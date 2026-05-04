@@ -22,12 +22,14 @@ coverage
 # editors
 /.idea
 .vscode/*
-!.vscode/settings.json
 !.vscode/tasks.json
 !.vscode/launch.json
 !.vscode/extensions.json
 .claude/worktrees
 .claude/settings.local.json
+
+# user editor settings
+# !.vscode/settings.json
 
 # logs
 npm-debug.log*
@@ -52,8 +54,6 @@ lore/BOARD.md
 lore/board.json
 
 .npmrc
-
-
 .temp
 .trash
 
