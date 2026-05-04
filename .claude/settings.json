@@ -1,0 +1,6 @@
+{
+  "enabledPlugins": {
+    "inbox@rf-claude-marketplace": true,
+    "lore-framework@rf-claude-marketplace": true
+  }
+}
