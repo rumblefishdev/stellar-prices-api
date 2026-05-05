@@ -596,6 +596,17 @@ using the `lambda_runtime` crate. It downloads the file, parses it, and extracts
 The XDR parsing logic is implemented as a shared Rust workspace crate, compiled into both the
 Block Explorer's Ledger Processor and the Prices Ledger Processor, eliminating duplication.
 
+**Write semantics into `price_ohlcv`.** All writers (live ingestion, rollup, and both backfill
+streams) use `INSERT ... ON CONFLICT (timestamp, asset_id, granularity) DO UPDATE`, never a
+plain `INSERT`. This is required because (a) ~10–12 ledgers land in the same minute and each
+must merge its trades into the same `(minute, asset, '1m')` row, (b) backfill restart from
+checkpoint can re-write a partially processed ledger, and (c) the Rollup Lambda re-derives
+each window from the underlying 1m rows on every run. Live ingestion uses incremental-merge
+update expressions (preserve `open`, overwrite `close`, `GREATEST(high)`, `LEAST(low)`, sum
+volumes and `trade_count`, recompute `vwap`); rollup and backfill writers operate on already-
+aggregated whole candles and replace all non-PK columns. See the database schema doc
+(Section 3.2 → "Write semantics — UPSERT, not INSERT") for the full merge-rule table.
+
 ### 5.3 Ingestion Workers
 
 | Worker | Trigger | Source | Data |

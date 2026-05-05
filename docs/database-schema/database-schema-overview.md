@@ -316,6 +316,46 @@ asset/granularity" query pattern.
 - Backfill writes into historical partitions (pre-2026) alongside live writes
   into current partitions, with no locking conflicts.
 
+#### Write semantics — UPSERT, not INSERT
+
+All four writers (`Prices Ledger Processor`, `OHLCV Rollup`, `SDEX Backfill`,
+`Soroban AMM Backfill`) write to `price_ohlcv` using
+`INSERT ... ON CONFLICT (timestamp, asset_id, granularity) DO UPDATE`, never a
+plain `INSERT`. A plain `INSERT` would fail or duplicate-error in three
+scenarios that are normal-path operation here:
+
+| Scenario | Why UPSERT is required |
+| -------- | ---------------------- |
+| Multiple ledgers in the same minute | The Prices Ledger Processor is invoked per S3 event (~5–6 s per ledger), so ~10–12 invocations land within one minute. Each must merge its trades into the *same* `(minute, asset, '1m')` row. Plain INSERT would PK-violate on the second invocation. |
+| Backfill restart from checkpoint | The SDEX backfill task tracks `current_ledger` in `backfill_progress` and resumes from its last checkpoint on restart. If the previous run had partially processed the next ledger, the same `(timestamp, asset, granularity)` row may be written twice. UPSERT makes restart idempotent. |
+| Rollup re-execution | The OHLCV Rollup Lambda runs every 15 min and re-aggregates the latest window from the underlying 1m candles. If a 1m row arrives late (S3 event delivery delay) the Rollup re-run produces an updated 15m candle for the same key — UPSERT merges it. |
+
+**Merge rules are different for live ingestion vs. whole-candle writers.**
+The two write modes are not interchangeable:
+
+| Writer | Mode | `ON CONFLICT DO UPDATE` clause |
+| ------ | ---- | ------------------------------ |
+| Prices Ledger Processor (1m, partial-candle, per-ledger) | **Incremental merge.** Trades from one ledger contribute to the in-flight 1m candle. | `open` preserved (`= price_ohlcv.open`); `close` overwritten with new ledger's close; `high = GREATEST(price_ohlcv.high, EXCLUDED.high)`; `low = LEAST(price_ohlcv.low, EXCLUDED.low)`; `volume_base = price_ohlcv.volume_base + EXCLUDED.volume_base`; `volume_quote_usd = price_ohlcv.volume_quote_usd + EXCLUDED.volume_quote_usd`; `trade_count = price_ohlcv.trade_count + EXCLUDED.trade_count`; `vwap` recomputed from accumulated `volume_quote_usd / volume_base`. |
+| OHLCV Rollup (15m–1M, whole-candle) | **Whole-row replacement.** The rollup re-derives the full candle from the underlying 1m rows in the window — the new value is authoritative. | All non-PK columns set to `EXCLUDED.*`. |
+| SDEX Backfill (1m, whole-candle) | **Whole-row replacement.** The backfill task aggregates all SDEX trades for one historical minute in memory and writes the finished candle once. | All non-PK columns set to `EXCLUDED.*`. |
+| Soroban AMM Backfill (1m, whole-candle) | **Whole-row replacement.** Same as SDEX backfill; aggregation happens in the task before the write. | All non-PK columns set to `EXCLUDED.*`. |
+
+**Concurrency.** PostgreSQL's `INSERT ... ON CONFLICT` is row-level atomic:
+two concurrent writers targeting the same PK serialise on the row lock, so
+the incremental-merge expressions above are safe under the documented
+concurrency (multiple Prices Ledger Processor invocations against the same
+in-flight 1m candle). Live and backfill writers never contend on the same
+row in practice — partition pruning separates them by month — but if a
+backfill catches up to the live tip, the row-level serialisation still
+guarantees correctness.
+
+**Source attribution.** When the same `(timestamp, asset, granularity)` is
+written by multiple distinct sources (e.g. SDEX and Soroswap both report a
+trade for the same asset in the same minute), the writer uses
+`source = 'aggregated'` and merges across sources. Single-source candles
+keep their original source label. The Current Price Updater reads only
+`source = 'aggregated'` rows for VWAP input.
+
 ### 3.3 `current_prices` — Materialized/Cached current state
 
 Single row per asset. Written by the **Current Price Updater** Lambda
