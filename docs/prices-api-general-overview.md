@@ -843,10 +843,13 @@ all-time history once backfill completes)
    all indexes present (verifiable via `\d+` psql output)
 3. After 24 hours of live operation: `price_ohlcv` contains continuous 1-min candles for at
    least 20 major assets (XLM, USDC, EURC, AQUA, BTC, ETH) with no gaps >2 candles
-4. `GET /backfill/status` returns `{"status": "running", "backfill_task_healthy": true}` with
-   `backfill_current_ledger` advancing (ledger sequence decreasing toward ledger 1 over time)
-5. CloudWatch alarm test: backfill task stopped manually → alarm fires within 15 minutes
-6. `earliest_data_available` in `GET /backfill/status` shows a date approximately 6 months ago
+4. `GET /backfill/status` returns `sdex.status: "running"`, `sdex.task_healthy: true`, and
+   `sdex.current_ledger` advancing (ledger sequence decreasing toward ledger 1 over time).
+   `soroban_amm.status` is `"running"` early in Tranche 1 and transitions to `"completed"`
+   once the AMM stream finishes (see Section 4.5 for the canonical response shape)
+5. CloudWatch alarm test: SDEX backfill task stopped manually → alarm fires within 15 minutes
+   (heartbeat watchdog on the `sdex_archive` row in `backfill_progress`)
+6. `sdex.earliest_data_available` in `GET /backfill/status` shows a date approximately 6 months ago
 
 **Budget: $XX,XXX (Tranche 1)**
 
@@ -909,20 +912,21 @@ At ~150,000 ledgers/hour sustained, that is ~45 million ledgers processed, cover
 **January 2018 to present** (8+ years of price history).
 
 **The Tranche 3 review validates that backfill is progressing correctly, not that it is complete.**
-The reviewer should confirm:
-- `GET /backfill/status` returns `status: running`, `backfill_task_healthy: true`
-- `earliest_data_available` ≤ 2018-01-01
-- `estimated_hours_to_completion` shows a reasonable remaining estimate (expected: 4–8 weeks)
-- `rate_ledgers_per_hour` is stable (variation <20% over the last 24 hours)
+The reviewer should confirm (against the response shape in Section 4.5):
+- `GET /backfill/status` returns `sdex.status: "running"`, `sdex.task_healthy: true`
+- `sdex.earliest_data_available` ≤ 2018-01-01
+- `sdex.estimated_hours_to_completion` shows a reasonable remaining estimate (expected: 4–8 weeks)
+- `sdex.rate_ledgers_per_hour` is stable (variation <20% over the last 24 hours)
+- `soroban_amm.status` is `"completed"` (carried over from Tranche 1)
 - OHLCV data for `?timeframe=all` on XLM returns data points from 2018 or earlier
 
-The backfill continues running autonomously post-delivery. When `status` transitions to
-`completed`, the `GET /backfill/status` endpoint records the `completed_at` timestamp. The team
-will share a link to this endpoint with Stellar for post-delivery monitoring.
+The backfill continues running autonomously post-delivery. When `sdex.status` transitions to
+`"completed"`, the `GET /backfill/status` endpoint records the `sdex.completed_at` timestamp.
+The team will share a link to this endpoint with Stellar for post-delivery monitoring.
 
 **Acceptance criteria:**
-1. `GET /backfill/status` shows `status: running`, `backfill_task_healthy: true`,
-   `earliest_data_available` ≤ 2018-01-01, `estimated_hours_to_completion` present and valid
+1. `GET /backfill/status` shows `sdex.status: "running"`, `sdex.task_healthy: true`,
+   `sdex.earliest_data_available` ≤ 2018-01-01, `sdex.estimated_hours_to_completion` present and valid
 2. OpenAPI spec passes `openapi-validator` lint with no errors; Swagger UI deployed
 3. Onboarding portal accessible; self-service API key request flow functional
 4. Integration test suite: all tests pass on CI (GitHub Actions link provided)

@@ -1061,10 +1061,11 @@ API grant:
 
 ---
 
-## 12. Tranche-1 DB Acceptance Criteria (verbatim)
+## 12. Tranche-1 DB Acceptance Criteria
 
 The database is provisioned and validated in Tranche 1. Relevant acceptance
-criteria from the delivery plan:
+criteria from the delivery plan, restated against the canonical
+`GET /backfill/status` response shape defined in Section 7.6:
 
 1. `cdk deploy` from a clean AWS account (sharing only the existing VPC/S3
    bucket from Block Explorer) produces the full Prices API stack with no
@@ -1075,11 +1076,14 @@ criteria from the delivery plan:
 3. After 24 hours of live operation: `price_ohlcv` contains continuous 1-min
    candles for at least 20 major assets (XLM, USDC, EURC, AQUA, BTC, ETH) with
    no gaps >2 candles.
-4. `GET /backfill/status` returns `{"status": "running", "backfill_task_healthy": true}`
-   with `backfill_current_ledger` advancing.
-5. CloudWatch alarm test: backfill task stopped manually → alarm fires within
-   15 minutes (heartbeat watchdog on `backfill_progress.last_heartbeat`).
-6. `earliest_data_available` in `GET /backfill/status` shows a date
+4. `GET /backfill/status` returns `sdex.status: "running"`, `sdex.task_healthy:
+   true`, and `sdex.current_ledger` advancing (decreasing toward ledger 1 over
+   time). `soroban_amm.status` is `"running"` early in Tranche 1 and
+   transitions to `"completed"` once the AMM stream finishes.
+5. CloudWatch alarm test: SDEX backfill task stopped manually → alarm fires
+   within 15 minutes (heartbeat watchdog on
+   `backfill_progress.last_heartbeat` for the `sdex_archive` row).
+6. `sdex.earliest_data_available` in `GET /backfill/status` shows a date
    approximately 6 months ago.
 
 ---
