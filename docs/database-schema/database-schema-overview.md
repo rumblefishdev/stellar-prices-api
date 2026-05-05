@@ -244,6 +244,24 @@ CREATE INDEX idx_assets_code ON assets(asset_code);
 - The `(asset_code, issuer_address, contract_address)` triple uniquely
   identifies an asset.
 
+#### Why there is no index on `asset_type` (despite `?type=` being a filter)
+
+`GET /assets?type=classic|soroban|all` is a documented filter, yet `assets`
+has no index on `asset_type`. This is deliberate:
+
+| Reason | Detail |
+| ------ | ------ |
+| **Cardinality is 2.** | `asset_type` only ever takes `'classic'` or `'soroban'`. PostgreSQL's planner generally skips B-tree indexes on a column where each value matches ~50% of the table — the index lookup + heap fetch is more expensive than a sequential scan. A naive `CREATE INDEX ... (asset_type)` would never be picked. |
+| **The table is small.** | `assets` is one row per tracked asset — Tranche 1 ships with ~20, realistic upper bound is ≤10k. The whole table sits in shared buffers; a sequential scan is microseconds. |
+| **The hot query plan doesn't need it.** | `GET /assets?type=…&sort=volume_24h` orders by a `current_prices` column (covered by the keyset indexes from Section 3.3) and filters by `assets.asset_type` post-join. PostgreSQL's plan is: index-scan `current_prices` in keyset order → PK-probe `assets` per row → filter `asset_type` → stop at LIMIT 51. The PK probe is already O(1); no `asset_type` index would change this plan. |
+| **Search is already supported.** | `?search=<code>` uses `idx_assets_code` for the prefix match. |
+
+**When to revisit:** if the assets table grows past ~100k rows *and* a future
+filter has high selectivity (matches a small fraction of rows), the right
+fix is **denormalisation** — copy `asset_type` onto `current_prices` and add
+it as the leading column of the keyset indexes — not an index on `assets`
+alone. Until then, the plain B-tree+PK plan is strictly faster.
+
 ### 3.2 `price_ohlcv` — Price Snapshots (OHLCV), Native Range Partitioning
 
 Time-series OHLCV candles at multiple granularities. The parent table is
