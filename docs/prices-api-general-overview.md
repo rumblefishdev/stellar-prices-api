@@ -224,7 +224,11 @@ CREATE TABLE current_prices (
     volume_24h_usd  NUMERIC(28,14),
     market_cap_usd  NUMERIC(28,14),
     vwap_24h        NUMERIC(28,14),
-    sources         JSONB,                 -- {"sdex": 1.02, "soroswap": 1.01, "aquarius": 1.015}
+    sources         JSONB,                 -- per-source {price, volume_24h}; e.g.
+    -- {"sdex": {"price": "1.0001", "volume_24h": "800000"},
+    --  "soroswap": {"price": "1.0002", "volume_24h": "500000"}}
+    -- Numeric values serialised as strings to preserve NUMERIC(28,14) precision.
+    -- Sources excluded by min_volume_usd or outlier detection are absent from the object.
     updated_at      TIMESTAMPTZ DEFAULT NOW()
 );
 ```
@@ -365,9 +369,9 @@ LIMIT 51;
       "volume_24h_usd": "1523400.50",
       "vwap_24h": "1.0002",
       "sources": {
-        "sdex": "1.0001",
-        "soroswap": "1.0002",
-        "aquarius": "1.0001"
+        "sdex":     { "price": "1.0001", "volume_24h": "800000" },
+        "soroswap": { "price": "1.0002", "volume_24h": "500000" },
+        "aquarius": { "price": "1.0001", "volume_24h": "223400" }
       },
       "updated_at": "2026-02-10T12:00:00Z"
     }

@@ -315,16 +315,63 @@ CREATE TABLE current_prices (
     volume_24h_usd  NUMERIC(28,14),
     market_cap_usd  NUMERIC(28,14),
     vwap_24h        NUMERIC(28,14),
-    sources         JSONB,                 -- {"sdex": 1.02, "soroswap": 1.01, "aquarius": 1.015}
+    sources         JSONB,                 -- per-source {price, volume_24h}, see below
     updated_at      TIMESTAMPTZ DEFAULT NOW()
 );
 ```
 
 **Notes:**
 
-- `sources` is a JSONB blob with the per-source price contributing to the VWAP,
-  e.g. `{"sdex": 1.02, "soroswap": 1.01, "aquarius": 1.015}`.
+- `sources` is a JSONB blob holding the per-source price **and** 24h volume
+  that contributed to the VWAP. Canonical shape:
+
+  ```json
+  {
+    "sdex":     { "price": "1.0001", "volume_24h": "800000" },
+    "soroswap": { "price": "1.0002", "volume_24h": "500000" },
+    "aquarius": { "price": "1.0001", "volume_24h": "223400" }
+  }
+  ```
+
+  - Numeric values are serialised as JSON **strings** to preserve the full
+    `NUMERIC(28,14)` precision when read back through `sqlx` and re-emitted
+    by the API (avoids the 64-bit floating-point round-trip that PostgreSQL
+    would otherwise apply if values were stored as JSON numbers).
+  - One key per source that passed the `min_volume_usd` and outlier-detection
+    filters in that update cycle; sources excluded that cycle are simply
+    absent from the object.
+  - `GET /assets/{id}/price` returns this object verbatim. `GET /assets`
+    returns the same object (the list endpoint exposes the full source
+    breakdown — clients that only want price strings can extract `.price`).
 - `asset_id` is both the primary key and a foreign key to `assets(id)`.
+
+#### Why JSONB and not a separate `current_price_sources` table?
+
+The `sources` field could plausibly be modelled three ways:
+
+1. **JSONB blob (chosen).**
+2. A separate child table — `current_price_sources(asset_id, source, price, volume_24h)` keyed by `(asset_id, source)`.
+3. Flat columns on `current_prices` — `sdex_price`, `sdex_volume_24h`, `soroswap_price`, …
+
+The blob is the right model **for this column's specific access pattern**, not as a general preference. The decisive properties are:
+
+| Property of `sources` | Consequence |
+| --------------------- | ----------- |
+| **Always read whole.** Every endpoint that returns it (`GET /price`, `GET /assets`, `POST /prices/batch`) returns *all* keys for the asset together. No endpoint asks for one source in isolation. | A child-table design would force a JOIN (or a second query) on every read of the hottest path in the system, then re-fold N rows back into the nested object the API returns anyway. |
+| **Always written whole.** The Current Price Updater Lambda recomputes the entire VWAP every minute and rewrites the row. There is no mutation of one source without rewriting the rest. | Single-row `UPDATE` vs. delete-and-reinsert N child rows per asset per minute. The blob avoids per-source lock churn. |
+| **Never queried by content.** No filter, sort, join, or aggregation looks inside `sources`. It is a display payload, not a query target. | The main reason to normalise — being able to `WHERE source.price > X` — does not apply. |
+| **Bounded, low-cardinality key set** (≤ ~10 sources realistically) and **lifecycle tied to the parent row** (a `sources` entry exists iff `current_prices` has a row). | The relational benefits of a child table (FK, independent lifecycle) carry no weight here. |
+| **Sources excluded by `min_volume_usd` / outlier detection are simply absent from the object.** | A child-table design would represent "absent this cycle" as missing rows, which is the same information the JSONB conveys via missing keys — no expressivity gained. |
+
+Flat per-source columns (option 3) are rejected outright: every new source becomes a migration, and the column set is sparse for assets that don't trade on every venue.
+
+**The real risk with the JSONB choice is shape drift, not normalisation purity.** It is mitigated by:
+
+- A single typed Rust struct (e.g. `BTreeMap<String, SourceEntry>` where `SourceEntry { price: Decimal, volume_24h: Decimal }`) shared between the Current Price Updater (writer) and the API handlers (readers). The shape is enforced at compile time on both sides.
+- A `CHECK (jsonb_typeof(sources) = 'object')` constraint on the column to catch gross corruption at the DB level.
+- If the shape ever needs to evolve, a versioned envelope (`{"v": 1, "sources": {…}}`) introduced at that point — not pre-emptively.
+
+**When this choice should be revisited:** if a future endpoint ever needs to filter or sort assets by a per-source field (e.g. "list assets where Soroswap volume > $1M"), promote the data to a child table at that point. Until then, the blob is strictly faster, simpler, and gives up no integrity that the typed-struct convention doesn't already enforce.
 
 ### 3.4 `oracle_prices` — Oracle Prices (Partitioned)
 
@@ -1280,7 +1327,7 @@ erDiagram
         NUMERIC_28_14 volume_24h_usd "nullable"
         NUMERIC_28_14 market_cap_usd "nullable"
         NUMERIC_28_14 vwap_24h "nullable"
-        JSONB         sources "per-source price map"
+        JSONB         sources "per-source price+volume_24h"
         TIMESTAMPTZ   updated_at "DEFAULT NOW()"
     }
 
