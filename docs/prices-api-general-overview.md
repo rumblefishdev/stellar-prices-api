@@ -180,7 +180,8 @@ CREATE INDEX idx_assets_code ON assets(asset_code);
 CREATE TABLE price_ohlcv (
     asset_id        INT NOT NULL,
     timestamp       TIMESTAMPTZ NOT NULL,
-    granularity     VARCHAR(5) NOT NULL,   -- '1m', '15m', '1h', '4h', '1d', '1w', '1M'
+    granularity     VARCHAR(5) NOT NULL
+                    CHECK (granularity IN ('1m', '15m', '1h', '4h', '1d', '1w', '1M')),
     open            NUMERIC(28,14) NOT NULL,
     high            NUMERIC(28,14) NOT NULL,
     low             NUMERIC(28,14) NOT NULL,
@@ -189,7 +190,7 @@ CREATE TABLE price_ohlcv (
     volume_quote_usd NUMERIC(28,14) NOT NULL DEFAULT 0,
     vwap            NUMERIC(28,14),
     trade_count     INT DEFAULT 0,
-    source          VARCHAR(20),           -- 'sdex', 'soroswap', 'aquarius', 'aggregated'
+    source          VARCHAR(20) NOT NULL,  -- example values: 'sdex', 'soroswap', 'aquarius', 'aggregated'
 
     PRIMARY KEY (timestamp, asset_id, granularity)
 ) PARTITION BY RANGE (timestamp);
@@ -249,7 +250,7 @@ CREATE INDEX idx_current_prices_change_24h
 ```sql
 CREATE TABLE oracle_prices (
     asset_id        INT NOT NULL,
-    oracle_name     VARCHAR(30) NOT NULL,  -- 'reflector', 'chainlink', 'redstone', 'band'
+    oracle_name     VARCHAR(30) NOT NULL,  -- example values: 'reflector', 'chainlink', 'redstone', 'band'
     price_usd       NUMERIC(28,14) NOT NULL,
     timestamp       TIMESTAMPTZ NOT NULL,
     raw_data        JSONB,
@@ -284,8 +285,8 @@ CREATE TABLE backfill_progress (
     start_ledger    BIGINT NOT NULL,
     target_ledger   BIGINT NOT NULL,
     current_ledger  BIGINT NOT NULL,
-    status          VARCHAR(20) NOT NULL DEFAULT 'running',
-    -- 'running', 'paused', 'completed', 'error'
+    status          VARCHAR(20) NOT NULL DEFAULT 'running'
+                    CHECK (status IN ('running', 'paused', 'completed', 'error')),
     rate_per_hour   BIGINT,               -- ledgers/hour, rolling average; NULL if the task does not track rate
     eta_hours       NUMERIC(10,1),        -- estimated hours to completion; NULL if unknown or task is short-lived
     last_heartbeat  TIMESTAMPTZ NOT NULL DEFAULT NOW(),

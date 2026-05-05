@@ -156,7 +156,7 @@ erDiagram
     price_ohlcv {
         INT             asset_id PK
         TIMESTAMPTZ     timestamp PK "PARTITION BY RANGE"
-        VARCHAR_5       granularity PK "1m|15m|1h|4h|1d|1w|1M"
+        VARCHAR_5       granularity PK "CHECK 1m|15m|1h|4h|1d|1w|1M"
         NUMERIC_28_14   open
         NUMERIC_28_14   high
         NUMERIC_28_14   low
@@ -165,7 +165,7 @@ erDiagram
         NUMERIC_28_14   volume_quote_usd
         NUMERIC_28_14   vwap
         INT             trade_count
-        VARCHAR_20      source "sdex|soroswap|aquarius|aggregated"
+        VARCHAR_20      source "NOT NULL, examples sdex|soroswap|aquarius|aggregated"
     }
 
     current_prices {
@@ -183,7 +183,7 @@ erDiagram
 
     oracle_prices {
         INT             asset_id PK
-        VARCHAR_30      oracle_name PK "reflector|chainlink|redstone|band"
+        VARCHAR_30      oracle_name PK "examples reflector|chainlink|redstone|band"
         TIMESTAMPTZ     timestamp PK "PARTITION BY RANGE"
         NUMERIC_28_14   price_usd
         JSONB           raw_data
@@ -195,7 +195,7 @@ erDiagram
         BIGINT       start_ledger
         BIGINT       target_ledger
         BIGINT       current_ledger
-        VARCHAR_20   status "running|paused|completed|error"
+        VARCHAR_20   status "CHECK running|paused|completed|error"
         BIGINT       rate_per_hour
         NUMERIC_10_1 eta_hours
         TIMESTAMPTZ  last_heartbeat
@@ -255,7 +255,8 @@ Cleanup Worker Lambda 2 months ahead of the current date.
 CREATE TABLE price_ohlcv (
     asset_id        INT NOT NULL,
     timestamp       TIMESTAMPTZ NOT NULL,
-    granularity     VARCHAR(5) NOT NULL,   -- '1m', '15m', '1h', '4h', '1d', '1w', '1M'
+    granularity     VARCHAR(5) NOT NULL
+                    CHECK (granularity IN ('1m', '15m', '1h', '4h', '1d', '1w', '1M')),
     open            NUMERIC(28,14) NOT NULL,
     high            NUMERIC(28,14) NOT NULL,
     low             NUMERIC(28,14) NOT NULL,
@@ -264,7 +265,7 @@ CREATE TABLE price_ohlcv (
     volume_quote_usd NUMERIC(28,14) NOT NULL DEFAULT 0,
     vwap            NUMERIC(28,14),
     trade_count     INT DEFAULT 0,
-    source          VARCHAR(20),           -- 'sdex', 'soroswap', 'aquarius', 'aggregated'
+    source          VARCHAR(20) NOT NULL,  -- example values: 'sdex', 'soroswap', 'aquarius', 'aggregated'
 
     PRIMARY KEY (timestamp, asset_id, granularity)
 ) PARTITION BY RANGE (timestamp);
@@ -399,7 +400,7 @@ ingestion.**
 ```sql
 CREATE TABLE oracle_prices (
     asset_id        INT NOT NULL,
-    oracle_name     VARCHAR(30) NOT NULL,  -- 'reflector', 'chainlink', 'redstone', 'band'
+    oracle_name     VARCHAR(30) NOT NULL,  -- example values: 'reflector', 'chainlink', 'redstone', 'band'
     price_usd       NUMERIC(28,14) NOT NULL,
     timestamp       TIMESTAMPTZ NOT NULL,
     raw_data        JSONB,
@@ -442,8 +443,8 @@ CREATE TABLE backfill_progress (
     start_ledger    BIGINT NOT NULL,
     target_ledger   BIGINT NOT NULL,
     current_ledger  BIGINT NOT NULL,
-    status          VARCHAR(20) NOT NULL DEFAULT 'running',
-    -- 'running', 'paused', 'completed', 'error'
+    status          VARCHAR(20) NOT NULL DEFAULT 'running'
+                    CHECK (status IN ('running', 'paused', 'completed', 'error')),
     rate_per_hour   BIGINT,               -- ledgers/hour, rolling average; NULL if the task does not track rate
     eta_hours       NUMERIC(10,1),        -- estimated hours to completion; NULL if unknown or task is short-lived
     last_heartbeat  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -1199,13 +1200,13 @@ flowchart TB
 
         Assets["<b>assets</b><br/>━━━━━━━━━━━━━━━━━━━━<br/>id SERIAL PK<br/>asset_code VARCHAR(12)<br/>asset_type VARCHAR(10) CHECK<br/>issuer_address VARCHAR(56)<br/>contract_address VARCHAR(56)<br/>home_domain VARCHAR(255)<br/>is_active BOOLEAN<br/>created_at TIMESTAMPTZ<br/>updated_at TIMESTAMPTZ<br/>━━━━━━━━━━━━━━━━━━━━<br/>UNIQUE(code,issuer,contract)<br/>idx_assets_contract<br/>idx_assets_code"]
 
-        OHLCV["<b>price_ohlcv</b> (PARTITIONED)<br/>━━━━━━━━━━━━━━━━━━━━<br/>asset_id INT (PK part)<br/>timestamp TIMESTAMPTZ (PK part)<br/>granularity VARCHAR(5) (PK part)<br/>open / high / low / close NUMERIC(28,14)<br/>volume_base NUMERIC(28,14)<br/>volume_quote_usd NUMERIC(28,14)<br/>vwap NUMERIC(28,14)<br/>trade_count INT<br/>source VARCHAR(20)<br/>━━━━━━━━━━━━━━━━━━━━<br/>PARTITION BY RANGE(timestamp)<br/>idx_ohlcv_asset_gran<br/>(asset_id, granularity, timestamp DESC)"]
+        OHLCV["<b>price_ohlcv</b> (PARTITIONED)<br/>━━━━━━━━━━━━━━━━━━━━<br/>asset_id INT (PK part)<br/>timestamp TIMESTAMPTZ (PK part)<br/>granularity VARCHAR(5) (PK part)<br/>  CHECK 1m|15m|1h|4h|1d|1w|1M<br/>open / high / low / close NUMERIC(28,14)<br/>volume_base NUMERIC(28,14)<br/>volume_quote_usd NUMERIC(28,14)<br/>vwap NUMERIC(28,14)<br/>trade_count INT<br/>source VARCHAR(20) NOT NULL<br/>  examples sdex|soroswap|aquarius|aggregated<br/>━━━━━━━━━━━━━━━━━━━━<br/>PARTITION BY RANGE(timestamp)<br/>idx_ohlcv_asset_gran<br/>(asset_id, granularity, timestamp DESC)"]
 
         Current["<b>current_prices</b><br/>━━━━━━━━━━━━━━━━━━━━<br/>asset_id INT PK,FK→assets.id<br/>price_usd NUMERIC(28,14)<br/>price_xlm NUMERIC(28,14)<br/>change_24h_pct NUMERIC(10,4)<br/>change_7d_pct NUMERIC(10,4)<br/>volume_24h_usd NUMERIC(28,14)<br/>market_cap_usd NUMERIC(28,14)<br/>vwap_24h NUMERIC(28,14)<br/>sources JSONB<br/>updated_at TIMESTAMPTZ<br/>━━━━━━━━━━━━━━━━━━━━<br/>idx_current_prices_volume_24h<br/>(volume_24h_usd DESC NULLS LAST, asset_id DESC)<br/>idx_current_prices_price<br/>(price_usd DESC NULLS LAST, asset_id DESC)<br/>idx_current_prices_change_24h<br/>(change_24h_pct DESC NULLS LAST, asset_id DESC)"]
 
-        OracleP["<b>oracle_prices</b> (PARTITIONED)<br/>━━━━━━━━━━━━━━━━━━━━<br/>asset_id INT (PK part)<br/>oracle_name VARCHAR(30) (PK part)<br/>timestamp TIMESTAMPTZ (PK part)<br/>price_usd NUMERIC(28,14)<br/>raw_data JSONB<br/>━━━━━━━━━━━━━━━━━━━━<br/>PARTITION BY RANGE(timestamp)<br/>idx_oracle_asset<br/>(asset_id, oracle_name, timestamp DESC)"]
+        OracleP["<b>oracle_prices</b> (PARTITIONED)<br/>━━━━━━━━━━━━━━━━━━━━<br/>asset_id INT (PK part)<br/>oracle_name VARCHAR(30) (PK part)<br/>  examples reflector|chainlink|redstone|band<br/>timestamp TIMESTAMPTZ (PK part)<br/>price_usd NUMERIC(28,14)<br/>raw_data JSONB<br/>━━━━━━━━━━━━━━━━━━━━<br/>PARTITION BY RANGE(timestamp)<br/>idx_oracle_asset<br/>(asset_id, oracle_name, timestamp DESC)"]
 
-        BP["<b>backfill_progress</b><br/>━━━━━━━━━━━━━━━━━━━━<br/>id SERIAL PK<br/>task_name VARCHAR(50) UNIQUE<br/>  (stream identifier)<br/>start_ledger BIGINT<br/>target_ledger BIGINT<br/>current_ledger BIGINT<br/>status VARCHAR(20)<br/>  running | paused | completed | error<br/>rate_per_hour BIGINT<br/>eta_hours NUMERIC(10,1)<br/>last_heartbeat TIMESTAMPTZ<br/>started_at TIMESTAMPTZ<br/>completed_at TIMESTAMPTZ<br/>━━━━━━━━━━━━━━━━━━━━<br/>One row per stream<br/>(seeded with sdex_archive,<br/>soroban_amm)"]
+        BP["<b>backfill_progress</b><br/>━━━━━━━━━━━━━━━━━━━━<br/>id SERIAL PK<br/>task_name VARCHAR(50) UNIQUE<br/>  (stream identifier)<br/>start_ledger BIGINT<br/>target_ledger BIGINT<br/>current_ledger BIGINT<br/>status VARCHAR(20)<br/>  CHECK running | paused | completed | error<br/>rate_per_hour BIGINT<br/>eta_hours NUMERIC(10,1)<br/>last_heartbeat TIMESTAMPTZ<br/>started_at TIMESTAMPTZ<br/>completed_at TIMESTAMPTZ<br/>━━━━━━━━━━━━━━━━━━━━<br/>One row per stream<br/>(seeded with sdex_archive,<br/>soroban_amm)"]
 
         %% Partition lifecycle (illustrative children of price_ohlcv)
         subgraph PARTS["price_ohlcv monthly partitions (lifecycle)"]
@@ -1341,7 +1342,7 @@ erDiagram
     price_ohlcv {
         INT           asset_id PK "NOT NULL"
         TIMESTAMPTZ   timestamp PK "NOT NULL, RANGE PARTITION KEY"
-        VARCHAR5      granularity PK "1m|15m|1h|4h|1d|1w|1M"
+        VARCHAR5      granularity PK "CHECK 1m|15m|1h|4h|1d|1w|1M"
         NUMERIC_28_14 open "NOT NULL"
         NUMERIC_28_14 high "NOT NULL"
         NUMERIC_28_14 low "NOT NULL"
@@ -1350,7 +1351,7 @@ erDiagram
         NUMERIC_28_14 volume_quote_usd "NOT NULL DEFAULT 0"
         NUMERIC_28_14 vwap "nullable"
         INT           trade_count "DEFAULT 0"
-        VARCHAR20     source "sdex|soroswap|aquarius|aggregated"
+        VARCHAR20     source "NOT NULL, examples sdex|soroswap|aquarius|aggregated"
         PARTITION     partition_strategy "BY RANGE(timestamp), monthly"
         INDEX         idx_ohlcv_asset_gran "asset_id, granularity, timestamp DESC"
     }
@@ -1373,7 +1374,7 @@ erDiagram
 
     oracle_prices {
         INT           asset_id PK "NOT NULL"
-        VARCHAR30     oracle_name PK "reflector|chainlink|redstone|band"
+        VARCHAR30     oracle_name PK "examples reflector|chainlink|redstone|band"
         TIMESTAMPTZ   timestamp PK "NOT NULL, RANGE PARTITION KEY"
         NUMERIC_28_14 price_usd "NOT NULL"
         JSONB         raw_data "raw oracle payload"
@@ -1387,7 +1388,7 @@ erDiagram
         BIGINT       start_ledger "NOT NULL"
         BIGINT       target_ledger "NOT NULL"
         BIGINT       current_ledger "NOT NULL"
-        VARCHAR20    status "running|paused|completed|error"
+        VARCHAR20    status "CHECK running|paused|completed|error"
         BIGINT       rate_per_hour "ledgers/hour, rolling avg, nullable"
         NUMERIC_10_1 eta_hours "estimated hours to completion, nullable"
         TIMESTAMPTZ  last_heartbeat "NOT NULL DEFAULT NOW()"
