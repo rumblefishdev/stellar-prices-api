@@ -154,9 +154,9 @@ erDiagram
     }
 
     price_ohlcv {
-        INT             asset_id PK
-        TIMESTAMPTZ     timestamp PK "PARTITION BY RANGE"
-        VARCHAR_5       granularity PK "CHECK 1m|15m|1h|4h|1d|1w|1M"
+        TIMESTAMPTZ     timestamp PK "composite PK 1/3, PARTITION BY RANGE"
+        INT             asset_id PK "composite PK 2/3"
+        VARCHAR_5       granularity PK "composite PK 3/3, CHECK 1m|15m|1h|4h|1d|1w|1M"
         NUMERIC_28_14   open
         NUMERIC_28_14   high
         NUMERIC_28_14   low
@@ -182,9 +182,9 @@ erDiagram
     }
 
     oracle_prices {
-        INT             asset_id PK
-        VARCHAR_30      oracle_name PK "examples reflector|chainlink|redstone|band"
-        TIMESTAMPTZ     timestamp PK "PARTITION BY RANGE"
+        TIMESTAMPTZ     timestamp PK "composite PK 1/3, PARTITION BY RANGE"
+        INT             asset_id PK "composite PK 2/3"
+        VARCHAR_30      oracle_name PK "composite PK 3/3, examples reflector|chainlink|redstone|band"
         NUMERIC_28_14   price_usd
         JSONB           raw_data
     }
@@ -1192,7 +1192,122 @@ criteria from the delivery plan, restated against the canonical
 
 ---
 
-## 14. Full Database Schema — One-Piece Mermaid Diagram
+## Appendices
+
+The two diagrams below are reference material rather than primary content of
+the main flow. **Appendix A** is the lighter, schema-only ER view — the
+recommended starting point for readers who only want to see tables and
+columns. **Appendix B** is the full system diagram showing writers, readers,
+external services, partitions, and the alarm — useful when reasoning about
+end-to-end dataflow.
+
+---
+
+### Appendix A — PostgreSQL Tables Only (ER Diagram)
+
+A focused, schema-only view: just the five PostgreSQL tables, every column
+with its SQL type, primary keys, foreign keys, unique constraints, and
+partitioning hints. No workers, no API endpoints, no external services.
+
+```mermaid
+erDiagram
+    assets ||--o| current_prices : "asset_id (FK)"
+    assets ||--o{ price_ohlcv    : "asset_id (logical)"
+    assets ||--o{ oracle_prices  : "asset_id (logical)"
+
+    assets {
+        SERIAL      id PK "AUTO INCREMENT"
+        VARCHAR12   asset_code "NOT NULL"
+        VARCHAR10   asset_type "NOT NULL CHECK classic|soroban"
+        VARCHAR56   issuer_address "NULL for XLM"
+        VARCHAR56   contract_address "C-address (SAC)"
+        VARCHAR255  home_domain "classic only, nullable"
+        BOOLEAN     is_active "DEFAULT TRUE"
+        TIMESTAMPTZ created_at "DEFAULT NOW()"
+        TIMESTAMPTZ updated_at "DEFAULT NOW()"
+        UNIQUE      uq_asset "code, issuer, contract"
+        INDEX       idx_assets_contract "contract_address"
+        INDEX       idx_assets_code "asset_code"
+    }
+
+    price_ohlcv {
+        INT           asset_id PK "NOT NULL"
+        TIMESTAMPTZ   timestamp PK "NOT NULL, RANGE PARTITION KEY"
+        VARCHAR5      granularity PK "CHECK 1m|15m|1h|4h|1d|1w|1M"
+        NUMERIC_28_14 open "NOT NULL"
+        NUMERIC_28_14 high "NOT NULL"
+        NUMERIC_28_14 low "NOT NULL"
+        NUMERIC_28_14 close "NOT NULL"
+        NUMERIC_28_14 volume_base "NOT NULL DEFAULT 0"
+        NUMERIC_28_14 volume_quote_usd "NOT NULL DEFAULT 0"
+        NUMERIC_28_14 vwap "nullable"
+        INT           trade_count "DEFAULT 0"
+        VARCHAR20     source "NOT NULL, examples sdex|soroswap|aquarius|aggregated"
+        PARTITION     partition_strategy "BY RANGE(timestamp), monthly"
+        INDEX         idx_ohlcv_asset_gran "asset_id, granularity, timestamp DESC"
+    }
+
+    current_prices {
+        INT           asset_id PK,FK "REFERENCES assets(id)"
+        NUMERIC_28_14 price_usd "NOT NULL"
+        NUMERIC_28_14 price_xlm "nullable"
+        NUMERIC_10_4  change_24h_pct "nullable"
+        NUMERIC_10_4  change_7d_pct "nullable"
+        NUMERIC_28_14 volume_24h_usd "nullable"
+        NUMERIC_28_14 market_cap_usd "nullable"
+        NUMERIC_28_14 vwap_24h "nullable"
+        JSONB         sources "per-source price+volume_24h"
+        TIMESTAMPTZ   updated_at "DEFAULT NOW()"
+        INDEX         idx_current_prices_volume_24h "volume_24h_usd DESC NULLS LAST, asset_id DESC"
+        INDEX         idx_current_prices_price "price_usd DESC NULLS LAST, asset_id DESC"
+        INDEX         idx_current_prices_change_24h "change_24h_pct DESC NULLS LAST, asset_id DESC"
+    }
+
+    oracle_prices {
+        INT           asset_id PK "NOT NULL"
+        VARCHAR30     oracle_name PK "examples reflector|chainlink|redstone|band"
+        TIMESTAMPTZ   timestamp PK "NOT NULL, RANGE PARTITION KEY"
+        NUMERIC_28_14 price_usd "NOT NULL"
+        JSONB         raw_data "raw oracle payload"
+        PARTITION     partition_strategy "BY RANGE(timestamp), monthly"
+        INDEX         idx_oracle_asset "asset_id, oracle_name, timestamp DESC"
+    }
+
+    backfill_progress {
+        SERIAL       id PK "AUTO INCREMENT"
+        VARCHAR50    task_name UK "NOT NULL UNIQUE"
+        BIGINT       start_ledger "NOT NULL"
+        BIGINT       target_ledger "NOT NULL"
+        BIGINT       current_ledger "NOT NULL"
+        VARCHAR20    status "CHECK running|paused|completed|error"
+        BIGINT       rate_per_hour "ledgers/hour, rolling avg, nullable"
+        NUMERIC_10_1 eta_hours "estimated hours to completion, nullable"
+        TIMESTAMPTZ  last_heartbeat "NOT NULL DEFAULT NOW()"
+        TIMESTAMPTZ  started_at "NOT NULL DEFAULT NOW()"
+        TIMESTAMPTZ  completed_at "nullable"
+    }
+```
+
+**Notes on the diagram**
+
+- `assets ||--o| current_prices` is a real SQL foreign key
+  (`current_prices.asset_id REFERENCES assets(id)`).
+- `assets ||--o{ price_ohlcv` and `assets ||--o{ oracle_prices` are drawn
+  with the same relationship glyph but are **logical-only** references —
+  there is no `REFERENCES` clause in the DDL, because foreign keys to a
+  partitioned table's child are expensive on high-write time-series tables.
+  The `(logical)` label on each edge is the only marker; Mermaid ER does
+  not support a separate "non-enforced" line style.
+- Underscored type names like `NUMERIC_28_14` and `VARCHAR12` are Mermaid
+  ER-syntax stand-ins for `NUMERIC(28,14)` and `VARCHAR(12)` respectively
+  (Mermaid ER does not allow parentheses inside type tokens).
+- `PARTITION` "rows" are not real columns — they are pinned to the bottom of
+  the entity to surface the partitioning strategy and shipped indexes.
+
+
+---
+
+### Appendix B — Full Database Schema (One-Piece System Diagram)
 
 A single, self-contained Mermaid diagram that combines: the ER schema (all 5
 tables with columns, types, PK/FK markers, partitioning hints), the live and
@@ -1368,108 +1483,6 @@ flowchart TB
   references that are not declared as SQL foreign keys (because the target is
   a partitioned table).
 
----
-
-## 15. PostgreSQL Tables Only — One-Piece Mermaid ER Diagram
-
-A focused, schema-only view: just the five PostgreSQL tables, every column
-with its SQL type, primary keys, foreign keys, unique constraints, and
-partitioning hints. No workers, no API endpoints, no external services.
-
-```mermaid
-erDiagram
-    assets ||--o| current_prices : "asset_id (FK)"
-    assets ||--o{ price_ohlcv    : "asset_id (logical)"
-    assets ||--o{ oracle_prices  : "asset_id (logical)"
-
-    assets {
-        SERIAL      id PK "AUTO INCREMENT"
-        VARCHAR12   asset_code "NOT NULL"
-        VARCHAR10   asset_type "NOT NULL CHECK classic|soroban"
-        VARCHAR56   issuer_address "NULL for XLM"
-        VARCHAR56   contract_address "C-address (SAC)"
-        VARCHAR255  home_domain "classic only, nullable"
-        BOOLEAN     is_active "DEFAULT TRUE"
-        TIMESTAMPTZ created_at "DEFAULT NOW()"
-        TIMESTAMPTZ updated_at "DEFAULT NOW()"
-        UNIQUE      uq_asset "code, issuer, contract"
-        INDEX       idx_assets_contract "contract_address"
-        INDEX       idx_assets_code "asset_code"
-    }
-
-    price_ohlcv {
-        INT           asset_id PK "NOT NULL"
-        TIMESTAMPTZ   timestamp PK "NOT NULL, RANGE PARTITION KEY"
-        VARCHAR5      granularity PK "CHECK 1m|15m|1h|4h|1d|1w|1M"
-        NUMERIC_28_14 open "NOT NULL"
-        NUMERIC_28_14 high "NOT NULL"
-        NUMERIC_28_14 low "NOT NULL"
-        NUMERIC_28_14 close "NOT NULL"
-        NUMERIC_28_14 volume_base "NOT NULL DEFAULT 0"
-        NUMERIC_28_14 volume_quote_usd "NOT NULL DEFAULT 0"
-        NUMERIC_28_14 vwap "nullable"
-        INT           trade_count "DEFAULT 0"
-        VARCHAR20     source "NOT NULL, examples sdex|soroswap|aquarius|aggregated"
-        PARTITION     partition_strategy "BY RANGE(timestamp), monthly"
-        INDEX         idx_ohlcv_asset_gran "asset_id, granularity, timestamp DESC"
-    }
-
-    current_prices {
-        INT           asset_id PK,FK "REFERENCES assets(id)"
-        NUMERIC_28_14 price_usd "NOT NULL"
-        NUMERIC_28_14 price_xlm "nullable"
-        NUMERIC_10_4  change_24h_pct "nullable"
-        NUMERIC_10_4  change_7d_pct "nullable"
-        NUMERIC_28_14 volume_24h_usd "nullable"
-        NUMERIC_28_14 market_cap_usd "nullable"
-        NUMERIC_28_14 vwap_24h "nullable"
-        JSONB         sources "per-source price+volume_24h"
-        TIMESTAMPTZ   updated_at "DEFAULT NOW()"
-        INDEX         idx_current_prices_volume_24h "volume_24h_usd DESC NULLS LAST, asset_id DESC"
-        INDEX         idx_current_prices_price "price_usd DESC NULLS LAST, asset_id DESC"
-        INDEX         idx_current_prices_change_24h "change_24h_pct DESC NULLS LAST, asset_id DESC"
-    }
-
-    oracle_prices {
-        INT           asset_id PK "NOT NULL"
-        VARCHAR30     oracle_name PK "examples reflector|chainlink|redstone|band"
-        TIMESTAMPTZ   timestamp PK "NOT NULL, RANGE PARTITION KEY"
-        NUMERIC_28_14 price_usd "NOT NULL"
-        JSONB         raw_data "raw oracle payload"
-        PARTITION     partition_strategy "BY RANGE(timestamp), monthly"
-        INDEX         idx_oracle_asset "asset_id, oracle_name, timestamp DESC"
-    }
-
-    backfill_progress {
-        SERIAL       id PK "AUTO INCREMENT"
-        VARCHAR50    task_name UK "NOT NULL UNIQUE"
-        BIGINT       start_ledger "NOT NULL"
-        BIGINT       target_ledger "NOT NULL"
-        BIGINT       current_ledger "NOT NULL"
-        VARCHAR20    status "CHECK running|paused|completed|error"
-        BIGINT       rate_per_hour "ledgers/hour, rolling avg, nullable"
-        NUMERIC_10_1 eta_hours "estimated hours to completion, nullable"
-        TIMESTAMPTZ  last_heartbeat "NOT NULL DEFAULT NOW()"
-        TIMESTAMPTZ  started_at "NOT NULL DEFAULT NOW()"
-        TIMESTAMPTZ  completed_at "nullable"
-    }
-```
-
-**Notes on the diagram**
-
-- `assets ||--o| current_prices` is a real SQL foreign key
-  (`current_prices.asset_id REFERENCES assets(id)`).
-- `assets ||--o{ price_ohlcv` and `assets ||--o{ oracle_prices` are drawn
-  with the same relationship glyph but are **logical-only** references —
-  there is no `REFERENCES` clause in the DDL, because foreign keys to a
-  partitioned table's child are expensive on high-write time-series tables.
-  The `(logical)` label on each edge is the only marker; Mermaid ER does
-  not support a separate "non-enforced" line style.
-- Underscored type names like `NUMERIC_28_14` and `VARCHAR12` are Mermaid
-  ER-syntax stand-ins for `NUMERIC(28,14)` and `VARCHAR(12)` respectively
-  (Mermaid ER does not allow parentheses inside type tokens).
-- `PARTITION` "rows" are not real columns — they are pinned to the bottom of
-  the entity to surface the partitioning strategy and shipped indexes.
 
 ---
 
