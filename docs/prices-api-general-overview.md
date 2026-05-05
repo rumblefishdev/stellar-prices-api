@@ -251,21 +251,39 @@ CREATE INDEX idx_oracle_asset ON oracle_prices (asset_id, oracle_name, timestamp
 ```
 
 ### 3.5 Backfill Progress Tracking
+
+One row per backfill stream (`sdex_archive`, `soroban_amm`). Both rows are
+seeded at provisioning time and updated by their respective ECS Fargate tasks.
+The `GET /backfill/status` endpoint reads both rows and returns them as the
+nested `sdex` and `soroban_amm` objects (see Section 4.5).
+
 ```sql
 CREATE TABLE backfill_progress (
     id              SERIAL PRIMARY KEY,
-    task_name       VARCHAR(50) NOT NULL UNIQUE, -- 'historical_all_time'
+    task_name       VARCHAR(50) NOT NULL UNIQUE,
+    -- Canonical streams seeded below: 'sdex_archive', 'soroban_amm'.
+    -- Additional streams (e.g. targeted gap-fills, future AMM reindexes) can
+    -- be added by inserting new rows; the API handler decides which task_names
+    -- it surfaces.
     start_ledger    BIGINT NOT NULL,
     target_ledger   BIGINT NOT NULL,
     current_ledger  BIGINT NOT NULL,
     status          VARCHAR(20) NOT NULL DEFAULT 'running',
     -- 'running', 'paused', 'completed', 'error'
-    rate_per_hour   BIGINT,               -- ledgers/hour, updated every 15 min
-    eta_hours       NUMERIC(10,1),        -- estimated hours to completion
+    rate_per_hour   BIGINT,               -- ledgers/hour, rolling average; NULL if the task does not track rate
+    eta_hours       NUMERIC(10,1),        -- estimated hours to completion; NULL if unknown or task is short-lived
     last_heartbeat  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     started_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     completed_at    TIMESTAMPTZ
 );
+
+-- Seed both stream rows at provisioning time so GET /backfill/status always
+-- has a row to read for each stream. target_ledger is updated to the current
+-- realtime tip when each task starts.
+INSERT INTO backfill_progress (task_name, start_ledger, target_ledger, current_ledger, status)
+VALUES
+    ('sdex_archive', 1,        0, 0, 'running'),
+    ('soroban_amm',  48500000, 0, 0, 'running');
 ```
 
 ### 3.6 Retention Policy (Cleanup Worker Lambda)

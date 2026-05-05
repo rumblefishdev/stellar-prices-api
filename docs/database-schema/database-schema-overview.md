@@ -191,7 +191,7 @@ erDiagram
 
     backfill_progress {
         SERIAL       id PK
-        VARCHAR_50   task_name UK
+        VARCHAR_50   task_name UK "stream identifier (one row per stream)"
         BIGINT       start_ledger
         BIGINT       target_ledger
         BIGINT       current_ledger
@@ -362,28 +362,52 @@ endpoint.
 
 ### 3.5 `backfill_progress` — Backfill Progress Tracking
 
-Single-row-per-task tracking table powering `GET /backfill/status`. Updated by
-the SDEX Backfill ECS Fargate task (heartbeat every 15 minutes) and by the
-Soroban AMM Backfill task (which runs once and marks itself completed).
+One-row-per-stream tracking table powering `GET /backfill/status`. The backfill
+is split into two independent streams (see Section 7.1), each represented by
+its own row keyed by `task_name`:
+
+- `'sdex_archive'` — long-running SDEX archive backfill (ECS Fargate, heartbeat every 15 minutes)
+- `'soroban_amm'` — one-time Soroban AMM backfill (ECS Fargate, marks itself `completed` in Tranche 1)
 
 ```sql
 CREATE TABLE backfill_progress (
     id              SERIAL PRIMARY KEY,
-    task_name       VARCHAR(50) NOT NULL UNIQUE, -- 'historical_all_time'
+    task_name       VARCHAR(50) NOT NULL UNIQUE,
+    -- Canonical streams seeded below: 'sdex_archive', 'soroban_amm'.
+    -- Additional streams (e.g. targeted gap-fills, future AMM reindexes) can
+    -- be added by inserting new rows; the API handler decides which task_names
+    -- it surfaces.
     start_ledger    BIGINT NOT NULL,
     target_ledger   BIGINT NOT NULL,
     current_ledger  BIGINT NOT NULL,
     status          VARCHAR(20) NOT NULL DEFAULT 'running',
     -- 'running', 'paused', 'completed', 'error'
-    rate_per_hour   BIGINT,               -- ledgers/hour, updated every 15 min
-    eta_hours       NUMERIC(10,1),        -- estimated hours to completion
+    rate_per_hour   BIGINT,               -- ledgers/hour, rolling average; NULL if the task does not track rate
+    eta_hours       NUMERIC(10,1),        -- estimated hours to completion; NULL if unknown or task is short-lived
     last_heartbeat  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     started_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     completed_at    TIMESTAMPTZ
 );
+
+-- Seed both stream rows at provisioning time so GET /backfill/status always has
+-- a row to read for each stream.
+INSERT INTO backfill_progress (task_name, start_ledger, target_ledger, current_ledger, status)
+VALUES
+    ('sdex_archive', 1,        0, 0, 'running'),  -- target_ledger updated to current tip on task start
+    ('soroban_amm',  48500000, 0, 0, 'running');  -- ~Soroban activation; target updated to current tip on task start
 ```
 
 **Status values:** `'running'`, `'paused'`, `'completed'`, `'error'`.
+
+**Per-stream operational behaviour** (a task-implementation choice, not a schema rule — any future long-running stream would behave like `sdex_archive`):
+
+| `task_name` | `rate_per_hour` / `eta_hours` | Heartbeat cadence | Terminal state |
+| ----------- | ----------------------------- | ----------------- | -------------- |
+| `sdex_archive` | populated, rolling 15-min average | every 15 min, monitored by CloudWatch alarm | `completed` post-delivery (ledger 1 reached) |
+| `soroban_amm` | typically `NULL` (short-lived task) | one update at completion | `completed` in Tranche 1 |
+
+The `GET /backfill/status` endpoint reads both rows and returns them as the
+nested `sdex` and `soroban_amm` objects (see Section 7.6).
 
 **Heartbeat alarm:** a CloudWatch alarm watches `last_heartbeat`. If the
 backfill task fails to update it for more than 10 minutes, an SNS alarm fires
@@ -481,7 +505,7 @@ gantt
 | `current_prices`    | `PRIMARY KEY (asset_id)`                                            | Single-row-per-asset upsert                                    |
 | `oracle_prices`     | `PRIMARY KEY (timestamp, asset_id, oracle_name)`                    | Partition pruning + uniqueness per (oracle, asset, time)       |
 | `oracle_prices`     | `idx_oracle_asset` on `(asset_id, oracle_name, timestamp DESC)`     | Latest-per-oracle lookup                                       |
-| `backfill_progress` | `PRIMARY KEY (id)` + `UNIQUE (task_name)`                           | Single row per logical task name                               |
+| `backfill_progress` | `PRIMARY KEY (id)` + `UNIQUE (task_name)`                           | One row per backfill stream (seeded with `sdex_archive`, `soroban_amm`; extensible) |
 
 **Partition pruning** is the central performance mechanism for the time-series
 tables: by placing `timestamp` first in the primary key and partitioning by
@@ -1021,7 +1045,7 @@ criteria from the delivery plan:
 | `price_ohlcv`       | RANGE on `timestamp` (monthly) | `(timestamp, asset_id, granularity)` | Prices Ledger Processor; OHLCV Rollup; Backfill tasks; Cleanup Worker (DELETE/DROP) | `GET /ohlcv`, Current Price Updater               |
 | `current_prices`    | none                           | `asset_id`                           | Current Price Updater Lambda                                                        | `GET /assets`, `GET /price`, `POST /prices/batch` |
 | `oracle_prices`     | RANGE on `timestamp` (monthly) | `(timestamp, asset_id, oracle_name)` | Oracle Fetcher Lambda; Cleanup Worker (DROP)                                        | `GET /oracles/{asset}`                            |
-| `backfill_progress` | none                           | `id` (UNIQUE on `task_name`)         | Backfill ECS tasks (heartbeat every 15 min)                                         | `GET /backfill/status`                            |
+| `backfill_progress` | none                           | `id` (UNIQUE on `task_name`)         | Backfill ECS tasks — one row per stream (heartbeat cadence is per-task; `sdex_archive` updates every 15 min, `soroban_amm` updates once at completion) | `GET /backfill/status`                            |
 
 ---
 
@@ -1097,7 +1121,7 @@ flowchart TB
 
         OracleP["<b>oracle_prices</b> (PARTITIONED)<br/>━━━━━━━━━━━━━━━━━━━━<br/>asset_id INT (PK part)<br/>oracle_name VARCHAR(30) (PK part)<br/>timestamp TIMESTAMPTZ (PK part)<br/>price_usd NUMERIC(28,14)<br/>raw_data JSONB<br/>━━━━━━━━━━━━━━━━━━━━<br/>PARTITION BY RANGE(timestamp)<br/>idx_oracle_asset<br/>(asset_id, oracle_name, timestamp DESC)"]
 
-        BP["<b>backfill_progress</b><br/>━━━━━━━━━━━━━━━━━━━━<br/>id SERIAL PK<br/>task_name VARCHAR(50) UNIQUE<br/>start_ledger BIGINT<br/>target_ledger BIGINT<br/>current_ledger BIGINT<br/>status VARCHAR(20)<br/>  running | paused | completed | error<br/>rate_per_hour BIGINT<br/>eta_hours NUMERIC(10,1)<br/>last_heartbeat TIMESTAMPTZ<br/>started_at TIMESTAMPTZ<br/>completed_at TIMESTAMPTZ"]
+        BP["<b>backfill_progress</b><br/>━━━━━━━━━━━━━━━━━━━━<br/>id SERIAL PK<br/>task_name VARCHAR(50) UNIQUE<br/>  (stream identifier)<br/>start_ledger BIGINT<br/>target_ledger BIGINT<br/>current_ledger BIGINT<br/>status VARCHAR(20)<br/>  running | paused | completed | error<br/>rate_per_hour BIGINT<br/>eta_hours NUMERIC(10,1)<br/>last_heartbeat TIMESTAMPTZ<br/>started_at TIMESTAMPTZ<br/>completed_at TIMESTAMPTZ<br/>━━━━━━━━━━━━━━━━━━━━<br/>One row per stream<br/>(seeded with sdex_archive,<br/>soroban_amm)"]
 
         %% Partition lifecycle (illustrative children of price_ohlcv)
         subgraph PARTS["price_ohlcv monthly partitions (lifecycle)"]
@@ -1248,7 +1272,7 @@ erDiagram
     }
 
     current_prices {
-        INT           asset_id PK_FK "REFERENCES assets(id)"
+        INT           asset_id PK,FK "REFERENCES assets(id)"
         NUMERIC_28_14 price_usd "NOT NULL"
         NUMERIC_28_14 price_xlm "nullable"
         NUMERIC_10_4  change_24h_pct "nullable"
@@ -1277,8 +1301,8 @@ erDiagram
         BIGINT       target_ledger "NOT NULL"
         BIGINT       current_ledger "NOT NULL"
         VARCHAR20    status "running|paused|completed|error"
-        BIGINT       rate_per_hour "ledgers/hour, 15-min avg"
-        NUMERIC_10_1 eta_hours "estimated hours to completion"
+        BIGINT       rate_per_hour "ledgers/hour, rolling avg, nullable"
+        NUMERIC_10_1 eta_hours "estimated hours to completion, nullable"
         TIMESTAMPTZ  last_heartbeat "NOT NULL DEFAULT NOW()"
         TIMESTAMPTZ  started_at "NOT NULL DEFAULT NOW()"
         TIMESTAMPTZ  completed_at "nullable"
@@ -1289,10 +1313,12 @@ erDiagram
 
 - `assets ||--o| current_prices` is a real SQL foreign key
   (`current_prices.asset_id REFERENCES assets(id)`).
-- `assets ..--o{ price_ohlcv` and `assets ..--o{ oracle_prices` are
-  **logical-only** references — there is no `REFERENCES` clause in the DDL,
-  because foreign keys to a partitioned table's child are expensive on
-  high-write time-series tables.
+- `assets ||--o{ price_ohlcv` and `assets ||--o{ oracle_prices` are drawn
+  with the same relationship glyph but are **logical-only** references —
+  there is no `REFERENCES` clause in the DDL, because foreign keys to a
+  partitioned table's child are expensive on high-write time-series tables.
+  The `(logical)` label on each edge is the only marker; Mermaid ER does
+  not support a separate "non-enforced" line style.
 - Underscored type names like `NUMERIC_28_14` and `VARCHAR12` are Mermaid
   ER-syntax stand-ins for `NUMERIC(28,14)` and `VARCHAR(12)` respectively
   (Mermaid ER does not allow parentheses inside type tokens).
