@@ -231,6 +231,18 @@ CREATE TABLE current_prices (
     -- Sources excluded by min_volume_usd or outlier detection are absent from the object.
     updated_at      TIMESTAMPTZ DEFAULT NOW()
 );
+
+-- Keyset-pagination indexes for GET /assets (one per documented `?sort=` value).
+-- Each index serves the keyset filter `WHERE (col, id) < (?, ?)` and the matching
+-- `ORDER BY col DESC, id DESC` from a single forward index scan; NULLS LAST
+-- aligns with the API contract that ranks assets without a value at the bottom.
+CREATE INDEX idx_current_prices_volume_24h
+    ON current_prices (volume_24h_usd DESC NULLS LAST, asset_id DESC);
+CREATE INDEX idx_current_prices_price
+    ON current_prices (price_usd DESC NULLS LAST, asset_id DESC);
+CREATE INDEX idx_current_prices_change_24h
+    ON current_prices (change_24h_pct DESC NULLS LAST, asset_id DESC);
+-- `?sort=code` is served by idx_assets_code; assets.id is the PK and tie-breaks the keyset.
 ```
 
 ### 3.4 Oracle Prices (Partitioned)

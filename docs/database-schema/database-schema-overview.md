@@ -318,6 +318,21 @@ CREATE TABLE current_prices (
     sources         JSONB,                 -- per-source {price, volume_24h}, see below
     updated_at      TIMESTAMPTZ DEFAULT NOW()
 );
+
+-- Keyset-pagination indexes for GET /assets.
+-- Each documented sort option (`?sort=`) needs a composite index on
+-- (sort_column DESC, asset_id DESC) so the WHERE (col, id) < (?, ?) keyset
+-- filter and the ORDER BY can both be served by a single index scan.
+-- NULLS LAST aligns the index ordering with the API contract that ranks
+-- assets without a value for that metric at the bottom of the list.
+CREATE INDEX idx_current_prices_volume_24h
+    ON current_prices (volume_24h_usd DESC NULLS LAST, asset_id DESC);
+CREATE INDEX idx_current_prices_price
+    ON current_prices (price_usd DESC NULLS LAST, asset_id DESC);
+CREATE INDEX idx_current_prices_change_24h
+    ON current_prices (change_24h_pct DESC NULLS LAST, asset_id DESC);
+-- `?sort=code` is served by the existing idx_assets_code on assets(asset_code);
+-- the keyset condition tie-breaks on assets.id which is already the PK.
 ```
 
 **Notes:**
@@ -550,6 +565,9 @@ gantt
 | `price_ohlcv`       | `PRIMARY KEY (timestamp, asset_id, granularity)`                    | Partition pruning + uniqueness within a candle                 |
 | `price_ohlcv`       | `idx_ohlcv_asset_gran` on `(asset_id, granularity, timestamp DESC)` | Typical OHLCV range query: asset + granularity in a time range |
 | `current_prices`    | `PRIMARY KEY (asset_id)`                                            | Single-row-per-asset upsert                                    |
+| `current_prices`    | `idx_current_prices_volume_24h` on `(volume_24h_usd DESC NULLS LAST, asset_id DESC)` | Keyset pagination for `GET /assets?sort=volume_24h` (default)  |
+| `current_prices`    | `idx_current_prices_price` on `(price_usd DESC NULLS LAST, asset_id DESC)` | Keyset pagination for `GET /assets?sort=price`                 |
+| `current_prices`    | `idx_current_prices_change_24h` on `(change_24h_pct DESC NULLS LAST, asset_id DESC)` | Keyset pagination for `GET /assets?sort=change_24h`            |
 | `oracle_prices`     | `PRIMARY KEY (timestamp, asset_id, oracle_name)`                    | Partition pruning + uniqueness per (oracle, asset, time)       |
 | `oracle_prices`     | `idx_oracle_asset` on `(asset_id, oracle_name, timestamp DESC)`     | Latest-per-oracle lookup                                       |
 | `backfill_progress` | `PRIMARY KEY (id)` + `UNIQUE (task_name)`                           | One row per backfill stream (seeded with `sdex_archive`, `soroban_amm`; extensible) |
@@ -667,6 +685,21 @@ LIMIT 51;
 ```
 
 `has_more` is determined by fetching `limit + 1` rows.
+
+**Index dependency.** The keyset query is only efficient because the
+`(sort_column DESC NULLS LAST, asset_id DESC)` composite index defined in
+Section 3.3 lets PostgreSQL serve both the `WHERE (col, id) < (?, ?)`
+filter and the `ORDER BY col DESC, id DESC` ordering from a single
+forward index scan. Without that index the planner falls back to a full
+sort of `current_prices` on every page request, which scales linearly
+with asset count. The mapping is:
+
+| `?sort=` value | Supporting index                |
+| -------------- | ------------------------------- |
+| `volume_24h` (default) | `idx_current_prices_volume_24h` |
+| `price`                | `idx_current_prices_price`      |
+| `change_24h`           | `idx_current_prices_change_24h` |
+| `code`                 | `idx_assets_code` (existing) — keyset tie-breaks on `assets.id` (the PK) |
 
 ```mermaid
 sequenceDiagram
@@ -1168,7 +1201,7 @@ flowchart TB
 
         OHLCV["<b>price_ohlcv</b> (PARTITIONED)<br/>━━━━━━━━━━━━━━━━━━━━<br/>asset_id INT (PK part)<br/>timestamp TIMESTAMPTZ (PK part)<br/>granularity VARCHAR(5) (PK part)<br/>open / high / low / close NUMERIC(28,14)<br/>volume_base NUMERIC(28,14)<br/>volume_quote_usd NUMERIC(28,14)<br/>vwap NUMERIC(28,14)<br/>trade_count INT<br/>source VARCHAR(20)<br/>━━━━━━━━━━━━━━━━━━━━<br/>PARTITION BY RANGE(timestamp)<br/>idx_ohlcv_asset_gran<br/>(asset_id, granularity, timestamp DESC)"]
 
-        Current["<b>current_prices</b><br/>━━━━━━━━━━━━━━━━━━━━<br/>asset_id INT PK,FK→assets.id<br/>price_usd NUMERIC(28,14)<br/>price_xlm NUMERIC(28,14)<br/>change_24h_pct NUMERIC(10,4)<br/>change_7d_pct NUMERIC(10,4)<br/>volume_24h_usd NUMERIC(28,14)<br/>market_cap_usd NUMERIC(28,14)<br/>vwap_24h NUMERIC(28,14)<br/>sources JSONB<br/>updated_at TIMESTAMPTZ"]
+        Current["<b>current_prices</b><br/>━━━━━━━━━━━━━━━━━━━━<br/>asset_id INT PK,FK→assets.id<br/>price_usd NUMERIC(28,14)<br/>price_xlm NUMERIC(28,14)<br/>change_24h_pct NUMERIC(10,4)<br/>change_7d_pct NUMERIC(10,4)<br/>volume_24h_usd NUMERIC(28,14)<br/>market_cap_usd NUMERIC(28,14)<br/>vwap_24h NUMERIC(28,14)<br/>sources JSONB<br/>updated_at TIMESTAMPTZ<br/>━━━━━━━━━━━━━━━━━━━━<br/>idx_current_prices_volume_24h<br/>(volume_24h_usd DESC NULLS LAST, asset_id DESC)<br/>idx_current_prices_price<br/>(price_usd DESC NULLS LAST, asset_id DESC)<br/>idx_current_prices_change_24h<br/>(change_24h_pct DESC NULLS LAST, asset_id DESC)"]
 
         OracleP["<b>oracle_prices</b> (PARTITIONED)<br/>━━━━━━━━━━━━━━━━━━━━<br/>asset_id INT (PK part)<br/>oracle_name VARCHAR(30) (PK part)<br/>timestamp TIMESTAMPTZ (PK part)<br/>price_usd NUMERIC(28,14)<br/>raw_data JSONB<br/>━━━━━━━━━━━━━━━━━━━━<br/>PARTITION BY RANGE(timestamp)<br/>idx_oracle_asset<br/>(asset_id, oracle_name, timestamp DESC)"]
 
@@ -1333,6 +1366,9 @@ erDiagram
         NUMERIC_28_14 vwap_24h "nullable"
         JSONB         sources "per-source price+volume_24h"
         TIMESTAMPTZ   updated_at "DEFAULT NOW()"
+        INDEX         idx_current_prices_volume_24h "volume_24h_usd DESC NULLS LAST, asset_id DESC"
+        INDEX         idx_current_prices_price "price_usd DESC NULLS LAST, asset_id DESC"
+        INDEX         idx_current_prices_change_24h "change_24h_pct DESC NULLS LAST, asset_id DESC"
     }
 
     oracle_prices {
