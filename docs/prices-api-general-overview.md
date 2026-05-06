@@ -217,7 +217,7 @@ CREATE INDEX idx_ohlcv_asset_gran ON price_ohlcv (asset_id, granularity, timesta
 ### 3.3 Current Prices (Materialized/Cached)
 ```sql
 CREATE TABLE current_prices (
-    asset_id        INT PRIMARY KEY REFERENCES assets(id),
+    asset_id        INT PRIMARY KEY REFERENCES assets(id) ON DELETE CASCADE,
     price_usd       NUMERIC(28,14) NOT NULL,
     price_xlm       NUMERIC(28,14),
     change_24h_pct  NUMERIC(10,4),

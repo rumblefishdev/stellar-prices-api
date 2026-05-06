@@ -366,7 +366,7 @@ on the read path).
 
 ```sql
 CREATE TABLE current_prices (
-    asset_id        INT PRIMARY KEY REFERENCES assets(id),
+    asset_id        INT PRIMARY KEY REFERENCES assets(id) ON DELETE CASCADE,
     price_usd       NUMERIC(28,14) NOT NULL,
     price_xlm       NUMERIC(28,14),
     change_24h_pct  NUMERIC(10,4),
@@ -424,6 +424,14 @@ CREATE INDEX idx_current_prices_change_24h
     returns the same object (the list endpoint exposes the full source
     breakdown — clients that only want price strings can extract `.price`).
 - `asset_id` is both the primary key and a foreign key to `assets(id)`.
+  The FK uses `ON DELETE CASCADE`: this row is a materialized cache of the
+  asset's latest aggregated state, so its lifecycle is tied to the parent.
+  If an asset is ever deleted from `assets` (rare — the project soft-deletes
+  via `is_active` instead), the corresponding `current_prices` row is
+  removed automatically rather than left dangling. `price_ohlcv` and
+  `oracle_prices` deliberately do **not** carry FKs to `assets` (see
+  Appendix A note), so historical candles and oracle samples survive any
+  hard delete and remain queryable for audit purposes.
 - `market_cap_usd` is computed by the Current Price Updater Lambda as
   `token_supply * price_usd`. `token_supply` is fetched from the asset's
   token contract — for Soroban assets and Stellar Asset Contracts (SACs)
@@ -1265,7 +1273,7 @@ erDiagram
     }
 
     current_prices {
-        INT           asset_id PK,FK "REFERENCES assets(id)"
+        INT           asset_id PK,FK "REFERENCES assets(id) ON DELETE CASCADE"
         NUMERIC_28_14 price_usd "NOT NULL"
         NUMERIC_28_14 price_xlm "nullable"
         NUMERIC_10_4  change_24h_pct "nullable"
@@ -1308,7 +1316,8 @@ erDiagram
 **Notes on the diagram**
 
 - `assets ||--o| current_prices` is a real SQL foreign key
-  (`current_prices.asset_id REFERENCES assets(id)`).
+  (`current_prices.asset_id REFERENCES assets(id) ON DELETE CASCADE`) — the
+  cache row is removed automatically when its asset is deleted.
 - `assets ||--o{ price_ohlcv` and `assets ||--o{ oracle_prices` are drawn
   with the same relationship glyph but are **logical-only** references —
   there is no `REFERENCES` clause in the DDL, because foreign keys to a
@@ -1392,7 +1401,7 @@ flowchart TB
 
         OHLCV["<b>price_ohlcv</b> (PARTITIONED)<br/>━━━━━━━━━━━━━━━━━━━━<br/>asset_id INT (PK part)<br/>timestamp TIMESTAMPTZ (PK part)<br/>granularity VARCHAR(5) (PK part)<br/>  CHECK 1m|15m|1h|4h|1d|1w|1M<br/>open / high / low / close NUMERIC(28,14)<br/>volume_base NUMERIC(28,14)<br/>volume_quote_usd NUMERIC(28,14)<br/>vwap NUMERIC(28,14)<br/>trade_count INT<br/>source VARCHAR(20) NOT NULL<br/>  examples sdex|soroswap|aquarius|aggregated<br/>━━━━━━━━━━━━━━━━━━━━<br/>PARTITION BY RANGE(timestamp)<br/>idx_ohlcv_asset_gran<br/>(asset_id, granularity, timestamp DESC)"]
 
-        Current["<b>current_prices</b><br/>━━━━━━━━━━━━━━━━━━━━<br/>asset_id INT PK,FK→assets.id<br/>price_usd NUMERIC(28,14)<br/>price_xlm NUMERIC(28,14)<br/>change_24h_pct NUMERIC(10,4)<br/>change_7d_pct NUMERIC(10,4)<br/>volume_24h_usd NUMERIC(28,14)<br/>market_cap_usd NUMERIC(28,14)<br/>  (token_supply × price_usd;<br/>   supply via token-contract call)<br/>vwap_24h NUMERIC(28,14)<br/>sources JSONB<br/>updated_at TIMESTAMPTZ<br/>━━━━━━━━━━━━━━━━━━━━<br/>idx_current_prices_volume_24h<br/>(volume_24h_usd DESC NULLS LAST, asset_id DESC)<br/>idx_current_prices_price<br/>(price_usd DESC NULLS LAST, asset_id DESC)<br/>idx_current_prices_change_24h<br/>(change_24h_pct DESC NULLS LAST, asset_id DESC)"]
+        Current["<b>current_prices</b><br/>━━━━━━━━━━━━━━━━━━━━<br/>asset_id INT PK,FK→assets.id<br/>  ON DELETE CASCADE<br/>price_usd NUMERIC(28,14)<br/>price_xlm NUMERIC(28,14)<br/>change_24h_pct NUMERIC(10,4)<br/>change_7d_pct NUMERIC(10,4)<br/>volume_24h_usd NUMERIC(28,14)<br/>market_cap_usd NUMERIC(28,14)<br/>  (token_supply × price_usd;<br/>   supply via token-contract call)<br/>vwap_24h NUMERIC(28,14)<br/>sources JSONB<br/>updated_at TIMESTAMPTZ<br/>━━━━━━━━━━━━━━━━━━━━<br/>idx_current_prices_volume_24h<br/>(volume_24h_usd DESC NULLS LAST, asset_id DESC)<br/>idx_current_prices_price<br/>(price_usd DESC NULLS LAST, asset_id DESC)<br/>idx_current_prices_change_24h<br/>(change_24h_pct DESC NULLS LAST, asset_id DESC)"]
 
         OracleP["<b>oracle_prices</b> (PARTITIONED)<br/>━━━━━━━━━━━━━━━━━━━━<br/>asset_id INT (PK part)<br/>oracle_name VARCHAR(30) (PK part)<br/>  examples reflector|chainlink|redstone|band<br/>timestamp TIMESTAMPTZ (PK part)<br/>price_usd NUMERIC(28,14)<br/>raw_data JSONB<br/>━━━━━━━━━━━━━━━━━━━━<br/>PARTITION BY RANGE(timestamp)<br/>idx_oracle_asset<br/>(asset_id, oracle_name, timestamp DESC)"]
 
