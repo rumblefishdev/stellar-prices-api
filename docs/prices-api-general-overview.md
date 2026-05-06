@@ -162,7 +162,10 @@ CREATE TABLE assets (
     asset_type      VARCHAR(10) NOT NULL CHECK (asset_type IN ('classic', 'soroban')),
     issuer_address  VARCHAR(56),          -- G-address, NULL for XLM
     contract_address VARCHAR(56),         -- C-address (SAC or native contract)
-    home_domain     VARCHAR(255),         -- classic assets only, nullable
+    home_domain     VARCHAR(255),         -- classic assets only, nullable;
+                                          -- stored as-is from the issuer's
+                                          -- set_options operation, no validation
+                                          -- or normalisation applied
     is_active       BOOLEAN DEFAULT TRUE, -- soft-delete flag; backend may flip to
                                           -- FALSE to hide an asset (delisted,
                                           -- blacklisted) without removing history.

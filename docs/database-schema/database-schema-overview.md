@@ -224,7 +224,10 @@ CREATE TABLE assets (
     asset_type      VARCHAR(10) NOT NULL CHECK (asset_type IN ('classic', 'soroban')),
     issuer_address  VARCHAR(56),          -- G-address, NULL for XLM
     contract_address VARCHAR(56),         -- C-address (SAC or native contract)
-    home_domain     VARCHAR(255),         -- classic assets only, nullable
+    home_domain     VARCHAR(255),         -- classic assets only, nullable;
+                                          -- stored as-is from the issuer
+                                          -- account's set_options operation,
+                                          -- no validation or normalisation
     is_active       BOOLEAN DEFAULT TRUE, -- soft-delete flag; backend may
                                           -- flip to FALSE to hide an asset
                                           -- without removing its history
@@ -245,6 +248,15 @@ CREATE INDEX idx_assets_code ON assets(asset_code);
   contract); also `NULL` for purely classic assets that have not been wrapped.
 - The `(asset_code, issuer_address, contract_address)` triple uniquely
   identifies an asset.
+- `home_domain` is the federation host advertised by the issuing account
+  (set via Stellar's `set_options` operation). The Asset Discovery Lambda
+  copies the string verbatim into this column with no validation, no
+  normalisation (no lowercasing, no trailing-dot trimming), and no
+  reachability check. `VARCHAR(255)` is sized to comfortably hold any
+  RFC 1035 hostname (≤253 octets); the column is nullable for assets
+  whose issuer did not set a home domain and for Soroban-only tokens
+  that have no classic issuer account. Consumers that need a canonical
+  form should normalise on read.
 - `is_active` is a **soft-delete flag**, not a discovery state. New rows
   inserted by the Asset Discovery Lambda default to `TRUE`. The backend
   (operations or a future admin endpoint) may set it to `FALSE` to hide
@@ -1258,7 +1270,7 @@ erDiagram
         VARCHAR10   asset_type "NOT NULL CHECK classic|soroban"
         VARCHAR56   issuer_address "NULL for XLM"
         VARCHAR56   contract_address "C-address (SAC)"
-        VARCHAR255  home_domain "classic only, nullable"
+        VARCHAR255  home_domain "classic only, nullable; stored as-is, no validation"
         BOOLEAN     is_active "DEFAULT TRUE; soft-delete flag set by backend"
         TIMESTAMPTZ created_at "DEFAULT NOW()"
         TIMESTAMPTZ updated_at "DEFAULT NOW()"
