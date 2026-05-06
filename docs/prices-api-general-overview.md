@@ -223,7 +223,12 @@ CREATE TABLE current_prices (
     change_24h_pct  NUMERIC(10,4),
     change_7d_pct   NUMERIC(10,4),
     volume_24h_usd  NUMERIC(28,14),
-    market_cap_usd  NUMERIC(28,14),
+    market_cap_usd  NUMERIC(28,14),        -- computed: token_supply * price_usd.
+                                           -- token_supply is read from the asset's
+                                           -- token contract (Soroban `total_supply`
+                                           -- / SEP-41 call; classic assets without
+                                           -- a SAC fall back to Horizon /assets).
+                                           -- NULL when supply is unavailable.
     vwap_24h        NUMERIC(28,14),
     sources         JSONB,                 -- per-source {price, volume_24h}; e.g.
     -- {"sdex": {"price": "1.0001", "volume_24h": "800000"},

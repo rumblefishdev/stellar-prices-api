@@ -372,7 +372,13 @@ CREATE TABLE current_prices (
     change_24h_pct  NUMERIC(10,4),
     change_7d_pct   NUMERIC(10,4),
     volume_24h_usd  NUMERIC(28,14),
-    market_cap_usd  NUMERIC(28,14),
+    market_cap_usd  NUMERIC(28,14),        -- computed: token_supply * price_usd.
+                                           -- token_supply is read from the asset's
+                                           -- token contract (Soroban `total_supply`
+                                           -- call for SAC/Soroban tokens; classic
+                                           -- assets fall back to Horizon's
+                                           -- /assets endpoint). NULL when supply
+                                           -- is unavailable.
     vwap_24h        NUMERIC(28,14),
     sources         JSONB,                 -- per-source {price, volume_24h}, see below
     updated_at      TIMESTAMPTZ DEFAULT NOW()
@@ -418,6 +424,14 @@ CREATE INDEX idx_current_prices_change_24h
     returns the same object (the list endpoint exposes the full source
     breakdown — clients that only want price strings can extract `.price`).
 - `asset_id` is both the primary key and a foreign key to `assets(id)`.
+- `market_cap_usd` is computed by the Current Price Updater Lambda as
+  `token_supply * price_usd`. `token_supply` is fetched from the asset's
+  token contract — for Soroban assets and Stellar Asset Contracts (SACs)
+  this is a `total_supply` (or equivalent SEP-41) contract call; classic
+  assets without a SAC fall back to Horizon's `/assets` endpoint for
+  circulating amount. The cell is left `NULL` when the supply call fails
+  or the asset has no contract registered, so consumers must treat the
+  field as nullable.
 
 #### Why JSONB and not a separate `current_price_sources` table?
 
@@ -1254,7 +1268,7 @@ erDiagram
         NUMERIC_10_4  change_24h_pct "nullable"
         NUMERIC_10_4  change_7d_pct "nullable"
         NUMERIC_28_14 volume_24h_usd "nullable"
-        NUMERIC_28_14 market_cap_usd "nullable"
+        NUMERIC_28_14 market_cap_usd "nullable; token_supply * price_usd (supply via token-contract call)"
         NUMERIC_28_14 vwap_24h "nullable"
         JSONB         sources "per-source price+volume_24h"
         TIMESTAMPTZ   updated_at "DEFAULT NOW()"
@@ -1375,7 +1389,7 @@ flowchart TB
 
         OHLCV["<b>price_ohlcv</b> (PARTITIONED)<br/>━━━━━━━━━━━━━━━━━━━━<br/>asset_id INT (PK part)<br/>timestamp TIMESTAMPTZ (PK part)<br/>granularity VARCHAR(5) (PK part)<br/>  CHECK 1m|15m|1h|4h|1d|1w|1M<br/>open / high / low / close NUMERIC(28,14)<br/>volume_base NUMERIC(28,14)<br/>volume_quote_usd NUMERIC(28,14)<br/>vwap NUMERIC(28,14)<br/>trade_count INT<br/>source VARCHAR(20) NOT NULL<br/>  examples sdex|soroswap|aquarius|aggregated<br/>━━━━━━━━━━━━━━━━━━━━<br/>PARTITION BY RANGE(timestamp)<br/>idx_ohlcv_asset_gran<br/>(asset_id, granularity, timestamp DESC)"]
 
-        Current["<b>current_prices</b><br/>━━━━━━━━━━━━━━━━━━━━<br/>asset_id INT PK,FK→assets.id<br/>price_usd NUMERIC(28,14)<br/>price_xlm NUMERIC(28,14)<br/>change_24h_pct NUMERIC(10,4)<br/>change_7d_pct NUMERIC(10,4)<br/>volume_24h_usd NUMERIC(28,14)<br/>market_cap_usd NUMERIC(28,14)<br/>vwap_24h NUMERIC(28,14)<br/>sources JSONB<br/>updated_at TIMESTAMPTZ<br/>━━━━━━━━━━━━━━━━━━━━<br/>idx_current_prices_volume_24h<br/>(volume_24h_usd DESC NULLS LAST, asset_id DESC)<br/>idx_current_prices_price<br/>(price_usd DESC NULLS LAST, asset_id DESC)<br/>idx_current_prices_change_24h<br/>(change_24h_pct DESC NULLS LAST, asset_id DESC)"]
+        Current["<b>current_prices</b><br/>━━━━━━━━━━━━━━━━━━━━<br/>asset_id INT PK,FK→assets.id<br/>price_usd NUMERIC(28,14)<br/>price_xlm NUMERIC(28,14)<br/>change_24h_pct NUMERIC(10,4)<br/>change_7d_pct NUMERIC(10,4)<br/>volume_24h_usd NUMERIC(28,14)<br/>market_cap_usd NUMERIC(28,14)<br/>  (token_supply × price_usd;<br/>   supply via token-contract call)<br/>vwap_24h NUMERIC(28,14)<br/>sources JSONB<br/>updated_at TIMESTAMPTZ<br/>━━━━━━━━━━━━━━━━━━━━<br/>idx_current_prices_volume_24h<br/>(volume_24h_usd DESC NULLS LAST, asset_id DESC)<br/>idx_current_prices_price<br/>(price_usd DESC NULLS LAST, asset_id DESC)<br/>idx_current_prices_change_24h<br/>(change_24h_pct DESC NULLS LAST, asset_id DESC)"]
 
         OracleP["<b>oracle_prices</b> (PARTITIONED)<br/>━━━━━━━━━━━━━━━━━━━━<br/>asset_id INT (PK part)<br/>oracle_name VARCHAR(30) (PK part)<br/>  examples reflector|chainlink|redstone|band<br/>timestamp TIMESTAMPTZ (PK part)<br/>price_usd NUMERIC(28,14)<br/>raw_data JSONB<br/>━━━━━━━━━━━━━━━━━━━━<br/>PARTITION BY RANGE(timestamp)<br/>idx_oracle_asset<br/>(asset_id, oracle_name, timestamp DESC)"]
 
