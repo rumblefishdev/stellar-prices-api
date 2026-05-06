@@ -524,8 +524,9 @@ feed the `price_usd` field in any other endpoint.
 Returns the current state of the historical all-time backfill. This endpoint is the primary
 mechanism for the Tranche 3 reviewer to validate that backfill is progressing correctly.
 
-A CloudWatch alarm fires if `last_heartbeat` falls more than 10 minutes behind the current
-time (indicating the backfill task has stalled or crashed).
+A CloudWatch alarm fires if `last_heartbeat` falls more than 20 minutes behind the current
+time (indicating the backfill task has stalled or crashed). The 20-minute threshold sits
+above the 15-minute write cadence so a single delayed write does not trip the alarm.
 
 The backfill is split into two independent streams with different sources and timelines (see
 Section 5.6). The response reflects both.
@@ -561,7 +562,7 @@ Section 5.6). The response reflects both.
 | `sdex.current_ledger` | Oldest ledger processed so far by the SDEX backfill task |
 | `sdex.rate_ledgers_per_hour` | Rolling 15-min average processing rate |
 | `sdex.estimated_hours_to_completion` | `ledgers_remaining / rate_per_hour` |
-| `sdex.task_healthy` | `false` if no heartbeat in past 10 minutes → CloudWatch alarm fires |
+| `sdex.task_healthy` | `false` if no heartbeat in past 20 minutes → CloudWatch alarm fires |
 | `sdex.earliest_data_available` | Timestamp of oldest SDEX OHLCV record in the database |
 | `soroban_amm.status` | Typically `completed` from Tranche 1 onwards |
 | `soroban_amm.earliest_data_available` | Soroban activation date (~Nov 2023) once complete |
@@ -762,8 +763,11 @@ trades and process faster; the estimate above is conservative.
 #### `GET /backfill/status` Alarm
 
 A CloudWatch alarm monitors the `last_heartbeat` field in `backfill_progress`. If the backfill
-task fails to update the heartbeat for more than 10 minutes, an SNS alarm fires (email + Slack)
-to alert the team. This alarm is active for the full backfill duration, including post-delivery.
+task fails to update the heartbeat for more than 20 minutes, an SNS alarm fires (email + Slack)
+to alert the team. The 20-minute threshold is chosen to sit comfortably above the 15-minute
+write cadence (`sdex_archive` updates every 15 min) so a single delayed write does not trip
+the alarm — only a genuine task stall does. This alarm is active for the full backfill
+duration, including post-delivery.
 
 ---
 
@@ -863,7 +867,7 @@ all-time history once backfill completes)
 - Historical backfill ECS Fargate task started; processing from current tip backwards;
   covers approximately 6 months of recent history by end of Tranche 1
 - `GET /backfill/status` endpoint live and returning valid progress data
-- CloudWatch alarm: backfill heartbeat >10 min stale → SNS notification
+- CloudWatch alarm: backfill heartbeat >20 min stale → SNS notification
 
 **Acceptance criteria:**
 1. `cdk deploy` from a clean AWS account (sharing only the existing VPC/S3 bucket from Block

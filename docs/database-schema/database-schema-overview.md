@@ -545,9 +545,11 @@ The `GET /backfill/status` endpoint reads both rows and returns them as the
 nested `sdex` and `soroban_amm` objects (see Section 7.6).
 
 **Heartbeat alarm:** a CloudWatch alarm watches `last_heartbeat`. If the
-backfill task fails to update it for more than 10 minutes, an SNS alarm fires
-(email + Slack). The alarm is active for the full backfill duration, including
-post-delivery.
+backfill task fails to update it for more than 20 minutes, an SNS alarm fires
+(email + Slack). The 20-minute threshold sits comfortably above the
+15-minute write cadence (`sdex_archive` updates every 15 min) so a single
+delayed write does not trip the alarm — only a genuine task stall does.
+The alarm is active for the full backfill duration, including post-delivery.
 
 ---
 
@@ -907,7 +909,7 @@ flowchart TD
     Task -->|parse LedgerCloseMeta<br/>extract offersClaimed[]| Task
     Task -->|historical OHLCV<br/>~150k ledgers/hour| OHLCV[(price_ohlcv<br/>historical partitions)]
     Task -->|heartbeat every 15 min| BP[(backfill_progress)]
-    BP -->|last_heartbeat &gt; 10 min stale| Alarm[CloudWatch Alarm<br/>→ SNS email + Slack]
+    BP -->|last_heartbeat &gt; 20 min stale| Alarm[CloudWatch Alarm<br/>→ SNS email + Slack]
 
     LiveTip[Prices Ledger Processor<br/>live writes, current month] --> OHLCVcur[(price_ohlcv<br/>current partition)]
 
@@ -938,7 +940,7 @@ stateDiagram-v2
     [*] --> running : INSERT row<br/>start_ledger=1, current=tip
     running --> paused : operator action
     paused --> running : resume
-    running --> error : exception<br/>(no heartbeat &gt; 10 min)
+    running --> error : exception<br/>(no heartbeat &gt; 20 min)
     error --> running : retry / restart<br/>resumes from current_ledger
     running --> completed : current_ledger == 1<br/>(all-time reached)
     completed --> [*] : completed_at recorded
@@ -957,7 +959,8 @@ stateDiagram-v2
 ### 7.6 `GET /backfill/status` — example response
 
 The endpoint reflects both streams. A CloudWatch alarm fires if
-`last_heartbeat` falls more than 10 minutes behind the current time.
+`last_heartbeat` falls more than 20 minutes behind the current time
+(threshold chosen to sit comfortably above the 15-min write cadence).
 
 ```json
 {
@@ -989,7 +992,7 @@ The endpoint reflects both streams. A CloudWatch alarm fires if
 | `sdex.current_ledger`                 | Oldest ledger processed so far by the SDEX backfill task             |
 | `sdex.rate_ledgers_per_hour`          | Rolling 15-min average processing rate                               |
 | `sdex.estimated_hours_to_completion`  | `ledgers_remaining / rate_per_hour`                                  |
-| `sdex.task_healthy`                   | `false` if no heartbeat in past 10 minutes → CloudWatch alarm fires  |
+| `sdex.task_healthy`                   | `false` if no heartbeat in past 20 minutes → CloudWatch alarm fires  |
 | `sdex.earliest_data_available`        | Timestamp of oldest SDEX OHLCV record in the database                |
 | `soroban_amm.status`                  | Typically `completed` from Tranche 1 onwards                         |
 | `soroban_amm.earliest_data_available` | Soroban activation date (~Nov 2023) once complete                    |
@@ -1453,7 +1456,7 @@ flowchart TB
     %% ============================================================
     %% ALARM
     %% ============================================================
-    BP -->|"last_heartbeat &gt; 10 min stale"| Alarm["CloudWatch Alarm<br/>→ SNS (email + Slack)"]
+    BP -->|"last_heartbeat &gt; 20 min stale"| Alarm["CloudWatch Alarm<br/>→ SNS (email + Slack)"]
     class Alarm alarm
 
     %% ============================================================
