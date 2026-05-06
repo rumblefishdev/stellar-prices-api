@@ -163,7 +163,11 @@ CREATE TABLE assets (
     issuer_address  VARCHAR(56),          -- G-address, NULL for XLM
     contract_address VARCHAR(56),         -- C-address (SAC or native contract)
     home_domain     VARCHAR(255),         -- classic assets only, nullable
-    is_active       BOOLEAN DEFAULT TRUE,
+    is_active       BOOLEAN DEFAULT TRUE, -- soft-delete flag; backend may flip to
+                                          -- FALSE to hide an asset (delisted,
+                                          -- blacklisted) without removing history.
+                                          -- Readers filter WHERE is_active = TRUE
+                                          -- unless ?include_inactive=true is set.
     created_at      TIMESTAMPTZ DEFAULT NOW(),
     updated_at      TIMESTAMPTZ DEFAULT NOW(),
 

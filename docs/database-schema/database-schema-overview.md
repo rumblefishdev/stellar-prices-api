@@ -225,7 +225,9 @@ CREATE TABLE assets (
     issuer_address  VARCHAR(56),          -- G-address, NULL for XLM
     contract_address VARCHAR(56),         -- C-address (SAC or native contract)
     home_domain     VARCHAR(255),         -- classic assets only, nullable
-    is_active       BOOLEAN DEFAULT TRUE,
+    is_active       BOOLEAN DEFAULT TRUE, -- soft-delete flag; backend may
+                                          -- flip to FALSE to hide an asset
+                                          -- without removing its history
     created_at      TIMESTAMPTZ DEFAULT NOW(),
     updated_at      TIMESTAMPTZ DEFAULT NOW(),
 
@@ -243,6 +245,16 @@ CREATE INDEX idx_assets_code ON assets(asset_code);
   contract); also `NULL` for purely classic assets that have not been wrapped.
 - The `(asset_code, issuer_address, contract_address)` triple uniquely
   identifies an asset.
+- `is_active` is a **soft-delete flag**, not a discovery state. New rows
+  inserted by the Asset Discovery Lambda default to `TRUE`. The backend
+  (operations or a future admin endpoint) may set it to `FALSE` to hide
+  an asset from `GET /assets` and the price-update path without removing
+  its `price_ohlcv` / `oracle_prices` history — useful for delisted,
+  blacklisted, or compliance-flagged tokens. Inactive rows remain in the
+  table so historical candles stay queryable for audit. Readers should
+  filter `WHERE is_active = TRUE` by default and only return inactive
+  rows when an explicit query parameter (e.g. `?include_inactive=true`)
+  is set.
 
 #### Why there is no index on `asset_type` (despite `?type=` being a filter)
 
@@ -1247,7 +1259,7 @@ erDiagram
         VARCHAR56   issuer_address "NULL for XLM"
         VARCHAR56   contract_address "C-address (SAC)"
         VARCHAR255  home_domain "classic only, nullable"
-        BOOLEAN     is_active "DEFAULT TRUE"
+        BOOLEAN     is_active "DEFAULT TRUE; soft-delete flag set by backend"
         TIMESTAMPTZ created_at "DEFAULT NOW()"
         TIMESTAMPTZ updated_at "DEFAULT NOW()"
         UNIQUE      uq_asset "code, issuer, contract"
@@ -1397,7 +1409,7 @@ flowchart TB
     subgraph RDS["Prices RDS — PostgreSQL 16"]
         direction TB
 
-        Assets["<b>assets</b><br/>━━━━━━━━━━━━━━━━━━━━<br/>id SERIAL PK<br/>asset_code VARCHAR(12)<br/>asset_type VARCHAR(10) CHECK<br/>issuer_address VARCHAR(56)<br/>contract_address VARCHAR(56)<br/>home_domain VARCHAR(255)<br/>is_active BOOLEAN<br/>created_at TIMESTAMPTZ<br/>updated_at TIMESTAMPTZ<br/>━━━━━━━━━━━━━━━━━━━━<br/>UNIQUE(code,issuer,contract)<br/>idx_assets_contract<br/>idx_assets_code"]
+        Assets["<b>assets</b><br/>━━━━━━━━━━━━━━━━━━━━<br/>id SERIAL PK<br/>asset_code VARCHAR(12)<br/>asset_type VARCHAR(10) CHECK<br/>issuer_address VARCHAR(56)<br/>contract_address VARCHAR(56)<br/>home_domain VARCHAR(255)<br/>is_active BOOLEAN (soft-delete)<br/>created_at TIMESTAMPTZ<br/>updated_at TIMESTAMPTZ<br/>━━━━━━━━━━━━━━━━━━━━<br/>UNIQUE(code,issuer,contract)<br/>idx_assets_contract<br/>idx_assets_code"]
 
         OHLCV["<b>price_ohlcv</b> (PARTITIONED)<br/>━━━━━━━━━━━━━━━━━━━━<br/>asset_id INT (PK part)<br/>timestamp TIMESTAMPTZ (PK part)<br/>granularity VARCHAR(5) (PK part)<br/>  CHECK 1m|15m|1h|4h|1d|1w|1M<br/>open / high / low / close NUMERIC(28,14)<br/>volume_base NUMERIC(28,14)<br/>volume_quote_usd NUMERIC(28,14)<br/>vwap NUMERIC(28,14)<br/>trade_count INT<br/>source VARCHAR(20) NOT NULL<br/>  examples sdex|soroswap|aquarius|aggregated<br/>━━━━━━━━━━━━━━━━━━━━<br/>PARTITION BY RANGE(timestamp)<br/>idx_ohlcv_asset_gran<br/>(asset_id, granularity, timestamp DESC)"]
 
