@@ -567,9 +567,9 @@ Section 5.6). The response reflects both.
 | `sdex.rate_ledgers_per_hour` | Rolling 15-min average processing rate |
 | `sdex.estimated_hours_to_completion` | `ledgers_remaining / rate_per_hour` |
 | `sdex.task_healthy` | `false` if no heartbeat in past 20 minutes → CloudWatch alarm fires |
-| `sdex.earliest_data_available` | Timestamp of oldest SDEX OHLCV record in the database |
+| `sdex.earliest_data_available` | Stored timestamp of the oldest SDEX OHLCV row known for this stream — recorded by the backfill task when it first writes a candle for a given timestamp, **not** computed live via `MIN(timestamp)`. Returned as-is, so reads are O(1). |
 | `soroban_amm.status` | Typically `completed` from Tranche 1 onwards |
-| `soroban_amm.earliest_data_available` | Soroban activation date (~Nov 2023) once complete |
+| `soroban_amm.earliest_data_available` | Same semantics as `sdex.earliest_data_available` — stored, not computed. Lands at the Soroban activation date (~Nov 2023) once the one-time backfill completes. |
 
 ---
 
