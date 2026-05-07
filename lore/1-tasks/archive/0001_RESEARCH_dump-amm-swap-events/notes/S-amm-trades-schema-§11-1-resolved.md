@@ -12,6 +12,16 @@ history:
     status: seed
     who: okarcz
     note: "Synthesis drafted from R-swap-topic-shapes.md"
+  - date: 2026-05-07
+    status: developing
+    who: claude
+    note: >
+      Added "Update: wider sample reinforces this conclusion" section
+      after R-swap-topic-shapes.md was extended with the
+      62400000–62463999 findings. Original conclusion ("per-venue
+      decoder dispatch is mandatory") preserved verbatim — the wider
+      sample strengthens it; the §7 decoder table is replaced by a
+      revised three-decoder version below.
 ---
 
 # Decision: AMM swap topic symbols differ across venues — filter must accept multiple
@@ -132,3 +142,69 @@ prose:
 3. **Wider sample for Phoenix detection** — re-run the tool against a
    longer ledger range (e.g. one full month) before locking the
    filter set. Optional; can be done as part of (1).
+
+---
+
+## Update: wider sample reinforces this conclusion
+
+> **Why this section exists.** A second run on a ~4-day window roughly
+> 5 weeks later (ledgers 62400000–62463999, 60,545 files, 234,312,389
+> events) materially extended the empirical picture. **The original
+> conclusion above is preserved verbatim** — the wider sample
+> *strengthens* it. This section adds (a) a third decoder shape that
+> was invisible in the 3.5-day window, and (b) a corrected `§7
+> decoder table`. Full evidence in `R-swap-topic-shapes.md` §"Update".
+
+### What changes in the conclusion
+
+Nothing in the headline ("per-venue decoder dispatch in the BE Ledger
+Processor is load-bearing, not optional"). The wider sample makes the
+case stronger, not weaker:
+
+- **Soroswap is now directly identifiable.** It uses
+  `String("SoroswapPair")` for `topics[0]` (note: ScVal *String*, not
+  *Symbol*) and a sub-event tag in `topics[1]`. This is a third
+  topic-shape pattern, distinct from both `Symbol("swap")` and
+  `Symbol("trade")`.
+- **The single-emitter assumption for `Symbol("swap")` is wrong.** 44
+  distinct contracts emit it in this window — a long tail, not one
+  router. So the filter's `(contract_id ∈ known_amm_set)` guard cannot
+  be skipped; topic-only matching would over-collect and decode-error.
+- **Soroswap pool events do not carry token addresses inline.** The
+  Aquarius decoders read tokens from the event topics; Soroswap's
+  decoder must look up `token_0` / `token_1` from the pool contract
+  (one-time, cacheable per pool). This is a real workload-shape
+  difference between decoders, not just a payload-format difference.
+
+### Revised §7 decoder table
+
+The original table in §"What this changes in `prices_amm_trades`" lists
+two decoders. The empirical observation is **three**. The original
+table is correct as far as it goes; this is the superseding version:
+
+| `topics[0]` | `topics[1]` filter | Where amounts live | Type | Token pair source |
+|---|---|---|---|---|
+| `Symbol("swap")` | (any) | `data.vec[3]`, `data.vec[4]` | `U128` | `topics[1]` (Vec of 2 Addresses) AND `data.vec[1..3]` |
+| `Symbol("trade")` | (any) | `data.vec[0]`, `data.vec[1]` | `I128` | `topics[1]`, `topics[2]` |
+| `String("SoroswapPair")` | `Symbol("swap")` only | `data.amount_{0,1}_{in,out}` (i128 keys in Map) | `I128` | **Off-event** — pool's `token_0` / `token_1` (one-time lookup, cacheable per pool) |
+
+Same dispatch rule as before — the indexer keys on `topics[0]` first. For
+the `String("SoroswapPair")` branch it must additionally check
+`topics[1]` and reject `Symbol("sync")` / `Symbol("deposit")` /
+`Symbol("withdraw")`, which share `topics[0]` with the swap event.
+
+### Phoenix is still unattributed
+
+Phoenix-prefixed PascalCase topics were not observed in either window.
+The most plausible explanation is that Phoenix is hidden among the 44
+`Symbol("swap")` emitters; resolution depends on the venue-attribution
+task (0002). No new follow-up needed — the existing tasks 0002 / 0003 /
+0004 already cover this; their scope is unchanged.
+
+### Implication for task 0003 (DOCS update)
+
+The DOCS update §7 should now include the three-row decoder table
+above (not the two-row version from the original §"What this changes")
+and explicitly call out the Soroswap off-event token-address lookup as
+an indexer requirement. No change to the DDL; no change to §11.1's
+"resolved" status.
