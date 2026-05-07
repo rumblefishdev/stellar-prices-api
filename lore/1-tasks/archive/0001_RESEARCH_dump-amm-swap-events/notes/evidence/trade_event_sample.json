@@ -1,0 +1,36 @@
+{
+  "ledger_seq": 62079996,
+  "tx_hash": "7f785bf7d275dba8827517a1a04b4e1e65c62bd82660982ca92602e636902e53",
+  "event_index": 4,
+  "source": "PerOp",
+  "inner_type": "Contract",
+  "contract_id": "CA6PUJLBYKZKUEKLZJMKBZLEKP2OTHANDEOWSFF44FTSYLKQPIICCJBE",
+  "topic_0": "trade",
+  "topics": [
+    {
+      "symbol": "trade"
+    },
+    {
+      "address": "CAS3J7GYLGXMF6TDJBBYYSE3HQ6BBSMLNUQ34T6TZMYMW2EVH34XOWMA"
+    },
+    {
+      "address": "CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75"
+    },
+    {
+      "address": "GDCRZPZYBZ24RHRO3WBPJGFDL7NDFKUQBS3ZDB6YGBJB3TGKMFYBQ3LD"
+    }
+  ],
+  "data": {
+    "vec": [
+      {
+        "i128": "25761941491"
+      },
+      {
+        "i128": "3901204480"
+      },
+      {
+        "i128": "12880971"
+      }
+    ]
+  }
+}
