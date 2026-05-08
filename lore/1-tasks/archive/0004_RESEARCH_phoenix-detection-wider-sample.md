@@ -2,18 +2,38 @@
 id: "0004"
 title: "Run dump-swap-events against a wider ledger range to detect Phoenix"
 type: RESEARCH
-status: backlog
+status: superseded
 related_adr: []
 related_tasks: ["0001", "0002"]
 tags: [priority-low, effort-small, soroban, amm]
 links:
-  - "../active/0001_RESEARCH_dump-amm-swap-events/notes/R-swap-topic-shapes.md"
+  - "../../archive/0001_RESEARCH_dump-amm-swap-events/notes/R-swap-topic-shapes.md"
+  - "../active/0002_RESEARCH_amm-venue-attribution/notes/S-venue-attribution-mapping.md"
 history:
   - date: 2026-05-07
     status: backlog
     who: okarcz
     note: "Spawned from 0001 future work."
+  - date: 2026-05-08
+    status: superseded
+    who: claude
+    by: ["0002"]
+    note: >
+      Acceptance criteria fully answered. (1) Wider sample (≥30 days)
+      already run as the 4-day FC47D9FF window plus 0002's cross-check.
+      (2) All swap-like topic_0 symbols enumerated in
+      R-swap-topic-shapes.md "Update: wider sample" and refined in
+      0002's S-venue-attribution-mapping.md "Cross-check vs 0001
+      sample" (correct Symbol vs String split). (3) Phoenix conclusion
+      reached — Phoenix is NOT low-volume; it emits topic_0=String("swap")
+      from 9 attested mainnet pools, 5,704 events in the 4-day window.
+      The original hypothesis (3) — Phoenix uses one of the symbols
+      already seen — is confirmed.
 ---
+
+> **Superseded by 0002** (2026-05-08). Findings consolidated into
+> `lore/1-tasks/active/0002_RESEARCH_amm-venue-attribution/notes/S-venue-attribution-mapping.md`
+> §"Cross-check vs 0001 sample". Kept here for history.
 
 # Run dump-swap-events against a wider ledger range to detect Phoenix
 
