@@ -22,6 +22,16 @@ history:
       shape from contracts/pool/src/contract.rs. Spot-check vs the top-5
       observed Symbol("swap") emitters: 2/5 are confirmed Phoenix pools
       (XLM/USDC, XLM/PHO).
+  - date: 2026-05-08
+    status: developing
+    who: claude
+    note: >
+      Cross-check vs 0001 sample data revealed topic-kind error:
+      Phoenix pools emit ScVal::String("swap"), not Symbol. Source uses
+      &str tuple which compiles to String. 9 of 11 known Phoenix pools
+      observed in the 4-day sample as String("swap") emitters (5,704
+      events total). Section "Pool swap event format" updated with
+      correction callout; rest of structural content unchanged.
 ---
 
 # Phoenix mainnet registry
@@ -93,8 +103,20 @@ Phoenix has two pool implementations:
 
 ## Pool swap event format (XYK pool — `contracts/pool/src/contract.rs`)
 
+> **Correction 2026-05-08** (verified by re-running `dump-swap-events`
+> against the wider sample, then per-event ScVal-kind inspection). The
+> source-code reading below referred to "Symbol" but the on-chain bytes
+> use **`ScVal::String`** for both `topic_0` and `topic_1`. Cause: the
+> Rust source uses `&str` tuple `("swap", "sender")` which `IntoVal`
+> compiles to `String`, not `Symbol` (a `Symbol` would require
+> `symbol_short!` / `Symbol::new(&env, ...)`). The 8-event grouping
+> shape is correct; only the topic-kind label is wrong throughout this
+> section. Replace `Symbol("swap")` with `String("swap")` and
+> `Symbol(<field>)` with `String(<field>)` wherever it appears below.
+> See `S-venue-attribution-mapping.md` §"Topic-kind correction".
+
 The XYK pool emits **eight** separate events per `swap`, all with
-`topic_0 = Symbol("swap")` and a Symbol field-name as `topic_1`.
+`topic_0 = String("swap")` and a String field-name as `topic_1`.
 This is *very different* from a single consolidated event.
 
 From `contracts/pool/src/contract.rs:1172-1185`

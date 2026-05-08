@@ -42,7 +42,12 @@ Sources for each address are cited in the per-venue R-notes.
 
 ## Observed emitter attribution
 
-### Top 5 `Symbol("swap")` emitters (from R-swap-topic-shapes.md wider sample)
+### Top 5 `topic_0=swap` emitters (from R-swap-topic-shapes.md wider sample)
+
+> **Note:** The R-swap-topic-shapes.md ranking conflated `Symbol("swap")`
+> and `String("swap")` because it grouped on `topic_0` after
+> normalisation. The table below preserves that ranking; the corrected
+> per-kind breakdown is in §"Cross-check vs 0001 sample".
 
 | Events | Contract | Venue | Role | Evidence |
 |---:|---|---|---|---|
@@ -93,11 +98,11 @@ Three observed pool-level decoders, each materially different:
 |---|---|---|---|
 | Aquarius pool | `Symbol("trade")` | `Vec<i128>(in, out, fee)` | 1 event = 1 trade |
 | Soroswap pool | `String("SoroswapPair") + Symbol("swap")` | uniswap-v2 `Map{amount_0_in, amount_0_out, amount_1_in, amount_1_out, to}` | 1 event = 1 trade |
-| Phoenix XYK pool | `Symbol("swap") + Symbol(<field>)` × **8** | scalar-per-event | **8 events = 1 trade** (6 for Phoenix stable pool) |
+| Phoenix XYK pool | `String("swap") + String(<field>)` × **8** | scalar-per-event | **8 events = 1 trade** (6 for Phoenix stable pool) |
 
-Phoenix's 8-event group is the surprising finding. The indexer must group by `(tx_hash, op_index, contract_id)` and reassemble one `prices_amm_trades` row from the eight `Symbol("swap")` events. Source: `phoenix-contracts/contracts/pool/src/contract.rs:1172-1185`.
+Phoenix's 8-event group is the surprising finding. The indexer must group by `(tx_hash, op_index, contract_id)` and reassemble one `prices_amm_trades` row from the eight `String("swap")` events. Source: `phoenix-contracts/contracts/pool/src/contract.rs:1172-1185`. (Note: source uses `&str` tuple `("swap", "sender")` which compiles to `String` ScVal, not `Symbol`. See §"Cross-check vs 0001 sample" for empirical verification.)
 
-This means filtering on `topic_0 = Symbol("swap")` alone is insufficient — the indexer cannot row-by-row map a Phoenix swap event to a trade.
+This means filtering on `topic_0 = swap` (any kind) alone is insufficient — the indexer cannot row-by-row map a Phoenix swap event to a trade, and must additionally distinguish Phoenix's `String("swap")` from Aquarius's `Symbol("swap")` to dispatch the right decoder.
 
 ### 2. Pool enumeration via factory events (recommended)
 
@@ -125,6 +130,113 @@ Recommend (b) — same shape as Aquarius's inline fee, consistent post-condition
 
 `SoroswapPair` swap events carry `amount_0_in/out`, `amount_1_in/out`, `to` — **no token addresses**. The indexer must read each Soroswap pool's `token_0` / `token_1` once at pool-discovery time (from factory event) and cache. Already raised in `R-swap-topic-shapes.md` §"Updated implications for the schema"; reinforced here.
 
+## Cross-check vs 0001 sample (verification 2026-05-08)
+
+The user requested verification that registry addresses match the actual
+event emitters from task 0001's sample data. Re-ran
+`dump-swap-events --symbol swap` against `.temp/FC47D9FF--62400000-62463999`
+and split emitters by `topics[0]` ScVal kind. Results:
+
+### Direct emitter matches (canonical address = observed `contract_id`)
+
+| Registry address | Role | 0001 evidence | Match |
+|---|---|---|---|
+| `CBQDHNBFBZYE...` | Aquarius router | `swap_event_sample.json` `contract_id`; #1 `Symbol("swap")` emitter (11,947 events) in wider sample | ✅ |
+| `CA6PUJLBYK...` | Aquarius pool sample | `trade_event_sample.json` `contract_id` | ✅ |
+| `CAG5LRYQ...` | Soroswap router | `soroswap_router_swap_sample.json` `contract_id` | ✅ |
+| `CAYP3UWL...` | Soroswap aggregator | `soroswap_aggregator_swap_sample.json` `contract_id` | ✅ |
+| `CAM7DY53G...` | Soroswap pool sample | `soroswap_pair_swap_sample.json` `contract_id`; matches factory's pair WASM | ✅ |
+| 9 of 11 Phoenix pools | Phoenix XYK pool | `String("swap")` emitter list — see next sub-section | ✅ |
+
+### Phoenix pools — 9 of 11 attested in the 4-day sample (corrected topic kind)
+
+| Phoenix pool address | Pair | Events in sample | Topic kind |
+|---|---|---:|---|
+| `CBHCRSVX3ZZ7...` | XLM/USDC | 4,128 | `String("swap")` |
+| `CBCZGGNOEUZG...` | XLM/PHO | 440 | `String("swap")` |
+| `CB5QUVK5GS3IU...` | XLM/EURX | 272 | `String("swap")` |
+| `CD5XNKK3B6BEF...` | PHO/USDC | 224 | `String("swap")` |
+| `CC6MJZN3HFOJK...` | EURX/USDC | 224 | `String("swap")` |
+| `CDMXKSLG5GIT...` | XLM/USDX | 152 | `String("swap")` |
+| `CBISULYO5ZGS...` | XLM/EURC | 144 | `String("swap")` |
+| `CCUCE5H5CKW3...` | GBPX/USDC | 72 | `String("swap")` |
+| `CCKOC2LJTPDB...` | XLM/GBPX | 48 | `String("swap")` |
+| `CDQLKNH3725...` | USDC/VEUR | **0** | not observed (low volume) |
+| `CBW5G5SO5SDY...` | USDC/VCHF | **0** | not observed (low volume) |
+
+**Total: 5,704 `String("swap")` events from 9 distinct emitters — 100% are Phoenix pools.** This is much stronger evidence for Phoenix attribution than the stellar.expert directory check alone: the on-chain emitter list and the `phoenix-contracts` repo's pool list match exactly.
+
+### Topic-kind correction (load-bearing for indexer §7)
+
+**Phoenix pool swap events use `topics[0] = ScVal::String("swap")`,
+not `ScVal::Symbol("swap")`.**
+
+- `R-phoenix-registry.md` (and the upstream Phoenix source-code claim
+  it cited) said `Symbol("swap") + Symbol(<field>)`. On-chain truth is
+  **`String("swap") + String(<field>)`**. The deployed WASM evidently
+  uses the String ScVal variant; either the source-code reading missed
+  this or the deployed WASM was built from a branch we didn't inspect.
+  The on-chain bytes are authoritative.
+- `R-swap-topic-shapes.md` (task 0001) "44 distinct contracts emit
+  Symbol("swap")" was an overcount — it grouped by the histogram's
+  normalised `topic_0` string, mixing `Symbol("swap")` and
+  `String("swap")` emissions. The correct split is:
+  - **`Symbol("swap")`**: 17,863 events / **35** distinct emitters.
+  - **`String("swap")`**: 5,704 events / **9** distinct emitters
+    (all Phoenix in this sample).
+- This is good news for the indexer: **Phoenix vs Aquarius can be
+  distinguished by the ScVal kind of `topics[0]`**, not just by
+  contract registry. The §7 filter must therefore branch on
+  `(topics[0].kind, topics[0].value)`:
+
+| `topics[0].kind` | value | Decoder |
+|---|---|---|
+| `Symbol` | `swap` | Aquarius router (`CBQDHNBFBZYE...` and friends) |
+| `Symbol` | `trade` | Aquarius constant-product pool |
+| `String` | `swap` | Phoenix XYK pool — group 8 events to 1 trade |
+| `String` | `SoroswapPair` (with `topics[1]=Symbol("swap")`) | Soroswap pool |
+| `String` | `SoroswapRouter` / `SoroswapAggregator` | Soroswap user-facing event (skip if also have pool event) |
+
+### Re-attribution of `Symbol("swap")` emitters after correction
+
+The full top-5 `Symbol("swap")` emitters in the 4-day sample (re-run
+2026-05-08):
+
+| Events | Contract | Attribution |
+|---:|---|---|
+| 11,947 | `CBQDHNBFBZYE...` | **Aquarius router** (verified) |
+| 2,706 | `CCR2CH4GQVCZ...` | **unknown** — emits `Symbol("swap")` like a router; not Aquarius router (different WASM/creator), not Soroswap, not Phoenix |
+| 2,480 | `CDMIM23WOUL5...` | **unknown** — same pattern |
+| 335 | `CCXRRORTOXXP...` | unknown |
+| 229 | `CAUF4DFYSX52...` | unknown |
+| (+ 30 more in long tail) | | |
+
+The earlier "Phoenix XLM/USDC pool" attribution for `CBHCRSVX3ZZ7...`
+(at "4,128 events") in the original synthesis was correct in venue —
+but the topic kind is **String("swap")**, not Symbol. The original
+ranking from `R-swap-topic-shapes.md` conflated the two.
+
+### Phoenix factory + multihop — not directly observed in 0001 sample
+
+`CB4SVAWJA6...` (factory) and `CCLZRD4E72...` (multihop) did not emit
+any `topic_0=swap` events in the 4-day window. This is consistent —
+factory events are rare (only on pool creation), and the multihop emits
+aggregated user-intent events that may not pass the `--symbol swap`
+filter or were absent in this window. Factory attestation rests on:
+
+1. The 9 attested pools' addresses match the factory's deployed-pool
+   list verbatim (per `R-phoenix-registry.md`, sourced from
+   `phoenix-contracts/scripts/upgrade_mainnet.sh`).
+2. The factory address itself appears in the same source-of-truth file.
+
+This is **second-order verification** — strong but not equivalent to
+seeing the factory emit a creation event in our local sample. Closing
+this loop would require either (a) a wider `--no-filter` dump scanning
+for the factory's `[Symbol("create"), Symbol("liquidity_pool")]` event
+in a window covering at least one Phoenix pool deployment, or (b)
+independent stellar.expert API verification of the factory's contract
+metadata.
+
 ## Future work
 
 Three concrete follow-ups (each a candidate for a backlog task — see parent README §"Future work" for the spawned IDs):
@@ -133,4 +245,4 @@ Three concrete follow-ups (each a candidate for a backlog task — see parent RE
 
 2. **Update `amm-trades-schema.md` §7 / §11.1** with the three-decoder reality, the Phoenix multi-event grouping rule, and the venue → factory-event registry strategy. Existing backlog 0003 covers most of this — extend its acceptance criteria to include Phoenix grouping + Soroswap two-topic filter rather than spawning a new task.
 
-3. **Mark backlog 0004 as superseded** — its acceptance criteria are answered by `R-swap-topic-shapes.md` "Update: wider sample" plus this attribution. Phoenix is not low-volume; it was hidden inside `Symbol("swap")` as hypothesised.
+3. **Mark backlog 0004 as superseded** — its acceptance criteria are answered by `R-swap-topic-shapes.md` "Update: wider sample" plus this attribution. Phoenix is not low-volume; it was hidden inside `topic_0=swap`, but in the **`String("swap")`** bucket the original analysis didn't distinguish from `Symbol("swap")`.

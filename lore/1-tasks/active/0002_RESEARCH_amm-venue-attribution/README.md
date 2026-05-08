@@ -82,20 +82,30 @@ indexer implications.
 
 **Headline:**
 
-| Topic / pattern | Attributed to | Notes |
+| Topic | Attributed to | Notes |
 |---|---|---|
-| `Symbol("swap")` `CBQDHNBFBZYE...` | Aquarius router | Co-emits `add_pool` (factory-style) and `config_rewards` |
-| `Symbol("swap")` `CBHCRSVX...` (4,128) | Phoenix XYK pool (XLM/USDC) | 1 of top 5 |
-| `Symbol("swap")` `CBCZGGNO...` (440) | Phoenix XYK pool (XLM/PHO) | shares WASM with `CBHCRSVX...` |
-| `Symbol("swap")` `CCR2CH4G...`, `CDMIM23W...` | **unknown** | not Aquarius / Phoenix / Soroswap; ~5,200 events combined |
+| `Symbol("swap")` `CBQDHNBFBZYE...` (11,947) | Aquarius router | Co-emits `add_pool` (factory-style) and `config_rewards` |
+| `Symbol("swap")` `CCR2CH4G...` (2,706) + `CDMIM23W...` (2,480) | **unknown** | router-style emission; not Aquarius / Phoenix / Soroswap |
+| `Symbol("swap")` long tail (32 contracts) | mostly unknown | unattributed for now |
+| `String("swap")` × 9 distinct emitters (5,704 events) | Phoenix XYK pools | 9 of 11 known Phoenix pools — match 100% |
 | `Symbol("trade")` × 29 | Aquarius constant-product pools | venue-distinctive shape |
 | `String("SoroswapPair")` × 79 | Soroswap pools | factory-derivable |
+| `String("SoroswapRouter")` / `String("SoroswapAggregator")` | Soroswap router / aggregator | direct registry match |
+
+**Verified 2026-05-08:** registry addresses cross-checked against task
+0001's event evidence. 5/5 directly observable canonical addresses match
+emitter `contract_id`s exactly. 9 of 11 Phoenix pool addresses match
+`String("swap")` emitters in the 4-day sample (the other 2 had zero
+volume). See `notes/S-venue-attribution-mapping.md` §"Cross-check vs
+0001 sample".
 
 **Surprise (load-bearing):** Phoenix XYK pools emit **8 separate events
-per swap** (6 for stable pools), all with `topic_0=Symbol("swap")` and a
-field-name `topic_1`. The indexer must group by
+per swap** (6 for stable pools) using `topics[0] = String("swap")`
+(NOT `Symbol("swap")` — corrected from initial source-code reading;
+on-chain bytes are authoritative). The indexer must group by
 `(tx_hash, op_index, contract_id)` to reconstruct one trade row.
-Source: `phoenix-contracts/contracts/pool/src/contract.rs:1172-1185`.
+Filter dispatch is therefore on `(topics[0].kind, topics[0].value)`:
+`Symbol("swap")` → Aquarius decoder, `String("swap")` → Phoenix decoder.
 
 ## Future Work
 
