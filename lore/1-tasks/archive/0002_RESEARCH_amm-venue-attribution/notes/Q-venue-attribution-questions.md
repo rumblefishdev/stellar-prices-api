@@ -6,7 +6,7 @@ spawned_from: ../README.md
 spawns: []
 tags: [soroban, amm, venue-attribution]
 links:
-  - "../../../archive/0001_RESEARCH_dump-amm-swap-events/notes/R-swap-topic-shapes.md"
+  - "../../0001_RESEARCH_dump-amm-swap-events/notes/R-swap-topic-shapes.md"
 history:
   - date: 2026-05-08
     status: seed

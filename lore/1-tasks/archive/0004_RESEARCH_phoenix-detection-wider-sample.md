@@ -7,8 +7,8 @@ related_adr: []
 related_tasks: ["0001", "0002"]
 tags: [priority-low, effort-small, soroban, amm]
 links:
-  - "../../archive/0001_RESEARCH_dump-amm-swap-events/notes/R-swap-topic-shapes.md"
-  - "../active/0002_RESEARCH_amm-venue-attribution/notes/S-venue-attribution-mapping.md"
+  - "0001_RESEARCH_dump-amm-swap-events/notes/R-swap-topic-shapes.md"
+  - "0002_RESEARCH_amm-venue-attribution/notes/S-venue-attribution-mapping.md"
 history:
   - date: 2026-05-07
     status: backlog
@@ -32,7 +32,7 @@ history:
 ---
 
 > **Superseded by 0002** (2026-05-08). Findings consolidated into
-> `lore/1-tasks/active/0002_RESEARCH_amm-venue-attribution/notes/S-venue-attribution-mapping.md`
+> `lore/1-tasks/archive/0002_RESEARCH_amm-venue-attribution/notes/S-venue-attribution-mapping.md`
 > §"Cross-check vs 0001 sample". Kept here for history.
 
 # Run dump-swap-events against a wider ledger range to detect Phoenix

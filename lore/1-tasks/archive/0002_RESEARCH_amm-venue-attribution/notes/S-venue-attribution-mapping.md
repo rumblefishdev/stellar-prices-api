@@ -6,7 +6,7 @@ spawned_from: ../README.md
 spawns: []
 tags: [soroban, amm, venue-attribution, schema-validation]
 links:
-  - "../../../archive/0001_RESEARCH_dump-amm-swap-events/notes/R-swap-topic-shapes.md"
+  - "../../0001_RESEARCH_dump-amm-swap-events/notes/R-swap-topic-shapes.md"
   - "R-soroswap-registry.md"
   - "R-aquarius-registry.md"
   - "R-phoenix-registry.md"

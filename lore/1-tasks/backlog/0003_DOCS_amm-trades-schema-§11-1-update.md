@@ -8,7 +8,7 @@ related_tasks: ["0001", "0002"]
 tags: [priority-medium, effort-small, schema-validation]
 links:
   - "../archive/0001_RESEARCH_dump-amm-swap-events/notes/S-amm-trades-schema-§11-1-resolved.md"
-  - "../active/0002_RESEARCH_amm-venue-attribution/notes/S-venue-attribution-mapping.md"
+  - "../archive/0002_RESEARCH_amm-venue-attribution/notes/S-venue-attribution-mapping.md"
   - "../../../docs/database-schema/amm-trades-schema.md"
 history:
   - date: 2026-05-07

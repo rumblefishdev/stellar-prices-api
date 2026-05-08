@@ -7,8 +7,8 @@ related_adr: []
 related_tasks: ["0002"]
 tags: [priority-medium, effort-small, soroban, amm, venue-attribution]
 links:
-  - "../active/0002_RESEARCH_amm-venue-attribution/notes/S-venue-attribution-mapping.md"
-  - "../active/0002_RESEARCH_amm-venue-attribution/notes/R-aquarius-registry.md"
+  - "../archive/0002_RESEARCH_amm-venue-attribution/notes/S-venue-attribution-mapping.md"
+  - "../archive/0002_RESEARCH_amm-venue-attribution/notes/R-aquarius-registry.md"
 history:
   - date: 2026-05-08
     status: backlog
