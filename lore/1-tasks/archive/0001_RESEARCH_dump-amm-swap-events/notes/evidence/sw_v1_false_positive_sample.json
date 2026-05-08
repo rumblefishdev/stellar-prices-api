@@ -1,0 +1,70 @@
+{
+  "ledger_seq": 62459603,
+  "tx_hash": "1fb123f3fa71221996694f5d93b3e6cd462aa6fd916bc516544d6c8892f1278f",
+  "event_index": 2,
+  "source": "PerOp",
+  "inner_type": "Contract",
+  "contract_id": "CD7OWX42FARZD2FY52ACNGYWPGXFL3OVQNBRVK5EJO3XOFB66MQNXMC5",
+  "topic_0": "sw_v1",
+  "topics": [
+    {
+      "symbol": "sw_v1"
+    },
+    {
+      "symbol": "add"
+    },
+    {
+      "vec": [
+        {
+          "symbol": "Ed25519"
+        },
+        {
+          "bytes": "7b4646f128e5c2d90ecb294d0dce02b3dd84f36e1caf602f257edcc904c9904e"
+        }
+      ]
+    }
+  ],
+  "data": {
+    "vec": [
+      {
+        "vec": [
+          {
+            "symbol": "Ed25519"
+          },
+          {
+            "vec": [
+              "void"
+            ]
+          },
+          {
+            "vec": [
+              {
+                "map": [
+                  {
+                    "key": {
+                      "address": "CB23WRDQWGSP6YPMY4UV5C4OW5CBTXKYN3XEATG7KJEZCXMJBYEHOUOV"
+                    },
+                    "val": "void"
+                  },
+                  {
+                    "key": {
+                      "address": "CDL74RF5BLYR2YBLCCI7F5FB6TPSCLKEJUBSD2RSVWZ4YHF3VMFAIGWA"
+                    },
+                    "val": "void"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "vec": [
+          {
+            "symbol": "Temporary"
+          }
+        ]
+      }
+    ]
+  }
+}
