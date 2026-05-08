@@ -1,0 +1,328 @@
+# AMM Trades Table — Schema Specification
+
+> **Design history.** The first iteration of this spec proposed a generic
+> `soroban_events` table on the Block Explorer RDS that mirrored CAP-67
+> shape (`topics JSONB`, `data JSONB`, full event stream). At the medium
+> volume scenario it sized to ~970 GB and carried every Soroban contract
+> event — most of which the Prices API never reads. This document replaces
+> that design with a storage-optimised, write-time-filtered AMM trades
+> table (~10 GB at the same scenario, ~100× smaller).
+
+> **External-dependency schema, dedicated to the Prices API.** This table lives
+> on the **Soroban Block Explorer RDS**, but is created and populated by the
+> Block Explorer Ledger Processor *specifically* to serve the Prices API's
+> Soroban AMM backfill (Tranche 1, see `docs/prices-api-general-overview.md`
+> §5.6 and `database-schema-overview.md` §7.3, §10).
+>
+> **Scope.** The Block Explorer indexer applies a write-time filter and
+> persists only what the Prices API needs to compute swap-derived prices and
+> OHLCV. All other Soroban events (transfers, deposits, withdraws, mints,
+> liquidity changes, diagnostic events, etc.) are dropped at decode time and
+> never reach this table. Token addresses, amounts, and the AMM venue are
+> the only payload — no raw topics, no raw `data` JSONB, no transaction
+> hash.
+>
+> **This is not a general Soroban events store.** If the Block Explorer
+> needs one for its own UI, that is a separate table outside the Prices API
+> contract.
+
+---
+
+## 1. Purpose
+
+One row per AMM swap on Stellar mainnet, restricted to the three venues the
+Prices API consumes:
+
+- Soroswap
+- Aquarius
+- Phoenix
+
+The Prices API uses this table as the input for its **Soroban AMM
+Backfill** ECS task (Tranche 1, `database-schema-overview.md` §7.3). The
+backfill aggregates rows here into 1-minute OHLCV candles and upserts them
+into the Prices RDS `price_ohlcv` table. Once the backfill completes
+(`backfill_progress.task_name = 'soroban_amm'` → `status = 'completed'`),
+this table is no longer read by the Prices API. The live Prices Ledger
+Processor (overview §5.2) decodes XDR directly and does not touch it.
+
+---
+
+## 2. Business cases the schema must satisfy
+
+Drawn from `prices-api-general-overview.md` and `database-schema-overview.md`:
+
+| # | Business case | Source | Schema implication |
+|---|---|---|---|
+| 1 | Persist **only** swap events from Soroswap / Aquarius / Phoenix; drop everything else at write time | overview §5.6 ("Block Explorer `soroban_events` … the Prices API connects read-only … extracts token pair + amounts") + user requirement to keep table minimal | Filter applied in BE Ledger Processor; no `topics` or generic `data` columns kept |
+| 2 | Bucket each swap into a 1-minute OHLCV candle by ledger close time | overview §5.2, §3.2 | `timestamp TIMESTAMPTZ` per row, partition key |
+| 3 | Identify which AMM produced the trade so VWAP can attribute per-source volume | overview §3.3 (`current_prices.sources` JSONB), §5.5 (VWAP per source) | `venue` column with CHECK constraint |
+| 4 | Compute the executed price for the swap (price = `amount_out / amount_in`, sided by the in/out token) | overview §5.5 | `token_in`, `token_out`, `amount_in`, `amount_out` |
+| 5 | Distinguish each hop of a multi-hop / routed swap | a single transaction can emit N swap events (one per hop) | `tx_index` + `event_index` in PK |
+| 6 | Idempotent re-ingest by the BE Ledger Processor (replay-safe) | matches the project's UPSERT convention (schema §3.2 "Write semantics — UPSERT, not INSERT") | Stable natural primary key |
+| 7 | Detect coverage gaps (contiguous Nov 2023 → present) so the AMM backfill task can fall back to archive reads for missing ledger ranges | overview §11.4, schema §10.1 | Orderable `ledger_seq BIGINT` |
+| 8 | Time-range scans hit only relevant months | matches conventions in `price_ohlcv` and `oracle_prices` (schema §3.2, §3.4) | `PARTITION BY RANGE (timestamp)`, monthly |
+
+---
+
+## 3. DDL
+
+```sql
+CREATE TABLE prices_amm_trades (
+    -- Position — uniquely identifies one swap event for idempotent UPSERT.
+    timestamp        TIMESTAMPTZ NOT NULL,           -- ledger close time, drives partitioning
+    ledger_seq       BIGINT      NOT NULL,           -- ledger sequence number
+    tx_index         SMALLINT    NOT NULL,           -- transaction position within the ledger
+    event_index      SMALLINT    NOT NULL,           -- swap-event position within the transaction
+
+    -- Venue + routing.
+    venue            VARCHAR(10) NOT NULL
+                     CHECK (venue IN ('soroswap', 'aquarius', 'phoenix')),
+    pair_contract_id VARCHAR(56) NOT NULL,           -- AMM pair / pool C-address
+
+    -- Trade economics.
+    token_in         VARCHAR(56) NOT NULL,           -- C-address of the sold token
+    token_out        VARCHAR(56) NOT NULL,           -- C-address of the bought token
+    amount_in        NUMERIC(28,14) NOT NULL,        -- amount of token_in sold
+    amount_out       NUMERIC(28,14) NOT NULL,        -- amount of token_out received
+
+    PRIMARY KEY (timestamp, ledger_seq, tx_index, event_index)
+) PARTITION BY RANGE (timestamp);
+
+-- Monthly partitions, starting at Soroban activation (Nov 2023).
+CREATE TABLE prices_amm_trades_2023_11 PARTITION OF prices_amm_trades
+    FOR VALUES FROM ('2023-11-01') TO ('2023-12-01');
+CREATE TABLE prices_amm_trades_2023_12 PARTITION OF prices_amm_trades
+    FOR VALUES FROM ('2023-12-01') TO ('2024-01-01');
+-- ... one per month, created two months ahead by the BE indexer
+--     (mirrors the Cleanup Worker pattern in schema §4).
+```
+
+No secondary indexes. The Prices API backfill scans by time range and the
+PK already starts with `timestamp`, so partition pruning + the local PK
+index serve the only query path. (See §5 "Index choice" below for
+rationale.)
+
+---
+
+## 4. Column rationale
+
+| Column | Type | Why kept |
+|---|---|---|
+| `timestamp` | `TIMESTAMPTZ` | Drives `PARTITION BY RANGE` (matches `price_ohlcv`/`oracle_prices`) and lets the AMM backfill bucket each trade into the correct 1m candle without a join. |
+| `ledger_seq` | `BIGINT` | Natural ordering across the entire stream; required for gap detection ("contiguous coverage from Soroban activation", schema §10.1). 8 bytes; current tip ~57M. |
+| `tx_index` | `SMALLINT` | Disambiguates events when one ledger contains multiple swap transactions. `SMALLINT` (max 32767) is far above any realistic per-ledger transaction count. |
+| `event_index` | `SMALLINT` | Disambiguates events within one transaction — a routed multi-hop swap emits one swap event per hop. Same width logic. |
+| `venue` | `VARCHAR(10) CHECK …` | The Prices API VWAP attributes volume per source (overview §5.5, `current_prices.sources` JSONB §3.3). The `venue` value flows into `price_ohlcv.source` and into the `sources` JSONB key. CHECK constraint matches the project's pattern in `assets.asset_type` (schema §3.1) and `price_ohlcv.granularity`. |
+| `pair_contract_id` | `VARCHAR(56)` | The AMM pair / pool contract C-address. Lets the Prices API match the trade against its pair registry to resolve `(token_in, token_out)` to internal `assets.id`s, and lets us recover all trades for a single pool for debugging. Width matches `assets.contract_address`. |
+| `token_in` | `VARCHAR(56)` | C-address of the sold token. Carried per-row (not derived from `pair_contract_id`) because Aquarius pools can hold > 2 tokens, so the pair contract alone does not identify the pair traded in a given event. |
+| `token_out` | `VARCHAR(56)` | Same reasoning as `token_in`. |
+| `amount_in` | `NUMERIC(28,14)` | Matches the precision used in `price_ohlcv` (overview §3.2). Together with `amount_out` it gives the executed price (`amount_out / amount_in`) and one side of the volume calculation. |
+| `amount_out` | `NUMERIC(28,14)` | Other side of the swap; gives `volume_base` in whichever token the Prices API treats as base. |
+
+### What is deliberately omitted
+
+| Field | Why not |
+|---|---|
+| `topics` JSONB | The whole table is pre-filtered to swap events, so `topics[0]` is always `"swap"` and adds no information. `topics[1..N]` carries trader addresses (`from`, `to`) which the Prices API does not consume. |
+| `data` JSONB | All Prices-relevant fields from the event payload are already lifted into typed columns above (`token_in`, `token_out`, `amount_in`, `amount_out`). Storing the original JSONB would be ~250 B/row of dead weight. |
+| `transaction_hash BYTEA(32)` | No Prices API query references it. The `(ledger_seq, tx_index, event_index)` triple already gives uniqueness for the UPSERT. |
+| `event_type` (system / contract / diagnostic) | Pre-filtering means every row is a contract swap event by definition. |
+| `fee` / `protocol_fee` | Prices API computes executed price from `amount_in` / `amount_out`, which already reflects fees as observed by the user. Per-AMM fee accounting is not in scope. |
+| `from_address` / `to_address` | Trader identity is not used by any Prices API endpoint or worker. |
+| Computed `price` column | Derivable in the consumer (`amount_out / amount_in` sided by which token is base). Storing it would force a write-time choice of "price of what in what" that doesn't exist on-chain — direction depends on the Prices API's pair registry. |
+| FK from `pair_contract_id` to a pairs table | Foreign keys to high-write time-series tables are expensive and the BE owns whatever pair registry it maintains; the reference is logical only. Same reasoning as `assets.id` ↔ `price_ohlcv.asset_id` in the Prices RDS (schema §3.0 note). |
+| Surrogate `BIGSERIAL id` | Natural composite PK is already 20 bytes and stable under replay. |
+
+---
+
+## 5. Primary key, partitioning, indexes
+
+### Primary key
+`(timestamp, ledger_seq, tx_index, event_index)` — `timestamp` first so
+partition pruning is effective on the only hot query (range scan in time
+order). The remaining three columns guarantee uniqueness within a
+partition. Mirrors the `price_ohlcv` PK convention (schema §3.2).
+
+### Partitioning
+- `PARTITION BY RANGE (timestamp)`, monthly.
+- First partition: `prices_amm_trades_2023_11` (Soroban activation).
+- New partitions created **two months ahead** of the current date, same
+  cadence as `price_ohlcv` and `oracle_prices`.
+- Retention is the BE's call. The Prices API only reads this table during
+  the one-time Tranche-1 backfill; partitions older than ~Tranche-1
+  completion can be dropped without affecting the Prices API.
+
+### Index choice
+**No secondary indexes.** The single hot query — the Prices AMM Backfill
+task scanning all trades in a time range, oldest → newest — is served by
+partition pruning plus the local PK index. Adding a `(pair_contract_id,
+timestamp)` index would cost write throughput and storage for an access
+pattern that doesn't exist in the Prices API contract.
+
+If the BE team finds it useful for ops/debugging, an optional index can be
+added later without breaking the Prices API:
+```sql
+-- Optional, ops-only:
+CREATE INDEX idx_prices_amm_trades_pair
+    ON prices_amm_trades (pair_contract_id, timestamp DESC);
+```
+
+---
+
+## 6. Write semantics
+
+The BE Ledger Processor inserts into `prices_amm_trades` using
+`INSERT … ON CONFLICT (timestamp, ledger_seq, tx_index, event_index)
+DO UPDATE` — same pattern the Prices API uses for `price_ohlcv` (schema
+§3.2 "Write semantics — UPSERT, not INSERT"). This is required for two
+reasons that match the Prices API design:
+
+1. **Re-processing the same ledger** (e.g. BE indexer restart from
+   checkpoint after a crash) must be idempotent.
+2. **Replay tolerance** — if the BE re-decodes a ledger because the swap
+   filter was updated to recognise a new AMM event variant, existing rows
+   for that ledger are overwritten cleanly.
+
+**Merge rule:** all non-PK columns are replaced (`SET col = EXCLUDED.col`).
+There is no incremental merge here — each row corresponds to a single,
+already-finalised swap event.
+
+---
+
+## 7. Scope of the BE indexer's filter
+
+The BE Ledger Processor must persist a row **iff** the event satisfies all of:
+
+1. The event is a Soroban contract event (CAP-67) emitted from
+   `SorobanTransactionMeta.events` in the ledger's `LedgerCloseMeta` XDR.
+2. The emitting `contract_id` is in the **known AMM pair / pool contract
+   set** for one of `soroswap`, `aquarius`, `phoenix`. (How the BE
+   maintains this set — hardcoded list, factory-event discovery, etc. — is
+   a BE implementation detail.)
+3. The event topic identifies a **swap** (e.g. `topics[0] = Symbol("swap")`).
+   The exact symbol per AMM is documented in the BE indexer; if any AMM
+   uses a different symbol for swaps the indexer's per-venue mapping
+   handles it.
+4. The decoded payload yields a usable `(token_in, token_out, amount_in,
+   amount_out)` quadruple. Events the indexer cannot decode are logged and
+   skipped, not persisted.
+
+Liquidity events (deposit / withdraw / add_liquidity / remove_liquidity),
+transfers, mints, burns, and oracle update events are **not** persisted —
+they do not contribute to executed-trade prices.
+
+---
+
+## 8. Storage estimate
+
+Per-row footprint:
+
+| Component | Bytes |
+|---|---|
+| Heap tuple header + null bitmap + alignment | ~24 |
+| `timestamp` (8) + `ledger_seq` (8) + `tx_index` (2) + `event_index` (2) | 20 |
+| `venue` (varlena, ~10) | ~12 |
+| `pair_contract_id`, `token_in`, `token_out` (3 × ~60 B varlena C-address) | ~180 |
+| `amount_in`, `amount_out` (NUMERIC(28,14), typical magnitudes) | ~32 |
+| Padding | ~10 |
+| **Heap subtotal** | **~280 B** |
+| PK index entry | ~36 |
+| **Per-row total (no secondary index, +15% bloat)** | **~360 B** |
+
+Row count is bounded by **AMM swap volume**, which is a tiny fraction of
+total Soroban contract events. Public Stellar telemetry over Nov 2023 →
+2026-05 suggests tens of thousands of AMM swaps per day across the three
+venues.
+
+| Scenario | Swaps / day | Rows (Nov 2023 → May 2026, ~915 days) | Storage |
+|---|---|---|---|
+| Low (early Soroban, low DEX activity) | ~10,000 | ~9.2 M | **~3.3 GB** |
+| Medium (realistic) | ~30,000 | ~27 M | **~10 GB** |
+| High (sustained busy) | ~100,000 | ~92 M | **~33 GB** |
+
+Forward growth at the medium scenario: ~11 M rows / year ≈ **~4 GB / year**.
+
+This is **roughly two orders of magnitude smaller** than a full
+`soroban_events` table — see "Storage comparison" in this conversation's
+predecessor design.
+
+---
+
+## 9. Cross-service contract
+
+- The Prices API connects **read-only** from the Soroban AMM Backfill ECS
+  task within the shared VPC.
+- The connection is used **only during Tranche 1**; once the AMM backfill
+  marks `backfill_progress.task_name = 'soroban_amm'` as
+  `status = 'completed'`, the connection is no longer used.
+- The Prices API never writes to `prices_amm_trades`.
+- The BE never reads from any Prices API table.
+- Schema changes to `prices_amm_trades` after Tranche 1 completes are
+  harmless to the Prices API. Schema changes during Tranche 1 require
+  coordination — flagged in `database-schema-overview.md` §10.1.
+
+---
+
+## 10. Reference query — what the Soroban AMM Backfill runs
+
+Illustrative; the real implementation lives in the Prices API AMM backfill
+ECS task.
+
+```sql
+-- Page through all AMM swap trades in time order, per partition, so the
+-- writer can aggregate trades into 1m candles before upserting into
+-- price_ohlcv (whole-row replacement, schema §3.2 backfill writer rule).
+SELECT timestamp,
+       ledger_seq,
+       venue,
+       pair_contract_id,
+       token_in,
+       token_out,
+       amount_in,
+       amount_out
+FROM   prices_amm_trades
+WHERE  timestamp >= $1 AND timestamp < $2
+ORDER  BY timestamp, ledger_seq, tx_index, event_index;
+```
+
+Partition pruning eliminates months outside `[$1, $2)`. The PK index serves
+the ordering directly — no sort step.
+
+The backfill task then:
+1. Resolves each `(token_in, token_out)` pair to internal `assets.id`s via
+   the Prices API's own asset registry.
+2. Buckets each row into the correct `(timestamp_minute, asset_id, '1m')`
+   key with `source = venue`.
+3. Upserts the resulting candles into `price_ohlcv` using the
+   whole-row-replacement merge rule for backfill writers (schema §3.2).
+4. After all partitions are processed, runs a coverage check
+   (overview §11.4, schema §10.1) and falls back to archive reads for any
+   ledger ranges where `prices_amm_trades` has gaps.
+
+---
+
+## 11. Open questions for the BE team
+
+These are the only questions the Prices API needs answered before this
+table can be implemented:
+
+1. **Filter symbol per AMM.** Does each of Soroswap / Aquarius / Phoenix
+   emit swap events under the topic symbol `"swap"`, or does any of them
+   use a different symbol? The BE indexer's per-venue mapping table is the
+   answer here.
+2. **Pair / pool contract registry.** How does the BE identify the set of
+   "known AMM pair contracts" — hardcoded list, factory-event discovery,
+   or both? Either is fine for the Prices API; the choice affects how
+   quickly newly-deployed pools become visible.
+3. **Decimals normalisation.** `amount_in` and `amount_out` are stored as
+   `NUMERIC(28,14)`. Confirm whether the BE Ledger Processor will divide
+   raw on-chain amounts by each token's `decimals()` before insertion, or
+   write the raw integer scalar. The Prices API expects the **decimal-
+   normalised** value (matching how it stores quantities throughout
+   `price_ohlcv` and `current_prices`).
+
+---
+
+_Companion to `prices-api-general-overview.md` and `database-schema-overview.md`._
+_Owned by the Soroban Block Explorer service; documented here because the
+Prices API depends on it._

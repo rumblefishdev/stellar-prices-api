@@ -162,8 +162,15 @@ CREATE TABLE assets (
     asset_type      VARCHAR(10) NOT NULL CHECK (asset_type IN ('classic', 'soroban')),
     issuer_address  VARCHAR(56),          -- G-address, NULL for XLM
     contract_address VARCHAR(56),         -- C-address (SAC or native contract)
-    home_domain     VARCHAR(255),         -- classic assets only, nullable
-    is_active       BOOLEAN DEFAULT TRUE,
+    home_domain     VARCHAR(255),         -- classic assets only, nullable;
+                                          -- stored as-is from the issuer's
+                                          -- set_options operation, no validation
+                                          -- or normalisation applied
+    is_active       BOOLEAN DEFAULT TRUE, -- soft-delete flag; backend may flip to
+                                          -- FALSE to hide an asset (delisted,
+                                          -- blacklisted) without removing history.
+                                          -- Readers filter WHERE is_active = TRUE
+                                          -- unless ?include_inactive=true is set.
     created_at      TIMESTAMPTZ DEFAULT NOW(),
     updated_at      TIMESTAMPTZ DEFAULT NOW(),
 
@@ -180,7 +187,8 @@ CREATE INDEX idx_assets_code ON assets(asset_code);
 CREATE TABLE price_ohlcv (
     asset_id        INT NOT NULL,
     timestamp       TIMESTAMPTZ NOT NULL,
-    granularity     VARCHAR(5) NOT NULL,   -- '1m', '15m', '1h', '4h', '1d', '1w', '1M'
+    granularity     VARCHAR(5) NOT NULL
+                    CHECK (granularity IN ('1m', '15m', '1h', '4h', '1d', '1w', '1M')),
     open            NUMERIC(28,14) NOT NULL,
     high            NUMERIC(28,14) NOT NULL,
     low             NUMERIC(28,14) NOT NULL,
@@ -189,7 +197,7 @@ CREATE TABLE price_ohlcv (
     volume_quote_usd NUMERIC(28,14) NOT NULL DEFAULT 0,
     vwap            NUMERIC(28,14),
     trade_count     INT DEFAULT 0,
-    source          VARCHAR(20),           -- 'sdex', 'soroswap', 'aquarius', 'aggregated'
+    source          VARCHAR(20) NOT NULL,  -- example values: 'sdex', 'soroswap', 'aquarius', 'aggregated'
 
     PRIMARY KEY (timestamp, asset_id, granularity)
 ) PARTITION BY RANGE (timestamp);
@@ -216,24 +224,45 @@ CREATE INDEX idx_ohlcv_asset_gran ON price_ohlcv (asset_id, granularity, timesta
 ### 3.3 Current Prices (Materialized/Cached)
 ```sql
 CREATE TABLE current_prices (
-    asset_id        INT PRIMARY KEY REFERENCES assets(id),
+    asset_id        INT PRIMARY KEY REFERENCES assets(id) ON DELETE CASCADE,
     price_usd       NUMERIC(28,14) NOT NULL,
     price_xlm       NUMERIC(28,14),
     change_24h_pct  NUMERIC(10,4),
     change_7d_pct   NUMERIC(10,4),
     volume_24h_usd  NUMERIC(28,14),
-    market_cap_usd  NUMERIC(28,14),
+    market_cap_usd  NUMERIC(28,14),        -- computed: token_supply * price_usd.
+                                           -- token_supply is read from the asset's
+                                           -- token contract (Soroban `total_supply`
+                                           -- / SEP-41 call; classic assets without
+                                           -- a SAC fall back to Horizon /assets).
+                                           -- NULL when supply is unavailable.
     vwap_24h        NUMERIC(28,14),
-    sources         JSONB,                 -- {"sdex": 1.02, "soroswap": 1.01, "aquarius": 1.015}
+    sources         JSONB,                 -- per-source {price, volume_24h}; e.g.
+    -- {"sdex": {"price": "1.0001", "volume_24h": "800000"},
+    --  "soroswap": {"price": "1.0002", "volume_24h": "500000"}}
+    -- Numeric values serialised as strings to preserve NUMERIC(28,14) precision.
+    -- Sources excluded by min_volume_usd or outlier detection are absent from the object.
     updated_at      TIMESTAMPTZ DEFAULT NOW()
 );
+
+-- Keyset-pagination indexes for GET /assets (one per documented `?sort=` value).
+-- Each index serves the keyset filter `WHERE (col, id) < (?, ?)` and the matching
+-- `ORDER BY col DESC, id DESC` from a single forward index scan; NULLS LAST
+-- aligns with the API contract that ranks assets without a value at the bottom.
+CREATE INDEX idx_current_prices_volume_24h
+    ON current_prices (volume_24h_usd DESC NULLS LAST, asset_id DESC);
+CREATE INDEX idx_current_prices_price
+    ON current_prices (price_usd DESC NULLS LAST, asset_id DESC);
+CREATE INDEX idx_current_prices_change_24h
+    ON current_prices (change_24h_pct DESC NULLS LAST, asset_id DESC);
+-- `?sort=code` is served by idx_assets_code; assets.id is the PK and tie-breaks the keyset.
 ```
 
 ### 3.4 Oracle Prices (Partitioned)
 ```sql
 CREATE TABLE oracle_prices (
     asset_id        INT NOT NULL,
-    oracle_name     VARCHAR(30) NOT NULL,  -- 'reflector', 'chainlink', 'redstone', 'band'
+    oracle_name     VARCHAR(30) NOT NULL,  -- example values: 'reflector', 'chainlink', 'redstone', 'band'
     price_usd       NUMERIC(28,14) NOT NULL,
     timestamp       TIMESTAMPTZ NOT NULL,
     raw_data        JSONB,
@@ -251,21 +280,39 @@ CREATE INDEX idx_oracle_asset ON oracle_prices (asset_id, oracle_name, timestamp
 ```
 
 ### 3.5 Backfill Progress Tracking
+
+One row per backfill stream (`sdex_archive`, `soroban_amm`). Both rows are
+seeded at provisioning time and updated by their respective ECS Fargate tasks.
+The `GET /backfill/status` endpoint reads both rows and returns them as the
+nested `sdex` and `soroban_amm` objects (see Section 4.5).
+
 ```sql
 CREATE TABLE backfill_progress (
     id              SERIAL PRIMARY KEY,
-    task_name       VARCHAR(50) NOT NULL UNIQUE, -- 'historical_all_time'
+    task_name       VARCHAR(50) NOT NULL UNIQUE,
+    -- Canonical streams seeded below: 'sdex_archive', 'soroban_amm'.
+    -- Additional streams (e.g. targeted gap-fills, future AMM reindexes) can
+    -- be added by inserting new rows; the API handler decides which task_names
+    -- it surfaces.
     start_ledger    BIGINT NOT NULL,
     target_ledger   BIGINT NOT NULL,
     current_ledger  BIGINT NOT NULL,
-    status          VARCHAR(20) NOT NULL DEFAULT 'running',
-    -- 'running', 'paused', 'completed', 'error'
-    rate_per_hour   BIGINT,               -- ledgers/hour, updated every 15 min
-    eta_hours       NUMERIC(10,1),        -- estimated hours to completion
+    status          VARCHAR(20) NOT NULL DEFAULT 'running'
+                    CHECK (status IN ('running', 'paused', 'completed', 'error')),
+    rate_per_hour   BIGINT,               -- ledgers/hour, rolling average; NULL if the task does not track rate
+    eta_hours       NUMERIC(10,1),        -- estimated hours to completion; NULL if unknown or task is short-lived
     last_heartbeat  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     started_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     completed_at    TIMESTAMPTZ
 );
+
+-- Seed both stream rows at provisioning time so GET /backfill/status always
+-- has a row to read for each stream. target_ledger is updated to the current
+-- realtime tip when each task starts.
+INSERT INTO backfill_progress (task_name, start_ledger, target_ledger, current_ledger, status)
+VALUES
+    ('sdex_archive', 1,        0, 0, 'running'),
+    ('soroban_amm',  48500000, 0, 0, 'running');
 ```
 
 ### 3.6 Retention Policy (Cleanup Worker Lambda)
@@ -347,9 +394,9 @@ LIMIT 51;
       "volume_24h_usd": "1523400.50",
       "vwap_24h": "1.0002",
       "sources": {
-        "sdex": "1.0001",
-        "soroswap": "1.0002",
-        "aquarius": "1.0001"
+        "sdex":     { "price": "1.0001", "volume_24h": "800000" },
+        "soroswap": { "price": "1.0002", "volume_24h": "500000" },
+        "aquarius": { "price": "1.0001", "volume_24h": "223400" }
       },
       "updated_at": "2026-02-10T12:00:00Z"
     }
@@ -484,8 +531,9 @@ feed the `price_usd` field in any other endpoint.
 Returns the current state of the historical all-time backfill. This endpoint is the primary
 mechanism for the Tranche 3 reviewer to validate that backfill is progressing correctly.
 
-A CloudWatch alarm fires if `last_heartbeat` falls more than 10 minutes behind the current
-time (indicating the backfill task has stalled or crashed).
+A CloudWatch alarm fires if `last_heartbeat` falls more than 20 minutes behind the current
+time (indicating the backfill task has stalled or crashed). The 20-minute threshold sits
+above the 15-minute write cadence so a single delayed write does not trip the alarm.
 
 The backfill is split into two independent streams with different sources and timelines (see
 Section 5.6). The response reflects both.
@@ -521,10 +569,10 @@ Section 5.6). The response reflects both.
 | `sdex.current_ledger` | Oldest ledger processed so far by the SDEX backfill task |
 | `sdex.rate_ledgers_per_hour` | Rolling 15-min average processing rate |
 | `sdex.estimated_hours_to_completion` | `ledgers_remaining / rate_per_hour` |
-| `sdex.task_healthy` | `false` if no heartbeat in past 10 minutes → CloudWatch alarm fires |
-| `sdex.earliest_data_available` | Timestamp of oldest SDEX OHLCV record in the database |
+| `sdex.task_healthy` | `false` if no heartbeat in past 20 minutes → CloudWatch alarm fires |
+| `sdex.earliest_data_available` | Stored timestamp of the oldest SDEX OHLCV row known for this stream — recorded by the backfill task when it first writes a candle for a given timestamp, **not** computed live via `MIN(timestamp)`. Returned as-is, so reads are O(1). |
 | `soroban_amm.status` | Typically `completed` from Tranche 1 onwards |
-| `soroban_amm.earliest_data_available` | Soroban activation date (~Nov 2023) once complete |
+| `soroban_amm.earliest_data_available` | Same semantics as `sdex.earliest_data_available` — stored, not computed. Lands at the Soroban activation date (~Nov 2023) once the one-time backfill completes. |
 
 ---
 
@@ -560,6 +608,17 @@ using the `lambda_runtime` crate. It downloads the file, parses it, and extracts
 
 The XDR parsing logic is implemented as a shared Rust workspace crate, compiled into both the
 Block Explorer's Ledger Processor and the Prices Ledger Processor, eliminating duplication.
+
+**Write semantics into `price_ohlcv`.** All writers (live ingestion, rollup, and both backfill
+streams) use `INSERT ... ON CONFLICT (timestamp, asset_id, granularity) DO UPDATE`, never a
+plain `INSERT`. This is required because (a) ~10–12 ledgers land in the same minute and each
+must merge its trades into the same `(minute, asset, '1m')` row, (b) backfill restart from
+checkpoint can re-write a partially processed ledger, and (c) the Rollup Lambda re-derives
+each window from the underlying 1m rows on every run. Live ingestion uses incremental-merge
+update expressions (preserve `open`, overwrite `close`, `GREATEST(high)`, `LEAST(low)`, sum
+volumes and `trade_count`, recompute `vwap`); rollup and backfill writers operate on already-
+aggregated whole candles and replace all non-PK columns. See the database schema doc
+(Section 3.2 → "Write semantics — UPSERT, not INSERT") for the full merge-rule table.
 
 ### 5.3 Ingestion Workers
 
@@ -711,8 +770,11 @@ trades and process faster; the estimate above is conservative.
 #### `GET /backfill/status` Alarm
 
 A CloudWatch alarm monitors the `last_heartbeat` field in `backfill_progress`. If the backfill
-task fails to update the heartbeat for more than 10 minutes, an SNS alarm fires (email + Slack)
-to alert the team. This alarm is active for the full backfill duration, including post-delivery.
+task fails to update the heartbeat for more than 20 minutes, an SNS alarm fires (email + Slack)
+to alert the team. The 20-minute threshold is chosen to sit comfortably above the 15-minute
+write cadence (`sdex_archive` updates every 15 min) so a single delayed write does not trip
+the alarm — only a genuine task stall does. This alarm is active for the full backfill
+duration, including post-delivery.
 
 ---
 
@@ -812,7 +874,7 @@ all-time history once backfill completes)
 - Historical backfill ECS Fargate task started; processing from current tip backwards;
   covers approximately 6 months of recent history by end of Tranche 1
 - `GET /backfill/status` endpoint live and returning valid progress data
-- CloudWatch alarm: backfill heartbeat >10 min stale → SNS notification
+- CloudWatch alarm: backfill heartbeat >20 min stale → SNS notification
 
 **Acceptance criteria:**
 1. `cdk deploy` from a clean AWS account (sharing only the existing VPC/S3 bucket from Block
@@ -821,10 +883,13 @@ all-time history once backfill completes)
    all indexes present (verifiable via `\d+` psql output)
 3. After 24 hours of live operation: `price_ohlcv` contains continuous 1-min candles for at
    least 20 major assets (XLM, USDC, EURC, AQUA, BTC, ETH) with no gaps >2 candles
-4. `GET /backfill/status` returns `{"status": "running", "backfill_task_healthy": true}` with
-   `backfill_current_ledger` advancing (ledger sequence decreasing toward ledger 1 over time)
-5. CloudWatch alarm test: backfill task stopped manually → alarm fires within 15 minutes
-6. `earliest_data_available` in `GET /backfill/status` shows a date approximately 6 months ago
+4. `GET /backfill/status` returns `sdex.status: "running"`, `sdex.task_healthy: true`, and
+   `sdex.current_ledger` advancing (ledger sequence decreasing toward ledger 1 over time).
+   `soroban_amm.status` is `"running"` early in Tranche 1 and transitions to `"completed"`
+   once the AMM stream finishes (see Section 4.5 for the canonical response shape)
+5. CloudWatch alarm test: SDEX backfill task stopped manually → alarm fires within 15 minutes
+   (heartbeat watchdog on the `sdex_archive` row in `backfill_progress`)
+6. `sdex.earliest_data_available` in `GET /backfill/status` shows a date approximately 6 months ago
 
 **Budget: $XX,XXX (Tranche 1)**
 
@@ -887,20 +952,21 @@ At ~150,000 ledgers/hour sustained, that is ~45 million ledgers processed, cover
 **January 2018 to present** (8+ years of price history).
 
 **The Tranche 3 review validates that backfill is progressing correctly, not that it is complete.**
-The reviewer should confirm:
-- `GET /backfill/status` returns `status: running`, `backfill_task_healthy: true`
-- `earliest_data_available` ≤ 2018-01-01
-- `estimated_hours_to_completion` shows a reasonable remaining estimate (expected: 4–8 weeks)
-- `rate_ledgers_per_hour` is stable (variation <20% over the last 24 hours)
+The reviewer should confirm (against the response shape in Section 4.5):
+- `GET /backfill/status` returns `sdex.status: "running"`, `sdex.task_healthy: true`
+- `sdex.earliest_data_available` ≤ 2018-01-01
+- `sdex.estimated_hours_to_completion` shows a reasonable remaining estimate (expected: 4–8 weeks)
+- `sdex.rate_ledgers_per_hour` is stable (variation <20% over the last 24 hours)
+- `soroban_amm.status` is `"completed"` (carried over from Tranche 1)
 - OHLCV data for `?timeframe=all` on XLM returns data points from 2018 or earlier
 
-The backfill continues running autonomously post-delivery. When `status` transitions to
-`completed`, the `GET /backfill/status` endpoint records the `completed_at` timestamp. The team
-will share a link to this endpoint with Stellar for post-delivery monitoring.
+The backfill continues running autonomously post-delivery. When `sdex.status` transitions to
+`"completed"`, the `GET /backfill/status` endpoint records the `sdex.completed_at` timestamp.
+The team will share a link to this endpoint with Stellar for post-delivery monitoring.
 
 **Acceptance criteria:**
-1. `GET /backfill/status` shows `status: running`, `backfill_task_healthy: true`,
-   `earliest_data_available` ≤ 2018-01-01, `estimated_hours_to_completion` present and valid
+1. `GET /backfill/status` shows `sdex.status: "running"`, `sdex.task_healthy: true`,
+   `sdex.earliest_data_available` ≤ 2018-01-01, `sdex.estimated_hours_to_completion` present and valid
 2. OpenAPI spec passes `openapi-validator` lint with no errors; Swagger UI deployed
 3. Onboarding portal accessible; self-service API key request flow functional
 4. Integration test suite: all tests pass on CI (GitHub Actions link provided)
