@@ -2,7 +2,7 @@
 id: "0002"
 title: "Attribute observed AMM contract IDs to venues (Soroswap / Aquarius / Phoenix)"
 type: RESEARCH
-status: backlog
+status: active
 related_adr: []
 related_tasks: ["0001"]
 tags: [priority-medium, effort-small, soroban, amm]
@@ -14,6 +14,10 @@ history:
     status: backlog
     who: okarcz
     note: "Spawned from 0001 future work."
+  - date: 2026-05-08
+    status: active
+    who: okarcz
+    note: "Activated for implementation."
 ---
 
 # Attribute observed AMM contract IDs to venues
