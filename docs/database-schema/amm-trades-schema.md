@@ -123,7 +123,7 @@ rationale.)
 
 | Field | Why not |
 |---|---|
-| `topics` JSONB | The whole table is pre-filtered to swap events, so `topics[0]` is always `"swap"` and adds no information. `topics[1..N]` carries trader addresses (`from`, `to`) which the Prices API does not consume. |
+| `topics` JSONB | The whole table is pre-filtered to swap events, and `venue` already encodes which of the four decoder shapes produced the row (see §7). `topics[1..N]` carries trader addresses (`from`, `to`) which the Prices API does not consume. |
 | `data` JSONB | All Prices-relevant fields from the event payload are already lifted into typed columns above (`token_in`, `token_out`, `amount_in`, `amount_out`). Storing the original JSONB would be ~250 B/row of dead weight. |
 | `transaction_hash BYTEA(32)` | No Prices API query references it. The `(ledger_seq, tx_index, event_index)` triple already gives uniqueness for the UPSERT. |
 | `event_type` (system / contract / diagnostic) | Pre-filtering means every row is a contract swap event by definition. |
@@ -195,21 +195,117 @@ The BE Ledger Processor must persist a row **iff** the event satisfies all of:
 
 1. The event is a Soroban contract event (CAP-67) emitted from
    `SorobanTransactionMeta.events` in the ledger's `LedgerCloseMeta` XDR.
-2. The emitting `contract_id` is in the **known AMM pair / pool contract
-   set** for one of `soroswap`, `aquarius`, `phoenix`. (How the BE
-   maintains this set — hardcoded list, factory-event discovery, etc. — is
-   a BE implementation detail.)
-3. The event topic identifies a **swap** (e.g. `topics[0] = Symbol("swap")`).
-   The exact symbol per AMM is documented in the BE indexer; if any AMM
-   uses a different symbol for swaps the indexer's per-venue mapping
-   handles it.
+2. The emitting `contract_id` belongs to the **per-venue pool / router
+   registry** maintained by the BE (one of `soroswap`, `aquarius`,
+   `phoenix`). The registry is enumerated by factory events — see
+   "Pool enumeration" below.
+3. The event matches one of the **four decoder shapes** in
+   "Per-venue decoder reference" below, dispatched on
+   `(topics[0].kind, topics[0].value)` and (for Soroswap) `topics[1]`.
+   ScVal kind matters: `Symbol("swap")` is the Aquarius router and
+   `String("swap")` is a Phoenix XYK pool — they are different decoders
+   and must not be merged on the normalised string `"swap"`.
 4. The decoded payload yields a usable `(token_in, token_out, amount_in,
-   amount_out)` quadruple. Events the indexer cannot decode are logged and
-   skipped, not persisted.
+   amount_out)` quadruple. For Phoenix, this requires grouping eight
+   `String("swap")` events into one logical trade (see
+   "Per-venue payload notes" below). Events the indexer cannot decode
+   are logged and skipped, not persisted.
 
 Liquidity events (deposit / withdraw / add_liquidity / remove_liquidity),
-transfers, mints, burns, and oracle update events are **not** persisted —
-they do not contribute to executed-trade prices.
+transfers, mints, burns, oracle update events, and Soroswap pool `sync`
+events are **not** persisted — they do not contribute to executed-trade
+prices.
+
+### Per-venue decoder reference
+
+Empirical findings from lore 0001 + 0002 (4-day mainnet sample, ledger
+range 62400000–62463999):
+
+| `topics[0].kind` | `topics[0].value` | `topics[1]` | Venue | Decoder | Data shape | Trade rows |
+|---|---|---|---|---|---|---:|
+| `Symbol` | `swap` | router-specific | **Aquarius** | router | `Vec<i128>(in, out, fee)` payload variant | 1 event = 1 trade |
+| `Symbol` | `trade` | `Address(sold)`, `Address(bought)`, `Address(trader)` | **Aquarius** | constant-product pool | `Vec<i128>(in, out, fee)` | 1 event = 1 trade |
+| `String` | `swap` | `String(<field>)` × varying | **Phoenix** | XYK / stable pool | scalar-per-event; reassemble | **8 events = 1 trade** (6 for stable) |
+| `String` | `SoroswapPair` | `Symbol("swap")` | **Soroswap** | pool | uniswap-v2 `Map{amount_0_in, amount_0_out, amount_1_in, amount_1_out, to}` | 1 event = 1 trade |
+
+User-facing wrapper events from Soroswap (`String("SoroswapRouter")`
+and `String("SoroswapAggregator")`) are emitted in addition to the
+underlying `SoroswapPair` pool event. The indexer keeps only the
+`SoroswapPair` row to avoid double-counting.
+
+The `Symbol("swap")` router decoder applies **only** to the Aquarius
+router `CBQDHNBFBZYE4MKPWBSJOPIYLW4SFSXAXUTSXJN76GNKYVYPCKWC6QUK`.
+Other `Symbol("swap")` emitters observed in the same window
+(~5,200 events / 4 days from `CCR2CH4G...`, `CDMIM23W...`, and a long
+tail) were manually verified as **non-target** — not Soroswap, not
+Aquarius, not Phoenix — and are dropped. The indexer applies a strict
+known-target allowlist: emitters outside the per-venue registry are
+skipped, not bucketed as `venue: unknown`. Evidence:
+`lore/1-tasks/archive/0005_RESEARCH_unknown-symbol-swap-emitters/notes/S-unknown-emitters-non-target.md`.
+
+### Pool enumeration
+
+The per-venue pool / router registry is populated by replaying factory
+events from genesis. Canonical mainnet addresses verified against task
+0001 emitter `contract_id`s:
+
+| Venue | Factory / router | Pool-creation topic | Data |
+|---|---|---|---|
+| Soroswap | `CA4HEQTL2WPEUYKYKCDOHCDNIV4QHNJ7EL4J4NQ6VADP7SYHVRYZ7AW2` (factory) | `[String("SoroswapFactory"), Symbol("new_pair")]` | `NewPairEvent { token_0: Address, token_1: Address, pair: Address, new_pairs_length: u32 }` |
+| Aquarius | `CBQDHNBFBZYE4MKPWBSJOPIYLW4SFSXAXUTSXJN76GNKYVYPCKWC6QUK` (router) | `Symbol("add_pool")` | `(pool_address: Address, pool_type: Symbol)` — `pool_type` is `constant_product` / `stable` / `concentrated` |
+| Phoenix | `CB4SVAWJA6TSRNOJZ7W2AWFW46D5VR4ZMFZKDIKXEINZCZEGZCJZCKMI` (factory) | `[Symbol("create"), Symbol("liquidity_pool")]` | `Address(pool_id)` |
+
+Additional canonical addresses verified in the same sample:
+
+| Venue | Role | Address / hash |
+|---|---|---|
+| Soroswap | Router | `CAG5LRYQ5JVEUI5TEID72EYOVX44TTUJT5BQR2J6J77FH65PCCFAJDDH` |
+| Soroswap | Aggregator | `CAYP3UWLJM7ZPTUKL6R6BFGTRWLZ46LRKOXTERI2K6BIJAWGYY62TXTO` |
+| Soroswap | Pair WASM hash | `18051456816b66f12e773a56f77c5794fac1b1fb7ab6e22d4fad5a412770f73e` |
+| Aquarius | Constant-product pool WASM hash | `ae0da5a84b15805c5c7931ac567a8d1b34be3f26b483993d9ff80cb2c3de9852` |
+| Phoenix | Multihop (router) | `CCLZRD4E72T7JCZCN3P7KNPYNXFYKQCL64ECLX7WP5GNVYPYJGU2IO2G` |
+
+Aquarius is unique: its router is both the swap entry-point and the
+registry. The indexer must read `pool_type: Symbol` from each
+`add_pool` event and dispatch each pool's trade events to the right
+per-type decoder.
+
+### Per-venue payload notes
+
+**Phoenix — multi-event grouping.** Phoenix XYK pools emit **8 separate
+events per swap** (6 for stable pools), all with topic shape
+`[String("swap"), String(<field>)]` and scalar-per-event payloads
+(`offer_amount`, `ask_amount`, `spread_amount`, `total_fee_bps`,
+`sender`, etc.). The indexer must group by
+`(tx_hash, op_index, contract_id)` to reassemble one logical trade
+into one `prices_amm_trades` row. Filtering on the topic alone yields
+N rows per actual trade, which is incorrect.
+
+**Soroswap — two-topic filter.** The `SoroswapPair` pool contract emits
+multiple `topics[0] = String("SoroswapPair")` event types per pool
+(`swap`, `sync`, `deposit`, `withdraw`). The indexer must require
+`topics[1] = Symbol("swap")` to keep only swap events; the other three
+are non-trade and must be dropped.
+
+**Soroswap — no inline tokens.** The `SoroswapPair` swap event payload
+carries `amount_0_in`, `amount_0_out`, `amount_1_in`, `amount_1_out`,
+`to` — **no token addresses**. The indexer resolves `token_0` /
+`token_1` from each pool's `NewPairEvent` (captured at pool-discovery
+time) and caches the `(pair, token_0, token_1)` triple, then joins on
+`pair_contract_id` to fill `token_in` / `token_out` in
+`prices_amm_trades`. Without the cache, every Soroswap trade would
+need an extra chain read.
+
+**Phoenix — fee shape (informational; not stored).** `prices_amm_trades`
+does not carry a `fee` column (see §4 "What is deliberately omitted").
+For completeness: Phoenix XYK pools emit `spread_amount` but **not**
+`commission_amount` — the commission is settled by a direct token
+transfer from the pool to `fee_recipient`. If a future revision of this
+schema adds a `fee` column, the recommended Phoenix fill strategy is
+`total_fee_bps × offer_amount`, with `total_fee_bps` read once from
+each pool's config at pool-discovery time and cached. Aquarius and
+Soroswap emit fee inline in the swap event payload. No action required
+for the current schema.
 
 ---
 
@@ -303,23 +399,36 @@ The backfill task then:
 
 ## 11. Open questions for the BE team
 
-These are the only questions the Prices API needs answered before this
-table can be implemented:
+Items resolved by lore tasks 0001 + 0002 + 0005 are marked as such with
+references. The remaining item is still pending BE input.
 
-1. **Filter symbol per AMM.** Does each of Soroswap / Aquarius / Phoenix
-   emit swap events under the topic symbol `"swap"`, or does any of them
-   use a different symbol? The BE indexer's per-venue mapping table is the
-   answer here.
-2. **Pair / pool contract registry.** How does the BE identify the set of
-   "known AMM pair contracts" — hardcoded list, factory-event discovery,
-   or both? Either is fine for the Prices API; the choice affects how
-   quickly newly-deployed pools become visible.
-3. **Decimals normalisation.** `amount_in` and `amount_out` are stored as
-   `NUMERIC(28,14)`. Confirm whether the BE Ledger Processor will divide
-   raw on-chain amounts by each token's `decimals()` before insertion, or
-   write the raw integer scalar. The Prices API expects the **decimal-
-   normalised** value (matching how it stores quantities throughout
-   `price_ohlcv` and `current_prices`).
+1. **~~Filter symbol per AMM.~~** **Resolved** by lore 0001 + 0002.
+   Four decoder shapes are in use, dispatched on
+   `(topics[0].kind, topics[0].value)` and (for Soroswap) `topics[1]`
+   — see §7 "Per-venue decoder reference". Key surprise:
+   `Symbol("swap")` (Aquarius router) and `String("swap")` (Phoenix XYK
+   pool) are distinct ScVal kinds with different decoders; Phoenix is
+   event-multiplexed (8 events → 1 trade) and Soroswap requires a
+   two-topic filter. Evidence:
+   `lore/1-tasks/archive/0001_RESEARCH_dump-amm-swap-events/notes/R-swap-topic-shapes.md`,
+   `lore/1-tasks/archive/0001_RESEARCH_dump-amm-swap-events/notes/S-amm-trades-schema-§11-1-resolved.md`,
+   `lore/1-tasks/archive/0002_RESEARCH_amm-venue-attribution/notes/S-venue-attribution-mapping.md`.
+
+2. **~~Pair / pool contract registry.~~** **Resolved** by lore 0002 +
+   0005. Factory-event discovery per venue, with canonical factory /
+   router addresses and pool-creation topics listed in §7 "Pool
+   enumeration". Aquarius is special: its router is itself the
+   registry and emits `add_pool` with a `pool_type` discriminator
+   (`constant_product` / `stable` / `concentrated`). Non-target
+   `Symbol("swap")` emitters outside the three venues are dropped via
+   a strict allowlist (no `venue: unknown` bucket) — see lore 0005.
+
+3. **Decimals normalisation.** `amount_in` and `amount_out` are stored
+   as `NUMERIC(28,14)`. Confirm whether the BE Ledger Processor will
+   divide raw on-chain amounts by each token's `decimals()` before
+   insertion, or write the raw integer scalar. The Prices API expects
+   the **decimal-normalised** value (matching how it stores quantities
+   throughout `price_ohlcv` and `current_prices`). *Still open.*
 
 ---
 
