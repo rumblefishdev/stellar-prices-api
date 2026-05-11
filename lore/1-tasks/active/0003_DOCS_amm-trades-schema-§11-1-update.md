@@ -2,7 +2,7 @@
 id: "0003"
 title: "Update amm-trades-schema.md §7 and §11.1 with empirical topic findings"
 type: DOCS
-status: backlog
+status: active
 related_adr: []
 related_tasks: ["0001", "0002"]
 tags: [priority-medium, effort-small, schema-validation]
@@ -23,6 +23,10 @@ history:
       was incomplete. Add Phoenix String("swap") multi-event grouping,
       Soroswap two-topic filter, ScVal-kind-based dispatch, and the
       contract → venue registry derived from canonical factories.
+  - date: 2026-05-11
+    status: active
+    who: okarcz
+    note: "Activated for implementation."
 ---
 
 # Update amm-trades-schema.md §7 and §11.1 with empirical findings
