@@ -31,11 +31,27 @@ dedicated AWS sub-account). Output is a reasoned synthesis with one or more reco
 solutions for how the two services co-deploy, share resources, and remain operationally
 decoupled.
 
-## Status: Active
+## Status: Active — research complete, awaiting review
 
-**Current state:** Drafted from the second-round-reviewed design doc
-(`docs/prices-api-general-overview.md`) which explicitly catalogues shared infra in §0 and
-§11. No analysis has been written yet.
+**Current state:** Five notes produced under `notes/`. Final synthesis in
+`notes/S-shared-infra-recommendation.md`. Four follow-up backlog tasks (0010–0013)
+spawned. Awaiting human review before marking completed and archiving.
+
+### Headline findings
+
+1. The cost-saving sharing story for Galexie + S3 + VPC + (probably) NAT Gateway holds. ✅
+2. The "shared ECS cluster for backfill" assumption in §2.3 / §5.6 / §11.1 is incorrect:
+   BE rejected Fargate backfill in favor of a local CLI per
+   [BE ADR 0010](../../../../../soroban-block-explorer/lore/2-adrs/0010_local-backfill-over-fargate.md).
+   Prices API must own its backfill execution layer. ❌ → reshape needed.
+3. The "read BE `soroban_events` table for decoded JSONB topics/data" plan in §5.6 may
+   not work — BE's table is `soroban_events_appearances` and full event detail is fetched
+   read-time from public archive per
+   [BE ADR 0033](../../../../../soroban-block-explorer/lore/2-adrs/0033_soroban-events-appearances-read-time-detail.md).
+   Spike needed before committing to the two-stream backfill plan. ⚠️
+4. Recommended integration shape: separate CDK app + SSM-based platform lookups + own
+   GitHub Actions OIDC + Prices-owned Fargate for SDEX backfill (Option **A2 + B1 + C1
+   + D3→D1** from `notes/I-integration-options.md`).
 
 ## Context
 
@@ -101,14 +117,38 @@ Write the final summary as `notes/S-shared-infra-recommendation.md` with:
 
 ## Acceptance Criteria
 
-- [ ] All four input documents read and summarised in `notes/R-*.md`
-- [ ] Component matrix written (shared / owned / coupled) covering every component in §2 of
-      the Prices API design
-- [ ] At least one concrete CDK + CI/CD integration approach proposed with trade-offs
-- [ ] Cross-service coupling risks (esp. `soroban_events` read-only dependency) explicitly
-      documented with mitigations
-- [ ] Final `notes/S-shared-infra-recommendation.md` written with a clear recommendation
-- [ ] Follow-up backlog tasks spawned (e.g. ADR for CDK ownership, infra-bootstrap task)
+- [x] All four input documents read and summarised in `notes/R-*.md`
+      (`R-prices-api-infra-requirements.md`, `R-block-explorer-infra-state.md`,
+      `R-shared-vs-owned-matrix.md`)
+- [x] Component matrix written (shared / owned / coupled) covering every component in §2 of
+      the Prices API design — see `notes/R-shared-vs-owned-matrix.md`
+- [x] At least one concrete CDK + CI/CD integration approach proposed with trade-offs
+      (three dimensions × multiple options in `notes/I-integration-options.md`)
+- [x] Cross-service coupling risks (esp. `soroban_events` read-only dependency) explicitly
+      documented with mitigations (see findings #2 and #3 above; full analysis in the
+      matrix and synthesis notes)
+- [x] Final `notes/S-shared-infra-recommendation.md` written with a clear recommendation
+- [x] Follow-up backlog tasks spawned: 0010 (verify BE event schema), 0011 (CDK bootstrap),
+      0012 (SDEX/AMM backfill design), 0013 (update design doc to match BE reality)
+
+## Implementation Notes
+
+- Inputs catalogued: `docs/prices-api-general-overview.md` (Prices §0–§11);
+  BE `infrastructure-overview.md`, `technical-design-general-overview.md`; BE ADRs
+  0001 (OIDC + secrets), 0006 (no S3 lifecycle), 0007 (2-Lambda architecture),
+  0010 (local backfill, NOT Fargate), 0029 (read-time XDR fetch).
+- Notes layout: 3× R- (research), 1× I- (idea/options), 1× S- (synthesis).
+- Two design-doc assumptions found to be wrong against BE reality (rows 7 and 8 of the
+  matrix); both materially change the backfill execution plan.
+
+## Future Work
+
+Spawned as backlog tasks (see `notes/S-shared-infra-recommendation.md` open questions):
+
+- **0010** — Verify BE `soroban_events_appearances` schema for Prices AMM backfill
+- **0011** — Bootstrap Prices-owned CDK app with SSM-based platform lookups
+- **0012** — Design SDEX + AMM backfill on Prices-owned Fargate cluster
+- **0013** — Update `prices-api-general-overview.md` §2.3/§5.6/§11 to match BE reality
 
 ## Notes
 
