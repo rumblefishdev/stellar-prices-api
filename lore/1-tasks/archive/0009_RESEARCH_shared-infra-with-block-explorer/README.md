@@ -2,9 +2,9 @@
 id: "0009"
 title: "Research shared infrastructure architecture with Soroban Block Explorer"
 type: RESEARCH
-status: active
+status: completed
 related_adr: []
-related_tasks: ["0007", "0008"]
+related_tasks: ["0007", "0008", "0010", "0011", "0012", "0013"]
 tags: [priority-high, effort-medium, infra, architecture, aws, shared-infra, block-explorer]
 links:
   - "../../../../docs/prices-api-general-overview.md"
@@ -19,6 +19,18 @@ history:
     status: active
     who: okarcz
     note: "Promoted from backlog to active"
+  - date: 2026-05-11
+    status: completed
+    who: claude
+    note: >
+      Research complete. 5 notes produced (3 R-, 1 I-, 1 S-).
+      Component matrix covers 18 rows; 2 hard mismatches found vs BE
+      reality (Fargate backfill cluster does not exist per BE ADR 0010;
+      soroban_events table is appearance-only per BE ADRs 0029/0033).
+      Recommendation: Option A2+B1+C1+D3->D1 — separate CDK app +
+      SSM platform lookups + Prices-owned Fargate backfill +
+      verify-then-archive-read for AMM stream. Spawned 4 follow-up
+      backlog tasks (0010-0013).
 ---
 
 # Research shared infrastructure architecture with Soroban Block Explorer
@@ -31,11 +43,11 @@ dedicated AWS sub-account). Output is a reasoned synthesis with one or more reco
 solutions for how the two services co-deploy, share resources, and remain operationally
 decoupled.
 
-## Status: Active — research complete, awaiting review
+## Status: Completed
 
-**Current state:** Five notes produced under `notes/`. Final synthesis in
-`notes/S-shared-infra-recommendation.md`. Four follow-up backlog tasks (0010–0013)
-spawned. Awaiting human review before marking completed and archiving.
+**Outcome:** Recommendation delivered as `notes/S-shared-infra-recommendation.md`. Four
+follow-up backlog tasks (0010–0013) carry the implementation work. Two material
+inaccuracies in `docs/prices-api-general-overview.md` flagged for revision (task 0013).
 
 ### Headline findings
 
@@ -140,6 +152,30 @@ Write the final summary as `notes/S-shared-infra-recommendation.md` with:
 - Notes layout: 3× R- (research), 1× I- (idea/options), 1× S- (synthesis).
 - Two design-doc assumptions found to be wrong against BE reality (rows 7 and 8 of the
   matrix); both materially change the backfill execution plan.
+
+## Design Decisions
+
+### From Plan
+
+1. **Notes layout follows lore Q/I/R/S/G convention.** R- for distilled inputs, I- for
+   options sketches, S- for the final synthesis. Matches the `_note_template.md` guidance.
+
+### Emerged
+
+2. **Spawned 4 follow-ups, not 5.** The synthesis note initially listed 5 candidates
+   (including a standalone "ADR for CDK ownership" task). Collapsed the ADR into task
+   0011's acceptance criteria — the ADR is a deliverable of the bootstrap work, not a
+   separate parallel task. Keeps the backlog smaller and avoids ADR-without-implementation.
+
+3. **Picked Option A2+B1+C1+D3→D1 as a recommendation rather than presenting all options
+   neutrally.** The matrix made one combination clearly best (separate CDK app + own
+   OIDC + own Fargate + verify-then-archive-read). Hedging would have left the next
+   reader without a starting point. The trade-off table for each dimension is preserved
+   in `I-integration-options.md` so the decision can be revisited.
+
+4. **Did not write any ADRs in this repo.** Research only — the cross-team decisions
+   (NAT cost share, CDK config sharing mechanism) require human input from the BE team
+   before an ADR can be authoritative. Listed as open questions in the synthesis note.
 
 ## Future Work
 
