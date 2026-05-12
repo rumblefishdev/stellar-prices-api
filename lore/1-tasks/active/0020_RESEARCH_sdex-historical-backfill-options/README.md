@@ -2,14 +2,14 @@
 id: "0020"
 title: "Research SDEX historical backfill options — is a dedicated parser+CH backfill needed?"
 type: RESEARCH
-status: backlog
+status: active
 related_adr: ["0001"]
 related_tasks: ["0015"]
 tags: [priority-high, effort-medium, research, sdex, backfill, stream-2, clickhouse, archive-reads]
 links:
-  - "../../2-adrs/0001_stream1-clickhouse-sourced-amm-backfill.md"
-  - "../archive/0015_RESEARCH_redefine-backfill-with-be-clickhouse-events/notes/G-ch-tables-for-price-calculation.md"
-  - "../../../docs/prices-api-general-overview.md"
+  - "../../../2-adrs/0001_stream1-clickhouse-sourced-amm-backfill.md"
+  - "../../archive/0015_RESEARCH_redefine-backfill-with-be-clickhouse-events/notes/G-ch-tables-for-price-calculation.md"
+  - "../../../../docs/prices-api-general-overview.md"
 history:
   - date: 2026-05-12
     status: backlog
@@ -21,6 +21,15 @@ history:
       and-CH approach pay off, or is the existing archive-read Fargate
       task pattern still the right shape? Open question — research
       first, then decide.
+  - date: 2026-05-12
+    status: active
+    who: okarcz
+    note: >
+      Promoted to active. Scope widened by user directive to also
+      answer: (a) what does an SDEX operation look like after parsing
+      from XDR, and (b) what's the best way to extract data needed
+      for token price calculation. These shape the Option B / Option D
+      cost-benefit analysis directly.
 ---
 
 # Research SDEX historical backfill options — is a dedicated parser+CH backfill needed?
