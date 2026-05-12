@@ -4,14 +4,21 @@ title: "Design SDEX + AMM backfill on Prices-owned Fargate cluster"
 type: FEATURE
 status: backlog
 related_adr: []
-related_tasks: ["0009", "0010", "0011"]
+related_tasks: ["0009", "0010", "0011", "0014"]
 tags: [priority-high, effort-large, infra, ecs, fargate, backfill]
-links: []
+links:
+  - "../../../../soroban-block-explorer/lore/2-adrs/0010_local-backfill-over-fargate.md"
+  - "../../../../soroban-block-explorer/lore/2-adrs/0040_multi-laptop-backfill-snapshot-merge-hazards.md"
+  - "../../../../soroban-block-explorer/lore/2-adrs/0044_clickhouse-pilot-parallel-store.md"
 history:
   - date: 2026-05-11
     status: backlog
     who: okarcz
     note: "Spawned from 0009 future work. Replaces the design's assumed BE shared cluster (BE ADR 0010)."
+  - date: 2026-05-12
+    status: backlog
+    who: okarcz
+    note: "Refs added by task 0014: BE ADR 0040 (multi-laptop backfill, refines ADR 0010) and BE ADR 0044 (CH pilot — possible future AMM source). Neither changes the C1 Fargate decision today."
 ---
 
 # Design SDEX + AMM backfill on Prices-owned Fargate cluster
@@ -33,6 +40,16 @@ Option C1 (own Fargate cluster + task definition).
 The exact AMM stream design depends on task 0010's outcome:
 - If BE's `soroban_events_appearances` carries decoded payloads → keep two streams.
 - If not → collapse into one archive-based stream (Option D1 in the integration note).
+
+BE ADR 0040 (multi-laptop backfill, accepted 2026-05-07) refines the BE ADR 0010
+local-CLI choice with a `db-merge` operator playbook. Confirms BE has no Fargate backfill
+in production — Prices needs its own.
+
+**Future option (not in scope for first delivery):** BE ADR 0044 introduced a local-only
+ClickHouse pilot with a full-content `soroban_events` table. If that pilot graduates to
+BE's AWS topology per a future BE ADR, the Prices AMM backfill could read from CH instead
+of either BE Postgres or the public archive. Tracked as awareness only; do not design
+against it until BE commits.
 
 ## Implementation
 
