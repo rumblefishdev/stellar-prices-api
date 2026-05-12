@@ -4,16 +4,21 @@ title: "Verify BE soroban_events_appearances schema for Prices AMM backfill"
 type: RESEARCH
 status: backlog
 related_adr: []
-related_tasks: ["0009"]
+related_tasks: ["0009", "0014"]
 tags: [priority-high, effort-small, infra, block-explorer, schema, backfill]
 links:
   - "../../../../soroban-block-explorer/lore/2-adrs/0029_abandon-parsed-artifacts-read-time-xdr-fetch.md"
   - "../../../../soroban-block-explorer/lore/2-adrs/0033_soroban-events-appearances-read-time-detail.md"
+  - "../../../../soroban-block-explorer/lore/2-adrs/0044_clickhouse-pilot-parallel-store.md"
 history:
   - date: 2026-05-11
     status: backlog
     who: okarcz
     note: "Spawned from 0009 future work. Resolves the row-8 hard mismatch in the shared-infra matrix."
+  - date: 2026-05-12
+    status: backlog
+    who: okarcz
+    note: "Question widened by task 0014: BE ADR 0044 (CH pilot, local-only / read-empty today) introduces a future full-content `soroban_events` table. Add CH-future-option dimension to the verification."
 ---
 
 # Verify BE soroban_events_appearances schema for Prices AMM backfill
@@ -32,6 +37,12 @@ Spawned from research task 0009. The "fast Tranche 1" Soroban AMM backfill in
 decoded swap data, avoiding ~8.5M ledger archive reads. If that table doesn't carry
 decoded payloads, this stream collapses into the SDEX-style archive-read pattern.
 
+Re-check from task 0014 (2026-05-12): BE ADR 0044 introduced a local-only ClickHouse
+pilot with a full-content `soroban_events` table. The pilot is read-empty today and is
+explicitly **NOT** part of BE's AWS production runtime — but it is a plausible future
+source for AMM backfill if it graduates per BE's follow-up ADR. Verification should now
+cover both today's RDS shape AND the pilot's stated trajectory.
+
 ## Implementation
 
 - Read BE migrations under `../soroban-block-explorer/crates/*/migrations/` and any
@@ -40,11 +51,15 @@ decoded payloads, this stream collapses into the SDEX-style archive-read pattern
 - If decoded payloads exist somewhere (perhaps a different table), document them.
 - If not, write a short note recommending Option D1 from
   `lore/1-tasks/active/0009_*/notes/I-integration-options.md`.
+- Inspect BE ADR 0044 + `crates/db-clickhouse/schema/init.sql` to confirm CH-side
+  `soroban_events` shape and pilot status; note its read-empty / local-only constraint.
 
 ## Acceptance Criteria
 
 - [ ] Definitive answer: are decoded Soroban event topics+data in BE's RDS or not?
 - [ ] If yes: document the exact table + columns + JSONB shape
 - [ ] If no: spawn a follow-up to revise Prices §5.6 (one-stream archive backfill)
+- [ ] CH pilot status documented: confirm pilot is read-empty + local-only and gated on a
+      follow-up BE ADR before any cross-project consumption
 - [ ] Update `lore/1-tasks/active/0009_*/notes/S-shared-infra-recommendation.md` open
       question #2 with the resolution

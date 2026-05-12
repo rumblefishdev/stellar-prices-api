@@ -4,15 +4,20 @@ title: "Update prices-api-general-overview.md §2.3/§5.6/§11 to match BE reali
 type: DOCS
 status: backlog
 related_adr: []
-related_tasks: ["0009", "0010", "0012"]
+related_tasks: ["0009", "0010", "0012", "0014"]
 tags: [priority-medium, effort-small, docs, infra]
 links:
   - "../../../../docs/prices-api-general-overview.md"
+  - "../../../../soroban-block-explorer/lore/2-adrs/0044_clickhouse-pilot-parallel-store.md"
 history:
   - date: 2026-05-11
     status: backlog
     who: okarcz
     note: "Spawned from 0009 future work. Two design-doc assumptions contradict BE production state."
+  - date: 2026-05-12
+    status: backlog
+    who: okarcz
+    note: "Refs added by task 0014: BE ADR 0044 (CH pilot). Design doc should briefly acknowledge the pilot exists and is local-only / read-empty today, NOT plan against it."
 ---
 
 # Update prices-api-general-overview.md §2.3/§5.6/§11 to match BE reality
@@ -51,5 +56,8 @@ design) land, the design doc should be updated for accuracy.
 - [ ] §5.6 backfill plan matches the implementation decided in 0012
 - [ ] §11.1 cost table updated; no claim that Prices does not pay for ECS cluster overhead
       if it doesn't apply
-- [ ] Cross-link to BE ADRs 0010/0029/0033 in §11.4 risk section
+- [ ] Cross-link to BE ADRs 0010/0029/0033/0040/0044 in §11.4 risk section
+- [ ] §11.4 includes a one-paragraph note: BE runs a local-only, read-empty ClickHouse
+      pilot (BE ADR 0044); Prices does not plan against it until a BE follow-up ADR moves
+      it into the AWS topology with PASS/FAIL criteria
 - [ ] Reviewer (project lead) approves the revision
