@@ -2,9 +2,9 @@
 id: "0010"
 title: "Verify BE soroban_events_appearances schema for Prices AMM backfill"
 type: RESEARCH
-status: backlog
+status: superseded
 related_adr: []
-related_tasks: ["0009", "0014"]
+related_tasks: ["0009", "0014", "0015"]
 tags: [priority-high, effort-small, infra, block-explorer, schema, backfill]
 links:
   - "../../../../soroban-block-explorer/lore/2-adrs/0029_abandon-parsed-artifacts-read-time-xdr-fetch.md"
@@ -19,6 +19,20 @@ history:
     status: backlog
     who: okarcz
     note: "Question widened by task 0014: BE ADR 0044 (CH pilot, local-only / read-empty today) introduces a future full-content `soroban_events` table. Add CH-future-option dimension to the verification."
+  - date: 2026-05-12
+    status: superseded
+    who: okarcz
+    by: ["0015"]
+    note: >
+      Superseded by task 0015. The verification question is answered
+      definitively: BE PG has no full-content soroban_events (only
+      appearances per ADR 0033); BE ClickHouse production schema
+      (`/home/oski/Projects/stellar/clickhouse-prod-schema.sql`,
+      populated by BE active task 0206) holds the full per-event
+      content with topics_xdr + data_xdr + hoisted signature.
+      Task 0015 carries the resulting backfill refactor and
+      schema→price-calc mapping that 0010 would otherwise have
+      stopped short of.
 ---
 
 # Verify BE soroban_events_appearances schema for Prices AMM backfill
