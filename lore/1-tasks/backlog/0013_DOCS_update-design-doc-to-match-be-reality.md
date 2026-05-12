@@ -3,12 +3,13 @@ id: "0013"
 title: "Update prices-api-general-overview.md §2.3/§5.6/§11 to match BE reality"
 type: DOCS
 status: backlog
-related_adr: []
-related_tasks: ["0009", "0010", "0012", "0014"]
-tags: [priority-medium, effort-small, docs, infra]
+related_adr: ["0001"]
+related_tasks: ["0009", "0010", "0012", "0014", "0015"]
+tags: [priority-medium, effort-small, docs, infra, clickhouse]
 links:
   - "../../../../docs/prices-api-general-overview.md"
   - "../../../../soroban-block-explorer/lore/2-adrs/0044_clickhouse-pilot-parallel-store.md"
+  - "../../2-adrs/0001_stream1-clickhouse-sourced-amm-backfill.md"
 history:
   - date: 2026-05-11
     status: backlog
@@ -18,6 +19,19 @@ history:
     status: backlog
     who: okarcz
     note: "Refs added by task 0014: BE ADR 0044 (CH pilot). Design doc should briefly acknowledge the pilot exists and is local-only / read-empty today, NOT plan against it."
+  - date: 2026-05-12
+    status: backlog
+    who: okarcz
+    note: >
+      Scope amended by task 0015 + ADR 0001. The Stream 1 §5.6
+      rewrite is no longer "collapse into archive reads" but
+      "source from a local CH instance populated by BE's
+      `backfill-runner --target=clickhouse`" — see ADR 0001 for
+      the canonical decision. §11.4 note must drop the
+      "don't plan against the CH pilot" framing and instead
+      record that prices-api intentionally consumes BE's CH for
+      a time-boxed Tranche 1 backfill window, with no live
+      runtime dependency on BE infra.
 ---
 
 # Update prices-api-general-overview.md §2.3/§5.6/§11 to match BE reality
@@ -53,11 +67,17 @@ design) land, the design doc should be updated for accuracy.
 ## Acceptance Criteria
 
 - [ ] §2.3 rows accurately reflect BE-owned vs. Prices-owned
-- [ ] §5.6 backfill plan matches the implementation decided in 0012
+- [ ] §5.6 Stream 1 rewritten per ADR 0001: local CH instance
+      (dev-laptop populated by BE `backfill-runner --target=clickhouse`),
+      Tranche 1 fast path preserved, hours-not-weeks claim retained
+- [ ] §5.6 Stream 2 updated per task 0020's recommendation (only
+      after 0020 lands; deferred until then)
 - [ ] §11.1 cost table updated; no claim that Prices does not pay for ECS cluster overhead
       if it doesn't apply
 - [ ] Cross-link to BE ADRs 0010/0029/0033/0040/0044 in §11.4 risk section
-- [ ] §11.4 includes a one-paragraph note: BE runs a local-only, read-empty ClickHouse
-      pilot (BE ADR 0044); Prices does not plan against it until a BE follow-up ADR moves
-      it into the AWS topology with PASS/FAIL criteria
+- [ ] Cross-link to prices-api ADR 0001 from §5.6 and §11.4
+- [ ] §11.4 note: BE's ClickHouse copy is the source for Tranche 1
+      Soroban-AMM backfill (time-boxed, dev-laptop hosted, no
+      AWS-deployed CH cluster involved); prices-api live runtime
+      does not depend on BE CH infra
 - [ ] Reviewer (project lead) approves the revision

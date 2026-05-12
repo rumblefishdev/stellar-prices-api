@@ -2,9 +2,9 @@
 id: "0015"
 title: "Redefine backfill plan and define price-calculation use of BE's ClickHouse full-content soroban_events"
 type: RESEARCH
-status: active
-related_adr: []
-related_tasks: ["0009", "0010", "0012", "0013", "0014"]
+status: completed
+related_adr: ["0001"]
+related_tasks: ["0009", "0010", "0012", "0013", "0014", "0017", "0018", "0020"]
 tags: [priority-high, effort-medium, infra, block-explorer, schema, clickhouse, backfill, price-calculation]
 links:
   - "../../../../soroban-block-explorer/lore/2-adrs/0044_clickhouse-pilot-parallel-store.md"
@@ -12,6 +12,7 @@ links:
   - "../../../../soroban-block-explorer/lore/1-tasks/archive/0204_FEATURE_clickhouse-pilot-crate-docker-schema/"
   - "../../../../soroban-block-explorer/lore/1-tasks/archive/0205_FEATURE_backfill-runner-clickhouse-target-flag.md"
   - "../../../docs/prices-api-general-overview.md"
+  - "../../../2-adrs/0001_stream1-clickhouse-sourced-amm-backfill.md"
 history:
   - date: 2026-05-12
     status: active
@@ -28,6 +29,15 @@ history:
       Stream 1 of `docs/prices-api-general-overview.md` against the new
       reality, and produce a table-by-table mapping from the CH schema
       onto the prices-api's token-price-calculation requirements.
+  - date: 2026-05-12
+    status: completed
+    who: okarcz
+    note: >
+      Closed after okarcz resolved all five open questions in the S-note.
+      Outcome: Option B confirmed (local CH on dev laptop), Stream 2
+      research spawned as 0020, ADR 0001 written and accepted, four
+      follow-ups slotted (0013 amended, 0017/0018/0020 spawned).
+      4 research notes produced (R/G/I/S). 1 ADR (first local ADR).
 ---
 
 # Redefine backfill plan and define price-calculation use of BE's ClickHouse full-content soroban_events
@@ -59,11 +69,13 @@ This research task does two things:
    instant price, asset identity, ledger-time resolution, contract
    labelling). Example queries included.
 
-## Status: Active
+## Status: Completed
 
-**Current state:** Research notes drafted in this session. Synthesis
-recommendation produced. Open questions for human input listed in
-`notes/S-redesigned-backfill-recommendation.md`.
+**Outcome:** Research done; recommendation accepted by okarcz; ADR
+0001 written; three follow-ups spawned (0017, 0018, 0020) and one
+existing follow-up (0013) had its scope amended. See
+`notes/S-redesigned-backfill-recommendation.md` §Resolutions for
+the resolved-question record.
 
 ## Context
 
@@ -148,13 +160,18 @@ Output: `notes/S-redesigned-backfill-recommendation.md`
 - [x] Final recommendation in `notes/S-redesigned-backfill-recommendation.md`
 - [x] Task 0010 marked superseded by 0015 (its narrow verification
       question is folded into the R-note + S-note)
-- [ ] Spawn follow-up: update `docs/prices-api-general-overview.md`
-      §5.6 / §2.3 / §11 to match the CH-sourced Stream 1 reality
-      (likely folded into existing backlog task 0013)
-- [ ] Spawn follow-up: cross-account CH read plumbing design (if
-      Option A is chosen) OR ETL pull job design (if Option B is
-      chosen) — decision pending human review
-- [ ] Open questions for human input documented in S-note
+- [x] Spawn follow-up: update `docs/prices-api-general-overview.md`
+      §5.6 / §2.3 / §11 — folded into existing backlog task 0013
+      with a 2026-05-12 history note + updated acceptance criteria
+      referencing ADR 0001
+- [x] Spawn follow-up: ETL pull job design (Option B chosen) →
+      task [0017](../../backlog/0017_FEATURE_local-clickhouse-for-prices-backfill.md)
+- [x] Open questions for human input documented in S-note,
+      resolved 2026-05-12 (see S-note §Resolutions)
+- [x] ADR 0001 written and accepted
+      ([2-adrs/0001_stream1-clickhouse-sourced-amm-backfill.md](../../../2-adrs/0001_stream1-clickhouse-sourced-amm-backfill.md))
+- [x] Per-AMM event-shape spike spawned as task [0018](../../backlog/0018_RESEARCH_decode-per-amm-swap-event-shapes.md)
+- [x] Stream 2 (SDEX) research spawned as task [0020](../../backlog/0020_RESEARCH_sdex-historical-backfill-options.md)
 
 ## Notes layout
 
@@ -164,4 +181,85 @@ notes/
 ├── G-ch-tables-for-price-calculation.md   — schema→price-calc mapping
 ├── I-integration-options.md               — consumption-pattern options
 └── S-redesigned-backfill-recommendation.md — synthesis + recommendation
+                                              (Resolutions appended 2026-05-12)
 ```
+
+## Implementation Notes
+
+- Inputs catalogued: BE ADR 0044; BE tasks 0204 (archived), 0205
+  (archived), 0206 (active); BE infrastructure overview;
+  `/home/oski/Projects/stellar/clickhouse-prod-schema.sql`
+  (task 0206 + 0208 + ADR 0044 amendments).
+- Notes layout follows lore Q/I/R/S/G convention: 1× R-, 1× G-,
+  1× I-, 1× S- (no Q- because the questions were external — owned
+  by the user as task framing).
+- Three structurally hard answers produced:
+  1. **No decoded events in BE PG, full content in BE CH.** Folds
+     in task 0010's verification question.
+  2. **Soroswap/Aquarius/Phoenix swap extraction is now a database
+     query, not an archive scan.** Restores the §5.6 hours-not-weeks
+     Tranche 1 promise.
+  3. **prices-api keeps no runtime CH dependency** — the CH usage
+     is time-boxed to the backfill window, run on a developer
+     laptop, accessed by prices-api for the Tranche 1 window only.
+
+## Design Decisions
+
+### From Plan
+
+1. **Notes layout follows R/G/I/S convention.** R- distills
+   external sources; G- generates the schema→price-calc artifact;
+   I- enumerates options; S- carries the synthesis with the
+   recommendation. Matches the framework's `_note_template.md`.
+
+2. **Supersede task 0010 rather than coexist.** The user chose
+   this explicitly (AskUserQuestion answered: "Supersede 0010").
+   0010's narrow verification question is fully answered by the
+   R-note; carrying both tasks would have left 0010 stuck waiting
+   on prerequisite information that the broader 0015 already
+   produces.
+
+3. **Active + execute, not backlog-only.** The user chose to do
+   the research in the same session that scaffolded the task,
+   rather than just sketching it. All four notes produced in one
+   session.
+
+### Emerged
+
+4. **ADR 0001 written inline with 0015 closure, not as a spawned
+   task.** Original spawn plan listed "0019 — Write ADR for
+   Stream 1 CH-sourced backfill" as a follow-up. On the user's
+   "yes ADR required" answer to Q5, the more efficient path was
+   to write the ADR as part of the same closure session — the
+   S-note already had the full ADR substance (Context, Decision,
+   Rationale, Alternatives, Consequences). Spawning a separate
+   "write the ADR" task would have been bureaucratic overhead.
+
+5. **0016 folded into existing 0013 rather than spawned as
+   a new doc-update task.** The original spawn plan listed 0016
+   as a new task. 0013 already covers the same §2.3/§5.6/§11
+   territory (and was previously spawned from research task 0009);
+   amending its frontmatter + acceptance criteria preserves the
+   continuity of its original scope and avoids two near-duplicate
+   tasks.
+
+6. **AskUserQuestion used twice before producing output.**
+   Once for scope ("supersede vs coexist", "active vs backlog"),
+   once for the five open questions. Saved the cost of producing
+   notes against a wrong premise.
+
+## Issues Encountered
+
+- The commit and push for the initial 4-note delivery landed
+  directly on `develop` instead of a feature branch. User chose
+  to skip the PR rather than force-reset develop. Lesson: the
+  `/branch` skill should run before `/lore-framework-git` when a
+  PR is wanted; in this session the user implicitly approved the
+  direct-to-develop flow by asking for the push, then declined to
+  rework it after the fact.
+
+## Future Work
+
+All future work is captured as spawned backlog tasks (see
+Acceptance Criteria above and S-note §Spawned follow-up tasks).
+No prose-only future work remains.

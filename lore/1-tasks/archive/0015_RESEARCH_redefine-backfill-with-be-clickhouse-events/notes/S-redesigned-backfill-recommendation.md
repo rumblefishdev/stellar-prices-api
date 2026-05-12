@@ -191,6 +191,45 @@ mandatory. If hot, prices-api can stand up a CH Dictionary on
    Recommended: spawn `lore/2-adrs/0001_…` (or wherever the local
    ADR numbering picks up) capturing the Stream 1 decision.
 
+## Resolutions (2026-05-12)
+
+All five open questions resolved by okarcz; recorded here so future
+sessions can read the synthesis without cross-referencing the
+conversation transcript.
+
+1. **Resolved — Option B confirmed.** Backfill via BE's
+   `backfill-runner --target=clickhouse` is a supported workflow
+   for prices-api consumption. The local-CH approach is the
+   committed Stream 1 shape.
+2. **Resolved — dev laptop.** The local CH instance runs on
+   okarcz's developer laptop. Prices-api Tranche 1 consumer will
+   be granted access to the laptop's CH (mechanism TBD —
+   SSH tunnel / Cloudflare tunnel / Tailscale; operational detail
+   owned by [task 0017](../../../../backlog/0017_FEATURE_local-clickhouse-for-prices-backfill.md)).
+   Skips the Fargate/EC2 cost decision entirely.
+3. **Resolved — separate research task.** Stream 2 (SDEX) gets its
+   own discrete research task rather than an inline pre-filter
+   decision. Question reframed as "what historical-backfill
+   options exist for SDEX — is a dedicated parser+CH backfill
+   needed?" → [task 0020](../../../../backlog/0020_RESEARCH_sdex-historical-backfill-options.md).
+4. **Resolved — stellar-xdr crate.** A `stellar-xdr` parser crate
+   will be built and ready for prices-api use. The Tranche 1
+   consumer decodes `topics_xdr` / `data_xdr` via this crate; no
+   dependency on BE's `xdr-parser` crate.
+5. **Resolved — ADR written.** [ADR 0001](../../../../../2-adrs/0001_stream1-clickhouse-sourced-amm-backfill.md)
+   captures the Stream 1 CH-sourced backfill decision (status:
+   accepted). First local ADR in stellar-prices-api.
+
+## Spawned follow-up tasks (final list)
+
+| ID | Title | State |
+|----|-------|-------|
+| [0013](../../../../backlog/0013_DOCS_update-design-doc-to-match-be-reality.md) | Update §2.3/§5.6/§11 of design doc | scope amended (history note added) |
+| [0017](../../../../backlog/0017_FEATURE_local-clickhouse-for-prices-backfill.md) | Local CH instance setup & access for Tranche 1 | new backlog |
+| [0018](../../../../backlog/0018_RESEARCH_decode-per-amm-swap-event-shapes.md) | Sample-decode per-AMM swap event shapes | new backlog |
+| [0020](../../../../backlog/0020_RESEARCH_sdex-historical-backfill-options.md) | Research SDEX historical backfill options | new backlog |
+| ADR [0001](../../../../../2-adrs/0001_stream1-clickhouse-sourced-amm-backfill.md) | Stream 1 ClickHouse-sourced AMM backfill | accepted, written inline with 0015 closure |
+
 ## Folded-in resolutions from related tasks
 
 ### Task 0010 (verify BE soroban_events_appearances schema)
