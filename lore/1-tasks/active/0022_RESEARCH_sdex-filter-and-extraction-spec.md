@@ -2,7 +2,7 @@
 id: "0022"
 title: "SDEX filter predicates and extraction spec for the dedicated archive-read backfill"
 type: RESEARCH
-status: backlog
+status: active
 related_adr: ["0002"]
 related_tasks: ["0012", "0013", "0020"]
 tags: [priority-high, effort-medium, research, sdex, backfill, stream-2, xdr, parser]
@@ -22,6 +22,16 @@ history:
       walk) and G-note (extractor algorithm + TradeTick shape).
       Output is the consumer-ready specification that task 0012's
       Rust implementation module consumes.
+  - date: 2026-05-13
+    status: active
+    who: okarcz
+    note: >
+      Promoted to active. Use the XDR sample files in `/.temp` as
+      example Stellar ledger data for the filter-profile run and
+      worked examples. The `xdr-parser` crate from
+      `../soroban-block-explorer` is available as a reference
+      implementation for XDR decoding if the stellar-xdr crate's
+      surface needs adapting.
 ---
 
 # SDEX filter predicates and extraction spec for the dedicated archive-read backfill
