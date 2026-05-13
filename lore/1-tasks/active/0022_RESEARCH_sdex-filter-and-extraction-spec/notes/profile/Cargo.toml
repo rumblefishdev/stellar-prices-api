@@ -1,0 +1,31 @@
+[package]
+name = "sdex-profile"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Profile harness for task 0022 — SDEX filter + extraction spec. Reads zstd-compressed LedgerCloseMetaBatch files (Galexie/.temp format), measures decode timing and trade-bearing-op density, dumps one worked example per ClaimAtom variant."
+
+[[bin]]
+name = "profile"
+path = "src/bin/profile.rs"
+
+[[bin]]
+name = "dump-examples"
+path = "src/bin/dump_examples.rs"
+
+[[bin]]
+name = "dump-canonical"
+path = "src/bin/dump_canonical.rs"
+
+[dependencies]
+stellar-xdr = { version = "26", default-features = true, features = ["curr", "base64"] }
+zstd = "0.13"
+walkdir = "2"
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+hex = "0.4"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
