@@ -3,13 +3,16 @@ id: "0023"
 title: "OHLCV row identity: decide base-only PK vs (base, quote) PK before SDEX backfill implementation"
 type: RESEARCH
 status: active
-related_adr: []
-related_tasks: ["0022", "0012"]
+related_adr: ["0003"]
+related_tasks: ["0022", "0012", "0024", "0025"]
 tags: [priority-high, effort-small, schema, ohlcv, sdex, backfill, blocking]
 links:
   - "../archive/0022_RESEARCH_sdex-filter-and-extraction-spec/notes/G-sdex-decode-and-bucket-spec.md"
   - "../../../docs/database-schema/database-schema-overview.md"
   - "../../../docs/prices-api-general-overview.md"
+  - "./notes/Q-decision-space.md"
+  - "./notes/S-recommendation.md"
+  - "../../2-adrs/0003_price-ohlcv-pk-includes-quote-asset-id.md"
 history:
   - date: 2026-05-13
     status: backlog
