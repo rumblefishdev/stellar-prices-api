@@ -40,6 +40,7 @@ graded against them clause-by-clause.
 | Trade-bearing density    | 99.35 % of recent-range ledgers carry ≥1 claim atom. Density filter saves almost nothing in the modern range. |
 | Checkpoint granularity   | Per-ledger. `UPDATE backfill_progress SET current_ledger = $1 WHERE task_name = 'sdex_archive'` runs in the same DB transaction as the ledger's bucket flush. |
 | Asset discovery          | Insert-on-fly with `ON CONFLICT (asset_type, asset_code, issuer_id, contract_id) DO NOTHING`. The Asset Discovery Lambda enriches metadata later. |
+| End-to-end backfill time | **12–16 days** single-task for all ~57M ledgers (archive S3 GET is the bottleneck, not decode/walk/DB). Parallelisable across disjoint ranges: 2 tasks → ~6–8 d, 4 tasks → ~3–4 d. See §4. |
 
 ## 1. Filter strategy
 
@@ -321,7 +322,100 @@ override), but as noted in §3.3 SDEX never sees SAC variants. So
 "all SDEX trades are 7-decimal" is a load-bearing invariant for
 this backfill and is explicitly relied on.
 
-## 4. Cross-references for task 0012
+## 4. End-to-end backfill runtime estimate
+
+This section closes the loop from §1's "decode cost" through
+§3's "DB write" to give a single end-to-end estimate of how long
+the full historical backfill will take to finish: read each
+ledger from the archive → decode XDR → extract `ClaimAtom`s →
+bucket → write to `price_ohlcv`. The total is the sum of the
+slowest stage at sustained pace.
+
+### 4.1 Per-stage throughput
+
+| Stage                                              | Throughput (per 2 vCPU Fargate task)     | Source                          |
+| -------------------------------------------------- | ----------------------------------------- | ------------------------------- |
+| Archive S3 GET (compressed bytes per ledger ≈ 167 KiB) | **~42–55 ledgers/s** (≈ 5–10 MB/s sustained, single connection) | [§5.6 design-doc figure](../../../../docs/prices-api-general-overview.md) — 150 000–200 000 ledgers/h |
+| Zstd decompress + `LedgerCloseMetaBatch::from_xdr` | **~311 ledgers/s** on developer laptop, ≥ ~600 ledgers/s on 2 vCPU Fargate (linear scaling, well-behaved CPU work) | [`profile/results.md`](./profile/results.md) — 3.22 ms/ledger mean |
+| `OperationResultTr` walk + `ClaimAtom` extract     | **>100 000 ledgers/s**                    | Profile measurement — 9 µs/ledger |
+| Bucket aggregation (in memory, per minute)         | bounded by trade volume; **negligible**   | Decode spec §5.1                |
+| Per-ledger UPSERT into `price_ohlcv` (whole-row replacement, ~6–12 candle rows per minute per task) | bounded by RDS IOPS on `db.t4g.small`; estimated **>500 ledger-writes/s** | RDS baseline; UPSERT semantics in decode spec §5.3 |
+
+Three stages have ample headroom (decode, walk, DB). One stage
+gates the wall clock: **archive S3 GET**. The other stages can
+absorb whatever rate that throws at them.
+
+### 4.2 Single-task estimate
+
+§5.6's stated rate of **150 000–200 000 ledgers/hour** corresponds
+to **42–55 ledgers/s** sustained. Plugging into the full
+historical range:
+
+| Range                                  | Ledgers      | At 42 ledgers/s | At 55 ledgers/s |
+| -------------------------------------- | ------------ | --------------- | --------------- |
+| Ledger 1 → tip (Nov 2015 → mid-2026)   | ~57 000 000  | **377 h ≈ 15.7 d** | **288 h ≈ 12.0 d** |
+
+This matches §5.6's published "~380 hours (~16 days) of pure
+compute" estimate for the SDEX archive backfill. The number is
+ledger-count-dominated, not byte-dominated; early ledgers
+(pre-2018) are tiny (low op-count, low compressed size) and
+process meaningfully faster than the 167 KiB/ledger mean from the
+modern sample, so the **real** runtime is probably 10–14 days
+not 16. §5.6 calls the 16-day figure conservative for that
+reason; this spec agrees.
+
+### 4.3 Parallelism if 12–16 days is too slow
+
+The extractor parallelises trivially across **disjoint ledger
+ranges** because:
+
+- Per-ledger checkpoint (filter spec §2.1) is per-row in
+  `backfill_progress`; multiple tasks can claim distinct ledger
+  ranges with their own progress rows (e.g. `sdex_archive_a`,
+  `sdex_archive_b`, …).
+- UPSERTs converge correctly under PG row-level locking — see
+  decode spec §5.5 and the schema doc's "Concurrency" note.
+- There is **no ordering requirement** for backfill writes: the
+  in-memory minute aggregator emits whole 1m candles for past
+  minutes, which are write-once final values, not partial merges.
+
+| Tasks | Wall time at 42 ledgers/s/task | Wall time at 55 ledgers/s/task |
+| ----- | ------------------------------ | ------------------------------ |
+| 1     | 15.7 d                         | 12.0 d                         |
+| 2     | 7.9 d                          | 6.0 d                          |
+| 4     | 3.9 d                          | 3.0 d                          |
+| 8     | 2.0 d                          | 1.5 d                          |
+
+Practical ceiling: ~4 parallel tasks before archive-bucket S3
+rate limits or DB IOPS start mattering. Going beyond is possible
+but needs a separate scaling note.
+
+### 4.4 What's NOT in this estimate
+
+- **Cold-start / warm-up time** for the Fargate task itself
+  (negligible — single-digit seconds).
+- **The downstream `volume_quote_usd` enrichment pass** — see
+  decode spec §5.3 and §6 item 2. That pass runs after the
+  backfill completes and reads `oracle_prices`; its runtime is
+  separate and small (one pass over already-written 1m rows).
+- **OHLCV rollups** (15m / 1h / 4h / 1d / 1w / 1M) — produced by
+  the existing OHLCV Rollup Lambda from the 1m base; not the
+  backfill's responsibility.
+- **Stream 1 (Soroban AMM) backfill** — independent task with
+  its own ~hours-long runtime (§5.6, ADR 0001).
+
+### 4.5 Recommendation
+
+Run the SDEX backfill as a **single 2 vCPU / 4 GB Fargate task**
+per §5.6, projecting 12–16 days of pure compute. If the project
+timeline requires faster, scale to 2–4 parallel tasks on disjoint
+ledger ranges before considering more invasive changes (e.g.
+custom XDR walker, decode-throughput optimisation). The decode
+stage is **7× faster than the archive read rate** on developer
+hardware (§1.4), so there is no value in spending engineering
+effort on the decoder; the gain is elsewhere.
+
+## 5. Cross-references for task 0012
 
 The Rust module shape this spec implies:
 
@@ -339,7 +433,7 @@ Both specs are written so the Rust submodules above map 1:1 to
 spec sections — task 0012 implementers can review compliance
 clause-by-clause.
 
-## 5. Notes / open items
+## 6. Notes / open items
 
 - The 65 % tx-failure rate observed in the modern sample range is
   much higher than I'd have guessed. If similar rates hold across
