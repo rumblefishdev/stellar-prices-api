@@ -2,7 +2,7 @@
 id: "0012"
 title: "Design SDEX backfill on Prices-owned Fargate (Stream 2, ADR 0002)"
 type: FEATURE
-status: backlog
+status: active
 related_adr: ["0002"]
 related_tasks: ["0011", "0014", "0020", "0022"]
 tags: [priority-high, effort-large, infra, ecs, fargate, backfill, sdex, stream-2]
@@ -31,6 +31,10 @@ history:
       (archived) and the consolidated spec produced by task 0022.
       BE-coupling exits the design entirely: archive reads only, BE
       `stellar-xdr` parser imported as a library crate.
+  - date: 2026-05-13
+    status: active
+    who: okarcz
+    note: "Activated via /promote-task. Starting design work."
 ---
 
 # Design SDEX backfill on Prices-owned Fargate (Stream 2)
