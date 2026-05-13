@@ -2,7 +2,7 @@
 id: "0024"
 title: "volume_quote_usd enrichment pass: join price_ohlcv with oracle_prices for non-USD-quoted pairs"
 type: FEATURE
-status: active
+status: completed
 related_adr: ["0003"]
 related_tasks: ["0022", "0012", "0023"]
 tags: [priority-medium, effort-medium, ohlcv, enrichment, oracle, backfill, stream-2]
@@ -30,6 +30,14 @@ history:
       (the actual Lambda or backfill extension) waits for task
       0012's CDK + Rust impl to land. ADR 0003's
       `quote_asset_id` PK column simplifies the SQL join.
+  - date: 2026-05-13
+    status: completed
+    who: okarcz
+    note: >
+      Phase 1 design landed via PR #11. G-note specifies hourly
+      cron Lambda + FOR UPDATE SKIP LOCKED + 5m forward-fill +
+      CloudWatch telemetry. Phase 2 implementation spawned as
+      task 0026 — blocked on task 0012's RDS+backfill landing.
 ---
 
 # `volume_quote_usd` enrichment pass
@@ -108,5 +116,69 @@ Phase 1 (this iteration):
       no-direct-USD-oracle case (design §3 + §3.1).
 - [x] Phase 2 acceptance criteria enumerated for the follow-up
       impl task (design §7).
-- [ ] Spawn Phase 2 follow-up task (numbered after the current
-      max backlog id). To be done when this task is archived.
+- [x] Spawn Phase 2 follow-up task — spawned as task
+      [0026](../../backlog/0026_FEATURE_volume-quote-usd-enrichment-impl.md),
+      `blocked` on task 0012.
+
+## Implementation Notes
+
+Phase 1 landed in one commit on `feat/0024_volume-quote-usd-enrichment`
+(PR [#11](https://github.com/rumblefishdev/stellar-prices-api/pull/11)
+squash-merged into develop as `01ce5ab`):
+
+| Commit    | Scope                                             |
+| --------- | ------------------------------------------------- |
+| `3312492` | Convert task to directory + Phase 1 design G-note |
+
+Artifact: [`notes/G-enrichment-pass-design.md`](./notes/G-enrichment-pass-design.md)
+(~317 lines) covering trigger, SQL, idempotency, concurrency,
+missing-oracle, historical pass, telemetry. Mapped 1:1 to Phase 2
+impl acceptance criteria in §7.
+
+## Design Decisions
+
+### From Plan
+
+1. **Cron Lambda over backfill-extension / live-writer.** The
+   README listed three trigger candidates; the spec recommends
+   the cron Lambda for decoupling, idempotency, and consistency
+   with the existing Oracle Fetcher Lambda's design pattern.
+
+### Emerged
+
+2. **Two-phase task split.** The original README treated 0024 as
+   a single-phase FEATURE. Implementation can't land before task
+   0012 (RDS bootstrap + SDEX backfill) exists. Split the work:
+   design now (this iteration), impl later (spawned task 0026).
+3. **`FOR UPDATE SKIP LOCKED` chosen over write-side coordination.**
+   The concurrency analysis surfaced a "writer clobbers enrichment"
+   race that loses ~1h of USD volume per affected row in the worst
+   case. Adding write-side coordination would eliminate it but
+   adds complexity to live writers and the backfill. The chosen
+   trade-off accepts the bounded loss — next pass re-enriches.
+4. **USDC/USDT treated as ordinary quote assets.** Considered
+   hard-coding `volume_quote_usd = volume_quote` for stablecoin
+   quotes; rejected to keep one code path and to capture depeg
+   corrections from the oracle data.
+5. **Exotic-quote two-hop enrichment punted to v2.** Quote assets
+   with no direct USD oracle (e.g. AQUA) accumulate at
+   `volume_quote_usd = 0` indefinitely in v1. The Current Price
+   Updater silently excludes them (correct: we don't know what
+   they're worth in USD). A v2 two-hop pass via XLM is named but
+   not specced — separate task when prioritised.
+
+## Issues Encountered
+
+- **First activation commit captured only the rename**, not the
+  frontmatter edits — `git mv` had staged the rename before my
+  Edit landed in the index. Caught immediately; followup commit
+  `f926874` captured the frontmatter changes.
+
+## Future Work
+
+Phase 2 implementation lives in spawned task
+[0026](../../backlog/0026_FEATURE_volume-quote-usd-enrichment-impl.md)
+(status `blocked` on task 0012). A potential Phase 3 task for
+two-hop enrichment of exotic-quote pairs is mentioned in design
+spec §3.1; not spawned yet — wait for operational evidence that
+the missing-oracle rate is high enough to justify.
