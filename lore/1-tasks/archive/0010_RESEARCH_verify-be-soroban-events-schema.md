@@ -27,7 +27,7 @@ history:
       Superseded by task 0015. The verification question is answered
       definitively: BE PG has no full-content soroban_events (only
       appearances per ADR 0033); BE ClickHouse production schema
-      (`/home/oski/Projects/stellar/clickhouse-prod-schema.sql`,
+      (`docs/database-schema/clickhouse-prod-schema.sql`,
       populated by BE active task 0206) holds the full per-event
       content with topics_xdr + data_xdr + hoisted signature.
       Task 0015 carries the resulting backfill refactor and

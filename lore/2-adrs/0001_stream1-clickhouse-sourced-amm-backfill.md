@@ -10,7 +10,7 @@ links:
   - "../../../soroban-block-explorer/lore/2-adrs/0044_clickhouse-pilot-parallel-store.md"
   - "../../../soroban-block-explorer/lore/2-adrs/0033_soroban-events-appearances-read-time-detail.md"
   - "../../docs/prices-api-general-overview.md"
-  - "../../../clickhouse-prod-schema.sql"
+  - "../../docs/database-schema/clickhouse-prod-schema.sql"
 history:
   - date: 2026-05-12
     status: proposed
@@ -74,7 +74,7 @@ column for cheap `WHERE signature = 'swap'` filtering. BE tasks
 CLI flag landed), and active 0206 (real CH writer replacing the
 stub) have moved the ClickHouse copy past the "read-empty pilot"
 of ADR 0044's §6 — the production schema is declared in
-`/home/oski/Projects/stellar/clickhouse-prod-schema.sql`.
+[`docs/database-schema/clickhouse-prod-schema.sql`](../../docs/database-schema/clickhouse-prod-schema.sql).
 
 What is **still true** as of 2026-05-12: BE has **no
 AWS-deployed ClickHouse cluster**. The production CH schema is
@@ -308,5 +308,5 @@ from `LedgerCloseMeta` XDR, same as SDEX `offersClaimed[]`.
 - [BE task 0204](../../../soroban-block-explorer/lore/1-tasks/archive/0204_FEATURE_clickhouse-pilot-crate-docker-schema/) — CH crate + schema landing
 - [BE task 0205](../../../soroban-block-explorer/lore/1-tasks/archive/0205_FEATURE_backfill-runner-clickhouse-target-flag.md) — `--target=clickhouse` CLI flag
 - [BE task 0206](../../../soroban-block-explorer/lore/1-tasks/active/0206_FEATURE_clickhouse-persist-real-inserts/README.md) — real CH writer (active)
-- [ClickHouse production schema](../../../clickhouse-prod-schema.sql) — canonical DDL
+- [ClickHouse production schema](../../docs/database-schema/clickhouse-prod-schema.sql) — canonical DDL
 - [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/) — for related commit format

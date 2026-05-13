@@ -8,7 +8,7 @@ tags: [clickhouse, schema, block-explorer, source-of-truth]
 links:
   - "../../../../../soroban-block-explorer/lore/2-adrs/0044_clickhouse-pilot-parallel-store.md"
   - "../../../../../soroban-block-explorer/lore/1-tasks/active/0206_FEATURE_clickhouse-persist-real-inserts/README.md"
-  - "../../../../../../clickhouse-prod-schema.sql"
+  - "../../../../../docs/database-schema/clickhouse-prod-schema.sql"
 history:
   - date: 2026-05-12
     status: mature
@@ -32,8 +32,8 @@ ADR 0044 (proposed 2026-05-08). Between that proposal and today
 | 0208 (referenced) | — | Folded `liquidity_pools` into `ReplacingMergeTree` (was `MergeTree` in pilot). Schema-only amendment. |
 
 The canonical schema lives at
-`/home/oski/Projects/stellar/clickhouse-prod-schema.sql` and is
-self-declared "ClickHouse production schema (task 0206 + 0208 + ADR 0044
+[`docs/database-schema/clickhouse-prod-schema.sql`](../../../../../docs/database-schema/clickhouse-prod-schema.sql)
+and is self-declared "ClickHouse production schema (task 0206 + 0208 + ADR 0044
 amendments)" in the header comment.
 
 ## Caveats — what is and isn't true today

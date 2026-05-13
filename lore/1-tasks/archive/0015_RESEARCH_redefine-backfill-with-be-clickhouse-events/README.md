@@ -21,7 +21,7 @@ history:
       Created in response to BE's ClickHouse graduation past the
       read-empty pilot (BE ADR 0044 + archived tasks 0204/0205 + active
       task 0206 wiring real writes; production schema declared in
-      /home/oski/Projects/stellar/clickhouse-prod-schema.sql).
+      docs/database-schema/clickhouse-prod-schema.sql).
       Supersedes task 0010 — that task's "do decoded Soroban events live
       anywhere in BE's DB?" question is now answered definitively (yes,
       in CH `soroban_events` with full topics_xdr + data_xdr per row).
@@ -54,7 +54,7 @@ different engine**: ClickHouse holds full-content `soroban_events`
 partitioned by `ledger_sequence`). The CH copy is no longer the
 "read-empty pilot" of ADR 0044 — it is being populated by BE's active
 task 0206 against the production schema at
-`/home/oski/Projects/stellar/clickhouse-prod-schema.sql`.
+[`docs/database-schema/clickhouse-prod-schema.sql`](../../../../docs/database-schema/clickhouse-prod-schema.sql).
 
 This research task does two things:
 
@@ -93,7 +93,7 @@ What changed since task 0009 closed (2026-05-11):
   `persist_ledger_clickhouse` with a real writer that populates all
   17 tables + the `transaction_hash_dict` Dictionary, designed for
   the 11M-ledger public-archive backfill against local Docker CH.
-- **`/home/oski/Projects/stellar/clickhouse-prod-schema.sql`** is the
+- [**`docs/database-schema/clickhouse-prod-schema.sql`**](../../../../docs/database-schema/clickhouse-prod-schema.sql) is the
   canonical production DDL (task 0206 + 0208 + ADR 0044 amendments).
   Notable additions vs ADR 0044: surrogate `Int64` IDs via
   `cityhash64(natural_key)` on three central hubs (accounts,
@@ -122,7 +122,7 @@ What this means for prices-api:
 ### Step 1 — Distill BE-side state (R-note)
 
 Pull together the canonical facts from BE ADR 0044, BE active task
-0206, and `clickhouse-prod-schema.sql` into a single research note:
+0206, and [`clickhouse-prod-schema.sql`](../../../../docs/database-schema/clickhouse-prod-schema.sql) into a single research note:
 which tables exist, which engines, which ORDER BYs, which surrogate
 IDs, what the population status is today vs ADR 0044's "read-empty
 pilot" framing.
@@ -188,7 +188,7 @@ notes/
 
 - Inputs catalogued: BE ADR 0044; BE tasks 0204 (archived), 0205
   (archived), 0206 (active); BE infrastructure overview;
-  `/home/oski/Projects/stellar/clickhouse-prod-schema.sql`
+  [`docs/database-schema/clickhouse-prod-schema.sql`](../../../../docs/database-schema/clickhouse-prod-schema.sql)
   (task 0206 + 0208 + ADR 0044 amendments).
 - Notes layout follows lore Q/I/R/S/G convention: 1× R-, 1× G-,
   1× I-, 1× S- (no Q- because the questions were external — owned

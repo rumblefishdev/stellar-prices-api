@@ -7,7 +7,7 @@ spawns: []
 tags: [schema, mapping, price-calculation, clickhouse, design]
 links:
   - "./R-be-clickhouse-schema-and-status.md"
-  - "../../../../../../clickhouse-prod-schema.sql"
+  - "../../../../../docs/database-schema/clickhouse-prod-schema.sql"
   - "../../../../../docs/prices-api-general-overview.md"
 history:
   - date: 2026-05-12
