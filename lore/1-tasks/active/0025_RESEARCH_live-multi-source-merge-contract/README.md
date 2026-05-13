@@ -3,7 +3,7 @@ id: "0025"
 title: "Live multi-source merge contract: source=sdex → 'aggregated' transition rules"
 type: RESEARCH
 status: active
-related_adr: ["0003"]
+related_adr: ["0003", "0004"]
 related_tasks: ["0022", "0012", "0023", "0024"]
 tags: [priority-medium, effort-small, ohlcv, live-ingestion, multi-source]
 links:
@@ -11,6 +11,8 @@ links:
   - "../archive/0023_RESEARCH_ohlcv-row-identity-base-vs-pair/notes/S-recommendation.md"
   - "../archive/0024_FEATURE_volume-quote-usd-enrichment/notes/G-enrichment-pass-design.md"
   - "../../2-adrs/0003_price-ohlcv-pk-includes-quote-asset-id.md"
+  - "../../2-adrs/0004_price-ohlcv-multi-source-merge-columns.md"
+  - "./notes/G-merge-contract-spec.md"
   - "../../../docs/database-schema/database-schema-overview.md"
 history:
   - date: 2026-05-13
