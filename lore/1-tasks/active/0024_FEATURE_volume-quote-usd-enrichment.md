@@ -2,12 +2,14 @@
 id: "0024"
 title: "volume_quote_usd enrichment pass: join price_ohlcv with oracle_prices for non-USD-quoted pairs"
 type: FEATURE
-status: backlog
-related_adr: []
-related_tasks: ["0022", "0012"]
+status: active
+related_adr: ["0003"]
+related_tasks: ["0022", "0012", "0023"]
 tags: [priority-medium, effort-medium, ohlcv, enrichment, oracle, backfill, stream-2]
 links:
-  - "../active/0022_RESEARCH_sdex-filter-and-extraction-spec/notes/G-sdex-decode-and-bucket-spec.md"
+  - "../archive/0022_RESEARCH_sdex-filter-and-extraction-spec/notes/G-sdex-decode-and-bucket-spec.md"
+  - "../archive/0023_RESEARCH_ohlcv-row-identity-base-vs-pair/notes/S-recommendation.md"
+  - "../../2-adrs/0003_price-ohlcv-pk-includes-quote-asset-id.md"
   - "../../../docs/database-schema/database-schema-overview.md"
   - "../../../docs/prices-api-general-overview.md"
 history:
@@ -18,6 +20,16 @@ history:
       Spawned from 0022 future-work item 2. Decode spec §5.3 + §6
       item 2 deferred this to a follow-up pass; the backfill
       writes volume_quote_usd = 0 until enrichment runs.
+  - date: 2026-05-13
+    status: active
+    who: okarcz
+    note: >
+      Promoted to active. First-phase scope is design-only:
+      produce a G-note specifying the trigger, SQL join,
+      idempotency, and missing-oracle behaviour. Implementation
+      (the actual Lambda or backfill extension) waits for task
+      0012's CDK + Rust impl to land. ADR 0003's
+      `quote_asset_id` PK column simplifies the SQL join.
 ---
 
 # `volume_quote_usd` enrichment pass
