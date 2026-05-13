@@ -61,33 +61,52 @@ The pass joins these, computes
 `volume_quote_usd = price_ohlcv.volume_quote * oracle_price`,
 and UPSERTs the result back to `price_ohlcv`.
 
-## Implementation
+## Two-phase scope
 
-- Decide enrichment trigger: hourly cron Lambda, end-of-backfill
-  one-shot, or live writer extension. Live extension is simplest
-  but couples the Prices Ledger Processor to oracle availability;
-  cron Lambda decouples and lets backfill complete without
-  oracle gating.
-- Define the SQL update (or Rust task) joining `price_ohlcv` with
-  `oracle_prices` for `volume_quote_usd = 0` rows.
-- Handle minute-bucket alignment between `price_ohlcv` (1m
-  candles) and `oracle_prices` (5m oracle fetch cadence).
-  Recommended: forward-fill oracle price to 1m granularity within
-  the same 5m window.
-- Idempotent: re-running the pass on already-enriched rows must
-  produce identical values.
+This task is split into two phases. **Phase 1 (this iteration)**
+is design-only and lands a spec note; **Phase 2** is the actual
+Lambda implementation and follows once task 0012 (RDS bootstrap +
+SDEX backfill) lands.
+
+### Phase 1 — Design spec (this iteration)
+
+Produce [`notes/G-enrichment-pass-design.md`](./notes/G-enrichment-pass-design.md)
+covering:
+
+- Trigger architecture choice (cron Lambda vs end-of-backfill vs
+  live-writer extension), with reasoning.
+- SQL contract: the UPDATE statement joining `price_ohlcv` and
+  `oracle_prices` on `quote_asset_id` (ADR 0003).
+- Minute-bucket alignment between `price_ohlcv` (1m) and
+  `oracle_prices` (5m forward-fill window).
+- Idempotency contract (`WHERE volume_quote_usd = 0` gate).
+- Missing-oracle behaviour, including exotic-quote (no direct
+  USD oracle) edge cases.
+- Concurrency contract under PG `FOR UPDATE SKIP LOCKED` against
+  the backfill + live writers.
+- Historical (post-backfill) one-shot enrichment vs the hourly
+  rolling pass.
+- CloudWatch telemetry.
+
+### Phase 2 — Implementation (post-0012)
+
+Spawned as a separate FEATURE task when task 0012 lands. Carries
+forward the Phase 1 spec into a runnable Rust Lambda + CDK
+deployment + integration test. The Phase 2 acceptance criteria
+are listed in §7 of the design spec.
 
 ## Acceptance Criteria
 
-- [ ] Enrichment pass implemented (Lambda or backfill task
-      extension — TBD in design).
-- [ ] `current_prices.volume_24h_usd` reflects SDEX trades from
-      XLM-quoted pairs (verify: pick an XLM-quoted pair like
-      SCOP/XLM, confirm USD volume is non-zero in `current_prices`
-      after enrichment runs).
-- [ ] Idempotency test: enrichment over already-enriched data is
-      a no-op.
-- [ ] Documented behaviour for pairs with **no** oracle reference
-      (e.g. exotic pair where neither side has oracle coverage):
-      leave `volume_quote_usd = 0` and add a metric to track
-      missing-oracle rate.
+Phase 1 (this iteration):
+
+- [x] Design spec produced as a G-note covering the eight
+      concerns enumerated above.
+- [x] Trigger architecture chosen with reasoning (cron Lambda;
+      see design §1).
+- [x] SQL contract spec'd against ADR 0003's schema.
+- [x] Missing-oracle behaviour documented including the
+      no-direct-USD-oracle case (design §3 + §3.1).
+- [x] Phase 2 acceptance criteria enumerated for the follow-up
+      impl task (design §7).
+- [ ] Spawn Phase 2 follow-up task (numbered after the current
+      max backlog id). To be done when this task is archived.
