@@ -2,12 +2,15 @@
 id: "0025"
 title: "Live multi-source merge contract: source=sdex → 'aggregated' transition rules"
 type: RESEARCH
-status: backlog
-related_adr: []
-related_tasks: ["0022", "0012"]
+status: active
+related_adr: ["0003"]
+related_tasks: ["0022", "0012", "0023", "0024"]
 tags: [priority-medium, effort-small, ohlcv, live-ingestion, multi-source]
 links:
-  - "../active/0022_RESEARCH_sdex-filter-and-extraction-spec/notes/G-sdex-decode-and-bucket-spec.md"
+  - "../archive/0022_RESEARCH_sdex-filter-and-extraction-spec/notes/G-sdex-decode-and-bucket-spec.md"
+  - "../archive/0023_RESEARCH_ohlcv-row-identity-base-vs-pair/notes/S-recommendation.md"
+  - "../archive/0024_FEATURE_volume-quote-usd-enrichment/notes/G-enrichment-pass-design.md"
+  - "../../2-adrs/0003_price-ohlcv-pk-includes-quote-asset-id.md"
   - "../../../docs/database-schema/database-schema-overview.md"
 history:
   - date: 2026-05-13
@@ -17,6 +20,15 @@ history:
       Spawned from 0022 future-work item 3. Decode spec §5.6 sketched
       the multi-source merge pattern but explicitly scoped the live
       writer-side contract out.
+  - date: 2026-05-13
+    status: active
+    who: okarcz
+    note: >
+      Promoted to active. Scope is design-only — produces a G-note
+      specifying the writer-side multi-source merge contract.
+      Implementation lives in the Prices Ledger Processor when task
+      0012 lands. ADR 0003's `quote_asset_id` PK makes the merge
+      collision well-defined (per-native-pair, per-minute).
 ---
 
 # Live multi-source merge contract
