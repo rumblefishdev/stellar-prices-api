@@ -2,12 +2,12 @@
 id: "0023"
 title: "OHLCV row identity: decide base-only PK vs (base, quote) PK before SDEX backfill implementation"
 type: RESEARCH
-status: backlog
+status: active
 related_adr: []
 related_tasks: ["0022", "0012"]
 tags: [priority-high, effort-small, schema, ohlcv, sdex, backfill, blocking]
 links:
-  - "../active/0022_RESEARCH_sdex-filter-and-extraction-spec/notes/G-sdex-decode-and-bucket-spec.md"
+  - "../archive/0022_RESEARCH_sdex-filter-and-extraction-spec/notes/G-sdex-decode-and-bucket-spec.md"
   - "../../../docs/database-schema/database-schema-overview.md"
   - "../../../docs/prices-api-general-overview.md"
 history:
@@ -18,6 +18,13 @@ history:
       Spawned from 0022 future-work item 1. Decode spec §2.3 + §6
       surfaced this as a load-bearing schema gap before task 0012's
       Rust implementation can start.
+  - date: 2026-05-13
+    status: active
+    who: okarcz
+    note: >
+      Promoted to active immediately after 0022 archival. Blocking
+      task 0012 — needs an ADR-level decision on the OHLCV row PK
+      shape before the SDEX backfill Rust impl can be written.
 ---
 
 # OHLCV row identity: decide base-only PK vs (base, quote) PK
