@@ -1,13 +1,13 @@
 ---
 id: "0003"
 title: "price_ohlcv PK includes quote_asset_id: store one OHLCV row per (asset, quote, minute) native pair"
-status: proposed
+status: accepted
 deciders: [okarcz]
 related_tasks: ["0012", "0022", "0023", "0024", "0025"]
 related_adrs: ["0001", "0002"]
 tags: [architecture, schema, ohlcv, primary-key, sdex, backfill, multi-quote]
 links:
-  - "../1-tasks/active/0023_RESEARCH_ohlcv-row-identity-base-vs-pair/notes/S-recommendation.md"
+  - "../1-tasks/archive/0023_RESEARCH_ohlcv-row-identity-base-vs-pair/notes/S-recommendation.md"
   - "../1-tasks/archive/0022_RESEARCH_sdex-filter-and-extraction-spec/notes/G-sdex-decode-and-bucket-spec.md"
   - "../../docs/database-schema/database-schema-overview.md"
   - "../../docs/prices-api-general-overview.md"
@@ -20,6 +20,14 @@ history:
       in task 0022's decode-and-bucket spec §6 item 1. Replaces
       the implicit "asset_id = base; quote is implied" convention
       with explicit per-native-pair row identity.
+  - date: 2026-05-13
+    status: accepted
+    who: okarcz
+    note: >
+      Accepted alongside the merge of task 0023's research PR (#10).
+      Option A (add `quote_asset_id` to the PK) is the committed
+      design. Task 0012 lands the DDL in its pre-backfill schema
+      migration. Tasks 0024 and 0025 are unblocked.
 ---
 
 # ADR 0003: `price_ohlcv` PK includes `quote_asset_id`
