@@ -4,7 +4,7 @@ title: "Stream 1 Soroban AMM historical backfill is sourced from BE's ClickHouse
 status: accepted
 deciders: [okarcz]
 related_tasks: ["0015", "0017", "0018"]
-related_adrs: []
+related_adrs: ["0002"]
 tags: [architecture, backfill, clickhouse, block-explorer, soroban, amm, stream-1]
 links:
   - "../../../soroban-block-explorer/lore/2-adrs/0044_clickhouse-pilot-parallel-store.md"
@@ -128,11 +128,11 @@ Concretely:
    Galexie → S3 → EventBridge. The CH dependency is bounded to the
    historical backfill window.
 
-5. **Stream 2 (SDEX archive reads) is unchanged** by this ADR.
-   Whether the CH `operations_appearances` table is used as an
-   optional pre-filter for trade-shaped ops, and whether SDEX
-   should adopt its own CH-style backfill, is the research
-   question owned by [task 0020](../1-tasks/backlog/0020_RESEARCH_sdex-historical-backfill-options.md).
+5. **Stream 2 (SDEX archive reads) is governed by a separate ADR.**
+   See [ADR 0002](./0002_stream2-sdex-archive-backfill-independent-of-be.md):
+   Stream 2 is a fully prices-api-owned archive-read Fargate task
+   with no BE runtime/data coupling; only the BE-authored
+   `stellar-xdr` parser is consumed as a library crate.
 
 ---
 

@@ -2,11 +2,12 @@
 id: "0021"
 title: "Measure SDEX trade-shaped op density in CH operations_appearances"
 type: RESEARCH
-status: backlog
-related_adr: []
-related_tasks: ["0020", "0017"]
-tags: [priority-medium, effort-small, research, sdex, backfill, clickhouse, measurement, stream-2]
+status: canceled
+related_adr: ["0002"]
+related_tasks: ["0020", "0017", "0022"]
+tags: [priority-medium, effort-small, research, sdex, backfill, clickhouse, measurement, stream-2, canceled]
 links:
+  - "../../2-adrs/0002_stream2-sdex-archive-backfill-independent-of-be.md"
   - "../archive/0020_RESEARCH_sdex-historical-backfill-options/notes/S-sdex-backfill-recommendation.md"
   - "../archive/0020_RESEARCH_sdex-historical-backfill-options/notes/I-stream2-options.md"
 history:
@@ -19,6 +20,18 @@ history:
       least one op of type ∈ {2, 3, 4, 12, 13} — decides whether
       the CH pre-filter plumbing is worth building over baseline
       Option A. Gated on task 0017's local CH being populated.
+  - date: 2026-05-13
+    status: canceled
+    who: okarcz
+    reason: pivot
+    note: >
+      Canceled by ADR 0002. The Option B (CH pre-filter) path was
+      rejected on the grounds of BE-coupling cost vs bounded
+      perf gain. With Option A locked in as the Stream 2
+      architecture and BE runtime/data coupling explicitly
+      removed, the trim-ratio measurement no longer has a
+      decision to inform. The detailed SDEX filter/decode spec
+      that this task was a partial input to is now task 0022.
 ---
 
 # Measure SDEX trade-shaped op density in CH `operations_appearances`
