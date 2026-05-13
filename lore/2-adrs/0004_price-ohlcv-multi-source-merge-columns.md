@@ -1,13 +1,13 @@
 ---
 id: "0004"
 title: "price_ohlcv carries first_trade_at, last_trade_at, sources_seen for deterministic multi-source merge"
-status: proposed
+status: accepted
 deciders: [okarcz]
 related_tasks: ["0012", "0022", "0023", "0024", "0025"]
 related_adrs: ["0003"]
 tags: [architecture, schema, ohlcv, multi-source, merge, live-ingestion]
 links:
-  - "../1-tasks/active/0025_RESEARCH_live-multi-source-merge-contract/notes/G-merge-contract-spec.md"
+  - "../1-tasks/archive/0025_RESEARCH_live-multi-source-merge-contract/notes/G-merge-contract-spec.md"
   - "../1-tasks/archive/0023_RESEARCH_ohlcv-row-identity-base-vs-pair/notes/S-recommendation.md"
   - "../1-tasks/archive/0022_RESEARCH_sdex-filter-and-extraction-spec/notes/G-sdex-decode-and-bucket-spec.md"
   - "./0003_price-ohlcv-pk-includes-quote-asset-id.md"
@@ -21,6 +21,15 @@ history:
       the live multi-source merge contract requires. Extends ADR
       0003 (which fixed PK identity); these columns sit on the
       same row but are non-PK.
+  - date: 2026-05-13
+    status: accepted
+    who: okarcz
+    note: >
+      Accepted alongside the merge of task 0025's research PR (#12).
+      Task 0012's pre-backfill schema migration lands all three
+      columns alongside ADR 0003's quote_asset_id. The merge
+      formula lives in a shared Rust library consumed by every
+      writer (live + backfill).
 ---
 
 # ADR 0004: `price_ohlcv` carries `first_trade_at`, `last_trade_at`, `sources_seen` for deterministic multi-source merge
