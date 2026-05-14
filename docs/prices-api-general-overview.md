@@ -144,11 +144,18 @@ are listed here to confirm there is no double-billing.
 | **S3 bucket `stellar-ledger-data/`** | Owned and funded by Block Explorer | Prices API Lambda reads the same files; no additional S3 storage cost |
 | **VPC (us-east-1a)** | Owned by Block Explorer | Prices API RDS and Lambda functions deploy into the same VPC and private subnets |
 | **NAT Gateway** | Block Explorer's single NAT Gateway, billed to Block Explorer | Prices API Lambda egress traffic routed through the same gateway; no second NAT Gateway provisioned |
-| **ECS Fargate cluster** | Block Explorer's cluster | Prices API historical backfill tasks run in the same ECS cluster (separate task definition, no cluster fee) |
 | **GitHub Actions CI/CD patterns** | Shared pipeline structure and CDK conventions | Prices API pipeline reuses the same CDK deployment pattern |
 | **Block Explorer `soroban_events` table (read-only)** | Contains all decoded CAP-67 events (Soroswap, Aquarius, Phoenix swaps) from Soroban activation to present | Prices API backfill task connects read-only to Block Explorer RDS (same VPC) to extract Soroban AMM swap history. Eliminates ~8.5M ledger archive reads for the Soroban AMM stream. This creates a schema dependency; documented in Section 11 |
 
 **Confirmed: none of the components in 2.3 appear in the Prices API budget.**
+
+**Removed row.** Earlier versions of this table listed an "ECS Fargate cluster" row claiming
+Prices API historical backfill tasks ran in BE's shared cluster. Per ADR 0005, the SDEX
+backfill is a local workstation CLI — not a Fargate task — so nothing is shared with BE's
+cluster on the Stream 2 path. The Soroban AMM stream's deployment shape is pending
+reconciliation with ADR 0001 (also workstation-local); the `soroban_events` row above
+covers the Stream 1 BE-data dependency that ADR 0001 will revisit. See §11.1 for the
+matching cost-savings table.
 
 ---
 
@@ -653,7 +660,17 @@ aggregated whole candles and replace all non-PK columns. See the database schema
 | **OHLCV Rollup** | EventBridge rate(15 min) | Internal DB | Roll up 1m candles → 15m, 1h, 4h, 1d, 1w, 1M |
 | **Current Price Updater** | EventBridge rate(1 min) | Internal DB (after ingestion) | VWAP across sources → `current_prices` table |
 | **Cleanup Worker** | EventBridge cron(02:00 UTC) | Internal DB | Delete expired fine-grained data, drop old partitions, create upcoming partitions |
-| **Backfill Task** | ECS Fargate, runs continuously during project | Stellar public history archives | Historical SDEX trades + Soroban swaps, written into historical `price_ohlcv` partitions |
+| **SDEX Backfill CLI** (`sdex-backfill`, ADR 0005) | Local Rust CLI on operator workstation, run in tip-backward chunks during the project | `s3://aws-public-blockchain` (anonymous `--no-sign-request`) | Historical SDEX trades → 1-min `price_ohlcv` rows in **local Postgres** |
+| **SDEX Cloud Push** (`sdex-cloud-push`, ADR 0005) | Operator-invoked between chunks; only AWS-touching component on the Stream 2 path | Local Postgres `price_ohlcv` + `assets` | Streams accumulated rows to cloud RDS; advances `backfill_progress.sdex_archive.current_ledger` and `last_push_at` |
+| **Soroban AMM Backfill** [†](#stream-1-row-pending-adr-0001) | See ADR 0001 | BE `soroban_events` (location pending per ADR 0001) | Historical Soroswap/Aquarius/Phoenix swaps → `price_ohlcv` |
+
+<a id="stream-1-row-pending-adr-0001"></a>
+**† Stream 1 row pending.** The Soroban AMM backfill's deployment shape is being reconciled
+with ADR 0001 in a follow-up. The current §5.6 Stream 1 architecture diagram and the §5.6
+processing-rate sub-table still describe a Fargate-style task reading BE's Postgres
+`soroban_events`; ADR 0001 moves the source to a local ClickHouse instance populated by BE's
+`backfill-runner --target=clickhouse`. This row will be rewritten when §5.6 Stream 1 is
+updated. The trigger and source cells above are deliberately minimal until then.
 
 ### 5.4 EventBridge Scheduler Rules
 
@@ -855,11 +872,14 @@ CLI progress via direct SQL on the workstation Postgres.
 
 **Starting instance:** `db.t4g.micro` (2 vCPU burstable, 1 GB RAM) — ~$12/mo
 
-**During backfill period:** upgraded to `db.m6g.large` (~$131/mo) — a non-burstable
-general-purpose instance with 2 dedicated vCPU and 8 GB RAM. The `t4g` burstable family is
-unsuitable for sustained backfill writes: CPU credits exhaust within hours under continuous
-load and the instance throttles to its baseline fraction (~20% of one vCPU), collapsing write
-throughput. After backfill completes, the instance is downgraded back to `db.t4g.micro`.
+**During `sdex-cloud-push` windows (ADR 0005):** the cloud RDS sees only the bursty push
+step, not continuous backfill writes. `db.t4g.micro` is typically sufficient throughout;
+an optional temporary upgrade to `db.t4g.small` (~$25/mo) during active push windows can
+help if a single push runs long enough to exhaust burst CPU credits. The `db.m6g.large`
+upgrade specified in earlier Fargate-era versions of this design is no longer required —
+that sizing was driven by the assumption of a continuous backfill task writing for weeks,
+which does not occur under ADR 0005. See §10 "Backfill Period Additional Costs" for the
+revised cost line.
 
 **Storage:** 20 GB gp3 initially, auto-scaling enabled up to 500 GB (to accommodate full
 all-time history once backfill completes)
