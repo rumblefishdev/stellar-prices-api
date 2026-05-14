@@ -2,7 +2,7 @@
 id: "0013"
 title: "Update prices-api-general-overview.md §2.3/§5.6/§11 to match ADR 0001 + ADR 0002"
 type: DOCS
-status: active
+status: completed
 related_adr: ["0001", "0002", "0005"]
 related_tasks: ["0012", "0014", "0015", "0017", "0022", "0029"]
 tags: [priority-medium, effort-small, docs, infra, clickhouse, sdex, backfill]
@@ -70,6 +70,20 @@ history:
       The Stream-1-flavored acceptance criteria below are marked
       "deferred to 0029"; this task stays active until 0029's PR also
       merges, at which point 0013 can be marked completed.
+  - date: 2026-05-14
+    status: completed
+    who: okarcz
+    note: >
+      PR #14 squash-merged to develop as commit 5f5b3c2. 7 commits
+      landed: 5 doc-edit commits (§2.3, §3.5, §4.5, §5.3, §5.6 Stream 2,
+      §6, §8, §9, §10, §11.1, §11.4 — 11 sections), 1 lore-housekeeping
+      commit (spawning task 0029 + marking Stream-1 criteria deferred),
+      1 doc-housekeeping commit (Revision History table at the top of
+      the design doc). User decided to complete 0013 now rather than
+      keep it active for the Stream 1 follow-up — task 0029 is fully
+      independent and will carry its own PR. Five of the eight original
+      acceptance criteria ticked; the three Stream-1 criteria are
+      explicitly deferred to 0029.
 ---
 
 # Update prices-api-general-overview.md §2.3/§5.6/§11 to match ADR 0001 + ADR 0002
