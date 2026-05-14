@@ -7,6 +7,17 @@
 > a concrete historical backfill plan with milestones in Tranches 2 and 3 is added; and a
 > `GET /backfill/status` API endpoint is introduced to allow progress monitoring.
 
+## Revision History
+
+Substantive revisions only. Minor wording / schema-comment / index tweaks land via normal
+commits and are not tracked here. Append a new row when a change touches the architecture,
+the API surface, or the cost / budget framing.
+
+| Date | Sections touched | Driver | Summary |
+|------|------------------|--------|---------|
+| 2026-05-14 | §2.3, §3.5, §4.5, §5.3, §5.6 Stream 2, §6, §8, §9, §10, §11.1, §11.4 | [ADR 0005](../lore/2-adrs/0005_stream2-sdex-local-workstation-backfill.md) (supersedes ADR 0002) · [Task 0013](../lore/1-tasks/active/0013_DOCS_update-design-doc-to-match-be-reality.md) | Stream 2 (SDEX) backfill moved from continuous ECS Fargate to a local Rust CLI on the operator's workstation with a separate `sdex-cloud-push` step to cloud RDS. `backfill_progress` schema swapped from heartbeat fields to `last_push_at`. `GET /backfill/status` response and tranche acceptance criteria reframed around push cadence. Backfill compute cost dropped ~95%. Stream 1 (Soroban AMM) reconciliation per [ADR 0001](../lore/2-adrs/0001_stream1-clickhouse-sourced-amm-backfill.md) is tracked separately under [Task 0029](../lore/1-tasks/backlog/0029_DOCS_update-design-doc-stream-1-adr-0001.md). |
+| (earlier) | whole document | second-round reviewer feedback | Post-2nd-Review baseline: stack switched to Rust + axum + sqlx (matching the Block Explorer codebase); BE-shared infrastructure explicitly catalogued (§11); historical backfill plan with Tranche 2 / Tranche 3 milestones added (§5.6); `GET /backfill/status` endpoint introduced (§4.5). |
+
 ---
 
 ## 0. Deployment & AWS Account
@@ -144,11 +155,18 @@ are listed here to confirm there is no double-billing.
 | **S3 bucket `stellar-ledger-data/`** | Owned and funded by Block Explorer | Prices API Lambda reads the same files; no additional S3 storage cost |
 | **VPC (us-east-1a)** | Owned by Block Explorer | Prices API RDS and Lambda functions deploy into the same VPC and private subnets |
 | **NAT Gateway** | Block Explorer's single NAT Gateway, billed to Block Explorer | Prices API Lambda egress traffic routed through the same gateway; no second NAT Gateway provisioned |
-| **ECS Fargate cluster** | Block Explorer's cluster | Prices API historical backfill tasks run in the same ECS cluster (separate task definition, no cluster fee) |
 | **GitHub Actions CI/CD patterns** | Shared pipeline structure and CDK conventions | Prices API pipeline reuses the same CDK deployment pattern |
 | **Block Explorer `soroban_events` table (read-only)** | Contains all decoded CAP-67 events (Soroswap, Aquarius, Phoenix swaps) from Soroban activation to present | Prices API backfill task connects read-only to Block Explorer RDS (same VPC) to extract Soroban AMM swap history. Eliminates ~8.5M ledger archive reads for the Soroban AMM stream. This creates a schema dependency; documented in Section 11 |
 
 **Confirmed: none of the components in 2.3 appear in the Prices API budget.**
+
+**Removed row.** Earlier versions of this table listed an "ECS Fargate cluster" row claiming
+Prices API historical backfill tasks ran in BE's shared cluster. Per ADR 0005, the SDEX
+backfill is a local workstation CLI — not a Fargate task — so nothing is shared with BE's
+cluster on the Stream 2 path. The Soroban AMM stream's deployment shape is pending
+reconciliation with ADR 0001 (also workstation-local); the `soroban_events` row above
+covers the Stream 1 BE-data dependency that ADR 0001 will revisit. See §11.1 for the
+matching cost-savings table.
 
 ---
 
@@ -282,9 +300,13 @@ CREATE INDEX idx_oracle_asset ON oracle_prices (asset_id, oracle_name, timestamp
 ### 3.5 Backfill Progress Tracking
 
 One row per backfill stream (`sdex_archive`, `soroban_amm`). Both rows are
-seeded at provisioning time and updated by their respective ECS Fargate tasks.
-The `GET /backfill/status` endpoint reads both rows and returns them as the
-nested `sdex` and `soroban_amm` objects (see Section 4.5).
+seeded at provisioning time. Per ADRs 0001 and 0005, both canonical streams
+are populated by workstation-local processes, so the cloud row is updated by
+a push step — not by a continuously-running cloud-side task. For
+`sdex_archive` the writer is `sdex-cloud-push` (runs in tip-backward chunks);
+for `soroban_amm` the writer is the one-shot AMM CLI when it completes its
+push to cloud. The `GET /backfill/status` endpoint reads both rows and
+returns them as the nested `sdex` and `soroban_amm` objects (see Section 4.5).
 
 ```sql
 CREATE TABLE backfill_progress (
@@ -296,12 +318,18 @@ CREATE TABLE backfill_progress (
     -- it surfaces.
     start_ledger    BIGINT NOT NULL,
     target_ledger   BIGINT NOT NULL,
-    current_ledger  BIGINT NOT NULL,
+    current_ledger  BIGINT NOT NULL,        -- the boundary ledger reflected in
+                                            -- the cloud DB after the most recent
+                                            -- push: oldest pushed for sdex_archive
+                                            -- (high→low), newest pushed for
+                                            -- soroban_amm (low→high)
     status          VARCHAR(20) NOT NULL DEFAULT 'running'
                     CHECK (status IN ('running', 'paused', 'completed', 'error')),
-    rate_per_hour   BIGINT,               -- ledgers/hour, rolling average; NULL if the task does not track rate
-    eta_hours       NUMERIC(10,1),        -- estimated hours to completion; NULL if unknown or task is short-lived
-    last_heartbeat  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_push_at    TIMESTAMPTZ,            -- timestamp of the most recent push
+                                            -- that advanced current_ledger. NULL
+                                            -- until the first push. Used by the
+                                            -- GET /backfill/status freshness
+                                            -- alarm (see §5.6)
     started_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     completed_at    TIMESTAMPTZ
 );
@@ -314,6 +342,16 @@ VALUES
     ('sdex_archive', 1,        0, 0, 'running'),
     ('soroban_amm',  48500000, 0, 0, 'running');
 ```
+
+**Removed from earlier schema versions.** `last_heartbeat`, `rate_per_hour`, and
+`eta_hours` were on the original Fargate-shaped schema (one continuous task per
+stream, heartbeating into the cloud row every 15 minutes). ADR 0005 made
+Stream 2 a local workstation CLI; ADR 0001 had already done the same for
+Stream 1. Neither stream has a continuously-running cloud-side process, so
+neither field has a meaningful value to write. Operators inspect live CLI
+progress (rate, ETA) via direct SQL on the workstation Postgres; the cloud
+DB carries only the most recent push state. If a future stream reintroduces a
+continuous cloud-side writer, these columns can be added back at that time.
 
 ### 3.6 Retention Policy (Cleanup Worker Lambda)
 ```
@@ -531,9 +569,13 @@ feed the `price_usd` field in any other endpoint.
 Returns the current state of the historical all-time backfill. This endpoint is the primary
 mechanism for the Tranche 3 reviewer to validate that backfill is progressing correctly.
 
-A CloudWatch alarm fires if `last_heartbeat` falls more than 20 minutes behind the current
-time (indicating the backfill task has stalled or crashed). The 20-minute threshold sits
-above the 15-minute write cadence so a single delayed write does not trip the alarm.
+Per ADRs 0001 and 0005, both canonical streams run as workstation-local processes; the
+cloud-side `backfill_progress` row advances only when each stream's push step runs. The
+response therefore reflects the most recent push state, not a live task heartbeat. Live
+CLI progress is visible to the operator via direct SQL on the workstation Postgres but is
+not surfaced to API consumers. A CloudWatch alarm fires if `last_push_at` falls behind the
+configured push-cadence threshold for the stream's tranche (operator-tunable; see §5.6
+"GET /backfill/status Freshness").
 
 The backfill is split into two independent streams with different sources and timelines (see
 Section 5.6). The response reflects both.
@@ -547,16 +589,14 @@ Section 5.6). The response reflects both.
     "current_ledger": 34891234,
     "start_ledger": 1,
     "target_ledger": 57234198,
-    "progress_pct": 61.2,
-    "ledgers_remaining": 22342964,
-    "rate_ledgers_per_hour": 148200,
-    "estimated_hours_to_completion": 150.7,
-    "task_healthy": true,
-    "last_heartbeat": "2026-06-15T14:29:55Z",
+    "progress_pct": 39.2,
+    "ledgers_remaining": 34891233,
+    "last_push_at": "2026-06-15T11:30:00Z",
     "earliest_data_available": "2019-08-22T00:00:00Z"
   },
   "soroban_amm": {
     "status": "completed",
+    "last_push_at": "2026-04-14T08:23:11Z",
     "completed_at": "2026-04-14T08:23:11Z",
     "earliest_data_available": "2023-11-01T00:00:00Z"
   }
@@ -566,12 +606,13 @@ Section 5.6). The response reflects both.
 | Field | Description |
 |-------|-------------|
 | `sdex.status` | `running`, `paused`, `completed`, or `error` — SDEX archive backfill |
-| `sdex.current_ledger` | Oldest ledger processed so far by the SDEX backfill task |
-| `sdex.rate_ledgers_per_hour` | Rolling 15-min average processing rate |
-| `sdex.estimated_hours_to_completion` | `ledgers_remaining / rate_per_hour` |
-| `sdex.task_healthy` | `false` if no heartbeat in past 20 minutes → CloudWatch alarm fires |
-| `sdex.earliest_data_available` | Stored timestamp of the oldest SDEX OHLCV row known for this stream — recorded by the backfill task when it first writes a candle for a given timestamp, **not** computed live via `MIN(timestamp)`. Returned as-is, so reads are O(1). |
+| `sdex.current_ledger` | Oldest ledger reflected in the cloud DB after the most recent `sdex-cloud-push`. Advances at push cadence, not CLI cadence. |
+| `sdex.progress_pct` | `(target_ledger - current_ledger) / (target_ledger - start_ledger) * 100`, computed at read time |
+| `sdex.ledgers_remaining` | `current_ledger - start_ledger`, computed at read time |
+| `sdex.last_push_at` | Timestamp of the most recent successful `sdex-cloud-push`. The CloudWatch freshness alarm fires when this is older than the configured push-cadence threshold for the active tranche. `null` until the first push. |
+| `sdex.earliest_data_available` | Stored timestamp of the oldest SDEX OHLCV row known for this stream — recorded by the push step when it first lands a candle for a given timestamp, **not** computed live via `MIN(timestamp)`. Returned as-is, so reads are O(1). |
 | `soroban_amm.status` | Typically `completed` from Tranche 1 onwards |
+| `soroban_amm.last_push_at` | Timestamp of the one-shot AMM CLI's completion push (ADR 0001). `null` until the push happens. |
 | `soroban_amm.earliest_data_available` | Same semantics as `sdex.earliest_data_available` — stored, not computed. Lands at the Soroban activation date (~Nov 2023) once the one-time backfill completes. |
 
 ---
@@ -630,7 +671,17 @@ aggregated whole candles and replace all non-PK columns. See the database schema
 | **OHLCV Rollup** | EventBridge rate(15 min) | Internal DB | Roll up 1m candles → 15m, 1h, 4h, 1d, 1w, 1M |
 | **Current Price Updater** | EventBridge rate(1 min) | Internal DB (after ingestion) | VWAP across sources → `current_prices` table |
 | **Cleanup Worker** | EventBridge cron(02:00 UTC) | Internal DB | Delete expired fine-grained data, drop old partitions, create upcoming partitions |
-| **Backfill Task** | ECS Fargate, runs continuously during project | Stellar public history archives | Historical SDEX trades + Soroban swaps, written into historical `price_ohlcv` partitions |
+| **SDEX Backfill CLI** (`sdex-backfill`, ADR 0005) | Local Rust CLI on operator workstation, run in tip-backward chunks during the project | `s3://aws-public-blockchain` (anonymous `--no-sign-request`) | Historical SDEX trades → 1-min `price_ohlcv` rows in **local Postgres** |
+| **SDEX Cloud Push** (`sdex-cloud-push`, ADR 0005) | Operator-invoked between chunks; only AWS-touching component on the Stream 2 path | Local Postgres `price_ohlcv` + `assets` | Streams accumulated rows to cloud RDS; advances `backfill_progress.sdex_archive.current_ledger` and `last_push_at` |
+| **Soroban AMM Backfill** [†](#stream-1-row-pending-adr-0001) | See ADR 0001 | BE `soroban_events` (location pending per ADR 0001) | Historical Soroswap/Aquarius/Phoenix swaps → `price_ohlcv` |
+
+<a id="stream-1-row-pending-adr-0001"></a>
+**† Stream 1 row pending.** The Soroban AMM backfill's deployment shape is being reconciled
+with ADR 0001 in a follow-up. The current §5.6 Stream 1 architecture diagram and the §5.6
+processing-rate sub-table still describe a Fargate-style task reading BE's Postgres
+`soroban_events`; ADR 0001 moves the source to a local ClickHouse instance populated by BE's
+`backfill-runner --target=clickhouse`. This row will be rewritten when §5.6 Stream 1 is
+updated. The trigger and source cells above are deliberately minimal until then.
 
 ### 5.4 EventBridge Scheduler Rules
 
@@ -671,7 +722,7 @@ which drives a two-stream backfill design:
 
 | Stream | Data location | Era | Method |
 |--------|-------------|-----|--------|
-| **SDEX trades** | `OperationResult → offersClaimed[]` in `LedgerCloseMeta` XDR | All-time (2015 → present, ~57M ledgers) | Archive reads via ECS Fargate task |
+| **SDEX trades** | `TransactionResultMeta` (`ClaimAtom` from the five trade-shaped op types) in `LedgerCloseMeta` XDR | All-time (2015 → present, ~57M ledgers) | Local Rust CLI on operator workstation (`s3://aws-public-blockchain` anonymous reads) → local Postgres → post-backfill cloud push (see ADR 0005) |
 | **Soroban AMM swaps** (Soroswap, Aquarius, Phoenix) | `SorobanTransactionMeta.events` (CAP-67) — already parsed and stored in Block Explorer `soroban_events` table | Soroban activation (Nov 2023) → present (~8.5M ledgers) | Read-only query to Block Explorer RDS |
 
 The Soroban AMM stream is handled first (Tranche 1) by querying the Block Explorer's already-indexed
@@ -700,26 +751,32 @@ Block Explorer RDS (read-only)
 │  - Marks soroban_amm stream "completed"  │
 └──────────────────────────────────────────┘
 
-STREAM 2 — SDEX (slow, runs through and past Tranche 3)
-────────────────────────────────────────────────────────
-Stellar Public History Archives (S3-compatible)
+STREAM 2 — SDEX (local backfill + post-backfill cloud push, ADR 0005)
+─────────────────────────────────────────────────────────────────────
+s3://aws-public-blockchain/v1.1/stellar/ledgers/pubnet/
+(Stellar public history archive, anonymous `--no-sign-request`)
         │
-        ▼ (ledger range reads, oldest→newest)
-┌──────────────────────────────────────────┐
-│  SDEX Backfill ECS Fargate Task (Rust)   │
-│  - Reads LedgerCloseMeta from archives   │
-│  - Extracts offersClaimed[] from         │
-│    ManageSellOffer/ManageBuyOffer results │
-│  - Writes OHLCV into historical          │
-│    price_ohlcv partitions                │
-│  - Updates backfill_progress heartbeat   │
-│    every 15 minutes                      │
-└──────────────────────────────────────────┘
+        ▼ `aws s3 sync` (partition-at-a-time prefetch)
+┌─────────────────────────────────────────────────────────┐
+│  sdex-backfill — local Rust CLI on operator workstation │
+│  (mirrors BE `backfill-runner` pattern, BE ADR 0010)    │
+│  - Decompresses `.xdr.zst` via BE `xdr-parser` crate    │
+│    (git Cargo dep; library only, no runtime coupling)   │
+│  - Filter + extract per task 0022's spec:               │
+│    5 trade-shaped op types → ClaimAtom → TradeTick      │
+│  - Buckets to 1-minute price_ohlcv (ADR 0003 PK shape)  │
+│  - Per-ledger atomic txn: price_ohlcv UPSERTs +         │
+│    backfill_progress checkpoint commit together         │
+└─────────────────────────────────────────────────────────┘
                │
                ▼
-       Prices RDS PostgreSQL
-       (historical price_ohlcv partitions,
-        written in parallel with live writes)
+       Local Postgres (Docker) on workstation
+       (operator-owned; backfill writes here, not cloud RDS)
+               │
+               ▼ `sdex-cloud-push` (separate post-backfill tool)
+       Prices RDS PostgreSQL (cloud)
+       (historical price_ohlcv partitions; runs in tip-backward
+        chunks so the cloud view advances every push cycle)
 ```
 
 Neither backfill task conflicts with live ingestion: native range partitioning separates
@@ -729,6 +786,14 @@ historical writes (old month partitions) from live writes (current month partiti
 Block Explorer's RDS within the shared VPC. It accesses only the `soroban_events` table and
 does not write to it. If the Block Explorer's `soroban_events` schema changes, the backfill
 task must be updated accordingly. This dependency is documented in Section 11.
+
+**Stream 2 coupling note (ADR 0005):** Stream 2 has zero runtime or data coupling with the
+Block Explorer. The only BE artefact consumed is the `xdr-parser` crate, pinned as a git
+Cargo library dependency (`xdr-parser = { git = "https://github.com/rumblefishdev/soroban-block-explorer.git", branch = "main" }`)
+and compiled read-only into the `sdex-backfill` binary. No BE database is read, no BE
+service is called, no BE infrastructure is shared on the Stream 2 path. (The git pin is a
+transient convenience; once BE publishes `xdr-parser` as a standalone versioned crate it
+becomes a plain `xdr-parser = "X.Y.Z"` pin — no design change.)
 
 #### Processing Rate and Compute Estimates
 
@@ -742,39 +807,62 @@ task must be updated accordingly. This dependency is documented in Section 11.
 | ECS task configuration | 1 vCPU / 2 GB RAM | Short-lived; same ECS cluster |
 | Expected completion | During Tranche 1 (Week 2–3) | |
 
-**Stream 2 — SDEX (archive reads):**
+**Stream 2 — SDEX (local workstation CLI, ADR 0005):**
 
 | Metric | Value | Notes |
 |--------|-------|-------|
 | Total ledgers | ~57 million | Ledger 1 (Nov 2015) to current tip |
-| Task configuration | 2 vCPU / 4 GB RAM, ECS Fargate, continuous | Shared ECS cluster |
-| Historical read rate | ~150,000–200,000 ledgers/hour | From public archives; single task |
-| Effective sustained rate (DB limited) | ~150,000 ledgers/hour | db.t4g.small during backfill |
-| Estimated total hours | ~380 hours (~16 days) of pure compute | 57M / 150,000 |
-| Expected completion | ~4–6 weeks after Tranche 3 | Backfill runs continuously post-delivery |
+| Runtime | Local Rust CLI on operator workstation | No AWS infrastructure for the backfill itself; mirrors BE `backfill-runner` |
+| Source | `s3://aws-public-blockchain/v1.1/stellar/ledgers/pubnet/` | Anonymous `--no-sign-request`; no AWS account needed to read |
+| Sink during backfill | Local Postgres (Docker) on workstation | Cloud RDS is **not** written during backfill |
+| Measured CLI rate | ~311 ledgers/s (~1.12M ledgers/hour) | Per task 0022's measurement against the SDEX filter |
+| Effective wall-clock (network-bound) | ~12–16 days continuous on one laptop | Archive sync is the bottleneck; CPU rarely saturates |
+| Cloud-push cadence | Tip-backward chunks (e.g. `--start=tip-1.1M --end=tip` for the first Tranche 1 chunk, then older ranges) | The cloud `GET /backfill/status` view advances at push cadence, not CLI cadence |
+| Expected completion | Full historical coverage extends past Tranche 3 | Tranche 3 acceptance is "progressing", not "complete" — unchanged from ADR 0002 |
 
-The SDEX backfill task is self-recovering: it tracks `current_ledger` in `backfill_progress`
-and resumes from its last checkpoint on restart. Early ledgers (pre-2018) have very few DEX
-trades and process faster; the estimate above is conservative.
+The `sdex-backfill` CLI is resumable at per-ledger granularity: each ledger's `price_ohlcv`
+UPSERTs and its `backfill_progress` checkpoint advance commit atomically in a single
+transaction. A crash mid-ledger leaves `current_ledger` pointing at the last fully-processed
+ledger; restart re-fetches and re-UPSERTs that ledger idempotently (whole-row replacement,
+per ADR 0004's merge semantics). Partition-level pre-skip is also supported: if a
+partition's clamped range is fully present in the processed set, the partition is not
+re-downloaded. Early ledgers (pre-2018) have very few DEX trades and process faster; the
+estimate above is conservative.
+
+Single-laptop v1 is deliberate (ADR 0005 §8). Multi-laptop parallelism is feasible but
+requires the `assets`-table surrogate-id remap that BE's `db-merge` solves — out of scope
+for v1, revisitable as v2 if measured wall-clock proves untenable.
 
 #### Backfill Milestones
 
 | Tranche | Stream | Milestone | Validation |
 |---------|--------|-----------|------------|
 | **1** (Week 4) | Soroban AMM | Full AMM history from Soroban activation (Nov 2023) available | `soroban_amm.status: "completed"` in `GET /backfill/status`; OHLCV data for Soroswap pairs verifiable for Nov 2023 dates |
-| **1** (Week 4) | SDEX | Archive backfill task running; covers recent 6 months of SDEX data | `sdex.task_healthy: true`; `sdex.earliest_data_available` ~6 months ago |
-| **2** (Week 9) | SDEX | 4+ years of SDEX history (back to Jan 2022) | `sdex.earliest_data_available` ≤ 2022-01-01; reviewer spot-checks XLM/USDC OHLCV for 2022 dates |
-| **3** (Week 13) | SDEX | 8+ years of SDEX history (back to Jan 2018) | `sdex.earliest_data_available` ≤ 2018-01-01; `sdex.task_healthy: true`; `estimated_hours_to_completion` shows credible remaining estimate |
-| **Post-delivery** | SDEX | Full all-time SDEX history (ledger 1 to present) | `sdex.status: "completed"`; Stellar notified |
+| **1** (Week 4) | SDEX | First tip-backward chunk (~6 months) processed locally and pushed to cloud RDS | `sdex.earliest_data_available` ~6 months ago in `GET /backfill/status` (reflects what the most recent push delivered); `sdex.last_push_at` within the last push-cadence window |
+| **2** (Week 9) | SDEX | 4+ years of SDEX history pushed (back to Jan 2022) | `sdex.earliest_data_available` ≤ 2022-01-01 after a fresh push; reviewer spot-checks XLM/USDC OHLCV for 2022 dates |
+| **3** (Week 13) | SDEX | 8+ years of SDEX history pushed (back to Jan 2018) | `sdex.earliest_data_available` ≤ 2018-01-01 after a fresh push; `sdex.last_push_at` within the last push-cadence window; operator reports a credible remaining estimate from local CLI progress |
+| **Post-delivery** | SDEX | Full all-time SDEX history (ledger 1 to present) pushed | `sdex.status: "completed"`; Stellar notified |
 
-#### `GET /backfill/status` Alarm
+Note (ADR 0005): Stream 2's cloud-side `GET /backfill/status` is fed by the post-backfill
+`sdex-cloud-push` step, not by a live Fargate task. The view advances every push cycle. The
+operator can inspect the local CLI's freshest progress via a direct SQL query on the local
+Postgres at any time, but API consumers see only the most recently pushed state.
 
-A CloudWatch alarm monitors the `last_heartbeat` field in `backfill_progress`. If the backfill
-task fails to update the heartbeat for more than 20 minutes, an SNS alarm fires (email + Slack)
-to alert the team. The 20-minute threshold is chosen to sit comfortably above the 15-minute
-write cadence (`sdex_archive` updates every 15 min) so a single delayed write does not trip
-the alarm — only a genuine task stall does. This alarm is active for the full backfill
-duration, including post-delivery.
+#### `GET /backfill/status` Freshness
+
+Per ADR 0005, the SDEX backfill runs locally on the operator's workstation; the cloud
+`backfill_progress` row for `sdex_archive` is updated by the `sdex-cloud-push` step, not by
+the running CLI. The cloud view therefore advances at push cadence, not CLI cadence.
+
+The relevant freshness signal on `GET /backfill/status` is `sdex.last_push_at` (the timestamp
+of the most recent successful push). A CloudWatch alarm fires if `sdex.last_push_at` is older
+than the configured push-cadence threshold during the backfill window (e.g. 7 days for
+Tranche 1, looser post-delivery as completion approaches). The threshold is operator-tunable
+because push cadence is driven by tip-backward chunk size, not by a continuous heartbeat.
+
+A laptop-side staleness check is **not** wired into AWS alarms — workstation uptime is an
+operator-managed concern (BE accepts the same trade in BE ADR 0010). Operators inspect local
+CLI progress via direct SQL on the workstation Postgres.
 
 ---
 
@@ -795,11 +883,14 @@ duration, including post-delivery.
 
 **Starting instance:** `db.t4g.micro` (2 vCPU burstable, 1 GB RAM) — ~$12/mo
 
-**During backfill period:** upgraded to `db.m6g.large` (~$131/mo) — a non-burstable
-general-purpose instance with 2 dedicated vCPU and 8 GB RAM. The `t4g` burstable family is
-unsuitable for sustained backfill writes: CPU credits exhaust within hours under continuous
-load and the instance throttles to its baseline fraction (~20% of one vCPU), collapsing write
-throughput. After backfill completes, the instance is downgraded back to `db.t4g.micro`.
+**During `sdex-cloud-push` windows (ADR 0005):** the cloud RDS sees only the bursty push
+step, not continuous backfill writes. `db.t4g.micro` is typically sufficient throughout;
+an optional temporary upgrade to `db.t4g.small` (~$25/mo) during active push windows can
+help if a single push runs long enough to exhaust burst CPU credits. The `db.m6g.large`
+upgrade specified in earlier Fargate-era versions of this design is no longer required —
+that sizing was driven by the assumption of a continuous backfill task writing for weeks,
+which does not occur under ADR 0005. See §10 "Backfill Period Additional Costs" for the
+revised cost line.
 
 **Storage:** 20 GB gp3 initially, auto-scaling enabled up to 500 GB (to accommodate full
 all-time history once backfill completes)
@@ -840,7 +931,7 @@ all-time history once backfill completes)
 | Component | Technology |
 |-----------|-----------|
 | Language | Rust (edition 2021) |
-| Runtime | AWS Lambda (Rust, custom `provided.al2` runtime via `lambda_runtime` crate) + ECS Fargate for Galexie and backfill task |
+| Runtime | AWS Lambda (Rust, custom `provided.al2` runtime via `lambda_runtime` crate) for API + ingestion workers; ECS Fargate for shared Galexie (BE-funded); local Rust CLI on operator workstation for Stream 2 backfill (ADR 0005) |
 | API Framework | `axum` (HTTP router, shared with Block Explorer backend) |
 | XDR parsing | `stellar-xdr` crate (official SDF Rust XDR types) — shared workspace crate with Block Explorer |
 | Database client | `sqlx` (compile-time verified queries, async) |
@@ -871,10 +962,12 @@ all-time history once backfill completes)
 - Prices Ledger Processor Lambda deployed and registered as second S3 event notification target
   on the shared `stellar-ledger-data/` S3 bucket; confirmed processing live ledgers
 - Asset Discovery Lambda running; `assets` table populated for at least 20 major assets
-- Historical backfill ECS Fargate task started; processing from current tip backwards;
-  covers approximately 6 months of recent history by end of Tranche 1
+- Local SDEX backfill CLI (`sdex-backfill`, ADR 0005) operating on the operator's
+  workstation against `s3://aws-public-blockchain`. First tip-backward chunk (~6 months)
+  processed and pushed to cloud via `sdex-cloud-push` by end of Tranche 1
 - `GET /backfill/status` endpoint live and returning valid progress data
-- CloudWatch alarm: backfill heartbeat >20 min stale → SNS notification
+- CloudWatch alarm: `sdex.last_push_at` older than the Tranche 1 push-cadence threshold
+  (e.g. 7 days) → SNS notification
 
 **Acceptance criteria:**
 1. `cdk deploy` from a clean AWS account (sharing only the existing VPC/S3 bucket from Block
@@ -883,12 +976,13 @@ all-time history once backfill completes)
    all indexes present (verifiable via `\d+` psql output)
 3. After 24 hours of live operation: `price_ohlcv` contains continuous 1-min candles for at
    least 20 major assets (XLM, USDC, EURC, AQUA, BTC, ETH) with no gaps >2 candles
-4. `GET /backfill/status` returns `sdex.status: "running"`, `sdex.task_healthy: true`, and
-   `sdex.current_ledger` advancing (ledger sequence decreasing toward ledger 1 over time).
-   `soroban_amm.status` is `"running"` early in Tranche 1 and transitions to `"completed"`
-   once the AMM stream finishes (see Section 4.5 for the canonical response shape)
-5. CloudWatch alarm test: SDEX backfill task stopped manually → alarm fires within 15 minutes
-   (heartbeat watchdog on the `sdex_archive` row in `backfill_progress`)
+4. `GET /backfill/status` returns `sdex.status: "running"`, `sdex.last_push_at` within the
+   configured Tranche 1 push-cadence window, and `sdex.current_ledger` decreasing across
+   successive pushes (tip-backward direction). `soroban_amm.status` is `"running"` early in
+   Tranche 1 and transitions to `"completed"` once the AMM stream finishes (see Section 4.5
+   for the canonical response shape)
+5. CloudWatch alarm test: skip a scheduled `sdex-cloud-push` cycle → freshness alarm fires
+   once `sdex.last_push_at` exceeds the configured Tranche 1 threshold
 6. `sdex.earliest_data_available` in `GET /backfill/status` shows a date approximately 6 months ago
 
 **Budget: $XX,XXX (Tranche 1)**
@@ -913,10 +1007,13 @@ all-time history once backfill completes)
 - Input validation: asset identifier format enforced, param ranges validated, 400 on invalid input
 
 **Backfill milestone for Tranche 2:**
-By the end of Week 9, the backfill task will have been running continuously for approximately
-5 weeks. At ~150,000 ledgers/hour sustained, that is ~25.2 million ledgers processed, covering
-approximately **January 2022 to present** (4+ years of price history, including all of the
-Soroban era plus 2 years of pre-Soroban SDEX data).
+By the end of Week 9, the operator has run additional tip-backward `sdex-backfill` chunks
+and `sdex-cloud-push` cycles covering approximately **January 2022 to present** (4+ years of
+SDEX history, including all of the Soroban era plus 2 years of pre-Soroban SDEX data). The
+pushed range and freshness are visible via `GET /backfill/status` (`sdex.earliest_data_available`,
+`sdex.last_push_at`). Local CLI per-ledger rate (~311 ledgers/s per task 0022) is well above
+what is required for this coverage given the workstation uptime through Tranche 2; see §5.6
+for the full local-CLI metrics.
 
 **Acceptance criteria:**
 1. All 7 endpoint groups return correct, schema-valid responses for at least 20 major assets
@@ -947,26 +1044,32 @@ Soroban era plus 2 years of pre-Soroban SDEX data).
 - GitHub repository made public with README, architecture docs, deploy instructions
 
 **Backfill milestone for Tranche 3:**
-By the end of Week 13, the backfill will have been running for approximately 9 weeks.
-At ~150,000 ledgers/hour sustained, that is ~45 million ledgers processed, covering approximately
-**January 2018 to present** (8+ years of price history).
+By the end of Week 13, the operator has run additional tip-backward `sdex-backfill` chunks
+and `sdex-cloud-push` cycles covering approximately **January 2018 to present** (8+ years of
+SDEX history). Per ADR 0005 §9, full historical completion (ledger 1 to current tip) is
+**not** a Tranche 3 deliverable — the operator continues pushing older ranges in the
+background post-delivery.
 
 **The Tranche 3 review validates that backfill is progressing correctly, not that it is complete.**
 The reviewer should confirm (against the response shape in Section 4.5):
-- `GET /backfill/status` returns `sdex.status: "running"`, `sdex.task_healthy: true`
+- `GET /backfill/status` returns `sdex.status: "running"` and `sdex.last_push_at` is fresh
+  (within the Tranche 3 push-cadence window)
 - `sdex.earliest_data_available` ≤ 2018-01-01
-- `sdex.estimated_hours_to_completion` shows a reasonable remaining estimate (expected: 4–8 weeks)
-- `sdex.rate_ledgers_per_hour` is stable (variation <20% over the last 24 hours)
+- `sdex.current_ledger` is strictly decreasing across successive `GET /backfill/status`
+  observations (visible as more pushes complete during the review window)
 - `soroban_amm.status` is `"completed"` (carried over from Tranche 1)
 - OHLCV data for `?timeframe=all` on XLM returns data points from 2018 or earlier
+- Operator narrates a credible remaining estimate from local CLI progress (not exposed
+  through the cloud API — see §5.6 freshness subsection)
 
-The backfill continues running autonomously post-delivery. When `sdex.status` transitions to
-`"completed"`, the `GET /backfill/status` endpoint records the `sdex.completed_at` timestamp.
-The team will share a link to this endpoint with Stellar for post-delivery monitoring.
+The local backfill continues post-delivery. When the final tip-backward chunk is pushed and
+`sdex.status` transitions to `"completed"`, the `GET /backfill/status` endpoint records
+`sdex.completed_at`. The team will share a link to this endpoint with Stellar for
+post-delivery monitoring.
 
 **Acceptance criteria:**
-1. `GET /backfill/status` shows `sdex.status: "running"`, `sdex.task_healthy: true`,
-   `sdex.earliest_data_available` ≤ 2018-01-01, `sdex.estimated_hours_to_completion` present and valid
+1. `GET /backfill/status` shows `sdex.status: "running"`, `sdex.last_push_at` within the
+   Tranche 3 push-cadence window, and `sdex.earliest_data_available` ≤ 2018-01-01
 2. OpenAPI spec passes `openapi-validator` lint with no errors; Swagger UI deployed
 3. Onboarding portal accessible; self-service API key request flow functional
 4. Integration test suite: all tests pass on CI (GitHub Actions link provided)
@@ -975,7 +1078,8 @@ The team will share a link to this endpoint with Stellar for post-delivery monit
    in Secrets Manager, all inputs validated
 7. GitHub repository public; `cdk deploy` from README works in a fresh AWS account
 8. CloudWatch dashboard accessible to Stellar team (read-only IAM role); all alarms OK
-9. 7-day post-launch monitoring report: uptime %, error rate, p95 latency, backfill rate
+9. 7-day post-launch monitoring report: uptime %, error rate, p95 latency, SDEX push
+   cadence and `earliest_data_available` trajectory
 
 **Budget: $XX,XXX (Tranche 3)**
 
@@ -999,13 +1103,23 @@ The team will share a link to this endpoint with Stellar for post-delivery monit
 
 ### Backfill Period Additional Costs (one-time, during 13-week project)
 
+Per ADR 0005, the SDEX backfill runs as a local Rust CLI (`sdex-backfill`) on the operator's
+workstation, not as a continuous ECS Fargate task. The cloud RDS sees only the bursty
+`sdex-cloud-push` step, not sustained backfill writes. AWS-billed line items shrink
+accordingly; workstation electricity and ISP bandwidth are operator-paid and outside this
+table.
+
 | Item | Configuration | One-time Cost |
 |------|--------------|--------------|
-| ECS Fargate — Soroban AMM backfill task | 1 vCPU / 2 GB RAM, a few hours (Tranche 1) | ~$2 |
-| ECS Fargate — SDEX archive backfill task | 2 vCPU / 4 GB RAM, 13 weeks continuous (2,184 hours) | ~$216 |
-| RDS during backfill | db.m6g.large ($131/mo, non-burstable dedicated CPU) for ~3 months; downgrade to db.t4g.micro after | ~$393 |
-| S3 archive reads (Stellar public history) | ~57M files × minimal read cost | ~$25 |
-| **Total one-time backfill compute** | | **~$636** |
+| ECS Fargate — Soroban AMM backfill task | 1 vCPU / 2 GB RAM, a few hours (Tranche 1) | ~$2 (pending Stream 1 reconciliation per ADR 0001 — also moved to local workstation; see follow-up) |
+| ECS Fargate — SDEX archive backfill task | — (no Fargate per ADR 0005) | **$0** |
+| RDS during push windows | Optional upgrade to db.t4g.small only during active `sdex-cloud-push` windows; otherwise db.t4g.micro suffices. The Fargate-era db.m6g.large upgrade is **not** required since the cloud RDS no longer sees continuous backfill writes | ~$30 |
+| S3 archive reads (Stellar public history) | Anonymous reads via `--no-sign-request` against `s3://aws-public-blockchain` — not billed to the Prices API AWS account | **$0** |
+| **Total one-time backfill compute (AWS-billed)** | | **~$32** |
+
+Compared with the prior ADR 0002 / Fargate-era estimate of ~$636, the local-workstation
+pattern reduces the AWS one-time backfill compute by roughly 95%. The trade is operator
+workstation uptime, accepted as a deliberate design choice (ADR 0005 §"Negative").
 
 ### Scaled Up (high traffic)
 
@@ -1032,9 +1146,15 @@ double-billing between the two grants.
 | S3 bucket `stellar-ledger-data/` | ~$2/mo | Same files read by both Lambdas; trivial additional S3 read cost |
 | VPC (subnets, security groups, route tables) | ~$0 (one-time setup cost eliminated) | Prices API resources deploy into existing VPC |
 | NAT Gateway | ~$35/mo | Single NAT Gateway handles egress for both services |
-| ECS Fargate cluster | ~$0 | Cluster overhead shared; backfill tasks run in the same cluster |
 | Block Explorer `soroban_events` table (read-only) | ~$0 (no extra RDS cost; read-only) | Soroban AMM backfill task queries the Block Explorer RDS to extract decoded swap events. Avoids re-reading ~8.5M ledgers from archives for the AMM stream. **Schema dependency**: documented below |
-| **Monthly saving** | **~$71/mo** | |
+| **Monthly saving** | **~$73/mo** | |
+
+**Removed row.** Earlier versions of this table listed an "ECS Fargate cluster" row claiming
+Prices API backfill tasks ran in BE's shared cluster. Per ADR 0005, the SDEX backfill is a
+local workstation CLI, not a Fargate task — no cluster sharing on the Stream 2 path. The
+Soroban AMM stream's deployment shape is being reconciled with ADR 0001 in a follow-up; if
+it also moves off Fargate, this section will need no further changes. If a future component
+returns to Fargate and shares BE's cluster, the row can be added back.
 
 ### 11.2 Development Savings
 
@@ -1068,3 +1188,10 @@ The Soroban AMM backfill task reads from the Block Explorer's `soroban_events` t
 The Prices API never writes to the Block Explorer's database. The Block Explorer never reads
 from the Prices API database. Outside the Soroban AMM backfill window, the two services have
 no runtime coupling.
+
+**Stream 2 (SDEX) coupling.** Per ADR 0005, the SDEX historical backfill has **zero**
+runtime or data coupling with the Block Explorer. The only BE artefact consumed is the
+`xdr-parser` crate, pinned as a git Cargo library dependency and compiled read-only into
+the `sdex-backfill` binary on the operator's workstation. No BE database is read, no BE
+service is called, and no BE infrastructure is shared on the Stream 2 path at any point
+in the project lifecycle. See §5.6 ("Stream 2 coupling note") for the full statement.
