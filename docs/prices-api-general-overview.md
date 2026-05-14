@@ -282,9 +282,13 @@ CREATE INDEX idx_oracle_asset ON oracle_prices (asset_id, oracle_name, timestamp
 ### 3.5 Backfill Progress Tracking
 
 One row per backfill stream (`sdex_archive`, `soroban_amm`). Both rows are
-seeded at provisioning time and updated by their respective ECS Fargate tasks.
-The `GET /backfill/status` endpoint reads both rows and returns them as the
-nested `sdex` and `soroban_amm` objects (see Section 4.5).
+seeded at provisioning time. Per ADRs 0001 and 0005, both canonical streams
+are populated by workstation-local processes, so the cloud row is updated by
+a push step — not by a continuously-running cloud-side task. For
+`sdex_archive` the writer is `sdex-cloud-push` (runs in tip-backward chunks);
+for `soroban_amm` the writer is the one-shot AMM CLI when it completes its
+push to cloud. The `GET /backfill/status` endpoint reads both rows and
+returns them as the nested `sdex` and `soroban_amm` objects (see Section 4.5).
 
 ```sql
 CREATE TABLE backfill_progress (
@@ -296,12 +300,18 @@ CREATE TABLE backfill_progress (
     -- it surfaces.
     start_ledger    BIGINT NOT NULL,
     target_ledger   BIGINT NOT NULL,
-    current_ledger  BIGINT NOT NULL,
+    current_ledger  BIGINT NOT NULL,        -- the boundary ledger reflected in
+                                            -- the cloud DB after the most recent
+                                            -- push: oldest pushed for sdex_archive
+                                            -- (high→low), newest pushed for
+                                            -- soroban_amm (low→high)
     status          VARCHAR(20) NOT NULL DEFAULT 'running'
                     CHECK (status IN ('running', 'paused', 'completed', 'error')),
-    rate_per_hour   BIGINT,               -- ledgers/hour, rolling average; NULL if the task does not track rate
-    eta_hours       NUMERIC(10,1),        -- estimated hours to completion; NULL if unknown or task is short-lived
-    last_heartbeat  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_push_at    TIMESTAMPTZ,            -- timestamp of the most recent push
+                                            -- that advanced current_ledger. NULL
+                                            -- until the first push. Used by the
+                                            -- GET /backfill/status freshness
+                                            -- alarm (see §5.6)
     started_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     completed_at    TIMESTAMPTZ
 );
@@ -314,6 +324,16 @@ VALUES
     ('sdex_archive', 1,        0, 0, 'running'),
     ('soroban_amm',  48500000, 0, 0, 'running');
 ```
+
+**Removed from earlier schema versions.** `last_heartbeat`, `rate_per_hour`, and
+`eta_hours` were on the original Fargate-shaped schema (one continuous task per
+stream, heartbeating into the cloud row every 15 minutes). ADR 0005 made
+Stream 2 a local workstation CLI; ADR 0001 had already done the same for
+Stream 1. Neither stream has a continuously-running cloud-side process, so
+neither field has a meaningful value to write. Operators inspect live CLI
+progress (rate, ETA) via direct SQL on the workstation Postgres; the cloud
+DB carries only the most recent push state. If a future stream reintroduces a
+continuous cloud-side writer, these columns can be added back at that time.
 
 ### 3.6 Retention Policy (Cleanup Worker Lambda)
 ```
@@ -531,9 +551,13 @@ feed the `price_usd` field in any other endpoint.
 Returns the current state of the historical all-time backfill. This endpoint is the primary
 mechanism for the Tranche 3 reviewer to validate that backfill is progressing correctly.
 
-A CloudWatch alarm fires if `last_heartbeat` falls more than 20 minutes behind the current
-time (indicating the backfill task has stalled or crashed). The 20-minute threshold sits
-above the 15-minute write cadence so a single delayed write does not trip the alarm.
+Per ADRs 0001 and 0005, both canonical streams run as workstation-local processes; the
+cloud-side `backfill_progress` row advances only when each stream's push step runs. The
+response therefore reflects the most recent push state, not a live task heartbeat. Live
+CLI progress is visible to the operator via direct SQL on the workstation Postgres but is
+not surfaced to API consumers. A CloudWatch alarm fires if `last_push_at` falls behind the
+configured push-cadence threshold for the stream's tranche (operator-tunable; see §5.6
+"GET /backfill/status Freshness").
 
 The backfill is split into two independent streams with different sources and timelines (see
 Section 5.6). The response reflects both.
@@ -547,16 +571,14 @@ Section 5.6). The response reflects both.
     "current_ledger": 34891234,
     "start_ledger": 1,
     "target_ledger": 57234198,
-    "progress_pct": 61.2,
-    "ledgers_remaining": 22342964,
-    "rate_ledgers_per_hour": 148200,
-    "estimated_hours_to_completion": 150.7,
-    "task_healthy": true,
-    "last_heartbeat": "2026-06-15T14:29:55Z",
+    "progress_pct": 39.2,
+    "ledgers_remaining": 34891233,
+    "last_push_at": "2026-06-15T11:30:00Z",
     "earliest_data_available": "2019-08-22T00:00:00Z"
   },
   "soroban_amm": {
     "status": "completed",
+    "last_push_at": "2026-04-14T08:23:11Z",
     "completed_at": "2026-04-14T08:23:11Z",
     "earliest_data_available": "2023-11-01T00:00:00Z"
   }
@@ -566,12 +588,13 @@ Section 5.6). The response reflects both.
 | Field | Description |
 |-------|-------------|
 | `sdex.status` | `running`, `paused`, `completed`, or `error` — SDEX archive backfill |
-| `sdex.current_ledger` | Oldest ledger processed so far by the SDEX backfill task |
-| `sdex.rate_ledgers_per_hour` | Rolling 15-min average processing rate |
-| `sdex.estimated_hours_to_completion` | `ledgers_remaining / rate_per_hour` |
-| `sdex.task_healthy` | `false` if no heartbeat in past 20 minutes → CloudWatch alarm fires |
-| `sdex.earliest_data_available` | Stored timestamp of the oldest SDEX OHLCV row known for this stream — recorded by the backfill task when it first writes a candle for a given timestamp, **not** computed live via `MIN(timestamp)`. Returned as-is, so reads are O(1). |
+| `sdex.current_ledger` | Oldest ledger reflected in the cloud DB after the most recent `sdex-cloud-push`. Advances at push cadence, not CLI cadence. |
+| `sdex.progress_pct` | `(target_ledger - current_ledger) / (target_ledger - start_ledger) * 100`, computed at read time |
+| `sdex.ledgers_remaining` | `current_ledger - start_ledger`, computed at read time |
+| `sdex.last_push_at` | Timestamp of the most recent successful `sdex-cloud-push`. The CloudWatch freshness alarm fires when this is older than the configured push-cadence threshold for the active tranche. `null` until the first push. |
+| `sdex.earliest_data_available` | Stored timestamp of the oldest SDEX OHLCV row known for this stream — recorded by the push step when it first lands a candle for a given timestamp, **not** computed live via `MIN(timestamp)`. Returned as-is, so reads are O(1). |
 | `soroban_amm.status` | Typically `completed` from Tranche 1 onwards |
+| `soroban_amm.last_push_at` | Timestamp of the one-shot AMM CLI's completion push (ADR 0001). `null` until the push happens. |
 | `soroban_amm.earliest_data_available` | Same semantics as `sdex.earliest_data_available` — stored, not computed. Lands at the Soroban activation date (~Nov 2023) once the one-time backfill completes. |
 
 ---
