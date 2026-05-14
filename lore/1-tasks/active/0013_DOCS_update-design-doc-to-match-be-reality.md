@@ -4,7 +4,7 @@ title: "Update prices-api-general-overview.md §2.3/§5.6/§11 to match ADR 0001
 type: DOCS
 status: active
 related_adr: ["0001", "0002", "0005"]
-related_tasks: ["0012", "0014", "0015", "0017", "0022"]
+related_tasks: ["0012", "0014", "0015", "0017", "0022", "0029"]
 tags: [priority-medium, effort-small, docs, infra, clickhouse, sdex, backfill]
 links:
   - "../../../../docs/prices-api-general-overview.md"
@@ -57,6 +57,19 @@ history:
       cloud push), not the Fargate framing in the 2026-05-13 history
       note above. Acceptance criteria below should be re-read with
       ADR 0005 as the canonical Stream 2 source.
+  - date: 2026-05-14
+    status: active
+    who: okarcz
+    note: >
+      Stream 2 / ADR 0005 reconciliation landed on branch
+      `docs/0013_update-design-doc-to-match-be-reality`
+      (commits deca40d, e359814, 643c53a, 3bf83a9, 9d22f3c). PR opening
+      next. Stream 1 / ADR 0001 reconciliation was deliberately deferred
+      from each per-turn scope and is now spawned as
+      [task 0029](../backlog/0029_DOCS_update-design-doc-stream-1-adr-0001.md).
+      The Stream-1-flavored acceptance criteria below are marked
+      "deferred to 0029"; this task stays active until 0029's PR also
+      merges, at which point 0013 can be marked completed.
 ---
 
 # Update prices-api-general-overview.md §2.3/§5.6/§11 to match ADR 0001 + ADR 0002
@@ -104,23 +117,62 @@ be updated for accuracy. Two ADRs now drive the rewrite:
 
 ## Acceptance Criteria
 
-- [ ] §2.3 rows accurately reflect BE-owned vs. Prices-owned (no
-      claim of BE-shared Fargate cluster; no claim of BE-shared
-      `soroban_events` PG read)
+> The criteria below were originally written against ADR 0001 + ADR 0002.
+> ADR 0005 superseded ADR 0002 on 2026-05-14 (Stream 2 moved from Fargate
+> to local workstation CLI). The Stream 2 work landed on this branch
+> against ADR 0005, not 0002 — the `[x]` marks below reflect that.
+> Stream-1-flavored criteria are deferred to [task 0029](../backlog/0029_DOCS_update-design-doc-stream-1-adr-0001.md).
+
+- [x] §2.3 rows accurately reflect BE-owned vs. Prices-owned: no
+      claim of BE-shared Fargate cluster (row dropped per ADR 0005);
+      `soroban_events` PG-read claim **deferred to 0029** — still
+      describes BE Postgres read; ADR 0001 moves it to local ClickHouse
 - [ ] §5.6 Stream 1 rewritten per ADR 0001: local CH instance
       (dev-laptop populated by BE `backfill-runner --target=clickhouse`),
       Tranche 1 fast path preserved, hours-not-weeks claim retained
-- [ ] §5.6 Stream 2 rewritten per ADR 0002: prices-api-owned
-      Fargate archive-reader, ledger 1 → tip, no CH pre-filter, no
-      BE runtime/data coupling, BE `stellar-xdr` crate consumed as a
-      library Cargo dep only
-- [ ] §9 Tranche 1 acceptance criteria: Stream 2 backfill "running and
+      **(deferred to 0029)**
+- [x] §5.6 Stream 2 rewritten per **ADR 0005** (supersedes ADR 0002):
+      local Rust CLI on operator workstation, anonymous
+      `s3://aws-public-blockchain` reads, local Postgres sink, separate
+      `sdex-cloud-push` step, no BE runtime/data coupling, BE
+      `xdr-parser` crate consumed as a git Cargo library dep only.
+      The original "Fargate archive-reader" framing in this criterion
+      was overridden by ADR 0005.
+- [x] §9 Tranche 1 acceptance criteria: Stream 2 backfill "running and
       progressing" is the deliverable bar; full historical completion
-      is explicitly out of scope for Tranche 1 (extends past Tranche 3)
-- [ ] §11.1 cost table updated; ECS cluster overhead correctly
-      attributed to Prices
-- [ ] §11.4 risk section: only Stream 1 carries any BE coupling, and
-      that coupling is time-boxed to the Tranche 1 backfill window;
-      Stream 2 has zero BE runtime/data coupling at any point
-- [ ] Cross-links from §5.6 / §11.4 to ADR 0001 and ADR 0002
-- [ ] Reviewer (project lead) approves the revision
+      is explicitly out of scope for Tranche 1 (extends past Tranche 3).
+      Updated to use push-cadence freshness (`sdex.last_push_at`) instead
+      of Fargate heartbeat. Tranche 2 and Tranche 3 acceptance criteria
+      also updated alongside.
+- [x] §11.1 cost table updated; ECS Fargate cluster row dropped (Stream 2
+      is local per ADR 0005); monthly saving total corrected $71 → $73.
+      Soroban-AMM-related row pending in [task 0029](../backlog/0029_DOCS_update-design-doc-stream-1-adr-0001.md).
+- [x] §11.4 risk section: Stream 2 has zero BE runtime/data coupling at
+      any point (new "Stream 2 (SDEX) coupling" subsection added).
+      Stream 1 coupling rewording **deferred to 0029** — the opening
+      paragraph and risk table still describe the pre-ADR-0001
+      BE-Postgres read pattern.
+- [x] Cross-links from §5.6 / §11.4 to **ADR 0005** added (Stream 2).
+      Cross-link to ADR 0001 in §5.6 / §11.4 **deferred to 0029**.
+- [ ] Reviewer (project lead) approves the revision (will be tracked on
+      the open PR for this branch; final tick once 0029 also merges)
+
+**Additional sections reconciled with ADR 0005 (not in original criteria
+but tightly coupled to §5.6 Stream 2):**
+
+- [x] §3.5 `backfill_progress` schema: dropped `last_heartbeat`,
+      `rate_per_hour`, `eta_hours`; added `last_push_at`
+- [x] §4.5 `GET /backfill/status` response: removed `task_healthy`,
+      `last_heartbeat`, `rate_ledgers_per_hour`,
+      `estimated_hours_to_completion`; added `last_push_at`
+- [x] §5.3 Ingestion Workers: split the combined Backfill Task row into
+      three rows (`sdex-backfill`, `sdex-cloud-push`, placeholder
+      Soroban AMM with † footnote pointing at 0029)
+- [x] §6 RDS sizing: replaced db.m6g.large continuous-write paragraph
+      with the push-window pattern
+- [x] §8 Tech Stack Summary: Runtime row no longer says "Fargate for
+      Galexie and backfill task" — split into Lambda / Galexie Fargate /
+      local CLI explicitly
+- [x] §10 Cost: SDEX Fargate line dropped ($216 → $0); RDS during
+      backfill resized ($393 → ~$30); S3 reads zeroed (anonymous);
+      new total ~$32. Soroban AMM Fargate line ($2) deferred to 0029.
