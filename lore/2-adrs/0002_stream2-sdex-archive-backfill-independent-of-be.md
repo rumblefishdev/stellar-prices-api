@@ -1,13 +1,14 @@
 ---
 id: "0002"
 title: "Stream 2 SDEX historical backfill is fully independent of Block Explorer (archive reads + imported BE XDR parser crate)"
-status: accepted
+status: superseded
 deciders: [okarcz]
 related_tasks: ["0012", "0013", "0020", "0021", "0022"]
-related_adrs: ["0001"]
-tags: [architecture, backfill, sdex, archive-reads, fargate, stream-2, parser-crate, block-explorer]
+related_adrs: ["0001", "0005"]
+tags: [architecture, backfill, sdex, archive-reads, fargate, stream-2, parser-crate, block-explorer, superseded]
 links:
   - "./0001_stream1-clickhouse-sourced-amm-backfill.md"
+  - "./0005_stream2-sdex-local-workstation-backfill.md"
   - "../1-tasks/archive/0020_RESEARCH_sdex-historical-backfill-options/README.md"
   - "../1-tasks/archive/0020_RESEARCH_sdex-historical-backfill-options/notes/G-sdex-trade-extraction-design.md"
   - "../1-tasks/archive/0020_RESEARCH_sdex-historical-backfill-options/notes/I-stream2-options.md"
@@ -25,6 +26,18 @@ history:
       committing Stream 2 to a fully prices-api-owned archive-read
       Fargate task — the BE-authored stellar-xdr parser is consumed
       as a library crate only, no BE runtime or DB coupling.
+  - date: 2026-05-14
+    status: superseded
+    who: okarcz
+    by: "0005"
+    note: >
+      Superseded by ADR 0005. The "BE-independent archive-read"
+      architectural commitment is preserved verbatim; only the
+      deployment shape changes — from a prices-api-owned ECS Fargate
+      task to a local workstation Rust CLI mirroring BE's
+      backfill-bench/backfill-runner pattern (BE ADR 0010). Cloud
+      push of finalised prices tables to RDS is a separate
+      post-backfill step. See ADR 0005 §Context for the rationale.
 ---
 
 # ADR 0002: Stream 2 SDEX historical backfill is fully independent of Block Explorer
