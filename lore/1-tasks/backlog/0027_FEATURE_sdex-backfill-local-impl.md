@@ -77,6 +77,13 @@ dependency on task 0011 (CDK bootstrap).
    - **`xdr-parser` consumed via git Cargo dep** per ADR 0005 §3:
      `xdr-parser = { git = "https://github.com/rumblefishdev/soroban-block-explorer.git", branch = "main" }`.
      No BE-repo changes; pin updates by editing `Cargo.toml`.
+   - **Future migration to a published crate (out of scope for this
+     task).** Per ADR 0005 §3's "Future direction" note, BE will
+     publish `xdr-parser` as a standalone versioned crate. When that
+     lands, prices-api swaps the git dep for a plain version pin
+     (`xdr-parser = "X.Y.Z"`) in a one-line `Cargo.toml` edit.
+     This task ships against whichever form is current at impl time;
+     a follow-up bump is trivial.
 
 2. **Schema migrations** in the prices-api PG migration tool:
    - `price_ohlcv` PK change per ADR 0003: add `quote_asset_id`

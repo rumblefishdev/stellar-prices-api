@@ -589,6 +589,15 @@ Verification: `cargo tree -i xdr-parser` resolves to the pinned BE
 git commit. No BE-repo changes; the pin can be updated by editing
 `Cargo.toml` and `cargo update -p xdr-parser`.
 
+**Planned migration to a published crate.** Per ADR 0005 §3's
+"Future direction" note, `xdr-parser` will be released as a
+standalone versioned crate independent of the BE workspace. When
+that happens, the workspace dep becomes a plain version pin
+(`xdr-parser = "X.Y.Z"`) and the `git = "…"` form is dropped. The
+cutover is a one-line edit to `Cargo.toml`; v1 of the backfill CLI
+is designed to work against either form. No code change is
+required because both forms expose the same crate API.
+
 ## 11. Cloud-push design (post-backfill)
 
 This is a sketch — the full design lands when task 0028 is activated.

@@ -105,6 +105,16 @@ operator's workstation that mirrors BE's `backfill-bench` /
    Preserves ADR 0002 §3's "BE parser as library dep, no runtime
    coupling" stance.
 
+   **Future direction (already decided, separately from this ADR):**
+   `xdr-parser` will be published as a standalone versioned crate,
+   independent of the BE workspace. Once published, the git Cargo
+   dep above is replaced with a plain version pin
+   (`xdr-parser = "X.Y.Z"`). Prices-api makes the cutover in a small
+   follow-up edit to its `Cargo.toml` whenever BE publishes; no
+   design or schema change is triggered, and v1 of the backfill CLI
+   can ship against either form. The git pin is a transient
+   convenience, not an architectural choice.
+
 4. **Pipeline.** Partition-at-a-time: download partition N+1 in
    background (`aws s3 sync`) while indexing partition N. Single-slot
    prefetch, no worker pool. Matches BE `backfill-runner::run::execute`.
