@@ -2,8 +2,8 @@
 id: "0013"
 title: "Update prices-api-general-overview.md §2.3/§5.6/§11 to match ADR 0001 + ADR 0002"
 type: DOCS
-status: backlog
-related_adr: ["0001", "0002"]
+status: active
+related_adr: ["0001", "0002", "0005"]
 related_tasks: ["0012", "0014", "0015", "0017", "0022"]
 tags: [priority-medium, effort-small, docs, infra, clickhouse, sdex, backfill]
 links:
@@ -46,6 +46,17 @@ history:
       and that path is closed. §11.4 must record that the only
       BE coupling at any point in prices-api's lifecycle is the
       time-boxed Stream 1 CH window (Tranche 1 only).
+  - date: 2026-05-14
+    status: active
+    who: okarcz
+    note: >
+      Activated via /promote-task. Scope amendment needed before
+      writing: ADR 0005 (accepted 2026-05-14) supersedes ADR 0002 —
+      Stream 2 is now local-workstation backfill, not Fargate. §5.6
+      Stream 2 rewrite must match ADR 0005 (local workstation +
+      cloud push), not the Fargate framing in the 2026-05-13 history
+      note above. Acceptance criteria below should be re-read with
+      ADR 0005 as the canonical Stream 2 source.
 ---
 
 # Update prices-api-general-overview.md §2.3/§5.6/§11 to match ADR 0001 + ADR 0002
