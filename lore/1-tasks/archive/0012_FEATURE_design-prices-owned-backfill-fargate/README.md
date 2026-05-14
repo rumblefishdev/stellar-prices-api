@@ -2,7 +2,7 @@
 id: "0012"
 title: "Design SDEX backfill on a local workstation (Stream 2, ADR 0005 — supersedes ADR 0002)"
 type: FEATURE
-status: active
+status: completed
 related_adr: ["0002", "0003", "0005"]
 related_tasks: ["0011", "0014", "0020", "0022", "0023", "0027", "0028"]
 tags: [priority-high, effort-medium, design, local-backfill, workstation, postgres, cloud-push, sdex, stream-2]
@@ -63,6 +63,18 @@ history:
       tool. Directory slug retained ("…-fargate") for branch /
       PR continuity; the README and G-note are the authoritative
       shape.
+  - date: 2026-05-14
+    status: completed
+    who: okarcz
+    note: >
+      Design closed. PR #13 merged to develop as squash commit
+      0052660. Deliverables: ADR 0005 (accepted, supersedes 0002),
+      ADR 0002 marked superseded, G-sdex-backfill-local-design.md
+      (~580 lines + xdr-parser future-direction note), README
+      rewritten, task 0027 refactored to local-CLI impl (~170 lines,
+      blocked-on-0011 removed), task 0028 spawned for cloud-push
+      (~130 lines, blocked on 0011 + 0027). All AC met; impl tasks
+      ready for activation when operator is ready to start.
 ---
 
 # Design SDEX backfill on a local workstation (Stream 2)
