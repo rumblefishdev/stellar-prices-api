@@ -7,6 +7,17 @@
 > a concrete historical backfill plan with milestones in Tranches 2 and 3 is added; and a
 > `GET /backfill/status` API endpoint is introduced to allow progress monitoring.
 
+## Revision History
+
+Substantive revisions only. Minor wording / schema-comment / index tweaks land via normal
+commits and are not tracked here. Append a new row when a change touches the architecture,
+the API surface, or the cost / budget framing.
+
+| Date | Sections touched | Driver | Summary |
+|------|------------------|--------|---------|
+| 2026-05-14 | §2.3, §3.5, §4.5, §5.3, §5.6 Stream 2, §6, §8, §9, §10, §11.1, §11.4 | [ADR 0005](../lore/2-adrs/0005_stream2-sdex-local-workstation-backfill.md) (supersedes ADR 0002) · [Task 0013](../lore/1-tasks/active/0013_DOCS_update-design-doc-to-match-be-reality.md) | Stream 2 (SDEX) backfill moved from continuous ECS Fargate to a local Rust CLI on the operator's workstation with a separate `sdex-cloud-push` step to cloud RDS. `backfill_progress` schema swapped from heartbeat fields to `last_push_at`. `GET /backfill/status` response and tranche acceptance criteria reframed around push cadence. Backfill compute cost dropped ~95%. Stream 1 (Soroban AMM) reconciliation per [ADR 0001](../lore/2-adrs/0001_stream1-clickhouse-sourced-amm-backfill.md) is tracked separately under [Task 0029](../lore/1-tasks/backlog/0029_DOCS_update-design-doc-stream-1-adr-0001.md). |
+| (earlier) | whole document | second-round reviewer feedback | Post-2nd-Review baseline: stack switched to Rust + axum + sqlx (matching the Block Explorer codebase); BE-shared infrastructure explicitly catalogued (§11); historical backfill plan with Tranche 2 / Tranche 3 milestones added (§5.6); `GET /backfill/status` endpoint introduced (§4.5). |
+
 ---
 
 ## 0. Deployment & AWS Account
