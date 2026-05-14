@@ -1,630 +1,695 @@
 ---
-title: "SDEX backfill on Prices-owned Fargate — operational design"
+title: "SDEX backfill on a local workstation — operational design"
 type: generation
 status: mature
 spawned_from: ../README.md
 spawns: []
-tags: [sdex, backfill, fargate, ecs, iam, runbook, stream-2, design]
+tags: [sdex, backfill, local, workstation, postgres, cloud-push, stream-2, design]
 links:
   - "../../../../2-adrs/0002_stream2-sdex-archive-backfill-independent-of-be.md"
   - "../../../../2-adrs/0003_price-ohlcv-pk-includes-quote-asset-id.md"
+  - "../../../../2-adrs/0005_stream2-sdex-local-workstation-backfill.md"
   - "../../../archive/0022_RESEARCH_sdex-filter-and-extraction-spec/notes/G-sdex-filter-strategy.md"
   - "../../../archive/0022_RESEARCH_sdex-filter-and-extraction-spec/notes/G-sdex-decode-and-bucket-spec.md"
   - "../../../archive/0020_RESEARCH_sdex-historical-backfill-options/notes/G-sdex-trade-extraction-design.md"
+  - "../../../../../../soroban-block-explorer/lore/2-adrs/0010_local-backfill-over-fargate.md"
 history:
   - date: 2026-05-13
     status: mature
     who: okarcz
     note: >
-      Operational design for the dedicated, BE-independent SDEX
-      backfill Fargate task. Consumes ADR 0002 (architecture),
-      ADR 0003 (PK shape) and task 0022's filter + decode-and-
-      bucket specs. Output is the implementation contract for
-      the follow-up CDK + Rust landing task.
+      First-pass design, Fargate shape. Consumed ADR 0002.
+  - date: 2026-05-14
+    status: mature
+    who: okarcz
+    note: >
+      Rewritten to match ADR 0005 (supersedes ADR 0002): local
+      workstation CLI mirroring BE's backfill-bench / backfill-runner
+      pattern; cloud push of finalised prices tables to RDS is a
+      separate post-backfill step. The Rust module split and the
+      mapping onto task 0022's filter + decode-and-bucket spec are
+      unchanged; everything host-shaped (Fargate task def, IAM,
+      CloudWatch, SNS) is gone.
 ---
 
-# SDEX backfill on Prices-owned Fargate — operational design
+# SDEX backfill on a local workstation — operational design
 
 ## 0. Scope and non-scope
 
-This note is the **operational and infrastructural design** for the
-SDEX (Stream 2) historical backfill task. It is consumed by the
-follow-up implementation task (see [§11](#11-handoff--implementation-checklist))
-which lands CDK code, Rust binary, schema migrations, and the staging
-runbook.
+This note is the **operational design** for the SDEX (Stream 2)
+historical backfill, post-supersession of ADR 0002 by ADR 0005. The
+backfill runs as a local Rust CLI on the operator's workstation,
+mirroring BE's `crates/backfill-bench` and `crates/backfill-runner`
+shape. A separate, smaller `sdex-cloud-push` tool streams the
+finalised prices tables to cloud RDS once backfill is complete (or
+reaches a release-ready threshold).
 
 **In scope here:**
 
-- ECS Fargate task definition shape (image, sizing, env, networking).
-- IAM role contract — exactly which AWS principals the task may touch,
-  and which it must not.
-- Processing direction (tip-backward) decision and reasoning.
-- Resumability contract against `backfill_progress`.
-- CloudWatch heartbeat metric, alarm threshold, SNS topic shape.
-- Failure-mode taxonomy and the task's response to each.
-- Runbook structure (start / stop / resume / alarm response).
-- Rust module split — 1:1 mapping onto task 0022's spec sections.
+- CLI shape (clap subcommands, args, env).
+- Partition-pipelined archive read via `aws s3 sync --no-sign-request`.
+- Local Postgres schema additions (`backfill_progress`, ADR 0003 PK migration).
+- Resumability contract (per-ledger atomic tx + partition-level skip).
+- Observability — stdout tracing JSON, optional p95 latency report.
+- Failure-mode taxonomy and operator response.
+- Rust module split — 1:1 mapping onto task 0022's spec.
+- Cloud-push contract (post-backfill, separate tool).
+- Reuse of BE's `xdr-parser` crate via git Cargo dep.
 
-**Out of scope (deferred to impl task):**
+**Out of scope (deferred to task 0027 / task 0028):**
 
-- Concrete CDK TypeScript (depends on task 0011 bootstrap).
-- Rust crate layout, Cargo workspace integration with `stellar-xdr`.
-- DDL for `backfill_progress` table and the ADR 0003 `quote_asset_id`
-  PK migration on `price_ohlcv`.
-- Final `aws ecs run-task` invocation, populated `cluster` /
-  `task-definition` ARNs.
-- Staging deploy + 10k-ledger smoke test.
+- Concrete Cargo workspace layout — proposed in §10, finalised on impl.
+- Cargo lockfile pin to a specific BE git SHA — chosen during impl.
+- Cloud RDS provisioning — gated by task 0011 (CDK bootstrap).
+- The `sdex-cloud-push` tool implementation — task 0028.
+- Multi-laptop parallel backfill — explicitly v2 per ADR 0005 §9.
 
 ## 1. Architecture overview
 
 ```text
-┌──────────────────────────────────────────────────────────────────────┐
-│ AWS account: prices-api (staging / production)                       │
-│                                                                      │
-│  ┌─────────────────────────────────┐    ┌───────────────────────┐   │
-│  │ ECS Fargate cluster             │    │ Stellar public        │   │
-│  │ `prices-backfill-{env}`         │───▶│ history archive S3    │   │
-│  │                                 │    │ (read-only, anonymous │   │
-│  │  ┌───────────────────────────┐  │    │  in production; IAM   │   │
-│  │  │ Task: sdex-backfill       │  │    │  role still scoped to │   │
-│  │  │ image: ECR/sdex-backfill  │  │    │  GET only)            │   │
-│  │  │ 2 vCPU / 4 GiB            │  │    └───────────────────────┘   │
-│  │  │ env: LEDGER_RANGE_*, ...  │  │                                │
-│  │  └─────────────┬─────────────┘  │    ┌───────────────────────┐   │
-│  │                │                 │───▶│ Prices PG (RDS)       │   │
-│  │                │                 │    │   • price_ohlcv       │   │
-│  │                │                 │    │   • backfill_progress │   │
-│  │                │                 │    │   • assets            │   │
-│  │                │                 │    └───────────────────────┘   │
-│  │                ▼                 │                                │
-│  │       CloudWatch Logs +          │    ┌───────────────────────┐   │
-│  │       PutMetricData              │───▶│ SNS                    │   │
-│  │       (Prices/Backfill)          │    │ prices-backfill-alerts│   │
-│  └─────────────────────────────────┘    └───────────────────────┘   │
-│                                                                      │
-│  No path connects this task to any Block Explorer account, RDS,      │
-│  ClickHouse, or S3 bucket. The BE-authored `stellar-xdr` parser is   │
-│  embedded in the container image as a Cargo library dependency.      │
-└──────────────────────────────────────────────────────────────────────┘
+                                 ┌──────────────────────────────────────┐
+                                 │ Stellar public history archive (S3)  │
+                                 │  s3://aws-public-blockchain/         │
+                                 │    v1.1/stellar/ledgers/pubnet/      │
+                                 │  (anonymous, --no-sign-request)       │
+                                 └─────────────────┬────────────────────┘
+                                                   │  aws s3 sync
+                                                   ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│ OPERATOR WORKSTATION                                                    │
+│                                                                          │
+│   ┌────────────────────────┐    ┌────────────────────────────────────┐  │
+│   │ .temp/backfill-sdex/   │    │ sdex-backfill (Rust CLI)            │  │
+│   │   <HEX>--<s>-<e>/       │───▶│  partition prefetch pipeline       │  │
+│   │     <hex>--<seq>.xdr.zst│    │  ├─ decompress + decode             │  │
+│   │   (local scratch)       │    │  ├─ filter trade-shaped ops         │  │
+│   └────────────────────────┘    │  ├─ ClaimAtom → TradeTick           │  │
+│                                  │  ├─ TradeTick → 1m price_ohlcv      │  │
+│                                  │  └─ UPSERT + advance checkpoint     │  │
+│                                  └──────────────┬─────────────────────┘  │
+│                                                 │                        │
+│                                                 ▼                        │
+│                                  ┌────────────────────────────────────┐  │
+│                                  │ Local PostgreSQL (Docker)           │  │
+│                                  │   • price_ohlcv (ADR 0003 PK)       │  │
+│                                  │   • assets                          │  │
+│                                  │   • backfill_progress               │  │
+│                                  └──────────────┬─────────────────────┘  │
+│                                                 │                        │
+│                                                 │ POST-BACKFILL          │
+│                                                 ▼                        │
+│                                  ┌────────────────────────────────────┐  │
+│                                  │ sdex-cloud-push (separate Rust CLI) │  │
+│                                  │  ├─ stream price_ohlcv + assets     │  │
+│                                  │  └─ COPY/INSERT … SELECT batches    │  │
+│                                  └──────────────┬─────────────────────┘  │
+└─────────────────────────────────────────────────┼────────────────────────┘
+                                                  │ public internet
+                                                  ▼
+                                  ┌────────────────────────────────────┐
+                                  │ Cloud Postgres (RDS, per task 0011) │
+                                  │   • price_ohlcv (canonical)         │
+                                  │   • assets                          │
+                                  └────────────────────────────────────┘
 ```
 
-**Cluster:** one Fargate cluster per environment, named
-`prices-backfill-{env}`. The cluster is dedicated to long-running
-backfill tasks (Stream 2 today; AMM Stream 1 is local-CH per ADR 0001
-and does not run here).
+**No AWS auth on the backfill path.** `aws s3 sync --no-sign-request`
+hits the anonymous public bucket — same path BE consumes in
+`backfill-bench`. The only AWS-touching component is
+`sdex-cloud-push`, which uses standard PG credentials against cloud
+RDS (no IAM-DB auth, no IAM role).
 
-**Task definition:** `sdex-backfill-{env}`, single-container.
-Stateless container — all checkpoints live in PG.
+**No code in the BE repo.** BE's `xdr-parser` crate is consumed
+read-only as a git Cargo dependency. We never PR into the BE repo;
+we pin a commit and update the pin when convenient.
 
-**Trigger:** initially manual via `aws ecs run-task` from the
-operator's workstation (or CI on demand). No scheduled EventBridge
-rule in the v1 design — operators start a run, observe progress, and
-the task self-completes when `current_ledger` reaches the configured
-floor. A scheduled "restart-on-stop" wrapper is an obvious v2
-addition but not required for Tranche 1.
+## 2. Direction and range strategy
 
-**Networking:** task launches in the prices-api VPC private subnets
-(joined to the BE-managed VPC per task 0011's SSM contract) and uses
-NAT egress for S3 and SNS, plus the in-VPC RDS endpoint for PG.
-Public-archive S3 is reached over the NAT path — no direct internet
-gateway attachment on the task.
+ADR 0005 §9 keeps the ledger-1 → tip coverage from ADR 0002 but
+delegates direction to the operator via the CLI's `--start`/`--end`
+flags (BE pattern). The Tranche 1 UX gate ("≥ 6 months of recent
+history exposed via `GET /backfill/status`") is met by running
+**tip-backward chunks** for v1:
 
-## 2. Processing direction: tip-backward (newest → oldest)
+| Phase    | Invocation                                        | Wall-clock at 311 ledgers/s | Outcome                                            |
+| -------- | ------------------------------------------------- | --------------------------- | -------------------------------------------------- |
+| Phase 1  | `--start=<tip-1_100_000> --end=<tip>`              | ~1 h pure decode (≈ ½–1 day with archive sync) | Tranche 1 ≥ 6 months ready to push                 |
+| Cloud push 1 | `sdex-cloud-push` of Phase 1 range             | minutes (bulk UPSERT)       | Cloud RDS exposes Tranche 1 window                 |
+| Phase 2  | `--start=<tip-12_000_000> --end=<tip-1_100_001>`   | ~10 h decode                | ~1 year of older history                           |
+| Cloud push 2 | as above                                       |                             | Cloud RDS extended                                 |
+| Phase N  | `--start=1 --end=<phase-N-1-floor>`                | ~12-16 days (full archive)  | Full historical complete                           |
 
-ADR 0002 §6 explicitly delegates the direction choice to this design.
-Three candidates were on the table:
+The CLI itself walks ledgers in `--start..=--end` ascending order
+within each invocation (BE's pattern — partitions iterate ascending).
+"Tip-backward" is realised by the operator's choice of consecutive
+non-overlapping ranges, not by reversing the in-binary walk. This
+exactly matches how BE chunks parallel-laptop backfills (BE ADR
+0040): each invocation is one disjoint range.
 
-| Direction      | Tranche 1 UX gate              | Checkpoint shape       | Operational cost |
-| -------------- | ------------------------------ | ---------------------- | ---------------- |
-| Oldest → newest | Fails — Tranche 1 needs the *recent* 6 months exposed, not ledger 1 | Monotonic incr | Simple |
-| **Newest → oldest** | **Passes — recent 6 months ready in ~3-4 days** | Monotonic decr | Simple |
-| Chunked / sharded | Same as newest-first if newest chunks run first | Per-chunk independent state | Operational overhead, multi-task fan-out |
+**Why not in-binary tip-backward decrement?** Three reasons:
 
-**Decision: tip-backward, single-task, monotonic-decreasing
-`current_ledger`.**
+1. **BE's pattern is ascending-only.** Their `partitions_for_range`
+   returns partitions sorted by `start ASC`. Mirroring saves us
+   re-implementing the (small but non-zero) prefetch-pipeline logic
+   for descending walks.
+2. **Operator already controls direction via chunks.** Tranche 1 UX
+   is met by picking the right first chunk; no in-binary direction
+   knob needed.
+3. **Multi-laptop v2 readiness.** When/if v2 lands, every laptop's
+   range is ascending; the design stays consistent.
 
-Reasoning:
+UPSERT correctness is unchanged from the previous design: per task
+0022 decode-and-bucket §5.4 the backfill writes whole-row replacement,
+so any order — within a chunk, across chunks, across laptops — yields
+the same final `price_ohlcv` row content.
 
-1. **Tranche 1 acceptance criterion (§5.6 / ADR 0002 §5) is
-   recency-biased.** "Approximately 6 months of recent history by
-   end of Tranche 1" maps directly to tip-backward. With task 0022's
-   measured 311 ledgers/s decode and ~99.35 % trade-bearing density,
-   6 months ≈ 1 026 000 ledgers ≈ 55 minutes of pure decode. Real
-   wall-clock is archive-transport-bound (12-16 days for the full
-   ~57M ledgers per task 0022 §4) but the first 6 months is reached
-   in well under a week even at the conservative end.
+## 3. CLI shape
 
-2. **UPSERT semantics make direction safe.** Task 0022's
-   decode-and-bucket spec §5.4 commits to **whole-row replacement**
-   for backfill UPSERTs. That means a later-arriving tick for the
-   same `(asset_id, quote_asset_id, timestamp, granularity)` row
-   always wins regardless of which side of the minute boundary it
-   crossed. Direction has no correctness implication — only UX.
+The binary is `sdex-backfill`, modeled directly on BE's `backfill-bench`
+(simpler) with optional features from `backfill-runner` (sink
+preflight, dashboard). One subcommand for v1; a `status` subcommand
+matching BE's runner is a v2 addition.
 
-3. **`earliest_data_available` retreat is acceptable.** With
-   tip-backward, the `GET /backfill/status` endpoint reports a
-   shrinking `earliest_data_available` over weeks. This is the
-   intended UX per §5.6.
+```rust
+// Logical shape — final crate path lands in task 0027.
+#[derive(Parser)]
+#[command(name = "sdex-backfill", version)]
+struct Cli {
+    /// First ledger to index (inclusive).
+    #[arg(long)]
+    start: u32,
 
-4. **Disjoint-range parallelisation is a v2 escape hatch, not a v1
-   requirement.** If 12-16 days proves too long, the same binary
-   shards by env-vars `LEDGER_RANGE_START` / `LEDGER_RANGE_END` and
-   runs multiple Fargate tasks against disjoint ranges. Each task
-   keeps its own row in `backfill_progress` keyed by `stream` —
-   reserve names `sdex_backfill_chunk_0`, `sdex_backfill_chunk_1`,
-   etc. for that future split. v1 ships with a single task and a
-   single `stream='sdex_backfill'` row.
+    /// Last ledger to index (inclusive).
+    #[arg(long)]
+    end: u32,
 
-## 3. Task definition shape
+    /// Postgres connection string. Flag > DATABASE_URL env > error.
+    #[arg(long, env = "DATABASE_URL")]
+    database_url: String,
 
-```yaml
-# Logical shape. CDK code lands this in the impl task.
-family: sdex-backfill
-networkMode: awsvpc
-requiresCompatibilities: [FARGATE]
+    /// Local scratch directory for downloaded partitions.
+    #[arg(long, env = "BACKFILL_TEMP_DIR", default_value = ".temp/sdex-backfill")]
+    temp_dir: PathBuf,
 
-cpu: "2048"          # 2 vCPU — matches 0020 G-note baseline
-memory: "4096"       # 4 GiB — leaves headroom over the streaming decoder
+    /// Delete each partition's local folder after indexing succeeds.
+    /// Default: delete (caps disk at ≈ 2 × partition_size).
+    /// Pass `--keep-partitions` for iteration / debugging.
+    #[arg(long)]
+    keep_partitions: bool,
 
-executionRoleArn:    arn:aws:iam::ACCOUNT:role/PricesBackfillExecution-{env}
-taskRoleArn:         arn:aws:iam::ACCOUNT:role/PricesBackfillSDEX-{env}
+    /// Enable per-ledger and per-partition progress logs.
+    /// Default: warnings only; final summary always printed.
+    #[arg(long, short)]
+    verbose: bool,
 
-containerDefinitions:
-  - name: sdex-backfill
-    image: ACCOUNT.dkr.ecr.REGION.amazonaws.com/prices/sdex-backfill:GIT_SHA
-    essential: true
-
-    environment:
-      - { name: STREAM,             value: sdex_backfill }
-      - { name: DIRECTION,          value: tip_backward }    # v2: also `oldest_first`, `chunked`
-      - { name: LEDGER_RANGE_START, value: "" }              # empty → resolve from archive HEAD
-      - { name: LEDGER_RANGE_END,   value: "1" }             # exclusive floor; 1 means "until genesis"
-      - { name: HEARTBEAT_EVERY_N_LEDGERS, value: "1000" }
-      - { name: AWS_REGION,         value: REGION }
-      - { name: METRIC_NAMESPACE,   value: Prices/Backfill }
-      - { name: LOG_LEVEL,          value: info }
-
-    secrets:
-      - { name: PG_DSN, valueFrom: arn:aws:secretsmanager:...:secret:prices/rds/backfill-writer }
-
-    logConfiguration:
-      logDriver: awslogs
-      options:
-        awslogs-group: /prices/backfill/sdex
-        awslogs-region: REGION
-        awslogs-stream-prefix: task
-        awslogs-create-group: "true"   # CDK creates the group with 30 d retention
-```
-
-**Sizing rationale.** Task 0022's profile measured 311 ledgers/s
-single-threaded decode on a developer laptop (`stellar-xdr` v26,
-release build). Allocating 2 vCPU on Fargate gives the same effective
-budget; archive S3 throughput will saturate before CPU does. Memory
-peak in the profile harness is well under 1 GiB (single-ledger
-streaming); 4 GiB is conservative headroom for tokio buffers and
-the PG client pool.
-
-**Image.** ECR-hosted Rust binary, distroless or `gcr.io/distroless/cc`
-base. Built in CI on every push to `develop`; tagged with git SHA.
-Production deploy uses immutable tags (no `latest`).
-
-## 4. IAM role contract
-
-Two roles. The **execution role** is what ECS Agent uses to pull the
-image and write logs. The **task role** is what the running binary
-uses to call AWS APIs.
-
-### 4.1 Execution role: `PricesBackfillExecution-{env}`
-
-Standard ECS execution permissions, scoped:
-
-```jsonc
-{
-  "Statement": [
-    // Pull task's image only — no other ECR repos.
-    { "Effect": "Allow",
-      "Action": ["ecr:GetAuthorizationToken"],
-      "Resource": "*" },
-    { "Effect": "Allow",
-      "Action": ["ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer"],
-      "Resource": "arn:aws:ecr:REGION:ACCOUNT:repository/prices/sdex-backfill" },
-
-    // Write logs to the task's own group.
-    { "Effect": "Allow",
-      "Action": ["logs:CreateLogStream", "logs:PutLogEvents"],
-      "Resource": "arn:aws:logs:REGION:ACCOUNT:log-group:/prices/backfill/sdex:*" },
-
-    // Read the RDS-writer secret at container start.
-    { "Effect": "Allow",
-      "Action": ["secretsmanager:GetSecretValue"],
-      "Resource": "arn:aws:secretsmanager:REGION:ACCOUNT:secret:prices/rds/backfill-writer-*" }
-  ]
+    /// Fail the run (exit 1) if per-ledger p95 latency exceeds N ms.
+    /// Unset = report only. Matches BE backfill-bench's --assert-p95-ms.
+    #[arg(long)]
+    assert_p95_ms: Option<u128>,
 }
 ```
 
-### 4.2 Task role: `PricesBackfillSDEX-{env}`
+**Defaults are operator-friendly:**
 
-This is the binary's blast radius. Every statement is least-privilege.
+- `database_url` is required but reads `DATABASE_URL` so the operator
+  can `export DATABASE_URL=postgres://... && sdex-backfill --start ... --end ...`.
+- `temp_dir` matches BE's `.temp/backfill-runner` shape but namespaces
+  to `.temp/sdex-backfill/` so a workstation running both tools doesn't
+  collide.
+- `keep_partitions` defaults off — same as BE.
 
-```jsonc
-{
-  "Statement": [
-    // Read Stellar public history archive bucket(s). Read-only.
-    // Bucket name is configurable per environment; staging may use a
-    // mirror, production points at the canonical public archive.
-    { "Effect": "Allow",
-      "Action": ["s3:GetObject"],
-      "Resource": "arn:aws:s3:::STELLAR_ARCHIVE_BUCKET/*" },
-    { "Effect": "Allow",
-      "Action": ["s3:ListBucket"],
-      "Resource": "arn:aws:s3:::STELLAR_ARCHIVE_BUCKET",
-      "Condition": { "StringLike": { "s3:prefix": ["ledger/*"] } } },
+**No `--target` flag in v1.** BE's `backfill-runner` has
+`--target postgres|clickhouse`; prices-api has only one sink
+(Postgres) in v1, so the flag is omitted. v2 can add it if cloud-push
+becomes a `--target cloud-rds` variant rather than a separate tool —
+but for now keeping the tools separate is simpler.
 
-    // Emit heartbeat + progress metrics.
-    { "Effect": "Allow",
-      "Action": ["cloudwatch:PutMetricData"],
-      "Resource": "*",
-      "Condition": { "StringEquals": { "cloudwatch:namespace": "Prices/Backfill" } } },
+## 4. Partition pipeline
 
-    // Publish to the alerts topic on terminal-error self-report
-    // (CloudWatch alarm handles the heartbeat-stale case).
-    { "Effect": "Allow",
-      "Action": ["sns:Publish"],
-      "Resource": "arn:aws:sns:REGION:ACCOUNT:prices-backfill-alerts" }
-  ]
-}
+Identical structure to BE's `crates/backfill-runner/src/run.rs`:
+
+```text
+preflight:
+    - which `aws --version`  (panic if missing)
+    - sink preflight (SELECT 1; panic if unreachable)
+
+resume:
+    completed ← SELECT processed ledger set in [start, end] from PG
+    partitions ← partitions_for_range(start, end)
+    todo ← partitions filter (not fully-done given `completed`)
+
+prime:
+    sync_partition(todo[0])     # foreground; required for cold start
+
+main loop (for each partition i in todo):
+    next_handle ← if i+1 in todo: spawn sync_partition(todo[i+1])
+
+    index_partition(todo[i], start, end, sink, completed):
+        for ledger in clamped(todo[i], start, end):
+            if ledger in completed: continue
+            bytes ← read local file from temp_dir
+            xdr   ← xdr_parser::decompress_zstd(bytes)
+            batch ← xdr_parser::deserialize_batch(xdr)
+            for lcm in batch.ledger_close_metas:
+                ticks ← extract_trade_ticks(lcm)    # task 0022 spec
+                rows  ← bucket(ticks)               # task 0022 spec
+                BEGIN;
+                  UPSERT rows INTO price_ohlcv     # whole-row replacement
+                  UPSERT row    INTO backfill_progress  # current_ledger advance
+                COMMIT;
+
+    if not --keep-partitions: rm -rf todo[i] local folder
+
+    await next_handle                              # surface sync errors
 ```
 
-### 4.3 Explicitly absent — and the test for that
+**Partition size:** 64 000 ledgers — matches BE's
+`PARTITION_SIZE`. The S3 layout uses `{HEX:08X}--{start}-{end}/`
+where `HEX = u32::MAX - start`, mirroring BE's `Partition::from_ledger`
+exactly. Per-ledger filename is `{u32::MAX - seq:08X}--{seq}.xdr.zst`.
 
-The task role **must not** grant any of the following. The impl task
-includes a CDK unit test that asserts these are not in the policy
-document:
+**Disk bound:** ≈ 2 × partition size — one indexing, one prefetching.
+Older partitions average ~50 MB compressed, recent partitions ~12 GB
+(per BE's notes); plan for 25-30 GB free scratch on the workstation.
 
-- `rds:*` on any Block Explorer RDS instance.
-- `s3:*` on any Block Explorer S3 bucket (the `stellar-xdr-meta`,
-  CH-snapshot, or `soroban-rpc-events` buckets — any account-shared
-  BE-owned bucket).
-- `ec2:*` on any BE-managed security group or VPC endpoint that
-  would imply network reachability to a BE service.
-- Cross-account `sts:AssumeRole` into a BE account.
+## 5. Resumability
 
-PG access is via the network path only — there is **no IAM-RDS
-authentication** here; the role does not appear in any RDS DB
-parameter group. PG auth is via username/password from Secrets
-Manager. This keeps the IAM contract evaluable from policy alone.
+### 5.1 `backfill_progress` table
 
-The BE-authored `stellar-xdr` parser crate is embedded **in the
-container image** as a Cargo library dependency (per ADR 0002 §3 and
-the docs §8 "shared workspace crate" pattern). No BE runtime endpoint
-is consulted by the binary at any point.
-
-## 5. Resumability contract
-
-### 5.1 `backfill_progress` table shape
-
-Single-row-per-stream. DDL lands in the impl task; the contract is:
+DDL lands in task 0027. Logical shape:
 
 ```sql
 CREATE TABLE backfill_progress (
-    stream          TEXT PRIMARY KEY,            -- 'sdex_backfill' for v1
-    current_ledger  BIGINT       NOT NULL,        -- last fully-processed ledger
-    direction       TEXT         NOT NULL,        -- 'tip_backward' | 'oldest_first'
-    range_start     BIGINT,                       -- nullable; set on first start
-    range_end       BIGINT       NOT NULL,        -- exclusive floor (1 for genesis)
-    started_at      TIMESTAMPTZ  NOT NULL,
-    updated_at      TIMESTAMPTZ  NOT NULL,
-    last_heartbeat  TIMESTAMPTZ  NOT NULL
+    stream             TEXT PRIMARY KEY,           -- 'sdex_backfill' for v1
+    last_processed     BIGINT NOT NULL,            -- highest fully-processed ledger seq in current chunk
+    range_start        BIGINT NOT NULL,            -- as passed to --start
+    range_end          BIGINT NOT NULL,            -- as passed to --end
+    started_at         TIMESTAMPTZ NOT NULL,
+    updated_at         TIMESTAMPTZ NOT NULL,
+    chunk_id           TEXT NOT NULL                -- e.g. 'tip-1100000-tip' for ops debugging
 );
 ```
 
-### 5.2 Per-ledger atomicity
+A single row exists for the chunk currently being processed; a chunk
+that completes leaves its row in place as the historical record.
+Multiple historical rows are fine — `stream` is the PK so each chunk
+must have a unique stream id like `sdex_backfill_2026_05_phase1`, OR
+the table can be widened to `(stream, chunk_id)` PK in v2 if the
+single-row pattern proves too restrictive. v1 ships with one
+`stream='sdex_backfill'` row and overwrites between chunks.
 
-Each ledger is processed in a **single PG transaction**:
+### 5.2 Per-ledger atomicity (unchanged from previous design)
 
-```text
-BEGIN;
-  -- One INSERT … ON CONFLICT DO UPDATE per TradeTick → price_ohlcv row
-  -- per task 0022 decode-and-bucket §5.4 (whole-row replacement).
-  -- See ADR 0003 for the PK shape.
-  INSERT INTO price_ohlcv (timestamp, asset_id, quote_asset_id, granularity, ...) ...
-    ON CONFLICT (timestamp, asset_id, quote_asset_id, granularity) DO UPDATE SET ...;
-  ... (one per tick) ...
+Each ledger's `price_ohlcv` UPSERTs commit together with the
+`backfill_progress.last_processed` advance, in one PG transaction.
+Crash mid-ledger → restart reprocesses that ledger from the archive
+(idempotent under whole-row replacement per 0022 §5.4).
 
-  -- Same tx commits the checkpoint advance.
-  UPDATE backfill_progress
-     SET current_ledger = $1, updated_at = NOW(), last_heartbeat = NOW()
-   WHERE stream = 'sdex_backfill';
-COMMIT;
-```
+### 5.3 Partition-level skip (BE pattern)
 
-Either everything in the ledger lands AND the checkpoint advances,
-or nothing does. Crash mid-ledger leaves `current_ledger` pointing
-at the **last fully processed** ledger; on restart the binary reads
-that value, computes `next = current_ledger - 1` (for tip-backward),
-and re-fetches that ledger. The re-fetch produces the same set of
-ticks (archive is immutable) and the same UPSERT yields the same
-row (whole-row replacement is idempotent for identical input).
+Before downloading a partition, the runner queries `backfill_progress`
+to compute the set of ledgers in `[start, end]` already in the local
+DB. Any partition whose entire clamped range is already in the
+checkpoint set is skipped — no S3 sync, no decode.
 
-### 5.3 First-start initialisation
+This means a `--start=1 --end=tip` invocation against a DB that
+already has ledgers `tip-1.1M..tip` from a prior Phase 1 run will
+only download / decode the genuinely-missing partitions.
 
-On a fresh start (no row for the stream), the binary:
+### 5.4 `assets` table writes
 
-1. Reads `LEDGER_RANGE_START` env var. If empty, queries archive HEAD
-   (the highest published ledger sequence — typically the network
-   tip from a few minutes ago).
-2. Inserts the initial `backfill_progress` row with `current_ledger
-   = range_start + 1` (so the first decrement lands on `range_start`).
-3. Begins the walk.
+The backfill emits new asset rows on first-seen via the existing
+asset-discovery contract (per task 0022 G-note's pair canonicalisation
+section). `assets` is upsert-by-natural-key with a surrogate `id
+BIGSERIAL`. In single-laptop v1 this is fine — sequence allocation
+is monotonic. v2 multi-laptop requires the same surrogate-id remap
+pattern BE solved in their `db-merge` crate; deferred per ADR 0005.
 
-On restart, the binary reads the existing row and resumes — env vars
-are advisory and warn-but-do-not-override the persisted state, so an
-accidental different `LEDGER_RANGE_START` on restart does not silently
-shift the walk.
+## 6. Observability — stdout only
 
-### 5.4 Termination
+No CloudWatch, no SNS. The CLI emits structured tracing logs to
+stdout (BE pattern, `tracing_subscriber::fmt`) and prints a summary
+block on completion.
 
-When `current_ledger == range_end`, the binary:
-
-1. Emits a final heartbeat with a terminal flag.
-2. Writes a structured `event=backfill_complete` log line.
-3. Exits 0. ECS marks the task `STOPPED` with reason `Essential
-   container in task exited`.
-
-No row deletion — the completed row stays in `backfill_progress` as
-the historical record of the run.
-
-## 6. Heartbeat metric and alarm
-
-### 6.1 Metric
-
-Namespace `Prices/Backfill`. Two metrics per stream:
-
-| Metric              | Unit       | Dimensions          | Emitted when                                     |
-| ------------------- | ---------- | ------------------- | ------------------------------------------------ |
-| `LedgersProcessed`  | `Count`    | `Stream=sdex`       | Every `HEARTBEAT_EVERY_N_LEDGERS` (default 1000) |
-| `Heartbeat`         | `Count`    | `Stream=sdex`       | Same emit point — value always 1                 |
-
-`PutMetricData` is batched: the binary buffers and flushes every 60
-seconds OR every 5 000 ledgers (whichever first) to stay well under
-the API throttle.
-
-### 6.2 Alarm
-
-```yaml
-AlarmName:                  prices-backfill-sdex-heartbeat-stale-{env}
-MetricName:                 Heartbeat
-Namespace:                  Prices/Backfill
-Dimensions:                 { Stream: sdex }
-Statistic:                  Sum
-Period:                     300                 # 5 min granularity
-EvaluationPeriods:          4                   # 4 × 5 min = 20 min
-DatapointsToAlarm:          4
-Threshold:                  1
-ComparisonOperator:         LessThanThreshold
-TreatMissingData:           breaching
-AlarmActions:               [ arn:aws:sns:...:prices-backfill-alerts ]
-```
-
-**Rationale for 20 min.** Task 0022's profile shows ~3 ms decode per
-ledger; even at the slow end of archive transport (~150 k ledgers/h)
-a healthy task emits a heartbeat every ~24 s at the default
-`HEARTBEAT_EVERY_N_LEDGERS=1000`. A 20-minute silence covers transient
-S3 5xx retries (the binary's own backoff exhausts in ~5 min, see
-§7.1) plus margin, so the alarm fires only on real stuck states.
-
-### 6.3 SNS topic
-
-`prices-backfill-alerts-{env}` — single topic per environment.
-Subscribers (email, PagerDuty) are an operations decision and land
-in the impl task; the design only requires the topic exist and be
-referenced by the alarm.
-
-## 7. Failure modes
-
-### 7.1 Transient archive 5xx
-
-Per-object S3 GET wraps in exponential-backoff with jitter:
-
-| Attempt | Delay  |
-| ------- | ------ |
-| 1       | —      |
-| 2       | 250 ms |
-| 3       | 1 s    |
-| 4       | 4 s    |
-| 5       | 16 s   |
-| 6       | 60 s   |
-
-Six attempts ≈ 80 s total. After the sixth, the binary exits non-zero
-with `event=archive_fetch_exhausted`; ECS does NOT auto-restart (task
-exits, operator triages). The 20-min alarm fires shortly after.
-
-### 7.2 RDS write failure
-
-Treated as fatal. The current ledger's transaction rolls back,
-checkpoint is not advanced, binary exits non-zero. On restart the
-same ledger is retried. If the failure is persistent (auth, schema
-mismatch, disk full), the alarm fires and the runbook directs the
-operator to PG-side diagnosis. The binary does not back off and
-retry RDS internally — restart is the unit of retry for DB issues.
-
-### 7.3 Parser panic (`stellar-xdr` decode error)
-
-Fatal in v1: exit non-zero, log the offending `ledger_seq` and the
-panic message, alarm fires. The recovery path is a parser-crate
-bug fix, not a binary-side workaround. v2 may add an opt-in
-`SKIP_MALFORMED_LEDGERS=true` env var that logs and advances past
-the offending ledger — but only after a real malformed-ledger
-incident motivates it; pre-emptive skip-and-log hides upstream bugs.
-
-### 7.4 OOM
-
-Not expected at 2 vCPU / 4 GiB given streaming decode. Mitigation if
-encountered: bump to 4 vCPU / 8 GiB in CDK, redeploy. The binary
-itself does not need code changes for this.
-
-### 7.5 Clock drift / stuck `last_heartbeat`
-
-The PG `UPDATE … SET last_heartbeat = NOW()` is server-time, so it
-follows RDS's clock. CloudWatch alarms use AWS's clock. A multi-minute
-clock disagreement between RDS and CW would skew the alarm trigger
-but the binary's `event=heartbeat_emitted` log carries the
-CW-PutMetricData timestamp so post-hoc reconstruction is possible.
-No code-side defence — this is operationally rare and easier to
-diagnose than to mask.
-
-## 8. Logging
-
-Log group: `/prices/backfill/sdex` — 30 d retention. Structured JSON
-on stdout, one line per event:
+### 6.1 Tracing events (stable names)
 
 ```json
-{"ts":"2026-05-13T08:21:14.512Z","level":"info","stream":"sdex_backfill",
- "ledger_seq":62442947,"event":"ledger_processed",
+{"ts":"2026-05-14T08:21:14.512Z","level":"info","stream":"sdex_backfill",
+ "ledger":62442947,"event":"ledger_processed",
  "trade_ticks":24,"upsert_rows":12,"dur_ms":3.41}
 ```
 
-Stable event names — these are operator-facing:
+Stable event names:
 
-- `task_started` — once per task start.
-- `range_resolved` — after `LEDGER_RANGE_START` / archive-HEAD resolve.
-- `ledger_fetched` — emitted at debug only; not standard runtime noise.
-- `ledger_processed` — every ledger; primary throughput line.
-- `heartbeat_emitted` — every N ledgers; carries metric values.
-- `checkpoint_advanced` — every successful ledger commit.
-- `archive_fetch_retry` — every retry attempt.
-- `archive_fetch_exhausted` — terminal S3 failure.
-- `pg_write_failed` — terminal DB failure.
-- `parser_panic` — terminal XDR decode failure.
-- `backfill_complete` — terminal success.
+| Event                       | Emitted when                                  |
+| --------------------------- | --------------------------------------------- |
+| `preflight_ok`              | aws CLI + sink reachable                      |
+| `range_resolved`            | partitions enumerated + `completed` set loaded |
+| `partition_sync_complete`   | `aws s3 sync` returned for a partition        |
+| `partition_indexing`        | switching index focus to next partition       |
+| `ledger_processed`          | every ledger (verbose) — primary throughput line |
+| `progress_tick`             | every 100 ledgers (default), summary metrics  |
+| `partition_done`            | end of partition; counts + duration           |
+| `backfill_complete`         | terminal success                              |
+| `archive_fetch_failed`      | `aws s3 sync` returned non-zero               |
+| `pg_write_failed`           | terminal DB error                             |
+| `parser_panic`              | XDR decode panic (typically a `stellar-xdr` bug) |
+
+### 6.2 Final summary (always printed, even without `--verbose`)
+
+Modeled on BE `backfill-runner::run::print_run_summary` and
+`backfill-bench` end-of-run block:
+
+```text
+=== sdex-backfill complete ===
+partitions processed:    47
+ledgers indexed:         3_008_000
+ledgers skipped (in DB): 11_456
+trade ticks emitted:     1_204_788
+price_ohlcv rows UPSERT: 481_220
+total bytes downloaded:  142 GiB
+parse total:             8 314 s
+persist total:           2 207 s
+ledger time (min / p50 / p95 / max): 1 / 3 / 8 / 142 ms
+elapsed:                 9_812 s (≈ 2 h 43 m)
+```
+
+### 6.3 Optional p95 assert
+
+`--assert-p95-ms 200` matches BE's `--assert-p95-ms` flag — exits
+non-zero if p95 exceeds the threshold, useful for CI smoke tests
+on small ranges. No SLO defined for v1; flag exists for future use.
+
+## 7. Failure modes
+
+### 7.1 Transient `aws s3 sync` failures
+
+`aws s3 sync` is invoked as a subprocess. If it exits non-zero, the
+CLI returns a typed `BackfillError::ArchiveFetch` and exits non-zero.
+**No in-binary retry loop for `s3 sync`** — `aws-cli` already does
+multipart retries internally with `S3_REQUEST_TIMEOUT` semantics.
+Operator response: re-run the same CLI invocation; the resume logic
+short-circuits already-downloaded partitions.
+
+### 7.2 Postgres write failure
+
+Treated as fatal. The current ledger's transaction rolls back,
+checkpoint is not advanced, binary exits non-zero. On restart the
+same ledger is retried (idempotent). If failure is persistent (auth,
+schema mismatch, disk full), operator diagnoses PG-side.
+
+### 7.3 Parser panic
+
+`stellar-xdr` / `xdr-parser` panic on malformed XDR. Treated as
+fatal — operator files an issue against the BE `xdr-parser` repo
+with the offending ledger sequence. v2 may add an opt-in
+`--skip-malformed` flag, but pre-emptive skip hides upstream bugs.
+
+### 7.4 Workstation sleep / network drop
+
+The CLI is interrupt-resumable by construction (per-ledger atomic
+checkpoint + partition pre-skip). Operator response: re-run the
+same invocation; resume picks up from `backfill_progress` and skips
+already-downloaded partitions.
+
+### 7.5 Insufficient disk space
+
+`aws s3 sync` fails on partition write; CLI exits per §7.1. Operator
+frees space (workspace cleanup, `--keep-partitions` was on?) and
+re-runs.
+
+### 7.6 OOM
+
+Streaming decode keeps memory bounded; OOM is not expected on
+modern workstations (≥ 8 GB RAM). If observed on legacy hardware,
+mitigation is the same as BE's: reduce parallelism (we already use
+single-slot prefetch) or run on a beefier machine.
+
+## 8. Local Postgres bootstrap
+
+Docker is the assumed shape, mirroring BE's local-PG pattern. A
+`docker-compose.yml` lands in task 0027 alongside the binary:
+
+```yaml
+# Logical shape; task 0027 finalises.
+services:
+  prices-pg-local:
+    image: postgres:16
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: prices_api
+    ports: ["5432:5432"]
+    volumes:
+      - prices-pg-data:/var/lib/postgresql/data
+
+volumes:
+  prices-pg-data:
+```
+
+Schema migrations apply via the same `sqlx-migrate` or `refinery`
+tool the prices-api API will use (decision deferred to task 0011 /
+ADR-to-be when the API crate lands). For v1 of backfill the migrations
+required are:
+
+- ADR 0003: `price_ohlcv` PK includes `quote_asset_id` (`uidx_price_ohlcv_pk` redefined as `(timestamp, asset_id, quote_asset_id, granularity)`).
+- New: `backfill_progress` table (§5.1).
+- Pre-existing: `assets`, `price_ohlcv` tables per `docs/database-schema/`.
 
 ## 9. Runbook outline
 
-Final runbook lives at `docs/runbooks/backfill-sdex.md` and is
-written by the impl task. Structure:
+Full runbook lands at `docs/runbooks/backfill-sdex.md` in task 0027.
+Structure:
 
-### 9.1 Start
-
-```bash
-aws ecs run-task \
-  --cluster prices-backfill-{env} \
-  --task-definition sdex-backfill-{env} \
-  --launch-type FARGATE \
-  --network-configuration "awsvpcConfiguration={subnets=[$SUBNET],securityGroups=[$SG],assignPublicIp=DISABLED}" \
-  --overrides '{"containerOverrides":[{"name":"sdex-backfill","environment":[{"name":"LEDGER_RANGE_END","value":"1"}]}]}'
-```
-
-### 9.2 Observe progress
+### 9.1 First-time setup
 
 ```bash
-# Last fully-processed ledger + heartbeat freshness
-psql -c "SELECT stream, current_ledger, direction,
-                started_at, updated_at, last_heartbeat
-           FROM backfill_progress
-          WHERE stream='sdex_backfill'"
+# 1. Install aws CLI (no credentials needed — anonymous bucket).
+which aws || { echo "install aws-cli"; exit 1; }
 
-# Public-facing aggregate
-curl https://prices-api.{env}.../backfill/status | jq
+# 2. Start local Postgres.
+docker compose up -d prices-pg-local
+
+# 3. Apply migrations.
+DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/prices_api \
+    cargo run -p db-migrate
+
+# 4. Build the backfill CLI in release mode.
+cargo build --release -p sdex-backfill
 ```
 
-### 9.3 Stop (graceful)
+### 9.2 Phase 1 — recent 6 months (Tranche 1 UX gate)
 
 ```bash
-aws ecs stop-task --cluster prices-backfill-{env} --task $TASK_ARN
+TIP=$(curl -s https://horizon.stellar.org/ledgers?order=desc | jq '.[0].sequence')
+# 1 100 000 ledgers ≈ 6 months at ~5s ledger cadence.
+
+DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/prices_api \
+target/release/sdex-backfill \
+    --start $((TIP - 1100000)) \
+    --end $TIP \
+    --verbose
 ```
 
-Per-ledger atomic commit means any stop point leaves
-`backfill_progress.current_ledger` pointing at a clean last-processed
-ledger. The next `run-task` resumes from there.
+Wall-clock: ≈ 1 h pure decode + archive sync overhead → ½ – 1 day.
 
-### 9.4 Resume
+### 9.3 Cloud push (post-backfill, requires task 0028)
 
-Identical to start — the binary detects the existing
-`backfill_progress` row and continues.
+```bash
+DATABASE_URL_LOCAL=postgres://...local... \
+DATABASE_URL_CLOUD=postgres://...cloud... \
+target/release/sdex-cloud-push \
+    --since-chunk Phase1 \
+    --tables price_ohlcv,assets
+```
 
-### 9.5 Alarm response (heartbeat stale > 20 min)
+### 9.4 Subsequent phases
 
-1. Check task status: `aws ecs describe-tasks --cluster ... --tasks ...`.
-2. If task is `STOPPED`, fetch the last 100 log lines:
-   `aws logs tail /prices/backfill/sdex --since 30m --follow=false`
-3. Match the last `event=` field against §8 to pick the failure mode.
-4. Follow the failure-mode-specific procedure
-   (`archive_fetch_exhausted` → wait for S3 to recover and re-run;
-   `pg_write_failed` → PG diagnostics; `parser_panic` → file a
-   `stellar-xdr` issue with the offending ledger seq).
+Repeat §9.2 with older ranges. The resume logic short-circuits
+overlapping ledger sets, so concurrent or overlapping operator
+invocations are safe (each just no-ops on already-processed ledgers).
+
+### 9.5 Stop / pause
+
+`Ctrl-C` interrupts the CLI. Per-ledger atomic commit means the
+next invocation resumes from a clean checkpoint.
+
+### 9.6 Inspect progress
+
+```bash
+psql $DATABASE_URL -c "
+  SELECT stream, last_processed, range_start, range_end, updated_at, chunk_id
+    FROM backfill_progress
+   WHERE stream = 'sdex_backfill';"
+
+psql $DATABASE_URL -c "
+  SELECT MIN(timestamp), MAX(timestamp), COUNT(*) FROM price_ohlcv;"
+```
 
 ## 10. Rust module split — mapping to task 0022's spec
 
-The binary's crate layout maps 1:1 onto task 0022's spec sections so
-the AC "spec from task 0022 is folded into the Rust implementation
-module" is verifiable clause-by-clause:
+Workspace layout (final paths land in task 0027):
 
-| Rust module       | Spec source                                          | Responsibility                                                                  |
-| ----------------- | ---------------------------------------------------- | ------------------------------------------------------------------------------- |
-| `archive`         | this design §1, §7.1                                 | S3 streaming `GET`; per-object backoff; produces `Bytes` per ledger.            |
-| `decode`          | 0022 filter-strategy §1.1-1.3; 0020 G-note §3        | `stellar-xdr::LedgerCloseMeta::from_xdr_bytes`. Single atomic decode per ledger. |
-| `filter`          | 0022 filter-strategy §1.4-1.6, §2                    | Post-decode `OperationResultTr` walk; `ClaimAtom` extraction; `txSUCCESS` gate.  |
-| `tick`            | 0022 decode-and-bucket §2-§3; 0020 G-note §"Output unit" | `ClaimAtom` → `TradeTick`. Per-variant V0 / ORDER_BOOK / LIQUIDITY_POOL decode. |
-| `canonical`       | 0022 decode-and-bucket §1; 0020 G-note §"Pair canonicalisation rule" | Asset canonicalisation, base/quote orientation, asset-id surrogation.           |
-| `price`           | 0022 decode-and-bucket §4                            | `amount_bought / amount_sold` → NUMERIC(28,14) with the spec's precision policy. |
-| `bucket`          | 0022 decode-and-bucket §5                            | `TradeTick` → `price_ohlcv` 1m row; whole-row replacement UPSERT batch.         |
-| `checkpoint`      | this design §5                                       | Read/write `backfill_progress`; transactional commit per ledger.                |
-| `heartbeat`       | this design §6                                       | Batched `PutMetricData` to `Prices/Backfill`.                                   |
-| `obs`             | this design §8                                       | Structured-JSON `tracing` subscriber on stdout.                                 |
-| `main`            | this design §3, §5.3, §5.4                           | Orchestration: range resolve, walk loop, graceful shutdown.                     |
+```text
+packages/
+  sdex-backfill/                # Bin crate — CLI entry
+    src/
+      main.rs
+      cli.rs                    # clap definitions, env handling
+      run.rs                    # orchestration (modeled on BE run.rs)
+      partition.rs              # Partition struct + partitions_for_range
+      sync.rs                   # aws s3 sync subprocess wrapper
+      ingest.rs                 # per-partition + per-ledger index loop
+      filter.rs                 # post-decode OperationResultTr walk (0022 §1.4–1.6)
+      tick.rs                   # ClaimAtom → TradeTick (0022 §2–§3)
+      canonical.rs              # pair canonicalisation (0022 §1, 0020 G-note)
+      price.rs                  # amount_bought / amount_sold → Decimal (0022 §4)
+      bucket.rs                 # TradeTick → price_ohlcv UPSERT (0022 §5)
+      checkpoint.rs             # backfill_progress read/write
+      obs.rs                    # tracing-subscriber setup
 
-`stellar-xdr` is imported as a Cargo workspace dependency — no
-in-repo XDR types. The crate is the BE-authored one per ADR 0002 §3;
-the impl task verifies via `cargo tree` that the dep resolves to the
-expected source.
+  sdex-cloud-push/              # Separate bin crate — task 0028
+    src/
+      main.rs
 
-## 11. Handoff — implementation checklist
+  db/                           # Shared sqlx pool + migrations
+    src/
+      pool.rs
+      migrations/
 
-The follow-up impl task (spawned in [§12](#12-spawned-follow-up-tasks))
-delivers, in order:
+Cargo.toml (workspace root)
+[workspace.dependencies]
+xdr-parser  = { git = "https://github.com/rumblefishdev/soroban-block-explorer.git", branch = "main" }
+stellar-xdr = "26"              # via xdr-parser, but also accessible direct
+tokio       = { version = "1", features = ["full"] }
+sqlx        = { version = "0.8", features = ["postgres", "macros", "runtime-tokio"] }
+clap        = { version = "4", features = ["derive", "env"] }
+tracing     = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+```
 
-1. **Cargo workspace bootstrap** — Rust workspace root, `sdex-backfill`
-   binary crate, `stellar-xdr` dep, CI build job that produces the
-   ECR image.
+Mapping onto 0022 spec sections (unchanged from the previous design's
+§10 — the spec is host-shape-agnostic):
 
-2. **Schema migrations** in the prices-api PG migration tool:
-   - `price_ohlcv` PK change per ADR 0003 (add `quote_asset_id` to
-     the PK; documented in 0023's S-note).
-   - `backfill_progress` table per §5.1 above.
+| Rust module    | Spec source                                          | Responsibility                                                                  |
+| -------------- | ---------------------------------------------------- | ------------------------------------------------------------------------------- |
+| `sync`         | this design §1, §4                                   | `aws s3 sync --no-sign-request` subprocess; per-partition.                       |
+| `partition`    | this design §4                                       | `Partition::from_ledger` + `partitions_for_range`; mirror BE's layout exactly.   |
+| `ingest`       | this design §4, §5                                   | Per-partition loop; per-ledger atomic tx; checkpoint advance.                    |
+| `filter`       | 0022 filter-strategy §1.4-1.6, §2                    | `TransactionResultMeta` walk; `txSUCCESS` gate; `ClaimAtom` extraction.          |
+| `tick`         | 0022 decode-and-bucket §2-§3; 0020 G-note            | `ClaimAtom` → `TradeTick`. V0 / ORDER_BOOK / LIQUIDITY_POOL decode.              |
+| `canonical`    | 0022 decode-and-bucket §1; 0020 G-note               | Asset canonicalisation, base/quote orientation, surrogation.                     |
+| `price`        | 0022 decode-and-bucket §4                            | `amount_bought / amount_sold` → NUMERIC(28,14) with precision policy.            |
+| `bucket`       | 0022 decode-and-bucket §5                            | `TradeTick` → 1m `price_ohlcv` row; whole-row replacement UPSERT batch.          |
+| `checkpoint`   | this design §5                                       | Read/write `backfill_progress`; transactional commit per ledger.                 |
+| `obs`          | this design §6                                       | `tracing` subscriber on stdout; structured JSON.                                 |
+| `run`/`main`   | this design §3, §4                                   | Orchestration: preflight, resume, partition pipeline, summary.                   |
 
-3. **CDK additions under `infra/aws-cdk/`** (depends on task 0011
-   landing first):
-   - `prices-backfill-{env}` ECS Fargate cluster.
-   - `sdex-backfill-{env}` task definition matching §3.
-   - `PricesBackfillExecution-{env}` and `PricesBackfillSDEX-{env}`
-     IAM roles matching §4. **Unit test asserting §4.3's forbidden
-     actions are absent.**
-   - CloudWatch alarm matching §6.2 wired to SNS topic from §6.3.
-   - CDK code comments referencing ADR 0002, ADR 0003, and this
-     G-note.
+**`xdr-parser` consumed via git Cargo dep** per ADR 0005 §3.
+Verification: `cargo tree -i xdr-parser` resolves to the pinned BE
+git commit. No BE-repo changes; the pin can be updated by editing
+`Cargo.toml` and `cargo update -p xdr-parser`.
 
-4. **Rust binary** with module layout per §10. Each module is
-   reviewable against the cited spec section.
+## 11. Cloud-push design (post-backfill)
 
-5. **Runbook at `docs/runbooks/backfill-sdex.md`** per §9.
+This is a sketch — the full design lands when task 0028 is activated.
+Captured here so the impl task and operators know what's coming.
 
-6. **Staging smoke test:** run the task against a 10 k-ledger range
-   in staging; assert `price_ohlcv` rows land and `backfill_progress
-   .current_ledger` advances monotonically.
+### 11.1 Tool shape
 
-7. **Confirm `cargo tree` resolves `stellar-xdr` to the BE workspace
-   source** (or pinned crate version per ADR 0002 §3 — final shape
-   set when task 0011 lands).
+```bash
+sdex-cloud-push \
+    --source-url postgres://...local... \
+    --target-url postgres://...cloud... \
+    --tables price_ohlcv,assets \
+    --since-ledger <N>                    # optional; default: all
+```
 
-## 12. Spawned follow-up tasks
+A small Rust binary (≈ 200-500 LOC). Streams rows from local PG to
+cloud PG. Two strategies, decided on impl:
 
-This design produces one new backlog task:
+- **`COPY … TO STDOUT` + `COPY … FROM STDIN`** — fastest, but no
+  UPSERT semantics. Requires "empty target" or table-truncate
+  semantics that drop history.
+- **`INSERT … SELECT … ON CONFLICT DO UPDATE`** — slower, but
+  preserves the whole-row-replacement semantics from 0022 §5.4.
+  Batched (typically 5-10k rows / round-trip).
 
-- **0027 — SDEX Fargate backfill implementation.** Lands the
-  Cargo workspace, Rust binary, schema migrations, CDK stack,
-  runbook, and staging smoke test per §11. Blocked on task 0011
-  (CDK bootstrap).
+Recommendation (decided at impl): start with the `INSERT … ON
+CONFLICT` strategy. `COPY` is faster but the loss of UPSERT
+semantics means we'd have to either truncate the cloud table (loses
+live-ingestion data accumulated since the last push) or pre-stage to
+a temp table and merge — both more complex than batched UPSERTs.
 
-No other follow-ups — the 0023 PK ADR (ADR 0003), 0024 enrichment
-design, and 0025 live-merge contract (ADR 0004) are already
-resolved; 0026 is the 0024 impl follow-up and runs parallel to 0027.
+### 11.2 Ordering
+
+Push `assets` first, then `price_ohlcv` — `price_ohlcv` rows FK to
+`assets.id` (via `asset_id`, `quote_asset_id`). Surrogate-id
+collisions between local and cloud are possible if cloud already
+has rows written by the live-ingestion Lambda. Push tool resolves
+by natural-key matching:
+
+```text
+For each local assets row:
+  SELECT id FROM cloud.assets WHERE <natural_key columns> = local;
+  IF found: remap local.id → cloud.id in the local → cloud copy.
+  ELSE:     INSERT into cloud.assets RETURNING id; use that id.
+
+Then for each local price_ohlcv row:
+  rewrite asset_id, quote_asset_id via the map computed above
+  UPSERT into cloud.price_ohlcv on (timestamp, asset_id, quote_asset_id, granularity)
+```
+
+This is the same surrogate-remap pattern BE solved in their
+`db-merge` crate (ADR 0040 §"Surrogate-id remap procedure"),
+narrowed to the two tables prices-api needs.
+
+### 11.3 Idempotency
+
+The push tool can be re-run safely: `ON CONFLICT DO UPDATE` makes
+each row idempotent; `assets` natural-key matching makes the
+remap idempotent across runs.
+
+### 11.4 Triggering live-ingestion handoff
+
+Once a chunk is pushed, the Prices Ledger Processor Lambda (live
+ingestion) is unaffected — its writes interleave with the pushed
+backfill data via the same UPSERT semantics. There is no explicit
+"handoff" event; the cloud DB simply has more historical rows after
+each push.
+
+## 12. Handoff — implementation checklists
+
+### 12.1 Task 0027 — local backfill CLI
+
+Per ADR 0005 §Decision points 1-6, 8, 9:
+
+1. Cargo workspace bootstrap with `sdex-backfill` bin crate. Pin
+   `xdr-parser` via git Cargo dep.
+2. Schema migrations:
+   - ADR 0003 PK: `price_ohlcv.PK = (timestamp, asset_id, quote_asset_id, granularity)`.
+   - New `backfill_progress` table (§5.1).
+3. Rust modules per §10. Each module reviewable against its cited
+   spec section.
+4. `docker-compose.yml` for local Postgres (§8).
+5. Runbook at `docs/runbooks/backfill-sdex.md` per §9.
+6. Smoke test: run against a 10 000-ledger recent range; assert
+   `price_ohlcv` rows land, `backfill_progress.last_processed`
+   advances, p95 latency printed.
+7. Verify `cargo tree -i xdr-parser` resolves to the pinned BE
+   git commit (no path-dep, no local override).
+
+### 12.2 Task 0028 — cloud-push tool
+
+Per §11 above and ADR 0005 §Decision point 7:
+
+1. `sdex-cloud-push` bin crate alongside `sdex-backfill`.
+2. `assets` natural-key remap (§11.2).
+3. `price_ohlcv` batched UPSERT with FK rewrite via map.
+4. CLI flags for source/target URLs, table list, optional
+   `--since-ledger` filter.
+5. Smoke test: push a small chunk to a docker-cloud-pg stand-in,
+   diff against source.
+6. Runbook section in `docs/runbooks/backfill-sdex.md` covering
+   the push step.
+7. Blocked on task 0011 (cloud RDS exists) and task 0027 (local
+   data exists).
