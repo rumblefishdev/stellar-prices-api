@@ -920,7 +920,7 @@ all-time history once backfill completes)
 | Component | Technology |
 |-----------|-----------|
 | Language | Rust (edition 2021) |
-| Runtime | AWS Lambda (Rust, custom `provided.al2` runtime via `lambda_runtime` crate) + ECS Fargate for Galexie and backfill task |
+| Runtime | AWS Lambda (Rust, custom `provided.al2` runtime via `lambda_runtime` crate) for API + ingestion workers; ECS Fargate for shared Galexie (BE-funded); local Rust CLI on operator workstation for Stream 2 backfill (ADR 0005) |
 | API Framework | `axum` (HTTP router, shared with Block Explorer backend) |
 | XDR parsing | `stellar-xdr` crate (official SDF Rust XDR types) — shared workspace crate with Block Explorer |
 | Database client | `sqlx` (compile-time verified queries, async) |
