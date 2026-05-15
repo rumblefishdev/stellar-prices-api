@@ -415,21 +415,294 @@ validated against the local pilot CH version once 0017 lands.)
 
 ## 3. Phoenix
 
-> **TODO** — next iteration of this task.
+Phoenix DeFi Hub is a multi-pool-type AMM (XYK + stable) on Soroban.
+Canonical mainnet contract registry: archive task 0002
+`R-phoenix-registry.md` (sources: `Phoenix-Protocol-Group/phoenix-contracts`
+`scripts/upgrade_mainnet.sh`, stellar.expert directory entries
+labelled "Phoenix Pool" / `phoenix-hub.io`). Eleven XYK pools are
+confirmed by exact-WASM membership in the upgrade script's
+`pools=()` array.
 
-Prior surface: archive task 0002 `R-phoenix-registry.md`. Phoenix
-emits `Symbol("swap")` from its pool contracts (per public reading)
-but did not appear under that name in archive task 0001's wider
-sample — venue attribution will need WASM-hash matching against
-Phoenix's published pool / factory binaries.
+Phoenix's swap event shape is the **structural outlier** of the
+three AMMs: a single swap fires **eight separate events** from the
+pool contract (six for the stable-pool variant), each carrying one
+named field of the swap as `topic[1]` and the corresponding value
+as `data`. The decoder must group `(tx_hash, contract_id)` and fold
+the eight events into one logical trade row.
+
+### 3.1 ScVal-level shape (XYK pool — 8-event grouping)
+
+Fresh decoded sample: `evidence/phoenix_pool_swap_decode.json`
+(event_index 5 through 12 of the same tx).
+
+- **tx**: `559498bdf567340c0780b80f2bfa07bcc58713fc328e659ef72461849a326aa8`
+- **ledger**: `62460522`
+- **emitter**: `CBHCRSVX3ZZ7EGTSYMKPEFGZNWRVCSESQR3UABET4MIW52N4EVU6BIZX`
+  (canonical Phoenix XYK pool, pair XLM/USDC — stellar.expert
+  directory label "Phoenix Pool", `phoenix-hub.io`, per archive
+  task 0002 `R-phoenix-registry.md`)
+
+Each of the eight events has the same two-topic shape:
+
+```
+topics = [ScVal::String("swap"), ScVal::String("<field>")]
+data   = <field-typed ScVal>
+```
+
+The **eight fields**, in their emission order (matching
+`contracts/pool/src/contract.rs:1172-1185`):
+
+| event_index (relative) | `topic[1]` | data type | sample value | Meaning |
+|---|---|---|---|---|
+| +0 (= 5) | `String("sender")` | `Address` | `GDCRZPZYBZ24RHRO3WBPJGFDL7NDFKUQBS3ZDB6YGBJB3TGKMFYBQ3LD` | trader (G-account) |
+| +1 (= 6) | `String("sell_token")` | `Address` | `CAS3J7GYLGXMF6TDJBBYYSE3HQ6BBSMLNUQ34T6TZMYMW2EVH34XOWMA` | token_in (XLM SAC) |
+| +2 (= 7) | `String("offer_amount")` | `i128` | `11659417676` (≈ 1165.94 XLM) | amount_in (raw, token_in units) |
+| +3 (= 8) | `String("actual received amount")` ⚠ | `i128` | `11659417676` | actual `token_in` received by the pool — diverges from `offer_amount` only for fee-on-transfer tokens; equals `offer_amount` for vanilla SAC tokens. **Field name contains literal spaces.** |
+| +4 (= 9) | `String("buy_token")` | `Address` | `CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75` | token_out (USDC SAC) |
+| +5 (= 10) | `String("return_amount")` | `i128` | `1857322909` (≈ 185.73 USDC) | amount_out (raw, token_out units) |
+| +6 (= 11) | `String("spread_amount")` | `i128` | `503808` | slippage (not the protocol fee — see §3.4) |
+| +7 (= 12) | `String("referral_fee_amount")` | `i128` | `0` | referral fee — currently disabled in the contract (`FIXM:` flag in source), always 0 |
+
+> ⚠ The `actual received amount` field name contains literal
+> spaces. Preserve verbatim when matching — do **not** normalise
+> to snake_case.
+
+Topics XDR base64 (example, for the `sender` event): `AAAAAgAAAA4AAAAEc3dhcAAAAA4AAAAGc2VuZGVyAAA=`
+
+Stable-pool variant emits **six events**
+(`contracts/pool_stable/src/contract.rs:1182-1189`): drops
+`actual received amount` and `referral_fee_amount`. Same topic
+shape, same `String` typing. No mainnet stable-pool address is
+currently known per `R-phoenix-registry.md` — the decoder should
+still handle the 6-event case for future-proofing.
+
+### 3.2 CH storage-level shape
+
+Each of the 8 events is a separate `soroban_events` row. For the
+first event (`sender`):
+
+`soroban_events.topics_xdr`:
+
+```json
+[
+  { "type": "string", "value": "swap"   },
+  { "type": "string", "value": "sender" }
+]
+```
+
+`soroban_events.data_xdr`:
+
+```json
+{ "type": "address", "value": "GDCRZPZYBZ24RHRO3WBPJGFDL7NDFKUQBS3ZDB6YGBJB3TGKMFYBQ3LD" }
+```
+
+`soroban_events.signature` = **NULL** for every Phoenix swap event
+(`topic[0]` is `type == "string"`, not `"sym"` — same root cause
+as Soroswap §1.2). Per `R-be-storage-format.md`, the consumer
+filter on `signature` does not work for Phoenix any more than for
+Soroswap.
+
+### 3.3 Token-in / token-out direction convention
+
+Token addresses come from the dedicated `sell_token` and `buy_token`
+events:
+
+- `token_in`   = data of the event with `topic[1] = String("sell_token")`
+- `token_out`  = data of the event with `topic[1] = String("buy_token")`
+- `trader`     = data of the event with `topic[1] = String("sender")`
+- `amount_in`  = data of the event with `topic[1] = String("offer_amount")` (raw units of `token_in`)
+- `amount_out` = data of the event with `topic[1] = String("return_amount")` (raw units of `token_out`)
+
+The eight events for a single swap **all carry the same
+`contract_id` and the same `tx_hash`**, and are guaranteed
+contiguous within the tx in emission order (sender → sell_token →
+offer_amount → actual_received → buy_token → return_amount →
+spread → referral_fee). The decoder can rely on either:
+
+- **By tx_hash + contract_id**: group all rows where
+  `(transaction_id, contract_id)` match and `topic[0] = String("swap")`;
+  pick out each field by `topic[1]`. Most robust if event ordering
+  ever changes.
+- **By contiguous event_index window**: take any
+  `String("swap")` row at offset *k* and read offsets *k..k+7* in
+  order. Faster if the emission order is stable (it has been
+  since launch per the source, but is in principle a contract
+  upgrade away from changing).
+
+### 3.4 Amount denomination — and the fee gap
+
+Amounts are `i128` raw contract units, decimals per token from the
+token contract's `decimals()` — same convention as Soroswap §1.4
+and Aquarius §2.4. Both tokens in this sample are 7-decimal SACs.
+
+**Fee is NOT emitted as an event.** Phoenix's source (per
+`R-phoenix-registry.md`) computes the protocol-fee debit inside
+`do_swap` and pays it directly to `fee_recipient` without publishing
+it. `spread_amount` is slippage (the pricing error vs. the constant-
+product curve), not the fee. Consumer options for the trade-row's
+`fee` column:
+
+1. **Leave NULL.** Lossy but simplest — recommended for MVP.
+2. **Reconstruct from pool config.** Call the Phoenix pool's
+   `query_config()` once per pool, cache the `commission_bps`,
+   compute `fee = offer_amount * commission_bps / 10_000` per
+   trade. Adds a per-pool one-shot lookup; requires Soroban RPC
+   access from the consumer side.
+
+This is a meaningful schema asymmetry vs. Aquarius (where the fee
+is `data[2]` of the trade event). The Tranche 1 consumer should
+adopt option 1 unless the downstream OHLCV requires per-trade fee
+revenue tracking.
+
+### 3.5 Cross-reference against `Phoenix-Protocol-Group/phoenix-contracts` source
+
+Source already transcribed and confirmed in archive task 0002
+`R-phoenix-registry.md` §"Pool swap event format":
+
+```rust
+// contracts/pool/src/contract.rs:1172-1185
+env.events().publish(("swap", "sender"), sender);
+env.events().publish(("swap", "sell_token"), sell_token);
+env.events().publish(("swap", "offer_amount"), offer_amount);
+env.events().publish(("swap", "actual received amount"), actual_received_amount);
+env.events().publish(("swap", "buy_token"), buy_token);
+env.events().publish(("swap", "return_amount"), compute_swap.return_amount);
+env.events().publish(("swap", "spread_amount"), compute_swap.spread_amount);
+env.events().publish(("swap", "referral_fee_amount"), compute_swap.referral_fee_amount);
+```
+
+Decoded sample matches the source signature bit-for-bit, including
+the unusual `actual received amount` literal. The `(swap, <field>)`
+tuple in Rust source uses `&str` literals which `IntoVal` compiles
+to `ScVal::String` (a `ScVal::Symbol` would require
+`symbol_short!()` / `Symbol::new()`) — explains the otherwise-
+surprising `String` topic kind.
+
+### 3.6 Filter recipe for the Tranche 1 consumer
+
+Phoenix is the harder case — `signature` is NULL and the 8-event
+fan-out means a naive `WHERE topic[0]='swap'` query returns 8 rows
+per logical trade.
+
+**Recommended approach: contract_id whitelist + GROUP BY**.
+
+```sql
+WITH phoenix_swap_events AS (
+  SELECT transaction_id, contract_id, event_index, ledger_sequence,
+         JSONExtractString(topics_xdr, '$[1].value') AS field,
+         data_xdr
+  FROM   soroban_events
+  WHERE  ledger_sequence BETWEEN <range_start> AND <range_end>
+    AND  contract_id IN (<11 known phoenix pool ids>)
+    AND  JSONExtractString(topics_xdr, '$[0].value') = 'swap'
+)
+SELECT transaction_id, contract_id, ledger_sequence,
+       MIN(event_index)                                                     AS first_event_index,
+       maxIf(JSONExtractString(data_xdr, '$.value'), field = 'sender')      AS trader,
+       maxIf(JSONExtractString(data_xdr, '$.value'), field = 'sell_token')  AS token_in,
+       maxIf(JSONExtractString(data_xdr, '$.value'), field = 'offer_amount') AS amount_in,
+       maxIf(JSONExtractString(data_xdr, '$.value'), field = 'buy_token')   AS token_out,
+       maxIf(JSONExtractString(data_xdr, '$.value'), field = 'return_amount') AS amount_out,
+       maxIf(JSONExtractString(data_xdr, '$.value'), field = 'spread_amount') AS spread
+FROM   phoenix_swap_events
+GROUP BY transaction_id, contract_id, ledger_sequence
+```
+
+(CH `JSONExtractString` + `maxIf` syntax to be validated against
+the local pilot CH version once task 0017 lands. The
+`maxIf(..., field = '<name>')` pattern works on string values too
+because at most one event per group carries each field.)
+
+The 11-pool whitelist comes from
+`R-phoenix-registry.md` §"Pool contracts". For new pools, the
+Phoenix factory `CB4SVAWJA6TSRNOJZ7W2AWFW46D5VR4ZMFZKDIKXEINZCZEGZCJZCKMI`
+emits `(Symbol("create"), Symbol("liquidity_pool"))` with
+`data = Address(<new pool>)` — the consumer should periodically
+re-scan the factory to keep the whitelist current.
+
+If avoiding a 50%-overhead `contract_id` lookup is desired, an
+alternative filter is `JSONExtractString(topics_xdr, '$[0].value') =
+'swap' AND JSONExtractString(topics_xdr, '$[1].type') = 'string'`
+— but that doesn't distinguish Phoenix from any other contract
+that happens to use `String("swap")` topic, so the whitelist is
+the safer path.
 
 ---
 
-## Appendix A — Recommendation: shared vs per-AMM extractor
+## Appendix A — Recommendation: per-AMM extractor with shared dispatch
 
-(To be finalised once all three AMM sections land. Initial reading
-from prior work and Soroswap: at least three distinct decoders are
-needed — Aquarius `trade` 3-element Vec, Aquarius router `swap`
-5-element Vec, Soroswap `swap` 5-key Map — plus a Phoenix decoder
-TBD. A trait-based dispatch keyed by `(contract_id → venue)` is the
-likely shape.)
+**Verdict: three independent decoders are required.** The pool-level
+swap event shapes have no overlap usable for a single extractor:
+
+| Venue | Topic[0] kind | Topic[1..] | Data shape | Token inline? | Fee in event? | Event count per swap |
+|---|---|---|---|---|---|---|
+| Soroswap (Pair) | `String("SoroswapPair")` | `Symbol("swap")` | `Map<5>` (`amount_0_in`, `amount_0_out`, `amount_1_in`, `amount_1_out`, `to`) | **No** — `token_0`/`token_1` lookup needed | No (computable from pool config) | 1 |
+| Aquarius (pool) | `Symbol("trade")` | `Address × 3` (token_in, token_out, trader) | `Vec<3, i128>` (`amount_in`, `amount_out`, `fee`) | **Yes** | **Yes** (`data[2]`) | 1 |
+| Phoenix (XYK pool) | `String("swap")` | `String("<field>")` × 8 | scalar per event | Yes (across `sell_token` / `buy_token` events) | No (computable from pool config) | **8** (6 for stable pool) |
+
+The differences are structural, not cosmetic — Soroswap requires
+direction inference and token-side lookup; Aquarius is fully
+inline; Phoenix requires per-tx event grouping.
+
+**Recommended consumer shape**: a per-venue extractor trait keyed
+by `(contract_id) → venue`, with a per-venue input-grouping policy:
+
+```rust
+trait SwapExtractor {
+    /// Read a contiguous run of CH rows for one tx and produce zero
+    /// or more trade rows. Returns the number of CH rows consumed.
+    fn extract(rows: &[SorobanEventRow]) -> ExtractResult;
+}
+
+// Concrete impls:
+struct SoroswapPairExtractor;   // consumes 1 row per swap
+struct AquariusPoolExtractor;   // consumes 1 row per swap
+struct PhoenixXykPoolExtractor; // consumes 8 contiguous rows per swap
+struct PhoenixStablePoolExtractor; // consumes 6 contiguous rows per swap
+```
+
+Venue identification at row-level: build a `HashMap<C-strkey, Venue>`
+once from the three registries (Soroswap factory `new_pair` events,
+Aquarius router `add_pool` events, Phoenix factory
+`("create", "liquidity_pool")` events) and look up per event's
+`contract_id`. This is more robust than relying on topic shape
+alone, which can collide across protocols (e.g. nothing prevents a
+new protocol from also using `Symbol("trade")`).
+
+Filter complexity ranking, from simplest to hardest:
+1. **Aquarius** — `WHERE signature = 'trade' AND contract_id IN (aquarius_pools)`
+2. **Soroswap pair** — `WHERE JSONExtractString(topics_xdr, '$[0].value') = 'SoroswapPair' AND JSONExtractString(topics_xdr, '$[1].value') = 'swap'` (whitelist optional but recommended)
+3. **Phoenix** — full SQL group-by as in §3.6 above
+
+The consumer's pipeline executes the three filters concurrently
+and feeds the matching row sets into the corresponding extractor.
+
+---
+
+## Appendix B — Open follow-ups (out of scope for this task)
+
+Findings during this decode that should spawn separate backlog
+tasks rather than expanding scope here:
+
+1. **BE column naming.** `soroban_events.topics_xdr` /
+   `.data_xdr` contain JSON, not XDR bytes. Surface a rename
+   request (or a `COMMENT ON COLUMN`) upstream to BE. See
+   `R-be-storage-format.md` "Open follow-ups".
+2. **`signature` column undercounts non-Symbol-first-topic
+   events.** Soroswap and Phoenix both fall in this category.
+   Either (a) extend BE's `extract_event_signature` to also hoist
+   `String`-typed topic[0]s, or (b) add a parallel
+   `LowCardinality(Nullable(String)) protocol` column derived
+   from the topic[0]+topic[1] pair. Both options keep the existing
+   Aquarius behaviour intact. Task 0017's smoke-query design
+   should account for the current behaviour.
+3. **Phoenix stable-pool first observation.** When the first
+   stable-pool address appears in the wild, capture its WASM hash
+   and confirm the 6-event-grouping decoder works against a real
+   sample. Currently the registry only carries XYK pool addresses.
+4. **Soroswap source-emit-site verbatim quote.** §1.5 still has a
+   TODO to fetch `soroswap/core` Pair contract's `event.rs` (or
+   equivalent) and lock the field names from the emit call. The
+   decoded sample confirms the shape; a verbatim source quote
+   closes the loop the way `R-phoenix-registry.md` and
+   `R-aquarius-registry.md` did for those two.

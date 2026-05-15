@@ -54,6 +54,9 @@ struct Args {
     /// Filter by tx hash (hex, lowercase). For pinpointed lookups when we
     /// know the exact transaction we want to decode.
     tx_filter: Option<String>,
+    /// Filter by emitter contract id (C... strkey). Useful for locating
+    /// activity from a specific pool / router before targeting one tx.
+    contract_filter: Option<String>,
     /// Emit raw XDR (base64) of the topics ScVec and data ScVal alongside the
     /// decoded JSON. Used by lore task 0018 to confirm both decode paths
     /// (`ScVal::from_xdr_base64` and `serde_json::from_str::<ScVal>`).
@@ -69,6 +72,7 @@ fn parse_args() -> Result<Args, String> {
     let mut pretty = false;
     let mut histogram = false;
     let mut tx_filter: Option<String> = None;
+    let mut contract_filter: Option<String> = None;
     let mut show_xdr = false;
 
     let mut iter = std::env::args().skip(1);
@@ -91,15 +95,17 @@ fn parse_args() -> Result<Args, String> {
                 no_filter = true;
             }
             "--tx" => tx_filter = iter.next().map(|s| s.to_ascii_lowercase()),
+            "--contract" => contract_filter = iter.next(),
             "--show-xdr" => show_xdr = true,
             "-h" | "--help" => {
                 eprintln!(
                     "usage: dump-swap-events --dir <DIR> [--symbol <SUBSTR>|--no-filter] \
-                     [--tx <HEX_HASH>] [--show-xdr] \
+                     [--tx <HEX_HASH>] [--contract <C_STRKEY>] [--show-xdr] \
                      [--limit <N>] [--include-diagnostic] [--pretty]\n\
                      \n\
                      defaults: --symbol swap, drops Diagnostic-source events.\n\
-                     --show-xdr adds topics_xdr_b64 and data_xdr_b64 fields.\n"
+                     --show-xdr adds topics_xdr_b64 and data_xdr_b64 fields.\n\
+                     --contract narrows to events emitted by one contract id.\n"
                 );
                 std::process::exit(0);
             }
@@ -115,6 +121,7 @@ fn parse_args() -> Result<Args, String> {
         pretty,
         histogram,
         tx_filter,
+        contract_filter,
         show_xdr,
     })
 }
@@ -196,6 +203,18 @@ impl<'a> Walker<'a> {
 
         if matches!(source, EventSource::Diagnostic) && !self.args.include_diagnostic {
             return false;
+        }
+
+        if let Some(want) = &self.args.contract_filter {
+            let matches_contract = ev
+                .contract_id
+                .as_ref()
+                .map(contract_strkey)
+                .as_deref()
+                == Some(want.as_str());
+            if !matches_contract {
+                return false;
+            }
         }
 
         let ContractEventBody::V0(body) = &ev.body;

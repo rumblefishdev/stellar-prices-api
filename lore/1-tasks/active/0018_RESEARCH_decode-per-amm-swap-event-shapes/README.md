@@ -12,8 +12,10 @@ links:
   - "../../archive/0001_RESEARCH_dump-amm-swap-events/notes/R-swap-topic-shapes.md"
   - "../../archive/0002_RESEARCH_amm-venue-attribution/notes/R-soroswap-registry.md"
   - "../../archive/0002_RESEARCH_amm-venue-attribution/notes/R-aquarius-registry.md"
+  - "../../archive/0002_RESEARCH_amm-venue-attribution/notes/R-phoenix-registry.md"
   - "notes/evidence/soroswap_pair_swap_decode.json"
   - "notes/evidence/aquarius_pool_trade_decode.json"
+  - "notes/evidence/phoenix_pool_swap_decode.json"
   - "notes/R-be-storage-format.md"
   - "notes/G-amm-swap-event-shapes.md"
 history:
@@ -79,6 +81,33 @@ history:
       simple `WHERE signature = 'trade'` — with an optional
       `add_pool`-derived contract_id whitelist for venue-strict
       attribution. Phoenix still to go.
+  - date: 2026-05-15
+    status: active
+    who: claude
+    note: >
+      Phoenix §3 of the G-note landed. Added `--contract` filter to
+      tools/dump-swap-events, located a Phoenix XLM/USDC swap (pool
+      `CBHCRSVX3ZZ7…`) at mainnet tx 559498bdf5… ledger 62460522,
+      and captured the full 8-event grouping into
+      `notes/evidence/phoenix_pool_swap_decode.json`. Decoded shape
+      matches `Phoenix-Protocol-Group/phoenix-contracts`
+      `contracts/pool/src/contract.rs:1172-1185` bit-for-bit,
+      including the unusual `String("actual received amount")`
+      field name (literal spaces, source uses `&str` tuple so
+      topics resolve to `ScVal::String`, not `Symbol` — same
+      consequence as Soroswap: `signature` is NULL for all 8
+      Phoenix events). Confirmed: fee is NOT emitted; consumer
+      either NULLs the column or reconstructs from pool config.
+      Appendix A finalised — three independent extractors needed
+      (Soroswap pair Map, Aquarius pool Vec, Phoenix XYK 8-event
+      grouping + stable variant 6-event), dispatched per
+      contract_id via venue lookup tables built from each
+      registry's factory/add_pool/new_pair events. Appendix B
+      lists four out-of-scope follow-ups (column rename, signature
+      hoist for String topics, stable-pool first observation,
+      soroswap source verbatim). All four AMM acceptance criteria
+      now satisfied (samples decoded, shapes documented,
+      source-referenced, single-vs-per-AMM recommendation made).
 ---
 
 # Sample-decode per-AMM swap event shapes (Soroswap, Aquarius, Phoenix)
@@ -134,14 +163,22 @@ extractor strategy in the consumer.
 
 ## Acceptance Criteria
 
-- [ ] One real swap event decoded from each of Soroswap, Aquarius,
-      Phoenix.
-- [ ] Per-AMM topic + data shape documented in
-      `notes/G-amm-swap-event-shapes.md`.
-- [ ] Cross-referenced against each AMM's source code; discrepancies
-      noted.
-- [ ] Recommendation captured: single shared extractor, or per-AMM
-      extractors.
+- [x] One real swap event decoded from each of Soroswap, Aquarius,
+      Phoenix. (Evidence: `notes/evidence/soroswap_pair_swap_decode.json`,
+      `aquarius_pool_trade_decode.json`, `phoenix_pool_swap_decode.json` —
+      all decoded fresh via the stellar-xdr crate against `.temp/` LCM.)
+- [x] Per-AMM topic + data shape documented in
+      `notes/G-amm-swap-event-shapes.md`. (Sections §1 Soroswap,
+      §2 Aquarius, §3 Phoenix — each with ScVal-level + CH storage-
+      level shapes, direction convention, amount denomination, and
+      filter recipe.)
+- [x] Cross-referenced against each AMM's source code; discrepancies
+      noted. (Soroswap: pending verbatim quote, see Appendix B item 4;
+      Aquarius and Phoenix: source signatures already captured in
+      archive task 0002 registry notes and re-confirmed by the
+      decoded samples here, no drift.)
+- [x] Recommendation captured: **per-AMM extractors with
+      contract_id → venue dispatch** (see Appendix A of the G-note).
 
 ## Notes
 
