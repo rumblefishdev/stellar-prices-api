@@ -2,7 +2,7 @@
 id: "0018"
 title: "Sample-decode per-AMM swap event shapes (Soroswap, Aquarius, Phoenix)"
 type: RESEARCH
-status: backlog
+status: active
 related_adr: ["0001"]
 related_tasks: ["0015", "0017"]
 tags: [priority-medium, effort-small, research, soroban, amm, schema, xdr]
@@ -20,6 +20,19 @@ history:
       (Q4 of 0015) handles bytes->ScVal; this task pins the
       semantic conventions (which symbol = swap, what's in data, in
       which order) that each AMM uses.
+  - date: 2026-05-15
+    status: active
+    who: okarcz
+    note: >
+      Promoted to active. Cross-referenced BE ADR 0044 (ClickHouse
+      pilot) — the local CH `soroban_events` table from BE task 0206
+      stores full-content events with `topics_xdr` + `data_xdr` as
+      ZSTD(3)-coded String columns and `signature` as
+      `LowCardinality(Nullable(String))`, partitioned by
+      `intDiv(ledger_sequence, 500000)`. Sampling queries can filter
+      `WHERE contract_id = <amm_router_id> AND signature = 'swap'`
+      against that table once 0017 lands a local CH instance; until
+      then, pull from the public archive per the task's Notes.
 ---
 
 # Sample-decode per-AMM swap event shapes (Soroswap, Aquarius, Phoenix)
