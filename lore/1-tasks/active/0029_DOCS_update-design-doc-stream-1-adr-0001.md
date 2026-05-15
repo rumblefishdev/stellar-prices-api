@@ -99,24 +99,100 @@ ClickHouse instance populated by BE's `backfill-runner --target=clickhouse`":
 
 ## Acceptance Criteria
 
-- [ ] §2.3 `soroban_events` row reflects the local ClickHouse pattern per
+- [x] §2.3 `soroban_events` row reflects the local ClickHouse pattern per
       ADR 0001 (or is dropped if the row no longer represents shared infra)
-- [ ] §5.3 placeholder Soroban AMM Backfill row replaced with accurate
+      — **dropped**; expanded "Removed rows" prose explains why
+- [x] §5.3 placeholder Soroban AMM Backfill row replaced with accurate
       Stream 1 description (local CLI + local ClickHouse + extraction); the
       `†` footnote about the pending row removed
-- [ ] §5.6 Stream 1 architecture diagram redrawn for local ClickHouse model;
+- [x] §5.6 Stream 1 architecture diagram redrawn for local ClickHouse model;
       processing-rate sub-table rewritten with local-workstation metrics
-- [ ] §9 Tranche acceptance criteria audited for residual Fargate-shape
-      Stream 1 references; fixed if any remain
-- [ ] §10 Soroban AMM Fargate cost line removed; new total recomputed
-- [ ] §11.1 `soroban_events` row rewritten for the local ClickHouse pattern;
-      monthly saving total updated accordingly
-- [ ] §11.4 opening paragraph and risk table rewritten; BE coupling correctly
+- [x] §9 Tranche acceptance criteria audited for residual Fargate-shape
+      Stream 1 references; fixed if any remain — no residual Fargate
+      references found in criteria; added an explicit Tranche 1 work bullet
+      for Stream 1 (Stream 1 was previously implicit, only mentioned via
+      `soroban_amm.status` in AC #4)
+- [x] §10 Soroban AMM Fargate cost line removed; new total recomputed
+      (~$32 → ~$30)
+- [x] §11.1 `soroban_events` row rewritten for the local ClickHouse pattern;
+      monthly saving total updated accordingly — **row dropped** (the BE
+      artefact is the `backfill-runner` tool, which belongs in §11.2 dev
+      savings, not §11.1 shared infra). Monthly saving unchanged at ~$73
+      since the dropped row had been valued at ~$0
+- [x] §11.4 opening paragraph and risk table rewritten; BE coupling correctly
       framed as transient backfill-runner invocation, not runtime PG read
-- [ ] Cross-link to ADR 0001 added wherever §5.6 Stream 1 is touched
+- [x] Cross-link to ADR 0001 added wherever §5.6 Stream 1 is touched
 - [ ] Task 0013 can be marked completed once this PR merges (its three
       Stream 1 acceptance criteria were marked "deferred to 0029")
-- [ ] Reviewer (project lead) approves the revision
+      — pending PR merge
+- [ ] Reviewer (project lead) approves the revision — pending PR review
+
+## Implementation Notes
+
+Single-file change: `docs/prices-api-general-overview.md` (+144/-77 lines
+across §2.3, §5.3, §5.6 Stream 1, §9 Tranche 1, §10, §11.1, §11.2, §11.4,
+plus a new Revision History entry).
+
+The sweep was relatively short because tasks 0013 (Stream 2 reconciliation)
+and earlier had already updated the shared backbone sections — §3.5
+(`backfill_progress`), §4.5 (`GET /backfill/status` response), §6 (RDS
+sizing) — to a stream-agnostic local-CLI shape. Stream 1's update therefore
+only had to bring the stream-specific sections in line with the same
+pattern, plus reframe the BE coupling story.
+
+## Design Decisions
+
+### From Plan
+
+1. **Stream 1 is a local Rust CLI consuming a local ClickHouse instance
+   populated by BE's `backfill-runner --target=clickhouse`**, per ADR 0001.
+   The CLI decodes ScVal XDR via `stellar-xdr`, buckets to 1-min OHLCV,
+   and runs a one-shot completion push to cloud RDS.
+
+2. **§3.5 / §4.5 already encode the "one-shot AMM CLI push" pattern** —
+   no schema or API changes needed. They were updated during 0013 to
+   reference ADRs 0001 + 0005 jointly.
+
+### Emerged
+
+3. **Dropped §2.3 `soroban_events` row entirely** rather than rewriting it.
+   §2.3 is "Components Shared with Block Explorer (no additional charge)" —
+   ongoing shared infrastructure. The BE `backfill-runner` is a transient
+   one-shot prep tool, not shared infra. Belongs in §11.2 development
+   savings instead. Same logic applied to §11.1 (also infrastructure-only).
+   Expanded the "Removed rows" prose in both sections to enumerate both
+   removals (the prior Fargate-cluster row + the new `soroban_events` row)
+   with cross-links to the relevant ADRs.
+
+4. **Added a `backfill-runner` row to §11.2** ("Development Savings") to
+   capture the BE-shared artefact that Stream 1 consumes. Also added a row
+   for the BE-authored CH `soroban_events` schema (`clickhouse-prod-schema.sql`)
+   for symmetry with how §11.2 already lists `stellar-xdr` and CDK patterns.
+
+5. **Stream 1 binary name `soroban-amm-backfill`** chosen autonomously.
+   ADR 0001 doesn't pin a name; chose this to mirror `sdex-backfill`'s
+   convention from ADR 0005.
+
+6. **Added an explicit Tranche 1 work bullet for Stream 1** even though
+   the original §9 acceptance criterion #4 already exercises Stream 1
+   via `soroban_amm.status`. Without the work bullet, Stream 1 looked
+   under-specified compared with the SDEX bullet. The criterion was left
+   unchanged — the shape is correct.
+
+7. **Backfill total recomputed to ~$30** (was ~$32). Just dropped the $2
+   Soroban Fargate line; RDS stays at $30, S3 archive reads stay $0. The
+   "~95% reduction vs ADR 0002 / Fargate-era ~$636" framing carries
+   through unchanged.
+
+8. **§11.4 risk table replaced wholesale**, not minimally tweaked. The
+   three original BE-PG-flavored risks (schema change, DB gaps, BE DB
+   offline) didn't all apply once Stream 1's source moved to local CH.
+   Replaced with five local-CH-flavored risks: schema drift during prep,
+   `backfill-runner` writer bugs (BE task 0206), ledger-range misconfig
+   on prep, `backfill-runner` itself unavailable, plus the existing
+   gap-detection mitigation preserved. Added a Fargate-fallback breadcrumb
+   pointing at task 0017 for the unlikely case the laptop is impractical
+   (ADR 0001 §Consequences calls this out).
 
 ## Future Work
 
