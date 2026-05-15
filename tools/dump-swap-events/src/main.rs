@@ -21,7 +21,7 @@ use std::process::ExitCode;
 use serde::Serialize;
 use stellar_xdr::curr::{
     ContractEvent, ContractEventBody, ContractEventType, ContractId, LedgerCloseMeta,
-    LedgerCloseMetaBatch, Limits, ReadXdr, ScVal, TransactionMeta,
+    LedgerCloseMetaBatch, Limits, ReadXdr, ScVal, ScVec, TransactionMeta, WriteXdr,
 };
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -51,6 +51,13 @@ struct Args {
     /// `--no-filter` (we want to count everything). Useful for surveying
     /// what event kinds exist in a ledger range.
     histogram: bool,
+    /// Filter by tx hash (hex, lowercase). For pinpointed lookups when we
+    /// know the exact transaction we want to decode.
+    tx_filter: Option<String>,
+    /// Emit raw XDR (base64) of the topics ScVec and data ScVal alongside the
+    /// decoded JSON. Used by lore task 0018 to confirm both decode paths
+    /// (`ScVal::from_xdr_base64` and `serde_json::from_str::<ScVal>`).
+    show_xdr: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -61,6 +68,8 @@ fn parse_args() -> Result<Args, String> {
     let mut include_diagnostic = false;
     let mut pretty = false;
     let mut histogram = false;
+    let mut tx_filter: Option<String> = None;
+    let mut show_xdr = false;
 
     let mut iter = std::env::args().skip(1);
     while let Some(a) = iter.next() {
@@ -81,12 +90,16 @@ fn parse_args() -> Result<Args, String> {
                 histogram = true;
                 no_filter = true;
             }
+            "--tx" => tx_filter = iter.next().map(|s| s.to_ascii_lowercase()),
+            "--show-xdr" => show_xdr = true,
             "-h" | "--help" => {
                 eprintln!(
                     "usage: dump-swap-events --dir <DIR> [--symbol <SUBSTR>|--no-filter] \
+                     [--tx <HEX_HASH>] [--show-xdr] \
                      [--limit <N>] [--include-diagnostic] [--pretty]\n\
                      \n\
-                     defaults: --symbol swap, drops Diagnostic-source events.\n"
+                     defaults: --symbol swap, drops Diagnostic-source events.\n\
+                     --show-xdr adds topics_xdr_b64 and data_xdr_b64 fields.\n"
                 );
                 std::process::exit(0);
             }
@@ -101,6 +114,8 @@ fn parse_args() -> Result<Args, String> {
         include_diagnostic,
         pretty,
         histogram,
+        tx_filter,
+        show_xdr,
     })
 }
 
@@ -141,6 +156,10 @@ struct EmittedEvent<'a> {
     topic_0: Option<String>,
     topics: &'a [ScVal],
     data: &'a ScVal,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    topics_xdr_b64: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    data_xdr_b64: Option<String>,
 }
 
 struct Walker<'a> {
@@ -200,6 +219,23 @@ impl<'a> Walker<'a> {
             return true;
         }
 
+        let (topics_xdr_b64, data_xdr_b64) = if self.args.show_xdr {
+            // Re-encode the topics list as ScVec (the natural XDR container
+            // for a list of ScVal) so the base64 form is what a hypothetical
+            // raw-XDR storage layer would persist. BE's db-clickhouse writer
+            // actually stores serde_json instead — see lore task 0018 G-note
+            // for the storage-format finding.
+            let topics_xdr = topics
+                .to_vec()
+                .try_into()
+                .ok()
+                .and_then(|vm| ScVec(vm).to_xdr_base64(Limits::none()).ok());
+            let data_xdr = body.data.to_xdr_base64(Limits::none()).ok();
+            (topics_xdr, data_xdr)
+        } else {
+            (None, None)
+        };
+
         let emitted = EmittedEvent {
             ledger_seq,
             tx_hash,
@@ -210,6 +246,8 @@ impl<'a> Walker<'a> {
             topic_0: t0,
             topics,
             data: &body.data,
+            topics_xdr_b64,
+            data_xdr_b64,
         };
 
         let json = if self.args.pretty {
@@ -230,6 +268,11 @@ impl<'a> Walker<'a> {
     }
 
     fn process_tx_meta(&mut self, meta: &TransactionMeta, tx_hash: &str, ledger_seq: u32) {
+        if let Some(filter) = &self.args.tx_filter {
+            if !tx_hash.eq_ignore_ascii_case(filter) {
+                return;
+            }
+        }
         match meta {
             TransactionMeta::V3(v3) => {
                 if let Some(sm) = &v3.soroban_meta {

@@ -7,8 +7,13 @@ related_adr: ["0001"]
 related_tasks: ["0015", "0017"]
 tags: [priority-medium, effort-small, research, soroban, amm, schema, xdr]
 links:
-  - "../../2-adrs/0001_stream1-clickhouse-sourced-amm-backfill.md"
-  - "../archive/0015_RESEARCH_redefine-backfill-with-be-clickhouse-events/notes/G-ch-tables-for-price-calculation.md"
+  - "../../../2-adrs/0001_stream1-clickhouse-sourced-amm-backfill.md"
+  - "../../archive/0015_RESEARCH_redefine-backfill-with-be-clickhouse-events/notes/G-ch-tables-for-price-calculation.md"
+  - "../../archive/0001_RESEARCH_dump-amm-swap-events/notes/R-swap-topic-shapes.md"
+  - "../../archive/0002_RESEARCH_amm-venue-attribution/notes/R-soroswap-registry.md"
+  - "notes/evidence/soroswap_pair_swap_decode.json"
+  - "notes/R-be-storage-format.md"
+  - "notes/G-amm-swap-event-shapes.md"
 history:
   - date: 2026-05-12
     status: backlog
@@ -33,6 +38,27 @@ history:
       `WHERE contract_id = <amm_router_id> AND signature = 'swap'`
       against that table once 0017 lands a local CH instance; until
       then, pull from the public archive per the task's Notes.
+  - date: 2026-05-15
+    status: active
+    who: claude
+    note: >
+      Soroswap section first cut. Extended
+      `tools/dump-swap-events` with `--show-xdr` and `--tx <hash>`
+      flags; decoded the canonical SoroswapPair `swap` event from
+      mainnet tx 21bb150d… ledger 62460506 (the same event
+      WASM-verified as Soroswap in archive task 0002) into
+      `notes/evidence/soroswap_pair_swap_decode.json` — full event
+      stream of that tx with raw XDR base64 alongside stellar-xdr
+      default-serde JSON. Two cross-repo findings recorded in
+      `notes/R-be-storage-format.md`: (a) BE writes a custom tagged
+      JSON `{type, value}`, not raw XDR — column name is
+      misleading; (b) BE's `signature` column is NULL for Soroswap
+      because `extract_event_signature` requires `topic[0].type ==
+      "sym"` and Soroswap's `topic[0]` is `type == "string"`.
+      Consequence: task 0017's smoke query
+      `WHERE signature = 'swap'` will undercount Soroswap. Consumer
+      filter recipe drafted in `notes/G-amm-swap-event-shapes.md`.
+      Aquarius / Phoenix sections still to go.
 ---
 
 # Sample-decode per-AMM swap event shapes (Soroswap, Aquarius, Phoenix)
