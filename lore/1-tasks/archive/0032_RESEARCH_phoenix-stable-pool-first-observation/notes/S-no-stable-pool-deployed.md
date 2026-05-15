@@ -8,7 +8,7 @@ tags: [phoenix, stable-pool, negative-result, factory-survey, stream-1-consumer]
 links:
   - "R-phoenix-xyk-pool-interface.md"
   - "evidence/phoenix_pool_inventory_2026-05-15.txt"
-  - "../../archive/0018_RESEARCH_decode-per-amm-swap-event-shapes/notes/G-amm-swap-event-shapes.md"
+  - "../../0018_RESEARCH_decode-per-amm-swap-event-shapes/notes/G-amm-swap-event-shapes.md"
 history:
   - date: 2026-05-15
     status: mature
