@@ -15,7 +15,8 @@ the API surface, or the cost / budget framing.
 
 | Date | Sections touched | Driver | Summary |
 |------|------------------|--------|---------|
-| 2026-05-14 | §2.3, §3.5, §4.5, §5.3, §5.6 Stream 2, §6, §8, §9, §10, §11.1, §11.4 | [ADR 0005](../lore/2-adrs/0005_stream2-sdex-local-workstation-backfill.md) (supersedes ADR 0002) · [Task 0013](../lore/1-tasks/active/0013_DOCS_update-design-doc-to-match-be-reality.md) | Stream 2 (SDEX) backfill moved from continuous ECS Fargate to a local Rust CLI on the operator's workstation with a separate `sdex-cloud-push` step to cloud RDS. `backfill_progress` schema swapped from heartbeat fields to `last_push_at`. `GET /backfill/status` response and tranche acceptance criteria reframed around push cadence. Backfill compute cost dropped ~95%. Stream 1 (Soroban AMM) reconciliation per [ADR 0001](../lore/2-adrs/0001_stream1-clickhouse-sourced-amm-backfill.md) is tracked separately under [Task 0029](../lore/1-tasks/backlog/0029_DOCS_update-design-doc-stream-1-adr-0001.md). |
+| 2026-05-15 | §2.3, §5.3, §5.6 Stream 1 (two-stream design table, architecture diagram, processing-rate sub-table, schema-coupling note), §9 (Tranche 1 work), §10, §11.1, §11.2, §11.4 | [ADR 0001](../lore/2-adrs/0001_stream1-clickhouse-sourced-amm-backfill.md) · [Task 0029](../lore/1-tasks/active/0029_DOCS_update-design-doc-stream-1-adr-0001.md) | Stream 1 (Soroban AMM) backfill reconciled with ADR 0001: source moved from BE's PG `soroban_events` to a **local ClickHouse** instance populated upfront by BE's `backfill-runner --target=clickhouse`; deployment shape moved from ECS Fargate to a local Rust CLI (`soroban-amm-backfill`) on the operator's workstation, ScVal decoding via `stellar-xdr` crate, one-shot completion push to cloud RDS. Stream 1 Fargate cost line removed; backfill total now ~$30. BE coupling reframed as a transient prep-step tool invocation (not runtime DB read); §11.1 `soroban_events` row removed and its development-savings counterpart added to §11.2. Closes out the design-doc sweep started in [Task 0013](../lore/1-tasks/archive/0013_DOCS_update-design-doc-to-match-be-reality.md). |
+| 2026-05-14 | §2.3, §3.5, §4.5, §5.3, §5.6 Stream 2, §6, §8, §9, §10, §11.1, §11.4 | [ADR 0005](../lore/2-adrs/0005_stream2-sdex-local-workstation-backfill.md) (supersedes ADR 0002) · [Task 0013](../lore/1-tasks/archive/0013_DOCS_update-design-doc-to-match-be-reality.md) | Stream 2 (SDEX) backfill moved from continuous ECS Fargate to a local Rust CLI on the operator's workstation with a separate `sdex-cloud-push` step to cloud RDS. `backfill_progress` schema swapped from heartbeat fields to `last_push_at`. `GET /backfill/status` response and tranche acceptance criteria reframed around push cadence. Backfill compute cost dropped ~95%. Stream 1 (Soroban AMM) reconciliation per [ADR 0001](../lore/2-adrs/0001_stream1-clickhouse-sourced-amm-backfill.md) is tracked separately under [Task 0029](../lore/1-tasks/active/0029_DOCS_update-design-doc-stream-1-adr-0001.md). |
 | (earlier) | whole document | second-round reviewer feedback | Post-2nd-Review baseline: stack switched to Rust + axum + sqlx (matching the Block Explorer codebase); BE-shared infrastructure explicitly catalogued (§11); historical backfill plan with Tranche 2 / Tranche 3 milestones added (§5.6); `GET /backfill/status` endpoint introduced (§4.5). |
 
 ---
@@ -156,17 +157,31 @@ are listed here to confirm there is no double-billing.
 | **VPC (us-east-1a)** | Owned by Block Explorer | Prices API RDS and Lambda functions deploy into the same VPC and private subnets |
 | **NAT Gateway** | Block Explorer's single NAT Gateway, billed to Block Explorer | Prices API Lambda egress traffic routed through the same gateway; no second NAT Gateway provisioned |
 | **GitHub Actions CI/CD patterns** | Shared pipeline structure and CDK conventions | Prices API pipeline reuses the same CDK deployment pattern |
-| **Block Explorer `soroban_events` table (read-only)** | Contains all decoded CAP-67 events (Soroswap, Aquarius, Phoenix swaps) from Soroban activation to present | Prices API backfill task connects read-only to Block Explorer RDS (same VPC) to extract Soroban AMM swap history. Eliminates ~8.5M ledger archive reads for the Soroban AMM stream. This creates a schema dependency; documented in Section 11 |
 
 **Confirmed: none of the components in 2.3 appear in the Prices API budget.**
 
-**Removed row.** Earlier versions of this table listed an "ECS Fargate cluster" row claiming
-Prices API historical backfill tasks ran in BE's shared cluster. Per ADR 0005, the SDEX
-backfill is a local workstation CLI — not a Fargate task — so nothing is shared with BE's
-cluster on the Stream 2 path. The Soroban AMM stream's deployment shape is pending
-reconciliation with ADR 0001 (also workstation-local); the `soroban_events` row above
-covers the Stream 1 BE-data dependency that ADR 0001 will revisit. See §11.1 for the
-matching cost-savings table.
+**Removed rows.** Earlier versions of this table listed two rows that no longer reflect the
+chosen architecture:
+
+1. An **"ECS Fargate cluster"** row claiming Prices API historical backfill tasks ran in
+   BE's shared cluster. Per [ADR 0005](../lore/2-adrs/0005_stream2-sdex-local-workstation-backfill.md),
+   the SDEX backfill is a local workstation CLI — not a Fargate task — so nothing is
+   shared with BE's cluster on the Stream 2 path.
+
+2. A **"Block Explorer `soroban_events` table (read-only)"** row claiming the Soroban AMM
+   backfill held a read-only connection to BE's RDS within the shared VPC. Per
+   [ADR 0001](../lore/2-adrs/0001_stream1-clickhouse-sourced-amm-backfill.md), that row was
+   wrong on two counts: (a) BE's PG `soroban_events` is now appearances-only — full event
+   content lives in S3, not PG, per
+   [BE ADR 0033](../../soroban-block-explorer/lore/2-adrs/0033_soroban-events-appearances-read-time-detail.md);
+   and (b) Stream 1 now consumes a **locally-run ClickHouse instance** populated by BE's
+   `backfill-runner --target=clickhouse` (BE task 0205), not BE's production RDS. Nothing
+   on the Stream 1 path is shared runtime infrastructure either; the only BE artefacts
+   consumed are the `backfill-runner` CLI (a one-shot transient invocation) and the
+   production ClickHouse schema. Both are captured in §11.2's development-savings table.
+
+See §11.1 for the matching cost-savings table and §5.6 Stream 1 for the reconciled
+architecture.
 
 ---
 
@@ -673,15 +688,7 @@ aggregated whole candles and replace all non-PK columns. See the database schema
 | **Cleanup Worker** | EventBridge cron(02:00 UTC) | Internal DB | Delete expired fine-grained data, drop old partitions, create upcoming partitions |
 | **SDEX Backfill CLI** (`sdex-backfill`, ADR 0005) | Local Rust CLI on operator workstation, run in tip-backward chunks during the project | `s3://aws-public-blockchain` (anonymous `--no-sign-request`) | Historical SDEX trades → 1-min `price_ohlcv` rows in **local Postgres** |
 | **SDEX Cloud Push** (`sdex-cloud-push`, ADR 0005) | Operator-invoked between chunks; only AWS-touching component on the Stream 2 path | Local Postgres `price_ohlcv` + `assets` | Streams accumulated rows to cloud RDS; advances `backfill_progress.sdex_archive.current_ledger` and `last_push_at` |
-| **Soroban AMM Backfill** [†](#stream-1-row-pending-adr-0001) | See ADR 0001 | BE `soroban_events` (location pending per ADR 0001) | Historical Soroswap/Aquarius/Phoenix swaps → `price_ohlcv` |
-
-<a id="stream-1-row-pending-adr-0001"></a>
-**† Stream 1 row pending.** The Soroban AMM backfill's deployment shape is being reconciled
-with ADR 0001 in a follow-up. The current §5.6 Stream 1 architecture diagram and the §5.6
-processing-rate sub-table still describe a Fargate-style task reading BE's Postgres
-`soroban_events`; ADR 0001 moves the source to a local ClickHouse instance populated by BE's
-`backfill-runner --target=clickhouse`. This row will be rewritten when §5.6 Stream 1 is
-updated. The trigger and source cells above are deliberately minimal until then.
+| **Soroban AMM Backfill CLI** (`soroban-amm-backfill`, ADR 0001) | One-shot Local Rust CLI on operator workstation, run once during Tranche 1 | Local ClickHouse `soroban_events` (populated upfront by BE's `backfill-runner --target=clickhouse`, BE task 0205); ScVal decoding via the `stellar-xdr` crate | Historical Soroswap/Aquarius/Phoenix swaps → 1-min `price_ohlcv` rows; on completion runs the cloud push that lands all rows and sets `backfill_progress.soroban_amm.last_push_at` + `status='completed'` |
 
 ### 5.4 EventBridge Scheduler Rules
 
@@ -723,33 +730,53 @@ which drives a two-stream backfill design:
 | Stream | Data location | Era | Method |
 |--------|-------------|-----|--------|
 | **SDEX trades** | `TransactionResultMeta` (`ClaimAtom` from the five trade-shaped op types) in `LedgerCloseMeta` XDR | All-time (2015 → present, ~57M ledgers) | Local Rust CLI on operator workstation (`s3://aws-public-blockchain` anonymous reads) → local Postgres → post-backfill cloud push (see ADR 0005) |
-| **Soroban AMM swaps** (Soroswap, Aquarius, Phoenix) | `SorobanTransactionMeta.events` (CAP-67) — already parsed and stored in Block Explorer `soroban_events` table | Soroban activation (Nov 2023) → present (~8.5M ledgers) | Read-only query to Block Explorer RDS |
+| **Soroban AMM swaps** (Soroswap, Aquarius, Phoenix) | `SorobanTransactionMeta.events` (CAP-67), inlined `topics_xdr` + `data_xdr` per row in BE's ClickHouse `soroban_events` (BE ADRs [0033](../../soroban-block-explorer/lore/2-adrs/0033_soroban-events-appearances-read-time-detail.md), [0044](../../soroban-block-explorer/lore/2-adrs/0044_clickhouse-pilot-parallel-store.md)) | Soroban activation (Nov 2023) → present (~8.5M ledgers) | Local Rust CLI on operator workstation, consuming a local ClickHouse instance populated upfront by BE's `backfill-runner --target=clickhouse` (see [ADR 0001](../lore/2-adrs/0001_stream1-clickhouse-sourced-amm-backfill.md)) → one-shot push to cloud RDS |
 
-The Soroban AMM stream is handled first (Tranche 1) by querying the Block Explorer's already-indexed
-`soroban_events` table. This completes quickly (hours, not weeks) and gives full AMM price history
-from Soroban activation. The SDEX stream requires reading all 57 million ledgers from Stellar's
-public history archives and is the long-running backfill that extends beyond the project duration.
+The Soroban AMM stream is handled first (Tranche 1). A short BE-tooling prep step runs BE's
+`backfill-runner --target=clickhouse` against the Soroban-activation-onward ledger range
+(~8.5M ledgers) into a Docker-hosted ClickHouse instance on the operator's workstation; the
+prices-api `soroban-amm-backfill` CLI then queries that local CH copy (decoded via the
+`stellar-xdr` crate), bucketizes into 1-min `price_ohlcv` candles, and pushes the result to
+cloud RDS in a single completion push. The whole run completes in hours, not weeks, and the
+local CH instance is torn down once the push lands. The SDEX stream requires reading all
+57 million ledgers from Stellar's public history archives and is the long-running backfill
+that extends beyond the project duration.
 
 #### Architecture
 
 ```
-STREAM 1 — Soroban AMM (fast, Tranche 1)
-─────────────────────────────────────────
-Block Explorer RDS (read-only)
-  soroban_events WHERE contract_id IN
-  (Soroswap, Aquarius, Phoenix contracts)
+STREAM 1 — Soroban AMM (fast, Tranche 1, local CH-sourced, ADR 0001)
+─────────────────────────────────────────────────────────────────────
+BE `backfill-runner --target=clickhouse` (BE task 0205)
+  populates local CH `soroban_events` upfront from
+  s3://aws-public-blockchain (~8.5M ledgers, ~hours)
         │
         ▼
-┌──────────────────────────────────────────┐
-│  Soroban AMM Backfill Task (Rust)        │
-│  - Queries BE soroban_events by          │
-│    contract_id and event topic           │
-│  - Extracts token pair + amounts         │
-│    from decoded JSONB topics/data        │
-│  - Writes OHLCV into historical          │
-│    price_ohlcv partitions                │
-│  - Marks soroban_amm stream "completed"  │
-└──────────────────────────────────────────┘
+Local ClickHouse (Docker) on operator workstation
+  soroban_events WHERE signature = 'swap'
+    AND contract_id IN (Soroswap, Aquarius, Phoenix)
+  JOIN ledgers ON closed_at  (per BE CH prod schema)
+        │
+        ▼
+┌──────────────────────────────────────────────────────────┐
+│  soroban-amm-backfill — local Rust CLI                   │
+│  - Queries local CH by signature + contract_id            │
+│  - Decodes topics_xdr + data_xdr (ScVal) via              │
+│    `stellar-xdr` crate (shared BE-authored library)       │
+│  - Extracts token pair + amounts                          │
+│  - Buckets to 1-minute price_ohlcv (ADR 0003 PK shape)    │
+│  - Writes to local Postgres (Docker) on workstation       │
+└──────────────────────────────────────────────────────────┘
+        │
+        ▼ one-shot completion push (only AWS-touching step on Stream 1)
+Prices RDS PostgreSQL (cloud)
+  - Lands all `price_ohlcv` rows in historical partitions
+  - Sets `backfill_progress.soroban_amm`: current_ledger,
+    last_push_at, status='completed', completed_at
+        │
+        ▼
+Local ClickHouse instance is torn down after the push lands
+(one-shot job; CH is a snapshot tool, not a long-running engine)
 
 STREAM 2 — SDEX (local backfill + post-backfill cloud push, ADR 0005)
 ─────────────────────────────────────────────────────────────────────
@@ -782,10 +809,14 @@ s3://aws-public-blockchain/v1.1/stellar/ledgers/pubnet/
 Neither backfill task conflicts with live ingestion: native range partitioning separates
 historical writes (old month partitions) from live writes (current month partition).
 
-**Schema coupling note:** the Soroban AMM backfill task holds a read-only connection to the
-Block Explorer's RDS within the shared VPC. It accesses only the `soroban_events` table and
-does not write to it. If the Block Explorer's `soroban_events` schema changes, the backfill
-task must be updated accordingly. This dependency is documented in Section 11.
+**Schema coupling note (ADR 0001):** the Soroban AMM backfill consumes a **local** ClickHouse
+instance populated upfront by BE's `backfill-runner --target=clickhouse` against the canonical
+production CH schema (`docs/database-schema/clickhouse-prod-schema.sql` in this repo, mirroring
+BE's). There is no runtime read against BE's database; the only coupling is the one-time,
+transient invocation of BE's `backfill-runner` tool and the BE-authored CH schema the local
+instance ingests. If BE evolves the CH `soroban_events` schema after the Tranche 1 backfill
+window, the prices-api consumer is unaffected — its CH instance was a snapshot and is torn
+down post-push. This dependency is documented in Section 11.
 
 **Stream 2 coupling note (ADR 0005):** Stream 2 has zero runtime or data coupling with the
 Block Explorer. The only BE artefact consumed is the `xdr-parser` crate, pinned as a git
@@ -797,15 +828,19 @@ becomes a plain `xdr-parser = "X.Y.Z"` pin — no design change.)
 
 #### Processing Rate and Compute Estimates
 
-**Stream 1 — Soroban AMM (Block Explorer DB query):**
+**Stream 1 — Soroban AMM (local CH-sourced workstation CLI, ADR 0001):**
 
 | Metric | Value | Notes |
 |--------|-------|-------|
-| Data source | Block Explorer `soroban_events` table | Already indexed, decoded JSONB |
+| Data source | Local ClickHouse `soroban_events` (Docker, populated upfront by BE's `backfill-runner --target=clickhouse`) | Per-event rows with inlined `topics_xdr` + `data_xdr` + hoisted `signature` column |
 | Ledger range | ~48.5M–57M (Nov 2023 to present) | ~8.5M ledgers worth of events |
-| Estimated runtime | A few hours | DB query + OHLCV write; no archive reads needed |
-| ECS task configuration | 1 vCPU / 2 GB RAM | Short-lived; same ECS cluster |
-| Expected completion | During Tranche 1 (Week 2–3) | |
+| Runtime | Local Rust CLI on operator workstation (`soroban-amm-backfill`) | No AWS infrastructure for the backfill itself; mirrors §5.6 Stream 2's local-CLI pattern |
+| Workstation prep step | BE `backfill-runner --target=clickhouse` populates local CH | One-shot; runs against `s3://aws-public-blockchain` anonymous reads — no AWS account required |
+| Local CH footprint | Hundreds of GB pre-compression; substantially smaller post-ZSTD on disk | Sized for an operator workstation per ADR 0001 §Rationale (dev-laptop, not Fargate/EC2) |
+| Sink during backfill | Local Postgres (Docker) on workstation | Cloud RDS is **not** written until the one-shot completion push |
+| Estimated wall-clock (including CH prep) | A few hours, dominated by `backfill-runner` archive ingestion | CH query + extraction + OHLCV write is fast against an indexed local store |
+| Cloud-push cadence | One-shot completion push only | Cloud `backfill_progress.soroban_amm` advances from `running` to `completed` in a single transition |
+| Expected completion | During Tranche 1 (Week 2–3) | After the push, the local CH instance is torn down |
 
 **Stream 2 — SDEX (local workstation CLI, ADR 0005):**
 
@@ -965,6 +1000,12 @@ all-time history once backfill completes)
 - Local SDEX backfill CLI (`sdex-backfill`, ADR 0005) operating on the operator's
   workstation against `s3://aws-public-blockchain`. First tip-backward chunk (~6 months)
   processed and pushed to cloud via `sdex-cloud-push` by end of Tranche 1
+- Soroban AMM Stream 1 fully delivered (ADR 0001): operator runs BE's
+  `backfill-runner --target=clickhouse` on the workstation to populate a local ClickHouse
+  instance with `soroban_events` from Soroban activation to tip (~8.5M ledgers); the
+  `soroban-amm-backfill` Rust CLI then extracts Soroswap/Aquarius/Phoenix swaps (ScVal
+  decoded via `stellar-xdr`), buckets to 1-min `price_ohlcv`, and runs the one-shot
+  completion push to cloud RDS. Local CH instance is torn down post-push
 - `GET /backfill/status` endpoint live and returning valid progress data
 - CloudWatch alarm: `sdex.last_push_at` older than the Tranche 1 push-cadence threshold
   (e.g. 7 days) → SNS notification
@@ -1103,23 +1144,25 @@ post-delivery monitoring.
 
 ### Backfill Period Additional Costs (one-time, during 13-week project)
 
-Per ADR 0005, the SDEX backfill runs as a local Rust CLI (`sdex-backfill`) on the operator's
-workstation, not as a continuous ECS Fargate task. The cloud RDS sees only the bursty
-`sdex-cloud-push` step, not sustained backfill writes. AWS-billed line items shrink
-accordingly; workstation electricity and ISP bandwidth are operator-paid and outside this
-table.
+Per ADRs 0001 and 0005, **both** historical backfill streams run as local Rust CLIs on the
+operator's workstation, not as continuous ECS Fargate tasks. The cloud RDS sees only bursty
+push steps: the Stream 2 `sdex-cloud-push` (tip-backward chunks) and the Stream 1
+`soroban-amm-backfill` one-shot completion push. AWS-billed line items shrink accordingly;
+workstation electricity, ISP bandwidth, and local ClickHouse disk for the Stream 1 prep step
+are operator-paid and outside this table.
 
 | Item | Configuration | One-time Cost |
 |------|--------------|--------------|
-| ECS Fargate — Soroban AMM backfill task | 1 vCPU / 2 GB RAM, a few hours (Tranche 1) | ~$2 (pending Stream 1 reconciliation per ADR 0001 — also moved to local workstation; see follow-up) |
+| ECS Fargate — Soroban AMM backfill task | — (no Fargate per ADR 0001) | **$0** |
 | ECS Fargate — SDEX archive backfill task | — (no Fargate per ADR 0005) | **$0** |
-| RDS during push windows | Optional upgrade to db.t4g.small only during active `sdex-cloud-push` windows; otherwise db.t4g.micro suffices. The Fargate-era db.m6g.large upgrade is **not** required since the cloud RDS no longer sees continuous backfill writes | ~$30 |
-| S3 archive reads (Stellar public history) | Anonymous reads via `--no-sign-request` against `s3://aws-public-blockchain` — not billed to the Prices API AWS account | **$0** |
-| **Total one-time backfill compute (AWS-billed)** | | **~$32** |
+| RDS during push windows | Optional upgrade to db.t4g.small only during active push windows (`sdex-cloud-push` chunks and the one-shot Stream 1 completion push); otherwise db.t4g.micro suffices. The Fargate-era db.m6g.large upgrade is **not** required since the cloud RDS no longer sees continuous backfill writes | ~$30 |
+| S3 archive reads (Stellar public history) | Anonymous reads via `--no-sign-request` against `s3://aws-public-blockchain` — not billed to the Prices API AWS account. Applies to both streams: SDEX reads archive directly, Stream 1's BE `backfill-runner` prep step also reads from this bucket on the operator's workstation | **$0** |
+| **Total one-time backfill compute (AWS-billed)** | | **~$30** |
 
-Compared with the prior ADR 0002 / Fargate-era estimate of ~$636, the local-workstation
-pattern reduces the AWS one-time backfill compute by roughly 95%. The trade is operator
-workstation uptime, accepted as a deliberate design choice (ADR 0005 §"Negative").
+Compared with the prior ADR 0002 / Fargate-era estimate of ~$636 (Stream 2) plus the legacy
+Stream 1 Fargate line, the local-workstation pattern across both streams reduces the AWS
+one-time backfill compute by roughly 95%. The trade is operator workstation uptime, accepted
+as a deliberate design choice (ADR 0005 §"Negative" and ADR 0001 §Consequences).
 
 ### Scaled Up (high traffic)
 
@@ -1146,21 +1189,36 @@ double-billing between the two grants.
 | S3 bucket `stellar-ledger-data/` | ~$2/mo | Same files read by both Lambdas; trivial additional S3 read cost |
 | VPC (subnets, security groups, route tables) | ~$0 (one-time setup cost eliminated) | Prices API resources deploy into existing VPC |
 | NAT Gateway | ~$35/mo | Single NAT Gateway handles egress for both services |
-| Block Explorer `soroban_events` table (read-only) | ~$0 (no extra RDS cost; read-only) | Soroban AMM backfill task queries the Block Explorer RDS to extract decoded swap events. Avoids re-reading ~8.5M ledgers from archives for the AMM stream. **Schema dependency**: documented below |
 | **Monthly saving** | **~$73/mo** | |
 
-**Removed row.** Earlier versions of this table listed an "ECS Fargate cluster" row claiming
-Prices API backfill tasks ran in BE's shared cluster. Per ADR 0005, the SDEX backfill is a
-local workstation CLI, not a Fargate task — no cluster sharing on the Stream 2 path. The
-Soroban AMM stream's deployment shape is being reconciled with ADR 0001 in a follow-up; if
-it also moves off Fargate, this section will need no further changes. If a future component
-returns to Fargate and shares BE's cluster, the row can be added back.
+**Removed rows.** Earlier versions of this table listed two rows that no longer reflect
+the chosen architecture:
+
+1. An **"ECS Fargate cluster"** row claiming Prices API backfill tasks ran in BE's shared
+   cluster. Per [ADR 0005](../lore/2-adrs/0005_stream2-sdex-local-workstation-backfill.md)
+   and [ADR 0001](../lore/2-adrs/0001_stream1-clickhouse-sourced-amm-backfill.md), both
+   historical backfill streams run as local workstation CLIs — no Fargate cluster sharing
+   on either path. If a future component returns to Fargate and shares BE's cluster, the
+   row can be added back.
+
+2. A **"Block Explorer `soroban_events` table (read-only)"** row claiming the Soroban AMM
+   backfill queried BE's RDS at runtime (saving ~$0/mo since the access was read-only). Per
+   [ADR 0001](../lore/2-adrs/0001_stream1-clickhouse-sourced-amm-backfill.md), Stream 1
+   no longer touches BE's RDS at all; it consumes a local ClickHouse instance populated
+   upfront by BE's `backfill-runner --target=clickhouse`. The shared artefact is therefore
+   a one-shot tool invocation, not ongoing infrastructure — it belongs in §11.2's
+   development-savings table, not here. The avoided ~8.5M archive reads benefit is
+   preserved (the BE-shipped CH copy still eliminates that work), but it is not a monthly
+   infrastructure saving. The headline monthly saving total is unchanged at ~$73/mo since
+   this row was already valued at ~$0.
 
 ### 11.2 Development Savings
 
 | Artifact | Shared from Block Explorer | Saving |
 |----------|--------------------------|--------|
-| `stellar-xdr` Rust parsing crate | Written once, compiled into both Ledger Processors | ~5–7 dev days of XDR parsing logic not duplicated |
+| `stellar-xdr` Rust parsing crate | Written once, compiled into both Ledger Processors and the `soroban-amm-backfill` CLI (ScVal decoding for ADR 0001) | ~5–7 dev days of XDR parsing logic not duplicated |
+| `backfill-runner --target=clickhouse` (BE task 0205) | One-shot prep tool invoked on the operator's workstation to populate a local CH copy of `soroban_events`; consumed as-is | ~3–5 dev days vs. building a prices-api-side `LedgerCloseMeta → CH` writer for the Stream 1 backfill window |
+| BE production ClickHouse schema (`docs/database-schema/clickhouse-prod-schema.sql`, mirrors BE) | DDL adopted unchanged for the local Stream 1 CH instance | ~1–2 dev days of schema design + indexing decisions not duplicated |
 | `sqlx` migration patterns + database tooling | Shared Rust workspace and CI patterns | ~2–3 dev days |
 | CDK VPC + IAM patterns | Reused CDK constructs | ~3–4 dev days |
 | Observability configuration (CloudWatch dashboards, alarm patterns) | Copy-adapted from Block Explorer | ~1–2 dev days |
@@ -1176,18 +1234,27 @@ The following components are **separate** and funded exclusively by the Prices A
 
 ### 11.4 Cross-Service Dependency and Risk
 
-The Soroban AMM backfill task reads from the Block Explorer's `soroban_events` table
-(read-only, within the shared VPC). This is the one point of coupling between the two services:
+Per [ADR 0001](../lore/2-adrs/0001_stream1-clickhouse-sourced-amm-backfill.md), the Soroban AMM
+backfill does **not** read from the Block Explorer's runtime database. The Stream 1 path
+consumes a **local** ClickHouse instance running in Docker on the operator's workstation,
+populated upfront by a one-shot invocation of BE's `backfill-runner --target=clickhouse` CLI
+(BE task 0205) against Stellar's public S3 archive. The only Stream 1 coupling to BE is
+therefore (a) the transient `backfill-runner` tool invocation during workstation prep, and
+(b) the BE-authored CH `soroban_events` schema the local instance ingests. Neither is a
+runtime dependency on BE infrastructure.
 
 | Risk | Mitigation |
 |------|-----------|
-| Block Explorer `soroban_events` schema changes | The Soroban AMM backfill runs only once (Tranche 1) and completes in hours. Schema changes after it completes have no impact |
-| Block Explorer DB has coverage gaps (indexing started late, missed some ledgers) | Gap detection: after the DB-sourced backfill, the task checks for contiguous OHLCV coverage from Soroban activation to present. Any gaps trigger a targeted archive-read for the missing ledger ranges |
-| Block Explorer DB goes offline during the backfill window | Backfill is retried automatically; typical downtime during Tranche 1 is negligible |
+| BE evolves the CH `soroban_events` schema after Tranche 1 lands | Stream 1 is a one-shot job that completes during Tranche 1 (Week 2–3); the local CH instance is torn down once the cloud push lands. Post-completion BE schema changes have no impact on the prices-api consumer |
+| BE evolves the CH schema **during** the prep step | Pin a known-good `backfill-runner` version (matching the production CH schema at the time of the run) for the duration of the workstation prep. If BE ships an incompatible change mid-run, re-pin and re-populate the local instance |
+| BE's `backfill-runner` produces incorrect or incomplete rows in the local CH (bugs in the CH writer landed by BE task 0206) | Gap detection: after the AMM CLI's cloud push, prices-api checks for contiguous OHLCV coverage from Soroban activation to present. Any gaps trigger a targeted archive-read for the missing ledger ranges (same fallback as the legacy design) |
+| Local CH coverage is partial because the prep step's ledger range was misconfigured | The prep step uses an explicit `--start`/`--end` range covering Soroban activation (~ledger 48.5M) to current tip. Range is checked in by the operator before the AMM CLI starts; gap detection (above) catches anything missed |
+| BE's `backfill-runner` is unavailable (CLI bug, breaking interface change, or BE-side regression) | Stream 1 is gated on operator workstation; if `backfill-runner` is unusable, the operator can rerun once BE fixes it. Stream 1 is short (~hours), so a delay of a day or two is recoverable within Tranche 1's window. Fargate-based fallback is documented in [task 0017](../lore/1-tasks/backlog/0017_FEATURE_local-clickhouse-for-prices-backfill.md) for the unlikely case the laptop is impractical |
 
-The Prices API never writes to the Block Explorer's database. The Block Explorer never reads
-from the Prices API database. Outside the Soroban AMM backfill window, the two services have
-no runtime coupling.
+The Prices API never reads from or writes to the Block Explorer's runtime database. The
+Block Explorer never reads from the Prices API database. Outside the one-shot
+`backfill-runner` invocation on the operator's workstation during Tranche 1 prep, the two
+services have **no runtime coupling on either stream**.
 
 **Stream 2 (SDEX) coupling.** Per ADR 0005, the SDEX historical backfill has **zero**
 runtime or data coupling with the Block Explorer. The only BE artefact consumed is the
