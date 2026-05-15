@@ -2,7 +2,7 @@
 id: "0018"
 title: "Sample-decode per-AMM swap event shapes (Soroswap, Aquarius, Phoenix)"
 type: RESEARCH
-status: active
+status: completed
 related_adr: ["0001"]
 related_tasks: ["0015", "0017"]
 tags: [priority-medium, effort-small, research, soroban, amm, schema, xdr]
@@ -108,6 +108,25 @@ history:
       soroswap source verbatim). All four AMM acceptance criteria
       now satisfied (samples decoded, shapes documented,
       source-referenced, single-vs-per-AMM recommendation made).
+  - date: 2026-05-15
+    status: completed
+    who: claude
+    note: >
+      All four AC met. Three real swap events decoded with the
+      stellar-xdr crate (Soroswap pair tx 21bb150d…, Aquarius pool
+      tx 7f785bf7d2…, Phoenix XYK pool tx 559498bdf5…) and saved
+      under `notes/evidence/` with raw XDR base64. Consumer spec
+      `notes/G-amm-swap-event-shapes.md` covers all three with
+      ScVal-level + CH-storage-level shapes, direction conventions,
+      amount denomination caveats, and per-AMM filter recipes.
+      Cross-repo finding `notes/R-be-storage-format.md` documents
+      BE's custom tagged-JSON encoding (column-name vs content
+      mismatch + Symbol-only signature hoist gap). Tool extension:
+      `tools/dump-swap-events` gained `--show-xdr`, `--tx`, and
+      `--contract` flags. Four follow-ups spawned to backlog:
+      0030 (BE column rename), 0031 (signature-column String hoist
+      perf eval), 0032 (Phoenix stable-pool first observation),
+      0033 (Soroswap source verbatim quote).
 ---
 
 # Sample-decode per-AMM swap event shapes (Soroswap, Aquarius, Phoenix)
@@ -189,3 +208,19 @@ extractor strategy in the consumer.
 - If new Soroban AMMs become relevant during the Tranche window,
   this task's pattern (one canonical pair + one sample decode +
   source-code cross-ref) re-runs per new AMM.
+
+## Future Work
+
+Spawned to backlog at completion (2026-05-15):
+
+- **0030 (DOCS)** — Surface BE `soroban_events.topics_xdr` /
+  `.data_xdr` column-naming issue. Cross-repo signal; content is
+  tagged JSON, not XDR.
+- **0031 (RESEARCH)** — Evaluate BE-side `signature` hoist for
+  String-typed `topic[0]` (Soroswap, Phoenix). Microbench the
+  JSON-extract workaround vs. a hoisted column once task 0017
+  lands.
+- **0032 (RESEARCH)** — Capture Phoenix stable-pool first mainnet
+  observation (WASM hash + 6-event decode confirmation).
+- **0033 (DOCS)** — Lock the Soroswap Pair swap event emit site to
+  source with a verbatim quote in this task's archived G-note §1.5.
