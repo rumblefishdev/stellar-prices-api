@@ -233,14 +233,183 @@ simplify to a single column predicate.
 
 ## 2. Aquarius
 
-> **TODO** — next iteration of this task.
+Aquarius is a multi-pool-type AMM (constant-product, stableswap,
+concentrated) on Soroban. Canonical mainnet contract registry:
+archive task 0002 `R-aquarius-registry.md` (sources: `AquaToken/soroban-amm`
+GitHub master, stellar.expert verified-contract metadata for the
+router `CBQDHNBFBZYE…`).
 
-Prior surface: archive task 0002 `R-aquarius-registry.md` and
-`R-swap-topic-shapes.md` §`Symbol("trade")`. The `Symbol("trade")`
-event with 3-element `Vec<i128>` data payload is the candidate
-pool-level event; the `Symbol("swap")` event from
-`CBQDHNBFBZYE…` (verified Aquarius
-`soroban-liquidity-pool-router-contract`) is router-level.
+Aquarius emits two distinct swap-shaped events:
+
+| Role | `topic[0]` value | Authority for trade extraction? |
+|---|---|---|
+| Pool `Symbol("trade")` | per-hop pool swap | **YES** — emitted by every Aquarius pool (constant-product, stable, concentrated share this shape) with inline token_in / token_out / trader addresses |
+| Router `Symbol("swap")` | user-facing routed swap | No (duplicates the pool event; use only for user-intent reconstruction or for non-pool-attributed flows) |
+
+Reasoning is the same as Soroswap: a multi-hop user swap fires N pool
+`trade` events plus 1 router `swap` event, and double-counting must be
+avoided. The pool event is also where the **fee** is reported, which
+is needed for the OHLCV downstream.
+
+### 2.1 ScVal-level shape (the canonical Aquarius pool `trade` event)
+
+Fresh decoded sample: `evidence/aquarius_pool_trade_decode.json`
+(event_index 4).
+
+- **tx**: `7f785bf7d275dba8827517a1a04b4e1e65c62bd82660982ca92602e636902e53`
+- **ledger**: `62079996`
+- **emitter**: `CA6PUJLBYKZKUEKLZJMKBZLEKP2OTHANDEOWSFF44FTSYLKQPIICCJBE`
+  (canonical Aquarius constant-product pool — WASM hash
+  `ae0da5a84b15805c5c7931ac567a8d1b34be3f26b483993d9ff80cb2c3de9852`,
+  per archive task 0002 `R-aquarius-registry.md`)
+
+**Topics** (`Vec<ScVal>`, length 4 — inline tokens + trader):
+
+| Position | Type | Value (sample) |
+|---|---|---|
+| `topics[0]` | `ScVal::Symbol` | `"trade"` |
+| `topics[1]` | `ScVal::Address` | `CAS3J7GYLGXMF6TDJBBYYSE3HQ6BBSMLNUQ34T6TZMYMW2EVH34XOWMA` (token_in — XLM SAC) |
+| `topics[2]` | `ScVal::Address` | `CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75` (token_out — USDC SAC) |
+| `topics[3]` | `ScVal::Address` | `GDCRZPZYBZ24RHRO3WBPJGFDL7NDFKUQBS3ZDB6YGBJB3TGKMFYBQ3LD` (trader — G-account) |
+
+**Topics XDR base64**:
+`AAAABAAAAA8AAAAFdHJhZGUAAAAAAAASAAAAASW0/NhZrsL6Y0hDjEibPDwQyYttIb5P08swy2iVPvl3AAAAEgAAAAGt785ZruUpaPdgYdSUwlJbdWWfpClqZfSZ7ynlZHfklgAAABIAAAAAAAAAAMUcvzgOdcieLt2C9JijX9oyqpAMt5GH2DBSHczKYXAY`
+
+**Data** (`ScVal::Vec`, 3 entries — positional, not keyed):
+
+```
+ScVal::Vec(Some([
+    ScVal::I128(amount_in),
+    ScVal::I128(amount_out),
+    ScVal::I128(fee),     // denominated in token_in
+]))
+```
+
+Sample values:
+
+| Index | Type | Value (raw) | Meaning |
+|---|---|---|---|
+| `data[0]` | `i128` | `25761941491` | `in_amount` (= ~2576.19 XLM at 7 decimals) |
+| `data[1]` | `i128` | `3901204480` | `out_amount` (= ~390.12 USDC at 7 decimals) |
+| `data[2]` | `i128` | `12880971` | `fee_amount` (= ~1.29 XLM ≈ 0.05% of in_amount, consistent with the Aquarius constant-product 5-bps fee config) |
+
+**Data XDR base64**: `AAAAEAAAAAEAAAADAAAACgAAAAAAAAAAAAAABf+IB/MAAAAKAAAAAAAAAAAAAAAA6IeoAAAAAAoAAAAAAAAAAAAAAAAAxIxL`
+
+### 2.2 CH storage-level shape
+
+Per `R-be-storage-format.md`, BE writes the custom tagged JSON.
+For this event:
+
+`soroban_events.topics_xdr`:
+
+```json
+[
+  { "type": "sym",     "value": "trade" },
+  { "type": "address", "value": "CAS3J7GYLGXMF6TDJBBYYSE3HQ6BBSMLNUQ34T6TZMYMW2EVH34XOWMA" },
+  { "type": "address", "value": "CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75" },
+  { "type": "address", "value": "GDCRZPZYBZ24RHRO3WBPJGFDL7NDFKUQBS3ZDB6YGBJB3TGKMFYBQ3LD" }
+]
+```
+
+`soroban_events.data_xdr`:
+
+```json
+{
+  "type": "vec",
+  "value": [
+    { "type": "i128", "value": "25761941491" },
+    { "type": "i128", "value": "3901204480" },
+    { "type": "i128", "value": "12880971" }
+  ]
+}
+```
+
+`soroban_events.signature` = **`"trade"`** for this event
+(topic[0] is `type == "sym"`, so BE's `extract_event_signature`
+populates it normally — unlike the Soroswap §1.2 case).
+
+### 2.3 Token-in / token-out direction convention
+
+Trivial — token addresses are **inline in the topic vector**:
+
+- `token_in` = `topics[1]`
+- `token_out` = `topics[2]`
+- `trader` = `topics[3]`
+- `amount_in` = `data[0]` (in `token_in` raw units)
+- `amount_out` = `data[1]` (in `token_out` raw units)
+- `fee` = `data[2]` (in `token_in` raw units)
+
+No per-pool `token_0` / `token_1` lookup required (the meaningful
+contrast with Soroswap §1.3). No zero-vs-non-zero inference logic.
+This is materially simpler to extract.
+
+### 2.4 Amount denomination
+
+Same convention as Soroswap §1.4: `i128` raw contract units, with
+per-token decimals read from the token contract's `decimals()` —
+**do not assume 7**. In this sample both tokens are SACs of
+7-decimal Stellar Classic assets (XLM native + USDC issued by
+`GA5ZSEJY…`), so the raw values divided by `10^7` give the
+human-readable amounts cited above. A pool whose tokens include a
+contract-issued (non-Classic) token with `decimals() = 18` would
+not.
+
+### 2.5 Cross-reference against `AquaToken/soroban-amm` source
+
+Source on GitHub: `AquaToken/soroban-amm`, branch `master`,
+`liquidity_pool_events/src/lib.rs` (shared by `liquidity_pool`
+constant-product, `liquidity_pool_stableswap`, and
+`liquidity_pool_concentrated` pool modules). The canonical emit
+signature, transcribed in archive task 0002 `R-aquarius-registry.md`
+§"Event formats":
+
+```rust
+fn trade(user, token_in, token_out, in_amount, out_amount, fee_amount) {
+    // topics: ("trade", token_in: Address, token_out: Address, user: Address)
+    // body:   (in_amount as i128, out_amount as i128, fee_amount as i128)
+}
+```
+
+Decoded sample matches exactly: `Symbol("trade")` + three `Address`
+topics in the documented order, three `I128` in the body in the
+documented order. The router-side `swap` emit signature is
+documented in the same registry note (`liquidity_pool_router/src/events.rs`)
+and matches the wider-sample observations in archive task 0001
+`R-swap-topic-shapes.md`. No source-vs-empirical drift on either
+side.
+
+### 2.6 Filter recipe for the Tranche 1 consumer
+
+Aquarius is the simple case — the hoisted `signature` column works:
+
+```sql
+SELECT contract_id, transaction_id, ledger_sequence, event_index,
+       topics_xdr, data_xdr
+FROM   soroban_events
+WHERE  ledger_sequence BETWEEN <range_start> AND <range_end>
+  AND  signature = 'trade'
+```
+
+To restrict to **Aquarius** pools specifically (vs. any other
+protocol that happens to emit `Symbol("trade")` — currently none
+observed at scale, but possible in the future), join against the
+authoritative pool registry built from the Aquarius router
+(`CBQDHNBFBZYE…`) `Symbol("add_pool")` events:
+
+```sql
+SELECT t.*
+FROM   soroban_events AS t
+WHERE  t.signature = 'trade'
+  AND  t.contract_id IN (
+         SELECT JSONExtractString(data_xdr, '$.value[0].value')   -- body[0] = pool address
+         FROM   soroban_events
+         WHERE  contract_id = '<aquarius_router_strkey>'
+           AND  signature = 'add_pool'
+       )
+```
+
+(The second predicate's CH JSON-extract syntax is again to be
+validated against the local pilot CH version once 0017 lands.)
 
 ---
 

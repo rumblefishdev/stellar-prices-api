@@ -11,7 +11,9 @@ links:
   - "../../archive/0015_RESEARCH_redefine-backfill-with-be-clickhouse-events/notes/G-ch-tables-for-price-calculation.md"
   - "../../archive/0001_RESEARCH_dump-amm-swap-events/notes/R-swap-topic-shapes.md"
   - "../../archive/0002_RESEARCH_amm-venue-attribution/notes/R-soroswap-registry.md"
+  - "../../archive/0002_RESEARCH_amm-venue-attribution/notes/R-aquarius-registry.md"
   - "notes/evidence/soroswap_pair_swap_decode.json"
+  - "notes/evidence/aquarius_pool_trade_decode.json"
   - "notes/R-be-storage-format.md"
   - "notes/G-amm-swap-event-shapes.md"
 history:
@@ -59,6 +61,24 @@ history:
       `WHERE signature = 'swap'` will undercount Soroswap. Consumer
       filter recipe drafted in `notes/G-amm-swap-event-shapes.md`.
       Aquarius / Phoenix sections still to go.
+  - date: 2026-05-15
+    status: active
+    who: claude
+    note: >
+      Aquarius §2 of the G-note landed. Decoded the canonical pool
+      `Symbol("trade")` event from mainnet tx 7f785bf7d2…
+      ledger 62079996 (pool `CA6PUJLBYKZK…`, WASM hash
+      `ae0da5a8…9852` matching Aquarius `liquidity_pool` per archive
+      task 0002) into `notes/evidence/aquarius_pool_trade_decode.json`
+      with raw XDR base64. Shape matches `AquaToken/soroban-amm`
+      `liquidity_pool_events/src/lib.rs::trade` verbatim — token_in
+      / token_out / trader inline in `topics[1..=3]`, body
+      `Vec<i128>(in_amount, out_amount, fee)`. `signature` column
+      populates as `'trade'` (topic[0] is `Symbol`, unlike
+      Soroswap's `String`), so the consumer filter recipe is the
+      simple `WHERE signature = 'trade'` — with an optional
+      `add_pool`-derived contract_id whitelist for venue-strict
+      attribution. Phoenix still to go.
 ---
 
 # Sample-decode per-AMM swap event shapes (Soroswap, Aquarius, Phoenix)
