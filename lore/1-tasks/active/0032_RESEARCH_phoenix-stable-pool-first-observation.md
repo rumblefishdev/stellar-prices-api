@@ -2,12 +2,12 @@
 id: "0032"
 title: "Capture Phoenix stable-pool first mainnet observation (WASM hash + 6-event decode)"
 type: RESEARCH
-status: backlog
+status: active
 related_adr: ["0001"]
 related_tasks: ["0018"]
 tags: [priority-low, effort-small, phoenix, stable-pool, schema-validation]
 links:
-  - "../active/0018_RESEARCH_decode-per-amm-swap-event-shapes/notes/G-amm-swap-event-shapes.md"
+  - "../archive/0018_RESEARCH_decode-per-amm-swap-event-shapes/notes/G-amm-swap-event-shapes.md"
   - "../archive/0002_RESEARCH_amm-venue-attribution/notes/R-phoenix-registry.md"
   - "https://github.com/Phoenix-Protocol-Group/phoenix-contracts/blob/main/contracts/pool_stable/src/contract.rs"
 history:
@@ -15,6 +15,10 @@ history:
     status: backlog
     who: claude
     note: "Spawned from 0018 Appendix B item 3."
+  - date: 2026-05-15
+    status: active
+    who: oski
+    note: "Activated to start research."
 ---
 
 # Phoenix stable-pool first observation
