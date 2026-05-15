@@ -2,14 +2,14 @@
 id: "0029"
 title: "Update prices-api-general-overview.md Stream 1 sections per ADR 0001 (local ClickHouse-sourced AMM backfill)"
 type: DOCS
-status: backlog
+status: active
 related_adr: ["0001"]
 related_tasks: ["0013", "0015", "0017", "0018"]
 tags: [priority-medium, effort-small, docs, stream-1, clickhouse, backfill, block-explorer]
 links:
   - "../../2-adrs/0001_stream1-clickhouse-sourced-amm-backfill.md"
   - "../../../docs/prices-api-general-overview.md"
-  - "../active/0013_DOCS_update-design-doc-to-match-be-reality.md"
+  - "../archive/0013_DOCS_update-design-doc-to-match-be-reality.md"
 history:
   - date: 2026-05-14
     status: backlog
@@ -24,6 +24,13 @@ history:
       Each affected section either still describes Stream 1 as a
       Fargate task reading BE Postgres `soroban_events` (the pre-ADR
       0001 framing) or holds a placeholder row referencing this task.
+  - date: 2026-05-15
+    status: active
+    who: oskar
+    note: >
+      Promoted to active. Starting Stream 1 / ADR 0001 reconciliation
+      sweep across §2.3, §5.3, §5.6, §9, §10, §11.1, §11.4 of
+      docs/prices-api-general-overview.md.
 ---
 
 # Update prices-api-general-overview.md Stream 1 sections per ADR 0001
