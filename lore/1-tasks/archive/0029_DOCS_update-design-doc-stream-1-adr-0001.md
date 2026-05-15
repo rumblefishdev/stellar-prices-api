@@ -2,7 +2,7 @@
 id: "0029"
 title: "Update prices-api-general-overview.md Stream 1 sections per ADR 0001 (local ClickHouse-sourced AMM backfill)"
 type: DOCS
-status: active
+status: completed
 related_adr: ["0001"]
 related_tasks: ["0013", "0015", "0017", "0018"]
 tags: [priority-medium, effort-small, docs, stream-1, clickhouse, backfill, block-explorer]
@@ -31,6 +31,23 @@ history:
       Promoted to active. Starting Stream 1 / ADR 0001 reconciliation
       sweep across §2.3, §5.3, §5.6, §9, §10, §11.1, §11.4 of
       docs/prices-api-general-overview.md.
+  - date: 2026-05-15
+    status: completed
+    who: claude
+    note: >
+      Reconciliation sweep merged via PR #15 (squash commit 5ce3a7e on
+      develop). Single-file change to docs/prices-api-general-overview.md
+      (+144/-77 lines) touching §2.3, §5.3, §5.6 Stream 1 (two-stream
+      design table, ASCII architecture diagram, schema-coupling note,
+      processing-rate sub-table), §9 Tranche 1 work bullets, §10, §11.1,
+      §11.2, §11.4, plus a new Revision History entry. Eight design-doc
+      acceptance criteria all closed; the "Task 0013 closure" AC was
+      moot (0013 was already in archive pre-emptively, with its three
+      Stream 1 ACs marked "deferred to 0029" — those are now satisfied
+      by this PR). Backfill cost total ~$32 → ~$30. Three "Emerged"
+      autonomous decisions documented under Design Decisions: row removal
+      vs rewrite for §2.3/§11.1, `soroban-amm-backfill` binary naming,
+      and wholesale §11.4 risk-table replacement.
 ---
 
 # Update prices-api-general-overview.md Stream 1 sections per ADR 0001
@@ -46,7 +63,7 @@ the operator's workstation, not as an ECS Fargate task.
 
 ## Context
 
-Companion task to [0013](../active/0013_DOCS_update-design-doc-to-match-be-reality.md).
+Companion task to [0013](../archive/0013_DOCS_update-design-doc-to-match-be-reality.md).
 Task 0013's PR landed Stream 2 / ADR 0005 reconciliation; this task picks up
 the Stream 1 / ADR 0001 reconciliation that was deliberately out of scope on
 every turn of 0013's implementation.
@@ -122,10 +139,14 @@ ClickHouse instance populated by BE's `backfill-runner --target=clickhouse`":
 - [x] §11.4 opening paragraph and risk table rewritten; BE coupling correctly
       framed as transient backfill-runner invocation, not runtime PG read
 - [x] Cross-link to ADR 0001 added wherever §5.6 Stream 1 is touched
-- [ ] Task 0013 can be marked completed once this PR merges (its three
+- [x] Task 0013 can be marked completed once this PR merges (its three
       Stream 1 acceptance criteria were marked "deferred to 0029")
-      — pending PR merge
-- [ ] Reviewer (project lead) approves the revision — pending PR review
+      — moot in practice: 0013 was already pre-closed in archive at the
+      start of this session (commit 45cf3cf, before 0029 was even
+      activated), with its three Stream 1 ACs marked "deferred to 0029".
+      Those deferred ACs are now satisfied by this PR
+- [x] Reviewer (project lead) approves the revision — PR #15 merged to
+      develop (squash commit 5ce3a7e)
 
 ## Implementation Notes
 
