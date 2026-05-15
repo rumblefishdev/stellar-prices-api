@@ -7,8 +7,9 @@ related_adr: ["0001"]
 related_tasks: ["0018"]
 tags: [priority-low, effort-small, phoenix, stable-pool, schema-validation]
 links:
-  - "../archive/0018_RESEARCH_decode-per-amm-swap-event-shapes/notes/G-amm-swap-event-shapes.md"
-  - "../archive/0002_RESEARCH_amm-venue-attribution/notes/R-phoenix-registry.md"
+  - "../../archive/0018_RESEARCH_decode-per-amm-swap-event-shapes/notes/G-amm-swap-event-shapes.md"
+  - "../../archive/0002_RESEARCH_amm-venue-attribution/notes/R-phoenix-registry.md"
+  - "notes/R-phoenix-xyk-pool-interface.md"
   - "https://github.com/Phoenix-Protocol-Group/phoenix-contracts/blob/main/contracts/pool_stable/src/contract.rs"
 history:
   - date: 2026-05-15
