@@ -33,9 +33,14 @@ interface should be diffed against this baseline to confirm the
 
 - **Pool**: Phoenix XLM/USDC (XYK)
 - **Contract ID**: `CBHCRSVX3ZZ7EGTSYMKPEFGZNWRVCSESQR3UABET4MIW52N4EVU6BIZX`
+- **WASM SHA-256**: `167ab414a226427de34c19947ef9c5cf38c6c0ed91ecf9392f7cef3278ff506c`
+- **WASM size**: 36810 bytes
+- **Contract meta description**: `Phoenix Protocol XYK Liquidity Pool`
 - **Toolchain**: Rust 1.85.1
 - **Stellar SDK**: 22.0.7#211569aa49c8d896877dfca1f2eb4fe9071121c8
-- **Captured**: 2026-05-15
+- **Captured**: 2026-05-15 via `stellar contract fetch` against mainnet
+  (`https://mainnet.sorobanrpc.com`), then `sha256sum` on the binary
+  and `stellar contract info meta --wasm` for the description.
 
 ## Interface — user-facing entrypoints
 
@@ -144,10 +149,19 @@ this XYK baseline once a stable pool is found:
 
 ## Followups
 
-- Pull the actual XYK WASM hash for `CBHCRSVX3ZZ7EGTSYMKPEFGZNWRVCSESQR3UABET4MIW52N4EVU6BIZX`
-  (via `stellar contract info` or RPC `getLedgerEntries`) and record it
-  here. This converts the "known negative" above from theory to a
-  concrete filter.
-- When a stable pool is found, create `R-phoenix-stable-pool-interface.md`
-  alongside this note and diff the two interfaces in an `S-` synthesis
-  note.
+- ~~Pull the actual XYK WASM hash for `CBHCRSVX3ZZ7EGTSYMKPEFGZNWRVCSESQR3UABET4MIW52N4EVU6BIZX`~~
+  **DONE 2026-05-15** — hash recorded above.
+- ~~Scan the Phoenix factory for all pools and group by WASM hash.~~
+  **DONE 2026-05-15** — see
+  [evidence/phoenix_pool_inventory_2026-05-15.txt](evidence/phoenix_pool_inventory_2026-05-15.txt).
+  11 pools total. 10 share the XYK hash above; 1 pool
+  (`CD5XNKK3...IAA`, PHO/USDC) carries a different WASM
+  `13b158655e40396957537bf1c528c6542b315930c1c9e0df640f57293c8af2ca`
+  but is **also an XYK build** (same interface, same meta string, same
+  protocol version `"2.0.0"`, only 237 bytes larger). Token-economic
+  basis confirms this: a PHO/USDC pair would never use a stable curve.
+  See [S-no-stable-pool-deployed.md](S-no-stable-pool-deployed.md)
+  for the synthesis.
+- When a stable pool eventually shows up in the factory, create
+  `R-phoenix-stable-pool-interface.md` alongside this note and diff
+  the two interfaces in an `S-` synthesis note.

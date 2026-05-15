@@ -67,11 +67,27 @@ observation:
 ## Acceptance Criteria
 
 - [ ] At least one mainnet Phoenix stable-pool deployment
-      identified (WASM hash recorded).
+      identified (WASM hash recorded)
+      → **Negative result, 2026-05-15**: see
+      [S-no-stable-pool-deployed.md](notes/S-no-stable-pool-deployed.md).
 - [ ] One real stable-pool swap event grouping decoded and
-      archived as evidence.
-- [ ] Consumer's stable-pool decoder spec updated with
-      observation.
+      archived as evidence
+      → Cannot satisfy; no stable pool exists to decode from.
+- [x] Consumer's stable-pool decoder spec status documented
+      (note: rephrased from "updated with observation" → "status
+      documented" since no observation was possible).
+
+## Findings (2026-05-15)
+
+The Phoenix mainnet factory contains **11 pools, zero stable**.
+Two distinct XYK WASM builds were found in production
+(`167ab414...506c` ×10, `13b158655e...f2ca` ×1). The full inventory
+is in
+[notes/evidence/phoenix_pool_inventory_2026-05-15.txt](notes/evidence/phoenix_pool_inventory_2026-05-15.txt);
+the analysis and consumer implications are in
+[notes/S-no-stable-pool-deployed.md](notes/S-no-stable-pool-deployed.md).
+Reference XYK interface and WASM hash are recorded in
+[notes/R-phoenix-xyk-pool-interface.md](notes/R-phoenix-xyk-pool-interface.md).
 
 ## Notes
 
