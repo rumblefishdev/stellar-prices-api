@@ -5,7 +5,7 @@ type: RESEARCH
 status: completed
 related_adr: []
 related_tasks: ["0002"]
-tags: [priority-medium, effort-small, soroban, amm, venue-attribution]
+tags: [layer-research, priority-medium, effort-small, soroban, amm, venue-attribution]
 links:
   - "../0002_RESEARCH_amm-venue-attribution/notes/S-venue-attribution-mapping.md"
   - "../0002_RESEARCH_amm-venue-attribution/notes/R-aquarius-registry.md"

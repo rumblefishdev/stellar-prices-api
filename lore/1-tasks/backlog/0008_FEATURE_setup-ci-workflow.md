@@ -5,7 +5,7 @@ type: FEATURE
 status: backlog
 related_adr: []
 related_tasks: ["0006"]
-tags: [phase-future, priority-medium, effort-small, infra, ci]
+tags: [layer-tooling, phase-future, priority-medium, effort-small, infra, ci]
 links: []
 history:
   - date: 2026-05-11

@@ -5,7 +5,7 @@ type: RESEARCH
 status: completed
 related_adr: []
 related_tasks: ["0002", "0003", "0004"]
-tags: [priority-medium, effort-small, soroban, amm, schema-validation]
+tags: [layer-research, priority-medium, effort-small, soroban, amm, schema-validation]
 links:
   - "../../../../docs/database-schema/amm-trades-schema.md#11-open-questions-for-the-be-team"
   - "../../../../docs/database-schema/amm-trades-schema.md"

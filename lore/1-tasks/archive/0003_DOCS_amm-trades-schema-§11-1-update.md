@@ -5,7 +5,7 @@ type: DOCS
 status: completed
 related_adr: []
 related_tasks: ["0001", "0002", "0005"]
-tags: [priority-medium, effort-small, schema-validation]
+tags: [layer-database, priority-medium, effort-small, schema-validation]
 links:
   - "0001_RESEARCH_dump-amm-swap-events/notes/S-amm-trades-schema-§11-1-resolved.md"
   - "0002_RESEARCH_amm-venue-attribution/notes/S-venue-attribution-mapping.md"

@@ -5,7 +5,7 @@ type: RESEARCH
 status: completed
 related_adr: ["0003"]
 related_tasks: ["0022", "0012", "0024", "0025"]
-tags: [priority-high, effort-small, schema, ohlcv, sdex, backfill, blocking]
+tags: [layer-research, priority-high, effort-small, schema, ohlcv, sdex, backfill, blocking]
 links:
   - "../archive/0022_RESEARCH_sdex-filter-and-extraction-spec/notes/G-sdex-decode-and-bucket-spec.md"
   - "../../../docs/database-schema/database-schema-overview.md"

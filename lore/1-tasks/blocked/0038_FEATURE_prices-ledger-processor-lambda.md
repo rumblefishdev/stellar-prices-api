@@ -5,7 +5,7 @@ type: FEATURE
 status: blocked
 related_adr: ["0001", "0003", "0004", "0005", "0006"]
 related_tasks: ["0011", "0037"]
-tags: [priority-high, effort-large, stream-1, lambda, ingestion, rust, aws]
+tags: [layer-indexing, priority-high, effort-large, stream-1, lambda, ingestion, rust, aws]
 links:
   - "../../../docs/prices-api-general-overview.md"
   - "../../2-adrs/0001_stream1-clickhouse-sourced-amm-backfill.md"

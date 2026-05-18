@@ -5,7 +5,7 @@ type: RESEARCH
 status: completed
 related_adr: ["0001"]
 related_tasks: ["0012", "0013", "0015", "0021"]
-tags: [priority-high, effort-medium, research, sdex, backfill, stream-2, clickhouse, archive-reads]
+tags: [layer-research, priority-high, effort-medium, research, sdex, backfill, stream-2, clickhouse, archive-reads]
 links:
   - "../../2-adrs/0001_stream1-clickhouse-sourced-amm-backfill.md"
   - "../0015_RESEARCH_redefine-backfill-with-be-clickhouse-events/notes/G-ch-tables-for-price-calculation.md"

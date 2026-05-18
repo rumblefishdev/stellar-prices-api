@@ -5,7 +5,7 @@ type: RESEARCH
 status: completed
 related_adr: ["0003", "0004"]
 related_tasks: ["0022", "0012", "0023", "0024"]
-tags: [priority-medium, effort-small, ohlcv, live-ingestion, multi-source]
+tags: [layer-research, priority-medium, effort-small, ohlcv, live-ingestion, multi-source]
 links:
   - "../archive/0022_RESEARCH_sdex-filter-and-extraction-spec/notes/G-sdex-decode-and-bucket-spec.md"
   - "../archive/0023_RESEARCH_ohlcv-row-identity-base-vs-pair/notes/S-recommendation.md"

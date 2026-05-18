@@ -5,7 +5,7 @@ type: RESEARCH
 status: completed
 related_adr: ["0001"]
 related_tasks: ["0009", "0010", "0012", "0013", "0014", "0017", "0018", "0020"]
-tags: [priority-high, effort-medium, infra, block-explorer, schema, clickhouse, backfill, price-calculation]
+tags: [layer-research, priority-high, effort-medium, infra, block-explorer, schema, clickhouse, backfill, price-calculation]
 links:
   - "../../../../soroban-block-explorer/lore/2-adrs/0044_clickhouse-pilot-parallel-store.md"
   - "../../../../soroban-block-explorer/lore/1-tasks/active/0206_FEATURE_clickhouse-persist-real-inserts/README.md"

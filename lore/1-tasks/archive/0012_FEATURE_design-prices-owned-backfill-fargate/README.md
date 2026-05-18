@@ -5,7 +5,7 @@ type: FEATURE
 status: completed
 related_adr: ["0002", "0003", "0005"]
 related_tasks: ["0011", "0014", "0020", "0022", "0023", "0027", "0028"]
-tags: [priority-high, effort-medium, design, local-backfill, workstation, postgres, cloud-push, sdex, stream-2]
+tags: [layer-indexing, priority-high, effort-medium, design, local-backfill, workstation, postgres, cloud-push, sdex, stream-2]
 links:
   - "../../2-adrs/0002_stream2-sdex-archive-backfill-independent-of-be.md"
   - "../../2-adrs/0003_price-ohlcv-pk-includes-quote-asset-id.md"

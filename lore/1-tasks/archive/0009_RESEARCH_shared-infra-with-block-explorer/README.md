@@ -5,7 +5,7 @@ type: RESEARCH
 status: completed
 related_adr: []
 related_tasks: ["0007", "0008", "0010", "0011", "0012", "0013"]
-tags: [priority-high, effort-medium, infra, architecture, aws, shared-infra, block-explorer]
+tags: [layer-research, priority-high, effort-medium, infra, architecture, aws, shared-infra, block-explorer]
 links:
   - "../../../../docs/prices-api-general-overview.md"
   - "../../../../../soroban-block-explorer/docs/architecture/infrastructure/infrastructure-overview.md"

@@ -5,7 +5,7 @@ type: FEATURE
 status: completed
 related_adr: []
 related_tasks: ["0007", "0008"]
-tags: [priority-high, effort-small, infra, tooling]
+tags: [layer-tooling, priority-high, effort-small, infra, tooling]
 links:
   - "https://github.com/rumblefishdev/stellar-prices-api/pull/6"
 history:

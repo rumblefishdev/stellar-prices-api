@@ -5,7 +5,7 @@ type: RESEARCH
 status: completed
 related_adr: ["0002"]
 related_tasks: ["0012", "0013", "0020", "0023", "0024", "0025"]
-tags: [priority-high, effort-medium, research, sdex, backfill, stream-2, xdr, parser]
+tags: [layer-research, priority-high, effort-medium, research, sdex, backfill, stream-2, xdr, parser]
 links:
   - "../../2-adrs/0002_stream2-sdex-archive-backfill-independent-of-be.md"
   - "../archive/0020_RESEARCH_sdex-historical-backfill-options/notes/R-sdex-operation-xdr-shape.md"

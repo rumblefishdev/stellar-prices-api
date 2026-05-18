@@ -5,7 +5,7 @@ type: DOCS
 status: backlog
 related_adr: []
 related_tasks: ["0018"]
-tags: [priority-low, effort-small, cross-repo, be-feedback, clickhouse, soroban-events]
+tags: [layer-database, priority-low, effort-small, cross-repo, be-feedback, clickhouse, soroban-events]
 links:
   - "../active/0018_RESEARCH_decode-per-amm-swap-event-shapes/notes/R-be-storage-format.md"
   - "../../../../soroban-block-explorer/crates/db-clickhouse/src/persist/stage.rs"

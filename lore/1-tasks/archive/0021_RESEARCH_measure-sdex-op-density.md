@@ -5,7 +5,7 @@ type: RESEARCH
 status: canceled
 related_adr: ["0002"]
 related_tasks: ["0020", "0017", "0022"]
-tags: [priority-medium, effort-small, research, sdex, backfill, clickhouse, measurement, stream-2, canceled]
+tags: [layer-research, priority-medium, effort-small, research, sdex, backfill, clickhouse, measurement, stream-2, canceled]
 links:
   - "../../2-adrs/0002_stream2-sdex-archive-backfill-independent-of-be.md"
   - "../archive/0020_RESEARCH_sdex-historical-backfill-options/notes/S-sdex-backfill-recommendation.md"
