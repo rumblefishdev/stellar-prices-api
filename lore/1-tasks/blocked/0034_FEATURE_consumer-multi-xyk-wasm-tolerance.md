@@ -2,13 +2,14 @@
 id: "0034"
 title: "Consumer must tolerate >=2 Phoenix XYK WASM builds (PHO/USDC currently dropped if hash-keyed)"
 type: FEATURE
-status: active
-related_adr: []
-related_tasks: ["0032", "0018"]
+status: blocked
+related_adr: ["0006"]
+related_tasks: ["0032", "0018", "0037"]
 tags: [priority-medium, effort-small, phoenix, consumer, stream-1, price-feed-correctness]
 links:
   - "../archive/0032_RESEARCH_phoenix-stable-pool-first-observation/notes/S-no-stable-pool-deployed.md"
   - "../archive/0018_RESEARCH_decode-per-amm-swap-event-shapes/notes/G-amm-swap-event-shapes.md"
+  - "../backlog/0037_FEATURE_tranche1-ledger-processor-skeleton.md"
 history:
   - date: 2026-05-15
     status: backlog
@@ -18,6 +19,19 @@ history:
     status: active
     who: oski
     note: "Activated to begin implementation."
+  - date: 2026-05-18
+    status: blocked
+    who: oski
+    by: ["0037"]
+    note: >
+      Re-blocked on discovery that no consumer code exists yet. The
+      Tranche 1 Ledger Processor (per ADR 0006) has not been
+      scaffolded — packages/ is empty, only tools/dump-swap-events
+      exists. There is no pool registry to attach pool_type to and
+      no extractor dispatch to route 8/6-event groupings through.
+      Spawned 0037 as the minimal prerequisite: Tranche 1 Ledger
+      Processor skeleton with a Phoenix pool registry and extractor
+      dispatcher hook. 0034 resumes once 0037 lands.
 ---
 
 # Consumer must tolerate >=2 Phoenix XYK WASM builds
