@@ -2,10 +2,10 @@
 id: "0042"
 title: "Classify legacy lore tasks with layer-* tags for board grouping"
 type: DOCS
-status: backlog
+status: active
 related_adr: []
 related_tasks: ["0041"]
-tags: ["layer-tooling", "phase-future", "effort-small", "priority-low"]
+tags: ["layer-tooling", "phase-now", "effort-small", "priority-low"]
 links:
   - "https://rumblefishdev.github.io/stellar-prices-api/"
 history:
@@ -13,6 +13,10 @@ history:
     status: backlog
     who: claude
     note: "Spawned from 0041 future work."
+  - date: 2026-05-18
+    status: active
+    who: oski
+    note: "Activated to classify legacy tasks."
 ---
 
 # Classify legacy lore tasks with layer-* tags for board grouping
