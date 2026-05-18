@@ -2,7 +2,7 @@
 id: "0034"
 title: "Consumer must tolerate >=2 Phoenix XYK WASM builds (PHO/USDC currently dropped if hash-keyed)"
 type: FEATURE
-status: backlog
+status: active
 related_adr: []
 related_tasks: ["0032", "0018"]
 tags: [priority-medium, effort-small, phoenix, consumer, stream-1, price-feed-correctness]
@@ -14,6 +14,10 @@ history:
     status: backlog
     who: oski
     note: "Spawned from 0032 negative-result survey."
+  - date: 2026-05-18
+    status: active
+    who: oski
+    note: "Activated to begin implementation."
 ---
 
 # Consumer must tolerate >=2 Phoenix XYK WASM builds
