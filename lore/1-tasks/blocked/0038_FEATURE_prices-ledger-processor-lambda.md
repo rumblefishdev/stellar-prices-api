@@ -37,6 +37,18 @@ history:
       stack scaffolding; 0037 provides the extractor kernel and
       dispatch surface. Both are themselves backlog as of this
       date.
+  - date: 2026-05-18
+    status: blocked
+    who: okarcz
+    note: >
+      Redesign pending. Task 0044's research (synthesis §3) and
+      ADR 0007 (proposed) call for major rewrite of this task —
+      sqlx → `clickhouse` crate; PG UPSERT with ADR 0004 merge
+      formula → ReplacingMergeTree per-source rows; VPC Lambda
+      → no-VPC + mTLS. Hold rewrite until both gating events
+      clear: (1) BE Hetzner CH ships, (2) ADR 0007 accepted
+      (gated on task 0045). Do not start implementation against
+      this spec.
 ---
 
 # Prices Ledger Processor Lambda — live S3-event-driven ingestion into price_ohlcv

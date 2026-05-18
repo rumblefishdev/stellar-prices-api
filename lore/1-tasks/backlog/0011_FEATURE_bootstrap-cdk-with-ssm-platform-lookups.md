@@ -12,6 +12,18 @@ history:
     status: backlog
     who: okarcz
     note: "Spawned from 0009 future work. Implements Option A2 from the integration-options note."
+  - date: 2026-05-18
+    status: backlog
+    who: okarcz
+    note: >
+      Redesign pending. Task 0044's research (synthesis §3) and
+      ADR 0007 (proposed) call for major rewrite of this task —
+      RDS line and Prices-api VPC integration are out; Secrets
+      Manager mTLS material + no-VPC Lambdas + IAM scope for
+      `secretsmanager:GetSecretValue` come in. Hold rewrite until
+      both gating events clear: (1) BE Hetzner CH ships, (2)
+      ADR 0007 transitions proposed → accepted (gated on task
+      0045). Do not start implementation against this spec.
 ---
 
 # Bootstrap Prices-owned CDK app with SSM-based platform lookups
