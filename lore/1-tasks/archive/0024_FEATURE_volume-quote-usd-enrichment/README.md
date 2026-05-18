@@ -5,7 +5,7 @@ type: FEATURE
 status: completed
 related_adr: ["0003"]
 related_tasks: ["0022", "0012", "0023"]
-tags: [priority-medium, effort-medium, ohlcv, enrichment, oracle, backfill, stream-2]
+tags: [layer-indexing, priority-medium, effort-medium, ohlcv, enrichment, oracle, backfill, stream-2]
 links:
   - "../archive/0022_RESEARCH_sdex-filter-and-extraction-spec/notes/G-sdex-decode-and-bucket-spec.md"
   - "../archive/0023_RESEARCH_ohlcv-row-identity-base-vs-pair/notes/S-recommendation.md"

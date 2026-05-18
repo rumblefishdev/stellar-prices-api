@@ -5,7 +5,7 @@ type: RESEARCH
 status: completed
 related_adr: ["0001"]
 related_tasks: ["0018", "0034", "0035", "0036"]
-tags: [priority-low, effort-small, phoenix, stable-pool, schema-validation, negative-result]
+tags: [layer-research, priority-low, effort-small, phoenix, stable-pool, schema-validation, negative-result]
 links:
   - "../../archive/0018_RESEARCH_decode-per-amm-swap-event-shapes/notes/G-amm-swap-event-shapes.md"
   - "../../archive/0002_RESEARCH_amm-venue-attribution/notes/R-phoenix-registry.md"

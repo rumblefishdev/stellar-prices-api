@@ -5,7 +5,7 @@ type: RESEARCH
 status: completed
 related_adr: ["0001"]
 related_tasks: ["0015", "0017"]
-tags: [priority-medium, effort-small, research, soroban, amm, schema, xdr]
+tags: [layer-research, priority-medium, effort-small, research, soroban, amm, schema, xdr]
 links:
   - "../../../2-adrs/0001_stream1-clickhouse-sourced-amm-backfill.md"
   - "../../archive/0015_RESEARCH_redefine-backfill-with-be-clickhouse-events/notes/G-ch-tables-for-price-calculation.md"

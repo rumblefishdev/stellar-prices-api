@@ -5,7 +5,7 @@ type: FEATURE
 status: blocked
 related_adr: ["0003", "0004", "0006"]
 related_tasks: ["0011", "0038", "0039"]
-tags: [priority-high, effort-large, api, lambda, axum, rust, aws]
+tags: [layer-backend, priority-high, effort-large, api, lambda, axum, rust, aws]
 links:
   - "../../../docs/prices-api-general-overview.md"
   - "../../2-adrs/0003_price-ohlcv-pk-includes-quote-asset-id.md"

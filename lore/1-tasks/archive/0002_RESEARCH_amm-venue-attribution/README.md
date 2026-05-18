@@ -5,7 +5,7 @@ type: RESEARCH
 status: completed
 related_adr: []
 related_tasks: ["0001"]
-tags: [priority-medium, effort-small, soroban, amm]
+tags: [layer-research, priority-medium, effort-small, soroban, amm]
 links:
   - "../0001_RESEARCH_dump-amm-swap-events/notes/R-swap-topic-shapes.md"
   - "../../../../docs/database-schema/amm-trades-schema.md"

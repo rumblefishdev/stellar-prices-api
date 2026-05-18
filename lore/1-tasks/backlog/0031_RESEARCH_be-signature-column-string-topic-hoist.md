@@ -5,7 +5,7 @@ type: RESEARCH
 status: backlog
 related_adr: []
 related_tasks: ["0018", "0017"]
-tags: [priority-medium, effort-small, cross-repo, be-feedback, clickhouse, signature-column, filter-perf]
+tags: [layer-research, priority-medium, effort-small, cross-repo, be-feedback, clickhouse, signature-column, filter-perf]
 links:
   - "../active/0018_RESEARCH_decode-per-amm-swap-event-shapes/notes/R-be-storage-format.md"
   - "../active/0018_RESEARCH_decode-per-amm-swap-event-shapes/notes/G-amm-swap-event-shapes.md"

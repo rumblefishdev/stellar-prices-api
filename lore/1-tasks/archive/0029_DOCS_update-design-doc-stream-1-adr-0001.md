@@ -5,7 +5,7 @@ type: DOCS
 status: completed
 related_adr: ["0001"]
 related_tasks: ["0013", "0015", "0017", "0018"]
-tags: [priority-medium, effort-small, docs, stream-1, clickhouse, backfill, block-explorer]
+tags: [layer-indexing, priority-medium, effort-small, docs, stream-1, clickhouse, backfill, block-explorer]
 links:
   - "../../2-adrs/0001_stream1-clickhouse-sourced-amm-backfill.md"
   - "../../../docs/prices-api-general-overview.md"

@@ -5,7 +5,7 @@ type: DOCS
 status: backlog
 related_adr: []
 related_tasks: ["0018"]
-tags: [priority-low, effort-small, soroswap, source-cross-ref, doc-completeness]
+tags: [layer-research, priority-low, effort-small, soroswap, source-cross-ref, doc-completeness]
 links:
   - "../archive/0018_RESEARCH_decode-per-amm-swap-event-shapes/notes/G-amm-swap-event-shapes.md"
   - "https://github.com/soroswap/core"

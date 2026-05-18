@@ -5,7 +5,7 @@ type: RESEARCH
 status: backlog
 related_adr: []
 related_tasks: ["0032", "0034"]
-tags: [priority-low, effort-small, phoenix, wasm-analysis, defensive]
+tags: [layer-research, priority-low, effort-small, phoenix, wasm-analysis, defensive]
 links:
   - "../archive/0032_RESEARCH_phoenix-stable-pool-first-observation/notes/S-no-stable-pool-deployed.md"
   - "../archive/0032_RESEARCH_phoenix-stable-pool-first-observation/notes/evidence/phoenix_pool_inventory_2026-05-15.txt"

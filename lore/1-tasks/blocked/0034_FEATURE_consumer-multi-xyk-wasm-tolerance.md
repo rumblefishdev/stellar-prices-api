@@ -5,7 +5,7 @@ type: FEATURE
 status: blocked
 related_adr: ["0006"]
 related_tasks: ["0032", "0018", "0037"]
-tags: [priority-medium, effort-small, phoenix, consumer, stream-1, price-feed-correctness]
+tags: [layer-indexing, priority-medium, effort-small, phoenix, consumer, stream-1, price-feed-correctness]
 links:
   - "../archive/0032_RESEARCH_phoenix-stable-pool-first-observation/notes/S-no-stable-pool-deployed.md"
   - "../archive/0018_RESEARCH_decode-per-amm-swap-event-shapes/notes/G-amm-swap-event-shapes.md"

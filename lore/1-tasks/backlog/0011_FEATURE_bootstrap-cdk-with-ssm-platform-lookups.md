@@ -5,7 +5,7 @@ type: FEATURE
 status: backlog
 related_adr: []
 related_tasks: ["0009", "0008"]
-tags: [priority-medium, effort-medium, infra, cdk, aws, shared-infra]
+tags: [layer-infra, priority-medium, effort-medium, infra, cdk, aws, shared-infra]
 links: []
 history:
   - date: 2026-05-11

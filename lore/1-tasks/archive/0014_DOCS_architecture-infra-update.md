@@ -5,7 +5,7 @@ type: DOCS
 status: completed
 related_adr: []
 related_tasks: ["0009", "0010", "0012", "0013"]
-tags: [priority-medium, effort-small, docs, infra, block-explorer]
+tags: [layer-infra, priority-medium, effort-small, docs, infra, block-explorer]
 links:
   - "../../../../soroban-block-explorer/lore/2-adrs/0044_clickhouse-pilot-parallel-store.md"
   - "../../../../soroban-block-explorer/lore/2-adrs/0040_multi-laptop-backfill-snapshot-merge-hazards.md"

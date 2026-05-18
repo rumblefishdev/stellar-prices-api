@@ -5,7 +5,7 @@ type: FEATURE
 status: backlog
 related_adr: ["0003", "0005"]
 related_tasks: ["0012", "0022", "0028"]
-tags: [priority-high, effort-large, local-backfill, workstation, rust, postgres, docker, sdex, stream-2]
+tags: [layer-indexing, priority-high, effort-large, local-backfill, workstation, rust, postgres, docker, sdex, stream-2]
 links:
   - "../active/0012_FEATURE_design-prices-owned-backfill-fargate/notes/G-sdex-backfill-local-design.md"
   - "../../2-adrs/0005_stream2-sdex-local-workstation-backfill.md"

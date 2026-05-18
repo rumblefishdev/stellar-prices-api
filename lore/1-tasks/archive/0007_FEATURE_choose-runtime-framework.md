@@ -5,7 +5,7 @@ type: FEATURE
 status: completed
 related_adr: ["0006"]
 related_tasks: ["0006"]
-tags: [phase-future, priority-medium, effort-medium, infra]
+tags: [layer-tooling, phase-future, priority-medium, effort-medium, infra]
 links:
   - "../../2-adrs/0006_runtime-framework-rust-axum.md"
   - "../../../docs/prices-api-general-overview.md"

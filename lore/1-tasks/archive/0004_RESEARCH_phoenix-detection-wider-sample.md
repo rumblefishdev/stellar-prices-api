@@ -5,7 +5,7 @@ type: RESEARCH
 status: superseded
 related_adr: []
 related_tasks: ["0001", "0002"]
-tags: [priority-low, effort-small, soroban, amm]
+tags: [layer-research, priority-low, effort-small, soroban, amm]
 links:
   - "0001_RESEARCH_dump-amm-swap-events/notes/R-swap-topic-shapes.md"
   - "0002_RESEARCH_amm-venue-attribution/notes/S-venue-attribution-mapping.md"

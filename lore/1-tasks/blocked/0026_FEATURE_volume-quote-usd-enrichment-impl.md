@@ -6,7 +6,7 @@ status: blocked
 related_adr: ["0003"]
 related_tasks: ["0024", "0012", "0022", "0023"]
 by: ["0012"]
-tags: [priority-medium, effort-medium, lambda, ohlcv, enrichment, oracle, phase-2]
+tags: [layer-indexing, priority-medium, effort-medium, lambda, ohlcv, enrichment, oracle, phase-2]
 links:
   - "../archive/0024_FEATURE_volume-quote-usd-enrichment/notes/G-enrichment-pass-design.md"
   - "../archive/0024_FEATURE_volume-quote-usd-enrichment/README.md"

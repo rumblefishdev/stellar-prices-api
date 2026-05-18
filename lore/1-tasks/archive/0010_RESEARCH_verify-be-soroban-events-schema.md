@@ -5,7 +5,7 @@ type: RESEARCH
 status: superseded
 related_adr: []
 related_tasks: ["0009", "0014", "0015"]
-tags: [priority-high, effort-small, infra, block-explorer, schema, backfill]
+tags: [layer-research, priority-high, effort-small, infra, block-explorer, schema, backfill]
 links:
   - "../../../../soroban-block-explorer/lore/2-adrs/0029_abandon-parsed-artifacts-read-time-xdr-fetch.md"
   - "../../../../soroban-block-explorer/lore/2-adrs/0033_soroban-events-appearances-read-time-detail.md"
