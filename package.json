@@ -2,7 +2,9 @@
   "name": "@rumblefish/stellar-prices-api",
   "version": "0.0.0",
   "license": "MIT",
-  "scripts": {},
+  "scripts": {
+    "board": "node tools/scripts/generate-lore-board.mjs"
+  },
   "private": true,
   "dependencies": {},
   "devDependencies": {
