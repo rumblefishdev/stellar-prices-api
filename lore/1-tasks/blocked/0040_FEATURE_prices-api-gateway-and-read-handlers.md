@@ -37,6 +37,17 @@ history:
       handlers can be developed against fixture data once 0011
       is archived, so 0038 / 0039 are listed in related_tasks
       rather than `by:`.
+  - date: 2026-05-18
+    status: blocked
+    who: okarcz
+    note: >
+      Redesign pending. Task 0044's research (synthesis §3) and
+      ADR 0007 (proposed) call for **moderate** rewrite — endpoint
+      contracts unchanged, but read handlers retarget from sqlx
+      → `clickhouse` crate, queries adapt to per-source row shape
+      (GROUP BY at read time), and the latency budget (<100 ms
+      p95) needs re-validation against the public-internet hop to
+      Hetzner CH. Hold rewrite until ADR 0007 accepted.
 ---
 
 # Prices API Gateway + Rust/axum read handlers

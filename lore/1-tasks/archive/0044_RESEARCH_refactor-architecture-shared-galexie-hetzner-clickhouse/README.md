@@ -2,9 +2,9 @@
 id: "0044"
 title: "Refactor architecture: shared Galexie + AWS Lambda → BE's Hetzner ClickHouse for live data"
 type: RESEARCH
-status: active
-related_adr: ["0001", "0005", "0006"]
-related_tasks: ["0009", "0011", "0017", "0038", "0039", "0040"]
+status: completed
+related_adr: ["0001", "0005", "0006", "0007"]
+related_tasks: ["0009", "0011", "0017", "0038", "0039", "0040", "0045"]
 tags: [layer-research, priority-high, effort-medium, infra, architecture, aws, shared-infra, block-explorer, clickhouse, hetzner, galexie, refactor]
 links:
   - "../../../docs/prices-api-general-overview.md"
@@ -31,6 +31,22 @@ history:
     status: active
     who: okarcz
     note: "Promoted from backlog to active to begin research."
+  - date: 2026-05-18
+    status: completed
+    who: okarcz
+    note: >
+      Research complete in 7 steps (4 R-notes, 1 I-note, 1 S-note,
+      ~2,250 lines of analysis). Recommendation: conditional go on
+      refactoring prices-api's live data sink to BE's planned Hetzner
+      ClickHouse, gated on BE tasks 0216 + 0227 shipping AND a
+      cross-team conversation producing written commitments on
+      schema-ownership, bucket fan-out, capacity, cert issuance,
+      and cost-share. Spawned ADR 0007 (proposed) and task 0045
+      (backlog). Rewrites of blocked tasks 0011/0038/0039/0040
+      deferred until ADR 0007 is accepted; history entries added
+      to those tasks pointing at this synthesis as the redesign
+      source. Task 0017 unchanged (backfill is workstation-local).
+      Research committed on branch `lore-0044-research`; PR #20.
 ---
 
 # Refactor architecture: shared Galexie + AWS Lambda → BE's Hetzner ClickHouse for live data
@@ -211,44 +227,142 @@ Final `notes/S-refactor-recommendation.md` with:
 
 ## Acceptance Criteria
 
-- [ ] All five inputs above read and summarised in `notes/R-*.md`.
-- [ ] Stellar peers → Galexie → S3 → Lambda live-feed chain
-      documented from first principles (not just "see BE doc").
-- [ ] Side-by-side mapping of prices-api write targets from RDS to
-      ClickHouse, including the OHLCV merge-semantics re-expression.
-- [ ] AWS-Lambda ↔ Hetzner-CH auth + network path documented with
-      mTLS cert lifecycle and failure-mode analysis.
-- [ ] Schema-ownership boundary recommendation with at least two
-      options compared (separate DB vs. shared tables).
-- [ ] Cost-delta table vs. the current RDS-based plan.
-- [ ] Final recommendation note with go/no-go and impact on each
-      of the blocked tasks 0011 / 0017 / 0038 / 0039 / 0040.
-- [ ] Open questions for the BE team enumerated explicitly so the
-      cross-team conversation can happen against a written brief.
-- [ ] Follow-up backlog tasks spawned (ADR + implementation) if
-      the recommendation is go.
+- [x] All five inputs above read and summarised in `notes/R-*.md`.
+- [x] Stellar peers → Galexie → S3 → Lambda live-feed chain
+      documented from first principles (not just "see BE doc")
+      — `R-stellar-peers-galexie-live-feed.md`.
+- [x] Side-by-side mapping of prices-api write targets from RDS to
+      ClickHouse, including the OHLCV merge-semantics re-expression
+      — `R-ingest-target-mapping.md` §2 (CH-A vs. CH-B).
+- [x] AWS-Lambda ↔ Hetzner-CH auth + network path documented with
+      mTLS cert lifecycle and failure-mode analysis
+      — `R-aws-hetzner-auth-network.md`.
+- [x] Schema-ownership boundary recommendation with at least two
+      options compared (separate DB vs. shared tables)
+      — `I-schema-ownership-options.md` (four shapes compared).
+- [x] Cost-delta table vs. the current RDS-based plan
+      — `R-cost-delta.md`.
+- [x] Final recommendation note with go/no-go and impact on each
+      of the blocked tasks 0011 / 0017 / 0038 / 0039 / 0040
+      — `S-refactor-recommendation.md` §3.
+- [x] Open questions for the BE team enumerated explicitly so the
+      cross-team conversation can happen against a written brief
+      — 28 raised; consolidated into 4 clusters in
+      `S-refactor-recommendation.md` §4; forwarded to task 0045.
+- [x] Follow-up backlog tasks spawned (ADR + implementation) if
+      the recommendation is go — ADR 0007 (proposed) and task 0045
+      (backlog). Implementation tasks (rewrites of 0011 / 0038 /
+      0039 / 0040) gated on ADR 0007 acceptance.
 
-## Open Questions (initial)
+## Implementation Notes
 
-These are seeded by the user's framing; the research either answers
-them or escalates them to a cross-team decision.
+- Notes layout: 4 R-notes (research distillations) + 1 I-note
+  (options analysis for step 5) + 1 S-note (synthesis). Each step
+  shipped as a separate commit on branch `lore-0044-research`
+  (PR #20 to develop).
+- Approximate line counts: step 1 ~250, step 2 ~590, step 3 ~460,
+  step 4 ~430, step 5 ~430, step 6 ~335, step 7 ~310 — total
+  ~2,800 lines across all notes.
+- Primary sources cited: Stellar developer docs (Captive Core,
+  Galexie, overlay protocol), SEP-0054 (data-lake file naming),
+  stellar-core integration.md, stellar/go runner source, BE's
+  infrastructure-overview, BE task 0216 + 0227, BE ADR 0044 +
+  0045, BE CDK code (ingestion-stack.ts, compute-stack.ts).
+  Local sources: design doc §0-§11, ADRs 0001-0006, archived
+  task 0009 (parent research).
 
-1. **Cost-share agreement** — BE is funding the Hetzner box. Is
-   the shared-CH idea a "free ride" because BE has spare capacity,
-   or does prices-api co-fund? Needs a written agreement either way.
-2. **Schema ownership** — separate database inside the same CH
-   cluster, or shared tables with discriminator columns? Affects
-   migration tooling and blast radius of accidental DDL.
-3. **OHLCV merge semantics on ClickHouse** — `ReplacingMergeTree`
-   has eventual-consistency semantics that may or may not be
-   compatible with the incremental-merge update expression from
-   ADR 0004. The research has to land on a concrete CH table
-   engine choice before any implementation task is spawned.
-4. **mTLS identity issuer** — does prices-api reuse BE's PCA /
-   issuer, or stand up its own and have BE trust it?
-5. **Disaster-recovery and backup** — RDS gives PITR for free.
-   What is the CH-on-Hetzner backup story, and is it acceptable
-   for prices-api's data?
+## Design Decisions
+
+### From Plan
+
+1. **Notes follow Q/I/R/S/G convention.** R- for distilled inputs,
+   I- for options analysis, S- for synthesis — same shape used by
+   the closely-related archived task 0009.
+2. **Step-per-commit.** Each step landed as its own commit for
+   readable git history and reviewable diff.
+3. **Step 5 explicitly an I-note, not an R-note.** Schema-ownership
+   compares prices-api-internal options against external BE
+   constraints — fits the "idea/options" prefix rather than
+   "research" per the lore note-prefix guide.
+
+### Emerged
+
+4. **"ClickHouse on horizon" disambiguation up-front via
+   `AskUserQuestion`.** The user's framing had three plausible
+   readings (Hetzner / future-planned / specific host named
+   horizon); confirmed BE's Hetzner CH before drafting the task.
+   The disambiguation shaped the whole task scope.
+5. **Synthesis includes a "working hypotheses" consolidation
+   table** (`S-refactor-recommendation.md` §2). Wasn't in the
+   plan; added because the 16 working hypotheses spread across
+   the six R/I-notes were hard to see in aggregate. The table
+   doubles as the implementation-task spec.
+6. **Did not produce the optional `G-prices-init-sql.md`.** The
+   DDL choice (CH-B per-source rows, MV chain, per-granularity
+   tables) is locked in via the synthesis, but the literal
+   `init.sql` lives best in the implementation task once the
+   schema-ownership Option 1 buy-in is confirmed. Pre-writing
+   DDL before that conversation risks churn. Surfaced as
+   "spawn opportunistically" in synthesis §5.3 rather than
+   landed here.
+7. **Spawned only 2 follow-ups** (ADR 0007 + task 0045), not
+   the full §5.1 list. Rewrites of 0011/0038/0039/0040 are
+   gated on ADR 0007's acceptance; spawning blocked-on-blocked
+   chains creates noise. The "spawn opportunistically" list
+   (schema applier, design-doc update) similarly waits for
+   the ADR.
+8. **Added history entries (not full rewrites) to the four
+   affected blocked tasks** rather than rewriting their specs.
+   Cross-team conversation may meaningfully change the shape
+   (e.g. if BE refuses Option 1, falls back to Option 4
+   sidecar CH); rewriting against a design that might shift
+   is premature churn.
+9. **Force-pushed develop after step 7** to move the 7 research
+   commits from develop to a feature branch (`lore-0044-research`)
+   and open PR #20. Pushing research content directly to develop
+   was a mistake — `/promote-task` says push status-only changes
+   to develop; research content should go through PR review.
+   Force-push with `--force-with-lease` was safe given solo
+   work on the repo.
+
+## Issues Encountered
+
+- **Pushed step commits directly to develop initially.** Extended
+  the `/promote-task` "push status changes direct to develop"
+  convention beyond its actual scope. Resolved by force-pushing
+  develop back to the activation commit (94c9a32) and moving
+  the 7 research commits to branch `lore-0044-research` for PR
+  review. Not a regression — the develop history was rewritten
+  cleanly with `--force-with-lease`.
+- **"ClickHouse on horizon" ambiguous.** Could have meant Hetzner
+  (typo/dictation slip), "on the horizon" (future-planned), or a
+  specific host. Resolved up-front with one `AskUserQuestion`
+  call before drafting the task. Saved a likely scope rewrite
+  later.
+
+## Future Work
+
+All future work has been spawned as concrete artifacts — none left
+as prose:
+
+- **ADR 0007** — `live-data-sink-on-shared-hetzner-clickhouse`
+  (proposed). Captures this synthesis as the architectural
+  commitment. Status → accepted after the cross-team conversation
+  closes.
+- **Task 0045** — `cross-team-bundle-with-be-on-hetzner-ch-tenancy`
+  (backlog). Drives the four BE-conversation clusters from
+  `S-refactor-recommendation.md` §4 to written commitments.
+- **Rewrites of blocked tasks 0011 / 0038 / 0039 / 0040** — not
+  yet spawned. Each has a history entry pointing here as the
+  redesign source. Rewrite-in-place when both gating conditions
+  clear: (a) BE Hetzner CH ships (BE tasks 0216 + 0227 close),
+  (b) ADR 0007 transitions from proposed → accepted.
+- **Schema migration applier** + **design-doc update task** —
+  noted in synthesis §5.3 as "spawn opportunistically" once
+  ADR 0007 is accepted.
+- **Optional `G-prices-init-sql.md`** — the literal `init.sql`
+  for `prices.*` plus the MV chain. Deliberately deferred to
+  the implementation task per Design Decision #6.
 
 ## Notes
 
@@ -266,3 +380,11 @@ them or escalates them to a cross-team decision.
   are not unilateral.
 - This is a successor in spirit to 0009. The matrix-and-options
   format from 0009's `notes/` is a good template — reuse it.
+
+## Open Questions — superseded
+
+The 5 initial open questions were answered or absorbed into the
+research. The full set of 28 questions raised across steps 1–6
+was consolidated into the 4 BE-conversation clusters in
+`notes/S-refactor-recommendation.md` §4 and forwarded to **task
+0045** (`cross-team-bundle-with-be-on-hetzner-ch-tenancy`).

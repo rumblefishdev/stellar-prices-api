@@ -36,6 +36,18 @@ history:
       Secrets Manager CDK scaffolding; 0038 must be producing
       `price_ohlcv` rows before the periodic workers have
       useful input. Promote only once both are archived.
+  - date: 2026-05-18
+    status: blocked
+    who: okarcz
+    note: >
+      Redesign pending. Task 0044's research (synthesis §3) and
+      ADR 0007 (proposed) call for major rewrite — the OHLCV
+      Rollup Lambda is **deleted entirely** (replaced by a CH
+      MaterializedView chain `1m → 15m → ... → 1M`); Current
+      Price Updater, Oracle Fetcher, Asset Discovery, Cleanup
+      Worker retargeted from RDS to ClickHouse. Cleanup becomes
+      `ALTER TABLE … DROP PARTITION` per per-granularity table.
+      Hold rewrite until ADR 0007 accepted.
 ---
 
 # Prices periodic workers — 5 EventBridge-Scheduler-triggered Lambdas
