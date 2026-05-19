@@ -160,9 +160,15 @@ Asks (from synthesis §4.4):
 
 ## Artifacts in this task
 
-- `notes/G-be-conversation-brief.md` — single-bundle brief to send
-  to BE. 13 asks across the four clusters, with proposed numbers,
-  fallbacks, and an outcome-tracking table. Draft; review internally
-  before sending.
-- `notes/G-be-agreement-record.md` — (not yet created) the outcome
-  record once BE responds. Populated from the §7 table in the brief.
+- `notes/G-be-conversation-brief.md` — single-bundle brief to BE.
+  13 asks across the four clusters, with proposed numbers, fallbacks,
+  and an outcome-tracking table. Sent.
+- `notes/G-be-agreement-record.md` — BE's responses to the brief.
+  10 yes / 0 no / 3 TBD (B6 spawns 0047; B7 + D12 pending). Records
+  what unblocks now vs. what stays gated.
+
+## Follow-up tasks spawned
+
+- **0047** — Cross-tenant throughput verification on shared Hetzner
+  CH. Final gate on ADR 0007 transitioning `proposed → accepted`.
+  Spawned from B6 TBD.
