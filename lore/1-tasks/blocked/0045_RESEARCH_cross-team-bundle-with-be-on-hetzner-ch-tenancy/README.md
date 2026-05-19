@@ -41,6 +41,18 @@ history:
       to BE. 0046 produces them from a 10k-ledger sample. Unblock
       0045 once 0046 closes and update the brief's Cluster B/D
       asks with the empirical figures.
+  - date: 2026-05-19
+    status: blocked
+    who: okarcz
+    by: ["0047"]
+    note: >
+      Blocker re-targeted. 0046 closed (empirical numbers landed,
+      brief updated, BE responded). Now blocked on 0047 — cross-
+      tenant throughput verification, spawned from the BE
+      agreement record's Cluster B6 TBD. ADR 0007 stays `proposed`
+      until 0047 closes GREEN or YELLOW. Cluster B7 (Borg cadence)
+      and D12 (cost-share number) are soft TBDs handled in-line
+      with BE once 0047 resolves.
 ---
 
 # Cross-team bundle with BE: settle Hetzner CH tenancy, fan-out, capacity, certs, cost-share
@@ -157,3 +169,18 @@ Asks (from synthesis §4.4):
 - Coordinate scheduling against BE tasks 0216 + 0227. If 0227
   is still in flight, some Cluster B asks (e.g. final Caddy
   settings) may need to wait for the Ansible playbook to land.
+
+## Artifacts in this task
+
+- `notes/G-be-conversation-brief.md` — single-bundle brief to BE.
+  13 asks across the four clusters, with proposed numbers, fallbacks,
+  and an outcome-tracking table. Sent.
+- `notes/G-be-agreement-record.md` — BE's responses to the brief.
+  10 yes / 0 no / 3 TBD (B6 spawns 0047; B7 + D12 pending). Records
+  what unblocks now vs. what stays gated.
+
+## Follow-up tasks spawned
+
+- **0047** — Cross-tenant throughput verification on shared Hetzner
+  CH. Final gate on ADR 0007 transitioning `proposed → accepted`.
+  Spawned from B6 TBD.
