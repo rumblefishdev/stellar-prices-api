@@ -25,6 +25,17 @@ history:
       backed by a 10k uniform sample of the local backfill CH
       (ledgers 62019999–62079982; 47.5M total events). Output is
       the G-note `notes/G-soroban-events-pricing-decoder.md`.
+  - date: 2026-05-19
+    status: active
+    who: okarcz
+    note: >
+      Extended G-note §11 with a full-table verification and a
+      worked example: USDC/XLM Phoenix pool CA6PUJLB…ICCJBE,
+      trade tx 928D46DD…7943AC at ledger 62079996, deriving XLM
+      current_price = 0.151394 USDC from a single soroban_events
+      row through the decoder → bucketer → Current Price Updater
+      chain. Confirms the table is sufficient for pricing
+      end-to-end across all 47.5M rows.
 ---
 
 # Soroban events pricing decoder spec
@@ -118,23 +129,26 @@ Per signature, document:
 
 ## Acceptance Criteria
 
-- [ ] `notes/G-soroban-events-pricing-decoder.md` exists and covers:
-  - [ ] Empirical 10k-sample signature distribution.
-  - [ ] Per-signature decoder rules with field-level mapping to
+- [x] `notes/G-soroban-events-pricing-decoder.md` exists and covers:
+  - [x] Empirical 10k-sample signature distribution.
+  - [x] Per-signature decoder rules with field-level mapping to
         `price_ohlcv` columns.
-  - [ ] Cross-event correlation (`trade` + `update_reserves` +
+  - [x] Cross-event correlation (`trade` + `update_reserves` +
         `transfer` join recipe).
-  - [ ] Explicit "NOT in soroban_events" section for classic SDEX
+  - [x] Explicit "NOT in soroban_events" section for classic SDEX
         and classic LP, with pointers to `operations_appearances`
         / `LedgerCloseMeta.OperationResult.ClaimAtom`.
-  - [ ] Per-protocol contract catalog: Soroswap router, CLMM,
+  - [x] Per-protocol contract catalog: Soroswap router, CLMM,
         Phoenix-style.
-  - [ ] Lambda E2E spec aligned with ADR 0007 (mTLS, no VPC, CH
+  - [x] Lambda E2E spec aligned with ADR 0007 (mTLS, no VPC, CH
         sink, SNS fan-out).
-  - [ ] Edge-cases section: NULL signatures, three swap shapes,
+  - [x] Edge-cases section: NULL signatures, three swap shapes,
         REDSTONE bytes-decode, ReplacingMergeTree FINAL.
-- [ ] G-note cross-linked from `0038` and `ADR 0007`.
-- [ ] Index regenerated.
+  - [x] §11 worked example: full-table verification + USDC/XLM
+        Phoenix trade decoded end-to-end through bucketer to
+        `tokens.current_price`.
+- [x] G-note cross-linked from `0038` and `ADR 0007`.
+- [x] Index regenerated.
 
 ## Out of scope
 
