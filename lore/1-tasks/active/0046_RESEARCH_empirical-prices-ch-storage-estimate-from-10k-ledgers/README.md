@@ -129,8 +129,8 @@ Cost output:
 
 ## Acceptance Criteria
 
-- [ ] `notes/G-empirical-storage-estimate.md` — single report with: methodology, per-event-class counts (10k sample), row-size table, extrapolation to year 1 / year 5 / 3 growth scenarios, Hetzner tier match, USD/EUR monthly + yearly cost.
-- [ ] `scripts/sizing/` — the small Rust/script tool used to produce the numbers, with a one-liner reproduction command in the report.
+- [x] `notes/G-empirical-storage-estimate.md` — landed. Methodology, per-event counts (Phase A 1,654-ledger reference + Phase B 10k-ledger primary), measured CH compression on `soroban_events`, row-generation model, year-1/5/10 extrapolations × 5 growth scenarios, Hetzner tier match (AX41-NVMe → AX102), USD/EUR pro-rata cost.
+- [~] `scripts/sizing/` — not a separate directory; reproduction commands documented inline in §8 of the report (backfill-runner + curl queries). No bespoke Rust script needed; BE's `backfill-runner` + `clickhouse-client` cover the workflow.
 - [ ] Cross-link the report from task 0045's `notes/G-be-conversation-brief.md` Cluster B (capacity) and Cluster D (cost-share) so the brief carries real numbers when it goes to BE.
 - [ ] Update task 0044's `R-cost-delta.md` §6 with a history-entry footnote pointing at this report as the empirical basis, or supersede the 5-10% number outright.
 - [ ] **Reproducible**: another engineer can re-run the script on any backfill directory + get a matching report.
