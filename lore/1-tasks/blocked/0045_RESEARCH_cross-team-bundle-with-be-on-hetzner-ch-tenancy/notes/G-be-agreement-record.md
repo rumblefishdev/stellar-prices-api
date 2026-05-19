@@ -9,7 +9,7 @@ links:
   - "./G-be-conversation-brief.md"
   - "../README.md"
   - "../../../../2-adrs/0007_live-data-sink-on-shared-hetzner-clickhouse.md"
-  - "../../../active/0046_RESEARCH_empirical-prices-ch-storage-estimate-from-10k-ledgers/notes/G-empirical-storage-estimate.md"
+  - "../../../archive/0046_RESEARCH_empirical-prices-ch-storage-estimate-from-10k-ledgers/notes/G-empirical-storage-estimate.md"
 history:
   - date: 2026-05-19
     status: developing

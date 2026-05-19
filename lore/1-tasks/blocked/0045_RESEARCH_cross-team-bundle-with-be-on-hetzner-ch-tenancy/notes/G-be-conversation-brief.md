@@ -49,7 +49,7 @@ interdependent.
 10,000-ledger mainnet sample (~13.9 hours of activity, 8.75M events);
 prices-api writes **~74 bytes/ledger** → **~0.45 GB/year at current
 mainnet activity** (full report in
-[`G-empirical-storage-estimate.md`](../../../active/0046_RESEARCH_empirical-prices-ch-storage-estimate-from-10k-ledgers/notes/G-empirical-storage-estimate.md)).
+[`G-empirical-storage-estimate.md`](../../../archive/0046_RESEARCH_empirical-prices-ch-storage-estimate-from-10k-ledgers/notes/G-empirical-storage-estimate.md)).
 Even at 30× growth over 10 years we sit under 140 GB. The conversation
 is about goodwill and round numbers, not infrastructure.
 
@@ -142,7 +142,7 @@ the research note.)
 > bytes/ledger). Even at 30× growth over 10 years we sit under 140 GB.
 > Storage and retention are non-issues; the only real capacity
 > concern is connection-layer (Caddy keepalive). Full numbers in
-> [`G-empirical-storage-estimate.md`](../../../active/0046_RESEARCH_empirical-prices-ch-storage-estimate-from-10k-ledgers/notes/G-empirical-storage-estimate.md).
+> [`G-empirical-storage-estimate.md`](../../../archive/0046_RESEARCH_empirical-prices-ch-storage-estimate-from-10k-ledgers/notes/G-empirical-storage-estimate.md).
 
 **Ask 4.** Hetzner box hardware specs + your monthly Hetzner invoice
 amount (server + Storage Box + traffic, if any). We need this to
@@ -213,7 +213,7 @@ and we'd rather not.
 
 > **Empirical basis (new):** We measured prices-api's storage / row /
 > CPU share against a 10k-ledger mainnet sample (full report in
-> [`G-empirical-storage-estimate.md`](../../../active/0046_RESEARCH_empirical-prices-ch-storage-estimate-from-10k-ledgers/notes/G-empirical-storage-estimate.md)):
+> [`G-empirical-storage-estimate.md`](../../../archive/0046_RESEARCH_empirical-prices-ch-storage-estimate-from-10k-ledgers/notes/G-empirical-storage-estimate.md)):
 >
 > - Storage share: **~1.1% at current activity, ~10% at 10× scale**
 > - Row share: **~1.5% at current, ~10% at 10× scale**
@@ -292,7 +292,7 @@ written follow-ups. We do not start any rewrites of tasks 0011 / 0038
 
 Linked for context, not required reading:
 
-- **Empirical capacity / cost estimate (load-bearing for Cluster B/D):** ../../../active/0046_RESEARCH_empirical-prices-ch-storage-estimate-from-10k-ledgers/notes/G-empirical-storage-estimate.md
+- **Empirical capacity / cost estimate (load-bearing for Cluster B/D):** ../../../archive/0046_RESEARCH_empirical-prices-ch-storage-estimate-from-10k-ledgers/notes/G-empirical-storage-estimate.md
 - Task 0044 synthesis: ../../../archive/0044_RESEARCH_refactor-architecture-shared-galexie-hetzner-clickhouse/notes/S-refactor-recommendation.md
 - Why a separate database (Option 1): ../../../archive/0044_RESEARCH_refactor-architecture-shared-galexie-hetzner-clickhouse/notes/I-schema-ownership-options.md
 - Why SNS fan-out (Shape B): ../../../archive/0044_RESEARCH_refactor-architecture-shared-galexie-hetzner-clickhouse/notes/R-stellar-peers-galexie-live-feed.md §6
