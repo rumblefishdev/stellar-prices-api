@@ -157,3 +157,12 @@ Asks (from synthesis §4.4):
 - Coordinate scheduling against BE tasks 0216 + 0227. If 0227
   is still in flight, some Cluster B asks (e.g. final Caddy
   settings) may need to wait for the Ansible playbook to land.
+
+## Artifacts in this task
+
+- `notes/G-be-conversation-brief.md` — single-bundle brief to send
+  to BE. 13 asks across the four clusters, with proposed numbers,
+  fallbacks, and an outcome-tracking table. Draft; review internally
+  before sending.
+- `notes/G-be-agreement-record.md` — (not yet created) the outcome
+  record once BE responds. Populated from the §7 table in the brief.
