@@ -2,12 +2,12 @@
 id: "0045"
 title: "Cross-team bundle with BE: settle Hetzner CH tenancy, fan-out, capacity, certs, cost-share"
 type: RESEARCH
-status: backlog
+status: active
 related_adr: ["0007"]
 related_tasks: ["0044", "0011", "0038", "0039", "0040"]
 tags: [layer-research, priority-high, effort-medium, coordination, block-explorer, hetzner, clickhouse, cross-team]
 links:
-  - "../active/0044_RESEARCH_refactor-architecture-shared-galexie-hetzner-clickhouse/notes/S-refactor-recommendation.md"
+  - "../archive/0044_RESEARCH_refactor-architecture-shared-galexie-hetzner-clickhouse/notes/S-refactor-recommendation.md"
   - "../../2-adrs/0007_live-data-sink-on-shared-hetzner-clickhouse.md"
   - "../../../../soroban-block-explorer/lore/1-tasks/active/0216_RESEARCH_hetzner-clickhouse-deploy/README.md"
   - "../../../../soroban-block-explorer/lore/1-tasks/active/0227_FEATURE_infra-hetzner-ansible-playbook.md"
@@ -22,6 +22,13 @@ history:
       blocked tasks 0011/0038/0039/0040 can be sequenced. Mostly
       coordination work, not engineering — calendar time depends
       on BE responsiveness.
+  - date: 2026-05-19
+    status: active
+    who: okarcz
+    note: >
+      Promoted to active. Task 0044 closed and merged to develop
+      (PR #20, squash commit ba6cfa4). Starting the cross-team
+      bundle work on a dedicated branch.
 ---
 
 # Cross-team bundle with BE: settle Hetzner CH tenancy, fan-out, capacity, certs, cost-share
