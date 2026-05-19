@@ -2,7 +2,7 @@
 id: "0045"
 title: "Cross-team bundle with BE: settle Hetzner CH tenancy, fan-out, capacity, certs, cost-share"
 type: RESEARCH
-status: active
+status: blocked
 related_adr: ["0007"]
 related_tasks: ["0044", "0011", "0038", "0039", "0040"]
 tags: [layer-research, priority-high, effort-medium, coordination, block-explorer, hetzner, clickhouse, cross-team]
@@ -29,6 +29,18 @@ history:
       Promoted to active. Task 0044 closed and merged to develop
       (PR #20, squash commit ba6cfa4). Starting the cross-team
       bundle work on a dedicated branch.
+  - date: 2026-05-19
+    status: blocked
+    who: okarcz
+    by: ["0046"]
+    note: >
+      Moved to blocked pending 0046's empirical capacity / cost
+      numbers. The BE conversation brief (drafted on PR #21) lands
+      hand-waved 5-10% pro-rata stance for Cluster D cost-share
+      and Cluster B capacity; both need real numbers before going
+      to BE. 0046 produces them from a 10k-ledger sample. Unblock
+      0045 once 0046 closes and update the brief's Cluster B/D
+      asks with the empirical figures.
 ---
 
 # Cross-team bundle with BE: settle Hetzner CH tenancy, fan-out, capacity, certs, cost-share
