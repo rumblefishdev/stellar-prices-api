@@ -45,6 +45,14 @@ our Lambdas, our schema migrations, our cost-tracking. We are asking
 for **four things** below — a single bundle, because they are
 interdependent.
 
+**Capacity-wise, prices-api is a small tenant.** We measured against a
+10,000-ledger mainnet sample (~13.9 hours of activity, 8.75M events);
+prices-api writes **~74 bytes/ledger** → **~0.45 GB/year at current
+mainnet activity** (full report in
+[`G-empirical-storage-estimate.md`](../../../active/0046_RESEARCH_empirical-prices-ch-storage-estimate-from-10k-ledgers/notes/G-empirical-storage-estimate.md)).
+Even at 30× growth over 10 years we sit under 140 GB. The conversation
+is about goodwill and round numbers, not infrastructure.
+
 We expect a written outcome per cluster (accepted / counter / blocked).
 Once all four land, we promote ADR 0007 (proposed → accepted) and
 unblock our rewrites of tasks 0011 / 0038 / 0039 / 0040.
@@ -129,9 +137,17 @@ the research note.)
 
 ### 3.2 Cluster B — Capacity, retention, backup
 
+> **Framing:** Empirical measurement on a 10k-ledger mainnet sample
+> shows prices-api writes ~0.45 GB/year at current activity (~74
+> bytes/ledger). Even at 30× growth over 10 years we sit under 140 GB.
+> Storage and retention are non-issues; the only real capacity
+> concern is connection-layer (Caddy keepalive). Full numbers in
+> [`G-empirical-storage-estimate.md`](../../../active/0046_RESEARCH_empirical-prices-ch-storage-estimate-from-10k-ledgers/notes/G-empirical-storage-estimate.md).
+
 **Ask 4.** Hetzner box hardware specs + your monthly Hetzner invoice
 amount (server + Storage Box + traffic, if any). We need this to
-ground the capacity math and the cost-share conversation in §3.4.
+ground the cost-share conversation in §3.4. (Capacity is no longer
+the question — pro-rata is.)
 
 **Ask 5.** Confirm Caddy `max_keepalive_conns` has headroom for a
 second tenant's writers (we'd be adding ~6 Lambdas, mostly idle, with
@@ -146,7 +162,7 @@ mirror the S3 content into prices-api-owned storage.
 **Ask 7.** Add `BACKUP DATABASE prices` as a separate daily Borg
 target so prices-api can be restored independently of BE data (or in
 case of `prices.*`-only corruption). Same Storage Box; we are not
-asking for new infrastructure.
+asking for new infrastructure. Bytes-trivial (<1 GB/year).
 
 **Ask 8.** Confirm the backup RPO is **daily Borg granularity**
 (no PITR). This is acceptable for prices-api; surfacing as a heads-up
@@ -159,6 +175,11 @@ so it isn't a surprise later.
 small in-AWS write buffer (SQS) to smooth bursts. If `BACKUP DATABASE
 prices` is rejected, we'd take logical exports to S3 ourselves;
 non-blocking.
+
+**Retention policy: not in scope.** At <1 GB/year indefinite, we will
+not need a per-granularity retention policy for the foreseeable future
+(10+ years even at 30× growth). The design retains a `DROP PARTITION`
+code path as a no-op for safety.
 
 ---
 
@@ -190,21 +211,32 @@ and we'd rather not.
 
 ### 3.4 Cluster D — Money
 
-**Ask 12.** Cost-share. We open with a **5–10% pro-rata proposal**:
-~$3–$15/env/month, three envs, ~$10–$45/month total flowing to BE.
-Basis: our estimated share of storage rows (~5% steady state),
-ingress traffic (~5%), and CPU (~10% during MV chain runs).
+> **Empirical basis (new):** We measured prices-api's storage / row /
+> CPU share against a 10k-ledger mainnet sample (full report in
+> [`G-empirical-storage-estimate.md`](../../../active/0046_RESEARCH_empirical-prices-ch-storage-estimate-from-10k-ledgers/notes/G-empirical-storage-estimate.md)):
+>
+> - Storage share: **~1.1% at current activity, ~10% at 10× scale**
+> - Row share: **~1.5% at current, ~10% at 10× scale**
+> - CPU share: **~5% at current, ~10% at 10× scale** (MV chain + writes)
+> - Blended central: **~1-2% flat, ~7-10% at 10× scale**
+
+**Ask 12.** Cost-share. We open with a **~1-2% pro-rata proposal at
+current activity**: ~**$1-2/env/month**, three envs, **~$3-6/month**
+total flowing to BE. Basis: empirical measurement above.
 
 **Stance:**
 
 - We are happy to pay the pro-rata number above.
-- We are happy with a **flat fee up to ~$15/env/month** for simplicity.
+- We are happy with a **flat fee up to ~$5/env/month** for simplicity
+  (a 2-3× premium over central pro-rata that absorbs scale risk for
+  BE while staying well below the 10×-scale ceiling).
 - We are happy with a **free ride** if you offer it — both sides
   win on at-scale savings vs. the dedicated-RDS counterfactual (we're
   saving ~$6.9k/year at scale, of which we'd happily kick back a
   meaningful slice).
-- Re-open the conversation if production scale materially shifts
-  (10× rows, traffic, or CPU).
+- **Re-open clause: if production scale materially shifts (10× rows,
+  traffic, or CPU), the pro-rata band moves to ~7-10% / $5-7/env/mo.**
+  We commit to a re-open at that point.
 
 **Ask 13.** Agree on **how the money actually moves** — internal cost
 allocation, monthly invoice, or zero-flow with a written acknowledgment?
@@ -212,8 +244,10 @@ We do not have a preference; whatever your finance side prefers.
 
 **What we need from you:** a number (or "free ride") + a mechanism.
 
-**Fallback if blocked:** if the cost ask sticks at >$20/env/month
-flat, we'd re-evaluate the sidecar-CH path. Unlikely to come to that.
+**Fallback if blocked:** if the cost ask sticks at >$10/env/month
+flat at current scale, we'd re-evaluate the sidecar-CH path. Highly
+unlikely to come to that — the empirical numbers leave plenty of
+headroom for a generous flat fee.
 
 ---
 
@@ -258,11 +292,12 @@ written follow-ups. We do not start any rewrites of tasks 0011 / 0038
 
 Linked for context, not required reading:
 
+- **Empirical capacity / cost estimate (load-bearing for Cluster B/D):** ../../../active/0046_RESEARCH_empirical-prices-ch-storage-estimate-from-10k-ledgers/notes/G-empirical-storage-estimate.md
 - Task 0044 synthesis: ../../../archive/0044_RESEARCH_refactor-architecture-shared-galexie-hetzner-clickhouse/notes/S-refactor-recommendation.md
 - Why a separate database (Option 1): ../../../archive/0044_RESEARCH_refactor-architecture-shared-galexie-hetzner-clickhouse/notes/I-schema-ownership-options.md
 - Why SNS fan-out (Shape B): ../../../archive/0044_RESEARCH_refactor-architecture-shared-galexie-hetzner-clickhouse/notes/R-stellar-peers-galexie-live-feed.md §6
 - mTLS + Secrets Manager + `OnceCell`: ../../../archive/0044_RESEARCH_refactor-architecture-shared-galexie-hetzner-clickhouse/notes/R-aws-hetzner-auth-network.md
-- Cost basis for the 5-10% pro-rata number: ../../../archive/0044_RESEARCH_refactor-architecture-shared-galexie-hetzner-clickhouse/notes/R-cost-delta.md
+- Initial (hand-waved) cost basis — **superseded by the empirical report above**: ../../../archive/0044_RESEARCH_refactor-architecture-shared-galexie-hetzner-clickhouse/notes/R-cost-delta.md
 - Architectural commitment (proposed): ../../../../2-adrs/0007_live-data-sink-on-shared-hetzner-clickhouse.md
 
 ---
