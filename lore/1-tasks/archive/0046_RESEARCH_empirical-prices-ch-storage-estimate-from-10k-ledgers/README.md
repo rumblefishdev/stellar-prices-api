@@ -2,12 +2,12 @@
 id: "0046"
 title: "Empirical prices-api CH storage estimate from 10k mainnet ledgers — extrapolate to Hetzner server + monthly/yearly cost"
 type: RESEARCH
-status: active
+status: completed
 related_adr: ["0007"]
-related_tasks: ["0045", "0044"]
+related_tasks: ["0045", "0044", "0047"]
 tags: [layer-research, priority-high, effort-medium, hetzner, clickhouse, sizing, cost, capacity]
 links:
-  - "./0045_RESEARCH_cross-team-bundle-with-be-on-hetzner-ch-tenancy/notes/G-be-conversation-brief.md"
+  - "../blocked/0045_RESEARCH_cross-team-bundle-with-be-on-hetzner-ch-tenancy/notes/G-be-conversation-brief.md"
   - "../../2-adrs/0007_live-data-sink-on-shared-hetzner-clickhouse.md"
   - "../archive/0044_RESEARCH_refactor-architecture-shared-galexie-hetzner-clickhouse/notes/R-cost-delta.md"
   - "../archive/0044_RESEARCH_refactor-architecture-shared-galexie-hetzner-clickhouse/notes/R-ingest-target-mapping.md"
@@ -31,6 +31,22 @@ history:
       Promoted to active immediately on creation. Blocking 0045
       closure on the empirical capacity / cost numbers, so no
       time spent sitting in backlog.
+  - date: 2026-05-19
+    status: completed
+    who: okarcz
+    note: >
+      Closed. Backfilled 10k ledgers (62070000-62079999, 8.75M events)
+      from BE's mainnet sample into local ClickHouse via BE's
+      backfill-runner. Measured per-signature event rates and per-
+      column compression on soroban_events (14.8x ratio).
+      Headline: prices-api stores ~74 bytes/ledger, ~0.45 GB/year
+      flat growth — order of magnitude smaller than the 0044
+      hand-waved 5-10% pro-rata estimate. Updates fed into the
+      brief (task 0045) shifting Cluster D opening to ~1-2% / $1-2
+      per env per month, and Cluster B retention concern dropped.
+      Report at notes/G-empirical-storage-estimate.md (PR #22,
+      merged as ae0bc6b). Throughput/concurrency verification
+      (not in scope here) spawned as task 0047.
 ---
 
 # Empirical prices-api CH storage estimate from 10k mainnet ledgers
@@ -131,9 +147,25 @@ Cost output:
 
 - [x] `notes/G-empirical-storage-estimate.md` — landed. Methodology, per-event counts (Phase A 1,654-ledger reference + Phase B 10k-ledger primary), measured CH compression on `soroban_events`, row-generation model, year-1/5/10 extrapolations × 5 growth scenarios, Hetzner tier match (AX41-NVMe → AX102), USD/EUR pro-rata cost.
 - [~] `scripts/sizing/` — not a separate directory; reproduction commands documented inline in §8 of the report (backfill-runner + curl queries). No bespoke Rust script needed; BE's `backfill-runner` + `clickhouse-client` cover the workflow.
-- [ ] Cross-link the report from task 0045's `notes/G-be-conversation-brief.md` Cluster B (capacity) and Cluster D (cost-share) so the brief carries real numbers when it goes to BE.
-- [ ] Update task 0044's `R-cost-delta.md` §6 with a history-entry footnote pointing at this report as the empirical basis, or supersede the 5-10% number outright.
-- [ ] **Reproducible**: another engineer can re-run the script on any backfill directory + get a matching report.
+- [x] Cross-link the report from task 0045's `notes/G-be-conversation-brief.md` Cluster B (capacity) and Cluster D (cost-share) — done on PR #21 commit 982ba25. Brief's Cluster D opening shifted from 5-10% to ~1-2% pro-rata; Cluster B retention concern dropped.
+- [~] Update task 0044's `R-cost-delta.md` §6 — deferred. The synthesis note already references 0046; the cost-delta note is in archive and refactoring its §6 would be cosmetic. The brief + agreement record are the load-bearing documents.
+- [x] **Reproducible**: §8 of the report documents the full command sequence. Re-runs against any 10k-ledger window in ~7-8 minutes wall-clock.
+
+## Implementation notes
+
+- Local docker-compose ClickHouse was reset before this work; the JSONL samples in `lore/4-notes/samples/soroban-events/` represented a prior 1.65k-ledger run. The fresh 10k-window backfill (62070000-62079999) was the primary data source; 1.65k window stayed as a reference for comparison.
+- The 1.65k reference window showed ~30% higher trading activity than the 10k average — temporal trading-hour bias. Confirmed by Phase A vs. Phase B side-by-side in §2.2.
+- Per-column compression measurement on `soroban_events` was the biggest single insight: 14.8× ratio vs. the 3× assumed in the initial draft. Drove the per-row size estimate from ~95 bytes to ~55 bytes for `price_ohlcv_1m`.
+
+## Design decisions (emerged)
+
+- **Scoped strictly to storage / row volume.** Throughput, concurrent-query load, CPU contention from MV chain — all explicitly out of scope here; surfaced as task 0047.
+- **Per-source rows (CH-B) for `price_ohlcv_1m` is the modeled shape.** Compaction reduction was empirically modest (~10%) because event distribution across distinct (pool, minute) buckets is sparse — most events fall in unique buckets.
+
+## Future work / spawned
+
+- **Task 0047** — Cross-tenant throughput verification (spawned from task 0045's BE agreement record, not from this task directly, but informed by this task's exclusion of throughput from scope).
+- BE could publish their measured `default.*` compression ratio and storage rate for a true measured pro-rata fraction (this task used estimated denominators).
 
 ## Out of scope
 
