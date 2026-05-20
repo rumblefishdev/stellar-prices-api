@@ -49,6 +49,17 @@ history:
       clear: (1) BE Hetzner CH ships, (2) ADR 0007 accepted
       (gated on task 0045). Do not start implementation against
       this spec.
+  - date: 2026-05-19
+    status: blocked
+    who: okarcz
+    note: >
+      Decoder + Lambda E2E spec landed in task 0048's G-note
+      (`lore/1-tasks/active/0048_…/notes/G-soroban-events-pricing-decoder.md`).
+      Spec is grounded in a 10k uniform sample of the local
+      backfill CH and aligned with ADR 0007. When the
+      gating events clear, the rewrite implements 0048 directly
+      (not the §Implementation Plan in this file, which
+      assumed the RDS/VPC shape).
 ---
 
 # Prices Ledger Processor Lambda — live S3-event-driven ingestion into price_ohlcv
