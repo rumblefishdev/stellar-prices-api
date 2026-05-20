@@ -1,14 +1,17 @@
 ---
 id: "0049"
-title: "Rewrite docs/prices-api-general-overview.md to match ADR 0007 (Hetzner CH live sink)"
+title: "Rewrite design docs (overview + database-schema companion) to match ADR 0007 (Hetzner CH live sink)"
 type: DOCS
 status: completed
-related_adr: ["0007"]
+related_adr: ["0001", "0003", "0004", "0007"]
 related_tasks: ["0044", "0045", "0046", "0047", "0048", "0011", "0038", "0039", "0040"]
-tags: [layer-docs, priority-high, effort-medium, clickhouse, hetzner, overview, design-doc]
+tags: [layer-docs, priority-high, effort-medium, clickhouse, hetzner, overview, design-doc, database-schema, mermaid]
 links:
   - "../../../docs/prices-api-general-overview.md"
+  - "../../../docs/database-schema/database-schema-overview.md"
+  - "../../../docs/database-schema/amm-trades-schema.md"
   - "../../2-adrs/0007_live-data-sink-on-shared-hetzner-clickhouse.md"
+  - "../../2-adrs/0001_stream1-clickhouse-sourced-amm-backfill.md"
   - "../archive/0045_RESEARCH_cross-team-bundle-with-be-on-hetzner-ch-tenancy/notes/G-be-agreement-record.md"
   - "../archive/0046_RESEARCH_empirical-prices-ch-storage-estimate-from-10k-ledgers/notes/G-empirical-storage-estimate.md"
 history:
@@ -47,6 +50,53 @@ history:
       live-state RDS / NAT Gateway / OHLCV Rollup / sqlx
       references remain — only historical context in the
       Revision History and explicit "removed" callouts.
+  - date: 2026-05-20
+    status: active
+    who: okarcz
+    note: >
+      Reopened from archive. Scope expanded to cover the
+      `docs/database-schema/` companion folder, which the original
+      task did not include:
+      (a) `database-schema-overview.md` — 1540-line companion that
+          mirrors the main overview; describes RDS Postgres
+          throughout (66 RDS/Postgres refs, 0 ClickHouse, 14
+          mermaid blocks). Needs the same ADR 0007 alignment as
+          the main overview.
+      (b) `amm-trades-schema.md` — describes a now-obsolete
+          pre-ADR-0001 design (custom AMM trades table on BE's
+          RDS, supposedly created and populated by BE for the
+          prices-api backfill). Superseded by ADR 0001 (BE's
+          `backfill-runner --target=clickhouse` populating a local
+          CH copy of `soroban_events`); should be marked
+          superseded with a clear banner.
+      (c) `clickhouse-prod-schema.sql` — BE's `default.*`
+          production schema reference. Not prices-api's schema;
+          no change.
+      All Appendix A (ER diagram) and Appendix B (full system
+      diagram) mermaid blocks in `database-schema-overview.md`
+      need to flip from PostgreSQL types and partitioning to
+      ClickHouse engines and sort keys.
+      Title updated to reflect the expanded scope. Continues on
+      the lore-0049/overview-rewrite-adr-0007 branch (PR #26).
+  - date: 2026-05-20
+    status: completed
+    who: okarcz
+    note: >
+      Closed (expanded scope). All 12 + 18 acceptance criteria met
+      across the main overview rewrite (already committed in
+      d1ee0e5 / rebased as 20bb744 on PR #26) and the
+      database-schema/ companion rewrite landing in a follow-up
+      commit on the same branch. Companion file changes:
+      `amm-trades-schema.md` superseded banner added; full
+      `database-schema-overview.md` rewrite (1540 → 1906 lines,
+      net +366) covers all 13 main sections + Appendices A & B; all
+      14 mermaid blocks flipped to ClickHouse types, engines, sort
+      keys, MV chain, mTLS edge, and the workstation-local backfill
+      topology. Final grep verified no live-state RDS / sqlx /
+      PostgreSQL 16 / OHLCV Rollup / ECS Fargate references
+      remain in current-state text. Total work for the expanded
+      0049: main overview (788 +, 384 -) plus database-schema
+      (~1500 + with full rewrites of §3, §7, §8, §10, Appendix B).
 ---
 
 # Rewrite docs/prices-api-general-overview.md to match ADR 0007
@@ -117,6 +167,29 @@ History.
 - [x] No references to `db.t4g.micro`, `db.m6g.large`, `db.r6g.large`, RDS Proxy, Multi-AZ, or RDS read replica remain in current-state text. RDS occurrences in the body are either (a) explicit "removed" or "no longer" callouts, (b) historical Revision History rows describing prior states, or (c) the §2.3 paragraph documenting the obsolete table rows that previously existed
 - [x] §5.5 L1/L2/L3 VWAP layering callout is preserved unchanged (added by task 0048)
 - [x] Local backfill sections (Stream 1, Stream 2) preserve their ADR 0001 / ADR 0005 alignment; only the cloud-push target (RDS → Hetzner CH `prices.*`) and §5.6 metric table sink-during-backfill notes changed
+
+### Expanded scope (database-schema/ folder)
+
+- [x] `docs/database-schema/amm-trades-schema.md` carries a clear "SUPERSEDED" banner pointing at ADR 0001, ADR 0007, and BE ADRs 0044/0045
+- [x] `docs/database-schema/database-schema-overview.md` Revision History row added (2026-05-20, ADR 0007 driver)
+- [x] §1.1 / §1.2 mermaid diagrams show ClickHouse + SNS + mTLS Caddy edge, not RDS + direct S3
+- [x] §2 Database Tech Stack lists CH on Hetzner, `clickhouse` Rust crate, MV-chain rollups, mTLS — no PostgreSQL 16, no sqlx
+- [x] §3.0 ER overview mermaid block uses CH types (`Decimal_38_14`, `LowCardinality_S`, `FixedString12`) and shows engines / `PARTITION_BY` / `ORDER_BY` pseudo-rows; MV-chain edges between per-granularity OHLCV tables
+- [x] §3.1–§3.5 DDL rewritten to ClickHouse: per-granularity `price_ohlcv_*` tables on `ReplacingMergeTree(version)`, MV chain sketch, `prices.assets` / `current_prices` / `oracle_prices` / `backfill_progress` on appropriate engines
+- [x] §4 Retention is `ALTER TABLE … DROP PARTITION` per per-granularity table (not row DELETE)
+- [x] §5 Indexing reframed as "Sort Keys & Query Patterns" — CH sort key, partition pruning, projections-not-B-tree-indexes
+- [x] §6 Workers — OHLCV Rollup Lambda row removed; MV chain noted as the replacement; `ohlcv-rollup` EventBridge rule gone; `FINAL` and `argMax/argMin` noted on the readers table
+- [x] §7 Backfill — both streams' diagrams and metric tables reflect local CLIs + Hetzner CH push targets; `task_healthy` / `last_heartbeat` swapped for `last_push_at` everywhere; §7.6 example response uses the new field shape
+- [x] §8 Sizing — "RDS Sizing, Performance, Scaling" → "Sizing, Performance, Scaling (Hetzner ClickHouse, shared with BE)"; cross-cloud latency mitigation; sidecar-CH fallback; RDS escalation ladder removed
+- [x] §9 Security — mTLS sub-bullets added (per-env certs, 1-year rotation, CA revocation, NotAfter alarm); no-VPC framing; Borg RPO trade-off
+- [x] §10 Cross-Service Dependency — rewritten around Hetzner shared tenancy (ADR 0007), not BE-RDS read-only edge; mermaid block shows Hetzner box with `default.*` + `prices.*` co-tenancy, mTLS at Caddy
+- [x] §11 What Is Not Shared — RDS PostgreSQL instance row replaced with `prices.*` schema + onboarding portal rows
+- [x] §12 Tranche-1 DB Acceptance Criteria — flipped to ClickHouse / no-VPC / SNS / mTLS / push-cadence
+- [x] §13 Quick Reference — engine + sort-key + partition columns; one row per per-granularity table
+- [x] Appendix A (ER diagram) — full rewrite to CH types, engines, MV-chain edges, no SQL FKs
+- [x] Appendix B (full system diagram) — full rewrite: SNS bucket fan-out, mTLS edge, Hetzner box with shared CH (default.* + prices.*), workstation backfill subgraph (BE backfill-runner, local CH, local Postgres, cloud-push tools), MV chain dotted edges, push-freshness alarm
+- [x] Final grep on `database-schema-overview.md` shows no live-state RDS / sqlx / PostgreSQL 16 / OHLCV Rollup Lambda / ECS Fargate backfill references — only historical context, comparative-to-prior-design framing, and explicit "removed" callouts
+- [x] `clickhouse-prod-schema.sql` left as-is (BE's `default.*` reference, not prices-api's schema)
 
 ## Out of scope
 
