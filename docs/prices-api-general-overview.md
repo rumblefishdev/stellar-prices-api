@@ -720,6 +720,26 @@ the system setting.
 inter-source median. Sources deviating by more than a configurable percentage are excluded from
 that update cycle.
 
+#### Where this formula is implemented (layering)
+
+The §5.5 weighted-price formula is **not** computed by the ingestion path (Prices Ledger
+Processor / soroban-amm-backfill / sdex-backfill). It runs one layer up, in the **Current
+Price Updater Lambda** (`price-updater`, EventBridge rate(1 min) — see §5.3 row "Current Price
+Updater" and §5.4. Implementation tracked in lore task `0039_FEATURE_prices-periodic-workers-lambda-set`,
+Step 2).
+
+| Layer | Owner | Input | Formula | Output |
+|-------|-------|-------|---------|--------|
+| **L1 — Ingestion / decoding** | Prices Ledger Processor (live) + soroban-amm-backfill + sdex-backfill (historical) | Raw `LedgerCloseMeta` (SDEX) or decoded `soroban_events` swap/trade ticks | Per-tick price `(amount_bought / 10^dec_bought) / (amount_sold / 10^dec_sold)`; per-bucket `vwap = volume_quote / volume_base` | `price_ohlcv_1m` row **per (timestamp, asset, quote, source)** |
+| **L2 — Cross-source aggregation** | **Current Price Updater Lambda** | `price_ohlcv` rows summed over a trailing 24h window per source | **§5.5 formula** — `Σ(price × volume_24h) / Σ(volume_24h)` across sources, with outlier filter vs inter-source median | One row per `(asset, quote)` in `current_prices` |
+| **L3 — Read-time merging** | Rust/axum read handlers | `price_ohlcv` rows for a window | Per-ADR-0007 §3.3 `GROUP BY` across sources (mostly a SELECT helper, not a re-weighting) | API response |
+
+The decoder's per-source candle `vwap` (one minute, one source) and §5.5's cross-source
+weighted price (twenty-four hours, all sources) are different quantities by design — they
+solve different problems and live in different Lambdas. See lore task
+`0048_RESEARCH_soroban-events-pricing-decoder-spec` §3 for the decoder-layer definition and
+its rationale.
+
 ### 5.6 Historical All-Time Backfill Plan
 
 #### Scope and Two-Stream Design

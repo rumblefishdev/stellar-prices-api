@@ -198,6 +198,35 @@ ADR 0007 §3.3), not write-time. Re-INSERT of the same `(minute,
 asset, quote, source)` key collapses on `ReplacingMergeTree`
 merge — idempotent without UPSERT.
 
+#### Scope boundary — what the decoder does *not* compute
+
+The bucket-level `vwap = volume_quote / volume_base` defined above is a
+**single-source, single-minute** volume-weighted average. It is **not**
+the cross-source weighted price described in
+`docs/prices-api-general-overview.md` §5.5:
+
+```
+Weighted Price = Σ(source_price × source_volume_24h) / Σ(source_volume_24h)
+```
+
+That §5.5 formula is implemented one layer up, in the **Current Price
+Updater Lambda** (`price-updater`, EventBridge `rate(1 minute)`),
+specified in task
+[0039 — Step 2](../../../blocked/0039_FEATURE_prices-periodic-workers-lambda-set.md).
+It reads `price_ohlcv` candles produced by *this* decoder (per-source,
+per-minute), sums volumes over a trailing 24h window per source, weights
+each source's price by its 24h volume, applies the inter-source median
+outlier filter, and UPSERTs the result into `current_prices`.
+
+| Layer | Owner | Formula | Granularity |
+|-------|-------|---------|-------------|
+| L1 — decoding/bucketing (this spec) | Prices Ledger Processor + backfill CLIs | `vwap = volume_quote / volume_base` | 1 source × 1 minute |
+| L2 — cross-source current price | Current Price Updater Lambda (task 0039) | **§5.5 formula** above | all sources × trailing 24h |
+
+The decoder MUST NOT pre-compute the §5.5 weighted price: doing so
+would lose the per-source rows needed for ADR 0004's multi-source
+columns and ADR 0007 §3.3's read-time merge. Keep the layers strict.
+
 ---
 
 ## 4. Soroban AMM decoder rules
