@@ -2,7 +2,7 @@
 id: "0048"
 title: "Soroban events pricing decoder spec — what to extract from soroban_events for price_ohlcv, and how the Lambda implements it"
 type: RESEARCH
-status: active
+status: completed
 related_adr: ["0001", "0003", "0004", "0007"]
 related_tasks: ["0038", "0039", "0040", "0045", "0046", "0047"]
 tags: [layer-research, priority-high, effort-medium, stream-1, lambda, ingestion, clickhouse, decoder, pricing]
@@ -36,6 +36,20 @@ history:
       row through the decoder → bucketer → Current Price Updater
       chain. Confirms the table is sufficient for pricing
       end-to-end across all 47.5M rows.
+  - date: 2026-05-20
+    status: completed
+    who: okarcz
+    note: >
+      Spec closed and merged to develop via PR #23 (squash-merged at
+      8defb1a). Deliverable: G-note (1124 lines across 11 sections +
+      worked example) plus a 20-line layering subsection in
+      docs/prices-api-general-overview.md §5.5 pinning the
+      Σ(price×volume_24h)/Σ(volume_24h) weighted-price formula to
+      the Current Price Updater Lambda (task 0039 Step 2) and
+      forbidding pre-weighting at the L1 decoder layer.
+      All 9 acceptance criteria met. Implementation of the spec
+      itself moves through tasks 0038/0039/0040 once ADR 0007 is
+      accepted and task 0045's BE bundle closes.
 ---
 
 # Soroban events pricing decoder spec
@@ -149,6 +163,40 @@ Per signature, document:
         `tokens.current_price`.
 - [x] G-note cross-linked from `0038` and `ADR 0007`.
 - [x] Index regenerated.
+
+## Design Decisions
+
+### From Plan
+
+1. **Spec-only deliverable, no code.** Implementation deferred to
+   0038/0039/0040 once ADR 0007 is accepted and task 0045's BE
+   bundle closes. Keeps this task scope-tight and reviewable.
+
+2. **Empirical grounding via 10k uniform sample on the local
+   backfill CH.** Hash-bucketed sample
+   (`cityHash64(transaction_id, event_index, ledger_sequence) % N = K`)
+   over all 47.5M events. Better than head/tail slicing because it
+   smooths over time-of-day activity bursts.
+
+3. **Per-source × per-minute candles, no write-time cross-source
+   merge.** ADR 0004 + ADR 0007 §3.3 say merge is read-time. The
+   decoder writes one `price_ohlcv_1m` row per
+   `(timestamp, asset, quote, source)`.
+
+### Emerged
+
+4. **Layering callout added in PR review (commit f6dcf44).** The
+   word "VWAP" was used in two places — the decoder's bucket-level
+   `vwap = volume_quote / volume_base` (single-source, single-minute)
+   and `docs/prices-api-general-overview.md` §5.5's cross-source
+   weighted price `Σ(price × volume_24h) / Σ(volume_24h)`. A reader
+   asked whether the decoder applies the §5.5 formula. Answer: no,
+   by design — §5.5 lives in the Current Price Updater Lambda
+   (task 0039 Step 2). Added an L1/L2/L3 layering table to the
+   overview's §5.5 and a "Scope boundary" callout in the G-note §3
+   to make this explicit; the decoder MUST NOT pre-weight across
+   sources because doing so would defeat ADR 0004's multi-source
+   columns and ADR 0007 §3.3's read-time merge.
 
 ## Out of scope
 
