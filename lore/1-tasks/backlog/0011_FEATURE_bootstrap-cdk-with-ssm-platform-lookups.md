@@ -3,10 +3,13 @@ id: "0011"
 title: "Bootstrap Prices-owned CDK app with SSM-based platform lookups"
 type: FEATURE
 status: backlog
-related_adr: []
-related_tasks: ["0009", "0008"]
-tags: [layer-infra, priority-medium, effort-medium, infra, cdk, aws, shared-infra]
-links: []
+related_adr: ["0007"]
+related_tasks: ["0009", "0008", "0045", "0047"]
+tags: [layer-infra, priority-medium, effort-medium, infra, cdk, aws, shared-infra, clickhouse, hetzner]
+links:
+  - "../../2-adrs/0007_live-data-sink-on-shared-hetzner-clickhouse.md"
+  - "../archive/0045_RESEARCH_cross-team-bundle-with-be-on-hetzner-ch-tenancy/notes/G-be-agreement-record.md"
+  - "./0047_RESEARCH_cross-tenant-throughput-verification-on-shared-hetzner-ch.md"
 history:
   - date: 2026-05-11
     status: backlog
@@ -24,6 +27,19 @@ history:
       both gating events clear: (1) BE Hetzner CH ships, (2)
       ADR 0007 transitions proposed → accepted (gated on task
       0045). Do not start implementation against this spec.
+  - date: 2026-05-20
+    status: backlog
+    who: okarcz
+    note: >
+      ADR 0007 accepted via task 0045's closure. Architectural
+      uncertainty is gone — the rewrite shape is "no RDS, no
+      VPC, Secrets Manager mTLS material, IAM secretsmanager
+      scope". Remaining gates are engineering: BE 0227 (so the
+      Caddy address + cert issuance script are concrete) and
+      task 0047 (throughput verification — a RED outcome shifts
+      this task's CDK targets from BE's shared box to a
+      Prices-api-owned sidecar box, same code shape). Task
+      stays in backlog pending those two events.
 ---
 
 # Bootstrap Prices-owned CDK app with SSM-based platform lookups

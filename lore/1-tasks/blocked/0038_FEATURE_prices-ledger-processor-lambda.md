@@ -3,9 +3,9 @@ id: "0038"
 title: "Prices Ledger Processor Lambda — live S3-event-driven ingestion into price_ohlcv"
 type: FEATURE
 status: blocked
-related_adr: ["0001", "0003", "0004", "0005", "0006"]
-related_tasks: ["0011", "0037"]
-tags: [layer-indexing, priority-high, effort-large, stream-1, lambda, ingestion, rust, aws]
+related_adr: ["0001", "0003", "0004", "0005", "0006", "0007"]
+related_tasks: ["0011", "0037", "0045", "0047", "0048"]
+tags: [layer-indexing, priority-high, effort-large, stream-1, lambda, ingestion, rust, aws, clickhouse, hetzner]
 links:
   - "../../../docs/prices-api-general-overview.md"
   - "../../2-adrs/0001_stream1-clickhouse-sourced-amm-backfill.md"
@@ -13,8 +13,11 @@ links:
   - "../../2-adrs/0004_price-ohlcv-multi-source-merge-columns.md"
   - "../../2-adrs/0005_stream2-sdex-local-workstation-backfill.md"
   - "../../2-adrs/0006_runtime-framework-rust-axum.md"
+  - "../../2-adrs/0007_live-data-sink-on-shared-hetzner-clickhouse.md"
+  - "../archive/0045_RESEARCH_cross-team-bundle-with-be-on-hetzner-ch-tenancy/notes/G-be-agreement-record.md"
   - "../backlog/0011_FEATURE_bootstrap-cdk-with-ssm-platform-lookups.md"
   - "../backlog/0037_FEATURE_tranche1-ledger-processor-skeleton.md"
+  - "../backlog/0047_RESEARCH_cross-tenant-throughput-verification-on-shared-hetzner-ch.md"
 history:
   - date: 2026-05-18
     status: backlog
@@ -60,6 +63,19 @@ history:
       gating events clear, the rewrite implements 0048 directly
       (not the §Implementation Plan in this file, which
       assumed the RDS/VPC shape).
+  - date: 2026-05-20
+    status: blocked
+    who: okarcz
+    note: >
+      ADR 0007 accepted (PR closing task 0045 lands today; BE
+      agreement record at G-be-agreement-record.md is the
+      authoritative cross-team contract). The architectural
+      uncertainty is resolved; this task's blockers are now
+      strictly engineering: (a) BE 0227 ships the Hetzner mTLS
+      endpoint, (b) task 0047 verifies cross-tenant throughput
+      GREEN/YELLOW (a RED outcome supersedes ADR 0007 to the
+      sidecar-CH variant — same rewrite shape, different host).
+      Task stays blocked; rewrite begins once (a) and (b) clear.
 ---
 
 # Prices Ledger Processor Lambda — live S3-event-driven ingestion into price_ohlcv

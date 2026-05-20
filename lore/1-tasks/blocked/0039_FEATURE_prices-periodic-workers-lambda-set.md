@@ -3,15 +3,18 @@ id: "0039"
 title: "Prices periodic workers — 5 EventBridge-Scheduler-triggered Lambdas (price updater, rollup, oracle, discovery, cleanup)"
 type: FEATURE
 status: blocked
-related_adr: ["0003", "0004", "0006"]
-related_tasks: ["0011", "0038"]
-tags: [layer-indexing, priority-high, effort-large, lambda, scheduler, rust, aws, ingestion]
+related_adr: ["0003", "0004", "0006", "0007"]
+related_tasks: ["0011", "0038", "0045", "0047"]
+tags: [layer-indexing, priority-high, effort-large, lambda, scheduler, rust, aws, ingestion, clickhouse, hetzner]
 links:
   - "../../../docs/prices-api-general-overview.md"
   - "../../2-adrs/0003_price-ohlcv-pk-includes-quote-asset-id.md"
   - "../../2-adrs/0004_price-ohlcv-multi-source-merge-columns.md"
   - "../../2-adrs/0006_runtime-framework-rust-axum.md"
+  - "../../2-adrs/0007_live-data-sink-on-shared-hetzner-clickhouse.md"
+  - "../archive/0045_RESEARCH_cross-team-bundle-with-be-on-hetzner-ch-tenancy/notes/G-be-agreement-record.md"
   - "../backlog/0011_FEATURE_bootstrap-cdk-with-ssm-platform-lookups.md"
+  - "../backlog/0047_RESEARCH_cross-tenant-throughput-verification-on-shared-hetzner-ch.md"
   - "./0038_FEATURE_prices-ledger-processor-lambda.md"
 history:
   - date: 2026-05-18
@@ -48,6 +51,18 @@ history:
       Worker retargeted from RDS to ClickHouse. Cleanup becomes
       `ALTER TABLE … DROP PARTITION` per per-granularity table.
       Hold rewrite until ADR 0007 accepted.
+  - date: 2026-05-20
+    status: blocked
+    who: okarcz
+    note: >
+      ADR 0007 accepted via task 0045's closure (agreement record
+      at archive/0045_.../notes/G-be-agreement-record.md is the
+      cross-team contract). Architectural uncertainty resolved;
+      remaining gates are engineering: BE 0227 (Hetzner mTLS
+      endpoint) + task 0047 (throughput verification GREEN/YELLOW).
+      OHLCV Rollup Lambda confirmed deleted in the rewrite (per
+      ADR 0007 §3.4 — CH MV chain replaces it). Task stays
+      blocked; rewrite begins after 0038 lands.
 ---
 
 # Prices periodic workers — 5 EventBridge-Scheduler-triggered Lambdas

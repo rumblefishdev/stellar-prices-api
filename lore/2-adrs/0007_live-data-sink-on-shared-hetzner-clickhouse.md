@@ -1,14 +1,17 @@
 ---
 id: "0007"
 title: "Live data sink on shared Hetzner ClickHouse, not Prices-owned RDS Postgres"
-status: proposed
+status: accepted
 deciders: [okarcz]
-related_tasks: ["0044", "0045", "0011", "0017", "0038", "0039", "0040"]
+related_tasks: ["0044", "0045", "0046", "0047", "0011", "0017", "0038", "0039", "0040"]
 related_adrs: ["0001", "0003", "0004", "0005", "0006"]
 tags: [architecture, infrastructure, clickhouse, hetzner, shared-infra, block-explorer, data-sink, live-ingestion]
 links:
-  - "../1-tasks/active/0044_RESEARCH_refactor-architecture-shared-galexie-hetzner-clickhouse/README.md"
-  - "../1-tasks/active/0044_RESEARCH_refactor-architecture-shared-galexie-hetzner-clickhouse/notes/S-refactor-recommendation.md"
+  - "../1-tasks/archive/0044_RESEARCH_refactor-architecture-shared-galexie-hetzner-clickhouse/README.md"
+  - "../1-tasks/archive/0044_RESEARCH_refactor-architecture-shared-galexie-hetzner-clickhouse/notes/S-refactor-recommendation.md"
+  - "../1-tasks/archive/0045_RESEARCH_cross-team-bundle-with-be-on-hetzner-ch-tenancy/notes/G-be-agreement-record.md"
+  - "../1-tasks/archive/0046_RESEARCH_empirical-prices-ch-storage-estimate-from-10k-ledgers/notes/G-empirical-storage-estimate.md"
+  - "../1-tasks/backlog/0047_RESEARCH_cross-tenant-throughput-verification-on-shared-hetzner-ch.md"
   - "../../../soroban-block-explorer/docs/architecture/infrastructure/infrastructure-overview.md"
   - "../../../soroban-block-explorer/lore/2-adrs/0044_clickhouse-pilot-parallel-store.md"
   - "../../../soroban-block-explorer/lore/2-adrs/0045_clickhouse-local-backfill-then-mirror-to-hetzner-via-freeze-rsync-attach.md"
@@ -26,6 +29,41 @@ history:
       reverts to `superseded` if BE rejects Option 1 in §3 and
       drives a different shape (most likely the Option 4 sidecar CH
       from task 0044's I-note).
+  - date: 2026-05-20
+    status: accepted
+    who: okarcz
+    note: >
+      Transitioned proposed → accepted on the basis of task 0045's
+      agreement record (notes/G-be-agreement-record.md): 10 yes /
+      0 no / 3 TBD. Cluster A (architecture buy-in) all-yes locks
+      in the separate-`prices`-database shape, the SNS fan-out,
+      and the announcement-not-approval DDL norm. Cluster C
+      (auth) all-yes locks in per-env mTLS certs, 1-year manual
+      rotation, and CA-rotation revocation. Cluster B is mostly
+      yes — hardware/cost (B4), Caddy headroom (B5), Borg target
+      (B7), and daily RPO (B8) all accepted on the empirical basis
+      task 0046 established. Cluster D money mechanism (D13) yes.
+      Remaining items tracked as engineering follow-ups, not
+      architectural unknowns:
+      (a) Task 0047 (B6 throughput verification) is a hard
+          engineering gate before the implementation tasks
+          (0011/0038/0039/0040) can begin their rewrites. A RED
+          outcome would supersede this ADR via Alternative 3
+          (sidecar CH on the same Hetzner box).
+      (b) B7 Borg cadence (daily vs. weekly) is a soft operational
+          knob; daily is the recommendation pending BE
+          confirmation.
+      (c) D12 cost-share number is a soft commercial follow-up;
+          the brief's ~1-2% pro-rata stance (per task 0046's
+          empirical ~0.45 GB/yr footprint) is the proposal,
+          re-validated once BE's `default.*` lands on the
+          production box.
+      The original "BE Hetzner CH reaches production" gate (BE
+      tasks 0216 + 0227) is acknowledged still in flight on the
+      BE side; the architectural commitment does not wait on the
+      production cutover, but implementation work tied to that
+      cutover (mTLS endpoint, Caddy address, cert issuance) is
+      sequenced after BE 0227 lands.
 ---
 
 # ADR 0007: Live data sink on shared Hetzner ClickHouse, not Prices-owned RDS Postgres
@@ -112,14 +150,29 @@ cluster**, not a Prices-owned RDS Postgres. Specifically:
    in named `prices.*` views to keep the breakage surface
    narrow.
 
-The recommendation is **conditional go**: this decision is
-authoritative once two gating events clear:
+**Status: accepted (2026-05-20).** Task 0045's agreement record
+([G-be-agreement-record.md](../1-tasks/archive/0045_RESEARCH_cross-team-bundle-with-be-on-hetzner-ch-tenancy/notes/G-be-agreement-record.md))
+landed BE acceptance across the four agenda clusters (10 yes / 0
+no / 3 TBD; architectural shape locked via Cluster A all-yes).
+Engineering follow-ups before implementation can begin:
 
-- BE Hetzner ClickHouse reaches production (BE tasks 0216 + 0227
-  close).
-- Task 0045 produces written cross-team commitments with BE on
-  architecture buy-in, capacity / retention / backup, cert
-  issuance, and cost-share.
+- **Hard gate — task 0047** (cross-tenant throughput verification).
+  A RED outcome (shared CH+Caddy cannot absorb combined load)
+  supersedes this ADR via Alternative 3 (sidecar CH on the same
+  Hetzner box). GREEN/YELLOW unblocks the rewrites of
+  0011/0038/0039/0040.
+- **Soft follow-up — B7 Borg cadence** (daily vs. weekly). Daily
+  is the recommendation; resolvable in-line with BE.
+- **Soft follow-up — D12 cost-share number.** Brief's ~1-2%
+  pro-rata stance (per task 0046's empirical ~0.45 GB/yr
+  footprint) is the opening proposal; finalised once BE's
+  `default.*` lands on the production box and a measured fraction
+  is computable.
+- **Sequencing — BE 0216 + 0227.** The mTLS endpoint, Caddy
+  address, and per-env cert issuance script are gated on BE's
+  Ansible playbook landing. Architectural acceptance does not
+  wait on that cutover, but implementation work that touches the
+  production endpoint does.
 
 ---
 

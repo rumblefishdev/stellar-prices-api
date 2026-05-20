@@ -3,15 +3,18 @@ id: "0040"
 title: "Prices API Gateway + Rust/axum read handlers — public REST endpoints with API-key auth, rate limit, response cache"
 type: FEATURE
 status: blocked
-related_adr: ["0003", "0004", "0006"]
-related_tasks: ["0011", "0038", "0039"]
-tags: [layer-backend, priority-high, effort-large, api, lambda, axum, rust, aws]
+related_adr: ["0003", "0004", "0006", "0007"]
+related_tasks: ["0011", "0038", "0039", "0045", "0047"]
+tags: [layer-backend, priority-high, effort-large, api, lambda, axum, rust, aws, clickhouse, hetzner]
 links:
   - "../../../docs/prices-api-general-overview.md"
   - "../../2-adrs/0003_price-ohlcv-pk-includes-quote-asset-id.md"
   - "../../2-adrs/0004_price-ohlcv-multi-source-merge-columns.md"
   - "../../2-adrs/0006_runtime-framework-rust-axum.md"
+  - "../../2-adrs/0007_live-data-sink-on-shared-hetzner-clickhouse.md"
+  - "../archive/0045_RESEARCH_cross-team-bundle-with-be-on-hetzner-ch-tenancy/notes/G-be-agreement-record.md"
   - "../backlog/0011_FEATURE_bootstrap-cdk-with-ssm-platform-lookups.md"
+  - "../backlog/0047_RESEARCH_cross-tenant-throughput-verification-on-shared-hetzner-ch.md"
   - "./0038_FEATURE_prices-ledger-processor-lambda.md"
   - "./0039_FEATURE_prices-periodic-workers-lambda-set.md"
 history:
@@ -48,6 +51,17 @@ history:
       (GROUP BY at read time), and the latency budget (<100 ms
       p95) needs re-validation against the public-internet hop to
       Hetzner CH. Hold rewrite until ADR 0007 accepted.
+  - date: 2026-05-20
+    status: blocked
+    who: okarcz
+    note: >
+      ADR 0007 accepted via task 0045's closure (agreement record
+      is the cross-team contract). Endpoint contracts confirmed
+      unchanged from §4 of the overview doc; the rewrite is read-
+      path-only (sqlx → clickhouse crate, FINAL or GROUP BY
+      argMax/argMin on ReplacingMergeTree per ADR 0007 §3.3).
+      <100ms p95 budget re-validation depends on task 0047's
+      throughput numbers. Task stays blocked on 0011.
 ---
 
 # Prices API Gateway + Rust/axum read handlers
