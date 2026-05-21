@@ -6,6 +6,7 @@ status: backlog
 related_adr: ["0001", "0006"]
 related_tasks: ["0034", "0018"]
 tags: [layer-indexing, priority-medium, effort-medium, milestone-M1, stream-1, consumer, scaffolding, rust]
+milestone: 1
 links:
   - "../blocked/0034_FEATURE_consumer-multi-xyk-wasm-tolerance.md"
   - "../archive/0018_RESEARCH_decode-per-amm-swap-event-shapes/notes/G-amm-swap-event-shapes.md"

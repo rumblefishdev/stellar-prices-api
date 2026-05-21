@@ -6,6 +6,7 @@ status: backlog
 related_adr: ["0006", "0007"]
 related_tasks: ["0011", "0050", "0051", "0052", "0040"]
 tags: [layer-backend, priority-high, effort-small, milestone-M1, api, lambda, axum, rust, clickhouse, read-endpoint]
+milestone: 1
 links:
   - "../../../docs/prices-api-general-overview.md"
   - "../../2-adrs/0006_runtime-framework-rust-axum.md"

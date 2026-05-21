@@ -6,6 +6,7 @@ status: active
 related_adr: ["0001", "0005", "0007"]
 related_tasks: ["0011", "0017", "0027", "0028", "0034", "0037", "0038", "0050", "0051", "0052", "0053", "0054", "0055", "0056"]
 tags: [layer-docs, priority-medium, effort-small, milestone-M1, meta, lore-admin, task-definition, tranche-1-scope]
+milestone: 1
 links:
   - "../../../docs/prices-api-general-overview.md"
 history:

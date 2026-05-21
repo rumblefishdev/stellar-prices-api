@@ -6,6 +6,7 @@ status: backlog
 related_adr: ["0001", "0003", "0004", "0007"]
 related_tasks: ["0017", "0034", "0037", "0048", "0052", "0051"]
 tags: [layer-indexing, priority-high, effort-large, milestone-M1, stream-1, rust, cli, workstation, clickhouse, soroban, amm, soroswap, aquarius, phoenix]
+milestone: 1
 links:
   - "../../../docs/prices-api-general-overview.md"
   - "../../2-adrs/0001_stream1-clickhouse-sourced-amm-backfill.md"

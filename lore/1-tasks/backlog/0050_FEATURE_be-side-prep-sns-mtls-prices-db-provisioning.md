@@ -6,6 +6,7 @@ status: backlog
 related_adr: ["0007"]
 related_tasks: ["0045", "0047", "0011", "0038"]
 tags: [layer-infra, priority-high, effort-medium, milestone-M1, cross-team, block-explorer, hetzner, clickhouse, mtls, sns]
+milestone: 1
 links:
   - "../../../docs/prices-api-general-overview.md"
   - "../../2-adrs/0007_live-data-sink-on-shared-hetzner-clickhouse.md"

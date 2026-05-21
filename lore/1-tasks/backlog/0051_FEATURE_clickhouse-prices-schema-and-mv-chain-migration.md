@@ -6,6 +6,7 @@ status: backlog
 related_adr: ["0003", "0004", "0007"]
 related_tasks: ["0050", "0011", "0038", "0046"]
 tags: [layer-database, priority-high, effort-medium, milestone-M1, clickhouse, hetzner, schema, migrations, ddl]
+milestone: 1
 links:
   - "../../../docs/prices-api-general-overview.md"
   - "../../../docs/database-schema/clickhouse-prod-schema.sql"

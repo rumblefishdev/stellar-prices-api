@@ -6,6 +6,7 @@ status: backlog
 related_adr: ["0003", "0005"]
 related_tasks: ["0011", "0012", "0027"]
 tags: [layer-indexing, priority-medium, effort-medium, milestone-M1, cloud-push, clickhouse, hetzner, postgres, sdex, stream-2, rust]
+milestone: 1
 links:
   - "../active/0012_FEATURE_design-prices-owned-backfill-fargate/notes/G-sdex-backfill-local-design.md"
   - "../../2-adrs/0005_stream2-sdex-local-workstation-backfill.md"

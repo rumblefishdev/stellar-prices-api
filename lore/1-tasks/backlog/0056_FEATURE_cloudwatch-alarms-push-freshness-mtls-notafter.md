@@ -6,6 +6,7 @@ status: backlog
 related_adr: ["0005", "0007"]
 related_tasks: ["0011", "0050", "0051", "0055", "0028"]
 tags: [layer-infra, priority-medium, effort-small, milestone-M1, observability, cloudwatch, alarms, sns, mtls, backfill]
+milestone: 1
 links:
   - "../../../docs/prices-api-general-overview.md"
   - "../../2-adrs/0005_stream2-sdex-local-workstation-backfill.md"

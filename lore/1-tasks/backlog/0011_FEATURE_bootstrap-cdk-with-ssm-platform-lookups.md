@@ -6,6 +6,7 @@ status: backlog
 related_adr: ["0007"]
 related_tasks: ["0009", "0008", "0045", "0047"]
 tags: [layer-infra, priority-medium, effort-medium, milestone-M1, infra, cdk, aws, shared-infra, clickhouse, hetzner]
+milestone: 1
 links:
   - "../../2-adrs/0007_live-data-sink-on-shared-hetzner-clickhouse.md"
   - "../archive/0045_RESEARCH_cross-team-bundle-with-be-on-hetzner-ch-tenancy/notes/G-be-agreement-record.md"
