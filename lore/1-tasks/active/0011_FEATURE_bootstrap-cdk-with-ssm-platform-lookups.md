@@ -63,6 +63,47 @@ history:
       rewrite (RDS/VPC out, Secrets-Manager mTLS in, mirror
       BE's TS-CDK layout) follows in a separate commit on the
       task branch.
+  - date: 2026-05-21
+    status: active
+    who: okarcz
+    note: >
+      Skeleton complete. All six stacks from §Implementation
+      Plan land in `infra/` as buildable + synthable TypeScript
+      CDK: CicdStack (GH OIDC + per-env deploy roles),
+      SecretsStack (two mTLS Secret slots + SSM ARN outputs),
+      ComputeStack (LedgerProcessor + ApiHandler IAM roles +
+      LogGroups, plus `createPricesLambdaRole` /
+      `lambdaLogGroupName` / `pricesLambdaDefaults` helpers in
+      `lib/lambda-baseline.ts`), ApiGatewayStack (REST API
+      with /health mock + UsagePlan + ApiKey, SSM publishes
+      api-gateway-id), EventBridgeStack (4 rule shells —
+      Rollup eliminated per ADR 0007 §3.4), ObservabilityStack
+      (empty Dashboard scaffold). cdk synth runs clean for both
+      staging and production (verified inside `node:22.22.0`
+      docker — matches `.nvmrc`), and the no-VPC/RDS/NAT/SG
+      synth-time guard returns nothing on every template. The
+      SSM key contract from §SSM Key Contract is wired both
+      ways: CicdStack IAM scope reads /platform/* + /prices/*
+      and writes /prices/* only; SecretsStack publishes its
+      two ARNs to /prices/{env}/mtls-{cert,key}-secret-arn;
+      ApiGatewayStack publishes /prices/{env}/api-gateway-id.
+      Spec rewrite + skeleton landed across 6 commits on
+      `feat/0011_bootstrap-cdk-with-ssm-platform-lookups`,
+      PR #28 against develop.
+      
+      Remaining acceptance items are all deployment-or-CI-
+      blocked, not code-blocked: (a) manual CicdStack deploy
+      and GitHub-Environment OIDC role-ARN wiring is operator
+      work, deferred until the user is ready to touch AWS;
+      (b) `make diff-{env}` verification against a fresh AWS
+      sub-account requires the operator step from (a) first;
+      (c) the CI job running `cdk diff` on infra/ PRs lives in
+      task 0008's CI workflow scope. Task stays `active`
+      until these clear. Downstream M1 tasks (0038/0039/0040/
+      0055/0056) can already start against the skeleton's
+      hooks since the cross-stack contract is stable —
+      `infra/README.md` §"Where each downstream task plugs in"
+      documents the concrete attachment points.
 ---
 
 # Bootstrap Prices-owned CDK app with SSM-based platform lookups
