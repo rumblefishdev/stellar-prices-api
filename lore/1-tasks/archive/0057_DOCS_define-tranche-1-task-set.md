@@ -2,7 +2,7 @@
 id: "0057"
 title: "Define the Tranche 1 (M1) task set — author 7 new tasks, tag 7 existing"
 type: DOCS
-status: active
+status: completed
 related_adr: ["0001", "0005", "0007"]
 related_tasks: ["0011", "0017", "0027", "0028", "0034", "0037", "0038", "0050", "0051", "0052", "0053", "0054", "0055", "0056"]
 tags: [layer-docs, priority-medium, effort-small, milestone-M1, meta, lore-admin, task-definition, tranche-1-scope]
@@ -22,6 +22,15 @@ history:
       branch-before-commit + Conventional-Commits-with-lore-scope
       convention) without retro-fitting any single child task as
       the umbrella.
+  - date: 2026-05-21
+    status: completed
+    who: okarcz
+    note: >
+      Merged via PR #27 (squash, develop). 15 task files touched
+      (8 new: 0050–0056 + 0057; 7 modified: 0011, 0017, 0027,
+      0028, 0034, 0037, 0038). All 15 carry `milestone: 1`
+      frontmatter field (matches BE 0240 convention). T1 task
+      set complete; execution gated on BE 0227 + task 0047.
 ---
 
 # Define the Tranche 1 (M1) task set
@@ -93,7 +102,11 @@ multi-WASM tolerance), 0037 (Tranche 1 Ledger Processor skeleton),
       vocabulary consolidation
 - [x] Memory entry `tranche-1-task-set.md` records carve-out
       reasoning + canonical tag for future sessions
-- [ ] PR opened against `develop` and merged
+- [x] PR opened against `develop` and merged (PR #27, squash,
+      commit 674d625)
+- [x] `milestone: 1` frontmatter field added to all 15 M1 tasks
+      (matches BE 0240 convention; follow-up after initial
+      task-set landed)
 
 ## Out of scope
 
