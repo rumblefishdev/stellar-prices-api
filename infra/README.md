@@ -25,13 +25,22 @@ ComputeStack         (no-VPC Lambdas + IAM roles)
 ObservabilityStack   (CloudWatch dashboard scaffold; alarms land in task 0056)
 ```
 
-**Currently implemented:** `CicdStack`, `SecretsStack`,
-`ComputeStack` (roles + log groups only — Lambda functions land
-with 0038/0039/0040), `ApiGatewayStack` (REST API shell with a
-`/health` mock route and UsagePlan/ApiKey wiring — real routes
-land in 0040), `EventBridgeStack` (4 rule shells — Lambda targets
-land in 0039). Remaining stacks land as separate slices
-(Observability — see task 0011 spec §Implementation Plan).
+**Currently implemented:** all six stacks called for by task
+0011's spec:
+
+- `CicdStack` — GitHub OIDC + per-env deploy roles.
+- `SecretsStack` — mTLS material slots + SSM outputs.
+- `ComputeStack` — IAM roles + log groups for the two anchor Lambdas;
+  helpers (`createPricesLambdaRole`, etc.) reusable by 0039 / 0055.
+- `ApiGatewayStack` — REST API with `/health` mock + UsagePlan/ApiKey;
+  real `/v1/prices/...` routes land in 0040.
+- `EventBridgeStack` — 4 rule shells for the periodic workers;
+  Lambda targets land in 0039.
+- `ObservabilityStack` — empty dashboard scaffold; widgets + alarms
+  land in 0056.
+
+Each subsequent task slots its real resources into the
+already-deployable container these stacks provide.
 
 ## Prerequisites
 
@@ -161,15 +170,19 @@ PEMs — CDK manages the resource (and `generateSecretString`
 parameters), not the secret value itself, once it has been replaced
 out-of-band.
 
-## Future stacks
+## Where each downstream task plugs in
 
-These are scaffolded by task 0011's spec but not yet implemented in
-this repo. Each lands as a separate FEATURE task per BE's pattern
-(one stack ≈ one lore task):
+Per BE's pattern, one downstream task ≈ one chunk of real content
+attached to the skeleton:
 
-| Stack | Owning task | Purpose |
-|---|---|---|
-| `ObservabilityStack` | 0056 | CloudWatch alarms (push-freshness, mTLS NotAfter, error rate) |
+| Task | Where it plugs in |
+|---|---|
+| `0008` (CI workflow) | Adds `.github/workflows/deploy.yml` that assumes the per-env CicdStack deploy role via OIDC and runs `make deploy-{env}`. |
+| `0038` (Ledger Processor Lambda) | Adds a `RustFunction` to ComputeStack, references `ledgerProcessorRole` + `ledgerProcessorLogGroup`, attaches SNS subscription, publishes Lambda ARN to `/prices/{env}/ledger-processor-lambda-arn`. |
+| `0039` (Periodic workers) | Adds 4 `RustFunction`s in ComputeStack, calls `rule.addTarget(...)` on each `EventBridgeStack` rule, uses `createPricesLambdaRole` for the per-worker IAM roles. |
+| `0040` (API handlers) | Adds a `RustFunction` to ComputeStack, attaches as Lambda proxy integration onto ApiGatewayStack's REST API root, adds `/v1/prices/...` resources, wires custom domain + Route 53 A-record + ACM cert. |
+| `0055` (Backfill status) | Adds a `RustFunction` to ComputeStack using `createPricesLambdaRole`, adds `/backfill/status` resource to ApiGatewayStack. |
+| `0056` (Alarms) | Adds `cloudwatch.Alarm` constructs to ObservabilityStack referencing ComputeStack log groups + ApiGatewayStack stage metrics + Lambda function metrics. Attaches widgets to the dashboard. |
 
 ## Lambda conventions
 

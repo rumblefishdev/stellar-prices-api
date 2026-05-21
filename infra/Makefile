@@ -64,6 +64,12 @@ deploy-staging-eventbridge: build
 destroy-staging-eventbridge: build
 	npx cdk --app "$(STAGING_APP)" destroy Prices-staging-EventBridge --force
 
+deploy-staging-observability: build
+	npx cdk --app "$(STAGING_APP)" deploy Prices-staging-Observability --require-approval broadening
+
+destroy-staging-observability: build
+	npx cdk --app "$(STAGING_APP)" destroy Prices-staging-Observability --force
+
 # --- Production ---
 
 synth-production: build
@@ -101,3 +107,9 @@ deploy-production-eventbridge: build
 
 destroy-production-eventbridge: build
 	npx cdk --app "$(PRODUCTION_APP)" destroy Prices-production-EventBridge --force
+
+deploy-production-observability: build
+	npx cdk --app "$(PRODUCTION_APP)" deploy Prices-production-Observability --require-approval broadening
+
+destroy-production-observability: build
+	npx cdk --app "$(PRODUCTION_APP)" destroy Prices-production-Observability --force

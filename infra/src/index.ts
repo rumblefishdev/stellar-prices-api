@@ -13,6 +13,8 @@ export { ApiGatewayStack } from './lib/stacks/api-gateway-stack.js';
 export type { ApiGatewayStackProps } from './lib/stacks/api-gateway-stack.js';
 export { EventBridgeStack } from './lib/stacks/eventbridge-stack.js';
 export type { EventBridgeStackProps } from './lib/stacks/eventbridge-stack.js';
+export { ObservabilityStack } from './lib/stacks/observability-stack.js';
+export type { ObservabilityStackProps } from './lib/stacks/observability-stack.js';
 
 // Lambda baseline helpers — used by downstream stacks that add
 // additional Lambdas (0038, 0039, 0040, 0055).
