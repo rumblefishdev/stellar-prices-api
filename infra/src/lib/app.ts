@@ -2,6 +2,7 @@ import * as cdk from 'aws-cdk-lib';
 
 import { validateConfig, type EnvironmentConfig } from './types.js';
 import { SecretsStack } from './stacks/secrets-stack.js';
+import { ComputeStack } from './stacks/compute-stack.js';
 
 export interface CreateAppOptions {
   readonly config: EnvironmentConfig;
@@ -19,7 +20,15 @@ export function createApp({ config }: CreateAppOptions): void {
 
   const prefix = `Prices-${config.envName}`;
 
-  new SecretsStack(app, `${prefix}-Secrets`, { env, config });
+  const secrets = new SecretsStack(app, `${prefix}-Secrets`, { env, config });
+
+  const compute = new ComputeStack(app, `${prefix}-Compute`, {
+    env,
+    config,
+    mtlsCertSecret: secrets.mtlsCertSecret,
+    mtlsKeySecret: secrets.mtlsKeySecret,
+  });
+  compute.addDependency(secrets);
 
   app.synth();
 }

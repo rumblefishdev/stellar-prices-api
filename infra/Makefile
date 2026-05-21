@@ -46,6 +46,12 @@ deploy-staging-secrets: build
 destroy-staging-secrets: build
 	npx cdk --app "$(STAGING_APP)" destroy Prices-staging-Secrets --force
 
+deploy-staging-compute: build
+	npx cdk --app "$(STAGING_APP)" deploy Prices-staging-Compute --require-approval broadening
+
+destroy-staging-compute: build
+	npx cdk --app "$(STAGING_APP)" destroy Prices-staging-Compute --force
+
 # --- Production ---
 
 synth-production: build
@@ -65,3 +71,9 @@ deploy-production-secrets: build
 
 destroy-production-secrets: build
 	npx cdk --app "$(PRODUCTION_APP)" destroy Prices-production-Secrets --force
+
+deploy-production-compute: build
+	npx cdk --app "$(PRODUCTION_APP)" deploy Prices-production-Compute --require-approval broadening
+
+destroy-production-compute: build
+	npx cdk --app "$(PRODUCTION_APP)" destroy Prices-production-Compute --force

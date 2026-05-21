@@ -25,9 +25,11 @@ ComputeStack         (no-VPC Lambdas + IAM roles)
 ObservabilityStack   (CloudWatch dashboard scaffold; alarms land in task 0056)
 ```
 
-**Currently implemented:** `CicdStack`, `SecretsStack`. Remaining
-stacks land as separate slices (Compute, API Gateway, EventBridge,
-Observability — see task 0011 spec §Implementation Plan).
+**Currently implemented:** `CicdStack`, `SecretsStack`,
+`ComputeStack` (roles + log groups only — Lambda functions land
+with 0038/0039/0040). Remaining stacks land as separate slices
+(API Gateway, EventBridge, Observability — see task 0011 spec
+§Implementation Plan).
 
 ## Prerequisites
 
@@ -165,10 +167,45 @@ this repo. Each lands as a separate FEATURE task per BE's pattern
 
 | Stack | Owning task | Purpose |
 |---|---|---|
-| `ComputeStack` | 0011 follow-up + 0038/0039/0040 | Lambda roles (no-VPC), log-group naming convention |
-| `ApiGatewayStack` | 0040 | REST API shell + usage plan |
+| `ApiGatewayStack` | 0040 | REST API shell + usage plan, hooked to `ComputeStack.apiHandlerRole` |
 | `EventBridgeStack` | 0039 | Scheduler rules for periodic workers (no Rollup — see ADR 0007 §3.4) |
 | `ObservabilityStack` | 0056 | CloudWatch alarms (push-freshness, mTLS NotAfter, error rate) |
+
+## Lambda conventions
+
+Every prices-api Lambda follows a shared shape, captured in
+`infra/src/lib/lambda-baseline.ts`:
+
+- **Architecture:** `arm64` (Graviton). ~10-20% cheaper than x86 at
+  the same memory.
+- **Runtime:** `provided.al2023` (custom runtime targeting
+  cargo-lambda bootstrap binaries, per ADR 0006).
+- **No VPC.** Per ADR 0007 §3.6, Lambdas run on AWS-managed shared
+  subnets and reach Caddy over the public internet.
+- **Baseline IAM:** Every role gets `secretsmanager:GetSecretValue`
+  on the two mTLS material ARNs + `ssm:GetParameter` on both the
+  `/platform/{env}/*` and `/prices/{env}/*` namespaces. Stack-
+  specific permissions (S3 read for the processor, etc.) are added
+  via `role.addToPolicy(...)` in downstream tasks.
+- **Log group:** `/aws/lambda/prices-{env}-{lambdaName}`, retention
+  one month, removal policy DESTROY.
+
+Downstream tasks consume these conventions via:
+
+```ts
+import {
+  createPricesLambdaRole,
+  lambdaLogGroupName,
+  pricesLambdaDefaults,
+  PRICES_LAMBDA_LOG_RETENTION,
+} from '@rumblefish/stellar-prices-api-aws-cdk';
+```
+
+`ComputeStack` pre-creates the role + log group for the two anchor
+Lambdas (`LedgerProcessor` → task 0038, `ApiHandler` → task 0040)
+and exposes them as readonly properties. Tasks 0039 (periodic
+workers) and 0055 (backfill status) call `createPricesLambdaRole`
+to construct their own.
 
 ## Why no VPC
 
