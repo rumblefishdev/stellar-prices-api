@@ -1,4 +1,7 @@
 {
   "envName": "staging",
-  "awsRegion": "us-east-1"
+  "awsRegion": "us-east-1",
+  "apiGatewayThrottleRate": 50,
+  "apiGatewayThrottleBurst": 100,
+  "apiGatewayPartnerDailyQuota": 10000
 }

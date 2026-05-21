@@ -3,6 +3,7 @@ import * as cdk from 'aws-cdk-lib';
 import { validateConfig, type EnvironmentConfig } from './types.js';
 import { SecretsStack } from './stacks/secrets-stack.js';
 import { ComputeStack } from './stacks/compute-stack.js';
+import { ApiGatewayStack } from './stacks/api-gateway-stack.js';
 
 export interface CreateAppOptions {
   readonly config: EnvironmentConfig;
@@ -29,6 +30,11 @@ export function createApp({ config }: CreateAppOptions): void {
     mtlsKeySecret: secrets.mtlsKeySecret,
   });
   compute.addDependency(secrets);
+
+  // ApiGatewayStack is independent of ComputeStack in the skeleton
+  // (no Lambda integration yet — task 0040 wires the cross-stack
+  // dependency when it attaches the apiHandler Function).
+  new ApiGatewayStack(app, `${prefix}-ApiGateway`, { env, config });
 
   app.synth();
 }

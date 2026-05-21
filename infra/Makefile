@@ -52,6 +52,12 @@ deploy-staging-compute: build
 destroy-staging-compute: build
 	npx cdk --app "$(STAGING_APP)" destroy Prices-staging-Compute --force
 
+deploy-staging-apigateway: build
+	npx cdk --app "$(STAGING_APP)" deploy Prices-staging-ApiGateway --require-approval broadening
+
+destroy-staging-apigateway: build
+	npx cdk --app "$(STAGING_APP)" destroy Prices-staging-ApiGateway --force
+
 # --- Production ---
 
 synth-production: build
@@ -77,3 +83,9 @@ deploy-production-compute: build
 
 destroy-production-compute: build
 	npx cdk --app "$(PRODUCTION_APP)" destroy Prices-production-Compute --force
+
+deploy-production-apigateway: build
+	npx cdk --app "$(PRODUCTION_APP)" deploy Prices-production-ApiGateway --require-approval broadening
+
+destroy-production-apigateway: build
+	npx cdk --app "$(PRODUCTION_APP)" destroy Prices-production-ApiGateway --force

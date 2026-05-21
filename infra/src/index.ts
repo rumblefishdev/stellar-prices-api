@@ -9,6 +9,8 @@ export { SecretsStack } from './lib/stacks/secrets-stack.js';
 export type { SecretsStackProps } from './lib/stacks/secrets-stack.js';
 export { ComputeStack } from './lib/stacks/compute-stack.js';
 export type { ComputeStackProps } from './lib/stacks/compute-stack.js';
+export { ApiGatewayStack } from './lib/stacks/api-gateway-stack.js';
+export type { ApiGatewayStackProps } from './lib/stacks/api-gateway-stack.js';
 
 // Lambda baseline helpers — used by downstream stacks that add
 // additional Lambdas (0038, 0039, 0040, 0055).

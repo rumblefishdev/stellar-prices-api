@@ -23,6 +23,15 @@ export interface CicdConfig {
 export interface EnvironmentConfig {
   readonly envName: 'staging' | 'production';
   readonly awsRegion: string;
+
+  // API Gateway (consumed by ApiGatewayStack)
+
+  /** Sustained requests per second before API Gateway returns 429. */
+  readonly apiGatewayThrottleRate: number;
+  /** Maximum concurrent requests allowed in a short burst above the rate limit. */
+  readonly apiGatewayThrottleBurst: number;
+  /** Daily request quota for API-key holders (UsagePlan quota.limit). */
+  readonly apiGatewayPartnerDailyQuota: number;
 }
 
 /**
@@ -42,6 +51,31 @@ export function validateConfig(config: EnvironmentConfig): void {
   if (!config.awsRegion || !/^[a-z]{2}-[a-z]+-\d+$/.test(config.awsRegion)) {
     errors.push(
       `awsRegion must be a valid AWS region (e.g. "us-east-1"), got: "${config.awsRegion}"`,
+    );
+  }
+
+  if (
+    !Number.isInteger(config.apiGatewayThrottleRate) ||
+    config.apiGatewayThrottleRate < 1
+  ) {
+    errors.push(
+      `apiGatewayThrottleRate must be a positive integer, got: ${config.apiGatewayThrottleRate}`,
+    );
+  }
+  if (
+    !Number.isInteger(config.apiGatewayThrottleBurst) ||
+    config.apiGatewayThrottleBurst < config.apiGatewayThrottleRate
+  ) {
+    errors.push(
+      `apiGatewayThrottleBurst must be a positive integer >= apiGatewayThrottleRate (${config.apiGatewayThrottleRate}), got: ${config.apiGatewayThrottleBurst}`,
+    );
+  }
+  if (
+    !Number.isInteger(config.apiGatewayPartnerDailyQuota) ||
+    config.apiGatewayPartnerDailyQuota < 1
+  ) {
+    errors.push(
+      `apiGatewayPartnerDailyQuota must be a positive integer, got: ${config.apiGatewayPartnerDailyQuota}`,
     );
   }
 
