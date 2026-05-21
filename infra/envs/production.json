@@ -3,5 +3,11 @@
   "awsRegion": "us-east-1",
   "apiGatewayThrottleRate": 200,
   "apiGatewayThrottleBurst": 500,
-  "apiGatewayPartnerDailyQuota": 100000
+  "apiGatewayPartnerDailyQuota": 100000,
+  "scheduleExpressions": {
+    "priceUpdater": "rate(1 minute)",
+    "oracleWatcher": "rate(5 minutes)",
+    "assetDiscovery": "rate(1 hour)",
+    "cleanup": "cron(0 3 * * ? *)"
+  }
 }

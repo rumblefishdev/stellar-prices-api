@@ -32,6 +32,27 @@ export interface EnvironmentConfig {
   readonly apiGatewayThrottleBurst: number;
   /** Daily request quota for API-key holders (UsagePlan quota.limit). */
   readonly apiGatewayPartnerDailyQuota: number;
+
+  // EventBridge (consumed by EventBridgeStack)
+
+  /**
+   * Per-worker schedule expressions for task 0039's periodic Lambdas.
+   * Rule shells are pre-created here; the worker Lambdas attach as
+   * targets when 0039 lands.
+   *
+   * Rollup is intentionally absent — ADR 0007 §3.4 replaces it with
+   * a ClickHouse materialised-view chain (1m → 15m → 1h → ...).
+   */
+  readonly scheduleExpressions: {
+    /** Refreshes `current_prices` aggregations. */
+    readonly priceUpdater: string;
+    /** Polls Stellar on-chain oracles. */
+    readonly oracleWatcher: string;
+    /** Periodic asset-registry maintenance. */
+    readonly assetDiscovery: string;
+    /** Old-data partition drop (ALTER TABLE … DROP PARTITION). */
+    readonly cleanup: string;
+  };
 }
 
 /**
@@ -77,6 +98,28 @@ export function validateConfig(config: EnvironmentConfig): void {
     errors.push(
       `apiGatewayPartnerDailyQuota must be a positive integer, got: ${config.apiGatewayPartnerDailyQuota}`,
     );
+  }
+
+  const schedules = config.scheduleExpressions;
+  if (!schedules || typeof schedules !== 'object') {
+    errors.push(`scheduleExpressions missing or not an object`);
+  } else {
+    const expectedKeys = [
+      'priceUpdater',
+      'oracleWatcher',
+      'assetDiscovery',
+      'cleanup',
+    ] as const;
+    for (const key of expectedKeys) {
+      const value = schedules[key];
+      if (typeof value !== 'string' || value.trim().length === 0) {
+        errors.push(`scheduleExpressions.${key} missing or empty`);
+      } else if (!/^(rate\(|cron\()/.test(value)) {
+        errors.push(
+          `scheduleExpressions.${key} must start with 'rate(' or 'cron(', got: "${value}"`,
+        );
+      }
+    }
   }
 
   if (errors.length > 0) {

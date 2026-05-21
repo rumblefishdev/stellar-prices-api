@@ -58,6 +58,12 @@ deploy-staging-apigateway: build
 destroy-staging-apigateway: build
 	npx cdk --app "$(STAGING_APP)" destroy Prices-staging-ApiGateway --force
 
+deploy-staging-eventbridge: build
+	npx cdk --app "$(STAGING_APP)" deploy Prices-staging-EventBridge --require-approval broadening
+
+destroy-staging-eventbridge: build
+	npx cdk --app "$(STAGING_APP)" destroy Prices-staging-EventBridge --force
+
 # --- Production ---
 
 synth-production: build
@@ -89,3 +95,9 @@ deploy-production-apigateway: build
 
 destroy-production-apigateway: build
 	npx cdk --app "$(PRODUCTION_APP)" destroy Prices-production-ApiGateway --force
+
+deploy-production-eventbridge: build
+	npx cdk --app "$(PRODUCTION_APP)" deploy Prices-production-EventBridge --require-approval broadening
+
+destroy-production-eventbridge: build
+	npx cdk --app "$(PRODUCTION_APP)" destroy Prices-production-EventBridge --force

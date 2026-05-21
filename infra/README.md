@@ -29,9 +29,9 @@ ObservabilityStack   (CloudWatch dashboard scaffold; alarms land in task 0056)
 `ComputeStack` (roles + log groups only — Lambda functions land
 with 0038/0039/0040), `ApiGatewayStack` (REST API shell with a
 `/health` mock route and UsagePlan/ApiKey wiring — real routes
-land in 0040). Remaining stacks land as separate slices
-(EventBridge, Observability — see task 0011 spec §Implementation
-Plan).
+land in 0040), `EventBridgeStack` (4 rule shells — Lambda targets
+land in 0039). Remaining stacks land as separate slices
+(Observability — see task 0011 spec §Implementation Plan).
 
 ## Prerequisites
 
@@ -169,7 +169,6 @@ this repo. Each lands as a separate FEATURE task per BE's pattern
 
 | Stack | Owning task | Purpose |
 |---|---|---|
-| `EventBridgeStack` | 0039 | Scheduler rules for periodic workers (no Rollup — see ADR 0007 §3.4) |
 | `ObservabilityStack` | 0056 | CloudWatch alarms (push-freshness, mTLS NotAfter, error rate) |
 
 ## Lambda conventions

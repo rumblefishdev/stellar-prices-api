@@ -4,6 +4,7 @@ import { validateConfig, type EnvironmentConfig } from './types.js';
 import { SecretsStack } from './stacks/secrets-stack.js';
 import { ComputeStack } from './stacks/compute-stack.js';
 import { ApiGatewayStack } from './stacks/api-gateway-stack.js';
+import { EventBridgeStack } from './stacks/eventbridge-stack.js';
 
 export interface CreateAppOptions {
   readonly config: EnvironmentConfig;
@@ -35,6 +36,12 @@ export function createApp({ config }: CreateAppOptions): void {
   // (no Lambda integration yet — task 0040 wires the cross-stack
   // dependency when it attaches the apiHandler Function).
   new ApiGatewayStack(app, `${prefix}-ApiGateway`, { env, config });
+
+  // EventBridgeStack is independent of ComputeStack in the skeleton
+  // (no Lambda targets yet — task 0039 wires the cross-stack
+  // dependency when it attaches its four worker Lambdas via
+  // rule.addTarget()).
+  new EventBridgeStack(app, `${prefix}-EventBridge`, { env, config });
 
   app.synth();
 }
