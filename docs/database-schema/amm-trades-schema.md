@@ -1,5 +1,43 @@
 # AMM Trades Table — Schema Specification
 
+> ## ⚠️ SUPERSEDED (2026-05-20)
+>
+> **This document describes a design that is no longer pursued.** It is
+> retained as historical context only.
+>
+> Superseded by:
+> - [**ADR 0001**](../../lore/2-adrs/0001_stream1-clickhouse-sourced-amm-backfill.md)
+>   — Stream 1 (Soroban AMM backfill) now consumes a **local ClickHouse**
+>   instance on the operator's workstation, populated upfront by BE's
+>   `backfill-runner --target=clickhouse` against
+>   `s3://aws-public-blockchain`. BE no longer maintains a custom
+>   `amm_trades` table on its RDS for the Prices API to consume.
+> - [**ADR 0007**](../../lore/2-adrs/0007_live-data-sink-on-shared-hetzner-clickhouse.md)
+>   — Prices API's live data plane moved from a Prices-owned RDS Postgres
+>   to BE's shared Hetzner ClickHouse cluster. The `prices.*` schema
+>   on Hetzner is documented in
+>   [`database-schema-overview.md`](./database-schema-overview.md) and in
+>   `docs/prices-api-general-overview.md` §3.
+> - BE's [ADR 0044 (clickhouse pilot)](../../../soroban-block-explorer/lore/2-adrs/0044_clickhouse-pilot-parallel-store.md)
+>   and [ADR 0045 (CH local backfill mirrored to Hetzner)](../../../soroban-block-explorer/lore/2-adrs/0045_clickhouse-local-backfill-then-mirror-to-hetzner-via-freeze-rsync-attach.md)
+>   — BE's own storage moved off RDS onto ClickHouse, removing the BE-RDS
+>   surface this document was built against.
+>
+> **What replaces this document.** The Prices API consumes Soroban swap
+> events from BE's CH `soroban_events` table (whose canonical schema lives
+> in [`clickhouse-prod-schema.sql`](./clickhouse-prod-schema.sql)) via the
+> `soroban-amm-backfill` local CLI per ADR 0001. The decoder spec for that
+> path is [lore task 0048's G-note](../../lore/1-tasks/archive/0048_RESEARCH_soroban-events-pricing-decoder-spec/notes/G-soroban-events-pricing-decoder.md).
+> No `amm_trades` table is created on either side; the decoder reads
+> `soroban_events` directly.
+>
+> **The text below is preserved verbatim** as the design alternative that
+> was considered before ADR 0001 landed. Do not implement against it.
+
+---
+
+# Original design (superseded — see banner above)
+
 > **Design history.** The first iteration of this spec proposed a generic
 > `soroban_events` table on the Block Explorer RDS that mirrored CAP-67
 > shape (`topics JSONB`, `data JSONB`, full event stream). At the medium
