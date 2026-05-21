@@ -25,8 +25,8 @@ ComputeStack         (no-VPC Lambdas + IAM roles)
 ObservabilityStack   (CloudWatch dashboard scaffold; alarms land in task 0056)
 ```
 
-**Currently implemented:** `CicdStack` only. Remaining stacks land
-as separate lore tasks (Secrets, Compute, API Gateway, EventBridge,
+**Currently implemented:** `CicdStack`, `SecretsStack`. Remaining
+stacks land as separate slices (Compute, API Gateway, EventBridge,
 Observability — see task 0011 spec §Implementation Plan).
 
 ## Prerequisites
@@ -109,25 +109,53 @@ caught at the IAM layer, not at code review.
 From repo root:
 
 ```bash
-npm run infra:bootstrap         # First-time CDK bootstrap
-npm run infra:synth:cicd        # Synth CicdStack template
-npm run infra:diff:cicd         # Preview changes to CicdStack
-npm run infra:deploy:cicd       # Deploy CicdStack
+# One-time
+npm run infra:bootstrap         # CDK bootstrap (per AWS account + region)
+npm run infra:deploy:cicd       # CicdStack — OIDC + deploy roles
+
+# Per-env (staging / production)
+npm run infra:synth:staging     # Synth env template
+npm run infra:diff:staging      # Preview changes
+npm run infra:deploy:staging    # Deploy all env stacks
 ```
 
-Or from `infra/`:
+Same shape for production: `infra:synth:production`,
+`infra:diff:production`, `infra:deploy:production`.
+
+From `infra/`:
 
 ```bash
 make build
-make synth-cicd
-make diff-cicd
-make deploy-cicd
+make synth-staging
+make diff-staging
+make deploy-staging
+make deploy-staging-secrets     # single-stack scoped deploy
 ```
 
-The per-env stacks (Secrets, Compute, etc.) will add equivalent
-`infra:deploy:staging` / `infra:deploy:production` proxy scripts and
-`deploy-staging-{stack}` / `deploy-production-{stack}` Makefile
-targets when they land.
+Equivalent `production` and `*-{stack}` variants exist for every
+target — see `infra/Makefile`.
+
+## Uploading the real mTLS PEMs
+
+`SecretsStack` provisions the two Secrets Manager slots with random
+CDK-generated placeholder values. The real cert + key come from BE
+task 0050's per-AWS-service issuance script. To upload them after a
+deploy:
+
+```bash
+aws secretsmanager put-secret-value \
+    --secret-id prices/staging/clickhouse-mtls-cert \
+    --secret-string "$(cat path/to/staging-client.cert.pem)"
+
+aws secretsmanager put-secret-value \
+    --secret-id prices/staging/clickhouse-mtls-key \
+    --secret-string "$(cat path/to/staging-client.key.pem)"
+```
+
+Subsequent `cdk deploy` invocations will NOT overwrite the uploaded
+PEMs — CDK manages the resource (and `generateSecretString`
+parameters), not the secret value itself, once it has been replaced
+out-of-band.
 
 ## Future stacks
 
@@ -137,7 +165,6 @@ this repo. Each lands as a separate FEATURE task per BE's pattern
 
 | Stack | Owning task | Purpose |
 |---|---|---|
-| `SecretsStack` | 0011 follow-up | Empty Secrets Manager slots for mTLS cert/key + SSM outputs |
 | `ComputeStack` | 0011 follow-up + 0038/0039/0040 | Lambda roles (no-VPC), log-group naming convention |
 | `ApiGatewayStack` | 0040 | REST API shell + usage plan |
 | `EventBridgeStack` | 0039 | Scheduler rules for periodic workers (no Rollup — see ADR 0007 §3.4) |
