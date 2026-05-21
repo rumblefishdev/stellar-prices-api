@@ -5,7 +5,8 @@ type: FEATURE
 status: backlog
 related_adr: ["0001"]
 related_tasks: ["0015", "0018"]
-tags: [layer-infra, priority-high, effort-small, infra, backfill, clickhouse, tranche-1, block-explorer]
+tags: [layer-infra, priority-high, effort-small, milestone-M1, infra, backfill, clickhouse, block-explorer]
+milestone: 1
 links:
   - "../../2-adrs/0001_stream1-clickhouse-sourced-amm-backfill.md"
   - "../archive/0015_RESEARCH_redefine-backfill-with-be-clickhouse-events/notes/S-redesigned-backfill-recommendation.md"
