@@ -2,7 +2,7 @@
 id: "0011"
 title: "Bootstrap Prices-owned CDK app with SSM-based platform lookups"
 type: FEATURE
-status: backlog
+status: active
 related_adr: ["0007"]
 related_tasks: ["0009", "0008", "0045", "0047"]
 tags: [layer-infra, priority-medium, effort-medium, milestone-M1, infra, cdk, aws, shared-infra, clickhouse, hetzner]
@@ -41,6 +41,22 @@ history:
       this task's CDK targets from BE's shared box to a
       Prices-api-owned sidecar box, same code shape). Task
       stays in backlog pending those two events.
+  - date: 2026-05-21
+    status: active
+    who: okarcz
+    note: >
+      Promoted backlog → active. BE 0227 has landed
+      (soroban-block-explorer/infra-hetzner/ now contains the
+      Ansible playbook, Caddyfile, and CA tooling; CH-prod-01
+      is reachable at the documented Caddy address with mTLS
+      gating). Task 0047 (throughput verification) is still
+      open as a follow-up but no longer treated as a hard gate
+      — the rewrite proceeds against the shared-box shape from
+      ADR 0007 §Decision; a RED outcome later only shifts the
+      Caddy endpoint host, not the CDK code shape. Spec
+      rewrite (RDS/VPC out, Secrets-Manager mTLS in, mirror
+      BE's TS-CDK layout) follows in a separate commit on the
+      task branch.
 ---
 
 # Bootstrap Prices-owned CDK app with SSM-based platform lookups
