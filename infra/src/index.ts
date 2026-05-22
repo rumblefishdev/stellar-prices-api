@@ -27,3 +27,8 @@ export {
   PRICES_LAMBDA_LOG_REMOVAL_POLICY,
 } from './lib/lambda-baseline.js';
 export type { BaselineLambdaContext } from './lib/lambda-baseline.js';
+
+// mTLS helpers — used by downstream stacks that attach Lambdas
+// requiring the AWS Parameters and Secrets Lambda Extension layer
+// and per-service mTLS Secret ARN grants.
+export { secretsManagerLayerArn, mtlsSecretArn } from './lib/mtls.js';

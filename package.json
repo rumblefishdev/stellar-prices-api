@@ -8,9 +8,6 @@
     "infra:synth:cicd": "make -C infra synth-cicd",
     "infra:diff:cicd": "make -C infra diff-cicd",
     "infra:deploy:cicd": "make -C infra deploy-cicd",
-    "infra:synth:staging": "make -C infra synth-staging",
-    "infra:diff:staging": "make -C infra diff-staging",
-    "infra:deploy:staging": "make -C infra deploy-staging",
     "infra:synth:production": "make -C infra synth-production",
     "infra:diff:production": "make -C infra diff-production",
     "infra:deploy:production": "make -C infra deploy-production"

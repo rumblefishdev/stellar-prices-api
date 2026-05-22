@@ -2,9 +2,9 @@
  * Configuration for the shared CI/CD stack (consumed by CicdStack).
  *
  * One CicdStack is deployed once per AWS account — it provisions the
- * GitHub Actions OIDC provider and the per-env deploy roles. The
- * resulting role ARNs are stored as GitHub Environment secrets and
- * used by the deploy workflow (task 0008).
+ * GitHub Actions OIDC provider and the production deploy role. The
+ * resulting role ARN is stored as the GitHub Environment secret used
+ * by the deploy workflow.
  */
 export interface CicdConfig {
   readonly awsRegion: string;
@@ -15,13 +15,20 @@ export interface CicdConfig {
 /**
  * Per-environment configuration for the prices-api CDK app.
  *
+ * Production is the only supported AWS environment — staging was
+ * retired during the eu-central-1 cutover (mirrors BE task 0239).
+ * The single "production" environment is initially deployed with
+ * conservative test-sized parameters so the AWS resource layout is
+ * already in place; values are swapped to true production sizing
+ * once the service is exercised in anger.
+ *
  * Only includes fields consumed by existing stacks. Each new stack
  * task extends this interface with the fields it needs — no
  * placeholder fields for stacks that do not exist yet. (Mirrors BE's
  * `soroban-block-explorer/infra/src/lib/types.ts` convention.)
  */
 export interface EnvironmentConfig {
-  readonly envName: 'staging' | 'production';
+  readonly envName: 'production';
   readonly awsRegion: string;
 
   // API Gateway (consumed by ApiGatewayStack)
@@ -53,6 +60,35 @@ export interface EnvironmentConfig {
     /** Old-data partition drop (ALTER TABLE … DROP PARTITION). */
     readonly cleanup: string;
   };
+
+  // Hetzner ClickHouse — mTLS (consumed by ComputeStack, downstream
+  // tasks 0038/0039/0040/0052 that talk to the BE-hosted ClickHouse)
+
+  /**
+   * FQDN that BE's HetznerDnsStack maps to the Hetzner ClickHouse box.
+   * Used as the mTLS endpoint hostname by every prices-api Lambda
+   * that reads from / writes to ClickHouse (passed as `CH_DOMAIN`
+   * env var per the BE 0239 convention).
+   *
+   * BE owns the DNS record itself; prices-api just consumes the FQDN
+   * via this config.
+   */
+  readonly chDomainName: string;
+  /**
+   * Secret-name prefix in AWS Secrets Manager for mTLS client cert
+   * bundles. Each prices-api Lambda gets its own secret at
+   * `${mtlsSecretNamePrefix}/<service-cn>` containing the
+   * `{cert, key, ca}` PEM bundle issued by BE task 0050's CA pipeline.
+   *
+   * Example: `prices/production/mtls` → service secrets live at
+   * `prices/production/mtls/ledger-processor-production`,
+   * `prices/production/mtls/api-handler-production`, etc.
+   *
+   * Downstream stacks construct the full ARN at synth time using
+   * `mtlsSecretArn` from `lib/mtls.ts` so cross-team naming stays
+   * IAM-scopeable (single secret per Lambda, no wildcard sprawl).
+   */
+  readonly mtlsSecretNamePrefix: string;
 }
 
 /**
@@ -63,15 +99,15 @@ export interface EnvironmentConfig {
 export function validateConfig(config: EnvironmentConfig): void {
   const errors: string[] = [];
 
-  if (config.envName !== 'staging' && config.envName !== 'production') {
+  if (config.envName !== 'production') {
     errors.push(
-      `envName must be "staging" or "production", got: "${config.envName}"`,
+      `envName must be "production", got: "${config.envName}"`,
     );
   }
 
   if (!config.awsRegion || !/^[a-z]{2}-[a-z]+-\d+$/.test(config.awsRegion)) {
     errors.push(
-      `awsRegion must be a valid AWS region (e.g. "us-east-1"), got: "${config.awsRegion}"`,
+      `awsRegion must be a valid AWS region (e.g. "eu-central-1"), got: "${config.awsRegion}"`,
     );
   }
 
@@ -120,6 +156,27 @@ export function validateConfig(config: EnvironmentConfig): void {
         );
       }
     }
+  }
+
+  if (!config.chDomainName) {
+    errors.push(`chDomainName missing`);
+  } else if (
+    config.chDomainName.includes('CHANGE') ||
+    config.chDomainName.includes('PLACEHOLDER')
+  ) {
+    errors.push(
+      `chDomainName placeholder rejected: "${config.chDomainName}"`,
+    );
+  }
+
+  if (
+    !config.mtlsSecretNamePrefix ||
+    config.mtlsSecretNamePrefix.includes('CHANGE') ||
+    config.mtlsSecretNamePrefix.includes('PLACEHOLDER')
+  ) {
+    errors.push(
+      `mtlsSecretNamePrefix missing or placeholder: "${config.mtlsSecretNamePrefix}"`,
+    );
   }
 
   if (errors.length > 0) {

@@ -1,4 +1,3 @@
-STAGING_APP := node dist/bin/staging.js
 PRODUCTION_APP := node dist/bin/production.js
 CICD_APP := node dist/bin/cicd.js
 
@@ -7,9 +6,9 @@ build:
 
 # --- CI/CD ---
 # Deployed once per AWS account. Provisions the GitHub Actions OIDC
-# provider and per-env deploy roles (staging, production). Role
-# ARNs land as CfnOutputs — wire them into GitHub Environment
-# secrets as AWS_DEPLOY_ROLE_ARN.
+# provider and the production deploy role. Role ARN lands as a
+# CfnOutput — wire it into the GitHub Environment secret as
+# AWS_DEPLOY_ROLE_ARN.
 
 bootstrap:
 	npx cdk bootstrap
@@ -26,51 +25,10 @@ deploy-cicd: build
 destroy-cicd: build
 	npx cdk --app "$(CICD_APP)" destroy --all --force
 
-# --- Staging ---
-
-synth-staging: build
-	npx cdk --app "$(STAGING_APP)" synth
-
-diff-staging: build
-	npx cdk --app "$(STAGING_APP)" diff
-
-deploy-staging: build
-	npx cdk --app "$(STAGING_APP)" deploy --all --require-approval broadening
-
-destroy-staging: build
-	npx cdk --app "$(STAGING_APP)" destroy --all --force
-
-deploy-staging-secrets: build
-	npx cdk --app "$(STAGING_APP)" deploy Prices-staging-Secrets --require-approval broadening
-
-destroy-staging-secrets: build
-	npx cdk --app "$(STAGING_APP)" destroy Prices-staging-Secrets --force
-
-deploy-staging-compute: build
-	npx cdk --app "$(STAGING_APP)" deploy Prices-staging-Compute --require-approval broadening
-
-destroy-staging-compute: build
-	npx cdk --app "$(STAGING_APP)" destroy Prices-staging-Compute --force
-
-deploy-staging-apigateway: build
-	npx cdk --app "$(STAGING_APP)" deploy Prices-staging-ApiGateway --require-approval broadening
-
-destroy-staging-apigateway: build
-	npx cdk --app "$(STAGING_APP)" destroy Prices-staging-ApiGateway --force
-
-deploy-staging-eventbridge: build
-	npx cdk --app "$(STAGING_APP)" deploy Prices-staging-EventBridge --require-approval broadening
-
-destroy-staging-eventbridge: build
-	npx cdk --app "$(STAGING_APP)" destroy Prices-staging-EventBridge --force
-
-deploy-staging-observability: build
-	npx cdk --app "$(STAGING_APP)" deploy Prices-staging-Observability --require-approval broadening
-
-destroy-staging-observability: build
-	npx cdk --app "$(STAGING_APP)" destroy Prices-staging-Observability --force
-
 # --- Production ---
+# The only AWS environment. Initially deployed with conservative
+# test-sized parameters; production sizing is swapped in via
+# envs/production.json once the service is exercised in anger.
 
 synth-production: build
 	npx cdk --app "$(PRODUCTION_APP)" synth

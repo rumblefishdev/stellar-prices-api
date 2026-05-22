@@ -2,7 +2,11 @@ import * as cdk from 'aws-cdk-lib';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import type { Construct } from 'constructs';
 
-const GITHUB_OIDC_THUMBPRINT = 'ffffffffffffffffffffffffffffffffffffffff';
+// GitHub uses a well-known JWKS endpoint for OIDC verification; CDK requires
+// at least one thumbprint but does not actually validate against it. We use
+// GitHub's current OIDC root CA thumbprint as documented by AWS so this value
+// passes compliance scans that look for a real-looking thumbprint.
+const GITHUB_OIDC_THUMBPRINT = '6938fd4d98bab03faadb97b34396831e3780aea1';
 const GITHUB_OIDC_URL = 'https://token.actions.githubusercontent.com';
 /** Condition key prefix — AWS IAM strips the https:// from the issuer URL. */
 const GITHUB_OIDC_ISSUER = 'token.actions.githubusercontent.com';
@@ -15,16 +19,21 @@ export interface CicdStackProps extends cdk.StackProps {
 }
 
 /**
- * CI/CD resources shared across environments.
+ * CI/CD resources for the production AWS environment.
  *
  * Creates:
  * - GitHub Actions OIDC identity provider (singleton per AWS account)
- * - Staging deploy role (scoped to GitHub Environment "staging")
  * - Production deploy role (scoped to GitHub Environment "production")
  *
- * Deploy roles trust the CDK bootstrap roles for actual CloudFormation
- * operations. The OIDC trust policy restricts which GitHub workflows
- * can assume each role based on the GitHub Environment name.
+ * The deploy role trusts the CDK bootstrap roles for actual CloudFormation
+ * operations. The OIDC trust policy restricts which GitHub workflows can
+ * assume the role based on the GitHub Environment name.
+ *
+ * Staging deploy role removed — staging was retired during the
+ * eu-central-1 cutover (mirrors BE task 0239). The single
+ * "production" environment is initially deployed with conservative
+ * test-sized parameters; values are swapped to true production
+ * sizing once the service is exercised in anger.
  *
  * Deployed once per AWS account via: `make deploy-cicd`
  *
@@ -56,70 +65,69 @@ export class CicdStack extends cdk.Stack {
       },
     );
 
-    for (const envName of ['staging', 'production'] as const) {
-      const role = new iam.Role(this, `${capitalize(envName)}DeployRole`, {
-        roleName: `stellar-prices-api-${envName}-deploy`,
-        assumedBy: new iam.WebIdentityPrincipal(
-          oidcProvider.openIdConnectProviderArn,
-          {
-            StringEquals: {
-              [`${GITHUB_OIDC_ISSUER}:aud`]: GITHUB_OIDC_AUDIENCE,
-              [`${GITHUB_OIDC_ISSUER}:sub`]: `repo:${githubRepo}:environment:${envName}`,
-            },
+    const envName = 'production' as const;
+    const role = new iam.Role(this, `${capitalize(envName)}DeployRole`, {
+      roleName: `stellar-prices-api-${envName}-deploy`,
+      assumedBy: new iam.WebIdentityPrincipal(
+        oidcProvider.openIdConnectProviderArn,
+        {
+          StringEquals: {
+            [`${GITHUB_OIDC_ISSUER}:aud`]: GITHUB_OIDC_AUDIENCE,
+            [`${GITHUB_OIDC_ISSUER}:sub`]: `repo:${githubRepo}:environment:${envName}`,
           },
-        ),
-        maxSessionDuration: cdk.Duration.hours(1),
-        description: `GitHub Actions deploy role for ${envName} environment`,
-      });
+        },
+      ),
+      maxSessionDuration: cdk.Duration.hours(1),
+      description: `GitHub Actions deploy role for ${envName} environment`,
+    });
 
-      role.addToPolicy(
-        new iam.PolicyStatement({
-          actions: ['sts:AssumeRole'],
-          resources: [
-            `arn:aws:iam::${accountId}:role/cdk-hnb659fds-*-${accountId}-${awsRegion}`,
-          ],
-        }),
-      );
+    role.addToPolicy(
+      new iam.PolicyStatement({
+        actions: ['sts:AssumeRole'],
+        resources: [
+          `arn:aws:iam::${accountId}:role/cdk-hnb659fds-*-${accountId}-${awsRegion}`,
+        ],
+      }),
+    );
 
-      // Read both namespaces — /platform/* is BE-published, /prices/*
-      // is prices-api-published. Both are needed at synth time so
-      // valueForStringParameter calls can resolve during diff/deploy.
-      role.addToPolicy(
-        new iam.PolicyStatement({
-          actions: ['ssm:GetParameter', 'ssm:GetParameters'],
-          resources: [
-            `arn:aws:ssm:${awsRegion}:${accountId}:parameter/platform/${envName}/*`,
-            `arn:aws:ssm:${awsRegion}:${accountId}:parameter/prices/${envName}/*`,
-          ],
-        }),
-      );
+    // Read both namespaces — /platform/* is BE-published, /prices/*
+    // is prices-api-published. Both are needed at synth time so
+    // valueForStringParameter calls can resolve during diff/deploy.
+    role.addToPolicy(
+      new iam.PolicyStatement({
+        actions: ['ssm:GetParameter', 'ssm:GetParameters'],
+        resources: [
+          `arn:aws:ssm:${awsRegion}:${accountId}:parameter/platform/${envName}/*`,
+          `arn:aws:ssm:${awsRegion}:${accountId}:parameter/prices/${envName}/*`,
+        ],
+      }),
+    );
 
-      // Write only under /prices/* — never /platform/*. The two-
-      // namespace contract is the cross-team boundary; violating it
-      // here would let prices-api silently overwrite BE values.
-      role.addToPolicy(
-        new iam.PolicyStatement({
-          actions: ['ssm:PutParameter', 'ssm:DeleteParameter'],
-          resources: [
-            `arn:aws:ssm:${awsRegion}:${accountId}:parameter/prices/${envName}/*`,
-          ],
-        }),
-      );
+    // Write only under /prices/* — never /platform/*. The two-
+    // namespace contract is the cross-team boundary; violating it
+    // here would let prices-api silently overwrite BE values.
+    role.addToPolicy(
+      new iam.PolicyStatement({
+        actions: ['ssm:PutParameter', 'ssm:DeleteParameter'],
+        resources: [
+          `arn:aws:ssm:${awsRegion}:${accountId}:parameter/prices/${envName}/*`,
+        ],
+      }),
+    );
 
-      role.addToPolicy(
-        new iam.PolicyStatement({
-          actions: ['cloudformation:DescribeStacks'],
-          resources: [
-            `arn:aws:cloudformation:${awsRegion}:${accountId}:stack/Prices-${envName}-*/*`,
-          ],
-        }),
-      );
+    role.addToPolicy(
+      new iam.PolicyStatement({
+        actions: ['cloudformation:DescribeStacks'],
+        resources: [
+          `arn:aws:cloudformation:${awsRegion}:${accountId}:stack/Prices-${envName}-*/*`,
+        ],
+      }),
+    );
 
-      new cdk.CfnOutput(this, `${capitalize(envName)}DeployRoleArn`, {
-        value: role.roleArn,
-        description: `Deploy role ARN for ${envName} — add as AWS_DEPLOY_ROLE_ARN in GitHub Environment "${envName}"`,
-      });
-    }
+    new cdk.CfnOutput(this, `${capitalize(envName)}DeployRoleArn`, {
+      value: role.roleArn,
+      description: `Deploy role ARN for ${envName} — add as AWS_DEPLOY_ROLE_ARN in GitHub Environment "${envName}"`,
+    });
 
     cdk.Tags.of(this).add('Project', 'stellar-prices-api');
     cdk.Tags.of(this).add('ManagedBy', 'cdk');

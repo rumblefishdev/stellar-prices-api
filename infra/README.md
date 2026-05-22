@@ -70,23 +70,26 @@ account, **before** any GitHub Actions workflow can deploy anything:
 npm run infra:deploy:cicd
 ```
 
-CDK prints two CfnOutputs:
+CDK prints one CfnOutput:
 
-- `Prices-Cicd.StagingDeployRoleArn`
 - `Prices-Cicd.ProductionDeployRoleArn`
 
-### 3. Wire role ARNs into GitHub Environments
+### 3. Wire role ARN into the GitHub Environment
 
 In `https://github.com/rumblefishdev/stellar-prices-api/settings/environments`:
 
-- Create environment `staging`. Add secret `AWS_DEPLOY_ROLE_ARN` =
-  the staging output ARN.
 - Create environment `production`. Add secret `AWS_DEPLOY_ROLE_ARN` =
   the production output ARN. Add required reviewers if the team
   wants gated production deploys.
 
-The CI workflow (task 0008) consumes these secrets to assume the
-deploy roles via OIDC.
+Staging is intentionally absent — the eu-central-1 environment is
+initially deployed under the `production` name with conservative
+test-sized parameters (mirrors BE task 0239); production sizing is
+swapped in via `envs/production.json` once the service is
+exercised in anger.
+
+The CI workflow (task 0008) consumes this secret to assume the
+deploy role via OIDC.
 
 ## SSM Key Contract
 
@@ -124,29 +127,26 @@ From repo root:
 ```bash
 # One-time
 npm run infra:bootstrap         # CDK bootstrap (per AWS account + region)
-npm run infra:deploy:cicd       # CicdStack — OIDC + deploy roles
+npm run infra:deploy:cicd       # CicdStack — OIDC + deploy role
 
-# Per-env (staging / production)
-npm run infra:synth:staging     # Synth env template
-npm run infra:diff:staging      # Preview changes
-npm run infra:deploy:staging    # Deploy all env stacks
+# Production (the only AWS environment)
+npm run infra:synth:production  # Synth env template
+npm run infra:diff:production   # Preview changes
+npm run infra:deploy:production # Deploy all env stacks
 ```
-
-Same shape for production: `infra:synth:production`,
-`infra:diff:production`, `infra:deploy:production`.
 
 From `infra/`:
 
 ```bash
 make build
-make synth-staging
-make diff-staging
-make deploy-staging
-make deploy-staging-secrets     # single-stack scoped deploy
+make synth-production
+make diff-production
+make deploy-production
+make deploy-production-secrets  # single-stack scoped deploy
 ```
 
-Equivalent `production` and `*-{stack}` variants exist for every
-target — see `infra/Makefile`.
+Per-stack `deploy-production-{stack}` variants exist for every
+stack in the app — see `infra/Makefile`.
 
 ## Uploading the real mTLS PEMs
 
@@ -157,12 +157,12 @@ deploy:
 
 ```bash
 aws secretsmanager put-secret-value \
-    --secret-id prices/staging/clickhouse-mtls-cert \
-    --secret-string "$(cat path/to/staging-client.cert.pem)"
+    --secret-id prices/production/clickhouse-mtls-cert \
+    --secret-string "$(cat path/to/production-client.cert.pem)"
 
 aws secretsmanager put-secret-value \
-    --secret-id prices/staging/clickhouse-mtls-key \
-    --secret-string "$(cat path/to/staging-client.key.pem)"
+    --secret-id prices/production/clickhouse-mtls-key \
+    --secret-string "$(cat path/to/production-client.key.pem)"
 ```
 
 Subsequent `cdk deploy` invocations will NOT overwrite the uploaded
