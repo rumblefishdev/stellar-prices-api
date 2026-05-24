@@ -1,0 +1,15 @@
+[workspace]
+resolver = "3"
+members = ["packages/sdex-backfill"]
+
+[workspace.dependencies]
+stellar-xdr = { version = "=26.0.0", features = ["curr"] }
+xdr-parser = { git = "https://github.com/rumblefishdev/soroban-block-explorer.git", branch = "develop" }
+clickhouse = { version = "0.13", features = ["inserter"] }
+tokio = { version = "1", features = ["full"] }
+clap = { version = "4", features = ["derive", "env"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+serde = { version = "1", features = ["derive"] }
+rust_decimal = { version = "1", features = ["serde-with-str"] }
+thiserror = "2"
