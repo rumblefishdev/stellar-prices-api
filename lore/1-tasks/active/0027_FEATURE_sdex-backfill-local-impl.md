@@ -2,13 +2,13 @@
 id: "0027"
 title: "SDEX local-backfill impl — Cargo workspace + Rust CLI + schema migration per task 0012 / ADR 0005"
 type: FEATURE
-status: backlog
+status: active
 related_adr: ["0003", "0005"]
 related_tasks: ["0012", "0022", "0028"]
 tags: [layer-indexing, priority-high, effort-large, milestone-M1, local-backfill, workstation, rust, postgres, docker, sdex, stream-2]
 milestone: 1
 links:
-  - "../active/0012_FEATURE_design-prices-owned-backfill-fargate/notes/G-sdex-backfill-local-design.md"
+  - "../archive/0012_FEATURE_design-prices-owned-backfill-fargate/notes/G-sdex-backfill-local-design.md"
   - "../../2-adrs/0005_stream2-sdex-local-workstation-backfill.md"
   - "../../2-adrs/0003_price-ohlcv-pk-includes-quote-asset-id.md"
   - "../archive/0022_RESEARCH_sdex-filter-and-extraction-spec/notes/G-sdex-filter-strategy.md"
@@ -32,6 +32,11 @@ history:
       Rust CLI, local Postgres (Docker), schema migrations, runbook.
       Blocked-on-0011 removed — local backfill needs no CDK. Cloud
       push moved out to new task 0028.
+  - date: 2026-05-24
+    status: active
+    who: okarcz
+    note: >
+      Activated — SDEX local-backfill impl starts. Unblocked per ADR 0005.
 ---
 
 # SDEX local-backfill impl — Cargo workspace + Rust CLI + schema migration
