@@ -7,10 +7,10 @@ CREATE DATABASE IF NOT EXISTS prices;
 -- §3.1 — Asset registry (ReplacingMergeTree, last-write-wins on updated_at)
 CREATE TABLE IF NOT EXISTS prices.assets (
     asset_id         UInt32,
-    asset_code       FixedString(12),
-    asset_type       Enum8('classic' = 1, 'soroban' = 2),
-    issuer_address   FixedString(56),
-    contract_address FixedString(56),
+    asset_code       String,
+    asset_type       String,
+    issuer_address   String        DEFAULT '',
+    contract_address String        DEFAULT '',
     home_domain      String        DEFAULT '',
     is_active        UInt8         DEFAULT 1,
     created_at       DateTime      DEFAULT now(),

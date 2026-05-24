@@ -1,12 +1,23 @@
 use std::collections::HashSet;
 
 use clickhouse::Client;
+use rust_decimal::Decimal;
 use serde::Serialize;
 use tracing::info;
 
 use crate::bucket::OhlcvCandle;
 use crate::canonical::{AssetIdentity, AssetRegistry};
 use crate::error::BackfillError;
+
+fn decimal_to_i128(d: Decimal) -> i128 {
+    let scale = d.scale();
+    let mantissa = d.mantissa();
+    if scale <= 14 {
+        mantissa * 10i128.pow(14 - scale)
+    } else {
+        mantissa / 10i128.pow(scale - 14)
+    }
+}
 
 pub struct Sink {
     client: Client,
@@ -63,13 +74,13 @@ impl Sink {
                     asset_id: candle.asset_id,
                     quote_asset_id: candle.quote_asset_id,
                     source: "sdex".to_string(),
-                    open: candle.open.to_string(),
-                    high: candle.high.to_string(),
-                    low: candle.low.to_string(),
-                    close: candle.close.to_string(),
-                    volume_base: candle.volume_base.to_string(),
-                    volume_quote_usd: candle.volume_quote.to_string(),
-                    vwap: candle.vwap.to_string(),
+                    open: decimal_to_i128(candle.open),
+                    high: decimal_to_i128(candle.high),
+                    low: decimal_to_i128(candle.low),
+                    close: decimal_to_i128(candle.close),
+                    volume_base: decimal_to_i128(candle.volume_base),
+                    volume_quote_usd: decimal_to_i128(candle.volume_quote),
+                    vwap: decimal_to_i128(candle.vwap),
                     trade_count: candle.trade_count,
                     version: candle.version,
                 })
@@ -125,13 +136,13 @@ struct OhlcvRow {
     asset_id: u32,
     quote_asset_id: u32,
     source: String,
-    open: String,
-    high: String,
-    low: String,
-    close: String,
-    volume_base: String,
-    volume_quote_usd: String,
-    vwap: String,
+    open: i128,
+    high: i128,
+    low: i128,
+    close: i128,
+    volume_base: i128,
+    volume_quote_usd: i128,
+    vwap: i128,
     trade_count: u32,
     version: u64,
 }
