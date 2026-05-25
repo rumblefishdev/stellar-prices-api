@@ -1,6 +1,11 @@
 [workspace]
 resolver = "3"
-members = ["packages/sdex-backfill"]
+members = [
+    "packages/sdex-backfill",
+    "packages/extractors-core",
+    "packages/phoenix-extractor",
+    "packages/ledger-processor",
+]
 
 [workspace.dependencies]
 stellar-xdr = { version = "=26.0.0", features = ["curr"] }

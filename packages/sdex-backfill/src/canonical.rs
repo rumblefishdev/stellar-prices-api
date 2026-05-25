@@ -79,7 +79,10 @@ impl AssetRegistry {
             next_id = next_id.max(id + 1);
             by_identity.insert(identity, id);
         }
-        Self { by_identity, next_id }
+        Self {
+            by_identity,
+            next_id,
+        }
     }
 
     pub fn get_or_assign(&mut self, identity: &AssetIdentity) -> u32 {

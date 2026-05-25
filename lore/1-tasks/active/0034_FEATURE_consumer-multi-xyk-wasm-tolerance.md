@@ -80,9 +80,85 @@ and add a runtime warning if an unrecognized hash appears.
 
 ## Acceptance Criteria
 
-- [ ] Consumer's Phoenix venue lookup does not silently drop pools
+- [x] Consumer's Phoenix venue lookup does not silently drop pools
       whose WASM hash differs from the most common XYK build.
-- [ ] Classifier documented as `pool_type + event_count`, with a unit
+- [x] Classifier documented as `pool_type + event_count`, with a unit
       test covering both XYK pool variants by config-fixture.
 - [ ] PHO/USDC swaps (pool `CD5XNKK3...IAA`) verified end-to-end
-      through the consumer in a staging run.
+      through the consumer in a staging run. (deferred — requires live environment)
+
+## Implementation Notes
+
+### Crates created
+
+This task also delivered the 0037 skeleton as a prerequisite since no
+consumer code existed. Three new workspace members under `packages/`:
+
+| Crate | Path | Role |
+|-------|------|------|
+| `extractors-core` | `packages/extractors-core` | `SwapExtractor` trait, `SorobanEventRow`, `TaggedValue`, `TradeRow`, `Venue` enum — transcribed from 0018 Appendix A |
+| `phoenix-extractor` | `packages/phoenix-extractor` | `PhoenixPoolRegistry` (contract_id → pool_type lookup) + `PhoenixXykExtractor` (8-event grouping decoder) |
+| `ledger-processor` | `packages/ledger-processor` | lib + stub binary; `dispatch()` routes by venue, then `(pool_type, event_count)` for Phoenix |
+
+### Classifier design
+
+`PhoenixPoolRegistry` keys lookup by **contract_id** and stores
+`pool_type: u32` from the factory's `query_config()`. WASM hash is
+stored as `Option<[u8; 32]>` metadata but is **never consulted for
+extractor selection**. Routing logic in `dispatch_phoenix()`:
+
+- `pool_type == 0` AND `rows.len() >= 8` → `PhoenixXykExtractor`
+- `pool_type != 0` AND `rows.len() >= 6` → stable path (stub, no
+  mainnet stable pools exist yet per 0032)
+
+This survives future Phoenix XYK rebuilds without code changes.
+
+### Tests (14 total)
+
+**phoenix-extractor (8 tests):**
+- Registry fixture construction + lookup for both WASM variants
+- Proof that different WASM hashes both resolve as XYK via pool_type
+- XYK extractor: 8-event group decode, PHO/USDC alt-WASM pool,
+  insufficient rows rejection, unordered field tolerance
+
+**ledger-processor (6 tests):**
+- Dispatch routes XLM/USDC (common WASM) correctly
+- Dispatch routes PHO/USDC (alt WASM) identically
+- Explicit proof that dispatch uses pool_type, not WASM hash
+- Stable pool (pool_type != 0) returns error (intentionally unimplemented)
+- Unknown venue skipped, empty rows return empty
+
+### CI
+
+Added `.github/workflows/rust.yml` — runs `cargo fmt`, `cargo check`,
+`cargo test`, `cargo clippy` on PRs touching `packages/` or `Cargo.*`.
+
+## Design Decisions
+
+### From Plan
+
+1. **`pool_type + event_count` classifier**: per 0032 S-note §"So what?"
+   recommendation. WASM hash stored but never used for routing.
+
+2. **Per-venue extractor trait**: `SwapExtractor` with
+   `extract(&[SorobanEventRow]) -> ExtractResult` per 0018 Appendix A.
+
+### Emerged
+
+3. **Absorbed 0037 skeleton into this task**: no consumer code existed,
+   so the 0037 crate layout was a prerequisite. Built the minimum
+   skeleton (3 crates) needed for 0034's classifier to compile and test.
+
+4. **Field-name-based extraction over positional**: the XYK extractor
+   matches fields by `topic[1]` string name rather than relying on
+   emission order. This tolerates reordered events within a group
+   (tested explicitly).
+
+5. **`TaggedValue` enum for CH-level data**: models BE's tagged-JSON
+   encoding (`type` + `value`) from `R-be-storage-format.md` rather
+   than raw XDR `ScVal`. This is what the consumer actually reads from
+   ClickHouse.
+
+6. **Scoped clippy in CI**: runs clippy only on the three new crates,
+   not workspace-wide, because `sdex-backfill` has pre-existing clippy
+   issues unrelated to this task.

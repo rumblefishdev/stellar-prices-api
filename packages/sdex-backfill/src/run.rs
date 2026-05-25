@@ -24,7 +24,9 @@ pub async fn execute(
     tokio::fs::create_dir_all(temp_dir).await?;
 
     preflight_aws().await;
-    sink.preflight().await.unwrap_or_else(|e| panic!("pre-flight: sink unreachable: {e}"));
+    sink.preflight()
+        .await
+        .unwrap_or_else(|e| panic!("pre-flight: sink unreachable: {e}"));
     info!("pre-flight: all checks passed");
 
     let partitions = partitions_for_range(start, end);
@@ -41,7 +43,8 @@ pub async fn execute(
         .collect();
 
     info!(
-        start, end,
+        start,
+        end,
         total_partitions = partitions.len(),
         already_done = partitions.len() - todo.len(),
         to_process = todo.len(),
@@ -65,7 +68,10 @@ pub async fn execute(
         SyncOutcome::Complete
     );
     if !current_complete {
-        warn!(partition = todo[0].start, "first partition S3 incomplete — will skip");
+        warn!(
+            partition = todo[0].start,
+            "first partition S3 incomplete — will skip"
+        );
         partitions_skipped_s3 += 1;
     }
 
@@ -74,9 +80,9 @@ pub async fn execute(
             if let Some(next) = todo.get(i + 1) {
                 let next = (*next).clone();
                 let temp = temp_dir.to_path_buf();
-                Some(tokio::spawn(async move {
-                    sync_partition(&next, &temp).await
-                }))
+                Some(tokio::spawn(
+                    async move { sync_partition(&next, &temp).await },
+                ))
             } else {
                 None
             };
@@ -99,7 +105,10 @@ pub async fn execute(
             totals.candles_written += stats.candles_written;
             totals.total_bytes += stats.total_bytes;
         } else {
-            info!(partition = partition.start, "skipping S3-incomplete partition");
+            info!(
+                partition = partition.start,
+                "skipping S3-incomplete partition"
+            );
         }
 
         if !keep_partitions {

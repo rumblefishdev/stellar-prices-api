@@ -1,0 +1,42 @@
+name: Rust CI
+
+on:
+  pull_request:
+    paths:
+      - "packages/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/rust.yml"
+  push:
+    branches: [develop, master]
+    paths:
+      - "packages/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/rust.yml"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt
+        run: cargo fmt --all -- --check
+
+      - name: cargo check
+        run: cargo check --workspace
+
+      - name: cargo test
+        run: cargo test --workspace
+
+      # Scoped to new crates — sdex-backfill has pre-existing clippy issues.
+      - name: cargo clippy
+        run: cargo clippy -p extractors-core -p phoenix-extractor -p ledger-processor -- -D warnings

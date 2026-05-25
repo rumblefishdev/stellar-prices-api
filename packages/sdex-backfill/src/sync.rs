@@ -32,7 +32,8 @@ pub async fn sync_partition(
     if let Some((file_count, total_bytes)) = local_partition_complete(&local).await? {
         info!(
             partition = partition.start,
-            file_count, total_bytes,
+            file_count,
+            total_bytes,
             "partition local folder already complete — skipping aws s3 sync"
         );
         return Ok(SyncOutcome::Complete);
@@ -47,7 +48,8 @@ pub async fn sync_partition(
         info!(
             partition = partition.start,
             sync_duration_ms = duration.as_millis(),
-            file_count, total_bytes,
+            file_count,
+            total_bytes,
             "partition sync complete"
         );
         return Ok(SyncOutcome::Complete);
@@ -78,7 +80,10 @@ pub async fn sync_partition(
     run_sync_once(partition, &local).await?;
     let (file_count_retry, _) = dir_stats(&local).await?;
     if file_count_retry == PARTITION_SIZE as usize {
-        info!(partition = partition.start, "partition sync complete after retry");
+        info!(
+            partition = partition.start,
+            "partition sync complete after retry"
+        );
         return Ok(SyncOutcome::Complete);
     }
 
@@ -113,10 +118,7 @@ async fn local_partition_complete(dir: &Path) -> Result<Option<(usize, u64)>, Ba
     }
 }
 
-async fn run_sync_with_retry(
-    partition: &Partition,
-    local: &Path,
-) -> Result<(), BackfillError> {
+async fn run_sync_with_retry(partition: &Partition, local: &Path) -> Result<(), BackfillError> {
     let mut delay = RETRY_BASE_DELAY;
     for attempt in 1..=RETRY_ATTEMPTS {
         match run_sync_once(partition, local).await {
