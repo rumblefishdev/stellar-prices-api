@@ -10,6 +10,8 @@ use phoenix_extractor::{
 pub enum DispatchError {
     #[error("extract error: {0}")]
     Extract(#[from] ExtractError),
+    #[error("pool {contract_id} not found in Phoenix registry")]
+    UnknownPool { contract_id: String },
     #[error(
         "unknown Phoenix pool_type {pool_type} with {event_count} events for pool {contract_id}"
     )]
@@ -18,6 +20,8 @@ pub enum DispatchError {
         pool_type: u32,
         event_count: usize,
     },
+    #[error("venue {venue:?} extractor not yet implemented for pool {contract_id}")]
+    VenueNotImplemented { venue: Venue, contract_id: String },
 }
 
 /// Route a batch of contiguous Soroban event rows for a single
@@ -35,10 +39,8 @@ pub fn dispatch_phoenix(
     let contract_id = &rows[0].contract_id;
     let pool = registry
         .lookup(contract_id)
-        .ok_or_else(|| DispatchError::UnknownPhoenixShape {
+        .ok_or_else(|| DispatchError::UnknownPool {
             contract_id: contract_id.clone(),
-            pool_type: u32::MAX,
-            event_count: rows.len(),
         })?;
 
     match (pool.pool_type, rows.len()) {
@@ -77,12 +79,14 @@ pub fn dispatch(
 
     match venue {
         Some(Venue::Phoenix) => dispatch_phoenix(rows, phoenix_registry),
-        Some(Venue::Soroswap) => {
-            todo!("Soroswap extractor not yet implemented")
-        }
-        Some(Venue::Aquarius) => {
-            todo!("Aquarius extractor not yet implemented")
-        }
+        Some(Venue::Soroswap) => Err(DispatchError::VenueNotImplemented {
+            venue: Venue::Soroswap,
+            contract_id: contract_id.clone(),
+        }),
+        Some(Venue::Aquarius) => Err(DispatchError::VenueNotImplemented {
+            venue: Venue::Aquarius,
+            contract_id: contract_id.clone(),
+        }),
         None => Ok(vec![]),
     }
 }
