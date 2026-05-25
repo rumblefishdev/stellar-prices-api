@@ -4,8 +4,9 @@ version = "0.1.0"
 edition = "2024"
 description = "Phoenix AMM swap extractor — XYK (8-event) and stable (6-event) grouping decoders"
 
+[features]
+test-fixtures = []
+
 [dependencies]
 extractors-core = { path = "../extractors-core" }
 thiserror = { workspace = true }
-
-[dev-dependencies]

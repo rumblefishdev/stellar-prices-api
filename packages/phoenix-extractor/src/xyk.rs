@@ -75,47 +75,7 @@ impl SwapExtractor for PhoenixXykExtractor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use extractors_core::TaggedValue;
-
-    const XLM_USDC_POOL: &str = "CBHCRSVX3ZZ7EGTSYMKPEFGZNWRVCSESQR3UABET4MIW52N4EVU6BIZX";
-    const PHO_USDC_POOL: &str = "CD5XNKK3B6BEF2N7ULNHHGAMOKZ7P6456BFNIHRF4WNTEDKBRWAE7IAA";
-    const TRADER: &str = "GDCRZPZYBZ24RHRO3WBPJGFDL7NDFKUQBS3ZDB6YGBJB3TGKMFYBQ3LD";
-    const XLM_SAC: &str = "CAS3J7GYLGXMF6TDJBBYYSE3HQ6BBSMLNUQ34T6TZMYMW2EVH34XOWMA";
-    const USDC_SAC: &str = "CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75";
-    const TX_HASH: &str =
-        "559498bdf567340c0780b80f2bfa07bcc58713fc328e659ef72461849a326aa8";
-
-    fn make_phoenix_xyk_events(pool: &str, base_index: u32) -> Vec<SorobanEventRow> {
-        let fields: &[(&str, TaggedValue)] = &[
-            ("sender", TaggedValue::Address(TRADER.into())),
-            ("sell_token", TaggedValue::Address(XLM_SAC.into())),
-            ("offer_amount", TaggedValue::I128(11659417676)),
-            (
-                "actual received amount",
-                TaggedValue::I128(11659417676),
-            ),
-            ("buy_token", TaggedValue::Address(USDC_SAC.into())),
-            ("return_amount", TaggedValue::I128(1857322909)),
-            ("spread_amount", TaggedValue::I128(503808)),
-            ("referral_fee_amount", TaggedValue::I128(0)),
-        ];
-
-        fields
-            .iter()
-            .enumerate()
-            .map(|(i, (name, data))| SorobanEventRow {
-                contract_id: pool.to_string(),
-                transaction_id: TX_HASH.to_string(),
-                ledger_sequence: 62460522,
-                event_index: base_index + i as u32,
-                topics: vec![
-                    TaggedValue::String("swap".into()),
-                    TaggedValue::String((*name).into()),
-                ],
-                data: data.clone(),
-            })
-            .collect()
-    }
+    use crate::test_fixtures::*;
 
     #[test]
     fn xyk_extractor_decodes_8_event_group() {
@@ -159,7 +119,7 @@ mod tests {
     #[test]
     fn xyk_extractor_tolerates_unordered_fields() {
         let mut rows = make_phoenix_xyk_events(XLM_USDC_POOL, 0);
-        rows.swap(1, 4); // swap sell_token and buy_token positions
+        rows.swap(1, 4);
         let result = PhoenixXykExtractor.extract(&rows).unwrap();
 
         let trade = &result.trades[0];

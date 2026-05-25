@@ -46,13 +46,9 @@ pub fn extract_trades(lcm: &LedgerCloseMeta) -> Vec<RawTrade> {
             };
 
             for (claim_idx, claim) in claims.iter().enumerate() {
-                if let Some(trade) = claim_to_raw_trade(
-                    claim,
-                    sequence,
-                    closed_at,
-                    op_idx as u16,
-                    claim_idx as u16,
-                ) {
+                if let Some(trade) =
+                    claim_to_raw_trade(claim, sequence, closed_at, op_idx as u16, claim_idx as u16)
+                {
                     trades.push(trade);
                 }
             }
@@ -65,9 +61,7 @@ pub fn extract_trades(lcm: &LedgerCloseMeta) -> Vec<RawTrade> {
 fn extract_claims(tr: &OperationResultTr) -> &[ClaimAtom] {
     use OperationResultTr::*;
     match tr {
-        ManageSellOffer(stellar_xdr::curr::ManageSellOfferResult::Success(s)) => {
-            &s.offers_claimed
-        }
+        ManageSellOffer(stellar_xdr::curr::ManageSellOfferResult::Success(s)) => &s.offers_claimed,
         ManageBuyOffer(stellar_xdr::curr::ManageBuyOfferResult::Success(s)) => &s.offers_claimed,
         CreatePassiveSellOffer(stellar_xdr::curr::ManageSellOfferResult::Success(s)) => {
             &s.offers_claimed

@@ -92,10 +92,14 @@ impl CandleAccumulator {
     }
 
     pub fn flush_all(&mut self) -> Vec<OhlcvCandle> {
-        let mut flushed: Vec<OhlcvCandle> = self.candles.drain().map(|(_, mut c)| {
-            finalise_vwap(&mut c);
-            c
-        }).collect();
+        let mut flushed: Vec<OhlcvCandle> = self
+            .candles
+            .drain()
+            .map(|(_, mut c)| {
+                finalise_vwap(&mut c);
+                c
+            })
+            .collect();
         flushed.sort_by_key(|c| (c.minute_start, c.asset_id, c.quote_asset_id));
         flushed
     }

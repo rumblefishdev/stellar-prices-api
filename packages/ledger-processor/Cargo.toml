@@ -16,3 +16,6 @@ path = "src/main.rs"
 extractors-core = { path = "../extractors-core" }
 phoenix-extractor = { path = "../phoenix-extractor" }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+phoenix-extractor = { path = "../phoenix-extractor", features = ["test-fixtures"] }

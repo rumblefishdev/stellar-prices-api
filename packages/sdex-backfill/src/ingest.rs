@@ -32,7 +32,10 @@ pub async fn index_partition(
     registry: &mut AssetRegistry,
 ) -> Result<PartitionStats, BackfillError> {
     let (first, last) = partition.clamped(range_start, range_end);
-    info!(partition = partition.start, first, last, "partition indexing started");
+    info!(
+        partition = partition.start,
+        first, last, "partition indexing started"
+    );
 
     let wall_start = Instant::now();
     let mut stats = PartitionStats::default();
@@ -105,15 +108,9 @@ pub async fn index_partition(
 
 fn ledger_minute(lcm: &stellar_xdr::curr::LedgerCloseMeta) -> u32 {
     let closed_at = match lcm {
-        stellar_xdr::curr::LedgerCloseMeta::V0(v) => {
-            v.ledger_header.header.scp_value.close_time.0
-        }
-        stellar_xdr::curr::LedgerCloseMeta::V1(v) => {
-            v.ledger_header.header.scp_value.close_time.0
-        }
-        stellar_xdr::curr::LedgerCloseMeta::V2(v) => {
-            v.ledger_header.header.scp_value.close_time.0
-        }
+        stellar_xdr::curr::LedgerCloseMeta::V0(v) => v.ledger_header.header.scp_value.close_time.0,
+        stellar_xdr::curr::LedgerCloseMeta::V1(v) => v.ledger_header.header.scp_value.close_time.0,
+        stellar_xdr::curr::LedgerCloseMeta::V2(v) => v.ledger_header.header.scp_value.close_time.0,
     };
     ((closed_at as u32) / 60) * 60
 }

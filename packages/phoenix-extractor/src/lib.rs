@@ -8,3 +8,6 @@ pub const PHOENIX_XYK_EVENT_COUNT: usize = 8;
 pub const PHOENIX_STABLE_EVENT_COUNT: usize = 6;
 
 pub const POOL_TYPE_XYK: u32 = 0;
+
+#[cfg(any(test, feature = "test-fixtures"))]
+pub mod test_fixtures;

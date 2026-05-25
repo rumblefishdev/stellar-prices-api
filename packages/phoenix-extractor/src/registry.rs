@@ -35,12 +35,7 @@ impl PhoenixPoolRegistry {
         );
     }
 
-    pub fn register_with_wasm(
-        &mut self,
-        contract_id: String,
-        pool_type: u32,
-        wasm_hash: [u8; 32],
-    ) {
+    pub fn register_with_wasm(&mut self, contract_id: String, pool_type: u32, wasm_hash: [u8; 32]) {
         self.pools.insert(
             contract_id.clone(),
             PhoenixPool {
@@ -85,34 +80,11 @@ impl PhoenixPoolRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    const XLM_USDC_POOL: &str = "CBHCRSVX3ZZ7EGTSYMKPEFGZNWRVCSESQR3UABET4MIW52N4EVU6BIZX";
-    const PHO_USDC_POOL: &str = "CD5XNKK3B6BEF2N7ULNHHGAMOKZ7P6456BFNIHRF4WNTEDKBRWAE7IAA";
-
-    fn common_xyk_wasm_hash() -> [u8; 32] {
-        let mut h = [0u8; 32];
-        h[0] = 0x16;
-        h[1] = 0x7a;
-        h[2] = 0xb4;
-        h[3] = 0x14;
-        h
-    }
-
-    fn alt_xyk_wasm_hash() -> [u8; 32] {
-        let mut h = [0u8; 32];
-        h[0] = 0x13;
-        h[1] = 0xb1;
-        h[2] = 0x58;
-        h[3] = 0x65;
-        h
-    }
+    use crate::test_fixtures::*;
 
     #[test]
     fn registry_from_fixture_returns_correct_pool_type() {
-        let reg = PhoenixPoolRegistry::from_fixture(&[
-            (XLM_USDC_POOL, 0),
-            (PHO_USDC_POOL, 0),
-        ]);
+        let reg = PhoenixPoolRegistry::from_fixture(&[(XLM_USDC_POOL, 0), (PHO_USDC_POOL, 0)]);
 
         let xlm = reg.lookup(XLM_USDC_POOL).expect("XLM/USDC pool");
         assert_eq!(xlm.pool_type, 0);
@@ -147,10 +119,7 @@ mod tests {
 
     #[test]
     fn pool_count_reflects_registered_entries() {
-        let reg = PhoenixPoolRegistry::from_fixture(&[
-            (XLM_USDC_POOL, 0),
-            (PHO_USDC_POOL, 0),
-        ]);
+        let reg = PhoenixPoolRegistry::from_fixture(&[(XLM_USDC_POOL, 0), (PHO_USDC_POOL, 0)]);
         assert_eq!(reg.pool_count(), 2);
     }
 }

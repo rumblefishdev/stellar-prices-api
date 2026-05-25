@@ -25,14 +25,15 @@ impl Sink {
     }
 
     pub async fn preflight(&self) -> Result<(), BackfillError> {
-        self.client
-            .query("SELECT 1")
-            .execute()
-            .await?;
+        self.client.query("SELECT 1").execute().await?;
         Ok(())
     }
 
-    pub async fn load_completed(&self, start: u32, end: u32) -> Result<HashSet<u32>, BackfillError> {
+    pub async fn load_completed(
+        &self,
+        start: u32,
+        end: u32,
+    ) -> Result<HashSet<u32>, BackfillError> {
         let rows = self
             .client
             .query(
@@ -46,7 +47,8 @@ impl Sink {
 
         let set: HashSet<u32> = rows.into_iter().collect();
         info!(
-            start, end,
+            start,
+            end,
             completed = set.len(),
             "loaded completed ledgers from backfill_sdex_ledgers"
         );
@@ -56,9 +58,7 @@ impl Sink {
     pub async fn load_assets(&self) -> Result<Vec<(u32, AssetIdentity)>, BackfillError> {
         let rows = self
             .client
-            .query(
-                "SELECT asset_id, asset_code, issuer_address FROM prices.assets",
-            )
+            .query("SELECT asset_id, asset_code, issuer_address FROM prices.assets")
             .fetch_all::<ExistingAssetRow>()
             .await?;
 
@@ -77,7 +77,10 @@ impl Sink {
             })
             .collect();
 
-        info!(existing_assets = assets.len(), "loaded asset registry from ClickHouse");
+        info!(
+            existing_assets = assets.len(),
+            "loaded asset registry from ClickHouse"
+        );
         Ok(assets)
     }
 
@@ -86,9 +89,7 @@ impl Sink {
             return Ok(());
         }
 
-        let mut insert = self
-            .client
-            .insert("prices.price_ohlcv_1m")?;
+        let mut insert = self.client.insert("prices.price_ohlcv_1m")?;
 
         for candle in candles {
             insert
@@ -119,9 +120,7 @@ impl Sink {
         for (identity, &id) in registry.assets() {
             let (asset_code, asset_type, issuer_address) = match identity {
                 AssetIdentity::Native => ("XLM".to_string(), "classic", String::new()),
-                AssetIdentity::Credit { code, issuer } => {
-                    (code.clone(), "classic", issuer.clone())
-                }
+                AssetIdentity::Credit { code, issuer } => (code.clone(), "classic", issuer.clone()),
             };
 
             insert
