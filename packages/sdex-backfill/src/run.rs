@@ -56,9 +56,18 @@ pub async fn execute(
     let run_start = Instant::now();
     let mut totals = PartitionStats::default();
     let mut partitions_skipped_s3: usize = 0;
-    let mut registry = AssetRegistry::new();
 
-    sync_partition(todo[0], temp_dir).await?;
+    let existing_assets = sink.load_assets().await?;
+    let mut registry = AssetRegistry::from_existing(existing_assets);
+
+    let mut current_complete = matches!(
+        sync_partition(todo[0], temp_dir).await?,
+        SyncOutcome::Complete
+    );
+    if !current_complete {
+        warn!(partition = todo[0].start, "first partition S3 incomplete — will skip");
+        partitions_skipped_s3 += 1;
+    }
 
     for (i, partition) in todo.iter().enumerate() {
         let next_handle: Option<JoinHandle<Result<SyncOutcome, BackfillError>>> =
@@ -72,22 +81,26 @@ pub async fn execute(
                 None
             };
 
-        let stats = index_partition(
-            partition,
-            temp_dir,
-            sink,
-            start,
-            end,
-            &completed,
-            &mut registry,
-        )
-        .await?;
+        if current_complete {
+            let stats = index_partition(
+                partition,
+                temp_dir,
+                sink,
+                start,
+                end,
+                &completed,
+                &mut registry,
+            )
+            .await?;
 
-        totals.indexed += stats.indexed;
-        totals.skipped += stats.skipped;
-        totals.trade_ticks += stats.trade_ticks;
-        totals.candles_written += stats.candles_written;
-        totals.total_bytes += stats.total_bytes;
+            totals.indexed += stats.indexed;
+            totals.skipped += stats.skipped;
+            totals.trade_ticks += stats.trade_ticks;
+            totals.candles_written += stats.candles_written;
+            totals.total_bytes += stats.total_bytes;
+        } else {
+            info!(partition = partition.start, "skipping S3-incomplete partition");
+        }
 
         if !keep_partitions {
             let local = partition.local_folder(temp_dir);
@@ -98,15 +111,18 @@ pub async fn execute(
             }
         }
 
-        if let Some(h) = next_handle {
+        current_complete = if let Some(h) = next_handle {
             match h.await.expect("prefetch task panicked")? {
-                SyncOutcome::Complete => {}
+                SyncOutcome::Complete => true,
                 SyncOutcome::S3Incomplete { local, s3, need } => {
                     warn!(local, s3, need, "next partition S3 incomplete — will skip");
                     partitions_skipped_s3 += 1;
+                    false
                 }
             }
-        }
+        } else {
+            false
+        };
     }
 
     sink.write_assets(&registry).await?;

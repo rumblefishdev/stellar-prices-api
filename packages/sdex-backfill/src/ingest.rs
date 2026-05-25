@@ -46,13 +46,13 @@ pub async fn index_partition(
         }
 
         let path = partition.local_ledger_path(seq, temp_dir);
-        assert!(
-            path.exists(),
-            "ledger file missing: partition={} seq={} path={}",
-            partition.start,
-            seq,
-            path.display()
-        );
+        if !path.exists() {
+            return Err(BackfillError::LedgerFileMissing {
+                partition: partition.start,
+                seq,
+                path: path.display().to_string(),
+            });
+        }
 
         let compressed = tokio::fs::read(&path).await?;
         stats.total_bytes += compressed.len() as u64;

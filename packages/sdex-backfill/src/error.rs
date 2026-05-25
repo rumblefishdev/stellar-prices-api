@@ -26,6 +26,13 @@ pub enum BackfillError {
         source: io::Error,
     },
 
+    #[error("ledger file missing: partition={partition} seq={seq} path={path}")]
+    LedgerFileMissing {
+        partition: u32,
+        seq: u32,
+        path: String,
+    },
+
     #[error("xdr parse: {0}")]
     Parse(#[from] xdr_parser::ParseError),
 

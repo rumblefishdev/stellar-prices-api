@@ -72,11 +72,14 @@ pub struct AssetRegistry {
 }
 
 impl AssetRegistry {
-    pub fn new() -> Self {
-        Self {
-            by_identity: HashMap::new(),
-            next_id: 1,
+    pub fn from_existing(existing: Vec<(u32, AssetIdentity)>) -> Self {
+        let mut next_id = 1u32;
+        let mut by_identity = HashMap::with_capacity(existing.len());
+        for (id, identity) in existing {
+            next_id = next_id.max(id + 1);
+            by_identity.insert(identity, id);
         }
+        Self { by_identity, next_id }
     }
 
     pub fn get_or_assign(&mut self, identity: &AssetIdentity) -> u32 {

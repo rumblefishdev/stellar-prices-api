@@ -5,7 +5,7 @@ Mirrors the block explorer's `backfill-runner` pattern (BE ADR 0010).
 
 ## Prerequisites
 
-- **Rust toolchain** (stable, ≥ 1.75)
+- **Rust toolchain** (stable, ≥ 1.85)
 - **AWS CLI** (`aws --version`) — no credentials needed; reads an anonymous public bucket
 - **Docker** + **Docker Compose** — for local ClickHouse
 

@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use clickhouse::Client;
 use rust_decimal::Decimal;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tracing::info;
 
 use crate::bucket::OhlcvCandle;
@@ -10,13 +10,8 @@ use crate::canonical::{AssetIdentity, AssetRegistry};
 use crate::error::BackfillError;
 
 fn decimal_to_i128(d: Decimal) -> i128 {
-    let scale = d.scale();
-    let mantissa = d.mantissa();
-    if scale <= 14 {
-        mantissa * 10i128.pow(14 - scale)
-    } else {
-        mantissa / 10i128.pow(scale - 14)
-    }
+    let d = d.round_dp(14);
+    d.mantissa() * 10i128.pow(14 - d.scale())
 }
 
 pub struct Sink {
@@ -56,6 +51,34 @@ impl Sink {
             "loaded completed ledgers from backfill_sdex_ledgers"
         );
         Ok(set)
+    }
+
+    pub async fn load_assets(&self) -> Result<Vec<(u32, AssetIdentity)>, BackfillError> {
+        let rows = self
+            .client
+            .query(
+                "SELECT asset_id, asset_code, issuer_address FROM prices.assets",
+            )
+            .fetch_all::<ExistingAssetRow>()
+            .await?;
+
+        let assets: Vec<(u32, AssetIdentity)> = rows
+            .into_iter()
+            .map(|r| {
+                let identity = if r.asset_code == "XLM" && r.issuer_address.is_empty() {
+                    AssetIdentity::Native
+                } else {
+                    AssetIdentity::Credit {
+                        code: r.asset_code,
+                        issuer: r.issuer_address,
+                    }
+                };
+                (r.asset_id, identity)
+            })
+            .collect();
+
+        info!(existing_assets = assets.len(), "loaded asset registry from ClickHouse");
+        Ok(assets)
     }
 
     pub async fn write_candles(&self, candles: &[OhlcvCandle]) -> Result<(), BackfillError> {
@@ -161,4 +184,11 @@ struct AssetRow {
 #[derive(Debug, Serialize, clickhouse::Row)]
 struct LedgerRow {
     sequence: u32,
+}
+
+#[derive(Debug, Deserialize, clickhouse::Row)]
+struct ExistingAssetRow {
+    asset_id: u32,
+    asset_code: String,
+    issuer_address: String,
 }
