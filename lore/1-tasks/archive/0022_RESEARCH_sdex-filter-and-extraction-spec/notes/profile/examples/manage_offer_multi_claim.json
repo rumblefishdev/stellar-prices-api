@@ -1,0 +1,83 @@
+{
+  "claim_count": 4,
+  "claims": [
+    {
+      "atom": {
+        "amount_bought_stroops": 1648943,
+        "amount_sold_stroops": 22423,
+        "asset_bought": {
+          "code": "SCOP",
+          "issuer": "GC6OYQJIZF3HFXCYPFCBXYXNGIBQ4TNSFUBUXQJOZWIP6F3YZK4QH3VQ",
+          "type": "credit_alphanum4"
+        },
+        "asset_sold": {
+          "type": "native"
+        },
+        "offer_id": 1837081240,
+        "seller_id": "GDT4MRDHYOLKYDYDZTTIGMB6NLN6ESEVG3ON6T3JLYKKEGQIJ3CMNAUE",
+        "variant": "order_book"
+      },
+      "claim_index_0based": 0
+    },
+    {
+      "atom": {
+        "amount_bought_stroops": 11291653797,
+        "amount_sold_stroops": 153548425,
+        "asset_bought": {
+          "code": "SCOP",
+          "issuer": "GC6OYQJIZF3HFXCYPFCBXYXNGIBQ4TNSFUBUXQJOZWIP6F3YZK4QH3VQ",
+          "type": "credit_alphanum4"
+        },
+        "asset_sold": {
+          "type": "native"
+        },
+        "offer_id": 1837081438,
+        "seller_id": "GD432DNVITTGSYAVKCVYYV4D4JLVN3BR4OMK7OXV4BFXD54ZWZHN2PWA",
+        "variant": "order_book"
+      },
+      "claim_index_0based": 1
+    },
+    {
+      "atom": {
+        "amount_bought_stroops": 11007681197,
+        "amount_sold_stroops": 149686852,
+        "asset_bought": {
+          "code": "SCOP",
+          "issuer": "GC6OYQJIZF3HFXCYPFCBXYXNGIBQ4TNSFUBUXQJOZWIP6F3YZK4QH3VQ",
+          "type": "credit_alphanum4"
+        },
+        "asset_sold": {
+          "type": "native"
+        },
+        "offer_id": 1837081439,
+        "seller_id": "GCHCMIXYDWCRU7BTZUDYB4TU5SJEZFZG7E73TYRAUIRN5TDWN5XXNOTR",
+        "variant": "order_book"
+      },
+      "claim_index_0based": 2
+    },
+    {
+      "atom": {
+        "amount_bought_stroops": 118649296236,
+        "amount_sold_stroops": 1613428725,
+        "asset_bought": {
+          "code": "SCOP",
+          "issuer": "GC6OYQJIZF3HFXCYPFCBXYXNGIBQ4TNSFUBUXQJOZWIP6F3YZK4QH3VQ",
+          "type": "credit_alphanum4"
+        },
+        "asset_sold": {
+          "type": "native"
+        },
+        "offer_id": 1837081552,
+        "seller_id": "GAUEEYOUENSQLAFWSRPHABROV263WV5DKSH23ITC4BVY4GEWLBSRZUEG",
+        "variant": "order_book"
+      },
+      "claim_index_0based": 3
+    }
+  ],
+  "close_time_unix": 1778061845,
+  "ledger_sequence": 62442947,
+  "op_kind": "ManageSellOffer",
+  "operation_index_0based": 0,
+  "source_file": ".temp/FC47D9FF--62400000-62463999/FC47323C--62442947.xdr.zst",
+  "transaction_hash": "1f65e3affebb5f7b70ba23e9b41d4d8f7339be28de3e7e3a1808eabd2df30894"
+}

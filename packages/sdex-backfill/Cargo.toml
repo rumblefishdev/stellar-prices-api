@@ -1,0 +1,21 @@
+[package]
+name = "sdex-backfill"
+version = "0.1.0"
+edition = "2024"
+description = "SDEX historical backfill CLI — local workstation tool mirroring BE's backfill-runner pattern"
+
+[[bin]]
+name = "sdex-backfill"
+path = "src/main.rs"
+
+[dependencies]
+stellar-xdr = { workspace = true }
+xdr-parser = { workspace = true }
+clickhouse = { workspace = true }
+tokio = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde = { workspace = true }
+rust_decimal = { workspace = true }
+thiserror = { workspace = true }

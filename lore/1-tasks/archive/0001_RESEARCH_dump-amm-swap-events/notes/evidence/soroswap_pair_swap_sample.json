@@ -1,0 +1,61 @@
+{
+  "ledger_seq": 62460506,
+  "tx_hash": "21bb150d1274aff1e233c76aef36ba052eefbc7e9b41c5330f5cdc213e2ff350",
+  "event_index": 5,
+  "source": "PerOp",
+  "inner_type": "Contract",
+  "contract_id": "CAM7DY53G63XA4AJRS24Z6VFYAFSSF76C3RZ45BE5YU3FQS5255OOABP",
+  "topic_0": "SoroswapPair",
+  "topics": [
+    {
+      "string": "SoroswapPair"
+    },
+    {
+      "symbol": "swap"
+    }
+  ],
+  "data": {
+    "map": [
+      {
+        "key": {
+          "symbol": "amount_0_in"
+        },
+        "val": {
+          "i128": "6289308176"
+        }
+      },
+      {
+        "key": {
+          "symbol": "amount_0_out"
+        },
+        "val": {
+          "i128": "0"
+        }
+      },
+      {
+        "key": {
+          "symbol": "amount_1_in"
+        },
+        "val": {
+          "i128": "0"
+        }
+      },
+      {
+        "key": {
+          "symbol": "amount_1_out"
+        },
+        "val": {
+          "i128": "1001363207"
+        }
+      },
+      {
+        "key": {
+          "symbol": "to"
+        },
+        "val": {
+          "address": "GDKBWJP7DC2WWSNAVYMF2VJQGFOJMRX6PEHB3L33APCHOIYXBCFRNSQV"
+        }
+      }
+    ]
+  }
+}

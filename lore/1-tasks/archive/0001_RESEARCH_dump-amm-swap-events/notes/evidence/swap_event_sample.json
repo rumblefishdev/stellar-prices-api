@@ -1,0 +1,46 @@
+{
+  "ledger_seq": 62079939,
+  "tx_hash": "27f3a225d66f913aeda15076437af6451bfa84a20409c5be94e4856fe3685806",
+  "event_index": 7,
+  "source": "PerOp",
+  "inner_type": "Contract",
+  "contract_id": "CBQDHNBFBZYE4MKPWBSJOPIYLW4SFSXAXUTSXJN76GNKYVYPCKWC6QUK",
+  "topic_0": "swap",
+  "topics": [
+    {
+      "symbol": "swap"
+    },
+    {
+      "vec": [
+        {
+          "address": "CAUP7NFABXE5TJRL3FKTPMWRLC7IAXYDCTHQRFSCLR5TMGKHOOQO772J"
+        },
+        {
+          "address": "CBIJBDNZNF4X35BJ4FFZWCDBSCKOP5NB4PLG4SNENRMLAPYG4P5FM6VN"
+        }
+      ]
+    },
+    {
+      "address": "GDJCBRMIXRGE3OGY3PMWQU4S6AFYSA6XY3GIN7FNTWZTUTOL6D2VE4F2"
+    }
+  ],
+  "data": {
+    "vec": [
+      {
+        "address": "CCNXGPE4AQCSNEBZO3XJDKKDI3CRLYMVS6UWBBTVDLALLWMJEXBORQ2A"
+      },
+      {
+        "address": "CBIJBDNZNF4X35BJ4FFZWCDBSCKOP5NB4PLG4SNENRMLAPYG4P5FM6VN"
+      },
+      {
+        "address": "CAUP7NFABXE5TJRL3FKTPMWRLC7IAXYDCTHQRFSCLR5TMGKHOOQO772J"
+      },
+      {
+        "u128": "563523"
+      },
+      {
+        "u128": "562879"
+      }
+    ]
+  }
+}

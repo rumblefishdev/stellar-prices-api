@@ -1,0 +1,59 @@
+{
+  "ledger_seq": 62460506,
+  "tx_hash": "21bb150d1274aff1e233c76aef36ba052eefbc7e9b41c5330f5cdc213e2ff350",
+  "event_index": 6,
+  "source": "PerOp",
+  "inner_type": "Contract",
+  "contract_id": "CAG5LRYQ5JVEUI5TEID72EYOVX44TTUJT5BQR2J6J77FH65PCCFAJDDH",
+  "topic_0": "SoroswapRouter",
+  "topics": [
+    {
+      "string": "SoroswapRouter"
+    },
+    {
+      "symbol": "swap"
+    }
+  ],
+  "data": {
+    "map": [
+      {
+        "key": {
+          "symbol": "amounts"
+        },
+        "val": {
+          "vec": [
+            {
+              "i128": "6289308176"
+            },
+            {
+              "i128": "1001363207"
+            }
+          ]
+        }
+      },
+      {
+        "key": {
+          "symbol": "path"
+        },
+        "val": {
+          "vec": [
+            {
+              "address": "CAS3J7GYLGXMF6TDJBBYYSE3HQ6BBSMLNUQ34T6TZMYMW2EVH34XOWMA"
+            },
+            {
+              "address": "CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75"
+            }
+          ]
+        }
+      },
+      {
+        "key": {
+          "symbol": "to"
+        },
+        "val": {
+          "address": "GDKBWJP7DC2WWSNAVYMF2VJQGFOJMRX6PEHB3L33APCHOIYXBCFRNSQV"
+        }
+      }
+    ]
+  }
+}
