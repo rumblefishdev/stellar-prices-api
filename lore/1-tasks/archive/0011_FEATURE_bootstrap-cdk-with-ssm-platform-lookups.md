@@ -2,7 +2,7 @@
 id: "0011"
 title: "Bootstrap Prices-owned CDK app with SSM-based platform lookups"
 type: FEATURE
-status: active
+status: completed
 related_adr: ["0007", "0006"]
 related_tasks: ["0009", "0008", "0045", "0047", "0050", "0052", "0056", "0038", "0039", "0040"]
 tags: [layer-infra, priority-medium, effort-medium, milestone-M1, infra, cdk, aws, shared-infra, clickhouse, hetzner, mtls, secrets-manager]
@@ -104,6 +104,21 @@ history:
       hooks since the cross-stack contract is stable —
       `infra/README.md` §"Where each downstream task plugs in"
       documents the concrete attachment points.
+  - date: 2026-05-25
+    status: completed
+    who: okarcz
+    note: >
+      PR #28 merged to develop. 22 new files in infra/ (6 stacks,
+      2 entrypoints, 3 lib helpers, 2 env configs, Makefile,
+      README, tsconfig pair, package.json, cdk.json). Post-merge
+      review pass resolved 8 Copilot findings: removed premature
+      chDomainName/mtlsSecretNamePrefix config fields, fixed
+      EventBridge Scheduler→Rules terminology, disabled
+      useCdkManagedLogGroup to avoid LogGroup collision, updated
+      task spec to production-only. Also documented single-account
+      topology (BE + prices-api share one AWS account) and aligned
+      region to eu-central-1 per BE task 0239. Operator deploy of
+      CicdStack + CI workflow (task 0008) remain as follow-ups.
 ---
 
 # Bootstrap Prices-owned CDK app with SSM-based platform lookups
@@ -323,28 +338,31 @@ configs and unresolved SSM lookups at PR time, not deploy time.
 
 ## Acceptance Criteria
 
-- [ ] `infra/` directory exists with the file layout in Step 1, mirroring BE's
+- [x] `infra/` directory exists with the file layout in Step 1, mirroring BE's
       `soroban-block-explorer/infra/`.
-- [ ] `EnvironmentConfig` in `src/lib/types.ts` defines every field consumed by the
+- [x] `EnvironmentConfig` in `src/lib/types.ts` defines every field consumed by the
       six stacks, with JSDoc per field. `validateConfig` rejects placeholder values
       on production.
-- [ ] `envs/production.json` populated; no `PLACEHOLDER` / `CHANGE_ME` strings.
+- [x] `envs/production.json` populated; no `PLACEHOLDER` / `CHANGE_ME` strings.
 - [ ] `CicdStack` synths and (manually) deploys to the AWS account; deploy role ARN
       output and confirmed assumable via GitHub OIDC from a test workflow.
-- [ ] `SecretsStack` synths; secret ARNs published to
+      (deferred — operator deploy, not code-blocked)
+- [x] `SecretsStack` synths; secret ARNs published to
       `/prices/{env}/mtls-{cert,key}-secret-arn`.
-- [ ] `ComputeStack`, `ApiGatewayStack`, `EventBridgeStack`, `ObservabilityStack`
+- [x] `ComputeStack`, `ApiGatewayStack`, `EventBridgeStack`, `ObservabilityStack`
       synth (no Lambdas attached yet — empty shells with the IAM + log-group
       conventions in place).
 - [ ] `make diff-production` runs clean against the shared AWS account, given the
       BE-side SSM keys (`/platform/{env}/*`) have been populated by task 0050.
-- [ ] `infra/README.md` documents the full SSM key contract (both tables above), the
+      (deferred — requires operator deploy of CicdStack first)
+- [x] `infra/README.md` documents the full SSM key contract (both tables above), the
       GH OIDC bootstrap procedure, the Makefile targets, and the post-deploy
       verification steps.
-- [ ] No VPC / RDS / NAT / Security Group resources anywhere in the synthesised
+- [x] No VPC / RDS / NAT / Security Group resources anywhere in the synthesised
       template. (Synth-time `cdk synth | grep -E 'AWS::EC2::VPC|AWS::RDS::|AWS::EC2::NatGateway'`
       returns nothing.)
 - [ ] CI job runs `cdk diff` (or equivalent) on every PR touching `infra/`.
+      (deferred to task 0008)
 
 ## Out of scope
 
