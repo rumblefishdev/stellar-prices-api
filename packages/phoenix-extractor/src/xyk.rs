@@ -30,6 +30,15 @@ impl SwapExtractor for PhoenixXykExtractor {
         let mut return_amount = None;
 
         for row in group {
+            let topic0 = row
+                .topics
+                .first()
+                .and_then(|t| t.as_str())
+                .ok_or(ExtractError::UnexpectedTopicShape(row.event_index))?;
+            if topic0 != "swap" {
+                return Err(ExtractError::UnexpectedTopicShape(row.event_index));
+            }
+
             let field_name = row
                 .topics
                 .get(1)
