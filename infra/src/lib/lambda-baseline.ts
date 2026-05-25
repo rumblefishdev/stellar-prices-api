@@ -27,7 +27,8 @@ export interface BaselineLambdaContext {
  *
  * Downstream Lambdas extend these via `role.addToPolicy(...)` for
  * stack-specific needs (e.g. the ledger processor adds S3 read on
- * the BE-owned bucket; the API handler adds nothing extra).
+ * BE's ledger-data bucket — same-account, so a standard IAM policy
+ * grant is sufficient with no bucket policy from BE).
  */
 export function baselineLambdaPolicyStatements(
   ctx: BaselineLambdaContext,

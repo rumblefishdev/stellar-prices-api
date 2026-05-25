@@ -2,9 +2,11 @@
  * Configuration for the shared CI/CD stack (consumed by CicdStack).
  *
  * One CicdStack is deployed once per AWS account — it provisions the
- * GitHub Actions OIDC provider and the production deploy role. The
- * resulting role ARN is stored as the GitHub Environment secret used
- * by the deploy workflow.
+ * GitHub Actions OIDC provider and the production deploy role. Both
+ * prices-api and soroban-block-explorer share the same AWS account;
+ * the two OIDC deploy roles are distinguished by role name prefix.
+ * The resulting role ARN is stored as the GitHub Environment secret
+ * used by the deploy workflow.
  */
 export interface CicdConfig {
   readonly awsRegion: string;

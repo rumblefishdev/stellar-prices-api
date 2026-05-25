@@ -21,6 +21,10 @@ export interface CicdStackProps extends cdk.StackProps {
 /**
  * CI/CD resources for the production AWS environment.
  *
+ * Both soroban-block-explorer and stellar-prices-api share a single
+ * AWS account. This stack provisions the prices-api-specific OIDC
+ * plumbing (the BE equivalent lives in the block-explorer repo).
+ *
  * Creates:
  * - GitHub Actions OIDC identity provider (singleton per AWS account)
  * - Production deploy role (scoped to GitHub Environment "production")

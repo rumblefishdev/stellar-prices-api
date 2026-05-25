@@ -10,6 +10,36 @@ This directory mirrors `soroban-block-explorer/infra/` conventions
 `cicd` entrypoint) so the two infra surfaces feel familiar to anyone
 who has worked on either.
 
+## Account topology
+
+Both `soroban-block-explorer` (BE) and `stellar-prices-api` deploy
+into **the same AWS account**. There is no cross-account boundary
+between the two services.
+
+Consequences:
+
+- **S3 bucket access** — the ledger processor Lambda reads from
+  BE's `stellar-ledger-data` bucket via a standard IAM policy on
+  the Lambda execution role. No bucket policy amendment from BE
+  is required; same-account IAM evaluation grants access.
+- **SNS subscription** — the Lambda subscribes to BE's SNS topic
+  with a standard `sns:Subscribe` + Lambda resource policy. No
+  cross-account SNS topic policy needed.
+- **SSM Parameter Store** — both `/platform/{env}/*` (BE-owned)
+  and `/prices/{env}/*` (prices-api-owned) live in the same
+  account. Standard IAM scoping enforces the single-writer
+  contract per namespace.
+- **Secrets Manager** — mTLS secrets and the Lambda roles that
+  read them share the same account. No cross-account `kms:Decrypt`
+  grants needed.
+- **CicdStack isolation** — each service has its own OIDC deploy
+  role (BE's is prefixed `soroban-explorer-*`, prices-api's is
+  `stellar-prices-api-*`). The GitHub Environment condition on
+  each role ensures one service's CI cannot assume the other's
+  deploy role.
+- **CloudFormation stack naming** — prices-api stacks are prefixed
+  `Prices-*`, BE stacks are prefixed differently. No collision.
+
 ## Stack architecture (target)
 
 ```
@@ -44,9 +74,9 @@ already-deployable container these stacks provide.
 
 ## Prerequisites
 
-- AWS CLI with a configured profile pointing at the prices-api account
+- AWS CLI with a configured profile pointing at the shared AWS account
 - Node.js (see `.nvmrc` at repo root)
-- `export AWS_PROFILE=stellar-prices-api`
+- `export AWS_PROFILE=<shared-account-profile>`
 
 ## First-time setup
 
@@ -94,7 +124,10 @@ deploy role via OIDC.
 ## SSM Key Contract
 
 The infra is the integration boundary with `soroban-block-explorer`.
-Two SSM namespaces, single-writer per namespace:
+Both services deploy into the same AWS account (see "Account
+topology" above), so the namespace split is enforced by IAM policy,
+not by account boundaries. Two SSM namespaces, single-writer per
+namespace:
 
 ### Inputs — `/platform/{env}/...` (BE publishes, prices-api reads)
 
@@ -178,7 +211,7 @@ attached to the skeleton:
 | Task | Where it plugs in |
 |---|---|
 | `0008` (CI workflow) | Adds `.github/workflows/deploy.yml` that assumes the per-env CicdStack deploy role via OIDC and runs `make deploy-{env}`. |
-| `0038` (Ledger Processor Lambda) | Adds a `RustFunction` to ComputeStack, references `ledgerProcessorRole` + `ledgerProcessorLogGroup`, attaches SNS subscription, publishes Lambda ARN to `/prices/{env}/ledger-processor-lambda-arn`. |
+| `0038` (Ledger Processor Lambda) | Adds a `RustFunction` to ComputeStack, references `ledgerProcessorRole` + `ledgerProcessorLogGroup`, attaches SNS subscription, adds `s3:GetObject` on BE's bucket (same-account — IAM grant only, no bucket policy needed), publishes Lambda ARN to `/prices/{env}/ledger-processor-lambda-arn`. |
 | `0039` (Periodic workers) | Adds 4 `RustFunction`s in ComputeStack, calls `rule.addTarget(...)` on each `EventBridgeStack` rule, uses `createPricesLambdaRole` for the per-worker IAM roles. |
 | `0040` (API handlers) | Adds a `RustFunction` to ComputeStack, attaches as Lambda proxy integration onto ApiGatewayStack's REST API root, adds `/v1/prices/...` resources, wires custom domain + Route 53 A-record + ACM cert. |
 | `0055` (Backfill status) | Adds a `RustFunction` to ComputeStack using `createPricesLambdaRole`, adds `/backfill/status` resource to ApiGatewayStack. |
