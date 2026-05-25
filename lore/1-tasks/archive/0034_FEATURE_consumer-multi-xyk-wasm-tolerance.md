@@ -2,7 +2,7 @@
 id: "0034"
 title: "Consumer must tolerate >=2 Phoenix XYK WASM builds (PHO/USDC currently dropped if hash-keyed)"
 type: FEATURE
-status: active
+status: completed
 related_adr: ["0006"]
 related_tasks: ["0032", "0018", "0037"]
 tags: [layer-indexing, priority-medium, effort-small, milestone-M1, phoenix, consumer, stream-1, price-feed-correctness]
@@ -37,6 +37,14 @@ history:
     status: active
     who: oski
     note: "Activated to begin implementation of multi-XYK WASM tolerance."
+  - date: 2026-05-25
+    status: completed
+    who: oski
+    note: >
+      Implemented pool_type + event_count classifier across 3 new crates.
+      14 tests passing. PR #31 merged to develop. Absorbed 0037 skeleton
+      as prerequisite. Deferred: PHO/USDC e2e staging verification
+      (requires live environment).
 ---
 
 # Consumer must tolerate >=2 Phoenix XYK WASM builds
