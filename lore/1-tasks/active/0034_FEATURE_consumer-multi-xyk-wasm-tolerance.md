@@ -113,7 +113,7 @@ extractor selection**. Routing logic in `dispatch_phoenix()`:
 
 This survives future Phoenix XYK rebuilds without code changes.
 
-### Tests (13 total)
+### Tests (14 total)
 
 **phoenix-extractor (8 tests):**
 - Registry fixture construction + lookup for both WASM variants
@@ -121,16 +121,17 @@ This survives future Phoenix XYK rebuilds without code changes.
 - XYK extractor: 8-event group decode, PHO/USDC alt-WASM pool,
   insufficient rows rejection, unordered field tolerance
 
-**ledger-processor (5 tests):**
+**ledger-processor (6 tests):**
 - Dispatch routes XLM/USDC (common WASM) correctly
 - Dispatch routes PHO/USDC (alt WASM) identically
 - Explicit proof that dispatch uses pool_type, not WASM hash
+- Stable pool (pool_type != 0) returns error (intentionally unimplemented)
 - Unknown venue skipped, empty rows return empty
 
 ### CI
 
-Added `.github/workflows/rust.yml` — runs `cargo check`, `cargo test`,
-`cargo clippy` on PRs touching `packages/` or `Cargo.*`.
+Added `.github/workflows/rust.yml` — runs `cargo fmt`, `cargo check`,
+`cargo test`, `cargo clippy` on PRs touching `packages/` or `Cargo.*`.
 
 ## Design Decisions
 
