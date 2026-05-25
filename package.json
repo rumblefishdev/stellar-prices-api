@@ -3,7 +3,14 @@
   "version": "0.0.0",
   "license": "MIT",
   "scripts": {
-    "board": "node tools/scripts/generate-lore-board.mjs"
+    "board": "node tools/scripts/generate-lore-board.mjs",
+    "infra:bootstrap": "make -C infra bootstrap",
+    "infra:synth:cicd": "make -C infra synth-cicd",
+    "infra:diff:cicd": "make -C infra diff-cicd",
+    "infra:deploy:cicd": "make -C infra deploy-cicd",
+    "infra:synth:production": "make -C infra synth-production",
+    "infra:diff:production": "make -C infra diff-production",
+    "infra:deploy:production": "make -C infra deploy-production"
   },
   "private": true,
   "dependencies": {},
@@ -12,12 +19,14 @@
     "@swc-node/register": "1.11.1",
     "@swc/core": "1.15.8",
     "@swc/helpers": "0.5.18",
+    "@types/node": "^22.0.0",
     "nx": "22.7.0",
     "prettier": "^3.8.1",
     "tslib": "^2.3.0",
     "typescript": "~5.9.2"
   },
   "workspaces": [
-    "packages/*"
+    "packages/*",
+    "infra"
   ]
 }
