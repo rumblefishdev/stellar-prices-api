@@ -9,8 +9,11 @@ export interface EventBridgeStackProps extends cdk.StackProps {
 }
 
 /**
- * EventBridge Scheduler rules for the four periodic prices-api
- * workers (task 0039).
+ * EventBridge rules for the four periodic prices-api workers
+ * (task 0039).
+ *
+ * Uses `aws-events` `events.Rule` (CloudFormation `AWS::Events::Rule`),
+ * not EventBridge Scheduler (`AWS::Scheduler::Schedule`).
  *
  * Rule shells only — no `target` attached. Task 0039 creates the
  * worker Lambdas (using `createPricesLambdaRole` from

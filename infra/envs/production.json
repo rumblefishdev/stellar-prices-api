@@ -9,7 +9,5 @@
     "oracleWatcher": "rate(5 minutes)",
     "assetDiscovery": "rate(1 hour)",
     "cleanup": "cron(0 3 * * ? *)"
-  },
-  "chDomainName": "ch.sorobanscan.rumblefish.dev",
-  "mtlsSecretNamePrefix": "prices/production/mtls"
+  }
 }

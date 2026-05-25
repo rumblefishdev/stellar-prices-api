@@ -63,34 +63,6 @@ export interface EnvironmentConfig {
     readonly cleanup: string;
   };
 
-  // Hetzner ClickHouse — mTLS (consumed by ComputeStack, downstream
-  // tasks 0038/0039/0040/0052 that talk to the BE-hosted ClickHouse)
-
-  /**
-   * FQDN that BE's HetznerDnsStack maps to the Hetzner ClickHouse box.
-   * Used as the mTLS endpoint hostname by every prices-api Lambda
-   * that reads from / writes to ClickHouse (passed as `CH_DOMAIN`
-   * env var per the BE 0239 convention).
-   *
-   * BE owns the DNS record itself; prices-api just consumes the FQDN
-   * via this config.
-   */
-  readonly chDomainName: string;
-  /**
-   * Secret-name prefix in AWS Secrets Manager for mTLS client cert
-   * bundles. Each prices-api Lambda gets its own secret at
-   * `${mtlsSecretNamePrefix}/<service-cn>` containing the
-   * `{cert, key, ca}` PEM bundle issued by BE task 0050's CA pipeline.
-   *
-   * Example: `prices/production/mtls` → service secrets live at
-   * `prices/production/mtls/ledger-processor-production`,
-   * `prices/production/mtls/api-handler-production`, etc.
-   *
-   * Downstream stacks construct the full ARN at synth time using
-   * `mtlsSecretArn` from `lib/mtls.ts` so cross-team naming stays
-   * IAM-scopeable (single secret per Lambda, no wildcard sprawl).
-   */
-  readonly mtlsSecretNamePrefix: string;
 }
 
 /**
@@ -158,27 +130,6 @@ export function validateConfig(config: EnvironmentConfig): void {
         );
       }
     }
-  }
-
-  if (!config.chDomainName) {
-    errors.push(`chDomainName missing`);
-  } else if (
-    config.chDomainName.includes('CHANGE') ||
-    config.chDomainName.includes('PLACEHOLDER')
-  ) {
-    errors.push(
-      `chDomainName placeholder rejected: "${config.chDomainName}"`,
-    );
-  }
-
-  if (
-    !config.mtlsSecretNamePrefix ||
-    config.mtlsSecretNamePrefix.includes('CHANGE') ||
-    config.mtlsSecretNamePrefix.includes('PLACEHOLDER')
-  ) {
-    errors.push(
-      `mtlsSecretNamePrefix missing or placeholder: "${config.mtlsSecretNamePrefix}"`,
-    );
   }
 
   if (errors.length > 0) {

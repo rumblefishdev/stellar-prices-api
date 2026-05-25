@@ -191,26 +191,23 @@ Create `infra/` at repo root with:
 ```
 infra/
 ├── README.md                ← deploy commands, SSM contract, GH OIDC setup
-├── Makefile                 ← bootstrap, diff-staging, deploy-staging, …
+├── Makefile                 ← bootstrap, diff-production, deploy-production, …
 ├── cdk.json
 ├── package.json             ← typescript, aws-cdk-lib, constructs, vitest
 ├── tsconfig.json
 ├── tsconfig.lib.json
 ├── eslint.config.mjs
 ├── envs/
-│   ├── staging.json
 │   ├── production.json
 │   └── cicd.json
 └── src/
     ├── index.ts             ← re-exports stacks + types
     ├── bin/
-    │   ├── staging.ts       ← node entrypoints (createApp({ config }))
-    │   ├── production.ts
+    │   ├── production.ts    ← node entrypoint (createApp({ config }))
     │   └── cicd.ts
     └── lib/
         ├── app.ts           ← createApp factory wiring all stacks
         ├── types.ts         ← EnvironmentConfig + validateConfig + CicdConfig
-        ├── ports.ts         ← shared constants (e.g. CH endpoint port)
         └── stacks/
             ├── cicd-stack.ts
             ├── secrets-stack.ts
@@ -229,8 +226,8 @@ convention. `validateConfig` rejects `CHANGE_ME` / `PLACEHOLDER` values at synth
 Direct copy of BE's `cicd-stack.ts` shape, retargeted:
 
 - Singleton `iam.OpenIdConnectProvider` for `token.actions.githubusercontent.com`.
-- One `iam.Role` per env (`staging`, `production`), trust scoped to GitHub Environment
-  `repo:rumblefishdev/stellar-prices-api:environment:{env}`.
+- One `iam.Role` for production, trust scoped to GitHub Environment
+  `repo:rumblefishdev/stellar-prices-api:environment:production`.
 - Permissions: `sts:AssumeRole` on `cdk-hnb659fds-*` bootstrap roles + `ssm:GetParameter`
   on `/platform/{env}/*` and `/prices/{env}/*`. **No** ECR / S3-SPA / CloudFront perms
   — prices-api has no SPA and no Galexie image.
@@ -310,19 +307,18 @@ it, and call `createApp`. `bin/cicd.ts` is independent (only the `CicdStack`).
 1. The SSM key contract (the two tables above, verbatim).
 2. First-time setup: GH OIDC bootstrap → deploy CicdStack manually → add deploy role
    ARN as `AWS_DEPLOY_ROLE_ARN` GitHub Environment secret.
-3. Routine deploys: `make deploy-staging`, `make deploy-production`, scoped per-stack
-   variants.
+3. Routine deploys: `make deploy-production`, scoped per-stack variants.
 4. Post-deploy verification: synthetic SNS subscription test (consume the SNS ARN,
-   fire an S3 PutObject in staging, see Lambda invocation) — defers full path
+   fire an S3 PutObject, see Lambda invocation) — defers full path
    verification to 0038's acceptance.
 
-`Makefile` mirrors BE's: `bootstrap`, `diff-staging`, `deploy-staging`,
-`deploy-staging-{stack}`, plus a `deploy-cicd` target.
+`Makefile` mirrors BE's: `bootstrap`, `diff-production`, `deploy-production`,
+`deploy-production-{stack}`, plus a `deploy-cicd` target.
 
 ### Step 10: CI synth check
 
 Add a GitHub Actions job (or wire into the CI from task 0008) that runs
-`make diff-staging --no-deploy` on every PR touching `infra/`. Catches malformed
+`make diff-production --no-deploy` on every PR touching `infra/`. Catches malformed
 configs and unresolved SSM lookups at PR time, not deploy time.
 
 ## Acceptance Criteria
@@ -332,8 +328,7 @@ configs and unresolved SSM lookups at PR time, not deploy time.
 - [ ] `EnvironmentConfig` in `src/lib/types.ts` defines every field consumed by the
       six stacks, with JSDoc per field. `validateConfig` rejects placeholder values
       on production.
-- [ ] `envs/staging.json` and `envs/production.json` populated; no `PLACEHOLDER` /
-      `CHANGE_ME` strings on production.
+- [ ] `envs/production.json` populated; no `PLACEHOLDER` / `CHANGE_ME` strings.
 - [ ] `CicdStack` synths and (manually) deploys to the AWS account; deploy role ARN
       output and confirmed assumable via GitHub OIDC from a test workflow.
 - [ ] `SecretsStack` synths; secret ARNs published to
@@ -341,7 +336,7 @@ configs and unresolved SSM lookups at PR time, not deploy time.
 - [ ] `ComputeStack`, `ApiGatewayStack`, `EventBridgeStack`, `ObservabilityStack`
       synth (no Lambdas attached yet — empty shells with the IAM + log-group
       conventions in place).
-- [ ] `make diff-staging` runs clean against a fresh AWS sub-account, given the
+- [ ] `make diff-production` runs clean against the shared AWS account, given the
       BE-side SSM keys (`/platform/{env}/*`) have been populated by task 0050.
 - [ ] `infra/README.md` documents the full SSM key contract (both tables above), the
       GH OIDC bootstrap procedure, the Makefile targets, and the post-deploy
