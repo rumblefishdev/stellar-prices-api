@@ -2,7 +2,7 @@
 id: "0034"
 title: "Consumer must tolerate >=2 Phoenix XYK WASM builds (PHO/USDC currently dropped if hash-keyed)"
 type: FEATURE
-status: blocked
+status: active
 related_adr: ["0006"]
 related_tasks: ["0032", "0018", "0037"]
 tags: [layer-indexing, priority-medium, effort-small, milestone-M1, phoenix, consumer, stream-1, price-feed-correctness]
@@ -33,6 +33,10 @@ history:
       Spawned 0037 as the minimal prerequisite: Tranche 1 Ledger
       Processor skeleton with a Phoenix pool registry and extractor
       dispatcher hook. 0034 resumes once 0037 lands.
+  - date: 2026-05-25
+    status: active
+    who: oski
+    note: "Activated to begin implementation of multi-XYK WASM tolerance."
 ---
 
 # Consumer must tolerate >=2 Phoenix XYK WASM builds
