@@ -6,10 +6,10 @@ spawned_from: ../README.md
 spawns: []
 tags: [schema, multi-tenant, migrations, ddl, clickhouse, step-5]
 links:
-  - './R-be-hetzner-ch-shape.md'
-  - './R-ingest-target-mapping.md'
-  - './R-aws-hetzner-auth-network.md'
-  - '../../../../../soroban-block-explorer/lore/1-tasks/active/0227_FEATURE_infra-hetzner-ansible-playbook.md'
+  - "./R-be-hetzner-ch-shape.md"
+  - "./R-ingest-target-mapping.md"
+  - "./R-aws-hetzner-auth-network.md"
+  - "../../../../../soroban-block-explorer/lore/1-tasks/active/0227_FEATURE_infra-hetzner-ansible-playbook.md"
 history:
   - date: 2026-05-18
     status: developing
@@ -47,12 +47,12 @@ coordination process. Final go/no-go remains in the `S-*` note.
 
 ## 1. The four shapes
 
-| #     | Shape                                                                        | Storage                                                         | Ownership                                          | Migration unit |
-| ----- | ---------------------------------------------------------------------------- | --------------------------------------------------------------- | -------------------------------------------------- | -------------- |
-| **1** | **Separate database `prices` in the same CH cluster**                        | `prices.*` tables alongside BE's `default.*`                    | Prices-api owns its database fully                 | Per-database   |
-| **2** | **Shared tables with a `tenant` discriminator column**                       | BE's `default.*` tables gain a `tenant` column                  | BE owns DDL; prices-api proposes via PR to BE repo | Joint, BE-led  |
-| **3** | **Same database, separate CH user with table-level grants**                  | Tables physically in `default.*` but logically prices-api-owned | Mixed: BE creates table, prices-api owns rows      | Per-table      |
-| **4** | **Sidecar — separate `clickhouse-server` container on the same Hetzner box** | Two CH instances, two ports, two storage volumes                | Each fully independent                             | Per-instance   |
+| # | Shape | Storage | Ownership | Migration unit |
+|---|---|---|---|---|
+| **1** | **Separate database `prices` in the same CH cluster** | `prices.*` tables alongside BE's `default.*` | Prices-api owns its database fully | Per-database |
+| **2** | **Shared tables with a `tenant` discriminator column** | BE's `default.*` tables gain a `tenant` column | BE owns DDL; prices-api proposes via PR to BE repo | Joint, BE-led |
+| **3** | **Same database, separate CH user with table-level grants** | Tables physically in `default.*` but logically prices-api-owned | Mixed: BE creates table, prices-api owns rows | Per-table |
+| **4** | **Sidecar — separate `clickhouse-server` container on the same Hetzner box** | Two CH instances, two ports, two storage volumes | Each fully independent | Per-instance |
 
 ### 1.1 Option 1 — Separate database `prices`
 
@@ -85,7 +85,7 @@ Prices-api's tables: `prices.price_ohlcv_1m`,
 - **Cross-database reads work natively.** If prices-api ever
   needs to read BE's `default.soroban_events`, fully-qualified
   `default.soroban_events` works under the `GRANT SELECT ON
-default.*` line.
+  default.*` line.
 - **Resource isolation knobs available.** CH `quota` and
   `profile` settings under `users.d/prices-api.xml` cap memory,
   concurrent queries, network traffic. Standard CH idiom.
@@ -197,7 +197,7 @@ Reasoning, ranked by load-bearing weight:
    will land 5+ schema changes in the first quarter, decoupling
    is the dominant productivity factor.
 2. **One BE commitment.** BE agrees once to `CREATE DATABASE
-prices` + grants. Operationally inexpensive on BE side.
+   prices` + grants. Operationally inexpensive on BE side.
 3. **Natural CH idiom.** Multiple databases in one CH instance
    is the language's first-class multi-tenant primitive. No
    tricks.
@@ -278,12 +278,12 @@ The applier:
 
 ### 3.3 Third-party migration framework
 
-| Tool                                         | Verdict                                                                                              |
-| -------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
-| `refinery` (Rust)                            | No first-class CH driver. Pass.                                                                      |
-| `golang-migrate/migrate` (Go) with CH driver | First-class CH. Introduces a Go dependency in a Rust shop. Pass.                                     |
-| `atlas` (ariga.io)                           | Declarative schema-as-code with CH support. Powerful but heavy. Overkill for a 6-table schema. Pass. |
-| `clickhouse-migrations` (npm)                | JS dependency in a Rust shop. Pass.                                                                  |
+| Tool | Verdict |
+|---|---|
+| `refinery` (Rust) | No first-class CH driver. Pass. |
+| `golang-migrate/migrate` (Go) with CH driver | First-class CH. Introduces a Go dependency in a Rust shop. Pass. |
+| `atlas` (ariga.io) | Declarative schema-as-code with CH support. Powerful but heavy. Overkill for a 6-table schema. Pass. |
+| `clickhouse-migrations` (npm) | JS dependency in a Rust shop. Pass. |
 
 None of these are bad; they're just **larger** than the project
 needs at this scope.
@@ -388,7 +388,7 @@ is whatever Borg + CH `ATTACH PART` semantics allow:
 - **Whole-instance restore.** Always works. Restores both
   tenants' data.
 - **Per-database restore.** Possible via CH-native `BACKUP
-DATABASE prices TO …` (CH 23.4+) or selective Borg path
+  DATABASE prices TO …` (CH 23.4+) or selective Borg path
   restore of `/var/lib/clickhouse/data/prices/` plus
   `/var/lib/clickhouse/metadata/prices/`.
 

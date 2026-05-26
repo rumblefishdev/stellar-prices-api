@@ -1,18 +1,18 @@
 ---
-title: 'SDEX filter strategy + checkpoint contract + asset-discovery side-effects'
+title: "SDEX filter strategy + checkpoint contract + asset-discovery side-effects"
 type: generation
 status: mature
 spawned_from: ../README.md
 spawns: []
 tags: [sdex, filter, backfill, checkpoint, asset-discovery, spec, stream-2]
 links:
-  - '../README.md'
-  - '../../archive/0020_RESEARCH_sdex-historical-backfill-options/notes/R-sdex-operation-xdr-shape.md'
-  - '../../archive/0020_RESEARCH_sdex-historical-backfill-options/notes/G-sdex-trade-extraction-design.md'
-  - '../../../2-adrs/0002_stream2-sdex-archive-backfill-independent-of-be.md'
-  - './profile/results.md'
-  - '../../../../docs/prices-api-general-overview.md'
-  - '../../../../docs/database-schema/database-schema-overview.md'
+  - "../README.md"
+  - "../../archive/0020_RESEARCH_sdex-historical-backfill-options/notes/R-sdex-operation-xdr-shape.md"
+  - "../../archive/0020_RESEARCH_sdex-historical-backfill-options/notes/G-sdex-trade-extraction-design.md"
+  - "../../../2-adrs/0002_stream2-sdex-archive-backfill-independent-of-be.md"
+  - "./profile/results.md"
+  - "../../../../docs/prices-api-general-overview.md"
+  - "../../../../docs/database-schema/database-schema-overview.md"
 history:
   - date: 2026-05-13
     status: mature
@@ -33,13 +33,13 @@ graded against them clause-by-clause.
 
 ## TL;DR
 
-| Concern                  | Decision                                                                                                                                                                                   |
-| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Filter strategy          | Decode the ledger fully; walk `OperationResultTr` discriminant; emit only `TxSuccess` ops. The cheap pre-filter people imagine **does not exist** — `stellar-xdr` decodes atomically.      |
-| Filter CPU cost          | 3.22 ms / ledger (decode) + 9 µs / ledger (walk). 311 ledgers/s single-thread. ~7× §5.6's 42 ledgers/s target.                                                                             |
-| Trade-bearing density    | 99.35 % of recent-range ledgers carry ≥1 claim atom. Density filter saves almost nothing in the modern range.                                                                              |
-| Checkpoint granularity   | Per-ledger. `UPDATE backfill_progress SET current_ledger = $1 WHERE task_name = 'sdex_archive'` runs in the same DB transaction as the ledger's bucket flush.                              |
-| Asset discovery          | Insert-on-fly with `ON CONFLICT (asset_type, asset_code, issuer_id, contract_id) DO NOTHING`. The Asset Discovery Lambda enriches metadata later.                                          |
+| Concern                  | Decision                                                                              |
+| ------------------------ | ------------------------------------------------------------------------------------- |
+| Filter strategy          | Decode the ledger fully; walk `OperationResultTr` discriminant; emit only `TxSuccess` ops. The cheap pre-filter people imagine **does not exist** — `stellar-xdr` decodes atomically. |
+| Filter CPU cost          | 3.22 ms / ledger (decode) + 9 µs / ledger (walk). 311 ledgers/s single-thread. ~7× §5.6's 42 ledgers/s target. |
+| Trade-bearing density    | 99.35 % of recent-range ledgers carry ≥1 claim atom. Density filter saves almost nothing in the modern range. |
+| Checkpoint granularity   | Per-ledger. `UPDATE backfill_progress SET current_ledger = $1 WHERE task_name = 'sdex_archive'` runs in the same DB transaction as the ledger's bucket flush. |
+| Asset discovery          | Insert-on-fly with `ON CONFLICT (asset_type, asset_code, issuer_id, contract_id) DO NOTHING`. The Asset Discovery Lambda enriches metadata later. |
 | End-to-end backfill time | **12–16 days** single-task for all ~57M ledgers (archive S3 GET is the bottleneck, not decode/walk/DB). Parallelisable across disjoint ranges: 2 tasks → ~6–8 d, 4 tasks → ~3–4 d. See §4. |
 
 ## 1. Filter strategy
@@ -127,12 +127,12 @@ the profile says it won't be.
 
 Per `notes/profile/results.md` and §5.6:
 
-| Layer                        | Single-thread throughput | Notes                                                                             |
-| ---------------------------- | ------------------------ | --------------------------------------------------------------------------------- |
-| Archive S3 read              | 5–10 MB/s sustained      | §5.6 figure; bytes-per-ledger ≈ 167 KiB compressed → ≈ 30–60 ledgers/s/connection |
-| Zstd decompress + XDR decode | 311 ledgers/s            | Profile measurement                                                               |
-| `OperationResultTr` walk     | >100 000 ledgers/s       | Profile measurement                                                               |
-| DB UPSERT into `price_ohlcv` | tbd; bound by RDS IOPS   | Whole-row replacement per bucket spec §5                                          |
+| Layer                          | Single-thread throughput | Notes |
+| ------------------------------ | ------------------------ | ----- |
+| Archive S3 read                | 5–10 MB/s sustained      | §5.6 figure; bytes-per-ledger ≈ 167 KiB compressed → ≈ 30–60 ledgers/s/connection |
+| Zstd decompress + XDR decode   | 311 ledgers/s            | Profile measurement |
+| `OperationResultTr` walk       | >100 000 ledgers/s       | Profile measurement |
+| DB UPSERT into `price_ohlcv`   | tbd; bound by RDS IOPS   | Whole-row replacement per bucket spec §5 |
 
 The expected bottlenecks on a 2 vCPU Fargate task are **archive
 transport** (S3 read latency / sustained bandwidth) and **DB
@@ -181,7 +181,7 @@ absorb the rewrite idempotently.
 A chunk-level checkpoint ("commit every 100 ledgers, advance
 `current_ledger` by 100") would be ~100× fewer checkpoint writes
 but introduces a re-do window: on crash, up to 99 ledgers of work
-re-executes. With UPSERT-idempotent writes this is _correct_ but
+re-executes. With UPSERT-idempotent writes this is *correct* but
 wasteful. Per-ledger is cheap (one UPDATE per ledger, against the
 same row, with one connection — RDS handles this trivially) and
 gives the tightest restart window.
@@ -333,13 +333,13 @@ slowest stage at sustained pace.
 
 ### 4.1 Per-stage throughput
 
-| Stage                                                                                               | Throughput (per 2 vCPU Fargate task)                                                                               | Source                                                                                                |
-| --------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------- |
-| Archive S3 GET (compressed bytes per ledger ≈ 167 KiB)                                              | **~42–55 ledgers/s** (≈ 5–10 MB/s sustained, single connection)                                                    | [§5.6 design-doc figure](../../../../docs/prices-api-general-overview.md) — 150 000–200 000 ledgers/h |
-| Zstd decompress + `LedgerCloseMetaBatch::from_xdr`                                                  | **~311 ledgers/s** on developer laptop, ≥ ~600 ledgers/s on 2 vCPU Fargate (linear scaling, well-behaved CPU work) | [`profile/results.md`](./profile/results.md) — 3.22 ms/ledger mean                                    |
-| `OperationResultTr` walk + `ClaimAtom` extract                                                      | **>100 000 ledgers/s**                                                                                             | Profile measurement — 9 µs/ledger                                                                     |
-| Bucket aggregation (in memory, per minute)                                                          | bounded by trade volume; **negligible**                                                                            | Decode spec §5.1                                                                                      |
-| Per-ledger UPSERT into `price_ohlcv` (whole-row replacement, ~6–12 candle rows per minute per task) | bounded by RDS IOPS on `db.t4g.small`; estimated **>500 ledger-writes/s**                                          | RDS baseline; UPSERT semantics in decode spec §5.3                                                    |
+| Stage                                              | Throughput (per 2 vCPU Fargate task)     | Source                          |
+| -------------------------------------------------- | ----------------------------------------- | ------------------------------- |
+| Archive S3 GET (compressed bytes per ledger ≈ 167 KiB) | **~42–55 ledgers/s** (≈ 5–10 MB/s sustained, single connection) | [§5.6 design-doc figure](../../../../docs/prices-api-general-overview.md) — 150 000–200 000 ledgers/h |
+| Zstd decompress + `LedgerCloseMetaBatch::from_xdr` | **~311 ledgers/s** on developer laptop, ≥ ~600 ledgers/s on 2 vCPU Fargate (linear scaling, well-behaved CPU work) | [`profile/results.md`](./profile/results.md) — 3.22 ms/ledger mean |
+| `OperationResultTr` walk + `ClaimAtom` extract     | **>100 000 ledgers/s**                    | Profile measurement — 9 µs/ledger |
+| Bucket aggregation (in memory, per minute)         | bounded by trade volume; **negligible**   | Decode spec §5.1                |
+| Per-ledger UPSERT into `price_ohlcv` (whole-row replacement, ~6–12 candle rows per minute per task) | bounded by RDS IOPS on `db.t4g.small`; estimated **>500 ledger-writes/s** | RDS baseline; UPSERT semantics in decode spec §5.3 |
 
 Three stages have ample headroom (decode, walk, DB). One stage
 gates the wall clock: **archive S3 GET**. The other stages can
@@ -351,9 +351,9 @@ absorb whatever rate that throws at them.
 to **42–55 ledgers/s** sustained. Plugging into the full
 historical range:
 
-| Range                                | Ledgers     | At 42 ledgers/s    | At 55 ledgers/s    |
-| ------------------------------------ | ----------- | ------------------ | ------------------ |
-| Ledger 1 → tip (Nov 2015 → mid-2026) | ~57 000 000 | **377 h ≈ 15.7 d** | **288 h ≈ 12.0 d** |
+| Range                                  | Ledgers      | At 42 ledgers/s | At 55 ledgers/s |
+| -------------------------------------- | ------------ | --------------- | --------------- |
+| Ledger 1 → tip (Nov 2015 → mid-2026)   | ~57 000 000  | **377 h ≈ 15.7 d** | **288 h ≈ 12.0 d** |
 
 This matches §5.6's published "~380 hours (~16 days) of pure
 compute" estimate for the SDEX archive backfill. The number is

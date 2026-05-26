@@ -1,16 +1,15 @@
 ---
-title: 'R: AWS Lambda ↔ Hetzner CH — auth, network path, latency, failure modes'
+title: "R: AWS Lambda ↔ Hetzner CH — auth, network path, latency, failure modes"
 type: research
 status: developing
 spawned_from: ../README.md
 spawns: []
-tags:
-  [mtls, network, latency, failure-mode, lambda, hetzner, clickhouse, step-4]
+tags: [mtls, network, latency, failure-mode, lambda, hetzner, clickhouse, step-4]
 links:
-  - './R-be-hetzner-ch-shape.md'
-  - './R-stellar-peers-galexie-live-feed.md'
-  - '../../../../../soroban-block-explorer/lore/1-tasks/active/0227_FEATURE_infra-hetzner-ansible-playbook.md'
-  - '../../../../../soroban-block-explorer/docs/architecture/infrastructure/infrastructure-overview.md'
+  - "./R-be-hetzner-ch-shape.md"
+  - "./R-stellar-peers-galexie-live-feed.md"
+  - "../../../../../soroban-block-explorer/lore/1-tasks/active/0227_FEATURE_infra-hetzner-ansible-playbook.md"
+  - "../../../../../soroban-block-explorer/docs/architecture/infrastructure/infrastructure-overview.md"
 history:
   - date: 2026-05-18
     status: developing
@@ -63,11 +62,11 @@ prices-api side stores them in AWS.
 
 Three plausible locations, in decreasing fit:
 
-| Store                                | Pros                                                                                   | Cons                                                                                                                                                                                  | Verdict             |
-| ------------------------------------ | -------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------- |
-| **Secrets Manager**                  | Native rotation hooks; KMS-encrypted; per-Lambda IAM scope; first-class binary support | Cost (~$0.40/secret/mo × 2 fields × 3 envs ≈ $2.40/mo); rotation lambda is non-trivial                                                                                                | **Recommended**     |
-| **SSM Parameter Store SecureString** | Free; KMS-encrypted; IAM-scoped                                                        | Per-secret value cap (4 KiB standard, 8 KiB advanced); no built-in rotation; manual versioning                                                                                        | Acceptable fallback |
-| **Lambda env vars**                  | Trivial                                                                                | **Disqualified.** Env vars are visible in `aws lambda get-function-configuration`; the private key would leak via console access. CloudFormation/CDK templates would carry the value. |                     |
+| Store | Pros | Cons | Verdict |
+|---|---|---|---|
+| **Secrets Manager** | Native rotation hooks; KMS-encrypted; per-Lambda IAM scope; first-class binary support | Cost (~$0.40/secret/mo × 2 fields × 3 envs ≈ $2.40/mo); rotation lambda is non-trivial | **Recommended** |
+| **SSM Parameter Store SecureString** | Free; KMS-encrypted; IAM-scoped | Per-secret value cap (4 KiB standard, 8 KiB advanced); no built-in rotation; manual versioning | Acceptable fallback |
+| **Lambda env vars** | Trivial | **Disqualified.** Env vars are visible in `aws lambda get-function-configuration`; the private key would leak via console access. CloudFormation/CDK templates would carry the value. |  |
 
 Recommendation: **two Secrets Manager secrets per env** —
 `prices-api/{env}/hetzner-ch/client-cert` (PEM) and
@@ -193,28 +192,28 @@ Flag as a residual risk; same risk BE has today for itself.
 
 Concrete settings:
 
-| Element         | Value                                                                        |
-| --------------- | ---------------------------------------------------------------------------- |
-| Source          | Lambda outside VPC, us-east-1                                                |
-| Egress route    | Public internet (no NAT, no VPC endpoint)                                    |
-| Transport       | HTTPS :443 only (CH native port 9000 not exposed)                            |
-| Wire protocol   | ClickHouse HTTP (`POST /` with `JSONEachRow` body and SQL in `query=` param) |
-| TLS             | TLS 1.3 + mTLS (Caddy enforces)                                              |
-| Server identity | Let's Encrypt cert chaining to ISRG Root X1                                  |
-| Client identity | BE self-signed CA                                                            |
+| Element | Value |
+|---|---|
+| Source | Lambda outside VPC, us-east-1 |
+| Egress route | Public internet (no NAT, no VPC endpoint) |
+| Transport | HTTPS :443 only (CH native port 9000 not exposed) |
+| Wire protocol | ClickHouse HTTP (`POST /` with `JSONEachRow` body and SQL in `query=` param) |
+| TLS | TLS 1.3 + mTLS (Caddy enforces) |
+| Server identity | Let's Encrypt cert chaining to ISRG Root X1 |
+| Client identity | BE self-signed CA |
 
 ### 2.2 Latency budget
 
 Compared to today's plan (Lambda-in-VPC writing to RDS-in-VPC):
 
-| Hop                            | RDS-in-VPC                 | Hetzner CH                                              |
-| ------------------------------ | -------------------------- | ------------------------------------------------------- |
-| Network RTT                    | <1 ms (same AZ)            | **~80–130 ms** (us-east-1 ↔ EU)                         |
-| TLS handshake (cold)           | Pooled by RDS Proxy, ~5 ms | ~2 × RTT = **~160–260 ms** (TLS 1.3 1-RTT + mTLS hello) |
-| TLS handshake (warm)           | n/a (reused)               | 0 (reused)                                              |
-| Per-write driver overhead      | sqlx prepared stmt: ~1 ms  | HTTP request: **~5–10 ms in-process** + 1 RTT           |
-| Typical 1-row write            | **~3–5 ms**                | **~85–135 ms** (warm) / **~250–400 ms** (cold)          |
-| Typical batch write (100 rows) | ~5–10 ms                   | **~85–135 ms** (still 1 RTT)                            |
+| Hop | RDS-in-VPC | Hetzner CH |
+|---|---|---|
+| Network RTT | <1 ms (same AZ) | **~80–130 ms** (us-east-1 ↔ EU) |
+| TLS handshake (cold) | Pooled by RDS Proxy, ~5 ms | ~2 × RTT = **~160–260 ms** (TLS 1.3 1-RTT + mTLS hello) |
+| TLS handshake (warm) | n/a (reused) | 0 (reused) |
+| Per-write driver overhead | sqlx prepared stmt: ~1 ms | HTTP request: **~5–10 ms in-process** + 1 RTT |
+| Typical 1-row write | **~3–5 ms** | **~85–135 ms** (warm) / **~250–400 ms** (cold) |
+| Typical batch write (100 rows) | ~5–10 ms | **~85–135 ms** (still 1 RTT) |
 
 **Key observation.** The Hetzner path has **~25-40× higher
 per-write latency on cold connections, ~25× on warm**. But the
@@ -274,21 +273,21 @@ Recap from step 3:
   Lambda against the same object key.
 
 So the "is the data lost?" question has a structural answer:
-**no**. Data sits in S3 until _some_ Lambda invocation succeeds.
+**no**. Data sits in S3 until *some* Lambda invocation succeeds.
 
 ### 3.2 What happens when Hetzner is unreachable
 
 Consider concrete failure modes:
 
-| Failure                              | Lambda behavior                               | Recovery                                                              |
-| ------------------------------------ | --------------------------------------------- | --------------------------------------------------------------------- |
-| Hetzner box rebooting (~minutes)     | Lambda HTTPS timeout/connect-refused → throws | First retry (5min default) likely succeeds; if not, DLQ; replay later |
-| Caddy down (~minutes)                | TLS handshake fails → throws                  | Same as above                                                         |
-| Hetzner network unreachable (~hours) | Both retries exhaust → DLQ accumulates        | DLQ replay after restoration                                          |
-| TLS cert expired (server side)       | Handshake fails → throws                      | Alarm should fire well before; BE Caddy auto-renews so unlikely       |
-| TLS cert expired (client side)       | Handshake fails → throws                      | Prices-api side; CloudWatch NotAfter alarm avoids surprise            |
-| ClickHouse OOM / overload            | HTTP 5xx → throws                             | Lambda retry + DLQ                                                    |
-| Network partial — high packet loss   | Slow / timeout → throws                       | Lambda retry                                                          |
+| Failure | Lambda behavior | Recovery |
+|---|---|---|
+| Hetzner box rebooting (~minutes) | Lambda HTTPS timeout/connect-refused → throws | First retry (5min default) likely succeeds; if not, DLQ; replay later |
+| Caddy down (~minutes) | TLS handshake fails → throws | Same as above |
+| Hetzner network unreachable (~hours) | Both retries exhaust → DLQ accumulates | DLQ replay after restoration |
+| TLS cert expired (server side) | Handshake fails → throws | Alarm should fire well before; BE Caddy auto-renews so unlikely |
+| TLS cert expired (client side) | Handshake fails → throws | Prices-api side; CloudWatch NotAfter alarm avoids surprise |
+| ClickHouse OOM / overload | HTTP 5xx → throws | Lambda retry + DLQ |
+| Network partial — high packet loss | Slow / timeout → throws | Lambda retry |
 
 **Key property:** every failure mode either (a) self-recovers on
 next invocation when the issue clears, or (b) lands in DLQ for
@@ -302,11 +301,11 @@ queue.
 
 **Hetzner refactor** options:
 
-| Option                               | Description                                                         | Trade-off                                                                   |
-| ------------------------------------ | ------------------------------------------------------------------- | --------------------------------------------------------------------------- |
-| Direct write                         | Lambda HTTPS POST to Caddy:443                                      | Simplest; failure → DLQ + replay                                            |
-| SQS in front of Lambda               | S3 → SQS → Lambda (instead of S3 → Lambda direct)                   | Lambda batching; per-message visibility-timeout retry; DLQ tooling stronger |
-| SQS between Lambda and Hetzner write | Lambda enqueues an internal "write to CH" job; second Lambda drains | Decouples ingest from write; over-engineered for two consumers              |
+| Option | Description | Trade-off |
+|---|---|---|
+| Direct write | Lambda HTTPS POST to Caddy:443 | Simplest; failure → DLQ + replay |
+| SQS in front of Lambda | S3 → SQS → Lambda (instead of S3 → Lambda direct) | Lambda batching; per-message visibility-timeout retry; DLQ tooling stronger |
+| SQS between Lambda and Hetzner write | Lambda enqueues an internal "write to CH" job; second Lambda drains | Decouples ingest from write; over-engineered for two consumers |
 
 **Recommendation seed.** **Direct write.** The S3-event-retry-
 DLQ chain already gives structural durability; adding SQS in
@@ -358,11 +357,11 @@ HTTP capacity at Caddy:443 does.
 
 Three plausible Rust client paths:
 
-| Library                                       | Protocol          | mTLS support              | Notes                                                                                     |
-| --------------------------------------------- | ----------------- | ------------------------- | ----------------------------------------------------------------------------------------- |
-| `clickhouse` crate (clickhouse-rs/clickhouse) | HTTP              | Yes via `reqwest::Client` | **Recommended.** Maintained, async, supports `Identity` for mTLS, ergonomic insert/select |
-| `klickhouse`                                  | Native (TCP 9000) | Possible but unusual      | **Disqualified** — Hetzner CH native port is loopback-only                                |
-| `reqwest` raw + JSONEachRow                   | HTTP              | Native reqwest            | Fallback if `clickhouse` doesn't compose well with `lambda_runtime`                       |
+| Library | Protocol | mTLS support | Notes |
+|---|---|---|---|
+| `clickhouse` crate (clickhouse-rs/clickhouse) | HTTP | Yes via `reqwest::Client` | **Recommended.** Maintained, async, supports `Identity` for mTLS, ergonomic insert/select |
+| `klickhouse` | Native (TCP 9000) | Possible but unusual | **Disqualified** — Hetzner CH native port is loopback-only |
+| `reqwest` raw + JSONEachRow | HTTP | Native reqwest | Fallback if `clickhouse` doesn't compose well with `lambda_runtime` |
 
 The `clickhouse` crate accepts a pre-built `reqwest::Client`,
 letting prices-api inject the mTLS-configured client from §1.3

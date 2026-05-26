@@ -1,35 +1,26 @@
 ---
-id: '0032'
-title: 'Capture Phoenix stable-pool first mainnet observation (WASM hash + 6-event decode)'
+id: "0032"
+title: "Capture Phoenix stable-pool first mainnet observation (WASM hash + 6-event decode)"
 type: RESEARCH
 status: completed
-related_adr: ['0001']
-related_tasks: ['0018', '0034', '0035', '0036']
-tags:
-  [
-    layer-research,
-    priority-low,
-    effort-small,
-    phoenix,
-    stable-pool,
-    schema-validation,
-    negative-result,
-  ]
+related_adr: ["0001"]
+related_tasks: ["0018", "0034", "0035", "0036"]
+tags: [layer-research, priority-low, effort-small, phoenix, stable-pool, schema-validation, negative-result]
 links:
-  - '../../archive/0018_RESEARCH_decode-per-amm-swap-event-shapes/notes/G-amm-swap-event-shapes.md'
-  - '../../archive/0002_RESEARCH_amm-venue-attribution/notes/R-phoenix-registry.md'
-  - 'notes/R-phoenix-xyk-pool-interface.md'
-  - 'notes/S-no-stable-pool-deployed.md'
-  - 'https://github.com/Phoenix-Protocol-Group/phoenix-contracts/blob/main/contracts/pool_stable/src/contract.rs'
+  - "../../archive/0018_RESEARCH_decode-per-amm-swap-event-shapes/notes/G-amm-swap-event-shapes.md"
+  - "../../archive/0002_RESEARCH_amm-venue-attribution/notes/R-phoenix-registry.md"
+  - "notes/R-phoenix-xyk-pool-interface.md"
+  - "notes/S-no-stable-pool-deployed.md"
+  - "https://github.com/Phoenix-Protocol-Group/phoenix-contracts/blob/main/contracts/pool_stable/src/contract.rs"
 history:
   - date: 2026-05-15
     status: backlog
     who: claude
-    note: 'Spawned from 0018 Appendix B item 3.'
+    note: "Spawned from 0018 Appendix B item 3."
   - date: 2026-05-15
     status: active
     who: oski
-    note: 'Activated to start research.'
+    note: "Activated to start research."
   - date: 2026-05-15
     status: completed
     who: oski
@@ -80,7 +71,7 @@ observation:
    for `("create", "liquidity_pool")` events whose deployed
    contract carries the stable-pool WASM hash.
 2. Once one is found, run the same `dump-swap-events
---contract <stable_pool_id> --tx <hash> --show-xdr --pretty`
+   --contract <stable_pool_id> --tx <hash> --show-xdr --pretty`
    flow as Phoenix XYK, save to
    `notes/evidence/phoenix_stable_pool_swap_decode.json`.
 3. Update task 0018's G-note Appendix A extractor list with

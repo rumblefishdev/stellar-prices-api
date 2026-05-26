@@ -1,19 +1,19 @@
 ---
-title: 'Synthesis — SDEX historical backfill recommendation'
+title: "Synthesis — SDEX historical backfill recommendation"
 type: synthesis
 status: mature
 spawned_from: ../README.md
 spawns: []
 tags: [sdex, backfill, synthesis, recommendation, stream-2]
 links:
-  - './R-sdex-operation-xdr-shape.md'
-  - './G-sdex-trade-extraction-design.md'
-  - './I-stream2-options.md'
+  - "./R-sdex-operation-xdr-shape.md"
+  - "./G-sdex-trade-extraction-design.md"
+  - "./I-stream2-options.md"
 history:
   - date: 2026-05-12
     status: mature
     who: okarcz
-    note: 'Final recommendation; open questions and spawned follow-ups listed.'
+    note: "Final recommendation; open questions and spawned follow-ups listed."
 ---
 
 # Synthesis — SDEX historical backfill recommendation
@@ -38,12 +38,11 @@ question, not a guess.
 
 Stream 1 (Soroban AMM) won the CH-shaped answer because the
 **price-relevant payload is in CH** (`soroban_events.topics_xdr`
-
-- `data_xdr`). The archive read is fully replaced.
++ `data_xdr`). The archive read is fully replaced.
 
 Stream 2 (SDEX) doesn't have the same structural fit:
 
-- CH `operations_appearances` carries operation _appearance_
+- CH `operations_appearances` carries operation *appearance*
   metadata (type, source, destination, asset code, amount), NOT
   the per-trade `ClaimAtom` list that's the price-relevant
   payload (per R-note §2).
@@ -124,11 +123,11 @@ measurement — task 0021.
 
 ## Spawned follow-up tasks
 
-| Slot                                                                          | Title                                                               | State                                                                |
-| ----------------------------------------------------------------------------- | ------------------------------------------------------------------- | -------------------------------------------------------------------- |
-| [0012](../../../backlog/0012_FEATURE_design-prices-owned-backfill-fargate.md) | Design Prices-owned Fargate backfill                                | existing backlog — G-note becomes its concrete extractor spec        |
-| [0013](../../../backlog/0013_DOCS_update-design-doc-to-match-be-reality.md)   | Update §5.6 / §11 of design doc                                     | existing backlog — 0020's recommendation feeds §5.6 Stream 2 rewrite |
-| 0021 (new)                                                                    | Measure SDEX trade-shaped op density in CH `operations_appearances` | new backlog (spawn) — decides Option B's go/no-go                    |
+| Slot | Title | State |
+|------|-------|-------|
+| [0012](../../../backlog/0012_FEATURE_design-prices-owned-backfill-fargate.md) | Design Prices-owned Fargate backfill | existing backlog — G-note becomes its concrete extractor spec |
+| [0013](../../../backlog/0013_DOCS_update-design-doc-to-match-be-reality.md) | Update §5.6 / §11 of design doc | existing backlog — 0020's recommendation feeds §5.6 Stream 2 rewrite |
+| 0021 (new) | Measure SDEX trade-shaped op density in CH `operations_appearances` | new backlog (spawn) — decides Option B's go/no-go |
 
 ## Folded-in resolutions from prior work
 

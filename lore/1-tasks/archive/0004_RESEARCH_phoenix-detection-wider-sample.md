@@ -1,23 +1,23 @@
 ---
-id: '0004'
-title: 'Run dump-swap-events against a wider ledger range to detect Phoenix'
+id: "0004"
+title: "Run dump-swap-events against a wider ledger range to detect Phoenix"
 type: RESEARCH
 status: superseded
 related_adr: []
-related_tasks: ['0001', '0002']
+related_tasks: ["0001", "0002"]
 tags: [layer-research, priority-low, effort-small, soroban, amm]
 links:
-  - '0001_RESEARCH_dump-amm-swap-events/notes/R-swap-topic-shapes.md'
-  - '0002_RESEARCH_amm-venue-attribution/notes/S-venue-attribution-mapping.md'
+  - "0001_RESEARCH_dump-amm-swap-events/notes/R-swap-topic-shapes.md"
+  - "0002_RESEARCH_amm-venue-attribution/notes/S-venue-attribution-mapping.md"
 history:
   - date: 2026-05-07
     status: backlog
     who: okarcz
-    note: 'Spawned from 0001 future work.'
+    note: "Spawned from 0001 future work."
   - date: 2026-05-08
     status: superseded
     who: claude
-    by: ['0002']
+    by: ["0002"]
     note: >
       Acceptance criteria fully answered. (1) Wider sample (≥30 days)
       already run as the 4-day FC47D9FF window plus 0002's cross-check.
@@ -48,7 +48,6 @@ uses yet another topic symbol or is simply low-volume.
 
 Per `0001/notes/R-swap-topic-shapes.md`, only `swap` (1 emitter) and
 `trade` (29 emitters) were observed. Phoenix's absence may be:
-
 1. Low volume in the sampled window (plausible — Phoenix is the smallest
    of the three target AMMs).
 2. A third distinct topic symbol we haven't seen yet.

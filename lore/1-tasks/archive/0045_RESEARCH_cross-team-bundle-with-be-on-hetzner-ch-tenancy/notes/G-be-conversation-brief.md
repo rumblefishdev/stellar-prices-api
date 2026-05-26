@@ -1,21 +1,21 @@
 ---
-title: 'G: BE conversation brief — shared Hetzner CH for prices-api live writes'
+title: "G: BE conversation brief — shared Hetzner CH for prices-api live writes"
 type: generation
 status: developing
 spawned_from: ../README.md
 spawns: []
 tags: [generation, brief, cross-team, block-explorer, hetzner, clickhouse, mtls]
 links:
-  - '../README.md'
-  - '../../../../2-adrs/0007_live-data-sink-on-shared-hetzner-clickhouse.md'
-  - '../../../archive/0044_RESEARCH_refactor-architecture-shared-galexie-hetzner-clickhouse/notes/S-refactor-recommendation.md'
-  - '../../../../../../soroban-block-explorer/lore/1-tasks/active/0216_RESEARCH_hetzner-clickhouse-deploy/README.md'
-  - '../../../../../../soroban-block-explorer/lore/1-tasks/active/0227_FEATURE_infra-hetzner-ansible-playbook.md'
+  - "../README.md"
+  - "../../../../2-adrs/0007_live-data-sink-on-shared-hetzner-clickhouse.md"
+  - "../../../archive/0044_RESEARCH_refactor-architecture-shared-galexie-hetzner-clickhouse/notes/S-refactor-recommendation.md"
+  - "../../../../../../soroban-block-explorer/lore/1-tasks/active/0216_RESEARCH_hetzner-clickhouse-deploy/README.md"
+  - "../../../../../../soroban-block-explorer/lore/1-tasks/active/0227_FEATURE_infra-hetzner-ansible-playbook.md"
 history:
   - date: 2026-05-19
     status: developing
     who: okarcz
-    note: 'First draft. To be reviewed internally before sending to BE.'
+    note: "First draft. To be reviewed internally before sending to BE."
 ---
 
 # G: BE conversation brief — shared Hetzner ClickHouse for prices-api live writes
@@ -124,9 +124,8 @@ in the research note linked under §6.
 
 **Ask 3.** Confirm the **announcement-not-approval** norm for DDL
 inside `prices.*` — we open a PR in our repo, you get a Slack heads-up
-
-- the PR link, no blocking review unless cross-database reads are
-  involved.
++ the PR link, no blocking review unless cross-database reads are
+involved.
 
 **What we need from you:** yes / counter / no on each of the three.
 
@@ -305,21 +304,21 @@ Linked for context, not required reading:
 
 ## 7. Outcome tracking (filled in after response)
 
-| Cluster | Ask                                           | Outcome | Note |
-| ------- | --------------------------------------------- | ------- | ---- |
-| A       | 1. Separate `prices` DB + dedicated user      | —       |      |
-| A       | 2. SNS topic between S3 and Lambdas           | —       |      |
-| A       | 3. Announcement-not-approval DDL norm         | —       |      |
-| B       | 4. Hardware specs + monthly cost              | —       |      |
-| B       | 5. Caddy `max_keepalive_conns` headroom       | —       |      |
-| B       | 6. BE ADR 0006 retention confirmed            | —       |      |
-| B       | 7. Daily `BACKUP DATABASE prices` Borg target | —       |      |
-| B       | 8. Daily RPO acceptable (heads-up)            | —       |      |
-| C       | 9. Per-env client certs via BE script         | —       |      |
-| C       | 10. 1-year manual rotation cadence            | —       |      |
-| C       | 11. Revocation = CA rotation                  | —       |      |
-| D       | 12. Cost-share number                         | —       |      |
-| D       | 13. Money-movement mechanism                  | —       |      |
+| Cluster | Ask | Outcome | Note |
+|---|---|---|---|
+| A | 1. Separate `prices` DB + dedicated user | — | |
+| A | 2. SNS topic between S3 and Lambdas | — | |
+| A | 3. Announcement-not-approval DDL norm | — | |
+| B | 4. Hardware specs + monthly cost | — | |
+| B | 5. Caddy `max_keepalive_conns` headroom | — | |
+| B | 6. BE ADR 0006 retention confirmed | — | |
+| B | 7. Daily `BACKUP DATABASE prices` Borg target | — | |
+| B | 8. Daily RPO acceptable (heads-up) | — | |
+| C | 9. Per-env client certs via BE script | — | |
+| C | 10. 1-year manual rotation cadence | — | |
+| C | 11. Revocation = CA rotation | — | |
+| D | 12. Cost-share number | — | |
+| D | 13. Money-movement mechanism | — | |
 
 Once this table is fully populated, copy it (with outcomes) into
 `G-be-agreement-record.md` and close out the cluster outcomes section

@@ -1,24 +1,23 @@
 ---
-id: '0043'
-title: 'Fix package-lock.json mismatch — missing @emnapi/{core,runtime}@1.10.0'
+id: "0043"
+title: "Fix package-lock.json mismatch — missing @emnapi/{core,runtime}@1.10.0"
 type: BUG
 status: completed
 related_adr: []
-related_tasks: ['0041']
-tags:
-  ['layer-tooling', 'phase-now', 'effort-small', 'priority-medium', 'ci', 'npm']
+related_tasks: ["0041"]
+tags: ["layer-tooling", "phase-now", "effort-small", "priority-medium", "ci", "npm"]
 links:
-  - 'https://github.com/rumblefishdev/stellar-prices-api/actions/runs/26035530230'
-  - 'https://github.com/rumblefishdev/stellar-prices-api/pull/18'
+  - "https://github.com/rumblefishdev/stellar-prices-api/actions/runs/26035530230"
+  - "https://github.com/rumblefishdev/stellar-prices-api/pull/18"
 history:
   - date: 2026-05-18
     status: backlog
     who: claude
-    note: 'Spawned from 0041 — first deploy-board run failed on npm ci due to this pre-existing mismatch. 0041 sidestepped it by dropping npm ci (zero-dep script); future workflows that need real deps will hit it.'
+    note: "Spawned from 0041 — first deploy-board run failed on npm ci due to this pre-existing mismatch. 0041 sidestepped it by dropping npm ci (zero-dep script); future workflows that need real deps will hit it."
   - date: 2026-05-18
     status: active
     who: oski
-    note: 'Activated to regenerate package-lock.json.'
+    note: "Activated to regenerate package-lock.json."
   - date: 2026-05-18
     status: completed
     who: claude

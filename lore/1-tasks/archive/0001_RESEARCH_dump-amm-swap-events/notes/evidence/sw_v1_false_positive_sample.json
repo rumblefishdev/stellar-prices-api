@@ -32,7 +32,9 @@
             "symbol": "Ed25519"
           },
           {
-            "vec": ["void"]
+            "vec": [
+              "void"
+            ]
           },
           {
             "vec": [

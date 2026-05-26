@@ -1,23 +1,15 @@
 ---
-title: 'G: BE agreement record — responses to the Cluster A-D brief'
+title: "G: BE agreement record — responses to the Cluster A-D brief"
 type: generation
 status: developing
 spawned_from: ./G-be-conversation-brief.md
-spawns: ['0047']
-tags:
-  [
-    generation,
-    agreement-record,
-    cross-team,
-    block-explorer,
-    hetzner,
-    clickhouse,
-  ]
+spawns: ["0047"]
+tags: [generation, agreement-record, cross-team, block-explorer, hetzner, clickhouse]
 links:
-  - './G-be-conversation-brief.md'
-  - '../README.md'
-  - '../../../../2-adrs/0007_live-data-sink-on-shared-hetzner-clickhouse.md'
-  - '../../../archive/0046_RESEARCH_empirical-prices-ch-storage-estimate-from-10k-ledgers/notes/G-empirical-storage-estimate.md'
+  - "./G-be-conversation-brief.md"
+  - "../README.md"
+  - "../../../../2-adrs/0007_live-data-sink-on-shared-hetzner-clickhouse.md"
+  - "../../../archive/0046_RESEARCH_empirical-prices-ch-storage-estimate-from-10k-ledgers/notes/G-empirical-storage-estimate.md"
 history:
   - date: 2026-05-19
     status: developing
@@ -48,21 +40,21 @@ open items resolve.
 
 ## 1. Outcome table
 
-| Cluster | Ask                                           | Outcome                    | Note                                                                                                                             |
-| ------- | --------------------------------------------- | -------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| A       | 1. Separate `prices` DB + dedicated user      | **yes**                    |                                                                                                                                  |
-| A       | 2. SNS topic between S3 and Lambdas           | **yes**                    |                                                                                                                                  |
-| A       | 3. Announcement-not-approval DDL norm         | **yes**                    |                                                                                                                                  |
-| B       | 4. Hardware specs + monthly cost              | **accepted**               | Accepted on the basis of task 0046's empirical calculation; cost estimation flows from there.                                    |
-| B       | 5. Caddy `max_keepalive_conns` headroom       | **yes**                    |                                                                                                                                  |
-| B       | 6. BE ADR 0006 retention confirmed            | **TBD — spawns task 0047** | Big risk: can shared Hetzner CH+Caddy API serve combined BE + prices-api request volume fast enough? Verify before committing.   |
-| B       | 7. Daily `BACKUP DATABASE prices` Borg target | **yes**                    | Open question: do we need daily, or is a longer cadence (e.g. weekly) sufficient given the <1 GB/yr footprint? To revisit.       |
-| B       | 8. Daily RPO acceptable (heads-up)            | **yes**                    |                                                                                                                                  |
-| C       | 9. Per-env client certs via BE script         | **yes**                    |                                                                                                                                  |
-| C       | 10. 1-year manual rotation cadence            | **yes**                    |                                                                                                                                  |
-| C       | 11. Revocation = CA rotation                  | **yes**                    |                                                                                                                                  |
-| D       | 12. Cost-share number                         | **TBD**                    | More estimation needed for combined DB size projection and Hetzner storage-cost basis (BE side + prices side together). Pending. |
-| D       | 13. Money-movement mechanism                  | **yes**                    |                                                                                                                                  |
+| Cluster | Ask | Outcome | Note |
+|---|---|---|---|
+| A | 1. Separate `prices` DB + dedicated user | **yes** | |
+| A | 2. SNS topic between S3 and Lambdas | **yes** | |
+| A | 3. Announcement-not-approval DDL norm | **yes** | |
+| B | 4. Hardware specs + monthly cost | **accepted** | Accepted on the basis of task 0046's empirical calculation; cost estimation flows from there. |
+| B | 5. Caddy `max_keepalive_conns` headroom | **yes** | |
+| B | 6. BE ADR 0006 retention confirmed | **TBD — spawns task 0047** | Big risk: can shared Hetzner CH+Caddy API serve combined BE + prices-api request volume fast enough? Verify before committing. |
+| B | 7. Daily `BACKUP DATABASE prices` Borg target | **yes** | Open question: do we need daily, or is a longer cadence (e.g. weekly) sufficient given the <1 GB/yr footprint? To revisit. |
+| B | 8. Daily RPO acceptable (heads-up) | **yes** | |
+| C | 9. Per-env client certs via BE script | **yes** | |
+| C | 10. 1-year manual rotation cadence | **yes** | |
+| C | 11. Revocation = CA rotation | **yes** | |
+| D | 12. Cost-share number | **TBD** | More estimation needed for combined DB size projection and Hetzner storage-cost basis (BE side + prices side together). Pending. |
+| D | 13. Money-movement mechanism | **yes** | |
 
 **Summary:** 10 yes, 0 no, 3 TBD. The architectural shape (Cluster A
 all-yes) is locked in. Auth (Cluster C all-yes) is locked in. Two of
@@ -81,15 +73,15 @@ ADR 0007 conceptually, but the ADR stays in `proposed` status until
 the 3 TBDs resolve (specifically B6, since a "no" or
 "with-conditions" answer there would force the sidecar-CH fallback).
 
-| Commitment                                  | What unblocks                                                                                             |
-| ------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
-| Separate `prices` DB + user                 | Task 0011 rewrite can spec the CDK migration applier + Secrets Manager certs against a concrete DB target |
-| SNS topic on S3 bucket                      | Task 0038 rewrite can spec the Lambda subscription shape                                                  |
-| DDL announcement norm                       | Schema-applier task (0044 §5.3) can ship as prices-api-owned tooling                                      |
-| Caddy keepalive headroom                    | Task 0038 + 0039 can plan their batched HTTP write rate without re-tuning Caddy                           |
-| Per-env certs + 1y rotation + CA-revocation | Task 0011 rewrite can spec the Secrets Manager mTLS material shape + the CloudWatch NotAfter alarm        |
-| Daily Borg backup + RPO                     | Operational runbook can plan against daily RPO; no extra tooling needed on prices-api side                |
-| Money mechanism (yes)                       | When the number lands (D12 TBD), the flow is already agreed                                               |
+| Commitment | What unblocks |
+|---|---|
+| Separate `prices` DB + user | Task 0011 rewrite can spec the CDK migration applier + Secrets Manager certs against a concrete DB target |
+| SNS topic on S3 bucket | Task 0038 rewrite can spec the Lambda subscription shape |
+| DDL announcement norm | Schema-applier task (0044 §5.3) can ship as prices-api-owned tooling |
+| Caddy keepalive headroom | Task 0038 + 0039 can plan their batched HTTP write rate without re-tuning Caddy |
+| Per-env certs + 1y rotation + CA-revocation | Task 0011 rewrite can spec the Secrets Manager mTLS material shape + the CloudWatch NotAfter alarm |
+| Daily Borg backup + RPO | Operational runbook can plan against daily RPO; no extra tooling needed on prices-api side |
+| Money mechanism (yes) | When the number lands (D12 TBD), the flow is already agreed |
 
 ### 2.2 Spawned follow-up: task 0047
 
@@ -136,11 +128,11 @@ flat, re-open clause at 10× scale) holds as the proposal.
 
 ## 3. Risks introduced by the responses
 
-| Risk                                                                       | Probability | Impact | Mitigation                                                                                                             |
-| -------------------------------------------------------------------------- | ----------- | ------ | ---------------------------------------------------------------------------------------------------------------------- |
-| Task 0047 finds shared CH+Caddy can't sustain combined load                | Medium      | High   | Fallback to Option 4 sidecar CH (per task 0044 I-note §4); ADR 0007 would shift to that path                           |
-| Cost-share number lands materially higher than the empirical 1-2% pro-rata | Low         | Low    | Brief's flat-fee ceiling ($5/env) absorbs most realistic outcomes; >$10/env triggers fallback re-eval (per brief §3.4) |
-| BE flips B7 to weekly Borg and we accept                                   | Low         | Low    | Replay path covers the gap; ~minutes per day to recompute OHLCV from S3                                                |
+| Risk | Probability | Impact | Mitigation |
+|---|---|---|---|
+| Task 0047 finds shared CH+Caddy can't sustain combined load | Medium | High | Fallback to Option 4 sidecar CH (per task 0044 I-note §4); ADR 0007 would shift to that path |
+| Cost-share number lands materially higher than the empirical 1-2% pro-rata | Low | Low | Brief's flat-fee ceiling ($5/env) absorbs most realistic outcomes; >$10/env triggers fallback re-eval (per brief §3.4) |
+| BE flips B7 to weekly Borg and we accept | Low | Low | Replay path covers the gap; ~minutes per day to recompute OHLCV from S3 |
 
 ---
 
@@ -161,18 +153,18 @@ The original outcomes as supplied by the team contact (preserved
 verbatim for the historical record — paraphrased only where the
 matrix cells were shorter than the user's prose):
 
-> | Cluster | Ask                                           | Outcome | Note                                                                                                                                                                         |
-> | ------- | --------------------------------------------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-> | A       | 1. Separate `prices` DB + dedicated user      | yes     |                                                                                                                                                                              |
-> | A       | 2. SNS topic between S3 and Lambdas           | yes     |                                                                                                                                                                              |
-> | A       | 3. Announcement-not-approval DDL norm         | yes     |                                                                                                                                                                              |
-> | B       | 4. Hardware specs + monthly cost              | —       | accepted as task 0046 calculated and money estimated cost                                                                                                                    |
-> | B       | 5. Caddy `max_keepalive_conns` headroom       | yes     |                                                                                                                                                                              |
-> | B       | 6. BE ADR 0006 retention confirmed            | TBD     | the big risk is if the Hetzner API will be able to cover all API requests from both BE and prices-api projects. Create new RESEARCH task to verify if the API is fast enough |
-> | B       | 7. Daily `BACKUP DATABASE prices` Borg target | yes     | to consider if daily target is needed or can be longer period eg 1 week                                                                                                      |
-> | B       | 8. Daily RPO acceptable (heads-up)            | yes     |                                                                                                                                                                              |
-> | C       | 9. Per-env client certs via BE script         | yes     |                                                                                                                                                                              |
-> | C       | 10. 1-year manual rotation cadence            | yes     |                                                                                                                                                                              |
-> | C       | 11. Revocation = CA rotation                  | yes     |                                                                                                                                                                              |
-> | D       | 12. Cost-share number                         | tdb     | more estimation need to be done for db size and hetzner storage costs                                                                                                        |
-> | D       | 13. Money-movement mechanism                  | yes     |                                                                                                                                                                              |
+> | Cluster | Ask | Outcome | Note |
+> |---|---|---|---|
+> | A | 1. Separate `prices` DB + dedicated user | yes | |
+> | A | 2. SNS topic between S3 and Lambdas | yes | |
+> | A | 3. Announcement-not-approval DDL norm | yes | |
+> | B | 4. Hardware specs + monthly cost | — | accepted as task 0046 calculated and money estimated cost |
+> | B | 5. Caddy `max_keepalive_conns` headroom | yes | |
+> | B | 6. BE ADR 0006 retention confirmed | TBD | the big risk is if the Hetzner API will be able to cover all API requests from both BE and prices-api projects. Create new RESEARCH task to verify if the API is fast enough |
+> | B | 7. Daily `BACKUP DATABASE prices` Borg target | yes | to consider if daily target is needed or can be longer period eg 1 week |
+> | B | 8. Daily RPO acceptable (heads-up) | yes | |
+> | C | 9. Per-env client certs via BE script | yes | |
+> | C | 10. 1-year manual rotation cadence | yes | |
+> | C | 11. Revocation = CA rotation | yes | |
+> | D | 12. Cost-share number | tdb | more estimation need to be done for db size and hetzner storage costs |
+> | D | 13. Money-movement mechanism | yes | |

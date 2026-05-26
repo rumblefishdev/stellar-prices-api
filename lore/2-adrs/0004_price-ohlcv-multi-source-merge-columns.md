@@ -1,17 +1,17 @@
 ---
-id: '0004'
-title: 'price_ohlcv carries first_trade_at, last_trade_at, sources_seen for deterministic multi-source merge'
+id: "0004"
+title: "price_ohlcv carries first_trade_at, last_trade_at, sources_seen for deterministic multi-source merge"
 status: accepted
 deciders: [okarcz]
-related_tasks: ['0012', '0022', '0023', '0024', '0025']
-related_adrs: ['0003']
+related_tasks: ["0012", "0022", "0023", "0024", "0025"]
+related_adrs: ["0003"]
 tags: [architecture, schema, ohlcv, multi-source, merge, live-ingestion]
 links:
-  - '../1-tasks/archive/0025_RESEARCH_live-multi-source-merge-contract/notes/G-merge-contract-spec.md'
-  - '../1-tasks/archive/0023_RESEARCH_ohlcv-row-identity-base-vs-pair/notes/S-recommendation.md'
-  - '../1-tasks/archive/0022_RESEARCH_sdex-filter-and-extraction-spec/notes/G-sdex-decode-and-bucket-spec.md'
-  - './0003_price-ohlcv-pk-includes-quote-asset-id.md'
-  - '../../docs/database-schema/database-schema-overview.md'
+  - "../1-tasks/archive/0025_RESEARCH_live-multi-source-merge-contract/notes/G-merge-contract-spec.md"
+  - "../1-tasks/archive/0023_RESEARCH_ohlcv-row-identity-base-vs-pair/notes/S-recommendation.md"
+  - "../1-tasks/archive/0022_RESEARCH_sdex-filter-and-extraction-spec/notes/G-sdex-decode-and-bucket-spec.md"
+  - "./0003_price-ohlcv-pk-includes-quote-asset-id.md"
+  - "../../docs/database-schema/database-schema-overview.md"
 history:
   - date: 2026-05-13
     status: proposed

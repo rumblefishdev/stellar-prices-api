@@ -1,22 +1,22 @@
 ---
-id: '0006'
-title: 'Bootstrap Nx monorepo workspace (@rumblefish/stellar-prices-api)'
+id: "0006"
+title: "Bootstrap Nx monorepo workspace (@rumblefish/stellar-prices-api)"
 type: FEATURE
 status: completed
 related_adr: []
-related_tasks: ['0007', '0008']
+related_tasks: ["0007", "0008"]
 tags: [layer-tooling, priority-high, effort-small, infra, tooling]
 links:
-  - 'https://github.com/rumblefishdev/stellar-prices-api/pull/6'
+  - "https://github.com/rumblefishdev/stellar-prices-api/pull/6"
 history:
   - date: 2026-05-11
     status: backlog
     who: okarcz
-    note: 'Task created to initialize Nx workspace before service code lands.'
+    note: "Task created to initialize Nx workspace before service code lands."
   - date: 2026-05-11
     status: active
     who: okarcz
-    note: 'Activated to bootstrap the Nx workspace.'
+    note: "Activated to bootstrap the Nx workspace."
   - date: 2026-05-11
     status: completed
     who: claude
@@ -68,15 +68,15 @@ Copied the essential workspace files into the repo root, patched the workspace n
 
 ### Files added / modified
 
-| File                 | Origin       | Notes                                                           |
-| -------------------- | ------------ | --------------------------------------------------------------- |
-| `nx.json`            | Nx generator | Verbatim                                                        |
-| `tsconfig.base.json` | Nx generator | Verbatim                                                        |
-| `tsconfig.json`      | Nx generator | Verbatim                                                        |
-| `package.json`       | Nx generator | `name` patched `@org/source` → `@rumblefish/stellar-prices-api` |
-| `package-lock.json`  | Nx generator | `name` patched in all 2 occurrences                             |
-| `packages/.gitkeep`  | Nx generator | Verbatim                                                        |
-| `.gitignore`         | merged       | +3 Nx-specific patterns                                         |
+| File | Origin | Notes |
+|------|--------|-------|
+| `nx.json` | Nx generator | Verbatim |
+| `tsconfig.base.json` | Nx generator | Verbatim |
+| `tsconfig.json` | Nx generator | Verbatim |
+| `package.json` | Nx generator | `name` patched `@org/source` → `@rumblefish/stellar-prices-api` |
+| `package-lock.json` | Nx generator | `name` patched in all 2 occurrences |
+| `packages/.gitkeep` | Nx generator | Verbatim |
+| `.gitignore` | merged | +3 Nx-specific patterns |
 
 ### Toolchain
 

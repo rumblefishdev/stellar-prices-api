@@ -1,16 +1,16 @@
 ---
-title: 'Contract → venue mapping for observed AMM emitters'
+title: "Contract → venue mapping for observed AMM emitters"
 type: synthesis
 status: mature
 spawned_from: ../README.md
 spawns: []
 tags: [soroban, amm, venue-attribution, schema-validation]
 links:
-  - '../../0001_RESEARCH_dump-amm-swap-events/notes/R-swap-topic-shapes.md'
-  - 'R-soroswap-registry.md'
-  - 'R-aquarius-registry.md'
-  - 'R-phoenix-registry.md'
-  - '../../../../docs/database-schema/amm-trades-schema.md'
+  - "../../0001_RESEARCH_dump-amm-swap-events/notes/R-swap-topic-shapes.md"
+  - "R-soroswap-registry.md"
+  - "R-aquarius-registry.md"
+  - "R-phoenix-registry.md"
+  - "../../../../docs/database-schema/amm-trades-schema.md"
 history:
   - date: 2026-05-08
     status: mature
@@ -27,16 +27,16 @@ history:
 
 ## Canonical mainnet addresses (the registries)
 
-| Venue    | Role                            | Contract                                                           |
-| -------- | ------------------------------- | ------------------------------------------------------------------ |
-| Soroswap | Factory                         | `CA4HEQTL2WPEUYKYKCDOHCDNIV4QHNJ7EL4J4NQ6VADP7SYHVRYZ7AW2`         |
-| Soroswap | Router                          | `CAG5LRYQ5JVEUI5TEID72EYOVX44TTUJT5BQR2J6J77FH65PCCFAJDDH`         |
-| Soroswap | Aggregator                      | `CAYP3UWLJM7ZPTUKL6R6BFGTRWLZ46LRKOXTERI2K6BIJAWGYY62TXTO`         |
-| Soroswap | Pair WASM hash                  | `18051456816b66f12e773a56f77c5794fac1b1fb7ab6e22d4fad5a412770f73e` |
-| Aquarius | Router                          | `CBQDHNBFBZYE4MKPWBSJOPIYLW4SFSXAXUTSXJN76GNKYVYPCKWC6QUK`         |
+| Venue | Role | Contract |
+|---|---|---|
+| Soroswap | Factory | `CA4HEQTL2WPEUYKYKCDOHCDNIV4QHNJ7EL4J4NQ6VADP7SYHVRYZ7AW2` |
+| Soroswap | Router | `CAG5LRYQ5JVEUI5TEID72EYOVX44TTUJT5BQR2J6J77FH65PCCFAJDDH` |
+| Soroswap | Aggregator | `CAYP3UWLJM7ZPTUKL6R6BFGTRWLZ46LRKOXTERI2K6BIJAWGYY62TXTO` |
+| Soroswap | Pair WASM hash | `18051456816b66f12e773a56f77c5794fac1b1fb7ab6e22d4fad5a412770f73e` |
+| Aquarius | Router | `CBQDHNBFBZYE4MKPWBSJOPIYLW4SFSXAXUTSXJN76GNKYVYPCKWC6QUK` |
 | Aquarius | Constant-product pool WASM hash | `ae0da5a84b15805c5c7931ac567a8d1b34be3f26b483993d9ff80cb2c3de9852` |
-| Phoenix  | Factory                         | `CB4SVAWJA6TSRNOJZ7W2AWFW46D5VR4ZMFZKDIKXEINZCZEGZCJZCKMI`         |
-| Phoenix  | Multihop (router)               | `CCLZRD4E72T7JCZCN3P7KNPYNXFYKQCL64ECLX7WP5GNVYPYJGU2IO2G`         |
+| Phoenix | Factory | `CB4SVAWJA6TSRNOJZ7W2AWFW46D5VR4ZMFZKDIKXEINZCZEGZCJZCKMI` |
+| Phoenix | Multihop (router) | `CCLZRD4E72T7JCZCN3P7KNPYNXFYKQCL64ECLX7WP5GNVYPYJGU2IO2G` |
 
 Sources for each address are cited in the per-venue R-notes.
 
@@ -49,13 +49,13 @@ Sources for each address are cited in the per-venue R-notes.
 > normalisation. The table below preserves that ranking; the corrected
 > per-kind breakdown is in §"Cross-check vs 0001 sample".
 
-| Events | Contract                                                   | Venue        | Role                | Evidence                                                                                                                                     |
-| -----: | ---------------------------------------------------------- | ------------ | ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| 11,947 | `CBQDHNBFBZYE4MKPWBSJOPIYLW4SFSXAXUTSXJN76GNKYVYPCKWC6QUK` | **Aquarius** | Router              | stellar.expert label "Aquarius Router"; package `soroban-liquidity-pool-router-contract`; documented in `docs.aqua.network`                  |
-|  4,128 | `CBHCRSVX3ZZ7EGTSYMKPEFGZNWRVCSESQR3UABET4MIW52N4EVU6BIZX` | **Phoenix**  | XYK pool (XLM/USDC) | stellar.expert label "Phoenix Pool"; matches Phoenix factory's deployed pool list                                                            |
-|  2,706 | `CCR2CH4GQVCZHG7CHFVMNANCK45CU5DVKXZIIITDZQAU3CEJZ7RQH2MQ` | unknown      | —                   | unlabelled on stellar.expert; not Aquarius (different WASM/creator), not Phoenix (not in factory list), not Soroswap (different topic shape) |
-|  2,480 | `CDMIM23WOUL5CZBKX3GOA3V5R5AMVIMTCP52KCDQORWELAPLJ27WZCHL` | unknown      | —                   | same as above                                                                                                                                |
-|    440 | `CBCZGGNOEUZG4CAAE7TGTQQHETZMKUT4OIPFHHPKEUX46U4KXBBZ3GLH` | **Phoenix**  | XYK pool (XLM/PHO)  | stellar.expert label "Phoenix Pool"; same WASM as `CBHCRSVX...`                                                                              |
+| Events | Contract | Venue | Role | Evidence |
+|---:|---|---|---|---|
+| 11,947 | `CBQDHNBFBZYE4MKPWBSJOPIYLW4SFSXAXUTSXJN76GNKYVYPCKWC6QUK` | **Aquarius** | Router | stellar.expert label "Aquarius Router"; package `soroban-liquidity-pool-router-contract`; documented in `docs.aqua.network` |
+| 4,128 | `CBHCRSVX3ZZ7EGTSYMKPEFGZNWRVCSESQR3UABET4MIW52N4EVU6BIZX` | **Phoenix** | XYK pool (XLM/USDC) | stellar.expert label "Phoenix Pool"; matches Phoenix factory's deployed pool list |
+| 2,706 | `CCR2CH4GQVCZHG7CHFVMNANCK45CU5DVKXZIIITDZQAU3CEJZ7RQH2MQ` | unknown | — | unlabelled on stellar.expert; not Aquarius (different WASM/creator), not Phoenix (not in factory list), not Soroswap (different topic shape) |
+| 2,480 | `CDMIM23WOUL5CZBKX3GOA3V5R5AMVIMTCP52KCDQORWELAPLJ27WZCHL` | unknown | — | same as above |
+| 440 | `CBCZGGNOEUZG4CAAE7TGTQQHETZMKUT4OIPFHHPKEUX46U4KXBBZ3GLH` | **Phoenix** | XYK pool (XLM/PHO) | stellar.expert label "Phoenix Pool"; same WASM as `CBHCRSVX...` |
 
 The two unknowns share neither WASM nor creator with Aquarius or Phoenix — they are likely a fourth Soroban DEX outside the {Soroswap, Aquarius, Phoenix} target set, or a stale/internal contract. See `## Future work` below.
 
@@ -94,11 +94,11 @@ These supersede the hypothetical wording in `docs/database-schema/amm-trades-sch
 
 Three observed pool-level decoders, each materially different:
 
-| Decoder          | Topic match                                | Data                                                                       | Trade row count                                    |
-| ---------------- | ------------------------------------------ | -------------------------------------------------------------------------- | -------------------------------------------------- |
-| Aquarius pool    | `Symbol("trade")`                          | `Vec<i128>(in, out, fee)`                                                  | 1 event = 1 trade                                  |
-| Soroswap pool    | `String("SoroswapPair") + Symbol("swap")`  | uniswap-v2 `Map{amount_0_in, amount_0_out, amount_1_in, amount_1_out, to}` | 1 event = 1 trade                                  |
-| Phoenix XYK pool | `String("swap") + String(<field>)` × **8** | scalar-per-event                                                           | **8 events = 1 trade** (6 for Phoenix stable pool) |
+| Decoder | Topic match | Data | Trade row count |
+|---|---|---|---|
+| Aquarius pool | `Symbol("trade")` | `Vec<i128>(in, out, fee)` | 1 event = 1 trade |
+| Soroswap pool | `String("SoroswapPair") + Symbol("swap")` | uniswap-v2 `Map{amount_0_in, amount_0_out, amount_1_in, amount_1_out, to}` | 1 event = 1 trade |
+| Phoenix XYK pool | `String("swap") + String(<field>)` × **8** | scalar-per-event | **8 events = 1 trade** (6 for Phoenix stable pool) |
 
 Phoenix's 8-event group is the surprising finding. The indexer must group by `(tx_hash, op_index, contract_id)` and reassemble one `prices_amm_trades` row from the eight `String("swap")` events. Source: `phoenix-contracts/contracts/pool/src/contract.rs:1172-1185`. (Note: source uses `&str` tuple `("swap", "sender")` which compiles to `String` ScVal, not `Symbol`. See §"Cross-check vs 0001 sample" for empirical verification.)
 
@@ -108,11 +108,11 @@ This means filtering on `topic_0 = swap` (any kind) alone is insufficient — th
 
 For each venue, the indexer maintains a per-venue `(pool_address) → venue` lookup populated by replaying factory events from genesis:
 
-| Venue    | Factory address          | Pool-creation topic                               | Data                                                                                         |
-| -------- | ------------------------ | ------------------------------------------------- | -------------------------------------------------------------------------------------------- |
-| Soroswap | `CA4HEQTL...`            | `[String("SoroswapFactory"), Symbol("new_pair")]` | `NewPairEvent { token_0, token_1, pair, new_pairs_length }`                                  |
-| Aquarius | router `CBQDHNBFBZYE...` | `Symbol("add_pool")`                              | `(pool_address, pool_type: Symbol)` — distinguishes constant_product / stable / concentrated |
-| Phoenix  | `CB4SVAWJA6...`          | `[Symbol("create"), Symbol("liquidity_pool")]`    | `Address(pool_id)`                                                                           |
+| Venue | Factory address | Pool-creation topic | Data |
+|---|---|---|---|
+| Soroswap | `CA4HEQTL...` | `[String("SoroswapFactory"), Symbol("new_pair")]` | `NewPairEvent { token_0, token_1, pair, new_pairs_length }` |
+| Aquarius | router `CBQDHNBFBZYE...` | `Symbol("add_pool")` | `(pool_address, pool_type: Symbol)` — distinguishes constant_product / stable / concentrated |
+| Phoenix | `CB4SVAWJA6...` | `[Symbol("create"), Symbol("liquidity_pool")]` | `Address(pool_id)` |
 
 Aquarius is special: its router emits `add_pool` and is itself the venue registry, so the indexer also reads `pool_type: Symbol` and dispatches to the right decoder per pool.
 
@@ -139,30 +139,30 @@ and split emitters by `topics[0]` ScVal kind. Results:
 
 ### Direct emitter matches (canonical address = observed `contract_id`)
 
-| Registry address      | Role                 | 0001 evidence                                                                                       | Match |
-| --------------------- | -------------------- | --------------------------------------------------------------------------------------------------- | ----- |
-| `CBQDHNBFBZYE...`     | Aquarius router      | `swap_event_sample.json` `contract_id`; #1 `Symbol("swap")` emitter (11,947 events) in wider sample | ✅    |
-| `CA6PUJLBYK...`       | Aquarius pool sample | `trade_event_sample.json` `contract_id`                                                             | ✅    |
-| `CAG5LRYQ...`         | Soroswap router      | `soroswap_router_swap_sample.json` `contract_id`                                                    | ✅    |
-| `CAYP3UWL...`         | Soroswap aggregator  | `soroswap_aggregator_swap_sample.json` `contract_id`                                                | ✅    |
-| `CAM7DY53G...`        | Soroswap pool sample | `soroswap_pair_swap_sample.json` `contract_id`; matches factory's pair WASM                         | ✅    |
-| 9 of 11 Phoenix pools | Phoenix XYK pool     | `String("swap")` emitter list — see next sub-section                                                | ✅    |
+| Registry address | Role | 0001 evidence | Match |
+|---|---|---|---|
+| `CBQDHNBFBZYE...` | Aquarius router | `swap_event_sample.json` `contract_id`; #1 `Symbol("swap")` emitter (11,947 events) in wider sample | ✅ |
+| `CA6PUJLBYK...` | Aquarius pool sample | `trade_event_sample.json` `contract_id` | ✅ |
+| `CAG5LRYQ...` | Soroswap router | `soroswap_router_swap_sample.json` `contract_id` | ✅ |
+| `CAYP3UWL...` | Soroswap aggregator | `soroswap_aggregator_swap_sample.json` `contract_id` | ✅ |
+| `CAM7DY53G...` | Soroswap pool sample | `soroswap_pair_swap_sample.json` `contract_id`; matches factory's pair WASM | ✅ |
+| 9 of 11 Phoenix pools | Phoenix XYK pool | `String("swap")` emitter list — see next sub-section | ✅ |
 
 ### Phoenix pools — 9 of 11 attested in the 4-day sample (corrected topic kind)
 
-| Phoenix pool address | Pair      | Events in sample | Topic kind                |
-| -------------------- | --------- | ---------------: | ------------------------- |
-| `CBHCRSVX3ZZ7...`    | XLM/USDC  |            4,128 | `String("swap")`          |
-| `CBCZGGNOEUZG...`    | XLM/PHO   |              440 | `String("swap")`          |
-| `CB5QUVK5GS3IU...`   | XLM/EURX  |              272 | `String("swap")`          |
-| `CD5XNKK3B6BEF...`   | PHO/USDC  |              224 | `String("swap")`          |
-| `CC6MJZN3HFOJK...`   | EURX/USDC |              224 | `String("swap")`          |
-| `CDMXKSLG5GIT...`    | XLM/USDX  |              152 | `String("swap")`          |
-| `CBISULYO5ZGS...`    | XLM/EURC  |              144 | `String("swap")`          |
-| `CCUCE5H5CKW3...`    | GBPX/USDC |               72 | `String("swap")`          |
-| `CCKOC2LJTPDB...`    | XLM/GBPX  |               48 | `String("swap")`          |
-| `CDQLKNH3725...`     | USDC/VEUR |            **0** | not observed (low volume) |
-| `CBW5G5SO5SDY...`    | USDC/VCHF |            **0** | not observed (low volume) |
+| Phoenix pool address | Pair | Events in sample | Topic kind |
+|---|---|---:|---|
+| `CBHCRSVX3ZZ7...` | XLM/USDC | 4,128 | `String("swap")` |
+| `CBCZGGNOEUZG...` | XLM/PHO | 440 | `String("swap")` |
+| `CB5QUVK5GS3IU...` | XLM/EURX | 272 | `String("swap")` |
+| `CD5XNKK3B6BEF...` | PHO/USDC | 224 | `String("swap")` |
+| `CC6MJZN3HFOJK...` | EURX/USDC | 224 | `String("swap")` |
+| `CDMXKSLG5GIT...` | XLM/USDX | 152 | `String("swap")` |
+| `CBISULYO5ZGS...` | XLM/EURC | 144 | `String("swap")` |
+| `CCUCE5H5CKW3...` | GBPX/USDC | 72 | `String("swap")` |
+| `CCKOC2LJTPDB...` | XLM/GBPX | 48 | `String("swap")` |
+| `CDQLKNH3725...` | USDC/VEUR | **0** | not observed (low volume) |
+| `CBW5G5SO5SDY...` | USDC/VCHF | **0** | not observed (low volume) |
 
 **Total: 5,704 `String("swap")` events from 9 distinct emitters — 100% are Phoenix pools.** This is much stronger evidence for Phoenix attribution than the stellar.expert directory check alone: the on-chain emitter list and the `phoenix-contracts` repo's pool list match exactly.
 
@@ -189,27 +189,27 @@ not `ScVal::Symbol("swap")`.**
   contract registry. The §7 filter must therefore branch on
   `(topics[0].kind, topics[0].value)`:
 
-| `topics[0].kind` | value                                            | Decoder                                                   |
-| ---------------- | ------------------------------------------------ | --------------------------------------------------------- |
-| `Symbol`         | `swap`                                           | Aquarius router (`CBQDHNBFBZYE...` and friends)           |
-| `Symbol`         | `trade`                                          | Aquarius constant-product pool                            |
-| `String`         | `swap`                                           | Phoenix XYK pool — group 8 events to 1 trade              |
-| `String`         | `SoroswapPair` (with `topics[1]=Symbol("swap")`) | Soroswap pool                                             |
-| `String`         | `SoroswapRouter` / `SoroswapAggregator`          | Soroswap user-facing event (skip if also have pool event) |
+| `topics[0].kind` | value | Decoder |
+|---|---|---|
+| `Symbol` | `swap` | Aquarius router (`CBQDHNBFBZYE...` and friends) |
+| `Symbol` | `trade` | Aquarius constant-product pool |
+| `String` | `swap` | Phoenix XYK pool — group 8 events to 1 trade |
+| `String` | `SoroswapPair` (with `topics[1]=Symbol("swap")`) | Soroswap pool |
+| `String` | `SoroswapRouter` / `SoroswapAggregator` | Soroswap user-facing event (skip if also have pool event) |
 
 ### Re-attribution of `Symbol("swap")` emitters after correction
 
 The full top-5 `Symbol("swap")` emitters in the 4-day sample (re-run
 2026-05-08):
 
-|                   Events | Contract          | Attribution                                                                                                                 |
-| -----------------------: | ----------------- | --------------------------------------------------------------------------------------------------------------------------- |
-|                   11,947 | `CBQDHNBFBZYE...` | **Aquarius router** (verified)                                                                                              |
-|                    2,706 | `CCR2CH4GQVCZ...` | **unknown** — emits `Symbol("swap")` like a router; not Aquarius router (different WASM/creator), not Soroswap, not Phoenix |
-|                    2,480 | `CDMIM23WOUL5...` | **unknown** — same pattern                                                                                                  |
-|                      335 | `CCXRRORTOXXP...` | unknown                                                                                                                     |
-|                      229 | `CAUF4DFYSX52...` | unknown                                                                                                                     |
-| (+ 30 more in long tail) |                   |                                                                                                                             |
+| Events | Contract | Attribution |
+|---:|---|---|
+| 11,947 | `CBQDHNBFBZYE...` | **Aquarius router** (verified) |
+| 2,706 | `CCR2CH4GQVCZ...` | **unknown** — emits `Symbol("swap")` like a router; not Aquarius router (different WASM/creator), not Soroswap, not Phoenix |
+| 2,480 | `CDMIM23WOUL5...` | **unknown** — same pattern |
+| 335 | `CCXRRORTOXXP...` | unknown |
+| 229 | `CAUF4DFYSX52...` | unknown |
+| (+ 30 more in long tail) | | |
 
 The earlier "Phoenix XLM/USDC pool" attribution for `CBHCRSVX3ZZ7...`
 (at "4,128 events") in the original synthesis was correct in venue —

@@ -1,32 +1,20 @@
 ---
-id: '0012'
-title: 'Design SDEX backfill on a local workstation (Stream 2, ADR 0005 — supersedes ADR 0002)'
+id: "0012"
+title: "Design SDEX backfill on a local workstation (Stream 2, ADR 0005 — supersedes ADR 0002)"
 type: FEATURE
 status: completed
-related_adr: ['0002', '0003', '0005']
-related_tasks: ['0011', '0014', '0020', '0022', '0023', '0027', '0028']
-tags:
-  [
-    layer-indexing,
-    priority-high,
-    effort-medium,
-    design,
-    local-backfill,
-    workstation,
-    postgres,
-    cloud-push,
-    sdex,
-    stream-2,
-  ]
+related_adr: ["0002", "0003", "0005"]
+related_tasks: ["0011", "0014", "0020", "0022", "0023", "0027", "0028"]
+tags: [layer-indexing, priority-high, effort-medium, design, local-backfill, workstation, postgres, cloud-push, sdex, stream-2]
 links:
-  - '../../2-adrs/0002_stream2-sdex-archive-backfill-independent-of-be.md'
-  - '../../2-adrs/0003_price-ohlcv-pk-includes-quote-asset-id.md'
-  - '../../2-adrs/0005_stream2-sdex-local-workstation-backfill.md'
-  - '../archive/0022_RESEARCH_sdex-filter-and-extraction-spec/notes/G-sdex-filter-strategy.md'
-  - '../archive/0022_RESEARCH_sdex-filter-and-extraction-spec/notes/G-sdex-decode-and-bucket-spec.md'
-  - '../archive/0020_RESEARCH_sdex-historical-backfill-options/notes/G-sdex-trade-extraction-design.md'
-  - '../../../../soroban-block-explorer/lore/2-adrs/0010_local-backfill-over-fargate.md'
-  - '../../../../soroban-block-explorer/lore/2-adrs/0040_multi-laptop-backfill-snapshot-merge-hazards.md'
+  - "../../2-adrs/0002_stream2-sdex-archive-backfill-independent-of-be.md"
+  - "../../2-adrs/0003_price-ohlcv-pk-includes-quote-asset-id.md"
+  - "../../2-adrs/0005_stream2-sdex-local-workstation-backfill.md"
+  - "../archive/0022_RESEARCH_sdex-filter-and-extraction-spec/notes/G-sdex-filter-strategy.md"
+  - "../archive/0022_RESEARCH_sdex-filter-and-extraction-spec/notes/G-sdex-decode-and-bucket-spec.md"
+  - "../archive/0020_RESEARCH_sdex-historical-backfill-options/notes/G-sdex-trade-extraction-design.md"
+  - "../../../../soroban-block-explorer/lore/2-adrs/0010_local-backfill-over-fargate.md"
+  - "../../../../soroban-block-explorer/lore/2-adrs/0040_multi-laptop-backfill-snapshot-merge-hazards.md"
 history:
   - date: 2026-05-11
     status: backlog
@@ -35,7 +23,7 @@ history:
   - date: 2026-05-12
     status: backlog
     who: okarcz
-    note: 'Refs added by task 0014: BE ADR 0040 (multi-laptop backfill, refines ADR 0010) and BE ADR 0044 (CH pilot — possible future AMM source). Neither changes the C1 Fargate decision today.'
+    note: "Refs added by task 0014: BE ADR 0040 (multi-laptop backfill, refines ADR 0010) and BE ADR 0044 (CH pilot — possible future AMM source). Neither changes the C1 Fargate decision today."
   - date: 2026-05-13
     status: backlog
     who: okarcz
@@ -50,7 +38,7 @@ history:
   - date: 2026-05-13
     status: active
     who: okarcz
-    note: 'Activated via /promote-task. Starting design work.'
+    note: "Activated via /promote-task. Starting design work."
   - date: 2026-05-13
     status: active
     who: okarcz
@@ -148,21 +136,21 @@ The full design lives in
 
 Section map:
 
-| §   | Topic                                                                      |
-| --- | -------------------------------------------------------------------------- |
-| 0   | Scope (design covers vs task 0027 / 0028 lands)                            |
-| 1   | Architecture overview (workstation, S3 archive, local PG, cloud-push)      |
-| 2   | Direction and range strategy — tip-backward chunks via operator            |
-| 3   | CLI shape — clap, `--start`/`--end`/`--database-url`/`--temp-dir`          |
-| 4   | Partition pipeline — single-slot prefetch, BE pattern verbatim             |
-| 5   | Resumability — `backfill_progress` + per-ledger atomic tx + partition skip |
-| 6   | Observability — stdout tracing JSON; no CloudWatch                         |
-| 7   | Failure modes — S3 sync, PG, parser panic, sleep/network, disk, OOM        |
-| 8   | Local Postgres bootstrap — Docker, migrations                              |
-| 9   | Runbook outline — phases, start, stop, inspect                             |
-| 10  | Rust module split — 1:1 onto task 0022's spec                              |
-| 11  | Cloud-push design sketch — natural-key remap, batched UPSERT               |
-| 12  | Handoff checklists for task 0027 and task 0028                             |
+| § | Topic                                                                  |
+| - | ---------------------------------------------------------------------- |
+| 0 | Scope (design covers vs task 0027 / 0028 lands)                        |
+| 1 | Architecture overview (workstation, S3 archive, local PG, cloud-push) |
+| 2 | Direction and range strategy — tip-backward chunks via operator       |
+| 3 | CLI shape — clap, `--start`/`--end`/`--database-url`/`--temp-dir`     |
+| 4 | Partition pipeline — single-slot prefetch, BE pattern verbatim         |
+| 5 | Resumability — `backfill_progress` + per-ledger atomic tx + partition skip |
+| 6 | Observability — stdout tracing JSON; no CloudWatch                    |
+| 7 | Failure modes — S3 sync, PG, parser panic, sleep/network, disk, OOM   |
+| 8 | Local Postgres bootstrap — Docker, migrations                         |
+| 9 | Runbook outline — phases, start, stop, inspect                        |
+| 10 | Rust module split — 1:1 onto task 0022's spec                        |
+| 11 | Cloud-push design sketch — natural-key remap, batched UPSERT        |
+| 12 | Handoff checklists for task 0027 and task 0028                       |
 
 ## Acceptance Criteria
 

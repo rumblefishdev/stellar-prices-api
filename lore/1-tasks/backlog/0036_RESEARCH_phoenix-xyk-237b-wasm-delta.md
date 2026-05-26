@@ -1,27 +1,19 @@
 ---
-id: '0036'
-title: 'What is the 237-byte delta between Phoenix XYK WASM builds 167ab414... and 13b158655e...?'
+id: "0036"
+title: "What is the 237-byte delta between Phoenix XYK WASM builds 167ab414... and 13b158655e...?"
 type: RESEARCH
 status: backlog
 related_adr: []
-related_tasks: ['0032', '0034']
-tags:
-  [
-    layer-research,
-    priority-low,
-    effort-small,
-    phoenix,
-    wasm-analysis,
-    defensive,
-  ]
+related_tasks: ["0032", "0034"]
+tags: [layer-research, priority-low, effort-small, phoenix, wasm-analysis, defensive]
 links:
-  - '../archive/0032_RESEARCH_phoenix-stable-pool-first-observation/notes/S-no-stable-pool-deployed.md'
-  - '../archive/0032_RESEARCH_phoenix-stable-pool-first-observation/notes/evidence/phoenix_pool_inventory_2026-05-15.txt'
+  - "../archive/0032_RESEARCH_phoenix-stable-pool-first-observation/notes/S-no-stable-pool-deployed.md"
+  - "../archive/0032_RESEARCH_phoenix-stable-pool-first-observation/notes/evidence/phoenix_pool_inventory_2026-05-15.txt"
 history:
   - date: 2026-05-15
     status: backlog
     who: oski
-    note: 'Spawned from 0032 — defensive: confirm 8-event grouping holds on second XYK build.'
+    note: "Spawned from 0032 — defensive: confirm 8-event grouping holds on second XYK build."
 ---
 
 # Phoenix XYK 237-byte WASM delta
@@ -47,7 +39,7 @@ worth confirming to avoid future regressions.
 1. **Dump a real swap** on the PHO/USDC pool
    (`CD5XNKK3B6BEF2N7ULNHHGAMOKZ7P6456BFNIHRF4WNTEDKBRWAE7IAA`) using
    the same procedure as task 0018 §3 (`dump-swap-events --contract …
---tx … --show-xdr --pretty` against a Galexie ledger range
+   --tx … --show-xdr --pretty` against a Galexie ledger range
    containing the tx). Confirm the 8-event grouping holds and the
    field order matches the XYK spec.
 2. If the grouping or field order differs in any way, escalate: this

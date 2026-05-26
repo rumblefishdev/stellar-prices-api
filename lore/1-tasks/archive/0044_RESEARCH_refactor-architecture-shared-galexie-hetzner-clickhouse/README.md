@@ -1,33 +1,19 @@
 ---
-id: '0044'
+id: "0044"
 title: "Refactor architecture: shared Galexie + AWS Lambda → BE's Hetzner ClickHouse for live data"
 type: RESEARCH
 status: completed
-related_adr: ['0001', '0005', '0006', '0007']
-related_tasks: ['0009', '0011', '0017', '0038', '0039', '0040', '0045']
-tags:
-  [
-    layer-research,
-    priority-high,
-    effort-medium,
-    infra,
-    architecture,
-    aws,
-    shared-infra,
-    block-explorer,
-    clickhouse,
-    hetzner,
-    galexie,
-    refactor,
-  ]
+related_adr: ["0001", "0005", "0006", "0007"]
+related_tasks: ["0009", "0011", "0017", "0038", "0039", "0040", "0045"]
+tags: [layer-research, priority-high, effort-medium, infra, architecture, aws, shared-infra, block-explorer, clickhouse, hetzner, galexie, refactor]
 links:
-  - '../../../docs/prices-api-general-overview.md'
-  - '../../../../soroban-block-explorer/docs/architecture/infrastructure/infrastructure-overview.md'
-  - '../../../../soroban-block-explorer/lore/1-tasks/active/0216_RESEARCH_hetzner-clickhouse-deploy/README.md'
-  - '../../2-adrs/0001_stream1-clickhouse-sourced-amm-backfill.md'
-  - '../../2-adrs/0005_stream2-sdex-local-workstation-backfill.md'
-  - '../../2-adrs/0006_runtime-framework-rust-axum.md'
-  - '../archive/0009_RESEARCH_shared-infra-with-block-explorer/README.md'
+  - "../../../docs/prices-api-general-overview.md"
+  - "../../../../soroban-block-explorer/docs/architecture/infrastructure/infrastructure-overview.md"
+  - "../../../../soroban-block-explorer/lore/1-tasks/active/0216_RESEARCH_hetzner-clickhouse-deploy/README.md"
+  - "../../2-adrs/0001_stream1-clickhouse-sourced-amm-backfill.md"
+  - "../../2-adrs/0005_stream2-sdex-local-workstation-backfill.md"
+  - "../../2-adrs/0006_runtime-framework-rust-axum.md"
+  - "../archive/0009_RESEARCH_shared-infra-with-block-explorer/README.md"
 history:
   - date: 2026-05-18
     status: backlog
@@ -44,7 +30,7 @@ history:
   - date: 2026-05-18
     status: active
     who: okarcz
-    note: 'Promoted from backlog to active to begin research.'
+    note: "Promoted from backlog to active to begin research."
   - date: 2026-05-18
     status: completed
     who: okarcz

@@ -1,21 +1,21 @@
 ---
-id: '0003'
-title: 'Update amm-trades-schema.md §7 and §11.1 with empirical topic findings'
+id: "0003"
+title: "Update amm-trades-schema.md §7 and §11.1 with empirical topic findings"
 type: DOCS
 status: completed
 related_adr: []
-related_tasks: ['0001', '0002', '0005']
+related_tasks: ["0001", "0002", "0005"]
 tags: [layer-database, priority-medium, effort-small, schema-validation]
 links:
-  - '0001_RESEARCH_dump-amm-swap-events/notes/S-amm-trades-schema-§11-1-resolved.md'
-  - '0002_RESEARCH_amm-venue-attribution/notes/S-venue-attribution-mapping.md'
-  - '0005_RESEARCH_unknown-symbol-swap-emitters/notes/S-unknown-emitters-non-target.md'
-  - '../../../docs/database-schema/amm-trades-schema.md'
+  - "0001_RESEARCH_dump-amm-swap-events/notes/S-amm-trades-schema-§11-1-resolved.md"
+  - "0002_RESEARCH_amm-venue-attribution/notes/S-venue-attribution-mapping.md"
+  - "0005_RESEARCH_unknown-symbol-swap-emitters/notes/S-unknown-emitters-non-target.md"
+  - "../../../docs/database-schema/amm-trades-schema.md"
 history:
   - date: 2026-05-07
     status: backlog
     who: okarcz
-    note: 'Spawned from 0001 future work.'
+    note: "Spawned from 0001 future work."
   - date: 2026-05-08
     status: backlog
     who: claude
@@ -27,7 +27,7 @@ history:
   - date: 2026-05-11
     status: active
     who: okarcz
-    note: 'Activated for implementation.'
+    note: "Activated for implementation."
   - date: 2026-05-11
     status: completed
     who: claude
@@ -61,7 +61,6 @@ original two decoder shapes (`Symbol("swap")` router-style and
 `Symbol("trade")` Aquarius-pool).
 
 Lore 0002 / `S-venue-attribution-mapping.md` extends this with:
-
 - Soroswap two-topic shape:
   `[String("SoroswapPair") + Symbol("swap")]` with a uniswap-v2 Map
   payload — token addresses are NOT inline.
@@ -90,7 +89,7 @@ Lore 0002 / `S-venue-attribution-mapping.md` extends this with:
 - Replace §11.1 with the resolved finding + link to lore 0001 + 0002.
 - Add a "Per-venue decoder reference" subsection: table of
   `(topics[0].kind, topics[0].value, topics[1]?, decoder, fee column
-source)` for all four shapes.
+  source)` for all four shapes.
 - Add a "Pool enumeration" subsection: per-venue factory address +
   pool-creation event topic + data shape.
 - Phoenix `fee` semantics: pools don't emit `commission_amount` — only

@@ -1,19 +1,18 @@
 ---
-title: 'SDEX backfill on a local workstation — operational design'
+title: "SDEX backfill on a local workstation — operational design"
 type: generation
 status: mature
 spawned_from: ../README.md
 spawns: []
-tags:
-  [sdex, backfill, local, workstation, postgres, cloud-push, stream-2, design]
+tags: [sdex, backfill, local, workstation, postgres, cloud-push, stream-2, design]
 links:
-  - '../../../../2-adrs/0002_stream2-sdex-archive-backfill-independent-of-be.md'
-  - '../../../../2-adrs/0003_price-ohlcv-pk-includes-quote-asset-id.md'
-  - '../../../../2-adrs/0005_stream2-sdex-local-workstation-backfill.md'
-  - '../../../archive/0022_RESEARCH_sdex-filter-and-extraction-spec/notes/G-sdex-filter-strategy.md'
-  - '../../../archive/0022_RESEARCH_sdex-filter-and-extraction-spec/notes/G-sdex-decode-and-bucket-spec.md'
-  - '../../../archive/0020_RESEARCH_sdex-historical-backfill-options/notes/G-sdex-trade-extraction-design.md'
-  - '../../../../../../soroban-block-explorer/lore/2-adrs/0010_local-backfill-over-fargate.md'
+  - "../../../../2-adrs/0002_stream2-sdex-archive-backfill-independent-of-be.md"
+  - "../../../../2-adrs/0003_price-ohlcv-pk-includes-quote-asset-id.md"
+  - "../../../../2-adrs/0005_stream2-sdex-local-workstation-backfill.md"
+  - "../../../archive/0022_RESEARCH_sdex-filter-and-extraction-spec/notes/G-sdex-filter-strategy.md"
+  - "../../../archive/0022_RESEARCH_sdex-filter-and-extraction-spec/notes/G-sdex-decode-and-bucket-spec.md"
+  - "../../../archive/0020_RESEARCH_sdex-historical-backfill-options/notes/G-sdex-trade-extraction-design.md"
+  - "../../../../../../soroban-block-explorer/lore/2-adrs/0010_local-backfill-over-fargate.md"
 history:
   - date: 2026-05-13
     status: mature
@@ -132,13 +131,13 @@ flags (BE pattern). The Tranche 1 UX gate ("≥ 6 months of recent
 history exposed via `GET /backfill/status`") is met by running
 **tip-backward chunks** for v1:
 
-| Phase        | Invocation                                       | Wall-clock at 311 ledgers/s                    | Outcome                            |
-| ------------ | ------------------------------------------------ | ---------------------------------------------- | ---------------------------------- |
-| Phase 1      | `--start=<tip-1_100_000> --end=<tip>`            | ~1 h pure decode (≈ ½–1 day with archive sync) | Tranche 1 ≥ 6 months ready to push |
-| Cloud push 1 | `sdex-cloud-push` of Phase 1 range               | minutes (bulk UPSERT)                          | Cloud RDS exposes Tranche 1 window |
-| Phase 2      | `--start=<tip-12_000_000> --end=<tip-1_100_001>` | ~10 h decode                                   | ~1 year of older history           |
-| Cloud push 2 | as above                                         |                                                | Cloud RDS extended                 |
-| Phase N      | `--start=1 --end=<phase-N-1-floor>`              | ~12-16 days (full archive)                     | Full historical complete           |
+| Phase    | Invocation                                        | Wall-clock at 311 ledgers/s | Outcome                                            |
+| -------- | ------------------------------------------------- | --------------------------- | -------------------------------------------------- |
+| Phase 1  | `--start=<tip-1_100_000> --end=<tip>`              | ~1 h pure decode (≈ ½–1 day with archive sync) | Tranche 1 ≥ 6 months ready to push                 |
+| Cloud push 1 | `sdex-cloud-push` of Phase 1 range             | minutes (bulk UPSERT)       | Cloud RDS exposes Tranche 1 window                 |
+| Phase 2  | `--start=<tip-12_000_000> --end=<tip-1_100_001>`   | ~10 h decode                | ~1 year of older history                           |
+| Cloud push 2 | as above                                       |                             | Cloud RDS extended                                 |
+| Phase N  | `--start=1 --end=<phase-N-1-floor>`                | ~12-16 days (full archive)  | Full historical complete                           |
 
 The CLI itself walks ledgers in `--start..=--end` ascending order
 within each invocation (BE's pattern — partitions iterate ascending).
@@ -335,33 +334,26 @@ block on completion.
 ### 6.1 Tracing events (stable names)
 
 ```json
-{
-  "ts": "2026-05-14T08:21:14.512Z",
-  "level": "info",
-  "stream": "sdex_backfill",
-  "ledger": 62442947,
-  "event": "ledger_processed",
-  "trade_ticks": 24,
-  "upsert_rows": 12,
-  "dur_ms": 3.41
-}
+{"ts":"2026-05-14T08:21:14.512Z","level":"info","stream":"sdex_backfill",
+ "ledger":62442947,"event":"ledger_processed",
+ "trade_ticks":24,"upsert_rows":12,"dur_ms":3.41}
 ```
 
 Stable event names:
 
-| Event                     | Emitted when                                     |
-| ------------------------- | ------------------------------------------------ |
-| `preflight_ok`            | aws CLI + sink reachable                         |
-| `range_resolved`          | partitions enumerated + `completed` set loaded   |
-| `partition_sync_complete` | `aws s3 sync` returned for a partition           |
-| `partition_indexing`      | switching index focus to next partition          |
-| `ledger_processed`        | every ledger (verbose) — primary throughput line |
-| `progress_tick`           | every 100 ledgers (default), summary metrics     |
-| `partition_done`          | end of partition; counts + duration              |
-| `backfill_complete`       | terminal success                                 |
-| `archive_fetch_failed`    | `aws s3 sync` returned non-zero                  |
-| `pg_write_failed`         | terminal DB error                                |
-| `parser_panic`            | XDR decode panic (typically a `stellar-xdr` bug) |
+| Event                       | Emitted when                                  |
+| --------------------------- | --------------------------------------------- |
+| `preflight_ok`              | aws CLI + sink reachable                      |
+| `range_resolved`            | partitions enumerated + `completed` set loaded |
+| `partition_sync_complete`   | `aws s3 sync` returned for a partition        |
+| `partition_indexing`        | switching index focus to next partition       |
+| `ledger_processed`          | every ledger (verbose) — primary throughput line |
+| `progress_tick`             | every 100 ledgers (default), summary metrics  |
+| `partition_done`            | end of partition; counts + duration           |
+| `backfill_complete`         | terminal success                              |
+| `archive_fetch_failed`      | `aws s3 sync` returned non-zero               |
+| `pg_write_failed`           | terminal DB error                             |
+| `parser_panic`              | XDR decode panic (typically a `stellar-xdr` bug) |
 
 ### 6.2 Final summary (always printed, even without `--verbose`)
 
@@ -446,7 +438,7 @@ services:
     environment:
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: prices_api
-    ports: ['5432:5432']
+    ports: ["5432:5432"]
     volumes:
       - prices-pg-data:/var/lib/postgresql/data
 
@@ -578,19 +570,19 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 Mapping onto 0022 spec sections (unchanged from the previous design's
 §10 — the spec is host-shape-agnostic):
 
-| Rust module  | Spec source                               | Responsibility                                                                 |
-| ------------ | ----------------------------------------- | ------------------------------------------------------------------------------ |
-| `sync`       | this design §1, §4                        | `aws s3 sync --no-sign-request` subprocess; per-partition.                     |
-| `partition`  | this design §4                            | `Partition::from_ledger` + `partitions_for_range`; mirror BE's layout exactly. |
-| `ingest`     | this design §4, §5                        | Per-partition loop; per-ledger atomic tx; checkpoint advance.                  |
-| `filter`     | 0022 filter-strategy §1.4-1.6, §2         | `TransactionResultMeta` walk; `txSUCCESS` gate; `ClaimAtom` extraction.        |
-| `tick`       | 0022 decode-and-bucket §2-§3; 0020 G-note | `ClaimAtom` → `TradeTick`. V0 / ORDER_BOOK / LIQUIDITY_POOL decode.            |
-| `canonical`  | 0022 decode-and-bucket §1; 0020 G-note    | Asset canonicalisation, base/quote orientation, surrogation.                   |
-| `price`      | 0022 decode-and-bucket §4                 | `amount_bought / amount_sold` → NUMERIC(28,14) with precision policy.          |
-| `bucket`     | 0022 decode-and-bucket §5                 | `TradeTick` → 1m `price_ohlcv` row; whole-row replacement UPSERT batch.        |
-| `checkpoint` | this design §5                            | Read/write `backfill_progress`; transactional commit per ledger.               |
-| `obs`        | this design §6                            | `tracing` subscriber on stdout; structured JSON.                               |
-| `run`/`main` | this design §3, §4                        | Orchestration: preflight, resume, partition pipeline, summary.                 |
+| Rust module    | Spec source                                          | Responsibility                                                                  |
+| -------------- | ---------------------------------------------------- | ------------------------------------------------------------------------------- |
+| `sync`         | this design §1, §4                                   | `aws s3 sync --no-sign-request` subprocess; per-partition.                       |
+| `partition`    | this design §4                                       | `Partition::from_ledger` + `partitions_for_range`; mirror BE's layout exactly.   |
+| `ingest`       | this design §4, §5                                   | Per-partition loop; per-ledger atomic tx; checkpoint advance.                    |
+| `filter`       | 0022 filter-strategy §1.4-1.6, §2                    | `TransactionResultMeta` walk; `txSUCCESS` gate; `ClaimAtom` extraction.          |
+| `tick`         | 0022 decode-and-bucket §2-§3; 0020 G-note            | `ClaimAtom` → `TradeTick`. V0 / ORDER_BOOK / LIQUIDITY_POOL decode.              |
+| `canonical`    | 0022 decode-and-bucket §1; 0020 G-note               | Asset canonicalisation, base/quote orientation, surrogation.                     |
+| `price`        | 0022 decode-and-bucket §4                            | `amount_bought / amount_sold` → NUMERIC(28,14) with precision policy.            |
+| `bucket`       | 0022 decode-and-bucket §5                            | `TradeTick` → 1m `price_ohlcv` row; whole-row replacement UPSERT batch.          |
+| `checkpoint`   | this design §5                                       | Read/write `backfill_progress`; transactional commit per ledger.                 |
+| `obs`          | this design §6                                       | `tracing` subscriber on stdout; structured JSON.                                 |
+| `run`/`main`   | this design §3, §4                                   | Orchestration: preflight, resume, partition pipeline, summary.                   |
 
 **`xdr-parser` consumed via git Cargo dep** per ADR 0005 §3.
 Verification: `cargo tree -i xdr-parser` resolves to the pinned BE

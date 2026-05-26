@@ -1,8 +1,8 @@
 ---
-id: 'NNNN'
-title: '[Title]'
-type: FEATURE # BUG | FEATURE | RESEARCH | REFACTOR | DOCS
-status: active # active | blocked | completed | backlog
+id: "NNNN"
+title: "[Title]"
+type: FEATURE  # BUG | FEATURE | RESEARCH | REFACTOR | DOCS
+status: active  # active | blocked | completed | backlog
 related_adr: []
 related_tasks: []
 tags: []
@@ -11,7 +11,7 @@ history:
   - date: YYYY-MM-DD
     status: active
     who: your-id
-    note: 'Task created'
+    note: "Task created"
 ---
 
 # [Title]

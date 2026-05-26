@@ -1,24 +1,24 @@
 ---
-id: '0041'
-title: 'Lore Board on GitHub Pages — mirror soroban-block-explorer setup'
+id: "0041"
+title: "Lore Board on GitHub Pages — mirror soroban-block-explorer setup"
 type: FEATURE
 status: completed
 related_adr: []
-related_tasks: ['0042', '0043']
-tags: ['layer-tooling', 'phase-now', 'effort-small', 'priority-medium']
+related_tasks: ["0042", "0043"]
+tags: ["layer-tooling", "phase-now", "effort-small", "priority-medium"]
 links:
-  - 'https://rumblefishdev.github.io/stellar-prices-api/'
-  - 'https://github.com/rumblefishdev/stellar-prices-api/pull/16'
-  - 'https://github.com/rumblefishdev/stellar-prices-api/pull/17'
+  - "https://rumblefishdev.github.io/stellar-prices-api/"
+  - "https://github.com/rumblefishdev/stellar-prices-api/pull/16"
+  - "https://github.com/rumblefishdev/stellar-prices-api/pull/17"
 history:
   - date: 2026-05-18
     status: backlog
     who: claude
-    note: 'Task created. lore/board.html and workflows/deploy-board.yml already copied verbatim from soroban-block-explorer; remaining work is to wire the generator script, npm script, workflow location, and Pages enablement.'
+    note: "Task created. lore/board.html and workflows/deploy-board.yml already copied verbatim from soroban-block-explorer; remaining work is to wire the generator script, npm script, workflow location, and Pages enablement."
   - date: 2026-05-18
     status: active
     who: oski
-    note: 'Activated to start implementation.'
+    note: "Activated to start implementation."
   - date: 2026-05-18
     status: completed
     who: claude
@@ -51,10 +51,10 @@ This task wired up the remaining pieces (generator, npm script, workflow locatio
 
 Shipped across two PRs against `develop`:
 
-| PR  | Commit    | What                                                                                                                                                                                                        |
-| --- | --------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| PR | Commit | What |
+|----|--------|------|
 | #16 | `9c09604` | `tools/scripts/generate-lore-board.mjs` (245 LOC, verbatim from explorer), `npm run board`, `.github/workflows/deploy-board.yml` (moved from repo-root `workflows/`), `.nvmrc` (22.22.0), `lore/board.html` |
-| #17 | `5770495` | Dropped `npm ci` + `cache: npm` from the workflow (CI hotfix — see Issues Encountered)                                                                                                                      |
+| #17 | `5770495` | Dropped `npm ci` + `cache: npm` from the workflow (CI hotfix — see Issues Encountered) |
 
 Activation also shipped a direct status-only commit to `develop` (`9a70add`) via `/promote-task`.
 

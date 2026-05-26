@@ -1,19 +1,18 @@
 ---
-id: '0035'
-title: 'Periodically re-survey Phoenix factory; catch first stable pool when deployed'
+id: "0035"
+title: "Periodically re-survey Phoenix factory; catch first stable pool when deployed"
 type: RESEARCH
 status: backlog
 related_adr: []
-related_tasks: ['0032', '0018']
-tags:
-  [layer-research, priority-low, effort-small, phoenix, stable-pool, monitoring]
+related_tasks: ["0032", "0018"]
+tags: [layer-research, priority-low, effort-small, phoenix, stable-pool, monitoring]
 links:
-  - '../archive/0032_RESEARCH_phoenix-stable-pool-first-observation/notes/S-no-stable-pool-deployed.md'
+  - "../archive/0032_RESEARCH_phoenix-stable-pool-first-observation/notes/S-no-stable-pool-deployed.md"
 history:
   - date: 2026-05-15
     status: backlog
     who: oski
-    note: 'Spawned from 0032 — replaces 0032 as the ongoing concern.'
+    note: "Spawned from 0032 — replaces 0032 as the ongoing concern."
 ---
 
 # Periodic Phoenix factory re-survey

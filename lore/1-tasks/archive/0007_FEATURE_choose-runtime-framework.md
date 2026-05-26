@@ -1,19 +1,19 @@
 ---
-id: '0007'
-title: 'Choose runtime framework and generate first app'
+id: "0007"
+title: "Choose runtime framework and generate first app"
 type: FEATURE
 status: completed
-related_adr: ['0006']
-related_tasks: ['0006']
+related_adr: ["0006"]
+related_tasks: ["0006"]
 tags: [layer-tooling, phase-future, priority-medium, effort-medium, infra]
 links:
-  - '../../2-adrs/0006_runtime-framework-rust-axum.md'
-  - '../../../docs/prices-api-general-overview.md'
+  - "../../2-adrs/0006_runtime-framework-rust-axum.md"
+  - "../../../docs/prices-api-general-overview.md"
 history:
   - date: 2026-05-11
     status: backlog
     who: claude
-    note: 'Spawned from 0006 future work.'
+    note: "Spawned from 0006 future work."
   - date: 2026-05-14
     status: completed
     who: okarcz

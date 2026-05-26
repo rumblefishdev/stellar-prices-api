@@ -1,27 +1,17 @@
 ---
-id: '0005'
-title: 'Stream 2 SDEX historical backfill runs locally on a workstation (supersedes ADR 0002)'
+id: "0005"
+title: "Stream 2 SDEX historical backfill runs locally on a workstation (supersedes ADR 0002)"
 status: accepted
 deciders: [okarcz]
-related_tasks: ['0012', '0027']
-related_adrs: ['0001', '0002', '0003', '0004']
-tags:
-  [
-    architecture,
-    backfill,
-    sdex,
-    stream-2,
-    local-backfill,
-    workstation,
-    cloud-push,
-    block-explorer-pattern,
-  ]
+related_tasks: ["0012", "0027"]
+related_adrs: ["0001", "0002", "0003", "0004"]
+tags: [architecture, backfill, sdex, stream-2, local-backfill, workstation, cloud-push, block-explorer-pattern]
 links:
-  - './0001_stream1-clickhouse-sourced-amm-backfill.md'
-  - './0002_stream2-sdex-archive-backfill-independent-of-be.md'
-  - '../../../soroban-block-explorer/lore/2-adrs/0010_local-backfill-over-fargate.md'
-  - '../../../soroban-block-explorer/lore/2-adrs/0040_multi-laptop-backfill-snapshot-merge-hazards.md'
-  - '../1-tasks/active/0012_FEATURE_design-prices-owned-backfill-fargate/notes/G-sdex-backfill-fargate-design.md'
+  - "./0001_stream1-clickhouse-sourced-amm-backfill.md"
+  - "./0002_stream2-sdex-archive-backfill-independent-of-be.md"
+  - "../../../soroban-block-explorer/lore/2-adrs/0010_local-backfill-over-fargate.md"
+  - "../../../soroban-block-explorer/lore/2-adrs/0040_multi-laptop-backfill-snapshot-merge-hazards.md"
+  - "../1-tasks/active/0012_FEATURE_design-prices-owned-backfill-fargate/notes/G-sdex-backfill-fargate-design.md"
 history:
   - date: 2026-05-14
     status: proposed
@@ -186,13 +176,13 @@ that apply identically to prices-api.
 
 BE ADR 0010's five reasons map 1:1 to prices-api's situation:
 
-| BE ADR 0010 rationale                              | Maps to prices-api as                                                                                   |
-| -------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
-| Already built and proven (task 0117 benchmark)     | Pattern is proven; we reimplement in our repo (per "never modify BE" directive) for SDEX filter + table |
-| Simpler infrastructure (no Fargate, ECS, IAM, NAT) | Same — no CDK gate, no AWS infra for the backfill itself                                                |
-| Lower cost (no Fargate compute, no NAT egress)     | Same — workstation electricity + ISP bandwidth only                                                     |
-| Same pipeline (reuses `process_ledger`)            | Adapted — our pipeline is per task 0022's spec, same code path local and (future) cloud-streaming       |
-| Backfill is a one-time operation                   | Same — 57M ledgers is one-time; ongoing Lambda handles tip                                              |
+| BE ADR 0010 rationale                                | Maps to prices-api as                                                                  |
+| ---------------------------------------------------- | -------------------------------------------------------------------------------------- |
+| Already built and proven (task 0117 benchmark)       | Pattern is proven; we reimplement in our repo (per "never modify BE" directive) for SDEX filter + table |
+| Simpler infrastructure (no Fargate, ECS, IAM, NAT)   | Same — no CDK gate, no AWS infra for the backfill itself                               |
+| Lower cost (no Fargate compute, no NAT egress)       | Same — workstation electricity + ISP bandwidth only                                    |
+| Same pipeline (reuses `process_ledger`)              | Adapted — our pipeline is per task 0022's spec, same code path local and (future) cloud-streaming |
+| Backfill is a one-time operation                     | Same — 57M ledgers is one-time; ongoing Lambda handles tip                             |
 
 ### Why a separate "cloud push" step instead of writing to cloud RDS directly
 

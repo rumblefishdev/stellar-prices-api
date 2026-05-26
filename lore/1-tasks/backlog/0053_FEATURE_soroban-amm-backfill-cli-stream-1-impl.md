@@ -1,39 +1,23 @@
 ---
-id: '0053'
-title: 'Soroban AMM Backfill CLI (`soroban-amm-backfill`) — Stream 1 implementation per ADR 0001'
+id: "0053"
+title: "Soroban AMM Backfill CLI (`soroban-amm-backfill`) — Stream 1 implementation per ADR 0001"
 type: FEATURE
 status: backlog
-related_adr: ['0001', '0003', '0004', '0007']
-related_tasks: ['0017', '0034', '0037', '0048', '0052', '0051']
-tags:
-  [
-    layer-indexing,
-    priority-high,
-    effort-large,
-    milestone-M1,
-    stream-1,
-    rust,
-    cli,
-    workstation,
-    clickhouse,
-    soroban,
-    amm,
-    soroswap,
-    aquarius,
-    phoenix,
-  ]
+related_adr: ["0001", "0003", "0004", "0007"]
+related_tasks: ["0017", "0034", "0037", "0048", "0052", "0051"]
+tags: [layer-indexing, priority-high, effort-large, milestone-M1, stream-1, rust, cli, workstation, clickhouse, soroban, amm, soroswap, aquarius, phoenix]
 milestone: 1
 links:
-  - '../../../docs/prices-api-general-overview.md'
-  - '../../2-adrs/0001_stream1-clickhouse-sourced-amm-backfill.md'
-  - '../../2-adrs/0003_price-ohlcv-pk-includes-quote-asset-id.md'
-  - '../../2-adrs/0004_price-ohlcv-multi-source-merge-columns.md'
-  - '../../2-adrs/0007_live-data-sink-on-shared-hetzner-clickhouse.md'
-  - '../archive/0048_RESEARCH_soroban-events-pricing-decoder-spec/notes/G-soroban-events-pricing-decoder.md'
-  - '../archive/0018_RESEARCH_decode-per-amm-swap-event-shapes/notes/G-amm-swap-event-shapes.md'
-  - './0017_FEATURE_local-clickhouse-for-prices-backfill.md'
-  - './0037_FEATURE_tranche1-ledger-processor-skeleton.md'
-  - '../blocked/0034_FEATURE_consumer-multi-xyk-wasm-tolerance.md'
+  - "../../../docs/prices-api-general-overview.md"
+  - "../../2-adrs/0001_stream1-clickhouse-sourced-amm-backfill.md"
+  - "../../2-adrs/0003_price-ohlcv-pk-includes-quote-asset-id.md"
+  - "../../2-adrs/0004_price-ohlcv-multi-source-merge-columns.md"
+  - "../../2-adrs/0007_live-data-sink-on-shared-hetzner-clickhouse.md"
+  - "../archive/0048_RESEARCH_soroban-events-pricing-decoder-spec/notes/G-soroban-events-pricing-decoder.md"
+  - "../archive/0018_RESEARCH_decode-per-amm-swap-event-shapes/notes/G-amm-swap-event-shapes.md"
+  - "./0017_FEATURE_local-clickhouse-for-prices-backfill.md"
+  - "./0037_FEATURE_tranche1-ledger-processor-skeleton.md"
+  - "../blocked/0034_FEATURE_consumer-multi-xyk-wasm-tolerance.md"
 history:
   - date: 2026-05-21
     status: backlog
@@ -76,7 +60,7 @@ on the operator's workstation. The runtime flow is:
    this prep step).
 2. `soroban-amm-backfill` queries the local CH filtered by
    `signature = 'swap'` AND `contract_id IN (Soroswap, Aquarius,
-Phoenix registry)`. Note the Aquarius / Phoenix String-typed
+   Phoenix registry)`. Note the Aquarius / Phoenix String-typed
    topic[0] issue (task 0031) requires per-AMM filter logic.
 3. Each event's `topics_xdr` + `data_xdr` are decoded into a
    `TradeTick` per the 0048 decoder spec.
@@ -172,9 +156,9 @@ For each `TradeTick`:
 1. Resolve `asset_id` + `quote_asset_id` against the local
    `assets` table (UPSERT new ones discovered during decode).
 2. Compute the per-tick price and per-tick `volume_quote /
-volume_base` per 0048 §3.
+   volume_base` per 0048 §3.
 3. Group ticks into the `(floor_minute(closed_at), asset_id,
-quote_asset_id, source)` bucket and merge into local Postgres
+   quote_asset_id, source)` bucket and merge into local Postgres
    `price_ohlcv_1m` using ADR 0004's incremental-merge semantics
    (preserve open, overwrite close, GREATEST(high), LEAST(low),
    sum volumes + trade_count, recompute vwap).
@@ -194,7 +178,7 @@ Postgres to Hetzner CH `prices.*` via the 0052 mTLS client:
 3. After each table completes, log row counts.
 4. On success: `INSERT INTO prices.backfill_progress` row with
    `task_name='soroban_amm', status='completed',
-completed_at=now(), last_push_at=now()` (ReplacingMergeTree
+   completed_at=now(), last_push_at=now()` (ReplacingMergeTree
    collapses against the seeded row).
 5. On any failure: surface the error, do not flip status, exit
    non-zero. Re-run is idempotent because `ReplacingMergeTree`
@@ -238,7 +222,7 @@ A short `RUNBOOK.md` documenting the end-to-end run sequence:
       `completed`
 - [ ] Idempotent re-run of `push` produces no duplicate rows
       after `ReplacingMergeTree` background merge (`SELECT count()
-… FINAL` consistent before and after)
+      … FINAL` consistent before and after)
 - [ ] OHLCV data for Soroswap pairs verifiable for Nov 2023
       dates (Tranche 1 acceptance criterion)
 - [ ] Operator runbook in `RUNBOOK.md` walks through the full

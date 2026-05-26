@@ -1,27 +1,19 @@
 ---
-id: '0025'
+id: "0025"
 title: "Live multi-source merge contract: source=sdex → 'aggregated' transition rules"
 type: RESEARCH
 status: completed
-related_adr: ['0003', '0004']
-related_tasks: ['0022', '0012', '0023', '0024']
-tags:
-  [
-    layer-research,
-    priority-medium,
-    effort-small,
-    ohlcv,
-    live-ingestion,
-    multi-source,
-  ]
+related_adr: ["0003", "0004"]
+related_tasks: ["0022", "0012", "0023", "0024"]
+tags: [layer-research, priority-medium, effort-small, ohlcv, live-ingestion, multi-source]
 links:
-  - '../archive/0022_RESEARCH_sdex-filter-and-extraction-spec/notes/G-sdex-decode-and-bucket-spec.md'
-  - '../archive/0023_RESEARCH_ohlcv-row-identity-base-vs-pair/notes/S-recommendation.md'
-  - '../archive/0024_FEATURE_volume-quote-usd-enrichment/notes/G-enrichment-pass-design.md'
-  - '../../2-adrs/0003_price-ohlcv-pk-includes-quote-asset-id.md'
-  - '../../2-adrs/0004_price-ohlcv-multi-source-merge-columns.md'
-  - './notes/G-merge-contract-spec.md'
-  - '../../../docs/database-schema/database-schema-overview.md'
+  - "../archive/0022_RESEARCH_sdex-filter-and-extraction-spec/notes/G-sdex-decode-and-bucket-spec.md"
+  - "../archive/0023_RESEARCH_ohlcv-row-identity-base-vs-pair/notes/S-recommendation.md"
+  - "../archive/0024_FEATURE_volume-quote-usd-enrichment/notes/G-enrichment-pass-design.md"
+  - "../../2-adrs/0003_price-ohlcv-pk-includes-quote-asset-id.md"
+  - "../../2-adrs/0004_price-ohlcv-multi-source-merge-columns.md"
+  - "./notes/G-merge-contract-spec.md"
+  - "../../../docs/database-schema/database-schema-overview.md"
 history:
   - date: 2026-05-13
     status: backlog
@@ -70,7 +62,7 @@ attribution":
 
 > When the same `(timestamp, asset, granularity)` is written by
 > multiple distinct sources … the writer uses `source =
-'aggregated'` and merges across sources. Single-source candles
+> 'aggregated'` and merges across sources. Single-source candles
 > keep their original source label.
 
 Open questions:
@@ -128,11 +120,11 @@ Landed across 3 commits on `research/0025_live-multi-source-merge-contract`
 (PR [#12](https://github.com/rumblefishdev/stellar-prices-api/pull/12),
 squash-merged into develop as `6cd5e26`):
 
-| Commit    | Scope                                           |
-| --------- | ----------------------------------------------- |
-| `d23f05c` | Convert task to directory                       |
-| `81900b9` | Merge-contract design G-note (~450 lines)       |
-| `d550180` | Draft ADR 0004 (proposed) + README link refresh |
+| Commit    | Scope                                                            |
+| --------- | ---------------------------------------------------------------- |
+| `d23f05c` | Convert task to directory                                        |
+| `81900b9` | Merge-contract design G-note (~450 lines)                        |
+| `d550180` | Draft ADR 0004 (proposed) + README link refresh                  |
 
 Followed by completion + archive on develop (this commit).
 

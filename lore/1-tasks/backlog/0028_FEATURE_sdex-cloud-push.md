@@ -1,30 +1,17 @@
 ---
-id: '0028'
-title: 'SDEX cloud-push — stream local price_ohlcv + assets to cloud RDS after backfill'
+id: "0028"
+title: "SDEX cloud-push — stream local price_ohlcv + assets to cloud RDS after backfill"
 type: FEATURE
 status: backlog
-related_adr: ['0003', '0005']
-related_tasks: ['0011', '0012', '0027']
-tags:
-  [
-    layer-indexing,
-    priority-medium,
-    effort-medium,
-    milestone-M1,
-    cloud-push,
-    clickhouse,
-    hetzner,
-    postgres,
-    sdex,
-    stream-2,
-    rust,
-  ]
+related_adr: ["0003", "0005"]
+related_tasks: ["0011", "0012", "0027"]
+tags: [layer-indexing, priority-medium, effort-medium, milestone-M1, cloud-push, clickhouse, hetzner, postgres, sdex, stream-2, rust]
 milestone: 1
 links:
-  - '../active/0012_FEATURE_design-prices-owned-backfill-fargate/notes/G-sdex-backfill-local-design.md'
-  - '../../2-adrs/0005_stream2-sdex-local-workstation-backfill.md'
-  - '../../2-adrs/0003_price-ohlcv-pk-includes-quote-asset-id.md'
-  - '../../../../soroban-block-explorer/lore/2-adrs/0040_multi-laptop-backfill-snapshot-merge-hazards.md'
+  - "../active/0012_FEATURE_design-prices-owned-backfill-fargate/notes/G-sdex-backfill-local-design.md"
+  - "../../2-adrs/0005_stream2-sdex-local-workstation-backfill.md"
+  - "../../2-adrs/0003_price-ohlcv-pk-includes-quote-asset-id.md"
+  - "../../../../soroban-block-explorer/lore/2-adrs/0040_multi-laptop-backfill-snapshot-merge-hazards.md"
 history:
   - date: 2026-05-14
     status: backlog
@@ -74,7 +61,6 @@ Blocked on:
    crate's sqlx pool.
 
 2. **CLI flags** per 0012 G-note §11.1:
-
    ```bash
    sdex-cloud-push \
        --source-url postgres://...local... \
@@ -82,7 +68,6 @@ Blocked on:
        --tables price_ohlcv,assets \
        --since-ledger <N>                # optional; defaults to all
    ```
-
    - `--source-url` reads `DATABASE_URL_LOCAL` env.
    - `--target-url` reads `DATABASE_URL_CLOUD` env.
    - `--tables` defaults to `assets,price_ohlcv`.
@@ -101,7 +86,7 @@ Blocked on:
    - Stream rows from local in batches (5-10k rows / round-trip).
    - Rewrite `asset_id` and `quote_asset_id` via the map from step 3.
    - `INSERT … ON CONFLICT (timestamp, asset_id, quote_asset_id, granularity)
-DO UPDATE SET …` matching the whole-row replacement contract
+     DO UPDATE SET …` matching the whole-row replacement contract
      from task 0022 decode-and-bucket §5.4.
 
 5. **Idempotency:** the tool must be safely re-runnable. A re-run
@@ -123,7 +108,7 @@ DO UPDATE SET …` matching the whole-row replacement contract
    docker-compose, run `sdex-backfill` against a 10k-ledger range
    to populate local, then run `sdex-cloud-push` against the
    stand-in. Diff `SELECT COUNT(*), MIN(timestamp), MAX(timestamp)
-FROM price_ohlcv` between source and target — should match.
+   FROM price_ohlcv` between source and target — should match.
 
 ## Acceptance Criteria
 

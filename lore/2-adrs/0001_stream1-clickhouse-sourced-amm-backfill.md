@@ -1,17 +1,16 @@
 ---
-id: '0001'
+id: "0001"
 title: "Stream 1 Soroban AMM historical backfill is sourced from BE's ClickHouse soroban_events (local instance)"
 status: accepted
 deciders: [okarcz]
-related_tasks: ['0015', '0017', '0018']
-related_adrs: ['0002']
-tags:
-  [architecture, backfill, clickhouse, block-explorer, soroban, amm, stream-1]
+related_tasks: ["0015", "0017", "0018"]
+related_adrs: ["0002"]
+tags: [architecture, backfill, clickhouse, block-explorer, soroban, amm, stream-1]
 links:
-  - '../../../soroban-block-explorer/lore/2-adrs/0044_clickhouse-pilot-parallel-store.md'
-  - '../../../soroban-block-explorer/lore/2-adrs/0033_soroban-events-appearances-read-time-detail.md'
-  - '../../docs/prices-api-general-overview.md'
-  - '../../docs/database-schema/clickhouse-prod-schema.sql'
+  - "../../../soroban-block-explorer/lore/2-adrs/0044_clickhouse-pilot-parallel-store.md"
+  - "../../../soroban-block-explorer/lore/2-adrs/0033_soroban-events-appearances-read-time-detail.md"
+  - "../../docs/prices-api-general-overview.md"
+  - "../../docs/database-schema/clickhouse-prod-schema.sql"
 history:
   - date: 2026-05-12
     status: proposed

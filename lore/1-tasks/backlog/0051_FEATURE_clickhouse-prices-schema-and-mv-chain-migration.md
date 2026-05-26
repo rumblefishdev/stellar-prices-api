@@ -1,31 +1,20 @@
 ---
-id: '0051'
-title: 'ClickHouse `prices.*` schema + materialised-view rollup chain migration'
+id: "0051"
+title: "ClickHouse `prices.*` schema + materialised-view rollup chain migration"
 type: FEATURE
 status: backlog
-related_adr: ['0003', '0004', '0007']
-related_tasks: ['0050', '0011', '0038', '0046']
-tags:
-  [
-    layer-database,
-    priority-high,
-    effort-medium,
-    milestone-M1,
-    clickhouse,
-    hetzner,
-    schema,
-    migrations,
-    ddl,
-  ]
+related_adr: ["0003", "0004", "0007"]
+related_tasks: ["0050", "0011", "0038", "0046"]
+tags: [layer-database, priority-high, effort-medium, milestone-M1, clickhouse, hetzner, schema, migrations, ddl]
 milestone: 1
 links:
-  - '../../../docs/prices-api-general-overview.md'
-  - '../../../docs/database-schema/clickhouse-prod-schema.sql'
-  - '../../2-adrs/0003_price-ohlcv-pk-includes-quote-asset-id.md'
-  - '../../2-adrs/0004_price-ohlcv-multi-source-merge-columns.md'
-  - '../../2-adrs/0007_live-data-sink-on-shared-hetzner-clickhouse.md'
-  - '../archive/0046_RESEARCH_empirical-prices-ch-storage-estimate-from-10k-ledgers/notes/G-empirical-storage-estimate.md'
-  - './0050_FEATURE_be-side-prep-sns-mtls-prices-db-provisioning.md'
+  - "../../../docs/prices-api-general-overview.md"
+  - "../../../docs/database-schema/clickhouse-prod-schema.sql"
+  - "../../2-adrs/0003_price-ohlcv-pk-includes-quote-asset-id.md"
+  - "../../2-adrs/0004_price-ohlcv-multi-source-merge-columns.md"
+  - "../../2-adrs/0007_live-data-sink-on-shared-hetzner-clickhouse.md"
+  - "../archive/0046_RESEARCH_empirical-prices-ch-storage-estimate-from-10k-ledgers/notes/G-empirical-storage-estimate.md"
+  - "./0050_FEATURE_be-side-prep-sns-mtls-prices-db-provisioning.md"
 history:
   - date: 2026-05-21
     status: backlog
@@ -74,7 +63,7 @@ the Hetzner CH `prices` database. The schema comprises:
 
 `docs/database-schema/clickhouse-prod-schema.sql` already mirrors
 BE's production CH schema as a reference; this task produces the
-_prices_-side equivalent inside the `prices` database and ships
+*prices*-side equivalent inside the `prices` database and ships
 the migration tooling that applies it.
 
 ## Implementation Plan
@@ -126,8 +115,8 @@ Behaviour:
 
 1. Connect via mTLS to Caddy:443 using the env-scoped cert + key.
 2. Ensure `prices.schema_migrations(version UInt32, applied_at
-DateTime DEFAULT now()) ENGINE = ReplacingMergeTree(applied_at)
-ORDER BY (version)` exists (bootstrapping).
+   DateTime DEFAULT now()) ENGINE = ReplacingMergeTree(applied_at)
+   ORDER BY (version)` exists (bootstrapping).
 3. Read the highest applied version; for each file with a higher
    numeric prefix, execute its statements in order, then INSERT
    the new version.
@@ -150,7 +139,7 @@ the migrations end-to-end. Assert:
 Once 0050 has provisioned the database and credentials:
 
 - Apply against dev env first; verify with `clickhouse-client
---secure --host=caddy.example.com:443` + the prices-api user.
+  --secure --host=caddy.example.com:443` + the prices-api user.
 - Run the Step 4 assertions against the live `prices` DB.
 - Apply against staging and prod once dev is clean.
 

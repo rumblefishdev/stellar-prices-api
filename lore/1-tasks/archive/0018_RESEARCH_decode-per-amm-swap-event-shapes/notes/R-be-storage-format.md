@@ -1,16 +1,16 @@
 ---
-title: 'BE soroban_events JSON storage format — tagged ScVal encoding, not raw XDR'
+title: "BE soroban_events JSON storage format — tagged ScVal encoding, not raw XDR"
 type: research
 status: developing
 spawned_from: ../README.md
 spawns: []
 tags: [clickhouse, scval, json-encoding, signature-column, stream-1-consumer]
 links:
-  - '../../../../soroban-block-explorer/crates/xdr-parser/src/scval.rs'
-  - '../../../../soroban-block-explorer/crates/xdr-parser/src/event.rs'
-  - '../../../../soroban-block-explorer/crates/db-clickhouse/src/persist/stage.rs'
-  - '../../../../soroban-block-explorer/lore/2-adrs/0044_clickhouse-pilot-parallel-store.md'
-  - 'evidence/soroswap_pair_swap_decode.json'
+  - "../../../../soroban-block-explorer/crates/xdr-parser/src/scval.rs"
+  - "../../../../soroban-block-explorer/crates/xdr-parser/src/event.rs"
+  - "../../../../soroban-block-explorer/crates/db-clickhouse/src/persist/stage.rs"
+  - "../../../../soroban-block-explorer/lore/2-adrs/0044_clickhouse-pilot-parallel-store.md"
+  - "evidence/soroswap_pair_swap_decode.json"
 history:
   - date: 2026-05-15
     status: developing
@@ -42,26 +42,26 @@ apply directly**. Two specific consequences are spelled out below.
 `{ "type": "<tag>", "value": <val> }`. The tag set is fixed by the
 function, not by `stellar-xdr`:
 
-| ScVal variant               | tag                              | value shape                                                     |
-| --------------------------- | -------------------------------- | --------------------------------------------------------------- |
-| `Bool(b)`                   | `"bool"`                         | JSON bool                                                       |
-| `Void`                      | `"void"`                         | JSON null                                                       |
-| `Error(e)`                  | `"error"`                        | `e.name()` (string)                                             |
-| `U32(x)` / `I32(x)`         | `"u32"` / `"i32"`                | JSON number                                                     |
-| `U64(x)` / `I64(x)`         | `"u64"` / `"i64"`                | JSON number                                                     |
-| `Timepoint(t)`              | `"timepoint"`                    | u64                                                             |
-| `Duration(d)`               | `"duration"`                     | u64                                                             |
-| `U128` / `I128`             | `"u128"` / `"i128"`              | **decimal string** (i128 fits a Rust string, not a JSON number) |
-| `U256` / `I256`             | `"u256"` / `"i256"`              | 64-char hex string                                              |
-| `Bytes(b)`                  | `"bytes"`                        | base64 string                                                   |
-| `String(s)`                 | `"string"`                       | raw UTF-8                                                       |
-| `Symbol(s)`                 | **`"sym"`**                      | raw UTF-8 (note: 3-char tag, not `"symbol"`)                    |
-| `Vec(Some(v))`              | `"vec"`                          | array of tagged values                                          |
-| `Map(Some(m))`              | `"map"`                          | array of `{ "key": <tagged>, "value": <tagged> }`               |
-| `Address(a)`                | `"address"`                      | G-address or C-address strkey                                   |
-| `ContractInstance`          | `"contract_instance"`            | `{ "executable": … }`                                           |
-| `LedgerKeyContractInstance` | `"ledger_key_contract_instance"` | null                                                            |
-| `LedgerKeyNonce(k)`         | `"ledger_key_nonce"`             | i64 nonce                                                       |
+| ScVal variant | tag | value shape |
+|---|---|---|
+| `Bool(b)` | `"bool"` | JSON bool |
+| `Void` | `"void"` | JSON null |
+| `Error(e)` | `"error"` | `e.name()` (string) |
+| `U32(x)` / `I32(x)` | `"u32"` / `"i32"` | JSON number |
+| `U64(x)` / `I64(x)` | `"u64"` / `"i64"` | JSON number |
+| `Timepoint(t)` | `"timepoint"` | u64 |
+| `Duration(d)` | `"duration"` | u64 |
+| `U128` / `I128` | `"u128"` / `"i128"` | **decimal string** (i128 fits a Rust string, not a JSON number) |
+| `U256` / `I256` | `"u256"` / `"i256"` | 64-char hex string |
+| `Bytes(b)` | `"bytes"` | base64 string |
+| `String(s)` | `"string"` | raw UTF-8 |
+| `Symbol(s)` | **`"sym"`** | raw UTF-8 (note: 3-char tag, not `"symbol"`) |
+| `Vec(Some(v))` | `"vec"` | array of tagged values |
+| `Map(Some(m))` | `"map"` | array of `{ "key": <tagged>, "value": <tagged> }` |
+| `Address(a)` | `"address"` | G-address or C-address strkey |
+| `ContractInstance` | `"contract_instance"` | `{ "executable": … }` |
+| `LedgerKeyContractInstance` | `"ledger_key_contract_instance"` | null |
+| `LedgerKeyNonce(k)` | `"ledger_key_nonce"` | i64 nonce |
 
 `scval_to_typed_json` is **not the inverse** of `stellar-xdr`'s default
 `#[derive(Serialize)]` for `ScVal` — that derive produces e.g.
@@ -85,7 +85,7 @@ becomes:
 ```json
 [
   { "type": "string", "value": "SoroswapPair" },
-  { "type": "sym", "value": "swap" }
+  { "type": "sym",    "value": "swap" }
 ]
 ```
 
@@ -95,34 +95,16 @@ becomes:
 {
   "type": "map",
   "value": [
-    {
-      "key": { "type": "sym", "value": "amount_0_in" },
-      "value": { "type": "i128", "value": "6289308176" }
-    },
-    {
-      "key": { "type": "sym", "value": "amount_0_out" },
-      "value": { "type": "i128", "value": "0" }
-    },
-    {
-      "key": { "type": "sym", "value": "amount_1_in" },
-      "value": { "type": "i128", "value": "0" }
-    },
-    {
-      "key": { "type": "sym", "value": "amount_1_out" },
-      "value": { "type": "i128", "value": "1001363207" }
-    },
-    {
-      "key": { "type": "sym", "value": "to" },
-      "value": {
-        "type": "address",
-        "value": "GDKBWJP7DC2WWSNAVYMF2VJQGFOJMRX6PEHB3L33APCHOIYXBCFRNSQV"
-      }
-    }
+    { "key": { "type": "sym", "value": "amount_0_in"  }, "value": { "type": "i128", "value": "6289308176" } },
+    { "key": { "type": "sym", "value": "amount_0_out" }, "value": { "type": "i128", "value": "0"          } },
+    { "key": { "type": "sym", "value": "amount_1_in"  }, "value": { "type": "i128", "value": "0"          } },
+    { "key": { "type": "sym", "value": "amount_1_out" }, "value": { "type": "i128", "value": "1001363207" } },
+    { "key": { "type": "sym", "value": "to"           }, "value": { "type": "address", "value": "GDKBWJP7DC2WWSNAVYMF2VJQGFOJMRX6PEHB3L33APCHOIYXBCFRNSQV" } }
   ]
 }
 ```
 
-For reference, the raw XDR base64 (what `topics_xdr` _would_ hold if
+For reference, the raw XDR base64 (what `topics_xdr` *would* hold if
 the column actually stored XDR) is in
 `evidence/soroswap_pair_swap_decode.json` under the
 `topics_xdr_b64` and `data_xdr_b64` fields, captured by
@@ -154,12 +136,12 @@ is NULL for every Soroswap event in CH.
 
 Filter implications:
 
-| Predicate                                                                                                                     | Soroswap pair `swap` matches?                                                               |
-| ----------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
-| `WHERE signature = 'swap'`                                                                                                    | **No** (column is NULL)                                                                     |
-| `WHERE signature IS NULL`                                                                                                     | Yes, but also matches every non-Symbol-first-topic event ever (too broad)                   |
+| Predicate | Soroswap pair `swap` matches? |
+|---|---|
+| `WHERE signature = 'swap'` | **No** (column is NULL) |
+| `WHERE signature IS NULL` | Yes, but also matches every non-Symbol-first-topic event ever (too broad) |
 | `WHERE JSONExtractString(topics_xdr, '$[0].value') = 'SoroswapPair' AND JSONExtractString(topics_xdr, '$[1].value') = 'swap'` | Yes — exact (CH path syntax; verify against ZSTD-coded String column at consumer-impl time) |
-| `WHERE contract_id IN (<pre-enumerated Soroswap pair ids>)`                                                                   | Yes (requires factory-event enumeration of pair IDs)                                        |
+| `WHERE contract_id IN (<pre-enumerated Soroswap pair ids>)` | Yes (requires factory-event enumeration of pair IDs) |
 
 The smoke query in task 0017 (`SELECT count() FROM soroban_events
 WHERE signature = 'swap'`) will undercount Soroswap by exactly the

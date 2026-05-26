@@ -1,34 +1,22 @@
 ---
-id: '0040'
-title: 'Prices API Gateway + Rust/axum read handlers — public REST endpoints with API-key auth, rate limit, response cache'
+id: "0040"
+title: "Prices API Gateway + Rust/axum read handlers — public REST endpoints with API-key auth, rate limit, response cache"
 type: FEATURE
 status: blocked
-related_adr: ['0003', '0004', '0006', '0007']
-related_tasks: ['0011', '0038', '0039', '0045', '0047']
-tags:
-  [
-    layer-backend,
-    priority-high,
-    effort-large,
-    api,
-    lambda,
-    axum,
-    rust,
-    aws,
-    clickhouse,
-    hetzner,
-  ]
+related_adr: ["0003", "0004", "0006", "0007"]
+related_tasks: ["0011", "0038", "0039", "0045", "0047"]
+tags: [layer-backend, priority-high, effort-large, api, lambda, axum, rust, aws, clickhouse, hetzner]
 links:
-  - '../../../docs/prices-api-general-overview.md'
-  - '../../2-adrs/0003_price-ohlcv-pk-includes-quote-asset-id.md'
-  - '../../2-adrs/0004_price-ohlcv-multi-source-merge-columns.md'
-  - '../../2-adrs/0006_runtime-framework-rust-axum.md'
-  - '../../2-adrs/0007_live-data-sink-on-shared-hetzner-clickhouse.md'
-  - '../archive/0045_RESEARCH_cross-team-bundle-with-be-on-hetzner-ch-tenancy/notes/G-be-agreement-record.md'
-  - '../backlog/0011_FEATURE_bootstrap-cdk-with-ssm-platform-lookups.md'
-  - '../backlog/0047_RESEARCH_cross-tenant-throughput-verification-on-shared-hetzner-ch.md'
-  - './0038_FEATURE_prices-ledger-processor-lambda.md'
-  - './0039_FEATURE_prices-periodic-workers-lambda-set.md'
+  - "../../../docs/prices-api-general-overview.md"
+  - "../../2-adrs/0003_price-ohlcv-pk-includes-quote-asset-id.md"
+  - "../../2-adrs/0004_price-ohlcv-multi-source-merge-columns.md"
+  - "../../2-adrs/0006_runtime-framework-rust-axum.md"
+  - "../../2-adrs/0007_live-data-sink-on-shared-hetzner-clickhouse.md"
+  - "../archive/0045_RESEARCH_cross-team-bundle-with-be-on-hetzner-ch-tenancy/notes/G-be-agreement-record.md"
+  - "../backlog/0011_FEATURE_bootstrap-cdk-with-ssm-platform-lookups.md"
+  - "../backlog/0047_RESEARCH_cross-tenant-throughput-verification-on-shared-hetzner-ch.md"
+  - "./0038_FEATURE_prices-ledger-processor-lambda.md"
+  - "./0039_FEATURE_prices-periodic-workers-lambda-set.md"
 history:
   - date: 2026-05-18
     status: backlog
@@ -44,7 +32,7 @@ history:
   - date: 2026-05-18
     status: blocked
     who: oski
-    by: ['0011']
+    by: ["0011"]
     note: >
       Moved to blocked/ — hard-blocked on 0011 (no API Gateway
       stack, no RDS, no Secrets Manager without it). Soft-blocked
@@ -95,13 +83,13 @@ Overview §1.1 (API Layer) and §2.1 (API Gateway row + API
 handlers row) describe the read surface. §4 fixes the endpoint
 list and response shapes:
 
-| Section | Endpoint group                                     |
-| ------- | -------------------------------------------------- |
-| §4.1    | `GET /assets`, `GET /assets/{id}`                  |
+| Section | Endpoint group |
+|---------|----------------|
+| §4.1    | `GET /assets`, `GET /assets/{id}` |
 | §4.2    | `GET /assets/{id}/ohlcv`, `GET /assets/{id}/price` |
-| §4.3    | `POST /prices/batch`                               |
-| §4.4    | `GET /oracles/{id}`                                |
-| §4.5    | `GET /backfill/status`                             |
+| §4.3    | `POST /prices/batch` |
+| §4.4    | `GET /oracles/{id}` |
+| §4.5    | `GET /backfill/status` |
 
 §2.1 fixes the gateway-level non-functional requirements:
 
@@ -213,10 +201,9 @@ In `infra/aws-cdk/`:
 
 Per §2.1's S3 row and §8 Tech Stack: emit an OpenAPI 3.0 spec
 from the axum routes (e.g. via `aide` or hand-authored), host it
-
-- Swagger UI on S3 + CloudFront. Out of scope for the first cut
-  if it becomes load-bearing — split into a follow-up task at
-  that point.
++ Swagger UI on S3 + CloudFront. Out of scope for the first cut
+if it becomes load-bearing — split into a follow-up task at
+that point.
 
 ## Acceptance Criteria
 
@@ -231,7 +218,8 @@ from the axum routes (e.g. via `aide` or hand-authored), host it
       250-row fixture (integration test) with no duplicates or
       skipped rows across `?cursor` requests.
 - [ ] Asset identifier validation rejects malformed G/C-addresses
-      with 400; missing API key returns 403; over-rate returns 429.
+      with 400; missing API key returns 403; over-rate returns
+      429.
 - [ ] Cache hit on second identical GET within TTL is observable
       in CloudWatch (no Lambda invocation).
 - [ ] Per-handler Lambda memory ≤512 MB; timeout ≤15 s; p95

@@ -1,16 +1,16 @@
 ---
-id: '0003'
-title: 'price_ohlcv PK includes quote_asset_id: store one OHLCV row per (asset, quote, minute) native pair'
+id: "0003"
+title: "price_ohlcv PK includes quote_asset_id: store one OHLCV row per (asset, quote, minute) native pair"
 status: accepted
 deciders: [okarcz]
-related_tasks: ['0012', '0022', '0023', '0024', '0025']
-related_adrs: ['0001', '0002']
+related_tasks: ["0012", "0022", "0023", "0024", "0025"]
+related_adrs: ["0001", "0002"]
 tags: [architecture, schema, ohlcv, primary-key, sdex, backfill, multi-quote]
 links:
-  - '../1-tasks/archive/0023_RESEARCH_ohlcv-row-identity-base-vs-pair/notes/S-recommendation.md'
-  - '../1-tasks/archive/0022_RESEARCH_sdex-filter-and-extraction-spec/notes/G-sdex-decode-and-bucket-spec.md'
-  - '../../docs/database-schema/database-schema-overview.md'
-  - '../../docs/prices-api-general-overview.md'
+  - "../1-tasks/archive/0023_RESEARCH_ohlcv-row-identity-base-vs-pair/notes/S-recommendation.md"
+  - "../1-tasks/archive/0022_RESEARCH_sdex-filter-and-extraction-spec/notes/G-sdex-decode-and-bucket-spec.md"
+  - "../../docs/database-schema/database-schema-overview.md"
+  - "../../docs/prices-api-general-overview.md"
 history:
   - date: 2026-05-13
     status: proposed
@@ -125,14 +125,14 @@ column; partitioning column is unchanged).
   own row.
 - **Per-source attribution preserved.** SDEX and Soroswap and
   Aquarius can each write rows for the same `(asset, quote,
-minute)` triple; the multi-source merge contract (task 0025)
+  minute)` triple; the multi-source merge contract (task 0025)
   has well-defined rows to merge.
 - **Backfill decoupled from oracle data.** USD conversion is
   deferred to task 0024's enrichment pass — backfill writes the
   native-quote `volume_quote` and `vwap`; USD denomination
   derives later. With Option C this would have been impossible.
 - **Cheap to migrate.** Greenfield table; one `ALTER` per index
-  - PK + column. No row backfill.
+  + PK + column. No row backfill.
 - **Index size tractable.** PK tuple grows by 4 bytes
   (`INT`). For ~8 GB of `price_ohlcv` projected at year 1, PK
   overhead grows by ~5–10% — well inside the design-doc

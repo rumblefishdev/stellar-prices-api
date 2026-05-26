@@ -1,28 +1,17 @@
 ---
-id: '0048'
-title: 'Soroban events pricing decoder spec — what to extract from soroban_events for price_ohlcv, and how the Lambda implements it'
+id: "0048"
+title: "Soroban events pricing decoder spec — what to extract from soroban_events for price_ohlcv, and how the Lambda implements it"
 type: RESEARCH
 status: completed
-related_adr: ['0001', '0003', '0004', '0007']
-related_tasks: ['0038', '0039', '0040', '0045', '0046', '0047']
-tags:
-  [
-    layer-research,
-    priority-high,
-    effort-medium,
-    stream-1,
-    lambda,
-    ingestion,
-    clickhouse,
-    decoder,
-    pricing,
-  ]
+related_adr: ["0001", "0003", "0004", "0007"]
+related_tasks: ["0038", "0039", "0040", "0045", "0046", "0047"]
+tags: [layer-research, priority-high, effort-medium, stream-1, lambda, ingestion, clickhouse, decoder, pricing]
 links:
-  - '../../../3-wiki/project/soroban-events-schema.md'
-  - '../../../2-adrs/0007_live-data-sink-on-shared-hetzner-clickhouse.md'
-  - '../../blocked/0038_FEATURE_prices-ledger-processor-lambda.md'
-  - '../../blocked/0045_RESEARCH_cross-team-bundle-with-be-on-hetzner-ch-tenancy/README.md'
-  - '../../../../docs/prices-api-general-overview.md'
+  - "../../../3-wiki/project/soroban-events-schema.md"
+  - "../../../2-adrs/0007_live-data-sink-on-shared-hetzner-clickhouse.md"
+  - "../../blocked/0038_FEATURE_prices-ledger-processor-lambda.md"
+  - "../../blocked/0045_RESEARCH_cross-team-bundle-with-be-on-hetzner-ch-tenancy/README.md"
+  - "../../../../docs/prices-api-general-overview.md"
 history:
   - date: 2026-05-19
     status: active
@@ -135,7 +124,7 @@ Per signature, document:
   2. Soroban event extractor over `SorobanTransactionMeta.events`.
 - Bucket into 1-min OHLCV, INSERT into
   `prices.price_ohlcv_1m(timestamp, asset_id, quote_asset_id,
-granularity, source, …)` over HTTPS-mTLS to Caddy:443.
+  granularity, source, …)` over HTTPS-mTLS to Caddy:443.
 - Materialised view chain rolls 1m → 15m → … → 1M downstream.
 - Idempotency via `ReplacingMergeTree(version)` per ADR 0007.
 - Observability: lag metric, per-source trade counts, decode error

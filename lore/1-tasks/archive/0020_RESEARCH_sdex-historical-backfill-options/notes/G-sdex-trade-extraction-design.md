@@ -1,24 +1,24 @@
 ---
-title: 'SDEX trade-extraction design — best way to extract price data from XDR results'
+title: "SDEX trade-extraction design — best way to extract price data from XDR results"
 type: generation
 status: mature
 spawned_from: ../README.md
 spawns: []
 tags: [sdex, extraction, design, ohlcv, archive-reads, price-calculation]
 links:
-  - './R-sdex-operation-xdr-shape.md'
-  - '../../../archive/0015_RESEARCH_redefine-backfill-with-be-clickhouse-events/notes/G-ch-tables-for-price-calculation.md'
+  - "./R-sdex-operation-xdr-shape.md"
+  - "../../../archive/0015_RESEARCH_redefine-backfill-with-be-clickhouse-events/notes/G-ch-tables-for-price-calculation.md"
 history:
   - date: 2026-05-12
     status: mature
     who: okarcz
-    note: 'Extraction algorithm + recommended pipeline; references R-note for XDR shape.'
+    note: "Extraction algorithm + recommended pipeline; references R-note for XDR shape."
 ---
 
 # SDEX trade-extraction design
 
-**Answers user question 2:** _what is the best way to extract data
-needed for token price calculation?_
+**Answers user question 2:** *what is the best way to extract data
+needed for token price calculation?*
 
 Builds on the XDR shape pinned in
 [`R-sdex-operation-xdr-shape.md`](./R-sdex-operation-xdr-shape.md).
@@ -200,7 +200,7 @@ Pair direction matters for OHLCV. Recommended rule:
 1. If one side is in a known-quote-asset set (USDC, USDT, USD-pegged
    stables), put that side as the quote.
 2. Otherwise, deterministic ordering: `(asset_type, asset_code,
-issuer_id)` lexicographic. Lower one is base, higher is quote.
+   issuer_id)` lexicographic. Lower one is base, higher is quote.
 3. Cache the chosen orientation per pair in PG `asset_pairs` so the
    choice is stable across re-runs.
 4. When ticking, if `asset_sold == base`: price = bought/sold;

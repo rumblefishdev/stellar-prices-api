@@ -1,19 +1,19 @@
 ---
-title: 'Synthesis — redesigned §5.6 backfill and BE-CH-derived token price calculation'
+title: "Synthesis — redesigned §5.6 backfill and BE-CH-derived token price calculation"
 type: synthesis
 status: mature
 spawned_from: ../README.md
 spawns: []
 tags: [synthesis, recommendation, backfill, clickhouse, price-calculation]
 links:
-  - './R-be-clickhouse-schema-and-status.md'
-  - './G-ch-tables-for-price-calculation.md'
-  - './I-integration-options.md'
+  - "./R-be-clickhouse-schema-and-status.md"
+  - "./G-ch-tables-for-price-calculation.md"
+  - "./I-integration-options.md"
 history:
   - date: 2026-05-12
     status: mature
     who: okarcz
-    note: 'Final recommendation; open questions and spawned follow-ups listed.'
+    note: "Final recommendation; open questions and spawned follow-ups listed."
 ---
 
 # Synthesis — redesigned §5.6 backfill + token price calculation
@@ -66,7 +66,7 @@ Prices-api Tranche-1 backfill consumer:
    ~8.5M ledgers).
 3. Queries the local CH per [G-note Requirement 1](./G-ch-tables-for-price-calculation.md#requirement-1--soroban-amm-swaps-stream-1-of-56):
    filter `WHERE contract_id IN (Soroswap, Aquarius, Phoenix) AND
-signature = 'swap'`; JOIN `ledgers` for `closed_at`; decode
+   signature = 'swap'`; JOIN `ledgers` for `closed_at`; decode
    `topics_xdr`/`data_xdr` with the `stellar-xdr` crate on the
    prices-api side.
 4. Bucket trade ticks into OHLCV; write into prices-api
@@ -186,7 +186,7 @@ mandatory. If hot, prices-api can stand up a CH Dictionary on
    Fargate backfill design).
 5. **Do we need an ADR for this?** The redesign reverses a
    pre-implementation design assumption in `docs/prices-api-general-
-overview.md`. Per the project's emerging ADR convention,
+   overview.md`. Per the project's emerging ADR convention,
    anything that overturns a design-doc commitment merits an ADR.
    Recommended: spawn `lore/2-adrs/0001_…` (or wherever the local
    ADR numbering picks up) capturing the Stream 1 decision.
@@ -222,13 +222,13 @@ conversation transcript.
 
 ## Spawned follow-up tasks (final list)
 
-| ID                                                                                | Title                                          | State                                      |
-| --------------------------------------------------------------------------------- | ---------------------------------------------- | ------------------------------------------ |
-| [0013](../../../../backlog/0013_DOCS_update-design-doc-to-match-be-reality.md)    | Update §2.3/§5.6/§11 of design doc             | scope amended (history note added)         |
-| [0017](../../../../backlog/0017_FEATURE_local-clickhouse-for-prices-backfill.md)  | Local CH instance setup & access for Tranche 1 | new backlog                                |
-| [0018](../../../../backlog/0018_RESEARCH_decode-per-amm-swap-event-shapes.md)     | Sample-decode per-AMM swap event shapes        | new backlog                                |
-| [0020](../../../../backlog/0020_RESEARCH_sdex-historical-backfill-options.md)     | Research SDEX historical backfill options      | new backlog                                |
-| ADR [0001](../../../../../2-adrs/0001_stream1-clickhouse-sourced-amm-backfill.md) | Stream 1 ClickHouse-sourced AMM backfill       | accepted, written inline with 0015 closure |
+| ID | Title | State |
+|----|-------|-------|
+| [0013](../../../../backlog/0013_DOCS_update-design-doc-to-match-be-reality.md) | Update §2.3/§5.6/§11 of design doc | scope amended (history note added) |
+| [0017](../../../../backlog/0017_FEATURE_local-clickhouse-for-prices-backfill.md) | Local CH instance setup & access for Tranche 1 | new backlog |
+| [0018](../../../../backlog/0018_RESEARCH_decode-per-amm-swap-event-shapes.md) | Sample-decode per-AMM swap event shapes | new backlog |
+| [0020](../../../../backlog/0020_RESEARCH_sdex-historical-backfill-options.md) | Research SDEX historical backfill options | new backlog |
+| ADR [0001](../../../../../2-adrs/0001_stream1-clickhouse-sourced-amm-backfill.md) | Stream 1 ClickHouse-sourced AMM backfill | accepted, written inline with 0015 closure |
 
 ## Folded-in resolutions from related tasks
 
@@ -256,12 +256,12 @@ and the spawned follow-ups below.
 Per `/lore-framework-tasks` ("Never leave future work as prose
 only"), the items below become backlog tasks:
 
-| Slot | Title                                                                                                 | Notes                                                                                       |
-| ---- | ----------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
-| 0016 | Update `docs/prices-api-general-overview.md` §5.6 / §2.3 / §11 to reflect Stream 1 CH-sourced reality | Fold into existing backlog task 0013 if scope is compatible; otherwise spawn new.           |
-| 0017 | Design one-shot local CH instance for Tranche 1 backfill                                              | Disk sizing, where it runs (laptop / Fargate / EC2 spot), tear-down trigger.                |
-| 0018 | Sample-decode real Soroswap / Aquarius / Phoenix swap events                                          | Pin down per-AMM topic + data shape. Low-risk spike per G-note open spike section.          |
-| 0019 | Write ADR for Stream 1 CH-sourced backfill                                                            | Captures the §5.6 reversal as a first-class architectural decision (open question 5 above). |
+| Slot | Title | Notes |
+|------|-------|-------|
+| 0016 | Update `docs/prices-api-general-overview.md` §5.6 / §2.3 / §11 to reflect Stream 1 CH-sourced reality | Fold into existing backlog task 0013 if scope is compatible; otherwise spawn new. |
+| 0017 | Design one-shot local CH instance for Tranche 1 backfill | Disk sizing, where it runs (laptop / Fargate / EC2 spot), tear-down trigger. |
+| 0018 | Sample-decode real Soroswap / Aquarius / Phoenix swap events | Pin down per-AMM topic + data shape. Low-risk spike per G-note open spike section. |
+| 0019 | Write ADR for Stream 1 CH-sourced backfill | Captures the §5.6 reversal as a first-class architectural decision (open question 5 above). |
 
 ## Coordination notes
 

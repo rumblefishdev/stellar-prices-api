@@ -1,15 +1,15 @@
 ---
-title: 'Unknown Symbol("swap") emitters confirmed non-target — exclude from indexer'
+title: "Unknown Symbol(\"swap\") emitters confirmed non-target — exclude from indexer"
 type: synthesis
 status: mature
 spawned_from: ../README.md
 spawns: []
 tags: [soroban, amm, venue-attribution, indexer-policy]
 links:
-  - '../../0002_RESEARCH_amm-venue-attribution/notes/S-venue-attribution-mapping.md'
-  - '../../0002_RESEARCH_amm-venue-attribution/notes/R-aquarius-registry.md'
-  - '../../0002_RESEARCH_amm-venue-attribution/notes/R-soroswap-registry.md'
-  - '../../0002_RESEARCH_amm-venue-attribution/notes/R-phoenix-registry.md'
+  - "../../0002_RESEARCH_amm-venue-attribution/notes/S-venue-attribution-mapping.md"
+  - "../../0002_RESEARCH_amm-venue-attribution/notes/R-aquarius-registry.md"
+  - "../../0002_RESEARCH_amm-venue-attribution/notes/R-soroswap-registry.md"
+  - "../../0002_RESEARCH_amm-venue-attribution/notes/R-phoenix-registry.md"
 history:
   - date: 2026-05-11
     status: mature
@@ -48,13 +48,13 @@ These addresses are explicitly **excluded** from per-venue tracking by
 the BE indexer. They emit `Symbol("swap")` like a router/aggregator but
 belong to neither Soroswap, Aquarius, nor Phoenix.
 
-|     Events (4-day window) | Contract                                                   | Verified   |
-| ------------------------: | ---------------------------------------------------------- | ---------- |
-|                     2,706 | `CCR2CH4GQVCZHG7CHFVMNANCK45CU5DVKXZIIITDZQAU3CEJZ7RQH2MQ` | non-target |
-|                     2,480 | `CDMIM23WOUL5CZBKX3GOA3V5R5AMVIMTCP52KCDQORWELAPLJ27WZCHL` | non-target |
-|                       335 | `CCXRRORTOXXP53HEKJ6RCG7CDRWZAJHIS4N7PDL32PUNMNN7VWPJVQWS` | non-target |
-|                       229 | `CAUF4DFYSX52L2KJ4J7OFW3WDQMEUDVXNB7PG5VIC4VVOA3BCLWXDO2E` | non-target |
-| (+ ~30 more in long tail) | (see 0002 S-note §"Cross-check vs 0001 sample")            | non-target |
+| Events (4-day window) | Contract | Verified |
+|---:|---|---|
+| 2,706 | `CCR2CH4GQVCZHG7CHFVMNANCK45CU5DVKXZIIITDZQAU3CEJZ7RQH2MQ` | non-target |
+| 2,480 | `CDMIM23WOUL5CZBKX3GOA3V5R5AMVIMTCP52KCDQORWELAPLJ27WZCHL` | non-target |
+| 335   | `CCXRRORTOXXP53HEKJ6RCG7CDRWZAJHIS4N7PDL32PUNMNN7VWPJVQWS` | non-target |
+| 229   | `CAUF4DFYSX52L2KJ4J7OFW3WDQMEUDVXNB7PG5VIC4VVOA3BCLWXDO2E` | non-target |
+| (+ ~30 more in long tail) | (see 0002 S-note §"Cross-check vs 0001 sample") | non-target |
 
 Source for the full ranked list: `../../0002_RESEARCH_amm-venue-attribution/notes/S-venue-attribution-mapping.md`.
 

@@ -1,7 +1,7 @@
 ---
-id: 'NNNN'
+id: "NNNN"
 title: [Short descriptive title]
-status: proposed # proposed | accepted | deprecated | superseded
+status: proposed  # proposed | accepted | deprecated | superseded
 deciders: [team-member]
 related_tasks: []
 related_adrs: []
@@ -11,13 +11,12 @@ history:
   - date: YYYY-MM-DD
     status: proposed
     who: team-member
-    note: 'ADR created'
+    note: "ADR created"
 ---
 
 # ADR NNNN: [Title]
 
 **Related:**
-
 - [Task NNNN: Description](../1-tasks/active/NNNN_TYPE_slug.md)
 
 ---
@@ -47,11 +46,9 @@ Why is this the best choice among the alternatives?
 **Description:** Brief explanation.
 
 **Pros:**
-
 - ...
 
 **Cons:**
-
 - ...
 
 **Decision:** REJECTED - [reason]

@@ -1,29 +1,29 @@
 ---
-id: '0014'
-title: 'Architecture infra update — propagate BE develop changes (ADR 0044 CH pilot, ADR 0040 backfill) into Prices backlog tasks'
+id: "0014"
+title: "Architecture infra update — propagate BE develop changes (ADR 0044 CH pilot, ADR 0040 backfill) into Prices backlog tasks"
 type: DOCS
 status: completed
 related_adr: []
-related_tasks: ['0009', '0010', '0012', '0013']
+related_tasks: ["0009", "0010", "0012", "0013"]
 tags: [layer-infra, priority-medium, effort-small, docs, infra, block-explorer]
 links:
-  - '../../../../soroban-block-explorer/lore/2-adrs/0044_clickhouse-pilot-parallel-store.md'
-  - '../../../../soroban-block-explorer/lore/2-adrs/0040_multi-laptop-backfill-snapshot-merge-hazards.md'
-  - '../../../../soroban-block-explorer/docs/architecture/infrastructure/infrastructure-overview.md'
-  - '../../../../soroban-block-explorer/docs/architecture/technical-design-general-overview.md'
+  - "../../../../soroban-block-explorer/lore/2-adrs/0044_clickhouse-pilot-parallel-store.md"
+  - "../../../../soroban-block-explorer/lore/2-adrs/0040_multi-laptop-backfill-snapshot-merge-hazards.md"
+  - "../../../../soroban-block-explorer/docs/architecture/infrastructure/infrastructure-overview.md"
+  - "../../../../soroban-block-explorer/docs/architecture/technical-design-general-overview.md"
 history:
   - date: 2026-05-12
     status: backlog
     who: okarcz
-    note: 'Re-checked 0009 against BE develop @ b462c86. Two new BE artifacts post-date 0009 and need to be reflected in Prices follow-up tasks 0010/0012/0013.'
+    note: "Re-checked 0009 against BE develop @ b462c86. Two new BE artifacts post-date 0009 and need to be reflected in Prices follow-up tasks 0010/0012/0013."
   - date: 2026-05-12
     status: active
     who: okarcz
-    note: 'Promoted to active on branch docs/0014_architecture-infra-update.'
+    note: "Promoted to active on branch docs/0014_architecture-infra-update."
   - date: 2026-05-12
     status: completed
     who: okarcz
-    note: 'Edits applied to 0010/0012/0013 (3 frontmatter link blocks + 3 history entries + new acceptance bullets). 0011 reviewed and untouched. 0009 archive untouched per convention. Branch ready for commit.'
+    note: "Edits applied to 0010/0012/0013 (3 frontmatter link blocks + 3 history entries + new acceptance bullets). 0011 reviewed and untouched. 0009 archive untouched per convention. Branch ready for commit."
 ---
 
 # Architecture infra update — propagate BE develop changes into Prices backlog tasks

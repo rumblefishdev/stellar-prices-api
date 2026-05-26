@@ -1,31 +1,20 @@
 ---
-id: '0007'
-title: 'Live data sink on shared Hetzner ClickHouse, not Prices-owned RDS Postgres'
+id: "0007"
+title: "Live data sink on shared Hetzner ClickHouse, not Prices-owned RDS Postgres"
 status: accepted
 deciders: [okarcz]
-related_tasks:
-  ['0044', '0045', '0046', '0047', '0011', '0017', '0038', '0039', '0040']
-related_adrs: ['0001', '0003', '0004', '0005', '0006']
-tags:
-  [
-    architecture,
-    infrastructure,
-    clickhouse,
-    hetzner,
-    shared-infra,
-    block-explorer,
-    data-sink,
-    live-ingestion,
-  ]
+related_tasks: ["0044", "0045", "0046", "0047", "0011", "0017", "0038", "0039", "0040"]
+related_adrs: ["0001", "0003", "0004", "0005", "0006"]
+tags: [architecture, infrastructure, clickhouse, hetzner, shared-infra, block-explorer, data-sink, live-ingestion]
 links:
-  - '../1-tasks/archive/0044_RESEARCH_refactor-architecture-shared-galexie-hetzner-clickhouse/README.md'
-  - '../1-tasks/archive/0044_RESEARCH_refactor-architecture-shared-galexie-hetzner-clickhouse/notes/S-refactor-recommendation.md'
-  - '../1-tasks/archive/0045_RESEARCH_cross-team-bundle-with-be-on-hetzner-ch-tenancy/notes/G-be-agreement-record.md'
-  - '../1-tasks/archive/0046_RESEARCH_empirical-prices-ch-storage-estimate-from-10k-ledgers/notes/G-empirical-storage-estimate.md'
-  - '../1-tasks/backlog/0047_RESEARCH_cross-tenant-throughput-verification-on-shared-hetzner-ch.md'
-  - '../../../soroban-block-explorer/docs/architecture/infrastructure/infrastructure-overview.md'
-  - '../../../soroban-block-explorer/lore/2-adrs/0044_clickhouse-pilot-parallel-store.md'
-  - '../../../soroban-block-explorer/lore/2-adrs/0045_clickhouse-local-backfill-then-mirror-to-hetzner-via-freeze-rsync-attach.md'
+  - "../1-tasks/archive/0044_RESEARCH_refactor-architecture-shared-galexie-hetzner-clickhouse/README.md"
+  - "../1-tasks/archive/0044_RESEARCH_refactor-architecture-shared-galexie-hetzner-clickhouse/notes/S-refactor-recommendation.md"
+  - "../1-tasks/archive/0045_RESEARCH_cross-team-bundle-with-be-on-hetzner-ch-tenancy/notes/G-be-agreement-record.md"
+  - "../1-tasks/archive/0046_RESEARCH_empirical-prices-ch-storage-estimate-from-10k-ledgers/notes/G-empirical-storage-estimate.md"
+  - "../1-tasks/backlog/0047_RESEARCH_cross-tenant-throughput-verification-on-shared-hetzner-ch.md"
+  - "../../../soroban-block-explorer/docs/architecture/infrastructure/infrastructure-overview.md"
+  - "../../../soroban-block-explorer/lore/2-adrs/0044_clickhouse-pilot-parallel-store.md"
+  - "../../../soroban-block-explorer/lore/2-adrs/0045_clickhouse-local-backfill-then-mirror-to-hetzner-via-freeze-rsync-attach.md"
 history:
   - date: 2026-05-18
     status: proposed
@@ -207,7 +196,8 @@ the short version:
 - **Builds on a commitment BE already made.** The Hetzner CH is
   funded and being stood up regardless. Joining as a second
   tenant uses CH's first-class multi-tenant primitives.
-- **No data-loss path.** BE's indefinite S3 retention (BE ADR 0006) + Lambda async retry + DLQ provides structural durability
+- **No data-loss path.** BE's indefinite S3 retention (BE ADR
+  0006) + Lambda async retry + DLQ provides structural durability
   end-to-end; no intermediate queue needed.
 
 ---
@@ -313,13 +303,13 @@ if BE rejects the separate-database shape in §3.
 
 ### Implementation impact (recap from task 0044 synthesis §3)
 
-| Existing task                             | Status after this ADR is accepted                                                     |
-| ----------------------------------------- | ------------------------------------------------------------------------------------- |
-| **0011** — CDK bootstrap                  | Major rewrite. No RDS, no VPC; Secrets Manager mTLS material.                         |
-| **0017** — Local CH for backfill          | Unchanged (backfill is workstation-local; refactor only affects the live cloud sink). |
-| **0038** — Prices Ledger Processor Lambda | Major rewrite. sqlx → `clickhouse` crate; UPSERT → ReplacingMergeTree INSERT.         |
-| **0039** — Periodic workers Lambda set    | Major rewrite. OHLCV Rollup Lambda deleted; others retargeted.                        |
-| **0040** — API Gateway + read handlers    | Moderate rewrite. Read handlers retargeted; endpoint contracts unchanged.             |
+| Existing task | Status after this ADR is accepted |
+|---|---|
+| **0011** — CDK bootstrap | Major rewrite. No RDS, no VPC; Secrets Manager mTLS material. |
+| **0017** — Local CH for backfill | Unchanged (backfill is workstation-local; refactor only affects the live cloud sink). |
+| **0038** — Prices Ledger Processor Lambda | Major rewrite. sqlx → `clickhouse` crate; UPSERT → ReplacingMergeTree INSERT. |
+| **0039** — Periodic workers Lambda set | Major rewrite. OHLCV Rollup Lambda deleted; others retargeted. |
+| **0040** — API Gateway + read handlers | Moderate rewrite. Read handlers retargeted; endpoint contracts unchanged. |
 
 ---
 

@@ -1,29 +1,18 @@
 ---
-id: '0015'
+id: "0015"
 title: "Redefine backfill plan and define price-calculation use of BE's ClickHouse full-content soroban_events"
 type: RESEARCH
 status: completed
-related_adr: ['0001']
-related_tasks: ['0009', '0010', '0012', '0013', '0014', '0017', '0018', '0020']
-tags:
-  [
-    layer-research,
-    priority-high,
-    effort-medium,
-    infra,
-    block-explorer,
-    schema,
-    clickhouse,
-    backfill,
-    price-calculation,
-  ]
+related_adr: ["0001"]
+related_tasks: ["0009", "0010", "0012", "0013", "0014", "0017", "0018", "0020"]
+tags: [layer-research, priority-high, effort-medium, infra, block-explorer, schema, clickhouse, backfill, price-calculation]
 links:
-  - '../../../../soroban-block-explorer/lore/2-adrs/0044_clickhouse-pilot-parallel-store.md'
-  - '../../../../soroban-block-explorer/lore/1-tasks/active/0206_FEATURE_clickhouse-persist-real-inserts/README.md'
-  - '../../../../soroban-block-explorer/lore/1-tasks/archive/0204_FEATURE_clickhouse-pilot-crate-docker-schema/'
-  - '../../../../soroban-block-explorer/lore/1-tasks/archive/0205_FEATURE_backfill-runner-clickhouse-target-flag.md'
-  - '../../../docs/prices-api-general-overview.md'
-  - '../../../2-adrs/0001_stream1-clickhouse-sourced-amm-backfill.md'
+  - "../../../../soroban-block-explorer/lore/2-adrs/0044_clickhouse-pilot-parallel-store.md"
+  - "../../../../soroban-block-explorer/lore/1-tasks/active/0206_FEATURE_clickhouse-persist-real-inserts/README.md"
+  - "../../../../soroban-block-explorer/lore/1-tasks/archive/0204_FEATURE_clickhouse-pilot-crate-docker-schema/"
+  - "../../../../soroban-block-explorer/lore/1-tasks/archive/0205_FEATURE_backfill-runner-clickhouse-target-flag.md"
+  - "../../../docs/prices-api-general-overview.md"
+  - "../../../2-adrs/0001_stream1-clickhouse-sourced-amm-backfill.md"
 history:
   - date: 2026-05-12
     status: active
@@ -58,7 +47,8 @@ history:
 BE's data architecture shifted between when the prices-api design doc was
 written and today. The PG-side compromise that drove §5.6's "Stream 1
 queries BE RDS `soroban_events` for decoded JSONB" assumption (which was
-already known to be wrong against BE reality — task 0009 row 8, task 0010) is now resolved on the BE side by a **different table in a
+already known to be wrong against BE reality — task 0009 row 8, task
+0010) is now resolved on the BE side by a **different table in a
 different engine**: ClickHouse holds full-content `soroban_events`
 (per-event row, `topics_xdr` + `data_xdr` inlined, ZSTD-coded,
 partitioned by `ledger_sequence`). The CH copy is no longer the
@@ -118,7 +108,7 @@ What this means for prices-api:
   at CH, not PG.
 - The `signature`-hoisted column on `soroban_events` is exactly what
   AMM-swap extraction needs: filter `WHERE signature = 'swap' AND
-contract_id IN (Soroswap_router_ids, Aquarius_pool_ids, …)` is
+  contract_id IN (Soroswap_router_ids, Aquarius_pool_ids, …)` is
   granule-pruned + LowCardinality-cheap.
 - `liquidity_pools` + `liquidity_pool_snapshots` give an alternative
   price source: constant-product instant-price from reserves at any

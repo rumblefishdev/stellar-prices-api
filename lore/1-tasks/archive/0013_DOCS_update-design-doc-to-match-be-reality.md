@@ -1,35 +1,25 @@
 ---
-id: '0013'
-title: 'Update prices-api-general-overview.md §2.3/§5.6/§11 to match ADR 0001 + ADR 0002'
+id: "0013"
+title: "Update prices-api-general-overview.md §2.3/§5.6/§11 to match ADR 0001 + ADR 0002"
 type: DOCS
 status: completed
-related_adr: ['0001', '0002', '0005']
-related_tasks: ['0012', '0014', '0015', '0017', '0022', '0029']
-tags:
-  [
-    layer-database,
-    priority-medium,
-    effort-small,
-    docs,
-    infra,
-    clickhouse,
-    sdex,
-    backfill,
-  ]
+related_adr: ["0001", "0002", "0005"]
+related_tasks: ["0012", "0014", "0015", "0017", "0022", "0029"]
+tags: [layer-database, priority-medium, effort-small, docs, infra, clickhouse, sdex, backfill]
 links:
-  - '../../../../docs/prices-api-general-overview.md'
-  - '../../2-adrs/0001_stream1-clickhouse-sourced-amm-backfill.md'
-  - '../../2-adrs/0002_stream2-sdex-archive-backfill-independent-of-be.md'
-  - '../../../../soroban-block-explorer/lore/2-adrs/0044_clickhouse-pilot-parallel-store.md'
+  - "../../../../docs/prices-api-general-overview.md"
+  - "../../2-adrs/0001_stream1-clickhouse-sourced-amm-backfill.md"
+  - "../../2-adrs/0002_stream2-sdex-archive-backfill-independent-of-be.md"
+  - "../../../../soroban-block-explorer/lore/2-adrs/0044_clickhouse-pilot-parallel-store.md"
 history:
   - date: 2026-05-11
     status: backlog
     who: okarcz
-    note: 'Spawned from 0009 future work. Two design-doc assumptions contradict BE production state.'
+    note: "Spawned from 0009 future work. Two design-doc assumptions contradict BE production state."
   - date: 2026-05-12
     status: backlog
     who: okarcz
-    note: 'Refs added by task 0014: BE ADR 0044 (CH pilot). Design doc should briefly acknowledge the pilot exists and is local-only / read-empty today, NOT plan against it.'
+    note: "Refs added by task 0014: BE ADR 0044 (CH pilot). Design doc should briefly acknowledge the pilot exists and is local-only / read-empty today, NOT plan against it."
   - date: 2026-05-12
     status: backlog
     who: okarcz

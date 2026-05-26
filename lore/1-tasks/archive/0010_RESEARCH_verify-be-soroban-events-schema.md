@@ -1,37 +1,28 @@
 ---
-id: '0010'
-title: 'Verify BE soroban_events_appearances schema for Prices AMM backfill'
+id: "0010"
+title: "Verify BE soroban_events_appearances schema for Prices AMM backfill"
 type: RESEARCH
 status: superseded
 related_adr: []
-related_tasks: ['0009', '0014', '0015']
-tags:
-  [
-    layer-research,
-    priority-high,
-    effort-small,
-    infra,
-    block-explorer,
-    schema,
-    backfill,
-  ]
+related_tasks: ["0009", "0014", "0015"]
+tags: [layer-research, priority-high, effort-small, infra, block-explorer, schema, backfill]
 links:
-  - '../../../../soroban-block-explorer/lore/2-adrs/0029_abandon-parsed-artifacts-read-time-xdr-fetch.md'
-  - '../../../../soroban-block-explorer/lore/2-adrs/0033_soroban-events-appearances-read-time-detail.md'
-  - '../../../../soroban-block-explorer/lore/2-adrs/0044_clickhouse-pilot-parallel-store.md'
+  - "../../../../soroban-block-explorer/lore/2-adrs/0029_abandon-parsed-artifacts-read-time-xdr-fetch.md"
+  - "../../../../soroban-block-explorer/lore/2-adrs/0033_soroban-events-appearances-read-time-detail.md"
+  - "../../../../soroban-block-explorer/lore/2-adrs/0044_clickhouse-pilot-parallel-store.md"
 history:
   - date: 2026-05-11
     status: backlog
     who: okarcz
-    note: 'Spawned from 0009 future work. Resolves the row-8 hard mismatch in the shared-infra matrix.'
+    note: "Spawned from 0009 future work. Resolves the row-8 hard mismatch in the shared-infra matrix."
   - date: 2026-05-12
     status: backlog
     who: okarcz
-    note: 'Question widened by task 0014: BE ADR 0044 (CH pilot, local-only / read-empty today) introduces a future full-content `soroban_events` table. Add CH-future-option dimension to the verification.'
+    note: "Question widened by task 0014: BE ADR 0044 (CH pilot, local-only / read-empty today) introduces a future full-content `soroban_events` table. Add CH-future-option dimension to the verification."
   - date: 2026-05-12
     status: superseded
     who: okarcz
-    by: ['0015']
+    by: ["0015"]
     note: >
       Superseded by task 0015. The verification question is answered
       definitively: BE PG has no full-content soroban_events (only

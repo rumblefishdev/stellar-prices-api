@@ -1,31 +1,19 @@
 ---
-id: '0049'
-title: 'Rewrite design docs (overview + database-schema companion) to match ADR 0007 (Hetzner CH live sink)'
+id: "0049"
+title: "Rewrite design docs (overview + database-schema companion) to match ADR 0007 (Hetzner CH live sink)"
 type: DOCS
 status: completed
-related_adr: ['0001', '0003', '0004', '0007']
-related_tasks:
-  ['0044', '0045', '0046', '0047', '0048', '0011', '0038', '0039', '0040']
-tags:
-  [
-    layer-docs,
-    priority-high,
-    effort-medium,
-    clickhouse,
-    hetzner,
-    overview,
-    design-doc,
-    database-schema,
-    mermaid,
-  ]
+related_adr: ["0001", "0003", "0004", "0007"]
+related_tasks: ["0044", "0045", "0046", "0047", "0048", "0011", "0038", "0039", "0040"]
+tags: [layer-docs, priority-high, effort-medium, clickhouse, hetzner, overview, design-doc, database-schema, mermaid]
 links:
-  - '../../../docs/prices-api-general-overview.md'
-  - '../../../docs/database-schema/database-schema-overview.md'
-  - '../../../docs/database-schema/amm-trades-schema.md'
-  - '../../2-adrs/0007_live-data-sink-on-shared-hetzner-clickhouse.md'
-  - '../../2-adrs/0001_stream1-clickhouse-sourced-amm-backfill.md'
-  - '../archive/0045_RESEARCH_cross-team-bundle-with-be-on-hetzner-ch-tenancy/notes/G-be-agreement-record.md'
-  - '../archive/0046_RESEARCH_empirical-prices-ch-storage-estimate-from-10k-ledgers/notes/G-empirical-storage-estimate.md'
+  - "../../../docs/prices-api-general-overview.md"
+  - "../../../docs/database-schema/database-schema-overview.md"
+  - "../../../docs/database-schema/amm-trades-schema.md"
+  - "../../2-adrs/0007_live-data-sink-on-shared-hetzner-clickhouse.md"
+  - "../../2-adrs/0001_stream1-clickhouse-sourced-amm-backfill.md"
+  - "../archive/0045_RESEARCH_cross-team-bundle-with-be-on-hetzner-ch-tenancy/notes/G-be-agreement-record.md"
+  - "../archive/0046_RESEARCH_empirical-prices-ch-storage-estimate-from-10k-ledgers/notes/G-empirical-storage-estimate.md"
 history:
   - date: 2026-05-20
     status: backlog
@@ -143,27 +131,27 @@ History.
 
 ## Sections to rewrite
 
-| Section                           | Change                                                                                                                                                                                                                                                                         |
-| --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Revision History                  | Add a new row for today's rewrite, referencing ADR 0007                                                                                                                                                                                                                        |
-| §0 Deployment & AWS Account       | Note CH data plane lives on Hetzner (BE-owned); AWS account scope shrinks (no RDS, no VPC)                                                                                                                                                                                     |
-| §1.1 API Layer diagram            | Replace "RDS PostgreSQL" with "Hetzner ClickHouse (BE-shared) via HTTPS-mTLS"                                                                                                                                                                                                  |
-| §1.2 Data Ingestion Layer diagram | Add SNS fan-out between S3 and Lambdas; replace RDS box with CH box; remove OHLCV Rollup Lambda (replaced by CH MV chain)                                                                                                                                                      |
-| §2.1 Components Hosted            | Remove: RDS, NAT Gateway (no VPC), OHLCV Rollup Lambda. Add: SNS topic subscription (one-time BE CDK change), Secrets Manager mTLS material                                                                                                                                    |
-| §2.3 Shared with BE               | Add: Hetzner CH data plane (separate `prices` DB). Remove: VPC, NAT Gateway (no longer needed prices-side). Update: S3 → SNS fan-out instead of direct S3 → Lambda                                                                                                             |
-| §3 Database Schema                | Rewrite from PostgreSQL native range partitioning to ClickHouse `ReplacingMergeTree(version)` per-source, per-granularity tables (`price_ohlcv_1m`, `_15m`, ..., `_1M`). Backfill progress on `ReplacingMergeTree(updated_at)`. Cleanup becomes `ALTER TABLE … DROP PARTITION` |
-| §4.5 GET /backfill/status         | Endpoint contract unchanged; underlying read targets CH not Postgres                                                                                                                                                                                                           |
-| §5.2 Prices Ledger Processor      | Write semantics: UPSERT → ReplacingMergeTree INSERT (idempotency via `version` column); HTTPS-mTLS to Caddy:443 instead of in-VPC sqlx                                                                                                                                         |
-| §5.3 Ingestion Workers            | Remove OHLCV Rollup row (CH MV chain). Retarget other workers from RDS to CH                                                                                                                                                                                                   |
-| §5.4 EventBridge Scheduler Rules  | Remove `ohlcv-rollup` rule                                                                                                                                                                                                                                                     |
-| §5.5 VWAP layering                | Keep — already correct (added by task 0048)                                                                                                                                                                                                                                    |
-| §5.6 Historical backfill          | Update cloud-push targets from RDS to CH; the local backfill itself is unchanged                                                                                                                                                                                               |
-| §6 Performance & Scaling          | Replace "RDS Sizing" sub-section with "Hetzner CH (shared)" notes; remove Multi-AZ / read replica / RDS Proxy upgrade path. Add cross-cloud latency mitigation (warm connection reuse, batched per-ledger writes)                                                              |
-| §7 Security                       | Update RDS references; add mTLS section (per-env certs, 1-year rotation, CA revocation)                                                                                                                                                                                        |
-| §8 Tech Stack                     | sqlx → `clickhouse` Rust crate; remove "PostgreSQL 16"; add ClickHouse + Caddy mTLS row                                                                                                                                                                                        |
-| §9 Delivery Plan (Tranches)       | Tranche 1 reflects no RDS, no VPC; Lambdas deploy outside VPC; CDK stack simpler                                                                                                                                                                                               |
-| §10 Cost Estimate                 | Remove RDS line ($12). Add Hetzner CH cost-share line (~$1-2/env/mo per task 0046's empirical numbers). Remove NAT Gateway line (already $0). Remove RDS upgrade-during-backfill line. Note cross-cloud network path is included                                               |
-| §11 Infrastructure Sharing        | §11.1: add Hetzner CH data plane row. §11.2: add agreement record reference. §11.4: update Stream 1 risk discussion to reflect ADR 0007                                                                                                                                        |
+| Section | Change |
+|---|---|
+| Revision History | Add a new row for today's rewrite, referencing ADR 0007 |
+| §0 Deployment & AWS Account | Note CH data plane lives on Hetzner (BE-owned); AWS account scope shrinks (no RDS, no VPC) |
+| §1.1 API Layer diagram | Replace "RDS PostgreSQL" with "Hetzner ClickHouse (BE-shared) via HTTPS-mTLS" |
+| §1.2 Data Ingestion Layer diagram | Add SNS fan-out between S3 and Lambdas; replace RDS box with CH box; remove OHLCV Rollup Lambda (replaced by CH MV chain) |
+| §2.1 Components Hosted | Remove: RDS, NAT Gateway (no VPC), OHLCV Rollup Lambda. Add: SNS topic subscription (one-time BE CDK change), Secrets Manager mTLS material |
+| §2.3 Shared with BE | Add: Hetzner CH data plane (separate `prices` DB). Remove: VPC, NAT Gateway (no longer needed prices-side). Update: S3 → SNS fan-out instead of direct S3 → Lambda |
+| §3 Database Schema | Rewrite from PostgreSQL native range partitioning to ClickHouse `ReplacingMergeTree(version)` per-source, per-granularity tables (`price_ohlcv_1m`, `_15m`, ..., `_1M`). Backfill progress on `ReplacingMergeTree(updated_at)`. Cleanup becomes `ALTER TABLE … DROP PARTITION` |
+| §4.5 GET /backfill/status | Endpoint contract unchanged; underlying read targets CH not Postgres |
+| §5.2 Prices Ledger Processor | Write semantics: UPSERT → ReplacingMergeTree INSERT (idempotency via `version` column); HTTPS-mTLS to Caddy:443 instead of in-VPC sqlx |
+| §5.3 Ingestion Workers | Remove OHLCV Rollup row (CH MV chain). Retarget other workers from RDS to CH |
+| §5.4 EventBridge Scheduler Rules | Remove `ohlcv-rollup` rule |
+| §5.5 VWAP layering | Keep — already correct (added by task 0048) |
+| §5.6 Historical backfill | Update cloud-push targets from RDS to CH; the local backfill itself is unchanged |
+| §6 Performance & Scaling | Replace "RDS Sizing" sub-section with "Hetzner CH (shared)" notes; remove Multi-AZ / read replica / RDS Proxy upgrade path. Add cross-cloud latency mitigation (warm connection reuse, batched per-ledger writes) |
+| §7 Security | Update RDS references; add mTLS section (per-env certs, 1-year rotation, CA revocation) |
+| §8 Tech Stack | sqlx → `clickhouse` Rust crate; remove "PostgreSQL 16"; add ClickHouse + Caddy mTLS row |
+| §9 Delivery Plan (Tranches) | Tranche 1 reflects no RDS, no VPC; Lambdas deploy outside VPC; CDK stack simpler |
+| §10 Cost Estimate | Remove RDS line ($12). Add Hetzner CH cost-share line (~$1-2/env/mo per task 0046's empirical numbers). Remove NAT Gateway line (already $0). Remove RDS upgrade-during-backfill line. Note cross-cloud network path is included |
+| §11 Infrastructure Sharing | §11.1: add Hetzner CH data plane row. §11.2: add agreement record reference. §11.4: update Stream 1 risk discussion to reflect ADR 0007 |
 
 ## Acceptance Criteria
 
@@ -199,7 +187,7 @@ History.
 - [x] §12 Tranche-1 DB Acceptance Criteria — flipped to ClickHouse / no-VPC / SNS / mTLS / push-cadence
 - [x] §13 Quick Reference — engine + sort-key + partition columns; one row per per-granularity table
 - [x] Appendix A (ER diagram) — full rewrite to CH types, engines, MV-chain edges, no SQL FKs
-- [x] Appendix B (full system diagram) — full rewrite: SNS bucket fan-out, mTLS edge, Hetzner box with shared CH (default._ + prices._), workstation backfill subgraph (BE backfill-runner, local CH, local Postgres, cloud-push tools), MV chain dotted edges, push-freshness alarm
+- [x] Appendix B (full system diagram) — full rewrite: SNS bucket fan-out, mTLS edge, Hetzner box with shared CH (default.* + prices.*), workstation backfill subgraph (BE backfill-runner, local CH, local Postgres, cloud-push tools), MV chain dotted edges, push-freshness alarm
 - [x] Final grep on `database-schema-overview.md` shows no live-state RDS / sqlx / PostgreSQL 16 / OHLCV Rollup Lambda / ECS Fargate backfill references — only historical context, comparative-to-prior-design framing, and explicit "removed" callouts
 - [x] `clickhouse-prod-schema.sql` left as-is (BE's `default.*` reference, not prices-api's schema)
 
@@ -280,7 +268,7 @@ History.
 
 5. **Title and intro preamble left as-is.** The document title
    ("Post-2nd-Review") and the intro paragraph mentioning
-   `sqlx` describe the document's _starting point_, not its
+   `sqlx` describe the document's *starting point*, not its
    current state. The Revision History is the authoritative
    record of subsequent evolution. Rewriting the preamble would
    be a stylistic change beyond ADR 0007's scope.

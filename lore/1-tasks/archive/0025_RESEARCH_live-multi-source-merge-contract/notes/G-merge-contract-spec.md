@@ -1,17 +1,17 @@
 ---
-title: 'Live multi-source merge contract — writer-side detection + per-column merge rules'
+title: "Live multi-source merge contract — writer-side detection + per-column merge rules"
 type: generation
 status: mature
 spawned_from: ../README.md
 spawns: []
 tags: [ohlcv, multi-source, live-ingestion, merge, design, schema]
 links:
-  - '../README.md'
-  - '../../archive/0022_RESEARCH_sdex-filter-and-extraction-spec/notes/G-sdex-decode-and-bucket-spec.md'
-  - '../../archive/0023_RESEARCH_ohlcv-row-identity-base-vs-pair/notes/S-recommendation.md'
-  - '../../archive/0024_FEATURE_volume-quote-usd-enrichment/notes/G-enrichment-pass-design.md'
-  - '../../../2-adrs/0003_price-ohlcv-pk-includes-quote-asset-id.md'
-  - '../../../../docs/database-schema/database-schema-overview.md'
+  - "../README.md"
+  - "../../archive/0022_RESEARCH_sdex-filter-and-extraction-spec/notes/G-sdex-decode-and-bucket-spec.md"
+  - "../../archive/0023_RESEARCH_ohlcv-row-identity-base-vs-pair/notes/S-recommendation.md"
+  - "../../archive/0024_FEATURE_volume-quote-usd-enrichment/notes/G-enrichment-pass-design.md"
+  - "../../../2-adrs/0003_price-ohlcv-pk-includes-quote-asset-id.md"
+  - "../../../../docs/database-schema/database-schema-overview.md"
 history:
   - date: 2026-05-13
     status: mature
@@ -30,19 +30,20 @@ This note specifies what happens when two or more live writers
 (SDEX Ledger Processor, Soroswap, Aquarius, …) target the same
 `price_ohlcv` row in the same minute. The contract is **embedded
 in each writer's UPSERT statement**, with a shared library
-encapsulating the merge formula. The backfill contract (task 0022) writes single-source rows; this spec handles what happens
+encapsulating the merge formula. The backfill contract (task
+0022) writes single-source rows; this spec handles what happens
 when later writes touch them.
 
 ## TL;DR
 
-| Concern                  | Decision                                                                                                                                                                                                                                            |
-| ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Who initiates the merge  | **Each live writer**, on UPSERT conflict. Embedded in the `ON CONFLICT DO UPDATE` clause. No separate aggregator process.                                                                                                                           |
-| Open / close determinism | Requires two new columns: `first_trade_at TIMESTAMPTZ`, `last_trade_at TIMESTAMPTZ`. Writers populate; merge picks `MIN(first_trade_at)` and `MAX(last_trade_at)` to choose the canonical open/close. **Small schema-change ADR addendum to 0003.** |
-| Per-column merge rules   | `high` = `GREATEST`; `low` = `LEAST`; `volume_base`, `volume_quote_usd`, `trade_count` = `SUM`; `vwap` = recomputed from accumulated `volume_quote_usd / volume_base`; `open`/`close` tied to `first_trade_at`/`last_trade_at`.                     |
-| Source label transition  | `source = 'aggregated'` once ≥ 2 distinct sources have contributed. Single-source rows keep their original source label (`'sdex'`, `'soroswap'`, etc.).                                                                                             |
-| Per-row source breakdown | **Not stored on `price_ohlcv`.** Per-source visibility lives in `current_prices.sources` JSONB (already specced in the schema doc). If a per-1m-row breakdown becomes useful later, a `sources_seen JSONB` column can be added.                     |
-| Backfill interaction     | Backfill writes single-source whole-row replacement; live writer arriving later runs the merge formula. The backfill never needs to know about other sources — its row is "first to land" in its minute.                                            |
+| Concern                                | Decision                                                                                      |
+| -------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| Who initiates the merge                | **Each live writer**, on UPSERT conflict. Embedded in the `ON CONFLICT DO UPDATE` clause. No separate aggregator process. |
+| Open / close determinism               | Requires two new columns: `first_trade_at TIMESTAMPTZ`, `last_trade_at TIMESTAMPTZ`. Writers populate; merge picks `MIN(first_trade_at)` and `MAX(last_trade_at)` to choose the canonical open/close. **Small schema-change ADR addendum to 0003.** |
+| Per-column merge rules                 | `high` = `GREATEST`; `low` = `LEAST`; `volume_base`, `volume_quote_usd`, `trade_count` = `SUM`; `vwap` = recomputed from accumulated `volume_quote_usd / volume_base`; `open`/`close` tied to `first_trade_at`/`last_trade_at`. |
+| Source label transition                | `source = 'aggregated'` once ≥ 2 distinct sources have contributed. Single-source rows keep their original source label (`'sdex'`, `'soroswap'`, etc.). |
+| Per-row source breakdown               | **Not stored on `price_ohlcv`.** Per-source visibility lives in `current_prices.sources` JSONB (already specced in the schema doc). If a per-1m-row breakdown becomes useful later, a `sources_seen JSONB` column can be added. |
+| Backfill interaction                   | Backfill writes single-source whole-row replacement; live writer arriving later runs the merge formula. The backfill never needs to know about other sources — its row is "first to land" in its minute. |
 
 ## 1. Who initiates the merge
 
@@ -50,8 +51,8 @@ when later writes touch them.
 
 The README listed three candidates:
 
-| Option | Description                                                                  |
-| ------ | ---------------------------------------------------------------------------- |
+| Option | Description                                                                 |
+| ------ | --------------------------------------------------------------------------- |
 | (a)    | Each live writer detects on UPSERT conflict and rewrites with merged values. |
 | (b)    | Separate aggregator process polls and consolidates multi-touched rows.       |
 | (c)    | Rollup Lambda merges when it re-aggregates 1m → 15m / 1h / etc.              |
@@ -200,19 +201,19 @@ Given an incoming candle `EXCLUDED` for a `(timestamp, asset_id,
 quote_asset_id, granularity)` row that already has `price_ohlcv`
 values, the merge is:
 
-| Column             | Merge rule                                                                                                               |
-| ------------------ | ------------------------------------------------------------------------------------------------------------------------ |
-| `open`             | `EXCLUDED.open` if `EXCLUDED.first_trade_at < price_ohlcv.first_trade_at` else `price_ohlcv.open`                        |
-| `high`             | `GREATEST(price_ohlcv.high, EXCLUDED.high)`                                                                              |
-| `low`              | `LEAST(price_ohlcv.low, EXCLUDED.low)`                                                                                   |
-| `close`            | `EXCLUDED.close` if `EXCLUDED.last_trade_at > price_ohlcv.last_trade_at` else `price_ohlcv.close`                        |
-| `volume_base`      | `price_ohlcv.volume_base + EXCLUDED.volume_base`                                                                         |
-| `volume_quote_usd` | `price_ohlcv.volume_quote_usd + EXCLUDED.volume_quote_usd`                                                               |
+| Column             | Merge rule                                                                                                            |
+| ------------------ | --------------------------------------------------------------------------------------------------------------------- |
+| `open`             | `EXCLUDED.open` if `EXCLUDED.first_trade_at < price_ohlcv.first_trade_at` else `price_ohlcv.open`                      |
+| `high`             | `GREATEST(price_ohlcv.high, EXCLUDED.high)`                                                                            |
+| `low`              | `LEAST(price_ohlcv.low, EXCLUDED.low)`                                                                                 |
+| `close`            | `EXCLUDED.close` if `EXCLUDED.last_trade_at > price_ohlcv.last_trade_at` else `price_ohlcv.close`                      |
+| `volume_base`      | `price_ohlcv.volume_base + EXCLUDED.volume_base`                                                                       |
+| `volume_quote_usd` | `price_ohlcv.volume_quote_usd + EXCLUDED.volume_quote_usd`                                                             |
 | `vwap`             | `(price_ohlcv.volume_quote_usd + EXCLUDED.volume_quote_usd) / NULLIF(price_ohlcv.volume_base + EXCLUDED.volume_base, 0)` |
-| `trade_count`      | `price_ohlcv.trade_count + EXCLUDED.trade_count`                                                                         |
-| `source`           | `CASE WHEN price_ohlcv.source = EXCLUDED.source THEN price_ohlcv.source ELSE 'aggregated' END`                           |
-| `first_trade_at`   | `LEAST(price_ohlcv.first_trade_at, EXCLUDED.first_trade_at)`                                                             |
-| `last_trade_at`    | `GREATEST(price_ohlcv.last_trade_at, EXCLUDED.last_trade_at)`                                                            |
+| `trade_count`      | `price_ohlcv.trade_count + EXCLUDED.trade_count`                                                                       |
+| `source`           | `CASE WHEN price_ohlcv.source = EXCLUDED.source THEN price_ohlcv.source ELSE 'aggregated' END`                          |
+| `first_trade_at`   | `LEAST(price_ohlcv.first_trade_at, EXCLUDED.first_trade_at)`                                                           |
+| `last_trade_at`    | `GREATEST(price_ohlcv.last_trade_at, EXCLUDED.last_trade_at)`                                                          |
 
 ### 3.2 VWAP recomputation
 
@@ -269,8 +270,8 @@ The README listed three options:
 
 | Option | Approach                                                            |
 | ------ | ------------------------------------------------------------------- |
-| (a)    | Add `sources_seen JSONB` column with per-source breakdown per row.  |
-| (b)    | Rely on `current_prices.sources` JSONB at the asset+24h level only. |
+| (a)    | Add `sources_seen JSONB` column with per-source breakdown per row.   |
+| (b)    | Rely on `current_prices.sources` JSONB at the asset+24h level only.  |
 | (c)    | Reconstruct from a separate per-source rows table.                  |
 
 ### 4.2 Why (b)
@@ -307,7 +308,7 @@ Two sub-options surface:
   from `price_ohlcv`.
 - **(a)** Add `sources_seen JSONB` column to `price_ohlcv`
   carrying `{ "sdex": { "volume_base": X, "volume_quote_usd": Y,
-"trade_count": Z }, "soroswap": {...}, ... }`. Allows the
+  "trade_count": Z }, "soroswap": {...}, ... }`. Allows the
   Current Price Updater to read directly from `price_ohlcv` and
   reconstruct per-source 24h.
 

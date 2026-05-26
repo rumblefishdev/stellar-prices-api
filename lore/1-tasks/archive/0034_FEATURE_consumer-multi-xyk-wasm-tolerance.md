@@ -1,39 +1,29 @@
 ---
-id: '0034'
-title: 'Consumer must tolerate >=2 Phoenix XYK WASM builds (PHO/USDC currently dropped if hash-keyed)'
+id: "0034"
+title: "Consumer must tolerate >=2 Phoenix XYK WASM builds (PHO/USDC currently dropped if hash-keyed)"
 type: FEATURE
 status: completed
-related_adr: ['0006']
-related_tasks: ['0032', '0018', '0037']
-tags:
-  [
-    layer-indexing,
-    priority-medium,
-    effort-small,
-    milestone-M1,
-    phoenix,
-    consumer,
-    stream-1,
-    price-feed-correctness,
-  ]
+related_adr: ["0006"]
+related_tasks: ["0032", "0018", "0037"]
+tags: [layer-indexing, priority-medium, effort-small, milestone-M1, phoenix, consumer, stream-1, price-feed-correctness]
 milestone: 1
 links:
-  - '../archive/0032_RESEARCH_phoenix-stable-pool-first-observation/notes/S-no-stable-pool-deployed.md'
-  - '../archive/0018_RESEARCH_decode-per-amm-swap-event-shapes/notes/G-amm-swap-event-shapes.md'
-  - '../backlog/0037_FEATURE_tranche1-ledger-processor-skeleton.md'
+  - "../archive/0032_RESEARCH_phoenix-stable-pool-first-observation/notes/S-no-stable-pool-deployed.md"
+  - "../archive/0018_RESEARCH_decode-per-amm-swap-event-shapes/notes/G-amm-swap-event-shapes.md"
+  - "../backlog/0037_FEATURE_tranche1-ledger-processor-skeleton.md"
 history:
   - date: 2026-05-15
     status: backlog
     who: oski
-    note: 'Spawned from 0032 negative-result survey.'
+    note: "Spawned from 0032 negative-result survey."
   - date: 2026-05-18
     status: active
     who: oski
-    note: 'Activated to begin implementation.'
+    note: "Activated to begin implementation."
   - date: 2026-05-18
     status: blocked
     who: oski
-    by: ['0037']
+    by: ["0037"]
     note: >
       Re-blocked on discovery that no consumer code exists yet. The
       Tranche 1 Ledger Processor (per ADR 0006) has not been
@@ -46,7 +36,7 @@ history:
   - date: 2026-05-25
     status: active
     who: oski
-    note: 'Activated to begin implementation of multi-XYK WASM tolerance.'
+    note: "Activated to begin implementation of multi-XYK WASM tolerance."
   - date: 2026-05-25
     status: completed
     who: oski
@@ -70,7 +60,6 @@ extractor selection off a single WASM hash, the second-WASM pool
 ## Context
 
 Two XYK builds in production:
-
 - 10 pools share `167ab414a226427de34c19947ef9c5cf38c6c0ed91ecf9392f7cef3278ff506c`
 - 1 pool (`CD5XNKK3...IAA`, PHO/USDC) uses
   `13b158655e40396957537bf1c528c6542b315930c1c9e0df640f57293c8af2ca`
@@ -113,11 +102,11 @@ and add a runtime warning if an unrecognized hash appears.
 This task also delivered the 0037 skeleton as a prerequisite since no
 consumer code existed. Three new workspace members under `packages/`:
 
-| Crate               | Path                         | Role                                                                                                                 |
-| ------------------- | ---------------------------- | -------------------------------------------------------------------------------------------------------------------- |
-| `extractors-core`   | `packages/extractors-core`   | `SwapExtractor` trait, `SorobanEventRow`, `TaggedValue`, `TradeRow`, `Venue` enum — transcribed from 0018 Appendix A |
-| `phoenix-extractor` | `packages/phoenix-extractor` | `PhoenixPoolRegistry` (contract_id → pool_type lookup) + `PhoenixXykExtractor` (8-event grouping decoder)            |
-| `ledger-processor`  | `packages/ledger-processor`  | lib + stub binary; `dispatch()` routes by venue, then `(pool_type, event_count)` for Phoenix                         |
+| Crate | Path | Role |
+|-------|------|------|
+| `extractors-core` | `packages/extractors-core` | `SwapExtractor` trait, `SorobanEventRow`, `TaggedValue`, `TradeRow`, `Venue` enum — transcribed from 0018 Appendix A |
+| `phoenix-extractor` | `packages/phoenix-extractor` | `PhoenixPoolRegistry` (contract_id → pool_type lookup) + `PhoenixXykExtractor` (8-event grouping decoder) |
+| `ledger-processor` | `packages/ledger-processor` | lib + stub binary; `dispatch()` routes by venue, then `(pool_type, event_count)` for Phoenix |
 
 ### Classifier design
 
@@ -135,14 +124,12 @@ This survives future Phoenix XYK rebuilds without code changes.
 ### Tests (14 total)
 
 **phoenix-extractor (8 tests):**
-
 - Registry fixture construction + lookup for both WASM variants
 - Proof that different WASM hashes both resolve as XYK via pool_type
 - XYK extractor: 8-event group decode, PHO/USDC alt-WASM pool,
   insufficient rows rejection, unordered field tolerance
 
 **ledger-processor (6 tests):**
-
 - Dispatch routes XLM/USDC (common WASM) correctly
 - Dispatch routes PHO/USDC (alt WASM) identically
 - Explicit proof that dispatch uses pool_type, not WASM hash

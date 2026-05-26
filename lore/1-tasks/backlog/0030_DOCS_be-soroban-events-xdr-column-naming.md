@@ -1,29 +1,20 @@
 ---
-id: '0030'
-title: 'Surface BE soroban_events.topics_xdr / .data_xdr column-naming issue'
+id: "0030"
+title: "Surface BE soroban_events.topics_xdr / .data_xdr column-naming issue"
 type: DOCS
 status: backlog
 related_adr: []
-related_tasks: ['0018']
-tags:
-  [
-    layer-database,
-    priority-low,
-    effort-small,
-    cross-repo,
-    be-feedback,
-    clickhouse,
-    soroban-events,
-  ]
+related_tasks: ["0018"]
+tags: [layer-database, priority-low, effort-small, cross-repo, be-feedback, clickhouse, soroban-events]
 links:
-  - '../active/0018_RESEARCH_decode-per-amm-swap-event-shapes/notes/R-be-storage-format.md'
-  - '../../../../soroban-block-explorer/crates/db-clickhouse/src/persist/stage.rs'
-  - '../../../../soroban-block-explorer/lore/2-adrs/0044_clickhouse-pilot-parallel-store.md'
+  - "../active/0018_RESEARCH_decode-per-amm-swap-event-shapes/notes/R-be-storage-format.md"
+  - "../../../../soroban-block-explorer/crates/db-clickhouse/src/persist/stage.rs"
+  - "../../../../soroban-block-explorer/lore/2-adrs/0044_clickhouse-pilot-parallel-store.md"
 history:
   - date: 2026-05-15
     status: backlog
     who: claude
-    note: 'Spawned from 0018 Appendix B item 1.'
+    note: "Spawned from 0018 Appendix B item 1."
 ---
 
 # Surface BE soroban_events.topics_xdr / .data_xdr column-naming issue

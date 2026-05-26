@@ -1,31 +1,19 @@
 ---
-id: '0055'
-title: '`GET /backfill/status` endpoint — Tranche 1 isolated read handler'
+id: "0055"
+title: "`GET /backfill/status` endpoint — Tranche 1 isolated read handler"
 type: FEATURE
 status: backlog
-related_adr: ['0006', '0007']
-related_tasks: ['0011', '0050', '0051', '0052', '0040']
-tags:
-  [
-    layer-backend,
-    priority-high,
-    effort-small,
-    milestone-M1,
-    api,
-    lambda,
-    axum,
-    rust,
-    clickhouse,
-    read-endpoint,
-  ]
+related_adr: ["0006", "0007"]
+related_tasks: ["0011", "0050", "0051", "0052", "0040"]
+tags: [layer-backend, priority-high, effort-small, milestone-M1, api, lambda, axum, rust, clickhouse, read-endpoint]
 milestone: 1
 links:
-  - '../../../docs/prices-api-general-overview.md'
-  - '../../2-adrs/0006_runtime-framework-rust-axum.md'
-  - '../../2-adrs/0007_live-data-sink-on-shared-hetzner-clickhouse.md'
-  - '../blocked/0040_FEATURE_prices-api-gateway-and-read-handlers.md'
-  - './0051_FEATURE_clickhouse-prices-schema-and-mv-chain-migration.md'
-  - './0052_FEATURE_clickhouse-mtls-client-shared-crate.md'
+  - "../../../docs/prices-api-general-overview.md"
+  - "../../2-adrs/0006_runtime-framework-rust-axum.md"
+  - "../../2-adrs/0007_live-data-sink-on-shared-hetzner-clickhouse.md"
+  - "../blocked/0040_FEATURE_prices-api-gateway-and-read-handlers.md"
+  - "./0051_FEATURE_clickhouse-prices-schema-and-mv-chain-migration.md"
+  - "./0052_FEATURE_clickhouse-mtls-client-shared-crate.md"
 history:
   - date: 2026-05-21
     status: backlog
@@ -110,7 +98,7 @@ For the single GET handler:
    Pick the approach at impl time; document in
    `notes/S-realtime-tip-resolution.md`.
 3. Compute `progress_pct = (target_ledger - current_ledger) /
-(target_ledger - start_ledger) * 100` and
+   (target_ledger - start_ledger) * 100` and
    `ledgers_remaining = current_ledger - start_ledger` at read
    time (matches §4.5).
 4. Serialise to the §4.5 JSON envelope and return 200.
