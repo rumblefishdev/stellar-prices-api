@@ -1,7 +1,9 @@
 mod registry;
+mod stable;
 mod xyk;
 
 pub use registry::{PhoenixPool, PhoenixPoolRegistry};
+pub use stable::PhoenixStablePoolExtractor;
 pub use xyk::PhoenixXykExtractor;
 
 pub const PHOENIX_XYK_EVENT_COUNT: usize = 8;
