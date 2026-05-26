@@ -2,7 +2,7 @@
 id: "0008"
 title: "Set up CI workflow for the Nx workspace"
 type: FEATURE
-status: backlog
+status: active
 related_adr: []
 related_tasks: ["0006"]
 tags: [layer-tooling, phase-future, priority-medium, effort-small, infra, ci]
@@ -12,6 +12,10 @@ history:
     status: backlog
     who: claude
     note: "Spawned from 0006 future work."
+  - date: 2026-05-26
+    status: active
+    who: okarcz
+    note: "Activated for CI workflow implementation."
 ---
 
 # Set up CI workflow for the Nx workspace
