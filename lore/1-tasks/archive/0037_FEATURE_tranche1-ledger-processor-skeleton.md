@@ -2,7 +2,7 @@
 id: "0037"
 title: "Tranche 1 Ledger Processor skeleton — Phoenix pool registry + extractor dispatch hook"
 type: FEATURE
-status: active
+status: completed
 related_adr: ["0001", "0006"]
 related_tasks: ["0034", "0018"]
 tags: [layer-indexing, priority-medium, effort-medium, milestone-M1, stream-1, consumer, scaffolding, rust]
@@ -30,6 +30,15 @@ history:
       Activated. Most acceptance criteria already met by 0034 implementation
       (crate layout, trait, registry, dispatch, CI). Remaining: stub
       extractors for Soroswap, Aquarius, PhoenixStable.
+  - date: 2026-05-26
+    status: completed
+    who: okarcz
+    note: >
+      All 5 acceptance criteria met. Added 3 stub SwapExtractor impls
+      (PhoenixStable, Soroswap, Aquarius) across 2 new crates +
+      1 new module. 19 tests passing (0 new — all from 0034).
+      PR #32 merged to develop. Core skeleton was delivered by
+      0034; this task completed the remaining venue stubs.
 ---
 
 # Tranche 1 Ledger Processor skeleton
