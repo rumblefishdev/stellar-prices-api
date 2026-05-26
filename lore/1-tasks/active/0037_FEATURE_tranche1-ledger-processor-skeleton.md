@@ -2,7 +2,7 @@
 id: "0037"
 title: "Tranche 1 Ledger Processor skeleton — Phoenix pool registry + extractor dispatch hook"
 type: FEATURE
-status: backlog
+status: active
 related_adr: ["0001", "0006"]
 related_tasks: ["0034", "0018"]
 tags: [layer-indexing, priority-medium, effort-medium, milestone-M1, stream-1, consumer, scaffolding, rust]
@@ -23,6 +23,13 @@ history:
       to exist before it can wire in the pool_type + event_count
       classifier. This task creates the minimum scaffolding 0034
       requires; it does NOT need to be a complete consumer.
+  - date: 2026-05-26
+    status: active
+    who: okarcz
+    note: >
+      Activated. Most acceptance criteria already met by 0034 implementation
+      (crate layout, trait, registry, dispatch, CI). Remaining: stub
+      extractors for Soroswap, Aquarius, PhoenixStable.
 ---
 
 # Tranche 1 Ledger Processor skeleton
