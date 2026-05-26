@@ -8,7 +8,7 @@ related_tasks: ["0034", "0018"]
 tags: [layer-indexing, priority-medium, effort-medium, milestone-M1, stream-1, consumer, scaffolding, rust]
 milestone: 1
 links:
-  - "../blocked/0034_FEATURE_consumer-multi-xyk-wasm-tolerance.md"
+  - "../archive/0034_FEATURE_consumer-multi-xyk-wasm-tolerance.md"
   - "../archive/0018_RESEARCH_decode-per-amm-swap-event-shapes/notes/G-amm-swap-event-shapes.md"
   - "../../2-adrs/0001_stream1-clickhouse-sourced-amm-backfill.md"
   - "../../2-adrs/0006_runtime-framework-rust-axum.md"
@@ -124,16 +124,77 @@ sibling workflow.
 
 ## Acceptance Criteria
 
-- [ ] `cargo build -p phoenix-extractor` succeeds.
-- [ ] `cargo test -p phoenix-extractor` runs at least one test
+- [x] `cargo build -p phoenix-extractor` succeeds.
+- [x] `cargo test -p phoenix-extractor` runs at least one test
       that constructs a `PhoenixPoolRegistry` from a fixture and
       asserts `lookup()` returns the expected `pool_type`.
-- [ ] `SwapExtractor` trait defined in `extractors-core` matches
+- [x] `SwapExtractor` trait defined in `extractors-core` matches
       the shape in 0018 G-note Appendix A.
-- [ ] Stub `ledger-processor` binary compiles; `dispatch()`
+- [x] Stub `ledger-processor` binary compiles; `dispatch()`
       routes a fixture event through the registry without
       panicking on the Phoenix XYK path.
-- [ ] CI runs `cargo check` and `cargo test` on PRs.
+- [x] CI runs `cargo check` and `cargo test` on PRs.
+
+## Implementation Notes
+
+Most of the skeleton was built during task 0034 (which absorbed
+0037's scope to unblock itself). This task added the remaining
+stub extractors per Step 2 of the plan.
+
+### Crate layout (6 workspace members)
+
+| Crate | Role |
+|-------|------|
+| `extractors-core` | `SwapExtractor` trait, `SorobanEventRow`, `TaggedValue`, `TradeRow`, `ExtractResult`, `Venue` enum |
+| `phoenix-extractor` | `PhoenixXykExtractor` (full), `PhoenixStablePoolExtractor` (stub), `PhoenixPoolRegistry` |
+| `soroswap-extractor` | `SoroswapPairExtractor` (stub) |
+| `aquarius-extractor` | `AquariusPoolExtractor` (stub) |
+| `ledger-processor` | `dispatch()` + `dispatch_phoenix()` routing by `(pool_type, event_count)` |
+| `sdex-backfill` | Pre-existing, not part of this task |
+
+### Stub extractors
+
+Three `SwapExtractor` impls with `unimplemented!()` bodies:
+- `PhoenixStablePoolExtractor` in `phoenix-extractor/src/stable.rs`
+- `SoroswapPairExtractor` in `soroswap-extractor/src/lib.rs`
+- `AquariusPoolExtractor` in `aquarius-extractor/src/lib.rs`
+
+### Tests — 19 total (0 new, all from 0034)
+
+- `phoenix-extractor`: 8 tests (4 registry, 4 xyk)
+- `ledger-processor`: 6 tests (dispatch routing)
+- `sdex-backfill`: 5 tests (pre-existing)
+
+### CI
+
+`.github/workflows/rust.yml`: fmt, check, test (workspace-wide),
+clippy (scoped to 5 new crates, excludes sdex-backfill).
+
+## Design Decisions
+
+### From Plan
+
+1. **Separate crates per venue**: Each venue gets its own crate
+   (phoenix-extractor, soroswap-extractor, aquarius-extractor)
+   with extractors-core as the shared trait crate.
+
+2. **Stub extractors use `unimplemented!()`**: Per plan Step 2,
+   stubs exist as types implementing `SwapExtractor` but panic
+   if called. Dispatch returns `VenueNotImplemented` error
+   before reaching the stub.
+
+### Emerged
+
+3. **0034 absorbed 0037's core scope**: Task 0034 was blocked on
+   0037, so 0034 built the skeleton itself (workspace, trait,
+   registry, dispatch, CI). This task only needed to add the
+   three remaining stub extractors.
+
+4. **Soroswap and Aquarius as separate crates, not in
+   extractors-core**: Could have placed stubs in the trait crate,
+   but separate crates match the venue-per-crate pattern
+   established by phoenix-extractor and avoid mixing trait
+   definitions with implementations.
 
 ## Out of scope
 

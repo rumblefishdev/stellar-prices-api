@@ -1,0 +1,8 @@
+[package]
+name = "aquarius-extractor"
+version = "0.1.0"
+edition = "2024"
+description = "Aquarius AMM swap extractor"
+
+[dependencies]
+extractors-core = { path = "../extractors-core" }

@@ -4,6 +4,8 @@ members = [
     "packages/sdex-backfill",
     "packages/extractors-core",
     "packages/phoenix-extractor",
+    "packages/soroswap-extractor",
+    "packages/aquarius-extractor",
     "packages/ledger-processor",
 ]
 
