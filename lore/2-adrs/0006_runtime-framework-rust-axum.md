@@ -1,14 +1,15 @@
 ---
-id: "0006"
-title: "Runtime framework: Rust + axum on Lambda (shared workspace with Soroban Block Explorer)"
+id: '0006'
+title: 'Runtime framework: Rust + axum on Lambda (shared workspace with Soroban Block Explorer)'
 status: accepted
 deciders: [okarcz]
-related_tasks: ["0006", "0007"]
+related_tasks: ['0006', '0007']
 related_adrs: []
-tags: [architecture, runtime, framework, rust, axum, lambda, block-explorer-shared]
+tags:
+  [architecture, runtime, framework, rust, axum, lambda, block-explorer-shared]
 links:
-  - "../../docs/prices-api-general-overview.md"
-  - "../1-tasks/archive/0006_FEATURE_setup-nx-monorepo.md"
+  - '../../docs/prices-api-general-overview.md'
+  - '../1-tasks/archive/0006_FEATURE_setup-nx-monorepo.md'
 history:
   - date: 2026-05-14
     status: proposed

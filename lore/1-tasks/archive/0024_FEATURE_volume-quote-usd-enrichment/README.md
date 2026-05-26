@@ -1,17 +1,27 @@
 ---
-id: "0024"
-title: "volume_quote_usd enrichment pass: join price_ohlcv with oracle_prices for non-USD-quoted pairs"
+id: '0024'
+title: 'volume_quote_usd enrichment pass: join price_ohlcv with oracle_prices for non-USD-quoted pairs'
 type: FEATURE
 status: completed
-related_adr: ["0003"]
-related_tasks: ["0022", "0012", "0023"]
-tags: [layer-indexing, priority-medium, effort-medium, ohlcv, enrichment, oracle, backfill, stream-2]
+related_adr: ['0003']
+related_tasks: ['0022', '0012', '0023']
+tags:
+  [
+    layer-indexing,
+    priority-medium,
+    effort-medium,
+    ohlcv,
+    enrichment,
+    oracle,
+    backfill,
+    stream-2,
+  ]
 links:
-  - "../archive/0022_RESEARCH_sdex-filter-and-extraction-spec/notes/G-sdex-decode-and-bucket-spec.md"
-  - "../archive/0023_RESEARCH_ohlcv-row-identity-base-vs-pair/notes/S-recommendation.md"
-  - "../../2-adrs/0003_price-ohlcv-pk-includes-quote-asset-id.md"
-  - "../../../docs/database-schema/database-schema-overview.md"
-  - "../../../docs/prices-api-general-overview.md"
+  - '../archive/0022_RESEARCH_sdex-filter-and-extraction-spec/notes/G-sdex-decode-and-bucket-spec.md'
+  - '../archive/0023_RESEARCH_ohlcv-row-identity-base-vs-pair/notes/S-recommendation.md'
+  - '../../2-adrs/0003_price-ohlcv-pk-includes-quote-asset-id.md'
+  - '../../../docs/database-schema/database-schema-overview.md'
+  - '../../../docs/prices-api-general-overview.md'
 history:
   - date: 2026-05-13
     status: backlog

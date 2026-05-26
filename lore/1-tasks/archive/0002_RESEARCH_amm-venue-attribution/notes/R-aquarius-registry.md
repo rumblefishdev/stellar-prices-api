@@ -1,17 +1,17 @@
 ---
-title: "Aquarius (AQUA) Soroban AMM contract registry — mainnet"
+title: 'Aquarius (AQUA) Soroban AMM contract registry — mainnet'
 type: research
 status: developing
 spawned_from: ../README.md
 spawns: []
 tags: [soroban, amm, aquarius, venue-attribution]
 links:
-  - "https://github.com/AquaToken/soroban-amm"
-  - "https://docs.aqua.network/developers/code-examples/prerequisites-and-basics"
-  - "https://docs.aqua.network/developers/aquarius-soroban-functions"
-  - "https://api.stellar.expert/explorer/directory/CBQDHNBFBZYE4MKPWBSJOPIYLW4SFSXAXUTSXJN76GNKYVYPCKWC6QUK"
-  - "https://api.stellar.expert/explorer/public/contract/CBQDHNBFBZYE4MKPWBSJOPIYLW4SFSXAXUTSXJN76GNKYVYPCKWC6QUK"
-  - "https://api.stellar.expert/explorer/public/contract/CA6PUJLBYKZKUEKLZJMKBZLEKP2OTHANDEOWSFF44FTSYLKQPIICCJBE"
+  - 'https://github.com/AquaToken/soroban-amm'
+  - 'https://docs.aqua.network/developers/code-examples/prerequisites-and-basics'
+  - 'https://docs.aqua.network/developers/aquarius-soroban-functions'
+  - 'https://api.stellar.expert/explorer/directory/CBQDHNBFBZYE4MKPWBSJOPIYLW4SFSXAXUTSXJN76GNKYVYPCKWC6QUK'
+  - 'https://api.stellar.expert/explorer/public/contract/CBQDHNBFBZYE4MKPWBSJOPIYLW4SFSXAXUTSXJN76GNKYVYPCKWC6QUK'
+  - 'https://api.stellar.expert/explorer/public/contract/CA6PUJLBYKZKUEKLZJMKBZLEKP2OTHANDEOWSFF44FTSYLKQPIICCJBE'
 history:
   - date: 2026-05-08
     status: developing
@@ -35,11 +35,11 @@ verified pieces below come from cross-referencing the docs site, the
 stellar.expert directory entry, the verified contract metadata, and the
 source-code event signatures.
 
-| Role | Contract ID | Source / evidence | stellar.expert label |
-|---|---|---|---|
-| **Liquidity-pool router** (entry point + pool catalogue + factory) | `CBQDHNBFBZYE4MKPWBSJOPIYLW4SFSXAXUTSXJN76GNKYVYPCKWC6QUK` | `docs.aqua.network/developers/code-examples/prerequisites-and-basics` literally documents this as "the contract ID of the Aquarius AMM contract"; stellar.expert directory entry `name = "Aquarius Router", domain = "aqua.network", tag = "defi"`; verified contract `package_name = "soroban-liquidity-pool-router-contract"`, repo = `https://github.com/AquaToken/soroban-amm`; created 2024-07-25 | Aquarius Router (verified) |
-| **Constant-product pool WASM** | code hash `ae0da5a84b15805c5c7931ac567a8d1b34be3f26b483993d9ff80cb2c3de9852` | Derived from observed pool `CA6PUJLBYKZKUEKLZJMKBZLEKP2OTHANDEOWSFF44FTSYLKQPIICCJBE` (an active `trade`-emitter). Pool emits exactly the `Symbol("trade")` topic shape defined in `liquidity_pool_events/src/lib.rs` of the AquaToken repo (master branch). | (pool itself is unverified on stellar.expert, but WASM match attributes it to Aquarius `liquidity_pool` module) |
-| **Constant-product pool — example** | `CA6PUJLBYKZKUEKLZJMKBZLEKP2OTHANDEOWSFF44FTSYLKQPIICCJBE` | Trade-event sample in `archive/0001/.../evidence/trade_event_sample.json`; topic+data match Aquarius `LiquidityPoolEvents::trade` exactly (see "Event formats" below) | unverified (no directory entry) |
+| Role                                                               | Contract ID                                                                  | Source / evidence                                                                                                                                                                                                                                                                                                                                                                                      | stellar.expert label                                                                                            |
+| ------------------------------------------------------------------ | ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------- |
+| **Liquidity-pool router** (entry point + pool catalogue + factory) | `CBQDHNBFBZYE4MKPWBSJOPIYLW4SFSXAXUTSXJN76GNKYVYPCKWC6QUK`                   | `docs.aqua.network/developers/code-examples/prerequisites-and-basics` literally documents this as "the contract ID of the Aquarius AMM contract"; stellar.expert directory entry `name = "Aquarius Router", domain = "aqua.network", tag = "defi"`; verified contract `package_name = "soroban-liquidity-pool-router-contract"`, repo = `https://github.com/AquaToken/soroban-amm`; created 2024-07-25 | Aquarius Router (verified)                                                                                      |
+| **Constant-product pool WASM**                                     | code hash `ae0da5a84b15805c5c7931ac567a8d1b34be3f26b483993d9ff80cb2c3de9852` | Derived from observed pool `CA6PUJLBYKZKUEKLZJMKBZLEKP2OTHANDEOWSFF44FTSYLKQPIICCJBE` (an active `trade`-emitter). Pool emits exactly the `Symbol("trade")` topic shape defined in `liquidity_pool_events/src/lib.rs` of the AquaToken repo (master branch).                                                                                                                                           | (pool itself is unverified on stellar.expert, but WASM match attributes it to Aquarius `liquidity_pool` module) |
+| **Constant-product pool — example**                                | `CA6PUJLBYKZKUEKLZJMKBZLEKP2OTHANDEOWSFF44FTSYLKQPIICCJBE`                   | Trade-event sample in `archive/0001/.../evidence/trade_event_sample.json`; topic+data match Aquarius `LiquidityPoolEvents::trade` exactly (see "Event formats" below)                                                                                                                                                                                                                                  | unverified (no directory entry)                                                                                 |
 
 Pool-type-specific factory/WASM addresses for **stableswap**
 (`liquidity_pool_stableswap`) and **concentrated** (`liquidity_pool_concentrated`)
@@ -122,16 +122,16 @@ pool is `constant_product`, `stable`, or (presumably) `concentrated`.
 
 ### `Symbol("swap")` top emitters (from `R-swap-topic-shapes.md`, wider sample)
 
-| Events | Contract | WASM hash | Aquarius? | Evidence |
-|---:|---|---|---|---|
-| 11,947 | `CBQDHNBFBZYE…CKWC6QUK` | (router wasm) | **YES** | stellar.expert directory: "Aquarius Router", aqua.network. `package_name=soroban-liquidity-pool-router-contract`. |
-| 4,128 | `CBHCRSVX3ZZ7…BIZX` | `167ab414…506c` | **NO** (different WASM, different creator `GCNPDMUM…`) | Not Aquarius. Candidate for Phoenix/Soroswap router (other forks). |
-| 2,706 | `CCR2CH4GQVCZ…H2MQ` | `48b28121…c117` | **NO** (different WASM, different creator `GCFB64LD…`) | Not Aquarius. |
-| 2,480 | `CDMIM23WOUL5…ZCHL` | `4edd745f…6c8d` | **NO** (different WASM, different creator `GC7RIP4D…`) | Not Aquarius. |
-| 440 | `CBCZGGNOEUZG…3GLH` | `167ab414…506c` (same as CBHCRSVX) | **NO** | Same WASM/creator family as CBHCRSVX — same non-Aquarius protocol. |
+| Events | Contract                | WASM hash                          | Aquarius?                                              | Evidence                                                                                                          |
+| -----: | ----------------------- | ---------------------------------- | ------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------- |
+| 11,947 | `CBQDHNBFBZYE…CKWC6QUK` | (router wasm)                      | **YES**                                                | stellar.expert directory: "Aquarius Router", aqua.network. `package_name=soroban-liquidity-pool-router-contract`. |
+|  4,128 | `CBHCRSVX3ZZ7…BIZX`     | `167ab414…506c`                    | **NO** (different WASM, different creator `GCNPDMUM…`) | Not Aquarius. Candidate for Phoenix/Soroswap router (other forks).                                                |
+|  2,706 | `CCR2CH4GQVCZ…H2MQ`     | `48b28121…c117`                    | **NO** (different WASM, different creator `GCFB64LD…`) | Not Aquarius.                                                                                                     |
+|  2,480 | `CDMIM23WOUL5…ZCHL`     | `4edd745f…6c8d`                    | **NO** (different WASM, different creator `GC7RIP4D…`) | Not Aquarius.                                                                                                     |
+|    440 | `CBCZGGNOEUZG…3GLH`     | `167ab414…506c` (same as CBHCRSVX) | **NO**                                                 | Same WASM/creator family as CBHCRSVX — same non-Aquarius protocol.                                                |
 
 **Strong conclusion:** Aquarius's mainnet AMM router is exactly one
-contract (`CBQDHNBFBZYE…`). All 43 *other* `Symbol("swap")` emitters in
+contract (`CBQDHNBFBZYE…`). All 43 _other_ `Symbol("swap")` emitters in
 the wider sample are NOT Aquarius. The "single emitter for `Symbol("swap")`"
 observation in the original 3.5-day window was therefore correctly
 attributed to Aquarius — the wider sample's 43 additional emitters
@@ -139,8 +139,8 @@ belong to other protocols (Phoenix, plus possibly others).
 
 ### `Symbol("trade")` emitter — sample
 
-| Contract | Topic / data | Attribution |
-|---|---|---|
+| Contract            | Topic / data                                                                                                                                 | Attribution                                                                                                                                                    |
+| ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `CA6PUJLBYKZK…CJBE` | topics `[trade, CAS3J7GY… (token_in), CCW67TSZ… (token_out), GDCRZPZY… (trader)]`; body `[i128 25761941491, i128 3901204480, i128 12880971]` | **Aquarius constant-product pool** — exact bit-for-bit match to `LiquidityPoolEvents::trade` in `liquidity_pool_events/src/lib.rs`. WASM hash `ae0da5a8…9852`. |
 
 **Inference:** all 29 distinct `Symbol("trade")` emitters from

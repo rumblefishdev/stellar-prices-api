@@ -239,7 +239,7 @@ const json = generateJSON(tasks);
 
 writeFileSync(
   OUT_JSON,
-  JSON.stringify({ generated: new Date().toISOString(), tasks: json }, null, 2)
+  JSON.stringify({ generated: new Date().toISOString(), tasks: json }, null, 2),
 );
 
 console.log(`board.json generated (${tasks.length} tasks)`);

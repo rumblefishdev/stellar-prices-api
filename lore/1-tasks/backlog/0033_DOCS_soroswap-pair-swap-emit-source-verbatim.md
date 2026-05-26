@@ -1,19 +1,27 @@
 ---
-id: "0033"
-title: "Lock Soroswap Pair swap event emit site to source (verbatim quote in 0018 G-note)"
+id: '0033'
+title: 'Lock Soroswap Pair swap event emit site to source (verbatim quote in 0018 G-note)'
 type: DOCS
 status: backlog
 related_adr: []
-related_tasks: ["0018"]
-tags: [layer-research, priority-low, effort-small, soroswap, source-cross-ref, doc-completeness]
+related_tasks: ['0018']
+tags:
+  [
+    layer-research,
+    priority-low,
+    effort-small,
+    soroswap,
+    source-cross-ref,
+    doc-completeness,
+  ]
 links:
-  - "../archive/0018_RESEARCH_decode-per-amm-swap-event-shapes/notes/G-amm-swap-event-shapes.md"
-  - "https://github.com/soroswap/core"
+  - '../archive/0018_RESEARCH_decode-per-amm-swap-event-shapes/notes/G-amm-swap-event-shapes.md'
+  - 'https://github.com/soroswap/core'
 history:
   - date: 2026-05-15
     status: backlog
     who: claude
-    note: "Spawned from 0018 Appendix B item 4."
+    note: 'Spawned from 0018 Appendix B item 4.'
 ---
 
 # Soroswap Pair swap event emit site — verbatim source quote

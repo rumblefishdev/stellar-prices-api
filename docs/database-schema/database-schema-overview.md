@@ -9,8 +9,8 @@
 
 ## Revision History
 
-| Date | Sections | Driver | Summary |
-|------|----------|--------|---------|
+| Date       | Sections                        | Driver                                                                                                                                                                           | Summary                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| ---------- | ------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 2026-05-20 | All sections + Appendices A & B | [ADR 0007](../../lore/2-adrs/0007_live-data-sink-on-shared-hetzner-clickhouse.md) (accepted) · [Task 0049](../../lore/1-tasks/active/0049_DOCS_overview-rewrite-for-adr-0007.md) | **Live data sink flipped from Prices-owned RDS PostgreSQL 16 to BE's shared Hetzner ClickHouse cluster** (separate `prices` database, isolated via CH multi-tenant primitives). Schema rewritten to per-source `ReplacingMergeTree(version)` rows on per-granularity tables (`price_ohlcv_1m`, `_15m`, …, `_1M`) feeding a materialised-view rollup chain that eliminates the OHLCV Rollup Lambda. Cleanup becomes `ALTER TABLE … DROP PARTITION`. All 14 mermaid blocks (including Appendices A and B) updated to ClickHouse types, engines, sort keys, MV chain, and the mTLS edge. RDS sizing/scaling ladder removed; Hetzner cost-share added (~$1-2/env/mo per task 0046). |
 
 ---
@@ -137,16 +137,16 @@ are pushed to the Hetzner cluster via separate post-backfill tools.
 
 ## 2. Database Tech Stack
 
-| Component              | Technology                                                                                         |
-| ---------------------- | -------------------------------------------------------------------------------------------------- |
-| Database engine        | **ClickHouse** on BE's shared Hetzner cluster (separate `prices` database, ADR 0007)               |
+| Component              | Technology                                                                                                                                                       |
+| ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Database engine        | **ClickHouse** on BE's shared Hetzner cluster (separate `prices` database, ADR 0007)                                                                             |
 | Storage engines        | `ReplacingMergeTree(version)` for OHLCV; `ReplacingMergeTree(updated_at)` for `current_prices` / `assets` / `backfill_progress`; `MergeTree` for `oracle_prices` |
-| Rollups                | Chain of CH materialised views: `price_ohlcv_1m → _15m → _1h → _4h → _1d → _1w → _1M` (replaces the OHLCV Rollup Lambda) |
-| Partitioning           | `PARTITION BY toYYYYMM(timestamp)` on every OHLCV/oracle table; cleanup via `ALTER TABLE … DROP PARTITION` |
-| Database client (Rust) | [`clickhouse`](https://crates.io/crates/clickhouse) — async, native protocol over HTTPS-mTLS       |
-| Schema tooling         | Plain SQL DDL applied by the prices-api schema applier on first deploy; prices-api owns `prices.*` migrations unilaterally (ADR 0007 §3.7) |
-| Hosting                | BE-managed Hetzner box behind Caddy:443; cross-cloud (AWS → Hetzner) hop, ~80–130 ms RTT mitigated by warm connection reuse and batched per-ledger writes |
-| Credentials            | AWS Secrets Manager — per-env client cert + key for Caddy mTLS (2 secrets per env)                 |
+| Rollups                | Chain of CH materialised views: `price_ohlcv_1m → _15m → _1h → _4h → _1d → _1w → _1M` (replaces the OHLCV Rollup Lambda)                                         |
+| Partitioning           | `PARTITION BY toYYYYMM(timestamp)` on every OHLCV/oracle table; cleanup via `ALTER TABLE … DROP PARTITION`                                                       |
+| Database client (Rust) | [`clickhouse`](https://crates.io/crates/clickhouse) — async, native protocol over HTTPS-mTLS                                                                     |
+| Schema tooling         | Plain SQL DDL applied by the prices-api schema applier on first deploy; prices-api owns `prices.*` migrations unilaterally (ADR 0007 §3.7)                       |
+| Hosting                | BE-managed Hetzner box behind Caddy:443; cross-cloud (AWS → Hetzner) hop, ~80–130 ms RTT mitigated by warm connection reuse and batched per-ledger writes        |
+| Credentials            | AWS Secrets Manager — per-env client cert + key for Caddy mTLS (2 secrets per env)                                                                               |
 
 **Why ClickHouse on a BE-shared cluster (ADR 0007):**
 
@@ -348,13 +348,13 @@ SETTINGS index_granularity = 8192;
 not have B-tree secondary indexes the way PostgreSQL does, so the design
 decision is different from the prior Postgres-shaped doc:
 
-| Reason | Detail |
-| ------ | ------ |
-| **The table is small.** | `assets` is one row per tracked asset — Tranche 1 ships with ~20, realistic upper bound is ≤10k. The whole table sits comfortably in CH's data parts on a single MergeTree merge. A `SELECT … WHERE asset_type = 'classic'` is a scan over the merged data parts; at <10k rows it's sub-millisecond regardless of indexing strategy. |
-| **The `ORDER BY` key is `(asset_code, issuer_address, contract_address)`.** | Reads by identity (lookups for `GET /assets/{asset_identifier}`) are O(log N) via the sparse primary index. Filters by `asset_type` or `is_active` are full-scans, but the table is small enough that this is not measurable. |
-| **List-sorted reads use `current_prices`.** | `GET /assets?sort=volume_24h` orders by a `prices.current_prices` column, not an `assets` column. The handler issues `SELECT … FROM prices.current_prices FINAL JOIN prices.assets ON …`; the order/limit happens against `current_prices`, which is itself sorted by `asset_id`. With <10k assets the scan is bounded. |
+| Reason                                                                      | Detail                                                                                                                                                                                                                                                                                                                               |
+| --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **The table is small.**                                                     | `assets` is one row per tracked asset — Tranche 1 ships with ~20, realistic upper bound is ≤10k. The whole table sits comfortably in CH's data parts on a single MergeTree merge. A `SELECT … WHERE asset_type = 'classic'` is a scan over the merged data parts; at <10k rows it's sub-millisecond regardless of indexing strategy. |
+| **The `ORDER BY` key is `(asset_code, issuer_address, contract_address)`.** | Reads by identity (lookups for `GET /assets/{asset_identifier}`) are O(log N) via the sparse primary index. Filters by `asset_type` or `is_active` are full-scans, but the table is small enough that this is not measurable.                                                                                                        |
+| **List-sorted reads use `current_prices`.**                                 | `GET /assets?sort=volume_24h` orders by a `prices.current_prices` column, not an `assets` column. The handler issues `SELECT … FROM prices.current_prices FINAL JOIN prices.assets ON …`; the order/limit happens against `current_prices`, which is itself sorted by `asset_id`. With <10k assets the scan is bounded.              |
 
-**When to revisit:** if the assets table grows past ~100k rows *and* a sorted
+**When to revisit:** if the assets table grows past ~100k rows _and_ a sorted
 read becomes hot, add a CH `MaterializedView` projecting `current_prices`
 into the sort order the API needs. Don't reach for secondary indexes —
 projections / MVs are the CH idiom.
@@ -463,11 +463,11 @@ engine on background merge**, ordered by the `version` column — no
 `ON CONFLICT … DO UPDATE` and no incremental-merge expressions are needed at
 write time.
 
-| Scenario | Why this Just Works on CH |
-| -------- | ------------------------- |
+| Scenario                            | Why this Just Works on CH                                                                                                                                                                                                                                                                                     |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Multiple ledgers in the same minute | The Prices Ledger Processor is invoked per SNS message (~5–6 s per ledger), so ~10–12 invocations land within one minute. Each emits its own row(s); the engine collapses on the next merge, keeping the highest `version`. Live read path uses `FINAL` or `argMax/argMin + GROUP BY` to see the merged view. |
-| Backfill restart from checkpoint | The SDEX backfill CLI tracks `current_ledger` in `prices.backfill_progress` and resumes from its last checkpoint. Re-ingestion of a partially-processed ledger writes duplicate-PK rows that collapse on merge. |
-| Backfill / live overlap | If a backfill chunk's tip-end overlaps with live writes, the engine collapses on `version` — backfill chunks carry their own (`ledger_seq × 1000 + intra_ledger_order`) version, so live writes (higher version, newer ledgers) win deterministically. |
+| Backfill restart from checkpoint    | The SDEX backfill CLI tracks `current_ledger` in `prices.backfill_progress` and resumes from its last checkpoint. Re-ingestion of a partially-processed ledger writes duplicate-PK rows that collapse on merge.                                                                                               |
+| Backfill / live overlap             | If a backfill chunk's tip-end overlaps with live writes, the engine collapses on `version` — backfill chunks carry their own (`ledger_seq × 1000 + intra_ledger_order`) version, so live writes (higher version, newer ledgers) win deterministically.                                                        |
 
 **Per-bucket VWAP (single-source, single-minute) is computed at write time**
 as `volume_quote_usd / volume_base`. The **cross-source weighted price**
@@ -530,7 +530,7 @@ SETTINGS index_granularity = 8192;
 
   ```json
   {
-    "sdex":     { "price": "1.0001", "volume_24h": "800000" },
+    "sdex": { "price": "1.0001", "volume_24h": "800000" },
     "soroswap": { "price": "1.0002", "volume_24h": "500000" },
     "aquarius": { "price": "1.0001", "volume_24h": "223400" }
   }
@@ -544,6 +544,7 @@ SETTINGS index_granularity = 8192;
   - `GET /assets/{id}/price` returns this object verbatim. `GET /assets`
     returns the same object — the list endpoint exposes the full source
     breakdown.
+
 - **No SQL foreign key** to `prices.assets`. ClickHouse does not enforce FKs;
   `asset_id` here is a logical reference. The "1:1" cardinality is an
   application-level invariant maintained by the Current Price Updater
@@ -571,12 +572,12 @@ The `sources` field could plausibly be modelled three ways:
 
 The blob is the right model **for this column's specific access pattern**, not as a general preference. The decisive properties are:
 
-| Property of `sources` | Consequence |
-| --------------------- | ----------- |
-| **Always read whole.** Every endpoint that returns it (`GET /price`, `GET /assets`, `POST /prices/batch`) returns *all* keys for the asset together. No endpoint asks for one source in isolation. | A child-table design would force a JOIN (or a second query) on every read of the hottest path in the system, then re-fold N rows back into the nested object the API returns anyway. |
-| **Always written whole.** The Current Price Updater Lambda recomputes the entire VWAP every minute and rewrites the row. There is no mutation of one source without rewriting the rest. | Single INSERT vs. N rows per asset per minute. The blob avoids per-source merge churn on `ReplacingMergeTree`. |
-| **Never queried by content.** No filter, sort, join, or aggregation looks inside `sources`. It is a display payload, not a query target. | The main reason to normalise — being able to `WHERE source.price > X` — does not apply. CH JSON-extraction functions (`JSONExtractString`, etc.) work fine for ad-hoc operator inspection. |
-| **Bounded, low-cardinality key set** (≤ ~10 sources realistically). | The relational benefits of a child table carry no weight here. |
+| Property of `sources`                                                                                                                                                                              | Consequence                                                                                                                                                                                |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Always read whole.** Every endpoint that returns it (`GET /price`, `GET /assets`, `POST /prices/batch`) returns _all_ keys for the asset together. No endpoint asks for one source in isolation. | A child-table design would force a JOIN (or a second query) on every read of the hottest path in the system, then re-fold N rows back into the nested object the API returns anyway.       |
+| **Always written whole.** The Current Price Updater Lambda recomputes the entire VWAP every minute and rewrites the row. There is no mutation of one source without rewriting the rest.            | Single INSERT vs. N rows per asset per minute. The blob avoids per-source merge churn on `ReplacingMergeTree`.                                                                             |
+| **Never queried by content.** No filter, sort, join, or aggregation looks inside `sources`. It is a display payload, not a query target.                                                           | The main reason to normalise — being able to `WHERE source.price > X` — does not apply. CH JSON-extraction functions (`JSONExtractString`, etc.) work fine for ad-hoc operator inspection. |
+| **Bounded, low-cardinality key set** (≤ ~10 sources realistically).                                                                                                                                | The relational benefits of a child table carry no weight here.                                                                                                                             |
 
 `Nested` (option 3) is the CH-idiomatic alternative but offers nothing over
 the JSON-String for this access pattern — `Nested` shines when the per-source
@@ -674,10 +675,10 @@ VALUES
 
 **Per-stream operational behaviour:**
 
-| `task_name` | Push pattern | Terminal state |
-| ----------- | ------------ | -------------- |
+| `task_name`    | Push pattern                                                                | Terminal state                               |
+| -------------- | --------------------------------------------------------------------------- | -------------------------------------------- |
 | `sdex_archive` | Tip-backward chunks via `sdex-cloud-push` (operator-invoked between chunks) | `completed` post-delivery (ledger 1 reached) |
-| `soroban_amm` | Single one-shot completion push from the AMM CLI | `completed` in Tranche 1 (Week 2–3) |
+| `soroban_amm`  | Single one-shot completion push from the AMM CLI                            | `completed` in Tranche 1 (Week 2–3)          |
 
 The `GET /backfill/status` endpoint reads both rows (using `FINAL` or
 `argMax(…, updated_at)` to see the merged view) and returns them as the
@@ -737,15 +738,15 @@ over HTTPS-mTLS to Caddy:443.
 
 Summary of the retention contract per granularity:
 
-| Table | Retention | Mechanism |
-| --- | --- | --- |
-| `price_ohlcv_1m`  | 7 days  | `ALTER TABLE … DROP PARTITION` (per-month) |
-| `price_ohlcv_15m` | 30 days | `ALTER TABLE … DROP PARTITION` (per-month) |
-| `price_ohlcv_1h`  | forever | (no cleanup) |
-| `price_ohlcv_4h`  | forever | (no cleanup) |
-| `price_ohlcv_1d`  | forever | (no cleanup) |
-| `price_ohlcv_1w`  | forever | (no cleanup) |
-| `price_ohlcv_1M`  | forever | (no cleanup) |
+| Table             | Retention | Mechanism                                  |
+| ----------------- | --------- | ------------------------------------------ |
+| `price_ohlcv_1m`  | 7 days    | `ALTER TABLE … DROP PARTITION` (per-month) |
+| `price_ohlcv_15m` | 30 days   | `ALTER TABLE … DROP PARTITION` (per-month) |
+| `price_ohlcv_1h`  | forever   | (no cleanup)                               |
+| `price_ohlcv_4h`  | forever   | (no cleanup)                               |
+| `price_ohlcv_1d`  | forever   | (no cleanup)                               |
+| `price_ohlcv_1w`  | forever   | (no cleanup)                               |
+| `price_ohlcv_1M`  | forever   | (no cleanup)                               |
 | `oracle_prices`   | 13 months | `ALTER TABLE … DROP PARTITION` (per-month) |
 
 ```mermaid
@@ -800,13 +801,13 @@ rather than B-tree secondary indexes. The sort key drives the sparse primary
 index that's consulted at scan time; well-chosen sort keys reduce scanned
 data by orders of magnitude without the per-row cost of B-tree indexes.
 
-| Table | Sort key (`ORDER BY`) | Partition key | Purpose |
-| --- | --- | --- | --- |
-| `prices.assets` | `(asset_code, issuer_address, contract_address)` | — (small table, no partitioning) | Identity lookup for `GET /assets/{asset_identifier}` |
-| `prices.price_ohlcv_1m` (and all rolled-up tables) | `(asset_id, quote_asset_id, source, timestamp)` | `toYYYYMM(timestamp)` | Per-(asset, quote, source) time-series scans; partition pruning by month |
-| `prices.current_prices` | `(asset_id)` | — (small table, no partitioning) | One row per asset; lookup by id |
-| `prices.oracle_prices` | `(asset_id, oracle_name, timestamp)` | `toYYYYMM(timestamp)` | Latest-per-oracle lookup, partition pruning by month |
-| `prices.backfill_progress` | `(task_name)` | — | One row per backfill stream |
+| Table                                              | Sort key (`ORDER BY`)                            | Partition key                    | Purpose                                                                  |
+| -------------------------------------------------- | ------------------------------------------------ | -------------------------------- | ------------------------------------------------------------------------ |
+| `prices.assets`                                    | `(asset_code, issuer_address, contract_address)` | — (small table, no partitioning) | Identity lookup for `GET /assets/{asset_identifier}`                     |
+| `prices.price_ohlcv_1m` (and all rolled-up tables) | `(asset_id, quote_asset_id, source, timestamp)`  | `toYYYYMM(timestamp)`            | Per-(asset, quote, source) time-series scans; partition pruning by month |
+| `prices.current_prices`                            | `(asset_id)`                                     | — (small table, no partitioning) | One row per asset; lookup by id                                          |
+| `prices.oracle_prices`                             | `(asset_id, oracle_name, timestamp)`             | `toYYYYMM(timestamp)`            | Latest-per-oracle lookup, partition pruning by month                     |
+| `prices.backfill_progress`                         | `(task_name)`                                    | —                                | One row per backfill stream                                              |
 
 **Partition pruning** remains the central performance mechanism for the
 time-series tables: `WHERE timestamp BETWEEN X AND Y` only scans relevant
@@ -823,9 +824,9 @@ data part, so a typical `WHERE asset_id = ? AND quote_asset_id = ? AND source
 keyset-pagination indexes from the prior PostgreSQL design (`idx_current_prices_volume_24h`,
 etc.) don't translate. Instead:
 
-| Approach (chosen for v1) | Detail |
-| --- | --- |
-| **In-memory order + LIMIT** | The Lambda handler issues `SELECT … FROM prices.current_prices FINAL ORDER BY volume_24h_usd DESC LIMIT N`. With <10k tracked assets the sort is bounded; CH executes it in single-digit milliseconds even on a cold cache. |
+| Approach (chosen for v1)                            | Detail                                                                                                                                                                                                                                                                                 |
+| --------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **In-memory order + LIMIT**                         | The Lambda handler issues `SELECT … FROM prices.current_prices FINAL ORDER BY volume_24h_usd DESC LIMIT N`. With <10k tracked assets the sort is bounded; CH executes it in single-digit milliseconds even on a cold cache.                                                            |
 | **Projection on hot sort column (if needed later)** | If sorted reads become a measurable bottleneck, add a CH `ALTER TABLE … ADD PROJECTION` that pre-sorts `current_prices` by a sort column. Projections are CH's idiomatic "secondary index" — they materialise an alternate sort order without changing the table's primary `ORDER BY`. |
 
 **Materialised views** are the rollup mechanism on `price_ohlcv_*` (§3.2);
@@ -881,16 +882,16 @@ flowchart LR
 
 ### 6.1 Writers
 
-| Worker / Process | Trigger | Tables written |
-| --- | --- | --- |
-| **Prices Ledger Processor** Lambda | SNS message (per S3 PutObject; ~every 5–6 s) | `prices.price_ohlcv_1m` (per-source 1m INSERTs); `prices.assets` (when new assets discovered inline) |
-| **Asset Discovery** Lambda | EventBridge `rate(1 hour)` | `prices.assets` |
-| **MV chain (CH-internal)** | INSERT into `prices.price_ohlcv_1m` (and successive granularities) | `prices.price_ohlcv_15m` / `_1h` / `_4h` / `_1d` / `_1w` / `_1M`. **Not a Lambda** — runs inside ClickHouse, replaces the OHLCV Rollup Lambda |
-| **Current Price Updater** Lambda | EventBridge `rate(1 minute)` | `prices.current_prices` (cross-source VWAP per §5.5) |
-| **Oracle Fetcher** Lambda | EventBridge `rate(5 minutes)` | `prices.oracle_prices` |
-| **Cleanup Worker** Lambda | EventBridge `cron(0 2 * * *)` | `ALTER TABLE … DROP PARTITION` on aged partitions of `prices.price_ohlcv_1m` / `_15m` / `oracle_prices` |
-| **SDEX Backfill** (local CLI + `sdex-cloud-push`) | Tip-backward chunks during project | Historical `prices.price_ohlcv_*` partitions; updates to `prices.backfill_progress` row for `sdex_archive` |
-| **Soroban AMM Backfill** (local CLI + completion push) | One-time, Tranche 1 | Historical `prices.price_ohlcv_*` partitions; updates to `prices.backfill_progress` row for `soroban_amm` |
+| Worker / Process                                       | Trigger                                                            | Tables written                                                                                                                                |
+| ------------------------------------------------------ | ------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Prices Ledger Processor** Lambda                     | SNS message (per S3 PutObject; ~every 5–6 s)                       | `prices.price_ohlcv_1m` (per-source 1m INSERTs); `prices.assets` (when new assets discovered inline)                                          |
+| **Asset Discovery** Lambda                             | EventBridge `rate(1 hour)`                                         | `prices.assets`                                                                                                                               |
+| **MV chain (CH-internal)**                             | INSERT into `prices.price_ohlcv_1m` (and successive granularities) | `prices.price_ohlcv_15m` / `_1h` / `_4h` / `_1d` / `_1w` / `_1M`. **Not a Lambda** — runs inside ClickHouse, replaces the OHLCV Rollup Lambda |
+| **Current Price Updater** Lambda                       | EventBridge `rate(1 minute)`                                       | `prices.current_prices` (cross-source VWAP per §5.5)                                                                                          |
+| **Oracle Fetcher** Lambda                              | EventBridge `rate(5 minutes)`                                      | `prices.oracle_prices`                                                                                                                        |
+| **Cleanup Worker** Lambda                              | EventBridge `cron(0 2 * * *)`                                      | `ALTER TABLE … DROP PARTITION` on aged partitions of `prices.price_ohlcv_1m` / `_15m` / `oracle_prices`                                       |
+| **SDEX Backfill** (local CLI + `sdex-cloud-push`)      | Tip-backward chunks during project                                 | Historical `prices.price_ohlcv_*` partitions; updates to `prices.backfill_progress` row for `sdex_archive`                                    |
+| **Soroban AMM Backfill** (local CLI + completion push) | One-time, Tranche 1                                                | Historical `prices.price_ohlcv_*` partitions; updates to `prices.backfill_progress` row for `soroban_amm`                                     |
 
 **Worker removed (ADR 0007 §3.4):** the **OHLCV Rollup Lambda** is gone.
 Rollups happen inside ClickHouse via the MV chain attached to
@@ -909,15 +910,15 @@ retention-cleanup:         cron(0 2 * * *)  → Lambda "cleanup-worker"
 
 ### 6.3 Readers (API endpoints → tables)
 
-| Endpoint | Tables read |
-| --- | --- |
-| `GET /assets` | `prices.current_prices FINAL` JOIN `prices.assets FINAL` |
-| `GET /assets/{asset_identifier}` | `prices.assets FINAL` (+ `prices.current_prices FINAL`) |
-| `GET /assets/{asset_identifier}/price` | `prices.current_prices FINAL` |
+| Endpoint                               | Tables read                                                                                                  |
+| -------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| `GET /assets`                          | `prices.current_prices FINAL` JOIN `prices.assets FINAL`                                                     |
+| `GET /assets/{asset_identifier}`       | `prices.assets FINAL` (+ `prices.current_prices FINAL`)                                                      |
+| `GET /assets/{asset_identifier}/price` | `prices.current_prices FINAL`                                                                                |
 | `GET /assets/{asset_identifier}/ohlcv` | `prices.price_ohlcv_<granularity>` (`FINAL` or `argMax/argMin + GROUP BY`; partition pruning by `timestamp`) |
-| `POST /prices/batch` | `prices.current_prices FINAL` (multi-asset) |
-| `GET /oracles/{asset_identifier}` | `prices.oracle_prices` (`argMax(price_usd, timestamp)` for "latest per oracle") |
-| `GET /backfill/status` | `prices.backfill_progress FINAL` |
+| `POST /prices/batch`                   | `prices.current_prices FINAL` (multi-asset)                                                                  |
+| `GET /oracles/{asset_identifier}`      | `prices.oracle_prices` (`argMax(price_usd, timestamp)` for "latest per oracle")                              |
+| `GET /backfill/status`                 | `prices.backfill_progress FINAL`                                                                             |
 
 `FINAL` (or `argMax/argMin … GROUP BY`) resolves `ReplacingMergeTree`'s
 eventual consistency at read time. CH executes `FINAL` by streaming the
@@ -1014,10 +1015,10 @@ monthly partitions, plus heartbeat/status to `backfill_progress`.
 
 ### 7.1 Two-stream design (ADRs 0001, 0005, 0007)
 
-| Stream | Data location | Era | Method |
-| --- | --- | --- | --- |
-| **SDEX trades** | `ClaimAtom` from the five trade-shaped op types in `LedgerCloseMeta` XDR | All-time (2015 → present, ~57M ledgers) | Local Rust CLI on operator workstation (anonymous reads against `s3://aws-public-blockchain`) → local Postgres → `sdex-cloud-push` lands rows in Hetzner CH `prices.*` (ADR 0005) |
-| **Soroban AMM swaps** (Soroswap, Aquarius, Phoenix) | `soroban_events` in **local** ClickHouse, populated upfront by BE's `backfill-runner --target=clickhouse` against the same public S3 archive | Soroban activation (Nov 2023) → present (~8.5M ledgers) | Local Rust CLI on operator workstation; one-shot completion push lands rows in Hetzner CH `prices.*` (ADR 0001) |
+| Stream                                              | Data location                                                                                                                                | Era                                                     | Method                                                                                                                                                                            |
+| --------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **SDEX trades**                                     | `ClaimAtom` from the five trade-shaped op types in `LedgerCloseMeta` XDR                                                                     | All-time (2015 → present, ~57M ledgers)                 | Local Rust CLI on operator workstation (anonymous reads against `s3://aws-public-blockchain`) → local Postgres → `sdex-cloud-push` lands rows in Hetzner CH `prices.*` (ADR 0005) |
+| **Soroban AMM swaps** (Soroswap, Aquarius, Phoenix) | `soroban_events` in **local** ClickHouse, populated upfront by BE's `backfill-runner --target=clickhouse` against the same public S3 archive | Soroban activation (Nov 2023) → present (~8.5M ledgers) | Local Rust CLI on operator workstation; one-shot completion push lands rows in Hetzner CH `prices.*` (ADR 0001)                                                                   |
 
 The Soroban AMM stream is handled first (Tranche 1). The operator runs BE's
 `backfill-runner --target=clickhouse` to populate a local CH instance
@@ -1085,16 +1086,16 @@ flowchart LR
     class S3archive,LocalCH,LocalPG,CH,BP store;
 ```
 
-| Metric | Value | Notes |
-| --- | --- | --- |
-| Data source | Local ClickHouse `soroban_events` (Docker, populated upfront by BE's `backfill-runner --target=clickhouse`) | Per-event rows with inlined `topics_xdr` + `data_xdr` + hoisted `signature` column |
-| Ledger range | ~48.5M–57M (Nov 2023 to present) | ~8.5M ledgers worth of events |
-| Runtime | Local Rust CLI on operator workstation (`soroban-amm-backfill`) | No AWS infrastructure for the backfill itself; mirrors §7.4 Stream 2's local-CLI pattern |
-| Workstation prep step | BE `backfill-runner --target=clickhouse` populates local CH | One-shot; runs against `s3://aws-public-blockchain` anonymous reads |
-| Sink during backfill | Local Postgres (Docker) on workstation | Hetzner ClickHouse is **not** written until the one-shot completion push |
-| Estimated wall-clock | A few hours, dominated by `backfill-runner` archive ingestion | CH query + extraction + OHLCV write is fast against an indexed local store |
-| Cloud-push cadence | One-shot completion push only | `prices.backfill_progress.soroban_amm` advances from `running` to `completed` in a single transition |
-| Expected completion | During Tranche 1 (Week 2–3) | After the push, the local CH instance is torn down |
+| Metric                | Value                                                                                                       | Notes                                                                                                |
+| --------------------- | ----------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| Data source           | Local ClickHouse `soroban_events` (Docker, populated upfront by BE's `backfill-runner --target=clickhouse`) | Per-event rows with inlined `topics_xdr` + `data_xdr` + hoisted `signature` column                   |
+| Ledger range          | ~48.5M–57M (Nov 2023 to present)                                                                            | ~8.5M ledgers worth of events                                                                        |
+| Runtime               | Local Rust CLI on operator workstation (`soroban-amm-backfill`)                                             | No AWS infrastructure for the backfill itself; mirrors §7.4 Stream 2's local-CLI pattern             |
+| Workstation prep step | BE `backfill-runner --target=clickhouse` populates local CH                                                 | One-shot; runs against `s3://aws-public-blockchain` anonymous reads                                  |
+| Sink during backfill  | Local Postgres (Docker) on workstation                                                                      | Hetzner ClickHouse is **not** written until the one-shot completion push                             |
+| Estimated wall-clock  | A few hours, dominated by `backfill-runner` archive ingestion                                               | CH query + extraction + OHLCV write is fast against an indexed local store                           |
+| Cloud-push cadence    | One-shot completion push only                                                                               | `prices.backfill_progress.soroban_amm` advances from `running` to `completed` in a single transition |
+| Expected completion   | During Tranche 1 (Week 2–3)                                                                                 | After the push, the local CH instance is torn down                                                   |
 
 ### 7.4 Stream 2 — SDEX (slow, runs through and past Tranche 3, ADR 0005)
 
@@ -1144,16 +1145,16 @@ flowchart TD
     class Alarm alarm;
 ```
 
-| Metric | Value | Notes |
-| --- | --- | --- |
-| Total ledgers | ~57 million | Ledger 1 (Nov 2015) to current tip |
-| Runtime | Local Rust CLI on operator workstation | No AWS infrastructure for the backfill itself; mirrors BE `backfill-runner` |
-| Source | `s3://aws-public-blockchain/v1.1/stellar/ledgers/pubnet/` | Anonymous `--no-sign-request`; no AWS account needed to read |
-| Sink during backfill | Local Postgres (Docker) on workstation | Hetzner ClickHouse is **not** written during backfill — only by `sdex-cloud-push` |
-| Measured CLI rate | ~311 ledgers/s (~1.12M ledgers/hour) | Per task 0022's measurement against the SDEX filter |
-| Effective wall-clock (network-bound) | ~12–16 days continuous on one laptop | Archive sync is the bottleneck; CPU rarely saturates |
-| Cloud-push cadence | Tip-backward chunks | The cloud `GET /backfill/status` view advances at push cadence, not CLI cadence |
-| Expected completion | Full historical coverage extends past Tranche 3 | Tranche 3 acceptance is "progressing", not "complete" |
+| Metric                               | Value                                                     | Notes                                                                             |
+| ------------------------------------ | --------------------------------------------------------- | --------------------------------------------------------------------------------- |
+| Total ledgers                        | ~57 million                                               | Ledger 1 (Nov 2015) to current tip                                                |
+| Runtime                              | Local Rust CLI on operator workstation                    | No AWS infrastructure for the backfill itself; mirrors BE `backfill-runner`       |
+| Source                               | `s3://aws-public-blockchain/v1.1/stellar/ledgers/pubnet/` | Anonymous `--no-sign-request`; no AWS account needed to read                      |
+| Sink during backfill                 | Local Postgres (Docker) on workstation                    | Hetzner ClickHouse is **not** written during backfill — only by `sdex-cloud-push` |
+| Measured CLI rate                    | ~311 ledgers/s (~1.12M ledgers/hour)                      | Per task 0022's measurement against the SDEX filter                               |
+| Effective wall-clock (network-bound) | ~12–16 days continuous on one laptop                      | Archive sync is the bottleneck; CPU rarely saturates                              |
+| Cloud-push cadence                   | Tip-backward chunks                                       | The cloud `GET /backfill/status` view advances at push cadence, not CLI cadence   |
+| Expected completion                  | Full historical coverage extends past Tranche 3           | Tranche 3 acceptance is "progressing", not "complete"                             |
 
 The `sdex-backfill` CLI is **resumable at per-ledger granularity**: each
 ledger's row UPSERTs and its `backfill_progress` checkpoint advance commit
@@ -1177,13 +1178,13 @@ stateDiagram-v2
 
 ### 7.5 Backfill milestones (DB visibility)
 
-| Tranche | Stream | Milestone | Validation (DB-observable) |
-| --- | --- | --- | --- |
-| **1** (Week 4) | Soroban AMM | Full AMM history from Soroban activation (Nov 2023) available | `soroban_amm.status: "completed"` in `GET /backfill/status`; OHLCV data for Soroswap pairs verifiable for Nov 2023 dates |
-| **1** (Week 4) | SDEX | First tip-backward chunk (~6 months) processed locally and pushed to Hetzner CH | `sdex.earliest_data_available` ~6 months ago; `sdex.last_push_at` within configured Tranche 1 window |
-| **2** (Week 9) | SDEX | 4+ years pushed (back to Jan 2022) | `sdex.earliest_data_available` ≤ 2022-01-01 after a fresh push |
-| **3** (Week 13) | SDEX | 8+ years pushed (back to Jan 2018) | `sdex.earliest_data_available` ≤ 2018-01-01; `sdex.last_push_at` fresh; operator reports a credible remaining estimate from local CLI progress |
-| **Post-delivery** | SDEX | Full all-time SDEX history (ledger 1 to present) pushed | `sdex.status: "completed"`; Stellar notified |
+| Tranche           | Stream      | Milestone                                                                       | Validation (DB-observable)                                                                                                                     |
+| ----------------- | ----------- | ------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| **1** (Week 4)    | Soroban AMM | Full AMM history from Soroban activation (Nov 2023) available                   | `soroban_amm.status: "completed"` in `GET /backfill/status`; OHLCV data for Soroswap pairs verifiable for Nov 2023 dates                       |
+| **1** (Week 4)    | SDEX        | First tip-backward chunk (~6 months) processed locally and pushed to Hetzner CH | `sdex.earliest_data_available` ~6 months ago; `sdex.last_push_at` within configured Tranche 1 window                                           |
+| **2** (Week 9)    | SDEX        | 4+ years pushed (back to Jan 2022)                                              | `sdex.earliest_data_available` ≤ 2022-01-01 after a fresh push                                                                                 |
+| **3** (Week 13)   | SDEX        | 8+ years pushed (back to Jan 2018)                                              | `sdex.earliest_data_available` ≤ 2018-01-01; `sdex.last_push_at` fresh; operator reports a credible remaining estimate from local CLI progress |
+| **Post-delivery** | SDEX        | Full all-time SDEX history (ledger 1 to present) pushed                         | `sdex.status: "completed"`; Stellar notified                                                                                                   |
 
 ### 7.6 `GET /backfill/status` — example response
 
@@ -1214,17 +1215,17 @@ completion approaches).
 }
 ```
 
-| Field | Description |
-| --- | --- |
-| `sdex.status` | `running`, `paused`, `completed`, or `error` — SDEX archive backfill |
-| `sdex.current_ledger` | Oldest ledger reflected in the cloud DB after the most recent `sdex-cloud-push`. Advances at push cadence, not CLI cadence |
-| `sdex.progress_pct` | `(target_ledger - current_ledger) / (target_ledger - start_ledger) * 100`, computed at read time |
-| `sdex.ledgers_remaining` | `current_ledger - start_ledger`, computed at read time |
-| `sdex.last_push_at` | Timestamp of the most recent successful `sdex-cloud-push`. CloudWatch freshness alarm fires when this is older than the configured push-cadence threshold for the active tranche. `null` until the first push |
-| `sdex.earliest_data_available` | Stored timestamp of the oldest SDEX OHLCV row — recorded by the push step when it first lands a candle for a given timestamp, **not** computed live via `MIN(timestamp)`. Returned as-is, so reads are O(1) |
-| `soroban_amm.status` | Typically `completed` from Tranche 1 onwards |
-| `soroban_amm.last_push_at` | Timestamp of the one-shot AMM CLI's completion push. `null` until the push happens |
-| `soroban_amm.earliest_data_available` | Same semantics as `sdex.earliest_data_available` — stored, not computed. Lands at the Soroban activation date (~Nov 2023) once the one-time backfill completes |
+| Field                                 | Description                                                                                                                                                                                                   |
+| ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `sdex.status`                         | `running`, `paused`, `completed`, or `error` — SDEX archive backfill                                                                                                                                          |
+| `sdex.current_ledger`                 | Oldest ledger reflected in the cloud DB after the most recent `sdex-cloud-push`. Advances at push cadence, not CLI cadence                                                                                    |
+| `sdex.progress_pct`                   | `(target_ledger - current_ledger) / (target_ledger - start_ledger) * 100`, computed at read time                                                                                                              |
+| `sdex.ledgers_remaining`              | `current_ledger - start_ledger`, computed at read time                                                                                                                                                        |
+| `sdex.last_push_at`                   | Timestamp of the most recent successful `sdex-cloud-push`. CloudWatch freshness alarm fires when this is older than the configured push-cadence threshold for the active tranche. `null` until the first push |
+| `sdex.earliest_data_available`        | Stored timestamp of the oldest SDEX OHLCV row — recorded by the push step when it first lands a candle for a given timestamp, **not** computed live via `MIN(timestamp)`. Returned as-is, so reads are O(1)   |
+| `soroban_amm.status`                  | Typically `completed` from Tranche 1 onwards                                                                                                                                                                  |
+| `soroban_amm.last_push_at`            | Timestamp of the one-shot AMM CLI's completion push. `null` until the push happens                                                                                                                            |
+| `soroban_amm.earliest_data_available` | Same semantics as `sdex.earliest_data_available` — stored, not computed. Lands at the Soroban activation date (~Nov 2023) once the one-time backfill completes                                                |
 
 ### 7.7 Partial-history note in the OHLCV endpoint
 
@@ -1252,15 +1253,15 @@ asset's inception date, `GET /assets/{asset_identifier}/ohlcv` includes a
 
 ### 8.2 How that target is met
 
-| Layer | Strategy |
-| --- | --- |
-| **API Gateway caching** | Built-in response cache (0.5 GB). Per-endpoint TTLs: `/assets` list 60s, `/ohlcv` 60s, `/price` 15s, `/backfill/status` 30s. Cache key includes query params. `POST /prices/batch` uncached |
-| **API Gateway throttling** | Request throttling (100/s per API key, 1000/s global burst) |
-| **Lambda** | Rust binary with `lambda_runtime`. Sub-millisecond cold starts. Stateless, auto-scales to concurrency limit. No VPC, so no ENI provisioning latency on cold start |
-| **ClickHouse client (`clickhouse` crate)** | Warm connection pool reused across Lambda invocations to amortise mTLS handshake (~80-130 ms cross-cloud RTT to Caddy). Per-request payloads batched per-ledger so a typical invocation issues 1–2 INSERTs, not one per trade |
-| **Sort key + partitioning** | Per-granularity tables sorted by `(asset_id, quote_asset_id, source, timestamp)`; monthly partitions on `timestamp`. Partition pruning + sort-key skip eliminate irrelevant months and assets on hot reads |
-| **Query optimization** | `prices.current_prices` avoids real-time aggregation on the read path. OHLCV reads target the granularity table that already holds the requested resolution. Read handlers issue `SELECT … FINAL` or `argMax/argMin + GROUP BY` to handle `ReplacingMergeTree` eventual consistency |
-| **Cross-cloud latency mitigation** | Public-internet hop AWS → Hetzner is ~80-130 ms RTT. Mitigated by warm-container connection reuse, per-ledger write batching, API Gateway response caching for read-heavy endpoints, and single-round-trip CH query patterns. Single-digit-ms p50 SELECTs over the public hop are routine once the connection is warm |
+| Layer                                      | Strategy                                                                                                                                                                                                                                                                                                              |
+| ------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **API Gateway caching**                    | Built-in response cache (0.5 GB). Per-endpoint TTLs: `/assets` list 60s, `/ohlcv` 60s, `/price` 15s, `/backfill/status` 30s. Cache key includes query params. `POST /prices/batch` uncached                                                                                                                           |
+| **API Gateway throttling**                 | Request throttling (100/s per API key, 1000/s global burst)                                                                                                                                                                                                                                                           |
+| **Lambda**                                 | Rust binary with `lambda_runtime`. Sub-millisecond cold starts. Stateless, auto-scales to concurrency limit. No VPC, so no ENI provisioning latency on cold start                                                                                                                                                     |
+| **ClickHouse client (`clickhouse` crate)** | Warm connection pool reused across Lambda invocations to amortise mTLS handshake (~80-130 ms cross-cloud RTT to Caddy). Per-request payloads batched per-ledger so a typical invocation issues 1–2 INSERTs, not one per trade                                                                                         |
+| **Sort key + partitioning**                | Per-granularity tables sorted by `(asset_id, quote_asset_id, source, timestamp)`; monthly partitions on `timestamp`. Partition pruning + sort-key skip eliminate irrelevant months and assets on hot reads                                                                                                            |
+| **Query optimization**                     | `prices.current_prices` avoids real-time aggregation on the read path. OHLCV reads target the granularity table that already holds the requested resolution. Read handlers issue `SELECT … FINAL` or `argMax/argMin + GROUP BY` to handle `ReplacingMergeTree` eventual consistency                                   |
+| **Cross-cloud latency mitigation**         | Public-internet hop AWS → Hetzner is ~80-130 ms RTT. Mitigated by warm-container connection reuse, per-ledger write batching, API Gateway response caching for read-heavy endpoints, and single-round-trip CH query patterns. Single-digit-ms p50 SELECTs over the public hop are routine once the connection is warm |
 
 ### 8.3 ClickHouse sizing — BE-owned, prices-api joins as a second tenant
 
@@ -1269,13 +1270,13 @@ instance on a single Hetzner box behind Caddy:443). Prices-api joins as a
 second tenant via its own `prices` database, isolated by ClickHouse's native
 multi-tenant primitives (database, user, quota, profile).
 
-| Metric | Value | Source |
-| --- | --- | --- |
-| Prices-api storage footprint | ~0.45 GB/year flat-growth | Task 0046 empirical |
-| Average per-ledger storage | ~74 bytes/ledger | Task 0046 empirical |
-| Compression ratio (LZ4 + sort-key) | ~14.8× | Task 0046 empirical on `soroban_events` |
-| Write rate | ~1 INSERT per ledger (~12k/day per env at mainnet cadence) | §6.1 |
-| Read rate | API-Gateway-throttled ≤100 req/s per key, cached at gateway | §8.2 |
+| Metric                             | Value                                                       | Source                                  |
+| ---------------------------------- | ----------------------------------------------------------- | --------------------------------------- |
+| Prices-api storage footprint       | ~0.45 GB/year flat-growth                                   | Task 0046 empirical                     |
+| Average per-ledger storage         | ~74 bytes/ledger                                            | Task 0046 empirical                     |
+| Compression ratio (LZ4 + sort-key) | ~14.8×                                                      | Task 0046 empirical on `soroban_events` |
+| Write rate                         | ~1 INSERT per ledger (~12k/day per env at mainnet cadence)  | §6.1                                    |
+| Read rate                          | API-Gateway-throttled ≤100 req/s per key, cached at gateway | §8.2                                    |
 
 Hardware sizing, OS-level tuning, and any vertical/horizontal scaling
 decisions are owned by BE. Prices-api's contribution to the box is
@@ -1288,11 +1289,11 @@ The open capacity question that task 0047 is verifying: can the shared CH +
 Caddy host absorb the combined read/write load of both tenants under peak
 conditions? Task 0047 returns one of three outcomes:
 
-| Outcome | Action |
-| --- | --- |
-| **GREEN** | Proceed with ADR 0007 as-proposed (shared `prices` DB in BE's CH cluster). |
-| **YELLOW** | Proceed with tuning (bump `max_concurrent_queries`, tune Caddy keepalive, schedule MV merges off-peak). |
-| **RED** | Fallback to **Option 4 sidecar CH** (ADR 0007 Alternative 3): a second CH container on the same Hetzner box, separate port, separate data volumes. Cost delta: +~€39-69/mo for a second Hetzner tier if a second box becomes preferable. No prices-api code changes; only the Caddy endpoint and the cert pair swap. |
+| Outcome    | Action                                                                                                                                                                                                                                                                                                               |
+| ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **GREEN**  | Proceed with ADR 0007 as-proposed (shared `prices` DB in BE's CH cluster).                                                                                                                                                                                                                                           |
+| **YELLOW** | Proceed with tuning (bump `max_concurrent_queries`, tune Caddy keepalive, schedule MV merges off-peak).                                                                                                                                                                                                              |
+| **RED**    | Fallback to **Option 4 sidecar CH** (ADR 0007 Alternative 3): a second CH container on the same Hetzner box, separate port, separate data volumes. Cost delta: +~€39-69/mo for a second Hetzner tier if a second box becomes preferable. No prices-api code changes; only the Caddy endpoint and the cert pair swap. |
 
 **No RDS scaling path applies.** The previously-documented `db.t4g.micro →
 db.r6g.large + Multi-AZ + read replica + RDS Proxy` escalation ladder is
@@ -1303,22 +1304,22 @@ of the prices-api budget at any traffic level.
 
 Monthly running cost (low traffic, post-backfill):
 
-| Service | Estimated Cost | Notes |
-| --- | --- | --- |
-| Hetzner CH cost-share for `prices` DB | ~$1–$2/env/mo | Opening proposal ~1-2% pro-rata per task 0046; flat fee acceptable up to ~$5/env per the brief without changing the recommendation. D12 commercial follow-up |
+| Service                               | Estimated Cost | Notes                                                                                                                                                        |
+| ------------------------------------- | -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Hetzner CH cost-share for `prices` DB | ~$1–$2/env/mo  | Opening proposal ~1-2% pro-rata per task 0046; flat fee acceptable up to ~$5/env per the brief without changing the recommendation. D12 commercial follow-up |
 
 Backfill period additional costs (one-time, during 13-week project):
 
-| Item | Configuration | One-time Cost |
-| --- | --- | --- |
+| Item                     | Configuration                                                                                                                                     | One-time Cost   |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------- | --------------- |
 | Cloud DB during backfill | No RDS upgrade required (ADR 0007); the bursty pushes hit Hetzner CH instead. Empirically <1 GB extra (task 0046) — no marginal cost-share change | **$0 marginal** |
 
 Scaled-up at high traffic (DB-relevant):
 
-| Service | Added Cost |
-| --- | --- |
-| Hetzner CH cost-share re-opened (D12 escalation clause) | +~$3-15/env if production scales materially |
-| Sidecar CH fallback (if task 0047 returns RED) | +~€39-69/mo for one Hetzner box (one box covers all 3 envs) |
+| Service                                                 | Added Cost                                                  |
+| ------------------------------------------------------- | ----------------------------------------------------------- |
+| Hetzner CH cost-share re-opened (D12 escalation clause) | +~$3-15/env if production scales materially                 |
+| Sidecar CH fallback (if task 0047 returns RED)          | +~€39-69/mo for one Hetzner box (one box covers all 3 envs) |
 
 ---
 
@@ -1373,25 +1374,25 @@ instance on the operator's workstation populated by
 `backfill-runner --target=clickhouse` — separate from the production Hetzner
 CH, torn down after the cloud push lands.
 
-| Aspect | Detail |
-| --- | --- |
-| Direction | Prices API ↔ Hetzner ClickHouse (read + write), gated by mTLS |
-| Network | Public internet from AWS Lambda to Caddy:443 on Hetzner |
-| Databases touched | `prices.*` (prices-api writes + reads); `default.*` reads only via named `prices.*` views (rare) |
-| When | Continuous, for live ingestion + reads, post-Tranche-1 |
-| Why | Eliminates one production DB the prices-api would otherwise own; cost-share at empirical scale is ~$1-2/env/mo vs $12+/mo for the smallest RDS instance |
+| Aspect            | Detail                                                                                                                                                  |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Direction         | Prices API ↔ Hetzner ClickHouse (read + write), gated by mTLS                                                                                           |
+| Network           | Public internet from AWS Lambda to Caddy:443 on Hetzner                                                                                                 |
+| Databases touched | `prices.*` (prices-api writes + reads); `default.*` reads only via named `prices.*` views (rare)                                                        |
+| When              | Continuous, for live ingestion + reads, post-Tranche-1                                                                                                  |
+| Why               | Eliminates one production DB the prices-api would otherwise own; cost-share at empirical scale is ~$1-2/env/mo vs $12+/mo for the smallest RDS instance |
 
 ### 10.1 Risks and mitigations
 
-| Risk | Mitigation |
-| --- | --- |
-| Cross-tenant throughput contention on the shared Hetzner CH | **Task 0047** verifies cross-tenant throughput (GREEN/YELLOW/RED) before implementation begins. RED supersedes ADR 0007 to Alternative 3 (sidecar CH on the same Hetzner box — same code shape, different host). |
-| BE evolves `default.*` schema in ways that conflict with prices-api views | ADR 0007 §3.7: prices-api owns `prices.*` unilaterally; any cross-DB read into `default.*` is wrapped in a named `prices.*` view so the breakage surface is narrow and reviewable. |
-| Cross-cloud network outage (AWS ↔ Hetzner) | Lambdas tolerate connect failures with exponential-backoff retry; SNS delivery retries the message; BE's S3 retention (indefinite per BE ADR 0006) supports replay of arbitrary windows by re-firing PutObject events. No data-loss path. |
-| mTLS cert expiry not detected | CloudWatch NotAfter alarm fires 30 days before expiry; 1-year manual rotation cadence; revocation = CA rotation. |
-| Hetzner box backup RPO is daily Borg, not RDS PITR | Accepted in ADR 0007 §Negative. OHLCV data has natural replay path from BE's S3 archive; daily-granularity restore is operationally acceptable. |
-| BE's `backfill-runner` produces incorrect or incomplete rows in the **local** Stream 1 CH | Gap detection: after the AMM CLI's cloud push, prices-api checks for contiguous OHLCV coverage from Soroban activation to present. Any gaps trigger a targeted archive-read for the missing ledger ranges. |
-| BE's `backfill-runner` evolves between the prep step and the AMM CLI run | Pin a known-good `backfill-runner` version for the workstation prep. Re-pin and re-populate the local instance if BE ships an incompatible change. |
+| Risk                                                                                      | Mitigation                                                                                                                                                                                                                                |
+| ----------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Cross-tenant throughput contention on the shared Hetzner CH                               | **Task 0047** verifies cross-tenant throughput (GREEN/YELLOW/RED) before implementation begins. RED supersedes ADR 0007 to Alternative 3 (sidecar CH on the same Hetzner box — same code shape, different host).                          |
+| BE evolves `default.*` schema in ways that conflict with prices-api views                 | ADR 0007 §3.7: prices-api owns `prices.*` unilaterally; any cross-DB read into `default.*` is wrapped in a named `prices.*` view so the breakage surface is narrow and reviewable.                                                        |
+| Cross-cloud network outage (AWS ↔ Hetzner)                                                | Lambdas tolerate connect failures with exponential-backoff retry; SNS delivery retries the message; BE's S3 retention (indefinite per BE ADR 0006) supports replay of arbitrary windows by re-firing PutObject events. No data-loss path. |
+| mTLS cert expiry not detected                                                             | CloudWatch NotAfter alarm fires 30 days before expiry; 1-year manual rotation cadence; revocation = CA rotation.                                                                                                                          |
+| Hetzner box backup RPO is daily Borg, not RDS PITR                                        | Accepted in ADR 0007 §Negative. OHLCV data has natural replay path from BE's S3 archive; daily-granularity restore is operationally acceptable.                                                                                           |
+| BE's `backfill-runner` produces incorrect or incomplete rows in the **local** Stream 1 CH | Gap detection: after the AMM CLI's cloud push, prices-api checks for contiguous OHLCV coverage from Soroban activation to present. Any gaps trigger a targeted archive-read for the missing ledger ranges.                                |
+| BE's `backfill-runner` evolves between the prep step and the AMM CLI run                  | Pin a known-good `backfill-runner` version for the workstation prep. Re-pin and re-populate the local instance if BE ships an incompatible change.                                                                                        |
 
 **Boundary contract:** The Prices API never writes to BE's `default.*`
 schema; BE never reads from `prices.*`. The runtime coupling is exactly the
@@ -1486,14 +1487,14 @@ criteria from the delivery plan, restated against the canonical
 
 ## 13. Quick Reference — Tables at a Glance
 
-| Table | Engine | Partitioning | Sort key | Written by | Read by |
-| --- | --- | --- | --- | --- | --- |
-| `prices.assets` | `ReplacingMergeTree(updated_at)` | none | `(asset_code, issuer_address, contract_address)` | Asset Discovery Lambda; Prices Ledger Processor (inline) | All asset/price endpoints |
-| `prices.price_ohlcv_1m` | `ReplacingMergeTree(version)` | `toYYYYMM(timestamp)` | `(asset_id, quote_asset_id, source, timestamp)` | Prices Ledger Processor; backfill streams (sdex-cloud-push, soroban-amm completion push); Cleanup Worker (DROP PARTITION) | `GET /ohlcv` (1m timeframe), Current Price Updater, MV chain feeding rolled granularities |
-| `prices.price_ohlcv_15m` / `_1h` / `_4h` / `_1d` / `_1w` / `_1M` | `ReplacingMergeTree(version)` | `toYYYYMM(timestamp)` | `(asset_id, quote_asset_id, source, timestamp)` | MV chain on `_1m`; backfill streams (for pre-rolled ranges) | `GET /ohlcv` (rolled granularities) |
-| `prices.current_prices` | `ReplacingMergeTree(updated_at)` | none | `(asset_id)` | Current Price Updater Lambda | `GET /assets`, `GET /price`, `POST /prices/batch` |
-| `prices.oracle_prices` | `MergeTree` (append-only) | `toYYYYMM(timestamp)` | `(asset_id, oracle_name, timestamp)` | Oracle Fetcher Lambda; Cleanup Worker (DROP PARTITION) | `GET /oracles/{asset}` |
-| `prices.backfill_progress` | `ReplacingMergeTree(updated_at)` | none | `(task_name)` | Backfill cloud-push step — one row per stream | `GET /backfill/status` |
+| Table                                                            | Engine                           | Partitioning          | Sort key                                         | Written by                                                                                                                | Read by                                                                                   |
+| ---------------------------------------------------------------- | -------------------------------- | --------------------- | ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| `prices.assets`                                                  | `ReplacingMergeTree(updated_at)` | none                  | `(asset_code, issuer_address, contract_address)` | Asset Discovery Lambda; Prices Ledger Processor (inline)                                                                  | All asset/price endpoints                                                                 |
+| `prices.price_ohlcv_1m`                                          | `ReplacingMergeTree(version)`    | `toYYYYMM(timestamp)` | `(asset_id, quote_asset_id, source, timestamp)`  | Prices Ledger Processor; backfill streams (sdex-cloud-push, soroban-amm completion push); Cleanup Worker (DROP PARTITION) | `GET /ohlcv` (1m timeframe), Current Price Updater, MV chain feeding rolled granularities |
+| `prices.price_ohlcv_15m` / `_1h` / `_4h` / `_1d` / `_1w` / `_1M` | `ReplacingMergeTree(version)`    | `toYYYYMM(timestamp)` | `(asset_id, quote_asset_id, source, timestamp)`  | MV chain on `_1m`; backfill streams (for pre-rolled ranges)                                                               | `GET /ohlcv` (rolled granularities)                                                       |
+| `prices.current_prices`                                          | `ReplacingMergeTree(updated_at)` | none                  | `(asset_id)`                                     | Current Price Updater Lambda                                                                                              | `GET /assets`, `GET /price`, `POST /prices/batch`                                         |
+| `prices.oracle_prices`                                           | `MergeTree` (append-only)        | `toYYYYMM(timestamp)` | `(asset_id, oracle_name, timestamp)`             | Oracle Fetcher Lambda; Cleanup Worker (DROP PARTITION)                                                                    | `GET /oracles/{asset}`                                                                    |
+| `prices.backfill_progress`                                       | `ReplacingMergeTree(updated_at)` | none                  | `(task_name)`                                    | Backfill cloud-push step — one row per stream                                                                             | `GET /backfill/status`                                                                    |
 
 ---
 
@@ -1662,7 +1663,6 @@ erDiagram
   tables and the six MVs will land in
   [`clickhouse-prod-schema.sql`](./clickhouse-prod-schema.sql) once task 0011
   is unblocked.
-
 
 ---
 
@@ -1889,7 +1889,7 @@ flowchart TB
 - **Light-green nodes** inside `price_ohlcv_1m` represent illustrative
   monthly partitions in different phases of the retention lifecycle
   (future, current, archived = backfill targets, eligible for `ALTER … DROP
-  PARTITION`).
+PARTITION`).
 - **Dotted lines inside `prices.*`** represent the materialised-view rollup
   chain (`1m → 15m → 1h → 4h → 1d → 1w → 1M`) — runs CH-internally,
   replaces the OHLCV Rollup Lambda.
@@ -1898,7 +1898,6 @@ flowchart TB
   are wrapped in named `prices.*` views; no write path crosses the boundary.
 - Solid lines are runtime dataflow; dashed lines are logical references (no
   SQL FK enforcement in CH).
-
 
 ---
 

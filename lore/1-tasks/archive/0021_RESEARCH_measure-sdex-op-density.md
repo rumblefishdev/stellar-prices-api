@@ -1,15 +1,27 @@
 ---
-id: "0021"
-title: "Measure SDEX trade-shaped op density in CH operations_appearances"
+id: '0021'
+title: 'Measure SDEX trade-shaped op density in CH operations_appearances'
 type: RESEARCH
 status: canceled
-related_adr: ["0002"]
-related_tasks: ["0020", "0017", "0022"]
-tags: [layer-research, priority-medium, effort-small, research, sdex, backfill, clickhouse, measurement, stream-2, canceled]
+related_adr: ['0002']
+related_tasks: ['0020', '0017', '0022']
+tags:
+  [
+    layer-research,
+    priority-medium,
+    effort-small,
+    research,
+    sdex,
+    backfill,
+    clickhouse,
+    measurement,
+    stream-2,
+    canceled,
+  ]
 links:
-  - "../../2-adrs/0002_stream2-sdex-archive-backfill-independent-of-be.md"
-  - "../archive/0020_RESEARCH_sdex-historical-backfill-options/notes/S-sdex-backfill-recommendation.md"
-  - "../archive/0020_RESEARCH_sdex-historical-backfill-options/notes/I-stream2-options.md"
+  - '../../2-adrs/0002_stream2-sdex-archive-backfill-independent-of-be.md'
+  - '../archive/0020_RESEARCH_sdex-historical-backfill-options/notes/S-sdex-backfill-recommendation.md'
+  - '../archive/0020_RESEARCH_sdex-historical-backfill-options/notes/I-stream2-options.md'
 history:
   - date: 2026-05-12
     status: backlog
@@ -83,8 +95,7 @@ just run baseline Option A. No measurement available today
    FROM total, trade_bearing;
    ```
 
-3. **Repeat over decadal windows** (e.g. 2018, 2020, 2022, 2024,
-   2026) — trade-shaped op density has shifted across Stellar's
+3. **Repeat over decadal windows** (e.g. 2018, 2020, 2022, 2024, 2026) — trade-shaped op density has shifted across Stellar's
    history; the average over the whole range hides era-specific
    ratios. Soroban era (post 2023-11) skews differently because
    trades migrated partly to contract AMMs.

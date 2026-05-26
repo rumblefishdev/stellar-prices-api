@@ -1,17 +1,27 @@
 ---
-id: "0037"
-title: "Tranche 1 Ledger Processor skeleton — Phoenix pool registry + extractor dispatch hook"
+id: '0037'
+title: 'Tranche 1 Ledger Processor skeleton — Phoenix pool registry + extractor dispatch hook'
 type: FEATURE
 status: completed
-related_adr: ["0001", "0006"]
-related_tasks: ["0034", "0018"]
-tags: [layer-indexing, priority-medium, effort-medium, milestone-M1, stream-1, consumer, scaffolding, rust]
+related_adr: ['0001', '0006']
+related_tasks: ['0034', '0018']
+tags:
+  [
+    layer-indexing,
+    priority-medium,
+    effort-medium,
+    milestone-M1,
+    stream-1,
+    consumer,
+    scaffolding,
+    rust,
+  ]
 milestone: 1
 links:
-  - "../archive/0034_FEATURE_consumer-multi-xyk-wasm-tolerance.md"
-  - "../archive/0018_RESEARCH_decode-per-amm-swap-event-shapes/notes/G-amm-swap-event-shapes.md"
-  - "../../2-adrs/0001_stream1-clickhouse-sourced-amm-backfill.md"
-  - "../../2-adrs/0006_runtime-framework-rust-axum.md"
+  - '../archive/0034_FEATURE_consumer-multi-xyk-wasm-tolerance.md'
+  - '../archive/0018_RESEARCH_decode-per-amm-swap-event-shapes/notes/G-amm-swap-event-shapes.md'
+  - '../../2-adrs/0001_stream1-clickhouse-sourced-amm-backfill.md'
+  - '../../2-adrs/0006_runtime-framework-rust-axum.md'
 history:
   - date: 2026-05-18
     status: backlog
@@ -152,18 +162,19 @@ stub extractors per Step 2 of the plan.
 
 ### Crate layout (6 workspace members)
 
-| Crate | Role |
-|-------|------|
-| `extractors-core` | `SwapExtractor` trait, `SorobanEventRow`, `TaggedValue`, `TradeRow`, `ExtractResult`, `Venue` enum |
-| `phoenix-extractor` | `PhoenixXykExtractor` (full), `PhoenixStablePoolExtractor` (stub), `PhoenixPoolRegistry` |
-| `soroswap-extractor` | `SoroswapPairExtractor` (stub) |
-| `aquarius-extractor` | `AquariusPoolExtractor` (stub) |
-| `ledger-processor` | `dispatch()` + `dispatch_phoenix()` routing by `(pool_type, event_count)` |
-| `sdex-backfill` | Pre-existing, not part of this task |
+| Crate                | Role                                                                                               |
+| -------------------- | -------------------------------------------------------------------------------------------------- |
+| `extractors-core`    | `SwapExtractor` trait, `SorobanEventRow`, `TaggedValue`, `TradeRow`, `ExtractResult`, `Venue` enum |
+| `phoenix-extractor`  | `PhoenixXykExtractor` (full), `PhoenixStablePoolExtractor` (stub), `PhoenixPoolRegistry`           |
+| `soroswap-extractor` | `SoroswapPairExtractor` (stub)                                                                     |
+| `aquarius-extractor` | `AquariusPoolExtractor` (stub)                                                                     |
+| `ledger-processor`   | `dispatch()` + `dispatch_phoenix()` routing by `(pool_type, event_count)`                          |
+| `sdex-backfill`      | Pre-existing, not part of this task                                                                |
 
 ### Stub extractors
 
 Three `SwapExtractor` impls with `unimplemented!()` bodies:
+
 - `PhoenixStablePoolExtractor` in `phoenix-extractor/src/stable.rs`
 - `SoroswapPairExtractor` in `soroswap-extractor/src/lib.rs`
 - `AquariusPoolExtractor` in `aquarius-extractor/src/lib.rs`

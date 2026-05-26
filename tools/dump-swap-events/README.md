@@ -23,15 +23,15 @@ First build pulls ~80 crates and compiles in 20–30 s on a warm cache.
 ./target/release/dump-swap-events --dir <PATH> [options]
 ```
 
-| Flag | Default | Effect |
-|---|---|---|
-| `--dir <PATH>` | required | Directory of `.xdr.zst` files |
-| `--symbol <SUBSTR>` | `swap` | Substring match against `topic[0]` (string form) |
-| `--no-filter` | off | Disable the topic filter |
-| `--histogram` | off | Suppress per-event output; print only the `topic_0` histogram. Implies `--no-filter`. |
-| `--limit <N>` | unlimited | Stop after N emitted events |
-| `--include-diagnostic` | off | Include events from the V3/V4 `diagnostic_events` container (otherwise dropped — they hold byte-identical mirrors of consensus events) |
-| `--pretty` | off | Pretty-print JSON instead of one-line-per-event |
+| Flag                   | Default   | Effect                                                                                                                                 |
+| ---------------------- | --------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `--dir <PATH>`         | required  | Directory of `.xdr.zst` files                                                                                                          |
+| `--symbol <SUBSTR>`    | `swap`    | Substring match against `topic[0]` (string form)                                                                                       |
+| `--no-filter`          | off       | Disable the topic filter                                                                                                               |
+| `--histogram`          | off       | Suppress per-event output; print only the `topic_0` histogram. Implies `--no-filter`.                                                  |
+| `--limit <N>`          | unlimited | Stop after N emitted events                                                                                                            |
+| `--include-diagnostic` | off       | Include events from the V3/V4 `diagnostic_events` container (otherwise dropped — they hold byte-identical mirrors of consensus events) |
+| `--pretty`             | off       | Pretty-print JSON instead of one-line-per-event                                                                                        |
 
 Output is JSONL on stdout, summary + histogram on stderr.
 

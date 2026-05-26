@@ -1,24 +1,24 @@
 ---
-title: "SDEX operation XDR shape — what an SDEX op looks like after parsing"
+title: 'SDEX operation XDR shape — what an SDEX op looks like after parsing'
 type: research
 status: mature
 spawned_from: ../README.md
 spawns: []
 tags: [sdex, xdr, stellar-protocol, ledger-close-meta, claim-atom]
 links:
-  - "https://github.com/stellar/stellar-xdr"
-  - "https://developers.stellar.org/docs/learn/encyclopedia/sdex/liquidity-on-stellar-sdex-liquidity-pools"
+  - 'https://github.com/stellar/stellar-xdr'
+  - 'https://developers.stellar.org/docs/learn/encyclopedia/sdex/liquidity-on-stellar-sdex-liquidity-pools'
 history:
   - date: 2026-05-12
     status: mature
     who: okarcz
-    note: "Distilled from the Stellar protocol XDR spec (current at protocol 22)."
+    note: 'Distilled from the Stellar protocol XDR spec (current at protocol 22).'
 ---
 
 # SDEX operation XDR shape
 
-**Answers user question 1:** *how does an SDEX operation look after
-parsing from XDR?*
+**Answers user question 1:** _how does an SDEX operation look after
+parsing from XDR?_
 
 Headline: an SDEX-relevant operation has two distinct XDR shapes —
 the **operation input** (what the submitter asked for) and the
@@ -33,13 +33,13 @@ which prices. The result lives inside the ledger's
 
 Five operation types produce on-chain trades:
 
-| OpType | Numeric | Result wrapper | Trades land in |
-|--------|---------|----------------|----------------|
-| `MANAGE_SELL_OFFER` | 3 | `ManageSellOfferResult` | `success.offersClaimed<>` |
-| `CREATE_PASSIVE_SELL_OFFER` | 4 | `ManageSellOfferResult` (shared) | `success.offersClaimed<>` |
-| `MANAGE_BUY_OFFER` | 12 | `ManageBuyOfferResult` | `success.offersClaimed<>` |
-| `PATH_PAYMENT_STRICT_RECEIVE` | 2 | `PathPaymentStrictReceiveResult` | `success.offers<>` |
-| `PATH_PAYMENT_STRICT_SEND` | 13 | `PathPaymentStrictSendResult` | `success.offers<>` |
+| OpType                        | Numeric | Result wrapper                   | Trades land in            |
+| ----------------------------- | ------- | -------------------------------- | ------------------------- |
+| `MANAGE_SELL_OFFER`           | 3       | `ManageSellOfferResult`          | `success.offersClaimed<>` |
+| `CREATE_PASSIVE_SELL_OFFER`   | 4       | `ManageSellOfferResult` (shared) | `success.offersClaimed<>` |
+| `MANAGE_BUY_OFFER`            | 12      | `ManageBuyOfferResult`           | `success.offersClaimed<>` |
+| `PATH_PAYMENT_STRICT_RECEIVE` | 2       | `PathPaymentStrictReceiveResult` | `success.offers<>`        |
+| `PATH_PAYMENT_STRICT_SEND`    | 13      | `PathPaymentStrictSendResult`    | `success.offers<>`        |
 
 All five funnel matched-trade information through a single union:
 **`ClaimAtom`**. One match (an offer eaten, fully or partially) = one

@@ -52,20 +52,20 @@ ORDER BY (contract_id, ledger_sequence, transaction_id, event_index)
 
 Top signatures by count over 1.54M events. Full list in `lore/4-notes/samples/soroban-events/signatures-stats.tsv`.
 
-| Signature | Events | Contracts | Txs | Notes |
-| --- | ---: | ---: | ---: | --- |
-| `fee` | 792,453 | 1 | 550,122 | Emitted only by the **XLM SAC** (`CAS3J7GY…`). One per Soroban tx. |
-| `transfer` | 638,311 | 2,336 | 48,002 | SAC and token contract transfers. Asset coding varies (see below). |
-| `mint` | 89,725 | 271 | 35,105 | Token / LP mint. |
-| `burn` | 8,748 | 54 | 8,276 | Token / LP burn. |
-| `set_authorized` / `clawback` | 8,820 | 24 | — | SAC admin events. |
-| `update_reserves` | 743 | 77 | 426 | **AMM pool reserve snapshot** — pair with `trade`/`swap` on same tx. |
-| `trade` | 725 | 74 | 408 | Phoenix-style AMM trade. |
-| _(NULL)_ | 625 | 31 | 101 | Topic 0 is `string`, not `sym` — see below. |
-| `swap` | 549 | 4 | 249 | Three distinct shapes: CLMM, simple, router. |
-| `REDSTONE` | 98 | 1 | 98 | Oracle update — bytes-encoded SCVal. |
-| `REFLECTOR` | 96 | 3 | 96 | Oracle update — SCVal map with `update_data` vec. |
-| `score_submitted`, `supply`, `withdraw`, `vault_*`, etc. | tail | — | — | Misc protocol events. |
+| Signature                                                |  Events | Contracts |     Txs | Notes                                                                |
+| -------------------------------------------------------- | ------: | --------: | ------: | -------------------------------------------------------------------- |
+| `fee`                                                    | 792,453 |         1 | 550,122 | Emitted only by the **XLM SAC** (`CAS3J7GY…`). One per Soroban tx.   |
+| `transfer`                                               | 638,311 |     2,336 |  48,002 | SAC and token contract transfers. Asset coding varies (see below).   |
+| `mint`                                                   |  89,725 |       271 |  35,105 | Token / LP mint.                                                     |
+| `burn`                                                   |   8,748 |        54 |   8,276 | Token / LP burn.                                                     |
+| `set_authorized` / `clawback`                            |   8,820 |        24 |       — | SAC admin events.                                                    |
+| `update_reserves`                                        |     743 |        77 |     426 | **AMM pool reserve snapshot** — pair with `trade`/`swap` on same tx. |
+| `trade`                                                  |     725 |        74 |     408 | Phoenix-style AMM trade.                                             |
+| _(NULL)_                                                 |     625 |        31 |     101 | Topic 0 is `string`, not `sym` — see below.                          |
+| `swap`                                                   |     549 |         4 |     249 | Three distinct shapes: CLMM, simple, router.                         |
+| `REDSTONE`                                               |      98 |         1 |      98 | Oracle update — bytes-encoded SCVal.                                 |
+| `REFLECTOR`                                              |      96 |         3 |      96 | Oracle update — SCVal map with `update_data` vec.                    |
+| `score_submitted`, `supply`, `withdraw`, `vault_*`, etc. |    tail |         — |       — | Misc protocol events.                                                |
 
 ## Event shapes — payload reference
 
@@ -294,16 +294,16 @@ LIMIT 20;
 
 ## Sample files
 
-| File | Contents |
-| --- | --- |
-| `lore/4-notes/samples/soroban-events/signatures-stats.tsv` | Full per-signature count + contract/tx fan-out for the backfill window |
-| `lore/4-notes/samples/soroban-events/swap.jsonl` | 50 swap rows (covers all three shapes) |
-| `lore/4-notes/samples/soroban-events/trade.jsonl` | 50 Phoenix-style trades |
-| `lore/4-notes/samples/soroban-events/update_reserves.jsonl` | 50 reserve snapshots |
-| `lore/4-notes/samples/soroban-events/transfer.jsonl` | 50 SAC + custom-token transfers |
-| `lore/4-notes/samples/soroban-events/mint.jsonl` | 50 mint events |
-| `lore/4-notes/samples/soroban-events/burn.jsonl` | 50 burn events |
-| `lore/4-notes/samples/soroban-events/fee.jsonl` | 50 XLM SAC fee events |
-| `lore/4-notes/samples/soroban-events/REDSTONE.jsonl` | 50 RedStone oracle updates (bytes-encoded SCVal) |
-| `lore/4-notes/samples/soroban-events/REFLECTOR.jsonl` | 50 Reflector oracle updates (rich SCVal map) |
-| `lore/4-notes/samples/soroban-events/null-signature.jsonl` | 50 events where `signature IS NULL` |
+| File                                                        | Contents                                                               |
+| ----------------------------------------------------------- | ---------------------------------------------------------------------- |
+| `lore/4-notes/samples/soroban-events/signatures-stats.tsv`  | Full per-signature count + contract/tx fan-out for the backfill window |
+| `lore/4-notes/samples/soroban-events/swap.jsonl`            | 50 swap rows (covers all three shapes)                                 |
+| `lore/4-notes/samples/soroban-events/trade.jsonl`           | 50 Phoenix-style trades                                                |
+| `lore/4-notes/samples/soroban-events/update_reserves.jsonl` | 50 reserve snapshots                                                   |
+| `lore/4-notes/samples/soroban-events/transfer.jsonl`        | 50 SAC + custom-token transfers                                        |
+| `lore/4-notes/samples/soroban-events/mint.jsonl`            | 50 mint events                                                         |
+| `lore/4-notes/samples/soroban-events/burn.jsonl`            | 50 burn events                                                         |
+| `lore/4-notes/samples/soroban-events/fee.jsonl`             | 50 XLM SAC fee events                                                  |
+| `lore/4-notes/samples/soroban-events/REDSTONE.jsonl`        | 50 RedStone oracle updates (bytes-encoded SCVal)                       |
+| `lore/4-notes/samples/soroban-events/REFLECTOR.jsonl`       | 50 Reflector oracle updates (rich SCVal map)                           |
+| `lore/4-notes/samples/soroban-events/null-signature.jsonl`  | 50 events where `signature IS NULL`                                    |

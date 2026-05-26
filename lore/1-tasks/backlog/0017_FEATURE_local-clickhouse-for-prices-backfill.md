@@ -1,17 +1,27 @@
 ---
-id: "0017"
-title: "Local ClickHouse instance setup and access for prices-api Tranche 1 backfill"
+id: '0017'
+title: 'Local ClickHouse instance setup and access for prices-api Tranche 1 backfill'
 type: FEATURE
 status: backlog
-related_adr: ["0001"]
-related_tasks: ["0015", "0018"]
-tags: [layer-infra, priority-high, effort-small, milestone-M1, infra, backfill, clickhouse, block-explorer]
+related_adr: ['0001']
+related_tasks: ['0015', '0018']
+tags:
+  [
+    layer-infra,
+    priority-high,
+    effort-small,
+    milestone-M1,
+    infra,
+    backfill,
+    clickhouse,
+    block-explorer,
+  ]
 milestone: 1
 links:
-  - "../../2-adrs/0001_stream1-clickhouse-sourced-amm-backfill.md"
-  - "../archive/0015_RESEARCH_redefine-backfill-with-be-clickhouse-events/notes/S-redesigned-backfill-recommendation.md"
-  - "../../../../soroban-block-explorer/lore/1-tasks/archive/0205_FEATURE_backfill-runner-clickhouse-target-flag.md"
-  - "../../../../soroban-block-explorer/lore/1-tasks/active/0206_FEATURE_clickhouse-persist-real-inserts/README.md"
+  - '../../2-adrs/0001_stream1-clickhouse-sourced-amm-backfill.md'
+  - '../archive/0015_RESEARCH_redefine-backfill-with-be-clickhouse-events/notes/S-redesigned-backfill-recommendation.md'
+  - '../../../../soroban-block-explorer/lore/1-tasks/archive/0205_FEATURE_backfill-runner-clickhouse-target-flag.md'
+  - '../../../../soroban-block-explorer/lore/1-tasks/active/0206_FEATURE_clickhouse-persist-real-inserts/README.md'
 history:
   - date: 2026-05-12
     status: backlog

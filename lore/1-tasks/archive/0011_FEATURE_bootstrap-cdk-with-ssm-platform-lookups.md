@@ -1,27 +1,53 @@
 ---
-id: "0011"
-title: "Bootstrap Prices-owned CDK app with SSM-based platform lookups"
+id: '0011'
+title: 'Bootstrap Prices-owned CDK app with SSM-based platform lookups'
 type: FEATURE
 status: completed
-related_adr: ["0007", "0006"]
-related_tasks: ["0009", "0008", "0045", "0047", "0050", "0052", "0056", "0038", "0039", "0040"]
-tags: [layer-infra, priority-medium, effort-medium, milestone-M1, infra, cdk, aws, shared-infra, clickhouse, hetzner, mtls, secrets-manager]
+related_adr: ['0007', '0006']
+related_tasks:
+  [
+    '0009',
+    '0008',
+    '0045',
+    '0047',
+    '0050',
+    '0052',
+    '0056',
+    '0038',
+    '0039',
+    '0040',
+  ]
+tags:
+  [
+    layer-infra,
+    priority-medium,
+    effort-medium,
+    milestone-M1,
+    infra,
+    cdk,
+    aws,
+    shared-infra,
+    clickhouse,
+    hetzner,
+    mtls,
+    secrets-manager,
+  ]
 milestone: 1
 links:
-  - "../../2-adrs/0007_live-data-sink-on-shared-hetzner-clickhouse.md"
-  - "../../2-adrs/0006_runtime-framework-rust-axum.md"
-  - "../archive/0045_RESEARCH_cross-team-bundle-with-be-on-hetzner-ch-tenancy/notes/G-be-agreement-record.md"
-  - "../backlog/0047_RESEARCH_cross-tenant-throughput-verification-on-shared-hetzner-ch.md"
-  - "../backlog/0050_FEATURE_be-side-prep-sns-mtls-prices-db-provisioning.md"
-  - "../backlog/0052_FEATURE_clickhouse-mtls-client-shared-crate.md"
-  - "../backlog/0056_FEATURE_cloudwatch-alarms-push-freshness-mtls-notafter.md"
-  - "../../../../soroban-block-explorer/infra-hetzner/README.md"
-  - "../../../../soroban-block-explorer/infra/README.md"
+  - '../../2-adrs/0007_live-data-sink-on-shared-hetzner-clickhouse.md'
+  - '../../2-adrs/0006_runtime-framework-rust-axum.md'
+  - '../archive/0045_RESEARCH_cross-team-bundle-with-be-on-hetzner-ch-tenancy/notes/G-be-agreement-record.md'
+  - '../backlog/0047_RESEARCH_cross-tenant-throughput-verification-on-shared-hetzner-ch.md'
+  - '../backlog/0050_FEATURE_be-side-prep-sns-mtls-prices-db-provisioning.md'
+  - '../backlog/0052_FEATURE_clickhouse-mtls-client-shared-crate.md'
+  - '../backlog/0056_FEATURE_cloudwatch-alarms-push-freshness-mtls-notafter.md'
+  - '../../../../soroban-block-explorer/infra-hetzner/README.md'
+  - '../../../../soroban-block-explorer/infra/README.md'
 history:
   - date: 2026-05-11
     status: backlog
     who: okarcz
-    note: "Spawned from 0009 future work. Implements Option A2 from the integration-options note."
+    note: 'Spawned from 0009 future work. Implements Option A2 from the integration-options note.'
   - date: 2026-05-18
     status: backlog
     who: okarcz
@@ -90,7 +116,7 @@ history:
       Spec rewrite + skeleton landed across 6 commits on
       `feat/0011_bootstrap-cdk-with-ssm-platform-lookups`,
       PR #28 against develop.
-      
+
       Remaining acceptance items are all deployment-or-CI-
       blocked, not code-blocked: (a) manual CicdStack deploy
       and GitHub-Environment OIDC role-ARN wiring is operator
@@ -142,7 +168,7 @@ from research task 0009 → `S-shared-infra-recommendation.md`'s Option A2). ADR
 (accepted 2026-05-20 via task 0045) deletes the RDS line of that plan: the live data
 sink is BE's Hetzner ClickHouse, written to over public-internet mTLS. The
 implementation impact on this task is recorded in ADR 0007's "Implementation impact"
-table — *"Major rewrite. No RDS, no VPC; Secrets Manager mTLS material."*
+table — _"Major rewrite. No RDS, no VPC; Secrets Manager mTLS material."_
 
 Two upstream events have now landed which unblock the rewrite:
 
@@ -169,13 +195,13 @@ Two namespaces. **Prices-api never writes under `/platform/`; BE never writes un
 
 ### Inputs — consumed from `/platform/{env}/...` (BE publishes, prices-api reads)
 
-| SSM key | Type | Value | Published by |
-|---|---|---|---|
-| `/platform/{env}/ch-endpoint` | String | `https://ch.{env}.sorobanscan.rumblefish.dev:443` (mTLS Caddy address) | BE task 0050 |
-| `/platform/{env}/ch-database` | String | `prices` (per ADR 0007 §3.1) | BE task 0050 |
-| `/platform/{env}/ch-user` | String | CH username scoped to the `prices` DB | BE task 0050 |
-| `/platform/{env}/stellar-ledger-data-sns-arn` | String | SNS topic ARN BE fans out S3 PutObject to | BE task 0050 |
-| `/platform/{env}/stellar-ledger-data-bucket-arn` | String | BE-owned bucket ARN (read-only IAM scope) | BE task 0050 |
+| SSM key                                          | Type   | Value                                                                  | Published by |
+| ------------------------------------------------ | ------ | ---------------------------------------------------------------------- | ------------ |
+| `/platform/{env}/ch-endpoint`                    | String | `https://ch.{env}.sorobanscan.rumblefish.dev:443` (mTLS Caddy address) | BE task 0050 |
+| `/platform/{env}/ch-database`                    | String | `prices` (per ADR 0007 §3.1)                                           | BE task 0050 |
+| `/platform/{env}/ch-user`                        | String | CH username scoped to the `prices` DB                                  | BE task 0050 |
+| `/platform/{env}/stellar-ledger-data-sns-arn`    | String | SNS topic ARN BE fans out S3 PutObject to                              | BE task 0050 |
+| `/platform/{env}/stellar-ledger-data-bucket-arn` | String | BE-owned bucket ARN (read-only IAM scope)                              | BE task 0050 |
 
 BE's CA certificate (PEM) is embedded into the prices-api Rust workspace as a
 compile-time asset under `packages/clickhouse-client/ca/be-ca.pem` per task 0052's
@@ -184,18 +210,19 @@ lives in the repo.
 
 ### Outputs — published under `/prices/{env}/...` (prices-api writes, downstream reads)
 
-| SSM key | Type | Value | Consumer |
-|---|---|---|---|
-| `/prices/{env}/mtls-cert-secret-arn` | String | Secrets Manager ARN holding the mTLS client cert PEM | task 0052 Lambdas |
-| `/prices/{env}/mtls-key-secret-arn` | String | Secrets Manager ARN holding the mTLS client key PEM | task 0052 Lambdas |
-| `/prices/{env}/ledger-processor-lambda-arn` | String | Live ingest Lambda ARN (for BE to subscribe to SNS) | BE task 0050 / task 0038 |
-| `/prices/{env}/api-gateway-id` | String | REST API ID (for downstream domain wiring) | task 0040 |
+| SSM key                                     | Type   | Value                                                | Consumer                 |
+| ------------------------------------------- | ------ | ---------------------------------------------------- | ------------------------ |
+| `/prices/{env}/mtls-cert-secret-arn`        | String | Secrets Manager ARN holding the mTLS client cert PEM | task 0052 Lambdas        |
+| `/prices/{env}/mtls-key-secret-arn`         | String | Secrets Manager ARN holding the mTLS client key PEM  | task 0052 Lambdas        |
+| `/prices/{env}/ledger-processor-lambda-arn` | String | Live ingest Lambda ARN (for BE to subscribe to SNS)  | BE task 0050 / task 0038 |
+| `/prices/{env}/api-gateway-id`              | String | REST API ID (for downstream domain wiring)           | task 0040                |
 
 Every Lambda built by tasks 0038/0039/0040/0055 receives the four `/platform/` strings
-+ the two `/prices/` Secret ARNs as environment variables, named per task 0052's
-`from_env` contract (`CH_ENDPOINT`, `CH_DATABASE`, `CH_USER`, `CH_CERT_SECRET_ID`,
-`CH_KEY_SECRET_ID`). Resolution happens at synth time via
-`ssm.StringParameter.valueForStringParameter` — no runtime SSM round-trips.
+
+- the two `/prices/` Secret ARNs as environment variables, named per task 0052's
+  `from_env` contract (`CH_ENDPOINT`, `CH_DATABASE`, `CH_USER`, `CH_CERT_SECRET_ID`,
+  `CH_KEY_SECRET_ID`). Resolution happens at synth time via
+  `ssm.StringParameter.valueForStringParameter` — no runtime SSM round-trips.
 
 ## Implementation Plan
 

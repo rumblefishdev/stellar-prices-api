@@ -1,19 +1,19 @@
 ---
-title: "BE ClickHouse — production schema and population status as of 2026-05-12"
+title: 'BE ClickHouse — production schema and population status as of 2026-05-12'
 type: research
 status: mature
 spawned_from: ../README.md
 spawns: []
 tags: [clickhouse, schema, block-explorer, source-of-truth]
 links:
-  - "../../../../../soroban-block-explorer/lore/2-adrs/0044_clickhouse-pilot-parallel-store.md"
-  - "../../../../../soroban-block-explorer/lore/1-tasks/active/0206_FEATURE_clickhouse-persist-real-inserts/README.md"
-  - "../../../../../docs/database-schema/clickhouse-prod-schema.sql"
+  - '../../../../../soroban-block-explorer/lore/2-adrs/0044_clickhouse-pilot-parallel-store.md'
+  - '../../../../../soroban-block-explorer/lore/1-tasks/active/0206_FEATURE_clickhouse-persist-real-inserts/README.md'
+  - '../../../../../docs/database-schema/clickhouse-prod-schema.sql'
 history:
   - date: 2026-05-12
     status: mature
     who: okarcz
-    note: "Distilled from ADR 0044, BE task 0206 active state, and clickhouse-prod-schema.sql header comments."
+    note: 'Distilled from ADR 0044, BE task 0206 active state, and clickhouse-prod-schema.sql header comments.'
 ---
 
 # BE ClickHouse — production schema and population status
@@ -24,12 +24,12 @@ BE's ClickHouse store is **no longer the read-empty pilot** described in
 ADR 0044 (proposed 2026-05-08). Between that proposal and today
 (2026-05-12), the pilot graduated through:
 
-| BE task | Status | What it did |
-|---------|--------|-------------|
-| 0204 (FEATURE) | archived | Stood up `crates/db-clickhouse`, Docker compose service, idempotent `init.sql` mirroring 17 PG tables + 1 Dictionary. |
-| 0205 (FEATURE) | archived | Added `--target=clickhouse` flag to the backfill runner with stub `persist_ledger_clickhouse` (no-op writer). |
-| 0206 (FEATURE) | **active** | Replaces the stub with a real writer that populates all 17 tables + Dictionary. Targets the 11M-ledger public-archive backfill against local Docker CH. |
-| 0208 (referenced) | — | Folded `liquidity_pools` into `ReplacingMergeTree` (was `MergeTree` in pilot). Schema-only amendment. |
+| BE task           | Status     | What it did                                                                                                                                             |
+| ----------------- | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 0204 (FEATURE)    | archived   | Stood up `crates/db-clickhouse`, Docker compose service, idempotent `init.sql` mirroring 17 PG tables + 1 Dictionary.                                   |
+| 0205 (FEATURE)    | archived   | Added `--target=clickhouse` flag to the backfill runner with stub `persist_ledger_clickhouse` (no-op writer).                                           |
+| 0206 (FEATURE)    | **active** | Replaces the stub with a real writer that populates all 17 tables + Dictionary. Targets the 11M-ledger public-archive backfill against local Docker CH. |
+| 0208 (referenced) | —          | Folded `liquidity_pools` into `ReplacingMergeTree` (was `MergeTree` in pilot). Schema-only amendment.                                                   |
 
 The canonical schema lives at
 [`docs/database-schema/clickhouse-prod-schema.sql`](../../../../../docs/database-schema/clickhouse-prod-schema.sql)
@@ -62,11 +62,11 @@ betting on infra that does not exist yet.
 
 Three central FK hubs carry a deterministic surrogate `id Int64`:
 
-| Table | Natural key → `id` | Derivation |
-|-------|--------------------|------------|
-| `accounts` | `account_id` (StrKey) | `cityhash64(StrKey bytes)` |
+| Table               | Natural key → `id`     | Derivation                 |
+| ------------------- | ---------------------- | -------------------------- |
+| `accounts`          | `account_id` (StrKey)  | `cityhash64(StrKey bytes)` |
 | `soroban_contracts` | `contract_id` (StrKey) | `cityhash64(StrKey bytes)` |
-| `transactions` | `hash` (32 bytes) | `cityhash64(hash bytes)` |
+| `transactions`      | `hash` (32 bytes)      | `cityhash64(hash bytes)`   |
 
 Derivation rules (from header comment lines 31–51):
 
@@ -96,18 +96,18 @@ Every partitioned table uses `PARTITION BY intDiv(ledger_sequence,
 
 ### Tables relevant to prices-api (full list)
 
-| Table | Engine | Relevance |
-|-------|--------|-----------|
-| `soroban_events` | RMT | **Primary AMM-swap source.** Full XDR per event. |
-| `liquidity_pools` | RMT(last_updated_ledger) | AMM pool registry (classic Stellar LPs). |
-| `liquidity_pool_snapshots` | RMT | Per-ledger reserve history → constant-product price. |
-| `assets` | RMT | Asset identity / metadata. |
-| `soroban_contracts` | RMT(wasm_uploaded_at_ledger) | Contract registry; map `id` ↔ StrKey + SAC flag. |
-| `transactions` | RMT | Ledger-time correlation, success flag, soroban flag. |
-| `ledgers` | MergeTree | **Only source of `closed_at` wall-clock time.** |
-| `operations_appearances` | RMT | SDEX trade ops (Path payments + offer ops). |
-| `transaction_participants` | RMT | Account-side join only (less relevant for prices). |
-| `wasm_interface_metadata` | MergeTree | Optional contract metadata for labelling. |
+| Table                      | Engine                       | Relevance                                            |
+| -------------------------- | ---------------------------- | ---------------------------------------------------- |
+| `soroban_events`           | RMT                          | **Primary AMM-swap source.** Full XDR per event.     |
+| `liquidity_pools`          | RMT(last_updated_ledger)     | AMM pool registry (classic Stellar LPs).             |
+| `liquidity_pool_snapshots` | RMT                          | Per-ledger reserve history → constant-product price. |
+| `assets`                   | RMT                          | Asset identity / metadata.                           |
+| `soroban_contracts`        | RMT(wasm_uploaded_at_ledger) | Contract registry; map `id` ↔ StrKey + SAC flag.     |
+| `transactions`             | RMT                          | Ledger-time correlation, success flag, soroban flag. |
+| `ledgers`                  | MergeTree                    | **Only source of `closed_at` wall-clock time.**      |
+| `operations_appearances`   | RMT                          | SDEX trade ops (Path payments + offer ops).          |
+| `transaction_participants` | RMT                          | Account-side join only (less relevant for prices).   |
+| `wasm_interface_metadata`  | MergeTree                    | Optional contract metadata for labelling.            |
 
 Tables NOT relevant to prices-api: `account_balances_current`, `nfts`,
 `nft_ownership`, `lp_positions`, `soroban_invocations_appearances`,

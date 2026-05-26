@@ -1,23 +1,33 @@
 ---
-id: "0018"
-title: "Sample-decode per-AMM swap event shapes (Soroswap, Aquarius, Phoenix)"
+id: '0018'
+title: 'Sample-decode per-AMM swap event shapes (Soroswap, Aquarius, Phoenix)'
 type: RESEARCH
 status: completed
-related_adr: ["0001"]
-related_tasks: ["0015", "0017"]
-tags: [layer-research, priority-medium, effort-small, research, soroban, amm, schema, xdr]
+related_adr: ['0001']
+related_tasks: ['0015', '0017']
+tags:
+  [
+    layer-research,
+    priority-medium,
+    effort-small,
+    research,
+    soroban,
+    amm,
+    schema,
+    xdr,
+  ]
 links:
-  - "../../../2-adrs/0001_stream1-clickhouse-sourced-amm-backfill.md"
-  - "../../archive/0015_RESEARCH_redefine-backfill-with-be-clickhouse-events/notes/G-ch-tables-for-price-calculation.md"
-  - "../../archive/0001_RESEARCH_dump-amm-swap-events/notes/R-swap-topic-shapes.md"
-  - "../../archive/0002_RESEARCH_amm-venue-attribution/notes/R-soroswap-registry.md"
-  - "../../archive/0002_RESEARCH_amm-venue-attribution/notes/R-aquarius-registry.md"
-  - "../../archive/0002_RESEARCH_amm-venue-attribution/notes/R-phoenix-registry.md"
-  - "notes/evidence/soroswap_pair_swap_decode.json"
-  - "notes/evidence/aquarius_pool_trade_decode.json"
-  - "notes/evidence/phoenix_pool_swap_decode.json"
-  - "notes/R-be-storage-format.md"
-  - "notes/G-amm-swap-event-shapes.md"
+  - '../../../2-adrs/0001_stream1-clickhouse-sourced-amm-backfill.md'
+  - '../../archive/0015_RESEARCH_redefine-backfill-with-be-clickhouse-events/notes/G-ch-tables-for-price-calculation.md'
+  - '../../archive/0001_RESEARCH_dump-amm-swap-events/notes/R-swap-topic-shapes.md'
+  - '../../archive/0002_RESEARCH_amm-venue-attribution/notes/R-soroswap-registry.md'
+  - '../../archive/0002_RESEARCH_amm-venue-attribution/notes/R-aquarius-registry.md'
+  - '../../archive/0002_RESEARCH_amm-venue-attribution/notes/R-phoenix-registry.md'
+  - 'notes/evidence/soroswap_pair_swap_decode.json'
+  - 'notes/evidence/aquarius_pool_trade_decode.json'
+  - 'notes/evidence/phoenix_pool_swap_decode.json'
+  - 'notes/R-be-storage-format.md'
+  - 'notes/G-amm-swap-event-shapes.md'
 history:
   - date: 2026-05-12
     status: backlog
@@ -204,7 +214,7 @@ extractor strategy in the consumer.
 - This task can run before task 0017 lands by pulling real swap
   events from the public archive — but it is faster once 0017's
   local CH is queryable (`SELECT topics_xdr, data_xdr FROM
-  soroban_events WHERE …`).
+soroban_events WHERE …`).
 - If new Soroban AMMs become relevant during the Tranche window,
   this task's pattern (one canonical pair + one sample decode +
   source-code cross-ref) re-runs per new AMM.

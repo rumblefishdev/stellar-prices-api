@@ -1,12 +1,12 @@
 ---
-title: "Open questions for AMM venue attribution"
+title: 'Open questions for AMM venue attribution'
 type: question
 status: seed
 spawned_from: ../README.md
 spawns: []
 tags: [soroban, amm, venue-attribution]
 links:
-  - "../../0001_RESEARCH_dump-amm-swap-events/notes/R-swap-topic-shapes.md"
+  - '../../0001_RESEARCH_dump-amm-swap-events/notes/R-swap-topic-shapes.md'
 history:
   - date: 2026-05-08
     status: seed
@@ -20,13 +20,13 @@ history:
 
 Which venue does each of these belong to? Top 5 by event volume:
 
-| Events | Contract |
-|---:|---|
+| Events | Contract                                                   |
+| -----: | ---------------------------------------------------------- |
 | 11,947 | `CBQDHNBFBZYE4MKPWBSJOPIYLW4SFSXAXUTSXJN76GNKYVYPCKWC6QUK` |
-| 4,128 | `CBHCRSVX3ZZ7EGTSYMKPEFGZNWRVCSESQR3UABET4MIW52N4EVU6BIZX` |
-| 2,706 | `CCR2CH4GQVCZHG7CHFVMNANCK45CU5DVKXZIIITDZQAU3CEJZ7RQH2MQ` |
-| 2,480 | `CDMIM23WOUL5CZBKX3GOA3V5R5AMVIMTCP52KCDQORWELAPLJ27WZCHL` |
-| 440  | `CBCZGGNOEUZG4CAAE7TGTQQHETZMKUT4OIPFHHPKEUX46U4KXBBZ3GLH` |
+|  4,128 | `CBHCRSVX3ZZ7EGTSYMKPEFGZNWRVCSESQR3UABET4MIW52N4EVU6BIZX` |
+|  2,706 | `CCR2CH4GQVCZHG7CHFVMNANCK45CU5DVKXZIIITDZQAU3CEJZ7RQH2MQ` |
+|  2,480 | `CDMIM23WOUL5CZBKX3GOA3V5R5AMVIMTCP52KCDQORWELAPLJ27WZCHL` |
+|    440 | `CBCZGGNOEUZG4CAAE7TGTQQHETZMKUT4OIPFHHPKEUX46U4KXBBZ3GLH` |
 
 Source: `R-swap-topic-shapes.md` §"`Symbol("swap")` revisited".
 

@@ -1,16 +1,26 @@
 ---
-id: "0045"
-title: "Cross-team bundle with BE: settle Hetzner CH tenancy, fan-out, capacity, certs, cost-share"
+id: '0045'
+title: 'Cross-team bundle with BE: settle Hetzner CH tenancy, fan-out, capacity, certs, cost-share'
 type: RESEARCH
 status: completed
-related_adr: ["0007"]
-related_tasks: ["0044", "0046", "0047", "0011", "0038", "0039", "0040"]
-tags: [layer-research, priority-high, effort-medium, coordination, block-explorer, hetzner, clickhouse, cross-team]
+related_adr: ['0007']
+related_tasks: ['0044', '0046', '0047', '0011', '0038', '0039', '0040']
+tags:
+  [
+    layer-research,
+    priority-high,
+    effort-medium,
+    coordination,
+    block-explorer,
+    hetzner,
+    clickhouse,
+    cross-team,
+  ]
 links:
-  - "../0044_RESEARCH_refactor-architecture-shared-galexie-hetzner-clickhouse/notes/S-refactor-recommendation.md"
-  - "../../2-adrs/0007_live-data-sink-on-shared-hetzner-clickhouse.md"
-  - "../../../../soroban-block-explorer/lore/1-tasks/active/0216_RESEARCH_hetzner-clickhouse-deploy/README.md"
-  - "../../../../soroban-block-explorer/lore/1-tasks/active/0227_FEATURE_infra-hetzner-ansible-playbook.md"
+  - '../0044_RESEARCH_refactor-architecture-shared-galexie-hetzner-clickhouse/notes/S-refactor-recommendation.md'
+  - '../../2-adrs/0007_live-data-sink-on-shared-hetzner-clickhouse.md'
+  - '../../../../soroban-block-explorer/lore/1-tasks/active/0216_RESEARCH_hetzner-clickhouse-deploy/README.md'
+  - '../../../../soroban-block-explorer/lore/1-tasks/active/0227_FEATURE_infra-hetzner-ansible-playbook.md'
 history:
   - date: 2026-05-18
     status: backlog
@@ -32,7 +42,7 @@ history:
   - date: 2026-05-19
     status: blocked
     who: okarcz
-    by: ["0046"]
+    by: ['0046']
     note: >
       Moved to blocked pending 0046's empirical capacity / cost
       numbers. The BE conversation brief (drafted on PR #21) lands
@@ -44,7 +54,7 @@ history:
   - date: 2026-05-19
     status: blocked
     who: okarcz
-    by: ["0047"]
+    by: ['0047']
     note: >
       Blocker re-targeted. 0046 closed (empirical numbers landed,
       brief updated, BE responded). Now blocked on 0047 — cross-

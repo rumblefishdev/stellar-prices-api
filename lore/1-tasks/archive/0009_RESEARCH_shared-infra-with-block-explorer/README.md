@@ -1,24 +1,34 @@
 ---
-id: "0009"
-title: "Research shared infrastructure architecture with Soroban Block Explorer"
+id: '0009'
+title: 'Research shared infrastructure architecture with Soroban Block Explorer'
 type: RESEARCH
 status: completed
 related_adr: []
-related_tasks: ["0007", "0008", "0010", "0011", "0012", "0013"]
-tags: [layer-research, priority-high, effort-medium, infra, architecture, aws, shared-infra, block-explorer]
+related_tasks: ['0007', '0008', '0010', '0011', '0012', '0013']
+tags:
+  [
+    layer-research,
+    priority-high,
+    effort-medium,
+    infra,
+    architecture,
+    aws,
+    shared-infra,
+    block-explorer,
+  ]
 links:
-  - "../../../../docs/prices-api-general-overview.md"
-  - "../../../../../soroban-block-explorer/docs/architecture/infrastructure/infrastructure-overview.md"
-  - "../../../../../soroban-block-explorer/docs/architecture/technical-design-general-overview.md"
+  - '../../../../docs/prices-api-general-overview.md'
+  - '../../../../../soroban-block-explorer/docs/architecture/infrastructure/infrastructure-overview.md'
+  - '../../../../../soroban-block-explorer/docs/architecture/technical-design-general-overview.md'
 history:
   - date: 2026-05-11
     status: backlog
     who: okarcz
-    note: "Task drafted to research shared-infra architecture with soroban-block-explorer."
+    note: 'Task drafted to research shared-infra architecture with soroban-block-explorer.'
   - date: 2026-05-11
     status: active
     who: okarcz
-    note: "Promoted from backlog to active"
+    note: 'Promoted from backlog to active'
   - date: 2026-05-11
     status: completed
     who: claude
@@ -62,8 +72,8 @@ inaccuracies in `docs/prices-api-general-overview.md` flagged for revision (task
    [BE ADR 0033](../../../../../soroban-block-explorer/lore/2-adrs/0033_soroban-events-appearances-read-time-detail.md).
    Spike needed before committing to the two-stream backfill plan. ⚠️
 4. Recommended integration shape: separate CDK app + SSM-based platform lookups + own
-   GitHub Actions OIDC + Prices-owned Fargate for SDEX backfill (Option **A2 + B1 + C1
-   + D3→D1** from `notes/I-integration-options.md`).
+   GitHub Actions OIDC + Prices-owned Fargate for SDEX backfill (Option \*\*A2 + B1 + C1
+   - D3→D1\*\* from `notes/I-integration-options.md`).
 
 ## Context
 
@@ -96,6 +106,7 @@ operational assumptions.
 ### Step 2: Map shared vs. owned components
 
 Build a side-by-side matrix of every infra component the Prices API needs, marking each as:
+
 - **Shared** (Block Explorer owns/funds; Prices API consumes)
 - **Owned** (Prices API funds and operates separately)
 - **Coupled** (cross-service dependency such as the read-only `soroban_events` access)
@@ -105,6 +116,7 @@ Cross-check against §2.3 / §11.1 / §11.3 of the Prices API doc for double-bil
 ### Step 3: Identify integration points and risks
 
 For each shared/coupled component, document:
+
 - How the integration works at the AWS level (e.g. second S3 event-notification target on
   `stellar-ledger-data/`, second consumer in the same VPC private subnet, additional ECS
   task definition in the existing cluster)
@@ -121,6 +133,7 @@ SSM-parameter handoff), CI/CD model, environment parity (dev/staging/prod), and 
 ### Step 5: Synthesis README
 
 Write the final summary as `notes/S-shared-infra-recommendation.md` with:
+
 - TL;DR recommendation
 - Component-by-component matrix (shared/owned/coupled)
 - Recommended CDK + CI/CD shape

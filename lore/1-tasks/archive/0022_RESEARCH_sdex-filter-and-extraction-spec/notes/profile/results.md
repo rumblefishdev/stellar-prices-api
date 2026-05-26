@@ -13,11 +13,11 @@ Hardware: developer laptop, single thread, release build.
 
 ## Timing (single-threaded)
 
-| Phase                 | Total | Mean/ledger | Throughput            |
-| --------------------- | ----- | ----------- | --------------------- |
-| Decompress + decode   | 6.43s | 3.22 ms     | **311 ledgers/s**     |
-| Claim-atom walk       | 0.02s | 0.009 ms    | (essentially free)    |
-| End-to-end (wall)     | 6.45s | 3.22 ms     | **310 ledgers/s**     |
+| Phase               | Total | Mean/ledger | Throughput         |
+| ------------------- | ----- | ----------- | ------------------ |
+| Decompress + decode | 6.43s | 3.22 ms     | **311 ledgers/s**  |
+| Claim-atom walk     | 0.02s | 0.009 ms    | (essentially free) |
+| End-to-end (wall)   | 6.45s | 3.22 ms     | **310 ledgers/s**  |
 
 Decode dominates wall time (>99%). The variant-discriminant walk
 (`OperationResultTr` match + `ClaimAtom` variant tally) is free
@@ -44,11 +44,11 @@ dominate count but barely move bytes).
 
 ## ClaimAtom variant distribution
 
-| Variant            | Count   | Share    |
-| ------------------ | ------- | -------- |
-| V0 (legacy)        | 0       | 0.00 %   |
-| ORDER_BOOK         | 39 825  | 20.36 %  |
-| LIQUIDITY_POOL     | 155 749 | 79.64 %  |
+| Variant        | Count   | Share   |
+| -------------- | ------- | ------- |
+| V0 (legacy)    | 0       | 0.00 %  |
+| ORDER_BOOK     | 39 825  | 20.36 % |
+| LIQUIDITY_POOL | 155 749 | 79.64 % |
 
 V0 is empty as expected — V0 atoms are pre-protocol-18 only
 (≈ pre-Aug 2022). The sample is protocol 22.

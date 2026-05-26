@@ -1,22 +1,22 @@
 ---
-title: "R: Stellar peers → Captive Core → Galexie → S3 → Lambda — live feed end-to-end"
+title: 'R: Stellar peers → Captive Core → Galexie → S3 → Lambda — live feed end-to-end'
 type: research
 status: developing
 spawned_from: ../README.md
 spawns: []
 tags: [stellar, galexie, captive-core, overlay, s3, lambda, step-3]
 links:
-  - "https://developers.stellar.org/docs/data/indexers/build-your-own/galexie"
-  - "https://developers.stellar.org/docs/data/indexers/build-your-own/ingest-sdk/developer_guide/ledgerbackends/captivecore"
-  - "https://github.com/stellar/stellar-core/blob/master/docs/integration.md"
-  - "https://github.com/stellar/go/blob/master/ingest/ledgerbackend/stellar_core_runner.go"
-  - "https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0054.md"
-  - "../../../../../soroban-block-explorer/docs/architecture/infrastructure/infrastructure-overview.md"
-  - "../../../../../soroban-block-explorer/docs/architecture/indexing-pipeline/indexing-pipeline-overview.md"
-  - "../../../../../soroban-block-explorer/infra/src/lib/stacks/ingestion-stack.ts"
-  - "../../../../../soroban-block-explorer/infra/src/lib/stacks/compute-stack.ts"
-  - "../../../../../soroban-block-explorer/lore/1-tasks/archive/0001_RESEARCH_galexie-captive-core-setup/notes/R-galexie-cli-and-image.md"
-  - "../../../../../soroban-block-explorer/lore/2-adrs/0006_no-s3-lifecycle-on-ledger-data.md"
+  - 'https://developers.stellar.org/docs/data/indexers/build-your-own/galexie'
+  - 'https://developers.stellar.org/docs/data/indexers/build-your-own/ingest-sdk/developer_guide/ledgerbackends/captivecore'
+  - 'https://github.com/stellar/stellar-core/blob/master/docs/integration.md'
+  - 'https://github.com/stellar/go/blob/master/ingest/ledgerbackend/stellar_core_runner.go'
+  - 'https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0054.md'
+  - '../../../../../soroban-block-explorer/docs/architecture/infrastructure/infrastructure-overview.md'
+  - '../../../../../soroban-block-explorer/docs/architecture/indexing-pipeline/indexing-pipeline-overview.md'
+  - '../../../../../soroban-block-explorer/infra/src/lib/stacks/ingestion-stack.ts'
+  - '../../../../../soroban-block-explorer/infra/src/lib/stacks/compute-stack.ts'
+  - '../../../../../soroban-block-explorer/lore/1-tasks/archive/0001_RESEARCH_galexie-captive-core-setup/notes/R-galexie-cli-and-image.md'
+  - '../../../../../soroban-block-explorer/lore/2-adrs/0006_no-s3-lifecycle-on-ledger-data.md'
 history:
   - date: 2026-05-18
     status: developing
@@ -33,8 +33,8 @@ history:
 
 Step 3 of task 0044. Document the live ingestion chain from first
 principles so the refactor reasoning does not lean on "BE does
-something opaque". Five hops; each section names the *primitive*
-and the *concrete BE deployment value* where they diverge.
+something opaque". Five hops; each section names the _primitive_
+and the _concrete BE deployment value_ where they diverge.
 
 This is research only. The recommendation (whether and how
 prices-api becomes a second consumer) lives in the later `S-*` note.
@@ -119,9 +119,9 @@ serializes to durable storage.
 **Mainnet cadence.** ~5–6 seconds per ledger close (Stellar
 protocol baseline; not freshly quoted in the URLs above but
 consistent across Stellar docs and quoted in BE's
-indexing-pipeline-overview §line 145–146: *"The design expectation
+indexing-pipeline-overview §line 145–146: _"The design expectation
 is roughly one file every 5 to 6 seconds, aligned with ledger-
-close cadence."*).
+close cadence."_).
 
 **Captive-core storage.** A scratch directory under the
 `CAPTIVE_CORE_STORAGE_PATH` env var (not in TOML) holds the local
@@ -217,17 +217,17 @@ network = "pubnet"
 
 **Concrete values:**
 
-| Setting | Value | Source |
-|---|---|---|
-| Backend | S3 (`type = "S3"`) | `ingestion-stack.ts:182` |
-| Region | `us-east-1` | `ingestion-stack.ts:185` |
-| Bucket | `{envName}-stellar-ledger-data` (e.g. `production-stellar-ledger-data`) | `ledger-bucket-stack.ts:29-40` |
-| Ledgers per file | **1** (one ledger per file) | `ingestion-stack.ts:188` |
-| Files per partition | 64000 | `ingestion-stack.ts:189` |
-| Network | `pubnet` (mainnet) | `ingestion-stack.ts:195` |
-| Mainnet passphrase | `"Public Global Stellar Network ; September 2015"` | well-known + BE research notes |
-| Compression | `zstd` (file extension `.xdr.zst`) | SEP-0054 + BE compute-stack `suffix: '.xdr.zst'` |
-| Lifecycle policy | **None** — files retained indefinitely | [BE ADR 0006](../../../../../soroban-block-explorer/lore/2-adrs/0006_no-s3-lifecycle-on-ledger-data.md) |
+| Setting             | Value                                                                   | Source                                                                                                  |
+| ------------------- | ----------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| Backend             | S3 (`type = "S3"`)                                                      | `ingestion-stack.ts:182`                                                                                |
+| Region              | `us-east-1`                                                             | `ingestion-stack.ts:185`                                                                                |
+| Bucket              | `{envName}-stellar-ledger-data` (e.g. `production-stellar-ledger-data`) | `ledger-bucket-stack.ts:29-40`                                                                          |
+| Ledgers per file    | **1** (one ledger per file)                                             | `ingestion-stack.ts:188`                                                                                |
+| Files per partition | 64000                                                                   | `ingestion-stack.ts:189`                                                                                |
+| Network             | `pubnet` (mainnet)                                                      | `ingestion-stack.ts:195`                                                                                |
+| Mainnet passphrase  | `"Public Global Stellar Network ; September 2015"`                      | well-known + BE research notes                                                                          |
+| Compression         | `zstd` (file extension `.xdr.zst`)                                      | SEP-0054 + BE compute-stack `suffix: '.xdr.zst'`                                                        |
+| Lifecycle policy    | **None** — files retained indefinitely                                  | [BE ADR 0006](../../../../../soroban-block-explorer/lore/2-adrs/0006_no-s3-lifecycle-on-ledger-data.md) |
 
 **Cadence.** One file every ~5–6 seconds (matches mainnet ledger
 cadence). At one ledger per file × ~5.5s, that's **~10.9 files
@@ -256,20 +256,20 @@ if (config.indexerLambdaConcurrency > 0) {
   ledgerBucket.addEventNotification(
     s3.EventType.OBJECT_CREATED,
     new s3n.LambdaDestination(processorFunction),
-    { suffix: '.xdr.zst' }
+    { suffix: '.xdr.zst' },
   );
 }
 ```
 
 **Concrete contract:**
 
-| Aspect | Value |
-|---|---|
-| Event type | `OBJECT_CREATED` (S3 PutObject) |
-| Filter | Key suffix `.xdr.zst` (excludes metadata/logs) |
-| Destination | Ledger Processor Lambda (`soroban-explorer-indexer`) |
-| Reserved concurrency | `config.indexerLambdaConcurrency` (BE-sized ~20) |
-| Retry semantics | Async invoke: 2 retries, then DLQ (SQS) |
+| Aspect                    | Value                                                               |
+| ------------------------- | ------------------------------------------------------------------- |
+| Event type                | `OBJECT_CREATED` (S3 PutObject)                                     |
+| Filter                    | Key suffix `.xdr.zst` (excludes metadata/logs)                      |
+| Destination               | Ledger Processor Lambda (`soroban-explorer-indexer`)                |
+| Reserved concurrency      | `config.indexerLambdaConcurrency` (BE-sized ~20)                    |
+| Retry semantics           | Async invoke: 2 retries, then DLQ (SQS)                             |
 | Env vars passed to Lambda | `BUCKET_NAME`, `STELLAR_NETWORK_PASSPHRASE`, `ENRICHMENT_QUEUE_URL` |
 
 **Concurrency sizing.** BE caps at ~20 — sufficient for Galexie's
@@ -389,8 +389,8 @@ re-pay BE's cost without benefit.
 either Shape A/B/C from §6.
 
 **Where the prices-api refactor differs from today's RDS plan.**
-The bucket → Lambda hop is unchanged; only the Lambda's *write
-side* changes (RDS → Hetzner CH over mTLS). The S3 input contract
+The bucket → Lambda hop is unchanged; only the Lambda's _write
+side_ changes (RDS → Hetzner CH over mTLS). The S3 input contract
 is identical. **This is the cheapest possible refactor by
 construction** — the live-feed-to-Lambda half is already
 right, only the storage half flips.

@@ -1,18 +1,28 @@
 ---
-id: "0047"
-title: "Cross-tenant throughput verification — can shared Hetzner CH+Caddy absorb combined BE + prices-api read/write load?"
+id: '0047'
+title: 'Cross-tenant throughput verification — can shared Hetzner CH+Caddy absorb combined BE + prices-api read/write load?'
 type: RESEARCH
 status: backlog
-related_adr: ["0007"]
-related_tasks: ["0045", "0046", "0044"]
-tags: [layer-research, priority-high, effort-medium, hetzner, clickhouse, throughput, capacity, cross-team]
+related_adr: ['0007']
+related_tasks: ['0045', '0046', '0044']
+tags:
+  [
+    layer-research,
+    priority-high,
+    effort-medium,
+    hetzner,
+    clickhouse,
+    throughput,
+    capacity,
+    cross-team,
+  ]
 links:
-  - "../blocked/0045_RESEARCH_cross-team-bundle-with-be-on-hetzner-ch-tenancy/notes/G-be-agreement-record.md"
-  - "../blocked/0045_RESEARCH_cross-team-bundle-with-be-on-hetzner-ch-tenancy/notes/G-be-conversation-brief.md"
-  - "../archive/0046_RESEARCH_empirical-prices-ch-storage-estimate-from-10k-ledgers/notes/G-empirical-storage-estimate.md"
-  - "../../2-adrs/0007_live-data-sink-on-shared-hetzner-clickhouse.md"
-  - "../../../../soroban-block-explorer/lore/1-tasks/active/0216_RESEARCH_hetzner-clickhouse-deploy/README.md"
-  - "../../../../soroban-block-explorer/lore/1-tasks/active/0227_FEATURE_infra-hetzner-ansible-playbook.md"
+  - '../blocked/0045_RESEARCH_cross-team-bundle-with-be-on-hetzner-ch-tenancy/notes/G-be-agreement-record.md'
+  - '../blocked/0045_RESEARCH_cross-team-bundle-with-be-on-hetzner-ch-tenancy/notes/G-be-conversation-brief.md'
+  - '../archive/0046_RESEARCH_empirical-prices-ch-storage-estimate-from-10k-ledgers/notes/G-empirical-storage-estimate.md'
+  - '../../2-adrs/0007_live-data-sink-on-shared-hetzner-clickhouse.md'
+  - '../../../../soroban-block-explorer/lore/1-tasks/active/0216_RESEARCH_hetzner-clickhouse-deploy/README.md'
+  - '../../../../soroban-block-explorer/lore/1-tasks/active/0227_FEATURE_infra-hetzner-ansible-playbook.md'
 history:
   - date: 2026-05-19
     status: backlog
@@ -88,14 +98,14 @@ hardware is different.
 
 Build a write-load and read-load model:
 
-| Lambda | Trigger | Write rate per env | CH op |
-|---|---|---:|---|
-| Ledger Processor (0038) | S3 event | ~1 INSERT per 5s (one per ledger) | INSERT into `price_ohlcv_1m` per swap/trade event |
-| Current Price Updater (0039) | EventBridge 1min | 1 batch INSERT per minute | UPSERT into `current_prices` |
-| Oracle Fetcher (0039) | EventBridge 5min | 1 INSERT per 5min | INSERT into `oracle_prices` (also driven by REFLECTOR events via Ledger Processor) |
-| Asset Discovery (0039) | EventBridge 1hr | 1 small INSERT per hour | UPSERT into `assets` |
-| Cleanup Worker (0039) | EventBridge daily | 1 ALTER TABLE per day | DROP PARTITION (cheap) |
-| API read handlers (0040) | API Gateway | up to ~100 req/s per key | SELECT from `price_ohlcv_*` / `current_prices` / `oracle_prices` |
+| Lambda                       | Trigger           |                Write rate per env | CH op                                                                              |
+| ---------------------------- | ----------------- | --------------------------------: | ---------------------------------------------------------------------------------- |
+| Ledger Processor (0038)      | S3 event          | ~1 INSERT per 5s (one per ledger) | INSERT into `price_ohlcv_1m` per swap/trade event                                  |
+| Current Price Updater (0039) | EventBridge 1min  |         1 batch INSERT per minute | UPSERT into `current_prices`                                                       |
+| Oracle Fetcher (0039)        | EventBridge 5min  |                 1 INSERT per 5min | INSERT into `oracle_prices` (also driven by REFLECTOR events via Ledger Processor) |
+| Asset Discovery (0039)       | EventBridge 1hr   |           1 small INSERT per hour | UPSERT into `assets`                                                               |
+| Cleanup Worker (0039)        | EventBridge daily |             1 ALTER TABLE per day | DROP PARTITION (cheap)                                                             |
+| API read handlers (0040)     | API Gateway       |          up to ~100 req/s per key | SELECT from `price_ohlcv_*` / `current_prices` / `oracle_prices`                   |
 
 Aggregate per env, then × 3 envs (dev/staging/prod) where prod
 dominates.
@@ -104,14 +114,14 @@ dominates.
 
 For each subsystem, surface the limit and how close we'd run:
 
-| Subsystem | Limit | Current BE load | + prices-api projected | Headroom |
-|---|---|---|---|---|
-| Caddy `max_keepalive_conns` | TBD per BE | TBD | TBD | TBD |
-| CH `max_concurrent_queries` | default 100 | TBD | TBD | TBD |
-| CH IO throughput (NVMe ~3 GB/s read, ~1.5 GB/s write) | hardware-bound | TBD | TBD | TBD |
-| CH CPU (8-32 cores typical) | hardware-bound | TBD | TBD | TBD |
-| MV chain CPU (background) | bounded fraction | n/a | depends on event rate | TBD |
-| Caddy throughput | bounded by single process | TBD | TBD | TBD |
+| Subsystem                                             | Limit                     | Current BE load | + prices-api projected | Headroom |
+| ----------------------------------------------------- | ------------------------- | --------------- | ---------------------- | -------- |
+| Caddy `max_keepalive_conns`                           | TBD per BE                | TBD             | TBD                    | TBD      |
+| CH `max_concurrent_queries`                           | default 100               | TBD             | TBD                    | TBD      |
+| CH IO throughput (NVMe ~3 GB/s read, ~1.5 GB/s write) | hardware-bound            | TBD             | TBD                    | TBD      |
+| CH CPU (8-32 cores typical)                           | hardware-bound            | TBD             | TBD                    | TBD      |
+| MV chain CPU (background)                             | bounded fraction          | n/a             | depends on event rate  | TBD      |
+| Caddy throughput                                      | bounded by single process | TBD             | TBD                    | TBD      |
 
 ### Step 4: Load test (if feasible)
 
@@ -149,15 +159,15 @@ Output one of three:
 ## Acceptance Criteria
 
 - [ ] `notes/G-throughput-verification.md` — single report with:
-  BE current load (from `system.query_log` etc.), prices-api projected
-  load model (per §2), per-subsystem headroom table (§3), load-test
-  results if available (§4), color-coded recommendation (§5).
+      BE current load (from `system.query_log` etc.), prices-api projected
+      load model (per §2), per-subsystem headroom table (§3), load-test
+      results if available (§4), color-coded recommendation (§5).
 - [ ] If GREEN or YELLOW: list concrete tuning asks for BE
-  (Caddy / CH settings), cross-link from task 0045's agreement record.
+      (Caddy / CH settings), cross-link from task 0045's agreement record.
 - [ ] If RED: spawn ADR amendment + task to scope the sidecar-CH
-  build-out. Update 0045's agreement record.
+      build-out. Update 0045's agreement record.
 - [ ] Reproducible: the analytical model and any load-test setup
-  documented so another engineer can re-run after BE 0227 ships.
+      documented so another engineer can re-run after BE 0227 ships.
 
 ## Blocked on
 

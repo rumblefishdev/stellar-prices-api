@@ -1,15 +1,26 @@
 ---
-id: "0020"
-title: "Research SDEX historical backfill options — is a dedicated parser+CH backfill needed?"
+id: '0020'
+title: 'Research SDEX historical backfill options — is a dedicated parser+CH backfill needed?'
 type: RESEARCH
 status: completed
-related_adr: ["0001"]
-related_tasks: ["0012", "0013", "0015", "0021"]
-tags: [layer-research, priority-high, effort-medium, research, sdex, backfill, stream-2, clickhouse, archive-reads]
+related_adr: ['0001']
+related_tasks: ['0012', '0013', '0015', '0021']
+tags:
+  [
+    layer-research,
+    priority-high,
+    effort-medium,
+    research,
+    sdex,
+    backfill,
+    stream-2,
+    clickhouse,
+    archive-reads,
+  ]
 links:
-  - "../../2-adrs/0001_stream1-clickhouse-sourced-amm-backfill.md"
-  - "../0015_RESEARCH_redefine-backfill-with-be-clickhouse-events/notes/G-ch-tables-for-price-calculation.md"
-  - "../../../docs/prices-api-general-overview.md"
+  - '../../2-adrs/0001_stream1-clickhouse-sourced-amm-backfill.md'
+  - '../0015_RESEARCH_redefine-backfill-with-be-clickhouse-events/notes/G-ch-tables-for-price-calculation.md'
+  - '../../../docs/prices-api-general-overview.md'
 history:
   - date: 2026-05-12
     status: backlog
@@ -77,12 +88,12 @@ and G-note.
 
 ### Step 1 — Catalogue Stream 2 options
 
-| Option | Sketch |
-|--------|--------|
-| **A** | Status quo: prices-api owns a Fargate Rust task that does archive reads + offersClaimed extraction directly, writes OHLCV to PG. (Today's §5.6 plan.) |
-| **B** | Run BE's `backfill-runner --target=clickhouse` over the full archive range; query CH `operations_appearances` and the related `transactions` / `ledgers` tables for trade-shaped ops; do a smaller archive-read step only for the `offersClaimed[]` payload (which lives in `OperationResult` and is not unfolded in CH). Hybrid. |
-| **C** | Push BE to add an `sdex_trades` table to CH (the trade-equivalent of `soroban_events`'s full-content unfold for Soroban events). Read-only consumption analogous to Stream 1. Requires BE-side scope expansion. |
-| **D** | CH pre-filter only: use CH `operations_appearances` to compute the set of ledgers containing trade-shaped ops, then run the existing Fargate archive-read task against only that subset. Trim factor TBD. |
+| Option | Sketch                                                                                                                                                                                                                                                                                                                            |
+| ------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **A**  | Status quo: prices-api owns a Fargate Rust task that does archive reads + offersClaimed extraction directly, writes OHLCV to PG. (Today's §5.6 plan.)                                                                                                                                                                             |
+| **B**  | Run BE's `backfill-runner --target=clickhouse` over the full archive range; query CH `operations_appearances` and the related `transactions` / `ledgers` tables for trade-shaped ops; do a smaller archive-read step only for the `offersClaimed[]` payload (which lives in `OperationResult` and is not unfolded in CH). Hybrid. |
+| **C**  | Push BE to add an `sdex_trades` table to CH (the trade-equivalent of `soroban_events`'s full-content unfold for Soroban events). Read-only consumption analogous to Stream 1. Requires BE-side scope expansion.                                                                                                                   |
+| **D**  | CH pre-filter only: use CH `operations_appearances` to compute the set of ledgers containing trade-shaped ops, then run the existing Fargate archive-read task against only that subset. Trim factor TBD.                                                                                                                         |
 
 ### Step 2 — Quantify each option
 
@@ -142,8 +153,7 @@ notes/
 
 ## Implementation Notes
 
-- Inputs catalogued: Stellar protocol XDR spec (current at protocol
-  22) — `Stellar-transaction.x` (`ManageSellOfferResult`,
+- Inputs catalogued: Stellar protocol XDR spec (current at protocol 22) — `Stellar-transaction.x` (`ManageSellOfferResult`,
   `ManageBuyOfferResult`, `PathPaymentStrict*Result`, `ClaimAtom`,
   `Asset`) and `Stellar-ledger.x` (`LedgerCloseMeta`,
   `TransactionResultMeta`); 0015 G-note for the CH-table shape;
@@ -167,8 +177,7 @@ notes/
 ### From Plan
 
 1. **Four options enumerated, then quantitatively
-   discriminated.** The original task framing (per S-note of
-   0015) was "is dedicated parser+CH needed?" Translating that
+   discriminated.** The original task framing (per S-note of 0015) was "is dedicated parser+CH needed?" Translating that
    into A/B/C/D comparable on the same axes gave a defensible
    discriminator (trim ratio) for the close call between A and B.
 

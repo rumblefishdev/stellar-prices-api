@@ -1,20 +1,32 @@
 ---
-id: "0052"
-title: "ClickHouse mTLS client shared crate — cert loading from Secrets Manager + warm connection pool"
+id: '0052'
+title: 'ClickHouse mTLS client shared crate — cert loading from Secrets Manager + warm connection pool'
 type: FEATURE
 status: backlog
-related_adr: ["0006", "0007"]
-related_tasks: ["0050", "0038", "0039", "0040", "0028", "0051"]
-tags: [layer-backend, priority-high, effort-medium, milestone-M1, rust, clickhouse, mtls, shared-crate, lambda, secrets-manager]
+related_adr: ['0006', '0007']
+related_tasks: ['0050', '0038', '0039', '0040', '0028', '0051']
+tags:
+  [
+    layer-backend,
+    priority-high,
+    effort-medium,
+    milestone-M1,
+    rust,
+    clickhouse,
+    mtls,
+    shared-crate,
+    lambda,
+    secrets-manager,
+  ]
 milestone: 1
 links:
-  - "../../../docs/prices-api-general-overview.md"
-  - "../../2-adrs/0006_runtime-framework-rust-axum.md"
-  - "../../2-adrs/0007_live-data-sink-on-shared-hetzner-clickhouse.md"
-  - "./0050_FEATURE_be-side-prep-sns-mtls-prices-db-provisioning.md"
-  - "../blocked/0038_FEATURE_prices-ledger-processor-lambda.md"
-  - "../blocked/0039_FEATURE_prices-periodic-workers-lambda-set.md"
-  - "../blocked/0040_FEATURE_prices-api-gateway-and-read-handlers.md"
+  - '../../../docs/prices-api-general-overview.md'
+  - '../../2-adrs/0006_runtime-framework-rust-axum.md'
+  - '../../2-adrs/0007_live-data-sink-on-shared-hetzner-clickhouse.md'
+  - './0050_FEATURE_be-side-prep-sns-mtls-prices-db-provisioning.md'
+  - '../blocked/0038_FEATURE_prices-ledger-processor-lambda.md'
+  - '../blocked/0039_FEATURE_prices-periodic-workers-lambda-set.md'
+  - '../blocked/0040_FEATURE_prices-api-gateway-and-read-handlers.md'
 history:
   - date: 2026-05-21
     status: backlog

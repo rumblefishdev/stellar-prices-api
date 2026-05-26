@@ -1,14 +1,14 @@
 ---
-title: "No Phoenix stable pool exists on mainnet (2026-05-15) — 11/11 factory pools are XYK"
+title: 'No Phoenix stable pool exists on mainnet (2026-05-15) — 11/11 factory pools are XYK'
 type: synthesis
 status: mature
 spawned_from: ../README.md
 spawns: []
 tags: [phoenix, stable-pool, negative-result, factory-survey, stream-1-consumer]
 links:
-  - "R-phoenix-xyk-pool-interface.md"
-  - "evidence/phoenix_pool_inventory_2026-05-15.txt"
-  - "../../0018_RESEARCH_decode-per-amm-swap-event-shapes/notes/G-amm-swap-event-shapes.md"
+  - 'R-phoenix-xyk-pool-interface.md'
+  - 'evidence/phoenix_pool_inventory_2026-05-15.txt'
+  - '../../0018_RESEARCH_decode-per-amm-swap-event-shapes/notes/G-amm-swap-event-shapes.md'
 history:
   - date: 2026-05-15
     status: mature
@@ -53,6 +53,7 @@ correctly so, because there is nothing to verify against yet.
 ### 1. No stable pool
 
 The token pair on the only "different-WASM" pool is **PHO/USDC**:
+
 - `token_a` = `CBZ7M5B3Y4WWBZ5XK5UZCAFOEZ23KSSZXYECYX3IXM6E2JOLQC52DK32`
   → `symbol = "PHO"`, `name = "PHO:GAX5TXB5RYJNLBUR477PEXM4X75APK2PGMTN6KEFQSESGWFXEAKFSXJO"`
   (Phoenix's own governance token).
@@ -69,10 +70,10 @@ this pool is still XYK, just a different build.
 
 Despite reaching the same answer (XYK), the two WASM hashes differ:
 
-| WASM SHA-256 | Size | Count | Example pool |
-|---|---|---|---|
-| `167ab414...506c` | 36810 B | 10 | XLM/USDC (CBHCRSVX...BIZX) |
-| `13b158655e...f2ca` | 37047 B |  1 | PHO/USDC (CD5XNKK3...IAA) |
+| WASM SHA-256        | Size    | Count | Example pool               |
+| ------------------- | ------- | ----- | -------------------------- |
+| `167ab414...506c`   | 36810 B | 10    | XLM/USDC (CBHCRSVX...BIZX) |
+| `13b158655e...f2ca` | 37047 B | 1     | PHO/USDC (CD5XNKK3...IAA)  |
 
 Indistinguishable by external observation:
 
@@ -108,7 +109,7 @@ For the prices-api consumer (task 0018 / stream-1):
 
 2. **The XYK extractor must tolerate two WASMs.** The consumer
    should not key off WASM hash for XYK detection unless it accepts
-   *both* observed XYK hashes (and any future XYK build that Phoenix
+   _both_ observed XYK hashes (and any future XYK build that Phoenix
    ships). Better discriminator: `Config.pool_type == 0` AND the
    `swap` event grouping has 8 events. The hash-set approach risks
    silently dropping the PHO/USDC pool from price feeds.
@@ -124,12 +125,12 @@ For the prices-api consumer (task 0018 / stream-1):
 ## Acceptance criteria mapping for task 0032
 
 - [ ] At least one mainnet stable-pool deployment identified
-  → **Negative result**: none exist as of 2026-05-15.
+      → **Negative result**: none exist as of 2026-05-15.
 - [ ] One real stable-pool swap event grouping decoded and archived
-  → **Cannot satisfy**; no stable pool exists to decode from.
+      → **Cannot satisfy**; no stable pool exists to decode from.
 - [x] Consumer's stable-pool decoder spec status documented
-  → This note serves as the documentation: source-only, no
-  observation possible until Phoenix actually ships a stable pool.
+      → This note serves as the documentation: source-only, no
+      observation possible until Phoenix actually ships a stable pool.
 
 The task is therefore appropriate to close as a **negative-result
 synthesis** rather than left active waiting for a stable pool to

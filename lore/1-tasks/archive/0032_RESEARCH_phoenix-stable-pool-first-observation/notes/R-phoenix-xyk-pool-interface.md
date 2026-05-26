@@ -1,13 +1,13 @@
 ---
-title: "Phoenix XYK pool contract interface (XLM/USDC reference) — contrast surface for stable pool"
+title: 'Phoenix XYK pool contract interface (XLM/USDC reference) — contrast surface for stable pool'
 type: research
 status: seed
 spawned_from: ../README.md
 spawns: []
 tags: [phoenix, xyk, contract-interface, reference, stable-pool-contrast]
 links:
-  - "https://github.com/Phoenix-Protocol-Group/phoenix-contracts/blob/main/contracts/pool/src/contract.rs"
-  - "https://github.com/Phoenix-Protocol-Group/phoenix-contracts/blob/main/contracts/pool_stable/src/contract.rs"
+  - 'https://github.com/Phoenix-Protocol-Group/phoenix-contracts/blob/main/contracts/pool/src/contract.rs'
+  - 'https://github.com/Phoenix-Protocol-Group/phoenix-contracts/blob/main/contracts/pool_stable/src/contract.rs'
 history:
   - date: 2026-05-15
     status: seed

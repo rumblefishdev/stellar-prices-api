@@ -62,7 +62,6 @@ export interface EnvironmentConfig {
     /** Old-data partition drop (ALTER TABLE … DROP PARTITION). */
     readonly cleanup: string;
   };
-
 }
 
 /**
@@ -74,9 +73,7 @@ export function validateConfig(config: EnvironmentConfig): void {
   const errors: string[] = [];
 
   if (config.envName !== 'production') {
-    errors.push(
-      `envName must be "production", got: "${config.envName}"`,
-    );
+    errors.push(`envName must be "production", got: "${config.envName}"`);
   }
 
   if (!config.awsRegion || !/^[a-z]{2}-[a-z]+-\d+$/.test(config.awsRegion)) {

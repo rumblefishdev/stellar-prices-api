@@ -1,19 +1,19 @@
 ---
-title: "Stream 2 (SDEX) backfill — four options"
+title: 'Stream 2 (SDEX) backfill — four options'
 type: idea
 status: mature
 spawned_from: ../README.md
 spawns: []
 tags: [sdex, backfill, options, clickhouse, archive-reads]
 links:
-  - "./R-sdex-operation-xdr-shape.md"
-  - "./G-sdex-trade-extraction-design.md"
-  - "../../../archive/0015_RESEARCH_redefine-backfill-with-be-clickhouse-events/notes/I-integration-options.md"
+  - './R-sdex-operation-xdr-shape.md'
+  - './G-sdex-trade-extraction-design.md'
+  - '../../../archive/0015_RESEARCH_redefine-backfill-with-be-clickhouse-events/notes/I-integration-options.md'
 history:
   - date: 2026-05-12
     status: mature
     who: okarcz
-    note: "Four options expanded from the README sketches; trade-offs surfaced for synthesis."
+    note: 'Four options expanded from the README sketches; trade-offs surfaced for synthesis.'
 ---
 
 # Stream 2 (SDEX) backfill options
@@ -66,8 +66,8 @@ for the filtered ledger set, decoding the same way Option A does.
   already there.
 - Modest speedup proportional to the trim ratio. If 50% of
   ledgers carry no SDEX-shaped op, you halve the bytes-read.
-- Decoder logic is unchanged from Option A — only the *which
-  ledgers* changes.
+- Decoder logic is unchanged from Option A — only the _which
+  ledgers_ changes.
 
 **Cons:**
 
@@ -108,7 +108,7 @@ data directly, no archive walk.
   If BE does it, BE pays; the prices-api timeline still depends
   on when BE finishes.
 - No signal from BE that they want this. ADR 0044 §Decision §4a's
-  full-content unfold was specifically *for Soroban events*
+  full-content unfold was specifically _for Soroban events_
   because BE wanted the analytical query path. SDEX trades already
   have a working answer (archive + Horizon `/trades`) — BE may
   not see the same urgency.
@@ -145,14 +145,14 @@ the Stream-2 window is long enough to amortise the CH population.
 
 ## Comparison
 
-| Dimension | A | B | C | D |
-|-----------|---|---|---|---|
-| Marginal infra over baseline | None | Reuses 0017 CH | None (BE owns) | New CH instance |
-| Speedup vs A | 1× | 1.5–2× (est.) | Potentially 5–10× | 1.5–2× |
-| Depends on cross-team work | No | No (BE runner ships today) | **Yes (BE-side feature)** | No |
-| Risk if dependency slips | n/a | low (graceful fallback to A) | high (gate) | low |
-| Stellar protocol changes affect | only A's decoder | only A's decoder | BE's writer | only A's decoder |
-| §10 cost estimate aligned | Yes | Yes (no marginal cost) | Unknown | Adds CH op cost |
+| Dimension                       | A                | B                            | C                         | D                |
+| ------------------------------- | ---------------- | ---------------------------- | ------------------------- | ---------------- |
+| Marginal infra over baseline    | None             | Reuses 0017 CH               | None (BE owns)            | New CH instance  |
+| Speedup vs A                    | 1×               | 1.5–2× (est.)                | Potentially 5–10×         | 1.5–2×           |
+| Depends on cross-team work      | No               | No (BE runner ships today)   | **Yes (BE-side feature)** | No               |
+| Risk if dependency slips        | n/a              | low (graceful fallback to A) | high (gate)               | low              |
+| Stellar protocol changes affect | only A's decoder | only A's decoder             | BE's writer               | only A's decoder |
+| §10 cost estimate aligned       | Yes              | Yes (no marginal cost)       | Unknown                   | Adds CH op cost  |
 
 ## Discriminating measurement
 

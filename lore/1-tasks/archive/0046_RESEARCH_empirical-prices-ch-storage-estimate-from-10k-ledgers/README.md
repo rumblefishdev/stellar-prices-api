@@ -1,16 +1,26 @@
 ---
-id: "0046"
-title: "Empirical prices-api CH storage estimate from 10k mainnet ledgers — extrapolate to Hetzner server + monthly/yearly cost"
+id: '0046'
+title: 'Empirical prices-api CH storage estimate from 10k mainnet ledgers — extrapolate to Hetzner server + monthly/yearly cost'
 type: RESEARCH
 status: completed
-related_adr: ["0007"]
-related_tasks: ["0045", "0044", "0047"]
-tags: [layer-research, priority-high, effort-medium, hetzner, clickhouse, sizing, cost, capacity]
+related_adr: ['0007']
+related_tasks: ['0045', '0044', '0047']
+tags:
+  [
+    layer-research,
+    priority-high,
+    effort-medium,
+    hetzner,
+    clickhouse,
+    sizing,
+    cost,
+    capacity,
+  ]
 links:
-  - "../blocked/0045_RESEARCH_cross-team-bundle-with-be-on-hetzner-ch-tenancy/notes/G-be-conversation-brief.md"
-  - "../../2-adrs/0007_live-data-sink-on-shared-hetzner-clickhouse.md"
-  - "../archive/0044_RESEARCH_refactor-architecture-shared-galexie-hetzner-clickhouse/notes/R-cost-delta.md"
-  - "../archive/0044_RESEARCH_refactor-architecture-shared-galexie-hetzner-clickhouse/notes/R-ingest-target-mapping.md"
+  - '../blocked/0045_RESEARCH_cross-team-bundle-with-be-on-hetzner-ch-tenancy/notes/G-be-conversation-brief.md'
+  - '../../2-adrs/0007_live-data-sink-on-shared-hetzner-clickhouse.md'
+  - '../archive/0044_RESEARCH_refactor-architecture-shared-galexie-hetzner-clickhouse/notes/R-cost-delta.md'
+  - '../archive/0044_RESEARCH_refactor-architecture-shared-galexie-hetzner-clickhouse/notes/R-ingest-target-mapping.md'
 history:
   - date: 2026-05-19
     status: backlog

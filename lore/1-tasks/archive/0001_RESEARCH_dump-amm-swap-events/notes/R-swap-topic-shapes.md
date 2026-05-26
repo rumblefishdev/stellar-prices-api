@@ -1,5 +1,5 @@
 ---
-title: "Soroban swap-like contract event topic shapes observed in mainnet ledgers 62016000–62079999"
+title: 'Soroban swap-like contract event topic shapes observed in mainnet ledgers 62016000–62079999'
 type: research
 status: developing
 spawned_from: ../README.md
@@ -7,19 +7,19 @@ spawns:
   - S-amm-trades-schema-§11-1-resolved.md
 tags: [soroban, amm, cap-67, schema-validation]
 links:
-  - "../../../../../docs/database-schema/amm-trades-schema.md"
-  - "evidence/swap_event_sample.json"
-  - "evidence/trade_event_sample.json"
-  - "evidence/soroswap_pair_swap_sample.json"
-  - "evidence/soroswap_router_swap_sample.json"
-  - "evidence/soroswap_aggregator_swap_sample.json"
-  - "evidence/sw_v1_false_positive_sample.json"
-  - "evidence/wider_sample_histogram.txt"
+  - '../../../../../docs/database-schema/amm-trades-schema.md'
+  - 'evidence/swap_event_sample.json'
+  - 'evidence/trade_event_sample.json'
+  - 'evidence/soroswap_pair_swap_sample.json'
+  - 'evidence/soroswap_router_swap_sample.json'
+  - 'evidence/soroswap_aggregator_swap_sample.json'
+  - 'evidence/sw_v1_false_positive_sample.json'
+  - 'evidence/wider_sample_histogram.txt'
 history:
   - date: 2026-05-07
     status: seed
     who: okarcz
-    note: "Captured from running tools/dump-swap-events against .temp/FC4DB5FF--62016000-62079999"
+    note: 'Captured from running tools/dump-swap-events against .temp/FC4DB5FF--62016000-62079999'
   - date: 2026-05-07
     status: developing
     who: claude
@@ -43,22 +43,22 @@ Sample: 614 zstd-compressed `LedgerCloseMetaBatch` files in
 Aggregate counts (Diagnostic-source events excluded; consensus tx-level +
 per-op only):
 
-| Metric | Value |
-|---|---|
-| Files scanned | 614 / 614 |
+| Metric                     | Value     |
+| -------------------------- | --------- |
+| Files scanned              | 614 / 614 |
 | Total contract events seen | 2,738,082 |
-| Distinct `topic_0` symbols | 45 |
+| Distinct `topic_0` symbols | 45        |
 
 ## Swap-like topic_0 symbols observed
 
-Top of the histogram restricted to topics that *might* represent an AMM
+Top of the histogram restricted to topics that _might_ represent an AMM
 trade:
 
-| `topic_0` | Hits | Distinct emitters | Pattern signal |
-|---|---:|---:|---|
-| `trade` | 91 | 29 | Pool-level: 29/29 of these contracts also emit `update_reserves` |
-| `swap` | 53 | **1** | Factory/router: same contract also emits `add_pool` (2) and `config_rewards` (44) |
-| `SwappedFromVUsd` | 1 | 1 | Different protocol — virtual-USD synthetic, not a constant-product AMM |
+| `topic_0`         | Hits | Distinct emitters | Pattern signal                                                                    |
+| ----------------- | ---: | ----------------: | --------------------------------------------------------------------------------- |
+| `trade`           |   91 |                29 | Pool-level: 29/29 of these contracts also emit `update_reserves`                  |
+| `swap`            |   53 |             **1** | Factory/router: same contract also emits `add_pool` (2) and `config_rewards` (44) |
+| `SwappedFromVUsd` |    1 |                 1 | Different protocol — virtual-USD synthetic, not a constant-product AMM            |
 
 Phoenix-style swap topics were **not observed** in this window. This is not
 proof of absence project-wide; the sample is 3.5 days. See "Open questions"
@@ -197,7 +197,7 @@ cd ../..
 > to surface several swap topics. A second run on a ~4-day window roughly
 > 5 weeks later (ledgers 62400000–62463999) was added to validate and
 > extend the findings. **The original 3.5-day section above is preserved
-> verbatim** — this section *augments*, not replaces.
+> verbatim** — this section _augments_, not replaces.
 
 ### Source
 
@@ -209,12 +209,12 @@ cd ../..
 - Diagnostic-source events still excluded (consensus tx-level + per-op
   only).
 
-| Metric | Value |
-|---|---:|
-| Files scanned | 60,545 / 60,545 |
-| Files failed | 0 |
-| Total contract events seen | 234,312,389 |
-| Distinct `topic_0` strings (consensus only) | ~120 |
+| Metric                                      |           Value |
+| ------------------------------------------- | --------------: |
+| Files scanned                               | 60,545 / 60,545 |
+| Files failed                                |               0 |
+| Total contract events seen                  |     234,312,389 |
+| Distinct `topic_0` strings (consensus only) |            ~120 |
 
 ### Headline change vs. the 3.5-day window
 
@@ -223,23 +223,23 @@ The wider sample shows that was an artefact of low volume — at least
 **five distinct swap-bearing topic patterns** are observable, and the
 single-emitter pattern for `Symbol("swap")` was misleading.
 
-| `topic_0` | First sample (3.5 d) | Wider sample (~4 d, 5 wks later) | New finding |
-|---|---:|---:|---|
-| `Symbol("swap")` | 53 / 1 emitter | **23,567 / 44 emitters** | **No longer single-router**: now a long-tail mix of routers + pools |
-| `Symbol("trade")` | 91 / 29 emitters | 19,050 (volume grew, distinct count not enumerated this run) | Aquarius pattern stable |
-| `Symbol("update_reserves")` | 98 / 31 emitters | 20,222 | Aquarius reserve updates, paired with `trade` |
-| `String("SoroswapPair")` | 0 | **2,512** | **NEW** — Soroswap pool events; 79 distinct emitters; uses *String*, not *Symbol* |
-| `String("SoroswapRouter")` | 0 | **885** | **NEW** — Soroswap router |
-| `String("SoroswapAggregator")` | 0 | **18** | **NEW** — Soroswap multi-hop aggregator |
-| `Symbol("SwappedFromVUsd")` | 1 | 34 | Allbridge virtual-USD; out of scope |
-| `Symbol("SwappedToVUsd")` | 0 | 37 | **NEW** — Allbridge counterpart |
-| `Symbol("sw_v1")` | 0 | 336 | **False positive** — see below |
+| `topic_0`                      | First sample (3.5 d) |                             Wider sample (~4 d, 5 wks later) | New finding                                                                       |
+| ------------------------------ | -------------------: | -----------------------------------------------------------: | --------------------------------------------------------------------------------- |
+| `Symbol("swap")`               |       53 / 1 emitter |                                     **23,567 / 44 emitters** | **No longer single-router**: now a long-tail mix of routers + pools               |
+| `Symbol("trade")`              |     91 / 29 emitters | 19,050 (volume grew, distinct count not enumerated this run) | Aquarius pattern stable                                                           |
+| `Symbol("update_reserves")`    |     98 / 31 emitters |                                                       20,222 | Aquarius reserve updates, paired with `trade`                                     |
+| `String("SoroswapPair")`       |                    0 |                                                    **2,512** | **NEW** — Soroswap pool events; 79 distinct emitters; uses _String_, not _Symbol_ |
+| `String("SoroswapRouter")`     |                    0 |                                                      **885** | **NEW** — Soroswap router                                                         |
+| `String("SoroswapAggregator")` |                    0 |                                                       **18** | **NEW** — Soroswap multi-hop aggregator                                           |
+| `Symbol("SwappedFromVUsd")`    |                    1 |                                                           34 | Allbridge virtual-USD; out of scope                                               |
+| `Symbol("SwappedToVUsd")`      |                    0 |                                                           37 | **NEW** — Allbridge counterpart                                                   |
+| `Symbol("sw_v1")`              |                    0 |                                                          336 | **False positive** — see below                                                    |
 
 ### Soroswap topic shape (the one we couldn't see in the 3.5-day window)
 
 Soroswap does **not** emit `Symbol("swap")` from its pool contracts.
-Instead it uses a **two-topic** structure where `topics[0]` is a *String*
-naming the contract role and `topics[1]` is a *Symbol* naming the
+Instead it uses a **two-topic** structure where `topics[0]` is a _String_
+naming the contract role and `topics[1]` is a _Symbol_ naming the
 operation. This makes the §7 filter strictly more complex than the first
 sample suggested — `topics[0]` alone is insufficient for Soroswap.
 
@@ -253,12 +253,12 @@ topics = [
 Sub-event distribution for `SoroswapPair` in this window
 (`topics[0]=String("SoroswapPair")`):
 
-| `topics[1]` | Count | Meaning |
-|---|---:|---|
-| `Symbol("sync")` | 1,256 | Reserve update (post-anything) — analogous to Aquarius `update_reserves` |
-| `Symbol("swap")` | **1,241** | The actual Soroswap pool swap event |
-| `Symbol("withdraw")` | 8 | LP withdrawal |
-| `Symbol("deposit")` | 7 | LP deposit |
+| `topics[1]`          |     Count | Meaning                                                                  |
+| -------------------- | --------: | ------------------------------------------------------------------------ |
+| `Symbol("sync")`     |     1,256 | Reserve update (post-anything) — analogous to Aquarius `update_reserves` |
+| `Symbol("swap")`     | **1,241** | The actual Soroswap pool swap event                                      |
+| `Symbol("withdraw")` |         8 | LP withdrawal                                                            |
+| `Symbol("deposit")`  |         7 | LP deposit                                                               |
 
 #### Soroswap pool swap data shape
 
@@ -303,14 +303,14 @@ the pool-level event to avoid double-counting multi-hop swaps.
 In this window 44 distinct contracts emit the literal `Symbol("swap")`.
 Top emitters (events / contract):
 
-| Events | Contract |
-|---:|---|
-| 11,947 | `CBQDHNBFBZYE4MKPWBSJOPIYLW4SFSXAXUTSXJN76GNKYVYPCKWC6QUK` (the original sole emitter from the 3.5-day window) |
-| 4,128 | `CBHCRSVX3ZZ7EGTSYMKPEFGZNWRVCSESQR3UABET4MIW52N4EVU6BIZX` |
-| 2,706 | `CCR2CH4GQVCZHG7CHFVMNANCK45CU5DVKXZIIITDZQAU3CEJZ7RQH2MQ` |
-| 2,480 | `CDMIM23WOUL5CZBKX3GOA3V5R5AMVIMTCP52KCDQORWELAPLJ27WZCHL` |
-| 440 | `CBCZGGNOEUZG4CAAE7TGTQQHETZMKUT4OIPFHHPKEUX46U4KXBBZ3GLH` |
-| (+ 39 more) | … |
+|      Events | Contract                                                                                                       |
+| ----------: | -------------------------------------------------------------------------------------------------------------- |
+|      11,947 | `CBQDHNBFBZYE4MKPWBSJOPIYLW4SFSXAXUTSXJN76GNKYVYPCKWC6QUK` (the original sole emitter from the 3.5-day window) |
+|       4,128 | `CBHCRSVX3ZZ7EGTSYMKPEFGZNWRVCSESQR3UABET4MIW52N4EVU6BIZX`                                                     |
+|       2,706 | `CCR2CH4GQVCZHG7CHFVMNANCK45CU5DVKXZIIITDZQAU3CEJZ7RQH2MQ`                                                     |
+|       2,480 | `CDMIM23WOUL5CZBKX3GOA3V5R5AMVIMTCP52KCDQORWELAPLJ27WZCHL`                                                     |
+|         440 | `CBCZGGNOEUZG4CAAE7TGTQQHETZMKUT4OIPFHHPKEUX46U4KXBBZ3GLH`                                                     |
+| (+ 39 more) | …                                                                                                              |
 
 The "factory/router pattern, single emitter" hypothesis from the first
 window is **now wrong**. Reading: at least the top four are routers /
@@ -352,7 +352,7 @@ factory/pool addresses.
 What changes for `prices_amm_trades` and the §7 filter:
 
 1. **The `topics[0]`-only filter is insufficient for Soroswap.** The BE
-   indexer's per-venue mapping must match the *contract_id set*, not just
+   indexer's per-venue mapping must match the _contract_id set_, not just
    the topic symbol. For Soroswap pools specifically, the indexer must
    also drop `topics[1] != Symbol("swap")` to avoid emitting trade rows
    for `sync` / `deposit` / `withdraw`.
@@ -367,7 +367,7 @@ What changes for `prices_amm_trades` and the §7 filter:
      `Address`/`U128` payload.
    - Soroswap pool: `String("SoroswapPair") + Symbol("swap")` →
      uniswap-v2-style `Map` payload.
-   Plus likely a Phoenix decoder once attribution lands.
+     Plus likely a Phoenix decoder once attribution lands.
 
 These do not change the DDL in §4 — the typed columns
 `(token_in, token_out, amount_in, amount_out, venue, pair_contract_id)`

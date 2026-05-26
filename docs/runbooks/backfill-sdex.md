@@ -86,14 +86,14 @@ docker compose exec clickhouse clickhouse-client --query \
 
 ## Configuration
 
-| Flag | Env var | Default | Description |
-|------|---------|---------|-------------|
-| `--start` | — | required | First ledger (inclusive) |
-| `--end` | — | required | Last ledger (inclusive) |
-| `--clickhouse-url` | `CLICKHOUSE_URL` | `http://localhost:8123` | ClickHouse HTTP endpoint |
-| `--temp-dir` | `BACKFILL_TEMP_DIR` | `.temp/sdex-backfill` | Scratch directory for partitions |
-| `--keep-partitions` | — | false | Keep downloaded partitions after indexing |
-| `--verbose` / `-v` | — | false | Enable per-partition info logs |
+| Flag                | Env var             | Default                 | Description                               |
+| ------------------- | ------------------- | ----------------------- | ----------------------------------------- |
+| `--start`           | —                   | required                | First ledger (inclusive)                  |
+| `--end`             | —                   | required                | Last ledger (inclusive)                   |
+| `--clickhouse-url`  | `CLICKHOUSE_URL`    | `http://localhost:8123` | ClickHouse HTTP endpoint                  |
+| `--temp-dir`        | `BACKFILL_TEMP_DIR` | `.temp/sdex-backfill`   | Scratch directory for partitions          |
+| `--keep-partitions` | —                   | false                   | Keep downloaded partitions after indexing |
+| `--verbose` / `-v`  | —                   | false                   | Enable per-partition info logs            |
 
 ## Cloud push
 

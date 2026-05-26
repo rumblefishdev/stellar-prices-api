@@ -1,17 +1,17 @@
 ---
-title: "Per-AMM Soroban swap event shapes — consumer spec for prices-api Tranche 1"
+title: 'Per-AMM Soroban swap event shapes — consumer spec for prices-api Tranche 1'
 type: generation
 status: developing
 spawned_from: ../README.md
 spawns: []
 tags: [soroban, amm, soroswap, aquarius, phoenix, consumer-spec, stream-1]
 links:
-  - "evidence/soroswap_pair_swap_decode.json"
-  - "R-be-storage-format.md"
-  - "../../archive/0001_RESEARCH_dump-amm-swap-events/notes/R-swap-topic-shapes.md"
-  - "../../archive/0002_RESEARCH_amm-venue-attribution/notes/R-soroswap-registry.md"
-  - "https://github.com/soroswap/core"
-  - "../../../2-adrs/0001_stream1-clickhouse-sourced-amm-backfill.md"
+  - 'evidence/soroswap_pair_swap_decode.json'
+  - 'R-be-storage-format.md'
+  - '../../archive/0001_RESEARCH_dump-amm-swap-events/notes/R-swap-topic-shapes.md'
+  - '../../archive/0002_RESEARCH_amm-venue-attribution/notes/R-soroswap-registry.md'
+  - 'https://github.com/soroswap/core'
+  - '../../../2-adrs/0001_stream1-clickhouse-sourced-amm-backfill.md'
 history:
   - date: 2026-05-15
     status: developing
@@ -34,10 +34,10 @@ can be coded against a real spec instead of a guess. The spec is at
 two levels:
 
 1. **ScVal level** — the decoded event as `(topics: Vec<ScVal>, data:
-   ScVal)`. This is the *protocol* shape the AMM contract emits.
+ScVal)`. This is the _protocol_ shape the AMM contract emits.
 2. **CH storage level** — how BE persists the event into
-   `soroban_events.topics_xdr` / `.data_xdr`. This is the *consumer
-   read* shape, which is BE's custom tagged-JSON encoding, not raw
+   `soroban_events.topics_xdr` / `.data_xdr`. This is the _consumer
+   read_ shape, which is BE's custom tagged-JSON encoding, not raw
    XDR (see `R-be-storage-format.md`).
 
 Each section below covers both levels.
@@ -54,11 +54,11 @@ Canonical mainnet contract registry: archive task 0002
 
 Three Soroswap event "roles" exist, with distinct `topic[0]` strings:
 
-| Role | `topic[0]` value | Authority for trade extraction? |
-|---|---|---|
-| `SoroswapPair` | pool-level swap | **YES** — emitted by the pool contract per hop, has all the on-chain amounts |
-| `SoroswapRouter` | user-facing routed swap | No (convenience event; the pool event is the source of truth and a single user-facing swap = N pair events for N hops) |
-| `SoroswapAggregator` | cross-protocol aggregated swap | No (same reasoning; pool event(s) are the truth) |
+| Role                 | `topic[0]` value               | Authority for trade extraction?                                                                                        |
+| -------------------- | ------------------------------ | ---------------------------------------------------------------------------------------------------------------------- |
+| `SoroswapPair`       | pool-level swap                | **YES** — emitted by the pool contract per hop, has all the on-chain amounts                                           |
+| `SoroswapRouter`     | user-facing routed swap        | No (convenience event; the pool event is the source of truth and a single user-facing swap = N pair events for N hops) |
+| `SoroswapAggregator` | cross-protocol aggregated swap | No (same reasoning; pool event(s) are the truth)                                                                       |
 
 The Tranche 1 consumer **must extract from `SoroswapPair` swap events
 only** to avoid double-counting multi-hop routes.
@@ -80,10 +80,10 @@ Fresh decoded sample: `evidence/soroswap_pair_swap_decode.json`
 
 **Topics** (`Vec<ScVal>`, length 2):
 
-| Position | Type | Value | XDR base64 (the full Vec) |
-|---|---|---|---|
+| Position    | Type            | Value            | XDR base64 (the full Vec)                          |
+| ----------- | --------------- | ---------------- | -------------------------------------------------- |
 | `topics[0]` | `ScVal::String` | `"SoroswapPair"` | `AAAAAgAAAA4AAAAMU29yb3N3YXBQYWlyAAAADwAAAARzd2Fw` |
-| `topics[1]` | `ScVal::Symbol` | `"swap"` |  |
+| `topics[1]` | `ScVal::Symbol` | `"swap"`         |                                                    |
 
 **Data** (`ScVal::Map`, 5 entries):
 
@@ -99,13 +99,13 @@ ScVal::Map(Some([
 
 Sample values from the decoded evidence:
 
-| Key | Type | Value |
-|---|---|---|
-| `amount_0_in` | `i128` | `6289308176` |
-| `amount_0_out` | `i128` | `0` |
-| `amount_1_in` | `i128` | `0` |
-| `amount_1_out` | `i128` | `1001363207` |
-| `to` | `Address` | `GDKBWJP7DC2WWSNAVYMF2VJQGFOJMRX6PEHB3L33APCHOIYXBCFRNSQV` (G-account, the trader / recipient) |
+| Key            | Type      | Value                                                                                          |
+| -------------- | --------- | ---------------------------------------------------------------------------------------------- |
+| `amount_0_in`  | `i128`    | `6289308176`                                                                                   |
+| `amount_0_out` | `i128`    | `0`                                                                                            |
+| `amount_1_in`  | `i128`    | `0`                                                                                            |
+| `amount_1_out` | `i128`    | `1001363207`                                                                                   |
+| `to`           | `Address` | `GDKBWJP7DC2WWSNAVYMF2VJQGFOJMRX6PEHB3L33APCHOIYXBCFRNSQV` (G-account, the trader / recipient) |
 
 **Data XDR base64**:
 `AAAAEQAAAAEAAAAFAAAADwAAAAthbW91bnRfMF9pbgAAAAAKAAAAAAAAAAAAAAABdt86EAAAAA8AAAAMYW1vdW50XzBfb3V0AAAACgAAAAAAAAAAAAAAAAAAAAAAAAAPAAAAC2Ftb3VudF8xX2luAAAAAAoAAAAAAAAAAAAAAAAAAAAAAAAADwAAAAxhbW91bnRfMV9vdXQAAAAKAAAAAAAAAAAAAAAAO6+XBwAAAA8AAAACdG8AAAAAABIAAAAAAAAAANQbJf8YtWtJoK4YXVUwMVyWRv55Dh2vewPEdyMXCIsW`
@@ -120,7 +120,7 @@ raw XDR. For this event:
 ```json
 [
   { "type": "string", "value": "SoroswapPair" },
-  { "type": "sym",    "value": "swap" }
+  { "type": "sym", "value": "swap" }
 ]
 ```
 
@@ -130,11 +130,29 @@ raw XDR. For this event:
 {
   "type": "map",
   "value": [
-    { "key": { "type": "sym", "value": "amount_0_in"  }, "value": { "type": "i128", "value": "6289308176" } },
-    { "key": { "type": "sym", "value": "amount_0_out" }, "value": { "type": "i128", "value": "0"          } },
-    { "key": { "type": "sym", "value": "amount_1_in"  }, "value": { "type": "i128", "value": "0"          } },
-    { "key": { "type": "sym", "value": "amount_1_out" }, "value": { "type": "i128", "value": "1001363207" } },
-    { "key": { "type": "sym", "value": "to"           }, "value": { "type": "address", "value": "GDKBWJP7DC2WWSNAVYMF2VJQGFOJMRX6PEHB3L33APCHOIYXBCFRNSQV" } }
+    {
+      "key": { "type": "sym", "value": "amount_0_in" },
+      "value": { "type": "i128", "value": "6289308176" }
+    },
+    {
+      "key": { "type": "sym", "value": "amount_0_out" },
+      "value": { "type": "i128", "value": "0" }
+    },
+    {
+      "key": { "type": "sym", "value": "amount_1_in" },
+      "value": { "type": "i128", "value": "0" }
+    },
+    {
+      "key": { "type": "sym", "value": "amount_1_out" },
+      "value": { "type": "i128", "value": "1001363207" }
+    },
+    {
+      "key": { "type": "sym", "value": "to" },
+      "value": {
+        "type": "address",
+        "value": "GDKBWJP7DC2WWSNAVYMF2VJQGFOJMRX6PEHB3L33APCHOIYXBCFRNSQV"
+      }
+    }
   ]
 }
 ```
@@ -179,10 +197,10 @@ G→pair, event_index 3 = USDC pair→G).
 `i128` raw contract units, **not** stroops universally. The unit per
 token is the contract's published `decimals()`:
 
-| Token in this sample | SAC contract | Decimals | Sample raw → human |
-|---|---|---|---|
-| XLM (native SAC) | `CAS3J7GYLGX…` | 7 | `6289308176` → 628.9308176 XLM |
-| USDC (SAC of `USDC:GA5ZSEJY…`) | `CCW67TSZV3S…` | 7 | `1001363207` → 100.1363207 USDC |
+| Token in this sample           | SAC contract   | Decimals | Sample raw → human              |
+| ------------------------------ | -------------- | -------- | ------------------------------- |
+| XLM (native SAC)               | `CAS3J7GYLGX…` | 7        | `6289308176` → 628.9308176 XLM  |
+| USDC (SAC of `USDC:GA5ZSEJY…`) | `CCW67TSZV3S…` | 7        | `1001363207` → 100.1363207 USDC |
 
 USDC at 7 decimals is the Stellar Classic convention (SAC inherits the
 classic asset's precision; USDC issued by `GA5ZSEJY…` uses 7
@@ -201,7 +219,7 @@ implementation pattern.
 > **TODO** (this task, next iteration): fetch
 > `contracts/pair/src/event.rs` (or the actual filename in
 > `soroswap/core`) and quote the `publish(("SoroswapPair", swap),
-> SwapEvent { ... })` call site verbatim to lock the field names and
+SwapEvent { ... })` call site verbatim to lock the field names and
 > their order in the contract's emit code.
 
 ### 1.6 Filter recipe for the Tranche 1 consumer
@@ -241,10 +259,10 @@ router `CBQDHNBFBZYE…`).
 
 Aquarius emits two distinct swap-shaped events:
 
-| Role | `topic[0]` value | Authority for trade extraction? |
-|---|---|---|
-| Pool `Symbol("trade")` | per-hop pool swap | **YES** — emitted by every Aquarius pool (constant-product, stable, concentrated share this shape) with inline token_in / token_out / trader addresses |
-| Router `Symbol("swap")` | user-facing routed swap | No (duplicates the pool event; use only for user-intent reconstruction or for non-pool-attributed flows) |
+| Role                    | `topic[0]` value        | Authority for trade extraction?                                                                                                                        |
+| ----------------------- | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Pool `Symbol("trade")`  | per-hop pool swap       | **YES** — emitted by every Aquarius pool (constant-product, stable, concentrated share this shape) with inline token_in / token_out / trader addresses |
+| Router `Symbol("swap")` | user-facing routed swap | No (duplicates the pool event; use only for user-intent reconstruction or for non-pool-attributed flows)                                               |
 
 Reasoning is the same as Soroswap: a multi-hop user swap fires N pool
 `trade` events plus 1 router `swap` event, and double-counting must be
@@ -265,12 +283,12 @@ Fresh decoded sample: `evidence/aquarius_pool_trade_decode.json`
 
 **Topics** (`Vec<ScVal>`, length 4 — inline tokens + trader):
 
-| Position | Type | Value (sample) |
-|---|---|---|
-| `topics[0]` | `ScVal::Symbol` | `"trade"` |
-| `topics[1]` | `ScVal::Address` | `CAS3J7GYLGXMF6TDJBBYYSE3HQ6BBSMLNUQ34T6TZMYMW2EVH34XOWMA` (token_in — XLM SAC) |
+| Position    | Type             | Value (sample)                                                                    |
+| ----------- | ---------------- | --------------------------------------------------------------------------------- |
+| `topics[0]` | `ScVal::Symbol`  | `"trade"`                                                                         |
+| `topics[1]` | `ScVal::Address` | `CAS3J7GYLGXMF6TDJBBYYSE3HQ6BBSMLNUQ34T6TZMYMW2EVH34XOWMA` (token_in — XLM SAC)   |
 | `topics[2]` | `ScVal::Address` | `CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75` (token_out — USDC SAC) |
-| `topics[3]` | `ScVal::Address` | `GDCRZPZYBZ24RHRO3WBPJGFDL7NDFKUQBS3ZDB6YGBJB3TGKMFYBQ3LD` (trader — G-account) |
+| `topics[3]` | `ScVal::Address` | `GDCRZPZYBZ24RHRO3WBPJGFDL7NDFKUQBS3ZDB6YGBJB3TGKMFYBQ3LD` (trader — G-account)   |
 
 **Topics XDR base64**:
 `AAAABAAAAA8AAAAFdHJhZGUAAAAAAAASAAAAASW0/NhZrsL6Y0hDjEibPDwQyYttIb5P08swy2iVPvl3AAAAEgAAAAGt785ZruUpaPdgYdSUwlJbdWWfpClqZfSZ7ynlZHfklgAAABIAAAAAAAAAAMUcvzgOdcieLt2C9JijX9oyqpAMt5GH2DBSHczKYXAY`
@@ -287,11 +305,11 @@ ScVal::Vec(Some([
 
 Sample values:
 
-| Index | Type | Value (raw) | Meaning |
-|---|---|---|---|
-| `data[0]` | `i128` | `25761941491` | `in_amount` (= ~2576.19 XLM at 7 decimals) |
-| `data[1]` | `i128` | `3901204480` | `out_amount` (= ~390.12 USDC at 7 decimals) |
-| `data[2]` | `i128` | `12880971` | `fee_amount` (= ~1.29 XLM ≈ 0.05% of in_amount, consistent with the Aquarius constant-product 5-bps fee config) |
+| Index     | Type   | Value (raw)   | Meaning                                                                                                         |
+| --------- | ------ | ------------- | --------------------------------------------------------------------------------------------------------------- |
+| `data[0]` | `i128` | `25761941491` | `in_amount` (= ~2576.19 XLM at 7 decimals)                                                                      |
+| `data[1]` | `i128` | `3901204480`  | `out_amount` (= ~390.12 USDC at 7 decimals)                                                                     |
+| `data[2]` | `i128` | `12880971`    | `fee_amount` (= ~1.29 XLM ≈ 0.05% of in_amount, consistent with the Aquarius constant-product 5-bps fee config) |
 
 **Data XDR base64**: `AAAAEAAAAAEAAAADAAAACgAAAAAAAAAAAAAABf+IB/MAAAAKAAAAAAAAAAAAAAAA6IeoAAAAAAoAAAAAAAAAAAAAAAAAxIxL`
 
@@ -304,10 +322,19 @@ For this event:
 
 ```json
 [
-  { "type": "sym",     "value": "trade" },
-  { "type": "address", "value": "CAS3J7GYLGXMF6TDJBBYYSE3HQ6BBSMLNUQ34T6TZMYMW2EVH34XOWMA" },
-  { "type": "address", "value": "CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75" },
-  { "type": "address", "value": "GDCRZPZYBZ24RHRO3WBPJGFDL7NDFKUQBS3ZDB6YGBJB3TGKMFYBQ3LD" }
+  { "type": "sym", "value": "trade" },
+  {
+    "type": "address",
+    "value": "CAS3J7GYLGXMF6TDJBBYYSE3HQ6BBSMLNUQ34T6TZMYMW2EVH34XOWMA"
+  },
+  {
+    "type": "address",
+    "value": "CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75"
+  },
+  {
+    "type": "address",
+    "value": "GDCRZPZYBZ24RHRO3WBPJGFDL7NDFKUQBS3ZDB6YGBJB3TGKMFYBQ3LD"
+  }
 ]
 ```
 
@@ -452,16 +479,16 @@ data   = <field-typed ScVal>
 The **eight fields**, in their emission order (matching
 `contracts/pool/src/contract.rs:1172-1185`):
 
-| event_index (relative) | `topic[1]` | data type | sample value | Meaning |
-|---|---|---|---|---|
-| +0 (= 5) | `String("sender")` | `Address` | `GDCRZPZYBZ24RHRO3WBPJGFDL7NDFKUQBS3ZDB6YGBJB3TGKMFYBQ3LD` | trader (G-account) |
-| +1 (= 6) | `String("sell_token")` | `Address` | `CAS3J7GYLGXMF6TDJBBYYSE3HQ6BBSMLNUQ34T6TZMYMW2EVH34XOWMA` | token_in (XLM SAC) |
-| +2 (= 7) | `String("offer_amount")` | `i128` | `11659417676` (≈ 1165.94 XLM) | amount_in (raw, token_in units) |
-| +3 (= 8) | `String("actual received amount")` ⚠ | `i128` | `11659417676` | actual `token_in` received by the pool — diverges from `offer_amount` only for fee-on-transfer tokens; equals `offer_amount` for vanilla SAC tokens. **Field name contains literal spaces.** |
-| +4 (= 9) | `String("buy_token")` | `Address` | `CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75` | token_out (USDC SAC) |
-| +5 (= 10) | `String("return_amount")` | `i128` | `1857322909` (≈ 185.73 USDC) | amount_out (raw, token_out units) |
-| +6 (= 11) | `String("spread_amount")` | `i128` | `503808` | slippage (not the protocol fee — see §3.4) |
-| +7 (= 12) | `String("referral_fee_amount")` | `i128` | `0` | referral fee — currently disabled in the contract (`FIXM:` flag in source), always 0 |
+| event_index (relative) | `topic[1]`                           | data type | sample value                                               | Meaning                                                                                                                                                                                      |
+| ---------------------- | ------------------------------------ | --------- | ---------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| +0 (= 5)               | `String("sender")`                   | `Address` | `GDCRZPZYBZ24RHRO3WBPJGFDL7NDFKUQBS3ZDB6YGBJB3TGKMFYBQ3LD` | trader (G-account)                                                                                                                                                                           |
+| +1 (= 6)               | `String("sell_token")`               | `Address` | `CAS3J7GYLGXMF6TDJBBYYSE3HQ6BBSMLNUQ34T6TZMYMW2EVH34XOWMA` | token_in (XLM SAC)                                                                                                                                                                           |
+| +2 (= 7)               | `String("offer_amount")`             | `i128`    | `11659417676` (≈ 1165.94 XLM)                              | amount_in (raw, token_in units)                                                                                                                                                              |
+| +3 (= 8)               | `String("actual received amount")` ⚠ | `i128`    | `11659417676`                                              | actual `token_in` received by the pool — diverges from `offer_amount` only for fee-on-transfer tokens; equals `offer_amount` for vanilla SAC tokens. **Field name contains literal spaces.** |
+| +4 (= 9)               | `String("buy_token")`                | `Address` | `CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75` | token_out (USDC SAC)                                                                                                                                                                         |
+| +5 (= 10)              | `String("return_amount")`            | `i128`    | `1857322909` (≈ 185.73 USDC)                               | amount_out (raw, token_out units)                                                                                                                                                            |
+| +6 (= 11)              | `String("spread_amount")`            | `i128`    | `503808`                                                   | slippage (not the protocol fee — see §3.4)                                                                                                                                                   |
+| +7 (= 12)              | `String("referral_fee_amount")`      | `i128`    | `0`                                                        | referral fee — currently disabled in the contract (`FIXM:` flag in source), always 0                                                                                                         |
 
 > ⚠ The `actual received amount` field name contains literal
 > spaces. Preserve verbatim when matching — do **not** normalise
@@ -485,7 +512,7 @@ first event (`sender`):
 
 ```json
 [
-  { "type": "string", "value": "swap"   },
+  { "type": "string", "value": "swap" },
   { "type": "string", "value": "sender" }
 ]
 ```
@@ -493,7 +520,10 @@ first event (`sender`):
 `soroban_events.data_xdr`:
 
 ```json
-{ "type": "address", "value": "GDCRZPZYBZ24RHRO3WBPJGFDL7NDFKUQBS3ZDB6YGBJB3TGKMFYBQ3LD" }
+{
+  "type": "address",
+  "value": "GDCRZPZYBZ24RHRO3WBPJGFDL7NDFKUQBS3ZDB6YGBJB3TGKMFYBQ3LD"
+}
 ```
 
 `soroban_events.signature` = **NULL** for every Phoenix swap event
@@ -507,10 +537,10 @@ Soroswap.
 Token addresses come from the dedicated `sell_token` and `buy_token`
 events:
 
-- `token_in`   = data of the event with `topic[1] = String("sell_token")`
-- `token_out`  = data of the event with `topic[1] = String("buy_token")`
-- `trader`     = data of the event with `topic[1] = String("sender")`
-- `amount_in`  = data of the event with `topic[1] = String("offer_amount")` (raw units of `token_in`)
+- `token_in` = data of the event with `topic[1] = String("sell_token")`
+- `token_out` = data of the event with `topic[1] = String("buy_token")`
+- `trader` = data of the event with `topic[1] = String("sender")`
+- `amount_in` = data of the event with `topic[1] = String("offer_amount")` (raw units of `token_in`)
 - `amount_out` = data of the event with `topic[1] = String("return_amount")` (raw units of `token_out`)
 
 The eight events for a single swap **all carry the same
@@ -524,7 +554,7 @@ spread → referral_fee). The decoder can rely on either:
   pick out each field by `topic[1]`. Most robust if event ordering
   ever changes.
 - **By contiguous event_index window**: take any
-  `String("swap")` row at offset *k* and read offsets *k..k+7* in
+  `String("swap")` row at offset _k_ and read offsets _k..k+7_ in
   order. Faster if the emission order is stable (it has been
   since launch per the source, but is in principle a contract
   upgrade away from changing).
@@ -634,11 +664,11 @@ the safer path.
 **Verdict: three independent decoders are required.** The pool-level
 swap event shapes have no overlap usable for a single extractor:
 
-| Venue | Topic[0] kind | Topic[1..] | Data shape | Token inline? | Fee in event? | Event count per swap |
-|---|---|---|---|---|---|---|
-| Soroswap (Pair) | `String("SoroswapPair")` | `Symbol("swap")` | `Map<5>` (`amount_0_in`, `amount_0_out`, `amount_1_in`, `amount_1_out`, `to`) | **No** — `token_0`/`token_1` lookup needed | No (computable from pool config) | 1 |
-| Aquarius (pool) | `Symbol("trade")` | `Address × 3` (token_in, token_out, trader) | `Vec<3, i128>` (`amount_in`, `amount_out`, `fee`) | **Yes** | **Yes** (`data[2]`) | 1 |
-| Phoenix (XYK pool) | `String("swap")` | `String("<field>")` × 8 | scalar per event | Yes (across `sell_token` / `buy_token` events) | No (computable from pool config) | **8** (6 for stable pool) |
+| Venue              | Topic[0] kind            | Topic[1..]                                  | Data shape                                                                    | Token inline?                                  | Fee in event?                    | Event count per swap      |
+| ------------------ | ------------------------ | ------------------------------------------- | ----------------------------------------------------------------------------- | ---------------------------------------------- | -------------------------------- | ------------------------- |
+| Soroswap (Pair)    | `String("SoroswapPair")` | `Symbol("swap")`                            | `Map<5>` (`amount_0_in`, `amount_0_out`, `amount_1_in`, `amount_1_out`, `to`) | **No** — `token_0`/`token_1` lookup needed     | No (computable from pool config) | 1                         |
+| Aquarius (pool)    | `Symbol("trade")`        | `Address × 3` (token_in, token_out, trader) | `Vec<3, i128>` (`amount_in`, `amount_out`, `fee`)                             | **Yes**                                        | **Yes** (`data[2]`)              | 1                         |
+| Phoenix (XYK pool) | `String("swap")`         | `String("<field>")` × 8                     | scalar per event                                                              | Yes (across `sell_token` / `buy_token` events) | No (computable from pool config) | **8** (6 for stable pool) |
 
 The differences are structural, not cosmetic — Soroswap requires
 direction inference and token-side lookup; Aquarius is fully
@@ -670,6 +700,7 @@ alone, which can collide across protocols (e.g. nothing prevents a
 new protocol from also using `Symbol("trade")`).
 
 Filter complexity ranking, from simplest to hardest:
+
 1. **Aquarius** — `WHERE signature = 'trade' AND contract_id IN (aquarius_pools)`
 2. **Soroswap pair** — `WHERE JSONExtractString(topics_xdr, '$[0].value') = 'SoroswapPair' AND JSONExtractString(topics_xdr, '$[1].value') = 'swap'` (whitelist optional but recommended)
 3. **Phoenix** — full SQL group-by as in §3.6 above

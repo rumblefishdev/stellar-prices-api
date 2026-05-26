@@ -1,17 +1,17 @@
 ---
-title: "volume_quote_usd enrichment pass — design spec (trigger, SQL, idempotency, missing-oracle)"
+title: 'volume_quote_usd enrichment pass — design spec (trigger, SQL, idempotency, missing-oracle)'
 type: generation
 status: mature
 spawned_from: ../README.md
 spawns: []
 tags: [ohlcv, enrichment, oracle, usd-volume, cron-lambda, design]
 links:
-  - "../README.md"
-  - "../../archive/0022_RESEARCH_sdex-filter-and-extraction-spec/notes/G-sdex-decode-and-bucket-spec.md"
-  - "../../archive/0023_RESEARCH_ohlcv-row-identity-base-vs-pair/notes/S-recommendation.md"
-  - "../../../2-adrs/0003_price-ohlcv-pk-includes-quote-asset-id.md"
-  - "../../../../docs/database-schema/database-schema-overview.md"
-  - "../../../../docs/prices-api-general-overview.md"
+  - '../README.md'
+  - '../../archive/0022_RESEARCH_sdex-filter-and-extraction-spec/notes/G-sdex-decode-and-bucket-spec.md'
+  - '../../archive/0023_RESEARCH_ohlcv-row-identity-base-vs-pair/notes/S-recommendation.md'
+  - '../../../2-adrs/0003_price-ohlcv-pk-includes-quote-asset-id.md'
+  - '../../../../docs/database-schema/database-schema-overview.md'
+  - '../../../../docs/prices-api-general-overview.md'
 history:
   - date: 2026-05-13
     status: mature
@@ -34,25 +34,25 @@ missing-oracle behaviour).
 
 ## TL;DR
 
-| Concern                | Decision                                                                                |
-| ---------------------- | ---------------------------------------------------------------------------------------- |
-| Trigger                | **EventBridge cron Lambda**, hourly cadence. Decoupled from backfill + live writers.    |
-| Source rows            | `price_ohlcv WHERE volume_quote_usd = 0 AND volume_quote IS NOT NULL`                   |
-| Join key               | `quote_asset_id` (from ADR 0003) → `oracle_prices.asset_id`                              |
-| Minute alignment       | Forward-fill the oracle 5m bar onto the OHLCV 1m bars within the same 5m window.        |
-| Idempotency            | The `volume_quote_usd = 0` WHERE filter is the idempotency gate. Re-runs are no-ops on enriched rows. |
-| Missing-oracle         | Leave the row at `volume_quote_usd = 0`; emit `oracle_miss` CloudWatch metric per quote asset; retry on next pass. |
-| Two-hop quotes         | Out of scope for v1 (e.g. AQUA-quoted pairs). Phase 2 follow-up task. v1 enriches when the quote has direct USD oracle coverage. |
+| Concern          | Decision                                                                                                                         |
+| ---------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| Trigger          | **EventBridge cron Lambda**, hourly cadence. Decoupled from backfill + live writers.                                             |
+| Source rows      | `price_ohlcv WHERE volume_quote_usd = 0 AND volume_quote IS NOT NULL`                                                            |
+| Join key         | `quote_asset_id` (from ADR 0003) → `oracle_prices.asset_id`                                                                      |
+| Minute alignment | Forward-fill the oracle 5m bar onto the OHLCV 1m bars within the same 5m window.                                                 |
+| Idempotency      | The `volume_quote_usd = 0` WHERE filter is the idempotency gate. Re-runs are no-ops on enriched rows.                            |
+| Missing-oracle   | Leave the row at `volume_quote_usd = 0`; emit `oracle_miss` CloudWatch metric per quote asset; retry on next pass.               |
+| Two-hop quotes   | Out of scope for v1 (e.g. AQUA-quoted pairs). Phase 2 follow-up task. v1 enriches when the quote has direct USD oracle coverage. |
 
 ## 1. Trigger architecture
 
 Three candidates considered:
 
-| Option                          | Pros                                          | Cons                                                                        |
-| ------------------------------- | --------------------------------------------- | --------------------------------------------------------------------------- |
-| **A. EventBridge cron Lambda**  | Decoupled. Idempotent. Backfill / live writers never block on oracle availability. Operationally simple. | Hourly lag on USD-denominated volume visibility (acceptable per design-doc §5.6 cadence). |
-| B. End-of-backfill one-shot     | Single batch of computation; no rolling state. | USD volumes invisible during backfill (12–16 days). Doesn't cover live mode. |
-| C. Live writer extension        | Real-time USD volume.                          | Couples backfill correctness to oracle availability. Violates ADR 0003's "defer to enrichment" principle. |
+| Option                         | Pros                                                                                                     | Cons                                                                                                      |
+| ------------------------------ | -------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| **A. EventBridge cron Lambda** | Decoupled. Idempotent. Backfill / live writers never block on oracle availability. Operationally simple. | Hourly lag on USD-denominated volume visibility (acceptable per design-doc §5.6 cadence).                 |
+| B. End-of-backfill one-shot    | Single batch of computation; no rolling state.                                                           | USD volumes invisible during backfill (12–16 days). Doesn't cover live mode.                              |
+| C. Live writer extension       | Real-time USD volume.                                                                                    | Couples backfill correctness to oracle availability. Violates ADR 0003's "defer to enrichment" principle. |
 
 **Adopt Option A.** This matches the existing Oracle Fetcher Lambda
 pattern (§5.3 of design doc — cron-driven, decoupled). The hourly
@@ -72,12 +72,12 @@ adequate for SDEX trades that are non-real-time by definition.
 
 ### 1.2 Configuration
 
-| Env var                        | Default | Purpose                                              |
-| ------------------------------ | ------- | ---------------------------------------------------- |
-| `ENRICHMENT_BATCH_SIZE`        | 10 000  | UPDATE batch row limit (avoid long locks).           |
-| `ENRICHMENT_MAX_BATCHES`       | 20      | Per-invocation cap; remaining rows roll to next hour.|
-| `ENRICHMENT_ORACLE_NAME`       | `reflector` | Which `oracle_prices.oracle_name` row to read.   |
-| `ENRICHMENT_QUOTE_FORWARDFILL_WINDOW_S` | 300 | Max staleness of an oracle bar when forward-filling. |
+| Env var                                 | Default     | Purpose                                               |
+| --------------------------------------- | ----------- | ----------------------------------------------------- |
+| `ENRICHMENT_BATCH_SIZE`                 | 10 000      | UPDATE batch row limit (avoid long locks).            |
+| `ENRICHMENT_MAX_BATCHES`                | 20          | Per-invocation cap; remaining rows roll to next hour. |
+| `ENRICHMENT_ORACLE_NAME`                | `reflector` | Which `oracle_prices.oracle_name` row to read.        |
+| `ENRICHMENT_QUOTE_FORWARDFILL_WINDOW_S` | 300         | Max staleness of an oracle bar when forward-filling.  |
 
 ## 2. SQL contract
 
@@ -189,9 +189,9 @@ The PG `INSERT ... ON CONFLICT DO UPDATE` from writers (1) and (2)
 serialises on the row lock with the enrichment's UPDATE. Two
 collision scenarios:
 
-| Writer race                          | Outcome                                                                                |
-| ------------------------------------- | -------------------------------------------------------------------------------------- |
-| Writer commits first, then enrichment | Writer sets `volume_quote_usd = 0`; enrichment overwrites with real value. ✅          |
+| Writer race                                                                       | Outcome                                                                                              |
+| --------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| Writer commits first, then enrichment                                             | Writer sets `volume_quote_usd = 0`; enrichment overwrites with real value. ✅                        |
 | Enrichment commits first, then writer's UPSERT replaces `volume_quote_usd` with 0 | Lost work. Next enrichment pass re-fills (idempotent recovery). 🟡 minor inefficiency, no data loss. |
 
 The minor inefficiency in the second case is bounded — at most
@@ -258,12 +258,12 @@ lands.
 
 CloudWatch metrics emitted per invocation:
 
-| Metric                                  | Dimensions                                          | Use                                                  |
-| --------------------------------------- | --------------------------------------------------- | ---------------------------------------------------- |
-| `EnrichmentRowsEnriched`                | `granularity`                                       | How much work the Lambda did this hour.              |
-| `EnrichmentOracleMiss`                  | `quote_asset_id`, `oracle_name`, `granularity`      | Identifies quote assets with thin oracle coverage.   |
-| `EnrichmentRowsRemainingAtVolumeZero`   | `granularity`                                       | Saturation indicator — rising = oracle / coverage gap. |
-| `EnrichmentBatchDurationMs`             | (none)                                              | Performance / lock-contention indicator.             |
+| Metric                                | Dimensions                                     | Use                                                    |
+| ------------------------------------- | ---------------------------------------------- | ------------------------------------------------------ |
+| `EnrichmentRowsEnriched`              | `granularity`                                  | How much work the Lambda did this hour.                |
+| `EnrichmentOracleMiss`                | `quote_asset_id`, `oracle_name`, `granularity` | Identifies quote assets with thin oracle coverage.     |
+| `EnrichmentRowsRemainingAtVolumeZero` | `granularity`                                  | Saturation indicator — rising = oracle / coverage gap. |
+| `EnrichmentBatchDurationMs`           | (none)                                         | Performance / lock-contention indicator.               |
 
 Alarm on `EnrichmentRowsRemainingAtVolumeZero` if it grows
 monotonically over 24 hours — that's a sign of a structural
@@ -271,12 +271,12 @@ oracle-coverage gap, not a transient missing bar.
 
 ## 6. Failure modes
 
-| Failure                                       | Behaviour                                                                                |
-| --------------------------------------------- | ----------------------------------------------------------------------------------------- |
-| DB unavailable                                | Lambda fails; EventBridge retries per its default. Next invocation picks up same rows.   |
-| Oracle Fetcher Lambda hasn't run recently     | `priced.quote_oracle_price_usd` NULL → rows skipped → retry on next pass. Self-healing.  |
-| Backfill writes wholesale `volume_quote_usd = 0` over already-enriched rows | Next hourly pass re-enriches. ~1h lost data on enriched USD volume. Logged at INFO.      |
-| Schema drift (column renamed, etc.)           | UPDATE fails fast at startup. Lambda alarms; manual intervention.                        |
+| Failure                                                                     | Behaviour                                                                               |
+| --------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
+| DB unavailable                                                              | Lambda fails; EventBridge retries per its default. Next invocation picks up same rows.  |
+| Oracle Fetcher Lambda hasn't run recently                                   | `priced.quote_oracle_price_usd` NULL → rows skipped → retry on next pass. Self-healing. |
+| Backfill writes wholesale `volume_quote_usd = 0` over already-enriched rows | Next hourly pass re-enriches. ~1h lost data on enriched USD volume. Logged at INFO.     |
+| Schema drift (column renamed, etc.)                                         | UPDATE fails fast at startup. Lambda alarms; manual intervention.                       |
 
 ## 7. Acceptance criteria for the implementation task (post-0012)
 

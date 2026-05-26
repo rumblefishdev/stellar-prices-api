@@ -1,15 +1,15 @@
 ---
-title: "Recommendation — Option A: add quote_asset_id to price_ohlcv PK"
+title: 'Recommendation — Option A: add quote_asset_id to price_ohlcv PK'
 type: synthesis
 status: mature
 spawned_from: ./Q-decision-space.md
-spawns: ["ADR-draft"]
+spawns: ['ADR-draft']
 tags: [schema, ohlcv, primary-key, recommendation, sdex]
 links:
-  - "./Q-decision-space.md"
-  - "../README.md"
-  - "../../../archive/0022_RESEARCH_sdex-filter-and-extraction-spec/notes/G-sdex-decode-and-bucket-spec.md"
-  - "../../../../docs/database-schema/database-schema-overview.md"
+  - './Q-decision-space.md'
+  - '../README.md'
+  - '../../../archive/0022_RESEARCH_sdex-filter-and-extraction-spec/notes/G-sdex-decode-and-bucket-spec.md'
+  - '../../../../docs/database-schema/database-schema-overview.md'
 history:
   - date: 2026-05-13
     status: mature
@@ -38,28 +38,28 @@ schema-migration step before the backfill writes its first row.
 
 ## Option matrix
 
-| Option | Storage shape                                  | API projection at read time | Migration cost | Verdict |
-| ------ | ---------------------------------------------- | --------------------------- | -------------- | ------- |
-| **A**  | One row per native pair                        | Aggregate across rows       | Add column + recreate PK | **Adopt** |
-| B      | One row per pair via `asset_pairs` surrogate   | Same + join to resolve identities | New table + ALTER `price_ohlcv` + populate `asset_pairs` | Defer |
-| C      | One row per (asset, USD-or-XLM kind)           | Direct read                 | Couples backfill writes to oracle availability | Reject |
-| D      | Status quo (base-only PK)                      | Direct read                 | None                                | Reject (broken) |
+| Option | Storage shape                                | API projection at read time       | Migration cost                                           | Verdict         |
+| ------ | -------------------------------------------- | --------------------------------- | -------------------------------------------------------- | --------------- |
+| **A**  | One row per native pair                      | Aggregate across rows             | Add column + recreate PK                                 | **Adopt**       |
+| B      | One row per pair via `asset_pairs` surrogate | Same + join to resolve identities | New table + ALTER `price_ohlcv` + populate `asset_pairs` | Defer           |
+| C      | One row per (asset, USD-or-XLM kind)         | Direct read                       | Couples backfill writes to oracle availability           | Reject          |
+| D      | Status quo (base-only PK)                    | Direct read                       | None                                                     | Reject (broken) |
 
 ## Why A over B
 
 Both A and B preserve per-native-pair granularity. The trade-off is
 where the pair identity lives.
 
-| Aspect                          | A                                        | B                                          |
-| ------------------------------- | ---------------------------------------- | ------------------------------------------ |
-| PK size                         | 4 columns (timestamp, asset_id, quote_asset_id, granularity) | 3 columns (timestamp, asset_pair_id, granularity) |
-| Bytes per PK tuple              | ~32 B (TIMESTAMPTZ + 2 INT + VARCHAR(5)) | ~24 B (TIMESTAMPTZ + INT + VARCHAR(5))     |
-| Reads "all candles for asset X" | `WHERE asset_id = X` (direct)            | Need pair lookup: `WHERE asset_pair_id IN (SELECT id FROM asset_pairs WHERE base_id = X)` |
-| Writes from backfill            | Look up `asset_id`, `quote_asset_id` already done in §3 of 0022 spec | Same plus a pair-id lookup (or insert) before the OHLCV UPSERT |
-| Ad-hoc analytics                | "Which pairs traded USDC on date X?" — direct SELECT | Same plus join to `asset_pairs` |
-| Schema-doc match                | Smallest delta from current schema       | Larger delta (new table, new FK)           |
-| Migration cost (now, greenfield) | Add one column, recreate PK             | Create `asset_pairs`, populate, alter `price_ohlcv` |
-| Re-use of `asset_pairs`         | N/A                                      | Only consumer is `price_ohlcv` today; speculative re-use |
+| Aspect                           | A                                                                    | B                                                                                         |
+| -------------------------------- | -------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| PK size                          | 4 columns (timestamp, asset_id, quote_asset_id, granularity)         | 3 columns (timestamp, asset_pair_id, granularity)                                         |
+| Bytes per PK tuple               | ~32 B (TIMESTAMPTZ + 2 INT + VARCHAR(5))                             | ~24 B (TIMESTAMPTZ + INT + VARCHAR(5))                                                    |
+| Reads "all candles for asset X"  | `WHERE asset_id = X` (direct)                                        | Need pair lookup: `WHERE asset_pair_id IN (SELECT id FROM asset_pairs WHERE base_id = X)` |
+| Writes from backfill             | Look up `asset_id`, `quote_asset_id` already done in §3 of 0022 spec | Same plus a pair-id lookup (or insert) before the OHLCV UPSERT                            |
+| Ad-hoc analytics                 | "Which pairs traded USDC on date X?" — direct SELECT                 | Same plus join to `asset_pairs`                                                           |
+| Schema-doc match                 | Smallest delta from current schema                                   | Larger delta (new table, new FK)                                                          |
+| Migration cost (now, greenfield) | Add one column, recreate PK                                          | Create `asset_pairs`, populate, alter `price_ohlcv`                                       |
+| Re-use of `asset_pairs`          | N/A                                                                  | Only consumer is `price_ohlcv` today; speculative re-use                                  |
 
 **Decision:** A is materially simpler today and B's surrogate
 doesn't earn its complexity from any second consumer. If a future
@@ -77,7 +77,7 @@ anyway — why store anything else? Two reasons it doesn't work:
    USD denomination for SDEX trades on USDC/XLM requires the
    XLM/USD oracle price at the trade minute. The oracle path is
    handled by task 0024 (the `volume_quote_usd` enrichment pass)
-   which runs *after* the backfill. Forcing pre-normalisation
+   which runs _after_ the backfill. Forcing pre-normalisation
    would couple backfill correctness to oracle availability —
    regressing 0024's whole rationale.
 
@@ -189,7 +189,7 @@ decided when 0012 starts).
 ## Impact on task 0024 (`volume_quote_usd` enrichment)
 
 Positive. With per-native-pair rows, the enrichment pass joins
-`oracle_prices` on the *quote* side cleanly:
+`oracle_prices` on the _quote_ side cleanly:
 
 ```sql
 UPDATE price_ohlcv p
@@ -213,7 +213,7 @@ Positive. With per-pair rows, multiple sources writing to the
 same `(timestamp, asset_id, quote_asset_id, granularity)` row
 collide on PK and trigger the multi-source merge correctly.
 Pre-normalisation to quote-kind would have made same-quote-kind
-SDEX-vs-Soroswap collisions ambiguous about *which* native pair
+SDEX-vs-Soroswap collisions ambiguous about _which_ native pair
 each constituent represents.
 
 ## Open follow-ups (small)

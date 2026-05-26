@@ -1,23 +1,23 @@
 ---
-id: "0002"
-title: "Attribute observed AMM contract IDs to venues (Soroswap / Aquarius / Phoenix)"
+id: '0002'
+title: 'Attribute observed AMM contract IDs to venues (Soroswap / Aquarius / Phoenix)'
 type: RESEARCH
 status: completed
 related_adr: []
-related_tasks: ["0001"]
+related_tasks: ['0001']
 tags: [layer-research, priority-medium, effort-small, soroban, amm]
 links:
-  - "../0001_RESEARCH_dump-amm-swap-events/notes/R-swap-topic-shapes.md"
-  - "../../../../docs/database-schema/amm-trades-schema.md"
+  - '../0001_RESEARCH_dump-amm-swap-events/notes/R-swap-topic-shapes.md'
+  - '../../../../docs/database-schema/amm-trades-schema.md'
 history:
   - date: 2026-05-07
     status: backlog
     who: okarcz
-    note: "Spawned from 0001 future work."
+    note: 'Spawned from 0001 future work.'
   - date: 2026-05-08
     status: active
     who: okarcz
-    note: "Activated for implementation."
+    note: 'Activated for implementation.'
   - date: 2026-05-08
     status: completed
     who: claude
@@ -93,15 +93,15 @@ indexer implications.
 
 **Headline:**
 
-| Topic | Attributed to | Notes |
-|---|---|---|
-| `Symbol("swap")` `CBQDHNBFBZYE...` (11,947) | Aquarius router | Co-emits `add_pool` (factory-style) and `config_rewards` |
-| `Symbol("swap")` `CCR2CH4G...` (2,706) + `CDMIM23W...` (2,480) | **unknown** | router-style emission; not Aquarius / Phoenix / Soroswap |
-| `Symbol("swap")` long tail (32 contracts) | mostly unknown | unattributed for now |
-| `String("swap")` × 9 distinct emitters (5,704 events) | Phoenix XYK pools | 9 of 11 known Phoenix pools — match 100% |
-| `Symbol("trade")` × 29 | Aquarius constant-product pools | venue-distinctive shape |
-| `String("SoroswapPair")` × 79 | Soroswap pools | factory-derivable |
-| `String("SoroswapRouter")` / `String("SoroswapAggregator")` | Soroswap router / aggregator | direct registry match |
+| Topic                                                          | Attributed to                   | Notes                                                    |
+| -------------------------------------------------------------- | ------------------------------- | -------------------------------------------------------- |
+| `Symbol("swap")` `CBQDHNBFBZYE...` (11,947)                    | Aquarius router                 | Co-emits `add_pool` (factory-style) and `config_rewards` |
+| `Symbol("swap")` `CCR2CH4G...` (2,706) + `CDMIM23W...` (2,480) | **unknown**                     | router-style emission; not Aquarius / Phoenix / Soroswap |
+| `Symbol("swap")` long tail (32 contracts)                      | mostly unknown                  | unattributed for now                                     |
+| `String("swap")` × 9 distinct emitters (5,704 events)          | Phoenix XYK pools               | 9 of 11 known Phoenix pools — match 100%                 |
+| `Symbol("trade")` × 29                                         | Aquarius constant-product pools | venue-distinctive shape                                  |
+| `String("SoroswapPair")` × 79                                  | Soroswap pools                  | factory-derivable                                        |
+| `String("SoroswapRouter")` / `String("SoroswapAggregator")`    | Soroswap router / aggregator    | direct registry match                                    |
 
 **Verified 2026-05-08:** registry addresses cross-checked against task
 0001's event evidence. 5/5 directly observable canonical addresses match

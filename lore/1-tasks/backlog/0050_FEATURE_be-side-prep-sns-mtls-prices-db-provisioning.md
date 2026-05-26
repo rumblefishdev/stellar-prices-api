@@ -1,19 +1,31 @@
 ---
-id: "0050"
-title: "BE-side prep — SNS fan-out + mTLS client cert issuance + prices DB/user/quota provisioning on Hetzner CH"
+id: '0050'
+title: 'BE-side prep — SNS fan-out + mTLS client cert issuance + prices DB/user/quota provisioning on Hetzner CH'
 type: FEATURE
 status: backlog
-related_adr: ["0007"]
-related_tasks: ["0045", "0047", "0011", "0038"]
-tags: [layer-infra, priority-high, effort-medium, milestone-M1, cross-team, block-explorer, hetzner, clickhouse, mtls, sns]
+related_adr: ['0007']
+related_tasks: ['0045', '0047', '0011', '0038']
+tags:
+  [
+    layer-infra,
+    priority-high,
+    effort-medium,
+    milestone-M1,
+    cross-team,
+    block-explorer,
+    hetzner,
+    clickhouse,
+    mtls,
+    sns,
+  ]
 milestone: 1
 links:
-  - "../../../docs/prices-api-general-overview.md"
-  - "../../2-adrs/0007_live-data-sink-on-shared-hetzner-clickhouse.md"
-  - "../archive/0045_RESEARCH_cross-team-bundle-with-be-on-hetzner-ch-tenancy/notes/G-be-agreement-record.md"
-  - "./0047_RESEARCH_cross-tenant-throughput-verification-on-shared-hetzner-ch.md"
-  - "./0011_FEATURE_bootstrap-cdk-with-ssm-platform-lookups.md"
-  - "../blocked/0038_FEATURE_prices-ledger-processor-lambda.md"
+  - '../../../docs/prices-api-general-overview.md'
+  - '../../2-adrs/0007_live-data-sink-on-shared-hetzner-clickhouse.md'
+  - '../archive/0045_RESEARCH_cross-team-bundle-with-be-on-hetzner-ch-tenancy/notes/G-be-agreement-record.md'
+  - './0047_RESEARCH_cross-tenant-throughput-verification-on-shared-hetzner-ch.md'
+  - './0011_FEATURE_bootstrap-cdk-with-ssm-platform-lookups.md'
+  - '../blocked/0038_FEATURE_prices-ledger-processor-lambda.md'
 history:
   - date: 2026-05-21
     status: backlog
@@ -123,7 +135,7 @@ For each env (dev → staging → prod):
   expect 200 + a CH version string.
 - Connect as the prices-api user and confirm `SHOW DATABASES`
   includes `prices`, that `CREATE TABLE prices.foo (...) ENGINE
-  = Memory` succeeds, and that the same `CREATE TABLE` against
+= Memory` succeeds, and that the same `CREATE TABLE` against
   `default.foo` fails with permission denied. Drop the
   throwaway table.
 

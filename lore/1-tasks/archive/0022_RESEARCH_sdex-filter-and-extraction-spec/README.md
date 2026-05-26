@@ -1,16 +1,27 @@
 ---
-id: "0022"
-title: "SDEX filter predicates and extraction spec for the dedicated archive-read backfill"
+id: '0022'
+title: 'SDEX filter predicates and extraction spec for the dedicated archive-read backfill'
 type: RESEARCH
 status: completed
-related_adr: ["0002"]
-related_tasks: ["0012", "0013", "0020", "0023", "0024", "0025"]
-tags: [layer-research, priority-high, effort-medium, research, sdex, backfill, stream-2, xdr, parser]
+related_adr: ['0002']
+related_tasks: ['0012', '0013', '0020', '0023', '0024', '0025']
+tags:
+  [
+    layer-research,
+    priority-high,
+    effort-medium,
+    research,
+    sdex,
+    backfill,
+    stream-2,
+    xdr,
+    parser,
+  ]
 links:
-  - "../../2-adrs/0002_stream2-sdex-archive-backfill-independent-of-be.md"
-  - "../archive/0020_RESEARCH_sdex-historical-backfill-options/notes/R-sdex-operation-xdr-shape.md"
-  - "../archive/0020_RESEARCH_sdex-historical-backfill-options/notes/G-sdex-trade-extraction-design.md"
-  - "../../../docs/prices-api-general-overview.md"
+  - '../../2-adrs/0002_stream2-sdex-archive-backfill-independent-of-be.md'
+  - '../archive/0020_RESEARCH_sdex-historical-backfill-options/notes/R-sdex-operation-xdr-shape.md'
+  - '../archive/0020_RESEARCH_sdex-historical-backfill-options/notes/G-sdex-trade-extraction-design.md'
+  - '../../../docs/prices-api-general-overview.md'
 history:
   - date: 2026-05-13
     status: backlog
@@ -95,7 +106,7 @@ What's still open and this task closes:
    operation context differs; spec the per-variant decode.
 
 4. **`price` computation per `ClaimAtom`** — `amount_bought /
-   amount_sold` is the spot price in (bought-units-per-sold-unit).
+amount_sold` is the spot price in (bought-units-per-sold-unit).
    Spec the precision strategy (NUMERIC(28,14)), the asset-side
    decimals normalization (stellar classic = 7 stroops; SAC = ?), and
    the failure mode for divide-by-zero or extreme-precision losses.
@@ -302,8 +313,7 @@ detail in each task's README:
 
 ## Notes
 
-- This task did **not** re-litigate Option A vs Option B from task
-  0020. ADR 0002 already settled that. The filter strategy explored
+- This task did **not** re-litigate Option A vs Option B from task 0020. ADR 0002 already settled that. The filter strategy explored
   here is in-binary filtering on XDR-decoded ops, not BE-CH-sourced
   pre-filtering.
 - This task did **not** explore parallelisation / sharding strategies

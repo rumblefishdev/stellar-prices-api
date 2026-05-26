@@ -1,15 +1,25 @@
 ---
-id: "0029"
-title: "Update prices-api-general-overview.md Stream 1 sections per ADR 0001 (local ClickHouse-sourced AMM backfill)"
+id: '0029'
+title: 'Update prices-api-general-overview.md Stream 1 sections per ADR 0001 (local ClickHouse-sourced AMM backfill)'
 type: DOCS
 status: completed
-related_adr: ["0001"]
-related_tasks: ["0013", "0015", "0017", "0018"]
-tags: [layer-indexing, priority-medium, effort-small, docs, stream-1, clickhouse, backfill, block-explorer]
+related_adr: ['0001']
+related_tasks: ['0013', '0015', '0017', '0018']
+tags:
+  [
+    layer-indexing,
+    priority-medium,
+    effort-small,
+    docs,
+    stream-1,
+    clickhouse,
+    backfill,
+    block-explorer,
+  ]
 links:
-  - "../../2-adrs/0001_stream1-clickhouse-sourced-amm-backfill.md"
-  - "../../../docs/prices-api-general-overview.md"
-  - "../archive/0013_DOCS_update-design-doc-to-match-be-reality.md"
+  - '../../2-adrs/0001_stream1-clickhouse-sourced-amm-backfill.md'
+  - '../../../docs/prices-api-general-overview.md'
+  - '../archive/0013_DOCS_update-design-doc-to-match-be-reality.md'
 history:
   - date: 2026-05-14
     status: backlog
