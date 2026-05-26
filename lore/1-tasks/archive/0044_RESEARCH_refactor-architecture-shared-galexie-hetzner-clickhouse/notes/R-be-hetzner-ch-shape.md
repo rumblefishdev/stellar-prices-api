@@ -1,21 +1,21 @@
 ---
-title: "R: BE Hetzner ClickHouse shape — what prices-api can externally consume"
+title: 'R: BE Hetzner ClickHouse shape — what prices-api can externally consume'
 type: research
 status: developing
 spawned_from: ../README.md
 spawns: []
 tags: [hetzner, clickhouse, mtls, infra, block-explorer, step-1]
 links:
-  - "../../../../../soroban-block-explorer/docs/architecture/infrastructure/infrastructure-overview.md"
-  - "../../../../../soroban-block-explorer/lore/1-tasks/active/0216_RESEARCH_hetzner-clickhouse-deploy/README.md"
-  - "../../../../../soroban-block-explorer/lore/1-tasks/active/0216_RESEARCH_hetzner-clickhouse-deploy/notes/S-decisions.md"
-  - "../../../../../soroban-block-explorer/lore/1-tasks/active/0227_FEATURE_infra-hetzner-ansible-playbook.md"
-  - "../../../../../soroban-block-explorer/lore/2-adrs/0045_clickhouse-local-backfill-then-mirror-to-hetzner-via-freeze-rsync-attach.md"
+  - '../../../../../soroban-block-explorer/docs/architecture/infrastructure/infrastructure-overview.md'
+  - '../../../../../soroban-block-explorer/lore/1-tasks/active/0216_RESEARCH_hetzner-clickhouse-deploy/README.md'
+  - '../../../../../soroban-block-explorer/lore/1-tasks/active/0216_RESEARCH_hetzner-clickhouse-deploy/notes/S-decisions.md'
+  - '../../../../../soroban-block-explorer/lore/1-tasks/active/0227_FEATURE_infra-hetzner-ansible-playbook.md'
+  - '../../../../../soroban-block-explorer/lore/2-adrs/0045_clickhouse-local-backfill-then-mirror-to-hetzner-via-freeze-rsync-attach.md'
 history:
   - date: 2026-05-18
     status: developing
     who: okarcz
-    note: "Distilled from BE infra-overview §5.6, task 0216, task 0227, ADR 0045."
+    note: 'Distilled from BE infra-overview §5.6, task 0216, task 0227, ADR 0045.'
 ---
 
 # R: BE Hetzner ClickHouse shape — what prices-api can externally consume
@@ -30,15 +30,15 @@ later `S-*` note.
 
 ## 1. Physical host topology
 
-| Aspect | Value | Source |
-|---|---|---|
-| Provider | Hetzner Dedicated Server | 0216 `S-decisions.md` §1 |
-| OS | Ubuntu 24.04 LTS | 0227 `installimage.conf` |
-| Disk layout | mdadm RAID 1, single ext4 root, separate ext4 `/boot`, no swap | 0227 `installimage.conf` |
-| Provisioning | Hardware ordered manually via Hetzner Robot UI, **everything else IaC** (Ansible) | 0216 `S-decisions.md` §5, 0227 `Scope` |
-| Backups | Daily `borg` cron → Hetzner **BX21 Storage Box** | 0227 `Scope` + `Acceptance Criteria` |
-| Status (2026-05-18) | Box ordered + provisioned 2026-05-15; Ansible playbook + Caddy + mTLS work **in flight** | 0216 history line 4 |
-| Hardware class | Not pinned in any committed source as of today | (gap) |
+| Aspect              | Value                                                                                    | Source                                 |
+| ------------------- | ---------------------------------------------------------------------------------------- | -------------------------------------- |
+| Provider            | Hetzner Dedicated Server                                                                 | 0216 `S-decisions.md` §1               |
+| OS                  | Ubuntu 24.04 LTS                                                                         | 0227 `installimage.conf`               |
+| Disk layout         | mdadm RAID 1, single ext4 root, separate ext4 `/boot`, no swap                           | 0227 `installimage.conf`               |
+| Provisioning        | Hardware ordered manually via Hetzner Robot UI, **everything else IaC** (Ansible)        | 0216 `S-decisions.md` §5, 0227 `Scope` |
+| Backups             | Daily `borg` cron → Hetzner **BX21 Storage Box**                                         | 0227 `Scope` + `Acceptance Criteria`   |
+| Status (2026-05-18) | Box ordered + provisioned 2026-05-15; Ansible playbook + Caddy + mTLS work **in flight** | 0216 history line 4                    |
+| Hardware class      | Not pinned in any committed source as of today                                           | (gap)                                  |
 
 **Implication for prices-api.** The host is treated as a single
 production CH data plane, not a multi-tenant managed cluster. There
@@ -75,7 +75,7 @@ Concrete points (all from 0227):
   proxy is the single hop.
 - **Caddy directive enforced:** `tls.client_auth { mode require_and_verify }`.
   A TLS handshake without a CA-signed client cert is rejected
-  *before* any HTTP request reaches ClickHouse.
+  _before_ any HTTP request reaches ClickHouse.
 - **Docker compose `ports: !override`** is mandatory for every
   rebound service in the production overlay — defensive against the
   base compose silently appending the dev-mode publicly-bound ports.
@@ -88,12 +88,12 @@ prices-api Lambda would dial the same Caddy as BE does.
 
 ## 3. mTLS identity model
 
-| Element | Where it lives | Lifecycle |
-|---|---|---|
-| Public CA cert | `infra-hetzner/ca/ca.crt` in the BE repo (committed) | Static — rotation requires re-issuing the file + Caddy reload |
-| Private CA key | **Team password manager** — never in the repo | Held by BE team, used only by the one-time CA bootstrap script |
-| Client certs | Issued by a script in `infra-hetzner/ca/` — **per AWS service, per developer** | Per-cert lifecycle; revocation model not explicitly documented |
-| Server cert (TLS) | Let's Encrypt via Caddy, auto-renewed | Automatic |
+| Element           | Where it lives                                                                 | Lifecycle                                                      |
+| ----------------- | ------------------------------------------------------------------------------ | -------------------------------------------------------------- |
+| Public CA cert    | `infra-hetzner/ca/ca.crt` in the BE repo (committed)                           | Static — rotation requires re-issuing the file + Caddy reload  |
+| Private CA key    | **Team password manager** — never in the repo                                  | Held by BE team, used only by the one-time CA bootstrap script |
+| Client certs      | Issued by a script in `infra-hetzner/ca/` — **per AWS service, per developer** | Per-cert lifecycle; revocation model not explicitly documented |
+| Server cert (TLS) | Let's Encrypt via Caddy, auto-renewed                                          | Automatic                                                      |
 
 Key quote from 0227:
 
@@ -103,7 +103,7 @@ Key quote from 0227:
 The phrase "per AWS service" is the only externally-relevant signal
 that BE's identity model is **already designed to issue distinct
 certs to distinct AWS-side workloads**. That naturally accommodates
-a second tenant like the prices-api Lambda — but it does *not* imply
+a second tenant like the prices-api Lambda — but it does _not_ imply
 BE has agreed to issue one. The script is the mechanism; the policy
 is a cross-team conversation.
 
@@ -120,15 +120,15 @@ cost is:
 
 ## 4. Schema ownership boundary
 
-| Aspect | Value | Source |
-|---|---|---|
-| Schema source of truth | `crates/db-clickhouse/schema/init.sql` in BE repo | 0227 `ClickHouse configuration additions`, ADR 0044 |
-| Schema content | 17 tables + 1 Dictionary | BE infra-overview §5.2 |
-| Application mechanism | `db-clickhouse-init` sidecar, idempotent, runs on every boot | 0227 `Scope`, ADR 0045 §Consequences |
-| Engine choice | `ReplacingMergeTree` for the table family that holds soroban events | ADR 0045 §Rationale + §Alternatives |
-| Replication | **Not replicated.** `ReplicatedMergeTree` explicitly rejected for now (ADR 0045 alt. 3) | ADR 0045 |
-| Default DB | `default` (ClickHouse default) — no explicit per-tenant DB carve-out | inferred from 0227 + init.sql shape |
-| Internal user model | One application user; a localhost-only no-password `dict` user is used by the Dictionary `SOURCE` clause | 0227 `ClickHouse configuration additions` |
+| Aspect                 | Value                                                                                                    | Source                                              |
+| ---------------------- | -------------------------------------------------------------------------------------------------------- | --------------------------------------------------- |
+| Schema source of truth | `crates/db-clickhouse/schema/init.sql` in BE repo                                                        | 0227 `ClickHouse configuration additions`, ADR 0044 |
+| Schema content         | 17 tables + 1 Dictionary                                                                                 | BE infra-overview §5.2                              |
+| Application mechanism  | `db-clickhouse-init` sidecar, idempotent, runs on every boot                                             | 0227 `Scope`, ADR 0045 §Consequences                |
+| Engine choice          | `ReplacingMergeTree` for the table family that holds soroban events                                      | ADR 0045 §Rationale + §Alternatives                 |
+| Replication            | **Not replicated.** `ReplicatedMergeTree` explicitly rejected for now (ADR 0045 alt. 3)                  | ADR 0045                                            |
+| Default DB             | `default` (ClickHouse default) — no explicit per-tenant DB carve-out                                     | inferred from 0227 + init.sql shape                 |
+| Internal user model    | One application user; a localhost-only no-password `dict` user is used by the Dictionary `SOURCE` clause | 0227 `ClickHouse configuration additions`           |
 
 **Implication for prices-api.** Anything prices-api writes into this
 cluster either:
@@ -177,7 +177,7 @@ question #1 in the task README).
 ## 6. Backup / DR shape (relevant for whether prices-api data is recoverable)
 
 - **Backups:** Borg daily → BX21 Storage Box. Configured per 0227.
-  Backup destination is *Hetzner*, not AWS — egress for restore back
+  Backup destination is _Hetzner_, not AWS — egress for restore back
   to AWS would traverse public internet.
 - **PITR:** Not documented. Borg gives daily granularity. RDS-style
   point-in-time-recovery is not on the Hetzner side.
@@ -213,32 +213,32 @@ too (currently listed under §2.3 of `prices-api-general-overview.md`).
 
 ## 8. Summary — externally consumable surface
 
-| Surface | Externally consumable? | Notes |
-|---|---|---|
-| `https://<hetzner-host>:443/` ClickHouse HTTP over mTLS | **Yes** | Single endpoint, generic CH wire protocol |
-| Native CH protocol port 9000 | **No** | Loopback-only |
-| Per-tenant database / user | **Mechanism exists, no policy** | Requires BE agreement (open question) |
-| Per-AWS-service client cert | **Mechanism exists, no policy** | Issuance script supports it; needs BE issuance |
-| Backup / restore | **BE-owned** | Borg → BX21; no per-tenant restore primitive |
-| Schema migration | **BE-owned** today | Prices-api would need its own migration story (step 5) |
-| Observability | **BE-owned** | Native Prometheus endpoint on loopback (0227); no per-tenant cut |
+| Surface                                                 | Externally consumable?          | Notes                                                            |
+| ------------------------------------------------------- | ------------------------------- | ---------------------------------------------------------------- |
+| `https://<hetzner-host>:443/` ClickHouse HTTP over mTLS | **Yes**                         | Single endpoint, generic CH wire protocol                        |
+| Native CH protocol port 9000                            | **No**                          | Loopback-only                                                    |
+| Per-tenant database / user                              | **Mechanism exists, no policy** | Requires BE agreement (open question)                            |
+| Per-AWS-service client cert                             | **Mechanism exists, no policy** | Issuance script supports it; needs BE issuance                   |
+| Backup / restore                                        | **BE-owned**                    | Borg → BX21; no per-tenant restore primitive                     |
+| Schema migration                                        | **BE-owned** today              | Prices-api would need its own migration story (step 5)           |
+| Observability                                           | **BE-owned**                    | Native Prometheus endpoint on loopback (0227); no per-tenant cut |
 
 ## 9. Open questions surfaced by step 1 (forwarded to README)
 
 1. **Hardware sizing margin.** BE has not published the box's CPU
    / RAM / disk class. Capacity planning for a second tenant is
-   speculative until BE shares specs. *Action:* ask BE.
+   speculative until BE shares specs. _Action:_ ask BE.
 2. **Per-tenant database vs. shared tables.** BE plan is silent.
-   *Action:* step 5 of task 0044 to decide; preferred default for
+   _Action:_ step 5 of task 0044 to decide; preferred default for
    step 2 is "separate `prices` database".
 3. **Client-cert issuance policy.** Mechanism supports per-service
    certs; BE has not committed to issuing one for prices-api.
-   *Action:* cross-team request before any implementation work.
+   _Action:_ cross-team request before any implementation work.
 4. **Backup retention for prices-api rows.** Daily Borg vs. RDS
-   PITR is a recovery-grade demotion. *Action:* product decision
+   PITR is a recovery-grade demotion. _Action:_ product decision
    (RPO target for OHLCV).
 5. **Cross-tenant incident ownership.** No runbook covers the
-   prices-api ↔ BE interaction during an incident. *Action:*
+   prices-api ↔ BE interaction during an incident. _Action:_
    document in the eventual ADR if recommendation is "go".
 
 ## 10. What step 1 does NOT cover

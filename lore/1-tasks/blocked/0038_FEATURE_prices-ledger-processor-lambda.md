@@ -1,24 +1,37 @@
 ---
-id: "0038"
-title: "Prices Ledger Processor Lambda — live S3-event-driven ingestion into price_ohlcv"
+id: '0038'
+title: 'Prices Ledger Processor Lambda — live S3-event-driven ingestion into price_ohlcv'
 type: FEATURE
 status: blocked
-related_adr: ["0001", "0003", "0004", "0005", "0006", "0007"]
-related_tasks: ["0011", "0037", "0045", "0047", "0048"]
-tags: [layer-indexing, priority-high, effort-large, milestone-M1, stream-1, lambda, ingestion, rust, aws, clickhouse, hetzner]
+related_adr: ['0001', '0003', '0004', '0005', '0006', '0007']
+related_tasks: ['0011', '0037', '0045', '0047', '0048']
+tags:
+  [
+    layer-indexing,
+    priority-high,
+    effort-large,
+    milestone-M1,
+    stream-1,
+    lambda,
+    ingestion,
+    rust,
+    aws,
+    clickhouse,
+    hetzner,
+  ]
 milestone: 1
 links:
-  - "../../../docs/prices-api-general-overview.md"
-  - "../../2-adrs/0001_stream1-clickhouse-sourced-amm-backfill.md"
-  - "../../2-adrs/0003_price-ohlcv-pk-includes-quote-asset-id.md"
-  - "../../2-adrs/0004_price-ohlcv-multi-source-merge-columns.md"
-  - "../../2-adrs/0005_stream2-sdex-local-workstation-backfill.md"
-  - "../../2-adrs/0006_runtime-framework-rust-axum.md"
-  - "../../2-adrs/0007_live-data-sink-on-shared-hetzner-clickhouse.md"
-  - "../archive/0045_RESEARCH_cross-team-bundle-with-be-on-hetzner-ch-tenancy/notes/G-be-agreement-record.md"
-  - "../backlog/0011_FEATURE_bootstrap-cdk-with-ssm-platform-lookups.md"
-  - "../backlog/0037_FEATURE_tranche1-ledger-processor-skeleton.md"
-  - "../backlog/0047_RESEARCH_cross-tenant-throughput-verification-on-shared-hetzner-ch.md"
+  - '../../../docs/prices-api-general-overview.md'
+  - '../../2-adrs/0001_stream1-clickhouse-sourced-amm-backfill.md'
+  - '../../2-adrs/0003_price-ohlcv-pk-includes-quote-asset-id.md'
+  - '../../2-adrs/0004_price-ohlcv-multi-source-merge-columns.md'
+  - '../../2-adrs/0005_stream2-sdex-local-workstation-backfill.md'
+  - '../../2-adrs/0006_runtime-framework-rust-axum.md'
+  - '../../2-adrs/0007_live-data-sink-on-shared-hetzner-clickhouse.md'
+  - '../archive/0045_RESEARCH_cross-team-bundle-with-be-on-hetzner-ch-tenancy/notes/G-be-agreement-record.md'
+  - '../backlog/0011_FEATURE_bootstrap-cdk-with-ssm-platform-lookups.md'
+  - '../backlog/0037_FEATURE_tranche1-ledger-processor-skeleton.md'
+  - '../backlog/0047_RESEARCH_cross-tenant-throughput-verification-on-shared-hetzner-ch.md'
 history:
   - date: 2026-05-18
     status: backlog
@@ -35,7 +48,7 @@ history:
   - date: 2026-05-18
     status: blocked
     who: oski
-    by: ["0011", "0037"]
+    by: ['0011', '0037']
     note: >
       Moved to blocked/ — 0011 provides the RDS + Lambda CDK
       stack scaffolding; 0037 provides the extractor kernel and
@@ -159,9 +172,9 @@ For each S3 record in the incoming batch:
 Per overview §5.2 "Write semantics — UPSERT, not INSERT":
 
 - Group extracted trades by `(floor_minute(closed_at), asset_id,
-  '1m', source)`.
+'1m', source)`.
 - For each bucket, emit one `INSERT ... ON CONFLICT (timestamp,
-  asset_id, granularity) DO UPDATE` with the **incremental-merge**
+asset_id, granularity) DO UPDATE` with the **incremental-merge**
   update expression (preserve `open`, overwrite `close`,
   `GREATEST(high)`, `LEAST(low)`, sum `volume_base` /
   `volume_quote_usd` / `trade_count`, recompute `vwap`).
@@ -170,7 +183,7 @@ Per overview §5.2 "Write semantics — UPSERT, not INSERT":
   is added; this task follows whatever PK shape the 0011 schema
   migration lands.
 - `source` column is set to `'sdex' | 'soroswap' | 'aquarius' |
-  'phoenix'` per overview §3.2 examples and ADR 0004's
+'phoenix'` per overview §3.2 examples and ADR 0004's
   multi-source merge columns.
 
 ### Step 4: CDK Lambda stack wiring (depends on 0011)
@@ -200,8 +213,8 @@ In `infra/aws-cdk/` (created by 0011):
   (use sqlx test-tx pattern).
 - Integration: spin up a local Postgres (Docker) with the 0011
   schema applied, run the binary against a recorded S3 event
-  + fixture, assert rows land with the expected PK and
-  incremental-merge semantics.
+  - fixture, assert rows land with the expected PK and
+    incremental-merge semantics.
 
 ### Step 6: Observability
 
@@ -210,7 +223,7 @@ In `infra/aws-cdk/` (created by 0011):
   duration. CloudWatch Logs + X-Ray per §2.1.
 - Metric: `prices.ledger_processor.lag_seconds` =
   `now() - ledger.closed_at` at invocation time; alarms if
-  >60s sustained (matches the §5.1 Galexie lag alarm shape).
+  > 60s sustained (matches the §5.1 Galexie lag alarm shape).
 
 ## Acceptance Criteria
 

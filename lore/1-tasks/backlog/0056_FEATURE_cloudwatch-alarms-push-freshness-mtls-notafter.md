@@ -1,20 +1,32 @@
 ---
-id: "0056"
-title: "CloudWatch alarms — sdex.last_push_at freshness + mTLS cert NotAfter"
+id: '0056'
+title: 'CloudWatch alarms — sdex.last_push_at freshness + mTLS cert NotAfter'
 type: FEATURE
 status: backlog
-related_adr: ["0005", "0007"]
-related_tasks: ["0011", "0050", "0051", "0055", "0028"]
-tags: [layer-infra, priority-medium, effort-small, milestone-M1, observability, cloudwatch, alarms, sns, mtls, backfill]
+related_adr: ['0005', '0007']
+related_tasks: ['0011', '0050', '0051', '0055', '0028']
+tags:
+  [
+    layer-infra,
+    priority-medium,
+    effort-small,
+    milestone-M1,
+    observability,
+    cloudwatch,
+    alarms,
+    sns,
+    mtls,
+    backfill,
+  ]
 milestone: 1
 links:
-  - "../../../docs/prices-api-general-overview.md"
-  - "../../2-adrs/0005_stream2-sdex-local-workstation-backfill.md"
-  - "../../2-adrs/0007_live-data-sink-on-shared-hetzner-clickhouse.md"
-  - "./0050_FEATURE_be-side-prep-sns-mtls-prices-db-provisioning.md"
-  - "./0051_FEATURE_clickhouse-prices-schema-and-mv-chain-migration.md"
-  - "./0055_FEATURE_backfill-status-endpoint-tranche-1-isolated.md"
-  - "./0028_FEATURE_sdex-cloud-push.md"
+  - '../../../docs/prices-api-general-overview.md'
+  - '../../2-adrs/0005_stream2-sdex-local-workstation-backfill.md'
+  - '../../2-adrs/0007_live-data-sink-on-shared-hetzner-clickhouse.md'
+  - './0050_FEATURE_be-side-prep-sns-mtls-prices-db-provisioning.md'
+  - './0051_FEATURE_clickhouse-prices-schema-and-mv-chain-migration.md'
+  - './0055_FEATURE_backfill-status-endpoint-tranche-1-isolated.md'
+  - './0028_FEATURE_sdex-cloud-push.md'
 history:
   - date: 2026-05-21
     status: backlog
@@ -76,7 +88,7 @@ Add `packages/backfill-freshness-probe/` (binary crate).
 
 - Trigger: EventBridge Scheduler `rate(15 minutes)`.
 - Behaviour: `SELECT task_name, last_push_at FROM
-  prices.backfill_progress FINAL`; for each row, compute
+prices.backfill_progress FINAL`; for each row, compute
   `now() - last_push_at` in seconds; publish a CloudWatch
   metric per stream (`prices.backfill.sdex.push_age_seconds`,
   `prices.backfill.soroban_amm.push_age_seconds`).
@@ -103,7 +115,7 @@ Add `packages/mtls-notafter-probe/` (binary crate).
 
 In the 0011 CDK app, add:
 
-- Alarm `sdex-push-freshness-T1`: threshold 7 days * 86400 = 604800
+- Alarm `sdex-push-freshness-T1`: threshold 7 days \* 86400 = 604800
   seconds on `prices.backfill.sdex.push_age_seconds`, 1
   datapoint at 15-min granularity, action → SNS topic
   `prices-ops-alarms`.
@@ -137,8 +149,7 @@ threshold trips. Restore the canonical cert post-test.
 ## Acceptance Criteria
 
 - [ ] `packages/backfill-freshness-probe` runs on 15-min
-      schedule and publishes `prices.backfill.sdex.push_age_seconds`
-      + `prices.backfill.soroban_amm.push_age_seconds` to
+      schedule and publishes `prices.backfill.sdex.push_age_seconds` + `prices.backfill.soroban_amm.push_age_seconds` to
       CloudWatch
 - [ ] `packages/mtls-notafter-probe` runs daily and publishes
       `prices.mtls.days_to_notafter` to CloudWatch

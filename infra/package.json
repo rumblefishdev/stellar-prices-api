@@ -21,7 +21,10 @@
     "tslib": "^2.3.0"
   },
   "nx": {
-    "tags": ["type:infra", "scope:infra"]
+    "tags": [
+      "type:infra",
+      "scope:infra"
+    ]
   },
   "devDependencies": {
     "aws-cdk": "^2.1114.1"

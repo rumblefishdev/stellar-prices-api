@@ -13,12 +13,12 @@ Substantive revisions only. Minor wording / schema-comment / index tweaks land v
 commits and are not tracked here. Append a new row when a change touches the architecture,
 the API surface, or the cost / budget framing.
 
-| Date | Sections touched | Driver | Summary |
-|------|------------------|--------|---------|
-| 2026-05-20 | §0, §1.1, §1.2, §2.1, §2.3, §3, §4.5, §5.2–§5.4, §5.6, §6, §7, §8, §9, §10, §11 (all-table refresh) | [ADR 0007](../lore/2-adrs/0007_live-data-sink-on-shared-hetzner-clickhouse.md) (accepted) · [Task 0045](../lore/1-tasks/archive/0045_RESEARCH_cross-team-bundle-with-be-on-hetzner-ch-tenancy/README.md) · [Task 0049](../lore/1-tasks/active/0049_DOCS_overview-rewrite-for-adr-0007.md) | **Live data sink flipped from Prices-owned RDS PostgreSQL to BE's shared Hetzner ClickHouse cluster** (separate `prices` database). All live OHLCV / current-prices / oracle / asset registry / backfill-progress data now lives in ClickHouse, written over HTTPS-mTLS to Caddy:443 by Lambdas running outside any VPC. The S3 → Lambda path gains an SNS topic between the bucket and both tenants' processors (one-time BE CDK change). Schema rewritten to per-source `ReplacingMergeTree(version)` rows on per-granularity tables (`price_ohlcv_1m`, `_15m`, …, `_1M`); rollups become a CH materialised-view chain, **eliminating the OHLCV Rollup Lambda**. Prices-api VPC, NAT Gateway, and RDS line items removed; mTLS cert lifecycle added (per-env certs, 1-year manual rotation, CA-rotation revocation). Cost lines: $12/mo RDS removed; ~$1-2/env/mo Hetzner CH cost-share added (basis: [task 0046](../lore/1-tasks/archive/0046_RESEARCH_empirical-prices-ch-storage-estimate-from-10k-ledgers/notes/G-empirical-storage-estimate.md) empirical ~0.45 GB/yr, 14.8× compression). Local backfill sections (Stream 1 ADR 0001, Stream 2 ADR 0005) preserved — only their cloud-push targets shift RDS → CH. |
-| 2026-05-15 | §2.3, §5.3, §5.6 Stream 1 (two-stream design table, architecture diagram, processing-rate sub-table, schema-coupling note), §9 (Tranche 1 work), §10, §11.1, §11.2, §11.4 | [ADR 0001](../lore/2-adrs/0001_stream1-clickhouse-sourced-amm-backfill.md) · [Task 0029](../lore/1-tasks/active/0029_DOCS_update-design-doc-stream-1-adr-0001.md) | Stream 1 (Soroban AMM) backfill reconciled with ADR 0001: source moved from BE's PG `soroban_events` to a **local ClickHouse** instance populated upfront by BE's `backfill-runner --target=clickhouse`; deployment shape moved from ECS Fargate to a local Rust CLI (`soroban-amm-backfill`) on the operator's workstation, ScVal decoding via `stellar-xdr` crate, one-shot completion push to cloud RDS. Stream 1 Fargate cost line removed; backfill total now ~$30. BE coupling reframed as a transient prep-step tool invocation (not runtime DB read); §11.1 `soroban_events` row removed and its development-savings counterpart added to §11.2. Closes out the design-doc sweep started in [Task 0013](../lore/1-tasks/archive/0013_DOCS_update-design-doc-to-match-be-reality.md). |
-| 2026-05-14 | §2.3, §3.5, §4.5, §5.3, §5.6 Stream 2, §6, §8, §9, §10, §11.1, §11.4 | [ADR 0005](../lore/2-adrs/0005_stream2-sdex-local-workstation-backfill.md) (supersedes ADR 0002) · [Task 0013](../lore/1-tasks/archive/0013_DOCS_update-design-doc-to-match-be-reality.md) | Stream 2 (SDEX) backfill moved from continuous ECS Fargate to a local Rust CLI on the operator's workstation with a separate `sdex-cloud-push` step to cloud RDS. `backfill_progress` schema swapped from heartbeat fields to `last_push_at`. `GET /backfill/status` response and tranche acceptance criteria reframed around push cadence. Backfill compute cost dropped ~95%. Stream 1 (Soroban AMM) reconciliation per [ADR 0001](../lore/2-adrs/0001_stream1-clickhouse-sourced-amm-backfill.md) is tracked separately under [Task 0029](../lore/1-tasks/active/0029_DOCS_update-design-doc-stream-1-adr-0001.md). |
-| (earlier) | whole document | second-round reviewer feedback | Post-2nd-Review baseline: stack switched to Rust + axum + sqlx (matching the Block Explorer codebase); BE-shared infrastructure explicitly catalogued (§11); historical backfill plan with Tranche 2 / Tranche 3 milestones added (§5.6); `GET /backfill/status` endpoint introduced (§4.5). |
+| Date       | Sections touched                                                                                                                                                          | Driver                                                                                                                                                                                                                                                                                    | Summary                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 2026-05-20 | §0, §1.1, §1.2, §2.1, §2.3, §3, §4.5, §5.2–§5.4, §5.6, §6, §7, §8, §9, §10, §11 (all-table refresh)                                                                       | [ADR 0007](../lore/2-adrs/0007_live-data-sink-on-shared-hetzner-clickhouse.md) (accepted) · [Task 0045](../lore/1-tasks/archive/0045_RESEARCH_cross-team-bundle-with-be-on-hetzner-ch-tenancy/README.md) · [Task 0049](../lore/1-tasks/active/0049_DOCS_overview-rewrite-for-adr-0007.md) | **Live data sink flipped from Prices-owned RDS PostgreSQL to BE's shared Hetzner ClickHouse cluster** (separate `prices` database). All live OHLCV / current-prices / oracle / asset registry / backfill-progress data now lives in ClickHouse, written over HTTPS-mTLS to Caddy:443 by Lambdas running outside any VPC. The S3 → Lambda path gains an SNS topic between the bucket and both tenants' processors (one-time BE CDK change). Schema rewritten to per-source `ReplacingMergeTree(version)` rows on per-granularity tables (`price_ohlcv_1m`, `_15m`, …, `_1M`); rollups become a CH materialised-view chain, **eliminating the OHLCV Rollup Lambda**. Prices-api VPC, NAT Gateway, and RDS line items removed; mTLS cert lifecycle added (per-env certs, 1-year manual rotation, CA-rotation revocation). Cost lines: $12/mo RDS removed; ~$1-2/env/mo Hetzner CH cost-share added (basis: [task 0046](../lore/1-tasks/archive/0046_RESEARCH_empirical-prices-ch-storage-estimate-from-10k-ledgers/notes/G-empirical-storage-estimate.md) empirical ~0.45 GB/yr, 14.8× compression). Local backfill sections (Stream 1 ADR 0001, Stream 2 ADR 0005) preserved — only their cloud-push targets shift RDS → CH. |
+| 2026-05-15 | §2.3, §5.3, §5.6 Stream 1 (two-stream design table, architecture diagram, processing-rate sub-table, schema-coupling note), §9 (Tranche 1 work), §10, §11.1, §11.2, §11.4 | [ADR 0001](../lore/2-adrs/0001_stream1-clickhouse-sourced-amm-backfill.md) · [Task 0029](../lore/1-tasks/active/0029_DOCS_update-design-doc-stream-1-adr-0001.md)                                                                                                                         | Stream 1 (Soroban AMM) backfill reconciled with ADR 0001: source moved from BE's PG `soroban_events` to a **local ClickHouse** instance populated upfront by BE's `backfill-runner --target=clickhouse`; deployment shape moved from ECS Fargate to a local Rust CLI (`soroban-amm-backfill`) on the operator's workstation, ScVal decoding via `stellar-xdr` crate, one-shot completion push to cloud RDS. Stream 1 Fargate cost line removed; backfill total now ~$30. BE coupling reframed as a transient prep-step tool invocation (not runtime DB read); §11.1 `soroban_events` row removed and its development-savings counterpart added to §11.2. Closes out the design-doc sweep started in [Task 0013](../lore/1-tasks/archive/0013_DOCS_update-design-doc-to-match-be-reality.md).                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| 2026-05-14 | §2.3, §3.5, §4.5, §5.3, §5.6 Stream 2, §6, §8, §9, §10, §11.1, §11.4                                                                                                      | [ADR 0005](../lore/2-adrs/0005_stream2-sdex-local-workstation-backfill.md) (supersedes ADR 0002) · [Task 0013](../lore/1-tasks/archive/0013_DOCS_update-design-doc-to-match-be-reality.md)                                                                                                | Stream 2 (SDEX) backfill moved from continuous ECS Fargate to a local Rust CLI on the operator's workstation with a separate `sdex-cloud-push` step to cloud RDS. `backfill_progress` schema swapped from heartbeat fields to `last_push_at`. `GET /backfill/status` response and tranche acceptance criteria reframed around push cadence. Backfill compute cost dropped ~95%. Stream 1 (Soroban AMM) reconciliation per [ADR 0001](../lore/2-adrs/0001_stream1-clickhouse-sourced-amm-backfill.md) is tracked separately under [Task 0029](../lore/1-tasks/active/0029_DOCS_update-design-doc-stream-1-adr-0001.md).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| (earlier)  | whole document                                                                                                                                                            | second-round reviewer feedback                                                                                                                                                                                                                                                            | Post-2nd-Review baseline: stack switched to Rust + axum + sqlx (matching the Block Explorer codebase); BE-shared infrastructure explicitly catalogued (§11); historical backfill plan with Tranche 2 / Tranche 3 milestones added (§5.6); `GET /backfill/status` endpoint introduced (§4.5).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 
 ---
 
@@ -153,19 +153,19 @@ to their own infrastructure at any time if needed.
 
 ### 2.1 Components Hosted by Prices API (Prices API budget)
 
-| Service | Role | Details |
-|---------|------|---------|
-| **Lambda — Prices Ledger Processor** | Primary ingestion | SNS-triggered (one message per S3 PutObject on BE's `stellar-ledger-data/` bucket). Rust binary, no VPC. Parses XDR via `stellar-xdr` crate, extracts SDEX trades and Soroban swap events, INSERTs per-source 1-min OHLCV rows to ClickHouse `prices.price_ohlcv_1m` over HTTPS-mTLS to Caddy:443 |
-| **Lambda — Current Price Updater** | Price aggregation | EventBridge rate(1 min). Reads latest candles from `prices.price_ohlcv_1m`, computes cross-source VWAP per §5.5, writes to `prices.current_prices` (`ReplacingMergeTree(updated_at)`) |
-| **Lambda — Oracle Fetcher** | Oracle cross-reference | EventBridge rate(5 min). Reads Reflector via Soroban RPC `simulateTransaction`. Writes to `prices.oracle_prices`. Failures do not block primary ingestion |
-| **Lambda — Asset Discovery** | Asset registry | EventBridge rate(1 hour). Detects new SEP-41 contract deployments and classic asset issuances; UPSERTs into `prices.assets` |
-| **Lambda — Cleanup Worker** | Data retention | EventBridge cron(02:00 UTC daily). `ALTER TABLE … DROP PARTITION` on old monthly partitions of each per-granularity OHLCV table |
-| **Lambda — API handlers** | Public API | Individual functions per route group. Rust / axum via `lambda_runtime`, 256–512 MB, 15s timeout. No VPC; outbound HTTPS-mTLS to Caddy:443 |
-| **API Gateway** | Public API entry point | REST API, usage plans, API key auth, rate limiting (100 req/s per key), request validation. Built-in response cache (0.5 GB) with per-endpoint TTLs |
-| **EventBridge Scheduler** | Scheduled triggers | Cron/rate rules for all periodic Lambda workers |
-| **Secrets Manager** | Credentials & mTLS material | Per-env client cert + key for Caddy:443 mTLS (2 secrets per env); Soroswap/Aquarius API keys; oracle contract address |
-| **CloudWatch + X-Ray** | Observability | API latency, error rates, ingestion lag, Lambda duration/concurrency, backfill progress; mTLS cert NotAfter alarm |
-| **S3** (API docs) | Documentation hosting | OpenAPI spec + self-service onboarding portal, served via CloudFront |
+| Service                              | Role                        | Details                                                                                                                                                                                                                                                                                           |
+| ------------------------------------ | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Lambda — Prices Ledger Processor** | Primary ingestion           | SNS-triggered (one message per S3 PutObject on BE's `stellar-ledger-data/` bucket). Rust binary, no VPC. Parses XDR via `stellar-xdr` crate, extracts SDEX trades and Soroban swap events, INSERTs per-source 1-min OHLCV rows to ClickHouse `prices.price_ohlcv_1m` over HTTPS-mTLS to Caddy:443 |
+| **Lambda — Current Price Updater**   | Price aggregation           | EventBridge rate(1 min). Reads latest candles from `prices.price_ohlcv_1m`, computes cross-source VWAP per §5.5, writes to `prices.current_prices` (`ReplacingMergeTree(updated_at)`)                                                                                                             |
+| **Lambda — Oracle Fetcher**          | Oracle cross-reference      | EventBridge rate(5 min). Reads Reflector via Soroban RPC `simulateTransaction`. Writes to `prices.oracle_prices`. Failures do not block primary ingestion                                                                                                                                         |
+| **Lambda — Asset Discovery**         | Asset registry              | EventBridge rate(1 hour). Detects new SEP-41 contract deployments and classic asset issuances; UPSERTs into `prices.assets`                                                                                                                                                                       |
+| **Lambda — Cleanup Worker**          | Data retention              | EventBridge cron(02:00 UTC daily). `ALTER TABLE … DROP PARTITION` on old monthly partitions of each per-granularity OHLCV table                                                                                                                                                                   |
+| **Lambda — API handlers**            | Public API                  | Individual functions per route group. Rust / axum via `lambda_runtime`, 256–512 MB, 15s timeout. No VPC; outbound HTTPS-mTLS to Caddy:443                                                                                                                                                         |
+| **API Gateway**                      | Public API entry point      | REST API, usage plans, API key auth, rate limiting (100 req/s per key), request validation. Built-in response cache (0.5 GB) with per-endpoint TTLs                                                                                                                                               |
+| **EventBridge Scheduler**            | Scheduled triggers          | Cron/rate rules for all periodic Lambda workers                                                                                                                                                                                                                                                   |
+| **Secrets Manager**                  | Credentials & mTLS material | Per-env client cert + key for Caddy:443 mTLS (2 secrets per env); Soroswap/Aquarius API keys; oracle contract address                                                                                                                                                                             |
+| **CloudWatch + X-Ray**               | Observability               | API latency, error rates, ingestion lag, Lambda duration/concurrency, backfill progress; mTLS cert NotAfter alarm                                                                                                                                                                                 |
+| **S3** (API docs)                    | Documentation hosting       | OpenAPI spec + self-service onboarding portal, served via CloudFront                                                                                                                                                                                                                              |
 
 **Components no longer in the Prices API budget** (eliminated by ADR 0007):
 
@@ -175,25 +175,25 @@ to their own infrastructure at any time if needed.
 
 ### 2.2 External Services Consumed (read-only)
 
-| External service | Purpose | Failure impact |
-|-----------------|---------|----------------|
-| Reflector Oracle (Soroban RPC) | Price cross-reference only — not a primary source | Non-critical — oracle column shows `null` or last known value |
-| Soroswap API | Pool pair metadata and discovery | Non-critical — existing pairs continue; new pair discovery pauses |
-| Aquarius API | Pool pair metadata and discovery | Non-critical — same as above |
+| External service               | Purpose                                           | Failure impact                                                    |
+| ------------------------------ | ------------------------------------------------- | ----------------------------------------------------------------- |
+| Reflector Oracle (Soroban RPC) | Price cross-reference only — not a primary source | Non-critical — oracle column shows `null` or last known value     |
+| Soroswap API                   | Pool pair metadata and discovery                  | Non-critical — existing pairs continue; new pair discovery pauses |
+| Aquarius API                   | Pool pair metadata and discovery                  | Non-critical — same as above                                      |
 
 ### 2.3 Components Shared with Soroban Block Explorer (no additional charge)
 
 These components are funded by the Soroban Block Explorer grant and already operational. They
 are listed here to confirm there is no double-billing.
 
-| Component | Block Explorer context | Prices API usage |
-|-----------|----------------------|-----------------|
-| **Galexie ECS Fargate task** | 1 task, continuous, 1 vCPU / 2 GB, writes to `stellar-ledger-data/` S3 every ~5–6 s | One Galexie serves both services; no second Galexie needed |
-| **S3 bucket `stellar-ledger-data/`** | Owned and funded by Block Explorer | Prices API Lambda reads the same files; no additional S3 storage cost |
-| **SNS topic on `stellar-ledger-data/`** | One-time BE CDK change: S3 PutObject events fan out to an SNS topic instead of a direct Lambda target (ADR 0007 §3.2 / 0045 Cluster A2) | Prices API Lambda subscribes its own queue to the SNS topic — same delivery semantics as the legacy direct-S3 target, with fan-out as a first-class primitive |
-| **Hetzner ClickHouse cluster** | Production data plane for BE's `default.*` (BE ADR 0044 / 0045) — single CH instance on a single Hetzner box behind Caddy:443 | Prices API joins as a **second tenant** with its own `prices` database, isolated via ClickHouse's first-class multi-tenant primitives (database, user, quota, profile). Writes and reads over HTTPS-mTLS through the same Caddy. No second CH instance, no second Hetzner box. Cost-share: opening proposal ~1-2% pro-rata ($1-2/env/mo) per task 0046's empirical ~0.45 GB/yr footprint; D12 commercial follow-up |
-| **mTLS Certificate Authority** | BE-managed self-signed CA + per-AWS-service client-cert issuance script (BE Cluster C asks) | Prices API receives per-env client cert + key (one pair per env), stored in AWS Secrets Manager. Issuance script invocation is the only BE-side operator step per cert lifecycle (1-year manual rotation) |
-| **GitHub Actions CI/CD patterns** | Shared pipeline structure and CDK conventions | Prices API pipeline reuses the same CDK deployment pattern |
+| Component                               | Block Explorer context                                                                                                                  | Prices API usage                                                                                                                                                                                                                                                                                                                                                                                                   |
+| --------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Galexie ECS Fargate task**            | 1 task, continuous, 1 vCPU / 2 GB, writes to `stellar-ledger-data/` S3 every ~5–6 s                                                     | One Galexie serves both services; no second Galexie needed                                                                                                                                                                                                                                                                                                                                                         |
+| **S3 bucket `stellar-ledger-data/`**    | Owned and funded by Block Explorer                                                                                                      | Prices API Lambda reads the same files; no additional S3 storage cost                                                                                                                                                                                                                                                                                                                                              |
+| **SNS topic on `stellar-ledger-data/`** | One-time BE CDK change: S3 PutObject events fan out to an SNS topic instead of a direct Lambda target (ADR 0007 §3.2 / 0045 Cluster A2) | Prices API Lambda subscribes its own queue to the SNS topic — same delivery semantics as the legacy direct-S3 target, with fan-out as a first-class primitive                                                                                                                                                                                                                                                      |
+| **Hetzner ClickHouse cluster**          | Production data plane for BE's `default.*` (BE ADR 0044 / 0045) — single CH instance on a single Hetzner box behind Caddy:443           | Prices API joins as a **second tenant** with its own `prices` database, isolated via ClickHouse's first-class multi-tenant primitives (database, user, quota, profile). Writes and reads over HTTPS-mTLS through the same Caddy. No second CH instance, no second Hetzner box. Cost-share: opening proposal ~1-2% pro-rata ($1-2/env/mo) per task 0046's empirical ~0.45 GB/yr footprint; D12 commercial follow-up |
+| **mTLS Certificate Authority**          | BE-managed self-signed CA + per-AWS-service client-cert issuance script (BE Cluster C asks)                                             | Prices API receives per-env client cert + key (one pair per env), stored in AWS Secrets Manager. Issuance script invocation is the only BE-side operator step per cert lifecycle (1-year manual rotation)                                                                                                                                                                                                          |
+| **GitHub Actions CI/CD patterns**       | Shared pipeline structure and CDK conventions                                                                                           | Prices API pipeline reuses the same CDK deployment pattern                                                                                                                                                                                                                                                                                                                                                         |
 
 **Confirmed: none of the components in 2.3 appear in the Prices API budget.**
 
@@ -238,7 +238,7 @@ against `default.*` (if any) are wrapped in named `prices.*` views (ADR 0007 §3
 - **`ReplacingMergeTree(version)`** on `price_ohlcv_*` — per-source rows, one row per
   `(timestamp, asset_id, quote_asset_id, granularity, source)`. Idempotent re-writes from
   ledger replay collapse on background merge. Read path uses `FINAL` or `argMax/argMin +
-  GROUP BY` to handle eventual consistency.
+GROUP BY` to handle eventual consistency.
 - **`ReplacingMergeTree(updated_at)`** on `current_prices`, `assets`, `backfill_progress`
   — last-write-wins on the timestamp column.
 - **`MergeTree`** on `oracle_prices` — append-only.
@@ -249,6 +249,7 @@ against `default.*` (if any) are wrapped in named `prices.*` views (ADR 0007 §3
   Cleanup = `ALTER TABLE … DROP PARTITION`, instant.
 
 ### 3.1 Assets Table
+
 ```sql
 CREATE TABLE prices.assets (
     asset_id         UInt32,            -- application-assigned surrogate id
@@ -461,6 +462,7 @@ DB carries only the most recent push state. If a future stream reintroduces a
 continuous cloud-side writer, these columns can be added back at that time.
 
 ### 3.6 Retention Policy (Cleanup Worker Lambda)
+
 ```
 Fine-grained data retention:
   prices.price_ohlcv_1m   → keep 7 days  (ALTER TABLE DROP PARTITION for months > 7d old)
@@ -491,6 +493,7 @@ PARTITION` statements over HTTPS-mTLS to Caddy:443.
 ### 4.1 Assets
 
 #### `GET /assets`
+
 List all tracked assets with metadata and current price.
 
 **Query parameters:**
@@ -514,6 +517,7 @@ cursor = base64({ "volume_24h": 1523400.50, "id": 42 })
 ```
 
 On the first request (no cursor), the query is:
+
 ```sql
 SELECT * FROM current_prices JOIN assets ON assets.id = current_prices.asset_id
 ORDER BY volume_24h DESC, id DESC
@@ -521,6 +525,7 @@ LIMIT 51;  -- limit + 1 to determine has_more
 ```
 
 On subsequent requests, the server decodes the cursor and uses a **keyset condition**:
+
 ```sql
 SELECT * FROM current_prices JOIN assets ON assets.id = current_prices.asset_id
 WHERE (volume_24h, id) < (1523400.50, 42)  -- decoded from cursor
@@ -531,6 +536,7 @@ LIMIT 51;
 `has_more` is determined by fetching `limit + 1` rows.
 
 **Response:**
+
 ```json
 {
   "data": [
@@ -546,7 +552,7 @@ LIMIT 51;
       "volume_24h_usd": "1523400.50",
       "vwap_24h": "1.0002",
       "sources": {
-        "sdex":     { "price": "1.0001", "volume_24h": "800000" },
+        "sdex": { "price": "1.0001", "volume_24h": "800000" },
         "soroswap": { "price": "1.0002", "volume_24h": "500000" },
         "aquarius": { "price": "1.0001", "volume_24h": "223400" }
       },
@@ -559,7 +565,9 @@ LIMIT 51;
 ```
 
 #### `GET /assets/{asset_identifier}`
+
 Get single asset details. `asset_identifier` can be:
+
 - `{code}:{issuer}` for classic assets (e.g. `USDC:GA5ZSE...XYZ`)
 - `{contract_address}` for Soroban tokens (e.g. `CABC...DEF`)
 - `native` for XLM
@@ -567,6 +575,7 @@ Get single asset details. `asset_identifier` can be:
 ### 4.2 Prices / OHLCV
 
 #### `GET /assets/{asset_identifier}/ohlcv`
+
 Historical OHLCV candlestick data.
 
 **Query parameters:**
@@ -602,6 +611,7 @@ date, the response includes a `backfill_note` field indicating how far back data
 ```
 
 **Response:**
+
 ```json
 {
   "asset": "USDC:GA5ZSE...XYZ",
@@ -624,9 +634,11 @@ date, the response includes a `backfill_note` field indicating how far back data
 ```
 
 #### `GET /assets/{asset_identifier}/price`
+
 Current real-time price (latest snapshot from `current_prices`).
 
 **Response:**
+
 ```json
 {
   "asset": "USDC:GA5ZSE...XYZ",
@@ -636,9 +648,9 @@ Current real-time price (latest snapshot from `current_prices`).
   "volume_24h_usd": "1523400.50",
   "change_24h_pct": "-0.02",
   "sources": {
-    "sdex":      { "price": "1.0001", "volume_24h": "800000" },
-    "soroswap":  { "price": "1.0002", "volume_24h": "500000" },
-    "aquarius":  { "price": "1.0001", "volume_24h": "223400" }
+    "sdex": { "price": "1.0001", "volume_24h": "800000" },
+    "soroswap": { "price": "1.0002", "volume_24h": "500000" },
+    "aquarius": { "price": "1.0001", "volume_24h": "223400" }
   },
   "updated_at": "2026-02-10T12:00:30Z"
 }
@@ -647,32 +659,40 @@ Current real-time price (latest snapshot from `current_prices`).
 ### 4.3 Batch / Multi-asset
 
 #### `POST /prices/batch`
+
 Fetch current prices for multiple assets in one call.
 
 **Request body:**
+
 ```json
 {
-  "assets": [
-    "native",
-    "USDC:GA5ZSE...XYZ",
-    "CABC...DEF"
-  ]
+  "assets": ["native", "USDC:GA5ZSE...XYZ", "CABC...DEF"]
 }
 ```
 
 ### 4.4 Oracle Data
 
 #### `GET /oracles/{asset_identifier}`
+
 Oracle-specific prices for an asset. Oracle data is exposed here for reference only and does not
 feed the `price_usd` field in any other endpoint.
 
 **Response:**
+
 ```json
 {
   "asset": "USDC:GA5ZSE...XYZ",
   "oracles": [
-    {"name": "reflector", "price_usd": "1.0000", "updated_at": "2026-02-10T11:55:00Z"},
-    {"name": "redstone",  "price_usd": "1.0001", "updated_at": "2026-02-10T11:58:00Z"}
+    {
+      "name": "reflector",
+      "price_usd": "1.0000",
+      "updated_at": "2026-02-10T11:55:00Z"
+    },
+    {
+      "name": "redstone",
+      "price_usd": "1.0001",
+      "updated_at": "2026-02-10T11:58:00Z"
+    }
   ]
 }
 ```
@@ -680,6 +700,7 @@ feed the `price_usd` field in any other endpoint.
 ### 4.5 Backfill Progress
 
 #### `GET /backfill/status`
+
 Returns the current state of the historical all-time backfill. This endpoint is the primary
 mechanism for the Tranche 3 reviewer to validate that backfill is progressing correctly.
 
@@ -695,6 +716,7 @@ The backfill is split into two independent streams with different sources and ti
 Section 5.6). The response reflects both.
 
 **Response:**
+
 ```json
 {
   "realtime_tip_ledger": 57234198,
@@ -717,17 +739,17 @@ Section 5.6). The response reflects both.
 }
 ```
 
-| Field | Description |
-|-------|-------------|
-| `sdex.status` | `running`, `paused`, `completed`, or `error` — SDEX archive backfill |
-| `sdex.current_ledger` | Oldest ledger reflected in the cloud DB after the most recent `sdex-cloud-push`. Advances at push cadence, not CLI cadence. |
-| `sdex.progress_pct` | `(target_ledger - current_ledger) / (target_ledger - start_ledger) * 100`, computed at read time |
-| `sdex.ledgers_remaining` | `current_ledger - start_ledger`, computed at read time |
-| `sdex.last_push_at` | Timestamp of the most recent successful `sdex-cloud-push`. The CloudWatch freshness alarm fires when this is older than the configured push-cadence threshold for the active tranche. `null` until the first push. |
-| `sdex.earliest_data_available` | Stored timestamp of the oldest SDEX OHLCV row known for this stream — recorded by the push step when it first lands a candle for a given timestamp, **not** computed live via `MIN(timestamp)`. Returned as-is, so reads are O(1). |
-| `soroban_amm.status` | Typically `completed` from Tranche 1 onwards |
-| `soroban_amm.last_push_at` | Timestamp of the one-shot AMM CLI's completion push (ADR 0001). `null` until the push happens. |
-| `soroban_amm.earliest_data_available` | Same semantics as `sdex.earliest_data_available` — stored, not computed. Lands at the Soroban activation date (~Nov 2023) once the one-time backfill completes. |
+| Field                                 | Description                                                                                                                                                                                                                        |
+| ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `sdex.status`                         | `running`, `paused`, `completed`, or `error` — SDEX archive backfill                                                                                                                                                               |
+| `sdex.current_ledger`                 | Oldest ledger reflected in the cloud DB after the most recent `sdex-cloud-push`. Advances at push cadence, not CLI cadence.                                                                                                        |
+| `sdex.progress_pct`                   | `(target_ledger - current_ledger) / (target_ledger - start_ledger) * 100`, computed at read time                                                                                                                                   |
+| `sdex.ledgers_remaining`              | `current_ledger - start_ledger`, computed at read time                                                                                                                                                                             |
+| `sdex.last_push_at`                   | Timestamp of the most recent successful `sdex-cloud-push`. The CloudWatch freshness alarm fires when this is older than the configured push-cadence threshold for the active tranche. `null` until the first push.                 |
+| `sdex.earliest_data_available`        | Stored timestamp of the oldest SDEX OHLCV row known for this stream — recorded by the push step when it first lands a candle for a given timestamp, **not** computed live via `MIN(timestamp)`. Returned as-is, so reads are O(1). |
+| `soroban_amm.status`                  | Typically `completed` from Tranche 1 onwards                                                                                                                                                                                       |
+| `soroban_amm.last_push_at`            | Timestamp of the one-shot AMM CLI's completion push (ADR 0001). `null` until the push happens.                                                                                                                                     |
+| `soroban_amm.earliest_data_available` | Same semantics as `sdex.earliest_data_available` — stored, not computed. Lands at the Soroban activation date (~Nov 2023) once the one-time backfill completes.                                                                    |
 
 ---
 
@@ -743,12 +765,12 @@ The Prices API does not deploy or fund a second Galexie instance. Instead, the P
 Ledger Processor Lambda is registered as a second S3 event notification target on the shared
 `stellar-ledger-data/` bucket, alongside the Block Explorer's Ledger Processor.
 
-| Property | Value |
-|----------|-------|
-| Runtime | ECS Fargate, 1 vCPU / 2 GB RAM, continuously running (Block Explorer funded) |
-| Output | `s3://stellar-ledger-data/ledgers/{seq_start}-{seq_end}.xdr.zstd` |
-| Format | `LedgerCloseMeta` XDR, zstd-compressed |
-| Recovery | Checkpoint-aware — resumes from last exported sequence on restart |
+| Property       | Value                                                                        |
+| -------------- | ---------------------------------------------------------------------------- |
+| Runtime        | ECS Fargate, 1 vCPU / 2 GB RAM, continuously running (Block Explorer funded) |
+| Output         | `s3://stellar-ledger-data/ledgers/{seq_start}-{seq_end}.xdr.zstd`            |
+| Format         | `LedgerCloseMeta` XDR, zstd-compressed                                       |
+| Recovery       | Checkpoint-aware — resumes from last exported sequence on restart            |
 | Lag monitoring | CloudWatch alarm fires if S3 file timestamps fall >60s behind current ledger |
 
 ### 5.2 Prices Ledger Processor (Rust)
@@ -791,16 +813,16 @@ INSERT opens a fresh connection.
 
 ### 5.3 Ingestion Workers
 
-| Worker | Trigger | Source | Data |
-|--------|---------|--------|------|
-| **Prices Ledger Processor** | SNS message (per S3 PutObject; ~every 5–6 s) | `LedgerCloseMeta` from BE's S3 | SDEX trades + all Soroban AMM swap events → per-source 1-min OHLCV rows in `prices.price_ohlcv_1m` |
-| **Oracle Fetcher** | EventBridge rate(5 min) | Reflector Oracle (Soroban RPC `simulateTransaction`) | Oracle reported prices → `prices.oracle_prices` |
-| **Asset Discovery** | EventBridge rate(1 hour) | Ledger account entries in `LedgerCloseMeta` | New classic asset issuances; new SEP-41 contract deployments → `prices.assets` |
-| **Current Price Updater** | EventBridge rate(1 min) | `prices.price_ohlcv_1m` (after ingestion) | Cross-source VWAP per §5.5 → `prices.current_prices` |
-| **Cleanup Worker** | EventBridge cron(02:00 UTC) | `prices.*` | `ALTER TABLE … DROP PARTITION` for expired month-partitions of `price_ohlcv_1m`, `_15m`, `oracle_prices` |
-| **SDEX Backfill CLI** (`sdex-backfill`, ADR 0005) | Local Rust CLI on operator workstation, run in tip-backward chunks during the project | `s3://aws-public-blockchain` (anonymous `--no-sign-request`) | Historical SDEX trades → per-source 1-min rows in **local Postgres** on the workstation |
-| **SDEX Cloud Push** (`sdex-cloud-push`, ADR 0005) | Operator-invoked between chunks; only Hetzner-CH-touching component on the Stream 2 path | Local Postgres `price_ohlcv` + `assets` | Streams accumulated rows to `prices.price_ohlcv_*` over HTTPS-mTLS to Caddy:443; advances `prices.backfill_progress` row for `sdex_archive` (`current_ledger`, `last_push_at`) |
-| **Soroban AMM Backfill CLI** (`soroban-amm-backfill`, ADR 0001) | One-shot Local Rust CLI on operator workstation, run once during Tranche 1 | Local ClickHouse `soroban_events` (populated upfront by BE's `backfill-runner --target=clickhouse`); ScVal decoding via the `stellar-xdr` crate | Historical Soroswap/Aquarius/Phoenix swaps → per-source 1-min rows; on completion runs the cloud push that lands all rows into `prices.*` on Hetzner CH and sets the `soroban_amm` `backfill_progress` row to `status='completed'` |
+| Worker                                                          | Trigger                                                                                  | Source                                                                                                                                          | Data                                                                                                                                                                                                                               |
+| --------------------------------------------------------------- | ---------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Prices Ledger Processor**                                     | SNS message (per S3 PutObject; ~every 5–6 s)                                             | `LedgerCloseMeta` from BE's S3                                                                                                                  | SDEX trades + all Soroban AMM swap events → per-source 1-min OHLCV rows in `prices.price_ohlcv_1m`                                                                                                                                 |
+| **Oracle Fetcher**                                              | EventBridge rate(5 min)                                                                  | Reflector Oracle (Soroban RPC `simulateTransaction`)                                                                                            | Oracle reported prices → `prices.oracle_prices`                                                                                                                                                                                    |
+| **Asset Discovery**                                             | EventBridge rate(1 hour)                                                                 | Ledger account entries in `LedgerCloseMeta`                                                                                                     | New classic asset issuances; new SEP-41 contract deployments → `prices.assets`                                                                                                                                                     |
+| **Current Price Updater**                                       | EventBridge rate(1 min)                                                                  | `prices.price_ohlcv_1m` (after ingestion)                                                                                                       | Cross-source VWAP per §5.5 → `prices.current_prices`                                                                                                                                                                               |
+| **Cleanup Worker**                                              | EventBridge cron(02:00 UTC)                                                              | `prices.*`                                                                                                                                      | `ALTER TABLE … DROP PARTITION` for expired month-partitions of `price_ohlcv_1m`, `_15m`, `oracle_prices`                                                                                                                           |
+| **SDEX Backfill CLI** (`sdex-backfill`, ADR 0005)               | Local Rust CLI on operator workstation, run in tip-backward chunks during the project    | `s3://aws-public-blockchain` (anonymous `--no-sign-request`)                                                                                    | Historical SDEX trades → per-source 1-min rows in **local Postgres** on the workstation                                                                                                                                            |
+| **SDEX Cloud Push** (`sdex-cloud-push`, ADR 0005)               | Operator-invoked between chunks; only Hetzner-CH-touching component on the Stream 2 path | Local Postgres `price_ohlcv` + `assets`                                                                                                         | Streams accumulated rows to `prices.price_ohlcv_*` over HTTPS-mTLS to Caddy:443; advances `prices.backfill_progress` row for `sdex_archive` (`current_ledger`, `last_push_at`)                                                     |
+| **Soroban AMM Backfill CLI** (`soroban-amm-backfill`, ADR 0001) | One-shot Local Rust CLI on operator workstation, run once during Tranche 1               | Local ClickHouse `soroban_events` (populated upfront by BE's `backfill-runner --target=clickhouse`); ScVal decoding via the `stellar-xdr` crate | Historical Soroswap/Aquarius/Phoenix swaps → per-source 1-min rows; on completion runs the cloud push that lands all rows into `prices.*` on Hetzner CH and sets the `soroban_amm` `backfill_progress` row to `status='completed'` |
 
 **Worker removed: OHLCV Rollup Lambda** (eliminated by ADR 0007 §3.4). The 1m → 15m → 1h →
 4h → 1d → 1w → 1M roll-up chain is implemented inside ClickHouse as a chain of
@@ -848,11 +870,11 @@ Price Updater Lambda** (`price-updater`, EventBridge rate(1 min) — see §5.3 r
 Updater" and §5.4. Implementation tracked in lore task `0039_FEATURE_prices-periodic-workers-lambda-set`,
 Step 2).
 
-| Layer | Owner | Input | Formula | Output |
-|-------|-------|-------|---------|--------|
-| **L1 — Ingestion / decoding** | Prices Ledger Processor (live) + soroban-amm-backfill + sdex-backfill (historical) | Raw `LedgerCloseMeta` (SDEX) or decoded `soroban_events` swap/trade ticks | Per-tick price `(amount_bought / 10^dec_bought) / (amount_sold / 10^dec_sold)`; per-bucket `vwap = volume_quote / volume_base` | `price_ohlcv_1m` row **per (timestamp, asset, quote, source)** |
-| **L2 — Cross-source aggregation** | **Current Price Updater Lambda** | `price_ohlcv` rows summed over a trailing 24h window per source | **§5.5 formula** — `Σ(price × volume_24h) / Σ(volume_24h)` across sources, with outlier filter vs inter-source median | One row per `(asset, quote)` in `current_prices` |
-| **L3 — Read-time merging** | Rust/axum read handlers | `price_ohlcv` rows for a window | Per-ADR-0007 §3.3 `GROUP BY` across sources (mostly a SELECT helper, not a re-weighting) | API response |
+| Layer                             | Owner                                                                              | Input                                                                     | Formula                                                                                                                        | Output                                                         |
+| --------------------------------- | ---------------------------------------------------------------------------------- | ------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------- |
+| **L1 — Ingestion / decoding**     | Prices Ledger Processor (live) + soroban-amm-backfill + sdex-backfill (historical) | Raw `LedgerCloseMeta` (SDEX) or decoded `soroban_events` swap/trade ticks | Per-tick price `(amount_bought / 10^dec_bought) / (amount_sold / 10^dec_sold)`; per-bucket `vwap = volume_quote / volume_base` | `price_ohlcv_1m` row **per (timestamp, asset, quote, source)** |
+| **L2 — Cross-source aggregation** | **Current Price Updater Lambda**                                                   | `price_ohlcv` rows summed over a trailing 24h window per source           | **§5.5 formula** — `Σ(price × volume_24h) / Σ(volume_24h)` across sources, with outlier filter vs inter-source median          | One row per `(asset, quote)` in `current_prices`               |
+| **L3 — Read-time merging**        | Rust/axum read handlers                                                            | `price_ohlcv` rows for a window                                           | Per-ADR-0007 §3.3 `GROUP BY` across sources (mostly a SELECT helper, not a re-weighting)                                       | API response                                                   |
 
 The decoder's per-source candle `vwap` (one minute, one source) and §5.5's cross-source
 weighted price (twenty-four hours, all sources) are different quantities by design — they
@@ -867,9 +889,9 @@ its rationale.
 The two price data sources are fundamentally different in where their historical data lives,
 which drives a two-stream backfill design:
 
-| Stream | Data location | Era | Method |
-|--------|-------------|-----|--------|
-| **SDEX trades** | `TransactionResultMeta` (`ClaimAtom` from the five trade-shaped op types) in `LedgerCloseMeta` XDR | All-time (2015 → present, ~57M ledgers) | Local Rust CLI on operator workstation (`s3://aws-public-blockchain` anonymous reads) → local Postgres → post-backfill cloud push to Hetzner ClickHouse `prices.*` (see ADR 0005) |
+| Stream                                              | Data location                                                                                                                                                                                                                                                                                                                    | Era                                                     | Method                                                                                                                                                                                                                                                                          |
+| --------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **SDEX trades**                                     | `TransactionResultMeta` (`ClaimAtom` from the five trade-shaped op types) in `LedgerCloseMeta` XDR                                                                                                                                                                                                                               | All-time (2015 → present, ~57M ledgers)                 | Local Rust CLI on operator workstation (`s3://aws-public-blockchain` anonymous reads) → local Postgres → post-backfill cloud push to Hetzner ClickHouse `prices.*` (see ADR 0005)                                                                                               |
 | **Soroban AMM swaps** (Soroswap, Aquarius, Phoenix) | `SorobanTransactionMeta.events` (CAP-67), inlined `topics_xdr` + `data_xdr` per row in BE's ClickHouse `soroban_events` (BE ADRs [0033](../../soroban-block-explorer/lore/2-adrs/0033_soroban-events-appearances-read-time-detail.md), [0044](../../soroban-block-explorer/lore/2-adrs/0044_clickhouse-pilot-parallel-store.md)) | Soroban activation (Nov 2023) → present (~8.5M ledgers) | Local Rust CLI on operator workstation, consuming a local ClickHouse instance populated upfront by BE's `backfill-runner --target=clickhouse` (see [ADR 0001](../lore/2-adrs/0001_stream1-clickhouse-sourced-amm-backfill.md)) → one-shot push to Hetzner ClickHouse `prices.*` |
 
 The Soroban AMM stream is handled first (Tranche 1). A short BE-tooling prep step runs BE's
@@ -974,30 +996,30 @@ becomes a plain `xdr-parser = "X.Y.Z"` pin — no design change.)
 
 **Stream 1 — Soroban AMM (local CH-sourced workstation CLI, ADR 0001):**
 
-| Metric | Value | Notes |
-|--------|-------|-------|
-| Data source | Local ClickHouse `soroban_events` (Docker, populated upfront by BE's `backfill-runner --target=clickhouse`) | Per-event rows with inlined `topics_xdr` + `data_xdr` + hoisted `signature` column |
-| Ledger range | ~48.5M–57M (Nov 2023 to present) | ~8.5M ledgers worth of events |
-| Runtime | Local Rust CLI on operator workstation (`soroban-amm-backfill`) | No AWS infrastructure for the backfill itself; mirrors §5.6 Stream 2's local-CLI pattern |
-| Workstation prep step | BE `backfill-runner --target=clickhouse` populates local CH | One-shot; runs against `s3://aws-public-blockchain` anonymous reads — no AWS account required |
-| Local CH footprint | Hundreds of GB pre-compression; substantially smaller post-ZSTD on disk | Sized for an operator workstation per ADR 0001 §Rationale (dev-laptop, not Fargate/EC2) |
-| Sink during backfill | Local Postgres (Docker) on workstation | Hetzner ClickHouse `prices.*` is **not** written until the one-shot completion push |
-| Estimated wall-clock (including CH prep) | A few hours, dominated by `backfill-runner` archive ingestion | CH query + extraction + OHLCV write is fast against an indexed local store |
-| Cloud-push cadence | One-shot completion push only | `prices.backfill_progress` row for `soroban_amm` advances from `running` to `completed` in a single transition |
-| Expected completion | During Tranche 1 (Week 2–3) | After the push, the local CH instance is torn down |
+| Metric                                   | Value                                                                                                       | Notes                                                                                                          |
+| ---------------------------------------- | ----------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| Data source                              | Local ClickHouse `soroban_events` (Docker, populated upfront by BE's `backfill-runner --target=clickhouse`) | Per-event rows with inlined `topics_xdr` + `data_xdr` + hoisted `signature` column                             |
+| Ledger range                             | ~48.5M–57M (Nov 2023 to present)                                                                            | ~8.5M ledgers worth of events                                                                                  |
+| Runtime                                  | Local Rust CLI on operator workstation (`soroban-amm-backfill`)                                             | No AWS infrastructure for the backfill itself; mirrors §5.6 Stream 2's local-CLI pattern                       |
+| Workstation prep step                    | BE `backfill-runner --target=clickhouse` populates local CH                                                 | One-shot; runs against `s3://aws-public-blockchain` anonymous reads — no AWS account required                  |
+| Local CH footprint                       | Hundreds of GB pre-compression; substantially smaller post-ZSTD on disk                                     | Sized for an operator workstation per ADR 0001 §Rationale (dev-laptop, not Fargate/EC2)                        |
+| Sink during backfill                     | Local Postgres (Docker) on workstation                                                                      | Hetzner ClickHouse `prices.*` is **not** written until the one-shot completion push                            |
+| Estimated wall-clock (including CH prep) | A few hours, dominated by `backfill-runner` archive ingestion                                               | CH query + extraction + OHLCV write is fast against an indexed local store                                     |
+| Cloud-push cadence                       | One-shot completion push only                                                                               | `prices.backfill_progress` row for `soroban_amm` advances from `running` to `completed` in a single transition |
+| Expected completion                      | During Tranche 1 (Week 2–3)                                                                                 | After the push, the local CH instance is torn down                                                             |
 
 **Stream 2 — SDEX (local workstation CLI, ADR 0005):**
 
-| Metric | Value | Notes |
-|--------|-------|-------|
-| Total ledgers | ~57 million | Ledger 1 (Nov 2015) to current tip |
-| Runtime | Local Rust CLI on operator workstation | No AWS infrastructure for the backfill itself; mirrors BE `backfill-runner` |
-| Source | `s3://aws-public-blockchain/v1.1/stellar/ledgers/pubnet/` | Anonymous `--no-sign-request`; no AWS account needed to read |
-| Sink during backfill | Local Postgres (Docker) on workstation | Hetzner ClickHouse `prices.*` is **not** written during backfill — only by the post-backfill `sdex-cloud-push` step |
-| Measured CLI rate | ~311 ledgers/s (~1.12M ledgers/hour) | Per task 0022's measurement against the SDEX filter |
-| Effective wall-clock (network-bound) | ~12–16 days continuous on one laptop | Archive sync is the bottleneck; CPU rarely saturates |
-| Cloud-push cadence | Tip-backward chunks (e.g. `--start=tip-1.1M --end=tip` for the first Tranche 1 chunk, then older ranges) | The cloud `GET /backfill/status` view advances at push cadence, not CLI cadence |
-| Expected completion | Full historical coverage extends past Tranche 3 | Tranche 3 acceptance is "progressing", not "complete" — unchanged from ADR 0002 |
+| Metric                               | Value                                                                                                    | Notes                                                                                                               |
+| ------------------------------------ | -------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| Total ledgers                        | ~57 million                                                                                              | Ledger 1 (Nov 2015) to current tip                                                                                  |
+| Runtime                              | Local Rust CLI on operator workstation                                                                   | No AWS infrastructure for the backfill itself; mirrors BE `backfill-runner`                                         |
+| Source                               | `s3://aws-public-blockchain/v1.1/stellar/ledgers/pubnet/`                                                | Anonymous `--no-sign-request`; no AWS account needed to read                                                        |
+| Sink during backfill                 | Local Postgres (Docker) on workstation                                                                   | Hetzner ClickHouse `prices.*` is **not** written during backfill — only by the post-backfill `sdex-cloud-push` step |
+| Measured CLI rate                    | ~311 ledgers/s (~1.12M ledgers/hour)                                                                     | Per task 0022's measurement against the SDEX filter                                                                 |
+| Effective wall-clock (network-bound) | ~12–16 days continuous on one laptop                                                                     | Archive sync is the bottleneck; CPU rarely saturates                                                                |
+| Cloud-push cadence                   | Tip-backward chunks (e.g. `--start=tip-1.1M --end=tip` for the first Tranche 1 chunk, then older ranges) | The cloud `GET /backfill/status` view advances at push cadence, not CLI cadence                                     |
+| Expected completion                  | Full historical coverage extends past Tranche 3                                                          | Tranche 3 acceptance is "progressing", not "complete" — unchanged from ADR 0002                                     |
 
 The `sdex-backfill` CLI is resumable at per-ledger granularity: each ledger's `price_ohlcv`
 UPSERTs and its `backfill_progress` checkpoint advance commit atomically in a single
@@ -1014,13 +1036,13 @@ for v1, revisitable as v2 if measured wall-clock proves untenable.
 
 #### Backfill Milestones
 
-| Tranche | Stream | Milestone | Validation |
-|---------|--------|-----------|------------|
-| **1** (Week 4) | Soroban AMM | Full AMM history from Soroban activation (Nov 2023) available | `soroban_amm.status: "completed"` in `GET /backfill/status`; OHLCV data for Soroswap pairs verifiable for Nov 2023 dates |
-| **1** (Week 4) | SDEX | First tip-backward chunk (~6 months) processed locally and pushed to Hetzner CH `prices.*` | `sdex.earliest_data_available` ~6 months ago in `GET /backfill/status` (reflects what the most recent push delivered); `sdex.last_push_at` within the last push-cadence window |
-| **2** (Week 9) | SDEX | 4+ years of SDEX history pushed (back to Jan 2022) | `sdex.earliest_data_available` ≤ 2022-01-01 after a fresh push; reviewer spot-checks XLM/USDC OHLCV for 2022 dates |
-| **3** (Week 13) | SDEX | 8+ years of SDEX history pushed (back to Jan 2018) | `sdex.earliest_data_available` ≤ 2018-01-01 after a fresh push; `sdex.last_push_at` within the last push-cadence window; operator reports a credible remaining estimate from local CLI progress |
-| **Post-delivery** | SDEX | Full all-time SDEX history (ledger 1 to present) pushed | `sdex.status: "completed"`; Stellar notified |
+| Tranche           | Stream      | Milestone                                                                                  | Validation                                                                                                                                                                                      |
+| ----------------- | ----------- | ------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **1** (Week 4)    | Soroban AMM | Full AMM history from Soroban activation (Nov 2023) available                              | `soroban_amm.status: "completed"` in `GET /backfill/status`; OHLCV data for Soroswap pairs verifiable for Nov 2023 dates                                                                        |
+| **1** (Week 4)    | SDEX        | First tip-backward chunk (~6 months) processed locally and pushed to Hetzner CH `prices.*` | `sdex.earliest_data_available` ~6 months ago in `GET /backfill/status` (reflects what the most recent push delivered); `sdex.last_push_at` within the last push-cadence window                  |
+| **2** (Week 9)    | SDEX        | 4+ years of SDEX history pushed (back to Jan 2022)                                         | `sdex.earliest_data_available` ≤ 2022-01-01 after a fresh push; reviewer spot-checks XLM/USDC OHLCV for 2022 dates                                                                              |
+| **3** (Week 13)   | SDEX        | 8+ years of SDEX history pushed (back to Jan 2018)                                         | `sdex.earliest_data_available` ≤ 2018-01-01 after a fresh push; `sdex.last_push_at` within the last push-cadence window; operator reports a credible remaining estimate from local CLI progress |
+| **Post-delivery** | SDEX        | Full all-time SDEX history (ledger 1 to present) pushed                                    | `sdex.status: "completed"`; Stellar notified                                                                                                                                                    |
 
 Note (ADR 0005): Stream 2's cloud-side `GET /backfill/status` is fed by the post-backfill
 `sdex-cloud-push` step, not by a live Fargate task. The view advances every push cycle. The
@@ -1049,15 +1071,15 @@ CLI progress via direct SQL on the workstation Postgres.
 
 ### Target: <100ms p95 API response time
 
-| Layer | Strategy |
-|-------|----------|
-| **API Gateway caching** | Built-in response cache (0.5 GB). Per-endpoint TTLs: `/assets` list 60s, `/ohlcv` 60s, `/price` 15s, `/backfill/status` 30s. Cache key includes query params. POST `/prices/batch` uncached |
-| **API Gateway throttling** | Request throttling (100/s per API key, 1000/s global burst) |
-| **Lambda** | Rust binary with `lambda_runtime`. Sub-millisecond cold starts. Stateless, auto-scales to concurrency limit. No VPC, so no ENI provisioning latency on cold start |
-| **Database client (`clickhouse` crate)** | Warm connection pool reused across Lambda invocations to amortise mTLS handshake (~80-130 ms cross-cloud RTT to Caddy). Per-request payloads batched per-ledger so a typical invocation issues 1–2 INSERTs, not one per trade |
-| **Sort key & partitioning** | Per-granularity tables sorted by `(asset_id, quote_asset_id, source, timestamp)`; monthly partitions on `timestamp`. Partition pruning + sort-key skip eliminate irrelevant months and assets on hot reads |
-| **Query optimization** | `prices.current_prices` avoids real-time aggregation. OHLCV reads target the granularity table that already holds the requested resolution. Read handlers issue `SELECT … FINAL` or `argMax/argMin + GROUP BY` to handle `ReplacingMergeTree` eventual consistency |
-| **Cross-cloud latency mitigation** | Public-internet hop AWS → Hetzner is ~80-130 ms RTT. Mitigated by (a) warm-container connection reuse, (b) per-ledger write batching, (c) API Gateway response caching for read-heavy endpoints, (d) the API handlers' query patterns favouring single-round-trip CH calls. Single-digit-ms p50 SELECTs over the public hop are routine once the connection is warm; the >100 ms p95 budget remains comfortable |
+| Layer                                    | Strategy                                                                                                                                                                                                                                                                                                                                                                                                        |
+| ---------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **API Gateway caching**                  | Built-in response cache (0.5 GB). Per-endpoint TTLs: `/assets` list 60s, `/ohlcv` 60s, `/price` 15s, `/backfill/status` 30s. Cache key includes query params. POST `/prices/batch` uncached                                                                                                                                                                                                                     |
+| **API Gateway throttling**               | Request throttling (100/s per API key, 1000/s global burst)                                                                                                                                                                                                                                                                                                                                                     |
+| **Lambda**                               | Rust binary with `lambda_runtime`. Sub-millisecond cold starts. Stateless, auto-scales to concurrency limit. No VPC, so no ENI provisioning latency on cold start                                                                                                                                                                                                                                               |
+| **Database client (`clickhouse` crate)** | Warm connection pool reused across Lambda invocations to amortise mTLS handshake (~80-130 ms cross-cloud RTT to Caddy). Per-request payloads batched per-ledger so a typical invocation issues 1–2 INSERTs, not one per trade                                                                                                                                                                                   |
+| **Sort key & partitioning**              | Per-granularity tables sorted by `(asset_id, quote_asset_id, source, timestamp)`; monthly partitions on `timestamp`. Partition pruning + sort-key skip eliminate irrelevant months and assets on hot reads                                                                                                                                                                                                      |
+| **Query optimization**                   | `prices.current_prices` avoids real-time aggregation. OHLCV reads target the granularity table that already holds the requested resolution. Read handlers issue `SELECT … FINAL` or `argMax/argMin + GROUP BY` to handle `ReplacingMergeTree` eventual consistency                                                                                                                                              |
+| **Cross-cloud latency mitigation**       | Public-internet hop AWS → Hetzner is ~80-130 ms RTT. Mitigated by (a) warm-container connection reuse, (b) per-ledger write batching, (c) API Gateway response caching for read-heavy endpoints, (d) the API handlers' query patterns favouring single-round-trip CH calls. Single-digit-ms p50 SELECTs over the public hop are routine once the connection is warm; the >100 ms p95 budget remains comfortable |
 
 ### ClickHouse Sizing (shared Hetzner cluster, BE-owned)
 
@@ -1120,22 +1142,23 @@ on ClickHouse, that machinery is not part of the prices-api budget at any traffi
 
 ## 8. Tech Stack Summary
 
-| Component | Technology |
-|-----------|-----------|
-| Language | Rust (edition 2021) |
-| Runtime | AWS Lambda (Rust, custom `provided.al2` runtime via `lambda_runtime` crate) for API + ingestion workers (no VPC); ECS Fargate for shared Galexie (BE-funded); local Rust CLI on operator workstation for both backfill streams (ADRs 0001, 0005) |
-| API Framework | `axum` (HTTP router, shared with Block Explorer backend) |
-| XDR parsing | `stellar-xdr` crate (official SDF Rust XDR types) — shared workspace crate with Block Explorer |
-| ClickHouse client | [`clickhouse`](https://crates.io/crates/clickhouse) Rust crate (async, native protocol over HTTPS-mTLS) |
-| Database | ClickHouse on BE's shared Hetzner cluster (`prices` database, ADR 0007); engines per §3 — `ReplacingMergeTree`, `MergeTree`, materialised views |
-| TLS termination | BE-managed Caddy:443 reverse proxy; mTLS using BE's self-signed CA + per-env client cert in AWS Secrets Manager |
-| Event fan-out | SNS topic on BE's `stellar-ledger-data/` S3 bucket (one-time BE CDK change; subscribers: BE Ledger Processor + Prices Ledger Processor) |
-| Infrastructure | AWS CDK (TypeScript) — shared CDK app with Block Explorer stacks; prices-api stacks deploy no VPC/RDS/NAT |
-| CI/CD | GitHub Actions → `cdk deploy` — shared pipeline with Block Explorer |
-| Monitoring | CloudWatch Logs + Metrics + Alarms + X-Ray tracing; mTLS cert NotAfter alarm; ingestion-lag alarm |
-| API Docs | OpenAPI 3.0 spec, auto-generated from axum routes; Swagger UI hosted on S3 + CloudFront |
+| Component         | Technology                                                                                                                                                                                                                                       |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Language          | Rust (edition 2021)                                                                                                                                                                                                                              |
+| Runtime           | AWS Lambda (Rust, custom `provided.al2` runtime via `lambda_runtime` crate) for API + ingestion workers (no VPC); ECS Fargate for shared Galexie (BE-funded); local Rust CLI on operator workstation for both backfill streams (ADRs 0001, 0005) |
+| API Framework     | `axum` (HTTP router, shared with Block Explorer backend)                                                                                                                                                                                         |
+| XDR parsing       | `stellar-xdr` crate (official SDF Rust XDR types) — shared workspace crate with Block Explorer                                                                                                                                                   |
+| ClickHouse client | [`clickhouse`](https://crates.io/crates/clickhouse) Rust crate (async, native protocol over HTTPS-mTLS)                                                                                                                                          |
+| Database          | ClickHouse on BE's shared Hetzner cluster (`prices` database, ADR 0007); engines per §3 — `ReplacingMergeTree`, `MergeTree`, materialised views                                                                                                  |
+| TLS termination   | BE-managed Caddy:443 reverse proxy; mTLS using BE's self-signed CA + per-env client cert in AWS Secrets Manager                                                                                                                                  |
+| Event fan-out     | SNS topic on BE's `stellar-ledger-data/` S3 bucket (one-time BE CDK change; subscribers: BE Ledger Processor + Prices Ledger Processor)                                                                                                          |
+| Infrastructure    | AWS CDK (TypeScript) — shared CDK app with Block Explorer stacks; prices-api stacks deploy no VPC/RDS/NAT                                                                                                                                        |
+| CI/CD             | GitHub Actions → `cdk deploy` — shared pipeline with Block Explorer                                                                                                                                                                              |
+| Monitoring        | CloudWatch Logs + Metrics + Alarms + X-Ray tracing; mTLS cert NotAfter alarm; ingestion-lag alarm                                                                                                                                                |
+| API Docs          | OpenAPI 3.0 spec, auto-generated from axum routes; Swagger UI hosted on S3 + CloudFront                                                                                                                                                          |
 
 **Shared with Block Explorer codebase (same Rust workspace):**
+
 - `stellar-xdr` parsing logic — compiled into both the Block Explorer Ledger Processor and the
   Prices Ledger Processor from the same workspace crate
 - CloudWatch metric and alarm patterns
@@ -1149,6 +1172,7 @@ on ClickHouse, that machinery is not part of the prices-api budget at any traffi
 ### Tranche 1 — Infrastructure & Real-time Ingestion (Weeks 1–4)
 
 **Work:**
+
 - AWS CDK stack provisioned: Prices API Lambda execution roles (no VPC), API Gateway,
   EventBridge rules, CloudWatch alarms, Secrets Manager entries (including per-env mTLS
   cert + key pair for Caddy:443)
@@ -1176,11 +1200,12 @@ on ClickHouse, that machinery is not part of the prices-api budget at any traffi
   (e.g. 7 days) → SNS notification; mTLS cert NotAfter < 30 days → SNS notification
 
 **Acceptance criteria:**
+
 1. `cdk deploy` from a clean AWS account produces the full Prices API stack with no manual
    steps. The CDK app has **no RDS, no VPC, no NAT Gateway** in its synth output; secrets for
    the mTLS material are present and IAM allows `secretsmanager:GetSecretValue` for them
 2. `prices.*` schema on Hetzner CH matches Section 3 (verifiable via `clickhouse-client
-   --query "SHOW TABLES FROM prices"` and `SHOW CREATE TABLE prices.price_ohlcv_1m`
+--query "SHOW TABLES FROM prices"` and `SHOW CREATE TABLE prices.price_ohlcv_1m`
    etc., issued by the operator over mTLS)
 3. After 24 hours of live operation: `prices.price_ohlcv_1m` contains continuous 1-min
    per-source rows for at least 20 major assets (XLM, USDC, EURC, AQUA, BTC, ETH) with
@@ -1201,6 +1226,7 @@ on ClickHouse, that machinery is not part of the prices-api budget at any traffi
 ### Tranche 2 — Public API (Weeks 5–9)
 
 **Work:**
+
 - Core API endpoints implemented and deployed:
   - `GET /assets` (paginated, sortable, filterable)
   - `GET /assets/{asset_identifier}` (single asset)
@@ -1225,6 +1251,7 @@ what is required for this coverage given the workstation uptime through Tranche 
 for the full local-CLI metrics.
 
 **Acceptance criteria:**
+
 1. All 7 endpoint groups return correct, schema-valid responses for at least 20 major assets
 2. Load test (k6 or Locust, script provided): 100 req/s sustained for 5 minutes on
    `GET /assets/{id}/price` → p95 latency <200ms, error rate <0.1%
@@ -1242,6 +1269,7 @@ for the full local-CLI metrics.
 ### Tranche 3 — Production Launch & Validation (Weeks 10–13)
 
 **Work:**
+
 - OpenAPI 3.0 specification covering all endpoints
 - Self-service onboarding portal (S3 + CloudFront): API key request form, quickstart guide,
   example queries
@@ -1261,6 +1289,7 @@ background post-delivery.
 
 **The Tranche 3 review validates that backfill is progressing correctly, not that it is complete.**
 The reviewer should confirm (against the response shape in Section 4.5):
+
 - `GET /backfill/status` returns `sdex.status: "running"` and `sdex.last_push_at` is fresh
   (within the Tranche 3 push-cadence window)
 - `sdex.earliest_data_available` ≤ 2018-01-01
@@ -1277,6 +1306,7 @@ The local backfill continues post-delivery. When the final tip-backward chunk is
 post-delivery monitoring.
 
 **Acceptance criteria:**
+
 1. `GET /backfill/status` shows `sdex.status: "running"`, `sdex.last_push_at` within the
    Tranche 3 push-cadence window, and `sdex.earliest_data_available` ≤ 2018-01-01
 2. OpenAPI spec passes `openapi-validator` lint with no errors; Swagger UI deployed
@@ -1299,17 +1329,17 @@ post-delivery monitoring.
 
 ### Monthly Running Cost (low traffic, post-backfill)
 
-| Service | Estimated Cost | Notes |
-|---------|---------------|-------|
-| Hetzner ClickHouse share (`prices` DB on BE's cluster) | ~$1–$2 | Cost-share with BE per task 0046's empirical ~0.45 GB/yr, ~74 bytes/ledger, 14.8× compression — opening proposal ~1-2% pro-rata. D12 commercial follow-up; flat fee acceptable up to ~$5/env per the brief without changing the recommendation |
-| ECS Fargate — Galexie | **$0** | Shared with Block Explorer (see Section 2.3) |
-| SNS topic on `stellar-ledger-data/` | ~$1 | Per-message + delivery cost across both subscribers; negligible at ledger cadence |
-| Lambda — API handlers | ~$20 | Rust binaries, sub-ms cold starts; no VPC, so no ENI provisioning latency |
-| Lambda — Ingestion workers (~500K invocations) | ~$10 | |
-| API Gateway (10M requests + 0.5 GB cache) | ~$50 | |
-| CloudWatch + X-Ray | ~$20 | |
-| Secrets Manager (mTLS material × 2 per env + a few API keys) + S3 (API docs) | ~$6 | |
-| **Total (low traffic, post-backfill)** | **~$108/mo per env** | Down from ~$117/mo in the RDS-shaped prior design; down ~$70/mo from the original pre-shared-infra estimate |
+| Service                                                                      | Estimated Cost       | Notes                                                                                                                                                                                                                                          |
+| ---------------------------------------------------------------------------- | -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Hetzner ClickHouse share (`prices` DB on BE's cluster)                       | ~$1–$2               | Cost-share with BE per task 0046's empirical ~0.45 GB/yr, ~74 bytes/ledger, 14.8× compression — opening proposal ~1-2% pro-rata. D12 commercial follow-up; flat fee acceptable up to ~$5/env per the brief without changing the recommendation |
+| ECS Fargate — Galexie                                                        | **$0**               | Shared with Block Explorer (see Section 2.3)                                                                                                                                                                                                   |
+| SNS topic on `stellar-ledger-data/`                                          | ~$1                  | Per-message + delivery cost across both subscribers; negligible at ledger cadence                                                                                                                                                              |
+| Lambda — API handlers                                                        | ~$20                 | Rust binaries, sub-ms cold starts; no VPC, so no ENI provisioning latency                                                                                                                                                                      |
+| Lambda — Ingestion workers (~500K invocations)                               | ~$10                 |                                                                                                                                                                                                                                                |
+| API Gateway (10M requests + 0.5 GB cache)                                    | ~$50                 |                                                                                                                                                                                                                                                |
+| CloudWatch + X-Ray                                                           | ~$20                 |                                                                                                                                                                                                                                                |
+| Secrets Manager (mTLS material × 2 per env + a few API keys) + S3 (API docs) | ~$6                  |                                                                                                                                                                                                                                                |
+| **Total (low traffic, post-backfill)**                                       | **~$108/mo per env** | Down from ~$117/mo in the RDS-shaped prior design; down ~$70/mo from the original pre-shared-infra estimate                                                                                                                                    |
 
 ### Backfill Period Additional Costs (one-time, during 13-week project)
 
@@ -1321,14 +1351,14 @@ essentially unchanged from steady-state since the writes happen against Hetzner,
 AWS-side storage. Workstation electricity, ISP bandwidth, and local ClickHouse disk for
 the Stream 1 prep step are operator-paid and outside this table.
 
-| Item | Configuration | One-time Cost |
-|------|--------------|--------------|
-| ECS Fargate — Soroban AMM backfill task | — (no Fargate per ADR 0001) | **$0** |
-| ECS Fargate — SDEX archive backfill task | — (no Fargate per ADR 0005) | **$0** |
-| Cloud DB during push windows | No RDS (ADR 0007); the bursty pushes hit Hetzner CH instead — no extra AWS line item. The previously-budgeted `db.t4g.small` upgrade window is removed | **$0** |
-| Hetzner CH cost-share during backfill | Empirically the backfill spike adds <1 GB to the box's footprint (task 0046) — does not move the cost-share number. D12 follow-up may revise upward once measured | **$0** marginal |
-| S3 archive reads (Stellar public history) | Anonymous reads via `--no-sign-request` against `s3://aws-public-blockchain` — not billed to the Prices API AWS account. Applies to both streams | **$0** |
-| **Total one-time backfill compute (AWS-billed)** | | **~$0** |
+| Item                                             | Configuration                                                                                                                                                     | One-time Cost   |
+| ------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------- |
+| ECS Fargate — Soroban AMM backfill task          | — (no Fargate per ADR 0001)                                                                                                                                       | **$0**          |
+| ECS Fargate — SDEX archive backfill task         | — (no Fargate per ADR 0005)                                                                                                                                       | **$0**          |
+| Cloud DB during push windows                     | No RDS (ADR 0007); the bursty pushes hit Hetzner CH instead — no extra AWS line item. The previously-budgeted `db.t4g.small` upgrade window is removed            | **$0**          |
+| Hetzner CH cost-share during backfill            | Empirically the backfill spike adds <1 GB to the box's footprint (task 0046) — does not move the cost-share number. D12 follow-up may revise upward once measured | **$0** marginal |
+| S3 archive reads (Stellar public history)        | Anonymous reads via `--no-sign-request` against `s3://aws-public-blockchain` — not billed to the Prices API AWS account. Applies to both streams                  | **$0**          |
+| **Total one-time backfill compute (AWS-billed)** |                                                                                                                                                                   | **~$0**         |
 
 Compared with the prior ADR 0002 / Fargate-era estimate of ~$636 (Stream 2) plus the legacy
 Stream 1 Fargate line, the local-workstation pattern across both streams (already costed at
@@ -1338,11 +1368,11 @@ ADR 0007. The trade is operator workstation uptime, accepted as a deliberate des
 
 ### Scaled Up (high traffic)
 
-| Service | Added Cost |
-|---------|-----------|
+| Service                                                         | Added Cost                                        |
+| --------------------------------------------------------------- | ------------------------------------------------- |
 | Hetzner CH cost-share re-opened if production scales materially | +~$3-15/env (per task 0045 D12 escalation clause) |
-| Add Lambda provisioned concurrency | +~$45 |
-| **Total at scale** | **~$156-168/mo per env** |
+| Add Lambda provisioned concurrency                              | +~$45                                             |
+| **Total at scale**                                              | **~$156-168/mo per env**                          |
 
 The previously-documented `db.r6g.large + Multi-AZ + read replica + RDS Proxy` escalation
 (~$525/mo additional in the prior design) is **eliminated** under ADR 0007 — at any
@@ -1360,13 +1390,13 @@ double-billing between the two grants.
 
 ### 11.1 Shared Components (Block Explorer funded, Prices API does not charge)
 
-| Component | Saving vs. standalone Prices API | How sharing works |
-|-----------|----------------------------------|------------------|
-| Galexie ECS Fargate task | ~$36/mo | One Galexie serves both services |
-| S3 bucket `stellar-ledger-data/` + SNS fan-out topic | ~$2/mo | Same files read by both Lambdas; SNS fan-out replaces the previously-direct Lambda target so adding/removing tenants is a subscription change, not a bucket-config change |
-| Hetzner ClickHouse data plane (`prices` database tenant on BE's box) | ~$11–$12/mo (avoided RDS) net of ~$1–$2 cost-share to BE | Prices-api stores all live OHLCV / current-prices / oracle / asset registry / backfill-progress in a separate `prices` database, isolated via ClickHouse's native multi-tenant primitives. Cost-share opening proposal ~1-2% pro-rata per task 0046's empirical sizing; basis lives in [agreement record](../lore/1-tasks/archive/0045_RESEARCH_cross-team-bundle-with-be-on-hetzner-ch-tenancy/notes/G-be-agreement-record.md) (Cluster D) |
-| mTLS Certificate Authority + per-AWS-service issuance script (BE-managed) | ~$0 (avoids prices-api running its own CA) | One client cert per env, issued by BE; prices-api stores the keypair in AWS Secrets Manager |
-| **Monthly saving** | **~$49/mo** | Total saving comparable to the prior design once the avoided RDS line is netted against the new CH cost-share; the per-env baseline is **~$108/mo** (see §10) |
+| Component                                                                 | Saving vs. standalone Prices API                         | How sharing works                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| ------------------------------------------------------------------------- | -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Galexie ECS Fargate task                                                  | ~$36/mo                                                  | One Galexie serves both services                                                                                                                                                                                                                                                                                                                                                                                                            |
+| S3 bucket `stellar-ledger-data/` + SNS fan-out topic                      | ~$2/mo                                                   | Same files read by both Lambdas; SNS fan-out replaces the previously-direct Lambda target so adding/removing tenants is a subscription change, not a bucket-config change                                                                                                                                                                                                                                                                   |
+| Hetzner ClickHouse data plane (`prices` database tenant on BE's box)      | ~$11–$12/mo (avoided RDS) net of ~$1–$2 cost-share to BE | Prices-api stores all live OHLCV / current-prices / oracle / asset registry / backfill-progress in a separate `prices` database, isolated via ClickHouse's native multi-tenant primitives. Cost-share opening proposal ~1-2% pro-rata per task 0046's empirical sizing; basis lives in [agreement record](../lore/1-tasks/archive/0045_RESEARCH_cross-team-bundle-with-be-on-hetzner-ch-tenancy/notes/G-be-agreement-record.md) (Cluster D) |
+| mTLS Certificate Authority + per-AWS-service issuance script (BE-managed) | ~$0 (avoids prices-api running its own CA)               | One client cert per env, issued by BE; prices-api stores the keypair in AWS Secrets Manager                                                                                                                                                                                                                                                                                                                                                 |
+| **Monthly saving**                                                        | **~$49/mo**                                              | Total saving comparable to the prior design once the avoided RDS line is netted against the new CH cost-share; the per-env baseline is **~$108/mo** (see §10)                                                                                                                                                                                                                                                                               |
 
 **Components no longer shared (and no longer needed).** Two rows present in earlier
 versions of this table are gone — not because BE stopped offering them, but because the
@@ -1394,21 +1424,22 @@ prices-api architecture no longer requires them:
 
 ### 11.2 Development Savings
 
-| Artifact | Shared from Block Explorer | Saving |
-|----------|--------------------------|--------|
-| `stellar-xdr` Rust parsing crate | Written once, compiled into both Ledger Processors and the `soroban-amm-backfill` CLI (ScVal decoding for ADR 0001) | ~5–7 dev days of XDR parsing logic not duplicated |
-| `backfill-runner --target=clickhouse` (BE task 0205) | One-shot prep tool invoked on the operator's workstation to populate a local CH copy of `soroban_events`; consumed as-is | ~3–5 dev days vs. building a prices-api-side `LedgerCloseMeta → CH` writer for the Stream 1 backfill window |
-| BE production ClickHouse schema (`docs/database-schema/clickhouse-prod-schema.sql`, mirrors BE) | DDL adopted unchanged for the local Stream 1 CH instance; also reused as the engine + sort-key reference for the prices-api `prices.*` schema (ADR 0007) | ~1–2 dev days of schema design + indexing decisions not duplicated |
-| BE-managed mTLS CA + per-AWS-service issuance script | Per-env client cert issued via BE's existing tooling; prices-api avoids building its own CA / issuance pipeline | ~2–3 dev days plus ongoing CA-operations savings |
-| Hetzner CH operational tooling (Caddy config, backup Borg job, OS-level tuning) | BE owns the box; prices-api inherits the operational primitives without building them | ~5–10 dev days (one-time) + ongoing ops time not spent on CH operation |
-| BE Cluster A/B/C/D agreement record (task 0045) | Single written cross-team contract for tenancy, capacity, auth, cost-share | Avoids ad-hoc renegotiation per implementation task; lives at [`G-be-agreement-record.md`](../lore/1-tasks/archive/0045_RESEARCH_cross-team-bundle-with-be-on-hetzner-ch-tenancy/notes/G-be-agreement-record.md) |
-| ClickHouse client config patterns (mTLS material loading, connection reuse) | Copy-adapted from BE's own Lambda → CH writers | ~1–2 dev days |
-| CDK IAM + Secrets Manager patterns | Reused CDK constructs (no VPC / NAT patterns needed) | ~2–3 dev days |
-| Observability configuration (CloudWatch dashboards, alarm patterns) | Copy-adapted from Block Explorer; includes mTLS NotAfter alarm pattern | ~1–2 dev days |
+| Artifact                                                                                        | Shared from Block Explorer                                                                                                                               | Saving                                                                                                                                                                                                           |
+| ----------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `stellar-xdr` Rust parsing crate                                                                | Written once, compiled into both Ledger Processors and the `soroban-amm-backfill` CLI (ScVal decoding for ADR 0001)                                      | ~5–7 dev days of XDR parsing logic not duplicated                                                                                                                                                                |
+| `backfill-runner --target=clickhouse` (BE task 0205)                                            | One-shot prep tool invoked on the operator's workstation to populate a local CH copy of `soroban_events`; consumed as-is                                 | ~3–5 dev days vs. building a prices-api-side `LedgerCloseMeta → CH` writer for the Stream 1 backfill window                                                                                                      |
+| BE production ClickHouse schema (`docs/database-schema/clickhouse-prod-schema.sql`, mirrors BE) | DDL adopted unchanged for the local Stream 1 CH instance; also reused as the engine + sort-key reference for the prices-api `prices.*` schema (ADR 0007) | ~1–2 dev days of schema design + indexing decisions not duplicated                                                                                                                                               |
+| BE-managed mTLS CA + per-AWS-service issuance script                                            | Per-env client cert issued via BE's existing tooling; prices-api avoids building its own CA / issuance pipeline                                          | ~2–3 dev days plus ongoing CA-operations savings                                                                                                                                                                 |
+| Hetzner CH operational tooling (Caddy config, backup Borg job, OS-level tuning)                 | BE owns the box; prices-api inherits the operational primitives without building them                                                                    | ~5–10 dev days (one-time) + ongoing ops time not spent on CH operation                                                                                                                                           |
+| BE Cluster A/B/C/D agreement record (task 0045)                                                 | Single written cross-team contract for tenancy, capacity, auth, cost-share                                                                               | Avoids ad-hoc renegotiation per implementation task; lives at [`G-be-agreement-record.md`](../lore/1-tasks/archive/0045_RESEARCH_cross-team-bundle-with-be-on-hetzner-ch-tenancy/notes/G-be-agreement-record.md) |
+| ClickHouse client config patterns (mTLS material loading, connection reuse)                     | Copy-adapted from BE's own Lambda → CH writers                                                                                                           | ~1–2 dev days                                                                                                                                                                                                    |
+| CDK IAM + Secrets Manager patterns                                                              | Reused CDK constructs (no VPC / NAT patterns needed)                                                                                                     | ~2–3 dev days                                                                                                                                                                                                    |
+| Observability configuration (CloudWatch dashboards, alarm patterns)                             | Copy-adapted from Block Explorer; includes mTLS NotAfter alarm pattern                                                                                   | ~1–2 dev days                                                                                                                                                                                                    |
 
 ### 11.3 What Is Not Shared
 
 The following components are **separate** and funded exclusively by the Prices API grant:
+
 - Prices API Lambda functions (separate function definitions, separate IAM roles, no VPC)
 - Prices API API Gateway + usage plans + response cache
 - Prices API EventBridge rules
@@ -1427,16 +1458,16 @@ Soroban AMM backfill consumes a **local** ClickHouse instance on the operator's
 workstation populated by `backfill-runner --target=clickhouse` — separate from the
 production Hetzner CH.
 
-| Risk | Mitigation |
-|------|-----------|
-| Cross-tenant throughput contention on the shared Hetzner CH | **Task 0047** verifies cross-tenant throughput (GREEN/YELLOW/RED) before implementation begins. RED supersedes ADR 0007 to Alternative 3 (sidecar CH on the same Hetzner box — same code shape, different host). |
-| BE evolves `default.*` schema in ways that conflict with prices-api views | ADR 0007 §3.7: prices-api owns `prices.*` unilaterally; any cross-DB read into `default.*` is wrapped in a named `prices.*` view so the breakage surface is narrow and reviewable. |
-| Cross-cloud network outage (AWS ↔ Hetzner) | Lambdas tolerate connect failures with exponential-backoff retry; SNS delivery retries the message; BE's S3 retention (indefinite per BE ADR 0006) supports replay of arbitrary windows by re-firing PutObject events. No data loss path. |
-| mTLS cert expiry not detected | CloudWatch NotAfter alarm fires 30 days before expiry; 1-year manual rotation cadence (Cluster C agreement); revocation = CA rotation. |
-| Hetzner box backup RPO is daily Borg, not RDS PITR | Accepted in ADR 0007 §Negative. OHLCV data has natural replay path from BE's S3 archive; daily-granularity restore is operationally acceptable given the reconstruction cost. |
-| BE's `backfill-runner` produces incorrect or incomplete rows in the **local** Stream 1 CH | Gap detection: after the AMM CLI's cloud push, prices-api checks for contiguous OHLCV coverage from Soroban activation to present. Any gaps trigger a targeted archive-read for the missing ledger ranges. |
-| BE's `backfill-runner` evolves between the prep step and the AMM CLI run | Pin a known-good `backfill-runner` version for the duration of the workstation prep. Re-pin and re-populate the local instance if BE ships an incompatible change. |
-| BE's `backfill-runner` is unavailable | Stream 1 is gated on operator workstation; a delay of a day or two is recoverable within Tranche 1's window. Fargate-based fallback documented in [task 0017](../lore/1-tasks/backlog/0017_FEATURE_local-clickhouse-for-prices-backfill.md). |
+| Risk                                                                                      | Mitigation                                                                                                                                                                                                                                   |
+| ----------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Cross-tenant throughput contention on the shared Hetzner CH                               | **Task 0047** verifies cross-tenant throughput (GREEN/YELLOW/RED) before implementation begins. RED supersedes ADR 0007 to Alternative 3 (sidecar CH on the same Hetzner box — same code shape, different host).                             |
+| BE evolves `default.*` schema in ways that conflict with prices-api views                 | ADR 0007 §3.7: prices-api owns `prices.*` unilaterally; any cross-DB read into `default.*` is wrapped in a named `prices.*` view so the breakage surface is narrow and reviewable.                                                           |
+| Cross-cloud network outage (AWS ↔ Hetzner)                                                | Lambdas tolerate connect failures with exponential-backoff retry; SNS delivery retries the message; BE's S3 retention (indefinite per BE ADR 0006) supports replay of arbitrary windows by re-firing PutObject events. No data loss path.    |
+| mTLS cert expiry not detected                                                             | CloudWatch NotAfter alarm fires 30 days before expiry; 1-year manual rotation cadence (Cluster C agreement); revocation = CA rotation.                                                                                                       |
+| Hetzner box backup RPO is daily Borg, not RDS PITR                                        | Accepted in ADR 0007 §Negative. OHLCV data has natural replay path from BE's S3 archive; daily-granularity restore is operationally acceptable given the reconstruction cost.                                                                |
+| BE's `backfill-runner` produces incorrect or incomplete rows in the **local** Stream 1 CH | Gap detection: after the AMM CLI's cloud push, prices-api checks for contiguous OHLCV coverage from Soroban activation to present. Any gaps trigger a targeted archive-read for the missing ledger ranges.                                   |
+| BE's `backfill-runner` evolves between the prep step and the AMM CLI run                  | Pin a known-good `backfill-runner` version for the duration of the workstation prep. Re-pin and re-populate the local instance if BE ships an incompatible change.                                                                           |
+| BE's `backfill-runner` is unavailable                                                     | Stream 1 is gated on operator workstation; a delay of a day or two is recoverable within Tranche 1's window. Fargate-based fallback documented in [task 0017](../lore/1-tasks/backlog/0017_FEATURE_local-clickhouse-for-prices-backfill.md). |
 
 The Prices API never writes to BE's `default.*` schema; BE never reads from `prices.*`.
 The runtime coupling is exactly the shared-host + shared-Caddy endpoint, gated by mTLS,

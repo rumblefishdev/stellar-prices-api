@@ -1,18 +1,28 @@
 ---
-id: "0023"
-title: "OHLCV row identity: decide base-only PK vs (base, quote) PK before SDEX backfill implementation"
+id: '0023'
+title: 'OHLCV row identity: decide base-only PK vs (base, quote) PK before SDEX backfill implementation'
 type: RESEARCH
 status: completed
-related_adr: ["0003"]
-related_tasks: ["0022", "0012", "0024", "0025"]
-tags: [layer-research, priority-high, effort-small, schema, ohlcv, sdex, backfill, blocking]
+related_adr: ['0003']
+related_tasks: ['0022', '0012', '0024', '0025']
+tags:
+  [
+    layer-research,
+    priority-high,
+    effort-small,
+    schema,
+    ohlcv,
+    sdex,
+    backfill,
+    blocking,
+  ]
 links:
-  - "../archive/0022_RESEARCH_sdex-filter-and-extraction-spec/notes/G-sdex-decode-and-bucket-spec.md"
-  - "../../../docs/database-schema/database-schema-overview.md"
-  - "../../../docs/prices-api-general-overview.md"
-  - "./notes/Q-decision-space.md"
-  - "./notes/S-recommendation.md"
-  - "../../2-adrs/0003_price-ohlcv-pk-includes-quote-asset-id.md"
+  - '../archive/0022_RESEARCH_sdex-filter-and-extraction-spec/notes/G-sdex-decode-and-bucket-spec.md'
+  - '../../../docs/database-schema/database-schema-overview.md'
+  - '../../../docs/prices-api-general-overview.md'
+  - './notes/Q-decision-space.md'
+  - './notes/S-recommendation.md'
+  - '../../2-adrs/0003_price-ohlcv-pk-includes-quote-asset-id.md'
 history:
   - date: 2026-05-13
     status: backlog
@@ -58,22 +68,22 @@ Task 0022's decode-and-bucket spec §2.3 and §6 item 1 flagged
 this as a real ambiguity. Three options:
 
 A. **Add `quote_asset_id` to the PK.**
-   `PRIMARY KEY (timestamp, asset_id, quote_asset_id, granularity)`.
-   Simplest; preserves existing schema shape; doubles the row count
-   for assets that trade against many quotes (still bounded — a
-   handful of quotes per asset in practice).
+`PRIMARY KEY (timestamp, asset_id, quote_asset_id, granularity)`.
+Simplest; preserves existing schema shape; doubles the row count
+for assets that trade against many quotes (still bounded — a
+handful of quotes per asset in practice).
 
 B. **Introduce `asset_pair_id` as a surrogate.**
-   New `asset_pairs` table; `price_ohlcv.asset_pair_id` replaces
-   `asset_id`. Cleaner relational model; bigger migration; needs
-   the `asset_pairs` table to exist and be populated.
+New `asset_pairs` table; `price_ohlcv.asset_pair_id` replaces
+`asset_id`. Cleaner relational model; bigger migration; needs
+the `asset_pairs` table to exist and be populated.
 
 C. **Status quo: aggregate across quotes per asset.**
-   Drop the per-quote distinction; one "USDC candle" per minute
-   that merges USDC/XLM + USDC/USDT + … trades. Loses
-   information; defensible only if API consumers never need
-   per-quote granularity (they probably do, for USDC vs USDT
-   stablecoin depeg detection).
+Drop the per-quote distinction; one "USDC candle" per minute
+that merges USDC/XLM + USDC/USDT + … trades. Loses
+information; defensible only if API consumers never need
+per-quote granularity (they probably do, for USDC vs USDT
+stablecoin depeg detection).
 
 Option A is the default working assumption from 0022's spec.
 This task confirms / refutes that and produces the ADR.
@@ -103,10 +113,10 @@ Landed across 2 commits on `research/0023_ohlcv-row-identity-base-vs-pair`
 (PR [#10](https://github.com/rumblefishdev/stellar-prices-api/pull/10),
 squash-merged into develop as `8e57003`):
 
-| Commit    | Scope                                                        |
-| --------- | ------------------------------------------------------------ |
-| `745a626` | Convert task file → directory (`notes/`)                     |
-| `ff23481` | Research (Q-note + S-note) + ADR 0003 draft                  |
+| Commit    | Scope                                       |
+| --------- | ------------------------------------------- |
+| `745a626` | Convert task file → directory (`notes/`)    |
+| `ff23481` | Research (Q-note + S-note) + ADR 0003 draft |
 
 Followed by completion + archive (this commit on develop).
 

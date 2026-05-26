@@ -1,19 +1,19 @@
 ---
-title: "How prices-api consumes BE ClickHouse — four options"
+title: 'How prices-api consumes BE ClickHouse — four options'
 type: idea
 status: mature
 spawned_from: ../README.md
 spawns: []
 tags: [integration, clickhouse, block-explorer, options]
 links:
-  - "./R-be-clickhouse-schema-and-status.md"
-  - "./G-ch-tables-for-price-calculation.md"
-  - "../../../archive/0009_RESEARCH_shared-infra-with-block-explorer/notes/I-integration-options.md"
+  - './R-be-clickhouse-schema-and-status.md'
+  - './G-ch-tables-for-price-calculation.md'
+  - '../../../archive/0009_RESEARCH_shared-infra-with-block-explorer/notes/I-integration-options.md'
 history:
   - date: 2026-05-12
     status: mature
     who: okarcz
-    note: "Four consumption-pattern options sketched; trade-offs captured for synthesis."
+    note: 'Four consumption-pattern options sketched; trade-offs captured for synthesis.'
 ---
 
 # Four options for prices-api → BE ClickHouse consumption
@@ -173,14 +173,14 @@ Tranche 1 deliverable timing.
 
 ## Comparison table
 
-| Dimension | Option A | Option B | Option C | Option D |
-|-----------|----------|----------|----------|----------|
-| BE infra dependency at runtime | High | None | Low (only initial sync) | None |
-| Infra prices-api operates | None | Local CH (one-shot) | Local CH (ongoing) | Nothing new |
-| Tranche 1 fast-path viable? | Theoretically | Yes | Yes | No |
-| Couples to a BE decision not yet made | Yes (AWS CH deploy) | No | Partially (replication contract) | No |
-| Engineering effort | Low (if BE delivers) | Medium | High | Medium |
-| Forward-compatible with prices-api scale-up | Yes | Yes | Yes | Limited |
+| Dimension                                   | Option A             | Option B            | Option C                         | Option D    |
+| ------------------------------------------- | -------------------- | ------------------- | -------------------------------- | ----------- |
+| BE infra dependency at runtime              | High                 | None                | Low (only initial sync)          | None        |
+| Infra prices-api operates                   | None                 | Local CH (one-shot) | Local CH (ongoing)               | Nothing new |
+| Tranche 1 fast-path viable?                 | Theoretically        | Yes                 | Yes                              | No          |
+| Couples to a BE decision not yet made       | Yes (AWS CH deploy)  | No                  | Partially (replication contract) | No          |
+| Engineering effort                          | Low (if BE delivers) | Medium              | High                             | Medium      |
+| Forward-compatible with prices-api scale-up | Yes                  | Yes                 | Yes                              | Limited     |
 
 ## Open inputs for human review
 

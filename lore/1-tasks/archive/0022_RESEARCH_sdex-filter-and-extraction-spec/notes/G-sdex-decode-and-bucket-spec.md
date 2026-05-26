@@ -1,21 +1,21 @@
 ---
-title: "SDEX per-variant decode + pair canonicalisation + price math + 1m bucket UPSERT contract"
+title: 'SDEX per-variant decode + pair canonicalisation + price math + 1m bucket UPSERT contract'
 type: generation
 status: mature
 spawned_from: ../README.md
 spawns: []
 tags: [sdex, decode, claim-atom, ohlcv, bucket, upsert, spec, stream-2]
 links:
-  - "../README.md"
-  - "./G-sdex-filter-strategy.md"
-  - "../../archive/0020_RESEARCH_sdex-historical-backfill-options/notes/R-sdex-operation-xdr-shape.md"
-  - "../../archive/0020_RESEARCH_sdex-historical-backfill-options/notes/G-sdex-trade-extraction-design.md"
-  - "../../../2-adrs/0002_stream2-sdex-archive-backfill-independent-of-be.md"
-  - "../../../../docs/database-schema/database-schema-overview.md"
-  - "../../../../docs/prices-api-general-overview.md"
-  - "./profile/examples/order_book.json"
-  - "./profile/examples/liquidity_pool.json"
-  - "./profile/examples/manage_offer_multi_claim.json"
+  - '../README.md'
+  - './G-sdex-filter-strategy.md'
+  - '../../archive/0020_RESEARCH_sdex-historical-backfill-options/notes/R-sdex-operation-xdr-shape.md'
+  - '../../archive/0020_RESEARCH_sdex-historical-backfill-options/notes/G-sdex-trade-extraction-design.md'
+  - '../../../2-adrs/0002_stream2-sdex-archive-backfill-independent-of-be.md'
+  - '../../../../docs/database-schema/database-schema-overview.md'
+  - '../../../../docs/prices-api-general-overview.md'
+  - './profile/examples/order_book.json'
+  - './profile/examples/liquidity_pool.json'
+  - './profile/examples/manage_offer_multi_claim.json'
 history:
   - date: 2026-05-13
     status: mature
@@ -37,26 +37,26 @@ sections here.
 
 ## TL;DR
 
-| Concern                       | Decision                                                                                   |
-| ----------------------------- | ------------------------------------------------------------------------------------------ |
-| Pair canonicalisation         | Quote-asset preference (USDC, USDT, native XLM in that order); lexicographic fallback on `(asset_type, asset_code, issuer_str_key)` for everything else. Stored in `asset_pairs.canonical_base_id / canonical_quote_id` once, reused. |
-| `ClaimAtom` variant decode    | All three variants (V0 / ORDER_BOOK / LIQUIDITY_POOL) carry the same trade-shaped fields. Counterparty differs (informational, preserved). One decoder; per-variant pattern match. |
-| Price math                    | `price = amount_bought / amount_sold` in (bought-units-per-sold-unit), inverted as needed to match canonical pair orientation. `NUMERIC(28,14)` precision. Both amounts are stroops (10⁻⁷); divide by 10⁷ to normalise. Skip claim entirely on `amount_sold == 0`. |
-| Backfill bucket UPSERT        | **Whole-row replacement** (matches schema doc L362–365). Aggregate one minute's trades **in memory** per `(canonical_pair_id, minute)`, write the completed 1m candle once per minute per pair, `ON CONFLICT (timestamp, asset_id, granularity) DO UPDATE SET col = EXCLUDED.col`. |
-| Volume in USD                 | `volume_base` is authoritative (sum of base-side stroops normalised). `volume_quote_usd` left to a downstream enrichment pass when the quote-side USD reference is available; backfill writes 0 if unknown. |
+| Concern                    | Decision                                                                                                                                                                                                                                                                           |
+| -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Pair canonicalisation      | Quote-asset preference (USDC, USDT, native XLM in that order); lexicographic fallback on `(asset_type, asset_code, issuer_str_key)` for everything else. Stored in `asset_pairs.canonical_base_id / canonical_quote_id` once, reused.                                              |
+| `ClaimAtom` variant decode | All three variants (V0 / ORDER_BOOK / LIQUIDITY_POOL) carry the same trade-shaped fields. Counterparty differs (informational, preserved). One decoder; per-variant pattern match.                                                                                                 |
+| Price math                 | `price = amount_bought / amount_sold` in (bought-units-per-sold-unit), inverted as needed to match canonical pair orientation. `NUMERIC(28,14)` precision. Both amounts are stroops (10⁻⁷); divide by 10⁷ to normalise. Skip claim entirely on `amount_sold == 0`.                 |
+| Backfill bucket UPSERT     | **Whole-row replacement** (matches schema doc L362–365). Aggregate one minute's trades **in memory** per `(canonical_pair_id, minute)`, write the completed 1m candle once per minute per pair, `ON CONFLICT (timestamp, asset_id, granularity) DO UPDATE SET col = EXCLUDED.col`. |
+| Volume in USD              | `volume_base` is authoritative (sum of base-side stroops normalised). `volume_quote_usd` left to a downstream enrichment pass when the quote-side USD reference is available; backfill writes 0 if unknown.                                                                        |
 
 ## 1. The five SDEX-relevant op results
 
 Restating task 0020's R-note §1 for self-containedness; the
 extractor patterns directly on this:
 
-| `OperationResultTr` variant                  | `success.{field}` carrying claim atoms |
-| -------------------------------------------- | -------------------------------------- |
-| `ManageSellOffer(Success(_))`                | `offers_claimed: VecM<ClaimAtom>`      |
-| `ManageBuyOffer(Success(_))`                 | `offers_claimed: VecM<ClaimAtom>`      |
-| `CreatePassiveSellOffer(Success(_))`         | `offers_claimed: VecM<ClaimAtom>`      |
-| `PathPaymentStrictReceive(Success(_))`       | `offers: VecM<ClaimAtom>`              |
-| `PathPaymentStrictSend(Success(_))`          | `offers: VecM<ClaimAtom>`              |
+| `OperationResultTr` variant            | `success.{field}` carrying claim atoms |
+| -------------------------------------- | -------------------------------------- |
+| `ManageSellOffer(Success(_))`          | `offers_claimed: VecM<ClaimAtom>`      |
+| `ManageBuyOffer(Success(_))`           | `offers_claimed: VecM<ClaimAtom>`      |
+| `CreatePassiveSellOffer(Success(_))`   | `offers_claimed: VecM<ClaimAtom>`      |
+| `PathPaymentStrictReceive(Success(_))` | `offers: VecM<ClaimAtom>`              |
+| `PathPaymentStrictSend(Success(_))`    | `offers: VecM<ClaimAtom>`              |
 
 The field is named `offers_claimed` for manage-offer-shaped results
 and `offers` for path-payment-shaped results; otherwise the slice
@@ -203,9 +203,13 @@ The atom (claim 0 of 4):
   "variant": "order_book",
   "seller_id": "GDT4MRDHYOLKYDYDZTTIGMB6NLN6ESEVG3ON6T3JLYKKEGQIJ3CMNAUE",
   "offer_id": 1837081240,
-  "asset_sold":   { "type": "native" },
-  "amount_sold_stroops":   22423,
-  "asset_bought": { "type": "credit_alphanum4", "code": "SCOP", "issuer": "GC6OYQJIZF3HFXCYPFCBXYXNGIBQ4TNSFUBUXQJOZWIP6F3YZK4QH3VQ" },
+  "asset_sold": { "type": "native" },
+  "amount_sold_stroops": 22423,
+  "asset_bought": {
+    "type": "credit_alphanum4",
+    "code": "SCOP",
+    "issuer": "GC6OYQJIZF3HFXCYPFCBXYXNGIBQ4TNSFUBUXQJOZWIP6F3YZK4QH3VQ"
+  },
   "amount_bought_stroops": 1648943
 }
 ```
@@ -249,7 +253,7 @@ price_quote_per_base = amount_quote / amount_base
 ```
 
 But the natural read direction in the atom is **inverted** for
-this trade: the op submitter *sold XLM, bought SCOP*. The
+this trade: the op submitter _sold XLM, bought SCOP_. The
 canonical pair is (base=SCOP, quote=XLM). So price is
 `amount_sold (XLM) / amount_bought (SCOP)` = how much XLM was paid
 per SCOP received.
@@ -286,9 +290,17 @@ XDR via [`profile/examples/liquidity_pool.json`](./profile/examples/liquidity_po
 {
   "variant": "liquidity_pool",
   "pool_id_hex": "2d6442c3d3c0eeec077f3ef9054bf26ca4eac7ea5c53063dcf3a6dc45f08fc14",
-  "asset_sold":   { "type": "credit_alphanum12", "code": "3qualiT", "issuer": "GAVVNJKEM4XFXBPYITFCDVKOZRI3PAXJHDH666MDQIXJAJ4H7HO3722C" },
-  "amount_sold_stroops":   1200406,
-  "asset_bought": { "type": "credit_alphanum12", "code": "aTTaiN",  "issuer": "GDKS7XTNEVCPGVUT2ZPPOU5CHHF3NH6NX7P3ROSFSDAO6NQDS3C74Y6C" },
+  "asset_sold": {
+    "type": "credit_alphanum12",
+    "code": "3qualiT",
+    "issuer": "GAVVNJKEM4XFXBPYITFCDVKOZRI3PAXJHDH666MDQIXJAJ4H7HO3722C"
+  },
+  "amount_sold_stroops": 1200406,
+  "asset_bought": {
+    "type": "credit_alphanum12",
+    "code": "aTTaiN",
+    "issuer": "GDKS7XTNEVCPGVUT2ZPPOU5CHHF3NH6NX7P3ROSFSDAO6NQDS3C74Y6C"
+  },
   "amount_bought_stroops": 10000000
 }
 ```
@@ -312,7 +324,7 @@ price = amount_bought / amount_sold = 10_000_000 / 1_200_406
 ```
 
 The classic LP price is reproducible from `(reserve_a, reserve_b)`
-in the pool state; this `ClaimAtom` is the *executed* trade and is
+in the pool state; this `ClaimAtom` is the _executed_ trade and is
 what we record for OHLCV. Pool-state reconstruction is out of
 scope for this backfill (it lives in BE's `liquidity_pools` table).
 
@@ -332,10 +344,13 @@ XLM/USDC trade:
   "variant": "v0",
   "seller_ed25519_hex": "5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b",
   "offer_id": 12345678,
-  "asset_sold":   { "type": "native" },
-  "amount_sold_stroops":   1000000000,
-  "asset_bought": { "type": "credit_alphanum4", "code": "USDC",
-                    "issuer": "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN" },
+  "asset_sold": { "type": "native" },
+  "amount_sold_stroops": 1000000000,
+  "asset_bought": {
+    "type": "credit_alphanum4",
+    "code": "USDC",
+    "issuer": "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN"
+  },
   "amount_bought_stroops": 25000000
 }
 ```
@@ -349,7 +364,8 @@ StrKey transformation the modern `AccountID::PublicKey` round-trips
 through.
 
 Pair canonicalisation: USDC is in the quote-preference list (rank
-1) → USDC is quote, XLM is base.
+
+1. → USDC is quote, XLM is base.
 
 Price (USDC per XLM, quote_per_base):
 
@@ -408,13 +424,13 @@ inside double-precision (but we don't use double).
 
 ### 4.4 Edge cases
 
-| Case                          | Spec                                                                |
-| ----------------------------- | ------------------------------------------------------------------- |
-| `amount_sold == 0`            | Reject claim (log warning, increment a counter, skip). Should never happen on-chain (protocol-rejected pre-application) but defend in case. |
-| `amount_bought == 0`          | Same: reject + log. Same protocol invariant. |
-| Asset type 3 (`POOL_SHARE`)   | Hard error. SDEX trades never reference pool shares. Log at error level and abort the ledger (corrupt XDR). |
-| Asset type 4+ (`CONTRACT`)    | Same: hard error. SAC contracts don't appear in SDEX `ClaimAtom`s. |
-| `seller_id` is muxed         | Doesn't happen — `ClaimAtom`'s seller is `AccountID` (not `MuxedAccount`). No special handling. |
+| Case                        | Spec                                                                                                                                        |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| `amount_sold == 0`          | Reject claim (log warning, increment a counter, skip). Should never happen on-chain (protocol-rejected pre-application) but defend in case. |
+| `amount_bought == 0`        | Same: reject + log. Same protocol invariant.                                                                                                |
+| Asset type 3 (`POOL_SHARE`) | Hard error. SDEX trades never reference pool shares. Log at error level and abort the ledger (corrupt XDR).                                 |
+| Asset type 4+ (`CONTRACT`)  | Same: hard error. SAC contracts don't appear in SDEX `ClaimAtom`s.                                                                          |
+| `seller_id` is muxed        | Doesn't happen — `ClaimAtom`'s seller is `AccountID` (not `MuxedAccount`). No special handling.                                             |
 
 ## 5. 1m bucket UPSERT contract
 
@@ -518,14 +534,14 @@ ON CONFLICT (timestamp, asset_id, granularity) DO UPDATE SET
 ```
 
 `vwap` is computed in-memory before the write:
-`vwap = volume_quote / volume_base` (in *quote-asset units*, not
+`vwap = volume_quote / volume_base` (in _quote-asset units_, not
 USD — pre-enrichment).
 
 `volume_quote_usd` is **0** until a downstream pass enriches it:
 
 - For pairs with `quote = USDC` or `quote = USDT`, the
   enrichment is the identity: `volume_quote_usd = volume_quote *
-  oracle_price_of_quote_in_usd_at_minute`. With USDC/USDT pegged
+oracle_price_of_quote_in_usd_at_minute`. With USDC/USDT pegged
   to ~$1 the multiplier is ~1.
 - For pairs with `quote = native XLM`, the enrichment requires
   `oracle_price_of_XLM_in_USD_at_minute`. The Oracle Fetcher
@@ -543,7 +559,7 @@ The task 0022 README point (5) initially asked for incremental
 merge ("preserve open (lowest ledger-time wins within the minute),
 overwrite close (highest ledger-time wins), GREATEST(high) / LEAST(low),
 sum volumes and `trade_count`, recompute `vwap`"). That contract
-is the *live ingestion* contract (one ledger at a time, per
+is the _live ingestion_ contract (one ledger at a time, per
 S3-event) and is documented as such in
 [database-schema-overview L362](../../../../docs/database-schema/database-schema-overview.md).
 
@@ -557,13 +573,13 @@ That matches the schema doc's row for `SDEX Backfill`:
 
 Trade-offs:
 
-| Aspect              | Incremental (live-ingestion style)            | Whole-row (backfill style — **this spec**) |
-| ------------------- | --------------------------------------------- | ------------------------------------------ |
-| Writes per minute   | ~10–12 (one per contributing ledger)          | 1 (per pair)                               |
-| Convergence proof   | Requires UPSERT-merge formula audit           | Trivial (in-memory aggregation is just code) |
-| Crash semantics     | Partial candle in DB; resume re-merges        | Lost in-memory state; resume re-aggregates |
-| Memory pressure     | None (no in-flight state)                     | A few MB (bounded — see §5.2)              |
-| DB write rate       | 10× higher                                    | 1× baseline                                |
+| Aspect            | Incremental (live-ingestion style)     | Whole-row (backfill style — **this spec**)   |
+| ----------------- | -------------------------------------- | -------------------------------------------- |
+| Writes per minute | ~10–12 (one per contributing ledger)   | 1 (per pair)                                 |
+| Convergence proof | Requires UPSERT-merge formula audit    | Trivial (in-memory aggregation is just code) |
+| Crash semantics   | Partial candle in DB; resume re-merges | Lost in-memory state; resume re-aggregates   |
+| Memory pressure   | None (no in-flight state)              | A few MB (bounded — see §5.2)                |
+| DB write rate     | 10× higher                             | 1× baseline                                  |
 
 Whole-row is the right choice for backfill because:
 
@@ -602,7 +618,7 @@ Per schema doc §"Source attribution":
 
 > When the same `(timestamp, asset, granularity)` is written by
 > multiple distinct sources … the writer uses `source =
-> 'aggregated'` and merges across sources. Single-source candles
+'aggregated'` and merges across sources. Single-source candles
 > keep their original source label.
 
 For the backfill: write `source = 'sdex'` on initial write. The
@@ -629,21 +645,21 @@ spawn backlog tasks (numbers TBD):
    `asset_id = USDC.id` and would collide. Either:
    - add `quote_asset_id INT NOT NULL` to the PK,
    - or use `asset_pair_id` as the row key.
-   This is **load-bearing for SDEX correctness** (an asset
-   trading against multiple quotes is normal). Decision goes in
-   a schema-change ADR; backfill spec applies after it lands.
+     This is **load-bearing for SDEX correctness** (an asset
+     trading against multiple quotes is normal). Decision goes in
+     a schema-change ADR; backfill spec applies after it lands.
 
 2. **`volume_quote_usd` enrichment.** §5.3 above leaves it 0.
    A follow-up pass (likely a function of the Current Price
    Updater, or a dedicated backfill enrichment task) reads
    `oracle_prices` for the quote asset at minute-bucketed
    resolution and computes `volume_quote_usd = volume_quote *
-   oracle_price`. Until then, `current_prices.volume_24h_usd`
+oracle_price`. Until then, `current_prices.volume_24h_usd`
    computed from SDEX-only candles is undercounted by the
    non-USD-quoted pair fraction.
 
 3. **Multi-source merge contract.** §5.6 describes the
-   detect-then-merge pattern but the *live* contract for "I see
+   detect-then-merge pattern but the _live_ contract for "I see
    `source = 'sdex'`, I'm Stream 1, I merge in my own values
    without losing SDEX's contribution" needs a separate spec
    (lives outside the backfill, in the live writer path).

@@ -1,19 +1,19 @@
 ---
-title: "ClickHouse schema → prices-api token-price-calculation mapping"
+title: 'ClickHouse schema → prices-api token-price-calculation mapping'
 type: generation
 status: mature
 spawned_from: ../README.md
 spawns: []
 tags: [schema, mapping, price-calculation, clickhouse, design]
 links:
-  - "./R-be-clickhouse-schema-and-status.md"
-  - "../../../../../docs/database-schema/clickhouse-prod-schema.sql"
-  - "../../../../../docs/prices-api-general-overview.md"
+  - './R-be-clickhouse-schema-and-status.md'
+  - '../../../../../docs/database-schema/clickhouse-prod-schema.sql'
+  - '../../../../../docs/prices-api-general-overview.md'
 history:
   - date: 2026-05-12
     status: mature
     who: okarcz
-    note: "Per-requirement table mapping with example queries."
+    note: 'Per-requirement table mapping with example queries.'
 ---
 
 # Schema → price-calculation mapping
@@ -31,14 +31,14 @@ The mapping presumes the consumer can compute the
 
 ## Six price-calculation requirements
 
-| # | Requirement | Primary CH table(s) | Method |
-|---|-------------|--------------------|--------|
-| 1 | Soroban AMM swap events → OHLCV trade points | `soroban_events` + `ledgers` | Filter by `signature='swap'` & known AMM `contract_id`s; decode `topics_xdr`/`data_xdr` |
-| 2 | SDEX trades → OHLCV trade points | `operations_appearances` + `ledgers` (+ S3 archive for full XDR) | Granule-prune by `ledger_sequence`; CH `operations_appearances` lacks `offersClaimed[]` — still needs archive read |
-| 3 | Classic-Stellar LP reserves → instant constant-product price | `liquidity_pools` + `liquidity_pool_snapshots` | Pair lookup → per-ledger reserve snapshot → `price = reserve_b / reserve_a` |
-| 4 | Asset identity (disambiguate USDC variants, etc.) | `assets` | 4-tuple lookup `(asset_type, asset_code, issuer_id, contract_id)` |
-| 5 | Ledger-time resolution (`ledger_sequence` → wall-clock `closed_at`) | `ledgers` | JOIN on every fact-table query; cache as Dictionary if hot |
-| 6 | Contract labelling (`contract_id` Int64 → human StrKey + SAC flag) | `soroban_contracts` | JOIN for display only — IDs are computable locally for filtering |
+| #   | Requirement                                                         | Primary CH table(s)                                              | Method                                                                                                             |
+| --- | ------------------------------------------------------------------- | ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| 1   | Soroban AMM swap events → OHLCV trade points                        | `soroban_events` + `ledgers`                                     | Filter by `signature='swap'` & known AMM `contract_id`s; decode `topics_xdr`/`data_xdr`                            |
+| 2   | SDEX trades → OHLCV trade points                                    | `operations_appearances` + `ledgers` (+ S3 archive for full XDR) | Granule-prune by `ledger_sequence`; CH `operations_appearances` lacks `offersClaimed[]` — still needs archive read |
+| 3   | Classic-Stellar LP reserves → instant constant-product price        | `liquidity_pools` + `liquidity_pool_snapshots`                   | Pair lookup → per-ledger reserve snapshot → `price = reserve_b / reserve_a`                                        |
+| 4   | Asset identity (disambiguate USDC variants, etc.)                   | `assets`                                                         | 4-tuple lookup `(asset_type, asset_code, issuer_id, contract_id)`                                                  |
+| 5   | Ledger-time resolution (`ledger_sequence` → wall-clock `closed_at`) | `ledgers`                                                        | JOIN on every fact-table query; cache as Dictionary if hot                                                         |
+| 6   | Contract labelling (`contract_id` Int64 → human StrKey + SAC flag)  | `soroban_contracts`                                              | JOIN for display only — IDs are computable locally for filtering                                                   |
 
 ## Requirement 1 — Soroban AMM swaps (Stream 1 of §5.6)
 
@@ -94,7 +94,7 @@ Notes:
 - `FINAL` ensures `ReplacingMergeTree` dedup is applied at read time.
   Performance cost is real on hot ranges; the alternative is an
   `argMax(...)` pattern keyed on `(contract_id, ledger_sequence,
-  transaction_id, event_index)`.
+transaction_id, event_index)`.
 - The `WHERE contract_id IN (…) AND signature = 'swap'` predicate
   hits the primary key prefix → granule-pruned + LowCardinality-cheap.
 - `topics_xdr` and `data_xdr` are `String CODEC(ZSTD(3))` — wire
@@ -200,11 +200,11 @@ which BE does not mirror as table columns. For Soroban AMM
 instant-price-from-reserves, prices-api would need to either:
 
 (a) Reconstruct reserves by replaying swap events from
-    `soroban_events` (expensive but possible).
+`soroban_events` (expensive but possible).
 (b) Query the live network's contract storage via Soroban RPC at a
-    target ledger (precise but live-only, no historical replay).
+target ledger (precise but live-only, no historical replay).
 (c) Wait for BE to add per-Soroban-AMM reserve snapshots — not
-    currently on BE's roadmap.
+currently on BE's roadmap.
 
 The swap-event approach (Requirement 1) is the only fully-historical
 path for Soroban AMMs today.
@@ -212,6 +212,7 @@ path for Soroban AMMs today.
 ## Requirement 4 — Asset identity disambiguation
 
 USDC has three relevant incarnations on Stellar:
+
 1. Classic credit issued by Circle (`USDC` + Circle issuer G…).
 2. SAC wrap of the classic asset (same code + issuer, plus a
    `contract_id` for the SAC).

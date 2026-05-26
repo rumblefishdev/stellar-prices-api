@@ -1,17 +1,17 @@
 ---
-title: "Resolved: amm-trades-schema §11.1 — swap event topic symbols differ across AMMs"
+title: 'Resolved: amm-trades-schema §11.1 — swap event topic symbols differ across AMMs'
 type: synthesis
 status: developing
 spawned_from: R-swap-topic-shapes.md
 spawns: []
 tags: [soroban, amm, schema-validation, decision]
 links:
-  - "../../../../../docs/database-schema/amm-trades-schema.md#11-open-questions-for-the-be-team"
+  - '../../../../../docs/database-schema/amm-trades-schema.md#11-open-questions-for-the-be-team'
 history:
   - date: 2026-05-07
     status: seed
     who: okarcz
-    note: "Synthesis drafted from R-swap-topic-shapes.md"
+    note: 'Synthesis drafted from R-swap-topic-shapes.md'
   - date: 2026-05-07
     status: developing
     who: claude
@@ -60,6 +60,7 @@ to which topic symbol carried the values.
 What it changes in the **filter spec** (§7 of the same doc):
 
 - §7 step 3 currently reads:
+
   > The event topic identifies a **swap** (e.g. `topics[0] = Symbol("swap")`).
   > The exact symbol per AMM is documented in the BE indexer; if any AMM
   > uses a different symbol for swaps the indexer's per-venue mapping
@@ -71,20 +72,20 @@ What it changes in the **filter spec** (§7 of the same doc):
   hypothetical "if".
 
 - §7 step 4 (decoded payload yields `(token_in, token_out, amount_in,
-  amount_out)`) is satisfied by both observed shapes, but the **decoder
+amount_out)`) is satisfied by both observed shapes, but the **decoder
   is per-symbol**:
 
-  | Symbol | Where amounts live | Type | Where token pair lives |
-  |---|---|---|---|
-  | `swap` | `data.vec[3]`, `data.vec[4]` | `U128` | `topics[1]` (Vec of 2 Addresses) AND `data.vec[1..3]` |
-  | `trade` | `data.vec[0]`, `data.vec[1]` | `I128` | `topics[1]`, `topics[2]` |
+  | Symbol  | Where amounts live           | Type   | Where token pair lives                                |
+  | ------- | ---------------------------- | ------ | ----------------------------------------------------- |
+  | `swap`  | `data.vec[3]`, `data.vec[4]` | `U128` | `topics[1]` (Vec of 2 Addresses) AND `data.vec[1..3]` |
+  | `trade` | `data.vec[0]`, `data.vec[1]` | `I128` | `topics[1]`, `topics[2]`                              |
 
   These are not interchangeable; the indexer must dispatch by
   `topics[0]`.
 
 - A **third decoder** must reject `Symbol("SwappedFromVUsd")` and
   similar non-AMM swap-named events. The §7 filter is a `(contract_id ∈
-  known_amm_set) AND (topic[0] ∈ {known_amm_symbols})` AND-conjunction —
+known_amm_set) AND (topic[0] ∈ {known_amm_symbols})` AND-conjunction —
   the contract-set guard already prevents this misclassification, but
   worth restating in the doc.
 
@@ -132,7 +133,7 @@ prose:
 1. **Venue attribution for the observed contracts** — requires either
    public Soroswap/Aquarius/Phoenix contract registries or a query to
    the Stellar Expert API. Out of scope for the lore-0001 task because
-   the §11.1 question is *about topic symbols, not addresses*; venue
+   the §11.1 question is _about topic symbols, not addresses_; venue
    tagging is the BE's responsibility per §11.2.
 
 2. **DOCS update to `amm-trades-schema.md` §7 and §11.1** — replace the
@@ -151,9 +152,9 @@ prose:
 > 5 weeks later (ledgers 62400000–62463999, 60,545 files, 234,312,389
 > events) materially extended the empirical picture. **The original
 > conclusion above is preserved verbatim** — the wider sample
-> *strengthens* it. This section adds (a) a third decoder shape that
+> _strengthens_ it. This section adds (a) a third decoder shape that
 > was invisible in the 3.5-day window, and (b) a corrected `§7
-> decoder table`. Full evidence in `R-swap-topic-shapes.md` §"Update".
+decoder table`. Full evidence in `R-swap-topic-shapes.md` §"Update".
 
 ### What changes in the conclusion
 
@@ -162,8 +163,8 @@ Processor is load-bearing, not optional"). The wider sample makes the
 case stronger, not weaker:
 
 - **Soroswap is now directly identifiable.** It uses
-  `String("SoroswapPair")` for `topics[0]` (note: ScVal *String*, not
-  *Symbol*) and a sub-event tag in `topics[1]`. This is a third
+  `String("SoroswapPair")` for `topics[0]` (note: ScVal _String_, not
+  _Symbol_) and a sub-event tag in `topics[1]`. This is a third
   topic-shape pattern, distinct from both `Symbol("swap")` and
   `Symbol("trade")`.
 - **The single-emitter assumption for `Symbol("swap")` is wrong.** 44
@@ -182,10 +183,10 @@ The original table in §"What this changes in `prices_amm_trades`" lists
 two decoders. The empirical observation is **three**. The original
 table is correct as far as it goes; this is the superseding version:
 
-| `topics[0]` | `topics[1]` filter | Where amounts live | Type | Token pair source |
-|---|---|---|---|---|
-| `Symbol("swap")` | (any) | `data.vec[3]`, `data.vec[4]` | `U128` | `topics[1]` (Vec of 2 Addresses) AND `data.vec[1..3]` |
-| `Symbol("trade")` | (any) | `data.vec[0]`, `data.vec[1]` | `I128` | `topics[1]`, `topics[2]` |
+| `topics[0]`              | `topics[1]` filter    | Where amounts live                              | Type   | Token pair source                                                                  |
+| ------------------------ | --------------------- | ----------------------------------------------- | ------ | ---------------------------------------------------------------------------------- |
+| `Symbol("swap")`         | (any)                 | `data.vec[3]`, `data.vec[4]`                    | `U128` | `topics[1]` (Vec of 2 Addresses) AND `data.vec[1..3]`                              |
+| `Symbol("trade")`        | (any)                 | `data.vec[0]`, `data.vec[1]`                    | `I128` | `topics[1]`, `topics[2]`                                                           |
 | `String("SoroswapPair")` | `Symbol("swap")` only | `data.amount_{0,1}_{in,out}` (i128 keys in Map) | `I128` | **Off-event** — pool's `token_0` / `token_1` (one-time lookup, cacheable per pool) |
 
 Same dispatch rule as before — the indexer keys on `topics[0]` first. For

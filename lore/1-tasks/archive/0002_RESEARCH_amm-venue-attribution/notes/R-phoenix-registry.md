@@ -1,16 +1,16 @@
 ---
-title: "Phoenix DeFi Hub canonical mainnet contract registry + swap-event shape"
+title: 'Phoenix DeFi Hub canonical mainnet contract registry + swap-event shape'
 type: research
 status: developing
 spawned_from: ../README.md
 spawns: []
 tags: [soroban, amm, phoenix, venue-attribution]
 links:
-  - "https://github.com/Phoenix-Protocol-Group/phoenix-contracts"
-  - "https://github.com/Phoenix-Protocol-Group/phoenix-contracts/blob/main/scripts/upgrade_mainnet.sh"
-  - "https://github.com/Phoenix-Protocol-Group/phoenix-contracts/blob/main/contracts/pool/src/contract.rs"
-  - "https://github.com/Phoenix-Protocol-Group/phoenix-contracts/blob/main/contracts/factory/src/contract.rs"
-  - "https://api.stellar.expert/explorer/public/directory/"
+  - 'https://github.com/Phoenix-Protocol-Group/phoenix-contracts'
+  - 'https://github.com/Phoenix-Protocol-Group/phoenix-contracts/blob/main/scripts/upgrade_mainnet.sh'
+  - 'https://github.com/Phoenix-Protocol-Group/phoenix-contracts/blob/main/contracts/pool/src/contract.rs'
+  - 'https://github.com/Phoenix-Protocol-Group/phoenix-contracts/blob/main/contracts/factory/src/contract.rs'
+  - 'https://api.stellar.expert/explorer/public/directory/'
 history:
   - date: 2026-05-08
     status: developing
@@ -46,11 +46,11 @@ Cross-checked against the Stellar Expert directory API
 
 ### Singletons
 
-| Role | Contract ID | Stellar Expert label |
-|------|-------------|----------------------|
-| Factory | `CB4SVAWJA6TSRNOJZ7W2AWFW46D5VR4ZMFZKDIKXEINZCZEGZCJZCKMI` | *(not in directory — empty `{}`)* |
-| Multihop (router) | `CCLZRD4E72T7JCZCN3P7KNPYNXFYKQCL64ECLX7WP5GNVYPYJGU2IO2G` | *(not in directory)* |
-| Vesting | `CDEGWCGEMNFZT3UUQD7B4TTPDHXZLGEDB6WIP4PWNTXOR5EZD34HJ64O` | *(not relevant for trading)* |
+| Role              | Contract ID                                                | Stellar Expert label              |
+| ----------------- | ---------------------------------------------------------- | --------------------------------- |
+| Factory           | `CB4SVAWJA6TSRNOJZ7W2AWFW46D5VR4ZMFZKDIKXEINZCZEGZCJZCKMI` | _(not in directory — empty `{}`)_ |
+| Multihop (router) | `CCLZRD4E72T7JCZCN3P7KNPYNXFYKQCL64ECLX7WP5GNVYPYJGU2IO2G` | _(not in directory)_              |
+| Vesting           | `CDEGWCGEMNFZT3UUQD7B4TTPDHXZLGEDB6WIP4PWNTXOR5EZD34HJ64O` | _(not relevant for trading)_      |
 
 > The factory and multihop are absent from `stellar.expert/directory`
 > labels but their identity is anchored by the upgrade script committed
@@ -65,21 +65,21 @@ All entries below were verified to return
 from `https://api.stellar.expert/explorer/public/directory/<C-address>`
 on 2026-05-08.
 
-| Pair (per upgrade script) | Pool contract ID | Stellar Expert label |
-|---------------------------|------------------|----------------------|
-| PHO / USDC  | `CD5XNKK3B6BEF2N7ULNHHGAMOKZ7P6456BFNIHRF4WNTEDKBRWAE7IAA` | Phoenix Pool |
-| XLM / PHO   | `CBCZGGNOEUZG4CAAE7TGTQQHETZMKUT4OIPFHHPKEUX46U4KXBBZ3GLH` | Phoenix Pool |
-| XLM / USDC  | `CBHCRSVX3ZZ7EGTSYMKPEFGZNWRVCSESQR3UABET4MIW52N4EVU6BIZX` | Phoenix Pool |
-| XLM / EURC  | `CBISULYO5ZGS32WTNCBMEFCNKNSLFXCQ4Z3XHVDP4X4FLPSEALGSY3PS` | Phoenix Pool |
-| USDC / VEUR | `CDQLKNH3725BUP4HPKQKMM7OO62FDVXVTO7RCYPID527MZHJG2F3QBJW` | Phoenix Pool |
-| USDC / VCHF | `CBW5G5SO5SDYUGQVU7RMZ2KJ34POM3AMODOBIV2RQYG4KJDUUBVC3P2T` | Phoenix Pool |
-| XLM / USDX  | `CDMXKSLG5GITGFYERUW2MRYOBUQCMRT2QE5Y4PU3QZ53EBFWUXAXUTBC` | Phoenix Pool |
-| EURX / USDC | `CC6MJZN3HFOJKXN42ANTSCLRFOMHLFXHWPNAX64DQNUEBDMUYMPHASAV` | Phoenix Pool |
-| XLM / EURX  | `CB5QUVK5GS3IU23TMFZQ3P5J24YBBZP5PHUQAEJ2SP5K55PFTJRUQG2L` | Phoenix Pool |
-| XLM / GBPX  | `CCKOC2LJTPDBKDHTL3M5UO7HFZ2WFIHSOKCELMKQP3TLCIVUBKOQL4HB` | Phoenix Pool |
-| GBPX / USDC | `CCUCE5H5CKW3S7JBESGCES6ZGDMWLNRY3HOFET3OH33MXZWKXNJTKSM3` | Phoenix Pool |
+| Pair (per upgrade script) | Pool contract ID                                           | Stellar Expert label |
+| ------------------------- | ---------------------------------------------------------- | -------------------- |
+| PHO / USDC                | `CD5XNKK3B6BEF2N7ULNHHGAMOKZ7P6456BFNIHRF4WNTEDKBRWAE7IAA` | Phoenix Pool         |
+| XLM / PHO                 | `CBCZGGNOEUZG4CAAE7TGTQQHETZMKUT4OIPFHHPKEUX46U4KXBBZ3GLH` | Phoenix Pool         |
+| XLM / USDC                | `CBHCRSVX3ZZ7EGTSYMKPEFGZNWRVCSESQR3UABET4MIW52N4EVU6BIZX` | Phoenix Pool         |
+| XLM / EURC                | `CBISULYO5ZGS32WTNCBMEFCNKNSLFXCQ4Z3XHVDP4X4FLPSEALGSY3PS` | Phoenix Pool         |
+| USDC / VEUR               | `CDQLKNH3725BUP4HPKQKMM7OO62FDVXVTO7RCYPID527MZHJG2F3QBJW` | Phoenix Pool         |
+| USDC / VCHF               | `CBW5G5SO5SDYUGQVU7RMZ2KJ34POM3AMODOBIV2RQYG4KJDUUBVC3P2T` | Phoenix Pool         |
+| XLM / USDX                | `CDMXKSLG5GITGFYERUW2MRYOBUQCMRT2QE5Y4PU3QZ53EBFWUXAXUTBC` | Phoenix Pool         |
+| EURX / USDC               | `CC6MJZN3HFOJKXN42ANTSCLRFOMHLFXHWPNAX64DQNUEBDMUYMPHASAV` | Phoenix Pool         |
+| XLM / EURX                | `CB5QUVK5GS3IU23TMFZQ3P5J24YBBZP5PHUQAEJ2SP5K55PFTJRUQG2L` | Phoenix Pool         |
+| XLM / GBPX                | `CCKOC2LJTPDBKDHTL3M5UO7HFZ2WFIHSOKCELMKQP3TLCIVUBKOQL4HB` | Phoenix Pool         |
+| GBPX / USDC               | `CCUCE5H5CKW3S7JBESGCES6ZGDMWLNRY3HOFET3OH33MXZWKXNJTKSM3` | Phoenix Pool         |
 
-> Note: the upgrade script also lists 11 *stake* contracts (one per
+> Note: the upgrade script also lists 11 _stake_ contracts (one per
 > pool). Stake contracts emit bond/unbond events, not trade events,
 > so they're out of scope for `prices_amm_trades` and not enumerated
 > here. They're listed in `scripts/upgrade_mainnet.sh` if needed.
@@ -117,7 +117,7 @@ Phoenix has two pool implementations:
 
 The XYK pool emits **eight** separate events per `swap`, all with
 `topic_0 = String("swap")` and a String field-name as `topic_1`.
-This is *very different* from a single consolidated event.
+This is _very different_ from a single consolidated event.
 
 From `contracts/pool/src/contract.rs:1172-1185`
 ([source](https://github.com/Phoenix-Protocol-Group/phoenix-contracts/blob/main/contracts/pool/src/contract.rs)):
@@ -142,16 +142,16 @@ data   = <field-typed value>
 
 Where `<field>` is one of:
 
-| `topic_1` | data type | meaning |
-|-----------|-----------|---------|
-| `Symbol("sender")` | `Address` | trader (user that called `swap`) |
-| `Symbol("sell_token")` | `Address` | C-address of token being sold |
-| `Symbol("offer_amount")` | `i128` | amount user offered |
-| `Symbol("actual received amount")` | `i128` | amount actually received by pool (note: **field name has spaces**) |
-| `Symbol("buy_token")` | `Address` | C-address of token being bought |
-| `Symbol("return_amount")` | `i128` | amount sent to user |
-| `Symbol("spread_amount")` | `i128` | spread |
-| `Symbol("referral_fee_amount")` | `i128` | referral fee (typically 0 — referral path is `FIXM:`-disabled in current code, see line 1119) |
+| `topic_1`                          | data type | meaning                                                                                       |
+| ---------------------------------- | --------- | --------------------------------------------------------------------------------------------- |
+| `Symbol("sender")`                 | `Address` | trader (user that called `swap`)                                                              |
+| `Symbol("sell_token")`             | `Address` | C-address of token being sold                                                                 |
+| `Symbol("offer_amount")`           | `i128`    | amount user offered                                                                           |
+| `Symbol("actual received amount")` | `i128`    | amount actually received by pool (note: **field name has spaces**)                            |
+| `Symbol("buy_token")`              | `Address` | C-address of token being bought                                                               |
+| `Symbol("return_amount")`          | `i128`    | amount sent to user                                                                           |
+| `Symbol("spread_amount")`          | `i128`    | spread                                                                                        |
+| `Symbol("referral_fee_amount")`    | `i128`    | referral fee (typically 0 — referral path is `FIXM:`-disabled in current code, see line 1119) |
 
 ### Stable-pool variant
 
@@ -188,7 +188,7 @@ env.events().publish(("swap", "spread_amount"), spread_amount);
    (`contractId` from the `ContractEvent`), not derived from event
    data. (This matches Soroswap's pool-event behaviour per
    `R-swap-topic-shapes.md`.)
-6. **`fee` is *not* directly emitted** as a separate event. It must be
+6. **`fee` is _not_ directly emitted** as a separate event. It must be
    reconstructed: `commission_amount` is paid to `fee_recipient`
    inside `do_swap` (line 1110-1115) but is not published as an
    event. Only `spread_amount` (slippage) and the disabled
@@ -234,18 +234,18 @@ once on bootstrap, then subscribe to factory events for new pools.
 Top-5 from wider sample (`R-swap-topic-shapes.md` §"`Symbol("swap")`
 revisited"):
 
-| Events | Contract | Stellar Expert | Phoenix? |
-|---:|---|---|---|
-| 11,947 | `CBQDHNBFBZYE4MKPWBSJOPIYLW4SFSXAXUTSXJN76GNKYVYPCKWC6QUK` | "Aquarius Router" (aqua.network) | **No** — Aquarius |
-| 4,128 | `CBHCRSVX3ZZ7EGTSYMKPEFGZNWRVCSESQR3UABET4MIW52N4EVU6BIZX` | "Phoenix Pool" (phoenix-hub.io) | **Yes** — Phoenix XLM/USDC pool |
-| 2,706 | `CCR2CH4GQVCZHG7CHFVMNANCK45CU5DVKXZIIITDZQAU3CEJZ7RQH2MQ` | *(not in directory)* | Not in registry |
-| 2,480 | `CDMIM23WOUL5CZBKX3GOA3V5R5AMVIMTCP52KCDQORWELAPLJ27WZCHL` | *(not in directory)* | Not in registry |
-| 440 | `CBCZGGNOEUZG4CAAE7TGTQQHETZMKUT4OIPFHHPKEUX46U4KXBBZ3GLH` | "Phoenix Pool" (phoenix-hub.io) | **Yes** — Phoenix XLM/PHO pool |
+| Events | Contract                                                   | Stellar Expert                   | Phoenix?                        |
+| -----: | ---------------------------------------------------------- | -------------------------------- | ------------------------------- |
+| 11,947 | `CBQDHNBFBZYE4MKPWBSJOPIYLW4SFSXAXUTSXJN76GNKYVYPCKWC6QUK` | "Aquarius Router" (aqua.network) | **No** — Aquarius               |
+|  4,128 | `CBHCRSVX3ZZ7EGTSYMKPEFGZNWRVCSESQR3UABET4MIW52N4EVU6BIZX` | "Phoenix Pool" (phoenix-hub.io)  | **Yes** — Phoenix XLM/USDC pool |
+|  2,706 | `CCR2CH4GQVCZHG7CHFVMNANCK45CU5DVKXZIIITDZQAU3CEJZ7RQH2MQ` | _(not in directory)_             | Not in registry                 |
+|  2,480 | `CDMIM23WOUL5CZBKX3GOA3V5R5AMVIMTCP52KCDQORWELAPLJ27WZCHL` | _(not in directory)_             | Not in registry                 |
+|    440 | `CBCZGGNOEUZG4CAAE7TGTQQHETZMKUT4OIPFHHPKEUX46U4KXBBZ3GLH` | "Phoenix Pool" (phoenix-hub.io)  | **Yes** — Phoenix XLM/PHO pool  |
 
 **Headline:** 2 of the top-5 `Symbol("swap")` emitters are Phoenix XYK
 pools. This **resolves possibility #1** from `R-swap-topic-shapes.md`
 ("Phoenix is hidden inside the 44 `Symbol("swap")` emitters") — Phoenix
-*is* there, just under a 2-topic shape (`(swap, <field>)`) that the
+_is_ there, just under a 2-topic shape (`(swap, <field>)`) that the
 original three-topic Aquarius decoder cannot handle.
 
 The remaining 3 of top-5 are: 1 confirmed Aquarius router and 2
@@ -269,7 +269,8 @@ This is not contradictory with `R-swap-topic-shapes.md`'s observation
 that 44 distinct contracts emit `Symbol("swap")` — it just means
 Phoenix's contribution is concentrated in 2 pools and the long tail
 is distributed across other pools and other venues (Aquarius router
-+ Aquarius helper contracts + possibly more).
+
+- Aquarius helper contracts + possibly more).
 
 ## Sources
 

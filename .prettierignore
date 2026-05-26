@@ -1,6 +1,13 @@
 # Add files here to ignore them from prettier formatting
 dist
 coverage
+target
+Cargo.lock
+packages/
 .nx
+board.html
 AGENTS.md
 CLAUDE.md
+
+# JSONL evidence files (multi-object, not valid JSON)
+lore/**/evidence/*.json

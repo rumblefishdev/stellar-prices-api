@@ -131,22 +131,22 @@ namespace:
 
 ### Inputs — `/platform/{env}/...` (BE publishes, prices-api reads)
 
-| Key | Value | Published by |
-|---|---|---|
-| `/platform/{env}/ch-endpoint` | `https://ch.{env}.sorobanscan.rumblefish.dev:443` (mTLS Caddy address) | BE task 0050 |
-| `/platform/{env}/ch-database` | `prices` | BE task 0050 |
-| `/platform/{env}/ch-user` | CH username scoped to `prices` DB | BE task 0050 |
-| `/platform/{env}/stellar-ledger-data-sns-arn` | SNS topic ARN for S3 PutObject fan-out | BE task 0050 |
-| `/platform/{env}/stellar-ledger-data-bucket-arn` | BE-owned bucket ARN (read-only IAM scope) | BE task 0050 |
+| Key                                              | Value                                                                  | Published by |
+| ------------------------------------------------ | ---------------------------------------------------------------------- | ------------ |
+| `/platform/{env}/ch-endpoint`                    | `https://ch.{env}.sorobanscan.rumblefish.dev:443` (mTLS Caddy address) | BE task 0050 |
+| `/platform/{env}/ch-database`                    | `prices`                                                               | BE task 0050 |
+| `/platform/{env}/ch-user`                        | CH username scoped to `prices` DB                                      | BE task 0050 |
+| `/platform/{env}/stellar-ledger-data-sns-arn`    | SNS topic ARN for S3 PutObject fan-out                                 | BE task 0050 |
+| `/platform/{env}/stellar-ledger-data-bucket-arn` | BE-owned bucket ARN (read-only IAM scope)                              | BE task 0050 |
 
 ### Outputs — `/prices/{env}/...` (prices-api publishes, downstream reads)
 
-| Key | Value | Consumer |
-|---|---|---|
-| `/prices/{env}/mtls-cert-secret-arn` | Secrets Manager ARN holding mTLS client cert PEM | task 0052 Lambdas |
-| `/prices/{env}/mtls-key-secret-arn` | Secrets Manager ARN holding mTLS client key PEM | task 0052 Lambdas |
+| Key                                         | Value                                            | Consumer                 |
+| ------------------------------------------- | ------------------------------------------------ | ------------------------ |
+| `/prices/{env}/mtls-cert-secret-arn`        | Secrets Manager ARN holding mTLS client cert PEM | task 0052 Lambdas        |
+| `/prices/{env}/mtls-key-secret-arn`         | Secrets Manager ARN holding mTLS client key PEM  | task 0052 Lambdas        |
 | `/prices/{env}/ledger-processor-lambda-arn` | Live ingest Lambda ARN (for BE SNS subscription) | BE task 0050 / task 0038 |
-| `/prices/{env}/api-gateway-id` | REST API ID (for downstream domain wiring) | task 0040 |
+| `/prices/{env}/api-gateway-id`              | REST API ID (for downstream domain wiring)       | task 0040                |
 
 **Boundary rule:** the deploy role's IAM scope enforces this — it
 can `Get` both namespaces but `Put`/`Delete` only under `/prices/*`.
@@ -208,14 +208,14 @@ out-of-band.
 Per BE's pattern, one downstream task ≈ one chunk of real content
 attached to the skeleton:
 
-| Task | Where it plugs in |
-|---|---|
-| `0008` (CI workflow) | Adds `.github/workflows/deploy.yml` that assumes the per-env CicdStack deploy role via OIDC and runs `make deploy-{env}`. |
+| Task                             | Where it plugs in                                                                                                                                                                                                                                                                                 |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `0008` (CI workflow)             | Adds `.github/workflows/deploy.yml` that assumes the per-env CicdStack deploy role via OIDC and runs `make deploy-{env}`.                                                                                                                                                                         |
 | `0038` (Ledger Processor Lambda) | Adds a `RustFunction` to ComputeStack, references `ledgerProcessorRole` + `ledgerProcessorLogGroup`, attaches SNS subscription, adds `s3:GetObject` on BE's bucket (same-account — IAM grant only, no bucket policy needed), publishes Lambda ARN to `/prices/{env}/ledger-processor-lambda-arn`. |
-| `0039` (Periodic workers) | Adds 4 `RustFunction`s in ComputeStack, calls `rule.addTarget(...)` on each `EventBridgeStack` rule, uses `createPricesLambdaRole` for the per-worker IAM roles. |
-| `0040` (API handlers) | Adds a `RustFunction` to ComputeStack, attaches as Lambda proxy integration onto ApiGatewayStack's REST API root, adds `/v1/prices/...` resources, wires custom domain + Route 53 A-record + ACM cert. |
-| `0055` (Backfill status) | Adds a `RustFunction` to ComputeStack using `createPricesLambdaRole`, adds `/backfill/status` resource to ApiGatewayStack. |
-| `0056` (Alarms) | Adds `cloudwatch.Alarm` constructs to ObservabilityStack referencing ComputeStack log groups + ApiGatewayStack stage metrics + Lambda function metrics. Attaches widgets to the dashboard. |
+| `0039` (Periodic workers)        | Adds 4 `RustFunction`s in ComputeStack, calls `rule.addTarget(...)` on each `EventBridgeStack` rule, uses `createPricesLambdaRole` for the per-worker IAM roles.                                                                                                                                  |
+| `0040` (API handlers)            | Adds a `RustFunction` to ComputeStack, attaches as Lambda proxy integration onto ApiGatewayStack's REST API root, adds `/v1/prices/...` resources, wires custom domain + Route 53 A-record + ACM cert.                                                                                            |
+| `0055` (Backfill status)         | Adds a `RustFunction` to ComputeStack using `createPricesLambdaRole`, adds `/backfill/status` resource to ApiGatewayStack.                                                                                                                                                                        |
+| `0056` (Alarms)                  | Adds `cloudwatch.Alarm` constructs to ObservabilityStack referencing ComputeStack log groups + ApiGatewayStack stage metrics + Lambda function metrics. Attaches widgets to the dashboard.                                                                                                        |
 
 ## Lambda conventions
 

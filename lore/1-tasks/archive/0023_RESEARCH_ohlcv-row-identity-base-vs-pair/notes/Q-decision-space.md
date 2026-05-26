@@ -1,20 +1,20 @@
 ---
-title: "Decision space — how should price_ohlcv key its rows?"
+title: 'Decision space — how should price_ohlcv key its rows?'
 type: question
 status: mature
 spawned_from: ../README.md
-spawns: ["S-recommendation"]
+spawns: ['S-recommendation']
 tags: [schema, ohlcv, primary-key, sdex, backfill]
 links:
-  - "../README.md"
-  - "../../../archive/0022_RESEARCH_sdex-filter-and-extraction-spec/notes/G-sdex-decode-and-bucket-spec.md"
-  - "../../../../docs/prices-api-general-overview.md"
-  - "../../../../docs/database-schema/database-schema-overview.md"
+  - '../README.md'
+  - '../../../archive/0022_RESEARCH_sdex-filter-and-extraction-spec/notes/G-sdex-decode-and-bucket-spec.md'
+  - '../../../../docs/prices-api-general-overview.md'
+  - '../../../../docs/database-schema/database-schema-overview.md'
 history:
   - date: 2026-05-13
     status: mature
     who: okarcz
-    note: "Captured the decision-space framing the README listed (A/B/C) plus an Option D variant that emerged during the API survey."
+    note: 'Captured the decision-space framing the README listed (A/B/C) plus an Option D variant that emerged during the API survey.'
 ---
 
 # Decision space — how should `price_ohlcv` key its rows?
@@ -31,12 +31,12 @@ for SDEX correctness and deferred resolution here.
 
 ## The four options
 
-| ID | PK shape                                                       | What backfill writes per minute      | API projection effort |
-| -- | -------------------------------------------------------------- | ------------------------------------- | --------------------- |
-| A  | `(timestamp, asset_id, quote_asset_id, granularity)`           | One row per native pair               | Aggregate over rows for the asset → USD or XLM view |
-| B  | `(timestamp, asset_pair_id, granularity)` with new `asset_pairs` table | One row per native pair (via pair surrogate) | Same as A, plus a join |
-| C  | `(timestamp, asset_id, quote_kind, granularity)` where `quote_kind ∈ {USD, XLM}` | One row per asset per quote-kind, with native pair normalised at write | None — already in API shape |
-| D  | Status quo (`(timestamp, asset_id, granularity)`)              | Collides; either undefined or last-write-wins | Single row per asset already in API shape |
+| ID  | PK shape                                                                         | What backfill writes per minute                                        | API projection effort                               |
+| --- | -------------------------------------------------------------------------------- | ---------------------------------------------------------------------- | --------------------------------------------------- |
+| A   | `(timestamp, asset_id, quote_asset_id, granularity)`                             | One row per native pair                                                | Aggregate over rows for the asset → USD or XLM view |
+| B   | `(timestamp, asset_pair_id, granularity)` with new `asset_pairs` table           | One row per native pair (via pair surrogate)                           | Same as A, plus a join                              |
+| C   | `(timestamp, asset_id, quote_kind, granularity)` where `quote_kind ∈ {USD, XLM}` | One row per asset per quote-kind, with native pair normalised at write | None — already in API shape                         |
+| D   | Status quo (`(timestamp, asset_id, granularity)`)                                | Collides; either undefined or last-write-wins                          | Single row per asset already in API shape           |
 
 ## What the API surface looks like (key data point)
 
@@ -48,7 +48,7 @@ choice**, not per native pair. See
 
 So the API never reveals "USDC/USDT" vs "USDC/EURT" separately —
 those would aggregate into the single "USDC priced in USD" series.
-But the *storage* needs to keep the distinction because:
+But the _storage_ needs to keep the distinction because:
 
 1. Each native pair has its own VWAP / volume that contributes to
    the projection.

@@ -1,21 +1,21 @@
 ---
-title: "R: Map prices-api write targets from PG/RDS to ClickHouse"
+title: 'R: Map prices-api write targets from PG/RDS to ClickHouse'
 type: research
 status: developing
 spawned_from: ../README.md
 spawns: []
 tags: [clickhouse, ohlcv, schema, merge, rollups, current-prices, step-2]
 links:
-  - "../../../../2-adrs/0003_price-ohlcv-pk-includes-quote-asset-id.md"
-  - "../../../../2-adrs/0004_price-ohlcv-multi-source-merge-columns.md"
-  - "../../../../../docs/prices-api-general-overview.md"
-  - "../../../blocked/0038_FEATURE_prices-ledger-processor-lambda.md"
-  - "./R-be-hetzner-ch-shape.md"
+  - '../../../../2-adrs/0003_price-ohlcv-pk-includes-quote-asset-id.md'
+  - '../../../../2-adrs/0004_price-ohlcv-multi-source-merge-columns.md'
+  - '../../../../../docs/prices-api-general-overview.md'
+  - '../../../blocked/0038_FEATURE_prices-ledger-processor-lambda.md'
+  - './R-be-hetzner-ch-shape.md'
 history:
   - date: 2026-05-18
     status: developing
     who: okarcz
-    note: "Distilled from ADR 0003, ADR 0004, design doc §3 + §5.2, task 0038."
+    note: 'Distilled from ADR 0003, ADR 0004, design doc §3 + §5.2, task 0038.'
 ---
 
 # R: Map prices-api write targets from PG/RDS to ClickHouse
@@ -43,9 +43,9 @@ The blocked task 0038 spec defines the per-invocation contract:
 2. Run dispatch kernel from 0037 → emit `Vec<TradeTick>` per
    extractor (SDEX, Soroswap, Aquarius, Phoenix).
 3. Bucket trades by `(floor_minute(closed_at), asset_id,
-   quote_asset_id, '1m', source)`.
+quote_asset_id, '1m', source)`.
 4. Emit one `INSERT … ON CONFLICT (timestamp, asset_id,
-   quote_asset_id, granularity) DO UPDATE` per bucket — the merge
+quote_asset_id, granularity) DO UPDATE` per bucket — the merge
    formula from ADR 0004.
 
 The "single UPSERT with ON CONFLICT DO UPDATE" pattern is what
@@ -57,13 +57,13 @@ out the substitute.
 
 ## 1. CH engine primer for the merge cases we care about
 
-| Engine | What it does on merge | Where it fits here |
-|---|---|---|
-| `MergeTree` | Sorts by `ORDER BY`; never dedups. | Append-only event tables (oracle_prices, trade fact table) |
-| `ReplacingMergeTree(version)` | Keeps the row with the largest `version` per ORDER BY tuple. | Mutable rows with last-write-wins (`assets`, `backfill_progress`, optionally `current_prices`) |
-| `SummingMergeTree([cols])` | Sums numeric columns per ORDER BY tuple. | Pure additive aggregates only — not enough for OHLCV (open/close are positional, not additive) |
-| `AggregatingMergeTree` | Stores `AggregateFunction(...)` states; merges by combining states. | OHLCV with deterministic argMin/argMax/sum/min/max — the canonical fit |
-| `CollapsingMergeTree` / `VersionedCollapsingMergeTree` | Cancels paired +/- rows. | Not applicable here |
+| Engine                                                 | What it does on merge                                               | Where it fits here                                                                             |
+| ------------------------------------------------------ | ------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| `MergeTree`                                            | Sorts by `ORDER BY`; never dedups.                                  | Append-only event tables (oracle_prices, trade fact table)                                     |
+| `ReplacingMergeTree(version)`                          | Keeps the row with the largest `version` per ORDER BY tuple.        | Mutable rows with last-write-wins (`assets`, `backfill_progress`, optionally `current_prices`) |
+| `SummingMergeTree([cols])`                             | Sums numeric columns per ORDER BY tuple.                            | Pure additive aggregates only — not enough for OHLCV (open/close are positional, not additive) |
+| `AggregatingMergeTree`                                 | Stores `AggregateFunction(...)` states; merges by combining states. | OHLCV with deterministic argMin/argMax/sum/min/max — the canonical fit                         |
+| `CollapsingMergeTree` / `VersionedCollapsingMergeTree` | Cancels paired +/- rows.                                            | Not applicable here                                                                            |
 
 **Critical caveat: eventual consistency.** CH merges in the
 background; reads without `FINAL` (or without a `GROUP BY` that
@@ -87,20 +87,20 @@ The mapping below assumes API read paths use the `GROUP BY` form
 The merge formula from ADR 0004 has **five distinct aggregation
 shapes** on one row:
 
-| Column | PG merge semantics | CH aggregation primitive |
-|---|---|---|
-| `open` | Earliest `first_trade_at` wins | `argMin(open, first_trade_at)` |
-| `close` | Latest `last_trade_at` wins | `argMax(close, last_trade_at)` |
-| `high` | `GREATEST` | `max(high)` |
-| `low` | `LEAST` | `min(low)` |
-| `volume_base` | `SUM` | `sum(volume_base)` |
-| `volume_quote_usd` | `SUM` | `sum(volume_quote_usd)` |
-| `trade_count` | `SUM` | `sum(trade_count)` |
-| `first_trade_at` | `LEAST` | `min(first_trade_at)` |
-| `last_trade_at` | `GREATEST` | `max(last_trade_at)` |
-| `vwap` | Recomputed `Σvol_quote / Σvol_base` | Derived at read time |
-| `source` | `'aggregated'` if mixed, else single | Derived from `groupUniqArray` |
-| `sources_seen` | `jsonb_set` per-source slot | Native CH `Map(String, Tuple(...))` or per-source rows |
+| Column             | PG merge semantics                   | CH aggregation primitive                               |
+| ------------------ | ------------------------------------ | ------------------------------------------------------ |
+| `open`             | Earliest `first_trade_at` wins       | `argMin(open, first_trade_at)`                         |
+| `close`            | Latest `last_trade_at` wins          | `argMax(close, last_trade_at)`                         |
+| `high`             | `GREATEST`                           | `max(high)`                                            |
+| `low`              | `LEAST`                              | `min(low)`                                             |
+| `volume_base`      | `SUM`                                | `sum(volume_base)`                                     |
+| `volume_quote_usd` | `SUM`                                | `sum(volume_quote_usd)`                                |
+| `trade_count`      | `SUM`                                | `sum(trade_count)`                                     |
+| `first_trade_at`   | `LEAST`                              | `min(first_trade_at)`                                  |
+| `last_trade_at`    | `GREATEST`                           | `max(last_trade_at)`                                   |
+| `vwap`             | Recomputed `Σvol_quote / Σvol_base`  | Derived at read time                                   |
+| `source`           | `'aggregated'` if mixed, else single | Derived from `groupUniqArray`                          |
+| `sources_seen`     | `jsonb_set` per-source slot          | Native CH `Map(String, Tuple(...))` or per-source rows |
 
 This decomposes into two viable storage models. The trade-off is
 which side pays the merge complexity: writer or reader.
@@ -319,7 +319,7 @@ GROUP BY timestamp, asset_id, quote_asset_id;
   rows older than the per-part merge interval, typically
   minutes).
 
-### 2.3 Recommendation seed (defer final pick to S-*)
+### 2.3 Recommendation seed (defer final pick to S-\*)
 
 **Working hypothesis: CH-B (one row per source).** Rationale:
 
@@ -493,7 +493,7 @@ Lambda. CH is not great at mutations; the right idioms are:
 - **`ReplacingMergeTree(updated_at)`** — last-write-wins on the
   PK. Updates land as INSERTs with a newer `updated_at`. Reads
   use `FINAL` (cheap on a small table) or `argMax(...)
-  GROUP BY asset_id`.
+GROUP BY asset_id`.
 - **CH `Dictionary` backed by an external source** — for hot
   point-lookup reads with sub-millisecond latency. Source could
   be a CSV/Parquet snapshot in S3, refreshed periodically.
@@ -531,14 +531,14 @@ DynamoDB.
 
 ## 6. Summary mapping table
 
-| RDS target (PG plan) | CH target | Engine | Lambda change |
-|---|---|---|---|
-| `price_ohlcv` (1m) | `price_ohlcv` (per-source rows) | `ReplacingMergeTree(version)` | Ledger Processor: `INSERT` instead of `UPSERT` |
-| `price_ohlcv` (15m..1M rollups) | MV chain `_15m_mv` → `_1h_mv` → … | each MV writes into a `ReplacingMergeTree` | **Rollup Lambda eliminated** |
-| `current_prices` | `current_prices` (one row per asset) | `ReplacingMergeTree(updated_at)` | Current Price Updater retained, retargeted |
-| `oracle_prices` | `oracle_prices` | `MergeTree` | Oracle Fetcher retained, retargeted |
-| `assets` | `assets` (registry) | `ReplacingMergeTree(updated_at)` | Asset Discovery retained, retargeted |
-| `backfill_progress` | `backfill_progress` | `ReplacingMergeTree(updated_at)` | sdex-cloud-push retargeted (see ADR 0005) |
+| RDS target (PG plan)            | CH target                            | Engine                                     | Lambda change                                  |
+| ------------------------------- | ------------------------------------ | ------------------------------------------ | ---------------------------------------------- |
+| `price_ohlcv` (1m)              | `price_ohlcv` (per-source rows)      | `ReplacingMergeTree(version)`              | Ledger Processor: `INSERT` instead of `UPSERT` |
+| `price_ohlcv` (15m..1M rollups) | MV chain `_15m_mv` → `_1h_mv` → …    | each MV writes into a `ReplacingMergeTree` | **Rollup Lambda eliminated**                   |
+| `current_prices`                | `current_prices` (one row per asset) | `ReplacingMergeTree(updated_at)`           | Current Price Updater retained, retargeted     |
+| `oracle_prices`                 | `oracle_prices`                      | `MergeTree`                                | Oracle Fetcher retained, retargeted            |
+| `assets`                        | `assets` (registry)                  | `ReplacingMergeTree(updated_at)`           | Asset Discovery retained, retargeted           |
+| `backfill_progress`             | `backfill_progress`                  | `ReplacingMergeTree(updated_at)`           | sdex-cloud-push retargeted (see ADR 0005)      |
 
 **Cleanup Worker.** PG retention logic (`DROP TABLE` per
 month-partition; `DELETE WHERE granularity='1m' AND timestamp <

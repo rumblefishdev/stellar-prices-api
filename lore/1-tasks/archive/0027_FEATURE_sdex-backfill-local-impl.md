@@ -1,20 +1,33 @@
 ---
-id: "0027"
-title: "SDEX local-backfill impl — Cargo workspace + Rust CLI + ClickHouse local stack"
+id: '0027'
+title: 'SDEX local-backfill impl — Cargo workspace + Rust CLI + ClickHouse local stack'
 type: FEATURE
 status: done
-related_adr: ["0003", "0005", "0007"]
-related_tasks: ["0012", "0022", "0028"]
-tags: [layer-indexing, priority-high, effort-large, milestone-M1, local-backfill, workstation, rust, clickhouse, docker, sdex, stream-2]
+related_adr: ['0003', '0005', '0007']
+related_tasks: ['0012', '0022', '0028']
+tags:
+  [
+    layer-indexing,
+    priority-high,
+    effort-large,
+    milestone-M1,
+    local-backfill,
+    workstation,
+    rust,
+    clickhouse,
+    docker,
+    sdex,
+    stream-2,
+  ]
 milestone: 1
 links:
-  - "../archive/0012_FEATURE_design-prices-owned-backfill-fargate/notes/G-sdex-backfill-local-design.md"
-  - "../../2-adrs/0005_stream2-sdex-local-workstation-backfill.md"
-  - "../../2-adrs/0003_price-ohlcv-pk-includes-quote-asset-id.md"
-  - "../../2-adrs/0007_live-data-sink-on-shared-hetzner-clickhouse.md"
-  - "../archive/0022_RESEARCH_sdex-filter-and-extraction-spec/notes/G-sdex-filter-strategy.md"
-  - "../archive/0022_RESEARCH_sdex-filter-and-extraction-spec/notes/G-sdex-decode-and-bucket-spec.md"
-  - "../../../../soroban-block-explorer/lore/2-adrs/0010_local-backfill-over-fargate.md"
+  - '../archive/0012_FEATURE_design-prices-owned-backfill-fargate/notes/G-sdex-backfill-local-design.md'
+  - '../../2-adrs/0005_stream2-sdex-local-workstation-backfill.md'
+  - '../../2-adrs/0003_price-ohlcv-pk-includes-quote-asset-id.md'
+  - '../../2-adrs/0007_live-data-sink-on-shared-hetzner-clickhouse.md'
+  - '../archive/0022_RESEARCH_sdex-filter-and-extraction-spec/notes/G-sdex-filter-strategy.md'
+  - '../archive/0022_RESEARCH_sdex-filter-and-extraction-spec/notes/G-sdex-decode-and-bucket-spec.md'
+  - '../../../../soroban-block-explorer/lore/2-adrs/0010_local-backfill-over-fargate.md'
 history:
   - date: 2026-05-13
     status: backlog
@@ -125,7 +138,7 @@ dependency on task 0011 (CDK bootstrap).
      local `.xdr.zst`, calls `xdr_parser::decompress_zstd` +
      `xdr_parser::deserialize_batch`.
    - `filter.rs` — `TransactionResultMeta` walk + `txSUCCESS` gate
-     + `ClaimAtom` extraction. Per 0022 filter-strategy §1.4–1.6, §2.
+     - `ClaimAtom` extraction. Per 0022 filter-strategy §1.4–1.6, §2.
    - `tick.rs` — `ClaimAtom` → `TradeTick`. Per 0022 decode-and-bucket
      §2–§3 (V0 / ORDER_BOOK / LIQUIDITY_POOL variants).
    - `canonical.rs` — pair canonicalisation + asset surrogation.
@@ -180,37 +193,37 @@ dependency on task 0011 (CDK bootstrap).
 
 ### Files
 
-| File | Purpose |
-|------|---------|
-| `Cargo.toml` (root) | Workspace definition, shared deps |
-| `packages/sdex-backfill/Cargo.toml` | Binary crate, edition 2024 |
-| `docker-compose.yml` | ClickHouse 25.6, healthcheck, init.sql mount |
-| `packages/sdex-backfill/schema/init.sql` | 4-table ClickHouse schema |
-| `packages/sdex-backfill/src/main.rs` | Entry point |
-| `packages/sdex-backfill/src/cli.rs` | clap args (--start, --end, --clickhouse-url, --temp-dir, --keep-partitions, --verbose) |
-| `packages/sdex-backfill/src/obs.rs` | tracing-subscriber with JSON + EnvFilter |
-| `packages/sdex-backfill/src/run.rs` | Orchestration: preflight, partition pipeline, summary |
-| `packages/sdex-backfill/src/partition.rs` | Partition math, S3/local paths, 5 unit tests |
-| `packages/sdex-backfill/src/sync.rs` | `aws s3 sync` with retry/backoff, S3 completeness check |
-| `packages/sdex-backfill/src/ingest.rs` | Per-ledger XDR decode + trade extraction + candle flush |
-| `packages/sdex-backfill/src/filter.rs` | TxSuccess gate, 5 trade-shaped ops, ClaimAtom extraction |
-| `packages/sdex-backfill/src/tick.rs` | RawTrade → TradeTick (canonicalization + price) |
-| `packages/sdex-backfill/src/canonical.rs` | AssetIdentity, AssetRegistry, pair canonicalization (USDC→USDT→XLM preference) |
-| `packages/sdex-backfill/src/price.rs` | stroops_to_decimal, compute_price |
-| `packages/sdex-backfill/src/bucket.rs` | CandleAccumulator, 1-min OHLCV aggregation, VWAP |
-| `packages/sdex-backfill/src/sink.rs` | ClickHouse writer (candles, assets, completed ledgers) |
-| `packages/sdex-backfill/src/error.rs` | BackfillError enum (7 variants) |
-| `docs/runbooks/backfill-sdex.md` | Operator runbook |
+| File                                      | Purpose                                                                                |
+| ----------------------------------------- | -------------------------------------------------------------------------------------- |
+| `Cargo.toml` (root)                       | Workspace definition, shared deps                                                      |
+| `packages/sdex-backfill/Cargo.toml`       | Binary crate, edition 2024                                                             |
+| `docker-compose.yml`                      | ClickHouse 25.6, healthcheck, init.sql mount                                           |
+| `packages/sdex-backfill/schema/init.sql`  | 4-table ClickHouse schema                                                              |
+| `packages/sdex-backfill/src/main.rs`      | Entry point                                                                            |
+| `packages/sdex-backfill/src/cli.rs`       | clap args (--start, --end, --clickhouse-url, --temp-dir, --keep-partitions, --verbose) |
+| `packages/sdex-backfill/src/obs.rs`       | tracing-subscriber with JSON + EnvFilter                                               |
+| `packages/sdex-backfill/src/run.rs`       | Orchestration: preflight, partition pipeline, summary                                  |
+| `packages/sdex-backfill/src/partition.rs` | Partition math, S3/local paths, 5 unit tests                                           |
+| `packages/sdex-backfill/src/sync.rs`      | `aws s3 sync` with retry/backoff, S3 completeness check                                |
+| `packages/sdex-backfill/src/ingest.rs`    | Per-ledger XDR decode + trade extraction + candle flush                                |
+| `packages/sdex-backfill/src/filter.rs`    | TxSuccess gate, 5 trade-shaped ops, ClaimAtom extraction                               |
+| `packages/sdex-backfill/src/tick.rs`      | RawTrade → TradeTick (canonicalization + price)                                        |
+| `packages/sdex-backfill/src/canonical.rs` | AssetIdentity, AssetRegistry, pair canonicalization (USDC→USDT→XLM preference)         |
+| `packages/sdex-backfill/src/price.rs`     | stroops_to_decimal, compute_price                                                      |
+| `packages/sdex-backfill/src/bucket.rs`    | CandleAccumulator, 1-min OHLCV aggregation, VWAP                                       |
+| `packages/sdex-backfill/src/sink.rs`      | ClickHouse writer (candles, assets, completed ledgers)                                 |
+| `packages/sdex-backfill/src/error.rs`     | BackfillError enum (7 variants)                                                        |
+| `docs/runbooks/backfill-sdex.md`          | Operator runbook                                                                       |
 
 ### Smoke test results (2 runs)
 
-| Metric | Run 1 (62016000–62017000) | Run 2 (62017001–62018000) | Total |
-|--------|--------------------------|--------------------------|-------|
-| Ledgers indexed | 1,001 | 1,000 | 2,001 |
-| Trade ticks | 82,962 | 57,009 | 139,971 |
-| OHLCV rows | 40,715 | 27,382 | 68,097 |
-| Assets | 1,806 | 2,233 new | 4,039 |
-| Re-run no-op | pass | pass | pass |
+| Metric          | Run 1 (62016000–62017000) | Run 2 (62017001–62018000) | Total   |
+| --------------- | ------------------------- | ------------------------- | ------- |
+| Ledgers indexed | 1,001                     | 1,000                     | 2,001   |
+| Trade ticks     | 82,962                    | 57,009                    | 139,971 |
+| OHLCV rows      | 40,715                    | 27,382                    | 68,097  |
+| Assets          | 1,806                     | 2,233 new                 | 4,039   |
+| Re-run no-op    | pass                      | pass                      | pass    |
 
 ## Design Decisions
 

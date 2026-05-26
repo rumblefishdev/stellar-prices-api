@@ -1,14 +1,40 @@
 ---
-id: "0057"
-title: "Define the Tranche 1 (M1) task set — author 7 new tasks, tag 7 existing"
+id: '0057'
+title: 'Define the Tranche 1 (M1) task set — author 7 new tasks, tag 7 existing'
 type: DOCS
 status: completed
-related_adr: ["0001", "0005", "0007"]
-related_tasks: ["0011", "0017", "0027", "0028", "0034", "0037", "0038", "0050", "0051", "0052", "0053", "0054", "0055", "0056"]
-tags: [layer-docs, priority-medium, effort-small, milestone-M1, meta, lore-admin, task-definition, tranche-1-scope]
+related_adr: ['0001', '0005', '0007']
+related_tasks:
+  [
+    '0011',
+    '0017',
+    '0027',
+    '0028',
+    '0034',
+    '0037',
+    '0038',
+    '0050',
+    '0051',
+    '0052',
+    '0053',
+    '0054',
+    '0055',
+    '0056',
+  ]
+tags:
+  [
+    layer-docs,
+    priority-medium,
+    effort-small,
+    milestone-M1,
+    meta,
+    lore-admin,
+    task-definition,
+    tranche-1-scope,
+  ]
 milestone: 1
 links:
-  - "../../../docs/prices-api-general-overview.md"
+  - '../../../docs/prices-api-general-overview.md'
 history:
   - date: 2026-05-21
     status: active
@@ -63,15 +89,15 @@ single child task as the umbrella for the others.
 
 **New tasks** (`backlog/`, all `milestone-M1`):
 
-| ID | Title | Area |
-|----|-------|------|
-| 0050 | BE-side prep — SNS fan-out + mTLS issuance + prices DB provisioning | layer-infra, cross-team |
-| 0051 | ClickHouse `prices.*` schema + MV chain migration | layer-database |
-| 0052 | ClickHouse mTLS client shared crate | layer-backend |
-| 0053 | Soroban AMM Backfill CLI (`soroban-amm-backfill`) | layer-indexing, stream-1 |
-| 0054 | Asset Discovery Lambda (T1 minimal scope) | layer-indexing |
-| 0055 | `GET /backfill/status` endpoint (T1 isolated) | layer-backend |
-| 0056 | CloudWatch alarms — SDEX push freshness + mTLS NotAfter | layer-infra |
+| ID   | Title                                                               | Area                     |
+| ---- | ------------------------------------------------------------------- | ------------------------ |
+| 0050 | BE-side prep — SNS fan-out + mTLS issuance + prices DB provisioning | layer-infra, cross-team  |
+| 0051 | ClickHouse `prices.*` schema + MV chain migration                   | layer-database           |
+| 0052 | ClickHouse mTLS client shared crate                                 | layer-backend            |
+| 0053 | Soroban AMM Backfill CLI (`soroban-amm-backfill`)                   | layer-indexing, stream-1 |
+| 0054 | Asset Discovery Lambda (T1 minimal scope)                           | layer-indexing           |
+| 0055 | `GET /backfill/status` endpoint (T1 isolated)                       | layer-backend            |
+| 0056 | CloudWatch alarms — SDEX push freshness + mTLS NotAfter             | layer-infra              |
 
 **Existing tasks tagged with `milestone-M1`** (no shape changes):
 

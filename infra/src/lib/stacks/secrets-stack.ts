@@ -73,13 +73,15 @@ export class SecretsStack extends cdk.Stack {
     new ssm.StringParameter(this, 'MtlsCertSecretArnParam', {
       parameterName: `/prices/${envName}/mtls-cert-secret-arn`,
       stringValue: this.mtlsCertSecret.secretArn,
-      description: 'Secrets Manager ARN holding the prices-api mTLS client cert PEM',
+      description:
+        'Secrets Manager ARN holding the prices-api mTLS client cert PEM',
     });
 
     new ssm.StringParameter(this, 'MtlsKeySecretArnParam', {
       parameterName: `/prices/${envName}/mtls-key-secret-arn`,
       stringValue: this.mtlsKeySecret.secretArn,
-      description: 'Secrets Manager ARN holding the prices-api mTLS client key PEM',
+      description:
+        'Secrets Manager ARN holding the prices-api mTLS client key PEM',
     });
 
     new cdk.CfnOutput(this, 'MtlsCertSecretArn', {

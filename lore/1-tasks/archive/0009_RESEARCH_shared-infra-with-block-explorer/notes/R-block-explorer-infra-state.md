@@ -1,21 +1,21 @@
 ---
-title: "Soroban Block Explorer — actual infra state and boundaries"
+title: 'Soroban Block Explorer — actual infra state and boundaries'
 type: research
 status: mature
 tags: [infra, block-explorer, cross-service]
 links:
-  - "../../../../../../soroban-block-explorer/docs/architecture/infrastructure/infrastructure-overview.md"
-  - "../../../../../../soroban-block-explorer/docs/architecture/technical-design-general-overview.md"
-  - "../../../../../../soroban-block-explorer/lore/2-adrs/0001_OIDC-cicd-and-public-repo-secret-separation.md"
-  - "../../../../../../soroban-block-explorer/lore/2-adrs/0006_no-s3-lifecycle-on-ledger-data.md"
-  - "../../../../../../soroban-block-explorer/lore/2-adrs/0007_simplified-2-lambda-architecture.md"
-  - "../../../../../../soroban-block-explorer/lore/2-adrs/0010_local-backfill-over-fargate.md"
-  - "../../../../../../soroban-block-explorer/lore/2-adrs/0029_abandon-parsed-artifacts-read-time-xdr-fetch.md"
+  - '../../../../../../soroban-block-explorer/docs/architecture/infrastructure/infrastructure-overview.md'
+  - '../../../../../../soroban-block-explorer/docs/architecture/technical-design-general-overview.md'
+  - '../../../../../../soroban-block-explorer/lore/2-adrs/0001_OIDC-cicd-and-public-repo-secret-separation.md'
+  - '../../../../../../soroban-block-explorer/lore/2-adrs/0006_no-s3-lifecycle-on-ledger-data.md'
+  - '../../../../../../soroban-block-explorer/lore/2-adrs/0007_simplified-2-lambda-architecture.md'
+  - '../../../../../../soroban-block-explorer/lore/2-adrs/0010_local-backfill-over-fargate.md'
+  - '../../../../../../soroban-block-explorer/lore/2-adrs/0029_abandon-parsed-artifacts-read-time-xdr-fetch.md'
 history:
   - date: 2026-05-11
     status: mature
     who: okarcz
-    note: "Distilled from BE infrastructure-overview, technical-design-general-overview, ADRs 0001/0006/0007/0010/0029."
+    note: 'Distilled from BE infrastructure-overview, technical-design-general-overview, ADRs 0001/0006/0007/0010/0029.'
 ---
 
 # Soroban Block Explorer — actual infra state and boundaries
@@ -29,18 +29,18 @@ infra-focused refinement. Where ADRs conflict with prose, ADRs win (newer decisi
 
 Per BE `technical-design-general-overview.md` §3.3 and `infrastructure-overview.md` §5:
 
-| Component | Service | Notes |
-|---|---|---|
-| Galexie | ECS Fargate (1 continuous task) | Live ledger stream → S3 |
-| S3 bucket `stellar-ledger-data` | S3 | LedgerCloseMeta XDR; **no lifecycle rule** (ADR 0006) |
-| Lambda — Ledger Processor | Lambda (S3 event) | 14-step `persist_ledger`, single-tx writes (ADR 0027) |
-| Lambda — Rust/axum API | Lambda (per API GW route) | Read-only; some endpoints fetch public-archive XDR (ADR 0029) |
-| RDS PostgreSQL | `db.r6g.large`, Single-AZ | Block-explorer schema (ADR 0027) |
-| API Gateway | REST + throttling + caching | |
-| AWS WAF | Public-ingress protection | |
-| CloudFront | Static React SPA | |
-| Route 53, EventBridge, Secrets Manager, CloudWatch + X-Ray | Standard set | |
-| CI/CD | GitHub Actions + CDK (TypeScript) | OIDC; per-env IAM roles (ADR 0001) |
+| Component                                                  | Service                           | Notes                                                         |
+| ---------------------------------------------------------- | --------------------------------- | ------------------------------------------------------------- |
+| Galexie                                                    | ECS Fargate (1 continuous task)   | Live ledger stream → S3                                       |
+| S3 bucket `stellar-ledger-data`                            | S3                                | LedgerCloseMeta XDR; **no lifecycle rule** (ADR 0006)         |
+| Lambda — Ledger Processor                                  | Lambda (S3 event)                 | 14-step `persist_ledger`, single-tx writes (ADR 0027)         |
+| Lambda — Rust/axum API                                     | Lambda (per API GW route)         | Read-only; some endpoints fetch public-archive XDR (ADR 0029) |
+| RDS PostgreSQL                                             | `db.r6g.large`, Single-AZ         | Block-explorer schema (ADR 0027)                              |
+| API Gateway                                                | REST + throttling + caching       |                                                               |
+| AWS WAF                                                    | Public-ingress protection         |                                                               |
+| CloudFront                                                 | Static React SPA                  |                                                               |
+| Route 53, EventBridge, Secrets Manager, CloudWatch + X-Ray | Standard set                      |                                                               |
+| CI/CD                                                      | GitHub Actions + CDK (TypeScript) | OIDC; per-env IAM roles (ADR 0001)                            |
 
 **Architecture is 2-Lambda only** (ADR 0007): Ledger Processor + API. No Event Interpreter.
 
@@ -99,11 +99,11 @@ research follow-up — see `S-shared-infra-recommendation.md` open questions.
 
 ## Environments
 
-| Env | DB | Notes |
-|---|---|---|
-| Development | Local Postgres | Local + CI |
-| Staging | RDS, testnet | Edge-password-protected SPA |
-| Production | RDS, mainnet | Public; Multi-AZ deferred until SLA > 99.9% (ADR-staged) |
+| Env         | DB             | Notes                                                    |
+| ----------- | -------------- | -------------------------------------------------------- |
+| Development | Local Postgres | Local + CI                                               |
+| Staging     | RDS, testnet   | Edge-password-protected SPA                              |
+| Production  | RDS, mainnet   | Public; Multi-AZ deferred until SLA > 99.9% (ADR-staged) |
 
 ## Repo layout (BE)
 

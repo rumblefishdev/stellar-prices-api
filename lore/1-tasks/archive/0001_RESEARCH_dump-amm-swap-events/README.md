@@ -1,23 +1,31 @@
 ---
-id: "0001"
-title: "Dump AMM swap event topics+data from .zst ledger sample"
+id: '0001'
+title: 'Dump AMM swap event topics+data from .zst ledger sample'
 type: RESEARCH
 status: completed
 related_adr: []
-related_tasks: ["0002", "0003", "0004"]
-tags: [layer-research, priority-medium, effort-small, soroban, amm, schema-validation]
+related_tasks: ['0002', '0003', '0004']
+tags:
+  [
+    layer-research,
+    priority-medium,
+    effort-small,
+    soroban,
+    amm,
+    schema-validation,
+  ]
 links:
-  - "../../../../docs/database-schema/amm-trades-schema.md#11-open-questions-for-the-be-team"
-  - "../../../../docs/database-schema/amm-trades-schema.md"
+  - '../../../../docs/database-schema/amm-trades-schema.md#11-open-questions-for-the-be-team'
+  - '../../../../docs/database-schema/amm-trades-schema.md'
 history:
   - date: 2026-05-07
     status: backlog
     who: okarcz
-    note: "Task drafted from investigation into Soroban swap event topic shape"
+    note: 'Task drafted from investigation into Soroban swap event topic shape'
   - date: 2026-05-07
     status: active
     who: okarcz
-    note: "Promoted from backlog to active"
+    note: 'Promoted from backlog to active'
   - date: 2026-05-07
     status: completed
     who: claude
@@ -67,14 +75,14 @@ Three follow-up backlog tasks spawned (0002 / 0003 / 0004).
 
 ### Key numbers from the run
 
-| Metric | Value |
-|---|---:|
-| Files scanned | 614 / 614 (0 failed) |
-| Total contract events seen | 2,738,082 |
-| `swap` events | 53 (1 distinct emitter) |
-| `trade` events | 91 (29 distinct emitters) |
-| `update_reserves` events | 98 (31 emitters; 29/29 overlap with `trade`) |
-| `SwappedFromVUsd` events | 1 (non-AMM, virtual-USD synthetic) |
+| Metric                     |                                        Value |
+| -------------------------- | -------------------------------------------: |
+| Files scanned              |                         614 / 614 (0 failed) |
+| Total contract events seen |                                    2,738,082 |
+| `swap` events              |                      53 (1 distinct emitter) |
+| `trade` events             |                    91 (29 distinct emitters) |
+| `update_reserves` events   | 98 (31 emitters; 29/29 overlap with `trade`) |
+| `SwappedFromVUsd` events   |           1 (non-AMM, virtual-USD synthetic) |
 
 ## Acceptance Criteria
 

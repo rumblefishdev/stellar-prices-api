@@ -1,23 +1,34 @@
 ---
-id: "0002"
-title: "Stream 2 SDEX historical backfill is fully independent of Block Explorer (archive reads + imported BE XDR parser crate)"
+id: '0002'
+title: 'Stream 2 SDEX historical backfill is fully independent of Block Explorer (archive reads + imported BE XDR parser crate)'
 status: superseded
 deciders: [okarcz]
-related_tasks: ["0012", "0013", "0020", "0021", "0022"]
-related_adrs: ["0001", "0005"]
-tags: [architecture, backfill, sdex, archive-reads, fargate, stream-2, parser-crate, block-explorer, superseded]
+related_tasks: ['0012', '0013', '0020', '0021', '0022']
+related_adrs: ['0001', '0005']
+tags:
+  [
+    architecture,
+    backfill,
+    sdex,
+    archive-reads,
+    fargate,
+    stream-2,
+    parser-crate,
+    block-explorer,
+    superseded,
+  ]
 links:
-  - "./0001_stream1-clickhouse-sourced-amm-backfill.md"
-  - "./0005_stream2-sdex-local-workstation-backfill.md"
-  - "../1-tasks/archive/0020_RESEARCH_sdex-historical-backfill-options/README.md"
-  - "../1-tasks/archive/0020_RESEARCH_sdex-historical-backfill-options/notes/G-sdex-trade-extraction-design.md"
-  - "../1-tasks/archive/0020_RESEARCH_sdex-historical-backfill-options/notes/I-stream2-options.md"
-  - "../../docs/prices-api-general-overview.md"
+  - './0001_stream1-clickhouse-sourced-amm-backfill.md'
+  - './0005_stream2-sdex-local-workstation-backfill.md'
+  - '../1-tasks/archive/0020_RESEARCH_sdex-historical-backfill-options/README.md'
+  - '../1-tasks/archive/0020_RESEARCH_sdex-historical-backfill-options/notes/G-sdex-trade-extraction-design.md'
+  - '../1-tasks/archive/0020_RESEARCH_sdex-historical-backfill-options/notes/I-stream2-options.md'
+  - '../../docs/prices-api-general-overview.md'
 history:
   - date: 2026-05-13
     status: proposed
     who: okarcz
-    note: "Drafted to pin Stream 2 architecture after the user directive: SDEX backfill must be entirely independent of BE."
+    note: 'Drafted to pin Stream 2 architecture after the user directive: SDEX backfill must be entirely independent of BE.'
   - date: 2026-05-13
     status: accepted
     who: okarcz
@@ -29,7 +40,7 @@ history:
   - date: 2026-05-14
     status: superseded
     who: okarcz
-    by: "0005"
+    by: '0005'
     note: >
       Superseded by ADR 0005. The "BE-independent archive-read"
       architectural commitment is preserved verbatim; only the
@@ -139,11 +150,11 @@ the **trim ratio** — fraction of historical ledgers carrying at least one
 trade-shaped op. Even at the optimistic end (~50% trim), Option B's gain
 is bounded:
 
-- The `offersClaimed[]` payload is *not* unfolded into CH
+- The `offersClaimed[]` payload is _not_ unfolded into CH
   `operations_appearances`; the SDEX payload still requires an archive
   read for every trade-bearing ledger.
-- Option B's only saving is skipping the *read* of the non-trade-bearing
-  ledgers, not the *parse* of the trade-bearing ones.
+- Option B's only saving is skipping the _read_ of the non-trade-bearing
+  ledgers, not the _parse_ of the trade-bearing ones.
 
 Against that bounded gain, Option B re-introduces BE coupling on
 prices-api's longest-running historical stream — exactly the coupling
@@ -173,7 +184,7 @@ the same pattern. A library crate dependency:
 - keeps XDR truth single-sourced (no parallel implementation drift);
 - is fully under prices-api's control via pinning.
 
-This satisfies "entirely independent of the BE team" — the BE *team* is
+This satisfies "entirely independent of the BE team" — the BE _team_ is
 not on prices-api's runtime critical path, only their published crate is
 a build-time input.
 
@@ -181,8 +192,8 @@ a build-time input.
 
 ADR 0001 makes a different trade for a different stream. Stream 1's full
 data shape (decoded ScVal topics + data) is already materialized in the
-BE CH copy of `soroban_events`, so the CH path saved both *reads* and
-*parses* — a categorical win, not a marginal trim. Stream 2 has no
+BE CH copy of `soroban_events`, so the CH path saved both _reads_ and
+_parses_ — a categorical win, not a marginal trim. Stream 2 has no
 equivalent fully-materialized CH table (Option C would create one,
 rejected), so the architecture diverges. The two ADRs are
 complementary, not contradictory.

@@ -1,20 +1,32 @@
 ---
-id: "0054"
-title: "Asset Discovery Lambda — Tranche 1 minimal scope (populate ≥20 major assets)"
+id: '0054'
+title: 'Asset Discovery Lambda — Tranche 1 minimal scope (populate ≥20 major assets)'
 type: FEATURE
 status: backlog
-related_adr: ["0006", "0007"]
-related_tasks: ["0011", "0050", "0051", "0052", "0039"]
-tags: [layer-indexing, priority-medium, effort-medium, milestone-M1, lambda, scheduler, rust, aws, clickhouse, asset-registry]
+related_adr: ['0006', '0007']
+related_tasks: ['0011', '0050', '0051', '0052', '0039']
+tags:
+  [
+    layer-indexing,
+    priority-medium,
+    effort-medium,
+    milestone-M1,
+    lambda,
+    scheduler,
+    rust,
+    aws,
+    clickhouse,
+    asset-registry,
+  ]
 milestone: 1
 links:
-  - "../../../docs/prices-api-general-overview.md"
-  - "../../2-adrs/0006_runtime-framework-rust-axum.md"
-  - "../../2-adrs/0007_live-data-sink-on-shared-hetzner-clickhouse.md"
-  - "../blocked/0039_FEATURE_prices-periodic-workers-lambda-set.md"
-  - "./0050_FEATURE_be-side-prep-sns-mtls-prices-db-provisioning.md"
-  - "./0051_FEATURE_clickhouse-prices-schema-and-mv-chain-migration.md"
-  - "./0052_FEATURE_clickhouse-mtls-client-shared-crate.md"
+  - '../../../docs/prices-api-general-overview.md'
+  - '../../2-adrs/0006_runtime-framework-rust-axum.md'
+  - '../../2-adrs/0007_live-data-sink-on-shared-hetzner-clickhouse.md'
+  - '../blocked/0039_FEATURE_prices-periodic-workers-lambda-set.md'
+  - './0050_FEATURE_be-side-prep-sns-mtls-prices-db-provisioning.md'
+  - './0051_FEATURE_clickhouse-prices-schema-and-mv-chain-migration.md'
+  - './0052_FEATURE_clickhouse-mtls-client-shared-crate.md'
 history:
   - date: 2026-05-21
     status: backlog
@@ -138,7 +150,7 @@ beyond the seed.
 - [ ] Deployed via CDK with `rate(1 hour)` EventBridge rule
 - [ ] After cold start in any env, `prices.assets` contains
       ≥20 major assets (verified via `SELECT count() FROM
-      prices.assets FINAL`)
+prices.assets FINAL`)
 - [ ] After 24 hours of operation, the discovery worker has
       organically added at least one asset beyond the seed
       (verified via timestamp diff)
@@ -173,6 +185,6 @@ beyond the seed.
   don't reimplement. 0039 covers price-updater, oracle,
   cleanup — Asset Discovery is already done here.
 - The §3.1 `assets` natural-key tuple `(asset_code,
-  issuer_address, contract_address)` is the sort key, so
+issuer_address, contract_address)` is the sort key, so
   UPSERT semantics work via ReplacingMergeTree's natural
   collapse.

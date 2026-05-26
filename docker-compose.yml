@@ -2,8 +2,8 @@ services:
   clickhouse:
     image: clickhouse/clickhouse-server:25.6
     ports:
-      - "8123:8123"
-      - "9000:9000"
+      - '8123:8123'
+      - '9000:9000'
     volumes:
       - clickhouse-data:/var/lib/clickhouse
       - ./packages/sdex-backfill/schema/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
@@ -12,7 +12,7 @@ services:
       CLICKHOUSE_USER: default
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
     healthcheck:
-      test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
+      test: ['CMD', 'clickhouse-client', '--query', 'SELECT 1']
       interval: 5s
       timeout: 3s
       retries: 10

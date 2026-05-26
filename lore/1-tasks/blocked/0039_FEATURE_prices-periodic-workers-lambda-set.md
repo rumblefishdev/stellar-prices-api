@@ -1,21 +1,33 @@
 ---
-id: "0039"
-title: "Prices periodic workers — 5 EventBridge-Scheduler-triggered Lambdas (price updater, rollup, oracle, discovery, cleanup)"
+id: '0039'
+title: 'Prices periodic workers — 5 EventBridge-Scheduler-triggered Lambdas (price updater, rollup, oracle, discovery, cleanup)'
 type: FEATURE
 status: blocked
-related_adr: ["0003", "0004", "0006", "0007"]
-related_tasks: ["0011", "0038", "0045", "0047"]
-tags: [layer-indexing, priority-high, effort-large, lambda, scheduler, rust, aws, ingestion, clickhouse, hetzner]
+related_adr: ['0003', '0004', '0006', '0007']
+related_tasks: ['0011', '0038', '0045', '0047']
+tags:
+  [
+    layer-indexing,
+    priority-high,
+    effort-large,
+    lambda,
+    scheduler,
+    rust,
+    aws,
+    ingestion,
+    clickhouse,
+    hetzner,
+  ]
 links:
-  - "../../../docs/prices-api-general-overview.md"
-  - "../../2-adrs/0003_price-ohlcv-pk-includes-quote-asset-id.md"
-  - "../../2-adrs/0004_price-ohlcv-multi-source-merge-columns.md"
-  - "../../2-adrs/0006_runtime-framework-rust-axum.md"
-  - "../../2-adrs/0007_live-data-sink-on-shared-hetzner-clickhouse.md"
-  - "../archive/0045_RESEARCH_cross-team-bundle-with-be-on-hetzner-ch-tenancy/notes/G-be-agreement-record.md"
-  - "../backlog/0011_FEATURE_bootstrap-cdk-with-ssm-platform-lookups.md"
-  - "../backlog/0047_RESEARCH_cross-tenant-throughput-verification-on-shared-hetzner-ch.md"
-  - "./0038_FEATURE_prices-ledger-processor-lambda.md"
+  - '../../../docs/prices-api-general-overview.md'
+  - '../../2-adrs/0003_price-ohlcv-pk-includes-quote-asset-id.md'
+  - '../../2-adrs/0004_price-ohlcv-multi-source-merge-columns.md'
+  - '../../2-adrs/0006_runtime-framework-rust-axum.md'
+  - '../../2-adrs/0007_live-data-sink-on-shared-hetzner-clickhouse.md'
+  - '../archive/0045_RESEARCH_cross-team-bundle-with-be-on-hetzner-ch-tenancy/notes/G-be-agreement-record.md'
+  - '../backlog/0011_FEATURE_bootstrap-cdk-with-ssm-platform-lookups.md'
+  - '../backlog/0047_RESEARCH_cross-tenant-throughput-verification-on-shared-hetzner-ch.md'
+  - './0038_FEATURE_prices-ledger-processor-lambda.md'
 history:
   - date: 2026-05-18
     status: backlog
@@ -33,7 +45,7 @@ history:
   - date: 2026-05-18
     status: blocked
     who: oski
-    by: ["0011", "0038"]
+    by: ['0011', '0038']
     note: >
       Moved to blocked/ — 0011 provides Lambda + EventBridge +
       Secrets Manager CDK scaffolding; 0038 must be producing
@@ -144,7 +156,7 @@ boilerplate, and a small "ran at" telemetry helper.
 - Behaviour (§5.3, §2.2): call Reflector's oracle contract via
   Soroban RPC `simulateTransaction`. Write results to
   `oracle_prices` (§3.4) keyed by `(timestamp, asset_id,
-  oracle_name)` — partition pattern matches `price_ohlcv`.
+oracle_name)` — partition pattern matches `price_ohlcv`.
 - **Failure stance** (§2.2, §5.3): non-critical. A failed
   fetch logs + emits a metric but does not block other
   workers; the column "shows `null` or last known value"
@@ -260,10 +272,10 @@ In `infra/aws-cdk/`:
 
 - Five workers in one task is a deliberate scoping call: the
   scaffolding (CDK Lambda + EventBridge rule + Secrets Manager
-  + RDS access + CW alarms) is identical across all five, and
-  the per-worker logic is small. If any worker grows beyond
-  ~300 lines of impl logic during build, split it out into its
-  own task at that point — don't pre-emptively fragment.
+  - RDS access + CW alarms) is identical across all five, and
+    the per-worker logic is small. If any worker grows beyond
+    ~300 lines of impl logic during build, split it out into its
+    own task at that point — don't pre-emptively fragment.
 - Per ADR 0006 §Decision the first Rust binary lands with the
   Ledger Processor; this task is the second wave and reuses
   the same `cargo lambda` packaging + CI patterns established

@@ -1,17 +1,17 @@
 ---
-id: "G-soroban-events-pricing-decoder"
-title: "Soroban events pricing decoder — what to extract and how the Lambda ingests it into Hetzner ClickHouse"
+id: 'G-soroban-events-pricing-decoder'
+title: 'Soroban events pricing decoder — what to extract and how the Lambda ingests it into Hetzner ClickHouse'
 type: G
-task: "0048"
+task: '0048'
 status: mature
 spawned_from: []
 spawns: []
 related_notes: []
 links:
-  - "../../../../3-wiki/project/soroban-events-schema.md"
-  - "../../../../2-adrs/0007_live-data-sink-on-shared-hetzner-clickhouse.md"
-  - "../../../blocked/0038_FEATURE_prices-ledger-processor-lambda.md"
-  - "../../../../../docs/prices-api-general-overview.md"
+  - '../../../../3-wiki/project/soroban-events-schema.md'
+  - '../../../../2-adrs/0007_live-data-sink-on-shared-hetzner-clickhouse.md'
+  - '../../../blocked/0038_FEATURE_prices-ledger-processor-lambda.md'
+  - '../../../../../docs/prices-api-general-overview.md'
 ---
 
 # Soroban events pricing decoder
@@ -33,11 +33,11 @@ For each closed ledger the Lambda emits per-minute OHLCV rows into
 `prices.price_ohlcv_1m` on the shared Hetzner CH from **two
 independent paths**:
 
-| Path | Source (in LedgerCloseMeta) | Carries | Where it surfaces in this CH |
-|---|---|---|---|
-| **A. Soroban AMM** | `SorobanTransactionMeta.events[]` (matches `soroban_events` rows) | Pair-level `trade` / `swap` / `update_reserves` from Phoenix-style, Soroswap, CLMM, etc. | `soroban_events` (`signature IN ('trade','swap','update_reserves')`) |
-| **B. Classic SDEX** | `OperationResult.tr.{PathPayment*Result,ManageSell/BuyOfferResult}.offers[]` (vec of `ClaimAtomV0/V1/V2/LiquidityPool`) | Classic order-book matches and protocol-18 LP matches | **NOT in `soroban_events`.** Summary lives in `operations_appearances` (op type 2/3/12/13/19/20). Per-trade `ClaimAtom` data is **not** indexed in CH at all — must be parsed from the XDR directly. |
-| **C. Oracle inputs** | `SorobanTransactionMeta.events[]` for Reflector/RedStone feeds | External quote prices for assets that don't have a native AMM market | `soroban_events` (`signature IN ('REFLECTOR','REDSTONE')`) |
+| Path                 | Source (in LedgerCloseMeta)                                                                                             | Carries                                                                                  | Where it surfaces in this CH                                                                                                                                                                         |
+| -------------------- | ----------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **A. Soroban AMM**   | `SorobanTransactionMeta.events[]` (matches `soroban_events` rows)                                                       | Pair-level `trade` / `swap` / `update_reserves` from Phoenix-style, Soroswap, CLMM, etc. | `soroban_events` (`signature IN ('trade','swap','update_reserves')`)                                                                                                                                 |
+| **B. Classic SDEX**  | `OperationResult.tr.{PathPayment*Result,ManageSell/BuyOfferResult}.offers[]` (vec of `ClaimAtomV0/V1/V2/LiquidityPool`) | Classic order-book matches and protocol-18 LP matches                                    | **NOT in `soroban_events`.** Summary lives in `operations_appearances` (op type 2/3/12/13/19/20). Per-trade `ClaimAtom` data is **not** indexed in CH at all — must be parsed from the XDR directly. |
+| **C. Oracle inputs** | `SorobanTransactionMeta.events[]` for Reflector/RedStone feeds                                                          | External quote prices for assets that don't have a native AMM market                     | `soroban_events` (`signature IN ('REFLECTOR','REDSTONE')`)                                                                                                                                           |
 
 The Lambda runs both extractors per ledger and writes one
 `(timestamp, asset_id, quote_asset_id, granularity, source)`
@@ -63,21 +63,21 @@ over the local backfill CH (47,545,820 events; ledgers
 
 ### 2.1 Signature distribution in the sample
 
-| Signature | Sample rows | Sample contracts | Sample txs | Full-table count | Pricing-relevant? |
-|---|---:|---:|---:|---:|:---:|
-| `fee` | 5,921 | 1 | 5,920 | 28,308,343 | No (XLM SAC overhead) |
-| `transfer` | 2,770 | 519 | 2,759 | 13,018,026 | Indirect — confirms settlement, not the trade |
-| `mint` | 1,097 | 264 | 1,092 | 5,498,133 | No |
-| `burn` | 54 | 5 | 54 | 265,304 | No |
-| `set_authorized` | 54 | 10 | 54 | 211,164 | No |
-| `clawback` | 24 | 9 | 24 | 142,679 | No |
-| `trade` | **6** | 5 | 6 | **17,138** | **YES — Phoenix-style AMM** |
-| _(NULL)_ | 2 | 2 | 2 | 16,849 | Edge case — see §8.1 |
-| `REFLECTOR` | 2 | 1 | 2 | 3,449 | **YES — oracle** |
-| `REDSTONE` | 1 | 1 | 1 | 4,064 | **YES — oracle** |
-| `supply` / `vault_withdraw` / `withdraw_collateral` / `supply_collateral` / `score_submitted` | 1 each | 1 each | 1 each | 2.2k–2.7k | No (lending protocols, not price-bearing) |
-| `update_reserves` | 1 | 1 | 1 | **17,747** | **YES — paired with `trade`/`swap`** |
-| `swap` | 0 in sample | — | — | **13,417** | **YES — Soroswap + CLMM** |
+| Signature                                                                                     | Sample rows | Sample contracts | Sample txs | Full-table count |               Pricing-relevant?               |
+| --------------------------------------------------------------------------------------------- | ----------: | ---------------: | ---------: | ---------------: | :-------------------------------------------: |
+| `fee`                                                                                         |       5,921 |                1 |      5,920 |       28,308,343 |             No (XLM SAC overhead)             |
+| `transfer`                                                                                    |       2,770 |              519 |      2,759 |       13,018,026 | Indirect — confirms settlement, not the trade |
+| `mint`                                                                                        |       1,097 |              264 |      1,092 |        5,498,133 |                      No                       |
+| `burn`                                                                                        |          54 |                5 |         54 |          265,304 |                      No                       |
+| `set_authorized`                                                                              |          54 |               10 |         54 |          211,164 |                      No                       |
+| `clawback`                                                                                    |          24 |                9 |         24 |          142,679 |                      No                       |
+| `trade`                                                                                       |       **6** |                5 |          6 |       **17,138** |          **YES — Phoenix-style AMM**          |
+| _(NULL)_                                                                                      |           2 |                2 |          2 |           16,849 |             Edge case — see §8.1              |
+| `REFLECTOR`                                                                                   |           2 |                1 |          2 |            3,449 |               **YES — oracle**                |
+| `REDSTONE`                                                                                    |           1 |                1 |          1 |            4,064 |               **YES — oracle**                |
+| `supply` / `vault_withdraw` / `withdraw_collateral` / `supply_collateral` / `score_submitted` |      1 each |           1 each |     1 each |        2.2k–2.7k |   No (lending protocols, not price-bearing)   |
+| `update_reserves`                                                                             |           1 |                1 |          1 |       **17,747** |     **YES — paired with `trade`/`swap`**      |
+| `swap`                                                                                        | 0 in sample |                — |          — |       **13,417** |           **YES — Soroswap + CLMM**           |
 
 The 10k uniform sample under-represents `swap` (0 hits) because
 swap events are concentrated in a small set of high-volume
@@ -89,14 +89,14 @@ shapes regardless (§5).
 
 Confirmed AMM emitters in the backfill window:
 
-| Contract address | Protocol | Signature | Events | Notes |
-|---|---|---|---:|---|
-| `CBQDHNBFBZYE4MKPWBSJOPIYLW4SFSXAXUTSXJN76GNKYVYPCKWC6QUK` | **Soroswap Router** | `swap` (shape C) | 34,665 | One event per hop in multi-hop routes. |
-| `CCR2CH4GQVCZHG7CHFVMNANCK45CU5DVKXZIIITDZQAU3CEJZ7RQH2MQ` | **CLMM (Uniswap V3-style)** | `swap` (shape A) | 1,784 | Concentrated-liquidity pool. |
-| `CAUF4DFYSX52L2KJ4J7OFW3WDQMEUDVXNB7PG5VIC4VVOA3BCLWXDO2E` | **CLMM** | `swap` (shape A) | 1,618 | |
-| `CDKAJU3RTGL26PJZ3DLZUT25T5CB56YLMKIMTOEQJRKIV6WWZQ7M5TWZ` | **CLMM** | `swap` (shape A) | 138 | |
-| `CA7RQDMMV6E53P5EDZA5GPWBZ33AMW2ZNO42XLI2RGRIAP4QXIARUOJQ` | **CLMM** | `swap` (shape A) | 52 | |
-| 50+ contracts (top: `CA6PUJLBYKZKUEKLZJMKBZLEKP2OTHANDEOWSFF44FTSYLKQPIICCJBE`, `CDD3OQDU…`, `CCNXGPE4…`, `CDE57N6X…`, `CCY2PXGM…`) | **Phoenix-style pair pools** | `trade` + `update_reserves` | 17,138 total trades | Top emitter 14,646 events. |
+| Contract address                                                                                                                    | Protocol                     | Signature                   |              Events | Notes                                  |
+| ----------------------------------------------------------------------------------------------------------------------------------- | ---------------------------- | --------------------------- | ------------------: | -------------------------------------- |
+| `CBQDHNBFBZYE4MKPWBSJOPIYLW4SFSXAXUTSXJN76GNKYVYPCKWC6QUK`                                                                          | **Soroswap Router**          | `swap` (shape C)            |              34,665 | One event per hop in multi-hop routes. |
+| `CCR2CH4GQVCZHG7CHFVMNANCK45CU5DVKXZIIITDZQAU3CEJZ7RQH2MQ`                                                                          | **CLMM (Uniswap V3-style)**  | `swap` (shape A)            |               1,784 | Concentrated-liquidity pool.           |
+| `CAUF4DFYSX52L2KJ4J7OFW3WDQMEUDVXNB7PG5VIC4VVOA3BCLWXDO2E`                                                                          | **CLMM**                     | `swap` (shape A)            |               1,618 |                                        |
+| `CDKAJU3RTGL26PJZ3DLZUT25T5CB56YLMKIMTOEQJRKIV6WWZQ7M5TWZ`                                                                          | **CLMM**                     | `swap` (shape A)            |                 138 |                                        |
+| `CA7RQDMMV6E53P5EDZA5GPWBZ33AMW2ZNO42XLI2RGRIAP4QXIARUOJQ`                                                                          | **CLMM**                     | `swap` (shape A)            |                  52 |                                        |
+| 50+ contracts (top: `CA6PUJLBYKZKUEKLZJMKBZLEKP2OTHANDEOWSFF44FTSYLKQPIICCJBE`, `CDD3OQDU…`, `CCNXGPE4…`, `CDE57N6X…`, `CCY2PXGM…`) | **Phoenix-style pair pools** | `trade` + `update_reserves` | 17,138 total trades | Top emitter 14,646 events.             |
 
 **Aquarius AMM is NOT represented** in this 1.65k-ledger window
 under any obvious signature. Flag as a follow-up sample task
@@ -104,12 +104,12 @@ under any obvious signature. Flag as a follow-up sample task
 
 ### 2.3 Oracle feed contracts (full-table)
 
-| Contract | Feed | Key shape | Notes |
-|---|---|---|---|
-| `CALI2BYU2JE6WVRUFYTS6MSBNEHGJ35P4AVCZYF3B6QOE3QKOB2PLE6M` | **Reflector — Stellar on-chain assets** | `address` key | 3,459 events. Keys are token contract addresses → directly usable for assets without `code:issuer`. |
-| `CBKGPWGKSKZF52CFHMTRR23TBWTPMRDIYZ4O2P5VS65BMHYH4DXMCJZC` | **Reflector — FX symbols** | `sym` key | 3,459 events. EUR/GBP/CAD/BRL/JPY/CNY/XAU/… |
-| `CAFJZQWSED6YAWZU3GWRTOCNPPCGBN32L7QV43XX5LZLFTK6JLN34DLN` | **Reflector — global crypto symbols** | `sym` key | 3,429 events. BTC/ETH/USDT/XRP/SOL/USDC/ADA/… |
-| `CA526Y2NQWGWVVQ7RFFPGAZMU66PSYJ3UC2MTVAV4ZU7OM5BOPHDXUSG` | **RedStone** | bytes-encoded XDR | 12,192 events. Decoder is base64 + XDR (see §6.3). |
+| Contract                                                   | Feed                                    | Key shape         | Notes                                                                                               |
+| ---------------------------------------------------------- | --------------------------------------- | ----------------- | --------------------------------------------------------------------------------------------------- |
+| `CALI2BYU2JE6WVRUFYTS6MSBNEHGJ35P4AVCZYF3B6QOE3QKOB2PLE6M` | **Reflector — Stellar on-chain assets** | `address` key     | 3,459 events. Keys are token contract addresses → directly usable for assets without `code:issuer`. |
+| `CBKGPWGKSKZF52CFHMTRR23TBWTPMRDIYZ4O2P5VS65BMHYH4DXMCJZC` | **Reflector — FX symbols**              | `sym` key         | 3,459 events. EUR/GBP/CAD/BRL/JPY/CNY/XAU/…                                                         |
+| `CAFJZQWSED6YAWZU3GWRTOCNPPCGBN32L7QV43XX5LZLFTK6JLN34DLN` | **Reflector — global crypto symbols**   | `sym` key         | 3,429 events. BTC/ETH/USDT/XRP/SOL/USDC/ADA/…                                                       |
+| `CA526Y2NQWGWVVQ7RFFPGAZMU66PSYJ3UC2MTVAV4ZU7OM5BOPHDXUSG` | **RedStone**                            | bytes-encoded XDR | 12,192 events. Decoder is base64 + XDR (see §6.3).                                                  |
 
 All Reflector prices are scaled to **14 decimals**; this is
 Reflector's protocol constant, not derived from on-chain
@@ -117,17 +117,17 @@ metadata.
 
 ### 2.4 Classic SDEX coverage (`operations_appearances`, full-table)
 
-| Stellar op type | Count | Trade-bearing? |
-|---:|---:|---|
-| 1 (Payment) | 10,352,366 | No (direct payment, no offer match) |
-| 24 (RestoreFootprint) | 8,743,270 | No (Soroban housekeeping) |
-| 13 (PathPaymentStrictSend) | 3,173,497 | **YES** — `PathPaymentStrictSendResult.success.offers[]` |
-| 3 (ManageSellOffer) | 3,135,021 | **YES** when offer matches existing book — `ManageSellOfferResult.success.offersClaimed[]` |
-| 2 (PathPaymentStrictReceive) | 2,181,752 | **YES** — `PathPaymentStrictReceiveResult.success.offers[]` |
-| 12 (ManageBuyOffer) | 1,833,294 | **YES** when offer matches |
-| 4 (CreatePassiveSellOffer) | 6,961 | **YES** when matches on creation |
-| 19 (LiquidityPoolDeposit) | 478,008 | No directly; signals reserve change in classic LP |
-| 20 (LiquidityPoolWithdraw) | 41,726 | No directly; signals reserve change in classic LP |
+|              Stellar op type |      Count | Trade-bearing?                                                                             |
+| ---------------------------: | ---------: | ------------------------------------------------------------------------------------------ |
+|                  1 (Payment) | 10,352,366 | No (direct payment, no offer match)                                                        |
+|        24 (RestoreFootprint) |  8,743,270 | No (Soroban housekeeping)                                                                  |
+|   13 (PathPaymentStrictSend) |  3,173,497 | **YES** — `PathPaymentStrictSendResult.success.offers[]`                                   |
+|          3 (ManageSellOffer) |  3,135,021 | **YES** when offer matches existing book — `ManageSellOfferResult.success.offersClaimed[]` |
+| 2 (PathPaymentStrictReceive) |  2,181,752 | **YES** — `PathPaymentStrictReceiveResult.success.offers[]`                                |
+|          12 (ManageBuyOffer) |  1,833,294 | **YES** when offer matches                                                                 |
+|   4 (CreatePassiveSellOffer) |      6,961 | **YES** when matches on creation                                                           |
+|    19 (LiquidityPoolDeposit) |    478,008 | No directly; signals reserve change in classic LP                                          |
+|   20 (LiquidityPoolWithdraw) |     41,726 | No directly; signals reserve change in classic LP                                          |
 
 Trade-bearing SDEX is large — millions of operations across the
 backfill window. None of this is in `soroban_events`; the
@@ -191,14 +191,14 @@ The 1-minute bucketer derives:
 - `volume_quote_usd` = filled in a second pass (task 0026)
 - `trade_count` = number of ticks
 - `vwap` = `volume_quote / volume_base`
-- `version` = monotone counter (ledger_sequence * 10000 + op_index works)
+- `version` = monotone counter (ledger_sequence \* 10000 + op_index works)
 
 Per-source rows; cross-source merge is read-time (`GROUP BY` per
 ADR 0007 §3.3), not write-time. Re-INSERT of the same `(minute,
 asset, quote, source)` key collapses on `ReplacingMergeTree`
 merge — idempotent without UPSERT.
 
-#### Scope boundary — what the decoder does *not* compute
+#### Scope boundary — what the decoder does _not_ compute
 
 The bucket-level `vwap = volume_quote / volume_base` defined above is a
 **single-source, single-minute** volume-weighted average. It is **not**
@@ -213,15 +213,15 @@ That §5.5 formula is implemented one layer up, in the **Current Price
 Updater Lambda** (`price-updater`, EventBridge `rate(1 minute)`),
 specified in task
 [0039 — Step 2](../../../blocked/0039_FEATURE_prices-periodic-workers-lambda-set.md).
-It reads `price_ohlcv` candles produced by *this* decoder (per-source,
+It reads `price_ohlcv` candles produced by _this_ decoder (per-source,
 per-minute), sums volumes over a trailing 24h window per source, weights
 each source's price by its 24h volume, applies the inter-source median
 outlier filter, and UPSERTs the result into `current_prices`.
 
-| Layer | Owner | Formula | Granularity |
-|-------|-------|---------|-------------|
-| L1 — decoding/bucketing (this spec) | Prices Ledger Processor + backfill CLIs | `vwap = volume_quote / volume_base` | 1 source × 1 minute |
-| L2 — cross-source current price | Current Price Updater Lambda (task 0039) | **§5.5 formula** above | all sources × trailing 24h |
+| Layer                               | Owner                                    | Formula                             | Granularity                |
+| ----------------------------------- | ---------------------------------------- | ----------------------------------- | -------------------------- |
+| L1 — decoding/bucketing (this spec) | Prices Ledger Processor + backfill CLIs  | `vwap = volume_quote / volume_base` | 1 source × 1 minute        |
+| L2 — cross-source current price     | Current Price Updater Lambda (task 0039) | **§5.5 formula** above              | all sources × trailing 24h |
 
 The decoder MUST NOT pre-compute the §5.5 weighted price: doing so
 would lose the per-source rows needed for ADR 0004's multi-source
@@ -371,7 +371,7 @@ for Soroswap because it doesn't need pool-storage reads.
 Decoder:
 
 1. `base = token_in`, `quote = token_out`, `base_amount =
-   data[3]`, `quote_amount = data[4]`. Router data is unsigned
+data[3]`, `quote_amount = data[4]`. Router data is unsigned
    (`u128`) because the router never pays out negatively.
 2. `source = Source::Soroswap`. `venue_contract = data[0]` (the
    pair contract, not the router) so downstream queries can
@@ -461,7 +461,7 @@ Decoder is two steps:
 2. `xdr::ScVal::from_xdr(&bytes)?` — this is **real XDR**, not
    JSON despite the topic shape resembling other contract events.
 3. The resulting `ScVal::Map` has key `updated_feeds → vec of
-   maps {package_timestamp, price, write_timestamp}` plus
+maps {package_timestamp, price, write_timestamp}` plus
    `updater` (the writer's address).
 4. Each `updated_feeds[i]` is one symbol's quote at
    `package_timestamp` (ms). Scale + decimals are per-feed
@@ -528,7 +528,7 @@ relevant tr types:
      `Asset::CreditAlphanum12`, or `LiquidityPoolShare` (for V2
      against classic LPs).
    - `base = assetSold`, `quote = assetBought`, `base_amount =
-     amountSold`, `quote_amount = amountBought`.
+amountSold`, `quote_amount = amountBought`.
    - `source = Source::Sdex` if `ClaimAtomV0|V1`, `Source::ClassicLp`
      if `ClaimAtomV2` (matches against protocol-18 LPs).
    - `venue_contract = None` (no Soroban contract address).
@@ -553,12 +553,12 @@ are disjoint by construction.
 Pricing needs a stable `UInt64 asset_id`. Three identity spaces
 collide in this codebase:
 
-| Asset type | Source | Canonical form | Registry key |
-|---|---|---|---|
-| **Classic native (XLM)** | Stellar ledger | `"native"` | reserved `asset_id = 1` |
-| **Classic credit** | Stellar ledger | `"<CODE>:<G…issuer>"` | `(asset_type, code, issuer_id)` |
-| **SAC** (wrapped classic) | `soroban_contracts.is_sac = true` joining to the classic asset | C-address ↔ classic asset bijection | use the underlying classic `asset_id` |
-| **Custom token** | `soroban_contracts.is_sac = false` | C-address | the C-address itself maps to a synthetic `asset_id` |
+| Asset type                | Source                                                         | Canonical form                      | Registry key                                        |
+| ------------------------- | -------------------------------------------------------------- | ----------------------------------- | --------------------------------------------------- |
+| **Classic native (XLM)**  | Stellar ledger                                                 | `"native"`                          | reserved `asset_id = 1`                             |
+| **Classic credit**        | Stellar ledger                                                 | `"<CODE>:<G…issuer>"`               | `(asset_type, code, issuer_id)`                     |
+| **SAC** (wrapped classic) | `soroban_contracts.is_sac = true` joining to the classic asset | C-address ↔ classic asset bijection | use the underlying classic `asset_id`               |
+| **Custom token**          | `soroban_contracts.is_sac = false`                             | C-address                           | the C-address itself maps to a synthetic `asset_id` |
 
 Lambda warm-cache strategy: load `prices.asset_registry` on cold
 start, query CH for new addresses on miss, insert if not found
@@ -584,7 +584,7 @@ Per ADR 0007 §3:
 - Table engine is `ReplacingMergeTree(version)` ordered by
   `(timestamp, asset_id, quote_asset_id, granularity, source)`.
 - The Lambda computes `version = ledger_sequence * 1_000_000 +
-  op_index` (monotone across replays; later replays win).
+op_index` (monotone across replays; later replays win).
 - Replays (S3 PutObject DLQ retry, ledger re-fire from
   `aws s3api put-object-event` for backfill) re-INSERT with the
   same key; the latest `version` wins on next merge.
@@ -631,16 +631,17 @@ topics like `"sender"`, `"sell_token"`, `"offer_amount"`,
 `"actual received amount"`, `"buy_token"`. To capture:
 
 - Match on `topics_xdr` JSON content (`topic[0].type = "string"
-  AND topic[0].value = "swap"`).
+AND topic[0].value = "swap"`).
 - Buffer micro-events by `(tx_hash, contract)` and synthesise
   one `TradeTick` per logical swap.
 
 ### 8.2 Three-shape swap collision in one tx
 
 A single tx can emit shape C (router) + shape B (pair wrapper)
-+ shape A (inner CLMM). Apply the §4.4/§4.5 de-dup keyed on
-`(tx_hash, pair_contract, base, quote)`. **Default winner = the
-event that carries token identity in-band** (C beats A beats B).
+
+- shape A (inner CLMM). Apply the §4.4/§4.5 de-dup keyed on
+  `(tx_hash, pair_contract, base, quote)`. **Default winner = the
+  event that carries token identity in-band** (C beats A beats B).
 
 ### 8.3 Pre-merge duplicates from `ReplacingMergeTree`
 
@@ -872,13 +873,13 @@ A full-table inventory of pricing-relevant signatures
 ('trade','swap','update_reserves','REFLECTOR','REDSTONE')`) on
 all 47,545,820 rows of the local CH yields:
 
-| Signature | Events | Contracts | Txs | Ledger span |
-|---|---:|---:|---:|---|
-| `update_reserves` | 17,747 | 161 | 10,973 | 62020018–62079996 |
-| `trade` | 17,138 | 157 | 10,364 | 62020018–62079996 |
-| `swap` | 13,417 | 19 | 6,837 | 62020018–62079939 |
-| `REDSTONE` | 4,064 | 1 | 4,064 | 62020009–62079990 |
-| `REFLECTOR` | 3,449 | 3 | 3,449 | 62020003–62079991 |
+| Signature         | Events | Contracts |    Txs | Ledger span       |
+| ----------------- | -----: | --------: | -----: | ----------------- |
+| `update_reserves` | 17,747 |       161 | 10,973 | 62020018–62079996 |
+| `trade`           | 17,138 |       157 | 10,364 | 62020018–62079996 |
+| `swap`            | 13,417 |        19 |  6,837 | 62020018–62079939 |
+| `REDSTONE`        |  4,064 |         1 |  4,064 | 62020009–62079990 |
+| `REFLECTOR`       |  3,449 |         3 |  3,449 | 62020003–62079991 |
 
 The 17,138 `trade` events alone are sufficient to derive a price
 for every base/quote pair the pools quote. Cross-pair coverage:
@@ -886,13 +887,13 @@ the top traded pair is `CCW67TSZ` ↔ `CAS3J7GY` (5,223 trades).
 Resolving the SAC contracts via the `transfer` event topic[3]
 identifier (`<CODE>:<ISSUER>` for SAC, `"native"` for XLM):
 
-| Contract | Asset descriptor | Resolved as |
-|---|---|---|
-| `CAS3J7GYLGXMF6TDJBBYYSE3HQ6BBSMLNUQ34T6TZMYMW2EVH34XOWMA` | `native` | XLM (XLM SAC) |
-| `CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75` | `USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN` | USDC SAC |
-| `CAUIKL3IYGMERDRUN6YSCLWVAKIFG5Q4YJHUKM4S4NJZQIA3BAS6OJPK` | `AQUA:GBNZILSTVQZ4R7IKQDGHYGY2QXL5QOFJYQMXPKWRRM5PAV7Y4M67AQUA` | AQUA SAC |
-| `CDFZUVS5YNLXU7VENKOUDEOHCJGKQNVUBWD7KMN6E7ZROKPYPFLRUJFG` | `sUSD:GCHW7CWI7GMIYQYFXMFJNJX5645XGWIINIAEQK3SABQO6CAYL5T7JYIH` | sUSD SAC |
-| `CAESLMGW5LYTIEJI7FJHK6SFSWRELLNVX5Q4WR4UZEALMTRWQDBKDPAG` | `VELO:GDM4RQUQQUVSKQA7S6EM7XBZP3FCGH4Q7CL6TABQ7B2BEJ5ERARM2M5M` | VELO SAC |
+| Contract                                                   | Asset descriptor                                                | Resolved as   |
+| ---------------------------------------------------------- | --------------------------------------------------------------- | ------------- |
+| `CAS3J7GYLGXMF6TDJBBYYSE3HQ6BBSMLNUQ34T6TZMYMW2EVH34XOWMA` | `native`                                                        | XLM (XLM SAC) |
+| `CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75` | `USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN` | USDC SAC      |
+| `CAUIKL3IYGMERDRUN6YSCLWVAKIFG5Q4YJHUKM4S4NJZQIA3BAS6OJPK` | `AQUA:GBNZILSTVQZ4R7IKQDGHYGY2QXL5QOFJYQMXPKWRRM5PAV7Y4M67AQUA` | AQUA SAC      |
+| `CDFZUVS5YNLXU7VENKOUDEOHCJGKQNVUBWD7KMN6E7ZROKPYPFLRUJFG` | `sUSD:GCHW7CWI7GMIYQYFXMFJNJX5645XGWIINIAEQK3SABQO6CAYL5T7JYIH` | sUSD SAC      |
+| `CAESLMGW5LYTIEJI7FJHK6SFSWRELLNVX5Q4WR4UZEALMTRWQDBKDPAG` | `VELO:GDM4RQUQQUVSKQA7S6EM7XBZP3FCGH4Q7CL6TABQ7B2BEJ5ERARM2M5M` | VELO SAC      |
 
 (SAC tokens inherit their underlying Stellar classic asset's
 7-decimal precision; the registry from §7.1 must collapse
@@ -1004,10 +1005,10 @@ constant-product pool — sanity passes.
 Two USDC/XLM trades land in ledger 62079996 (both at
 04:16:10 UTC → both bucket to the minute `2026-04-12 04:16:00`):
 
-| application order | base (XLM stroops sold) | quote (USDC stroops bought) | price (USDC/XLM) |
-|---:|---:|---:|---:|
-| tx `7F785BF7…` (earlier) | 25,761,941,491 | 3,901,204,480 | 0.151440 |
-| tx `928D46DD…` (later)   | 13,209,580,838 | 1,999,812,752 | 0.151394 |
+|        application order | base (XLM stroops sold) | quote (USDC stroops bought) | price (USDC/XLM) |
+| -----------------------: | ----------------------: | --------------------------: | ---------------: |
+| tx `7F785BF7…` (earlier) |          25,761,941,491 |               3,901,204,480 |         0.151440 |
+|   tx `928D46DD…` (later) |          13,209,580,838 |               1,999,812,752 |         0.151394 |
 
 Bucketer (§7.4) folds these into one `price_ohlcv_1m` row:
 
@@ -1085,14 +1086,14 @@ Running the same `argMax((amount_bought / amount_sold),
 across every `trade` event whose quote leg is XLM
 (`CAS3J7GY…XLM`) on the full table:
 
-| Base contract | Resolved | Latest price (XLM per base) | At ledger | Trades in window |
-|---|---|---:|---:|---:|
-| `CCW67TSZ…` | USDC | 6.58164529 | 62079722 | 2,756 |
-| `CDFZUVS5…` | sUSD | 6.45730957 | 62078341 | 170 |
-| `CAAV3AE3…` | (stablecoin) | 8.74190884 | 62075164 | 54 |
-| `CCKCKCPH…` | (custom) | 0.02579493 | 62079058 | 180 |
-| `CAUIKL3I…` | AQUA | 0.00219164 | 62078749 | 584 |
-| `CBIJBDNZ…` | (high-value) | 47,291.66 | 62079979 | 199 |
+| Base contract | Resolved     | Latest price (XLM per base) | At ledger | Trades in window |
+| ------------- | ------------ | --------------------------: | --------: | ---------------: |
+| `CCW67TSZ…`   | USDC         |                  6.58164529 |  62079722 |            2,756 |
+| `CDFZUVS5…`   | sUSD         |                  6.45730957 |  62078341 |              170 |
+| `CAAV3AE3…`   | (stablecoin) |                  8.74190884 |  62075164 |               54 |
+| `CCKCKCPH…`   | (custom)     |                  0.02579493 |  62079058 |              180 |
+| `CAUIKL3I…`   | AQUA         |                  0.00219164 |  62078749 |              584 |
+| `CBIJBDNZ…`   | (high-value) |                   47,291.66 |  62079979 |              199 |
 
 Inverting USDC→XLM: `1 / 6.58164529 = 0.15191` USDC per XLM —
 within 0.3% of the single-trade price computed above. The

@@ -1,21 +1,21 @@
 ---
-title: "Soroswap canonical mainnet contract registry and event format"
+title: 'Soroswap canonical mainnet contract registry and event format'
 type: research
 status: developing
 spawned_from: ../README.md
 spawns: []
 tags: [soroban, amm, soroswap, venue-attribution]
 links:
-  - "https://github.com/soroswap/core/blob/main/public/mainnet.contracts.json"
-  - "https://github.com/soroswap/aggregator/blob/main/public/mainnet.contracts.json"
-  - "https://github.com/soroswap/core/blob/main/contracts/factory/src/event.rs"
-  - "https://docs.soroswap.finance/"
-  - "https://api.stellar.expert/explorer/public/contract/CA4HEQTL2WPEUYKYKCDOHCDNIV4QHNJ7EL4J4NQ6VADP7SYHVRYZ7AW2"
+  - 'https://github.com/soroswap/core/blob/main/public/mainnet.contracts.json'
+  - 'https://github.com/soroswap/aggregator/blob/main/public/mainnet.contracts.json'
+  - 'https://github.com/soroswap/core/blob/main/contracts/factory/src/event.rs'
+  - 'https://docs.soroswap.finance/'
+  - 'https://api.stellar.expert/explorer/public/contract/CA4HEQTL2WPEUYKYKCDOHCDNIV4QHNJ7EL4J4NQ6VADP7SYHVRYZ7AW2'
 history:
   - date: 2026-05-08
     status: seed
     who: claude
-    note: "Initial registry compiled from soroswap/core + soroswap/aggregator GitHub repos and verified via stellar.expert API."
+    note: 'Initial registry compiled from soroswap/core + soroswap/aggregator GitHub repos and verified via stellar.expert API.'
 ---
 
 # Soroswap canonical mainnet contract registry
@@ -28,21 +28,22 @@ and [soroswap/aggregator](https://github.com/soroswap/aggregator/blob/main/publi
 (retrieved 2026-05-08 via `gh api`). All WASM hashes cross-checked against
 `api.stellar.expert/explorer/public/contract/<id>` — all match.
 
-| Role | Contract ID | WASM hash | Source |
-|------|-------------|-----------|--------|
-| **SoroswapFactory** | `CA4HEQTL2WPEUYKYKCDOHCDNIV4QHNJ7EL4J4NQ6VADP7SYHVRYZ7AW2` | `5db738b05d…d4fad5a4` | core/mainnet.contracts.json `ids.factory` |
-| **SoroswapRouter** | `CAG5LRYQ5JVEUI5TEID72EYOVX44TTUJT5BQR2J6J77FH65PCCFAJDDH` | `4c3db3eb…6c4ba07` | core/mainnet.contracts.json `ids.router` |
-| **SoroswapAggregator** | `CAYP3UWLJM7ZPTUKL6R6BFGTRWLZ46LRKOXTERI2K6BIJAWGYY62TXTO` | `5e0bff5a…62447d2c` | aggregator/mainnet.contracts.json `ids.aggregator` |
-| Aggregator: Soroswap adapter | `CC6KQUATUBCIFZRDJL5X5PHCYGOHLPHKZQPUOTZTQTASGU5AUQ6DS7SC` | `e2c5b7018a…804e1094` | aggregator/mainnet.contracts.json `ids.soroswap_adapter` |
-| Aggregator: Phoenix adapter | `CCEBUGFV3D73OMV7MUXXA43AREY53MUHVD5SMUM7YZODNGY4NZBA2TSC` | `ab68de68…2374ee3a0a01c82b` | aggregator/mainnet.contracts.json `ids.phoenix_adapter` |
-| Aggregator: Aqua adapter | `CDHDUKHFZB6FORHEBZCNYI3GGVNVOLEITSGI7OKU4UIQND5QG75KGSRR` | `e26face3…157c8d29` | aggregator/mainnet.contracts.json `ids.aqua_adapter` |
-| Aggregator deployer | `CALUZAZZ6FHENZJBQLSTPBZBZOZMACRIHMAEGSCGJYRC35RA5ZDXTKP2` | `8454147…f10694` | aggregator/mainnet.contracts.json `ids.deployer` |
-| **Pair WASM hash** | (varies — pools deployed by factory) | `18051456816b66f12e773a56f77c5794fac1b1fb7ab6e22d4fad5a412770f73e` | core/mainnet.contracts.json `hashes.pair` |
+| Role                         | Contract ID                                                | WASM hash                                                          | Source                                                   |
+| ---------------------------- | ---------------------------------------------------------- | ------------------------------------------------------------------ | -------------------------------------------------------- |
+| **SoroswapFactory**          | `CA4HEQTL2WPEUYKYKCDOHCDNIV4QHNJ7EL4J4NQ6VADP7SYHVRYZ7AW2` | `5db738b05d…d4fad5a4`                                              | core/mainnet.contracts.json `ids.factory`                |
+| **SoroswapRouter**           | `CAG5LRYQ5JVEUI5TEID72EYOVX44TTUJT5BQR2J6J77FH65PCCFAJDDH` | `4c3db3eb…6c4ba07`                                                 | core/mainnet.contracts.json `ids.router`                 |
+| **SoroswapAggregator**       | `CAYP3UWLJM7ZPTUKL6R6BFGTRWLZ46LRKOXTERI2K6BIJAWGYY62TXTO` | `5e0bff5a…62447d2c`                                                | aggregator/mainnet.contracts.json `ids.aggregator`       |
+| Aggregator: Soroswap adapter | `CC6KQUATUBCIFZRDJL5X5PHCYGOHLPHKZQPUOTZTQTASGU5AUQ6DS7SC` | `e2c5b7018a…804e1094`                                              | aggregator/mainnet.contracts.json `ids.soroswap_adapter` |
+| Aggregator: Phoenix adapter  | `CCEBUGFV3D73OMV7MUXXA43AREY53MUHVD5SMUM7YZODNGY4NZBA2TSC` | `ab68de68…2374ee3a0a01c82b`                                        | aggregator/mainnet.contracts.json `ids.phoenix_adapter`  |
+| Aggregator: Aqua adapter     | `CDHDUKHFZB6FORHEBZCNYI3GGVNVOLEITSGI7OKU4UIQND5QG75KGSRR` | `e26face3…157c8d29`                                                | aggregator/mainnet.contracts.json `ids.aqua_adapter`     |
+| Aggregator deployer          | `CALUZAZZ6FHENZJBQLSTPBZBZOZMACRIHMAEGSCGJYRC35RA5ZDXTKP2` | `8454147…f10694`                                                   | aggregator/mainnet.contracts.json `ids.deployer`         |
+| **Pair WASM hash**           | (varies — pools deployed by factory)                       | `18051456816b66f12e773a56f77c5794fac1b1fb7ab6e22d4fad5a412770f73e` | core/mainnet.contracts.json `hashes.pair`                |
 
-**Pool enumeration:** Soroswap pools are *not* a fixed list. They are
+**Pool enumeration:** Soroswap pools are _not_ a fixed list. They are
 deployed deterministically by the factory. Each Soroswap pool contract
 shares the same WASM hash (`18051456816b66f12e773a56f77c5794fac1b1fb7ab6e22d4fad5a412770f73e`).
 The indexer can either:
+
 1. Scan `SoroswapFactory` for `("SoroswapFactory", "new_pair")` events and
    extract `pair: Address`, OR
 2. Match deployed contracts by WASM hash via `stellar.expert` /
@@ -99,7 +100,7 @@ The factory also emits `("SoroswapFactory", "init")`,
 relevant to pool enumeration.
 
 **Note on topic shape:** consistent with the wider-sample observation
-in `R-swap-topic-shapes.md` — Soroswap uses a *2-topic* form where
+in `R-swap-topic-shapes.md` — Soroswap uses a _2-topic_ form where
 `topics[0]` is a `String` (`"SoroswapFactory"` here, `"SoroswapPair"` /
 `"SoroswapRouter"` / `"SoroswapAggregator"` elsewhere) and `topics[1]`
 is a `Symbol` naming the operation. The §7 filter in
@@ -130,20 +131,20 @@ emitted by Soroswap — Soroswap's swap events are wrapped in
 `String("SoroswapAggregator")` topics, exactly as
 `R-swap-topic-shapes.md` reported.
 
-| Observed contract | stellar.expert verdict | Notes |
-|---|---|---|
-| `CBQDHNBFBZYE…` (11,947) | **VERIFIED Aquarius** | `validation.status: "verified"`, repository `github.com/AquaToken/soroban-amm`, package `soroban-liquidity-pool-router-contract`, commit `c4d842de…` |
-| `CBHCRSVX3ZZ7…` (4,128) | unverified | wasm `167ab414…f506c`, creator `GCNPDMUMRX…` (same as `CBCZGGNO…`); not Soroswap |
-| `CCR2CH4G…` (2,706) | unverified | wasm `48b28121…07c117`, creator `GCFB64LD…`; not Soroswap |
-| `CDMIM23W…` (2,480) | unverified | wasm `4edd745f…32b6c8d`, creator `GC7RIP4D…`; not Soroswap |
-| `CBCZGGNO…` (440) | unverified | wasm `167ab414…f506c` — **same WASM as CBHCRSVX3ZZ7…**; same creator `GCNPDMUMRX…`; both look like a paired Aquarius family member |
+| Observed contract        | stellar.expert verdict | Notes                                                                                                                                                |
+| ------------------------ | ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CBQDHNBFBZYE…` (11,947) | **VERIFIED Aquarius**  | `validation.status: "verified"`, repository `github.com/AquaToken/soroban-amm`, package `soroban-liquidity-pool-router-contract`, commit `c4d842de…` |
+| `CBHCRSVX3ZZ7…` (4,128)  | unverified             | wasm `167ab414…f506c`, creator `GCNPDMUMRX…` (same as `CBCZGGNO…`); not Soroswap                                                                     |
+| `CCR2CH4G…` (2,706)      | unverified             | wasm `48b28121…07c117`, creator `GCFB64LD…`; not Soroswap                                                                                            |
+| `CDMIM23W…` (2,480)      | unverified             | wasm `4edd745f…32b6c8d`, creator `GC7RIP4D…`; not Soroswap                                                                                           |
+| `CBCZGGNO…` (440)        | unverified             | wasm `167ab414…f506c` — **same WASM as CBHCRSVX3ZZ7…**; same creator `GCNPDMUMRX…`; both look like a paired Aquarius family member                   |
 
 **Cross-task signal:** the verified Aquarius hit on `CBQDHNBFBZYE…`
-positively attributes the *original* sole `Symbol("swap")` emitter
+positively attributes the _original_ sole `Symbol("swap")` emitter
 from the 3.5-day window (per `R-swap-topic-shapes.md` it was
 `CBQDHNBFBZYE…` then too) to **Aquarius's
 `soroban-liquidity-pool-router-contract`**. That answers acceptance
-criterion 1 *via the Aquarius fork*, not Soroswap. Recording it here
+criterion 1 _via the Aquarius fork_, not Soroswap. Recording it here
 because the spot-check produced the evidence — the
 `R-aquarius-registry.md` note should re-cite this stellar.expert
 verification.

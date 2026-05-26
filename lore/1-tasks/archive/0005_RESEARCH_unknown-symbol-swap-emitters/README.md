@@ -1,23 +1,31 @@
 ---
-id: "0005"
-title: "Identify unknown Symbol(\"swap\") emitters CCR2CH4G... and CDMIM23W..."
+id: '0005'
+title: 'Identify unknown Symbol("swap") emitters CCR2CH4G... and CDMIM23W...'
 type: RESEARCH
 status: completed
 related_adr: []
-related_tasks: ["0002"]
-tags: [layer-research, priority-medium, effort-small, soroban, amm, venue-attribution]
+related_tasks: ['0002']
+tags:
+  [
+    layer-research,
+    priority-medium,
+    effort-small,
+    soroban,
+    amm,
+    venue-attribution,
+  ]
 links:
-  - "../0002_RESEARCH_amm-venue-attribution/notes/S-venue-attribution-mapping.md"
-  - "../0002_RESEARCH_amm-venue-attribution/notes/R-aquarius-registry.md"
+  - '../0002_RESEARCH_amm-venue-attribution/notes/S-venue-attribution-mapping.md'
+  - '../0002_RESEARCH_amm-venue-attribution/notes/R-aquarius-registry.md'
 history:
   - date: 2026-05-08
     status: backlog
     who: claude
-    note: "Spawned from 0002 future work."
+    note: 'Spawned from 0002 future work.'
   - date: 2026-05-11
     status: active
     who: okarcz
-    note: "Activated for manual verification of the unknown emitters."
+    note: 'Activated for manual verification of the unknown emitters.'
   - date: 2026-05-11
     status: completed
     who: okarcz

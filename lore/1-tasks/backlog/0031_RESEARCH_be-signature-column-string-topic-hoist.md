@@ -1,20 +1,30 @@
 ---
-id: "0031"
-title: "Evaluate BE-side `signature` hoist for String-typed topic[0] (Soroswap, Phoenix)"
+id: '0031'
+title: 'Evaluate BE-side `signature` hoist for String-typed topic[0] (Soroswap, Phoenix)'
 type: RESEARCH
 status: backlog
 related_adr: []
-related_tasks: ["0018", "0017"]
-tags: [layer-research, priority-medium, effort-small, cross-repo, be-feedback, clickhouse, signature-column, filter-perf]
+related_tasks: ['0018', '0017']
+tags:
+  [
+    layer-research,
+    priority-medium,
+    effort-small,
+    cross-repo,
+    be-feedback,
+    clickhouse,
+    signature-column,
+    filter-perf,
+  ]
 links:
-  - "../active/0018_RESEARCH_decode-per-amm-swap-event-shapes/notes/R-be-storage-format.md"
-  - "../active/0018_RESEARCH_decode-per-amm-swap-event-shapes/notes/G-amm-swap-event-shapes.md"
-  - "../../../../soroban-block-explorer/crates/db-clickhouse/src/persist/stage.rs"
+  - '../active/0018_RESEARCH_decode-per-amm-swap-event-shapes/notes/R-be-storage-format.md'
+  - '../active/0018_RESEARCH_decode-per-amm-swap-event-shapes/notes/G-amm-swap-event-shapes.md'
+  - '../../../../soroban-block-explorer/crates/db-clickhouse/src/persist/stage.rs'
 history:
   - date: 2026-05-15
     status: backlog
     who: claude
-    note: "Spawned from 0018 Appendix B item 2."
+    note: 'Spawned from 0018 Appendix B item 2.'
 ---
 
 # BE signature column: String-typed topic[0] hoist

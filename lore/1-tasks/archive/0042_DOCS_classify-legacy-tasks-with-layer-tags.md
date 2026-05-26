@@ -1,23 +1,23 @@
 ---
-id: "0042"
-title: "Classify legacy lore tasks with layer-* tags for board grouping"
+id: '0042'
+title: 'Classify legacy lore tasks with layer-* tags for board grouping'
 type: DOCS
 status: completed
 related_adr: []
-related_tasks: ["0041"]
-tags: ["layer-tooling", "phase-now", "effort-small", "priority-low"]
+related_tasks: ['0041']
+tags: ['layer-tooling', 'phase-now', 'effort-small', 'priority-low']
 links:
-  - "https://rumblefishdev.github.io/stellar-prices-api/"
-  - "https://github.com/rumblefishdev/stellar-prices-api/pull/19"
+  - 'https://rumblefishdev.github.io/stellar-prices-api/'
+  - 'https://github.com/rumblefishdev/stellar-prices-api/pull/19'
 history:
   - date: 2026-05-18
     status: backlog
     who: claude
-    note: "Spawned from 0041 future work."
+    note: 'Spawned from 0041 future work.'
   - date: 2026-05-18
     status: active
     who: oski
-    note: "Activated to classify legacy tasks."
+    note: 'Activated to classify legacy tasks.'
   - date: 2026-05-18
     status: completed
     who: claude
@@ -29,7 +29,7 @@ history:
       layer-other. No follow-ups.
 ---
 
-# Classify legacy lore tasks with layer-* tags for board grouping
+# Classify legacy lore tasks with layer-\* tags for board grouping
 
 ## Summary
 
@@ -45,14 +45,14 @@ The mapping was applied via a one-shot bash script driving `sed` over a hand-bui
 
 Resulting per-layer counts (board.json after deploy):
 
-| Layer | Count |
-|-------|-------|
-| `layer-research` | 18 |
-| `layer-indexing` | 10 |
-| `layer-tooling` | 6 |
-| `layer-database` | 3 |
-| `layer-infra` | 3 |
-| `layer-backend` | 1 |
+| Layer            | Count |
+| ---------------- | ----- |
+| `layer-research` | 18    |
+| `layer-indexing` | 10    |
+| `layer-tooling`  | 6     |
+| `layer-database` | 3     |
+| `layer-infra`    | 3     |
+| `layer-backend`  | 1     |
 
 `layer-domain` and `layer-frontend` are unused — this project has no frontend, and domain types currently live within indexing crates rather than as standalone tasks.
 
