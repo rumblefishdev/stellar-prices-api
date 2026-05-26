@@ -1,4 +1,4 @@
 #!/usr/bin/env sh
 set -e
-cargo clippy --all-targets -- -D warnings
+cargo clippy -p extractors-core -p phoenix-extractor -p soroswap-extractor -p aquarius-extractor -p ledger-processor --all-targets -- -D warnings
 npm run -s verify:push
