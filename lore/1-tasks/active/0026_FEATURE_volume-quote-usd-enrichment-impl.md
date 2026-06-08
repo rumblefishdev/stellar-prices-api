@@ -2,7 +2,7 @@
 id: "0026"
 title: "volume_quote_usd enrichment Lambda — implement the Phase 1 spec from task 0024"
 type: FEATURE
-status: blocked
+status: active
 related_adr: ["0003"]
 related_tasks: ["0024", "0012", "0022", "0023"]
 by: ["0012"]
@@ -20,6 +20,37 @@ history:
       task 0012 — needs RDS bootstrap, `price_ohlcv` schema, and
       Oracle Fetcher Lambda to be deployed before the enrichment
       Lambda can be built and integration-tested.
+  - date: 2026-06-08
+    status: active
+    who: oski
+    note: >
+      Activated with the same scope reduction applied to task 0038:
+      local-only Rust crate + a written design document for the BE
+      cross-team meeting. No AWS deploy, no CDK apply, no live CH
+      writes, no EventBridge rule registration. The deliverable is
+      a runnable local binary the operator can demonstrate against
+      fixture data plus a G-note that lets BE react to the schema
+      and merge-semantics choices before any infra commitment.
+
+      **Critical architectural caveat.** The 0024 design spec was
+      written 2026-05-13 against the original RDS-Postgres data
+      plane. ADR 0007 (accepted 2026-05-20) supersedes that to
+      Hetzner ClickHouse. The PG-flavoured SQL in §2 of the
+      0024 G-note (`WITH ... FOR UPDATE SKIP LOCKED`,
+      `UPDATE ... FROM`, row-lock-bounded batches) does not
+      translate directly: CH has no row locks, `ALTER TABLE ...
+      UPDATE` is asynchronous, and the idiomatic enrichment
+      pattern is INSERT-with-newer-version into a
+      `ReplacingMergeTree`, deduped on next merge by the
+      ORDER BY key. The local prototype + spec G-note translate
+      the algorithm to CH semantics; the PG→CH translation is
+      one of the BE-meeting agenda items.
+
+      Out-of-scope for this activation: any AWS deploy,
+      EventBridge / Scheduler rule, IAM grants, SSM consumption,
+      CDK stack apply, or live CH writes — see the forthcoming
+      G-note under `notes/G-local-prototype-spec.md` for the full
+      Part C cross-team contract.
 ---
 
 # `volume_quote_usd` enrichment Lambda — implementation
