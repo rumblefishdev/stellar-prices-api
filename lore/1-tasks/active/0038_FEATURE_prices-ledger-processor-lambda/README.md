@@ -8,17 +8,17 @@ related_tasks: ["0011", "0037", "0045", "0047", "0048"]
 tags: [layer-indexing, priority-high, effort-large, milestone-M1, stream-1, lambda, ingestion, rust, aws, clickhouse, hetzner]
 milestone: 1
 links:
-  - "../../../docs/prices-api-general-overview.md"
-  - "../../2-adrs/0001_stream1-clickhouse-sourced-amm-backfill.md"
-  - "../../2-adrs/0003_price-ohlcv-pk-includes-quote-asset-id.md"
-  - "../../2-adrs/0004_price-ohlcv-multi-source-merge-columns.md"
-  - "../../2-adrs/0005_stream2-sdex-local-workstation-backfill.md"
-  - "../../2-adrs/0006_runtime-framework-rust-axum.md"
-  - "../../2-adrs/0007_live-data-sink-on-shared-hetzner-clickhouse.md"
-  - "../archive/0045_RESEARCH_cross-team-bundle-with-be-on-hetzner-ch-tenancy/notes/G-be-agreement-record.md"
-  - "../backlog/0011_FEATURE_bootstrap-cdk-with-ssm-platform-lookups.md"
-  - "../backlog/0037_FEATURE_tranche1-ledger-processor-skeleton.md"
-  - "../backlog/0047_RESEARCH_cross-tenant-throughput-verification-on-shared-hetzner-ch.md"
+  - "../../../../docs/prices-api-general-overview.md"
+  - "../../../2-adrs/0001_stream1-clickhouse-sourced-amm-backfill.md"
+  - "../../../2-adrs/0003_price-ohlcv-pk-includes-quote-asset-id.md"
+  - "../../../2-adrs/0004_price-ohlcv-multi-source-merge-columns.md"
+  - "../../../2-adrs/0005_stream2-sdex-local-workstation-backfill.md"
+  - "../../../2-adrs/0006_runtime-framework-rust-axum.md"
+  - "../../../2-adrs/0007_live-data-sink-on-shared-hetzner-clickhouse.md"
+  - "../../archive/0045_RESEARCH_cross-team-bundle-with-be-on-hetzner-ch-tenancy/notes/G-be-agreement-record.md"
+  - "../../archive/0011_FEATURE_bootstrap-cdk-with-ssm-platform-lookups.md"
+  - "../../archive/0037_FEATURE_tranche1-ledger-processor-skeleton.md"
+  - "../../backlog/0047_RESEARCH_cross-tenant-throughput-verification-on-shared-hetzner-ch.md"
 history:
   - date: 2026-05-18
     status: backlog
