@@ -1,0 +1,32 @@
+[package]
+name = "enrichment-worker"
+version = "0.1.0"
+edition = "2024"
+description = "volume_quote_usd enrichment Lambda — local-only prototype (task 0026)"
+
+[lib]
+name = "enrichment_worker"
+path = "src/lib.rs"
+
+[[bin]]
+name = "enrichment-worker"
+path = "src/main.rs"
+
+[[bin]]
+name = "enrichment-cli"
+path = "src/bin/cli.rs"
+
+[dependencies]
+clap = { workspace = true }
+rust_decimal = { workspace = true }
+serde = { workspace = true }
+serde_json = "1"
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+lambda_runtime = "0.13"
+
+[dev-dependencies]
+tempfile = "3"
