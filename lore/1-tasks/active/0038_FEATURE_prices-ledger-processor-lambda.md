@@ -2,7 +2,7 @@
 id: "0038"
 title: "Prices Ledger Processor Lambda — live S3-event-driven ingestion into price_ohlcv"
 type: FEATURE
-status: blocked
+status: active
 related_adr: ["0001", "0003", "0004", "0005", "0006", "0007"]
 related_tasks: ["0011", "0037", "0045", "0047", "0048"]
 tags: [layer-indexing, priority-high, effort-large, milestone-M1, stream-1, lambda, ingestion, rust, aws, clickhouse, hetzner]
@@ -77,6 +77,23 @@ history:
       GREEN/YELLOW (a RED outcome supersedes ADR 0007 to the
       sidecar-CH variant — same rewrite shape, different host).
       Task stays blocked; rewrite begins once (a) and (b) clear.
+  - date: 2026-06-08
+    status: active
+    who: oski
+    note: >
+      Activated with scope reduction. Original engineering blockers
+      ((a) BE 0227 mTLS endpoint, (b) task 0047 cross-tenant
+      throughput verification) remain unresolved, so this activation
+      is **local-only**: build a runnable local Lambda binary,
+      exercise it against recorded fixtures, and produce a written
+      design document for cross-team discussion with the BE team.
+      Out-of-scope for this activation: any AWS deploy, S3
+      notification registration on BE's bucket, SSM platform-key
+      consumption, CDK stack apply, or live RDS/CH writes. The
+      goal is to give BE something concrete (binary + spec) to
+      react to before the gating events clear — see the
+      forthcoming G-note on local-prototype scope under
+      `notes/G-local-prototype-spec.md`.
 ---
 
 # Prices Ledger Processor Lambda — live S3-event-driven ingestion into price_ohlcv
