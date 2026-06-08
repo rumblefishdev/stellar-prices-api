@@ -1,5 +1,6 @@
 pub mod bucket;
 pub mod cursor;
+pub mod decode;
 pub mod galexie_key;
 pub mod object_fetcher;
 pub mod reconcile;

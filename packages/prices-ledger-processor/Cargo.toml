@@ -12,10 +12,17 @@ path = "src/lib.rs"
 name = "prices-ledger-processor"
 path = "src/main.rs"
 
+[[bin]]
+name = "prices-cli"
+path = "src/bin/cli.rs"
+
 [dependencies]
 extractors-core = { path = "../extractors-core" }
 ledger-processor = { path = "../ledger-processor" }
 phoenix-extractor = { path = "../phoenix-extractor" }
+
+stellar-xdr = { workspace = true }
+xdr-parser = { workspace = true }
 
 clap = { workspace = true }
 serde = { workspace = true }
@@ -24,6 +31,10 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+
+lambda_runtime = "0.13"
+aws_lambda_events = { version = "0.16", default-features = false, features = ["sqs"] }
+hex = "0.4"
 
 [dev-dependencies]
 tempfile = "3"

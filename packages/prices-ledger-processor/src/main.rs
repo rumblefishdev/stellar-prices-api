@@ -1,111 +1,111 @@
-use std::path::PathBuf;
+//! Lambda entrypoint — SQS doorbell handler.
+//!
+//! Mirrors BE's indexer cold-start shape (eager config validation,
+//! structured JSON tracing, single shared state passed by reference to
+//! every invocation). The SQS message body is **ignored**; each
+//! invocation just runs the reconcile loop.
+//!
+//! Phase 2 prototype: the fetcher / cursor / sink are still the
+//! local-disk stubs. The Lambda mode exists to prove the
+//! `lambda_runtime` event-loop wires up cleanly — a `cargo lambda
+//! invoke` against a stub doorbell event runs end-to-end.
 
-use clap::{Parser, ValueEnum};
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use aws_lambda_events::sqs::{SqsBatchResponse, SqsEvent};
 use extractors_core::VenueRegistry;
+use lambda_runtime::{Error, LambdaEvent, service_fn};
 use phoenix_extractor::PhoenixPoolRegistry;
 use prices_ledger_processor::{
-    cursor::{Cursor, StubFileCursor},
-    object_fetcher::LocalDiskFetcher,
-    reconcile::{DecodedLedger, LedgerDecoder, Reconciler},
-    sink::{SqlFileSink, StdoutJsonSink},
+    cursor::StubFileCursor, decode::XdrLedgerDecoder, object_fetcher::LocalDiskFetcher,
+    reconcile::Reconciler, sink::StdoutJsonSink,
 };
-use tracing::info;
+use tracing::{error, info};
 
-#[derive(Parser, Debug)]
-#[command(
-    name = "prices-ledger-processor",
-    about = "Local-only prototype of the Prices Ledger Processor Lambda (task 0038)"
-)]
-struct Args {
-    /// Initial cursor value (ledger sequence the run starts AFTER).
-    /// Always overwrites the cursor file before the run.
-    #[arg(long)]
-    cursor: u64,
+const ENV_FIXTURES_DIR: &str = "FIXTURES_DIR";
+const ENV_CURSOR_FILE: &str = "CURSOR_FILE";
+const ENV_MAX_ITERATIONS: &str = "MAX_ITERATIONS";
+const DEFAULT_FIXTURES_DIR: &str = "fixtures/ledgers";
+const DEFAULT_CURSOR_FILE: &str = "out/cursor.txt";
+const DEFAULT_MAX_ITERATIONS: usize = 16;
 
-    /// Maximum reconcile iterations per invocation.
-    #[arg(long, default_value_t = 16)]
-    max_iterations: usize,
-
-    /// Sink selection.
-    #[arg(long, value_enum, default_value_t = SinkKind::Stdout)]
-    sink: SinkKind,
-
-    /// Local fixture root — keys derived by `ledger_s3_key` are joined onto this.
-    #[arg(long, default_value = "fixtures/ledgers")]
-    fixtures_dir: PathBuf,
-
-    /// Where the cursor file lives.
-    #[arg(long, default_value = "out/cursor.txt")]
-    cursor_file: PathBuf,
-
-    /// Where SQL-file sink output lands.
-    #[arg(long, default_value = "out")]
-    out_dir: PathBuf,
-}
-
-#[derive(Copy, Clone, Debug, ValueEnum)]
-enum SinkKind {
-    Stdout,
-    SqlFile,
-}
-
-/// Phase-1 no-op decoder. Returns an empty ledger list regardless of input,
-/// so the loop exercises cursor / fetcher / sink wiring without a real
-/// xdr-parser integration. Phase 2 replaces this with the real walk.
-struct NoopDecoder;
-
-impl LedgerDecoder for NoopDecoder {
-    async fn decode(&self, _bytes: &[u8]) -> Result<Vec<DecodedLedger>, String> {
-        Ok(Vec::new())
-    }
-}
+type R = Reconciler<LocalDiskFetcher, StubFileCursor, StdoutJsonSink, XdrLedgerDecoder>;
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<(), Error> {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .json()
         .init();
 
-    let args = Args::parse();
-
-    let cursor = StubFileCursor::new(&args.cursor_file);
-    cursor.write(args.cursor).await?;
-
-    let fetcher = LocalDiskFetcher::new(&args.fixtures_dir);
-
-    let stats = match args.sink {
-        SinkKind::Stdout => {
-            let reconciler = Reconciler {
-                fetcher,
-                cursor,
-                sink: StdoutJsonSink,
-                decoder: NoopDecoder,
-                venue_registry: VenueRegistry::new(),
-                phoenix_registry: PhoenixPoolRegistry::default(),
-            };
-            reconciler.run(args.max_iterations).await?
-        }
-        SinkKind::SqlFile => {
-            let reconciler = Reconciler {
-                fetcher,
-                cursor,
-                sink: SqlFileSink::new(&args.out_dir),
-                decoder: NoopDecoder,
-                venue_registry: VenueRegistry::new(),
-                phoenix_registry: PhoenixPoolRegistry::default(),
-            };
-            reconciler.run(args.max_iterations).await?
-        }
-    };
+    let fixtures_dir = std::env::var(ENV_FIXTURES_DIR)
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(DEFAULT_FIXTURES_DIR));
+    let cursor_file = std::env::var(ENV_CURSOR_FILE)
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(DEFAULT_CURSOR_FILE));
+    let max_iterations: usize = std::env::var(ENV_MAX_ITERATIONS)
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DEFAULT_MAX_ITERATIONS);
 
     info!(
-        start = stats.start_cursor,
-        end = stats.end_cursor,
-        persisted = stats.ledgers_persisted,
-        rows = stats.rows_emitted,
-        "reconcile complete"
+        fixtures_dir = %fixtures_dir.display(),
+        cursor_file = %cursor_file.display(),
+        max_iterations,
+        "prices-ledger-processor cold start"
     );
 
-    Ok(())
+    let reconciler: Arc<R> = Arc::new(Reconciler {
+        fetcher: LocalDiskFetcher::new(&fixtures_dir),
+        cursor: StubFileCursor::new(&cursor_file),
+        sink: StdoutJsonSink,
+        decoder: XdrLedgerDecoder,
+        venue_registry: VenueRegistry::new(),
+        phoenix_registry: PhoenixPoolRegistry::default(),
+    });
+
+    lambda_runtime::run(service_fn(move |event: LambdaEvent<SqsEvent>| {
+        let r = reconciler.clone();
+        async move { handler(event, r, max_iterations).await }
+    }))
+    .await
+}
+
+async fn handler(
+    event: LambdaEvent<SqsEvent>,
+    reconciler: Arc<R>,
+    max_iterations: usize,
+) -> Result<SqsBatchResponse, Error> {
+    let (payload, _ctx) = event.into_parts();
+    let mut batch_item_failures = Vec::new();
+
+    for msg in &payload.records {
+        let message_id = msg.message_id.clone().unwrap_or_default();
+        match reconciler.run(max_iterations).await {
+            Ok(stats) => info!(
+                message_id = %message_id,
+                start = stats.start_cursor,
+                end = stats.end_cursor,
+                persisted = stats.ledgers_persisted,
+                rows = stats.rows_emitted,
+                "doorbell processed"
+            ),
+            Err(e) => {
+                error!(
+                    message_id = %message_id,
+                    error = %e,
+                    "reconcile failed — will redeliver doorbell"
+                );
+                batch_item_failures.push(aws_lambda_events::sqs::BatchItemFailure {
+                    item_identifier: message_id,
+                });
+            }
+        }
+    }
+
+    Ok(SqsBatchResponse {
+        batch_item_failures,
+    })
 }
