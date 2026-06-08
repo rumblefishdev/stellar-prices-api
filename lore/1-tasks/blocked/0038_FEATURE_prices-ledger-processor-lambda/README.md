@@ -2,7 +2,7 @@
 id: "0038"
 title: "Prices Ledger Processor Lambda — live S3-event-driven ingestion into price_ohlcv"
 type: FEATURE
-status: active
+status: blocked
 related_adr: ["0001", "0003", "0004", "0005", "0006", "0007"]
 related_tasks: ["0011", "0037", "0045", "0047", "0048"]
 tags: [layer-indexing, priority-high, effort-large, milestone-M1, stream-1, lambda, ingestion, rust, aws, clickhouse, hetzner]
@@ -94,6 +94,24 @@ history:
       react to before the gating events clear — see the
       forthcoming G-note on local-prototype scope under
       `notes/G-local-prototype-spec.md`.
+  - date: 2026-06-08
+    status: blocked
+    who: oski
+    note: >
+      Local-prototype scope shipped: spec G-note + runnable Phase 1
+      scaffolding + Phase 2 real XDR decode against
+      BE-sourced fixtures (commits f17353f, 1137464, bd2ea9d,
+      10b60a3, fb57196 on branch feat/0038_prices-ledger-processor-lambda;
+      PR #34). Task moves back to blocked pending the cross-team
+      meeting with the BE team — the Part C asks in
+      `notes/G-local-prototype-spec.md` are the agenda
+      (SQS notification ownership, env-var injection vs SSM-at-runtime,
+      xdr-parser tag-pinning + semver, `db-clickhouse::mtls` reuse,
+      Caddyfile `CLICKHOUSE_CN_USER_MAP` for `prices-api-{env}`,
+      mTLS cert issuance). Original engineering gates
+      (BE 0227 + task 0047) also remain open. Unblocks: after the
+      meeting answers Part C, and either gating engineering event
+      clears.
 ---
 
 # Prices Ledger Processor Lambda — live S3-event-driven ingestion into price_ohlcv
