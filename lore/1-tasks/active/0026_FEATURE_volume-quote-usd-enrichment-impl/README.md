@@ -3,14 +3,15 @@ id: "0026"
 title: "volume_quote_usd enrichment Lambda — implement the Phase 1 spec from task 0024"
 type: FEATURE
 status: active
-related_adr: ["0003"]
-related_tasks: ["0024", "0012", "0022", "0023"]
-by: ["0012"]
-tags: [layer-indexing, priority-medium, effort-medium, lambda, ohlcv, enrichment, oracle, phase-2]
+related_adr: ["0003", "0004", "0007"]
+related_tasks: ["0024", "0012", "0022", "0023", "0038"]
+tags: [layer-indexing, priority-medium, effort-medium, lambda, ohlcv, enrichment, oracle, phase-2, clickhouse]
 links:
-  - "../archive/0024_FEATURE_volume-quote-usd-enrichment/notes/G-enrichment-pass-design.md"
-  - "../archive/0024_FEATURE_volume-quote-usd-enrichment/README.md"
-  - "../../2-adrs/0003_price-ohlcv-pk-includes-quote-asset-id.md"
+  - "../../archive/0024_FEATURE_volume-quote-usd-enrichment/notes/G-enrichment-pass-design.md"
+  - "../../archive/0024_FEATURE_volume-quote-usd-enrichment/README.md"
+  - "../../../2-adrs/0003_price-ohlcv-pk-includes-quote-asset-id.md"
+  - "../../../2-adrs/0004_price-ohlcv-multi-source-merge-columns.md"
+  - "../../../2-adrs/0007_live-data-sink-on-shared-hetzner-clickhouse.md"
 history:
   - date: 2026-05-13
     status: blocked
