@@ -452,6 +452,7 @@ name = "enrichment-worker"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "clickhouse",
  "lambda_runtime",
  "rust_decimal",
  "serde",

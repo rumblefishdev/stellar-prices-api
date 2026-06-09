@@ -289,7 +289,12 @@ CREATE TABLE prices.price_ohlcv_1m (
     low              Decimal(38, 14),
     close            Decimal(38, 14),
     volume_base      Decimal(38, 14) DEFAULT 0,
-    volume_quote_usd Decimal(38, 14) DEFAULT 0,
+    volume_quote     Decimal(38, 14) DEFAULT 0,  -- native quote-asset volume (sum of
+                                                  -- quote-leg amounts); decoder already
+                                                  -- computes it to derive vwap. Oracle-
+                                                  -- multiplied into volume_quote_usd by
+                                                  -- the enrichment Lambda (task 0026)
+    volume_quote_usd Decimal(38, 14) DEFAULT 0,  -- USD-denominated; filled by task 0026
     vwap             Decimal(38, 14),   -- single-source, single-minute VWAP
                                          -- (volume_quote / volume_base);
                                          -- see §5.5 layering for cross-source weighting

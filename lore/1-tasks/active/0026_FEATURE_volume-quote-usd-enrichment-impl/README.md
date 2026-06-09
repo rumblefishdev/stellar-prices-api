@@ -4,7 +4,7 @@ title: "volume_quote_usd enrichment Lambda — implement the Phase 1 spec from t
 type: FEATURE
 status: active
 related_adr: ["0003", "0004", "0007"]
-related_tasks: ["0024", "0012", "0022", "0023", "0038"]
+related_tasks: ["0024", "0012", "0022", "0023", "0038", "0058", "0059"]
 tags: [layer-indexing, priority-medium, effort-medium, lambda, ohlcv, enrichment, oracle, phase-2, clickhouse]
 links:
   - "../../archive/0024_FEATURE_volume-quote-usd-enrichment/notes/G-enrichment-pass-design.md"
@@ -114,6 +114,17 @@ Carried over from task 0024's design spec §7:
       credible against Horizon's historical aggregates).
 - [ ] CloudWatch metrics from spec §5 are emitted and visible in
       the dashboard.
+
+## Future Work
+
+Spawned from the production implementation (see G-note Decision Log,
+2026-06-09):
+
+- **0058** — populate the restored `volume_quote` column in the OHLCV
+  writers (prices-ledger-processor 0038 + sdex-backfill + soroban-amm
+  backfill). Enrichment reads this column directly; writers must fill it.
+- **0059** — MV rollup-chain version propagation under enriched `_1m`
+  re-inserts (task 0051 dependency). 0026 enriches `_1m` only.
 
 ## Notes
 

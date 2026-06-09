@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use enrichment_worker::candidates::JsonlCandidateSource;
+use enrichment_worker::ch_enrich::{ChEnrichConfig, ChEnrichmentPass};
 use enrichment_worker::oracle::InMemoryOracleLookup;
 use enrichment_worker::pass::run_pass;
 use enrichment_worker::sink::StdoutJsonSink;
@@ -26,6 +27,13 @@ const ENV_ORACLE_NAME: &str = "ORACLE_NAME";
 const ENV_WINDOW_S: &str = "FORWARD_FILL_WINDOW_S";
 const ENV_BATCH_SIZE: &str = "BATCH_SIZE";
 const ENV_MAX_BATCHES: &str = "MAX_BATCHES";
+
+// Production (CH Form-B) selector + connection. When `CLICKHOUSE_URL`
+// is set the Lambda runs the batch ASOF-JOIN enrichment against
+// ClickHouse; otherwise it falls back to the fixture-driven prototype.
+const ENV_CLICKHOUSE_URL: &str = "CLICKHOUSE_URL";
+const ENV_CH_DATABASE: &str = "CLICKHOUSE_DATABASE";
+const ENV_CH_TABLE: &str = "CLICKHOUSE_TABLE";
 
 #[derive(Clone)]
 struct Cfg {
@@ -52,6 +60,12 @@ async fn main() -> Result<(), Error> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .json()
         .init();
+
+    // Production swap: `CLICKHOUSE_URL` present → batch ASOF-JOIN
+    // enrichment against ClickHouse (Form B). Absent → fixture prototype.
+    if let Ok(url) = std::env::var(ENV_CLICKHOUSE_URL) {
+        return run_production(url).await;
+    }
 
     let cfg = Cfg {
         candidates_path: std::env::var(ENV_CANDIDATES)
@@ -139,6 +153,57 @@ async fn handler(
         "rows_enriched": stats.rows_enriched,
         "oracle_misses": stats.oracle_misses,
     }))
+}
+
+/// Production entrypoint — the CH Form-B path. Builds the enrichment
+/// pass at cold start (preflight failures surface as Lambda Init
+/// Errors, mirroring the prototype's eager oracle load), then runs one
+/// bounded pass per Scheduler event.
+async fn run_production(url: String) -> Result<(), Error> {
+    let cfg = ChEnrichConfig {
+        url,
+        database: std::env::var(ENV_CH_DATABASE).unwrap_or_else(|_| "prices".to_string()),
+        table: std::env::var(ENV_CH_TABLE).unwrap_or_else(|_| "price_ohlcv_1m".to_string()),
+        oracle_name: std::env::var(ENV_ORACLE_NAME).unwrap_or_else(|_| "reflector".to_string()),
+        window_s: parse_env_or(ENV_WINDOW_S, 300),
+        batch_size: parse_env_or(ENV_BATCH_SIZE, 10_000),
+        max_batches: parse_env_or(ENV_MAX_BATCHES, 20),
+    };
+
+    info!(
+        url = %cfg.url,
+        database = %cfg.database,
+        table = %cfg.table,
+        oracle_name = %cfg.oracle_name,
+        window_s = cfg.window_s,
+        batch_size = cfg.batch_size,
+        max_batches = cfg.max_batches,
+        "enrichment-worker cold start (clickhouse mode)"
+    );
+
+    let pass = ChEnrichmentPass::new(cfg);
+    pass.preflight().await.map_err(|e| {
+        error!(error = %e, "clickhouse preflight failed");
+        format!("clickhouse preflight failed: {e}")
+    })?;
+
+    let pass = Arc::new(pass);
+    lambda_runtime::run(service_fn(move |_event: LambdaEvent<serde_json::Value>| {
+        let pass = pass.clone();
+        async move {
+            let stats = pass
+                .run()
+                .await
+                .map_err(|e| format!("enrichment pass failed: {e}"))?;
+            Ok::<_, Error>(serde_json::json!({
+                "batches": stats.batches,
+                "candidates_before": stats.candidates_before,
+                "candidates_after": stats.candidates_after,
+                "rows_enriched": stats.rows_enriched,
+            }))
+        }
+    }))
+    .await
 }
 
 fn parse_env_or<T: std::str::FromStr>(var: &str, default: T) -> T {

@@ -235,10 +235,12 @@ Pros:
 
 Cons:
 
-- ✗ Requires `prices.price_ohlcv` to be a ReplacingMergeTree with
-  a `_inserted_at` version column. **This is part of the BE
-  meeting (C.4) — confirm the engine before we hard-code the
-  pattern.**
+- ✗ Requires `price_ohlcv_*` to be a ReplacingMergeTree with a
+  version column. **C.4 RESOLVED (2026-06-09): confirmed
+  `ReplacingMergeTree(version)`.** The version column is the
+  ledger-derived `version UInt64` (not the `_inserted_at` wall
+  clock this note originally assumed) — see the Decision Log at
+  the end of this note for how that changed the implementation.
 - ✗ `SELECT FINAL` is required on read paths to merge in real
   time (background merges happen asynchronously); reads pay a
   small cost. Acceptable per task 0046's empirical numbers.
@@ -670,3 +672,56 @@ production swap items:
 - ADR 0007 — live data sink on shared Hetzner ClickHouse
 - Task 0024 (archived) — original PG-flavoured design spec
 - Task 0038 — sibling prototype + cross-team contract (shared Parts C.1–C.3)
+
+---
+
+## Decision Log — C.4 resolved + production implementation (2026-06-09)
+
+The BE cross-team C.4 question is resolved and the production Form-B
+path is implemented (`packages/enrichment-worker/src/ch_enrich.rs`).
+Resolving C.4 surfaced three places where the *real* ADR-0007 schema
+diverges from what Part A.2 was drafted against; the implementation
+follows the schema, not the original sketch:
+
+1. **Engine confirmed `ReplacingMergeTree(version)`.** Recorded as a
+   hard requirement in `docs/database-schema/database-schema-overview.md`
+   §3.2 (callout) and `docs/prices-api-general-overview.md` §3.
+
+2. **Version is `version UInt64` (ledger_seq×1000 + intra-ledger
+   order), not `_inserted_at DateTime`.** Enriched re-inserts therefore
+   carry `version = original_version + 1` (deterministic, wins the
+   merge, self-heals if a later higher-version write to the same bucket
+   resets `volume_quote_usd = 0`). The `now() AS _inserted_at` promote
+   trick from A.2 is obsolete.
+
+3. **`volume_quote` was missing from the live schema and is RESTORED**
+   (empty/pre-production tables, so no backfill cost). The decoder
+   (task 0048 spec) already computes `volume_quote = Σ|quote_amount|`
+   to derive `vwap`, then discarded it; the column just stops
+   discarding it. Enrichment now reads it directly —
+   `volume_quote_usd = oracle_price × volume_quote` (exact) — instead
+   of the lossy `vwap × volume_base` reconstruction. **Writer
+   dependency:** task 0038 + the backfills must populate the restored
+   column (`sdex-backfill/src/sink.rs` currently writes `volume_quote`
+   into the `volume_quote_usd` slot — to be corrected there).
+
+**Other deltas from A.2:**
+
+- **Per-granularity tables.** Enrichment targets `price_ohlcv_1m` only.
+  Rolled-up `_15m … _1M` are produced by the MV chain; how those views
+  re-aggregate a *re-inserted* `_1m` row and what `version` they project
+  onto their RMT targets is a **task 0051 dependency** — flagged, not
+  solved here.
+- **Direct `INSERT … SELECT`, no staging table.** With ledger-derived
+  `version + 1`, the staging→promote→truncate dance (whose promote keyed
+  on `max(_inserted_at)`) buys nothing: the single statement is already
+  idempotent via the `FINAL WHERE volume_quote_usd = 0` read filter and
+  self-healing on partial crash.
+- **Trait seams dissolve in production.** `CandidateSource` /
+  `OraclePriceLookup` / `EnrichmentSink` fold into the one set-based SQL
+  statement; they remain the *prototype's* structure only.
+
+**Caveat:** the production path is verified to compile + pass the
+prototype test suite, but **not** run against a live ClickHouse (none
+provisioned; prepare-only). Needs an integration test against a real CH
+before it can be trusted end-to-end.
