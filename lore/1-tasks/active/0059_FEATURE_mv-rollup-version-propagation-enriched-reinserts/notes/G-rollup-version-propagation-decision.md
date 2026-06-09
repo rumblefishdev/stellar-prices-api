@@ -1,7 +1,7 @@
 ---
 title: "Rollup-chain semantics under enriched _1m re-inserts — decision + proof plan"
 type: generation
-status: developing
+status: mature
 spawns: []
 tags: [clickhouse, materialized-views, rollups, replacingmergetree, aggregatingmergetree, refreshable-mv]
 links:
@@ -20,18 +20,46 @@ history:
       insert-block MV mechanics; finds it under-counts independent of
       enrichment; recommends a refreshable / re-aggregate-from-FINAL
       rollup. Proof execution (local docker CH) deferred to a follow-up.
+  - date: 2026-06-09
+    status: mature
+    who: okarcz
+    note: >
+      Proof EXECUTED against clickhouse-server 24.8.14 (proof/, run.sh,
+      RESULTS.md). Confirmed all predictions plus two new findings: (1)
+      the draft §3.2 MV does not even COMPILE — alias collision
+      `sum(x) AS x` + re-`sum(x)` → ILLEGAL_AGGREGATION; (5) `max(version)`
+      is an insufficient rollup version projection — enriching an early
+      minute leaves bucket max unchanged, tying stale vs corrected rollup
+      rows. Observed: draft under-counts 150→10; enrichment does not
+      propagate (stays 0); re-aggregate-from-_1m-FINAL yields correct 150
+      / 500. Refines recommendation toward a true Refreshable MV (atomic
+      replace) over the scheduled-ReplacingMergeTree fallback.
 ---
 
 # Rollup-chain semantics under enriched `_1m` re-inserts — decision + proof plan
 
 ## 0. TL;DR
 
+> **Status: proof executed** against `clickhouse-server 24.8.14` — see
+> [`proof/RESULTS.md`](../proof/RESULTS.md) (`./proof/run.sh` reproduces).
+> Every prediction below was observed, plus two findings the desk analysis
+> missed: the draft **does not even compile** (alias collision), and
+> `max(version)` is an **insufficient rollup version projection**.
+
 The draft insert-trigger materialised-view rollup in
 [`database-schema-overview.md` §3.2](../../../../docs/database-schema/database-schema-overview.md)
 (`mv_ohlcv_1m_to_15m`, lines ~461–479) is **incorrect — and not only under
 enrichment.** A ClickHouse MV fires on the *inserted block*, aggregating only
 the rows in that one INSERT. Because the rollup target is
-`ReplacingMergeTree(version)`, two independent failures follow:
+`ReplacingMergeTree(version)`, the failures below follow.
+
+**Finding 0 (proof-only): the draft does not compile.** Transcribed verbatim it
+raises `ILLEGAL_AGGREGATION` — `sum(volume_base) AS volume_base` shadows the
+column, and the `vwap` line re-uses `sum(volume_base)`, nesting aggregate in
+aggregate. So before any semantic argument, the DDL is non-functional. Fix:
+`vwap = volume_quote_usd / nullIf(volume_base, 0)` (reference the aliases).
+
+Even with that fixed, two runtime failures remain:
 
 1. **Multi-block under-count (live path, no enrichment needed).** A 15-minute
    bucket is fed by ~15 separate per-minute INSERTs. Each fires the MV, each
@@ -168,7 +196,7 @@ SELECT
     sum(volume_base)      AS volume_base,
     sum(volume_quote)     AS volume_quote,
     sum(volume_quote_usd) AS volume_quote_usd,
-    sum(volume_quote_usd) / nullIf(sum(volume_base), 0) AS vwap,
+    volume_quote_usd / nullIf(volume_base, 0) AS vwap,  -- ref aliases (finding #1)
     sum(trade_count)      AS trade_count,
     max(version)          AS version
 FROM prices.price_ohlcv_1m FINAL          -- <-- post-dedup, post-enrichment
@@ -176,15 +204,17 @@ WHERE timestamp >= now() - INTERVAL 2 HOUR  -- bounded re-scan; coarser grains w
 GROUP BY timestamp, asset_id, quote_asset_id, source;
 ```
 
+> **vwap must reference the aliases**, not re-sum (`sum(…)/sum(…)`) — the proof
+> showed the re-sum form fails to compile (`ILLEGAL_AGGREGATION`, finding #1).
+
 Why it's correct:
 
 - Reads `_1m FINAL` → sees the **enriched, deduplicated** rows, never partials.
 - Recomputes the **whole bucket** each refresh → no multi-block under-count.
-- Enrichment propagates automatically on the next refresh — **no version
-  puzzle, no double-count.**
-- Target `ReplacingMergeTree(version)` with `version = max(source.version)`:
-  each refresh re-emits the full-bucket row; a later refresh with an enriched
-  (higher) source version replaces cleanly.
+- Enrichment propagates automatically on the next refresh — **no double-count.**
+- A true Refreshable MV **atomically replaces** the target on each refresh, so
+  it does *not* rely on `ReplacingMergeTree` version dedup at all — which
+  sidesteps the version-projection trap below.
 
 Trade-offs:
 
@@ -194,6 +224,16 @@ Trade-offs:
 - **CH version dependency.** Refreshable MVs are ≥ 23.12 and were experimental
   for a while. If the BE Hetzner cluster's version is uncertain, the *same
   query* runs as a scheduled job — see Option A′.
+
+> **Version-projection trap (finding #5, proof-confirmed).** `version =
+> max(source.version)` is **not** sufficient for a scheduled re-aggregate into a
+> `ReplacingMergeTree(version)` target (Option A′). Enriching an *early* minute
+> bumps that row's version (e.g. 7→8) but leaves the bucket `max(version)`
+> unchanged (15), so the stale and corrected rollup rows **tie on version** and
+> dedup degrades to insertion-order luck. A true Refreshable MV (atomic replace)
+> avoids this; a scheduled fallback must instead project a **strictly-increasing**
+> version — e.g. `sum(version)` (observed 120→121 on the same enrichment) or a
+> monotonic refresh epoch.
 
 ADR reconciliation: ADR 0007 §3.4 eliminated the **Rollup Lambda**. A
 refreshable MV keeps rollups **inside ClickHouse with no external scheduler**,
@@ -239,21 +279,47 @@ burden.
 - [ ] Rollup MVs **re-aggregate from `<source>_Ng FINAL`**, not from the insert
       block. Refreshable MV (Option A) preferred; scheduled re-aggregate (A′)
       only if the cluster CH version forces it.
-- [ ] Each rollup `SELECT` projects `version = max(source.version)` and
-      `sum(volume_quote)` **in addition to** `sum(volume_quote_usd)` (so the
-      native quote volume is available at every grain — see task 0058).
+- [ ] **`vwap` references the summed aliases** (`volume_quote_usd /
+      nullIf(volume_base, 0)`), never `sum(…)/sum(…)` — the latter fails to
+      compile (`ILLEGAL_AGGREGATION`, finding #1).
+- [ ] Each rollup `SELECT` projects `sum(volume_quote)` **in addition to**
+      `sum(volume_quote_usd)` (native quote volume available at every grain —
+      task 0058).
+- [ ] **Version projection:** a true Refreshable MV (atomic replace) needs no
+      version trick. A scheduled re-aggregate into `ReplacingMergeTree(version)`
+      (A′) **must not** use `version = max(source.version)` — it ties pre/post
+      early-minute enrichment (finding #5). Use a strictly-increasing projection
+      (`sum(version)` or a refresh epoch).
 - [ ] Rollup targets remain `ReplacingMergeTree(version)`, identical shape to
       `_1m` (no `AggregateFunction` columns).
 - [ ] Refresh windows bounded per grain (`_15m` ~minutes, `_1M` ~hourly/daily);
       document each.
 - [ ] The draft insert-trigger `mv_ohlcv_1m_to_15m` in schema-overview §3.2 is
-      **superseded**; update that doc when 0051 lands the real DDL.
+      **superseded** (and doesn't compile as written); update that doc when 0051
+      lands the real DDL.
 - [ ] ADR-0007 amendment (or new ADR) records refreshable-vs-insert-trigger.
 
-## 5. Proof plan (local docker ClickHouse — execution deferred)
+## 5. Proof — EXECUTED ✅
+
+> **Ran 2026-06-09 against `clickhouse-server 24.8.14`.** Artifacts:
+> [`proof/run.sh`](../proof/run.sh) (one-command repro),
+> [`proof/01_schema.sql`](../proof/01_schema.sql),
+> [`proof/02_seed.sql`](../proof/02_seed.sql),
+> [`proof/03_enrich_and_fix.sql`](../proof/03_enrich_and_fix.sql),
+> [`proof/RESULTS.md`](../proof/RESULTS.md). Headline numbers:
+>
+> | | `_1m FINAL` (truth) | draft `_15m` | re-aggregate from `_1m FINAL` |
+> |---|---|---|---|
+> | `volume_base` | **150** | **10** ❌ (1/15) | **150** ✅ |
+> | `volume_quote_usd` after enrich | **500** | **0** ❌ (no propagation) | **500** ✅ |
+> | `trade_count` | 15 | 1 | 15 |
+>
+> Plus finding #1 (draft won't compile) and finding #5 (`max(version)`
+> 15→15 ties; `sum(version)` 120→121 strictly increases). The plan that
+> produced these results follows.
 
 Goal: empirically demonstrate the draft's under-count, the enrichment
-double-count, and the Option-A fix, on a minimal `_1m → _15m` chain. No live
+mis-propagation, and the Option-A fix, on a minimal `_1m → _15m` chain. No live
 infra; a throwaway `clickhouse/clickhouse-server` container.
 
 **Fixtures.** One `(asset_id, quote_asset_id, source)` series; a single 15-minute

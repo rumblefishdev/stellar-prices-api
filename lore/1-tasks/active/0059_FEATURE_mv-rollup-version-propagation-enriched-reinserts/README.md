@@ -41,6 +41,18 @@ history:
       (Refreshable MV) rollups. Proof execution against a local docker
       CH is the next step (deferred). 0051 contract + ADR-0007
       amendment flagged.
+  - date: 2026-06-09
+    status: active
+    who: okarcz
+    note: >
+      Proof EXECUTED against clickhouse-server 24.8.14 (proof/ harness +
+      run.sh + RESULTS.md). Confirmed the draft under-counts 150->10 and
+      enrichment does not propagate; re-aggregate-from-_1m-FINAL yields
+      the correct 150/500. Two new findings: draft DDL does not compile
+      (alias collision), and max(version) is an insufficient rollup
+      version projection. Added a superseded-warning callout to schema
+      doc §3.2. G-note promoted to mature. Remaining work (full _15m.._1M
+      chain test, real DDL) still gated on 0051.
 ---
 
 # MV rollup-chain version propagation under enriched `_1m` re-inserts
@@ -87,6 +99,16 @@ Design + proof plan authored (no live CH yet). Headline findings:
 - This supersedes the draft DDL → **0051 must not ship it as written**, and an
   ADR-0007 amendment should record the refreshable-rollup choice.
 
+**Proof executed** (2026-06-09, `clickhouse-server 24.8.14` — see
+[`proof/`](proof/) + [`proof/RESULTS.md`](proof/RESULTS.md), `proof/run.sh`
+reproduces). Confirmed all predictions and surfaced two more: the draft DDL
+**does not compile** (alias collision → `ILLEGAL_AGGREGATION`), and
+`max(version)` is an **insufficient rollup version projection** (ties pre/post
+early-minute enrichment; `sum(version)` strictly increases). Observed:
+`volume_base` 150→10 under the draft; `volume_quote_usd` stays 0 after enrich;
+re-aggregate-from-`_1m FINAL` yields the correct 150 / 500. The schema doc §3.2
+now carries a ⚠️ pointer warning against the broken sketch.
+
 ## Implementation
 
 - Pin down the exact MV DDL (`SELECT` shape, `GROUP BY`, projected
@@ -100,10 +122,14 @@ Design + proof plan authored (no live CH yet). Headline findings:
 
 ## Acceptance Criteria
 
-- [ ] MV chain projects a `version` that lets an enriched `_1m`
-      re-insert win at every rolled-up granularity
-- [ ] No double-count / under-count of `volume_quote_usd` in `_15m … _1M`
-      after an enrichment pass
-- [ ] Integration test covering write → roll up → enrich → assert across
-      all granularities (`FINAL`)
-- [ ] 0026 G-note dependency note resolved / cross-linked
+- [~] MV chain projects a `version` that lets an enriched `_1m`
+      re-insert win at every rolled-up granularity — **semantics decided +
+      proven** (`sum(version)`/refresh-epoch, not `max(version)`); production
+      DDL lands in 0051
+- [~] No double-count / under-count of `volume_quote_usd` in `_15m … _1M`
+      after an enrichment pass — **proven on `_1m → _15m`** (re-aggregate from
+      `_1m FINAL`); full chain `_15m … _1M` verified once 0051 lands the DDL
+- [~] Integration test covering write → roll up → enrich → assert across
+      all granularities (`FINAL`) — **proof harness exists** (`proof/`, 1 hop);
+      extend to all grains against the real 0051 DDL
+- [x] 0026 G-note dependency note resolved / cross-linked

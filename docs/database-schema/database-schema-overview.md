@@ -481,6 +481,31 @@ GROUP BY timestamp, asset_id, quote_asset_id, source;
 -- Repeat for 15m → 1h, 1h → 4h, 4h → 1d, 1d → 1w, 1w → 1M.
 ```
 
+> #### ⚠️ This sketch DDL is superseded — do not implement as-is (task 0059)
+>
+> A local-ClickHouse proof (task 0059, 2026-06-09, CH 24.8.14) found the sketch
+> above is **non-functional and incorrect** on three independent counts:
+>
+> 1. **It does not compile.** `sum(volume_base) AS volume_base` shadows the
+>    column; the `vwap` line's `sum(volume_base)` then nests aggregate-in-
+>    aggregate → `Code: 184 ILLEGAL_AGGREGATION`. Fix: `vwap = volume_quote_usd
+/ nullIf(volume_base, 0)` (reference the aliases).
+> 2. **It under-counts ~15×.** A ClickHouse insert-trigger MV aggregates only
+>    the _inserted block_. A 15-minute bucket arrives as ~15 separate per-minute
+>    INSERTs → 15 partial `_15m` rows with the same sort key → the
+>    `ReplacingMergeTree` target keeps just one (`max(version)`). Observed
+>    `volume_base` 150 → 10.
+> 3. **Enrichment (task 0026) does not propagate.** A re-inserted corrected
+>    `_1m` row's `_15m` partial carries a `version` below the bucket max and
+>    loses; `volume_quote_usd` stays 0 at `_15m`.
+>
+> The fix is to **re-aggregate from `price_ohlcv_1m FINAL`** (a Refreshable MV,
+> or a scheduled `INSERT … SELECT … FROM _1m FINAL`), keeping rollups inside
+> ClickHouse per ADR 0007 §3.4. Task **0051** must implement that, not this
+> sketch. See
+> [`lore/1-tasks/active/0059_…/notes/G-rollup-version-propagation-decision.md`](../../lore/1-tasks/active/0059_FEATURE_mv-rollup-version-propagation-enriched-reinserts/notes/G-rollup-version-propagation-decision.md)
+> and its `proof/`. An ADR-0007 amendment recording this is pending.
+
 The full DDL set will land in `docs/database-schema/clickhouse-prod-schema.sql`
 once task 0011 (CDK + schema applier) is unblocked.
 
