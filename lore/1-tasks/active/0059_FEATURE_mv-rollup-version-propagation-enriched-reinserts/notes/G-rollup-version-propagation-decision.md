@@ -5,6 +5,7 @@ status: developing
 spawns: []
 tags: [clickhouse, materialized-views, rollups, replacingmergetree, aggregatingmergetree, refreshable-mv]
 links:
+  - "https://clickhouse.com/docs/materialized-view/incremental-materialized-view"
   - "../../../../docs/database-schema/database-schema-overview.md"
   - "../../../2-adrs/0007_live-data-sink-on-shared-hetzner-clickhouse.md"
   - "../../blocked/0026_FEATURE_volume-quote-usd-enrichment-impl/notes/G-local-prototype-spec.md"
@@ -72,6 +73,33 @@ table. It is an **INSERT trigger**: when a block of rows is inserted into the
 source table, the MV's `SELECT` runs **over just that block**, and its output
 is inserted into the target table. It does **not** read the target, and it does
 **not** re-read the rest of the source bucket.
+
+This is ClickHouse's own documented definition, not an inference. From the
+[official incremental-MV docs](https://clickhouse.com/docs/materialized-view/incremental-materialized-view)
+(retrieved 2026-06-09):
+
+> "a ClickHouse materialized view is just a trigger that runs a query on blocks
+> of data as they're inserted into a table."
+
+> "When new rows are inserted into this table, ClickHouse executes the
+> materialized view query *only* with those newly inserted rows."
+
+> "the source table in the materialized view's query is replaced with the
+> inserted block of data."
+
+That third quote is the mechanically decisive one: inside the MV's `SELECT`,
+`FROM price_ohlcv_1m` is substituted with *just the inserted block*, so a
+`GROUP BY 15m-bucket` aggregates only the rows in that one INSERT — never a
+re-read of the whole bucket. (The docs note the partial results are then sent
+to the target table to be "updated and merged" by the target engine — the
+"What the target engine does with N same-key rows" table below is exactly that
+reconciliation step.)
+
+> **Documented vs. deduced.** The block-only trigger behaviour above (and the
+> `ReplacingMergeTree` "keep one row per sort key" rule) are documented facts.
+> The specific *1/N under-count* conclusion in the table below is a sound
+> deduction composed from those two facts — the §5 proof plan exists to confirm
+> it empirically against a real ClickHouse before 0051 commits.
 
 Consequences for a `GROUP BY 15m-bucket` rollup:
 
