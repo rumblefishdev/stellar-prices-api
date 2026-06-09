@@ -46,10 +46,12 @@ history:
 > missed: the draft **does not even compile** (alias collision), and
 > `max(version)` is an **insufficient rollup version projection**.
 
-The draft insert-trigger materialised-view rollup in
+The original draft insert-trigger materialised-view rollup that stood in
 [`database-schema-overview.md` §3.2](../../../../docs/database-schema/database-schema-overview.md)
-(`mv_ohlcv_1m_to_15m`, lines ~461–479) is **incorrect — and not only under
-enrichment.** A ClickHouse MV fires on the *inserted block*, aggregating only
+(`mv_ohlcv_1m_to_15m`) was **incorrect — and not only under enrichment.**
+(§3.2 has since been **rewritten to the corrected pattern recommended by this
+note**; what follows is the analysis that drove that rewrite.) A ClickHouse MV
+fires on the *inserted block*, aggregating only
 the rows in that one INSERT. Because the rollup target is
 `ReplacingMergeTree(version)`, the failures below follow.
 
@@ -294,9 +296,12 @@ burden.
       `_1m` (no `AggregateFunction` columns).
 - [ ] Refresh windows bounded per grain (`_15m` ~minutes, `_1M` ~hourly/daily);
       document each.
-- [ ] The draft insert-trigger `mv_ohlcv_1m_to_15m` in schema-overview §3.2 is
-      **superseded** (and doesn't compile as written); update that doc when 0051
-      lands the real DDL.
+- [x] The draft insert-trigger `mv_ohlcv_1m_to_15m` in schema-overview §3.2 is
+      **superseded** (and doesn't compile as written). **Done 2026-06-09** —
+      §3.2 now shows the corrected refreshable / re-aggregate-from-`_1m FINAL`
+      pattern; the three insert-trigger phrasings elsewhere in the doc were
+      updated to match. 0051 finalises refreshable-MV vs. scheduled against the
+      cluster CH version.
 - [ ] ADR-0007 amendment (or new ADR) records refreshable-vs-insert-trigger.
 
 ## 5. Proof — EXECUTED ✅

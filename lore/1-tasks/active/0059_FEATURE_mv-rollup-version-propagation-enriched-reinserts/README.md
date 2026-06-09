@@ -107,7 +107,8 @@ reproduces). Confirmed all predictions and surfaced two more: the draft DDL
 early-minute enrichment; `sum(version)` strictly increases). Observed:
 `volume_base` 150→10 under the draft; `volume_quote_usd` stays 0 after enrich;
 re-aggregate-from-`_1m FINAL` yields the correct 150 / 500. The schema doc §3.2
-now carries a ⚠️ pointer warning against the broken sketch.
+was **rewritten to the corrected refreshable / re-aggregate pattern** (and the
+insert-trigger phrasings elsewhere in the doc updated to match).
 
 ## Implementation
 
