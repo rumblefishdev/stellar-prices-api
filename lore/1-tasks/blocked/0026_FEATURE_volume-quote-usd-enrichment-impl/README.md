@@ -2,15 +2,16 @@
 id: "0026"
 title: "volume_quote_usd enrichment Lambda — implement the Phase 1 spec from task 0024"
 type: FEATURE
-status: active
-related_adr: ["0003"]
-related_tasks: ["0024", "0012", "0022", "0023"]
-by: ["0012"]
-tags: [layer-indexing, priority-medium, effort-medium, lambda, ohlcv, enrichment, oracle, phase-2]
+status: blocked
+related_adr: ["0003", "0004", "0007"]
+related_tasks: ["0024", "0012", "0022", "0023", "0038", "0058", "0059"]
+tags: [layer-indexing, priority-medium, effort-medium, lambda, ohlcv, enrichment, oracle, phase-2, clickhouse]
 links:
-  - "../archive/0024_FEATURE_volume-quote-usd-enrichment/notes/G-enrichment-pass-design.md"
-  - "../archive/0024_FEATURE_volume-quote-usd-enrichment/README.md"
-  - "../../2-adrs/0003_price-ohlcv-pk-includes-quote-asset-id.md"
+  - "../../archive/0024_FEATURE_volume-quote-usd-enrichment/notes/G-enrichment-pass-design.md"
+  - "../../archive/0024_FEATURE_volume-quote-usd-enrichment/README.md"
+  - "../../../2-adrs/0003_price-ohlcv-pk-includes-quote-asset-id.md"
+  - "../../../2-adrs/0004_price-ohlcv-multi-source-merge-columns.md"
+  - "../../../2-adrs/0007_live-data-sink-on-shared-hetzner-clickhouse.md"
 history:
   - date: 2026-05-13
     status: blocked
@@ -51,6 +52,25 @@ history:
       CDK stack apply, or live CH writes — see the forthcoming
       G-note under `notes/G-local-prototype-spec.md` for the full
       Part C cross-team contract.
+  - date: 2026-06-09
+    status: blocked
+    who: oski
+    note: >
+      Re-blocked after landing the local prototype + production CH
+      Form-B enrichment path (commit 75d00d0). The reduced
+      local-only scope is delivered: runnable crate, fixture path,
+      production INSERT…SELECT ASOF-JOIN path wired, schema
+      requirement (ReplacingMergeTree + restored `volume_quote`)
+      documented, follow-ups 0058/0059 spawned. The remaining
+      acceptance criteria are integration-only and cannot be met
+      without live infra: blocked on 0012 (live ClickHouse endpoint
+      + Oracle Fetcher writing `oracle_prices`) and 0051
+      (`price_ohlcv_1m` + MV rollup-chain DDL deployed). Also gated
+      on 0058 (writers must populate `volume_quote`) and a BE
+      cross-team review of the schema/merge-semantics choices in the
+      G-note before any infra commitment. The production path
+      compiles and passes the prototype unit suite but has NOT been
+      run against a live ClickHouse.
 ---
 
 # `volume_quote_usd` enrichment Lambda — implementation
@@ -113,6 +133,17 @@ Carried over from task 0024's design spec §7:
       credible against Horizon's historical aggregates).
 - [ ] CloudWatch metrics from spec §5 are emitted and visible in
       the dashboard.
+
+## Future Work
+
+Spawned from the production implementation (see G-note Decision Log,
+2026-06-09):
+
+- **0058** — populate the restored `volume_quote` column in the OHLCV
+  writers (prices-ledger-processor 0038 + sdex-backfill + soroban-amm
+  backfill). Enrichment reads this column directly; writers must fill it.
+- **0059** — MV rollup-chain version propagation under enriched `_1m`
+  re-inserts (task 0051 dependency). 0026 enriches `_1m` only.
 
 ## Notes
 

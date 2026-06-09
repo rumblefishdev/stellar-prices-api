@@ -7,6 +7,7 @@ members = [
     "packages/soroswap-extractor",
     "packages/aquarius-extractor",
     "packages/ledger-processor",
+    "packages/enrichment-worker",
 ]
 
 [workspace.dependencies]

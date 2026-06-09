@@ -384,7 +384,12 @@ CREATE TABLE prices.price_ohlcv_1m (
     low              Decimal(38, 14),
     close            Decimal(38, 14),
     volume_base      Decimal(38, 14) DEFAULT 0,
-    volume_quote_usd Decimal(38, 14) DEFAULT 0,
+    volume_quote     Decimal(38, 14) DEFAULT 0,  -- native quote-asset volume (sum of
+                                                  -- quote-leg amounts); the decoder already
+                                                  -- computes this to derive vwap. Oracle-
+                                                  -- multiplied into volume_quote_usd by the
+                                                  -- enrichment Lambda (task 0026)
+    volume_quote_usd Decimal(38, 14) DEFAULT 0,  -- USD-denominated; filled by task 0026
     vwap             Decimal(38, 14),         -- single-source, single-minute VWAP
                                                -- (volume_quote / volume_base);
                                                -- see §5.5 of the main overview
@@ -416,6 +421,32 @@ sub-key inside that block gives O(log N) range scans.
 **Source values (example):** `'sdex'`, `'soroswap'`, `'aquarius'`,
 `'phoenix'`. `LowCardinality(String)` stores these as 16-bit dictionary
 indices; per-row cost is trivial.
+
+> #### ⚠️ Requirement — engine MUST be `ReplacingMergeTree(version)` (enrichment idempotency)
+>
+> Confirmed by the BE cross-team contract (task 0026 question C.4, 2026-06-09):
+> `price_ohlcv_*` **must** be `ReplacingMergeTree(version)` — **not** a plain
+> `MergeTree`. The `volume_quote_usd` enrichment Lambda (task 0026) does **not**
+> `ALTER TABLE … UPDATE` the zero-valued rows. ClickHouse has no efficient
+> in-place update, so enrichment instead **re-INSERTs a corrected copy of the row
+> with a strictly-greater `version`**, and the engine collapses the pair to the
+> enriched winner on the next background merge. This load-bearing invariant holds:
+>
+> - **Engine = `ReplacingMergeTree(version)`.** On a plain `MergeTree` the zero
+>   row and the enriched row would coexist forever, double-counting every read.
+> - **Enriched re-inserts carry `version = original_version + 1`.** The
+>   ledger-derived `version` of the source row + 1 guarantees the enriched copy
+>   wins the dedup. If a later legitimate write to the same bucket arrives with a
+>   higher ledger-derived version, it wins and resets `volume_quote_usd = 0`; the
+>   next enrichment pass re-enriches it (self-healing).
+> - **Reads that must reflect enrichment use `SELECT … FINAL`.** Background merges
+>   are asynchronous, so between the enrich INSERT and the next merge both versions
+>   physically coexist; `FINAL` forces the collapse at query time. The enrichment
+>   pass itself reads candidates via `FINAL WHERE volume_quote_usd = 0`, which is
+>   also what makes re-running it idempotent.
+> - **`volume_quote` is required input.** Enrichment computes
+>   `volume_quote_usd = oracle_price_usd × volume_quote` (exact), so the decoder/
+>   writer (task 0038 + backfills) must populate the `volume_quote` column above.
 
 #### Rollup chain — materialised views
 
