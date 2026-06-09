@@ -2,13 +2,13 @@
 id: "0059"
 title: "MV rollup-chain version propagation under enriched `_1m` re-inserts"
 type: FEATURE
-status: backlog
+status: active
 related_adr: ["0007"]
 related_tasks: ["0026", "0051"]
 tags: [layer-database, priority-high, effort-medium, clickhouse, materialized-views, rollups]
 links:
   - "../../../docs/database-schema/database-schema-overview.md"
-  - "../active/0026_FEATURE_volume-quote-usd-enrichment-impl/notes/G-local-prototype-spec.md"
+  - "../blocked/0026_FEATURE_volume-quote-usd-enrichment-impl/notes/G-local-prototype-spec.md"
   - "./0051_FEATURE_clickhouse-prices-schema-and-mv-chain-migration.md"
 history:
   - date: 2026-06-09
@@ -21,6 +21,14 @@ history:
       open questions about how _15m..._1M re-aggregate and what version
       the MVs project onto their ReplacingMergeTree targets. 0026
       scoped itself to _1m only and flagged this as a 0051 dependency.
+  - date: 2026-06-09
+    status: active
+    who: okarcz
+    note: >
+      Promoted from backlog to active. Fixed the stale 0026 link
+      (active -> blocked). Note: real progress is gated on 0051
+      landing the MV rollup-chain DDL — the SELECT/GROUP BY/projected
+      version this task verifies does not exist yet.
 ---
 
 # MV rollup-chain version propagation under enriched `_1m` re-inserts
