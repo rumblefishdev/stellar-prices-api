@@ -2,7 +2,7 @@
 id: "0026"
 title: "volume_quote_usd enrichment Lambda — implement the Phase 1 spec from task 0024"
 type: FEATURE
-status: active
+status: blocked
 related_adr: ["0003", "0004", "0007"]
 related_tasks: ["0024", "0012", "0022", "0023", "0038", "0058", "0059"]
 tags: [layer-indexing, priority-medium, effort-medium, lambda, ohlcv, enrichment, oracle, phase-2, clickhouse]
@@ -52,6 +52,25 @@ history:
       CDK stack apply, or live CH writes — see the forthcoming
       G-note under `notes/G-local-prototype-spec.md` for the full
       Part C cross-team contract.
+  - date: 2026-06-09
+    status: blocked
+    who: oski
+    note: >
+      Re-blocked after landing the local prototype + production CH
+      Form-B enrichment path (commit 75d00d0). The reduced
+      local-only scope is delivered: runnable crate, fixture path,
+      production INSERT…SELECT ASOF-JOIN path wired, schema
+      requirement (ReplacingMergeTree + restored `volume_quote`)
+      documented, follow-ups 0058/0059 spawned. The remaining
+      acceptance criteria are integration-only and cannot be met
+      without live infra: blocked on 0012 (live ClickHouse endpoint
+      + Oracle Fetcher writing `oracle_prices`) and 0051
+      (`price_ohlcv_1m` + MV rollup-chain DDL deployed). Also gated
+      on 0058 (writers must populate `volume_quote`) and a BE
+      cross-team review of the schema/merge-semantics choices in the
+      G-note before any infra commitment. The production path
+      compiles and passes the prototype unit suite but has NOT been
+      run against a live ClickHouse.
 ---
 
 # `volume_quote_usd` enrichment Lambda — implementation
