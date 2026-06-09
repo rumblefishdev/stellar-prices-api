@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS prices.price_ohlcv_1m (
     low              Decimal(38, 14),
     close            Decimal(38, 14),
     volume_base      Decimal(38, 14) DEFAULT 0,
+    volume_quote     Decimal(38, 14) DEFAULT 0,
     volume_quote_usd Decimal(38, 14) DEFAULT 0,
     vwap             Decimal(38, 14),
     trade_count      UInt32        DEFAULT 0,
