@@ -2,13 +2,13 @@
 id: "0058"
 title: "Populate the restored `volume_quote` column in the OHLCV writers"
 type: FEATURE
-status: backlog
+status: active
 related_adr: ["0004", "0007"]
 related_tasks: ["0026", "0038", "0051"]
 tags: [layer-ingestion, priority-high, effort-small, clickhouse, schema, writers]
 links:
   - "../../../docs/database-schema/database-schema-overview.md"
-  - "../active/0026_FEATURE_volume-quote-usd-enrichment-impl/notes/G-local-prototype-spec.md"
+  - "../blocked/0026_FEATURE_volume-quote-usd-enrichment-impl/notes/G-local-prototype-spec.md"
   - "../../../packages/sdex-backfill/src/sink.rs"
 history:
   - date: 2026-06-09
@@ -21,6 +21,12 @@ history:
       (volume_quote_usd = oracle_price x volume_quote, exact). The
       writers must now actually populate it, else every row reads back
       volume_quote = 0 and enrichment produces 0.
+  - date: 2026-06-09
+    status: active
+    who: okarcz
+    note: >
+      Promoted from backlog to active. Fixed the stale 0026 link
+      (active -> blocked, 0026 was re-blocked on 0012/0051).
 ---
 
 # Populate the restored `volume_quote` column in the OHLCV writers
