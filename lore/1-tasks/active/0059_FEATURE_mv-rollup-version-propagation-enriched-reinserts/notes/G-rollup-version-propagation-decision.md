@@ -6,6 +6,8 @@ spawns: []
 tags: [clickhouse, materialized-views, rollups, replacingmergetree, aggregatingmergetree, refreshable-mv]
 links:
   - "https://clickhouse.com/docs/materialized-view/incremental-materialized-view"
+  - "https://clickhouse.com/docs/materialized-view/refreshable-materialized-view"
+  - "https://clickhouse.com/docs/sql-reference/statements/create/view"
   - "../../../../docs/database-schema/database-schema-overview.md"
   - "../../../2-adrs/0007_live-data-sink-on-shared-hetzner-clickhouse.md"
   - "../../blocked/0026_FEATURE_volume-quote-usd-enrichment-impl/notes/G-local-prototype-spec.md"
@@ -34,6 +36,21 @@ history:
       propagate (stays 0); re-aggregate-from-_1m-FINAL yields correct 150
       / 500. Refines recommendation toward a true Refreshable MV (atomic
       replace) over the scheduled-ReplacingMergeTree fallback.
+  - date: 2026-06-10
+    status: mature
+    who: okarcz
+    note: >
+      Durability correction (doc-grounded). The default refreshable MV
+      "atomically replaces the table's previous contents" (CREATE VIEW
+      ref) — so replace-mode + a bounded WHERE window only ever holds the
+      window, and clearing _1m would empty the rollup on the next refresh.
+      Durable rollups therefore require APPEND ("inserts rows into the
+      table without deleting existing rows"), which puts them back on
+      ReplacingMergeTree version dedup → finding #5 (strictly-increasing
+      version) applies after all. Corrected the §3 "atomic replace
+      sidesteps finding #5" claim (only true with an unbounded window),
+      added §3.1 durability subsection with the two ClickHouse doc
+      citations, and added an APPEND-not-replace item to the §4 contract.
 ---
 
 # Rollup-chain semantics under enriched `_1m` re-inserts — decision + proof plan
@@ -83,7 +100,11 @@ correction-by-re-insert cannot both be served by a plain insert-trigger MV.**
 rather than sum the insert block** — implemented as a **Refreshable
 Materialized View** (ClickHouse ≥ 23.12) or, if the cluster's CH version
 can't be relied on, a scheduled `INSERT … SELECT … FROM _1m FINAL` re-aggregate.
-Targets stay `ReplacingMergeTree(version)` with `version = max(source.version)`.
+Targets stay `ReplacingMergeTree(version)`. The refresh must run in **`APPEND`
+mode** (default replace-mode + a bounded window destroys history — §3.1), and
+because APPEND goes back through RMT dedup the projected version must be
+**strictly increasing** (`sum(version)` / refresh epoch), **not**
+`max(source.version)` (finding #5).
 This is correct by construction on **both** failure modes, keeps rollups
 "inside ClickHouse / no Rollup Lambda" (honouring ADR 0007 §3.4), preserves the
 identical-shape target tables (no `AggregateFunction` columns → read path 0040
@@ -214,9 +235,13 @@ Why it's correct:
 - Reads `_1m FINAL` → sees the **enriched, deduplicated** rows, never partials.
 - Recomputes the **whole bucket** each refresh → no multi-block under-count.
 - Enrichment propagates automatically on the next refresh — **no double-count.**
-- A true Refreshable MV **atomically replaces** the target on each refresh, so
-  it does *not* rely on `ReplacingMergeTree` version dedup at all — which
-  sidesteps the version-projection trap below.
+- A true Refreshable MV in **replace mode** atomically swaps the whole target,
+  so it doesn't rely on `ReplacingMergeTree` version dedup — but that only
+  preserves history if the query is **unbounded** (recompute all history every
+  tick), which is too costly for coarse grains. With a **bounded** window
+  (below) the MV must run in **APPEND** mode, which *does* go back through
+  ReplacingMergeTree dedup → the version-projection trap (finding #5) applies.
+  See the durability subsection below; this is the load-bearing detail for 0051.
 
 Trade-offs:
 
@@ -232,10 +257,49 @@ Trade-offs:
 > `ReplacingMergeTree(version)` target (Option A′). Enriching an *early* minute
 > bumps that row's version (e.g. 7→8) but leaves the bucket `max(version)`
 > unchanged (15), so the stale and corrected rollup rows **tie on version** and
-> dedup degrades to insertion-order luck. A true Refreshable MV (atomic replace)
-> avoids this; a scheduled fallback must instead project a **strictly-increasing**
-> version — e.g. `sum(version)` (observed 120→121 on the same enrichment) or a
-> monotonic refresh epoch.
+> dedup degrades to insertion-order luck. Only *unbounded* replace-mode avoids
+> this — and we reject that on cost, so under the durable **APPEND** design
+> (§3.1) the trap **always** applies. Project a **strictly-increasing** version
+> — e.g. `sum(version)` (observed 120→121 on the same enrichment) or a monotonic
+> refresh epoch.
+
+#### Durability & refresh mode — replace vs APPEND (doc-grounded)
+
+The rollup tables must be **durable independent stores**, not ephemeral
+projections of `_1m`. Each granularity is a separate physical table; an MV only
+*writes into* its target — there is no cascade. So `TRUNCATE _1m` does **not**
+directly delete rows already in `_15m`. **But the refresh mode decides whether
+the *next* refresh wipes them**, and the default mode is dangerous here:
+
+- **Default (replace) mode** — *"each refresh atomically replaces the table's
+  previous contents."*
+  ([CREATE VIEW ref](https://clickhouse.com/docs/sql-reference/statements/create/view))
+  Combined with the bounded `WHERE timestamp >= now() - INTERVAL 2 HOUR`, the
+  target then **only ever holds the last 2 h**, and if `_1m` is cleared the next
+  refresh replaces the rollup with the (empty) result → **history loss.**
+  Replace-mode is only safe with an *unbounded* recompute — too costly per grain.
+- **APPEND mode** — *"If `APPEND` is specified, each refresh inserts rows into
+  the table without deleting existing rows"*
+  ([CREATE VIEW ref](https://clickhouse.com/docs/sql-reference/statements/create/view));
+  *"The `APPEND` functionality allows you to add new rows to the end of the
+  table instead of replacing the whole view"*
+  ([Refreshable MV guide](https://clickhouse.com/docs/materialized-view/refreshable-materialized-view)).
+  Rows outside the window are untouched; clearing `_1m` leaves historical rollup
+  rows intact. **This is the durable choice** — and it is exactly the
+  `INSERT … SELECT … FROM _1m FINAL` semantics the proof actually exercised
+  (append into a ReplacingMergeTree), *not* atomic replace.
+
+**Consequence:** durable + cost-bounded ⇒ **APPEND into a
+`ReplacingMergeTree(version)` target**, which reintroduces finding #5 — so the
+version projection **must** be strictly-increasing (`sum(version)` / refresh
+epoch), regardless of whether it's a true refreshable MV (`REFRESH … APPEND`) or
+the scheduled `INSERT … SELECT` (A′). The earlier "atomic replace sidesteps
+finding #5" shortcut only holds for the unbounded-replace variant, which we are
+not using.
+
+**Retention corollary:** because the rollup is the *only* copy of its history,
+`_1m`'s retention/TTL must be **≥ the widest refresh window** of any rollup that
+reads it — otherwise a rollup bucket can never be rebuilt after `_1m` ages out.
 
 ADR reconciliation: ADR 0007 §3.4 eliminated the **Rollup Lambda**. A
 refreshable MV keeps rollups **inside ClickHouse with no external scheduler**,
@@ -281,17 +345,29 @@ burden.
 - [ ] Rollup MVs **re-aggregate from `<source>_Ng FINAL`**, not from the insert
       block. Refreshable MV (Option A) preferred; scheduled re-aggregate (A′)
       only if the cluster CH version forces it.
+- [ ] **Refresh in `APPEND` mode, never default replace.** The default
+      *"atomically replaces the table's previous contents"*
+      ([CREATE VIEW ref](https://clickhouse.com/docs/sql-reference/statements/create/view));
+      combined with a bounded window that **destroys all history outside the
+      window** (and empties the rollup if `_1m` is cleared). `REFRESH … APPEND`
+      *"inserts rows … without deleting existing rows"* — durable. The scheduled
+      `INSERT … SELECT` (A′) is APPEND by nature. See §3.1.
+- [ ] **`_1m` retention/TTL ≥ the widest rollup refresh window.** The rollup is
+      the only copy of its history; a bucket can't be rebuilt once `_1m` ages out
+      past the window.
 - [ ] **`vwap` references the summed aliases** (`volume_quote_usd /
       nullIf(volume_base, 0)`), never `sum(…)/sum(…)` — the latter fails to
       compile (`ILLEGAL_AGGREGATION`, finding #1).
 - [ ] Each rollup `SELECT` projects `sum(volume_quote)` **in addition to**
       `sum(volume_quote_usd)` (native quote volume available at every grain —
       task 0058).
-- [ ] **Version projection:** a true Refreshable MV (atomic replace) needs no
-      version trick. A scheduled re-aggregate into `ReplacingMergeTree(version)`
-      (A′) **must not** use `version = max(source.version)` — it ties pre/post
-      early-minute enrichment (finding #5). Use a strictly-increasing projection
-      (`sum(version)` or a refresh epoch).
+- [ ] **Version projection (always needed, given APPEND).** Because durability
+      forces APPEND into a `ReplacingMergeTree(version)` target (above), the
+      version trick is **not** optional: `version = max(source.version)` **must
+      not** be used — it ties pre/post early-minute enrichment (finding #5). Use
+      a strictly-increasing projection (`sum(version)` or a refresh epoch). (The
+      "atomic replace needs no version trick" shortcut only applies to unbounded
+      replace-mode, which we reject on cost — see §3.1.)
 - [ ] Rollup targets remain `ReplacingMergeTree(version)`, identical shape to
       `_1m` (no `AggregateFunction` columns).
 - [ ] Refresh windows bounded per grain (`_15m` ~minutes, `_1M` ~hourly/daily);

@@ -53,6 +53,19 @@ history:
       version projection. Added a superseded-warning callout to schema
       doc §3.2. G-note promoted to mature. Remaining work (full _15m.._1M
       chain test, real DDL) still gated on 0051.
+  - date: 2026-06-10
+    status: active
+    who: okarcz
+    note: >
+      Durability correction (doc-grounded). Verified against the ClickHouse
+      CREATE VIEW reference + Refreshable MV guide that the default refresh
+      "atomically replaces the table's previous contents" — so replace-mode
+      plus a bounded window would destroy rollup history (and empty the
+      rollup if _1m is cleared). Durable rollups must use APPEND, which keeps
+      them on ReplacingMergeTree dedup → strictly-increasing version
+      (sum(version)/epoch) is ALWAYS required. Recorded both doc citations
+      and a new §3.1 in the G-note; added APPEND-not-replace + _1m-retention
+      items to the 0051 contract.
 ---
 
 # MV rollup-chain version propagation under enriched `_1m` re-inserts
@@ -109,6 +122,15 @@ early-minute enrichment; `sum(version)` strictly increases). Observed:
 re-aggregate-from-`_1m FINAL` yields the correct 150 / 500. The schema doc §3.2
 was **rewritten to the corrected refreshable / re-aggregate pattern** (and the
 insert-trigger phrasings elsewhere in the doc updated to match).
+
+**Durability correction (2026-06-10, doc-grounded — G-note §3.1).** The default
+refreshable MV *"atomically replaces the table's previous contents"*, so
+replace-mode + a bounded window would hold only the window and empty the rollup
+if `_1m` is cleared. Durable rollups require **`APPEND`** (*"inserts rows …
+without deleting existing rows"*) — which keeps them on `ReplacingMergeTree`
+dedup, so the strictly-increasing version projection (`sum(version)`/epoch) is
+**always** required, not just in the scheduled fallback. Added to the 0051
+contract; also implies `_1m` retention ≥ widest rollup refresh window.
 
 ## Implementation
 
