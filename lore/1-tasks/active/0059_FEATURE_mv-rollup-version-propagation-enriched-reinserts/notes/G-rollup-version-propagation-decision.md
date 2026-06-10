@@ -51,6 +51,18 @@ history:
       sidesteps finding #5" claim (only true with an unbounded window),
       added §3.1 durability subsection with the two ClickHouse doc
       citations, and added an APPEND-not-replace item to the §4 contract.
+  - date: 2026-06-10
+    status: mature
+    who: okarcz
+    note: >
+      Expanded Option A′ into a full "A vs A′" decision-criteria section
+      (refreshable MV vs external scheduled worker). Records that the two
+      are the *same* INSERT…SELECT into the same independent table — the
+      worker does NOT avoid any cascade/relation risk (there is none) — so
+      the fork is decided on operability + CH refreshable-MV support, not
+      data model. Adds the comparison table and the explicit decision rule;
+      names the cluster CH version / refreshable-MV acceptability as the
+      top BE-sync gate.
 ---
 
 # Rollup-chain semantics under enriched `_1m` re-inserts — decision + proof plan
@@ -306,12 +318,64 @@ refreshable MV keeps rollups **inside ClickHouse with no external scheduler**,
 so the ADR's intent holds; only the MV *flavour* changes (refreshable vs
 insert-trigger). Recommend recording this as an ADR-0007 amendment.
 
-### Option A′ — Scheduled re-aggregate job (fallback if CH version can't guarantee refreshable MVs)
+### Option A′ — Scheduled re-aggregate worker (external orchestration of the *same* query)
 
-Identical `INSERT INTO _15m SELECT … FROM _1m FINAL … GROUP BY …` driven by a
-tiny scheduler. **Caveat:** this resurrects a scheduled rollup step, partially
-undoing ADR 0007 §3.4. If used, fold it into the existing **0039 `rollup-worker`**
-rather than adding a new Lambda, and amend ADR 0007 explicitly. Prefer A.
+Identical `INSERT INTO _15m SELECT … FROM _1m FINAL … GROUP BY …` driven by an
+external scheduler (EventBridge → Lambda, or the existing **0039 `rollup-worker`**)
+instead of ClickHouse's own `REFRESH` clause. **Caveat:** this resurrects a
+scheduled rollup step, partially undoing ADR 0007 §3.4 — amend the ADR explicitly
+if chosen, and fold it into 0039 rather than adding a new Lambda.
+
+#### A vs A′ — this is the load-bearing fork; decide it on *operability + CH support*, not data-model risk
+
+A common intuition is that an external worker "avoids the table-relations / cascade
+risk of MVs." **It does not, because there is no such risk.** A ClickHouse MV
+target is a fully independent table (an MV is a write-trigger, not a foreign-key
+link); there is no cascade. In **APPEND** mode the refreshable MV executes *the
+exact statement* the worker would —
+`INSERT INTO _15m SELECT … FROM _1m FINAL … GROUP BY …` — into the same
+independent `ReplacingMergeTree`, with the same finding-#5 version requirement.
+**On the data model the two are identical.** The only real difference is *who
+drives the schedule and where the SQL lives*: DB-native (`REFRESH … APPEND`) vs
+external orchestration. There is **no third option** — ClickHouse has no built-in
+cron for arbitrary `INSERT … SELECT` other than the refreshable MV, so the choice
+is genuinely binary.
+
+| Axis | A — Refreshable MV (APPEND) | A′ — External worker (0039) |
+|---|---|---|
+| The rollup query | identical | identical |
+| Cascade / table relations | none | none (**not** an advantage) |
+| Correctness (version, APPEND) | finding #5 applies | finding #5 applies (same) |
+| Infra surface | one DDL object | Lambda + IAM + EventBridge + mTLS cert + DLQ + CloudWatch + deploy |
+| Where it runs | inside the cluster; no external auth to break | external; needs a live mTLS path to Hetzner to even fire |
+| Concurrency / leader | built-in (Replicated DB coordinates one refresh per tick) | hand-rolled "don't double-run" |
+| ADR 0007 §3.4 fit | honours it (rollups stay in CH) | reopens it → amendment required |
+| **CH version dependency** | **needs refreshable-MV support (≥ 23.12 + `allow_experimental_refreshable_materialized_view`)** | **none — runs on any CH version** |
+| Observability / control | `system.view_refreshes` (more opaque) | own logs/metrics, ad-hoc window replay, pause |
+
+**Where A′ genuinely wins** (the two axes that can flip the decision):
+
+1. **CH version risk — the decisive one.** Refreshable MVs need ≥ 23.12 and were
+   behind an experimental flag; the §5 proof did **not** exercise a true `REFRESH`
+   MV for exactly this reason (it needs the flag even on 24.8). If the shared
+   Hetzner cluster's version/flags don't reliably support them — or BE won't
+   enable the flag — **A is simply unavailable and A′ becomes the primary
+   choice, not a fallback.**
+2. **Operational control.** Explicit retries, backfill replay, "recompute just
+   this window," and first-class metrics are easier in a worker. Our rollups are
+   pure re-aggregation today, so we don't *need* this — but it's a real edge if
+   rollup logic ever grows beyond a `GROUP BY`.
+
+**Where A wins:** least moving infra, no external auth/reliability surface, built-in
+single-refresh coordination, and it honours ADR 0007 §3.4 without an amendment.
+
+**Decision rule:** prefer **A** *iff* the Hetzner cluster supports refreshable MVs
+**and** BE is comfortable with scheduled internal refreshes on their cluster;
+otherwise take **A′**, folded into 0039, with an ADR-0007 amendment. Either way
+the SQL, the target engine, and the version projection are unchanged — so 0051 can
+write the query once and bind it to whichever driver BE's answer dictates. This
+hinges on the §6 open question (cluster CH version + refreshable-MV acceptability),
+which is therefore the **top BE-sync item** for this task.
 
 ### Option B — `AggregatingMergeTree` insert-trigger MVs
 
