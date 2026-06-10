@@ -62,6 +62,35 @@ export interface EnvironmentConfig {
     /** Old-data partition drop (ALTER TABLE … DROP PARTITION). */
     readonly cleanup: string;
   };
+
+  // Ledger Processor ingest (consumed by IngestStack — task 0038)
+
+  /**
+   * Sizing + SQS-source tuning for the live Prices Ledger Processor
+   * Lambda. The Lambda is a content-free SQS "doorbell" consumer; per
+   * the 2026-06-10 cross-team decision (task 0038 §C.1) the doorbells
+   * arrive via SNS fan-out off BE's `stellar-ledger-data` bucket
+   * (`S3 → SNS → prices-ingest SQS + DLQ → Lambda`).
+   *
+   * Mirrors BE's indexer knobs (`compute-stack.ts`): `batchSize = 1`
+   * and `reservedConcurrency = 1` are **load-bearing for ordering**
+   * — two concurrent invocations would race the cursor — not perf
+   * preferences. `maxReceiveCount = 10` (vs the usual 3) absorbs the
+   * ESM over-poll/throttle churn that `concurrency = 1` induces so a
+   * processable doorbell is never false-DLQ'd.
+   */
+  readonly ledgerProcessor: {
+    /** Lambda memory (MB). */
+    readonly memoryMb: number;
+    /** Lambda timeout (seconds). The SQS visibility timeout is set to this + 60s. */
+    readonly timeoutSeconds: number;
+    /** Reserved concurrency. MUST be 1 — serial execution is the ordering guarantee. */
+    readonly reservedConcurrency: number;
+    /** SQS event-source batch size. 1 mirrors BE (doorbell, body ignored). */
+    readonly sqsBatchSize: number;
+    /** SQS redrive threshold before a message lands in the DLQ. */
+    readonly maxReceiveCount: number;
+  };
 }
 
 /**
@@ -126,6 +155,40 @@ export function validateConfig(config: EnvironmentConfig): void {
           `scheduleExpressions.${key} must start with 'rate(' or 'cron(', got: "${value}"`,
         );
       }
+    }
+  }
+
+  const lp = config.ledgerProcessor;
+  if (!lp || typeof lp !== 'object') {
+    errors.push('ledgerProcessor missing or not an object');
+  } else {
+    if (!Number.isInteger(lp.memoryMb) || lp.memoryMb < 128) {
+      errors.push(
+        `ledgerProcessor.memoryMb must be an integer >= 128, got: ${lp.memoryMb}`,
+      );
+    }
+    if (!Number.isInteger(lp.timeoutSeconds) || lp.timeoutSeconds < 1) {
+      errors.push(
+        `ledgerProcessor.timeoutSeconds must be a positive integer, got: ${lp.timeoutSeconds}`,
+      );
+    }
+    // Ordering correctness depends on serial execution — reject anything
+    // but 1. Two concurrent invocations would race the cursor (BE's
+    // load-bearing `reservedConcurrentExecutions = 1`, mirrored here).
+    if (lp.reservedConcurrency !== 1) {
+      errors.push(
+        `ledgerProcessor.reservedConcurrency must be exactly 1 (serial execution is the ordering guarantee), got: ${lp.reservedConcurrency}`,
+      );
+    }
+    if (!Number.isInteger(lp.sqsBatchSize) || lp.sqsBatchSize < 1) {
+      errors.push(
+        `ledgerProcessor.sqsBatchSize must be a positive integer, got: ${lp.sqsBatchSize}`,
+      );
+    }
+    if (!Number.isInteger(lp.maxReceiveCount) || lp.maxReceiveCount < 1) {
+      errors.push(
+        `ledgerProcessor.maxReceiveCount must be a positive integer, got: ${lp.maxReceiveCount}`,
+      );
     }
   }
 

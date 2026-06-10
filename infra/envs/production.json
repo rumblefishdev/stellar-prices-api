@@ -9,5 +9,12 @@
     "oracleWatcher": "rate(5 minutes)",
     "assetDiscovery": "rate(1 hour)",
     "cleanup": "cron(0 3 * * ? *)"
+  },
+  "ledgerProcessor": {
+    "memoryMb": 512,
+    "timeoutSeconds": 60,
+    "reservedConcurrency": 1,
+    "sqsBatchSize": 1,
+    "maxReceiveCount": 10
   }
 }
