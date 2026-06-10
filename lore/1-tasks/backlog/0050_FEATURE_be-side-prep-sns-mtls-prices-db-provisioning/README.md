@@ -8,12 +8,12 @@ related_tasks: ["0045", "0047", "0011", "0038"]
 tags: [layer-infra, priority-high, effort-medium, milestone-M1, cross-team, block-explorer, hetzner, clickhouse, mtls, sns]
 milestone: 1
 links:
-  - "../../../docs/prices-api-general-overview.md"
-  - "../../2-adrs/0007_live-data-sink-on-shared-hetzner-clickhouse.md"
-  - "../archive/0045_RESEARCH_cross-team-bundle-with-be-on-hetzner-ch-tenancy/notes/G-be-agreement-record.md"
-  - "./0047_RESEARCH_cross-tenant-throughput-verification-on-shared-hetzner-ch.md"
-  - "./0011_FEATURE_bootstrap-cdk-with-ssm-platform-lookups.md"
-  - "../blocked/0038_FEATURE_prices-ledger-processor-lambda.md"
+  - "../../../../docs/prices-api-general-overview.md"
+  - "../../../2-adrs/0007_live-data-sink-on-shared-hetzner-clickhouse.md"
+  - "../../archive/0045_RESEARCH_cross-team-bundle-with-be-on-hetzner-ch-tenancy/notes/G-be-agreement-record.md"
+  - "../0047_RESEARCH_cross-tenant-throughput-verification-on-shared-hetzner-ch.md"
+  - "../0011_FEATURE_bootstrap-cdk-with-ssm-platform-lookups.md"
+  - "../../active/0038_FEATURE_prices-ledger-processor-lambda/README.md"
 history:
   - date: 2026-05-21
     status: backlog
@@ -26,6 +26,21 @@ history:
       require BE-side CDK + operator action. Capturing them as one
       task makes the cross-team hand-off trackable; without it these
       slip into informal Slack threads and gate everything downstream.
+  - date: 2026-06-10
+    status: backlog
+    who: oski
+    note: >
+      Converted to directory form. The 2026-06-10 cross-team meeting
+      resolved the SNS-vs-direct-notification question (task 0038
+      §C.1) in favour of **SNS fan-out**; item 1 now has a
+      ready-to-implement BE ask at
+      `notes/G-be-sns-fanout-ask.md` (topic + repoint with
+      `rawMessageDelivery` + the `/platform/{env}/ledger-events-topic-arn`
+      SSM key, grounded in BE's compute-stack.ts and 0038's CDK in
+      PR #34). Note: the SNS item can ship independently of BE 0227 /
+      task 0047 (it's S3+SNS+SSM, not Hetzner-CH) — only the mTLS-cert
+      and `prices.*`-DB items stay gated. Task stays backlog pending
+      BE scheduling.
 ---
 
 # BE-side prep — SNS fan-out + mTLS client cert + prices DB provisioning
@@ -86,8 +101,10 @@ Produce a short written checklist (1–2 pages) under
 to deliver for each of the three items, with success signals
 prices-api can verify independently:
 
-- SNS topic ARN per env, published to a known SSM key (e.g.
-  `/platform/{env}/stellar-ledger-data-sns-arn`).
+- SNS topic ARN per env, published to a known SSM key
+  (`/platform/{env}/ledger-events-topic-arn` — canonical, per the
+  SNS-fan-out ask in `notes/G-be-sns-fanout-ask.md`, which is the
+  ready-to-implement spec for this item post the 2026-06-10 meeting).
 - Per-env mTLS cert + key handed off via a secure channel; CA
   certificate exported as a static asset checked into prices-api
   for trust-chain verification.
