@@ -63,17 +63,32 @@ history:
       data model. Adds the comparison table and the explicit decision rule;
       names the cluster CH version / refreshable-MV acceptability as the
       top BE-sync gate.
+  - date: 2026-06-10
+    status: mature
+    who: okarcz
+    note: >
+      DECISION LOCKED IN. Hetzner CH version confirmed 26.3.10.60 —
+      refreshable MVs supported fully/non-experimentally, resolving the §6
+      version gate. Choose the Refreshable MV (APPEND, re-aggregate from
+      _1m FINAL) over the Incremental insert-trigger MV; external-worker
+      fallback (A′) dropped, no ADR-0007 amendment needed. Updated TL;DR,
+      the §0 decision block, the §3 "Chosen" line, and the §6 open
+      questions to reflect the lock-in.
 ---
 
 # Rollup-chain semantics under enriched `_1m` re-inserts — decision + proof plan
 
 ## 0. TL;DR
 
-> **Status: proof executed** against `clickhouse-server 24.8.14` — see
+> **Status: DECISION LOCKED IN (2026-06-10)** — **Refreshable MV in `APPEND`
+> mode**, re-aggregating from `_1m FINAL`; *not* an Incremental (insert-trigger)
+> MV. Gate resolved: Hetzner runs **ClickHouse 26.3.10.60**, which supports
+> refreshable MVs fully, so the external-worker fallback (A′) is dropped.
+> Proof executed against `clickhouse-server 24.8.14` — see
 > [`proof/RESULTS.md`](../proof/RESULTS.md) (`./proof/run.sh` reproduces).
-> Every prediction below was observed, plus two findings the desk analysis
-> missed: the draft **does not even compile** (alias collision), and
-> `max(version)` is an **insufficient rollup version projection**.
+> Every prediction was observed, plus two findings the desk analysis missed:
+> the draft **does not even compile** (alias collision), and `max(version)` is
+> an **insufficient rollup version projection**.
 
 The original draft insert-trigger materialised-view rollup that stood in
 [`database-schema-overview.md` §3.2](../../../../docs/database-schema/database-schema-overview.md)
@@ -108,15 +123,23 @@ Even with that fixed, two runtime failures remain:
 The root cause is a fundamental tension: **incremental combine-on-insert and
 correction-by-re-insert cannot both be served by a plain insert-trigger MV.**
 
-**Decision (recommended): make the rollups re-aggregate from `_1m FINAL`
-rather than sum the insert block** — implemented as a **Refreshable
-Materialized View** (ClickHouse ≥ 23.12) or, if the cluster's CH version
-can't be relied on, a scheduled `INSERT … SELECT … FROM _1m FINAL` re-aggregate.
-Targets stay `ReplacingMergeTree(version)`. The refresh must run in **`APPEND`
-mode** (default replace-mode + a bounded window destroys history — §3.1), and
-because APPEND goes back through RMT dedup the projected version must be
-**strictly increasing** (`sum(version)` / refresh epoch), **not**
-`max(source.version)` (finding #5).
+**Decision (LOCKED IN 2026-06-10): rollups are a Refreshable Materialized View
+in `APPEND` mode that re-aggregates from `_1m FINAL`** — *not* an Incremental
+(insert-trigger) MV. Concretely:
+
+- **Refreshable, not Incremental.** The Incremental MV fires per inserted block
+  and aggregates only that block (the draft's three failures above). The
+  Refreshable MV re-runs `SELECT … FROM price_ohlcv_1m FINAL … GROUP BY …` on a
+  schedule, so it sees deduplicated + enriched rows and recomputes whole buckets.
+- **`APPEND` mode**, never default replace — replace-mode + a bounded window
+  destroys history (§3.1).
+- **Strictly-increasing version** (`sum(version)` / refresh epoch), **not**
+  `max(source.version)` — APPEND keeps the target on RMT dedup (finding #5).
+- Targets stay `ReplacingMergeTree(version)`, identical shape to `_1m`.
+
+The external-worker fallback (A′) is **no longer in play**: the Hetzner cluster
+runs **ClickHouse 26.3.10.60**, which supports refreshable MVs fully and
+non-experimentally (the §6 version gate is resolved).
 This is correct by construction on **both** failure modes, keeps rollups
 "inside ClickHouse / no Rollup Lambda" (honouring ADR 0007 §3.4), preserves the
 identical-shape target tables (no `AggregateFunction` columns → read path 0040
@@ -400,15 +423,20 @@ sum nets out. Rejected: the cancel row must reproduce the original bucket
 contribution *exactly*; fragile, hard to make idempotent, heavy operational
 burden.
 
-**Chosen: A** (with A′ as the version-constrained fallback).
+**Chosen: A — Refreshable MV in `APPEND` mode (LOCKED IN 2026-06-10).** The CH
+version gate that kept A′ alive is resolved: Hetzner runs ClickHouse 26.3.10.60,
+which supports refreshable MVs fully and non-experimentally, so the external
+worker (A′) is dropped. No ADR-0007 amendment is needed — rollups stay inside
+ClickHouse, honouring §3.4 as written.
 
 ## 4. Contract handed to task 0051
 
 0051 owns the DDL; this note fixes the semantics it must implement:
 
 - [ ] Rollup MVs **re-aggregate from `<source>_Ng FINAL`**, not from the insert
-      block. Refreshable MV (Option A) preferred; scheduled re-aggregate (A′)
-      only if the cluster CH version forces it.
+      block, via a **Refreshable MV** (`REFRESH … APPEND`) — *not* an Incremental
+      (insert-trigger) MV. **Locked in:** Hetzner runs CH 26.3.10.60, so the
+      scheduled-worker fallback (A′) is dropped.
 - [ ] **Refresh in `APPEND` mode, never default replace.** The default
       *"atomically replaces the table's previous contents"*
       ([CREATE VIEW ref](https://clickhouse.com/docs/sql-reference/statements/create/view));
@@ -503,7 +531,10 @@ composes across ≥ 2 hops (each grain reads the previous grain `FINAL`).
 
 ## 6. Open questions for the BE cross-team sync
 
-- What ClickHouse version runs on the shared Hetzner cluster? (Gates A vs A′.)
-- Are refreshable MVs enabled / acceptable on the shared cluster, or is a
-  scheduled re-aggregate (folded into 0039 `rollup-worker`) preferred operationally?
+- ~~What ClickHouse version runs on the shared Hetzner cluster? (Gates A vs A′.)~~
+  **RESOLVED 2026-06-10: 26.3.10.60** — supports refreshable MVs fully and
+  non-experimentally. A is locked in; A′ dropped.
+- Is BE comfortable with scheduled internal refreshes consuming cluster CPU on
+  `prices.*` (announcement-not-approval per ADR 0007 Cluster A)? No external
+  worker is proposed; this is purely a heads-up.
 - Refresh cadence per grain that BE is comfortable with vs. read-freshness SLA.
