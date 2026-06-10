@@ -2,9 +2,9 @@
 id: "0038"
 title: "Prices Ledger Processor Lambda — live S3-event-driven ingestion into price_ohlcv"
 type: FEATURE
-status: blocked
+status: active
 related_adr: ["0001", "0003", "0004", "0005", "0006", "0007"]
-related_tasks: ["0011", "0037", "0045", "0047", "0048"]
+related_tasks: ["0011", "0037", "0045", "0047", "0048", "0050"]
 tags: [layer-indexing, priority-high, effort-large, milestone-M1, stream-1, lambda, ingestion, rust, aws, clickhouse, hetzner]
 milestone: 1
 links:
@@ -112,6 +112,27 @@ history:
       (BE 0227 + task 0047) also remain open. Unblocks: after the
       meeting answers Part C, and either gating engineering event
       clears.
+  - date: 2026-06-10
+    status: active
+    who: oski
+    note: >
+      Cross-team meeting held. **Part C.1 RESOLVED: SNS fan-out**
+      (not a second direct S3→SQS notification). BE will refactor
+      their bucket-side notification from `S3 → SQS` to
+      `S3 → SNS → SQS` (`SnsDestination` + `rawMessageDelivery: true`
+      so their indexer's S3-event parser is unchanged); prices-api
+      owns its **own** `prices-ingest-{env}` SQS queue + DLQ
+      subscribing to the BE SNS topic, plus its own Lambda. Failure
+      isolation preserved (a prices-side backlog/DLQ never pressures
+      BE's indexer queue). The doorbell-cursor design is unaffected
+      by the transport choice — the Lambda ignores the message body
+      regardless of SNS-vs-SQS — so no reconcile-loop change; only
+      doc/comment narrative and the (gated) CDK wiring change.
+      Decision recorded inline in `notes/G-local-prototype-spec.md`
+      §C.1. The SNS-topic ownership + cross-account subscription is
+      the cross-team artefact tracked by task 0050. Moved back to
+      active for continued local-scope work; the production AWS
+      wiring (Part E) stays gated on BE 0227 + task 0047.
 ---
 
 # Prices Ledger Processor Lambda — live S3-event-driven ingestion into price_ohlcv
@@ -133,9 +154,14 @@ general-overview doc; the historical half lives in ADR 0001
 
 Per the general-overview doc §2.1 (Components Hosted by Prices API)
 and §5.2 (Prices Ledger Processor (Rust)), the live ingestion path
-is a Rust Lambda registered as a **second S3 event notification
-target** on Block Explorer's existing `stellar-ledger-data/` bucket
-(the first target is BE's own Ledger Processor). Per ADR 0001 §4
+is a Rust Lambda driven by a **content-free SQS doorbell**. Per the
+2026-06-10 cross-team decision (history below; spec §C.1), BE's
+`stellar-ledger-data/` bucket fans out object-created events via
+**SNS** (`S3 → SNS → SQS`); prices-api owns its **own**
+`prices-ingest-{env}` SQS queue + DLQ subscribed to that topic, so a
+prices-side backlog can never pressure BE's indexer queue. (BE's own
+queue subscribes to the same topic with `rawMessageDelivery: true`,
+leaving their indexer's S3-event parser unchanged.) Per ADR 0001 §4
 (Decision point 4 — "Live go-forward Soroban AMM ingestion does
 NOT depend on CH"), this Lambda is the system of record for live
 Soroban AMM swaps once Stream 1 has landed its one-shot historical
@@ -304,3 +330,63 @@ In `infra/aws-cdk/` (created by 0011):
 - The 1-min UPSERT contract is shared with both backfill
   streams; keep the merge SQL in a shared `packages/ohlcv-writer`
   module (or similar) so live + backfill writers stay in sync.
+
+## Implementation Notes
+
+> The `## Implementation Plan` above predates ADR 0007 and still
+> describes the retired RDS/sqlx/VPC shape. The authoritative design
+> is `notes/G-local-prototype-spec.md` (CH + mTLS + no-VPC +
+> SNS-doorbell). What was actually built:
+
+**Local prototype (Phase 1–2, branch `feat/0038_…`, PR #34).**
+`packages/prices-ledger-processor` mirrors BE's indexer structure
+with three production swap-seams (`ObjectFetcher`, `Cursor`,
+`OhlcvSink`). The doorbell-cursor reconcile loop (`src/reconcile.rs`)
+reads the cursor, derives the Galexie S3 key for `cursor+1`, fetches,
+decodes, dispatches via the 0037 kernel, buckets to 1-min OHLCV, and
+**advances the cursor last** — the ordering barrier. Runs against
+local fixtures; `cargo check -p prices-ledger-processor` green.
+
+**SNS decision + CDK ingest wiring (2026-06-10).** Folded the live
+ingest wiring into `infra/src/lib/stacks/compute-stack.ts`:
+prices-owned `prices-ingest-{env}` SQS + `prices-ingest-dlq-{env}`
+DLQ (`maxReceiveCount=10`), an SNS subscription to BE's imported
+`ledger-events` topic (`rawMessageDelivery`), the ledger-processor
+`lambda.Function` (ARM64 / `provided.al2023`, `reservedConcurrency=1`,
+`batchSize=1`, `timeout+60s` visibility), the event-source-mapping,
+and IAM (S3 read on BE's bucket, CloudWatch lag metric, X-Ray).
+Env-var contract sourced from `/platform/{env}/*` SSM at deploy
+(spec §C.2, incl. the new `ledger-events-topic-arn` key). `nx build`
++ `cdk synth Prices-production-Compute` both pass. **Prepare-only —
+no deploy** (gated on BE 0227 + task 0047 + BE publishing the SSM
+keys/topic).
+
+## Design Decisions
+
+### Emerged
+
+1. **Ingest wiring lives in `ComputeStack`, not a separate
+   `IngestStack`.** First drafted as a standalone stack consuming
+   ComputeStack's `ledgerProcessorRole`; this created a
+   CloudFormation **dependency cycle** — the event-source-mapping and
+   the queue/bucket grants mutate the role's policy with the other
+   stack's ARNs, so Compute↔Ingest depend on each other. Co-locating
+   role + queue + Function in one stack removes the cycle and matches
+   BE's single-`compute-stack.ts` shape. (`ingest-stack.ts` moved to
+   `.trash/`.)
+2. **`lambda.Function` + `Code.fromAsset`, not `RustFunction`.** The
+   prices infra doesn't carry `cargo-lambda-cdk`; rather than add an
+   uninstalled dependency, the Function consumes the pre-built
+   `cargo lambda build` bootstrap. Adopting `RustFunction` (synth-time
+   build, exactly BE's shape) is a follow-up once the dep lands.
+3. **`reservedConcurrency` pinned to exactly 1 in `validateConfig`.**
+   Not a tunable — serial execution is the ordering guarantee, so the
+   config validator rejects any other value rather than letting a
+   typo silently break ordering at deploy.
+
+## Future Work
+
+- Adopt `cargo-lambda-cdk` `RustFunction` (drop the `fromAsset` seam).
+- Production-rewrite punch-list — see spec Part E (gated on BE 0227 +
+  task 0047): S3-client `ObjectFetcher`, CH-backed cursor (spec D.1),
+  mTLS CH `OhlcvSink`, CW lag alarm, end-to-end smoke.

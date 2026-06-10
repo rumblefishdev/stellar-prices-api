@@ -447,6 +447,55 @@ indexer queue.
    diagnostic exports), we'd want a prefix filter on our
    subscription so we don't process them.
 
+> **✅ RESOLVED — 2026-06-10 cross-team meeting → SNS fan-out.**
+>
+> BE and prices-api agreed to move the bucket-side to **SNS** rather
+> than wire a second direct `S3 → SQS` notification. Final shape:
+>
+> ```
+> ledger PutObject → S3 ObjectCreated
+>                  → SNS topic (BE-owned, on stellar-ledger-data)
+>                  ├─ SQS  ledger-ingest-{env}    (BE)  — rawMessageDelivery=true
+>                  └─ SQS  prices-ingest-{env}     (prices-api) + its own DLQ
+>                                                  → prices Lambda (this task)
+> ```
+>
+> **Ownership split (the user's words):** *"BE will refactor the code
+> to use SNS; prices-api does its own SQS with DLQ and Lambda."*
+>
+> - **BE side:** repoint the existing notification to
+>   `SnsDestination(topic)` (was `SqsDestination(ingestQueue)`) and
+>   re-subscribe their own queue to the topic with
+>   `rawMessageDelivery: true` so the SQS body stays byte-identical
+>   to today and their indexer's S3-event parser is unchanged. BE
+>   adds a topic resource policy permitting the prices-api account
+>   to `sns:Subscribe`.
+> - **prices-api side:** own `prices-ingest-{env}` SQS + DLQ
+>   (`maxReceiveCount = 10`, `visibilityTimeout = lambdaTimeout + 60s`,
+>   per §C.8), subscribe it to the BE topic (cross-account), and a
+>   queue policy permitting the topic to deliver. This is the
+>   prices-side CDK in the Part E punch-list (gated on BE 0227 +
+>   task 0047).
+>
+> **Why SNS over a second direct notification:** failure isolation
+> *and* extensibility — a third/fourth consumer (asset-discovery,
+> analytics) just adds a subscription with no further change to BE's
+> bucket. EventBridge was considered (lighter for BE — additive bus
+> toggle, their `S3 → SQS` untouched) but SNS was chosen for lowest
+> latency and because the cross-team contract is being negotiated
+> around a topic; topic ownership + subscription is tracked by
+> **task 0050**.
+>
+> **Impact on this Lambda's code: none to the reconcile loop.** The
+> doorbell is content-free — the handler ignores the SQS message body
+> whether it arrives raw or SNS-wrapped — so the doorbell-cursor
+> mechanism (`src/reconcile.rs`) is unaffected. Only doc/comment
+> narrative and the (gated) CDK wiring carry the SNS shape.
+>
+> Sub-question (2) (prefix filter): deferred — `.xdr.zst` suffix
+> remains sufficient; BE has no plans for other object types on the
+> bucket. Revisit only if that changes.
+
 ### C.2 — Env-var injection contract (NOT SSM-at-runtime)
 
 **Correction to the earlier draft.** I previously proposed
@@ -463,6 +512,7 @@ into Lambda env vars** at deploy. We mirror that.
 | `/platform/{env}/stellar-ledger-data-bucket-arn` | String | (CDK-side, for IAM grant) |
 | `/platform/{env}/ch-domain` | String | `CH_DOMAIN` (Caddy host) |
 | `/platform/{env}/stellar-network-passphrase` | String | `STELLAR_NETWORK_PASSPHRASE` (xdr-parser cache init) |
+| `/platform/{env}/ledger-events-topic-arn` | String | (CDK-side, SNS topic the prices queue subscribes to — added by the §C.1 SNS decision) |
 
 **Why this changes the contract.** No prices-api Lambda runtime
 reads from SSM. The Lambda only sees env vars. SSM is the

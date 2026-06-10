@@ -5,6 +5,14 @@
 //! every invocation). The SQS message body is **ignored**; each
 //! invocation just runs the reconcile loop.
 //!
+//! Doorbell transport (2026-06-10 cross-team decision, spec §C.1):
+//! production doorbells reach this Lambda via **SNS fan-out** —
+//! `S3 ObjectCreated → SNS (BE-owned) → prices-ingest-{env} SQS + DLQ
+//! → this Lambda`. Because the body is ignored, the handler is
+//! identical whether the message is raw or SNS-wrapped; the `SqsEvent`
+//! envelope is all we deserialise. Failure isolation: the prices queue
+//! is prices-owned, so a backlog here never pressures BE's indexer.
+//!
 //! Phase 2 prototype: the fetcher / cursor / sink are still the
 //! local-disk stubs. The Lambda mode exists to prove the
 //! `lambda_runtime` event-loop wires up cleanly — a `cargo lambda
