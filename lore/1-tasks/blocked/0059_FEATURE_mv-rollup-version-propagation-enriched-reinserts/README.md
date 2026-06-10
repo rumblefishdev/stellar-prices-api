@@ -2,7 +2,7 @@
 id: "0059"
 title: "MV rollup-chain version propagation under enriched `_1m` re-inserts"
 type: FEATURE
-status: active
+status: blocked
 related_adr: ["0007"]
 related_tasks: ["0026", "0051"]
 tags: [layer-database, priority-high, effort-medium, clickhouse, materialized-views, rollups]
@@ -66,6 +66,21 @@ history:
       (sum(version)/epoch) is ALWAYS required. Recorded both doc citations
       and a new §3.1 in the G-note; added APPEND-not-replace + _1m-retention
       items to the 0051 contract.
+  - date: 2026-06-10
+    status: blocked
+    who: okarcz
+    by: ["0051"]
+    note: >
+      Design slice complete and merged to develop (PR #37, merge commit
+      fde4bb4): corrected rollup pattern in schema-overview §3.2, executed
+      proof (proof/ + RESULTS.md), doc-grounded durability correction, the
+      A-vs-A′ comparison, and the LOCKED-IN decision — Refreshable MV in
+      APPEND mode re-aggregating from _1m FINAL (Hetzner CH 26.3.10.60
+      confirmed; external-worker fallback dropped, no ADR-0007 amendment
+      needed). Moving to blocked: the remaining ACs (full _15m…_1M chain
+      integration test + production DDL) are gated on 0051 landing the MV
+      rollup-chain DDL — the SELECT/version/refresh-window this task
+      verifies does not exist until then.
 ---
 
 # MV rollup-chain version propagation under enriched `_1m` re-inserts
