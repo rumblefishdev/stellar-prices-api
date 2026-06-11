@@ -219,19 +219,65 @@ growth, top-500 filtering ≈ **halves multi-year size** (Year-10 52 → 30 GB) 
 dropping only **6.6 %** of trades. So filtering is a **moderate lever — most
 effective on long-term rollup growth, not the `_1m` snapshot.**
 
+### Retention-capped scenario (measured)
+
+The forever-retained rollups are what make the DB grow without bound. Measured the
+per-time-bucket density (rows/bucket × buckets/year × bytes/row) — more accurate
+than the per-ledger extrapolation for coarse grains, which it corrects downward:
+
+| Rollup | buckets in window | bytes/bucket | **annual (forever)** |
+|--------|------------------:|-------------:|---------------------:|
+| `_1h` | 163 | 284 KB | **2.49 GB/yr** |
+| `_4h` | 41 | 561 KB | **1.23 GB/yr** |
+| `_1d` | 8 | 1.0 MB | 0.37 GB/yr |
+| `_1w` | 2 | 1.6 MB | 0.08 GB/yr |
+| `_1M` | 1 | 1.8 MB | 0.02 GB/yr |
+| | | **total** | **≈ 4.2 GB/yr** |
+
+(`_1w`/`_1M` per-bucket counts are lower bounds — a full month sees more distinct
+pairs than this 6.75-day window — but they are tiny contributors anyway. `_1h`/
+`_4h` have many buckets → reliable.)
+
+Capping a rollup at retention R makes it **plateau** at `annual × R` instead of
+growing forever. The dominant cost is `_1h`+`_4h` (3.7 GB/yr of the 4.2); `_1d`/
+`_1w`/`_1M` together are only ~0.47 GB/yr, so they can stay forever cheaply.
+
+**Lever comparison — total prices DB size (per env, GB):**
+
+| Strategy | Year 1 | Year 3 | Year 5 | Year 10 | Bounded? |
+|----------|-------:|-------:|-------:|--------:|:--------:|
+| **Forever** (current) | 4.9 | 13.3 | 21.7 | 42.6 | ✗ (+4.2/yr) |
+| Filter top-500, forever | 3.0 | 7.8 | 12.7 | 24.7 | ✗ (+2.4/yr) |
+| Cap **all** rollups @ 1 yr | 4.9 | 4.9 | 4.9 | 4.9 | ✓ |
+| **Cap `_1h`/`_4h` @ 1 yr, keep `_1d…_1M`** | 4.9 | 5.9 | 6.8 | **9.2** | ~✓ (+0.47/yr) |
+| Filter top-500 **+** cap `_1h`/`_4h` @ 1 yr | 3.0 | 3.5 | 4.0 | **4.5** | ~✓ |
+
+`_1m`/`_15m`/`oracle` are already retention-capped (~0.75 GB combined; 0.62 GB
+filtered) — the table varies only the rollup policy on top of that.
+
+**Takeaway:** **retention-capping is the strongest lever** — it *bounds* growth
+(filtering only slows it). Capping just `_1h`/`_4h` at ~1 year while keeping
+`_1d`/`_1w`/`_1M` forever holds the DB near **~9 GB at 10 years** (vs ~43 GB
+unbounded) and still keeps all daily-and-coarser history. Stacking the top-500
+filter on top lands it at **~4.5 GB**. The trade-off is losing sub-daily (`_1h`/
+`_4h`) candles older than the cap — usually acceptable since fine-grained history
+is rarely queried far back.
+
 ### Recommendations
-1. **Asset filtering is a moderate lever (measured), not a silver bullet.** It
-   barely shrinks the 7-day `_1m` (top-500 keeps 84.5 %) but roughly **halves the
-   forever-retained rollup growth** (the dominant multi-year cost) while keeping
-   93 % of trades — top-500 takes Year-10 from ~52 → ~30 GB. Worth applying a
-   min-volume / `is_active` cut, but it does **not** reach the old 74 B/ledger
-   target. For bigger long-term savings, also reconsider **rollup retention**
-   (e.g. cap `_1h`/`_4h` instead of keeping forever) — they dominate growth.
-2. **Parallelize the backfill download.** The bottleneck is serial per-partition
+1. **Cap `_1h`/`_4h` rollup retention — the strongest, measured size lever.**
+   These two tables are 3.7 of the 4.2 GB/yr forever-growth. Capping them at
+   ~1 year (keeping `_1d`/`_1w`/`_1M` forever — only ~0.47 GB/yr) *bounds* the DB
+   at **~9 GB @ 10 yr vs ~43 GB unbounded**, preserving all daily-and-coarser
+   history. This *bounds* growth where filtering only slows it.
+2. **Asset filtering is a complementary, moderate lever.** It barely shrinks the
+   7-day `_1m` (top-500 keeps 84.5 %) but ~halves rollup growth while keeping
+   93 % of trades. Stacked on the `_1h`/`_4h` cap → **~4.5 GB @ 10 yr**. Does
+   **not** reach the old 74 B/ledger target on its own.
+3. **Parallelize the backfill download.** The bottleneck is serial per-partition
    `aws s3 sync`. Parallel partition syncs / higher S3 concurrency would cut the
    ~60 min/100k materially — critical for any full-history (~62 M-ledger) backfill,
    which is weeks at the serial rate.
-3. **AMM coverage** needs a historical factory-replay registry seed for full
+4. **AMM coverage** needs a historical factory-replay registry seed for full
    Phoenix/Soroswap/Aquarius candles (in-window-only today → 913 ticks / 651
    candles over 100k).
 
