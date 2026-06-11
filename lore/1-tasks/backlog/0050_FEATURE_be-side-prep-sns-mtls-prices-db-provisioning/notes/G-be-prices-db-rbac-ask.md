@@ -8,6 +8,7 @@ spawned_from: []
 spawns: []
 related_notes:
   - "G-be-sns-fanout-ask.md"
+  - "G-prices-disk-footprint-for-be.md"
 links:
   - "../../active/0038_FEATURE_prices-ledger-processor-lambda/notes/G-local-prototype-spec.md"
   - "../../../2-adrs/0007_live-data-sink-on-shared-hetzner-clickhouse.md"
@@ -49,7 +50,9 @@ already uses for `galexie` / `ingestion_writer`:
 No change to any existing BE user, the `default` admin path, backups
 (beyond optionally extending the snapshot scope — see §4), or the box's
 resource tuning. The `prices` data footprint (1-min OHLCV candles) is a
-rounding error against BE's full-chain index.
+rounding error against BE's full-chain index — **~0.45 GB/year**,
+empirically measured; concrete numbers + horizons in the sibling
+`G-prices-disk-footprint-for-be.md`.
 
 ---
 
