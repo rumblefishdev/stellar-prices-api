@@ -5,7 +5,14 @@ use stellar_xdr::curr::{Asset, PublicKey};
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub enum AssetIdentity {
     Native,
-    Credit { code: String, issuer: String },
+    Credit {
+        code: String,
+        issuer: String,
+    },
+    /// A Soroban token referenced by its contract address (C-strkey). Used by
+    /// the AMM venues (Phoenix/Soroswap/Aquarius) whose swap events carry
+    /// contract-address tokens rather than classic (code, issuer) pairs.
+    Contract(String),
 }
 
 impl AssetIdentity {
@@ -35,6 +42,11 @@ impl AssetIdentity {
                 key.extend_from_slice(code.as_bytes());
                 key.push(0);
                 key.extend_from_slice(issuer.as_bytes());
+                key
+            }
+            Self::Contract(addr) => {
+                let mut key = vec![2];
+                key.extend_from_slice(addr.as_bytes());
                 key
             }
         }

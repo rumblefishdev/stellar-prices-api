@@ -9,6 +9,7 @@ mod partition;
 mod price;
 mod run;
 mod sink;
+mod soroban;
 mod sync;
 mod tick;
 

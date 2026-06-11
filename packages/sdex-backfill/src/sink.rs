@@ -58,14 +58,18 @@ impl Sink {
     pub async fn load_assets(&self) -> Result<Vec<(u32, AssetIdentity)>, BackfillError> {
         let rows = self
             .client
-            .query("SELECT asset_id, asset_code, issuer_address FROM prices.assets")
+            .query(
+                "SELECT asset_id, asset_code, issuer_address, contract_address FROM prices.assets",
+            )
             .fetch_all::<ExistingAssetRow>()
             .await?;
 
         let assets: Vec<(u32, AssetIdentity)> = rows
             .into_iter()
             .map(|r| {
-                let identity = if r.asset_code == "XLM" && r.issuer_address.is_empty() {
+                let identity = if !r.contract_address.is_empty() {
+                    AssetIdentity::Contract(r.contract_address)
+                } else if r.asset_code == "XLM" && r.issuer_address.is_empty() {
                     AssetIdentity::Native
                 } else {
                     AssetIdentity::Credit {
@@ -84,7 +88,11 @@ impl Sink {
         Ok(assets)
     }
 
-    pub async fn write_candles(&self, candles: &[OhlcvCandle]) -> Result<(), BackfillError> {
+    pub async fn write_candles(
+        &self,
+        candles: &[OhlcvCandle],
+        source: &str,
+    ) -> Result<(), BackfillError> {
         if candles.is_empty() {
             return Ok(());
         }
@@ -97,7 +105,7 @@ impl Sink {
                     timestamp: candle.minute_start,
                     asset_id: candle.asset_id,
                     quote_asset_id: candle.quote_asset_id,
-                    source: "sdex".to_string(),
+                    source: source.to_string(),
                     open: decimal_to_i128(candle.open),
                     high: decimal_to_i128(candle.high),
                     low: decimal_to_i128(candle.low),
@@ -121,9 +129,16 @@ impl Sink {
         let mut insert = self.client.insert("prices.assets")?;
 
         for (identity, &id) in registry.assets() {
-            let (asset_code, asset_type, issuer_address) = match identity {
-                AssetIdentity::Native => ("XLM".to_string(), "classic", String::new()),
-                AssetIdentity::Credit { code, issuer } => (code.clone(), "classic", issuer.clone()),
+            let (asset_code, asset_type, issuer_address, contract_address) = match identity {
+                AssetIdentity::Native => {
+                    ("XLM".to_string(), "classic", String::new(), String::new())
+                }
+                AssetIdentity::Credit { code, issuer } => {
+                    (code.clone(), "classic", issuer.clone(), String::new())
+                }
+                AssetIdentity::Contract(addr) => {
+                    (String::new(), "soroban", String::new(), addr.clone())
+                }
             };
 
             insert
@@ -132,9 +147,29 @@ impl Sink {
                     asset_code,
                     asset_type: asset_type.to_string(),
                     issuer_address,
-                    contract_address: String::new(),
+                    contract_address,
                     home_domain: String::new(),
                     is_active: 1,
+                })
+                .await?;
+        }
+        insert.end().await?;
+        Ok(())
+    }
+
+    pub async fn write_oracle(&self, samples: &[OracleSample]) -> Result<(), BackfillError> {
+        if samples.is_empty() {
+            return Ok(());
+        }
+        let mut insert = self.client.insert("prices.oracle_prices")?;
+        for s in samples {
+            insert
+                .write(&OracleRow {
+                    timestamp: s.timestamp,
+                    asset_id: s.asset_id,
+                    oracle_name: s.oracle_name.clone(),
+                    price_usd: s.price_usd,
+                    raw_data: s.raw_data.clone(),
                 })
                 .await?;
         }
@@ -194,4 +229,25 @@ struct ExistingAssetRow {
     asset_id: u32,
     asset_code: String,
     issuer_address: String,
+    contract_address: String,
+}
+
+/// One decoded oracle price sample, ready for `prices.oracle_prices`.
+#[derive(Debug, Clone)]
+pub struct OracleSample {
+    pub timestamp: u32,
+    pub asset_id: u32,
+    pub oracle_name: String,
+    /// price_usd scaled to 14 decimals (matches Decimal(38,14)).
+    pub price_usd: i128,
+    pub raw_data: String,
+}
+
+#[derive(Debug, Serialize, clickhouse::Row)]
+struct OracleRow {
+    timestamp: u32,
+    asset_id: u32,
+    oracle_name: String,
+    price_usd: i128,
+    raw_data: String,
 }
