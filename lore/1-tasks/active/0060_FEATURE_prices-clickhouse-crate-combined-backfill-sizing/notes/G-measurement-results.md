@@ -152,8 +152,48 @@ bound)**, shrinking per-ledger as buckets amortize.
 **Bottom line:** at current mainnet density the prices DB is **~3.7 KB/ledger**
 and a year of live operation is **on the order of a few GB** — materially above
 the prior 0.45 GB/yr (task 0046) estimate, but not alarming. The first-year total
-is dominated by the retention-capped `_1m`/`_15m` (~0.5–0.65 GB) plus first-year
-coarse accumulation.
+is dominated by the retention-capped `_1m`/`_15m` plus the forever-retained
+hourly+ rollups.
+
+### Total prices DB size on Hetzner (summary)
+
+Per environment, compressed on-disk. ~17,280 ledgers/day, ~6.31 M/year at
+current mainnet density. Per-ledger figures from the 100k run.
+
+**Per-table projection — as measured (12,770 assets, unfiltered):**
+
+| Table | Retention | Scaling | Projected size |
+|-------|-----------|---------|---------------:|
+| price_ohlcv_1m | 7 days | capped | **0.24 GB** |
+| price_ohlcv_15m | 30 days | capped | **0.41 GB** |
+| oracle_prices | 13 months | capped | **0.09 GB** |
+| assets + current_prices | bounded | capped | ~0.01 GB |
+| price_ohlcv_1h | kept | +**2.9 GB/yr** | grows |
+| price_ohlcv_4h | kept | +**1.45 GB/yr** | grows |
+| price_ohlcv_1d | kept | +0.5 GB/yr | grows |
+| price_ohlcv_1w | kept | +0.20 GB/yr | grows |
+| price_ohlcv_1M | kept | +0.12 GB/yr | grows |
+| | | **capped subtotal** | **≈ 0.75 GB** (flat) |
+| | | **forever subtotal** | **≈ +5.2 GB/yr** |
+
+**Total prices DB size over time (per environment):**
+
+| Horizon | Unfiltered (as measured) | Filtered (~500 active assets) |
+|---------|-------------------------:|------------------------------:|
+| Steady-state capped | 0.75 GB | 0.12 GB |
+| **Year 1** | **≈ 6 GB** | **≈ 0.3 GB** |
+| Year 3 | ≈ 16 GB | ≈ 0.7 GB |
+| Year 5 | ≈ 26 GB | ≈ 1.1 GB |
+| Year 10 | ≈ 52 GB | ≈ 2.1 GB |
+
+Caveats: the forever-table annual rates are derived from a 5.8-day window and
+**lean high** — coarse grains (`_1d`/`_1w`/`_1M`) amortize further at multi-year
+scale (the 10k→100k two-point fit already shows `_1d` 155→80 B/ledger), so the
+real Year-3+ totals trend below these. **`oracle_prices` is oracle-feed-driven
+(~16 feeds), not pair-driven — it stays ~90 MB regardless of asset filtering.**
+The **filtered** column assumes a min-volume / curated `is_active` cut to ~500
+pairs (~25× fewer candles) and is the single biggest lever — it brings the
+footprint back near the prior 0.45 GB/yr estimate.
 
 ### Recommendations
 1. **Filter assets before writing candles.** 12,770 assets (mostly low-volume /
