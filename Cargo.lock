@@ -993,8 +993,10 @@ checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 name = "ledger-processor"
 version = "0.1.0"
 dependencies = [
+ "aquarius-extractor",
  "extractors-core",
  "phoenix-extractor",
+ "soroswap-extractor",
  "thiserror 2.0.18",
 ]
 
@@ -1178,6 +1180,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "85eae3c4ed2f50dcfe72643da4befc30deadb458a9b590d720cde2f2b1e97da9"
 dependencies = [
  "zerocopy",
+]
+
+[[package]]
+name = "prices-clickhouse"
+version = "0.1.0"
+dependencies = [
+ "clickhouse",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -1409,10 +1422,16 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 name = "sdex-backfill"
 version = "0.1.0"
 dependencies = [
+ "aquarius-extractor",
  "clap",
  "clickhouse",
+ "extractors-core",
+ "ledger-processor",
+ "phoenix-extractor",
  "rust_decimal",
  "serde",
+ "serde_json",
+ "soroswap-extractor",
  "stellar-xdr",
  "thiserror 2.0.18",
  "tokio",
