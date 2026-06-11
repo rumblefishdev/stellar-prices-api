@@ -9,9 +9,10 @@
 
 ## Revision History
 
-| Date       | Sections                        | Driver                                                                                                                                                                           | Summary                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| ---------- | ------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 2026-05-20 | All sections + Appendices A & B | [ADR 0007](../../lore/2-adrs/0007_live-data-sink-on-shared-hetzner-clickhouse.md) (accepted) · [Task 0049](../../lore/1-tasks/active/0049_DOCS_overview-rewrite-for-adr-0007.md) | **Live data sink flipped from Prices-owned RDS PostgreSQL 16 to BE's shared Hetzner ClickHouse cluster** (separate `prices` database, isolated via CH multi-tenant primitives). Schema rewritten to per-source `ReplacingMergeTree(version)` rows on per-granularity tables (`price_ohlcv_1m`, `_15m`, …, `_1M`) feeding a materialised-view rollup chain that eliminates the OHLCV Rollup Lambda. Cleanup becomes `ALTER TABLE … DROP PARTITION`. All 14 mermaid blocks (including Appendices A and B) updated to ClickHouse types, engines, sort keys, MV chain, and the mTLS edge. RDS sizing/scaling ladder removed; Hetzner cost-share added (~$1-2/env/mo per task 0046). |
+| Date       | Sections                               | Driver                                                                                                                                                                           | Summary                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| ---------- | -------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 2026-06-11 | §3.2 §3.0, Schema source-of-truth refs | [Task 0060](../../lore/1-tasks/active/0060_FEATURE_prices-clickhouse-crate-combined-backfill-sizing/README.md)                                                                   | **Schema implemented as the `packages/prices-clickhouse` crate** (`schema/init.sql` = 12 tables, source of truth; `rollups.sql` = refreshable-MV chain; `preroll.sql` = full-range re-aggregate). Built + applied on a local ClickHouse 25.6 and validated by a combined SDEX + soroban (oracle) backfill. **Sizing finding:** measured ~3.6 KB/ledger over a 10k-ledger sample (≈48× the prior 74 B/ledger task-0046 estimate), driven by ~4,343-asset pair diversity (317k 1m candles) and short-window rollups that don't yet amortize. `assets` implemented with `String` (not `FixedString`) columns to match the writer contract. See task 0060 `notes/G-measurement-results.md`. |
+| 2026-05-20 | All sections + Appendices A & B        | [ADR 0007](../../lore/2-adrs/0007_live-data-sink-on-shared-hetzner-clickhouse.md) (accepted) · [Task 0049](../../lore/1-tasks/active/0049_DOCS_overview-rewrite-for-adr-0007.md) | **Live data sink flipped from Prices-owned RDS PostgreSQL 16 to BE's shared Hetzner ClickHouse cluster** (separate `prices` database, isolated via CH multi-tenant primitives). Schema rewritten to per-source `ReplacingMergeTree(version)` rows on per-granularity tables (`price_ohlcv_1m`, `_15m`, …, `_1M`) feeding a materialised-view rollup chain that eliminates the OHLCV Rollup Lambda. Cleanup becomes `ALTER TABLE … DROP PARTITION`. All 14 mermaid blocks (including Appendices A and B) updated to ClickHouse types, engines, sort keys, MV chain, and the mTLS edge. RDS sizing/scaling ladder removed; Hetzner cost-share added (~$1-2/env/mo per task 0046).         |
 
 ---
 
@@ -516,9 +517,14 @@ volume_base, 0)`), never `sum(…)/sum(…)` — re-summing an aliased column ne
 
 Refreshable MVs require ClickHouse ≥ 23.12; the exact mechanism (refreshable MV
 vs. scheduled re-aggregate) is finalised in task **0051** against the Hetzner
-cluster's CH version. The full DDL set will land in
-`docs/database-schema/clickhouse-prod-schema.sql` once task 0011 (CDK + schema
-applier) is unblocked.
+cluster's CH version. The implemented DDL now lives in the
+**`packages/prices-clickhouse`** crate (task 0060) — `schema/init.sql` (12
+tables, the source of truth, applied by `prices-clickhouse-init`),
+`schema/rollups.sql` (the refreshable-MV chain), and `schema/preroll.sql` (the
+deterministic full-range re-aggregate used by backfill / the sizing
+measurement). Implementation note: `assets` uses `String` (not `FixedString`)
+columns there, matching the proven `sdex-backfill` writer contract; the
+footprint difference is negligible.
 
 #### Write semantics — INSERT with `ReplacingMergeTree(version)`
 
@@ -1729,9 +1735,9 @@ erDiagram
 - **`SAME_AS` / `SOURCE` pseudo-rows on the rolled-up tables** abbreviate
   identical schema (they have the same columns as `price_ohlcv_1m`) and
   show which MV populates them. The full DDL for all seven granularity
-  tables and the six MVs will land in
-  [`clickhouse-prod-schema.sql`](./clickhouse-prod-schema.sql) once task 0011
-  is unblocked.
+  tables and the six MVs is implemented in the
+  [`packages/prices-clickhouse`](../../packages/prices-clickhouse) crate
+  (`schema/init.sql` + `schema/rollups.sql`), task 0060.
 
 ---
 
