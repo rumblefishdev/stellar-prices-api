@@ -178,28 +178,55 @@ current mainnet density. Per-ledger figures from the 100k run.
 
 **Total prices DB size over time (per environment):**
 
-| Horizon | Unfiltered (as measured) | Filtered (~500 active assets) |
-|---------|-------------------------:|------------------------------:|
-| Steady-state capped | 0.75 GB | 0.12 GB |
-| **Year 1** | **≈ 6 GB** | **≈ 0.3 GB** |
-| Year 3 | ≈ 16 GB | ≈ 0.7 GB |
-| Year 5 | ≈ 26 GB | ≈ 1.1 GB |
-| Year 10 | ≈ 52 GB | ≈ 2.1 GB |
+| Horizon | Unfiltered (as measured) | Filtered (top-500, **measured**) |
+|---------|-------------------------:|---------------------------------:|
+| Steady-state capped | 0.75 GB | 0.62 GB |
+| **Year 1** | **≈ 6 GB** | **≈ 3.5 GB** |
+| Year 3 | ≈ 16 GB | ≈ 9 GB |
+| Year 5 | ≈ 26 GB | ≈ 15 GB |
+| Year 10 | ≈ 52 GB | ≈ 30 GB |
 
 Caveats: the forever-table annual rates are derived from a 5.8-day window and
 **lean high** — coarse grains (`_1d`/`_1w`/`_1M`) amortize further at multi-year
 scale (the 10k→100k two-point fit already shows `_1d` 155→80 B/ledger), so the
 real Year-3+ totals trend below these. **`oracle_prices` is oracle-feed-driven
 (~16 feeds), not pair-driven — it stays ~90 MB regardless of asset filtering.**
-The **filtered** column assumes a min-volume / curated `is_active` cut to ~500
-pairs (~25× fewer candles) and is the single biggest lever — it brings the
-footprint back near the prior 0.45 GB/yr estimate.
+The **filtered** column is the measured top-500 scenario from the experiment
+below (keeps 93.4 % of trades).
+
+### Asset-filtering experiment (measured, on the 100k data)
+
+Tested how much filtering to the most-active assets shrinks the DB. Per-asset
+activity = total `trade_count` where the asset is the base **or** quote; a candle
+survives a top-N cut iff **both** its base and quote rank ≤ N (12,764 distinct
+assets total). Survival curve on `price_ohlcv_1m`:
+
+| Keep top-N assets | `_1m` rows kept | trades kept (≈ real volume) |
+|------------------:|----------------:|----------------------------:|
+| 100 | 50.7 % | 75.2 % |
+| 200 | 68.2 % | 85.4 % |
+| 500 | 84.5 % | 93.4 % |
+| 1,000 | 93.5 % | 97.3 % |
+| 2,000 | 98.4 % | 99.4 % |
+
+**Key correction:** an earlier guess put filtering at ~25× — that is **wrong**.
+Mainnet has genuine pair diversity, so top-500 still holds **84.5 %** of `_1m`
+rows. BUT filtering bites the **forever-retained coarse rollups far harder** — at
+top-500, rows kept are `_1m` 84.5 % → `_1h` **65.1 %** → `_1M` **26.3 %** (a dust
+asset that trades once still costs 1 row in *every* granularity, so the tail
+dominates coarse-table row counts). Since the coarse rollups drive long-term
+growth, top-500 filtering ≈ **halves multi-year size** (Year-10 52 → 30 GB) while
+dropping only **6.6 %** of trades. So filtering is a **moderate lever — most
+effective on long-term rollup growth, not the `_1m` snapshot.**
 
 ### Recommendations
-1. **Filter assets before writing candles.** 12,770 assets (mostly low-volume /
-   spam) drive the dominant `_1m` cost. A min-volume / curated `is_active` filter
-   (e.g. top few hundred) would cut `_1m`/`_15m` ~10–25×, the single biggest size
-   lever. Revisit the 74 B/ledger target under such a filter.
+1. **Asset filtering is a moderate lever (measured), not a silver bullet.** It
+   barely shrinks the 7-day `_1m` (top-500 keeps 84.5 %) but roughly **halves the
+   forever-retained rollup growth** (the dominant multi-year cost) while keeping
+   93 % of trades — top-500 takes Year-10 from ~52 → ~30 GB. Worth applying a
+   min-volume / `is_active` cut, but it does **not** reach the old 74 B/ledger
+   target. For bigger long-term savings, also reconsider **rollup retention**
+   (e.g. cap `_1h`/`_4h` instead of keeping forever) — they dominate growth.
 2. **Parallelize the backfill download.** The bottleneck is serial per-partition
    `aws s3 sync`. Parallel partition syncs / higher S3 concurrency would cut the
    ~60 min/100k materially — critical for any full-history (~62 M-ledger) backfill,
