@@ -7,10 +7,8 @@
 //!
 //! Two pool-level data shapes are handled (from real mainnet samples + spec):
 //!
-//!   - uniswap-v2 constant product:
-//!       data = Map{ amount_0_in, amount_1_in, amount_0_out, amount_1_out : i128 }
-//!   - CLMM concentrated liquidity:
-//!       data = Map{ amount0, amount1 : i128 (signed; + into pool, − out), … }
+//! - uniswap-v2 constant product: `Map{ amount_0_in, amount_1_in, amount_0_out, amount_1_out : i128 }`
+//! - CLMM concentrated liquidity: `Map{ amount0, amount1 : i128 (signed; + into pool, − out) }`
 //!
 //! Router / aggregator wrapper `swap` events (simple {amount_in, amount_out})
 //! are dropped upstream (VenueRegistry maps only pool contract_ids) to avoid
