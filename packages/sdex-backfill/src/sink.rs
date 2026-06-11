@@ -103,7 +103,10 @@ impl Sink {
                     low: decimal_to_i128(candle.low),
                     close: decimal_to_i128(candle.close),
                     volume_base: decimal_to_i128(candle.volume_base),
-                    volume_quote_usd: decimal_to_i128(candle.volume_quote),
+                    volume_quote: decimal_to_i128(candle.volume_quote),
+                    // DEFAULT 0 — the 0026 enrichment Lambda fills this
+                    // (volume_quote_usd = oracle_price * volume_quote).
+                    volume_quote_usd: 0,
                     vwap: decimal_to_i128(candle.vwap),
                     trade_count: candle.trade_count,
                     version: candle.version,
@@ -163,6 +166,7 @@ struct OhlcvRow {
     low: i128,
     close: i128,
     volume_base: i128,
+    volume_quote: i128,
     volume_quote_usd: i128,
     vwap: i128,
     trade_count: u32,

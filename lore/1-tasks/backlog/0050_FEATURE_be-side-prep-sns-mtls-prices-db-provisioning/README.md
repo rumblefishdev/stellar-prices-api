@@ -112,6 +112,13 @@ prices-api can verify independently:
   identity) published to SSM/Secrets Manager keys; quota and
   profile names documented for future reference.
 
+> Items 2 + 3 (mTLS cert issuance + `prices.*` DB/user/grant/profile)
+> now have a ready-to-implement BE ask at
+> `notes/G-be-prices-db-rbac-ask.md` — grounded in BE's actual
+> `users.d/services.xml` / `profiles.xml`, the Caddy `CLICKHOUSE_CN_USER_MAP`,
+> and `issue-client-cert.sh`, with the two-layer (CH RBAC + AWS IAM)
+> isolation rationale. Sibling to `G-be-sns-fanout-ask.md` (item 1).
+
 ### Step 2: BE-side execution (BE owns)
 
 - BE 0227 (Hetzner Ansible playbook) ships first; this is the

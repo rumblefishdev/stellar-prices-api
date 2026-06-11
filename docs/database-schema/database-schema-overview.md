@@ -285,8 +285,9 @@ erDiagram
 
 > **MV chain edges.** The arrows from `price_ohlcv_1m` down through `_15m`,
 > `_1h`, `_4h`, `_1d`, `_1w`, `_1M` represent the materialised-view
-> rollup chain (ADR 0007 §3.4). Each step is a CH MV that re-aggregates
-> the parent table's rows into the next coarser granularity on INSERT.
+> rollup chain (ADR 0007 §3.4). Each step is a refreshable CH MV that
+> re-aggregates the parent granularity (read `FINAL`) into the next coarser
+> one on a refresh schedule — not on INSERT (task 0059; see §3.2).
 > This replaces the OHLCV Rollup Lambda from the prior design.
 
 ### 3.1 `prices.assets`
@@ -384,7 +385,12 @@ CREATE TABLE prices.price_ohlcv_1m (
     low              Decimal(38, 14),
     close            Decimal(38, 14),
     volume_base      Decimal(38, 14) DEFAULT 0,
-    volume_quote_usd Decimal(38, 14) DEFAULT 0,
+    volume_quote     Decimal(38, 14) DEFAULT 0,  -- native quote-asset volume (sum of
+                                                  -- quote-leg amounts); the decoder already
+                                                  -- computes this to derive vwap. Oracle-
+                                                  -- multiplied into volume_quote_usd by the
+                                                  -- enrichment Lambda (task 0026)
+    volume_quote_usd Decimal(38, 14) DEFAULT 0,  -- USD-denominated; filled by task 0026
     vwap             Decimal(38, 14),         -- single-source, single-minute VWAP
                                                -- (volume_quote / volume_base);
                                                -- see §5.5 of the main overview
@@ -417,18 +423,60 @@ sub-key inside that block gives O(log N) range scans.
 `'phoenix'`. `LowCardinality(String)` stores these as 16-bit dictionary
 indices; per-row cost is trivial.
 
+> #### ⚠️ Requirement — engine MUST be `ReplacingMergeTree(version)` (enrichment idempotency)
+>
+> Confirmed by the BE cross-team contract (task 0026 question C.4, 2026-06-09):
+> `price_ohlcv_*` **must** be `ReplacingMergeTree(version)` — **not** a plain
+> `MergeTree`. The `volume_quote_usd` enrichment Lambda (task 0026) does **not**
+> `ALTER TABLE … UPDATE` the zero-valued rows. ClickHouse has no efficient
+> in-place update, so enrichment instead **re-INSERTs a corrected copy of the row
+> with a strictly-greater `version`**, and the engine collapses the pair to the
+> enriched winner on the next background merge. This load-bearing invariant holds:
+>
+> - **Engine = `ReplacingMergeTree(version)`.** On a plain `MergeTree` the zero
+>   row and the enriched row would coexist forever, double-counting every read.
+> - **Enriched re-inserts carry `version = original_version + 1`.** The
+>   ledger-derived `version` of the source row + 1 guarantees the enriched copy
+>   wins the dedup. If a later legitimate write to the same bucket arrives with a
+>   higher ledger-derived version, it wins and resets `volume_quote_usd = 0`; the
+>   next enrichment pass re-enriches it (self-healing).
+> - **Reads that must reflect enrichment use `SELECT … FINAL`.** Background merges
+>   are asynchronous, so between the enrich INSERT and the next merge both versions
+>   physically coexist; `FINAL` forces the collapse at query time. The enrichment
+>   pass itself reads candidates via `FINAL WHERE volume_quote_usd = 0`, which is
+>   also what makes re-running it idempotent.
+> - **`volume_quote` is required input.** Enrichment computes
+>   `volume_quote_usd = oracle_price_usd × volume_quote` (exact), so the decoder/
+>   writer (task 0038 + backfills) must populate the `volume_quote` column above.
+
 #### Rollup chain — materialised views
 
 The 1m → 15m → 1h → 4h → 1d → 1w → 1M rollup runs **inside ClickHouse** as a
-chain of materialised views. Each MV fires on INSERT into its source table,
-aggregates the affected bucket, and writes one row to the target table. This
-replaces the OHLCV Rollup Lambda from the prior design (ADR 0007 §3.4).
+chain of **refreshable** materialised views (no OHLCV Rollup Lambda — ADR 0007
+§3.4). Each MV **re-aggregates the whole bucket from the previous granularity
+read `FINAL`** on a schedule, rather than summing the inserted block. Reading
+`FINAL` means each refresh sees the deduplicated, **enrichment-corrected**
+source (task 0026 re-INSERTs corrected `_1m` rows), so corrections propagate up
+the chain by construction and there is no partial-block under-count.
+
+> **Why not a plain insert-trigger MV?** A ClickHouse insert-trigger MV
+> aggregates only the _inserted block_, not the whole bucket. Because a
+> 15-minute bucket arrives as ~15 separate per-minute INSERTs, an insert-trigger
+> `sum()` into a `ReplacingMergeTree` target keeps only one partial per bucket
+> (~15× under-count) and never reflects enrichment re-inserts. Task **0059**
+> proved this against CH 24.8.14 and chose the refreshable / re-aggregate
+> pattern below — see its
+> [G-note](../../lore/1-tasks/active/0059_FEATURE_mv-rollup-version-propagation-enriched-reinserts/notes/G-rollup-version-propagation-decision.md)
+>
+> - `proof/`. An ADR-0007 amendment recording this is pending.
 
 Sketch DDL for the first step; the others mirror the same pattern with
-different `toStartOfInterval` durations and source/target table names:
+different `toStartOfInterval` durations and source/target table names (each
+reads the _previous_ granularity `FINAL`):
 
 ```sql
 CREATE MATERIALIZED VIEW prices.mv_ohlcv_1m_to_15m
+REFRESH EVERY 1 MINUTE                    -- coarser grains refresh less often
 TO prices.price_ohlcv_15m AS
 SELECT
     toStartOfInterval(timestamp, INTERVAL 15 MINUTE) AS timestamp,
@@ -440,18 +488,37 @@ SELECT
     min(low)                         AS low,
     argMax(close, timestamp)         AS close,
     sum(volume_base)                 AS volume_base,
+    sum(volume_quote)                AS volume_quote,
     sum(volume_quote_usd)            AS volume_quote_usd,
-    sum(volume_quote_usd) / nullIf(sum(volume_base), 0) AS vwap,
+    volume_quote_usd / nullIf(volume_base, 0) AS vwap,   -- ref aliases, never re-sum(…)
     sum(trade_count)                 AS trade_count,
     max(version)                     AS version
-FROM prices.price_ohlcv_1m
+FROM prices.price_ohlcv_1m FINAL             -- post-dedup, post-enrichment
+WHERE timestamp >= now() - INTERVAL 2 HOUR   -- bounded re-scan; widen for coarse grains
 GROUP BY timestamp, asset_id, quote_asset_id, source;
 
--- Repeat for 15m → 1h, 1h → 4h, 4h → 1d, 1d → 1w, 1w → 1M.
+-- Repeat for 15m → 1h, 1h → 4h, 4h → 1d, 1d → 1w, 1w → 1M — each FROM the
+-- previous granularity FINAL.
 ```
 
-The full DDL set will land in `docs/database-schema/clickhouse-prod-schema.sql`
-once task 0011 (CDK + schema applier) is unblocked.
+Two correctness points task 0059 established (both required of the final DDL):
+
+- **`vwap` references the summed aliases** (`volume_quote_usd / nullIf(
+volume_base, 0)`), never `sum(…)/sum(…)` — re-summing an aliased column nests
+  aggregate-in-aggregate and fails with `Code: 184 ILLEGAL_AGGREGATION`.
+- **Version projection.** A _true_ Refreshable MV atomically replaces the target
+  each refresh, so `version = max(version)` is fine. If a cluster's CH version
+  forces a scheduled `INSERT … SELECT … FROM _1m FINAL` into a
+  `ReplacingMergeTree` instead, `max(version)` is **insufficient** — enriching
+  an early minute leaves the bucket max unchanged, tying the stale and corrected
+  rollup rows; project a strictly-increasing version (`sum(version)` or a
+  refresh epoch) there.
+
+Refreshable MVs require ClickHouse ≥ 23.12; the exact mechanism (refreshable MV
+vs. scheduled re-aggregate) is finalised in task **0051** against the Hetzner
+cluster's CH version. The full DDL set will land in
+`docs/database-schema/clickhouse-prod-schema.sql` once task 0011 (CDK + schema
+applier) is unblocked.
 
 #### Write semantics — INSERT with `ReplacingMergeTree(version)`
 
@@ -485,8 +552,9 @@ were verified workable in task 0044 §2; trade-off acknowledged in ADR 0007
 writes (old month partitions) from live writes (current month partition);
 ClickHouse's MergeTree-family engines are safe under concurrent inserts.
 Backfill chunks that pre-roll higher granularities write directly to the
-target table (`_1d`, `_1h`, …) — they bypass the MV chain because the chain
-only fires on `_1m` INSERTs.
+target table (`_1d`, `_1h`, …) — they coexist with the rollup MVs, whose
+bounded refresh window (see §3.2) only re-aggregates _recent_ buckets, leaving
+historical backfilled partitions untouched.
 
 ### 3.3 `prices.current_prices` — Materialised / cached current state
 
@@ -1645,9 +1713,10 @@ erDiagram
   reflect the application-level relationship, not a declared constraint.
 - **MV chain edges.** The arrows between `price_ohlcv_1m`, `_15m`, `_1h`,
   `_4h`, `_1d`, `_1w`, `_1M` represent the **materialised-view rollup chain**
-  (ADR 0007 §3.4). Each step is a CH MV that re-aggregates the parent
-  table's rows into the next coarser granularity on INSERT. This replaces
-  the OHLCV Rollup Lambda from the prior PostgreSQL-shaped design.
+  (ADR 0007 §3.4). Each step is a refreshable CH MV that re-aggregates the
+  parent granularity (read `FINAL`) into the next coarser one on a refresh
+  schedule — not on INSERT (task 0059; see §3.2). This replaces the OHLCV
+  Rollup Lambda from the prior PostgreSQL-shaped design.
 - **Type-token stand-ins.** Mermaid ER syntax does not allow parentheses
   or commas inside type tokens, so `Decimal(38, 14)` appears as
   `Decimal_38_14`, `LowCardinality(String)` as `LowCardinality_S`,
