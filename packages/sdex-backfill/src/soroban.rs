@@ -308,8 +308,7 @@ fn learn_factory(ev: &xdr_parser::types::ExtractedEvent, reg: &mut Registries) {
                     .find(|(key, _)| key.as_str() == Some(k))
                     .and_then(|(_, v)| v.as_address().map(String::from))
             };
-            if let (Some(pair), Some(t0), Some(t1)) =
-                (get("pair"), get("token_0"), get("token_1"))
+            if let (Some(pair), Some(t0), Some(t1)) = (get("pair"), get("token_0"), get("token_1"))
             {
                 reg.soroswap.register(pair.clone(), t0, t1);
                 reg.venue.insert(pair, Venue::Soroswap);
