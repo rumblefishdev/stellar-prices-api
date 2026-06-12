@@ -91,12 +91,23 @@ others = volume-weighted USD close across quotes/sources). Optional endpoints:
 - [ ] `close_usd` column added to every OHLCV grain; writer Row populates it.
 - [ ] Oracle rows carry canonical `prices.assets` `asset_id` (no synthetic space);
       enrichment ASOF join matches for backfilled data.
-- [ ] Enrichment computes `close_usd = oracle_usd × close`, idempotent re-INSERT.
+- [ ] Enrichment computes `close_usd` with the tiered reference: oracle USDC/XLM in
+      the recent window, **USDC≡$1 (USDT≡$1) peg × XLM/USDC candle** for deep
+      history (the primary pre-Reflector mechanism, not a fallback). Idempotent
+      re-INSERT. (§12.1)
+- [ ] SAC collapses to its underlying classic/native identity — **one `asset_id`,
+      one price**; pure Soroban tokens keyed by `contract_address`. Requires the
+      `AssetIdentity` contract/SAC resolver (`canonical.rs`, `sink.rs`). (§12.4)
 - [ ] Rollup chain propagates `close_usd` onto forever-retained grains.
-- [ ] `prices.price_usd_series` view returns one USD close per (asset, bucket);
-      `NULL` for exotic-quote-only / pre-Soroban assets (documented contract).
-- [ ] Optional read API endpoints implemented (or deferred to 0040, noted).
-- [ ] Tests/fixtures for the reconciliation + enrichment + view.
+- [ ] `prices.price_usd_series` view: one USD close per (asset, bucket), keyed by
+      **natural Stellar identity** (`native` / `(code,issuer)` / `contract_address`),
+      not `asset_id`. (§12.2)
+- [ ] NULL contract: `close_usd` NULL (never error, never drops row) +
+      `status` discriminator `ok | no_asset_price | no_reference`, plus a companion
+      `prices.usd_reference(bucket)` for systemic-blackout detection. (§12.3)
+- [ ] Optional read API endpoints (single-asset primitive `price_usd_at`; also
+      serves volume not just TVL — §12.5) implemented or deferred to 0040, noted.
+- [ ] Tests/fixtures for the reconciliation + enrichment + view + NULL/status cases.
 
 ## Notes
 
@@ -106,6 +117,11 @@ others = volume-weighted USD close across quotes/sources). Optional endpoints:
 - Open questions to close before/early in impl: Reflector asset-key format
   (symbol vs contract address); cross-source collapse policy (volume-weighted vs
   canonical-source priority); whether the production Oracle Fetcher (0039)
-  already assigns `prices.assets` ids so backfill and live paths stay consistent.
+  already assigns `prices.assets` ids so backfill and live paths stay consistent;
+  the concrete first XLM/USDC ledger once the production backfill range is locked
+  (sets the deep-history USD floor — §12.1).
+- BE-confirmed decisions captured in note §12 (2026-06-12): peg-pivot reference,
+  natural-identity public key, NULL+status discriminator, one-row SAC collapse,
+  single-asset primitive.
 - The §5 reconciliation fix is **shared with task 0026** — coordinate so both
   paths land it once.

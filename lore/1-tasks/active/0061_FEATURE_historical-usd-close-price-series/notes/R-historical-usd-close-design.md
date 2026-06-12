@@ -230,5 +230,80 @@ asked for — one column, canonical USD, no multi-source/multi-quote pick per qu
    priority for the single per-asset USD close.
 3. **Confirm production Oracle Fetcher** (task 0039) assigns `prices.assets` ids, so
    the §5 reconciliation is consistent between backfill and live paths.
-4. Spawn a dedicated task for this feature (depends on / shares the 0026 enrichment
-   worker and the 0060 schema crate).
+4. ~~Spawn a dedicated task for this feature~~ — **done: task 0061** (this note's
+   home), branched off `develop` for clean separation from 0060.
+
+## 12. Refinements from BE follow-up (2026-06-12)
+
+Five clarifying questions from the Block Explorer team locked the following
+decisions. They supersede / sharpen §4, §5, §8, §9 where they overlap.
+
+### 12.1 Deep-history USD reference = XLM/USDC pivot with USDC≡$1 (not `oracle_prices`)
+
+`oracle_prices` is retention-capped (13 months), so it **cannot** be the
+read-time USD source for deep history. Instead:
+
+- We **bake `close_usd` into the candle at enrichment time** — a stored column,
+  retained forever on the rolled grains (`_1h/_1d/…`). The read-time view reads a
+  column, it does **not** join `oracle_prices`. Historical USD survives because
+  it is already multiplied-in.
+- **Reference tiering** for the multiplier:
+  - recent window (oracle row present) → real oracle USDC/XLM price (captures depeg);
+  - beyond / pre-Reflector → **USDC≡$1 (and USDT≡$1) peg × the XLM/USDC candle**.
+    This is the deep-history backbone and the *primary* pre-2024 mechanism (not a
+    mere fallback — supersedes the "(optional) peg fallback" note in §7).
+- How far back this reaches is **backfill-determined, not retention**: with the
+  full-history backfill, to XLM/USDC SDEX genesis (≈ USDC-on-Stellar launch) —
+  **earlier than 2024-02-20**. Confirm the concrete first XLM/USDC ledger once the
+  production backfill range is locked.
+- **Caveat to surface:** USDC≡$1 is a peg approximation; during a depeg, peg-based
+  deep-history USD is slightly off vs a true oracle. Acceptable for LP analytics.
+
+### 12.2 Public lookup key = natural Stellar identity, never `asset_id`
+
+`asset_id` is an internal app-assigned `UInt32` surrogate (`canonical.rs:69`) —
+not portable. The public key is:
+
+- native XLM → `native`;
+- classic → `(asset_code, issuer_address)`;
+- SAC / Soroban token → `contract_address`.
+
+The view/API resolves identity → `asset_id` internally via `prices.assets`.
+**Reconciliation:** the writer currently stores native XLM as `asset_type='classic'`
+with empty issuer (`sink.rs:125`); align the *public* key to expose XLM as `native`
+and map internally.
+
+### 12.3 NULL semantics + per-asset vs systemic discriminator
+
+`close_usd` is **NULL — never an error, never drops the row** (LEFT-JOIN-friendly).
+A discriminator distinguishes the two failure modes BE must tell apart:
+
+| status | meaning | TVL impact |
+|---|---|---|
+| `ok` | priced | — |
+| `no_asset_price` | this asset has no candle/illiquid leg at T, **but the USD reference IS available** | partial TVL from the other leg is valid |
+| `no_reference` | the USD reference itself is missing at T (systemic — **all** XLM-pivot assets NULL at that T) | partial does **not** save you |
+
+Computable: `no_reference ⟺ no XLM/USDC pivot (and no oracle) for bucket T`; else a
+missing own-candle ⟹ `no_asset_price`. Also expose a companion
+`prices.usd_reference(bucket)` (reference value / boolean per bucket) BE can
+`LEFT JOIN` to detect systemic blackouts independently of any single asset.
+
+### 12.4 SAC + classic underlying = ONE row, ONE price
+
+Collapse a SAC to its underlying classic/native identity → SDEX-classic and
+AMM-via-SAC share one `asset_id` and one USD price. **Required** by the
+cross-source merge (ADR 0004: per-source rows under the same `asset_id`); two rows
+would split liquidity and break the merge. A pure Soroban-native token (no classic
+underlying) gets its own row keyed by `contract_address`.
+
+**Not implemented yet:** `AssetIdentity` models only `Native` / `Credit{code,issuer}`
+(`canonical.rs:6-9`) and the SDEX writer always writes `contract_address=''`
+(`sink.rs:135`). The SAC-address → underlying-classic resolver is part of this
+task's §5 reconciliation work.
+
+### 12.5 `price_usd_at` is a single-asset primitive
+
+It returns the USD price of **one** asset at `t`. `volume_usd =
+gross_volume_a × price_usd_at(A,t)` is a single call; TVL is just two independent
+calls (one per leg). Single-asset is the base case — confirmed.
