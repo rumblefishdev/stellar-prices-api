@@ -31,7 +31,7 @@ packages/prices-clickhouse/
 | `price_ohlcv_1m` | `ReplacingMergeTree(version)` | `toYYYYMM(timestamp)` | backfill (per-source) / Ledger Processor |
 | `price_ohlcv_15m`…`_1M` | `ReplacingMergeTree(version)` | `toYYYYMM(timestamp)` | rollup chain / backfill pre-roll |
 | `current_prices` | `ReplacingMergeTree(updated_at)` | — | Current Price Updater (not backfilled) |
-| `oracle_prices` | `MergeTree` | `toYYYYMM(timestamp)` | backfill REFLECTOR/REDSTONE / Oracle Fetcher |
+| `oracle_prices` | `ReplacingMergeTree` | `toYYYYMM(timestamp)` | backfill REFLECTOR/REDSTONE / Oracle Fetcher |
 | `backfill_sdex_ledgers` | `ReplacingMergeTree` | — | backfill (resume cursor) |
 | `backfill_progress` | `ReplacingMergeTree(updated_at)` | — | backfill streams |
 

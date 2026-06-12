@@ -11,7 +11,13 @@ use crate::error::BackfillError;
 
 fn decimal_to_i128(d: Decimal) -> i128 {
     let d = d.round_dp(14);
-    d.mantissa() * 10i128.pow(14 - d.scale())
+    // `Decimal(38,14)` holds at most 38 significant digits. AMM amounts/prices
+    // are i128-derived and can be far larger than SDEX stroops, so a naive
+    // `mantissa * 10^(14-scale)` can overflow i128 and panic. Saturate instead:
+    // an out-of-range value is clamped to the representable bound rather than
+    // aborting the whole backfill.
+    let factor = 10i128.pow(14 - d.scale());
+    d.mantissa().saturating_mul(factor)
 }
 
 pub struct Sink {

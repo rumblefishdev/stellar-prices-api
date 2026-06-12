@@ -22,7 +22,7 @@ SELECT
     sum(volume_base)                          AS volume_base,
     sum(volume_quote)                         AS volume_quote,
     sum(volume_quote_usd)                     AS volume_quote_usd,
-    volume_quote_usd / nullIf(volume_base, 0)             AS vwap,
+    volume_quote / nullIf(volume_base, 0)                AS vwap,
     sum(trade_count)                          AS trade_count,
     max(version)                              AS version
 FROM prices.price_ohlcv_1m FINAL
@@ -39,7 +39,7 @@ SELECT
     sum(volume_base)                          AS volume_base,
     sum(volume_quote)                         AS volume_quote,
     sum(volume_quote_usd)                     AS volume_quote_usd,
-    volume_quote_usd / nullIf(volume_base, 0)             AS vwap,
+    volume_quote / nullIf(volume_base, 0)                AS vwap,
     sum(trade_count)                          AS trade_count,
     max(version)                              AS version
 FROM prices.price_ohlcv_15m FINAL
@@ -56,7 +56,7 @@ SELECT
     sum(volume_base)                          AS volume_base,
     sum(volume_quote)                         AS volume_quote,
     sum(volume_quote_usd)                     AS volume_quote_usd,
-    volume_quote_usd / nullIf(volume_base, 0)             AS vwap,
+    volume_quote / nullIf(volume_base, 0)                AS vwap,
     sum(trade_count)                          AS trade_count,
     max(version)                              AS version
 FROM prices.price_ohlcv_1h FINAL
@@ -73,7 +73,7 @@ SELECT
     sum(volume_base)                          AS volume_base,
     sum(volume_quote)                         AS volume_quote,
     sum(volume_quote_usd)                     AS volume_quote_usd,
-    volume_quote_usd / nullIf(volume_base, 0)             AS vwap,
+    volume_quote / nullIf(volume_base, 0)                AS vwap,
     sum(trade_count)                          AS trade_count,
     max(version)                              AS version
 FROM prices.price_ohlcv_4h FINAL
@@ -90,7 +90,7 @@ SELECT
     sum(volume_base)                          AS volume_base,
     sum(volume_quote)                         AS volume_quote,
     sum(volume_quote_usd)                     AS volume_quote_usd,
-    volume_quote_usd / nullIf(volume_base, 0)             AS vwap,
+    volume_quote / nullIf(volume_base, 0)                AS vwap,
     sum(trade_count)                          AS trade_count,
     max(version)                              AS version
 FROM prices.price_ohlcv_1d FINAL
@@ -107,7 +107,7 @@ SELECT
     sum(volume_base)                          AS volume_base,
     sum(volume_quote)                         AS volume_quote,
     sum(volume_quote_usd)                     AS volume_quote_usd,
-    volume_quote_usd / nullIf(volume_base, 0)             AS vwap,
+    volume_quote / nullIf(volume_base, 0)                AS vwap,
     sum(trade_count)                          AS trade_count,
     max(version)                              AS version
 FROM prices.price_ohlcv_1w FINAL

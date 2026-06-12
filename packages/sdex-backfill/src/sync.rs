@@ -63,7 +63,24 @@ pub async fn sync_partition(
     // individually-missing ledger. This also lets the run pick up the partial
     // tip partition instead of dropping its (already-published) ledgers.
     let s3_count = s3_object_count(partition).await?;
-    if file_count >= s3_count && s3_count > 0 {
+    if s3_count == 0 {
+        // The archive listing came back empty — either a genuinely-unpublished
+        // partition or a transient `aws s3 ls` hiccup. Either way we cannot
+        // confirm completeness, so defer this partition (skipped this run,
+        // retried next) rather than aborting the whole backfill with a
+        // `need: 0` hard error.
+        warn!(
+            partition = partition.start,
+            local_files = file_count,
+            "archive listing empty/unavailable — deferring partition"
+        );
+        return Ok(SyncOutcome::S3Incomplete {
+            local: file_count,
+            s3: 0,
+            need: PARTITION_SIZE as usize,
+        });
+    }
+    if file_count >= s3_count {
         info!(
             partition = partition.start,
             sync_duration_ms = duration.as_millis(),

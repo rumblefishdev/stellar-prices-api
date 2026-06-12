@@ -123,10 +123,16 @@ ORDER BY (asset_id)
 SETTINGS index_granularity = 8192;
 
 ----------------------------------------------------------------------
--- Oracle reference prices (§3.4). Append-only MergeTree, monthly partitions.
+-- Oracle reference prices (§3.4). ReplacingMergeTree, monthly partitions.
 -- Written by the Oracle Fetcher Lambda in production; the backfill writes
 -- REFLECTOR/REDSTONE samples decoded from soroban events. raw_data keeps the
 -- forensic JSON of the decoded event.
+--
+-- ReplacingMergeTree (dedup on the full sort key (asset_id, oracle_name,
+-- timestamp)) so a re-run / crash-resume that re-decodes the same ledger does
+-- not accumulate duplicate samples — matching the idempotent re-INSERT
+-- guarantee the price_ohlcv tables get from ReplacingMergeTree(version). Read
+-- with FINAL (or rely on background merges) for the collapsed view.
 ----------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS prices.oracle_prices (
@@ -136,7 +142,7 @@ CREATE TABLE IF NOT EXISTS prices.oracle_prices (
     price_usd     Decimal(38, 14),
     raw_data      String        CODEC(ZSTD(3))
 )
-ENGINE = MergeTree
+ENGINE = ReplacingMergeTree
 PARTITION BY toYYYYMM(timestamp)
 ORDER BY (asset_id, oracle_name, timestamp)
 SETTINGS index_granularity = 8192;

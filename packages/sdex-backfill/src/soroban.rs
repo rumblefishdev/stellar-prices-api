@@ -27,9 +27,6 @@ use crate::canonical::{AssetIdentity, AssetRegistry, canonicalise};
 use crate::sink::OracleSample;
 use crate::tick::TradeTick;
 
-/// Reflector publishes prices already scaled to 14 decimals — matches the
-/// `Decimal(38,14)` `oracle_prices.price_usd` column directly.
-const ORACLE_SCALE: u32 = 14;
 /// AMM token amounts are treated as 7-decimal (Stellar SAC convention). Token
 /// decimals vary; this is a documented sizing-measurement approximation.
 const AMM_AMOUNT_SCALE: u32 = 7;
@@ -173,14 +170,21 @@ fn json_int(val: Option<&Value>) -> i128 {
     }
 }
 
-/// First topic's symbol value, if any (the event "signature").
-fn signature(topics: &Value) -> Option<&str> {
+/// The string/symbol value of the topic at `idx`, if any.
+fn topic_symbol(topics: &Value, idx: usize) -> Option<&str> {
     topics
         .as_array()?
-        .first()?
+        .get(idx)?
         .as_object()?
         .get("value")?
         .as_str()
+}
+
+/// First topic's symbol value, if any (the event "signature"). Note: some
+/// factories (Soroswap) put a name String in topic[0] and the real action
+/// symbol in topic[1] — see `learn_factory`.
+fn signature(topics: &Value) -> Option<&str> {
+    topic_symbol(topics, 0)
 }
 
 /// Process all Soroban events in one ledger.
@@ -214,7 +218,7 @@ pub fn process_ledger(
                 Some("REDSTONE") => decode_redstone(ev, contract_id.as_str(), reg, &mut out),
                 _ => {
                     // Factory events grow the registry; pool events are queued.
-                    learn_factory(&contract_id, ev, reg);
+                    learn_factory(ev, reg);
                     let row = SorobanEventRow {
                         contract_id: contract_id.clone(),
                         transaction_id: tx_id.clone(),
@@ -267,51 +271,51 @@ fn venue_source(v: &Venue) -> &'static str {
 
 /// Recognise factory events and register the created pool. Detected by event
 /// signature (only factories emit these), independent of emitter address.
-fn learn_factory(contract_id: &str, ev: &xdr_parser::types::ExtractedEvent, reg: &mut Registries) {
-    let topics = ev.topics.as_array();
-    let sig = signature(&ev.topics);
-    match sig {
-        // Aquarius router: Symbol("add_pool"), data (pool_address, pool_type)
-        Some("add_pool") => {
-            if let Some(pool) = first_address(&ev.data) {
-                reg.venue.insert(pool, Venue::Aquarius);
-            }
+///
+/// The action symbol is not always in topic[0]: Aquarius (`add_pool`) and
+/// Phoenix (`create`) emit it there, but Soroswap's factory event is
+/// `[String("SoroswapFactory"), Symbol("new_pair")]`, so its action lives in
+/// topic[1]. We therefore check both positions.
+fn learn_factory(ev: &xdr_parser::types::ExtractedEvent, reg: &mut Registries) {
+    let sig0 = signature(&ev.topics);
+    let sig1 = topic_symbol(&ev.topics, 1);
+
+    // Aquarius router: Symbol("add_pool"), data (pool_address, pool_type)
+    if sig0 == Some("add_pool") {
+        if let Some(pool) = first_address(&ev.data) {
+            reg.venue.insert(pool, Venue::Aquarius);
         }
-        // Phoenix factory: [Symbol("create"), Symbol("liquidity_pool")], data Address(pool)
-        Some("create") => {
-            let is_lp = topics
-                .and_then(|t| t.get(1))
-                .and_then(|t| t.as_object())
-                .and_then(|o| o.get("value"))
-                .and_then(|v| v.as_str())
-                == Some("liquidity_pool");
-            if is_lp {
-                if let Some(pool) = address_value(&ev.data) {
-                    reg.venue.insert(pool.clone(), Venue::Phoenix);
-                    reg.phoenix.register(pool, phoenix_extractor::POOL_TYPE_XYK);
-                }
-            }
-        }
-        // Soroswap factory: [String("SoroswapFactory"), Symbol("new_pair")],
-        // data { token_0, token_1, pair, ... }
-        Some("new_pair") => {
-            if let TaggedValue::Map(m) = json_to_tagged(&ev.data) {
-                let get = |k: &str| {
-                    m.iter()
-                        .find(|(key, _)| key.as_str() == Some(k))
-                        .and_then(|(_, v)| v.as_address().map(String::from))
-                };
-                if let (Some(pair), Some(t0), Some(t1)) =
-                    (get("pair"), get("token_0"), get("token_1"))
-                {
-                    reg.soroswap.register(pair.clone(), t0, t1);
-                    reg.venue.insert(pair, Venue::Soroswap);
-                }
-            }
-        }
-        _ => {}
+        return;
     }
-    let _ = contract_id;
+
+    // Phoenix factory: [Symbol("create"), Symbol("liquidity_pool")], data Address(pool)
+    if sig0 == Some("create") {
+        if sig1 == Some("liquidity_pool") {
+            if let Some(pool) = address_value(&ev.data) {
+                reg.venue.insert(pool.clone(), Venue::Phoenix);
+                reg.phoenix.register(pool, phoenix_extractor::POOL_TYPE_XYK);
+            }
+        }
+        return;
+    }
+
+    // Soroswap factory: [String("SoroswapFactory"), Symbol("new_pair")],
+    // data { token_0, token_1, pair, ... }. The action symbol is in topic[1].
+    if sig1 == Some("new_pair") {
+        if let TaggedValue::Map(m) = json_to_tagged(&ev.data) {
+            let get = |k: &str| {
+                m.iter()
+                    .find(|(key, _)| key.as_str() == Some(k))
+                    .and_then(|(_, v)| v.as_address().map(String::from))
+            };
+            if let (Some(pair), Some(t0), Some(t1)) =
+                (get("pair"), get("token_0"), get("token_1"))
+            {
+                reg.soroswap.register(pair.clone(), t0, t1);
+                reg.venue.insert(pair, Venue::Soroswap);
+            }
+        }
+    }
 }
 
 fn address_value(v: &Value) -> Option<String> {
@@ -409,7 +413,6 @@ fn decode_reflector(
             }
         }
     }
-    let _ = ORACLE_SCALE;
 }
 
 /// REDSTONE carries a base64 XDR `bytes` payload (updated_feeds map). Full XDR
@@ -462,5 +465,31 @@ mod tests {
     fn signature_reads_topic0_symbol() {
         let topics = json!([{"type":"sym","value":"REFLECTOR"},{"type":"sym","value":"update"}]);
         assert_eq!(signature(&topics), Some("REFLECTOR"));
+    }
+
+    #[test]
+    fn soroswap_factory_action_symbol_is_in_topic1() {
+        // Regression: the Soroswap factory event carries a name String in
+        // topic[0] and the real action symbol ("new_pair") in topic[1].
+        // learn_factory must key off topic[1] for Soroswap — keying off
+        // topic[0] (signature) silently never registers any Soroswap pool, so
+        // all Soroswap swaps drop.
+        let topics = json!([
+            {"type":"string","value":"SoroswapFactory"},
+            {"type":"sym","value":"new_pair"}
+        ]);
+        assert_eq!(signature(&topics), Some("SoroswapFactory"));
+        assert_eq!(topic_symbol(&topics, 1), Some("new_pair"));
+    }
+
+    #[test]
+    fn phoenix_factory_action_symbols_resolve_by_position() {
+        // Phoenix: [Symbol("create"), Symbol("liquidity_pool")].
+        let topics = json!([
+            {"type":"sym","value":"create"},
+            {"type":"sym","value":"liquidity_pool"}
+        ]);
+        assert_eq!(signature(&topics), Some("create"));
+        assert_eq!(topic_symbol(&topics, 1), Some("liquidity_pool"));
     }
 }
