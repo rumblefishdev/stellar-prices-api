@@ -1,3 +1,4 @@
+use aquarius_extractor::AquariusPoolExtractor;
 use extractors_core::{
     ExtractError, SorobanEventRow, SwapExtractor, TradeRow, Venue, VenueRegistry,
 };
@@ -5,6 +6,7 @@ use phoenix_extractor::{
     PHOENIX_STABLE_EVENT_COUNT, PHOENIX_XYK_EVENT_COUNT, POOL_TYPE_XYK, PhoenixPoolRegistry,
     PhoenixXykExtractor,
 };
+use soroswap_extractor::{SoroswapPairExtractor, SoroswapPoolRegistry};
 
 #[derive(Debug, thiserror::Error)]
 pub enum DispatchError {
@@ -65,10 +67,15 @@ pub fn dispatch_phoenix(
 }
 
 /// Top-level dispatcher: routes events by venue, then by pool shape for Phoenix.
+///
+/// Soroswap requires the pool→tokens registry to resolve token identities; an
+/// unresolved pool (created before the indexed window) yields no trades rather
+/// than an error. Aquarius and Phoenix carry tokens inline.
 pub fn dispatch(
     rows: &[SorobanEventRow],
     venue_registry: &VenueRegistry,
     phoenix_registry: &PhoenixPoolRegistry,
+    soroswap_registry: &SoroswapPoolRegistry,
 ) -> Result<Vec<TradeRow>, DispatchError> {
     if rows.is_empty() {
         return Ok(vec![]);
@@ -79,14 +86,11 @@ pub fn dispatch(
 
     match venue {
         Some(Venue::Phoenix) => dispatch_phoenix(rows, phoenix_registry),
-        Some(Venue::Soroswap) => Err(DispatchError::VenueNotImplemented {
-            venue: Venue::Soroswap,
-            contract_id: contract_id.clone(),
-        }),
-        Some(Venue::Aquarius) => Err(DispatchError::VenueNotImplemented {
-            venue: Venue::Aquarius,
-            contract_id: contract_id.clone(),
-        }),
+        Some(Venue::Soroswap) => match soroswap_registry.lookup(contract_id) {
+            Some(pair) => Ok(SoroswapPairExtractor::new(pair).extract(rows)?.trades),
+            None => Ok(vec![]),
+        },
+        Some(Venue::Aquarius) => Ok(AquariusPoolExtractor.extract(rows)?.trades),
         None => Ok(vec![]),
     }
 }
@@ -113,7 +117,13 @@ mod tests {
         let phoenix_reg = phoenix_registry_both_wasm_variants();
         let venue_reg = venue_registry_phoenix(&[XLM_USDC_POOL, PHO_USDC_POOL]);
 
-        let trades = dispatch(&rows, &venue_reg, &phoenix_reg).unwrap();
+        let trades = dispatch(
+            &rows,
+            &venue_reg,
+            &phoenix_reg,
+            &SoroswapPoolRegistry::new(),
+        )
+        .unwrap();
         assert_eq!(trades.len(), 1);
         assert_eq!(trades[0].contract_id, XLM_USDC_POOL);
         assert_eq!(trades[0].venue, Venue::Phoenix);
@@ -125,7 +135,13 @@ mod tests {
         let phoenix_reg = phoenix_registry_both_wasm_variants();
         let venue_reg = venue_registry_phoenix(&[XLM_USDC_POOL, PHO_USDC_POOL]);
 
-        let trades = dispatch(&rows, &venue_reg, &phoenix_reg).unwrap();
+        let trades = dispatch(
+            &rows,
+            &venue_reg,
+            &phoenix_reg,
+            &SoroswapPoolRegistry::new(),
+        )
+        .unwrap();
         assert_eq!(trades.len(), 1);
         assert_eq!(trades[0].contract_id, PHO_USDC_POOL);
         assert_eq!(trades[0].amount_in, 11659417676);
@@ -170,7 +186,13 @@ mod tests {
         let phoenix_reg = phoenix_registry_both_wasm_variants();
         let venue_reg = venue_registry_phoenix(&[XLM_USDC_POOL]);
 
-        let trades = dispatch(&rows, &venue_reg, &phoenix_reg).unwrap();
+        let trades = dispatch(
+            &rows,
+            &venue_reg,
+            &phoenix_reg,
+            &SoroswapPoolRegistry::new(),
+        )
+        .unwrap();
         assert!(trades.is_empty());
     }
 
@@ -179,7 +201,7 @@ mod tests {
         let phoenix_reg = phoenix_registry_both_wasm_variants();
         let venue_reg = venue_registry_phoenix(&[XLM_USDC_POOL]);
 
-        let trades = dispatch(&[], &venue_reg, &phoenix_reg).unwrap();
+        let trades = dispatch(&[], &venue_reg, &phoenix_reg, &SoroswapPoolRegistry::new()).unwrap();
         assert!(trades.is_empty());
     }
 }

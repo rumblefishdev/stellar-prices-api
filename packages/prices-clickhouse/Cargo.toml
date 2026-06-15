@@ -1,0 +1,16 @@
+[package]
+name = "prices-clickhouse"
+version = "0.1.0"
+edition = "2024"
+description = "prices ClickHouse schema + connection layer (mirrors BE crates/db-clickhouse; task 0060)"
+
+[[bin]]
+name = "prices-clickhouse-init"
+path = "src/bin/prices-clickhouse-init.rs"
+
+[dependencies]
+clickhouse = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+thiserror = { workspace = true }

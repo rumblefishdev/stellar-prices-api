@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
+    "packages/prices-clickhouse",
     "packages/sdex-backfill",
     "packages/extractors-core",
     "packages/phoenix-extractor",
@@ -19,5 +20,6 @@ clap = { version = "4", features = ["derive", "env"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 rust_decimal = { version = "1", features = ["serde-with-str"] }
 thiserror = "2"

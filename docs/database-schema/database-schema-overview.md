@@ -9,9 +9,10 @@
 
 ## Revision History
 
-| Date       | Sections                        | Driver                                                                                                                                                                           | Summary                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| ---------- | ------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 2026-05-20 | All sections + Appendices A & B | [ADR 0007](../../lore/2-adrs/0007_live-data-sink-on-shared-hetzner-clickhouse.md) (accepted) · [Task 0049](../../lore/1-tasks/active/0049_DOCS_overview-rewrite-for-adr-0007.md) | **Live data sink flipped from Prices-owned RDS PostgreSQL 16 to BE's shared Hetzner ClickHouse cluster** (separate `prices` database, isolated via CH multi-tenant primitives). Schema rewritten to per-source `ReplacingMergeTree(version)` rows on per-granularity tables (`price_ohlcv_1m`, `_15m`, …, `_1M`) feeding a materialised-view rollup chain that eliminates the OHLCV Rollup Lambda. Cleanup becomes `ALTER TABLE … DROP PARTITION`. All 14 mermaid blocks (including Appendices A and B) updated to ClickHouse types, engines, sort keys, MV chain, and the mTLS edge. RDS sizing/scaling ladder removed; Hetzner cost-share added (~$1-2/env/mo per task 0046). |
+| Date       | Sections                               | Driver                                                                                                                                                                           | Summary                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| ---------- | -------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 2026-06-11 | §3.2 §3.0, Schema source-of-truth refs | [Task 0060](../../lore/1-tasks/active/0060_FEATURE_prices-clickhouse-crate-combined-backfill-sizing/README.md)                                                                   | **Schema implemented as the `packages/prices-clickhouse` crate** (`schema/init.sql` = 12 tables, source of truth; `rollups.sql` = refreshable-MV chain; `preroll.sql` = full-range re-aggregate). Built + applied on a local ClickHouse 25.6 and validated by a combined SDEX + soroban (oracle) backfill. **Sizing finding:** measured ~3.6 KB/ledger over a 10k-ledger sample (≈48× the prior 74 B/ledger task-0046 estimate), driven by ~4,343-asset pair diversity (317k 1m candles) and short-window rollups that don't yet amortize. `assets` implemented with `String` (not `FixedString`) columns to match the writer contract. See task 0060 `notes/G-measurement-results.md`. |
+| 2026-05-20 | All sections + Appendices A & B        | [ADR 0007](../../lore/2-adrs/0007_live-data-sink-on-shared-hetzner-clickhouse.md) (accepted) · [Task 0049](../../lore/1-tasks/active/0049_DOCS_overview-rewrite-for-adr-0007.md) | **Live data sink flipped from Prices-owned RDS PostgreSQL 16 to BE's shared Hetzner ClickHouse cluster** (separate `prices` database, isolated via CH multi-tenant primitives). Schema rewritten to per-source `ReplacingMergeTree(version)` rows on per-granularity tables (`price_ohlcv_1m`, `_15m`, …, `_1M`) feeding a materialised-view rollup chain that eliminates the OHLCV Rollup Lambda. Cleanup becomes `ALTER TABLE … DROP PARTITION`. All 14 mermaid blocks (including Appendices A and B) updated to ClickHouse types, engines, sort keys, MV chain, and the mTLS edge. RDS sizing/scaling ladder removed; Hetzner cost-share added (~$1-2/env/mo per task 0046).         |
 
 ---
 
@@ -140,7 +141,7 @@ are pushed to the Hetzner cluster via separate post-backfill tools.
 | Component              | Technology                                                                                                                                                       |
 | ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Database engine        | **ClickHouse** on BE's shared Hetzner cluster (separate `prices` database, ADR 0007)                                                                             |
-| Storage engines        | `ReplacingMergeTree(version)` for OHLCV; `ReplacingMergeTree(updated_at)` for `current_prices` / `assets` / `backfill_progress`; `MergeTree` for `oracle_prices` |
+| Storage engines        | `ReplacingMergeTree(version)` for OHLCV; `ReplacingMergeTree(updated_at)` for `current_prices` / `assets` / `backfill_progress`; `ReplacingMergeTree` for `oracle_prices` |
 | Rollups                | Chain of CH materialised views: `price_ohlcv_1m → _15m → _1h → _4h → _1d → _1w → _1M` (replaces the OHLCV Rollup Lambda)                                         |
 | Partitioning           | `PARTITION BY toYYYYMM(timestamp)` on every OHLCV/oracle table; cleanup via `ALTER TABLE … DROP PARTITION`                                                       |
 | Database client (Rust) | [`clickhouse`](https://crates.io/crates/clickhouse) — async, native protocol over HTTPS-mTLS                                                                     |
@@ -253,7 +254,7 @@ erDiagram
         LowCardinality_S   oracle_name "reflector|chainlink|redstone|band"
         Decimal_38_14      price_usd
         String             raw_data "JSON blob, unparsed"
-        ENGINE             engine "MergeTree (append-only)"
+        ENGINE             engine "ReplacingMergeTree"
         PARTITION_BY       partition "toYYYYMM(timestamp)"
         ORDER_BY           sort_key "asset_id, oracle_name, timestamp"
     }
@@ -516,9 +517,14 @@ volume_base, 0)`), never `sum(…)/sum(…)` — re-summing an aliased column ne
 
 Refreshable MVs require ClickHouse ≥ 23.12; the exact mechanism (refreshable MV
 vs. scheduled re-aggregate) is finalised in task **0051** against the Hetzner
-cluster's CH version. The full DDL set will land in
-`docs/database-schema/clickhouse-prod-schema.sql` once task 0011 (CDK + schema
-applier) is unblocked.
+cluster's CH version. The implemented DDL now lives in the
+**`packages/prices-clickhouse`** crate (task 0060) — `schema/init.sql` (12
+tables, the source of truth, applied by `prices-clickhouse-init`),
+`schema/rollups.sql` (the refreshable-MV chain), and `schema/preroll.sql` (the
+deterministic full-range re-aggregate used by backfill / the sizing
+measurement). Implementation note: `assets` uses `String` (not `FixedString`)
+columns there, matching the proven `sdex-backfill` writer contract; the
+footprint difference is negligible.
 
 #### Write semantics — INSERT with `ReplacingMergeTree(version)`
 
@@ -669,10 +675,13 @@ Monthly partitioning via `toYYYYMM(timestamp)`. Written by the **Oracle Fetcher*
 Lambda (EventBridge `rate(5 minutes)`) which calls Reflector via Soroban RPC
 `simulateTransaction`. **Failures here do not block primary ingestion.**
 
-The engine is `MergeTree` (append-only) — there is no dedup story for oracle
-samples; every fetched data point is a row, and the read path explicitly
-chooses `argMax(price_usd, timestamp)` when it wants "latest oracle reading
-for asset X".
+The engine is `ReplacingMergeTree`, which dedups on the full sort key
+`(asset_id, oracle_name, timestamp)`. A given (asset, oracle, second) sample is
+therefore a single logical row even if a backfill re-run or crash-resume
+re-decodes the same ledger — matching the idempotent re-INSERT guarantee the
+`price_ohlcv` tables get from `ReplacingMergeTree(version)`. The read path still
+chooses `argMax(price_usd, timestamp)` when it wants "latest oracle reading for
+asset X"; use `FINAL` (or rely on background merges) for the collapsed view.
 
 ```sql
 CREATE TABLE prices.oracle_prices (
@@ -682,7 +691,7 @@ CREATE TABLE prices.oracle_prices (
     price_usd     Decimal(38, 14),
     raw_data      String                   -- JSON blob, unparsed for forensic value
 )
-ENGINE = MergeTree
+ENGINE = ReplacingMergeTree
 PARTITION BY toYYYYMM(timestamp)
 ORDER BY (asset_id, oracle_name, timestamp)
 SETTINGS index_granularity = 8192;
@@ -918,7 +927,7 @@ flowchart LR
     OHLCV15m -.->|MV chain| OHLCVrest[(... → 1h → 4h → 1d → 1w → 1M)]
     CPU[Current Price Updater<br/>rate 1m] -->|SELECT latest 1m| OHLCV1m
     CPU -->|VWAP INSERT| Current[(current_prices<br/>ReplacingMergeTree)]
-    Oracle[Oracle Fetcher<br/>rate 5m] -->|INSERT| OracleP[(oracle_prices<br/>MergeTree)]
+    Oracle[Oracle Fetcher<br/>rate 5m] -->|INSERT| OracleP[(oracle_prices<br/>ReplacingMergeTree)]
     Cleanup[Cleanup Worker<br/>cron 02:00 UTC] -->|ALTER ... DROP PARTITION| OHLCV1m
     Cleanup -->|ALTER ... DROP PARTITION| OHLCV15m
     Cleanup -->|ALTER ... DROP PARTITION| OracleP
@@ -1561,7 +1570,7 @@ criteria from the delivery plan, restated against the canonical
 | `prices.price_ohlcv_1m`                                          | `ReplacingMergeTree(version)`    | `toYYYYMM(timestamp)` | `(asset_id, quote_asset_id, source, timestamp)`  | Prices Ledger Processor; backfill streams (sdex-cloud-push, soroban-amm completion push); Cleanup Worker (DROP PARTITION) | `GET /ohlcv` (1m timeframe), Current Price Updater, MV chain feeding rolled granularities |
 | `prices.price_ohlcv_15m` / `_1h` / `_4h` / `_1d` / `_1w` / `_1M` | `ReplacingMergeTree(version)`    | `toYYYYMM(timestamp)` | `(asset_id, quote_asset_id, source, timestamp)`  | MV chain on `_1m`; backfill streams (for pre-rolled ranges)                                                               | `GET /ohlcv` (rolled granularities)                                                       |
 | `prices.current_prices`                                          | `ReplacingMergeTree(updated_at)` | none                  | `(asset_id)`                                     | Current Price Updater Lambda                                                                                              | `GET /assets`, `GET /price`, `POST /prices/batch`                                         |
-| `prices.oracle_prices`                                           | `MergeTree` (append-only)        | `toYYYYMM(timestamp)` | `(asset_id, oracle_name, timestamp)`             | Oracle Fetcher Lambda; Cleanup Worker (DROP PARTITION)                                                                    | `GET /oracles/{asset}`                                                                    |
+| `prices.oracle_prices`                                           | `ReplacingMergeTree`             | `toYYYYMM(timestamp)` | `(asset_id, oracle_name, timestamp)`             | Oracle Fetcher Lambda; Cleanup Worker (DROP PARTITION)                                                                    | `GET /oracles/{asset}`                                                                    |
 | `prices.backfill_progress`                                       | `ReplacingMergeTree(updated_at)` | none                  | `(task_name)`                                    | Backfill cloud-push step — one row per stream                                                                             | `GET /backfill/status`                                                                    |
 
 ---
@@ -1685,7 +1694,7 @@ erDiagram
         LowCardinality_S   oracle_name "reflector | chainlink | redstone | band"
         Decimal_38_14      price_usd
         String             raw_data "JSON blob, unparsed"
-        ENGINE             engine "MergeTree (append-only)"
+        ENGINE             engine "ReplacingMergeTree"
         PARTITION_BY       partition "toYYYYMM(timestamp)"
         ORDER_BY           sort_key "(asset_id, oracle_name, timestamp)"
     }
@@ -1729,9 +1738,9 @@ erDiagram
 - **`SAME_AS` / `SOURCE` pseudo-rows on the rolled-up tables** abbreviate
   identical schema (they have the same columns as `price_ohlcv_1m`) and
   show which MV populates them. The full DDL for all seven granularity
-  tables and the six MVs will land in
-  [`clickhouse-prod-schema.sql`](./clickhouse-prod-schema.sql) once task 0011
-  is unblocked.
+  tables and the six MVs is implemented in the
+  [`packages/prices-clickhouse`](../../packages/prices-clickhouse) crate
+  (`schema/init.sql` + `schema/rollups.sql`), task 0060.
 
 ---
 
@@ -1848,7 +1857,7 @@ flowchart TB
 
                 Current["<b>prices.current_prices</b><br/>━━━━━━━━━━━━━━━━━━━━<br/>asset_id UInt32 (logical FK)<br/>price_usd / price_xlm Decimal(38,14)<br/>change_24h_pct / change_7d_pct Decimal(10,4)<br/>volume_24h_usd / market_cap_usd Decimal(38,14)<br/>vwap_24h Decimal(38,14)<br/>sources String (JSON)<br/>updated_at DateTime (RMT version)<br/>━━━━━━━━━━━━━━━━━━━━<br/>ReplacingMergeTree(updated_at)<br/>ORDER BY (asset_id)"]
 
-                OracleP["<b>prices.oracle_prices</b><br/>━━━━━━━━━━━━━━━━━━━━<br/>timestamp DateTime<br/>asset_id UInt32<br/>oracle_name LowCardinality(String)<br/>price_usd Decimal(38,14)<br/>raw_data String (JSON)<br/>━━━━━━━━━━━━━━━━━━━━<br/>MergeTree (append-only)<br/>PARTITION BY toYYYYMM(timestamp)<br/>ORDER BY (asset_id, oracle_name, timestamp)"]
+                OracleP["<b>prices.oracle_prices</b><br/>━━━━━━━━━━━━━━━━━━━━<br/>timestamp DateTime<br/>asset_id UInt32<br/>oracle_name LowCardinality(String)<br/>price_usd Decimal(38,14)<br/>raw_data String (JSON)<br/>━━━━━━━━━━━━━━━━━━━━<br/>ReplacingMergeTree<br/>PARTITION BY toYYYYMM(timestamp)<br/>ORDER BY (asset_id, oracle_name, timestamp)"]
 
                 BP["<b>prices.backfill_progress</b><br/>━━━━━━━━━━━━━━━━━━━━<br/>task_name LowCardinality(String)<br/>  sdex_archive | soroban_amm<br/>start/target/current_ledger UInt64<br/>status Enum8<br/>last_push_at Nullable(DateTime)<br/>started_at / updated_at DateTime<br/>completed_at Nullable(DateTime)<br/>━━━━━━━━━━━━━━━━━━━━<br/>ReplacingMergeTree(updated_at)<br/>ORDER BY (task_name)"]
 
