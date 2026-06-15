@@ -71,3 +71,7 @@ target/
 # Local Docker compose overrides (perf tunings, env-specific paths)
 docker-compose.override.yml
 docker-compose.override.yaml
+
+# Downloaded raw ledger fixtures (backfill test data) — large, regenerable from
+# the public ledger store; never committed.
+**/fixtures/ledgers/

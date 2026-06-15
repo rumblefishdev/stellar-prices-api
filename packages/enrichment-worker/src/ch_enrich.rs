@@ -6,8 +6,20 @@
 //! pipeline. Those three per-row trait seams **dissolve** here: the
 //! whole enrichment is one set-based SQL statement that reads the
 //! zero-valued candidates, forward-fills the oracle price via an
-//! `ASOF LEFT JOIN`, computes `volume_quote_usd`, and re-inserts the
-//! corrected rows in a single server-side pass.
+//! `ASOF LEFT JOIN`, computes both `volume_quote_usd`
+//! (`oracle_usd × volume_quote`) and `close_usd`
+//! (`oracle_usd × close`, task 0061), and re-inserts the corrected rows
+//! in a single server-side pass.
+//!
+//! ## USD-close reference tiers (task 0061 §12.1)
+//!
+//! This ASOF join is the **recent-window oracle tier**: it sets
+//! `close_usd` only where a Reflector oracle row exists for the candle's
+//! `quote_asset_id` within the staleness window. Deep history (no oracle
+//! row) stays at `close_usd = 0` and is the job of the **peg-pivot tier**
+//! (USDC≡$1 / USDT≡$1 × the XLM/USDC candle) — not yet implemented here.
+//! Until it lands, deep-history candles carry `close_usd = 0` (the view's
+//! `no_reference` status), never a wrong non-NULL value.
 //!
 //! ## Why a direct `INSERT … SELECT` (not the staging table)
 //!
@@ -101,7 +113,7 @@ impl ChEnrichmentPass {
     async fn count_candidates(&self) -> Result<u64, ChEnrichError> {
         let sql = format!(
             "SELECT count() FROM {db}.{tbl} FINAL \
-             WHERE volume_quote_usd = 0 AND volume_quote > 0",
+             WHERE (volume_quote_usd = 0 OR close_usd = 0) AND volume_quote > 0",
             db = self.cfg.database,
             tbl = self.cfg.table,
         );
@@ -122,13 +134,14 @@ impl ChEnrichmentPass {
             "INSERT INTO {db}.{tbl} \
                  (timestamp, asset_id, quote_asset_id, source, \
                   open, high, low, close, \
-                  volume_base, volume_quote, volume_quote_usd, vwap, \
+                  volume_base, volume_quote, volume_quote_usd, close_usd, vwap, \
                   trade_count, version) \
              SELECT \
                  p.timestamp, p.asset_id, p.quote_asset_id, p.source, \
                  p.open, p.high, p.low, p.close, \
                  p.volume_base, p.volume_quote, \
                  CAST(o.price_usd * p.volume_quote AS Decimal(38, 14)) AS volume_quote_usd, \
+                 CAST(o.price_usd * p.close AS Decimal(38, 14)) AS close_usd, \
                  p.vwap, p.trade_count, \
                  p.version + 1 AS version \
              FROM {db}.{tbl} AS p FINAL \
@@ -136,7 +149,7 @@ impl ChEnrichmentPass {
                      ON o.asset_id = p.quote_asset_id \
                     AND o.oracle_name = ? \
                     AND o.timestamp <= p.timestamp \
-             WHERE p.volume_quote_usd = 0 \
+             WHERE (p.volume_quote_usd = 0 OR p.close_usd = 0) \
                AND p.volume_quote > 0 \
                AND o.price_usd IS NOT NULL \
                AND (p.timestamp - o.timestamp) <= ? \

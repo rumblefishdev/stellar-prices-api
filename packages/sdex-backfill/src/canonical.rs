@@ -53,8 +53,12 @@ impl AssetIdentity {
     }
 }
 
-const USDC_ISSUER: &str = "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN";
-const USDT_ISSUER: &str = "GCQTGZQQ5G4PTM2GL7CDIFKUBIPEC52BROAQIAPW53XBRJVN6ZJVTG6V";
+/// Canonical Stellar issuer for circle's USDC. Shared with the Soroban oracle
+/// reconciliation (`soroban.rs`) so a Reflector `USDC` symbol resolves to the
+/// same `AssetIdentity` (hence the same `asset_id`) used as a trade quote.
+pub(crate) const USDC_ISSUER: &str = "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN";
+/// Canonical Stellar issuer for USDT. Shared with `soroban.rs` (see above).
+pub(crate) const USDT_ISSUER: &str = "GCQTGZQQ5G4PTM2GL7CDIFKUBIPEC52BROAQIAPW53XBRJVN6ZJVTG6V";
 
 fn is_preferred_quote(asset: &AssetIdentity) -> Option<u8> {
     match asset {

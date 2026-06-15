@@ -22,6 +22,7 @@ SELECT
     sum(volume_base)                          AS volume_base,
     sum(volume_quote)                         AS volume_quote,
     sum(volume_quote_usd)                     AS volume_quote_usd,
+    argMax(close_usd, timestamp)              AS close_usd,
     volume_quote / nullIf(volume_base, 0)                AS vwap,
     sum(trade_count)                          AS trade_count,
     max(version)                              AS version
@@ -39,6 +40,7 @@ SELECT
     sum(volume_base)                          AS volume_base,
     sum(volume_quote)                         AS volume_quote,
     sum(volume_quote_usd)                     AS volume_quote_usd,
+    argMax(close_usd, timestamp)              AS close_usd,
     volume_quote / nullIf(volume_base, 0)                AS vwap,
     sum(trade_count)                          AS trade_count,
     max(version)                              AS version
@@ -56,6 +58,7 @@ SELECT
     sum(volume_base)                          AS volume_base,
     sum(volume_quote)                         AS volume_quote,
     sum(volume_quote_usd)                     AS volume_quote_usd,
+    argMax(close_usd, timestamp)              AS close_usd,
     volume_quote / nullIf(volume_base, 0)                AS vwap,
     sum(trade_count)                          AS trade_count,
     max(version)                              AS version
@@ -73,6 +76,7 @@ SELECT
     sum(volume_base)                          AS volume_base,
     sum(volume_quote)                         AS volume_quote,
     sum(volume_quote_usd)                     AS volume_quote_usd,
+    argMax(close_usd, timestamp)              AS close_usd,
     volume_quote / nullIf(volume_base, 0)                AS vwap,
     sum(trade_count)                          AS trade_count,
     max(version)                              AS version
@@ -90,6 +94,7 @@ SELECT
     sum(volume_base)                          AS volume_base,
     sum(volume_quote)                         AS volume_quote,
     sum(volume_quote_usd)                     AS volume_quote_usd,
+    argMax(close_usd, timestamp)              AS close_usd,
     volume_quote / nullIf(volume_base, 0)                AS vwap,
     sum(trade_count)                          AS trade_count,
     max(version)                              AS version
@@ -107,6 +112,7 @@ SELECT
     sum(volume_base)                          AS volume_base,
     sum(volume_quote)                         AS volume_quote,
     sum(volume_quote_usd)                     AS volume_quote_usd,
+    argMax(close_usd, timestamp)              AS close_usd,
     volume_quote / nullIf(volume_base, 0)                AS vwap,
     sum(trade_count)                          AS trade_count,
     max(version)                              AS version

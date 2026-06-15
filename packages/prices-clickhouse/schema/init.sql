@@ -80,6 +80,7 @@ CREATE TABLE IF NOT EXISTS prices.price_ohlcv_1m (
     volume_base      Decimal(38, 14) DEFAULT 0,
     volume_quote     Decimal(38, 14) DEFAULT 0,
     volume_quote_usd Decimal(38, 14) DEFAULT 0,
+    close_usd        Decimal(38, 14) DEFAULT 0,
     vwap             Decimal(38, 14),
     trade_count      UInt32        DEFAULT 0,
     version          UInt64
@@ -99,6 +100,19 @@ CREATE TABLE IF NOT EXISTS prices.price_ohlcv_4h  AS prices.price_ohlcv_1m;
 CREATE TABLE IF NOT EXISTS prices.price_ohlcv_1d  AS prices.price_ohlcv_1m;
 CREATE TABLE IF NOT EXISTS prices.price_ohlcv_1w  AS prices.price_ohlcv_1m;
 CREATE TABLE IF NOT EXISTS prices.price_ohlcv_1M  AS prices.price_ohlcv_1m;
+
+-- Historical USD close (task 0061). close_usd = oracle_usd × close, computed at
+-- enrichment time (DEFAULT 0 until the enrichment pass fills it, mirroring
+-- volume_quote_usd). Added to the base CREATE above so fresh AS-copies inherit
+-- it; these idempotent ALTERs add it to databases created before 0061, where the
+-- AS-copies do NOT inherit a post-hoc base-table ALTER — so apply per table.
+ALTER TABLE prices.price_ohlcv_1m  ADD COLUMN IF NOT EXISTS close_usd Decimal(38, 14) DEFAULT 0 AFTER volume_quote_usd;
+ALTER TABLE prices.price_ohlcv_15m ADD COLUMN IF NOT EXISTS close_usd Decimal(38, 14) DEFAULT 0 AFTER volume_quote_usd;
+ALTER TABLE prices.price_ohlcv_1h  ADD COLUMN IF NOT EXISTS close_usd Decimal(38, 14) DEFAULT 0 AFTER volume_quote_usd;
+ALTER TABLE prices.price_ohlcv_4h  ADD COLUMN IF NOT EXISTS close_usd Decimal(38, 14) DEFAULT 0 AFTER volume_quote_usd;
+ALTER TABLE prices.price_ohlcv_1d  ADD COLUMN IF NOT EXISTS close_usd Decimal(38, 14) DEFAULT 0 AFTER volume_quote_usd;
+ALTER TABLE prices.price_ohlcv_1w  ADD COLUMN IF NOT EXISTS close_usd Decimal(38, 14) DEFAULT 0 AFTER volume_quote_usd;
+ALTER TABLE prices.price_ohlcv_1M  ADD COLUMN IF NOT EXISTS close_usd Decimal(38, 14) DEFAULT 0 AFTER volume_quote_usd;
 
 ----------------------------------------------------------------------
 -- Current per-asset state (§3.3). One row per asset. Written by the Current

@@ -121,6 +121,9 @@ impl Sink {
                     // DEFAULT 0 — the 0026 enrichment Lambda fills this
                     // (volume_quote_usd = oracle_price * volume_quote).
                     volume_quote_usd: 0,
+                    // DEFAULT 0 — the enrichment pass fills this (task 0061,
+                    // close_usd = oracle_price * close), same as volume_quote_usd.
+                    close_usd: 0,
                     vwap: decimal_to_i128(candle.vwap),
                     trade_count: candle.trade_count,
                     version: candle.version,
@@ -209,6 +212,7 @@ struct OhlcvRow {
     volume_base: i128,
     volume_quote: i128,
     volume_quote_usd: i128,
+    close_usd: i128,
     vwap: i128,
     trade_count: u32,
     version: u64,

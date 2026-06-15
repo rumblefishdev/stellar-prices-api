@@ -131,9 +131,10 @@ mod tests {
     fn init_sql_parses_into_statements() {
         // 1 CREATE DATABASE + 12 CREATE TABLE (assets, _1m, _15m, _1h, _4h,
         // _1d, _1w, _1M, current_prices, oracle_prices, backfill_sdex_ledgers,
-        // backfill_progress) = 13 statements.
+        // backfill_progress) + 7 close_usd ALTERs (one per OHLCV grain, task
+        // 0061) = 20 statements.
         let stmts = split_statements(INIT_SQL);
-        assert_eq!(stmts.len(), 13, "got {}", stmts.len());
+        assert_eq!(stmts.len(), 20, "got {}", stmts.len());
     }
 
     #[test]
