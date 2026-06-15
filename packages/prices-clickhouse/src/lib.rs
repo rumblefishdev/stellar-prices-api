@@ -19,6 +19,11 @@ pub const ROLLUPS_SQL: &str = include_str!("../schema/rollups.sql");
 /// sizing measurement (re-aggregates `_1m FINAL` into `_15m … _1M`).
 pub const PREROLL_SQL: &str = include_str!("../schema/preroll.sql");
 
+/// Read-surface views (task 0061 Step 5): `prices.price_usd_series` (USD close
+/// per natural-identity asset/bucket) + `prices.usd_reference` (per-bucket USD
+/// reference availability). Plain views — applied after the init tables.
+pub const VIEWS_SQL: &str = include_str!("../schema/views.sql");
+
 /// Default ClickHouse HTTP endpoint when `CLICKHOUSE_URL` is not set.
 pub const DEFAULT_URL: &str = "http://localhost:8123";
 
@@ -141,5 +146,13 @@ mod tests {
     fn rollups_and_preroll_each_have_six_statements() {
         assert_eq!(split_statements(ROLLUPS_SQL).len(), 6);
         assert_eq!(split_statements(PREROLL_SQL).len(), 6);
+    }
+
+    #[test]
+    fn views_sql_has_two_create_view_statements() {
+        let stmts = split_statements(VIEWS_SQL);
+        assert_eq!(stmts.len(), 2, "got {}", stmts.len());
+        assert!(stmts.iter().any(|s| s.contains("prices.usd_reference")));
+        assert!(stmts.iter().any(|s| s.contains("prices.price_usd_series")));
     }
 }

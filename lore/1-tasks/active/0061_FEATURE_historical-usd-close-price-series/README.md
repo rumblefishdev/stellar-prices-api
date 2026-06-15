@@ -48,6 +48,20 @@ history:
       ClickHouse in a scratch DB: correct peg/pivot values, idempotent
       re-INSERT, oracle-set volume_quote_usd preserved. cargo build
       --workspace + all unit tests green.
+  - date: 2026-06-15
+    status: active
+    who: claude
+    note: >
+      Step 5 read-surface views (schema/views.sql, VIEWS_SQL): price_usd_series
+      (volume-weighted USD close per natural-identity asset/bucket, §12.2) and
+      usd_reference (per-bucket XLM/USDC pivot for blackout detection, §12.3),
+      both on the forever-retained _1d grain reading baked close_usd (not the
+      retention-capped oracle_prices). status discriminator is a documented
+      read-time LEFT JOIN (a view can't enumerate untraded asset×bucket combos).
+      Applied by default by prices-clickhouse-init. Float64 weighting fixes a
+      Decimal-division overflow. +1 builder test; both views created and queried
+      against live ClickHouse (correct native/credit/contract rows + weighting).
+      HTTP endpoints deferred to 0040. Only §12.4 SAC resolver remains.
 ---
 
 # Historical USD-quoted price series — `price_usd(asset, t)`
@@ -69,8 +83,9 @@ peg-pivot tier additionally validated against live ClickHouse) on
 from `develop`. Done: Step 1 (schema column + writer), Step 2 (oracle↔asset-id
 reconciliation, the load-bearing fix — also fixes the latent 0026 join bug),
 Step 3 **both enrichment tiers** (recent-window oracle + deep-history peg-pivot,
-§12.1), Step 4 (rollup/preroll propagation). Remaining: the SAC resolver (§12.4)
-and Step 5 (view + status discriminator + API, §12.2/§12.3). Full design in
+§12.1), Step 4 (rollup/preroll propagation), Step 5 (the `price_usd_series` +
+`usd_reference` read-surface views, §12.2/§12.3; HTTP endpoints deferred to 0040).
+**Only remaining design item:** the SAC→underlying resolver (§12.4). Full design in
 [`notes/R-historical-usd-close-design.md`](notes/R-historical-usd-close-design.md).
 
 ## Context
@@ -138,17 +153,24 @@ others = volume-weighted USD close across quotes/sources). Optional endpoints:
       `AssetIdentity` contract/SAC resolver (`canonical.rs`, `sink.rs`). (§12.4)
 - [x] Rollup chain propagates `close_usd` onto forever-retained grains.
       (`argMax(close_usd, timestamp)` in all 6 rollup MVs + 6 preroll INSERTs.)
-- [ ] `prices.price_usd_series` view: one USD close per (asset, bucket), keyed by
+- [x] `prices.price_usd_series` view: one USD close per (asset, bucket), keyed by
       **natural Stellar identity** (`native` / `(code,issuer)` / `contract_address`),
-      not `asset_id`. (§12.2)
-- [ ] NULL contract: `close_usd` NULL (never error, never drops row) +
+      not `asset_id`. (§12.2) — `schema/views.sql`; validated against live CH.
+- [x] NULL contract: `close_usd` NULL (never error, never drops row) +
       `status` discriminator `ok | no_asset_price | no_reference`, plus a companion
-      `prices.usd_reference(bucket)` for systemic-blackout detection. (§12.3)
-- [ ] Optional read API endpoints (single-asset primitive `price_usd_at`; also
-      serves volume not just TVL — §12.5) implemented or deferred to 0040, noted.
+      `prices.usd_reference(bucket)` for systemic-blackout detection. (§12.3) —
+      `usd_reference` view shipped; `no_asset_price` is inherently a miss-condition
+      so the discriminator is a **documented read-time** join of the two views
+      (a view can't enumerate untraded (asset×bucket) combos). Misses are absent
+      rows (NULL on the reader's LEFT JOIN), never errors.
+- [x] Optional read API endpoints (single-asset primitive `price_usd_at`; also
+      serves volume not just TVL — §12.5) **deferred to 0040** (the Prices API
+      Gateway + axum read-handlers task), noted. The views are the primary delivery
+      surface — BE reads `prices.*` directly (§8), HTTP is 0040's concern.
 - [~] Tests/fixtures for the reconciliation + enrichment + view + NULL/status cases.
-      (Reconciliation unit tests done; enrichment/view/NULL-status integration
-      tests pending Step 5.)
+      (Reconciliation + peg/pivot SQL-shape unit tests done; enrichment peg/pivot
+      and both views validated against live ClickHouse this session. Durable
+      `#[ignore]`d live-CH integration tests still to add — no harness in repo yet.)
 
 ## Implementation Notes
 
@@ -191,6 +213,20 @@ soroban oracle extractor, the rollup/preroll SQL). All changes build clean
   `argMax(close_usd, timestamp) AS close_usd` after `volume_quote_usd` in all 6
   rollup MVs and 6 preroll INSERTs (USD close is a last-value, not a sum). Position
   matches the table column order so the positional `INSERT … SELECT` stays aligned.
+- **Step 5 — read-surface views.** New `packages/prices-clickhouse/schema/views.sql`
+  (`VIEWS_SQL` const; applied by default by `prices-clickhouse-init` after the
+  tables, before the opt-in rollups). Two plain views, both keyed by natural
+  Stellar identity and reading the baked `close_usd` (NOT the retention-capped
+  `oracle_prices`), both on the forever-retained `price_ohlcv_1d` grain:
+  - `prices.price_usd_series` — one volume-weighted USD close per
+    (`asset_kind` ∈ native/credit/contract, `asset_code`, `issuer_address`,
+    `contract_address`, `bucket`); cross-source/cross-quote collapse per ADR 0004.
+  - `prices.usd_reference` — per-bucket XLM/USDC pivot value; a bucket's presence
+    is the durable "USD reference is up at T" signal for blackout detection.
+  Read-time status (`ok | no_asset_price | no_reference`) is documented in the
+  file header as a LEFT-JOIN of the two views. +1 builder test; both views created
+  and queried against live ClickHouse (correct natural-identity rows + weighting).
+  HTTP endpoints deferred to task 0040.
 
 ## Design Decisions
 
@@ -250,19 +286,39 @@ soroban oracle extractor, the rollup/preroll SQL). All changes build clean
 11. **`pivot_window_s` default = 1 day** (vs the oracle tier's 300s) — deep history
     is sparser, and XLM/USDC is liquid so a 1-day forward-fill bound rarely bites;
     configurable via `PIVOT_WINDOW_S`.
+12. **`status` discriminator is read-time, not a stored column** — `no_asset_price`
+    means "this asset has no row at bucket T", which a view cannot enumerate (it
+    would need the full asset×bucket grid). So `price_usd_series` carries only
+    priced rows; the reader classifies a miss by LEFT-JOINing `usd_reference`
+    (bucket present ⇒ `no_asset_price`, absent ⇒ `no_reference`). The canonical
+    query is documented in the `views.sql` header. This matches §12.3's own
+    "Computable: … BE can LEFT JOIN" framing.
+13. **Views keyed/grouped by natural identity, built on `_1d`, Float64 weighting** —
+    GROUP BY (code, issuer, contract, bucket) resolves `asset_id`→identity and
+    incidentally collapses any duplicate ids for the same identity; `_1d` is the
+    forever-retained series grain (§8); the volume-weighted average is computed in
+    Float64 then cast back to `Decimal(38,14)` (same `Decimal`-overflow fix as the
+    pivot — ClickHouse rejected the all-`Decimal` division at view-creation time).
+14. **Views applied by default in `prices-clickhouse-init`** (not behind a flag like
+    `--rollups`) — they are plain views with no ClickHouse-version constraint and
+    are the core read surface, so they should always exist after a schema apply.
+15. **HTTP read endpoints deferred to task 0040** — §12.5/Step 5 explicitly allow
+    "implemented or deferred to 0040, noted". 0040 owns the API Gateway + axum
+    handlers; BE consumes the views directly over the shared cluster (§8), so the
+    view *is* the delivery here and the HTTP layer is genuinely 0040's scope.
 
 ## Future Work
 
-- **Committed live-CH integration test for the peg-pivot tier** — the SQL is unit-
-  tested for shape and was validated manually against live ClickHouse this session;
-  a durable `#[ignore]`d integration test (fixtures → `run()` → assert) would lock
-  it in. No live-CH test harness exists in the repo yet.
-- **SAC → underlying-classic resolver (§12.4)** — `AssetIdentity` models only
-  `Native`/`Credit`/`Contract`; SAC addresses don't yet collapse to their classic
-  underlying, so AMM-via-SAC XLM/USDC quotes won't match the oracle `Native`/`Credit`
-  identity. Needed for one-`asset_id`-one-price.
-- **Step 5 — `prices.price_usd_series` view + `usd_reference(bucket)` companion +
-  status discriminator (§12.2/§12.3) + read endpoints (§12.5)**.
+- **SAC → underlying-classic resolver (§12.4)** — the one remaining design item.
+  `AssetIdentity` models only `Native`/`Credit`/`Contract`; SAC addresses don't yet
+  collapse to their classic underlying, so AMM-via-SAC XLM/USDC quotes won't match
+  the `Native`/`Credit` identity and the same economic asset can split into two
+  `asset_id`s (and two `price_usd_series` rows). Needed for one-`asset_id`-one-price.
+- **Committed live-CH integration tests** — the peg/pivot enrichment and both views
+  were validated against live ClickHouse this session; durable `#[ignore]`d
+  integration tests (fixtures → run/query → assert) would lock them in. No live-CH
+  test harness exists in the repo yet.
+- **HTTP read endpoints (§12.5)** — deferred to task 0040 (API Gateway + axum).
 
 ## Notes
 
