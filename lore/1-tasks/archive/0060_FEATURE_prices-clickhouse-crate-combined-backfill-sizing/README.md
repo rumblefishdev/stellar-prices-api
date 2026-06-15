@@ -2,7 +2,7 @@
 id: "0060"
 title: "Local prices ClickHouse schema crate + combined SDEX/soroban backfill — DB size & timing measurement"
 type: FEATURE
-status: active
+status: completed
 related_adr: ["0007"]
 related_tasks: ["0038", "0051", "0026", "0058"]
 tags: [layer-database, milestone-M1, clickhouse, backfill, sdex, soroban, sizing, effort-large]
@@ -20,6 +20,21 @@ history:
       combined single-pass SDEX + soroban-events backfill over a
       100k-ledger range to MEASURE total prices.* DB size and backfill
       wall-clock. Numbers feed the production Hetzner sizing/timing plan.
+  - date: 2026-06-15
+    status: completed
+    who: claude
+    note: >
+      PR #38 merged into develop. All acceptance criteria met: prices-clickhouse
+      crate (12 tables), Soroswap+Aquarius extractors, single-pass SDEX+soroban
+      backfill, oracle extraction, 10k+100k sizing measurement. High-effort
+      review round fixed 6 findings (vwap rollup referencing volume_quote_usd;
+      Soroswap factory action in topic[1] not topic[0]; decimal_to_i128 saturate;
+      empty-s3-listing defer; oracle ReplacingMergeTree dedup; dead bindings).
+      All fixes re-validated locally on 128k real ledgers + a 550.7M-event
+      soroban census that confirmed the Soroswap topic[1] fix end-to-end
+      (6 raw new_pair events = 3 unique pools registered from topic[1]).
+      Results posted to PR #38 (2 comments). Status: 10k → ~3.7 KB/ledger,
+      100k → 350 MiB / ~61 min.
 ---
 
 # Local prices ClickHouse schema crate + combined SDEX/soroban backfill — DB size & timing measurement
@@ -34,9 +49,11 @@ all `prices.*` tables** (normalised per 10k ledgers) and **(2) backfill
 wall-clock time** (estimated). Local numbers are the basis for the production
 backfill on Hetzner.
 
-## Status: Active
+## Status: Completed
 
-**Current state:** Just created. Scope locked with the operator (see Decisions).
+**Current state:** Done — PR #38 merged into `develop` (2026-06-15). Review-round
+fixes re-validated on 128k real ledgers; Soroswap `topic[1]` fix confirmed by a
+550.7M-event soroban census. See the 2026-06-15 history entry.
 
 ## Context
 
