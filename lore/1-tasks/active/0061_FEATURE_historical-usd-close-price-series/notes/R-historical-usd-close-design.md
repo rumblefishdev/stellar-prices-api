@@ -333,3 +333,34 @@ calls (one per leg). Single-asset is the base case — confirmed.
 Net: **views = caller-passes; the 0040 API primitive = view-picks.** No new view
 design needed (already shipped per-grain). Open only: BE confirms they own grain
 choice at the JOIN layer; 0040 implements the `ts → grain` routing when built.
+
+### 12.7 BE interop round (2026-06-15): JOIN contract, live spot, SAC read-seam
+
+BE confirmed they JOIN `price_usd_series` directly (no alias) on the structured
+identity columns (no combined `asset_key` string needed). Resolved/added:
+
+- **JOIN interop contract** (documented in `views.sql` header) — the exact column
+  forms, to kill silent JOIN mismatch: `asset_code` is a **trimmed `String`**
+  (not padded `FixedString`); `bucket` is a grain-floored `DateTime` (join on
+  `toStartOfHour(closed_at)` for `_1h`, `toStartOfDay(closed_at)` for `_1d`);
+  `close_usd`/`price_usd` are `Decimal(38,14)`; `asset_kind ∈
+  native/credit/contract`; the canonical XLM key is `('native','XLM','','')`.
+- **Live spot view `prices.current_price_usd`** — BE materializes live TVL at
+  ingest (per-snapshot spot at the tip, low rate), history stays compute-at-read.
+  Same contract as the series (natural-id key, NULL-never-error) but one row per
+  asset + `updated_at` for the consumer's staleness policy. Reads `current_prices`
+  (written by the **0039** Current Price Updater) — this is the read surface;
+  cadence/freshness + non-trading stale semantics are 0039's to define.
+- **SAC read-seam `prices.identity_by_contract`** — the §12.4 collapse is
+  **write-time**, so a SAC-wrapped leg's price is stored under the *classic*
+  identity; `price_usd_series` has no row keyed by the SAC contract address. So a
+  read consumer who holds a Soroban-DEX pool leg (a contract address) cannot
+  resolve a SAC leg by joining the series directly — correcting BE's assumption
+  that "the view resolves contract_address to the classic price." Fix: persist the
+  deterministic SAC of each classic asset onto `prices.assets.sac_address` (writer
+  computes it via `AssetRegistry::sac_address_of`), and expose
+  `identity_by_contract(contract) → natural identity` (a pure Soroban token maps
+  to itself; a SAC maps to its classic underlying). BE joins their leg's contract
+  there, then joins the identity to `price_usd_series`. Covers all AMM venues
+  (Phoenix/Soroswap/Aquarius) — the resolver is venue-agnostic (in
+  `amm_trade_to_tick`, common to all three).

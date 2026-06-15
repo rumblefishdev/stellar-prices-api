@@ -117,6 +117,22 @@ history:
       No view change (already shipped per-grain). Documented in views.sql header,
       design note §12.6, Design Decision 18; breadcrumb added to task 0040.
       Remaining w/ BE: confirm they own grain choice at the JOIN layer.
+  - date: 2026-06-15
+    status: active
+    who: claude
+    note: >
+      BE interop round (§12.7). Documented the JOIN contract in views.sql
+      (asset_code trimmed String; bucket grain-floored DateTime join on
+      toStartOf{Hour,Day}(closed_at); close_usd Decimal(38,14)). Added two
+      views: current_price_usd (live spot over current_prices for BE's
+      ingest-time TVL materialization — natural-id key + updated_at; data from
+      0039) and identity_by_contract (SAC read-seam — the §12.4 collapse is
+      write-time so a SAC leg's price is under the classic identity; persist
+      assets.sac_address via AssetRegistry::sac_address_of and resolve a leg's
+      contract → natural identity). +2 unit/integration assertions; all 6 views
+      validated against live CH. BE confirmed: JOIN price_usd_series directly
+      (no alias), structured columns (no asset_key string). Operational ask from
+      BE: backfill range must cover ledger 50457424 (2024-02-20).
 ---
 
 # Historical USD-quoted price series — `price_usd(asset, t)`

@@ -51,6 +51,7 @@ CREATE TABLE IF NOT EXISTS prices.assets (
     asset_type       String,
     issuer_address   String        DEFAULT '',
     contract_address String        DEFAULT '',
+    sac_address      String        DEFAULT '',
     home_domain      String        DEFAULT '',
     is_active        UInt8         DEFAULT 1,
     created_at       DateTime      DEFAULT now(),
@@ -59,6 +60,13 @@ CREATE TABLE IF NOT EXISTS prices.assets (
 ENGINE = ReplacingMergeTree(updated_at)
 ORDER BY (asset_code, issuer_address, contract_address)
 SETTINGS index_granularity = 8192;
+
+-- The SAC contract address that wraps a classic asset (task 0061 §12.4): the
+-- §12.4 collapse is write-time, so a SAC-wrapped leg's price lives under the
+-- classic identity. This column lets a read-time consumer resolve their SAC
+-- contract address back to the classic asset (see prices.identity_by_contract).
+-- Added to the base CREATE; idempotent ALTER for pre-0061 databases.
+ALTER TABLE prices.assets ADD COLUMN IF NOT EXISTS sac_address String DEFAULT '' AFTER contract_address;
 
 ----------------------------------------------------------------------
 -- 1-minute OHLCV candles, per-source rows (ADR 0004). Live writes from the

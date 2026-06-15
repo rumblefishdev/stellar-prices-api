@@ -149,6 +149,9 @@ impl Sink {
                     (String::new(), "soroban", String::new(), addr.clone())
                 }
             };
+            // The SAC that wraps this classic asset (§12.4) — '' for a pure
+            // Soroban token. Lets a read-time consumer resolve a SAC-wrapped leg.
+            let sac_address = registry.sac_address_of(identity).unwrap_or_default();
 
             insert
                 .write(&AssetRow {
@@ -157,6 +160,7 @@ impl Sink {
                     asset_type: asset_type.to_string(),
                     issuer_address,
                     contract_address,
+                    sac_address,
                     home_domain: String::new(),
                     is_active: 1,
                 })
@@ -225,6 +229,7 @@ struct AssetRow {
     asset_type: String,
     issuer_address: String,
     contract_address: String,
+    sac_address: String,
     home_domain: String,
     is_active: u8,
 }

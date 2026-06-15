@@ -217,6 +217,16 @@ impl AssetRegistry {
         self.sac_index.get(contract_addr).cloned()
     }
 
+    /// The SAC contract address that wraps a classic identity (Native / Credit),
+    /// or `None` for a pure `Contract` identity (no classic underlying). Persisted
+    /// onto `prices.assets.sac_address` so a read-time consumer can resolve a
+    /// SAC-wrapped leg (their contract address) back to the collapsed classic
+    /// price — the §12.4 collapse is write-time, so the price lives under the
+    /// classic identity, not under the SAC address.
+    pub fn sac_address_of(&self, identity: &AssetIdentity) -> Option<String> {
+        identity_to_asset(identity).and_then(|asset| sac_address(&asset, &self.network_id))
+    }
+
     pub fn assets(&self) -> impl Iterator<Item = (&AssetIdentity, &u32)> {
         self.by_identity.iter()
     }
@@ -308,6 +318,21 @@ mod tests {
         // Pre-seeded at construction, even on an empty registry.
         let reg = AssetRegistry::from_existing(vec![]);
         assert_eq!(reg.resolve_sac(NATIVE_SAC), Some(AssetIdentity::Native));
+    }
+
+    #[test]
+    fn sac_address_of_emits_classic_sac_and_none_for_contract() {
+        let reg = AssetRegistry::from_existing(vec![]);
+        // Classic identity → its deterministic SAC (the persisted read-seam key).
+        assert_eq!(
+            reg.sac_address_of(&AssetIdentity::Native).as_deref(),
+            Some(NATIVE_SAC)
+        );
+        // Pure Soroban token → no classic underlying → no SAC.
+        assert_eq!(
+            reg.sac_address_of(&AssetIdentity::Contract("CXYZ".to_string())),
+            None
+        );
     }
 
     #[test]

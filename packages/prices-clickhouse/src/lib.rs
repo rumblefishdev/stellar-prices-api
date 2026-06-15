@@ -136,10 +136,10 @@ mod tests {
     fn init_sql_parses_into_statements() {
         // 1 CREATE DATABASE + 12 CREATE TABLE (assets, _1m, _15m, _1h, _4h,
         // _1d, _1w, _1M, current_prices, oracle_prices, backfill_sdex_ledgers,
-        // backfill_progress) + 7 close_usd ALTERs (one per OHLCV grain, task
-        // 0061) = 20 statements.
+        // backfill_progress) + 7 close_usd ALTERs (one per OHLCV grain) + 1
+        // assets.sac_address ALTER (task 0061) = 21 statements.
         let stmts = split_statements(INIT_SQL);
-        assert_eq!(stmts.len(), 20, "got {}", stmts.len());
+        assert_eq!(stmts.len(), 21, "got {}", stmts.len());
     }
 
     #[test]
@@ -149,21 +149,20 @@ mod tests {
     }
 
     #[test]
-    fn views_sql_has_four_create_view_statements() {
-        // daily + hourly variants of the series and the reference companion.
+    fn views_sql_has_six_create_view_statements() {
+        // series + reference at 1d and 1h, the SAC read-seam resolver, and the
+        // live-spot view.
         let stmts = split_statements(VIEWS_SQL);
-        assert_eq!(stmts.len(), 4, "got {}", stmts.len());
-        assert!(stmts.iter().any(|s| s.contains("prices.usd_reference AS")));
-        assert!(
-            stmts
-                .iter()
-                .any(|s| s.contains("prices.price_usd_series AS"))
-        );
-        assert!(stmts.iter().any(|s| s.contains("prices.usd_reference_1h")));
-        assert!(
-            stmts
-                .iter()
-                .any(|s| s.contains("prices.price_usd_series_1h"))
-        );
+        assert_eq!(stmts.len(), 6, "got {}", stmts.len());
+        for v in [
+            "prices.usd_reference AS",
+            "prices.price_usd_series AS",
+            "prices.usd_reference_1h",
+            "prices.price_usd_series_1h",
+            "prices.identity_by_contract",
+            "prices.current_price_usd",
+        ] {
+            assert!(stmts.iter().any(|s| s.contains(v)), "missing {v}");
+        }
     }
 }

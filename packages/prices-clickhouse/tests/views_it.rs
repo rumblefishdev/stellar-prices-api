@@ -47,14 +47,15 @@ async fn views_expose_usd_series_and_reference() {
     let db = "it_views_series";
     let client = setup_scratch(db).await;
 
-    // 1=XLM native, 2=USDC, 10=FOO credit, 20=EXO quote, 30=soroban contract token.
+    // 1=XLM native (with a SAC), 2=USDC, 10=FOO credit, 20=EXO quote,
+    // 30=pure soroban contract token.
     client
         .query(&format!(
             "INSERT INTO {db}.assets \
-             (asset_id, asset_code, asset_type, issuer_address, contract_address) VALUES \
-             (1,'XLM','classic','',''), (2,'USDC','classic','{USDC_ISSUER}',''), \
-             (10,'FOO','classic','GFOO',''), (20,'EXO','classic','GEXO',''), \
-             (30,'','soroban','','CTOKEN7XYZ')"
+             (asset_id, asset_code, asset_type, issuer_address, contract_address, sac_address) VALUES \
+             (1,'XLM','classic','','','CXLMSAC'), (2,'USDC','classic','{USDC_ISSUER}','',''), \
+             (10,'FOO','classic','GFOO','',''), (20,'EXO','classic','GEXO','',''), \
+             (30,'','soroban','','CTOKEN7XYZ','')"
         ))
         .execute()
         .await
@@ -158,6 +159,47 @@ async fn views_expose_usd_series_and_reference() {
         .await
         .unwrap();
     assert_eq!(hourly_ref, 2, "two hourly reference buckets");
+
+    // identity_by_contract (SAC read-seam): XLM has a SAC, the soroban token its
+    // own contract; resolving each contract returns the right natural identity.
+    let (kind, code): (String, String) = client
+        .query(&format!(
+            "SELECT asset_kind, asset_code FROM {db}.identity_by_contract WHERE contract = 'CXLMSAC'"
+        ))
+        .fetch_one::<(String, String)>()
+        .await
+        .unwrap();
+    assert_eq!(
+        (kind.as_str(), code.as_str()),
+        ("native", "XLM"),
+        "SAC resolves to native XLM"
+    );
+    let pure: String = client
+        .query(&format!(
+            "SELECT asset_kind FROM {db}.identity_by_contract WHERE contract = 'CTOKEN7XYZ'"
+        ))
+        .fetch_one::<String>()
+        .await
+        .unwrap();
+    assert_eq!(pure, "contract", "pure soroban token maps to itself");
+
+    // current_price_usd (live spot): one row per asset, natural-identity keyed.
+    client
+        .query(&format!(
+            "INSERT INTO {db}.current_prices (asset_id, price_usd, updated_at) \
+             VALUES (1, 0.1600, toDateTime(1620100000))"
+        ))
+        .execute()
+        .await
+        .unwrap();
+    let spot: f64 = client
+        .query(&format!(
+            "SELECT toFloat64(price_usd) FROM {db}.current_price_usd WHERE asset_kind = 'native'"
+        ))
+        .fetch_one::<f64>()
+        .await
+        .unwrap();
+    assert!(approx(spot, 0.16), "live spot XLM price");
 
     client
         .query(&format!("DROP DATABASE {db}"))

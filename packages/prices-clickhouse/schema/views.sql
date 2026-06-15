@@ -53,6 +53,18 @@
 --
 -- close_usd is always returned as a value-or-absent: a miss is a missing row
 -- (NULL after the reader's LEFT JOIN), never an error and never a dropped row.
+--
+-- ## JOIN interop contract (exact column forms — avoids silent JOIN mismatch)
+--   asset_kind       String, one of 'native' / 'credit' / 'contract'.
+--   asset_code       trimmed String (e.g. 'XLM','USDC') — NOT a padded
+--                    FixedString; '' for native and for pure Soroban tokens.
+--   issuer_address   String G-strkey; '' for native and Soroban tokens.
+--   contract_address String C-strkey; '' for native/classic.
+--   bucket           DateTime, already floored to the grain. Join hourly on
+--                    toStartOfHour(closed_at), daily on toStartOfDay(closed_at).
+--   close_usd / price_usd  Decimal(38, 14).
+-- native XLM key is ('native','XLM','',''). One canonical XLM row (the native
+-- identity); the writer's stored asset_type='classic' is mapped to 'native' here.
 
 ----------------------------------------------------------------------
 -- prices.usd_reference — per-bucket USD reference availability.
@@ -137,3 +149,56 @@ FROM prices.price_ohlcv_1h AS p FINAL
 INNER JOIN prices.assets AS a FINAL ON a.asset_id = p.asset_id
 WHERE p.close_usd > 0
 GROUP BY asset_code, issuer_address, contract_address, bucket;
+
+----------------------------------------------------------------------
+-- prices.identity_by_contract — SAC read-seam resolver (§12.4).
+-- The §12.4 SAC→classic collapse is WRITE-TIME: a SAC-wrapped leg's candles are
+-- stored under the underlying classic identity, so price_usd_series has NO row
+-- keyed by the SAC contract address. A read-time consumer with a Soroban-DEX pool
+-- leg (a contract address) resolves it here to the natural identity to look up in
+-- price_usd_series: a pure Soroban token maps to itself (`contract`); a SAC maps
+-- to its classic underlying (`native`/`credit`). Join your leg's contract
+-- address on `contract`, then join the resulting identity to price_usd_series.
+----------------------------------------------------------------------
+
+CREATE VIEW IF NOT EXISTS prices.identity_by_contract AS
+SELECT
+    contract_address AS contract,
+    'contract'       AS asset_kind,
+    ''               AS asset_code,
+    ''               AS issuer_address,
+    contract_address AS contract_address
+FROM prices.assets FINAL
+WHERE contract_address != ''
+UNION ALL
+SELECT
+    sac_address AS contract,
+    multiIf(asset_code = 'XLM' AND issuer_address = '', 'native', 'credit') AS asset_kind,
+    asset_code      AS asset_code,
+    issuer_address  AS issuer_address,
+    ''              AS contract_address
+FROM prices.assets FINAL
+WHERE sac_address != '';
+
+----------------------------------------------------------------------
+-- prices.current_price_usd — live spot (tip) per asset, natural-identity keyed.
+-- Same contract as price_usd_series (natural id, NULL-never-error via the
+-- consumer's LEFT JOIN) but for "now": one row per asset with the latest USD
+-- price + `updated_at` for the consumer's own staleness policy. Reads
+-- current_prices, which is written by the Current Price Updater (task 0039) —
+-- this view is the read surface; it is empty until that writer runs.
+----------------------------------------------------------------------
+
+CREATE VIEW IF NOT EXISTS prices.current_price_usd AS
+SELECT
+    multiIf(
+        a.contract_address != '', 'contract',
+        a.asset_code = 'XLM' AND a.issuer_address = '', 'native',
+        'credit') AS asset_kind,
+    a.asset_code       AS asset_code,
+    a.issuer_address   AS issuer_address,
+    a.contract_address AS contract_address,
+    c.price_usd        AS price_usd,
+    c.updated_at       AS updated_at
+FROM prices.current_prices AS c FINAL
+INNER JOIN prices.assets AS a FINAL ON a.asset_id = c.asset_id;
