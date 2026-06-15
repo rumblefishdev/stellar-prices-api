@@ -13,13 +13,26 @@
 //!
 //! ## USD-close reference tiers (task 0061 §12.1)
 //!
-//! This ASOF join is the **recent-window oracle tier**: it sets
-//! `close_usd` only where a Reflector oracle row exists for the candle's
-//! `quote_asset_id` within the staleness window. Deep history (no oracle
-//! row) stays at `close_usd = 0` and is the job of the **peg-pivot tier**
-//! (USDC≡$1 / USDT≡$1 × the XLM/USDC candle) — not yet implemented here.
-//! Until it lands, deep-history candles carry `close_usd = 0` (the view's
-//! `no_reference` status), never a wrong non-NULL value.
+//! `close_usd` (and the still-missing `volume_quote_usd`) are filled in two
+//! ordered tiers, run inside [`ChEnrichmentPass::run`]:
+//!
+//! 1. **Recent-window oracle tier** ([`ChEnrichmentPass::enrich_batch`]) — the
+//!    `ASOF LEFT JOIN oracle_prices`. Sets the USD columns wherever a Reflector
+//!    row exists for the candle's `quote_asset_id` within the staleness window.
+//!    This is the depeg-aware tier and it wins where it applies.
+//! 2. **Peg-pivot tier** ([`ChEnrichmentPass::enrich_peg_pivot_step`]) — the
+//!    deep-history backbone for candles the oracle tier left at `close_usd = 0`:
+//!    - **peg:** a USDC- or USDT-quoted candle gets `close_usd = close × $1`
+//!      (USDC≡USDT≡$1), exact and oracle-free, back to SDEX genesis;
+//!    - **pivot:** an XLM-quoted candle gets `close_usd = close × xlm_usd`, where
+//!      `xlm_usd` is the volume-weighted XLM/USDC candle close (× $1) at or before
+//!      the bucket, forward-filled by an `ASOF LEFT JOIN`.
+//!
+//! Candles whose quote is none of USDC/USDT/XLM (and had no oracle) keep
+//! `close_usd = 0` — never a wrong non-NULL value (the view's `no_reference`).
+//! The peg-pivot tier preserves any `volume_quote_usd` the oracle tier already
+//! set (`if(volume_quote_usd > 0, …)`), so the depeg-aware value is never
+//! clobbered by the `$1` peg.
 //!
 //! ## Why a direct `INSERT … SELECT` (not the staging table)
 //!
@@ -43,7 +56,16 @@
 //! is a 0051 concern. See the dependency note in the task 0026 G-note.
 
 use clickhouse::Client;
+use serde::Deserialize;
 use tracing::{info, warn};
+
+/// Canonical Stellar issuers for the pegged USD stablecoins, used by the
+/// peg-pivot tier to recognise USDC/USDT quote assets in `prices.assets`.
+/// Mirror of `sdex-backfill/src/canonical.rs` (kept in sync by hand — these are
+/// fixed mainnet addresses); the backfill resolves the same identities so the
+/// `asset_id` it interns matches the `quote_asset_id` enriched here.
+const USDC_ISSUER: &str = "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN";
+const USDT_ISSUER: &str = "GCQTGZQQ5G4PTM2GL7CDIFKUBIPEC52BROAQIAPW53XBRJVN6ZJVTG6V";
 
 #[derive(Debug, thiserror::Error)]
 pub enum ChEnrichError {
@@ -61,6 +83,11 @@ pub struct ChEnrichConfig {
     pub table: String,
     pub oracle_name: String,
     pub window_s: u32,
+    /// Max staleness (seconds) for the peg-pivot tier's XLM/USDC pivot: how far
+    /// back the `ASOF` join may forward-fill a missing XLM/USDC close. Larger
+    /// than `window_s` because deep history is sparser; XLM/USDC is liquid so
+    /// gaps are normally small. Default 1 day.
+    pub pivot_window_s: u32,
     pub batch_size: u64,
     pub max_batches: u32,
 }
@@ -73,10 +100,45 @@ impl Default for ChEnrichConfig {
             table: "price_ohlcv_1m".to_string(),
             oracle_name: "reflector".to_string(),
             window_s: 300,
+            pivot_window_s: 86_400,
             batch_size: 10_000,
             max_batches: 20,
         }
     }
+}
+
+/// Internal `asset_id`s of the USD reference assets, resolved from
+/// `prices.assets` at the start of the peg-pivot tier. Any may be absent (e.g. a
+/// dataset with no USDT trades), so each is optional.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct ReferenceIds {
+    xlm: Option<u32>,
+    usdc: Option<u32>,
+    usdt: Option<u32>,
+}
+
+impl ReferenceIds {
+    /// Quote `asset_id`s that peg to exactly $1 (USDC, USDT).
+    fn stable_ids(&self) -> Vec<u32> {
+        [self.usdc, self.usdt].into_iter().flatten().collect()
+    }
+
+    /// The XLM→USD pivot needs both the XLM asset and the XLM/USDC market.
+    fn can_pivot(&self) -> bool {
+        self.xlm.is_some() && self.usdc.is_some()
+    }
+
+    /// Whether the peg-pivot tier can do anything at all.
+    fn has_any(&self) -> bool {
+        !self.stable_ids().is_empty() || self.can_pivot()
+    }
+}
+
+#[derive(Debug, clickhouse::Row, Deserialize)]
+struct RefAssetRow {
+    asset_id: u32,
+    asset_code: String,
+    issuer_address: String,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -168,10 +230,65 @@ impl ChEnrichmentPass {
         Ok(())
     }
 
-    /// Run the bounded enrichment pass: up to `max_batches × batch_size`
-    /// rows per invocation. Stops early when a batch makes no progress —
-    /// i.e. every remaining candidate is a (currently) permanent oracle
-    /// miss — or when no candidates remain.
+    /// Resolve the internal `asset_id`s of XLM / USDC / USDT from
+    /// `prices.assets`, by their canonical (code, issuer) identity. `FINAL`
+    /// collapses the `ReplacingMergeTree`. Any that the dataset never saw are
+    /// left `None` and that branch of the peg-pivot tier is skipped.
+    async fn resolve_reference_ids(&self) -> Result<ReferenceIds, ChEnrichError> {
+        let sql = format!(
+            "SELECT asset_id, asset_code, issuer_address \
+             FROM {db}.assets FINAL \
+             WHERE (asset_code = 'XLM'  AND issuer_address = '' AND contract_address = '') \
+                OR (asset_code = 'USDC' AND issuer_address = '{usdc}') \
+                OR (asset_code = 'USDT' AND issuer_address = '{usdt}')",
+            db = self.cfg.database,
+            usdc = USDC_ISSUER,
+            usdt = USDT_ISSUER,
+        );
+        let rows = self.client.query(&sql).fetch_all::<RefAssetRow>().await?;
+
+        let mut refs = ReferenceIds::default();
+        for r in rows {
+            if r.asset_code == "XLM" && r.issuer_address.is_empty() {
+                refs.xlm = Some(r.asset_id);
+            } else if r.asset_code == "USDC" && r.issuer_address == USDC_ISSUER {
+                refs.usdc = Some(r.asset_id);
+            } else if r.asset_code == "USDT" && r.issuer_address == USDT_ISSUER {
+                refs.usdt = Some(r.asset_id);
+            }
+        }
+        Ok(refs)
+    }
+
+    /// One peg-pivot step: the peg statement (USDC/USDT quotes → ×$1) followed by
+    /// the pivot statement (XLM quotes → ×XLM/USDC close). Both target only rows
+    /// the oracle tier left at `close_usd = 0`, so the oracle value always wins
+    /// where it exists. Each is skipped when its reference asset is absent.
+    async fn enrich_peg_pivot_step(&self, refs: &ReferenceIds) -> Result<(), ChEnrichError> {
+        if let Some(sql) = peg_sql(&self.cfg.database, &self.cfg.table, &refs.stable_ids()) {
+            self.client
+                .query(&sql)
+                .bind(self.cfg.batch_size)
+                .execute()
+                .await?;
+        }
+        if let (Some(xlm_id), Some(usdc_id)) = (refs.xlm, refs.usdc) {
+            let sql = pivot_sql(&self.cfg.database, &self.cfg.table, xlm_id, usdc_id);
+            self.client
+                .query(&sql)
+                .bind(self.cfg.pivot_window_s)
+                .bind(self.cfg.batch_size)
+                .execute()
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Run the bounded enrichment pass in two ordered tiers (task 0061 §12.1):
+    /// the recent-window oracle tier first, then the peg-pivot deep-history tier
+    /// over whatever it left at `close_usd = 0`. Each tier loops up to
+    /// `max_batches × batch_size` rows and stops early when a batch makes no
+    /// progress — i.e. its remaining candidates have no reference of that kind.
     pub async fn run(&self) -> Result<ChPassStats, ChEnrichError> {
         let candidates_before = self.count_candidates().await?;
         info!(
@@ -182,6 +299,8 @@ impl ChEnrichmentPass {
 
         let mut batches = 0u32;
         let mut remaining = candidates_before;
+
+        // Tier 1 — recent-window oracle (depeg-aware; wins where it applies).
         for _ in 0..self.cfg.max_batches {
             if remaining == 0 {
                 break;
@@ -191,17 +310,49 @@ impl ChEnrichmentPass {
             batches += 1;
 
             if after >= remaining {
-                // No row flipped out of the zero-set: the leftover
-                // candidates have no in-window oracle price yet. Stop —
-                // they roll over to a future pass once oracle data lands.
-                warn!(
+                // No row flipped out of the zero-set: the leftover candidates
+                // have no in-window oracle price. Move to the peg-pivot tier —
+                // these are deep-history (or exotic-quote) candles.
+                info!(
                     remaining = after,
-                    "batch made no progress — remaining candidates are oracle misses"
+                    "oracle tier drained — handing remaining candles to peg-pivot tier"
                 );
                 remaining = after;
                 break;
             }
             remaining = after;
+        }
+
+        // Tier 2 — peg-pivot deep-history backbone (USDC/USDT≡$1; XLM via XLM/USDC).
+        if remaining > 0 {
+            let refs = self.resolve_reference_ids().await?;
+            if refs.has_any() {
+                for _ in 0..self.cfg.max_batches {
+                    if remaining == 0 {
+                        break;
+                    }
+                    self.enrich_peg_pivot_step(&refs).await?;
+                    let after = self.count_candidates().await?;
+                    batches += 1;
+
+                    if after >= remaining {
+                        // The leftovers have no USD reference at all — their quote
+                        // is neither USDC/USDT/XLM (nor oracle-priced). They stay
+                        // NULL/`no_reference`, never a wrong value.
+                        warn!(
+                            remaining = after,
+                            "peg-pivot tier made no progress — remaining candles have no USD reference (exotic quotes)"
+                        );
+                        remaining = after;
+                        break;
+                    }
+                    remaining = after;
+                }
+            } else {
+                warn!(
+                    "no USDC/USDT/XLM reference assets in prices.assets — peg-pivot tier skipped"
+                );
+            }
         }
 
         let stats = ChPassStats {
@@ -217,5 +368,140 @@ impl ChEnrichmentPass {
             "enrichment pass complete"
         );
         Ok(stats)
+    }
+}
+
+/// The 15-column INSERT target list, shared by every enrichment statement so the
+/// SELECT projections stay positionally aligned with it.
+const INSERT_COLUMNS: &str = "timestamp, asset_id, quote_asset_id, source, \
+     open, high, low, close, \
+     volume_base, volume_quote, volume_quote_usd, close_usd, vwap, \
+     trade_count, version";
+
+/// Peg statement: USDC/USDT-quoted candles get `close_usd = close × $1`. Returns
+/// `None` when neither stablecoin is in the registry (nothing to peg). The
+/// single bound parameter is the `LIMIT` (batch size). `volume_quote_usd` is
+/// only filled when still zero, so an oracle-set (depeg-aware) value survives.
+fn peg_sql(db: &str, tbl: &str, stable_ids: &[u32]) -> Option<String> {
+    if stable_ids.is_empty() {
+        return None;
+    }
+    let in_list = stable_ids
+        .iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!(
+        "INSERT INTO {db}.{tbl} ({INSERT_COLUMNS}) \
+         SELECT \
+             p.timestamp, p.asset_id, p.quote_asset_id, p.source, \
+             p.open, p.high, p.low, p.close, \
+             p.volume_base, p.volume_quote, \
+             if(p.volume_quote_usd > 0, p.volume_quote_usd, CAST(p.volume_quote AS Decimal(38, 14))) AS volume_quote_usd, \
+             CAST(p.close AS Decimal(38, 14)) AS close_usd, \
+             p.vwap, p.trade_count, \
+             p.version + 1 AS version \
+         FROM {db}.{tbl} AS p FINAL \
+         WHERE p.close_usd = 0 \
+           AND p.volume_quote > 0 \
+           AND p.quote_asset_id IN ({in_list}) \
+         ORDER BY p.timestamp \
+         LIMIT ?"
+    ))
+}
+
+/// Pivot statement: XLM-quoted candles get `close_usd = close × xlm_usd`, where
+/// `xlm_usd` is the volume-weighted XLM/USDC candle close (× $1 peg) forward-
+/// filled by an `ASOF LEFT JOIN`. The pivot subquery keys on `ref_asset_id =
+/// xlm_id` so the ASOF join has an equality predicate (required) and matches only
+/// XLM-quoted candles. Float64 weighting avoids `Decimal` product overflow on the
+/// `sum(close × volume_base)` numerator. Bound parameters, in order: the pivot
+/// staleness window (seconds) and the `LIMIT`.
+fn pivot_sql(db: &str, tbl: &str, xlm_id: u32, usdc_id: u32) -> String {
+    format!(
+        "INSERT INTO {db}.{tbl} ({INSERT_COLUMNS}) \
+         SELECT \
+             p.timestamp, p.asset_id, p.quote_asset_id, p.source, \
+             p.open, p.high, p.low, p.close, \
+             p.volume_base, p.volume_quote, \
+             if(p.volume_quote_usd > 0, p.volume_quote_usd, CAST(r.usd * toFloat64(p.volume_quote) AS Decimal(38, 14))) AS volume_quote_usd, \
+             CAST(r.usd * toFloat64(p.close) AS Decimal(38, 14)) AS close_usd, \
+             p.vwap, p.trade_count, \
+             p.version + 1 AS version \
+         FROM {db}.{tbl} AS p FINAL \
+         ASOF LEFT JOIN ( \
+             SELECT \
+                 {xlm_id} AS ref_asset_id, timestamp, \
+                 sum(toFloat64(close) * toFloat64(volume_base)) / nullIf(sum(toFloat64(volume_base)), 0) AS usd \
+             FROM {db}.{tbl} FINAL \
+             WHERE asset_id = {xlm_id} AND quote_asset_id = {usdc_id} \
+             GROUP BY timestamp \
+         ) AS r \
+             ON r.ref_asset_id = p.quote_asset_id AND r.timestamp <= p.timestamp \
+         WHERE p.close_usd = 0 \
+           AND p.volume_quote > 0 \
+           AND r.usd IS NOT NULL \
+           AND (p.timestamp - r.timestamp) <= ? \
+         ORDER BY p.timestamp \
+         LIMIT ?"
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn peg_sql_is_none_without_stablecoins() {
+        assert!(peg_sql("prices", "price_ohlcv_1m", &[]).is_none());
+    }
+
+    #[test]
+    fn peg_sql_fills_close_usd_for_stable_quotes() {
+        let sql = peg_sql("prices", "price_ohlcv_1m", &[3, 7]).unwrap();
+        // close_usd column present and positionally after volume_quote_usd.
+        assert!(sql.contains("volume_quote_usd, close_usd, vwap"));
+        assert!(sql.contains("CAST(p.close AS Decimal(38, 14)) AS close_usd"));
+        // Only touches oracle-missed rows, only the named stablecoin quotes.
+        assert!(sql.contains("p.close_usd = 0"));
+        assert!(sql.contains("p.quote_asset_id IN (3, 7)"));
+        // Never clobbers an oracle-set volume_quote_usd.
+        assert!(sql.contains("if(p.volume_quote_usd > 0, p.volume_quote_usd,"));
+    }
+
+    #[test]
+    fn pivot_sql_pivots_xlm_through_usdc() {
+        let sql = pivot_sql("prices", "price_ohlcv_1m", 5, 3);
+        // Pivot series is the XLM/USDC market (asset 5 quoted in asset 3).
+        assert!(sql.contains("asset_id = 5 AND quote_asset_id = 3"));
+        // ASOF equality predicate + forward-fill inequality.
+        assert!(sql.contains("r.ref_asset_id = p.quote_asset_id AND r.timestamp <= p.timestamp"));
+        assert!(sql.contains("CAST(r.usd * toFloat64(p.close) AS Decimal(38, 14)) AS close_usd"));
+        // Staleness-window + LIMIT placeholders, in bind order.
+        assert!(sql.contains("(p.timestamp - r.timestamp) <= ?"));
+    }
+
+    #[test]
+    fn reference_ids_helpers() {
+        let full = ReferenceIds {
+            xlm: Some(5),
+            usdc: Some(3),
+            usdt: Some(7),
+        };
+        assert_eq!(full.stable_ids(), vec![3, 7]);
+        assert!(full.can_pivot());
+        assert!(full.has_any());
+
+        // XLM present but no USDC market → cannot pivot, but can still peg USDT.
+        let no_usdc = ReferenceIds {
+            xlm: Some(5),
+            usdc: None,
+            usdt: Some(7),
+        };
+        assert!(!no_usdc.can_pivot());
+        assert_eq!(no_usdc.stable_ids(), vec![7]);
+        assert!(no_usdc.has_any());
+
+        assert!(!ReferenceIds::default().has_any());
     }
 }

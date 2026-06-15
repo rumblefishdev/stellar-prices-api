@@ -35,6 +35,19 @@ history:
       tests green. Resolved the Reflector-key-format open question (symbols).
       Deferred: Step 3 peg-pivot deep-history tier (§12.1), SAC resolver
       (§12.4), Step 5 view + status discriminator + API (§12.2/§12.3).
+  - date: 2026-06-15
+    status: active
+    who: claude
+    note: >
+      Implemented the Step 3 peg-pivot deep-history tier (§12.1) in
+      ch_enrich.rs: run() now runs an oracle phase then a peg-pivot phase.
+      Peg = USDC/USDT quotes × $1; pivot = XLM quotes × volume-weighted
+      XLM/USDC close (ASOF forward-fill, keyed ref_asset_id for the ASOF
+      equality). Fills close_usd + volume_quote_usd (no-clobber guard);
+      exotic quotes stay 0. +4 unit tests. Validated against live
+      ClickHouse in a scratch DB: correct peg/pivot values, idempotent
+      re-INSERT, oracle-set volume_quote_usd preserved. cargo build
+      --workspace + all unit tests green.
 ---
 
 # Historical USD-quoted price series — `price_usd(asset, t)`
@@ -50,14 +63,14 @@ identity `close_usd = close × usd_price(quote_asset, t)`.
 
 ## Status: Active
 
-**Current state:** Data-plane plumbing landed and verified (build + unit tests
-green) on `feat/0061_historical-usd-close-price-series` after merging the 0060
-deliverables from `develop`. Done: Step 1 (schema column + writer), Step 2
-(oracle↔asset-id reconciliation, the load-bearing fix — also fixes the latent
-0026 join bug), Step 3 recent-window oracle tier, Step 4 (rollup/preroll
-propagation). Remaining: Step 3 deep-history peg-pivot tier (§12.1), the SAC
-resolver (§12.4), and Step 5 (view + status discriminator + API, §12.2/§12.3).
-Full design in
+**Current state:** Data-plane landed and verified (build + unit tests green; the
+peg-pivot tier additionally validated against live ClickHouse) on
+`feat/0061_historical-usd-close-price-series` after merging the 0060 deliverables
+from `develop`. Done: Step 1 (schema column + writer), Step 2 (oracle↔asset-id
+reconciliation, the load-bearing fix — also fixes the latent 0026 join bug),
+Step 3 **both enrichment tiers** (recent-window oracle + deep-history peg-pivot,
+§12.1), Step 4 (rollup/preroll propagation). Remaining: the SAC resolver (§12.4)
+and Step 5 (view + status discriminator + API, §12.2/§12.3). Full design in
 [`notes/R-historical-usd-close-design.md`](notes/R-historical-usd-close-design.md).
 
 ## Context
@@ -114,10 +127,12 @@ others = volume-weighted USD close across quotes/sources). Optional endpoints:
 - [x] Oracle rows carry canonical `prices.assets` `asset_id` (no synthetic space);
       enrichment ASOF join matches for backfilled data. (Synthetic `oracle_id()`
       space removed; `reflector_key_to_identity` resolves via `AssetRegistry`.)
-- [~] Enrichment computes `close_usd` with the tiered reference: oracle USDC/XLM in
-      the recent window **(done)**, **USDC≡$1 (USDT≡$1) peg × XLM/USDC candle** for
-      deep history **(deferred — peg-pivot tier not yet implemented)** (the primary
-      pre-Reflector mechanism, not a fallback). Idempotent re-INSERT. (§12.1)
+- [x] Enrichment computes `close_usd` with the tiered reference: oracle USDC/XLM in
+      the recent window, **USDC≡$1 (USDT≡$1) peg × XLM/USDC candle** for deep
+      history (the primary pre-Reflector mechanism, not a fallback). Idempotent
+      re-INSERT. (§12.1) — both tiers implemented in `ch_enrich.rs`; peg + pivot
+      validated against live ClickHouse (correct values, idempotent, no-clobber of
+      an oracle-set `volume_quote_usd`).
 - [ ] SAC collapses to its underlying classic/native identity — **one `asset_id`,
       one price**; pure Soroban tokens keyed by `contract_address`. Requires the
       `AssetIdentity` contract/SAC resolver (`canonical.rs`, `sink.rs`). (§12.4)
@@ -158,13 +173,20 @@ soroban oracle extractor, the rollup/preroll SQL). All changes build clean
   `quote_asset_id` → the enrichment ASOF join matches backfilled data. `USDC_ISSUER`
   /`USDT_ISSUER` promoted to `pub(crate)` in `canonical.rs` (single source of truth).
   4 new unit tests, incl. the USDC oracle-row == trade-quote-id guarantee.
-- **Step 3 — enrichment (recent-window tier).**
-  `packages/enrichment-worker/src/ch_enrich.rs`: added
+- **Step 3 — enrichment, both tiers.**
+  `packages/enrichment-worker/src/ch_enrich.rs`. **Tier 1 (oracle):** added
   `CAST(o.price_usd * p.close AS Decimal(38,14)) AS close_usd` to the SELECT +
   `close_usd` to the INSERT column list; candidate filter / count extended to
   `(volume_quote_usd = 0 OR close_usd = 0)` so already-volume-enriched rows still
-  get `close_usd` backfilled. The deep-history peg-pivot tier (§12.1) is **not**
-  implemented — deep-history candles stay at `close_usd = 0` (never a wrong value).
+  get `close_usd` backfilled. **Tier 2 (peg-pivot, §12.1):** `run()` now runs a
+  second phase over what the oracle tier left at `close_usd = 0` —
+  `enrich_peg_pivot_step` issues a **peg** statement (USDC/USDT quotes →
+  `close_usd = close × $1`) and a **pivot** statement (XLM quotes →
+  `close_usd = close × xlm_usd`, where `xlm_usd` is the volume-weighted XLM/USDC
+  candle close, ASOF-forward-filled). Reference `asset_id`s resolved from
+  `prices.assets` via `resolve_reference_ids`. Exotic-quote candles stay
+  `close_usd = 0`. +4 unit tests; peg + pivot exercised against live ClickHouse
+  (correct values, idempotent re-INSERT, oracle-set `volume_quote_usd` preserved).
 - **Step 4 — rollup propagation.** `schema/rollups.sql` + `schema/preroll.sql`:
   `argMax(close_usd, timestamp) AS close_usd` after `volume_quote_usd` in all 6
   rollup MVs and 6 preroll INSERTs (USD close is a last-value, not a sum). Position
@@ -207,13 +229,34 @@ soroban oracle extractor, the rollup/preroll SQL). All changes build clean
    (`enrich.rs`/`pass.rs`/`sink/sql_file.rs`) targets task 0026's legacy
    `prices.price_ohlcv` shape (with `granularity` + `_inserted_at`), not the real
    schema, and is not part of 0061's `close_usd` delivery. Left untouched.
+7. **Peg and pivot are two separate statements, not one COALESCE** — the peg is a
+   timeless constant (`$1`) with no join; the pivot is a time series needing an
+   `ASOF` forward-fill. They don't unify cleanly under one ASOF (a constant has no
+   timestamps), so the step runs peg then pivot over the disjoint quote sets
+   (USDC/USDT vs XLM).
+8. **Pivot ASOF needs an equality predicate** — ClickHouse `ASOF JOIN` requires an
+   equi-condition, but all XLM candles pivot against the *same* XLM/USDC series.
+   Solved by keying the pivot subquery as `{xlm_id} AS ref_asset_id` and joining
+   `ON r.ref_asset_id = p.quote_asset_id AND r.timestamp <= p.timestamp` — natural
+   ("the USD price of the candle's quote asset") and extensible to more pivots.
+9. **Float64 for the volume-weighted pivot multiplier** — `sum(close × volume_base)`
+   in `Decimal(38,14)` can overflow; the weighted average is computed in Float64
+   then cast back to `Decimal(38,14)`. Ample precision for a USD reference price.
+10. **Peg-pivot fills BOTH `close_usd` and `volume_quote_usd`** (the latter only
+    when still 0, via `if(volume_quote_usd > 0, …)`) — the same quote-USD multiplier
+    applies to both, it keeps the candidate set converging cleanly, and the guard
+    guarantees an oracle-set (depeg-aware) `volume_quote_usd` is never overwritten
+    by the `$1` peg. Validated against live CH.
+11. **`pivot_window_s` default = 1 day** (vs the oracle tier's 300s) — deep history
+    is sparser, and XLM/USDC is liquid so a 1-day forward-fill bound rarely bites;
+    configurable via `PIVOT_WINDOW_S`.
 
 ## Future Work
 
-- **Step 3 deep-history peg-pivot tier (§12.1)** — `close_usd` for candles with no
-  in-window oracle row: USDC≡$1 / USDT≡$1 peg for stable-quoted candles, and the
-  XLM/USDC candle as the pivot for XLM-quoted candles. The primary pre-Reflector
-  mechanism; currently those candles carry `close_usd = 0`.
+- **Committed live-CH integration test for the peg-pivot tier** — the SQL is unit-
+  tested for shape and was validated manually against live ClickHouse this session;
+  a durable `#[ignore]`d integration test (fixtures → `run()` → assert) would lock
+  it in. No live-CH test harness exists in the repo yet.
 - **SAC → underlying-classic resolver (§12.4)** — `AssetIdentity` models only
   `Native`/`Credit`/`Contract`; SAC addresses don't yet collapse to their classic
   underlying, so AMM-via-SAC XLM/USDC quotes won't match the oracle `Native`/`Credit`
