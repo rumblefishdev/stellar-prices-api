@@ -27,8 +27,17 @@
 --   prices.price_usd_series_1h   / prices.usd_reference_1h     — hourly buckets
 -- Pair a series with its same-grain reference when classifying status. Hourly
 -- serves read-time TVL keyed to a ledger's closed_at without collapsing a whole
--- day to one close; daily is cheaper for long-range charts. Grain selection is
--- the caller's (the explorer joins whichever grain its query needs).
+-- day to one close; daily is cheaper for long-range charts.
+--
+-- ## Grain-selection ownership (decided 2026-06-15)
+-- At the VIEW layer, grain selection is the CALLER's: the consumer JOINs whichever
+-- grain its query needs (one consistent grain per chart → no resolution
+-- discontinuities; keeps these views a dumb, fast, retention-agnostic data
+-- surface). The "finest-retained-for-T" routing (view-picks) is deliberately NOT
+-- in the views — it belongs to the point-lookup HTTP endpoint (task 0040,
+-- `price_usd_at(id, ts)`), the natural home for that policy. So: views =
+-- caller-passes; the 0040 API primitive = view-picks. Confirm with BE that they
+-- own grain choice at the JOIN layer.
 --
 -- ## Read-time status discriminator (§12.3) — computed by the reader
 -- A view cannot enumerate (asset × bucket) combinations that never traded, so

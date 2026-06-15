@@ -307,3 +307,29 @@ task's §5 reconciliation work.
 It returns the USD price of **one** asset at `t`. `volume_usd =
 gross_volume_a × price_usd_at(A,t)` is a single call; TVL is just two independent
 calls (one per leg). Single-asset is the base case — confirmed.
+
+### 12.6 Grain-selection ownership: views = caller-passes, 0040 API = view-picks
+
+`close_usd` exists at several grains with different retention (`_1m` 7d, `_15m`
+30d, `_1h`/`_4h`/`_1d`/… forever), so the *finest grain still retained for a time
+`T`* varies with how old `T` is. Who picks the grain for a lookup?
+
+**Decision (2026-06-15):**
+
+- **Views = caller-passes.** The in-cluster views are exposed *per grain*
+  (`price_usd_series` / `_1h`, `usd_reference` / `_1h`); the consumer JOINs the
+  grain its query needs. Rationale: a chart wants **one consistent grain per
+  query** (chosen by its zoom/window) — mixing grains across points would create
+  resolution discontinuities — and it keeps the views a dumb, fast,
+  retention-agnostic data surface (no coupling of grain/retention policy into the
+  view, and none of the cross-grain `UNION` a single "smart" view would need).
+  This matches BE's own `timeframe`/`start+end` API mental model.
+- **0040 HTTP API = view-picks.** The turnkey point-lookup primitive
+  `price_usd_at(id, ts)` (task 0040) maps `ledger → ts → finest-retained grain`
+  and returns one `close_usd`. A point lookup wants *finest-available*, and the
+  API layer is the natural home for that retention-aware routing — keeping the
+  policy out of both the views and the consumer.
+
+Net: **views = caller-passes; the 0040 API primitive = view-picks.** No new view
+design needed (already shipped per-grain). Open only: BE confirms they own grain
+choice at the JOIN layer; 0040 implements the `ts → grain` routing when built.

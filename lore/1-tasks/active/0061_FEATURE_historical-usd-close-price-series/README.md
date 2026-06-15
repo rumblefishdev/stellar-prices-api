@@ -106,6 +106,17 @@ history:
       _1h already exists + forever-retained). Open w/ BE: grain-selection
       ownership, view-name confirmation (price_usd_at vs price_usd_series),
       optional {code}:{issuer} string key; operational: backfill to 2024-02-20.
+  - date: 2026-06-15
+    status: active
+    who: claude
+    note: >
+      Decided grain-selection ownership (was open w/ BE): VIEWS = caller-passes
+      (consumer JOINs the per-grain view its query needs — one consistent grain
+      per chart, views stay retention-agnostic), and the 0040 HTTP point-lookup
+      primitive price_usd_at(id,ts) = view-picks (maps ts → finest-retained grain).
+      No view change (already shipped per-grain). Documented in views.sql header,
+      design note §12.6, Design Decision 18; breadcrumb added to task 0040.
+      Remaining w/ BE: confirm they own grain choice at the JOIN layer.
 ---
 
 # Historical USD-quoted price series — `price_usd(asset, t)`
@@ -397,6 +408,13 @@ soroban oracle extractor, the rollup/preroll SQL). All changes build clean
     needed. Residual gap (documented): an asset *first* seen as a SAC on AMM,
     strictly before any classic sighting and not in the loaded registry, won't
     collapse that run — self-heals next run once the classic is persisted.
+18. **Grain-selection ownership: views = caller-passes, 0040 API = view-picks**
+    (decided 2026-06-15; §12.6). The in-cluster views are per-grain and the
+    consumer JOINs the grain its query needs (one consistent grain per chart;
+    views stay a dumb, retention-agnostic surface). The "finest-retained-for-T"
+    routing belongs to the 0040 point-lookup endpoint (`price_usd_at(id, ts)`),
+    not the views. No new view design — already shipped per-grain. Documented in
+    `views.sql` header + design note §12.6.
 
 ## Future Work
 
