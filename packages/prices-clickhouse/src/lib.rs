@@ -149,10 +149,21 @@ mod tests {
     }
 
     #[test]
-    fn views_sql_has_two_create_view_statements() {
+    fn views_sql_has_four_create_view_statements() {
+        // daily + hourly variants of the series and the reference companion.
         let stmts = split_statements(VIEWS_SQL);
-        assert_eq!(stmts.len(), 2, "got {}", stmts.len());
-        assert!(stmts.iter().any(|s| s.contains("prices.usd_reference")));
-        assert!(stmts.iter().any(|s| s.contains("prices.price_usd_series")));
+        assert_eq!(stmts.len(), 4, "got {}", stmts.len());
+        assert!(stmts.iter().any(|s| s.contains("prices.usd_reference AS")));
+        assert!(
+            stmts
+                .iter()
+                .any(|s| s.contains("prices.price_usd_series AS"))
+        );
+        assert!(stmts.iter().any(|s| s.contains("prices.usd_reference_1h")));
+        assert!(
+            stmts
+                .iter()
+                .any(|s| s.contains("prices.price_usd_series_1h"))
+        );
     }
 }

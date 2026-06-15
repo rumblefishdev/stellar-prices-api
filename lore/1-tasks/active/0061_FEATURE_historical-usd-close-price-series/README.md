@@ -88,6 +88,24 @@ history:
       stays green. enrichment-worker gains a prices-clickhouse dev-dep for
       INIT_SQL/apply_sql. Remaining: SAC end-to-end backfill check (needs ledger
       fixtures) and the 0040 HTTP layer.
+  - date: 2026-06-15
+    status: active
+    who: claude
+    note: >
+      End-to-end validated the whole close_usd pipeline against the local CH over
+      10k real mainnet ledgers (62030000-62039999): oracle reconciliation lands
+      canonical asset_ids (no synthetic space), oracle+peg+pivot enrichment fills
+      144603/222801 candles, rollup propagates to _1d, views return economically
+      sound USD (XLM $0.158, BTC $71k, USDC depeg captured), idempotent re-run.
+      Added examples/run_ch_pass.rs (local driver for the production pass).
+      Reviewed BE 0199 contract (soroban-block-explorer lp-analytics): our impl
+      matches all agreed points (write-time close_usd per grain, tiered reference,
+      natural-identity key incl. XLM-as-native, NULL+discriminator+usd_reference,
+      SAC resolver). One gap closed: views were _1d-only; the contract names
+      1h/1d. Added price_usd_series_1h + usd_reference_1h (zero marginal storage —
+      _1h already exists + forever-retained). Open w/ BE: grain-selection
+      ownership, view-name confirmation (price_usd_at vs price_usd_series),
+      optional {code}:{issuer} string key; operational: backfill to 2024-02-20.
 ---
 
 # Historical USD-quoted price series — `price_usd(asset, t)`
@@ -187,6 +205,8 @@ others = volume-weighted USD close across quotes/sources). Optional endpoints:
 - [x] `prices.price_usd_series` view: one USD close per (asset, bucket), keyed by
       **natural Stellar identity** (`native` / `(code,issuer)` / `contract_address`),
       not `asset_id`. (§12.2) — `schema/views.sql`; validated against live CH.
+      Provided at **both 1h and 1d grains** (`price_usd_series` / `_1h`,
+      `usd_reference` / `_1h`) per the BE 0199 contract (1h/1d).
 - [x] NULL contract: `close_usd` NULL (never error, never drops row) +
       `status` discriminator `ok | no_asset_price | no_reference`, plus a companion
       `prices.usd_reference(bucket)` for systemic-blackout detection. (§12.3) —
@@ -260,7 +280,12 @@ soroban oracle extractor, the rollup/preroll SQL). All changes build clean
   Read-time status (`ok | no_asset_price | no_reference`) is documented in the
   file header as a LEFT-JOIN of the two views. +1 builder test; both views created
   and queried against live ClickHouse (correct natural-identity rows + weighting).
-  HTTP endpoints deferred to task 0040.
+  HTTP endpoints deferred to task 0040. Provided at **1h and 1d grains** (4 views)
+  per the BE 0199 contract — the daily collapses a whole day to one close, hourly
+  serves read-time TVL keyed to a ledger's `closed_at`. Zero marginal cost: both
+  `_1h`/`_1d` OHLCV tables already exist + carry `close_usd` and are forever-
+  retained; a plain view is stored query text only (measured ~2× read vs daily,
+  single-digit ms). Integration test covers both grains.
 - **§12.4 — SAC resolver.** `packages/sdex-backfill/src/canonical.rs`: `AssetRegistry`
   now derives each classic asset's deterministic Stellar Asset Contract address —
   `C`-strkey of `sha256(HashIdPreimage::ContractId{network, Asset})` — into a

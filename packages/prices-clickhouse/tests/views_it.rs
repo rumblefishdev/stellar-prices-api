@@ -126,6 +126,39 @@ async fn views_expose_usd_series_and_reference() {
         .unwrap();
     assert!(approx(xlm_usd, 0.30), "usd_reference xlm_usd");
 
+    // Hourly-grain variants: same shape on price_ohlcv_1h. Two hourly XLM/USDC
+    // candles (different prices) must surface as two distinct hourly buckets.
+    client
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1h \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
+             (1620003600, 1, 2,'sdex', 0.31,0.31,0.31,0.31, 100,31,31,0.31,0.31,1,1), \
+             (1620007200, 1, 2,'sdex', 0.32,0.32,0.32,0.32, 100,32,32,0.32,0.32,1,1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+    let hourly_xlm: Vec<f64> = client
+        .query(&format!(
+            "SELECT toFloat64(close_usd) FROM {db}.price_usd_series_1h \
+             WHERE asset_kind = 'native' ORDER BY bucket"
+        ))
+        .fetch_all::<f64>()
+        .await
+        .unwrap();
+    assert_eq!(hourly_xlm.len(), 2, "two hourly native buckets");
+    assert!(
+        approx(hourly_xlm[0], 0.31) && approx(hourly_xlm[1], 0.32),
+        "hourly XLM close_usd"
+    );
+    let hourly_ref: u64 = client
+        .query(&format!("SELECT count() FROM {db}.usd_reference_1h"))
+        .fetch_one::<u64>()
+        .await
+        .unwrap();
+    assert_eq!(hourly_ref, 2, "two hourly reference buckets");
+
     client
         .query(&format!("DROP DATABASE {db}"))
         .execute()

@@ -20,10 +20,21 @@
 -- native XLM → ('native','XLM','',''); classic → ('credit', code, issuer, '');
 -- SAC / Soroban token → ('contract','','', contract_address).
 --
+-- ## Grain variants (1h + 1d)
+-- The series + reference are provided at two grains, both on forever-retained
+-- OHLCV tables (1h and 1d carry close_usd via the rollup chain):
+--   prices.price_usd_series      / prices.usd_reference       — daily buckets
+--   prices.price_usd_series_1h   / prices.usd_reference_1h     — hourly buckets
+-- Pair a series with its same-grain reference when classifying status. Hourly
+-- serves read-time TVL keyed to a ledger's closed_at without collapsing a whole
+-- day to one close; daily is cheaper for long-range charts. Grain selection is
+-- the caller's (the explorer joins whichever grain its query needs).
+--
 -- ## Read-time status discriminator (§12.3) — computed by the reader
 -- A view cannot enumerate (asset × bucket) combinations that never traded, so
 -- `no_asset_price` is a read-time condition, not a stored column. For a lookup
--- of (identity I, bucket T), LEFT JOIN price_usd_series against usd_reference:
+-- of (identity I, bucket T), LEFT JOIN price_usd_series against usd_reference
+-- (at the matching grain):
 --
 --   status = ok             -- row present in price_usd_series for (I, T)
 --          | no_asset_price  -- (I, T) absent, BUT usd_reference has bucket T
@@ -76,6 +87,44 @@ SELECT
     p.timestamp        AS bucket,
     CAST(sum(toFloat64(p.close_usd) * toFloat64(p.volume_base)) / nullIf(sum(toFloat64(p.volume_base)), 0) AS Decimal(38, 14)) AS close_usd
 FROM prices.price_ohlcv_1d AS p FINAL
+INNER JOIN prices.assets AS a FINAL ON a.asset_id = p.asset_id
+WHERE p.close_usd > 0
+GROUP BY asset_code, issuer_address, contract_address, bucket;
+
+----------------------------------------------------------------------
+-- Hourly-grain variants — identical shape/semantics to the daily views above,
+-- reading price_ohlcv_1h (also forever-retained, also carries close_usd). For
+-- read-time TVL keyed to a ledger's closed_at at hourly resolution. Filter by
+-- bucket range so the predicate pushes down to the _1h scan (bounded by the
+-- window, not full history); promote to a materialized table only if measured
+-- read latency demands it (design note §6).
+----------------------------------------------------------------------
+
+CREATE VIEW IF NOT EXISTS prices.usd_reference_1h AS
+SELECT
+    p.timestamp AS bucket,
+    CAST(sum(toFloat64(p.close) * toFloat64(p.volume_base)) / nullIf(sum(toFloat64(p.volume_base)), 0) AS Decimal(38, 14)) AS xlm_usd
+FROM prices.price_ohlcv_1h AS p FINAL
+INNER JOIN prices.assets AS base  FINAL ON base.asset_id  = p.asset_id
+INNER JOIN prices.assets AS quote FINAL ON quote.asset_id = p.quote_asset_id
+WHERE base.asset_code = 'XLM' AND base.issuer_address = '' AND base.contract_address = ''
+  AND quote.asset_code = 'USDC'
+  AND quote.issuer_address = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN'
+  AND p.close > 0
+GROUP BY p.timestamp;
+
+CREATE VIEW IF NOT EXISTS prices.price_usd_series_1h AS
+SELECT
+    multiIf(
+        a.contract_address != '', 'contract',
+        a.asset_code = 'XLM' AND a.issuer_address = '', 'native',
+        'credit') AS asset_kind,
+    a.asset_code       AS asset_code,
+    a.issuer_address   AS issuer_address,
+    a.contract_address AS contract_address,
+    p.timestamp        AS bucket,
+    CAST(sum(toFloat64(p.close_usd) * toFloat64(p.volume_base)) / nullIf(sum(toFloat64(p.volume_base)), 0) AS Decimal(38, 14)) AS close_usd
+FROM prices.price_ohlcv_1h AS p FINAL
 INNER JOIN prices.assets AS a FINAL ON a.asset_id = p.asset_id
 WHERE p.close_usd > 0
 GROUP BY asset_code, issuer_address, contract_address, bucket;
