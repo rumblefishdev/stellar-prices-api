@@ -15,6 +15,8 @@ path = "src/main.rs"
 [dependencies]
 extractors-core = { path = "../extractors-core" }
 phoenix-extractor = { path = "../phoenix-extractor" }
+soroswap-extractor = { path = "../soroswap-extractor" }
+aquarius-extractor = { path = "../aquarius-extractor" }
 thiserror = { workspace = true }
 
 [dev-dependencies]

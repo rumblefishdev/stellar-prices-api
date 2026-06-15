@@ -55,34 +55,55 @@ pub async fn sync_partition(
         return Ok(SyncOutcome::Complete);
     }
 
+    // Archive tail-lag: the public archive is routinely a few ledgers short of
+    // a full 64k partition at its tail, and the live tip partition is only
+    // partially published. Rather than skip the whole partition, index whatever
+    // the archive currently exposes — we treat it as ready once our local copy
+    // holds every object the archive lists; `index_partition` skips any
+    // individually-missing ledger. This also lets the run pick up the partial
+    // tip partition instead of dropping its (already-published) ledgers.
     let s3_count = s3_object_count(partition).await?;
-    if s3_count < PARTITION_SIZE as usize {
+    if s3_count == 0 {
+        // The archive listing came back empty — either a genuinely-unpublished
+        // partition or a transient `aws s3 ls` hiccup. Either way we cannot
+        // confirm completeness, so defer this partition (skipped this run,
+        // retried next) rather than aborting the whole backfill with a
+        // `need: 0` hard error.
         warn!(
             partition = partition.start,
             local_files = file_count,
-            s3_files = s3_count,
-            need = PARTITION_SIZE,
-            "S3 archive lag — partition incomplete on S3, skipping"
+            "archive listing empty/unavailable — deferring partition"
         );
         return Ok(SyncOutcome::S3Incomplete {
             local: file_count,
-            s3: s3_count,
+            s3: 0,
             need: PARTITION_SIZE as usize,
         });
+    }
+    if file_count >= s3_count {
+        info!(
+            partition = partition.start,
+            sync_duration_ms = duration.as_millis(),
+            file_count,
+            s3_count,
+            total_bytes,
+            "partition synced — have all archive objects (tail-lag tolerated)"
+        );
+        return Ok(SyncOutcome::Complete);
     }
 
     warn!(
         partition = partition.start,
         local_files = file_count,
         s3_files = s3_count,
-        "local sync partial despite full S3 — retrying"
+        "local sync behind archive — retrying"
     );
     run_sync_once(partition, &local).await?;
     let (file_count_retry, _) = dir_stats(&local).await?;
-    if file_count_retry == PARTITION_SIZE as usize {
+    if file_count_retry >= s3_count && s3_count > 0 {
         info!(
             partition = partition.start,
-            "partition sync complete after retry"
+            file_count_retry, s3_count, "partition sync complete after retry"
         );
         return Ok(SyncOutcome::Complete);
     }
@@ -91,7 +112,7 @@ pub async fn sync_partition(
         partition_start: partition.start,
         local: file_count_retry,
         s3: s3_count,
-        need: PARTITION_SIZE as usize,
+        need: s3_count,
     })
 }
 

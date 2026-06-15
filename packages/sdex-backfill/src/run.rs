@@ -10,6 +10,7 @@ use crate::error::BackfillError;
 use crate::ingest::{PartitionStats, index_partition};
 use crate::partition::{Partition, partitions_for_range};
 use crate::sink::Sink;
+use crate::soroban::Registries;
 use crate::sync::{SyncOutcome, sync_partition};
 
 pub async fn execute(
@@ -62,6 +63,9 @@ pub async fn execute(
 
     let existing_assets = sink.load_assets().await?;
     let mut registry = AssetRegistry::from_existing(existing_assets);
+    // Venue / pool / oracle registries, grown incrementally across partitions
+    // from in-window factory events.
+    let mut reg = Registries::new();
 
     let mut current_complete = matches!(
         sync_partition(todo[0], temp_dir).await?,
@@ -96,12 +100,15 @@ pub async fn execute(
                 end,
                 &completed,
                 &mut registry,
+                &mut reg,
             )
             .await?;
 
             totals.indexed += stats.indexed;
             totals.skipped += stats.skipped;
             totals.trade_ticks += stats.trade_ticks;
+            totals.amm_ticks += stats.amm_ticks;
+            totals.oracle_rows += stats.oracle_rows;
             totals.candles_written += stats.candles_written;
             totals.total_bytes += stats.total_bytes;
         } else {
@@ -164,7 +171,9 @@ fn print_run_summary(
     println!("partitions skipped (S3):   {partitions_skipped_s3}");
     println!("ledgers indexed:           {}", totals.indexed);
     println!("ledgers already in DB:     {}", totals.skipped);
-    println!("trade ticks emitted:       {}", totals.trade_ticks);
+    println!("SDEX trade ticks:          {}", totals.trade_ticks);
+    println!("AMM trade ticks:           {}", totals.amm_ticks);
+    println!("oracle rows:               {}", totals.oracle_rows);
     println!("price_ohlcv_1m rows:       {}", totals.candles_written);
     println!("total bytes downloaded:    {}", totals.total_bytes);
     println!("elapsed:                   {} s", elapsed.as_secs());
