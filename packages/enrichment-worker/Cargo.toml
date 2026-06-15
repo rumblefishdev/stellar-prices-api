@@ -31,3 +31,4 @@ lambda_runtime = "0.13"
 
 [dev-dependencies]
 tempfile = "3"
+prices-clickhouse = { path = "../prices-clickhouse" }

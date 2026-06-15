@@ -76,6 +76,18 @@ history:
       CAS3…XOWMA. cargo build --workspace + all workspace tests green. All
       §12.1–§12.5 design items now implemented; remaining is durable live-CH
       integration tests and the 0040 HTTP layer.
+  - date: 2026-06-15
+    status: active
+    who: claude
+    note: >
+      Added live-CH integration tests (#[ignore]d, isolated scratch DB built by
+      rewriting the real schema onto the scratch name): ch_enrich_it.rs
+      (oracle/peg/pivot tiers + no-reference + idempotency) and views_it.rs
+      (natural-identity series + cross-quote weighting + usd_reference). Both
+      pass against the local ClickHouse; skipped in normal runs so CI without CH
+      stays green. enrichment-worker gains a prices-clickhouse dev-dep for
+      INIT_SQL/apply_sql. Remaining: SAC end-to-end backfill check (needs ledger
+      fixtures) and the 0040 HTTP layer.
 ---
 
 # Historical USD-quoted price series — `price_usd(asset, t)`
@@ -186,10 +198,13 @@ others = volume-weighted USD close across quotes/sources). Optional endpoints:
       serves volume not just TVL — §12.5) **deferred to 0040** (the Prices API
       Gateway + axum read-handlers task), noted. The views are the primary delivery
       surface — BE reads `prices.*` directly (§8), HTTP is 0040's concern.
-- [~] Tests/fixtures for the reconciliation + enrichment + view + NULL/status cases.
-      (Reconciliation + peg/pivot SQL-shape unit tests done; enrichment peg/pivot
-      and both views validated against live ClickHouse this session. Durable
-      `#[ignore]`d live-CH integration tests still to add — no harness in repo yet.)
+- [x] Tests/fixtures for the reconciliation + enrichment + view + NULL/status cases.
+      Unit: reconciliation, peg/pivot SQL builders, SAC derivation (vs the known
+      native SAC). Integration (`#[ignore]`d, live CH, isolated scratch DB):
+      `enrichment-worker/tests/ch_enrich_it.rs` (oracle/peg/pivot tiers +
+      no-reference + idempotency) and `prices-clickhouse/tests/views_it.rs`
+      (natural-identity series + cross-quote weighting + `usd_reference`). Both pass
+      against a local ClickHouse.
 
 ## Implementation Notes
 
@@ -255,6 +270,16 @@ soroban oracle extractor, the rollup/preroll SQL). All changes build clean
   onto its classic `asset_id` (one row, one price); a pure Soroban token keeps its
   `Contract(address)` identity. New deps: `stellar-strkey`, `sha2`. +4 unit tests,
   anchored on the known native-XLM mainnet SAC (`CAS3…XOWMA`).
+- **Live-CH integration tests.** `#[ignore]`d (run with `cargo test -- --ignored`
+  against a local ClickHouse), each in an isolated scratch database built by
+  rewriting the real `prices.*` schema onto the scratch name (so the schema stays
+  the single source of truth and `prices` is never touched), dropped at the end:
+  - `enrichment-worker/tests/ch_enrich_it.rs` — `ChEnrichmentPass::run()` over a
+    fixture spanning a recent oracle-covered candle, deep peg (USDC) + pivot (XLM)
+    candles, and an exotic-quote candle; asserts the per-tier `close_usd`, that the
+    oracle value beats the peg, that an exotic quote stays 0, and idempotency.
+  - `prices-clickhouse/tests/views_it.rs` — applies schema + views, asserts the
+    natural-identity rows, the cross-quote volume-weighting, and `usd_reference`.
 
 ## Design Decisions
 
@@ -350,16 +375,14 @@ soroban oracle extractor, the rollup/preroll SQL). All changes build clean
 
 ## Future Work
 
-All design items (§12.1–§12.5) are implemented. Remaining is hardening / handoff:
+All design items (§12.1–§12.5) are implemented, with unit + live-CH integration
+tests for the enrichment tiers and the views. Remaining is handoff / breadth:
 
-- **Committed live-CH integration tests** — the peg/pivot enrichment and both views
-  were validated against live ClickHouse this session; durable `#[ignore]`d
-  integration tests (fixtures → run/query → assert) would lock them in. No live-CH
-  test harness exists in the repo yet.
-- **End-to-end backfill validation of the SAC collapse** — the derivation is
-  unit-tested against the known native SAC; a full backfill over a window with both
-  SDEX-classic and AMM-via-SAC trades of the same asset would confirm one merged
-  `asset_id`/`price_usd_series` row in practice.
+- **End-to-end backfill validation of the SAC collapse** — the derivation is unit-
+  tested against the known native SAC and the registry collapse is unit-tested; a
+  full backfill over a window with both SDEX-classic and AMM-via-SAC trades of the
+  same asset would confirm one merged `asset_id`/`price_usd_series` row end to end
+  (needs ledger XDR fixtures — the gitignored `fixtures/ledgers/`).
 - **HTTP read endpoints (§12.5)** — deferred to task 0040 (API Gateway + axum).
 
 ## Notes
