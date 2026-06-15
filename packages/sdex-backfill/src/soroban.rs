@@ -347,14 +347,26 @@ fn first_address(v: &Value) -> Option<String> {
     }
 }
 
+/// Resolve an AMM token (contract address) to a canonical `AssetIdentity`: the
+/// underlying classic asset if the address is a known SAC (§12.4), else the
+/// `Contract` identity for a pure Soroban token.
+fn resolve_amm_token(contract_addr: &str, assets: &AssetRegistry) -> AssetIdentity {
+    assets
+        .resolve_sac(contract_addr)
+        .unwrap_or_else(|| AssetIdentity::Contract(contract_addr.to_string()))
+}
+
 /// Convert a venue `TradeRow` into a `TradeTick` for the candle accumulator.
 fn amm_trade_to_tick(
     trade: &extractors_core::TradeRow,
     closed_at: i64,
     assets: &mut AssetRegistry,
 ) -> Option<TradeTick> {
-    let sold = AssetIdentity::Contract(trade.token_in.clone());
-    let bought = AssetIdentity::Contract(trade.token_out.clone());
+    // Collapse a SAC token onto its underlying classic identity (§12.4) so
+    // AMM-via-SAC and SDEX-classic share one asset_id; a pure Soroban token keeps
+    // its contract-address identity.
+    let sold = resolve_amm_token(&trade.token_in, assets);
+    let bought = resolve_amm_token(&trade.token_out, assets);
     let pair = canonicalise(&sold, &bought, assets);
 
     let amount_in = Decimal::try_from_i128_with_scale(trade.amount_in, AMM_AMOUNT_SCALE).ok()?;

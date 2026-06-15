@@ -62,6 +62,20 @@ history:
       Decimal-division overflow. +1 builder test; both views created and queried
       against live ClickHouse (correct native/credit/contract rows + weighting).
       HTTP endpoints deferred to 0040. Only §12.4 SAC resolver remains.
+  - date: 2026-06-15
+    status: active
+    who: claude
+    note: >
+      Implemented the §12.4 SAC resolver — the last design item. AssetRegistry
+      (canonical.rs) derives each classic asset's deterministic SAC address
+      (sha256 of the ContractId preimage → C-strkey) into a reverse index
+      (pre-seeded XLM/USDC/USDT + every interned classic); soroban.rs AMM path
+      resolves SAC tokens to the classic identity before interning, collapsing
+      AMM-via-SAC and SDEX-classic onto one asset_id. New deps stellar-strkey +
+      sha2. +4 unit tests incl. exact match of the known native-XLM mainnet SAC
+      CAS3…XOWMA. cargo build --workspace + all workspace tests green. All
+      §12.1–§12.5 design items now implemented; remaining is durable live-CH
+      integration tests and the 0040 HTTP layer.
 ---
 
 # Historical USD-quoted price series — `price_usd(asset, t)`
@@ -84,8 +98,10 @@ from `develop`. Done: Step 1 (schema column + writer), Step 2 (oracle↔asset-id
 reconciliation, the load-bearing fix — also fixes the latent 0026 join bug),
 Step 3 **both enrichment tiers** (recent-window oracle + deep-history peg-pivot,
 §12.1), Step 4 (rollup/preroll propagation), Step 5 (the `price_usd_series` +
-`usd_reference` read-surface views, §12.2/§12.3; HTTP endpoints deferred to 0040).
-**Only remaining design item:** the SAC→underlying resolver (§12.4). Full design in
+`usd_reference` read-surface views, §12.2/§12.3; HTTP endpoints deferred to 0040),
+and the §12.4 SAC→underlying resolver. **All design items (§12.1–§12.5) are now
+implemented.** Remaining is hardening (durable live-CH integration tests) and the
+0040 HTTP layer. Full design in
 [`notes/R-historical-usd-close-design.md`](notes/R-historical-usd-close-design.md).
 
 ## Context
@@ -148,9 +164,12 @@ others = volume-weighted USD close across quotes/sources). Optional endpoints:
       re-INSERT. (§12.1) — both tiers implemented in `ch_enrich.rs`; peg + pivot
       validated against live ClickHouse (correct values, idempotent, no-clobber of
       an oracle-set `volume_quote_usd`).
-- [ ] SAC collapses to its underlying classic/native identity — **one `asset_id`,
-      one price**; pure Soroban tokens keyed by `contract_address`. Requires the
-      `AssetIdentity` contract/SAC resolver (`canonical.rs`, `sink.rs`). (§12.4)
+- [x] SAC collapses to its underlying classic/native identity — **one `asset_id`,
+      one price**; pure Soroban tokens keyed by `contract_address`. (§12.4) —
+      `AssetRegistry` derives each classic asset's deterministic SAC address
+      (`sha256(ContractId preimage)` → `C`-strkey) into a reverse index; the AMM
+      path resolves SAC tokens to the classic identity before interning. Verified:
+      the derivation reproduces the known native-XLM mainnet SAC exactly.
 - [x] Rollup chain propagates `close_usd` onto forever-retained grains.
       (`argMax(close_usd, timestamp)` in all 6 rollup MVs + 6 preroll INSERTs.)
 - [x] `prices.price_usd_series` view: one USD close per (asset, bucket), keyed by
@@ -227,6 +246,15 @@ soroban oracle extractor, the rollup/preroll SQL). All changes build clean
   file header as a LEFT-JOIN of the two views. +1 builder test; both views created
   and queried against live ClickHouse (correct natural-identity rows + weighting).
   HTTP endpoints deferred to task 0040.
+- **§12.4 — SAC resolver.** `packages/sdex-backfill/src/canonical.rs`: `AssetRegistry`
+  now derives each classic asset's deterministic Stellar Asset Contract address —
+  `C`-strkey of `sha256(HashIdPreimage::ContractId{network, Asset})` — into a
+  `sac_index` (SAC address → classic identity), pre-seeded with XLM/USDC/USDT and
+  populated for every interned classic. `soroban.rs` `amm_trade_to_tick` resolves
+  each AMM token via `resolve_sac` before canonicalising, so a SAC token collapses
+  onto its classic `asset_id` (one row, one price); a pure Soroban token keeps its
+  `Contract(address)` identity. New deps: `stellar-strkey`, `sha2`. +4 unit tests,
+  anchored on the known native-XLM mainnet SAC (`CAS3…XOWMA`).
 
 ## Design Decisions
 
@@ -306,18 +334,32 @@ soroban oracle extractor, the rollup/preroll SQL). All changes build clean
     "implemented or deferred to 0040, noted". 0040 owns the API Gateway + axum
     handlers; BE consumes the views directly over the shared cluster (§8), so the
     view *is* the delivery here and the HTTP layer is genuinely 0040's scope.
+16. **SAC resolved by forward derivation, not reverse lookup** — a SAC address is a
+    one-way hash, so we derive each *known classic* asset's SAC and index it, rather
+    than trying to invert an arbitrary contract address. Sufficient because the
+    split only matters when an asset trades on BOTH SDEX (classic → in the registry,
+    so its SAC is indexed) and AMM; a token seen only on AMM has no classic form to
+    merge with, so leaving it as `Contract(address)` splits nothing.
+17. **SAC index pre-seeded with XLM/USDC/USDT + mainnet hard-coded** — covers the
+    load-bearing quotes regardless of intra-run sighting order (an AMM SAC swap
+    processed before that asset's first SDEX trade). Network passphrase is fixed to
+    mainnet (the backfill is mainnet-only); make it a parameter if testnet is ever
+    needed. Residual gap (documented): an asset *first* seen as a SAC on AMM,
+    strictly before any classic sighting and not in the loaded registry, won't
+    collapse that run — self-heals next run once the classic is persisted.
 
 ## Future Work
 
-- **SAC → underlying-classic resolver (§12.4)** — the one remaining design item.
-  `AssetIdentity` models only `Native`/`Credit`/`Contract`; SAC addresses don't yet
-  collapse to their classic underlying, so AMM-via-SAC XLM/USDC quotes won't match
-  the `Native`/`Credit` identity and the same economic asset can split into two
-  `asset_id`s (and two `price_usd_series` rows). Needed for one-`asset_id`-one-price.
+All design items (§12.1–§12.5) are implemented. Remaining is hardening / handoff:
+
 - **Committed live-CH integration tests** — the peg/pivot enrichment and both views
   were validated against live ClickHouse this session; durable `#[ignore]`d
   integration tests (fixtures → run/query → assert) would lock them in. No live-CH
   test harness exists in the repo yet.
+- **End-to-end backfill validation of the SAC collapse** — the derivation is
+  unit-tested against the known native SAC; a full backfill over a window with both
+  SDEX-classic and AMM-via-SAC trades of the same asset would confirm one merged
+  `asset_id`/`price_usd_series` row in practice.
 - **HTTP read endpoints (§12.5)** — deferred to task 0040 (API Gateway + axum).
 
 ## Notes
