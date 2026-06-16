@@ -240,7 +240,7 @@ pub fn process_ledger(
 
             match sig {
                 Some("REFLECTOR") => decode_reflector(ev, assets, &mut out),
-                Some("REDSTONE") => decode_redstone(ev, contract_id.as_str(), assets, &mut out),
+                Some("REDSTONE") => decode_redstone(ev, &mut out),
                 _ => {
                     // Factory events grow the registry; pool events are queued.
                     learn_factory(ev, reg);
@@ -459,20 +459,27 @@ fn decode_reflector(
     }
 }
 
+/// Reserved `asset_id` for an oracle feed that is not a tradeable asset (e.g. the
+/// REDSTONE emitter contract). Never assigned by the [`AssetRegistry`] (its ids
+/// start at 1), so it maps to no `prices.assets` row — the feed stays out of the
+/// asset read surface while its `oracle_prices` row is still recorded.
+const ORACLE_FEED_NO_ASSET_ID: u32 = 0;
+
 /// REDSTONE carries a base64 XDR `bytes` payload (updated_feeds map). Full XDR
 /// decode is deferred; we capture one row per event with the raw payload so the
 /// `oracle_prices` byte footprint is measured (price left 0).
 ///
-/// REDSTONE does not decode a per-asset symbol, so there is no canonical asset to
-/// resolve. We key it to the emitting oracle contract via a `Contract` identity —
-/// keeping it in the canonical id space (task 0061 §5, no synthetic ids) and out
-/// of the `reflector` ASOF join (price_usd = 0, oracle_name = 'redstone').
-fn decode_redstone(
-    ev: &xdr_parser::types::ExtractedEvent,
-    contract_id: &str,
-    assets: &mut AssetRegistry,
-    out: &mut LedgerSoroban,
-) {
+/// REDSTONE does not decode a per-asset symbol, so there is no tradeable asset to
+/// resolve. We deliberately do NOT intern the emitting oracle contract into the
+/// `AssetRegistry`: an oracle feed is not an asset, and interning it would persist
+/// it to `prices.assets` and leak it into the contract-keyed read surface
+/// (`identity_by_contract`, `current_price_usd`), where a consumer resolving a
+/// pool-leg contract address could match an oracle feed as if it were a token.
+/// Instead the row carries the reserved [`ORACLE_FEED_NO_ASSET_ID`] sentinel — its
+/// `asset_id` is functionally dead anyway (price_usd = 0, oracle_name =
+/// 'redstone'; never read by the `reflector` ASOF join), and the raw payload is
+/// preserved for the byte-footprint measurement.
+fn decode_redstone(ev: &xdr_parser::types::ExtractedEvent, out: &mut LedgerSoroban) {
     let raw = ev
         .data
         .as_object()
@@ -480,10 +487,9 @@ fn decode_redstone(
         .and_then(|v| v.as_str())
         .unwrap_or_default()
         .to_string();
-    let asset_id = assets.get_or_assign(&AssetIdentity::Contract(contract_id.to_string()));
     out.oracle.push(OracleSample {
         timestamp: ev.created_at.max(0) as u32,
-        asset_id,
+        asset_id: ORACLE_FEED_NO_ASSET_ID,
         oracle_name: "redstone".to_string(),
         price_usd: 0,
         raw_data: raw,
@@ -578,6 +584,22 @@ mod tests {
         // Oracle path resolves the Reflector "USDC" symbol.
         let oracle_id = assets.get_or_assign(&reflector_key_to_identity("USDC").unwrap());
         assert_eq!(trade_quote_id, oracle_id);
+    }
+
+    #[test]
+    fn oracle_feed_sentinel_never_collides_with_a_real_asset_id() {
+        // The REDSTONE sentinel (task 0061 review #2) must be disjoint from every
+        // id the registry assigns, so an oracle-feed `oracle_prices` row maps to
+        // NO `prices.assets` row and cannot leak into the contract read surface
+        // (`identity_by_contract` / `current_price_usd`). Registry ids start at 1,
+        // leaving 0 reserved.
+        let mut reg = AssetRegistry::from_existing(vec![]);
+        let native = reg.get_or_assign(&AssetIdentity::Native);
+        assert_ne!(native, ORACLE_FEED_NO_ASSET_ID);
+        assert!(native >= 1, "registry ids must start at 1");
+        // A Contract identity — what REDSTONE used to intern — also never hits 0.
+        let contract = reg.get_or_assign(&AssetIdentity::Contract("CORACLEFEED".to_string()));
+        assert_ne!(contract, ORACLE_FEED_NO_ASSET_ID);
     }
 
     #[test]
