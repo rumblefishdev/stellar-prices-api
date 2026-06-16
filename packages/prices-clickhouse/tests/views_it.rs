@@ -47,14 +47,17 @@ async fn views_expose_usd_series_and_reference() {
     let client = setup_scratch(db).await;
 
     // 1=XLM native (with a SAC), 2=USDC, 10=FOO credit, 20=EXO quote,
-    // 30=pure soroban contract token.
+    // 30=soroban contract token. Token 30 deliberately carries a non-empty
+    // asset_code ('CTK') — discovery/metadata could populate a symbol — to prove
+    // the views normalize a 'contract' kind to asset_code='' (review #6), not just
+    // rely on the writer leaving it blank.
     client
         .query(&format!(
             "INSERT INTO {db}.assets \
              (asset_id, asset_code, asset_type, issuer_address, contract_address, sac_address) VALUES \
              (1,'XLM','classic','','','CXLMSAC'), (2,'USDC','classic','{USDC_ISSUER}','',''), \
              (10,'FOO','classic','GFOO','',''), (20,'EXO','classic','GEXO','',''), \
-             (30,'','soroban','','CTOKEN7XYZ','')"
+             (30,'CTK','soroban','','CTOKEN7XYZ','')"
         ))
         .execute()
         .await
@@ -105,7 +108,22 @@ async fn views_expose_usd_series_and_reference() {
     );
     assert!(
         approx(series_close("contract", "").await, 2.0),
-        "soroban token"
+        "soroban token (asset_code normalized to '')"
+    );
+
+    // Review #6: the stored 'CTK' symbol must NOT leak through — the contract row
+    // is keyed by contract_address with asset_code/issuer_address forced to ''.
+    let leaked: u64 = client
+        .query(&format!(
+            "SELECT count() FROM {db}.price_usd_series \
+             WHERE asset_kind = 'contract' AND (asset_code != '' OR issuer_address != '')"
+        ))
+        .fetch_one::<u64>()
+        .await
+        .unwrap();
+    assert_eq!(
+        leaked, 0,
+        "contract kind must blank asset_code/issuer_address"
     );
 
     // EXO only appears as an unpriced quote leg → not a priced row.
@@ -183,10 +201,11 @@ async fn views_expose_usd_series_and_reference() {
     assert_eq!(pure, "contract", "pure soroban token maps to itself");
 
     // current_price_usd (live spot): one row per asset, natural-identity keyed.
+    // Include the contract token (30) to confirm the same #6 normalization here.
     client
         .query(&format!(
-            "INSERT INTO {db}.current_prices (asset_id, price_usd, updated_at) \
-             VALUES (1, 0.1600, toDateTime(1620100000))"
+            "INSERT INTO {db}.current_prices (asset_id, price_usd, updated_at) VALUES \
+             (1, 0.1600, toDateTime(1620100000)), (30, 2.5000, toDateTime(1620100000))"
         ))
         .execute()
         .await
@@ -199,6 +218,18 @@ async fn views_expose_usd_series_and_reference() {
         .await
         .unwrap();
     assert!(approx(spot, 0.16), "live spot XLM price");
+    let (ckind, ccode): (String, String) = client
+        .query(&format!(
+            "SELECT asset_kind, asset_code FROM {db}.current_price_usd WHERE contract_address = 'CTOKEN7XYZ'"
+        ))
+        .fetch_one::<(String, String)>()
+        .await
+        .unwrap();
+    assert_eq!(
+        (ckind.as_str(), ccode.as_str()),
+        ("contract", ""),
+        "current_price_usd blanks the contract token's asset_code"
+    );
 
     client
         .query(&format!("DROP DATABASE {db}"))

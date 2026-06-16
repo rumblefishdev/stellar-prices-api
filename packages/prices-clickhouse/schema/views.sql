@@ -26,6 +26,11 @@
 --   asset_code, issuer_address, contract_address.
 -- native XLM → ('native','XLM','',''); classic → ('credit', code, issuer, '');
 -- SAC / Soroban token → ('contract','','', contract_address).
+-- The 'contract' kind is normalized at read time: asset_code and issuer_address
+-- are forced to '' (via if(contract_address != '', '', …)), so the
+-- (contract ⇒ asset_code='') interop contract holds even if discovery/metadata
+-- ever populates a symbol into a Soroban token's asset_code — the view does not
+-- depend on the writer keeping it blank.
 --
 -- ## Grain variants (1h + 1d)
 -- The series + reference are provided at two grains, both on forever-retained
@@ -109,15 +114,15 @@ SELECT
         a.contract_address != '', 'contract',
         a.asset_code = 'XLM' AND a.issuer_address = '', 'native',
         'credit') AS asset_kind,
-    a.asset_code       AS asset_code,
-    a.issuer_address   AS issuer_address,
+    if(a.contract_address != '', '', a.asset_code)     AS asset_code,
+    if(a.contract_address != '', '', a.issuer_address) AS issuer_address,
     a.contract_address AS contract_address,
     p.timestamp        AS bucket,
     CAST(sum(toFloat64(p.close_usd) * toFloat64(p.volume_base)) / nullIf(sum(toFloat64(p.volume_base)), 0) AS Decimal(38, 14)) AS close_usd
 FROM prices.price_ohlcv_1d AS p FINAL
 INNER JOIN prices.assets AS a FINAL ON a.asset_id = p.asset_id
 WHERE p.close_usd > 0
-GROUP BY asset_code, issuer_address, contract_address, bucket;
+GROUP BY asset_kind, asset_code, issuer_address, contract_address, bucket;
 
 ----------------------------------------------------------------------
 -- Hourly-grain variants — identical shape/semantics to the daily views above,
@@ -147,15 +152,15 @@ SELECT
         a.contract_address != '', 'contract',
         a.asset_code = 'XLM' AND a.issuer_address = '', 'native',
         'credit') AS asset_kind,
-    a.asset_code       AS asset_code,
-    a.issuer_address   AS issuer_address,
+    if(a.contract_address != '', '', a.asset_code)     AS asset_code,
+    if(a.contract_address != '', '', a.issuer_address) AS issuer_address,
     a.contract_address AS contract_address,
     p.timestamp        AS bucket,
     CAST(sum(toFloat64(p.close_usd) * toFloat64(p.volume_base)) / nullIf(sum(toFloat64(p.volume_base)), 0) AS Decimal(38, 14)) AS close_usd
 FROM prices.price_ohlcv_1h AS p FINAL
 INNER JOIN prices.assets AS a FINAL ON a.asset_id = p.asset_id
 WHERE p.close_usd > 0
-GROUP BY asset_code, issuer_address, contract_address, bucket;
+GROUP BY asset_kind, asset_code, issuer_address, contract_address, bucket;
 
 ----------------------------------------------------------------------
 -- prices.identity_by_contract — SAC read-seam resolver (§12.4).
@@ -202,8 +207,8 @@ SELECT
         a.contract_address != '', 'contract',
         a.asset_code = 'XLM' AND a.issuer_address = '', 'native',
         'credit') AS asset_kind,
-    a.asset_code       AS asset_code,
-    a.issuer_address   AS issuer_address,
+    if(a.contract_address != '', '', a.asset_code)     AS asset_code,
+    if(a.contract_address != '', '', a.issuer_address) AS issuer_address,
     a.contract_address AS contract_address,
     c.price_usd        AS price_usd,
     c.updated_at       AS updated_at
