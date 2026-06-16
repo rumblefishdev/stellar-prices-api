@@ -12,6 +12,13 @@
 --   - close_usd is BAKED into the candles at enrichment time (§12.1); these views
 --     read that column — they do NOT join the retention-capped oracle_prices.
 --
+-- ## USDC issuer literal (load-bearing)
+-- The USDC issuer address below is the same join key the Rust paths use; the
+-- single source of truth is `prices_clickhouse::USDC_ISSUER` (re-exported to the
+-- backfill + enrichment crates). SQL cannot reference a Rust const, so this
+-- literal is a hand-synced copy — if the canonical address ever changes, update
+-- it here AND in that const together, or the views and the writer diverge.
+--
 -- ## Public key = natural Stellar identity, never asset_id (§12.2)
 -- asset_id is an internal UInt32 surrogate. These views resolve it to the
 -- portable identity via prices.assets and expose:

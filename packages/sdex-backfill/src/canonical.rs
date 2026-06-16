@@ -57,12 +57,13 @@ impl AssetIdentity {
     }
 }
 
-/// Canonical Stellar issuer for circle's USDC. Shared with the Soroban oracle
-/// reconciliation (`soroban.rs`) so a Reflector `USDC` symbol resolves to the
-/// same `AssetIdentity` (hence the same `asset_id`) used as a trade quote.
-pub(crate) const USDC_ISSUER: &str = "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN";
-/// Canonical Stellar issuer for USDT. Shared with `soroban.rs` (see above).
-pub(crate) const USDT_ISSUER: &str = "GCQTGZQQ5G4PTM2GL7CDIFKUBIPEC52BROAQIAPW53XBRJVN6ZJVTG6V";
+/// Canonical Stellar issuers for USDC/USDT — the load-bearing USD-reference join
+/// keys. Re-exported from `prices-clickhouse` (the single Rust source of truth,
+/// shared with `enrichment-worker`) so the backfill interns the same identity the
+/// enrichment reader matches on; they can never drift. Used here and in the
+/// Soroban oracle reconciliation (`soroban.rs`) so a Reflector `USDC`/`USDT`
+/// symbol resolves to the same `asset_id` used as a trade quote.
+pub(crate) use prices_clickhouse::{USDC_ISSUER, USDT_ISSUER};
 
 /// Mainnet (Public) network passphrase. The SAC contract id is network-scoped, so
 /// this fixes which network's SACs we resolve. The backfill is mainnet-only (the

@@ -1429,6 +1429,7 @@ dependencies = [
  "extractors-core",
  "ledger-processor",
  "phoenix-extractor",
+ "prices-clickhouse",
  "rust_decimal",
  "serde",
  "serde_json",

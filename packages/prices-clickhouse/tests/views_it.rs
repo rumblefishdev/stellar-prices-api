@@ -8,8 +8,7 @@
 //! onto the scratch name) and drops it at the end.
 
 use clickhouse::Client;
-
-const USDC_ISSUER: &str = "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN";
+use prices_clickhouse::USDC_ISSUER;
 
 fn ch_url() -> String {
     std::env::var("CLICKHOUSE_URL").unwrap_or_else(|_| "http://localhost:8123".to_string())

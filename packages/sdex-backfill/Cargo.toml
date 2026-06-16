@@ -22,6 +22,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 rust_decimal = { workspace = true }
 thiserror = { workspace = true }
+prices-clickhouse = { path = "../prices-clickhouse" }
 extractors-core = { path = "../extractors-core" }
 phoenix-extractor = { path = "../phoenix-extractor" }
 soroswap-extractor = { path = "../soroswap-extractor" }

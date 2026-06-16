@@ -61,11 +61,10 @@ use tracing::{info, warn};
 
 /// Canonical Stellar issuers for the pegged USD stablecoins, used by the
 /// peg-pivot tier to recognise USDC/USDT quote assets in `prices.assets`.
-/// Mirror of `sdex-backfill/src/canonical.rs` (kept in sync by hand — these are
-/// fixed mainnet addresses); the backfill resolves the same identities so the
-/// `asset_id` it interns matches the `quote_asset_id` enriched here.
-const USDC_ISSUER: &str = "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN";
-const USDT_ISSUER: &str = "GCQTGZQQ5G4PTM2GL7CDIFKUBIPEC52BROAQIAPW53XBRJVN6ZJVTG6V";
+/// Re-exported from `prices-clickhouse` (the single source of truth, also used by
+/// `sdex-backfill`) so the `asset_id` the backfill interns under these issuers
+/// matches the `quote_asset_id` enriched here — no hand-synced literal to drift.
+use prices_clickhouse::{USDC_ISSUER, USDT_ISSUER};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ChEnrichError {
@@ -191,6 +190,14 @@ impl ChEnrichmentPass {
     /// makes the corrected row win the `ReplacingMergeTree` merge, and the
     /// inner `CAST(… AS Decimal(38, 14))` keeps the `Decimal(38,14) ×
     /// Decimal(38,14)` product inside the column's precision.
+    ///
+    /// `volume_quote_usd` is write-once (`if(volume_quote_usd > 0, …)`), matching
+    /// the peg/pivot statements: the widened candidate filter
+    /// (`volume_quote_usd = 0 OR close_usd = 0`) re-admits rows enriched before
+    /// `close_usd` existed (`volume_quote_usd > 0`, `close_usd = 0`) so their
+    /// `close_usd` gets backfilled, but their already-set (depeg-aware)
+    /// `volume_quote_usd` must not be silently rewritten from a different ASOF
+    /// match. `close_usd` is unconditional — it is the column this pass owns.
     async fn enrich_batch(&self) -> Result<(), ChEnrichError> {
         let sql = format!(
             "INSERT INTO {db}.{tbl} \
@@ -202,7 +209,7 @@ impl ChEnrichmentPass {
                  p.timestamp, p.asset_id, p.quote_asset_id, p.source, \
                  p.open, p.high, p.low, p.close, \
                  p.volume_base, p.volume_quote, \
-                 CAST(o.price_usd * p.volume_quote AS Decimal(38, 14)) AS volume_quote_usd, \
+                 if(p.volume_quote_usd > 0, p.volume_quote_usd, CAST(o.price_usd * p.volume_quote AS Decimal(38, 14))) AS volume_quote_usd, \
                  CAST(o.price_usd * p.close AS Decimal(38, 14)) AS close_usd, \
                  p.vwap, p.trade_count, \
                  p.version + 1 AS version \
@@ -384,11 +391,28 @@ impl ChEnrichmentPass {
             }
         }
 
+        let rows_enriched = candidates_before.saturating_sub(remaining);
+
+        // A pass that enriches *nothing* despite a non-empty backlog is the
+        // fingerprint of the failure 0061 fixes: the oracle↔asset-id join matches
+        // nothing (mis-reconciliation) or no USDC/USDT/XLM reference exists in
+        // prices.assets — both leave every candidate at zero. In a healthy system
+        // one of the two tiers always makes a dent, so this is warn-worthy (a
+        // monitoring signal), not the routine info the per-tier drains emit.
+        if candidates_before > 0 && rows_enriched == 0 {
+            warn!(
+                candidates = candidates_before,
+                "enrichment pass enriched 0 rows despite a non-empty backlog — \
+                 check oracle↔asset-id reconciliation and that USDC/USDT/XLM \
+                 reference assets exist in prices.assets"
+            );
+        }
+
         let stats = ChPassStats {
             batches,
             candidates_before,
             candidates_after: remaining,
-            rows_enriched: candidates_before.saturating_sub(remaining),
+            rows_enriched,
         };
         info!(
             batches = stats.batches,

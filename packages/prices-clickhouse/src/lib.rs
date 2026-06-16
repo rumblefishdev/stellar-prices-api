@@ -33,6 +33,19 @@ pub const DEFAULT_USER: &str = "default";
 /// The `prices` logical store. Every table in `schema/init.sql` lives here.
 pub const PROD_DATABASE: &str = "prices";
 
+/// Canonical mainnet issuer of USDC (Circle). **Load-bearing join key** for the
+/// USD-close path: the backfill interns the USDC identity under this issuer, the
+/// enrichment peg tier and `resolve_reference_ids` match `prices.assets` on it,
+/// and `schema/views.sql` embeds the same literal. Single Rust source of truth —
+/// re-exported by `sdex-backfill` and `enrichment-worker` so the address can
+/// never drift between the writer and the reader. (The `views.sql` copy is a SQL
+/// literal that cannot reference a Rust const; keep it in sync with this value.)
+pub const USDC_ISSUER: &str = "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN";
+
+/// Canonical mainnet issuer of USDT. Companion to [`USDC_ISSUER`]; same
+/// single-source-of-truth contract.
+pub const USDT_ISSUER: &str = "GCQTGZQQ5G4PTM2GL7CDIFKUBIPEC52BROAQIAPW53XBRJVN6ZJVTG6V";
+
 /// ClickHouse client configuration, sourced from environment with local-dev
 /// defaults.
 #[derive(Debug, Clone)]
