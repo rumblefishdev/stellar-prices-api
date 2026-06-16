@@ -289,6 +289,12 @@ impl ChEnrichmentPass {
     /// over whatever it left at `close_usd = 0`. Each tier loops up to
     /// `max_batches × batch_size` rows and stops early when a batch makes no
     /// progress — i.e. its remaining candidates have no reference of that kind.
+    ///
+    /// The peg-pivot tier runs only if the oracle tier *drained* (reached a
+    /// fixed point). If the oracle tier instead exhausted its batch budget while
+    /// still making progress, its leftovers may still hold an unapplied in-window
+    /// oracle price, so they are deferred to the next invocation rather than
+    /// pegged — pegging an oracle-eligible candle would bake a wrong flat $1.
     pub async fn run(&self) -> Result<ChPassStats, ChEnrichError> {
         let candidates_before = self.count_candidates().await?;
         info!(
@@ -300,9 +306,21 @@ impl ChEnrichmentPass {
         let mut batches = 0u32;
         let mut remaining = candidates_before;
 
+        // Whether the oracle tier reached a fixed point — drained every row it
+        // can enrich — versus exhausting its batch budget while still making
+        // progress. Only a drained tier leaves *true* oracle misses behind; if
+        // it instead ran out of `max_batches`, the leftovers may still carry an
+        // in-window oracle price this run simply did not reach. Handing those to
+        // the peg-pivot tier would bake a flat $1 peg over a depeg-aware oracle
+        // value (and, once `close_usd > 0`, they never re-enter the oracle tier
+        // on a later pass). So Tier 2 is gated on this flag; un-drained leftovers
+        // roll over to the next invocation's oracle tier instead.
+        let mut oracle_drained = remaining == 0;
+
         // Tier 1 — recent-window oracle (depeg-aware; wins where it applies).
         for _ in 0..self.cfg.max_batches {
             if remaining == 0 {
+                oracle_drained = true;
                 break;
             }
             self.enrich_batch().await?;
@@ -311,20 +329,31 @@ impl ChEnrichmentPass {
 
             if after >= remaining {
                 // No row flipped out of the zero-set: the leftover candidates
-                // have no in-window oracle price. Move to the peg-pivot tier —
-                // these are deep-history (or exotic-quote) candles.
+                // have no in-window oracle price. They are true oracle misses —
+                // hand them to the peg-pivot tier (deep-history / exotic quotes).
                 info!(
                     remaining = after,
                     "oracle tier drained — handing remaining candles to peg-pivot tier"
                 );
                 remaining = after;
+                oracle_drained = true;
                 break;
             }
             remaining = after;
         }
 
         // Tier 2 — peg-pivot deep-history backbone (USDC/USDT≡$1; XLM via XLM/USDC).
-        if remaining > 0 {
+        // Gated on `oracle_drained`: an oracle tier that exhausted its batch
+        // budget while still making progress may have left rows with an unapplied
+        // in-window oracle price, which must not be pegged to $1 (they roll over
+        // to the next run's oracle tier instead).
+        if remaining > 0 && !oracle_drained {
+            info!(
+                remaining,
+                "oracle tier hit its batch budget while still making progress — \
+                 deferring peg-pivot tier so unreached oracle candles are not pegged"
+            );
+        } else if remaining > 0 {
             let refs = self.resolve_reference_ids().await?;
             if refs.has_any() {
                 for _ in 0..self.cfg.max_batches {

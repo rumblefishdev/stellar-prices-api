@@ -157,3 +157,85 @@ async fn enrich_fills_close_usd_across_oracle_peg_and_pivot_tiers() {
         .await
         .unwrap();
 }
+
+/// Regression for the Tier-2 premature-peg bug: when the oracle tier exhausts its
+/// batch budget while still making progress, the rows it did NOT reach must be
+/// deferred to the next run's oracle tier — never pegged to a flat $1, which
+/// would clobber the depeg-aware oracle price they are still entitled to.
+///
+/// Two oracle-covered USDC candles + a budget of one row per pass (`batch_size`
+/// = `max_batches` = 1): pass 1 enriches only the earlier candle and leaves the
+/// oracle tier un-drained, so the later candle must stay `close_usd = 0` (NOT
+/// the $1 peg). Pass 2's oracle tier then drains and gives it the oracle value.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn oracle_budget_exhaustion_defers_instead_of_pegging() {
+    let db = "it_enrich_undrained";
+    let client = setup_scratch(db).await;
+
+    client
+        .query(&ASSETS.replace("{db}", db).replace("{usdc}", USDC_ISSUER))
+        .execute()
+        .await
+        .unwrap();
+    // One oracle USDC price ≠ $1, in-window for both candles below (window_s=300,
+    // both candles are within 300s of this timestamp). Depeg value so the oracle
+    // result (× price) is distinguishable from the flat $1 peg.
+    client
+        .query(&format!(
+            "INSERT INTO {db}.oracle_prices (timestamp, asset_id, oracle_name, price_usd, raw_data) \
+             VALUES (1700000000, 2, 'reflector', 1.0012, '{{}}')"
+        ))
+        .execute()
+        .await
+        .unwrap();
+    // Two FOO/USDC candles, both oracle-eligible. enrich_batch orders by timestamp
+    // ASC, so a 1-row batch reaches the earlier (1700000000) first.
+    let (early, late) = (1_700_000_000u32, 1_700_000_300u32);
+    client
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1m \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
+             ({early},10,2,'sdex', 5,5,5,5,    1, 5,0,0, 5,1,1), \
+             ({late}, 10,2,'sdex', 10,10,10,10, 1,10,0,0,10,1,1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    // Pass 1 with a one-row budget: oracle tier makes progress (early candle) but
+    // does not drain → peg-pivot tier deferred.
+    let mut budget1 = cfg(db);
+    budget1.batch_size = 1;
+    budget1.max_batches = 1;
+    ChEnrichmentPass::new(budget1).run().await.unwrap();
+
+    let approx = |a: f64, b: f64| (a - b).abs() < 1e-4;
+    // Early candle: oracle applied (5 × 1.0012 = 5.006).
+    assert!(
+        approx(close_usd(&client, db, 10, 2, early).await, 5.006),
+        "early candle oracle-enriched"
+    );
+    // Late candle: NOT reached by the budget-limited oracle tier, and NOT pegged
+    // (the bug would have written 10 × $1 = 10.0). Deferred → still 0.
+    assert!(
+        approx(close_usd(&client, db, 10, 2, late).await, 0.0),
+        "late candle deferred, not pegged to $1"
+    );
+
+    // Pass 2: the oracle tier now drains the late candle and gives it the oracle
+    // value (10 × 1.0012 = 10.012), NOT the $1 peg (10.0) — confirming the defer
+    // preserved its depeg-aware entitlement rather than losing it.
+    ChEnrichmentPass::new(cfg(db)).run().await.unwrap();
+    assert!(
+        approx(close_usd(&client, db, 10, 2, late).await, 10.012),
+        "late candle oracle-enriched on the next pass (not the $1 peg)"
+    );
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
