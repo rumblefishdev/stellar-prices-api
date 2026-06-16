@@ -69,11 +69,22 @@ impl Registries {
 ///
 /// Reflector keys are **ticker symbols**, not contract addresses — confirmed
 /// against captured samples (`lore/4-notes/samples/soroban-events/REFLECTOR.jsonl`:
-/// `XLM`, `USDC`, `USDT`, `EURC`, `BTC`, `EUR`, …). Only the canonical SDEX
-/// quote assets (`USDC > USDT > XLM`, see `canonical::is_preferred_quote`) need a
-/// Stellar identity for the USD-close ASOF join; the FX/crypto reference symbols
-/// (`EUR`, `BTC`, `ETH`, …) have no Stellar tradeable identity and return `None`
-/// (the sample is dropped rather than minted into `prices.assets`).
+/// `XLM`, `USDC`, `USDT`, `EURC`, `BTC`, `EUR`, …). We resolve only the assets we
+/// price *through*: the USD-pegged stables (`USDC`, `USDT`) and `XLM`. Everything
+/// else returns `None` and the sample is dropped rather than minted into
+/// `prices.assets`.
+///
+/// Two reasons a symbol is dropped, and they are not the same:
+///   - **No Stellar identity** (`EUR`, `BTC`, `ETH`, `XAU`, …): pure FX/crypto
+///     reference rates that aren't tradeable Stellar assets, so they could never
+///     be a candle's quote and could never match the USD-close ASOF join.
+///   - **Deliberately out of scope** (`EURC`, …): EURC *is* a tradeable Stellar
+///     classic (Circle's Euro Coin) and *could* appear as a candle quote, but the
+///     USD-close reference set is intentionally restricted to USD-pegged + XLM
+///     quotes. We do not price through a EUR-denominated stable, so an
+///     EURC-quoted candle is an unsupported quote (→ no `close_usd`), by design —
+///     not a coverage gap. Pricing through EURC would require its own Reflector
+///     reference arm here plus a EURC/USDC pivot in the peg-pivot tier.
 fn reflector_key_to_identity(key: &str) -> Option<AssetIdentity> {
     match key {
         "XLM" | "native" => Some(AssetIdentity::Native),
@@ -426,10 +437,11 @@ fn decode_reflector(
                 let key = kv[0].as_str().map(String::from);
                 let price = kv[1].as_i128();
                 if let (Some(key), Some(price)) = (key, price) {
-                    // Resolve to the canonical asset_id (task 0061 §5). Reference
-                    // symbols with no Stellar identity (EUR, BTC, …) are dropped:
-                    // they never appear as a candle quote, so they cannot match
-                    // the enrichment ASOF join.
+                    // Resolve to the canonical asset_id (task 0061 §5). Only the
+                    // USD-pegged stables + XLM resolve; every other symbol is
+                    // dropped — either it has no Stellar identity (EUR, BTC, …) or
+                    // it's a tradeable asset we deliberately don't price through
+                    // (EURC). See `reflector_key_to_identity` for the distinction.
                     let Some(identity) = reflector_key_to_identity(&key) else {
                         continue;
                     };
