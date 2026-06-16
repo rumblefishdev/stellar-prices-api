@@ -355,12 +355,21 @@ soroban oracle extractor, the rollup/preroll SQL). All changes build clean
    the base CREATE covers fresh installs (AS-copies inherit); the `ALTER … IF NOT
    EXISTS` covers pre-0061 DBs. Kept both in `init.sql` (still idempotent) rather
    than introducing a separate migrations mechanism this repo doesn't have.
-4. **REDSTONE keyed to its emitting contract via `AssetIdentity::Contract`** — the
-   plan only addressed Reflector. To fully delete the synthetic id space, REDSTONE
-   (price_usd = 0, deferred decode, never read by the `reflector` join) now resolves
-   its emitting oracle contract through the canonical registry instead of a synthetic
-   id. Semantically loose (an oracle contract isn't a tradeable asset) but harmless
-   and uniform; documented inline.
+4. **REDSTONE oracle feed carries a reserved no-asset sentinel** (revised — see
+   below) — the plan only addressed Reflector. *Originally* (to fully delete the
+   synthetic id space) REDSTONE resolved its emitting oracle contract through the
+   canonical registry via `AssetIdentity::Contract` instead of a synthetic id.
+   **Superseded by review finding #2:** interning the oracle contract persisted it
+   to `prices.assets` and leaked it into the contract-keyed read surface
+   (`identity_by_contract`, `current_price_usd`), where a consumer resolving a
+   pool-leg contract address could match an oracle feed as if it were a token. Fix
+   at the source: `decode_redstone` no longer interns anything — the row carries a
+   reserved `ORACLE_FEED_NO_ASSET_ID = 0` sentinel the registry never assigns (ids
+   start at 1), so the feed stays out of `prices.assets` entirely and no read
+   surface can surface it. Safe because the REDSTONE `asset_id` was always dead
+   (price_usd = 0, oracle_name = 'redstone', never read by the `reflector` ASOF
+   join); the raw payload is still recorded for the byte-footprint measurement.
+   (Commit `5584644`.)
 5. **Candidate filter widened to `OR close_usd = 0`** — the plan said "extend the
    filter to close_usd = 0". Made it `(volume_quote_usd = 0 OR close_usd = 0)` so
    rows already volume-enriched in a prior pass (before `close_usd` existed) still
