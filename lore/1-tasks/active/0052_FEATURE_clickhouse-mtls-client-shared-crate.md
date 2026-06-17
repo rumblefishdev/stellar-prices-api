@@ -2,7 +2,7 @@
 id: "0052"
 title: "ClickHouse mTLS client shared crate — cert loading from Secrets Manager + warm connection pool"
 type: FEATURE
-status: backlog
+status: active
 related_adr: ["0006", "0007"]
 related_tasks: ["0050", "0038", "0039", "0040", "0028", "0051"]
 tags: [layer-backend, priority-high, effort-medium, milestone-M1, rust, clickhouse, mtls, shared-crate, lambda, secrets-manager]
@@ -28,6 +28,16 @@ history:
       status endpoint) and the 0028 SDEX cloud-push tool need
       exactly the same setup. Captured here so it gets built
       once, not five times.
+  - date: 2026-06-17
+    status: active
+    who: oski
+    note: >
+      Activated as the recommended starting point for the Hetzner DB
+      track: it has zero external dependencies (author + Docker test
+      need no admin access), and it is the foundation 0051's
+      schema-apply runner and the 0038/0039/0040 Lambdas all import.
+      Live-cluster validation step still waits on 0063 (was 0050) for
+      a real cert + endpoint.
 ---
 
 # ClickHouse mTLS client shared crate
