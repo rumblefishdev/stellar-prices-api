@@ -51,6 +51,7 @@ CREATE TABLE IF NOT EXISTS prices.assets (
     asset_type       String,
     issuer_address   String        DEFAULT '',
     contract_address String        DEFAULT '',
+    sac_address      String        DEFAULT '',
     home_domain      String        DEFAULT '',
     is_active        UInt8         DEFAULT 1,
     created_at       DateTime      DEFAULT now(),
@@ -59,6 +60,13 @@ CREATE TABLE IF NOT EXISTS prices.assets (
 ENGINE = ReplacingMergeTree(updated_at)
 ORDER BY (asset_code, issuer_address, contract_address)
 SETTINGS index_granularity = 8192;
+
+-- The SAC contract address that wraps a classic asset (task 0061 §12.4): the
+-- §12.4 collapse is write-time, so a SAC-wrapped leg's price lives under the
+-- classic identity. This column lets a read-time consumer resolve their SAC
+-- contract address back to the classic asset (see prices.identity_by_contract).
+-- Added to the base CREATE; idempotent ALTER for pre-0061 databases.
+ALTER TABLE prices.assets ADD COLUMN IF NOT EXISTS sac_address String DEFAULT '' AFTER contract_address;
 
 ----------------------------------------------------------------------
 -- 1-minute OHLCV candles, per-source rows (ADR 0004). Live writes from the
@@ -80,6 +88,7 @@ CREATE TABLE IF NOT EXISTS prices.price_ohlcv_1m (
     volume_base      Decimal(38, 14) DEFAULT 0,
     volume_quote     Decimal(38, 14) DEFAULT 0,
     volume_quote_usd Decimal(38, 14) DEFAULT 0,
+    close_usd        Decimal(38, 14) DEFAULT 0,
     vwap             Decimal(38, 14),
     trade_count      UInt32        DEFAULT 0,
     version          UInt64
@@ -99,6 +108,19 @@ CREATE TABLE IF NOT EXISTS prices.price_ohlcv_4h  AS prices.price_ohlcv_1m;
 CREATE TABLE IF NOT EXISTS prices.price_ohlcv_1d  AS prices.price_ohlcv_1m;
 CREATE TABLE IF NOT EXISTS prices.price_ohlcv_1w  AS prices.price_ohlcv_1m;
 CREATE TABLE IF NOT EXISTS prices.price_ohlcv_1M  AS prices.price_ohlcv_1m;
+
+-- Historical USD close (task 0061). close_usd = oracle_usd × close, computed at
+-- enrichment time (DEFAULT 0 until the enrichment pass fills it, mirroring
+-- volume_quote_usd). Added to the base CREATE above so fresh AS-copies inherit
+-- it; these idempotent ALTERs add it to databases created before 0061, where the
+-- AS-copies do NOT inherit a post-hoc base-table ALTER — so apply per table.
+ALTER TABLE prices.price_ohlcv_1m  ADD COLUMN IF NOT EXISTS close_usd Decimal(38, 14) DEFAULT 0 AFTER volume_quote_usd;
+ALTER TABLE prices.price_ohlcv_15m ADD COLUMN IF NOT EXISTS close_usd Decimal(38, 14) DEFAULT 0 AFTER volume_quote_usd;
+ALTER TABLE prices.price_ohlcv_1h  ADD COLUMN IF NOT EXISTS close_usd Decimal(38, 14) DEFAULT 0 AFTER volume_quote_usd;
+ALTER TABLE prices.price_ohlcv_4h  ADD COLUMN IF NOT EXISTS close_usd Decimal(38, 14) DEFAULT 0 AFTER volume_quote_usd;
+ALTER TABLE prices.price_ohlcv_1d  ADD COLUMN IF NOT EXISTS close_usd Decimal(38, 14) DEFAULT 0 AFTER volume_quote_usd;
+ALTER TABLE prices.price_ohlcv_1w  ADD COLUMN IF NOT EXISTS close_usd Decimal(38, 14) DEFAULT 0 AFTER volume_quote_usd;
+ALTER TABLE prices.price_ohlcv_1M  ADD COLUMN IF NOT EXISTS close_usd Decimal(38, 14) DEFAULT 0 AFTER volume_quote_usd;
 
 ----------------------------------------------------------------------
 -- Current per-asset state (§3.3). One row per asset. Written by the Current

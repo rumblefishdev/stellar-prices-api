@@ -23,7 +23,7 @@ use soroswap_extractor::SoroswapPoolRegistry;
 use xdr_parser::extract_events;
 use xdr_parser::types::EventSource;
 
-use crate::canonical::{AssetIdentity, AssetRegistry, canonicalise};
+use crate::canonical::{AssetIdentity, AssetRegistry, USDC_ISSUER, USDT_ISSUER, canonicalise};
 use crate::sink::OracleSample;
 use crate::tick::TradeTick;
 
@@ -32,15 +32,17 @@ use crate::tick::TradeTick;
 const AMM_AMOUNT_SCALE: u32 = 7;
 
 /// Per-run registries, grown incrementally from in-window factory events.
+///
+/// Oracle assets are NOT kept here: they are resolved through the same
+/// `AssetRegistry` as trades (task 0061 §5) so a Reflector `USDC`/`XLM` row
+/// carries the identical canonical `asset_id` used as a candle's
+/// `quote_asset_id`. The previous synthetic `>= 1_000_000` oracle id space made
+/// the enrichment ASOF join (`o.asset_id = p.quote_asset_id`) match nothing for
+/// backfilled data.
 pub struct Registries {
     pub venue: VenueRegistry,
     pub phoenix: PhoenixPoolRegistry,
     pub soroswap: SoroswapPoolRegistry,
-    /// Oracle asset key (symbol or contract address) → synthetic asset_id.
-    /// Kept in a separate id space (>= 1_000_000) from the trade AssetRegistry;
-    /// oracle assets are not written to `prices.assets`.
-    oracle_ids: HashMap<String, u32>,
-    oracle_next: u32,
 }
 
 impl Default for Registries {
@@ -49,8 +51,6 @@ impl Default for Registries {
             venue: VenueRegistry::new(),
             phoenix: PhoenixPoolRegistry::new(),
             soroswap: SoroswapPoolRegistry::new(),
-            oracle_ids: HashMap::new(),
-            oracle_next: 1_000_000,
         }
     }
 }
@@ -60,18 +60,43 @@ impl Registries {
         Self::default()
     }
 
-    fn oracle_id(&mut self, key: &str) -> u32 {
-        if let Some(&id) = self.oracle_ids.get(key) {
-            return id;
-        }
-        let id = self.oracle_next;
-        self.oracle_next += 1;
-        self.oracle_ids.insert(key.to_string(), id);
-        id
-    }
-
     pub fn pool_count(&self) -> usize {
         self.soroswap.pool_count() + self.phoenix.pool_count()
+    }
+}
+
+/// Resolve a Reflector `update`-event asset key to a canonical `AssetIdentity`.
+///
+/// Reflector keys are **ticker symbols**, not contract addresses — confirmed
+/// against captured samples (`lore/4-notes/samples/soroban-events/REFLECTOR.jsonl`:
+/// `XLM`, `USDC`, `USDT`, `EURC`, `BTC`, `EUR`, …). We resolve only the assets we
+/// price *through*: the USD-pegged stables (`USDC`, `USDT`) and `XLM`. Everything
+/// else returns `None` and the sample is dropped rather than minted into
+/// `prices.assets`.
+///
+/// Two reasons a symbol is dropped, and they are not the same:
+///   - **No Stellar identity** (`EUR`, `BTC`, `ETH`, `XAU`, …): pure FX/crypto
+///     reference rates that aren't tradeable Stellar assets, so they could never
+///     be a candle's quote and could never match the USD-close ASOF join.
+///   - **Deliberately out of scope** (`EURC`, …): EURC *is* a tradeable Stellar
+///     classic (Circle's Euro Coin) and *could* appear as a candle quote, but the
+///     USD-close reference set is intentionally restricted to USD-pegged + XLM
+///     quotes. We do not price through a EUR-denominated stable, so an
+///     EURC-quoted candle is an unsupported quote (→ no `close_usd`), by design —
+///     not a coverage gap. Pricing through EURC would require its own Reflector
+///     reference arm here plus a EURC/USDC pivot in the peg-pivot tier.
+fn reflector_key_to_identity(key: &str) -> Option<AssetIdentity> {
+    match key {
+        "XLM" | "native" => Some(AssetIdentity::Native),
+        "USDC" => Some(AssetIdentity::Credit {
+            code: "USDC".to_string(),
+            issuer: USDC_ISSUER.to_string(),
+        }),
+        "USDT" => Some(AssetIdentity::Credit {
+            code: "USDT".to_string(),
+            issuer: USDT_ISSUER.to_string(),
+        }),
+        _ => None,
     }
 }
 
@@ -214,8 +239,8 @@ pub fn process_ledger(
             let sig = signature(&ev.topics);
 
             match sig {
-                Some("REFLECTOR") => decode_reflector(ev, reg, &mut out),
-                Some("REDSTONE") => decode_redstone(ev, contract_id.as_str(), reg, &mut out),
+                Some("REFLECTOR") => decode_reflector(ev, assets, &mut out),
+                Some("REDSTONE") => decode_redstone(ev, &mut out),
                 _ => {
                     // Factory events grow the registry; pool events are queued.
                     learn_factory(ev, reg);
@@ -333,14 +358,26 @@ fn first_address(v: &Value) -> Option<String> {
     }
 }
 
+/// Resolve an AMM token (contract address) to a canonical `AssetIdentity`: the
+/// underlying classic asset if the address is a known SAC (§12.4), else the
+/// `Contract` identity for a pure Soroban token.
+fn resolve_amm_token(contract_addr: &str, assets: &AssetRegistry) -> AssetIdentity {
+    assets
+        .resolve_sac(contract_addr)
+        .unwrap_or_else(|| AssetIdentity::Contract(contract_addr.to_string()))
+}
+
 /// Convert a venue `TradeRow` into a `TradeTick` for the candle accumulator.
 fn amm_trade_to_tick(
     trade: &extractors_core::TradeRow,
     closed_at: i64,
     assets: &mut AssetRegistry,
 ) -> Option<TradeTick> {
-    let sold = AssetIdentity::Contract(trade.token_in.clone());
-    let bought = AssetIdentity::Contract(trade.token_out.clone());
+    // Collapse a SAC token onto its underlying classic identity (§12.4) so
+    // AMM-via-SAC and SDEX-classic share one asset_id; a pure Soroban token keeps
+    // its contract-address identity.
+    let sold = resolve_amm_token(&trade.token_in, assets);
+    let bought = resolve_amm_token(&trade.token_out, assets);
     let pair = canonicalise(&sold, &bought, assets);
 
     let amount_in = Decimal::try_from_i128_with_scale(trade.amount_in, AMM_AMOUNT_SCALE).ok()?;
@@ -372,7 +409,7 @@ fn amm_trade_to_tick(
 /// [asset_key, price_i128@1e14] pairs; topic[2] is the u64 ms timestamp.
 fn decode_reflector(
     ev: &xdr_parser::types::ExtractedEvent,
-    reg: &mut Registries,
+    assets: &mut AssetRegistry,
     out: &mut LedgerSoroban,
 ) {
     let ts_ms = ev
@@ -400,7 +437,15 @@ fn decode_reflector(
                 let key = kv[0].as_str().map(String::from);
                 let price = kv[1].as_i128();
                 if let (Some(key), Some(price)) = (key, price) {
-                    let asset_id = reg.oracle_id(&key);
+                    // Resolve to the canonical asset_id (task 0061 §5). Only the
+                    // USD-pegged stables + XLM resolve; every other symbol is
+                    // dropped — either it has no Stellar identity (EUR, BTC, …) or
+                    // it's a tradeable asset we deliberately don't price through
+                    // (EURC). See `reflector_key_to_identity` for the distinction.
+                    let Some(identity) = reflector_key_to_identity(&key) else {
+                        continue;
+                    };
+                    let asset_id = assets.get_or_assign(&identity);
                     out.oracle.push(OracleSample {
                         timestamp,
                         asset_id,
@@ -414,15 +459,27 @@ fn decode_reflector(
     }
 }
 
+/// Reserved `asset_id` for an oracle feed that is not a tradeable asset (e.g. the
+/// REDSTONE emitter contract). Never assigned by the [`AssetRegistry`] (its ids
+/// start at 1), so it maps to no `prices.assets` row — the feed stays out of the
+/// asset read surface while its `oracle_prices` row is still recorded.
+const ORACLE_FEED_NO_ASSET_ID: u32 = 0;
+
 /// REDSTONE carries a base64 XDR `bytes` payload (updated_feeds map). Full XDR
 /// decode is deferred; we capture one row per event with the raw payload so the
 /// `oracle_prices` byte footprint is measured (price left 0).
-fn decode_redstone(
-    ev: &xdr_parser::types::ExtractedEvent,
-    contract_id: &str,
-    reg: &mut Registries,
-    out: &mut LedgerSoroban,
-) {
+///
+/// REDSTONE does not decode a per-asset symbol, so there is no tradeable asset to
+/// resolve. We deliberately do NOT intern the emitting oracle contract into the
+/// `AssetRegistry`: an oracle feed is not an asset, and interning it would persist
+/// it to `prices.assets` and leak it into the contract-keyed read surface
+/// (`identity_by_contract`, `current_price_usd`), where a consumer resolving a
+/// pool-leg contract address could match an oracle feed as if it were a token.
+/// Instead the row carries the reserved [`ORACLE_FEED_NO_ASSET_ID`] sentinel — its
+/// `asset_id` is functionally dead anyway (price_usd = 0, oracle_name =
+/// 'redstone'; never read by the `reflector` ASOF join), and the raw payload is
+/// preserved for the byte-footprint measurement.
+fn decode_redstone(ev: &xdr_parser::types::ExtractedEvent, out: &mut LedgerSoroban) {
     let raw = ev
         .data
         .as_object()
@@ -430,10 +487,9 @@ fn decode_redstone(
         .and_then(|v| v.as_str())
         .unwrap_or_default()
         .to_string();
-    let asset_id = reg.oracle_id(contract_id);
     out.oracle.push(OracleSample {
         timestamp: ev.created_at.max(0) as u32,
-        asset_id,
+        asset_id: ORACLE_FEED_NO_ASSET_ID,
         oracle_name: "redstone".to_string(),
         price_usd: 0,
         raw_data: raw,
@@ -479,6 +535,71 @@ mod tests {
         ]);
         assert_eq!(signature(&topics), Some("SoroswapFactory"));
         assert_eq!(topic_symbol(&topics, 1), Some("new_pair"));
+    }
+
+    #[test]
+    fn reflector_resolves_quote_symbols_to_canonical_identities() {
+        assert_eq!(
+            reflector_key_to_identity("XLM"),
+            Some(AssetIdentity::Native)
+        );
+        assert_eq!(
+            reflector_key_to_identity("USDC"),
+            Some(AssetIdentity::Credit {
+                code: "USDC".to_string(),
+                issuer: USDC_ISSUER.to_string(),
+            })
+        );
+        assert_eq!(
+            reflector_key_to_identity("USDT"),
+            Some(AssetIdentity::Credit {
+                code: "USDT".to_string(),
+                issuer: USDT_ISSUER.to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn reflector_drops_non_stellar_reference_symbols() {
+        // FX/crypto references (real keys in the captured samples) have no
+        // Stellar tradeable identity — they must not be minted into the asset
+        // registry / prices.assets.
+        for k in ["EUR", "GBP", "BTC", "ETH", "EURC", "XAU"] {
+            assert_eq!(reflector_key_to_identity(k), None, "key {k} should drop");
+        }
+    }
+
+    #[test]
+    fn reflector_usdc_matches_trade_quote_id() {
+        // The load-bearing guarantee (task 0061 §5): a Reflector USDC oracle row
+        // and a candle whose quote is USDC must land on the SAME asset_id, so the
+        // enrichment ASOF join `o.asset_id = p.quote_asset_id` matches.
+        let mut assets = AssetRegistry::from_existing(vec![]);
+        let usdc = AssetIdentity::Credit {
+            code: "USDC".to_string(),
+            issuer: USDC_ISSUER.to_string(),
+        };
+        // Trade path interns USDC as a quote.
+        let trade_quote_id = assets.get_or_assign(&usdc);
+        // Oracle path resolves the Reflector "USDC" symbol.
+        let oracle_id = assets.get_or_assign(&reflector_key_to_identity("USDC").unwrap());
+        assert_eq!(trade_quote_id, oracle_id);
+    }
+
+    #[test]
+    fn oracle_feed_sentinel_never_collides_with_a_real_asset_id() {
+        // The REDSTONE sentinel (task 0061 review #2) must be disjoint from every
+        // id the registry assigns, so an oracle-feed `oracle_prices` row maps to
+        // NO `prices.assets` row and cannot leak into the contract read surface
+        // (`identity_by_contract` / `current_price_usd`). Registry ids start at 1,
+        // leaving 0 reserved.
+        let mut reg = AssetRegistry::from_existing(vec![]);
+        let native = reg.get_or_assign(&AssetIdentity::Native);
+        assert_ne!(native, ORACLE_FEED_NO_ASSET_ID);
+        assert!(native >= 1, "registry ids must start at 1");
+        // A Contract identity — what REDSTONE used to intern — also never hits 0.
+        let contract = reg.get_or_assign(&AssetIdentity::Contract("CORACLEFEED".to_string()));
+        assert_ne!(contract, ORACLE_FEED_NO_ASSET_ID);
     }
 
     #[test]

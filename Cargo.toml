@@ -13,6 +13,8 @@ members = [
 
 [workspace.dependencies]
 stellar-xdr = { version = "=26.0.0", features = ["curr"] }
+stellar-strkey = "0.0.13"
+sha2 = "0.10"
 xdr-parser = { git = "https://github.com/rumblefishdev/soroban-block-explorer.git", branch = "develop" }
 clickhouse = { version = "0.13", features = ["inserter"] }
 tokio = { version = "1", features = ["full"] }

@@ -274,3 +274,11 @@ that point.
   (both must agree on what counts as "the same asset"). Land
   the parser in `packages/api-core/` and have 0038 / 0039
   depend on it once stable, rather than duplicating.
+- **Grain-selection ownership (from 0061 §12.6, decided 2026-06-15):**
+  the `price_usd_at(id, ts)` point-lookup endpoint owns **view-picks** —
+  map `ledger → ts → finest-retained grain` (`_1m` ≤7d, `_15m` ≤30d,
+  else `_1h`/`_1d`) and read `close_usd`. The in-cluster views stay
+  **caller-passes** (per-grain: `prices.price_usd_series` / `_1h`), so
+  this retention-aware routing lives in the API layer, not the views.
+  See `packages/prices-clickhouse/schema/views.sql` header + 0061 note
+  §12.6.
