@@ -238,3 +238,71 @@ async fn oracle_budget_exhaustion_defers_instead_of_pegging() {
         .await
         .unwrap();
 }
+
+/// Snapshot-watermark bound (review #5): a pass only enriches candidates with
+/// `timestamp <= watermark`, so a candle the live writer inserts after the
+/// snapshot is taken (newer timestamp) is deferred to the next run rather than
+/// being counted — which would otherwise inflate the candidate count and falsely
+/// trip the no-progress break. `run_through` pins the boundary so a single-
+/// threaded test can stand in for the concurrent insert.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn watermark_defers_candles_newer_than_the_snapshot() {
+    let db = "it_enrich_watermark";
+    let client = setup_scratch(db).await;
+
+    client
+        .query(&ASSETS.replace("{db}", db).replace("{usdc}", USDC_ISSUER))
+        .execute()
+        .await
+        .unwrap();
+    // Two FOO/USDC candles enrichable via the $1 peg (no oracle row needed). The
+    // 'old' one is at/below the pinned watermark; the 'new' one is above it,
+    // standing in for a candle inserted by the live processor mid-pass.
+    let (old, new) = (1_700_000_000u32, 1_700_000_600u32);
+    client
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1m \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
+             ({old},10,2,'sdex', 5,5,5,5, 1, 5,0,0, 5,1,1), \
+             ({new},10,2,'sdex', 8,8,8,8, 1, 8,0,0, 8,1,1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    let approx = |a: f64, b: f64| (a - b).abs() < 1e-4;
+
+    // Pin the watermark at `old`: only that candle is in this pass's population.
+    let stats = ChEnrichmentPass::new(cfg(db))
+        .run_through(old)
+        .await
+        .unwrap();
+    assert_eq!(
+        stats.candidates_before, 1,
+        "newer candle excluded from the snapshot"
+    );
+    assert!(
+        approx(close_usd(&client, db, 10, 2, old).await, 5.0),
+        "old candle pegged"
+    );
+    // The newer candle was above the watermark cutoff → untouched this pass.
+    assert!(
+        approx(close_usd(&client, db, 10, 2, new).await, 0.0),
+        "newer candle deferred, not enriched"
+    );
+
+    // A normal run (watermark = max(timestamp) = new) now picks it up.
+    ChEnrichmentPass::new(cfg(db)).run().await.unwrap();
+    assert!(
+        approx(close_usd(&client, db, 10, 2, new).await, 8.0),
+        "newer candle enriched on the next run"
+    );
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}

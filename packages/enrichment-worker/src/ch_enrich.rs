@@ -167,18 +167,41 @@ impl ChEnrichmentPass {
         Ok(())
     }
 
-    /// Count the still-unenriched, enrichable-shaped candidates. `FINAL`
-    /// collapses pending versions so already-enriched rows (which carry
-    /// `volume_quote_usd > 0` at `version + 1`) are excluded even before
-    /// the background merge runs.
-    async fn count_candidates(&self) -> Result<u64, ChEnrichError> {
+    /// The newest candle `timestamp` (unix seconds) at pass start, used as a
+    /// snapshot watermark. The pass only counts and enriches candidates at or
+    /// before it, so candles the live Ledger Processor (task 0038) inserts *during*
+    /// the pass — which carry newer ledger-close timestamps — are excluded from
+    /// this pass's population. Without the bound, a concurrent insert can inflate
+    /// the candidate count and falsely trip the `after >= remaining` no-progress
+    /// break, stopping the pass with enrichable rows left. The newer candles are
+    /// picked up by the next scheduled run. Returns 0 on an empty table.
+    async fn watermark(&self) -> Result<u32, ChEnrichError> {
         let sql = format!(
-            "SELECT count() FROM {db}.{tbl} FINAL \
-             WHERE (volume_quote_usd = 0 OR close_usd = 0) AND volume_quote > 0",
+            "SELECT toUnixTimestamp(max(timestamp)) FROM {db}.{tbl}",
             db = self.cfg.database,
             tbl = self.cfg.table,
         );
-        Ok(self.client.query(&sql).fetch_one::<u64>().await?)
+        Ok(self.client.query(&sql).fetch_one::<u32>().await?)
+    }
+
+    /// Count the still-unenriched, enrichable-shaped candidates at or before the
+    /// snapshot `watermark` (see [`Self::watermark`]). `FINAL` collapses pending
+    /// versions so already-enriched rows (which carry `volume_quote_usd > 0` at
+    /// `version + 1`) are excluded even before the background merge runs.
+    async fn count_candidates(&self, watermark: u32) -> Result<u64, ChEnrichError> {
+        let sql = format!(
+            "SELECT count() FROM {db}.{tbl} FINAL \
+             WHERE (volume_quote_usd = 0 OR close_usd = 0) AND volume_quote > 0 \
+               AND timestamp <= toDateTime(?)",
+            db = self.cfg.database,
+            tbl = self.cfg.table,
+        );
+        Ok(self
+            .client
+            .query(&sql)
+            .bind(watermark)
+            .fetch_one::<u64>()
+            .await?)
     }
 
     /// Enrich up to `batch_size` candidates in one server-side statement.
@@ -198,7 +221,7 @@ impl ChEnrichmentPass {
     /// `close_usd` gets backfilled, but their already-set (depeg-aware)
     /// `volume_quote_usd` must not be silently rewritten from a different ASOF
     /// match. `close_usd` is unconditional — it is the column this pass owns.
-    async fn enrich_batch(&self) -> Result<(), ChEnrichError> {
+    async fn enrich_batch(&self, watermark: u32) -> Result<(), ChEnrichError> {
         let sql = format!(
             "INSERT INTO {db}.{tbl} \
                  (timestamp, asset_id, quote_asset_id, source, \
@@ -222,6 +245,7 @@ impl ChEnrichmentPass {
                AND p.volume_quote > 0 \
                AND o.price_usd IS NOT NULL \
                AND (p.timestamp - o.timestamp) <= ? \
+               AND p.timestamp <= toDateTime(?) \
              ORDER BY p.timestamp \
              LIMIT ?",
             db = self.cfg.database,
@@ -231,6 +255,7 @@ impl ChEnrichmentPass {
             .query(&sql)
             .bind(&self.cfg.oracle_name)
             .bind(self.cfg.window_s)
+            .bind(watermark)
             .bind(self.cfg.batch_size)
             .execute()
             .await?;
@@ -271,10 +296,15 @@ impl ChEnrichmentPass {
     /// the pivot statement (XLM quotes → ×XLM/USDC close). Both target only rows
     /// the oracle tier left at `close_usd = 0`, so the oracle value always wins
     /// where it exists. Each is skipped when its reference asset is absent.
-    async fn enrich_peg_pivot_step(&self, refs: &ReferenceIds) -> Result<(), ChEnrichError> {
+    async fn enrich_peg_pivot_step(
+        &self,
+        refs: &ReferenceIds,
+        watermark: u32,
+    ) -> Result<(), ChEnrichError> {
         if let Some(sql) = peg_sql(&self.cfg.database, &self.cfg.table, &refs.stable_ids()) {
             self.client
                 .query(&sql)
+                .bind(watermark)
                 .bind(self.cfg.batch_size)
                 .execute()
                 .await?;
@@ -284,6 +314,7 @@ impl ChEnrichmentPass {
             self.client
                 .query(&sql)
                 .bind(self.cfg.pivot_window_s)
+                .bind(watermark)
                 .bind(self.cfg.batch_size)
                 .execute()
                 .await?;
@@ -302,10 +333,27 @@ impl ChEnrichmentPass {
     /// still making progress, its leftovers may still hold an unapplied in-window
     /// oracle price, so they are deferred to the next invocation rather than
     /// pegged — pegging an oracle-eligible candle would bake a wrong flat $1.
+    ///
+    /// Snapshots the candidate population at the newest existing candle: every
+    /// count and enrich statement is bounded to `timestamp <= watermark`, so
+    /// candles the live Ledger Processor inserts concurrently (newer timestamps)
+    /// can't inflate the count and falsely trip the no-progress break; they roll
+    /// over to the next scheduled run. See [`Self::run_through`] to pin the
+    /// boundary explicitly.
     pub async fn run(&self) -> Result<ChPassStats, ChEnrichError> {
-        let candidates_before = self.count_candidates().await?;
+        self.run_through(self.watermark().await?).await
+    }
+
+    /// [`Self::run`] over candidates with `timestamp <= watermark`, with the
+    /// snapshot boundary supplied by the caller instead of read as the current
+    /// max. `run()` is `run_through(self.watermark().await?)`; tests use this to
+    /// pin the boundary and assert that candles newer than the snapshot are
+    /// deferred, not enriched, in the current pass.
+    pub async fn run_through(&self, watermark: u32) -> Result<ChPassStats, ChEnrichError> {
+        let candidates_before = self.count_candidates(watermark).await?;
         info!(
             candidates = candidates_before,
+            watermark,
             table = %self.cfg.table,
             "enrichment pass start"
         );
@@ -330,8 +378,8 @@ impl ChEnrichmentPass {
                 oracle_drained = true;
                 break;
             }
-            self.enrich_batch().await?;
-            let after = self.count_candidates().await?;
+            self.enrich_batch(watermark).await?;
+            let after = self.count_candidates(watermark).await?;
             batches += 1;
 
             if after >= remaining {
@@ -367,8 +415,8 @@ impl ChEnrichmentPass {
                     if remaining == 0 {
                         break;
                     }
-                    self.enrich_peg_pivot_step(&refs).await?;
-                    let after = self.count_candidates().await?;
+                    self.enrich_peg_pivot_step(&refs, watermark).await?;
+                    let after = self.count_candidates(watermark).await?;
                     batches += 1;
 
                     if after >= remaining {
@@ -432,9 +480,11 @@ const INSERT_COLUMNS: &str = "timestamp, asset_id, quote_asset_id, source, \
      trade_count, version";
 
 /// Peg statement: USDC/USDT-quoted candles get `close_usd = close × $1`. Returns
-/// `None` when neither stablecoin is in the registry (nothing to peg). The
-/// single bound parameter is the `LIMIT` (batch size). `volume_quote_usd` is
-/// only filled when still zero, so an oracle-set (depeg-aware) value survives.
+/// `None` when neither stablecoin is in the registry (nothing to peg). Bound
+/// parameters, in order: the snapshot watermark (`p.timestamp <= toDateTime(?)`,
+/// shared with the rest of the pass — see [`ChEnrichmentPass::watermark`]) and the
+/// `LIMIT` (batch size). `volume_quote_usd` is only filled when still zero, so an
+/// oracle-set (depeg-aware) value survives.
 fn peg_sql(db: &str, tbl: &str, stable_ids: &[u32]) -> Option<String> {
     if stable_ids.is_empty() {
         return None;
@@ -458,6 +508,7 @@ fn peg_sql(db: &str, tbl: &str, stable_ids: &[u32]) -> Option<String> {
          WHERE p.close_usd = 0 \
            AND p.volume_quote > 0 \
            AND p.quote_asset_id IN ({in_list}) \
+           AND p.timestamp <= toDateTime(?) \
          ORDER BY p.timestamp \
          LIMIT ?"
     ))
@@ -469,7 +520,9 @@ fn peg_sql(db: &str, tbl: &str, stable_ids: &[u32]) -> Option<String> {
 /// xlm_id` so the ASOF join has an equality predicate (required) and matches only
 /// XLM-quoted candles. Float64 weighting avoids `Decimal` product overflow on the
 /// `sum(close × volume_base)` numerator. Bound parameters, in order: the pivot
-/// staleness window (seconds) and the `LIMIT`.
+/// staleness window (seconds), the snapshot watermark
+/// (`p.timestamp <= toDateTime(?)`, shared with the rest of the pass — see
+/// [`ChEnrichmentPass::watermark`]), and the `LIMIT`.
 fn pivot_sql(db: &str, tbl: &str, xlm_id: u32, usdc_id: u32) -> String {
     format!(
         "INSERT INTO {db}.{tbl} ({INSERT_COLUMNS}) \
@@ -495,6 +548,7 @@ fn pivot_sql(db: &str, tbl: &str, xlm_id: u32, usdc_id: u32) -> String {
            AND p.volume_quote > 0 \
            AND r.usd IS NOT NULL \
            AND (p.timestamp - r.timestamp) <= ? \
+           AND p.timestamp <= toDateTime(?) \
          ORDER BY p.timestamp \
          LIMIT ?"
     )
@@ -520,6 +574,12 @@ mod tests {
         assert!(sql.contains("p.quote_asset_id IN (3, 7)"));
         // Never clobbers an oracle-set volume_quote_usd.
         assert!(sql.contains("if(p.volume_quote_usd > 0, p.volume_quote_usd,"));
+        // Snapshot watermark bound (binds before LIMIT): watermark, then batch.
+        assert!(sql.contains("p.timestamp <= toDateTime(?)"));
+        assert!(
+            sql.find("p.timestamp <= toDateTime(?)").unwrap() < sql.find("LIMIT ?").unwrap(),
+            "watermark bind must precede the LIMIT bind"
+        );
     }
 
     #[test]
@@ -530,8 +590,13 @@ mod tests {
         // ASOF equality predicate + forward-fill inequality.
         assert!(sql.contains("r.ref_asset_id = p.quote_asset_id AND r.timestamp <= p.timestamp"));
         assert!(sql.contains("CAST(r.usd * toFloat64(p.close) AS Decimal(38, 14)) AS close_usd"));
-        // Staleness-window + LIMIT placeholders, in bind order.
+        // Staleness-window + watermark + LIMIT placeholders, in bind order.
         assert!(sql.contains("(p.timestamp - r.timestamp) <= ?"));
+        assert!(sql.contains("p.timestamp <= toDateTime(?)"));
+        let win = sql.find("(p.timestamp - r.timestamp) <= ?").unwrap();
+        let wm = sql.find("p.timestamp <= toDateTime(?)").unwrap();
+        let lim = sql.find("LIMIT ?").unwrap();
+        assert!(win < wm && wm < lim, "bind order: window, watermark, limit");
     }
 
     #[test]
