@@ -156,7 +156,7 @@ wrong). The mTLS client surface is consumed by:
       0063 (needs a real cert bundle + endpoint); first exercised by 0051's
       live schema-apply
 - [ ] Consumed by ≥1 downstream (0051 schema-apply / 0038 / 0040 as they land)
-- [ ] README documents the env-var contract (`MTLS_SECRET_NAME`, `CH_DOMAIN`)
+- [x] README documents the env-var contract (`MTLS_SECRET_NAME`, `CH_DOMAIN`)
       + the build-once-reuse pattern
 
 ## Blocked on

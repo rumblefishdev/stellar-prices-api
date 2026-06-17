@@ -22,6 +22,7 @@ packages/prices-clickhouse/
 │   └── preroll.sql    # deterministic full-range _1m → _15m…_1M re-aggregate (measurement)
 └── src/
     ├── lib.rs                         # Config, client(), apply_init_sql / apply_seed / apply_sql, embedded SQL
+    ├── mtls.rs                        # mTLS transport (feature `aws-mtls`) — see below
     └── bin/prices-clickhouse-init.rs  # CLI schema applier (tables + seed + views)
 ```
 
@@ -59,6 +60,60 @@ cargo run -p prices-clickhouse --bin prices-clickhouse-init -- --rollups
 # 3. Verify (expect 12 tables in db 'prices')
 docker exec <ch-container> clickhouse-client -q \
   "SELECT count() FROM system.tables WHERE database='prices'"
+```
+
+## Remote (mTLS) connection
+
+The default build is plaintext-only (`Config` + `client()`, for local Docker /
+tests). Talking to the production Hetzner ClickHouse goes over HTTPS + mTLS to
+the Caddy reverse proxy, behind the **`aws-mtls`** cargo feature (task 0052):
+
+```toml
+prices-clickhouse = { path = "...", features = ["aws-mtls"] }
+```
+
+Caddy validates the client-cert chain, maps the cert CN to a CH user via
+`CLICKHOUSE_CN_USER_MAP`, and re-applies that identity upstream — so no
+`X-ClickHouse-User` / Basic Auth is set client-side (Caddy strips both). The
+CH user (and thus privileges) is whatever your cert CN maps to; see ADR 0007
+§3.5 and the cert-issuance procedure in task 0063.
+
+### Env-var contract
+
+`client_from_lambda_env(database)` — the cold-start convenience — reads:
+
+| Var | Set by | Purpose |
+|-----|--------|---------|
+| `MTLS_SECRET_NAME` | CDK (task 0011) | Secrets Manager secret holding the bundle JSON `{cert, key, ca}` (all PEM) |
+| `CH_DOMAIN` | CDK (task 0011) | Caddy hostname; the client connects to `https://{CH_DOMAIN}` |
+| `AWS_SESSION_TOKEN` | Lambda runtime | Auth header for the Parameters & Secrets Extension fetch |
+
+Both `MTLS_SECRET_NAME` and `CH_DOMAIN` are required; a missing/empty value
+fails at init with `MtlsError::MissingEnv` (surfaces as a CW `Init Errors`
+metric, never a half-configured client). The bundle is fetched from the **AWS
+Parameters & Secrets Lambda Extension** (`http://localhost:2773`), not the SDK,
+so warm containers hit its in-process cache — no Secrets Manager API call on the
+hot path. Set `PARAMETERS_SECRETS_EXTENSION_CACHE_ENABLED=true` on the function.
+
+> **Off-Lambda use:** the extension endpoint only exists inside a Lambda runtime.
+> From a workstation, fetch the bundle yourself (AWS CLI/SDK), build an
+> `MtlsBundle { cert_pem, key_pem, ca_pem }`, and call `client_with_mtls(domain,
+> &bundle, database)` directly.
+
+### Build once, reuse
+
+Build the client **once in Lambda global init and clone it per invocation** — do
+not rebuild per request. The returned `clickhouse::Client` is cheap to clone:
+under the hood `hyper_util`'s legacy client owns an `Arc`-shared connection pool,
+so cloning shares warm, pooled TLS connections and amortises the ~80–130 ms
+cross-cloud TLS handshake across invocations. Rebuilding per request throws that
+away and re-handshakes every time.
+
+```rust
+// global init (cold start) — once
+let ch = prices_clickhouse::mtls::client_from_lambda_env("prices").await?;
+// per invocation — clone the warm handle
+let ch = ch.clone();
 ```
 
 ## Rollups: MV chain vs. pre-roll
