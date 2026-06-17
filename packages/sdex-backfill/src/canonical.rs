@@ -65,10 +65,21 @@ impl AssetIdentity {
 /// symbol resolves to the same `asset_id` used as a trade quote.
 pub(crate) use prices_clickhouse::{USDC_ISSUER, USDT_ISSUER};
 
-/// Mainnet (Public) network passphrase. The SAC contract id is network-scoped, so
-/// this fixes which network's SACs we resolve. The backfill is mainnet-only (the
-/// public ledger store), so this is hard-coded; make it a parameter if a testnet
-/// backfill is ever needed.
+/// Mainnet (Public) network passphrase. A SAC contract id is **network-scoped**:
+/// it is `sha256(HashIdPreimage::ContractId { network_id, asset })`, and
+/// `network_id = sha256(passphrase)`. So the passphrase decides which network's
+/// SACs we derive. Hard-coded because the backfill is mainnet-only (it reads the
+/// public ledger store).
+///
+/// ⚠️ Silent failure mode if this is ever wrong for the data being processed
+/// (review #9): running the backfill against testnet/futurenet ledgers while this
+/// stays on the mainnet passphrase would derive **mainnet** SACs, persist wrong
+/// `sac_address` values into `prices.assets`, and silently fail to collapse
+/// SAC↔classic legs on that network (its real SACs hash differently). No error is
+/// raised — the wrong addresses just never match, surfacing only as split
+/// liquidity when someone debugs it. To support a non-mainnet backfill, thread the
+/// network passphrase through config and into [`AssetRegistry::from_existing`]
+/// (the single bake-in point, below) rather than reading this const.
 const MAINNET_PASSPHRASE: &str = "Public Global Stellar Network ; September 2015";
 
 fn mainnet_network_id() -> [u8; 32] {
@@ -165,6 +176,9 @@ impl AssetRegistry {
         let mut reg = Self {
             by_identity,
             next_id,
+            // Mainnet SAC scope is baked in here. To support a non-mainnet
+            // backfill, take the passphrase as a parameter instead — see the
+            // silent-failure note on `MAINNET_PASSPHRASE` (review #9).
             network_id: mainnet_network_id(),
             sac_index: HashMap::new(),
         };
