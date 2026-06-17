@@ -24,6 +24,12 @@ pub const PREROLL_SQL: &str = include_str!("../schema/preroll.sql");
 /// reference availability). Plain views — applied after the init tables.
 pub const VIEWS_SQL: &str = include_str!("../schema/views.sql");
 
+/// Canonical `backfill_progress` seed (task 0051 / §3.5): the `sdex_archive` and
+/// `soroban_amm` streams. Idempotent — only inserts task_names not already
+/// present, so a re-run never resets live progress. Applied after the init
+/// tables (the `backfill_progress` table must exist first).
+pub const SEED_SQL: &str = include_str!("../schema/seed.sql");
+
 /// Default ClickHouse HTTP endpoint when `CLICKHOUSE_URL` is not set.
 pub const DEFAULT_URL: &str = "http://localhost:8123";
 
@@ -96,6 +102,14 @@ pub enum SchemaError {
 /// `CREATE … IF NOT EXISTS`.
 pub async fn apply_init_sql(client: &Client) -> Result<(), SchemaError> {
     apply_sql(client, INIT_SQL).await
+}
+
+/// Apply [`SEED_SQL`] to the given client. Idempotent — the guarded `INSERT`
+/// only adds canonical `backfill_progress` rows that are not already present,
+/// so re-running never clobbers live progress. Requires the `backfill_progress`
+/// table to exist (run [`apply_init_sql`] first).
+pub async fn apply_seed(client: &Client) -> Result<(), SchemaError> {
+    apply_sql(client, SEED_SQL).await
 }
 
 /// Apply an arbitrary multi-statement SQL string (used for `ROLLUPS_SQL` /

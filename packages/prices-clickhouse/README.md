@@ -16,11 +16,13 @@ packages/prices-clickhouse/
 ├── README.md
 ├── schema/
 │   ├── init.sql       # DATABASE + all prices.* tables (the source of truth)
+│   ├── seed.sql       # canonical backfill_progress streams (idempotent INSERT)
+│   ├── views.sql      # read-surface views (price_usd_series, usd_reference)
 │   ├── rollups.sql    # production refreshable-MV rollup chain (applied separately)
 │   └── preroll.sql    # deterministic full-range _1m → _15m…_1M re-aggregate (measurement)
 └── src/
-    ├── lib.rs                         # Config, client(), apply_init_sql / apply_sql, embedded SQL
-    └── bin/prices-clickhouse-init.rs  # CLI schema applier
+    ├── lib.rs                         # Config, client(), apply_init_sql / apply_seed / apply_sql, embedded SQL
+    └── bin/prices-clickhouse-init.rs  # CLI schema applier (tables + seed + views)
 ```
 
 ## Tables (`prices.*`)
