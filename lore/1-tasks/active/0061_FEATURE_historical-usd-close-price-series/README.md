@@ -530,6 +530,9 @@ tests for the enrichment tiers and the views. Remaining is handoff / breadth:
   same asset would confirm one merged `asset_id`/`price_usd_series` row end to end
   (needs ledger XDR fixtures — the gitignored `fixtures/ledgers/`).
 - **HTTP read endpoints (§12.5)** — deferred to task 0040 (API Gateway + axum).
+- **Enrichment progress via INSERT rows-affected** — code-review #10 part 2,
+  spawned as backlog task **0062** (gated on a `clickhouse`-crate upgrade that
+  surfaces `written_rows`; see Design Decision 27).
 
 ## Notes
 
