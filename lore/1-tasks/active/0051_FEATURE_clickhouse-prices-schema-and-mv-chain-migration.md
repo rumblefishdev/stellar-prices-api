@@ -2,7 +2,7 @@
 id: "0051"
 title: "ClickHouse `prices.*` schema + materialised-view rollup chain migration"
 type: FEATURE
-status: backlog
+status: active
 related_adr: ["0003", "0004", "0007"]
 related_tasks: ["0060", "0061", "0059", "0063", "0052", "0011", "0038", "0046", "0050"]
 tags: [layer-database, priority-high, effort-medium, milestone-M1, clickhouse, hetzner, schema, migrations, ddl]
@@ -57,6 +57,15 @@ history:
       therefore largely DONE. 0051 now narrows to the genuine remainder:
       apply that schema to the LIVE Hetzner prices DB over mTLS, seed
       backfill_progress, and decide the production apply strategy.
+  - date: 2026-06-17
+    status: active
+    who: oski
+    note: >
+      Activated to implement the two now-unblocked steps (no live
+      cluster needed): seed backfill_progress with the two canonical
+      rows + assert in views_it.rs, and record the production
+      apply/version-tracking strategy decision. Live mTLS apply
+      (Steps 3–4) stays pending 0052 + 0063.
 ---
 
 # ClickHouse `prices.*` schema + materialised-view rollup chain migration
