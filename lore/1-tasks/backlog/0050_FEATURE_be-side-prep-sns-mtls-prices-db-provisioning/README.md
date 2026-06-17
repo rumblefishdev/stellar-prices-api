@@ -1,10 +1,10 @@
 ---
 id: "0050"
-title: "BE-side prep — SNS fan-out + mTLS client cert issuance + prices DB/user/quota provisioning on Hetzner CH"
+title: "BE-side prep — SNS fan-out topic on the stellar-ledger-data bucket (mTLS cert + prices DB carved out to 0063)"
 type: FEATURE
 status: backlog
 related_adr: ["0007"]
-related_tasks: ["0045", "0047", "0011", "0038"]
+related_tasks: ["0045", "0047", "0011", "0038", "0063"]
 tags: [layer-infra, priority-high, effort-medium, milestone-M1, cross-team, block-explorer, hetzner, clickhouse, mtls, sns]
 milestone: 1
 links:
@@ -41,9 +41,23 @@ history:
       task 0047 (it's S3+SNS+SSM, not Hetzner-CH) — only the mTLS-cert
       and `prices.*`-DB items stay gated. Task stays backlog pending
       BE scheduling.
+  - date: 2026-06-17
+    status: backlog
+    who: oski
+    note: >
+      **Scope narrowed to the SNS fan-out item (item 1) only.** BE 0227
+      shipped (archived 2026-05-19) and BE is granting prices-api admin
+      access to the Hetzner CH box, so items 2 (mTLS cert issuance) + 3
+      (`prices` DB/user/quota/profile) are now self-served and moved to
+      the new task 0063. This task retains only the genuinely-still-BE-side
+      SNS fan-out topic, which can ship independently.
 ---
 
-# BE-side prep — SNS fan-out + mTLS client cert + prices DB provisioning
+# BE-side prep — SNS fan-out topic (S3 → SNS → tenant Ledger Processors)
+
+> **Scope (2026-06-17):** narrowed to the **SNS fan-out** item only.
+> The mTLS-cert and `prices` DB/user/quota items moved to **task 0063**
+> (self-served now that admin access is granted + BE 0227 shipped).
 
 ## Summary
 
@@ -163,37 +177,33 @@ keys.
 - [ ] SNS topic exists on BE's `stellar-ledger-data/` bucket
       fan-out for all three envs; ARNs published to SSM under
       a stable key prices-api's CDK can read
-- [ ] Per-env mTLS client cert + key pairs delivered, stored in
-      AWS Secrets Manager (2 secrets per env), trust chain
-      verifiable against BE's CA certificate
-- [ ] `prices` database + dedicated user + quota + profile exist
-      on the Hetzner CH cluster; smoke test confirms
-      per-database isolation (write to `prices.*` works, write
-      to `default.*` denied)
-- [ ] `notes/G-be-prep-checklist.md` published with all three
-      items marked complete, dates recorded, and SSM/Secrets
-      keys documented
-- [ ] 0011 (CDK bootstrap) references the SSM keys produced by
-      this task; no CDK-side guess-and-hope for ARN/endpoint
-      values
+      (`/platform/{env}/ledger-events-topic-arn`)
+- [ ] BE's existing Ledger Processor subscription preserved;
+      prices-api can subscribe via the published ARN with
+      `rawMessageDelivery`
+- [ ] Throwaway-Lambda smoke test confirms an S3 PutObject triggers
+      an SNS delivery; the recorded message envelope is captured as
+      a fixture for 0038
+- [ ] 0011 (CDK bootstrap) references the SSM key produced by
+      this task; no CDK-side guess-and-hope for the topic ARN
+
+> **Moved to task 0063** (self-served, admin access granted): per-env
+> mTLS client cert issuance + storage, and the `prices` database /
+> user / quota / profile provisioning + isolation smoke test.
 
 ## Blocked on
 
-- **BE 0227** (Hetzner Ansible playbook ships) — upstream gate
-  per the 0045 agreement record. ADR 0007 stays sidecar-fallback
-  ready until BE 0227 lands.
-- **Task 0047** — cross-tenant throughput verification GREEN /
-  YELLOW. A RED outcome supersedes ADR 0007 to the sidecar-CH
-  variant; this task's BE-side execution does not change shape,
-  but the target host does.
+- Nothing hard. The SNS fan-out is S3 + SNS + SSM only — it does not
+  depend on BE 0227 (shipped) or task 0047. Practical prerequisite is
+  BE scheduling the one-time CDK change on the `stellar-ledger-data/`
+  bucket stack.
 
 ## Out of scope
 
+- mTLS cert issuance + `prices` DB/user/quota provisioning — **task 0063**.
 - Schema migration tooling for `prices.*` tables — see 0051.
 - Cost-share dollar-figure finalisation — Cluster D commercial
   follow-up per the 0045 agreement record.
-- CA rotation procedure beyond documenting the current 1-year
-  manual cadence.
 
 ## Notes
 

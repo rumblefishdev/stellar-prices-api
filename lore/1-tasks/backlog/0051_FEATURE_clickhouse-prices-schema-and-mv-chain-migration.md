@@ -4,7 +4,7 @@ title: "ClickHouse `prices.*` schema + materialised-view rollup chain migration"
 type: FEATURE
 status: backlog
 related_adr: ["0003", "0004", "0007"]
-related_tasks: ["0050", "0011", "0038", "0046"]
+related_tasks: ["0063", "0050", "0011", "0038", "0046"]
 tags: [layer-database, priority-high, effort-medium, milestone-M1, clickhouse, hetzner, schema, migrations, ddl]
 milestone: 1
 links:
@@ -28,6 +28,18 @@ history:
       owns the act of applying it to the Hetzner CH cluster. 0011
       stops at AWS CDK; 0038 assumes the schema exists. This task
       fills the gap.
+  - date: 2026-06-17
+    status: backlog
+    who: oski
+    note: >
+      Live-apply dependency repointed from 0050 → 0063. BE 0227
+      (Hetzner deploy) shipped and prices-api is getting admin access,
+      so the empty prices database + scoped users are now provisioned
+      by the self-served task 0063 rather than by BE under 0050.
+      Authoring + Docker-CH integration testing remain unblocked and
+      can start now. Open item flagged: schema-apply needs a
+      DDL-capable identity (prices_writer is write_no_ddl) — settle
+      with 0063.
 ---
 
 # ClickHouse `prices.*` schema + materialised-view rollup chain migration
@@ -164,10 +176,12 @@ Once 0050 has provisioned the database and credentials:
 
 ## Blocked on
 
-- **0050** — needs the `prices` database, user, and Hetzner CH
+- **0063** — needs the `prices` database, user, and Hetzner CH
   endpoint to exist before the runner can apply against the live
-  cluster. Docker-CH integration test does not depend on 0050;
-  authoring + Docker testing can start in Week 1 in parallel.
+  cluster. (Was 0050; the DB-provisioning work moved to the
+  self-served 0063 after BE 0227 shipped + admin access granted.)
+  Docker-CH integration test does not depend on 0063; authoring +
+  Docker testing can start now in parallel.
 - **0052** — needs the shared ClickHouse client crate so the
   runner is not the only thing importing the `clickhouse` Rust
   crate directly. Could be relaxed if 0052 slips: a self-contained
