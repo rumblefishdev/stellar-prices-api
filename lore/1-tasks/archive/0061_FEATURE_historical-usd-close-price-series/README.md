@@ -2,7 +2,7 @@
 id: "0061"
 title: "Historical USD-quoted price series — price_usd(asset, t) primitive for Block Explorer LP analytics"
 type: FEATURE
-status: active
+status: completed
 related_adr: ["0003", "0004", "0007"]
 related_tasks: ["0060", "0026", "0039", "0051", "0040"]
 tags: [layer-database, clickhouse, oracle, reflector, usd-pricing, enrichment, cross-team-be, effort-medium]
@@ -151,6 +151,17 @@ history:
       blocked by the pinned clickhouse 0.13 execute() API. Design Decisions 19–27
       added. All unit + live-CH integration tests green (+ new watermark, contract-
       normalization, pivot-ref, and reference-cleanup test coverage).
+  - date: 2026-06-17
+    status: completed
+    who: claude
+    note: >
+      Done. All 9 acceptance criteria met; §12.1–§12.5 design items implemented,
+      unit + live-CH integration tested, and validated end-to-end over 10k real
+      mainnet ledgers. Code-review round closed (10 findings, Design Decisions
+      19–27). Delivered via PR #39 (→ develop). Remaining breadth is tracked in
+      other tasks: HTTP read endpoints → 0040; enrichment rows-affected progress →
+      backlog 0062 (gated on a clickhouse-crate upgrade); SAC end-to-end backfill
+      validation noted in Future Work (needs ledger XDR fixtures).
 ---
 
 # Historical USD-quoted price series — `price_usd(asset, t)`
