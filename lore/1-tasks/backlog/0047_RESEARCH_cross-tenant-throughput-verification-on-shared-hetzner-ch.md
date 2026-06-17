@@ -12,7 +12,7 @@ links:
   - "../archive/0046_RESEARCH_empirical-prices-ch-storage-estimate-from-10k-ledgers/notes/G-empirical-storage-estimate.md"
   - "../../2-adrs/0007_live-data-sink-on-shared-hetzner-clickhouse.md"
   - "../../../../soroban-block-explorer/lore/1-tasks/active/0216_RESEARCH_hetzner-clickhouse-deploy/README.md"
-  - "../../../../soroban-block-explorer/lore/1-tasks/active/0227_FEATURE_infra-hetzner-ansible-playbook.md"
+  - "../../../../soroban-block-explorer/lore/1-tasks/archive/0227_FEATURE_infra-hetzner-ansible-playbook.md"
 history:
   - date: 2026-05-19
     status: backlog
@@ -25,6 +25,17 @@ history:
       row volume (proven light); this task measures throughput,
       concurrency, IOPS, and CPU contention. ADR 0007 stays
       `proposed` until this task resolves the gate.
+  - date: 2026-06-17
+    status: backlog
+    who: oski
+    note: >
+      Upstream gate satisfied: BE 0227 (Hetzner CH production deploy)
+      shipped and was archived 2026-05-19, so the box is now live and
+      `system.query_log` / `system.metric_log` are queryable for Step 1.
+      This task can now run against the real production CH rather than
+      only the local docker-compose mirror. It remains the final gate
+      on ADR 0007 → accepted and on driving prices traffic at prod
+      volume. (BE 0216 is a research doc, not a hard query-time gate.)
 ---
 
 # Cross-tenant throughput verification on shared Hetzner CH
@@ -161,9 +172,10 @@ Output one of three:
 
 ## Blocked on
 
-- **BE 0216 + 0227** — Hetzner CH must be live enough to query
-  `system.query_log` (or at least docker-compose CH backfilled with
-  BE data is available for analytical work).
+- ~~**BE 0216 + 0227** — Hetzner CH must be live enough to query
+  `system.query_log`.~~ **Satisfied (2026-06-17):** BE 0227 shipped
+  (archived 2026-05-19); the production box is live and queryable.
+  BE 0216 is a research doc, not a hard gate.
 - **Task 0046** — already merged; the empirical write-volume numbers
   feed §2.
 
