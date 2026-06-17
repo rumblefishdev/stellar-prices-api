@@ -4,7 +4,7 @@ title: "ClickHouse `prices.*` schema + materialised-view rollup chain migration"
 type: FEATURE
 status: backlog
 related_adr: ["0003", "0004", "0007"]
-related_tasks: ["0063", "0050", "0011", "0038", "0046"]
+related_tasks: ["0060", "0061", "0059", "0063", "0052", "0011", "0038", "0046", "0050"]
 tags: [layer-database, priority-high, effort-medium, milestone-M1, clickhouse, hetzner, schema, migrations, ddl]
 milestone: 1
 links:
@@ -40,170 +40,174 @@ history:
       can start now. Open item flagged: schema-apply needs a
       DDL-capable identity (prices_writer is write_no_ddl) — settle
       with 0063.
+  - date: 2026-06-17
+    status: backlog
+    who: oski
+    note: >
+      **Major rescope.** Inspecting the codebase showed the schema is
+      already shipped in packages/prices-clickhouse (tasks 0060/0061/
+      0059): init.sql has every §3 table (assets, price_ohlcv_1m + 6
+      rolled granularities, current_prices, oracle_prices,
+      backfill_progress), rollups.sql has the full MV chain (built as
+      REFRESH-EVERY refreshable MVs, not incremental — a deliberate
+      0060/0059 design), views.sql has the read surface (0061), and the
+      prices-clickhouse-init binary applies it all idempotently with a
+      Docker integration test (views_it.rs). The original "author
+      numbered DDL + build a versioned schema-apply runner" scope is
+      therefore largely DONE. 0051 now narrows to the genuine remainder:
+      apply that schema to the LIVE Hetzner prices DB over mTLS, seed
+      backfill_progress, and decide the production apply strategy.
 ---
 
 # ClickHouse `prices.*` schema + materialised-view rollup chain migration
 
+> **Rescoped 2026-06-17:** the schema + apply tooling are already
+> shipped in `packages/prices-clickhouse` (tasks 0060/0061/0059). This
+> task no longer authors DDL or builds a runner — it **applies the
+> existing schema to the live Hetzner `prices` DB over mTLS, seeds
+> `backfill_progress`, and picks the production apply strategy.**
+
 ## Summary
 
-Author the full `prices.*` DDL (Section 3 tables + MV rollup chain)
-and the migration tooling that applies it idempotently to the
-Hetzner CH cluster's `prices` database over HTTPS-mTLS. Seeds the
-two canonical `backfill_progress` rows (`sdex_archive`,
-`soroban_amm`) per §3.5. Output is the source of truth for the
-ingestion, periodic-worker, push, and read paths.
+Stand up the `prices.*` schema on the **live** Hetzner CH `prices`
+database over HTTPS-mTLS, using the schema + apply tooling already
+present in `packages/prices-clickhouse`. Seed the two canonical
+`backfill_progress` rows (`sdex_archive`, `soroban_amm`) per §3.5,
+which no existing migration does. Decide and document how schema is
+applied/tracked in production.
 
-## Context
+## Context — what already exists vs what remains
 
-Per §3 of the general-overview doc, all live prices data lives in
-the Hetzner CH `prices` database. The schema comprises:
+`packages/prices-clickhouse` (task 0060, with 0061 + 0059) already
+ships, and a Docker integration test (`tests/views_it.rs`) covers it:
 
-- `prices.assets` — `ReplacingMergeTree(updated_at)`, surrogate
-  `asset_id`, sort key `(asset_code, issuer_address, contract_address)`.
-- Seven per-granularity OHLCV tables — `prices.price_ohlcv_1m`,
-  `_15m`, `_1h`, `_4h`, `_1d`, `_1w`, `_1M` — all
-  `ReplacingMergeTree(version)`, monthly partitions, sort key
-  `(asset_id, quote_asset_id, source, timestamp)` per ADR 0003 +
-  ADR 0004.
-- Six materialised views — `mv_ohlcv_1m_to_15m`, `_15m_to_1h`,
-  `_1h_to_4h`, `_4h_to_1d`, `_1d_to_1w`, `_1w_to_1M` — replacing
-  the previously-scheduled OHLCV Rollup Lambda (ADR 0007 §3.4).
-- `prices.current_prices` — `ReplacingMergeTree(updated_at)`.
-- `prices.oracle_prices` — `MergeTree`, monthly partitions.
-- `prices.backfill_progress` — `ReplacingMergeTree(updated_at)`,
-  seeded with two rows per §3.5.
+- **Tables** (`schema/init.sql`): `assets` (`ReplacingMergeTree(updated_at)`),
+  `price_ohlcv_1m` + the 6 rolled granularities (`_15m … _1M`,
+  `ReplacingMergeTree(version)`, sort key per ADR 0003/0004),
+  `current_prices`, `oracle_prices`, `backfill_progress`.
+- **MV rollup chain** (`schema/rollups.sql`): `mv_ohlcv_1m_to_15m …
+  _1w_to_1M`, built as **refreshable MVs** (`REFRESH EVERY …`) — a
+  deliberate 0060/0059 design, not the incremental cascade the original
+  ADR 0007 §3.4 sketch implied. MV version propagation is task 0059.
+- **Read-surface views** (`schema/views.sql`, task 0061).
+- **Apply tooling**: `apply_init_sql` / `apply_sql` + the
+  `prices-clickhouse-init` binary (applies init + views always,
+  rollups opt-in via `--rollups`), idempotent (`CREATE … IF NOT EXISTS`).
 
-`docs/database-schema/clickhouse-prod-schema.sql` already mirrors
-BE's production CH schema as a reference; this task produces the
-*prices*-side equivalent inside the `prices` database and ships
-the migration tooling that applies it.
+What is **not** done — the remaining 0051 work:
+
+1. The init binary connects via plaintext `CLICKHOUSE_URL` (localhost).
+   Nothing applies the schema to the **live Hetzner `prices` DB over
+   Caddy:443 mTLS**.
+2. `backfill_progress` is created but **never seeded** with the two
+   canonical rows (no `INSERT … sdex_archive / soroban_amm` anywhere).
+3. No decision recorded on the **production apply / version-tracking
+   strategy** (wholesale-idempotent — as shipped, mirroring BE — vs the
+   numbered-migrations + `schema_migrations` table the original plan
+   sketched).
 
 ## Implementation Plan
 
-### Step 1: Pick a migration runner
+### Step 1: Seed `backfill_progress`
 
-Choose between:
+Add the two canonical rows (`sdex_archive`, `soroban_amm`) with
+`status='running'` per §3.5. Make it idempotent
+and part of the standard apply path — either an `INSERT` block in
+`init.sql` guarded against duplicates (the table is
+`ReplacingMergeTree`, so a stable key + re-insert is safe) or a small
+`schema/seed.sql` applied by the init binary. Cover it in
+`views_it.rs` (`SELECT count() FROM prices.backfill_progress` = 2).
 
-- **Hand-rolled SQL files + a Rust binary** (`schema-apply`)
-  that connects via the 0052 ClickHouse client and runs `.sql`
-  files in numeric order, recording applied versions in a small
-  `prices.schema_migrations` table. Mirrors BE's
-  `db-clickhouse/migrations/` shape.
-- An external tool like `clickhouse-driver`/`refinery` if a
-  ready-made CH-aware runner exists in the Rust ecosystem at
-  impl time.
+### Step 2: Decide the production apply / version-tracking strategy
 
-Recommend hand-rolled: keeps the tooling surface small, matches
-BE's pattern, no extra dependency. Decide at impl time and
-record the decision in a short `notes/S-migration-runner.md`.
+Record the decision in `notes/S-prod-apply-strategy.md`:
 
-### Step 2: Author migration files
+- **Recommended — wholesale idempotent** (as already shipped): the
+  `prices-clickhouse-init` binary applies `init.sql` + `views.sql`
+  (+ `--rollups`) on demand; every statement is `CREATE … IF NOT
+  EXISTS`. Mirrors BE's single-`init.sql` model; no `schema_migrations`
+  table needed. Schema changes ship as edits to the SQL files + a
+  re-run.
+- **Alternative — numbered migrations + `schema_migrations`**: only if
+  we hit a change that idempotent re-apply can't express safely
+  (column drop, engine change). Defer until such a change exists; if
+  adopted, spawn it as its own task rather than pre-building it here.
 
-Write the DDL in numbered files under `db/migrations/clickhouse/`:
+### Step 3: Wire the init binary to the live mTLS endpoint
 
-```
-001_assets.sql
-002_price_ohlcv_1m.sql
-003_price_ohlcv_higher_granularities.sql
-004_mv_rollup_chain.sql
-005_current_prices.sql
-006_oracle_prices.sql
-007_backfill_progress.sql
-008_seed_backfill_progress_rows.sql
-009_schema_migrations.sql           (the tracking table itself; created first in practice)
-```
+The binary today builds a plaintext `client(&cfg)`. Add an
+mTLS-capable apply path that uses **0052's `client_mtls`** so the same
+schema can be applied to Caddy:443. Resolve the DDL-identity question
+from 0063: `prices_writer` is `write_no_ddl`, so apply schema under an
+admin/DDL-capable cert (short-lived) — **not** the writer identity.
 
-Each file is idempotent (`CREATE TABLE IF NOT EXISTS`,
-`CREATE MATERIALIZED VIEW IF NOT EXISTS`). Each DDL statement
-mirrors §3 of the design doc verbatim, with the engine and sort
-key choices grounded in ADR 0003 (PK includes quote_asset_id),
-ADR 0004 (multi-source merge columns), and ADR 0007 (per-source
-rows + MV chain).
+### Step 4: Apply against the live Hetzner CH `prices` DB
 
-### Step 3: Implement `schema-apply` runner
+Once 0063 has provisioned the database + a DDL-capable credential:
 
-Small Rust binary depending on the 0052 ClickHouse client crate.
-Behaviour:
-
-1. Connect via mTLS to Caddy:443 using the env-scoped cert + key.
-2. Ensure `prices.schema_migrations(version UInt32, applied_at
-   DateTime DEFAULT now()) ENGINE = ReplacingMergeTree(applied_at)
-   ORDER BY (version)` exists (bootstrapping).
-3. Read the highest applied version; for each file with a higher
-   numeric prefix, execute its statements in order, then INSERT
-   the new version.
-4. Exit non-zero on any DDL failure; print which file failed.
-
-### Step 4: Integration test
-
-Use a Docker `clickhouse-server` (no mTLS, plaintext) to apply
-the migrations end-to-end. Assert:
-
-- `SHOW TABLES FROM prices` returns the 7 OHLCV tables + 3
-  metadata tables + 6 MVs.
-- `SHOW CREATE TABLE prices.price_ohlcv_1m` matches the §3.2
-  schema verbatim (regex match on engine + ORDER BY clause).
-- `SELECT count() FROM prices.backfill_progress` returns 2.
-- Re-running the runner against the same DB is a no-op.
-
-### Step 5: Apply against the Hetzner CH `prices` DB
-
-Once 0050 has provisioned the database and credentials:
-
-- Apply against dev env first; verify with `clickhouse-client
-  --secure --host=caddy.example.com:443` + the prices-api user.
-- Run the Step 4 assertions against the live `prices` DB.
-- Apply against staging and prod once dev is clean.
+- Apply against **dev** first; verify the table/MV/view set with
+  `SHOW TABLES FROM prices` + a `SHOW CREATE TABLE prices.price_ohlcv_1m`
+  engine/ORDER BY check, and `backfill_progress` count = 2.
+- Smoke the MV chain (refreshable): insert a `_1m` fixture row, trigger/
+  wait a refresh, confirm it propagates up the chain.
+- Apply against **staging** then **prod** once dev is clean.
+- Capture each env's `SHOW TABLES FROM prices` output in
+  `notes/G-live-schema-state.md` for provenance.
 
 ## Acceptance Criteria
 
-- [ ] `db/migrations/clickhouse/` contains all numbered DDL
-      files; each is idempotent and matches §3 verbatim
-- [ ] `schema-apply` Rust binary applies the migration set
-      against a Docker CH from a clean slate without error
-- [ ] Re-running the binary is a no-op (no schema drift, no
-      duplicate rows in `schema_migrations`)
-- [ ] Integration test asserts table list, engine signatures,
-      sort keys, and partition expressions
-- [ ] Applied against the live Hetzner CH `prices` database
-      for at least the dev env; `SHOW TABLES FROM prices`
-      output captured in a `notes/G-dev-schema-state.md` for
-      provenance
-- [ ] `prices.backfill_progress` shows two seeded rows
-      (`sdex_archive`, `soroban_amm`) with `status='running'`
-- [ ] MV chain backfills: insert a fixture 1-min row, observe
-      it cascades through 15m → 1h → 4h → 1d → 1w → 1M
+Already satisfied by `prices-clickhouse` (0060/0061/0059) — kept for
+provenance:
+
+- [x] `prices.*` DDL exists and is idempotent (`schema/init.sql`),
+      engines + sort keys per ADR 0003/0004/0007
+- [x] MV rollup chain `mv_ohlcv_1m_to_15m … _1w_to_1M` exists
+      (`schema/rollups.sql`, refreshable-MV design)
+- [x] Apply tooling + Docker integration test
+      (`prices-clickhouse-init`, `tests/views_it.rs`)
+
+Remaining for this task:
+
+- [ ] `prices.backfill_progress` seeded with the two canonical rows
+      (`sdex_archive`, `soroban_amm`, `status='running'`), idempotently,
+      asserted in `views_it.rs`
+- [ ] Production apply/version-tracking strategy decided + recorded in
+      `notes/S-prod-apply-strategy.md`
+- [ ] Init binary can apply over mTLS via 0052's `client_mtls`, under a
+      DDL-capable identity (not `prices_writer`)
+- [ ] Schema applied to the live Hetzner `prices` DB for at least dev;
+      table/MV/view set + `backfill_progress` count verified; output
+      captured in `notes/G-live-schema-state.md`
+- [ ] Refreshable MV chain smoke-verified live (fixture `_1m` row
+      propagates up after refresh)
 
 ## Blocked on
 
-- **0063** — needs the `prices` database, user, and Hetzner CH
-  endpoint to exist before the runner can apply against the live
-  cluster. (Was 0050; the DB-provisioning work moved to the
-  self-served 0063 after BE 0227 shipped + admin access granted.)
-  Docker-CH integration test does not depend on 0063; authoring +
-  Docker testing can start now in parallel.
-- **0052** — needs the shared ClickHouse client crate so the
-  runner is not the only thing importing the `clickhouse` Rust
-  crate directly. Could be relaxed if 0052 slips: a self-contained
-  client in the migration runner is acceptable for v1.
+- **0063** — needs the live `prices` database + endpoint + a
+  DDL-capable credential before Steps 3–4 can apply against the
+  cluster. (Was 0050; moved to self-served 0063 after BE 0227 shipped.)
+- **0052** — Step 3 uses its `client_mtls` for the live apply path.
+- **Steps 1–2 are unblocked now** — seeding `backfill_progress` and the
+  strategy note need only the local Docker CH and can start immediately.
 
 ## Out of scope
 
-- Schema evolution beyond Tranche 1 — column adds / drops as the
-  product matures are separate migrations spawned per-need.
-- `default.*` cross-DB views — none required for Tranche 1
-  (§3 lists none); ADR 0007 §3.7 documents the policy if/when
-  one is needed.
+- Authoring the `prices.*` DDL / MV chain / views — **done in 0060 /
+  0061 / 0059**; this task only applies + seeds + decides strategy.
+- Numbered-migration runner + `schema_migrations` table — deferred
+  unless a non-idempotent change forces it (see Step 2); spawn as its
+  own task if/when adopted.
+- MV version-propagation correctness — task **0059**.
+- Schema evolution beyond Tranche 1 — separate migrations per-need.
 - Backfill of historical data — see 0027 / 0028 (SDEX) and 0053
   (Soroban AMM).
-- Performance tuning beyond what §3 sort keys specify.
 
 ## Notes
 
 - Engines and sort keys are not free design choices: ADR 0003,
-  ADR 0004, and ADR 0007 §3.3 lock them in. Treat any deviation
-  in DDL authoring as needing a new ADR.
-- The MV chain replaces the previously-scheduled OHLCV Rollup
-  Lambda (ADR 0007 §3.4). If a future tranche revisits per-MV
-  cost or correctness, that decision lives in its own ADR; this
-  task is faithful to ADR 0007.
+  ADR 0004, and ADR 0007 §3.3 lock them in. Any DDL change needs a new
+  ADR — but DDL authoring now lives in `prices-clickhouse`, not here.
+- The MV chain shipped as **refreshable MVs** (`REFRESH EVERY …`), a
+  0060/0059 design choice that diverges from ADR 0007 §3.4's
+  incremental-cascade sketch. That divergence is owned by those tasks;
+  0051 is faithful to what shipped, not to the original sketch.
