@@ -150,6 +150,20 @@ async fn enrich_fills_close_usd_across_oracle_peg_and_pivot_tiers() {
         "idempotent pivot"
     );
 
+    // The run-scoped pivot reference table is dropped on completion (review #10):
+    // no orphan `*_xlmusd_ref_*` table should remain in the scratch database.
+    let leftover: u64 = client
+        .query(&format!(
+            "SELECT count() FROM system.tables WHERE database = '{db}' AND name LIKE '%xlmusd_ref%'"
+        ))
+        .fetch_one::<u64>()
+        .await
+        .unwrap();
+    assert_eq!(
+        leftover, 0,
+        "pivot reference table must be dropped after the run"
+    );
+
     client
         .query(&format!("DROP DATABASE {db}"))
         .execute()
