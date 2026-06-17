@@ -133,6 +133,24 @@ history:
       validated against live CH. BE confirmed: JOIN price_usd_series directly
       (no alias), structured columns (no asset_key string). Operational ask from
       BE: backfill range must cover ledger 50457424 (2024-02-20).
+  - date: 2026-06-17
+    status: active
+    who: claude
+    note: >
+      Code-review follow-up round (recall-biased /code-review of the 0061 diff →
+      10 findings, all resolved). Fixes: #1 Tier-2 premature-peg gate on
+      oracle_drained (020894c); #2 REDSTONE oracle feed kept out of the asset read
+      surface via a reserved sentinel (5584644, revised Design Decision 4); #3 EURC
+      USD/XLM-only reference scope — doc only (79cab22); #4 oracle-tier
+      volume_quote_usd write-once guard + #7 warn on zero-enrichment backlog + #8
+      USDC/USDT issuers de-duplicated into prices-clickhouse (924dfe0); #6 views
+      enforce contract⇒asset_code='' (db2720f); #5 enrichment pass snapshot-bound to
+      a max(timestamp) watermark, run()→run_through (4094c2d); #9 network-scoped SAC
+      silent-failure documented (9cfd789); #10 part 1 XLM/USDC pivot reference
+      materialized once per run (ab673d6), part 2 (rows-affected) documented as
+      blocked by the pinned clickhouse 0.13 execute() API. Design Decisions 19–27
+      added. All unit + live-CH integration tests green (+ new watermark, contract-
+      normalization, pivot-ref, and reference-cleanup test coverage).
 ---
 
 # Historical USD-quoted price series — `price_usd(asset, t)`
@@ -440,6 +458,66 @@ soroban oracle extractor, the rollup/preroll SQL). All changes build clean
     routing belongs to the 0040 point-lookup endpoint (`price_usd_at(id, ts)`),
     not the views. No new view design — already shipped per-grain. Documented in
     `views.sql` header + design note §12.6.
+
+### Emerged — code-review follow-ups (2026-06-16/17)
+
+A recall-biased `/code-review` of the 0061 diff surfaced 10 findings; all are now
+resolved (commits on `feat/0061_historical-usd-close-price-series`). The
+load-bearing decisions:
+
+19. **Tier-2 gated on the oracle tier having *drained*, not on `remaining > 0`**
+    (#1, commit `020894c`). The Tier-1 loop exits either by no-progress *or* by
+    exhausting `max_batches` while still making progress; firing Tier 2 on the
+    latter pegged unreached oracle-eligible USDC/USDT candles to a flat $1 (sticky
+    once `close_usd > 0`). Added an `oracle_drained` flag; un-drained leftovers
+    roll to the next run's oracle tier instead of being pegged.
+20. **EURC stays out of the reference set by design — doc only** (#3, commit
+    `79cab22`). EURC is Reflector-covered *and* a tradeable Stellar classic, so an
+    EURC-quoted candle reads as `no_reference`. Confirmed intended: the USD-close
+    reference set is deliberately **USD-pegged stables + XLM only** (we do not
+    price through a EUR stable). Corrected the `reflector_key_to_identity` comment
+    to distinguish "no Stellar identity" (EUR/BTC/XAU) from "deliberately out of
+    scope" (EURC); no code change.
+21. **Oracle tier makes `volume_quote_usd` write-once** (#4, commit `924dfe0`).
+    Added the `if(volume_quote_usd > 0, …)` guard the peg/pivot statements already
+    had, so a row re-admitted by the widened filter (#5 of From-Plan) can't have a
+    depeg-aware value silently rewritten from a different ASOF match; `close_usd`
+    stays unconditional (it is the column the pass owns).
+22. **Reconciliation-failure backlog gets a `warn!`** (#7, commit `924dfe0`). A
+    pass that enriches 0 rows over a non-empty backlog is the fingerprint of the
+    failure 0061 fixes (oracle↔id join matches nothing / no reference assets);
+    warn rather than let it go info-only. Low-noise: only fires when both tiers do
+    nothing.
+23. **USDC/USDT issuers de-duplicated into `prices-clickhouse`** (#8, commit
+    `924dfe0`). The load-bearing join keys were hand-synced literals across 4+ Rust
+    sites; promoted to a single `pub` const in `prices-clickhouse`, re-exported by
+    `sdex-backfill` and `enrichment-worker`. The `views.sql` copy stays a SQL
+    literal (SQL can't reference a Rust const) but is annotated as hand-synced.
+24. **Natural-identity views enforce `contract ⇒ asset_code=''`** (#6, commit
+    `db2720f`). `price_usd_series`, `_1h`, and `current_price_usd` now force
+    `asset_code`/`issuer_address` to `''` for the `contract` kind
+    (`if(contract_address != '', '', …)`) rather than passing them through, so the
+    documented JOIN-interop contract holds even if discovery/metadata ever
+    populates a Soroban token's symbol.
+25. **Enrichment pass is snapshot-bound to a watermark** (#5, commit `4094c2d`).
+    Progress/termination was inferred from a global `count_candidates()` delta,
+    which a concurrent live insert (0038) could inflate, falsely tripping the
+    no-progress break. Capture `watermark = max(timestamp)` at start and bound
+    every count + enrich statement to `timestamp <= watermark`; newer candles roll
+    to the next run. Split `run()` → `run_through(watermark)` for testability.
+26. **Network-scoped SAC silent-failure documented, not parameterized** (#9, commit
+    `9cfd789`). The mainnet passphrase is hard-coded in `from_existing`; a
+    non-mainnet run would silently derive wrong SACs. Per agreed scope, expanded
+    the `MAINNET_PASSPHRASE` note to spell out the failure mode and name the single
+    bake-in point to parameterize, rather than threading network through config.
+27. **XLM/USDC pivot reference materialized once per run** (#10 part 1, commit
+    `ab673d6`). The pivot re-aggregated the whole XLM/USDC series under `FINAL` on
+    every batch; now materialized once into a run-scoped MergeTree table
+    (watermark-bounded, uniquely named, dropped on all paths) that the per-batch
+    pivot ASOF-joins. #10 part 2 (per-batch `FINAL` count scans → rows-affected) is
+    **documented but not done**: the pinned `clickhouse` 0.13 `execute()` doesn't
+    surface `X-ClickHouse-Summary`, so it would need a raw-HTTP bypass; the #25
+    watermark at least pins each count to a fixed population.
 
 ## Future Work
 
