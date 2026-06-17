@@ -95,16 +95,22 @@ wrong). The mTLS client surface is consumed by:
 
 ## Implementation Plan
 
-### Step 1: TLS-enable the `clickhouse` dependency
+### Step 1: TLS-enable the `clickhouse` dependency — DONE (2026-06-17)
 
-- Add the `clickhouse` crate's TLS feature (rustls-based) to the
-  workspace dep alongside `inserter`. Pin workspace-level `rustls`
-  to the major version that feature pulls — the multi-rustls
-  compile hazard is real (see Notes).
-- Add `aws-sdk-secretsmanager` + `aws-config` to
-  `packages/prices-clickhouse/Cargo.toml`.
-- Commit BE's CA cert as a static asset in the crate
-  (`assets/be-ca.pem`, public key material — safe to commit).
+- Enabled `rustls-tls-ring` + `rustls-tls-webpki-roots` on the
+  workspace `clickhouse` dep alongside `inserter`. `ring` (not the
+  default `aws-lc` bundle) avoids a cmake/C toolchain — friendlier for
+  Lambda cross-builds; `webpki-roots` bundles Mozilla roots to verify
+  Caddy's Let's Encrypt server cert.
+- Verified: workspace builds, and the tree resolves to a single
+  `rustls` (0.23.40) — no multi-rustls hazard, so no explicit pin
+  needed (left for Step 2 if a direct rustls dep is added).
+- **Dropped the "commit BE's CA cert as a static asset" item** — see
+  Emerged decision 1. Caddy's *server* cert is Let's Encrypt (public),
+  so the client verifies it with `webpki-roots`; BE's CA lives on Caddy
+  for *client* verification, not in our code.
+- `aws-sdk-secretsmanager` / `aws-config` deferred to Step 2, where
+  they're actually used (avoids a dead dependency in a Step-1-only PR).
 
 ### Step 2: mTLS config + Secrets-Manager loader (extend, don't replace)
 
@@ -169,8 +175,9 @@ Mirror the existing `tests/views_it.rs` Docker-CH harness:
 - [ ] `packages/prices-clickhouse` gains `MtlsConfig` +
       `mtls_from_env` + `client_mtls`; the existing plaintext
       `Config`/`client` path is unchanged and still compiles
-- [ ] Workspace `clickhouse` TLS feature enabled; `rustls` pinned
-      to a single major version (no multi-rustls build)
+- [x] Workspace `clickhouse` TLS feature enabled
+      (`rustls-tls-ring` + `rustls-tls-webpki-roots`); tree resolves to
+      a single `rustls` 0.23.40 (no multi-rustls build) — Step 1
 - [ ] Integration test confirms warm-connection reuse across
       simulated Lambda invocations (single TLS handshake per
       container lifetime)
@@ -181,6 +188,34 @@ Mirror the existing `tests/views_it.rs` Docker-CH harness:
       var contract from 0011 / 0063
 - [ ] `clickhouse_client.reconnect_count` metric emitted; reconnect
       path verified against a manually-killed TLS connection in test
+
+## Implementation Notes
+
+**Step 1 done (2026-06-17):** workspace `Cargo.toml` `clickhouse` dep now
+carries `rustls-tls-ring` + `rustls-tls-webpki-roots`. `cargo build
+--workspace` is clean; `cargo tree -i rustls` shows a single `rustls 0.23.40`
+with `ring 0.17.14`, `hyper-rustls 0.27.9`, `webpki-roots 1.0.8`. No code
+changes — TLS is a compile-time capability switch; the mTLS wiring is Step 2.
+
+## Design Decisions
+
+### Emerged
+
+1. **No embedded BE CA in the client.** The original plan said to commit
+   `assets/be-ca.pem`. Confirmed from BE's `Caddyfile` that Caddy's *server*
+   cert is Let's Encrypt (public) — the client verifies it with `webpki-roots`.
+   BE's CA is used by Caddy to verify *our* client cert (`clients-ca.pem` on the
+   box), so it never belongs in our code. Dropped.
+2. **`ring` crypto provider, not aws-lc.** `rustls-tls-ring` over the default
+   `rustls-tls` (aws-lc) to avoid a cmake/C-toolchain build dep — better for
+   Lambda cross-compiles. Single-rustls resolution means no explicit pin needed
+   yet.
+3. **aws-sdk deferred to Step 2.** Adding it in Step 1 would be a dead dep; it's
+   added where the Secrets-Manager loader uses it.
+4. **Admin cert = ops only.** BE handed over an mTLS admin cert+key (the
+   DDL-capable identity for schema-apply / 0063 provisioning, run from the
+   workstation). The runtime Lambdas must still use scoped
+   `prices-ingestion`/`prices-api` certs from Secrets Manager — least privilege.
 
 ## Blocked on
 

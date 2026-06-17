@@ -16,7 +16,12 @@ stellar-xdr = { version = "=26.0.0", features = ["curr"] }
 stellar-strkey = "0.0.13"
 sha2 = "0.10"
 xdr-parser = { git = "https://github.com/rumblefishdev/soroban-block-explorer.git", branch = "develop" }
-clickhouse = { version = "0.13", features = ["inserter"] }
+# TLS: `rustls-tls-ring` compiles in rustls with the ring crypto provider
+# (lighter than the default aws-lc bundle, no cmake/C toolchain — friendlier for
+# Lambda cross-builds). `rustls-tls-webpki-roots` bundles Mozilla roots so we can
+# verify Caddy's Let's Encrypt server cert without relying on an OS trust store.
+# Client-cert (mTLS) material is loaded at runtime in the prices-clickhouse crate.
+clickhouse = { version = "0.13", features = ["inserter", "rustls-tls-ring", "rustls-tls-webpki-roots"] }
 tokio = { version = "1", features = ["full"] }
 clap = { version = "4", features = ["derive", "env"] }
 tracing = "0.1"
