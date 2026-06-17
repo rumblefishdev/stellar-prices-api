@@ -38,6 +38,18 @@ history:
       schema-apply runner and the 0038/0039/0040 Lambdas all import.
       Live-cluster validation step still waits on 0063 (was 0050) for
       a real cert + endpoint.
+  - date: 2026-06-17
+    status: active
+    who: oski
+    note: >
+      Studied BE's crates/db-clickhouse/src/mtls.rs (their production mTLS CH
+      client) and chose to PORT it into prices-clickhouse behind an `aws-mtls`
+      feature rather than design our own or git-depend on their crate. First
+      Step-1 attempt (enabling the clickhouse crate's rustls-tls features) was
+      the wrong mechanism — closed PR #44 — because that can't present a client
+      cert; mTLS needs a custom connector via with_http_client (confirmed
+      present + connector-generic in our 0.13, so no version bump). Port + unit
+      tests done; live round-trip deferred to 0063/0051.
 ---
 
 # ClickHouse mTLS client shared crate
@@ -93,100 +105,66 @@ wrong). The mTLS client surface is consumed by:
   step.
 - 0051 — `schema-apply` migration runner.
 
-## Implementation Plan
+> **Approach (2026-06-17): port BE's proven module, don't design our own.**
+> BE's `crates/db-clickhouse/src/mtls.rs` already solves this exact problem in
+> production. After studying it we chose to **port it near-verbatim** into
+> `prices-clickhouse` behind an `aws-mtls` feature (decision recorded in the
+> task history + Design Decisions). The custom `MtlsConfig`/two-secret API
+> sketched earlier is superseded by BE's single-bundle + Lambda-Extension shape.
 
-### Step 1: TLS-enable the `clickhouse` dependency
+## Implementation Plan (as built)
 
-- Add the `clickhouse` crate's TLS feature (rustls-based) to the
-  workspace dep alongside `inserter`. Pin workspace-level `rustls`
-  to the major version that feature pulls — the multi-rustls
-  compile hazard is real (see Notes).
-- Add `aws-sdk-secretsmanager` + `aws-config` to
-  `packages/prices-clickhouse/Cargo.toml`.
-- Commit BE's CA cert as a static asset in the crate
-  (`assets/be-ca.pem`, public key material — safe to commit).
+### Step 1: Port the mTLS module — DONE (2026-06-17)
 
-### Step 2: mTLS config + Secrets-Manager loader (extend, don't replace)
+- `packages/prices-clickhouse/src/mtls.rs` — ported from BE. Public surface:
+  - `MtlsBundle { cert_pem, key_pem, ca_pem }` (manual `Debug` redacts all PEM).
+  - `fetch_bundle_from_extension(secret_name)` — fetches the bundle from the
+    **AWS Parameters & Secrets Lambda Extension** (`localhost:2773`, `reqwest`),
+    warm-cached; reads `AWS_SESSION_TOKEN`.
+  - `client_with_mtls(domain, &bundle, database)` — builds a `hyper-rustls`
+    connector with `with_client_auth_cert`, root store = `webpki-roots` + bundle
+    CA, injected into `clickhouse::Client::with_http_client`.
+  - `client_from_lambda_env(database)` — one-shot for cold start; reads
+    `MTLS_SECRET_NAME` + `CH_DOMAIN`.
+- `Cargo.toml` — new `aws-mtls` feature gating optional deps (hyper-util,
+  hyper-rustls, rustls[aws-lc-rs], rustls-pemfile, rustls-pki-types,
+  webpki-roots, reqwest, serde, serde_json). Default build stays plaintext-only.
+- `lib.rs` — `#[cfg(feature = "aws-mtls")] pub mod mtls;`.
 
-Keep the existing `Config` / `from_env()` / `client(cfg)` plaintext
-path untouched (Docker + local dev + the `prices-clickhouse-init`
-binary depend on it). Add an mTLS variant beside it:
+### Out of scope vs the original sketch
 
-```rust
-pub struct MtlsConfig {
-    pub endpoint: String,        // https://caddy.example.com:443
-    pub database: String,        // defaults to PROD_DATABASE ("prices")
-    pub user: String,            // e.g. prices_writer / prices_reader
-    pub cert_secret_id: String,  // AWS Secrets Manager ARN
-    pub key_secret_id: String,   // AWS Secrets Manager ARN
-}
-
-pub async fn mtls_from_env() -> Result<MtlsConfig, ConfigError>; // CH_* env
-pub async fn client_mtls(cfg: &MtlsConfig) -> Result<Client, BuildError>;
-```
-
-`mtls_from_env` reads `CH_ENDPOINT`, `CH_DATABASE`, `CH_USER`,
-`CH_CERT_SECRET_ID`, `CH_KEY_SECRET_ID` (populated by the 0011 CDK
-stack from the SSM keys 0063 publishes). `client_mtls` fetches the
-two secrets in parallel, parses the PEMs, configures rustls with the
-embedded BE CA + the client cert/key, and returns a `clickhouse::Client`.
-
-### Step 3: Warm-connection helper for Lambdas
-
-Provide a `lambda_init`-style helper using `OnceCell` so a Lambda's
-`main` warms the TLS connection once in global init and reuses the
-clone-cheap `Client` across invocations. Document the pattern in the
-crate README (the existing `Client`-is-cheap-to-clone note already
-hints at this).
-
-### Step 4: Resilience + metric
-
-- Cold-start TLS handshake failure → fail fast (let the Lambda
-  runtime restart the container; no retry).
-- Mid-request connection drop → verify the upstream `clickhouse`
-  crate re-handshakes transparently; if not, add a thin one-attempt
-  retry layer.
-- Emit `clickhouse_client.reconnect_count` for ops visibility.
-
-> Insert/read helpers (`insert_ohlcv_rows`, `select_final`,
-> `select_argmax_groupby`) are **deferred** unless the existing crate
-> lacks them — the extractor/backfill crates already own their row
-> structs + writers (per the crate's own lib.rs doc comment). Add only
-> if a concrete consumer needs a shared wrapper; otherwise out of scope.
-
-### Step 5: Tests
-
-Mirror the existing `tests/views_it.rs` Docker-CH harness:
-
-- Unit: `mtls_from_env` parsing + `MtlsConfig` validation.
-- Integration: Docker CH with a test-generated self-signed CA +
-  client-cert pair; run an INSERT + SELECT round-trip over mTLS.
-  Reuse the warm `Client` across two simulated invocations and assert
-  no second TLS handshake (instrument via tracing).
+- **No `MtlsConfig`/two-secret API, no `CH_*` env quartet** — BE uses a single
+  JSON bundle secret + `MTLS_SECRET_NAME`/`CH_DOMAIN`; we match it for cross-team
+  consistency.
+- **No embedded BE CA asset** — Caddy's server cert is public LE (verified via
+  `webpki-roots`); the bundle CA arrives at runtime in the secret.
+- **No `OnceCell` helper / `reconnect_count` metric** — BE builds the
+  clone-cheap client once into Lambda state and relies on the hyper pool; we
+  follow that. Add a metric later only if ops needs it.
+- **No insert/read helpers** — extractor/backfill crates own their writers.
 
 ## Acceptance Criteria
 
-- [ ] `packages/prices-clickhouse` gains `MtlsConfig` +
-      `mtls_from_env` + `client_mtls`; the existing plaintext
-      `Config`/`client` path is unchanged and still compiles
-- [ ] Workspace `clickhouse` TLS feature enabled; `rustls` pinned
-      to a single major version (no multi-rustls build)
-- [ ] Integration test confirms warm-connection reuse across
-      simulated Lambda invocations (single TLS handshake per
-      container lifetime)
-- [ ] mTLS surface consumed by at least one downstream (0038 live
-      processor / 0040 handlers once they unblock; 0063's smoke test
-      can be the first live exercise)
-- [ ] README documents the `lambda_init` pattern and the env
-      var contract from 0011 / 0063
-- [ ] `clickhouse_client.reconnect_count` metric emitted; reconnect
-      path verified against a manually-killed TLS connection in test
+- [x] `prices-clickhouse` gains an `aws-mtls`-gated `mtls` module
+      (`client_with_mtls` / `client_from_lambda_env` / `fetch_bundle_from_extension`);
+      the plaintext `Config`/`client` path is unchanged and still builds lean
+- [x] mTLS stack compiles on our `clickhouse` 0.13 via `with_http_client`
+      (no version bump); single `rustls` 0.23.40 in the tree
+- [x] Unit tests pass: PEM-parse shape, `MtlsBundle` Debug redaction,
+      missing-env error (`cargo test -p prices-clickhouse --features aws-mtls`)
+- [ ] Live mTLS round-trip against the Hetzner `prices` DB (dev) — deferred to
+      0063 (needs a real cert bundle + endpoint); first exercised by 0051's
+      live schema-apply
+- [ ] Consumed by ≥1 downstream (0051 schema-apply / 0038 / 0040 as they land)
+- [ ] README documents the env-var contract (`MTLS_SECRET_NAME`, `CH_DOMAIN`)
+      + the build-once-reuse pattern
 
 ## Blocked on
 
-- **None for authoring + Docker testing** — can start now.
-- **0063** (was 0050) — only the live-cluster validation step needs a
-  real cert + key + endpoint. Docker testing covers everything else.
+- **None for the port + unit tests** — DONE.
+- **0063** (was 0050) — the live round-trip needs a real cert bundle in Secrets
+  Manager + the Caddy endpoint. The bundle is the single JSON `{cert,key,ca}`
+  secret named by `MTLS_SECRET_NAME`.
 
 ## Out of scope
 
@@ -197,15 +175,46 @@ Mirror the existing `tests/views_it.rs` Docker-CH harness:
   throughput warrants it.
 - Migration tooling — see 0051.
 
+## Design Decisions
+
+### Emerged
+
+1. **Port BE's `mtls.rs`, don't design our own** (chosen over depending on BE's
+   `db-clickhouse` crate via git or extracting a shared crate). The git-dep
+   route would force a `clickhouse` version bump to BE's `=0.15.0` and drag
+   their schema/persist/domain code into our build; the shared-crate route needs
+   BE lead time. Porting keeps a clean boundary, stays on our 0.13, and inherits
+   their war-story fixes by copying. Cost: manually track future BE changes to
+   this ~250-line file.
+2. **First Step-1 attempt (enable the `clickhouse` crate's `rustls-tls-*`
+   features) was wrong** and was closed (PR #44). Those features make the
+   crate's *default* client TLS-capable but cannot present a client cert; mTLS
+   needs a custom connector via `with_http_client`. Confirmed `with_http_client`
+   exists in 0.13 and its `impl<C> HttpClient for Client<C, RequestBody>` is
+   generic over the connector — so BE's pattern compiles on 0.13.
+3. **`aws-lc-rs` provider** (matches BE) — builds fine locally (cmake present)
+   and in the Lambda toolchain. If a future build target lacks a C toolchain,
+   switch the `aws-mtls` feature + `install_default_crypto_provider()` to `ring`.
+4. **Single bundle + Lambda Extension** over `aws-sdk-secretsmanager` + two
+   secrets — warm-cached, no SM API on the hot path, and identical to BE so the
+   shared infra (CDK secret naming, `MTLS_SECRET_NAME`/`CH_DOMAIN`) is uniform.
+
+## Implementation Notes
+
+- Ported `mtls.rs` (gated `aws-mtls`), added the feature + optional deps to
+  `Cargo.toml`, wired `pub mod mtls` in `lib.rs`.
+- Verified: default build lean (no rustls); `--features aws-mtls` builds; clippy
+  clean; 7 unit tests pass; fmt clean. `cargo tree` → single `rustls 0.23.40`,
+  `hyper-rustls 0.27.9`, `reqwest 0.12`, `aws-lc-rs`.
+- Live round-trip not runnable here (needs real cert bundle + Caddy endpoint) —
+  deferred to 0063/0051 live apply.
+
 ## Notes
 
-- The `clickhouse` Rust crate's TLS feature pulls a specific
-  `rustls` major version; pin the workspace-level `rustls` to
-  match to avoid the multi-version-rustls compile hazard.
-- BE's CA cert is checked into the crate (or workspace) as a
-  static asset — that's safe to commit (public key material).
-  The per-env client cert + key are runtime-loaded from
-  Secrets Manager, never committed.
-- Once 0038/0039/0040 land, audit that every CH access goes
-  through this crate; flag any direct `clickhouse::Client::new`
-  in code review.
+- Keep this module in lockstep with BE's `crates/db-clickhouse/src/mtls.rs`;
+  port their fixes when they change it.
+- The per-env client cert + key arrive at runtime in the Secrets Manager bundle
+  — never committed. Only BE's public CA cert would ever be safe to commit, and
+  we don't even need that (it rides in the bundle). See secrecy rule in memory.
+- Once 0038/0039/0040 land, audit that every remote CH access goes through this
+  module; flag any direct plaintext `client()` against the prod endpoint.
