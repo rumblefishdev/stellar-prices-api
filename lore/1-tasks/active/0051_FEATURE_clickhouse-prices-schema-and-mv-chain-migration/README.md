@@ -177,11 +177,13 @@ provenance:
 
 Remaining for this task:
 
-- [ ] `prices.backfill_progress` seeded with the two canonical rows
+- [x] `prices.backfill_progress` seeded with the two canonical rows
       (`sdex_archive`, `soroban_amm`, `status='running'`), idempotently,
-      asserted in `views_it.rs`
-- [ ] Production apply/version-tracking strategy decided + recorded in
-      `notes/S-prod-apply-strategy.md`
+      asserted in `views_it.rs` — `schema/seed.sql` + `apply_seed`, wired
+      into `prices-clickhouse-init`; verified end-to-end (re-run preserves
+      `current_ledger`)
+- [x] Production apply/version-tracking strategy decided + recorded in
+      `notes/S-prod-apply-strategy.md` — wholesale-idempotent (as shipped)
 - [ ] Init binary can apply over mTLS via 0052's `client_mtls`, under a
       DDL-capable identity (not `prices_writer`)
 - [ ] Schema applied to the live Hetzner `prices` DB for at least dev;
@@ -189,6 +191,40 @@ Remaining for this task:
       captured in `notes/G-live-schema-state.md`
 - [ ] Refreshable MV chain smoke-verified live (fixture `_1m` row
       propagates up after refresh)
+
+## Implementation Notes
+
+Steps 1–2 implemented (2026-06-17):
+
+- `packages/prices-clickhouse/schema/seed.sql` — guarded `INSERT … SELECT
+  arrayJoin([...]) WHERE task_name NOT IN (SELECT task_name FROM
+  backfill_progress)`. Seeds `sdex_archive` + `soroban_amm` (`status='running'`,
+  placeholder ledger bounds 0).
+- `src/lib.rs` — `SEED_SQL` const + `apply_seed()` (sibling to `apply_init_sql`).
+- `src/bin/prices-clickhouse-init.rs` — applies seed between tables and views.
+- `tests/views_it.rs` — `SEED_SQL` added to `setup_scratch`; new
+  `backfill_progress_seed_is_idempotent` test asserts exactly two streams and
+  that re-running the seed preserves a row's `current_ledger`.
+- Verified against ClickHouse 25.6: both integration tests pass, and the init
+  binary run twice (with simulated progress in between) keeps 2 distinct
+  streams and preserves `current_ledger=777`.
+- `notes/S-prod-apply-strategy.md` records the wholesale-idempotent decision.
+
+## Design Decisions
+
+### Emerged
+
+1. **Seed as a guarded `INSERT`, not a blind one.** `backfill_progress` is
+   `ReplacingMergeTree(updated_at)` keyed by `task_name`, so a plain re-insert
+   with a fresh `updated_at` would replace the live row and reset progress. The
+   `NOT IN` guard makes re-apply a true no-op. (Plan said "guarded against
+   duplicates"; this is the concrete mechanism.)
+2. **Seed lives in `schema/seed.sql` + `apply_seed`, applied by the init
+   binary** rather than inlined into `init.sql` — keeps data-seeding separate
+   from DDL while staying on the single idempotent apply path.
+3. **Placeholder ledger bounds = 0.** The spec only mandated `status='running'`;
+   the backfill streams (0028/0053) fill real bounds as they advance.
+4. **Converted 0051 to directory form** to hold `notes/S-prod-apply-strategy.md`.
 
 ## Blocked on
 

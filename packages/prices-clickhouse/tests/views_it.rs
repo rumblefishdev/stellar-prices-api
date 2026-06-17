@@ -34,6 +34,9 @@ async fn setup_scratch(db: &str) -> Client {
     prices_clickhouse::apply_sql(&client, &rewrite(prices_clickhouse::INIT_SQL, db))
         .await
         .unwrap();
+    prices_clickhouse::apply_sql(&client, &rewrite(prices_clickhouse::SEED_SQL, db))
+        .await
+        .unwrap();
     prices_clickhouse::apply_sql(&client, &rewrite(prices_clickhouse::VIEWS_SQL, db))
         .await
         .unwrap();
@@ -230,6 +233,72 @@ async fn views_expose_usd_series_and_reference() {
         ("contract", ""),
         "current_price_usd blanks the contract token's asset_code"
     );
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// `backfill_progress` is seeded with exactly the two canonical streams, and
+/// re-running the seed is a no-op that does not reset live progress (task 0051
+/// Step 1). `setup_scratch` already applies `SEED_SQL` once.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn backfill_progress_seed_is_idempotent() {
+    let db = "it_backfill_seed";
+    let client = setup_scratch(db).await;
+
+    // Exactly the two canonical streams after the initial apply.
+    let names: Vec<String> = client
+        .query(&format!(
+            "SELECT DISTINCT task_name FROM {db}.backfill_progress ORDER BY task_name"
+        ))
+        .fetch_all::<String>()
+        .await
+        .unwrap();
+    assert_eq!(
+        names,
+        vec!["sdex_archive".to_string(), "soroban_amm".to_string()],
+        "seed creates exactly the two canonical streams"
+    );
+
+    // Advance a stream, then re-run the seed. The explicit far-future updated_at
+    // guarantees this row wins the ReplacingMergeTree(updated_at) merge over the
+    // seed row regardless of wall-clock timing.
+    client
+        .query(&format!(
+            "INSERT INTO {db}.backfill_progress \
+             (task_name, start_ledger, target_ledger, current_ledger, status, updated_at) VALUES \
+             ('sdex_archive', 0, 1000, 500, 'running', toDateTime(4000000000))"
+        ))
+        .execute()
+        .await
+        .unwrap();
+    prices_clickhouse::apply_sql(&client, &rewrite(prices_clickhouse::SEED_SQL, db))
+        .await
+        .unwrap();
+
+    // Still exactly two distinct streams — the re-run inserted nothing.
+    let distinct: u64 = client
+        .query(&format!(
+            "SELECT uniqExact(task_name) FROM {db}.backfill_progress"
+        ))
+        .fetch_one::<u64>()
+        .await
+        .unwrap();
+    assert_eq!(distinct, 2, "re-running the seed adds no new streams");
+
+    // Progress is preserved — the seed did not clobber current_ledger back to 0.
+    let current: u64 = client
+        .query(&format!(
+            "SELECT current_ledger FROM {db}.backfill_progress FINAL WHERE task_name = 'sdex_archive'"
+        ))
+        .fetch_one::<u64>()
+        .await
+        .unwrap();
+    assert_eq!(current, 500, "re-running the seed preserves live progress");
 
     client
         .query(&format!("DROP DATABASE {db}"))

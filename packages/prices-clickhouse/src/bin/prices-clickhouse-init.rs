@@ -1,8 +1,9 @@
 //! Apply the prices ClickHouse schema to a target instance.
 //!
 //! Idempotent — every statement is `CREATE … IF NOT EXISTS`. Applies the init
-//! tables and the read-surface views (`prices.price_usd_series`,
-//! `prices.usd_reference`); the refreshable rollup MVs are opt-in (`--rollups`).
+//! tables, seeds the canonical `backfill_progress` streams, and applies the
+//! read-surface views (`prices.price_usd_series`, `prices.usd_reference`); the
+//! refreshable rollup MVs are opt-in (`--rollups`).
 //! Used by local dev / CI: `cargo run -p prices-clickhouse --bin prices-clickhouse-init`.
 //!
 //! Reads `CLICKHOUSE_URL`, `CLICKHOUSE_USER`, `CLICKHOUSE_PASSWORD`,
@@ -12,7 +13,9 @@
 //!   --rollups   also apply schema/rollups.sql (production refreshable MVs;
 //!               needs ClickHouse ≥ 23.12)
 
-use prices_clickhouse::{Config, ROLLUPS_SQL, VIEWS_SQL, apply_init_sql, apply_sql, client};
+use prices_clickhouse::{
+    Config, ROLLUPS_SQL, VIEWS_SQL, apply_init_sql, apply_seed, apply_sql, client,
+};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -41,6 +44,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = client(&cfg);
     apply_init_sql(&client).await?;
     tracing::info!("tables applied");
+
+    // Seed the canonical backfill streams. Idempotent (NOT IN guard), so this is
+    // safe to run on every apply and never clobbers live progress.
+    apply_seed(&client).await?;
+    tracing::info!("backfill_progress seeded");
 
     // Read-surface views depend on the tables above; plain views, no CH-version
     // constraint, so always applied (unlike the opt-in refreshable rollup MVs).
