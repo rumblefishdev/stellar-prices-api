@@ -25,6 +25,7 @@ const ENV_CANDIDATES: &str = "CANDIDATES_FIXTURE";
 const ENV_ORACLE_FIXTURE: &str = "ORACLE_FIXTURE";
 const ENV_ORACLE_NAME: &str = "ORACLE_NAME";
 const ENV_WINDOW_S: &str = "FORWARD_FILL_WINDOW_S";
+const ENV_PIVOT_WINDOW_S: &str = "PIVOT_WINDOW_S";
 const ENV_BATCH_SIZE: &str = "BATCH_SIZE";
 const ENV_MAX_BATCHES: &str = "MAX_BATCHES";
 
@@ -166,6 +167,7 @@ async fn run_production(url: String) -> Result<(), Error> {
         table: std::env::var(ENV_CH_TABLE).unwrap_or_else(|_| "price_ohlcv_1m".to_string()),
         oracle_name: std::env::var(ENV_ORACLE_NAME).unwrap_or_else(|_| "reflector".to_string()),
         window_s: parse_env_or(ENV_WINDOW_S, 300),
+        pivot_window_s: parse_env_or(ENV_PIVOT_WINDOW_S, 86_400),
         batch_size: parse_env_or(ENV_BATCH_SIZE, 10_000),
         max_batches: parse_env_or(ENV_MAX_BATCHES, 20),
     };
@@ -176,6 +178,7 @@ async fn run_production(url: String) -> Result<(), Error> {
         table = %cfg.table,
         oracle_name = %cfg.oracle_name,
         window_s = cfg.window_s,
+        pivot_window_s = cfg.pivot_window_s,
         batch_size = cfg.batch_size,
         max_batches = cfg.max_batches,
         "enrichment-worker cold start (clickhouse mode)"

@@ -6,7 +6,7 @@ services:
       - '9000:9000'
     volumes:
       - clickhouse-data:/var/lib/clickhouse
-      - ./packages/sdex-backfill/schema/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - ./packages/prices-clickhouse/schema/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     environment:
       CLICKHOUSE_DB: prices
       CLICKHOUSE_USER: default
