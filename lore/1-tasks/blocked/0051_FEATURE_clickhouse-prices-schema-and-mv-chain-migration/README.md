@@ -2,7 +2,7 @@
 id: "0051"
 title: "ClickHouse `prices.*` schema + materialised-view rollup chain migration"
 type: FEATURE
-status: active
+status: blocked
 related_adr: ["0003", "0004", "0007"]
 related_tasks: ["0060", "0061", "0059", "0063", "0052", "0011", "0038", "0046", "0050"]
 tags: [layer-database, priority-high, effort-medium, milestone-M1, clickhouse, hetzner, schema, migrations, ddl]
@@ -83,6 +83,15 @@ history:
       applies via loopback-admin like BE; no mTLS code to write. The 0052
       dependency drops; only the live apply remains, gated on 0063 access
       handover.
+  - date: 2026-06-18
+    status: blocked
+    who: oski
+    note: >
+      Descope merged to develop via PR #46 (squash 1a31da6). With Step 3
+      descoped and Steps 1–2 already shipped, the only remaining work is
+      Step 4 — the live loopback-admin apply + MV smoke test — which needs
+      0063 to create the `prices` database and hand over box admin access.
+      No code work remains on 0051 itself; moving to blocked on 0063.
 ---
 
 # ClickHouse `prices.*` schema + materialised-view rollup chain migration
