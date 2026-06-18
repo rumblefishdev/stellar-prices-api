@@ -42,6 +42,21 @@ history:
       Hard constraint (operator): **no Hetzner or AWS calls** — every remote
       action (clickhouse-client on the box, ansible-playbook, aws
       secretsmanager) is gated on explicit per-session approval.
+  - date: 2026-06-18
+    status: active
+    who: oski
+    note: >
+      DDL-apply identity decided — **Option 1**: loopback `default` admin
+      applies all DDL; runtime certs (`prices_writer`/`prices_reader`) carry
+      no DDL (`write_no_ddl`/`read_only`, grants on `prices.*` only). Chosen
+      over the G-note's scoped-DDL writer and the hybrid migrator cert; matches
+      BE (removed remote-DDL users in BE 0241) and keeps the 0051 loopback
+      descope. Authored `notes/G-provisioning-plan.md` — the ready-to-execute
+      runbook with drafted BE-PR XML (services/quotas + CN-map), the CREATE
+      DATABASE one-shot, the cert→single-bundle-secret procedure (aligned to
+      0052, reconciling the old two-secret assumption), verification, and a
+      gated-action inventory. All authoring only — no Hetzner/AWS/BE-repo
+      action taken.
 ---
 
 # Provision the `prices` database on Hetzner CH (self-served)
@@ -97,22 +112,28 @@ under admin, then kept reproducible by 0051's migration runner.
 
 ### Step 2: Add the prices tenant to BE's RBAC (PR to soroban-block-explorer)
 
-Mirror the existing BE tenant shape (see `G-be-prices-db-rbac-ask.md`):
+Mirror the existing BE tenant shape. **Concrete drafted XML/CN-map/SQL
+lives in `notes/G-provisioning-plan.md`** (Option 1). In summary:
 
 - `users.d/services.xml`: add `prices_writer` (profile `write_no_ddl`,
-  quota `high_write`) and `prices_reader` (profile `read_only`, quota
-  `api_throttle` or a new `prices_read` quota), both `<no_password/>`
-  with networks restricted to loopback + the compose bridge subnet.
-- Reuse BE's existing `write_no_ddl` / `read_only` profiles unless
-  prices needs tighter caps; if so add a `prices_write` profile in
-  `profiles.xml`. Decide at impl time; record in a short note.
-- `CLICKHOUSE_CN_USER_MAP`: add `prices-ingestion-{env}:prices_writer`
-  and `prices-api-{env}:prices_reader`.
+  quota `prices_write`, grant `SELECT, INSERT, OPTIMIZE ON prices.*`) and
+  `prices_reader` (profile `read_only`, quota `prices_read`, grant
+  `SELECT ON prices.*`), both `<no_password/>` with networks restricted
+  to loopback + the compose bridge subnet.
+- `users.d/profiles.xml`: **no change** — reuse BE's `write_no_ddl`
+  (8 GiB) + `read_only` (4 GiB/30 s). No `prices_write` profile (Option 1).
+- `users.d/quotas.xml`: add dedicated `prices_write` / `prices_read`
+  (caps copied from BE's `high_write` / `api_throttle`) so prices never
+  draws down BE's per-service budget.
+- `CLICKHOUSE_CN_USER_MAP` (env, not a file): append
+  `prices-ingestion-{env}:prices_writer` and `prices-api-{env}:prices_reader`.
 
-> DDL caveat: `write_no_ddl` blocks `CREATE TABLE`. 0051's schema-apply
-> runs under an admin/DDL-capable identity, **not** `prices_writer`.
-> Resolve which identity applies schema as part of Step 2 (either a
-> short-lived admin cert for migrations, or BE applies the initial DDL).
+> **DDL identity — DECIDED 2026-06-18 (Option 1, Design Decisions → Emerged #1):**
+> DDL is the box `default` admin over loopback; `prices_writer` stays
+> `write_no_ddl` with **no** `CREATE`/`DROP`/`ALTER` grant. Schema is applied by
+> 0051 over loopback (Step 4 below), **not** over mTLS and **not** by
+> `prices_writer`. No migration cert is issued (revisit only if box-access-per-
+> migration becomes friction — then add an Option-3 `prices_migrator` cert).
 
 ### Step 3: Create the database + deploy the RBAC
 
@@ -129,18 +150,25 @@ Mirror the existing BE tenant shape (see `G-be-prices-db-rbac-ask.md`):
   - Requires the CA private key. If admin-on-the-box does **not**
     include CA-key access, this sub-step stays a BE ask (BE runs the
     script and hands over the bundle) — flag it explicitly.
-- Store cert+key (+ CA cert) bundles in AWS Secrets Manager, 2 secrets
-  per env, at the keys 0011's CDK + 0052's client crate expect.
+- Store each cert as a **single JSON bundle** `{cert,key,ca}` in AWS
+  Secrets Manager (one secret per identity per env), named by the
+  `MTLS_SECRET_NAME` 0052's client reads — **not** the two-secret
+  cert/key split the 0050 G-note assumed. Reconcile 0011/0038 CDK to the
+  single-bundle shape if it still emits `MTLS_CERT_SECRET_NAME` /
+  `MTLS_KEY_SECRET_NAME` (see `notes/G-provisioning-plan.md` §5 + open
+  item 2; likely a follow-up task).
 
 ### Step 5: Verify tenant isolation
 
 For each env (dev → staging → prod):
 
 - Connect via Caddy:443 with the prices cert; `SELECT version()` → 200.
-- As `prices_writer`: `CREATE TABLE prices.smoke (x UInt8) ENGINE=Memory`
-  + `INSERT` succeed; the same against `default.*` is **denied**.
+- As `prices_writer`: `INSERT` into an existing `prices.*` table succeeds;
+  `INSERT`/`SELECT` against `default.*` is **denied**; `CREATE TABLE
+  prices.smoke …` is **denied** too (writer has no DDL — the Option-1
+  proof). The tables themselves are created by 0051's loopback apply, not
+  here.
 - As `prices_reader`: `SELECT` from `prices.*` works; any write denied.
-- Drop the smoke table.
 
 ## Acceptance Criteria
 
@@ -150,15 +178,48 @@ For each env (dev → staging → prod):
       quota scoping resource usage away from BE's `default.*`
 - [ ] Caddy `CLICKHOUSE_CN_USER_MAP` maps the prices CNs to the prices
       users; unmapped CNs 403
-- [ ] Per-env mTLS cert+key pairs issued and stored in AWS Secrets
-      Manager (2 secrets/env) at the keys 0011/0052 read; or, if CA-key
-      access is withheld, the BE-issuance hand-off is recorded done
+- [ ] Per-env mTLS certs issued and stored in AWS Secrets Manager as a
+      single `{cert,key,ca}` JSON bundle per identity (named by
+      `MTLS_SECRET_NAME`, per 0052); or, if CA-key access is withheld,
+      the BE-issuance hand-off is recorded done
 - [ ] Smoke test confirms isolation: `prices.*` writable by
-      `prices_writer`, `default.*` denied; `prices_reader` read-only
-- [ ] DDL-apply identity for 0051 decided + documented (admin cert vs
-      BE applies initial DDL)
-- [ ] `notes/G-provisioning-record.md` captures the SQL/XML applied,
-      SSM/Secrets keys, CNs, and per-env completion dates
+      `prices_writer`, `default.*` denied, `CREATE TABLE` denied to the
+      writer; `prices_reader` read-only
+- [x] DDL-apply identity for 0051 decided + documented — **Option 1:
+      loopback `default` admin applies DDL; `prices_writer` is
+      `write_no_ddl`** (Design Decisions → Emerged #1;
+      `notes/G-provisioning-plan.md`)
+- [x] Provisioning runbook authored — `notes/G-provisioning-plan.md`
+      (drafted BE-PR XML/CN-map, SQL, cert/SM procedure, gated-action
+      inventory). A per-env completion record is appended as steps run.
+
+## Design Decisions
+
+### Emerged
+
+1. **Option 1 — loopback-admin DDL; no-DDL runtime certs** (chosen over
+   Option 2 "scoped-DDL `prices_writer` applies over mTLS", the literal
+   0050 G-note, and Option 3 "separate short-lived `prices_migrator`
+   cert"). 0063 grants prices-api box admin access, so the loopback
+   `default` path covers all DDL; the always-on runtime certs stay
+   least-privilege (`write_no_ddl` / `read_only`, grants on `prices.*`
+   only) — a leaked ingestion cert cannot `DROP TABLE prices.*` or touch
+   `default.*`. Matches BE exactly (they removed their remote-DDL
+   `migration_admin`/`partition_admin` users in BE 0241) and keeps the
+   0051 loopback descope intact (no mTLS apply path). Trade-off: each
+   schema change needs box access — acceptable for a low-churn OHLCV
+   schema on the wholesale-idempotent apply; upgrade to Option 3's
+   migrator cert only if that friction is ever felt. Full runbook +
+   drafted artifacts in `notes/G-provisioning-plan.md`.
+2. **No new `prices_write` profile; dedicated `prices_write`/`prices_read`
+   quotas.** Profiles reuse BE's `write_no_ddl`/`read_only` (Option 1
+   needs no DDL profile); quotas are prices-owned so prices can't draw
+   down BE's `high_write`/`api_throttle` budget (mirrors BE's own
+   `dev_read`-vs-`api_throttle` isolation). Quota naming is a minor
+   BE-PR-time call (G-plan open item 4).
+3. **Single `{cert,key,ca}` bundle secret per 0052**, not the two-secret
+   cert/key split the G-note/0038-PR#34 assumed — reconcile the CDK
+   (G-plan open item 2).
 
 ## Blocked on
 
