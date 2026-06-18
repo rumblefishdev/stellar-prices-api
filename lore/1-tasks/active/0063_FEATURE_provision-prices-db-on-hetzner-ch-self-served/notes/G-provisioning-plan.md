@@ -44,6 +44,23 @@ per-session operator approval before running.
 
 No external CN maps to `default`; admin is reachable only from the box.
 
+### Single production box — what `{env}` means here
+
+There is **one** Hetzner CH box: BE's `production` dedicated server `ch-prod-01`
+(one `CH_DOMAIN`; `infra-hetzner/README.md`: "exactly once per environment
+(`production`)"). There is **no separate dev/staging Hetzner box.** So the
+`{env}` placeholder throughout this runbook is the **AWS-side** environment of
+the *connecting client* (the Lambda stage), not a second CH box — every cert CN
+terminates at the same one box.
+
+> ⚠️ **Open implication — confirm with BE.** One box → one `prices` database.
+> If per-env certs (`prices-ingestion-dev` vs `-production`) are all issued, they
+> map to the **same** `prices_writer`/`prices_reader` users writing the **same**
+> `prices.*` tables. Decide before issuing certs: (a) only `-production` CNs for
+> now (recommended — least surface, matches the single box), or (b) per-env CNs
+> with an agreed story for whether dev/staging clients should touch prod
+> `prices.*` at all. Tracked as Open item 5.
+
 ---
 
 ## 1. BE-repo PR content (author locally → 🔒 PR to soroban-block-explorer)
@@ -255,3 +272,12 @@ Using the issued certs via Caddy:443:
    set rather than extending BE's snapshot. Flag as a decision, not an oversight.
 4. **Quota naming** — dedicated `prices_write`/`prices_read` (recommended, §1c)
    vs reusing BE's `high_write`/`api_throttle`. Confirm at BE PR time.
+5. **Per-env CNs vs single box** (§0) — one prod box → one `prices` DB. Confirm
+   whether to issue only `-production` CNs (recommended) or per-env CNs that all
+   target the same box/DB, before Step 5 cert issuance.
+6. **`<grants>` element validity** — §1a places `<grants><query>GRANT …</query>`
+   inside the user XML. BE's live `services.xml` does **not** use inline grants
+   (its service users have broad access by design), so this needs verifying
+   against the running CH version before the PR: confirm CH applies user-XML
+   `<grants>` at startup, else move the GRANT statements into the
+   `db-clickhouse-init` `init.sql` (run once under loopback admin) instead.
