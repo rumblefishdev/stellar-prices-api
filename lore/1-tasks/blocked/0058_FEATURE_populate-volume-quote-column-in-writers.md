@@ -2,13 +2,13 @@
 id: "0058"
 title: "Populate the restored `volume_quote` column in the OHLCV writers"
 type: FEATURE
-status: active
+status: blocked
 related_adr: ["0004", "0007"]
 related_tasks: ["0026", "0038", "0051"]
 tags: [layer-ingestion, priority-high, effort-small, clickhouse, schema, writers]
 links:
   - "../../../docs/database-schema/database-schema-overview.md"
-  - "../blocked/0026_FEATURE_volume-quote-usd-enrichment-impl/notes/G-local-prototype-spec.md"
+  - "0026_FEATURE_volume-quote-usd-enrichment-impl/notes/G-local-prototype-spec.md"
   - "../../../packages/sdex-backfill/src/sink.rs"
 history:
   - date: 2026-06-09
@@ -27,6 +27,20 @@ history:
     note: >
       Promoted from backlog to active. Fixed the stale 0026 link
       (active -> blocked, 0026 was re-blocked on 0012/0051).
+  - date: 2026-06-18
+    status: blocked
+    who: claude
+    by: ["0038", "0053"]
+    note: >
+      Moved active -> blocked. The do-able portion is done: sdex-backfill
+      (the only OHLCV writer that exists) populates volume_quote and writes
+      volume_quote_usd as literal DEFAULT 0 (sink.rs, schema/init.sql,
+      verified in code). The remaining writer paths do not exist yet —
+      prices-ledger-processor is fixtures-only (owned by 0038) and
+      soroban-amm-backfill has no package (owned by 0053). The final
+      integration AC also needs live ClickHouse (same gate as 0026).
+      Nothing further is implementable until 0038/0053 land their write
+      paths and adopt the volume_quote column contract.
 ---
 
 # Populate the restored `volume_quote` column in the OHLCV writers
