@@ -151,6 +151,14 @@ pub async fn fetch_bundle_from_extension(secret_name: &str) -> Result<MtlsBundle
 /// cloning the returned `clickhouse::Client` shares the pool. Build it once in
 /// Lambda global init and reuse the clone across invocations.
 ///
+/// Reuse amortises the ~80–130 ms cross-cloud TLS handshake only while a pooled
+/// socket stays alive: `pool_idle_timeout` (8 s, below) closes idle connections,
+/// so back-to-back invocations reuse the warm socket but invocations spaced
+/// further apart than the idle window re-handshake. Sharing the client is still
+/// the right default — it removes per-call connector setup and keeps the pool
+/// warm under load — but it is not a guarantee of zero handshakes on a sparse
+/// traffic pattern.
+///
 /// `database` is the CH database to send queries against — `"prices"` for the
 /// production layout (see `schema/init.sql`).
 pub fn client_with_mtls(
@@ -246,7 +254,15 @@ fn parse_private_key(pem: &str) -> Result<PrivateKeyDer<'static>, MtlsError> {
     let mut reader = Cursor::new(pem.as_bytes());
     rustls_pemfile::private_key(&mut reader)
         .map_err(|e| MtlsError::PemParse(format!("private_key(): {e}")))?
-        .ok_or_else(|| MtlsError::PemParse("no private key found in PEM".into()))
+        .ok_or_else(|| {
+            MtlsError::PemParse(
+                "no usable private key in `key` PEM — expected a PKCS#8 \
+                 (`BEGIN PRIVATE KEY`), PKCS#1 (`BEGIN RSA PRIVATE KEY`), or SEC1 \
+                 (`BEGIN EC PRIVATE KEY`) block; check the bundle's `key` field is \
+                 present and not an unsupported/encrypted format"
+                    .into(),
+            )
+        })
 }
 
 /// rustls 0.23 requires an explicit crypto provider install before

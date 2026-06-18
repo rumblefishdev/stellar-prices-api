@@ -106,8 +106,15 @@ Build the client **once in Lambda global init and clone it per invocation** — 
 not rebuild per request. The returned `clickhouse::Client` is cheap to clone:
 under the hood `hyper_util`'s legacy client owns an `Arc`-shared connection pool,
 so cloning shares warm, pooled TLS connections and amortises the ~80–130 ms
-cross-cloud TLS handshake across invocations. Rebuilding per request throws that
-away and re-handshakes every time.
+cross-cloud TLS handshake. Rebuilding per request throws that away and
+re-handshakes every time.
+
+Note the amortisation only holds while a pooled socket survives: the pool's idle
+timeout (8 s) closes quiet connections, so back-to-back invocations reuse the
+warm socket but invocations spaced further apart than the idle window pay a fresh
+handshake. Sharing the client is still the right default — it removes per-call
+connector setup and keeps the pool warm under load — but it is not a guarantee of
+zero handshakes on a sparse traffic pattern.
 
 ```rust
 // global init (cold start) — once
