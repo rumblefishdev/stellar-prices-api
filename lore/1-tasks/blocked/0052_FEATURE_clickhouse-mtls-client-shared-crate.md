@@ -2,7 +2,7 @@
 id: "0052"
 title: "ClickHouse mTLS client shared crate — cert loading from Secrets Manager + warm connection pool"
 type: FEATURE
-status: active
+status: blocked
 related_adr: ["0006", "0007"]
 related_tasks: ["0060", "0063", "0038", "0039", "0040", "0028", "0051", "0050"]
 tags: [layer-backend, priority-high, effort-medium, milestone-M1, rust, clickhouse, mtls, shared-crate, lambda, secrets-manager]
@@ -50,6 +50,20 @@ history:
       cert; mTLS needs a custom connector via with_http_client (confirmed
       present + connector-generic in our 0.13, so no version bump). Port + unit
       tests done; live round-trip deferred to 0063/0051.
+  - date: 2026-06-18
+    status: blocked
+    who: oski
+    note: >
+      In-scope work merged to develop via PR #45 (squash d4a9657): the
+      `aws-mtls`-gated `mtls` module (client_with_mtls / client_from_lambda_env
+      / fetch_bundle_from_extension), the feature + optional deps, README
+      env-var contract + build-once-reuse note, and the two code-review polish
+      fixes (amortisation-claim wording, actionable key-parse error). 7 unit
+      tests green; default build stays plaintext-lean. Moving to blocked on
+      0063: the two remaining acceptance criteria — live mTLS round-trip and
+      ≥1 downstream consumer — both need a real cert bundle in Secrets Manager
+      + the reachable Caddy endpoint, which 0063 provisions (first exercised by
+      0051's live schema-apply). No code work remains on 0052 itself.
 ---
 
 # ClickHouse mTLS client shared crate
