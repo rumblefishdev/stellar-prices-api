@@ -2,7 +2,7 @@
 id: "0063"
 title: "Provision the `prices` database + user + quota + profile + mTLS cert on Hetzner CH (self-served with admin access)"
 type: FEATURE
-status: backlog
+status: active
 related_adr: ["0007"]
 related_tasks: ["0050", "0051", "0047", "0011", "0038"]
 tags: [layer-infra, priority-high, effort-medium, milestone-M1, hetzner, clickhouse, mtls, rbac, tenancy]
@@ -29,6 +29,19 @@ history:
       narrowed to the SNS fan-out item only. The table schema + MV chain
       itself remains in 0051, which applies into the database this task
       creates.
+  - date: 2026-06-18
+    status: active
+    who: oski
+    note: >
+      Activated as the single gate now in front of both 0051 (live schema
+      apply) and 0052 (live mTLS round-trip), both moved to blocked-on-0063.
+      Scope this session is **authoring / PR-staging only**: draft the
+      `prices_writer`/`prices_reader` `users.d` additions + CN-map entries
+      (PR to soroban-block-explorer), the `CREATE DATABASE` one-shot, and
+      the cert→Secrets-Manager procedure — grounded in BE's real RBAC files.
+      Hard constraint (operator): **no Hetzner or AWS calls** — every remote
+      action (clickhouse-client on the box, ansible-playbook, aws
+      secretsmanager) is gated on explicit per-session approval.
 ---
 
 # Provision the `prices` database on Hetzner CH (self-served)
