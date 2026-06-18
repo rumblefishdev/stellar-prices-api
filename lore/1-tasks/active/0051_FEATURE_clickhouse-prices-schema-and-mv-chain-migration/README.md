@@ -66,6 +66,23 @@ history:
       rows + assert in views_it.rs, and record the production
       apply/version-tracking strategy decision. Live mTLS apply
       (Steps 3–4) stays pending 0052 + 0063.
+  - date: 2026-06-18
+    status: active
+    who: oski
+    note: >
+      **Descoped Step 3 (remote mTLS apply path).** Studying BE's
+      infra-hetzner + db-clickhouse showed BE never applies schema over
+      mTLS: db-clickhouse-init runs as a docker-compose sidecar ON the box
+      over the plaintext Docker bridge as the `default` admin, and BE
+      deliberately REMOVED its remote-DDL users (migration_admin/
+      partition_admin, BE task 0241). mTLS there is only the runtime
+      read/write transport for the remote api/indexer Lambdas. 0063
+      confirms prices-api gets the same posture — box admin via loopback
+      (`clickhouse-client --user=default` on the box) — so a remote
+      mTLS DDL apply path is unnecessary and against the grain. 0051 now
+      applies via loopback-admin like BE; no mTLS code to write. The 0052
+      dependency drops; only the live apply remains, gated on 0063 access
+      handover.
 ---
 
 # ClickHouse `prices.*` schema + materialised-view rollup chain migration
@@ -73,14 +90,22 @@ history:
 > **Rescoped 2026-06-17:** the schema + apply tooling are already
 > shipped in `packages/prices-clickhouse` (tasks 0060/0061/0059). This
 > task no longer authors DDL or builds a runner — it **applies the
-> existing schema to the live Hetzner `prices` DB over mTLS, seeds
+> existing schema to the live Hetzner `prices` DB, seeds
 > `backfill_progress`, and picks the production apply strategy.**
+>
+> **Re-scoped 2026-06-18:** the live apply is done **over loopback as
+> the box `default` admin**, mirroring BE's docker-compose sidecar
+> model — *not* over a remote mTLS DDL connection. Step 3's mTLS apply
+> path is **descoped** (see Design Decisions → Emerged #5). mTLS (0052)
+> stays the runtime read/write transport for the 0038/0039/0040
+> Lambdas, exactly as in BE.
 
 ## Summary
 
 Stand up the `prices.*` schema on the **live** Hetzner CH `prices`
-database over HTTPS-mTLS, using the schema + apply tooling already
-present in `packages/prices-clickhouse`. Seed the two canonical
+database over loopback as the box `default` admin (BE's sidecar model),
+using the schema + apply tooling already present in
+`packages/prices-clickhouse`. Seed the two canonical
 `backfill_progress` rows (`sdex_archive`, `soroban_amm`) per §3.5,
 which no existing migration does. Decide and document how schema is
 applied/tracked in production.
@@ -105,9 +130,11 @@ ships, and a Docker integration test (`tests/views_it.rs`) covers it:
 
 What is **not** done — the remaining 0051 work:
 
-1. The init binary connects via plaintext `CLICKHOUSE_URL` (localhost).
-   Nothing applies the schema to the **live Hetzner `prices` DB over
-   Caddy:443 mTLS**.
+1. The init binary already connects via plaintext `CLICKHOUSE_URL`
+   (localhost) — exactly the transport the live apply needs. What is
+   missing is simply **running it against the live box's loopback**
+   (on the box, or via SSH tunnel to `localhost:8123`) as the `default`
+   admin, once 0063 hands over access. No new transport code is needed.
 2. `backfill_progress` is created but **never seeded** with the two
    canonical rows (no `INSERT … sdex_archive / soroban_amm` anywhere).
 3. No decision recorded on the **production apply / version-tracking
@@ -142,17 +169,26 @@ Record the decision in `notes/S-prod-apply-strategy.md`:
   (column drop, engine change). Defer until such a change exists; if
   adopted, spawn it as its own task rather than pre-building it here.
 
-### Step 3: Wire the init binary to the live mTLS endpoint
+### Step 3: ~~Wire the init binary to the live mTLS endpoint~~ — DESCOPED (2026-06-18)
 
-The binary today builds a plaintext `client(&cfg)`. Add an
-mTLS-capable apply path that uses **0052's `client_mtls`** so the same
-schema can be applied to Caddy:443. Resolve the DDL-identity question
-from 0063: `prices_writer` is `write_no_ddl`, so apply schema under an
-admin/DDL-capable cert (short-lived) — **not** the writer identity.
+**No mTLS apply path is built.** BE applies schema on the box over the
+plaintext Docker bridge as the `default` admin (a `db-clickhouse-init`
+sidecar) and deliberately removed its remote-DDL users (BE task 0241);
+mTLS there is only the runtime read/write transport for the remote
+Lambdas. 0063 gives prices-api the same posture — box admin via loopback
+— so the existing plaintext `prices-clickhouse-init` (or native
+`clickhouse-client --queries-file`) **already is** the apply path. The
+remaining work is operational (Step 4), not code. See Design Decisions →
+Emerged #5. `prices_writer` stays `write_no_ddl`; DDL runs as `default`
+admin on the box, not as the writer identity.
 
 ### Step 4: Apply against the live Hetzner CH `prices` DB
 
-Once 0063 has provisioned the database + a DDL-capable credential:
+Once 0063 has provisioned the database + handed over box admin access,
+run the existing plaintext `prices-clickhouse-init` (or feed
+`init.sql`/`seed.sql`/`views.sql` to native `clickhouse-client
+--queries-file`) against the box's loopback `localhost:8123` as the
+`default` admin — on the box or through an SSH tunnel:
 
 - Apply against **dev** first; verify the table/MV/view set with
   `SHOW TABLES FROM prices` + a `SHOW CREATE TABLE prices.price_ohlcv_1m`
@@ -184,13 +220,15 @@ Remaining for this task:
       `current_ledger`)
 - [x] Production apply/version-tracking strategy decided + recorded in
       `notes/S-prod-apply-strategy.md` — wholesale-idempotent (as shipped)
-- [ ] Init binary can apply over mTLS via 0052's `client_mtls`, under a
-      DDL-capable identity (not `prices_writer`)
-- [ ] Schema applied to the live Hetzner `prices` DB for at least dev;
-      table/MV/view set + `backfill_progress` count verified; output
-      captured in `notes/G-live-schema-state.md`
+- [x] Apply transport decided: **loopback-admin, no mTLS path** — the
+      existing plaintext `prices-clickhouse-init` is the apply tool;
+      remote mTLS DDL descoped (mirrors BE; Design Decisions → Emerged #5)
+- [ ] Schema applied to the live Hetzner `prices` DB for at least dev,
+      over loopback as the `default` admin; table/MV/view set +
+      `backfill_progress` count verified; output captured in
+      `notes/G-live-schema-state.md` *(gated on 0063 access handover)*
 - [ ] Refreshable MV chain smoke-verified live (fixture `_1m` row
-      propagates up after refresh)
+      propagates up after refresh) *(gated on 0063 access handover)*
 
 ## Implementation Notes
 
@@ -225,20 +263,41 @@ Steps 1–2 implemented (2026-06-17):
 3. **Placeholder ledger bounds = 0.** The spec only mandated `status='running'`;
    the backfill streams (0028/0053) fill real bounds as they advance.
 4. **Converted 0051 to directory form** to hold `notes/S-prod-apply-strategy.md`.
+5. **Descoped Step 3's remote mTLS apply path; apply over loopback as the
+   box `default` admin instead** (chosen over building an mTLS DDL path on
+   the init binary via 0052's client). Studying BE's `infra-hetzner` +
+   `crates/db-clickhouse` showed BE applies schema with a `db-clickhouse-init`
+   docker-compose **sidecar** running on the box over the plaintext Docker
+   bridge as `default` — and BE *removed* its remote-DDL users
+   (`migration_admin`/`partition_admin`, BE task 0241). mTLS in BE is solely
+   the runtime read/write transport for the remote `api`/`indexer` Lambdas
+   (`mtls::client_from_lambda_env`), never the schema path. Task 0063 grants
+   prices-api the same posture (box admin via loopback — `clickhouse-client
+   --user=default` on the box, confirmed in 0063 Steps 1+3), so a remote
+   mTLS DDL connection is unnecessary and re-introduces exactly what BE
+   retired. Consequence: **no mTLS code in 0051**; the existing plaintext
+   `prices-clickhouse-init` is the apply tool, and the 0052 dependency drops.
+   `prices_writer` stays `write_no_ddl`; DDL is the loopback `default` admin.
 
 ## Blocked on
 
-- **0063** — needs the live `prices` database + endpoint + a
-  DDL-capable credential before Steps 3–4 can apply against the
-  cluster. (Was 0050; moved to self-served 0063 after BE 0227 shipped.)
-- **0052** — Step 3 uses its `client_mtls` for the live apply path.
-- **Steps 1–2 are unblocked now** — seeding `backfill_progress` and the
-  strategy note need only the local Docker CH and can start immediately.
+- **0063** — Step 4 needs the live `prices` database created + **box
+  admin access handed over** (loopback `default`) before the schema can
+  be applied to the cluster. (Was 0050; moved to self-served 0063 after
+  BE 0227 shipped.)
+- **~~0052~~** — no longer a dependency: Step 3's mTLS apply path is
+  descoped (Emerged #5), so 0051 needs no code from the mTLS crate.
+- **Steps 1–3 are done / need no live cluster** — seed + strategy shipped,
+  and the apply transport is the existing plaintext loopback path. Only the
+  live apply (Step 4) waits on 0063.
 
 ## Out of scope
 
 - Authoring the `prices.*` DDL / MV chain / views — **done in 0060 /
   0061 / 0059**; this task only applies + seeds + decides strategy.
+- Remote mTLS DDL apply path — **descoped** (Emerged #5); schema is
+  applied over loopback as the box admin, mirroring BE. mTLS (0052) is
+  the runtime read/write transport for the 0038/0039/0040 Lambdas only.
 - Numbered-migration runner + `schema_migrations` table — deferred
   unless a non-idempotent change forces it (see Step 2); spawn as its
   own task if/when adopted.
