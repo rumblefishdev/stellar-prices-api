@@ -8,9 +8,43 @@ description = "prices ClickHouse schema + connection layer (mirrors BE crates/db
 name = "prices-clickhouse-init"
 path = "src/bin/prices-clickhouse-init.rs"
 
+[features]
+default = []
+# Exposes the `mtls` module — builds a `clickhouse::Client` that authenticates
+# to the remote CH endpoint (Caddy reverse proxy on the Hetzner box) with a
+# client-cert bundle fetched from AWS Secrets Manager via the Parameters and
+# Secrets Lambda Extension (localhost:2773). Ported from BE's
+# `crates/db-clickhouse/src/mtls.rs` (task 0052). Gated so the
+# `prices-clickhouse-init` CLI (local dev / CI, plaintext loopback CH) does not
+# pull the rustls / hyper-util / reqwest stack.
+aws-mtls = [
+    "dep:hyper-util",
+    "dep:hyper-rustls",
+    "dep:rustls",
+    "dep:rustls-pemfile",
+    "dep:rustls-pki-types",
+    "dep:webpki-roots",
+    "dep:reqwest",
+    "dep:serde",
+    "dep:serde_json",
+]
+
 [dependencies]
 clickhouse = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 thiserror = { workspace = true }
+
+# mTLS feature deps (gated by `aws-mtls`). Optional so the default build and the
+# init CLI stay lean. Versions/features mirror BE's db-clickhouse `aws-mtls`
+# feature so the two tenants' mTLS stacks stay in lockstep.
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"], optional = true }
+hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "tls12", "aws-lc-rs"], optional = true }
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "tls12"], optional = true }
+rustls-pemfile = { version = "2", optional = true }
+rustls-pki-types = { version = "1", optional = true }
+webpki-roots = { version = "1", optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["json"], optional = true }
