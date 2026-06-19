@@ -115,14 +115,15 @@ flowchart LR
     AD -->|HTTPS-mTLS| CH
     Cleanup -->|HTTPS-mTLS| CH
 
-    BFsdex[SDEX Backfill<br/>Local Rust CLI on workstation<br/>ADR 0005] -->|local Postgres| LPG[(workstation Postgres)]
-    BFamm[Soroban AMM Backfill<br/>Local Rust CLI on workstation<br/>ADR 0001] -->|local Postgres| LPG
-    LPG -->|sdex-cloud-push,<br/>HTTPS-mTLS| CH
-    LCH[(local ClickHouse<br/>populated by BE backfill-runner<br/>Docker, workstation)] --> BFamm
+    BFsdex[SDEX Backfill<br/>Local Rust CLI on workstation<br/>ADR 0005] -->|write OHLCV<br/>to local ClickHouse| LCHsdex[(local ClickHouse<br/>SDEX backfill<br/>Docker, workstation)]
+    LCHsdex -->|sdex-cloud-push,<br/>HTTPS-mTLS| CH
+    LCH[(local ClickHouse<br/>soroban_events input + prices.* mirror<br/>Docker, workstation)] -->|read soroban_events| BFamm[Soroban AMM Backfill<br/>Local Rust CLI on workstation<br/>ADR 0001]
+    BFamm -->|write per-source OHLCV<br/>to local prices.* mirror| LCH
+    LCH -->|amm-cloud-push,<br/>HTTPS-mTLS| CH
 
     classDef store fill:#e8f1ff,stroke:#3a6ea5,stroke-width:2px;
     classDef external fill:#f3e8ff,stroke:#6a3a8a,stroke-width:1px;
-    class CH,CH15,CH1h,CHRollups,S3,LPG,LCH store;
+    class CH,CH15,CH1h,CHRollups,S3,LCHsdex,LCH store;
     class SNS external;
 ```
 
@@ -138,16 +139,16 @@ are pushed to the Hetzner cluster via separate post-backfill tools.
 
 ## 2. Database Tech Stack
 
-| Component              | Technology                                                                                                                                                       |
-| ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Database engine        | **ClickHouse** on BE's shared Hetzner cluster (separate `prices` database, ADR 0007)                                                                             |
-| Storage engines        | `ReplacingMergeTree(version)` for OHLCV; `ReplacingMergeTree(updated_at)` for `current_prices` / `assets` / `backfill_progress`; `ReplacingMergeTree` for `oracle_prices` |
-| Rollups                | Chain of CH materialised views: `price_ohlcv_1m → _15m → _1h → _4h → _1d → _1w → _1M` (replaces the OHLCV Rollup Lambda)                                         |
-| Partitioning           | `PARTITION BY toYYYYMM(timestamp)` on every OHLCV/oracle table; cleanup via `ALTER TABLE … DROP PARTITION`                                                       |
-| Database client (Rust) | [`clickhouse`](https://crates.io/crates/clickhouse) — async, native protocol over HTTPS-mTLS                                                                     |
-| Schema tooling         | Plain SQL DDL applied by the prices-api schema applier on first deploy; prices-api owns `prices.*` migrations unilaterally (ADR 0007 §3.7)                       |
-| Hosting                | BE-managed Hetzner box behind Caddy:443; cross-cloud (AWS → Hetzner) hop, ~80–130 ms RTT mitigated by warm connection reuse and batched per-ledger writes        |
-| Credentials            | AWS Secrets Manager — per-env client cert + key for Caddy mTLS (2 secrets per env)                                                                               |
+| Component              | Technology                                                                                                                                                                            |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Database engine        | **ClickHouse** on BE's shared Hetzner cluster (separate `prices` database, ADR 0007)                                                                                                  |
+| Storage engines        | `ReplacingMergeTree(version)` for OHLCV; `ReplacingMergeTree(updated_at)` for `current_prices` / `assets` / `backfill_progress`; `ReplacingMergeTree` for `oracle_prices`             |
+| Rollups                | Chain of CH materialised views: `price_ohlcv_1m → _15m → _1h → _4h → _1d → _1w → _1M` (replaces the OHLCV Rollup Lambda)                                                              |
+| Partitioning           | `PARTITION BY toYYYYMM(timestamp)` on every OHLCV/oracle table; cleanup via `ALTER TABLE … DROP PARTITION`                                                                            |
+| Database client (Rust) | [`clickhouse`](https://crates.io/crates/clickhouse) — async, native protocol over HTTPS-mTLS                                                                                          |
+| Schema tooling         | Plain SQL DDL applied by the prices-api schema applier on first deploy; prices-api owns `prices.*` migrations unilaterally (ADR 0007 §3.7)                                            |
+| Hosting                | BE-managed Hetzner box behind Caddy:443; cross-cloud (AWS → Hetzner) hop, ~80–130 ms RTT mitigated by warm connection reuse and batched per-ledger writes                             |
+| Credentials            | AWS Secrets Manager — per-env client `{cert,key,ca}` as a single JSON bundle secret per identity (one secret per identity per env, named by `MTLS_SECRET_NAME`; ADR 0007 / task 0063) |
 
 **Why ClickHouse on a BE-shared cluster (ADR 0007):**
 
@@ -768,7 +769,7 @@ minutes. ADR 0005 made Stream 2 a local workstation CLI; ADR 0001 had
 already done the same for Stream 1. Neither stream has a continuously-running
 cloud-side process now, so none of those fields had a meaningful value to
 write. Operators inspect live CLI progress (rate, ETA) via direct SQL on the
-workstation Postgres; the cloud row carries only the most recent push state.
+local workstation ClickHouse; the cloud row carries only the most recent push state.
 
 **Freshness alarm (replaces heartbeat alarm).** A CloudWatch alarm watches
 `sdex.last_push_at`. If it is older than the configured push-cadence
@@ -1092,10 +1093,10 @@ monthly partitions, plus heartbeat/status to `backfill_progress`.
 
 ### 7.1 Two-stream design (ADRs 0001, 0005, 0007)
 
-| Stream                                              | Data location                                                                                                                                | Era                                                     | Method                                                                                                                                                                            |
-| --------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **SDEX trades**                                     | `ClaimAtom` from the five trade-shaped op types in `LedgerCloseMeta` XDR                                                                     | All-time (2015 → present, ~57M ledgers)                 | Local Rust CLI on operator workstation (anonymous reads against `s3://aws-public-blockchain`) → local Postgres → `sdex-cloud-push` lands rows in Hetzner CH `prices.*` (ADR 0005) |
-| **Soroban AMM swaps** (Soroswap, Aquarius, Phoenix) | `soroban_events` in **local** ClickHouse, populated upfront by BE's `backfill-runner --target=clickhouse` against the same public S3 archive | Soroban activation (Nov 2023) → present (~8.5M ledgers) | Local Rust CLI on operator workstation; one-shot completion push lands rows in Hetzner CH `prices.*` (ADR 0001)                                                                   |
+| Stream                                              | Data location                                                                                                                                | Era                                                     | Method                                                                                                                                                                              |
+| --------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **SDEX trades**                                     | `ClaimAtom` from the five trade-shaped op types in `LedgerCloseMeta` XDR                                                                     | All-time (2015 → present, ~57M ledgers)                 | Local Rust CLI on operator workstation (anonymous reads against `s3://aws-public-blockchain`) → local ClickHouse → `sdex-cloud-push` lands rows in Hetzner CH `prices.*` (ADR 0005) |
+| **Soroban AMM swaps** (Soroswap, Aquarius, Phoenix) | `soroban_events` in **local** ClickHouse, populated upfront by BE's `backfill-runner --target=clickhouse` against the same public S3 archive | Soroban activation (Nov 2023) → present (~8.5M ledgers) | Local Rust CLI on operator workstation; one-shot completion push lands rows in Hetzner CH `prices.*` (ADR 0001)                                                                     |
 
 The Soroban AMM stream is handled first (Tranche 1). The operator runs BE's
 `backfill-runner --target=clickhouse` to populate a local CH instance
@@ -1139,7 +1140,7 @@ Local ClickHouse (Docker) on operator workstation
 │    `stellar-xdr` crate                                    │
 │  - Extracts token pair + amounts                          │
 │  - Buckets to per-source 1-minute rows                    │
-│  - Writes to local Postgres (Docker) on workstation       │
+│  - Writes to local CH prices.* mirror (Docker)            │
 └──────────────────────────────────────────────────────────┘
         │
         ▼ one-shot completion push (only Hetzner-CH-touching step on Stream 1)
@@ -1155,12 +1156,12 @@ Hetzner ClickHouse `prices.*` (HTTPS-mTLS to Caddy:443)
 flowchart LR
     S3archive[(s3://aws-public-blockchain<br/>Stellar public history)] -->|backfill-runner --target=clickhouse| LocalCH[(Local ClickHouse<br/>Docker, workstation<br/>soroban_events)]
     LocalCH -->|signature='swap'<br/>contract_id IN Soroswap/Aquarius/Phoenix<br/>JOIN ledgers ON closed_at| CLI[soroban-amm-backfill<br/>Local Rust CLI<br/>ScVal decode via stellar-xdr]
-    CLI -->|per-source 1-min rows| LocalPG[(workstation Postgres)]
-    LocalPG -->|one-shot completion push<br/>HTTPS-mTLS to Caddy:443| CH[(Hetzner ClickHouse<br/>prices.price_ohlcv_*)]
+    CLI -->|per-source 1-min rows| LocalMirror[(local ClickHouse<br/>prices.* mirror)]
+    LocalMirror -->|one-shot completion push<br/>HTTPS-mTLS to Caddy:443| CH[(Hetzner ClickHouse<br/>prices.price_ohlcv_*)]
     CLI -->|status=completed,<br/>last_push_at| BP[(prices.backfill_progress)]
 
     classDef store fill:#e8f1ff,stroke:#3a6ea5,stroke-width:2px;
-    class S3archive,LocalCH,LocalPG,CH,BP store;
+    class S3archive,LocalCH,LocalMirror,CH,BP store;
 ```
 
 | Metric                | Value                                                                                                       | Notes                                                                                                |
@@ -1169,7 +1170,7 @@ flowchart LR
 | Ledger range          | ~48.5M–57M (Nov 2023 to present)                                                                            | ~8.5M ledgers worth of events                                                                        |
 | Runtime               | Local Rust CLI on operator workstation (`soroban-amm-backfill`)                                             | No AWS infrastructure for the backfill itself; mirrors §7.4 Stream 2's local-CLI pattern             |
 | Workstation prep step | BE `backfill-runner --target=clickhouse` populates local CH                                                 | One-shot; runs against `s3://aws-public-blockchain` anonymous reads                                  |
-| Sink during backfill  | Local Postgres (Docker) on workstation                                                                      | Hetzner ClickHouse is **not** written until the one-shot completion push                             |
+| Sink during backfill  | Local ClickHouse `prices.*` mirror (Docker) on workstation                                                  | Hetzner ClickHouse is **not** written until the one-shot completion push                             |
 | Estimated wall-clock  | A few hours, dominated by `backfill-runner` archive ingestion                                               | CH query + extraction + OHLCV write is fast against an indexed local store                           |
 | Cloud-push cadence    | One-shot completion push only                                                                               | `prices.backfill_progress.soroban_amm` advances from `running` to `completed` in a single transition |
 | Expected completion   | During Tranche 1 (Week 2–3)                                                                                 | After the push, the local CH instance is torn down                                                   |
@@ -1189,12 +1190,12 @@ s3://aws-public-blockchain/v1.1/stellar/ledgers/pubnet/
 │  - Filter + extract per task 0022's spec:               │
 │    5 trade-shaped op types → ClaimAtom → TradeTick      │
 │  - Buckets to per-source 1-minute rows                  │
-│  - Per-ledger atomic txn: row UPSERTs +                 │
-│    backfill_progress checkpoint commit together         │
+│  - Per-ledger checkpoint: INSERT rows, then             │
+│    record ledger in backfill_sdex_ledgers               │
 └─────────────────────────────────────────────────────────┘
                │
                ▼
-       Local Postgres (Docker) on workstation
+       Local ClickHouse (Docker) on workstation
        (operator-owned; backfill writes here, not Hetzner CH)
                │
                ▼ `sdex-cloud-push` (separate post-backfill tool, HTTPS-mTLS)
@@ -1208,8 +1209,8 @@ s3://aws-public-blockchain/v1.1/stellar/ledgers/pubnet/
 flowchart TD
     Arch[(s3://aws-public-blockchain<br/>Stellar public history<br/>anonymous --no-sign-request)] -->|aws s3 sync| LocalDisk[(local .zst files)]
     LocalDisk -->|xdr-parser crate<br/>git Cargo dep| CLI[sdex-backfill<br/>Local Rust CLI on workstation<br/>~311 ledgers/s, ~1.12M/hr]
-    CLI -->|filter 5 trade-shaped op types<br/>extract ClaimAtom<br/>bucket to per-source rows| LocalPG[(workstation Postgres)]
-    LocalPG -->|sdex-cloud-push<br/>tip-backward chunks<br/>HTTPS-mTLS to Caddy:443| CH[(Hetzner ClickHouse<br/>prices.price_ohlcv_*)]
+    CLI -->|filter 5 trade-shaped op types<br/>extract ClaimAtom<br/>bucket to per-source rows| LocalChStage[(local ClickHouse<br/>price_ohlcv staging)]
+    LocalChStage -->|sdex-cloud-push<br/>tip-backward chunks<br/>HTTPS-mTLS to Caddy:443| CH[(Hetzner ClickHouse<br/>prices.price_ohlcv_*)]
     CLI -->|per-ledger atomic checkpoint| BPlocal[(local backfill_progress)]
     CH -->|push updates row| BP[(prices.backfill_progress<br/>sdex_archive)]
     BP -->|last_push_at &gt; tranche threshold| Alarm[CloudWatch Alarm<br/>→ SNS email + Slack]
@@ -1218,7 +1219,7 @@ flowchart TD
 
     classDef store fill:#e8f1ff,stroke:#3a6ea5,stroke-width:2px;
     classDef alarm fill:#ffe5e5,stroke:#a53a3a,stroke-width:2px;
-    class Arch,LocalDisk,LocalPG,CH,BP,BPlocal,CH1m store;
+    class Arch,LocalDisk,LocalChStage,CH,BP,BPlocal,CH1m store;
     class Alarm alarm;
 ```
 
@@ -1227,18 +1228,19 @@ flowchart TD
 | Total ledgers                        | ~57 million                                               | Ledger 1 (Nov 2015) to current tip                                                |
 | Runtime                              | Local Rust CLI on operator workstation                    | No AWS infrastructure for the backfill itself; mirrors BE `backfill-runner`       |
 | Source                               | `s3://aws-public-blockchain/v1.1/stellar/ledgers/pubnet/` | Anonymous `--no-sign-request`; no AWS account needed to read                      |
-| Sink during backfill                 | Local Postgres (Docker) on workstation                    | Hetzner ClickHouse is **not** written during backfill — only by `sdex-cloud-push` |
+| Sink during backfill                 | Local ClickHouse (Docker) on workstation                  | Hetzner ClickHouse is **not** written during backfill — only by `sdex-cloud-push` |
 | Measured CLI rate                    | ~311 ledgers/s (~1.12M ledgers/hour)                      | Per task 0022's measurement against the SDEX filter                               |
 | Effective wall-clock (network-bound) | ~12–16 days continuous on one laptop                      | Archive sync is the bottleneck; CPU rarely saturates                              |
 | Cloud-push cadence                   | Tip-backward chunks                                       | The cloud `GET /backfill/status` view advances at push cadence, not CLI cadence   |
 | Expected completion                  | Full historical coverage extends past Tranche 3           | Tranche 3 acceptance is "progressing", not "complete"                             |
 
 The `sdex-backfill` CLI is **resumable at per-ledger granularity**: each
-ledger's row UPSERTs and its `backfill_progress` checkpoint advance commit
-atomically in a single local-Postgres transaction. A crash mid-ledger leaves
-`current_ledger` pointing at the last fully-processed ledger; restart
-re-fetches and re-UPSERTs that ledger idempotently. Early ledgers (pre-2018)
-have very few DEX trades and process faster.
+processed ledger is recorded in the local `backfill_sdex_ledgers` checkpoint
+table after its rows are INSERTed. A crash mid-ledger leaves `current_ledger`
+pointing at the last fully-processed ledger; restart skips ledgers already
+recorded and re-inserts the in-flight ledger idempotently (re-inserted rows
+collapse under `ReplacingMergeTree(version)`). Early ledgers (pre-2018) have
+very few DEX trades and process faster.
 
 ### 7.4a Backfill state machine (`prices.backfill_progress.status`)
 
@@ -1404,9 +1406,10 @@ Scaled-up at high traffic (DB-relevant):
 
 - **ClickHouse endpoint reachable only via mTLS through Caddy:443** on the
   BE-managed Hetzner box. There is no other network surface to `prices.*`.
-- **mTLS material in AWS Secrets Manager** (per-env client cert + key, two
-  secrets per env). Cert + key are loaded into the Lambda runtime on cold
-  start and held in memory for the container's lifetime; never in env vars
+- **mTLS material in AWS Secrets Manager** (per-env client `{cert,key,ca}`
+  as a single JSON bundle secret per identity, named by `MTLS_SECRET_NAME`).
+  The bundle is loaded into the Lambda runtime on cold start and held in
+  memory for the container's lifetime; never in env vars
   or source. Rotation: 1-year manual cadence (BE Cluster C agreement);
   CloudWatch alarm on cert NotAfter approaching expiry; revocation = CA
   rotation on compromise.
@@ -1801,7 +1804,7 @@ flowchart TB
     %% ============================================================
     %% AWS — SECRETS MANAGER (mTLS material)
     %% ============================================================
-    SM[("AWS Secrets Manager<br/>per-env mTLS cert + key<br/>(2 secrets per env)")]
+    SM[("AWS Secrets Manager<br/>per-env mTLS {cert,key,ca}<br/>(1 JSON bundle secret per identity)")]
     class SM store
     SM -.->|"loaded on cold start"| LIVE
 
@@ -1814,21 +1817,21 @@ flowchart TB
         LocalCH[("Local ClickHouse<br/>soroban_events<br/>(Docker, torn down after push)")]
         AMM["soroban-amm-backfill<br/>Rust CLI (Stream 1)<br/>ScVal decode via stellar-xdr"]
         SDEX["sdex-backfill<br/>Rust CLI (Stream 2)<br/>~311 ledgers/s, ~1.12M/h"]
-        LocalPG[("Workstation Postgres<br/>price_ohlcv staging<br/>(Docker)")]
+        LocalStage[("Local ClickHouse<br/>prices.* staging<br/>(Docker)")]
         SDEXpush["sdex-cloud-push<br/>tip-backward chunks"]
         AMMpush["AMM completion push<br/>one-shot"]
     end
     class BERun,AMM,SDEX,SDEXpush,AMMpush writer
-    class LocalCH,LocalPG workstation
+    class LocalCH,LocalStage workstation
 
     Archives -->|"backfill-runner --target=clickhouse"| BERun
     BERun --> LocalCH
     LocalCH --> AMM
     Archives -->|"aws s3 sync"| SDEX
-    AMM --> LocalPG
-    SDEX --> LocalPG
-    LocalPG --> SDEXpush
-    LocalPG --> AMMpush
+    AMM --> LocalStage
+    SDEX --> LocalStage
+    LocalStage --> SDEXpush
+    LocalStage --> AMMpush
 
     %% ============================================================
     %% HETZNER — CADDY + CLICKHOUSE (BE-managed)
@@ -1954,13 +1957,13 @@ flowchart TB
 **How to read the diagram**
 
 - **Blue cylinders** are persistent stores (Hetzner CH tables, S3, archives,
-  workstation Postgres, AWS Secrets Manager).
+  workstation ClickHouse, AWS Secrets Manager).
 - **Green nodes** are writers (Lambdas + workstation CLIs + cloud-push tools).
 - **Yellow nodes** are public API endpoints (readers).
 - **Purple nodes** are external services and BE-managed infrastructure
   (Reflector, SNS topic, Caddy).
-- **Orange nodes** are workstation-local components (Docker-hosted CH, local
-  Postgres) — outside the AWS / Hetzner production surface.
+- **Orange nodes** are workstation-local components (Docker-hosted local
+  ClickHouse) — outside the AWS / Hetzner production surface.
 - **Red node** is the CloudWatch alarm fed by `prices.backfill_progress.sdex.last_push_at`
   (push freshness alarm; the heartbeat-style alarm from the prior design is
   gone).
