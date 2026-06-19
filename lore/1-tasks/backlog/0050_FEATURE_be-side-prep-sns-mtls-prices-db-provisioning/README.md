@@ -87,10 +87,11 @@ to land before any prices-api ingestion or schema work can begin:
    change.
 2. **mTLS client cert issuance** (§5.2, §7, ADR 0007 §3.5): BE
    runs the self-signed CA and the per-AWS-service issuance
-   script. Prices-api receives one client cert + key per env
-   (dev / staging / prod), to be stored in AWS Secrets Manager
-   (2 secrets per env). 1-year manual rotation cadence (BE
-   Cluster C agreement). The issuance script invocation is the
+   script. Prices-api receives one client `{cert,key,ca}` per env
+   (dev / staging / prod), to be stored in AWS Secrets Manager as
+   a single JSON bundle secret per identity (named by
+   `MTLS_SECRET_NAME`, per task 0063). 1-year manual rotation
+   cadence (BE Cluster C agreement). The issuance script invocation is the
    only BE-side operator step per cert lifecycle.
 3. **`prices` database + user + quota + profile** (§3 intro,
    §11.1, ADR 0007 §3.5): BE creates the empty `prices` database
