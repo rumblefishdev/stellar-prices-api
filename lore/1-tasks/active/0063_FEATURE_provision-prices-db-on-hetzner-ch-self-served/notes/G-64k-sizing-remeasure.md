@@ -5,7 +5,7 @@ type: G
 task: "0063"
 status: mature
 spawned_from: ["G-provisioning-plan"]
-spawns: []
+spawns: ["G-128k-parse-and-sizing-test"]
 tags: [clickhouse, sizing, capacity, cost, hetzner, measurement, shared-vs-sidecar]
 links:
   - "../../../../docs/database-schema/database-schema-overview.md"
