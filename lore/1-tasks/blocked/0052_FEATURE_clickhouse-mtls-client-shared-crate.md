@@ -95,8 +95,9 @@ dep is pinned at `0.13` with only the `inserter` feature — **no TLS**.
 What is missing for talking to the production Hetzner box (ADR 0007
 §3.5 / design §5.2 "mTLS write path"):
 
-1. Load the per-env client cert + key from AWS Secrets Manager
-   (two secrets per env per ADR 0007 §3.5).
+1. Load the per-env client `{cert,key,ca}` from AWS Secrets Manager
+   (a single JSON bundle secret per identity, named by
+   `MTLS_SECRET_NAME`, per ADR 0007 §3.5 / task 0063).
 2. Establish a warm TLS connection during Lambda global init so
    the ~80–130 ms cross-cloud RTT for TLS handshake is amortised
    across invocations.
