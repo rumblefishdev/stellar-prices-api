@@ -11,6 +11,7 @@
 
 | Date       | Sections                               | Driver                                                                                                                                                                           | Summary                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | ---------- | -------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 2026-06-19 | §1.2, §8.3, §8.5                       | [Task 0063](../../lore/1-tasks/active/0063_FEATURE_provision-prices-db-on-hetzner-ch-self-served/README.md)                                                                      | **Sizing + cost-share corrected from measurement.** Fresh 64k-ledger backfill (62016000-62079999) measured **114 MiB / ~1,872 B/ledger**; combined with task 0060's 10k+100k runs the real footprint is **~1.9-3.7 KB/ledger / ~3.5-6 GB/yr** (activity-dependent), superseding the 0046 ~74 B/ledger / ~0.45 GB/yr estimate. Cost-share raised ~$1-2 → **~$8-11/env/mo** (~10-15% pro-rata). Added a shared-vs-dedicated-container cost table; dedicated container ~2× cost **and** breaks BE's in-cluster `price_usd_series` JOIN — shared stays correct. See task 0063 `notes/G-64k-sizing-remeasure.md`.                                                                            |
 | 2026-06-11 | §3.2 §3.0, Schema source-of-truth refs | [Task 0060](../../lore/1-tasks/active/0060_FEATURE_prices-clickhouse-crate-combined-backfill-sizing/README.md)                                                                   | **Schema implemented as the `packages/prices-clickhouse` crate** (`schema/init.sql` = 12 tables, source of truth; `rollups.sql` = refreshable-MV chain; `preroll.sql` = full-range re-aggregate). Built + applied on a local ClickHouse 25.6 and validated by a combined SDEX + soroban (oracle) backfill. **Sizing finding:** measured ~3.6 KB/ledger over a 10k-ledger sample (≈48× the prior 74 B/ledger task-0046 estimate), driven by ~4,343-asset pair diversity (317k 1m candles) and short-window rollups that don't yet amortize. `assets` implemented with `String` (not `FixedString`) columns to match the writer contract. See task 0060 `notes/G-measurement-results.md`. |
 | 2026-05-20 | All sections + Appendices A & B        | [ADR 0007](../../lore/2-adrs/0007_live-data-sink-on-shared-hetzner-clickhouse.md) (accepted) · [Task 0049](../../lore/1-tasks/active/0049_DOCS_overview-rewrite-for-adr-0007.md) | **Live data sink flipped from Prices-owned RDS PostgreSQL 16 to BE's shared Hetzner ClickHouse cluster** (separate `prices` database, isolated via CH multi-tenant primitives). Schema rewritten to per-source `ReplacingMergeTree(version)` rows on per-granularity tables (`price_ohlcv_1m`, `_15m`, …, `_1M`) feeding a materialised-view rollup chain that eliminates the OHLCV Rollup Lambda. Cleanup becomes `ALTER TABLE … DROP PARTITION`. All 14 mermaid blocks (including Appendices A and B) updated to ClickHouse types, engines, sort keys, MV chain, and the mTLS edge. RDS sizing/scaling ladder removed; Hetzner cost-share added (~$1-2/env/mo per task 0046).         |
 
@@ -153,9 +154,11 @@ are pushed to the Hetzner cluster via separate post-backfill tools.
 **Why ClickHouse on a BE-shared cluster (ADR 0007):**
 
 - Eliminates one production DB the prices-api would otherwise own (RDS).
-- Cost-share at empirical scale (~0.45 GB/yr, ~74 bytes/ledger, 14.8× compression
-  per task 0046) is ~1-2% pro-rata, i.e. ~$1–2/env/mo vs. $12+/mo for the
-  smallest RDS instance and substantially more at any scale-up tier.
+- Cost-share at **measured** scale (~3.5-6 GB/yr; ~1.9-3.7 KB/ledger across three
+  backfill windows — tasks 0060 + 0063, **superseding** the 0046 ~74 B/ledger
+  estimate) is ~10-15% pro-rata, i.e. ~$8-11/env/mo — still far below the $12+/mo
+  smallest RDS instance and substantially more at any scale-up tier, and trivial
+  for a 1 TB Hetzner box.
 - Columnar storage + `LowCardinality(String)` for the `source` column drives down
   per-row footprint for the per-source OHLCV shape (ADR 0004).
 - Materialised-view rollup chain replaces a scheduled Lambda — one fewer moving
@@ -1349,18 +1352,26 @@ instance on a single Hetzner box behind Caddy:443). Prices-api joins as a
 second tenant via its own `prices` database, isolated by ClickHouse's native
 multi-tenant primitives (database, user, quota, profile).
 
-| Metric                             | Value                                                       | Source                                  |
-| ---------------------------------- | ----------------------------------------------------------- | --------------------------------------- |
-| Prices-api storage footprint       | ~0.45 GB/year flat-growth                                   | Task 0046 empirical                     |
-| Average per-ledger storage         | ~74 bytes/ledger                                            | Task 0046 empirical                     |
-| Compression ratio (LZ4 + sort-key) | ~14.8×                                                      | Task 0046 empirical on `soroban_events` |
-| Write rate                         | ~1 INSERT per ledger (~12k/day per env at mainnet cadence)  | §6.1                                    |
-| Read rate                          | API-Gateway-throttled ≤100 req/s per key, cached at gateway | §8.2                                    |
+| Metric                       | Value                                                                       | Source                     |
+| ---------------------------- | --------------------------------------------------------------------------- | -------------------------- |
+| Prices-api storage footprint | **~3.5-6 GB/year** (realistic, retention-amortised)                         | Tasks 0060 + 0063 measured |
+| Average per-ledger storage   | **~1.9-3.7 KB/ledger** (activity-dependent, ~2× spread)                     | Tasks 0060 + 0063 measured |
+| Strongest size lever         | Retention-cap `_1h`/`_4h` → bounds DB at ~9 GB @ 10yr (vs ~43 GB unbounded) | Task 0060 measured         |
+| Write rate                   | ~1 INSERT per ledger (~12k/day per env at mainnet cadence)                  | §6.1                       |
+| Read rate                    | API-Gateway-throttled ≤100 req/s per key, cached at gateway                 | §8.2                       |
+
+> **Sizing superseded (2026-06-19).** The original ~74 B/ledger / ~0.45 GB/yr
+> figure was the task-0046 _per-event estimate_. Three ground-truth backfill
+> measurements (0060: 10k @ 62966000+ and 100k @ 62882700+; 0063: 64k @
+> 62016000+) put the real footprint at **~1.9-3.7 KB/ledger** — ~25-50× higher,
+> driven by trading-pair diversity (thousands of low-volume tokens, unfiltered)
+> rather than ledger count. Still small in absolute terms. See task 0063
+> `notes/G-64k-sizing-remeasure.md` and task 0060 `notes/G-measurement-results.md`.
 
 Hardware sizing, OS-level tuning, and any vertical/horizontal scaling
-decisions are owned by BE. Prices-api's contribution to the box is
-empirically light; the tier choice is driven by BE's `default.*` footprint,
-not by `prices.*`.
+decisions are owned by BE. Prices-api's contribution to the box is now
+~10-15% of the data-plane storage (still well within a single Hetzner box);
+the tier choice is driven by BE's `default.*` footprint, not by `prices.*`.
 
 ### 8.4 Capacity contention — fallback to sidecar CH
 
@@ -1383,15 +1394,15 @@ of the prices-api budget at any traffic level.
 
 Monthly running cost (low traffic, post-backfill):
 
-| Service                               | Estimated Cost | Notes                                                                                                                                                        |
-| ------------------------------------- | -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Hetzner CH cost-share for `prices` DB | ~$1–$2/env/mo  | Opening proposal ~1-2% pro-rata per task 0046; flat fee acceptable up to ~$5/env per the brief without changing the recommendation. D12 commercial follow-up |
+| Service                               | Estimated Cost     | Notes                                                                                                                                                                                                                                                                                                                             |
+| ------------------------------------- | ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Hetzner CH cost-share for `prices` DB | **~$8–$11/env/mo** | ~10-15% pro-rata on the **measured** ~3.5-6 GB/yr (tasks 0060 + 0063), superseding the ~$1-2/0046 figure. A dedicated prices CH container (ADR 0007 Alt-3) would run ~$16-25/env/mo (same disk + a reserved CH process) **and** break BE's in-cluster `price_usd_series` JOIN — so shared stays correct. D12 commercial follow-up |
 
 Backfill period additional costs (one-time, during 13-week project):
 
-| Item                     | Configuration                                                                                                                                     | One-time Cost   |
-| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------- | --------------- |
-| Cloud DB during backfill | No RDS upgrade required (ADR 0007); the bursty pushes hit Hetzner CH instead. Empirically <1 GB extra (task 0046) — no marginal cost-share change | **$0 marginal** |
+| Item                     | Configuration                                                                                                                                                                                                                            | One-time Cost   |
+| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------- |
+| Cloud DB during backfill | No RDS upgrade required (ADR 0007); the bursty pushes hit Hetzner CH instead. Measured ~114 MiB per 64k ledgers (task 0063) — a full recent-history backfill is single-digit GB, absorbed by BE's box with no marginal cost-share change | **$0 marginal** |
 
 Scaled-up at high traffic (DB-relevant):
 
