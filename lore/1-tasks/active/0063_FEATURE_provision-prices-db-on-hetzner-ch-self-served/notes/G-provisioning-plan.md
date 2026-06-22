@@ -319,3 +319,27 @@ Using the issued certs via Caddy:443:
    state, just SQL-applied rather than XML-declared. Two syntax fixes already
    applied to §1a from the re-diff: XML grants carry **no** `TO <user>` clause,
    and `<access_management>0</access_management>` was added to match BE's users.
+
+---
+
+## Completion record
+
+### 2026-06-22 — §2 database created + §4 schema applied (operator, by hand)
+
+- **§2 (G3) DONE.** `CREATE DATABASE IF NOT EXISTS prices` run on the single
+  `production` box `ch-prod-01` (`168.119.73.161`) as the `default` admin via
+  `docker exec app-clickhouse-1 clickhouse-client` (loopback). CH 26.3.10.
+- **§4 / task 0051 Step 4 DONE (apply).** The full `prices.*` schema (tables,
+  seed, views, refreshable MV chain) was applied immediately after, over the
+  same loopback path — `init.sql` → `seed.sql` → `views.sql` → `rollups.sql`
+  streamed from the local repo via `ssh … docker exec … clickhouse-client
+  --multiquery` (Route A). `price_ohlcv_1m` engine + sort key verified live
+  against ADR 0003/0004. Provenance: 0051 `notes/G-live-schema-state.md`
+  (object-set / seed-count outputs + MV smoke still being captured).
+- **AC #1 (`prices` database exists) — satisfied.**
+
+**Still open on 0063 (all BE-gated, unchanged):** §1 RBAC PR
+(`prices_writer`/`prices_reader` users + quotas), §1d Caddy `CN→user` map,
+§3 Ansible `--tags app` run, §5 mTLS cert issuance + Secrets-Manager bundles,
+§6 tenant-isolation smoke test. None of these are unblocked by the database
+creation — they need BE's PR merge + Ansible run + CA-key access.
