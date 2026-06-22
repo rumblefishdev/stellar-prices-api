@@ -5,7 +5,7 @@ type: G
 task: "0063"
 status: mature
 spawned_from: ["G-be-prices-db-rbac-ask"]
-spawns: ["G-64k-sizing-remeasure"]
+spawns: ["G-64k-sizing-remeasure", "G-be-rbac-pr-description", "S-schema-deploy-verification"]
 related_notes:
   - "../../../backlog/0050_FEATURE_be-side-prep-sns-mtls-prices-db-provisioning/notes/G-be-prices-db-rbac-ask.md"
 links:
@@ -71,7 +71,10 @@ Drafted here; do **not** push to the BE repo without approval.
 ### 1a. `crates/db-clickhouse/users.d/services.xml` — two new users
 
 ```xml
-<!-- prices tenant (prices-api task 0063). Additive; cert-as-credential. -->
+<!-- prices tenant (prices-api task 0063). Additive; cert-as-credential.
+     Element shape matches BE's 5 live users (no_password / networks /
+     profile / quota / access_management). The <grants> block is the ONE
+     addition no current BE user has — see re-diff note + open item 6. -->
 <prices_writer>
     <no_password/>
     <networks>
@@ -81,8 +84,10 @@ Drafted here; do **not** push to the BE repo without approval.
     </networks>
     <profile>write_no_ddl</profile>   <!-- REUSED; allow_ddl=0 -->
     <quota>prices_write</quota>
+    <access_management>0</access_management>   <!-- match BE's 5 users -->
     <grants>
-        <query>GRANT SELECT, INSERT, OPTIMIZE ON prices.* TO prices_writer</query>
+        <!-- XML grants take NO "TO <user>" — the user is implied by context. -->
+        <query>GRANT SELECT, INSERT, OPTIMIZE ON prices.*</query>
     </grants>
 </prices_writer>
 
@@ -95,8 +100,9 @@ Drafted here; do **not** push to the BE repo without approval.
     </networks>
     <profile>read_only</profile>      <!-- REUSED; allow_ddl=0, 4 GiB / 30 s -->
     <quota>prices_read</quota>
+    <access_management>0</access_management>
     <grants>
-        <query>GRANT SELECT ON prices.* TO prices_reader</query>
+        <query>GRANT SELECT ON prices.*</query>
     </grants>
 </prices_reader>
 ```
@@ -105,6 +111,18 @@ What is intentionally **absent** vs the G-note's writer grant: no `CREATE TABLE`
 `DROP TABLE`, `ALTER`, `TRUNCATE`. The writer appends + dedups (`OPTIMIZE` for
 `ReplacingMergeTree`); structural change is the loopback admin's job. Even if a
 grant slipped through, `write_no_ddl`'s `allow_ddl=0` blocks DDL at the profile.
+
+> **Re-diff vs BE `develop` @ `8e4e705d` (2026-06-22).** The two users slot in
+> alongside `dev_shared` / `galexie` / `api_reader` / `ingestion_writer` /
+> `dev_read` and copy their element shape exactly, with two deliberate deltas:
+> (1) `<access_management>0</access_management>` — added to match all 5 BE users;
+> (2) a `<grants>` block — which **no** BE user currently has. BE's service users
+> are unscoped (implicit all-database access; fine when `default` is the only DB).
+> The `<grants>` block both scopes prices to `prices.*` **and** flips these users
+> into explicit-grant mode, so `prices_writer` is denied `default.*` (the
+> isolation AC). Corollary: BE's own unscoped users (`ingestion_writer` etc.) can
+> still reach `prices.*` — acceptable, that's inside BE's own trust boundary; the
+> isolation that matters (a leaked prices cert → `prices.*` only) holds.
 
 ### 1b. `crates/db-clickhouse/users.d/profiles.xml` — NO change
 
@@ -116,7 +134,13 @@ G-note's DDL-capable `prices_write` profile is not created.
 
 Dedicated quotas (not reusing BE's `high_write` / `api_throttle`) so prices can
 never consume BE's per-service budget — the same isolation reasoning BE used to
-split `dev_read` from `api_throttle`. Caps copied from the BE siblings:
+split `dev_read` from `api_throttle`. **DECIDED 2026-06-22: dedicated naming
+`prices_write` / `prices_read`** (open item 4 closed). Caps copied from the BE
+siblings — **re-diff vs `develop` @ `8e4e705d` confirms an exact match to the
+live values** (`prices_write` ≡ `high_write`'s `written_bytes`
+`1125899906842624`; `prices_read` ≡ `api_throttle`'s `queries 10000` /
+`result_rows 10000000000` / `read_rows 50000000000` / `read_bytes
+1099511627776` / `execution_time 1000`, incl. the post-0243 `errors 0`):
 
 ```xml
 <prices_write>   <!-- mirror high_write: writes unbounded, written_bytes sanity cap -->
@@ -149,10 +173,12 @@ split `dev_read` from `api_throttle`. Caps copied from the BE siblings:
 
 `clickhouse_cn_user_pairs` is derived from the `CLICKHOUSE_CN_USER_MAP` env var
 (`group_vars/all.yml:75`), supplied at playbook time (operator shell / GH
-Secrets). **Append** two pairs per env — no checked-in file to edit:
+Secrets). **DECIDED 2026-06-22: single-CN, no env suffix** (open item 5 closed) —
+one prod box, one `prices` DB, so identity is per-role not per-env. **Append**
+exactly two pairs — no checked-in file to edit:
 
 ```
-prices-ingestion-{env}:prices_writer,prices-api-{env}:prices_reader
+prices-ingestion:prices_writer,prices-api:prices_reader
 ```
 
 Unmapped CN → `__unmapped__` → 403 at Caddy (fail-closed). No prices CN maps to
@@ -204,9 +230,13 @@ provisioning sequence.
 Per env, from BE's CA (needs the CA private key — **if box-admin does not include
 CA-key access, this is a BE ask**: BE runs the script, hands over the bundle):
 
+Single-CN (open item 5 closed): **one cert per identity, no `-{env}` suffix** —
+the CN matches the §1d CN map. The same cert is reused by clients in every AWS
+env (one prod box / one DB), so only two certs are issued total:
+
 ```bash
-./infra-hetzner/ca/issue-client-cert.sh prices-ingestion-{env}
-./infra-hetzner/ca/issue-client-cert.sh prices-api-{env}
+./infra-hetzner/ca/issue-client-cert.sh prices-ingestion
+./infra-hetzner/ca/issue-client-cert.sh prices-api
 ```
 
 **Storage format — single JSON bundle, per task 0052 (NOT two secrets).** 0052's
@@ -215,10 +245,12 @@ client reads one Secrets Manager secret holding `{cert, key, ca}` JSON, named by
 one bundle secret per identity per env:
 
 ```bash
-# one secret per identity per env, JSON {cert,key,ca}:
+# Secret PATH stays env-scoped (each AWS env account has its own SM), but the
+# bundle CONTENT is the same single cert across envs (single-CN). One secret per
+# identity per env, JSON {cert,key,ca}:
 aws secretsmanager put-secret-value --secret-id prices/{env}/clickhouse-mtls-ingestion \
-  --secret-string "$(jq -n --arg c "$(cat prices-ingestion-{env}.crt)" \
-                            --arg k "$(cat prices-ingestion-{env}.key)" \
+  --secret-string "$(jq -n --arg c "$(cat prices-ingestion.crt)" \
+                            --arg k "$(cat prices-ingestion.key)" \
                             --arg a "$(cat ca.crt)" '{cert:$c,key:$k,ca:$a}')"
 ```
 
@@ -238,11 +270,11 @@ in env/SSM, never the cert/key material. 1-year manual rotation cadence.
 
 Using the issued certs via Caddy:443:
 
-- `prices-ingestion-{env}` cert: `SELECT version()` → 200; `SHOW DATABASES`
+- `prices-ingestion` cert: `SELECT version()` → 200; `SHOW DATABASES`
   includes `prices`; `INSERT` into a `prices.*` table succeeds; the same against
   `default.*` → **ACCESS_DENIED**; `CREATE TABLE prices.smoke …` → **DENIED**
   (writer has no DDL — the Option-1 proof). Schema itself was applied in Step 4.
-- `prices-api-{env}` cert: `SELECT` on `prices.*` works; any `INSERT`/`CREATE`
+- `prices-api` cert: `SELECT` on `prices.*` works; any `INSERT`/`CREATE`
   → **ACCESS_DENIED**.
 
 ---
@@ -270,14 +302,20 @@ Using the issued certs via Caddy:443:
 3. **Backup scope** (G-note §4) — recommend **(b)**: `prices.*` is re-derivable
    from ledger history, so accept it is outside BE's `RESTORE DATABASE default`
    set rather than extending BE's snapshot. Flag as a decision, not an oversight.
-4. **Quota naming** — dedicated `prices_write`/`prices_read` (recommended, §1c)
-   vs reusing BE's `high_write`/`api_throttle`. Confirm at BE PR time.
-5. **Per-env CNs vs single box** (§0) — one prod box → one `prices` DB. Confirm
-   whether to issue only `-production` CNs (recommended) or per-env CNs that all
-   target the same box/DB, before Step 5 cert issuance.
-6. **`<grants>` element validity** — §1a places `<grants><query>GRANT …</query>`
-   inside the user XML. BE's live `services.xml` does **not** use inline grants
-   (its service users have broad access by design), so this needs verifying
-   against the running CH version before the PR: confirm CH applies user-XML
-   `<grants>` at startup, else move the GRANT statements into the
-   `db-clickhouse-init` `init.sql` (run once under loopback admin) instead.
+4. ✅ **CLOSED 2026-06-22 — Quota naming:** dedicated `prices_write`/`prices_read`
+   (§1c). Caps re-diffed against `develop` @ `8e4e705d` — exact match to the live
+   `high_write`/`api_throttle` values.
+5. ✅ **CLOSED 2026-06-22 — CN scheme:** single-CN, no env suffix
+   (`prices-ingestion` / `prices-api`). One prod box / one `prices` DB; identity
+   is per-role. The same two certs are reused by clients in every AWS env; only
+   the Secrets-Manager **path** is env-scoped (§1d, §5).
+6. **`<grants>` element validity (OPEN — pre-PR check).** Re-diff confirms BE's
+   live `services.xml` @ `8e4e705d` uses **no** `<grants>` on any of its 5 users
+   (they're unscoped by design). The prices users are the first to use it, so
+   before the PR: confirm the box's CH version applies user-XML `<grants>` at
+   startup (supported since CH ~21.4; BE's local mirror is 25.6). If it does not,
+   fall back to moving the two `GRANT … ON prices.*` statements into the
+   `db-clickhouse-init` `init.sql` (run once under loopback admin) — same end
+   state, just SQL-applied rather than XML-declared. Two syntax fixes already
+   applied to §1a from the re-diff: XML grants carry **no** `TO <user>` clause,
+   and `<access_management>0</access_management>` was added to match BE's users.
