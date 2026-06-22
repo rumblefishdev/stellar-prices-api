@@ -5,7 +5,7 @@ type: G
 task: "0063"
 status: mature
 spawned_from: ["G-be-prices-db-rbac-ask"]
-spawns: ["G-64k-sizing-remeasure", "G-be-rbac-pr-description"]
+spawns: ["G-64k-sizing-remeasure", "G-be-rbac-pr-description", "S-schema-deploy-verification"]
 related_notes:
   - "../../../backlog/0050_FEATURE_be-side-prep-sns-mtls-prices-db-provisioning/notes/G-be-prices-db-rbac-ask.md"
 links:
