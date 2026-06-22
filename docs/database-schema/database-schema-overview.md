@@ -9,10 +9,12 @@
 
 ## Revision History
 
-| Date       | Sections                               | Driver                                                                                                                                                                           | Summary                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| ---------- | -------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 2026-06-11 | §3.2 §3.0, Schema source-of-truth refs | [Task 0060](../../lore/1-tasks/active/0060_FEATURE_prices-clickhouse-crate-combined-backfill-sizing/README.md)                                                                   | **Schema implemented as the `packages/prices-clickhouse` crate** (`schema/init.sql` = 12 tables, source of truth; `rollups.sql` = refreshable-MV chain; `preroll.sql` = full-range re-aggregate). Built + applied on a local ClickHouse 25.6 and validated by a combined SDEX + soroban (oracle) backfill. **Sizing finding:** measured ~3.6 KB/ledger over a 10k-ledger sample (≈48× the prior 74 B/ledger task-0046 estimate), driven by ~4,343-asset pair diversity (317k 1m candles) and short-window rollups that don't yet amortize. `assets` implemented with `String` (not `FixedString`) columns to match the writer contract. See task 0060 `notes/G-measurement-results.md`. |
-| 2026-05-20 | All sections + Appendices A & B        | [ADR 0007](../../lore/2-adrs/0007_live-data-sink-on-shared-hetzner-clickhouse.md) (accepted) · [Task 0049](../../lore/1-tasks/active/0049_DOCS_overview-rewrite-for-adr-0007.md) | **Live data sink flipped from Prices-owned RDS PostgreSQL 16 to BE's shared Hetzner ClickHouse cluster** (separate `prices` database, isolated via CH multi-tenant primitives). Schema rewritten to per-source `ReplacingMergeTree(version)` rows on per-granularity tables (`price_ohlcv_1m`, `_15m`, …, `_1M`) feeding a materialised-view rollup chain that eliminates the OHLCV Rollup Lambda. Cleanup becomes `ALTER TABLE … DROP PARTITION`. All 14 mermaid blocks (including Appendices A and B) updated to ClickHouse types, engines, sort keys, MV chain, and the mTLS edge. RDS sizing/scaling ladder removed; Hetzner cost-share added (~$1-2/env/mo per task 0046).         |
+| Date       | Sections                               | Driver                                                                                                                                                                           | Summary                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| ---------- | -------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 2026-06-22 | §3.2 (`close_usd` col + views), §13    | [Task 0061](../../lore/1-tasks/archive/0061_FEATURE_historical-usd-close-price-series/README.md)                                                                                 | **Documented the historical USD close surface.** Added the `close_usd Decimal(38,14) DEFAULT 0` column (`= oracle_usd × close`, baked in at enrichment time) to the `price_ohlcv_*` DDL, and a new §3.2 subsection covering the BE-facing read-surface VIEWs — `prices.price_usd_series` / `_1h` (volume-weighted `close_usd` per natural identity + bucket), `prices.usd_reference` / `_1h` (per-bucket XLM/USDC "reference is up at T" signal), and `prices.identity_by_contract` (SAC read-seam resolver) — with the read-time `ok` / `no_asset_price` / `no_reference` status discriminator, caller-owned grain selection, and the load-bearing USDC-issuer literal. Source of truth: `packages/prices-clickhouse/schema/views.sql`. |
+| 2026-06-19 | §1.2, §8.3, §8.5                       | [Task 0063](../../lore/1-tasks/active/0063_FEATURE_provision-prices-db-on-hetzner-ch-self-served/README.md)                                                                      | **Sizing + cost-share corrected from measurement.** Fresh 64k-ledger backfill (62016000-62079999) measured **114 MiB / ~1,872 B/ledger**; combined with task 0060's 10k+100k runs the real footprint is **~1.9-3.7 KB/ledger / ~3.5-6 GB/yr** (activity-dependent), superseding the 0046 ~74 B/ledger / ~0.45 GB/yr estimate. Cost-share raised ~$1-2 → **~$8-11/env/mo** (~10-15% pro-rata). Added a shared-vs-dedicated-container cost table; dedicated container ~2× cost **and** breaks BE's in-cluster `price_usd_series` JOIN — shared stays correct. See task 0063 `notes/G-64k-sizing-remeasure.md`.                                                                                                                             |
+| 2026-06-11 | §3.2 §3.0, Schema source-of-truth refs | [Task 0060](../../lore/1-tasks/active/0060_FEATURE_prices-clickhouse-crate-combined-backfill-sizing/README.md)                                                                   | **Schema implemented as the `packages/prices-clickhouse` crate** (`schema/init.sql` = 12 tables, source of truth; `rollups.sql` = refreshable-MV chain; `preroll.sql` = full-range re-aggregate). Built + applied on a local ClickHouse 25.6 and validated by a combined SDEX + soroban (oracle) backfill. **Sizing finding:** measured ~3.6 KB/ledger over a 10k-ledger sample (≈48× the prior 74 B/ledger task-0046 estimate), driven by ~4,343-asset pair diversity (317k 1m candles) and short-window rollups that don't yet amortize. `assets` implemented with `String` (not `FixedString`) columns to match the writer contract. See task 0060 `notes/G-measurement-results.md`.                                                  |
+| 2026-05-20 | All sections + Appendices A & B        | [ADR 0007](../../lore/2-adrs/0007_live-data-sink-on-shared-hetzner-clickhouse.md) (accepted) · [Task 0049](../../lore/1-tasks/active/0049_DOCS_overview-rewrite-for-adr-0007.md) | **Live data sink flipped from Prices-owned RDS PostgreSQL 16 to BE's shared Hetzner ClickHouse cluster** (separate `prices` database, isolated via CH multi-tenant primitives). Schema rewritten to per-source `ReplacingMergeTree(version)` rows on per-granularity tables (`price_ohlcv_1m`, `_15m`, …, `_1M`) feeding a materialised-view rollup chain that eliminates the OHLCV Rollup Lambda. Cleanup becomes `ALTER TABLE … DROP PARTITION`. All 14 mermaid blocks (including Appendices A and B) updated to ClickHouse types, engines, sort keys, MV chain, and the mTLS edge. RDS sizing/scaling ladder removed; Hetzner cost-share added (~$1-2/env/mo per task 0046).                                                          |
 
 ---
 
@@ -153,9 +155,11 @@ are pushed to the Hetzner cluster via separate post-backfill tools.
 **Why ClickHouse on a BE-shared cluster (ADR 0007):**
 
 - Eliminates one production DB the prices-api would otherwise own (RDS).
-- Cost-share at empirical scale (~0.45 GB/yr, ~74 bytes/ledger, 14.8× compression
-  per task 0046) is ~1-2% pro-rata, i.e. ~$1–2/env/mo vs. $12+/mo for the
-  smallest RDS instance and substantially more at any scale-up tier.
+- Cost-share at **measured** scale (~3.5-6 GB/yr; ~1.9-3.7 KB/ledger across three
+  backfill windows — tasks 0060 + 0063, **superseding** the 0046 ~74 B/ledger
+  estimate) is ~10-15% pro-rata, i.e. ~$8-11/env/mo — still far below the $12+/mo
+  smallest RDS instance and substantially more at any scale-up tier, and trivial
+  for a 1 TB Hetzner box.
 - Columnar storage + `LowCardinality(String)` for the `source` column drives down
   per-row footprint for the per-source OHLCV shape (ADR 0004).
 - Materialised-view rollup chain replaces a scheduled Lambda — one fewer moving
@@ -393,6 +397,12 @@ CREATE TABLE prices.price_ohlcv_1m (
                                                   -- multiplied into volume_quote_usd by the
                                                   -- enrichment Lambda (task 0026)
     volume_quote_usd Decimal(38, 14) DEFAULT 0,  -- USD-denominated; filled by task 0026
+    close_usd        Decimal(38, 14) DEFAULT 0,   -- historical USD close (task 0061);
+                                                  -- close_usd = oracle_usd × close, baked
+                                                  -- in at enrichment time (DEFAULT 0 until
+                                                  -- the enrichment pass fills it, mirroring
+                                                  -- volume_quote_usd). Surfaced to BE via
+                                                  -- the prices.price_usd_series* views below
     vwap             Decimal(38, 14),         -- single-source, single-minute VWAP
                                                -- (volume_quote / volume_base);
                                                -- see §5.5 of the main overview
@@ -562,6 +572,89 @@ Backfill chunks that pre-roll higher granularities write directly to the
 target table (`_1d`, `_1h`, …) — they coexist with the rollup MVs, whose
 bounded refresh window (see §3.2) only re-aggregates _recent_ buckets, leaving
 historical backfilled partitions untouched.
+
+#### Read-surface views — historical USD close series (task 0061)
+
+The `close_usd` column above is the per-candle historical USD price BE
+requested (BE task 0199 / our task 0061 — see
+[R-historical-usd-close-design](../../lore/1-tasks/archive/0061_FEATURE_historical-usd-close-price-series/notes/R-historical-usd-close-design.md)).
+BE does **not** read the OHLCV tables directly; the contract is a set of
+**plain `VIEW`s** (no special CH version needed, unlike the refreshable rollup
+MVs) defined in `packages/prices-clickhouse/schema/views.sql`, applied after
+`init.sql`. They resolve the internal `asset_id` surrogate to the **portable
+natural Stellar identity** (`asset_kind ∈ ('native','credit','contract')`,
+`asset_code`, `issuer_address`, `contract_address`) so the surface survives
+asset-id reassignment.
+
+| View                          | Grain  | Returns                                         | Purpose                                                                                                          |
+| ----------------------------- | ------ | ----------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `prices.price_usd_series`     | daily  | `close_usd` per (natural identity, day bucket)  | long-range USD charts                                                                                            |
+| `prices.price_usd_series_1h`  | hourly | `close_usd` per (natural identity, hour bucket) | read-time TVL keyed to a ledger's `closed_at`                                                                    |
+| `prices.usd_reference`        | daily  | `xlm_usd` per day bucket                        | per-bucket "USD reference is up at T" signal                                                                     |
+| `prices.usd_reference_1h`     | hourly | `xlm_usd` per hour bucket                       | hourly companion to the above                                                                                    |
+| `prices.identity_by_contract` | —      | contract → natural identity                     | SAC read-seam resolver (§12.4): map a Soroban-DEX pool leg's contract address to the natural identity to look up |
+
+```sql
+-- One volume-weighted USD close per (natural identity, day bucket). The
+-- cross-source/cross-quote collapse: volume-weighted close_usd over every candle
+-- of the asset in the bucket (ADR 0004 per-source rows merge at read time). Only
+-- priced rows (close_usd > 0). _1h is identical but reads price_ohlcv_1h.
+CREATE VIEW IF NOT EXISTS prices.price_usd_series AS
+SELECT
+    multiIf(
+        a.contract_address != '', 'contract',
+        a.asset_code = 'XLM' AND a.issuer_address = '', 'native',
+        'credit') AS asset_kind,
+    if(a.contract_address != '', '', a.asset_code)     AS asset_code,
+    if(a.contract_address != '', '', a.issuer_address) AS issuer_address,
+    a.contract_address AS contract_address,
+    p.timestamp        AS bucket,
+    CAST(sum(toFloat64(p.close_usd) * toFloat64(p.volume_base))
+         / nullIf(sum(toFloat64(p.volume_base)), 0) AS Decimal(38, 14)) AS close_usd
+FROM prices.price_ohlcv_1d AS p FINAL
+INNER JOIN prices.assets AS a FINAL ON a.asset_id = p.asset_id
+WHERE p.close_usd > 0
+GROUP BY asset_kind, asset_code, issuer_address, contract_address, bucket;
+
+-- The XLM/USDC volume-weighted close (XLM's USD price under the USDC≡$1 peg) per
+-- bucket. A bucket's PRESENCE is the durable "USD reference is up at T" signal.
+-- Reads `close` (always present from the backfill), independent of enrichment.
+CREATE VIEW IF NOT EXISTS prices.usd_reference AS
+SELECT
+    p.timestamp AS bucket,
+    CAST(sum(toFloat64(p.close) * toFloat64(p.volume_base))
+         / nullIf(sum(toFloat64(p.volume_base)), 0) AS Decimal(38, 14)) AS xlm_usd
+FROM prices.price_ohlcv_1d AS p FINAL
+INNER JOIN prices.assets AS base  FINAL ON base.asset_id  = p.asset_id
+INNER JOIN prices.assets AS quote FINAL ON quote.asset_id = p.quote_asset_id
+WHERE base.asset_code = 'XLM' AND base.issuer_address = '' AND base.contract_address = ''
+  AND quote.asset_code = 'USDC'
+  AND quote.issuer_address = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN'
+  AND p.close > 0
+GROUP BY p.timestamp;
+```
+
+**Read-time status discriminator (computed by the reader, not stored).** A view
+cannot enumerate (asset × bucket) combinations that never traded, so a miss is a
+missing row (NULL after the consumer's `LEFT JOIN`), never an error and never a
+dropped row. For a lookup of (identity I, bucket T), the consumer LEFT JOINs
+`price_usd_series` against `usd_reference` at the matching grain:
+
+- `ok` — row present in `price_usd_series` for (I, T).
+- `no_asset_price` — (I, T) absent **but** `usd_reference` has bucket T (the USD
+  reference is up; partial TVL is valid).
+- `no_reference` — (I, T) absent **and** `usd_reference` has no bucket T
+  (systemic blackout — every XLM-pivot asset is NULL).
+
+**Grain ownership.** Grain selection is the **caller's** — the consumer JOINs
+whichever grain (`_1h` vs daily) its query needs; the views stay a dumb, fast,
+retention-agnostic surface. The finest-retained-for-T routing lives one layer up
+in the point-lookup HTTP endpoint (`price_usd_at`, task 0040), not in the views.
+
+> **USDC issuer literal is load-bearing.** The issuer address in `usd_reference`
+> is a hand-synced copy of `prices_clickhouse::USDC_ISSUER` (SQL cannot reference
+> a Rust const). If the canonical address ever changes, update it in the views
+> **and** that const together, or the views and the writer diverge.
 
 ### 3.3 `prices.current_prices` — Materialised / cached current state
 
@@ -1349,18 +1442,26 @@ instance on a single Hetzner box behind Caddy:443). Prices-api joins as a
 second tenant via its own `prices` database, isolated by ClickHouse's native
 multi-tenant primitives (database, user, quota, profile).
 
-| Metric                             | Value                                                       | Source                                  |
-| ---------------------------------- | ----------------------------------------------------------- | --------------------------------------- |
-| Prices-api storage footprint       | ~0.45 GB/year flat-growth                                   | Task 0046 empirical                     |
-| Average per-ledger storage         | ~74 bytes/ledger                                            | Task 0046 empirical                     |
-| Compression ratio (LZ4 + sort-key) | ~14.8×                                                      | Task 0046 empirical on `soroban_events` |
-| Write rate                         | ~1 INSERT per ledger (~12k/day per env at mainnet cadence)  | §6.1                                    |
-| Read rate                          | API-Gateway-throttled ≤100 req/s per key, cached at gateway | §8.2                                    |
+| Metric                       | Value                                                                       | Source                     |
+| ---------------------------- | --------------------------------------------------------------------------- | -------------------------- |
+| Prices-api storage footprint | **~3.5-6 GB/year** (realistic, retention-amortised)                         | Tasks 0060 + 0063 measured |
+| Average per-ledger storage   | **~1.9-3.7 KB/ledger** (activity-dependent, ~2× spread)                     | Tasks 0060 + 0063 measured |
+| Strongest size lever         | Retention-cap `_1h`/`_4h` → bounds DB at ~9 GB @ 10yr (vs ~43 GB unbounded) | Task 0060 measured         |
+| Write rate                   | ~1 INSERT per ledger (~12k/day per env at mainnet cadence)                  | §6.1                       |
+| Read rate                    | API-Gateway-throttled ≤100 req/s per key, cached at gateway                 | §8.2                       |
+
+> **Sizing superseded (2026-06-19).** The original ~74 B/ledger / ~0.45 GB/yr
+> figure was the task-0046 _per-event estimate_. Three ground-truth backfill
+> measurements (0060: 10k @ 62966000+ and 100k @ 62882700+; 0063: 64k @
+> 62016000+) put the real footprint at **~1.9-3.7 KB/ledger** — ~25-50× higher,
+> driven by trading-pair diversity (thousands of low-volume tokens, unfiltered)
+> rather than ledger count. Still small in absolute terms. See task 0063
+> `notes/G-64k-sizing-remeasure.md` and task 0060 `notes/G-measurement-results.md`.
 
 Hardware sizing, OS-level tuning, and any vertical/horizontal scaling
-decisions are owned by BE. Prices-api's contribution to the box is
-empirically light; the tier choice is driven by BE's `default.*` footprint,
-not by `prices.*`.
+decisions are owned by BE. Prices-api's contribution to the box is now
+~10-15% of the data-plane storage (still well within a single Hetzner box);
+the tier choice is driven by BE's `default.*` footprint, not by `prices.*`.
 
 ### 8.4 Capacity contention — fallback to sidecar CH
 
@@ -1383,15 +1484,15 @@ of the prices-api budget at any traffic level.
 
 Monthly running cost (low traffic, post-backfill):
 
-| Service                               | Estimated Cost | Notes                                                                                                                                                        |
-| ------------------------------------- | -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Hetzner CH cost-share for `prices` DB | ~$1–$2/env/mo  | Opening proposal ~1-2% pro-rata per task 0046; flat fee acceptable up to ~$5/env per the brief without changing the recommendation. D12 commercial follow-up |
+| Service                               | Estimated Cost     | Notes                                                                                                                                                                                                                                                                                                                             |
+| ------------------------------------- | ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Hetzner CH cost-share for `prices` DB | **~$8–$11/env/mo** | ~10-15% pro-rata on the **measured** ~3.5-6 GB/yr (tasks 0060 + 0063), superseding the ~$1-2/0046 figure. A dedicated prices CH container (ADR 0007 Alt-3) would run ~$16-25/env/mo (same disk + a reserved CH process) **and** break BE's in-cluster `price_usd_series` JOIN — so shared stays correct. D12 commercial follow-up |
 
 Backfill period additional costs (one-time, during 13-week project):
 
-| Item                     | Configuration                                                                                                                                     | One-time Cost   |
-| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------- | --------------- |
-| Cloud DB during backfill | No RDS upgrade required (ADR 0007); the bursty pushes hit Hetzner CH instead. Empirically <1 GB extra (task 0046) — no marginal cost-share change | **$0 marginal** |
+| Item                     | Configuration                                                                                                                                                                                                                            | One-time Cost   |
+| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------- |
+| Cloud DB during backfill | No RDS upgrade required (ADR 0007); the bursty pushes hit Hetzner CH instead. Measured ~114 MiB per 64k ledgers (task 0063) — a full recent-history backfill is single-digit GB, absorbed by BE's box with no marginal cost-share change | **$0 marginal** |
 
 Scaled-up at high traffic (DB-relevant):
 
@@ -1567,14 +1668,15 @@ criteria from the delivery plan, restated against the canonical
 
 ## 13. Quick Reference — Tables at a Glance
 
-| Table                                                            | Engine                           | Partitioning          | Sort key                                         | Written by                                                                                                                | Read by                                                                                   |
-| ---------------------------------------------------------------- | -------------------------------- | --------------------- | ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
-| `prices.assets`                                                  | `ReplacingMergeTree(updated_at)` | none                  | `(asset_code, issuer_address, contract_address)` | Asset Discovery Lambda; Prices Ledger Processor (inline)                                                                  | All asset/price endpoints                                                                 |
-| `prices.price_ohlcv_1m`                                          | `ReplacingMergeTree(version)`    | `toYYYYMM(timestamp)` | `(asset_id, quote_asset_id, source, timestamp)`  | Prices Ledger Processor; backfill streams (sdex-cloud-push, soroban-amm completion push); Cleanup Worker (DROP PARTITION) | `GET /ohlcv` (1m timeframe), Current Price Updater, MV chain feeding rolled granularities |
-| `prices.price_ohlcv_15m` / `_1h` / `_4h` / `_1d` / `_1w` / `_1M` | `ReplacingMergeTree(version)`    | `toYYYYMM(timestamp)` | `(asset_id, quote_asset_id, source, timestamp)`  | MV chain on `_1m`; backfill streams (for pre-rolled ranges)                                                               | `GET /ohlcv` (rolled granularities)                                                       |
-| `prices.current_prices`                                          | `ReplacingMergeTree(updated_at)` | none                  | `(asset_id)`                                     | Current Price Updater Lambda                                                                                              | `GET /assets`, `GET /price`, `POST /prices/batch`                                         |
-| `prices.oracle_prices`                                           | `ReplacingMergeTree`             | `toYYYYMM(timestamp)` | `(asset_id, oracle_name, timestamp)`             | Oracle Fetcher Lambda; Cleanup Worker (DROP PARTITION)                                                                    | `GET /oracles/{asset}`                                                                    |
-| `prices.backfill_progress`                                       | `ReplacingMergeTree(updated_at)` | none                  | `(task_name)`                                    | Backfill cloud-push step — one row per stream                                                                             | `GET /backfill/status`                                                                    |
+| Table                                                                              | Engine                           | Partitioning          | Sort key                                         | Written by                                                                                                                | Read by                                                                                   |
+| ---------------------------------------------------------------------------------- | -------------------------------- | --------------------- | ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| `prices.assets`                                                                    | `ReplacingMergeTree(updated_at)` | none                  | `(asset_code, issuer_address, contract_address)` | Asset Discovery Lambda; Prices Ledger Processor (inline)                                                                  | All asset/price endpoints                                                                 |
+| `prices.price_ohlcv_1m`                                                            | `ReplacingMergeTree(version)`    | `toYYYYMM(timestamp)` | `(asset_id, quote_asset_id, source, timestamp)`  | Prices Ledger Processor; backfill streams (sdex-cloud-push, soroban-amm completion push); Cleanup Worker (DROP PARTITION) | `GET /ohlcv` (1m timeframe), Current Price Updater, MV chain feeding rolled granularities |
+| `prices.price_ohlcv_15m` / `_1h` / `_4h` / `_1d` / `_1w` / `_1M`                   | `ReplacingMergeTree(version)`    | `toYYYYMM(timestamp)` | `(asset_id, quote_asset_id, source, timestamp)`  | MV chain on `_1m`; backfill streams (for pre-rolled ranges)                                                               | `GET /ohlcv` (rolled granularities)                                                       |
+| `prices.current_prices`                                                            | `ReplacingMergeTree(updated_at)` | none                  | `(asset_id)`                                     | Current Price Updater Lambda                                                                                              | `GET /assets`, `GET /price`, `POST /prices/batch`                                         |
+| `prices.oracle_prices`                                                             | `ReplacingMergeTree`             | `toYYYYMM(timestamp)` | `(asset_id, oracle_name, timestamp)`             | Oracle Fetcher Lambda; Cleanup Worker (DROP PARTITION)                                                                    | `GET /oracles/{asset}`                                                                    |
+| `prices.backfill_progress`                                                         | `ReplacingMergeTree(updated_at)` | none                  | `(task_name)`                                    | Backfill cloud-push step — one row per stream                                                                             | `GET /backfill/status`                                                                    |
+| `prices.price_usd_series` / `_1h`, `usd_reference` / `_1h`, `identity_by_contract` | `VIEW` (plain, derived)          | none (read-through)   | n/a (defined over `price_ohlcv_1d` / `_1h`)      | n/a — derived at read time from `close_usd` / `close` on the OHLCV tables (task 0061)                                     | BE historical USD close series (BE task 0199); `price_usd_at` endpoint (task 0040)        |
 
 ---
 
