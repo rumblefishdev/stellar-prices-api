@@ -172,7 +172,9 @@ For each env (dev → staging → prod):
 
 ## Acceptance Criteria
 
-- [ ] `prices` database exists on the Hetzner CH box
+- [x] `prices` database exists on the Hetzner CH box — created 2026-06-22
+      under `default` admin on `ch-prod-01`; schema also applied (task 0051
+      Step 4). See `notes/G-provisioning-plan.md` → Completion record.
 - [ ] `prices_writer` + `prices_reader` users exist via BE-repo
       `users.d/*.xml` (reproducible across deploys), with profile +
       quota scoping resource usage away from BE's `default.*`

@@ -295,8 +295,10 @@ Using the issued certs via Caddy:443:
 
 ## Open items / decisions to confirm
 
-1. **CA-key access** — does box-admin include the CA private key? If not, Step 5
-   issuance is a BE ask (BE runs `issue-client-cert.sh`, hands over the bundle).
+1. ✅ **CLOSED 2026-06-22 — CA-key access:** the operator will issue the mTLS
+   client certs self-served (`issue-client-cert.sh`) and store the
+   `{cert,key,ca}` bundles in Secrets Manager. Step 5 is **not** a BE ask;
+   the only BE-owned item left is the §1 `users.d` RBAC PR.
 2. **Secret shape reconciliation** — align 0011/0038 CDK to 0052's single-bundle
    `MTLS_SECRET_NAME` (see §5 warning). Likely a follow-up task.
 3. **Backup scope** (G-note §4) — recommend **(b)**: `prices.*` is re-derivable
@@ -319,3 +321,42 @@ Using the issued certs via Caddy:443:
    state, just SQL-applied rather than XML-declared. Two syntax fixes already
    applied to §1a from the re-diff: XML grants carry **no** `TO <user>` clause,
    and `<access_management>0</access_management>` was added to match BE's users.
+
+---
+
+## Completion record
+
+### 2026-06-22 — §2 database created + §4 schema applied (operator, by hand)
+
+- **§2 (G3) DONE.** `CREATE DATABASE IF NOT EXISTS prices` run on the single
+  `production` box `ch-prod-01` (`168.119.73.161`) as the `default` admin via
+  `docker exec app-clickhouse-1 clickhouse-client` (loopback). CH 26.3.10.
+- **§4 / task 0051 Step 4 DONE (apply).** The full `prices.*` schema (tables,
+  seed, views, refreshable MV chain) was applied immediately after, over the
+  same loopback path — `init.sql` → `seed.sql` → `views.sql` → `rollups.sql`
+  streamed from the local repo via `ssh … docker exec … clickhouse-client
+  --multiquery` (Route A). `price_ohlcv_1m` engine + sort key verified live
+  against ADR 0003/0004. Provenance: 0051 `notes/G-live-schema-state.md`
+  (object-set / seed-count outputs + MV smoke still being captured).
+- **AC #1 (`prices` database exists) — satisfied.**
+
+**Still open on 0063 — ownership clarified 2026-06-22:**
+
+- **BE-side (the only genuinely BE-owned item):** §1 RBAC PR —
+  `prices_writer` / `prices_reader` users + quotas added to
+  `users.d/*.xml` (reproducible across deploys). This is the one piece
+  prices-api cannot self-serve, since the users are XML-defined and live in
+  the BE repo.
+- **Prices-api / operator-owned (will be done self-served):** §1d Caddy
+  `CLICKHOUSE_CN_USER_MAP` entries (`prices-ingestion:prices_writer`,
+  `prices-api:prices_reader`) **and** §5 mTLS client-cert issuance + the
+  single `{cert,key,ca}` Secrets-Manager bundles. The operator will add the
+  CN-map entries and issue/store the certs directly — these are **not** a BE
+  ask. (Implies CA-key access is available to the operator; open item 1 is
+  resolved on the operator side.)
+- **Operator-coordinated infra actions:** §3 Ansible `--tags app` run (picks
+  up the new users + CN map) and §6 tenant-isolation smoke test — gated only
+  on the §1 BE PR landing first.
+
+Net: **only the BE `users.d` RBAC PR (§1) is on the BE side.** Everything
+else is prices-api/operator work, sequenced after that PR merges.
