@@ -64,10 +64,18 @@ own CDK is likewise single-env: `EnvironmentConfig.envName` is the literal
 
 ---
 
-## 1. BE-repo PR content (author locally → 🔒 PR to soroban-block-explorer)
+## 1. BE-repo RBAC — ✅ SHIPPED by BE task 0314 (2026-06-23)
+
+> ✅ **DONE — BE task 0314, commit `87f24b76`** (branch
+> `feat/0314_prices-tenant-clickhouse-rbac`, merged). BE added `prices_writer` /
+> `prices_reader` to `services.xml` (with inline `<grants>`) and
+> `prices_write` / `prices_read` to `quotas.xml` — verified **byte-for-byte
+> identical** to the §1a/§1c drafts below (profiles unchanged, §1b). This was the
+> one genuinely BE-owned item for 0063. **Not yet live on the box:** the change
+> takes effect only on the operator-run `ansible --tags app` (§3). The drafts
+> below are retained as the as-built record.
 
 All three edits are **additive** — no existing BE user/profile/quota changes.
-Drafted here; do **not** push to the BE repo without approval.
 
 ### 1a. `crates/db-clickhouse/users.d/services.xml` — two new users
 
@@ -183,6 +191,19 @@ exactly two pairs — no checked-in file to edit:
 ```
 prices-ingestion-production:prices_writer,prices-api-production:prices_reader
 ```
+
+> ⚠️ **Heads-up — BE doc lists these CNs *bare* (deploy-time mismatch to avoid).**
+> BE's `docs/architecture/security/clickhouse-rbac.md` CN→user table (added by
+> task 0314) lists the prices rows as `prices-ingestion` / `prices-api` (no
+> `-<environment>`) — transcribed from our *pre-reversal* ask. **Every other**
+> CN in that same BE table is `-<environment>` (`galexie-<environment>`,
+> `lambda-api-<environment>`, …) and the doc says certs "get a CN matching their
+> AWS role," so our env-suffixed form is the one that matches BE's own dominant
+> convention; the bare prices rows are the anomaly. We own the CN-map append
+> (`CLICKHOUSE_CN_USER_MAP` in `~/.config/soroban-prod.env`), so use the
+> **env-suffixed** pairs above — they must match the issued cert CNs (§5) and our
+> secret names. Optional cleanup: ask BE to fix their two doc rows to
+> `prices-{ingestion,api}-<environment>`.
 
 Unmapped CN → `__unmapped__` → 403 at Caddy (fail-closed). No prices CN maps to
 `default`/`dev_shared`.
@@ -373,8 +394,9 @@ Using the issued certs via Caddy:443:
 
 1. ✅ **CLOSED 2026-06-22 — CA-key access:** the operator will issue the mTLS
    client certs self-served (`issue-client-cert.sh`) and store the
-   `{cert,key,ca}` bundles in Secrets Manager. Step 5 is **not** a BE ask;
-   the only BE-owned item left is the §1 `users.d` RBAC PR.
+   `{cert,key,ca}` bundles in Secrets Manager. Step 5 is **not** a BE ask.
+   (The §1 `users.d` RBAC — formerly the last BE-owned item — has since
+   shipped via BE task 0314 `87f24b76`; see §1.)
 2. ✅ **CLOSED 2026-06-23 — Secret shape reconciliation (done on PR#34).**
    Was: `secrets-stack.ts` emitted the two-secret (`…-cert`/`…-key`),
    single-identity shape with random placeholders, while `mtls.rs` reads one
@@ -428,25 +450,25 @@ Using the issued certs via Caddy:443:
   (object-set / seed-count outputs + MV smoke still being captured).
 - **AC #1 (`prices` database exists) — satisfied.**
 
-**Still open on 0063 — ownership clarified 2026-06-22:**
+**Still open on 0063 — updated 2026-06-23 (BE §1 shipped):**
 
-- **BE-side (the only genuinely BE-owned item):** §1 RBAC PR —
-  `prices_writer` / `prices_reader` users + quotas added to
-  `users.d/*.xml` (reproducible across deploys). This is the one piece
-  prices-api cannot self-serve, since the users are XML-defined and live in
-  the BE repo.
-- **Prices-api / operator-owned (will be done self-served):** §1d Caddy
+- ✅ **BE-side §1 RBAC — SHIPPED** by BE task 0314 (commit `87f24b76`):
+  `prices_writer` / `prices_reader` + `prices_write` / `prices_read` added to
+  `users.d/{services,quotas}.xml`, byte-for-byte the §1a/§1c drafts. The one
+  piece prices-api could not self-serve is **done**; it goes live on the §3
+  `ansible --tags app` run.
+- **Prices-api / operator-owned (self-served, remaining):** §1d Caddy
   `CLICKHOUSE_CN_USER_MAP` entries
   (`prices-ingestion-production:prices_writer`,
-  `prices-api-production:prices_reader`) **and** §5 mTLS client-cert issuance +
-  the single `{cert,key,ca}` Secrets-Manager bundles
-  (`prices/production/clickhouse-mtls-prices-{ingestion,api}-production`). The
-  operator will add the CN-map entries and issue/store the certs directly —
-  these are **not** a BE ask. (Implies CA-key access is available to the
-  operator; open item 1 is resolved on the operator side.)
+  `prices-api-production:prices_reader` — env-suffixed; see the §1d heads-up re
+  BE's bare-CN doc rows) **and** §5 mTLS client-cert issuance + the single
+  `{cert,key,ca}` Secrets-Manager bundles
+  (`prices/production/clickhouse-mtls-prices-{ingestion,api}-production`). Not a
+  BE ask (CA-key access available to the operator; open item 1 resolved).
 - **Operator-coordinated infra actions:** §3 Ansible `--tags app` run (picks
-  up the new users + CN map) and §6 tenant-isolation smoke test — gated only
-  on the §1 BE PR landing first.
+  up the new users + CN map) and §6 tenant-isolation smoke test — now unblocked
+  (the §1 BE dependency has landed).
 
-Net: **only the BE `users.d` RBAC PR (§1) is on the BE side.** Everything
-else is prices-api/operator work, sequenced after that PR merges.
+Net: **the BE-side dependency (§1) is closed.** Everything remaining is
+prices-api/operator work — issue certs (§5), append the CN map (§1d), run
+`ansible --tags app` (§3), smoke-test isolation (§6).

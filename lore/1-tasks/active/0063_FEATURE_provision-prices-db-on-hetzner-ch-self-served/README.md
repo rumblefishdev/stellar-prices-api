@@ -175,9 +175,14 @@ For each env (dev → staging → prod):
 - [x] `prices` database exists on the Hetzner CH box — created 2026-06-22
       under `default` admin on `ch-prod-01`; schema also applied (task 0051
       Step 4). See `notes/G-provisioning-plan.md` → Completion record.
-- [ ] `prices_writer` + `prices_reader` users exist via BE-repo
+- [~] `prices_writer` + `prices_reader` users exist via BE-repo
       `users.d/*.xml` (reproducible across deploys), with profile +
       quota scoping resource usage away from BE's `default.*`
+      — **DEFINED 2026-06-23 by BE task 0314 (commit `87f24b76`)**:
+      `services.xml` (+users, inline `<grants>`) + `quotas.xml`
+      (+`prices_write`/`prices_read`) match our G-plan §1 byte-for-byte.
+      Goes **live** only after the operator-run `ansible --tags app`
+      (see AC below + §3); checkbox flips to [x] once deployed.
 - [ ] Caddy `CLICKHOUSE_CN_USER_MAP` maps the prices CNs to the prices
       users; unmapped CNs 403
 - [ ] Per-env mTLS certs issued and stored in AWS Secrets Manager as a
