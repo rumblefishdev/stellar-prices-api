@@ -258,13 +258,70 @@ CREATE DATABASE IF NOT EXISTS prices;
 
 ## 3. Deploy the RBAC (🔒 Hetzner, Ansible)
 
-After the 1a–1d PR merges in the BE repo + `CLICKHOUSE_CN_USER_MAP` is extended:
+**What "RBAC" means here:** the role-based access control config — the
+`prices_writer`/`prices_reader` CH users (quotas + `prices.*`-only grants,
+shipped by BE 0314 `87f24b76`) **and** the Caddy CN→user map (pushed to
+`soroban/production/operator/env`, see §1d). After §1 + §1d both pieces are
+**committed but not running**: the users live in the BE repo's
+`users.d/*.xml`, the CN map lives in the operator env secret. The
+`--tags app` run is the one action that makes both live on the box:
+
+- the `app` role pulls the updated BE repo onto the box → ClickHouse
+  hot-loads the new `users.d/*.xml` (`prices_writer`/`prices_reader`);
+- it re-renders `/srv/app/.env` from `CLICKHOUSE_CN_USER_MAP` and reloads
+  Caddy → the two prices CNs enter the mTLS allowlist and map to the prices
+  users.
+
+Until this runs, a prices cert hitting Caddy:443 gets a **403** (unmapped CN)
+and the prices users don't exist on the box.
+
+> ⚠️ **Gated + shared-box.** This runs against the **shared** production box
+> and `--tags app` recreates containers whose env/compose changed — it briefly
+> cycles BE's `clickhouse`/Caddy services too. **Coordinate with BE and get
+> explicit approval before running** (prepare-only constraint). prices-api does
+> not run this solo.
+
+### Operator procedure (run from a machine with box SSH + the operator env)
 
 ```bash
+# 0. Local BE checkout must have the merged 0314 RBAC (the app role deploys
+#    from repo state), and the operator env must have the §1d CN-map push.
+cd ~/Projects/stellar/soroban-block-explorer
+git checkout master && git pull                 # must include 87f24b76
+export AWS_PROFILE=soroban-explorer
+aws secretsmanager get-secret-value --secret-id soroban/production/operator/env \
+  --query SecretString --output text > ~/.config/soroban-prod.env
+
+# 1. Sanity: the prices CNs must be in the map you're about to deploy
+grep CLICKHOUSE_CN_USER_MAP ~/.config/soroban-prod.env
+#    → must contain prices-ingestion-production:prices_writer
+#      and             prices-api-production:prices_reader
+
+# 2. Connectivity check
+source ~/.config/soroban-prod.env
+cd infra-hetzner/ansible/
+ansible -i inventory.ini all -m ping            # expect: ch-prod-01 | SUCCESS
+
+# 3. DRY RUN first — review the diff before touching prod
+ansible-playbook -i inventory.ini site.yml --tags app --check --diff
+
+# 4. Coordinate with BE, then the real run
 ansible-playbook -i inventory.ini site.yml --tags app   # CH picks up users.d, Caddy picks up the CN map
 ```
 
-Prepare-only: coordinate the actual run with BE / explicit approval.
+### Post-deploy verification
+
+```bash
+ssh deploy@<ch-prod-01-ip>
+docker exec clickhouse clickhouse-client -q \
+  "SELECT name FROM system.users WHERE name LIKE 'prices_%'"   # → prices_reader, prices_writer
+exit
+# cert-less hit is still rejected at the TLS layer:
+curl -sSI "https://${CH_DOMAIN}/ping"                          # → handshake failure, NOT 200
+```
+
+Once this run succeeds the two `[~]` acceptance criteria (users live + CN-map
+live) flip to `[x]`, and §6 (isolation smoke test) is unblocked.
 
 ---
 
