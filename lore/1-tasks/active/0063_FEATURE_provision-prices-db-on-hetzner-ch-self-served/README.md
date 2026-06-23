@@ -183,12 +183,17 @@ For each env (dev → staging → prod):
       (+`prices_write`/`prices_read`) match our G-plan §1 byte-for-byte.
       Goes **live** only after the operator-run `ansible --tags app`
       (see AC below + §3); checkbox flips to [x] once deployed.
-- [ ] Caddy `CLICKHOUSE_CN_USER_MAP` maps the prices CNs to the prices
-      users; unmapped CNs 403
-- [ ] Per-env mTLS certs issued and stored in AWS Secrets Manager as a
+- [~] Caddy `CLICKHOUSE_CN_USER_MAP` maps the prices CNs to the prices
+      users; unmapped CNs 403 — **entries PUSHED 2026-06-23**
+      (`prices-ingestion-production:prices_writer`,
+      `prices-api-production:prices_reader`) to `soroban/production/operator/env`;
+      goes **live** on the §3 `ansible --tags app` run.
+- [x] Per-env mTLS certs issued and stored in AWS Secrets Manager as a
       single `{cert,key,ca}` JSON bundle per identity (named by
-      `MTLS_SECRET_NAME`, per 0052); or, if CA-key access is withheld,
-      the BE-issuance hand-off is recorded done
+      `MTLS_SECRET_NAME`, per 0052) — **DONE 2026-06-23**: CNs
+      `prices-{ingestion,api}-production`, secrets
+      `prices/production/clickhouse-mtls-prices-{ingestion,api}-production`
+      (`eu-central-1`). Self-served from BE's CA; no hand-off needed.
 - [ ] Smoke test confirms isolation: `prices.*` writable by
       `prices_writer`, `default.*` denied, `CREATE TABLE` denied to the
       writer; `prices_reader` read-only

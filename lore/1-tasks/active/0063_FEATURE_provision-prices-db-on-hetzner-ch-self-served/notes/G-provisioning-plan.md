@@ -398,16 +398,61 @@ in env/SSM, never the cert/key material. 1-year manual rotation cadence.
 
 ---
 
-## 6. Verify tenant isolation (🔒 Hetzner, per env)
+## 6. Verify tenant isolation (🔒 Hetzner, run after §3 deploy)
 
-Using the issued certs via Caddy:443:
+Test through Caddy:443 with the issued certs. The local cert copies were shredded
+in §5 Step 5, so re-fetch the bundles from Secrets Manager into tmpfs for the
+test, then shred. Needs `jq` + `curl`; `CH_DOMAIN` comes from the operator env.
 
-- `prices-ingestion-production` cert: `SELECT version()` → 200; `SHOW DATABASES`
-  includes `prices`; `INSERT` into a `prices.*` table succeeds; the same against
-  `default.*` → **ACCESS_DENIED**; `CREATE TABLE prices.smoke …` → **DENIED**
-  (writer has no DDL — the Option-1 proof). Schema itself was applied in Step 4.
-- `prices-api-production` cert: `SELECT` on `prices.*` works; any `INSERT`/`CREATE`
-  → **ACCESS_DENIED**.
+```bash
+export AWS_PROFILE=soroban-explorer AWS_DEFAULT_REGION=eu-central-1
+set -a; source ~/.config/soroban-prod.env; set +a        # provides CH_DOMAIN
+mkdir -p /dev/shm/prices-smoke && chmod 0700 /dev/shm/prices-smoke
+cd /dev/shm/prices-smoke
+
+# fetch + split each bundle (curl needs cert+key; the LE server cert is verified
+# by the system roots, so NO --cacert and the bundle ca is not needed here)
+for id in ingestion api; do
+  b="$(aws secretsmanager get-secret-value \
+        --secret-id "prices/production/clickhouse-mtls-prices-${id}-production" \
+        --query SecretString --output text)"
+  printf '%s' "$b" | jq -r .cert > "$id.crt"
+  printf '%s' "$b" | jq -r .key  > "$id.key"; chmod 600 "$id.key"
+done
+
+CH="https://$CH_DOMAIN"
+q() { # $1=identity (ingestion|api)  $2=SQL
+  printf '%s → ' "$2"
+  curl -sS -o /tmp/smk -w '[HTTP %{http_code}]\n' \
+       --cert "$1.crt" --key "$1.key" "$CH" --data-binary "$2"
+  sed 's/^/    /' /tmp/smk
+}
+
+# --- writer: prices-ingestion-production → prices_writer ---
+q ingestion "SELECT version()"                                    # 200 + version
+q ingestion "SELECT count() FROM prices.price_ohlcv_1m"           # 200 + a number
+q ingestion "SELECT count() FROM default.<an-existing-BE-table>"  # ACCESS_DENIED
+q ingestion "CREATE TABLE prices.smoke (x UInt8) ENGINE=Memory"   # ACCESS_DENIED (no DDL)
+
+# --- reader: prices-api-production → prices_reader ---
+q api "SELECT count() FROM prices.price_ohlcv_1m"                 # 200 + a number
+q api "INSERT INTO prices.price_ohlcv_1m (timestamp) VALUES (now())"  # ACCESS_DENIED
+
+# cleanup
+cd /; shred -u /dev/shm/prices-smoke/*.key; rm -rf /dev/shm/prices-smoke
+```
+
+Expected: writer `SELECT`s → `[HTTP 200]`; writer on `default.*` and `CREATE
+TABLE` → an `ACCESS_DENIED` / "Not enough privileges" body (HTTP 403/500); reader
+`SELECT` → 200, reader `INSERT` → `ACCESS_DENIED`. That set is the isolation
+acceptance proof.
+
+> Notes: substitute a real `default` table you know exists (the deny fires on the
+> privilege check). To also prove **writer INSERT succeeds** (AC), run one marked
+> insert — e.g. a row with an obvious sentinel — and confirm it lands; the writer
+> has no `DELETE`/DDL grant, so clean it up afterward over **loopback admin**
+> (`docker exec app-clickhouse-1 clickhouse-client` as `default`), exactly like
+> the 0051 MV smoke cleanup. `CN`→`__unmapped__` certs 403 at Caddy before CH.
 
 ---
 
@@ -470,6 +515,23 @@ Using the issued certs via Caddy:443:
 ---
 
 ## Completion record
+
+### 2026-06-23 — §5 certs issued+stored + §1d CN map pushed (operator, by hand)
+
+- **§5 DONE.** Both mTLS client certs issued from BE's CA
+  (`soroban-prod / ca-key` from the password manager → tmpfs) for CNs
+  `prices-ingestion-production` / `prices-api-production`, and stored as single
+  `{cert,key,ca}` JSON bundles in Secrets Manager (`eu-central-1`):
+  `prices/production/clickhouse-mtls-prices-{ingestion,api}-production`. Local
+  key material shredded.
+- **§1d DONE (pushed, not yet live).** `CLICKHOUSE_CN_USER_MAP` extended with
+  `prices-ingestion-production:prices_writer` +
+  `prices-api-production:prices_reader` and `put-secret-value`'d back to
+  `soroban/production/operator/env`. Effective on the §3 `ansible --tags app` run.
+- **AC (certs issued+stored) — satisfied.** CN-map + users go live on §3.
+
+**Remaining: §3** (`ansible --tags app`, with BE — applies BE 0314's users +
+the CN map) → **§6** (isolation smoke test, commands now in §6).
 
 ### 2026-06-22 — §2 database created + §4 schema applied (operator, by hand)
 
