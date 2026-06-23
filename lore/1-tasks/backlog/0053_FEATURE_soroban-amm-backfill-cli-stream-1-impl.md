@@ -4,7 +4,7 @@ title: "Soroban AMM Backfill CLI (`soroban-amm-backfill`) — Stream 1 implement
 type: FEATURE
 status: backlog
 related_adr: ["0001", "0003", "0004", "0007"]
-related_tasks: ["0017", "0034", "0037", "0048", "0052", "0051"]
+related_tasks: ["0017", "0034", "0037", "0048", "0052", "0051", "0058", "0026"]
 tags: [layer-indexing, priority-high, effort-large, milestone-M1, stream-1, rust, cli, workstation, clickhouse, soroban, amm, soroswap, aquarius, phoenix]
 milestone: 1
 links:
@@ -21,16 +21,27 @@ links:
 history:
   - date: 2026-05-21
     status: backlog
-    who: okarcz
+    who: operator
     note: >
       Spawned during Tranche 1 task-set creation. ADR 0001 commits
       Stream 1 to a local-CH-sourced workstation CLI; 0017 covers
       the CH instance setup; 0037 covers the dispatch kernel; 0034
       covers Phoenix WASM tolerance; 0048 carries the decoder spec.
       No task owns the actual `soroban-amm-backfill` binary —
-      decode loop, bucket to 1-min OHLCV, write to local Postgres,
-      run the one-shot completion push to Hetzner CH. This task
-      fills the gap.
+      decode loop, bucket to 1-min OHLCV, write to the local prices.*
+      CH mirror, run the one-shot completion push to Hetzner CH. This
+      task fills the gap.
+  - date: 2026-06-19
+    status: backlog
+    who: claude
+    note: >
+      Corrected the local staging store from a local Postgres to a
+      local ClickHouse mirror of the Hetzner `prices.*` schema (same
+      local-CH→Hetzner shape BE uses) — Summary, Context, Steps
+      1/5/6/7/8, acceptance criteria, deps. Added volume_quote (0058)
+      population + USD columns left DEFAULT 0 for the enrichment pass
+      (0026). Repointed provisioning blocker 0050→0063. Replaced
+      personal username with "operator".
 ---
 
 # Soroban AMM Backfill CLI (`soroban-amm-backfill`)
@@ -42,8 +53,10 @@ binary that reads the operator's local ClickHouse `soroban_events`
 (populated upfront by BE's `backfill-runner --target=clickhouse`
 per 0017), decodes Soroswap / Aquarius / Phoenix swap events via
 the `stellar-xdr` crate using the 0048 decoder spec, buckets the
-results into per-source 1-min OHLCV rows in a local Postgres, and
-runs a one-shot completion push to Hetzner ClickHouse `prices.*`
+results into per-source 1-min OHLCV rows in a **local ClickHouse
+mirror of the Hetzner `prices.*` schema** (the same local-CH→Hetzner
+shape BE uses, not a local Postgres), and runs a one-shot completion
+push to Hetzner ClickHouse `prices.*`
 that lands the historical rows and flips
 `prices.backfill_progress.soroban_amm` to `status='completed'`.
 
@@ -65,10 +78,13 @@ on the operator's workstation. The runtime flow is:
 3. Each event's `topics_xdr` + `data_xdr` are decoded into a
    `TradeTick` per the 0048 decoder spec.
 4. Ticks are bucketed to 1-min OHLCV per ADR 0003 PK shape
-   (timestamp, asset_id, quote_asset_id, source) and written to
-   a local Postgres (Docker) on the workstation.
-5. On completion, the cloud-push step streams the local
-   `price_ohlcv_*` rows into Hetzner CH `prices.*` via the 0052
+   (timestamp, asset_id, quote_asset_id, source) and INSERTed into
+   a local ClickHouse mirror of `prices.*` (Docker — the same local
+   CH that holds `soroban_events`; schema applied from
+   `packages/prices-clickhouse/schema/*` per 0017). `version` is set
+   per ADR 0004 so ReplacingMergeTree collapses re-runs.
+5. On completion, the cloud-push step copies the local `prices.*`
+   mirror rows into Hetzner CH `prices.*` via the 0052
    shared mTLS client, then flips `backfill_progress.soroban_amm`
    to `status='completed'`. The local CH instance is torn down
    post-push.
@@ -83,11 +99,11 @@ Total wall-clock: a few hours, dominated by 0017's
 Add `packages/soroban-amm-backfill/` as a binary crate.
 Dependencies:
 
-- `clickhouse` (raw, not the 0052 wrapper — reads from the local
-  plaintext CH, no mTLS).
+- `clickhouse` (raw, not the 0052 wrapper — reads `soroban_events`
+  from and writes the `prices.*` mirror to the local plaintext CH,
+  no mTLS).
 - 0052 shared CH client for the cloud-push step (mTLS to Caddy).
 - `stellar-xdr` — official SDF Rust XDR types for ScVal decoding.
-- `sqlx` (Postgres) — local Postgres sink.
 - `clap` — CLI argument parsing.
 - `tracing` + `tracing-subscriber` — structured logs.
 
@@ -96,7 +112,7 @@ CLI surface:
 ```
 soroban-amm-backfill
   --local-ch-url URL         (default http://localhost:8123)
-  --local-pg-url URL         (default postgres://localhost/prices_backfill)
+  --mirror-db NAME           (local prices.* mirror DB in the local CH; default 'prices')
   --start-ledger SEQ
   --end-ledger SEQ
   --venues VENUES            (comma-separated: soroswap,aquarius,phoenix; default all)
@@ -158,19 +174,26 @@ For each `TradeTick`:
 2. Compute the per-tick price and per-tick `volume_quote /
    volume_base` per 0048 §3.
 3. Group ticks into the `(floor_minute(closed_at), asset_id,
-   quote_asset_id, source)` bucket and merge into local Postgres
-   `price_ohlcv_1m` using ADR 0004's incremental-merge semantics
-   (preserve open, overwrite close, GREATEST(high), LEAST(low),
-   sum volumes + trade_count, recompute vwap).
-4. Pre-roll higher granularities (15m, 1h, 4h, 1d, 1w, 1M) in
-   the same pass so the cloud-push step writes already-aggregated
-   rows directly to the target tables (matches design doc §3.2
+   quote_asset_id, source)` bucket and finalize each bucket
+   in-memory per ADR 0004 (preserve open, overwrite close,
+   GREATEST(high), LEAST(low), sum volumes + trade_count, recompute
+   vwap). Populate `volume_quote` with native quote-asset volume
+   (per 0058); leave `volume_quote_usd` and `close_usd` at their
+   `DEFAULT 0` — the USD enrichment pass fills them later from
+   `oracle_prices` (0026; see archival-USD open question in 0017).
+   INSERT the finalized rows into the local CH
+   `prices.price_ohlcv_1m` mirror; ReplacingMergeTree(version)
+   collapses any re-run.
+4. Pre-roll higher granularities (15m, 1h, 4h, 1d, 1w, 1M) in the
+   same pass (math mirrors the `rollups.sql` MV chain) and INSERT
+   them into their local CH mirror tables, so the cloud-push step
+   copies already-aggregated rows (matches design doc §3.2
    "Backfill scripts produce already-aggregated rows").
 
 ### Step 6: Cloud-push (`push` subcommand)
 
-Streams all `price_ohlcv_*` rows + new `assets` rows from local
-Postgres to Hetzner CH `prices.*` via the 0052 mTLS client:
+Copies all `price_ohlcv_*` rows + new `assets` rows from the local
+CH `prices.*` mirror to Hetzner CH `prices.*` via the 0052 mTLS client:
 
 1. Open a CH connection per granularity table.
 2. Stream rows in chunks (e.g. 10k rows per INSERT) using the
@@ -188,9 +211,10 @@ Postgres to Hetzner CH `prices.*` via the 0052 mTLS client:
 
 - Unit: decoder paths covered by 0037 / 0048; here, test the
   bucketing + pre-roll math for at least two venue-pair scenarios.
-- Integration: end-to-end against a Docker CH + Docker Postgres,
-  seeded with a small recorded `soroban_events` fixture; assert
-  the produced 1-min rows match a hand-computed gold file.
+- Integration: end-to-end against a Docker CH holding both the
+  `soroban_events` input and the `prices.*` mirror, seeded with a
+  small recorded `soroban_events` fixture; assert the produced
+  1-min rows match a hand-computed gold file.
 - Smoke: cloud-push step against a local Docker CH (no mTLS) +
   a stubbed `prices.backfill_progress` row.
 
@@ -201,7 +225,7 @@ A short `RUNBOOK.md` documenting the end-to-end run sequence:
 1. Run 0017's CH prep (`backfill-runner --target=clickhouse`).
 2. Apply 0051's schema to Hetzner CH `prices` if not done.
 3. Run `soroban-amm-backfill decode --start-ledger=… --end-ledger=…`.
-4. Inspect local Postgres row counts; spot-check via SQL.
+4. Inspect local CH `prices.*` mirror row counts; spot-check via SQL.
 5. Run `soroban-amm-backfill push --target-ch-url=…`.
 6. Confirm `GET /backfill/status` shows
    `soroban_amm.status: "completed"` (0055).
@@ -210,11 +234,13 @@ A short `RUNBOOK.md` documenting the end-to-end run sequence:
 ## Acceptance Criteria
 
 - [ ] `packages/soroban-amm-backfill` binary builds and runs
-      end-to-end against a Docker local CH + Docker local Postgres
+      end-to-end against a Docker local CH (soroban_events input +
+      prices.* mirror)
 - [ ] Decoder paths produce `TradeTick` records that match the
       0048 spec gold-file fixtures for all three venues
-- [ ] Pre-rolled higher-granularity rows in local Postgres are
-      consistent with the 1-min rows under the §3.2 MV semantics
+- [ ] Pre-rolled higher-granularity rows in the local CH prices.*
+      mirror are consistent with the 1-min rows under the §3.2 MV
+      semantics
       (`argMin(open)`, `max(high)`, `min(low)`, `argMax(close)`,
       `sum(volumes)`)
 - [ ] `push` subcommand streams local rows to Hetzner CH
@@ -245,8 +271,9 @@ A short `RUNBOOK.md` documenting the end-to-end run sequence:
   workflow can run before 0052 lands.
 - **0051** — the target Hetzner CH `prices.*` schema must exist
   before the push lands data.
-- **0050** — the Hetzner CH credentials and endpoint must be
-  provisioned before the push lands.
+- **0063** — the `prices` database, scoped users, and per-env mTLS
+  cert/endpoint must be provisioned on the Hetzner box before the
+  push lands (0050 narrowed to SNS only).
 
 ## Out of scope
 

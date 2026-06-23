@@ -2,7 +2,7 @@
 id: "0051"
 title: "ClickHouse `prices.*` schema + materialised-view rollup chain migration"
 type: FEATURE
-status: blocked
+status: completed
 related_adr: ["0003", "0004", "0007"]
 related_tasks: ["0060", "0061", "0059", "0063", "0052", "0011", "0038", "0046", "0050"]
 tags: [layer-database, priority-high, effort-medium, milestone-M1, clickhouse, hetzner, schema, migrations, ddl]
@@ -92,7 +92,34 @@ history:
       Step 4 — the live loopback-admin apply + MV smoke test — which needs
       0063 to create the `prices` database and hand over box admin access.
       No code work remains on 0051 itself; moving to blocked on 0063.
----
+  - date: 2026-06-22
+    status: blocked
+    who: oski
+    note: >
+      **Step 4 live apply executed (operator, by hand).** 0063 created the
+      `prices` database on the single Hetzner `production` box `ch-prod-01`
+      and admin access is in hand, so the schema was applied over loopback as
+      the `default` admin via Route A — `init.sql` → `seed.sql` → `views.sql`
+      → `rollups.sql` streamed through `ssh … docker exec app-clickhouse-1
+      clickhouse-client --multiquery` (CH 26.3.10). `price_ohlcv_1m` engine
+      (`ReplacingMergeTree(version)`) + sort key
+      (`asset_id, quote_asset_id, source, timestamp`) verified live against
+      ADR 0003/0004. Provenance note `notes/G-live-schema-state.md` created.
+      Remaining before done: paste the `SHOW TABLES`/seed-count outputs into
+      the note and run the §6 MV propagation smoke test. Stays blocked-form
+      in `blocked/` until those two close, then archive.
+  - date: 2026-06-22
+    status: completed
+    who: oski
+    note: >
+      **Done.** Step 4 verification closed. Live object set captured (24
+      objects: 12 base ReplacingMergeTree tables + 6 rollup MVs + 6 read
+      views), `backfill_progress` seed = 2, `price_ohlcv_1m` engine + sort key
+      verified vs ADR 0003/0004, and the refreshable MV chain smoke-verified
+      (`_1m` fixture → `_15m`; cleanup also demonstrated replace-on-refresh
+      semantics). All evidence in `notes/G-live-schema-state.md`. Both
+      remaining acceptance criteria now [x]; no code changed (operational
+      apply + verification only). Archiving.
 
 # ClickHouse `prices.*` schema + materialised-view rollup chain migration
 
@@ -232,12 +259,18 @@ Remaining for this task:
 - [x] Apply transport decided: **loopback-admin, no mTLS path** — the
       existing plaintext `prices-clickhouse-init` is the apply tool;
       remote mTLS DDL descoped (mirrors BE; Design Decisions → Emerged #5)
-- [ ] Schema applied to the live Hetzner `prices` DB for at least dev,
-      over loopback as the `default` admin; table/MV/view set +
-      `backfill_progress` count verified; output captured in
-      `notes/G-live-schema-state.md` *(gated on 0063 access handover)*
-- [ ] Refreshable MV chain smoke-verified live (fixture `_1m` row
-      propagates up after refresh) *(gated on 0063 access handover)*
+- [x] Schema applied to the live Hetzner `prices` DB (the single
+      `production` box `ch-prod-01` — no separate dev/staging CH box), over
+      loopback as the `default` admin — **applied 2026-06-22** via Route A
+      (streamed `init`/`seed`/`views`/`rollups` SQL through `ssh … docker exec
+      clickhouse-client --multiquery`). 24 objects verified (12 base tables +
+      6 rollup MVs + 6 read-surface views), `backfill_progress` = 2,
+      `price_ohlcv_1m` engine + sort key verified against ADR 0003/0004.
+      Output captured in `notes/G-live-schema-state.md`.
+- [x] Refreshable MV chain smoke-verified live — fixture `_1m`
+      (`source='smoke'`) row propagated into `_15m`; fixture cleaned up, which
+      also confirmed the MV replace-on-refresh semantics
+      (`G-live-schema-state.md` §6).
 
 ## Implementation Notes
 
