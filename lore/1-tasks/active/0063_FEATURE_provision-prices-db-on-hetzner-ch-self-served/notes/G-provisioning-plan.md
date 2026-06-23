@@ -39,8 +39,8 @@ per-session operator approval before running.
 | Job | Identity | Path | Powers |
 |---|---|---|---|
 | Install / migrate schema | `default` admin | loopback on the box (SSH) | full DDL |
-| Ingest candles (0038/0039) | cert `CN=prices-ingestion-{env}` → `prices_writer` | Caddy:443 mTLS from AWS | `SELECT, INSERT, OPTIMIZE ON prices.*` |
-| API reads (0040) | cert `CN=prices-api-{env}` → `prices_reader` | Caddy:443 mTLS from AWS | `SELECT ON prices.*` |
+| Ingest candles (0038/0039) | cert `CN=prices-ingestion-production` → `prices_writer` | Caddy:443 mTLS from AWS | `SELECT, INSERT, OPTIMIZE ON prices.*` |
+| API reads (0040) | cert `CN=prices-api-production` → `prices_reader` | Caddy:443 mTLS from AWS | `SELECT ON prices.*` |
 
 No external CN maps to `default`; admin is reachable only from the box.
 
@@ -48,18 +48,19 @@ No external CN maps to `default`; admin is reachable only from the box.
 
 There is **one** Hetzner CH box: BE's `production` dedicated server `ch-prod-01`
 (one `CH_DOMAIN`; `infra-hetzner/README.md`: "exactly once per environment
-(`production`)"). There is **no separate dev/staging Hetzner box.** So the
-`{env}` placeholder throughout this runbook is the **AWS-side** environment of
-the *connecting client* (the Lambda stage), not a second CH box — every cert CN
-terminates at the same one box.
+(`production`)"). There is **no separate dev/staging Hetzner box.** prices-api's
+own CDK is likewise single-env: `EnvironmentConfig.envName` is the literal
+`'production'` (`infra/src/lib/types.ts:33`, validated 75-76) — there is no `dev`
+/ `staging` AWS stage either.
 
-> ⚠️ **Open implication — confirm with BE.** One box → one `prices` database.
-> If per-env certs (`prices-ingestion-dev` vs `-production`) are all issued, they
-> map to the **same** `prices_writer`/`prices_reader` users writing the **same**
-> `prices.*` tables. Decide before issuing certs: (a) only `-production` CNs for
-> now (recommended — least surface, matches the single box), or (b) per-env CNs
-> with an agreed story for whether dev/staging clients should touch prod
-> `prices.*` at all. Tracked as Open item 5.
+> ✅ **Resolved 2026-06-23 (open item 5, re-opened then settled).** CNs are
+> **env-suffixed, mirroring BE** (`prices-ingestion-production` /
+> `prices-api-production`), not the bare `prices-ingestion` form. Rationale:
+> prices shares **BE's CA**, so prices CNs live in the *same CA namespace* as
+> BE's `lambda-ingestion-production` etc.; the `-production` suffix keeps them
+> globally unique + self-documenting there, and matches BE's convention exactly.
+> One box → one `prices` DB still holds: both CNs terminate at the same box and
+> map to the same two users; there is simply no second env to disambiguate.
 
 ---
 
@@ -172,13 +173,15 @@ live values** (`prices_write` ≡ `high_write`'s `written_bytes`
 ### 1d. Caddy CN→user map (env, not a file)
 
 `clickhouse_cn_user_pairs` is derived from the `CLICKHOUSE_CN_USER_MAP` env var
-(`group_vars/all.yml:75`), supplied at playbook time (operator shell / GH
-Secrets). **DECIDED 2026-06-22: single-CN, no env suffix** (open item 5 closed) —
-one prod box, one `prices` DB, so identity is per-role not per-env. **Append**
+(`group_vars/all.yml:104`), supplied at playbook time (operator shell / GH
+Secrets). The Caddy template renders each pair into
+`map {http.request.tls.client.subject} {ch_user}` as `"CN=<cn>" <user>`
+(`cn_user_map.snippet.j2`); unmapped → `__unmapped__` → 403.
+**DECIDED 2026-06-23: env-suffixed CNs, mirroring BE** (open item 5). **Append**
 exactly two pairs — no checked-in file to edit:
 
 ```
-prices-ingestion:prices_writer,prices-api:prices_reader
+prices-ingestion-production:prices_writer,prices-api-production:prices_reader
 ```
 
 Unmapped CN → `__unmapped__` → 403 at Caddy (fail-closed). No prices CN maps to
@@ -225,44 +228,93 @@ provisioning sequence.
 
 ---
 
-## 5. Issue + store the mTLS certs (🔒 Hetzner CA + 🔒 AWS)
+## 5. Issue + store the mTLS certs (🔒 Hetzner CA + 🔒 AWS) — **operator-run**
 
-Per env, from BE's CA (needs the CA private key — **if box-admin does not include
-CA-key access, this is a BE ask**: BE runs the script, hands over the bundle):
+> **Hard constraint:** every step here touches the CA private key, the client
+> private keys, or mutates AWS. Per the standing key rule + prepare-only rule,
+> **the operator runs all of §5 by hand** — Claude authors the runbook and may
+> only verify *public* certs (Phase C). The CA-key access is confirmed available
+> to the operator (open item 1 closed), so this is **not** a BE ask.
 
-Single-CN (open item 5 closed): **one cert per identity, no `-{env}` suffix** —
-the CN matches the §1d CN map. The same cert is reused by clients in every AWS
-env (one prod box / one DB), so only two certs are issued total:
+Two identities, env-suffixed CNs (open item 5). The CN is the single thread that
+ties together the cert subject, the §1d Caddy map key, the CH user, **and** the
+Secrets-Manager secret-id — keep them byte-identical (the invariant that prevents
+the BE-style drift in open item 2).
 
+| Identity | CN | Secret-id = `MTLS_SECRET_NAME` |
+|---|---|---|
+| Writer (0038/0039) | `prices-ingestion-production` | `prices/production/clickhouse-mtls-prices-ingestion-production` |
+| Reader (0040) | `prices-api-production` | `prices/production/clickhouse-mtls-prices-api-production` |
+
+### Phase A — CA key into tmpfs (CA key confirmed raw PEM in BE-shared SM)
 ```bash
-./infra-hetzner/ca/issue-client-cert.sh prices-ingestion
-./infra-hetzner/ca/issue-client-cert.sh prices-api
+mkdir -p /dev/shm/soroban-ca && chmod 0700 /dev/shm/soroban-ca
+aws secretsmanager get-secret-value --profile "$BE_PROFILE" \
+  --secret-id "$BE_CA_SECRET_ID" --query SecretString --output text \
+  > /dev/shm/soroban-ca/ca.key
+chmod 0600 /dev/shm/soroban-ca/ca.key      # never cat this file
+export CA_KEY_PATH=/dev/shm/soroban-ca/ca.key
 ```
 
-**Storage format — single JSON bundle, per task 0052 (NOT two secrets).** 0052's
-client reads one Secrets Manager secret holding `{cert, key, ca}` JSON, named by
-`MTLS_SECRET_NAME`, fetched via the Lambda Parameters & Secrets Extension. Store
-one bundle secret per identity per env:
-
+### Phase B — issue both certs (365-day, ECDSA P-256, clientAuth EKU)
 ```bash
-# Secret PATH stays env-scoped (each AWS env account has its own SM), but the
-# bundle CONTENT is the same single cert across envs (single-CN). One secret per
-# identity per env, JSON {cert,key,ca}:
-aws secretsmanager put-secret-value --secret-id prices/{env}/clickhouse-mtls-ingestion \
-  --secret-string "$(jq -n --arg c "$(cat prices-ingestion.crt)" \
-                            --arg k "$(cat prices-ingestion.key)" \
-                            --arg a "$(cat ca.crt)" '{cert:$c,key:$k,ca:$a}')"
+cd /home/oski/Projects/stellar/soroban-block-explorer/infra-hetzner/ca
+./issue-client-cert.sh prices-ingestion-production
+./issue-client-cert.sh prices-api-production
+# → ./out/<CN>/{<CN>.crt,<CN>.key,ca.crt}  (out/ is gitignored)
 ```
 
-> ⚠️ **Cross-task reconciliation:** 0038's earlier AWS side (PR #34) + the 0050
-> G-note assumed **two** secrets (`…-cert` / `…-key`). 0052 standardised on the
-> **single-bundle** shape. Whichever 0011/0038 CDK provisions the secret + env
-> vars must match 0052: `MTLS_SECRET_NAME` → one `{cert,key,ca}` JSON secret,
-> plus `CH_DOMAIN`. Flag a follow-up to align the CDK if it still emits the
-> two-secret `MTLS_CERT_SECRET_NAME` / `MTLS_KEY_SECRET_NAME` pair.
+### Phase C — verify (public-cert only; Claude may run this)
+```bash
+for CN in prices-ingestion-production prices-api-production; do
+  openssl verify -CAfile ca.crt out/$CN/$CN.crt
+  openssl x509 -in out/$CN/$CN.crt -noout -subject -ext extendedKeyUsage
+done   # expect: OK, subject CN matches, EKU = TLS Web Client Authentication
+```
+
+### Phase D — single `{cert,key,ca}` JSON bundle → Secrets Manager (per task 0052)
+0052's client reads **one** secret named by `MTLS_SECRET_NAME`, parses it as
+`{cert,key,ca}` JSON, fetched via the Lambda Parameters & Secrets Extension
+(`packages/prices-clickhouse/src/mtls.rs:106-146,232-236`). Use `create-secret`
+if the name doesn't exist yet, else `put-secret-value`:
+```bash
+cd out
+for pair in \
+  "prices-ingestion-production:prices/production/clickhouse-mtls-prices-ingestion-production" \
+  "prices-api-production:prices/production/clickhouse-mtls-prices-api-production"; do
+  CN="${pair%%:*}"; SID="${pair##*:}"
+  BUNDLE="$(jq -n --arg c "$(cat $CN/$CN.crt)" --arg k "$(cat $CN/$CN.key)" \
+                  --arg a "$(cat $CN/ca.crt)" '{cert:$c,key:$k,ca:$a}')"
+  aws secretsmanager put-secret-value --profile "$PX_PROFILE" \
+    --secret-id "$SID" --secret-string "$BUNDLE" \
+    || aws secretsmanager create-secret --profile "$PX_PROFILE" \
+         --name "$SID" --secret-string "$BUNDLE"
+done
+```
+
+### Phase E — wipe all secret material
+```bash
+shred -u /dev/shm/soroban-ca/ca.key && rmdir /dev/shm/soroban-ca
+rm -rf out/prices-ingestion-production out/prices-api-production   # SM is source of truth
+```
 
 Secrets-Manager bytes only; per the SSM key contract, only secret **names** ride
 in env/SSM, never the cert/key material. 1-year manual rotation cadence.
+
+> ✅ **Cross-task reconciliation (open item 2) — DONE on PR#34 (2026-06-23).**
+> Previously a confirmed mismatch: the shipped client (`mtls.rs`) reads **one**
+> `{cert,key,ca}` bundle via `MTLS_SECRET_NAME`, but `secrets-stack.ts` created
+> **two** secrets (`…-cert` + `…-key`, random placeholders, single identity).
+> Reconciled in `feat/0038` commit `fed74bc`
+> (`fix(lore-0038): use single mTLS bundle secret for CH client`): `secrets-stack`
+> no longer creates the material (publishes the two bundle **names** to SSM,
+> operator-issued out-of-band like BE); `compute-stack` sets each Lambda group's
+> `MTLS_SECRET_NAME` (writer→ingestion, reader→api) and grants read on only its
+> own by-name ARN; secret-id / `MTLS_SECRET_NAME` / CN / Caddy map key all derive
+> from one CN via the `mtlsSecretName` helper (so they cannot drift). Lesson that
+> drove this: BE's own CA README says upload to `soroban/<CN>-mtls` while their
+> CDK reads `${prefix}/lambda-<role>-<env>` — a live doc-vs-code drift we avoid by
+> single-sourcing the name.
 
 ---
 
@@ -270,11 +322,11 @@ in env/SSM, never the cert/key material. 1-year manual rotation cadence.
 
 Using the issued certs via Caddy:443:
 
-- `prices-ingestion` cert: `SELECT version()` → 200; `SHOW DATABASES`
+- `prices-ingestion-production` cert: `SELECT version()` → 200; `SHOW DATABASES`
   includes `prices`; `INSERT` into a `prices.*` table succeeds; the same against
   `default.*` → **ACCESS_DENIED**; `CREATE TABLE prices.smoke …` → **DENIED**
   (writer has no DDL — the Option-1 proof). Schema itself was applied in Step 4.
-- `prices-api` cert: `SELECT` on `prices.*` works; any `INSERT`/`CREATE`
+- `prices-api-production` cert: `SELECT` on `prices.*` works; any `INSERT`/`CREATE`
   → **ACCESS_DENIED**.
 
 ---
@@ -299,18 +351,30 @@ Using the issued certs via Caddy:443:
    client certs self-served (`issue-client-cert.sh`) and store the
    `{cert,key,ca}` bundles in Secrets Manager. Step 5 is **not** a BE ask;
    the only BE-owned item left is the §1 `users.d` RBAC PR.
-2. **Secret shape reconciliation** — align 0011/0038 CDK to 0052's single-bundle
-   `MTLS_SECRET_NAME` (see §5 warning). Likely a follow-up task.
+2. ✅ **CLOSED 2026-06-23 — Secret shape reconciliation (done on PR#34).**
+   Was: `secrets-stack.ts` emitted the two-secret (`…-cert`/`…-key`),
+   single-identity shape with random placeholders, while `mtls.rs` reads one
+   `{cert,key,ca}` bundle via `MTLS_SECRET_NAME`. Fixed in `feat/0038` commit
+   `fed74bc`: `secrets-stack` publishes the two bundle **names** to SSM (no
+   CDK-managed material; operator issues out-of-band), `compute-stack` sets each
+   Lambda group's `MTLS_SECRET_NAME` + grants its own by-name ARN, and
+   `mtls.ts`/`lambda-baseline.ts`/`app.ts` thread a single secret name. The
+   reconciliation rode in PR#34 because that PR owns the live ledger Function
+   whose env wiring was the broken half. See §5 warning.
 3. **Backup scope** (G-note §4) — recommend **(b)**: `prices.*` is re-derivable
    from ledger history, so accept it is outside BE's `RESTORE DATABASE default`
    set rather than extending BE's snapshot. Flag as a decision, not an oversight.
 4. ✅ **CLOSED 2026-06-22 — Quota naming:** dedicated `prices_write`/`prices_read`
    (§1c). Caps re-diffed against `develop` @ `8e4e705d` — exact match to the live
    `high_write`/`api_throttle` values.
-5. ✅ **CLOSED 2026-06-22 — CN scheme:** single-CN, no env suffix
-   (`prices-ingestion` / `prices-api`). One prod box / one `prices` DB; identity
-   is per-role. The same two certs are reused by clients in every AWS env; only
-   the Secrets-Manager **path** is env-scoped (§1d, §5).
+5. ✅ **CLOSED 2026-06-23 — CN scheme: env-suffixed, mirroring BE**
+   (`prices-ingestion-production` / `prices-api-production`). *Supersedes the
+   2026-06-22 single-CN call.* Reason: prices shares BE's CA, so prices CNs
+   share BE's CA namespace (which is env-suffixed, e.g.
+   `lambda-ingestion-production`); the suffix keeps them globally unique +
+   self-documenting and matches BE exactly. envName is the literal `'production'`
+   (`infra/src/lib/types.ts:33`). secret-id ≡ `MTLS_SECRET_NAME` ≡ Caddy map key,
+   all derived from the one CN (§0, §1d, §5).
 6. **`<grants>` element validity (OPEN — pre-PR check).** Re-diff confirms BE's
    live `services.xml` @ `8e4e705d` uses **no** `<grants>` on any of its 5 users
    (they're unscoped by design). The prices users are the first to use it, so
@@ -348,12 +412,14 @@ Using the issued certs via Caddy:443:
   prices-api cannot self-serve, since the users are XML-defined and live in
   the BE repo.
 - **Prices-api / operator-owned (will be done self-served):** §1d Caddy
-  `CLICKHOUSE_CN_USER_MAP` entries (`prices-ingestion:prices_writer`,
-  `prices-api:prices_reader`) **and** §5 mTLS client-cert issuance + the
-  single `{cert,key,ca}` Secrets-Manager bundles. The operator will add the
-  CN-map entries and issue/store the certs directly — these are **not** a BE
-  ask. (Implies CA-key access is available to the operator; open item 1 is
-  resolved on the operator side.)
+  `CLICKHOUSE_CN_USER_MAP` entries
+  (`prices-ingestion-production:prices_writer`,
+  `prices-api-production:prices_reader`) **and** §5 mTLS client-cert issuance +
+  the single `{cert,key,ca}` Secrets-Manager bundles
+  (`prices/production/clickhouse-mtls-prices-{ingestion,api}-production`). The
+  operator will add the CN-map entries and issue/store the certs directly —
+  these are **not** a BE ask. (Implies CA-key access is available to the
+  operator; open item 1 is resolved on the operator side.)
 - **Operator-coordinated infra actions:** §3 Ansible `--tags app` run (picks
   up the new users + CN map) and §6 tenant-isolation smoke test — gated only
   on the §1 BE PR landing first.
