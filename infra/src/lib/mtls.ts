@@ -46,10 +46,50 @@ export function secretsManagerLayerArn(region: string): string {
 }
 
 /**
+ * The two mTLS client identities prices-api presents to BE's Hetzner
+ * ClickHouse, mirroring BE's per-service Lambda model:
+ *
+ * - `ingestion` → CH user `prices_writer` (ledger processor + periodic
+ *   workers; `SELECT, INSERT, OPTIMIZE ON prices.*`).
+ * - `api`       → CH user `prices_reader` (axum read handlers;
+ *   `SELECT ON prices.*`).
+ */
+export type MtlsRole = 'ingestion' | 'api';
+
+/**
+ * Canonical mTLS client-cert CN for a role, env-suffixed to mirror BE
+ * (`lambda-ingestion-production`). prices-api shares BE's CA, so these CNs
+ * live in BE's CA namespace and must stay globally unique there — hence the
+ * `-${envName}` suffix. The CN is the single thread tying the cert subject,
+ * the Caddy `CLICKHOUSE_CN_USER_MAP` key, the CH user, and the secret name
+ * together; keep all four derived from this one string.
+ *
+ *   mtlsClientCn('production', 'ingestion') === 'prices-ingestion-production'
+ */
+export function mtlsClientCn(envName: string, role: MtlsRole): string {
+  return `prices-${role}-${envName}`;
+}
+
+/**
+ * Secrets Manager secret name holding the single `{cert,key,ca}` JSON bundle
+ * for a role — the value `MTLS_SECRET_NAME` resolves to at Lambda runtime
+ * (see `packages/prices-clickhouse/src/mtls.rs`). The secret is created
+ * out-of-band by the operator (BE-mirroring: CDK does NOT manage the material;
+ * see `SecretsStack`), so this name must match the `--secret-id` the issuance
+ * runbook uploads to (0063 `notes/G-provisioning-plan.md` §5).
+ *
+ *   mtlsSecretName('production', 'ingestion')
+ *     === 'prices/production/clickhouse-mtls-prices-ingestion-production'
+ */
+export function mtlsSecretName(envName: string, role: MtlsRole): string {
+  return `prices/${envName}/clickhouse-mtls-${mtlsClientCn(envName, role)}`;
+}
+
+/**
  * Build the wildcard-suffixed Secrets Manager ARN for a secret name.
  *
  * AWS Secrets Manager appends a random 6-char suffix to every secret
- * ARN (e.g. `…secret:prices/production/mtls/ledger-processor-production-aBcDeF`).
+ * ARN (e.g. `…secret:prices/production/clickhouse-mtls-prices-api-production-aBcDeF`).
  * IAM grants must use a wildcard to match. Returns the ARN form
  * `arn:aws:secretsmanager:<region>:<account>:secret:<name>-*`.
  *
@@ -57,6 +97,19 @@ export function secretsManagerLayerArn(region: string): string {
  * works in both per-account synth and assumed-role deploys.
  */
 export function mtlsSecretArn(scope: cdk.Stack, secretName: string): string {
+  return mtlsSecretArnFromParts(scope.region, scope.account, secretName);
+}
+
+/**
+ * Scope-free variant of {@link mtlsSecretArn} for callers that already hold
+ * the region + account (e.g. `lambda-baseline` builds the grant from the
+ * resolved `EnvironmentConfig.awsRegion` + account id, without a `Stack`).
+ */
+export function mtlsSecretArnFromParts(
+  region: string,
+  account: string,
+  secretName: string,
+): string {
   // Reject IAM-meaningful wildcards in the secret name. The function builds
   // an ARN like `…:secret:${secretName}-*` for IAM grants; an unexpected `*`
   // or `?` inside `secretName` would silently widen the grant beyond the
@@ -67,7 +120,5 @@ export function mtlsSecretArn(scope: cdk.Stack, secretName: string): string {
         `those characters widen the IAM grant beyond a single secret.`,
     );
   }
-  const region = scope.region;
-  const account = scope.account;
   return `arn:aws:secretsmanager:${region}:${account}:secret:${secretName}-*`;
 }

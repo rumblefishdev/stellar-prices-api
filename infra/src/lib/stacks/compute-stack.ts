@@ -4,7 +4,6 @@ import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as lambdaEventSources from 'aws-cdk-lib/aws-lambda-event-sources';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as s3 from 'aws-cdk-lib/aws-s3';
-import type * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import * as sns from 'aws-cdk-lib/aws-sns';
 import * as snsSubscriptions from 'aws-cdk-lib/aws-sns-subscriptions';
 import * as sqs from 'aws-cdk-lib/aws-sqs';
@@ -19,7 +18,7 @@ import {
   lambdaLogGroupName,
   pricesLambdaDefaults,
 } from '../lambda-baseline.js';
-import { secretsManagerLayerArn } from '../mtls.js';
+import { mtlsSecretName, secretsManagerLayerArn } from '../mtls.js';
 
 const DLQ_RETENTION_DAYS = 14;
 
@@ -67,8 +66,6 @@ function platformSsmKeys(envName: string) {
 
 export interface ComputeStackProps extends cdk.StackProps {
   readonly config: EnvironmentConfig;
-  readonly mtlsCertSecret: secretsmanager.ISecret;
-  readonly mtlsKeySecret: secretsmanager.ISecret;
 }
 
 /**
@@ -130,16 +127,35 @@ export class ComputeStack extends cdk.Stack {
   public readonly ingestDlq: sqs.Queue;
   public readonly apiHandlerRole: iam.Role;
   public readonly apiHandlerLogGroup: logs.LogGroup;
+  /**
+   * `MTLS_SECRET_NAME` the ledger-processor (writer) Lambda reads — the
+   * single `{cert,key,ca}` bundle for CH user `prices_writer`. Set on the
+   * Function env below; the role is granted read on exactly this secret.
+   */
+  public readonly ledgerProcessorMtlsSecretName: string;
+  /**
+   * `MTLS_SECRET_NAME` the api-handler (reader) Lambda must read — the
+   * single bundle for CH user `prices_reader`. Set on the Function env in
+   * task 0040; the role is already granted read on exactly this secret.
+   */
+  public readonly apiHandlerMtlsSecretName: string;
 
   constructor(scope: Construct, id: string, props: ComputeStackProps) {
     super(scope, id, props);
 
-    const { config, mtlsCertSecret, mtlsKeySecret } = props;
+    const { config } = props;
     const { envName, awsRegion } = config;
     const lp = config.ledgerProcessor;
     const accountId = cdk.Stack.of(this).account;
-    const ctx = { config, accountId, mtlsCertSecret, mtlsKeySecret };
     const keys = platformSsmKeys(envName);
+
+    // Two mTLS identities, mirroring BE's per-service split: the ledger
+    // processor writes as `prices_writer` (ingestion bundle); the api handler
+    // reads as `prices_reader` (api bundle). Each role is granted read on ONLY
+    // its own secret (least privilege). The secrets are created out-of-band by
+    // the operator (see SecretsStack); CDK only names + grants + sets the env.
+    this.ledgerProcessorMtlsSecretName = mtlsSecretName(envName, 'ingestion');
+    this.apiHandlerMtlsSecretName = mtlsSecretName(envName, 'api');
 
     // ---------------------------------------------------------------
     // Ledger Processor: baseline role + log group
@@ -147,7 +163,11 @@ export class ComputeStack extends cdk.Stack {
     this.ledgerProcessorRole = createPricesLambdaRole(
       this,
       'LedgerProcessorRole',
-      ctx,
+      {
+        config,
+        accountId,
+        mtlsSecretName: this.ledgerProcessorMtlsSecretName,
+      },
     );
     this.ledgerProcessorLogGroup = new logs.LogGroup(
       this,
@@ -269,11 +289,13 @@ export class ComputeStack extends cdk.Stack {
           CH_DOMAIN: chDomain,
           // Required by xdr-parser's network-id cache (SAC derivation).
           STELLAR_NETWORK_PASSPHRASE: networkPassphrase,
-          // prices-api uses two separate mTLS secrets (cert + key) per
-          // ADR 0007 §3.5; names match SecretsStack. Task 0052's
-          // clickhouse client crate reads these via the extension.
-          MTLS_CERT_SECRET_NAME: `prices/${envName}/clickhouse-mtls-cert`,
-          MTLS_KEY_SECRET_NAME: `prices/${envName}/clickhouse-mtls-key`,
+          // Single {cert,key,ca} bundle secret (task 0052/0063). Task 0052's
+          // clickhouse client crate reads exactly this one env var
+          // (`MTLS_SECRET_NAME`) and parses the JSON bundle via the extension
+          // — see packages/prices-clickhouse/src/mtls.rs:233. Name is derived
+          // from the shared mtlsSecretName helper, so it can't drift from the
+          // SecretsStack publication or the operator's create-secret.
+          MTLS_SECRET_NAME: this.ledgerProcessorMtlsSecretName,
           // In-memory caching in the secrets extension — repeat reads in
           // one execution environment hit RAM, not Secrets Manager.
           PARAMETERS_SECRETS_EXTENSION_CACHE_ENABLED: 'true',
@@ -323,7 +345,11 @@ export class ComputeStack extends cdk.Stack {
     // ---------------------------------------------------------------
     // API Handler: baseline role + log group (Function lands in 0040)
     // ---------------------------------------------------------------
-    this.apiHandlerRole = createPricesLambdaRole(this, 'ApiHandlerRole', ctx);
+    this.apiHandlerRole = createPricesLambdaRole(this, 'ApiHandlerRole', {
+      config,
+      accountId,
+      mtlsSecretName: this.apiHandlerMtlsSecretName,
+    });
     this.apiHandlerLogGroup = new logs.LogGroup(this, 'ApiHandlerLogGroup', {
       logGroupName: lambdaLogGroupName(envName, 'api-handler'),
       retention: PRICES_LAMBDA_LOG_RETENTION,

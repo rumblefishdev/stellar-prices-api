@@ -30,5 +30,15 @@ export type { BaselineLambdaContext } from './lib/lambda-baseline.js';
 
 // mTLS helpers — used by downstream stacks that attach Lambdas
 // requiring the AWS Parameters and Secrets Lambda Extension layer
-// and per-service mTLS Secret ARN grants.
-export { secretsManagerLayerArn, mtlsSecretArn } from './lib/mtls.js';
+// and per-service mTLS Secret ARN grants. `mtlsClientCn` /
+// `mtlsSecretName` are the single source of truth for the env-suffixed
+// CN + bundle secret name (0063); 0038/0040 set `MTLS_SECRET_NAME` from
+// the `ComputeStack` props derived from them.
+export {
+  secretsManagerLayerArn,
+  mtlsSecretArn,
+  mtlsSecretArnFromParts,
+  mtlsClientCn,
+  mtlsSecretName,
+} from './lib/mtls.js';
+export type { MtlsRole } from './lib/mtls.js';
