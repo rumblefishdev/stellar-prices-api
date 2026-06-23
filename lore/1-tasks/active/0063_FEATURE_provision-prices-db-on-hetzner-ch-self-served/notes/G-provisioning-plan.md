@@ -205,6 +205,41 @@ prices-ingestion-production:prices_writer,prices-api-production:prices_reader
 > secret names. Optional cleanup: ask BE to fix their two doc rows to
 > `prices-{ingestion,api}-<environment>`.
 
+#### Procedure — edit + push the map (🔒 AWS, operator-run)
+
+`CLICKHOUSE_CN_USER_MAP` lives **inside** the operator env secret
+`soroban/production/operator/env` (the dotenv fetched to
+`~/.config/soroban-prod.env` and `source`d). So "append" = edit that one var in
+the file, then `put-secret-value` the **whole** file back (preserves the other
+keys). Re-fetch first so a concurrent edit isn't clobbered:
+
+```bash
+export AWS_PROFILE=soroban-explorer
+
+# (a) refresh local copy
+aws secretsmanager get-secret-value --secret-id soroban/production/operator/env \
+  --query SecretString --output text > ~/.config/soroban-prod.env
+
+# (b) edit: append the two pairs to the EXISTING CLICKHOUSE_CN_USER_MAP value
+#     (one line; don't drop existing CNs). Resulting tail:
+#     CLICKHOUSE_CN_USER_MAP="…existing…,prices-ingestion-production:prices_writer,prices-api-production:prices_reader"
+${EDITOR:-vi} ~/.config/soroban-prod.env
+
+# (c) verify (the CN map is non-secret; safe to print just this var)
+set -a; source ~/.config/soroban-prod.env; set +a
+echo "$CLICKHOUSE_CN_USER_MAP" | tr ',' '\n' | grep prices
+#   expect exactly: prices-ingestion-production:prices_writer
+#                   prices-api-production:prices_reader   (no duplicates)
+
+# (d) push the updated env back to Secrets Manager (new version)
+aws secretsmanager put-secret-value --secret-id soroban/production/operator/env \
+  --secret-string file://$HOME/.config/soroban-prod.env
+```
+
+This is the **durable** store; the Caddy snippet is *rendered* from this var
+during the §3 `ansible --tags app` run (which sources the same env). Inert until
+that deploy. Mutating AWS action — gated.
+
 Unmapped CN → `__unmapped__` → 403 at Caddy (fail-closed). No prices CN maps to
 `default`/`dev_shared`.
 
