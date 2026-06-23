@@ -233,7 +233,7 @@ provisioning sequence.
 > **Hard constraint:** every step here touches the CA private key, the client
 > private keys, or mutates AWS. Per the standing key rule + prepare-only rule,
 > **the operator runs all of §5 by hand** — Claude authors the runbook and may
-> only verify *public* certs (Phase C). The CA-key access is confirmed available
+> only verify *public* certs (Step 3). The CA-key access is confirmed available
 > to the operator (open item 1 closed), so this is **not** a BE ask.
 
 Two identities, env-suffixed CNs (open item 5). The CN is the single thread that
@@ -246,56 +246,80 @@ the BE-style drift in open item 2).
 | Writer (0038/0039) | `prices-ingestion-production` | `prices/production/clickhouse-mtls-prices-ingestion-production` |
 | Reader (0040) | `prices-api-production` | `prices/production/clickhouse-mtls-prices-api-production` |
 
-### Phase A — CA key into tmpfs (CA key confirmed raw PEM in BE-shared SM)
+> **CA key location — corrected 2026-06-23.** BE's CA tooling does **not** fetch
+> the CA key from Secrets Manager; per `infra-hetzner/ca/README.md` the CA private
+> key lives in a **password manager**, and `issue-client-cert.sh` reads it from
+> `/dev/shm/soroban-ca/ca.key` (override `$CA_KEY_PATH`). The operator + BE share
+> one AWS account, so the whole flow runs under a single profile
+> `AWS_PROFILE=soroban-explorer` (no `--profile` flags); the operator env is
+> loaded from the SM secret `soroban/production/operator/env`.
+
+### Step 0 — profile + load operator env
+```bash
+export AWS_PROFILE=soroban-explorer
+
+aws secretsmanager get-secret-value --secret-id soroban/production/operator/env \
+  --query SecretString --output text > ~/.config/soroban-prod.env
+set -a; source ~/.config/soroban-prod.env; set +a   # load operator env vars
+
+CA_DIR=/home/oski/Projects/stellar/soroban-block-explorer/infra-hetzner/ca
+```
+
+### Step 1 — put the CA private key at the tmpfs path
+`issue-client-cert.sh` requires the CA key at `/dev/shm/soroban-ca/ca.key`
+(or `$CA_KEY_PATH`). Materialize it from wherever the operator setup holds it
+(the sourced operator env, or the password manager) — never `cat` it:
 ```bash
 mkdir -p /dev/shm/soroban-ca && chmod 0700 /dev/shm/soroban-ca
-aws secretsmanager get-secret-value --profile "$BE_PROFILE" \
-  --secret-id "$BE_CA_SECRET_ID" --query SecretString --output text \
-  > /dev/shm/soroban-ca/ca.key
+
+# >>> the ONE operator-specific line — materialize ca.key from your setup, e.g.:
+#   printf '%s' "$<YOUR_CA_KEY_VAR>" > /dev/shm/soroban-ca/ca.key
+#   (or copy a password-manager export into that path)
+
 chmod 0600 /dev/shm/soroban-ca/ca.key      # never cat this file
 export CA_KEY_PATH=/dev/shm/soroban-ca/ca.key
 ```
 
-### Phase B — issue both certs (365-day, ECDSA P-256, clientAuth EKU)
+### Step 2 — issue both certs (365-day, ECDSA P-256, clientAuth EKU)
 ```bash
-cd /home/oski/Projects/stellar/soroban-block-explorer/infra-hetzner/ca
+cd "$CA_DIR"
 ./issue-client-cert.sh prices-ingestion-production
 ./issue-client-cert.sh prices-api-production
 # → ./out/<CN>/{<CN>.crt,<CN>.key,ca.crt}  (out/ is gitignored)
 ```
 
-### Phase C — verify (public-cert only; Claude may run this)
+### Step 3 — verify (public-cert only; Claude may run this)
 ```bash
 for CN in prices-ingestion-production prices-api-production; do
-  openssl verify -CAfile ca.crt out/$CN/$CN.crt
-  openssl x509 -in out/$CN/$CN.crt -noout -subject -ext extendedKeyUsage
+  openssl verify -CAfile "$CA_DIR/ca.crt" "$CA_DIR/out/$CN/$CN.crt"
+  openssl x509 -in "$CA_DIR/out/$CN/$CN.crt" -noout -subject -ext extendedKeyUsage
 done   # expect: OK, subject CN matches, EKU = TLS Web Client Authentication
 ```
 
-### Phase D — single `{cert,key,ca}` JSON bundle → Secrets Manager (per task 0052)
+### Step 4 — single `{cert,key,ca}` JSON bundle → Secrets Manager (per task 0052)
 0052's client reads **one** secret named by `MTLS_SECRET_NAME`, parses it as
 `{cert,key,ca}` JSON, fetched via the Lambda Parameters & Secrets Extension
-(`packages/prices-clickhouse/src/mtls.rs:106-146,232-236`). Use `create-secret`
-if the name doesn't exist yet, else `put-secret-value`:
+(`packages/prices-clickhouse/src/mtls.rs:106-146,232-236`). The CDK no longer
+creates these secrets (operator-owned; open item 2), so use `create-secret`,
+falling back to `put-secret-value` if the name already exists:
 ```bash
-cd out
+cd "$CA_DIR/out"
 for pair in \
   "prices-ingestion-production:prices/production/clickhouse-mtls-prices-ingestion-production" \
   "prices-api-production:prices/production/clickhouse-mtls-prices-api-production"; do
   CN="${pair%%:*}"; SID="${pair##*:}"
-  BUNDLE="$(jq -n --arg c "$(cat $CN/$CN.crt)" --arg k "$(cat $CN/$CN.key)" \
-                  --arg a "$(cat $CN/ca.crt)" '{cert:$c,key:$k,ca:$a}')"
-  aws secretsmanager put-secret-value --profile "$PX_PROFILE" \
-    --secret-id "$SID" --secret-string "$BUNDLE" \
-    || aws secretsmanager create-secret --profile "$PX_PROFILE" \
-         --name "$SID" --secret-string "$BUNDLE"
+  BUNDLE="$(jq -n --arg c "$(cat "$CN/$CN.crt")" --arg k "$(cat "$CN/$CN.key")" \
+                  --arg a "$(cat "$CN/ca.crt")" '{cert:$c,key:$k,ca:$a}')"
+  aws secretsmanager create-secret --name "$SID" --secret-string "$BUNDLE" \
+    || aws secretsmanager put-secret-value --secret-id "$SID" --secret-string "$BUNDLE"
 done
 ```
 
-### Phase E — wipe all secret material
+### Step 5 — wipe all secret material
 ```bash
 shred -u /dev/shm/soroban-ca/ca.key && rmdir /dev/shm/soroban-ca
-rm -rf out/prices-ingestion-production out/prices-api-production   # SM is source of truth
+rm -rf "$CA_DIR/out/prices-ingestion-production" "$CA_DIR/out/prices-api-production"
+# SM is now the source of truth
 ```
 
 Secrets-Manager bytes only; per the SSM key contract, only secret **names** ride
