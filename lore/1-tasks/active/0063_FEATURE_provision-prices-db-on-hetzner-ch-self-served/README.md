@@ -57,6 +57,20 @@ history:
       0052, reconciling the old two-secret assumption), verification, and a
       gated-action inventory. All authoring only — no Hetzner/AWS/BE-repo
       action taken.
+  - date: 2026-06-23
+    status: active
+    who: oski
+    note: >
+      §5 mTLS certs issued + stored in Secrets Manager and §1d CN-map
+      pushed to the operator env secret (both done by hand, recorded in
+      the G-plan completion record). Expanded the runbook's §3 "Deploy the
+      RBAC" from a one-liner into the full operator-run procedure (what
+      RBAC means here, shared-box/gated warning, Steps 0–4 with dry run,
+      post-deploy verification) so the BE-coordinated `--tags app` run is
+      turnkey. Remaining: the gated §3 ansible deploy (BE-coordinated) then
+      the §6 isolation smoke test — both operator-run. Two ACs sit at
+      `[~]` (users + CN-map defined/pushed, live on deploy); task stays
+      active until those flip and §6 passes.
 ---
 
 # Provision the `prices` database on Hetzner CH (self-served)
