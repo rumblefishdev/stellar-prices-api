@@ -318,7 +318,7 @@ aws secretsmanager get-secret-value --secret-id soroban/production/operator/env 
   --query SecretString --output text > ~/.config/soroban-prod.env
 set -a; source ~/.config/soroban-prod.env; set +a   # load operator env vars
 
-CA_DIR=/home/oski/Projects/stellar/soroban-block-explorer/infra-hetzner/ca
+CA_DIR="$HOME/Projects/stellar/soroban-block-explorer/infra-hetzner/ca"  # adjust to your checkout
 ```
 
 ### Step 1 — put the CA private key at the tmpfs path
