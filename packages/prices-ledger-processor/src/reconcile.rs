@@ -14,6 +14,7 @@ use std::future::Future;
 use extractors_core::{SorobanEventRow, VenueRegistry};
 use ledger_processor::dispatch::{DispatchError, dispatch};
 use phoenix_extractor::PhoenixPoolRegistry;
+use soroswap_extractor::SoroswapPoolRegistry;
 use tracing::{info, warn};
 
 use crate::bucket::Bucketer;
@@ -67,6 +68,7 @@ pub struct Reconciler<F, C, S, D> {
     pub decoder: D,
     pub venue_registry: VenueRegistry,
     pub phoenix_registry: PhoenixPoolRegistry,
+    pub soroswap_registry: SoroswapPoolRegistry,
 }
 
 impl<F, C, S, D> Reconciler<F, C, S, D>
@@ -104,8 +106,12 @@ where
             let mut max_seq = current;
             for ledger in ledgers {
                 for group in &ledger.event_groups {
-                    let trades = match dispatch(group, &self.venue_registry, &self.phoenix_registry)
-                    {
+                    let trades = match dispatch(
+                        group,
+                        &self.venue_registry,
+                        &self.phoenix_registry,
+                        &self.soroswap_registry,
+                    ) {
                         Ok(t) => t,
                         Err(DispatchError::VenueNotImplemented { venue, contract_id }) => {
                             warn!(?venue, %contract_id, "venue extractor not yet implemented — skipping");

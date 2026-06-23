@@ -10,6 +10,7 @@ use prices_ledger_processor::{
     reconcile::Reconciler,
     sink::{SqlFileSink, StdoutJsonSink},
 };
+use soroswap_extractor::SoroswapPoolRegistry;
 use tracing::info;
 
 #[derive(Parser, Debug)]
@@ -73,6 +74,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 decoder: XdrLedgerDecoder,
                 venue_registry: VenueRegistry::new(),
                 phoenix_registry: PhoenixPoolRegistry::default(),
+                soroswap_registry: SoroswapPoolRegistry::new(),
             };
             reconciler.run(args.max_iterations).await?
         }
@@ -84,6 +86,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 decoder: XdrLedgerDecoder,
                 venue_registry: VenueRegistry::new(),
                 phoenix_registry: PhoenixPoolRegistry::default(),
+                soroswap_registry: SoroswapPoolRegistry::new(),
             };
             reconciler.run(args.max_iterations).await?
         }

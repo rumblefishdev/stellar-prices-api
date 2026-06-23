@@ -20,6 +20,7 @@ path = "src/bin/cli.rs"
 extractors-core = { path = "../extractors-core" }
 ledger-processor = { path = "../ledger-processor" }
 phoenix-extractor = { path = "../phoenix-extractor" }
+soroswap-extractor = { path = "../soroswap-extractor" }
 
 stellar-xdr = { workspace = true }
 xdr-parser = { workspace = true }

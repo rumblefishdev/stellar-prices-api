@@ -10,6 +10,7 @@ use prices_ledger_processor::{
     reconcile::{DecodedLedger, LedgerDecoder, Reconciler},
     sink::{OhlcvSink, SinkError},
 };
+use soroswap_extractor::SoroswapPoolRegistry;
 use tempfile::tempdir;
 
 struct CaptureSink {
@@ -83,6 +84,7 @@ async fn empty_fixture_dir_no_op_returns_zero_persisted() {
         decoder: EmptyDecoder,
         venue_registry: VenueRegistry::new(),
         phoenix_registry: PhoenixPoolRegistry::default(),
+        soroswap_registry: SoroswapPoolRegistry::new(),
     };
 
     let stats = reconciler.run(8).await.unwrap();
@@ -119,6 +121,7 @@ async fn contiguous_run_advances_cursor_until_gap() {
         decoder: EmptyDecoder,
         venue_registry: VenueRegistry::new(),
         phoenix_registry: PhoenixPoolRegistry::default(),
+        soroswap_registry: SoroswapPoolRegistry::new(),
     };
 
     let stats = reconciler.run(8).await.unwrap();
@@ -156,6 +159,7 @@ async fn unknown_contract_dispatch_does_not_fail() {
         decoder: SingleEmptyGroupDecoder,
         venue_registry: VenueRegistry::new(),
         phoenix_registry: PhoenixPoolRegistry::default(),
+        soroswap_registry: SoroswapPoolRegistry::new(),
     };
 
     let stats = reconciler.run(2).await.unwrap();
@@ -189,6 +193,7 @@ async fn idempotent_on_re_run_from_same_cursor() {
             decoder: EmptyDecoder,
             venue_registry: VenueRegistry::new(),
             phoenix_registry: PhoenixPoolRegistry::default(),
+            soroswap_registry: SoroswapPoolRegistry::new(),
         };
         reconciler.run(8).await.unwrap()
     };

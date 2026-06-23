@@ -29,6 +29,7 @@ use prices_ledger_processor::{
     cursor::StubFileCursor, decode::XdrLedgerDecoder, object_fetcher::LocalDiskFetcher,
     reconcile::Reconciler, sink::StdoutJsonSink,
 };
+use soroswap_extractor::SoroswapPoolRegistry;
 use tracing::{error, info};
 
 const ENV_FIXTURES_DIR: &str = "FIXTURES_DIR";
@@ -72,6 +73,7 @@ async fn main() -> Result<(), Error> {
         decoder: XdrLedgerDecoder,
         venue_registry: VenueRegistry::new(),
         phoenix_registry: PhoenixPoolRegistry::default(),
+        soroswap_registry: SoroswapPoolRegistry::new(),
     });
 
     lambda_runtime::run(service_fn(move |event: LambdaEvent<SqsEvent>| {
