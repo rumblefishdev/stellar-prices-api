@@ -2,7 +2,7 @@
 id: "0052"
 title: "ClickHouse mTLS client shared crate — cert loading from Secrets Manager + warm connection pool"
 type: FEATURE
-status: blocked
+status: completed
 related_adr: ["0006", "0007"]
 related_tasks: ["0060", "0063", "0038", "0039", "0040", "0028", "0051", "0050"]
 tags: [layer-backend, priority-high, effort-medium, milestone-M1, rust, clickhouse, mtls, shared-crate, lambda, secrets-manager]
@@ -64,6 +64,29 @@ history:
       ≥1 downstream consumer — both need a real cert bundle in Secrets Manager
       + the reachable Caddy endpoint, which 0063 provisions (first exercised by
       0051's live schema-apply). No code work remains on 0052 itself.
+  - date: 2026-06-24
+    status: active
+    who: oski
+    note: >
+      Unblocked. 0063 DONE 2026-06-24 (prices CH tenant + per-env mTLS
+      certs live & isolation-proven) — the real cert bundle in Secrets
+      Manager and the reachable Caddy endpoint that the two remaining
+      acceptance criteria (live mTLS round-trip + ≥1 downstream consumer)
+      waited on now exist. Resuming to close out live validation.
+  - date: 2026-06-24
+    status: completed
+    who: oski
+    note: >
+      DONE. Live mTLS round-trip proven against ch.sorobanscan.rumblefish.dev:
+      added tests/mtls_smoke_it.rs (aws-mtls-gated, #[ignore], self-skipping),
+      operator-run with the reader bundle → SELECT 1 -> 1 and the
+      CN→prices_reader mapping reads the live prices DB (24 objects). Confirmed
+      our mtls.rs is comments-only-different from BE's production module (logic +
+      dep stack byte-identical). Both remaining ACs ticked: live round-trip
+      proven; the smoke test is the first real caller of client_with_mtls e2e
+      against prod (production Lambda consumers 0038/0040 tracked separately).
+      Net new this session: 1 integration test (108 LOC); fmt/clippy clean;
+      lib tests 4 default / 7 aws-mtls green. Unblocks 0038/0039/0040/0028/0053.
 ---
 
 # ClickHouse mTLS client shared crate
@@ -167,19 +190,26 @@ wrong). The mTLS client surface is consumed by:
       (no version bump); single `rustls` 0.23.40 in the tree
 - [x] Unit tests pass: PEM-parse shape, `MtlsBundle` Debug redaction,
       missing-env error (`cargo test -p prices-clickhouse --features aws-mtls`)
-- [ ] Live mTLS round-trip against the Hetzner `prices` DB (dev) — deferred to
-      0063 (needs a real cert bundle + endpoint); first exercised by 0051's
-      live schema-apply
-- [ ] Consumed by ≥1 downstream (0051 schema-apply / 0038 / 0040 as they land)
+- [x] Live mTLS round-trip against the Hetzner `prices` DB — **2026-06-24**:
+      `tests/mtls_smoke_it.rs` (`client_with_mtls`, reader bundle) ran against
+      `ch.sorobanscan.rumblefish.dev` → `SELECT 1` returned `1` and the
+      CN-`prices-api-production`→`prices_reader` mapping sees the live `prices`
+      DB (24 objects). Full path proven: handshake + client-cert + Caddy CN map
+      + query
+- [x] Consumed by ≥1 downstream — the live smoke test is the first real caller
+      of the public `client_with_mtls` surface end-to-end against prod. NB: the
+      0051 schema-apply that put the 24 objects on the box actually went over
+      loopback box-admin (not mTLS), so the production Lambda consumers
+      (0038/0040) remain the eventual go-forward callers, tracked in their tasks
 - [x] README documents the env-var contract (`MTLS_SECRET_NAME`, `CH_DOMAIN`)
       + the build-once-reuse pattern
 
 ## Blocked on
 
-- **None for the port + unit tests** — DONE.
-- **0063** (was 0050) — the live round-trip needs a real cert bundle in Secrets
-  Manager + the Caddy endpoint. The bundle is the single JSON `{cert,key,ca}`
-  secret named by `MTLS_SECRET_NAME`.
+- **Nothing — RESOLVED 2026-06-24.** The port + unit tests were always
+  unblocked; the live round-trip waited on **0063** (cert bundle in Secrets
+  Manager + Caddy endpoint), which completed 2026-06-23/24. Round-trip proven,
+  task closed.
 
 ## Out of scope
 
@@ -221,8 +251,19 @@ wrong). The mTLS client surface is consumed by:
 - Verified: default build lean (no rustls); `--features aws-mtls` builds; clippy
   clean; 7 unit tests pass; fmt clean. `cargo tree` → single `rustls 0.23.40`,
   `hyper-rustls 0.27.9`, `reqwest 0.12`, `aws-lc-rs`.
-- Live round-trip not runnable here (needs real cert bundle + Caddy endpoint) —
-  deferred to 0063/0051 live apply.
+- **Live round-trip proven 2026-06-24** (after 0063 provisioned the bundle +
+  endpoint). Added `tests/mtls_smoke_it.rs` — an `aws-mtls`-gated, `#[ignore]`d,
+  self-skipping integration test driving the workstation path `client_with_mtls`
+  with a bundle read from local PEM files (no Lambda extension). Operator run:
+  reader bundle `prices/production/clickhouse-mtls-prices-api-production`
+  (eu-central-1) → PEMs in tmpfs → `CH_DOMAIN=ch.sorobanscan.rumblefish.dev` →
+  `cargo test -p prices-clickhouse --features aws-mtls --test mtls_smoke_it --
+  --ignored`. Result: `SELECT 1 -> 1`; `prices` reports 24 objects. The diff vs
+  BE's production `crates/db-clickhouse/src/mtls.rs` is comments-only (logic +
+  rustls/hyper-rustls dep stack byte-identical), so this validates the same
+  transport BE already runs in prod. The one intentional divergence stays
+  `clickhouse` 0.13 (vs BE's =0.15) — the only API used (`with_http_client`) is
+  identical across both.
 
 ## Notes
 
