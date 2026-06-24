@@ -15,6 +15,7 @@
     "timeoutSeconds": 60,
     "reservedConcurrency": 1,
     "sqsBatchSize": 1,
-    "maxReceiveCount": 10
+    "maxReceiveCount": 10,
+    "maxIterations": 16
   }
 }

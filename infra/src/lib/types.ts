@@ -90,6 +90,23 @@ export interface EnvironmentConfig {
     readonly sqsBatchSize: number;
     /** SQS redrive threshold before a message lands in the DLQ. */
     readonly maxReceiveCount: number;
+    /**
+     * Max contiguous ledgers walked per reconcile run (`MAX_ITERATIONS`).
+     * Bounds one invocation's S3 fetch + decode budget against the Lambda
+     * timeout; the Rust default is 16.
+     */
+    readonly maxIterations: number;
+    /**
+     * KMS key ARN protecting BE's `stellar-ledger-data` bucket, if it is
+     * SSE-KMS encrypted. When set, the ledger-processor role is granted
+     * `kms:Decrypt` on this key — `grantRead` on a bucket imported by
+     * attributes (no `encryptionKey`) does NOT add it, so without this a
+     * KMS-encrypted bucket returns `AccessDenied` on every `GetObject`
+     * (which the fetcher maps to a hard error that DLQ's the doorbell, not
+     * a gap). Leave unset for an SSE-S3 / unencrypted bucket. Confirm with
+     * BE (task 0038 §C.2).
+     */
+    readonly bucketKmsKeyArn?: string;
   };
 }
 
@@ -188,6 +205,20 @@ export function validateConfig(config: EnvironmentConfig): void {
     if (!Number.isInteger(lp.maxReceiveCount) || lp.maxReceiveCount < 1) {
       errors.push(
         `ledgerProcessor.maxReceiveCount must be a positive integer, got: ${lp.maxReceiveCount}`,
+      );
+    }
+    if (!Number.isInteger(lp.maxIterations) || lp.maxIterations < 1) {
+      errors.push(
+        `ledgerProcessor.maxIterations must be a positive integer, got: ${lp.maxIterations}`,
+      );
+    }
+    if (
+      lp.bucketKmsKeyArn !== undefined &&
+      (typeof lp.bucketKmsKeyArn !== 'string' ||
+        !lp.bucketKmsKeyArn.startsWith('arn:aws:kms:'))
+    ) {
+      errors.push(
+        `ledgerProcessor.bucketKmsKeyArn, when set, must be a KMS key ARN, got: ${lp.bucketKmsKeyArn}`,
       );
     }
   }

@@ -1,4 +1,4 @@
-//! Error redaction wrappers for log emission.
+//! Error redaction for log emission.
 //!
 //! Mirrors BE's `safe_error_message` / `safe_bad_response_token`
 //! (`crates/indexer/src/handler/mod.rs:436-485`).
@@ -8,6 +8,12 @@
 //! example — its body echoes offending row values into the message).
 //! Emit fixed labels plus, for HTTP/CH responses, only the leading
 //! `Code: NNN` or HTTP status token.
+//!
+//! This lives in the shared core (not the Lambda crate) so the redaction
+//! is applied at the *source*: [`IngestError`](crate::IngestError)'s own
+//! `Display` routes the ClickHouse variant through here, so every consumer
+//! of the shared [`OhlcvWriter`](crate::OhlcvWriter) — the live Lambda
+//! *and* the SDEX backfill — is leak-safe without each re-implementing it.
 
 /// Extract ONLY the leading code/status token from a wire-error body.
 /// Returns `"Code: NNN"` for a CH exception body, `"HTTP NNN"` for a
@@ -25,6 +31,13 @@ pub fn safe_response_token(msg: &str) -> String {
         return format!("HTTP {leading}");
     }
     "detail suppressed".to_string()
+}
+
+/// Redact a ClickHouse client error into a leak-safe label. Used by
+/// [`IngestError`](crate::IngestError)'s `Display` so the offending-row
+/// body a `BadResponse` echoes never reaches a log line.
+pub fn redact_clickhouse(err: &clickhouse::error::Error) -> String {
+    safe_response_token(&err.to_string())
 }
 
 #[cfg(test)]

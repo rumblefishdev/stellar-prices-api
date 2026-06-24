@@ -65,9 +65,18 @@ async fn main() -> Result<(), Error> {
         info!(seed, "seeded cursor from INITIAL_CURSOR");
     }
 
-    let fetcher = S3Fetcher::from_env(&bucket).await;
-    let sink = ClickHouseSink::from_lambda_env().await?;
-    sink.preflight().await?;
+    // Build the S3 fetcher and the mTLS sink concurrently — they are
+    // independent (ambient AWS config load vs. Secrets-extension fetch +
+    // mTLS handshake), so joining them shaves their latency off cold start.
+    let (fetcher, sink) = tokio::join!(
+        S3Fetcher::from_env(&bucket),
+        ClickHouseSink::from_lambda_env()
+    );
+    let sink = sink?;
+    // `load_registry` is the first ClickHouse round-trip, so it already
+    // surfaces an unreachable cluster as a Lambda Init error — a separate
+    // preflight `SELECT 1` would just be a redundant extra round-trip on the
+    // cold path.
     let registry = sink.load_registry().await?;
 
     info!(

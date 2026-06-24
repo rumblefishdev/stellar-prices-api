@@ -204,6 +204,18 @@ export class ComputeStack extends cdk.Stack {
       this,
       keys.ledgerEventsTopicArn,
     );
+    // Bootstrap ledger for the doorbell cursor (`INITIAL_CURSOR`). The
+    // reconcile loop's `/tmp` cursor file is empty on a fresh container, so
+    // without a seed `cursor.read()` errors and every doorbell DLQs — the
+    // Lambda can never start. Sourced from the prices-owned SSM namespace
+    // (the operator seeds "live ingestion starts here" at deploy prep, like
+    // the mTLS secrets) rather than committed config, so it is never a
+    // stale magic number. One-time bootstrap; superseded by the durable
+    // CH-backed cursor (task 0064).
+    const initialCursor = ssm.StringParameter.valueForStringParameter(
+      this,
+      `/prices/${envName}/ledger-processor/initial-cursor`,
+    );
 
     // ---------------------------------------------------------------
     // SQS DLQ + prices ingest queue (prices-owned doorbell source)
@@ -296,6 +308,18 @@ export class ComputeStack extends cdk.Stack {
           // from the shared mtlsSecretName helper, so it can't drift from the
           // SecretsStack publication or the operator's create-secret.
           MTLS_SECRET_NAME: this.ledgerProcessorMtlsSecretName,
+          // Bootstrap cursor seed. main.rs writes the `/tmp` cursor file
+          // from this on a fresh container; without it `cursor.read()` errors
+          // and every doorbell DLQs (the Lambda never starts).
+          INITIAL_CURSOR: initialCursor,
+          // Explicit cursor checkpoint path. `/tmp` is the only writable
+          // Lambda filesystem; matches the Rust default but pinned here so
+          // the runtime contract is visible. (Per-container ephemeral —
+          // durable cursor is task 0064.)
+          CURSOR_FILE: '/tmp/prices-cursor.txt',
+          // Max contiguous ledgers per reconcile run (bounds fetch+decode
+          // against the Lambda timeout).
+          MAX_ITERATIONS: String(lp.maxIterations),
           // In-memory caching in the secrets extension — repeat reads in
           // one execution environment hit RAM, not Secrets Manager.
           PARAMETERS_SECRETS_EXTENSION_CACHE_ENABLED: 'true',
@@ -307,10 +331,19 @@ export class ComputeStack extends cdk.Stack {
     // batches buy nothing under concurrency=1). reportBatchItemFailures
     // lets the handler fail just the offending doorbell; SQS redelivers
     // it up to maxReceiveCount, then it lands in the DLQ.
+    //
+    // maxConcurrency caps the event-source's poller scaling. By default the
+    // ESM scales to 5 concurrent batches; with reservedConcurrency=1 the
+    // other 4 are throttle-rejected and their messages re-enqueue, each
+    // incrementing receiveCount — under a burst a processable doorbell can
+    // hit maxReceiveCount and false-DLQ before it is ever handled. 2 is the
+    // ESM minimum (it cannot equal the reserved 1), so this shrinks the
+    // over-poll window from 5→2 to complement maxReceiveCount.
     this.ledgerProcessorFunction.addEventSource(
       new lambdaEventSources.SqsEventSource(this.ingestQueue, {
         batchSize: lp.sqsBatchSize,
         reportBatchItemFailures: true,
+        maxConcurrency: 2,
       }),
     );
 
@@ -323,6 +356,21 @@ export class ComputeStack extends cdk.Stack {
       bucketName: ledgerBucketName,
     });
     ledgerBucket.grantRead(this.ledgerProcessorRole);
+
+    // grantRead on a bucket imported by attributes (no `encryptionKey`)
+    // cannot infer an SSE-KMS key, so it adds no kms:Decrypt. If BE's
+    // bucket is KMS-encrypted, every GetObject would 403 (AccessDenied) —
+    // which S3Fetcher maps to a hard error that DLQ's the doorbell, not a
+    // gap. Grant decrypt explicitly when the key ARN is configured.
+    if (lp.bucketKmsKeyArn) {
+      this.ledgerProcessorRole.addToPrincipalPolicy(
+        new iam.PolicyStatement({
+          sid: 'DecryptLedgerObjects',
+          actions: ['kms:Decrypt'],
+          resources: [lp.bucketKmsKeyArn],
+        }),
+      );
+    }
 
     this.ledgerProcessorRole.addToPrincipalPolicy(
       new iam.PolicyStatement({

@@ -13,7 +13,6 @@ use std::future::Future;
 use prices_ingest_core::{AssetRegistry, OhlcvCandle, OhlcvWriter, OracleSample};
 
 use crate::retry::{DEFAULT_BACKOFF_MS, retry_with_backoff};
-use crate::safe_log::safe_response_token;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SinkError {
@@ -125,16 +124,12 @@ impl CandleSink for ClickHouseSink {
     }
 }
 
-/// Map an ingest error into a sink error WITHOUT leaking row data: a ClickHouse
-/// `BadResponse` body can echo offending values, so only the leading
-/// `Code: NNN` token survives (see [`safe_response_token`]).
+/// Map an ingest error into a sink error. `IngestError`'s `Display` is already
+/// leak-safe — its ClickHouse variant redacts the `BadResponse` body down to the
+/// leading `Code: NNN` / status token (see
+/// [`prices_ingest_core::safe_response_token`]) — so this is a plain string map.
 fn redact(e: prices_ingest_core::IngestError) -> SinkError {
-    match &e {
-        prices_ingest_core::IngestError::Clickhouse(err) => {
-            SinkError::Write(safe_response_token(&err.to_string()))
-        }
-        other => SinkError::Write(other.to_string()),
-    }
+    SinkError::Write(e.to_string())
 }
 
 /// In-memory sink for tests and `--dry-run`: counts rows, touches no network.

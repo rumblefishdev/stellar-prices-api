@@ -14,12 +14,12 @@
 //! - [`object_fetcher`] — local-disk (fixtures/tests) vs S3 (`lambda` feature).
 //! - [`cursor`] — the ledger-sequence checkpoint.
 //! - [`sink`] — the ClickHouse writer (plaintext local vs `aws-mtls` remote).
-//! - [`galexie_key`] / [`retry`] / [`safe_log`] — key derivation, backoff, log redaction.
+//! - [`galexie_key`] / [`retry`] — key derivation, backoff. (Log redaction now
+//!   lives at the error source in `prices_ingest_core::safe_log`.)
 
 pub mod cursor;
 pub mod galexie_key;
 pub mod object_fetcher;
 pub mod reconcile;
 pub mod retry;
-pub mod safe_log;
 pub mod sink;

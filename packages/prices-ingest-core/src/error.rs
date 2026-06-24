@@ -13,6 +13,10 @@ pub enum IngestError {
     #[error("xdr parse: {0}")]
     Parse(#[from] xdr_parser::ParseError),
 
-    #[error("clickhouse: {0}")]
+    // Self-redacting: a ClickHouse `BadResponse` body can echo offending row
+    // values, so the `Display` emits only the leading `Code: NNN` / status
+    // token, never the raw body. Applying it on the shared error means every
+    // consumer of the writer (live Lambda + SDEX backfill) is leak-safe.
+    #[error("clickhouse: {}", crate::safe_log::redact_clickhouse(.0))]
     Clickhouse(#[from] clickhouse::error::Error),
 }
