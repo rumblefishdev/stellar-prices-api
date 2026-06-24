@@ -5,12 +5,12 @@ use tokio::process::Command;
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
-use crate::canonical::AssetRegistry;
+use prices_ingest_core::{AssetRegistry, Registries};
+
 use crate::error::BackfillError;
 use crate::ingest::{PartitionStats, index_partition};
 use crate::partition::{Partition, partitions_for_range};
 use crate::sink::Sink;
-use crate::soroban::Registries;
 use crate::sync::{SyncOutcome, sync_partition};
 
 pub async fn execute(

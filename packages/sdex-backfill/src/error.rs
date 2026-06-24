@@ -38,4 +38,7 @@ pub enum BackfillError {
 
     #[error("clickhouse: {0}")]
     Clickhouse(#[from] clickhouse::error::Error),
+
+    #[error("ingest: {0}")]
+    Ingest(#[from] prices_ingest_core::IngestError),
 }

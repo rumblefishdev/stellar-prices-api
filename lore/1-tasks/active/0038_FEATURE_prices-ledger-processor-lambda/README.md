@@ -133,6 +133,30 @@ history:
       the cross-team artefact tracked by task 0050. Moved back to
       active for continued local-scope work; the production AWS
       wiring (Part E) stays gated on BE 0227 + task 0047.
+  - date: 2026-06-24
+    status: active
+    who: oski
+    note: >
+      Refactored the Lambda onto the **shared, tested ingestion core**
+      and landed the two production data-plane seams 0052/0063 unblocked.
+      The prototype's hand-rolled decode/bucket/canonicalisation diverged
+      from the tested `sdex-backfill` (String asset ids + lexicographic
+      orientation + f64, vs the real `price_ohlcv_1m`'s UInt32 surrogate
+      ids + SAC→classic collapse + Decimal/version) — so writing it to the
+      **shared** `prices.price_ohlcv_1m` would split liquidity. Extracted
+      `packages/prices-ingest-core` (canonical/price/tick/bucket/filter/
+      soroban + the transport-agnostic `OhlcvWriter`) out of sdex-backfill
+      and repointed both crates at it, so live + backfill now emit
+      byte-identical rows. Replaced the prototype `bucket.rs`/`decode.rs`/
+      stdout+sql_file sinks (→ `.trash/`) with: a core-backed reconcile
+      loop, an `S3Fetcher` (`aws-sdk-s3`, `lambda` feature), and a
+      `ClickHouseSink` over `prices-clickhouse::mtls` (`aws-mtls` feature,
+      the task-0052 client). Default build stays lean (no rustls/lambda);
+      `--features lambda` compiles the full SQS-doorbell + S3 + mTLS path.
+      Tests: 13 core + 5 sdex (regression gate green) + 15 lambda-unit + 3
+      real-fixture e2e (decode→bucket→cursor, gap-stop, idempotent). fmt +
+      clippy clean. **Prepare-only — no deploy, no prod writes** (Part E
+      deploy/cert/Caddy still gated on BE 0227 + task 0047). Stays active.
 ---
 
 # Prices Ledger Processor Lambda — live S3-event-driven ingestion into price_ohlcv
@@ -275,26 +299,34 @@ In `infra/aws-cdk/` (created by 0011):
 
 ## Acceptance Criteria
 
-- [ ] `packages/prices-ledger-processor` binary builds against
-      `provided.al2` (cargo lambda or equivalent).
-- [ ] Lambda is registered as a second S3 notification target on
-      BE's `stellar-ledger-data/` bucket via CDK; no conflict
-      with BE's own Ledger Processor registration.
-- [ ] Given a recorded `LedgerCloseMeta` containing ≥1 Soroban
-      AMM swap and ≥1 SDEX trade, the binary writes the expected
-      1-min `price_ohlcv` rows via UPSERT with the ADR 0003 PK
-      shape and ADR 0004 multi-source columns.
-- [ ] Re-invoking with the same ledger event is idempotent: row
-      counts and column values unchanged (incremental-merge
-      preserves `open`, refreshes `close`, etc.).
-- [ ] `prices.ledger_processor.lag_seconds` metric published to
-      CloudWatch; alarm wired up to fire on >60s sustained lag.
-- [ ] Integration test covers: S3 event → fetched object →
-      decoded XDR → dispatched extract → UPSERTed row against
-      a local Postgres mirroring the 0011 schema.
-- [ ] Docs: README in `packages/prices-ledger-processor`
-      describing the S3 event contract, the BE-coordination
-      step for bucket notifications, and the SSM keys consumed.
+> Criteria below are the post-ADR-0007 (CH + mTLS + ReplacingMergeTree)
+> shape; the original RDS/UPSERT wording is superseded.
+
+- [x] `packages/prices-ledger-processor` builds; the `lambda`-feature
+      binary compiles the full `provided.al2023` path (S3 + mTLS +
+      `lambda_runtime`). `cargo lambda` ZIP packaging is the deploy step.
+- [x] Decode → extract → bucket → write reuses the **tested**
+      `prices-ingest-core` (same code as `sdex-backfill`), so live rows
+      match the backfill: ADR 0003 PK (`asset_id, quote_asset_id,
+      source, timestamp`), ADR 0004 multi-source columns, UInt32
+      surrogate ids with SAC→classic collapse, `Decimal(38,14)`.
+- [x] Re-invoking from the same cursor is idempotent — proven by the
+      `idempotent_on_re_run_from_same_cursor` e2e test (deterministic
+      candle set + `version` → ReplacingMergeTree collapses re-inserts).
+- [x] Real-fixture integration test: S3-equivalent object →
+      `decode_object` → dispatch/extract → bucketed candles → cursor
+      advance, gap-stop, idempotency (`tests/reconcile_e2e.rs`,
+      self-skips when fixtures absent).
+- [x] mTLS sink goes through `prices-clickhouse::mtls` (task 0052), not
+      reinvented; CH error bodies redacted via `safe_log` before logging.
+- [x] Docs: `packages/prices-ledger-processor/README.md` — S3/SNS event
+      contract, BE-coordination (task 0050), env-var/SSM keys consumed.
+- [x] Lambda registered as the prices SNS→SQS doorbell target via CDK
+      (`infra/.../compute-stack.ts`, prepare-only — 2026-06-10).
+- [ ] `prices.ledger_processor.lag_seconds` CloudWatch metric + >60s
+      alarm — **deferred** (CW emit is a deploy concern; spec Part E).
+- [ ] Live mTLS write against the Hetzner `prices` DB — **deferred**
+      (prepare-not-deploy; transport already proven by task 0052's smoke).
 
 ## Blocked on
 
@@ -361,6 +393,44 @@ Env-var contract sourced from `/platform/{env}/*` SSM at deploy
 no deploy** (gated on BE 0227 + task 0047 + BE publishing the SSM
 keys/topic).
 
+**Shared-core refactor + data-plane seams (2026-06-24).** The
+prototype reimplemented decode/bucket/canonicalisation by hand and it
+diverged from the tested `sdex-backfill` — fatal once a real sink
+writes to the *shared* `prices.price_ohlcv_1m` (different asset ids +
+orientation → split liquidity). Fixed by extracting
+`packages/prices-ingest-core` (the tested `canonical`/`price`/`tick`/
+`bucket`/`filter`/`soroban` modules + a transport-agnostic
+`OhlcvWriter` split out of the backfill `Sink`) and repointing **both**
+`sdex-backfill` and this Lambda at it. The Lambda now keeps only its
+transport shell:
+- `src/reconcile.rs` — doorbell-cursor loop calling `prices_ingest_core`
+  (`extract_trades` + `process_ledger` → `CandleAccumulator`), warm
+  `AssetRegistry` + `Registries` loaded from `prices.assets` at cold
+  start, accumulate across the contiguous run, flush + advance cursor
+  **last**.
+- `src/object_fetcher/s3.rs` — `S3Fetcher` (`aws-sdk-s3` GetObject;
+  `NoSuchKey`→gap), `lambda` feature.
+- `src/sink/mod.rs` — `ClickHouseSink` over the shared `OhlcvWriter`;
+  `plaintext` (local) and `from_lambda_env` (mTLS via
+  `prices-clickhouse::mtls`, `aws-mtls` feature); writes retried via
+  `retry.rs`, CH errors redacted via `safe_log`.
+- `src/bin/cli.rs` — local fixture runner (`--dry-run` counts; else
+  writes to local plaintext CH).
+- `src/main.rs` — SQS-doorbell entrypoint (`lambda` feature, eager
+  cold-start init).
+
+Retired to `.trash/0038-lambda-prototype/`: `bucket.rs`, `decode.rs`,
+`sink/{sql_file,stdout}.rs`. Feature matrix: `default` lean (no
+rustls/lambda), `aws-mtls`, `lambda` (= `aws-mtls` + runtime + S3).
+Tests: 13 core + 5 sdex (regression gate) + 15 lambda-unit + 3
+real-fixture e2e. fmt + clippy clean.
+
+**Broken/modified tests:** `tests/reconcile_e2e.rs` rewritten — the old
+synthetic-`LedgerDecoder` fakes are gone (the decode seam was removed in
+favour of the shared `decode_object`); it now drives the real pipeline
+over the three bundled fixture ledgers (62460540–542) and self-skips
+when fixtures are absent. Intentional, not a regression.
+
 ## Design Decisions
 
 ### Emerged
@@ -383,10 +453,36 @@ keys/topic).
    Not a tunable — serial execution is the ordering guarantee, so the
    config validator rejects any other value rather than letting a
    typo silently break ordering at deploy.
+4. **Refactor onto the shared core instead of keeping the prototype's
+   own decode/bucket (2026-06-24).** The user-confirmed call: a real
+   sink writing the prototype's String-id/f64/lexicographic rows to the
+   *shared* `prices.price_ohlcv_1m` would not match the backfill →
+   split liquidity. Resolved by extracting `prices-ingest-core` and
+   reusing it (partial "reconcile" of the live path onto the tested
+   code), not by reconciling ids inside the sink. Realises the task's
+   own Notes ask ("keep the merge SQL in a shared module so live +
+   backfill writers stay in sync").
+5. **`OhlcvWriter` takes a `clickhouse::Client`, not a URL.** Lets the
+   one writer serve both the plaintext local client and the task-0052
+   mTLS client (both are `clickhouse::Client`) — the audit rule that
+   every remote CH access goes through `prices-clickhouse::mtls` holds.
+6. **Candles accumulate across the whole contiguous run, flushed once.**
+   Matches the backfill's per-chunk accumulation so intra-run minutes
+   aggregate. A minute split across two *separate* invocations lands as
+   two `version`-keyed rows (RMT keeps the latest) — the same
+   characteristic the backfill has across partition boundaries; the fix
+   is a periodic re-aggregation (spawned as backlog).
 
 ## Future Work
 
-- Adopt `cargo-lambda-cdk` `RustFunction` (drop the `fromAsset` seam).
-- Production-rewrite punch-list — see spec Part E (gated on BE 0227 +
-  task 0047): S3-client `ObjectFetcher`, CH-backed cursor (spec D.1),
-  mTLS CH `OhlcvSink`, CW lag alarm, end-to-end smoke.
+> Each item below is spawned as a backlog task (don't leave as prose).
+
+- **0064** — CH-backed cursor (replace `StubFileCursor`; spec D.1).
+- **0065** — periodic OHLCV re-aggregation for cross-invocation /
+  cross-chunk intra-minute candles (live + backfill share the gap).
+- **0066** — `cargo-lambda-cdk` `RustFunction` + CloudWatch
+  `lag_seconds` metric/alarm, and unify the dual rustls (0.21 from
+  `aws-sdk-s3` vs 0.23 from mTLS) to shrink the Lambda ZIP.
+- Production deploy + live end-to-end smoke — spec Part E, still gated
+  on BE 0227 + task 0047 (not a standalone backlog item; unblocks with
+  those gates).

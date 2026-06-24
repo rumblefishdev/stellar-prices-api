@@ -1,27 +1,33 @@
 //! Doorbell-cursor reconcile loop.
 //!
-//! Mirrors BE's indexer (`crates/indexer/src/handler/mod.rs:201`):
-//! read cursor, derive next S3 key, fetch, decode, dispatch, bucket,
-//! sink, advance cursor last. Stops at the first gap or
-//! `max_iterations`. The cursor write is the **ordering barrier** —
-//! a crash before it leaves the cursor unchanged and the next
-//! invocation re-processes the same ledger (idempotent via the
-//! ReplacingMergeTree / merge semantics in production; via the
-//! pure-function bucketer in the prototype).
+//! Mirrors BE's indexer: read cursor, derive the next S3 key, fetch, decode,
+//! extract+bucket, write, advance the cursor **last**. Stops at the first gap or
+//! `max_iterations`. The cursor write is the ordering barrier — a crash before
+//! it leaves the cursor unchanged and the next invocation re-processes the run
+//! (idempotent: ReplacingMergeTree collapses re-inserts by `version`).
+//!
+//! The decode→extract→canonicalise→bucket step is `prices_ingest_core` — the
+//! same code the SDEX backfill runs — so live candles are byte-identical to
+//! backfilled ones. Candles accumulate across the whole contiguous run and are
+//! flushed once at the end, so all ledgers sharing a minute aggregate into one
+//! candle (matching the backfill's per-chunk accumulation). The only residual
+//! is a minute split across two separate invocations/runs; that is the same
+//! `version`-keyed characteristic the backfill has across partition boundaries,
+//! and a periodic re-aggregation is tracked as a follow-up.
 
-use std::future::Future;
+use std::collections::HashMap;
 
-use extractors_core::{SorobanEventRow, VenueRegistry};
-use ledger_processor::dispatch::{DispatchError, dispatch};
-use phoenix_extractor::PhoenixPoolRegistry;
-use soroswap_extractor::SoroswapPoolRegistry;
-use tracing::{info, warn};
+use prices_ingest_core::{
+    AssetRegistry, CandleAccumulator, OracleSample, Registries, decode_object, extract_trades,
+    ledger_sequence, process_ledger, raw_trade_to_tick,
+};
+use tokio::sync::Mutex;
+use tracing::info;
 
-use crate::bucket::Bucketer;
 use crate::cursor::{Cursor, CursorError};
 use crate::galexie_key::ledger_s3_key;
 use crate::object_fetcher::{FetchError, ObjectFetcher};
-use crate::sink::{OhlcvSink, SinkError};
+use crate::sink::{CandleSink, SinkError};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ReconcileError {
@@ -31,26 +37,8 @@ pub enum ReconcileError {
     Fetch(#[from] FetchError),
     #[error("decode error: {0}")]
     Decode(String),
-    #[error("dispatch error: {0}")]
-    Dispatch(String),
     #[error("sink error: {0}")]
     Sink(#[from] SinkError),
-}
-
-#[derive(Debug, Clone)]
-pub struct DecodedLedger {
-    pub ledger_sequence: u64,
-    pub closed_at_unix_seconds: i64,
-    /// Soroban events grouped by `(transaction_id, contract_id)` — the
-    /// shape the kernel from task 0037 dispatches on.
-    pub event_groups: Vec<Vec<SorobanEventRow>>,
-}
-
-pub trait LedgerDecoder {
-    fn decode(
-        &self,
-        bytes: &[u8],
-    ) -> impl Future<Output = Result<Vec<DecodedLedger>, String>> + Send;
 }
 
 #[derive(Debug, Clone, Default)]
@@ -61,28 +49,58 @@ pub struct RunStats {
     pub rows_emitted: u64,
 }
 
-pub struct Reconciler<F, C, S, D> {
-    pub fetcher: F,
-    pub cursor: C,
-    pub sink: S,
-    pub decoder: D,
-    pub venue_registry: VenueRegistry,
-    pub phoenix_registry: PhoenixPoolRegistry,
-    pub soroswap_registry: SoroswapPoolRegistry,
+/// Warm per-container processing state: the surrogate-id registry (loaded from
+/// `prices.assets` at cold start) and the incrementally-grown AMM venue/pool
+/// registries. Persisting these across invocations lets a warm Lambda resolve
+/// pools discovered earlier in its lifetime.
+pub struct ProcessingState {
+    pub assets: AssetRegistry,
+    pub registries: Registries,
 }
 
-impl<F, C, S, D> Reconciler<F, C, S, D>
+pub struct Reconciler<F, C, S> {
+    fetcher: F,
+    cursor: C,
+    sink: S,
+    state: Mutex<ProcessingState>,
+}
+
+impl<F, C, S> Reconciler<F, C, S>
 where
     F: ObjectFetcher + Sync,
     C: Cursor + Sync,
-    S: OhlcvSink + Sync,
-    D: LedgerDecoder + Sync,
+    S: CandleSink + Sync,
 {
+    pub fn new(
+        fetcher: F,
+        cursor: C,
+        sink: S,
+        assets: AssetRegistry,
+        registries: Registries,
+    ) -> Self {
+        Self {
+            fetcher,
+            cursor,
+            sink,
+            state: Mutex::new(ProcessingState { assets, registries }),
+        }
+    }
+
     pub async fn run(&self, max_iterations: usize) -> Result<RunStats, ReconcileError> {
+        let mut st = self.state.lock().await;
+        // Deref the guard once so `registries` and `assets` can be borrowed as
+        // disjoint fields (a borrow through the guard's DerefMut each time would
+        // conflict).
+        let state = &mut *st;
+
         let start = self.cursor.read().await?;
         let mut current = start;
         let mut persisted = 0u64;
-        let mut rows_emitted = 0u64;
+
+        // Accumulate across the whole contiguous run, flush once at the end.
+        let mut sdex = CandleAccumulator::new();
+        let mut amm: HashMap<&'static str, CandleAccumulator> = HashMap::new();
+        let mut oracle: Vec<OracleSample> = Vec::new();
 
         for _ in 0..max_iterations {
             let next = current + 1;
@@ -96,46 +114,61 @@ where
                 break;
             };
 
-            let ledgers = self
-                .decoder
-                .decode(&bytes)
-                .await
-                .map_err(ReconcileError::Decode)?;
-
-            let mut bucketer = Bucketer::new();
-            let mut max_seq = current;
-            for ledger in ledgers {
-                for group in &ledger.event_groups {
-                    let trades = match dispatch(
-                        group,
-                        &self.venue_registry,
-                        &self.phoenix_registry,
-                        &self.soroswap_registry,
-                    ) {
-                        Ok(t) => t,
-                        Err(DispatchError::VenueNotImplemented { venue, contract_id }) => {
-                            warn!(?venue, %contract_id, "venue extractor not yet implemented — skipping");
-                            Vec::new()
-                        }
-                        Err(e) => return Err(ReconcileError::Dispatch(e.to_string())),
-                    };
-                    for trade in &trades {
-                        bucketer.ingest(ledger.closed_at_unix_seconds, trade);
-                    }
+            let lcms = decode_object(&bytes).map_err(|e| ReconcileError::Decode(e.to_string()))?;
+            let mut obj_max = current;
+            for lcm in &lcms {
+                // Classic SDEX trades from operation results.
+                for trade in extract_trades(lcm) {
+                    sdex.merge(&raw_trade_to_tick(&trade, &mut state.assets));
                 }
-                if ledger.ledger_sequence > max_seq {
-                    max_seq = ledger.ledger_sequence;
+                // Soroban AMM trades + oracle samples.
+                let sob = process_ledger(lcm, &mut state.registries, &mut state.assets);
+                for (source, tick) in &sob.amm_ticks {
+                    amm.entry(source)
+                        .or_insert_with(CandleAccumulator::new)
+                        .merge(tick);
                 }
+                oracle.extend(sob.oracle);
+                obj_max = obj_max.max(ledger_sequence(lcm) as u64);
             }
 
-            let rows = bucketer.drain();
-            rows_emitted += rows.len() as u64;
-            self.sink.write(&rows).await?;
-            self.cursor.write(max_seq).await?;
-            info!(ledger = max_seq, rows = rows.len(), "ledger persisted");
-            current = max_seq;
+            current = obj_max.max(next);
             persisted += 1;
         }
+
+        if persisted == 0 {
+            return Ok(RunStats {
+                start_cursor: start,
+                end_cursor: start,
+                ledgers_persisted: 0,
+                rows_emitted: 0,
+            });
+        }
+
+        // Flush + write, then advance the cursor LAST (ordering barrier).
+        let mut rows_emitted = 0u64;
+
+        let sdex_candles = sdex.flush_all();
+        rows_emitted += sdex_candles.len() as u64;
+        self.sink.write_candles(&sdex_candles, "sdex").await?;
+
+        for (source, mut acc) in amm {
+            let candles = acc.flush_all();
+            rows_emitted += candles.len() as u64;
+            self.sink.write_candles(&candles, source).await?;
+        }
+
+        self.sink.write_oracle(&oracle).await?;
+        self.sink.write_assets(&state.assets).await?;
+        self.cursor.write(current).await?;
+
+        info!(
+            start,
+            end = current,
+            persisted,
+            rows = rows_emitted,
+            "reconcile run complete"
+        );
 
         Ok(RunStats {
             start_cursor: start,

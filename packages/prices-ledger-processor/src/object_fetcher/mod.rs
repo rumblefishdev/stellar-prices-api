@@ -4,8 +4,12 @@
 use std::future::Future;
 
 pub mod local_disk;
+#[cfg(feature = "lambda")]
+pub mod s3;
 
 pub use local_disk::LocalDiskFetcher;
+#[cfg(feature = "lambda")]
+pub use s3::S3Fetcher;
 
 #[derive(Debug, thiserror::Error)]
 pub enum FetchError {
@@ -15,6 +19,8 @@ pub enum FetchError {
         #[source]
         source: std::io::Error,
     },
+    #[error("object-store error fetching {key}: {detail}")]
+    Backend { key: String, detail: String },
 }
 
 pub trait ObjectFetcher {

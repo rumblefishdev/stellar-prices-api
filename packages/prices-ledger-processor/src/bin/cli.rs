@@ -1,38 +1,47 @@
+//! Local fixture runner for the Prices Ledger Processor (task 0038).
+//!
+//! Drives the *same* reconcile loop the Lambda runs, but against local-disk
+//! fixtures and a local (plaintext) ClickHouse — no AWS, no mTLS. Use it to
+//! exercise the full decode → extract → bucket → write pipeline end-to-end:
+//!
+//! ```bash
+//! # write into local Docker ClickHouse (apply prices schema first)
+//! CLICKHOUSE_URL=http://localhost:8123 cargo run -p prices-ledger-processor \
+//!     --bin prices-cli -- --cursor 62460539 --max-iterations 16
+//!
+//! # parse + bucket only, no DB writes
+//! cargo run -p prices-ledger-processor --bin prices-cli -- \
+//!     --cursor 62460539 --dry-run
+//! ```
+
 use std::path::PathBuf;
 
-use clap::{Parser, ValueEnum};
-use extractors_core::VenueRegistry;
-use phoenix_extractor::PhoenixPoolRegistry;
+use clap::Parser;
+use prices_ingest_core::{AssetRegistry, Registries};
 use prices_ledger_processor::{
     cursor::{Cursor, StubFileCursor},
-    decode::XdrLedgerDecoder,
     object_fetcher::LocalDiskFetcher,
-    reconcile::Reconciler,
-    sink::{SqlFileSink, StdoutJsonSink},
+    reconcile::{Reconciler, RunStats},
+    sink::{ClickHouseSink, CountingSink},
 };
-use soroswap_extractor::SoroswapPoolRegistry;
 use tracing::info;
 
 #[derive(Parser, Debug)]
 #[command(
     name = "prices-cli",
-    about = "Local CLI driver for the Prices Ledger Processor prototype (task 0038)"
+    about = "Local fixture runner for the Prices Ledger Processor (task 0038)"
 )]
 struct Args {
-    /// Initial cursor value (ledger sequence the run starts AFTER).
-    /// Always overwrites the cursor file before the run.
+    /// Initial cursor (the run starts at this ledger + 1). Overwrites the
+    /// cursor file before the run.
     #[arg(long)]
     cursor: u64,
 
-    /// Maximum reconcile iterations per invocation.
+    /// Maximum reconcile iterations (contiguous ledgers) per run.
     #[arg(long, default_value_t = 16)]
     max_iterations: usize,
 
-    /// Sink selection.
-    #[arg(long, value_enum, default_value_t = SinkKind::Stdout)]
-    sink: SinkKind,
-
-    /// Local fixture root — keys derived by `ledger_s3_key` are joined onto this.
+    /// Local fixture root — derived Galexie keys are joined onto this.
     #[arg(long, default_value = "fixtures/ledgers")]
     fixtures_dir: PathBuf,
 
@@ -40,15 +49,13 @@ struct Args {
     #[arg(long, default_value = "out/cursor.txt")]
     cursor_file: PathBuf,
 
-    /// Where SQL-file sink output lands.
-    #[arg(long, default_value = "out")]
-    out_dir: PathBuf,
-}
+    /// Local ClickHouse endpoint (plaintext). Ignored with --dry-run.
+    #[arg(long, env = "CLICKHOUSE_URL", default_value = "http://localhost:8123")]
+    clickhouse_url: String,
 
-#[derive(Copy, Clone, Debug, ValueEnum)]
-enum SinkKind {
-    Stdout,
-    SqlFile,
+    /// Parse + bucket only; do not write to ClickHouse (counts rows).
+    #[arg(long, default_value_t = false)]
+    dry_run: bool,
 }
 
 #[tokio::main]
@@ -62,34 +69,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let cursor = StubFileCursor::new(&args.cursor_file);
     cursor.write(args.cursor).await?;
-
     let fetcher = LocalDiskFetcher::new(&args.fixtures_dir);
 
-    let stats = match args.sink {
-        SinkKind::Stdout => {
-            let reconciler = Reconciler {
-                fetcher,
-                cursor,
-                sink: StdoutJsonSink,
-                decoder: XdrLedgerDecoder,
-                venue_registry: VenueRegistry::new(),
-                phoenix_registry: PhoenixPoolRegistry::default(),
-                soroswap_registry: SoroswapPoolRegistry::new(),
-            };
-            reconciler.run(args.max_iterations).await?
-        }
-        SinkKind::SqlFile => {
-            let reconciler = Reconciler {
-                fetcher,
-                cursor,
-                sink: SqlFileSink::new(&args.out_dir),
-                decoder: XdrLedgerDecoder,
-                venue_registry: VenueRegistry::new(),
-                phoenix_registry: PhoenixPoolRegistry::default(),
-                soroswap_registry: SoroswapPoolRegistry::new(),
-            };
-            reconciler.run(args.max_iterations).await?
-        }
+    let stats: RunStats = if args.dry_run {
+        let reconciler = Reconciler::new(
+            fetcher,
+            cursor,
+            CountingSink::default(),
+            AssetRegistry::from_existing(Vec::new()),
+            Registries::new(),
+        );
+        reconciler.run(args.max_iterations).await?
+    } else {
+        let sink = ClickHouseSink::plaintext(&args.clickhouse_url);
+        sink.preflight().await?;
+        let registry = sink.load_registry().await?;
+        let reconciler = Reconciler::new(fetcher, cursor, sink, registry, Registries::new());
+        reconciler.run(args.max_iterations).await?
     };
 
     info!(
@@ -97,6 +93,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         end = stats.end_cursor,
         persisted = stats.ledgers_persisted,
         rows = stats.rows_emitted,
+        dry_run = args.dry_run,
         "reconcile complete"
     );
 

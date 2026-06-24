@@ -1,45 +1,39 @@
-//! Lambda entrypoint — SQS doorbell handler.
+//! Lambda entrypoint — SQS doorbell handler (built only with `--features lambda`).
 //!
-//! Mirrors BE's indexer cold-start shape (eager config validation,
-//! structured JSON tracing, single shared state passed by reference to
-//! every invocation). The SQS message body is **ignored**; each
-//! invocation just runs the reconcile loop.
+//! Cold start mirrors BE's indexer: eager config + connectivity validation, then
+//! one shared [`Reconciler`] reused across invocations. The SQS message body is
+//! **ignored** — production doorbells arrive via SNS fan-out
+//! (`S3 ObjectCreated → SNS (BE-owned) → prices-ingest-{env} SQS + DLQ → here`,
+//! 2026-06-10 cross-team decision); raw or SNS-wrapped, the handler just runs
+//! the doorbell-cursor reconcile loop. `reservedConcurrency = 1` (set in CDK)
+//! keeps runs serial, which is the ordering guarantee.
 //!
-//! Doorbell transport (2026-06-10 cross-team decision, spec §C.1):
-//! production doorbells reach this Lambda via **SNS fan-out** —
-//! `S3 ObjectCreated → SNS (BE-owned) → prices-ingest-{env} SQS + DLQ
-//! → this Lambda`. Because the body is ignored, the handler is
-//! identical whether the message is raw or SNS-wrapped; the `SqsEvent`
-//! envelope is all we deserialise. Failure isolation: the prices queue
-//! is prices-owned, so a backlog here never pressures BE's indexer.
-//!
-//! Phase 2 prototype: the fetcher / cursor / sink are still the
-//! local-disk stubs. The Lambda mode exists to prove the
-//! `lambda_runtime` event-loop wires up cleanly — a `cargo lambda
-//! invoke` against a stub doorbell event runs end-to-end.
+//! Transport here is production: S3 object fetch + ClickHouse over mTLS (task
+//! 0052). The cursor is still a file checkpoint (`CURSOR_FILE`, seeded from
+//! `INITIAL_CURSOR`) pending the CH-backed cursor decision (G-note Part D.1).
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use aws_lambda_events::sqs::{SqsBatchResponse, SqsEvent};
-use extractors_core::VenueRegistry;
-use lambda_runtime::{Error, LambdaEvent, service_fn};
-use phoenix_extractor::PhoenixPoolRegistry;
+use aws_lambda_events::sqs::{BatchItemFailure, SqsBatchResponse, SqsEvent};
+use lambda_runtime::{Error, LambdaEvent, run, service_fn};
+use prices_ingest_core::Registries;
 use prices_ledger_processor::{
-    cursor::StubFileCursor, decode::XdrLedgerDecoder, object_fetcher::LocalDiskFetcher,
-    reconcile::Reconciler, sink::StdoutJsonSink,
+    cursor::{Cursor, StubFileCursor},
+    object_fetcher::S3Fetcher,
+    reconcile::Reconciler,
+    sink::ClickHouseSink,
 };
-use soroswap_extractor::SoroswapPoolRegistry;
 use tracing::{error, info};
 
-const ENV_FIXTURES_DIR: &str = "FIXTURES_DIR";
+const ENV_BUCKET: &str = "BUCKET_NAME";
 const ENV_CURSOR_FILE: &str = "CURSOR_FILE";
+const ENV_INITIAL_CURSOR: &str = "INITIAL_CURSOR";
 const ENV_MAX_ITERATIONS: &str = "MAX_ITERATIONS";
-const DEFAULT_FIXTURES_DIR: &str = "fixtures/ledgers";
-const DEFAULT_CURSOR_FILE: &str = "out/cursor.txt";
+const DEFAULT_CURSOR_FILE: &str = "/tmp/prices-cursor.txt";
 const DEFAULT_MAX_ITERATIONS: usize = 16;
 
-type R = Reconciler<LocalDiskFetcher, StubFileCursor, StdoutJsonSink, XdrLedgerDecoder>;
+type R = Reconciler<S3Fetcher, StubFileCursor, ClickHouseSink>;
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
@@ -48,9 +42,10 @@ async fn main() -> Result<(), Error> {
         .json()
         .init();
 
-    let fixtures_dir = std::env::var(ENV_FIXTURES_DIR)
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(DEFAULT_FIXTURES_DIR));
+    // Eager cold-start init — a missing env / unreachable cluster should be a
+    // Lambda Init error, not a per-event panic.
+    let bucket = std::env::var(ENV_BUCKET)
+        .map_err(|_| Error::from(format!("{ENV_BUCKET} env var is required")))?;
     let cursor_file = std::env::var(ENV_CURSOR_FILE)
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(DEFAULT_CURSOR_FILE));
@@ -59,24 +54,38 @@ async fn main() -> Result<(), Error> {
         .and_then(|s| s.parse().ok())
         .unwrap_or(DEFAULT_MAX_ITERATIONS);
 
+    let cursor = StubFileCursor::new(&cursor_file);
+    // Seed the cursor on a fresh container if it has no checkpoint yet.
+    if cursor.read().await.is_err()
+        && let Some(seed) = std::env::var(ENV_INITIAL_CURSOR)
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+    {
+        cursor.write(seed).await?;
+        info!(seed, "seeded cursor from INITIAL_CURSOR");
+    }
+
+    let fetcher = S3Fetcher::from_env(&bucket).await;
+    let sink = ClickHouseSink::from_lambda_env().await?;
+    sink.preflight().await?;
+    let registry = sink.load_registry().await?;
+
     info!(
-        fixtures_dir = %fixtures_dir.display(),
+        %bucket,
         cursor_file = %cursor_file.display(),
         max_iterations,
-        "prices-ledger-processor cold start"
+        "prices-ledger-processor cold start ready"
     );
 
-    let reconciler: Arc<R> = Arc::new(Reconciler {
-        fetcher: LocalDiskFetcher::new(&fixtures_dir),
-        cursor: StubFileCursor::new(&cursor_file),
-        sink: StdoutJsonSink,
-        decoder: XdrLedgerDecoder,
-        venue_registry: VenueRegistry::new(),
-        phoenix_registry: PhoenixPoolRegistry::default(),
-        soroswap_registry: SoroswapPoolRegistry::new(),
-    });
+    let reconciler: Arc<R> = Arc::new(Reconciler::new(
+        fetcher,
+        cursor,
+        sink,
+        registry,
+        Registries::new(),
+    ));
 
-    lambda_runtime::run(service_fn(move |event: LambdaEvent<SqsEvent>| {
+    run(service_fn(move |event: LambdaEvent<SqsEvent>| {
         let r = reconciler.clone();
         async move { handler(event, r, max_iterations).await }
     }))
@@ -108,7 +117,7 @@ async fn handler(
                     error = %e,
                     "reconcile failed — will redeliver doorbell"
                 );
-                batch_item_failures.push(aws_lambda_events::sqs::BatchItemFailure {
+                batch_item_failures.push(BatchItemFailure {
                     item_identifier: message_id,
                 });
             }

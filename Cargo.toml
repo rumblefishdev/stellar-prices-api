@@ -8,6 +8,7 @@ members = [
     "packages/soroswap-extractor",
     "packages/aquarius-extractor",
     "packages/ledger-processor",
+    "packages/prices-ingest-core",
     "packages/prices-ledger-processor",
 ]
 
@@ -25,3 +26,11 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rust_decimal = { version = "1", features = ["serde-with-str"] }
 thiserror = "2"
+
+# AWS / Lambda — used only by the live Prices Ledger Processor (task 0038),
+# behind its `lambda` / `aws-mtls` cargo features so default builds stay lean.
+lambda_runtime = "0.13"
+aws-config = "1"
+aws-sdk-s3 = "1"
+aws_lambda_events = { version = "0.16", default-features = false, features = ["sqs"] }
+tempfile = "3"
