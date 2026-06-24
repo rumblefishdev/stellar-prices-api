@@ -157,6 +157,17 @@ history:
       real-fixture e2e (decode→bucket→cursor, gap-stop, idempotent). fmt +
       clippy clean. **Prepare-only — no deploy, no prod writes** (Part E
       deploy/cert/Caddy still gated on BE 0227 + task 0047). Stays active.
+  - date: 2026-06-24
+    status: active
+    who: claude
+    note: >
+      Applied the safe-set fixes from the PR #34 review (commit 673f775):
+      wired INITIAL_CURSOR (prices SSM) / CURSOR_FILE / MAX_ITERATIONS into
+      the Lambda env, optional kms:Decrypt grant, SQS maxConcurrency=2,
+      BadResponse redaction moved to the core error source, concurrent
+      cold-start init. Added a Deploy prerequisites checklist (bootstrap
+      cursor SSM param + source-bucket KMS confirmation). Findings #1/#3/#5
+      annotated on follow-ups 0064/0065. Stays active.
 ---
 
 # Prices Ledger Processor Lambda — live S3-event-driven ingestion into price_ohlcv
@@ -336,6 +347,27 @@ In `infra/aws-cdk/` (created by 0011):
 - **0037** — `packages/ledger-processor::dispatch` kernel and
   the `SwapExtractor` trait surface. Without 0037, this task
   has no extraction primitive to call.
+
+## Deploy prerequisites (operator)
+
+> Prepare-only items the operator must complete before / at deploy. Synth
+> fails fast if the SSM param below is absent, so a half-configured Lambda
+> can't ship silently.
+
+- [ ] **Bootstrap cursor** — create SSM param
+  `/prices/{env}/ledger-processor/initial-cursor` (type `String`) with the
+  ledger live ingestion should resume from. The reconcile loop seeds its
+  cursor from this on first start and begins at `value + 1`, so set it to the
+  **last ledger already accounted for**: the SDEX backfill's
+  `max(sequence) FROM prices.backfill_sdex_ledgers` for a seamless handoff,
+  or `currentTip − 1` for a forward-only start. Do **not** use `0` (an
+  empty-table sentinel — would walk from genesis and never catch up). Wired
+  into the Lambda env from this key in `compute-stack.ts`; one-time
+  bootstrap, retired by task 0064. (PR #34 review, findings #2/#3.)
+- [ ] **Source-bucket KMS** — confirm with BE whether `stellar-ledger-data`
+  is SSE-KMS encrypted. If so, set `ledgerProcessor.bucketKmsKeyArn` in
+  `infra/envs/{env}.json` so the role gets `kms:Decrypt`; otherwise every
+  `GetObject` 403s and the doorbell DLQs. (PR #34 review, finding #4.)
 
 ## Out of scope
 
