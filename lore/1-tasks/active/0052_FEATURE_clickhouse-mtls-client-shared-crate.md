@@ -2,7 +2,7 @@
 id: "0052"
 title: "ClickHouse mTLS client shared crate — cert loading from Secrets Manager + warm connection pool"
 type: FEATURE
-status: blocked
+status: active
 related_adr: ["0006", "0007"]
 related_tasks: ["0060", "0063", "0038", "0039", "0040", "0028", "0051", "0050"]
 tags: [layer-backend, priority-high, effort-medium, milestone-M1, rust, clickhouse, mtls, shared-crate, lambda, secrets-manager]
@@ -64,6 +64,15 @@ history:
       ≥1 downstream consumer — both need a real cert bundle in Secrets Manager
       + the reachable Caddy endpoint, which 0063 provisions (first exercised by
       0051's live schema-apply). No code work remains on 0052 itself.
+  - date: 2026-06-24
+    status: active
+    who: oski
+    note: >
+      Unblocked. 0063 DONE 2026-06-24 (prices CH tenant + per-env mTLS
+      certs live & isolation-proven) — the real cert bundle in Secrets
+      Manager and the reachable Caddy endpoint that the two remaining
+      acceptance criteria (live mTLS round-trip + ≥1 downstream consumer)
+      waited on now exist. Resuming to close out live validation.
 ---
 
 # ClickHouse mTLS client shared crate
