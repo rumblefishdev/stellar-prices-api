@@ -2,7 +2,7 @@
 id: "0063"
 title: "Provision the `prices` database + user + quota + profile + mTLS cert on Hetzner CH (self-served with admin access)"
 type: FEATURE
-status: active
+status: completed
 related_adr: ["0007"]
 related_tasks: ["0050", "0051", "0047", "0011", "0038"]
 tags: [layer-infra, priority-high, effort-medium, milestone-M1, hetzner, clickhouse, mtls, rbac, tenancy]
@@ -71,6 +71,21 @@ history:
       the §6 isolation smoke test — both operator-run. Two ACs sit at
       `[~]` (users + CN-map defined/pushed, live on deploy); task stays
       active until those flip and §6 passes.
+  - date: 2026-06-24
+    status: completed
+    who: oski
+    note: >
+      BE ran the §3 `ansible --tags app` deploy — `prices_writer` /
+      `prices_reader` users + the `CLICKHOUSE_CN_USER_MAP` prices CNs are
+      now LIVE on `ch-prod-01`. §6 isolation verified via the read-only
+      proof (operator chose the no-mutation variant — no write/DDL
+      attempted against `default` or `prices`): both prices certs
+      `SELECT version()` → 200 through Caddy:443; `prices.price_ohlcv_1m`
+      readable by both; `SHOW GRANTS` = writer `SELECT,INSERT,OPTIMIZE ON
+      prices.*` (no `default.*`, no DDL), reader `SELECT ON prices.*`
+      only. All 7 acceptance criteria met. The `prices` tenant
+      (database + scoped users/quotas + CN-map + per-env mTLS certs) is
+      fully provisioned and isolation-proven. Archiving.
 ---
 
 # Provision the `prices` database on Hetzner CH (self-served)
@@ -189,28 +204,35 @@ For each env (dev → staging → prod):
 - [x] `prices` database exists on the Hetzner CH box — created 2026-06-22
       under `default` admin on `ch-prod-01`; schema also applied (task 0051
       Step 4). See `notes/G-provisioning-plan.md` → Completion record.
-- [~] `prices_writer` + `prices_reader` users exist via BE-repo
+- [x] `prices_writer` + `prices_reader` users exist via BE-repo
       `users.d/*.xml` (reproducible across deploys), with profile +
       quota scoping resource usage away from BE's `default.*`
       — **DEFINED 2026-06-23 by BE task 0314 (commit `87f24b76`)**:
       `services.xml` (+users, inline `<grants>`) + `quotas.xml`
       (+`prices_write`/`prices_read`) match our G-plan §1 byte-for-byte.
-      Goes **live** only after the operator-run `ansible --tags app`
-      (see AC below + §3); checkbox flips to [x] once deployed.
-- [~] Caddy `CLICKHOUSE_CN_USER_MAP` maps the prices CNs to the prices
+      **LIVE 2026-06-24** via the BE-run `ansible --tags app`; confirmed
+      by §6 `SHOW GRANTS` (writer `SELECT,INSERT,OPTIMIZE ON prices.*`;
+      reader `SELECT ON prices.*`).
+- [x] Caddy `CLICKHOUSE_CN_USER_MAP` maps the prices CNs to the prices
       users; unmapped CNs 403 — **entries PUSHED 2026-06-23**
       (`prices-ingestion-production:prices_writer`,
       `prices-api-production:prices_reader`) to `soroban/production/operator/env`;
-      goes **live** on the §3 `ansible --tags app` run.
+      **LIVE 2026-06-24** via the §3 `ansible --tags app` run — confirmed
+      by §6 (both prices certs `SELECT version()` → 200 through Caddy:443).
 - [x] Per-env mTLS certs issued and stored in AWS Secrets Manager as a
       single `{cert,key,ca}` JSON bundle per identity (named by
       `MTLS_SECRET_NAME`, per 0052) — **DONE 2026-06-23**: CNs
       `prices-{ingestion,api}-production`, secrets
       `prices/production/clickhouse-mtls-prices-{ingestion,api}-production`
       (`eu-central-1`). Self-served from BE's CA; no hand-off needed.
-- [ ] Smoke test confirms isolation: `prices.*` writable by
-      `prices_writer`, `default.*` denied, `CREATE TABLE` denied to the
-      writer; `prices_reader` read-only
+- [x] Smoke test confirms isolation — **2026-06-24, read-only proof**
+      (operator chose the no-mutation variant: per-user `SHOW GRANTS` +
+      `SELECT`, no write/DDL attempts). Both prices certs `SELECT
+      version()` → 200 through Caddy:443; `prices.price_ohlcv_1m`
+      readable by both; `SHOW GRANTS` = writer `SELECT,INSERT,OPTIMIZE
+      ON prices.*` (no `default.*`, no DDL), reader `SELECT ON prices.*`
+      only. Isolation proven without touching any table. See
+      `notes/G-provisioning-plan.md` → Completion record.
 - [x] DDL-apply identity for 0051 decided + documented — **Option 1:
       loopback `default` admin applies DDL; `prices_writer` is
       `write_no_ddl`** (Design Decisions → Emerged #1;

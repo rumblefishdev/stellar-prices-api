@@ -573,6 +573,27 @@ acceptance proof.
 
 ## Completion record
 
+### 2026-06-24 — §3 deployed (BE) + §6 isolation verified → TASK COMPLETE
+
+- **§3 DONE (BE-run).** BE ran `ansible-playbook … site.yml --tags app` on
+  `ch-prod-01`. ClickHouse picked up BE 0314's `users.d/*.xml`
+  (`prices_writer` / `prices_reader` now exist) and Caddy picked up the §1d
+  `CLICKHOUSE_CN_USER_MAP` entries — both prices CNs are now live in the mTLS
+  allowlist + map to the prices users.
+- **§6 DONE — read-only proof.** Operator chose the no-mutation variant (no
+  write/DDL attempted against `default` or `prices`, by request). Output:
+  - both prices certs `SELECT version()` → `[HTTP 200]` (`26.3.10.60`) →
+    Caddy mTLS allowlist + CN map confirmed for both identities;
+  - `SELECT count() FROM prices.price_ohlcv_1m` → `200`, count `0` (table
+    exists, empty pre-ingestion) for both;
+  - `SHOW GRANTS` → `GRANT SELECT, INSERT, OPTIMIZE ON prices.* TO
+    prices_writer` (no `default.*`, no `CREATE/DROP/ALTER` — the Option-1
+    no-DDL proof) and `GRANT SELECT ON prices.* TO prices_reader` (read-only).
+  - Isolation proven without touching any table.
+- **All acceptance criteria satisfied.** The `prices` tenant — database +
+  scoped users/quotas + CN-map + per-env mTLS certs — is fully provisioned and
+  isolation-proven. Task archived.
+
 ### 2026-06-23 — §5 certs issued+stored + §1d CN map pushed (operator, by hand)
 
 - **§5 DONE.** Both mTLS client certs issued from BE's CA
