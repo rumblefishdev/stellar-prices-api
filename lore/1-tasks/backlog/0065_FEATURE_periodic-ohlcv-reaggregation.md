@@ -13,6 +13,10 @@ history:
     status: backlog
     who: oski
     note: "Spawned from 0038 future work (cross-invocation intra-minute merge gap)."
+  - date: 2026-06-24
+    status: backlog
+    who: claude
+    note: "Added PR #34 review context: finding #1 (live-path frequency correction) and finding #5 (version-namespace overflow caveat for the merge fix)."
 ---
 
 # Periodic OHLCV re-aggregation for cross-chunk intra-minute candles
@@ -33,6 +37,31 @@ chunk's trades for that minute.
 not sum — so per-chunk partial candles for a boundary minute don't merge.
 Negligible-but-real (one minute per chunk boundary). Same root cause for live
 and backfill since both now use `prices-ingest-core`'s `CandleAccumulator`.
+
+## Review findings (PR #34 review, 2026-06-24)
+
+**Finding #1 — the live-path frequency is NOT negligible.** "One minute per
+chunk boundary" holds for the backfill (large partitions), but the live Lambda
+calls `flush_all()` every invocation (`reconcile.rs`), and with
+`MAX_ITERATIONS=16` a run spans ~80-96s of ledgers — so a minute boundary
+falls inside essentially *every* invocation. That is roughly one corrupted
+(under-counted volume / wrong `open`) boundary minute per run in the live path,
+not a rare edge. The in-code comment equating it with the backfill's partition
+boundaries understates it; the fix is materially more impactful for 0038 than
+the "negligible" framing suggests.
+
+**Finding #5 — the `version` scheme can invert across ledgers, which
+constrains the fix.** `version = ledger_seq*1000 + operation_index`
+(`bucket.rs`) assumes `operation_index < 1000`, but the AMM path sets it to
+`first_event_index & 0xFFFF` (0..65535; `first_event_index` is `u32` in
+`extractors-core`). A tx emitting ≥1000 events overflows the per-ledger
+namespace, so a *later* ledger's candle can carry a *lower* `version` than an
+earlier one. Any re-aggregation that relies on "higher version wins" must not
+assume `version` is monotonic in ledger order — either widen the multiplier /
+pack `(ledger, event_index)` without truncation, or make the merge
+order-independent (Summing/Aggregating engine). Note: changing the version
+formula also touches already-written backfill rows, so it needs a migration
+decision.
 
 ## Implementation (options to evaluate)
 
