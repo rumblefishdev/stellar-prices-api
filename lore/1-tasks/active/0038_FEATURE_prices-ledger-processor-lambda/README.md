@@ -168,6 +168,17 @@ history:
       cold-start init. Added a Deploy prerequisites checklist (bootstrap
       cursor SSM param + source-bucket KMS confirmation). Findings #1/#3/#5
       annotated on follow-ups 0064/0065. Stays active.
+  - date: 2026-06-25
+    status: active
+    who: claude
+    note: >
+      Resolved the deploy-prep source-bucket KMS item (finding #4): BE's
+      production-stellar-ledger-data is SSE-S3 (AES256), not SSE-KMS —
+      confirmed in the BE repo ledger-bucket-stack.ts (S3_MANAGED) and BE
+      task 0278 (dropped KMS for SSE-S3 to cut per-object KMS request cost
+      on the public XDR). So bucketKmsKeyArn stays unset; grantRead's plain
+      S3 perms suffice, no kms:Decrypt / 403 risk. Checklist item ticked.
+      Stays active.
 ---
 
 # Prices Ledger Processor Lambda — live S3-event-driven ingestion into price_ohlcv
@@ -364,10 +375,19 @@ In `infra/aws-cdk/` (created by 0011):
   empty-table sentinel — would walk from genesis and never catch up). Wired
   into the Lambda env from this key in `compute-stack.ts`; one-time
   bootstrap, retired by task 0064. (PR #34 review, findings #2/#3.)
-- [ ] **Source-bucket KMS** — confirm with BE whether `stellar-ledger-data`
-  is SSE-KMS encrypted. If so, set `ledgerProcessor.bucketKmsKeyArn` in
-  `infra/envs/{env}.json` so the role gets `kms:Decrypt`; otherwise every
-  `GetObject` 403s and the doorbell DLQs. (PR #34 review, finding #4.)
+- [x] **Source-bucket KMS** — **resolved: not SSE-KMS, leave
+  `bucketKmsKeyArn` unset.** BE's `production-stellar-ledger-data` is
+  **SSE-S3 (AES256)**, confirmed in the BE repo
+  (`infra/src/lib/stacks/ledger-bucket-stack.ts:36`,
+  `s3.BucketEncryption.S3_MANAGED`) and BE task **0278** (completed
+  2026-06-02): KMS was dropped for SSE-S3 to kill the per-object KMS
+  request cost on the high-volume ingest pipeline, since the XDR is public
+  on-chain data. So `grantRead`'s plain S3 perms suffice — no `kms:Decrypt`
+  needed and no `GetObject` 403/DLQ risk. Pre-0278 objects keep their old
+  SSE-KMS under the AWS-managed `aws/s3` key, still readable by a
+  same-account principal with S3 access (no explicit `kms:*` IAM required).
+  Our `bucketKmsKeyArn` slot is for a *customer* KMS key, which this bucket
+  has none of. (PR #34 review, finding #4.)
 
 ## Out of scope
 
