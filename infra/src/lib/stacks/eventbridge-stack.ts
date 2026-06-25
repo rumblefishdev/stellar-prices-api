@@ -31,6 +31,10 @@ const ASSET_DISCOVERY_ASSET_DIR =
   process.env['ASSET_DISCOVERY_ASSET_DIR'] ??
   '../target/lambda/asset-discovery';
 
+/** Cargo-lambda build output for the `cleanup-worker` binary (task 0039). */
+const CLEANUP_WORKER_ASSET_DIR =
+  process.env['CLEANUP_WORKER_ASSET_DIR'] ?? '../target/lambda/cleanup-worker';
+
 export interface EventBridgeStackProps extends cdk.StackProps {
   readonly config: EnvironmentConfig;
 }
@@ -58,6 +62,7 @@ export class EventBridgeStack extends cdk.Stack {
   public readonly assetDiscoveryRule: events.Rule;
   public readonly cleanupRule: events.Rule;
   public readonly assetDiscoveryFunction: lambda.Function;
+  public readonly cleanupFunction: lambda.Function;
 
   constructor(scope: Construct, id: string, props: EventBridgeStackProps) {
     super(scope, id, props);
@@ -207,6 +212,62 @@ export class EventBridgeStack extends cdk.Stack {
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     });
 
+    // -----------------------------------------------------------------
+    // Cleanup worker Lambda (task 0039) + its cron target. CH-only (no S3,
+    // no VPC): issues ALTER TABLE … DROP PARTITION over mTLS per §3.6.
+    // Reuses the same `ingestion` mTLS identity + secrets extension layer
+    // as the discovery worker.
+    // -----------------------------------------------------------------
+    const cleanupRole = createPricesLambdaRole(this, 'CleanupRole', {
+      config,
+      accountId,
+      mtlsSecretName: discoveryMtlsSecretName,
+    });
+
+    const cleanupLogGroup = new logs.LogGroup(this, 'CleanupLogGroup', {
+      logGroupName: lambdaLogGroupName(env, 'cleanup'),
+      retention: PRICES_LAMBDA_LOG_RETENTION,
+      removalPolicy: PRICES_LAMBDA_LOG_REMOVAL_POLICY,
+    });
+
+    this.cleanupFunction = new lambda.Function(this, 'CleanupFunction', {
+      ...pricesLambdaDefaults, // ARM64 + PROVIDED_AL2023 (ADR 0006/0007)
+      functionName: `prices-${env}-cleanup`,
+      handler: 'bootstrap',
+      code: lambda.Code.fromAsset(CLEANUP_WORKER_ASSET_DIR),
+      role: cleanupRole,
+      logGroup: cleanupLogGroup,
+      memorySize: 256,
+      // DROP PARTITION is metadata-only; the run is a handful of queries.
+      timeout: cdk.Duration.minutes(2),
+      tracing: lambda.Tracing.ACTIVE,
+      layers: [secretsExtensionLayer],
+      environment: {
+        ENV_NAME: env,
+        RUST_LOG: 'info',
+        CH_DOMAIN: chDomain,
+        MTLS_SECRET_NAME: discoveryMtlsSecretName,
+        PARAMETERS_SECRETS_EXTENSION_CACHE_ENABLED: 'true',
+      },
+    });
+
+    this.cleanupRule.addTarget(
+      new targets.LambdaFunction(this.cleanupFunction),
+    );
+
+    new cloudwatch.Alarm(this, 'CleanupErrorAlarm', {
+      alarmName: `prices-${env}-cleanup-errors`,
+      alarmDescription:
+        'Cleanup Lambda invocation errors (retention partition-drop failed).',
+      metric: this.cleanupFunction.metricErrors({
+        period: cdk.Duration.days(1),
+        statistic: 'Sum',
+      }),
+      threshold: 1,
+      evaluationPeriods: 1,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+
     new cdk.CfnOutput(this, 'PriceUpdaterRuleArn', {
       value: this.priceUpdaterRule.ruleArn,
     });
@@ -221,6 +282,9 @@ export class EventBridgeStack extends cdk.Stack {
     });
     new cdk.CfnOutput(this, 'CleanupRuleArn', {
       value: this.cleanupRule.ruleArn,
+    });
+    new cdk.CfnOutput(this, 'CleanupFunctionName', {
+      value: this.cleanupFunction.functionName,
     });
 
     cdk.Tags.of(this).add('Project', 'stellar-prices-api');
