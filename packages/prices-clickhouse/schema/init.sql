@@ -198,3 +198,19 @@ CREATE TABLE IF NOT EXISTS prices.backfill_progress (
 ENGINE = ReplacingMergeTree(updated_at)
 ORDER BY (task_name)
 SETTINGS index_granularity = 8192;
+
+-- ---------------------------------------------------------------------
+-- Asset Discovery high-water-mark (task 0054). One row per worker tracking
+-- the highest ledger sequence the hourly discovery scan has processed, so
+-- the next invocation resumes at last_ledger + 1 rather than re-scanning.
+-- Single-writer = the asset-discovery worker. ReplacingMergeTree on the
+-- worker key; read with FINAL.
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS prices.discovery_state (
+    worker        LowCardinality(String),   -- 'asset-discovery'
+    last_ledger   UInt64,                    -- highest ledger sequence scanned
+    updated_at    DateTime      DEFAULT now()
+)
+ENGINE = ReplacingMergeTree(updated_at)
+ORDER BY (worker)
+SETTINGS index_granularity = 8192;

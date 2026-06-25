@@ -1,0 +1,8 @@
+{
+  "_note": "Tranche-1 seed of well-known mainnet assets (task 0054). Each entry maps to a prices_ingest_core::AssetIdentity. kind = native | credit | contract. VERIFIED entries only — do NOT fabricate issuer addresses; a wrong issuer is a different asset. XLM/USDC/USDT issuers match the canonical prices_clickhouse::{USDC_ISSUER,USDT_ISSUER} constants. TODO(0054): expand to >=20 verified major assets (AQUA, EURC, yXLM, wrapped BTC/ETH, top Soroban tokens) sourced from StellarExpert top-assets before the T1 '>=20 major assets' acceptance bar is claimed.",
+  "assets": [
+    { "kind": "native" },
+    { "kind": "credit", "code": "USDC", "issuer": "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN" },
+    { "kind": "credit", "code": "USDT", "issuer": "GCQTGZQQ5G4PTM2GL7CDIFKUBIPEC52BROAQIAPW53XBRJVN6ZJVTG6V" }
+  ]
+}

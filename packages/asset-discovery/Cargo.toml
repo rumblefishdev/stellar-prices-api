@@ -1,0 +1,41 @@
+[package]
+name = "asset-discovery"
+version = "0.1.0"
+edition = "2024"
+description = "Asset Discovery worker — seeds + discovers prices.assets (task 0054)"
+
+[lib]
+name = "asset_discovery"
+path = "src/lib.rs"
+
+# The EventBridge-scheduled Lambda entrypoint. Behind `lambda` so a default
+# `cargo build` (and `cargo test` for the lib + seed logic) stays lean — no
+# lambda_runtime / aws-config / rustls mTLS stack. Build the deployable with
+# `cargo lambda build -p asset-discovery --release --arm64` (ADR 0006).
+[[bin]]
+name = "asset-discovery"
+path = "src/main.rs"
+required-features = ["lambda"]
+
+[features]
+default = []
+# Remote ClickHouse over mTLS via the task-0052 prices-clickhouse::mtls client.
+aws-mtls = ["prices-clickhouse/aws-mtls"]
+# Full Lambda: scheduled runtime + the mTLS sink.
+lambda = ["aws-mtls", "dep:lambda_runtime"]
+
+[dependencies]
+prices-ingest-core = { path = "../prices-ingest-core" }
+prices-clickhouse = { path = "../prices-clickhouse" }
+
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+lambda_runtime = { workspace = true, optional = true }
+
+[dev-dependencies]
+clickhouse = { workspace = true }
