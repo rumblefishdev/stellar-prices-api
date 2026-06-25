@@ -2,16 +2,23 @@ import * as cdk from 'aws-cdk-lib';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as logs from 'aws-cdk-lib/aws-logs';
-import type * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import type { Construct } from 'constructs';
 
 import type { EnvironmentConfig } from './types.js';
+import { mtlsSecretArnFromParts } from './mtls.js';
 
 export interface BaselineLambdaContext {
   readonly config: EnvironmentConfig;
   readonly accountId: string;
-  readonly mtlsCertSecret: secretsmanager.ISecret;
-  readonly mtlsKeySecret: secretsmanager.ISecret;
+  /**
+   * Secrets Manager NAME of the single `{cert,key,ca}` bundle this Lambda
+   * reads (its `MTLS_SECRET_NAME`). Each Lambda is granted read on only its
+   * own bundle — least privilege, mirroring BE's per-service grant. The
+   * secret is created out-of-band by the operator (see `SecretsStack`); the
+   * grant is on the by-name wildcard ARN, so it does not require the secret
+   * to exist at synth time. Derive with `mtlsSecretName(envName, role)`.
+   */
+  readonly mtlsSecretName: string;
 }
 
 /**
@@ -20,7 +27,8 @@ export interface BaselineLambdaContext {
  *
  * 1. CloudWatch Logs write — via AWSLambdaBasicExecutionRole managed
  *    policy (attached separately at role construction time).
- * 2. Read the two mTLS material secrets from Secrets Manager.
+ * 2. Read its own mTLS bundle secret from Secrets Manager (one secret,
+ *    by-name wildcard ARN — BE-mirroring; the operator creates the value).
  * 3. Read both SSM namespaces — /platform/{env}/* (BE-published) and
  *    /prices/{env}/* (prices-api-published). Read-only here; the
  *    deploy role (CicdStack) is the only principal that writes.
@@ -41,7 +49,9 @@ export function baselineLambdaPolicyStatements(
     new iam.PolicyStatement({
       sid: 'ReadMtlsMaterial',
       actions: ['secretsmanager:GetSecretValue'],
-      resources: [ctx.mtlsCertSecret.secretArn, ctx.mtlsKeySecret.secretArn],
+      resources: [
+        mtlsSecretArnFromParts(region, accountId, ctx.mtlsSecretName),
+      ],
     }),
     new iam.PolicyStatement({
       sid: 'ReadSsmNamespaces',

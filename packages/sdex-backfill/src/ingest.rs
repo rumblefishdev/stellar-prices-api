@@ -4,14 +4,13 @@ use std::time::{Duration, Instant};
 
 use tracing::{info, warn};
 
-use crate::bucket::CandleAccumulator;
-use crate::canonical::AssetRegistry;
+use prices_ingest_core::{
+    AssetRegistry, CandleAccumulator, Registries, extract_trades, process_ledger, raw_trade_to_tick,
+};
+
 use crate::error::BackfillError;
-use crate::filter::extract_trades;
 use crate::partition::Partition;
 use crate::sink::{OracleSample, Sink};
-use crate::soroban::{Registries, process_ledger};
-use crate::tick::raw_trade_to_tick;
 
 const ORACLE_FLUSH_THRESHOLD: usize = 50_000;
 

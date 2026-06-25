@@ -1,96 +1,85 @@
 import * as cdk from 'aws-cdk-lib';
-import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import type { Construct } from 'constructs';
 
 import type { EnvironmentConfig } from '../types.js';
+import { mtlsSecretName } from '../mtls.js';
 
 export interface SecretsStackProps extends cdk.StackProps {
   readonly config: EnvironmentConfig;
 }
 
 /**
- * Secrets Manager slots for the mTLS material that prices-api uses
- * to connect to BE's Hetzner ClickHouse over HTTPS-mTLS.
+ * Publishes the canonical Secrets Manager **names** for the prices-api mTLS
+ * bundles. It deliberately does NOT create the secrets.
  *
- * Per ADR 0007 §3.5: two secrets per env (cert + key, separately).
- * BE's per-AWS-service issuance script (task 0050) produces the real
- * PEMs; an operator uploads them post-deploy via:
+ * ## Why no `new secretsmanager.Secret` (BE-mirroring)
  *
- *     aws secretsmanager put-secret-value \
- *         --secret-id prices/{env}/clickhouse-mtls-cert \
- *         --secret-string "$(cat <cert>.pem)"
+ * BE never CDK-manages the mTLS material for its Lambdas: `compute-stack.ts`
+ * builds the secret *name*, grants `secretsmanager:GetSecretValue` on the
+ * by-name ARN, sets `MTLS_SECRET_NAME`, and the operator creates the secret
+ * out-of-band (`infra-hetzner/ca/issue-client-cert.sh` → `aws secretsmanager
+ * create-secret`). We mirror that exactly:
  *
- *     aws secretsmanager put-secret-value \
- *         --secret-id prices/{env}/clickhouse-mtls-key \
- *         --secret-string "$(cat <key>.pem)"
+ * - The secret holds the **single `{cert,key,ca}` JSON bundle** that
+ *   `packages/prices-clickhouse/src/mtls.rs` parses at runtime — NOT the old
+ *   two-secret cert/key split this stack used to create. The CA private key
+ *   never enters CDK; cert/key bytes are operator-issued and uploaded.
+ * - Letting CloudFormation own the secret would (a) require a random
+ *   placeholder that the runtime client cannot parse as a bundle, and (b)
+ *   collide with the operator's `create-secret` (CFN refuses to create a name
+ *   that already exists). Naming-only avoids both.
  *
- * The CDK template intentionally does NOT contain the PEM values —
- * `generateSecretString` creates a random placeholder on first
- * deploy; subsequent `cdk deploy` invocations do not re-randomize as
- * long as the generator parameters are unchanged. Re-running deploy
- * after the operator upload leaves the real PEMs intact.
+ * Per the SSM key contract, only the prices-owned secret **names** are
+ * published to `/prices/{env}/*` (identifiers, never trust material) so the
+ * issuance runbook and any out-of-band tooling read one source of truth. The
+ * names themselves come from {@link mtlsSecretName} — the same helper
+ * `ComputeStack` uses for the IAM grant + `MTLS_SECRET_NAME`, so the two can
+ * never drift (the failure mode we found in BE's own README-vs-CDK).
  *
- * The Secret ARNs are published to SSM under the prices-api-owned
- * namespace (`/prices/{env}/mtls-{cert,key}-secret-arn`) so task
- * 0052's `clickhouse-client` crate can read them at Lambda init.
+ * Two identities (0063 decision, env-suffixed CNs):
+ * - `prices/{env}/clickhouse-mtls-prices-ingestion-{env}` → `prices_writer`
+ * - `prices/{env}/clickhouse-mtls-prices-api-{env}`       → `prices_reader`
  */
 export class SecretsStack extends cdk.Stack {
-  public readonly mtlsCertSecret: secretsmanager.ISecret;
-  public readonly mtlsKeySecret: secretsmanager.ISecret;
+  /** Secrets Manager name of the ingestion (writer) `{cert,key,ca}` bundle. */
+  public readonly ingestionSecretName: string;
+  /** Secrets Manager name of the api (reader) `{cert,key,ca}` bundle. */
+  public readonly apiSecretName: string;
 
   constructor(scope: Construct, id: string, props: SecretsStackProps) {
     super(scope, id, props);
 
     const { envName } = props.config;
 
-    this.mtlsCertSecret = new secretsmanager.Secret(this, 'MtlsCertSecret', {
-      secretName: `prices/${envName}/clickhouse-mtls-cert`,
+    this.ingestionSecretName = mtlsSecretName(envName, 'ingestion');
+    this.apiSecretName = mtlsSecretName(envName, 'api');
+
+    new ssm.StringParameter(this, 'MtlsIngestionSecretNameParam', {
+      parameterName: `/prices/${envName}/mtls-ingestion-secret-name`,
+      stringValue: this.ingestionSecretName,
       description:
-        `mTLS client certificate (PEM) for prices-api → BE Hetzner ClickHouse, ${envName}. ` +
-        `Initial value is a CDK-generated random placeholder; operator replaces with the real ` +
-        `cert via 'aws secretsmanager put-secret-value' after BE task 0050 issuance.`,
-      generateSecretString: {
-        passwordLength: 64,
-        excludePunctuation: true,
-      },
-      removalPolicy: cdk.RemovalPolicy.RETAIN,
+        'Secrets Manager NAME of the prices-api ingestion (writer) mTLS ' +
+        '{cert,key,ca} bundle. Operator creates the secret out-of-band; ' +
+        'CDK only names + grants. Value = MTLS_SECRET_NAME for writer Lambdas.',
     });
 
-    this.mtlsKeySecret = new secretsmanager.Secret(this, 'MtlsKeySecret', {
-      secretName: `prices/${envName}/clickhouse-mtls-key`,
+    new ssm.StringParameter(this, 'MtlsApiSecretNameParam', {
+      parameterName: `/prices/${envName}/mtls-api-secret-name`,
+      stringValue: this.apiSecretName,
       description:
-        `mTLS client private key (PEM) for prices-api → BE Hetzner ClickHouse, ${envName}. ` +
-        `Initial value is a CDK-generated random placeholder; operator replaces with the real ` +
-        `key via 'aws secretsmanager put-secret-value' after BE task 0050 issuance.`,
-      generateSecretString: {
-        passwordLength: 64,
-        excludePunctuation: true,
-      },
-      removalPolicy: cdk.RemovalPolicy.RETAIN,
+        'Secrets Manager NAME of the prices-api api (reader) mTLS ' +
+        '{cert,key,ca} bundle. Operator creates the secret out-of-band; ' +
+        'CDK only names + grants. Value = MTLS_SECRET_NAME for reader Lambdas.',
     });
 
-    new ssm.StringParameter(this, 'MtlsCertSecretArnParam', {
-      parameterName: `/prices/${envName}/mtls-cert-secret-arn`,
-      stringValue: this.mtlsCertSecret.secretArn,
-      description:
-        'Secrets Manager ARN holding the prices-api mTLS client cert PEM',
+    new cdk.CfnOutput(this, 'MtlsIngestionSecretName', {
+      value: this.ingestionSecretName,
+      description: `mTLS ingestion (writer) bundle secret name for ${envName}`,
     });
-
-    new ssm.StringParameter(this, 'MtlsKeySecretArnParam', {
-      parameterName: `/prices/${envName}/mtls-key-secret-arn`,
-      stringValue: this.mtlsKeySecret.secretArn,
-      description:
-        'Secrets Manager ARN holding the prices-api mTLS client key PEM',
-    });
-
-    new cdk.CfnOutput(this, 'MtlsCertSecretArn', {
-      value: this.mtlsCertSecret.secretArn,
-      description: `mTLS cert Secrets Manager ARN for ${envName}`,
-    });
-    new cdk.CfnOutput(this, 'MtlsKeySecretArn', {
-      value: this.mtlsKeySecret.secretArn,
-      description: `mTLS key Secrets Manager ARN for ${envName}`,
+    new cdk.CfnOutput(this, 'MtlsApiSecretName', {
+      value: this.apiSecretName,
+      description: `mTLS api (reader) bundle secret name for ${envName}`,
     });
 
     cdk.Tags.of(this).add('Project', 'stellar-prices-api');

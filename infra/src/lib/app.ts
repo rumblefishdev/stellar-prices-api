@@ -23,15 +23,13 @@ export function createApp({ config }: CreateAppOptions): void {
 
   const prefix = `Prices-${config.envName}`;
 
-  const secrets = new SecretsStack(app, `${prefix}-Secrets`, { env, config });
+  // SecretsStack only publishes the mTLS bundle secret NAMES to SSM — it does
+  // not create the secrets (operator-issued out-of-band; BE-mirroring). So
+  // ComputeStack derives its own secret names from the shared `mtlsSecretName`
+  // helper and needs no cross-stack reference / dependency on SecretsStack.
+  new SecretsStack(app, `${prefix}-Secrets`, { env, config });
 
-  const compute = new ComputeStack(app, `${prefix}-Compute`, {
-    env,
-    config,
-    mtlsCertSecret: secrets.mtlsCertSecret,
-    mtlsKeySecret: secrets.mtlsKeySecret,
-  });
-  compute.addDependency(secrets);
+  new ComputeStack(app, `${prefix}-Compute`, { env, config });
 
   // ApiGatewayStack is independent of ComputeStack in the skeleton
   // (no Lambda integration yet — task 0040 wires the cross-stack

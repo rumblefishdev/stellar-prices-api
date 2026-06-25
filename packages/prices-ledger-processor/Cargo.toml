@@ -1,0 +1,51 @@
+[package]
+name = "prices-ledger-processor"
+version = "0.1.0"
+edition = "2024"
+description = "Prices Ledger Processor — live S3/SNS-doorbell ingestion into prices.price_ohlcv_1m over mTLS (task 0038)"
+
+[lib]
+name = "prices_ledger_processor"
+path = "src/lib.rs"
+
+# The SQS-doorbell Lambda entrypoint. Behind `lambda` so a default `cargo build`
+# stays lean (no lambda_runtime / aws-sdk-s3 / rustls mTLS stack); build it with
+# `cargo build -p prices-ledger-processor --features lambda` (→ `cargo lambda` for
+# the provided.al2023 ZIP, ADR 0006).
+[[bin]]
+name = "prices-ledger-processor"
+path = "src/main.rs"
+required-features = ["lambda"]
+
+# Local fixture runner — drives the same reconcile loop against local-disk
+# fixtures and a local (plaintext) ClickHouse. Always builds.
+[[bin]]
+name = "prices-cli"
+path = "src/bin/cli.rs"
+
+[features]
+default = []
+# Remote ClickHouse over mTLS via the task-0052 prices-clickhouse::mtls client.
+aws-mtls = ["prices-clickhouse/aws-mtls"]
+# Full Lambda: SQS doorbell runtime + S3 object fetch + the mTLS sink.
+lambda = ["aws-mtls", "dep:lambda_runtime", "dep:aws_lambda_events", "dep:aws-sdk-s3", "dep:aws-config"]
+
+[dependencies]
+prices-ingest-core = { path = "../prices-ingest-core" }
+prices-clickhouse = { path = "../prices-clickhouse" }
+
+tokio = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+lambda_runtime = { workspace = true, optional = true }
+aws_lambda_events = { workspace = true, optional = true }
+aws-sdk-s3 = { workspace = true, optional = true }
+aws-config = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

@@ -24,8 +24,8 @@ use xdr_parser::extract_events;
 use xdr_parser::types::EventSource;
 
 use crate::canonical::{AssetIdentity, AssetRegistry, USDC_ISSUER, USDT_ISSUER, canonicalise};
-use crate::sink::OracleSample;
 use crate::tick::TradeTick;
+use crate::writer::OracleSample;
 
 /// AMM token amounts are treated as 7-decimal (Stellar SAC convention). Token
 /// decimals vary; this is a documented sizing-measurement approximation.
