@@ -2,7 +2,7 @@
 id: "0054"
 title: "Asset Discovery Lambda — Tranche 1 minimal scope (populate ≥20 major assets)"
 type: FEATURE
-status: backlog
+status: active
 related_adr: ["0006", "0007"]
 related_tasks: ["0011", "0050", "0051", "0052", "0039"]
 tags: [layer-indexing, priority-medium, effort-medium, milestone-M1, lambda, scheduler, rust, aws, clickhouse, asset-registry]
@@ -40,6 +40,17 @@ history:
       `prices.asset_supply`; this task stays discovery-only. Blockers
       0011/0051/0052 are cleared; ready to promote ahead of 0039's
       discovery step.
+  - date: 2026-06-25
+    status: active
+    who: oski
+    note: >
+      Promoted backlog → active. All blockers now cleared: 0011/0051/0052
+      archived, and the last one — 0050 (SNS fan-out) — completed today
+      (delivered by BE 0306, prod 2026-06-22). Body reconciliation to the
+      latest architecture (ReplacingMergeTree INSERT not UPSERT; identity
+      columns only — `home_domain` enrichment deferred per the 0067
+      clobber hazard) + implementation land on the impl branch, not this
+      status-only push.
 ---
 
 # Asset Discovery Lambda — Tranche 1 minimal scope
