@@ -12,6 +12,7 @@ members = [
     "packages/prices-ledger-processor",
     "packages/asset-discovery",
     "packages/cleanup-worker",
+    "packages/supply-worker",
 ]
 
 [workspace.dependencies]
