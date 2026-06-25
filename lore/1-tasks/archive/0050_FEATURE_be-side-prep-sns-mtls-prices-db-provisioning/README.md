@@ -2,7 +2,7 @@
 id: "0050"
 title: "BE-side prep — SNS fan-out topic on the stellar-ledger-data bucket (mTLS cert + prices DB carved out to 0063)"
 type: FEATURE
-status: backlog
+status: completed
 related_adr: ["0007"]
 related_tasks: ["0045", "0047", "0011", "0038", "0063"]
 tags: [layer-infra, priority-high, effort-medium, milestone-M1, cross-team, block-explorer, hetzner, clickhouse, mtls, sns]
@@ -51,6 +51,23 @@ history:
       (`prices` DB/user/quota/profile) are now self-served and moved to
       the new task 0063. This task retains only the genuinely-still-BE-side
       SNS fan-out topic, which can ship independently.
+  - date: 2026-06-25
+    status: completed
+    who: oski
+    note: >
+      Completed. The narrowed scope (SNS fan-out) was delivered by **BE
+      task 0306** (`sns-fanout-ledger-events`, archived/completed
+      2026-06-22): `production-ledger-events` topic deployed to prod,
+      S3→SNS cutover with `rawMessageDelivery=true`, BE indexer
+      subscription preserved, and 5× `/platform/production/*` SSM keys
+      published (incl. `ledger-events-topic-arn`, bucket name/arn,
+      ch-domain, network-passphrase). Verified against this task's AC; our
+      subscriber side already reads the key (`compute-stack.ts:63,203`).
+      The only residual AC — the prices-api-side joint smoke test + SNS
+      envelope fixture — is deploy-gated (prepare-only) and handled
+      off-board cross-team per 0306; it lands with 0038's deployment, not
+      here. Mainnet network-passphrase is public; `ch-domain` is an
+      mTLS-gated endpoint, not a credential. Archived.
 ---
 
 # BE-side prep — SNS fan-out topic (S3 → SNS → tenant Ledger Processors)
@@ -175,18 +192,22 @@ keys.
 
 ## Acceptance Criteria
 
-- [ ] SNS topic exists on BE's `stellar-ledger-data/` bucket
-      fan-out for all three envs; ARNs published to SSM under
-      a stable key prices-api's CDK can read
-      (`/platform/{env}/ledger-events-topic-arn`)
-- [ ] BE's existing Ledger Processor subscription preserved;
+- [x] SNS topic exists on BE's `stellar-ledger-data/` bucket
+      fan-out; ARN published to SSM under the stable key prices-api's
+      CDK reads (`/platform/{env}/ledger-events-topic-arn`).
+      **BE 0306, prod 2026-06-22** (`production-ledger-events`; one env —
+      `production.json` is the only `EnvironmentConfig`).
+- [x] BE's existing Ledger Processor subscription preserved;
       prices-api can subscribe via the published ARN with
-      `rawMessageDelivery`
-- [ ] Throwaway-Lambda smoke test confirms an S3 PutObject triggers
-      an SNS delivery; the recorded message envelope is captured as
-      a fixture for 0038
-- [ ] 0011 (CDK bootstrap) references the SSM key produced by
-      this task; no CDK-side guess-and-hope for the topic ARN
+      `rawMessageDelivery`. **BE 0306: `rawMessageDelivery=true`,
+      indexer ESM/parser untouched.**
+- [~] Throwaway-Lambda smoke test (S3 PutObject → SNS delivery) +
+      SNS envelope fixture for 0038 — **deferred: prepare-only-gated,
+      our subscriber side; handled off-board cross-team per BE 0306's
+      "joint verification" item. Lands with 0038 deployment.**
+- [x] CDK references the SSM key produced by this task; no guess-and-hope
+      for the topic ARN. **`compute-stack.ts:63,203` reads
+      `/platform/{env}/ledger-events-topic-arn`.**
 
 > **Moved to task 0063** (self-served, admin access granted): per-env
 > mTLS client cert issuance + storage, and the `prices` database /
