@@ -41,8 +41,9 @@ Issues to resolve, ranked most-severe first. Check off as fixed.
 
 ## Correctness — secondary
 
-- [ ] **6. `market_cap_usd` Float64 round-trip loses precision / can overflow** — `packages/prices-clickhouse/schema/current.sql:42`
+- [x] **6. `market_cap_usd` Float64 round-trip loses precision / can overflow** — `packages/prices-clickhouse/schema/current.sql:42`
   `toDecimal128(toFloat64(price)*toFloat64(supply), 14)` loses low-order digits for large caps and can exceed `Decimal(38,14)` → refresh fails for all assets. Distinct from #1.
+  *Fixed:* exact `Decimal256` product (no Float64 loss) + `accurateCastOrNull('Decimal128(14)')` → out-of-range degrades to the `0` sentinel via `ifNull` instead of throwing. vwap_24h stays Float64 (price-magnitude, can't overflow).
 
 ## Cleanup / altitude
 

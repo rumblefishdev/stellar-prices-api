@@ -26,10 +26,20 @@
 -- DEFAULTs (0 / '') in v1 — tracked as follow-ups (XLM-quote orientation, the
 -- 24h/7d reference-close self-join, and the per-source JSON breakdown).
 
--- vwap_24h and market_cap_usd multiply Decimals, which would overflow
--- Decimal(38,14)'s scale (Decimal×Decimal widens scale past 38) — so those
--- two are computed in Float64 and cast back with toDecimal128(…, 14). price_usd
--- (argMax, no arithmetic) and volume_24h_usd (a plain sum) stay native Decimal.
+-- Decimal×Decimal widens scale past Decimal(38,14)'s budget (14+14=28 scale
+-- leaves only 10 integer digits → overflow at ~1e10), so the two arithmetic
+-- columns can't multiply natively:
+--   vwap_24h       — a volume-weighted *price*, so it stays price-magnitude and
+--                    can't overflow; computed in Float64 (≈15-16 sig digits,
+--                    ample for a price) and cast back with toDecimal128(…,14).
+--   market_cap_usd — price × supply can be huge, so Float64 would both lose
+--                    low-order digits AND throw on overflow (poisoning the whole
+--                    refresh). Computed as an EXACT Decimal256 product instead,
+--                    then accurateCastOrNull back to Decimal(38,14): out-of-range
+--                    → NULL → 0 (the column's "unavailable" sentinel) rather than
+--                    a refresh-killing exception.
+-- price_usd (argMax, no arithmetic) and volume_24h_usd (a plain sum) stay native
+-- Decimal.
 --
 -- The TO clause carries an EXPLICIT target column list: a materialised view
 -- inserts into its target POSITIONALLY otherwise, and this SELECT projects only
@@ -50,10 +60,12 @@ SELECT
                 / nullIf(sum(toFloat64(c.volume_quote_usd)), 0),
             0),
         14)                                                 AS vwap_24h,
-    toDecimal128(
-        toFloat64(argMax(c.close_usd, c.timestamp))
-            * toFloat64(ifNull(max(s.token_supply), 0)),
-        14)                                                 AS market_cap_usd,
+    ifNull(
+        accurateCastOrNull(
+            toDecimal256(argMax(c.close_usd, c.timestamp), 14)
+                * toDecimal256(ifNull(max(s.token_supply), 0), 14),
+            'Decimal128(14)'),
+        toDecimal128(0, 14))                                AS market_cap_usd,
     now()                                                   AS updated_at
 FROM prices.price_ohlcv_1m AS c FINAL
 LEFT JOIN prices.asset_supply AS s FINAL ON s.asset_id = c.asset_id
