@@ -21,13 +21,20 @@ required-features = ["lambda"]
 default = []
 # Remote ClickHouse over mTLS via the task-0052 prices-clickhouse::mtls client.
 aws-mtls = ["prices-clickhouse/aws-mtls"]
-# Full Lambda: scheduled runtime + the mTLS sink.
-lambda = ["aws-mtls", "dep:lambda_runtime"]
+# Full Lambda: scheduled runtime + the mTLS sink + the S3 ledger fetcher
+# (prices-ledger-processor's `lambda` feature gates S3Fetcher).
+lambda = ["aws-mtls", "dep:lambda_runtime", "prices-ledger-processor/lambda"]
 
 [dependencies]
 prices-ingest-core = { path = "../prices-ingest-core" }
 prices-clickhouse = { path = "../prices-clickhouse" }
+# Reused for the Galexie S3 key scheme + ObjectFetcher trait (LocalDiskFetcher
+# in tests, S3Fetcher behind `lambda`) — so discovery fetches ledgers by the
+# exact same scheme as the live processor (0038), no drift.
+prices-ledger-processor = { path = "../prices-ledger-processor" }
 
+stellar-xdr = { workspace = true }
+clickhouse = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -38,4 +45,5 @@ tracing-subscriber = { workspace = true }
 lambda_runtime = { workspace = true, optional = true }
 
 [dev-dependencies]
-clickhouse = { workspace = true }
+# Checksum-validates every seed issuer is a well-formed Stellar public key.
+stellar-strkey = { workspace = true }
