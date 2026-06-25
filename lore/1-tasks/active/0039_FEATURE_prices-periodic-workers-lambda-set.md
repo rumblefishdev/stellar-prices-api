@@ -538,6 +538,12 @@ In the `infra/` CDK app:
 
 ## Future Work
 
+- **0068** (FEATURE, backlog) — `current_prices` MV v2 columns. The v1 MV
+  leaves `price_xlm`, `change_24h_pct`, `change_7d_pct`, `sources` at their
+  table DEFAULTs and uses a plain VWAP. Extend the MV (XLM-quote orientation,
+  24h/7d reference-close self-join, per-source JSON, §5.5 outlier filter). No
+  backfill needed — the refreshable MV recomputes every row each minute.
+
 - **0067** (BUG, backlog) — `assets` enrichment columns (`home_domain`, and
   any future on-`assets` column) are clobbered by the ledger processor's
   full-row `write_assets` re-emit. Surfaced by this task's single-writer
