@@ -85,7 +85,7 @@ impl Registries {
 ///     EURC-quoted candle is an unsupported quote (→ no `close_usd`), by design —
 ///     not a coverage gap. Pricing through EURC would require its own Reflector
 ///     reference arm here plus a EURC/USDC pivot in the peg-pivot tier.
-fn reflector_key_to_identity(key: &str) -> Option<AssetIdentity> {
+pub fn reflector_key_to_identity(key: &str) -> Option<AssetIdentity> {
     match key {
         "XLM" | "native" => Some(AssetIdentity::Native),
         "USDC" => Some(AssetIdentity::Credit {

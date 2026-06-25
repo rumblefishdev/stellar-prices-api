@@ -49,11 +49,13 @@ Issues to resolve, ranked most-severe first. Check off as fixed.
 - [ ] **7. Three near-identical ~40-line Lambda wiring blocks** — `infra/src/lib/stacks/eventbridge-stack.ts:228`
   Extract a `createWorkerLambda({name, assetDir, rule, memory, timeout, alarmPeriod, env})` factory for cleanup/supply/oracle (and asset-discovery).
 
-- [ ] **8. `symbol_to_identity` duplicates private `reflector_key_to_identity` and has drifted** — `packages/oracle-worker/src/lib.rs:62`
+- [x] **8. `symbol_to_identity` duplicates private `reflector_key_to_identity` and has drifted** — `packages/oracle-worker/src/lib.rs:62`
   Core maps `native`+`XLM`; copy maps only `XLM`. Make `reflector_key_to_identity` `pub` and reuse it.
+  *Fixed:* made `reflector_key_to_identity` `pub` + re-exported from prices-ingest-core; deleted the local `symbol_to_identity` and reuse the shared fn.
 
-- [ ] **9. `TRACKED_SYMBOLS` duplicates the mapping domain; loop guard is dead code** — `packages/oracle-worker/src/lib.rs:238`
+- [x] **9. `TRACKED_SYMBOLS` duplicates the mapping domain; loop guard is dead code** — `packages/oracle-worker/src/lib.rs:238`
   `let Some(identity) = symbol_to_identity(symbol) else { continue }` can never `continue`. Iterate the mapping or drop the guard.
+  *Fixed:* removing the duplicate `symbol_to_identity` leaves `TRACKED_SYMBOLS` (poll list) and `reflector_key_to_identity` (mapping) as distinct concerns, so the guard is now a genuine filter; added an invariant test that every tracked symbol resolves.
 
 ## Non-blocking note
 

@@ -6,14 +6,13 @@
 //! `OracleSample` / `write_oracle` so rows match the event-decoded oracle path.
 //!
 //! v1 queries the Reflector "External CEX & DEX" oracle for the USD-pegged
-//! assets that resolve to a Stellar identity (XLM + USDC/USDT), mirroring the
+//! assets that resolve to a Stellar identity (XLM + USDC/USDT), reusing the
 //! event path's `reflector_key_to_identity`. Reflector prices are 14-decimal
 //! `i128` (SEP-40 `decimals()`), matching `OracleSample.price_usd` and
 //! `oracle_prices.price_usd Decimal(38,14)`.
 
 use base64::Engine;
-use prices_clickhouse::{USDC_ISSUER, USDT_ISSUER};
-use prices_ingest_core::{AssetIdentity, AssetRegistry, OhlcvWriter, OracleSample};
+use prices_ingest_core::{AssetRegistry, OhlcvWriter, OracleSample, reflector_key_to_identity};
 use stellar_xdr::curr::{
     ContractId, Hash, HostFunction, Int128Parts, InvokeContractArgs, InvokeHostFunctionOp, Limits,
     Memo, MuxedAccount, Operation, OperationBody, Preconditions, ReadXdr, ScAddress, ScMap,
@@ -27,8 +26,10 @@ pub const REFLECTOR_CEX_DEX: &str = "CAFJZQWSED6YAWZU3GWRTOCNPPCGBN32L7QV43XX5LZ
 pub const REFLECTOR_DECIMALS: u32 = 14;
 /// Default public Soroban RPC endpoint (overridable via `SOROBAN_RPC_URL`).
 pub const DEFAULT_SOROBAN_RPC: &str = "https://mainnet.sorobanrpc.com";
-/// Reflector symbols the worker polls — only those that resolve to a Stellar
-/// identity (USD-pegged stables + XLM), per the event path.
+/// Reflector symbols the worker polls. Each is mapped to a canonical Stellar
+/// identity by the shared [`reflector_key_to_identity`]; a symbol that has no
+/// Stellar identity is fetched-then-skipped (the loop's filter), so this list
+/// can grow independently of the mapping.
 pub const TRACKED_SYMBOLS: &[&str] = &["XLM", "USDC", "USDT"];
 
 #[derive(Debug, thiserror::Error)]
@@ -54,24 +55,6 @@ pub enum OracleError {
 pub struct PriceData {
     pub price: i128,
     pub timestamp: u64,
-}
-
-/// Map a Reflector symbol to a canonical Stellar identity — the USD-pegged
-/// stables + XLM (mirrors the private `reflector_key_to_identity`). Other
-/// symbols (BTC, EUR, …) have no Stellar identity and are dropped.
-pub fn symbol_to_identity(symbol: &str) -> Option<AssetIdentity> {
-    match symbol {
-        "XLM" => Some(AssetIdentity::Native),
-        "USDC" => Some(AssetIdentity::Credit {
-            code: "USDC".to_string(),
-            issuer: USDC_ISSUER.to_string(),
-        }),
-        "USDT" => Some(AssetIdentity::Credit {
-            code: "USDT".to_string(),
-            issuer: USDT_ISSUER.to_string(),
-        }),
-        _ => None,
-    }
 }
 
 fn sc_symbol(s: &str) -> Result<ScSymbol, OracleError> {
@@ -237,7 +220,9 @@ pub async fn run_oracle(
     let mut skipped = 0usize;
 
     for &symbol in TRACKED_SYMBOLS {
-        let Some(identity) = symbol_to_identity(symbol) else {
+        // Filter out any polled symbol with no Stellar identity (shared with the
+        // event-decode path, so the two oracle arms map symbols identically).
+        let Some(identity) = reflector_key_to_identity(symbol) else {
             continue;
         };
         match fetch_lastprice(http, rpc_url, contract, symbol).await {
@@ -288,16 +273,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn symbol_mapping_covers_stables_and_xlm() {
-        assert!(matches!(
-            symbol_to_identity("XLM"),
-            Some(AssetIdentity::Native)
-        ));
-        assert!(matches!(
-            symbol_to_identity("USDC"),
-            Some(AssetIdentity::Credit { .. })
-        ));
-        assert!(symbol_to_identity("BTC").is_none());
+    fn every_tracked_symbol_resolves_to_an_identity() {
+        // The symbol→identity mapping itself is owned + tested in
+        // prices-ingest-core (reflector_key_to_identity); here we only assert
+        // the worker's poll list agrees with it, so no row is silently skipped.
+        for &symbol in TRACKED_SYMBOLS {
+            assert!(
+                reflector_key_to_identity(symbol).is_some(),
+                "tracked symbol {symbol} has no Stellar identity"
+            );
+        }
     }
 
     #[test]
