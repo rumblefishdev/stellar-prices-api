@@ -25,6 +25,11 @@ pub const ROLLUPS_SQL: &str = include_str!("../schema/rollups.sql");
 /// sizing measurement (re-aggregates `_1m FINAL` into `_15m … _1M`).
 pub const PREROLL_SQL: &str = include_str!("../schema/preroll.sql");
 
+/// Refreshable MV maintaining `prices.current_prices` (task 0039 — replaces the
+/// price-updater Lambda). Applied separately like [`ROLLUPS_SQL`] (needs
+/// ClickHouse ≥ 23.12); not part of the default init flow.
+pub const CURRENT_SQL: &str = include_str!("../schema/current.sql");
+
 /// Read-surface views (task 0061 Step 5): `prices.price_usd_series` (USD close
 /// per natural-identity asset/bucket) + `prices.usd_reference` (per-bucket USD
 /// reference availability). Plain views — applied after the init tables.
@@ -167,18 +172,27 @@ mod tests {
 
     #[test]
     fn init_sql_parses_into_statements() {
-        // 1 CREATE DATABASE + 12 CREATE TABLE (assets, _1m, _15m, _1h, _4h,
-        // _1d, _1w, _1M, current_prices, oracle_prices, backfill_sdex_ledgers,
-        // backfill_progress) + 7 close_usd ALTERs (one per OHLCV grain) + 1
-        // assets.sac_address ALTER (task 0061) = 21 statements.
+        // 1 CREATE DATABASE + 14 CREATE TABLE (assets, _1m, _15m, _1h, _4h,
+        // _1d, _1w, _1M, current_prices, asset_supply, oracle_prices,
+        // backfill_sdex_ledgers, backfill_progress, discovery_state) + 7
+        // close_usd ALTERs (one per OHLCV grain) + 1 assets.sac_address ALTER
+        // (task 0061) = 23 statements. (+discovery_state task 0054,
+        // +asset_supply task 0039.)
         let stmts = split_statements(INIT_SQL);
-        assert_eq!(stmts.len(), 21, "got {}", stmts.len());
+        assert_eq!(stmts.len(), 23, "got {}", stmts.len());
     }
 
     #[test]
     fn rollups_and_preroll_each_have_six_statements() {
         assert_eq!(split_statements(ROLLUPS_SQL).len(), 6);
         assert_eq!(split_statements(PREROLL_SQL).len(), 6);
+    }
+
+    #[test]
+    fn current_sql_is_one_materialized_view() {
+        let stmts = split_statements(CURRENT_SQL);
+        assert_eq!(stmts.len(), 1, "got {}", stmts.len());
+        assert!(stmts[0].contains("prices.mv_current_prices"));
     }
 
     #[test]

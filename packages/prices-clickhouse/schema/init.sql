@@ -145,6 +145,22 @@ ORDER BY (asset_id)
 SETTINGS index_granularity = 8192;
 
 ----------------------------------------------------------------------
+-- Per-asset circulating supply (task 0039 supply worker). Its OWN
+-- single-writer table so supply (slow, hourly) and price (fast, per-minute
+-- MV) never fight over a shared ReplacingMergeTree row. The current_prices
+-- MV LEFT JOINs this for market_cap_usd; NULL/absent supply → NULL market
+-- cap (best-effort, general-overview §3.3). Sole writer = the supply worker.
+----------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS prices.asset_supply (
+    asset_id      UInt32,
+    token_supply  Decimal(38, 14),
+    fetched_at    DateTime      DEFAULT now()
+)
+ENGINE = ReplacingMergeTree(fetched_at)
+ORDER BY (asset_id)
+SETTINGS index_granularity = 8192;
+
+----------------------------------------------------------------------
 -- Oracle reference prices (§3.4). ReplacingMergeTree, monthly partitions.
 -- Written by the Oracle Fetcher Lambda in production; the backfill writes
 -- REFLECTOR/REDSTONE samples decoded from soroban events. raw_data keeps the
