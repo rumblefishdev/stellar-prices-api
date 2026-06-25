@@ -13,6 +13,7 @@ members = [
     "packages/asset-discovery",
     "packages/cleanup-worker",
     "packages/supply-worker",
+    "packages/oracle-worker",
 ]
 
 [workspace.dependencies]

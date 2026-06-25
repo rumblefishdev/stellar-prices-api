@@ -2158,6 +2158,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
 
 [[package]]
+name = "oracle-worker"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "clickhouse",
+ "lambda_runtime",
+ "prices-clickhouse",
+ "prices-ingest-core",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "stellar-strkey",
+ "stellar-xdr",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "outref"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

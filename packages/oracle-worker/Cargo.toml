@@ -1,0 +1,39 @@
+[package]
+name = "oracle-worker"
+version = "0.1.0"
+edition = "2024"
+description = "Prices oracle worker — Reflector (SEP-40) via Soroban RPC into prices.oracle_prices (task 0039)"
+
+[lib]
+name = "oracle_worker"
+path = "src/lib.rs"
+
+[[bin]]
+name = "oracle-worker"
+path = "src/main.rs"
+required-features = ["lambda"]
+
+[features]
+default = []
+aws-mtls = ["prices-clickhouse/aws-mtls"]
+lambda = ["aws-mtls", "dep:lambda_runtime"]
+
+[dependencies]
+prices-clickhouse = { path = "../prices-clickhouse" }
+prices-ingest-core = { path = "../prices-ingest-core" }
+stellar-xdr = { workspace = true }
+stellar-strkey = { workspace = true }
+base64 = "0.22"
+clickhouse = { workspace = true }
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls-webpki-roots",
+    "json",
+] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+thiserror = { workspace = true }
+
+lambda_runtime = { workspace = true, optional = true }

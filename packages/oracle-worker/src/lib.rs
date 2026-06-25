@@ -1,0 +1,346 @@
+//! Oracle worker (task 0039) — polls the Reflector SEP-40 price oracle via
+//! Soroban RPC `simulateTransaction` and writes `prices.oracle_prices`.
+//!
+//! Non-critical (general-overview §2.2): a failed fetch logs + is skipped; the
+//! oracle column simply shows the last known value. Reuses `prices-ingest-core`'s
+//! `OracleSample` / `write_oracle` so rows match the event-decoded oracle path.
+//!
+//! v1 queries the Reflector "External CEX & DEX" oracle for the USD-pegged
+//! assets that resolve to a Stellar identity (XLM + USDC/USDT), mirroring the
+//! event path's `reflector_key_to_identity`. Reflector prices are 14-decimal
+//! `i128` (SEP-40 `decimals()`), matching `OracleSample.price_usd` and
+//! `oracle_prices.price_usd Decimal(38,14)`.
+
+use base64::Engine;
+use prices_clickhouse::{USDC_ISSUER, USDT_ISSUER};
+use prices_ingest_core::{AssetIdentity, AssetRegistry, OhlcvWriter, OracleSample};
+use stellar_xdr::curr::{
+    ContractId, Hash, HostFunction, Int128Parts, InvokeContractArgs, InvokeHostFunctionOp, Limits,
+    Memo, MuxedAccount, Operation, OperationBody, Preconditions, ReadXdr, ScAddress, ScMap,
+    ScSymbol, ScVal, ScVec, SequenceNumber, Transaction, TransactionEnvelope, TransactionExt,
+    TransactionV1Envelope, Uint256, VecM, WriteXdr,
+};
+
+/// Reflector "External CEXs & DEXs" oracle (SEP-40), Stellar mainnet.
+pub const REFLECTOR_CEX_DEX: &str = "CAFJZQWSED6YAWZU3GWRTOCNPPCGBN32L7QV43XX5LZLFTK6JLN34DLN";
+/// SEP-40 price decimals Reflector reports (matches `Decimal(38,14)`).
+pub const REFLECTOR_DECIMALS: u32 = 14;
+/// Default public Soroban RPC endpoint (overridable via `SOROBAN_RPC_URL`).
+pub const DEFAULT_SOROBAN_RPC: &str = "https://mainnet.sorobanrpc.com";
+/// Reflector symbols the worker polls — only those that resolve to a Stellar
+/// identity (USD-pegged stables + XLM), per the event path.
+pub const TRACKED_SYMBOLS: &[&str] = &["XLM", "USDC", "USDT"];
+
+#[derive(Debug, thiserror::Error)]
+pub enum OracleError {
+    #[error(transparent)]
+    Clickhouse(#[from] clickhouse::error::Error),
+    #[error(transparent)]
+    Ingest(#[from] prices_ingest_core::IngestError),
+    #[error("soroban rpc: {0}")]
+    Http(#[from] reqwest::Error),
+    #[error("rpc json: {0}")]
+    Json(#[from] serde_json::Error),
+    #[error("xdr: {0}")]
+    Xdr(#[from] stellar_xdr::curr::Error),
+    #[error("strkey: {0}")]
+    Strkey(#[from] stellar_strkey::DecodeError),
+    #[error("base64: {0}")]
+    Base64(#[from] base64::DecodeError),
+}
+
+/// A decoded `PriceData` from the oracle (price is 14-decimal `i128`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PriceData {
+    pub price: i128,
+    pub timestamp: u64,
+}
+
+/// Map a Reflector symbol to a canonical Stellar identity — the USD-pegged
+/// stables + XLM (mirrors the private `reflector_key_to_identity`). Other
+/// symbols (BTC, EUR, …) have no Stellar identity and are dropped.
+pub fn symbol_to_identity(symbol: &str) -> Option<AssetIdentity> {
+    match symbol {
+        "XLM" => Some(AssetIdentity::Native),
+        "USDC" => Some(AssetIdentity::Credit {
+            code: "USDC".to_string(),
+            issuer: USDC_ISSUER.to_string(),
+        }),
+        "USDT" => Some(AssetIdentity::Credit {
+            code: "USDT".to_string(),
+            issuer: USDT_ISSUER.to_string(),
+        }),
+        _ => None,
+    }
+}
+
+fn sc_symbol(s: &str) -> Result<ScSymbol, OracleError> {
+    Ok(ScSymbol(s.try_into()?))
+}
+
+/// SEP-40 `Asset::Other(Symbol)` ScVal — a contracttype enum is a 2-element vec
+/// `[variant-symbol, value]`.
+pub fn asset_other_scval(symbol: &str) -> Result<ScVal, OracleError> {
+    let variant = ScVal::Symbol(sc_symbol("Other")?);
+    let value = ScVal::Symbol(sc_symbol(symbol)?);
+    let vec: VecM<ScVal> = vec![variant, value].try_into()?;
+    Ok(ScVal::Vec(Some(ScVec(vec))))
+}
+
+/// Reconstruct an `i128` from XDR `Int128Parts`.
+fn i128_from_parts(parts: &Int128Parts) -> i128 {
+    ((parts.hi as i128) << 64) | (parts.lo as i128)
+}
+
+/// Parse the `lastprice` return ScVal (`Option<PriceData>`): `Void` → `None`,
+/// otherwise a `PriceData` map `{price, timestamp}`.
+pub fn parse_price_data(scval: &ScVal) -> Option<PriceData> {
+    let ScVal::Map(Some(ScMap(entries))) = scval else {
+        return None; // Void (None) or unexpected shape
+    };
+    let mut price = None;
+    let mut timestamp = None;
+    for entry in entries.iter() {
+        let ScVal::Symbol(ScSymbol(key)) = &entry.key else {
+            continue;
+        };
+        match key.to_string().as_str() {
+            "price" => {
+                if let ScVal::I128(parts) = &entry.val {
+                    price = Some(i128_from_parts(parts));
+                }
+            }
+            "timestamp" => {
+                if let ScVal::U64(ts) = &entry.val {
+                    timestamp = Some(*ts);
+                }
+            }
+            _ => {}
+        }
+    }
+    Some(PriceData {
+        price: price?,
+        timestamp: timestamp?,
+    })
+}
+
+/// Build a base64 `TransactionEnvelope` invoking `func(args)` on `contract`,
+/// for a read-only `simulateTransaction` (source account / fee / seq are not
+/// checked by simulation).
+pub fn build_simulate_envelope(
+    contract: &str,
+    func: &str,
+    args: Vec<ScVal>,
+) -> Result<String, OracleError> {
+    let contract_hash = stellar_strkey::Contract::from_string(contract)?.0;
+    let invoke = InvokeContractArgs {
+        contract_address: ScAddress::Contract(ContractId(Hash(contract_hash))),
+        function_name: sc_symbol(func)?,
+        args: args.try_into()?,
+    };
+    let op = Operation {
+        source_account: None,
+        body: OperationBody::InvokeHostFunction(InvokeHostFunctionOp {
+            host_function: HostFunction::InvokeContract(invoke),
+            auth: VecM::default(),
+        }),
+    };
+    let tx = Transaction {
+        // Simulation ignores the source account / fee / seq for a read-only call.
+        source_account: MuxedAccount::Ed25519(Uint256([0u8; 32])),
+        fee: 0,
+        seq_num: SequenceNumber(0),
+        cond: Preconditions::None,
+        memo: Memo::None,
+        operations: vec![op].try_into()?,
+        ext: TransactionExt::V0,
+    };
+    let envelope = TransactionEnvelope::Tx(TransactionV1Envelope {
+        tx,
+        signatures: VecM::default(),
+    });
+    let xdr = envelope.to_xdr(Limits::none())?;
+    Ok(base64::engine::general_purpose::STANDARD.encode(xdr))
+}
+
+#[derive(serde::Deserialize)]
+struct RpcResponse {
+    result: Option<RpcResult>,
+}
+#[derive(serde::Deserialize)]
+struct RpcResult {
+    #[serde(default)]
+    results: Vec<RpcInvokeResult>,
+    #[serde(default)]
+    error: Option<String>,
+}
+#[derive(serde::Deserialize)]
+struct RpcInvokeResult {
+    xdr: String,
+}
+
+/// Call `lastprice(asset)` on the Reflector contract via Soroban RPC
+/// `simulateTransaction`, returning the decoded `PriceData` (`None` if the
+/// oracle has no price for the asset).
+pub async fn fetch_lastprice(
+    http: &reqwest::Client,
+    rpc_url: &str,
+    contract: &str,
+    symbol: &str,
+) -> Result<Option<PriceData>, OracleError> {
+    let envelope =
+        build_simulate_envelope(contract, "lastprice", vec![asset_other_scval(symbol)?])?;
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "simulateTransaction",
+        "params": { "transaction": envelope },
+    });
+    let resp: RpcResponse = http.post(rpc_url).json(&body).send().await?.json().await?;
+    let result = match resp.result {
+        Some(r) => r,
+        None => return Ok(None),
+    };
+    if let Some(err) = result.error {
+        tracing::warn!(symbol, error = %err, "simulate returned error");
+        return Ok(None);
+    }
+    let Some(first) = result.results.into_iter().next() else {
+        return Ok(None);
+    };
+    let raw = base64::engine::general_purpose::STANDARD.decode(first.xdr)?;
+    let scval = ScVal::from_xdr(&raw, Limits::none())?;
+    Ok(parse_price_data(&scval))
+}
+
+/// Outcome of a [`run_oracle`] pass.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct OracleStats {
+    pub queried: usize,
+    pub written: usize,
+    pub skipped: usize,
+}
+
+/// Poll Reflector for each tracked symbol and write the prices to
+/// `oracle_prices`. Best-effort: per-symbol failures are skipped; only a CH
+/// write failure fails the run.
+pub async fn run_oracle(
+    writer: &OhlcvWriter,
+    http: &reqwest::Client,
+    rpc_url: &str,
+    contract: &str,
+) -> Result<OracleStats, OracleError> {
+    let existing = writer.load_assets().await?;
+    let mut registry = AssetRegistry::from_existing(existing);
+    let mut samples = Vec::new();
+    let mut skipped = 0usize;
+
+    for &symbol in TRACKED_SYMBOLS {
+        let Some(identity) = symbol_to_identity(symbol) else {
+            continue;
+        };
+        match fetch_lastprice(http, rpc_url, contract, symbol).await {
+            Ok(Some(pd)) => {
+                let asset_id = registry.get_or_assign(&identity);
+                samples.push(OracleSample {
+                    timestamp: pd.timestamp.min(u32::MAX as u64) as u32,
+                    asset_id,
+                    oracle_name: "reflector".to_string(),
+                    price_usd: pd.price,
+                    raw_data: format!("{{\"symbol\":\"{symbol}\"}}"),
+                });
+            }
+            Ok(None) => {
+                skipped += 1;
+                tracing::debug!(symbol, "no Reflector price");
+            }
+            Err(err) => {
+                skipped += 1;
+                tracing::warn!(symbol, error = %err, "oracle fetch failed; skipping");
+            }
+        }
+    }
+
+    let written = samples.len();
+    writer.write_oracle(&samples).await?;
+    Ok(OracleStats {
+        queried: TRACKED_SYMBOLS.len(),
+        written,
+        skipped,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn symbol_mapping_covers_stables_and_xlm() {
+        assert!(matches!(
+            symbol_to_identity("XLM"),
+            Some(AssetIdentity::Native)
+        ));
+        assert!(matches!(
+            symbol_to_identity("USDC"),
+            Some(AssetIdentity::Credit { .. })
+        ));
+        assert!(symbol_to_identity("BTC").is_none());
+    }
+
+    #[test]
+    fn asset_other_scval_is_two_element_vec() {
+        let sc = asset_other_scval("BTC").unwrap();
+        let ScVal::Vec(Some(ScVec(v))) = sc else {
+            panic!("expected vec");
+        };
+        assert_eq!(v.len(), 2);
+        assert!(matches!(&v[0], ScVal::Symbol(s) if s.0.to_string() == "Other"));
+        assert!(matches!(&v[1], ScVal::Symbol(s) if s.0.to_string() == "BTC"));
+    }
+
+    #[test]
+    fn parses_price_data_map() {
+        let entries: VecM<_> = vec![
+            stellar_xdr::curr::ScMapEntry {
+                key: ScVal::Symbol(sc_symbol("price").unwrap()),
+                val: ScVal::I128(Int128Parts { hi: 0, lo: 250 }),
+            },
+            stellar_xdr::curr::ScMapEntry {
+                key: ScVal::Symbol(sc_symbol("timestamp").unwrap()),
+                val: ScVal::U64(1700),
+            },
+        ]
+        .try_into()
+        .unwrap();
+        let scval = ScVal::Map(Some(ScMap(entries)));
+        let pd = parse_price_data(&scval).expect("some");
+        assert_eq!(
+            pd,
+            PriceData {
+                price: 250,
+                timestamp: 1700
+            }
+        );
+    }
+
+    #[test]
+    fn parses_void_as_none() {
+        assert!(parse_price_data(&ScVal::Void).is_none());
+    }
+
+    #[test]
+    fn builds_a_base64_envelope() {
+        let env = build_simulate_envelope(
+            REFLECTOR_CEX_DEX,
+            "lastprice",
+            vec![asset_other_scval("XLM").unwrap()],
+        )
+        .expect("envelope");
+        assert!(!env.is_empty());
+        // Round-trips as valid base64 XDR.
+        let raw = base64::engine::general_purpose::STANDARD
+            .decode(&env)
+            .unwrap();
+        assert!(TransactionEnvelope::from_xdr(&raw, Limits::none()).is_ok());
+    }
+}
