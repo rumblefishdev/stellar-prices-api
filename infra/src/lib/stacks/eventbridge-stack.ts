@@ -39,6 +39,10 @@ const CLEANUP_WORKER_ASSET_DIR =
 const SUPPLY_WORKER_ASSET_DIR =
   process.env['SUPPLY_WORKER_ASSET_DIR'] ?? '../target/lambda/supply-worker';
 
+/** Cargo-lambda build output for the `oracle-worker` binary (task 0039). */
+const ORACLE_WORKER_ASSET_DIR =
+  process.env['ORACLE_WORKER_ASSET_DIR'] ?? '../target/lambda/oracle-worker';
+
 export interface EventBridgeStackProps extends cdk.StackProps {
   readonly config: EnvironmentConfig;
 }
@@ -50,9 +54,8 @@ export interface EventBridgeStackProps extends cdk.StackProps {
  * Uses `aws-events` `events.Rule` (CloudFormation `AWS::Events::Rule`),
  * not EventBridge Scheduler (`AWS::Scheduler::Schedule`).
  *
- * Targets attached here (task 0039 / 0054): asset-discovery, cleanup, and
- * asset-supply Lambdas. The oracle-watcher rule is still a shell (its worker
- * is the remaining 0039 piece).
+ * All four rules now have their worker Lambdas attached (task 0039 / 0054):
+ * asset-discovery, asset-supply, oracle-watcher, and cleanup.
  *
  * Two workers from the original 0039 spec are intentionally absent — ADR 0007
  * replaces them with ClickHouse MVs: the **Rollup** worker (§3.4, the rollup
@@ -67,6 +70,7 @@ export class EventBridgeStack extends cdk.Stack {
   public readonly assetDiscoveryFunction: lambda.Function;
   public readonly cleanupFunction: lambda.Function;
   public readonly supplyFunction: lambda.Function;
+  public readonly oracleFunction: lambda.Function;
 
   constructor(scope: Construct, id: string, props: EventBridgeStackProps) {
     super(scope, id, props);
@@ -350,6 +354,66 @@ export class EventBridgeStack extends cdk.Stack {
     });
     new cdk.CfnOutput(this, 'CleanupFunctionName', {
       value: this.cleanupFunction.functionName,
+    });
+
+    // -----------------------------------------------------------------
+    // Oracle worker Lambda (task 0039) + its rate(5m) target. CH mTLS +
+    // public Soroban-RPC egress (no S3, no VPC). Polls the Reflector SEP-40
+    // oracle and writes prices.oracle_prices. Non-critical (§2.2).
+    // -----------------------------------------------------------------
+    const oracleRole = createPricesLambdaRole(this, 'OracleRole', {
+      config,
+      accountId,
+      mtlsSecretName: discoveryMtlsSecretName,
+    });
+
+    const oracleLogGroup = new logs.LogGroup(this, 'OracleLogGroup', {
+      logGroupName: lambdaLogGroupName(env, 'oracle'),
+      retention: PRICES_LAMBDA_LOG_RETENTION,
+      removalPolicy: PRICES_LAMBDA_LOG_REMOVAL_POLICY,
+    });
+
+    this.oracleFunction = new lambda.Function(this, 'OracleFunction', {
+      ...pricesLambdaDefaults, // ARM64 + PROVIDED_AL2023 (ADR 0006/0007)
+      functionName: `prices-${env}-oracle`,
+      handler: 'bootstrap',
+      code: lambda.Code.fromAsset(ORACLE_WORKER_ASSET_DIR),
+      role: oracleRole,
+      logGroup: oracleLogGroup,
+      memorySize: 256,
+      timeout: cdk.Duration.minutes(2),
+      tracing: lambda.Tracing.ACTIVE,
+      layers: [secretsExtensionLayer],
+      environment: {
+        ENV_NAME: env,
+        RUST_LOG: 'info',
+        CH_DOMAIN: chDomain,
+        MTLS_SECRET_NAME: discoveryMtlsSecretName,
+        PARAMETERS_SECRETS_EXTENSION_CACHE_ENABLED: 'true',
+        // SOROBAN_RPC_URL / REFLECTOR_CONTRACT unset → the binary's mainnet
+        // defaults (public Soroban RPC + the Reflector CEX/DEX oracle).
+      },
+    });
+
+    this.oracleWatcherRule.addTarget(
+      new targets.LambdaFunction(this.oracleFunction),
+    );
+
+    new cloudwatch.Alarm(this, 'OracleErrorAlarm', {
+      alarmName: `prices-${env}-oracle-errors`,
+      alarmDescription:
+        'Oracle Lambda invocation errors (informational; oracle is non-critical — §2.2 — and degrades to last-known value).',
+      metric: this.oracleFunction.metricErrors({
+        period: cdk.Duration.minutes(5),
+        statistic: 'Sum',
+      }),
+      threshold: 1,
+      evaluationPeriods: 1,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+
+    new cdk.CfnOutput(this, 'OracleFunctionName', {
+      value: this.oracleFunction.functionName,
     });
 
     cdk.Tags.of(this).add('Project', 'stellar-prices-api');
