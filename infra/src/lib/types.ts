@@ -53,8 +53,12 @@ export interface EnvironmentConfig {
    * a ClickHouse materialised-view chain (1m → 15m → 1h → ...).
    */
   readonly scheduleExpressions: {
-    /** Refreshes `current_prices` aggregations. */
-    readonly priceUpdater: string;
+    /**
+     * Per-asset circulating-supply fetch (Horizon) → prices.asset_supply.
+     * (The former price-updater is eliminated — ADR 0007 §3.4 / 0039 Q#1
+     * replace it with the prices.current_prices refreshable MV.)
+     */
+    readonly assetSupply: string;
     /** Polls Stellar on-chain oracles. */
     readonly oracleWatcher: string;
     /** Periodic asset-registry maintenance. */
@@ -158,7 +162,7 @@ export function validateConfig(config: EnvironmentConfig): void {
     errors.push(`scheduleExpressions missing or not an object`);
   } else {
     const expectedKeys = [
-      'priceUpdater',
+      'assetSupply',
       'oracleWatcher',
       'assetDiscovery',
       'cleanup',

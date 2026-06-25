@@ -35,6 +35,10 @@ const ASSET_DISCOVERY_ASSET_DIR =
 const CLEANUP_WORKER_ASSET_DIR =
   process.env['CLEANUP_WORKER_ASSET_DIR'] ?? '../target/lambda/cleanup-worker';
 
+/** Cargo-lambda build output for the `supply-worker` binary (task 0039). */
+const SUPPLY_WORKER_ASSET_DIR =
+  process.env['SUPPLY_WORKER_ASSET_DIR'] ?? '../target/lambda/supply-worker';
+
 export interface EventBridgeStackProps extends cdk.StackProps {
   readonly config: EnvironmentConfig;
 }
@@ -46,23 +50,23 @@ export interface EventBridgeStackProps extends cdk.StackProps {
  * Uses `aws-events` `events.Rule` (CloudFormation `AWS::Events::Rule`),
  * not EventBridge Scheduler (`AWS::Scheduler::Schedule`).
  *
- * The price-updater + oracle-watcher + cleanup rules are still shells
- * (task 0039 attaches their targets). The asset-discovery rule now has
- * its target: the `asset-discovery` Lambda created here, which seeds the
- * major-asset baseline and scans recent ledgers for new assets
- * (`prices.assets`), advancing `prices.discovery_state`.
+ * Targets attached here (task 0039 / 0054): asset-discovery, cleanup, and
+ * asset-supply Lambdas. The oracle-watcher rule is still a shell (its worker
+ * is the remaining 0039 piece).
  *
- * The Rollup worker that appeared in the original task 0039 spec is
- * intentionally absent — ADR 0007 §3.4 replaces it with a ClickHouse
- * materialised-view chain.
+ * Two workers from the original 0039 spec are intentionally absent — ADR 0007
+ * replaces them with ClickHouse MVs: the **Rollup** worker (§3.4, the rollup
+ * MV chain) and the **price-updater** (§Q#1, the `current_prices` MV). So
+ * there is no price-updater rule; the former slot is now **asset-supply**.
  */
 export class EventBridgeStack extends cdk.Stack {
-  public readonly priceUpdaterRule: events.Rule;
+  public readonly assetSupplyRule: events.Rule;
   public readonly oracleWatcherRule: events.Rule;
   public readonly assetDiscoveryRule: events.Rule;
   public readonly cleanupRule: events.Rule;
   public readonly assetDiscoveryFunction: lambda.Function;
   public readonly cleanupFunction: lambda.Function;
+  public readonly supplyFunction: lambda.Function;
 
   constructor(scope: Construct, id: string, props: EventBridgeStackProps) {
     super(scope, id, props);
@@ -73,10 +77,10 @@ export class EventBridgeStack extends cdk.Stack {
     const accountId = this.account;
     const schedules = config.scheduleExpressions;
 
-    this.priceUpdaterRule = new events.Rule(this, 'PriceUpdaterRule', {
-      ruleName: `prices-${env}-price-updater`,
-      description: `Refreshes current_prices aggregations (${env})`,
-      schedule: events.Schedule.expression(schedules.priceUpdater),
+    this.assetSupplyRule = new events.Rule(this, 'AssetSupplyRule', {
+      ruleName: `prices-${env}-asset-supply`,
+      description: `Per-asset circulating-supply fetch → asset_supply (${env})`,
+      schedule: events.Schedule.expression(schedules.assetSupply),
     });
 
     this.oracleWatcherRule = new events.Rule(this, 'OracleWatcherRule', {
@@ -268,8 +272,69 @@ export class EventBridgeStack extends cdk.Stack {
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     });
 
-    new cdk.CfnOutput(this, 'PriceUpdaterRuleArn', {
-      value: this.priceUpdaterRule.ruleArn,
+    // -----------------------------------------------------------------
+    // Supply worker Lambda (task 0039) + its rate(1h) target. CH mTLS +
+    // public Horizon egress (no S3, no VPC). Fills prices.asset_supply that
+    // the current_prices MV multiplies by the live price for market_cap.
+    // Reuses the ingestion mTLS identity + secrets extension layer.
+    // -----------------------------------------------------------------
+    const supplyRole = createPricesLambdaRole(this, 'SupplyRole', {
+      config,
+      accountId,
+      mtlsSecretName: discoveryMtlsSecretName,
+    });
+
+    const supplyLogGroup = new logs.LogGroup(this, 'SupplyLogGroup', {
+      logGroupName: lambdaLogGroupName(env, 'supply'),
+      retention: PRICES_LAMBDA_LOG_RETENTION,
+      removalPolicy: PRICES_LAMBDA_LOG_REMOVAL_POLICY,
+    });
+
+    this.supplyFunction = new lambda.Function(this, 'SupplyFunction', {
+      ...pricesLambdaDefaults, // ARM64 + PROVIDED_AL2023 (ADR 0006/0007)
+      functionName: `prices-${env}-supply`,
+      handler: 'bootstrap',
+      code: lambda.Code.fromAsset(SUPPLY_WORKER_ASSET_DIR),
+      role: supplyRole,
+      logGroup: supplyLogGroup,
+      memorySize: 512,
+      // Sequential Horizon GETs across the asset registry; generous headroom
+      // under the 1h cadence (best-effort, so a timeout just defers).
+      timeout: cdk.Duration.minutes(5),
+      tracing: lambda.Tracing.ACTIVE,
+      layers: [secretsExtensionLayer],
+      environment: {
+        ENV_NAME: env,
+        RUST_LOG: 'info',
+        CH_DOMAIN: chDomain,
+        MTLS_SECRET_NAME: discoveryMtlsSecretName,
+        PARAMETERS_SECRETS_EXTENSION_CACHE_ENABLED: 'true',
+        // HORIZON_URL unset → the binary's public-Horizon default.
+      },
+    });
+
+    this.assetSupplyRule.addTarget(
+      new targets.LambdaFunction(this.supplyFunction),
+    );
+
+    new cloudwatch.Alarm(this, 'SupplyErrorAlarm', {
+      alarmName: `prices-${env}-supply-errors`,
+      alarmDescription:
+        'Supply Lambda invocation errors (informational; supply is best-effort, market_cap degrades to 0).',
+      metric: this.supplyFunction.metricErrors({
+        period: cdk.Duration.hours(1),
+        statistic: 'Sum',
+      }),
+      threshold: 1,
+      evaluationPeriods: 1,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+
+    new cdk.CfnOutput(this, 'AssetSupplyRuleArn', {
+      value: this.assetSupplyRule.ruleArn,
+    });
+    new cdk.CfnOutput(this, 'SupplyFunctionName', {
+      value: this.supplyFunction.functionName,
     });
     new cdk.CfnOutput(this, 'OracleWatcherRuleArn', {
       value: this.oracleWatcherRule.ruleArn,

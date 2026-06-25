@@ -2,10 +2,12 @@
 //! `prices.asset_supply`, the table the `current_prices` MV multiplies by the
 //! live price for `market_cap_usd`.
 //!
-//! v1 covers **classic (credit) assets** via Horizon `/assets` (`amount` =
-//! total supply). Soroban-contract token `total_supply` (RPC `simulateTransac
-//! tion`) and native XLM are follow-ups. Per ADR 0007 the worker is the **sole
-//! writer** of `asset_supply`. Best-effort: a per-asset fetch failure is logged
+//! v1 covers **classic (credit) assets** via Horizon `/assets`, summing total
+//! issued supply across trustline balances + claimable-balance / liquidity-pool
+//! / contract holdings (Horizon deprecated the flat `amount` field). Soroban-
+//! contract token `total_supply` (RPC `simulateTransaction`) and native XLM are
+//! follow-ups. Per ADR 0007 the worker is the **sole writer** of `asset_supply`.
+//! Best-effort: a per-asset fetch failure is logged
 //! and skipped — `market_cap_usd` simply stays 0 for that asset (NULL-
 //! acceptable), and the run still succeeds.
 
