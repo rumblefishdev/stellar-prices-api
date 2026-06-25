@@ -232,6 +232,7 @@ pub async fn run_oracle(
 ) -> Result<OracleStats, OracleError> {
     let existing = writer.load_assets().await?;
     let mut registry = AssetRegistry::from_existing(existing);
+    let known_before = registry.assets().count();
     let mut samples = Vec::new();
     let mut skipped = 0usize;
 
@@ -243,7 +244,11 @@ pub async fn run_oracle(
             Ok(Some(pd)) => {
                 let asset_id = registry.get_or_assign(&identity);
                 samples.push(OracleSample {
-                    timestamp: pd.timestamp.min(u32::MAX as u64) as u32,
+                    // Reflector reports millisecond timestamps; oracle_prices.timestamp
+                    // is DateTime (epoch seconds), so divide by 1000 to match the
+                    // event-decoded path (prices-ingest-core soroban.rs). The clamp is
+                    // a backstop for the 2106 u32 ceiling, not the unit conversion.
+                    timestamp: (pd.timestamp / 1000).min(u32::MAX as u64) as u32,
                     asset_id,
                     oracle_name: "reflector".to_string(),
                     price_usd: pd.price,
@@ -259,6 +264,14 @@ pub async fn run_oracle(
                 tracing::warn!(symbol, error = %err, "oracle fetch failed; skipping");
             }
         }
+    }
+
+    // Persist any newly-minted surrogate ids BEFORE the oracle rows that
+    // reference them, so oracle_prices.asset_id always resolves in prices.assets
+    // and never collides with an id the discovery/ingest path mints next (it
+    // derives next_id from the persisted max).
+    if registry.assets().count() > known_before {
+        writer.write_assets(&registry).await?;
     }
 
     let written = samples.len();

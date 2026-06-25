@@ -7,6 +7,13 @@
 -- NOT applied by prices-clickhouse-init (kept out of init.sql so schema-apply
 -- stays version-agnostic). Refreshable MVs require ClickHouse ≥ 23.12.
 --
+-- DEPLOY ORDER / DEPENDENCY: every USD column here derives from
+-- price_ohlcv_1m.close_usd and .volume_quote_usd, which the ingest path writes
+-- as DEFAULT 0 — they are filled by the enrichment pass (task 0026). Until that
+-- pass is deployed and has run, this MV emits price_usd / volume_24h_usd /
+-- vwap_24h / market_cap_usd = 0 for every asset. Apply this MV only once
+-- enrichment is live, otherwise current_prices serves all-zero rows.
+--
 -- v1 columns (the cleanly price-data-derivable + market cap):
 --   price_usd       — latest USD close (argMax over the 24h window)
 --   volume_24h_usd  — trailing-24h USD volume
@@ -23,9 +30,16 @@
 -- Decimal(38,14)'s scale (Decimal×Decimal widens scale past 38) — so those
 -- two are computed in Float64 and cast back with toDecimal128(…, 14). price_usd
 -- (argMax, no arithmetic) and volume_24h_usd (a plain sum) stay native Decimal.
+--
+-- The TO clause carries an EXPLICIT target column list: a materialised view
+-- inserts into its target POSITIONALLY otherwise, and this SELECT projects only
+-- the v1 subset (not all 10 current_prices columns, nor in table order). The
+-- column list maps each projection to its named column; the unlisted columns
+-- (price_xlm, change_24h_pct, change_7d_pct, sources) take their table DEFAULTs.
 CREATE MATERIALIZED VIEW IF NOT EXISTS prices.mv_current_prices
 REFRESH EVERY 1 MINUTE
-TO prices.current_prices AS
+TO prices.current_prices
+   (asset_id, price_usd, volume_24h_usd, vwap_24h, market_cap_usd, updated_at) AS
 SELECT
     c.asset_id                                              AS asset_id,
     argMax(c.close_usd, c.timestamp)                        AS price_usd,

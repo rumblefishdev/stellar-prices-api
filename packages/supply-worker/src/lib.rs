@@ -168,21 +168,36 @@ pub async fn write_supplies(
     Ok(())
 }
 
+/// How many fetched supplies to accumulate before flushing to ClickHouse. The
+/// Horizon fetch loop is sequential and can run for minutes across a large asset
+/// registry; flushing in batches means a Lambda timeout mid-loop still persists
+/// everything fetched so far (only the in-flight batch is lost) rather than
+/// discarding the whole run.
+pub const SUPPLY_FLUSH_BATCH: usize = 50;
+
 /// Load credit assets, fetch each one's supply from Horizon (best-effort), and
-/// write the successes to `asset_supply`. Only a ClickHouse load/write failure
-/// fails the run; per-asset Horizon failures are skipped.
+/// write the successes to `asset_supply` in batches. Only a ClickHouse load/write
+/// failure fails the run; per-asset Horizon failures are skipped.
 pub async fn run_supply(
     ch: &Client,
     http: &reqwest::Client,
     base_url: &str,
 ) -> Result<SupplyStats, SupplyError> {
     let assets = load_credit_assets(ch).await?;
-    let mut supplies = Vec::new();
+    let mut batch: Vec<(u32, Decimal)> = Vec::new();
+    let mut written = 0usize;
     let mut skipped = 0usize;
 
     for asset in &assets {
         match fetch_supply(http, base_url, &asset.asset_code, &asset.issuer_address).await {
-            Ok(Some(supply)) => supplies.push((asset.asset_id, supply)),
+            Ok(Some(supply)) => {
+                batch.push((asset.asset_id, supply));
+                if batch.len() >= SUPPLY_FLUSH_BATCH {
+                    write_supplies(ch, &batch).await?;
+                    written += batch.len();
+                    batch.clear();
+                }
+            }
             Ok(None) => {
                 skipped += 1;
                 tracing::debug!(code = %asset.asset_code, "no Horizon record");
@@ -194,8 +209,12 @@ pub async fn run_supply(
         }
     }
 
-    let written = supplies.len();
-    write_supplies(ch, &supplies).await?;
+    // Flush the tail.
+    if !batch.is_empty() {
+        write_supplies(ch, &batch).await?;
+        written += batch.len();
+    }
+
     Ok(SupplyStats {
         considered: assets.len(),
         written,
