@@ -28,6 +28,18 @@ history:
       oracle, cleanup, rollup). Asset Discovery alone is in T1
       scope; carve it out so it can ship without dragging the
       other four with it.
+  - date: 2026-06-25
+    status: backlog
+    who: oski
+    note: >
+      Confirmed as the owner of the Asset Discovery worker via 0039's
+      open Q#2 → Option A (0039 reuses this binary + CDK, does NOT
+      rebuild it; 0039 only adds the deferred Soroswap/Aquarius
+      pool-registry maintenance). Supply fetch is NOT in this task —
+      0039 split it into a separate `supply-worker` writing
+      `prices.asset_supply`; this task stays discovery-only. Blockers
+      0011/0051/0052 are cleared; ready to promote ahead of 0039's
+      discovery step.
 ---
 
 # Asset Discovery Lambda — Tranche 1 minimal scope

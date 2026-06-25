@@ -4,7 +4,7 @@ title: "Prices periodic workers — 4 EventBridge-Scheduler-triggered ClickHouse
 type: FEATURE
 status: active
 related_adr: ["0003", "0004", "0006", "0007"]
-related_tasks: ["0011", "0038", "0045", "0047"]
+related_tasks: ["0011", "0038", "0045", "0047", "0054"]
 tags: [layer-indexing, priority-high, effort-large, lambda, scheduler, rust, aws, ingestion, clickhouse, hetzner]
 links:
   - "../../../docs/prices-api-general-overview.md"
@@ -98,6 +98,16 @@ history:
       pollute discovery's health/timeout. Scope now FOUR Lambdas (oracle,
       discovery, supply, cleanup) + 2 MVs. `asset_supply` sole writer is the
       supply worker. Added a Mermaid topology diagram.
+  - date: 2026-06-25
+    status: active
+    who: oski
+    note: >
+      Resolved open Q#2 → Option A. Task 0054 (milestone-M1) builds and
+      ships the Asset Discovery worker; 0039 reuses its binary + CDK and
+      only adds the deferred Soroswap/Aquarius pool-registry maintenance.
+      Added 0054 to related_tasks + Dependencies; 0039's discovery work is
+      additive and sequenced after 0054's binary lands. Oracle/supply/
+      cleanup/MV proceed independently.
 ---
 
 # Prices periodic workers — 4 EventBridge-Scheduler-triggered ClickHouse Lambdas
@@ -171,7 +181,7 @@ reconciled scope.
 | **OHLCV Rollup** `rate(15m)` | ❌ **ELIMINATED** | ADR 0007 §3.4 "Rollup Lambda eliminated." Replaced by the refreshable-MV chain `1m→15m→…→1M` in `schema/rollups.sql`; task **0051** archived (chain live on prod 2026-06-22). |
 | **Current Price Updater** `rate(1m)` | ❌ **ELIMINATED** | Open Q#1 resolved (2026-06-25): 5 of 6 `current_prices` columns are SQL-derivable from `price_ohlcv_1m` + rollups (§5.5 outlier filter is plain `quantileExact` SQL), so the 1-min Lambda → a refreshable MV. The only external input — `market_cap_usd = price × token_supply` (§3.3, supply from Soroban `total_supply`/Horizon) — moves to a new `prices.asset_supply` table the MV JOINs. See Step 2. |
 | **Oracle Fetcher** `rate(5m)` | ✅ KEEP (→CH) | Fetches Reflector via Soroban RPC `simulateTransaction` (external I/O — cannot be an MV) → `prices.oracle_prices`. |
-| **Asset Discovery** `rate(1h)` | ✅ KEEP (→CH) | Scans ledgers for new assets → `prices.assets`. NOT folded into 0038 (which only `load_registry()` reads). ⚠️ overlaps task **0054** (minimal T1 carve-out) — absorb/extend, don't duplicate. |
+| **Asset Discovery** `rate(1h)` | ✅ KEEP (→CH) — **built by 0054** | Scans ledgers for new assets → `prices.assets`. NOT folded into 0038 (which only `load_registry()` reads). **Q#2 resolved → Option A:** the worker binary + CDK ship from **0054** (T1 minimal: detection + 20-asset seed); 0039 **reuses** it and only **adds** Soroswap/Aquarius pool-registry maintenance. |
 | **Supply Fetcher** `rate(1h)` | ✅ KEEP (→CH) | **Split out of discovery (2026-06-25).** Iterates all assets, fetches `token_supply` (Soroban `total_supply` / Horizon — external I/O, not an MV) → sole writer of new `prices.asset_supply`, which the `current_prices` MV JOINs for `market_cap_usd`. Separated from discovery for failure isolation + independent O(N) scaling (see Step 6). |
 | **Cleanup/Retention** `cron daily` | ✅ KEEP (thin) | `ALTER TABLE … DROP PARTITION` per per-granularity table (ADR 0007 §3.3). No declarative `TTL` in schema → retention stays procedural. |
 
@@ -208,10 +218,16 @@ reconciled scope.
    `NULL`-able by design. Supply is slow-moving, so a dedicated hourly
    **Supply Fetcher** (Step 6) writes `prices.asset_supply` and the
    `current_prices` MV multiplies it by the live price. See Step 2 + Step 6.
-2. **Asset Discovery vs. task 0054.** Decide whether 0039 absorbs 0054's
-   minimal discovery binary or 0054 ships first and 0039 extends it. (The
-   `asset_supply` fetch is now its own Supply Fetcher worker, so this Q is
-   scoped to discovery proper.)
+2. ~~Asset Discovery vs. task 0054.~~ **RESOLVED 2026-06-25 → Option A.**
+   **0054** (milestone-M1) builds and ships the Asset Discovery worker
+   first — minimal T1 scope (new-asset detection + ~20-major-asset seed +
+   `prices.discovery_state` high-water-mark). 0039 does **not** rebuild it;
+   0039's discovery step (Step 5) **reuses** 0054's binary + CDK and only
+   **adds** the Soroswap/Aquarius pool-registry maintenance 0054 explicitly
+   deferred. Rationale: 0054 is narrower, M1-gated, already designed as the
+   reusable foundation, and its blockers (0011/0051/0052) are cleared; the
+   supply-worker split keeps discovery cleanly separable. So 0054 should be
+   promoted/sequenced ahead of 0039's discovery work.
 
 ## Topology (workers, MVs, and `prices.*` tables)
 
@@ -237,7 +253,7 @@ flowchart TB
   subgraph LAM["AWS Lambdas — this task (0038 = context)"]
     LP["Ledger Processor<br/>task 0038 · S3-event"]
     OW["oracle-worker<br/>rate(5m)"]
-    DW["discovery-worker<br/>rate(1h)"]
+    DW["discovery-worker<br/>rate(1h) · built by 0054"]
     SW["supply-worker<br/>rate(1h)"]
     CW["cleanup-worker<br/>cron daily"]
   end
@@ -370,26 +386,24 @@ list isn't re-added by mistake.
 - Soroban RPC endpoint + Reflector contract address read from
   Secrets Manager (per §2.1 row).
 
-### Step 5: Asset Discovery (`discovery-worker`)
+### Step 5: Asset Discovery (`discovery-worker`) — reuse 0054, add pool-registry
 
-- Trigger: EventBridge Scheduler `rate(1 hour)`.
-- **First check task 0054** (minimal T1 Asset Discovery carve-out) —
-  absorb or extend it rather than building a parallel binary (open Q#2).
-- Behaviour (§5.3): scan recent ledger account entries for new
-  classic asset issuances and new SEP-41 / Soroban token
-  contract deployments. INSERT into `prices.assets`
-  (`ReplacingMergeTree`, `schema/init.sql`) keyed on
-  `(asset_code, issuer_address, contract_address)`; dedup engine-side.
-- Reads from the same `stellar-ledger-data/` S3 bucket as 0038
-  (no separate ingestion path); selects the last hour of ledgers by
-  S3 key prefix or by `closed_at` lookup against `prices.*` (CH).
-- Supply fetch is **not** here — it's its own worker (Step 6), split off
-  for failure isolation and independent scaling.
-- Soroswap / Aquarius API integration (§2.2) for pool pair
-  metadata is in scope here — pool registries inform the
-  Ledger Processor (0038) about which contracts to extract
-  swaps from. Coordinate the pool-registry hand-off with the
-  0037 Phoenix pool registry surface.
+**Q#2 resolved → Option A: the discovery worker is built and shipped by
+task 0054, not here.** 0039 does not rebuild it.
+
+- **Reuse 0054 as-is:** its `packages/asset-discovery/` binary + CDK
+  Lambda + `rate(1 hour)` rule + the `prices.discovery_state`
+  high-water-mark table + the 20-major-asset seed. 0054 already covers
+  new classic-asset issuance + SEP-41 detection → `prices.assets` INSERT
+  (`ReplacingMergeTree` dedup on the §3.1 natural key).
+- **0039 adds only the deferred extension:** Soroswap / Aquarius pool-pair
+  registry maintenance (§2.2) — pool registries tell the Ledger Processor
+  (0038) which contracts to extract swaps from. Coordinate the
+  pool-registry hand-off with the 0037 Phoenix pool registry surface.
+- Supply fetch is **not** here — separate worker (Step 6). 0054 has no
+  supply concern either; it predates the split and was discovery-only.
+- **Sequencing:** 0054 should ship (or at least land its binary) before
+  this step; 0039's discovery work is purely additive on top of it.
 
 ### Step 6: Supply Fetcher (`supply-worker`)
 
@@ -461,9 +475,10 @@ In the `infra/` CDK app:
 
 ## Acceptance Criteria
 
-- [ ] **Four** Rust Lambda binaries (oracle, discovery, supply, cleanup)
-      built against `provided.al2` (ARM64), deployed via the `infra/` CDK
-      app — no VPC, no RDS.
+- [ ] **Four** worker Lambdas live (oracle, discovery, supply, cleanup)
+      on `provided.al2` (ARM64), no VPC, no RDS — of which **discovery is
+      delivered by task 0054** (0039 reuses its binary + CDK, not rebuilt);
+      oracle/supply/cleanup are built here.
 - [ ] **Four** EventBridge Scheduler rules created with the §5.4
       cron/rate expressions verbatim (no rollup, no price-update rule);
       discovery + supply both `rate(1 hour)` as separate rules.
@@ -474,8 +489,9 @@ In the `infra/` CDK app:
 - [ ] `oracle-worker` calls Reflector via Soroban RPC, writes
       `prices.oracle_prices` rows, and emits an alarm-without-blocking
       on RPC failure.
-- [ ] `discovery-worker` inserts new assets into `prices.assets` keyed on
-      §3.1 without duplicating existing rows. (Reconciled with 0054.)
+- [ ] `discovery-worker` (from **0054**) deployed and inserting new assets
+      into `prices.assets` keyed on §3.1 without duplicates; **0039 adds**
+      Soroswap/Aquarius pool-registry maintenance on top. (Q#2 Option A.)
 - [ ] `supply-worker` writes `token_supply` into `prices.asset_supply`
       (its **sole** writer); a per-asset fetch failure is skipped
       (best-effort) and emits an informational alarm without blocking.
@@ -494,7 +510,7 @@ In the `infra/` CDK app:
 - [x] ~~`price-updater`~~ — eliminated (refreshable MV + `asset_supply`;
       open Q#1, 2026-06-25).
 
-## Dependencies (both cleared 2026-06-25)
+## Dependencies
 
 - **0011** — Lambda + EventBridge + Secrets Manager CDK scaffolding
   (no RDS/VPC under ADR 0007). **Archived (done).**
@@ -502,6 +518,11 @@ In the `infra/` CDK app:
   `current_prices` MV and the cleanup worker read it; discovery maintains
   the asset registry and the supply worker maintains `asset_supply`, both
   feeding the live path. **PR #34 merged to develop 2026-06-25.**
+- **0054** (Q#2 Option A) — delivers the Asset Discovery worker (binary +
+  CDK) that 0039's Step 5 reuses. 0039's discovery work (pool-registry
+  maintenance) is additive and sequenced **after** 0054 lands its binary.
+  Not a hard blocker on the rest of 0039 (oracle/supply/cleanup/MV proceed
+  independently).
 
 ## Out of scope
 
