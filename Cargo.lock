@@ -110,6 +110,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7c02d123df017efcdfbd739ef81735b36c5ba83ec3c59c80a9d7ecc718f92e50"
 
 [[package]]
+name = "asset-discovery"
+version = "0.1.0"
+dependencies = [
+ "clickhouse",
+ "lambda_runtime",
+ "prices-clickhouse",
+ "prices-ingest-core",
+ "prices-ledger-processor",
+ "serde",
+ "serde_json",
+ "stellar-strkey",
+ "stellar-xdr",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "async-stream"
 version = "0.3.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -1,0 +1,25 @@
+{
+  "_note": "Tranche-1 seed of major mainnet assets (task 0054). Each entry maps to a prices_ingest_core::AssetIdentity (kind = native | credit | contract). Provenance: StellarExpert public top-assets by rating (api.stellar.expert/explorer/public/asset), fetched 2026-06-25; USDC/USDT issuers cross-checked against the canonical prices_clickhouse::{USDC_ISSUER,USDT_ISSUER} constants (USDC matched exactly). Every issuer is checksum-validated as a Stellar ed25519 public key by the `seed_issuers_are_valid_strkeys` unit test, which fails the build on any malformed address. This seed only BOOTSTRAPS the obvious majors so prices.assets is non-empty at cold start; the organic ledger-scan discovery is the accurate long-term source. Do NOT fabricate issuers — a wrong issuer is a different asset.",
+  "assets": [
+    { "kind": "native" },
+    { "kind": "credit", "code": "USDC", "issuer": "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN" },
+    { "kind": "credit", "code": "USDT", "issuer": "GCQTGZQQ5G4PTM2GL7CDIFKUBIPEC52BROAQIAPW53XBRJVN6ZJVTG6V" },
+    { "kind": "credit", "code": "yUSDC", "issuer": "GDGTVWSM4MGS4T7Z6W4RPWOCHE2I6RDFCIFZGS3DOA63LWQTRNZNTTFF" },
+    { "kind": "credit", "code": "yXLM", "issuer": "GARDNV3Q7YGT4AKSDF25LT32YSCCW4EV22Y2TV3I2PU2MMXJTEDL5T55" },
+    { "kind": "credit", "code": "XRP", "issuer": "GBXRPL45NPHCVMFFAYZVUVFFVKSIZ362ZXFP7I2ETNQ3QKZMFLPRDTD5" },
+    { "kind": "credit", "code": "SSLX", "issuer": "GBHFGY3ZNEJWLNO4LBUKLYOCEK4V7ENEBJGPRHHX7JU47GWHBREH37UR" },
+    { "kind": "credit", "code": "AQUA", "issuer": "GBNZILSTVQZ4R7IKQDGHYGY2QXL5QOFJYQMXPKWRRM5PAV7Y4M67AQUA" },
+    { "kind": "credit", "code": "BTC", "issuer": "GDPJALI4AZKUU2W426U5WKMAT6CN3AJRPIIRYR2YM54TL2GDWO5O2MZM" },
+    { "kind": "credit", "code": "SHX", "issuer": "GDSTRSHXHGJ7ZIVRBXEYE5Q74XUVCUSEKEBR7UCHEUUEK72N7I7KJ6JH" },
+    { "kind": "credit", "code": "ETH", "issuer": "GBFXOHVAS43OIWNIO7XLRJAHT3BICFEIKOJLZVXNT572MISM4CMGSOCC" },
+    { "kind": "credit", "code": "ZARZ", "issuer": "GAROH4EV3WVVTRQKEY43GZK3XSRBEYETRVZ7SVG5LHWOAANSMCTJBB3U" },
+    { "kind": "credit", "code": "yBTC", "issuer": "GBUVRNH4RW4VLHP4C5MOF46RRIRZLAVHYGX45MVSTKA2F6TMR7E7L6NW" },
+    { "kind": "credit", "code": "yETH", "issuer": "GDYQNEF2UWTK4L6HITMT53MZ6F5QWO3Q4UVE6SCGC4OMEQIZQQDERQFD" },
+    { "kind": "credit", "code": "EURMTL", "issuer": "GACKTN5DAZGWXRWB2WLM6OPBDHAMT6SJNGLJZPQMEZBUR4JUGBX2UK7V" },
+    { "kind": "credit", "code": "MTL", "issuer": "GACKTN5DAZGWXRWB2WLM6OPBDHAMT6SJNGLJZPQMEZBUR4JUGBX2UK7V" },
+    { "kind": "credit", "code": "PYUSD", "issuer": "GDQE7IXJ4HUHV6RQHIUPRJSEZE4DRS5WY577O2FY6YQ5LVWZ7JZTU2V5" },
+    { "kind": "credit", "code": "EURC", "issuer": "GAQRF3UGHBT6JYQZ7YSUYCIYWAF4T2SAA5237Q5LIQYJOHHFAWDXZ7NM" },
+    { "kind": "credit", "code": "ARST", "issuer": "GCSAZVWXZKWS4XS223M5F54H2B6XPIIXZZGP7KEAIU6YSL5HDRGCI3DG" },
+    { "kind": "credit", "code": "NGNC", "issuer": "GASBV6W7GGED66MXEVC7YZHTWWYMSVYEY35USF2HJZBLABLYIFQGXZY6" }
+  ]
+}
