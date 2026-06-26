@@ -5,7 +5,7 @@ type: RESEARCH
 status: backlog
 related_adr: ["0007"]
 related_tasks: ["0045", "0046", "0044"]
-tags: [layer-research, priority-high, effort-medium, hetzner, clickhouse, throughput, capacity, cross-team]
+tags: [layer-research, priority-low, effort-medium, hetzner, clickhouse, throughput, capacity, cross-team, deferred, phase-post-deploy]
 links:
   - "../blocked/0045_RESEARCH_cross-team-bundle-with-be-on-hetzner-ch-tenancy/notes/G-be-agreement-record.md"
   - "../blocked/0045_RESEARCH_cross-team-bundle-with-be-on-hetzner-ch-tenancy/notes/G-be-conversation-brief.md"
@@ -36,9 +36,33 @@ history:
       only the local docker-compose mirror. It remains the final gate
       on ADR 0007 → accepted and on driving prices traffic at prod
       volume. (BE 0216 is a research doc, not a hard query-time gate.)
+  - date: 2026-06-26
+    status: backlog
+    who: oski
+    note: >
+      **DEFERRED — explicitly NOT a blocker for 0038 / 0040.** ADR 0007 is
+      already accepted (via 0045's closure, 2026-05-20), so this task no
+      longer gates the architecture, and the prices.* database is already
+      deployed + isolation-proven on the shared Hetzner CH (tasks
+      0052/0063). Running an isolated cross-tenant throughput probe NOW has
+      no value: there is no real prices-api read/write load to combine with
+      BE's until the full system (ledger processor + workers + API) is
+      built and deployed. So fold this verification into the real
+      build+deploy rollout and run it then, **coordinated with the BE
+      team** (joint look at `system.query_log`/`metric_log` under genuine
+      combined load). Kept in backlog, re-tagged `deferred`/`phase-post-deploy`,
+      priority dropped high → low. Do later; do not block downstream tasks
+      on it.
 ---
 
 # Cross-tenant throughput verification on shared Hetzner CH
+
+> **Status (2026-06-26): DEFERRED — not a blocker.** ADR 0007 is already
+> accepted and the prices.* DB is already live + isolation-proven on the
+> shared Hetzner CH (0052/0063). There is no real combined load to verify
+> until the full system is built and deployed, so this runs as part of that
+> rollout, **coordinated with the BE team** — not as a gate on 0038/0040.
+> Kept open for that later joint verification.
 
 ## Summary
 
