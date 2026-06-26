@@ -11,6 +11,9 @@ members = [
     "packages/prices-ingest-core",
     "packages/prices-ledger-processor",
     "packages/asset-discovery",
+    "packages/cleanup-worker",
+    "packages/supply-worker",
+    "packages/oracle-worker",
 ]
 
 [workspace.dependencies]

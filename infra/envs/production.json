@@ -5,7 +5,7 @@
   "apiGatewayThrottleBurst": 100,
   "apiGatewayPartnerDailyQuota": 10000,
   "scheduleExpressions": {
-    "priceUpdater": "rate(5 minutes)",
+    "assetSupply": "rate(1 hour)",
     "oracleWatcher": "rate(5 minutes)",
     "assetDiscovery": "rate(1 hour)",
     "cleanup": "cron(0 3 * * ? *)"
