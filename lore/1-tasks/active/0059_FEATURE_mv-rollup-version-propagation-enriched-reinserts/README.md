@@ -93,6 +93,25 @@ history:
       this task verifies now exists. Moving back to active to land the
       remaining ACs: the full _15m…_1M chain integration test +
       extending the proof harness against the real rollups.sql DDL.
+  - date: 2026-06-26
+    status: active
+    who: oski
+    note: >
+      **Remaining ACs delivered + a real bug fixed.** Authored
+      packages/prices-clickhouse/tests/rollup_chain_it.rs — a full-chain
+      (_1m → _15m → … → _1M) integration test driving the REAL shipped
+      rollups.sql, plus a preroll.sql full-range pass; both green vs docker
+      CH 25.6. The test surfaced a correctness bug in the as-shipped
+      rollups.sql AND preroll.sql: `toStartOfInterval(timestamp,…) AS
+      timestamp` shadows the source column, so argMin(open)/argMax(close)/
+      argMax(close_usd) tie-break to an arbitrary row (volumes/high/low were
+      fine). Fixed both (FROM … AS t + qualified t.timestamp) and the
+      schema-overview §3.2 reference DDL; current.sql was already correct.
+      The buggy DDL is live on ch-prod-01 (applied under 0051) → spawned
+      0071 to re-apply. All four ACs now [x]. Verified the shipped
+      max(version) projection is correct for the true-refreshable replace-mode
+      chain that 0051 actually shipped (differs from the G-note's APPEND/
+      sum(version) lock-in).
 ---
 
 # MV rollup-chain version propagation under enriched `_1m` re-inserts
@@ -172,14 +191,68 @@ contract; also implies `_1m` retention ≥ widest rollup refresh window.
 
 ## Acceptance Criteria
 
-- [~] MV chain projects a `version` that lets an enriched `_1m`
-      re-insert win at every rolled-up granularity — **semantics decided +
-      proven** (`sum(version)`/refresh-epoch, not `max(version)`); production
-      DDL lands in 0051
-- [~] No double-count / under-count of `volume_quote_usd` in `_15m … _1M`
-      after an enrichment pass — **proven on `_1m → _15m`** (re-aggregate from
-      `_1m FINAL`); full chain `_15m … _1M` verified once 0051 lands the DDL
-- [~] Integration test covering write → roll up → enrich → assert across
-      all granularities (`FINAL`) — **proof harness exists** (`proof/`, 1 hop);
-      extend to all grains against the real 0051 DDL
+- [x] MV chain projects a `version` that lets an enriched `_1m`
+      re-insert win at every rolled-up granularity — **proven against the real
+      0051 DDL** across the full `_1m → _15m → … → _1M` chain
+      (`tests/rollup_chain_it.rs`): the shipped chain is a *true* refreshable MV
+      in replace mode (atomic target swap), so `max(version)` is sufficient and
+      the enriched row wins at every grain (version advances 1 → 2).
+- [x] No double-count / under-count of `volume_quote_usd` in `_15m … _1M`
+      after an enrichment pass — **proven on the full chain**: `volume_base`
+      stays 30 (no double-count) and `volume_quote_usd` propagates 0 → 300 at
+      every grain after the enrichment re-insert + refresh.
+- [x] Integration test covering write → roll up → enrich → assert across
+      all granularities (`FINAL`) — **`tests/rollup_chain_it.rs`** drives the
+      real `rollups.sql` chain end-to-end (+ a `preroll.sql` full-range pass),
+      green against docker CH 25.6.
 - [x] 0026 G-note dependency note resolved / cross-linked
+
+## Implementation Notes
+
+Full-chain integration test landed at
+`packages/prices-clickhouse/tests/rollup_chain_it.rs` (two `#[ignore]` tests,
+scratch-DB isolated like `views_it.rs`, driven deterministically via
+`SYSTEM REFRESH VIEW` + poll like `current_mv_it.rs`). It applies the **real**
+shipped `INIT_SQL` + `ROLLUPS_SQL`, rolls a 3-minute bucket up all six grains,
+then enrichment-re-inserts (`version+1`, `volume_quote_usd` filled) and
+re-drives the chain, asserting OHLCV + version at every grain `FINAL`.
+
+**Bug found and fixed (see Design Decisions → Emerged).** The as-shipped
+`rollups.sql` / `preroll.sql` mis-computed `open`/`close`/`close_usd`. Fixed in
+both schema files + the schema-overview §3.2 reference DDL. The buggy DDL is
+live on `ch-prod-01` (applied under 0051) → re-apply spawned as **0071**.
+
+## Design Decisions
+
+### Emerged
+
+1. **`AS timestamp` bucket alias shadowed the source column (correctness bug).**
+   `toStartOfInterval(timestamp, …) AS timestamp` makes the bare `timestamp`
+   inside `argMin(open, …)` / `argMax(close, …)` / `argMax(close_usd, …)`
+   resolve to the *bucket-start* (constant within a bucket), so O/C/close_usd
+   tie-break to an arbitrary row instead of the true first/last by time. Volumes
+   (`sum`), `high`/`low` are unaffected. The 0059 desk proof only checked
+   volumes, so it never surfaced this. **Fix:** `FROM … AS t` + qualified
+   `t.timestamp` in `rollups.sql` and `preroll.sql`. `current.sql` was already
+   correct (it uses `AS c` + `c.timestamp`).
+
+2. **`max(version)` accepted (not `sum(version)`).** The G-note locked in
+   "APPEND + `sum(version)`", but 0051 actually shipped a *true* refreshable MV
+   in **replace** mode (atomic target swap) + bounded window, with `preroll.sql`
+   as the separate full-range historical path. Under atomic replace there is no
+   `ReplacingMergeTree` version tie to lose, so the shipped `max(version)` is
+   correct — the integration test confirms the enriched row wins at every grain.
+   The test asserts the shipped semantics rather than re-litigating the G-note.
+
+## Issues Encountered
+
+- **MV → target column mapping is positional, not by-name** (verified with a
+  swapped-alias `INSERT … SELECT` probe), so qualifying the source column while
+  keeping the output column aliased `timestamp` is safe.
+- `prefer_column_name_to_alias=1` is **not** a viable fix — it makes `GROUP BY
+  timestamp` bind to the raw column, shattering the bucket into per-minute rows.
+
+## Future Work
+
+- **0071** (spawned) — re-apply the corrected `rollups.sql` / `preroll.sql` to
+  the live `ch-prod-01` cluster (the buggy DDL is already deployed under 0051).
