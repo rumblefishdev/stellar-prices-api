@@ -179,6 +179,24 @@ history:
       on the public XDR). So bucketKmsKeyArn stays unset; grantRead's plain
       S3 perms suffice, no kms:Decrypt / 403 risk. Checklist item ticked.
       Stays active.
+  - date: 2026-06-26
+    status: active
+    who: oski
+    note: >
+      **Deploy gates reassessed — both external gates now clear/deferred.**
+      (1) BE 0227 (Hetzner Ansible playbook + mTLS CA + production CH
+      deploy) confirmed `completed` and archived in the BE repo, so the
+      Part-E mTLS endpoint gate is satisfied. (2) Task 0047 (cross-tenant
+      throughput verification) is explicitly **no longer a blocker**: the
+      prices.* DB is already live + isolation-proven on the shared Hetzner
+      CH (0052/0063) and ADR 0007 is accepted, so isolated verification now
+      has no value — it is deferred to run during the full-system
+      build+deploy, coordinated with the BE team (see 0047's 2026-06-26
+      note). Net: 0038 no longer waits on any cross-team/research gate; the
+      only thing between it and `done` is the actual production rollout
+      (Part E: SNS→SQS wiring, cert/Caddy CN map, cursor SSM seed, live
+      mTLS smoke) under the prepare-only policy. Stays active pending that
+      deploy go-ahead.
 ---
 
 # Prices Ledger Processor Lambda — live S3-event-driven ingestion into price_ohlcv
