@@ -2,7 +2,7 @@
 id: "0059"
 title: "MV rollup-chain version propagation under enriched `_1m` re-inserts"
 type: FEATURE
-status: blocked
+status: active
 related_adr: ["0007"]
 related_tasks: ["0026", "0051"]
 tags: [layer-database, priority-high, effort-medium, clickhouse, materialized-views, rollups]
@@ -81,6 +81,18 @@ history:
       integration test + production DDL) are gated on 0051 landing the MV
       rollup-chain DDL — the SELECT/version/refresh-window this task
       verifies does not exist until then.
+  - date: 2026-06-26
+    status: active
+    who: oski
+    note: >
+      **Unblocked — 0051 completed (archived 2026-06-22).** The MV
+      rollup-chain DDL landed in
+      packages/prices-clickhouse/schema/rollups.sql (full _1m → _15m …
+      _1M refreshable-MV chain) and was applied live on ch-prod-01
+      (CH 26.3.10), so the SELECT / projected-version / refresh-window
+      this task verifies now exists. Moving back to active to land the
+      remaining ACs: the full _15m…_1M chain integration test +
+      extending the proof harness against the real rollups.sql DDL.
 ---
 
 # MV rollup-chain version propagation under enriched `_1m` re-inserts
