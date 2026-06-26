@@ -2,7 +2,7 @@
 id: "0026"
 title: "volume_quote_usd enrichment Lambda — implement the Phase 1 spec from task 0024"
 type: FEATURE
-status: blocked
+status: active
 related_adr: ["0003", "0004", "0007"]
 related_tasks: ["0024", "0012", "0022", "0023", "0038", "0058", "0059"]
 tags: [layer-indexing, priority-medium, effort-medium, lambda, ohlcv, enrichment, oracle, phase-2, clickhouse]
@@ -71,6 +71,27 @@ history:
       G-note before any infra commitment. The production path
       compiles and passes the prototype unit suite but has NOT been
       run against a live ClickHouse.
+  - date: 2026-06-26
+    status: active
+    who: oski
+    note: >
+      **Unblocked — every dependency from the 2026-06-09 re-block has
+      resolved.** 0012 (live CH endpoint + Oracle Fetcher) ✅ completed;
+      0051 (`price_ohlcv_1m` + MV rollup-chain DDL) ✅ completed and live on
+      ch-prod-01; 0059 (rollup version propagation under enriched re-inserts)
+      ✅ completed/merged (PR #61). The `volume_quote` data dependency
+      (tracked as 0058) is satisfied: the shared
+      `prices_ingest_core::OhlcvWriter` (writer.rs:122/210) now populates
+      `volume_quote` for BOTH writer paths (sdex-backfill + the 0038
+      ledger-processor), with `volume_quote_usd` left at DEFAULT 0 for this
+      enrichment to fill. Live CH is reachable (0063 tenant + 0052 mTLS, per
+      memory). Moving blocked → active to drive the remaining
+      integration-only ACs. **Constraints carried in:** stay local-first /
+      prepare-not-deploy (no AWS deploy, EventBridge rule, or live prod
+      writes without explicit approval); the BE cross-team review of the
+      Form-B merge semantics in `notes/G-local-prototype-spec.md` is still
+      an open agenda item, not a code blocker. (Body "Context" / "blocked
+      until 0012" prose is historical — 0012 is archived/completed.)
 ---
 
 # `volume_quote_usd` enrichment Lambda — implementation
