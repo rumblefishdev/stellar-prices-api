@@ -491,22 +491,22 @@ CREATE MATERIALIZED VIEW prices.mv_ohlcv_1m_to_15m
 REFRESH EVERY 1 MINUTE                    -- coarser grains refresh less often
 TO prices.price_ohlcv_15m AS
 SELECT
-    toStartOfInterval(timestamp, INTERVAL 15 MINUTE) AS timestamp,
+    toStartOfInterval(t.timestamp, INTERVAL 15 MINUTE) AS timestamp,
     asset_id,
     quote_asset_id,
     source,
-    argMin(open,  timestamp)        AS open,
-    max(high)                        AS high,
+    argMin(open,  t.timestamp)      AS open,    -- qualified: the AS-timestamp
+    max(high)                        AS high,   -- alias shadows the source column
     min(low)                         AS low,
-    argMax(close, timestamp)         AS close,
+    argMax(close, t.timestamp)       AS close,
     sum(volume_base)                 AS volume_base,
     sum(volume_quote)                AS volume_quote,
     sum(volume_quote_usd)            AS volume_quote_usd,
     volume_quote_usd / nullIf(volume_base, 0) AS vwap,   -- ref aliases, never re-sum(…)
     sum(trade_count)                 AS trade_count,
     max(version)                     AS version
-FROM prices.price_ohlcv_1m FINAL             -- post-dedup, post-enrichment
-WHERE timestamp >= now() - INTERVAL 2 HOUR   -- bounded re-scan; widen for coarse grains
+FROM prices.price_ohlcv_1m AS t FINAL          -- post-dedup, post-enrichment
+WHERE t.timestamp >= now() - INTERVAL 2 HOUR   -- bounded re-scan; widen for coarse grains
 GROUP BY timestamp, asset_id, quote_asset_id, source;
 
 -- Repeat for 15m → 1h, 1h → 4h, 4h → 1d, 1d → 1w, 1w → 1M — each FROM the
@@ -525,6 +525,15 @@ volume_base, 0)`), never `sum(…)/sum(…)` — re-summing an aliased column ne
   an early minute leaves the bucket max unchanged, tying the stale and corrected
   rollup rows; project a strictly-increasing version (`sum(version)` or a
   refresh epoch) there.
+- **Qualify the bucket-time argument.** The bucket key is aliased `AS timestamp`
+  to land in the target's `timestamp` column, but that alias **shadows** the
+  source `timestamp` column. `argMin(open, …)` / `argMax(close, …)` /
+  `argMax(close_usd, …)` must therefore reference the **qualified** source column
+  `t.timestamp` (`FROM … AS t`). With the bare `timestamp` they read the
+  constant bucket-start, so open/close/close_usd tie-break to an arbitrary row in
+  the bucket instead of the true first/last by time. The 0059 full-chain
+  integration test (`prices-clickhouse/tests/rollup_chain_it.rs`) caught this in
+  the as-shipped `rollups.sql` / `preroll.sql`; both are fixed.
 
 Refreshable MVs require ClickHouse ≥ 23.12; the exact mechanism (refreshable MV
 vs. scheduled re-aggregate) is finalised in task **0051** against the Hetzner
