@@ -244,6 +244,34 @@ live on `ch-prod-01` (applied under 0051) → re-apply spawned as **0071**.
    correct — the integration test confirms the enriched row wins at every grain.
    The test asserts the shipped semantics rather than re-litigating the G-note.
 
+3. **Pin the local/CI ClickHouse to the EXACT production version.** Code review
+   flagged that the new integration test was being validated against
+   `docker-compose.yml`'s `clickhouse-server:25.6` (`25.6.13.41`), while
+   `ch-prod-01` runs **`26.3.10.60`** (per the 0051 G-live-schema-state note and
+   0063 provisioning verification) — a 25.x → 26.x major gap. Refreshable-MV
+   semantics, SQL alias resolution and date/time functions can all differ across
+   CH releases, so "green locally" was not evidence for the engine the DDL
+   actually runs on. **Decision:** pin `docker-compose.yml` to the exact prod
+   version `clickhouse/clickhouse-server:26.3.10.60` and re-run the full
+   `prices-clickhouse` suite against it (rollup_chain, current_mv, views — all
+   green). Policy going forward: local/CI must match the live `ch-prod-01`
+   version; re-check `SELECT version()` on prod before bumping the pin. (This
+   strengthens — but does not replace — the live re-verify owed by **0071** on
+   the production cluster itself.)
+
+4. **Flaky test anchor made deterministic + version-robust.** The first cut of
+   `insert_bucket` embedded `toStartOfInterval(now(), …)`, re-evaluated
+   server-side at *each* INSERT; the un-enriched and enriched batches are
+   separate INSERTs with the whole chain-drive between them, so a wall-clock
+   15-minute boundary crossing would anchor them to different buckets → no
+   `ReplacingMergeTree` dedup → `_1m FINAL` keeps all 6 rows and the
+   single-bucket / no-double-count assertions fail. **Fix:** `bucket_anchor()`
+   fetches the boundary **once** as a `toUInt64(toUnixTimestamp(…))` integer
+   epoch and rebuilds it as `toDateTime(<n>)`, reused for every INSERT. The epoch
+   round-trip (not `formatDateTime`, whose `%i`/`%M` specifiers are a portability
+   liability across CH versions) keeps it correct regardless of server version or
+   timezone.
+
 ## Issues Encountered
 
 - **MV → target column mapping is positional, not by-name** (verified with a

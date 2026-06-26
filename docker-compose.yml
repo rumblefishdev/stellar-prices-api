@@ -1,6 +1,10 @@
 services:
   clickhouse:
-    image: clickhouse/clickhouse-server:25.6
+    # Pinned to the EXACT version running on ch-prod-01 (Hetzner) so local/CI
+    # tests exercise the same engine as production — refreshable-MV semantics,
+    # alias resolution and date/time functions can differ across CH releases.
+    # Before changing this, re-check the live `SELECT version()` on ch-prod-01.
+    image: clickhouse/clickhouse-server:26.3.10.60
     ports:
       - '8123:8123'
       - '9000:9000'

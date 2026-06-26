@@ -37,17 +37,44 @@ fn rewrite(sql: &str, db: &str) -> String {
         .replace("IF NOT EXISTS prices", &format!("IF NOT EXISTS {db}"))
 }
 
+/// Fetch a single fixed 15-minute bucket boundary from the server, returned as
+/// a `toDateTime('…')` SQL literal. Computed ONCE per test and reused for every
+/// INSERT (see [`insert_bucket`]) so the un-enriched and enriched batches share
+/// identical row timestamps — i.e. identical PKs. If each INSERT re-evaluated
+/// `toStartOfInterval(now(), …)` instead, a wall-clock 15-minute boundary
+/// crossing between the two batches (the chain drive in between can take tens of
+/// seconds) would anchor them to different buckets: the enrichment re-INSERT
+/// would no longer dedup against the original under `ReplacingMergeTree(version)`,
+/// leaving `_1m FINAL` with all 6 rows (volume_base 60, two `_15m` buckets) and
+/// breaking the single-bucket / no-double-count assertions.
+async fn bucket_anchor(client: &Client) -> String {
+    // Freeze the boundary as an integer epoch and rebuild it with `toDateTime`.
+    // Round-tripping through a Unix timestamp (not `formatDateTime`/string
+    // parsing) keeps this independent of format-specifier and timezone
+    // behaviour, which need not be identical between the local/CI ClickHouse and
+    // the older/newer server version running on the cluster.
+    let epoch: u64 = client
+        .query("SELECT toUInt64(toUnixTimestamp(toStartOfInterval(now(), INTERVAL 15 MINUTE)))")
+        .fetch_one()
+        .await
+        .expect("fetch bucket anchor");
+    format!("toDateTime({epoch})")
+}
+
 /// One 15-minute bucket of three per-minute `_1m` rows for a single
 /// `(asset 1, quote 2, sdex)` series, all anchored to the PREVIOUS completed
-/// 15-minute bucket (12–14 min before the current boundary) so they:
+/// 15-minute bucket (12–14 min before `anchor`, a fixed boundary from
+/// [`bucket_anchor`]) so they:
 ///   - share one `_15m`/`_1h`/.../`_1M` bucket at every grain, and
 ///   - sit comfortably inside every rollup `WHERE timestamp >= now() - …`
 ///     window (the tightest is `_15m`'s 2 HOUR).
 ///
+/// `anchor` is reused across every INSERT in a test so enrichment re-INSERTs
+/// share the original rows' timestamps (PKs) — see [`bucket_anchor`].
 /// `vqusd` is the per-row `volume_quote_usd` (0 = un-enriched, >0 = enriched);
 /// `version` is the `ReplacingMergeTree(version)` discriminator.
-fn insert_bucket(db: &str, vqusd: &str, version: u64) -> String {
-    let b = "toStartOfInterval(now(), INTERVAL 15 MINUTE)";
+fn insert_bucket(db: &str, anchor: &str, vqusd: &str, version: u64) -> String {
+    let b = anchor;
     format!(
         "INSERT INTO {db}.price_ohlcv_1m \
          (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
@@ -206,9 +233,14 @@ async fn enrichment_propagates_through_full_rollup_chain() {
         .await
         .expect("create rollup MV chain");
 
+    // One fixed bucket boundary, reused by BOTH the un-enriched and the enriched
+    // INSERT so the enrichment re-INSERT dedups against the original (same PKs)
+    // even if wall-clock crosses a 15-minute boundary mid-test.
+    let anchor = bucket_anchor(&admin).await;
+
     // ---- Phase 1: un-enriched (volume_quote_usd = 0), roll up the full chain.
     admin
-        .query(&insert_bucket(db, "0", 1))
+        .query(&insert_bucket(db, &anchor, "0", 1))
         .execute()
         .await
         .expect("insert un-enriched _1m bucket");
@@ -234,8 +266,9 @@ async fn enrichment_propagates_through_full_rollup_chain() {
     }
 
     // ---- Phase 2: enrichment re-INSERT — fill volume_quote_usd, bump version.
+    // Same `anchor` as Phase 1 → same timestamps → ReplacingMergeTree dedup.
     admin
-        .query(&insert_bucket(db, "100", 2))
+        .query(&insert_bucket(db, &anchor, "100", 2))
         .execute()
         .await
         .expect("insert enriched _1m bucket");
@@ -298,8 +331,9 @@ async fn preroll_reaggregates_full_chain_ohlc_correctly() {
         .await
         .expect("apply init schema");
 
+    let anchor = bucket_anchor(&admin).await;
     admin
-        .query(&insert_bucket(db, "100", 1))
+        .query(&insert_bucket(db, &anchor, "100", 1))
         .execute()
         .await
         .expect("insert _1m bucket");
