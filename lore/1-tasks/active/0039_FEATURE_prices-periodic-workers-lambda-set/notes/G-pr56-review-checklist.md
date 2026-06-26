@@ -61,7 +61,9 @@ Issues to resolve, ranked most-severe first. Check off as fixed.
 
 ## Non-blocking note
 
-- [ ] **CI builds no Lambda bootstrap binaries** — `cdk synth` needs a manual `cargo lambda build -p {cleanup,supply,oracle}-worker --release --arm64`. Pre-existing gap, now ×3; consider a CI build/guard.
+- [x] **CI builds no Lambda bootstrap binaries** — `cdk synth` needs a manual `cargo lambda build -p {cleanup,supply,oracle}-worker --release --arm64`. Pre-existing gap, now ×3; consider a CI build/guard.
+  *Fixed:* added a Lambda build+verify guard to the `rust` job in `.github/workflows/ci.yml`, on a native ARM runner (`ubuntu-24.04-arm`) so `--arm64` is a plain native build (no zig/cross-compile), with `cargo-lambda` installed via pip — adapting the BE repo's pattern ([[be-ci-lambda-build-pattern]]).
+  **Verified locally (x86 + zig cross-build) — and this caught a real bug in the first attempt:** every Lambda bin is gated behind `required-features = ["lambda"]`, so a bare `cargo lambda build --release --arm64` (BE's exact command) silently SKIPS all five deploy bins and packages only unrelated CLIs (`prices-cli`, `sdex-backfill`, `prices-clickhouse-init`) — a `failglob "any bootstrap"` check would false-pass. Corrected command: `cargo lambda build --release --arm64 --features lambda -p prices-ledger-processor -p asset-discovery -p cleanup-worker -p supply-worker -p oracle-worker`. The verify step now asserts each of the **five** expected `target/lambda/<name>/bootstrap` paths exists (not just "any"). Proven end-to-end: build → all 5 real arm64 ELF bootstraps → full `cdk synth` of the production app succeeds. Also corrected the now-wrong build-command comments in `asset-discovery`/`cleanup-worker` `Cargo.toml` (were missing `--features lambda`). `ci.yml` is in the `rust` paths filter, so the guard runs on this PR.
 
 ## Verified OK (no action)
 

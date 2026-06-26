@@ -10,7 +10,8 @@ path = "src/lib.rs"
 
 # EventBridge cron(0 2 * * *) Lambda entrypoint. Behind `lambda` so default
 # build/test stays lean. Deployable: cargo lambda build -p cleanup-worker
-# --release --arm64 (ADR 0006).
+# --release --arm64 --features lambda (the `lambda` feature is required or
+# the bin is skipped; ADR 0006).
 [[bin]]
 name = "cleanup-worker"
 path = "src/main.rs"

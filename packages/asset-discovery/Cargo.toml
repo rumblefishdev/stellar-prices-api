@@ -11,7 +11,8 @@ path = "src/lib.rs"
 # The EventBridge-scheduled Lambda entrypoint. Behind `lambda` so a default
 # `cargo build` (and `cargo test` for the lib + seed logic) stays lean — no
 # lambda_runtime / aws-config / rustls mTLS stack. Build the deployable with
-# `cargo lambda build -p asset-discovery --release --arm64` (ADR 0006).
+# `cargo lambda build -p asset-discovery --release --arm64 --features lambda`
+# (the `lambda` feature is required or the bin is skipped; ADR 0006).
 [[bin]]
 name = "asset-discovery"
 path = "src/main.rs"
