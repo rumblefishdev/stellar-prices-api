@@ -2,7 +2,7 @@
 id: "0059"
 title: "MV rollup-chain version propagation under enriched `_1m` re-inserts"
 type: FEATURE
-status: active
+status: completed
 related_adr: ["0007"]
 related_tasks: ["0026", "0051"]
 tags: [layer-database, priority-high, effort-medium, clickhouse, materialized-views, rollups]
@@ -112,6 +112,21 @@ history:
       max(version) projection is correct for the true-refreshable replace-mode
       chain that 0051 actually shipped (differs from the G-note's APPEND/
       sum(version) lock-in).
+  - date: 2026-06-26
+    status: completed
+    who: oski
+    note: >
+      **Done — merged (PR #61, merge commit e216ac4) and archived.** All 4 ACs
+      [x]. Shipped: full-chain integration test
+      (packages/prices-clickhouse/tests/rollup_chain_it.rs, 2 #[ignore] tests)
+      driving the real rollups.sql + preroll.sql; argMin/argMax timestamp-
+      shadowing fix in rollups.sql + preroll.sql + schema-overview §3.2.
+      Post-review (Emerged #3/#4): pinned docker-compose CH to the EXACT prod
+      version 26.3.10.60 (was 25.6) and made the test anchor deterministic /
+      version-robust (epoch round-trip). Full prices-clickhouse suite re-verified
+      green on 26.3.10.60 (lib 5, rollup_chain 2, current_mv 1, views 2; clippy
+      clean; rollup_chain 6×6 repeat). Spawned 0071 for the live ch-prod-01
+      re-apply (out of scope here — prepare-not-deploy).
 ---
 
 # MV rollup-chain version propagation under enriched `_1m` re-inserts
