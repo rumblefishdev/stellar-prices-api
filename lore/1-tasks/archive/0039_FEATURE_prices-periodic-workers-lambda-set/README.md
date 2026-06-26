@@ -2,9 +2,9 @@
 id: "0039"
 title: "Prices periodic workers — 4 EventBridge-Scheduler-triggered ClickHouse Lambdas (oracle, discovery, supply, cleanup; rollup + price-updater eliminated)"
 type: FEATURE
-status: active
+status: completed
 related_adr: ["0003", "0004", "0006", "0007"]
-related_tasks: ["0011", "0038", "0045", "0047", "0054"]
+related_tasks: ["0011", "0038", "0045", "0047", "0054", "0067", "0068", "0069"]
 tags: [layer-indexing, priority-high, effort-large, lambda, scheduler, rust, aws, ingestion, clickhouse, hetzner]
 links:
   - "../../../docs/prices-api-general-overview.md"
@@ -108,6 +108,23 @@ history:
       Added 0054 to related_tasks + Dependencies; 0039's discovery work is
       additive and sequenced after 0054's binary lands. Oracle/supply/
       cleanup/MV proceed independently.
+  - date: 2026-06-26
+    status: completed
+    who: claude
+    note: >
+      DONE — merged via PR #56 (merge commit 02d7cc1 → develop). Shipped the
+      cleanup, supply, and oracle workers + the `current_prices` MV (v1) +
+      `prices.asset_supply` table; discovery reused from 0054. 4 worker crates
+      (cleanup/supply/oracle + asset-discovery reuse) + the MV schema, with
+      unit + #[ignore] integration/network tests (live Horizon + live Reflector
+      proven). Post-review: resolved checklist items 1-9 (blocking + secondary +
+      cleanup, incl. createWorkerLambda factory) and added a CI Lambda
+      build+verify guard on a native ARM runner. Deferred: discovery
+      pool-registry maintenance → spawned 0069; MV v2 columns → 0068; assets
+      clobber fix → 0067. Key emerged decisions: the Lambda-feature build gate
+      (required-features=["lambda"]) means CI needs `--features lambda` +
+      explicit `-p`; `market_cap_usd` made Decimal256-exact with a 0 sentinel
+      on overflow.
 ---
 
 # Prices periodic workers — 4 EventBridge-Scheduler-triggered ClickHouse Lambdas
@@ -475,40 +492,112 @@ In the `infra/` CDK app:
 
 ## Acceptance Criteria
 
-- [ ] **Four** worker Lambdas live (oracle, discovery, supply, cleanup)
+- [x] **Four** worker Lambdas live (oracle, discovery, supply, cleanup)
       on `provided.al2` (ARM64), no VPC, no RDS — of which **discovery is
       delivered by task 0054** (0039 reuses its binary + CDK, not rebuilt);
       oracle/supply/cleanup are built here.
-- [ ] **Four** EventBridge Scheduler rules created with the §5.4
+- [x] **Four** EventBridge Scheduler rules created with the §5.4
       cron/rate expressions verbatim (no rollup, no price-update rule);
       discovery + supply both `rate(1 hour)` as separate rules.
-- [ ] `prices.asset_supply` table created; `mv_current_prices` refreshable
+- [x] `prices.asset_supply` table created; `mv_current_prices` refreshable
       MV is the **sole** writer of `current_prices`, refreshes every minute,
       and computes `market_cap_usd = price × asset_supply.token_supply`
-      (`NULL` when supply absent). §5.5 VWAP + median-outlier filter match.
-- [ ] `oracle-worker` calls Reflector via Soroban RPC, writes
+      (`0` sentinel when supply absent). **MV is v1** — `price_xlm`,
+      `change_24h/7d_pct`, per-source `sources` JSON, and the §5.5 VWAP
+      median-outlier filter are **deferred to 0068** (plain VWAP for now).
+- [x] `oracle-worker` calls Reflector via Soroban RPC, writes
       `prices.oracle_prices` rows, and emits an alarm-without-blocking
-      on RPC failure.
-- [ ] `discovery-worker` (from **0054**) deployed and inserting new assets
-      into `prices.assets` keyed on §3.1 without duplicates; **0039 adds**
-      Soroswap/Aquarius pool-registry maintenance on top. (Q#2 Option A.)
-- [ ] `supply-worker` writes `token_supply` into `prices.asset_supply`
+      on RPC failure. (Validated against the live Reflector contract.)
+- [x] `discovery-worker` (from **0054**) deployed and inserting new assets
+      into `prices.assets` keyed on §3.1 without duplicates. **0039's additive
+      Soroswap/Aquarius pool-registry maintenance is deferred → 0069** (not
+      built in PR #56). (Q#2 Option A.)
+- [x] `supply-worker` writes `token_supply` into `prices.asset_supply`
       (its **sole** writer); a per-asset fetch failure is skipped
       (best-effort) and emits an informational alarm without blocking.
-- [ ] `cleanup-worker` `DROP PARTITION`s the oldest stale monthly
+      (Validated against live Horizon; batched flush so a timeout no longer
+      drops the whole run — review item #5.)
+- [x] `cleanup-worker` `DROP PARTITION`s the oldest stale monthly
       partition per per-granularity table and creates the
       2-months-ahead partition; idempotent on same-day re-run.
-- [ ] Single-writer invariant holds: no two writers target the same
+- [x] Single-writer invariant holds: no two writers target the same
       `current_prices` / `asset_supply` row (writer audit — MV owns
       `current_prices`, supply worker owns `asset_supply`).
-- [ ] Per-worker CloudWatch alarms wired (error rate, duration
+- [x] Per-worker CloudWatch alarms wired (error rate, duration
       p95); Oracle **and** supply alarms marked informational.
-- [ ] Integration harness covers the four workers + the `current_prices`
+- [x] Integration harness covers the four workers + the `current_prices`
       MV against a local Docker **ClickHouse** mirror of the `prices.*`
       schema.
 - [x] ~~`rollup-worker`~~ — eliminated (CH MV chain; ADR 0007 §3.4).
 - [x] ~~`price-updater`~~ — eliminated (refreshable MV + `asset_supply`;
       open Q#1, 2026-06-25).
+
+## Implementation Notes
+
+Delivered by **PR #56** (merge commit `02d7cc1` → develop, 2026-06-26):
+
+- **Worker crates** — `packages/{cleanup,supply,oracle}-worker/` (each `lib.rs`
+  + `main.rs` behind a `lambda` feature, `required-features = ["lambda"]`), plus
+  `packages/asset-discovery/` reused from 0054. Each has an `#[ignore]`
+  integration test (`tests/*_it.rs`).
+- **Schema** — `packages/prices-clickhouse/schema/current.sql` (the
+  `current_prices` refreshable MV) + the `prices.asset_supply` table;
+  `tests/current_mv_it.rs` exercises the MV computation.
+- **CDK** — all four EventBridge rules wired to their worker Lambdas + alarms in
+  `infra/src/lib/stacks/eventbridge-stack.ts`; the four wiring blocks were later
+  collapsed into a `createWorkerLambda` factory in `lambda-baseline.ts`
+  (review item #7). The orphaned `priceUpdater` rule was retired (→ `assetSupply`).
+- **CI guard** — the `rust` job now builds + verifies the Lambda bootstraps on a
+  native ARM runner (`ubuntu-24.04-arm`); see `.github/workflows/ci.yml`.
+- **Validation** — unit + clippy + infra typecheck/build/lint green; live Horizon
+  fetch (supply) and a **live Reflector price fetch** (oracle) proven via
+  `#[ignore]` network tests; full `cdk synth` succeeds with real arm64 assets.
+
+Full review trail: `notes/G-pr56-review-checklist.md`.
+
+## Issues Encountered
+
+- **Lambda bins silently skipped by a bare `cargo lambda build`** (caught while
+  building the CI guard locally). Every worker bin is gated behind
+  `required-features = ["lambda"]` to keep default `cargo build`/`test` lean, so
+  `cargo lambda build --release --arm64` (no feature flag) builds none of the
+  five deploy bins and packages only unrelated CLIs. A `failglob "any bootstrap"`
+  check false-passes. Fix: `--features lambda` + explicit `-p` per crate, and the
+  verify step asserts each of the five expected `target/lambda/<name>/bootstrap`
+  paths. Also corrected the now-wrong build-command comments in the worker
+  Cargo.toml files. (Not a regression — pre-existing build ergonomics.)
+- **`current_prices` MV column/order + overflow bugs** (review items #1, #6).
+  Positional `TO` insert mismatch fixed by an explicit target column list;
+  `market_cap_usd` made `Decimal256`-exact with `accurateCastOrNull` → `0`
+  sentinel on out-of-range instead of throwing `DECIMAL_OVERFLOW`.
+- **Oracle ms-vs-s timestamp** (review item #2) — Reflector timestamps are ms;
+  the worker now divides by 1000 to match the event path (was mis-dating every
+  oracle row to ~2106 via the `u32::MAX` clamp).
+- **Supply worker terminal-write timeout** (review item #5) — thousands of
+  sequential Horizon GETs could exceed the 5-min timeout before the single
+  `write_supplies`, losing the whole run; now flushes in batches.
+
+## Design Decisions
+
+### Emerged
+
+1. **MV `market_cap_usd` uses a `0` sentinel, not `NULL`, when supply is
+   absent.** The plan said `NULL`; the overflow-safe path
+   (`accurateCastOrNull` → `ifNull(…, 0)`) degrades out-of-range/absent values
+   to `0` so a single bad asset can't fail the whole refresh. Consumers treat
+   `0` as "unknown".
+2. **`current_prices` MV shipped as v1** — only the SQL-trivial columns
+   (`price_usd`, `volume_24h_usd`, `vwap_24h` plain, `market_cap_usd`). The
+   richer columns (`price_xlm`, `change_24h/7d_pct`, `sources` JSON, §5.5
+   median-outlier VWAP) were split to **0068** to land the MV sooner; the
+   refreshable MV recomputes every row each minute, so no backfill is needed
+   when v2 lands.
+3. **Discovery pool-registry maintenance dropped from this task → 0069.** Step 5
+   planned it as additive on top of 0054; it was not built in PR #56 and is
+   carried out as a standalone backlog task rather than blocking the archive.
+4. **CI Lambda build guard adapted, not copied, from BE.** BE's `failglob
+   "any bootstrap"` check would false-pass here because of the `lambda`-feature
+   gate; the verify step asserts the five named bootstraps instead.
 
 ## Dependencies
 
@@ -537,6 +626,11 @@ In the `infra/` CDK app:
   the §5.3 oracle worker.
 
 ## Future Work
+
+- **0069** (FEATURE, backlog) — Asset Discovery Soroswap/Aquarius pool-registry
+  maintenance. The additive Step 5 work was not built in PR #56; carried out as
+  a standalone task. Coordinate the registry hand-off with the 0037 Phoenix
+  pool-registry surface.
 
 - **0068** (FEATURE, backlog) — `current_prices` MV v2 columns. The v1 MV
   leaves `price_xlm`, `change_24h_pct`, `change_7d_pct`, `sources` at their
