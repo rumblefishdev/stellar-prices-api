@@ -47,8 +47,9 @@ Issues to resolve, ranked most-severe first. Check off as fixed.
 
 ## Cleanup / altitude
 
-- [ ] **7. Three near-identical ~40-line Lambda wiring blocks** — `infra/src/lib/stacks/eventbridge-stack.ts:228`
+- [x] **7. Three near-identical ~40-line Lambda wiring blocks** — `infra/src/lib/stacks/eventbridge-stack.ts:228`
   Extract a `createWorkerLambda({name, assetDir, rule, memory, timeout, alarmPeriod, env})` factory for cleanup/supply/oracle (and asset-discovery).
+  *Fixed:* added `createWorkerLambda(scope, props)` to `lambda-baseline.ts` (role + log group + ARM64 function + rule target + error alarm; returns `{function, role}` so asset-discovery still grants S3 read on its `role`). All four blocks now call it; asset-discovery passes its extra env (`BUCKET_NAME`, `STELLAR_NETWORK_PASSPHRASE`) via `environment`. Construct ids preserved (`${idPrefix}Role/LogGroup/Function/ErrorAlarm`) → `cdk synth` diff vs HEAD is empty except one cosmetic env-map key reorder (no deploy effect). typecheck + lint green.
 
 - [x] **8. `symbol_to_identity` duplicates private `reflector_key_to_identity` and has drifted** — `packages/oracle-worker/src/lib.rs:62`
   Core maps `native`+`XLM`; copy maps only `XLM`. Make `reflector_key_to_identity` `pub` and reuse it.

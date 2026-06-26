@@ -1,4 +1,7 @@
 import * as cdk from 'aws-cdk-lib';
+import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
+import type * as events from 'aws-cdk-lib/aws-events';
+import * as targets from 'aws-cdk-lib/aws-events-targets';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as logs from 'aws-cdk-lib/aws-logs';
@@ -144,3 +147,123 @@ export const PRICES_LAMBDA_LOG_RETENTION = logs.RetentionDays.ONE_MONTH;
  * Per-env override can be added if production needs RETAIN.
  */
 export const PRICES_LAMBDA_LOG_REMOVAL_POLICY = cdk.RemovalPolicy.DESTROY;
+
+export interface WorkerLambdaProps extends BaselineLambdaContext {
+  /**
+   * PascalCase base for the construct (logical) ids: `${idPrefix}Role`,
+   * `${idPrefix}LogGroup`, `${idPrefix}Function`, `${idPrefix}ErrorAlarm`.
+   * Must match the existing ids so CloudFormation does not replace
+   * resources (e.g. `Cleanup`, `Supply`, `Oracle`, `AssetDiscovery`).
+   */
+  readonly idPrefix: string;
+  /**
+   * Short kebab name used for the physical resource names:
+   * `prices-{env}-{name}` (function), the log group suffix, and the
+   * `prices-{env}-{name}-errors` alarm (e.g. `cleanup`, `supply`,
+   * `oracle`, `asset-discovery`).
+   */
+  readonly name: string;
+  /** cargo-lambda `bootstrap` asset directory for this worker. */
+  readonly assetDir: string;
+  readonly memorySize: number;
+  readonly timeout: cdk.Duration;
+  /** Shared Secrets Manager extension layer (one per stack). */
+  readonly secretsExtensionLayer: lambda.ILayerVersion;
+  /** ClickHouse mTLS endpoint (`CH_DOMAIN`). */
+  readonly chDomain: string;
+  /**
+   * Worker-specific environment variables. Merged over the common set
+   * every worker gets (`ENV_NAME`, `RUST_LOG`, `CH_DOMAIN`,
+   * `MTLS_SECRET_NAME`, `PARAMETERS_SECRETS_EXTENSION_CACHE_ENABLED`).
+   */
+  readonly environment?: Record<string, string>;
+  /** EventBridge rule wired as the worker's invocation target. */
+  readonly rule: events.Rule;
+  readonly alarmDescription: string;
+  /** Period over which the error alarm sums invocation errors. */
+  readonly alarmPeriod: cdk.Duration;
+}
+
+export interface WorkerLambda {
+  readonly function: lambda.Function;
+  readonly role: iam.Role;
+}
+
+/**
+ * Builds one periodic prices-api worker Lambda end to end: baseline IAM
+ * role, log group, `Function` (ARM64 + PROVIDED_AL2023), EventBridge rule
+ * target, and an informational error alarm. Collapses the four
+ * near-identical wiring blocks (asset-discovery, cleanup, supply, oracle)
+ * into a single factory.
+ *
+ * Returns the `function` and `role` so callers can attach worker-specific
+ * permissions afterwards (e.g. asset-discovery grants S3 read on BE's
+ * ledger bucket via `role`).
+ */
+export function createWorkerLambda(
+  scope: Construct,
+  props: WorkerLambdaProps,
+): WorkerLambda {
+  const {
+    config,
+    accountId,
+    mtlsSecretName,
+    idPrefix,
+    name,
+    assetDir,
+    memorySize,
+    timeout,
+    secretsExtensionLayer,
+    chDomain,
+    rule,
+    alarmDescription,
+    alarmPeriod,
+  } = props;
+  const env = config.envName;
+
+  const role = createPricesLambdaRole(scope, `${idPrefix}Role`, {
+    config,
+    accountId,
+    mtlsSecretName,
+  });
+
+  const logGroup = new logs.LogGroup(scope, `${idPrefix}LogGroup`, {
+    logGroupName: lambdaLogGroupName(env, name),
+    retention: PRICES_LAMBDA_LOG_RETENTION,
+    removalPolicy: PRICES_LAMBDA_LOG_REMOVAL_POLICY,
+  });
+
+  const fn = new lambda.Function(scope, `${idPrefix}Function`, {
+    ...pricesLambdaDefaults, // ARM64 + PROVIDED_AL2023 (ADR 0006/0007)
+    functionName: `prices-${env}-${name}`,
+    handler: 'bootstrap',
+    code: lambda.Code.fromAsset(assetDir),
+    role,
+    logGroup,
+    memorySize,
+    timeout,
+    tracing: lambda.Tracing.ACTIVE,
+    layers: [secretsExtensionLayer],
+    environment: {
+      ENV_NAME: env,
+      RUST_LOG: 'info',
+      CH_DOMAIN: chDomain,
+      MTLS_SECRET_NAME: mtlsSecretName,
+      PARAMETERS_SECRETS_EXTENSION_CACHE_ENABLED: 'true',
+      ...props.environment,
+    },
+  });
+
+  rule.addTarget(new targets.LambdaFunction(fn));
+
+  new cloudwatch.Alarm(scope, `${idPrefix}ErrorAlarm`, {
+    alarmName: `prices-${env}-${name}-errors`,
+    alarmDescription,
+    metric: fn.metricErrors({ period: alarmPeriod, statistic: 'Sum' }),
+    threshold: 1,
+    evaluationPeriods: 1,
+    treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+  });
+
+  return { function: fn, role };
+}
