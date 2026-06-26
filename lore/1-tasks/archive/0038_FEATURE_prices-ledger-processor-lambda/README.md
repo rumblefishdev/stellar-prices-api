@@ -2,9 +2,9 @@
 id: "0038"
 title: "Prices Ledger Processor Lambda — live S3-event-driven ingestion into price_ohlcv"
 type: FEATURE
-status: active
+status: completed
 related_adr: ["0001", "0003", "0004", "0005", "0006", "0007"]
-related_tasks: ["0011", "0037", "0045", "0047", "0048", "0050"]
+related_tasks: ["0011", "0037", "0045", "0047", "0048", "0050", "0070"]
 tags: [layer-indexing, priority-high, effort-large, milestone-M1, stream-1, lambda, ingestion, rust, aws, clickhouse, hetzner]
 milestone: 1
 links:
@@ -197,6 +197,20 @@ history:
       (Part E: SNS→SQS wiring, cert/Caddy CN map, cursor SSM seed, live
       mTLS smoke) under the prepare-only policy. Stays active pending that
       deploy go-ahead.
+  - date: 2026-06-26
+    status: completed
+    who: oski
+    note: >
+      DONE (code-complete) and archived. All engineering acceptance
+      criteria met (shared `prices-ingest-core`, S3 fetcher, ClickHouse
+      mTLS sink, idempotent doorbell-cursor reconcile loop, real-fixture
+      e2e, CDK SNS→SQS doorbell wiring, docs) and merged via PR #34. No
+      blockers remain. The three deferred criteria are **pure production
+      deployment** (live mTLS write, `lag_seconds` metric+alarm, cursor SSM
+      seed) — split into new task **0070** (M1 Part E deploy runbook) so
+      this code-complete task can close while the operator/cross-team
+      rollout is tracked separately for the milestone-1 plan. Stale
+      `## Blocked on` (0011/0037) corrected — both archived.
 ---
 
 # Prices Ledger Processor Lambda — live S3-event-driven ingestion into price_ohlcv
@@ -364,18 +378,20 @@ In `infra/aws-cdk/` (created by 0011):
 - [x] Lambda registered as the prices SNS→SQS doorbell target via CDK
       (`infra/.../compute-stack.ts`, prepare-only — 2026-06-10).
 - [ ] `prices.ledger_processor.lag_seconds` CloudWatch metric + >60s
-      alarm — **deferred** (CW emit is a deploy concern; spec Part E).
-- [ ] Live mTLS write against the Hetzner `prices` DB — **deferred**
-      (prepare-not-deploy; transport already proven by task 0052's smoke).
+      alarm — **deploy-only, moved to 0070** (CW emit is a deploy concern).
+- [ ] Live mTLS write against the Hetzner `prices` DB — **deploy-only, moved
+      to 0070** (transport already proven by task 0052's smoke).
 
 ## Blocked on
 
-- **0011** — RDS + CDK Lambda stack scaffolding + SSM platform
-  lookups (VPC, BE bucket ARN). Without 0011, this Lambda has
-  no target DB and no CDK stack to live in.
-- **0037** — `packages/ledger-processor::dispatch` kernel and
-  the `SwapExtractor` trait surface. Without 0037, this task
-  has no extraction primitive to call.
+_None remaining — both original blockers are archived (done):_
+
+- ~~**0011**~~ — CDK + SSM-platform-lookup scaffolding. **Archived.**
+- ~~**0037**~~ — `packages/ledger-processor::dispatch` kernel + `SwapExtractor`
+  surface. **Archived.**
+
+Production deployment is tracked separately by **0070** (M1 Part E rollout) —
+not a blocker on this code-complete task.
 
 ## Deploy prerequisites (operator)
 
@@ -553,6 +569,7 @@ when fixtures are absent. Intentional, not a regression.
 - **0066** — `cargo-lambda-cdk` `RustFunction` + CloudWatch
   `lag_seconds` metric/alarm, and unify the dual rustls (0.21 from
   `aws-sdk-s3` vs 0.23 from mTLS) to shrink the Lambda ZIP.
-- Production deploy + live end-to-end smoke — spec Part E, still gated
-  on BE 0227 + task 0047 (not a standalone backlog item; unblocks with
-  those gates).
+- **0070** — production deploy + live end-to-end mTLS smoke (spec Part E).
+  All gates now clear (BE 0227 done; 0047 deferred); spawned as a standalone
+  M1 deploy task carrying this task's three deferred deploy criteria + the
+  full rollout runbook.
