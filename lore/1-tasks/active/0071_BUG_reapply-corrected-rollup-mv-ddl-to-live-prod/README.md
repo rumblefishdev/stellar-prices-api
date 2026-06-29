@@ -7,8 +7,9 @@ related_adr: ["0007"]
 related_tasks: ["0059", "0051"]
 tags: [layer-database, priority-high, effort-small, clickhouse, materialized-views, rollups, operations]
 links:
-  - "../../../packages/prices-clickhouse/schema/rollups.sql"
-  - "../../../packages/prices-clickhouse/schema/preroll.sql"
+  - "../../../../packages/prices-clickhouse/schema/rollups.sql"
+  - "../../../../packages/prices-clickhouse/schema/preroll.sql"
+  - "notes/G-prod-reapply-runbook.md"
 history:
   - date: 2026-06-26
     status: backlog
@@ -34,6 +35,22 @@ history:
       spot-check) — the live DDL against ch-prod-01 (168.119.73.161, Route A
       `ssh … docker exec app-clickhouse-1 clickhouse-client`) is run by the
       operator, NOT by this session (prepare-not-deploy).
+  - date: 2026-06-29
+    status: active
+    who: oski
+    note: >
+      Converted to a directory task; landed the operator runbook
+      (`notes/G-prod-reapply-runbook.md`) with an empty-DB fast path. Also
+      investigated renaming the shadowing bucket alias `AS timestamp` →
+      `ts_bucket` as a permanent hardening — REJECTED: a `TO`-table MV matches
+      its SELECT output to the target columns BY NAME, so `ts_bucket` is refused
+      with `Code: 8 THERE_IS_NO_COLUMN` (reproduced live on CH 26.3.10.60 via
+      `prices-clickhouse/tests/rollup_chain_it.rs`). The bucket key is therefore
+      structurally forced to `AS timestamp`; source-qualifying `t.timestamp` is
+      the only available fix, exactly as 0059 shipped. Banked the finding as a
+      comment in `rollups.sql`/`preroll.sql` (comment-only diff, both rollup
+      integration tests green) so the dead-end isn't re-attempted. No schema
+      behaviour change; no prod deploy.
 ---
 
 # Re-apply corrected rollup/preroll DDL to live ch-prod-01

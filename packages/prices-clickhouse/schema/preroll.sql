@@ -16,6 +16,9 @@
 -- QUALIFIED source column `t.timestamp` (FROM … AS t); the bare `timestamp`
 -- would resolve to the constant bucket-start alias and tie-break open / close /
 -- close_usd to an arbitrary row instead of the true first / last by time.
+-- (This INSERT … SELECT maps to the target BY POSITION, so the bucket COULD be
+-- renamed here — but `rollups.sql`'s MVs match BY NAME and require `AS timestamp`
+-- (task 0071), so both files keep the same alias for consistency.)
 
 INSERT INTO prices.price_ohlcv_15m
 SELECT

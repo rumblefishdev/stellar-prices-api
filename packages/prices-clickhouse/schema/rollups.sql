@@ -15,13 +15,19 @@
 --   - version = max(version) is correct for a TRUE refreshable MV (atomic
 --     target replace). If a CH build forces scheduled INSERT…SELECT into a
 --     ReplacingMergeTree instead, project a strictly-increasing version.
---   - The bucket key is aliased `AS timestamp` to match the target column, but
---     that alias SHADOWS the source `timestamp` column. argMin/argMax must
---     therefore reference the QUALIFIED source column `t.timestamp` (FROM … AS
---     t) — using the bare `timestamp` resolves to the bucket-start alias, which
---     is constant within a bucket, so open/close/close_usd would tie-break to an
---     arbitrary row instead of the true first/last by time (task 0059 full-chain
---     integration test). The WHERE window is likewise qualified `t.timestamp`.
+--   - The bucket key MUST be aliased `AS timestamp` — it cannot be renamed to
+--     dodge the shadow below. A `TO`-table MV matches its SELECT output to the
+--     target columns BY NAME, so a differently-named bucket (e.g. `ts_bucket`)
+--     is rejected with `Code: 8 THERE_IS_NO_COLUMN` (verified on CH 26.3.10.60,
+--     task 0071). That mandatory alias SHADOWS the source `timestamp` column, so
+--     argMin/argMax — and the WHERE window — MUST read the QUALIFIED source
+--     `t.timestamp` (FROM … AS t). A bare `timestamp` resolves to the bucket-
+--     start alias, which is constant within a bucket, so open/close/close_usd
+--     would tie-break to an arbitrary row instead of the true first/last by time
+--     (task 0059 full-chain integration test). Qualification is the ONLY fix for
+--     the MVs; renaming the bucket is not available. (`preroll.sql` uses a plain
+--     INSERT … SELECT, which maps by position, so the same `AS timestamp` there
+--     is for consistency, not necessity.)
 
 CREATE MATERIALIZED VIEW IF NOT EXISTS prices.mv_ohlcv_1m_to_15m
 REFRESH EVERY 1 MINUTE
