@@ -148,6 +148,13 @@ pub struct ChPassStats {
     pub candidates_before: u64,
     pub candidates_after: u64,
     pub rows_enriched: u64,
+    /// Candidates the recent-window oracle tier left unenriched this pass — the
+    /// count handed down to (or deferred from) the peg-pivot tier. Maps to the
+    /// `EnrichmentOracleMiss` CloudWatch metric (spec §5).
+    pub oracle_misses: u64,
+    /// Wall-clock duration of the pass, milliseconds. Maps to the
+    /// `EnrichmentBatchDurationMs` CloudWatch metric (spec §5).
+    pub duration_ms: u64,
 }
 
 pub struct ChEnrichmentPass {
@@ -177,6 +184,20 @@ impl ChEnrichmentPass {
     pub async fn preflight(&self) -> Result<(), ChEnrichError> {
         self.client.query("SELECT 1").execute().await?;
         Ok(())
+    }
+
+    /// Per-tier batch budget. `max_batches = 0` is the **one-shot** mode: drain
+    /// the whole backlog to completion in this invocation (each tier loops until
+    /// it stops making progress), instead of the bounded `MAX_BATCHES × BATCH_SIZE`
+    /// rows the hourly cron caps at. Used to clear a large post-SDEX-backfill
+    /// backlog in a single manual run (spec §4). The no-progress / drained breaks
+    /// in each tier guarantee termination regardless of the bound.
+    fn effective_max_batches(&self) -> u32 {
+        if self.cfg.max_batches == 0 {
+            u32::MAX
+        } else {
+            self.cfg.max_batches
+        }
     }
 
     /// The newest candle `timestamp` (unix seconds) at pass start, used as a
@@ -377,7 +398,7 @@ impl ChEnrichmentPass {
         // Capture a mid-loop error so the reference table is still dropped before
         // it propagates.
         let mut pending: Option<ChEnrichError> = None;
-        for _ in 0..self.cfg.max_batches {
+        for _ in 0..self.effective_max_batches() {
             if remaining == 0 {
                 break;
             }
@@ -477,6 +498,7 @@ impl ChEnrichmentPass {
     /// pin the boundary and assert that candles newer than the snapshot are
     /// deferred, not enriched, in the current pass.
     pub async fn run_through(&self, watermark: u32) -> Result<ChPassStats, ChEnrichError> {
+        let start = std::time::Instant::now();
         let candidates_before = self.count_candidates(watermark).await?;
         info!(
             candidates = candidates_before,
@@ -500,7 +522,7 @@ impl ChEnrichmentPass {
         let mut oracle_drained = remaining == 0;
 
         // Tier 1 — recent-window oracle (depeg-aware; wins where it applies).
-        for _ in 0..self.cfg.max_batches {
+        for _ in 0..self.effective_max_batches() {
             if remaining == 0 {
                 oracle_drained = true;
                 break;
@@ -523,6 +545,11 @@ impl ChEnrichmentPass {
             }
             remaining = after;
         }
+
+        // Candidates the oracle tier left at zero — the EnrichmentOracleMiss
+        // metric. Captured before the peg-pivot tier runs so it reflects oracle
+        // coverage specifically, not the final remainder.
+        let oracle_misses = remaining;
 
         // Tier 2 — peg-pivot deep-history backbone (USDC/USDT≡$1; XLM via XLM/USDC).
         // Gated on `oracle_drained`: an oracle tier that exhausted its batch
@@ -572,6 +599,8 @@ impl ChEnrichmentPass {
             candidates_before,
             candidates_after: remaining,
             rows_enriched,
+            oracle_misses,
+            duration_ms: start.elapsed().as_millis() as u64,
         };
         info!(
             batches = stats.batches,

@@ -29,6 +29,7 @@ async fn main() -> Result<(), lambda_runtime::Error> {
         .json()
         .init();
 
+    let env_name = env_or("ENV_NAME", "unknown");
     let cfg = ChEnrichConfig {
         // Unused on the mTLS path — the client carries the URL/TLS.
         url: String::new(),
@@ -38,6 +39,7 @@ async fn main() -> Result<(), lambda_runtime::Error> {
         window_s: env_parse_or("FORWARD_FILL_WINDOW_S", 300),
         pivot_window_s: env_parse_or("PIVOT_WINDOW_S", 86_400),
         batch_size: env_parse_or("BATCH_SIZE", 10_000),
+        // MAX_BATCHES=0 → one-shot mode: drain the whole backlog this run (spec §4).
         max_batches: env_parse_or("MAX_BATCHES", 20),
     };
 
@@ -57,10 +59,21 @@ async fn main() -> Result<(), lambda_runtime::Error> {
     let client = prices_clickhouse::mtls::client_from_lambda_env(&cfg.database).await?;
     let pass = Arc::new(ChEnrichmentPass::with_client(client, cfg));
     pass.preflight().await?;
+
+    // CloudWatch client for the spec §5 metrics. Built once at cold start;
+    // publish is best-effort per invocation (a metric failure never fails the
+    // enrichment pass).
+    let aws_cfg = aws_config::defaults(aws_config::BehaviorVersion::latest())
+        .load()
+        .await;
+    let cw = Arc::new(aws_sdk_cloudwatch::Client::new(&aws_cfg));
+    let env_name = Arc::new(env_name);
     tracing::info!("enrichment-worker cold start ready");
 
     run(service_fn(move |_event: LambdaEvent<serde_json::Value>| {
         let pass = pass.clone();
+        let cw = cw.clone();
+        let env_name = env_name.clone();
         async move {
             let stats = pass.run().await?;
             tracing::info!(
@@ -68,13 +81,24 @@ async fn main() -> Result<(), lambda_runtime::Error> {
                 candidates_before = stats.candidates_before,
                 candidates_after = stats.candidates_after,
                 rows_enriched = stats.rows_enriched,
+                oracle_misses = stats.oracle_misses,
+                duration_ms = stats.duration_ms,
                 "enrichment pass complete"
             );
+
+            // Publish the four spec §5 metrics. Best-effort: log and continue.
+            let metrics = enrichment_worker::metrics::pass_metrics(&stats);
+            if let Err(e) = enrichment_worker::metrics::publish(&cw, &env_name, &metrics).await {
+                tracing::warn!(error = %e, "cloudwatch metric publish failed (non-fatal)");
+            }
+
             Ok::<serde_json::Value, lambda_runtime::Error>(serde_json::json!({
                 "batches": stats.batches,
                 "candidates_before": stats.candidates_before,
                 "candidates_after": stats.candidates_after,
                 "rows_enriched": stats.rows_enriched,
+                "oracle_misses": stats.oracle_misses,
+                "duration_ms": stats.duration_ms,
             }))
         }
     }))

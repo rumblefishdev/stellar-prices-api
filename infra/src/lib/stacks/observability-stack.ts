@@ -34,6 +34,13 @@ export interface ObservabilityStackProps extends cdk.StackProps {
  */
 export class ObservabilityStack extends cdk.Stack {
   public readonly dashboard: cloudwatch.Dashboard;
+  /**
+   * Alarm on the enrichment backlog (spec §5
+   * `EnrichmentRowsRemainingAtVolumeZero`, task 0026). The broader dashboard
+   * widget set remains task 0056's; this single alarm ships with 0026 because
+   * the metric it watches is emitted by the enrichment worker in the same task.
+   */
+  public readonly enrichmentBacklogAlarm: cloudwatch.Alarm;
 
   constructor(scope: Construct, id: string, props: ObservabilityStackProps) {
     super(scope, id, props);
@@ -57,6 +64,41 @@ export class ObservabilityStack extends cdk.Stack {
         height: 4,
       }),
     );
+
+    // Enrichment backlog alarm (task 0026 / spec §5). The worker publishes
+    // `EnrichmentRowsRemainingAtVolumeZero` (rows still at volume_quote_usd=0
+    // after a pass) under the `Prices/Enrichment` namespace. A sustained high
+    // backlog means the pass is not draining — the fingerprint of an
+    // oracle↔asset-id mis-reconciliation or missing USDC/USDT/XLM reference
+    // assets. Threshold/period are a deliberately conservative scaffold; task
+    // 0056 tunes them once real volumes are observed.
+    this.enrichmentBacklogAlarm = new cloudwatch.Alarm(
+      this,
+      'EnrichmentBacklogAlarm',
+      {
+        alarmName: `prices-${config.envName}-enrichment-backlog`,
+        alarmDescription:
+          'Enrichment left a large volume_quote_usd=0 backlog across consecutive hourly passes (spec §5 EnrichmentRowsRemainingAtVolumeZero). Sustained high values mean enrichment is not draining — check oracle↔asset-id reconciliation and that USDC/USDT/XLM reference assets exist in prices.assets. Scaffold threshold; tuned in task 0056.',
+        metric: new cloudwatch.Metric({
+          namespace: 'Prices/Enrichment',
+          metricName: 'EnrichmentRowsRemainingAtVolumeZero',
+          dimensionsMap: { Environment: config.envName },
+          statistic: 'Maximum',
+          period: cdk.Duration.hours(1),
+        }),
+        threshold: 100_000,
+        evaluationPeriods: 6,
+        datapointsToAlarm: 6,
+        comparisonOperator:
+          cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      },
+    );
+
+    new cdk.CfnOutput(this, 'EnrichmentBacklogAlarmName', {
+      value: this.enrichmentBacklogAlarm.alarmName,
+      description: `Enrichment backlog alarm for ${config.envName}`,
+    });
 
     new cdk.CfnOutput(this, 'DashboardName', {
       value: this.dashboard.dashboardName,

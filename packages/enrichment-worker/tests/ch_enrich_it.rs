@@ -320,3 +320,70 @@ async fn watermark_defers_candles_newer_than_the_snapshot() {
         .await
         .unwrap();
 }
+
+/// One-shot mode (`max_batches = 0`): a single run drains the entire backlog to
+/// completion, instead of the bounded `MAX_BATCHES × BATCH_SIZE` rows the hourly
+/// cron caps at (spec §4). Seeds five peg-enrichable candles and runs with a
+/// one-row batch + unbounded budget — all five must be enriched in the one pass,
+/// with the new `ChPassStats` fields populated (oracle_misses = 5 handed to the
+/// peg tier, rows_enriched = 5, candidates_after = 0, duration_ms > 0).
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn one_shot_drains_full_backlog() {
+    let db = "it_enrich_oneshot";
+    let client = setup_scratch(db).await;
+    client
+        .query(&ASSETS.replace("{db}", db).replace("{usdc}", USDC_ISSUER))
+        .execute()
+        .await
+        .unwrap();
+
+    // Five FOO/USDC candles, all peg-enrichable ($1), distinct timestamps and
+    // closes (close=i+2 → close_usd=i+2 under the peg).
+    let values: Vec<String> = (0..5u32)
+        .map(|i| {
+            let (ts, c) = (1_600_000_000 + i * 60, i + 2);
+            format!("({ts},10,2,'sdex', {c},{c},{c},{c}, 1,{c},0,0,{c},1,1)")
+        })
+        .collect();
+    client
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1m \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) \
+             VALUES {}",
+            values.join(", ")
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    // One-row batch + unbounded budget (max_batches = 0): drain all five at once.
+    let mut one_shot = cfg(db);
+    one_shot.batch_size = 1;
+    one_shot.max_batches = 0;
+    let stats = ChEnrichmentPass::new(one_shot).run().await.unwrap();
+
+    assert_eq!(stats.candidates_before, 5);
+    assert_eq!(stats.rows_enriched, 5, "one-shot drained the full backlog");
+    assert_eq!(stats.candidates_after, 0, "no candidate left at zero");
+    assert_eq!(
+        stats.oracle_misses, 5,
+        "no oracle rows → all five handed to the peg tier"
+    );
+
+    let approx = |a: f64, b: f64| (a - b).abs() < 1e-4;
+    for i in 0..5u32 {
+        let (ts, c) = (1_600_000_000 + i * 60, (i + 2) as f64);
+        assert!(
+            approx(close_usd(&client, db, 10, 2, ts).await, c),
+            "candle {i} pegged to close_usd"
+        );
+    }
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
