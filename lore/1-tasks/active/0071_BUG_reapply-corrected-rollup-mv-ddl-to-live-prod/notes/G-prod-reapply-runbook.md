@@ -104,6 +104,16 @@ $CH_SSH "$CH -q \"SELECT name FROM system.tables \
   WHERE database='prices' AND name LIKE 'mv_ohlcv_%' ORDER BY name\""   # expect 6
 ```
 
+**Confirm the corrected definition is now live** (this is the real proof on an
+empty DB — listing 6 names is NOT proof the DROP took, since the buggy MVs are
+also 6). The shown SQL must read `FROM prices.price_ohlcv_1m AS t FINAL` and
+`argMin(open, t.timestamp)` / `argMax(close, t.timestamp)` — a bare `timestamp`
+inside the argMin/argMax means the DROP was skipped; re-run §3.
+
+```bash
+$CH_SSH "$CH -q 'SHOW CREATE TABLE prices.mv_ohlcv_1m_to_15m FORMAT TSVRaw'"
+```
+
 ## 5. Recompute mis-rolled buckets — ONLY if §1 found data
 
 Skip entirely on the empty-DB path. Pick one based on the MV refresh mode
@@ -141,7 +151,7 @@ Mismatch count between stored `_15m` and the true first/last recomputed from
 ```bash
 $CH_SSH "$CH -q \"
 SELECT count() AS mismatched_buckets
-FROM prices.price_ohlcv_15m FINAL AS r
+FROM prices.price_ohlcv_15m AS r FINAL   -- alias BEFORE FINAL (CH syntax; 'FINAL AS r' is a parse error)
 INNER JOIN (
   SELECT toStartOfInterval(t.timestamp, INTERVAL 15 MINUTE) AS timestamp,
          asset_id, quote_asset_id, source,
