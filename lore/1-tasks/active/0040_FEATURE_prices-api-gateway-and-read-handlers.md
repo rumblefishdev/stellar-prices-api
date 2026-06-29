@@ -2,7 +2,7 @@
 id: "0040"
 title: "Prices API Gateway + Rust/axum read handlers — public REST endpoints with API-key auth, rate limit, response cache"
 type: FEATURE
-status: blocked
+status: active
 related_adr: ["0003", "0004", "0006", "0007"]
 related_tasks: ["0011", "0038", "0039", "0045", "0047"]
 tags: [layer-backend, priority-high, effort-large, api, lambda, axum, rust, aws, clickhouse, hetzner]
@@ -62,6 +62,23 @@ history:
       argMax/argMin on ReplacingMergeTree per ADR 0007 §3.3).
       <100ms p95 budget re-validation depends on task 0047's
       throughput numbers. Task stays blocked on 0011.
+  - date: 2026-06-29
+    status: active
+    who: oski
+    note: >
+      **Unblocked — hard `by:` blocker 0011 has resolved.** Task 0011
+      (CDK bootstrap + SSM platform lookups) is completed/archived, so the
+      CDK app, IAM, and Secrets-Manager/SSM plumbing the API stack needs now
+      exist. The soft deps cited at draft time are also both done: 0038
+      (ledger-processor) ✅ archived and 0039 (periodic workers) ✅ archived,
+      so `price_ohlcv_*` and `current_prices` have live producers for
+      end-to-end smoke tests. Remaining caveats are NOT blockers: the read-path
+      rewrite (sqlx → `clickhouse` crate per ADR 0007) is in-scope build work,
+      and the <100ms p95 re-validation soft-depends on 0047 (backlog) but is
+      explicitly informational for this functional-endpoints task. Moving
+      blocked → active. **Constraints carried in:** stay local-first /
+      prepare-not-deploy — handlers develop against fixture + live-CH reads;
+      no AWS deploy / API Gateway apply without explicit approval.
 ---
 
 # Prices API Gateway + Rust/axum read handlers
