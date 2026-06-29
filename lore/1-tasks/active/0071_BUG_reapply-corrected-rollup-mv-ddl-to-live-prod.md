@@ -2,7 +2,7 @@
 id: "0071"
 title: "Re-apply corrected rollup/preroll DDL to live ch-prod-01 (argMin/argMax timestamp-shadowing fix)"
 type: BUG
-status: backlog
+status: active
 related_adr: ["0007"]
 related_tasks: ["0059", "0051"]
 tags: [layer-database, priority-high, effort-small, clickhouse, materialized-views, rollups, operations]
@@ -23,6 +23,17 @@ history:
       BUGGY DDL was already applied LIVE on ch-prod-01 under 0051 (2026-06-22).
       The six refreshable MVs in prices.* must be re-created from the corrected
       rollups.sql. Deferred to a deploy-capable session (prepare-not-deploy).
+  - date: 2026-06-29
+    status: active
+    who: oski
+    note: >
+      Promoted backlog → active to prepare the prod fix. Operator-executed:
+      this session produces the step-by-step runbook (DROP + re-CREATE the six
+      `prices.mv_ohlcv_*` MVs from the corrected `rollups.sql`, recompute the
+      mis-rolled `_15m … _1M` buckets via corrected `preroll.sql`, post-apply
+      spot-check) — the live DDL against ch-prod-01 (168.119.73.161, Route A
+      `ssh … docker exec app-clickhouse-1 clickhouse-client`) is run by the
+      operator, NOT by this session (prepare-not-deploy).
 ---
 
 # Re-apply corrected rollup/preroll DDL to live ch-prod-01
