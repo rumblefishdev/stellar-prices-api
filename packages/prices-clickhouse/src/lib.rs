@@ -8,6 +8,10 @@
 
 use clickhouse::Client;
 
+/// Optional env-var helpers (`env_or` / `env_parse_or`) shared by the worker
+/// Lambdas. Companion to `mtls::require_env` (the must-be-set case).
+pub mod env;
+
 /// mTLS transport for the remote Hetzner CH endpoint (Caddy:443). Gated behind
 /// the `aws-mtls` feature so the plaintext local-dev / init-CLI path does not
 /// pull the rustls / hyper-util / reqwest stack. Ported from BE (task 0052).

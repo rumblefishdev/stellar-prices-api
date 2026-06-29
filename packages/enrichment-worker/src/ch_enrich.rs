@@ -58,7 +58,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use clickhouse::Client;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 /// Canonical Stellar issuers for the pegged USD stablecoins, used by the
@@ -91,6 +91,12 @@ pub struct ChEnrichConfig {
     pub pivot_window_s: u32,
     pub batch_size: u64,
     pub max_batches: u32,
+    /// One-shot historical-drain mode (spec §4): when `true`, each tier loops
+    /// until it stops making progress instead of stopping at `max_batches`, so a
+    /// single invocation clears the whole post-backfill backlog. An **explicit**
+    /// flag, not a `max_batches` sentinel — `max_batches = 0` keeps its literal
+    /// meaning (zero batches) so it can never silently become an unbounded drain.
+    pub one_shot: bool,
 }
 
 impl Default for ChEnrichConfig {
@@ -104,6 +110,7 @@ impl Default for ChEnrichConfig {
             pivot_window_s: 86_400,
             batch_size: 10_000,
             max_batches: 20,
+            one_shot: false,
         }
     }
 }
@@ -142,12 +149,24 @@ struct RefAssetRow {
     issuer_address: String,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct ChPassStats {
     pub batches: u32,
     pub candidates_before: u64,
     pub candidates_after: u64,
     pub rows_enriched: u64,
+    /// Candidates the recent-window oracle tier left unenriched this pass — the
+    /// count handed down to (or deferred from) the peg-pivot tier. Maps to the
+    /// `EnrichmentOracleMiss` CloudWatch metric (spec §5).
+    pub oracle_misses: u64,
+    /// Candles still at `volume_quote_usd = 0` after the pass — maps to the
+    /// `EnrichmentRowsRemainingAtVolumeZero` metric (spec §5). Specifically the
+    /// volume-USD backlog, NOT the general `candidates_after` remainder (which
+    /// also includes `close_usd = 0` rows).
+    pub rows_remaining_at_volume_zero: u64,
+    /// Wall-clock duration of the pass, milliseconds. Maps to the
+    /// `EnrichmentBatchDurationMs` CloudWatch metric (spec §5).
+    pub duration_ms: u64,
 }
 
 pub struct ChEnrichmentPass {
@@ -177,6 +196,21 @@ impl ChEnrichmentPass {
     pub async fn preflight(&self) -> Result<(), ChEnrichError> {
         self.client.query("SELECT 1").execute().await?;
         Ok(())
+    }
+
+    /// Per-tier batch budget. In one-shot mode (`cfg.one_shot`, spec §4) each
+    /// tier loops until it stops making progress (effective bound `u32::MAX`),
+    /// draining the whole backlog in a single invocation instead of the bounded
+    /// `MAX_BATCHES × BATCH_SIZE` rows the hourly cron caps at. The no-progress /
+    /// drained breaks in each tier guarantee termination regardless of the bound.
+    /// `max_batches` keeps its literal meaning in both modes (so `0` = zero
+    /// batches, never a hidden unbounded drain).
+    fn effective_max_batches(&self) -> u32 {
+        if self.cfg.one_shot {
+            u32::MAX
+        } else {
+            self.cfg.max_batches
+        }
     }
 
     /// The newest candle `timestamp` (unix seconds) at pass start, used as a
@@ -214,6 +248,28 @@ impl ChEnrichmentPass {
         let sql = format!(
             "SELECT count() FROM {db}.{tbl} FINAL \
              WHERE (volume_quote_usd = 0 OR close_usd = 0) AND volume_quote > 0 \
+               AND timestamp <= toDateTime(?)",
+            db = self.cfg.database,
+            tbl = self.cfg.table,
+        );
+        Ok(self
+            .client
+            .query(&sql)
+            .bind(watermark)
+            .fetch_one::<u64>()
+            .await?)
+    }
+
+    /// Count candles still at `volume_quote_usd = 0` (with non-zero
+    /// `volume_quote`) at or below the watermark — the population the
+    /// `EnrichmentRowsRemainingAtVolumeZero` metric (spec §5) is named for.
+    /// Distinct from [`Self::count_candidates`], which counts rows missing
+    /// *either* USD column (`volume_quote_usd = 0 OR close_usd = 0`): the
+    /// `close_usd`-only remainder must not inflate a "volume zero" gauge.
+    async fn count_remaining_at_volume_zero(&self, watermark: u32) -> Result<u64, ChEnrichError> {
+        let sql = format!(
+            "SELECT count() FROM {db}.{tbl} FINAL \
+             WHERE volume_quote_usd = 0 AND volume_quote > 0 \
                AND timestamp <= toDateTime(?)",
             db = self.cfg.database,
             tbl = self.cfg.table,
@@ -377,7 +433,7 @@ impl ChEnrichmentPass {
         // Capture a mid-loop error so the reference table is still dropped before
         // it propagates.
         let mut pending: Option<ChEnrichError> = None;
-        for _ in 0..self.cfg.max_batches {
+        for _ in 0..self.effective_max_batches() {
             if remaining == 0 {
                 break;
             }
@@ -477,6 +533,7 @@ impl ChEnrichmentPass {
     /// pin the boundary and assert that candles newer than the snapshot are
     /// deferred, not enriched, in the current pass.
     pub async fn run_through(&self, watermark: u32) -> Result<ChPassStats, ChEnrichError> {
+        let start = std::time::Instant::now();
         let candidates_before = self.count_candidates(watermark).await?;
         info!(
             candidates = candidates_before,
@@ -500,7 +557,7 @@ impl ChEnrichmentPass {
         let mut oracle_drained = remaining == 0;
 
         // Tier 1 — recent-window oracle (depeg-aware; wins where it applies).
-        for _ in 0..self.cfg.max_batches {
+        for _ in 0..self.effective_max_batches() {
             if remaining == 0 {
                 oracle_drained = true;
                 break;
@@ -523,6 +580,16 @@ impl ChEnrichmentPass {
             }
             remaining = after;
         }
+
+        // Candidates the oracle tier could not cover — the EnrichmentOracleMiss
+        // metric. Only meaningful when the oracle tier *drained* (reached a fixed
+        // point): then `remaining` is the set with no in-window oracle price. If
+        // the tier instead exhausted its batch budget while still making progress
+        // (`oracle_drained == false`), the leftovers were simply not reached this
+        // pass — they are NOT misses, so report 0 rather than inflating the metric
+        // by the whole un-processed remainder (which would over-count by orders of
+        // magnitude on any large-backlog catch-up).
+        let oracle_misses = if oracle_drained { remaining } else { 0 };
 
         // Tier 2 — peg-pivot deep-history backbone (USDC/USDT≡$1; XLM via XLM/USDC).
         // Gated on `oracle_drained`: an oracle tier that exhausted its batch
@@ -567,11 +634,16 @@ impl ChEnrichmentPass {
             );
         }
 
+        let rows_remaining_at_volume_zero = self.count_remaining_at_volume_zero(watermark).await?;
+
         let stats = ChPassStats {
             batches,
             candidates_before,
             candidates_after: remaining,
             rows_enriched,
+            oracle_misses,
+            rows_remaining_at_volume_zero,
+            duration_ms: start.elapsed().as_millis() as u64,
         };
         info!(
             batches = stats.batches,

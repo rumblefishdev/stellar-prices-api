@@ -28,10 +28,10 @@ async fn main() -> Result<(), lambda_runtime::Error> {
             .timeout(Duration::from_secs(15))
             .build()?,
     );
-    let rpc_url = std::env::var("SOROBAN_RPC_URL")
-        .unwrap_or_else(|_| oracle_worker::DEFAULT_SOROBAN_RPC.to_string());
-    let contract = std::env::var("REFLECTOR_CONTRACT")
-        .unwrap_or_else(|_| oracle_worker::REFLECTOR_CEX_DEX.to_string());
+    let rpc_url =
+        prices_clickhouse::env::env_or("SOROBAN_RPC_URL", oracle_worker::DEFAULT_SOROBAN_RPC);
+    let contract =
+        prices_clickhouse::env::env_or("REFLECTOR_CONTRACT", oracle_worker::REFLECTOR_CEX_DEX);
     tracing::info!(%rpc_url, %contract, "oracle-worker cold start ready");
 
     run(service_fn(move |_event: LambdaEvent<serde_json::Value>| {

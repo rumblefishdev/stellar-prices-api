@@ -37,5 +37,6 @@ thiserror = "2"
 lambda_runtime = "0.13"
 aws-config = "1"
 aws-sdk-s3 = "1"
+aws-sdk-cloudwatch = "1"
 aws_lambda_events = { version = "0.16", default-features = false, features = ["sqs"] }
 tempfile = "3"

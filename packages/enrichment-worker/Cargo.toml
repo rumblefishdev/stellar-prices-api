@@ -2,7 +2,7 @@
 name = "enrichment-worker"
 version = "0.1.0"
 edition = "2024"
-description = "volume_quote_usd enrichment Lambda — local-only prototype (task 0026)"
+description = "close_usd / volume_quote_usd enrichment Lambda — EventBridge cron worker (task 0026)"
 
 [lib]
 name = "enrichment_worker"
@@ -25,7 +25,12 @@ path = "src/bin/cli.rs"
 [features]
 default = []
 aws-mtls = ["prices-clickhouse/aws-mtls"]
-lambda = ["aws-mtls", "dep:lambda_runtime"]
+lambda = [
+    "aws-mtls",
+    "dep:lambda_runtime",
+    "dep:aws-config",
+    "dep:aws-sdk-cloudwatch",
+]
 
 [dependencies]
 clap = { workspace = true }
@@ -40,6 +45,8 @@ tracing-subscriber = { workspace = true }
 prices-clickhouse = { path = "../prices-clickhouse" }
 
 lambda_runtime = { workspace = true, optional = true }
+aws-config = { workspace = true, optional = true }
+aws-sdk-cloudwatch = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = "3"

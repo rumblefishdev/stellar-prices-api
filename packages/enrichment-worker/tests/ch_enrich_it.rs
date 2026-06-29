@@ -64,6 +64,7 @@ fn cfg(db: &str) -> ChEnrichConfig {
         pivot_window_s: 86_400,
         batch_size: 1000,
         max_batches: 10,
+        one_shot: false,
     }
 }
 
@@ -222,7 +223,16 @@ async fn oracle_budget_exhaustion_defers_instead_of_pegging() {
     let mut budget1 = cfg(db);
     budget1.batch_size = 1;
     budget1.max_batches = 1;
-    ChEnrichmentPass::new(budget1).run().await.unwrap();
+    let pass1 = ChEnrichmentPass::new(budget1).run().await.unwrap();
+
+    // The oracle tier exhausted its 1-batch budget while still making progress
+    // (not drained), so the unreached late candle must NOT be reported as an
+    // oracle miss — `oracle_misses` is 0, not the un-processed remainder (1).
+    // (Regression guard for the EnrichmentOracleMiss over-count.)
+    assert_eq!(
+        pass1.oracle_misses, 0,
+        "budget-exhausted (un-drained) oracle tier reports 0 confirmed misses"
+    );
 
     let approx = |a: f64, b: f64| (a - b).abs() < 1e-4;
     // Early candle: oracle applied (5 × 1.0012 = 5.006).
@@ -313,6 +323,74 @@ async fn watermark_defers_candles_newer_than_the_snapshot() {
         approx(close_usd(&client, db, 10, 2, new).await, 8.0),
         "newer candle enriched on the next run"
     );
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// One-shot mode (`max_batches = 0`): a single run drains the entire backlog to
+/// completion, instead of the bounded `MAX_BATCHES × BATCH_SIZE` rows the hourly
+/// cron caps at (spec §4). Seeds five peg-enrichable candles and runs with a
+/// one-row batch + unbounded budget — all five must be enriched in the one pass,
+/// with the new `ChPassStats` fields populated (oracle_misses = 5 handed to the
+/// peg tier, rows_enriched = 5, candidates_after = 0, duration_ms > 0).
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn one_shot_drains_full_backlog() {
+    let db = "it_enrich_oneshot";
+    let client = setup_scratch(db).await;
+    client
+        .query(&ASSETS.replace("{db}", db).replace("{usdc}", USDC_ISSUER))
+        .execute()
+        .await
+        .unwrap();
+
+    // Five FOO/USDC candles, all peg-enrichable ($1), distinct timestamps and
+    // closes (close=i+2 → close_usd=i+2 under the peg).
+    let values: Vec<String> = (0..5u32)
+        .map(|i| {
+            let (ts, c) = (1_600_000_000 + i * 60, i + 2);
+            format!("({ts},10,2,'sdex', {c},{c},{c},{c}, 1,{c},0,0,{c},1,1)")
+        })
+        .collect();
+    client
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1m \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) \
+             VALUES {}",
+            values.join(", ")
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    // One-row batch + explicit one-shot flag: drain all five at once regardless
+    // of max_batches (left at the cfg default, proving one_shot overrides it).
+    let mut oneshot = cfg(db);
+    oneshot.batch_size = 1;
+    oneshot.one_shot = true;
+    let stats = ChEnrichmentPass::new(oneshot).run().await.unwrap();
+
+    assert_eq!(stats.candidates_before, 5);
+    assert_eq!(stats.rows_enriched, 5, "one-shot drained the full backlog");
+    assert_eq!(stats.candidates_after, 0, "no candidate left at zero");
+    assert_eq!(
+        stats.oracle_misses, 5,
+        "no oracle rows → all five handed to the peg tier"
+    );
+
+    let approx = |a: f64, b: f64| (a - b).abs() < 1e-4;
+    for i in 0..5u32 {
+        let (ts, c) = (1_600_000_000 + i * 60, (i + 2) as f64);
+        assert!(
+            approx(close_usd(&client, db, 10, 2, ts).await, c),
+            "candle {i} pegged to close_usd"
+        );
+    }
 
     client
         .query(&format!("DROP DATABASE {db}"))

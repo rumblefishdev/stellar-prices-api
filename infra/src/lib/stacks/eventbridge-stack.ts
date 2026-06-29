@@ -1,5 +1,6 @@
 import * as cdk from 'aws-cdk-lib';
 import * as events from 'aws-cdk-lib/aws-events';
+import * as iam from 'aws-cdk-lib/aws-iam';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
@@ -291,7 +292,7 @@ export class EventBridgeStack extends cdk.Stack {
     // `ingestion` mTLS identity the other writers use. Idempotency comes from
     // the `FINAL WHERE … = 0` read filter, so concurrency is not pinned.
     // -----------------------------------------------------------------
-    this.enrichmentFunction = createWorkerLambda(this, {
+    const enrichment = createWorkerLambda(this, {
       config,
       accountId,
       mtlsSecretName: discoveryMtlsSecretName,
@@ -301,7 +302,11 @@ export class EventBridgeStack extends cdk.Stack {
       memorySize: 512,
       // A bounded pass is MAX_BATCHES × BATCH_SIZE rows of set-based
       // INSERT…SELECT; generous headroom under the hourly cadence (overflow
-      // just defers to the next run).
+      // just defers to the next run). The one-shot historical drain
+      // (ENRICHMENT_ONE_SHOT=true) is NOT this hourly function — it would run far
+      // longer than 5 min and must not be set here (every cron run would then be
+      // unbounded). A dedicated one-time invocation with its own longer timeout
+      // is deploy-time work (task 0026 Option 3 / spec §4).
       timeout: cdk.Duration.minutes(5),
       secretsExtensionLayer,
       chDomain,
@@ -311,12 +316,31 @@ export class EventBridgeStack extends cdk.Stack {
         CLICKHOUSE_TABLE: 'price_ohlcv_1m',
         // ORACLE_NAME / FORWARD_FILL_WINDOW_S / PIVOT_WINDOW_S / BATCH_SIZE /
         // MAX_BATCHES unset → the binary's ChEnrichConfig defaults
-        // (reflector / 300 / 86400 / 10000 / 20).
+        // (reflector / 300 / 86400 / 10000 / 20). ENRICHMENT_ONE_SHOT is left
+        // unset (false) here — it belongs only on a dedicated one-time drain
+        // invocation, never this hourly target (see the timeout note above).
       },
       alarmDescription:
         'Enrichment Lambda invocation errors (close_usd / volume_quote_usd enrichment pass failed).',
       alarmPeriod: cdk.Duration.hours(1),
-    }).function;
+    });
+    this.enrichmentFunction = enrichment.function;
+
+    // The worker publishes the spec §5 metrics (EnrichmentRowsEnriched,
+    // EnrichmentOracleMiss, EnrichmentRowsRemainingAtVolumeZero,
+    // EnrichmentBatchDurationMs) under the `Prices/Enrichment` namespace.
+    // PutMetricData has no resource-level scoping, so it is `*` constrained to
+    // that namespace. The ObservabilityStack alarms on these metrics.
+    enrichment.role.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'PublishEnrichmentMetrics',
+        actions: ['cloudwatch:PutMetricData'],
+        resources: ['*'],
+        conditions: {
+          StringEquals: { 'cloudwatch:namespace': 'Prices/Enrichment' },
+        },
+      }),
+    );
 
     new cdk.CfnOutput(this, 'EnrichmentRuleArn', {
       value: this.enrichmentRule.ruleArn,

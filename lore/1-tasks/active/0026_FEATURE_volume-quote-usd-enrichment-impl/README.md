@@ -145,6 +145,33 @@ history:
       dashboard (Option 2 / task 0056), the one-shot historical mode (Option 2),
       and the actual deploy + live backfill credibility check (Option 3 — lifts
       prepare-not-deploy). Task stays `active`.
+  - date: 2026-06-29
+    status: active
+    who: oski
+    note: >
+      **Option 2 — CloudWatch metrics + one-shot mode (prepare-only).** Closed
+      the metric-emission half of the telemetry ACs and added the historical
+      drain mode. Metrics: new `metrics.rs` publishes the four spec §5 metrics
+      (`EnrichmentRowsEnriched`, `EnrichmentOracleMiss`,
+      `EnrichmentRowsRemainingAtVolumeZero`, `EnrichmentBatchDurationMs`) via
+      `aws_sdk_cloudwatch` under the `Prices/Enrichment` namespace; the
+      stats→metric mapping is a pure unit-tested function and the publish is
+      `lambda`-gated + best-effort (never fails the pass). `ChPassStats` gained
+      `oracle_misses` (remaining after the oracle tier) + `duration_ms`. One-shot:
+      `MAX_BATCHES=0` ⇒ unbounded drain in a single invocation (both tier loops
+      use `effective_max_batches()`), for clearing a large post-backfill backlog
+      (spec §4); covered by a new integration test (`one_shot_drains_full_backlog`).
+      Infra: granted `cloudwatch:PutMetricData` to the enrichment role (scoped to
+      the `Prices/Enrichment` namespace) and authored the
+      `EnrichmentRowsRemainingAtVolumeZero` backlog alarm in observability-stack
+      (scaffold threshold; task 0056 tunes + owns the dashboard widgets).
+      Verified: 25 unit + 2 e2e + 4 live-CH integration tests green; clippy/fmt
+      clean (default + lambda); `cargo lambda build` bootstrap builds; infra
+      lint/build/typecheck + `cdk synth` green (PutMetricData grant + alarm
+      confirmed in the templates; namespace consistent across worker/IAM/alarm).
+      **Remaining (Option 3, deploy-gated):** actual `cdk deploy`, live dashboard
+      visibility, and the post-backfill credibility check (≥3 XLM-quoted assets).
+      Task stays `active`.
 ---
 
 # `volume_quote_usd` enrichment Lambda — implementation
@@ -204,17 +231,22 @@ Carried over from task 0024's design spec §7:
 - [x] Re-running on already-enriched rows produces zero changes
       (idempotency test). — `ch_enrich_it.rs` vs prod-pinned CH 26.3.10.60.
 - [x] Rows with missing oracle stay at `volume_quote_usd = 0`,
-      `EnrichmentOracleMiss` metric increments. — "no reference stays 0" half
-      verified by `ch_enrich_it.rs`; the metric-emission half is deferred with
-      the CloudWatch publish (Option 2 / task 0056).
+      `EnrichmentOracleMiss` metric increments. — "no reference stays 0"
+      verified by `ch_enrich_it.rs`; the `EnrichmentOracleMiss` metric is now
+      emitted (Option 2: `metrics.rs` maps `ChPassStats.oracle_misses` →
+      CloudWatch, alarm wired). Live increment observable only post-deploy.
 - [ ] After full SDEX backfill + a one-shot historical enrichment
       pass, `current_prices.volume_24h_usd` for at least 3
       XLM-quoted assets reflects SDEX-sourced volume (>0 and
       credible against Horizon's historical aggregates).
-      — deploy-gated (needs live env + one-shot mode, Option 2/3).
+      — one-shot mode now exists (`MAX_BATCHES=0`, Option 2); the live
+      credibility check is still deploy-gated (Option 3).
 - [ ] CloudWatch metrics from spec §5 are emitted and visible in
-      the dashboard. — metric publish + dashboard widgets deferred to
-      Option 2 / task 0056 (observability-stack is a scaffold).
+      the dashboard. — **emit half done** (Option 2: all four metrics published
+      via `aws_sdk_cloudwatch` under `Prices/Enrichment` +
+      `EnrichmentRowsRemainingAtVolumeZero` backlog alarm authored,
+      synth-verified). Dashboard widgets + live visibility remain deploy-gated
+      (task 0056 owns the dashboard; observability-stack is still a scaffold).
 
 ## Future Work
 

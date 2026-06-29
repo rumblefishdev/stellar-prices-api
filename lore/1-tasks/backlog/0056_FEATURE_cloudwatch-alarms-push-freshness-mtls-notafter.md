@@ -4,7 +4,7 @@ title: "CloudWatch alarms — sdex.last_push_at freshness + mTLS cert NotAfter"
 type: FEATURE
 status: backlog
 related_adr: ["0005", "0007"]
-related_tasks: ["0011", "0050", "0051", "0055", "0028"]
+related_tasks: ["0011", "0050", "0051", "0055", "0028", "0026"]
 tags: [layer-infra, priority-medium, effort-small, milestone-M1, observability, cloudwatch, alarms, sns, mtls, backfill]
 milestone: 1
 links:
@@ -183,3 +183,38 @@ threshold trips. Restore the canonical cert post-test.
   Lambdas could be folded into the worker set if process
   count matters. For T1, keep them standalone for clarity
   and to avoid coupling alarm health to worker bundle health.
+
+## Incoming from task 0026 (enrichment) — PR #66 code review
+
+Task 0026 published the enrichment spec-§5 metrics under the
+`Prices/Enrichment` namespace (`EnrichmentRowsEnriched`,
+`EnrichmentOracleMiss`, `EnrichmentRowsRemainingAtVolumeZero`,
+`EnrichmentBatchDurationMs`) and authored a **scaffold** backlog alarm in
+`infra/src/lib/stacks/observability-stack.ts`
+(`prices-{env}-enrichment-backlog`). Two review findings are deferred here for
+0056 to resolve when it owns the dashboard + alarm tuning end to end:
+
+- **#5 — the enrichment backlog alarm latches / storms.** As shipped it is
+  `EnrichmentRowsRemainingAtVolumeZero` Maximum > 100_000 over 6×1h,
+  `treatMissingData: NOT_BREACHING`. Two problems: (a) during a legitimate
+  multi-million-row post-backfill catch-up the backlog sits above the threshold
+  for many consecutive hours → the alarm fires on the exact operation the
+  one-shot drain exists for; (b) a permanent floor of exotic-quote candles
+  (quote ∉ {USDC,USDT,XLM}, no oracle) never drains by design, so once that
+  floor exceeds the threshold the alarm latches in ALARM with no path back to
+  OK. Re-design when tuning: e.g. alarm on *lack of progress* (metric-math:
+  `EnrichmentRowsEnriched == 0 AND EnrichmentRowsRemainingAtVolumeZero > 0`
+  sustained) rather than an absolute backlog level, and/or a `_1m`-recency-bounded
+  remaining count that excludes the permanent exotic-quote floor. The 100_000
+  threshold is a placeholder.
+
+- **#7 — `EnrichmentBatchDurationMs` is whole-pass wall-clock, not per-batch.**
+  The metric is measured across the entire `run_through` (all batches + the
+  count() scans), but the name reads as per-batch latency. When building the
+  dashboard, either rename/relabel it as total pass duration or divide by
+  `batches` for a true per-batch figure — don't let operators size batch/timeout
+  headroom off a value that grows with backlog and one-shot mode.
+
+Both live in `observability-stack.ts` / the enrichment worker's `metrics.rs`;
+0026 left the alarm as an explicit scaffold (commented as such) precisely so
+0056 owns the final shape.

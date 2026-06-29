@@ -30,8 +30,7 @@ async fn main() -> Result<(), lambda_runtime::Error> {
             .user_agent("stellar-prices-supply-worker/0.1")
             .build()?,
     );
-    let base_url =
-        std::env::var("HORIZON_URL").unwrap_or_else(|_| supply_worker::DEFAULT_HORIZON.to_string());
+    let base_url = prices_clickhouse::env::env_or("HORIZON_URL", supply_worker::DEFAULT_HORIZON);
     tracing::info!(%base_url, "supply-worker cold start ready");
 
     run(service_fn(move |_event: LambdaEvent<serde_json::Value>| {
