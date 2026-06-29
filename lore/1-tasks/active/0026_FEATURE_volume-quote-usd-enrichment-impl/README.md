@@ -118,6 +118,33 @@ history:
       backfill credibility check) and stay out of scope under the carried-in
       prepare-not-deploy constraint; the BE Form-B review is still open. Task
       stays `active`.
+  - date: 2026-06-29
+    status: active
+    who: oski
+    note: >
+      **Option 1 — CDK + packaging (prepare-only).** Wired the enrichment
+      Lambda into the CDK app and matched the sibling-worker packaging, closing
+      the EventBridge/IAM ACs at the code+synth level (no deploy). Infra:
+      `EnrichmentRule` (`rate(1 hour)`) + worker `Function` + IAM role + error
+      alarm + log group in `eventbridge-stack.ts` via the shared
+      `createWorkerLambda`, mirroring oracle/cleanup/supply; `enrichment` added
+      to the schedule config type + validation + `production.json`. `cdk synth`
+      produces the full resource set (verified: rule rate(1 hour) → function;
+      env carries the mTLS contract CH_DOMAIN/MTLS_SECRET_NAME + CLICKHOUSE_*).
+      Crate: gated the Lambda bin behind a `lambda` feature (required-features,
+      lean default build) like the siblings, and rewrote the entrypoint to build
+      the mTLS client via `prices_clickhouse::mtls::client_from_lambda_env`
+      instead of a plain CLICKHOUSE_URL client (the prior fixture-prototype
+      Lambda mode is dropped; the prototype lives on as `enrichment-cli`). Added
+      `ChEnrichmentPass::with_client`; url-based `new()` kept for the integration
+      tests. CI: added `-p enrichment-worker` to the cargo-lambda build matrix.
+      Verified locally: default + `--features lambda` build clean, 24 unit + 2
+      e2e pass, clippy/fmt clean, `cargo lambda build` produces the bootstrap,
+      infra lint/build/typecheck + `cdk synth` green. **Still deferred:** the
+      custom `EnrichmentRowsRemainingAtVolumeZero` metric + CloudWatch publish +
+      dashboard (Option 2 / task 0056), the one-shot historical mode (Option 2),
+      and the actual deploy + live backfill credibility check (Option 3 — lifts
+      prepare-not-deploy). Task stays `active`.
 ---
 
 # `volume_quote_usd` enrichment Lambda — implementation
@@ -168,18 +195,26 @@ notes when made.
 
 Carried over from task 0024's design spec §7:
 
-- [ ] EventBridge cron Lambda exists with the schema in §2 wired up.
-- [ ] CDK + IAM matches §1.1 / §1.2.
-- [ ] Re-running on already-enriched rows produces zero changes
-      (idempotency test).
-- [ ] Rows with missing oracle stay at `volume_quote_usd = 0`,
-      `EnrichmentOracleMiss` metric increments.
+- [x] EventBridge cron Lambda exists with the schema in §2 wired up.
+      — CDK authored in `eventbridge-stack.ts` (`EnrichmentRule` rate(1 hour)
+      → worker Function), `cdk synth` verified; live deploy still pending.
+- [x] CDK + IAM matches §1.1 / §1.2.
+      — `createWorkerLambda` (IAM role + mTLS-secret read + SSM read + error
+      alarm + log group), arm64/PROVIDED_AL2023; synth-verified. Deploy pending.
+- [x] Re-running on already-enriched rows produces zero changes
+      (idempotency test). — `ch_enrich_it.rs` vs prod-pinned CH 26.3.10.60.
+- [x] Rows with missing oracle stay at `volume_quote_usd = 0`,
+      `EnrichmentOracleMiss` metric increments. — "no reference stays 0" half
+      verified by `ch_enrich_it.rs`; the metric-emission half is deferred with
+      the CloudWatch publish (Option 2 / task 0056).
 - [ ] After full SDEX backfill + a one-shot historical enrichment
       pass, `current_prices.volume_24h_usd` for at least 3
       XLM-quoted assets reflects SDEX-sourced volume (>0 and
       credible against Horizon's historical aggregates).
+      — deploy-gated (needs live env + one-shot mode, Option 2/3).
 - [ ] CloudWatch metrics from spec §5 are emitted and visible in
-      the dashboard.
+      the dashboard. — metric publish + dashboard widgets deferred to
+      Option 2 / task 0056 (observability-stack is a scaffold).
 
 ## Future Work
 
