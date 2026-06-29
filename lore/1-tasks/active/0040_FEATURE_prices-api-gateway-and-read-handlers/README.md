@@ -275,6 +275,14 @@ that point.
 
 ## Notes
 
+- **Open decision — Lambda topology:** see
+  [`notes/S-lambda-topology-single-vs-five.md`](notes/S-lambda-topology-single-vs-five.md).
+  Compares a **single axum Lambda (BE pattern)** vs **five per-route Lambdas**
+  (§2.1's literal wording). Finding: §4 imposes no topology constraint, so both
+  are feasible; recommendation is **single** (copy BE's `common/` kit + CDK + CI
+  wholesale, better §6 p95), with §2.1's "function per route group" recorded as
+  an ADR-worthy deviation. Per-key 100 req/s needs the gateway usage-plan either
+  way. **Not yet locked** — the §2.1 bullet below states the original mandate.
 - This is the **first axum binary** in the codebase per
   ADR 0006 §Decision; conventions for axum-on-`lambda_runtime`
   packaging, routing layout, and error mapping established here
@@ -282,7 +290,7 @@ that point.
 - The §2.1 "individual functions per route group" mandate is
   deliberate: five handler binaries, not one mono-Lambda. This
   keeps per-route cold-start, memory sizing, and IAM scoping
-  independent.
+  independent. **(Under review — see the topology note above.)**
 - Per-endpoint cache TTLs are a meaningful design call —
   document them in the done notes, not just in CDK. A future
   reviewer looking at the §2.1 row needs to know what TTLs were
