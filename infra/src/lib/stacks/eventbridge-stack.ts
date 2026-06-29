@@ -34,6 +34,11 @@ const SUPPLY_WORKER_ASSET_DIR =
 const ORACLE_WORKER_ASSET_DIR =
   process.env['ORACLE_WORKER_ASSET_DIR'] ?? '../target/lambda/oracle-worker';
 
+/** Cargo-lambda build output for the `enrichment-worker` binary (task 0026). */
+const ENRICHMENT_WORKER_ASSET_DIR =
+  process.env['ENRICHMENT_WORKER_ASSET_DIR'] ??
+  '../target/lambda/enrichment-worker';
+
 export interface EventBridgeStackProps extends cdk.StackProps {
   readonly config: EnvironmentConfig;
 }
@@ -58,10 +63,12 @@ export class EventBridgeStack extends cdk.Stack {
   public readonly oracleWatcherRule: events.Rule;
   public readonly assetDiscoveryRule: events.Rule;
   public readonly cleanupRule: events.Rule;
+  public readonly enrichmentRule: events.Rule;
   public readonly assetDiscoveryFunction: lambda.Function;
   public readonly cleanupFunction: lambda.Function;
   public readonly supplyFunction: lambda.Function;
   public readonly oracleFunction: lambda.Function;
+  public readonly enrichmentFunction: lambda.Function;
 
   constructor(scope: Construct, id: string, props: EventBridgeStackProps) {
     super(scope, id, props);
@@ -94,6 +101,12 @@ export class EventBridgeStack extends cdk.Stack {
       ruleName: `prices-${env}-cleanup`,
       description: `Old-data partition drop on prices.* tables (${env})`,
       schedule: events.Schedule.expression(schedules.cleanup),
+    });
+
+    this.enrichmentRule = new events.Rule(this, 'EnrichmentRule', {
+      ruleName: `prices-${env}-enrichment`,
+      description: `close_usd / volume_quote_usd enrichment of price_ohlcv_1m (${env})`,
+      schedule: events.Schedule.expression(schedules.enrichment),
     });
 
     // -----------------------------------------------------------------
@@ -268,6 +281,48 @@ export class EventBridgeStack extends cdk.Stack {
 
     new cdk.CfnOutput(this, 'OracleFunctionName', {
       value: this.oracleFunction.functionName,
+    });
+
+    // -----------------------------------------------------------------
+    // Enrichment worker Lambda (task 0026) + its hourly cron target. CH-only
+    // (no S3, no Horizon, no VPC): reads price_ohlcv_1m + oracle_prices and
+    // re-inserts higher-`version` rows with close_usd / volume_quote_usd that
+    // the ReplacingMergeTree collapses on merge. Writes prices.* → the same
+    // `ingestion` mTLS identity the other writers use. Idempotency comes from
+    // the `FINAL WHERE … = 0` read filter, so concurrency is not pinned.
+    // -----------------------------------------------------------------
+    this.enrichmentFunction = createWorkerLambda(this, {
+      config,
+      accountId,
+      mtlsSecretName: discoveryMtlsSecretName,
+      idPrefix: 'Enrichment',
+      name: 'enrichment',
+      assetDir: ENRICHMENT_WORKER_ASSET_DIR,
+      memorySize: 512,
+      // A bounded pass is MAX_BATCHES × BATCH_SIZE rows of set-based
+      // INSERT…SELECT; generous headroom under the hourly cadence (overflow
+      // just defers to the next run).
+      timeout: cdk.Duration.minutes(5),
+      secretsExtensionLayer,
+      chDomain,
+      rule: this.enrichmentRule,
+      environment: {
+        CLICKHOUSE_DATABASE: 'prices',
+        CLICKHOUSE_TABLE: 'price_ohlcv_1m',
+        // ORACLE_NAME / FORWARD_FILL_WINDOW_S / PIVOT_WINDOW_S / BATCH_SIZE /
+        // MAX_BATCHES unset → the binary's ChEnrichConfig defaults
+        // (reflector / 300 / 86400 / 10000 / 20).
+      },
+      alarmDescription:
+        'Enrichment Lambda invocation errors (close_usd / volume_quote_usd enrichment pass failed).',
+      alarmPeriod: cdk.Duration.hours(1),
+    }).function;
+
+    new cdk.CfnOutput(this, 'EnrichmentRuleArn', {
+      value: this.enrichmentRule.ruleArn,
+    });
+    new cdk.CfnOutput(this, 'EnrichmentFunctionName', {
+      value: this.enrichmentFunction.functionName,
     });
 
     cdk.Tags.of(this).add('Project', 'stellar-prices-api');

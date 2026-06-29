@@ -65,6 +65,11 @@ export interface EnvironmentConfig {
     readonly assetDiscovery: string;
     /** Old-data partition drop (ALTER TABLE … DROP PARTITION). */
     readonly cleanup: string;
+    /**
+     * volume_quote_usd / close_usd enrichment pass over price_ohlcv_1m
+     * (task 0026). Bounded-batch INSERT…SELECT into the ReplacingMergeTree.
+     */
+    readonly enrichment: string;
   };
 
   // Ledger Processor ingest (consumed by IngestStack — task 0038)
@@ -166,6 +171,7 @@ export function validateConfig(config: EnvironmentConfig): void {
       'oracleWatcher',
       'assetDiscovery',
       'cleanup',
+      'enrichment',
     ] as const;
     for (const key of expectedKeys) {
       const value = schedules[key];

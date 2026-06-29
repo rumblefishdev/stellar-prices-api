@@ -8,7 +8,8 @@
     "assetSupply": "rate(1 hour)",
     "oracleWatcher": "rate(5 minutes)",
     "assetDiscovery": "rate(1 hour)",
-    "cleanup": "cron(0 3 * * ? *)"
+    "cleanup": "cron(0 3 * * ? *)",
+    "enrichment": "rate(1 hour)"
   },
   "ledgerProcessor": {
     "memoryMb": 512,

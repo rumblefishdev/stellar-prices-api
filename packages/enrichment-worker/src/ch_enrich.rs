@@ -163,6 +163,16 @@ impl ChEnrichmentPass {
         Self { client, cfg }
     }
 
+    /// Build a pass from a pre-constructed client — e.g. the mTLS client from
+    /// [`prices_clickhouse::mtls::client_from_lambda_env`] used by the Lambda
+    /// entrypoint. The client's URL/TLS are already configured (`cfg.url` is
+    /// ignored on this path); only `cfg.database` is re-applied so the pass and
+    /// the client agree on the target database.
+    pub fn with_client(client: Client, cfg: ChEnrichConfig) -> Self {
+        let client = client.with_database(&cfg.database);
+        Self { client, cfg }
+    }
+
     /// Cold-start health check — fail Lambda Init, not per-event.
     pub async fn preflight(&self) -> Result<(), ChEnrichError> {
         self.client.query("SELECT 1").execute().await?;

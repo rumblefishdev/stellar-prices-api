@@ -8,13 +8,24 @@ description = "volume_quote_usd enrichment Lambda — local-only prototype (task
 name = "enrichment_worker"
 path = "src/lib.rs"
 
+# EventBridge cron Lambda entrypoint (task 0026). Behind `lambda` so the
+# default build/test exercises `ch_enrich` + the prototype CLI without the AWS
+# runtime / mTLS stack. Deployable: cargo lambda build -p enrichment-worker
+# --release --arm64 --features lambda (the `lambda` feature is required or the
+# bin is skipped; ADR 0006).
 [[bin]]
 name = "enrichment-worker"
 path = "src/main.rs"
+required-features = ["lambda"]
 
 [[bin]]
 name = "enrichment-cli"
 path = "src/bin/cli.rs"
+
+[features]
+default = []
+aws-mtls = ["prices-clickhouse/aws-mtls"]
+lambda = ["aws-mtls", "dep:lambda_runtime"]
 
 [dependencies]
 clap = { workspace = true }
@@ -28,7 +39,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 prices-clickhouse = { path = "../prices-clickhouse" }
 
-lambda_runtime = "0.13"
+lambda_runtime = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = "3"
