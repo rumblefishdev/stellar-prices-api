@@ -177,6 +177,27 @@ Append result (date, CH version, empty-vs-recompute path taken, before/after
 mismatch counts) to 0051's `G-live-schema-state.md` or here, then complete 0071
 via `/lore-framework-tasks` and archive.
 
+### Applied — 2026-06-29 (ch-prod-01)
+
+- **Box / version:** `ch-prod-01` (168.119.73.161), CH **26.3.10.60**, Route A
+  (`docker exec app-clickhouse-1 clickhouse-client`).
+- **Scenario:** EMPTY-DB path — `SELECT count() FROM prices.price_ohlcv_1m` = **0**,
+  so no mis-rolled buckets existed; §5 recompute correctly skipped.
+- **Action:** §3 DROP of all six `prices.mv_ohlcv_*` + §4 re-create from the
+  corrected `rollups.sql` (single `--multiquery` stream).
+- **Proof (§4 def-check):** `SHOW CREATE TABLE prices.mv_ohlcv_1m_to_15m` shows
+  `FROM prices.price_ohlcv_1m AS t FINAL` with `argMin(open, t.timestamp)` /
+  `argMax(close, t.timestamp)` / `argMax(close_usd, t.timestamp)` and
+  `WHERE t.timestamp >= now() - toIntervalHour(2)` — the corrected, qualified
+  form. No bare `timestamp` in any argMin/argMax.
+- **§6 mismatch query:** returns **0** (trivial on the empty DB; the def-check
+  above is the substantive proof).
+- **No restart / no data loss:** DDL only, `prices.*`-scoped; the shared box and
+  BE's `default.*` untouched.
+- **First-attempt note:** an initial pass re-streamed `rollups.sql` WITHOUT the
+  §3 DROP — a no-op (`CREATE … IF NOT EXISTS` skipped the existing buggy MVs).
+  The DROP-then-recreate above is what actually replaced the definitions.
+
 ## Acceptance-criteria mapping
 
 | 0071 AC | Covered by |
