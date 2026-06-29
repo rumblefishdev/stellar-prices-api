@@ -401,11 +401,11 @@ impl ChEnrichmentPass {
             }
         }
 
-        if let Some(name) = &pivot_ref {
-            if let Err(e) = self.drop_table(name).await {
-                // A uniquely-named leftover is harmless; warn rather than fail.
-                warn!(table = %name, error = %e, "failed to drop pivot reference table");
-            }
+        if let Some(name) = &pivot_ref
+            && let Err(e) = self.drop_table(name).await
+        {
+            // A uniquely-named leftover is harmless; warn rather than fail.
+            warn!(table = %name, error = %e, "failed to drop pivot reference table");
         }
 
         match pending {
