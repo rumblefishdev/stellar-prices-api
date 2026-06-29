@@ -164,12 +164,36 @@ INNER JOIN (
 WHERE r.open != expect.open OR r.close != expect.close OR r.close_usd != expect.close_usd\""
 ```
 
-On an empty DB this returns 0 trivially. To *prove* the corrected DDL works,
-insert a throwaway 2-row `_1m` bucket with distinct timestamps (true open=10 at
-the earlier ts, true close=40 at the later), `SYSTEM REFRESH VIEW
-prices.mv_ohlcv_1m_to_15m`, confirm `_15m` shows open=10/close=40, then
-`DELETE FROM prices.price_ohlcv_1m WHERE source='smoke'` and refresh again —
-never hand-delete the rollup tables (0051 lesson: they are MV-owned).
+On an empty DB this returns 0 trivially — so it proves nothing. The substantive
+proof on an empty DB is the §4 `SHOW CREATE` definition check; combined with the
+`prices-clickhouse/tests/rollup_chain_it.rs` integration test (passes on the
+prod-pinned image), that is sufficient. A live smoke test is optional and NOT
+recommended — but if you want one, MIND THE WINDOW:
+
+> ⚠️ The live MV filters `WHERE t.timestamp >= now() - INTERVAL 2 HOUR`. Fixture
+> rows with a stale/epoch timestamp (e.g. 1700000000 ≈ Nov 2023) are excluded by
+> the refresh, so `_15m` stays empty and the check looks "stuck"/blank. Use
+> `now()`-relative timestamps INSIDE the 2-hour window:
+
+```bash
+$CH_SSH "$CH --multiquery -q \"
+INSERT INTO prices.price_ohlcv_1m
+  (timestamp, asset_id, quote_asset_id, source, open, high, low, close,
+   volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES
+  (toStartOfInterval(now(), INTERVAL 15 MINUTE) + INTERVAL 60 SECOND,  999,1,'smoke',10,40,10,15,1,1,0,0,12,1,1),
+  (toStartOfInterval(now(), INTERVAL 15 MINUTE) + INTERVAL 120 SECOND, 999,1,'smoke',30,40,10,40,1,1,0,0,35,1,2);\""
+$CH_SSH "$CH -q 'SYSTEM REFRESH VIEW prices.mv_ohlcv_1m_to_15m'"; sleep 5
+$CH_SSH "$CH -q \"SELECT open, close FROM prices.price_ohlcv_15m FINAL WHERE source='smoke' AND asset_id=999\""   # expect 10, 40
+```
+
+Cleanup (always run if you inserted any smoke rows — delete from the BASE `_1m`
+and let the MV re-derive; never hand-delete the rollup tables, 0051 lesson):
+
+```bash
+$CH_SSH "$CH -q \"DELETE FROM prices.price_ohlcv_1m WHERE source='smoke'\""
+$CH_SSH "$CH -q 'SYSTEM REFRESH VIEW prices.mv_ohlcv_1m_to_15m'"
+$CH_SSH "$CH -q \"SELECT count() FROM prices.price_ohlcv_1m WHERE source='smoke'\""   # expect 0
+```
 
 ## 7. Record provenance + close
 
