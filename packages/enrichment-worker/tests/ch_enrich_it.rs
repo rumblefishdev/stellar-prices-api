@@ -64,6 +64,7 @@ fn cfg(db: &str) -> ChEnrichConfig {
         pivot_window_s: 86_400,
         batch_size: 1000,
         max_batches: 10,
+        one_shot: false,
     }
 }
 
@@ -222,7 +223,16 @@ async fn oracle_budget_exhaustion_defers_instead_of_pegging() {
     let mut budget1 = cfg(db);
     budget1.batch_size = 1;
     budget1.max_batches = 1;
-    ChEnrichmentPass::new(budget1).run().await.unwrap();
+    let pass1 = ChEnrichmentPass::new(budget1).run().await.unwrap();
+
+    // The oracle tier exhausted its 1-batch budget while still making progress
+    // (not drained), so the unreached late candle must NOT be reported as an
+    // oracle miss — `oracle_misses` is 0, not the un-processed remainder (1).
+    // (Regression guard for the EnrichmentOracleMiss over-count.)
+    assert_eq!(
+        pass1.oracle_misses, 0,
+        "budget-exhausted (un-drained) oracle tier reports 0 confirmed misses"
+    );
 
     let approx = |a: f64, b: f64| (a - b).abs() < 1e-4;
     // Early candle: oracle applied (5 × 1.0012 = 5.006).
@@ -358,11 +368,12 @@ async fn one_shot_drains_full_backlog() {
         .await
         .unwrap();
 
-    // One-row batch + unbounded budget (max_batches = 0): drain all five at once.
-    let mut one_shot = cfg(db);
-    one_shot.batch_size = 1;
-    one_shot.max_batches = 0;
-    let stats = ChEnrichmentPass::new(one_shot).run().await.unwrap();
+    // One-row batch + explicit one-shot flag: drain all five at once regardless
+    // of max_batches (left at the cfg default, proving one_shot overrides it).
+    let mut oneshot = cfg(db);
+    oneshot.batch_size = 1;
+    oneshot.one_shot = true;
+    let stats = ChEnrichmentPass::new(oneshot).run().await.unwrap();
 
     assert_eq!(stats.candidates_before, 5);
     assert_eq!(stats.rows_enriched, 5, "one-shot drained the full backlog");

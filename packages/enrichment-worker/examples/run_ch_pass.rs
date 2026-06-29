@@ -32,6 +32,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         pivot_window_s: env_or("PIVOT_WINDOW_S", 86_400),
         batch_size: env_or("BATCH_SIZE", 10_000),
         max_batches: env_or("MAX_BATCHES", 20),
+        one_shot: std::env::var("ENRICHMENT_ONE_SHOT")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false),
     };
 
     let pass = ChEnrichmentPass::new(cfg);

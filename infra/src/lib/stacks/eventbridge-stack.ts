@@ -302,8 +302,11 @@ export class EventBridgeStack extends cdk.Stack {
       memorySize: 512,
       // A bounded pass is MAX_BATCHES × BATCH_SIZE rows of set-based
       // INSERT…SELECT; generous headroom under the hourly cadence (overflow
-      // just defers to the next run). A one-shot drain (MAX_BATCHES=0) runs
-      // longer — bump the env's timeout/memory for that manual invocation.
+      // just defers to the next run). The one-shot historical drain
+      // (ENRICHMENT_ONE_SHOT=true) is NOT this hourly function — it would run far
+      // longer than 5 min and must not be set here (every cron run would then be
+      // unbounded). A dedicated one-time invocation with its own longer timeout
+      // is deploy-time work (task 0026 Option 3 / spec §4).
       timeout: cdk.Duration.minutes(5),
       secretsExtensionLayer,
       chDomain,
@@ -313,8 +316,9 @@ export class EventBridgeStack extends cdk.Stack {
         CLICKHOUSE_TABLE: 'price_ohlcv_1m',
         // ORACLE_NAME / FORWARD_FILL_WINDOW_S / PIVOT_WINDOW_S / BATCH_SIZE /
         // MAX_BATCHES unset → the binary's ChEnrichConfig defaults
-        // (reflector / 300 / 86400 / 10000 / 20). MAX_BATCHES=0 is the
-        // one-shot historical-drain mode (spec §4).
+        // (reflector / 300 / 86400 / 10000 / 20). ENRICHMENT_ONE_SHOT is left
+        // unset (false) here — it belongs only on a dedicated one-time drain
+        // invocation, never this hourly target (see the timeout note above).
       },
       alarmDescription:
         'Enrichment Lambda invocation errors (close_usd / volume_quote_usd enrichment pass failed).',

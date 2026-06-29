@@ -39,8 +39,11 @@ async fn main() -> Result<(), lambda_runtime::Error> {
         window_s: env_parse_or("FORWARD_FILL_WINDOW_S", 300),
         pivot_window_s: env_parse_or("PIVOT_WINDOW_S", 86_400),
         batch_size: env_parse_or("BATCH_SIZE", 10_000),
-        // MAX_BATCHES=0 → one-shot mode: drain the whole backlog this run (spec §4).
         max_batches: env_parse_or("MAX_BATCHES", 20),
+        // ENRICHMENT_ONE_SHOT=true → drain the whole backlog this invocation
+        // (spec §4), ignoring max_batches. An explicit flag, not a MAX_BATCHES
+        // sentinel, so MAX_BATCHES keeps its literal meaning.
+        one_shot: env_parse_or("ENRICHMENT_ONE_SHOT", false),
     };
 
     tracing::info!(
@@ -51,6 +54,7 @@ async fn main() -> Result<(), lambda_runtime::Error> {
         pivot_window_s = cfg.pivot_window_s,
         batch_size = cfg.batch_size,
         max_batches = cfg.max_batches,
+        one_shot = cfg.one_shot,
         "enrichment-worker cold start"
     );
 
@@ -82,6 +86,7 @@ async fn main() -> Result<(), lambda_runtime::Error> {
                 candidates_after = stats.candidates_after,
                 rows_enriched = stats.rows_enriched,
                 oracle_misses = stats.oracle_misses,
+                rows_remaining_at_volume_zero = stats.rows_remaining_at_volume_zero,
                 duration_ms = stats.duration_ms,
                 "enrichment pass complete"
             );
@@ -98,6 +103,7 @@ async fn main() -> Result<(), lambda_runtime::Error> {
                 "candidates_after": stats.candidates_after,
                 "rows_enriched": stats.rows_enriched,
                 "oracle_misses": stats.oracle_misses,
+                "rows_remaining_at_volume_zero": stats.rows_remaining_at_volume_zero,
                 "duration_ms": stats.duration_ms,
             }))
         }

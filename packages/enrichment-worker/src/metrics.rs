@@ -48,7 +48,7 @@ pub fn pass_metrics(stats: &ChPassStats) -> Vec<Metric> {
         },
         Metric {
             name: "EnrichmentRowsRemainingAtVolumeZero",
-            value: stats.candidates_after as f64,
+            value: stats.rows_remaining_at_volume_zero as f64,
             unit: Unit::Count,
         },
         Metric {
@@ -110,6 +110,7 @@ mod tests {
             candidates_after: 7,
             rows_enriched: 93,
             oracle_misses: 12,
+            rows_remaining_at_volume_zero: 4,
             duration_ms: 4500,
         };
         let m = pass_metrics(&stats);
@@ -117,7 +118,9 @@ mod tests {
 
         assert_eq!(by("EnrichmentRowsEnriched").value, 93.0);
         assert_eq!(by("EnrichmentOracleMiss").value, 12.0);
-        assert_eq!(by("EnrichmentRowsRemainingAtVolumeZero").value, 7.0);
+        // The volume-zero metric tracks `rows_remaining_at_volume_zero` (4), NOT
+        // the general `candidates_after` remainder (7).
+        assert_eq!(by("EnrichmentRowsRemainingAtVolumeZero").value, 4.0);
         let dur = by("EnrichmentBatchDurationMs");
         assert_eq!(dur.value, 4500.0);
         assert_eq!(dur.unit, Unit::Milliseconds);
