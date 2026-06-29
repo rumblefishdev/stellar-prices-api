@@ -92,6 +92,32 @@ history:
       Form-B merge semantics in `notes/G-local-prototype-spec.md` is still
       an open agenda item, not a code blocker. (Body "Context" / "blocked
       until 0012" prose is historical — 0012 is archived/completed.)
+  - date: 2026-06-29
+    status: active
+    who: oski
+    note: >
+      **Re-integrated the orphaned `enrichment-worker` crate into the Cargo
+      workspace and drove the locally-achievable integration ACs green.**
+      The crate had been dropped from the root `Cargo.toml` `members` list by
+      a later merge (the `members` block was rewritten when 0039/0054's crates
+      landed), leaving it out of `cargo metadata`, `cargo check --workspace`,
+      and `cargo test --workspace` — i.e. silently un-built and un-tested by CI
+      since the prototype commit (d13d3dc). Re-added the member; the crate
+      compiles in-workspace against the current `prices-clickhouse` and the
+      full workspace check stays clean. Fixed one `collapsible_if` clippy nit
+      in `ch_enrich.rs` (run path; behaviour unchanged). Verified: 24 unit +
+      2 e2e pass; **all 3 `#[ignore]`d live-CH integration tests
+      (`tests/ch_enrich_it.rs`) pass against a local ClickHouse pinned to the
+      prod version 26.3.10.60** — exercising the oracle / stablecoin-peg /
+      XLM-pivot tiers, idempotency (2nd pass = no change), oracle-miss stays
+      `close_usd = 0`, budget-exhaustion-defers-not-pegs, and the snapshot
+      watermark bound, plus the run-scoped pivot-ref table cleanup. CI keeps
+      these `#[ignore]`d (no CH on the runner) so they compile but don't run
+      there. **Remaining ACs are deploy/infra-gated** (CDK Lambda + EventBridge
+      Scheduler rule + IAM, CloudWatch metric publish + dashboard, live-prod
+      backfill credibility check) and stay out of scope under the carried-in
+      prepare-not-deploy constraint; the BE Form-B review is still open. Task
+      stays `active`.
 ---
 
 # `volume_quote_usd` enrichment Lambda — implementation

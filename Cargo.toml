@@ -14,6 +14,7 @@ members = [
     "packages/cleanup-worker",
     "packages/supply-worker",
     "packages/oracle-worker",
+    "packages/enrichment-worker",
 ]
 
 [workspace.dependencies]
