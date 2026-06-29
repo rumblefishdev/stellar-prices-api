@@ -41,10 +41,7 @@ async fn main() -> Result<(), lambda_runtime::Error> {
     let fetcher = Arc::new(S3Fetcher::from_env(bucket).await);
 
     let seed = Arc::new(asset_discovery::seed_identities()?);
-    let max_ledgers = std::env::var("MAX_LEDGERS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(DEFAULT_MAX_LEDGERS);
+    let max_ledgers = prices_clickhouse::env::env_parse_or("MAX_LEDGERS", DEFAULT_MAX_LEDGERS);
     // Where to begin if `discovery_state` is empty (no prior run). Operator-set,
     // like 0038's INITIAL_CURSOR; absent → seed only, no scan (logged).
     let initial_ledger: Option<u64> = std::env::var("INITIAL_DISCOVERY_LEDGER")

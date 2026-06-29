@@ -22,6 +22,7 @@
 async fn main() -> Result<(), lambda_runtime::Error> {
     use enrichment_worker::ch_enrich::{ChEnrichConfig, ChEnrichmentPass};
     use lambda_runtime::{LambdaEvent, run, service_fn};
+    use prices_clickhouse::env::{env_or, env_parse_or};
     use std::sync::Arc;
 
     tracing_subscriber::fmt()
@@ -97,31 +98,12 @@ async fn main() -> Result<(), lambda_runtime::Error> {
                 tracing::warn!(error = %e, "cloudwatch metric publish failed (non-fatal)");
             }
 
-            Ok::<serde_json::Value, lambda_runtime::Error>(serde_json::json!({
-                "batches": stats.batches,
-                "candidates_before": stats.candidates_before,
-                "candidates_after": stats.candidates_after,
-                "rows_enriched": stats.rows_enriched,
-                "oracle_misses": stats.oracle_misses,
-                "rows_remaining_at_volume_zero": stats.rows_remaining_at_volume_zero,
-                "duration_ms": stats.duration_ms,
-            }))
+            // `ChPassStats` derives Serialize, so the response mirrors the
+            // struct verbatim — adding a stat field never needs a manual edit here.
+            Ok::<serde_json::Value, lambda_runtime::Error>(serde_json::to_value(&stats)?)
         }
     }))
     .await
-}
-
-#[cfg(feature = "lambda")]
-fn env_or(var: &str, default: &str) -> String {
-    std::env::var(var).unwrap_or_else(|_| default.to_string())
-}
-
-#[cfg(feature = "lambda")]
-fn env_parse_or<T: std::str::FromStr>(var: &str, default: T) -> T {
-    std::env::var(var)
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(default)
 }
 
 #[cfg(not(feature = "lambda"))]

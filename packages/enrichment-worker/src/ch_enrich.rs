@@ -58,7 +58,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use clickhouse::Client;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 /// Canonical Stellar issuers for the pegged USD stablecoins, used by the
@@ -149,7 +149,7 @@ struct RefAssetRow {
     issuer_address: String,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct ChPassStats {
     pub batches: u32,
     pub candidates_before: u64,

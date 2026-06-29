@@ -7,13 +7,7 @@
 //!   cargo run -p enrichment-worker --example run_ch_pass
 
 use enrichment_worker::ch_enrich::{ChEnrichConfig, ChEnrichmentPass};
-
-fn env_or<T: std::str::FromStr>(key: &str, default: T) -> T {
-    std::env::var(key)
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(default)
-}
+use prices_clickhouse::env::{env_or, env_parse_or};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -24,17 +18,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     let cfg = ChEnrichConfig {
-        url: std::env::var("CLICKHOUSE_URL").unwrap_or_else(|_| "http://localhost:8123".into()),
-        database: std::env::var("CLICKHOUSE_DATABASE").unwrap_or_else(|_| "prices".into()),
-        table: std::env::var("CLICKHOUSE_TABLE").unwrap_or_else(|_| "price_ohlcv_1m".into()),
-        oracle_name: std::env::var("ORACLE_NAME").unwrap_or_else(|_| "reflector".into()),
-        window_s: env_or("FORWARD_FILL_WINDOW_S", 300),
-        pivot_window_s: env_or("PIVOT_WINDOW_S", 86_400),
-        batch_size: env_or("BATCH_SIZE", 10_000),
-        max_batches: env_or("MAX_BATCHES", 20),
-        one_shot: std::env::var("ENRICHMENT_ONE_SHOT")
-            .map(|v| v == "true" || v == "1")
-            .unwrap_or(false),
+        url: env_or("CLICKHOUSE_URL", "http://localhost:8123"),
+        database: env_or("CLICKHOUSE_DATABASE", "prices"),
+        table: env_or("CLICKHOUSE_TABLE", "price_ohlcv_1m"),
+        oracle_name: env_or("ORACLE_NAME", "reflector"),
+        window_s: env_parse_or("FORWARD_FILL_WINDOW_S", 300),
+        pivot_window_s: env_parse_or("PIVOT_WINDOW_S", 86_400),
+        batch_size: env_parse_or("BATCH_SIZE", 10_000),
+        max_batches: env_parse_or("MAX_BATCHES", 20),
+        one_shot: env_parse_or("ENRICHMENT_ONE_SHOT", false),
     };
 
     let pass = ChEnrichmentPass::new(cfg);
