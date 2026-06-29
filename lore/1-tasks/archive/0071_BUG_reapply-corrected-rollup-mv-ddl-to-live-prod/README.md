@@ -2,7 +2,7 @@
 id: "0071"
 title: "Re-apply corrected rollup/preroll DDL to live ch-prod-01 (argMin/argMax timestamp-shadowing fix)"
 type: BUG
-status: active
+status: completed
 related_adr: ["0007"]
 related_tasks: ["0059", "0051"]
 tags: [layer-database, priority-high, effort-small, clickhouse, materialized-views, rollups, operations]
@@ -51,6 +51,24 @@ history:
       comment in `rollups.sql`/`preroll.sql` (comment-only diff, both rollup
       integration tests green) so the dead-end isn't re-attempted. No schema
       behaviour change; no prod deploy.
+  - date: 2026-06-29
+    status: completed
+    who: oski
+    note: >
+      Fix applied to ch-prod-01 (CH 26.3.10.60, Route A) and verified — see
+      `notes/G-prod-reapply-runbook.md` "Applied — 2026-06-29". EMPTY-DB path
+      (`price_ohlcv_1m` = 0), so no mis-rolled buckets existed and the recompute
+      step was N/A. DROP of all six `prices.mv_ohlcv_*` + re-create from the
+      corrected `rollups.sql`; `SHOW CREATE mv_ohlcv_1m_to_15m` confirms the
+      live definition reads `FROM price_ohlcv_1m AS t FINAL` with
+      `argMin/argMax(…, t.timestamp)` (qualified, no bare `timestamp`). MV
+      refresh healthy (`system.view_refreshes` status Scheduled, no exception);
+      box + BE `default.*` untouched, no restart, no data residue. Two runbook
+      footguns found and fixed in-note during the live run: (1) re-streaming
+      `rollups.sql` without the DROP is a no-op (`IF NOT EXISTS`); (2) the verify
+      query needs `AS r FINAL` (alias before FINAL) and the live smoke test must
+      use in-window timestamps (`now() - INTERVAL 2 HOUR` filter). Completing and
+      archiving.
 ---
 
 # Re-apply corrected rollup/preroll DDL to live ch-prod-01
@@ -92,7 +110,10 @@ loopback `default` admin).
 
 ## Acceptance Criteria
 
-- [ ] Six `prices.mv_ohlcv_*` MVs on ch-prod-01 re-created from corrected DDL
-- [ ] Mis-rolled historical buckets recomputed (preroll or window refresh)
-- [ ] Live spot-check confirms correct argMin-open / argMax-close at ≥ `_15m`
-- [ ] Provenance appended to 0051 `notes/G-live-schema-state.md` (or a 0071 note)
+- [x] Six `prices.mv_ohlcv_*` MVs on ch-prod-01 re-created from corrected DDL
+- [x] Mis-rolled historical buckets recomputed (preroll or window refresh)
+      — N/A: empty DB (`price_ohlcv_1m` = 0), no mis-rolled buckets existed
+- [x] Live spot-check confirms correct argMin-open / argMax-close at ≥ `_15m`
+      — via `SHOW CREATE` definition proof (qualified `t.timestamp`) + the
+      green `rollup_chain_it.rs` integration test on the prod-pinned image
+- [x] Provenance appended to a 0071 note (`notes/G-prod-reapply-runbook.md`)
