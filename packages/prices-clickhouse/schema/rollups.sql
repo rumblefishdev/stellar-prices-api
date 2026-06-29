@@ -15,19 +15,29 @@
 --   - version = max(version) is correct for a TRUE refreshable MV (atomic
 --     target replace). If a CH build forces scheduled INSERT…SELECT into a
 --     ReplacingMergeTree instead, project a strictly-increasing version.
---   - The bucket key MUST be aliased `AS timestamp` — it cannot be renamed to
---     dodge the shadow below. A `TO`-table MV matches its SELECT output to the
---     target columns BY NAME, so a differently-named bucket (e.g. `ts_bucket`)
---     is rejected with `Code: 8 THERE_IS_NO_COLUMN` (verified on CH 26.3.10.60,
---     task 0071). That mandatory alias SHADOWS the source `timestamp` column, so
---     argMin/argMax — and the WHERE window — MUST read the QUALIFIED source
---     `t.timestamp` (FROM … AS t). A bare `timestamp` resolves to the bucket-
---     start alias, which is constant within a bucket, so open/close/close_usd
---     would tie-break to an arbitrary row instead of the true first/last by time
---     (task 0059 full-chain integration test). Qualification is the ONLY fix for
---     the MVs; renaming the bucket is not available. (`preroll.sql` uses a plain
---     INSERT … SELECT, which maps by position, so the same `AS timestamp` there
---     is for consistency, not necessity.)
+--   - The bucket key MUST be aliased `AS timestamp`, and that forced name is —
+--     separately — what makes the `t.` qualifier below mandatory. Two distinct
+--     ClickHouse name mechanisms collide here (task 0071):
+--
+--       (1) INSERT ROUTING (by name). A `TO`-table MV routes its result by
+--           matching each SELECT-output column NAME to the TARGET table's column
+--           of the same name (target = `price_ohlcv_15m`; the source table is not
+--           consulted). So the bucket output must be named `timestamp` to land in
+--           `price_ohlcv_15m.timestamp`. A differently-named bucket (`ts_bucket`)
+--           is rejected: `Code: 8 THERE_IS_NO_COLUMN` (verified on CH 26.3.10.60).
+--           NB a plain `INSERT … SELECT` routes by POSITION instead — which is why
+--           `preroll.sql` accepts `ts_bucket`; it keeps `timestamp` only for
+--           parity with the MVs.
+--
+--       (2) IN-QUERY RESOLUTION (the shadow). Inside the SELECT, the mandatory
+--           `AS timestamp` alias shadows the source column `timestamp`, so a bare
+--           `timestamp` in argMin/argMax + the WHERE window resolves to the
+--           CONSTANT bucket-start value, not the per-row time — tie-breaking
+--           open/close/close_usd to an arbitrary row (task 0059 full-chain test).
+--           Reading the QUALIFIED source `t.timestamp` (FROM … AS t) is the fix.
+--
+--     Because (1) forces the name that causes (2), renaming the bucket is NOT an
+--     option for the MVs — `t.`-qualification is the only available remedy.
 
 CREATE MATERIALIZED VIEW IF NOT EXISTS prices.mv_ohlcv_1m_to_15m
 REFRESH EVERY 1 MINUTE
