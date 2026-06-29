@@ -102,6 +102,7 @@ jobs:
           -p cleanup-worker
           -p supply-worker
           -p oracle-worker
+          -p enrichment-worker
 
       # Assert every bootstrap the CDK app references actually built. A bare
       # "any bootstrap exists" glob would false-pass on the unrelated CLIs,
