@@ -10,9 +10,15 @@ pub struct AppConfig {
     /// exercise CH-free routes (e.g. `/health`). Defaults to true so the live
     /// Lambda always primes its connection pool.
     pub ch_enabled: bool,
-    /// Public base URL stamped into the OpenAPI `servers` block (Phase 1).
+    /// Public base URL stamped into the OpenAPI `servers` block.
     /// `None` until configured via `API_BASE_URL`.
     pub base_url: Option<String>,
+    /// Accepted `X-API-Key` values, parsed from comma-separated `API_KEYS`.
+    /// When empty the in-app auth gate is **disarmed** (open) — so local/dev and
+    /// the early Phase 2 load test work before keys are provisioned. The
+    /// per-key 100 req/s throttle is enforced at the API Gateway usage-plan
+    /// regardless (ADR 0008). Mirrors BE's deploy-dark gating.
+    pub api_keys: Vec<String>,
 }
 
 impl AppConfig {
@@ -23,6 +29,15 @@ impl AppConfig {
                 .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
                 .unwrap_or(true),
             base_url: std::env::var("API_BASE_URL").ok(),
+            api_keys: std::env::var("API_KEYS")
+                .map(|raw| {
+                    raw.split(',')
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default(),
         }
     }
 }

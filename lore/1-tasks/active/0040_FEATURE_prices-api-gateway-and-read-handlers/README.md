@@ -111,6 +111,26 @@ history:
       fmt clean. Workspace root updated (member + axum/lambda_http/tower-http
       deps mirroring BE versions). Next: Phase 1 (auth + moka + identity parser
       + utoipa OpenAPI). prepare-not-deploy upheld — no AWS calls.
+  - date: 2026-06-30
+    status: active
+    who: claude
+    note: >
+      **Phase 1 (shared core) landed.** (1) In-app `X-API-Key` auth
+      (`auth/mod.rs`): constant-time `ct_eq`, gate armed only when `API_KEYS`
+      set (deploy-dark), `/health` + `/api-docs-json` exempt; per-key 100 req/s
+      still owned by the gateway usage-plan. (2) Asset-identifier parser
+      (`identity.rs`): `native` / `CODE:ISSUER` / `C…contract` → `AssetIdentifier`
+      with real strkey CRC validation via `stellar-strkey`; resolution to
+      `asset_id` deferred to Phase 2 (needs CH). (3) moka `ttl_cache` builder
+      (`cache.rs`) — the in-process cache primitive Phase 2 composes. (4) utoipa
+      OpenAPI: router migrated to `utoipa-axum` `OpenApiRouter`, `ApiDoc` +
+      `register_routes`, spec served at `GET /api-docs-json` and emitted by
+      `bin/extract_openapi`. Verified: 16 tests green (auth gate 401/exempt,
+      identity parse cases, health + spec), `extract_openapi` emits valid
+      OpenAPI 3.1.0, `cargo check --features lambda` compiles, clippy + fmt
+      clean. Next: Phase 2 (cheap read endpoints — /price, batch, asset,
+      oracles, backfill — against the existing CH views). prepare-not-deploy
+      upheld.
 ---
 
 # Prices API Gateway + Rust/axum read handlers

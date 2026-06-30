@@ -6,8 +6,11 @@
 
 use axum::Json;
 use axum::http::StatusCode;
+use axum::http::header::CACHE_CONTROL;
 use axum::response::{IntoResponse, Response};
 use serde::Serialize;
+
+use crate::common::cache_control;
 
 /// The wire shape for every error response.
 #[derive(Debug, Serialize)]
@@ -35,6 +38,8 @@ pub const INVALID_ID: &str = "invalid_id";
 pub const INVALID_QUERY: &str = "invalid_query";
 /// The requested resource does not exist.
 pub const NOT_FOUND: &str = "not_found";
+/// Missing or invalid `X-API-Key`.
+pub const UNAUTHORIZED: &str = "unauthorized";
 /// An upstream ClickHouse query failed.
 pub const DB_ERROR: &str = "db_error";
 
@@ -66,4 +71,18 @@ pub fn internal_error(code: &'static str, message: impl Into<String>) -> Respons
         details: None,
     }
     .into_response_with(StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+/// 401 Unauthorized. Carries `Cache-Control: no-store` so a rejection is never
+/// cached by the client or the gateway.
+pub fn unauthorized(message: impl Into<String>) -> Response {
+    let mut resp = ErrorEnvelope {
+        code: UNAUTHORIZED,
+        message: message.into(),
+        details: None,
+    }
+    .into_response_with(StatusCode::UNAUTHORIZED);
+    resp.headers_mut()
+        .insert(CACHE_CONTROL, cache_control::NO_STORE);
+    resp
 }

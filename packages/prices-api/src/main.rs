@@ -34,7 +34,7 @@ async fn main() {
         AppState::without_ch()
     };
 
-    lambda_http::run(app(state))
+    lambda_http::run(app(&config, state))
         .await
         .expect("failed to run Lambda");
 }

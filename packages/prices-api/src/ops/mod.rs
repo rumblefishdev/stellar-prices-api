@@ -25,6 +25,12 @@ struct Health {
 /// `GET /health` — liveness probe. Returns 200 with a tiny JSON body and a
 /// non-cacheable `Cache-Control`. Deliberately does NOT touch ClickHouse, so it
 /// answers even when the CH client is absent (mirrors BE's health exemption).
+#[utoipa::path(
+    get,
+    path = "/health",
+    tag = "ops",
+    responses((status = 200, description = "Service is healthy"))
+)]
 pub async fn health() -> Response {
     let mut resp = (
         StatusCode::OK,
