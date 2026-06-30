@@ -3,8 +3,8 @@ id: "0040"
 title: "Prices API Gateway + Rust/axum read handlers — public REST endpoints with API-key auth, rate limit, response cache"
 type: FEATURE
 status: active
-related_adr: ["0003", "0004", "0006", "0007"]
-related_tasks: ["0011", "0038", "0039", "0045", "0047"]
+related_adr: ["0003", "0004", "0006", "0007", "0008"]
+related_tasks: ["0011", "0038", "0039", "0045", "0047", "0072"]
 tags: [layer-backend, priority-high, effort-large, api, lambda, axum, rust, aws, clickhouse, hetzner]
 links:
   - "../../../docs/prices-api-general-overview.md"
@@ -79,6 +79,22 @@ history:
       blocked → active. **Constraints carried in:** stay local-first /
       prepare-not-deploy — handlers develop against fixture + live-CH reads;
       no AWS deploy / API Gateway apply without explicit approval.
+  - date: 2026-06-30
+    status: active
+    who: claude
+    note: >
+      Persisted the implementation plan (notes/G-implementation-plan.md):
+      endpoint→data-source map against the existing prices-clickhouse views,
+      phased build (scaffold→shared-core→cheap-reads→new-query-reads→gateway→
+      verify), and two locked decisions. (1) **Single axum Lambda** copied from
+      BE crates/api (not five per-route) — §4 imposes no topology constraint and
+      the load-test SLO is won by moka + gateway cache + warm mTLS, all BE
+      already provides; §2.1 "function per route group" recorded as an
+      ADR-worthy deviation (ADR pending). (2) **/price ships with sources={}**
+      and zero price_xlm/change_24h_pct stubs — mv_current_prices leaves them at
+      DEFAULT in v1; materializing them is producer-side, spawned as backlog
+      task **0072**, after which /price flips to pass-through. Corrected the
+      stale sqlx/RDS phrasing in Step 1 (superseded by ADR 0007 CH retarget).
 ---
 
 # Prices API Gateway + Rust/axum read handlers
@@ -123,12 +139,20 @@ is the first axum binary in the codebase (the Ledger Processor in
 
 ## Implementation Plan
 
+> **Authoritative plan:** [`notes/G-implementation-plan.md`](notes/G-implementation-plan.md)
+> (endpoint→data-source map, phased build, single-Lambda decision, the
+> `/price` stub decision → task 0072). The steps below are the original draft,
+> kept for history; where they differ from the G-note, the G-note wins. In
+> particular the `sqlx`/RDS phrasing predates the ADR 0007 ClickHouse retarget
+> and the single-Lambda topology decision.
+
 ### Step 1: Workspace + crate layout
 
 Add `packages/api/` as the umbrella for handler crates, sharing a
 library crate `packages/api-core/` for:
 
-- DB connection pooling (`sqlx`, RDS via Secrets Manager).
+- ClickHouse access via `prices_clickhouse::mtls::client_from_lambda_env`
+  (mTLS to Hetzner CH per ADR 0007) — **not** `sqlx`/RDS (superseded).
 - Asset identifier parsing per §4.1 (`{code}:{issuer}`,
   `{contract_address}`, `native`).
 - Cursor encode/decode for §4.1's keyset pagination (Base64 JSON
@@ -137,15 +161,26 @@ library crate `packages/api-core/` for:
 - Per-endpoint response cache key + TTL hint headers (API
   Gateway honours these for the §2.1 0.5 GB cache).
 
-One binary crate per route group, matching the §2.1 row "API
-handlers — Individual functions per route group". Recommended
-split (5 binaries, one per §4.x sub-section):
+**DECISION (locked 2026-06-30): a SINGLE axum Lambda serving all
+routes**, copied from BE `crates/api` — NOT five per-route binaries.
+The original draft below proposed a 5-binary split (mirroring §2.1's
+"function per route group"); that is **superseded**. One binary crate
+`crates/prices-api` with one axum router and a module per route group
+(`assets`, `ohlcv`/`price`, `batch`, `oracles`, `backfill`). Modules
+stay independent so a hot endpoint can be split into its own Lambda
+later without a rewrite (escape hatch + reserved-concurrency hook). The
+§2.1 "function per route group" wording is the deviation recorded in
+[ADR 0008](../../2-adrs/0008_single-axum-lambda-for-prices-api.md). See
+[`notes/G-implementation-plan.md`](notes/G-implementation-plan.md)
+and [`notes/S-lambda-topology-single-vs-five.md`](notes/S-lambda-topology-single-vs-five.md).
 
-- `packages/api/assets-handler` — §4.1
-- `packages/api/ohlcv-handler` — §4.2
-- `packages/api/batch-handler` — §4.3
-- `packages/api/oracles-handler` — §4.4
-- `packages/api/backfill-status-handler` — §4.5
+~~Recommended split (5 binaries, one per §4.x sub-section)~~ — superseded:
+
+- ~~`packages/api/assets-handler` — §4.1~~
+- ~~`packages/api/ohlcv-handler` — §4.2~~
+- ~~`packages/api/batch-handler` — §4.3~~
+- ~~`packages/api/oracles-handler` — §4.4~~
+- ~~`packages/api/backfill-status-handler` — §4.5~~
 
 ### Step 2: Endpoint implementations
 
@@ -163,9 +198,12 @@ For each handler, transcribe the §4 spec verbatim:
   `?base_currency` switch; emits `backfill_note` when
   `?timeframe=all` is requested and the backfill hasn't reached
   the asset's inception.
-- **§4.2 `GET /assets/{id}/price`**: read from `current_prices`,
-  return §4.2 response shape including the `sources` JSONB
-  expanded.
+- **§4.2 `GET /assets/{id}/price`**: read the `current_price_usd`
+  view (mTLS CH). Real fields: `price_usd`, `vwap_24h`,
+  `volume_24h_usd`, `updated_at`. **`sources` ships as `{}`** and
+  `price_xlm` / `change_24h_pct` as zero stubs — `mv_current_prices`
+  leaves them at DEFAULT in v1; materializing them is **task 0072**,
+  after which this handler flips to pass-through (see G-note).
 - **§4.3 `POST /prices/batch`**: read `current_prices` for the
   posted asset list; cap batch size (size TBD at impl — pick
   something defensible, e.g. 100).
@@ -224,8 +262,10 @@ that point.
 
 ## Acceptance Criteria
 
-- [ ] Five Rust/axum Lambda binaries built against `provided.al2`,
-      deployed via CDK from 0011's `infra/aws-cdk/` app.
+- [ ] **Single** Rust/axum Lambda binary (`crates/prices-api`,
+      all routes) built against `provided.al2`/PROVIDED_AL2023,
+      deployed via CDK from 0011's infra app. (Topology decision
+      2026-06-30 — single, not five; see G-note.)
 - [ ] REST API Gateway with API-key auth, 100 req/s usage plan,
       0.5 GB response cache, per-endpoint TTLs documented.
 - [ ] All §4 endpoints implemented per the response shapes shown
@@ -275,14 +315,26 @@ that point.
 
 ## Notes
 
+- **Lambda topology — DECIDED 2026-06-30: SINGLE axum Lambda** (copy the BE
+  pattern wholesale). See
+  [`notes/S-lambda-topology-single-vs-five.md`](notes/S-lambda-topology-single-vs-five.md)
+  for the full comparison and
+  [`notes/G-implementation-plan.md`](notes/G-implementation-plan.md) for the
+  locked plan. §4 imposes no topology constraint; single wins on §6 p95 and lets
+  us copy BE's `common/` kit + CDK + CI. §2.1's "function per route group"
+  wording is the deviation recorded in
+  [ADR 0008](../../2-adrs/0008_single-axum-lambda-for-prices-api.md). Per-key
+  100 req/s needs the gateway usage-plan regardless.
 - This is the **first axum binary** in the codebase per
   ADR 0006 §Decision; conventions for axum-on-`lambda_runtime`
   packaging, routing layout, and error mapping established here
   will be reused by any future API handler.
-- The §2.1 "individual functions per route group" mandate is
-  deliberate: five handler binaries, not one mono-Lambda. This
-  keeps per-route cold-start, memory sizing, and IAM scoping
-  independent.
+- ~~The §2.1 "individual functions per route group" mandate is
+  deliberate: five handler binaries, not one mono-Lambda.~~
+  **Superseded 2026-06-30:** we ship a single axum Lambda (BE pattern).
+  Per-route cold-start/memory/IAM isolation was the only upside, and it
+  doesn't help the single-endpoint load-test SLO; the escape hatch
+  (split a hot route out later) preserves it if ever needed.
 - Per-endpoint cache TTLs are a meaningful design call —
   document them in the done notes, not just in CDK. A future
   reviewer looking at the §2.1 row needs to know what TTLs were
