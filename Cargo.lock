@@ -120,7 +120,7 @@ name = "asset-discovery"
 version = "0.1.0"
 dependencies = [
  "clickhouse",
- "lambda_runtime",
+ "lambda_runtime 0.13.0",
  "prices-clickhouse",
  "prices-ingest-core",
  "prices-ledger-processor",
@@ -714,6 +714,74 @@ dependencies = [
 ]
 
 [[package]]
+name = "aws_lambda_events"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d02c123e89527e7b424f74f52d11be0d17ef2887819323a42dcae1c7630ca53d"
+dependencies = [
+ "base64",
+ "bytes",
+ "http 1.4.0",
+ "http-body 1.0.1",
+ "http-serde",
+ "query_map",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "axum"
+version = "0.8.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "31b698c5f9a010f6573133b09e0de5408834d0c82f8d7475a89fc1867a71cd90"
+dependencies = [
+ "axum-core",
+ "bytes",
+ "form_urlencoded",
+ "futures-util",
+ "http 1.4.0",
+ "http-body 1.0.1",
+ "http-body-util",
+ "hyper 1.9.0",
+ "hyper-util",
+ "itoa",
+ "matchit",
+ "memchr",
+ "mime",
+ "percent-encoding",
+ "pin-project-lite",
+ "serde_core",
+ "serde_json",
+ "serde_path_to_error",
+ "serde_urlencoded",
+ "sync_wrapper",
+ "tokio",
+ "tower 0.5.3",
+ "tower-layer",
+ "tower-service",
+ "tracing",
+]
+
+[[package]]
+name = "axum-core"
+version = "0.5.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "08c78f31d7b1291f7ee735c1c6780ccde7785daae9a9206026862dab7d8792d1"
+dependencies = [
+ "bytes",
+ "futures-core",
+ "http 1.4.0",
+ "http-body 1.0.1",
+ "http-body-util",
+ "mime",
+ "pin-project-lite",
+ "sync_wrapper",
+ "tower-layer",
+ "tower-service",
+ "tracing",
+]
+
+[[package]]
 name = "base16ct"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -852,6 +920,9 @@ name = "bytes"
 version = "1.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1e748733b7cbc798e1434b6ac524f0c1ff2ab456fe201501e6497c8417a4fc33"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "bytes-utils"
@@ -963,7 +1034,7 @@ name = "cleanup-worker"
 version = "0.1.0"
 dependencies = [
  "clickhouse",
- "lambda_runtime",
+ "lambda_runtime 0.13.0",
  "prices-clickhouse",
  "serde",
  "serde_json",
@@ -1320,6 +1391,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "encoding_rs"
+version = "0.8.35"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "75030f3c4f45dafd7586dd6780965a8c7e8e285a5ecb86713e63a79c5b2766f3"
+dependencies = [
+ "cfg-if",
+]
+
+[[package]]
 name = "enrichment-worker"
 version = "0.1.0"
 dependencies = [
@@ -1327,7 +1407,7 @@ dependencies = [
  "aws-sdk-cloudwatch",
  "clap",
  "clickhouse",
- "lambda_runtime",
+ "lambda_runtime 0.13.0",
  "prices-clickhouse",
  "rust_decimal",
  "serde",
@@ -1805,6 +1885,7 @@ dependencies = [
  "http 1.4.0",
  "http-body 1.0.1",
  "httparse",
+ "httpdate",
  "itoa",
  "pin-project-lite",
  "smallvec",
@@ -2064,6 +2145,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "lambda_http"
+version = "1.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9f7f1395a7854d32e6f0c366448740dceb2e1bcb90bbbbf2785152e0ca3283e0"
+dependencies = [
+ "aws_lambda_events 1.2.0",
+ "bytes",
+ "encoding_rs",
+ "futures-util",
+ "http 1.4.0",
+ "http-body 1.0.1",
+ "http-body-util",
+ "hyper 1.9.0",
+ "lambda_runtime 1.2.1",
+ "mime",
+ "percent-encoding",
+ "pin-project-lite",
+ "serde",
+ "serde_json",
+ "serde_urlencoded",
+ "tokio-stream",
+ "url",
+]
+
+[[package]]
 name = "lambda_runtime"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2079,7 +2185,7 @@ dependencies = [
  "http-serde",
  "hyper 1.9.0",
  "hyper-util",
- "lambda_runtime_api_client",
+ "lambda_runtime_api_client 0.11.1",
  "pin-project",
  "serde",
  "serde_json",
@@ -2088,6 +2194,31 @@ dependencies = [
  "tokio-stream",
  "tower 0.4.13",
  "tower-layer",
+ "tracing",
+]
+
+[[package]]
+name = "lambda_runtime"
+version = "1.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4de91395937cd37777dce2c98ed95060a6fbd7dfaefb7ae3cc5fec84bb8379d0"
+dependencies = [
+ "async-stream",
+ "base64",
+ "bytes",
+ "futures",
+ "http 1.4.0",
+ "http-body-util",
+ "http-serde",
+ "hyper 1.9.0",
+ "lambda_runtime_api_client 1.0.3",
+ "pin-project",
+ "serde",
+ "serde_json",
+ "serde_path_to_error",
+ "tokio",
+ "tokio-stream",
+ "tower 0.5.3",
  "tracing",
 ]
 
@@ -2108,6 +2239,25 @@ dependencies = [
  "tokio",
  "tower 0.4.13",
  "tower-service",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "lambda_runtime_api_client"
+version = "1.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b5e9ffa99f1e87b21d42ac98fe7eac55f4cfb9ed14677a64a7dab4d8f44399a4"
+dependencies = [
+ "bytes",
+ "futures-channel",
+ "futures-util",
+ "http 1.4.0",
+ "http-body 1.0.1",
+ "http-body-util",
+ "hyper 1.9.0",
+ "hyper-util",
+ "tower 0.5.3",
  "tracing",
  "tracing-subscriber",
 ]
@@ -2193,6 +2343,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "matchit"
+version = "0.8.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
+
+[[package]]
 name = "md-5"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2207,6 +2363,12 @@ name = "memchr"
 version = "2.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
+
+[[package]]
+name = "mime"
+version = "0.3.17"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6877bb514081ee2a7ff5ef9de3281f14a4dd4bceac4c09388074a6b5df8a139a"
 
 [[package]]
 name = "minicbor"
@@ -2305,7 +2467,7 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "clickhouse",
- "lambda_runtime",
+ "lambda_runtime 0.13.0",
  "prices-clickhouse",
  "prices-ingest-core",
  "reqwest",
@@ -2456,6 +2618,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "prices-api"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "clickhouse",
+ "lambda_http",
+ "prices-clickhouse",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tower 0.5.3",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "prices-clickhouse"
 version = "0.1.0"
 dependencies = [
@@ -2503,9 +2683,9 @@ version = "0.1.0"
 dependencies = [
  "aws-config",
  "aws-sdk-s3",
- "aws_lambda_events",
+ "aws_lambda_events 0.16.1",
  "clap",
- "lambda_runtime",
+ "lambda_runtime 0.13.0",
  "prices-clickhouse",
  "prices-ingest-core",
  "serde",
@@ -2577,6 +2757,17 @@ dependencies = [
  "wasi",
  "web-sys",
  "winapi",
+]
+
+[[package]]
+name = "query_map"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5eab6b8b1074ef3359a863758dae650c7c0c6027927a085b7af911c8e0bf3a15"
+dependencies = [
+ "form_urlencoded",
+ "serde",
+ "serde_derive",
 ]
 
 [[package]]
@@ -3457,7 +3648,7 @@ name = "supply-worker"
 version = "0.1.0"
 dependencies = [
  "clickhouse",
- "lambda_runtime",
+ "lambda_runtime 0.13.0",
  "prices-clickhouse",
  "reqwest",
  "rust_decimal",
@@ -3765,6 +3956,7 @@ dependencies = [
  "tokio",
  "tower-layer",
  "tower-service",
+ "tracing",
 ]
 
 [[package]]
@@ -3782,6 +3974,7 @@ dependencies = [
  "tower 0.5.3",
  "tower-layer",
  "tower-service",
+ "tracing",
  "url",
 ]
 

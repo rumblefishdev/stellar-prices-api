@@ -95,6 +95,22 @@ history:
       DEFAULT in v1; materializing them is producer-side, spawned as backlog
       task **0072**, after which /price flips to pass-through. Corrected the
       stale sqlx/RDS phrasing in Step 1 (superseded by ADR 0007 CH retarget).
+  - date: 2026-06-30
+    status: active
+    who: claude
+    note: >
+      **Phase 0 (scaffold) landed.** New crate `packages/prices-api` (single
+      axum Lambda per ADR 0008, skeleton copied from BE `crates/api`): `app()`
+      router shared by the Lambda bin + tests, `AppState { ch: Option<Client> }`
+      (Arc-backed, built once at cold start via `prices-clickhouse::mtls`),
+      `AppConfig::from_env`, `common/{errors,cache_control}` kit, and
+      `GET /health` wired end-to-end. Bin gated behind `lambda` feature
+      (`required-features`), mTLS behind `aws-mtls` — default build stays lean.
+      Verified: `cargo test -p prices-api` green (health oneshot smoke test),
+      `cargo check --features lambda` compiles the bin + mTLS path, clippy +
+      fmt clean. Workspace root updated (member + axum/lambda_http/tower-http
+      deps mirroring BE versions). Next: Phase 1 (auth + moka + identity parser
+      + utoipa OpenAPI). prepare-not-deploy upheld — no AWS calls.
 ---
 
 # Prices API Gateway + Rust/axum read handlers

@@ -15,6 +15,7 @@ members = [
     "packages/supply-worker",
     "packages/oracle-worker",
     "packages/enrichment-worker",
+    "packages/prices-api",
 ]
 
 [workspace.dependencies]
@@ -24,6 +25,14 @@ sha2 = "0.10"
 xdr-parser = { git = "https://github.com/rumblefishdev/soroban-block-explorer.git", branch = "develop" }
 clickhouse = { version = "0.13", features = ["inserter"] }
 tokio = { version = "1", features = ["full"] }
+
+# HTTP / API surface (task 0040 — public Prices API; ADR 0008 single axum
+# Lambda). Versions mirror BE's proven crates/api combo (axum 0.8 + lambda_http 1
+# + tower-http 0.6). lambda_http 1 pulls lambda_runtime 1 alongside the workers'
+# 0.13 — acceptable; unify on lambda_runtime 1 as a later cleanup.
+axum = "0.8"
+lambda_http = "1"
+tower-http = { version = "0.6", features = ["cors", "trace"] }
 clap = { version = "4", features = ["derive", "env"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
