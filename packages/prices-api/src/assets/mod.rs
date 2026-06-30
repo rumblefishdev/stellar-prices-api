@@ -16,5 +16,6 @@ pub fn router() -> OpenApiRouter<AppState> {
     OpenApiRouter::new()
         .routes(routes!(handlers::get_assets))
         .routes(routes!(handlers::get_price))
+        .routes(routes!(handlers::get_ohlcv))
         .routes(routes!(handlers::get_asset))
 }

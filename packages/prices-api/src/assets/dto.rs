@@ -76,3 +76,36 @@ pub struct AssetListResponse {
     pub cursor: Option<String>,
     pub has_more: bool,
 }
+
+/// One OHLCV candle (overview §4.2). O/H/L/C are in the `base_currency` quote
+/// asset, **as stored** (no conversion). Doubles as the CH row.
+#[derive(Debug, Serialize, serde::Deserialize, clickhouse::Row, ToSchema)]
+pub struct Candle {
+    /// Bucket start (ISO-8601 UTC).
+    pub timestamp: String,
+    pub open: String,
+    pub high: String,
+    pub low: String,
+    pub close: String,
+    /// Base-asset volume.
+    pub volume_base: String,
+    /// USD-denominated quote volume (the one USD figure on the candle).
+    pub volume_quote_usd: String,
+    pub vwap: String,
+    pub trade_count: u64,
+}
+
+/// `GET /assets/{id}/ohlcv` response.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct OhlcvResponse {
+    /// Echoed natural identity.
+    pub asset: String,
+    /// Effective granularity (auto-selected from `timeframe` unless overridden).
+    pub granularity: String,
+    /// `USD` or `XLM` — the quote the candles are denominated in.
+    pub base_currency: String,
+    /// Present only when `timeframe=all` and the backfill is still running.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backfill_note: Option<String>,
+    pub data: Vec<Candle>,
+}

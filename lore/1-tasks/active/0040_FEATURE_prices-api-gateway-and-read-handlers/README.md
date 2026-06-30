@@ -169,6 +169,29 @@ history:
       compiles, clippy + fmt clean. OHLCV (§4.2) + assets listing (§4.1) remain
       for Phase 3; gateway/usage-plan/cache for Phase 4. prepare-not-deploy
       upheld (local docker CH only).
+  - date: 2026-06-30
+    status: active
+    who: claude
+    note: >
+      **Phase 3 complete — both new-query endpoints landed + live-CH tested; all
+      7 §4 endpoints now exist.** (1) `GET /v1/assets` — keyset cursor pagination
+      (common/cursor.rs, opaque Base64 {v,id}), ?type/?search filters, ?sort
+      (price/volume_24h/change_24h/code) + ?order; §3.3 CH idiom (ORDER BY+LIMIT
+      on merged current_prices, numeric sort via toFloat64). (2)
+      `GET /v1/assets/{id}/ohlcv` — timeframe→granularity auto-map, ?granularity
+      /?start/?end overrides, base_currency selects the QUOTE LEG (USD→USDC,
+      XLM→native) with O/H/L/C returned AS STORED (quote-denominated, NO USD
+      conversion — corrected requirement, see memory + 0073); cross-source merge
+      per bucket (high=max, low=min, sums, vwap volume-weighted, open/close via
+      argMax(.,volume_base)); backfill_note via per-asset min(timestamp) gated on
+      SDEX status=running. **Spawned task 0073** (store earliest_data_available
+      on backfill_progress + populate in writers). **Bug caught live:** aliasing
+      `sum(volume_base) AS volume_base` shadows the column → argMax nests
+      aggregates (CH err 184); fixed with non-colliding aliases. Verified vs CH
+      26.3.10.60: 41 tests green (8 live-CH new: 4 ohlcv + 4 list), OpenAPI lists
+      all 8 paths, lambda compiles, clippy + fmt clean. Remaining: Phase 4
+      (API Gateway stack — usage-plan, stage cache, reserved concurrency) +
+      Phase 5 (k6 SLO). prepare-not-deploy upheld.
 ---
 
 # Prices API Gateway + Rust/axum read handlers

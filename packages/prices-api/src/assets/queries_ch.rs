@@ -7,6 +7,7 @@
 
 use clickhouse::Client;
 
+use crate::assets::dto::Candle;
 use crate::common::cursor::Cursor;
 use crate::identity::AssetIdentifier;
 
@@ -292,6 +293,198 @@ pub async fn resolve_asset_id(
         q = q.bind(b);
     }
     Ok(q.fetch_optional::<IdRow>().await?.map(|r| r.asset_id))
+}
+
+// ----------------------------------------------------------------------------
+// OHLCV (overview §4.2)
+// ----------------------------------------------------------------------------
+
+/// The quote leg the candles are denominated in (the `?base_currency` param).
+#[derive(Debug, Clone, Copy)]
+pub enum BaseCurrency {
+    Usd,
+    Xlm,
+}
+
+impl BaseCurrency {
+    pub fn parse(s: Option<&str>) -> Option<Self> {
+        match s.unwrap_or("USD").to_ascii_uppercase().as_str() {
+            "USD" => Some(BaseCurrency::Usd),
+            "XLM" => Some(BaseCurrency::Xlm),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            BaseCurrency::Usd => "USD",
+            BaseCurrency::Xlm => "XLM",
+        }
+    }
+}
+
+/// OHLCV granularity → per-grain table suffix.
+#[derive(Debug, Clone, Copy)]
+pub enum Granularity {
+    M1,
+    M15,
+    H1,
+    H4,
+    D1,
+    W1,
+    Mo1,
+}
+
+impl Granularity {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Granularity::M1 => "1m",
+            Granularity::M15 => "15m",
+            Granularity::H1 => "1h",
+            Granularity::H4 => "4h",
+            Granularity::D1 => "1d",
+            Granularity::W1 => "1w",
+            Granularity::Mo1 => "1M",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "1m" => Some(Granularity::M1),
+            "15m" => Some(Granularity::M15),
+            "1h" => Some(Granularity::H1),
+            "4h" => Some(Granularity::H4),
+            "1d" => Some(Granularity::D1),
+            "1w" => Some(Granularity::W1),
+            "1M" => Some(Granularity::Mo1),
+            _ => None,
+        }
+    }
+}
+
+/// Requested time window (overview §4.2 auto-granularity table).
+#[derive(Debug, Clone, Copy)]
+pub enum Timeframe {
+    H1,
+    H24,
+    D7,
+    D30,
+    Y1,
+    All,
+}
+
+impl Timeframe {
+    pub fn parse(s: Option<&str>) -> Option<Self> {
+        match s.unwrap_or("24h") {
+            "1h" => Some(Timeframe::H1),
+            "24h" => Some(Timeframe::H24),
+            "7d" => Some(Timeframe::D7),
+            "30d" => Some(Timeframe::D30),
+            "1y" => Some(Timeframe::Y1),
+            "all" => Some(Timeframe::All),
+            _ => None,
+        }
+    }
+
+    /// Auto-selected granularity when `?granularity` is omitted.
+    pub fn default_granularity(self) -> Granularity {
+        match self {
+            Timeframe::H1 => Granularity::M1,
+            Timeframe::H24 => Granularity::M15,
+            Timeframe::D7 => Granularity::H1,
+            Timeframe::D30 => Granularity::H4,
+            Timeframe::Y1 => Granularity::D1,
+            Timeframe::All => Granularity::D1,
+        }
+    }
+
+    /// `now() - <interval>` lower-bound SQL, or `None` for `all`. Static strings
+    /// (never user input) — safe to inline.
+    pub fn interval(self) -> Option<&'static str> {
+        match self {
+            Timeframe::H1 => Some("INTERVAL 1 HOUR"),
+            Timeframe::H24 => Some("INTERVAL 24 HOUR"),
+            Timeframe::D7 => Some("INTERVAL 7 DAY"),
+            Timeframe::D30 => Some("INTERVAL 30 DAY"),
+            Timeframe::Y1 => Some("INTERVAL 1 YEAR"),
+            Timeframe::All => None,
+        }
+    }
+
+    pub fn is_all(self) -> bool {
+        matches!(self, Timeframe::All)
+    }
+}
+
+/// Validated OHLCV query inputs.
+pub struct OhlcvArgs {
+    pub asset_id: u32,
+    pub quote_asset_id: u32,
+    pub granularity: Granularity,
+    /// `?start` override (ISO-8601); takes precedence over `since_interval`.
+    pub start: Option<String>,
+    /// `?end` override (ISO-8601).
+    pub end: Option<String>,
+    /// `now() - <interval>` lower bound from the timeframe (ignored if `start`
+    /// is set or for `all`).
+    pub since_interval: Option<&'static str>,
+    pub limit: u64,
+}
+
+/// Read merged candles for one asset against one quote leg, at the chosen grain.
+///
+/// Per-source rows are collapsed (`FINAL`) then merged across sources per
+/// bucket: `high=max`, `low=min`, volumes + `trade_count` summed, `vwap`
+/// volume-weighted, and `open`/`close` taken from the highest-volume source
+/// (`argMax(.., volume_base)`). O/H/L/C are returned as stored (quote-asset
+/// denominated). Ascending by timestamp.
+pub async fn ohlcv(ch: &Client, args: OhlcvArgs) -> Result<Vec<Candle>, clickhouse::error::Error> {
+    let table = format!("price_ohlcv_{}", args.granularity.as_str());
+
+    let mut conds = vec!["asset_id = ?".to_string(), "quote_asset_id = ?".to_string()];
+    if args.start.is_some() {
+        conds.push("timestamp >= parseDateTimeBestEffort(?)".to_string());
+    } else if let Some(iv) = args.since_interval {
+        conds.push(format!("timestamp >= now() - {iv}"));
+    }
+    if args.end.is_some() {
+        conds.push("timestamp <= parseDateTimeBestEffort(?)".to_string());
+    }
+
+    // NB: output aliases must NOT collide with column names referenced inside
+    // aggregates — e.g. aliasing `sum(volume_base) AS volume_base` shadows the
+    // `volume_base` column so `argMax(open, volume_base)` would nest aggregates
+    // (CH error 184). Deserialization is positional (RowBinary), so the alias
+    // labels here are cosmetic and need only be distinct.
+    let sql = format!(
+        "SELECT \
+           formatDateTime(timestamp, '%Y-%m-%dT%H:%i:%SZ') AS ts, \
+           toString(argMax(open, volume_base)) AS o, \
+           toString(max(high)) AS h, \
+           toString(min(low)) AS l, \
+           toString(argMax(close, volume_base)) AS c, \
+           toString(sum(volume_base)) AS vb, \
+           toString(sum(volume_quote_usd)) AS vqu, \
+           toString(toDecimal128(ifNull(sum(toFloat64(vwap) * toFloat64(volume_base)) \
+               / nullIf(sum(toFloat64(volume_base)), 0), 0), 14)) AS vw, \
+           toUInt64(sum(trade_count)) AS tc \
+         FROM {table} FINAL \
+         WHERE {conds} \
+         GROUP BY timestamp \
+         ORDER BY timestamp ASC \
+         LIMIT {limit}",
+        conds = conds.join(" AND "),
+        limit = args.limit
+    );
+
+    let mut q = ch.query(&sql).bind(args.asset_id).bind(args.quote_asset_id);
+    if let Some(s) = args.start {
+        q = q.bind(s);
+    }
+    if let Some(e) = args.end {
+        q = q.bind(e);
+    }
+    q.fetch_all::<Candle>().await
 }
 
 #[cfg(test)]

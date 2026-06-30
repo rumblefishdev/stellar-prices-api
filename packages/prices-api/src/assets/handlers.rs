@@ -6,11 +6,18 @@ use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::assets::dto::{AssetDetail, AssetListItem, AssetListResponse, PriceResponse};
-use crate::assets::queries_ch::{self, ListArgs, Order, SortCol, TypeFilter};
+use crate::assets::dto::{
+    AssetDetail, AssetListItem, AssetListResponse, OhlcvResponse, PriceResponse,
+};
+use crate::assets::queries_ch::{
+    self, BaseCurrency, Granularity, ListArgs, OhlcvArgs, Order, SortCol, Timeframe, TypeFilter,
+};
 use crate::common::{cache_control, cursor, errors};
 use crate::identity::AssetIdentifier;
 use crate::state::AppState;
+
+/// Cap on candles returned per OHLCV request (bounds response size).
+const OHLCV_MAX_POINTS: u64 = 5000;
 
 /// Default / maximum page size for `GET /assets` (overview §4.1).
 const DEFAULT_LIMIT: u32 = 50;
@@ -227,4 +234,169 @@ pub async fn get_assets(State(state): State<AppState>, Query(p): Query<ListParam
     .into_response();
     cache_control::attach(&mut resp, cache_control::MEDIUM);
     resp
+}
+
+/// Query parameters for `GET /assets/{id}/ohlcv`.
+#[derive(Debug, Deserialize)]
+pub struct OhlcvParams {
+    pub timeframe: Option<String>,
+    pub granularity: Option<String>,
+    pub start: Option<String>,
+    pub end: Option<String>,
+    pub base_currency: Option<String>,
+}
+
+/// `GET /assets/{asset_identifier}/ohlcv` — candlestick history.
+///
+/// O/H/L/C are denominated in `base_currency` (USD→USDC quote, XLM→native quote)
+/// and returned as stored — no conversion. Candles merge across sources per
+/// bucket. `backfill_note` appears only for `timeframe=all` while the backfill
+/// is still running.
+#[utoipa::path(
+    get,
+    path = "/assets/{asset_identifier}/ohlcv",
+    tag = "prices",
+    params(
+        ("asset_identifier" = String, Path, description = "native, CODE:ISSUER, or a C… contract"),
+        ("timeframe" = Option<String>, Query, description = "1h | 24h | 7d | 30d | 1y | all (default 24h)"),
+        ("granularity" = Option<String>, Query,
+         description = "1m | 15m | 1h | 4h | 1d | 1w | 1M (auto from timeframe if omitted)"),
+        ("start" = Option<String>, Query, description = "ISO-8601 range start (overrides timeframe)"),
+        ("end" = Option<String>, Query, description = "ISO-8601 range end"),
+        ("base_currency" = Option<String>, Query, description = "USD (default) | XLM"),
+    ),
+    responses(
+        (status = 200, description = "Candlestick series", body = OhlcvResponse),
+        (status = 400, description = "Invalid parameter"),
+        (status = 404, description = "Unknown asset"),
+    )
+)]
+pub async fn get_ohlcv(
+    State(state): State<AppState>,
+    Path(raw): Path<String>,
+    Query(p): Query<OhlcvParams>,
+) -> Response {
+    let id = match AssetIdentifier::parse(&raw) {
+        Ok(id) => id,
+        Err(e) => return errors::bad_request(errors::INVALID_ID, e.to_string()),
+    };
+    let Some(timeframe) = Timeframe::parse(p.timeframe.as_deref()) else {
+        return errors::bad_request(errors::INVALID_QUERY, "invalid timeframe");
+    };
+    let Some(base_currency) = BaseCurrency::parse(p.base_currency.as_deref()) else {
+        return errors::bad_request(errors::INVALID_QUERY, "invalid base_currency");
+    };
+    let granularity = match p.granularity.as_deref() {
+        None => timeframe.default_granularity(),
+        Some(s) => match Granularity::parse(s) {
+            Some(g) => g,
+            None => return errors::bad_request(errors::INVALID_QUERY, "invalid granularity"),
+        },
+    };
+
+    // Resolve the base asset.
+    let asset_id = match queries_ch::resolve_asset_id(state.ch(), &id).await {
+        Ok(Some(a)) => a,
+        Ok(None) => return errors::not_found("unknown asset"),
+        Err(e) => {
+            tracing::error!(error = %e, "ohlcv resolve base failed");
+            return errors::internal_error(errors::DB_ERROR, "asset lookup failed");
+        }
+    };
+
+    // Resolve the quote leg from base_currency.
+    let quote_ident = match base_currency {
+        BaseCurrency::Usd => AssetIdentifier::Classic {
+            code: "USDC".to_string(),
+            issuer: prices_clickhouse::USDC_ISSUER.to_string(),
+        },
+        BaseCurrency::Xlm => AssetIdentifier::Native,
+    };
+    let quote_asset_id = match queries_ch::resolve_asset_id(state.ch(), &quote_ident).await {
+        Ok(Some(q)) => q,
+        // Quote leg not tracked → no candles for it; return an empty series.
+        Ok(None) => return ohlcv_response(&id, granularity, base_currency, None, Vec::new()),
+        Err(e) => {
+            tracing::error!(error = %e, "ohlcv resolve quote failed");
+            return errors::internal_error(errors::DB_ERROR, "quote lookup failed");
+        }
+    };
+
+    let since_interval = if p.start.is_some() {
+        None
+    } else {
+        timeframe.interval()
+    };
+    let args = OhlcvArgs {
+        asset_id,
+        quote_asset_id,
+        granularity,
+        start: p.start.clone(),
+        end: p.end.clone(),
+        since_interval,
+        limit: OHLCV_MAX_POINTS,
+    };
+    let data = match queries_ch::ohlcv(state.ch(), args).await {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::error!(error = %e, "ohlcv query failed");
+            return errors::internal_error(errors::DB_ERROR, "ohlcv lookup failed");
+        }
+    };
+
+    // backfill_note: only for timeframe=all, with data, while SDEX still running.
+    let note = if timeframe.is_all() && !data.is_empty() && sdex_backfill_running(state.ch()).await
+    {
+        let from = data
+            .first()
+            .map(|c| {
+                c.timestamp
+                    .split('T')
+                    .next()
+                    .unwrap_or(&c.timestamp)
+                    .to_string()
+            })
+            .unwrap_or_default();
+        Some(format!(
+            "Historical data available from {from}. Backfill in progress — see GET /backfill/status."
+        ))
+    } else {
+        None
+    };
+
+    ohlcv_response(&id, granularity, base_currency, note, data)
+}
+
+/// Build the OHLCV 200 response with a MEDIUM cache header.
+fn ohlcv_response(
+    id: &AssetIdentifier,
+    granularity: Granularity,
+    base_currency: BaseCurrency,
+    backfill_note: Option<String>,
+    data: Vec<crate::assets::dto::Candle>,
+) -> Response {
+    let mut resp = Json(OhlcvResponse {
+        asset: id.to_canonical(),
+        granularity: granularity.as_str().to_string(),
+        base_currency: base_currency.as_str().to_string(),
+        backfill_note,
+        data,
+    })
+    .into_response();
+    cache_control::attach(&mut resp, cache_control::MEDIUM);
+    resp
+}
+
+/// True if the SDEX backfill stream is still running (best-effort; false on
+/// error, so a status hiccup just omits the note).
+async fn sdex_backfill_running(ch: &clickhouse::Client) -> bool {
+    match crate::backfill::queries_ch::all_progress(ch).await {
+        Ok(rows) => rows
+            .iter()
+            .any(|r| r.task_name == "sdex_archive" && r.status == "running"),
+        Err(e) => {
+            tracing::warn!(error = %e, "ohlcv backfill-status check failed; omitting note");
+            false
+        }
+    }
 }

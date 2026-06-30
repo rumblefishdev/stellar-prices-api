@@ -27,6 +27,8 @@ use crate::state::AppState;
         crate::assets::dto::AssetDetail,
         crate::assets::dto::AssetListItem,
         crate::assets::dto::AssetListResponse,
+        crate::assets::dto::Candle,
+        crate::assets::dto::OhlcvResponse,
         crate::oracles::dto::OraclesResponse,
         crate::oracles::dto::OracleEntry,
         crate::backfill::dto::BackfillStatus,
