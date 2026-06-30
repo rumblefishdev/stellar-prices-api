@@ -43,6 +43,19 @@ const LEDGER_PROCESSOR_ASSET_DIR =
   '../target/lambda/prices-ledger-processor';
 
 /**
+ * Cargo-lambda build output for the `prices-api` binary (the single axum
+ * api-handler, ADR 0008). Build it first:
+ *
+ *     cargo lambda build -p prices-api --release --arm64 --features lambda
+ *
+ * which writes `target/lambda/prices-api/bootstrap`. Same pre-built-asset
+ * convention as the ledger processor (RustFunction adoption is a shared
+ * follow-up). Override with `API_HANDLER_ASSET_DIR`.
+ */
+const API_HANDLER_ASSET_DIR =
+  process.env['API_HANDLER_ASSET_DIR'] ?? '../target/lambda/prices-api';
+
+/**
  * SSM keys the BE team publishes under the platform namespace and the
  * prices-api CDK reads **at deploy time** (NOT at Lambda runtime — the
  * Lambda only ever sees env vars; SSM is the deploy handshake). See
@@ -127,6 +140,11 @@ export class ComputeStack extends cdk.Stack {
   public readonly ingestDlq: sqs.Queue;
   public readonly apiHandlerRole: iam.Role;
   public readonly apiHandlerLogGroup: logs.LogGroup;
+  /**
+   * The single axum api-handler Lambda (ADR 0008). Consumed by
+   * `ApiGatewayStack` as the proxy integration for all `/v1` routes.
+   */
+  public readonly apiHandlerFunction: lambda.Function;
   /**
    * `MTLS_SECRET_NAME` the ledger-processor (writer) Lambda reads — the
    * single `{cert,key,ca}` bundle for CH user `prices_writer`. Set on the
@@ -404,6 +422,40 @@ export class ComputeStack extends cdk.Stack {
       removalPolicy: PRICES_LAMBDA_LOG_REMOVAL_POLICY,
     });
 
+    // The single axum api-handler (ADR 0008). Reads as `prices_reader` over
+    // mTLS; reuses the same `chDomain` SSM value + secrets extension layer as
+    // the ledger processor. No `API_KEYS` env → the in-app key gate stays
+    // DISARMED; per-key 100 req/s is enforced at the API Gateway usage plan
+    // (ADR 0008). `reservedConcurrentExecutions` is the optional SLO escape
+    // hatch (only set when configured). API Gateway grants invoke via the
+    // integration's resource policy (no role-cycle, unlike the SQS ESM above).
+    const apiHandler = config.apiHandler;
+    this.apiHandlerFunction = new lambda.Function(this, 'ApiHandlerFunction', {
+      ...pricesLambdaDefaults, // ARM64 + PROVIDED_AL2023 (ADR 0006/0007)
+      functionName: `prices-${envName}-api-handler`,
+      handler: 'bootstrap',
+      code: lambda.Code.fromAsset(API_HANDLER_ASSET_DIR),
+      role: this.apiHandlerRole,
+      logGroup: this.apiHandlerLogGroup,
+      memorySize: apiHandler.memoryMb,
+      timeout: cdk.Duration.seconds(apiHandler.timeoutSeconds),
+      ...(apiHandler.reservedConcurrency !== undefined
+        ? { reservedConcurrentExecutions: apiHandler.reservedConcurrency }
+        : {}),
+      tracing: lambda.Tracing.ACTIVE,
+      layers: [secretsExtensionLayer],
+      environment: {
+        ENV_NAME: envName,
+        RUST_LOG: 'info',
+        CH_DOMAIN: chDomain,
+        // Reader bundle ({cert,key,ca}) for CH user prices_reader.
+        MTLS_SECRET_NAME: this.apiHandlerMtlsSecretName,
+        // Build the mTLS CH client eagerly at cold start (primes the pool).
+        CH_ENABLED: 'true',
+        PARAMETERS_SECRETS_EXTENSION_CACHE_ENABLED: 'true',
+      },
+    });
+
     // ---------------------------------------------------------------
     // Outputs
     // ---------------------------------------------------------------
@@ -426,6 +478,10 @@ export class ComputeStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'ApiHandlerRoleArn', {
       value: this.apiHandlerRole.roleArn,
       description: `API Handler Lambda execution role ARN (${envName})`,
+    });
+    new cdk.CfnOutput(this, 'ApiHandlerFunctionArn', {
+      value: this.apiHandlerFunction.functionArn,
+      description: `API Handler (axum) Lambda ARN (${envName})`,
     });
 
     cdk.Tags.of(this).add('Project', 'stellar-prices-api');

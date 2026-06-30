@@ -1,5 +1,6 @@
 import * as cdk from 'aws-cdk-lib';
 import * as apigateway from 'aws-cdk-lib/aws-apigateway';
+import type * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import type { Construct } from 'constructs';
 
@@ -7,38 +8,49 @@ import type { EnvironmentConfig } from '../types.js';
 
 export interface ApiGatewayStackProps extends cdk.StackProps {
   readonly config: EnvironmentConfig;
+  /**
+   * The single axum api-handler Lambda (ADR 0008) every `/v1` route proxies to.
+   * Passed in from `ComputeStack` (cross-stack reference).
+   */
+  readonly apiHandlerFunction: lambda.IFunction;
 }
 
 /**
- * Public REST API Gateway shell.
+ * Per-endpoint response-cache TTLs (overview §2.1). The cache key includes the
+ * path params (automatic) plus the query params declared per method below, so
+ * paginated / parameterized reads cache correctly. `POST /prices/batch` and
+ * `GET /health` are uncached.
+ */
+const CACHE_TTL = {
+  assetsList: cdk.Duration.seconds(60),
+  assetDetail: cdk.Duration.seconds(60),
+  price: cdk.Duration.seconds(15),
+  ohlcv: cdk.Duration.seconds(60),
+  oracles: cdk.Duration.seconds(30),
+  backfill: cdk.Duration.seconds(30),
+} as const;
+
+/** 0.5 GB stage cache (overview §2.1). */
+const CACHE_CLUSTER_SIZE = '0.5';
+
+/**
+ * Public REST API Gateway for prices-api.
  *
- * This is a skeleton: it stands up the `RestApi` itself, the
- * environment-specific throttling on the stage, and the UsagePlan
- * + ApiKey for non-browser consumers — but no real routes. The
- * only method is a `GET /health` mock integration returning
- * `{ "status": "ok", "stack": "prices-{env}" }`, which:
+ * Fronts the single axum api-handler Lambda (ADR 0008): every `/v1` route is a
+ * Lambda **proxy** integration onto `ComputeStack.apiHandlerFunction`, so the
+ * gateway forwards the full request (path + query + headers) and the Lambda's
+ * own axum router (which owns the `/v1` prefix) handles it — the gateway adds no
+ * prefix of its own, so there is no `/v1/v1` double-prefix.
  *
- * 1. Makes the stage deployable (API Gateway refuses to deploy a
- *    stage with zero methods).
- * 2. Provides a synthetic probe target for downstream alarms
- *    (task 0056) without needing a real Lambda.
+ * - **Auth / rate limit**: data routes set `apiKeyRequired: true`; the UsagePlan
+ *   enforces the §2.1/§7 per-key 100 req/s (`apiKeyRateLimit`) + a daily quota.
+ *   `GET /health` stays a keyless mock (cheapest liveness probe).
+ * - **Response cache**: 0.5 GB stage cache with per-endpoint TTLs (`CACHE_TTL`);
+ *   each cached method declares its query params as cache keys.
  *
- * Task 0040 will attach the `/v1/prices/...` routes as Lambda
- * proxy integrations onto the `ComputeStack.apiHandlerRole`-backed
- * function. The `/health` route stays — it's still useful as the
- * cheapest "is the stage alive" check.
- *
- * Deferred to 0040 / 0056:
- * - Custom domain wiring (Route 53 A-record + ACM cert).
- * - WAF WebACL (REGIONAL-scoped) for IP rate-limiting and managed
- *   rule sets.
- * - CORS preflight (waits for browser-consumer requirements).
- * - Response caching (no real traffic shape to size it against
- *   yet).
- *
- * The REST API ID is published to SSM at `/prices/{env}/api-gateway-id`
- * so downstream consumers (custom domain wiring, CloudWatch dashboards)
- * can resolve it without cross-stack imports.
+ * Still deferred (task 0056 / later): custom domain + ACM, WAF WebACL, CORS
+ * preflight. The REST API ID is published to SSM at
+ * `/prices/{env}/api-gateway-id`.
  */
 export class ApiGatewayStack extends cdk.Stack {
   public readonly api: apigateway.RestApi;
@@ -46,7 +58,8 @@ export class ApiGatewayStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props: ApiGatewayStackProps) {
     super(scope, id, props);
 
-    const { config } = props;
+    const { config, apiHandlerFunction } = props;
+    const cacheEnabled = config.apiGatewayCacheEnabled;
 
     this.api = new apigateway.RestApi(this, 'Api', {
       restApiName: `prices-${config.envName}-api`,
@@ -56,13 +69,18 @@ export class ApiGatewayStack extends cdk.Stack {
         tracingEnabled: true,
         throttlingRateLimit: config.apiGatewayThrottleRate,
         throttlingBurstLimit: config.apiGatewayThrottleBurst,
+        // 0.5 GB stage response cache; per-method TTLs set on each method below.
+        cachingEnabled: cacheEnabled,
+        ...(cacheEnabled
+          ? { cacheClusterEnabled: true, cacheClusterSize: CACHE_CLUSTER_SIZE }
+          : {}),
       },
       endpointTypes: [apigateway.EndpointType.REGIONAL],
     });
 
-    // Skeleton GET /health route — mock integration returns a static
-    // 200 with the env name. Replace / supplement with real routes
-    // in task 0040.
+    // ---------------------------------------------------------------
+    // GET /health — keyless mock (liveness; no Lambda invocation).
+    // ---------------------------------------------------------------
     const health = this.api.root.addResource('health');
     health.addMethod(
       'GET',
@@ -79,25 +97,140 @@ export class ApiGatewayStack extends cdk.Stack {
           },
         ],
         passthroughBehavior: apigateway.PassthroughBehavior.NEVER,
-        requestTemplates: {
-          'application/json': '{ "statusCode": 200 }',
-        },
+        requestTemplates: { 'application/json': '{ "statusCode": 200 }' },
       }),
       {
         methodResponses: [{ statusCode: '200' }],
+        // health stays uncached even when the stage cache is on.
+        ...(cacheEnabled ? { cachingEnabled: false } : {}),
       },
     );
 
-    // Usage plan + API key. In skeleton mode no methods require an
-    // API key — the plan attaches to the stage so requests sent
-    // with `x-api-key` are tracked and throttled, but the key is
-    // not yet a gate. Task 0040 marks specific routes with
-    // `apiKeyRequired: true` when partner endpoints arrive.
+    // ---------------------------------------------------------------
+    // /v1/* — Lambda proxy routes to the single api-handler.
+    // ---------------------------------------------------------------
+    /** Lambda proxy integration with the given gateway cache-key params. */
+    const proxy = (cacheKeyParameters: string[]) =>
+      new apigateway.LambdaIntegration(apiHandlerFunction, {
+        proxy: true,
+        ...(cacheKeyParameters.length ? { cacheKeyParameters } : {}),
+      });
+    /** Declare cache-key params on the method (path → required, query → optional). */
+    const declare = (keys: string[]): Record<string, boolean> =>
+      Object.fromEntries(keys.map((k) => [k, k.includes('.path.')]));
+    /** Add a key-gated GET with a cached integration. */
+    const addGet = (resource: apigateway.IResource, cacheKeys: string[]) =>
+      resource.addMethod('GET', proxy(cacheKeys), {
+        apiKeyRequired: true,
+        requestParameters: declare(cacheKeys),
+      });
+
+    const PATH_ID = 'method.request.path.asset_identifier';
+    const qs = (name: string) => `method.request.querystring.${name}`;
+
+    const v1 = this.api.root.addResource('v1');
+
+    // /v1/assets (list) + /v1/assets/{asset_identifier} (+ /price, /ohlcv)
+    const assets = v1.addResource('assets');
+    addGet(assets, [
+      qs('type'),
+      qs('search'),
+      qs('sort'),
+      qs('order'),
+      qs('cursor'),
+      qs('limit'),
+    ]);
+    const assetId = assets.addResource('{asset_identifier}');
+    addGet(assetId, [PATH_ID]);
+    addGet(assetId.addResource('price'), [PATH_ID]);
+    addGet(assetId.addResource('ohlcv'), [
+      PATH_ID,
+      qs('timeframe'),
+      qs('granularity'),
+      qs('start'),
+      qs('end'),
+      qs('base_currency'),
+    ]);
+
+    // /v1/oracles/{asset_identifier}
+    const oracles = v1.addResource('oracles');
+    addGet(oracles.addResource('{asset_identifier}'), [PATH_ID]);
+
+    // /v1/backfill/status
+    const backfill = v1.addResource('backfill');
+    addGet(backfill.addResource('status'), []);
+
+    // /v1/prices/batch (POST, uncached)
+    const prices = v1.addResource('prices');
+    prices.addResource('batch').addMethod('POST', proxy([]), {
+      apiKeyRequired: true,
+    });
+
+    // ---------------------------------------------------------------
+    // Per-method cache TTLs (only meaningful when the stage cache is on).
+    // ---------------------------------------------------------------
+    if (cacheEnabled) {
+      // Per-method caching expressed as CfnStage method settings (resourcePath +
+      // httpMethod). The high-level `deployOptions.methodOptions` is fixed at
+      // construction; setting the L1 `methodSettings` here keeps the per-route
+      // TTL table colocated with the routes for readability.
+      const cfnStage = this.api.deploymentStage.node
+        .defaultChild as apigateway.CfnStage;
+      cfnStage.methodSettings = [
+        {
+          resourcePath: '/v1/assets',
+          httpMethod: 'GET',
+          cachingEnabled: true,
+          cacheTtlInSeconds: CACHE_TTL.assetsList.toSeconds(),
+        },
+        {
+          resourcePath: '/v1/assets/{asset_identifier}',
+          httpMethod: 'GET',
+          cachingEnabled: true,
+          cacheTtlInSeconds: CACHE_TTL.assetDetail.toSeconds(),
+        },
+        {
+          resourcePath: '/v1/assets/{asset_identifier}/price',
+          httpMethod: 'GET',
+          cachingEnabled: true,
+          cacheTtlInSeconds: CACHE_TTL.price.toSeconds(),
+        },
+        {
+          resourcePath: '/v1/assets/{asset_identifier}/ohlcv',
+          httpMethod: 'GET',
+          cachingEnabled: true,
+          cacheTtlInSeconds: CACHE_TTL.ohlcv.toSeconds(),
+        },
+        {
+          resourcePath: '/v1/oracles/{asset_identifier}',
+          httpMethod: 'GET',
+          cachingEnabled: true,
+          cacheTtlInSeconds: CACHE_TTL.oracles.toSeconds(),
+        },
+        {
+          resourcePath: '/v1/backfill/status',
+          httpMethod: 'GET',
+          cachingEnabled: true,
+          cacheTtlInSeconds: CACHE_TTL.backfill.toSeconds(),
+        },
+        // Explicitly uncached:
+        {
+          resourcePath: '/v1/prices/batch',
+          httpMethod: 'POST',
+          cachingEnabled: false,
+        },
+        { resourcePath: '/health', httpMethod: 'GET', cachingEnabled: false },
+      ];
+    }
+
+    // ---------------------------------------------------------------
+    // UsagePlan + API key — per-key 100 req/s (§2.1/§7) + daily quota.
+    // ---------------------------------------------------------------
     const usagePlan = this.api.addUsagePlan('UsagePlan', {
       name: `prices-${config.envName}-partner-plan`,
       throttle: {
-        rateLimit: config.apiGatewayThrottleRate,
-        burstLimit: config.apiGatewayThrottleBurst,
+        rateLimit: config.apiKeyRateLimit,
+        burstLimit: config.apiKeyBurstLimit,
       },
       quota: {
         limit: config.apiGatewayPartnerDailyQuota,

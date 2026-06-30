@@ -29,12 +29,17 @@ export function createApp({ config }: CreateAppOptions): void {
   // helper and needs no cross-stack reference / dependency on SecretsStack.
   new SecretsStack(app, `${prefix}-Secrets`, { env, config });
 
-  new ComputeStack(app, `${prefix}-Compute`, { env, config });
+  const compute = new ComputeStack(app, `${prefix}-Compute`, { env, config });
 
-  // ApiGatewayStack is independent of ComputeStack in the skeleton
-  // (no Lambda integration yet — task 0040 wires the cross-stack
-  // dependency when it attaches the apiHandler Function).
-  new ApiGatewayStack(app, `${prefix}-ApiGateway`, { env, config });
+  // ApiGatewayStack proxies all /v1 routes to ComputeStack's single axum
+  // api-handler Lambda (ADR 0008). Passing the Function in creates the
+  // cross-stack dependency (CFN export/import); CDK orders Compute before
+  // ApiGateway automatically.
+  new ApiGatewayStack(app, `${prefix}-ApiGateway`, {
+    env,
+    config,
+    apiHandlerFunction: compute.apiHandlerFunction,
+  });
 
   // EventBridgeStack is independent of ComputeStack in the skeleton
   // (no Lambda targets yet — task 0039 wires the cross-stack

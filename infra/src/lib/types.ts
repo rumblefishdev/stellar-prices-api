@@ -35,12 +35,41 @@ export interface EnvironmentConfig {
 
   // API Gateway (consumed by ApiGatewayStack)
 
-  /** Sustained requests per second before API Gateway returns 429. */
+  /** Stage-wide sustained requests per second before API Gateway returns 429. */
   readonly apiGatewayThrottleRate: number;
-  /** Maximum concurrent requests allowed in a short burst above the rate limit. */
+  /** Stage-wide maximum concurrent requests in a short burst above the rate. */
   readonly apiGatewayThrottleBurst: number;
   /** Daily request quota for API-key holders (UsagePlan quota.limit). */
   readonly apiGatewayPartnerDailyQuota: number;
+  /**
+   * Per-API-key sustained requests/second (UsagePlan throttle). The §2.1 / §7
+   * contract is 100 req/s per key; this is the value enforced per key holder.
+   */
+  readonly apiKeyRateLimit: number;
+  /** Per-API-key burst limit (UsagePlan throttle). */
+  readonly apiKeyBurstLimit: number;
+  /**
+   * Whether the API Gateway stage response cache (0.5 GB) is enabled. Per-route
+   * TTLs are fixed in `ApiGatewayStack` per §2.1.
+   */
+  readonly apiGatewayCacheEnabled: boolean;
+
+  // API handler Lambda (consumed by ComputeStack + ApiGatewayStack — task 0040)
+
+  /**
+   * Sizing for the single axum api-handler Lambda (ADR 0008 — one function
+   * serves all routes). §2.1: 256–512 MB, 15 s timeout.
+   */
+  readonly apiHandler: {
+    readonly memoryMb: number;
+    readonly timeoutSeconds: number;
+    /**
+     * Reserved concurrency for the api-handler (the ADR 0008 escape hatch / SLO
+     * protection for the hot `/price` path). Omit for on-demand scaling; set to
+     * guarantee dedicated concurrency.
+     */
+    readonly reservedConcurrency?: number;
+  };
 
   // EventBridge (consumed by EventBridgeStack)
 
@@ -160,6 +189,49 @@ export function validateConfig(config: EnvironmentConfig): void {
     errors.push(
       `apiGatewayPartnerDailyQuota must be a positive integer, got: ${config.apiGatewayPartnerDailyQuota}`,
     );
+  }
+  if (!Number.isInteger(config.apiKeyRateLimit) || config.apiKeyRateLimit < 1) {
+    errors.push(
+      `apiKeyRateLimit must be a positive integer, got: ${config.apiKeyRateLimit}`,
+    );
+  }
+  if (
+    !Number.isInteger(config.apiKeyBurstLimit) ||
+    config.apiKeyBurstLimit < config.apiKeyRateLimit
+  ) {
+    errors.push(
+      `apiKeyBurstLimit must be a positive integer >= apiKeyRateLimit (${config.apiKeyRateLimit}), got: ${config.apiKeyBurstLimit}`,
+    );
+  }
+  if (typeof config.apiGatewayCacheEnabled !== 'boolean') {
+    errors.push(
+      `apiGatewayCacheEnabled must be a boolean, got: ${config.apiGatewayCacheEnabled}`,
+    );
+  }
+
+  const api = config.apiHandler;
+  if (!api || typeof api !== 'object') {
+    errors.push('apiHandler missing or not an object');
+  } else {
+    if (!Number.isInteger(api.memoryMb) || api.memoryMb < 128) {
+      errors.push(
+        `apiHandler.memoryMb must be an integer >= 128, got: ${api.memoryMb}`,
+      );
+    }
+    if (!Number.isInteger(api.timeoutSeconds) || api.timeoutSeconds < 1) {
+      errors.push(
+        `apiHandler.timeoutSeconds must be a positive integer, got: ${api.timeoutSeconds}`,
+      );
+    }
+    if (
+      api.reservedConcurrency !== undefined &&
+      (!Number.isInteger(api.reservedConcurrency) ||
+        api.reservedConcurrency < 1)
+    ) {
+      errors.push(
+        `apiHandler.reservedConcurrency, when set, must be a positive integer, got: ${api.reservedConcurrency}`,
+      );
+    }
   }
 
   const schedules = config.scheduleExpressions;

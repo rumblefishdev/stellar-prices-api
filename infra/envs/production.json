@@ -1,9 +1,16 @@
 {
   "envName": "production",
   "awsRegion": "eu-central-1",
-  "apiGatewayThrottleRate": 50,
-  "apiGatewayThrottleBurst": 100,
+  "apiGatewayThrottleRate": 200,
+  "apiGatewayThrottleBurst": 400,
   "apiGatewayPartnerDailyQuota": 10000,
+  "apiKeyRateLimit": 100,
+  "apiKeyBurstLimit": 200,
+  "apiGatewayCacheEnabled": true,
+  "apiHandler": {
+    "memoryMb": 512,
+    "timeoutSeconds": 15
+  },
   "scheduleExpressions": {
     "assetSupply": "rate(1 hour)",
     "oracleWatcher": "rate(5 minutes)",

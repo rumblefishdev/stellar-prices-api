@@ -192,6 +192,31 @@ history:
       all 8 paths, lambda compiles, clippy + fmt clean. Remaining: Phase 4
       (API Gateway stack — usage-plan, stage cache, reserved concurrency) +
       Phase 5 (k6 SLO). prepare-not-deploy upheld.
+  - date: 2026-06-30
+    status: active
+    who: claude
+    note: >
+      **Phase 4 complete — API Gateway + Lambda CDK wired (prepare-only,
+      synth-verified, no deploy).** ComputeStack now builds the single
+      `prices-{env}-api-handler` Lambda (ARM64/PROVIDED_AL2023, ADR 0008) from
+      `../target/lambda/prices-api` (override `API_HANDLER_ASSET_DIR`), reusing
+      the pre-created apiHandlerRole/LogGroup + reader mTLS bundle + secrets
+      extension layer + `ch-domain` SSM; `CH_ENABLED=true`, no `API_KEYS` (in-app
+      gate disarmed — gateway owns per-key throttle). Optional
+      `apiHandler.reservedConcurrency` is the ADR 0008 SLO escape hatch (unset in
+      prod config). ApiGatewayStack proxies all 7 §4 routes to it under `/v1`
+      (Lambda proxy → no `/v1/v1` double-prefix; the axum router owns `/v1`),
+      data methods `apiKeyRequired`, keyless `/health` mock retained. 0.5 GB
+      stage cache with per-endpoint TTLs (assets/ohlcv 60s, price 15s,
+      oracles/backfill 30s; batch + health uncached) + query/path cache-key
+      params. UsagePlan throttle = per-key 100/200 (`apiKeyRateLimit/Burst`,
+      §2.1/§7) + daily quota; stage throttle 200/400. New config:
+      `apiKeyRateLimit`, `apiKeyBurstLimit`, `apiGatewayCacheEnabled`,
+      `apiHandler{}` (+ validation, production.json). Verified: `nx build infra`
+      + `cdk synth` (all stacks, exit 0) + `nx lint infra` clean; template
+      asserts 7 key-gated methods, cache size 0.5, exact TTLs, usage-plan
+      100/200. Built the arm64 bootstrap locally for synth (no deploy). Only
+      Phase 5 (k6 load test) remains.
 ---
 
 # Prices API Gateway + Rust/axum read handlers
