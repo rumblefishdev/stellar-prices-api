@@ -32,9 +32,7 @@ impl AppState {
     /// Panics with a clear message if a handler reaches the CH path but no
     /// client was built at cold start (a config error — e.g. `CH_ENABLED=false`
     /// on a data route), surfacing it loudly rather than as a silent 500.
-    /// Mirrors BE's `AppState::ch`. Unused until the first data route lands
-    /// (Phase 2).
-    #[allow(dead_code)]
+    /// Mirrors BE's `AppState::ch`.
     pub(crate) fn ch(&self) -> &Client {
         self.ch.as_ref().expect(
             "ClickHouse client not initialised (CH_ENABLED=false?) but a CH route was reached",

@@ -44,7 +44,6 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 utoipa = { workspace = true }
 utoipa-axum = { workspace = true }
-moka = { version = "0.12", features = ["sync", "future"] }
 stellar-strkey = { workspace = true }
 base64 = "0.22"
 prices-clickhouse = { path = "../prices-clickhouse" }
