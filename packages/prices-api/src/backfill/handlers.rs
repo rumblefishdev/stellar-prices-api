@@ -19,10 +19,7 @@ use crate::state::AppState;
 pub async fn get_status(State(state): State<AppState>) -> Response {
     let rows = match queries_ch::all_progress(state.ch()).await {
         Ok(rows) => rows,
-        Err(e) => {
-            tracing::error!(error = %e, "backfill all_progress query failed");
-            return errors::internal_error(errors::DB_ERROR, "backfill status lookup failed");
-        }
+        Err(e) => return errors::db_error(&e, "backfill status lookup"),
     };
 
     let find = |name: &str| rows.iter().find(|r| r.task_name == name);

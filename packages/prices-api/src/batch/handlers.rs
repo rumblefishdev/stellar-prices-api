@@ -1,9 +1,10 @@
 //! Axum handler for `/v1/prices/batch`.
 
+use std::collections::HashMap;
+
 use axum::Json;
 use axum::extract::State;
 use axum::response::{IntoResponse, Response};
-use serde_json::json;
 
 use crate::assets::dto::PriceResponse;
 use crate::assets::queries_ch;
@@ -49,25 +50,29 @@ pub async fn post_batch(State(state): State<AppState>, Json(req): Json<BatchRequ
         }
     }
 
+    // One query for the whole batch (vs. a per-asset N+1 loop), then map each
+    // requested identifier back to its row by natural-identity key.
+    let rows = match queries_ch::current_prices_batch(state.ch(), &ids).await {
+        Ok(rows) => rows,
+        Err(e) => return errors::db_error(&e, "batch price lookup"),
+    };
+    let by_key: HashMap<queries_ch::IdentKey, queries_ch::BatchPriceRow> =
+        rows.into_iter().map(|r| (r.ident_key(), r)).collect();
+
     let mut prices = Vec::new();
     let mut not_found = Vec::new();
     for id in &ids {
-        match queries_ch::current_price(state.ch(), id).await {
-            Ok(Some(row)) => prices.push(PriceResponse {
-                asset: id.to_canonical(),
-                price_usd: row.price_usd,
-                price_xlm: "0".to_string(),
-                vwap_24h: row.vwap_24h,
-                volume_24h_usd: row.volume_24h_usd,
-                change_24h_pct: "0".to_string(),
-                sources: json!({}),
-                updated_at: row.updated_at,
-            }),
-            Ok(None) => not_found.push(id.to_canonical()),
-            Err(e) => {
-                tracing::error!(error = %e, "batch current_price query failed");
-                return errors::internal_error(errors::DB_ERROR, "batch price lookup failed");
-            }
+        match by_key.get(&queries_ch::IdentKey::of(id)) {
+            Some(row) => prices.push(PriceResponse::from_row(
+                id.to_canonical(),
+                queries_ch::CurrentPriceRow {
+                    price_usd: row.price_usd.clone(),
+                    vwap_24h: row.vwap_24h.clone(),
+                    volume_24h_usd: row.volume_24h_usd.clone(),
+                    updated_at: row.updated_at.clone(),
+                },
+            )),
+            None => not_found.push(id.to_canonical()),
         }
     }
 

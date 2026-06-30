@@ -38,10 +38,7 @@ pub async fn get_oracles(State(state): State<AppState>, Path(raw): Path<String>)
     let asset_id = match assets_q::resolve_asset_id(state.ch(), &id).await {
         Ok(Some(aid)) => aid,
         Ok(None) => return errors::not_found("unknown asset"),
-        Err(e) => {
-            tracing::error!(error = %e, "resolve_asset_id failed");
-            return errors::internal_error(errors::DB_ERROR, "asset lookup failed");
-        }
+        Err(e) => return errors::db_error(&e, "asset lookup"),
     };
 
     match queries_ch::oracles_for_asset(state.ch(), asset_id).await {
@@ -54,9 +51,6 @@ pub async fn get_oracles(State(state): State<AppState>, Path(raw): Path<String>)
             cache_control::attach(&mut resp, cache_control::MEDIUM);
             resp
         }
-        Err(e) => {
-            tracing::error!(error = %e, "oracles_for_asset query failed");
-            errors::internal_error(errors::DB_ERROR, "oracle lookup failed")
-        }
+        Err(e) => errors::db_error(&e, "oracle lookup"),
     }
 }

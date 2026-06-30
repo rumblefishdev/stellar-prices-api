@@ -50,26 +50,13 @@ pub async fn get_price(State(state): State<AppState>, Path(raw): Path<String>) -
 
     match queries_ch::current_price(state.ch(), &id).await {
         Ok(Some(row)) => {
-            let body = PriceResponse {
-                asset: id.to_canonical(),
-                price_usd: row.price_usd,
-                price_xlm: "0".to_string(),
-                vwap_24h: row.vwap_24h,
-                volume_24h_usd: row.volume_24h_usd,
-                change_24h_pct: "0".to_string(),
-                sources: json!({}),
-                updated_at: row.updated_at,
-            };
+            let body = PriceResponse::from_row(id.to_canonical(), row);
             let mut resp = Json(body).into_response();
             cache_control::attach(&mut resp, cache_control::SHORT);
             resp
         }
         Ok(None) => errors::not_found("no current price for the asset"),
-        Err(e) => {
-            // Log the detail; never leak the raw CH error to the client.
-            tracing::error!(error = %e, "current_price query failed");
-            errors::internal_error(errors::DB_ERROR, "price lookup failed")
-        }
+        Err(e) => errors::db_error(&e, "price lookup"),
     }
 }
 
@@ -117,10 +104,7 @@ pub async fn get_asset(State(state): State<AppState>, Path(raw): Path<String>) -
             resp
         }
         Ok(None) => errors::not_found("unknown asset"),
-        Err(e) => {
-            tracing::error!(error = %e, "asset_detail query failed");
-            errors::internal_error(errors::DB_ERROR, "asset lookup failed")
-        }
+        Err(e) => errors::db_error(&e, "asset lookup"),
     }
 }
 
@@ -188,10 +172,7 @@ pub async fn get_assets(State(state): State<AppState>, Query(p): Query<ListParam
     };
     let mut rows = match queries_ch::list_assets(state.ch(), args).await {
         Ok(rows) => rows,
-        Err(e) => {
-            tracing::error!(error = %e, "list_assets query failed");
-            return errors::internal_error(errors::DB_ERROR, "asset list failed");
-        }
+        Err(e) => return errors::db_error(&e, "asset list"),
     };
 
     let has_more = rows.len() as u64 > limit as u64;
@@ -296,25 +277,22 @@ pub async fn get_ohlcv(
     // Validate ?start / ?end up front — otherwise a malformed value is bound into
     // ClickHouse `parseDateTimeBestEffort(?)`, which throws → a 500 for what is a
     // client input error (should be 400).
-    if let Some(s) = p.start.as_deref() {
-        if !valid_iso8601(s) {
-            return errors::bad_request(errors::INVALID_QUERY, "invalid start (expected ISO-8601)");
-        }
+    if let Some(s) = p.start.as_deref()
+        && !valid_iso8601(s)
+    {
+        return errors::bad_request(errors::INVALID_QUERY, "invalid start (expected ISO-8601)");
     }
-    if let Some(e) = p.end.as_deref() {
-        if !valid_iso8601(e) {
-            return errors::bad_request(errors::INVALID_QUERY, "invalid end (expected ISO-8601)");
-        }
+    if let Some(e) = p.end.as_deref()
+        && !valid_iso8601(e)
+    {
+        return errors::bad_request(errors::INVALID_QUERY, "invalid end (expected ISO-8601)");
     }
 
     // Resolve the base asset.
     let asset_id = match queries_ch::resolve_asset_id(state.ch(), &id).await {
         Ok(Some(a)) => a,
         Ok(None) => return errors::not_found("unknown asset"),
-        Err(e) => {
-            tracing::error!(error = %e, "ohlcv resolve base failed");
-            return errors::internal_error(errors::DB_ERROR, "asset lookup failed");
-        }
+        Err(e) => return errors::db_error(&e, "asset lookup"),
     };
 
     // Resolve the quote leg from base_currency.
@@ -327,12 +305,21 @@ pub async fn get_ohlcv(
     };
     let quote_asset_id = match queries_ch::resolve_asset_id(state.ch(), &quote_ident).await {
         Ok(Some(q)) => q,
-        // Quote leg not tracked → no candles for it; return an empty series.
-        Ok(None) => return ohlcv_response(&id, granularity, base_currency, None, Vec::new()),
-        Err(e) => {
-            tracing::error!(error = %e, "ohlcv resolve quote failed");
-            return errors::internal_error(errors::DB_ERROR, "quote lookup failed");
+        // The quote leg (USDC for USD, native for XLM) must be tracked — its
+        // absence is a server-side data gap, not "no candles". Surface it as a
+        // 503 instead of masking it as an empty 200 (which looks like a healthy
+        // asset with no history).
+        Ok(None) => {
+            tracing::error!(
+                base_currency = base_currency.as_str(),
+                "ohlcv quote asset not tracked"
+            );
+            return errors::service_unavailable(
+                errors::QUOTE_UNAVAILABLE,
+                "pricing in the requested base_currency is unavailable",
+            );
         }
+        Err(e) => return errors::db_error(&e, "quote lookup"),
     };
 
     let since_interval = if p.start.is_some() {
@@ -351,10 +338,7 @@ pub async fn get_ohlcv(
     };
     let data = match queries_ch::ohlcv(state.ch(), args).await {
         Ok(d) => d,
-        Err(e) => {
-            tracing::error!(error = %e, "ohlcv query failed");
-            return errors::internal_error(errors::DB_ERROR, "ohlcv lookup failed");
-        }
+        Err(e) => return errors::db_error(&e, "ohlcv lookup"),
     };
 
     // backfill_note: only for timeframe=all, with data, while SDEX still running.

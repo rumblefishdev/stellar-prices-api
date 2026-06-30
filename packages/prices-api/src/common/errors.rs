@@ -42,6 +42,9 @@ pub const NOT_FOUND: &str = "not_found";
 pub const UNAUTHORIZED: &str = "unauthorized";
 /// An upstream ClickHouse query failed.
 pub const DB_ERROR: &str = "db_error";
+/// A required quote asset (e.g. USDC for USD) is not tracked — pricing in the
+/// requested `base_currency` cannot be served.
+pub const QUOTE_UNAVAILABLE: &str = "quote_unavailable";
 
 /// 400 Bad Request with a machine-readable `code`.
 pub fn bad_request(code: &'static str, message: impl Into<String>) -> Response {
@@ -71,6 +74,28 @@ pub fn internal_error(code: &'static str, message: impl Into<String>) -> Respons
         details: None,
     }
     .into_response_with(StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+/// Map a failed ClickHouse query to a `DB_ERROR` 500. Logs the underlying error
+/// (with `context` for correlation) and never leaks it to the client. `context`
+/// names the operation, e.g. `db_error(&e, "price lookup")` → "price lookup
+/// failed". One place to change DB-error policy (status, fields) for every
+/// handler, instead of re-deriving the `tracing::error! + internal_error` arm.
+pub fn db_error(e: &clickhouse::error::Error, context: &str) -> Response {
+    tracing::error!(error = %e, context, "clickhouse query failed");
+    internal_error(DB_ERROR, format!("{context} failed"))
+}
+
+/// 503 Service Unavailable with a machine-readable `code`. For a transient or
+/// data-availability condition the client may retry (e.g. a required quote
+/// asset not yet tracked).
+pub fn service_unavailable(code: &'static str, message: impl Into<String>) -> Response {
+    ErrorEnvelope {
+        code,
+        message: message.into(),
+        details: None,
+    }
+    .into_response_with(StatusCode::SERVICE_UNAVAILABLE)
 }
 
 /// 401 Unauthorized. Carries `Cache-Control: no-store` so a rejection is never

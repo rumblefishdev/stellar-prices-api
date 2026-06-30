@@ -20,14 +20,20 @@ export interface ApiGatewayStackProps extends cdk.StackProps {
  * path params (automatic) plus the query params declared per method below, so
  * paginated / parameterized reads cache correctly. `POST /prices/batch` and
  * `GET /health` are uncached.
+ *
+ * SINGLE SOURCE OF TRUTH: these MUST mirror the handler `Cache-Control` tiers in
+ * `packages/prices-api/src/common/cache_control.rs` (the gateway stage cache and
+ * the client/CDN max-age must agree, or one serves staler data than the other).
+ * Mapping: SHORT=10s → price; MEDIUM=60s → assetsList / assetDetail / ohlcv /
+ * oracles / backfill.
  */
 const CACHE_TTL = {
-  assetsList: cdk.Duration.seconds(60),
-  assetDetail: cdk.Duration.seconds(60),
-  price: cdk.Duration.seconds(15),
-  ohlcv: cdk.Duration.seconds(60),
-  oracles: cdk.Duration.seconds(30),
-  backfill: cdk.Duration.seconds(30),
+  assetsList: cdk.Duration.seconds(60), // MEDIUM
+  assetDetail: cdk.Duration.seconds(60), // MEDIUM
+  price: cdk.Duration.seconds(10), // SHORT
+  ohlcv: cdk.Duration.seconds(60), // MEDIUM
+  oracles: cdk.Duration.seconds(60), // MEDIUM
+  backfill: cdk.Duration.seconds(60), // MEDIUM
 } as const;
 
 /** 0.5 GB stage cache (overview §2.1). */

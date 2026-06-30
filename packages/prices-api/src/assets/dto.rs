@@ -26,6 +26,25 @@ pub struct PriceResponse {
     pub updated_at: String,
 }
 
+impl PriceResponse {
+    /// Build from a current-price row, applying the v1 0072 stubs (`price_xlm`,
+    /// `change_24h_pct`, `sources`) in ONE place. `/price` and `/prices/batch`
+    /// both go through here, so when task 0072 materializes those columns, flip
+    /// them here and both endpoints update together (no drift).
+    pub fn from_row(asset: String, row: crate::assets::queries_ch::CurrentPriceRow) -> Self {
+        PriceResponse {
+            asset,
+            price_usd: row.price_usd,
+            price_xlm: "0".to_string(),
+            vwap_24h: row.vwap_24h,
+            volume_24h_usd: row.volume_24h_usd,
+            change_24h_pct: "0".to_string(),
+            sources: serde_json::json!({}),
+            updated_at: row.updated_at,
+        }
+    }
+}
+
 /// `GET /assets/{id}` response (overview §4.1). The doc fixes only the request
 /// forms; this is the chosen detail shape, resolved from `prices.assets`.
 #[derive(Debug, Serialize, ToSchema)]

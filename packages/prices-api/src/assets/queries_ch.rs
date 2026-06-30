@@ -261,6 +261,86 @@ pub async fn current_price(
     q.fetch_optional::<CurrentPriceRow>().await
 }
 
+/// One current-price row plus its natural-identity columns, so a batch result
+/// can be mapped back to the requested identifier ([`IdentKey`]).
+#[derive(Debug, clickhouse::Row, serde::Deserialize)]
+pub struct BatchPriceRow {
+    pub asset_code: String,
+    pub issuer_address: String,
+    pub contract_address: String,
+    pub price_usd: String,
+    pub vwap_24h: String,
+    pub volume_24h_usd: String,
+    pub updated_at: String,
+}
+
+/// A natural-identity lookup key shared by a requested [`AssetIdentifier`] and a
+/// returned [`BatchPriceRow`]. Soroban assets key by contract; classic/native
+/// key by `(code, issuer)` — matching how [`identity_where`] filters each.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum IdentKey {
+    ClassicLike(String, String),
+    Contract(String),
+}
+
+impl IdentKey {
+    pub fn of(id: &AssetIdentifier) -> Self {
+        match id {
+            AssetIdentifier::Native => IdentKey::ClassicLike("XLM".to_string(), String::new()),
+            AssetIdentifier::Classic { code, issuer } => {
+                IdentKey::ClassicLike(code.clone(), issuer.clone())
+            }
+            AssetIdentifier::Contract(c) => IdentKey::Contract(c.clone()),
+        }
+    }
+}
+
+impl BatchPriceRow {
+    pub fn ident_key(&self) -> IdentKey {
+        if self.contract_address.is_empty() {
+            IdentKey::ClassicLike(self.asset_code.clone(), self.issuer_address.clone())
+        } else {
+            IdentKey::Contract(self.contract_address.clone())
+        }
+    }
+}
+
+/// Fetch current prices for many assets in ONE query (vs. a per-asset N+1 loop).
+/// The identity predicates are OR-ed; positional binds are collected in clause
+/// order. Returns one row per matched asset — callers map back via [`IdentKey`]
+/// and treat absent identifiers as not-found.
+pub async fn current_prices_batch(
+    ch: &Client,
+    ids: &[AssetIdentifier],
+) -> Result<Vec<BatchPriceRow>, clickhouse::error::Error> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut clauses = Vec::with_capacity(ids.len());
+    let mut binds: Vec<String> = Vec::new();
+    for id in ids {
+        let (where_sql, b) = identity_where(id);
+        clauses.push(format!("({where_sql})"));
+        binds.extend(b);
+    }
+    let sql = format!(
+        "SELECT a.asset_code, a.issuer_address, a.contract_address, \
+           toString(c.price_usd) AS price_usd, \
+           toString(c.vwap_24h) AS vwap_24h, \
+           toString(c.volume_24h_usd) AS volume_24h_usd, \
+           formatDateTime(c.updated_at, '%Y-%m-%dT%H:%i:%SZ') AS updated_at \
+         FROM current_prices AS c FINAL \
+         INNER JOIN assets AS a FINAL ON a.asset_id = c.asset_id \
+         WHERE {where_clause}",
+        where_clause = clauses.join(" OR ")
+    );
+    let mut q = ch.query(&sql);
+    for b in binds {
+        q = q.bind(b);
+    }
+    q.fetch_all::<BatchPriceRow>().await
+}
+
 /// Fetch the `assets` row for `id` (for the detail endpoint).
 pub async fn asset_detail(
     ch: &Client,
