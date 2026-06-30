@@ -456,23 +456,30 @@ pub async fn ohlcv(ch: &Client, args: OhlcvArgs) -> Result<Vec<Candle>, clickhou
     // `volume_base` column so `argMax(open, volume_base)` would nest aggregates
     // (CH error 184). Deserialization is positional (RowBinary), so the alias
     // labels here are cosmetic and need only be distinct.
+    // When the window × granularity yields more buckets than `limit`, keep the
+    // MOST-RECENT ones (inner `ORDER BY timestamp DESC LIMIT`), then re-sort
+    // ascending for output. An ASC+LIMIT would instead return the OLDEST N and
+    // silently drop the recent candles a chart actually wants. `ts` is ISO-8601
+    // (`%Y-%m-%dT%H:%i:%SZ`), so lexicographic `ts ASC` == chronological order.
     let sql = format!(
-        "SELECT \
-           formatDateTime(timestamp, '%Y-%m-%dT%H:%i:%SZ') AS ts, \
-           toString(argMax(open, volume_base)) AS o, \
-           toString(max(high)) AS h, \
-           toString(min(low)) AS l, \
-           toString(argMax(close, volume_base)) AS c, \
-           toString(sum(volume_base)) AS vb, \
-           toString(sum(volume_quote_usd)) AS vqu, \
-           toString(toDecimal128(ifNull(sum(toFloat64(vwap) * toFloat64(volume_base)) \
-               / nullIf(sum(toFloat64(volume_base)), 0), 0), 14)) AS vw, \
-           toUInt64(sum(trade_count)) AS tc \
-         FROM {table} FINAL \
-         WHERE {conds} \
-         GROUP BY timestamp \
-         ORDER BY timestamp ASC \
-         LIMIT {limit}",
+        "SELECT ts, o, h, l, c, vb, vqu, vw, tc FROM ( \
+           SELECT \
+             formatDateTime(timestamp, '%Y-%m-%dT%H:%i:%SZ') AS ts, \
+             toString(argMax(open, volume_base)) AS o, \
+             toString(max(high)) AS h, \
+             toString(min(low)) AS l, \
+             toString(argMax(close, volume_base)) AS c, \
+             toString(sum(volume_base)) AS vb, \
+             toString(sum(volume_quote_usd)) AS vqu, \
+             toString(toDecimal128(ifNull(sum(toFloat64(vwap) * toFloat64(volume_base)) \
+                 / nullIf(sum(toFloat64(volume_base)), 0), 0), 14)) AS vw, \
+             toUInt64(sum(trade_count)) AS tc \
+           FROM {table} FINAL \
+           WHERE {conds} \
+           GROUP BY timestamp \
+           ORDER BY timestamp DESC \
+           LIMIT {limit} \
+         ) ORDER BY ts ASC",
         conds = conds.join(" AND "),
         limit = args.limit
     );

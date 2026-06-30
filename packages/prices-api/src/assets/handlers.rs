@@ -293,6 +293,19 @@ pub async fn get_ohlcv(
             None => return errors::bad_request(errors::INVALID_QUERY, "invalid granularity"),
         },
     };
+    // Validate ?start / ?end up front — otherwise a malformed value is bound into
+    // ClickHouse `parseDateTimeBestEffort(?)`, which throws → a 500 for what is a
+    // client input error (should be 400).
+    if let Some(s) = p.start.as_deref() {
+        if !valid_iso8601(s) {
+            return errors::bad_request(errors::INVALID_QUERY, "invalid start (expected ISO-8601)");
+        }
+    }
+    if let Some(e) = p.end.as_deref() {
+        if !valid_iso8601(e) {
+            return errors::bad_request(errors::INVALID_QUERY, "invalid end (expected ISO-8601)");
+        }
+    }
 
     // Resolve the base asset.
     let asset_id = match queries_ch::resolve_asset_id(state.ch(), &id).await {
@@ -397,6 +410,92 @@ async fn sdex_backfill_running(ch: &clickhouse::Client) -> bool {
         Err(e) => {
             tracing::warn!(error = %e, "ohlcv backfill-status check failed; omitting note");
             false
+        }
+    }
+}
+
+/// Lightweight ISO-8601 / epoch validation for `?start` / `?end`. Accepts what
+/// our clients send (and what ClickHouse `parseDateTimeBestEffort` consumes)
+/// without pulling in a datetime crate: a bare epoch (all digits), or a
+/// `YYYY-MM-DD` date optionally followed by `T`/space and an `HH:MM[:SS][.fff]`
+/// time with an optional `Z` / `±HH:MM` offset. Anything else (e.g. `notadate`)
+/// is rejected so the handler returns 400 instead of letting CH error → 500.
+fn valid_iso8601(s: &str) -> bool {
+    let s = s.trim();
+    if s.is_empty() {
+        return false;
+    }
+    // Bare unix epoch (seconds / millis).
+    if s.bytes().all(|b| b.is_ascii_digit()) {
+        return true;
+    }
+    let bytes = s.as_bytes();
+    // Date prefix: exactly `YYYY-MM-DD`.
+    if bytes.len() < 10 {
+        return false;
+    }
+    let digit = |i: usize| bytes[i].is_ascii_digit();
+    if !(digit(0)
+        && digit(1)
+        && digit(2)
+        && digit(3)
+        && bytes[4] == b'-'
+        && digit(5)
+        && digit(6)
+        && bytes[7] == b'-'
+        && digit(8)
+        && digit(9))
+    {
+        return false;
+    }
+    let month = (bytes[5] - b'0') * 10 + (bytes[6] - b'0');
+    let day = (bytes[8] - b'0') * 10 + (bytes[9] - b'0');
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return false;
+    }
+    if s.len() == 10 {
+        return true;
+    }
+    // Optional time component: separator (`T` or space) then time-ish chars only.
+    if bytes[10] != b'T' && bytes[10] != b' ' {
+        return false;
+    }
+    let time = &s[11..];
+    time.len() >= 5 // at least HH:MM
+        && time
+            .bytes()
+            .all(|b| b.is_ascii_digit() || matches!(b, b':' | b'.' | b'Z' | b'+' | b'-'))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::valid_iso8601;
+
+    #[test]
+    fn iso8601_accepts_common_forms() {
+        for s in [
+            "2026-06-15",
+            "2026-06-15T11:30:00Z",
+            "2026-06-15 11:30:00",
+            "2026-06-15T11:30:00.123+02:00",
+            "1718450000",
+        ] {
+            assert!(valid_iso8601(s), "{s} should be valid");
+        }
+    }
+
+    #[test]
+    fn iso8601_rejects_garbage() {
+        for s in [
+            "notadate",
+            "",
+            "2026/06/15",
+            "2026-13-01",
+            "2026-06-32",
+            "06-15-2026",
+            "T12:00:00",
+        ] {
+            assert!(!valid_iso8601(s), "{s} should be invalid");
         }
     }
 }

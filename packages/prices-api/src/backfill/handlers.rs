@@ -33,7 +33,7 @@ pub async fn get_status(State(state): State<AppState>) -> Response {
         start_ledger: r.start_ledger,
         target_ledger: r.target_ledger,
         progress_pct: progress_pct(r),
-        ledgers_remaining: r.current_ledger.saturating_sub(r.start_ledger),
+        ledgers_remaining: r.target_ledger.saturating_sub(r.current_ledger),
         last_push_at: r.last_push_at.clone(),
     });
 
@@ -55,13 +55,15 @@ pub async fn get_status(State(state): State<AppState>) -> Response {
     resp
 }
 
-/// `(target - current) / (target - start) * 100`, guarded against a zero span
-/// (placeholder rows seed all ledgers to 0).
+/// `(current - start) / (target - start) * 100`, guarded against a zero span
+/// (placeholder rows seed all ledgers to 0). `current_ledger` advances upward
+/// from `start_ledger` toward `target_ledger` (the §2.2 checkpoint contract:
+/// resume from `current_ledger + 1`), so progress is the *consumed* fraction.
 fn progress_pct(r: &ProgressRow) -> f64 {
     let span = r.target_ledger.saturating_sub(r.start_ledger);
     if span == 0 {
         return 0.0;
     }
-    let done = r.target_ledger.saturating_sub(r.current_ledger);
+    let done = r.current_ledger.saturating_sub(r.start_ledger);
     (done as f64 / span as f64) * 100.0
 }

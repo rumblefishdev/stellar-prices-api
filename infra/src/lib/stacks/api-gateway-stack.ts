@@ -176,7 +176,17 @@ export class ApiGatewayStack extends cdk.Stack {
       // TTL table colocated with the routes for readability.
       const cfnStage = this.api.deploymentStage.node
         .defaultChild as apigateway.CfnStage;
+      // Assigning `methodSettings` wholesale REPLACES the `/*/*` entry CDK
+      // renders from `deployOptions.throttlingRateLimit/Burst`, which would drop
+      // the stage-wide throttle (only the per-key usage-plan limit would remain).
+      // Re-declare it here so the §2.1 aggregate stage ceiling survives.
       cfnStage.methodSettings = [
+        {
+          resourcePath: '/*',
+          httpMethod: '*',
+          throttlingRateLimit: config.apiGatewayThrottleRate,
+          throttlingBurstLimit: config.apiGatewayThrottleBurst,
+        },
         {
           resourcePath: '/v1/assets',
           httpMethod: 'GET',

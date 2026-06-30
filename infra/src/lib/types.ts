@@ -208,6 +208,18 @@ export function validateConfig(config: EnvironmentConfig): void {
       `apiGatewayCacheEnabled must be a boolean, got: ${config.apiGatewayCacheEnabled}`,
     );
   }
+  // The stage-wide throttle is a hard ceiling across ALL keys, so it must be at
+  // least the advertised per-key rate — otherwise a single key can never reach
+  // its SLA and compliant traffic gets spurious 429s.
+  if (
+    Number.isInteger(config.apiGatewayThrottleRate) &&
+    Number.isInteger(config.apiKeyRateLimit) &&
+    config.apiGatewayThrottleRate < config.apiKeyRateLimit
+  ) {
+    errors.push(
+      `apiGatewayThrottleRate (${config.apiGatewayThrottleRate}) must be >= apiKeyRateLimit (${config.apiKeyRateLimit}) so a single key can reach its per-key SLA`,
+    );
+  }
 
   const api = config.apiHandler;
   if (!api || typeof api !== 'object') {

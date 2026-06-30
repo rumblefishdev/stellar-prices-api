@@ -29,9 +29,9 @@ pub struct SdexStream {
     pub current_ledger: u64,
     pub start_ledger: u64,
     pub target_ledger: u64,
-    /// `(target - current) / (target - start) * 100`, computed at read time.
+    /// `(current - start) / (target - start) * 100`, computed at read time.
     pub progress_pct: f64,
-    /// `current_ledger - start_ledger`, computed at read time.
+    /// `target_ledger - current_ledger`, computed at read time.
     pub ledgers_remaining: u64,
     /// Most recent successful push (`null` until the first push).
     pub last_push_at: Option<String>,

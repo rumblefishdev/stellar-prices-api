@@ -232,11 +232,13 @@ async fn backfill_status_maps_both_streams() {
     assert_eq!(json["realtime_tip_ledger"], 57234198u64);
     assert_eq!(json["sdex"]["status"], "running");
     assert_eq!(json["sdex"]["current_ledger"], 34891234u64);
-    assert_eq!(json["sdex"]["ledgers_remaining"], 34891233u64);
+    // remaining = target - current = 57234198 - 34891234
+    assert_eq!(json["sdex"]["ledgers_remaining"], 22342964u64);
     assert_eq!(json["sdex"]["last_push_at"], "2026-06-15T11:30:00Z");
-    // (57234198 - 34891234) / (57234198 - 1) * 100 ≈ 39.04
+    // done = (current - start) / (target - start) * 100
+    //      = (34891234 - 1) / (57234198 - 1) * 100 ≈ 60.96
     let pct = json["sdex"]["progress_pct"].as_f64().unwrap();
-    assert!((pct - 39.04).abs() < 0.1, "pct={pct}");
+    assert!((pct - 60.96).abs() < 0.1, "pct={pct}");
 
     assert_eq!(json["soroban_amm"]["status"], "completed");
     assert_eq!(json["soroban_amm"]["completed_at"], "2026-04-14T08:23:11Z");
