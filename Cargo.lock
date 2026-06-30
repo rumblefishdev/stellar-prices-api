@@ -2730,6 +2730,7 @@ name = "prices-api"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "base64",
  "clickhouse",
  "lambda_http",
  "moka",

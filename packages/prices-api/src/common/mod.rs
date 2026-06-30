@@ -5,4 +5,5 @@
 //! (`/assets` listing, response caching).
 
 pub mod cache_control;
+pub mod cursor;
 pub mod errors;

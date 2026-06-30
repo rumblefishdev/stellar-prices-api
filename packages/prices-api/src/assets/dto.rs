@@ -45,3 +45,34 @@ pub struct AssetDetail {
     /// Whether the asset is currently tracked as active.
     pub is_active: bool,
 }
+
+/// One item in the `GET /assets` listing (overview §4.1).
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AssetListItem {
+    pub asset_code: String,
+    /// `classic` or `soroban` (matches the `?type` filter vocabulary).
+    pub asset_type: String,
+    pub issuer_address: String,
+    pub contract_address: String,
+    pub home_domain: String,
+    pub price_usd: String,
+    /// **Stub `"0"`** until task 0072.
+    pub change_24h_pct: String,
+    /// **Stub `"0"`** until task 0072.
+    pub change_7d_pct: String,
+    pub volume_24h_usd: String,
+    pub vwap_24h: String,
+    /// Per-source breakdown. **Stub `{}`** until task 0072.
+    #[schema(value_type = Object)]
+    pub sources: serde_json::Value,
+    pub updated_at: String,
+}
+
+/// `GET /assets` paginated response.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AssetListResponse {
+    pub data: Vec<AssetListItem>,
+    /// Opaque cursor for the next page (`null` on the last page).
+    pub cursor: Option<String>,
+    pub has_more: bool,
+}

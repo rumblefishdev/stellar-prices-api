@@ -25,6 +25,8 @@ use crate::state::AppState;
     components(schemas(
         crate::assets::dto::PriceResponse,
         crate::assets::dto::AssetDetail,
+        crate::assets::dto::AssetListItem,
+        crate::assets::dto::AssetListResponse,
         crate::oracles::dto::OraclesResponse,
         crate::oracles::dto::OracleEntry,
         crate::backfill::dto::BackfillStatus,

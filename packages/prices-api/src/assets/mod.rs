@@ -14,6 +14,7 @@ use crate::state::AppState;
 /// Resource router (mounted under `/v1` by [`crate::openapi::register_routes`]).
 pub fn router() -> OpenApiRouter<AppState> {
     OpenApiRouter::new()
+        .routes(routes!(handlers::get_assets))
         .routes(routes!(handlers::get_price))
         .routes(routes!(handlers::get_asset))
 }
