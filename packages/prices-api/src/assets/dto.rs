@@ -25,3 +25,23 @@ pub struct PriceResponse {
     /// Timestamp of the snapshot (ISO-8601 UTC).
     pub updated_at: String,
 }
+
+/// `GET /assets/{id}` response (overview §4.1). The doc fixes only the request
+/// forms; this is the chosen detail shape, resolved from `prices.assets`.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AssetDetail {
+    /// Echoed natural identity.
+    pub asset: String,
+    /// Normalized kind: `native`, `credit`, or `contract`.
+    pub asset_kind: String,
+    /// Classic asset code (`""` for native/contract).
+    pub code: String,
+    /// Classic issuer G-strkey (`""` otherwise).
+    pub issuer: String,
+    /// Soroban contract C-strkey (`""` otherwise).
+    pub contract: String,
+    /// SEP-1 home domain, if known.
+    pub home_domain: String,
+    /// Whether the asset is currently tracked as active.
+    pub is_active: bool,
+}

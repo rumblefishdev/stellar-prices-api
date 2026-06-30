@@ -18,6 +18,21 @@ pub struct CurrentPriceRow {
     pub updated_at: String,
 }
 
+/// One `assets` row, for the detail endpoint.
+#[derive(Debug, clickhouse::Row, serde::Deserialize)]
+pub struct AssetRow {
+    pub asset_code: String,
+    pub issuer_address: String,
+    pub contract_address: String,
+    pub home_domain: String,
+    pub is_active: u8,
+}
+
+#[derive(Debug, clickhouse::Row, serde::Deserialize)]
+struct IdRow {
+    asset_id: u32,
+}
+
 /// Build the natural-identity `WHERE` fragment + ordered binds selecting the
 /// `assets` row for `id`. Variable parts are parameterized (`?`); the native
 /// case is fully literal (it has no variable component).
@@ -61,6 +76,40 @@ pub async fn current_price(
         q = q.bind(b);
     }
     q.fetch_optional::<CurrentPriceRow>().await
+}
+
+/// Fetch the `assets` row for `id` (for the detail endpoint).
+pub async fn asset_detail(
+    ch: &Client,
+    id: &AssetIdentifier,
+) -> Result<Option<AssetRow>, clickhouse::error::Error> {
+    let (where_sql, binds) = identity_where(id);
+    let sql = format!(
+        "SELECT a.asset_code, a.issuer_address, a.contract_address, a.home_domain, a.is_active \
+         FROM assets AS a FINAL \
+         WHERE {where_sql} \
+         LIMIT 1"
+    );
+    let mut q = ch.query(&sql);
+    for b in binds {
+        q = q.bind(b);
+    }
+    q.fetch_optional::<AssetRow>().await
+}
+
+/// Resolve a natural identity to the internal `asset_id` surrogate, or `None` if
+/// the asset is unknown. Used by endpoints keyed on `asset_id` (e.g. oracles).
+pub async fn resolve_asset_id(
+    ch: &Client,
+    id: &AssetIdentifier,
+) -> Result<Option<u32>, clickhouse::error::Error> {
+    let (where_sql, binds) = identity_where(id);
+    let sql = format!("SELECT a.asset_id FROM assets AS a FINAL WHERE {where_sql} LIMIT 1");
+    let mut q = ch.query(&sql);
+    for b in binds {
+        q = q.bind(b);
+    }
+    Ok(q.fetch_optional::<IdRow>().await?.map(|r| r.asset_id))
 }
 
 #[cfg(test)]

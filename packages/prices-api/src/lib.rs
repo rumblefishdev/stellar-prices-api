@@ -10,12 +10,15 @@
 
 pub mod assets;
 pub mod auth;
+pub mod backfill;
+pub mod batch;
 pub mod cache;
 pub mod common;
 pub mod config;
 pub mod identity;
 pub mod openapi;
 pub mod ops;
+pub mod oracles;
 pub mod state;
 
 use std::sync::Arc;

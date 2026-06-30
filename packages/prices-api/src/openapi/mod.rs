@@ -22,10 +22,23 @@ use crate::state::AppState;
         description = "Public read API for Stellar asset prices, OHLCV, oracle \
                        cross-reference, and backfill status."
     ),
-    components(schemas(crate::assets::dto::PriceResponse)),
+    components(schemas(
+        crate::assets::dto::PriceResponse,
+        crate::assets::dto::AssetDetail,
+        crate::oracles::dto::OraclesResponse,
+        crate::oracles::dto::OracleEntry,
+        crate::backfill::dto::BackfillStatus,
+        crate::backfill::dto::SdexStream,
+        crate::backfill::dto::AmmStream,
+        crate::batch::dto::BatchRequest,
+        crate::batch::dto::BatchResponse,
+    )),
     tags(
         (name = "ops", description = "Operational endpoints (health)"),
-        (name = "prices", description = "Asset prices and OHLCV")
+        (name = "assets", description = "Asset metadata"),
+        (name = "prices", description = "Asset prices (current + batch)"),
+        (name = "oracles", description = "Oracle cross-reference prices"),
+        (name = "backfill", description = "Historical backfill progress")
     )
 )]
 pub struct ApiDoc;
@@ -37,5 +50,7 @@ pub fn register_routes() -> OpenApiRouter<AppState> {
     OpenApiRouter::with_openapi(ApiDoc::openapi())
         .routes(routes!(crate::ops::health))
         .nest("/v1", crate::assets::router())
-    // .nest("/v1", crate::oracles::router()) // Phase 2 … etc.
+        .nest("/v1", crate::oracles::router())
+        .nest("/v1", crate::backfill::router())
+        .nest("/v1", crate::batch::router())
 }

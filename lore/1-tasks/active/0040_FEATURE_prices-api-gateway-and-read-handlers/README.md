@@ -149,6 +149,26 @@ history:
       happy-path (200 w/ data) needs a live CH — deferred to a local-CH
       integration test (prod-pinned 26.3.10.60). Remaining Phase 2 endpoints
       (asset detail, batch, oracles, backfill) still to do.
+  - date: 2026-06-30
+    status: active
+    who: claude
+    note: >
+      **Phase 2 complete — all five §4 read endpoints landed + live-CH tested.**
+      Added `GET /v1/assets/{id}` (detail; assets table, normalized asset_kind),
+      `POST /v1/prices/batch` (validated, capped at 100, found + not_found,
+      uncached), `GET /v1/oracles/{id}` (latest-per-oracle via argMax; resolves
+      asset_id then 404s unknown), `GET /v1/backfill/status` (maps the
+      sdex_archive + soroban_amm rows, computes progress_pct/ledgers_remaining).
+      **Emerged decisions / gaps:** (a) `backfill_progress` has no
+      `earliest_data_available` column → field omitted (writers' to add); (b)
+      no live chain-tip table → `realtime_tip_ledger` derived from SDEX
+      `target_ledger`; (c) ClickHouse `formatDateTime` minute specifier is `%i`
+      (`%M` = month name) — caught by a live test. Verified against local CH
+      26.3.10.60: 31 tests green (12 default + 5 auth + 2 health + 2 price + 3
+      price_it + 7 endpoints_it), OpenAPI spec lists all 6 paths, lambda
+      compiles, clippy + fmt clean. OHLCV (§4.2) + assets listing (§4.1) remain
+      for Phase 3; gateway/usage-plan/cache for Phase 4. prepare-not-deploy
+      upheld (local docker CH only).
 ---
 
 # Prices API Gateway + Rust/axum read handlers
