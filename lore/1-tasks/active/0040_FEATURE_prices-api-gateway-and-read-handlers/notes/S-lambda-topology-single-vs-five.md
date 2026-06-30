@@ -1,7 +1,7 @@
 ---
-title: "Decision (pending): API Lambda topology — single axum Lambda (BE pattern) vs five per-route Lambdas"
+title: "Decision (DECIDED: single): API Lambda topology — single axum Lambda (BE pattern) vs five per-route Lambdas"
 type: synthesis
-status: developing
+status: mature
 spawns: []
 tags: [api, lambda, axum, topology, cdk, reuse, adr-candidate]
 links:
@@ -15,9 +15,21 @@ history:
       Captured the single-vs-five Lambda topology analysis after reviewing the
       BE (soroban-block-explorer) production API stack as a reuse donor and
       re-reading overview §4 / §2.1. Decision still open; recommendation = single.
+  - date: 2026-06-30
+    status: mature
+    who: oski
+    note: >
+      DECIDED: single axum Lambda (copy the BE pattern wholesale). §2.1's
+      "function per route group" wording is the deviation recorded in ADR 0008.
+      Decision also recorded in the 0040 README history + the locked
+      plan (G-implementation-plan.md).
 ---
 
-# Decision (pending): API Lambda topology
+> **DECISION (2026-06-30): SINGLE axum Lambda.** The body below is the
+> comparison that led here; it is no longer "pending". Recorded in the 0040
+> README history and G-implementation-plan.md.
+
+# Decision (DECIDED: single): API Lambda topology
 
 ## The question
 
