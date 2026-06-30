@@ -50,9 +50,9 @@ pub async fn current_price(
            toString(c.price_usd) AS price_usd, \
            toString(c.vwap_24h) AS vwap_24h, \
            toString(c.volume_24h_usd) AS volume_24h_usd, \
-           formatDateTime(c.updated_at, '%Y-%m-%dT%H:%M:%SZ') AS updated_at \
-         FROM prices.current_prices AS c FINAL \
-         INNER JOIN prices.assets AS a FINAL ON a.asset_id = c.asset_id \
+           formatDateTime(c.updated_at, '%Y-%m-%dT%H:%i:%SZ') AS updated_at \
+         FROM current_prices AS c FINAL \
+         INNER JOIN assets AS a FINAL ON a.asset_id = c.asset_id \
          WHERE {where_sql} \
          LIMIT 1"
     );
