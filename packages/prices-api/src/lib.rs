@@ -8,6 +8,7 @@
 //! the BE pattern that keeps the deployed routes and the tested routes in
 //! lockstep.
 
+pub mod assets;
 pub mod auth;
 pub mod cache;
 pub mod common;

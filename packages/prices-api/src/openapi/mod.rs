@@ -22,8 +22,10 @@ use crate::state::AppState;
         description = "Public read API for Stellar asset prices, OHLCV, oracle \
                        cross-reference, and backfill status."
     ),
+    components(schemas(crate::assets::dto::PriceResponse)),
     tags(
-        (name = "ops", description = "Operational endpoints (health)")
+        (name = "ops", description = "Operational endpoints (health)"),
+        (name = "prices", description = "Asset prices and OHLCV")
     )
 )]
 pub struct ApiDoc;
@@ -32,7 +34,8 @@ pub struct ApiDoc;
 /// paths. Resource routers nest under `/v1`; operational routes stay at the
 /// root.
 pub fn register_routes() -> OpenApiRouter<AppState> {
-    OpenApiRouter::with_openapi(ApiDoc::openapi()).routes(routes!(crate::ops::health))
-    // .nest("/v1", crate::assets::router())  // Phase 2/3
+    OpenApiRouter::with_openapi(ApiDoc::openapi())
+        .routes(routes!(crate::ops::health))
+        .nest("/v1", crate::assets::router())
     // .nest("/v1", crate::oracles::router()) // Phase 2 … etc.
 }

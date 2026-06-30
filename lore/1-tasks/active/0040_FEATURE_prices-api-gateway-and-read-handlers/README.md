@@ -131,6 +131,24 @@ history:
       clean. Next: Phase 2 (cheap read endpoints — /price, batch, asset,
       oracles, backfill — against the existing CH views). prepare-not-deploy
       upheld.
+  - date: 2026-06-30
+    status: active
+    who: claude
+    note: >
+      **Phase 2 started — `GET /v1/assets/{id}/price` (the load-test target).**
+      New `assets/` resource module: `queries_ch` (CurrentPriceRow + identity
+      WHERE builder), `dto::PriceResponse`, `handlers::get_price`, nested under
+      `/v1`. **Emerged decision:** query `current_prices ⨝ assets` directly with
+      a natural-identity WHERE rather than extending the `current_price_usd`
+      view (which only projects price_usd/updated_at) — keeps the change inside
+      0040, no edit to 0061's shared views, consistent with the table-reading
+      endpoints. Decimals returned as strings (`toString`) per §4.2;
+      price_xlm/change_24h_pct/sources are the 0072 stubs. Verified: 21 tests
+      green (incl. identity-WHERE unit tests + invalid-id 400 without touching
+      CH + price path in the spec), lambda compiles, clippy + fmt clean. The
+      happy-path (200 w/ data) needs a live CH — deferred to a local-CH
+      integration test (prod-pinned 26.3.10.60). Remaining Phase 2 endpoints
+      (asset detail, batch, oracles, backfill) still to do.
 ---
 
 # Prices API Gateway + Rust/axum read handlers

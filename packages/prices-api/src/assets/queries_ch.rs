@@ -1,0 +1,95 @@
+//! ClickHouse query layer for the `/v1/assets` resource.
+//!
+//! Decimal columns are returned as **strings** (full precision preserved via
+//! `toString`), matching the §4.2 string-typed JSON contract and sidestepping
+//! Decimal↔Rust mapping. Rows deserialize positionally (RowBinary), so struct
+//! field order MUST match the `SELECT` column order.
+
+use clickhouse::Client;
+
+use crate::identity::AssetIdentifier;
+
+/// One current-price row, all numeric fields as decimal strings.
+#[derive(Debug, clickhouse::Row, serde::Deserialize)]
+pub struct CurrentPriceRow {
+    pub price_usd: String,
+    pub vwap_24h: String,
+    pub volume_24h_usd: String,
+    pub updated_at: String,
+}
+
+/// Build the natural-identity `WHERE` fragment + ordered binds selecting the
+/// `assets` row for `id`. Variable parts are parameterized (`?`); the native
+/// case is fully literal (it has no variable component).
+fn identity_where(id: &AssetIdentifier) -> (&'static str, Vec<String>) {
+    match id {
+        AssetIdentifier::Native => (
+            "a.asset_code = 'XLM' AND a.issuer_address = '' AND a.contract_address = ''",
+            vec![],
+        ),
+        AssetIdentifier::Classic { code, issuer } => (
+            "a.asset_code = ? AND a.issuer_address = ? AND a.contract_address = ''",
+            vec![code.clone(), issuer.clone()],
+        ),
+        AssetIdentifier::Contract(c) => ("a.contract_address = ?", vec![c.clone()]),
+    }
+}
+
+/// Fetch the current price for `id` from `current_prices ⨝ assets`.
+///
+/// Returns `None` when the asset has no current-price row (unknown asset, or the
+/// updater MV hasn't produced one yet). `FINAL` collapses both ReplacingMergeTree
+/// tables to their latest rows.
+pub async fn current_price(
+    ch: &Client,
+    id: &AssetIdentifier,
+) -> Result<Option<CurrentPriceRow>, clickhouse::error::Error> {
+    let (where_sql, binds) = identity_where(id);
+    let sql = format!(
+        "SELECT \
+           toString(c.price_usd) AS price_usd, \
+           toString(c.vwap_24h) AS vwap_24h, \
+           toString(c.volume_24h_usd) AS volume_24h_usd, \
+           formatDateTime(c.updated_at, '%Y-%m-%dT%H:%M:%SZ') AS updated_at \
+         FROM prices.current_prices AS c FINAL \
+         INNER JOIN prices.assets AS a FINAL ON a.asset_id = c.asset_id \
+         WHERE {where_sql} \
+         LIMIT 1"
+    );
+    let mut q = ch.query(&sql);
+    for b in binds {
+        q = q.bind(b);
+    }
+    q.fetch_optional::<CurrentPriceRow>().await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn identity_where_native_is_literal_no_binds() {
+        let (sql, binds) = identity_where(&AssetIdentifier::Native);
+        assert!(sql.contains("asset_code = 'XLM'"));
+        assert!(sql.contains("contract_address = ''"));
+        assert!(binds.is_empty());
+    }
+
+    #[test]
+    fn identity_where_classic_binds_code_then_issuer() {
+        let (sql, binds) = identity_where(&AssetIdentifier::Classic {
+            code: "USDC".into(),
+            issuer: "GISSUER".into(),
+        });
+        assert_eq!(binds, vec!["USDC".to_string(), "GISSUER".to_string()]);
+        assert!(sql.contains("asset_code = ?"));
+        assert!(sql.contains("contract_address = ''"));
+    }
+
+    #[test]
+    fn identity_where_contract_binds_address() {
+        let (sql, binds) = identity_where(&AssetIdentifier::Contract("CTOKEN".into()));
+        assert_eq!(binds, vec!["CTOKEN".to_string()]);
+        assert!(sql.contains("a.contract_address = ?"));
+    }
+}

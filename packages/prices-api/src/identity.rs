@@ -68,6 +68,18 @@ impl AssetIdentifier {
         }
         Err(IdentifierError::Unrecognized)
     }
+
+    /// Render the canonical textual form (the inverse of [`parse`]). Echoed back
+    /// in responses as the `asset` field.
+    ///
+    /// [`parse`]: AssetIdentifier::parse
+    pub fn to_canonical(&self) -> String {
+        match self {
+            Self::Native => "native".to_string(),
+            Self::Classic { code, issuer } => format!("{code}:{issuer}"),
+            Self::Contract(c) => c.clone(),
+        }
+    }
 }
 
 #[cfg(test)]
