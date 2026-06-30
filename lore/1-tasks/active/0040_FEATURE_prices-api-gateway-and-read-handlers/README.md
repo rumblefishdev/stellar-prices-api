@@ -217,6 +217,29 @@ history:
       asserts 7 key-gated methods, cache size 0.5, exact TTLs, usage-plan
       100/200. Built the arm64 bootstrap locally for synth (no deploy). Only
       Phase 5 (k6 load test) remains.
+  - date: 2026-06-30
+    status: active
+    who: claude
+    note: >
+      **Phase 5 complete — k6 load-test script + local harness (§9 "script
+      provided").** `packages/prices-api/loadtest/price_load.js`: k6
+      constant-arrival-rate 100 req/s × 5 min on GET /assets/{id}/price with
+      thresholds `p95<200ms` + `http_req_failed rate<0.001` (k6 exits non-zero on
+      breach → pass/fail gate); parameterized by BASE_URL/API_KEY/ASSET/RATE/
+      DURATION for either the deployed stage (authoritative) or the local server
+      (approximate). Added a `local-server` feature + `src/bin/serve.rs` (axum
+      over TCP against plaintext local CH — same app() router) + seed.sql +
+      runbook. **Harness validated end-to-end via curl** (k6 not installed here):
+      seeded native price, GET /v1/assets/native/price → 200 with the row, and
+      500/500 OK under 20-way concurrency at ~754 req/s (well above the 100 req/s
+      target; local p95 sub-ms — a lower bound, real SLO is deploy-gated).
+      **Gotcha found + documented:** the refreshable `mv_current_prices` MV
+      REPLACES current_prices every minute and wipes a manual seed — load test
+      needs a clean CH (`docker compose down -v`) or drop the MV. Verified: serve
+      bin compiles, clippy clean. **All 5 implementation phases done.** Remaining
+      ACs are deploy-gated: the live k6 SLO run against the deployed stage, and
+      the CloudWatch dashboard (task 0056); plus the §9 VWAP/backfill live checks.
+      prepare-not-deploy upheld.
 ---
 
 # Prices API Gateway + Rust/axum read handlers

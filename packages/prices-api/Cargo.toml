@@ -23,6 +23,14 @@ required-features = ["lambda"]
 default = []
 aws-mtls = ["prices-clickhouse/aws-mtls"]
 lambda = ["aws-mtls", "dep:lambda_http"]
+# Local HTTP server (src/bin/serve.rs) for dev + load testing. No extra deps —
+# reuses tokio (net) + axum::serve + the plaintext CH client.
+local-server = []
+
+[[bin]]
+name = "serve"
+path = "src/bin/serve.rs"
+required-features = ["local-server"]
 
 [dependencies]
 axum = { workspace = true }
