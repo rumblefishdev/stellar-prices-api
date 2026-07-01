@@ -3,7 +3,7 @@ id: "0053"
 title: "Combined single-pass historical backfill (SDEX + Soroban AMM) — full-chain, forward-discovery, dual-stream progress"
 type: FEATURE
 status: active
-related_adr: ["0001", "0003", "0004", "0007"]
+related_adr: ["0001", "0003", "0004", "0007", "0009"]
 related_tasks: ["0017", "0028", "0034", "0037", "0048", "0052", "0051", "0058", "0026", "0060", "0069", "0073", "0063"]
 tags: [layer-indexing, priority-high, effort-large, milestone-M1, stream-1, single-pass, rust, cli, workstation, clickhouse, soroban, amm, soroswap, aquarius, phoenix, sdex]
 milestone: 1
@@ -13,6 +13,7 @@ links:
   - "../../2-adrs/0003_price-ohlcv-pk-includes-quote-asset-id.md"
   - "../../2-adrs/0004_price-ohlcv-multi-source-merge-columns.md"
   - "../../2-adrs/0007_live-data-sink-on-shared-hetzner-clickhouse.md"
+  - "../../2-adrs/0009_backfill-direct-write-to-hetzner-clickhouse.md"
   - "../archive/0048_RESEARCH_soroban-events-pricing-decoder-spec/notes/G-soroban-events-pricing-decoder.md"
   - "../archive/0060_FEATURE_prices-clickhouse-crate-combined-backfill-sizing/README.md"
   - "./0069_FEATURE_discovery-pool-registry-maintenance.md"
@@ -86,6 +87,21 @@ history:
       partition order, persist the discovered registry, dual `backfill_progress`
       updates, and the cloud-push (soft-coordinates with backlog 0028; the local
       extract→mirror bulk is startable now).
+  - date: 2026-07-01
+    status: active
+    who: okarcz
+    note: >
+      **Push model decided: direct-write (Model B) — ADR 0009.** After checking
+      BE's prod approach (`backfill-runner --target clickhouse` writes straight
+      to Hetzner over Caddy mTLS) and the A-vs-B analysis, the operator chose to
+      write the backfill **directly to Hetzner over the 0052 mTLS client** — no
+      local mirror, no separate push CLI, no `assets` remap (ids align via
+      load-from-target), and `/backfill/status` updates in real time. Steps 4–5
+      rewritten; task 0028 (stage-then-push) superseded by ADR 0009. Already
+      shipped on the branch (PR #72): extract-mode gate, the unregistered-pool
+      guard → `prices.unresolved_pools`, and the pinned activation ledger
+      (50,463,000). Remaining: mTLS sink + real-time dual progress rows +
+      minute-aligned split + runbook + integration/idempotency tests.
 ---
 
 # Combined single-pass historical backfill (SDEX + Soroban AMM)
@@ -251,14 +267,30 @@ processor's mechanism). Add the "no swap for an unregistered pool" guard.
 Emit the accumulated pool registry as a durable artifact at run end (and/or
 checkpoint) so partial re-runs and the live processor can load it.
 
-### Step 4: Dual progress-row updates
-On each run's push, update the `backfill_progress` rows per decision 6
-(including `paused` between runs, and `earliest_data_available`).
+> **Push model — direct-write (Model B, [ADR 0009](../../2-adrs/0009_backfill-direct-write-to-hetzner-clickhouse.md), 2026-07-01).** Steps 4–5 below
+> supersede the earlier local-stage-then-push (task 0028). The backfill writes
+> **directly to Hetzner `prices.*` over the 0052 mTLS client** — no local mirror,
+> no separate push CLI, no `assets` remap (ids align via load-from-target). This
+> mirrors BE's prod `backfill-runner --target clickhouse` and lets
+> `/backfill/status` update in real time.
 
-### Step 5: Cloud-push (shared with 0028)
-Stream local `prices.*` rows → Hetzner via the 0052 mTLS client; chunked
-INSERTs; flip `backfill_progress` on success; idempotent re-run
-(`ReplacingMergeTree(version)`).
+### Step 4: Real-time dual progress-row updates
+Advance the two `backfill_progress` rows **as partitions complete** (Model B
+writes to Hetzner live, so status is truthful in real time — not only after a
+terminal push). Per decision 6: soroban run → `soroban_amm` advances forward +
+`sdex_archive.current = activation`; sdex run → walks `sdex_archive`; `paused`
+between runs; `earliest_data_available`; set `target_ledger = live tip` at start;
+`last_push_at = now()` on each update.
+
+### Step 5: Direct-write mTLS sink (ADR 0009; supersedes the 0028 push)
+Give `sdex-backfill`'s `Sink` an mTLS-target constructor over the 0052 client
+(reuse the live processor's `client_from_lambda_env` / `ClickHouseSink`,
+`aws-mtls` feature). A flag/env selects local-plaintext (testing against a
+stand-in) vs Hetzner-mTLS (real run). Load the asset registry from the target so
+surrogate ids align with live (**no remap**). Chunked INSERTs + retry/backoff on
+the sink; idempotent re-run (`ReplacingMergeTree(version)`); resume via
+`backfill_sdex_ledgers` on Hetzner. No local CH mirror; local ledger scratch is
+cleaned per-partition as today.
 
 ### Step 6: Tests
 - Unit: bucketing + pre-roll math for ≥2 venue-pair scenarios; the

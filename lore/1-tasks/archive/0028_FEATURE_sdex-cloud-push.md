@@ -2,9 +2,9 @@
 id: "0028"
 title: "SDEX cloud-push — stream local price_ohlcv + assets to Hetzner ClickHouse prices.* after backfill"
 type: FEATURE
-status: backlog
-related_adr: ["0003", "0005", "0007"]
-related_tasks: ["0012", "0027", "0052", "0063", "0051"]
+status: superseded
+related_adr: ["0003", "0005", "0007", "0009"]
+related_tasks: ["0012", "0027", "0052", "0063", "0051", "0053"]
 tags: [layer-indexing, priority-medium, effort-medium, milestone-M1, cloud-push, clickhouse, hetzner, mtls, sdex, stream-2, rust]
 milestone: 1
 links:
@@ -32,7 +32,26 @@ history:
       client, idempotency is ReplacingMergeTree(version) (not Postgres
       ON CONFLICT / xmax). Repointed RDS blocker 0011 → provisioning
       0063 + schema 0051. Replaced personal username with "operator".
+  - date: 2026-07-01
+    status: superseded
+    who: okarcz
+    by: "0009"
+    note: >
+      **Superseded by ADR 0009 (direct-write, Model B).** The operator chose
+      to write the backfill directly to Hetzner over the 0052 mTLS client
+      (BE's prod-proven `backfill-runner --target clickhouse` pattern) rather
+      than stage into a local mirror and run this separate push CLI. That
+      dissolves this task's whole reason to exist: no local→cloud copy pass,
+      and — because the backfill loads the asset registry from the target —
+      **no `assets` surrogate-id natural-key remap** (this task's core
+      complexity). The direct-write sink + real-time `backfill_progress`
+      updates are folded into task 0053 (Steps 4–5). Retained for history.
 ---
+
+> **⚠️ Superseded (2026-07-01) — see [ADR 0009](../../2-adrs/0009_backfill-direct-write-to-hetzner-clickhouse.md).**
+> The backfill now writes **directly** to Hetzner (Model B); there is no separate
+> push step and no `assets` remap. This spec is kept for history only. The
+> mTLS-sink + progress-row work lives in task 0053, Steps 4–5.
 
 # SDEX cloud-push — stream local `price_ohlcv` + `assets` to Hetzner CH `prices.*`
 
