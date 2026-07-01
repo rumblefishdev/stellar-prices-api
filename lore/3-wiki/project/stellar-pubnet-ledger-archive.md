@@ -6,10 +6,11 @@
 
 Reference for the public S3 archive the SDEX/Soroban backfill downloads from
 (`sdex-backfill`, task 0053). The load-bearing fact for the backfill is the
-**Soroban activation ledger ≈ 50,463,000** — the split point between the
+**Soroban activation ledger = 50,463,000** — the split point between the
 `sdex-only` pre-Soroban tail `[1, activation)` and the `combined`
-Soroban era `[activation, tip]`. This is the value the backfill's
-`--activation-ledger` flag should default to.
+Soroban era `[activation, tip]`, and the `sdex-backfill --activation-ledger`
+default. We adopt the BE team's located value as authoritative/pinned; the
+derivation below (mirrored from the BE doc) shows how it was anchored.
 
 ---
 
