@@ -25,6 +25,8 @@ async fn main() {
         cli.start,
         cli.end,
         cli.keep_partitions,
+        cli.mode,
+        cli.activation_ledger,
     )
     .await
     {

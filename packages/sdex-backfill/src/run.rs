@@ -8,19 +8,40 @@ use tracing::{info, warn};
 use prices_ingest_core::{AssetRegistry, Registries};
 
 use crate::error::BackfillError;
-use crate::ingest::{PartitionStats, index_partition};
+use crate::ingest::{ExtractMode, PartitionStats, index_partition};
 use crate::partition::{Partition, partitions_for_range};
 use crate::sink::Sink;
 use crate::sync::{SyncOutcome, sync_partition};
 
+#[allow(clippy::too_many_arguments)]
 pub async fn execute(
     sink: &Sink,
     temp_dir: &Path,
     start: u32,
     end: u32,
     keep_partitions: bool,
+    mode: ExtractMode,
+    activation_ledger: u32,
 ) -> Result<(), BackfillError> {
     assert!(start <= end, "invalid range: start ({start}) > end ({end})");
+
+    // Sanity-check the mode against the range: Combined over a purely
+    // pre-activation range extracts no AMM; SdexOnly over the Soroban era
+    // silently drops AMM swaps. Warn loudly rather than fail — the operator
+    // may have a deliberate reason.
+    match mode {
+        ExtractMode::Combined if end < activation_ledger => warn!(
+            end,
+            activation_ledger,
+            "combined mode but range is entirely pre-activation — no Soroban AMM to extract"
+        ),
+        ExtractMode::SdexOnly if end >= activation_ledger => warn!(
+            activation_ledger,
+            end,
+            "sdex-only mode over the Soroban era — AMM swaps in [activation, end] will NOT be extracted"
+        ),
+        _ => {}
+    }
 
     tokio::fs::create_dir_all(temp_dir).await?;
 
@@ -101,6 +122,7 @@ pub async fn execute(
                 &completed,
                 &mut registry,
                 &mut reg,
+                mode,
             )
             .await?;
 
