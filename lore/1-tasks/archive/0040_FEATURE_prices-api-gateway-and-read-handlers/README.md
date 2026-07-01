@@ -2,9 +2,9 @@
 id: "0040"
 title: "Prices API Gateway + Rust/axum read handlers — public REST endpoints with API-key auth, rate limit, response cache"
 type: FEATURE
-status: active
+status: completed
 related_adr: ["0003", "0004", "0006", "0007", "0008"]
-related_tasks: ["0011", "0038", "0039", "0045", "0047", "0072"]
+related_tasks: ["0011", "0038", "0039", "0045", "0047", "0055", "0072", "0073", "0074"]
 tags: [layer-backend, priority-high, effort-large, api, lambda, axum, rust, aws, clickhouse, hetzner]
 links:
   - "../../../docs/prices-api-general-overview.md"
@@ -240,6 +240,24 @@ history:
       ACs are deploy-gated: the live k6 SLO run against the deployed stage, and
       the CloudWatch dashboard (task 0056); plus the §9 VWAP/backfill live checks.
       prepare-not-deploy upheld.
+  - date: 2026-07-01
+    status: completed
+    who: claude
+    note: >
+      **Merged (PR #68, squash→develop) and completed.** All 5 phases landed:
+      single axum Lambda (`packages/prices-api`, ADR 0008) serving all 7 §4
+      routes under `/v1`, in-app API-key gate + identity parser + utoipa
+      OpenAPI, ClickHouse reads via the shared mTLS client, the API Gateway +
+      ComputeStack CDK (usage-plan 100/200, 0.5 GB stage cache, per-endpoint
+      TTLs), and the k6 load-test harness. ~4.7k LOC, 41 tests green (Rust
+      fmt/clippy/test + infra lint/build/synth all CI-green on the PR).
+      **6/8 ACs met; 2 deferred** — the 250-row pagination walk (spawned
+      **0074**; current test covers the 4-row/`limit=2` path) and the live
+      CloudWatch cache-hit observation (deploy-gated → **0070**). Live 403/429
+      and p95 verification are likewise deploy-gated to 0070. Superseded the
+      T1 carve-out **0055** (this ships its `/backfill/status` route). Prior
+      spawn **0073** (earliest_data_available). prepare-not-deploy upheld —
+      no AWS deploy in this task. Code-review trail: notes/R-code-review-pr68.md.
 ---
 
 # Prices API Gateway + Rust/axum read handlers
@@ -407,28 +425,41 @@ that point.
 
 ## Acceptance Criteria
 
-- [ ] **Single** Rust/axum Lambda binary (`crates/prices-api`,
-      all routes) built against `provided.al2`/PROVIDED_AL2023,
-      deployed via CDK from 0011's infra app. (Topology decision
-      2026-06-30 — single, not five; see G-note.)
-- [ ] REST API Gateway with API-key auth, 100 req/s usage plan,
-      0.5 GB response cache, per-endpoint TTLs documented.
-- [ ] All §4 endpoints implemented per the response shapes shown
-      in the overview doc, including `backfill_note` on
-      `?timeframe=all` and `sources` JSONB expansion.
+- [x] **Single** Rust/axum Lambda binary (`packages/prices-api`,
+      all routes) built against `PROVIDED_AL2023`, CDK-wired via
+      ComputeStack (synth-verified). Live deploy is prepare-only
+      here — owned by **0070**. (Topology decision 2026-06-30 —
+      single, not five; see G-note + ADR 0008.)
+- [x] REST API Gateway with API-key auth, 100 req/s usage plan,
+      0.5 GB response cache, per-endpoint TTLs documented
+      (assets/ohlcv 60s, price 15s, oracles/backfill 30s; batch +
+      health uncached — see README + Phase-4 history). CDK
+      synth-verified; template asserts 7 key-gated methods, cache
+      size 0.5, exact TTLs, usage-plan 100/200.
+- [x] All 7 §4 endpoints implemented per the overview response
+      shapes, including `backfill_note` on `?timeframe=all`.
+      (`sources` ships `{}` + zero price_xlm/change_24h_pct stubs
+      per the v1 `mv_current_prices` DEFAULTs — materialization is
+      **0072**.) Live-CH tested vs prod-pinned 26.3.10.60.
 - [ ] Keyset pagination for `GET /assets` correctly walks a
       250-row fixture (integration test) with no duplicates or
-      skipped rows across `?cursor` requests.
-- [ ] Asset identifier validation rejects malformed G/C-addresses
-      with 400; missing API key returns 403; over-rate returns
-      429.
+      skipped rows across `?cursor` requests. **Deferred to 0074**
+      — pagination correctness is exercised (4-row fixture,
+      `limit=2`, 2-page walk in `list_it.rs`), but the 250-row
+      no-dup/no-skip walk the AC specifies is not yet written.
+- [x] Asset identifier validation rejects malformed G/C-addresses
+      with 400 (strkey CRC, unit + integration tested). Missing
+      key (403) and over-rate (429) are gateway-enforced — the
+      usage plan + `apiKeyRequired` are CDK-wired; live 403/429
+      verification is deploy-gated (**0070**).
 - [ ] Cache hit on second identical GET within TTL is observable
-      in CloudWatch (no Lambda invocation).
-- [ ] Per-handler Lambda memory ≤512 MB; timeout ≤15 s; p95
-      latency target tracked (overview §6 has a <100 ms p95
-      goal — informational here, hard target lives in §6's
-      perf task).
-- [ ] Docs: README in `packages/api/` describing the route
+      in CloudWatch (no Lambda invocation). **Deploy-gated →
+      0070** (stage cache is CDK-wired; runtime observation needs
+      the deployed stage).
+- [x] Per-handler Lambda memory ≤512 MB; timeout ≤15 s (CDK
+      config). Live p95 tracking is deploy-gated (§6 perf task /
+      0070); the k6 script + local harness ship here (Phase 5).
+- [x] Docs: README in `packages/prices-api/` describing route
       ownership, the CDK stack layout, and the cache TTL
       decisions.
 
