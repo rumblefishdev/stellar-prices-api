@@ -2,7 +2,7 @@
 id: "0055"
 title: "`GET /backfill/status` endpoint — Tranche 1 isolated read handler"
 type: FEATURE
-status: backlog
+status: superseded
 related_adr: ["0006", "0007"]
 related_tasks: ["0011", "0050", "0051", "0052", "0040"]
 tags: [layer-backend, priority-high, effort-small, milestone-M1, api, lambda, axum, rust, clickhouse, read-endpoint]
@@ -26,6 +26,22 @@ history:
       public API surface (assets, ohlcv, batch, oracles, …) which
       is T2 scope. Carve out just /backfill/status so it can ship
       on the T1 timeline without dragging T2 work forward.
+  - date: 2026-07-01
+    status: superseded
+    who: claude
+    note: >
+      **Superseded by 0040 (PR #68, merged to develop 2026-07-01).** The
+      full public API landed on the T1 timeline anyway, so the carve-out was
+      never needed. 0040 ships `GET /v1/backfill/status`
+      (`packages/prices-api/src/backfill/`): reads both `backfill_progress`
+      rows, computes `progress_pct`/`ledgers_remaining` at read time, returns
+      the §4.5 envelope, behind the shared usage-plan + 30s stage cache — i.e.
+      exactly this task's scope, delivered by the "fold into the larger axum
+      app" option this task's own Context anticipated. Two shape deltas
+      recorded in 0040, not gaps here: `earliest_data_available` is omitted
+      pending the column (spawned 0073), and `realtime_tip_ledger` is derived
+      from the SDEX `target_ledger` rather than a dedicated tip row. No code to
+      write; moving backlog → archive as superseded.
 ---
 
 # `GET /backfill/status` endpoint — Tranche 1 isolated
