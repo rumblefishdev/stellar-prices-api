@@ -1,11 +1,11 @@
 ---
 id: "0053"
-title: "Soroban AMM Backfill CLI (`soroban-amm-backfill`) — Stream 1 implementation per ADR 0001"
+title: "Combined single-pass historical backfill (SDEX + Soroban AMM) — full-chain, forward-discovery, dual-stream progress"
 type: FEATURE
 status: backlog
 related_adr: ["0001", "0003", "0004", "0007"]
-related_tasks: ["0017", "0034", "0037", "0048", "0052", "0051", "0058", "0026"]
-tags: [layer-indexing, priority-high, effort-large, milestone-M1, stream-1, rust, cli, workstation, clickhouse, soroban, amm, soroswap, aquarius, phoenix]
+related_tasks: ["0017", "0028", "0034", "0037", "0048", "0052", "0051", "0058", "0026", "0060", "0069", "0073", "0063"]
+tags: [layer-indexing, priority-high, effort-large, milestone-M1, stream-1, single-pass, rust, cli, workstation, clickhouse, soroban, amm, soroswap, aquarius, phoenix, sdex]
 milestone: 1
 links:
   - "../../../docs/prices-api-general-overview.md"
@@ -14,10 +14,8 @@ links:
   - "../../2-adrs/0004_price-ohlcv-multi-source-merge-columns.md"
   - "../../2-adrs/0007_live-data-sink-on-shared-hetzner-clickhouse.md"
   - "../archive/0048_RESEARCH_soroban-events-pricing-decoder-spec/notes/G-soroban-events-pricing-decoder.md"
-  - "../archive/0018_RESEARCH_decode-per-amm-swap-event-shapes/notes/G-amm-swap-event-shapes.md"
-  - "./0017_FEATURE_local-clickhouse-for-prices-backfill.md"
-  - "./0037_FEATURE_tranche1-ledger-processor-skeleton.md"
-  - "../blocked/0034_FEATURE_consumer-multi-xyk-wasm-tolerance.md"
+  - "../archive/0060_FEATURE_prices-clickhouse-crate-combined-backfill-sizing/README.md"
+  - "./0069_FEATURE_discovery-pool-registry-maintenance.md"
 history:
   - date: 2026-05-21
     status: backlog
@@ -42,260 +40,269 @@ history:
       population + USD columns left DEFAULT 0 for the enrichment pass
       (0026). Repointed provisioning blocker 0050→0063. Replaced
       personal username with "operator".
+  - date: 2026-07-01
+    status: backlog
+    who: claude
+    note: >
+      **Rescoped: `soroban_events`-sourced separate binary → combined
+      single-pass backfill.** ADR 0001's model (BE `backfill-runner`
+      populates a local `soroban_events` table that this CLI queries) is
+      superseded by the combined single-pass decision locked with the
+      operator in task 0060 (2026-06-11) and already built + measured
+      there (Soroswap+Aquarius extractors, one-parse SDEX+AMM+oracle
+      extraction, prices-clickhouse crate, 100k sizing run). This task now
+      owns: (1) extending the single-pass engine in `sdex-backfill` to the
+      full chain; (2) **two disjoint range invocations** — a *soroban
+      backfill* over `[activation, tip]` extracting **SDEX + AMM** in one
+      download pass, and a *sdex backfill* over `[1, activation)` extracting
+      **SDEX only** — so no ledger is downloaded twice (download is the
+      bottleneck, not parsing; 0060); (3) **forward oldest→newest** decode
+      over the Soroban range so every pool's factory-create precedes its
+      swaps (organic discovery, no external registry seed); (4) **dual
+      progress-row** updates so `/backfill/status` stays truthful; (5) the
+      cloud-push (shared with 0028). Dropped the 0017 blocker (its
+      `soroban_events` role is dead; the local-CH infra already exists via
+      docker-compose + the prices-clickhouse crate). ADR 0001 amended
+      in place to record the pivot.
 ---
 
-# Soroban AMM Backfill CLI (`soroban-amm-backfill`)
+# Combined single-pass historical backfill (SDEX + Soroban AMM)
 
 ## Summary
 
-Build the one-shot workstation CLI specified in ADR 0001: a Rust
-binary that reads the operator's local ClickHouse `soroban_events`
-(populated upfront by BE's `backfill-runner --target=clickhouse`
-per 0017), decodes Soroswap / Aquarius / Phoenix swap events via
-the `stellar-xdr` crate using the 0048 decoder spec, buckets the
-results into per-source 1-min OHLCV rows in a **local ClickHouse
-mirror of the Hetzner `prices.*` schema** (the same local-CH→Hetzner
-shape BE uses, not a local Postgres), and runs a one-shot completion
-push to Hetzner ClickHouse `prices.*`
-that lands the historical rows and flips
-`prices.backfill_progress.soroban_amm` to `status='completed'`.
+Build the **one-shot combined historical backfill** that populates the
+local `prices.*` ClickHouse mirror across the whole chain and pushes it to
+Hetzner. It extends the single-pass engine already built and measured in
+[task 0060](../archive/0060_FEATURE_prices-clickhouse-crate-combined-backfill-sizing/README.md)
+(one S3 download → decode → SDEX candles + Soroban AMM candles + oracle
+rows, all `prices.*`) from a 100k sizing slice to the full historical range.
+
+The run is split into **two disjoint ledger-range invocations of the same
+engine**, because downloading each ledger's XDR is the dominant cost —
+parsing is cheap (0060) — so every ledger is downloaded **exactly once**:
+
+- **Soroban backfill — `[activation, tip]`, extracts SDEX + AMM (+ oracle).**
+  The Soroban era. One download per ledger yields *both* classic SDEX
+  trades (`source='sdex'`) and AMM swaps (`source∈{phoenix,soroswap,aquarius}`).
+  The Soroban-era SDEX comes for free here — it is **not** re-downloaded
+  later just to get its SDEX trades.
+- **SDEX backfill — `[1, activation)`, extracts SDEX only.** The pre-Soroban
+  tail, where no AMM pools can exist, so there is nothing to combine.
+
+Coverage: SDEX = `[1, activation)` + `[activation, tip]` = `[1, tip]`;
+AMM = `[activation, tip]`. No ledger downloaded twice.
 
 ## Context
 
-Per ADR 0001 §Decision and the design doc §5.6 Stream 1, the
-Soroban AMM historical backfill (Nov 2023 → present, ~8.5M
-ledgers) is **not** a Fargate task: it runs as a local Rust CLI
-on the operator's workstation. The runtime flow is:
+### Supersession of the `soroban_events` sourcing model
 
-1. BE's `backfill-runner --target=clickhouse` populates a
-   Docker-hosted local ClickHouse with `soroban_events` rows
-   for the Soroban-activation-onward ledger range (0017 owns
-   this prep step).
-2. `soroban-amm-backfill` queries the local CH filtered by
-   `signature = 'swap'` AND `contract_id IN (Soroswap, Aquarius,
-   Phoenix registry)`. Note the Aquarius / Phoenix String-typed
-   topic[0] issue (task 0031) requires per-AMM filter logic.
-3. Each event's `topics_xdr` + `data_xdr` are decoded into a
-   `TradeTick` per the 0048 decoder spec.
-4. Ticks are bucketed to 1-min OHLCV per ADR 0003 PK shape
-   (timestamp, asset_id, quote_asset_id, source) and INSERTed into
-   a local ClickHouse mirror of `prices.*` (Docker — the same local
-   CH that holds `soroban_events`; schema applied from
-   `packages/prices-clickhouse/schema/*` per 0017). `version` is set
-   per ADR 0004 so ReplacingMergeTree collapses re-runs.
-5. On completion, the cloud-push step copies the local `prices.*`
-   mirror rows into Hetzner CH `prices.*` via the 0052
-   shared mTLS client, then flips `backfill_progress.soroban_amm`
-   to `status='completed'`. The local CH instance is torn down
-   post-push.
+The original 0053 (and ADR 0001) had a *separate* `soroban-amm-backfill`
+binary query a local `soroban_events` table pre-populated by BE's
+`backfill-runner --target=clickhouse` (owned by 0017). That model is
+**superseded** by the combined single-pass decision locked with the
+operator in **task 0060** (2026-06-11) and already implemented there:
 
-Total wall-clock: a few hours, dominated by 0017's
-`backfill-runner` archive ingestion.
+- Both SDEX trades and Soroban events live in the **same**
+  `LedgerCloseMeta`. `sdex-backfill` already downloads, decompresses and
+  parses each ledger once; 0060 wired Soroban event extraction into that
+  same pass (Soroswap + Aquarius extractors implemented, oracle extraction
+  added) and writes per-source candles to `prices.*`.
+- This **removes the dependency on BE's `backfill-runner` / a
+  pre-populated `soroban_events` table** (and therefore on 0017's role #1),
+  halves the download cost (no second pass over the Soroban era), and makes
+  backfilled candles byte-identical to the live processor's (one ledger →
+  both extractions).
+
+See [ADR 0001](../../2-adrs/0001_stream1-clickhouse-sourced-amm-backfill.md)
+(amended 2026-07-01) for the decision record.
+
+### What 0060 already delivered (do not rebuild)
+
+- `packages/prices-clickhouse` schema crate + `prices-clickhouse-init`.
+- Soroswap + Aquarius extractors (Phoenix XYK from earlier work).
+- Combined single-pass extraction (SDEX + AMM + REFLECTOR/REDSTONE oracle)
+  in the `sdex-backfill` per-ledger loop, writing per-source candles +
+  pre-rolled granularities to the local `prices.*` mirror.
+- 100k-ledger sizing/timing: ~3.7 KB/ledger, ~61 min/100k, **download-bound**.
+- Local CH via `docker-compose.yml` (pinned `26.3.10.60`, auto-applies
+  `init.sql`).
+
+### What remains (this task)
+
+Full-history run correctness + operability: forward-discovery for the whole
+Soroban range, the two-range split, dual-stream progress accounting, the
+cloud-push, and the pool-discovery completeness guard.
+
+## Design decisions (locked)
+
+1. **One engine, two range invocations — not a new binary.** The combined
+   single-pass extractor lives in `sdex-backfill` (per 0060). The *sdex
+   backfill* is that same engine with AMM extraction a no-op below
+   `activation`. Same code, two disjoint ranges.
+
+2. **Download-once.** Ledger download/decompress is the bottleneck (0060);
+   parsing is cheap. Never download a Soroban-era ledger twice — extract
+   SDEX + AMM together in the `[activation, tip]` pass.
+
+3. **Forward oldest→newest over `[activation, tip]` ⇒ organic pool
+   discovery.** A Soroban AMM pool cannot exist before Soroban activation,
+   so if the AMM window is exactly `[activation, tip]` and decode proceeds
+   chronologically, every pool's factory-create event is seen **before** any
+   of its swaps. Discovery is complete **by construction — no external
+   factory registry seed is required as a prerequisite** (this downgrades
+   [0069](./0069_FEATURE_discovery-pool-registry-maintenance.md) from a
+   blocker to an optimization / live-maintenance concern). Guard: assert
+   **"no swap decoded for an unregistered pool"** — a fired guard means an
+   extractor gap (e.g. the Phoenix multi-WASM / Soroswap `topic[1]` classes
+   0060 hit), not silently dropped volume.
+
+4. **Persist the discovered pool registry as an output artifact.** So a
+   partial re-backfill (a mid-history window) and the live processor can
+   load it without re-deriving from activation. Reuse the live processor's
+   persisted-registry mechanism. This inverts 0069: registry-as-output, not
+   registry-as-required-input.
+
+5. **Parallel download + strictly-ordered decode.** Download is the
+   bottleneck and can be fully parallel (concurrent partition prefetch);
+   decode/registration must respect ledger order so create precedes swap.
+   Carry registry state forward across partitions.
+
+6. **Dual progress-row update (keeps `/backfill/status` truthful).**
+   Per overview §3.5 there are two `backfill_progress` rows: `sdex_archive`
+   (`start=1`, `target=tip`, **backward**, `current_ledger`=oldest pushed)
+   and `soroban_amm` (`start=activation`, **forward**, one-shot). The
+   combined run writes SDEX for `[activation, tip]`, so it must advance
+   **both** rows or SDEX under-reports:
+   - **Soroban backfill** → `soroban_amm.status='completed'` **and**
+     `sdex_archive.current_ledger = activation` (≈ the recent chunk done,
+     ~23% of the chain), `status='running'`, `last_push_at=now()`.
+   - **SDEX backfill** → walks `sdex_archive` from `activation → 1`
+     (≈23% → 100%).
+   - **Between the two runs**, set `sdex_archive.status='paused'` so the
+     §5.6 `last_push_at` freshness alarm does not false-fire.
+   - Record `earliest_data_available` per stream (needs the task 0073
+     column) for the `?timeframe=all` `backfill_note`.
+
+7. **Split on the activation ledger, minute-aligned.** The two runs cover
+   disjoint ledger ranges; align the split to a minute boundary so the one
+   `source='sdex'` minute straddling `activation` is not partially
+   double-written (`ReplacingMergeTree` replaces, not sums).
+
+8. **Cloud-push shared with task 0028, not duplicated per stream.**
+   The push mechanics (stream local `prices.*` rows to Hetzner over the 0052
+   mTLS client, chunked INSERTs, flip `backfill_progress`) are common to
+   SDEX and AMM; house them once.
+
+### Recommended run order
+
+**Globally forward: SDEX `[1, activation)` first is *not* required for
+correctness, but the operator-chosen order sets what `/backfill/status`
+shows during the run** (see the discussion captured in §Design). Two valid
+orders:
+
+- **Soroban-era first** (`[activation, tip]` combined) → `soroban_amm`
+  completes and `sdex_archive` jumps to ~23% immediately; the pre-Soroban
+  SDEX tail follows as a later milestone. Good for getting recent + AMM data
+  first; **requires the dual-row update (decision 6) or SDEX under-reports.**
+- **Chronological** (`[1, activation)` SDEX, then `[activation, tip]`
+  combined) → `sdex_archive` advances monotonically `1→tip`; simplest honest
+  progress, but you grind the long pre-Soroban tail before any recent/AMM
+  data.
+
+Either is acceptable; the milestone framing (Soroban era now, SDEX tail
+next) uses Soroban-era-first.
 
 ## Implementation Plan
 
-### Step 1: CLI scaffolding
+### Step 1: Full-range driver over the 0060 engine
+Extend the `sdex-backfill` run loop to accept a mode flag: `combined`
+(SDEX+AMM+oracle, for `[activation, tip]`) vs `sdex-only` (for
+`[1, activation)`). Keep the single parse pass; gate AMM/oracle dispatch on
+the mode. `--start`/`--end` already exist.
 
-Add `packages/soroban-amm-backfill/` as a binary crate.
-Dependencies:
+### Step 2: Forward-ordered decode + registry carry-forward
+Ensure the `[activation, tip]` pass decodes in ledger order with the
+venue/pool registries persisted across partitions (reuse the live
+processor's mechanism). Add the "no swap for an unregistered pool" guard.
 
-- `clickhouse` (raw, not the 0052 wrapper — reads `soroban_events`
-  from and writes the `prices.*` mirror to the local plaintext CH,
-  no mTLS).
-- 0052 shared CH client for the cloud-push step (mTLS to Caddy).
-- `stellar-xdr` — official SDF Rust XDR types for ScVal decoding.
-- `clap` — CLI argument parsing.
-- `tracing` + `tracing-subscriber` — structured logs.
+### Step 3: Discovered-registry artifact
+Emit the accumulated pool registry as a durable artifact at run end (and/or
+checkpoint) so partial re-runs and the live processor can load it.
 
-CLI surface:
+### Step 4: Dual progress-row updates
+On each run's push, update the `backfill_progress` rows per decision 6
+(including `paused` between runs, and `earliest_data_available`).
 
-```
-soroban-amm-backfill
-  --local-ch-url URL         (default http://localhost:8123)
-  --mirror-db NAME           (local prices.* mirror DB in the local CH; default 'prices')
-  --start-ledger SEQ
-  --end-ledger SEQ
-  --venues VENUES            (comma-separated: soroswap,aquarius,phoenix; default all)
-  push                       (subcommand to run the one-shot cloud push)
-    --target-ch-url URL      (Caddy:443)
-    --target-db NAME         (default 'prices')
-  decode                     (subcommand to run only the local extract step)
-```
+### Step 5: Cloud-push (shared with 0028)
+Stream local `prices.*` rows → Hetzner via the 0052 mTLS client; chunked
+INSERTs; flip `backfill_progress` on success; idempotent re-run
+(`ReplacingMergeTree(version)`).
 
-### Step 2: Pool registry loading
+### Step 6: Tests
+- Unit: bucketing + pre-roll math for ≥2 venue-pair scenarios; the
+  unregistered-pool guard; the dual-row update logic.
+- Integration: end-to-end against Docker local CH from a small recorded
+  ledger fixture spanning the activation boundary; assert per-source rows +
+  both progress rows + the minute-boundary seam.
+- Idempotency: re-run push → `SELECT count() … FINAL` stable.
 
-Reuse the per-venue registry surface from 0037 (`SwapExtractor`
-trait + `PoolRegistry`). For Phoenix, accept the multi-WASM
-tolerance from 0034; for Soroswap and Aquarius, use the canonical
-factory-derived pool lists per 0018 / 0033.
-
-Pool registries are loaded once at startup and cached for the
-lifetime of the run.
-
-### Step 3: Local CH event query
-
-For each (venue, batch of ledgers) page through:
-
-```sql
-SELECT
-    ledger_seq,
-    closed_at,
-    tx_hash,
-    contract_id,
-    topics_xdr,         -- BE's tagged-JSON ScVal, not XDR bytes (task 0030)
-    data_xdr
-FROM soroban_events
-WHERE signature = 'swap' OR (venue = 'soroswap' AND topic0_string = 'SoroswapPair')
-  OR (venue = 'phoenix' AND topic0_string = 'swap')
-  AND ledger_seq BETWEEN ? AND ?
-  AND contract_id IN (?)
-ORDER BY ledger_seq, tx_hash
-```
-
-The exact predicate depends on whether 0031's hoist has landed
-on BE side; if not, use per-AMM raw-topic filters. Document the
-filter strategy choice in `notes/S-event-filter-strategy.md`.
-
-### Step 4: Decode per 0048 spec
-
-For each event, call the venue-specific decoder from
-`packages/ledger-processor::dispatch` (kernel from 0037), which
-returns a `TradeTick { amount_in, amount_out, asset_in,
-asset_out, ... }`. The decoder is shared with the live
-processor (0038), so identical decode paths are exercised here
-and in live ingestion.
-
-### Step 5: Bucket to 1-min OHLCV
-
-For each `TradeTick`:
-
-1. Resolve `asset_id` + `quote_asset_id` against the local
-   `assets` table (UPSERT new ones discovered during decode).
-2. Compute the per-tick price and per-tick `volume_quote /
-   volume_base` per 0048 §3.
-3. Group ticks into the `(floor_minute(closed_at), asset_id,
-   quote_asset_id, source)` bucket and finalize each bucket
-   in-memory per ADR 0004 (preserve open, overwrite close,
-   GREATEST(high), LEAST(low), sum volumes + trade_count, recompute
-   vwap). Populate `volume_quote` with native quote-asset volume
-   (per 0058); leave `volume_quote_usd` and `close_usd` at their
-   `DEFAULT 0` — the USD enrichment pass fills them later from
-   `oracle_prices` (0026; see archival-USD open question in 0017).
-   INSERT the finalized rows into the local CH
-   `prices.price_ohlcv_1m` mirror; ReplacingMergeTree(version)
-   collapses any re-run.
-4. Pre-roll higher granularities (15m, 1h, 4h, 1d, 1w, 1M) in the
-   same pass (math mirrors the `rollups.sql` MV chain) and INSERT
-   them into their local CH mirror tables, so the cloud-push step
-   copies already-aggregated rows (matches design doc §3.2
-   "Backfill scripts produce already-aggregated rows").
-
-### Step 6: Cloud-push (`push` subcommand)
-
-Copies all `price_ohlcv_*` rows + new `assets` rows from the local
-CH `prices.*` mirror to Hetzner CH `prices.*` via the 0052 mTLS client:
-
-1. Open a CH connection per granularity table.
-2. Stream rows in chunks (e.g. 10k rows per INSERT) using the
-   CH native protocol's bulk-INSERT path.
-3. After each table completes, log row counts.
-4. On success: `INSERT INTO prices.backfill_progress` row with
-   `task_name='soroban_amm', status='completed',
-   completed_at=now(), last_push_at=now()` (ReplacingMergeTree
-   collapses against the seeded row).
-5. On any failure: surface the error, do not flip status, exit
-   non-zero. Re-run is idempotent because `ReplacingMergeTree`
-   collapses on (version) per ADR 0004.
-
-### Step 7: Tests
-
-- Unit: decoder paths covered by 0037 / 0048; here, test the
-  bucketing + pre-roll math for at least two venue-pair scenarios.
-- Integration: end-to-end against a Docker CH holding both the
-  `soroban_events` input and the `prices.*` mirror, seeded with a
-  small recorded `soroban_events` fixture; assert the produced
-  1-min rows match a hand-computed gold file.
-- Smoke: cloud-push step against a local Docker CH (no mTLS) +
-  a stubbed `prices.backfill_progress` row.
-
-### Step 8: Operator runbook
-
-A short `RUNBOOK.md` documenting the end-to-end run sequence:
-
-1. Run 0017's CH prep (`backfill-runner --target=clickhouse`).
-2. Apply 0051's schema to Hetzner CH `prices` if not done.
-3. Run `soroban-amm-backfill decode --start-ledger=… --end-ledger=…`.
-4. Inspect local CH `prices.*` mirror row counts; spot-check via SQL.
-5. Run `soroban-amm-backfill push --target-ch-url=…`.
-6. Confirm `GET /backfill/status` shows
-   `soroban_amm.status: "completed"` (0055).
-7. Tear down local CH + Postgres.
+### Step 7: Operator runbook
+Fold into `docs/runbooks/running-ingestion-components.md`: the two-range
+sequence, run order + what `/backfill/status` shows, the activation split,
+and teardown.
 
 ## Acceptance Criteria
 
-- [ ] `packages/soroban-amm-backfill` binary builds and runs
-      end-to-end against a Docker local CH (soroban_events input +
-      prices.* mirror)
-- [ ] Decoder paths produce `TradeTick` records that match the
-      0048 spec gold-file fixtures for all three venues
-- [ ] Pre-rolled higher-granularity rows in the local CH prices.*
-      mirror are consistent with the 1-min rows under the §3.2 MV
-      semantics
-      (`argMin(open)`, `max(high)`, `min(low)`, `argMax(close)`,
-      `sum(volumes)`)
-- [ ] `push` subcommand streams local rows to Hetzner CH
-      `prices.*` and flips `backfill_progress.soroban_amm` to
-      `completed`
-- [ ] Idempotent re-run of `push` produces no duplicate rows
-      after `ReplacingMergeTree` background merge (`SELECT count()
-      … FINAL` consistent before and after)
-- [ ] OHLCV data for Soroswap pairs verifiable for Nov 2023
-      dates (Tranche 1 acceptance criterion)
-- [ ] Operator runbook in `RUNBOOK.md` walks through the full
-      sequence; tested by a second team member following it cold
+- [ ] Combined single-pass run over `[activation, tip]` writes SDEX + AMM +
+      oracle rows to the local `prices.*` mirror from a **single download per
+      ledger** (no second pass for Soroban-era SDEX).
+- [ ] SDEX-only run over `[1, activation)` completes the pre-Soroban SDEX
+      tail; union coverage is `[1, tip]` with no ledger downloaded twice.
+- [ ] Forward-ordered decode yields complete AMM pool discovery over the
+      Soroban range with **no external registry seed**; the
+      unregistered-pool guard never fires on a clean run (and is an error if
+      it does).
+- [ ] Discovered pool registry is emitted as a durable artifact.
+- [ ] `push` streams local rows to Hetzner and updates `backfill_progress`;
+      the **soroban run advances both** `soroban_amm`→`completed` and
+      `sdex_archive`→`current=activation`; the **sdex run** walks
+      `sdex_archive`→`completed`; `status='paused'` is set between runs.
+- [ ] `GET /backfill/status` reports truthful, monotonic progress for both
+      streams throughout (no SDEX under-report while recent SDEX exists).
+- [ ] OHLCV for Soroswap pairs verifiable for Nov 2023 dates (Tranche 1 AC).
+- [ ] Idempotent re-run of `push` (no duplicate rows after merge).
+- [ ] Runbook updated.
 
 ## Blocked on
 
-- **0017** — local CH instance setup and `backfill-runner`
-  prep tooling. Without 0017, the `soroban_events` source is
-  empty.
-- **0037** — shared `SwapExtractor` trait + dispatch kernel +
-  Phoenix pool registry. Without 0037, the venue-specific decode
-  is reinvented here.
-- **0034** — Phoenix multi-WASM tolerance. The Phoenix
-  extractor must tolerate ≥2 XYK WASM builds; without 0034 the
-  PHO/USDC pair is silently dropped.
-- **0048** decoder spec (archived) — the spec is mature; this
-  task consumes it.
-- **0052** — for the cloud-push step's mTLS client. Decode-only
-  workflow can run before 0052 lands.
-- **0051** — the target Hetzner CH `prices.*` schema must exist
-  before the push lands data.
-- **0063** — the `prices` database, scoped users, and per-env mTLS
-  cert/endpoint must be provisioned on the Hetzner box before the
-  push lands (0050 narrowed to SNS only).
+- **0037** — shared `SwapExtractor` trait + dispatch kernel + Phoenix pool
+  registry (largely satisfied via 0060; confirm coverage).
+- **0034** — Phoenix multi-WASM tolerance (or the PHO/USDC pair is dropped).
+- **0048** decoder spec (archived) — consumed.
+- **0052** — mTLS client for the cloud-push step (done; local decode runs
+  without it).
+- **0051 / 0063** — Hetzner `prices.*` schema + provisioned `prices` DB /
+  mTLS before the push lands (both done).
+- **~~0017~~** — **removed.** Its `soroban_events` role is superseded by the
+  single-pass model; the local-CH infra already exists (docker-compose +
+  the prices-clickhouse crate from 0060).
 
 ## Out of scope
 
-- Live Soroban AMM ingestion — handled by 0038 from the moment
-  the local CH is populated; this task is purely historical.
-- SDEX backfill — see 0027 / 0028.
-- Resuming a partially-pushed run with sub-table granularity —
-  v1 either pushes all granularities or none, then idempotent
-  re-run cleans up. Sub-table resume is a backlog item if
-  measured wall-clock makes it worth it.
+- Live Soroban AMM / SDEX ingestion — the live processor (0038); this task
+  is purely historical.
+- The factory-registry *maintenance* service for live discovery — 0069
+  (now an optimization, not a prerequisite here).
+- Sub-table-granular resume of a partially-pushed run — v1 pushes all
+  granularities or none, then idempotent re-run cleans up.
 
 ## Notes
 
-- The local CH instance is **torn down after the push**
-  (ADR 0001 §Consequences). Do not treat it as a long-lived
-  store.
-- The decode loop and the bucketing math are shared with the
-  live Ledger Processor (0038); house both in
-  `packages/ledger-processor` so a bug fixed in one path also
-  fixes the other.
-- `backfill_progress.target_ledger` should be set to the live
-  tip at the moment the run starts (decode subcommand) so
-  `progress_pct` in 0055's response is meaningful during the
-  run (even though for Stream 1 the run is fast enough that
-  partial progress is rarely observed).
+- The local CH instance is torn down after the push (ADR 0001
+  §Consequences); it is not a long-lived store.
+- Decode + bucket math are shared with the live Ledger Processor (0038) —
+  house both in the shared ingest crate so a fix in one path fixes the
+  other. This is exactly why the single-pass backfill is byte-identical to
+  live: same code, replayed from history.
+- `backfill_progress.target_ledger` is set to the live tip when each run
+  starts, so `progress_pct` is meaningful during the run.

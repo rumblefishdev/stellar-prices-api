@@ -1,9 +1,9 @@
 ---
 id: "0001"
 title: "Stream 1 Soroban AMM historical backfill is sourced from BE's ClickHouse soroban_events (local instance)"
-status: accepted
+status: superseded
 deciders: [okarcz]
-related_tasks: ["0015", "0017", "0018"]
+related_tasks: ["0015", "0017", "0018", "0053", "0060"]
 related_adrs: ["0002"]
 tags: [architecture, backfill, clickhouse, block-explorer, soroban, amm, stream-1]
 links:
@@ -26,6 +26,21 @@ history:
       a supported workflow for prices-api consumption. prices-api side:
       local CH runs on dev laptop (okarcz) with shared access; the
       stellar-xdr parser crate (to be built) will handle ScVal decoding.
+  - date: 2026-07-01
+    status: superseded
+    who: claude
+    note: >
+      **Superseded in place by the combined single-pass backfill** (see the
+      Amendment at the top of the body). The `soroban_events`-sourced model
+      below — BE `backfill-runner --target=clickhouse` populates a local
+      `soroban_events` table that a separate `soroban-amm-backfill` CLI
+      queries — is replaced by extracting SDEX + Soroban AMM swaps in a
+      **single download/parse pass** of each `LedgerCloseMeta`. The pivot was
+      locked with the operator in task 0060 (2026-06-11) and built + measured
+      there; implementation is the rescoped task 0053. No separate replacing
+      ADR was created — the superseding decision is recorded as the Amendment
+      here (hence no `by:` ADR). Retiring the `soroban_events` role also
+      retires task 0017's reason to exist.
 ---
 
 # ADR 0001: Stream 1 Soroban AMM historical backfill is sourced from BE's ClickHouse `soroban_events` (local instance)
@@ -37,6 +52,57 @@ history:
 - [Task 0018: Sample-decode per-AMM swap event shapes (Soroswap, Aquarius, Phoenix)](../1-tasks/backlog/0018_RESEARCH_decode-per-amm-swap-event-shapes.md) — pins the extraction logic
 - [BE ADR 0044: ClickHouse pilot — parallel store mirroring Postgres schema, with full-content soroban_events](../../../soroban-block-explorer/lore/2-adrs/0044_clickhouse-pilot-parallel-store.md) — the upstream enabling decision
 - [BE ADR 0033: soroban_events → soroban_events_appearances (read-time event detail from S3)](../../../soroban-block-explorer/lore/2-adrs/0033_soroban-events-appearances-read-time-detail.md) — the PG compromise this ADR routes around
+
+---
+
+## Amendment (2026-07-01) — SUPERSEDED: combined single-pass replaces `soroban_events` sourcing
+
+> **Status: superseded in place.** The Decision below (source the Soroban AMM
+> backfill from a local `soroban_events` table populated by BE's
+> `backfill-runner --target=clickhouse`, queried by a separate
+> `soroban-amm-backfill` CLI) is **no longer in force.** The original text is
+> retained for history. The current decision is this Amendment.
+
+**New decision — combined single-pass historical backfill.** The Soroban AMM
+history is extracted in the **same download/parse pass as SDEX**, directly
+from each `LedgerCloseMeta`, with **no intermediate `soroban_events` table
+and no dependency on BE's `backfill-runner`**. Locked with the operator in
+**task 0060** (2026-06-11), built and measured there (Soroswap + Aquarius
+extractors, one-parse SDEX + AMM + oracle extraction, the `prices-clickhouse`
+schema crate, a 100k-ledger sizing run). Implementation is the rescoped
+[task 0053](../1-tasks/backlog/0053_FEATURE_soroban-amm-backfill-cli-stream-1-impl.md).
+
+Why the pivot:
+
+1. **Download is the bottleneck, not parsing** (0060: download-bound,
+   ~37 ms/ledger). SDEX trades and Soroban events live in the *same*
+   `LedgerCloseMeta`, so a second pass to build `soroban_events` would
+   re-download the entire Soroban era. Single-pass extracts both from one
+   download → each ledger downloaded exactly once.
+2. **No `soroban_events` store** (was ~100–150 GB) and **no cross-team
+   `backfill-runner` dependency**. Retires task 0017's `soroban_events` role;
+   the local CH itself already exists (docker-compose + the crate).
+3. **Backfill == live by construction** — the decode/bucket path is shared
+   with the live Ledger Processor (0038), so backfilled candles are
+   byte-identical to live ones.
+
+Shape of the run (details in task 0053):
+
+- **Soroban backfill** over `[activation, tip]` extracts **SDEX + AMM**
+  (+ oracle) in one pass; **SDEX backfill** over `[1, activation)` extracts
+  **SDEX only**. Disjoint ranges → union `[1, tip]`, no double download.
+- **Forward oldest→newest** decode of the Soroban range makes every pool's
+  factory-create precede its swaps → **complete pool discovery with no
+  external registry seed** (downgrades task 0069 to an optimization). Guard:
+  no swap may be decoded for an unregistered pool.
+- **Both** `backfill_progress` rows are updated by the combined run
+  (`soroban_amm`→completed **and** `sdex_archive`→`current=activation`) so
+  `GET /backfill/status` (overview §3.5/§4.5) stays truthful.
+
+What is **unchanged** from the original decision: it is still a **local
+workstation one-shot** feeding the `prices.*` mirror, then a completion push
+to the Hetzner cloud CH; the local instance is torn down afterwards; and
+live go-forward ingestion never depended on this path (point 4 below).
 
 ---
 

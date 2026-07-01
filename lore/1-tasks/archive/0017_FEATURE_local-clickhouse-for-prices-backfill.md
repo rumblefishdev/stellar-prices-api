@@ -2,7 +2,7 @@
 id: "0017"
 title: "Local ClickHouse instance setup and access for prices-api Tranche 1 backfill"
 type: FEATURE
-status: backlog
+status: superseded
 related_adr: ["0001", "0003", "0004", "0007"]
 related_tasks: ["0015", "0018", "0051", "0052", "0053", "0058", "0026", "0061"]
 tags: [layer-infra, priority-high, effort-small, milestone-M1, infra, backfill, clickhouse, hetzner, block-explorer]
@@ -36,9 +36,38 @@ history:
       volume_quote_usd / close_usd + oracle_prices; tasks 0058/0026/0061)
       and the mTLS cloud-push path via the 0052 client. Replaced personal
       username with "operator".
+  - date: 2026-07-01
+    status: superseded
+    who: claude
+    by: ["0053", "0060"]
+    note: >
+      **Superseded — the `soroban_events` sourcing model this task existed to
+      set up is dead.** Task 0060 (2026-06-11, operator-locked) pivoted the AMM
+      backfill to a **combined single-pass** extraction (SDEX + Soroban events
+      decoded from the same `LedgerCloseMeta` in one download/parse), removing
+      the dependency on BE's `backfill-runner` and a pre-populated
+      `soroban_events` table — this task's role #1. Role #2 (the local
+      `prices.*` mirror) is already stood up by `docker-compose.yml` (CH pinned
+      `26.3.10.60`, auto-applies `init.sql`) + the `prices-clickhouse` crate
+      built in 0060, so there is no residual setup work here. ADR 0001 amended
+      to record the pivot; the full-history run is owned by the rescoped 0053.
+      **Note on state:** the 2026-07-01 promotion to `active` was committed
+      half-broken (the `git mv` landed but the pre-commit hook dropped the
+      status/history edits, leaving the file in `active/` at `status: backlog`);
+      this entry both closes the task and corrects that. Moving → archive.
 ---
 
 # Local ClickHouse instance setup and access for prices-api Tranche 1 backfill
+
+> **⚠️ SUPERSEDED (2026-07-01) by tasks 0060 + 0053.** The combined
+> single-pass backfill (SDEX + Soroban AMM from one `LedgerCloseMeta` parse)
+> removed the `soroban_events` sourcing this task set up (role #1), and the
+> local `prices.*` mirror (role #2) already exists via `docker-compose.yml` +
+> the `prices-clickhouse` crate. No residual work. See
+> [ADR 0001](../../2-adrs/0001_stream1-clickhouse-sourced-amm-backfill.md)
+> (amended) and the rescoped
+> [task 0053](../backlog/0053_FEATURE_soroban-amm-backfill-cli-stream-1-impl.md).
+> Original body retained below for history.
 
 ## Summary
 
