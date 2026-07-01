@@ -25,16 +25,27 @@ pub async fn execute(
 ) -> Result<(), BackfillError> {
     assert!(start <= end, "invalid range: start ({start}) > end ({end})");
 
-    // Sanity-check the mode against the range: Combined over a purely
-    // pre-activation range extracts no AMM; SdexOnly over the Soroban era
-    // silently drops AMM swaps. Warn loudly rather than fail — the operator
-    // may have a deliberate reason.
+    // Sanity-check the mode against the range. Warn loudly rather than fail —
+    // the operator may have a deliberate reason.
     match mode {
+        // Combined over a purely pre-activation range extracts no AMM.
         ExtractMode::Combined if end < activation_ledger => warn!(
             end,
             activation_ledger,
             "combined mode but range is entirely pre-activation — no Soroban AMM to extract"
         ),
+        // Forward pool discovery is only complete when the window begins at
+        // activation: a pool's factory-create event must be decoded before any
+        // of its swaps. A window that starts *after* activation never sees the
+        // create events of earlier pools, so their swaps are silently dropped
+        // (soroban.rs treats an unregistered pool as skip) unless a persisted
+        // pool registry is loaded first (not yet wired up).
+        ExtractMode::Combined if start > activation_ledger => warn!(
+            start,
+            activation_ledger,
+            "combined mode starts after activation — pools created before start are not discovered; their AMM swaps will be silently dropped without a preloaded pool registry"
+        ),
+        // SdexOnly over the Soroban era silently drops AMM swaps.
         ExtractMode::SdexOnly if end >= activation_ledger => warn!(
             activation_ledger,
             end,
