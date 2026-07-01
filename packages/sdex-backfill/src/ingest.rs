@@ -5,7 +5,8 @@ use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
 use prices_ingest_core::{
-    AssetRegistry, CandleAccumulator, Registries, extract_trades, process_ledger, raw_trade_to_tick,
+    AssetRegistry, CandleAccumulator, Registries, UnresolvedPoolSwap, extract_trades,
+    process_ledger, raw_trade_to_tick,
 };
 
 use crate::error::BackfillError;
@@ -24,6 +25,9 @@ pub struct PartitionStats {
     pub candles_written: usize,
     pub total_bytes: u64,
     pub wall_clock: Duration,
+    /// Per-ledger records of swaps dropped for an unregistered pool. Aggregated
+    /// and re-checked against the final registry at run end (see `run.rs`).
+    pub unresolved: Vec<UnresolvedPoolSwap>,
 }
 
 /// What to extract from each ledger.
@@ -115,6 +119,9 @@ pub async fn index_partition(
                     stats.oracle_rows += sob.oracle.len();
                     oracle_buf.extend(sob.oracle);
                 }
+                // Swaps decoded for pools not (yet) in the registry — carried up
+                // for the run-end re-check rather than silently dropped.
+                stats.unresolved.extend(sob.unresolved);
             }
 
             let current_minute = ledger_minute(lcm);

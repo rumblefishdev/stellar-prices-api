@@ -230,3 +230,31 @@ CREATE TABLE IF NOT EXISTS prices.discovery_state (
 ENGINE = ReplacingMergeTree(updated_at)
 ORDER BY (worker)
 SETTINGS index_granularity = 8192;
+
+-- ---------------------------------------------------------------------
+-- Unresolved AMM pools (task 0053, decision #3). One row per
+-- (contract_id, source): a Soroban contract that emitted a swap-shaped event
+-- while absent from the venue registry, so the swap could not be classified to
+-- a venue/pool and its volume was dropped. On a clean forward-discovery
+-- backfill (AMM window starting at Soroban activation) this table is EMPTY.
+-- A still_unresolved=1 row is a genuine extractor gap to investigate:
+-- sample_topics carries the event shape; first/last_ledger + swap_count size
+-- the dropped volume. still_unresolved=0 means the pool registered later in the
+-- run (only its early swaps were dropped). source is 'backfill' or 'live' — the
+-- live processor may append the same shape. ReplacingMergeTree(version) with
+-- version = last_ledger collapses re-runs on the (contract_id, source) key.
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS prices.unresolved_pools (
+    contract_id      String,
+    source           LowCardinality(String),
+    first_ledger     UInt32,
+    last_ledger      UInt32,
+    swap_count       UInt64,
+    sample_topics    String        CODEC(ZSTD(3)),
+    still_unresolved UInt8         DEFAULT 1,
+    version          UInt64,
+    updated_at       DateTime      DEFAULT now()
+)
+ENGINE = ReplacingMergeTree(version)
+ORDER BY (contract_id, source)
+SETTINGS index_granularity = 8192;

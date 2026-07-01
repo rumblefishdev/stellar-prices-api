@@ -3286,6 +3286,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "clickhouse",
+ "extractors-core",
  "prices-clickhouse",
  "prices-ingest-core",
  "rust_decimal",

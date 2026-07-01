@@ -12,7 +12,7 @@ use std::collections::HashSet;
 
 use clickhouse::Row;
 use prices_ingest_core::canonical::AssetIdentity;
-use prices_ingest_core::{AssetRegistry, OhlcvCandle, OhlcvWriter};
+use prices_ingest_core::{AssetRegistry, OhlcvCandle, OhlcvWriter, UnresolvedPool};
 use serde::Serialize;
 use tracing::info;
 
@@ -56,6 +56,14 @@ impl Sink {
 
     pub async fn write_oracle(&self, samples: &[OracleSample]) -> Result<(), BackfillError> {
         self.writer.write_oracle(samples).await?;
+        Ok(())
+    }
+
+    pub async fn write_unresolved_pools(
+        &self,
+        pools: &[UnresolvedPool],
+    ) -> Result<(), BackfillError> {
+        self.writer.write_unresolved_pools(pools).await?;
         Ok(())
     }
 

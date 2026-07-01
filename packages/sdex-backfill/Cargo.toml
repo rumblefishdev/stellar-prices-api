@@ -24,3 +24,6 @@ rust_decimal = { workspace = true }
 thiserror = { workspace = true }
 prices-ingest-core = { path = "../prices-ingest-core" }
 prices-clickhouse = { path = "../prices-clickhouse" }
+
+[dev-dependencies]
+extractors-core = { path = "../extractors-core" }

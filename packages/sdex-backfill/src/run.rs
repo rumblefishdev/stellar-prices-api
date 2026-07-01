@@ -5,7 +5,7 @@ use tokio::process::Command;
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
-use prices_ingest_core::{AssetRegistry, Registries};
+use prices_ingest_core::{AssetRegistry, Registries, UnresolvedPool, UnresolvedPoolSwap};
 
 use crate::error::BackfillError;
 use crate::ingest::{ExtractMode, PartitionStats, index_partition};
@@ -124,7 +124,7 @@ pub async fn execute(
             };
 
         if current_complete {
-            let stats = index_partition(
+            let mut stats = index_partition(
                 partition,
                 temp_dir,
                 sink,
@@ -144,6 +144,7 @@ pub async fn execute(
             totals.oracle_rows += stats.oracle_rows;
             totals.candles_written += stats.candles_written;
             totals.total_bytes += stats.total_bytes;
+            totals.unresolved.append(&mut stats.unresolved);
         } else {
             info!(
                 partition = partition.start,
@@ -179,7 +180,74 @@ pub async fn execute(
     let elapsed = run_start.elapsed();
     print_run_summary(todo.len(), &totals, partitions_skipped_s3, elapsed);
 
+    // Re-check the swaps that hit an unregistered pool against the *final*
+    // registry, record them to prices.unresolved_pools, and fail the run if any
+    // pool is a genuine gap (still absent after the whole forward pass). The
+    // rows are written either way so the operator can investigate; only the
+    // exit status reflects the gap.
+    let unresolved = aggregate_unresolved(&totals.unresolved, &reg);
+    if !unresolved.is_empty() {
+        let genuine_gaps = unresolved
+            .iter()
+            .filter(|u| u.still_unresolved == 1)
+            .count();
+        sink.write_unresolved_pools(&unresolved).await?;
+        warn!(
+            contracts = unresolved.len(),
+            genuine_gaps, "unresolved AMM pools recorded to prices.unresolved_pools"
+        );
+        if genuine_gaps > 0 {
+            return Err(BackfillError::UnresolvedPools(genuine_gaps));
+        }
+    }
+
     Ok(())
+}
+
+/// Aggregate per-ledger unresolved-swap records by contract and re-check each
+/// against the final registry. A contract still absent from `reg.venue` is a
+/// genuine extractor gap (`still_unresolved = 1`); one that registered later in
+/// the run only lost its early swaps (`still_unresolved = 0`). Output is sorted
+/// genuine-gaps-first then by contract id so the artifact is stable across runs.
+fn aggregate_unresolved(raw: &[UnresolvedPoolSwap], reg: &Registries) -> Vec<UnresolvedPool> {
+    struct Agg {
+        first: u32,
+        last: u32,
+        count: u64,
+        sample: String,
+    }
+    let mut by_contract: std::collections::HashMap<&str, Agg> = std::collections::HashMap::new();
+    for u in raw {
+        let e = by_contract.entry(&u.contract_id).or_insert(Agg {
+            first: u.ledger_sequence,
+            last: u.ledger_sequence,
+            count: 0,
+            sample: u.sample_topics.clone(),
+        });
+        e.first = e.first.min(u.ledger_sequence);
+        e.last = e.last.max(u.ledger_sequence);
+        e.count += u.swap_count as u64;
+    }
+
+    let mut out: Vec<UnresolvedPool> = by_contract
+        .into_iter()
+        .map(|(contract_id, a)| UnresolvedPool {
+            contract_id: contract_id.to_string(),
+            source: "backfill".to_string(),
+            first_ledger: a.first,
+            last_ledger: a.last,
+            swap_count: a.count,
+            sample_topics: a.sample,
+            still_unresolved: u8::from(!reg.venue.contains_key(contract_id)),
+        })
+        .collect();
+
+    out.sort_by(|a, b| {
+        b.still_unresolved
+            .cmp(&a.still_unresolved)
+            .then_with(|| a.contract_id.cmp(&b.contract_id))
+    });
+    out
 }
 
 fn partition_fully_done(
@@ -227,4 +295,63 @@ async fn preflight_aws() {
         version = %String::from_utf8_lossy(&out.stdout).trim(),
         "pre-flight: aws CLI present"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use extractors_core::Venue;
+
+    fn swap(contract: &str, ledger: u32, count: u32) -> UnresolvedPoolSwap {
+        UnresolvedPoolSwap {
+            contract_id: contract.to_string(),
+            ledger_sequence: ledger,
+            swap_count: count,
+            sample_topics: format!("[Symbol(\"swap\")] @ {ledger}"),
+        }
+    }
+
+    #[test]
+    fn aggregates_by_contract_and_widens_ledger_range() {
+        // Two ledgers for the same pool → one record summing counts and spanning
+        // the full ledger range.
+        let raw = vec![swap("POOL_A", 48_600_000, 2), swap("POOL_A", 48_600_050, 3)];
+        let reg = Registries::new(); // empty → nothing registered
+
+        let out = aggregate_unresolved(&raw, &reg);
+
+        assert_eq!(out.len(), 1);
+        let a = &out[0];
+        assert_eq!(a.contract_id, "POOL_A");
+        assert_eq!(a.source, "backfill");
+        assert_eq!(a.first_ledger, 48_600_000);
+        assert_eq!(a.last_ledger, 48_600_050);
+        assert_eq!(a.swap_count, 5);
+        assert_eq!(a.still_unresolved, 1, "absent from registry → genuine gap");
+    }
+
+    #[test]
+    fn recheck_clears_pools_registered_later_in_the_run() {
+        let raw = vec![swap("GAP", 1, 1), swap("LATE", 2, 4)];
+        // LATE registered later in the forward pass; GAP never did.
+        let mut reg = Registries::new();
+        reg.venue.insert("LATE".to_string(), Venue::Soroswap);
+
+        let out = aggregate_unresolved(&raw, &reg);
+
+        // Sorted genuine-gaps-first, so GAP (still_unresolved=1) precedes LATE.
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].contract_id, "GAP");
+        assert_eq!(out[0].still_unresolved, 1);
+        assert_eq!(out[1].contract_id, "LATE");
+        assert_eq!(
+            out[1].still_unresolved, 0,
+            "registered by run-end → recoverable, not a gap"
+        );
+    }
+
+    #[test]
+    fn empty_input_yields_no_records() {
+        assert!(aggregate_unresolved(&[], &Registries::new()).is_empty());
+    }
 }

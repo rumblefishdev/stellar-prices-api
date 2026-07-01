@@ -40,6 +40,8 @@ pub use error::IngestError;
 pub use filter::{RawTrade, extract_trades};
 pub use price::{compute_price, stroops_to_decimal};
 pub use safe_log::safe_response_token;
-pub use soroban::{LedgerSoroban, Registries, process_ledger, reflector_key_to_identity};
+pub use soroban::{
+    LedgerSoroban, Registries, UnresolvedPoolSwap, process_ledger, reflector_key_to_identity,
+};
 pub use tick::{TradeTick, raw_trade_to_tick};
-pub use writer::{OhlcvWriter, OracleSample};
+pub use writer::{OhlcvWriter, OracleSample, UnresolvedPool};

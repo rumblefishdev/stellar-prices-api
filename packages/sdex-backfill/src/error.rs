@@ -41,4 +41,10 @@ pub enum BackfillError {
 
     #[error("ingest: {0}")]
     Ingest(#[from] prices_ingest_core::IngestError),
+
+    #[error(
+        "{0} AMM pool(s) had swaps dropped for lack of registration — \
+         see prices.unresolved_pools WHERE still_unresolved = 1"
+    )]
+    UnresolvedPools(usize),
 }
