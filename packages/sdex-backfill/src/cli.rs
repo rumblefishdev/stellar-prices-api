@@ -22,9 +22,13 @@ pub struct Cli {
     #[arg(long, value_enum, default_value_t = ExtractMode::Combined)]
     pub mode: ExtractMode,
 
-    /// Soroban activation ledger — used only to sanity-check `--mode` against
-    /// the requested range (warns on an obvious mismatch).
-    #[arg(long, default_value_t = 48_500_000)]
+    /// Soroban activation ledger (Protocol 20, ~2024-02-20). Splits the
+    /// `sdex-only` pre-Soroban tail `[1, activation)` from the `combined`
+    /// Soroban era `[activation, tip]`, and sanity-checks `--mode` against the
+    /// requested range (warns on an obvious mismatch). Value from
+    /// `lore/3-wiki/project/stellar-pubnet-ledger-archive.md` (interpolated from
+    /// archive close-times, ±~28 days).
+    #[arg(long, default_value_t = 50_463_000)]
     pub activation_ledger: u32,
 
     /// ClickHouse HTTP URL (e.g. http://localhost:8123).
