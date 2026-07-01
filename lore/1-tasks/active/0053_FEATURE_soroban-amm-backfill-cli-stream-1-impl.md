@@ -2,7 +2,7 @@
 id: "0053"
 title: "Combined single-pass historical backfill (SDEX + Soroban AMM) — full-chain, forward-discovery, dual-stream progress"
 type: FEATURE
-status: backlog
+status: active
 related_adr: ["0001", "0003", "0004", "0007"]
 related_tasks: ["0017", "0028", "0034", "0037", "0048", "0052", "0051", "0058", "0026", "0060", "0069", "0073", "0063"]
 tags: [layer-indexing, priority-high, effort-large, milestone-M1, stream-1, single-pass, rust, cli, workstation, clickhouse, soroban, amm, soroswap, aquarius, phoenix, sdex]
@@ -64,6 +64,28 @@ history:
       `soroban_events` role is dead; the local-CH infra already exists via
       docker-compose + the prices-clickhouse crate). ADR 0001 amended
       in place to record the pivot.
+  - date: 2026-07-01
+    status: active
+    who: claude
+    note: >
+      Promoted backlog → active after a blocker verification against the
+      codebase. **All six blockers are completed/archived** (0034/0037/0048/
+      0051/0052/0063) and the code foundation is present and robust:
+      SwapExtractor trait (`extractors-core`) + dispatch kernel
+      (`ledger-processor/src/dispatch.rs`, unknown pools handled, no panics),
+      Soroswap/Aquarius/Phoenix-XYK extractors implemented (not stubs), Phoenix
+      multi-WASM tolerance (dispatch routes by `pool_type`), the combined
+      single-pass engine already in `sdex-backfill/src/ingest.rs` (SDEX + AMM +
+      oracle from one parse), the mTLS client (`prices-clickhouse/src/mtls.rs`),
+      and the registry accumulating across partitions within a run. Two apparent
+      gaps are non-blocking: the Phoenix stable extractor `unimplemented!()` is
+      **unreachable** (dispatch returns a clean error; no mainnet stable pools),
+      and the Soroswap-unresolved-pool→empty path (`dispatch.rs:89-92`) is the
+      discovery gap the forward-from-activation design already fixes. Remaining
+      work is this task's own scope — full-range driver + mode gate, forward
+      partition order, persist the discovered registry, dual `backfill_progress`
+      updates, and the cloud-push (soft-coordinates with backlog 0028; the local
+      extract→mirror bulk is startable now).
 ---
 
 # Combined single-pass historical backfill (SDEX + Soroban AMM)
