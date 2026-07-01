@@ -1,0 +1,130 @@
+//! Response DTOs for the `/v1/assets` resource.
+
+use serde::Serialize;
+use utoipa::ToSchema;
+
+/// `GET /assets/{id}/price` response (overview §4.2). All numeric fields are
+/// decimal strings to preserve precision.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct PriceResponse {
+    /// Echoed natural identity (`native`, `CODE:ISSUER`, or a C… contract).
+    pub asset: String,
+    /// Current USD price.
+    pub price_usd: String,
+    /// XLM-quoted price. **Stub `"0"`** until task 0072 materializes it in the MV.
+    pub price_xlm: String,
+    /// 24h USD volume-weighted average price.
+    pub vwap_24h: String,
+    /// Trailing-24h USD volume.
+    pub volume_24h_usd: String,
+    /// 24h percentage change. **Stub `"0"`** until task 0072.
+    pub change_24h_pct: String,
+    /// Per-source (DEX) price/volume breakdown. **Stub `{}`** until task 0072.
+    #[schema(value_type = Object)]
+    pub sources: serde_json::Value,
+    /// Timestamp of the snapshot (ISO-8601 UTC).
+    pub updated_at: String,
+}
+
+impl PriceResponse {
+    /// Build from a current-price row, applying the v1 0072 stubs (`price_xlm`,
+    /// `change_24h_pct`, `sources`) in ONE place. `/price` and `/prices/batch`
+    /// both go through here, so when task 0072 materializes those columns, flip
+    /// them here and both endpoints update together (no drift).
+    pub fn from_row(asset: String, row: crate::assets::queries_ch::CurrentPriceRow) -> Self {
+        PriceResponse {
+            asset,
+            price_usd: row.price_usd,
+            price_xlm: "0".to_string(),
+            vwap_24h: row.vwap_24h,
+            volume_24h_usd: row.volume_24h_usd,
+            change_24h_pct: "0".to_string(),
+            sources: serde_json::json!({}),
+            updated_at: row.updated_at,
+        }
+    }
+}
+
+/// `GET /assets/{id}` response (overview §4.1). The doc fixes only the request
+/// forms; this is the chosen detail shape, resolved from `prices.assets`.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AssetDetail {
+    /// Echoed natural identity.
+    pub asset: String,
+    /// Normalized kind: `native`, `credit`, or `contract`.
+    pub asset_kind: String,
+    /// Classic asset code (`""` for native/contract).
+    pub code: String,
+    /// Classic issuer G-strkey (`""` otherwise).
+    pub issuer: String,
+    /// Soroban contract C-strkey (`""` otherwise).
+    pub contract: String,
+    /// SEP-1 home domain, if known.
+    pub home_domain: String,
+    /// Whether the asset is currently tracked as active.
+    pub is_active: bool,
+}
+
+/// One item in the `GET /assets` listing (overview §4.1).
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AssetListItem {
+    pub asset_code: String,
+    /// `classic` or `soroban` (matches the `?type` filter vocabulary).
+    pub asset_type: String,
+    pub issuer_address: String,
+    pub contract_address: String,
+    pub home_domain: String,
+    pub price_usd: String,
+    /// **Stub `"0"`** until task 0072.
+    pub change_24h_pct: String,
+    /// **Stub `"0"`** until task 0072.
+    pub change_7d_pct: String,
+    pub volume_24h_usd: String,
+    pub vwap_24h: String,
+    /// Per-source breakdown. **Stub `{}`** until task 0072.
+    #[schema(value_type = Object)]
+    pub sources: serde_json::Value,
+    pub updated_at: String,
+}
+
+/// `GET /assets` paginated response.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AssetListResponse {
+    pub data: Vec<AssetListItem>,
+    /// Opaque cursor for the next page (`null` on the last page).
+    pub cursor: Option<String>,
+    pub has_more: bool,
+}
+
+/// One OHLCV candle (overview §4.2). O/H/L/C are in the `base_currency` quote
+/// asset, **as stored** (no conversion). Doubles as the CH row.
+#[derive(Debug, Serialize, serde::Deserialize, clickhouse::Row, ToSchema)]
+pub struct Candle {
+    /// Bucket start (ISO-8601 UTC).
+    pub timestamp: String,
+    pub open: String,
+    pub high: String,
+    pub low: String,
+    pub close: String,
+    /// Base-asset volume.
+    pub volume_base: String,
+    /// USD-denominated quote volume (the one USD figure on the candle).
+    pub volume_quote_usd: String,
+    pub vwap: String,
+    pub trade_count: u64,
+}
+
+/// `GET /assets/{id}/ohlcv` response.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct OhlcvResponse {
+    /// Echoed natural identity.
+    pub asset: String,
+    /// Effective granularity (auto-selected from `timeframe` unless overridden).
+    pub granularity: String,
+    /// `USD` or `XLM` — the quote the candles are denominated in.
+    pub base_currency: String,
+    /// Present only when `timeframe=all` and the backfill is still running.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backfill_note: Option<String>,
+    pub data: Vec<Candle>,
+}

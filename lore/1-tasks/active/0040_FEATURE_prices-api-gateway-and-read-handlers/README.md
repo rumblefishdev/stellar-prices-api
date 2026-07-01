@@ -95,6 +95,151 @@ history:
       DEFAULT in v1; materializing them is producer-side, spawned as backlog
       task **0072**, after which /price flips to pass-through. Corrected the
       stale sqlx/RDS phrasing in Step 1 (superseded by ADR 0007 CH retarget).
+  - date: 2026-06-30
+    status: active
+    who: claude
+    note: >
+      **Phase 0 (scaffold) landed.** New crate `packages/prices-api` (single
+      axum Lambda per ADR 0008, skeleton copied from BE `crates/api`): `app()`
+      router shared by the Lambda bin + tests, `AppState { ch: Option<Client> }`
+      (Arc-backed, built once at cold start via `prices-clickhouse::mtls`),
+      `AppConfig::from_env`, `common/{errors,cache_control}` kit, and
+      `GET /health` wired end-to-end. Bin gated behind `lambda` feature
+      (`required-features`), mTLS behind `aws-mtls` — default build stays lean.
+      Verified: `cargo test -p prices-api` green (health oneshot smoke test),
+      `cargo check --features lambda` compiles the bin + mTLS path, clippy +
+      fmt clean. Workspace root updated (member + axum/lambda_http/tower-http
+      deps mirroring BE versions). Next: Phase 1 (auth + moka + identity parser
+      + utoipa OpenAPI). prepare-not-deploy upheld — no AWS calls.
+  - date: 2026-06-30
+    status: active
+    who: claude
+    note: >
+      **Phase 1 (shared core) landed.** (1) In-app `X-API-Key` auth
+      (`auth/mod.rs`): constant-time `ct_eq`, gate armed only when `API_KEYS`
+      set (deploy-dark), `/health` + `/api-docs-json` exempt; per-key 100 req/s
+      still owned by the gateway usage-plan. (2) Asset-identifier parser
+      (`identity.rs`): `native` / `CODE:ISSUER` / `C…contract` → `AssetIdentifier`
+      with real strkey CRC validation via `stellar-strkey`; resolution to
+      `asset_id` deferred to Phase 2 (needs CH). (3) moka `ttl_cache` builder
+      (`cache.rs`) — the in-process cache primitive Phase 2 composes. (4) utoipa
+      OpenAPI: router migrated to `utoipa-axum` `OpenApiRouter`, `ApiDoc` +
+      `register_routes`, spec served at `GET /api-docs-json` and emitted by
+      `bin/extract_openapi`. Verified: 16 tests green (auth gate 401/exempt,
+      identity parse cases, health + spec), `extract_openapi` emits valid
+      OpenAPI 3.1.0, `cargo check --features lambda` compiles, clippy + fmt
+      clean. Next: Phase 2 (cheap read endpoints — /price, batch, asset,
+      oracles, backfill — against the existing CH views). prepare-not-deploy
+      upheld.
+  - date: 2026-06-30
+    status: active
+    who: claude
+    note: >
+      **Phase 2 started — `GET /v1/assets/{id}/price` (the load-test target).**
+      New `assets/` resource module: `queries_ch` (CurrentPriceRow + identity
+      WHERE builder), `dto::PriceResponse`, `handlers::get_price`, nested under
+      `/v1`. **Emerged decision:** query `current_prices ⨝ assets` directly with
+      a natural-identity WHERE rather than extending the `current_price_usd`
+      view (which only projects price_usd/updated_at) — keeps the change inside
+      0040, no edit to 0061's shared views, consistent with the table-reading
+      endpoints. Decimals returned as strings (`toString`) per §4.2;
+      price_xlm/change_24h_pct/sources are the 0072 stubs. Verified: 21 tests
+      green (incl. identity-WHERE unit tests + invalid-id 400 without touching
+      CH + price path in the spec), lambda compiles, clippy + fmt clean. The
+      happy-path (200 w/ data) needs a live CH — deferred to a local-CH
+      integration test (prod-pinned 26.3.10.60). Remaining Phase 2 endpoints
+      (asset detail, batch, oracles, backfill) still to do.
+  - date: 2026-06-30
+    status: active
+    who: claude
+    note: >
+      **Phase 2 complete — all five §4 read endpoints landed + live-CH tested.**
+      Added `GET /v1/assets/{id}` (detail; assets table, normalized asset_kind),
+      `POST /v1/prices/batch` (validated, capped at 100, found + not_found,
+      uncached), `GET /v1/oracles/{id}` (latest-per-oracle via argMax; resolves
+      asset_id then 404s unknown), `GET /v1/backfill/status` (maps the
+      sdex_archive + soroban_amm rows, computes progress_pct/ledgers_remaining).
+      **Emerged decisions / gaps:** (a) `backfill_progress` has no
+      `earliest_data_available` column → field omitted (writers' to add); (b)
+      no live chain-tip table → `realtime_tip_ledger` derived from SDEX
+      `target_ledger`; (c) ClickHouse `formatDateTime` minute specifier is `%i`
+      (`%M` = month name) — caught by a live test. Verified against local CH
+      26.3.10.60: 31 tests green (12 default + 5 auth + 2 health + 2 price + 3
+      price_it + 7 endpoints_it), OpenAPI spec lists all 6 paths, lambda
+      compiles, clippy + fmt clean. OHLCV (§4.2) + assets listing (§4.1) remain
+      for Phase 3; gateway/usage-plan/cache for Phase 4. prepare-not-deploy
+      upheld (local docker CH only).
+  - date: 2026-06-30
+    status: active
+    who: claude
+    note: >
+      **Phase 3 complete — both new-query endpoints landed + live-CH tested; all
+      7 §4 endpoints now exist.** (1) `GET /v1/assets` — keyset cursor pagination
+      (common/cursor.rs, opaque Base64 {v,id}), ?type/?search filters, ?sort
+      (price/volume_24h/change_24h/code) + ?order; §3.3 CH idiom (ORDER BY+LIMIT
+      on merged current_prices, numeric sort via toFloat64). (2)
+      `GET /v1/assets/{id}/ohlcv` — timeframe→granularity auto-map, ?granularity
+      /?start/?end overrides, base_currency selects the QUOTE LEG (USD→USDC,
+      XLM→native) with O/H/L/C returned AS STORED (quote-denominated, NO USD
+      conversion — corrected requirement, see memory + 0073); cross-source merge
+      per bucket (high=max, low=min, sums, vwap volume-weighted, open/close via
+      argMax(.,volume_base)); backfill_note via per-asset min(timestamp) gated on
+      SDEX status=running. **Spawned task 0073** (store earliest_data_available
+      on backfill_progress + populate in writers). **Bug caught live:** aliasing
+      `sum(volume_base) AS volume_base` shadows the column → argMax nests
+      aggregates (CH err 184); fixed with non-colliding aliases. Verified vs CH
+      26.3.10.60: 41 tests green (8 live-CH new: 4 ohlcv + 4 list), OpenAPI lists
+      all 8 paths, lambda compiles, clippy + fmt clean. Remaining: Phase 4
+      (API Gateway stack — usage-plan, stage cache, reserved concurrency) +
+      Phase 5 (k6 SLO). prepare-not-deploy upheld.
+  - date: 2026-06-30
+    status: active
+    who: claude
+    note: >
+      **Phase 4 complete — API Gateway + Lambda CDK wired (prepare-only,
+      synth-verified, no deploy).** ComputeStack now builds the single
+      `prices-{env}-api-handler` Lambda (ARM64/PROVIDED_AL2023, ADR 0008) from
+      `../target/lambda/prices-api` (override `API_HANDLER_ASSET_DIR`), reusing
+      the pre-created apiHandlerRole/LogGroup + reader mTLS bundle + secrets
+      extension layer + `ch-domain` SSM; `CH_ENABLED=true`, no `API_KEYS` (in-app
+      gate disarmed — gateway owns per-key throttle). Optional
+      `apiHandler.reservedConcurrency` is the ADR 0008 SLO escape hatch (unset in
+      prod config). ApiGatewayStack proxies all 7 §4 routes to it under `/v1`
+      (Lambda proxy → no `/v1/v1` double-prefix; the axum router owns `/v1`),
+      data methods `apiKeyRequired`, keyless `/health` mock retained. 0.5 GB
+      stage cache with per-endpoint TTLs (assets/ohlcv 60s, price 15s,
+      oracles/backfill 30s; batch + health uncached) + query/path cache-key
+      params. UsagePlan throttle = per-key 100/200 (`apiKeyRateLimit/Burst`,
+      §2.1/§7) + daily quota; stage throttle 200/400. New config:
+      `apiKeyRateLimit`, `apiKeyBurstLimit`, `apiGatewayCacheEnabled`,
+      `apiHandler{}` (+ validation, production.json). Verified: `nx build infra`
+      + `cdk synth` (all stacks, exit 0) + `nx lint infra` clean; template
+      asserts 7 key-gated methods, cache size 0.5, exact TTLs, usage-plan
+      100/200. Built the arm64 bootstrap locally for synth (no deploy). Only
+      Phase 5 (k6 load test) remains.
+  - date: 2026-06-30
+    status: active
+    who: claude
+    note: >
+      **Phase 5 complete — k6 load-test script + local harness (§9 "script
+      provided").** `packages/prices-api/loadtest/price_load.js`: k6
+      constant-arrival-rate 100 req/s × 5 min on GET /assets/{id}/price with
+      thresholds `p95<200ms` + `http_req_failed rate<0.001` (k6 exits non-zero on
+      breach → pass/fail gate); parameterized by BASE_URL/API_KEY/ASSET/RATE/
+      DURATION for either the deployed stage (authoritative) or the local server
+      (approximate). Added a `local-server` feature + `src/bin/serve.rs` (axum
+      over TCP against plaintext local CH — same app() router) + seed.sql +
+      runbook. **Harness validated end-to-end via curl** (k6 not installed here):
+      seeded native price, GET /v1/assets/native/price → 200 with the row, and
+      500/500 OK under 20-way concurrency at ~754 req/s (well above the 100 req/s
+      target; local p95 sub-ms — a lower bound, real SLO is deploy-gated).
+      **Gotcha found + documented:** the refreshable `mv_current_prices` MV
+      REPLACES current_prices every minute and wipes a manual seed — load test
+      needs a clean CH (`docker compose down -v`) or drop the MV. Verified: serve
+      bin compiles, clippy clean. **All 5 implementation phases done.** Remaining
+      ACs are deploy-gated: the live k6 SLO run against the deployed stage, and
+      the CloudWatch dashboard (task 0056); plus the §9 VWAP/backfill live checks.
+      prepare-not-deploy upheld.
 ---
 
 # Prices API Gateway + Rust/axum read handlers

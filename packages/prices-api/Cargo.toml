@@ -1,0 +1,54 @@
+[package]
+name = "prices-api"
+version = "0.1.0"
+edition = "2024"
+description = "Public Prices REST API — axum read handlers on a single Lambda (task 0040, ADR 0008)"
+
+[lib]
+name = "prices_api"
+path = "src/lib.rs"
+
+# Single axum Lambda serving ALL route groups (ADR 0008 — not five per-route
+# binaries). Behind `lambda` so the default build/test exercises the router via
+# tower `oneshot` without the AWS runtime / mTLS stack. Deploy:
+#   cargo lambda build -p prices-api --release --arm64 --features lambda
+# The `lambda` feature is REQUIRED or the bin is skipped (ADR 0006 pattern,
+# mirrors enrichment-worker).
+[[bin]]
+name = "prices-api"
+path = "src/main.rs"
+required-features = ["lambda"]
+
+[features]
+default = []
+aws-mtls = ["prices-clickhouse/aws-mtls"]
+lambda = ["aws-mtls", "dep:lambda_http"]
+# Local HTTP server (src/bin/serve.rs) for dev + load testing. No extra deps —
+# reuses tokio (net) + axum::serve + the plaintext CH client.
+local-server = []
+
+[[bin]]
+name = "serve"
+path = "src/bin/serve.rs"
+required-features = ["local-server"]
+
+[dependencies]
+axum = { workspace = true }
+clickhouse = { workspace = true }
+serde = { workspace = true }
+serde_json = "1"
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tower-http = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+utoipa = { workspace = true }
+utoipa-axum = { workspace = true }
+stellar-strkey = { workspace = true }
+base64 = "0.22"
+prices-clickhouse = { path = "../prices-clickhouse" }
+
+lambda_http = { workspace = true, optional = true }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
