@@ -13,7 +13,8 @@ use std::collections::HashSet;
 use clickhouse::Row;
 use prices_ingest_core::canonical::AssetIdentity;
 use prices_ingest_core::{
-    AssetRegistry, DEFAULT_BACKOFF_MS, OhlcvCandle, OhlcvWriter, UnresolvedPool, retry_with_backoff,
+    AssetRegistry, DEFAULT_BACKOFF_MS, OhlcvCandle, OhlcvWriter, PoolRegistryRow, Registries,
+    UnresolvedPool, retry_with_backoff,
 };
 use serde::{Deserialize, Serialize};
 use tracing::info;
@@ -133,6 +134,58 @@ impl Sink {
         .await
         .map(|_| ())
         .map_err(BackfillError::from)
+    }
+
+    /// Persist the discovered AMM pool registry to `prices.pool_registry` (task
+    /// 0053, decision #4) — the durable output a partial re-backfill or the live
+    /// processor can [`load_pool_registry`](Self::load_pool_registry) instead of
+    /// re-deriving from activation. Idempotent: ReplacingMergeTree on
+    /// `contract_id`, so a re-run replaces rather than duplicates.
+    pub async fn write_pool_registry(&self, reg: &Registries) -> Result<(), BackfillError> {
+        let rows = reg.to_pool_rows();
+        if rows.is_empty() {
+            return Ok(());
+        }
+        retry_with_backoff(
+            &DEFAULT_BACKOFF_MS,
+            |_| true,
+            || async {
+                let mut insert = self.writer.client().insert("prices.pool_registry")?;
+                for row in &rows {
+                    insert.write(row).await?;
+                }
+                insert.end().await?;
+                Ok::<(), clickhouse::error::Error>(())
+            },
+        )
+        .await
+        .map(|_| ())
+        .map_err(BackfillError::from)?;
+        info!(pools = rows.len(), "persisted discovered pool registry");
+        Ok(())
+    }
+
+    /// Rehydrate a [`Registries`] from `prices.pool_registry` so a run over a
+    /// window that starts after activation still resolves pools created earlier
+    /// (decision #4 inverts task 0069). Returns empty registries when the table
+    /// is empty — the fresh full-run case.
+    pub async fn load_pool_registry(&self) -> Result<Registries, BackfillError> {
+        let rows = self
+            .writer
+            .client()
+            .query(
+                "SELECT contract_id, venue, token0, token1, pool_type, wasm_hash \
+                 FROM prices.pool_registry FINAL",
+            )
+            .fetch_all::<PoolRegistryRow>()
+            .await?;
+        let mut reg = Registries::new();
+        reg.load_pool_rows(&rows);
+        info!(
+            entries = rows.len(),
+            "loaded discovered pool registry from prices.pool_registry"
+        );
+        Ok(reg)
     }
 
     /// Upsert one `prices.backfill_progress` row from a [`ProgressUpdate`]

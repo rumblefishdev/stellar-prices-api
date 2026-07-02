@@ -7,6 +7,29 @@ pub enum Venue {
     Phoenix,
 }
 
+impl Venue {
+    /// Canonical lowercase source name — the same string used as a candle's
+    /// `source` and persisted in the discovered `pool_registry` artifact.
+    pub fn as_source(&self) -> &'static str {
+        match self {
+            Venue::Soroswap => "soroswap",
+            Venue::Aquarius => "aquarius",
+            Venue::Phoenix => "phoenix",
+        }
+    }
+
+    /// Inverse of [`Venue::as_source`] — rehydrate a venue from its persisted
+    /// source name. `None` for an unknown string.
+    pub fn from_source(s: &str) -> Option<Venue> {
+        match s {
+            "soroswap" => Some(Venue::Soroswap),
+            "aquarius" => Some(Venue::Aquarius),
+            "phoenix" => Some(Venue::Phoenix),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct SorobanEventRow {
     pub contract_id: String,

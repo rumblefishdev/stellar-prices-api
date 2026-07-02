@@ -274,3 +274,28 @@ CREATE TABLE IF NOT EXISTS prices.unresolved_pools (
 ENGINE = ReplacingMergeTree(version)
 ORDER BY (contract_id, source)
 SETTINGS index_granularity = 8192;
+
+-- ---------------------------------------------------------------------
+-- Discovered AMM pool registry (task 0053, decision #4). One row per pool the
+-- forward-discovery backfill classified from a factory event — the persisted
+-- output of the in-window registry so a partial re-backfill (a mid-history
+-- window) or the live processor can LOAD it instead of re-deriving from Soroban
+-- activation (this inverts task 0069: registry-as-output, not required-input).
+-- venue = 'soroswap' | 'phoenix' | 'aquarius'. token0/token1 are the Soroswap
+-- pair tokens (needed because a Soroswap swap event omits them); pool_type /
+-- wasm_hash are Phoenix pool details; both default empty for venues that don't
+-- use them. ReplacingMergeTree(updated_at) on contract_id collapses re-runs;
+-- read with FINAL.
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS prices.pool_registry (
+    contract_id   String,
+    venue         LowCardinality(String),
+    token0        String        DEFAULT '',
+    token1        String        DEFAULT '',
+    pool_type     UInt32        DEFAULT 0,
+    wasm_hash     String        DEFAULT '',
+    updated_at    DateTime      DEFAULT now()
+)
+ENGINE = ReplacingMergeTree(updated_at)
+ORDER BY (contract_id)
+SETTINGS index_granularity = 8192;

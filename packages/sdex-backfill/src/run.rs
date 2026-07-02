@@ -100,9 +100,11 @@ pub async fn execute(
 
     let existing_assets = sink.load_assets().await?;
     let mut registry = AssetRegistry::from_existing(existing_assets);
-    // Venue / pool / oracle registries, grown incrementally across partitions
-    // from in-window factory events.
-    let mut reg = Registries::new();
+    // Venue / pool registries. Preloaded from the persisted `pool_registry`
+    // artifact (decision #4) so a window starting after activation still
+    // resolves earlier-created pools; empty on a fresh full run. Then grown
+    // incrementally across partitions from in-window factory events.
+    let mut reg = sink.load_pool_registry().await?;
 
     let mut current_complete = matches!(
         sync_partition(todo[0], temp_dir).await?,
@@ -207,6 +209,9 @@ pub async fn execute(
     }
 
     sink.write_assets(&registry).await?;
+    // Persist the discovered pool registry as a durable artifact (decision #4)
+    // so a partial re-backfill / the live processor can load it.
+    sink.write_pool_registry(&reg).await?;
 
     // Terminal progress update: soroban_amm → completed; sdex_archive jumps to
     // its oldest reflected ledger (activation for the combined run, the run
