@@ -7,6 +7,17 @@ import type { Construct } from 'constructs';
 
 import type { EnvironmentConfig } from '../types.js';
 
+/**
+ * Physical name of the Tranche-1 ops-notification SNS topic (task 0056).
+ * Single source of truth: `ObservabilityStack` creates the topic under this
+ * name, and `EventBridgeStack` imports it by the same deterministic name to
+ * wire its probe `-errors` alarms — no cross-stack CFN reference (and thus no
+ * deploy-ordering coupling) between the two stacks.
+ */
+export function opsAlarmsTopicName(envName: string): string {
+  return `prices-${envName}-ops-alarms`;
+}
+
 export interface ObservabilityStackProps extends cdk.StackProps {
   readonly config: EnvironmentConfig;
 }
@@ -79,32 +90,61 @@ export class ObservabilityStack extends cdk.Stack {
       }),
     );
 
-    // Enrichment backlog alarm (task 0026 / spec §5). The worker publishes
-    // `EnrichmentRowsRemainingAtVolumeZero` (rows still at volume_quote_usd=0
-    // after a pass) under the `Prices/Enrichment` namespace. A sustained high
-    // backlog means the pass is not draining — the fingerprint of an
-    // oracle↔asset-id mis-reconciliation or missing USDC/USDT/XLM reference
-    // assets. Threshold/period are a deliberately conservative scaffold; task
-    // 0056 tunes them once real volumes are observed.
+    // Enrichment stall alarm (task 0026 / spec §5, re-designed in 0056). Fires
+    // on *lack of progress*, not absolute backlog: a pass that enriched zero
+    // rows (`EnrichmentRowsEnriched < 1`) while a volume_quote_usd=0 backlog
+    // still exists (`EnrichmentRowsRemainingAtVolumeZero > 0`), sustained across
+    // 3 consecutive hourly passes. That is the fingerprint of a genuine stall
+    // (oracle↔asset-id mis-reconciliation, missing USDC/USDT/XLM reference
+    // assets) — enrichment is *stuck*, not merely behind.
+    //
+    // Why not the old `backlog Maximum > 100_000` scaffold: it latched with no
+    // path back to OK. (a) A legitimate multi-million-row post-backfill drain
+    // sits above any absolute threshold for hours while enriching fine; (b) the
+    // permanent exotic-quote floor (quote ∉ {USDC,USDT,XLM}, no oracle) never
+    // drains by design, so once it exceeds the threshold the alarm is stuck in
+    // ALARM forever. The progress-based signal instead clears the moment a pass
+    // enriches ≥1 row again, so a draining catch-up and a steady-state floor
+    // both read OK while a true stall still fires. Residual: a genuinely idle
+    // env with a nonzero floor and no new enrichable rows for 3h can trip, but
+    // it self-clears on the next non-empty pass — acceptable vs. a latching page
+    // (a fully clean exclusion of the floor needs a recency-bounded remaining
+    // metric from the worker; see task 0026 incoming finding #5).
+    const enrichedPerHour = new cloudwatch.Metric({
+      namespace: 'Prices/Enrichment',
+      metricName: 'EnrichmentRowsEnriched',
+      dimensionsMap: { Environment: config.envName },
+      statistic: 'Sum',
+      period: cdk.Duration.hours(1),
+    });
+    const backlogPerHour = new cloudwatch.Metric({
+      namespace: 'Prices/Enrichment',
+      metricName: 'EnrichmentRowsRemainingAtVolumeZero',
+      dimensionsMap: { Environment: config.envName },
+      statistic: 'Maximum',
+      period: cdk.Duration.hours(1),
+    });
     this.enrichmentBacklogAlarm = new cloudwatch.Alarm(
       this,
       'EnrichmentBacklogAlarm',
       {
         alarmName: `prices-${config.envName}-enrichment-backlog`,
         alarmDescription:
-          'Enrichment left a large volume_quote_usd=0 backlog across consecutive hourly passes (spec §5 EnrichmentRowsRemainingAtVolumeZero). Sustained high values mean enrichment is not draining — check oracle↔asset-id reconciliation and that USDC/USDT/XLM reference assets exist in prices.assets. Scaffold threshold; tuned in task 0056.',
-        metric: new cloudwatch.Metric({
-          namespace: 'Prices/Enrichment',
-          metricName: 'EnrichmentRowsRemainingAtVolumeZero',
-          dimensionsMap: { Environment: config.envName },
-          statistic: 'Maximum',
+          'Enrichment made no progress (EnrichmentRowsEnriched = 0) while a volume_quote_usd=0 backlog remained (EnrichmentRowsRemainingAtVolumeZero > 0) across 3 consecutive hourly passes — enrichment is stalled, not merely behind. Check oracle↔asset-id reconciliation and that USDC/USDT/XLM reference assets exist in prices.assets. Progress-based (0056): clears when a pass enriches ≥1 row, so it does not latch on catch-up drains or the permanent exotic-quote floor.',
+        metric: new cloudwatch.MathExpression({
+          // 1 when a pass enriched nothing AND a backlog remains, else 0.
+          // Comparison operators yield per-datapoint 0/1 series in CW metric
+          // math; the product is the logical AND.
+          expression: '(enriched < 1) * (backlog > 0)',
+          usingMetrics: { enriched: enrichedPerHour, backlog: backlogPerHour },
           period: cdk.Duration.hours(1),
+          label: 'EnrichmentStalledWithBacklog',
         }),
-        threshold: 100_000,
-        evaluationPeriods: 6,
-        datapointsToAlarm: 6,
+        threshold: 1,
+        evaluationPeriods: 3,
+        datapointsToAlarm: 3,
         comparisonOperator:
-          cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+          cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
         treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
       },
     );
@@ -124,7 +164,7 @@ export class ObservabilityStack extends cdk.Stack {
     // both routed to a shared SNS topic.
     // -----------------------------------------------------------------
     this.opsAlarmsTopic = new sns.Topic(this, 'OpsAlarmsTopic', {
-      topicName: `prices-${config.envName}-ops-alarms`,
+      topicName: opsAlarmsTopicName(config.envName),
       displayName: `prices-api ${config.envName} ops alarms`,
     });
     if (config.opsAlarms.notificationEmail) {

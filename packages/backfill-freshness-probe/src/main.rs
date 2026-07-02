@@ -17,17 +17,13 @@ async fn main() -> Result<(), lambda_runtime::Error> {
     use lambda_runtime::{LambdaEvent, run, service_fn};
     use std::sync::Arc;
 
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .json()
-        .init();
+    prices_clickhouse::observability::init_tracing();
 
-    // Cold start: build the CH + CloudWatch clients once and probe CH
-    // connectivity, so a bad secret/endpoint surfaces as a Lambda Init error
-    // rather than a per-event failure. The `ingestion` mTLS identity
-    // (prices_writer) has SELECT on prices.* — sufficient for the read.
+    // Cold start: build the CH + CloudWatch clients once. A bad secret/endpoint
+    // surfaces on the first `AGE_QUERY` (the invocation fails and the probe's
+    // error alarm fires) — no separate `SELECT 1` liveness probe is needed. The
+    // `ingestion` mTLS identity (prices_writer) has SELECT on prices.*.
     let ch = Arc::new(prices_clickhouse::mtls::client_from_lambda_env("prices").await?);
-    ch.query("SELECT 1").execute().await?;
 
     let aws_cfg = aws_config::defaults(aws_config::BehaviorVersion::latest())
         .load()
@@ -44,12 +40,16 @@ async fn main() -> Result<(), lambda_runtime::Error> {
             let rows = ch.query(AGE_QUERY).fetch_all::<StreamAge>().await?;
             let metrics = age_metrics(&rows);
 
-            // Best-effort publish: a transient CloudWatch error must not fail
-            // the invocation (that would trip the worker's own error alarm and
-            // muddy the signal); the next 15-min run re-publishes.
-            if let Err(err) = publish(&cw, &environment, &metrics).await {
-                tracing::warn!(error = %err, "PutMetricData failed; skipping this cycle");
-            }
+            // Propagate a publish failure so the invocation errors (mirrors the
+            // mtls-notafter-probe). The freshness alarm is treatMissingData:
+            // NOT_BREACHING, so if PutMetricData fails, no PushAgeSeconds datum
+            // lands and the alarm silently stays OK — a stalled push would go
+            // undetected. Failing the invocation instead trips the probe's own
+            // `-errors` alarm, which is the intended dead-probe signal. A
+            // transient blip self-heals on the next 15-min run; a persistent
+            // failure (bad grant, sustained throttle) is a real fault that must
+            // page rather than be swallowed.
+            publish(&cw, &environment, &metrics).await?;
 
             let published: Vec<_> = metrics
                 .iter()

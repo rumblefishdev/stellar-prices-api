@@ -21,10 +21,7 @@ async fn main() -> Result<(), lambda_runtime::Error> {
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .json()
-        .init();
+    prices_clickhouse::observability::init_tracing();
 
     // The set of certs to probe is CDK-provided: `role=secret-name` pairs. A
     // missing/empty spec is a deploy misconfiguration — fail Init rather than
@@ -60,12 +57,15 @@ async fn main() -> Result<(), lambda_runtime::Error> {
                 .unwrap_or(0);
 
             let mut samples: Vec<RoleDays> = Vec::with_capacity(targets.len());
+            let mut failures: Vec<String> = Vec::new();
             for target in targets.iter() {
-                // Per-cert failures are logged and skipped so one unreadable
-                // secret does not blind the probe to the others — but a run
-                // where EVERY cert fails errors below, so total failure trips
-                // the worker's error alarm (expiry must never go silently
-                // unmonitored).
+                // A failed cert contributes no metric, so it is EXCLUDED from
+                // MinDaysToNotAfter — a healthy sibling would otherwise mask it
+                // and its expiry would go unmonitored (the whole §11.4 risk).
+                // Collect each failure and surface it below: any per-cert
+                // failure (not only a total wipeout) fails the invocation, which
+                // trips the probe's ops-wired error alarm. Healthy certs are
+                // still published first so their days-to-expiry stays fresh.
                 let bundle = match prices_clickhouse::mtls::fetch_bundle_from_extension(
                     &target.secret_name,
                 )
@@ -74,6 +74,7 @@ async fn main() -> Result<(), lambda_runtime::Error> {
                     Ok(b) => b,
                     Err(err) => {
                         tracing::error!(role = %target.role, error = %err, "bundle fetch failed");
+                        failures.push(format!("{} (fetch: {err})", target.role));
                         continue;
                     }
                 };
@@ -87,17 +88,31 @@ async fn main() -> Result<(), lambda_runtime::Error> {
                     }
                     Err(err) => {
                         tracing::error!(role = %target.role, error = %err, "cert parse failed");
+                        failures.push(format!("{} (parse: {err})", target.role));
                     }
                 }
             }
 
-            if samples.is_empty() {
-                return Err(lambda_runtime::Error::from(
-                    "all mTLS cert probes failed — no days-to-NotAfter could be computed",
-                ));
+            // Refresh the healthy certs' metrics (and MinDaysToNotAfter over
+            // them) before surfacing any failure — a partial outage must not
+            // stale-out the certs that DID read cleanly. `publish` no-ops on an
+            // empty slice, so a total failure just skips straight to the error.
+            if !samples.is_empty() {
+                publish(&cw, &environment, &samples).await?;
             }
 
-            publish(&cw, &environment, &samples).await?;
+            // Any cert we could not read/parse is unmonitored until fixed, and
+            // its silence is invisible on the days-to-expiry alarm. Fail the run
+            // so the error alarm pages instead of a healthy sibling hiding it.
+            if !failures.is_empty() {
+                return Err(lambda_runtime::Error::from(format!(
+                    "mtls-notafter-probe: {}/{} cert(s) unreadable — days-to-expiry unmonitored \
+                     for: [{}]",
+                    failures.len(),
+                    targets.len(),
+                    failures.join(", "),
+                )));
+            }
 
             let published: Vec<_> = samples
                 .iter()

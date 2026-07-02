@@ -1,13 +1,16 @@
 import * as cdk from 'aws-cdk-lib';
+import * as cw_actions from 'aws-cdk-lib/aws-cloudwatch-actions';
 import * as events from 'aws-cdk-lib/aws-events';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as s3 from 'aws-cdk-lib/aws-s3';
+import * as sns from 'aws-cdk-lib/aws-sns';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import type { Construct } from 'constructs';
 
 import type { EnvironmentConfig } from '../types.js';
 import { createWorkerLambda } from '../lambda-baseline.js';
+import { opsAlarmsTopicName } from './observability-stack.js';
 import {
   mtlsSecretName,
   mtlsSecretArnFromParts,
@@ -388,6 +391,21 @@ export class EventBridgeStack extends cdk.Stack {
     });
 
     // -----------------------------------------------------------------
+    // Both probes' metric alarms (SdexPushFreshnessAlarm / MtlsNotAfterAlarm in
+    // ObservabilityStack) are treatMissingData: NOT_BREACHING and so rely on
+    // each probe's own `-errors` alarm as the dead-probe backstop. Route those
+    // error alarms to the shared ops SNS topic (owned by ObservabilityStack).
+    // Imported by deterministic name — no cross-stack CFN reference, so the two
+    // stacks stay independently deployable (see `opsAlarmsTopicName`).
+    // -----------------------------------------------------------------
+    const opsAlarmsTopic = sns.Topic.fromTopicArn(
+      this,
+      'OpsAlarmsTopicRef',
+      `arn:aws:sns:${region}:${accountId}:${opsAlarmsTopicName(env)}`,
+    );
+    const opsAlarmAction = new cw_actions.SnsAction(opsAlarmsTopic);
+
+    // -----------------------------------------------------------------
     // Backfill freshness probe (task 0056) + its rate(15m) target. CH-only
     // (no S3, no VPC): SELECTs prices.backfill_progress over the ingestion
     // mTLS identity and republishes each stream's push age as the
@@ -409,6 +427,7 @@ export class EventBridgeStack extends cdk.Stack {
       alarmDescription:
         'Backfill freshness probe invocation errors — the SDEX push-age metric may be stale, blinding the freshness alarm.',
       alarmPeriod: cdk.Duration.minutes(15),
+      errorAlarmActions: [opsAlarmAction],
     });
     this.backfillFreshnessProbeFunction = freshness.function;
 
@@ -449,6 +468,7 @@ export class EventBridgeStack extends cdk.Stack {
       alarmDescription:
         'mTLS NotAfter probe invocation errors — cert days-to-expiry metric may be stale, blinding the expiry alarm.',
       alarmPeriod: cdk.Duration.days(1),
+      errorAlarmActions: [opsAlarmAction],
     });
     this.mtlsNotafterProbeFunction = notafter.function;
 

@@ -182,11 +182,22 @@ export interface WorkerLambdaProps extends BaselineLambdaContext {
   readonly alarmDescription: string;
   /** Period over which the error alarm sums invocation errors. */
   readonly alarmPeriod: cdk.Duration;
+  /**
+   * Actions wired to the worker's `-errors` alarm (e.g. an ops SNS topic).
+   * Optional: the alarm is created either way, but with no action it is inert
+   * (transitions to ALARM but notifies no one). Wire an action for any worker
+   * whose error alarm is a load-bearing signal — notably the probes, whose
+   * NOT_BREACHING metric alarms rely on this alarm as their dead-probe backstop.
+   */
+  readonly errorAlarmActions?: readonly cloudwatch.IAlarmAction[];
 }
 
 export interface WorkerLambda {
   readonly function: lambda.Function;
   readonly role: iam.Role;
+  /** The `prices-{env}-{name}-errors` alarm, exposed so callers can attach
+   * further actions or reference it in a dashboard. */
+  readonly errorAlarm: cloudwatch.Alarm;
 }
 
 /**
@@ -256,7 +267,7 @@ export function createWorkerLambda(
 
   rule.addTarget(new targets.LambdaFunction(fn));
 
-  new cloudwatch.Alarm(scope, `${idPrefix}ErrorAlarm`, {
+  const errorAlarm = new cloudwatch.Alarm(scope, `${idPrefix}ErrorAlarm`, {
     alarmName: `prices-${env}-${name}-errors`,
     alarmDescription,
     metric: fn.metricErrors({ period: alarmPeriod, statistic: 'Sum' }),
@@ -264,6 +275,9 @@ export function createWorkerLambda(
     evaluationPeriods: 1,
     treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
   });
+  for (const action of props.errorAlarmActions ?? []) {
+    errorAlarm.addAlarmAction(action);
+  }
 
-  return { function: fn, role };
+  return { function: fn, role, errorAlarm };
 }

@@ -35,49 +35,51 @@ pub const METRIC_NAME: &str = "PushAgeSeconds";
 pub const SDEX_ARCHIVE_STREAM: &str = "sdex_archive";
 pub const SOROBAN_AMM_STREAM: &str = "soroban_amm";
 
-/// Sentinel published for a stream whose `last_push_at` is still NULL (no push
-/// has landed yet). A negative value can never exceed the positive freshness
-/// threshold, so the alarm reads "no push expected yet" as OK during the
-/// pre-first-push window (§5.6) rather than false-firing on a fresh deploy.
-pub const NO_PUSH_SENTINEL: f64 = -1.0;
-
-/// One stream's push age as read from `backfill_progress`. `age_seconds` is
-/// `None` when `last_push_at` is NULL (no push yet).
+/// One stream's push age as read from `backfill_progress`, in seconds. For a
+/// stream that has never pushed (`last_push_at` IS NULL) the age is measured
+/// from `started_at` (registration time) instead of a NULL — see [`AGE_QUERY`]
+/// — so a never-pushed stream still ages out. `age_seconds` is therefore never
+/// NULL.
 #[derive(Debug, Clone, PartialEq, Eq, clickhouse::Row, serde::Deserialize)]
 pub struct StreamAge {
     pub task_name: String,
-    pub age_seconds: Option<i64>,
+    pub age_seconds: i64,
 }
 
-/// One CloudWatch datum: the stream it belongs to and its push-age value
-/// (seconds, or [`NO_PUSH_SENTINEL`] for a stream that has never pushed).
+/// One CloudWatch datum: the stream it belongs to and its push-age value in
+/// seconds.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Metric {
     pub stream: String,
     pub value: f64,
 }
 
-/// Map the queried per-stream ages to CloudWatch data. A NULL age (no push yet)
-/// becomes [`NO_PUSH_SENTINEL`]; a present age is published verbatim in seconds.
+/// Map the queried per-stream ages to CloudWatch data — the age in seconds,
+/// verbatim.
 pub fn age_metrics(rows: &[StreamAge]) -> Vec<Metric> {
     rows.iter()
         .map(|row| Metric {
             stream: row.task_name.clone(),
-            value: row
-                .age_seconds
-                .map(|s| s as f64)
-                .unwrap_or(NO_PUSH_SENTINEL),
+            value: row.age_seconds as f64,
         })
         .collect()
 }
 
 /// SQL that reads each stream's push age (latest row per stream via `FINAL`).
-/// Age is `now() - last_push_at` evaluated in ClickHouse; NULL `last_push_at`
-/// yields NULL age (surfaced as [`NO_PUSH_SENTINEL`] by [`age_metrics`]).
+/// Age is `now() - coalesce(last_push_at, started_at)` evaluated in ClickHouse:
+/// seconds since the last push, or — for a stream that has never pushed — since
+/// its registration (`started_at`, which the backfill sink preserves across row
+/// updates). The `started_at` fallback is the fix for the never-first-pushed
+/// blind spot: a NULL `last_push_at` used to publish a sentinel that sat
+/// permanently below the threshold, so a first push that was overdue (or never
+/// came) never fired the alarm. Now the stream keeps aging from registration,
+/// so once it exceeds the freshness threshold the alarm fires — "alarm once the
+/// Tranche-1 window opens" (§5.6). `started_at` is non-nullable, so `coalesce`
+/// always yields a value and `age_seconds` is never NULL.
 pub const AGE_QUERY: &str = "SELECT \
      task_name, \
-     if(isNull(last_push_at), NULL, \
-        toInt64(toUnixTimestamp(now()) - toUnixTimestamp(last_push_at))) AS age_seconds \
+     toInt64(toUnixTimestamp(now()) - toUnixTimestamp(coalesce(last_push_at, started_at))) \
+       AS age_seconds \
    FROM backfill_progress FINAL \
    ORDER BY task_name";
 
@@ -132,7 +134,7 @@ mod tests {
     fn present_age_maps_verbatim() {
         let rows = vec![StreamAge {
             task_name: SDEX_ARCHIVE_STREAM.to_string(),
-            age_seconds: Some(604_801),
+            age_seconds: 604_801,
         }];
         let m = age_metrics(&rows);
         assert_eq!(m.len(), 1);
@@ -141,17 +143,20 @@ mod tests {
     }
 
     #[test]
-    fn null_age_becomes_no_push_sentinel() {
-        // A stream that has never pushed must publish a value that can never
-        // exceed a positive freshness threshold, so the alarm stays OK during
-        // the pre-first-push window.
+    fn never_pushed_stream_ages_out_and_can_breach() {
+        // A never-pushed stream no longer publishes a permanently-OK sentinel:
+        // AGE_QUERY ages it from `started_at`, so once it has existed past the
+        // freshness threshold the published age exceeds it and the alarm fires
+        // ("alarm once the Tranche-1 window opens", §5.6). Here an 8-day-old
+        // never-pushed stream is over the 7-day default and would breach.
+        let eight_days = 8 * 86_400;
         let rows = vec![StreamAge {
             task_name: SDEX_ARCHIVE_STREAM.to_string(),
-            age_seconds: None,
+            age_seconds: eight_days,
         }];
         let m = age_metrics(&rows);
-        assert_eq!(m[0].value, NO_PUSH_SENTINEL);
-        assert!(m[0].value < 7.0 * 86_400.0);
+        assert_eq!(m[0].value, eight_days as f64);
+        assert!(m[0].value > 7.0 * 86_400.0);
     }
 
     #[test]
@@ -159,11 +164,11 @@ mod tests {
         let rows = vec![
             StreamAge {
                 task_name: SDEX_ARCHIVE_STREAM.to_string(),
-                age_seconds: Some(10),
+                age_seconds: 10,
             },
             StreamAge {
                 task_name: SOROBAN_AMM_STREAM.to_string(),
-                age_seconds: Some(20),
+                age_seconds: 20,
             },
         ];
         let m = age_metrics(&rows);

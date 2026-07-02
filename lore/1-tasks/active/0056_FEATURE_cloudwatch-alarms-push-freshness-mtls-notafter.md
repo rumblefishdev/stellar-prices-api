@@ -121,6 +121,36 @@ In the 0011 CDK app, add:
   operator email (parametrise via SSM so subscribers can be
   managed without redeploy).
 
+### Step 3.5: Post-deploy — subscribe the ops topic (operational)
+
+**By design, the `prices-{env}-ops-alarms` topic ships with no
+subscribers.** `config.opsAlarms.notificationEmail` is left unset in
+`envs/production.json` on purpose: subscriptions are managed directly
+in SNS (email / Slack / PagerDuty) so the on-call roster can change
+without a redeploy. The consequence is that a fresh deploy routes every
+alarm to a topic **no one is listening to** until an operator subscribes
+an address — the alarms fire correctly but deliver nowhere.
+
+Deploy checklist — **must be done once per env, immediately after the
+first deploy, before the fire-tests below can pass:**
+
+1. Confirm the topic exists:
+   `aws sns list-topics --profile soroban-explorer | grep prices-<env>-ops-alarms`
+2. Subscribe the ops address/alias (role alias, not a personal
+   address — see [[feedback-no-personal-names-in-docs]]):
+   `aws sns subscribe --profile soroban-explorer \`
+   `  --topic-arn arn:aws:sns:eu-central-1:<account>:prices-<env>-ops-alarms \`
+   `  --protocol email --notification-endpoint prices-ops@<domain>`
+3. Confirm the subscription: the endpoint receives an AWS confirmation
+   email whose link **must be clicked** before delivery starts. Verify
+   with `aws sns list-subscriptions-by-topic --topic-arn <arn>` →
+   `SubscriptionArn` is a real ARN, not `PendingConfirmation`.
+
+If an operator address ever becomes canonical, the alternative is to set
+`opsAlarms.notificationEmail` in the env JSON and let CDK seed the
+subscription at deploy (still requires the click-to-confirm step). The
+`notificationEmail?` field remains supported for that.
+
 ### Step 4: Manual fire-test
 
 For acceptance: skip a `sdex-cloud-push` cycle (operator
@@ -154,8 +184,9 @@ threshold trips. Restore the canonical cert post-test.
       `Prices/Backfill`, one datum per stream via a `Stream` dimension
       (`sdex_archive`, `soroban_amm`) — supersedes the two per-name metrics in
       the plan; see Design Decisions. Age computed server-side in CH (clock-skew
-      immune); NULL `last_push_at` → `-1` sentinel. Rule + Lambda + rate synth-
-      verified.*
+      immune) as `now() - coalesce(last_push_at, started_at)`, so a never-pushed
+      stream ages from registration and fires once overdue (no permanently-OK
+      sentinel). Rule + Lambda + rate synth-verified.*
 - [x] `packages/mtls-notafter-probe` runs daily and publishes days-to-expiry.
       *Per-role `DaysToNotAfter` (dim `Role`) + aggregate `MinDaysToNotAfter`
       under `Prices/Mtls`, across the `ingestion` + `api` cert bundles. X.509
@@ -165,9 +196,13 @@ threshold trips. Restore the canonical cert post-test.
       the topic + both alarms + `SnsAction`; also back-wired the previously
       action-less enrichment-backlog alarm. Synth asserts topic + both alarms +
       metrics.*
+- [ ] **(operational)** An ops address/alias is subscribed to
+      `prices-{env}-ops-alarms` and confirmed (not `PendingConfirmation`). *Topic
+      ships subscriber-less by design; see Step 3.5 for the one-time per-env
+      subscribe checklist. Prerequisite for the fire-test below to deliver.*
 - [ ] **(operational)** Manual fire-test for the freshness alarm produces an
       SNS delivery to the configured operator email (Tranche-1 AC #5). *Requires
-      a real deploy + a skipped push cycle + a subscribed address.*
+      a real deploy + a skipped push cycle + a subscribed address (Step 3.5).*
 - [x] Threshold for the freshness alarm is operator-tunable.
       *`config.opsAlarms.sdexPushFreshnessSeconds` (default 604800) +
       `mtlsNotAfterDaysThreshold` (30); validated in `validateConfig`. Per-env
@@ -205,15 +240,20 @@ unit-tested, `main.rs` cfg-gated on `lambda`; features
 
 - `packages/backfill-freshness-probe` — SELECTs `backfill_progress FINAL` over
   the 0052 `client_from_lambda_env` (ingestion identity), age computed
-  server-side (`now() - last_push_at`), publishes `Prices/Backfill`
-  `PushAgeSeconds` per stream. Best-effort publish (warn, don't fail the run).
-  3 unit tests.
+  server-side as `now() - coalesce(last_push_at, started_at)` (never-pushed
+  streams age from registration so an overdue first push still fires), publishes
+  `Prices/Backfill` `PushAgeSeconds` per stream. Publish failures propagate and
+  fail the invocation (trips the ops-wired error alarm — a swallowed publish
+  would leave the NOT_BREACHING freshness alarm silently green). 3 unit tests.
 - `packages/mtls-notafter-probe` — reuses `fetch_bundle_from_extension` to read
   each role's `{cert,key,ca}` bundle, parses `NotAfter` with `x509-parser`
   (added to `[workspace.dependencies]`), publishes `Prices/Mtls`
-  `DaysToNotAfter` (per-`Role`) + `MinDaysToNotAfter`. Per-cert failures are
-  logged + skipped; an all-fail run errors so total blindness trips the error
-  alarm. 7 unit tests.
+  `DaysToNotAfter` (per-`Role`) + `MinDaysToNotAfter`. Healthy certs publish
+  first (kept fresh), then **any** per-cert fetch/parse failure fails the run —
+  not only a total wipeout — so a single unreadable cert can't be masked by a
+  healthy sibling (it is excluded from `MinDaysToNotAfter`, so its silence is
+  invisible on the expiry alarm; the error alarm is the channel that catches
+  it). 7 unit tests.
 - Both added to the workspace `members`. `cargo test` (default) + `cargo check
   --features lambda` + `fmt` + `clippy` all clean; `cargo check --workspace` green.
 
@@ -236,6 +276,18 @@ unit-tested, `main.rs` cfg-gated on `lambda`; features
   EventBridge stacks asserts the topic, both alarms (`PushAgeSeconds` /
   `MinDaysToNotAfter`), both probe functions, and all three IAM grants.
 
+**Post-review cleanups (PR #73 code review):** ① freshness publish propagates
+(no swallow) + probe `-errors` alarms now routed to the ops topic via a
+generalized `createWorkerLambda` `errorAlarmActions` (imported by deterministic
+`opsAlarmsTopicName`, no cross-stack ref); ② enrichment-backlog alarm re-designed
+to a non-latching *lack-of-progress* metric-math signal before getting a live
+channel; ③ mTLS probe fails on *any* per-cert failure (not only total); ④
+freshness age uses `coalesce(last_push_at, started_at)` so never-pushed streams
+age out; ⑤ ops topic subscription documented as a per-env deploy step (Step 3.5);
+⑥ minor: stricter `notificationEmail` regex, dropped redundant cold-start
+`SELECT 1`, `min_days` via `reduce(f64::min)`, and a shared
+`prices_clickhouse::observability::init_tracing()` helper the two probes adopt.
+
 ## Design Decisions
 
 ### From Plan
@@ -257,17 +309,35 @@ unit-tested, `main.rs` cfg-gated on `lambda`; features
    and lets the alarm target exactly `Stream=sdex_archive`. A separate
    `MinDaysToNotAfter` aggregate gives the NotAfter alarm one value covering
    "either cert."
-4. **Age computed server-side in ClickHouse.** `now() - last_push_at` is
-   evaluated in CH, not from the Lambda clock, because `last_push_at` was
-   written with CH's `now()` — removes cross-host skew from the freshness signal.
+4. **Age computed server-side in ClickHouse.** `now() - coalesce(last_push_at,
+   started_at)` is evaluated in CH, not from the Lambda clock, because the
+   timestamps were written with CH's `now()` — removes cross-host skew from the
+   freshness signal. The `coalesce(…, started_at)` fallback (added when closing
+   review finding #4) ages a *never-pushed* stream from its registration time
+   instead of publishing a permanently-OK `-1` sentinel, so a first push that is
+   overdue (or never lands) fires the alarm once the stream has existed past the
+   threshold — the plan's "alarm once the Tranche-1 window opens" (§5.6). The
+   sink preserves `started_at` across row updates, so it is a stable base. (Fully
+   covering the *missing-row* case — no `sdex_archive` row at all — relies on the
+   `seed.sql` invariant that both canonical rows always exist post-deploy.)
 5. **`treatMissingData: NOT_BREACHING` on both alarms.** The freshness probe
    keeps publishing a *rising* age when pushes stop, so the climbing value —
    not missing data — is the signal; a dead probe is caught by its own
    `-errors` alarm. Avoids double-firing / flapping on deploy gaps.
-6. **Back-wired the enrichment-backlog alarm to the ops topic.** It shipped in
-   0026 with no action (0026 explicitly left routing to 0056). An alarm with no
-   action is inert, so it now points at `prices-{env}-ops-alarms` too. Its
-   threshold *tuning* (findings #5/#7 below) remains open.
+6. **Re-designed + back-wired the enrichment-backlog alarm.** It shipped in
+   0026 with no action (0026 explicitly left routing to 0056), so it now points
+   at `prices-{env}-ops-alarms`. Before giving it a live paging channel the
+   latch/storm (incoming finding #5) was fixed: the alarm no longer watches the
+   absolute `EnrichmentRowsRemainingAtVolumeZero > 100_000` level (which sat in
+   ALARM for hours during a legit post-backfill drain, and latched forever on
+   the permanent exotic-quote floor). It now fires on *lack of progress* —
+   metric-math `(EnrichmentRowsEnriched < 1) * (EnrichmentRowsRemainingAtVolumeZero > 0)`
+   sustained 3×1h — which self-clears the instant a pass enriches ≥1 row, so a
+   draining catch-up and a steady-state floor both read OK while a true stall
+   fires. Residual (idle env + nonzero floor + no new enrichable rows for 3h can
+   trip, but self-clears) needs the worker's recency-bounded remaining metric to
+   excise fully; tracked under finding #5's `_1m`-bounded option. Finding #7
+   (`EnrichmentBatchDurationMs` is whole-pass, not per-batch) remains open.
 7. **mTLS probe reads `SystemTime::now()` for the clock.** Cert validity is
    absolute UTC, so the Lambda wall-clock is fine here (no CH involved).
 
@@ -306,6 +376,16 @@ Task 0026 published the enrichment spec-§5 metrics under the
   sustained) rather than an absolute backlog level, and/or a `_1m`-recency-bounded
   remaining count that excludes the permanent exotic-quote floor. The 100_000
   threshold is a placeholder.
+
+  **Resolved (0056).** Re-designed to the *lack-of-progress* metric-math signal
+  `(EnrichmentRowsEnriched < 1) * (EnrichmentRowsRemainingAtVolumeZero > 0)` ≥ 1
+  sustained 3×1h (`GREATER_THAN_OR_EQUAL_TO_THRESHOLD`, `NOT_BREACHING`), in
+  `observability-stack.ts`. Non-latching: clears the moment a pass enriches ≥1
+  row, so the catch-up drain (a) and steady-state floor (b) both read OK. The
+  `_1m`-recency-bounded remaining metric (to excise the residual idle-env +
+  floor false-fire completely) is a worker-side change left to 0026 and is *not*
+  required for the alarm to be page-safe. Finding #7 (per-batch duration)
+  remains open.
 
 - **#7 — `EnrichmentBatchDurationMs` is whole-pass wall-clock, not per-batch.**
   The metric is measured across the entire `run_through` (all batches + the

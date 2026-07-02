@@ -92,10 +92,7 @@ pub fn days_to_not_after(cert_pem: &str, now_unix: i64) -> Result<f64, NotAfterE
 
 /// Minimum days-to-NotAfter across the probed certs (`None` if none succeeded).
 pub fn min_days(samples: &[RoleDays]) -> Option<f64> {
-    samples
-        .iter()
-        .map(|s| s.days)
-        .fold(None, |acc, d| Some(acc.map_or(d, |a: f64| a.min(d))))
+    samples.iter().map(|s| s.days).reduce(f64::min)
 }
 
 /// Publish per-role `DaysToNotAfter` (dimensioned `Environment` + `Role`) and

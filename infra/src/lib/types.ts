@@ -329,10 +329,14 @@ export function validateConfig(config: EnvironmentConfig): void {
         `opsAlarms.mtlsNotAfterDaysThreshold must be a positive integer (days), got: ${ops.mtlsNotAfterDaysThreshold}`,
       );
     }
+    // Require a real local@domain.tld shape, not just a stray '@': a value like
+    // '@' or 'ops@' passes an includes('@') check but yields an undeliverable
+    // SNS subscription (a silent notification black hole).
+    const emailShape = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     if (
       ops.notificationEmail !== undefined &&
       (typeof ops.notificationEmail !== 'string' ||
-        !ops.notificationEmail.includes('@'))
+        !emailShape.test(ops.notificationEmail))
     ) {
       errors.push(
         `opsAlarms.notificationEmail, when set, must be an email address, got: ${ops.notificationEmail}`,
