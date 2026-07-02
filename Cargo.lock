@@ -2672,6 +2672,7 @@ dependencies = [
  "aquarius-extractor",
  "clickhouse",
  "extractors-core",
+ "hex",
  "ledger-processor",
  "phoenix-extractor",
  "prices-clickhouse",

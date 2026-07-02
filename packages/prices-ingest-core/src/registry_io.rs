@@ -55,7 +55,7 @@ impl Registries {
                         if let Some(p) = self.phoenix.lookup(contract_id) {
                             row.pool_type = p.pool_type;
                             if let Some(h) = p.wasm_hash {
-                                row.wasm_hash = hex_encode(&h);
+                                row.wasm_hash = hex::encode(h);
                             }
                         }
                     }
@@ -101,24 +101,11 @@ impl Registries {
     }
 }
 
-fn hex_encode(bytes: &[u8; 32]) -> String {
-    let mut s = String::with_capacity(64);
-    for b in bytes {
-        s.push_str(&format!("{b:02x}"));
-    }
-    s
-}
-
-/// Parse a 64-char hex string into 32 bytes; `None` for empty or malformed input.
+/// Parse a hex string into exactly 32 bytes; `None` for empty, wrong-length, or
+/// malformed input. Thin wrapper over `hex::decode` that pins the 32-byte width
+/// the Phoenix `wasm_hash` requires.
 fn hex_decode32(s: &str) -> Option<[u8; 32]> {
-    if s.len() != 64 {
-        return None;
-    }
-    let mut out = [0u8; 32];
-    for (i, byte) in out.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).ok()?;
-    }
-    Some(out)
+    hex::decode(s).ok()?.try_into().ok()
 }
 
 #[cfg(test)]
@@ -132,7 +119,7 @@ mod tests {
             0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16,
             0x17, 0x18, 0x50, 0x6c,
         ];
-        let s = hex_encode(&h);
+        let s = hex::encode(h);
         assert_eq!(s.len(), 64);
         assert_eq!(hex_decode32(&s), Some(h));
     }

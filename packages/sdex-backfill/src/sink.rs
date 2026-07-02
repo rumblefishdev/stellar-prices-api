@@ -22,7 +22,7 @@ use tracing::info;
 pub use prices_ingest_core::OracleSample;
 
 use crate::error::BackfillError;
-use crate::progress::{Current, ProgressStatus, ProgressUpdate};
+use crate::progress::{Current, ProgressStatus, ProgressUpdate, SDEX_ARCHIVE, SOROBAN_AMM};
 
 pub struct Sink {
     writer: OhlcvWriter,
@@ -83,57 +83,51 @@ impl Sink {
     // `version`), so a retried INSERT can only replace, never duplicate. That
     // lets the sink retry every failure as transient (`|_| true`) — a bounded
     // `[50, 200, 800] ms` backoff so a passing CH/network blip does not abort a
-    // multi-hour backfill. Same envelope and classifier as the live sink.
+    // multi-hour backfill. Same envelope and classifier as the live sink. Every
+    // write goes through `retry_write` so the policy lives in exactly one place.
+
+    /// Run one idempotent `prices.*` write under the shared retry envelope: the
+    /// bounded `[50, 200, 800] ms` backoff, every error treated as transient
+    /// (safe because the writes are ReplacingMergeTree-idempotent). Any error
+    /// type that maps into [`BackfillError`] works, so both `IngestError` and
+    /// raw `clickhouse::error::Error` closures share it.
+    async fn retry_write<F, Fut, E>(&self, op: F) -> Result<(), BackfillError>
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = Result<(), E>>,
+        BackfillError: From<E>,
+    {
+        retry_with_backoff(&DEFAULT_BACKOFF_MS, |_| true, op)
+            .await
+            .map(|_| ())
+            .map_err(BackfillError::from)
+    }
 
     pub async fn write_candles(
         &self,
         candles: &[OhlcvCandle],
         source: &str,
     ) -> Result<(), BackfillError> {
-        retry_with_backoff(
-            &DEFAULT_BACKOFF_MS,
-            |_| true,
-            || async { self.writer.write_candles(candles, source).await },
-        )
-        .await
-        .map(|_| ())
-        .map_err(BackfillError::from)
+        self.retry_write(|| async { self.writer.write_candles(candles, source).await })
+            .await
     }
 
     pub async fn write_assets(&self, registry: &AssetRegistry) -> Result<(), BackfillError> {
-        retry_with_backoff(
-            &DEFAULT_BACKOFF_MS,
-            |_| true,
-            || async { self.writer.write_assets(registry).await },
-        )
-        .await
-        .map(|_| ())
-        .map_err(BackfillError::from)
+        self.retry_write(|| async { self.writer.write_assets(registry).await })
+            .await
     }
 
     pub async fn write_oracle(&self, samples: &[OracleSample]) -> Result<(), BackfillError> {
-        retry_with_backoff(
-            &DEFAULT_BACKOFF_MS,
-            |_| true,
-            || async { self.writer.write_oracle(samples).await },
-        )
-        .await
-        .map(|_| ())
-        .map_err(BackfillError::from)
+        self.retry_write(|| async { self.writer.write_oracle(samples).await })
+            .await
     }
 
     pub async fn write_unresolved_pools(
         &self,
         pools: &[UnresolvedPool],
     ) -> Result<(), BackfillError> {
-        retry_with_backoff(
-            &DEFAULT_BACKOFF_MS,
-            |_| true,
-            || async { self.writer.write_unresolved_pools(pools).await },
-        )
-        .await
-        .map(|_| ())
-        .map_err(BackfillError::from)
+        self.retry_write(|| async { self.writer.write_unresolved_pools(pools).await })
+            .await
     }
 
     /// Persist the discovered AMM pool registry to `prices.pool_registry` (task
@@ -146,21 +140,15 @@ impl Sink {
         if rows.is_empty() {
             return Ok(());
         }
-        retry_with_backoff(
-            &DEFAULT_BACKOFF_MS,
-            |_| true,
-            || async {
-                let mut insert = self.writer.client().insert("prices.pool_registry")?;
-                for row in &rows {
-                    insert.write(row).await?;
-                }
-                insert.end().await?;
-                Ok::<(), clickhouse::error::Error>(())
-            },
-        )
-        .await
-        .map(|_| ())
-        .map_err(BackfillError::from)?;
+        self.retry_write(|| async {
+            let mut insert = self.writer.client().insert("prices.pool_registry")?;
+            for row in &rows {
+                insert.write(row).await?;
+            }
+            insert.end().await?;
+            Ok::<(), clickhouse::error::Error>(())
+        })
+        .await?;
         info!(pools = rows.len(), "persisted discovered pool registry");
         Ok(())
     }
@@ -170,15 +158,26 @@ impl Sink {
     /// (decision #4 inverts task 0069). Returns empty registries when the table
     /// is empty — the fresh full-run case.
     pub async fn load_pool_registry(&self) -> Result<Registries, BackfillError> {
-        let rows = self
-            .writer
-            .client()
-            .query(
-                "SELECT contract_id, venue, token0, token1, pool_type, wasm_hash \
-                 FROM prices.pool_registry FINAL",
-            )
-            .fetch_all::<PoolRegistryRow>()
-            .await?;
+        // Retried like the writes: this runs once at startup, and a transient CH
+        // blip here would otherwise abort the whole multi-hour run before a
+        // single ledger is indexed.
+        let rows = retry_with_backoff(
+            &DEFAULT_BACKOFF_MS,
+            |_| true,
+            || async {
+                self.writer
+                    .client()
+                    .query(
+                        "SELECT contract_id, venue, token0, token1, pool_type, wasm_hash \
+                     FROM prices.pool_registry FINAL",
+                    )
+                    .fetch_all::<PoolRegistryRow>()
+                    .await
+            },
+        )
+        .await
+        .map(|(rows, _tries)| rows)
+        .map_err(BackfillError::from)?;
         let mut reg = Registries::new();
         reg.load_pool_rows(&rows);
         info!(
@@ -200,24 +199,32 @@ impl Sink {
     /// a stored `completed` back to `running` ([`resolve_status`]); and widens
     /// the `[earliest, newest]_data_available` window monotonically (min of
     /// earliest, max of newest) so the covered span never narrows. `last_push_at`
-    /// / `updated_at` are stamped server-side with `now()`; `completed_at` is
-    /// stamped once on the transition into `completed` and preserved thereafter,
-    /// so no wall-clock is read in-process.
+    /// `last_push_at` is stamped server-side with `now()`; `updated_at` (the RMT
+    /// version) is forced strictly past the stored value so back-to-back writes
+    /// in the same second can't tie; `completed_at` is stamped once on the
+    /// transition into `completed` and preserved thereafter, so no wall-clock is
+    /// read in-process.
     pub async fn write_progress(&self, update: &ProgressUpdate) -> Result<(), BackfillError> {
-        retry_with_backoff(
-            &DEFAULT_BACKOFF_MS,
-            |_| true,
-            || async { self.write_progress_once(update).await },
-        )
-        .await
-        .map(|_| ())
-        .map_err(BackfillError::from)
+        self.retry_write(|| async { self.write_progress_once(update).await })
+            .await
     }
 
     async fn write_progress_once(
         &self,
         update: &ProgressUpdate,
     ) -> Result<(), clickhouse::error::Error> {
+        // `task_name` is interpolated straight into the INSERT below, so hard-gate
+        // it to the two known stream constants. Today's callers only ever pass
+        // these, but this keeps a future dynamic caller from opening an injection
+        // hole through the string-built SQL. All other interpolated values are
+        // numeric or fixed-string enums.
+        if update.task_name != SDEX_ARCHIVE && update.task_name != SOROBAN_AMM {
+            return Err(clickhouse::error::Error::Custom(format!(
+                "refusing to write progress for unknown task_name {:?}",
+                update.task_name
+            )));
+        }
+
         let existing = self
             .writer
             .client()
@@ -227,7 +234,8 @@ impl Sink {
                         toUnixTimestamp(started_at) AS started_at, \
                         toUnixTimestamp(completed_at) AS completed, \
                         toUnixTimestamp(earliest_data_available) AS earliest, \
-                        toUnixTimestamp(newest_data_available) AS newest \
+                        toUnixTimestamp(newest_data_available) AS newest, \
+                        toUnixTimestamp(updated_at) AS updated \
                  FROM prices.backfill_progress FINAL WHERE task_name = ?",
             )
             .bind(update.task_name)
@@ -275,17 +283,30 @@ impl Sink {
         let earliest_sql = earliest.map_or("NULL".to_string(), |e| format!("toDateTime({e})"));
         let newest_sql = newest.map_or("NULL".to_string(), |n| format!("toDateTime({n})"));
 
+        // updated_at is the ReplacingMergeTree version (second resolution). Two
+        // updates for the same task_name within one wall-clock second — e.g. the
+        // last per-partition `running` write and the terminal `completed` write —
+        // would otherwise share a version, and FINAL would keep a nondeterministic
+        // winner (losing the completion). Because writes for a task are strictly
+        // sequential and each reads the prior row via FINAL, forcing this row's
+        // version strictly past the stored one guarantees the latest write always
+        // wins the collapse.
+        let updated_at_sql = match existing.as_ref() {
+            Some(e) => format!("greatest(now(), toDateTime({}))", e.updated as u64 + 1),
+            None => "now()".to_string(),
+        };
+
         // All interpolated values are numeric or from fixed-string constants
-        // (task_name, status) — no user input, so no injection surface. Datetimes
-        // are set server-side (now() / toDateTime(unix)) to avoid encoding a
-        // Rust DateTime.
+        // (task_name is gated above to the two stream names, status to the enum),
+        // so there is no injection surface. Datetimes are set server-side (now() /
+        // toDateTime(unix)) to avoid encoding a Rust DateTime.
         let sql = format!(
             "INSERT INTO prices.backfill_progress \
              (task_name, start_ledger, target_ledger, current_ledger, status, \
               last_push_at, earliest_data_available, newest_data_available, \
               started_at, completed_at, updated_at) \
              VALUES ('{task}', {start}, {target}, {current}, '{status}', \
-              now(), {earliest_sql}, {newest_sql}, {started_at_sql}, {completed_at_sql}, now())",
+              now(), {earliest_sql}, {newest_sql}, {started_at_sql}, {completed_at_sql}, {updated_at_sql})",
             task = update.task_name,
             start = update.start_ledger,
             target = update.target_ledger,
@@ -330,24 +351,18 @@ impl Sink {
         }
         // Idempotent resume bookkeeping (RMT keyed by sequence) → retry the whole
         // batch INSERT as transient, same bounded backoff as the candle writes.
-        retry_with_backoff(
-            &DEFAULT_BACKOFF_MS,
-            |_| true,
-            || async {
-                let mut insert = self
-                    .writer
-                    .client()
-                    .insert("prices.backfill_sdex_ledgers")?;
-                for &seq in sequences {
-                    insert.write(&LedgerRow { sequence: seq }).await?;
-                }
-                insert.end().await?;
-                Ok::<(), clickhouse::error::Error>(())
-            },
-        )
+        self.retry_write(|| async {
+            let mut insert = self
+                .writer
+                .client()
+                .insert("prices.backfill_sdex_ledgers")?;
+            for &seq in sequences {
+                insert.write(&LedgerRow { sequence: seq }).await?;
+            }
+            insert.end().await?;
+            Ok::<(), clickhouse::error::Error>(())
+        })
         .await
-        .map(|_| ())
-        .map_err(BackfillError::from)
     }
 }
 
@@ -368,6 +383,7 @@ struct ExistingProgress {
     completed: Option<u32>,
     earliest: Option<u32>,
     newest: Option<u32>,
+    updated: u32,
 }
 
 /// Resolve the `current_ledger` to write, merged monotonically against the
@@ -397,16 +413,18 @@ fn resolve_status(existing: Option<&str>, update: ProgressStatus) -> ProgressSta
     }
 }
 
-/// Lowest of two optional minute watermarks (monotonic earliest).
-fn merge_min(a: Option<u32>, b: Option<u32>) -> Option<u32> {
+/// Lowest of two optional minute watermarks (monotonic earliest). Shared with
+/// `run.rs`'s run-level window merge.
+pub(crate) fn merge_min(a: Option<u32>, b: Option<u32>) -> Option<u32> {
     match (a, b) {
         (Some(x), Some(y)) => Some(x.min(y)),
         (x, y) => x.or(y),
     }
 }
 
-/// Highest of two optional minute watermarks (monotonic newest).
-fn merge_max(a: Option<u32>, b: Option<u32>) -> Option<u32> {
+/// Highest of two optional minute watermarks (monotonic newest). Shared with
+/// `run.rs`'s run-level window merge.
+pub(crate) fn merge_max(a: Option<u32>, b: Option<u32>) -> Option<u32> {
     match (a, b) {
         (Some(x), Some(y)) => Some(x.max(y)),
         (x, y) => x.or(y),

@@ -99,7 +99,8 @@ pub struct Observed {
 ///   recent SDEX is not under-reported — carries `sdex_archive.current` down to
 ///   the run floor at completion (its window/target still update live).
 /// - **SdexOnly** (`[1, activation)`) advances only `sdex_archive`; it completes
-///   the stream only when the run reached genesis (`start == 1`).
+///   the stream only when the run covered the whole pre-Soroban tail — started
+///   at genesis (`start == 1`) and reached the activation boundary.
 ///
 /// A stream is only marked `completed` when the run actually reached the bound
 /// it targets — a partial or resumed sub-window stays `running`, and the sink's
@@ -160,9 +161,14 @@ pub fn progress_updates(
             ]
         }
         ExtractMode::SdexOnly => {
-            // Genesis reached only when the run walked down to ledger 1 and
-            // actually indexed something.
-            let reached_genesis = start == 1 && observed.highest_indexed > 0;
+            // The archive is only complete when the pre-Soroban tail is fully
+            // covered: the run started at genesis (`start == 1`) AND reached up to
+            // the activation boundary (`highest_indexed >= activation - 1`), where
+            // the combined pass takes over. A chunked genesis-first run that stops
+            // short (e.g. `--start 1 --end 20_000_000`) stays `running` instead of
+            // falsely completing while `[end, activation)` is still missing.
+            let reached_genesis =
+                start == 1 && observed.highest_indexed >= activation.saturating_sub(1);
             vec![ProgressUpdate {
                 task_name: SDEX_ARCHIVE,
                 start_ledger: 1,
@@ -362,6 +368,27 @@ mod tests {
         let sdex = row(&rows, SDEX_ARCHIVE);
         assert_eq!(sdex.current_ledger, Current::SetBackward(40_000_000));
         assert_eq!(sdex.status, ProgressStatus::Running);
+    }
+
+    #[test]
+    fn sdex_only_genesis_chunk_that_stops_short_does_not_complete() {
+        // A chunk from genesis that stops well below activation must NOT mark the
+        // archive complete — [end, activation) is still missing.
+        let rows = progress_updates(
+            ExtractMode::SdexOnly,
+            1,
+            TIP,
+            ACTIVATION,
+            observed(20_000_000), // far short of activation
+            Phase::Completed,
+        );
+        let sdex = row(&rows, SDEX_ARCHIVE);
+        assert_eq!(sdex.current_ledger, Current::SetBackward(1));
+        assert_eq!(
+            sdex.status,
+            ProgressStatus::Running,
+            "did not reach the activation boundary → not completed"
+        );
     }
 
     #[test]

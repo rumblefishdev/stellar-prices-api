@@ -303,7 +303,7 @@ pub fn process_ledger(
                     continue;
                 }
             };
-            let source = venue_source(&venue);
+            let source = venue.as_source();
             match dispatch(&rows, &reg.venue, &reg.phoenix, &reg.soroswap) {
                 Ok(trades) => {
                     for t in trades {
@@ -325,14 +325,6 @@ fn topics_to_tagged(topics: &Value) -> Vec<TaggedValue> {
         .as_array()
         .map(|a| a.iter().map(json_to_tagged).collect())
         .unwrap_or_default()
-}
-
-fn venue_source(v: &Venue) -> &'static str {
-    match v {
-        Venue::Phoenix => "phoenix",
-        Venue::Soroswap => "soroswap",
-        Venue::Aquarius => "aquarius",
-    }
 }
 
 /// Recognise factory events and register the created pool. Detected by event

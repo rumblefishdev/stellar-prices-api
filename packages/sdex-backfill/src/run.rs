@@ -11,7 +11,7 @@ use crate::error::BackfillError;
 use crate::ingest::{ExtractMode, PartitionStats, index_partition};
 use crate::partition::{Partition, partitions_for_range};
 use crate::progress::{Observed, Phase, progress_updates};
-use crate::sink::Sink;
+use crate::sink::{Sink, merge_max, merge_min};
 use crate::sync::{SyncOutcome, sync_partition};
 
 #[allow(clippy::too_many_arguments)]
@@ -58,6 +58,20 @@ pub async fn execute(
             "sdex-only mode over the Soroban era — AMM swaps in [activation, end] will NOT be extracted"
         ),
         _ => {}
+    }
+
+    // The sdex_archive progress denominator (`target_ledger`) is the LIVE chain
+    // tip. In a sdex-only tail run `--end` is the activation boundary, not the
+    // tip, so `--tip <live tip>` must be passed explicitly; when it is omitted
+    // `tip` defaults to `--end` (≈ activation), which would make progress_pct
+    // read against the wrong denominator and over-report the archive. A tip at or
+    // below activation is the tell-tale of a forgotten flag.
+    if mode == ExtractMode::SdexOnly && tip <= activation_ledger {
+        warn!(
+            tip,
+            activation_ledger,
+            "sdex-only run without a live --tip: backfill_progress.target_ledger is the activation boundary, not the chain tip, so /backfill/status progress_pct will over-report — pass --tip <live tip>"
+        );
     }
 
     tokio::fs::create_dir_all(temp_dir).await?;
@@ -155,8 +169,8 @@ pub async fn execute(
             totals.oracle_rows += stats.oracle_rows;
             totals.candles_written += stats.candles_written;
             totals.total_bytes += stats.total_bytes;
-            totals.earliest_minute = min_opt(totals.earliest_minute, stats.earliest_minute);
-            totals.latest_minute = max_opt(totals.latest_minute, stats.latest_minute);
+            totals.earliest_minute = merge_min(totals.earliest_minute, stats.earliest_minute);
+            totals.latest_minute = merge_max(totals.latest_minute, stats.latest_minute);
             totals.unresolved.append(&mut stats.unresolved);
 
             // Forward watermark = this partition's clamped upper bound.
@@ -281,22 +295,6 @@ pub async fn execute(
     print_run_summary(todo.len(), &totals, partitions_skipped_s3, elapsed);
 
     Ok(())
-}
-
-/// Lowest of two optional minute watermarks (run-level earliest window edge).
-fn min_opt(a: Option<u32>, b: Option<u32>) -> Option<u32> {
-    match (a, b) {
-        (Some(x), Some(y)) => Some(x.min(y)),
-        (x, y) => x.or(y),
-    }
-}
-
-/// Highest of two optional minute watermarks (run-level newest window edge).
-fn max_opt(a: Option<u32>, b: Option<u32>) -> Option<u32> {
-    match (a, b) {
-        (Some(x), Some(y)) => Some(x.max(y)),
-        (x, y) => x.or(y),
-    }
 }
 
 /// Aggregate per-ledger unresolved-swap records by contract and re-check each
