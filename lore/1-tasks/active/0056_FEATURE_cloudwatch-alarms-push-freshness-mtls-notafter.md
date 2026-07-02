@@ -2,7 +2,7 @@
 id: "0056"
 title: "CloudWatch alarms — sdex.last_push_at freshness + mTLS cert NotAfter"
 type: FEATURE
-status: backlog
+status: active
 related_adr: ["0005", "0007"]
 related_tasks: ["0011", "0050", "0051", "0055", "0028", "0026"]
 tags: [layer-infra, priority-medium, effort-small, milestone-M1, observability, cloudwatch, alarms, sns, mtls, backfill]
@@ -28,6 +28,14 @@ history:
       skipped push. No existing task owns these alarms; fold them
       into 0011 conflates infra-bootstrap with observability.
       Carve out as a small dedicated task.
+  - date: 2026-07-02
+    status: active
+    who: okarcz
+    note: >
+      Promoted from backlog to begin implementation — last remaining
+      pure-code M1 task. Two probe Lambda crates
+      (backfill-freshness-probe, mtls-notafter-probe) + CloudWatch
+      alarms + prices-ops-alarms SNS topic.
 ---
 
 # CloudWatch alarms — SDEX push freshness + mTLS NotAfter
