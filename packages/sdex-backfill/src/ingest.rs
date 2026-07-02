@@ -15,6 +15,12 @@ use crate::sink::{OracleSample, Sink};
 
 const ORACLE_FLUSH_THRESHOLD: usize = 50_000;
 
+/// Soroban activation ledger on pubnet (Protocol 20, 2024-02-20). Splits the
+/// `SdexOnly` pre-Soroban tail `[1, activation)` from the `Combined` Soroban
+/// era `[activation, tip]`. Pinned value located by the BE team; see
+/// `lore/3-wiki/project/stellar-pubnet-ledger-archive.md`.
+pub const SOROBAN_ACTIVATION_LEDGER: u32 = 50_463_000;
+
 #[derive(Debug, Clone, Default)]
 pub struct PartitionStats {
     pub indexed: usize,

@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use clap::Parser;
 
-use crate::ingest::ExtractMode;
+use crate::ingest::{ExtractMode, SOROBAN_ACTIVATION_LEDGER};
 
 #[derive(Parser, Debug)]
 #[command(name = "sdex-backfill", version)]
@@ -27,7 +27,7 @@ pub struct Cli {
     /// Soroban era `[activation, tip]`, and sanity-checks `--mode` against the
     /// requested range (warns on an obvious mismatch). Pinned value located by
     /// the BE team; see `lore/3-wiki/project/stellar-pubnet-ledger-archive.md`.
-    #[arg(long, default_value_t = 50_463_000)]
+    #[arg(long, default_value_t = SOROBAN_ACTIVATION_LEDGER)]
     pub activation_ledger: u32,
 
     /// ClickHouse HTTP URL (e.g. http://localhost:8123).
