@@ -10,9 +10,9 @@
 
 use std::future::Future;
 
-use prices_ingest_core::{AssetRegistry, OhlcvCandle, OhlcvWriter, OracleSample};
-
-use crate::retry::{DEFAULT_BACKOFF_MS, retry_with_backoff};
+use prices_ingest_core::{
+    AssetRegistry, DEFAULT_BACKOFF_MS, OhlcvCandle, OhlcvWriter, OracleSample, retry_with_backoff,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum SinkError {

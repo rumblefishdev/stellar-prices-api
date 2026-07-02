@@ -28,6 +28,7 @@ pub mod decode;
 pub mod error;
 pub mod filter;
 pub mod price;
+pub mod retry;
 pub mod safe_log;
 pub mod soroban;
 pub mod tick;
@@ -39,6 +40,7 @@ pub use decode::{decode_object, ledger_sequence};
 pub use error::IngestError;
 pub use filter::{RawTrade, extract_trades};
 pub use price::{compute_price, stroops_to_decimal};
+pub use retry::{DEFAULT_BACKOFF_MS, retry_with_backoff};
 pub use safe_log::safe_response_token;
 pub use soroban::{
     LedgerSoroban, Registries, UnresolvedPoolSwap, process_ledger, reflector_key_to_identity,

@@ -12,7 +12,9 @@ use std::collections::HashSet;
 
 use clickhouse::Row;
 use prices_ingest_core::canonical::AssetIdentity;
-use prices_ingest_core::{AssetRegistry, OhlcvCandle, OhlcvWriter, UnresolvedPool};
+use prices_ingest_core::{
+    AssetRegistry, DEFAULT_BACKOFF_MS, OhlcvCandle, OhlcvWriter, UnresolvedPool, retry_with_backoff,
+};
 use serde::Serialize;
 use tracing::info;
 
@@ -75,31 +77,61 @@ impl Sink {
         Ok(self.writer.load_assets().await?)
     }
 
+    // All `prices.*` writes below are idempotent (ReplacingMergeTree keyed by
+    // `version`), so a retried INSERT can only replace, never duplicate. That
+    // lets the sink retry every failure as transient (`|_| true`) — a bounded
+    // `[50, 200, 800] ms` backoff so a passing CH/network blip does not abort a
+    // multi-hour backfill. Same envelope and classifier as the live sink.
+
     pub async fn write_candles(
         &self,
         candles: &[OhlcvCandle],
         source: &str,
     ) -> Result<(), BackfillError> {
-        self.writer.write_candles(candles, source).await?;
-        Ok(())
+        retry_with_backoff(
+            &DEFAULT_BACKOFF_MS,
+            |_| true,
+            || async { self.writer.write_candles(candles, source).await },
+        )
+        .await
+        .map(|_| ())
+        .map_err(BackfillError::from)
     }
 
     pub async fn write_assets(&self, registry: &AssetRegistry) -> Result<(), BackfillError> {
-        self.writer.write_assets(registry).await?;
-        Ok(())
+        retry_with_backoff(
+            &DEFAULT_BACKOFF_MS,
+            |_| true,
+            || async { self.writer.write_assets(registry).await },
+        )
+        .await
+        .map(|_| ())
+        .map_err(BackfillError::from)
     }
 
     pub async fn write_oracle(&self, samples: &[OracleSample]) -> Result<(), BackfillError> {
-        self.writer.write_oracle(samples).await?;
-        Ok(())
+        retry_with_backoff(
+            &DEFAULT_BACKOFF_MS,
+            |_| true,
+            || async { self.writer.write_oracle(samples).await },
+        )
+        .await
+        .map(|_| ())
+        .map_err(BackfillError::from)
     }
 
     pub async fn write_unresolved_pools(
         &self,
         pools: &[UnresolvedPool],
     ) -> Result<(), BackfillError> {
-        self.writer.write_unresolved_pools(pools).await?;
-        Ok(())
+        retry_with_backoff(
+            &DEFAULT_BACKOFF_MS,
+            |_| true,
+            || async { self.writer.write_unresolved_pools(pools).await },
+        )
+        .await
+        .map(|_| ())
+        .map_err(BackfillError::from)
     }
 
     // --- backfill-only resume bookkeeping (prices.backfill_sdex_ledgers) ---
@@ -135,15 +167,26 @@ impl Sink {
         if sequences.is_empty() {
             return Ok(());
         }
-        let mut insert = self
-            .writer
-            .client()
-            .insert("prices.backfill_sdex_ledgers")?;
-        for &seq in sequences {
-            insert.write(&LedgerRow { sequence: seq }).await?;
-        }
-        insert.end().await?;
-        Ok(())
+        // Idempotent resume bookkeeping (RMT keyed by sequence) → retry the whole
+        // batch INSERT as transient, same bounded backoff as the candle writes.
+        retry_with_backoff(
+            &DEFAULT_BACKOFF_MS,
+            |_| true,
+            || async {
+                let mut insert = self
+                    .writer
+                    .client()
+                    .insert("prices.backfill_sdex_ledgers")?;
+                for &seq in sequences {
+                    insert.write(&LedgerRow { sequence: seq }).await?;
+                }
+                insert.end().await?;
+                Ok::<(), clickhouse::error::Error>(())
+            },
+        )
+        .await
+        .map(|_| ())
+        .map_err(BackfillError::from)
     }
 }
 

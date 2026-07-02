@@ -2683,6 +2683,7 @@ dependencies = [
  "stellar-strkey",
  "stellar-xdr",
  "thiserror 2.0.18",
+ "tokio",
  "tracing",
  "xdr-parser",
 ]
