@@ -8,7 +8,7 @@ use tracing::{info, warn};
 use prices_ingest_core::{AssetRegistry, Registries, UnresolvedPool, UnresolvedPoolSwap};
 
 use crate::error::BackfillError;
-use crate::ingest::{ExtractMode, PartitionStats, index_partition};
+use crate::ingest::{ExtractMode, PartitionStats, index_partition, peek_ledger_minute};
 use crate::partition::{Partition, partitions_for_range};
 use crate::progress::{Observed, Phase, progress_updates};
 use crate::sink::{Sink, merge_max, merge_min};
@@ -115,6 +115,9 @@ pub async fn execute(
     // Highest ledger fully indexed so far — the forward watermark that drives
     // `soroban_amm.current_ledger` in the per-partition progress update.
     let mut highest_indexed: u32 = 0;
+    // Fires the one-time activation-split minute-alignment check on whichever
+    // partition straddles the split (decision 7).
+    let mut checked_alignment = false;
 
     let existing_assets = sink.load_assets().await?;
     let mut registry = AssetRegistry::from_existing(existing_assets);
@@ -195,6 +198,40 @@ pub async fn execute(
                 Phase::Running,
             ) {
                 sink.write_progress(&u).await?;
+            }
+
+            // One-time minute-alignment check at the activation split (decision
+            // 7). The boundary partition is synced whole, so both ledgers
+            // straddling the split are on disk here even though only one side is
+            // in-range. If activation-1 and activation land in the same
+            // candle-minute, that minute's source='sdex' candle is written
+            // partially by BOTH range runs (ReplacingMergeTree replaces, not
+            // sums) → silent undercount. Warn (best-effort) rather than fail: it
+            // is a single boundary minute and the fix is a targeted reconcile.
+            if !checked_alignment
+                && activation_ledger > 1
+                && partition.start <= activation_ledger
+                && activation_ledger <= partition.end
+            {
+                checked_alignment = true;
+                if let (Some(m_prev), Some(m_act)) = (
+                    peek_ledger_minute(partition, activation_ledger - 1, temp_dir).await,
+                    peek_ledger_minute(partition, activation_ledger, temp_dir).await,
+                ) {
+                    if m_prev == m_act {
+                        warn!(
+                            activation_ledger,
+                            prev_ledger = activation_ledger - 1,
+                            straddled_minute = m_act,
+                            "activation split is NOT minute-aligned: the ledgers on either side of the split share one candle-minute, so its source='sdex' candle is written partially by both range runs (RMT replaces, not sums) and undercounts — reconcile that single minute from one pass after both runs, or accept the documented boundary artifact"
+                        );
+                    } else {
+                        info!(
+                            activation_ledger,
+                            "activation split is minute-aligned — no straddled sdex candle at the boundary"
+                        );
+                    }
+                }
             }
         } else {
             info!(

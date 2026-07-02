@@ -6,7 +6,7 @@ use tracing::{info, warn};
 
 use prices_ingest_core::{
     AssetRegistry, CandleAccumulator, OhlcvCandle, Registries, UnresolvedPoolSwap, extract_trades,
-    process_ledger, raw_trade_to_tick,
+    ledger_sequence, process_ledger, raw_trade_to_tick,
 };
 
 use crate::error::BackfillError;
@@ -217,4 +217,23 @@ fn ledger_minute(lcm: &stellar_xdr::curr::LedgerCloseMeta) -> u32 {
         stellar_xdr::curr::LedgerCloseMeta::V2(v) => v.ledger_header.header.scp_value.close_time.0,
     };
     ((closed_at as u32) / 60) * 60
+}
+
+/// Best-effort decode of a single ledger's candle-minute straight from its
+/// on-disk partition file, without going through the indexing path. Used by the
+/// minute-alignment guard to peek at the ledger on the *other* side of the
+/// activation split — which is present on disk (the whole partition folder is
+/// synced) even though it is outside the run's in-range window. Returns `None`
+/// if the file is absent or the ledger isn't in it (archive tail-lag, a
+/// partition-aligned split), so the guard simply skips rather than fails.
+pub async fn peek_ledger_minute(partition: &Partition, seq: u32, temp_dir: &Path) -> Option<u32> {
+    let path = partition.local_ledger_path(seq, temp_dir);
+    let compressed = tokio::fs::read(&path).await.ok()?;
+    let xdr_bytes = xdr_parser::decompress_zstd(&compressed).ok()?;
+    let batch = xdr_parser::deserialize_batch(&xdr_bytes).ok()?;
+    batch
+        .ledger_close_metas
+        .iter()
+        .find(|lcm| ledger_sequence(lcm) == seq)
+        .map(ledger_minute)
 }

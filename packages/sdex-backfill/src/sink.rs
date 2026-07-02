@@ -402,13 +402,15 @@ fn resolve_current(update: Current, existing: Option<u64>) -> u64 {
     }
 }
 
-/// Never downgrade a stored `completed` back to `running`: a separate run may
-/// have already finished this stream (e.g. the sdex-only pass completes the
-/// archive before a combined pass touches it). Any other transition takes the
-/// update's status.
+/// Never downgrade a stored `completed` back to `running` or `paused`: a
+/// separate run may have already finished this stream (e.g. the sdex-only pass
+/// completes the archive before a combined pass touches it, or leaves it
+/// `paused`). Any other transition takes the update's status.
 fn resolve_status(existing: Option<&str>, update: ProgressStatus) -> ProgressStatus {
     match (existing, update) {
-        (Some("completed"), ProgressStatus::Running) => ProgressStatus::Completed,
+        (Some("completed"), ProgressStatus::Running | ProgressStatus::Paused) => {
+            ProgressStatus::Completed
+        }
         _ => update,
     }
 }
@@ -472,10 +474,19 @@ mod tests {
             resolve_status(Some("completed"), ProgressStatus::Running),
             ProgressStatus::Completed
         );
-        // Running → completed and fresh rows take the update as-is.
+        // A combined pass leaving `paused` must not un-complete a finished stream.
+        assert_eq!(
+            resolve_status(Some("completed"), ProgressStatus::Paused),
+            ProgressStatus::Completed
+        );
+        // Running → completed, running → paused, and fresh rows take the update.
         assert_eq!(
             resolve_status(Some("running"), ProgressStatus::Completed),
             ProgressStatus::Completed
+        );
+        assert_eq!(
+            resolve_status(Some("running"), ProgressStatus::Paused),
+            ProgressStatus::Paused
         );
         assert_eq!(
             resolve_status(None, ProgressStatus::Running),

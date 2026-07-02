@@ -24,6 +24,11 @@ pub const SOROBAN_AMM: &str = "soroban_amm";
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum ProgressStatus {
     Running,
+    /// The stream is resting between the two range runs — recent data is landed
+    /// but the other range hasn't started. Set on `sdex_archive` when the
+    /// combined pass finishes so the §5.6 `last_push_at` freshness alarm does not
+    /// false-fire during the (possibly long) gap before the sdex-only tail run.
+    Paused,
     Completed,
 }
 
@@ -32,6 +37,7 @@ impl ProgressStatus {
     pub fn as_ch(self) -> &'static str {
         match self {
             ProgressStatus::Running => "running",
+            ProgressStatus::Paused => "paused",
             ProgressStatus::Completed => "completed",
         }
     }
@@ -97,7 +103,8 @@ pub struct Observed {
 ///
 /// - **Combined** (`[activation, tip]`) advances `soroban_amm` forward and — so
 ///   recent SDEX is not under-reported — carries `sdex_archive.current` down to
-///   the run floor at completion (its window/target still update live).
+///   the run floor at completion, leaving that stream `paused` (the "between the
+///   two runs" resting state) so the freshness alarm doesn't false-fire.
 /// - **SdexOnly** (`[1, activation)`) advances only `sdex_archive`; it completes
 ///   the stream only when the run covered the whole pre-Soroban tail — started
 ///   at genesis (`start == 1`) and reached the activation boundary.
@@ -142,10 +149,12 @@ pub fn progress_updates(
                 // Backward stream: recent SDEX is reflected down to the run
                 // floor once the pass is done (the floor is `start`, not a
                 // hard-coded `activation`, so a partial `[X, tip]` window does
-                // not over-claim coverage below `X`). Stays put mid-run. Never
-                // `completed` here — the pre-Soroban tail remains for the
-                // SdexOnly run, and the sink will not downgrade a stored
-                // `completed` a prior sdex-only run may have set.
+                // not over-claim coverage below `X`). Stays put mid-run. At
+                // completion the stream goes `paused` — the combined pass is done
+                // but the pre-Soroban tail hasn't started, and this is exactly
+                // the "between the two runs" state (decision 6) that must not
+                // trip the freshness alarm. Never `completed` here; the sink also
+                // won't downgrade a stored `completed` a prior sdex-only run set.
                 ProgressUpdate {
                     task_name: SDEX_ARCHIVE,
                     start_ledger: 1,
@@ -154,7 +163,10 @@ pub fn progress_updates(
                         Phase::Running => Current::Keep,
                         Phase::Completed => Current::SetBackward(start as u64),
                     },
-                    status: ProgressStatus::Running,
+                    status: match phase {
+                        Phase::Running => ProgressStatus::Running,
+                        Phase::Completed => ProgressStatus::Paused,
+                    },
                     earliest_minute: earliest,
                     newest_minute: newest,
                 },
@@ -255,8 +267,8 @@ mod tests {
         // The AC: recent SDEX is reflected → oldest reflected = the run floor
         // (activation for a full combined pass). Backward-merged by the sink.
         assert_eq!(sdex.current_ledger, Current::SetBackward(ACTIVATION as u64));
-        // Not completed — the pre-Soroban tail still remains.
-        assert_eq!(sdex.status, ProgressStatus::Running);
+        // Not completed — the pre-Soroban tail still remains; paused between runs.
+        assert_eq!(sdex.status, ProgressStatus::Paused);
     }
 
     #[test]

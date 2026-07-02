@@ -207,18 +207,28 @@ the order only sets what `/backfill/status` shows during the run:
 
 **What `/backfill/status` shows.** The run advances **both** `backfill_progress`
 rows live: the combined run drives `soroban_amm` forward to `completed` **and**
-sets `sdex_archive.current = activation` (so recent SDEX is not under-reported);
-the sdex-only run walks `sdex_archive` toward genesis and marks it `completed`
-at ledger 1. Both rows also carry the covered `[earliest, newest]_data_available`
-time window. (The read-side `progress_pct` and timestamp exposure are finished
-in **task 0073**.)
+sets `sdex_archive.current = activation` (so recent SDEX is not under-reported),
+then leaves `sdex_archive` **`paused`** at completion — the resting "between the
+two runs" state, set automatically so the §"freshness" alarm does not false-fire
+while you prepare the tail run (no manual status flip needed). The sdex-only run
+un-pauses `sdex_archive`, walks it toward genesis, and marks it `completed` only
+when it started at ledger 1 **and** reached the activation boundary (a chunk that
+stops short stays `running`/`paused`). `current_ledger` is merged monotonically
+and a stored `completed` is never downgraded, so the two runs are safe in either
+order. Both rows also carry the covered `[earliest, newest]_data_available` time
+window. (The read-side `progress_pct` and timestamp exposure are finished in
+**task 0073**.)
 
 **The activation split is a seam.** The two SDEX ranges meet at activation —
 treat it like any backfill/live seam (see the seam section): make the sdex-only
 run's `--end` the **last ledger of a completed minute**, or accept one
-undercounted boundary minute (healed by **task 0065**). Set `--tip` to the live
-chain tip on the sdex-only run so `sdex_archive`'s progress is measured against
-the whole chain, not just the pre-Soroban range.
+undercounted boundary minute (healed by **task 0065**). The backfill checks this
+for you: on the partition straddling the split it decodes the two ledgers on
+either side and **logs a loud `WARN` naming the straddled minute** if the split
+is not minute-aligned (and an `INFO` confirming a clean boundary otherwise), so a
+boundary undercount is never silent. Set `--tip` to the live chain tip on the
+sdex-only run so `sdex_archive`'s progress is measured against the whole chain,
+not just the pre-Soroban range.
 
 **Discovered pool registry.** A combined run persists every pool it classifies
 to `prices.pool_registry` at run end and preloads it at run start — so a partial

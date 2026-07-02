@@ -150,9 +150,10 @@ async fn combined_then_sdex_progress_end_to_end() {
         completed_at_set(&c, SOROBAN_AMM).await,
         "soroban completed_at set"
     );
-    // The AC: recent SDEX reflected → oldest reflected = activation, still running.
+    // The AC: recent SDEX reflected → oldest reflected = activation; the stream
+    // is paused between the two runs (decision 6), not running.
     assert_eq!(current(&c, SDEX_ARCHIVE).await, ACTIVATION as u64);
-    assert_eq!(status(&c, SDEX_ARCHIVE).await, "running");
+    assert_eq!(status(&c, SDEX_ARCHIVE).await, "paused");
     // started_at preserved across the read-modify-write.
     assert_eq!(
         ts(&c, SOROBAN_AMM, "started_at").await,
