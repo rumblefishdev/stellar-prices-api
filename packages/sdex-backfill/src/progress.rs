@@ -37,13 +37,26 @@ impl ProgressStatus {
     }
 }
 
-/// What to do with `current_ledger` for a row.
+/// What to do with `current_ledger` for a row. The two `Set*` variants are
+/// merged **monotonically against the stored value by the sink**, so an
+/// out-of-order, partial, or resumed run can never move `current_ledger` the
+/// wrong way (see [`crate::sink`]):
+///
+/// - [`Current::SetForward`] — a forward stream (`soroban_amm`, oldest→newest):
+///   the sink keeps `max(new, stored)`, so a resume never regresses it.
+/// - [`Current::SetBackward`] — a backward stream (`sdex_archive`, tip→genesis):
+///   the sink keeps `min(new, stored)` (treating the seeded `0` placeholder as
+///   unset), so a combined pass never un-does an archive a prior `sdex-only`
+///   run already carried down to genesis.
+/// - [`Current::Keep`] — leave the stored value untouched (the backward stream
+///   mid-run, where no per-partition value is truthful).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Current {
-    /// Set it to this ledger (the honest forward/terminal value).
-    Set(u64),
-    /// Leave the stored value untouched — the backward `sdex_archive` mid-run
-    /// case, where no per-partition value is truthful.
+    /// Forward watermark: sink keeps `max(new, stored)`.
+    SetForward(u64),
+    /// Backward watermark: sink keeps `min(new, stored)`.
+    SetBackward(u64),
+    /// Leave the stored value untouched.
     Keep,
 }
 
@@ -83,10 +96,15 @@ pub struct Observed {
 /// observed watermarks, and the phase.
 ///
 /// - **Combined** (`[activation, tip]`) advances `soroban_amm` forward and — so
-///   recent SDEX is not under-reported — sets `sdex_archive.current = activation`
-///   at completion (its window/target still update live).
+///   recent SDEX is not under-reported — carries `sdex_archive.current` down to
+///   the run floor at completion (its window/target still update live).
 /// - **SdexOnly** (`[1, activation)`) advances only `sdex_archive`; it completes
 ///   the stream only when the run reached genesis (`start == 1`).
+///
+/// A stream is only marked `completed` when the run actually reached the bound
+/// it targets — a partial or resumed sub-window stays `running`, and the sink's
+/// monotonic merge (plus its refusal to downgrade a stored `completed`) makes
+/// these updates safe to apply in any run order.
 pub fn progress_updates(
     mode: ExtractMode,
     start: u32,
@@ -97,59 +115,72 @@ pub fn progress_updates(
 ) -> Vec<ProgressUpdate> {
     let (earliest, newest) = (observed.earliest_minute, observed.newest_minute);
     match mode {
-        ExtractMode::Combined => vec![
-            // Forward stream: current_ledger = newest reflected.
-            ProgressUpdate {
-                task_name: SOROBAN_AMM,
-                start_ledger: activation as u64,
-                target_ledger: tip as u64,
-                current_ledger: Current::Set(match phase {
-                    Phase::Running => observed.highest_indexed as u64,
-                    // Clamp to tip so a partition whose `last` overshoots the
-                    // range never reports past the denominator.
-                    Phase::Completed => (observed.highest_indexed as u64).min(tip as u64),
-                }),
-                status: match phase {
-                    Phase::Running => ProgressStatus::Running,
-                    Phase::Completed => ProgressStatus::Completed,
+        ExtractMode::Combined => {
+            // Completed only once the forward pass actually reached the tip — a
+            // partial / resumed sub-window (or a run that indexed nothing) stays
+            // `running` instead of falsely claiming the whole stream is done.
+            let reached_tip =
+                observed.highest_indexed > 0 && observed.highest_indexed as u64 >= tip as u64;
+            // Forward watermark, always clamped to the tip denominator so a
+            // partition whose `last` overshoots the range never reports past it.
+            let soroban_current = (observed.highest_indexed as u64).min(tip as u64);
+            vec![
+                // Forward stream: current_ledger = newest reflected.
+                ProgressUpdate {
+                    task_name: SOROBAN_AMM,
+                    start_ledger: activation as u64,
+                    target_ledger: tip as u64,
+                    current_ledger: Current::SetForward(soroban_current),
+                    status: match phase {
+                        Phase::Completed if reached_tip => ProgressStatus::Completed,
+                        _ => ProgressStatus::Running,
+                    },
+                    earliest_minute: earliest,
+                    newest_minute: newest,
                 },
-                earliest_minute: earliest,
-                newest_minute: newest,
-            },
-            // Backward stream: only reflects that recent SDEX exists once the
-            // combined pass is done → current jumps to activation at completion,
-            // stays put mid-run. Never `completed` here (the pre-Soroban tail
-            // remains for the SdexOnly run).
-            ProgressUpdate {
+                // Backward stream: recent SDEX is reflected down to the run
+                // floor once the pass is done (the floor is `start`, not a
+                // hard-coded `activation`, so a partial `[X, tip]` window does
+                // not over-claim coverage below `X`). Stays put mid-run. Never
+                // `completed` here — the pre-Soroban tail remains for the
+                // SdexOnly run, and the sink will not downgrade a stored
+                // `completed` a prior sdex-only run may have set.
+                ProgressUpdate {
+                    task_name: SDEX_ARCHIVE,
+                    start_ledger: 1,
+                    target_ledger: tip as u64,
+                    current_ledger: match phase {
+                        Phase::Running => Current::Keep,
+                        Phase::Completed => Current::SetBackward(start as u64),
+                    },
+                    status: ProgressStatus::Running,
+                    earliest_minute: earliest,
+                    newest_minute: newest,
+                },
+            ]
+        }
+        ExtractMode::SdexOnly => {
+            // Genesis reached only when the run walked down to ledger 1 and
+            // actually indexed something.
+            let reached_genesis = start == 1 && observed.highest_indexed > 0;
+            vec![ProgressUpdate {
                 task_name: SDEX_ARCHIVE,
                 start_ledger: 1,
                 target_ledger: tip as u64,
+                // Backward: oldest reflected = the run's floor, known only at
+                // the end.
                 current_ledger: match phase {
                     Phase::Running => Current::Keep,
-                    Phase::Completed => Current::Set(activation as u64),
+                    Phase::Completed => Current::SetBackward(start as u64),
                 },
-                status: ProgressStatus::Running,
+                status: match phase {
+                    Phase::Completed if reached_genesis => ProgressStatus::Completed,
+                    _ => ProgressStatus::Running,
+                },
                 earliest_minute: earliest,
                 newest_minute: newest,
-            },
-        ],
-        ExtractMode::SdexOnly => vec![ProgressUpdate {
-            task_name: SDEX_ARCHIVE,
-            start_ledger: 1,
-            target_ledger: tip as u64,
-            // Backward: oldest reflected = the run's floor, known only at the
-            // end. `completed` only when the run reached genesis.
-            current_ledger: match phase {
-                Phase::Running => Current::Keep,
-                Phase::Completed => Current::Set(start as u64),
-            },
-            status: match phase {
-                Phase::Completed if start == 1 => ProgressStatus::Completed,
-                _ => ProgressStatus::Running,
-            },
-            earliest_minute: earliest,
-            newest_minute: newest,
-        }],
+            }]
+        }
     }
 }
 
@@ -189,7 +220,7 @@ mod tests {
         let amm = row(&rows, SOROBAN_AMM);
         assert_eq!(amm.start_ledger, ACTIVATION as u64);
         assert_eq!(amm.target_ledger, TIP as u64);
-        assert_eq!(amm.current_ledger, Current::Set(50_600_000));
+        assert_eq!(amm.current_ledger, Current::SetForward(50_600_000));
         assert_eq!(amm.status, ProgressStatus::Running);
 
         // sdex_archive: no honest mid-run current; window still flows.
@@ -211,14 +242,61 @@ mod tests {
             Phase::Completed,
         );
         let amm = row(&rows, SOROBAN_AMM);
-        assert_eq!(amm.current_ledger, Current::Set(TIP as u64));
+        assert_eq!(amm.current_ledger, Current::SetForward(TIP as u64));
         assert_eq!(amm.status, ProgressStatus::Completed);
 
         let sdex = row(&rows, SDEX_ARCHIVE);
-        // The AC: recent SDEX is reflected → oldest reflected = activation.
-        assert_eq!(sdex.current_ledger, Current::Set(ACTIVATION as u64));
+        // The AC: recent SDEX is reflected → oldest reflected = the run floor
+        // (activation for a full combined pass). Backward-merged by the sink.
+        assert_eq!(sdex.current_ledger, Current::SetBackward(ACTIVATION as u64));
         // Not completed — the pre-Soroban tail still remains.
         assert_eq!(sdex.status, ProgressStatus::Running);
+    }
+
+    #[test]
+    fn combined_partial_window_does_not_complete_soroban() {
+        // A combined sub-window that stops short of the tip must NOT mark the
+        // Soroban stream completed, and its sdex_archive floor is `start`, not a
+        // hard-coded activation.
+        let rows = progress_updates(
+            ExtractMode::Combined,
+            50_500_000, // start after activation
+            TIP,        // tip denominator
+            ACTIVATION,
+            observed(50_600_000), // stopped well short of tip
+            Phase::Completed,
+        );
+        let amm = row(&rows, SOROBAN_AMM);
+        assert_eq!(amm.current_ledger, Current::SetForward(50_600_000));
+        assert_eq!(
+            amm.status,
+            ProgressStatus::Running,
+            "did not reach tip → not completed"
+        );
+
+        let sdex = row(&rows, SDEX_ARCHIVE);
+        assert_eq!(
+            sdex.current_ledger,
+            Current::SetBackward(50_500_000),
+            "backward floor = run start, not activation"
+        );
+    }
+
+    #[test]
+    fn combined_completed_with_nothing_indexed_stays_running() {
+        // Degenerate resume where every remaining partition was S3-incomplete:
+        // highest_indexed never advanced past 0 → must not complete at 0.
+        let rows = progress_updates(
+            ExtractMode::Combined,
+            ACTIVATION,
+            TIP,
+            ACTIVATION,
+            observed(0),
+            Phase::Completed,
+        );
+        let amm = row(&rows, SOROBAN_AMM);
+        assert_eq!(amm.current_ledger, Current::SetForward(0));
+        assert_eq!(amm.status, ProgressStatus::Running);
     }
 
     #[test]
@@ -234,7 +312,7 @@ mod tests {
         );
         assert_eq!(
             row(&rows, SOROBAN_AMM).current_ledger,
-            Current::Set(TIP as u64)
+            Current::SetForward(TIP as u64)
         );
     }
 
@@ -266,7 +344,7 @@ mod tests {
             Phase::Completed,
         );
         let sdex = row(&rows, SDEX_ARCHIVE);
-        assert_eq!(sdex.current_ledger, Current::Set(1));
+        assert_eq!(sdex.current_ledger, Current::SetBackward(1));
         assert_eq!(sdex.status, ProgressStatus::Completed);
     }
 
@@ -282,7 +360,7 @@ mod tests {
             Phase::Completed,
         );
         let sdex = row(&rows, SDEX_ARCHIVE);
-        assert_eq!(sdex.current_ledger, Current::Set(40_000_000));
+        assert_eq!(sdex.current_ledger, Current::SetBackward(40_000_000));
         assert_eq!(sdex.status, ProgressStatus::Running);
     }
 

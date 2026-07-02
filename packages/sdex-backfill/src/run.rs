@@ -39,13 +39,17 @@ pub async fn execute(
         // Forward pool discovery is only complete when the window begins at
         // activation: a pool's factory-create event must be decoded before any
         // of its swaps. A window that starts *after* activation never sees the
-        // create events of earlier pools, so their swaps are silently dropped
-        // (soroban.rs treats an unregistered pool as skip) unless a persisted
-        // pool registry is loaded first (not yet wired up).
+        // create events of earlier pools, so their swaps cannot be classified
+        // unless a persisted pool registry is preloaded (decision #4; done at
+        // run start from prices.pool_registry). Any swap for a still-unresolved
+        // pool is recorded to prices.unresolved_pools (not silently dropped) and
+        // — because a post-activation start makes such gaps expected — does not
+        // fail the run. Seed prices.pool_registry from a prior full run to
+        // actually capture that volume.
         ExtractMode::Combined if start > activation_ledger => warn!(
             start,
             activation_ledger,
-            "combined mode starts after activation — pools created before start are not discovered; their AMM swaps will be silently dropped without a preloaded pool registry"
+            "combined mode starts after activation — pools created before start are resolved only from a preloaded pool_registry; swaps for any unresolved pool are recorded to prices.unresolved_pools (not dropped) but their volume is lost unless the registry was seeded"
         ),
         // SdexOnly over the Soroban era silently drops AMM swaps.
         ExtractMode::SdexOnly if end >= activation_ledger => warn!(
@@ -213,9 +217,50 @@ pub async fn execute(
     // so a partial re-backfill / the live processor can load it.
     sink.write_pool_registry(&reg).await?;
 
-    // Terminal progress update: soroban_amm → completed; sdex_archive jumps to
-    // its oldest reflected ledger (activation for the combined run, the run
-    // floor for the sdex-only run) and completes only if it reached genesis.
+    // Re-check the swaps that hit an unregistered pool against the *final*
+    // registry and record them to prices.unresolved_pools so the operator can
+    // investigate. Records are written either way; only the exit status reflects
+    // a GENUINE gap.
+    //
+    // A window that begins at or before activation should — by forward-discovery
+    // construction — have seen every pool's factory-create before its swaps, so
+    // a still-unresolved pool is a true extractor gap that must fail the run. A
+    // window that begins AFTER activation legitimately cannot see the create
+    // events of earlier pools (the guard above warns about exactly this;
+    // decision #4 seeds prices.pool_registry to cover them), so its
+    // still-unresolved pools are expected — recorded, not fatal — matching the
+    // guard's "operator may have a reason".
+    let unresolved = aggregate_unresolved(&totals.unresolved, &reg);
+    let fatal_gaps = if unresolved.is_empty() {
+        0
+    } else {
+        let genuine_gaps = unresolved
+            .iter()
+            .filter(|u| u.still_unresolved == 1)
+            .count();
+        sink.write_unresolved_pools(&unresolved).await?;
+        let fatal = if start <= activation_ledger {
+            genuine_gaps
+        } else {
+            0
+        };
+        warn!(
+            contracts = unresolved.len(),
+            genuine_gaps, fatal, "unresolved AMM pools recorded to prices.unresolved_pools"
+        );
+        fatal
+    };
+
+    // Fail BEFORE writing the terminal `completed` progress, so a run that
+    // aborts on a genuine gap is never reported as completed on /backfill/status.
+    if fatal_gaps > 0 {
+        return Err(BackfillError::UnresolvedPools(fatal_gaps));
+    }
+
+    // Terminal progress update: soroban_amm completes only if the forward pass
+    // reached the tip; sdex_archive carries its backward floor down to the run
+    // start (the sink merges both monotonically and won't downgrade a stored
+    // `completed`), completing only when a sdex-only run reached genesis.
     let observed = Observed {
         highest_indexed,
         earliest_minute: totals.earliest_minute,
@@ -234,27 +279,6 @@ pub async fn execute(
 
     let elapsed = run_start.elapsed();
     print_run_summary(todo.len(), &totals, partitions_skipped_s3, elapsed);
-
-    // Re-check the swaps that hit an unregistered pool against the *final*
-    // registry, record them to prices.unresolved_pools, and fail the run if any
-    // pool is a genuine gap (still absent after the whole forward pass). The
-    // rows are written either way so the operator can investigate; only the
-    // exit status reflects the gap.
-    let unresolved = aggregate_unresolved(&totals.unresolved, &reg);
-    if !unresolved.is_empty() {
-        let genuine_gaps = unresolved
-            .iter()
-            .filter(|u| u.still_unresolved == 1)
-            .count();
-        sink.write_unresolved_pools(&unresolved).await?;
-        warn!(
-            contracts = unresolved.len(),
-            genuine_gaps, "unresolved AMM pools recorded to prices.unresolved_pools"
-        );
-        if genuine_gaps > 0 {
-            return Err(BackfillError::UnresolvedPools(genuine_gaps));
-        }
-    }
 
     Ok(())
 }

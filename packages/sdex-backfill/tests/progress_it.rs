@@ -226,4 +226,31 @@ async fn combined_then_sdex_progress_end_to_end() {
     );
     // soroban_amm untouched by the sdex-only run.
     assert_eq!(current(&c, SOROBAN_AMM).await, TIP as u64);
+
+    // --- Phase 6: a later combined pass must NOT regress or un-complete the
+    // archive the sdex-only run already carried down to genesis (the
+    // chronological-order bug: combined completion used to overwrite
+    // sdex_archive back to current=activation, status='running').
+    write(
+        &sink,
+        ExtractMode::Combined,
+        ACTIVATION,
+        Observed {
+            highest_indexed: TIP,
+            earliest_minute: Some(T0 - 500_000),
+            newest_minute: Some(T1),
+        },
+        Phase::Completed,
+    )
+    .await;
+    assert_eq!(
+        current(&c, SDEX_ARCHIVE).await,
+        1,
+        "backward current must not regress from genesis back up to activation"
+    );
+    assert_eq!(
+        status(&c, SDEX_ARCHIVE).await,
+        "completed",
+        "a stored 'completed' must never be downgraded to 'running'"
+    );
 }

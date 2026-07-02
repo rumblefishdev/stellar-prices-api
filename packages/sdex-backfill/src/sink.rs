@@ -22,7 +22,7 @@ use tracing::info;
 pub use prices_ingest_core::OracleSample;
 
 use crate::error::BackfillError;
-use crate::progress::{Current, ProgressUpdate};
+use crate::progress::{Current, ProgressStatus, ProgressUpdate};
 
 pub struct Sink {
     writer: OhlcvWriter,
@@ -193,13 +193,16 @@ impl Sink {
     /// read-modify-write: the new row (fresh `updated_at = now()`) replaces the
     /// old one on merge.
     ///
-    /// Read-modify preserves `started_at`, honours [`Current::Keep`] (leave the
-    /// stored `current_ledger` — the backward `sdex_archive` mid-run case), and
-    /// widens the `[earliest, newest]_data_available` window monotonically (min
-    /// of earliest, max of newest) so an out-of-order or partial run never
-    /// narrows the covered span. `last_push_at` / `updated_at` (and
-    /// `completed_at` when completing) are stamped server-side with `now()` so
-    /// no wall-clock is read in-process.
+    /// Read-modify preserves `started_at`; merges `current_ledger` monotonically
+    /// against the stored value ([`resolve_current`]: forward stream keeps the
+    /// max, backward stream the min, [`Current::Keep`] leaves it untouched) so a
+    /// partial / resumed / out-of-order run never regresses it; never downgrades
+    /// a stored `completed` back to `running` ([`resolve_status`]); and widens
+    /// the `[earliest, newest]_data_available` window monotonically (min of
+    /// earliest, max of newest) so the covered span never narrows. `last_push_at`
+    /// / `updated_at` are stamped server-side with `now()`; `completed_at` is
+    /// stamped once on the transition into `completed` and preserved thereafter,
+    /// so no wall-clock is read in-process.
     pub async fn write_progress(&self, update: &ProgressUpdate) -> Result<(), BackfillError> {
         retry_with_backoff(
             &DEFAULT_BACKOFF_MS,
@@ -220,7 +223,9 @@ impl Sink {
             .client()
             .query(
                 "SELECT current_ledger, \
+                        toString(status) AS status, \
                         toUnixTimestamp(started_at) AS started_at, \
+                        toUnixTimestamp(completed_at) AS completed, \
                         toUnixTimestamp(earliest_data_available) AS earliest, \
                         toUnixTimestamp(newest_data_available) AS newest \
                  FROM prices.backfill_progress FINAL WHERE task_name = ?",
@@ -231,12 +236,17 @@ impl Sink {
             .into_iter()
             .next();
 
-        // current_ledger: Keep preserves the stored value (backward stream mid
-        // run); on a fresh row Keep falls back to 0 (the seeded placeholder).
-        let current = match update.current_ledger {
-            Current::Set(v) => v,
-            Current::Keep => existing.as_ref().map(|e| e.current_ledger).unwrap_or(0),
-        };
+        // current_ledger merged monotonically against the stored value: a
+        // forward stream keeps the max, a backward stream the min, so a partial
+        // / resumed / out-of-order run can never move it the wrong way (nor
+        // un-do an archive a prior run already carried down to genesis).
+        let current = resolve_current(
+            update.current_ledger,
+            existing.as_ref().map(|e| e.current_ledger),
+        );
+        // Never downgrade a stored `completed` back to `running` — a separate
+        // run may have already finished this stream.
+        let status = resolve_status(existing.as_ref().map(|e| e.status.as_str()), update.status);
         // Monotonic window: never narrow what a prior run already recorded.
         let earliest = merge_min(
             existing.as_ref().and_then(|e| e.earliest),
@@ -252,9 +262,15 @@ impl Sink {
             Some(e) => format!("toDateTime({})", e.started_at),
             None => "now()".to_string(),
         };
-        let completed_at_sql = match update.status {
-            crate::progress::ProgressStatus::Completed => "now()",
-            _ => "NULL",
+        // completed_at: stamp `now()` only on the transition INTO completed;
+        // preserve the original stamp if the stream was already completed; NULL
+        // while running (so a mid-run write never wipes a real completion time).
+        let completed_at_sql = match status {
+            ProgressStatus::Completed => match existing.as_ref().and_then(|e| e.completed) {
+                Some(ts) => format!("toDateTime({ts})"),
+                None => "now()".to_string(),
+            },
+            _ => "NULL".to_string(),
         };
         let earliest_sql = earliest.map_or("NULL".to_string(), |e| format!("toDateTime({e})"));
         let newest_sql = newest.map_or("NULL".to_string(), |n| format!("toDateTime({n})"));
@@ -274,7 +290,7 @@ impl Sink {
             start = update.start_ledger,
             target = update.target_ledger,
             current = current,
-            status = update.status.as_ch(),
+            status = status.as_ch(),
         );
         self.writer.client().query(&sql).execute().await
     }
@@ -340,14 +356,45 @@ struct LedgerRow {
     sequence: u32,
 }
 
-/// Mergeable state read back from an existing `backfill_progress` row.
-/// `earliest` / `newest` are `toUnixTimestamp(Nullable(DateTime))` → `Option`.
+/// Mergeable state read back from an existing `backfill_progress` row. Field
+/// order MUST match the `SELECT` column order in `write_progress_once` (the
+/// clickhouse `Row` derive binds positionally). `completed` / `earliest` /
+/// `newest` are `toUnixTimestamp(Nullable(DateTime))` → `Option`.
 #[derive(Debug, Row, Deserialize)]
 struct ExistingProgress {
     current_ledger: u64,
+    status: String,
     started_at: u32,
+    completed: Option<u32>,
     earliest: Option<u32>,
     newest: Option<u32>,
+}
+
+/// Resolve the `current_ledger` to write, merged monotonically against the
+/// stored value so a partial / resumed / out-of-order run never moves it the
+/// wrong way. A forward stream keeps `max(new, stored)`; a backward stream keeps
+/// `min(new, stored)`, treating the seeded `0` (never a real reflected ledger —
+/// genesis is 1) as unset. `Keep` preserves the stored value (0 on a fresh row).
+fn resolve_current(update: Current, existing: Option<u64>) -> u64 {
+    match update {
+        Current::SetForward(v) => existing.map_or(v, |e| e.max(v)),
+        Current::SetBackward(v) => match existing {
+            Some(e) if e != 0 => e.min(v),
+            _ => v,
+        },
+        Current::Keep => existing.unwrap_or(0),
+    }
+}
+
+/// Never downgrade a stored `completed` back to `running`: a separate run may
+/// have already finished this stream (e.g. the sdex-only pass completes the
+/// archive before a combined pass touches it). Any other transition takes the
+/// update's status.
+fn resolve_status(existing: Option<&str>, update: ProgressStatus) -> ProgressStatus {
+    match (existing, update) {
+        (Some("completed"), ProgressStatus::Running) => ProgressStatus::Completed,
+        _ => update,
+    }
 }
 
 /// Lowest of two optional minute watermarks (monotonic earliest).
@@ -368,7 +415,55 @@ fn merge_max(a: Option<u32>, b: Option<u32>) -> Option<u32> {
 
 #[cfg(test)]
 mod tests {
-    use super::{merge_max, merge_min};
+    use super::{merge_max, merge_min, resolve_current, resolve_status};
+    use crate::progress::{Current, ProgressStatus};
+
+    #[test]
+    fn forward_current_never_regresses() {
+        // Resume that indexed less than a prior run keeps the higher watermark.
+        assert_eq!(resolve_current(Current::SetForward(50), Some(100)), 100);
+        assert_eq!(resolve_current(Current::SetForward(100), Some(50)), 100);
+        assert_eq!(resolve_current(Current::SetForward(42), None), 42);
+    }
+
+    #[test]
+    fn backward_current_never_regresses_and_ignores_placeholder_zero() {
+        // A combined pass (floor=activation) must not un-do a completed archive
+        // already carried down to genesis (current=1).
+        assert_eq!(
+            resolve_current(Current::SetBackward(50_463_000), Some(1)),
+            1
+        );
+        // Lower floor wins going backward.
+        assert_eq!(resolve_current(Current::SetBackward(10), Some(100)), 10);
+        // Seeded 0 placeholder is treated as unset, not as "reached genesis".
+        assert_eq!(resolve_current(Current::SetBackward(500), Some(0)), 500);
+        assert_eq!(resolve_current(Current::SetBackward(500), None), 500);
+    }
+
+    #[test]
+    fn keep_preserves_stored_current() {
+        assert_eq!(resolve_current(Current::Keep, Some(123)), 123);
+        assert_eq!(resolve_current(Current::Keep, None), 0);
+    }
+
+    #[test]
+    fn status_never_downgrades_completed() {
+        // A mid-run running write over an already-completed stream stays done.
+        assert_eq!(
+            resolve_status(Some("completed"), ProgressStatus::Running),
+            ProgressStatus::Completed
+        );
+        // Running → completed and fresh rows take the update as-is.
+        assert_eq!(
+            resolve_status(Some("running"), ProgressStatus::Completed),
+            ProgressStatus::Completed
+        );
+        assert_eq!(
+            resolve_status(None, ProgressStatus::Running),
+            ProgressStatus::Running
+        );
+    }
 
     #[test]
     fn merge_min_takes_the_older_and_tolerates_gaps() {
