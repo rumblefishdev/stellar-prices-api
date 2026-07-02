@@ -15,12 +15,13 @@ use prices_ingest_core::canonical::AssetIdentity;
 use prices_ingest_core::{
     AssetRegistry, DEFAULT_BACKOFF_MS, OhlcvCandle, OhlcvWriter, UnresolvedPool, retry_with_backoff,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tracing::info;
 
 pub use prices_ingest_core::OracleSample;
 
 use crate::error::BackfillError;
+use crate::progress::{Current, ProgressUpdate};
 
 pub struct Sink {
     writer: OhlcvWriter,
@@ -134,6 +135,97 @@ impl Sink {
         .map_err(BackfillError::from)
     }
 
+    /// Upsert one `prices.backfill_progress` row from a [`ProgressUpdate`]
+    /// (task 0053 / decision 6). ReplacingMergeTree keyed by `task_name`, so we
+    /// read-modify-write: the new row (fresh `updated_at = now()`) replaces the
+    /// old one on merge.
+    ///
+    /// Read-modify preserves `started_at`, honours [`Current::Keep`] (leave the
+    /// stored `current_ledger` — the backward `sdex_archive` mid-run case), and
+    /// widens the `[earliest, newest]_data_available` window monotonically (min
+    /// of earliest, max of newest) so an out-of-order or partial run never
+    /// narrows the covered span. `last_push_at` / `updated_at` (and
+    /// `completed_at` when completing) are stamped server-side with `now()` so
+    /// no wall-clock is read in-process.
+    pub async fn write_progress(&self, update: &ProgressUpdate) -> Result<(), BackfillError> {
+        retry_with_backoff(
+            &DEFAULT_BACKOFF_MS,
+            |_| true,
+            || async { self.write_progress_once(update).await },
+        )
+        .await
+        .map(|_| ())
+        .map_err(BackfillError::from)
+    }
+
+    async fn write_progress_once(
+        &self,
+        update: &ProgressUpdate,
+    ) -> Result<(), clickhouse::error::Error> {
+        let existing = self
+            .writer
+            .client()
+            .query(
+                "SELECT current_ledger, \
+                        toUnixTimestamp(started_at) AS started_at, \
+                        toUnixTimestamp(earliest_data_available) AS earliest, \
+                        toUnixTimestamp(newest_data_available) AS newest \
+                 FROM prices.backfill_progress FINAL WHERE task_name = ?",
+            )
+            .bind(update.task_name)
+            .fetch_all::<ExistingProgress>()
+            .await?
+            .into_iter()
+            .next();
+
+        // current_ledger: Keep preserves the stored value (backward stream mid
+        // run); on a fresh row Keep falls back to 0 (the seeded placeholder).
+        let current = match update.current_ledger {
+            Current::Set(v) => v,
+            Current::Keep => existing.as_ref().map(|e| e.current_ledger).unwrap_or(0),
+        };
+        // Monotonic window: never narrow what a prior run already recorded.
+        let earliest = merge_min(
+            existing.as_ref().and_then(|e| e.earliest),
+            update.earliest_minute,
+        );
+        let newest = merge_max(
+            existing.as_ref().and_then(|e| e.newest),
+            update.newest_minute,
+        );
+
+        // Preserve started_at across updates; server `now()` seeds a fresh row.
+        let started_at_sql = match existing.as_ref() {
+            Some(e) => format!("toDateTime({})", e.started_at),
+            None => "now()".to_string(),
+        };
+        let completed_at_sql = match update.status {
+            crate::progress::ProgressStatus::Completed => "now()",
+            _ => "NULL",
+        };
+        let earliest_sql = earliest.map_or("NULL".to_string(), |e| format!("toDateTime({e})"));
+        let newest_sql = newest.map_or("NULL".to_string(), |n| format!("toDateTime({n})"));
+
+        // All interpolated values are numeric or from fixed-string constants
+        // (task_name, status) — no user input, so no injection surface. Datetimes
+        // are set server-side (now() / toDateTime(unix)) to avoid encoding a
+        // Rust DateTime.
+        let sql = format!(
+            "INSERT INTO prices.backfill_progress \
+             (task_name, start_ledger, target_ledger, current_ledger, status, \
+              last_push_at, earliest_data_available, newest_data_available, \
+              started_at, completed_at, updated_at) \
+             VALUES ('{task}', {start}, {target}, {current}, '{status}', \
+              now(), {earliest_sql}, {newest_sql}, {started_at_sql}, {completed_at_sql}, now())",
+            task = update.task_name,
+            start = update.start_ledger,
+            target = update.target_ledger,
+            current = current,
+            status = update.status.as_ch(),
+        );
+        self.writer.client().query(&sql).execute().await
+    }
+
     // --- backfill-only resume bookkeeping (prices.backfill_sdex_ledgers) ---
 
     pub async fn load_completed(
@@ -193,4 +285,51 @@ impl Sink {
 #[derive(Debug, Serialize, Row)]
 struct LedgerRow {
     sequence: u32,
+}
+
+/// Mergeable state read back from an existing `backfill_progress` row.
+/// `earliest` / `newest` are `toUnixTimestamp(Nullable(DateTime))` → `Option`.
+#[derive(Debug, Row, Deserialize)]
+struct ExistingProgress {
+    current_ledger: u64,
+    started_at: u32,
+    earliest: Option<u32>,
+    newest: Option<u32>,
+}
+
+/// Lowest of two optional minute watermarks (monotonic earliest).
+fn merge_min(a: Option<u32>, b: Option<u32>) -> Option<u32> {
+    match (a, b) {
+        (Some(x), Some(y)) => Some(x.min(y)),
+        (x, y) => x.or(y),
+    }
+}
+
+/// Highest of two optional minute watermarks (monotonic newest).
+fn merge_max(a: Option<u32>, b: Option<u32>) -> Option<u32> {
+    match (a, b) {
+        (Some(x), Some(y)) => Some(x.max(y)),
+        (x, y) => x.or(y),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{merge_max, merge_min};
+
+    #[test]
+    fn merge_min_takes_the_older_and_tolerates_gaps() {
+        assert_eq!(merge_min(Some(100), Some(50)), Some(50));
+        assert_eq!(merge_min(None, Some(50)), Some(50));
+        assert_eq!(merge_min(Some(100), None), Some(100));
+        assert_eq!(merge_min(None, None), None);
+    }
+
+    #[test]
+    fn merge_max_takes_the_newer_and_tolerates_gaps() {
+        assert_eq!(merge_max(Some(100), Some(50)), Some(100));
+        assert_eq!(merge_max(None, Some(50)), Some(50));
+        assert_eq!(merge_max(Some(100), None), Some(100));
+        assert_eq!(merge_max(None, None), None);
+    }
 }

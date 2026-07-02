@@ -10,6 +10,7 @@ use prices_ingest_core::{AssetRegistry, Registries, UnresolvedPool, UnresolvedPo
 use crate::error::BackfillError;
 use crate::ingest::{ExtractMode, PartitionStats, index_partition};
 use crate::partition::{Partition, partitions_for_range};
+use crate::progress::{Observed, Phase, progress_updates};
 use crate::sink::Sink;
 use crate::sync::{SyncOutcome, sync_partition};
 
@@ -22,6 +23,7 @@ pub async fn execute(
     keep_partitions: bool,
     mode: ExtractMode,
     activation_ledger: u32,
+    tip: u32,
 ) -> Result<(), BackfillError> {
     assert!(start <= end, "invalid range: start ({start}) > end ({end})");
 
@@ -92,6 +94,9 @@ pub async fn execute(
     let run_start = Instant::now();
     let mut totals = PartitionStats::default();
     let mut partitions_skipped_s3: usize = 0;
+    // Highest ledger fully indexed so far — the forward watermark that drives
+    // `soroban_amm.current_ledger` in the per-partition progress update.
+    let mut highest_indexed: u32 = 0;
 
     let existing_assets = sink.load_assets().await?;
     let mut registry = AssetRegistry::from_existing(existing_assets);
@@ -144,7 +149,33 @@ pub async fn execute(
             totals.oracle_rows += stats.oracle_rows;
             totals.candles_written += stats.candles_written;
             totals.total_bytes += stats.total_bytes;
+            totals.earliest_minute = min_opt(totals.earliest_minute, stats.earliest_minute);
+            totals.latest_minute = max_opt(totals.latest_minute, stats.latest_minute);
             totals.unresolved.append(&mut stats.unresolved);
+
+            // Forward watermark = this partition's clamped upper bound.
+            let (_, part_last) = partition.clamped(start, end);
+            highest_indexed = highest_indexed.max(part_last);
+
+            // Advance the progress row(s) live (Model B writes to Hetzner as we
+            // go, so /backfill/status is truthful in real time). sdex_archive's
+            // backward current_ledger stays put mid-run (Current::Keep); the
+            // covered time-window advances for both streams.
+            let observed = Observed {
+                highest_indexed,
+                earliest_minute: totals.earliest_minute,
+                newest_minute: totals.latest_minute,
+            };
+            for u in progress_updates(
+                mode,
+                start,
+                tip,
+                activation_ledger,
+                observed,
+                Phase::Running,
+            ) {
+                sink.write_progress(&u).await?;
+            }
         } else {
             info!(
                 partition = partition.start,
@@ -177,6 +208,25 @@ pub async fn execute(
 
     sink.write_assets(&registry).await?;
 
+    // Terminal progress update: soroban_amm → completed; sdex_archive jumps to
+    // its oldest reflected ledger (activation for the combined run, the run
+    // floor for the sdex-only run) and completes only if it reached genesis.
+    let observed = Observed {
+        highest_indexed,
+        earliest_minute: totals.earliest_minute,
+        newest_minute: totals.latest_minute,
+    };
+    for u in progress_updates(
+        mode,
+        start,
+        tip,
+        activation_ledger,
+        observed,
+        Phase::Completed,
+    ) {
+        sink.write_progress(&u).await?;
+    }
+
     let elapsed = run_start.elapsed();
     print_run_summary(todo.len(), &totals, partitions_skipped_s3, elapsed);
 
@@ -202,6 +252,22 @@ pub async fn execute(
     }
 
     Ok(())
+}
+
+/// Lowest of two optional minute watermarks (run-level earliest window edge).
+fn min_opt(a: Option<u32>, b: Option<u32>) -> Option<u32> {
+    match (a, b) {
+        (Some(x), Some(y)) => Some(x.min(y)),
+        (x, y) => x.or(y),
+    }
+}
+
+/// Highest of two optional minute watermarks (run-level newest window edge).
+fn max_opt(a: Option<u32>, b: Option<u32>) -> Option<u32> {
+    match (a, b) {
+        (Some(x), Some(y)) => Some(x.max(y)),
+        (x, y) => x.or(y),
+    }
 }
 
 /// Aggregate per-ledger unresolved-swap records by contract and re-check each

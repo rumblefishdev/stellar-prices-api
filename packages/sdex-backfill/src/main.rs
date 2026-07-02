@@ -3,6 +3,7 @@ mod error;
 mod ingest;
 mod obs;
 mod partition;
+mod progress;
 mod run;
 mod sink;
 mod sync;
@@ -26,6 +27,10 @@ async fn main() {
         }
     };
 
+    // The sdex_archive stream targets the live tip; --end is the tip in combined
+    // mode, so default there. For the sdex-only tail the operator passes --tip.
+    let tip = cli.tip.unwrap_or(cli.end);
+
     if let Err(err) = run::execute(
         &sink,
         &cli.temp_dir,
@@ -34,6 +39,7 @@ async fn main() {
         cli.keep_partitions,
         cli.mode,
         cli.activation_ledger,
+        tip,
     )
     .await
     {

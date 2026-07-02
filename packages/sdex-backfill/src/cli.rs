@@ -47,6 +47,15 @@ pub struct Cli {
     #[arg(long, default_value_t = SOROBAN_ACTIVATION_LEDGER)]
     pub activation_ledger: u32,
 
+    /// Chain tip — the `backfill_progress.target_ledger` denominator that makes
+    /// `progress_pct` meaningful. The `sdex_archive` stream always targets the
+    /// live tip; in `combined` mode `--end` *is* the tip, so this defaults to
+    /// `--end`. For the `sdex-only` run over `[1, activation)` pass the current
+    /// live tip explicitly so the archive's progress is measured against the
+    /// whole chain, not just the pre-Soroban range.
+    #[arg(long)]
+    pub tip: Option<u32>,
+
     /// Where to write `prices.*` rows: `local` (plaintext Docker CH) or
     /// `hetzner` (direct-write over mTLS, ADR 0009). `hetzner` needs a build
     /// with `--features aws-mtls`.
