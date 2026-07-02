@@ -367,9 +367,10 @@ export class EventBridgeStack extends cdk.Stack {
     });
     this.enrichmentFunction = enrichment.function;
 
-    // The worker publishes the spec §5 metrics (EnrichmentRowsEnriched,
+    // The worker publishes the enrichment metrics (EnrichmentRowsEnriched,
     // EnrichmentOracleMiss, EnrichmentRowsRemainingAtVolumeZero,
-    // EnrichmentBatchDurationMs) under the `Prices/Enrichment` namespace.
+    // EnrichmentRowsRemainingRecent, EnrichmentPassDurationMs, and a derived
+    // EnrichmentAvgBatchDurationMs) under the `Prices/Enrichment` namespace.
     // PutMetricData has no resource-level scoping, so it is `*` constrained to
     // that namespace. The ObservabilityStack alarms on these metrics.
     enrichment.role.addToPolicy(

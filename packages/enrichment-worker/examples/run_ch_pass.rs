@@ -24,6 +24,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         oracle_name: env_or("ORACLE_NAME", "reflector"),
         window_s: env_parse_or("FORWARD_FILL_WINDOW_S", 300),
         pivot_window_s: env_parse_or("PIVOT_WINDOW_S", 86_400),
+        recent_window_s: env_parse_or("ENRICH_RECENT_WINDOW_S", 14_400),
         batch_size: env_parse_or("BATCH_SIZE", 10_000),
         max_batches: env_parse_or("MAX_BATCHES", 20),
         one_shot: env_parse_or("ENRICHMENT_ONE_SHOT", false),

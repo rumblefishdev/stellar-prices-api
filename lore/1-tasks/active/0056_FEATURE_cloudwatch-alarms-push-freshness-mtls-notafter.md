@@ -36,6 +36,19 @@ history:
       pure-code M1 task. Two probe Lambda crates
       (backfill-freshness-probe, mtls-notafter-probe) + CloudWatch
       alarms + prices-ops-alarms SNS topic.
+  - date: 2026-07-02
+    status: active
+    who: claude
+    note: >
+      Enrichment-alarm findings subsection marked complete. All four
+      review findings on this task's stall alarm are resolved: #5 +
+      #7 (PR #66/#73 reviews, done worker-side in 0026) and #1 (recency
+      window 2h < 3h sustain, widened to 4h) + #2 (recent one-shot
+      collapse, accepted + documented) from the PR #74 follow-up review.
+      Commits 68f89c3 / bae273f / 0bf5068; verified 26 unit + 5 live-CH
+      ITs vs prod-pinned CH 26.3.10.60. Task stays active for the
+      deploy-gated operational remainder (ops-topic subscribe + 2 alarm
+      fire-tests).
 ---
 
 # CloudWatch alarms — SDEX push freshness + mTLS NotAfter
@@ -335,9 +348,14 @@ age out; ⑤ ops topic subscription documented as a per-env deploy step (Step 3.
    sustained 3×1h — which self-clears the instant a pass enriches ≥1 row, so a
    draining catch-up and a steady-state floor both read OK while a true stall
    fires. Residual (idle env + nonzero floor + no new enrichable rows for 3h can
-   trip, but self-clears) needs the worker's recency-bounded remaining metric to
-   excise fully; tracked under finding #5's `_1m`-bounded option. Finding #7
-   (`EnrichmentBatchDurationMs` is whole-pass, not per-batch) remains open.
+   trip, but self-clears) needed the worker's recency-bounded remaining metric to
+   excise fully. **Resolved in task 0026 (2026-07-02):** the worker now emits
+   `EnrichmentRowsRemainingRecent` (a `now()`-windowed volume-zero count that
+   excludes the deep-history floor) and this alarm's backlog term switched to it,
+   so an idle env reads 0 and no longer trips. Finding #7
+   (`EnrichmentBatchDurationMs` whole-pass, not per-batch) also **resolved in
+   0026**: renamed to `EnrichmentPassDurationMs` + derived
+   `EnrichmentAvgBatchDurationMs`.
 7. **mTLS probe reads `SystemTime::now()` for the clock.** Cert validity is
    absolute UTC, so the Lambda wall-clock is fine here (no CH involved).
 
@@ -354,6 +372,18 @@ age out; ⑤ ops topic subscription documented as a per-env deploy step (Step 3.
   and to avoid coupling alarm health to worker bundle health.
 
 ## Incoming from task 0026 (enrichment) — PR #66 code review
+
+> **✅ Findings section complete (2026-07-02).** All four enrichment-alarm
+> review findings that landed on this task are resolved: **#5** (alarm
+> latch/storm → progress-based signal + recency-bounded backlog) and **#7**
+> (`EnrichmentBatchDurationMs` misnamed → `EnrichmentPassDurationMs` +
+> `EnrichmentAvgBatchDurationMs`) from the PR #66/#73 reviews, plus **#1**
+> (recency window 2h < 3h sustain → widened to 4h) and **#2**
+> (`recent` one-shot collapse → accepted + documented) from the PR #74
+> follow-up review. Commits `68f89c3` / `bae273f` / `0bf5068`; verified by 26
+> unit + 5 live-CH ITs against prod-pinned CH 26.3.10.60. The parent task 0056
+> stays `active` for its deploy-gated operational items (ops-topic subscribe +
+> the two alarm fire-tests) — only this findings subsection is closed.
 
 Task 0026 published the enrichment spec-§5 metrics under the
 `Prices/Enrichment` namespace (`EnrichmentRowsEnriched`,
@@ -382,10 +412,15 @@ Task 0026 published the enrichment spec-§5 metrics under the
   sustained 3×1h (`GREATER_THAN_OR_EQUAL_TO_THRESHOLD`, `NOT_BREACHING`), in
   `observability-stack.ts`. Non-latching: clears the moment a pass enriches ≥1
   row, so the catch-up drain (a) and steady-state floor (b) both read OK. The
-  `_1m`-recency-bounded remaining metric (to excise the residual idle-env +
-  floor false-fire completely) is a worker-side change left to 0026 and is *not*
-  required for the alarm to be page-safe. Finding #7 (per-batch duration)
-  remains open.
+  recency-bounded remaining metric (to excise the residual idle-env + floor
+  false-fire completely) was a worker-side change left to 0026 — **done
+  2026-07-02:** the worker emits `EnrichmentRowsRemainingRecent` (`now()`-windowed,
+  default **4h, ≥ this alarm's 3h sustain**) and the alarm's backlog term
+  switched to it, so an idle env reads 0 and the residual is closed. Finding #7
+  (per-batch duration) also **resolved in 0026** (see below). (The window shipped
+  at 2h initially; a follow-up review of the 0026 worker change caught that as a
+  bug — 2h < the 3h sustain means a real stall can't breach 3 consecutive
+  datapoints — and widened it to 4h. See "PR #74 follow-up review" below.)
 
 - **#7 — `EnrichmentBatchDurationMs` is whole-pass wall-clock, not per-batch.**
   The metric is measured across the entire `run_through` (all batches + the
@@ -394,6 +429,50 @@ Task 0026 published the enrichment spec-§5 metrics under the
   `batches` for a true per-batch figure — don't let operators size batch/timeout
   headroom off a value that grows with backlog and one-shot mode.
 
+  **Resolved in task 0026 (2026-07-02).** Both: renamed to
+  `EnrichmentPassDurationMs` (accurate whole-pass name) **and** added a derived
+  `EnrichmentAvgBatchDurationMs = duration_ms / batches` (emitted only when
+  `batches > 0`) for the true per-batch figure. No alarm/dashboard consumed the
+  old name, so the rename was safe.
+
 Both live in `observability-stack.ts` / the enrichment worker's `metrics.rs`;
 0026 left the alarm as an explicit scaffold (commented as such) precisely so
 0056 owns the final shape.
+
+## PR #74 follow-up review (2026-07-02) — findings #1 and #2 resolved
+
+A code review of the 0026 worker change that resolved incoming #5/#7 above
+(PR #74, branch `feat/0026_enrichment-metrics-recency-passduration`) surfaced two
+further findings on the new `EnrichmentRowsRemainingRecent` path. Both are now
+addressed; recorded here because they directly affect this task's stall alarm.
+
+- **#1 — recency window (2h) shorter than the alarm's 3h sustain → real stalls
+  never page.** As first shipped, `recent_window_s` defaulted to 2h, *shorter*
+  than this alarm's `datapointsToAlarm = evaluationPeriods = 3` × 1h = 3h sustain.
+  A genuinely stuck *fresh* candle ages out of a 2h window after ~2 hourly
+  datapoints, so it can never accumulate the 3 consecutive breaches the alarm
+  needs — a stall in a low-cadence env would never fire, a silent-outage
+  regression vs. the old always-on full-backlog term.
+  **Resolved (0026, commit `68f89c3`).** Default widened to **4h**, with the
+  invariant **`recent_window_s` ≥ the alarm's sustain window** documented at all
+  three sites (`ChEnrichConfig::recent_window_s` doc, `main.rs` env default, and
+  the alarm comment in `observability-stack.ts`). A fresh stuck candle now
+  survives all 3 datapoints; the finding-#5 idle-env guarantee is preserved (the
+  deep-history exotic-quote floor is *years* old, still outside any few-hour
+  window). If `datapointsToAlarm`/`evaluationPeriods` ever change,
+  `ENRICH_RECENT_WINDOW_S` must be raised to match.
+
+- **#2 — `EnrichmentRowsRemainingRecent` collapses to 0 during long one-shot
+  drains.** The count mixes a frozen pass-start `watermark` (population ceiling)
+  with a live `now()` recency floor; in a one-shot drain longer than
+  `recent_window_s`, `now()` advances past the frozen watermark, the interval
+  empties, and `recent` reads 0 regardless of the real backlog.
+  **Resolved as accept + document (0026, commit `bae273f`).** Harmless to this
+  alarm, which gates on the *short scheduled* pass and on `enriched < 1` (a
+  draining one-shot has `enriched ≫ 0`), so a wrong `recent` can neither
+  false-page nor mask a real page; `EnrichmentRowsRemainingAtVolumeZero` stays
+  correct during a drain. Anchoring the floor to `watermark` would fix one-shot
+  but re-break finding #5's idle-env guarantee, so the `now()` anchor is
+  deliberate. `rows_remaining_recent` is documented as **steady-state-only**
+  (watch `EnrichmentRowsRemainingAtVolumeZero` during one-shot drains), with a
+  Decision Log entry in the 0026 task README and a deferred one-shot-skip option.

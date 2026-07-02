@@ -49,10 +49,11 @@ export interface ObservabilityStackProps extends cdk.StackProps {
 export class ObservabilityStack extends cdk.Stack {
   public readonly dashboard: cloudwatch.Dashboard;
   /**
-   * Alarm on the enrichment backlog (spec §5
-   * `EnrichmentRowsRemainingAtVolumeZero`, task 0026). The broader dashboard
-   * widget set remains task 0056's; this single alarm ships with 0026 because
-   * the metric it watches is emitted by the enrichment worker in the same task.
+   * Enrichment stall alarm (progress-based: `EnrichmentRowsEnriched` = 0 while
+   * the recency-bounded `EnrichmentRowsRemainingRecent` > 0, task 0026). The
+   * broader dashboard widget set remains task 0056's; this single alarm ships
+   * with 0026 because the metrics it watches are emitted by the enrichment
+   * worker in the same task.
    */
   public readonly enrichmentBacklogAlarm: cloudwatch.Alarm;
   /**
@@ -92,10 +93,10 @@ export class ObservabilityStack extends cdk.Stack {
 
     // Enrichment stall alarm (task 0026 / spec §5, re-designed in 0056). Fires
     // on *lack of progress*, not absolute backlog: a pass that enriched zero
-    // rows (`EnrichmentRowsEnriched < 1`) while a volume_quote_usd=0 backlog
-    // still exists (`EnrichmentRowsRemainingAtVolumeZero > 0`), sustained across
-    // 3 consecutive hourly passes. That is the fingerprint of a genuine stall
-    // (oracle↔asset-id mis-reconciliation, missing USDC/USDT/XLM reference
+    // rows (`EnrichmentRowsEnriched < 1`) while a *recent* volume_quote_usd=0
+    // backlog still exists (`EnrichmentRowsRemainingRecent > 0`), sustained
+    // across 3 consecutive hourly passes. That is the fingerprint of a genuine
+    // stall (oracle↔asset-id mis-reconciliation, missing USDC/USDT/XLM reference
     // assets) — enrichment is *stuck*, not merely behind.
     //
     // Why not the old `backlog Maximum > 100_000` scaffold: it latched with no
@@ -105,11 +106,24 @@ export class ObservabilityStack extends cdk.Stack {
     // drains by design, so once it exceeds the threshold the alarm is stuck in
     // ALARM forever. The progress-based signal instead clears the moment a pass
     // enriches ≥1 row again, so a draining catch-up and a steady-state floor
-    // both read OK while a true stall still fires. Residual: a genuinely idle
-    // env with a nonzero floor and no new enrichable rows for 3h can trip, but
-    // it self-clears on the next non-empty pass — acceptable vs. a latching page
-    // (a fully clean exclusion of the floor needs a recency-bounded remaining
-    // metric from the worker; see task 0026 incoming finding #5).
+    // both read OK while a true stall still fires.
+    //
+    // The backlog term is `EnrichmentRowsRemainingRecent`, the worker's
+    // recency-bounded volume-zero count (candles within `ENRICH_RECENT_WINDOW_S`,
+    // default 4h, of the CH clock). It excludes the permanent deep-history
+    // exotic-quote floor, so the earlier residual — an idle env with a nonzero
+    // floor and no new enrichable rows tripping the alarm — is closed: an idle
+    // env produces no fresh candles, so `EnrichmentRowsRemainingRecent` reads 0
+    // and the alarm stays OK (task 0026 finding #5, resolved worker-side).
+    //
+    // The window must be >= this alarm's 3h sustain (evaluationPeriods ×
+    // datapointsToAlarm × 1h). Otherwise a genuinely stuck *fresh* candle ages
+    // out of the window before it can breach 3 consecutive hourly datapoints, so
+    // a real stall in a low-cadence env would never page (task 0026 finding #1).
+    // 4h ≥ 3h keeps a fresh stuck candle counted across all 3 datapoints; the
+    // deep-history floor (years old) stays excluded, so the idle-env guarantee
+    // above holds. If you raise datapointsToAlarm/evaluationPeriods, raise
+    // ENRICH_RECENT_WINDOW_S to match.
     const enrichedPerHour = new cloudwatch.Metric({
       namespace: 'Prices/Enrichment',
       metricName: 'EnrichmentRowsEnriched',
@@ -119,7 +133,7 @@ export class ObservabilityStack extends cdk.Stack {
     });
     const backlogPerHour = new cloudwatch.Metric({
       namespace: 'Prices/Enrichment',
-      metricName: 'EnrichmentRowsRemainingAtVolumeZero',
+      metricName: 'EnrichmentRowsRemainingRecent',
       dimensionsMap: { Environment: config.envName },
       statistic: 'Maximum',
       period: cdk.Duration.hours(1),
@@ -130,7 +144,7 @@ export class ObservabilityStack extends cdk.Stack {
       {
         alarmName: `prices-${config.envName}-enrichment-backlog`,
         alarmDescription:
-          'Enrichment made no progress (EnrichmentRowsEnriched = 0) while a volume_quote_usd=0 backlog remained (EnrichmentRowsRemainingAtVolumeZero > 0) across 3 consecutive hourly passes — enrichment is stalled, not merely behind. Check oracle↔asset-id reconciliation and that USDC/USDT/XLM reference assets exist in prices.assets. Progress-based (0056): clears when a pass enriches ≥1 row, so it does not latch on catch-up drains or the permanent exotic-quote floor.',
+          'Enrichment made no progress (EnrichmentRowsEnriched = 0) while a recent volume_quote_usd=0 backlog remained (EnrichmentRowsRemainingRecent > 0) across 3 consecutive hourly passes — enrichment is stalled, not merely behind. Check oracle↔asset-id reconciliation and that USDC/USDT/XLM reference assets exist in prices.assets. Progress-based (0056): clears when a pass enriches ≥1 row, so it does not latch on catch-up drains; the recency-bounded backlog excludes the permanent exotic-quote floor, so an idle env stays OK.',
         metric: new cloudwatch.MathExpression({
           // 1 when a pass enriched nothing AND a backlog remains, else 0.
           // Comparison operators yield per-datapoint 0/1 series in CW metric

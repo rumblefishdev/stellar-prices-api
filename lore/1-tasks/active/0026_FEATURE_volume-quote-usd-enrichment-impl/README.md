@@ -172,6 +172,44 @@ history:
       **Remaining (Option 3, deploy-gated):** actual `cdk deploy`, live dashboard
       visibility, and the post-backfill credibility check (≥3 XLM-quoted assets).
       Task stays `active`.
+  - date: 2026-07-02
+    status: active
+    who: claude
+    note: >
+      **Resolved the two enrichment metric items deferred here from the 0056
+      code review (findings #5 + #7).** Both are worker-side + a one-line alarm
+      rewire; no deploy.
+
+      *Finding #5 — recency-bounded backlog (excise the stall alarm's idle-env
+      false-fire).* `ChEnrichConfig` gains `recent_window_s` (env
+      `ENRICH_RECENT_WINDOW_S`, default 7200s). `count_remaining_at_volume_zero`
+      now returns `(total, recent)` from a **single** `FINAL` scan
+      (`count()` + `countIf(timestamp >= now() - ?)`), `now()` evaluated
+      server-side in CH (clock-skew-immune, matching the 0056 freshness-probe
+      design). `ChPassStats` gains `rows_remaining_recent`; `metrics.rs`
+      publishes `EnrichmentRowsRemainingRecent`. The observability-stack stall
+      alarm's backlog term switched `EnrichmentRowsRemainingAtVolumeZero` →
+      `EnrichmentRowsRemainingRecent`. Because an *idle* env produces no fresh
+      candles, the recency count reads 0 there → the permanent deep-history
+      exotic-quote floor no longer trips the alarm (the residual 0056 flagged is
+      closed). The full `EnrichmentRowsRemainingAtVolumeZero` metric is still
+      published for dashboard/forensic value — just no longer alarmed on.
+
+      *Finding #7 — `EnrichmentBatchDurationMs` mislabeled.* Renamed to
+      `EnrichmentPassDurationMs` (it is whole-pass wall-clock: all batches + the
+      `FINAL` count scans, not one batch) and added a derived
+      `EnrichmentAvgBatchDurationMs = duration_ms / batches`, emitted only when
+      `batches > 0`, so operators size batch/timeout headroom off a true
+      per-batch figure. No alarm/dashboard consumed the old name (comments only),
+      so the rename is safe.
+
+      Verified: 26 unit (+2 metrics tests) + 2 e2e + **5 live-CH ITs** (+1 new
+      `recency_bounded_backlog_excludes_deep_history_floor`, asserting total=2 /
+      recent=1) green vs prod-pinned CH 26.3.10.60; clippy/fmt clean (default +
+      lambda); `cargo check --workspace` green. Infra: `tsc -b` + eslint +
+      prettier clean; `cdk synth` of the Observability stack confirms the alarm
+      renders on `EnrichmentRowsRemainingRecent` with the SNS action wired.
+      Task stays `active` (deploy-gated ACs unchanged).
 ---
 
 # `volume_quote_usd` enrichment Lambda — implementation
@@ -242,11 +280,14 @@ Carried over from task 0024's design spec §7:
       — one-shot mode now exists (`MAX_BATCHES=0`, Option 2); the live
       credibility check is still deploy-gated (Option 3).
 - [ ] CloudWatch metrics from spec §5 are emitted and visible in
-      the dashboard. — **emit half done** (Option 2: all four metrics published
-      via `aws_sdk_cloudwatch` under `Prices/Enrichment` +
-      `EnrichmentRowsRemainingAtVolumeZero` backlog alarm authored,
-      synth-verified). Dashboard widgets + live visibility remain deploy-gated
-      (task 0056 owns the dashboard; observability-stack is still a scaffold).
+      the dashboard. — **emit half done** (Option 2 + the 2026-07-02 metric
+      items: `EnrichmentRowsEnriched` / `EnrichmentOracleMiss` /
+      `EnrichmentRowsRemainingAtVolumeZero` / `EnrichmentRowsRemainingRecent` /
+      `EnrichmentPassDurationMs` / `EnrichmentAvgBatchDurationMs` published via
+      `aws_sdk_cloudwatch` under `Prices/Enrichment`; the progress-based stall
+      alarm now gates on `EnrichmentRowsRemainingRecent`, synth-verified).
+      Dashboard widgets + live visibility remain deploy-gated (task 0056 owns
+      the dashboard; observability-stack is still a scaffold).
 
 ## Future Work
 
@@ -258,6 +299,96 @@ Spawned from the production implementation (see G-note Decision Log,
   backfill). Enrichment reads this column directly; writers must fill it.
 - **0059** — MV rollup-chain version propagation under enriched `_1m`
   re-inserts (task 0051 dependency). 0026 enriches `_1m` only.
+
+## Decision Log
+
+### 2026-07-02 — `recent_window_s` default = 4h, must be ≥ the stall alarm's sustain window
+
+**Context.** The stall alarm (observability-stack) fires on
+`EnrichmentRowsEnriched = 0 AND EnrichmentRowsRemainingRecent > 0`
+sustained across 3 consecutive hourly datapoints
+(`evaluationPeriods = datapointsToAlarm = 3`, 1h period → 3h sustain).
+`EnrichmentRowsRemainingRecent` counts volume-zero candles whose
+`timestamp` is within `recent_window_s` of the CH server clock.
+
+**Bug found in PR #74 review (finding #1).** The window shipped at 2h,
+*shorter* than the 3h sustain. A genuinely stuck **fresh** candle stays
+inside a 2h window for only ~2 hourly datapoints, so it can never
+accumulate the 3 consecutive breaches the alarm needs. Result: a real
+enrichment stall in a **low-cadence env** (fresh candles arriving less
+often than the window) would never page — a silent-outage regression vs.
+the old full-backlog metric, which stayed >0 continuously.
+
+**Root cause.** Two competing failure modes on the same knob:
+- *Window too long* → a fresh **exotic** candle (no oracle/peg reference,
+  never enrichable) could hold the alarm — a false page.
+- *Window too short* → a genuine stall in a sparse env never reaches 3
+  datapoints — a missed page (the bug above).
+
+The original PR chose "short" to bound the exotic false-page, but that
+requires `enriched = 0` for 3 straight hours *as well*, which effectively
+never happens in a live env still producing enrichable candles — so the
+exotic risk it was buying was far narrower than the missed-stall risk it
+introduced.
+
+**Decision.** Set `recent_window_s` default to **4h (14 400s)**, with the
+invariant **`recent_window_s` ≥ the alarm's sustain window**. A fresh
+stuck candle now survives all 3 datapoints, so real stalls page again.
+The idle-env guarantee (finding #5) is preserved unchanged: the permanent
+deep-history exotic-quote floor is *years* old and stays far outside any
+few-hour window, so an idle env still reports `recent = 0`.
+
+**Invariant enforcement.** The tie between window and sustain is
+documented at all three sites (`ChEnrichConfig::recent_window_s` doc,
+`main.rs` env default, and the alarm comment in observability-stack). If
+`datapointsToAlarm`/`evaluationPeriods` change, `ENRICH_RECENT_WINDOW_S`
+must be raised to match. Left as prose + magic-number defaults for now;
+promote to a shared constant if the alarm ever moves off the 3h sustain.
+
+**Deferred (airtight alternative, not taken).** The fully robust fix is to
+scope `recent` to candles that *have* a usable reference (oracle/peg) but
+are still `volume_quote_usd = 0` — i.e. "should have enriched, didn't".
+That removes fresh-exotic candles from the count entirely, decoupling the
+window from the exotic floor at any size. It needs an `EXISTS`/join in the
+count query (more than a one-liner); file it as follow-up only if a
+fresh-exotic false page is ever observed in practice.
+
+### 2026-07-02 — `EnrichmentRowsRemainingRecent` is a steady-state-only signal (finding #2, accepted)
+
+**Context.** `count_remaining_at_volume_zero` derives `recent` from a single
+scan that mixes two clocks: the population **ceiling** is the pass-start
+`watermark` (frozen, so concurrent inserts can't inflate the count), the
+recency **floor** is `now()` evaluated when the scan runs (pass end). The
+counted interval is `[now() − recent_window_s, watermark]`.
+
+**Behaviour found in PR #74 review (finding #2).** The two ends only agree
+when the pass is short. In a **one-shot drain** whose duration exceeds
+`recent_window_s`, `now()` advances past the frozen `watermark`, so the
+interval empties and `recent` collapses to **0** regardless of the real fresh
+backlog. Example: drain starts 12:00 (watermark freezes at 12:00), runs 6h,
+scan at 18:00 → floor 14:00 > ceiling 12:00 → `recent = 0`.
+
+**Why it's harmless.** The stall alarm gates on the *scheduled hourly* pass
+(`max_batches = 20`, finishes in seconds → `now() ≈ watermark`), never a
+one-shot. And the alarm term is `enriched < 1 AND recent > 0`; a draining
+one-shot has `enriched ≫ 0`, so a wrong `recent` can neither false-page nor
+mask a real page. `rows_remaining_at_volume_zero` (`total`) is bounded only by
+`watermark`, so it stays correct throughout a one-shot drain.
+
+**Decision — accept, document only.** The `now()` anchor is deliberate: it is
+what gives the finding-#5 idle-env guarantee (an idle env has nothing near the
+wall clock → `recent = 0`). Anchoring the floor to `watermark` would fix
+one-shot but re-break finding #5 (an idle env's `watermark` sits *on* the
+floor, so it would read >0 again). The two can't be reconciled on one window
+over one query, so `recent` is documented as **steady-state-only**: during a
+one-shot drain, watch `EnrichmentRowsRemainingAtVolumeZero`, not
+`EnrichmentRowsRemainingRecent`. Documented at the `ChPassStats.rows_remaining_recent`
+field.
+
+**Deferred (not taken).** If a long one-shot's misleading `recent = 0` ever
+bites an operator, skip emitting `EnrichmentRowsRemainingRecent` when
+`one_shot == true` (thread the flag into `ChPassStats` → `pass_metrics`). A few
+lines; not worth it until observed.
 
 ## Notes
 
