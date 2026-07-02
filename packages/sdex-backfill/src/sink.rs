@@ -31,6 +31,41 @@ impl Sink {
         }
     }
 
+    /// Direct-write sink to the Hetzner `prices.*` cluster over mTLS (ADR 0009).
+    ///
+    /// Unlike the live Lambdas' `client_from_lambda_env` — which fetches the
+    /// bundle from the Parameters & Secrets Extension on `localhost:2773` — the
+    /// backfill runs on an operator workstation, so it reads the client bundle
+    /// from on-disk PEM files and builds the task-0052 client with
+    /// [`prices_clickhouse::mtls::client_with_mtls`] (the same workstation entry
+    /// point the 0052 round-trip smoke test uses). The key is read straight into
+    /// rustls and never logged.
+    #[cfg(feature = "aws-mtls")]
+    pub fn mtls(
+        domain: &str,
+        cert_path: &std::path::Path,
+        key_path: &std::path::Path,
+        ca_path: &std::path::Path,
+        database: &str,
+    ) -> Result<Self, BackfillError> {
+        use prices_clickhouse::mtls::{MtlsBundle, client_with_mtls};
+
+        let read = |p: &std::path::Path| -> Result<String, BackfillError> {
+            std::fs::read_to_string(p)
+                .map_err(|e| BackfillError::Mtls(format!("read PEM at `{}`: {e}", p.display())))
+        };
+        let bundle = MtlsBundle {
+            cert_pem: read(cert_path)?,
+            key_pem: read(key_path)?,
+            ca_pem: read(ca_path)?,
+        };
+        let client = client_with_mtls(domain, &bundle, database)
+            .map_err(|e| BackfillError::Mtls(e.to_string()))?;
+        Ok(Self {
+            writer: OhlcvWriter::new(client),
+        })
+    }
+
     pub async fn preflight(&self) -> Result<(), BackfillError> {
         self.writer.preflight().await?;
         Ok(())

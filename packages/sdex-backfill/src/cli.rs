@@ -4,6 +4,23 @@ use clap::Parser;
 
 use crate::ingest::{ExtractMode, SOROBAN_ACTIVATION_LEDGER};
 
+/// Where the backfill writes its `prices.*` rows.
+///
+/// Direct-write to Hetzner (`Hetzner`) is the real-run model per ADR 0009 — no
+/// local mirror, no separate push CLI; `/backfill/status` updates in real time.
+/// `Local` is the plaintext Docker-CH path for tests and dry runs against a
+/// stand-in.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Default, clap::ValueEnum)]
+pub enum Transport {
+    /// Plaintext HTTP to a local / Docker ClickHouse (`--clickhouse-url`).
+    #[default]
+    Local,
+    /// HTTPS + mTLS to the Hetzner `prices.*` cluster via Caddy (the task-0052
+    /// client). Requires a build with `--features aws-mtls` and the
+    /// `--ch-domain` / `--mtls-*-path` bundle args.
+    Hetzner,
+}
+
 #[derive(Parser, Debug)]
 #[command(name = "sdex-backfill", version)]
 pub struct Cli {
@@ -30,9 +47,38 @@ pub struct Cli {
     #[arg(long, default_value_t = SOROBAN_ACTIVATION_LEDGER)]
     pub activation_ledger: u32,
 
-    /// ClickHouse HTTP URL (e.g. http://localhost:8123).
+    /// Where to write `prices.*` rows: `local` (plaintext Docker CH) or
+    /// `hetzner` (direct-write over mTLS, ADR 0009). `hetzner` needs a build
+    /// with `--features aws-mtls`.
+    #[arg(long, value_enum, default_value_t = Transport::Local)]
+    pub transport: Transport,
+
+    /// ClickHouse HTTP URL for `--transport local` (e.g. http://localhost:8123).
     #[arg(long, env = "CLICKHOUSE_URL", default_value = "http://localhost:8123")]
     pub clickhouse_url: String,
+
+    /// Caddy host fronting the Hetzner CH, for `--transport hetzner` (e.g.
+    /// ch.sorobanscan.rumblefish.dev). The client connects to `https://{domain}`.
+    #[arg(long, env = "CH_DOMAIN")]
+    pub ch_domain: Option<String>,
+
+    /// Target CH database for `--transport hetzner`.
+    #[arg(long, env = "CH_DATABASE", default_value = "prices")]
+    pub ch_database: String,
+
+    /// Path to the PEM client certificate, for `--transport hetzner`.
+    #[arg(long, env = "MTLS_CERT_PATH")]
+    pub mtls_cert_path: Option<PathBuf>,
+
+    /// Path to the PEM client private key, for `--transport hetzner`. Read
+    /// straight into rustls; never logged.
+    #[arg(long, env = "MTLS_KEY_PATH")]
+    pub mtls_key_path: Option<PathBuf>,
+
+    /// Path to the PEM CA bundle (signer of the client cert), for
+    /// `--transport hetzner`.
+    #[arg(long, env = "MTLS_CA_PATH")]
+    pub mtls_ca_path: Option<PathBuf>,
 
     /// Local scratch directory for downloaded partitions.
     #[arg(long, env = "BACKFILL_TEMP_DIR", default_value = ".temp/sdex-backfill")]
