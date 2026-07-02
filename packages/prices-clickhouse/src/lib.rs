@@ -12,6 +12,9 @@ use clickhouse::Client;
 /// Lambdas. Companion to `mtls::require_env` (the must-be-set case).
 pub mod env;
 
+/// Shared observability setup for the worker Lambdas (`init_tracing`).
+pub mod observability;
+
 /// mTLS transport for the remote Hetzner CH endpoint (Caddy:443). Gated behind
 /// the `aws-mtls` feature so the plaintext local-dev / init-CLI path does not
 /// pull the rustls / hyper-util / reqwest stack. Ported from BE (task 0052).

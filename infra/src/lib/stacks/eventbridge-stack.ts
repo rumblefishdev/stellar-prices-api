@@ -1,14 +1,21 @@
 import * as cdk from 'aws-cdk-lib';
+import * as cw_actions from 'aws-cdk-lib/aws-cloudwatch-actions';
 import * as events from 'aws-cdk-lib/aws-events';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as s3 from 'aws-cdk-lib/aws-s3';
+import * as sns from 'aws-cdk-lib/aws-sns';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import type { Construct } from 'constructs';
 
 import type { EnvironmentConfig } from '../types.js';
 import { createWorkerLambda } from '../lambda-baseline.js';
-import { mtlsSecretName, secretsManagerLayerArn } from '../mtls.js';
+import { opsAlarmsTopicName } from './observability-stack.js';
+import {
+  mtlsSecretName,
+  mtlsSecretArnFromParts,
+  secretsManagerLayerArn,
+} from '../mtls.js';
 
 /**
  * Cargo-lambda build output for the `asset-discovery` binary (task 0054).
@@ -40,6 +47,16 @@ const ENRICHMENT_WORKER_ASSET_DIR =
   process.env['ENRICHMENT_WORKER_ASSET_DIR'] ??
   '../target/lambda/enrichment-worker';
 
+/** Cargo-lambda build output for the `backfill-freshness-probe` (task 0056). */
+const BACKFILL_FRESHNESS_PROBE_ASSET_DIR =
+  process.env['BACKFILL_FRESHNESS_PROBE_ASSET_DIR'] ??
+  '../target/lambda/backfill-freshness-probe';
+
+/** Cargo-lambda build output for the `mtls-notafter-probe` (task 0056). */
+const MTLS_NOTAFTER_PROBE_ASSET_DIR =
+  process.env['MTLS_NOTAFTER_PROBE_ASSET_DIR'] ??
+  '../target/lambda/mtls-notafter-probe';
+
 export interface EventBridgeStackProps extends cdk.StackProps {
   readonly config: EnvironmentConfig;
 }
@@ -65,11 +82,15 @@ export class EventBridgeStack extends cdk.Stack {
   public readonly assetDiscoveryRule: events.Rule;
   public readonly cleanupRule: events.Rule;
   public readonly enrichmentRule: events.Rule;
+  public readonly backfillFreshnessProbeRule: events.Rule;
+  public readonly mtlsNotafterProbeRule: events.Rule;
   public readonly assetDiscoveryFunction: lambda.Function;
   public readonly cleanupFunction: lambda.Function;
   public readonly supplyFunction: lambda.Function;
   public readonly oracleFunction: lambda.Function;
   public readonly enrichmentFunction: lambda.Function;
+  public readonly backfillFreshnessProbeFunction: lambda.Function;
+  public readonly mtlsNotafterProbeFunction: lambda.Function;
 
   constructor(scope: Construct, id: string, props: EventBridgeStackProps) {
     super(scope, id, props);
@@ -109,6 +130,26 @@ export class EventBridgeStack extends cdk.Stack {
       description: `close_usd / volume_quote_usd enrichment of price_ohlcv_1m (${env})`,
       schedule: events.Schedule.expression(schedules.enrichment),
     });
+
+    this.backfillFreshnessProbeRule = new events.Rule(
+      this,
+      'BackfillFreshnessProbeRule',
+      {
+        ruleName: `prices-${env}-backfill-freshness-probe`,
+        description: `Publishes backfill_progress push age → Prices/Backfill PushAgeSeconds (${env})`,
+        schedule: events.Schedule.expression(schedules.backfillFreshnessProbe),
+      },
+    );
+
+    this.mtlsNotafterProbeRule = new events.Rule(
+      this,
+      'MtlsNotafterProbeRule',
+      {
+        ruleName: `prices-${env}-mtls-notafter-probe`,
+        description: `Publishes mTLS cert days-to-NotAfter → Prices/Mtls (${env})`,
+        schedule: events.Schedule.expression(schedules.mtlsNotafterProbe),
+      },
+    );
 
     // -----------------------------------------------------------------
     // Asset Discovery worker Lambda (task 0054) + its rule target.
@@ -347,6 +388,117 @@ export class EventBridgeStack extends cdk.Stack {
     });
     new cdk.CfnOutput(this, 'EnrichmentFunctionName', {
       value: this.enrichmentFunction.functionName,
+    });
+
+    // -----------------------------------------------------------------
+    // Both probes' metric alarms (SdexPushFreshnessAlarm / MtlsNotAfterAlarm in
+    // ObservabilityStack) are treatMissingData: NOT_BREACHING and so rely on
+    // each probe's own `-errors` alarm as the dead-probe backstop. Route those
+    // error alarms to the shared ops SNS topic (owned by ObservabilityStack).
+    // Imported by deterministic name — no cross-stack CFN reference, so the two
+    // stacks stay independently deployable (see `opsAlarmsTopicName`).
+    // -----------------------------------------------------------------
+    const opsAlarmsTopic = sns.Topic.fromTopicArn(
+      this,
+      'OpsAlarmsTopicRef',
+      `arn:aws:sns:${region}:${accountId}:${opsAlarmsTopicName(env)}`,
+    );
+    const opsAlarmAction = new cw_actions.SnsAction(opsAlarmsTopic);
+
+    // -----------------------------------------------------------------
+    // Backfill freshness probe (task 0056) + its rate(15m) target. CH-only
+    // (no S3, no VPC): SELECTs prices.backfill_progress over the ingestion
+    // mTLS identity and republishes each stream's push age as the
+    // Prices/Backfill PushAgeSeconds metric the SDEX freshness alarm watches.
+    // -----------------------------------------------------------------
+    const freshness = createWorkerLambda(this, {
+      config,
+      accountId,
+      mtlsSecretName: discoveryMtlsSecretName,
+      idPrefix: 'BackfillFreshnessProbe',
+      name: 'backfill-freshness-probe',
+      assetDir: BACKFILL_FRESHNESS_PROBE_ASSET_DIR,
+      memorySize: 256,
+      // Two-row SELECT + one PutMetricData; trivially fast.
+      timeout: cdk.Duration.minutes(1),
+      secretsExtensionLayer,
+      chDomain,
+      rule: this.backfillFreshnessProbeRule,
+      alarmDescription:
+        'Backfill freshness probe invocation errors — the SDEX push-age metric may be stale, blinding the freshness alarm.',
+      alarmPeriod: cdk.Duration.minutes(15),
+      errorAlarmActions: [opsAlarmAction],
+    });
+    this.backfillFreshnessProbeFunction = freshness.function;
+
+    freshness.role.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'PublishBackfillMetrics',
+        actions: ['cloudwatch:PutMetricData'],
+        resources: ['*'],
+        conditions: {
+          StringEquals: { 'cloudwatch:namespace': 'Prices/Backfill' },
+        },
+      }),
+    );
+
+    // -----------------------------------------------------------------
+    // mTLS NotAfter probe (task 0056) + its rate(1d) target. Reads BOTH the
+    // ingestion and api cert bundles from Secrets Manager (via the extension)
+    // and publishes days-to-NotAfter → Prices/Mtls. It builds no CH client, so
+    // CH_DOMAIN / MTLS_SECRET_NAME (set by the factory) are unused; the probe
+    // reads MTLS_PROBE_SECRETS instead.
+    // -----------------------------------------------------------------
+    const apiMtlsSecretName = mtlsSecretName(env, 'api');
+    const notafter = createWorkerLambda(this, {
+      config,
+      accountId,
+      mtlsSecretName: discoveryMtlsSecretName,
+      idPrefix: 'MtlsNotafterProbe',
+      name: 'mtls-notafter-probe',
+      assetDir: MTLS_NOTAFTER_PROBE_ASSET_DIR,
+      memorySize: 256,
+      timeout: cdk.Duration.minutes(1),
+      secretsExtensionLayer,
+      chDomain,
+      rule: this.mtlsNotafterProbeRule,
+      environment: {
+        MTLS_PROBE_SECRETS: `ingestion=${discoveryMtlsSecretName},api=${apiMtlsSecretName}`,
+      },
+      alarmDescription:
+        'mTLS NotAfter probe invocation errors — cert days-to-expiry metric may be stale, blinding the expiry alarm.',
+      alarmPeriod: cdk.Duration.days(1),
+      errorAlarmActions: [opsAlarmAction],
+    });
+    this.mtlsNotafterProbeFunction = notafter.function;
+
+    // The factory's baseline grants read on the ingestion secret only; the
+    // probe also reads the api role's bundle, so grant that second secret.
+    notafter.role.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'ReadApiMtlsMaterial',
+        actions: ['secretsmanager:GetSecretValue'],
+        resources: [
+          mtlsSecretArnFromParts(region, accountId, apiMtlsSecretName),
+        ],
+      }),
+    );
+    notafter.role.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'PublishMtlsMetrics',
+        actions: ['cloudwatch:PutMetricData'],
+        resources: ['*'],
+        conditions: {
+          StringEquals: { 'cloudwatch:namespace': 'Prices/Mtls' },
+        },
+      }),
+    );
+
+    new cdk.CfnOutput(this, 'BackfillFreshnessProbeFunctionName', {
+      value: this.backfillFreshnessProbeFunction.functionName,
+    });
+    new cdk.CfnOutput(this, 'MtlsNotafterProbeFunctionName', {
+      value: this.mtlsNotafterProbeFunction.functionName,
     });
 
     cdk.Tags.of(this).add('Project', 'stellar-prices-api');
