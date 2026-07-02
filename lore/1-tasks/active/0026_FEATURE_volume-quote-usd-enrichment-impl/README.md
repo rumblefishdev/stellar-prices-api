@@ -353,6 +353,43 @@ window from the exotic floor at any size. It needs an `EXISTS`/join in the
 count query (more than a one-liner); file it as follow-up only if a
 fresh-exotic false page is ever observed in practice.
 
+### 2026-07-02 — `EnrichmentRowsRemainingRecent` is a steady-state-only signal (finding #2, accepted)
+
+**Context.** `count_remaining_at_volume_zero` derives `recent` from a single
+scan that mixes two clocks: the population **ceiling** is the pass-start
+`watermark` (frozen, so concurrent inserts can't inflate the count), the
+recency **floor** is `now()` evaluated when the scan runs (pass end). The
+counted interval is `[now() − recent_window_s, watermark]`.
+
+**Behaviour found in PR #74 review (finding #2).** The two ends only agree
+when the pass is short. In a **one-shot drain** whose duration exceeds
+`recent_window_s`, `now()` advances past the frozen `watermark`, so the
+interval empties and `recent` collapses to **0** regardless of the real fresh
+backlog. Example: drain starts 12:00 (watermark freezes at 12:00), runs 6h,
+scan at 18:00 → floor 14:00 > ceiling 12:00 → `recent = 0`.
+
+**Why it's harmless.** The stall alarm gates on the *scheduled hourly* pass
+(`max_batches = 20`, finishes in seconds → `now() ≈ watermark`), never a
+one-shot. And the alarm term is `enriched < 1 AND recent > 0`; a draining
+one-shot has `enriched ≫ 0`, so a wrong `recent` can neither false-page nor
+mask a real page. `rows_remaining_at_volume_zero` (`total`) is bounded only by
+`watermark`, so it stays correct throughout a one-shot drain.
+
+**Decision — accept, document only.** The `now()` anchor is deliberate: it is
+what gives the finding-#5 idle-env guarantee (an idle env has nothing near the
+wall clock → `recent = 0`). Anchoring the floor to `watermark` would fix
+one-shot but re-break finding #5 (an idle env's `watermark` sits *on* the
+floor, so it would read >0 again). The two can't be reconciled on one window
+over one query, so `recent` is documented as **steady-state-only**: during a
+one-shot drain, watch `EnrichmentRowsRemainingAtVolumeZero`, not
+`EnrichmentRowsRemainingRecent`. Documented at the `ChPassStats.rows_remaining_recent`
+field.
+
+**Deferred (not taken).** If a long one-shot's misleading `recent = 0` ever
+bites an operator, skip emitting `EnrichmentRowsRemainingRecent` when
+`one_shot == true` (thread the flag into `ChPassStats` → `pass_metrics`). A few
+lines; not worth it until observed.
+
 ## Notes
 
 - This task is `blocked` until 0012 lands. When unblocked, move

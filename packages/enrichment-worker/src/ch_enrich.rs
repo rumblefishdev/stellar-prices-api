@@ -194,6 +194,20 @@ pub struct ChPassStats {
     /// to the `EnrichmentRowsRemainingRecent` metric the stall alarm watches, so
     /// a genuinely idle env (no fresh candles) reads zero instead of latching on
     /// the floor (task 0026 finding #5).
+    ///
+    /// **Steady-state signal only.** The count mixes two clocks: the population
+    /// ceiling is the pass-start `watermark` (frozen), the recency floor is
+    /// `now()` at scan time. They only agree when the pass is short. In a
+    /// **one-shot drain** longer than `recent_window_s`, `now()` advances past
+    /// the frozen `watermark`, the `[now()-window, watermark]` interval goes
+    /// empty, and this collapses to 0 regardless of the real fresh backlog. This
+    /// is harmless — the alarm gates on the short scheduled pass and on
+    /// `enriched < 1`, which a draining one-shot never satisfies — but during a
+    /// long one-shot drain read `rows_remaining_at_volume_zero` (`total`), which
+    /// stays correct, not this. Anchoring the floor to `watermark` instead would
+    /// fix one-shot but re-break finding #5 (an idle env's `watermark` sits on
+    /// the floor, so it would read >0 again); the `now()` anchor is the
+    /// deliberate trade (task 0026 finding #2, accepted).
     pub rows_remaining_recent: u64,
     /// Wall-clock duration of the **whole pass**, milliseconds — every batch
     /// plus the `FINAL` count scans, not a single batch. Maps to the
