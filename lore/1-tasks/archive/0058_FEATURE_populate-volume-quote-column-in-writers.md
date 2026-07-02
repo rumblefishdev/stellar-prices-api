@@ -2,7 +2,7 @@
 id: "0058"
 title: "Populate the restored `volume_quote` column in the OHLCV writers"
 type: FEATURE
-status: blocked
+status: completed
 related_adr: ["0004", "0007"]
 related_tasks: ["0026", "0038", "0051"]
 tags: [layer-ingestion, priority-high, effort-small, clickhouse, schema, writers]
@@ -41,6 +41,19 @@ history:
       integration AC also needs live ClickHouse (same gate as 0026).
       Nothing further is implementable until 0038/0053 land their write
       paths and adopt the volume_quote column contract.
+  - date: 2026-07-02
+    status: completed
+    who: okarcz
+    note: >
+      Unblocked + completed. Both blockers landed and unified on ONE
+      OHLCV writer: 0038's live path (prices-ledger-processor) and 0053's
+      combined backfill (sdex-backfill, PR #72 merged) both delegate to
+      prices_ingest_core::OhlcvWriter::write_candles (writer.rs:122), which
+      writes volume_quote = Σ|quote_amount| and volume_quote_usd = 0 DEFAULT.
+      writer.rs:108 is the sole price_ohlcv insert in the codebase. AC #4
+      verified against the local prod-pinned ClickHouse: candles_it (writer
+      round-trip) + ch_enrich_it (4/4 — rows with volume_quote enrich to
+      non-zero volume_quote_usd) both green. All ACs met.
 ---
 
 # Populate the restored `volume_quote` column in the OHLCV writers
@@ -77,17 +90,26 @@ Depends on task 0051 having added the column to the live schema DDL.
 
 ## Acceptance Criteria
 
-- [~] `volume_quote` populated with `Σ |quote_amount|` per bucket in all
-      OHLCV writer paths — **done for sdex-backfill**; prices-ledger-processor
-      and soroban-amm-backfill writer paths do not exist yet (see Notes)
+- [x] `volume_quote` populated with `Σ |quote_amount|` per bucket in all
+      OHLCV writer paths. *Resolved by the writer unification: both the live
+      path (`prices-ledger-processor`) and the 0053 combined backfill
+      (`sdex-backfill`) now delegate to the single
+      `prices_ingest_core::OhlcvWriter::write_candles` (`writer.rs:122`, fed by
+      `OhlcvCandle.volume_quote` = `Σ tick.volume_quote` from
+      `canonical_volumes`). `writer.rs:108` is the only `price_ohlcv` insert in
+      the codebase.*
 - [x] `volume_quote_usd` written as `DEFAULT 0` by writers (no longer
       aliased from `volume_quote`) — sdex-backfill `sink.rs`
 - [x] `vwap = volume_quote / volume_base` still holds against the stored
       `volume_quote` — unchanged; `finalise_vwap` already divides the same
       accumulated `volume_quote` (`bucket.rs`), now also persisted verbatim
-- [ ] A written row, run through the 0026 enrichment, yields a non-zero
-      `volume_quote_usd` when an in-window oracle price exists — integration,
-      deferred (needs live ClickHouse; same gate as 0026)
+- [x] A written row, run through the 0026 enrichment, yields a non-zero
+      `volume_quote_usd` when an in-window oracle price exists. *Verified
+      2026-07-02 against the local prod-pinned ClickHouse (26.3.10.60):
+      `enrichment-worker` `ch_enrich_it` 4/4 green (inserts rows carrying
+      `volume_quote`, asserts non-zero `volume_quote_usd` across the oracle /
+      peg / pivot tiers), and `sdex-backfill` `candles_it` green (writer
+      round-trip incl. `volume_quote`).*
 
 ## Implementation Notes
 
@@ -110,16 +132,25 @@ currently exists:
 `cargo clippy -p sdex-backfill` clean (pre-existing `canonical.rs` warnings
 only); `cargo test -p sdex-backfill` 5/5 pass.
 
-**Deferred to the owning tasks** (the writers don't exist yet):
+**Resolution (2026-07-02) — the writer was unified, not duplicated.** Both
+formerly-missing paths landed and, rather than each carrying their own
+`OhlcvRow`, they converge on the shared `prices_ingest_core::OhlcvWriter`:
 
-- prices-ledger-processor (`packages/prices-ledger-processor/` is fixtures
-  only — task **0038** has not written its OHLCV INSERT path). When 0038
-  builds that path it must write `volume_quote` and leave `volume_quote_usd`
-  at `DEFAULT 0`.
-- soroban-amm-backfill — no such package; task **0053** not started.
+- **prices-ledger-processor** (task **0038**, live path): `reconcile.rs` →
+  `sink/mod.rs` → `OhlcvWriter::write_candles`.
+- **0053 combined backfill** (task **0053**, PR #72 merged): lives in
+  `sdex-backfill`; its `sink.rs` was refactored to delegate to the same
+  `OhlcvWriter::write_candles` (the standalone `OhlcvRow` this task originally
+  patched in `sink.rs` is gone). Covers SDEX + AMM sources in one pass.
 
-This task stays `active` until 0038 (and, if applicable, 0053) land their
-write paths and adopt the same column contract.
+So the earlier sdex-backfill-local `sink.rs`/`init.sql` change is **superseded**
+by `prices_ingest_core::writer.rs` carrying the contract for every writer.
+`writer.rs:108` is the only `prices.price_ohlcv_1m` insert in the tree; it writes
+`volume_quote` and leaves `volume_quote_usd = 0`. Nothing writer-side remains.
+
+Integration confirmed against the local prod-pinned ClickHouse (26.3.10.60):
+`sdex-backfill` `candles_it` (writer round-trip) and `enrichment-worker`
+`ch_enrich_it` (4/4 — `volume_quote` → non-zero `volume_quote_usd`) both green.
 
 ## Design Decisions
 
