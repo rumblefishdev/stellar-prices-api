@@ -1,18 +1,13 @@
-mod cli;
-mod error;
-mod ingest;
-mod obs;
-mod partition;
-mod progress;
-mod run;
-mod sink;
-mod sync;
+//! Thin binary shim over the `sdex_backfill` library. All engine logic lives in
+//! the library modules (see `lib.rs`); this file only parses the CLI, builds the
+//! selected sink, and runs the engine.
 
 use clap::Parser;
 
-use cli::{Cli, Transport};
-use error::BackfillError;
-use sink::Sink;
+use sdex_backfill::cli::{Cli, Transport};
+use sdex_backfill::error::BackfillError;
+use sdex_backfill::sink::Sink;
+use sdex_backfill::{obs, run};
 
 #[tokio::main]
 async fn main() {
