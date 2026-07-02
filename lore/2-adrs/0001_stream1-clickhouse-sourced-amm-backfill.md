@@ -41,6 +41,19 @@ history:
       ADR was created — the superseding decision is recorded as the Amendment
       here (hence no `by:` ADR). Retiring the `soroban_events` role also
       retires task 0017's reason to exist.
+  - date: 2026-07-01
+    status: superseded
+    who: okarcz
+    by: "0009"
+    note: >
+      **Push-model clause superseded by ADR 0009.** The amendment's "local
+      `prices.*` mirror → completion push to Hetzner → tear down local"
+      (Model A / task 0028) is replaced by writing the backfill **directly to
+      Hetzner over the 0052 mTLS client** (Model B), mirroring BE's
+      production `backfill-runner --target clickhouse`. The combined
+      single-pass extraction, download-once, forward discovery, and dual
+      `backfill_progress` rows are UNCHANGED — only the transport to Hetzner
+      changes. See ADR 0009.
 ---
 
 # ADR 0001: Stream 1 Soroban AMM historical backfill is sourced from BE's ClickHouse `soroban_events` (local instance)

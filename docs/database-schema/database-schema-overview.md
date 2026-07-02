@@ -884,6 +884,52 @@ uptime is an operator-managed concern (consistent with BE ADR 0010).
 
 ---
 
+### 3.6 `prices.pool_registry` — Discovered AMM pool registry (task 0053)
+
+The durable, persisted form of the AMM pool classification the combined
+single-pass backfill builds from Soroban **factory** events (`new_pair`,
+`create`, `add_pool`). It exists so the classification survives the run: a
+Soroban AMM `swap` event alone does not say which venue a contract is (or, for
+Soroswap, which two tokens the pool trades) — that is only learned from the
+pool's earlier factory-create event. Persisting it means a **partial
+re-backfill** (a mid-history window that does not itself contain the older
+create events) and the **live processor** can _load_ the registry instead of
+re-deriving it by re-scanning from Soroban activation. This inverts task 0069:
+registry-as-**output**, not registry-as-required-input (design decision #4).
+
+```sql
+CREATE TABLE prices.pool_registry (
+    contract_id   String,                   -- pool/pair contract (C-strkey); the key
+    venue         LowCardinality(String),   -- 'soroswap' | 'phoenix' | 'aquarius'
+    token0        String DEFAULT '',        -- Soroswap pair token0 (a swap event omits it);
+    token1        String DEFAULT '',        --   empty for venues whose swaps carry the tokens
+    pool_type     UInt32 DEFAULT 0,         -- Phoenix pool_type (0 = XYK constant-product)
+    wasm_hash     String DEFAULT '',        -- Phoenix pool WASM hash (hex); '' when unknown
+    updated_at    DateTime DEFAULT now()    -- RMT version
+)
+ENGINE = ReplacingMergeTree(updated_at)
+ORDER BY (contract_id)
+SETTINGS index_granularity = 8192;
+```
+
+`venue` is the master superset — every discovered pool has a row — with the
+venue-specific columns filled only where they apply (Soroswap tokens; Phoenix
+`pool_type` + `wasm_hash`; Aquarius carries no extra pool detail because its
+swap events already include the token addresses).
+
+**Written by:** the `sdex-backfill` CLI at run end (one row per discovered pool;
+idempotent — `ReplacingMergeTree(updated_at)` on `contract_id` collapses
+re-runs). **Read by:** `sdex-backfill` at run start (preload, so a
+post-activation window still resolves earlier-created pools; empty table on a
+fresh full run) and, prospectively, the live Ledger Processor for the same
+load-instead-of-re-derive reason. Relates to `prices.unresolved_pools` (task
+0053): a clean forward-discovery run registers every pool here **before** its
+swaps, so `unresolved_pools` stays empty; a row there signals a pool that was
+swapped before it was registered — an extractor gap, not a `pool_registry`
+entry.
+
+---
+
 ## 4. Retention Policy (Cleanup Worker Lambda)
 
 The **Cleanup Worker** Lambda runs daily on EventBridge `cron(0 2 * * *)`
@@ -988,6 +1034,7 @@ data by orders of magnitude without the per-row cost of B-tree indexes.
 | `prices.current_prices`                            | `(asset_id)`                                     | — (small table, no partitioning) | One row per asset; lookup by id                                          |
 | `prices.oracle_prices`                             | `(asset_id, oracle_name, timestamp)`             | `toYYYYMM(timestamp)`            | Latest-per-oracle lookup, partition pruning by month                     |
 | `prices.backfill_progress`                         | `(task_name)`                                    | —                                | One row per backfill stream                                              |
+| `prices.pool_registry`                             | `(contract_id)`                                  | — (small table, no partitioning) | One row per discovered AMM pool; load/preload by contract                |
 
 **Partition pruning** remains the central performance mechanism for the
 time-series tables: `WHERE timestamp BETWEEN X AND Y` only scans relevant

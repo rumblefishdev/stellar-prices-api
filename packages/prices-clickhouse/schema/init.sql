@@ -215,6 +215,22 @@ ENGINE = ReplacingMergeTree(updated_at)
 ORDER BY (task_name)
 SETTINGS index_granularity = 8192;
 
+-- earliest_data_available (overview §4.5; task 0073 producer-half folded into
+-- 0053): stored timestamp of the oldest OHLCV row this stream has landed,
+-- recorded by the backfill as it lands older candles — NOT computed live via
+-- MIN(timestamp) (timestamp is not the sort key → full scan). Nullable: unset
+-- until the stream lands its first candle. The `?timeframe=all` backfill_note
+-- and /backfill/status read it as-is (O(1)).
+ALTER TABLE prices.backfill_progress ADD COLUMN IF NOT EXISTS earliest_data_available Nullable(DateTime) AFTER last_push_at;
+
+-- newest_data_available (task 0053): companion to earliest_data_available — the
+-- timestamp of the MOST RECENT OHLCV row this stream has landed. Together the
+-- pair is the covered time-window of the stream, and both ends advance
+-- monotonically per-partition in the forward single-pass (direction-agnostic,
+-- unlike the ledger-directional current_ledger). Nullable: unset until the
+-- stream lands its first candle. Read as-is (O(1)); never a live MAX() scan.
+ALTER TABLE prices.backfill_progress ADD COLUMN IF NOT EXISTS newest_data_available Nullable(DateTime) AFTER earliest_data_available;
+
 -- ---------------------------------------------------------------------
 -- Asset Discovery high-water-mark (task 0054). One row per worker tracking
 -- the highest ledger sequence the hourly discovery scan has processed, so
@@ -229,4 +245,57 @@ CREATE TABLE IF NOT EXISTS prices.discovery_state (
 )
 ENGINE = ReplacingMergeTree(updated_at)
 ORDER BY (worker)
+SETTINGS index_granularity = 8192;
+
+-- ---------------------------------------------------------------------
+-- Unresolved AMM pools (task 0053, decision #3). One row per
+-- (contract_id, source): a Soroban contract that emitted a swap-shaped event
+-- while absent from the venue registry, so the swap could not be classified to
+-- a venue/pool and its volume was dropped. On a clean forward-discovery
+-- backfill (AMM window starting at Soroban activation) this table is EMPTY.
+-- A still_unresolved=1 row is a genuine extractor gap to investigate:
+-- sample_topics carries the event shape; first/last_ledger + swap_count size
+-- the dropped volume. still_unresolved=0 means the pool registered later in the
+-- run (only its early swaps were dropped). source is 'backfill' or 'live' — the
+-- live processor may append the same shape. ReplacingMergeTree(version) with
+-- version = last_ledger collapses re-runs on the (contract_id, source) key.
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS prices.unresolved_pools (
+    contract_id      String,
+    source           LowCardinality(String),
+    first_ledger     UInt32,
+    last_ledger      UInt32,
+    swap_count       UInt64,
+    sample_topics    String        CODEC(ZSTD(3)),
+    still_unresolved UInt8         DEFAULT 1,
+    version          UInt64,
+    updated_at       DateTime      DEFAULT now()
+)
+ENGINE = ReplacingMergeTree(version)
+ORDER BY (contract_id, source)
+SETTINGS index_granularity = 8192;
+
+-- ---------------------------------------------------------------------
+-- Discovered AMM pool registry (task 0053, decision #4). One row per pool the
+-- forward-discovery backfill classified from a factory event — the persisted
+-- output of the in-window registry so a partial re-backfill (a mid-history
+-- window) or the live processor can LOAD it instead of re-deriving from Soroban
+-- activation (this inverts task 0069: registry-as-output, not required-input).
+-- venue = 'soroswap' | 'phoenix' | 'aquarius'. token0/token1 are the Soroswap
+-- pair tokens (needed because a Soroswap swap event omits them); pool_type /
+-- wasm_hash are Phoenix pool details; both default empty for venues that don't
+-- use them. ReplacingMergeTree(updated_at) on contract_id collapses re-runs;
+-- read with FINAL.
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS prices.pool_registry (
+    contract_id   String,
+    venue         LowCardinality(String),
+    token0        String        DEFAULT '',
+    token1        String        DEFAULT '',
+    pool_type     UInt32        DEFAULT 0,
+    wasm_hash     String        DEFAULT '',
+    updated_at    DateTime      DEFAULT now()
+)
+ENGINE = ReplacingMergeTree(updated_at)
+ORDER BY (contract_id)
 SETTINGS index_granularity = 8192;

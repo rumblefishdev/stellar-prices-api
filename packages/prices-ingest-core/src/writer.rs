@@ -174,6 +174,36 @@ impl OhlcvWriter {
         Ok(())
     }
 
+    /// Write aggregated unresolved-pool observations into
+    /// `prices.unresolved_pools` (see [`UnresolvedPool`]). Idempotent via
+    /// `ReplacingMergeTree(version)` on `(contract_id, source)`.
+    pub async fn write_unresolved_pools(
+        &self,
+        pools: &[UnresolvedPool],
+    ) -> Result<(), IngestError> {
+        if pools.is_empty() {
+            return Ok(());
+        }
+        let mut insert = self.client.insert("prices.unresolved_pools")?;
+        for p in pools {
+            insert
+                .write(&UnresolvedPoolRow {
+                    contract_id: p.contract_id.clone(),
+                    source: p.source.clone(),
+                    first_ledger: p.first_ledger,
+                    last_ledger: p.last_ledger,
+                    swap_count: p.swap_count,
+                    sample_topics: p.sample_topics.clone(),
+                    still_unresolved: p.still_unresolved,
+                    // Latest observation wins the RMT collapse.
+                    version: p.last_ledger as u64,
+                })
+                .await?;
+        }
+        insert.end().await?;
+        Ok(())
+    }
+
     /// Write decoded oracle price samples into `prices.oracle_prices`.
     pub async fn write_oracle(&self, samples: &[OracleSample]) -> Result<(), IngestError> {
         if samples.is_empty() {
@@ -233,6 +263,37 @@ struct ExistingAssetRow {
     asset_code: String,
     issuer_address: String,
     contract_address: String,
+}
+
+/// One aggregated unresolved-pool observation, ready for
+/// `prices.unresolved_pools`. A caller aggregates the per-ledger
+/// [`crate::soroban::UnresolvedPoolSwap`] records by contract and re-checks each
+/// against the final registry to set `still_unresolved`.
+#[derive(Debug, Clone)]
+pub struct UnresolvedPool {
+    pub contract_id: String,
+    /// Which pipeline observed it: `"backfill"` or `"live"`.
+    pub source: String,
+    pub first_ledger: u32,
+    pub last_ledger: u32,
+    pub swap_count: u64,
+    pub sample_topics: String,
+    /// `1` = still absent from the registry at run-end (a genuine extractor gap
+    /// to investigate); `0` = the pool registered later in the run, so only its
+    /// early swaps were dropped (recoverable, informational).
+    pub still_unresolved: u8,
+}
+
+#[derive(Debug, Serialize, clickhouse::Row)]
+struct UnresolvedPoolRow {
+    contract_id: String,
+    source: String,
+    first_ledger: u32,
+    last_ledger: u32,
+    swap_count: u64,
+    sample_topics: String,
+    still_unresolved: u8,
+    version: u64,
 }
 
 /// One decoded oracle price sample, ready for `prices.oracle_prices`.

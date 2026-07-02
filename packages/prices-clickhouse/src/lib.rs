@@ -176,14 +176,17 @@ mod tests {
 
     #[test]
     fn init_sql_parses_into_statements() {
-        // 1 CREATE DATABASE + 14 CREATE TABLE (assets, _1m, _15m, _1h, _4h,
+        // 1 CREATE DATABASE + 16 CREATE TABLE (assets, _1m, _15m, _1h, _4h,
         // _1d, _1w, _1M, current_prices, asset_supply, oracle_prices,
-        // backfill_sdex_ledgers, backfill_progress, discovery_state) + 7
-        // close_usd ALTERs (one per OHLCV grain) + 1 assets.sac_address ALTER
-        // (task 0061) = 23 statements. (+discovery_state task 0054,
-        // +asset_supply task 0039.)
+        // backfill_sdex_ledgers, backfill_progress, discovery_state,
+        // unresolved_pools, pool_registry) + 7 close_usd ALTERs (one per OHLCV
+        // grain) + 1 assets.sac_address ALTER (task 0061) + 2 backfill_progress
+        // ALTERs (earliest_data_available [0073 half → 0053] +
+        // newest_data_available [0053]) = 27 statements. (+discovery_state task
+        // 0054, +asset_supply task 0039, +unresolved_pools + pool_registry task
+        // 0053.)
         let stmts = split_statements(INIT_SQL);
-        assert_eq!(stmts.len(), 23, "got {}", stmts.len());
+        assert_eq!(stmts.len(), 27, "got {}", stmts.len());
     }
 
     #[test]

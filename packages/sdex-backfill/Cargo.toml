@@ -8,6 +8,15 @@ description = "SDEX historical backfill CLI — local workstation tool mirroring
 name = "sdex-backfill"
 path = "src/main.rs"
 
+[features]
+default = []
+# Direct-write to Hetzner `prices.*` over the task-0052 mTLS client (ADR 0009):
+# adds `--transport hetzner`, which builds the sink from an on-disk client-cert
+# bundle. Gated so the default local-plaintext build (Docker CH, CI) does not
+# pull the rustls / hyper-util stack. Delegates to `prices-clickhouse`'s
+# `aws-mtls` feature, which exposes the `mtls` module.
+aws-mtls = ["prices-clickhouse/aws-mtls"]
+
 [dependencies]
 stellar-xdr = { workspace = true }
 stellar-strkey = { workspace = true }
@@ -24,3 +33,6 @@ rust_decimal = { workspace = true }
 thiserror = { workspace = true }
 prices-ingest-core = { path = "../prices-ingest-core" }
 prices-clickhouse = { path = "../prices-clickhouse" }
+
+[dev-dependencies]
+extractors-core = { path = "../extractors-core" }

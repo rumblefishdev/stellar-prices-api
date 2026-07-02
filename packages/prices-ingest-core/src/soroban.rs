@@ -100,12 +100,35 @@ pub fn reflector_key_to_identity(key: &str) -> Option<AssetIdentity> {
     }
 }
 
+/// A `swap`-shaped Soroban event decoded for a contract that is absent from the
+/// venue registry, so it could not be classified to a venue/pool and its volume
+/// was dropped.
+///
+/// On a clean forward-discovery run (the AMM window starting exactly at Soroban
+/// activation) this never happens: every pool's factory-create event is decoded
+/// before any of its swaps, so the pool is always registered by swap time. A
+/// populated record therefore means either an extractor gap (an event class we
+/// don't yet recognise) or a pool created before the window — `sample_topics`
+/// carries the event shape for the post-run re-check. Non-swap events on
+/// unknown contracts are correctly ignored (not every contract is an AMM pool).
+#[derive(Debug, Clone)]
+pub struct UnresolvedPoolSwap {
+    pub contract_id: String,
+    pub ledger_sequence: u32,
+    /// How many `swap` events this contract dropped in this ledger.
+    pub swap_count: u32,
+    /// Debug rendering of the first dropped swap's topics — the diagnostic hint.
+    pub sample_topics: String,
+}
+
 /// Output of processing one ledger's Soroban events.
 #[derive(Default)]
 pub struct LedgerSoroban {
     /// (source, tick) pairs; source ∈ {phoenix, soroswap, aquarius}.
     pub amm_ticks: Vec<(&'static str, TradeTick)>,
     pub oracle: Vec<OracleSample>,
+    /// Contracts that emitted a `swap` but were not in the venue registry.
+    pub unresolved: Vec<UnresolvedPoolSwap>,
 }
 
 fn collect_tx_metas(lcm: &LedgerCloseMeta) -> Vec<&TransactionMeta> {
@@ -260,9 +283,27 @@ pub fn process_ledger(
         for (contract_id, rows) in amm_groups {
             let venue = match reg.venue.get(&contract_id) {
                 Some(v) => v.clone(),
-                None => continue, // unknown pool/contract — skip
+                None => {
+                    // Unknown contract. Most are not AMM pools and are correctly
+                    // ignored — but if this one emitted a `swap`, its volume is
+                    // being dropped. Record it for the post-run re-check instead
+                    // of silently skipping (guard from task 0053 decision #3).
+                    let swaps: Vec<&SorobanEventRow> = rows
+                        .iter()
+                        .filter(|r| r.topics.first().and_then(|t| t.as_str()) == Some("swap"))
+                        .collect();
+                    if let Some(first) = swaps.first() {
+                        out.unresolved.push(UnresolvedPoolSwap {
+                            contract_id,
+                            ledger_sequence: ledger_seq,
+                            swap_count: swaps.len() as u32,
+                            sample_topics: format!("{:?}", first.topics),
+                        });
+                    }
+                    continue;
+                }
             };
-            let source = venue_source(&venue);
+            let source = venue.as_source();
             match dispatch(&rows, &reg.venue, &reg.phoenix, &reg.soroswap) {
                 Ok(trades) => {
                     for t in trades {
@@ -284,14 +325,6 @@ fn topics_to_tagged(topics: &Value) -> Vec<TaggedValue> {
         .as_array()
         .map(|a| a.iter().map(json_to_tagged).collect())
         .unwrap_or_default()
-}
-
-fn venue_source(v: &Venue) -> &'static str {
-    match v {
-        Venue::Phoenix => "phoenix",
-        Venue::Soroswap => "soroswap",
-        Venue::Aquarius => "aquarius",
-    }
 }
 
 /// Recognise factory events and register the created pool. Detected by event

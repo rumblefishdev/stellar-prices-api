@@ -41,4 +41,17 @@ pub enum BackfillError {
 
     #[error("ingest: {0}")]
     Ingest(#[from] prices_ingest_core::IngestError),
+
+    #[error(
+        "{0} AMM pool(s) had swaps dropped for lack of registration — \
+         see prices.unresolved_pools WHERE still_unresolved = 1"
+    )]
+    UnresolvedPools(usize),
+
+    #[cfg(feature = "aws-mtls")]
+    #[error("--transport hetzner requires these arg(s)/env var(s): {0}")]
+    MissingMtlsArg(String),
+
+    #[error("mtls sink init failed: {0}")]
+    Mtls(String),
 }

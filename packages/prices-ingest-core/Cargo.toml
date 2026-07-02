@@ -14,11 +14,13 @@ stellar-strkey = { workspace = true }
 sha2 = { workspace = true }
 xdr-parser = { workspace = true }
 clickhouse = { workspace = true }
+tokio = { workspace = true }
 rust_decimal = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
+hex = "0.4"
 
 prices-clickhouse = { path = "../prices-clickhouse" }
 extractors-core = { path = "../extractors-core" }

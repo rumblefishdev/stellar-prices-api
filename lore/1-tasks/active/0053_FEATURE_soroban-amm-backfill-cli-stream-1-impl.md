@@ -3,7 +3,7 @@ id: "0053"
 title: "Combined single-pass historical backfill (SDEX + Soroban AMM) — full-chain, forward-discovery, dual-stream progress"
 type: FEATURE
 status: active
-related_adr: ["0001", "0003", "0004", "0007"]
+related_adr: ["0001", "0003", "0004", "0007", "0009"]
 related_tasks: ["0017", "0028", "0034", "0037", "0048", "0052", "0051", "0058", "0026", "0060", "0069", "0073", "0063"]
 tags: [layer-indexing, priority-high, effort-large, milestone-M1, stream-1, single-pass, rust, cli, workstation, clickhouse, soroban, amm, soroswap, aquarius, phoenix, sdex]
 milestone: 1
@@ -13,6 +13,7 @@ links:
   - "../../2-adrs/0003_price-ohlcv-pk-includes-quote-asset-id.md"
   - "../../2-adrs/0004_price-ohlcv-multi-source-merge-columns.md"
   - "../../2-adrs/0007_live-data-sink-on-shared-hetzner-clickhouse.md"
+  - "../../2-adrs/0009_backfill-direct-write-to-hetzner-clickhouse.md"
   - "../archive/0048_RESEARCH_soroban-events-pricing-decoder-spec/notes/G-soroban-events-pricing-decoder.md"
   - "../archive/0060_FEATURE_prices-clickhouse-crate-combined-backfill-sizing/README.md"
   - "./0069_FEATURE_discovery-pool-registry-maintenance.md"
@@ -86,6 +87,43 @@ history:
       partition order, persist the discovered registry, dual `backfill_progress`
       updates, and the cloud-push (soft-coordinates with backlog 0028; the local
       extract→mirror bulk is startable now).
+  - date: 2026-07-01
+    status: active
+    who: okarcz
+    note: >
+      **Push model decided: direct-write (Model B) — ADR 0009.** After checking
+      BE's prod approach (`backfill-runner --target clickhouse` writes straight
+      to Hetzner over Caddy mTLS) and the A-vs-B analysis, the operator chose to
+      write the backfill **directly to Hetzner over the 0052 mTLS client** — no
+      local mirror, no separate push CLI, no `assets` remap (ids align via
+      load-from-target), and `/backfill/status` updates in real time. Steps 4–5
+      rewritten; task 0028 (stage-then-push) superseded by ADR 0009. Already
+      shipped on the branch (PR #72): extract-mode gate, the unregistered-pool
+      guard → `prices.unresolved_pools`, and the pinned activation ledger
+      (50,463,000). Remaining: mTLS sink + real-time dual progress rows +
+      minute-aligned split + runbook + integration/idempotency tests.
+  - date: 2026-07-02
+    status: active
+    who: claude
+    note: >
+      **Code-complete on PR #72; remainder is operational.** Landed the mTLS
+      direct-write sink (ADR 0009), the real-time dual `backfill_progress`
+      writer + discovered-registry artifact, and retry/backoff. A high-effort
+      code review found and fixed a cluster of `backfill_progress` accounting
+      bugs (monotonic direction-aware `current_ledger` via
+      `SetForward`/`SetBackward`, never-downgrade a stored `completed`,
+      complete-only-when-tip-reached, gap-check-before-terminal-write, strictly-
+      increasing RMT version, `--tip`/retry/SQL hardening), plus cleanup (shared
+      retry/merge helpers, `Venue::as_source`, `hex` crate, doc link). Then
+      closed the two remaining code gaps: **`paused` status between the two
+      runs** (auto at combined completion — decision 6) and the **activation
+      minute-alignment guard** (decision 7 — decodes the two boundary ledgers,
+      both on disk, and WARNs on a straddled sdex minute). 54 unit tests pass;
+      workspace/aws-mtls/fmt/clippy clean. Updated the Acceptance Criteria +
+      added an Implementation-status block. Remaining is **operational only**
+      (keeps the task active): the real two-range archive run + Hetzner
+      direct-write, the Nov-2023 Soroswap OHLCV verification, greening the
+      Docker-gated CH integration tests, and PR review/merge.
 ---
 
 # Combined single-pass historical backfill (SDEX + Soroban AMM)
@@ -251,14 +289,30 @@ processor's mechanism). Add the "no swap for an unregistered pool" guard.
 Emit the accumulated pool registry as a durable artifact at run end (and/or
 checkpoint) so partial re-runs and the live processor can load it.
 
-### Step 4: Dual progress-row updates
-On each run's push, update the `backfill_progress` rows per decision 6
-(including `paused` between runs, and `earliest_data_available`).
+> **Push model — direct-write (Model B, [ADR 0009](../../2-adrs/0009_backfill-direct-write-to-hetzner-clickhouse.md), 2026-07-01).** Steps 4–5 below
+> supersede the earlier local-stage-then-push (task 0028). The backfill writes
+> **directly to Hetzner `prices.*` over the 0052 mTLS client** — no local mirror,
+> no separate push CLI, no `assets` remap (ids align via load-from-target). This
+> mirrors BE's prod `backfill-runner --target clickhouse` and lets
+> `/backfill/status` update in real time.
 
-### Step 5: Cloud-push (shared with 0028)
-Stream local `prices.*` rows → Hetzner via the 0052 mTLS client; chunked
-INSERTs; flip `backfill_progress` on success; idempotent re-run
-(`ReplacingMergeTree(version)`).
+### Step 4: Real-time dual progress-row updates
+Advance the two `backfill_progress` rows **as partitions complete** (Model B
+writes to Hetzner live, so status is truthful in real time — not only after a
+terminal push). Per decision 6: soroban run → `soroban_amm` advances forward +
+`sdex_archive.current = activation`; sdex run → walks `sdex_archive`; `paused`
+between runs; `earliest_data_available`; set `target_ledger = live tip` at start;
+`last_push_at = now()` on each update.
+
+### Step 5: Direct-write mTLS sink (ADR 0009; supersedes the 0028 push)
+Give `sdex-backfill`'s `Sink` an mTLS-target constructor over the 0052 client
+(reuse the live processor's `client_from_lambda_env` / `ClickHouseSink`,
+`aws-mtls` feature). A flag/env selects local-plaintext (testing against a
+stand-in) vs Hetzner-mTLS (real run). Load the asset registry from the target so
+surrogate ids align with live (**no remap**). Chunked INSERTs + retry/backoff on
+the sink; idempotent re-run (`ReplacingMergeTree(version)`); resume via
+`backfill_sdex_ledgers` on Hetzner. No local CH mirror; local ledger scratch is
+cleaned per-partition as today.
 
 ### Step 6: Tests
 - Unit: bucketing + pre-roll math for ≥2 venue-pair scenarios; the
@@ -275,25 +329,74 @@ and teardown.
 
 ## Acceptance Criteria
 
-- [ ] Combined single-pass run over `[activation, tip]` writes SDEX + AMM +
-      oracle rows to the local `prices.*` mirror from a **single download per
-      ledger** (no second pass for Soroban-era SDEX).
-- [ ] SDEX-only run over `[1, activation)` completes the pre-Soroban SDEX
+> **Legend.** `[x]` = code-complete + unit/integration-tested. `[ ]` marked
+> **(operational)** = the mechanism is implemented and tested but the criterion
+> is only *confirmed* by executing the real two-range archive run — see
+> **Implementation status** below. All code landed on PR #72
+> (`feat/0053-extract-mode-gate`).
+
+- [x] Combined single-pass run over `[activation, tip]` writes SDEX + AMM +
+      oracle rows from a **single download per ledger** (no second pass for
+      Soroban-era SDEX). *Engine from 0060; `candles_it` CH IT asserts per-source
+      rows across the activation boundary from one pass.*
+- [x] SDEX-only run over `[1, activation)` completes the pre-Soroban SDEX
       tail; union coverage is `[1, tip]` with no ledger downloaded twice.
-- [ ] Forward-ordered decode yields complete AMM pool discovery over the
-      Soroban range with **no external registry seed**; the
-      unregistered-pool guard never fires on a clean run (and is an error if
-      it does).
-- [ ] Discovered pool registry is emitted as a durable artifact.
-- [ ] `push` streams local rows to Hetzner and updates `backfill_progress`;
-      the **soroban run advances both** `soroban_amm`→`completed` and
-      `sdex_archive`→`current=activation`; the **sdex run** walks
-      `sdex_archive`→`completed`; `status='paused'` is set between runs.
-- [ ] `GET /backfill/status` reports truthful, monotonic progress for both
-      streams throughout (no SDEX under-report while recent SDEX exists).
-- [ ] OHLCV for Soroswap pairs verifiable for Nov 2023 dates (Tranche 1 AC).
-- [ ] Idempotent re-run of `push` (no duplicate rows after merge).
-- [ ] Runbook updated.
+      *`ExtractMode::SdexOnly` gate + mode/range guard; no full-range coverage
+      run executed yet (operational).*
+- [x] Forward-ordered decode yields complete AMM pool discovery with **no
+      external registry seed**; the unregistered-pool guard captures + persists
+      (and fails only on a genuine gap). *Guard implemented; "never fires on a
+      clean run" is confirmed on the archive run (operational).*
+- [x] Discovered pool registry is emitted as a durable artifact.
+      *`prices.pool_registry` write + preload; `pool_registry_it` round-trip IT.*
+- [x] `push`/direct-write updates `backfill_progress`; the **soroban run
+      advances both** `soroban_amm`→`completed` and `sdex_archive`→
+      `current=activation`; the **sdex run** walks `sdex_archive`→`completed`;
+      **`status='paused'` is set between runs** (auto, at combined completion).
+      *Direct-write mTLS sink (ADR 0009), dual-row writer, `Paused` status;
+      `progress_it` CH IT covers both rows + the paused seam.*
+- [x] `GET /backfill/status` reports truthful, monotonic progress for both
+      streams (no SDEX under-report). *Monotonic direction-aware `current_ledger`
+      + non-downgrade of `completed` (code-review findings 1–4) + strictly-
+      increasing RMT version; read-side `progress_pct` exposure is task 0073.*
+- [ ] **(operational)** OHLCV for Soroswap pairs verifiable for Nov 2023 dates
+      (Tranche 1 AC) — requires the real archive run + a data spot-check.
+- [x] Idempotent re-run of `push` (no duplicate rows after merge). (CH ITs:
+      `candles_it` per-source + re-write, `progress_it`, `pool_registry_it` —
+      all assert stable `count() … FINAL`.)
+- [x] Runbook updated. (`docs/runbooks/running-ingestion-components.md` §1 —
+      two-range sequence, run order, `/backfill/status`, activation split +
+      minute-align guard, paused-between-runs, transport, teardown;
+      `backfill-sdex.md` cloud-push → direct-write.)
+
+## Implementation status (2026-07-02)
+
+**Code-complete on PR #72** — all seven implementation-plan steps have landed:
+the extract-mode gate + full-range driver, forward-ordered decode with
+registry carry-forward, the unresolved-pool guard, the discovered-registry
+artifact, the direct-write mTLS sink (ADR 0009), the real-time dual
+`backfill_progress` writer, and unit + CH integration tests. A high-effort code
+review found and **fixed a cluster of `backfill_progress` accounting bugs**
+(monotonic direction-aware `current_ledger`, no false completion, fail-before-
+completed, RMT version-collision, `--tip`/retry/SQL hardening), and the two
+final code gaps — **`paused` status between runs** and the **activation
+minute-alignment guard** — are implemented. 54 unit tests pass; `cargo check
+--workspace`/`--features aws-mtls`/`fmt`/clippy clean.
+
+**Remaining — operational only (keeps this task active):**
+
+1. **Execute the two-range run** against the pubnet archive and direct-write to
+   Hetzner: combined `[activation, tip]` then sdex-only `[1, activation-1]`
+   (`--tip` = live tip). Confirm single-download coverage, the guard never
+   fires on the clean run, and truthful monotonic `/backfill/status`.
+2. **Verify OHLCV for Soroswap pairs on Nov 2023 dates** (the Tranche-1 AC data
+   check) once the run lands.
+3. **Green the Docker-gated CH integration tests** (`candles_it`,
+   `pool_registry_it`, `progress_it`) against a local ClickHouse once.
+4. PR #72 review + merge.
+
+Per standing rules these are operator-run against real infra (archive fetch +
+Hetzner), not executed autonomously.
 
 ## Blocked on
 
@@ -317,6 +420,15 @@ and teardown.
   (now an optimization, not a prerequisite here).
 - Sub-table-granular resume of a partially-pushed run — v1 pushes all
   granularities or none, then idempotent re-run cleans up.
+
+## Future Work
+
+- **[0075](../backlog/0075_DOCS_update-db-schema-overview-newer-tables.md)** —
+  update `docs/database-schema/database-schema-overview.md` for the newer
+  `prices.*` tables (`unresolved_pools`, `discovery_state`, and the
+  `backfill_progress` `earliest/newest_data_available` columns). `pool_registry`
+  was documented here (§3.6); the rest is deferred until 0053 lands so the doc
+  reflects the final schema.
 
 ## Notes
 

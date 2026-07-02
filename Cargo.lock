@@ -2672,6 +2672,7 @@ dependencies = [
  "aquarius-extractor",
  "clickhouse",
  "extractors-core",
+ "hex",
  "ledger-processor",
  "phoenix-extractor",
  "prices-clickhouse",
@@ -2683,6 +2684,7 @@ dependencies = [
  "stellar-strkey",
  "stellar-xdr",
  "thiserror 2.0.18",
+ "tokio",
  "tracing",
  "xdr-parser",
 ]
@@ -3286,6 +3288,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "clickhouse",
+ "extractors-core",
  "prices-clickhouse",
  "prices-ingest-core",
  "rust_decimal",
