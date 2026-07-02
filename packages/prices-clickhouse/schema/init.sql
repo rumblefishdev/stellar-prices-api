@@ -215,6 +215,14 @@ ENGINE = ReplacingMergeTree(updated_at)
 ORDER BY (task_name)
 SETTINGS index_granularity = 8192;
 
+-- earliest_data_available (overview §4.5; task 0073 producer-half folded into
+-- 0053): stored timestamp of the oldest OHLCV row this stream has landed,
+-- recorded by the backfill as it lands older candles — NOT computed live via
+-- MIN(timestamp) (timestamp is not the sort key → full scan). Nullable: unset
+-- until the stream lands its first candle. The `?timeframe=all` backfill_note
+-- and /backfill/status read it as-is (O(1)).
+ALTER TABLE prices.backfill_progress ADD COLUMN IF NOT EXISTS earliest_data_available Nullable(DateTime) AFTER last_push_at;
+
 -- ---------------------------------------------------------------------
 -- Asset Discovery high-water-mark (task 0054). One row per worker tracking
 -- the highest ledger sequence the hourly discovery scan has processed, so

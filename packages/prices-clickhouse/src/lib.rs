@@ -180,10 +180,12 @@ mod tests {
         // _1d, _1w, _1M, current_prices, asset_supply, oracle_prices,
         // backfill_sdex_ledgers, backfill_progress, discovery_state,
         // unresolved_pools) + 7 close_usd ALTERs (one per OHLCV grain) + 1
-        // assets.sac_address ALTER (task 0061) = 24 statements. (+discovery_state
-        // task 0054, +asset_supply task 0039, +unresolved_pools task 0053.)
+        // assets.sac_address ALTER (task 0061) + 1 backfill_progress
+        // .earliest_data_available ALTER (task 0073 half → 0053) = 25 statements.
+        // (+discovery_state task 0054, +asset_supply task 0039, +unresolved_pools
+        // task 0053.)
         let stmts = split_statements(INIT_SQL);
-        assert_eq!(stmts.len(), 24, "got {}", stmts.len());
+        assert_eq!(stmts.len(), 25, "got {}", stmts.len());
     }
 
     #[test]
