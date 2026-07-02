@@ -2,10 +2,10 @@
 id: "0074"
 title: "`GET /assets` keyset pagination — 250-row no-dup/no-skip integration test"
 type: FEATURE
-status: active
+status: completed
 related_adr: ["0008"]
 related_tasks: ["0040"]
-tags: [layer-backend, effort-small, priority-medium, api, rust, clickhouse, test, pagination]
+tags: [layer-backend, effort-small, priority-medium, api, rust, clickhouse, test, pagination, milestone-M1]
 milestone: 1
 links:
   - "../../../packages/prices-api/tests/list_it.rs"
@@ -27,6 +27,18 @@ history:
       Promoted from backlog to implement the last non-deploy-gated M1
       item. Small, code-only: add the 250-row cursor-walk IT to
       `list_it.rs`.
+  - date: 2026-07-02
+    status: completed
+    who: claude
+    note: >
+      Done + merged (PR #75, merge `573b02c` → develop). Added
+      `keyset_pagination_250_rows_no_dup_no_skip` (+`setup_n`/`enc_cursor`
+      helpers) to `list_it.rs` (+124 lines, 1 test). All 3 ACs met; verified
+      green vs prod-pinned CH 26.3.10.60 (full `list_it` suite 5/5), clippy +
+      rustfmt-edition2024 clean. No production code changed; no existing tests
+      modified. Also added the `milestone-M1` tag (task previously carried only
+      the `milestone: 1` field, which is what excluded it from the tag-based M1
+      filter). This was the last non-deploy-gated M1 item.
 ---
 
 # `GET /assets` pagination — 250-row integration test
