@@ -95,12 +95,15 @@ docker compose exec clickhouse clickhouse-client --query \
 | `--keep-partitions` | —                   | false                   | Keep downloaded partitions after indexing |
 | `--verbose` / `-v`  | —                   | false                   | Enable per-partition info logs            |
 
-## Cloud push
+## Writing to Hetzner (direct-write, ADR 0009)
 
-Cloud push to the Hetzner ClickHouse cluster is handled by a
-separate tool (task 0028). Once the local backfill reaches a
-release-ready threshold, the cloud-push tool streams the relevant
-tables to the production cluster over HTTPS-mTLS.
+The earlier stage-then-push model (a separate task-0028 cloud-push tool) is
+**superseded**. `sdex-backfill` now writes `prices.*` **directly** to the
+Hetzner cluster over the task-0052 mTLS client with `--transport hetzner` (no
+local mirror, no separate push step), so `/backfill/status` updates in real
+time. See §1 "SDEX + Soroban AMM historical backfill" in
+[`running-ingestion-components.md`](running-ingestion-components.md) for the
+`--transport` / `--mode` / `CH_DOMAIN` + `MTLS_*_PATH` invocation.
 
 ## Troubleshooting
 

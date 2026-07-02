@@ -325,7 +325,9 @@ and teardown.
       streams throughout (no SDEX under-report while recent SDEX exists).
 - [ ] OHLCV for Soroswap pairs verifiable for Nov 2023 dates (Tranche 1 AC).
 - [ ] Idempotent re-run of `push` (no duplicate rows after merge).
-- [ ] Runbook updated.
+- [x] Runbook updated. (`docs/runbooks/running-ingestion-components.md` §1 —
+      two-range sequence, run order, `/backfill/status`, activation split,
+      transport, teardown; `backfill-sdex.md` cloud-push → direct-write.)
 
 ## Blocked on
 

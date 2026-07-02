@@ -18,17 +18,16 @@ If you only read one section, read
 ## The pipeline at a glance
 
 ```
-                 ┌─────────────────────────┐
- Galexie S3  ──► │ sdex-backfill (history)  │──┐
- (public)        └─────────────────────────┘  │
-                 ┌─────────────────────────┐  │   source='sdex'
- Galexie S3  ──► │ soroban-amm-backfill     │──┤   source=phoenix|soroswap|aquarius
- (public)        │   (history, PLANNED 0053)│  │        │
-                 └─────────────────────────┘  ▼        ▼
-                 ┌─────────────────────────┐  ┌──────────────────────────┐
- S3 doorbell ──► │ prices-ledger-processor  │─►│ prices.price_ohlcv_1m    │
- (live tip)      │   (live, both sources)   │  │  ReplacingMergeTree(ver) │
-                 └─────────────────────────┘  └──────────┬───────────────┘
+                 ┌────────────────────────────────────┐
+ Galexie S3  ──► │ sdex-backfill (one CLI, history)   │──┐  source='sdex'
+ (public)        │  --mode combined  [activation,tip]  │  │  + phoenix|soroswap|aquarius
+                 │  --mode sdex-only [1,activation)    │  │  (combined pass only)
+                 └────────────────────────────────────┘  │
+                 ┌─────────────────────────┐              ▼
+ S3 doorbell ──► │ prices-ledger-processor  │─►┌──────────────────────────┐
+ (live tip)      │   (live, both sources)   │  │ prices.price_ohlcv_1m    │
+                 └─────────────────────────┘  │  ReplacingMergeTree(ver) │
+                                               └──────────┬───────────────┘
                                                           │ (rollup MVs → _15m.._1M)
                  ┌─────────────────────────┐              ▼
  oracle-worker ─►│ prices.oracle_prices     │   enrichment-worker fills
@@ -46,17 +45,16 @@ seam section.
 
 ## Component summary
 
-| Component                 | Kind                 | Writes                                                       | How it runs                               | Built?       |
-| ------------------------- | -------------------- | ------------------------------------------------------------ | ----------------------------------------- | ------------ |
-| `sdex-backfill`           | operator CLI         | `price_ohlcv_1m` (`sdex`), `assets`, `backfill_sdex_ledgers` | manual, `--start/--end`                   | ✅           |
-| `soroban-amm-backfill`    | operator CLI         | `price_ohlcv_1m` (AMM sources)                               | manual (planned)                          | ⛔ task 0053 |
-| `prices-ledger-processor` | Lambda / fixture CLI | `price_ohlcv_1m` (all sources), `oracle_prices`, `assets`    | SQS doorbell (prod) or `--cursor` (local) | ✅           |
-| `enrichment-worker`       | Lambda / CLI         | `price_ohlcv_1m` (`_usd` cols)                               | scheduled (prod) or CLI (local)           | ✅ prototype |
-| `asset-discovery`         | scheduled Lambda     | `assets`, `discovery_state`                                  | EventBridge `rate(1h)`                    | ✅           |
-| `oracle-worker`           | scheduled Lambda     | `oracle_prices`                                              | EventBridge schedule                      | ✅           |
-| `supply-worker`           | scheduled Lambda     | `asset_supply`                                               | EventBridge schedule                      | ✅           |
-| `cleanup-worker`          | scheduled Lambda     | TTL/partition maintenance                                    | EventBridge schedule                      | ✅           |
-| `prices-api`              | HTTP Lambda          | reads only                                                   | API Gateway (prod) or `serve` bin (local) | ✅           |
+| Component                 | Kind                 | Writes                                                                                                                                                | How it runs                               | Built?       |
+| ------------------------- | -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------- | ------------ |
+| `sdex-backfill`           | operator CLI         | `price_ohlcv_1m` (`sdex` + AMM sources), `assets`, `oracle_prices`, `backfill_progress`, `pool_registry`, `unresolved_pools`, `backfill_sdex_ledgers` | manual, `--mode`/`--start`/`--end`        | ✅           |
+| `prices-ledger-processor` | Lambda / fixture CLI | `price_ohlcv_1m` (all sources), `oracle_prices`, `assets`                                                                                             | SQS doorbell (prod) or `--cursor` (local) | ✅           |
+| `enrichment-worker`       | Lambda / CLI         | `price_ohlcv_1m` (`_usd` cols)                                                                                                                        | scheduled (prod) or CLI (local)           | ✅ prototype |
+| `asset-discovery`         | scheduled Lambda     | `assets`, `discovery_state`                                                                                                                           | EventBridge `rate(1h)`                    | ✅           |
+| `oracle-worker`           | scheduled Lambda     | `oracle_prices`                                                                                                                                       | EventBridge schedule                      | ✅           |
+| `supply-worker`           | scheduled Lambda     | `asset_supply`                                                                                                                                        | EventBridge schedule                      | ✅           |
+| `cleanup-worker`          | scheduled Lambda     | TTL/partition maintenance                                                                                                                             | EventBridge schedule                      | ✅           |
+| `prices-api`              | HTTP Lambda          | reads only                                                                                                                                            | API Gateway (prod) or `serve` bin (local) | ✅           |
 
 ---
 
@@ -142,35 +140,109 @@ minute-aligned handoffs matter.
 
 ## Component catalog
 
-### 1. SDEX historical backfill (`sdex-backfill`)
+### 1. SDEX + Soroban AMM historical backfill (`sdex-backfill`)
 
-Backfills classic DEX (`source='sdex'`) trade history from the public
-Galexie archive. **Full runbook: [`backfill-sdex.md`](backfill-sdex.md).**
+**One CLI, two disjoint range invocations of the same single-pass engine.**
+Each ledger's XDR is downloaded once (download is the bottleneck, not parsing),
+so the two runs never download a ledger twice. **Full SDEX deep-dive:
+[`backfill-sdex.md`](backfill-sdex.md).**
+
+- **Soroban era — combined.** `--mode combined --start <activation> --end <tip>`
+  extracts **SDEX + AMM + oracle** from one download per ledger
+  (`source='sdex'` plus `phoenix`/`soroswap`/`aquarius`).
+- **Pre-Soroban tail — sdex-only.** `--mode sdex-only --start 1 --end <activation-1>`
+  extracts SDEX only — no AMM pools exist before activation.
+
+Union coverage: SDEX = `[1, tip]`, AMM = `[activation, tip]`, no ledger
+downloaded twice. Activation is pinned (`--activation-ledger`, default
+`50463000` — Protocol 20, 2024-02-20).
 
 ```bash
-cargo build --release -p sdex-backfill
-target/release/sdex-backfill --start <FIRST_LEDGER> --end <LAST_LEDGER> --verbose
+cargo build --release -p sdex-backfill                        # local plaintext CH
+cargo build --release -p sdex-backfill --features aws-mtls    # to direct-write Hetzner
 ```
 
-| Flag                | Env                 | Default                 | Meaning                       |
-| ------------------- | ------------------- | ----------------------- | ----------------------------- |
-| `--start`           | —                   | required                | First ledger, inclusive       |
-| `--end`             | —                   | required                | Last ledger, inclusive        |
-| `--clickhouse-url`  | `CLICKHOUSE_URL`    | `http://localhost:8123` | CH HTTP endpoint              |
-| `--temp-dir`        | `BACKFILL_TEMP_DIR` | `.temp/sdex-backfill`   | Partition scratch dir         |
-| `--keep-partitions` | —                   | false                   | Keep downloads after indexing |
-| `--verbose` / `-v`  | —                   | false                   | Per-partition logs            |
+| Flag                  | Env                 | Default                 | Meaning                                                                                               |
+| --------------------- | ------------------- | ----------------------- | ----------------------------------------------------------------------------------------------------- |
+| `--start`             | —                   | required                | First ledger, inclusive                                                                               |
+| `--end`               | —                   | required                | Last ledger, inclusive                                                                                |
+| `--mode`              | —                   | `combined`              | `combined` (SDEX+AMM+oracle, for `[activation,tip]`) or `sdex-only` (for `[1,activation)`)            |
+| `--activation-ledger` | —                   | `50463000`              | Soroban activation — the range split point + `--mode` sanity check                                    |
+| `--tip`               | —                   | `--end`                 | Chain tip = `backfill_progress.target_ledger` denominator; pass the **live** tip on the sdex-only run |
+| `--transport`         | —                   | `local`                 | `local` (plaintext `--clickhouse-url`) or `hetzner` (mTLS direct-write; needs `--features aws-mtls`)  |
+| `--clickhouse-url`    | `CLICKHOUSE_URL`    | `http://localhost:8123` | CH HTTP endpoint (transport=local)                                                                    |
+| `--ch-domain`         | `CH_DOMAIN`         | —                       | Caddy host fronting Hetzner CH (transport=hetzner)                                                    |
+| `--ch-database`       | `CH_DATABASE`       | `prices`                | Target database (transport=hetzner)                                                                   |
+| `--mtls-cert-path`    | `MTLS_CERT_PATH`    | —                       | PEM client cert (transport=hetzner)                                                                   |
+| `--mtls-key-path`     | `MTLS_KEY_PATH`     | —                       | PEM client key — read straight into rustls, never logged (transport=hetzner)                          |
+| `--mtls-ca-path`      | `MTLS_CA_PATH`      | —                       | PEM CA bundle (transport=hetzner)                                                                     |
+| `--temp-dir`          | `BACKFILL_TEMP_DIR` | `.temp/sdex-backfill`   | Partition scratch dir                                                                                 |
+| `--keep-partitions`   | —                   | false                   | Keep downloads after indexing                                                                         |
+| `--verbose` / `-v`    | —                   | false                   | Per-partition logs                                                                                    |
 
-Resumable: `Ctrl-C` and re-run the same range; done partitions are
-skipped. Runs older ranges in any order.
+**Direct-write to Hetzner (ADR 0009).** `--transport hetzner` writes `prices.*`
+straight to the shared cluster over the task-0052 mTLS client — no local mirror,
+no separate push step — so `/backfill/status` updates in real time. Needs the
+`aws-mtls` build and the operator's client bundle:
 
-### 2. AMM historical backfill (`soroban-amm-backfill`) — PLANNED
+```bash
+CH_DOMAIN=ch.sorobanscan.rumblefish.dev \
+MTLS_CERT_PATH=… MTLS_KEY_PATH=… MTLS_CA_PATH=… \
+target/release/sdex-backfill --transport hetzner \
+    --mode combined --start 50463000 --end <TIP> --verbose
+```
 
-Stream-1 backfill of Soroban AMM swaps (`phoenix`/`soroswap`/`aquarius`).
-**Not yet built — task 0053** (blocked on 0017 local ClickHouse). When it
-lands it will follow the same `--start/--end` shape and the same
-disjoint-range rules against the live processor. Until then, AMM history
-is empty except for whatever the live processor has seen at the tip.
+`--transport local` (default) writes plaintext to `--clickhouse-url` — for
+testing against a stand-in CH, not a real run.
+
+**Recommended run order.** Both orders are correct (the ranges are disjoint);
+the order only sets what `/backfill/status` shows during the run:
+
+- **Soroban-era first** (combined `[activation,tip]`) → `soroban_amm` completes
+  and `sdex_archive` jumps to `current=activation` immediately (recent + AMM
+  data first); the pre-Soroban SDEX tail follows as a later milestone.
+- **Chronological** (sdex-only `[1,activation)` first, then combined) →
+  `sdex_archive` advances monotonically `1→tip` (simplest honest progress), but
+  you grind the long pre-Soroban tail before any recent/AMM data lands.
+
+**What `/backfill/status` shows.** The run advances **both** `backfill_progress`
+rows live: the combined run drives `soroban_amm` forward to `completed` **and**
+sets `sdex_archive.current = activation` (so recent SDEX is not under-reported);
+the sdex-only run walks `sdex_archive` toward genesis and marks it `completed`
+at ledger 1. Both rows also carry the covered `[earliest, newest]_data_available`
+time window. (The read-side `progress_pct` and timestamp exposure are finished
+in **task 0073**.)
+
+**The activation split is a seam.** The two SDEX ranges meet at activation —
+treat it like any backfill/live seam (see the seam section): make the sdex-only
+run's `--end` the **last ledger of a completed minute**, or accept one
+undercounted boundary minute (healed by **task 0065**). Set `--tip` to the live
+chain tip on the sdex-only run so `sdex_archive`'s progress is measured against
+the whole chain, not just the pre-Soroban range.
+
+**Discovered pool registry.** A combined run persists every pool it classifies
+to `prices.pool_registry` at run end and preloads it at run start — so a partial
+re-backfill of a mid-history window still resolves pools created earlier. A
+clean forward run from activation leaves `prices.unresolved_pools` **empty**; a
+row there is an extractor gap to investigate (its `sample_topics` carries the
+event shape), not silently dropped volume.
+
+**Teardown.** Direct-write leaves nothing local to tear down beyond the
+per-partition scratch (`--temp-dir`, auto-cleaned unless `--keep-partitions`).
+If you exercised a local stand-in CH via `docker compose up -d clickhouse`, run
+`docker compose down` when done (its data lives in a named volume).
+
+Resumable: `Ctrl-C` and re-run the same range; done ledgers
+(`backfill_sdex_ledgers`) are skipped and ReplacingMergeTree dedups the rest.
+
+### 2. AMM historical backfill — superseded (folded into §1)
+
+The separate `soroban-amm-backfill` binary planned in early 0053 was
+**superseded** by the combined single-pass model (task 0053 / ADR 0009). Soroban
+AMM swaps are extracted by `sdex-backfill --mode combined` in the **same
+download pass** as SDEX (§1) — there is no second binary and no second pass over
+the Soroban era, and backfilled AMM candles are byte-identical to the live
+processor's (same code, replayed from history).
 
 ### 3. Live ledger processor (`prices-ledger-processor`)
 
@@ -269,14 +341,15 @@ and its `loadtest/` for the k6 harness.
 
 ## Related follow-ups
 
-| Task     | Why it matters here                                                    |
-| -------- | ---------------------------------------------------------------------- |
-| **0053** | AMM historical backfill CLI — not yet built                            |
-| **0064** | Durable ClickHouse-backed cursor (replaces the `/tmp` stub)            |
-| **0065** | Periodic OHLCV re-aggregation — heals boundary/seam undercounts        |
-| **0066** | Ledger-processor `RustFunction` + lag metric (prod deploy)             |
-| **0067** | `assets` column clobber by concurrent writers                          |
-| **0070** | Production rollout — where live+backfill coordination gets nailed down |
+| Task     | Why it matters here                                                       |
+| -------- | ------------------------------------------------------------------------- |
+| **0053** | Combined single-pass SDEX+AMM backfill — this runbook's §1 (`--mode`)     |
+| **0073** | Read-side `/backfill/status`: expose the data-window + fix `progress_pct` |
+| **0064** | Durable ClickHouse-backed cursor (replaces the `/tmp` stub)               |
+| **0065** | Periodic OHLCV re-aggregation — heals boundary/seam undercounts           |
+| **0066** | Ledger-processor `RustFunction` + lag metric (prod deploy)                |
+| **0067** | `assets` column clobber by concurrent writers                             |
+| **0070** | Production rollout — where live+backfill coordination gets nailed down    |
 
 ---
 
