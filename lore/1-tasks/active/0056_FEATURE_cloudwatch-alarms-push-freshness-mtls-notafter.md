@@ -36,6 +36,19 @@ history:
       pure-code M1 task. Two probe Lambda crates
       (backfill-freshness-probe, mtls-notafter-probe) + CloudWatch
       alarms + prices-ops-alarms SNS topic.
+  - date: 2026-07-02
+    status: active
+    who: claude
+    note: >
+      Enrichment-alarm findings subsection marked complete. All four
+      review findings on this task's stall alarm are resolved: #5 +
+      #7 (PR #66/#73 reviews, done worker-side in 0026) and #1 (recency
+      window 2h < 3h sustain, widened to 4h) + #2 (recent one-shot
+      collapse, accepted + documented) from the PR #74 follow-up review.
+      Commits 68f89c3 / bae273f / 0bf5068; verified 26 unit + 5 live-CH
+      ITs vs prod-pinned CH 26.3.10.60. Task stays active for the
+      deploy-gated operational remainder (ops-topic subscribe + 2 alarm
+      fire-tests).
 ---
 
 # CloudWatch alarms — SDEX push freshness + mTLS NotAfter
@@ -359,6 +372,18 @@ age out; ⑤ ops topic subscription documented as a per-env deploy step (Step 3.
   and to avoid coupling alarm health to worker bundle health.
 
 ## Incoming from task 0026 (enrichment) — PR #66 code review
+
+> **✅ Findings section complete (2026-07-02).** All four enrichment-alarm
+> review findings that landed on this task are resolved: **#5** (alarm
+> latch/storm → progress-based signal + recency-bounded backlog) and **#7**
+> (`EnrichmentBatchDurationMs` misnamed → `EnrichmentPassDurationMs` +
+> `EnrichmentAvgBatchDurationMs`) from the PR #66/#73 reviews, plus **#1**
+> (recency window 2h < 3h sustain → widened to 4h) and **#2**
+> (`recent` one-shot collapse → accepted + documented) from the PR #74
+> follow-up review. Commits `68f89c3` / `bae273f` / `0bf5068`; verified by 26
+> unit + 5 live-CH ITs against prod-pinned CH 26.3.10.60. The parent task 0056
+> stays `active` for its deploy-gated operational items (ops-topic subscribe +
+> the two alarm fire-tests) — only this findings subsection is closed.
 
 Task 0026 published the enrichment spec-§5 metrics under the
 `Prices/Enrichment` namespace (`EnrichmentRowsEnriched`,
