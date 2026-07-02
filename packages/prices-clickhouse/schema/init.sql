@@ -223,6 +223,14 @@ SETTINGS index_granularity = 8192;
 -- and /backfill/status read it as-is (O(1)).
 ALTER TABLE prices.backfill_progress ADD COLUMN IF NOT EXISTS earliest_data_available Nullable(DateTime) AFTER last_push_at;
 
+-- newest_data_available (task 0053): companion to earliest_data_available — the
+-- timestamp of the MOST RECENT OHLCV row this stream has landed. Together the
+-- pair is the covered time-window of the stream, and both ends advance
+-- monotonically per-partition in the forward single-pass (direction-agnostic,
+-- unlike the ledger-directional current_ledger). Nullable: unset until the
+-- stream lands its first candle. Read as-is (O(1)); never a live MAX() scan.
+ALTER TABLE prices.backfill_progress ADD COLUMN IF NOT EXISTS newest_data_available Nullable(DateTime) AFTER earliest_data_available;
+
 -- ---------------------------------------------------------------------
 -- Asset Discovery high-water-mark (task 0054). One row per worker tracking
 -- the highest ledger sequence the hourly discovery scan has processed, so

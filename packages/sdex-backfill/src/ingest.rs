@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
 use prices_ingest_core::{
-    AssetRegistry, CandleAccumulator, Registries, UnresolvedPoolSwap, extract_trades,
+    AssetRegistry, CandleAccumulator, OhlcvCandle, Registries, UnresolvedPoolSwap, extract_trades,
     process_ledger, raw_trade_to_tick,
 };
 
@@ -31,9 +31,31 @@ pub struct PartitionStats {
     pub candles_written: usize,
     pub total_bytes: u64,
     pub wall_clock: Duration,
+    /// Oldest / newest candle `minute_start` (unix seconds) landed this
+    /// partition, or `None` if none were written. Merged up into the run's
+    /// `earliest_data_available` / `newest_data_available` — the covered
+    /// time-window (§4.5 + task 0053). Both advance monotonically in the forward
+    /// pass, so per-partition updates stay truthful for either stream.
+    pub earliest_minute: Option<u32>,
+    pub latest_minute: Option<u32>,
     /// Per-ledger records of swaps dropped for an unregistered pool. Aggregated
     /// and re-checked against the final registry at run end (see `run.rs`).
     pub unresolved: Vec<UnresolvedPoolSwap>,
+}
+
+impl PartitionStats {
+    /// Record a batch of just-written candles: bump the count and widen the
+    /// [earliest, latest] minute window. Single seam so every write site keeps
+    /// the count and the window in sync.
+    fn note_candles(&mut self, candles: &[OhlcvCandle]) {
+        self.candles_written += candles.len();
+        if let Some(lo) = candles.iter().map(|c| c.minute_start).min() {
+            self.earliest_minute = Some(self.earliest_minute.map_or(lo, |cur| cur.min(lo)));
+        }
+        if let Some(hi) = candles.iter().map(|c| c.minute_start).max() {
+            self.latest_minute = Some(self.latest_minute.map_or(hi, |cur| cur.max(hi)));
+        }
+    }
 }
 
 /// What to extract from each ledger.
@@ -134,13 +156,13 @@ pub async fn index_partition(
             let candles = sdex.flush_older_than(current_minute);
             if !candles.is_empty() {
                 sink.write_candles(&candles, "sdex").await?;
-                stats.candles_written += candles.len();
+                stats.note_candles(&candles);
             }
             for (source, acc) in amm.iter_mut() {
                 let c = acc.flush_older_than(current_minute);
                 if !c.is_empty() {
                     sink.write_candles(&c, *source).await?;
-                    stats.candles_written += c.len();
+                    stats.note_candles(&c);
                 }
             }
             if oracle_buf.len() >= ORACLE_FLUSH_THRESHOLD {
@@ -156,13 +178,13 @@ pub async fn index_partition(
     let remaining = sdex.flush_all();
     if !remaining.is_empty() {
         sink.write_candles(&remaining, "sdex").await?;
-        stats.candles_written += remaining.len();
+        stats.note_candles(&remaining);
     }
     for (source, acc) in amm.iter_mut() {
         let c = acc.flush_all();
         if !c.is_empty() {
             sink.write_candles(&c, *source).await?;
-            stats.candles_written += c.len();
+            stats.note_candles(&c);
         }
     }
     if !oracle_buf.is_empty() {
