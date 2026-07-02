@@ -16,6 +16,8 @@ members = [
     "packages/oracle-worker",
     "packages/enrichment-worker",
     "packages/prices-api",
+    "packages/backfill-freshness-probe",
+    "packages/mtls-notafter-probe",
 ]
 
 [workspace.dependencies]
@@ -51,3 +53,8 @@ aws-sdk-s3 = "1"
 aws-sdk-cloudwatch = "1"
 aws_lambda_events = { version = "0.16", default-features = false, features = ["sqs"] }
 tempfile = "3"
+
+# X.509 parsing for the mTLS-NotAfter probe (task 0056) — extract cert validity
+# to publish days-to-expiry. Pure/no-AWS, so the probe's day-math stays testable
+# in the default build.
+x509-parser = "0.16"

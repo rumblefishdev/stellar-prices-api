@@ -144,22 +144,37 @@ threshold trips. Restore the canonical cert post-test.
 
 ## Acceptance Criteria
 
-- [ ] `packages/backfill-freshness-probe` runs on 15-min
-      schedule and publishes `prices.backfill.sdex.push_age_seconds`
-      + `prices.backfill.soroban_amm.push_age_seconds` to
-      CloudWatch
-- [ ] `packages/mtls-notafter-probe` runs daily and publishes
-      `prices.mtls.days_to_notafter` to CloudWatch
-- [ ] Two CloudWatch alarms wired (push-freshness, mTLS NotAfter);
-      both publish to the `prices-ops-alarms` SNS topic
-- [ ] Manual fire-test for the freshness alarm produces an SNS
-      delivery to the configured operator email (Tranche 1
-      acceptance criterion #5 met)
-- [ ] Threshold for the freshness alarm is operator-tunable
-      (CDK parameter or SSM-backed) per §5.6's "threshold is
-      operator-tunable" requirement
-- [ ] `notes/G-alarm-fire-test.md` records the fire-test
-      timestamps + SNS message IDs for both alarms
+> **Legend.** `[x]` = code-complete + unit-tested + `cdk synth`-verified.
+> `[ ]` marked **(operational)** = mechanism implemented + verified in synth,
+> but only *confirmed* by a real deploy + fire-test against AWS/Hetzner (see
+> **Implementation status**). Standing rules keep those operator-run.
+
+- [x] `packages/backfill-freshness-probe` runs on the 15-min schedule and
+      publishes push age to CloudWatch. *Metric `PushAgeSeconds` under
+      `Prices/Backfill`, one datum per stream via a `Stream` dimension
+      (`sdex_archive`, `soroban_amm`) — supersedes the two per-name metrics in
+      the plan; see Design Decisions. Age computed server-side in CH (clock-skew
+      immune); NULL `last_push_at` → `-1` sentinel. Rule + Lambda + rate synth-
+      verified.*
+- [x] `packages/mtls-notafter-probe` runs daily and publishes days-to-expiry.
+      *Per-role `DaysToNotAfter` (dim `Role`) + aggregate `MinDaysToNotAfter`
+      under `Prices/Mtls`, across the `ingestion` + `api` cert bundles. X.509
+      parse via `x509-parser`; unit-tested against an embedded cert.*
+- [x] Two CloudWatch alarms wired (push-freshness, mTLS NotAfter); both publish
+      to the `prices-{env}-ops-alarms` SNS topic. *`ObservabilityStack` creates
+      the topic + both alarms + `SnsAction`; also back-wired the previously
+      action-less enrichment-backlog alarm. Synth asserts topic + both alarms +
+      metrics.*
+- [ ] **(operational)** Manual fire-test for the freshness alarm produces an
+      SNS delivery to the configured operator email (Tranche-1 AC #5). *Requires
+      a real deploy + a skipped push cycle + a subscribed address.*
+- [x] Threshold for the freshness alarm is operator-tunable.
+      *`config.opsAlarms.sdexPushFreshnessSeconds` (default 604800) +
+      `mtlsNotAfterDaysThreshold` (30); validated in `validateConfig`. Per-env
+      JSON, no code change.*
+- [ ] **(operational)** `notes/G-alarm-fire-test.md` records the fire-test
+      timestamps + SNS message IDs for both alarms. *Produced during the deploy
+      fire-test above.*
 
 ## Blocked on
 
@@ -179,6 +194,82 @@ threshold trips. Restore the canonical cert post-test.
 - Backfill orchestration / push automation — see 0028.
 - Ingestion lag alarm on the live Ledger Processor (§5.1 names
   a Galexie-side lag alarm, which is BE-owned) — separate concern.
+
+## Implementation Notes (2026-07-02)
+
+Landed on branch `feat/0056_cloudwatch-alarms-push-freshness-mtls-notafter`.
+
+**Rust — two probe crates (mirror the 0039 worker shape: `lib.rs` pure +
+unit-tested, `main.rs` cfg-gated on `lambda`; features
+`default`/`aws-mtls`/`lambda`):**
+
+- `packages/backfill-freshness-probe` — SELECTs `backfill_progress FINAL` over
+  the 0052 `client_from_lambda_env` (ingestion identity), age computed
+  server-side (`now() - last_push_at`), publishes `Prices/Backfill`
+  `PushAgeSeconds` per stream. Best-effort publish (warn, don't fail the run).
+  3 unit tests.
+- `packages/mtls-notafter-probe` — reuses `fetch_bundle_from_extension` to read
+  each role's `{cert,key,ca}` bundle, parses `NotAfter` with `x509-parser`
+  (added to `[workspace.dependencies]`), publishes `Prices/Mtls`
+  `DaysToNotAfter` (per-`Role`) + `MinDaysToNotAfter`. Per-cert failures are
+  logged + skipped; an all-fail run errors so total blindness trips the error
+  alarm. 7 unit tests.
+- Both added to the workspace `members`. `cargo test` (default) + `cargo check
+  --features lambda` + `fmt` + `clippy` all clean; `cargo check --workspace` green.
+
+**Infra (CDK):**
+
+- `types.ts` — `scheduleExpressions.{backfillFreshnessProbe,mtlsNotafterProbe}`
+  + a new `opsAlarms` config block (`notificationEmail?`,
+  `sdexPushFreshnessSeconds`, `mtlsNotAfterDaysThreshold`), all validated in
+  `validateConfig`. `envs/production.json` seeds `rate(15 minutes)` /
+  `rate(1 day)` and the 604800 / 30 thresholds.
+- `eventbridge-stack.ts` — two rules + two `createWorkerLambda` probes, scoped
+  `PutMetricData` grants (namespace-conditioned), and a second
+  `secretsmanager:GetSecretValue` grant so the mTLS probe reads the `api` bundle
+  too (baseline only grants `ingestion`). `MTLS_PROBE_SECRETS` env threads both
+  role secret names in.
+- `observability-stack.ts` — `prices-{env}-ops-alarms` SNS topic (optional
+  seeded email subscription), the two alarms + `SnsAction`, and back-wired the
+  previously action-less enrichment-backlog alarm to the same topic.
+- `tsc -b` + `eslint` + `prettier` clean; `cdk synth` of the Observability +
+  EventBridge stacks asserts the topic, both alarms (`PushAgeSeconds` /
+  `MinDaysToNotAfter`), both probe functions, and all three IAM grants.
+
+## Design Decisions
+
+### From Plan
+
+1. **Two standalone probe crates over the mTLS CH client + Secrets Extension.**
+   As the plan specified — freshness probe reads CH, NotAfter probe reads the
+   cert bundles; both publish custom metrics an alarm fires on.
+2. **Freshness threshold operator-tunable via config.** Satisfied with a typed
+   `opsAlarms` config block (the "CDK parameter" option), not SSM — simpler and
+   validated at synth.
+
+### Emerged
+
+3. **`Stream`/`Role` dimensions instead of per-name metrics.** The plan named
+   `prices.backfill.sdex.push_age_seconds` etc. as distinct metrics; I publish a
+   single `PushAgeSeconds` (dim `Stream`) and `DaysToNotAfter` (dim `Role`).
+   Matches the house convention (`Prices/Enrichment` + `Environment` dim),
+   extends to the schema's "additional `task_name`s" note without a code change,
+   and lets the alarm target exactly `Stream=sdex_archive`. A separate
+   `MinDaysToNotAfter` aggregate gives the NotAfter alarm one value covering
+   "either cert."
+4. **Age computed server-side in ClickHouse.** `now() - last_push_at` is
+   evaluated in CH, not from the Lambda clock, because `last_push_at` was
+   written with CH's `now()` — removes cross-host skew from the freshness signal.
+5. **`treatMissingData: NOT_BREACHING` on both alarms.** The freshness probe
+   keeps publishing a *rising* age when pushes stop, so the climbing value —
+   not missing data — is the signal; a dead probe is caught by its own
+   `-errors` alarm. Avoids double-firing / flapping on deploy gaps.
+6. **Back-wired the enrichment-backlog alarm to the ops topic.** It shipped in
+   0026 with no action (0026 explicitly left routing to 0056). An alarm with no
+   action is inert, so it now points at `prices-{env}-ops-alarms` too. Its
+   threshold *tuning* (findings #5/#7 below) remains open.
+7. **mTLS probe reads `SystemTime::now()` for the clock.** Cert validity is
+   absolute UTC, so the Lambda wall-clock is fine here (no CH involved).
 
 ## Notes
 

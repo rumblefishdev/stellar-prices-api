@@ -99,6 +99,44 @@ export interface EnvironmentConfig {
      * (task 0026). Bounded-batch INSERT…SELECT into the ReplacingMergeTree.
      */
     readonly enrichment: string;
+    /**
+     * Backfill push-freshness probe (task 0056). Reads
+     * `prices.backfill_progress.last_push_at` over mTLS and republishes each
+     * stream's push age as the `Prices/Backfill` `PushAgeSeconds` metric the
+     * SDEX freshness alarm watches. §5.6 cadence: every 15 minutes.
+     */
+    readonly backfillFreshnessProbe: string;
+    /**
+     * mTLS client-cert NotAfter probe (task 0056). Reads the per-role cert
+     * bundles from Secrets Manager and publishes days-to-expiry as the
+     * `Prices/Mtls` `MinDaysToNotAfter` metric the cert-expiry alarm watches.
+     * Daily is ample for a 30-day threshold.
+     */
+    readonly mtlsNotafterProbe: string;
+  };
+
+  // Ops alarms + notification (consumed by ObservabilityStack — task 0056)
+
+  /**
+   * Tranche-1 ops alarms (§5.6 / §7 / §11.4): the SDEX push-freshness alarm and
+   * the mTLS cert-expiry alarm, both routed to the `prices-{env}-ops-alarms`
+   * SNS topic. Thresholds live here so they are operator-tunable per env
+   * without a code change (§5.6 "threshold is operator-tunable").
+   */
+  readonly opsAlarms: {
+    /**
+     * Operator email seeded as an SNS subscription. Optional: when omitted the
+     * topic is still created (subscriptions can be managed directly in SNS
+     * without a redeploy); when set, CDK seeds this one address.
+     */
+    readonly notificationEmail?: string;
+    /**
+     * Freshness threshold (seconds) for `sdex_archive` push age. Default 7 days
+     * (604800) — the first-chunk push covers ~6 months of history (§5.6).
+     */
+    readonly sdexPushFreshnessSeconds: number;
+    /** Days-to-NotAfter below which the mTLS cert-expiry alarm fires (30). */
+    readonly mtlsNotAfterDaysThreshold: number;
   };
 
   // Ledger Processor ingest (consumed by IngestStack — task 0038)
@@ -256,6 +294,8 @@ export function validateConfig(config: EnvironmentConfig): void {
       'assetDiscovery',
       'cleanup',
       'enrichment',
+      'backfillFreshnessProbe',
+      'mtlsNotafterProbe',
     ] as const;
     for (const key of expectedKeys) {
       const value = schedules[key];
@@ -266,6 +306,37 @@ export function validateConfig(config: EnvironmentConfig): void {
           `scheduleExpressions.${key} must start with 'rate(' or 'cron(', got: "${value}"`,
         );
       }
+    }
+  }
+
+  const ops = config.opsAlarms;
+  if (!ops || typeof ops !== 'object') {
+    errors.push('opsAlarms missing or not an object');
+  } else {
+    if (
+      !Number.isInteger(ops.sdexPushFreshnessSeconds) ||
+      ops.sdexPushFreshnessSeconds < 1
+    ) {
+      errors.push(
+        `opsAlarms.sdexPushFreshnessSeconds must be a positive integer (seconds), got: ${ops.sdexPushFreshnessSeconds}`,
+      );
+    }
+    if (
+      !Number.isInteger(ops.mtlsNotAfterDaysThreshold) ||
+      ops.mtlsNotAfterDaysThreshold < 1
+    ) {
+      errors.push(
+        `opsAlarms.mtlsNotAfterDaysThreshold must be a positive integer (days), got: ${ops.mtlsNotAfterDaysThreshold}`,
+      );
+    }
+    if (
+      ops.notificationEmail !== undefined &&
+      (typeof ops.notificationEmail !== 'string' ||
+        !ops.notificationEmail.includes('@'))
+    ) {
+      errors.push(
+        `opsAlarms.notificationEmail, when set, must be an email address, got: ${ops.notificationEmail}`,
+      );
     }
   }
 
