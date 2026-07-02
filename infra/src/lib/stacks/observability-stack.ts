@@ -110,12 +110,20 @@ export class ObservabilityStack extends cdk.Stack {
     //
     // The backlog term is `EnrichmentRowsRemainingRecent`, the worker's
     // recency-bounded volume-zero count (candles within `ENRICH_RECENT_WINDOW_S`,
-    // default 2h, of the CH clock — strictly shorter than this alarm's 3h
-    // sustain window). It excludes the permanent deep-history exotic-quote floor,
-    // so the earlier residual — an idle env with a nonzero floor and no new
-    // enrichable rows tripping the alarm — is closed: an idle env produces no
-    // fresh candles, so `EnrichmentRowsRemainingRecent` reads 0 and the alarm
-    // stays OK (task 0026 finding #5, resolved worker-side).
+    // default 4h, of the CH clock). It excludes the permanent deep-history
+    // exotic-quote floor, so the earlier residual — an idle env with a nonzero
+    // floor and no new enrichable rows tripping the alarm — is closed: an idle
+    // env produces no fresh candles, so `EnrichmentRowsRemainingRecent` reads 0
+    // and the alarm stays OK (task 0026 finding #5, resolved worker-side).
+    //
+    // The window must be >= this alarm's 3h sustain (evaluationPeriods ×
+    // datapointsToAlarm × 1h). Otherwise a genuinely stuck *fresh* candle ages
+    // out of the window before it can breach 3 consecutive hourly datapoints, so
+    // a real stall in a low-cadence env would never page (task 0026 finding #1).
+    // 4h ≥ 3h keeps a fresh stuck candle counted across all 3 datapoints; the
+    // deep-history floor (years old) stays excluded, so the idle-env guarantee
+    // above holds. If you raise datapointsToAlarm/evaluationPeriods, raise
+    // ENRICH_RECENT_WINDOW_S to match.
     const enrichedPerHour = new cloudwatch.Metric({
       namespace: 'Prices/Enrichment',
       metricName: 'EnrichmentRowsEnriched',

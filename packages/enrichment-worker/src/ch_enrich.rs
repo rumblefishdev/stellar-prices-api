@@ -93,10 +93,16 @@ pub struct ChEnrichConfig {
     /// only candles whose `timestamp` is within this window of `now()` count
     /// toward the recency-bounded backlog, so the permanent deep-history
     /// exotic-quote floor (pairs with no oracle/peg reference that will never
-    /// enrich) is excluded and an *idle* env reads zero. Kept strictly shorter
-    /// than the stall alarm's 3×1h sustain window so an idle env can never hold
-    /// the alarm breaching for 3 consecutive datapoints (task 0026 finding #5).
-    /// Default 2 hours.
+    /// enrich) is excluded and an *idle* env reads zero (task 0026 finding #5).
+    ///
+    /// Must be **≥ the stall alarm's 3×1h sustain window** (default 4h ≥ 3h).
+    /// Earlier this was kept *shorter* than the sustain window; that was a bug:
+    /// a genuinely stuck *fresh* candle aged out of the window before it could
+    /// breach 3 consecutive hourly datapoints, so a real stall in a low-cadence
+    /// env never paged. A window ≥ the sustain keeps a fresh stuck candle counted
+    /// across all 3 datapoints (real stalls fire again) while the deep-history
+    /// floor — candles *years* old — is still excluded, so an idle env still
+    /// reads zero. See the decision note in the 0026 task README. Default 4 hours.
     pub recent_window_s: u32,
     pub batch_size: u64,
     pub max_batches: u32,
@@ -117,7 +123,7 @@ impl Default for ChEnrichConfig {
             oracle_name: "reflector".to_string(),
             window_s: 300,
             pivot_window_s: 86_400,
-            recent_window_s: 7_200,
+            recent_window_s: 14_400,
             batch_size: 10_000,
             max_batches: 20,
             one_shot: false,

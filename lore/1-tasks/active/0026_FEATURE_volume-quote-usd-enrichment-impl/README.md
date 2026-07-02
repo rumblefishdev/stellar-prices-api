@@ -300,6 +300,59 @@ Spawned from the production implementation (see G-note Decision Log,
 - **0059** — MV rollup-chain version propagation under enriched `_1m`
   re-inserts (task 0051 dependency). 0026 enriches `_1m` only.
 
+## Decision Log
+
+### 2026-07-02 — `recent_window_s` default = 4h, must be ≥ the stall alarm's sustain window
+
+**Context.** The stall alarm (observability-stack) fires on
+`EnrichmentRowsEnriched = 0 AND EnrichmentRowsRemainingRecent > 0`
+sustained across 3 consecutive hourly datapoints
+(`evaluationPeriods = datapointsToAlarm = 3`, 1h period → 3h sustain).
+`EnrichmentRowsRemainingRecent` counts volume-zero candles whose
+`timestamp` is within `recent_window_s` of the CH server clock.
+
+**Bug found in PR #74 review (finding #1).** The window shipped at 2h,
+*shorter* than the 3h sustain. A genuinely stuck **fresh** candle stays
+inside a 2h window for only ~2 hourly datapoints, so it can never
+accumulate the 3 consecutive breaches the alarm needs. Result: a real
+enrichment stall in a **low-cadence env** (fresh candles arriving less
+often than the window) would never page — a silent-outage regression vs.
+the old full-backlog metric, which stayed >0 continuously.
+
+**Root cause.** Two competing failure modes on the same knob:
+- *Window too long* → a fresh **exotic** candle (no oracle/peg reference,
+  never enrichable) could hold the alarm — a false page.
+- *Window too short* → a genuine stall in a sparse env never reaches 3
+  datapoints — a missed page (the bug above).
+
+The original PR chose "short" to bound the exotic false-page, but that
+requires `enriched = 0` for 3 straight hours *as well*, which effectively
+never happens in a live env still producing enrichable candles — so the
+exotic risk it was buying was far narrower than the missed-stall risk it
+introduced.
+
+**Decision.** Set `recent_window_s` default to **4h (14 400s)**, with the
+invariant **`recent_window_s` ≥ the alarm's sustain window**. A fresh
+stuck candle now survives all 3 datapoints, so real stalls page again.
+The idle-env guarantee (finding #5) is preserved unchanged: the permanent
+deep-history exotic-quote floor is *years* old and stays far outside any
+few-hour window, so an idle env still reports `recent = 0`.
+
+**Invariant enforcement.** The tie between window and sustain is
+documented at all three sites (`ChEnrichConfig::recent_window_s` doc,
+`main.rs` env default, and the alarm comment in observability-stack). If
+`datapointsToAlarm`/`evaluationPeriods` change, `ENRICH_RECENT_WINDOW_S`
+must be raised to match. Left as prose + magic-number defaults for now;
+promote to a shared constant if the alarm ever moves off the 3h sustain.
+
+**Deferred (airtight alternative, not taken).** The fully robust fix is to
+scope `recent` to candles that *have* a usable reference (oracle/peg) but
+are still `volume_quote_usd = 0` — i.e. "should have enriched, didn't".
+That removes fresh-exotic candles from the count entirely, decoupling the
+window from the exotic floor at any size. It needs an `EXISTS`/join in the
+count query (more than a one-liner); file it as follow-up only if a
+fresh-exotic false page is ever observed in practice.
+
 ## Notes
 
 - This task is `blocked` until 0012 lands. When unblocked, move
