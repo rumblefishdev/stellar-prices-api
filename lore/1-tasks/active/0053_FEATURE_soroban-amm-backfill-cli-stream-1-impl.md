@@ -324,7 +324,9 @@ and teardown.
 - [ ] `GET /backfill/status` reports truthful, monotonic progress for both
       streams throughout (no SDEX under-report while recent SDEX exists).
 - [ ] OHLCV for Soroswap pairs verifiable for Nov 2023 dates (Tranche 1 AC).
-- [ ] Idempotent re-run of `push` (no duplicate rows after merge).
+- [x] Idempotent re-run of `push` (no duplicate rows after merge). (CH ITs:
+      `candles_it` per-source + re-write, `progress_it`, `pool_registry_it` —
+      all assert stable `count() … FINAL`.)
 - [x] Runbook updated. (`docs/runbooks/running-ingestion-components.md` §1 —
       two-range sequence, run order, `/backfill/status`, activation split,
       transport, teardown; `backfill-sdex.md` cloud-push → direct-write.)
