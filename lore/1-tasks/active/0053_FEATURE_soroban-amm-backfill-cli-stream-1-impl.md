@@ -350,6 +350,15 @@ and teardown.
 - Sub-table-granular resume of a partially-pushed run — v1 pushes all
   granularities or none, then idempotent re-run cleans up.
 
+## Future Work
+
+- **[0075](../backlog/0075_DOCS_update-db-schema-overview-newer-tables.md)** —
+  update `docs/database-schema/database-schema-overview.md` for the newer
+  `prices.*` tables (`unresolved_pools`, `discovery_state`, and the
+  `backfill_progress` `earliest/newest_data_available` columns). `pool_registry`
+  was documented here (§3.6); the rest is deferred until 0053 lands so the doc
+  reflects the final schema.
+
 ## Notes
 
 - The local CH instance is torn down after the push (ADR 0001
