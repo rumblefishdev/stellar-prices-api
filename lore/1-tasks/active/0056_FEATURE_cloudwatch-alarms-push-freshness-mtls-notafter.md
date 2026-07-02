@@ -335,9 +335,14 @@ age out; ⑤ ops topic subscription documented as a per-env deploy step (Step 3.
    sustained 3×1h — which self-clears the instant a pass enriches ≥1 row, so a
    draining catch-up and a steady-state floor both read OK while a true stall
    fires. Residual (idle env + nonzero floor + no new enrichable rows for 3h can
-   trip, but self-clears) needs the worker's recency-bounded remaining metric to
-   excise fully; tracked under finding #5's `_1m`-bounded option. Finding #7
-   (`EnrichmentBatchDurationMs` is whole-pass, not per-batch) remains open.
+   trip, but self-clears) needed the worker's recency-bounded remaining metric to
+   excise fully. **Resolved in task 0026 (2026-07-02):** the worker now emits
+   `EnrichmentRowsRemainingRecent` (a `now()`-windowed volume-zero count that
+   excludes the deep-history floor) and this alarm's backlog term switched to it,
+   so an idle env reads 0 and no longer trips. Finding #7
+   (`EnrichmentBatchDurationMs` whole-pass, not per-batch) also **resolved in
+   0026**: renamed to `EnrichmentPassDurationMs` + derived
+   `EnrichmentAvgBatchDurationMs`.
 7. **mTLS probe reads `SystemTime::now()` for the clock.** Cert validity is
    absolute UTC, so the Lambda wall-clock is fine here (no CH involved).
 
@@ -382,10 +387,12 @@ Task 0026 published the enrichment spec-§5 metrics under the
   sustained 3×1h (`GREATER_THAN_OR_EQUAL_TO_THRESHOLD`, `NOT_BREACHING`), in
   `observability-stack.ts`. Non-latching: clears the moment a pass enriches ≥1
   row, so the catch-up drain (a) and steady-state floor (b) both read OK. The
-  `_1m`-recency-bounded remaining metric (to excise the residual idle-env +
-  floor false-fire completely) is a worker-side change left to 0026 and is *not*
-  required for the alarm to be page-safe. Finding #7 (per-batch duration)
-  remains open.
+  recency-bounded remaining metric (to excise the residual idle-env + floor
+  false-fire completely) was a worker-side change left to 0026 — **done
+  2026-07-02:** the worker emits `EnrichmentRowsRemainingRecent` (`now()`-windowed,
+  default 2h, shorter than this alarm's 3h sustain) and the alarm's backlog term
+  switched to it, so an idle env reads 0 and the residual is closed. Finding #7
+  (per-batch duration) also **resolved in 0026** (see below).
 
 - **#7 — `EnrichmentBatchDurationMs` is whole-pass wall-clock, not per-batch.**
   The metric is measured across the entire `run_through` (all batches + the
@@ -393,6 +400,12 @@ Task 0026 published the enrichment spec-§5 metrics under the
   dashboard, either rename/relabel it as total pass duration or divide by
   `batches` for a true per-batch figure — don't let operators size batch/timeout
   headroom off a value that grows with backlog and one-shot mode.
+
+  **Resolved in task 0026 (2026-07-02).** Both: renamed to
+  `EnrichmentPassDurationMs` (accurate whole-pass name) **and** added a derived
+  `EnrichmentAvgBatchDurationMs = duration_ms / batches` (emitted only when
+  `batches > 0`) for the true per-batch figure. No alarm/dashboard consumed the
+  old name, so the rename was safe.
 
 Both live in `observability-stack.ts` / the enrichment worker's `metrics.rs`;
 0026 left the alarm as an explicit scaffold (commented as such) precisely so

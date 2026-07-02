@@ -89,6 +89,15 @@ pub struct ChEnrichConfig {
     /// than `window_s` because deep history is sparser; XLM/USDC is liquid so
     /// gaps are normally small. Default 1 day.
     pub pivot_window_s: u32,
+    /// Recency window (seconds) for the `EnrichmentRowsRemainingRecent` metric:
+    /// only candles whose `timestamp` is within this window of `now()` count
+    /// toward the recency-bounded backlog, so the permanent deep-history
+    /// exotic-quote floor (pairs with no oracle/peg reference that will never
+    /// enrich) is excluded and an *idle* env reads zero. Kept strictly shorter
+    /// than the stall alarm's 3×1h sustain window so an idle env can never hold
+    /// the alarm breaching for 3 consecutive datapoints (task 0026 finding #5).
+    /// Default 2 hours.
+    pub recent_window_s: u32,
     pub batch_size: u64,
     pub max_batches: u32,
     /// One-shot historical-drain mode (spec §4): when `true`, each tier loops
@@ -108,6 +117,7 @@ impl Default for ChEnrichConfig {
             oracle_name: "reflector".to_string(),
             window_s: 300,
             pivot_window_s: 86_400,
+            recent_window_s: 7_200,
             batch_size: 10_000,
             max_batches: 20,
             one_shot: false,
@@ -149,6 +159,14 @@ struct RefAssetRow {
     issuer_address: String,
 }
 
+/// One `FINAL` scan of the volume-zero backlog, split into the full remainder
+/// and the recency-bounded subset (see [`ChEnrichmentPass::count_remaining_at_volume_zero`]).
+#[derive(Debug, clickhouse::Row, Deserialize)]
+struct RemainingCounts {
+    total: u64,
+    recent: u64,
+}
+
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct ChPassStats {
     pub batches: u32,
@@ -164,8 +182,19 @@ pub struct ChPassStats {
     /// volume-USD backlog, NOT the general `candidates_after` remainder (which
     /// also includes `close_usd = 0` rows).
     pub rows_remaining_at_volume_zero: u64,
-    /// Wall-clock duration of the pass, milliseconds. Maps to the
-    /// `EnrichmentBatchDurationMs` CloudWatch metric (spec §5).
+    /// The subset of `rows_remaining_at_volume_zero` whose candle `timestamp`
+    /// falls within `cfg.recent_window_s` of `now()` — the recency-bounded
+    /// backlog that excludes the permanent deep-history exotic-quote floor. Maps
+    /// to the `EnrichmentRowsRemainingRecent` metric the stall alarm watches, so
+    /// a genuinely idle env (no fresh candles) reads zero instead of latching on
+    /// the floor (task 0026 finding #5).
+    pub rows_remaining_recent: u64,
+    /// Wall-clock duration of the **whole pass**, milliseconds — every batch
+    /// plus the `FINAL` count scans, not a single batch. Maps to the
+    /// `EnrichmentPassDurationMs` CloudWatch metric (renamed from the misleading
+    /// `EnrichmentBatchDurationMs`; task 0026 finding #7). `metrics::pass_metrics`
+    /// also derives a true per-batch `EnrichmentAvgBatchDurationMs` from this and
+    /// `batches`.
     pub duration_ms: u64,
 }
 
@@ -266,9 +295,25 @@ impl ChEnrichmentPass {
     /// Distinct from [`Self::count_candidates`], which counts rows missing
     /// *either* USD column (`volume_quote_usd = 0 OR close_usd = 0`): the
     /// `close_usd`-only remainder must not inflate a "volume zero" gauge.
-    async fn count_remaining_at_volume_zero(&self, watermark: u32) -> Result<u64, ChEnrichError> {
+    ///
+    /// Returns two figures from a single `FINAL` scan: `total` (the whole
+    /// backlog, for the dashboard/forensic metric) and `recent` (only candles
+    /// within `cfg.recent_window_s` of the CH server clock — the recency-bounded
+    /// backlog the stall alarm watches). `now()` is evaluated server-side in
+    /// ClickHouse, not from the Lambda wall clock, so the window is immune to
+    /// host clock skew (matching the freshness-probe design in task 0056). The
+    /// recency bound excludes the permanent deep-history exotic-quote floor
+    /// (quote ∉ {USDC,USDT,XLM}, no oracle) so an *idle* env — one producing no
+    /// fresh candles — reports `recent = 0` and cannot false-fire the stall
+    /// alarm on the floor alone (task 0026 finding #5).
+    async fn count_remaining_at_volume_zero(
+        &self,
+        watermark: u32,
+    ) -> Result<RemainingCounts, ChEnrichError> {
         let sql = format!(
-            "SELECT count() FROM {db}.{tbl} FINAL \
+            "SELECT count() AS total, \
+                    countIf(timestamp >= now() - ?) AS recent \
+             FROM {db}.{tbl} FINAL \
              WHERE volume_quote_usd = 0 AND volume_quote > 0 \
                AND timestamp <= toDateTime(?)",
             db = self.cfg.database,
@@ -277,8 +322,9 @@ impl ChEnrichmentPass {
         Ok(self
             .client
             .query(&sql)
+            .bind(self.cfg.recent_window_s)
             .bind(watermark)
-            .fetch_one::<u64>()
+            .fetch_one::<RemainingCounts>()
             .await?)
     }
 
@@ -634,7 +680,7 @@ impl ChEnrichmentPass {
             );
         }
 
-        let rows_remaining_at_volume_zero = self.count_remaining_at_volume_zero(watermark).await?;
+        let remaining_counts = self.count_remaining_at_volume_zero(watermark).await?;
 
         let stats = ChPassStats {
             batches,
@@ -642,7 +688,8 @@ impl ChEnrichmentPass {
             candidates_after: remaining,
             rows_enriched,
             oracle_misses,
-            rows_remaining_at_volume_zero,
+            rows_remaining_at_volume_zero: remaining_counts.total,
+            rows_remaining_recent: remaining_counts.recent,
             duration_ms: start.elapsed().as_millis() as u64,
         };
         info!(

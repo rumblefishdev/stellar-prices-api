@@ -172,6 +172,44 @@ history:
       **Remaining (Option 3, deploy-gated):** actual `cdk deploy`, live dashboard
       visibility, and the post-backfill credibility check (≥3 XLM-quoted assets).
       Task stays `active`.
+  - date: 2026-07-02
+    status: active
+    who: claude
+    note: >
+      **Resolved the two enrichment metric items deferred here from the 0056
+      code review (findings #5 + #7).** Both are worker-side + a one-line alarm
+      rewire; no deploy.
+
+      *Finding #5 — recency-bounded backlog (excise the stall alarm's idle-env
+      false-fire).* `ChEnrichConfig` gains `recent_window_s` (env
+      `ENRICH_RECENT_WINDOW_S`, default 7200s). `count_remaining_at_volume_zero`
+      now returns `(total, recent)` from a **single** `FINAL` scan
+      (`count()` + `countIf(timestamp >= now() - ?)`), `now()` evaluated
+      server-side in CH (clock-skew-immune, matching the 0056 freshness-probe
+      design). `ChPassStats` gains `rows_remaining_recent`; `metrics.rs`
+      publishes `EnrichmentRowsRemainingRecent`. The observability-stack stall
+      alarm's backlog term switched `EnrichmentRowsRemainingAtVolumeZero` →
+      `EnrichmentRowsRemainingRecent`. Because an *idle* env produces no fresh
+      candles, the recency count reads 0 there → the permanent deep-history
+      exotic-quote floor no longer trips the alarm (the residual 0056 flagged is
+      closed). The full `EnrichmentRowsRemainingAtVolumeZero` metric is still
+      published for dashboard/forensic value — just no longer alarmed on.
+
+      *Finding #7 — `EnrichmentBatchDurationMs` mislabeled.* Renamed to
+      `EnrichmentPassDurationMs` (it is whole-pass wall-clock: all batches + the
+      `FINAL` count scans, not one batch) and added a derived
+      `EnrichmentAvgBatchDurationMs = duration_ms / batches`, emitted only when
+      `batches > 0`, so operators size batch/timeout headroom off a true
+      per-batch figure. No alarm/dashboard consumed the old name (comments only),
+      so the rename is safe.
+
+      Verified: 26 unit (+2 metrics tests) + 2 e2e + **5 live-CH ITs** (+1 new
+      `recency_bounded_backlog_excludes_deep_history_floor`, asserting total=2 /
+      recent=1) green vs prod-pinned CH 26.3.10.60; clippy/fmt clean (default +
+      lambda); `cargo check --workspace` green. Infra: `tsc -b` + eslint +
+      prettier clean; `cdk synth` of the Observability stack confirms the alarm
+      renders on `EnrichmentRowsRemainingRecent` with the SNS action wired.
+      Task stays `active` (deploy-gated ACs unchanged).
 ---
 
 # `volume_quote_usd` enrichment Lambda — implementation
@@ -242,11 +280,14 @@ Carried over from task 0024's design spec §7:
       — one-shot mode now exists (`MAX_BATCHES=0`, Option 2); the live
       credibility check is still deploy-gated (Option 3).
 - [ ] CloudWatch metrics from spec §5 are emitted and visible in
-      the dashboard. — **emit half done** (Option 2: all four metrics published
-      via `aws_sdk_cloudwatch` under `Prices/Enrichment` +
-      `EnrichmentRowsRemainingAtVolumeZero` backlog alarm authored,
-      synth-verified). Dashboard widgets + live visibility remain deploy-gated
-      (task 0056 owns the dashboard; observability-stack is still a scaffold).
+      the dashboard. — **emit half done** (Option 2 + the 2026-07-02 metric
+      items: `EnrichmentRowsEnriched` / `EnrichmentOracleMiss` /
+      `EnrichmentRowsRemainingAtVolumeZero` / `EnrichmentRowsRemainingRecent` /
+      `EnrichmentPassDurationMs` / `EnrichmentAvgBatchDurationMs` published via
+      `aws_sdk_cloudwatch` under `Prices/Enrichment`; the progress-based stall
+      alarm now gates on `EnrichmentRowsRemainingRecent`, synth-verified).
+      Dashboard widgets + live visibility remain deploy-gated (task 0056 owns
+      the dashboard; observability-stack is still a scaffold).
 
 ## Future Work
 

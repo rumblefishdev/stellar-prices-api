@@ -62,6 +62,10 @@ fn cfg(db: &str) -> ChEnrichConfig {
         oracle_name: "reflector".to_string(),
         window_s: 300,
         pivot_window_s: 86_400,
+        // Wide (10y) so the recency bound never excludes fixture candles: the
+        // existing assertions are on the *total* volume-zero backlog. The
+        // recency split itself is exercised by `recency_bounded_backlog_*`.
+        recent_window_s: 315_360_000,
         batch_size: 1000,
         max_batches: 10,
         one_shot: false,
@@ -391,6 +395,74 @@ async fn one_shot_drains_full_backlog() {
             "candle {i} pegged to close_usd"
         );
     }
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// Recency-bounded backlog (task 0026 finding #5): the permanent exotic-quote
+/// floor — pairs with no oracle/peg reference that never enrich — is deep in
+/// history, so a recency-windowed count excludes it while still catching a
+/// *fresh* stuck candle. This is the series the stall alarm gates on, so an idle
+/// env (no new candles) reports zero instead of latching on the floor.
+///
+/// Fixture: an exotic FOO/EXO pair with no USDC/USDT/XLM reference and no oracle
+/// price, so neither candle enriches. One candle sits deep in history, one at
+/// `now()`. With a 1-hour recency window the full backlog is 2 but the recency-
+/// bounded count is just the fresh candle (1).
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn recency_bounded_backlog_excludes_deep_history_floor() {
+    let db = "it_enrich_recency";
+    let client = setup_scratch(db).await;
+
+    // Only exotic assets: no USDC/USDT/XLM reference exists, so the peg-pivot
+    // tier finds nothing and FOO/EXO is the permanent, never-draining floor.
+    client
+        .query(&format!(
+            "INSERT INTO {db}.assets \
+             (asset_id, asset_code, asset_type, issuer_address, contract_address) VALUES \
+             (10,'FOO','classic','GFOO',''), (20,'EXO','classic','GEXO','')"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    // Two zero-USD FOO/EXO candles: one deep in history, one at `now()`.
+    client
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1m \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
+             (1600000000,        10,20,'sdex', 9,9,9,9, 1,9,0,0, 9,1,1), \
+             (toUnixTimestamp(now()),10,20,'sdex', 9,9,9,9, 1,9,0,0, 9,1,1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    // 1-hour recency window: the deep-history candle is far outside it.
+    let mut recency = cfg(db);
+    recency.recent_window_s = 3_600;
+    let stats = ChEnrichmentPass::new(recency).run().await.unwrap();
+
+    // Nothing enriches — no reference of any kind for the exotic quote …
+    assert_eq!(stats.rows_enriched, 0, "exotic floor never enriches");
+    // … so the full volume-zero backlog is both candles …
+    assert_eq!(
+        stats.rows_remaining_at_volume_zero, 2,
+        "full backlog counts the whole floor"
+    );
+    // … but only the `now()` candle falls inside the recency window: the alarm's
+    // series excludes the permanent deep-history floor (finding #5), so an idle
+    // env with only deep floor would read 0 here and never trip the stall alarm.
+    assert_eq!(
+        stats.rows_remaining_recent, 1,
+        "recency-bounded count excludes the deep-history floor"
+    );
 
     client
         .query(&format!("DROP DATABASE {db}"))
