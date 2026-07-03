@@ -8,6 +8,7 @@ related_tasks: ["0070", "0078", "0053", "0069", "0035"]
 tags: [layer-indexing, priority-high, effort-small, amm, pool-registry, soroswap, phoenix, aquarius, clickhouse, cli, rust]
 links:
   - "https://api.soroswap.finance/docs"
+  - "../../../docs/runbooks/seed-pool-registry.md"
 history:
   - date: 2026-07-03
     status: active
