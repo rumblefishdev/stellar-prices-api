@@ -118,8 +118,10 @@ pub struct DiscoveryStats {
     pub ledgers_scanned: u64,
     /// Total assets in the registry after the run (existing + newly discovered).
     pub assets_total: usize,
-    /// Total AMM pools in `prices.pool_registry` after the run (existing +
-    /// newly discovered in-window). See the pool-registry maintenance note (0069).
+    /// Rows persisted to `prices.pool_registry` after the run — one per
+    /// registered pool across all venues (Soroswap / Aquarius / Phoenix), i.e.
+    /// `to_pool_rows().len()`, *not* `pool_count()` (which omits Aquarius). See
+    /// the pool-registry maintenance note (0069).
     pub pools_total: usize,
 }
 
@@ -208,8 +210,11 @@ pub async fn discover_window<F: ObjectFetcher>(
     let mut registry = AssetRegistry::from_existing(existing);
     // Pre-seed the pool registry from the persisted table so the window scan
     // grows it (rather than re-deriving from activation) and a re-scan never
-    // drops a pool it didn't happen to re-observe (task 0069).
+    // drops a pool it didn't happen to re-observe (task 0069). Snapshot the
+    // persisted rows so we only re-write the table when the scan actually changed
+    // it (see the write guard below).
     let mut pools = writer.load_pool_registry().await?;
+    let loaded_rows = pools.to_pool_rows();
 
     let mut scanned = 0u64;
     let mut last = start_ledger.saturating_sub(1);
@@ -224,13 +229,23 @@ pub async fn discover_window<F: ObjectFetcher>(
         scanned += 1;
     }
 
+    // The durable row set after the scan — one row per registered pool across all
+    // venues (Soroswap / Aquarius / Phoenix). This, not `pool_count()` (which omits
+    // Aquarius), is what's actually persisted, so it is the true `pools_total`.
+    let final_rows = pools.to_pool_rows();
+
     if scanned > 0 {
         writer.write_assets(&registry).await?;
-        // Persist the (possibly grown) pool registry before advancing the cursor,
-        // so a crash after the cursor write can't strand a discovered pool behind
-        // an already-advanced high-water-mark. Idempotent (RMT on contract_id) and
-        // a no-op when nothing was discovered.
-        writer.write_pool_registry(&pools).await?;
+        // Only re-write the registry when the scan changed it. The pre-seeded
+        // registry is re-emitted verbatim on every zero-discovery run, and a full
+        // RMT re-INSERT each hour would pile up parts and inflate the next FINAL
+        // load. Compare the whole row set (not just the count) so a pool whose row
+        // was enriched in-window is still persisted. Written before advancing the
+        // cursor so a crash can't strand a discovered pool behind an already-
+        // advanced high-water-mark; idempotent (RMT on contract_id).
+        if final_rows != loaded_rows {
+            writer.write_pool_registry(&pools).await?;
+        }
         save_cursor(writer, last).await?;
     }
 
@@ -239,7 +254,7 @@ pub async fn discover_window<F: ObjectFetcher>(
         to_ledger: last,
         ledgers_scanned: scanned,
         assets_total: registry.assets().count(),
-        pools_total: pools.pool_count(),
+        pools_total: final_rows.len(),
     })
 }
 

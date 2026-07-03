@@ -86,18 +86,21 @@ async fn discover_window_scans_fixtures_and_advances_cursor() {
     );
 
     // Pool-registry maintenance (task 0069): whatever the scan discovered was
-    // persisted to `prices.pool_registry`, and reloading it round-trips exactly
-    // the count the run reported. (These SDEX-era fixtures may carry no AMM
-    // factory events, so the count can legitimately be 0 — the invariant under
-    // test is persist-then-reload consistency, not a specific pool count.)
-    let reloaded = writer
-        .load_pool_registry()
+    // persisted to `prices.pool_registry`, and `pools_total` reports exactly the
+    // number of rows in the table — all venues, Aquarius included (so we assert
+    // against the real `count()`, not the Aquarius-blind `pool_count()`). These
+    // SDEX-era fixtures may carry no AMM factory events, so the count can
+    // legitimately be 0 — the invariant under test is that the reported figure
+    // matches what was actually persisted, not a specific pool count.
+    let persisted: u64 = writer
+        .client()
+        .query("SELECT count() FROM prices.pool_registry FINAL")
+        .fetch_one()
         .await
-        .expect("reload pool registry");
+        .expect("count persisted pools");
     assert_eq!(
-        reloaded.pool_count(),
-        stats.pools_total,
-        "persisted pool registry must round-trip the reported pools_total"
+        persisted as usize, stats.pools_total,
+        "reported pools_total must equal the rows actually persisted"
     );
 
     // Resuming at cursor+1 finds an immediate gap → no-op (idempotent tail).
