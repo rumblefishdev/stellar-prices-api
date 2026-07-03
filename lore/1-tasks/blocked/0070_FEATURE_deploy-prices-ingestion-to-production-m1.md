@@ -2,9 +2,9 @@
 id: "0070"
 title: "Deploy prices live-ingestion + periodic workers to production (M1 Part E rollout)"
 type: FEATURE
-status: active
+status: blocked
 related_adr: ["0006", "0007"]
-related_tasks: ["0038", "0039", "0050", "0052", "0063", "0064", "0047"]
+related_tasks: ["0038", "0039", "0050", "0052", "0063", "0064", "0047", "0053", "0076", "0077", "0078"]
 tags: [layer-ops, milestone-M1, deploy, priority-high, effort-medium, aws, cdk, lambda, clickhouse, hetzner, cross-team]
 milestone: 1
 links:
@@ -12,6 +12,19 @@ links:
   - "../archive/0039_FEATURE_prices-periodic-workers-lambda-set/README.md"
   - "../../2-adrs/0007_live-data-sink-on-shared-hetzner-clickhouse.md"
 history:
+  - date: 2026-07-03
+    status: blocked
+    who: oski
+    note: >
+      Blocked on AMM live-coverage wiring before go-live (operator decision).
+      Deploy prep is green — preconditions ✅, all 9 arm64 bootstraps built
+      (build list corrected 5→9, see 0077), synth + diff clean (5 stacks, zero
+      deletes). But investigation found live AMM prices need BOTH a pool_registry
+      seed (0053 backfill) AND a live-processor preload fix (0078): today the live
+      processor passes Registries::new() and never loads prices.pool_registry, so
+      pre-existing AMM pools' live swaps go unresolved. SDEX live is unaffected.
+      Holding for full AMM+SDEX coverage rather than shipping SDEX-only. Unblock
+      when 0053 (seed) + 0078 (preload) land, then resume at Step 2 (cursor seed).
   - date: 2026-07-03
     status: active
     who: oski
@@ -90,10 +103,15 @@ Run from `infra/`. Each `make deploy-*` wraps
 ```
 cargo lambda build --release --arm64 --features lambda \
   -p prices-ledger-processor -p asset-discovery \
-  -p cleanup-worker -p supply-worker -p oracle-worker
+  -p cleanup-worker -p supply-worker -p oracle-worker \
+  -p enrichment-worker -p backfill-freshness-probe \
+  -p mtls-notafter-probe -p prices-api
 ```
-- [ ] Verify `target/lambda/<name>/bootstrap` exists for all five (CI already
-      guards this; rebuild locally so `cdk synth` packages real assets).
+- [ ] Verify `target/lambda/<name>/bootstrap` exists for all **nine** assets the
+      production app references. NOTE (2026-07-03): the earlier 5-crate list was
+      stale — `synth-production` also needs enrichment-worker, the two 0056 probes,
+      and the prices-api handler, or it fails `CannotFindAsset`. CI builds only 6
+      and never runs `synth-production`, so it does not guard this (see follow-up 0077).
 
 ### 2. Seed the bootstrap cursor (operator, one-time)
 - [ ] Create SSM `String` param `/prices/production/ledger-processor/initial-cursor`
