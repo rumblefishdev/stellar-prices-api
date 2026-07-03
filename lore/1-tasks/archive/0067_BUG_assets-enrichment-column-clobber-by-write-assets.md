@@ -2,7 +2,7 @@
 id: "0067"
 title: "assets enrichment columns clobbered by write_assets full-row re-emit (home_domain, future token_supply)"
 type: BUG
-status: active
+status: completed
 related_adr: ["0004", "0007"]
 related_tasks: ["0038", "0039"]
 tags: [layer-ingestion, clickhouse, data-integrity, writers, effort-small, priority-medium]
@@ -24,6 +24,20 @@ history:
       is clobbered) — NOT a 0070 go-live gate — but chose to fix now via Option 1
       (single-writer enrichment table), the same pattern asset_supply uses. No data
       migration needed (assets.home_domain is always '').
+  - date: 2026-07-03
+    status: completed
+    who: okarcz
+    note: >
+      Shipped in PR #81 (squash-merged to develop, commit 0e102a5). Option 1:
+      new single-writer prices.asset_metadata; write_assets drops home_domain
+      (identity only); write_asset_metadata added; prices-api list+detail LEFT
+      JOIN the enrichment table. All 3 acceptance criteria met. High-effort
+      /code-review ran: caught a CI-failing stale INIT_SQL statement-count test
+      (27→28, fixed) + flagged the vestigial assets.home_domain column
+      (deprecation comment added); deploy-ordering note recorded. Unit +
+      gated integration tests green vs local CH 26.3.10.60; CI green. Prod schema
+      apply (add asset_metadata via Route A) pending — gates the Tranche-2 API
+      deploy, NOT the 0070 ingestion deploy.
 ---
 
 # assets enrichment columns clobbered by `write_assets` full-row re-emit
