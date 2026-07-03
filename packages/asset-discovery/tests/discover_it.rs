@@ -43,7 +43,11 @@ async fn discover_window_scans_fixtures_and_advances_cursor() {
     prices_clickhouse::apply_sql(writer.client(), prices_clickhouse::INIT_SQL)
         .await
         .expect("apply init schema");
-    for table in ["prices.assets", "prices.discovery_state"] {
+    for table in [
+        "prices.assets",
+        "prices.discovery_state",
+        "prices.pool_registry",
+    ] {
         writer
             .client()
             .query(&format!("TRUNCATE TABLE {table}"))
@@ -79,6 +83,24 @@ async fn discover_window_scans_fixtures_and_advances_cursor() {
         cursor,
         Some(LAST_LEDGER),
         "discovery_state advanced to the tip"
+    );
+
+    // Pool-registry maintenance (task 0069): whatever the scan discovered was
+    // persisted to `prices.pool_registry`, and `pools_total` reports exactly the
+    // number of rows in the table — all venues, Aquarius included (so we assert
+    // against the real `count()`, not the Aquarius-blind `pool_count()`). These
+    // SDEX-era fixtures may carry no AMM factory events, so the count can
+    // legitimately be 0 — the invariant under test is that the reported figure
+    // matches what was actually persisted, not a specific pool count.
+    let persisted: u64 = writer
+        .client()
+        .query("SELECT count() FROM prices.pool_registry FINAL")
+        .fetch_one()
+        .await
+        .expect("count persisted pools");
+    assert_eq!(
+        persisted as usize, stats.pools_total,
+        "reported pools_total must equal the rows actually persisted"
     );
 
     // Resuming at cursor+1 finds an immediate gap → no-op (idempotent tail).

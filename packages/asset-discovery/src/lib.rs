@@ -11,6 +11,16 @@
 //!    the discovery surface — an asset that never trades has no price row to
 //!    populate, so it needs no registry entry. See [`discover_window`].
 //!
+//! **Pool-registry maintenance (task 0069).** The same window scan runs
+//! `process_ledger`, which grows an AMM [`Registries`] from in-window factory
+//! events (Soroswap / Aquarius / Phoenix). This worker loads the persisted
+//! `prices.pool_registry`, keeps growing it across the window, and persists it
+//! back — so newly-created pools become resolvable *durably*, surviving the live
+//! ledger-processor's cold-start reload (task 0078). This is the periodic
+//! maintenance the live processor deliberately does not do on its hot path (it
+//! only reads the registry). Registry-as-output, sharing the exact
+//! `to_pool_rows` shape the SDEX backfill persists (task 0053 decision #4).
+//!
 //! Both reuse `prices_ingest_core`'s [`AssetRegistry`] + [`OhlcvWriter`] so the
 //! rows are byte-identical to the live ledger processor's (same surrogate ids,
 //! same column mapping). The supply fetch (`prices.asset_supply`) is a
@@ -108,20 +118,36 @@ pub struct DiscoveryStats {
     pub ledgers_scanned: u64,
     /// Total assets in the registry after the run (existing + newly discovered).
     pub assets_total: usize,
+    /// Rows persisted to `prices.pool_registry` after the run — one per
+    /// registered pool across all venues (Soroswap / Aquarius / Phoenix), i.e.
+    /// `to_pool_rows().len()`, *not* `pool_count()` (which omits Aquarius). See
+    /// the pool-registry maintenance note (0069).
+    pub pools_total: usize,
 }
 
 /// Register every asset appearing in `metas` (SDEX trades + Soroban AMM tokens)
-/// into `registry`, reusing the tested ingest pipeline. Pure — no I/O.
-pub fn register_ledger_assets(registry: &mut AssetRegistry, metas: &[LedgerCloseMeta]) {
-    let mut soroban = Registries::new();
+/// into `registry`, and grow `pools` from any in-window AMM factory events.
+/// Reuses the tested ingest pipeline. Pure — no I/O.
+///
+/// `pools` is caller-owned so it accumulates across a whole window scan (and is
+/// pre-seeded from the persisted `prices.pool_registry`): every factory event
+/// `process_ledger` sees registers its pool, which the caller then persists
+/// (task 0069). Passing it in — rather than a throwaway per call — is what turns
+/// the previously-discarded pool discovery into durable registry maintenance.
+pub fn register_ledger_assets(
+    registry: &mut AssetRegistry,
+    pools: &mut Registries,
+    metas: &[LedgerCloseMeta],
+) {
     for lcm in metas {
         for trade in extract_trades(lcm) {
             // RawTrade assets are already AssetIdentity (via AssetIdentity::from_xdr).
             registry.get_or_assign(&trade.asset_sold);
             registry.get_or_assign(&trade.asset_bought);
         }
-        // process_ledger get_or_assigns the AMM token identities into `registry`.
-        let _ = process_ledger(lcm, &mut soroban, registry);
+        // process_ledger get_or_assigns the AMM token identities into `registry`
+        // and grows `pools` from factory events (Soroswap/Aquarius/Phoenix).
+        let _ = process_ledger(lcm, pools, registry);
     }
 }
 
@@ -182,6 +208,13 @@ pub async fn discover_window<F: ObjectFetcher>(
 ) -> Result<DiscoveryStats, DiscoveryError> {
     let existing = writer.load_assets().await?;
     let mut registry = AssetRegistry::from_existing(existing);
+    // Pre-seed the pool registry from the persisted table so the window scan
+    // grows it (rather than re-deriving from activation) and a re-scan never
+    // drops a pool it didn't happen to re-observe (task 0069). Snapshot the
+    // persisted rows so we only re-write the table when the scan actually changed
+    // it (see the write guard below).
+    let mut pools = writer.load_pool_registry().await?;
+    let loaded_rows = pools.to_pool_rows();
 
     let mut scanned = 0u64;
     let mut last = start_ledger.saturating_sub(1);
@@ -191,13 +224,28 @@ pub async fn discover_window<F: ObjectFetcher>(
             break; // gap → caught up
         };
         let metas = decode_object(&bytes)?;
-        register_ledger_assets(&mut registry, &metas);
+        register_ledger_assets(&mut registry, &mut pools, &metas);
         last = ledger;
         scanned += 1;
     }
 
+    // The durable row set after the scan — one row per registered pool across all
+    // venues (Soroswap / Aquarius / Phoenix). This, not `pool_count()` (which omits
+    // Aquarius), is what's actually persisted, so it is the true `pools_total`.
+    let final_rows = pools.to_pool_rows();
+
     if scanned > 0 {
         writer.write_assets(&registry).await?;
+        // Only re-write the registry when the scan changed it. The pre-seeded
+        // registry is re-emitted verbatim on every zero-discovery run, and a full
+        // RMT re-INSERT each hour would pile up parts and inflate the next FINAL
+        // load. Compare the whole row set (not just the count) so a pool whose row
+        // was enriched in-window is still persisted. Written before advancing the
+        // cursor so a crash can't strand a discovered pool behind an already-
+        // advanced high-water-mark; idempotent (RMT on contract_id).
+        if final_rows != loaded_rows {
+            writer.write_pool_registry(&pools).await?;
+        }
         save_cursor(writer, last).await?;
     }
 
@@ -206,6 +254,7 @@ pub async fn discover_window<F: ObjectFetcher>(
         to_ledger: last,
         ledgers_scanned: scanned,
         assets_total: registry.assets().count(),
+        pools_total: final_rows.len(),
     })
 }
 
@@ -267,6 +316,41 @@ mod tests {
             ids.len() >= 20,
             "Tranche-1 requires >=20 seeded major assets, got {}",
             ids.len()
+        );
+    }
+
+    /// Pool-registry maintenance (task 0069) must not drop a pool it loaded but
+    /// did not re-observe this window. `register_ledger_assets` grows the caller's
+    /// `pools` in place, so a pre-seeded pool survives a scan of ledgers with no
+    /// factory events — the guarantee that a rolling-window re-scan is additive,
+    /// never clobbering. Pure, no I/O.
+    #[test]
+    fn register_ledger_assets_preserves_preseeded_pools() {
+        use prices_ingest_core::PoolRegistryRow;
+
+        let mut assets = AssetRegistry::from_existing(Vec::new());
+        // Seed a pool the way `discover_window` does — from a persisted row.
+        let mut pools = Registries::new();
+        pools.load_pool_rows(&[PoolRegistryRow {
+            contract_id: "CPREEXISTING".into(),
+            venue: "soroswap".into(),
+            token0: "CTOKEN0".into(),
+            token1: "CTOKEN1".into(),
+            pool_type: 0,
+            wasm_hash: String::new(),
+        }]);
+        assert_eq!(pools.pool_count(), 1);
+
+        // No ledgers → no factory events → the seeded pool must remain.
+        register_ledger_assets(&mut assets, &mut pools, &[]);
+
+        assert_eq!(pools.pool_count(), 1, "pre-seeded pool must not be dropped");
+        assert!(
+            pools
+                .to_pool_rows()
+                .iter()
+                .any(|r| r.contract_id == "CPREEXISTING"),
+            "seeded pool must still round-trip to a durable row"
         );
     }
 }

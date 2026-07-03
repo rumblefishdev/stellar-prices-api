@@ -121,6 +121,28 @@ impl OhlcvWriter {
         Ok(reg)
     }
 
+    /// Persist the discovered AMM pool [`Registries`] to `prices.pool_registry`
+    /// (task 0053 decision #4). The durable counterpart of [`load_pool_registry`]
+    /// so read and write share one row shape and table name and can never drift.
+    /// Idempotent: ReplacingMergeTree on `contract_id`, so a re-run replaces
+    /// rather than duplicates. A no-op (no INSERT) when the registry is empty.
+    ///
+    /// Shared by the SDEX backfill's end-of-run persist and the periodic
+    /// asset-discovery worker's pool-registry maintenance (task 0069).
+    pub async fn write_pool_registry(&self, reg: &Registries) -> Result<(), IngestError> {
+        let rows = reg.to_pool_rows();
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let mut insert = self.client.insert("prices.pool_registry")?;
+        for row in &rows {
+            insert.write(row).await?;
+        }
+        insert.end().await?;
+        info!(pools = rows.len(), "persisted discovered pool registry");
+        Ok(())
+    }
+
     /// Write a batch of candles for one `source` into `prices.price_ohlcv_1m`.
     pub async fn write_candles(
         &self,

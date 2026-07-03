@@ -86,6 +86,7 @@ async fn main() -> Result<(), lambda_runtime::Error> {
                 scanned = stats.map(|s| s.ledgers_scanned).unwrap_or(0),
                 to_ledger = stats.map(|s| s.to_ledger).unwrap_or(0),
                 assets_total = stats.map(|s| s.assets_total).unwrap_or(seeded),
+                pools_total = stats.map(|s| s.pools_total).unwrap_or(0),
                 "asset-discovery run complete"
             );
             Ok::<serde_json::Value, lambda_runtime::Error>(serde_json::json!({
@@ -93,6 +94,7 @@ async fn main() -> Result<(), lambda_runtime::Error> {
                 "scanned": stats.map(|s| s.ledgers_scanned).unwrap_or(0),
                 "to_ledger": stats.map(|s| s.to_ledger).unwrap_or(0),
                 "assets_total": stats.map(|s| s.assets_total).unwrap_or(seeded),
+                "pools_total": stats.map(|s| s.pools_total).unwrap_or(0),
             }))
         }
     }))
