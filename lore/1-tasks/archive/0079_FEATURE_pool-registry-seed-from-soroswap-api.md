@@ -2,7 +2,7 @@
 id: "0079"
 title: "Seed prices.pool_registry from the Soroswap /pools API (all venues) — fast live-AMM unblock for 0070"
 type: FEATURE
-status: active
+status: completed
 related_adr: ["0007"]
 related_tasks: ["0070", "0078", "0053", "0069", "0035"]
 tags: [layer-indexing, priority-high, effort-small, amm, pool-registry, soroswap, phoenix, aquarius, clickhouse, cli, rust]
@@ -21,6 +21,21 @@ history:
       classification the live processor needs — retrievable in 3 calls (~541
       pools) instead of a ~3-day activation→tip ledger replay. Build a one-off
       CLI seeder so 0070 can go live for AMM without waiting on the full backfill.
+  - date: 2026-07-03
+    status: completed
+    who: okarcz
+    note: >
+      Shipped in PR #82 (squash-merged to develop, commit 5053955). New crate
+      pool-registry-seed: fetch /pools per venue, venue-aware normalize
+      (aqua->aquarius, drop sdex, Phoenix xyk-only, Aquarius xyk+stable, hold
+      concentrated pending 0080), shared write_pool_registry. Live dry-run seeds
+      521 rows. High-effort code-review: 8 findings, 6 fixed (env-only key, HTTP
+      timeout, resilient parse, Soroswap empty-token guard, 0-pool guard, runbook
+      IP redaction) + shared mTLS-from-paths helper refactor (deduped
+      sdex-backfill). On-chain WASM spot-check PASSED for one live pool per venue
+      (soroswap/phoenix/aqua all match known hashes). Runbook + backlog 0080 added.
+      All ACs met. NOT yet run against prod — operator step (runbook Step 3) to
+      unblock 0070 live AMM.
 ---
 
 # Seed `prices.pool_registry` from the Soroswap `/pools` API
