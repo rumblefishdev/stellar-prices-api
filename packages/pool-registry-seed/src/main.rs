@@ -1,0 +1,130 @@
+//! One-off CLI: seed `prices.pool_registry` from the Soroswap `/pools` API
+//! (task 0079). Fetches every AMM venue, maps + normalises, and writes the
+//! registry via the shared `OhlcvWriter::write_pool_registry` (idempotent RMT).
+//!
+//!     # dry run — fetch + map, print what would be written, no ClickHouse:
+//!     SOROSWAP_API_KEY=sk_… cargo run -p pool-registry-seed -- --dry-run
+//!
+//!     # local Docker CH:
+//!     SOROSWAP_API_KEY=sk_… cargo run -p pool-registry-seed -- --ch-url http://localhost:8123
+//!
+//!     # Hetzner prod over mTLS:
+//!     SOROSWAP_API_KEY=sk_… cargo run -p pool-registry-seed -- \
+//!       --ch-domain ch.example --mtls-cert-path cert.pem \
+//!       --mtls-key-path key.pem --mtls-ca-path ca.pem
+//!
+//! The API key is read from `SOROSWAP_API_KEY` (never a CLI flag value in shell
+//! history) and never logged.
+
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+
+use clap::Parser;
+use pool_registry_seed::{SeedError, build_registry, fetch_all_venues};
+use prices_ingest_core::OhlcvWriter;
+
+#[derive(Parser, Debug)]
+#[command(about = "Seed prices.pool_registry from the Soroswap /pools API (task 0079)")]
+struct Cli {
+    /// Soroswap API base URL.
+    #[arg(long, default_value = "https://api.soroswap.finance")]
+    base_url: String,
+    /// Network to seed (the API accepts testnet | mainnet).
+    #[arg(long, default_value = "mainnet")]
+    network: String,
+    /// Bearer API key. Read from the environment, not passed on the command line.
+    #[arg(long, env = "SOROSWAP_API_KEY", hide_env_values = true)]
+    api_key: String,
+    /// Fetch + map + report only; do not connect to or write ClickHouse.
+    #[arg(long)]
+    dry_run: bool,
+    /// ClickHouse database (writes are fully qualified `prices.*` regardless).
+    #[arg(long, default_value = "prices")]
+    database: String,
+
+    // --- transport: plaintext local (default) OR Hetzner mTLS (--ch-domain) ---
+    /// Plaintext CH URL (local/dev). Used unless `--ch-domain` is set.
+    #[arg(long, default_value = "http://localhost:8123")]
+    ch_url: String,
+    /// Hetzner CH domain — when set, writes over mTLS using the bundle paths below.
+    #[arg(long)]
+    ch_domain: Option<String>,
+    #[arg(long, env = "MTLS_CERT_PATH")]
+    mtls_cert_path: Option<PathBuf>,
+    #[arg(long, env = "MTLS_KEY_PATH")]
+    mtls_key_path: Option<PathBuf>,
+    #[arg(long, env = "MTLS_CA_PATH")]
+    mtls_ca_path: Option<PathBuf>,
+}
+
+fn build_writer(cli: &Cli) -> Result<OhlcvWriter, SeedError> {
+    let Some(domain) = &cli.ch_domain else {
+        return Ok(OhlcvWriter::plaintext(&cli.ch_url));
+    };
+    use prices_clickhouse::mtls::{MtlsBundle, client_with_mtls};
+
+    let read = |label: &str, path: &Option<PathBuf>| -> Result<String, SeedError> {
+        let p = path
+            .as_ref()
+            .ok_or_else(|| SeedError::Config(format!("--ch-domain set but {label} is missing")))?;
+        std::fs::read_to_string(p)
+            .map_err(|e| SeedError::Mtls(format!("read PEM at `{}`: {e}", p.display())))
+    };
+    let bundle = MtlsBundle {
+        cert_pem: read("--mtls-cert-path / MTLS_CERT_PATH", &cli.mtls_cert_path)?,
+        key_pem: read("--mtls-key-path / MTLS_KEY_PATH", &cli.mtls_key_path)?,
+        ca_pem: read("--mtls-ca-path / MTLS_CA_PATH", &cli.mtls_ca_path)?,
+    };
+    let client = client_with_mtls(domain, &bundle, &cli.database)
+        .map_err(|e| SeedError::Mtls(e.to_string()))?;
+    Ok(OhlcvWriter::new(client))
+}
+
+#[tokio::main]
+async fn main() -> Result<(), SeedError> {
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .init();
+    let cli = Cli::parse();
+
+    let http = reqwest::Client::builder().build()?;
+    let (rows, stats) = fetch_all_venues(&http, &cli.base_url, &cli.api_key, &cli.network).await?;
+    tracing::info!(
+        kept = stats.kept,
+        dropped_venue = stats.dropped_venue,
+        dropped_pool_type = stats.dropped_pool_type,
+        "mapped Soroswap API pools → registry rows"
+    );
+    let reg = build_registry(&rows);
+    let out = reg.to_pool_rows();
+
+    // Per-venue summary (what actually lands in the table).
+    let mut by_venue: BTreeMap<String, usize> = BTreeMap::new();
+    for r in &out {
+        *by_venue.entry(r.venue.clone()).or_insert(0) += 1;
+    }
+
+    if cli.dry_run {
+        println!("DRY RUN — would write {} pool_registry rows:", out.len());
+        for (venue, count) in &by_venue {
+            println!("  {venue}: {count}");
+        }
+        if stats.dropped_pool_type > 0 {
+            println!(
+                "  ({} pool(s) skipped for unknown poolType)",
+                stats.dropped_pool_type
+            );
+        }
+        return Ok(());
+    }
+
+    let writer = build_writer(&cli)?;
+    writer.preflight().await?;
+    writer.write_pool_registry(&reg).await?;
+    tracing::info!(rows = out.len(), ?by_venue, "seeded prices.pool_registry");
+    println!(
+        "Seeded {} rows into prices.pool_registry: {by_venue:?}",
+        out.len()
+    );
+    Ok(())
+}
