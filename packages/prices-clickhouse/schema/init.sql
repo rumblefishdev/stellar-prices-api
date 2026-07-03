@@ -69,6 +69,26 @@ SETTINGS index_granularity = 8192;
 ALTER TABLE prices.assets ADD COLUMN IF NOT EXISTS sac_address String DEFAULT '' AFTER contract_address;
 
 ----------------------------------------------------------------------
+-- Asset enrichment (ReplacingMergeTree, last-write-wins on updated_at) — §0067.
+-- SINGLE-WRITER table: only the discovery/enrichment worker writes here. Split
+-- out of `prices.assets` because that table is a full-row-replace RMT with TWO
+-- writers (ledger processor + discovery); a full-row `write_assets` re-emit
+-- would clobber any enrichment column set on the shared row back to its default.
+-- Keeping enrichment in its own single-writer table (same pattern as
+-- `asset_supply`) makes it survive, and read views LEFT JOIN it. `home_domain`
+-- stays as a DEFAULT '' column on `assets` for back-compat but is no longer read.
+----------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS prices.asset_metadata (
+    asset_id     UInt32,
+    home_domain  String        DEFAULT '',
+    updated_at   DateTime      DEFAULT now()
+)
+ENGINE = ReplacingMergeTree(updated_at)
+ORDER BY (asset_id)
+SETTINGS index_granularity = 8192;
+
+----------------------------------------------------------------------
 -- 1-minute OHLCV candles, per-source rows (ADR 0004). Live writes from the
 -- Prices Ledger Processor; backfill streams write here with source in
 -- ('sdex','phoenix','soroswap','aquarius'). version = ledger_seq × 1000 +

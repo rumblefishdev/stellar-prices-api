@@ -188,7 +188,7 @@ pub async fn list_assets(
            a.asset_code AS asset_code, \
            a.issuer_address AS issuer_address, \
            a.contract_address AS contract_address, \
-           a.home_domain AS home_domain, \
+           m.home_domain AS home_domain, \
            toString(c.price_usd) AS price_usd, \
            toString(c.change_24h_pct) AS change_24h_pct, \
            toString(c.change_7d_pct) AS change_7d_pct, \
@@ -198,6 +198,7 @@ pub async fn list_assets(
            {sort_key_expr} AS sort_key \
          FROM current_prices AS c FINAL \
          INNER JOIN assets AS a FINAL ON a.asset_id = c.asset_id \
+         LEFT JOIN asset_metadata AS m FINAL ON m.asset_id = a.asset_id \
          {where_clause} \
          ORDER BY {sort_expr} {dir}, a.asset_id {dir} \
          LIMIT {limit}",
@@ -348,8 +349,9 @@ pub async fn asset_detail(
 ) -> Result<Option<AssetRow>, clickhouse::error::Error> {
     let (where_sql, binds) = identity_where(id);
     let sql = format!(
-        "SELECT a.asset_code, a.issuer_address, a.contract_address, a.home_domain, a.is_active \
+        "SELECT a.asset_code, a.issuer_address, a.contract_address, m.home_domain, a.is_active \
          FROM assets AS a FINAL \
+         LEFT JOIN asset_metadata AS m FINAL ON m.asset_id = a.asset_id \
          WHERE {where_sql} \
          LIMIT 1"
     );
