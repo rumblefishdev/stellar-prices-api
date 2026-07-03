@@ -52,6 +52,10 @@ CREATE TABLE IF NOT EXISTS prices.assets (
     issuer_address   String        DEFAULT '',
     contract_address String        DEFAULT '',
     sac_address      String        DEFAULT '',
+    -- DEPRECATED (task 0067): enrichment moved to the single-writer
+    -- `prices.asset_metadata`. Neither written nor read — do NOT wire a writer
+    -- here (that re-arms the two-writer RMT clobber). Kept only to avoid a
+    -- destructive DROP; safe to remove once no env references it.
     home_domain      String        DEFAULT '',
     is_active        UInt8         DEFAULT 1,
     created_at       DateTime      DEFAULT now(),
@@ -67,6 +71,26 @@ SETTINGS index_granularity = 8192;
 -- contract address back to the classic asset (see prices.identity_by_contract).
 -- Added to the base CREATE; idempotent ALTER for pre-0061 databases.
 ALTER TABLE prices.assets ADD COLUMN IF NOT EXISTS sac_address String DEFAULT '' AFTER contract_address;
+
+----------------------------------------------------------------------
+-- Asset enrichment (ReplacingMergeTree, last-write-wins on updated_at) — §0067.
+-- SINGLE-WRITER table: only the discovery/enrichment worker writes here. Split
+-- out of `prices.assets` because that table is a full-row-replace RMT with TWO
+-- writers (ledger processor + discovery); a full-row `write_assets` re-emit
+-- would clobber any enrichment column set on the shared row back to its default.
+-- Keeping enrichment in its own single-writer table (same pattern as
+-- `asset_supply`) makes it survive, and read views LEFT JOIN it. `home_domain`
+-- stays as a DEFAULT '' column on `assets` for back-compat but is no longer read.
+----------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS prices.asset_metadata (
+    asset_id     UInt32,
+    home_domain  String        DEFAULT '',
+    updated_at   DateTime      DEFAULT now()
+)
+ENGINE = ReplacingMergeTree(updated_at)
+ORDER BY (asset_id)
+SETTINGS index_granularity = 8192;
 
 ----------------------------------------------------------------------
 -- 1-minute OHLCV candles, per-source rows (ADR 0004). Live writes from the

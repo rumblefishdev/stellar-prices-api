@@ -48,4 +48,4 @@ pub use soroban::{
     LedgerSoroban, Registries, UnresolvedPoolSwap, process_ledger, reflector_key_to_identity,
 };
 pub use tick::{TradeTick, raw_trade_to_tick};
-pub use writer::{OhlcvWriter, OracleSample, UnresolvedPool};
+pub use writer::{AssetMetadata, OhlcvWriter, OracleSample, UnresolvedPool};

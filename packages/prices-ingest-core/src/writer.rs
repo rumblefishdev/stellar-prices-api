@@ -213,8 +213,32 @@ impl OhlcvWriter {
                     issuer_address,
                     contract_address,
                     sac_address,
-                    home_domain: String::new(),
                     is_active: 1,
+                })
+                .await?;
+        }
+        insert.end().await?;
+        Ok(())
+    }
+
+    /// Write asset enrichment (`home_domain`, …) into `prices.asset_metadata`
+    /// (task 0067). This is the **single-writer** enrichment surface: identity
+    /// columns live in `prices.assets` (re-emitted in full by `write_assets` on
+    /// the ledger processor), enrichment lives here (written only by the
+    /// discovery/enrichment worker). Splitting them stops a full-row
+    /// `write_assets` re-emit from clobbering enrichment back to its default on
+    /// the shared ReplacingMergeTree row. Idempotent (RMT on `asset_id`); a no-op
+    /// when `entries` is empty.
+    pub async fn write_asset_metadata(&self, entries: &[AssetMetadata]) -> Result<(), IngestError> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+        let mut insert = self.client.insert("prices.asset_metadata")?;
+        for e in entries {
+            insert
+                .write(&AssetMetadataRow {
+                    asset_id: e.asset_id,
+                    home_domain: e.home_domain.clone(),
                 })
                 .await?;
         }
@@ -301,8 +325,21 @@ struct AssetRow {
     issuer_address: String,
     contract_address: String,
     sac_address: String,
-    home_domain: String,
     is_active: u8,
+}
+
+/// One asset-enrichment entry for [`OhlcvWriter::write_asset_metadata`] — the
+/// single-writer counterpart to identity in `prices.assets` (task 0067).
+#[derive(Debug, Clone)]
+pub struct AssetMetadata {
+    pub asset_id: u32,
+    pub home_domain: String,
+}
+
+#[derive(Debug, Serialize, clickhouse::Row)]
+struct AssetMetadataRow {
+    asset_id: u32,
+    home_domain: String,
 }
 
 #[derive(Debug, Deserialize, clickhouse::Row)]

@@ -47,10 +47,20 @@ async fn setup(db: &str) -> Client {
     admin
         .query(&format!(
             "INSERT INTO {db}.assets \
-             (asset_id, asset_code, asset_type, issuer_address, contract_address, home_domain) VALUES \
-             (1, 'XLM', 'native', '', '', ''), \
-             (2, 'USDC', 'credit', '{iss}', '', 'centre.io')",
+             (asset_id, asset_code, asset_type, issuer_address, contract_address) VALUES \
+             (1, 'XLM', 'native', '', ''), \
+             (2, 'USDC', 'credit', '{iss}', '')",
             iss = issuer()
+        ))
+        .execute()
+        .await
+        .unwrap();
+    // home_domain is enrichment — it lives in the single-writer asset_metadata
+    // table, not on the assets identity row (task 0067). The read path LEFT JOINs
+    // it back in.
+    admin
+        .query(&format!(
+            "INSERT INTO {db}.asset_metadata (asset_id, home_domain) VALUES (2, 'centre.io')"
         ))
         .execute()
         .await
@@ -155,6 +165,23 @@ async fn asset_detail_native() {
     assert_eq!(json["asset_kind"], "native");
     assert_eq!(json["code"], "XLM");
     assert_eq!(json["is_active"], true);
+    teardown(db).await;
+}
+
+#[tokio::test]
+#[ignore = "requires a local ClickHouse"]
+async fn asset_detail_returns_home_domain_from_metadata() {
+    // Task 0067: home_domain is served from the asset_metadata LEFT JOIN, not the
+    // assets identity row. The fixture only seeds it in asset_metadata.
+    let db = "it_ep_detail_hd_0067";
+    let client = setup(db).await;
+    let (status, json) = get(client, &format!("/v1/assets/USDC:{}", issuer())).await;
+    assert_eq!(status, StatusCode::OK, "body={json}");
+    assert_eq!(json["code"], "USDC");
+    assert_eq!(
+        json["home_domain"], "centre.io",
+        "home_domain must be joined in from asset_metadata"
+    );
     teardown(db).await;
 }
 
