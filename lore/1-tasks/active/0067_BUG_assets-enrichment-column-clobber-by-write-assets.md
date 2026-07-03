@@ -2,7 +2,7 @@
 id: "0067"
 title: "assets enrichment columns clobbered by write_assets full-row re-emit (home_domain, future token_supply)"
 type: BUG
-status: backlog
+status: active
 related_adr: ["0004", "0007"]
 related_tasks: ["0038", "0039"]
 tags: [layer-ingestion, clickhouse, data-integrity, writers, effort-small, priority-medium]
@@ -15,6 +15,15 @@ history:
     note: >
       Spawned from 0039 future work. Surfaced while resolving 0039 open
       Q#1 (current-price MV + asset_supply single-writer design).
+  - date: 2026-07-03
+    status: active
+    who: okarcz
+    note: >
+      Promoted backlog → active to implement the fix. Pre-deploy review confirmed
+      the bug is latent (nothing writes a non-empty home_domain today, so nothing
+      is clobbered) — NOT a 0070 go-live gate — but chose to fix now via Option 1
+      (single-writer enrichment table), the same pattern asset_supply uses. No data
+      migration needed (assets.home_domain is always '').
 ---
 
 # assets enrichment columns clobbered by `write_assets` full-row re-emit
