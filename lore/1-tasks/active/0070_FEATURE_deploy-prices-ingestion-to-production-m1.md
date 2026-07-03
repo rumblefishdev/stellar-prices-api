@@ -2,7 +2,7 @@
 id: "0070"
 title: "Deploy prices live-ingestion + periodic workers to production (M1 Part E rollout)"
 type: FEATURE
-status: backlog
+status: active
 related_adr: ["0006", "0007"]
 related_tasks: ["0038", "0039", "0050", "0052", "0063", "0064", "0047"]
 tags: [layer-ops, milestone-M1, deploy, priority-high, effort-medium, aws, cdk, lambda, clickhouse, hetzner, cross-team]
@@ -12,6 +12,16 @@ links:
   - "../archive/0039_FEATURE_prices-periodic-workers-lambda-set/README.md"
   - "../../2-adrs/0007_live-data-sink-on-shared-hetzner-clickhouse.md"
 history:
+  - date: 2026-07-03
+    status: active
+    who: oski
+    note: >
+      Promoted backlog → active to start the production rollout. Two blockers
+      cleared beforehand: prod CH schema drift closed (task 0076, PR #76 merged)
+      and the cross-team S3→SNS fan-out + platform SSM keys + prices RBAC already
+      live in prod (BE tasks 0306/0314). Remaining critical path is our-side only
+      (build bootstraps → seed cursor → synth/diff → deploy → smoke-test) plus one
+      BE confirm: live CLICKHOUSE_CN_USER_MAP maps suffixed prices-ingestion-production.
   - date: 2026-06-26
     status: backlog
     who: oski
