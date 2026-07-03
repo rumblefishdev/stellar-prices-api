@@ -17,7 +17,6 @@ use std::sync::Arc;
 
 use aws_lambda_events::sqs::{BatchItemFailure, SqsBatchResponse, SqsEvent};
 use lambda_runtime::{Error, LambdaEvent, run, service_fn};
-use prices_ingest_core::Registries;
 use prices_ledger_processor::{
     cursor::{Cursor, StubFileCursor},
     object_fetcher::S3Fetcher,
@@ -78,6 +77,11 @@ async fn main() -> Result<(), Error> {
     // preflight `SELECT 1` would just be a redundant extra round-trip on the
     // cold path.
     let registry = sink.load_registry().await?;
+    // Preload the discovered AMM pool registry (task 0078). Without this the live
+    // processor starts pool-blind and only classifies pools created after go-live;
+    // every pre-existing pool's swaps would go to `unresolved_pools`. Empty until
+    // the backfill (0053) seeds `prices.pool_registry` — SDEX is unaffected either way.
+    let pool_registry = sink.load_pool_registry().await?;
 
     info!(
         %bucket,
@@ -91,7 +95,7 @@ async fn main() -> Result<(), Error> {
         cursor,
         sink,
         registry,
-        Registries::new(),
+        pool_registry,
     ));
 
     run(service_fn(move |event: LambdaEvent<SqsEvent>| {

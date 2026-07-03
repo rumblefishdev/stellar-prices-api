@@ -11,7 +11,8 @@
 use std::future::Future;
 
 use prices_ingest_core::{
-    AssetRegistry, DEFAULT_BACKOFF_MS, OhlcvCandle, OhlcvWriter, OracleSample, retry_with_backoff,
+    AssetRegistry, DEFAULT_BACKOFF_MS, OhlcvCandle, OhlcvWriter, OracleSample, Registries,
+    retry_with_backoff,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -82,6 +83,15 @@ impl ClickHouseSink {
     pub async fn load_registry(&self) -> Result<AssetRegistry, SinkError> {
         let existing = self.writer.load_assets().await.map_err(redact)?;
         Ok(AssetRegistry::from_existing(existing))
+    }
+
+    /// Preload the discovered AMM pool registry from `prices.pool_registry` so the
+    /// live processor resolves pools created before the cursor start (task 0078)
+    /// — otherwise it only knows pools whose factory events appear in its own live
+    /// stream, and every pre-existing pool's swaps land in `unresolved_pools`.
+    /// Empty when the registry has not been seeded (SDEX-only operation is fine).
+    pub async fn load_pool_registry(&self) -> Result<Registries, SinkError> {
+        self.writer.load_pool_registry().await.map_err(redact)
     }
 }
 

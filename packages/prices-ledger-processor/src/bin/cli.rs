@@ -84,7 +84,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let sink = ClickHouseSink::plaintext(&args.clickhouse_url);
         sink.preflight().await?;
         let registry = sink.load_registry().await?;
-        let reconciler = Reconciler::new(fetcher, cursor, sink, registry, Registries::new());
+        let pool_registry = sink.load_pool_registry().await?;
+        let reconciler = Reconciler::new(fetcher, cursor, sink, registry, pool_registry);
         reconciler.run(args.max_iterations).await?
     };
 

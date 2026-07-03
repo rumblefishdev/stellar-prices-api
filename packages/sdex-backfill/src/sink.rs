@@ -13,8 +13,8 @@ use std::collections::HashSet;
 use clickhouse::Row;
 use prices_ingest_core::canonical::AssetIdentity;
 use prices_ingest_core::{
-    AssetRegistry, DEFAULT_BACKOFF_MS, OhlcvCandle, OhlcvWriter, PoolRegistryRow, Registries,
-    UnresolvedPool, retry_with_backoff,
+    AssetRegistry, DEFAULT_BACKOFF_MS, OhlcvCandle, OhlcvWriter, Registries, UnresolvedPool,
+    retry_with_backoff,
 };
 use serde::{Deserialize, Serialize};
 use tracing::info;
@@ -158,33 +158,19 @@ impl Sink {
     /// (decision #4 inverts task 0069). Returns empty registries when the table
     /// is empty — the fresh full-run case.
     pub async fn load_pool_registry(&self) -> Result<Registries, BackfillError> {
-        // Retried like the writes: this runs once at startup, and a transient CH
-        // blip here would otherwise abort the whole multi-hour run before a
-        // single ledger is indexed.
-        let rows = retry_with_backoff(
+        // Query + row→Registries mapping live in `OhlcvWriter::load_pool_registry`,
+        // shared with the live ledger-processor (task 0078) so the two paths can
+        // never drift. Wrapped in retry here because this runs once at startup and
+        // a transient CH blip would otherwise abort the whole multi-hour run before
+        // a single ledger is indexed.
+        retry_with_backoff(
             &DEFAULT_BACKOFF_MS,
             |_| true,
-            || async {
-                self.writer
-                    .client()
-                    .query(
-                        "SELECT contract_id, venue, token0, token1, pool_type, wasm_hash \
-                     FROM prices.pool_registry FINAL",
-                    )
-                    .fetch_all::<PoolRegistryRow>()
-                    .await
-            },
+            || async { self.writer.load_pool_registry().await },
         )
         .await
-        .map(|(rows, _tries)| rows)
-        .map_err(BackfillError::from)?;
-        let mut reg = Registries::new();
-        reg.load_pool_rows(&rows);
-        info!(
-            entries = rows.len(),
-            "loaded discovered pool registry from prices.pool_registry"
-        );
-        Ok(reg)
+        .map(|(reg, _tries)| reg)
+        .map_err(BackfillError::from)
     }
 
     /// Upsert one `prices.backfill_progress` row from a [`ProgressUpdate`]

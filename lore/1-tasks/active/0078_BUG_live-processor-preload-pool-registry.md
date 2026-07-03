@@ -2,9 +2,9 @@
 id: "0078"
 title: "Live ledger-processor must preload prices.pool_registry (AMM pools created before go-live are unresolved otherwise)"
 type: BUG
-status: backlog
+status: active
 related_adr: ["0007"]
-related_tasks: ["0070", "0053", "0069", "0054"]
+related_tasks: ["0070", "0053", "0069", "0054", "0077"]
 tags: [layer-indexing, priority-high, effort-small, rust, lambda, clickhouse, amm, soroban, pool-registry, milestone-M1]
 milestone: 1
 links:
@@ -13,6 +13,19 @@ links:
   - "../../../packages/prices-ingest-core/src/registry_io.rs"
   - "../../../packages/sdex-backfill/src/sink.rs"
 history:
+  - date: 2026-07-03
+    status: active
+    who: oski
+    note: >
+      Implemented the preload. Added a shared `OhlcvWriter::load_pool_registry`
+      (prices-ingest-core) as the single source of the pool_registry SELECT;
+      the live sink delegates to it, and main.rs/cli.rs now pass the loaded
+      Registries into Reconciler::new instead of Registries::new(). Refactored
+      the backfill sink to delegate to the same shared method (dedup, wraps it in
+      the existing startup retry). New live IT (pool_registry_preload_it) + the
+      existing backfill pool_registry_it both pass against local CH 26.3.10.60;
+      30+7+24 unit tests green; changed files clippy-clean. Remaining before done:
+      full swap→priced-row E2E test, and the persist-on-discovery decision.
   - date: 2026-07-03
     status: backlog
     who: oski
@@ -70,12 +83,48 @@ does), so a seeded registry makes AMM live prices resolvable.
 
 ## Acceptance Criteria
 
-- [ ] Live processor loads `prices.pool_registry` at cold start into `Registries`.
-- [ ] With a seeded registry, an AMM swap for a pre-existing pool produces a
-      priced row (verified end-to-end), not an `unresolved_pools` entry.
-- [ ] Persist-on-discovery behaviour for the live path decided + documented.
-- [ ] `cli.rs` path updated consistently.
-- [ ] Unit/integration coverage for the preload + resolve.
+- [x] Live processor loads `prices.pool_registry` at cold start into `Registries`
+      (`main.rs` preloads via `ClickHouseSink::load_pool_registry`).
+- [x] `cli.rs` path updated consistently (real branch preloads; dry-run stays empty).
+- [x] Integration coverage for the preload: `pool_registry_preload_it` seeds the
+      registry and asserts the live sink rehydrates all venues (green vs local CH).
+- [ ] With a seeded registry, an AMM **swap** for a pre-existing pool produces a
+      priced row end-to-end (reconcile-level test with AMM ledger fixtures) — deferred.
+- [ ] Persist-on-discovery behaviour for the live path decided + documented — deferred.
+
+## Implementation Notes
+
+- New `OhlcvWriter::load_pool_registry()` in `prices-ingest-core/src/writer.rs` —
+  the single home for the `SELECT … FROM prices.pool_registry FINAL` query + the
+  `load_pool_rows` mapping. Both the live sink and the backfill sink delegate to
+  it, so the two paths can never drift (the drift-avoidance spirit of 0077).
+- Live sink: `ClickHouseSink::load_pool_registry` (thin delegate, `map_err(redact)`).
+- Wiring: `main.rs` + `cli.rs` pass the loaded `Registries` into `Reconciler::new`;
+  removed the now-unused `Registries` import in `main.rs`.
+- Backfill: `sdex-backfill/src/sink.rs::load_pool_registry` now delegates to the
+  shared method (kept its startup `retry_with_backoff`); dropped the duplicate
+  query + `PoolRegistryRow` import.
+- Tests: added `prices-ledger-processor/tests/pool_registry_preload_it.rs`;
+  `clickhouse` + `extractors-core` added as dev-deps. Existing backfill
+  `pool_registry_it` now also exercises the shared method.
+
+## Design Decisions
+
+### Emerged
+
+1. **Shared method on `OhlcvWriter`, not a per-sink copy.** The plan said "mirror
+   the backfill impl on the live sink," but copying the SQL is exactly the drift
+   we're fixing. Put the query in `OhlcvWriter` (where `load_assets` already lives)
+   and had both sinks delegate — one source of truth, backfill keeps its retry wrapper.
+
+## Remaining Work
+
+- Reconcile-level E2E: feed AMM swap fixtures for a seeded pool, assert a
+  `price_ohlcv_1m` row (not `unresolved_pools`).
+- **Persist-on-discovery decision:** should the live processor `write_pool_registry`
+  for pools it discovers from live factory events (so they survive cold starts),
+  or stay a pure consumer and rely on 0053/0054 to persist? Lean: pure consumer
+  for now (narrow gap = only pools created between backfill runs), but decide + note.
 
 ## Notes
 
