@@ -52,6 +52,10 @@ CREATE TABLE IF NOT EXISTS prices.assets (
     issuer_address   String        DEFAULT '',
     contract_address String        DEFAULT '',
     sac_address      String        DEFAULT '',
+    -- DEPRECATED (task 0067): enrichment moved to the single-writer
+    -- `prices.asset_metadata`. Neither written nor read — do NOT wire a writer
+    -- here (that re-arms the two-writer RMT clobber). Kept only to avoid a
+    -- destructive DROP; safe to remove once no env references it.
     home_domain      String        DEFAULT '',
     is_active        UInt8         DEFAULT 1,
     created_at       DateTime      DEFAULT now(),

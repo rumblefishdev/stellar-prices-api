@@ -99,6 +99,15 @@ Option 1 (split identity vs. enrichment), mirroring the `asset_supply` pattern.
 - Tests: new `enrichment_survives_it.rs` regression; `endpoints_it.rs` fixture
   moved `home_domain` into `asset_metadata` + added a detail assertion.
 
+## Deploy note
+
+`prices.asset_metadata` is a **new** table and the API now `LEFT JOIN`s it, so
+the updated `INIT_SQL` must be applied to a CH env **before** the prices-api
+rollout there — otherwise list/detail endpoints 500 with `UNKNOWN_TABLE`. Prod
+does not have the table yet; it lands with the next schema apply (same channel as
+0076). Not urgent for 0070 (ingestion-only; the API is a later Tranche-2 deploy),
+but it gates the API deploy.
+
 ## Design Decisions
 
 ### From Plan
