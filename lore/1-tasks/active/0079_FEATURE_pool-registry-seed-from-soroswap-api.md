@@ -66,11 +66,11 @@ otherwise require. This is the practical unblock for 0070's AMM live coverage.
 ## Acceptance Criteria
 
 - [x] CLI fetches all AMM venues (soroswap/phoenix/aquarius) with the env-var
-      credential and maps rows into `prices.pool_registry` with the
-      `aqua→aquarius` / `xyk→0` / drop-`sdex` normalization. (Fetch covers
-      `AMM_PROTOCOLS`; mapping fully unit-tested incl. a verbatim live-API-shape
-      payload. Live end-to-end fetch is the operator's run with the real key —
-      the API was already confirmed returning 199/12/330 pools manually.)
+      credential and maps rows into `prices.pool_registry` with the venue-aware
+      normalization (`aqua→aquarius`, drop `sdex`, Phoenix xyk-only, Aquarius
+      xyk+stable, hold concentrated). **Live dry-run confirmed** (key from
+      `.env.local`): 521 rows — soroswap 199, phoenix 12, aquarius 310 — 20
+      concentrated held.
 - [x] Writes via the shared `write_pool_registry` path; re-running is idempotent
       (integration test asserts count unchanged after a second write).
 - [x] Integration test against local CH: seed a fixture-shaped payload → rows
@@ -109,19 +109,29 @@ New crate `packages/pool-registry-seed/` (~one-off CLI). Reuses the shared
 
 ### Emerged
 
-3. **Unknown `poolType` → skip + log, not default-to-0.** Seeding a pool with a
-   guessed type the extractor can't decode (e.g. a future Phoenix stable pool)
-   would silently mis-price it; better to leave it unresolved. All 541 live
-   pools are `xyk` today, so nothing is dropped in practice.
-4. **`poolType` mapped, not defaulted.** The live API *returns* `poolType`
-   (undocumented in the OpenAPI schema), so `pool_type` is accurate rather than a
-   blanket `0` — a bonus over what the task assumed.
-5. **Transport mirrors `sdex-backfill`** (plaintext local / mTLS-from-paths) plus
+3. **`poolType` acceptance is venue-aware, not blanket.** The live data disproved
+   the "all pools are xyk" assumption — Aquarius has 269 xyk + **41 stable + 20
+   concentrated** (Soroswap/Phoenix are all xyk). `pool_type` is only consumed by
+   Phoenix dispatch, so: **Phoenix** seeds xyk only (stable extractor is
+   `unimplemented!()`); **Soroswap** seeds all (pair extractor, pool_type unused);
+   **Aquarius** routes by venue and reads tokens inline, so it seeds xyk+stable.
+   A first blanket "skip non-xyk" wrongly dropped the 41 Aquarius stable pools —
+   fixed to venue-aware. Live dry-run now seeds **521** (199 + 12 + 310).
+4. **Aquarius `concentrated` (20) held back → task 0080.** The extractor is
+   documented only for constant-product/stableswap; concentrated may use a
+   different event shape (mis-decode risk > leaving unresolved). Skipped + logged;
+   verification spawned as **0080** before including them.
+5. **`poolType` mapped, not defaulted.** The live API *returns* `poolType`
+   (undocumented in its OpenAPI schema) — used for the venue-aware classification
+   above rather than assuming a type.
+6. **Transport mirrors `sdex-backfill`** (plaintext local / mTLS-from-paths) plus
    a `--dry-run` that needs no ClickHouse — lets the operator eyeball coverage
-   before any write.
+   before any write. (Live dry-run run + confirmed: 521 rows, 20 concentrated held.)
 
 ## Future Work
 
+- **0080** — verify Aquarius concentrated-pool swap-event shape; include the 20
+  held pools if it matches the extractor.
 - A **scheduled** variant (periodic API re-seed) if we ever want belt-and-suspenders
   over 0069's factory-event maintenance — deliberately out of scope (one-off).
 

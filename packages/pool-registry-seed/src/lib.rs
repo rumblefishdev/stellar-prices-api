@@ -9,9 +9,16 @@
 //!
 //! The API's `GET /pools?network=…&protocol=…` (bearer-auth) returns, per pool:
 //! `protocol, address, tokenA, tokenB, poolType` (+ reserves/fees we ignore).
-//! Normalisation applied here: `protocol "aqua" → venue "aquarius"`, `sdex` and
-//! any non-AMM protocol dropped, `poolType "xyk" → pool_type 0` (unknown types
-//! logged + skipped rather than guessed — e.g. a future Phoenix stable pool).
+//! Normalisation applied here: `protocol "aqua" → venue "aquarius"`; `sdex` and
+//! any non-AMM protocol dropped. `poolType` acceptance is **venue-aware**,
+//! because `pool_type` is only consumed by Phoenix dispatch:
+//!   - **Phoenix** — seed `xyk` only (the stable extractor is unimplemented), so
+//!     an unknown/stable Phoenix poolType is skipped rather than mis-dispatched.
+//!   - **Soroswap** — always the pair extractor; pool_type unused → seed all.
+//!   - **Aquarius** — routes by venue and reads tokens inline from the swap
+//!     event, so it decodes constant-product + `stable` pools regardless of type;
+//!     seed `xyk`+`stable`, but hold `concentrated` (possibly a different event
+//!     shape → mis-decode risk) pending verification (task 0080).
 
 use prices_ingest_core::{PoolRegistryRow, Registries};
 use serde::Deserialize;
@@ -63,12 +70,27 @@ pub fn venue_for(protocol: &str) -> Option<&'static str> {
     }
 }
 
-/// Map the API `poolType` to our numeric `pool_type`. `None` for anything other
-/// than `xyk` so an unrecognised type (e.g. a future Phoenix stable pool the
-/// extractor can't decode) is skipped rather than mis-seeded.
+/// Map a **Phoenix** `poolType` to our numeric `pool_type`. `None` for anything
+/// other than `xyk` so a stable/unknown Phoenix pool (the stable extractor is
+/// `unimplemented!()`) is skipped rather than mis-dispatched.
 pub fn pool_type_code(pool_type: &str) -> Option<u32> {
     match pool_type {
         "xyk" => Some(0),
+        _ => None,
+    }
+}
+
+/// Venue-aware decision: should this pool be seeded, and with what `pool_type`?
+/// `None` drops it. `pool_type` is only consumed by Phoenix dispatch — Soroswap
+/// (pair extractor) and Aquarius (venue-routed, inline tokens) ignore it, so
+/// they store `0`. See the module docs for the per-venue rationale.
+pub fn classify_pool_type(venue: &str, api_pool_type: &str) -> Option<u32> {
+    match venue {
+        "phoenix" => pool_type_code(api_pool_type),
+        // Aquarius extractor handles constant-product + stableswap; `concentrated`
+        // held back pending event-shape verification (task 0080).
+        "aquarius" => matches!(api_pool_type, "xyk" | "stable").then_some(0),
+        "soroswap" => Some(0),
         _ => None,
     }
 }
@@ -95,12 +117,12 @@ pub fn to_registry_rows(pools: &[ApiPool]) -> (Vec<PoolRegistryRow>, MapStats) {
             stats.dropped_venue += 1;
             continue;
         };
-        let Some(pool_type) = pool_type_code(&p.pool_type) else {
+        let Some(pool_type) = classify_pool_type(venue, &p.pool_type) else {
             warn!(
                 contract = %p.address,
                 venue,
                 pool_type = %p.pool_type,
-                "unknown poolType — skipping pool (not seeding a type the extractor can't decode)"
+                "skipping pool — poolType not seedable for this venue (extractor can't decode it)"
             );
             stats.dropped_pool_type += 1;
             continue;
@@ -205,31 +227,55 @@ mod tests {
     }
 
     #[test]
-    fn pool_type_only_maps_xyk() {
+    fn phoenix_pool_type_only_maps_xyk() {
         assert_eq!(pool_type_code("xyk"), Some(0));
         assert_eq!(pool_type_code("stable"), None);
         assert_eq!(pool_type_code(""), None);
     }
 
     #[test]
-    fn mapping_keeps_amm_drops_sdex_and_unknown_type() {
+    fn classify_is_venue_aware() {
+        // Phoenix: xyk only (stable extractor unimplemented).
+        assert_eq!(classify_pool_type("phoenix", "xyk"), Some(0));
+        assert_eq!(classify_pool_type("phoenix", "stable"), None);
+        // Soroswap: pool_type unused → always seeded.
+        assert_eq!(classify_pool_type("soroswap", "xyk"), Some(0));
+        assert_eq!(classify_pool_type("soroswap", "whatever"), Some(0));
+        // Aquarius: xyk + stable kept; concentrated held (task 0080).
+        assert_eq!(classify_pool_type("aquarius", "xyk"), Some(0));
+        assert_eq!(classify_pool_type("aquarius", "stable"), Some(0));
+        assert_eq!(classify_pool_type("aquarius", "concentrated"), None);
+    }
+
+    #[test]
+    fn mapping_is_venue_aware_and_drops_sdex() {
         let pools = vec![
             pool("soroswap", "CSORO", "xyk"),
             pool("phoenix", "CPHO", "xyk"),
-            pool("aqua", "CAQUA", "xyk"),
-            pool("sdex", "CSDEX", "xyk"), // dropped: not an AMM venue
-            pool("phoenix", "CSTABLE", "stable"), // dropped: unknown pool type
+            pool("aqua", "CAQ_XYK", "xyk"),
+            pool("aqua", "CAQ_STABLE", "stable"), // KEPT: Aquarius decodes stableswap
+            pool("aqua", "CAQ_CONC", "concentrated"), // dropped: held pending 0080
+            pool("phoenix", "CPHO_STABLE", "stable"), // dropped: Phoenix stable unimplemented
+            pool("sdex", "CSDEX", "xyk"),         // dropped: not an AMM venue
         ];
         let (rows, stats) = to_registry_rows(&pools);
-        assert_eq!(stats.kept, 3);
-        assert_eq!(stats.dropped_venue, 1);
-        assert_eq!(stats.dropped_pool_type, 1);
+        assert_eq!(stats.kept, 4, "soroswap + phoenix-xyk + aqua xyk & stable");
+        assert_eq!(stats.dropped_venue, 1); // sdex
+        assert_eq!(stats.dropped_pool_type, 2); // aqua concentrated + phoenix stable
 
-        // aqua row carries the canonical venue.
-        let aqua = rows.iter().find(|r| r.contract_id == "CAQUA").unwrap();
+        let kept: Vec<&str> = rows.iter().map(|r| r.contract_id.as_str()).collect();
+        assert!(
+            kept.contains(&"CAQ_STABLE"),
+            "Aquarius stableswap must be seeded"
+        );
+        assert!(
+            !kept.contains(&"CAQ_CONC"),
+            "Aquarius concentrated held back"
+        );
+        assert!(!kept.contains(&"CPHO_STABLE"));
+        assert!(!kept.contains(&"CSDEX"));
+        let aqua = rows.iter().find(|r| r.contract_id == "CAQ_XYK").unwrap();
         assert_eq!(aqua.venue, "aquarius");
-        assert!(rows.iter().all(|r| r.contract_id != "CSDEX"));
-        assert!(rows.iter().all(|r| r.contract_id != "CSTABLE"));
     }
 
     #[test]

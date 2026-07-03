@@ -40,16 +40,18 @@ async fn seeds_pool_registry_and_normalises_venues() {
         .await
         .expect("truncate");
 
-    // An API-shaped payload spanning all cases.
+    // An API-shaped payload spanning every venue-aware case.
     let pools = vec![
         pool("soroswap", "CSORO", "CTOKA", "CTOKB", "xyk"),
         pool("phoenix", "CPHO", "CPHOA", "CPHOB", "xyk"),
         pool("aqua", "CAQUA", "CAQA", "CAQB", "xyk"),
-        pool("sdex", "CSDEX", "", "", "xyk"), // must be dropped
-        pool("phoenix", "CSTABLE", "CSA", "CSB", "stable"), // must be dropped
+        pool("aqua", "CAQSTABLE", "CAS", "CBS", "stable"), // KEPT: Aquarius stableswap
+        pool("aqua", "CAQCONC", "CAC", "CBC", "concentrated"), // dropped: held (task 0080)
+        pool("sdex", "CSDEX", "", "", "xyk"),              // dropped: not an AMM venue
+        pool("phoenix", "CPHOSTABLE", "CSA", "CSB", "stable"), // dropped: Phoenix stable unimplemented
     ];
     let (rows, stats) = to_registry_rows(&pools);
-    assert_eq!(stats.kept, 3);
+    assert_eq!(stats.kept, 4);
     let reg = build_registry(&rows);
 
     writer
@@ -57,21 +59,30 @@ async fn seeds_pool_registry_and_normalises_venues() {
         .await
         .expect("write pool registry");
 
-    // Row count in the table == the three kept AMM pools.
+    // Row count in the table == the four kept AMM pools.
     let persisted: u64 = writer
         .client()
         .query("SELECT count() FROM prices.pool_registry FINAL")
         .fetch_one()
         .await
         .expect("count");
-    assert_eq!(persisted, 3, "only the 3 classified AMM pools persist");
+    assert_eq!(
+        persisted, 4,
+        "only the classified/seedable AMM pools persist"
+    );
 
-    // Reload and assert the normalisation: aqua landed as canonical 'aquarius',
-    // sdex + the stable pool are absent, Soroswap pair tokens survived.
+    // Reload and assert the venue-aware normalisation: aqua landed as canonical
+    // 'aquarius', its stableswap pool is kept, concentrated + sdex + Phoenix
+    // stable are absent, Soroswap pair tokens survived.
     let reloaded = writer.load_pool_registry().await.expect("reload");
     assert_eq!(
         reloaded.venue.get("CAQUA").map(|v| v.as_source()),
         Some("aquarius")
+    );
+    assert_eq!(
+        reloaded.venue.get("CAQSTABLE").map(|v| v.as_source()),
+        Some("aquarius"),
+        "Aquarius stableswap pool must be seeded"
     );
     assert_eq!(
         reloaded.venue.get("CSORO").map(|v| v.as_source()),
@@ -82,12 +93,16 @@ async fn seeds_pool_registry_and_normalises_venues() {
         Some("phoenix")
     );
     assert!(
-        reloaded.venue.get("CSDEX").is_none(),
+        !reloaded.venue.contains_key("CAQCONC"),
+        "Aquarius concentrated held back pending task 0080"
+    );
+    assert!(
+        !reloaded.venue.contains_key("CSDEX"),
         "sdex must not be seeded"
     );
     assert!(
-        reloaded.venue.get("CSTABLE").is_none(),
-        "unknown poolType must not be seeded"
+        !reloaded.venue.contains_key("CPHOSTABLE"),
+        "Phoenix stable must not be seeded"
     );
     let soro = reloaded.soroswap.lookup("CSORO").expect("soroswap pair");
     assert_eq!(
@@ -103,5 +118,5 @@ async fn seeds_pool_registry_and_normalises_venues() {
         .fetch_one()
         .await
         .expect("count after rewrite");
-    assert_eq!(after, 3, "re-run is idempotent (RMT on contract_id)");
+    assert_eq!(after, 4, "re-run is idempotent (RMT on contract_id)");
 }
