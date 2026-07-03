@@ -2,7 +2,7 @@
 id: "0069"
 title: "Asset Discovery — Soroswap/Aquarius pool-registry maintenance"
 type: FEATURE
-status: backlog
+status: active
 related_adr: ["0007"]
 related_tasks: ["0039", "0054", "0037"]
 tags: ["phase-future", "effort-small", "priority-low", "discovery", "amm"]
@@ -12,6 +12,18 @@ history:
     status: backlog
     who: claude
     note: "Spawned from 0039 Step 5 future work — the additive pool-registry piece was not delivered in PR #56 (oracle/supply/cleanup/MV + discovery-via-0054 shipped instead)."
+  - date: 2026-07-03
+    status: active
+    who: okarcz
+    note: >
+      Promoted backlog → active to start implementation. Confirmed still a real
+      gap (not built elsewhere): asset-discovery writes prices.assets only;
+      prices.pool_registry has a single writer (sdex-backfill CLI); no periodic
+      pool-discovery worker or EventBridge rule exists; the live processor loads
+      the registry once at cold start and never refreshes/persists. All deps
+      (0037/0054/0039) are completed, so unblocked. Not a 0070 go-live gate —
+      this is the post-deploy robustness layer (survive cold starts, catch pools
+      the live factory-event stream misses).
 ---
 
 # Asset Discovery — Soroswap/Aquarius pool-registry maintenance
