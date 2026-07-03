@@ -2,7 +2,7 @@
 id: "0033"
 title: "Lock Soroswap Pair swap event emit site to source (verbatim quote in 0018 G-note)"
 type: DOCS
-status: backlog
+status: canceled
 related_adr: []
 related_tasks: ["0018"]
 tags: [layer-research, priority-low, effort-small, soroswap, source-cross-ref, doc-completeness]
@@ -14,6 +14,18 @@ history:
     status: backlog
     who: claude
     note: "Spawned from 0018 Appendix B item 4."
+  - date: 2026-07-03
+    status: canceled
+    who: oski
+    reason: obsolete
+    note: >
+      Pre-prod-deploy backlog review (0070). Pure doc-completeness chore on
+      an archived task's G-note, with zero deploy relevance. Soroswap Pair
+      swap shape is already established empirically via the WASM-hash
+      identity match (hashes.pair = 18051456…f73e) plus a decoded mainnet
+      sample. Verbatim source quote adds marginal defensiveness only; not
+      worth carrying. Reopen ad hoc if a Soroswap contract upgrade ever
+      changes field names.
 ---
 
 # Soroswap Pair swap event emit site — verbatim source quote
