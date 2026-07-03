@@ -136,21 +136,12 @@ impl Sink {
     /// re-deriving from activation. Idempotent: ReplacingMergeTree on
     /// `contract_id`, so a re-run replaces rather than duplicates.
     pub async fn write_pool_registry(&self, reg: &Registries) -> Result<(), BackfillError> {
-        let rows = reg.to_pool_rows();
-        if rows.is_empty() {
-            return Ok(());
-        }
-        self.retry_write(|| async {
-            let mut insert = self.writer.client().insert("prices.pool_registry")?;
-            for row in &rows {
-                insert.write(row).await?;
-            }
-            insert.end().await?;
-            Ok::<(), clickhouse::error::Error>(())
-        })
-        .await?;
-        info!(pools = rows.len(), "persisted discovered pool registry");
-        Ok(())
+        // Insert + row shape live in `OhlcvWriter::write_pool_registry`, shared with
+        // the periodic asset-discovery worker (task 0069) so the two writers can
+        // never drift. Wrapped in retry here because a transient CH blip at end-of-run
+        // must not abandon a multi-hour backfill's registry output.
+        self.retry_write(|| async { self.writer.write_pool_registry(reg).await })
+            .await
     }
 
     /// Rehydrate a [`Registries`] from `prices.pool_registry` so a run over a

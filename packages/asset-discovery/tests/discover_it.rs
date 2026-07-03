@@ -43,7 +43,11 @@ async fn discover_window_scans_fixtures_and_advances_cursor() {
     prices_clickhouse::apply_sql(writer.client(), prices_clickhouse::INIT_SQL)
         .await
         .expect("apply init schema");
-    for table in ["prices.assets", "prices.discovery_state"] {
+    for table in [
+        "prices.assets",
+        "prices.discovery_state",
+        "prices.pool_registry",
+    ] {
         writer
             .client()
             .query(&format!("TRUNCATE TABLE {table}"))
@@ -79,6 +83,21 @@ async fn discover_window_scans_fixtures_and_advances_cursor() {
         cursor,
         Some(LAST_LEDGER),
         "discovery_state advanced to the tip"
+    );
+
+    // Pool-registry maintenance (task 0069): whatever the scan discovered was
+    // persisted to `prices.pool_registry`, and reloading it round-trips exactly
+    // the count the run reported. (These SDEX-era fixtures may carry no AMM
+    // factory events, so the count can legitimately be 0 — the invariant under
+    // test is persist-then-reload consistency, not a specific pool count.)
+    let reloaded = writer
+        .load_pool_registry()
+        .await
+        .expect("reload pool registry");
+    assert_eq!(
+        reloaded.pool_count(),
+        stats.pools_total,
+        "persisted pool registry must round-trip the reported pools_total"
     );
 
     // Resuming at cursor+1 finds an immediate gap → no-op (idempotent tail).
