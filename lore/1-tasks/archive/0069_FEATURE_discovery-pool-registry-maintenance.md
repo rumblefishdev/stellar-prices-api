@@ -2,7 +2,7 @@
 id: "0069"
 title: "Asset Discovery — Soroswap/Aquarius pool-registry maintenance"
 type: FEATURE
-status: active
+status: completed
 related_adr: ["0007"]
 related_tasks: ["0039", "0054", "0037"]
 tags: ["phase-future", "effort-small", "priority-low", "discovery", "amm"]
@@ -24,6 +24,20 @@ history:
       (0037/0054/0039) are completed, so unblocked. Not a 0070 go-live gate —
       this is the post-deploy robustness layer (survive cold starts, catch pools
       the live factory-event stream misses).
+  - date: 2026-07-03
+    status: completed
+    who: okarcz
+    note: >
+      Shipped in PR #80 (squash-merged to develop, commit 1dcc8f6). Folded
+      pool-registry maintenance into the existing hourly asset-discovery worker
+      — no new Lambda/EventBridge rule. discover_window loads → grows (from
+      in-window factory events) → persists prices.pool_registry, writing only
+      when the row set changed. Extracted shared OhlcvWriter::write_pool_registry
+      (sdex-backfill now delegates). 6 files, ~225 lines. All 3 acceptance
+      criteria met. High-effort /code-review ran: 4 findings, 3 fixed
+      (pools_total counted persisted rows incl. Aquarius; no-op write guard;
+      Aquarius-aware test), 1 noted (pool_registry table hard-dep, by-design).
+      Unit + gated integration tests green vs local CH 26.3.10.60; CI green.
 ---
 
 # Asset Discovery — Soroswap/Aquarius pool-registry maintenance
