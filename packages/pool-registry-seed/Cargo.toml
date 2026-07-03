@@ -1,0 +1,20 @@
+[package]
+name = "pool-registry-seed"
+version = "0.1.0"
+edition = "2024"
+description = "One-off CLI: seed prices.pool_registry from the Soroswap /pools API across all AMM venues (task 0079)"
+
+[dependencies]
+prices-ingest-core = { path = "../prices-ingest-core" }
+# aws-mtls exposes `mtls::client_with_mtls` for the Hetzner direct-write path.
+prices-clickhouse = { path = "../prices-clickhouse", features = ["aws-mtls"] }
+tokio = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+# Own reqwest with a TLS backend — the prices-clickhouse one is HTTP-only (Lambda
+# extension localhost). We call https://api.soroswap.finance, so we need rustls.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

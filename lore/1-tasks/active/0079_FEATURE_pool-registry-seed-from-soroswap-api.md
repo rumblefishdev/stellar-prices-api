@@ -8,6 +8,7 @@ related_tasks: ["0070", "0078", "0053", "0069", "0035"]
 tags: [layer-indexing, priority-high, effort-small, amm, pool-registry, soroswap, phoenix, aquarius, clickhouse, cli, rust]
 links:
   - "https://api.soroswap.finance/docs"
+  - "../../../docs/runbooks/seed-pool-registry.md"
 history:
   - date: 2026-07-03
     status: active
@@ -65,18 +66,78 @@ otherwise require. This is the practical unblock for 0070's AMM live coverage.
 
 ## Acceptance Criteria
 
-- [ ] CLI fetches all AMM venues (soroswap/phoenix/aquarius) with the env-var
-      credential and maps rows into `prices.pool_registry` with the
-      `aqua→aquarius` / `xyk→0` / drop-`sdex` normalization.
-- [ ] Writes via the shared `write_pool_registry` path; re-running is idempotent
-      (no duplicate rows after RMT merge).
-- [ ] Integration test against local CH: seed a fixture-shaped payload → rows
-      land, round-trip through `load_pool_registry`, unknown `poolType`/`sdex`
-      handled.
-- [ ] Sample spot-check: a handful of API pools cross-checked against on-chain /
-      task-0018 WASM-hash identities (a sample, not a full replay) — documented.
-- [ ] Credential handled safely: read from env / Secrets Manager, never logged
-      or committed.
+- [x] CLI fetches all AMM venues (soroswap/phoenix/aquarius) with the env-var
+      credential and maps rows into `prices.pool_registry` with the venue-aware
+      normalization (`aqua→aquarius`, drop `sdex`, Phoenix xyk-only, Aquarius
+      xyk+stable, hold concentrated). **Live dry-run confirmed** (key from
+      `.env.local`): 521 rows — soroswap 199, phoenix 12, aquarius 310 — 20
+      concentrated held.
+- [x] Writes via the shared `write_pool_registry` path; re-running is idempotent
+      (integration test asserts count unchanged after a second write).
+- [x] Integration test against local CH: seed a fixture-shaped payload → rows
+      land, round-trip through `load_pool_registry`, `sdex` + unknown `poolType`
+      dropped. (`tests/seed_it.rs`, green vs local CH.)
+- [x] Sample spot-check: one live API pool per venue fetched from mainnet
+      (`stellar contract fetch` via `mainnet.sorobanrpc.com`) and its on-chain
+      WASM hash matched the known-good per-venue WASM (task 0018/0034) —
+      soroswap `CA2GDZI6…`→`18051456…f73e` ✅, phoenix `CB5QUVK5…`→`167ab414…506c`
+      ✅, aqua `CA242XKX…`→`ae0da5a8…9852` ✅. Method pre-validated against 0018's
+      canonical pair. The API's addresses are genuine expected-WASM contracts.
+- [x] Credential handled safely: read from `SOROSWAP_API_KEY` env (`hide_env_values`),
+      never logged, never a CLI value in shell history; Secrets-Manager path
+      documented for automated use ([[prod-ch-schema-current-0076]] namespace note).
+
+## Implementation Notes
+
+New crate `packages/pool-registry-seed/` (~one-off CLI). Reuses the shared
+`OhlcvWriter::write_pool_registry` (0069) and `Registries::load_pool_rows`
+(0053), so the artifact is byte-identical to the backfill's.
+
+- `src/lib.rs` — pure, testable core: `ApiPool` (serde `camelCase`), `venue_for`
+  (`aqua→aquarius`, drop non-AMM), `pool_type_code` (`xyk→0`, else skip),
+  `to_registry_rows` (+`MapStats`), `build_registry`, `fetch_pools` /
+  `fetch_all_venues` (reqwest, `bearer_auth`, `assetList` omitted for full set).
+- `src/main.rs` — clap CLI: `--dry-run` (fetch+map+report, no CH), plaintext
+  `--ch-url` (default local) or Hetzner `--ch-domain` + `--mtls-*-path` (mirrors
+  `Sink::mtls`). Key from `SOROSWAP_API_KEY` env.
+- `tests/seed_it.rs` — gated CH integration (round-trip + idempotency +
+  normalization). 5 unit tests + 1 integration test; build + clippy clean.
+
+## Design Decisions
+
+### From Plan
+
+1. **Reuse the shared write path** (`write_pool_registry` / `load_pool_rows`)
+   instead of a bespoke insert — one registry writer, no drift.
+2. **`aqua→aquarius`, drop `sdex`, `xyk→0`** normalization as specified.
+
+### Emerged
+
+3. **`poolType` acceptance is venue-aware, not blanket.** The live data disproved
+   the "all pools are xyk" assumption — Aquarius has 269 xyk + **41 stable + 20
+   concentrated** (Soroswap/Phoenix are all xyk). `pool_type` is only consumed by
+   Phoenix dispatch, so: **Phoenix** seeds xyk only (stable extractor is
+   `unimplemented!()`); **Soroswap** seeds all (pair extractor, pool_type unused);
+   **Aquarius** routes by venue and reads tokens inline, so it seeds xyk+stable.
+   A first blanket "skip non-xyk" wrongly dropped the 41 Aquarius stable pools —
+   fixed to venue-aware. Live dry-run now seeds **521** (199 + 12 + 310).
+4. **Aquarius `concentrated` (20) held back → task 0080.** The extractor is
+   documented only for constant-product/stableswap; concentrated may use a
+   different event shape (mis-decode risk > leaving unresolved). Skipped + logged;
+   verification spawned as **0080** before including them.
+5. **`poolType` mapped, not defaulted.** The live API *returns* `poolType`
+   (undocumented in its OpenAPI schema) — used for the venue-aware classification
+   above rather than assuming a type.
+6. **Transport mirrors `sdex-backfill`** (plaintext local / mTLS-from-paths) plus
+   a `--dry-run` that needs no ClickHouse — lets the operator eyeball coverage
+   before any write. (Live dry-run run + confirmed: 521 rows, 20 concentrated held.)
+
+## Future Work
+
+- **0080** — verify Aquarius concentrated-pool swap-event shape; include the 20
+  held pools if it matches the extractor.
+- A **scheduled** variant (periodic API re-seed) if we ever want belt-and-suspenders
+  over 0069's factory-event maintenance — deliberately out of scope (one-off).
 
 ## Out of scope
 
