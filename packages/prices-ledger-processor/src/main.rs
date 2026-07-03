@@ -17,7 +17,6 @@ use std::sync::Arc;
 
 use aws_lambda_events::sqs::{BatchItemFailure, SqsBatchResponse, SqsEvent};
 use lambda_runtime::{Error, LambdaEvent, run, service_fn};
-use prices_ingest_core::Registries;
 use prices_ledger_processor::{
     cursor::{Cursor, StubFileCursor},
     object_fetcher::S3Fetcher,
@@ -73,11 +72,21 @@ async fn main() -> Result<(), Error> {
         ClickHouseSink::from_lambda_env()
     );
     let sink = sink?;
-    // `load_registry` is the first ClickHouse round-trip, so it already
-    // surfaces an unreachable cluster as a Lambda Init error — a separate
-    // preflight `SELECT 1` would just be a redundant extra round-trip on the
-    // cold path.
-    let registry = sink.load_registry().await?;
+    // Two independent ClickHouse reads on the cold path — joined so `try_join!`
+    // shaves a round-trip off Lambda Init (same reasoning as the fetcher+sink join
+    // above). Either failing still surfaces an unreachable cluster (or missing
+    // schema) as a Lambda Init error, so no separate preflight `SELECT 1` is needed.
+    //
+    // - load_registry: existing asset surrogate ids from `prices.assets`.
+    // - load_pool_registry: discovered AMM pool classification from
+    //   `prices.pool_registry` (task 0078). The processor only READS this table —
+    //   it never applies schema — so the table MUST already exist (created by
+    //   init.sql, applied out-of-band; task 0076). Present-but-empty (registry not
+    //   yet seeded by the 0053 backfill) is fine: AMM swaps for pre-existing pools
+    //   stay unresolved but SDEX is unaffected. ABSENT is NOT fine: the read errors
+    //   and init fails (taking SDEX down too), so schema must be applied before deploy.
+    let (registry, pool_registry) =
+        tokio::try_join!(sink.load_registry(), sink.load_pool_registry())?;
 
     info!(
         %bucket,
@@ -91,7 +100,7 @@ async fn main() -> Result<(), Error> {
         cursor,
         sink,
         registry,
-        Registries::new(),
+        pool_registry,
     ));
 
     run(service_fn(move |event: LambdaEvent<SqsEvent>| {

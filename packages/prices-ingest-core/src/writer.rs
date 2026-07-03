@@ -19,6 +19,8 @@ use tracing::info;
 use crate::bucket::OhlcvCandle;
 use crate::canonical::{AssetIdentity, AssetRegistry};
 use crate::error::IngestError;
+use crate::registry_io::PoolRegistryRow;
+use crate::soroban::Registries;
 
 /// Convert a `Decimal` to the `i128` mantissa ClickHouse expects for a
 /// `Decimal(38, 14)` column. Saturates rather than panicking: AMM
@@ -93,6 +95,30 @@ impl OhlcvWriter {
             "loaded asset registry from ClickHouse"
         );
         Ok(assets)
+    }
+
+    /// Rehydrate the discovered AMM pool [`Registries`] from `prices.pool_registry`
+    /// so a consumer resolves pools created before its processing window instead of
+    /// re-deriving from Soroban activation (task 0053 decision #4). Returns empty
+    /// registries when the table has not been seeded. Shared by the SDEX backfill
+    /// startup and the live ledger-processor cold start (task 0078) — a single
+    /// query so the two paths can never drift.
+    pub async fn load_pool_registry(&self) -> Result<Registries, IngestError> {
+        let rows = self
+            .client
+            .query(
+                "SELECT contract_id, venue, token0, token1, pool_type, wasm_hash \
+                 FROM prices.pool_registry FINAL",
+            )
+            .fetch_all::<PoolRegistryRow>()
+            .await?;
+        let mut reg = Registries::new();
+        reg.load_pool_rows(&rows);
+        info!(
+            entries = rows.len(),
+            "loaded discovered pool registry from ClickHouse"
+        );
+        Ok(reg)
     }
 
     /// Write a batch of candles for one `source` into `prices.price_ohlcv_1m`.

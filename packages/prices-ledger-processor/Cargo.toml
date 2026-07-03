@@ -49,3 +49,5 @@ aws-config = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+clickhouse = { workspace = true }
+extractors-core = { path = "../extractors-core" }

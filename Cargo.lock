@@ -2806,6 +2806,8 @@ dependencies = [
  "aws-sdk-s3",
  "aws_lambda_events 0.16.1",
  "clap",
+ "clickhouse",
+ "extractors-core",
  "lambda_runtime 0.13.0",
  "prices-clickhouse",
  "prices-ingest-core",
