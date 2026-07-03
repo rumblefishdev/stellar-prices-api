@@ -95,6 +95,33 @@ docker exec -i app-clickhouse-1 clickhouse-client -q \
 
 Expect ~`soroswap 199 / phoenix 12 / aquarius 310` (numbers drift over time).
 
+## Spot-check (optional, recommended before the first prod seed)
+
+Independently confirm the API's pool addresses are genuine on-chain AMM pool
+contracts by matching a sample pool's WASM hash against the known-good per-venue
+hash (task 0018/0034). Requires the [Stellar CLI](https://developers.stellar.org/docs/tools/cli).
+
+```bash
+PP="Public Global Stellar Network ; September 2015"
+RPC="https://mainnet.sorobanrpc.com"
+# <POOL> = any pool address from the API for that venue
+stellar contract fetch --id <POOL> --rpc-url "$RPC" --network-passphrase "$PP" \
+  --out-file /tmp/pool.wasm
+sha256sum /tmp/pool.wasm
+```
+
+Expected on-chain WASM by venue:
+
+| Venue                         | Expected WASM sha256                                               |
+| ----------------------------- | ------------------------------------------------------------------ |
+| soroswap                      | `18051456816b66f12e773a56f77c5794fac1b1fb7ab6e22d4fad5a412770f73e` |
+| phoenix (xyk)                 | `167ab414a226427de34c19947ef9c5cf38c6c0ed91ecf9392f7cef3278ff506c` |
+| aqua (xyk / constant-product) | `ae0da5a84b15805c5c7931ac567a8d1b34be3f26b483993d9ff80cb2c3de9852` |
+
+A match proves the address is the expected pool contract; a mismatch means the
+API returned a contract of an unexpected type — investigate before seeding it.
+(Verified 2026-07-03 for one live pool per venue.)
+
 ## Notes
 
 - **Venue-aware seeding.** `pool_type` is only used by Phoenix dispatch, so:

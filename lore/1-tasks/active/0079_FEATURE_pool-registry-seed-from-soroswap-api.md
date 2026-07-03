@@ -77,9 +77,12 @@ otherwise require. This is the practical unblock for 0070's AMM live coverage.
 - [x] Integration test against local CH: seed a fixture-shaped payload → rows
       land, round-trip through `load_pool_registry`, `sdex` + unknown `poolType`
       dropped. (`tests/seed_it.rs`, green vs local CH.)
-- [ ] Sample spot-check: a handful of API pools cross-checked against on-chain /
-      task-0018 WASM-hash identities — **operator step**, run once against the
-      live API before trusting the prod seed. (Not code; pending the real run.)
+- [x] Sample spot-check: one live API pool per venue fetched from mainnet
+      (`stellar contract fetch` via `mainnet.sorobanrpc.com`) and its on-chain
+      WASM hash matched the known-good per-venue WASM (task 0018/0034) —
+      soroswap `CA2GDZI6…`→`18051456…f73e` ✅, phoenix `CB5QUVK5…`→`167ab414…506c`
+      ✅, aqua `CA242XKX…`→`ae0da5a8…9852` ✅. Method pre-validated against 0018's
+      canonical pair. The API's addresses are genuine expected-WASM contracts.
 - [x] Credential handled safely: read from `SOROSWAP_API_KEY` env (`hide_env_values`),
       never logged, never a CLI value in shell history; Secrets-Manager path
       documented for automated use ([[prod-ch-schema-current-0076]] namespace note).
