@@ -101,6 +101,8 @@ pub struct MapStats {
     pub kept: usize,
     pub dropped_venue: usize,
     pub dropped_pool_type: usize,
+    /// Dropped for an incomplete row (e.g. a Soroswap pool with an empty token).
+    pub dropped_incomplete: usize,
 }
 
 /// Map API pools to durable `pool_registry` rows, applying the venue/pool_type
@@ -127,6 +129,18 @@ pub fn to_registry_rows(pools: &[ApiPool]) -> (Vec<PoolRegistryRow>, MapStats) {
             stats.dropped_pool_type += 1;
             continue;
         };
+        // Soroswap keys candles on the registry's token pair (the pair extractor),
+        // so an incomplete API row with an empty token would seed empty-asset
+        // candles. Drop it rather than corrupt pricing. (Aquarius/Phoenix rows
+        // don't carry these tokens, so this only guards Soroswap.)
+        if venue == "soroswap" && (p.token_a.is_empty() || p.token_b.is_empty()) {
+            warn!(
+                contract = %p.address,
+                "skipping soroswap pool with an empty token in the pair"
+            );
+            stats.dropped_incomplete += 1;
+            continue;
+        }
         rows.push(PoolRegistryRow {
             contract_id: p.address.clone(),
             venue: venue.to_string(),
@@ -171,7 +185,24 @@ pub async fn fetch_pools(
             protocol: protocol.to_string(),
         });
     }
-    Ok(resp.json::<Vec<ApiPool>>().await?)
+    // Parse element-wise so one malformed/null pool object is skipped + logged
+    // rather than failing the whole venue (and, via `?`, aborting the seed).
+    let values: Vec<serde_json::Value> = resp.json().await?;
+    let mut pools = Vec::with_capacity(values.len());
+    let mut malformed = 0usize;
+    for v in values {
+        match serde_json::from_value::<ApiPool>(v) {
+            Ok(p) => pools.push(p),
+            Err(e) => {
+                malformed += 1;
+                warn!(protocol, error = %e, "skipping malformed pool object");
+            }
+        }
+    }
+    if malformed > 0 {
+        warn!(protocol, malformed, "skipped malformed pool objects");
+    }
+    Ok(pools)
 }
 
 /// Fetch every AMM venue and map into one deduped registry-row set. Returns the
@@ -276,6 +307,23 @@ mod tests {
         assert!(!kept.contains(&"CSDEX"));
         let aqua = rows.iter().find(|r| r.contract_id == "CAQ_XYK").unwrap();
         assert_eq!(aqua.venue, "aquarius");
+    }
+
+    #[test]
+    fn soroswap_pool_with_empty_token_is_dropped() {
+        let pools = vec![ApiPool {
+            protocol: "soroswap".into(),
+            address: "CBAD".into(),
+            token_a: String::new(), // incomplete pair
+            token_b: "CTOKB".into(),
+            pool_type: "xyk".into(),
+        }];
+        let (rows, stats) = to_registry_rows(&pools);
+        assert!(
+            rows.is_empty(),
+            "empty-token Soroswap pool must not be seeded"
+        );
+        assert_eq!(stats.dropped_incomplete, 1);
     }
 
     #[test]

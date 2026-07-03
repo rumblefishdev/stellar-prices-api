@@ -83,10 +83,12 @@ The CLI opens an mTLS connection to Caddy:443 (which CN-maps the cert to the
 `prices_writer` CH user), runs a `SELECT 1` preflight, then `INSERT INTO
 prices.pool_registry`. On success it prints the per-venue row counts.
 
-### Verify (Route A admin path)
+### Verify
+
+Connect to the prod ClickHouse host over the operator's SSH access (see the
+internal access notes — host + key are not committed here), then run:
 
 ```bash
-ssh -i ~/.ssh/sorban-prod_ed25519 deploy@168.119.73.161
 docker exec -i app-clickhouse-1 clickhouse-client -q \
   "SELECT venue, count() FROM prices.pool_registry FINAL GROUP BY venue ORDER BY venue"
 ```

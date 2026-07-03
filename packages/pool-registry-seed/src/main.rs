@@ -32,9 +32,6 @@ struct Cli {
     /// Network to seed (the API accepts testnet | mainnet).
     #[arg(long, default_value = "mainnet")]
     network: String,
-    /// Bearer API key. Read from the environment, not passed on the command line.
-    #[arg(long, env = "SOROSWAP_API_KEY", hide_env_values = true)]
-    api_key: String,
     /// Fetch + map + report only; do not connect to or write ClickHouse.
     #[arg(long)]
     dry_run: bool,
@@ -87,8 +84,21 @@ async fn main() -> Result<(), SeedError> {
         .init();
     let cli = Cli::parse();
 
-    let http = reqwest::Client::builder().build()?;
-    let (rows, stats) = fetch_all_venues(&http, &cli.base_url, &cli.api_key, &cli.network).await?;
+    // Env-only credential — deliberately NOT a CLI flag (would land in shell
+    // history / `ps`) and kept out of any Debug-printable struct.
+    let api_key = std::env::var("SOROSWAP_API_KEY")
+        .map_err(|_| SeedError::Config("SOROSWAP_API_KEY env var is required".into()))?;
+
+    let http = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .user_agent("stellar-prices-pool-registry-seed")
+        .build()?;
+    let (rows, stats) = fetch_all_venues(&http, &cli.base_url, &api_key, &cli.network).await?;
+    if rows.is_empty() {
+        return Err(SeedError::Config(
+            "fetched 0 seedable pools — check --network and the SOROSWAP_API_KEY credential".into(),
+        ));
+    }
     tracing::info!(
         kept = stats.kept,
         dropped_venue = stats.dropped_venue,
