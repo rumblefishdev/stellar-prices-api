@@ -2,7 +2,7 @@
 id: "0031"
 title: "Evaluate BE-side `signature` hoist for String-typed topic[0] (Soroswap, Phoenix)"
 type: RESEARCH
-status: backlog
+status: canceled
 related_adr: []
 related_tasks: ["0018", "0017"]
 tags: [layer-research, priority-medium, effort-small, cross-repo, be-feedback, clickhouse, signature-column, filter-perf]
@@ -15,6 +15,17 @@ history:
     status: backlog
     who: claude
     note: "Spawned from 0018 Appendix B item 2."
+  - date: 2026-07-03
+    status: canceled
+    who: oski
+    reason: obsolete
+    note: >
+      Pre-prod-deploy backlog review (0070). Query-performance micro-opt
+      + cross-repo feedback, never a correctness or deploy concern. The
+      per-AMM JSONExtractString workaround (0018 §3.6/§1.6) is in the
+      extractors and works; the perf gap was never measured and no AMM
+      filter query has shown up as slow. No bearing on production. Reopen
+      only if prod AMM filter queries prove slow.
 ---
 
 # BE signature column: String-typed topic[0] hoist

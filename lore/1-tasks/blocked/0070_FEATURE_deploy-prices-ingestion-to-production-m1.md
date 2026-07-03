@@ -4,7 +4,7 @@ title: "Deploy prices live-ingestion + periodic workers to production (M1 Part E
 type: FEATURE
 status: blocked
 related_adr: ["0006", "0007"]
-related_tasks: ["0038", "0039", "0050", "0052", "0063", "0064", "0047", "0053", "0076", "0077", "0078"]
+related_tasks: ["0038", "0039", "0050", "0052", "0063", "0064", "0047", "0053", "0076", "0077", "0078", "0036"]
 tags: [layer-ops, milestone-M1, deploy, priority-high, effort-medium, aws, cdk, lambda, clickhouse, hetzner, cross-team]
 milestone: 1
 links:
@@ -146,6 +146,16 @@ make deploy-production-observability  # dashboards/alarms incl. lag_seconds
 - [ ] Drop one ledger object event (or wait for the next live PutObject) →
       confirm the ledger-processor invocation succeeds, advances the cursor,
       and **rows land in `prices.price_ohlcv_1m`** over mTLS.
+- [ ] **AMM live coverage** (this task's blocker): confirm a real AMM swap
+      resolves against the seeded `pool_registry` and produces a `price_ohlcv_1m`
+      row — SDEX-only is not sufficient. Fold in **0036**'s confirm-once check
+      here: for a Phoenix XYK swap on the PHO/USDC pool
+      (`CD5XNKK3B6BEF2N7ULNHHGAMOKZ7P6456BFNIHRF4WNTEDKBRWAE7IAA`), verify the
+      8-event grouping holds and field order matches the 0018 XYK spec against
+      real live data. (0034 multi-WASM tolerance is already shipped, so this is
+      a confirmation, not a gate — but the 237-byte XYK WASM delta means it's
+      worth eyeballing once on real prod flow.) If the grouping diverges,
+      escalate per 0036 §2 rather than proceeding.
 - [ ] Trigger each worker once (manual invoke): oracle writes `oracle_prices`;
       supply writes `asset_supply`; cleanup is a safe no-op on first run;
       discovery inserts/updates `assets`. The `current_prices` MV populates.
