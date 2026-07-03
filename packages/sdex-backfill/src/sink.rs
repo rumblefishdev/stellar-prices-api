@@ -52,19 +52,12 @@ impl Sink {
         ca_path: &std::path::Path,
         database: &str,
     ) -> Result<Self, BackfillError> {
-        use prices_clickhouse::mtls::{MtlsBundle, client_with_mtls};
-
-        let read = |p: &std::path::Path| -> Result<String, BackfillError> {
-            std::fs::read_to_string(p)
-                .map_err(|e| BackfillError::Mtls(format!("read PEM at `{}`: {e}", p.display())))
-        };
-        let bundle = MtlsBundle {
-            cert_pem: read(cert_path)?,
-            key_pem: read(key_path)?,
-            ca_pem: read(ca_path)?,
-        };
-        let client = client_with_mtls(domain, &bundle, database)
-            .map_err(|e| BackfillError::Mtls(e.to_string()))?;
+        // Bundle-load lives in `prices_clickhouse::mtls::client_with_mtls_from_paths`,
+        // shared with the pool-registry-seed CLI so the PEM-read path isn't duplicated.
+        let client = prices_clickhouse::mtls::client_with_mtls_from_paths(
+            domain, cert_path, key_path, ca_path, database,
+        )
+        .map_err(|e| BackfillError::Mtls(e.to_string()))?;
         Ok(Self {
             writer: OhlcvWriter::new(client),
         })

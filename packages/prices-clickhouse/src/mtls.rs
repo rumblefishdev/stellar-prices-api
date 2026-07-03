@@ -24,6 +24,7 @@
 //! identity, so any client-side credential would be discarded.
 
 use std::io::Cursor;
+use std::path::Path;
 use std::time::Duration;
 
 use rustls::ClientConfig;
@@ -60,6 +61,8 @@ pub enum MtlsError {
     MissingEnv(&'static str),
     #[error("Secrets Extension fetch failed: {0}")]
     Fetch(String),
+    #[error("read PEM file failed: {0}")]
+    ReadPem(String),
     #[error("Secrets bundle JSON decode failed: {0}")]
     BundleDecode(String),
     #[error("PEM parse failed: {0}")]
@@ -220,6 +223,29 @@ pub fn client_with_mtls(
     Ok(clickhouse::Client::with_http_client(hyper_client)
         .with_url(url)
         .with_database(database))
+}
+
+/// Build an mTLS ClickHouse client from PEM **file paths** (client cert, client
+/// key, CA) — the path-based companion to [`client_with_mtls`], which takes
+/// in-memory PEM strings. Shared by the operator CLIs (sdex-backfill,
+/// pool-registry-seed) so the bundle-load lives in exactly one place.
+pub fn client_with_mtls_from_paths(
+    domain: &str,
+    cert_path: &Path,
+    key_path: &Path,
+    ca_path: &Path,
+    database: &str,
+) -> Result<clickhouse::Client, MtlsError> {
+    let read = |p: &Path| -> Result<String, MtlsError> {
+        std::fs::read_to_string(p)
+            .map_err(|e| MtlsError::ReadPem(format!("`{}`: {e}", p.display())))
+    };
+    let bundle = MtlsBundle {
+        cert_pem: read(cert_path)?,
+        key_pem: read(key_path)?,
+        ca_pem: read(ca_path)?,
+    };
+    client_with_mtls(domain, &bundle, database)
 }
 
 /// One-shot convenience for Lambda cold start: read the bundle from the

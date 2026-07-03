@@ -17,7 +17,7 @@
 //! history) and never logged.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::Parser;
 use pool_registry_seed::{SeedError, build_registry, fetch_all_venues};
@@ -58,22 +58,20 @@ fn build_writer(cli: &Cli) -> Result<OhlcvWriter, SeedError> {
     let Some(domain) = &cli.ch_domain else {
         return Ok(OhlcvWriter::plaintext(&cli.ch_url));
     };
-    use prices_clickhouse::mtls::{MtlsBundle, client_with_mtls};
-
-    let read = |label: &str, path: &Option<PathBuf>| -> Result<String, SeedError> {
-        let p = path
-            .as_ref()
-            .ok_or_else(|| SeedError::Config(format!("--ch-domain set but {label} is missing")))?;
-        std::fs::read_to_string(p)
-            .map_err(|e| SeedError::Mtls(format!("read PEM at `{}`: {e}", p.display())))
-    };
-    let bundle = MtlsBundle {
-        cert_pem: read("--mtls-cert-path / MTLS_CERT_PATH", &cli.mtls_cert_path)?,
-        key_pem: read("--mtls-key-path / MTLS_KEY_PATH", &cli.mtls_key_path)?,
-        ca_pem: read("--mtls-ca-path / MTLS_CA_PATH", &cli.mtls_ca_path)?,
-    };
-    let client = client_with_mtls(domain, &bundle, &cli.database)
-        .map_err(|e| SeedError::Mtls(e.to_string()))?;
+    // Require the three bundle paths (nice per-flag error), then delegate the
+    // PEM-read + client build to the shared helper (same path sdex-backfill uses).
+    fn require<'a>(label: &str, path: &'a Option<PathBuf>) -> Result<&'a Path, SeedError> {
+        path.as_deref()
+            .ok_or_else(|| SeedError::Config(format!("--ch-domain set but {label} is missing")))
+    }
+    let client = prices_clickhouse::mtls::client_with_mtls_from_paths(
+        domain,
+        require("--mtls-cert-path / MTLS_CERT_PATH", &cli.mtls_cert_path)?,
+        require("--mtls-key-path / MTLS_KEY_PATH", &cli.mtls_key_path)?,
+        require("--mtls-ca-path / MTLS_CA_PATH", &cli.mtls_ca_path)?,
+        &cli.database,
+    )
+    .map_err(|e| SeedError::Mtls(e.to_string()))?;
     Ok(OhlcvWriter::new(client))
 }
 
