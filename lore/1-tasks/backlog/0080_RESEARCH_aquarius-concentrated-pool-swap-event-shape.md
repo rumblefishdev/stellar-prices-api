@@ -36,6 +36,17 @@ divergence and scope an extractor variant before seeding them.
   `concentrated` (20 pools) is skipped to avoid seeding a pool whose swaps might
   mis-decode into wrong OHLCV. Unseeded, their live swaps go to
   `unresolved_pools` (no data) rather than producing bad data.
+- **The seeder's hold is only a seeder-side filter — the concentrated pools reach
+  the registry anyway via the on-chain factory-event path.** `learn_factory`
+  registers every Aquarius `add_pool` event as `venue=Aquarius` regardless of
+  sub-type (`soroban.rs`), so the SDEX/AMM backfill (0053) and the live processor
+  both classify concentrated pools as Aquarius and dispatch their swaps to
+  `AquariusPoolExtractor`. So this mis-decode risk is a **pre-existing property of
+  the AMM discovery path, not something the seeder introduced** — it must be
+  resolved before AMM prices for Aquarius concentrated pools can be trusted,
+  independent of whether the API seeder is used. If the shape diverges, the fix
+  likely needs to gate the extractor by sub-type (or add a variant), not just
+  filter the seed.
 - The extractor lives at `packages/aquarius-extractor/src/lib.rs`; its header
   documents constant-product / stableswap only. Reference decode methodology:
   task 0018 (per-AMM swap event shapes).
