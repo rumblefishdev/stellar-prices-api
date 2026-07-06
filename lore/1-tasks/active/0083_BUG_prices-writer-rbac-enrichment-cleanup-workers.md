@@ -80,13 +80,32 @@ in order:
    grants `CREATE/DROP/SELECT/INSERT ON prices_scratch.*`), keeping DDL out of the
    shared `prices` data DB. Small code change: separate `scratch_database` config.
 
+## Implementation — enrichment (2026-07-06, option 1 chosen)
+
+Reworked the peg-pivot tier to compute the XLM/USDC reference **inline as an
+ASOF-join subquery** — no `CREATE TABLE` / `DROP TABLE` at all, so `prices_writer`
+needs **zero new grants** for enrichment (fully BE-independent). Removed
+`pivot_ref_sql`, `materialize_pivot_ref`, `drop_table`, `unique_suffix`;
+`pivot_sql` now embeds the ref `SELECT` (single-pair sort-key-prefix scan, cheap
+to recompute per batch) and `enrich_peg_pivot_step` self-gates on `refs.xlm/usdc`
+with a 4-bind order (watermark, window, watermark, LIMIT). Validated against local
+CH **26.3.10.60** (= prod): 25 unit + 5 `ch_enrich_it` (incl. the pivot-tier
+`close_usd` correctness case) + 2 `enrich_e2e` all green; clippy clean. **PR #86**.
+Perf note: review #10's single-materialization is traded for a per-batch
+single-pair re-aggregation — negligible now (no backfill), revisit with a
+session-pinned `CREATE TEMPORARY TABLE` only if it regresses post-backfill.
+
+**Takes effect on redeploy:** rebuild the `enrichment-worker` bootstrap +
+`make deploy-production-eventbridge` (enrichment lives in the EventBridge stack).
+
 ## Acceptance Criteria
 
 - [ ] cleanup runs green: enumerates + drops old partitions (verify on a live invoke).
-- [ ] enrichment runs green and populates `close_usd` on `price_ohlcv_1m` — via
-      subquery/CTE (preferred) or a scratch DB, not broad `CREATE TABLE` on `prices.*`.
-- [ ] No orphaned `prices.price_ohlcv_1m_xlmusd_ref_*` tables in prod (none
-      expected now — CREATE was denied pre-execution; re-check after the fix lands).
+- [x] enrichment reworked to populate `close_usd` via an inline ASOF subquery (no
+      `CREATE TABLE`); validated against CH 26.3.10.60. **Confirm on a live prod
+      invoke after redeploy** (should no longer ACCESS_DENIED).
+- [x] No orphaned `prices.price_ohlcv_1m_xlmusd_ref_*` tables — the table is now
+      never created (inline subquery); IT asserts count 0.
 - [ ] BE RBAC change (cleanup grants) applied + documented alongside their 0314.
 
 ## BE hand-off message (ready to send)
