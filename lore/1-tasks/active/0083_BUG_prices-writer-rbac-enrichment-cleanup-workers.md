@@ -4,7 +4,7 @@ title: "enrichment + cleanup workers fail on prices_writer RBAC (ACCESS_DENIED) 
 type: BUG
 status: active
 related_adr: ["0007"]
-related_tasks: ["0070", "0082", "0026", "0056"]
+related_tasks: ["0070", "0082", "0026", "0056", "0085"]
 tags: [layer-ops, milestone-M1, priority-high, effort-small, aws, clickhouse, rbac, cross-team, hetzner, post-deploy]
 milestone: 1
 links:
@@ -97,6 +97,13 @@ session-pinned `CREATE TEMPORARY TABLE` only if it regresses post-backfill.
 
 **Takes effect on redeploy:** rebuild the `enrichment-worker` bootstrap +
 `make deploy-production-eventbridge` (enrichment lives in the EventBridge stack).
+
+**Code review (PR #86, high-effort):** no hard correctness bug — behaviour-
+preserving (bind order, ASOF forward-fill, no drift, no caller breakage all
+confirmed). Flagged the accepted trade-off: the inline ref is re-aggregated per
+batch (`O(slice × batches)`), which could risk the 300s timeout once the 0053
+backfill grows the XLM/USDC slice → **restore materialize-once before then,
+spawned as 0085**. Tightened the code comment to state this honestly (PR #86).
 
 ## Acceptance Criteria
 
