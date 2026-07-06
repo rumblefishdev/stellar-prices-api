@@ -52,9 +52,30 @@ Workers deployed by 0070's EventBridge stack, each on its own schedule:
 - Sanity-check `soroswap`-source rows appear in `price_ohlcv_1m` once a Soroswap
   swap lands (only `aquarius`/`phoenix` had rows in the first go-live window).
 
+## Findings (2026-07-06, first invoke round)
+
+Manual `aws lambda invoke` of each worker against prod:
+
+| Worker | Result |
+|--------|--------|
+| `oracle` | ✅ `{"queried":3,"skipped":0,"written":3}` → `oracle_prices` |
+| `asset-discovery` | ✅ `seeded 1660 assets` (pools_total 0 — empty payload gave no ledger range to scan) |
+| `supply` | ⚠️ slow — aws CLI read-timeout + 3 retries at 60s each; no error logged. Verify by `asset_supply` freshness, not the sync invoke. |
+| `enrichment` | ❌ **ACCESS_DENIED** → spawned **0083** |
+| `cleanup` | ❌ **ACCESS_DENIED** → spawned **0083** |
+
+Root cause (from prod `system.query_log`): `prices_writer` lacks `SELECT ON
+system.parts` (cleanup) and `CREATE TABLE ON prices.*` (enrichment's peg-pivot
+ref table). Core ingestion unaffected. Fix tracked in **0083** (BE RBAC grant +
+enrichment temp-table redesign).
+
 ## Acceptance Criteria
 
-- [ ] Each periodic worker writes its table on a live invoke.
+- [~] Each periodic worker writes its table on a live invoke — `oracle` +
+      `asset-discovery` ✅; `supply` pending freshness check; `enrichment` +
+      `cleanup` **blocked on 0083** (RBAC).
 - [ ] `current_prices` MV populated from live candles.
 - [ ] `lag_seconds` + all deploy alarms `OK` under steady state (no false-fire).
 - [ ] `soroswap`-source rows confirmed present in `price_ohlcv_1m`.
+- [ ] `supply` confirmed writing `asset_supply` (via table freshness, not the
+      timing-out sync invoke).
