@@ -4,13 +4,26 @@ title: "enrichment + cleanup workers fail on prices_writer RBAC (ACCESS_DENIED) 
 type: BUG
 status: active
 related_adr: ["0007"]
-related_tasks: ["0070", "0082", "0026", "0056", "0085"]
+related_tasks: ["0070", "0082", "0026", "0056", "0085", "0086"]
 tags: [layer-ops, milestone-M1, priority-high, effort-small, aws, clickhouse, rbac, cross-team, hetzner, post-deploy]
 milestone: 1
 links:
   - "../../../packages/enrichment-worker/src/ch_enrich.rs"
   - "../../../packages/cleanup-worker/src"
 history:
+  - date: 2026-07-06
+    status: active
+    who: okarcz
+    note: >
+      Cleanup half DONE. Live `aws lambda invoke` of prices-production-cleanup ran
+      green over mTLS as prices_writer: dropped price_ohlcv_1m=202311 +
+      oracle_prices=197001 (dropped=2), no ACCESS_DENIED — SELECT ON system.parts +
+      ALTER DELETE proven end-to-end. Pre-flight caught a query-shape gotcha (ad-hoc
+      preview projecting toUInt32(partition) over the whole-DB parts scan throws on
+      the tuple()-partitioned prices tables; the worker is unaffected — it guards
+      toUInt32 behind a table= short-circuit on month-partitioned tables). Cleanup
+      AC flipped to done. Remaining before archive: enrichment live-invoke
+      confirmation post-redeploy.
   - date: 2026-07-06
     status: active
     who: okarcz
@@ -147,12 +160,51 @@ Exactly what cleanup needs: `SELECT ON system.parts` (enumerate partitions) +
   `14:58` restart (the one minute the boundary-scan flagged, `13:09`, was a
   query off-by-a-second artifact — it has 1006 rows).
 
-Only remaining item: a **live cleanup-worker invoke** to confirm it enumerates +
-drops green now that the grants are in place.
+### Live cleanup-worker invoke (2026-07-06) — green
+
+Invoked `prices-production-cleanup` (`aws lambda invoke`, empty payload) right after
+the grants landed. It authenticated as `prices_writer` over mTLS and ran cleanup's
+real `SELECT system.parts` + `ALTER TABLE … DROP PARTITION` end-to-end — **no
+ACCESS_DENIED**:
+```
+dropped expired partition  table=price_ohlcv_1m  partition=202311
+dropped expired partition  table=oracle_prices   partition=197001
+cleanup run complete  dropped=2
+→ {"dropped":["price_ohlcv_1m=202311","oracle_prices=197001"]}
+```
+97ms, clean exit. Dropped exactly the two junk partitions previewed (the `202311`
+2-row remnant and oracle's epoch-zero `197001` bad-timestamp row); `price_ohlcv_15m`
+correctly had nothing to drop. `SELECT ON system.parts` + `ALTER DELETE ON prices.*`
+are proven working end-to-end — the cleanup half of 0083 is complete.
+
+**Pre-flight note (query-shape gotcha):** an ad-hoc preview that projected
+`toUInt32(partition)` as a SELECT-list alias over a whole-DB `system.parts` scan
+threw `CANNOT_PARSE_TEXT: Cannot parse 'tuple()' as UInt32` — the shared `prices` DB
+has many `PARTITION BY tuple()` tables (`current_prices`, `assets`, `pool_registry`,
+…). The **worker is not affected**: all 3 retention tables are `PARTITION BY
+toYYYYMM(timestamp)` (numeric partitions), and `ch_enrich`… er, `cleanup/lib.rs:57`
+guards `toUInt32(partition)` inside a short-circuited `AND` behind `table='…'`, so it
+only ever evaluates on the pinned month-partitioned table. Confirmed by running the
+worker's exact per-table query (clean, correct drop set) before the invoke.
+
+**Spawned 0086 (out of scope for 0083):** the Step-3 CH-side check showed
+`oracle_prices` partition `197001` *reappeared* after the drop (`modification_time`
+18:32:28, post-invoke). Not a cleanup failure — the DROP executed cleanly; the
+oracle-watcher **re-inserts** rows with `timestamp = real_epoch / 1000` (Reflector
+seconds-vs-ms unit bug), landing them in `1970-01`. `price_usd` values are correct;
+only the timestamp is wrong. Filed as **0086** (BUG, oracle-worker). Cleanup can
+never keep `197001` empty until 0086 ships.
+
+## Future Work
+
+- **0086** — oracle-worker Reflector timestamp `×1000` unit bug (junk `1970-01`
+  rows re-materialize `oracle_prices` partition `197001` each run). Spawned above.
 
 ## Acceptance Criteria
 
-- [ ] cleanup runs green: enumerates + drops old partitions (verify on a live invoke).
+- [x] cleanup runs green: enumerates + drops old partitions (verified on a live
+      `aws lambda invoke` 2026-07-06 — dropped `price_ohlcv_1m=202311` +
+      `oracle_prices=197001`, `dropped=2`, no ACCESS_DENIED).
 - [x] enrichment reworked to populate `close_usd` via an inline ASOF subquery (no
       `CREATE TABLE`); validated against CH 26.3.10.60. **Confirm on a live prod
       invoke after redeploy** (should no longer ACCESS_DENIED).
