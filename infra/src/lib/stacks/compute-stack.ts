@@ -350,18 +350,19 @@ export class ComputeStack extends cdk.Stack {
     // lets the handler fail just the offending doorbell; SQS redelivers
     // it up to maxReceiveCount, then it lands in the DLQ.
     //
-    // maxConcurrency caps the event-source's poller scaling. By default the
-    // ESM scales to 5 concurrent batches; with reservedConcurrency=1 the
-    // other 4 are throttle-rejected and their messages re-enqueue, each
-    // incrementing receiveCount — under a burst a processable doorbell can
-    // hit maxReceiveCount and false-DLQ before it is ever handled. 2 is the
-    // ESM minimum (it cannot equal the reserved 1), so this shrinks the
-    // over-poll window from 5→2 to complement maxReceiveCount.
+    // We deliberately do NOT set the ESM `maxConcurrency`. AWS requires
+    // 2 ≤ maxConcurrency ≤ the function's reserved concurrency; with the
+    // load-bearing reservedConcurrency=1 (the serial-ordering guarantee,
+    // enforced in types.ts) there is no legal value — the API rejects it with
+    // "MaximumConcurrency: 2 is greater than Function Reserved Concurrency: 1".
+    // reservedConcurrency=1 already caps execution to a single concurrent
+    // invocation (the ordering guarantee); the ESM's default poller scaling is
+    // throttled down to that 1, and any over-poll re-drives are bounded by the
+    // queue's maxReceiveCount → DLQ. Mirrors BE's compute-stack (no maxConcurrency).
     this.ledgerProcessorFunction.addEventSource(
       new lambdaEventSources.SqsEventSource(this.ingestQueue, {
         batchSize: lp.sqsBatchSize,
         reportBatchItemFailures: true,
-        maxConcurrency: 2,
       }),
     );
 
