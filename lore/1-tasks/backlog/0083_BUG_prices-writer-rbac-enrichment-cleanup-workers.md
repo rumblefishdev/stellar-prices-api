@@ -58,8 +58,10 @@ GRANT ALTER DELETE ON prices.* TO prices_writer;
 
 ### enrichment (decision — do NOT just widen grants)
 Granting broad `CREATE TABLE ON prices.*` to the writer on a **BE-co-tenanted**
-database is poor posture, and a crashed run leaks orphaned `*_xlmusd_ref_*` tables
-(one already exists in prod from this failure — clean it up). Prefer, in order:
+database is poor posture, and — once the grant exists — a crash mid-run would leak
+orphaned `*_xlmusd_ref_*` tables in the shared DB. (No orphan exists now: the
+current failures are `ExceptionBeforeStart`, so the `CREATE` never ran.) Prefer,
+in order:
 
 1. **Subquery / CTE (no DDL).** Replace the materialized ref table with an inline
    `ASOF LEFT JOIN (SELECT … the XLM/USDC series …) AS r`. The ref series is small
@@ -75,6 +77,6 @@ database is poor posture, and a crashed run leaks orphaned `*_xlmusd_ref_*` tabl
 - [ ] cleanup runs green: enumerates + drops old partitions (verify on a live invoke).
 - [ ] enrichment runs green and populates `close_usd` on `price_ohlcv_1m` — via
       subquery/CTE (preferred) or a scratch DB, not broad `CREATE TABLE` on `prices.*`.
-- [ ] Orphaned `prices.price_ohlcv_1m_xlmusd_ref_*` table(s) from the failed run
-      dropped in prod.
+- [ ] No orphaned `prices.price_ohlcv_1m_xlmusd_ref_*` tables in prod (none
+      expected now — CREATE was denied pre-execution; re-check after the fix lands).
 - [ ] BE RBAC change (cleanup grants) applied + documented alongside their 0314.
