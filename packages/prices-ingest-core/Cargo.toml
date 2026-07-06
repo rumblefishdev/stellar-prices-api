@@ -28,3 +28,7 @@ phoenix-extractor = { path = "../phoenix-extractor" }
 soroswap-extractor = { path = "../soroswap-extractor" }
 aquarius-extractor = { path = "../aquarius-extractor" }
 ledger-processor = { path = "../ledger-processor" }
+
+[dev-dependencies]
+# task 0078: reuse the shared Phoenix xyk swap fixture in the classify-seam test.
+phoenix-extractor = { path = "../phoenix-extractor", features = ["test-fixtures"] }

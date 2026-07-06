@@ -280,44 +280,66 @@ pub fn process_ledger(
             }
         }
 
-        for (contract_id, rows) in amm_groups {
-            let venue = match reg.venue.get(&contract_id) {
-                Some(v) => v.clone(),
-                None => {
-                    // Unknown contract. Most are not AMM pools and are correctly
-                    // ignored — but if this one emitted a `swap`, its volume is
-                    // being dropped. Record it for the post-run re-check instead
-                    // of silently skipping (guard from task 0053 decision #3).
-                    let swaps: Vec<&SorobanEventRow> = rows
-                        .iter()
-                        .filter(|r| r.topics.first().and_then(|t| t.as_str()) == Some("swap"))
-                        .collect();
-                    if let Some(first) = swaps.first() {
-                        out.unresolved.push(UnresolvedPoolSwap {
-                            contract_id,
-                            ledger_sequence: ledger_seq,
-                            swap_count: swaps.len() as u32,
-                            sample_topics: format!("{:?}", first.topics),
-                        });
-                    }
-                    continue;
-                }
-            };
-            let source = venue.as_source();
-            match dispatch(&rows, &reg.venue, &reg.phoenix, &reg.soroswap) {
-                Ok(trades) => {
-                    for t in trades {
-                        if let Some(tick) = amm_trade_to_tick(&t, closed_at, assets) {
-                            out.amm_ticks.push((source, tick));
-                        }
-                    }
-                }
-                Err(e) => warn!(contract_id, error = %e, "amm dispatch error"),
-            }
-        }
+        classify_amm_groups(amm_groups, reg, assets, ledger_seq, closed_at, &mut out);
     }
 
     out
+}
+
+/// Classify each contract's queued AMM event rows against the current registry.
+///
+/// This is the resolvability seam **task 0078** protects. A pool present in
+/// `reg.venue` is dispatched to price ticks (appended to `out.amm_ticks`); a
+/// pool that is *absent* but emitted a `swap` is recorded in `out.unresolved`
+/// so its dropped volume is visible to the post-run re-check (guard from task
+/// 0053 decision #3). With the live processor now preloading `pool_registry`
+/// (0078), a pre-existing pool is seeded before its first live swap and lands in
+/// `amm_ticks` instead of `unresolved` — the empty-registry regression this fix
+/// closes. Kept a standalone fn so that seeded-vs-unseeded behaviour is
+/// unit-testable without a full XDR `LedgerCloseMeta` AMM fixture (none exist).
+fn classify_amm_groups(
+    amm_groups: HashMap<String, Vec<SorobanEventRow>>,
+    reg: &Registries,
+    assets: &mut AssetRegistry,
+    ledger_seq: u32,
+    closed_at: i64,
+    out: &mut LedgerSoroban,
+) {
+    for (contract_id, rows) in amm_groups {
+        let venue = match reg.venue.get(&contract_id) {
+            Some(v) => v.clone(),
+            None => {
+                // Unknown contract. Most are not AMM pools and are correctly
+                // ignored — but if this one emitted a `swap`, its volume is
+                // being dropped. Record it for the post-run re-check instead
+                // of silently skipping (guard from task 0053 decision #3).
+                let swaps: Vec<&SorobanEventRow> = rows
+                    .iter()
+                    .filter(|r| r.topics.first().and_then(|t| t.as_str()) == Some("swap"))
+                    .collect();
+                if let Some(first) = swaps.first() {
+                    out.unresolved.push(UnresolvedPoolSwap {
+                        contract_id,
+                        ledger_sequence: ledger_seq,
+                        swap_count: swaps.len() as u32,
+                        sample_topics: format!("{:?}", first.topics),
+                    });
+                }
+                continue;
+            }
+        };
+        let source = venue.as_source();
+        match dispatch(&rows, &reg.venue, &reg.phoenix, &reg.soroswap) {
+            Ok(trades) => {
+                for t in trades {
+                    if let Some(tick) = amm_trade_to_tick(&t, closed_at, assets) {
+                        out.amm_ticks.push((source, tick));
+                    }
+                }
+            }
+            Err(e) => warn!(contract_id, error = %e, "amm dispatch error"),
+        }
+    }
 }
 
 fn topics_to_tagged(topics: &Value) -> Vec<TaggedValue> {
@@ -633,6 +655,64 @@ mod tests {
         // A Contract identity — what REDSTONE used to intern — also never hits 0.
         let contract = reg.get_or_assign(&AssetIdentity::Contract("CORACLEFEED".to_string()));
         assert_ne!(contract, ORACLE_FEED_NO_ASSET_ID);
+    }
+
+    #[test]
+    fn seeded_pool_swap_prices_where_unseeded_falls_to_unresolved() {
+        // Task 0078 resolvability guarantee at the classify seam: an AMM swap for
+        // a pre-existing pool must PRICE when the pool_registry is seeded (as the
+        // live processor's cold-start preload now provides) and only fall to
+        // `unresolved` when the registry is empty (the regression this fix
+        // closes). Uses the shared Phoenix xyk swap fixture — no XDR ledger
+        // fixture with AMM activity exists to drive the full `process_ledger`.
+        use phoenix_extractor::test_fixtures::{
+            XLM_USDC_POOL, common_xyk_wasm_hash, make_phoenix_xyk_events,
+        };
+
+        const SEQ: u32 = 62_460_522;
+        const CLOSED_AT: i64 = 1_700_000_000;
+        let group = || {
+            let mut g: HashMap<String, Vec<SorobanEventRow>> = HashMap::new();
+            g.insert(
+                XLM_USDC_POOL.to_string(),
+                make_phoenix_xyk_events(XLM_USDC_POOL, 0),
+            );
+            g
+        };
+
+        // Unseeded registry → swap volume is dropped to `unresolved` (the bug).
+        let empty = Registries::new();
+        let mut assets = AssetRegistry::from_existing(vec![]);
+        let mut out = LedgerSoroban::default();
+        classify_amm_groups(group(), &empty, &mut assets, SEQ, CLOSED_AT, &mut out);
+        assert!(out.amm_ticks.is_empty(), "unseeded pool must not price");
+        assert_eq!(
+            out.unresolved.len(),
+            1,
+            "unseeded swap recorded as unresolved"
+        );
+        assert_eq!(out.unresolved[0].contract_id, XLM_USDC_POOL);
+
+        // Seeded registry (preloaded pool_registry) → the same swap prices.
+        let mut seeded = Registries::new();
+        seeded
+            .venue
+            .insert(XLM_USDC_POOL.to_string(), Venue::Phoenix);
+        seeded
+            .phoenix
+            .register_with_wasm(XLM_USDC_POOL.to_string(), 0, common_xyk_wasm_hash());
+        let mut assets = AssetRegistry::from_existing(vec![]);
+        let mut out = LedgerSoroban::default();
+        classify_amm_groups(group(), &seeded, &mut assets, SEQ, CLOSED_AT, &mut out);
+        assert!(
+            out.unresolved.is_empty(),
+            "seeded pool must not fall to unresolved"
+        );
+        assert_eq!(out.amm_ticks.len(), 1, "seeded swap prices to a tick");
+        assert_eq!(
+            out.amm_ticks[0].0, "phoenix",
+            "tick tagged with the phoenix source"
+        );
     }
 
     #[test]
