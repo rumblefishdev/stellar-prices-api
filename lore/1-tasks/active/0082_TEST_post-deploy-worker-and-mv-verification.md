@@ -87,15 +87,16 @@ Soroswap-specific resolution gap; **watch**, investigate if it persists.
 - `sdex-push-freshness` = ALARM while SDEX is fresh → **false positive** (watches
   the backfill push signal, not live ingestion). → 0056 finding A.
 - No ledger-processor `lag_seconds`/error alarm exists at all. → 0056 finding B.
-- `supply-errors` = ALARM despite writing 1164 rows → likely the 3× overlapping
-  manual invokes hitting the Lambda timeout; expected to self-clear on the next
-  clean scheduled run (confirm via logs).
+- `supply-errors` = ALARM — **NOT benign** (logs confirmed): supply hits the
+  300s Lambda timeout (`Status: timeout`) on **every** invoke incl. scheduled +
+  async retries, writing `asset_supply` only partially (1164/1685). Real defect →
+  spawned **0084** (batch/checkpoint the asset walk).
 
 ## Acceptance Criteria
 
 - [~] Each periodic worker writes its table on a live invoke — `oracle`,
-      `asset-discovery`, `supply` ✅; `enrichment` + `cleanup` **blocked on 0083**
-      (RBAC).
+      `asset-discovery` ✅; `supply` writes but **times out mid-walk → 0084**;
+      `enrichment` + `cleanup` **blocked on 0083** (RBAC).
 - [x] `current_prices` MV populated from live candles (1627 rows via
       `mv_current_prices`; rollup chain `_15m/_1h/_4h` also filling).
 - [~] Deploy alarms sane under steady state — `cleanup`/`enrichment` ALARM
@@ -103,5 +104,5 @@ Soroswap-specific resolution gap; **watch**, investigate if it persists.
       ledger-processor lag alarm **folded into 0056** (findings A/B).
 - [ ] `soroswap`-source rows confirmed present in `price_ohlcv_1m` — **watch**
       (0 after 30 min, `unresolved_pools`=0; investigate if it persists).
-- [x] `supply` confirmed writing `asset_supply` (1164 rows; the sync-invoke
-      timeout is just the slow Horizon walk, not a failure).
+- [~] `supply` writes `asset_supply` (1164 rows) but **does not complete** — it
+      times out at 300s on every invoke; full-walk fix tracked in **0084**.
