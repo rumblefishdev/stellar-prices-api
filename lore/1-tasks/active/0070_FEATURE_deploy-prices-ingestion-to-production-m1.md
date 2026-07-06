@@ -2,7 +2,7 @@
 id: "0070"
 title: "Deploy prices live-ingestion + periodic workers to production (M1 Part E rollout)"
 type: FEATURE
-status: blocked
+status: active
 related_adr: ["0006", "0007"]
 related_tasks: ["0038", "0039", "0050", "0052", "0063", "0064", "0047", "0053", "0076", "0077", "0078", "0036"]
 tags: [layer-ops, milestone-M1, deploy, priority-high, effort-medium, aws, cdk, lambda, clickhouse, hetzner, cross-team]
@@ -12,6 +12,18 @@ links:
   - "../archive/0039_FEATURE_prices-periodic-workers-lambda-set/README.md"
   - "../../2-adrs/0007_live-data-sink-on-shared-hetzner-clickhouse.md"
 history:
+  - date: 2026-07-06
+    status: active
+    who: okarcz
+    note: >
+      Unblocked — both AMM live-coverage blockers cleared. 0078 (live-processor
+      pool_registry preload) merged to develop via PR #84; prod
+      `prices.pool_registry` seeded via the 0079 CLI over the prices_writer mTLS
+      bundle (521 rows: soroswap 199 / phoenix 12 / aquarius 310, independently
+      verified via SSH read-back with FINAL). Resuming the deploy runbook.
+      NOTE: rebuild the 9 arm64 bootstraps from current develop before synth —
+      the 2026-07-03 build predates the 0078 code change and would ship without
+      the preload fix.
   - date: 2026-07-03
     status: blocked
     who: oski
