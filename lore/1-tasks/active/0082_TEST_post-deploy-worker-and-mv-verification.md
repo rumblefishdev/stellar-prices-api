@@ -2,7 +2,7 @@
 id: "0082"
 title: "Post-deploy verification — periodic workers write their tables + current_prices MV populates + alarms don't false-fire"
 type: TEST
-status: backlog
+status: active
 related_adr: ["0007"]
 related_tasks: ["0070", "0056"]
 tags: [layer-ops, milestone-M1, priority-medium, effort-small, aws, clickhouse, observability, post-deploy]
@@ -10,6 +10,12 @@ milestone: 1
 links:
   - "../archive/0070_FEATURE_deploy-prices-ingestion-to-production-m1.md"
 history:
+  - date: 2026-07-06
+    status: active
+    who: okarcz
+    note: >
+      Activated right after the 0070 go-live to verify the periodic workers +
+      MV + alarms while the freshly-deployed system is warm.
   - date: 2026-07-06
     status: backlog
     who: okarcz
