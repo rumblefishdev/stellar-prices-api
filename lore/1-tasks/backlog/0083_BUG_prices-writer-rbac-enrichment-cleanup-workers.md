@@ -80,3 +80,36 @@ in order:
 - [ ] No orphaned `prices.price_ohlcv_1m_xlmusd_ref_*` tables in prod (none
       expected now — CREATE was denied pre-execution; re-check after the fix lands).
 - [ ] BE RBAC change (cleanup grants) applied + documented alongside their 0314.
+
+## BE hand-off message (ready to send)
+
+> **Subject: `prices_writer` CH grants — two periodic workers hit ACCESS_DENIED (post prices go-live)**
+>
+> We deployed prices live-ingestion to prod today (ledger-processor + workers).
+> Core ingestion works — the ledger-processor, oracle, and asset-discovery all
+> write fine over `prices_writer`. But two scheduled workers fail with **Code 497
+> ACCESS_DENIED** (confirmed in `system.query_log`), because they need privileges
+> beyond the `INSERT`/`SELECT` your 0314 RBAC granted:
+>
+> **1. `cleanup` (retention worker)** — enumerates + drops old monthly partitions:
+> ```sql
+> -- reads partitions to drop:
+> GRANT SELECT ON system.parts TO prices_writer;
+> -- executes `ALTER TABLE prices.<t> DROP PARTITION <p>` — please grant the
+> -- partition-drop privilege scoped to prices.* (in 26.3.10.60 this is covered
+> -- by ALTER DELETE; grant whichever token your model uses for DROP PARTITION):
+> GRANT ALTER DELETE ON prices.* TO prices_writer;
+> ```
+> Exact failing query: `SELECT DISTINCT partition FROM system.parts WHERE
+> database='prices' AND table='price_ohlcv_1m' AND active=1 …` → `Not enough
+> privileges … SELECT ON system.parts`.
+>
+> **2. `enrichment`** — currently does `CREATE TABLE
+> prices.price_ohlcv_1m_xlmusd_ref_<nanos> …` in the shared `prices` DB. **We are
+> NOT asking for `CREATE TABLE ON prices.*`** — we agree that's poor posture on a
+> co-tenanted DB. We'll rework it on our side (inline subquery, or a dedicated
+> `prices_scratch` DB we own). Flagging only so you're aware; **if** you'd prefer
+> we go the scratch-DB route, let us know and we'll request grants scoped to
+> `prices_scratch.*` only.
+>
+> No orphaned tables exist (the CREATE was denied pre-execution). Thanks!
