@@ -2,7 +2,7 @@
 id: "0083"
 title: "enrichment + cleanup workers fail on prices_writer RBAC (ACCESS_DENIED) — grant scope + enrichment temp-table redesign"
 type: BUG
-status: backlog
+status: active
 related_adr: ["0007"]
 related_tasks: ["0070", "0082", "0026", "0056"]
 tags: [layer-ops, milestone-M1, priority-high, effort-small, aws, clickhouse, rbac, cross-team, hetzner, post-deploy]
@@ -11,6 +11,14 @@ links:
   - "../../../packages/enrichment-worker/src/ch_enrich.rs"
   - "../../../packages/cleanup-worker/src"
 history:
+  - date: 2026-07-06
+    status: active
+    who: okarcz
+    note: >
+      Activated to do the BE-independent half: rework enrichment's peg-pivot tier
+      from a `CREATE TABLE` ref-table to an inline ASOF-JOIN subquery (needs zero
+      grants), unblocking enrichment without waiting on BE. cleanup stays parked
+      on the BE RBAC grant (system.parts + DROP PARTITION).
   - date: 2026-07-06
     status: backlog
     who: okarcz
