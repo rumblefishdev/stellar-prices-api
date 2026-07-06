@@ -2,7 +2,7 @@
 id: "0084"
 title: "supply-worker times out at the 300s Lambda limit before completing a full asset walk"
 type: BUG
-status: backlog
+status: active
 related_adr: []
 related_tasks: ["0070", "0082", "0039"]
 tags: [layer-ops, priority-medium, effort-medium, aws, lambda, horizon, worker, post-deploy]
@@ -19,6 +19,10 @@ history:
       assets) before being killed. Memory is fine (~48/512 MB) — it's wall-clock
       bound on serial per-asset Horizon calls. Degraded (not go-live-blocking:
       supply feeds market-cap-style enrichment, not core pricing).
+  - date: 2026-07-06
+    status: active
+    who: okarcz
+    note: Promoted to active to start work on the supply-worker timeout fix.
 ---
 
 # supply-worker times out before completing the asset walk
