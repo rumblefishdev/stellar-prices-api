@@ -2,9 +2,9 @@
 id: "0070"
 title: "Deploy prices live-ingestion + periodic workers to production (M1 Part E rollout)"
 type: FEATURE
-status: active
+status: completed
 related_adr: ["0006", "0007"]
-related_tasks: ["0038", "0039", "0050", "0052", "0063", "0064", "0047", "0053", "0076", "0077", "0078", "0036"]
+related_tasks: ["0038", "0039", "0050", "0052", "0063", "0064", "0047", "0053", "0076", "0077", "0078", "0036", "0082"]
 tags: [layer-ops, milestone-M1, deploy, priority-high, effort-medium, aws, cdk, lambda, clickhouse, hetzner, cross-team]
 milestone: 1
 links:
@@ -12,6 +12,23 @@ links:
   - "../archive/0039_FEATURE_prices-periodic-workers-lambda-set/README.md"
   - "../../2-adrs/0007_live-data-sink-on-shared-hetzner-clickhouse.md"
 history:
+  - date: 2026-07-06
+    status: completed
+    who: okarcz
+    note: >
+      **Production go-live complete — M1 live ingestion is running.** Deployed
+      Secrets + Compute + EventBridge + Observability (all CREATE_COMPLETE) to
+      account 750702271865 / eu-central-1. Hit one deploy bug: the ledger-processor
+      SQS ESM set maxConcurrency:2 against reservedConcurrency:1 → CREATE_FAILED;
+      fixed in PR #85 (removed the setting) and redeployed clean. Smoke-test green:
+      ledger-processor consuming via SNS→SQS doorbell, cursor advanced
+      63352611→63353108 and tracking tip; 22,252 sdex + AMM rows (aquarius 218,
+      phoenix 10) landing in price_ohlcv_1m over mTLS; unresolved_pools=0; DLQ=0.
+      AMM live coverage — the reason for the 0078 preload + pool_registry seed —
+      confirmed end-to-end in prod. Post-deploy follow-ups spawned/tracked: 0082
+      (worker table-write verify), 0056 (ops subscribe + alarm fire-tests), 0047
+      (throughput), 0064 (cursor retirement). ApiGateway/read-API (0040) left
+      undeployed per scope.
   - date: 2026-07-06
     status: active
     who: okarcz
@@ -193,16 +210,28 @@ make deploy-production-observability  # dashboards/alarms incl. lag_seconds
 
 ## Acceptance Criteria
 
-- [ ] All five arm64 bootstraps build and `cdk synth` packages them (Step 1).
-- [ ] Cursor SSM param seeded with a sane last-accounted ledger (Step 2).
-- [ ] BE S3→SNS fan-out live + cross-account subscription working (Step 3).
-- [ ] Compute + EventBridge + Observability stacks deployed to production (Step 5).
-- [ ] **Live mTLS write proven**: a real ledger produces rows in
-      `prices.price_ohlcv_1m` end-to-end (moved from 0038). (Step 6)
+- [x] All **nine** arm64 bootstraps build and `cdk synth` packages them (Step 1;
+      count corrected 5→9 per 0077, rebuilt from post-0078 develop).
+- [x] Cursor SSM param seeded with a sane last-accounted ledger (Step 2;
+      `/prices/production/ledger-processor/initial-cursor = 63352611`, forward-only
+      = Horizon tip − 1).
+- [x] BE S3→SNS fan-out live + cross-account subscription working (Step 3;
+      proven by `doorbell processed` in the ledger-processor logs).
+- [x] Secrets + Compute + EventBridge + Observability stacks deployed to
+      production, all `CREATE_COMPLETE` (Step 5). ApiGateway intentionally NOT
+      deployed (read API = 0040, out of scope).
+- [x] **Live mTLS write proven**: real ledgers produce rows in
+      `prices.price_ohlcv_1m` end-to-end (Step 6) — 22,252 `sdex` rows + AMM
+      rows (`aquarius` 218, `phoenix` 10) with fresh timestamps; cursor advanced
+      63352611→63353108; `unresolved_pools = 0`; **AMM live coverage confirmed**
+      (the 0078 preload + seeded `pool_registry` working together in prod).
 - [ ] Each periodic worker writes its table on a live invoke; `current_prices`
-      MV populates; no DLQ backlog. (moved from 0039 deploy scope)
-- [ ] `lag_seconds` metric + >60s alarm live (moved from 0038). (Step 7)
-- [ ] 0047 throughput verification scheduled/run with BE post-deploy (Step 8).
+      MV populates — DLQ backlog confirmed **0**; per-worker table-write
+      verification deferred to post-deploy check **0082**.
+- [x] `lag_seconds` metric + >60s alarm live (Step 7; Observability stack
+      deployed, processor emitting lag while tracking tip).
+- [ ] 0047 throughput verification scheduled/run with BE post-deploy (Step 8) —
+      deferred to task **0047**.
 
 ## Out of scope
 
@@ -210,3 +239,32 @@ make deploy-production-observability  # dashboards/alarms incl. lag_seconds
 - The read API (0040) — separate, not yet built.
 - CH schema/MV DDL (owned by 0051/0039).
 - mTLS CA / cert issuance mechanics (operator + BE 0227).
+
+## Design Decisions
+
+### Emerged
+
+1. **Removed the SQS ESM `maxConcurrency: 2`** (PR #85, `fix(lore-0070)`). The
+   first Compute deploy failed `CREATE` — the ledger-processor's event source set
+   `maxConcurrency: 2` while `reservedConcurrency` is the load-bearing `1` (serial
+   ordering). AWS requires `2 ≤ maxConcurrency ≤ reservedConcurrency`, so
+   `reserved = 1` admits **no** legal value; the API rejected it
+   (`MaximumConcurrency: 2 is greater than Function Reserved Concurrency: 1`),
+   rolling the stack back. `reserved = 1` already caps concurrency, so the setting
+   was removed (mirrors BE's compute-stack). This was a latent 0038 bug that only
+   surfaced at first real deploy — CI never ran `synth-production` (0077).
+
+2. **Forward-only go-live cursor = Horizon tip − 1 (`63352611`).** No historical
+   backfill has been written to prod (only the `pool_registry` seed), so the
+   processor starts at the current tip; historical candles come later via the 0053
+   backfill. It caught up ~500 ledgers to the tip on first run and now tracks live.
+
+## Future Work
+
+- **0082** — post-deploy verification: confirm each periodic worker writes its
+  table on a live invoke + `current_prices` MV populates + alarms don't false-fire
+  (AC left open above).
+- **0056** — subscribe an ops address to `prices-production-ops-alarms` + fire-test
+  the freshness / mTLS-NotAfter alarms.
+- **0047** — combined-load throughput verification with BE.
+- **0064** — retire the bootstrap-cursor SSM param (live cursor now self-manages).
