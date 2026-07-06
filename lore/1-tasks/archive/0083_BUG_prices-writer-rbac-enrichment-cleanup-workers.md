@@ -2,7 +2,7 @@
 id: "0083"
 title: "enrichment + cleanup workers fail on prices_writer RBAC (ACCESS_DENIED) — grant scope + enrichment temp-table redesign"
 type: BUG
-status: active
+status: completed
 related_adr: ["0007"]
 related_tasks: ["0070", "0082", "0026", "0056", "0085", "0086"]
 tags: [layer-ops, milestone-M1, priority-high, effort-small, aws, clickhouse, rbac, cross-team, hetzner, post-deploy]
@@ -11,6 +11,19 @@ links:
   - "../../../packages/enrichment-worker/src/ch_enrich.rs"
   - "../../../packages/cleanup-worker/src"
 history:
+  - date: 2026-07-06
+    status: completed
+    who: okarcz
+    note: >
+      DONE — all 4 acceptance criteria met. Enrichment redeployed
+      (make deploy-production-eventbridge; CDK diff = enrichment function only) and
+      live-invoked green: no ACCESS_DENIED, no CREATE TABLE (inline-subquery rework
+      live), rows_enriched growing (81,466 close_usd populated), orphan_ref_tables=0,
+      pivot close_usd math verified. Cleanup half already proven (partition drops
+      over prices_writer). BE RBAC grants applied + CH restart audited
+      non-destructive. Spawned 0086 (oracle ×1000 timestamp bug) + noted the
+      enrichment-stall alarm floor (~48k unenrichable exotic-quote recent rows) for
+      0082. 2 workers unblocked; 25 unit + 5 IT + 2 e2e green (PR #86); PR #87 (docs).
   - date: 2026-07-06
     status: active
     who: okarcz
@@ -195,10 +208,39 @@ seconds-vs-ms unit bug), landing them in `1970-01`. `price_usd` values are corre
 only the timestamp is wrong. Filed as **0086** (BUG, oracle-worker). Cleanup can
 never keep `197001` empty until 0086 ships.
 
+### Enrichment redeploy + live invoke (2026-07-06) — green
+
+Rebuilt the `enrichment-worker` bootstrap (`cargo lambda build --release --arm64
+--features lambda -p enrichment-worker`) and deployed via
+`make deploy-production-eventbridge` — the CDK diff touched **only**
+`EnrichmentFunction`'s code S3Key (minimal blast radius). Live
+`aws lambda invoke prices-production-enrichment` ran clean:
+```
+enrichment pass complete  batches=4  rows_enriched=9174  duration_ms=585
+  candidates_before=138972  candidates_after=129798
+  oracle_misses=130455  rows_remaining_at_volume_zero=129798  rows_remaining_recent=48727
+```
+- **No `ACCESS_DENIED`, no `CREATE TABLE … xlmusd_ref`** — the inline-subquery rework
+  is live (log shows the oracle tier draining then the peg-pivot tier running inline
+  and self-gating on "no USD reference").
+- CH-side verify: `close_usd != 0` = 81,466 (growing), **`orphan_ref_tables = 0`**,
+  and pivot math correct (XLM/USDC → USD conversions spot-checked exact).
+- The ~130k rows that stay `close_usd=0` are **exotic-quote candles with no
+  USD/XLM/USDC reference path** — expected best-effort behaviour, not a defect.
+
+**Observation (not blocking; for the alarm owners / 0082):** `rows_remaining_recent
+= 48727` is dominated by permanently-unenrichable exotic-quote candles. The
+`Prices/Enrichment` `EnrichmentRowsRemainingRecent` stall alarm threshold must
+account for this floor or it will false-fire — flag for 0082's "alarms don't
+false-fire" verification.
+
 ## Future Work
 
 - **0086** — oracle-worker Reflector timestamp `×1000` unit bug (junk `1970-01`
   rows re-materialize `oracle_prices` partition `197001` each run). Spawned above.
+- **Enrichment-stall alarm floor** — the `EnrichmentRowsRemainingRecent` threshold
+  should exclude permanently-unenrichable exotic-quote candles (~48k recent floor)
+  to avoid false-firing. Track under 0082 (post-deploy alarm verification).
 
 ## Acceptance Criteria
 
@@ -206,8 +248,9 @@ never keep `197001` empty until 0086 ships.
       `aws lambda invoke` 2026-07-06 — dropped `price_ohlcv_1m=202311` +
       `oracle_prices=197001`, `dropped=2`, no ACCESS_DENIED).
 - [x] enrichment reworked to populate `close_usd` via an inline ASOF subquery (no
-      `CREATE TABLE`); validated against CH 26.3.10.60. **Confirm on a live prod
-      invoke after redeploy** (should no longer ACCESS_DENIED).
+      `CREATE TABLE`); validated against CH 26.3.10.60. **Confirmed on a live prod
+      invoke 2026-07-06 after redeploy** — no ACCESS_DENIED, no `CREATE TABLE`;
+      `rows_enriched` growing (81,466 enriched), pivot `close_usd` math correct.
 - [x] No orphaned `prices.price_ohlcv_1m_xlmusd_ref_*` tables — the table is now
       never created (inline subquery); IT asserts count 0.
 - [x] BE RBAC change (cleanup grants) applied + documented alongside their 0314 —
