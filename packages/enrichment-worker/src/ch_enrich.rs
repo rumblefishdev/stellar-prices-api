@@ -471,9 +471,16 @@ impl ChEnrichmentPass {
     /// Tier 2 — the peg-pivot deep-history backbone, over the fixed `watermark`
     /// snapshot. Each per-batch pivot computes the volume-weighted XLM/USDC
     /// reference **inline** ([`pivot_sql`]) rather than from a pre-materialized
-    /// table — the ref aggregation is a single-pair sort-key-prefix scan, so it's
-    /// cheap to recompute per batch, and it needs no `CREATE TABLE` grant on the
-    /// shared tenant (task 0083). Returns the updated `(remaining, batches)`.
+    /// table, so it needs no `CREATE TABLE` grant on the shared tenant (task 0083).
+    ///
+    /// TRADE-OFF (reverses review #10's materialize-once): the ref is now
+    /// re-aggregated per batch, so total ref work is O(slice × batches) instead of
+    /// O(slice). The slice is a single-pair sort-key prefix, so it's cheap **while
+    /// XLM/USDC history is small** — but it grows with backfill depth × the batch
+    /// count (up to `max_batches`, unbounded in `one_shot`) and could risk the
+    /// 300s Lambda timeout post-backfill. Restore materialize-once (in-memory ref
+    /// or a session-scoped `CREATE TEMPORARY TABLE`) before the 0053 backfill runs
+    /// — tracked in **0085**. Returns the updated `(remaining, batches)`.
     async fn run_peg_pivot_tier(
         &self,
         refs: &ReferenceIds,
