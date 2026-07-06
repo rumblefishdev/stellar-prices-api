@@ -228,8 +228,11 @@ make deploy-production-observability  # dashboards/alarms incl. lag_seconds
 - [ ] Each periodic worker writes its table on a live invoke; `current_prices`
       MV populates — DLQ backlog confirmed **0**; per-worker table-write
       verification deferred to post-deploy check **0082**.
-- [x] `lag_seconds` metric + >60s alarm live (Step 7; Observability stack
-      deployed, processor emitting lag while tracking tip).
+- [~] `lag_seconds` metric + >60s alarm live (Step 7). **Correction (0082
+      verification):** the processor emits the metric and the Observability stack
+      deployed, but **no `lag_seconds`/error alarm is actually created** for the
+      ledger-processor (only a comment in `observability-stack.ts`). The alarm
+      gap is folded into **0056** (finding B). Original `[x]` was over-marked.
 - [ ] 0047 throughput verification scheduled/run with BE post-deploy (Step 8) —
       deferred to task **0047**.
 

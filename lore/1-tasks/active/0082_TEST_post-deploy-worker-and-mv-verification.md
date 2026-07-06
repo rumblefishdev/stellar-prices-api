@@ -69,13 +69,39 @@ system.parts` (cleanup) and `CREATE TABLE ON prices.*` (enrichment's peg-pivot
 ref table). Core ingestion unaffected. Fix tracked in **0083** (BE RBAC grant +
 enrichment temp-table redesign).
 
+## Findings (2026-07-06, table + alarm round)
+
+**Tables (`system.tables`):** ✅ `asset_supply` **1164** (so `supply` *did*
+complete server-side despite the CLI timeout), ✅ `current_prices` **1627** (MV
+populating via `mv_current_prices`), ✅ rollup chain filling (`_15m` 18k / `_1h`
+10k / `_4h` 6k from `_1m` 46.9k; `_1d/_1w/_1M` still 0 — longer refresh cadence),
+✅ `oracle_prices` 157, `assets` 1685, `pool_registry` 521, `unresolved_pools` 0.
+`asset_metadata` 0 (enrichment down, 0083).
+
+**Sources:** `aquarius` 451, `phoenix` 15, `sdex` 46.5k — all fresh. **`soroswap`
+still 0** after 30+ min with `unresolved_pools = 0` — either low activity or a
+Soroswap-specific resolution gap; **watch**, investigate if it persists.
+
+**Alarms** — two expected, two are real observability gaps → folded into **0056**:
+- `cleanup-errors`, `enrichment-errors` = ALARM — **expected** (0083 RBAC).
+- `sdex-push-freshness` = ALARM while SDEX is fresh → **false positive** (watches
+  the backfill push signal, not live ingestion). → 0056 finding A.
+- No ledger-processor `lag_seconds`/error alarm exists at all. → 0056 finding B.
+- `supply-errors` = ALARM despite writing 1164 rows → likely the 3× overlapping
+  manual invokes hitting the Lambda timeout; expected to self-clear on the next
+  clean scheduled run (confirm via logs).
+
 ## Acceptance Criteria
 
-- [~] Each periodic worker writes its table on a live invoke — `oracle` +
-      `asset-discovery` ✅; `supply` pending freshness check; `enrichment` +
-      `cleanup` **blocked on 0083** (RBAC).
-- [ ] `current_prices` MV populated from live candles.
-- [ ] `lag_seconds` + all deploy alarms `OK` under steady state (no false-fire).
-- [ ] `soroswap`-source rows confirmed present in `price_ohlcv_1m`.
-- [ ] `supply` confirmed writing `asset_supply` (via table freshness, not the
-      timing-out sync invoke).
+- [~] Each periodic worker writes its table on a live invoke — `oracle`,
+      `asset-discovery`, `supply` ✅; `enrichment` + `cleanup` **blocked on 0083**
+      (RBAC).
+- [x] `current_prices` MV populated from live candles (1627 rows via
+      `mv_current_prices`; rollup chain `_15m/_1h/_4h` also filling).
+- [~] Deploy alarms sane under steady state — `cleanup`/`enrichment` ALARM
+      expected (0083); `sdex-push-freshness` false-positive + missing
+      ledger-processor lag alarm **folded into 0056** (findings A/B).
+- [ ] `soroswap`-source rows confirmed present in `price_ohlcv_1m` — **watch**
+      (0 after 30 min, `unresolved_pools`=0; investigate if it persists).
+- [x] `supply` confirmed writing `asset_supply` (1164 rows; the sync-invoke
+      timeout is just the slow Horizon walk, not a failure).

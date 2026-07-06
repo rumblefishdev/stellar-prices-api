@@ -223,6 +223,33 @@ threshold trips. Restore the canonical cert post-test.
 - [ ] **(operational)** `notes/G-alarm-fire-test.md` records the fire-test
       timestamps + SNS message IDs for both alarms. *Produced during the deploy
       fire-test above.*
+- [ ] **(post-deploy, from 0082)** `sdex-push-freshness` must not false-fire in a
+      live-only deployment (see Post-deploy findings A).
+- [ ] **(post-deploy, from 0082)** Ledger-processor `lag_seconds` + error alarm
+      actually created and deployed (see Post-deploy findings B).
+
+## Post-deploy findings (2026-07-06 — from the 0070 go-live + 0082 verification)
+
+**A. `sdex-push-freshness` false-fires under live-only operation.** `AGE_QUERY`
+ages `backfill_progress.last_push_at` (`now() - coalesce(last_push_at,
+started_at)`, default threshold 7 days). Post-go-live prod has 2 stale
+`backfill_progress` rows and **no backfill running** (only `pool_registry`
+seeded; `backfill_sdex_ledgers = 0`), so the alarm sits in **ALARM** even though
+live SDEX ingestion is healthy (candles fresh to the current minute). The alarm
+monitors the **backfill push cadence**, which is a different plane from the live
+processor ([[backfill-live-no-code-coordination]]). Options: suppress/repoint
+until the backfill runs, gate it on a backfill being registered-and-active, or
+add a distinct live-ingestion freshness signal (e.g. off the ledger-processor's
+last write / cursor advance). Decide + implement.
+
+**B. The ledger-processor has no `lag_seconds`/error alarm deployed.**
+`prices.ledger_processor.lag_seconds` appears only as a **comment** in
+`observability-stack.ts:33` — no alarm construct is created, and the deployed
+alarm set (all periodic-worker alarms + the two probes) contains none for the
+**core ingestion Lambda**. So the most critical component is unmonitored. Add a
+`lag_seconds > 60s` alarm + a ledger-processor error alarm, both wired to
+`prices-{env}-ops-alarms`. (This is the alarm the 0070 runbook AC#7 assumed
+existed — that AC has been corrected to point here.)
 
 ## Blocked on
 
