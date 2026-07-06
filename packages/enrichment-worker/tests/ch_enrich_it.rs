@@ -155,8 +155,9 @@ async fn enrich_fills_close_usd_across_oracle_peg_and_pivot_tiers() {
         "idempotent pivot"
     );
 
-    // The run-scoped pivot reference table is dropped on completion (review #10):
-    // no orphan `*_xlmusd_ref_*` table should remain in the scratch database.
+    // Task 0083: the XLM/USDC reference is now computed inline as an ASOF-join
+    // subquery — no `CREATE TABLE` at all — so no `*_xlmusd_ref_*` table is ever
+    // created (previously a run-scoped table dropped on completion, review #10).
     let leftover: u64 = client
         .query(&format!(
             "SELECT count() FROM system.tables WHERE database = '{db}' AND name LIKE '%xlmusd_ref%'"
@@ -166,7 +167,7 @@ async fn enrich_fills_close_usd_across_oracle_peg_and_pivot_tiers() {
         .unwrap();
     assert_eq!(
         leftover, 0,
-        "pivot reference table must be dropped after the run"
+        "no pivot reference table should ever be created (inline subquery)"
     );
 
     client

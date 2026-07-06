@@ -55,8 +55,6 @@
 //! what `version` they project onto their `ReplacingMergeTree` targets
 //! is a 0051 concern. See the dependency note in the task 0026 G-note.
 
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use clickhouse::Client;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
@@ -440,12 +438,12 @@ impl ChEnrichmentPass {
     /// the pivot statement (XLM quotes → ×XLM/USDC close). Both target only rows
     /// the oracle tier left at `close_usd = 0`, so the oracle value always wins
     /// where it exists. The peg runs whenever a stablecoin is in the registry; the
-    /// pivot runs only when `pivot_ref` is `Some` (the caller pre-materialized the
-    /// XLM/USDC reference table — see [`Self::run_peg_pivot_tier`]).
+    /// pivot runs only when both the XLM asset and the XLM/USDC market are known
+    /// ([`ReferenceIds::can_pivot`]) — it computes the XLM/USDC reference inline
+    /// (no pre-materialized table; see [`pivot_sql`]).
     async fn enrich_peg_pivot_step(
         &self,
         refs: &ReferenceIds,
-        pivot_ref: Option<&str>,
         watermark: u32,
     ) -> Result<(), ChEnrichError> {
         if let Some(sql) = peg_sql(&self.cfg.database, &self.cfg.table, &refs.stable_ids()) {
@@ -456,10 +454,11 @@ impl ChEnrichmentPass {
                 .execute()
                 .await?;
         }
-        if let Some(ref_table) = pivot_ref {
-            let sql = pivot_sql(&self.cfg.database, &self.cfg.table, ref_table);
+        if let (Some(xlm_id), Some(usdc_id)) = (refs.xlm, refs.usdc) {
+            let sql = pivot_sql(&self.cfg.database, &self.cfg.table, xlm_id, usdc_id);
             self.client
                 .query(&sql)
+                .bind(watermark)
                 .bind(self.cfg.pivot_window_s)
                 .bind(watermark)
                 .bind(self.cfg.batch_size)
@@ -470,11 +469,18 @@ impl ChEnrichmentPass {
     }
 
     /// Tier 2 — the peg-pivot deep-history backbone, over the fixed `watermark`
-    /// snapshot. When a pivot is possible, materializes the volume-weighted
-    /// XLM/USDC reference **once** into a run-scoped table, so each per-batch pivot
-    /// ASOF-joins that small table instead of re-aggregating the entire XLM/USDC
-    /// history under `FINAL` on every batch (review #10). The reference table is
-    /// dropped on every exit path. Returns the updated `(remaining, batches)`.
+    /// snapshot. Each per-batch pivot computes the volume-weighted XLM/USDC
+    /// reference **inline** ([`pivot_sql`]) rather than from a pre-materialized
+    /// table, so it needs no `CREATE TABLE` grant on the shared tenant (task 0083).
+    ///
+    /// TRADE-OFF (reverses review #10's materialize-once): the ref is now
+    /// re-aggregated per batch, so total ref work is O(slice × batches) instead of
+    /// O(slice). The slice is a single-pair sort-key prefix, so it's cheap **while
+    /// XLM/USDC history is small** — but it grows with backfill depth × the batch
+    /// count (up to `max_batches`, unbounded in `one_shot`) and could risk the
+    /// 300s Lambda timeout post-backfill. Restore materialize-once (in-memory ref
+    /// or a session-scoped `CREATE TEMPORARY TABLE`) before the 0053 backfill runs
+    /// — tracked in **0085**. Returns the updated `(remaining, batches)`.
     async fn run_peg_pivot_tier(
         &self,
         refs: &ReferenceIds,
@@ -482,93 +488,27 @@ impl ChEnrichmentPass {
         mut remaining: u64,
         mut batches: u32,
     ) -> Result<(u64, u32), ChEnrichError> {
-        let pivot_ref = if let (Some(xlm_id), Some(usdc_id)) = (refs.xlm, refs.usdc) {
-            let name = format!(
-                "{}_xlmusd_ref_{}_{}",
-                self.cfg.table,
-                std::process::id(),
-                unique_suffix()
-            );
-            self.materialize_pivot_ref(&name, xlm_id, usdc_id, watermark)
-                .await?;
-            Some(name)
-        } else {
-            None
-        };
-
-        // Capture a mid-loop error so the reference table is still dropped before
-        // it propagates.
-        let mut pending: Option<ChEnrichError> = None;
         for _ in 0..self.effective_max_batches() {
             if remaining == 0 {
                 break;
             }
-            if let Err(e) = self
-                .enrich_peg_pivot_step(refs, pivot_ref.as_deref(), watermark)
-                .await
-            {
-                pending = Some(e);
+            self.enrich_peg_pivot_step(refs, watermark).await?;
+            let after = self.count_candidates(watermark).await?;
+            batches += 1;
+            if after >= remaining {
+                // The leftovers have no USD reference at all — their quote is
+                // neither USDC/USDT/XLM (nor oracle-priced). They stay
+                // NULL/`no_reference`, never a wrong value.
+                warn!(
+                    remaining = after,
+                    "peg-pivot tier made no progress — remaining candles have no USD reference (exotic quotes)"
+                );
+                remaining = after;
                 break;
             }
-            match self.count_candidates(watermark).await {
-                Ok(after) => {
-                    batches += 1;
-                    if after >= remaining {
-                        // The leftovers have no USD reference at all — their quote
-                        // is neither USDC/USDT/XLM (nor oracle-priced). They stay
-                        // NULL/`no_reference`, never a wrong value.
-                        warn!(
-                            remaining = after,
-                            "peg-pivot tier made no progress — remaining candles have no USD reference (exotic quotes)"
-                        );
-                        remaining = after;
-                        break;
-                    }
-                    remaining = after;
-                }
-                Err(e) => {
-                    pending = Some(e);
-                    break;
-                }
-            }
+            remaining = after;
         }
-
-        if let Some(name) = &pivot_ref
-            && let Err(e) = self.drop_table(name).await
-        {
-            // A uniquely-named leftover is harmless; warn rather than fail.
-            warn!(table = %name, error = %e, "failed to drop pivot reference table");
-        }
-
-        match pending {
-            Some(e) => Err(e),
-            None => Ok((remaining, batches)),
-        }
-    }
-
-    /// Materialize the volume-weighted XLM/USDC reference (XLM's USD price under
-    /// the USDC≡$1 peg) at or before `watermark`, once, into `name`. `ref_asset_id`
-    /// is the constant XLM id so the per-batch pivot keeps its ASOF equi-predicate
-    /// (`r.ref_asset_id = p.quote_asset_id`). Drops any stale same-named table from
-    /// a crashed prior run first.
-    async fn materialize_pivot_ref(
-        &self,
-        name: &str,
-        xlm_id: u32,
-        usdc_id: u32,
-        watermark: u32,
-    ) -> Result<(), ChEnrichError> {
-        self.drop_table(name).await?;
-        let sql = pivot_ref_sql(&self.cfg.database, name, &self.cfg.table, xlm_id, usdc_id);
-        self.client.query(&sql).bind(watermark).execute().await?;
-        Ok(())
-    }
-
-    /// Drop a (run-scoped) table if it exists.
-    async fn drop_table(&self, name: &str) -> Result<(), ChEnrichError> {
-        let sql = format!("DROP TABLE IF EXISTS {db}.{name}", db = self.cfg.database);
-        self.client.query(&sql).execute().await?;
-        Ok(())
+        Ok((remaining, batches))
     }
 
     /// Run the bounded enrichment pass in two ordered tiers (task 0061 §12.1):
@@ -764,46 +704,19 @@ fn peg_sql(db: &str, tbl: &str, stable_ids: &[u32]) -> Option<String> {
     ))
 }
 
-/// A process-and-time-unique suffix for the run-scoped pivot reference table, so
-/// concurrent invocations never collide on the table name.
-fn unique_suffix() -> u128 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0)
-}
-
-/// `CREATE TABLE … AS SELECT` that materializes the volume-weighted XLM/USDC
-/// reference series — XLM's USD price per `timestamp` under the USDC≡$1 peg — at
-/// or before the snapshot watermark (the single bound parameter). Built once per
-/// run so the per-batch [`pivot_sql`] joins this small table instead of
-/// re-aggregating the whole XLM/USDC history under `FINAL` on every batch
-/// (review #10). `ref_asset_id` is the constant XLM id so the pivot ASOF join
-/// keeps its required equi-predicate; Float64 weighting avoids `Decimal` product
-/// overflow on the `sum(close × volume_base)` numerator.
-fn pivot_ref_sql(db: &str, name: &str, tbl: &str, xlm_id: u32, usdc_id: u32) -> String {
-    format!(
-        "CREATE TABLE {db}.{name} ENGINE = MergeTree ORDER BY (ref_asset_id, timestamp) AS \
-         SELECT \
-             CAST({xlm_id} AS UInt32) AS ref_asset_id, \
-             timestamp, \
-             sum(toFloat64(close) * toFloat64(volume_base)) / nullIf(sum(toFloat64(volume_base)), 0) AS usd \
-         FROM {db}.{tbl} FINAL \
-         WHERE asset_id = {xlm_id} AND quote_asset_id = {usdc_id} \
-           AND timestamp <= toDateTime(?) \
-         GROUP BY timestamp"
-    )
-}
-
 /// Pivot statement: XLM-quoted candles get `close_usd = close × xlm_usd`, where
-/// `xlm_usd` is forward-filled by an `ASOF LEFT JOIN` against the pre-materialized
-/// XLM/USDC reference table `ref_table` (see [`pivot_ref_sql`]) — keyed on
-/// `ref_asset_id = quote_asset_id` so the ASOF join has its required equality
-/// predicate and matches only XLM-quoted candles. Bound parameters, in order: the
-/// pivot staleness window (seconds), the snapshot watermark
-/// (`p.timestamp <= toDateTime(?)`, shared with the rest of the pass — see
+/// `xlm_usd` is forward-filled by an `ASOF LEFT JOIN` against the volume-weighted
+/// XLM/USDC reference series — computed **inline as a subquery** (no DDL, so the
+/// writer needs no `CREATE TABLE` grant on the shared tenant; task 0083). The
+/// subquery's `WHERE asset_id = xlm AND quote_asset_id = usdc` is a sort-key prefix
+/// on `price_ohlcv_1m`, so each batch re-aggregates only that single pair's slice,
+/// not the whole table. `ref_asset_id` is the constant XLM id so the ASOF join
+/// keeps its required equality predicate (`r.ref_asset_id = p.quote_asset_id`) and
+/// matches only XLM-quoted candles. Bound parameters, in SQL order: the snapshot
+/// watermark (ref subquery), the pivot staleness window (seconds), the snapshot
+/// watermark again (outer, shared with the rest of the pass — see
 /// [`ChEnrichmentPass::watermark`]), and the `LIMIT`.
-fn pivot_sql(db: &str, tbl: &str, ref_table: &str) -> String {
+fn pivot_sql(db: &str, tbl: &str, xlm_id: u32, usdc_id: u32) -> String {
     format!(
         "INSERT INTO {db}.{tbl} ({INSERT_COLUMNS}) \
          SELECT \
@@ -815,7 +728,17 @@ fn pivot_sql(db: &str, tbl: &str, ref_table: &str) -> String {
              p.vwap, p.trade_count, \
              p.version + 1 AS version \
          FROM {db}.{tbl} AS p FINAL \
-         ASOF LEFT JOIN {db}.{ref_table} AS r \
+         ASOF LEFT JOIN ( \
+             SELECT \
+                 CAST({xlm_id} AS UInt32) AS ref_asset_id, \
+                 timestamp, \
+                 sum(toFloat64(close) * toFloat64(volume_base)) / nullIf(sum(toFloat64(volume_base)), 0) AS usd \
+             FROM {db}.{tbl} FINAL \
+             WHERE asset_id = {xlm_id} AND quote_asset_id = {usdc_id} \
+               AND timestamp <= toDateTime(?) \
+             GROUP BY timestamp \
+             ORDER BY timestamp \
+         ) AS r \
              ON r.ref_asset_id = p.quote_asset_id AND r.timestamp <= p.timestamp \
          WHERE p.close_usd = 0 \
            AND p.volume_quote > 0 \
@@ -856,43 +779,28 @@ mod tests {
     }
 
     #[test]
-    fn pivot_ref_sql_materializes_the_xlm_usdc_series() {
-        let sql = pivot_ref_sql(
-            "prices",
-            "price_ohlcv_1m_xlmusd_ref_42",
-            "price_ohlcv_1m",
-            5,
-            3,
-        );
-        // Creates the run-scoped reference table.
-        assert!(
-            sql.contains("CREATE TABLE prices.price_ohlcv_1m_xlmusd_ref_42 ENGINE = MergeTree")
-        );
-        // Aggregates the XLM/USDC market (asset 5 quoted in asset 3) once, bounded
-        // by the watermark (its single bound parameter).
+    fn pivot_sql_computes_the_xlm_usdc_reference_inline() {
+        let sql = pivot_sql("prices", "price_ohlcv_1m", 5, 3);
+        // Reference is an inline ASOF-join subquery — NOT a pre-materialized table
+        // (task 0083: no CREATE TABLE grant needed on the shared tenant).
+        assert!(sql.contains("ASOF LEFT JOIN ("));
+        assert!(!sql.contains("CREATE TABLE"));
+        // Subquery aggregates the XLM/USDC market (asset 5 quoted in asset 3).
         assert!(sql.contains("asset_id = 5 AND quote_asset_id = 3"));
         assert!(sql.contains("CAST(5 AS UInt32) AS ref_asset_id"));
-        assert!(sql.contains("timestamp <= toDateTime(?)"));
         assert!(sql.contains("GROUP BY timestamp"));
-    }
-
-    #[test]
-    fn pivot_sql_pivots_xlm_through_the_reference_table() {
-        let sql = pivot_sql("prices", "price_ohlcv_1m", "price_ohlcv_1m_xlmusd_ref_42");
-        // Joins the pre-materialized reference table — NOT a per-batch re-aggregation.
-        assert!(sql.contains("ASOF LEFT JOIN prices.price_ohlcv_1m_xlmusd_ref_42 AS r"));
-        assert!(
-            !sql.contains("GROUP BY"),
-            "reference is materialized, not re-aggregated here"
-        );
         // ASOF equality predicate + forward-fill inequality.
         assert!(sql.contains("r.ref_asset_id = p.quote_asset_id AND r.timestamp <= p.timestamp"));
         assert!(sql.contains("CAST(r.usd * toFloat64(p.close) AS Decimal(38, 14)) AS close_usd"));
-        // Staleness-window + watermark + LIMIT placeholders, in bind order.
+        // Bind order: subquery watermark, staleness window, outer watermark, LIMIT.
+        let sub_wm = sql.find("toDateTime(?)").unwrap();
         let win = sql.find("(p.timestamp - r.timestamp) <= ?").unwrap();
-        let wm = sql.find("p.timestamp <= toDateTime(?)").unwrap();
+        let outer_wm = sql.find("p.timestamp <= toDateTime(?)").unwrap();
         let lim = sql.find("LIMIT ?").unwrap();
-        assert!(win < wm && wm < lim, "bind order: window, watermark, limit");
+        assert!(
+            sub_wm < win && win < outer_wm && outer_wm < lim,
+            "bind order: watermark, window, watermark, limit"
+        );
     }
 
     #[test]
