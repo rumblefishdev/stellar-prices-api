@@ -2,9 +2,9 @@
 id: "0078"
 title: "Live ledger-processor must preload prices.pool_registry (AMM pools created before go-live are unresolved otherwise)"
 type: BUG
-status: active
+status: completed
 related_adr: ["0007"]
-related_tasks: ["0070", "0053", "0069", "0054", "0077"]
+related_tasks: ["0070", "0053", "0069", "0054", "0077", "0081"]
 tags: [layer-indexing, priority-high, effort-small, rust, lambda, clickhouse, amm, soroban, pool-registry, milestone-M1]
 milestone: 1
 links:
@@ -13,6 +13,21 @@ links:
   - "../../../packages/prices-ingest-core/src/registry_io.rs"
   - "../../../packages/sdex-backfill/src/sink.rs"
 history:
+  - date: 2026-07-06
+    status: done
+    who: okarcz
+    note: >
+      Closed the two deferred acceptance criteria. Proved the seeded-vs-unseeded
+      resolvability claim by extracting `process_ledger`'s classify block into a
+      standalone `classify_amm_groups` (behaviour-preserving) and unit-testing it
+      with the shared Phoenix xyk fixture — seeded venue reg → `amm_ticks`, empty
+      → `unresolved` (Emerged #2). Full XDR E2E was fixture-blocked (bundled
+      Galexie ledgers carry zero AMM activity; probed and confirmed) → spawned
+      0081 for a real-fixture full-pipeline E2E. Decided persist-on-discovery:
+      live path stays a **pure consumer** — 0053 backfill + 0069 discovery worker
+      already own `pool_registry` persistence (Emerged #3). 31 prices-ingest-core
+      tests green (+1 new); changed code clippy-clean (pre-existing crate lints
+      untouched). Unblocks 0070 AMM live coverage.
   - date: 2026-07-03
     status: active
     who: oski
@@ -88,9 +103,13 @@ does), so a seeded registry makes AMM live prices resolvable.
 - [x] `cli.rs` path updated consistently (real branch preloads; dry-run stays empty).
 - [x] Integration coverage for the preload: `pool_registry_preload_it` seeds the
       registry and asserts the live sink rehydrates all venues (green vs local CH).
-- [ ] With a seeded registry, an AMM **swap** for a pre-existing pool produces a
-      priced row end-to-end (reconcile-level test with AMM ledger fixtures) — deferred.
-- [ ] Persist-on-discovery behaviour for the live path decided + documented — deferred.
+- [x] With a seeded registry, an AMM **swap** for a pre-existing pool prices
+      instead of falling to `unresolved` — proven at the `classify_amm_groups`
+      seam (`soroban.rs`): seeded venue reg → `amm_ticks`, empty → `unresolved`,
+      driven by the shared Phoenix xyk swap fixture (see Emerged #2 for why this
+      seam rather than a full XDR `LedgerCloseMeta` fixture).
+- [x] Persist-on-discovery behaviour for the live path decided + documented —
+      **pure consumer** (Emerged #3).
 
 ## Implementation Notes
 
@@ -117,14 +136,45 @@ does), so a seeded registry makes AMM live prices resolvable.
    we're fixing. Put the query in `OhlcvWriter` (where `load_assets` already lives)
    and had both sinks delegate — one source of truth, backfill keeps its retry wrapper.
 
-## Remaining Work
+2. **Proved resolvability at a `classify_amm_groups` seam, not a full XDR E2E.**
+   The remaining "swap → priced row" proof was blocked on fixtures: the bundled
+   Galexie ledgers (62460540–42) carry **zero** AMM activity, and no synthetic
+   `LedgerCloseMeta` builder exists (the decode/extract path is entirely XDR-native
+   via `xdr_parser::extract_events`). Rather than hand-roll XDR or fetch a new
+   real-AMM ledger (both disproportionate to an `effort-small` bug), extracted the
+   registry-classification block of `process_ledger` into a standalone
+   `classify_amm_groups(groups, reg, assets, …)` and unit-tested the exact 0078
+   claim: the same Phoenix swap group prices to an `amm_tick` when the pool is
+   seeded in `reg.venue` and only falls to `unresolved` when the registry is empty.
+   Reuses the shared `phoenix_extractor::test_fixtures` swap fixture; hermetic, no
+   ClickHouse. Behaviour-preserving refactor (the block moved verbatim). If a real
+   full-pipeline AMM E2E is ever wanted, it's tracked as spawned follow-up 0081.
 
-- Reconcile-level E2E: feed AMM swap fixtures for a seeded pool, assert a
-  `price_ohlcv_1m` row (not `unresolved_pools`).
-- **Persist-on-discovery decision:** should the live processor `write_pool_registry`
-  for pools it discovers from live factory events (so they survive cold starts),
-  or stay a pure consumer and rely on 0053/0054 to persist? Lean: pure consumer
-  for now (narrow gap = only pools created between backfill runs), but decide + note.
+3. **Live path is a pure consumer of `pool_registry` (no persist-on-discovery).**
+   The live processor loads `pool_registry` at cold start and grows its registry
+   from live factory events *in-memory* within a warm container, but does **not**
+   `write_pool_registry`. Persistence is already owned elsewhere: the 0053 backfill
+   and the 0069 asset-discovery worker (now maintaining `pool_registry`, PR #80)
+   both persist discovered pools. Making the live Lambda also write would duplicate
+   that responsibility and risk write contention on the shared Hetzner CH from the
+   hot path. Residual gap — a pool created live *and* first traded before the next
+   discovery-worker run *and* the container cold-starts in between — is narrow,
+   self-heals on the next discovery/backfill pass, and its dropped swaps are already
+   visible in `unresolved_pools` for the post-run re-check. Accepted.
+
+## Issues Encountered
+
+- **No AMM ledger fixture available.** Probed all three bundled Galexie fixtures
+  through `process_ledger`: `amm_ticks=0, unresolved=0, venues=0` for every ledger
+  — they predate/miss AMM swaps, so a full-pipeline reconcile E2E couldn't be
+  driven from committed data. Resolved by testing the classify seam directly
+  (Emerged #2); a full-pipeline E2E with a real AMM fixture is spawned as 0081.
+
+## Future Work
+
+- **0081** — full-pipeline AMM reconcile E2E with a real Galexie fixture (the
+  end-to-end version of this task's classify-seam unit test, once an AMM-bearing
+  ledger fixture exists).
 
 ## Notes
 
