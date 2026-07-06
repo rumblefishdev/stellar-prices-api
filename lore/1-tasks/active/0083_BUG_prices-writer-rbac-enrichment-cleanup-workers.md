@@ -15,6 +15,18 @@ history:
     status: active
     who: okarcz
     note: >
+      BE applied cleanup grants (SELECT ON system.parts + ALTER DELETE ON prices.*)
+      and restarted ch-prod-01 (14:58:12 UTC) in the same window. Read-only audit
+      confirms grants present in SHOW GRANTS FOR prices_writer, and the restart was
+      non-destructive: all 30 prices objects intact, no data loss, all 7 refreshable
+      MVs Scheduled w/ zero exceptions, no detached parts, no orphaned *_xlmusd_ref_*
+      tables, ingestion continuous through the restart (61.5k rows since, ~29s
+      freshness, zero gaps in last 4h). Flipped the BE-RBAC acceptance criterion to
+      done. Only cleanup live-invoke remains.
+  - date: 2026-07-06
+    status: active
+    who: okarcz
+    note: >
       Activated to do the BE-independent half: rework enrichment's peg-pivot tier
       from a `CREATE TABLE` ref-table to an inline ASOF-JOIN subquery (needs zero
       grants), unblocking enrichment without waiting on BE. cleanup stays parked
@@ -105,6 +117,39 @@ batch (`O(slice × batches)`), which could risk the 300s timeout once the 0053
 backfill grows the XLM/USDC slice → **restore materialize-once before then,
 spawned as 0085**. Tightened the code comment to state this honestly (PR #86).
 
+## Verification — BE RBAC grant + CH restart audit (2026-07-06)
+
+BE applied the cleanup grants **and restarted `ch-prod-01`** in the same window
+(restart at `14:58:12 UTC`). Ran a read-only audit over `prices.*` to confirm the
+grants landed and the restart was non-destructive. All checks via
+`docker exec … clickhouse-client` (no writes, no restarts).
+
+**Grants confirmed present** (`SHOW GRANTS FOR prices_writer`):
+```sql
+GRANT SELECT, INSERT, ALTER DELETE, OPTIMIZE ON prices.* TO prices_writer
+GRANT SELECT ON system.parts                             TO prices_writer
+```
+Exactly what cleanup needs: `SELECT ON system.parts` (enumerate partitions) +
+`ALTER DELETE ON prices.*` (BE confirmed this is the `DROP PARTITION` token in
+26.3.10.60, matching the hand-off note). cleanup should no longer ACCESS_DENIED.
+
+**Restart broke/deleted nothing:**
+- All 30 `prices` objects present; every data table is `ReplacingMergeTree`
+  (disk-backed) — nothing in-memory to lose across a restart.
+- Data intact: `price_ohlcv_1m` = 316k rows, all rollups (15m/1h/4h/1d/1w) populated;
+  partitions healthy (`202607` = 316k rows / 7 parts).
+- All 7 refreshable MVs `Scheduled`, **zero exceptions**; per-minute MVs
+  (`mv_current_prices`, `mv_ohlcv_1m_to_15m`) refreshing on schedule.
+- No detached/broken parts; **no orphaned `*_xlmusd_ref_*` tables** (0083 invariant).
+- **Live ingestion continuous through the restart**: 61.5k rows written since
+  `14:58:12`, freshness ~29s (newest candle tracks real time). **Zero gaps in the
+  last 4h** — a per-minute scan across `14:55–15:05` shows no dip to zero at the
+  `14:58` restart (the one minute the boundary-scan flagged, `13:09`, was a
+  query off-by-a-second artifact — it has 1006 rows).
+
+Only remaining item: a **live cleanup-worker invoke** to confirm it enumerates +
+drops green now that the grants are in place.
+
 ## Acceptance Criteria
 
 - [ ] cleanup runs green: enumerates + drops old partitions (verify on a live invoke).
@@ -113,7 +158,10 @@ spawned as 0085**. Tightened the code comment to state this honestly (PR #86).
       invoke after redeploy** (should no longer ACCESS_DENIED).
 - [x] No orphaned `prices.price_ohlcv_1m_xlmusd_ref_*` tables — the table is now
       never created (inline subquery); IT asserts count 0.
-- [ ] BE RBAC change (cleanup grants) applied + documented alongside their 0314.
+- [x] BE RBAC change (cleanup grants) applied + documented alongside their 0314 —
+      verified present in `SHOW GRANTS FOR prices_writer` (2026-07-06); post-grant
+      CH restart audited as non-destructive (no data loss, no gaps, ingestion
+      continuous).
 
 ## BE hand-off message (ready to send)
 
