@@ -4,12 +4,23 @@ title: "Post-deploy verification — periodic workers write their tables + curre
 type: TEST
 status: active
 related_adr: ["0007"]
-related_tasks: ["0070", "0056"]
+related_tasks: ["0070", "0056", "0083", "0084", "0086"]
 tags: [layer-ops, milestone-M1, priority-medium, effort-small, aws, clickhouse, observability, post-deploy]
 milestone: 1
 links:
   - "../archive/0070_FEATURE_deploy-prices-ingestion-to-production-m1.md"
 history:
+  - date: 2026-07-06
+    status: active
+    who: okarcz
+    note: >
+      0083 resolved: enrichment + cleanup workers now write green in prod
+      (RBAC grants applied; enrichment reworked to no-DDL inline subquery +
+      redeployed; both live-invoked, no ACCESS_DENIED). CH restart audited
+      non-destructive. Updated the worker-write + alarm criteria accordingly and
+      flagged the EnrichmentRowsRemainingRecent stall-alarm floor (~48k
+      exotic-quote candles) for 0056 tuning. Remaining open here: supply timeout
+      (0084) and the soroswap-source watch. Also cross-linked 0086 (oracle ts bug).
   - date: 2026-07-06
     status: active
     who: okarcz
@@ -92,16 +103,41 @@ Soroswap-specific resolution gap; **watch**, investigate if it persists.
   async retries, writing `asset_supply` only partially (1164/1685). Real defect →
   spawned **0084** (batch/checkpoint the asset walk).
 
+## Findings (2026-07-06, 0083 resolution round)
+
+**0083 DONE — enrichment + cleanup now write green in prod** (see [[0083]]):
+- BE extended `prices_writer` (`SELECT ON system.parts` + `ALTER DELETE ON
+  prices.*`); **cleanup** live-invoked green (dropped expired partitions
+  `price_ohlcv_1m=202311` + `oracle_prices=197001`, no ACCESS_DENIED).
+- **enrichment** reworked to a no-DDL inline ASOF subquery, redeployed +
+  live-invoked green — `close_usd` populating (81k+ rows), **zero orphan
+  `*_xlmusd_ref_*` tables**, no ACCESS_DENIED. `asset_metadata` is a separate
+  column, not enrichment output.
+- BE also restarted `ch-prod-01` in that window — audited **non-destructive**
+  (no data loss, no gaps, ingestion continuous, all MVs scheduled).
+
+**Alarm implications:** `cleanup-errors` + `enrichment-errors` should now clear
+to `OK` (the RBAC crash that raised them is fixed) — **re-check both are OK**.
+New watch: the `Prices/Enrichment` **`EnrichmentRowsRemainingRecent`** stall alarm
+has a permanent floor of ~48k unenrichable **exotic-quote** recent candles (no
+USD/XLM/USDC reference path); its threshold must sit above that floor or it will
+false-fire → track the threshold with the 0056 alarm-tuning items.
+
+Two workers still open: `supply` (times out → **0084**) and the `soroswap`-source
+watch (below). Oracle data-quality bug spawned: **0086** (Reflector ×1000
+timestamps → junk `1970-01` `oracle_prices` rows).
+
 ## Acceptance Criteria
 
 - [~] Each periodic worker writes its table on a live invoke — `oracle`,
-      `asset-discovery` ✅; `supply` writes but **times out mid-walk → 0084**;
-      `enrichment` + `cleanup` **blocked on 0083** (RBAC).
+      `asset-discovery`, **`enrichment` ✅, `cleanup` ✅ (0083 resolved
+      2026-07-06)**; `supply` writes but **times out mid-walk → 0084**.
 - [x] `current_prices` MV populated from live candles (1627 rows via
       `mv_current_prices`; rollup chain `_15m/_1h/_4h` also filling).
-- [~] Deploy alarms sane under steady state — `cleanup`/`enrichment` ALARM
-      expected (0083); `sdex-push-freshness` false-positive + missing
-      ledger-processor lag alarm **folded into 0056** (findings A/B).
+- [~] Deploy alarms sane under steady state — `cleanup`/`enrichment` error alarms
+      should now clear post-0083 (**re-check OK**); `sdex-push-freshness`
+      false-positive + missing ledger-processor lag alarm + `EnrichmentRowsRemaining`
+      floor **folded into 0056** (findings A/B + enrichment-floor).
 - [ ] `soroswap`-source rows confirmed present in `price_ohlcv_1m` — **watch**
       (0 after 30 min, `unresolved_pools`=0; investigate if it persists).
 - [~] `supply` writes `asset_supply` (1164 rows) but **does not complete** — it
