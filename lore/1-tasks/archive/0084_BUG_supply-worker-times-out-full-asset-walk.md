@@ -2,7 +2,7 @@
 id: "0084"
 title: "supply-worker times out at the 300s Lambda limit before completing a full asset walk"
 type: BUG
-status: active
+status: completed
 related_adr: []
 related_tasks: ["0070", "0082", "0039"]
 tags: [layer-ops, priority-medium, effort-medium, aws, lambda, horizon, worker, post-deploy]
@@ -64,6 +64,17 @@ history:
       zero-writes present. Zero Errors datapoints post-deploy. 3/4 AC confirmed;
       only `supply-errors` alarm→OK pending the 1 h window (re-check ~12:00, then
       archive). Registry ≥5000 (max_assets cap) → full coverage ~5–6 hourly runs.
+  - date: 2026-07-07
+    status: completed
+    who: okarcz
+    note: >
+      DONE. All 4 acceptance criteria confirmed in prod. Final one:
+      `supply-errors` alarm cleared ALARM→OK at 11:31:53 UTC (zero Errors since
+      the pre-deploy timeouts rolled off the 1 h window). Fix = staleness
+      self-checkpoint + 240 s wall-clock budget + Ok(None)→write-0 rotation +
+      `configureAsyncInvoke(retryAttempts:0)` + budget clamp + join-nulls-safe
+      ordering (PR #90, incl. 4 code-review fixes). Deployed + live-verified.
+      Archived.
 ---
 
 # supply-worker times out before completing the asset walk
@@ -115,11 +126,10 @@ slow run doesn't triple compute.
       deadline_hit:true`); `asset_supply FINAL` count climbed 3434→4280 across
       runs; `absent` zero-writes present (`zero_rows:5`). Registry is ≥5000
       (max_assets cap hit) so full coverage round-robins over ~5–6 hourly runs.
-- [~] **(operational)** `supply-errors` alarm returns to `OK` — the timeout error
-      source is fixed (zero `Errors` datapoints post-deploy). Alarm is `Sum(Errors)`
-      over a 1 h period, so it stays ALARM until the hour containing the last
-      pre-deploy timeout (~10:35) rolls off; mechanically clears at the ~12:00
-      evaluation. **Re-check ~12:00 2026-07-07 for OK, then archive.**
+- [x] `supply-errors` alarm returns to `OK` — **CONFIRMED 2026-07-07 11:31:53 UTC**
+      (`StateValue: OK`). The 1 h `Sum(Errors)` window rolled off the last
+      pre-deploy timeout (~10:35) with zero errors since, so it cleared ALARM→OK
+      on the first clean evaluation.
 - [x] Async-retry storm bounded — function-error async retries set to 0 via
       `fn.configureAsyncInvoke` (the correct layer; the EventBridge target
       `retryAttempts` only governs delivery — code-review finding #2), and with
