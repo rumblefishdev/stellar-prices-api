@@ -31,24 +31,36 @@ async fn main() -> Result<(), lambda_runtime::Error> {
             .build()?,
     );
     let base_url = prices_clickhouse::env::env_or("HORIZON_URL", supply_worker::DEFAULT_HORIZON);
-    tracing::info!(%base_url, "supply-worker cold start ready");
+    let cfg = supply_worker::SupplyRunConfig::from_env();
+    tracing::info!(
+        %base_url,
+        time_budget_secs = cfg.time_budget.as_secs(),
+        max_assets = cfg.max_assets,
+        "supply-worker cold start ready"
+    );
 
     run(service_fn(move |_event: LambdaEvent<serde_json::Value>| {
         let ch = ch.clone();
         let http = http.clone();
         let base_url = base_url.clone();
         async move {
-            let stats = supply_worker::run_supply(&ch, &http, &base_url).await?;
+            let stats = supply_worker::run_supply(&ch, &http, &base_url, &cfg).await?;
             tracing::info!(
                 considered = stats.considered,
                 written = stats.written,
+                absent = stats.absent,
                 skipped = stats.skipped,
+                deferred = stats.deferred,
+                deadline_hit = stats.deadline_hit,
                 "supply-worker run complete"
             );
             Ok::<serde_json::Value, lambda_runtime::Error>(serde_json::json!({
                 "considered": stats.considered,
                 "written": stats.written,
+                "absent": stats.absent,
                 "skipped": stats.skipped,
+                "deferred": stats.deferred,
+                "deadline_hit": stats.deadline_hit,
             }))
         }
     }))

@@ -30,29 +30,52 @@ async fn load_and_write_supply_roundtrip() {
             .unwrap_or_else(|e| panic!("truncate {t}: {e}"));
     }
 
-    // A credit asset (loads), native XLM (no issuer → excluded), a Soroban
-    // contract (excluded). Only the credit asset should come back.
+    // Two credit assets (load), native XLM (no issuer → excluded), a Soroban
+    // contract (excluded). EURC already has a supply row; USDC never did.
     client
         .query(
             "INSERT INTO prices.assets \
              (asset_id, asset_code, asset_type, issuer_address, contract_address) VALUES \
              (1, 'USDC', 'classic', 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN', ''), \
              (2, 'XLM', 'classic', '', ''), \
-             (3, '', 'soroban', '', 'CAS3J7GYLGXMF6TDJBBYYSE3HQ6BBSMLNUQ34M7JQNS7VJK4D5DA73G5')",
+             (3, '', 'soroban', '', 'CAS3J7GYLGXMF6TDJBBYYSE3HQ6BBSMLNUQ34M7JQNS7VJK4D5DA73G5'), \
+             (4, 'EURC', 'classic', 'GDHU6WRG4IEQXM5NZ4BMPKOXHW76MZM4Y2IEMFDVXBSDP6SJY4ITNPP2', '')",
         )
         .execute()
         .await
         .expect("seed assets");
 
-    let assets = supply_worker::load_credit_assets(&client)
+    // EURC has a (stale) supply row; USDC has none. Never-fetched must sort
+    // first under the stalest-first checkpoint ordering (task 0084).
+    client
+        .query(
+            "INSERT INTO prices.asset_supply (asset_id, token_supply, fetched_at) VALUES \
+             (4, 100.0, toDateTime('2020-01-01 00:00:00'))",
+        )
+        .execute()
+        .await
+        .expect("seed stale EURC supply");
+
+    let assets = supply_worker::load_stalest_credit_assets(&client, 10)
         .await
         .expect("load");
     assert_eq!(
         assets.len(),
-        1,
-        "only the credit asset is a supply candidate"
+        2,
+        "both credit assets are supply candidates (XLM + soroban excluded)"
     );
-    assert_eq!(assets[0].asset_code, "USDC");
+    assert_eq!(
+        assets[0].asset_code, "USDC",
+        "never-fetched USDC must lead the stalest-first ordering"
+    );
+    assert_eq!(assets[1].asset_code, "EURC", "already-fetched asset trails");
+
+    // The `limit` caps the slice — only the single stalest is returned.
+    let capped = supply_worker::load_stalest_credit_assets(&client, 1)
+        .await
+        .expect("load capped");
+    assert_eq!(capped.len(), 1, "limit bounds the per-run slice");
+    assert_eq!(capped[0].asset_code, "USDC");
 
     supply_worker::write_supplies(&client, &[(1, Decimal::from_str("999.5").unwrap())])
         .await
