@@ -297,6 +297,21 @@ pub fn process_ledger(
 /// `amm_ticks` instead of `unresolved` — the empty-registry regression this fix
 /// closes. Kept a standalone fn so that seeded-vs-unseeded behaviour is
 /// unit-testable without a full XDR `LedgerCloseMeta` AMM fixture (none exist).
+/// Recognise the Aquarius-router `swap` *summary* event by its topic shape.
+///
+///   topics = [ Symbol("swap"),
+///              Vec([ Address(tokenA), Address(tokenB) ]),
+///              Address(<swapper>) ]
+///
+/// The address `Vec` at topic[1] is the router signature: pool-level `swap`
+/// events (the genuine-gap case the guard must still catch) never carry it.
+/// See the router sample in `lore/4-notes/samples/soroban-events/swap.jsonl`
+/// and the emitter note in `aquarius-extractor/src/lib.rs` (task 0087).
+fn is_aquarius_router_swap(row: &SorobanEventRow) -> bool {
+    row.topics.first().and_then(|t| t.as_str()) == Some("swap")
+        && matches!(row.topics.get(1), Some(TaggedValue::Vec(_)))
+}
+
 fn classify_amm_groups(
     amm_groups: HashMap<String, Vec<SorobanEventRow>>,
     reg: &Registries,
@@ -313,9 +328,19 @@ fn classify_amm_groups(
                 // ignored — but if this one emitted a `swap`, its volume is
                 // being dropped. Record it for the post-run re-check instead
                 // of silently skipping (guard from task 0053 decision #3).
+                //
+                // Exception (task 0087): the Aquarius *router* emits a `swap`
+                // *summary* wrapping the pool-level `trade`. The router is never
+                // factory-registered (only pools are), so it always reaches this
+                // branch, and it is deliberately ignored for pricing — matching
+                // it would double-count the pool `trade`. It must NOT be flagged
+                // as a gap, or it fatal-trips the unresolved-pools guard. A
+                // genuine unknown-pool `swap` carries no address `Vec` at
+                // topic[1] and is still recorded.
                 let swaps: Vec<&SorobanEventRow> = rows
                     .iter()
                     .filter(|r| r.topics.first().and_then(|t| t.as_str()) == Some("swap"))
+                    .filter(|r| !is_aquarius_router_swap(r))
                     .collect();
                 if let Some(first) = swaps.first() {
                     out.unresolved.push(UnresolvedPoolSwap {
@@ -712,6 +737,72 @@ mod tests {
         assert_eq!(
             out.amm_ticks[0].0, "phoenix",
             "tick tagged with the phoenix source"
+        );
+    }
+
+    #[test]
+    fn router_swap_is_not_flagged_but_genuine_pool_swap_still_is() {
+        // Task 0087: the Aquarius router's `swap` summary (address `Vec` at
+        // topic[1]) is a deliberately-ignored wrapper over the pool `trade`. It
+        // reaches the unknown-contract branch (routers are never registered) but
+        // must NOT be recorded as an unresolved-pool gap — else it fatal-trips
+        // the guard on a clean backfill. A genuine unknown-pool `swap` (no Vec
+        // topic) must still be flagged, keeping the safety net intact. Neither
+        // may produce a candle (the router event must not double-count).
+        const SEQ: u32 = 50_639_018;
+        const CLOSED_AT: i64 = 1_700_000_000;
+        const ROUTER: &str = "CBQDHNBFBZYE4MKPWBSJOPIYLW4SFSXAXUTSXJN76GNKYVYPCKWC6QUK";
+        const UNKNOWN_POOL: &str = "CCR2CH4GQVCZHG7CHFVMNANCK45CU5DVKXZIIITDZQAU3CEJZ7RQH2MQ";
+        const TOKEN_A: &str = "CAS3J7GYLGXMF6TDJBBYYSE3HQ6BBSMLNUQ34T6TZMYMW2EVH34XOWMA";
+        const TOKEN_B: &str = "CAUIKL3IYGMERDRUN6YSCLWVAKIFG5Q4YJHUKM4S4NJZQIA3BAS6OJPK";
+
+        let router_swap = SorobanEventRow {
+            contract_id: ROUTER.to_string(),
+            transaction_id: "tx-router".to_string(),
+            ledger_sequence: SEQ as u64,
+            event_index: 3,
+            // [ Symbol("swap"), Vec([Address, Address]), Address(swapper) ]
+            topics: vec![
+                TaggedValue::Symbol("swap".to_string()),
+                TaggedValue::Vec(vec![
+                    TaggedValue::Address(TOKEN_A.to_string()),
+                    TaggedValue::Address(TOKEN_B.to_string()),
+                ]),
+                TaggedValue::Address(
+                    "GBCC4DK4KJQTQ6CZVNOZTZYDHMFKZMRSXLE2JN3NWBBGEAUKZHUTDDXA".to_string(),
+                ),
+            ],
+            data: TaggedValue::Vec(vec![]),
+        };
+        // Genuine unknown-pool swap: single `swap` topic, no address Vec.
+        let pool_swap = SorobanEventRow {
+            contract_id: UNKNOWN_POOL.to_string(),
+            transaction_id: "tx-pool".to_string(),
+            ledger_sequence: SEQ as u64,
+            event_index: 4,
+            topics: vec![TaggedValue::Symbol("swap".to_string())],
+            data: TaggedValue::Vec(vec![]),
+        };
+
+        let mut groups: HashMap<String, Vec<SorobanEventRow>> = HashMap::new();
+        groups.insert(ROUTER.to_string(), vec![router_swap]);
+        groups.insert(UNKNOWN_POOL.to_string(), vec![pool_swap]);
+
+        let reg = Registries::new(); // neither contract registered
+        let mut assets = AssetRegistry::from_existing(vec![]);
+        let mut out = LedgerSoroban::default();
+        classify_amm_groups(groups, &reg, &mut assets, SEQ, CLOSED_AT, &mut out);
+
+        // Router swap must NOT double-count and must NOT be flagged.
+        assert!(out.amm_ticks.is_empty(), "router swap must not price");
+        assert_eq!(
+            out.unresolved.len(),
+            1,
+            "only the genuine unknown-pool swap is flagged"
+        );
+        assert_eq!(
+            out.unresolved[0].contract_id, UNKNOWN_POOL,
+            "the flagged gap is the real unknown pool, not the router"
         );
     }
 
