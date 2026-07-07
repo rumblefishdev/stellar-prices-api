@@ -113,9 +113,13 @@ unknown-pool `swap` (non-Vec shape). Regression guard on the double-count bounda
       (commit 4aef1f1 — `is_aquarius_router_swap()` filter in `classify_amm_groups`)
 - [x] Genuine unregistered-pool `swap`s still trip the guard (safety net intact).
       (regression test asserts a non-Vec `swap` is still recorded as unresolved)
-- [ ] Confirmed whether the 3 pairs' underlying Aquarius pool `trade` volume is
+- [~] Confirmed whether the 3 pairs' underlying Aquarius pool `trade` volume is
       captured; if not, root-caused (in-window discovery bug vs pre-window seed
-      gap → 0080).
+      gap → 0080). **Partial (Step 2 findings):** router `swap` proven redundant
+      with a captured, resolvable pool `trade` (14/14 in sample) — no double-count,
+      guard fix drops nothing real. The tranche-specific `amm_ticks: 0` root cause
+      needs the Step 3 re-run's actual `add_pool`/`trade` events (local CH holds
+      no fatal-run data). CL single-topic `swap` gap split off to 0080.
 - [ ] Tranche `[50457424, 50687999]` re-runs clean (no fatal) → **full combined
       run unblocked**.
 
@@ -124,6 +128,37 @@ unknown-pool `swap` (non-Vec shape). Regression guard on the double-count bounda
 - **0053** — the full combined `[activation, tip]` run cannot complete cleanly
   until the guard stops fatal-firing on router swaps (it fatal-exited on this
   2 h validation tranche).
+
+## Step 2 Findings (2026-07-07) — router-redundancy CONFIRMED; tranche gap deferred to Step 3
+
+Analysed the captured samples in `lore/4-notes/samples/soroban-events/`
+(`swap.jsonl` + `trade.jsonl`, window 62078346–62079999):
+
+1. **`data[0]` is the underlying pool** (confirms the task's claim). Of the 50
+   `swap` rows, 32 are router-shape (Vec `topic[1]`), all from one router
+   `CBQDHNB…`; they reference **14 distinct pools** in `data[0]`.
+2. **14/14 of those pools also emit the canonical `trade`** event, shape
+   `[Symbol("trade"), Address, Address, Address]` — exactly what
+   `AquariusPoolExtractor` resolves. So in steady-state data the router `swap`
+   is **provably redundant** with a captured, resolvable pool `trade`: the guard
+   fix drops nothing real, and matching the router *would* double-count. ✅
+3. **A separate genuine gap exists but is NOT this task:** the 18 non-router
+   single-topic `swap`s carry a concentrated-liquidity map
+   (`amount0/amount1/liquidity/sqrt_price_x96/tick`) — Uni-v3 style, unhandled
+   by any extractor. Those would land in `unresolved_pools` legitimately. This is
+   the **0080** concentrated-pool question, distinct from the router false-positive.
+
+**Not yet closed — the tranche's `amm_ticks: 0`.** The samples are a *different*
+window (62.0M) and a *different* router than the tranche's three emitters
+(`CANMWW5D…/CBVSLUYH…/CDVTDAUA…`, 50.6M). The local CH volume holds none of the
+fatal-exited run's data (guard aborted before persistence; `unresolved_pools`,
+`pool_registry`, `price_ohlcv_1m` all 0 rows). Whether the tranche's underlying
+pool `trade`s were dropped for want of registration (in-window `add_pool`
+discovery bug) vs a pool-type/shape gap (→ 0080) can only be settled with that
+window's actual `add_pool`/`trade` events. The **Step 3 re-run** (now unblocked
+by the guard fix) is the vehicle: re-run `[50457424, 50687999]` and inspect
+whether `add_pool` registers the three routers' `data[0]` pools and whether their
+`trade`s resolve to candles.
 
 ## Notes
 
