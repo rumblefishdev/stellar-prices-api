@@ -449,8 +449,10 @@ only at run-end). Chunk boundary = one accepted one-minute seam per source.
 | `[1, 50457423]` pre-Soroban SDEX tail | ~50.5M ledgers (~4× larger) — run `--mode sdex-only` after the combined range, with `--tip <live tip>`. |
 
 **Measured throughput (2026-07-07):** ~184 KB/ledger, ~4.8 MB/s, ~64 min/100k —
-~100% download-bound. **Strongly consider a us-east-1 EC2** (S3-local) to collapse
-download time before committing weeks of home bandwidth.
+~100% download-bound. **Strongly consider a us-east-2 EC2** (the
+`aws-public-blockchain` bucket is in us-east-2 — same-region S3) to collapse
+download time before committing weeks of home bandwidth. Full first-timer
+runbook: `docs/runbooks/continue-soroban-backfill.md`.
 
 **`--end` floor stays 63352611** (SDEX live floor − 1). Backfill now contaminates
 `min(sdex ledger)` in `price_ohlcv_1m`, so re-derive the live floor from a
