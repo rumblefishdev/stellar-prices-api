@@ -201,6 +201,16 @@ threshold trips. Restore the canonical cert post-test.
   both probes and confirm metrics appear in LocalStack
   CloudWatch.
 
+> **Freshness-probe CH IT added (2026-07-08, PR #97).**
+> `packages/backfill-freshness-probe/tests/freshness_it.rs` exercises the real
+> `AGE_QUERY` against a local Docker ClickHouse: it **passes on CH 26.3.10.60**
+> (prod-pinned) and guards the finding-A regression the unit tests missed — it
+> executes + deserializes into `StreamAge` (would have failed on the
+> `Nullable(Int64)`→`i64` bug), proves the `running + pushed` gate (seed / paused
+> / completed / stale-`running` rows all excluded), FINAL-latest-version
+> correctness, and the live-only zero-rows end state.
+> `cargo test -p backfill-freshness-probe --test freshness_it -- --ignored`.
+
 ## Acceptance Criteria
 
 > **Legend.** `[x]` = code-complete + unit-tested + `cdk synth`-verified.
