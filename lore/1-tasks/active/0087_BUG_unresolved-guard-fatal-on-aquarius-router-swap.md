@@ -21,6 +21,17 @@ history:
       (topic[0]=swap, topic[1]=Vec([tokenA,tokenB]), topic[2]=swapper) —
       deliberately ignored to avoid double-counting the pool-level `trade`, but the
       guard flags them → false-positive FATAL that blocks a clean full run.
+  - date: 2026-07-07
+    status: active
+    who: okarcz
+    note: >
+      Steps 1 & 4 done (commit 4aef1f1). Added `is_aquarius_router_swap()` to
+      `classify_amm_groups`: a `swap` with an address `Vec` at topic[1] (the
+      router shape) is skipped before the unresolved-pools guard records it; a
+      genuine unknown-pool `swap` (no Vec topic) still trips it. Regression test
+      `router_swap_is_not_flagged_but_genuine_pool_swap_still_is` asserts both +
+      no candle (double-count boundary). 32/32 crate tests pass. Both code-side
+      ACs met. Starting Step 2 (underlying-pool coverage).
 ---
 
 # Aquarius-router `swap` false-positive fatals the combined backfill
@@ -98,8 +109,10 @@ unknown-pool `swap` (non-Vec shape). Regression guard on the double-count bounda
 
 ## Acceptance Criteria
 
-- [ ] The unresolved-pools guard no longer fatals on Aquarius-router `swap` events.
-- [ ] Genuine unregistered-pool `swap`s still trip the guard (safety net intact).
+- [x] The unresolved-pools guard no longer fatals on Aquarius-router `swap` events.
+      (commit 4aef1f1 — `is_aquarius_router_swap()` filter in `classify_amm_groups`)
+- [x] Genuine unregistered-pool `swap`s still trip the guard (safety net intact).
+      (regression test asserts a non-Vec `swap` is still recorded as unresolved)
 - [ ] Confirmed whether the 3 pairs' underlying Aquarius pool `trade` volume is
       captured; if not, root-caused (in-window discovery bug vs pre-window seed
       gap → 0080).
