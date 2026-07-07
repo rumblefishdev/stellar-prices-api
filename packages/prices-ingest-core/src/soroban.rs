@@ -297,21 +297,6 @@ pub fn process_ledger(
 /// `amm_ticks` instead of `unresolved` — the empty-registry regression this fix
 /// closes. Kept a standalone fn so that seeded-vs-unseeded behaviour is
 /// unit-testable without a full XDR `LedgerCloseMeta` AMM fixture (none exist).
-/// Recognise the Aquarius-router `swap` *summary* event by its topic shape.
-///
-///   topics = [ Symbol("swap"),
-///              Vec([ Address(tokenA), Address(tokenB) ]),
-///              Address(<swapper>) ]
-///
-/// The address `Vec` at topic[1] is the router signature: pool-level `swap`
-/// events (the genuine-gap case the guard must still catch) never carry it.
-/// See the router sample in `lore/4-notes/samples/soroban-events/swap.jsonl`
-/// and the emitter note in `aquarius-extractor/src/lib.rs` (task 0087).
-fn is_aquarius_router_swap(row: &SorobanEventRow) -> bool {
-    row.topics.first().and_then(|t| t.as_str()) == Some("swap")
-        && matches!(row.topics.get(1), Some(TaggedValue::Vec(_)))
-}
-
 fn classify_amm_groups(
     amm_groups: HashMap<String, Vec<SorobanEventRow>>,
     reg: &Registries,
@@ -365,6 +350,21 @@ fn classify_amm_groups(
             Err(e) => warn!(contract_id, error = %e, "amm dispatch error"),
         }
     }
+}
+
+/// Recognise the Aquarius-router `swap` *summary* event by its topic shape.
+///
+///   topics = [ Symbol("swap"),
+///              Vec([ Address(tokenA), Address(tokenB) ]),
+///              Address(<swapper>) ]
+///
+/// The address `Vec` at topic[1] is the router signature: pool-level `swap`
+/// events (the genuine-gap case the guard must still catch) never carry it.
+/// See the router sample in `lore/4-notes/samples/soroban-events/swap.jsonl`
+/// and the emitter note in `aquarius-extractor/src/lib.rs` (task 0087).
+fn is_aquarius_router_swap(row: &SorobanEventRow) -> bool {
+    row.topics.first().and_then(|t| t.as_str()) == Some("swap")
+        && matches!(row.topics.get(1), Some(TaggedValue::Vec(_)))
 }
 
 fn topics_to_tagged(topics: &Value) -> Vec<TaggedValue> {
