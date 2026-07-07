@@ -6,11 +6,14 @@
 
 Reference for the public S3 archive the SDEX/Soroban backfill downloads from
 (`sdex-backfill`, task 0053). The load-bearing fact for the backfill is the
-**Soroban activation ledger = 50,463,000** — the split point between the
+**Soroban activation ledger = 50,457,424** — the split point between the
 `sdex-only` pre-Soroban tail `[1, activation)` and the `combined`
 Soroban era `[activation, tip]`, and the `sdex-backfill --activation-ledger`
-default. We adopt the BE team's located value as authoritative/pinned; the
-derivation below (mirrored from the BE doc) shows how it was anchored.
+default. Authoritative value from the BE team's
+`crates/backfill-runner/README.md` "Start ledger" section
+(`50_457_424`, 2024-02-20 Protocol 20 go-live, community-sourced); the
+~5.83 s/ledger derivation below (mirrored from the BE doc) was an earlier
+estimate (~50,463,000) that this authoritative value supersedes.
 
 ---
 
@@ -60,12 +63,16 @@ Ledger close times were extracted from the XDR data to anchor this to the archiv
 
 At a rate of ~5.83 seconds per ledger (derived from the 46M → 50M segment), Protocol 20 activated approximately **28 days after ledger 50,048,000**, placing the activation at:
 
-> **Soroban activation ≈ ledger 50,463,000** (2024-02-20)
+> **Soroban activation ≈ ledger 50,463,000** (2024-02-20) — _estimate only._
+
+> **Authoritative: ledger 50,457,424** (2024-02-20) — from BE's
+> `crates/backfill-runner/README.md` "Start ledger". The ~5.83 s/ledger
+> estimate above lands ~5,576 ledgers late; use the authoritative value.
 
 This splits the archive into:
 
-- **Pre-Soroban:** ledgers 0 – 50,463,000 (~50.5M ledgers, Sep 2015 – Feb 2024)
-- **Post-Soroban:** ledgers 50,463,000 – 62,040,000 (~11.6M ledgers, Feb 2024 – present)
+- **Pre-Soroban:** ledgers 0 – 50,457,424 (~50.5M ledgers, Sep 2015 – Feb 2024)
+- **Post-Soroban:** ledgers 50,457,424 – 62,040,000 (~11.6M ledgers, Feb 2024 – present)
 
 ---
 

@@ -155,7 +155,7 @@ so the two runs never download a ledger twice. **Full SDEX deep-dive:
 
 Union coverage: SDEX = `[1, tip]`, AMM = `[activation, tip]`, no ledger
 downloaded twice. Activation is pinned (`--activation-ledger`, default
-`50463000` — Protocol 20, 2024-02-20).
+`50457424` — Protocol 20, 2024-02-20).
 
 ```bash
 cargo build --release -p sdex-backfill                        # local plaintext CH
@@ -167,7 +167,7 @@ cargo build --release -p sdex-backfill --features aws-mtls    # to direct-write 
 | `--start`             | —                   | required                | First ledger, inclusive                                                                               |
 | `--end`               | —                   | required                | Last ledger, inclusive                                                                                |
 | `--mode`              | —                   | `combined`              | `combined` (SDEX+AMM+oracle, for `[activation,tip]`) or `sdex-only` (for `[1,activation)`)            |
-| `--activation-ledger` | —                   | `50463000`              | Soroban activation — the range split point + `--mode` sanity check                                    |
+| `--activation-ledger` | —                   | `50457424`              | Soroban activation — the range split point + `--mode` sanity check                                    |
 | `--tip`               | —                   | `--end`                 | Chain tip = `backfill_progress.target_ledger` denominator; pass the **live** tip on the sdex-only run |
 | `--transport`         | —                   | `local`                 | `local` (plaintext `--clickhouse-url`) or `hetzner` (mTLS direct-write; needs `--features aws-mtls`)  |
 | `--clickhouse-url`    | `CLICKHOUSE_URL`    | `http://localhost:8123` | CH HTTP endpoint (transport=local)                                                                    |
@@ -189,7 +189,7 @@ no separate push step — so `/backfill/status` updates in real time. Needs the
 CH_DOMAIN=ch.sorobanscan.rumblefish.dev \
 MTLS_CERT_PATH=… MTLS_KEY_PATH=… MTLS_CA_PATH=… \
 target/release/sdex-backfill --transport hetzner \
-    --mode combined --start 50463000 --end <TIP> --verbose
+    --mode combined --start 50457424 --end <TIP> --verbose
 ```
 
 `--transport local` (default) writes plaintext to `--clickhouse-url` — for
@@ -242,8 +242,52 @@ per-partition scratch (`--temp-dir`, auto-cleaned unless `--keep-partitions`).
 If you exercised a local stand-in CH via `docker compose up -d clickhouse`, run
 `docker compose down` when done (its data lives in a named volume).
 
-Resumable: `Ctrl-C` and re-run the same range; done ledgers
-(`backfill_sdex_ledgers`) are skipped and ReplacingMergeTree dedups the rest.
+**Stopping & resuming.** The run is safe to stop and restart — it
+auto-resumes, no special flag.
+
+- **How it checkpoints.** Progress is committed **per partition**: after a
+  partition's candles/oracle rows are written, its ledger sequences are recorded
+  into `backfill_sdex_ledgers` (`ingest.rs`, end of `index_partition`). On
+  startup `load_completed(start, end)` skips any partition whose ledgers are all
+  recorded (`partition_fully_done`), so completed partitions are **not
+  re-downloaded and not re-decoded**.
+- **How to stop.** `Ctrl-C` / `tmux kill` — there is no graceful-shutdown
+  handler, and none is needed: completion is committed per partition, and candle
+  writes are idempotent (`ReplacingMergeTree(version)`, `version =
+ledger_seq*1000 + op_index` → re-writing a ledger replaces with identical
+  values, never duplicates/undercounts). The **one partition in flight** when
+  killed was not yet recorded → on restart it is simply re-downloaded and
+  re-decoded from scratch. Only that single partition's partial work is lost.
+- **How to resume.** Re-run the **same command verbatim** (same `--start`/`--end`
+  /`--mode`). Local scratch is cleaned per partition, so there is nothing to tidy
+  first.
+
+**Caveat — AMM pool discovery on a resumed `combined` run.** The discovered pool
+registry (`reg`) is held in memory across partitions and only flushed to
+`prices.pool_registry` at **clean run-end** (`run.rs`, after the loop) — the
+per-partition `backfill_sdex_ledgers` checkpoint advances independently. So if a
+pool's **factory-create** event landed in a partition that completed _before_ an
+interrupt, that discovery was only in memory and is lost; on restart that
+partition is skipped (marked done) and the pool is **not re-discovered**. A later
+**swap** for it then hits the unresolved path → recorded to
+`prices.unresolved_pools` (volume unresolved), not resolved into a candle.
+Exposure is limited to pools _created in the backfilled window that are not in the
+preloaded seed_ (prod `pool_registry` is seeded with ~521 pools via task 0079, so
+most historical pools resolve regardless).
+
+- **Post-resume check** — after any resumed `combined` run, inspect the
+  safety-net table:
+  ```sql
+  SELECT venue, count() AS pools, sum(swap_count) AS missed_swaps
+  FROM prices.unresolved_pools FINAL GROUP BY venue ORDER BY missed_swaps DESC
+  ```
+  Empty / unchanged → nothing missed. Grew after the resume → those pools' volume
+  was skipped; reconcile by re-seeding `pool_registry` and re-running just the
+  affected ledger range (idempotent, safe to repeat).
+- **Cleanest planned pause:** stop **between the two runs** (after `combined`
+  completes, before the `sdex-only` tail) — the tail carries no AMM discovery
+  state, so it resumes with zero caveat. A mid-`combined` pause is fine too; just
+  run the `unresolved_pools` check above afterward.
 
 ### 2. AMM historical backfill — superseded (folded into §1)
 

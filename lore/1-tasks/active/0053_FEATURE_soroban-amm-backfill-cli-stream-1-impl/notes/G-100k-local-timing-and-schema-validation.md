@@ -18,12 +18,18 @@ history:
 
 # 100k local backfill — timing + schema validation
 
-Operational validation run of `sdex-backfill --mode combined` over the first
-**100,000 ledgers from Soroban activation** (`50463000 → 50562999`), writing to a
+Operational validation run of `sdex-backfill --mode combined` over a
+**100,000-ledger slice** (`50463000 → 50562999`), writing to a
 **local Docker ClickHouse** (`--transport local`, `http://localhost:8123`).
 Purpose: measure wall-clock on the current workstation + link, verify the
 `prices.*` schema is well-defined, and confirm `backfill_progress` fills
 correctly per partition. **Fully local — nothing pushed to Hetzner.**
+
+> Note (2026-07-07): this run's `--start 50463000` predates the corrected
+> authoritative Soroban activation ledger **50,457,424** (BE
+> `crates/backfill-runner/README.md`); it began ~5,576 ledgers *after* true
+> activation. Immaterial to the timing/schema measurement, but the real
+> archive run starts at `50457424`. Numbers below are the slice actually run.
 
 Successor to the 0060 100k sizing run
 ([G-measurement-results](../../archive/0060_FEATURE_prices-clickhouse-crate-combined-backfill-sizing/notes/G-measurement-results.md)).

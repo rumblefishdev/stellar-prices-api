@@ -206,7 +206,7 @@ pub fn progress_updates(
 mod tests {
     use super::*;
 
-    const ACTIVATION: u32 = 50_463_000;
+    const ACTIVATION: u32 = 50_457_424;
     const TIP: u32 = 55_000_000;
 
     fn observed(highest: u32) -> Observed {

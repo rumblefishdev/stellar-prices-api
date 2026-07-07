@@ -421,7 +421,7 @@ mod tests {
         // A combined pass (floor=activation) must not un-do a completed archive
         // already carried down to genesis (current=1).
         assert_eq!(
-            resolve_current(Current::SetBackward(50_463_000), Some(1)),
+            resolve_current(Current::SetBackward(50_457_424), Some(1)),
             1
         );
         // Lower floor wins going backward.
