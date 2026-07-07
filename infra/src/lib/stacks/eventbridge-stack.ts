@@ -263,12 +263,24 @@ export class EventBridgeStack extends cdk.Stack {
       name: 'supply',
       assetDir: SUPPLY_WORKER_ASSET_DIR,
       memorySize: 512,
-      // Sequential Horizon GETs across the asset registry; generous headroom
-      // under the 1h cadence (best-effort, so a timeout just defers).
+      // Sequential Horizon GETs across the asset registry. The worker walks the
+      // stalest assets first inside a wall-clock budget (task 0084), so a single
+      // run finishes cleanly under this timeout and successive hourly runs
+      // round-robin the whole registry — no single invoke needs the full walk.
       timeout: cdk.Duration.minutes(5),
       secretsExtensionLayer,
       chDomain,
       rule: this.assetSupplyRule,
+      environment: {
+        // Stop the Horizon walk at 240 s, 60 s under the 300 s Lambda timeout,
+        // so a run never ends `Status: timeout`. Remaining stalest assets defer
+        // to the next tick.
+        SUPPLY_TIME_BUDGET_SECS: '240',
+      },
+      // Best-effort + self-resuming: a failed run must not be async-retried 2×
+      // more (each a full multi-minute walk); the next schedule picks up the
+      // stalest assets anyway (task 0084).
+      targetRetryAttempts: 0,
       // HORIZON_URL unset → the binary's public-Horizon default.
       alarmDescription:
         'Supply Lambda invocation errors (informational; supply is best-effort, market_cap degrades to 0).',

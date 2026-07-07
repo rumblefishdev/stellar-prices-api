@@ -23,6 +23,19 @@ history:
     status: active
     who: okarcz
     note: Promoted to active to start work on the supply-worker timeout fix.
+  - date: 2026-07-07
+    status: active
+    who: okarcz
+    note: >
+      Fix code-complete (prepare-only, not deployed). Staleness self-checkpoint
+      (`load_stalest_credit_assets`, order by `fetched_at`, never-fetched first)
+      + a 240 s wall-clock walk budget (`SUPPLY_TIME_BUDGET_SECS`) so no single
+      invoke needs the full registry and a run can't hit the 300 s timeout;
+      successive hourly runs round-robin all assets. Supply EventBridge target
+      set `retryAttempts: 0` to kill the async-retry storm. 5 unit pass +
+      Docker-gated IT for the ordering; `--features lambda`/clippy/fmt + infra
+      `tsc` clean. Remaining: post-deploy confirmation (clean run, full coverage,
+      `supply-errors` → OK).
 ---
 
 # supply-worker times out before completing the asset walk
@@ -57,8 +70,68 @@ slow run doesn't triple compute.
 
 ## Acceptance Criteria
 
-- [ ] A scheduled supply run completes without timing out (logs a clean
-      completion, not `Status: timeout`).
-- [ ] `asset_supply` covers the full active asset set (no partial-walk gap).
-- [ ] `supply-errors` alarm returns to `OK` under steady state.
-- [ ] Async-retry storm bounded (no 3× full-timeout re-runs per trigger).
+> **Legend.** `[x]` = code-complete + tested. `[ ]` **(operational)** = mechanism
+> implemented + tested; confirmed only by a real post-deploy scheduled run.
+
+- [x] A scheduled supply run completes without timing out — a wall-clock budget
+      (`SUPPLY_TIME_BUDGET_SECS`, default 240 s < the 300 s Lambda limit) stops the
+      Horizon walk early and flushes; the loop can no longer run to `Status:
+      timeout`. **(operational)** confirmed by a clean `run complete` log in prod.
+- [x] `asset_supply` covers the full active asset set (no partial-walk gap) — the
+      walk loads the **stalest** assets first (`load_stalest_credit_assets`,
+      ordered by `asset_supply.fetched_at` with never-fetched leading), so
+      successive hourly runs round-robin the whole registry instead of re-walking
+      from the top. **(operational)** full coverage confirmed after ⌈registry/
+      throughput⌉ scheduled runs (~2–3 h).
+- [ ] **(operational)** `supply-errors` alarm returns to `OK` under steady state —
+      the timeout that raised it is gone; re-check post-deploy.
+- [x] Async-retry storm bounded — supply's EventBridge target now sets
+      `retryAttempts: 0` (no 2× re-drive of a multi-minute walk); and with clean
+      completion there is no error to retry in the first place.
+
+## Implementation Notes
+
+Code-complete (not yet deployed — prepare-only per standing rules).
+
+- **`packages/supply-worker/src/lib.rs`** —
+  - `SupplyRunConfig { time_budget, max_assets }` + `from_env()`
+    (`SUPPLY_TIME_BUDGET_SECS` / `SUPPLY_MAX_ASSETS_PER_RUN`); defaults 240 s /
+    5000.
+  - `load_credit_assets` → **`load_stalest_credit_assets(client, limit)`**: LEFT
+    JOINs the latest `fetched_at` per asset (`GROUP BY max`), `ORDER BY
+    fetched_at ASC` (never-fetched = epoch-0 default → first), `LIMIT ?`.
+  - `run_supply(..., cfg)` walks under an `Instant`-based deadline; on budget-hit
+    it stops starting fetches, flushes the pending batch, and reports
+    `deferred` + `deadline_hit` on `SupplyStats`.
+- **`src/main.rs`** — builds `SupplyRunConfig::from_env()` at cold start, passes
+  it in, logs `deferred`/`deadline_hit`.
+- **`infra/…/lambda-baseline.ts`** — new optional `targetRetryAttempts` prop on
+  the worker target.
+- **`infra/…/eventbridge-stack.ts`** — supply sets `SUPPLY_TIME_BUDGET_SECS=240`
+  + `targetRetryAttempts: 0`.
+- **Tests** — unit: config-default-under-timeout. IT (Docker-gated): stalest-first
+  ordering (never-fetched leads the already-fetched) + `limit` slice cap. 5 unit
+  pass; `cargo check --features lambda` / clippy / fmt clean; infra `tsc` clean.
+
+## Design Decisions
+
+### From Plan
+
+1. **Batch + checkpoint across invocations (fix option 1).** No single invoke
+   walks the whole registry; each does a bounded slice and the next resumes.
+
+### Emerged
+
+2. **Staleness self-checkpoint, not an external cursor.** The plan suggested a
+   cursor in `discovery_state`/SSM. Instead the checkpoint is *implicit* in the
+   data: order by `asset_supply.fetched_at` and refresh the stalest first —
+   writing them stamps a fresh `fetched_at` so they fall to the back next run.
+   No cursor to store/advance, no offset drift when assets are added/removed, and
+   it self-heals (a missed asset stays stalest and leads the next run). Chosen
+   because `asset_supply` already carries `fetched_at` (its RMT version).
+3. **Time budget is the primary bound; `max_assets` is a query-size cap.** A
+   wall-clock deadline (240 s) directly prevents the timeout regardless of
+   per-asset Horizon latency, which a fixed count cannot. `max_assets` (5000)
+   only keeps the loaded list bounded as the registry grows.
+4. **`retryAttempts: 0` added as an optional shared-helper prop**, used only by
+   supply — surgical, leaves the other workers' default (2) untouched.

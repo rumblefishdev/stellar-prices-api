@@ -190,6 +190,13 @@ export interface WorkerLambdaProps extends BaselineLambdaContext {
    * NOT_BREACHING metric alarms rely on this alarm as their dead-probe backstop.
    */
   readonly errorAlarmActions?: readonly cloudwatch.IAlarmAction[];
+  /**
+   * Async-invocation retry attempts for the EventBridge → Lambda target
+   * (default 2). Set to 0 for a long-running best-effort worker where a failed
+   * run must not be re-driven 2× more (each a full multi-minute walk) before the
+   * next schedule — the next tick resumes the work anyway (task 0084 supply).
+   */
+  readonly targetRetryAttempts?: number;
 }
 
 export interface WorkerLambda {
@@ -265,7 +272,11 @@ export function createWorkerLambda(
     },
   });
 
-  rule.addTarget(new targets.LambdaFunction(fn));
+  rule.addTarget(
+    new targets.LambdaFunction(fn, {
+      retryAttempts: props.targetRetryAttempts,
+    }),
+  );
 
   const errorAlarm = new cloudwatch.Alarm(scope, `${idPrefix}ErrorAlarm`, {
     alarmName: `prices-${env}-${name}-errors`,

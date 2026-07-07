@@ -15,9 +15,62 @@ use clickhouse::{Client, Row};
 use rust_decimal::Decimal;
 use serde::Deserialize;
 use std::str::FromStr;
+use std::time::{Duration, Instant};
 
 /// Public Horizon endpoint (overridable via `HORIZON_URL`).
 pub const DEFAULT_HORIZON: &str = "https://horizon.stellar.org";
+
+/// Default wall-clock budget for a single run's Horizon walk, in seconds. The
+/// Lambda timeout is 300 s; stopping the walk at 240 s leaves headroom for the
+/// final batch flush + runtime teardown so a run *never* ends `Status: timeout`
+/// (task 0084). Override with `SUPPLY_TIME_BUDGET_SECS`.
+pub const DEFAULT_TIME_BUDGET_SECS: u64 = 240;
+
+/// Default upper bound on assets pulled per run — a safety cap on the CH query
+/// so the in-memory list stays bounded as the registry grows. The *time* budget
+/// is the real per-run limiter; this just keeps the query from returning tens of
+/// thousands of rows. Override with `SUPPLY_MAX_ASSETS_PER_RUN`.
+pub const DEFAULT_MAX_ASSETS_PER_RUN: usize = 5_000;
+
+/// Per-run bounds that keep the supply walk inside the Lambda timeout (task
+/// 0084). A run refreshes the **stalest** assets first (see
+/// [`load_stalest_credit_assets`]) until either bound is hit, so successive
+/// scheduled runs round-robin the whole registry over a few invocations instead
+/// of re-walking from the top and timing out before reaching the tail.
+#[derive(Debug, Clone, Copy)]
+pub struct SupplyRunConfig {
+    /// Stop starting new Horizon fetches once this much wall-clock has elapsed.
+    pub time_budget: Duration,
+    /// Upper bound on assets loaded (CH query `LIMIT`).
+    pub max_assets: usize,
+}
+
+impl Default for SupplyRunConfig {
+    fn default() -> Self {
+        Self {
+            time_budget: Duration::from_secs(DEFAULT_TIME_BUDGET_SECS),
+            max_assets: DEFAULT_MAX_ASSETS_PER_RUN,
+        }
+    }
+}
+
+impl SupplyRunConfig {
+    /// Build from `SUPPLY_TIME_BUDGET_SECS` / `SUPPLY_MAX_ASSETS_PER_RUN`,
+    /// falling back to the defaults.
+    pub fn from_env() -> Self {
+        let default = Self::default();
+        Self {
+            time_budget: Duration::from_secs(prices_clickhouse::env::env_parse_or(
+                "SUPPLY_TIME_BUDGET_SECS",
+                DEFAULT_TIME_BUDGET_SECS,
+            )),
+            max_assets: prices_clickhouse::env::env_parse_or(
+                "SUPPLY_MAX_ASSETS_PER_RUN",
+                default.max_assets,
+            ),
+        }
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum SupplyError {
@@ -42,22 +95,49 @@ pub struct CreditAsset {
 /// Outcome of a [`run_supply`] pass.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct SupplyStats {
-    /// Credit assets considered.
+    /// Credit assets loaded for this run (the stalest slice, ≤ `max_assets`).
     pub considered: usize,
     /// Supplies fetched + written to `asset_supply`.
     pub written: usize,
     /// Assets skipped (no Horizon record or a fetch error).
     pub skipped: usize,
+    /// Assets loaded but not attempted because the time budget was hit —
+    /// deferred to the next scheduled run (they remain the stalest, so they lead
+    /// the next slice). 0 on a run that finished its whole slice.
+    pub deferred: usize,
+    /// Whether the run stopped early on the wall-clock budget.
+    pub deadline_hit: bool,
 }
 
 /// Load classic credit assets (have both a code and a G-issuer) from
-/// `prices.assets`. Native XLM and Soroban contracts are excluded.
-pub async fn load_credit_assets(client: &Client) -> Result<Vec<CreditAsset>, SupplyError> {
+/// `prices.assets`, **stalest first** — assets never fetched (no `asset_supply`
+/// row) lead, then those with the oldest `fetched_at`. Capped at `limit`.
+///
+/// This ordering is the checkpoint (task 0084): each scheduled run refreshes the
+/// most-out-of-date assets, and writing them stamps a fresh `fetched_at` so they
+/// sort last next time. Over ⌈registry / per-run-throughput⌉ runs the whole set
+/// is covered, then it round-robins oldest-first — no external cursor needed and
+/// robust to assets being added or removed. Native XLM and Soroban contracts are
+/// excluded.
+pub async fn load_stalest_credit_assets(
+    client: &Client,
+    limit: usize,
+) -> Result<Vec<CreditAsset>, SupplyError> {
+    // LEFT JOIN the latest supply time per asset. Unmatched (never-fetched)
+    // assets get the DateTime default (epoch 0), so they sort first under ASC.
     let rows = client
         .query(
-            "SELECT asset_id, asset_code, issuer_address FROM prices.assets FINAL \
-             WHERE asset_type = 'classic' AND issuer_address != '' AND asset_code != ''",
+            "SELECT a.asset_id, a.asset_code, a.issuer_address \
+             FROM prices.assets AS a FINAL \
+             LEFT JOIN ( \
+                 SELECT asset_id, max(fetched_at) AS fetched_at \
+                 FROM prices.asset_supply GROUP BY asset_id \
+             ) AS s ON a.asset_id = s.asset_id \
+             WHERE a.asset_type = 'classic' AND a.issuer_address != '' AND a.asset_code != '' \
+             ORDER BY s.fetched_at ASC, a.asset_id ASC \
+             LIMIT ?",
         )
+        .bind(limit as u64)
         .fetch_all::<CreditAsset>()
         .await?;
     Ok(rows)
@@ -175,20 +255,36 @@ pub async fn write_supplies(
 /// discarding the whole run.
 pub const SUPPLY_FLUSH_BATCH: usize = 50;
 
-/// Load credit assets, fetch each one's supply from Horizon (best-effort), and
-/// write the successes to `asset_supply` in batches. Only a ClickHouse load/write
-/// failure fails the run; per-asset Horizon failures are skipped.
+/// Load the stalest credit assets, fetch each one's supply from Horizon
+/// (best-effort), and write the successes to `asset_supply` in batches — **within
+/// a wall-clock budget** so the run never hits the Lambda timeout (task 0084).
+///
+/// Only a ClickHouse load/write failure fails the run; per-asset Horizon failures
+/// are skipped. When the time budget is reached the walk stops early: everything
+/// fetched so far is persisted (batches flush as they fill), and the untouched
+/// assets — still the stalest — lead the next scheduled run.
 pub async fn run_supply(
     ch: &Client,
     http: &reqwest::Client,
     base_url: &str,
+    cfg: &SupplyRunConfig,
 ) -> Result<SupplyStats, SupplyError> {
-    let assets = load_credit_assets(ch).await?;
+    let assets = load_stalest_credit_assets(ch, cfg.max_assets).await?;
     let mut batch: Vec<(u32, Decimal)> = Vec::new();
     let mut written = 0usize;
     let mut skipped = 0usize;
+    let mut deferred = 0usize;
+    let mut deadline_hit = false;
 
-    for asset in &assets {
+    let deadline = Instant::now() + cfg.time_budget;
+    for (i, asset) in assets.iter().enumerate() {
+        if Instant::now() >= deadline {
+            // Out of time: leave the remaining (still-stalest) assets for the
+            // next run rather than risk a mid-fetch Lambda kill.
+            deferred = assets.len() - i;
+            deadline_hit = true;
+            break;
+        }
         match fetch_supply(http, base_url, &asset.asset_code, &asset.issuer_address).await {
             Ok(Some(supply)) => {
                 batch.push((asset.asset_id, supply));
@@ -219,6 +315,8 @@ pub async fn run_supply(
         considered: assets.len(),
         written,
         skipped,
+        deferred,
+        deadline_hit,
     })
 }
 
@@ -272,5 +370,21 @@ mod tests {
             parse_horizon_amount(body),
             Err(SupplyError::Decimal(_))
         ));
+    }
+
+    #[test]
+    fn config_default_stays_under_the_lambda_timeout() {
+        let cfg = SupplyRunConfig::default();
+        // 240 s walk budget + flush headroom must stay below the 300 s Lambda
+        // timeout, else the run can still end `Status: timeout` (task 0084).
+        assert!(
+            cfg.time_budget < Duration::from_secs(300),
+            "time budget must leave headroom under the 300 s Lambda limit"
+        );
+        assert_eq!(
+            cfg.time_budget,
+            Duration::from_secs(DEFAULT_TIME_BUDGET_SECS)
+        );
+        assert_eq!(cfg.max_assets, DEFAULT_MAX_ASSETS_PER_RUN);
     }
 }
