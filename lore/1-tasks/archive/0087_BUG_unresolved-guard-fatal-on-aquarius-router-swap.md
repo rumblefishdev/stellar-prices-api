@@ -2,7 +2,7 @@
 id: "0087"
 title: "unresolved-pools guard fatal-fires on Aquarius router `swap` events — blocks the combined backfill"
 type: BUG
-status: active
+status: completed
 related_adr: ["0001"]
 related_tasks: ["0053", "0080", "0060"]
 tags: [layer-indexing, amm, aquarius, soroban, backfill, extractor, clickhouse]
@@ -57,6 +57,18 @@ history:
       recorded in 0080's "Related gap" section. 0087's own scope (stop the fatal)
       is complete; AC4 (full-tranche no-fatal) folds into the 0053 backfill run
       (guard unit test already proves the no-fatal boundary). Ready for PR.
+  - date: 2026-07-07
+    status: completed
+    who: okarcz
+    note: >
+      Merged via PR #92 (squash 8cc8200 → develop). Guard fix
+      (`is_aquarius_router_swap` + same-tx-independent filter) + regression test
+      landed; code review found + fixed a doc-comment misplacement (relocated the
+      helper). 1 file changed in prices-ingest-core, 32/32 crate tests pass, CI
+      green. AC1–3 met; AC4 deferred into the 0053 live re-run (unit test proves
+      the no-fatal boundary). Early-epoch router-swap pricing deferred to 0080
+      (full same-tx-dedup design + quantification recorded there). Backfill for
+      0053 is unblocked.
 ---
 
 # Aquarius-router `swap` false-positive fatals the combined backfill
