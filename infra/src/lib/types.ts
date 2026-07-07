@@ -150,6 +150,25 @@ export interface EnvironmentConfig {
      * past it).
      */
     readonly ledgerProcessorLagSeconds: number;
+    /**
+     * Optional AWS Chatbot → Slack routing for the ops-alarms topic (task 0056).
+     * When set, `ObservabilityStack` subscribes `prices-{env}-ops-alarms` to a
+     * Slack channel via a `SlackChannelConfiguration`, so alarms land in Slack —
+     * matching how BE routes its own CloudWatch alarms (no ops email/mailing
+     * list). Reuses BE's existing channel by reading the same SSM params
+     * (`/soroban-explorer/{env}/slack-{workspace,channel}-id`) in the shared
+     * account; the Slack workspace is already authorized in AWS Chatbot for BE.
+     * Omit to leave the topic subscriber-less (managed manually in SNS).
+     *
+     * Values are SSM Parameter *names* (plain String, not credentials), resolved
+     * at deploy — the workspace/channel IDs stay out of this public repo. The
+     * named params must exist before deploying Observability, else synth/deploy
+     * fails on the lookup.
+     */
+    readonly slack?: {
+      readonly workspaceIdSsmParam: string;
+      readonly channelIdSsmParam: string;
+    };
   };
 
   // Ledger Processor ingest (consumed by IngestStack — task 0038)
@@ -349,6 +368,20 @@ export function validateConfig(config: EnvironmentConfig): void {
       errors.push(
         `opsAlarms.ledgerProcessorLagSeconds must be a positive integer (seconds), got: ${ops.ledgerProcessorLagSeconds}`,
       );
+    }
+    if (ops.slack !== undefined) {
+      const isSsmName = (v: unknown): boolean =>
+        typeof v === 'string' && v.startsWith('/') && v.length > 1;
+      if (
+        typeof ops.slack !== 'object' ||
+        ops.slack === null ||
+        !isSsmName(ops.slack.workspaceIdSsmParam) ||
+        !isSsmName(ops.slack.channelIdSsmParam)
+      ) {
+        errors.push(
+          'opsAlarms.slack, when set, must be { workspaceIdSsmParam, channelIdSsmParam } with absolute SSM parameter names (leading "/")',
+        );
+      }
     }
     // Require a real local@domain.tld shape, not just a stray '@': a value like
     // '@' or 'ops@' passes an includes('@') check but yields an undeliverable

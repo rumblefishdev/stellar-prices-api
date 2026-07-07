@@ -1,8 +1,11 @@
 import * as cdk from 'aws-cdk-lib';
+import * as chatbot from 'aws-cdk-lib/aws-chatbot';
 import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as cw_actions from 'aws-cdk-lib/aws-cloudwatch-actions';
+import * as iam from 'aws-cdk-lib/aws-iam';
 import * as sns from 'aws-cdk-lib/aws-sns';
 import * as subscriptions from 'aws-cdk-lib/aws-sns-subscriptions';
+import * as ssm from 'aws-cdk-lib/aws-ssm';
 import type { Construct } from 'constructs';
 
 import type { EnvironmentConfig } from '../types.js';
@@ -71,6 +74,11 @@ export class ObservabilityStack extends cdk.Stack {
    * `config.opsAlarms.notificationEmail`.
    */
   public readonly opsAlarmsTopic: sns.Topic;
+  /**
+   * AWS Chatbot Slack subscription for the ops-alarms topic (task 0056).
+   * Created only when `config.opsAlarms.slack` is set; undefined otherwise.
+   */
+  public readonly opsAlarmsSlackChannel?: chatbot.SlackChannelConfiguration;
   /** SDEX push-freshness alarm (§5.6 / Tranche-1 AC #5). */
   public readonly sdexPushFreshnessAlarm: cloudwatch.Alarm;
   /** mTLS client-cert expiry alarm (§7 / §11.4). */
@@ -202,6 +210,48 @@ export class ObservabilityStack extends cdk.Stack {
         new subscriptions.EmailSubscription(config.opsAlarms.notificationEmail),
       );
     }
+
+    // AWS Chatbot → Slack (task 0056). When `opsAlarms.slack` is configured we
+    // route the ops-alarms topic to a Slack channel, matching how BE delivers
+    // its own CloudWatch alarms (its `${env}-soroban-explorer-alarms` topic →
+    // Chatbot → Slack) — the team's real ops surface, no email/mailing list.
+    // Reuses BE's channel: the workspace/channel IDs are read at deploy from the
+    // SSM params `opsAlarms.slack.{workspaceIdSsmParam,channelIdSsmParam}` (kept
+    // out of this public repo), which point at BE's existing
+    // `/soroban-explorer/{env}/slack-*` values in the shared account. The Slack
+    // workspace is already authorized in AWS Chatbot for BE, so no extra console
+    // step is needed here — the named SSM params just have to exist before
+    // deploying Observability. Omit the config to leave the topic
+    // subscriber-less (managed manually in SNS).
+    if (config.opsAlarms.slack) {
+      const slackWorkspaceId = ssm.StringParameter.valueForStringParameter(
+        this,
+        config.opsAlarms.slack.workspaceIdSsmParam,
+      );
+      const slackChannelId = ssm.StringParameter.valueForStringParameter(
+        this,
+        config.opsAlarms.slack.channelIdSsmParam,
+      );
+      this.opsAlarmsSlackChannel = new chatbot.SlackChannelConfiguration(
+        this,
+        'OpsAlarmsSlackChannel',
+        {
+          slackChannelConfigurationName: opsAlarmsTopicName(config.envName),
+          slackWorkspaceId,
+          slackChannelId,
+          notificationTopics: [this.opsAlarmsTopic],
+          role: new iam.Role(this, 'OpsAlarmsChatbotRole', {
+            assumedBy: new iam.ServicePrincipal('chatbot.amazonaws.com'),
+            managedPolicies: [
+              iam.ManagedPolicy.fromAwsManagedPolicyName(
+                'CloudWatchReadOnlyAccess',
+              ),
+            ],
+          }),
+        },
+      );
+    }
+
     const snsAction = new cw_actions.SnsAction(this.opsAlarmsTopic);
 
     // The enrichment backlog alarm (task 0026) shipped without an action; wire

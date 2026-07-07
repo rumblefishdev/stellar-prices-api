@@ -65,6 +65,19 @@ history:
       + production.json. fmt/clippy/eslint/prettier clean. Task stays active:
       deploy Observability + ops-topic subscribe + both fire-tests remain
       operational.
+  - date: 2026-07-08
+    status: active
+    who: okarcz
+    note: >
+      Ops routing decided + wired: AWS Chatbot → Slack, reusing BE's channel
+      (BE has no ops email — it routes CloudWatch alarms to Slack via Chatbot).
+      Added optional `opsAlarms.slack` config; ObservabilityStack now creates a
+      SlackChannelConfiguration (prices-{env}-ops-alarms) on the ops topic,
+      reading BE's existing `/soroban-explorer/{env}/slack-{workspace,channel}-id`
+      SSM params in the shared account. Synth-verified; tsc/eslint/prettier clean.
+      Supersedes the manual email-subscribe as the chosen route (email path kept
+      as fallback). Deploy of Observability (with the SSM params present) makes it
+      live.
 ---
 
 # CloudWatch alarms — SDEX push freshness + mTLS NotAfter
@@ -152,13 +165,27 @@ In the 0011 CDK app, add:
 
 ### Step 3.5: Post-deploy — subscribe the ops topic (operational)
 
+> **Routing chosen (2026-07-08): AWS Chatbot → Slack, reusing BE's channel
+> (PR #97 follow-up).** BE has **no ops email** — it routes all its CloudWatch
+> alarms to Slack via an `AWS Chatbot SlackChannelConfiguration`
+> (`${env}-soroban-explorer-alarms` topic → Slack), with the workspace/channel
+> IDs in SSM (`/soroban-explorer/{env}/slack-{workspace,channel}-id`). We now
+> match that: `opsAlarms.slack` in `production.json` wires a
+> `SlackChannelConfiguration` (`prices-{env}-ops-alarms`) on our ops topic,
+> reading **BE's same SSM params** in the shared account, so prices alarms land
+> in BE's existing ops channel — one surface, no email/mailing list, no
+> click-to-confirm. The Slack workspace is already authorized in Chatbot for BE.
+> **Prereq:** the named SSM params must exist before deploying Observability
+> (they do — BE's alarms depend on them); the deploy fails on the lookup if not.
+> The email path (`notificationEmail` / `aws sns subscribe`) below remains
+> supported as a fallback but is not the chosen route.
+
 **By design, the `prices-{env}-ops-alarms` topic ships with no
-subscribers.** `config.opsAlarms.notificationEmail` is left unset in
+email subscribers.** `config.opsAlarms.notificationEmail` is left unset in
 `envs/production.json` on purpose: subscriptions are managed directly
 in SNS (email / Slack / PagerDuty) so the on-call roster can change
-without a redeploy. The consequence is that a fresh deploy routes every
-alarm to a topic **no one is listening to** until an operator subscribes
-an address — the alarms fire correctly but deliver nowhere.
+without a redeploy. With the Slack route above wired, the topic is no longer a
+black hole; the email checklist below is only needed if Slack is *not* used.
 
 Deploy checklist — **must be done once per env, immediately after the
 first deploy, before the fire-tests below can pass:**
