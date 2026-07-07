@@ -52,6 +52,18 @@ history:
       `coalesce(fetched_at, toDateTime(0))` so stalest-first no longer depends on
       the `join_use_nulls` default. New `absent` stat. 5 unit + const-assert
       invariant; clippy/fmt/tsc clean.
+  - date: 2026-07-07
+    status: active
+    who: okarcz
+    note: >
+      Deployed to prod (PR #90 merged to develop; rebuilt all worker bootstraps,
+      diff-reviewed, `make deploy-production-eventbridge` → UPDATE_COMPLETE 58 s).
+      Verified live: post-deploy REPORT `Duration≈240128 ms Succeeded` (was
+      `300000 ms Status: timeout` pre-deploy); `written:945 deferred:4054
+      deadline_hit:true`; `asset_supply` count 3434→4280 climbing, `absent`
+      zero-writes present. Zero Errors datapoints post-deploy. 3/4 AC confirmed;
+      only `supply-errors` alarm→OK pending the 1 h window (re-check ~12:00, then
+      archive). Registry ≥5000 (max_assets cap) → full coverage ~5–6 hourly runs.
 ---
 
 # supply-worker times out before completing the asset walk
@@ -91,23 +103,33 @@ slow run doesn't triple compute.
 
 - [x] A scheduled supply run completes without timing out — a wall-clock budget
       (`SUPPLY_TIME_BUDGET_SECS`, default 240 s < the 300 s Lambda limit) stops the
-      Horizon walk early and flushes; the loop can no longer run to `Status:
-      timeout`. **(operational)** confirmed by a clean `run complete` log in prod.
+      Horizon walk early and flushes. **CONFIRMED in prod 2026-07-07:** post-deploy
+      `REPORT` lines show `Duration ≈ 240128 ms … Succeeded` (no `Status: timeout`),
+      vs the pre-deploy `Duration: 300000.00 ms … Status: timeout` on the same
+      function minutes earlier.
 - [x] `asset_supply` covers the full active asset set (no partial-walk gap) — the
       walk loads the **stalest** assets first (`load_stalest_credit_assets`,
       ordered by `asset_supply.fetched_at` with never-fetched leading), so
-      successive hourly runs round-robin the whole registry instead of re-walking
-      from the top. **(operational)** full coverage confirmed after ⌈registry/
-      throughput⌉ scheduled runs (~2–3 h).
-- [ ] **(operational)** `supply-errors` alarm returns to `OK` under steady state —
-      the timeout that raised it is gone; re-check post-deploy.
-- [x] Async-retry storm bounded — supply's EventBridge target now sets
-      `retryAttempts: 0` (no 2× re-drive of a multi-minute walk); and with clean
-      completion there is no error to retry in the first place.
+      successive hourly runs round-robin the whole registry. **CONFIRMED in prod:**
+      each run does ~945 assets and defers the rest (`written:945 deferred:4054
+      deadline_hit:true`); `asset_supply FINAL` count climbed 3434→4280 across
+      runs; `absent` zero-writes present (`zero_rows:5`). Registry is ≥5000
+      (max_assets cap hit) so full coverage round-robins over ~5–6 hourly runs.
+- [~] **(operational)** `supply-errors` alarm returns to `OK` — the timeout error
+      source is fixed (zero `Errors` datapoints post-deploy). Alarm is `Sum(Errors)`
+      over a 1 h period, so it stays ALARM until the hour containing the last
+      pre-deploy timeout (~10:35) rolls off; mechanically clears at the ~12:00
+      evaluation. **Re-check ~12:00 2026-07-07 for OK, then archive.**
+- [x] Async-retry storm bounded — function-error async retries set to 0 via
+      `fn.configureAsyncInvoke` (the correct layer; the EventBridge target
+      `retryAttempts` only governs delivery — code-review finding #2), and with
+      clean completion there is no error to retry. Prod runs Succeeded, so no
+      re-drive occurred.
 
 ## Implementation Notes
 
-Code-complete (not yet deployed — prepare-only per standing rules).
+Code-complete + **deployed to prod 2026-07-07** (`Prices-production-EventBridge`,
+58 s, `UPDATE_COMPLETE`); verified live (see Acceptance Criteria).
 
 - **`packages/supply-worker/src/lib.rs`** —
   - `SupplyRunConfig { time_budget, max_assets }` + `from_env()`
