@@ -49,6 +49,22 @@ history:
       ITs vs prod-pinned CH 26.3.10.60. Task stays active for the
       deploy-gated operational remainder (ops-topic subscribe + 2 alarm
       fire-tests).
+  - date: 2026-07-08
+    status: active
+    who: okarcz
+    note: >
+      Post-deploy findings A + B resolved in code (branch
+      fix/0056-freshness-gate-and-processor-alarms). A: freshness AGE_QUERY
+      gated on `status='running' AND last_push_at IS NOT NULL` (drops the
+      coalesce/started_at fallback) so live-only seed rows no longer false-fire;
+      4 unit tests green. B: three ledger-processor alarms (lag via ingest-queue
+      ApproximateAgeOfOldestMessage > ledgerProcessorLagSeconds default 60s;
+      errors via AWS/Lambda Errors; dlq via DLQ depth) added to
+      ObservabilityStack from AWS-native metrics — no processor redeploy;
+      synth-verified. New `opsAlarms.ledgerProcessorLagSeconds` config + validate
+      + production.json. fmt/clippy/eslint/prettier clean. Task stays active:
+      deploy Observability + ops-topic subscribe + both fire-tests remain
+      operational.
 ---
 
 # CloudWatch alarms — SDEX push freshness + mTLS NotAfter
@@ -185,6 +201,16 @@ threshold trips. Restore the canonical cert post-test.
   both probes and confirm metrics appear in LocalStack
   CloudWatch.
 
+> **Freshness-probe CH IT added (2026-07-08, PR #97).**
+> `packages/backfill-freshness-probe/tests/freshness_it.rs` exercises the real
+> `AGE_QUERY` against a local Docker ClickHouse: it **passes on CH 26.3.10.60**
+> (prod-pinned) and guards the finding-A regression the unit tests missed — it
+> executes + deserializes into `StreamAge` (would have failed on the
+> `Nullable(Int64)`→`i64` bug), proves the `running + pushed` gate (seed / paused
+> / completed / stale-`running` rows all excluded), FINAL-latest-version
+> correctness, and the live-only zero-rows end state.
+> `cargo test -p backfill-freshness-probe --test freshness_it -- --ignored`.
+
 ## Acceptance Criteria
 
 > **Legend.** `[x]` = code-complete + unit-tested + `cdk synth`-verified.
@@ -223,10 +249,22 @@ threshold trips. Restore the canonical cert post-test.
 - [ ] **(operational)** `notes/G-alarm-fire-test.md` records the fire-test
       timestamps + SNS message IDs for both alarms. *Produced during the deploy
       fire-test above.*
-- [ ] **(post-deploy, from 0082)** `sdex-push-freshness` must not false-fire in a
-      live-only deployment (see Post-deploy findings A).
-- [ ] **(post-deploy, from 0082)** Ledger-processor `lag_seconds` + error alarm
-      actually created and deployed (see Post-deploy findings B).
+- [x] **(from 0082, finding A)** `sdex-push-freshness` no longer false-fires in a
+      live-only deployment. *Freshness probe `AGE_QUERY` now gates on
+      `status='running' AND last_push_at IS NOT NULL` — live-only seed rows
+      (running, NULL `last_push_at`) and the paused/completed seams publish no
+      metric, so the `NOT_BREACHING` alarm stays OK; a running backfill that has
+      pushed and then stalls still fires (AC #5). Supersedes the finding-#4
+      `coalesce(…, started_at)` fallback. 4 unit tests. **Deploy-confirm** the
+      alarm sits OK in live-only is operational.*
+- [x] **(from 0082, finding B)** Ledger-processor lag + error alarms created.
+      *Three alarms in `ObservabilityStack`, all → `prices-{env}-ops-alarms`,
+      built from AWS-native metrics by deterministic name (no processor
+      redeploy): `-lag` (ingest-queue `ApproximateAgeOfOldestMessage` >
+      `ledgerProcessorLagSeconds`, default 60 s, sustained 3×1 min — the honest
+      lag proxy since the processor emits no custom `lag_seconds`), `-errors`
+      (`AWS/Lambda Errors` ≥ 1), `-dlq` (ingest-DLQ depth ≥ 1). Synth-verified.
+      **Deploy** of the Observability stack is operational.*
 
 ## Post-deploy findings (2026-07-06 — from the 0070 go-live + 0082 verification)
 
@@ -242,6 +280,20 @@ until the backfill runs, gate it on a backfill being registered-and-active, or
 add a distinct live-ingestion freshness signal (e.g. off the ledger-processor's
 last write / cursor advance). Decide + implement.
 
+> **Resolved in code (2026-07-08, branch
+> `fix/0056-freshness-gate-and-processor-alarms`).** Chose *gate on a
+> registered-and-active backfill* (option 2): `AGE_QUERY` now filters
+> `WHERE status = 'running' AND last_push_at IS NOT NULL`, and age is
+> `now() - last_push_at` (the `coalesce(…, started_at)` fallback — and with it
+> finding #4's never-first-pushed behaviour — is dropped, because it could not
+> tell "backfill expected but silent" apart from "no backfill at all", which was
+> this false-page). Live-only seed rows (running, NULL `last_push_at`) and the
+> paused/completed seams publish no metric → `NOT_BREACHING` → OK; a running
+> backfill that has pushed then stalls still fires (AC #5). The live-ingestion
+> plane is covered by the finding-B ledger-processor alarms below (including the
+> no-invocations halt detector), not by repurposing this backfill-cadence alarm.
+> 4 unit tests. Deploy-confirm the alarm reads OK in live-only remains operational.
+
 **B. The ledger-processor has no `lag_seconds`/error alarm deployed.**
 `prices.ledger_processor.lag_seconds` appears only as a **comment** in
 `observability-stack.ts:33` — no alarm construct is created, and the deployed
@@ -250,6 +302,36 @@ alarm set (all periodic-worker alarms + the two probes) contains none for the
 `lag_seconds > 60s` alarm + a ledger-processor error alarm, both wired to
 `prices-{env}-ops-alarms`. (This is the alarm the 0070 runbook AC#7 assumed
 existed — that AC has been corrected to point here.)
+
+> **Resolved in code (2026-07-08, same branch).** The ledger-processor emits
+> **no** custom metric (`lag_seconds` was only ever a comment — grep confirms
+> zero emission), so rather than add Rust emission + a processor redeploy, the
+> alarms ride AWS-native metrics, built from ComputeStack's exported name helpers
+> (`ledgerProcessorFunctionName` / `ingestQueueName` / `ingestDlqName`) so
+> `ObservabilityStack` needs no cross-stack ref (mirrors the `opsAlarmsTopicName`
+> import pattern) yet shares one source of truth — a rename can't silently orphan
+> an alarm:
+> - **`prices-{env}-ledger-processor-lag`** — ingest queue
+>   `AWS/SQS ApproximateAgeOfOldestMessage` > `opsAlarms.ledgerProcessorLagSeconds`
+>   (new config, default **120 s**), sustained **5×1 min** (headroom so routine
+>   deploys / cold starts don't false-page; a real stall keeps climbing). The
+>   honest "processor falling behind" proxy.
+> - **`prices-{env}-ledger-processor-errors`** — `AWS/Lambda Errors` ≥ 1 over
+>   5 min (handler crashes).
+> - **`prices-{env}-ledger-processor-dlq`** — ingest-DLQ
+>   `ApproximateNumberOfMessagesVisible` ≥ 1. Catches poison-pill doorbells that
+>   `reportBatchItemFailures` re-drives to the DLQ **without** a Lambda Error.
+> - **`prices-{env}-ledger-processor-no-invocations`** — `AWS/Lambda Invocations`
+>   < 1 over 15 min, **`treatMissingData: BREACHING`**. Closes the halt blind
+>   spot the other three share: they key on *present* messages, so a producer-side
+>   stop (S3→SNS→SQS delivery halts / subscription removed) drains the queue and
+>   invokes nothing — invisible to lag/errors/DLQ. Zero invocations for 15 min on
+>   a chain that closes a ledger every ~5–6 s is a genuine outage. (Added after
+>   the PR #97 self-review flagged the gap.)
+>
+> All → `prices-{env}-ops-alarms`. Synth-verified against
+> `Prices-production-Observability`. Deploy of the Observability stack is
+> operational.
 
 ## Blocked on
 

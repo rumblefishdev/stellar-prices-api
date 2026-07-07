@@ -6,6 +6,11 @@ import * as subscriptions from 'aws-cdk-lib/aws-sns-subscriptions';
 import type { Construct } from 'constructs';
 
 import type { EnvironmentConfig } from '../types.js';
+import {
+  ingestDlqName,
+  ingestQueueName,
+  ledgerProcessorFunctionName,
+} from './compute-stack.js';
 
 /**
  * Physical name of the Tranche-1 ops-notification SNS topic (task 0056).
@@ -25,19 +30,22 @@ export interface ObservabilityStackProps extends cdk.StackProps {
 /**
  * CloudWatch dashboard scaffold for prices-api.
  *
- * Skeleton-only: provisions the empty dashboard with a header
- * TextWidget. Task 0056 attaches the real widgets and alarms:
+ * The dashboard itself is skeleton-only (a header TextWidget); the real
+ * widget set is still task 0056's dashboard work. The alarms, however, are
+ * live here:
  *
- * - push-freshness (S3 PutObject → Lambda invocation lag,
- *   alarm > 60s sustained per ADR 0007 / task 0038's
- *   `prices.ledger_processor.lag_seconds` metric)
- * - mTLS NotAfter (cert expiry, alarm 14 days before NotAfter)
- * - Lambda error rate per worker
- * - API Gateway 5xx rate
- * - ClickHouse write latency (custom metric, populated by the
- *   clickhouse-client crate from task 0052)
+ * - SDEX push-freshness (Prices/Backfill `PushAgeSeconds`, §5.6 / AC #5)
+ * - mTLS NotAfter (Prices/Mtls `MinDaysToNotAfter`, §7 / §11.4)
+ * - enrichment-stall (Prices/Enrichment progress signal, task 0026)
+ * - live ledger-processor lag / errors / DLQ (AWS-native metrics, finding B):
+ *   the core ingestion Lambda's `lag_seconds > 60s` intent (ADR 0007 /
+ *   task 0038) is realised via the ingest queue's oldest-message age, since
+ *   the processor emits no custom lag metric.
  *
- * The `dashboard` property is exposed so task 0056 can call
+ * Still deferred to the dashboard-widget half of 0056: API Gateway 5xx rate
+ * and ClickHouse write latency.
+ *
+ * The `dashboard` property is exposed so the widget work can call
  * `addWidgets(...)` without cross-stack imports.
  *
  * The log-group naming convention is intentionally NOT redefined
@@ -67,6 +75,14 @@ export class ObservabilityStack extends cdk.Stack {
   public readonly sdexPushFreshnessAlarm: cloudwatch.Alarm;
   /** mTLS client-cert expiry alarm (§7 / §11.4). */
   public readonly mtlsNotAfterAlarm: cloudwatch.Alarm;
+  /** Live ledger-processor ingestion-lag alarm (task 0056 finding B). */
+  public readonly ledgerProcessorLagAlarm: cloudwatch.Alarm;
+  /** Live ledger-processor invocation-error alarm (task 0056 finding B). */
+  public readonly ledgerProcessorErrorAlarm: cloudwatch.Alarm;
+  /** Live ledger-processor DLQ-depth alarm (task 0056 finding B). */
+  public readonly ledgerProcessorDlqAlarm: cloudwatch.Alarm;
+  /** Live ledger-processor total-halt alarm — zero invocations (finding B / halt gap). */
+  public readonly ledgerProcessorNoInvocationsAlarm: cloudwatch.Alarm;
 
   constructor(scope: Construct, id: string, props: ObservabilityStackProps) {
     super(scope, id, props);
@@ -247,6 +263,154 @@ export class ObservabilityStack extends cdk.Stack {
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     });
     this.mtlsNotAfterAlarm.addAlarmAction(snsAction);
+
+    // -----------------------------------------------------------------
+    // Live ledger-processor health (task 0056 finding B). The core ingestion
+    // Lambda shipped unmonitored: `prices.ledger_processor.lag_seconds` existed
+    // only as a comment and no alarm watched it. These three alarms cover it
+    // from AWS-native metrics, so no custom-metric emission / processor redeploy
+    // is required. Metric dimensions are built from ComputeStack's own name
+    // helpers (the function, the ingest queue, and its DLQ) — a shared single
+    // source of truth, so a rename there flows here automatically instead of
+    // silently leaving the alarm on a non-existent metric. Imported by name (not
+    // as CDK objects), so ObservabilityStack stays independently deployable with
+    // no cross-stack CFN reference, exactly like the ops-topic pattern above.
+    const ledgerProcessorFnName = ledgerProcessorFunctionName(config.envName);
+    const ingestQueue = ingestQueueName(config.envName);
+    const ingestDlq = ingestDlqName(config.envName);
+
+    // Ingestion lag: the ledger-processor emits no lag metric, so we watch the
+    // ingest queue's oldest-message age — the honest "processor is falling
+    // behind" signal. Ledgers close ~every 5–6 s and a healthy processor drains
+    // the doorbell in seconds; an oldest-message age sustained above the
+    // threshold (default 120 s) means live ingestion is lagging.
+    //
+    // Sustained over 5×1-min datapoints (not 3) so a routine deploy / cold start
+    // / brief mTLS reconnect — during which the oldest enqueued doorbell ages a
+    // few minutes while the processor is briefly paused, then drains — does not
+    // false-page. A real stall keeps the age climbing well past 5 min. Note the
+    // Maximum statistic means a single old message pins the datapoint, so the
+    // sustain (not the per-datapoint value) is what suppresses catch-up flap.
+    this.ledgerProcessorLagAlarm = new cloudwatch.Alarm(
+      this,
+      'LedgerProcessorLagAlarm',
+      {
+        alarmName: `prices-${config.envName}-ledger-processor-lag`,
+        alarmDescription:
+          'The prices-ingest SQS doorbell is backing up (ApproximateAgeOfOldestMessage over the threshold, sustained 5 min): the live ledger-processor is not keeping up with ledger production or has stalled. Threshold is operator-tunable via config.opsAlarms.ledgerProcessorLagSeconds. Check the ledger-processor logs, the mTLS ClickHouse write path, and the DLQ.',
+        metric: new cloudwatch.Metric({
+          namespace: 'AWS/SQS',
+          metricName: 'ApproximateAgeOfOldestMessage',
+          dimensionsMap: { QueueName: ingestQueue },
+          statistic: 'Maximum',
+          period: cdk.Duration.minutes(1),
+        }),
+        threshold: config.opsAlarms.ledgerProcessorLagSeconds,
+        evaluationPeriods: 5,
+        datapointsToAlarm: 5,
+        comparisonOperator:
+          cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+        // SQS reports 0 (not missing) on an empty-but-active queue → 0 <
+        // threshold → OK. Should the metric go truly absent, missing = caught up
+        // (a real halt is caught by the separate no-invocations alarm below), so
+        // it must not breach.
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      },
+    );
+    this.ledgerProcessorLagAlarm.addAlarmAction(snsAction);
+
+    // Hard errors: the ledger-processor Lambda throwing (a crash, not a graceful
+    // per-item batch failure). Any invocation error over 5 min pages.
+    this.ledgerProcessorErrorAlarm = new cloudwatch.Alarm(
+      this,
+      'LedgerProcessorErrorAlarm',
+      {
+        alarmName: `prices-${config.envName}-ledger-processor-errors`,
+        alarmDescription:
+          'The live ledger-processor Lambda is throwing invocation errors (AWS/Lambda Errors ≥ 1 over 5 min). Distinct from a poison-pill doorbell (see the DLQ alarm): this is the handler crashing. Check the ledger-processor logs.',
+        metric: new cloudwatch.Metric({
+          namespace: 'AWS/Lambda',
+          metricName: 'Errors',
+          dimensionsMap: { FunctionName: ledgerProcessorFnName },
+          statistic: 'Sum',
+          period: cdk.Duration.minutes(5),
+        }),
+        threshold: 1,
+        evaluationPeriods: 1,
+        datapointsToAlarm: 1,
+        comparisonOperator:
+          cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      },
+    );
+    this.ledgerProcessorErrorAlarm.addAlarmAction(snsAction);
+
+    // Poison-pill / permanent-failure doorbells: under reportBatchItemFailures a
+    // handler that keeps failing one item re-drives it (no Lambda Error) until
+    // maxReceiveCount, then it lands in the DLQ — a dropped ledger = a data gap.
+    // Any message in the DLQ pages; this is the failure the Errors alarm cannot
+    // see. treatMissingData BREACHING would false-fire while SQS reports no
+    // datapoint on an empty DLQ, so keep it NOT_BREACHING and watch the count.
+    this.ledgerProcessorDlqAlarm = new cloudwatch.Alarm(
+      this,
+      'LedgerProcessorDlqAlarm',
+      {
+        alarmName: `prices-${config.envName}-ledger-processor-dlq`,
+        alarmDescription:
+          'A ledger doorbell exhausted its SQS retries and landed in the prices-ingest DLQ (ApproximateNumberOfMessagesVisible ≥ 1): a ledger the live processor could not process = a candle gap. Inspect the DLQ message, fix the cause, and redrive.',
+        metric: new cloudwatch.Metric({
+          namespace: 'AWS/SQS',
+          metricName: 'ApproximateNumberOfMessagesVisible',
+          dimensionsMap: { QueueName: ingestDlq },
+          statistic: 'Maximum',
+          period: cdk.Duration.minutes(5),
+        }),
+        threshold: 1,
+        evaluationPeriods: 1,
+        datapointsToAlarm: 1,
+        comparisonOperator:
+          cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      },
+    );
+    this.ledgerProcessorDlqAlarm.addAlarmAction(snsAction);
+
+    // Total ingestion halt: the lag / errors / DLQ alarms above all key on the
+    // *presence* of enqueued or failed messages, so a producer-side stop (BE's
+    // S3→SNS→SQS delivery halts, the subscription is deleted, or upstream simply
+    // stops publishing) is invisible to them — the queue drains to empty, the
+    // Lambda is never invoked, and all three sit OK while live candles silently
+    // stop. This alarm closes that blind spot from the consumer side: if the
+    // ledger-processor records zero `Invocations` for 15 min it has received no
+    // doorbells at all. Pubnet closes a ledger every ~5–6 s, so a healthy
+    // processor is invoked near-continuously and a 15-min silence is a genuine
+    // outage, never normal idle. `treatMissingData: BREACHING` is load-bearing:
+    // Lambda publishes NO `Invocations` datapoint for a period with zero
+    // invocations, so "missing" *is* the halt signal (a LESS_THAN threshold
+    // alone would never evaluate).
+    this.ledgerProcessorNoInvocationsAlarm = new cloudwatch.Alarm(
+      this,
+      'LedgerProcessorNoInvocationsAlarm',
+      {
+        alarmName: `prices-${config.envName}-ledger-processor-no-invocations`,
+        alarmDescription:
+          'The live ledger-processor recorded zero invocations for 15 min: no ledger doorbells are arriving (upstream S3→SNS→SQS delivery stopped, the subscription was removed, or the producer halted). Live ingestion is stalled at the source and candles are silently frozen. Check the SNS subscription on prices-ingest, BE ledger publication, and the ingest queue. Unlike the lag/errors/DLQ alarms this fires on the ABSENCE of throughput.',
+        metric: new cloudwatch.Metric({
+          namespace: 'AWS/Lambda',
+          metricName: 'Invocations',
+          dimensionsMap: { FunctionName: ledgerProcessorFnName },
+          statistic: 'Sum',
+          period: cdk.Duration.minutes(15),
+        }),
+        threshold: 1,
+        evaluationPeriods: 1,
+        datapointsToAlarm: 1,
+        comparisonOperator: cloudwatch.ComparisonOperator.LESS_THAN_THRESHOLD,
+        // Missing = zero invocations = the halt we are looking for.
+        treatMissingData: cloudwatch.TreatMissingData.BREACHING,
+      },
+    );
+    this.ledgerProcessorNoInvocationsAlarm.addAlarmAction(snsAction);
 
     new cdk.CfnOutput(this, 'OpsAlarmsTopicArn', {
       value: this.opsAlarmsTopic.topicArn,

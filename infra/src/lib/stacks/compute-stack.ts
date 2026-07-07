@@ -23,6 +23,24 @@ import { mtlsSecretName, secretsManagerLayerArn } from '../mtls.js';
 const DLQ_RETENTION_DAYS = 14;
 
 /**
+ * Deterministic physical names for the live ledger-processor Lambda and its SQS
+ * doorbell queue + DLQ. ComputeStack owns these resources; ObservabilityStack
+ * imports these helpers to build CloudWatch alarm metric dimensions by name —
+ * so the two stacks share a single source of truth with no cross-stack CFN
+ * reference (mirrors `opsAlarmsTopicName`). A rename here now flows to the alarms
+ * automatically instead of silently pointing them at a non-existent metric.
+ */
+export function ledgerProcessorFunctionName(envName: string): string {
+  return `prices-${envName}-ledger-processor`;
+}
+export function ingestQueueName(envName: string): string {
+  return `prices-ingest-${envName}`;
+}
+export function ingestDlqName(envName: string): string {
+  return `prices-ingest-dlq-${envName}`;
+}
+
+/**
  * Cargo-lambda build output for the `prices-ledger-processor` binary.
  *
  * BE defines the equivalent Lambda with `cargo-lambda-cdk`'s
@@ -239,12 +257,12 @@ export class ComputeStack extends cdk.Stack {
     // SQS DLQ + prices ingest queue (prices-owned doorbell source)
     // ---------------------------------------------------------------
     this.ingestDlq = new sqs.Queue(this, 'PricesIngestDlq', {
-      queueName: `prices-ingest-dlq-${envName}`,
+      queueName: ingestDlqName(envName),
       retentionPeriod: cdk.Duration.days(DLQ_RETENTION_DAYS),
     });
 
     this.ingestQueue = new sqs.Queue(this, 'PricesIngestQueue', {
-      queueName: `prices-ingest-${envName}`,
+      queueName: ingestQueueName(envName),
       // MUST be >= the Lambda timeout, else SQS redelivers a doorbell
       // the Lambda is still legitimately draining. timeout + 60s margin.
       visibilityTimeout: cdk.Duration.seconds(lp.timeoutSeconds + 60),
@@ -292,7 +310,7 @@ export class ComputeStack extends cdk.Stack {
       'LedgerProcessorFunction',
       {
         ...pricesLambdaDefaults, // ARM64 + PROVIDED_AL2023 (ADR 0006/0007)
-        functionName: `prices-${envName}-ledger-processor`,
+        functionName: ledgerProcessorFunctionName(envName),
         // cargo-lambda emits a single self-contained `bootstrap` binary;
         // PROVIDED_AL2023 custom runtimes always use the `bootstrap`
         // handler name.
