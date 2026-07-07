@@ -100,7 +100,8 @@ history:
       rewritten; task 0028 (stage-then-push) superseded by ADR 0009. Already
       shipped on the branch (PR #72): extract-mode gate, the unregistered-pool
       guard → `prices.unresolved_pools`, and the pinned activation ledger
-      (50,463,000). Remaining: mTLS sink + real-time dual progress rows +
+      (50,457,424 — authoritative BE value; corrected 2026-07-07 from the
+      earlier 50,463,000 estimate). Remaining: mTLS sink + real-time dual progress rows +
       minute-aligned split + runbook + integration/idempotency tests.
   - date: 2026-07-02
     status: active

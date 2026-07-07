@@ -155,7 +155,7 @@ so the two runs never download a ledger twice. **Full SDEX deep-dive:
 
 Union coverage: SDEX = `[1, tip]`, AMM = `[activation, tip]`, no ledger
 downloaded twice. Activation is pinned (`--activation-ledger`, default
-`50463000` — Protocol 20, 2024-02-20).
+`50457424` — Protocol 20, 2024-02-20).
 
 ```bash
 cargo build --release -p sdex-backfill                        # local plaintext CH
@@ -167,7 +167,7 @@ cargo build --release -p sdex-backfill --features aws-mtls    # to direct-write 
 | `--start`             | —                   | required                | First ledger, inclusive                                                                               |
 | `--end`               | —                   | required                | Last ledger, inclusive                                                                                |
 | `--mode`              | —                   | `combined`              | `combined` (SDEX+AMM+oracle, for `[activation,tip]`) or `sdex-only` (for `[1,activation)`)            |
-| `--activation-ledger` | —                   | `50463000`              | Soroban activation — the range split point + `--mode` sanity check                                    |
+| `--activation-ledger` | —                   | `50457424`              | Soroban activation — the range split point + `--mode` sanity check                                    |
 | `--tip`               | —                   | `--end`                 | Chain tip = `backfill_progress.target_ledger` denominator; pass the **live** tip on the sdex-only run |
 | `--transport`         | —                   | `local`                 | `local` (plaintext `--clickhouse-url`) or `hetzner` (mTLS direct-write; needs `--features aws-mtls`)  |
 | `--clickhouse-url`    | `CLICKHOUSE_URL`    | `http://localhost:8123` | CH HTTP endpoint (transport=local)                                                                    |
@@ -189,7 +189,7 @@ no separate push step — so `/backfill/status` updates in real time. Needs the
 CH_DOMAIN=ch.sorobanscan.rumblefish.dev \
 MTLS_CERT_PATH=… MTLS_KEY_PATH=… MTLS_CA_PATH=… \
 target/release/sdex-backfill --transport hetzner \
-    --mode combined --start 50463000 --end <TIP> --verbose
+    --mode combined --start 50457424 --end <TIP> --verbose
 ```
 
 `--transport local` (default) writes plaintext to `--clickhouse-url` — for

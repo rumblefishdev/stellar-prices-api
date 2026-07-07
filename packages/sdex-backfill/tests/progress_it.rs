@@ -16,7 +16,7 @@ use sdex_backfill::ingest::ExtractMode;
 use sdex_backfill::progress::{Observed, Phase, SDEX_ARCHIVE, SOROBAN_AMM, progress_updates};
 use sdex_backfill::sink::Sink;
 
-const ACTIVATION: u32 = 50_463_000;
+const ACTIVATION: u32 = 50_457_424;
 const TIP: u32 = 55_000_000;
 const T0: u32 = 1_700_000_000; // 2023-11-14
 const T1: u32 = 1_720_000_000; // 2024-07-03
