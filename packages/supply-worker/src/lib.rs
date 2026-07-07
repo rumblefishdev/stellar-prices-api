@@ -26,6 +26,25 @@ pub const DEFAULT_HORIZON: &str = "https://horizon.stellar.org";
 /// (task 0084). Override with `SUPPLY_TIME_BUDGET_SECS`.
 pub const DEFAULT_TIME_BUDGET_SECS: u64 = 240;
 
+/// Hard ceiling on the (env-overridable) walk budget, in seconds — kept safely
+/// under the 300 s Lambda timeout so no `SUPPLY_TIME_BUDGET_SECS` value can
+/// re-introduce the timeout 0084 fixes. Raise this in lockstep if the Lambda
+/// timeout is ever raised.
+pub const MAX_TIME_BUDGET_SECS: u64 = 290;
+
+/// Floor on the walk budget, in seconds — guards against `SUPPLY_TIME_BUDGET_SECS=0`
+/// (which would make the deadline trip immediately and write nothing).
+pub const MIN_TIME_BUDGET_SECS: u64 = 10;
+
+// Compile-time invariant (task 0084 finding #3): the clamp bounds must guarantee
+// every accepted budget both writes something (> 0) and stays under the 300 s
+// Lambda timeout — so a misconfigured `SUPPLY_TIME_BUDGET_SECS` can never
+// re-introduce `Status: timeout` nor silently defer every asset.
+const _: () = assert!(MIN_TIME_BUDGET_SECS > 0);
+const _: () = assert!(MIN_TIME_BUDGET_SECS <= DEFAULT_TIME_BUDGET_SECS);
+const _: () = assert!(DEFAULT_TIME_BUDGET_SECS <= MAX_TIME_BUDGET_SECS);
+const _: () = assert!(MAX_TIME_BUDGET_SECS < 300);
+
 /// Default upper bound on assets pulled per run — a safety cap on the CH query
 /// so the in-memory list stays bounded as the registry grows. The *time* budget
 /// is the real per-run limiter; this just keeps the query from returning tens of
@@ -56,14 +75,28 @@ impl Default for SupplyRunConfig {
 
 impl SupplyRunConfig {
     /// Build from `SUPPLY_TIME_BUDGET_SECS` / `SUPPLY_MAX_ASSETS_PER_RUN`,
-    /// falling back to the defaults.
+    /// falling back to the defaults. The time budget is **clamped** to
+    /// `[MIN_TIME_BUDGET_SECS, MAX_TIME_BUDGET_SECS]` so a misconfigured value
+    /// can neither disable the walk (`0` → writes nothing) nor exceed the Lambda
+    /// timeout (`> 300` → re-introduces `Status: timeout`); a clamp is logged.
     pub fn from_env() -> Self {
         let default = Self::default();
+        let raw_secs = prices_clickhouse::env::env_parse_or(
+            "SUPPLY_TIME_BUDGET_SECS",
+            DEFAULT_TIME_BUDGET_SECS,
+        );
+        let secs = raw_secs.clamp(MIN_TIME_BUDGET_SECS, MAX_TIME_BUDGET_SECS);
+        if secs != raw_secs {
+            tracing::warn!(
+                raw = raw_secs,
+                clamped = secs,
+                min = MIN_TIME_BUDGET_SECS,
+                max = MAX_TIME_BUDGET_SECS,
+                "SUPPLY_TIME_BUDGET_SECS out of range — clamped to stay under the Lambda timeout",
+            );
+        }
         Self {
-            time_budget: Duration::from_secs(prices_clickhouse::env::env_parse_or(
-                "SUPPLY_TIME_BUDGET_SECS",
-                DEFAULT_TIME_BUDGET_SECS,
-            )),
+            time_budget: Duration::from_secs(secs),
             max_assets: prices_clickhouse::env::env_parse_or(
                 "SUPPLY_MAX_ASSETS_PER_RUN",
                 default.max_assets,
@@ -99,7 +132,14 @@ pub struct SupplyStats {
     pub considered: usize,
     /// Supplies fetched + written to `asset_supply`.
     pub written: usize,
-    /// Assets skipped (no Horizon record or a fetch error).
+    /// Assets Horizon has no `/assets` record for. Written as `token_supply = 0`
+    /// (market_cap degrades to 0, task-accepted) **and** stamped with a fresh
+    /// `fetched_at` so they rotate out of the stalest-first front instead of
+    /// leading every run forever (task 0084 starvation guard).
+    pub absent: usize,
+    /// Assets skipped on a transient fetch error — *not* written (a good stored
+    /// supply must not be clobbered with 0 over a blip), so they stay stale and
+    /// are retried next run.
     pub skipped: usize,
     /// Assets loaded but not attempted because the time budget was hit —
     /// deferred to the next scheduled run (they remain the stalest, so they lead
@@ -123,8 +163,10 @@ pub async fn load_stalest_credit_assets(
     client: &Client,
     limit: usize,
 ) -> Result<Vec<CreditAsset>, SupplyError> {
-    // LEFT JOIN the latest supply time per asset. Unmatched (never-fetched)
-    // assets get the DateTime default (epoch 0), so they sort first under ASC.
+    // LEFT JOIN the latest supply time per asset, ordered oldest-first.
+    // `coalesce(..., toDateTime(0))` pins never-fetched assets (unmatched → 0 or
+    // NULL depending on `join_use_nulls`) to the front regardless of that
+    // session setting — the ordering must not depend on the CH default.
     let rows = client
         .query(
             "SELECT a.asset_id, a.asset_code, a.issuer_address \
@@ -134,7 +176,7 @@ pub async fn load_stalest_credit_assets(
                  FROM prices.asset_supply GROUP BY asset_id \
              ) AS s ON a.asset_id = s.asset_id \
              WHERE a.asset_type = 'classic' AND a.issuer_address != '' AND a.asset_code != '' \
-             ORDER BY s.fetched_at ASC, a.asset_id ASC \
+             ORDER BY coalesce(s.fetched_at, toDateTime(0)) ASC, a.asset_id ASC \
              LIMIT ?",
         )
         .bind(limit as u64)
@@ -259,10 +301,14 @@ pub const SUPPLY_FLUSH_BATCH: usize = 50;
 /// (best-effort), and write the successes to `asset_supply` in batches — **within
 /// a wall-clock budget** so the run never hits the Lambda timeout (task 0084).
 ///
-/// Only a ClickHouse load/write failure fails the run; per-asset Horizon failures
-/// are skipped. When the time budget is reached the walk stops early: everything
-/// fetched so far is persisted (batches flush as they fill), and the untouched
-/// assets — still the stalest — lead the next scheduled run.
+/// Only a ClickHouse load/write failure fails the run. An asset Horizon has **no
+/// record** for is written as `0` (and counted `absent`) so its `fetched_at`
+/// advances — otherwise it would lead the stalest-first ordering forever (task
+/// 0084). A **transient fetch error** is skipped without a write (to avoid
+/// zeroing a good stored value) and retried next run. When the time budget is
+/// reached the walk stops early: everything processed so far is persisted
+/// (batches flush as they fill + a tail flush), and the untouched assets — still
+/// the stalest — lead the next scheduled run.
 pub async fn run_supply(
     ch: &Client,
     http: &reqwest::Client,
@@ -272,6 +318,7 @@ pub async fn run_supply(
     let assets = load_stalest_credit_assets(ch, cfg.max_assets).await?;
     let mut batch: Vec<(u32, Decimal)> = Vec::new();
     let mut written = 0usize;
+    let mut absent = 0usize;
     let mut skipped = 0usize;
     let mut deferred = 0usize;
     let mut deadline_hit = false;
@@ -288,32 +335,46 @@ pub async fn run_supply(
         match fetch_supply(http, base_url, &asset.asset_code, &asset.issuer_address).await {
             Ok(Some(supply)) => {
                 batch.push((asset.asset_id, supply));
-                if batch.len() >= SUPPLY_FLUSH_BATCH {
-                    write_supplies(ch, &batch).await?;
-                    written += batch.len();
-                    batch.clear();
-                }
+                written += 1;
             }
             Ok(None) => {
-                skipped += 1;
-                tracing::debug!(code = %asset.asset_code, "no Horizon record");
+                // No Horizon record → supply is 0/unknown. Write 0 (market_cap
+                // degrades to 0, which the task accepts) so this asset's
+                // `fetched_at` advances and it rotates out of the stalest-first
+                // front. Otherwise a delisted / SDEX-only asset keeps its epoch-0
+                // key, leads every run forever, and re-polls Horizon each time
+                // (task 0084 starvation guard).
+                batch.push((asset.asset_id, Decimal::ZERO));
+                absent += 1;
+                tracing::debug!(code = %asset.asset_code, "no Horizon record; writing supply 0");
             }
             Err(err) => {
+                // Transient fetch failure: do NOT write 0 (it would clobber a
+                // good stored value); leave the asset stale so it is retried next
+                // run rather than zeroed on a blip.
                 skipped += 1;
                 tracing::warn!(code = %asset.asset_code, error = %err, "supply fetch failed; skipping");
             }
+        }
+        // Flush once the batch fills. Counts are tallied at decision time above,
+        // so both `written` (real supplies) and `absent` (zero rows) persist even
+        // if the deadline breaks the loop before the next flush — the tail flush
+        // below drains whatever remains.
+        if batch.len() >= SUPPLY_FLUSH_BATCH {
+            write_supplies(ch, &batch).await?;
+            batch.clear();
         }
     }
 
     // Flush the tail.
     if !batch.is_empty() {
         write_supplies(ch, &batch).await?;
-        written += batch.len();
     }
 
     Ok(SupplyStats {
         considered: assets.len(),
         written,
+        absent,
         skipped,
         deferred,
         deadline_hit,

@@ -191,12 +191,16 @@ export interface WorkerLambdaProps extends BaselineLambdaContext {
    */
   readonly errorAlarmActions?: readonly cloudwatch.IAlarmAction[];
   /**
-   * Async-invocation retry attempts for the EventBridge → Lambda target
-   * (default 2). Set to 0 for a long-running best-effort worker where a failed
-   * run must not be re-driven 2× more (each a full multi-minute walk) before the
-   * next schedule — the next tick resumes the work anyway (task 0084 supply).
+   * Lambda **async-invocation** retry attempts (0–2, default 2) for
+   * function-execution errors. Applied via the function's `EventInvokeConfig`
+   * (`configureAsyncInvoke`) — EventBridge invokes the target asynchronously, so
+   * a *function* error is retried by Lambda's own async config, NOT the target's
+   * `RetryPolicy` (which only covers EventBridge→Lambda *delivery* failures). Set
+   * to 0 for a long-running best-effort worker where a failed run must not be
+   * re-driven 2× more (each a full multi-minute walk); the next schedule resumes
+   * the work anyway (task 0084 supply).
    */
-  readonly targetRetryAttempts?: number;
+  readonly asyncRetryAttempts?: number;
 }
 
 export interface WorkerLambda {
@@ -272,9 +276,15 @@ export function createWorkerLambda(
     },
   });
 
+  // Function-execution retries live on the Lambda's async invoke config, not the
+  // EventBridge target's RetryPolicy (which only governs delivery). Set both to
+  // the same bound so neither layer re-drives a long best-effort run.
+  if (props.asyncRetryAttempts !== undefined) {
+    fn.configureAsyncInvoke({ retryAttempts: props.asyncRetryAttempts });
+  }
   rule.addTarget(
     new targets.LambdaFunction(fn, {
-      retryAttempts: props.targetRetryAttempts,
+      retryAttempts: props.asyncRetryAttempts,
     }),
   );
 

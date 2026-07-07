@@ -48,6 +48,7 @@ async fn main() -> Result<(), lambda_runtime::Error> {
             tracing::info!(
                 considered = stats.considered,
                 written = stats.written,
+                absent = stats.absent,
                 skipped = stats.skipped,
                 deferred = stats.deferred,
                 deadline_hit = stats.deadline_hit,
@@ -56,6 +57,7 @@ async fn main() -> Result<(), lambda_runtime::Error> {
             Ok::<serde_json::Value, lambda_runtime::Error>(serde_json::json!({
                 "considered": stats.considered,
                 "written": stats.written,
+                "absent": stats.absent,
                 "skipped": stats.skipped,
                 "deferred": stats.deferred,
                 "deadline_hit": stats.deadline_hit,

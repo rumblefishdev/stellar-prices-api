@@ -36,6 +36,22 @@ history:
       Docker-gated IT for the ordering; `--features lambda`/clippy/fmt + infra
       `tsc` clean. Remaining: post-deploy confirmation (clean run, full coverage,
       `supply-errors` → OK).
+  - date: 2026-07-07
+    status: active
+    who: okarcz
+    note: >
+      High-effort code review (PR #90) found + fixed 4 issues. #1 dead-asset
+      starvation: Ok(None) assets now write supply 0 (task-accepted market_cap=0)
+      so their fetched_at advances and they rotate out of the stalest front
+      instead of leading every run forever; transient Err still skipped (no
+      value clobber). #2 `retryAttempts:0` was on the EventBridge target
+      (delivery), not function-error retries — moved to
+      `fn.configureAsyncInvoke` so the async-retry storm is actually bounded.
+      #3 `SUPPLY_TIME_BUDGET_SECS` clamped to [10, 290] (compile-time invariant
+      < 300 s) so a misconfig can't re-time-out or write nothing. #4 ORDER BY
+      `coalesce(fetched_at, toDateTime(0))` so stalest-first no longer depends on
+      the `join_use_nulls` default. New `absent` stat. 5 unit + const-assert
+      invariant; clippy/fmt/tsc clean.
 ---
 
 # supply-worker times out before completing the asset walk

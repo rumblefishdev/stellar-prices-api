@@ -279,8 +279,9 @@ export class EventBridgeStack extends cdk.Stack {
       },
       // Best-effort + self-resuming: a failed run must not be async-retried 2×
       // more (each a full multi-minute walk); the next schedule picks up the
-      // stalest assets anyway (task 0084).
-      targetRetryAttempts: 0,
+      // stalest assets anyway (task 0084). Applied to the Lambda's async invoke
+      // config (function-error retries), not just the EventBridge target.
+      asyncRetryAttempts: 0,
       // HORIZON_URL unset → the binary's public-Horizon default.
       alarmDescription:
         'Supply Lambda invocation errors (informational; supply is best-effort, market_cap degrades to 0).',
