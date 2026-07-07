@@ -13,6 +13,22 @@
 //! immune to clock skew between the Lambda and ClickHouse — `last_push_at` was
 //! itself written with CH's `now()` by the backfill sink.
 //!
+//! ## Only an *active, already-pushing* backfill is watched (task 0056 finding A)
+//!
+//! [`AGE_QUERY`] publishes an age **only** for a stream that is
+//! `status = 'running'` **and** has pushed at least once (`last_push_at IS NOT
+//! NULL`). A live-only deployment with no historical backfill running (the
+//! post-go-live reality: `backfill_progress` seeded, `backfill_sdex_ledgers`
+//! empty) therefore publishes nothing, the metric goes missing, and the
+//! `NOT_BREACHING` alarm stays OK instead of false-firing on the seed rows'
+//! age. This **supersedes** the earlier `coalesce(last_push_at, started_at)`
+//! fallback: the freshness alarm measures a *push cadence that has stalled*
+//! (Tranche-1 AC #5 — "skip a scheduled push cycle"), which only has meaning
+//! once pushing has begun. A backfill that is *expected but silent* is now an
+//! operator concern of the manual chunked run, not a metric that could not tell
+//! "backfill overdue" apart from "no backfill at all" — that ambiguity was the
+//! go-live false-page (finding A).
+//!
 //! Split for testability: the pure metric-shaping ([`age_metrics`]) is compiled
 //! in every build and unit-tested without the AWS SDK; the actual CloudWatch
 //! publish ([`publish`]) is gated behind the `lambda` feature.
@@ -35,11 +51,11 @@ pub const METRIC_NAME: &str = "PushAgeSeconds";
 pub const SDEX_ARCHIVE_STREAM: &str = "sdex_archive";
 pub const SOROBAN_AMM_STREAM: &str = "soroban_amm";
 
-/// One stream's push age as read from `backfill_progress`, in seconds. For a
-/// stream that has never pushed (`last_push_at` IS NULL) the age is measured
-/// from `started_at` (registration time) instead of a NULL — see [`AGE_QUERY`]
-/// — so a never-pushed stream still ages out. `age_seconds` is therefore never
-/// NULL.
+/// One stream's push age as read from `backfill_progress`, in seconds. Only
+/// streams that are `status = 'running'` and have pushed at least once reach
+/// this struct (see [`AGE_QUERY`]); a paused/completed stream, or one that has
+/// never pushed, is filtered out in SQL and simply produces no row. `age_seconds`
+/// is `now() - last_push_at` and is therefore never NULL.
 #[derive(Debug, Clone, PartialEq, Eq, clickhouse::Row, serde::Deserialize)]
 pub struct StreamAge {
     pub task_name: String,
@@ -65,22 +81,32 @@ pub fn age_metrics(rows: &[StreamAge]) -> Vec<Metric> {
         .collect()
 }
 
-/// SQL that reads each stream's push age (latest row per stream via `FINAL`).
-/// Age is `now() - coalesce(last_push_at, started_at)` evaluated in ClickHouse:
-/// seconds since the last push, or — for a stream that has never pushed — since
-/// its registration (`started_at`, which the backfill sink preserves across row
-/// updates). The `started_at` fallback is the fix for the never-first-pushed
-/// blind spot: a NULL `last_push_at` used to publish a sentinel that sat
-/// permanently below the threshold, so a first push that was overdue (or never
-/// came) never fired the alarm. Now the stream keeps aging from registration,
-/// so once it exceeds the freshness threshold the alarm fires — "alarm once the
-/// Tranche-1 window opens" (§5.6). `started_at` is non-nullable, so `coalesce`
-/// always yields a value and `age_seconds` is never NULL.
+/// SQL that reads each *active, already-pushing* stream's push age (latest row
+/// per stream via `FINAL`). Age is `now() - last_push_at` evaluated in
+/// ClickHouse: seconds since the last push.
+///
+/// The `WHERE status = 'running' AND last_push_at IS NOT NULL` guard is the
+/// task 0056 finding-A fix. It excludes:
+/// - **live-only seed rows** — `backfill_progress` is seeded `status='running'`
+///   with a NULL `last_push_at`; with no backfill actually pushing, the old
+///   `coalesce(…, started_at)` fallback aged them from seed time and sat the
+///   alarm permanently in ALARM (the go-live false-page). A NULL `last_push_at`
+///   now yields no row → no metric → `NOT_BREACHING` → OK.
+/// - **paused streams** — the documented `status='paused'` seam *between* the
+///   two backfill runs (§5.6) no longer needs to lean on `NOT_BREACHING`.
+/// - **completed streams** — a finished backfill legitimately stops pushing and
+///   must not page.
+///
+/// A running backfill that *has* pushed and then stalls keeps `status='running'`
+/// with a stale `last_push_at`, so its age climbs and the alarm fires — exactly
+/// Tranche-1 AC #5. Because the filter guarantees a non-NULL `last_push_at`,
+/// `age_seconds` is never NULL.
 pub const AGE_QUERY: &str = "SELECT \
      task_name, \
-     toInt64(toUnixTimestamp(now()) - toUnixTimestamp(coalesce(last_push_at, started_at))) \
+     toInt64(toUnixTimestamp(now()) - toUnixTimestamp(last_push_at)) \
        AS age_seconds \
    FROM backfill_progress FINAL \
+   WHERE status = 'running' AND last_push_at IS NOT NULL \
    ORDER BY task_name";
 
 /// Publish `metrics` to CloudWatch under [`METRIC_NAMESPACE`] as
@@ -143,12 +169,11 @@ mod tests {
     }
 
     #[test]
-    fn never_pushed_stream_ages_out_and_can_breach() {
-        // A never-pushed stream no longer publishes a permanently-OK sentinel:
-        // AGE_QUERY ages it from `started_at`, so once it has existed past the
-        // freshness threshold the published age exceeds it and the alarm fires
-        // ("alarm once the Tranche-1 window opens", §5.6). Here an 8-day-old
-        // never-pushed stream is over the 7-day default and would breach.
+    fn running_pushed_stream_that_stalls_can_breach() {
+        // A running backfill that has pushed and then stalls keeps aging its
+        // `last_push_at`; AGE_QUERY returns that climbing age (only running +
+        // already-pushed streams survive the WHERE guard), so an 8-day-old push
+        // is over the 7-day default and would breach (Tranche-1 AC #5).
         let eight_days = 8 * 86_400;
         let rows = vec![StreamAge {
             task_name: SDEX_ARCHIVE_STREAM.to_string(),
@@ -157,6 +182,19 @@ mod tests {
         let m = age_metrics(&rows);
         assert_eq!(m[0].value, eight_days as f64);
         assert!(m[0].value > 7.0 * 86_400.0);
+    }
+
+    #[test]
+    fn age_query_gates_on_running_and_pushed() {
+        // Finding A: only an active, already-pushing backfill is watched, so a
+        // live-only deployment's seed rows (running, NULL last_push_at) and the
+        // paused/completed seams never publish an age → no false-fire.
+        assert!(AGE_QUERY.contains("status = 'running'"));
+        assert!(AGE_QUERY.contains("last_push_at IS NOT NULL"));
+        // The superseded started_at fallback must be gone (it was the false-fire
+        // source in live-only).
+        assert!(!AGE_QUERY.contains("coalesce"));
+        assert!(!AGE_QUERY.contains("started_at"));
     }
 
     #[test]

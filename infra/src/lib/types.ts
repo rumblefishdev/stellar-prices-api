@@ -137,6 +137,17 @@ export interface EnvironmentConfig {
     readonly sdexPushFreshnessSeconds: number;
     /** Days-to-NotAfter below which the mTLS cert-expiry alarm fires (30). */
     readonly mtlsNotAfterDaysThreshold: number;
+    /**
+     * Ingestion-lag threshold (seconds) for the live ledger-processor alarm
+     * (task 0056 finding B). Watches the `prices-ingest-{env}` SQS queue's
+     * `ApproximateAgeOfOldestMessage` — the honest "processor is falling
+     * behind" signal, since the ledger-processor emits no custom lag metric.
+     * Ledgers close ~every 5–6 s and a healthy processor drains the doorbell in
+     * seconds, so an oldest-message age sustained above this means live
+     * ingestion is lagging. Default 60 s (ADR 0007 / task 0038's intended
+     * `lag_seconds > 60s`).
+     */
+    readonly ledgerProcessorLagSeconds: number;
   };
 
   // Ledger Processor ingest (consumed by IngestStack — task 0038)
@@ -327,6 +338,14 @@ export function validateConfig(config: EnvironmentConfig): void {
     ) {
       errors.push(
         `opsAlarms.mtlsNotAfterDaysThreshold must be a positive integer (days), got: ${ops.mtlsNotAfterDaysThreshold}`,
+      );
+    }
+    if (
+      !Number.isInteger(ops.ledgerProcessorLagSeconds) ||
+      ops.ledgerProcessorLagSeconds < 1
+    ) {
+      errors.push(
+        `opsAlarms.ledgerProcessorLagSeconds must be a positive integer (seconds), got: ${ops.ledgerProcessorLagSeconds}`,
       );
     }
     // Require a real local@domain.tld shape, not just a stray '@': a value like
