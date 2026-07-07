@@ -32,6 +32,19 @@ history:
       `router_swap_is_not_flagged_but_genuine_pool_swap_still_is` asserts both +
       no candle (double-count boundary). 32/32 crate tests pass. Both code-side
       ACs met. Starting Step 2 (underlying-pool coverage).
+  - date: 2026-07-07
+    status: active
+    who: okarcz
+    note: >
+      Step 2 CLOSED via targeted archive fetch (2 endpoint ledgers, no full
+      re-run). Decisive: at the tranche's early Soroban epoch the underlying
+      pools emit NO events — the router `swap` (data = [pool, tin, tout, amt_in,
+      amt_out]) is the SOLE trade record. So `amm_ticks: 0` is genuine bounded
+      volume loss, NOT a discovery/seed bug. The sample's "router redundant with
+      pool `trade`" holds only for the later epoch (62.0M, 14/14). Early-epoch
+      coverage gap → 0080 (accept router as priceable / new extractor). Guard
+      fix still correctly unblocks the backfill. AC3 checked. Only Step 3 (full
+      re-run, no-fatal confirm) remains.
 ---
 
 # Aquarius-router `swap` false-positive fatals the combined backfill
@@ -113,13 +126,16 @@ unknown-pool `swap` (non-Vec shape). Regression guard on the double-count bounda
       (commit 4aef1f1 — `is_aquarius_router_swap()` filter in `classify_amm_groups`)
 - [x] Genuine unregistered-pool `swap`s still trip the guard (safety net intact).
       (regression test asserts a non-Vec `swap` is still recorded as unresolved)
-- [~] Confirmed whether the 3 pairs' underlying Aquarius pool `trade` volume is
+- [x] Confirmed whether the 3 pairs' underlying Aquarius pool `trade` volume is
       captured; if not, root-caused (in-window discovery bug vs pre-window seed
-      gap → 0080). **Partial (Step 2 findings):** router `swap` proven redundant
-      with a captured, resolvable pool `trade` (14/14 in sample) — no double-count,
-      guard fix drops nothing real. The tranche-specific `amm_ticks: 0` root cause
-      needs the Step 3 re-run's actual `add_pool`/`trade` events (local CH holds
-      no fatal-run data). CL single-topic `swap` gap split off to 0080.
+      gap → 0080). **Confirmed via targeted archive fetch of the two endpoint
+      ledgers:** the underlying pools emit NO events at this early epoch — the
+      router `swap` is the sole trade record. So `amm_ticks: 0` is genuine volume
+      loss, NOT a discovery/seed bug. Root cause = early-epoch AMM surfaces trades
+      only through the router summary (no pool `trade`), which no extractor handles.
+      → coverage gap owned by **0080** (accept router as priceable for the early
+      window / new extractor). The sample's "router redundant with `trade`" holds
+      only for the later epoch (62.0M, 14/14). Guard fix still correctly unblocks.
 - [ ] Tranche `[50457424, 50687999]` re-runs clean (no fatal) → **full combined
       run unblocked**.
 
@@ -148,17 +164,52 @@ Analysed the captured samples in `lore/4-notes/samples/soroban-events/`
    by any extractor. Those would land in `unresolved_pools` legitimately. This is
    the **0080** concentrated-pool question, distinct from the router false-positive.
 
-**Not yet closed — the tranche's `amm_ticks: 0`.** The samples are a *different*
-window (62.0M) and a *different* router than the tranche's three emitters
-(`CANMWW5D…/CBVSLUYH…/CDVTDAUA…`, 50.6M). The local CH volume holds none of the
-fatal-exited run's data (guard aborted before persistence; `unresolved_pools`,
-`pool_registry`, `price_ohlcv_1m` all 0 rows). Whether the tranche's underlying
-pool `trade`s were dropped for want of registration (in-window `add_pool`
-discovery bug) vs a pool-type/shape gap (→ 0080) can only be settled with that
-window's actual `add_pool`/`trade` events. The **Step 3 re-run** (now unblocked
-by the guard fix) is the vehicle: re-run `[50457424, 50687999]` and inspect
-whether `add_pool` registers the three routers' `data[0]` pools and whether their
-`trade`s resolve to candles.
+### Targeted-fetch result (2026-07-07) — DECISIVE, and it revises the above
+
+Fetched the two endpoint ledgers of the tranche's router swaps straight from the
+public archive (`aws s3 cp --no-sign-request`, one `.xdr.zst` per ledger) and
+dumped **every** non-diagnostic event with a throwaway `xdr-parser` example
+(BE crate, reused `extract_events`; removed after):
+
+- **L50639018** — router `CBVSLUYH…` `swap`, `data[0]` pool
+  `CC7LUVAF…`, topic[1] `Vec([CBDIIPX3…, CB3I5U7S…])`, amounts `100000000 →
+  98911870`.
+- **L50686276** — router `CANMWW5D…` `swap`, `data[0]` pool
+  `CCKWA3RE…`, topic[1] `Vec([CAS3J7GY…, CAUIKL3I…])`, amounts `10000000 →
+  514069487`.
+
+**The underlying pools emit NOTHING.** Across both full ledgers (2071 events;
+signatures `transfer 1528, fee 534, set_authorized 4, approve 2, swap 2,
+burn 1`) there is **no `trade`, no `sync`, no `add_pool`**, and the pool
+addresses `CC7LUVAF…`/`CCKWA3RE…` emit **zero** events. Each router-swap tx is
+just `fee` + `approve` + token `transfer`s + the router `swap`. So at this early
+Soroban epoch (Protocol-20 launch, ~2024-02/03) **the router `swap` is the SOLE
+machine-readable trade record** — its data already carries
+`[pool, token_in, token_out, amount_in, amount_out]`, a complete trade.
+
+**Therefore `amm_ticks: 0` is genuine, bounded volume loss — not merely a guard
+false-positive.** The Step-2-sample "router is redundant with a captured pool
+`trade`" conclusion holds **only for the later epoch** (62.0M, where pools *do*
+emit `trade` — 14/14). Early-epoch AMM trades surface *only* via the router
+`swap`, which no extractor handles, so their volume is silently dropped. The
+"do-NOT-match-the-router → double-count" rule is **epoch-dependent**: matching it
+early would NOT double-count (there is no pool `trade` to double).
+
+Root cause of `amm_ticks: 0` = **not** an in-window `add_pool` discovery bug and
+**not** a pre-window seed gap — it is that this epoch's AMM exposes trades only
+through the router summary. This is a coverage gap that belongs with **0080**
+(Aquarius/router swap-event shapes across epochs) — a *new-extractor / accept the
+router as a priceable source for the early window* decision, distinct from and
+larger than 0087's guard fix.
+
+**Bounds the gap:** volume is lost only for the window `[activation .. pools begin
+emitting `trade`]`; the later epoch (verified at 62.0M) resolves normally via
+`trade`. Quantifying that cutover ledger is 0080/0053 follow-up work.
+
+The guard fix remains correct and sufficient to **unblock** the backfill (stops
+the fatal); the early-epoch volume completeness is a separate, now-root-caused
+gap. Step 3 (full re-run) will confirm no-fatal end-to-end and let the operator
+measure how much early-epoch AMM volume the router-only path represents.
 
 ## Notes
 
