@@ -147,6 +147,12 @@ Each ledger's XDR is downloaded once (download is the bottleneck, not parsing),
 so the two runs never download a ledger twice. **Full SDEX deep-dive:
 [`backfill-sdex.md`](backfill-sdex.md).**
 
+> **Running the remaining historical chunks?** Follow the from-scratch,
+> step-by-step guide **[`continue-soroban-backfill.md`](continue-soroban-backfill.md)** —
+> prerequisites, fastest region, fetching the `prices_writer` mTLS bundle, finding
+> the resume point, running/verifying a chunk, and stop-and-re-run. Written so a
+> first-timer (incl. BE) can drive it end to end.
+
 - **Soroban era — combined.** `--mode combined --start <activation> --end <tip>`
   extracts **SDEX + AMM + oracle** from one download per ledger
   (`source='sdex'` plus `phoenix`/`soroswap`/`aquarius`).
