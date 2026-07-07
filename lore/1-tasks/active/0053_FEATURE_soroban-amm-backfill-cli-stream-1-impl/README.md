@@ -125,6 +125,24 @@ history:
       (keeps the task active): the real two-range archive run + Hetzner
       direct-write, the Nov-2023 Soroswap OHLCV verification, greening the
       Docker-gated CH integration tests, and PR review/merge.
+  - date: 2026-07-07
+    status: active
+    who: okarcz
+    note: >
+      **First clean forward chunk executed on prod.** After 0087 unblocked the
+      router guard (PR #92, merged), ran combined `[50688000, 51007999]` (5×64k
+      partitions) direct-write to Hetzner: 320000/320000 ledgers, 0 skipped; SDEX
+      29.79M ticks → 17.22M candles; AMM=0, oracle=0 (both expected this early —
+      pools emit only router summaries per 0087/0080, Reflector/Redstone not live
+      yet). `soroban_amm.current_ledger` advanced 50687999 → 51007999. **0087 fix
+      CONFIRMED on real prod data:** zero NEW unresolved rows from this chunk; the
+      3 rows in `prices.unresolved_pools` (CANMWW5D/CBVSLUYH/CDVTDAUA, swap_count
+      16/1/1, first_ledger < 50688000) are pre-fix leftovers from the first fatal
+      tranche. **Throughput measured:** 59 GB in 12328 s (~3.4 h), ~4.8 MB/s,
+      ~184 KB/ledger, ~64 min/100k — ~100% download-bound (faster than the 82
+      estimate). Also greened the 3 Docker-gated CH ITs locally
+      (candles/pool_registry/progress). Resume workflow validated: `--start =
+      soroban_amm.current_ledger + 1`, +320k steps, `--end` floor 63352611.
 ---
 
 # Combined single-pass historical backfill (SDEX + Soroban AMM)
@@ -415,6 +433,29 @@ minute-alignment guard** — are implemented. 54 unit tests pass; `cargo check
 
 Per standing rules these are operator-run against real infra (archive fetch +
 Hetzner), not executed autonomously.
+
+### Operational progress — the run itself (updated 2026-07-07)
+
+The two-range run is underway as **chunked forward combined passes**: resume from
+`soroban_amm.current_ledger`, step in 320k-ledger (5×64k-partition) chunks,
+each direct-written to Hetzner and **run to completion** (pool_registry persists
+only at run-end). Chunk boundary = one accepted one-minute seam per source.
+
+| Range | Status |
+|-------|--------|
+| `[activation, 50687999]` | data + `pool_registry` landed, but the run **fatal-exited** on the 0087 router guard (now fixed + merged, PR #92). |
+| `[50688000, 51007999]` | ✅ **first clean forward chunk (2026-07-07)** — 320000 ledgers, SDEX 17.22M candles, AMM=0/oracle=0 (expected early epoch), 0 new unresolved. 0087 confirmed on prod. ~3.4 h, 59 GB, download-bound. |
+| `[51008000, 63352611]` remaining combined | ~12.3M ledgers ≈ **~2.3 TB / ~5.6 days** continuous at the measured ~4.8 MB/s. |
+| `[1, 50457423]` pre-Soroban SDEX tail | ~50.5M ledgers (~4× larger) — run `--mode sdex-only` after the combined range, with `--tip <live tip>`. |
+
+**Measured throughput (2026-07-07):** ~184 KB/ledger, ~4.8 MB/s, ~64 min/100k —
+~100% download-bound. **Strongly consider a us-east-1 EC2** (S3-local) to collapse
+download time before committing weeks of home bandwidth.
+
+**`--end` floor stays 63352611** (SDEX live floor − 1). Backfill now contaminates
+`min(sdex ledger)` in `price_ohlcv_1m`, so re-derive the live floor from a
+non-backfilled source (or the live cursor) before the **final** combined chunk;
+it only moves forward, so 63352611 remains a safe ceiling meanwhile.
 
 ## Blocked on
 
