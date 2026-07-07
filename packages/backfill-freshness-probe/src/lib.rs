@@ -44,10 +44,13 @@ pub const METRIC_NAMESPACE: &str = "Prices/Backfill";
 pub const METRIC_NAME: &str = "PushAgeSeconds";
 
 /// Canonical stream `task_name`s (mirror `prices.backfill_progress`). The SDEX
-/// archive stream is the one the Tranche-1 freshness alarm watches; the Soroban
-/// AMM stream's age is published for forensic value but has no wired alarm (it
-/// completes in a single push then transitions to `completed` — ongoing
-/// freshness is not meaningful; task Out-of-scope).
+/// archive stream is the one the Tranche-1 freshness alarm watches. The Soroban
+/// AMM stream has no wired alarm (it completes in a single push then transitions
+/// to `completed` — ongoing freshness is not meaningful; task Out-of-scope). Its
+/// age is published for forensic value *only while it is still `running` and has
+/// pushed* — the [`AGE_QUERY`] `status='running'` gate stops emitting it once it
+/// reaches `completed`/`paused`, which for this one-shot stream is its normal
+/// end state.
 pub const SDEX_ARCHIVE_STREAM: &str = "sdex_archive";
 pub const SOROBAN_AMM_STREAM: &str = "soroban_amm";
 
@@ -55,7 +58,9 @@ pub const SOROBAN_AMM_STREAM: &str = "soroban_amm";
 /// streams that are `status = 'running'` and have pushed at least once reach
 /// this struct (see [`AGE_QUERY`]); a paused/completed stream, or one that has
 /// never pushed, is filtered out in SQL and simply produces no row. `age_seconds`
-/// is `now() - last_push_at` and is therefore never NULL.
+/// is `now() - last_push_at` wrapped in `assumeNotNull` (see [`AGE_QUERY`]) so
+/// the column is non-`Nullable(Int64)` and deserializes into this plain `i64`;
+/// it is therefore never NULL.
 #[derive(Debug, Clone, PartialEq, Eq, clickhouse::Row, serde::Deserialize)]
 pub struct StreamAge {
     pub task_name: String,
@@ -99,15 +104,32 @@ pub fn age_metrics(rows: &[StreamAge]) -> Vec<Metric> {
 ///
 /// A running backfill that *has* pushed and then stalls keeps `status='running'`
 /// with a stale `last_push_at`, so its age climbs and the alarm fires — exactly
-/// Tranche-1 AC #5. Because the filter guarantees a non-NULL `last_push_at`,
-/// `age_seconds` is never NULL.
+/// Tranche-1 AC #5.
+///
+/// Two ClickHouse-typing details:
+/// - **`assumeNotNull(last_push_at)`** — the `WHERE … IS NOT NULL` predicate
+///   removes NULL *rows* but does **not** narrow the *column's* static type, so
+///   `toUnixTimestamp(last_push_at)` (and the `toInt64(…)` around it) would stay
+///   `Nullable`. `age_seconds` is a plain `i64` (not `Option`), and the
+///   `clickhouse` crate rejects a `Nullable(Int64)` column into a non-`Option`
+///   field. `assumeNotNull` (safe here — the `WHERE` guarantees non-NULL) keeps
+///   the column non-`Nullable`, matching the repo's `Option`-or-strip convention
+///   (cf. `sink.rs`'s `toUnixTimestamp(Nullable)` → `Option<u32>` reads). The
+///   old `coalesce(…, started_at)` yielded this non-NULL column for free.
+/// - **`SETTINGS optimize_move_to_prewhere_if_final = 0`** — `status`/
+///   `last_push_at` are not in the sort key, so moving them to PREWHERE would
+///   evaluate them on unmerged parts and could surface a stale pre-`FINAL`
+///   version (e.g. an old `running` row of a since-`completed` stream). The
+///   setting defaults to 0, but pinning it makes the query correct regardless of
+///   the connection profile.
 pub const AGE_QUERY: &str = "SELECT \
      task_name, \
-     toInt64(toUnixTimestamp(now()) - toUnixTimestamp(last_push_at)) \
+     toInt64(toUnixTimestamp(now()) - toUnixTimestamp(assumeNotNull(last_push_at))) \
        AS age_seconds \
    FROM backfill_progress FINAL \
    WHERE status = 'running' AND last_push_at IS NOT NULL \
-   ORDER BY task_name";
+   ORDER BY task_name \
+   SETTINGS optimize_move_to_prewhere_if_final = 0";
 
 /// Publish `metrics` to CloudWatch under [`METRIC_NAMESPACE`] as
 /// [`METRIC_NAME`], each tagged with `Environment` + `Stream` dimensions. One
@@ -195,6 +217,13 @@ mod tests {
         // source in live-only).
         assert!(!AGE_QUERY.contains("coalesce"));
         assert!(!AGE_QUERY.contains("started_at"));
+        // `age_seconds` must stay non-Nullable(Int64) so it deserializes into the
+        // plain i64 field — the WHERE filters NULL rows but does not narrow the
+        // column type, so the expression is wrapped in assumeNotNull.
+        assert!(AGE_QUERY.contains("assumeNotNull(last_push_at)"));
+        // FINAL + non-sort-key predicate must not be moved to PREWHERE (stale
+        // pre-merge version guard).
+        assert!(AGE_QUERY.contains("optimize_move_to_prewhere_if_final = 0"));
     }
 
     #[test]
