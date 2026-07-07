@@ -23,7 +23,7 @@
   "opsAlarms": {
     "sdexPushFreshnessSeconds": 604800,
     "mtlsNotAfterDaysThreshold": 30,
-    "ledgerProcessorLagSeconds": 60
+    "ledgerProcessorLagSeconds": 120
   },
   "ledgerProcessor": {
     "memoryMb": 512,

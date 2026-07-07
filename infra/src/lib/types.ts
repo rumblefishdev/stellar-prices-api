@@ -143,9 +143,11 @@ export interface EnvironmentConfig {
      * `ApproximateAgeOfOldestMessage` — the honest "processor is falling
      * behind" signal, since the ledger-processor emits no custom lag metric.
      * Ledgers close ~every 5–6 s and a healthy processor drains the doorbell in
-     * seconds, so an oldest-message age sustained above this means live
-     * ingestion is lagging. Default 60 s (ADR 0007 / task 0038's intended
-     * `lag_seconds > 60s`).
+     * seconds, so an oldest-message age sustained (5×1 min) above this means
+     * live ingestion is lagging. Default 120 s — above the ADR 0007 / task 0038
+     * `lag_seconds > 60s` intent, to give routine deploys / cold starts headroom
+     * before the sustained-lag alarm pages (a real stall keeps climbing well
+     * past it).
      */
     readonly ledgerProcessorLagSeconds: number;
   };

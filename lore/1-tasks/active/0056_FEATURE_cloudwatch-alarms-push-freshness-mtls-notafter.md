@@ -280,9 +280,9 @@ last write / cursor advance). Decide + implement.
 > this false-page). Live-only seed rows (running, NULL `last_push_at`) and the
 > paused/completed seams publish no metric → `NOT_BREACHING` → OK; a running
 > backfill that has pushed then stalls still fires (AC #5). The live-ingestion
-> plane is instead covered by the finding-B ledger-processor alarms below, not by
-> repurposing this backfill-cadence alarm. 4 unit tests. Deploy-confirm the alarm
-> reads OK in live-only remains operational.
+> plane is covered by the finding-B ledger-processor alarms below (including the
+> no-invocations halt detector), not by repurposing this backfill-cadence alarm.
+> 4 unit tests. Deploy-confirm the alarm reads OK in live-only remains operational.
 
 **B. The ledger-processor has no `lag_seconds`/error alarm deployed.**
 `prices.ledger_processor.lag_seconds` appears only as a **comment** in
@@ -296,23 +296,30 @@ existed — that AC has been corrected to point here.)
 > **Resolved in code (2026-07-08, same branch).** The ledger-processor emits
 > **no** custom metric (`lag_seconds` was only ever a comment — grep confirms
 > zero emission), so rather than add Rust emission + a processor redeploy, the
-> three alarms ride AWS-native metrics, built by deterministic physical name so
+> alarms ride AWS-native metrics, built from ComputeStack's exported name helpers
+> (`ledgerProcessorFunctionName` / `ingestQueueName` / `ingestDlqName`) so
 > `ObservabilityStack` needs no cross-stack ref (mirrors the `opsAlarmsTopicName`
-> import pattern):
+> import pattern) yet shares one source of truth — a rename can't silently orphan
+> an alarm:
 > - **`prices-{env}-ledger-processor-lag`** — ingest queue
 >   `AWS/SQS ApproximateAgeOfOldestMessage` > `opsAlarms.ledgerProcessorLagSeconds`
->   (new config, default **60 s**), sustained 3×1 min. The honest "processor
->   falling behind" proxy: ledgers close ~every 5–6 s and a healthy processor
->   drains the doorbell in seconds, so a rising oldest-message age *is* ingestion
->   lag.
+>   (new config, default **120 s**), sustained **5×1 min** (headroom so routine
+>   deploys / cold starts don't false-page; a real stall keeps climbing). The
+>   honest "processor falling behind" proxy.
 > - **`prices-{env}-ledger-processor-errors`** — `AWS/Lambda Errors` ≥ 1 over
 >   5 min (handler crashes).
 > - **`prices-{env}-ledger-processor-dlq`** — ingest-DLQ
 >   `ApproximateNumberOfMessagesVisible` ≥ 1. Catches poison-pill doorbells that
->   `reportBatchItemFailures` re-drives to the DLQ **without** a Lambda Error, so
->   the Errors alarm alone would miss a dropped-ledger candle gap.
+>   `reportBatchItemFailures` re-drives to the DLQ **without** a Lambda Error.
+> - **`prices-{env}-ledger-processor-no-invocations`** — `AWS/Lambda Invocations`
+>   < 1 over 15 min, **`treatMissingData: BREACHING`**. Closes the halt blind
+>   spot the other three share: they key on *present* messages, so a producer-side
+>   stop (S3→SNS→SQS delivery halts / subscription removed) drains the queue and
+>   invokes nothing — invisible to lag/errors/DLQ. Zero invocations for 15 min on
+>   a chain that closes a ledger every ~5–6 s is a genuine outage. (Added after
+>   the PR #97 self-review flagged the gap.)
 >
-> All three → `prices-{env}-ops-alarms`, `NOT_BREACHING`. Synth-verified against
+> All → `prices-{env}-ops-alarms`. Synth-verified against
 > `Prices-production-Observability`. Deploy of the Observability stack is
 > operational.
 
