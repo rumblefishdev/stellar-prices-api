@@ -45,6 +45,18 @@ history:
       coverage gap → 0080 (accept router as priceable / new extractor). Guard
       fix still correctly unblocks the backfill. AC3 checked. Only Step 3 (full
       re-run, no-fatal confirm) remains.
+  - date: 2026-07-07
+    status: active
+    who: okarcz
+    note: >
+      DECISION — skip early-epoch router pricing now, defer to 0080. Rationale:
+      guard fix already unblocks 0053; lost volume is small + early (18 swaps in
+      the first fortnight) + idempotently re-fillable via a targeted early-window
+      re-run. The full same-tx-dedup design + quantification + the two open
+      decisions (source tag, protocol identity, bounded-vs-ongoing probe) are
+      recorded in 0080's "Related gap" section. 0087's own scope (stop the fatal)
+      is complete; AC4 (full-tranche no-fatal) folds into the 0053 backfill run
+      (guard unit test already proves the no-fatal boundary). Ready for PR.
 ---
 
 # Aquarius-router `swap` false-positive fatals the combined backfill
@@ -136,8 +148,10 @@ unknown-pool `swap` (non-Vec shape). Regression guard on the double-count bounda
       → coverage gap owned by **0080** (accept router as priceable for the early
       window / new extractor). The sample's "router redundant with `trade`" holds
       only for the later epoch (62.0M, 14/14). Guard fix still correctly unblocks.
-- [ ] Tranche `[50457424, 50687999]` re-runs clean (no fatal) → **full combined
-      run unblocked**.
+- [~] Tranche `[50457424, 50687999]` re-runs clean (no fatal) → **full combined
+      run unblocked**. Guard unit test proves the no-fatal boundary; the live
+      full-tranche confirmation folds into the 0053 backfill run (deferred, not a
+      separate exercise).
 
 ## Blocks
 
@@ -216,5 +230,11 @@ measure how much early-epoch AMM volume the router-only path represents.
 - **Do NOT** add a swap-matcher for the router event — it would double-count the
   pool-level `trade`. The router event is correctly ignored for pricing; the only
   defect is the guard mis-flagging it as a gap.
+  - **Update (2026-07-07):** this is **epoch-conditional**. It holds for the later
+    epoch (pool emits `trade`; router redundant). At the EARLY epoch the pool
+    emits nothing, so the router `swap` is the sole trade and ignoring it drops
+    real volume. Pricing it safely requires a same-tx dedup (price only when the
+    `data[0]` pool produced no tick in the tx). Deferred to **0080** — see its
+    "Related gap" section. Not in 0087's scope (0087 = stop the fatal only).
 - SDEX extraction on the tranche was fully correct (~21.5M ticks → ~12.9M candles
   over `[50457424, 50687999]`); this task is AMM-only.
