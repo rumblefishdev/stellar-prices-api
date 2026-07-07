@@ -389,6 +389,23 @@ minute-alignment guard** — are implemented. 54 unit tests pass; `cargo check
    Hetzner: combined `[activation, tip]` then sdex-only `[1, activation-1]`
    (`--tip` = live tip). Confirm single-download coverage, the guard never
    fires on the clean run, and truthful monotonic `/backfill/status`.
+
+   **Combined-run `--end` seam (confirmed 2026-07-07).** The combined run must
+   stop *below* the floor of live ingestion, never at/above it — same-source
+   minute overlap in `ReplacingMergeTree(version)` silently undercounts (keeps
+   the higher-version candle, never sums). Live coverage floors, read from
+   `prices.price_ohlcv_1m FINAL` (`min(toUInt64(version) DIV 1000)` per source):
+   `sdex = 63352612`, `aquarius = 63352617`, `phoenix = 63352792`. **SDEX is the
+   lowest**, and live only moves *forward*, so `63352612` is a stable floor
+   across all sources. Therefore **combined `--end = 63352612 − 1 = 63352611`** —
+   guarantees no ledger is written by both backfill and live for any source. The
+   single boundary minute (`2026-07-06 09:35:00`, live's first candle) is owned
+   by live; if live started mid-minute it may undercount by a handful of
+   pre-floor trades — the documented, accepted one-minute seam. Re-read the SDEX
+   floor right before launch and recompute `--end = floor − 1` if it changed
+   (it won't decrease, but a live restart from a different cursor would move it).
+   Pass `--tip` = current live tip (~`63365946`+, climbing ~12/min) explicitly,
+   since `--end` sits below the tip and would otherwise skew `progress_pct`.
 2. **Verify OHLCV for Soroswap pairs on Nov 2023 dates** (the Tranche-1 AC data
    check) once the run lands.
 3. **Green the Docker-gated CH integration tests** (`candles_it`,
