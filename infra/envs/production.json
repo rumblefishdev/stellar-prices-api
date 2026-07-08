@@ -25,8 +25,8 @@
     "mtlsNotAfterDaysThreshold": 30,
     "ledgerProcessorLagSeconds": 120,
     "slack": {
-      "workspaceIdSsmParam": "/soroban-explorer/production/slack-workspace-id",
-      "channelIdSsmParam": "/soroban-explorer/production/slack-channel-id"
+      "workspaceIdSsmParam": "/prices/production/slack-workspace-id",
+      "channelIdSsmParam": "/prices/production/slack-channel-id"
     }
   },
   "ledgerProcessor": {

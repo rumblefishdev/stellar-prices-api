@@ -254,9 +254,12 @@ export class ObservabilityStack extends cdk.Stack {
 
     const snsAction = new cw_actions.SnsAction(this.opsAlarmsTopic);
 
+    // Every alarm gets both an ALARM and an OK action on the ops topic, so the
+    // Slack channel sees the recovery as well as the breach (task 0056).
     // The enrichment backlog alarm (task 0026) shipped without an action; wire
     // it to the ops topic now that 0056 owns the alarm-routing.
     this.enrichmentBacklogAlarm.addAlarmAction(snsAction);
+    this.enrichmentBacklogAlarm.addOkAction(snsAction);
 
     // SDEX push freshness (§5.6 / Tranche-1 AC #5). The backfill-freshness-probe
     // republishes `sdex_archive`'s push age (seconds) as Prices/Backfill
@@ -290,6 +293,7 @@ export class ObservabilityStack extends cdk.Stack {
       },
     );
     this.sdexPushFreshnessAlarm.addAlarmAction(snsAction);
+    this.sdexPushFreshnessAlarm.addOkAction(snsAction);
 
     // mTLS cert expiry (§7 / §11.4). The mtls-notafter-probe publishes the
     // minimum days-to-NotAfter across the ingestion + api client certs; alarm
@@ -313,6 +317,7 @@ export class ObservabilityStack extends cdk.Stack {
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     });
     this.mtlsNotAfterAlarm.addAlarmAction(snsAction);
+    this.mtlsNotAfterAlarm.addOkAction(snsAction);
 
     // -----------------------------------------------------------------
     // Live ledger-processor health (task 0056 finding B). The core ingestion
@@ -368,6 +373,7 @@ export class ObservabilityStack extends cdk.Stack {
       },
     );
     this.ledgerProcessorLagAlarm.addAlarmAction(snsAction);
+    this.ledgerProcessorLagAlarm.addOkAction(snsAction);
 
     // Hard errors: the ledger-processor Lambda throwing (a crash, not a graceful
     // per-item batch failure). Any invocation error over 5 min pages.
@@ -394,6 +400,7 @@ export class ObservabilityStack extends cdk.Stack {
       },
     );
     this.ledgerProcessorErrorAlarm.addAlarmAction(snsAction);
+    this.ledgerProcessorErrorAlarm.addOkAction(snsAction);
 
     // Poison-pill / permanent-failure doorbells: under reportBatchItemFailures a
     // handler that keeps failing one item re-drives it (no Lambda Error) until
@@ -424,6 +431,7 @@ export class ObservabilityStack extends cdk.Stack {
       },
     );
     this.ledgerProcessorDlqAlarm.addAlarmAction(snsAction);
+    this.ledgerProcessorDlqAlarm.addOkAction(snsAction);
 
     // Total ingestion halt: the lag / errors / DLQ alarms above all key on the
     // *presence* of enqueued or failed messages, so a producer-side stop (BE's
@@ -461,6 +469,7 @@ export class ObservabilityStack extends cdk.Stack {
       },
     );
     this.ledgerProcessorNoInvocationsAlarm.addAlarmAction(snsAction);
+    this.ledgerProcessorNoInvocationsAlarm.addOkAction(snsAction);
 
     new cdk.CfnOutput(this, 'OpsAlarmsTopicArn', {
       value: this.opsAlarmsTopic.topicArn,

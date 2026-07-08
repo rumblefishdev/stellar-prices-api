@@ -155,9 +155,11 @@ export interface EnvironmentConfig {
      * When set, `ObservabilityStack` subscribes `prices-{env}-ops-alarms` to a
      * Slack channel via a `SlackChannelConfiguration`, so alarms land in Slack —
      * matching how BE routes its own CloudWatch alarms (no ops email/mailing
-     * list). Reuses BE's existing channel by reading the same SSM params
-     * (`/soroban-explorer/{env}/slack-{workspace,channel}-id`) in the shared
-     * account; the Slack workspace is already authorized in AWS Chatbot for BE.
+     * list). Prices has its **own** channel (`#stellar-prices-api-bot`), not BE's,
+     * so these point at **prices-owned** params
+     * (`/prices/{env}/slack-{workspace,channel}-id`) per the SSM ownership split.
+     * The workspace ID is the same shared Slack workspace BE already authorized in
+     * AWS Chatbot (only the channel differs), so no re-authorization is needed.
      * Omit to leave the topic subscriber-less (managed manually in SNS).
      *
      * Values are SSM Parameter *names* (plain String, not credentials), resolved
