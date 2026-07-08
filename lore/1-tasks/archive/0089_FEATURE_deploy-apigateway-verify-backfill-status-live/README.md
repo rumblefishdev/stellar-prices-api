@@ -2,7 +2,7 @@
 id: "0089"
 title: "Deploy Prices ApiGateway + verify GET /v1/backfill/status live (M1 AC)"
 type: FEATURE
-status: active
+status: completed
 related_adr: ["0008"]
 related_tasks: ["0040", "0055", "0070", "0088", "0082"]
 tags: [layer-api, priority-high, effort-small, milestone-M1, apigateway, backfill-status, read-api, operational, deploy]
@@ -21,6 +21,23 @@ history:
       excluded it ("ApiGateway intentionally NOT deployed, read API = 0040, out of
       scope"), and `describe-stacks Prices-production-ApiGateway` returns
       "does not exist". No task owned the deploy + live check until now.
+  - date: 2026-07-08
+    status: completed
+    who: okarcz
+    note: >
+      DONE. Deployed Prices-production-ApiGateway (CREATE_COMPLETE); built +
+      confirmed the api-handler asset was current (Compute no-diff). First real
+      gateway call 404'd EVERY /v1 route — root-caused to the api-handler missing
+      AWS_LAMBDA_HTTP_IGNORE_STAGE_IN_PATH=true, so lambda_http kept the
+      /production stage in the path and axum matched nothing (health 200 only
+      because it is a gateway mock; 0040 tested in-process only). Fixed by adding
+      that env var in compute-stack.ts (mirrors BE), env-only Compute redeploy.
+      GET /v1/backfill/status now returns 200 + a valid §4.5 BackfillStatus
+      (sdex paused 79.62%%, ledgers_remaining 12914101; soroban_amm running),
+      no-key → 403, health → 200. M1 AC "backfill/status endpoint live +
+      returning valid progress data" satisfied. Would have 404'd the whole API in
+      T2 — good early catch. Fix + completion on branch
+      fix/0089-api-handler-stage-prefix-404.
 ---
 
 # Deploy Prices ApiGateway + verify `GET /v1/backfill/status` live
@@ -72,17 +89,50 @@ valid progress envelope over the live `prices.backfill_progress` rows.
 
 ## Acceptance Criteria
 
-- [ ] `Prices-production-ApiGateway` deployed, `CREATE_COMPLETE`.
-- [ ] `GET /health` returns 200 (unauthenticated liveness).
-- [ ] `GET /v1/backfill/status` with a valid `x-api-key` returns **200** and the
-      §4.5 `BackfillStatus` envelope populated for both `sdex` and `soroban_amm`
-      from the live `backfill_progress` rows.
-- [ ] `progress_pct` ∈ [0,100] and `ledgers_remaining` = `target − current`
-      (non-negative) for `sdex_archive`; monotonic vs. the underlying rows.
-- [ ] A missing/invalid `x-api-key` is rejected (403) on the data route
-      (confirms the UsagePlan + key auth are wired).
-- [ ] Result recorded (endpoint URL, sample response, timestamp) — either a note
-      here or folded into 0082's post-deploy verification record.
+- [x] `Prices-production-ApiGateway` deployed, `CREATE_COMPLETE` (2026-07-08).
+      URL `https://02mabge71l.execute-api.eu-central-1.amazonaws.com/production/`.
+- [x] `GET /health` returns 200 (unauthenticated liveness — API Gateway mock).
+- [x] `GET /v1/backfill/status` with a valid `x-api-key` returns **200** and the
+      §4.5 `BackfillStatus` envelope for both `sdex` and `soroban_amm` from the
+      live `backfill_progress` rows. *Required the stage-prefix fix below.*
+- [x] `progress_pct` ∈ [0,100] and `ledgers_remaining` = `target − current`. *Live
+      sample: `sdex` paused, `current 50457424 / target 63371525`, `progress_pct
+      79.62`, `ledgers_remaining 12914101` (= 63371525 − 50457424 ✓); `soroban_amm`
+      running, `last_push_at 2026-07-07T19:37:03Z`, `realtime_tip_ledger 63371525`.*
+- [x] A missing/invalid `x-api-key` is rejected (403) on the data route.
+- [x] Result recorded (URL + sample response + 2026-07-08 timestamp — this AC list).
+
+## Issues Encountered
+
+**Every `/v1` route 404'd through API Gateway (stage prefix not stripped).** After
+deploying ApiGateway, `GET /v1/backfill/status` (and `/v1/assets`, etc.) returned
+**404** with a valid key, while `/health` returned 200 and a keyless call returned
+403. Root cause: the api-handler Lambda was missing
+**`AWS_LAMBDA_HTTP_IGNORE_STAGE_IN_PATH=true`**, so `lambda_http` handed axum the
+path *with* the API Gateway stage (`/production/v1/backfill/status`), which matches
+no route → 404 in ~2 ms (no CH call). `/health` masked it because it is a keyless
+API Gateway **mock**, not a Lambda route, and 0040's tests are all in-process
+`tower::oneshot` (never through the real gateway), so this had zero prior coverage.
+**This would have 404'd the *entire* public API in T2, not just `/backfill/status`.**
+
+**Fix (config-only, no Rust change):** added `AWS_LAMBDA_HTTP_IGNORE_STAGE_IN_PATH:
+'true'` to the api-handler `environment` in `ComputeStack`
+(`compute-stack.ts`), mirroring BE's api-handler (BE documents the same env var in
+`crates/api/src/common/edge_lock.rs`). Redeploy of `Prices-production-Compute` was
+env-only (diff = one added variable on `ApiHandlerFunction`; ledger-processor
+untouched). Post-deploy the endpoint returns 200 + the valid envelope above.
+
+## Design Decisions
+
+### Emerged
+
+1. **Stage-prefix strip via env var, not a path-rewrite layer.** `lambda_http`'s
+   `AWS_LAMBDA_HTTP_IGNORE_STAGE_IN_PATH` is the intended, BE-matching mechanism —
+   preferred over a bespoke tower layer stripping `/{stage}`. One env var, no code.
+2. **Fix folded into 0089 rather than a separate bug task.** The defect surfaced
+   as the direct blocker to this task's single AC (endpoint live), the fix is
+   one line, and no other work depended on it — so it is recorded here as an
+   emerged finding instead of spawning a bug task.
 
 ## Out of scope
 
