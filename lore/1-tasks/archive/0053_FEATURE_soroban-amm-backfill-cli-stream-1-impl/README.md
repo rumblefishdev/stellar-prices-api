@@ -2,9 +2,9 @@
 id: "0053"
 title: "Combined single-pass historical backfill (SDEX + Soroban AMM) — full-chain, forward-discovery, dual-stream progress"
 type: FEATURE
-status: active
+status: completed
 related_adr: ["0001", "0003", "0004", "0007", "0009"]
-related_tasks: ["0017", "0028", "0034", "0037", "0048", "0052", "0051", "0058", "0026", "0060", "0069", "0073", "0063"]
+related_tasks: ["0017", "0028", "0034", "0037", "0048", "0052", "0051", "0058", "0026", "0060", "0069", "0073", "0063", "0088"]
 tags: [layer-indexing, priority-high, effort-large, milestone-M1, stream-1, single-pass, rust, cli, workstation, clickhouse, soroban, amm, soroswap, aquarius, phoenix, sdex]
 milestone: 1
 links:
@@ -143,6 +143,20 @@ history:
       estimate). Also greened the 3 Docker-gated CH ITs locally
       (candles/pool_registry/progress). Resume workflow validated: `--start =
       soroban_amm.current_ledger + 1`, +320k steps, `--end` floor 63352611.
+  - date: 2026-07-08
+    status: completed
+    who: okarcz
+    note: >
+      DONE (code-complete). All implementation, tests, code-review fixes, and the
+      runbook landed and merged (PR #72; 0087 guard fix #92). The only remainder
+      was the multi-day operational archive run + the Nov-2023 Soroswap OHLCV
+      data spot-check — no code work — which is intentionally paused by the
+      operator (to be resumed, ideally from a us-east-2 EC2). That operational
+      tail is **moved to new task 0088** (backfill run tracker), which points to
+      docs/runbooks/continue-soroban-backfill.md. Closing 0053 as code-complete;
+      0088 tracks the run to completion. The Docker-gated CH ITs were greened
+      locally on 2026-07-07 (see prior entry); the one open AC (Soroswap Nov-2023
+      OHLCV) carries to 0088.
 ---
 
 # Combined single-pass historical backfill (SDEX + Soroban AMM)
@@ -378,8 +392,11 @@ and teardown.
       streams (no SDEX under-report). *Monotonic direction-aware `current_ledger`
       + non-downgrade of `completed` (code-review findings 1–4) + strictly-
       increasing RMT version; read-side `progress_pct` exposure is task 0073.*
-- [ ] **(operational)** OHLCV for Soroswap pairs verifiable for Nov 2023 dates
-      (Tranche 1 AC) — requires the real archive run + a data spot-check.
+- [→] **(operational, moved to 0088)** OHLCV for Soroswap pairs verifiable for
+      Nov 2023 dates (Tranche 1 AC) — requires the real archive run + a data
+      spot-check. *Code + tests + runbook complete here; the multi-day run and
+      this data check are tracked by task **0088** (backfill run tracker), so
+      0053 closes as code-complete.*
 - [x] Idempotent re-run of `push` (no duplicate rows after merge). (CH ITs:
       `candles_it` per-source + re-write, `progress_it`, `pool_registry_it` —
       all assert stable `count() … FINAL`.)
@@ -402,7 +419,10 @@ final code gaps — **`paused` status between runs** and the **activation
 minute-alignment guard** — are implemented. 54 unit tests pass; `cargo check
 --workspace`/`--features aws-mtls`/`fmt`/clippy clean.
 
-**Remaining — operational only (keeps this task active):**
+**Remaining — operational only (MOVED to task 0088 on 2026-07-08; 0053 closed
+code-complete).** The multi-day run + data check no longer gate this task — see
+`0088_FEATURE_soroban-backfill-run-tracker` and
+`docs/runbooks/continue-soroban-backfill.md`:
 
 1. **Execute the two-range run** against the pubnet archive and direct-write to
    Hetzner: combined `[activation, tip]` then sdex-only `[1, activation-1]`
