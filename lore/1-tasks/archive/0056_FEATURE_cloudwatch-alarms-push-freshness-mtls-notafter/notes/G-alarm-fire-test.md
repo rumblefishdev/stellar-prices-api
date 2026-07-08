@@ -1,7 +1,7 @@
 ---
 prefix: G
 title: Alarm fire-test artifacts (freshness + mTLS NotAfter)
-status: developing
+status: mature
 spawned_from: "0056"
 ---
 
@@ -57,21 +57,39 @@ past the Tranche-1 freshness threshold…"_.
 
 ---
 
-## 2. mTLS NotAfter — `prices-production-mtls-notafter-30d`
+## 2. mTLS NotAfter — `prices-production-mtls-notafter`
 
-**Status: PENDING.** Method (per task Step 4): issue a short-lived (~25-day)
-test cert into a **dev-only** secret, run `mtls-notafter-probe`, confirm
-`MinDaysToNotAfter` drops below the 30-day threshold and the alarm trips to
-Slack, then restore the canonical cert. (Delivery-only alternative:
-`set-alarm-state` on the alarm to prove the SNS → Slack path, as validated for
-the ledger-processor alarm during the Slack routing smoke test.)
+**Method (authentic, real-metric path).** Instead of issuing a short-lived test
+cert (which touches secret material), the threshold was temporarily *raised
+above* the live `MinDaysToNotAfter` value so the alarm breached on the **real**
+cert metric. The `mtls-notafter-probe` runs daily (`rate(1 day)`), so after each
+threshold change the probe was invoked manually to drop a fresh datapoint into
+the alarm's current 1-day evaluation period (else `NOT_BREACHING` would hold it).
 
-| Transition | Metric value | Threshold | Alarm state | Slack post (UTC) |
+- Temp change: `config.opsAlarms.mtlsNotAfterDaysThreshold` `30 → 400`
+  (uncommitted), `make deploy-production-observability`, then
+  `aws lambda invoke --function-name prices-production-mtls-notafter-probe`.
+- Metric: `Prices/Mtls` / `MinDaysToNotAfter`, dim `Environment=production`
+  (aggregate min across the `ingestion` + `api` cert bundles).
+- Live cert state at test time: both roles ~**350 days** to NotAfter
+  (`ingestion 350.053`, `api 350.053` — healthy, ~11.5 months of runway).
+
+| Transition | Datapoint (min_days @ time) | Threshold | Alarm state | Slack post (UTC) |
 |---|---|---|---|---|
-| 🚨 OK → ALARM | _(tbd)_ | `30` | | |
-| ✅ ALARM → OK | _(tbd)_ | `30` | | |
+| 🚨 OK → ALARM | `350.053 @ 2026-07-07 12:27` | `400` | ALARM | **2026-07-08 12:27:09** |
+| ✅ ALARM → OK | `350.051 @ 2026-07-07 12:30` | `30` (restored) | OK | 2026-07-08 ~12:3x |
 
-- **Result: _(tbd)_**
+Slack breach text (verbatim): _"Threshold Crossed: 1 out of the last 1 datapoints
+[350.05315972222223 (07/07/26 12:27:00)] was less than the threshold (400.0)…"_
+with the alarm description _"An mTLS client cert is within the Tranche-1 expiry
+window…"_.
+
+- Threshold restored to `30` + redeployed + probe re-invoked; `git status` clean
+  afterwards (no residual config drift). Alarm returned to OK (`350 > 30`) and
+  posted the recovery.
+- **Result: PASS.** Real-metric breach + recovery both delivered to Slack.
+
+> Same `MessageId` caveat as §1 — Slack cards don't surface the raw SNS ID.
 
 ---
 

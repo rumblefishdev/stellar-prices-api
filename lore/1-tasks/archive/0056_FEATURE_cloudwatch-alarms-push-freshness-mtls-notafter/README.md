@@ -2,7 +2,7 @@
 id: "0056"
 title: "CloudWatch alarms — sdex.last_push_at freshness + mTLS cert NotAfter"
 type: FEATURE
-status: active
+status: completed
 related_adr: ["0005", "0007"]
 related_tasks: ["0011", "0050", "0051", "0055", "0028", "0026"]
 tags: [layer-infra, priority-medium, effort-small, milestone-M1, observability, cloudwatch, alarms, sns, mtls, backfill]
@@ -94,6 +94,24 @@ history:
       describe-slack-channel-configurations --region us-east-2` (Chatbot API is
       us-east-2-only). Task stays active: the freshness + mTLS fire-tests +
       notes/G-alarm-fire-test.md remain operational.
+  - date: 2026-07-08
+    status: completed
+    who: okarcz
+    note: >
+      DONE. All operational fire-tests passed against the real metric path and
+      the last ACs closed. Finding A confirmed live (EventBridge diff shows no
+      drift → deployed probe IS the merged fix; runs clean every 15 min, no
+      Nullable(Int64) deser crash, publishes only for running+pushed streams,
+      alarm OK). Freshness fire-test: temporarily lowered sdexPushFreshnessSeconds
+      604800->3600, alarm breached on live PushAgeSeconds 58211>3600 -> Slack
+      12:09:28 UTC, restored -> recovery. mTLS fire-test: raised
+      mtlsNotAfterDaysThreshold 30->400 + manual probe invoke, alarm breached on
+      live MinDaysToNotAfter 350<400 -> Slack 12:27:09 UTC, restored -> recovery.
+      Both threshold edits reverted, git clean. Artifacts in
+      notes/G-alarm-fire-test.md. All 8 alarms (2 probes + 4 ledger-processor +
+      enrichment-backlog + mtls) route to #stellar-prices-api-bot with both
+      addAlarmAction + addOkAction. Fire-test artifacts committed on branch
+      docs/0056-alarm-fire-test-artifacts.
 ---
 
 # CloudWatch alarms — SDEX push freshness + mTLS NotAfter
@@ -306,11 +324,12 @@ threshold trips. Restore the canonical cert post-test.
       *`config.opsAlarms.sdexPushFreshnessSeconds` (default 604800) +
       `mtlsNotAfterDaysThreshold` (30); validated in `validateConfig`. Per-env
       JSON, no code change.*
-- [~] **(operational)** `notes/G-alarm-fire-test.md` records the fire-test
-      timestamps for both alarms. *Freshness section complete (breach + recovery,
-      2026-07-08); mTLS NotAfter section still pending its fire-test. Slack cards
-      don't surface the raw SNS `MessageId` — note documents how to capture one if
-      the AC strictly requires it.*
+- [x] **(operational)** `notes/G-alarm-fire-test.md` records the fire-test
+      timestamps for both alarms. *Both done 2026-07-08, real-metric path: freshness
+      (`PushAgeSeconds 58211>3600` → 🚨 `12:09:28`, restore → ✅) and mTLS NotAfter
+      (`MinDaysToNotAfter 350<400` → 🚨 `12:27:09`, restore → ✅), each breach +
+      recovery to `#stellar-prices-api-bot`. Slack cards don't surface the raw SNS
+      `MessageId` — note documents how to capture one if the AC strictly requires it.*
 - [x] **(from 0082, finding A)** `sdex-push-freshness` no longer false-fires in a
       live-only deployment. *Freshness probe `AGE_QUERY` now gates on
       `status='running' AND last_push_at IS NOT NULL` — live-only seed rows
