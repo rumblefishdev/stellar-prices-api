@@ -1,8 +1,11 @@
 import * as cdk from 'aws-cdk-lib';
+import * as chatbot from 'aws-cdk-lib/aws-chatbot';
 import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as cw_actions from 'aws-cdk-lib/aws-cloudwatch-actions';
+import * as iam from 'aws-cdk-lib/aws-iam';
 import * as sns from 'aws-cdk-lib/aws-sns';
 import * as subscriptions from 'aws-cdk-lib/aws-sns-subscriptions';
+import * as ssm from 'aws-cdk-lib/aws-ssm';
 import type { Construct } from 'constructs';
 
 import type { EnvironmentConfig } from '../types.js';
@@ -71,6 +74,11 @@ export class ObservabilityStack extends cdk.Stack {
    * `config.opsAlarms.notificationEmail`.
    */
   public readonly opsAlarmsTopic: sns.Topic;
+  /**
+   * AWS Chatbot Slack subscription for the ops-alarms topic (task 0056).
+   * Created only when `config.opsAlarms.slack` is set; undefined otherwise.
+   */
+  public readonly opsAlarmsSlackChannel?: chatbot.SlackChannelConfiguration;
   /** SDEX push-freshness alarm (§5.6 / Tranche-1 AC #5). */
   public readonly sdexPushFreshnessAlarm: cloudwatch.Alarm;
   /** mTLS client-cert expiry alarm (§7 / §11.4). */
@@ -202,11 +210,56 @@ export class ObservabilityStack extends cdk.Stack {
         new subscriptions.EmailSubscription(config.opsAlarms.notificationEmail),
       );
     }
+
+    // AWS Chatbot → Slack (task 0056). When `opsAlarms.slack` is configured we
+    // route the ops-alarms topic to a Slack channel, matching how BE delivers
+    // its own CloudWatch alarms (its `${env}-soroban-explorer-alarms` topic →
+    // Chatbot → Slack) — the team's real ops surface, no email/mailing list.
+    // Reuses BE's channel: the workspace/channel IDs are read at deploy from the
+    // SSM params `opsAlarms.slack.{workspaceIdSsmParam,channelIdSsmParam}` (kept
+    // out of this public repo), which point at BE's existing
+    // `/soroban-explorer/{env}/slack-*` values in the shared account. The Slack
+    // workspace is already authorized in AWS Chatbot for BE, so no extra console
+    // step is needed here — the named SSM params just have to exist before
+    // deploying Observability. Omit the config to leave the topic
+    // subscriber-less (managed manually in SNS).
+    if (config.opsAlarms.slack) {
+      const slackWorkspaceId = ssm.StringParameter.valueForStringParameter(
+        this,
+        config.opsAlarms.slack.workspaceIdSsmParam,
+      );
+      const slackChannelId = ssm.StringParameter.valueForStringParameter(
+        this,
+        config.opsAlarms.slack.channelIdSsmParam,
+      );
+      this.opsAlarmsSlackChannel = new chatbot.SlackChannelConfiguration(
+        this,
+        'OpsAlarmsSlackChannel',
+        {
+          slackChannelConfigurationName: opsAlarmsTopicName(config.envName),
+          slackWorkspaceId,
+          slackChannelId,
+          notificationTopics: [this.opsAlarmsTopic],
+          role: new iam.Role(this, 'OpsAlarmsChatbotRole', {
+            assumedBy: new iam.ServicePrincipal('chatbot.amazonaws.com'),
+            managedPolicies: [
+              iam.ManagedPolicy.fromAwsManagedPolicyName(
+                'CloudWatchReadOnlyAccess',
+              ),
+            ],
+          }),
+        },
+      );
+    }
+
     const snsAction = new cw_actions.SnsAction(this.opsAlarmsTopic);
 
+    // Every alarm gets both an ALARM and an OK action on the ops topic, so the
+    // Slack channel sees the recovery as well as the breach (task 0056).
     // The enrichment backlog alarm (task 0026) shipped without an action; wire
     // it to the ops topic now that 0056 owns the alarm-routing.
     this.enrichmentBacklogAlarm.addAlarmAction(snsAction);
+    this.enrichmentBacklogAlarm.addOkAction(snsAction);
 
     // SDEX push freshness (§5.6 / Tranche-1 AC #5). The backfill-freshness-probe
     // republishes `sdex_archive`'s push age (seconds) as Prices/Backfill
@@ -240,6 +293,7 @@ export class ObservabilityStack extends cdk.Stack {
       },
     );
     this.sdexPushFreshnessAlarm.addAlarmAction(snsAction);
+    this.sdexPushFreshnessAlarm.addOkAction(snsAction);
 
     // mTLS cert expiry (§7 / §11.4). The mtls-notafter-probe publishes the
     // minimum days-to-NotAfter across the ingestion + api client certs; alarm
@@ -263,6 +317,7 @@ export class ObservabilityStack extends cdk.Stack {
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     });
     this.mtlsNotAfterAlarm.addAlarmAction(snsAction);
+    this.mtlsNotAfterAlarm.addOkAction(snsAction);
 
     // -----------------------------------------------------------------
     // Live ledger-processor health (task 0056 finding B). The core ingestion
@@ -318,6 +373,7 @@ export class ObservabilityStack extends cdk.Stack {
       },
     );
     this.ledgerProcessorLagAlarm.addAlarmAction(snsAction);
+    this.ledgerProcessorLagAlarm.addOkAction(snsAction);
 
     // Hard errors: the ledger-processor Lambda throwing (a crash, not a graceful
     // per-item batch failure). Any invocation error over 5 min pages.
@@ -344,6 +400,7 @@ export class ObservabilityStack extends cdk.Stack {
       },
     );
     this.ledgerProcessorErrorAlarm.addAlarmAction(snsAction);
+    this.ledgerProcessorErrorAlarm.addOkAction(snsAction);
 
     // Poison-pill / permanent-failure doorbells: under reportBatchItemFailures a
     // handler that keeps failing one item re-drives it (no Lambda Error) until
@@ -374,6 +431,7 @@ export class ObservabilityStack extends cdk.Stack {
       },
     );
     this.ledgerProcessorDlqAlarm.addAlarmAction(snsAction);
+    this.ledgerProcessorDlqAlarm.addOkAction(snsAction);
 
     // Total ingestion halt: the lag / errors / DLQ alarms above all key on the
     // *presence* of enqueued or failed messages, so a producer-side stop (BE's
@@ -411,6 +469,7 @@ export class ObservabilityStack extends cdk.Stack {
       },
     );
     this.ledgerProcessorNoInvocationsAlarm.addAlarmAction(snsAction);
+    this.ledgerProcessorNoInvocationsAlarm.addOkAction(snsAction);
 
     new cdk.CfnOutput(this, 'OpsAlarmsTopicArn', {
       value: this.opsAlarmsTopic.topicArn,

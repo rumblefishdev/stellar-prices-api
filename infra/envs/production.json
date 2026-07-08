@@ -23,7 +23,11 @@
   "opsAlarms": {
     "sdexPushFreshnessSeconds": 604800,
     "mtlsNotAfterDaysThreshold": 30,
-    "ledgerProcessorLagSeconds": 120
+    "ledgerProcessorLagSeconds": 120,
+    "slack": {
+      "workspaceIdSsmParam": "/prices/production/slack-workspace-id",
+      "channelIdSsmParam": "/prices/production/slack-channel-id"
+    }
   },
   "ledgerProcessor": {
     "memoryMb": 512,

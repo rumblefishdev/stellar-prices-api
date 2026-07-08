@@ -65,6 +65,35 @@ history:
       + production.json. fmt/clippy/eslint/prettier clean. Task stays active:
       deploy Observability + ops-topic subscribe + both fire-tests remain
       operational.
+  - date: 2026-07-08
+    status: active
+    who: okarcz
+    note: >
+      Ops routing decided + wired: AWS Chatbot → Slack, reusing BE's channel
+      (BE has no ops email — it routes CloudWatch alarms to Slack via Chatbot).
+      Added optional `opsAlarms.slack` config; ObservabilityStack now creates a
+      SlackChannelConfiguration (prices-{env}-ops-alarms) on the ops topic,
+      reading BE's existing `/soroban-explorer/{env}/slack-{workspace,channel}-id`
+      SSM params in the shared account. Synth-verified; tsc/eslint/prettier clean.
+      Supersedes the manual email-subscribe as the chosen route (email path kept
+      as fallback). Deploy of Observability (with the SSM params present) makes it
+      live.
+  - date: 2026-07-08
+    status: active
+    who: okarcz
+    note: >
+      Slack routing DEPLOYED to production + verified. Changed target from BE's
+      shared channel to prices' OWN channel #stellar-prices-api-bot: opsAlarms.slack
+      now reads prices-owned SSM params /prices/production/slack-{workspace,channel}-id
+      (workspace T83HLEDJN — same shared workspace, so no Chatbot re-auth; channel
+      C0BFWLMFQ9G). Created the two SSM params, deployed Prices-production-Observability
+      (SlackChannelConfiguration + Chatbot role + 4 ledger-processor alarms all live).
+      Added addOkAction to all 7 alarms so recoveries notify too. Smoke-tested via
+      set-alarm-state on ledger-processor-errors: both a breach and a recovery landed
+      in #stellar-prices-api-bot. Verified config with `aws chatbot
+      describe-slack-channel-configurations --region us-east-2` (Chatbot API is
+      us-east-2-only). Task stays active: the freshness + mTLS fire-tests +
+      notes/G-alarm-fire-test.md remain operational.
 ---
 
 # CloudWatch alarms — SDEX push freshness + mTLS NotAfter
@@ -152,13 +181,38 @@ In the 0011 CDK app, add:
 
 ### Step 3.5: Post-deploy — subscribe the ops topic (operational)
 
+> **Routing chosen + DEPLOYED (2026-07-08): AWS Chatbot → Slack, prices' OWN
+> channel `#stellar-prices-api-bot`.** BE has **no ops email** — it routes all its
+> CloudWatch alarms to Slack via an `AWS Chatbot SlackChannelConfiguration`
+> (`${env}-soroban-explorer-alarms` topic → Slack), with the workspace/channel
+> IDs in SSM (`/soroban-explorer/{env}/slack-{workspace,channel}-id`). We match
+> that mechanism but route to a **separate prices channel**, not BE's:
+> `opsAlarms.slack` in `production.json` wires a `SlackChannelConfiguration`
+> (`prices-{env}-ops-alarms`) on our ops topic, reading **prices-owned** SSM params
+> (`/prices/{env}/slack-{workspace,channel}-id`) per the SSM ownership split — the
+> workspace ID is the same shared workspace BE already authorized in Chatbot
+> (`T83HLEDJN`; only the channel differs, `C0BFWLMFQ9G`), so no re-authorization.
+> Prices owning its own params decouples us from BE's param lifecycle.
+> **Prereq:** the prices SSM params must exist before deploying Observability
+> (create them with `aws ssm put-parameter`; the deploy fails on the lookup if not).
+> **Status: deployed to production 2026-07-08 + smoke-tested** — forcing
+> `prices-production-ledger-processor-errors` into ALARM then OK posted **both** a
+> 🚨 breach and a ✅ recovery to `#stellar-prices-api-bot` (all 7 alarms carry both
+> `addAlarmAction` + `addOkAction` → ops topic, so recoveries notify too).
+> The email path (`notificationEmail` / `aws sns subscribe`) below remains
+> supported as a fallback but is not the chosen route.
+>
+> _Earlier draft (superseded same day): reuse BE's existing channel by reading
+> BE's `/soroban-explorer/...` params. Changed to a dedicated prices channel +
+> prices-owned params at the operator's request — keeps prices alarms off BE's
+> ops surface and off BE's param ownership._
+
 **By design, the `prices-{env}-ops-alarms` topic ships with no
-subscribers.** `config.opsAlarms.notificationEmail` is left unset in
+email subscribers.** `config.opsAlarms.notificationEmail` is left unset in
 `envs/production.json` on purpose: subscriptions are managed directly
 in SNS (email / Slack / PagerDuty) so the on-call roster can change
-without a redeploy. The consequence is that a fresh deploy routes every
-alarm to a topic **no one is listening to** until an operator subscribes
-an address — the alarms fire correctly but deliver nowhere.
+without a redeploy. With the Slack route above wired, the topic is no longer a
+black hole; the email checklist below is only needed if Slack is *not* used.
 
 Deploy checklist — **must be done once per env, immediately after the
 first deploy, before the fire-tests below can pass:**
