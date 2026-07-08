@@ -289,28 +289,39 @@ threshold trips. Restore the canonical cert post-test.
       the topic + both alarms + `SnsAction`; also back-wired the previously
       action-less enrichment-backlog alarm. Synth asserts topic + both alarms +
       metrics.*
-- [ ] **(operational)** An ops address/alias is subscribed to
-      `prices-{env}-ops-alarms` and confirmed (not `PendingConfirmation`). *Topic
-      ships subscriber-less by design; see Step 3.5 for the one-time per-env
-      subscribe checklist. Prerequisite for the fire-test below to deliver.*
-- [ ] **(operational)** Manual fire-test for the freshness alarm produces an
-      SNS delivery to the configured operator email (Tranche-1 AC #5). *Requires
-      a real deploy + a skipped push cycle + a subscribed address (Step 3.5).*
+- [x] **(operational)** The ops topic has a confirmed subscriber. *Delivery is
+      **Slack via AWS Chatbot** to prices' own channel `#stellar-prices-api-bot`
+      (workspace `T83HLEDJN`, channel `C0BFWLMFQ9G`), not email — deployed +
+      smoke-tested 2026-07-08 (forced `ledger-processor-errors` ALARM→OK posted
+      both a breach and a recovery). See Step 3.5. Email subscribe is the
+      documented fallback if Slack is ever dropped.*
+- [x] **(operational)** Manual fire-test for the freshness alarm produces a Slack
+      delivery (Tranche-1 AC #5). *2026-07-08: temporarily lowered
+      `sdexPushFreshnessSeconds` `604800→3600` and deployed, so the alarm breached
+      on the **real** `PushAgeSeconds` datapoint (`58211s @ 11:39 > 3600`) → 🚨 to
+      `#stellar-prices-api-bot` at `12:09:28 UTC`; restored `604800` → ✅ recovery.
+      Threshold reverted, `git status` clean. Artifacts in
+      [notes/G-alarm-fire-test.md](notes/G-alarm-fire-test.md).*
 - [x] Threshold for the freshness alarm is operator-tunable.
       *`config.opsAlarms.sdexPushFreshnessSeconds` (default 604800) +
       `mtlsNotAfterDaysThreshold` (30); validated in `validateConfig`. Per-env
       JSON, no code change.*
-- [ ] **(operational)** `notes/G-alarm-fire-test.md` records the fire-test
-      timestamps + SNS message IDs for both alarms. *Produced during the deploy
-      fire-test above.*
+- [~] **(operational)** `notes/G-alarm-fire-test.md` records the fire-test
+      timestamps for both alarms. *Freshness section complete (breach + recovery,
+      2026-07-08); mTLS NotAfter section still pending its fire-test. Slack cards
+      don't surface the raw SNS `MessageId` — note documents how to capture one if
+      the AC strictly requires it.*
 - [x] **(from 0082, finding A)** `sdex-push-freshness` no longer false-fires in a
       live-only deployment. *Freshness probe `AGE_QUERY` now gates on
       `status='running' AND last_push_at IS NOT NULL` — live-only seed rows
       (running, NULL `last_push_at`) and the paused/completed seams publish no
       metric, so the `NOT_BREACHING` alarm stays OK; a running backfill that has
       pushed and then stalls still fires (AC #5). Supersedes the finding-#4
-      `coalesce(…, started_at)` fallback. 4 unit tests. **Deploy-confirm** the
-      alarm sits OK in live-only is operational.*
+      `coalesce(…, started_at)` fallback. 4 unit tests. **Deploy-confirmed
+      2026-07-08:** EventBridge `diff` shows no drift from the merged fix (the
+      deployed probe IS the finding-A build), the probe runs cleanly every 15 min
+      (no `Nullable(Int64)` deser crash), publishes `PushAgeSeconds` only for the
+      2 running+pushed streams, and the alarm reads OK — no false-fire.*
 - [x] **(from 0082, finding B)** Ledger-processor lag + error alarms created.
       *Three alarms in `ObservabilityStack`, all → `prices-{env}-ops-alarms`,
       built from AWS-native metrics by deterministic name (no processor
