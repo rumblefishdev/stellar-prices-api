@@ -472,6 +472,15 @@ export class ComputeStack extends cdk.Stack {
         // Build the mTLS CH client eagerly at cold start (primes the pool).
         CH_ENABLED: 'true',
         PARAMETERS_SECRETS_EXTENSION_CACHE_ENABLED: 'true',
+        // Strip the `/{stage}` prefix (`/production`) that API Gateway REST
+        // proxy puts in the path, so lambda_http hands axum `/v1/...` (not
+        // `/production/v1/...`). Without this every `/v1` route 404s — the axum
+        // router is mounted at `/v1`, `/health`, etc. Mirrors BE's api-handler
+        // (see BE `crates/api/src/common/edge_lock.rs`). The health check works
+        // regardless only because it is a keyless API Gateway mock, not a
+        // Lambda route, which is why this went unnoticed until the first real
+        // deploy (0040's tests are all in-process `tower::oneshot`).
+        AWS_LAMBDA_HTTP_IGNORE_STAGE_IN_PATH: 'true',
       },
     });
 
