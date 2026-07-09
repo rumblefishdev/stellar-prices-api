@@ -74,6 +74,33 @@ CH() { ssh -i ~/.ssh/sorban-prod_ed25519 deploy@168.119.73.161 \
 
 (Re-define this in each new shell you open.)
 
+### Step 0 — Disk-headroom precheck (mandatory, before you disable cleanup)
+
+Because Step 2 disables the nightly cleanup, the **entire** 1-minute history
+accumulates in `prices.price_ohlcv_1m` during the multi-day re-run before Step 5
+pre-rolls it away. Measured, this is small (~5–9 GB compressed at ~33 B/row), but
+this is a **shared** cluster — confirm the host has room before disabling anything.
+
+```bash
+CH() { ssh -i ~/.ssh/sorban-prod_ed25519 deploy@168.119.73.161 \
+  "docker exec -i app-clickhouse-1 clickhouse-client $*"; }
+
+# projected full-history size = bytes_per_row × ~150M rows (mid estimate; upper bound ~267M)
+CH --query="SELECT formatReadableSize(sum(data_compressed_bytes)) AS current_on_disk, sum(rows) AS current_rows, round(sum(data_compressed_bytes)/sum(rows),1) AS bytes_per_row, formatReadableSize(round(sum(data_compressed_bytes)/sum(rows)) * 267000000) AS projected_full_upper_bound FROM system.parts WHERE database='prices' AND table='price_ohlcv_1m' AND active"
+
+# free disk on the ClickHouse host
+ssh -i ~/.ssh/sorban-prod_ed25519 deploy@168.119.73.161 "df -h /var/lib/docker"
+```
+
+**✅ Confirm — GO / NO-GO:** the `df -h` **`Avail`** column is **≥ 20 GB** (comfortably
+above the ~15 GB transient peak, i.e. the projected full history + rollup tables +
+merge overhead). Compare it against `projected_full_upper_bound` from the first query.
+
+- **Avail ≥ 20 GB** → proceed. Keep this runbook as written.
+- **Avail < 20 GB** → **STOP.** Do not disable cleanup. Escalate to the prices-API /
+  cluster owner: either free space, or use the bounded per-chunk pre-roll approach
+  (roll each chunk up before the next, so `1m` never holds more than one chunk).
+
 ---
 
 ## 3. Step 1 — Stop the backfill that is currently running
@@ -306,6 +333,7 @@ sudo systemctl unmask sleep.target suspend.target hibernate.target hybrid-sleep.
 
 Tick every box before declaring the fix complete:
 
+- [ ] Step 0 — free disk on the ClickHouse host was `≥ 20 GB` before disabling cleanup.
 - [ ] Step 1 — no `sdex-backfill` process was running before the re-run.
 - [ ] Step 2 — cleanup rule read `DISABLED` before the re-run.
 - [ ] Step 3 — `backfill_sdex_ledgers` count was `0`.
