@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use serde::Serialize;
-use stellar_xdr::curr::{
+use stellar_xdr::{
     ContractEvent, ContractEventBody, ContractEventType, ContractId, LedgerCloseMeta,
     LedgerCloseMetaBatch, Limits, ReadXdr, ScVal, ScVec, TransactionMeta, WriteXdr,
 };
@@ -206,12 +206,8 @@ impl<'a> Walker<'a> {
         }
 
         if let Some(want) = &self.args.contract_filter {
-            let matches_contract = ev
-                .contract_id
-                .as_ref()
-                .map(contract_strkey)
-                .as_deref()
-                == Some(want.as_str());
+            let matches_contract =
+                ev.contract_id.as_ref().map(contract_strkey).as_deref() == Some(want.as_str());
             if !matches_contract {
                 return false;
             }
@@ -321,13 +317,7 @@ impl<'a> Walker<'a> {
             TransactionMeta::V4(v4) => {
                 let mut idx = 0usize;
                 for tev in v4.events.iter() {
-                    self.handle_event(
-                        &tev.event,
-                        ledger_seq,
-                        tx_hash,
-                        idx,
-                        EventSource::TxLevel,
-                    );
+                    self.handle_event(&tev.event, ledger_seq, tx_hash, idx, EventSource::TxLevel);
                     idx += 1;
                     if self.limit_reached() {
                         return;
@@ -366,21 +356,36 @@ impl<'a> Walker<'a> {
                 v.ledger_header.header.ledger_seq,
                 v.tx_processing
                     .iter()
-                    .map(|p| (hex::encode(p.result.transaction_hash.0), &p.tx_apply_processing))
+                    .map(|p| {
+                        (
+                            hex::encode(p.result.transaction_hash.0),
+                            &p.tx_apply_processing,
+                        )
+                    })
                     .collect(),
             ),
             LedgerCloseMeta::V1(v) => (
                 v.ledger_header.header.ledger_seq,
                 v.tx_processing
                     .iter()
-                    .map(|p| (hex::encode(p.result.transaction_hash.0), &p.tx_apply_processing))
+                    .map(|p| {
+                        (
+                            hex::encode(p.result.transaction_hash.0),
+                            &p.tx_apply_processing,
+                        )
+                    })
                     .collect(),
             ),
             LedgerCloseMeta::V2(v) => (
                 v.ledger_header.header.ledger_seq,
                 v.tx_processing
                     .iter()
-                    .map(|p| (hex::encode(p.result.transaction_hash.0), &p.tx_apply_processing))
+                    .map(|p| {
+                        (
+                            hex::encode(p.result.transaction_hash.0),
+                            &p.tx_apply_processing,
+                        )
+                    })
                     .collect(),
             ),
         };

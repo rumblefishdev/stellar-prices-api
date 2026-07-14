@@ -211,11 +211,11 @@ pub async fn index_partition(
     Ok(stats)
 }
 
-fn ledger_minute(lcm: &stellar_xdr::curr::LedgerCloseMeta) -> u32 {
+fn ledger_minute(lcm: &stellar_xdr::LedgerCloseMeta) -> u32 {
     let closed_at = match lcm {
-        stellar_xdr::curr::LedgerCloseMeta::V0(v) => v.ledger_header.header.scp_value.close_time.0,
-        stellar_xdr::curr::LedgerCloseMeta::V1(v) => v.ledger_header.header.scp_value.close_time.0,
-        stellar_xdr::curr::LedgerCloseMeta::V2(v) => v.ledger_header.header.scp_value.close_time.0,
+        stellar_xdr::LedgerCloseMeta::V0(v) => v.ledger_header.header.scp_value.close_time.0,
+        stellar_xdr::LedgerCloseMeta::V1(v) => v.ledger_header.header.scp_value.close_time.0,
+        stellar_xdr::LedgerCloseMeta::V2(v) => v.ledger_header.header.scp_value.close_time.0,
     };
     ((closed_at as u32) / 60) * 60
 }

@@ -35,7 +35,7 @@ use prices_ingest_core::{
 use prices_ledger_processor::galexie_key::ledger_s3_key;
 use prices_ledger_processor::object_fetcher::{FetchError, ObjectFetcher};
 use serde::{Deserialize, Serialize};
-use stellar_xdr::curr::LedgerCloseMeta;
+use stellar_xdr::LedgerCloseMeta;
 
 /// The Tranche-1 seed list, embedded at build time. Edited as data, not code.
 pub const SEED_JSON: &str = include_str!("../seed/major_assets.json");

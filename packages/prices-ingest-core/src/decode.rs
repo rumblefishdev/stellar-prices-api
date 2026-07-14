@@ -6,7 +6,7 @@
 //! `ledgers_per_file = 1` the returned vec is usually a single ledger, but the
 //! batch shape is honoured so a multi-ledger file decodes correctly too.
 
-use stellar_xdr::curr::LedgerCloseMeta;
+use stellar_xdr::LedgerCloseMeta;
 
 use crate::error::IngestError;
 

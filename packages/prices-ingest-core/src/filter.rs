@@ -1,4 +1,4 @@
-use stellar_xdr::curr::{
+use stellar_xdr::{
     ClaimAtom, LedgerCloseMeta, OperationResult, OperationResultTr, TransactionResultResult,
 };
 
@@ -27,10 +27,10 @@ pub fn extract_trades(lcm: &LedgerCloseMeta) -> Vec<RawTrade> {
         let ops = match result {
             TransactionResultResult::TxSuccess(ops)
             | TransactionResultResult::TxFeeBumpInnerSuccess(
-                stellar_xdr::curr::InnerTransactionResultPair {
+                stellar_xdr::InnerTransactionResultPair {
                     result:
-                        stellar_xdr::curr::InnerTransactionResult {
-                            result: stellar_xdr::curr::InnerTransactionResultResult::TxSuccess(ops),
+                        stellar_xdr::InnerTransactionResult {
+                            result: stellar_xdr::InnerTransactionResultResult::TxSuccess(ops),
                             ..
                         },
                     ..
@@ -61,17 +61,13 @@ pub fn extract_trades(lcm: &LedgerCloseMeta) -> Vec<RawTrade> {
 fn extract_claims(tr: &OperationResultTr) -> &[ClaimAtom] {
     use OperationResultTr::*;
     match tr {
-        ManageSellOffer(stellar_xdr::curr::ManageSellOfferResult::Success(s)) => &s.offers_claimed,
-        ManageBuyOffer(stellar_xdr::curr::ManageBuyOfferResult::Success(s)) => &s.offers_claimed,
-        CreatePassiveSellOffer(stellar_xdr::curr::ManageSellOfferResult::Success(s)) => {
-            &s.offers_claimed
-        }
-        PathPaymentStrictReceive(stellar_xdr::curr::PathPaymentStrictReceiveResult::Success(s)) => {
+        ManageSellOffer(stellar_xdr::ManageSellOfferResult::Success(s)) => &s.offers_claimed,
+        ManageBuyOffer(stellar_xdr::ManageBuyOfferResult::Success(s)) => &s.offers_claimed,
+        CreatePassiveSellOffer(stellar_xdr::ManageSellOfferResult::Success(s)) => &s.offers_claimed,
+        PathPaymentStrictReceive(stellar_xdr::PathPaymentStrictReceiveResult::Success(s)) => {
             &s.offers
         }
-        PathPaymentStrictSend(stellar_xdr::curr::PathPaymentStrictSendResult::Success(s)) => {
-            &s.offers
-        }
+        PathPaymentStrictSend(stellar_xdr::PathPaymentStrictSendResult::Success(s)) => &s.offers,
         _ => &[],
     }
 }
@@ -144,7 +140,7 @@ fn ledger_header(lcm: &LedgerCloseMeta) -> (u32, i64) {
 }
 
 struct TxProcessingRef<'a> {
-    result: &'a stellar_xdr::curr::TransactionResultPair,
+    result: &'a stellar_xdr::TransactionResultPair,
 }
 
 fn tx_processing_entries(lcm: &LedgerCloseMeta) -> Vec<TxProcessingRef<'_>> {

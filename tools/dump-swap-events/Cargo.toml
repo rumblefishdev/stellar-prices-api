@@ -6,7 +6,7 @@ publish = false
 description = "Investigative tool: dump Soroban contract event topics+data from zstd-compressed LedgerCloseMetaBatch files. See lore task 0001."
 
 [dependencies]
-stellar-xdr = { version = "26", default-features = true, features = ["curr", "serde", "serde_json", "base64"] }
+stellar-xdr = { version = "27", default-features = true, features = ["serde", "serde_json", "base64"] }
 stellar-strkey = "0.0.13"
 zstd = "0.13"
 serde = { version = "1", features = ["derive"] }
