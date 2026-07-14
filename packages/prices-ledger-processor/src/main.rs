@@ -9,16 +9,16 @@
 //! keeps runs serial, which is the ordering guarantee.
 //!
 //! Transport here is production: S3 object fetch + ClickHouse over mTLS (task
-//! 0052). The cursor is still a file checkpoint (`CURSOR_FILE`, seeded from
-//! `INITIAL_CURSOR`) pending the CH-backed cursor decision (G-note Part D.1).
+//! 0052). The cursor is durable in `prices.ingest_cursor` (task 0064), sharing
+//! the sink's mTLS client, so it survives execution-environment recycles instead
+//! of rewinding to the `INITIAL_CURSOR` seed on every cold start.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use aws_lambda_events::sqs::{BatchItemFailure, SqsBatchResponse, SqsEvent};
 use lambda_runtime::{Error, LambdaEvent, run, service_fn};
 use prices_ledger_processor::{
-    cursor::{Cursor, StubFileCursor},
+    cursor::{ClickHouseCursor, Cursor},
     object_fetcher::S3Fetcher,
     reconcile::Reconciler,
     sink::ClickHouseSink,
@@ -26,13 +26,13 @@ use prices_ledger_processor::{
 use tracing::{error, info};
 
 const ENV_BUCKET: &str = "BUCKET_NAME";
-const ENV_CURSOR_FILE: &str = "CURSOR_FILE";
 const ENV_INITIAL_CURSOR: &str = "INITIAL_CURSOR";
 const ENV_MAX_ITERATIONS: &str = "MAX_ITERATIONS";
-const DEFAULT_CURSOR_FILE: &str = "/tmp/prices-cursor.txt";
 const DEFAULT_MAX_ITERATIONS: usize = 16;
+/// Logical consumer key for this processor's row in `prices.ingest_cursor`.
+const CURSOR_ID: &str = "ledger-processor";
 
-type R = Reconciler<S3Fetcher, StubFileCursor, ClickHouseSink>;
+type R = Reconciler<S3Fetcher, ClickHouseCursor, ClickHouseSink>;
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
@@ -45,24 +45,10 @@ async fn main() -> Result<(), Error> {
     // Lambda Init error, not a per-event panic.
     let bucket = std::env::var(ENV_BUCKET)
         .map_err(|_| Error::from(format!("{ENV_BUCKET} env var is required")))?;
-    let cursor_file = std::env::var(ENV_CURSOR_FILE)
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(DEFAULT_CURSOR_FILE));
     let max_iterations: usize = std::env::var(ENV_MAX_ITERATIONS)
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(DEFAULT_MAX_ITERATIONS);
-
-    let cursor = StubFileCursor::new(&cursor_file);
-    // Seed the cursor on a fresh container if it has no checkpoint yet.
-    if cursor.read().await.is_err()
-        && let Some(seed) = std::env::var(ENV_INITIAL_CURSOR)
-            .ok()
-            .and_then(|s| s.parse::<u64>().ok())
-    {
-        cursor.write(seed).await?;
-        info!(seed, "seeded cursor from INITIAL_CURSOR");
-    }
 
     // Build the S3 fetcher and the mTLS sink concurrently — they are
     // independent (ambient AWS config load vs. Secrets-extension fetch +
@@ -72,6 +58,29 @@ async fn main() -> Result<(), Error> {
         ClickHouseSink::from_lambda_env()
     );
     let sink = sink?;
+
+    // Durable cursor in `prices.ingest_cursor` (task 0064), sharing the sink's
+    // mTLS client. Unlike the old `/tmp` file, it survives execution-environment
+    // recycles — so the loop resumes from the stored ledger instead of rewinding
+    // to INITIAL_CURSOR every cold start (the freeze this task fixes). Seed only
+    // fires on a genuinely empty table (true first run); a missing table errors
+    // here, failing Init loudly (schema must be applied before deploy).
+    let cursor = ClickHouseCursor::new(sink.client().clone(), CURSOR_ID);
+    match cursor.read().await {
+        Ok(at) => info!(at, "resumed cursor from ClickHouse"),
+        Err(_) => {
+            if let Some(seed) = std::env::var(ENV_INITIAL_CURSOR)
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+            {
+                cursor.write(seed).await?;
+                info!(
+                    seed,
+                    "seeded cursor from INITIAL_CURSOR (empty ingest_cursor)"
+                );
+            }
+        }
+    }
     // Two independent ClickHouse reads on the cold path — joined so `try_join!`
     // shaves a round-trip off Lambda Init (same reasoning as the fetcher+sink join
     // above). Either failing still surfaces an unreachable cluster (or missing
@@ -90,8 +99,8 @@ async fn main() -> Result<(), Error> {
 
     info!(
         %bucket,
-        cursor_file = %cursor_file.display(),
         max_iterations,
+        cursor_id = CURSOR_ID,
         "prices-ledger-processor cold start ready"
     );
 

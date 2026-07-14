@@ -323,3 +323,27 @@ CREATE TABLE IF NOT EXISTS prices.pool_registry (
 ENGINE = ReplacingMergeTree(updated_at)
 ORDER BY (contract_id)
 SETTINGS index_granularity = 8192;
+
+-- ---------------------------------------------------------------------
+-- Live ingestion cursor (task 0064). One row per consumer `id` holding the
+-- last contiguous ledger the doorbell-cursor reconcile loop has processed.
+-- Replaces the ledger-processor's ephemeral `/tmp` file cursor (StubFileCursor),
+-- which was wiped on every Lambda execution-environment recycle and reseeded
+-- from the static INITIAL_CURSOR — so the loop rewound to the backfill floor
+-- forever and the live frontier could never advance. Durable here, the cursor
+-- survives container churn and the processor resumes where it left off.
+-- The reconcile loop writes this row LAST each run (after the candle write), so
+-- a crash before it re-processes the run (idempotent — RMT candles). Read with
+-- FINAL; ReplacingMergeTree(updated_at) collapses re-writes on the `id` key.
+-- Millisecond `updated_at` + strictly serial runs (reservedConcurrency = 1)
+-- guarantee the latest write wins. Seeded once from INITIAL_CURSOR on an empty
+-- table (a genuine first run); thereafter the stored value is authoritative.
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS prices.ingest_cursor (
+    id          String,
+    ledger      UInt64,
+    updated_at  DateTime64(3) DEFAULT now64(3)
+)
+ENGINE = ReplacingMergeTree(updated_at)
+ORDER BY (id)
+SETTINGS index_granularity = 8192;

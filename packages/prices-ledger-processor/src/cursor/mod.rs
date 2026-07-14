@@ -4,8 +4,10 @@
 
 use std::future::Future;
 
+pub mod ch;
 pub mod stub_file;
 
+pub use ch::ClickHouseCursor;
 pub use stub_file::StubFileCursor;
 
 #[derive(Debug, thiserror::Error)]

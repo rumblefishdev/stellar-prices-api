@@ -34,6 +34,9 @@ lambda = ["aws-mtls", "dep:lambda_runtime", "dep:aws_lambda_events", "dep:aws-sd
 prices-ingest-core = { path = "../prices-ingest-core" }
 prices-clickhouse = { path = "../prices-clickhouse" }
 
+# Named directly by the durable cursor (task 0064) and the sink's `client()`
+# accessor. Already compiled transitively via prices-clickhouse, so this is free.
+clickhouse = { workspace = true }
 tokio = { workspace = true }
 clap = { workspace = true }
 serde = { workspace = true }
@@ -49,5 +52,4 @@ aws-config = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
-clickhouse = { workspace = true }
 extractors-core = { path = "../extractors-core" }
