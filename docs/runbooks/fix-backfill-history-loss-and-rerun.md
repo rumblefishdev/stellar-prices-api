@@ -14,9 +14,21 @@
 > 3. **Deep pre-Soroban tail (2015→2024)** is a **decision**, not automatic — task **0092**.
 > 4. Cleanup is already disabled (§4 done); re-enable (§9) only after pre-roll.
 >
+> **Order revised again (2026-07-14): gap-fill FIRST, then a single pre-roll.**
+> `preroll.sql` is full-range (no `WHERE`), so pre-rolling before the gap is filled
+> means two full aggregations on the shared cluster + a ReplacingMergeTree
+> reconciliation of the partial June bucket. Filling the gap first and pre-rolling
+> **once** over contiguous `1m` is cheaper and correct in a single pass. Concrete
+> sequence:
+>
+> 1. **Phase A — gap-fill the hole** (§6b, bounded run over `62,642,957 → 63,352,611`).
+> 2. **Phase B — one full pre-roll** (§7, Step 5) over the now-contiguous `1m`.
+> 3. **Verify** (§8), then **re-enable cleanup** (§9) — only after Phase B.
+> 4. Deep pre-Soroban tail (2015→2024) stays a **decision** — task **0092**.
+>
 > The steps below remain the reference for each individual action (pre-roll, cleanup
 > toggle, verify, and the deep-tail download if approved). **Skip Step 3 and the
-> full-range Step 4.** Rationale + re-scope: task **0090**.
+> full-range Step 4 (6.1) — use §6b instead.** Rationale + re-scope: task **0090**.
 
 **Audience:** any operator, no prior project knowledge assumed. Follow the steps
 top to bottom, run each command, and check the **✅ Confirm** line under it before
@@ -268,6 +280,75 @@ CH --query='SELECT task_name, current_ledger, status FROM prices.backfill_progre
 
 **✅ Confirm before moving on:** `grep -c 'FULL BACKFILL COMPLETE' ~/backfill.log`
 prints **`1`**. Do **not** proceed to step 5 until it does.
+
+---
+
+## 6b. Phase A — bounded gap-fill (USE THIS instead of the full 6.1 script)
+
+The surviving `1m` is contiguous `2024-02 → 2026-05`; the only hole is the June-2026
+range left by the mid-loop kill. Re-run the backfill **bounded to that hole only** —
+all **below** the proto27 boundary (63,401,875), so `stellar-xdr 26` is fine (no 0091
+dependency), and the prod pool registry is already seeded so AMM resolves. ~1 h on a
+us-east-2 EC2, ~1 day on a home line. This replaces the multi-day full re-download.
+
+### 6b.1 Preflight — confirm the real resume start from live progress
+
+Don't hard-code the start. The kill left the progress trackers _behind_ the last
+written candle (candles reached `62,642,956`, but `soroban_amm` progress sits lower).
+Read the authoritative resume point and start one past the **lowest** tracker — the
+backfill is idempotent (`ReplacingMergeTree` + per-partition completed-ledger skip),
+so re-covering already-written ledgers is free and guarantees nothing is missed.
+
+```bash
+CH() { ssh -i ~/.ssh/sorban-prod_ed25519 deploy@168.119.73.161 \
+  "docker exec -i app-clickhouse-1 clickhouse-client $*"; }
+
+# authoritative progress per stream (expect soroban_amm ≈ 62,591,999, sdex_archive higher):
+CH --query='SELECT task_name, current_ledger, status FROM prices.backfill_progress FINAL FORMAT PrettyCompact'
+# newest candle actually written (expect ≈ 62,642,956):
+CH --query="SELECT max(toUInt64(version) DIV 1000) AS newest_ledger FROM prices.price_ohlcv_1m FINAL WHERE source='sdex'"
+```
+
+Set `START = min(current_ledger over the combined streams) + 1` (≈ **62,592,000**).
+`END` is the fixed floor **63,352,611** (live ingestion owns `63,352,612+`).
+
+### 6b.2 Run the bounded gap-fill (tmux, same certs as 6.1)
+
+```bash
+export CH_DOMAIN=ch.sorobanscan.rumblefish.dev
+export MTLS_CERT_PATH=$HOME/prices-mtls/prices_writer.crt
+export MTLS_KEY_PATH=$HOME/prices-mtls/prices_writer.key
+export MTLS_CA_PATH=$HOME/prices-mtls/ca.crt
+
+BIN=$HOME/stellar-prices-api/target/release/sdex-backfill    # build: cargo build --release -p sdex-backfill --features aws-mtls
+START=62592000            # ← from 6b.1 (min tracker + 1); adjust to the live value
+END=63352611             # floor — do NOT exceed
+TIP=$(curl -s 'https://horizon.stellar.org/' | python3 -c 'import sys,json;print(json.load(sys.stdin)["core_latest_ledger"])')
+
+tmux new -s gapfill       # detach: Ctrl-b then d
+"$BIN" --mode combined --start "$START" --end "$END" --tip "$TIP" \
+  --transport hetzner --verbose 2>&1 | tee -a "$HOME/gapfill.log"
+```
+
+One startup `WARN` ("combined mode starts after activation — pools created before
+start resolved only from the preloaded registry") is **expected** — the registry is
+seeded in prod, so live-era pools resolve; any genuinely-unknown pool lands in
+`prices.unresolved_pools` (visible, not silently lost).
+
+### 6b.3 Confirm the hole is closed (before Phase B pre-roll)
+
+```bash
+# progress advanced to the floor:
+CH --query='SELECT task_name, current_ledger, status FROM prices.backfill_progress FINAL FORMAT PrettyCompact'
+# candles now reach the floor per source:
+CH --query="SELECT source, max(toUInt64(version) DIV 1000) AS newest_ledger, count() AS rows
+            FROM prices.price_ohlcv_1m FINAL
+            WHERE toUInt64(version) DIV 1000 BETWEEN 62592000 AND 63352611
+            GROUP BY source ORDER BY source FORMAT PrettyCompact"
+```
+
+**✅ Confirm:** `soroban_amm.current_ledger` = `63352611`; `sdex` candles span the range
+with no interior gap. Then proceed to **§7 (Phase B — the single full pre-roll)**.
 
 ---
 

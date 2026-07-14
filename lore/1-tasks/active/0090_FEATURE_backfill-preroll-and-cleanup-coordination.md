@@ -69,6 +69,18 @@ history:
       Phase B. Insurance pre-roll-first only wins if Phase A is slow/uncertain
       (home-line days), not a ~1h EC2 fill. Renamed Phases 1/2/3 to A/B/C and
       reordered the ACs to match.
+  - date: 2026-07-14
+    status: active
+    who: okarcz
+    note: >
+      Phase A run procedure PREPARED (not executed — prod-gated). Added §6b to
+      docs/runbooks/fix-backfill-history-loss-and-rerun.md: a bounded gap-fill
+      that replaces the full-range Step 4 — live-progress preflight (resume from
+      min tracker + 1 ≈ 62,592,000, not a hard-coded start, since the kill left
+      trackers behind the last candle), the exact `sdex-backfill --mode combined
+      --start … --end 63352611 --transport hetzner` command in tmux with the
+      writer certs, and a close-the-hole verify. Also reordered the runbook's
+      superseding banner to gap-fill-first. Execution still needs owner sign-off.
 ---
 
 # Backfill loses history — wire preroll + cleanup-coordination into the backfill workflow
