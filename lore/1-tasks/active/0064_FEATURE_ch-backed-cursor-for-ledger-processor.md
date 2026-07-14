@@ -2,10 +2,10 @@
 id: "0064"
 title: "ClickHouse-backed cursor for the Prices Ledger Processor"
 type: FEATURE
-status: backlog
+status: active
 related_adr: ["0007"]
-related_tasks: ["0038"]
-tags: [layer-indexing, priority-medium, effort-small, lambda, clickhouse, cursor]
+related_tasks: ["0038", "0094", "0091"]
+tags: [layer-indexing, priority-high, effort-small, lambda, clickhouse, cursor]
 links:
   - "../active/0038_FEATURE_prices-ledger-processor-lambda/notes/G-local-prototype-spec.md"
 history:
@@ -17,6 +17,18 @@ history:
     status: backlog
     who: claude
     note: "Added PR #34 review context for finding #3 (cold-start rewind + bootstrap; interim INITIAL_CURSOR SSM seed shipped)."
+  - date: 2026-07-14
+    status: active
+    who: okarcz
+    note: >
+      Promoted backlog → active, priority-medium → HIGH. Diagnosed live as the
+      cause of the still-frozen frontier after the proto27 deploy (0094): the
+      /tmp StubFileCursor resets to INITIAL_CURSOR (63,352,611, the backfill
+      floor) on every Lambda execution-environment recycle, so the reconcile
+      loop oscillates floor→~63,372k→floor and never reaches the wall/tip. proto27
+      masked it until now. IMPLEMENTED the durable CH cursor + wired into main.rs;
+      all 4 integration tests pass against local CH 26.3.10.60 (= prod). Blocks
+      0094 AC #2 (live advances past 63,401,875). Branch feat/0064_ch-backed-cursor.
 ---
 
 # ClickHouse-backed cursor for the Prices Ledger Processor
@@ -62,6 +74,49 @@ concrete failure modes this task removes:
 
 ## Acceptance Criteria
 
-- [ ] `prices.processed_ledgers` (or chosen design) added to the schema.
-- [ ] CH `Cursor` impl; reconcile resumes from CH across cold starts.
-- [ ] Idempotent: re-run from the persisted cursor is a no-op past the tip.
+- [x] Cursor table added to the schema — `prices.ingest_cursor` (chose this over
+      `processed_ledgers`; single row per consumer `id`, RMT(updated_at)).
+- [x] CH `Cursor` impl (`cursor::ClickHouseCursor`); reconcile resumes from CH
+      across cold starts. Proven by `cursor_ch_it::cursor_survives_a_new_client_instance`
+      (a fresh client reads the persisted value, does not rewind).
+- [x] Idempotent: re-run from the persisted cursor is a no-op past the tip
+      (existing `reconcile_e2e::idempotent_on_re_run_from_same_cursor` + gap-stop;
+      cursor persistence doesn't change candle idempotency — RMT by version).
+- [ ] **Deploy** the new processor to prod (approval-gated) — the freeze only
+      lifts once the xdr-27 **and** CH-cursor build is running. **Requires the
+      `prices.ingest_cursor` table applied to prod CH first** (init.sql, out-of-band).
+
+## Implementation Notes
+
+Built on branch `feat/0064_ch-backed-cursor`:
+
+- **Schema** — `prices.ingest_cursor (id String, ledger UInt64, updated_at
+  DateTime64(3))`, `ReplacingMergeTree(updated_at) ORDER BY id`, in `init.sql`.
+  `init_sql_parses_into_statements` bumped 28 → 29.
+- **`cursor::ClickHouseCursor`** — `read()` = `SELECT ledger … FINAL WHERE id=?`
+  via `fetch_optional` (None → `Read` error → seed path fires once); `write()` =
+  `INSERT … now64(3)`.
+- **`main.rs`** — swapped `StubFileCursor` → `ClickHouseCursor`, built from the
+  sink's shared mTLS client (`sink.client().clone()`); dropped `CURSOR_FILE` /
+  `/tmp`. Seed-on-empty from `INITIAL_CURSOR` retained (genuine first-run only).
+- **Tests** — `tests/cursor_ch_it.rs`, 4 cases, all green vs local CH 26.3.10.60
+  (= prod). `cargo check --workspace`, clippy, fmt all clean.
+
+## Design Decisions
+
+### Emerged
+
+1. **`ReplacingMergeTree(updated_at)` with `now64(3)`, not `ledger`-as-version.**
+   Millisecond version + strictly serial runs (reservedConcurrency=1) mean the
+   latest write always wins the FINAL read, and it still allows a deliberate
+   operator reset (a later `now64(3)` beats the stored row) — which a
+   `ReplacingMergeTree(ledger)` would silently ignore.
+2. **Share the sink's mTLS client** (`sink.client().clone()`) instead of opening
+   a second connection — no extra Secrets-extension fetch / handshake at cold
+   start. Required exposing `ClickHouseSink::client()` and promoting `clickhouse`
+   from dev- to a normal dependency (already compiled transitively — free).
+3. **Kept `INITIAL_CURSOR` as the genuine first-run bootstrap**, not retired. On
+   an empty table it seeds once; thereafter the CH value is authoritative. A
+   missing table errors at Init (fail-loud, matching the pool_registry contract).
+4. **`id = "ledger-processor"`** constant — the table is multi-consumer by
+   design, so future consumers get their own row without schema change.
