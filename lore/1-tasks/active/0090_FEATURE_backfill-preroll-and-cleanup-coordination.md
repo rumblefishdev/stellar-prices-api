@@ -179,8 +179,10 @@ to **task 0093**.
 - [~] Cleanup re-enable procedure documented; re-enabled only AFTER pre-roll.
       **Documented** ✅ (§10: `describe-rule` → pre-roll → `enable-rule` order).
       **Execution** pending (prod mutation — after Phase 1 pre-roll runs).
-- [ ] Deep pre-Soroban tail (2015→2024) split to **task 0092** (decision w/ BE 0199).
-- [ ] Backfill watchdog + live candle-freshness alarm split to **task 0093**.
+- [x] Deep pre-Soroban tail (2015→2024) split to **task 0092** (decision w/ BE 0199).
+      ✅ `0092_FEATURE_pre-soroban-tail-backfill-decision` (backlog, related to 0090).
+- [x] Backfill watchdog + live candle-freshness alarm split to **task 0093**.
+      ✅ `0093_FEATURE_freshness-alarms-backfill-and-live` (backlog, related to 0090).
 
 ## Risks / Notes
 
