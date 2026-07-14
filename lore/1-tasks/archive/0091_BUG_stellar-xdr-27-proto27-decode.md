@@ -2,9 +2,9 @@
 id: "0091"
 title: "Bump stellar-xdr 26→27 for Protocol-27 decode (unfreeze live ingestion)"
 type: BUG
-status: backlog
+status: completed
 related_adr: []
-related_tasks: ["0090"]
+related_tasks: ["0090", "0094"]
 tags: ["milestone-M1", "priority-high", "effort-small", "phase-live"]
 links:
   - "https://stellar.org/blog/foundation-news/stellar-zipper-protocol-27-upgrade-guide"
@@ -31,6 +31,19 @@ history:
       (~14:00 UTC): stall/parse-fail there => 0091 is an active blocker;
       sails through => 0091 is latent hardening. DLQ empty + 14d retention
       => no redrive/replay needed; recovery is the processor re-ingesting.
+  - date: 2026-07-14
+    status: completed
+    who: okarcz
+    note: >
+      CODE COMPLETE + MERGED. stellar-xdr 26.0.0→27 (exact-pin =27.0.0),
+      curr→crate-root migration across 7 crates + dump-swap-events; xdr-parser
+      re-pinned to BE #325 merge d61b359f (kept on branch=develop by choice);
+      decode_probe example relocated here. 0 SorobanCredentials usages → no new
+      match arms needed. 73 unit tests pass; CI green. Squash-merged to develop
+      as PR #104 (e17ed03). Operational remainder (DEPLOY the xdr-27
+      ledger-processor before the 63,401,875 crossing, drain DLQ, replay frozen
+      gap 63,384,068→tip, verify live advances, add a version-gap CI guard) is
+      NOT done — spawned as task 0094. Archived as code-complete.
 ---
 
 # Bump stellar-xdr 26→27 for Protocol-27 decode (unfreeze live ingestion)
@@ -90,20 +103,71 @@ under task 0090.
 
 ## Acceptance Criteria
 
-- [ ] `stellar-xdr` is `27.x` in `Cargo.lock`; no `curr` feature pin remains.
-- [ ] Workspace compiles and tests pass with the `curr`→crate-root migration.
-- [ ] A real proto27 ledger (≥ 63,401,875) decodes without a parse error
-      (probe via `packages/prices-ingest-core/examples/decode_probe.rs` or a
-      targeted test).
-- [ ] Live ingestion advances past ledger 63,401,875 in prices CH
-      (`price_ohlcv_1m` max ledger climbs toward the current tip).
-- [ ] Live DLQ drained; no residual "XDR parse failed" errors.
-- [ ] Frozen gap (63,384,068 → tip) backfilled/replayed for all live sources.
+- [x] `stellar-xdr` is `27.x` in `Cargo.lock`; no `curr` feature pin remains.
+      (Exact-pinned `=27.0.0` in `Cargo.toml`; lock at 27.0.0.)
+- [x] Workspace compiles and tests pass with the `curr`→crate-root migration.
+      (73 unit tests pass across decode/extract crates; CI green on PR #104.)
+- [~] A real proto27 ledger (≥ 63,401,875) decodes without a parse error.
+      Decode path is BE's `xdr-parser` at #325 (verified there against real
+      proto27 ledgers, 287+2 tests); `decode_probe` example compiles at xdr 27
+      but has NOT yet been run locally against a ≥63,401,875 file. Live-decode
+      confirmation → **0094**.
+- [ ] Live ingestion advances past ledger 63,401,875 in prices CH — **deferred
+      to 0094** (requires deploying the xdr-27 processor).
+- [ ] Live DLQ drained; no residual "XDR parse failed" errors — **deferred to 0094**.
+- [ ] Frozen gap (63,384,068 → tip) backfilled/replayed — **deferred to 0094**.
+
+## Implementation Notes
+
+Merged to `develop` as **PR #104** (squash `e17ed03`), base `develop`. Files
+touched (12): `Cargo.toml` + `Cargo.lock`; `stellar_xdr::curr::*` → `stellar_xdr::*`
+in `asset-discovery`, `oracle-worker`, `prices-ingest-core` (`canonical`/`decode`/
+`filter`/`soroban`), `sdex-backfill/ingest`, and the `dump-swap-events` tool; new
+`prices-ingest-core/examples/decode_probe.rs` (relocated from PR #103). No
+production-logic change — a pure version bump + module migration guarded by the
+compiler.
+
+## Design Decisions
+
+### From Plan
+
+1. **26→27 workspace-wide `curr`→crate-root migration** exactly as scoped; the
+   `features = ["curr"]` pin dropped (v27 collapsed the curr/next split).
+
+### Emerged
+
+2. **No SorobanCredentials match arms added.** The plan expected possible new
+   match arms for the two proto27 credential variants. We reference
+   `SorobanCredentials` in **0 places**, so — unlike BE #325 — none were needed.
+   `deserialize_batch` still requires v27 because it parses whole ledgers eagerly.
+
+3. **`xdr-parser` re-pinned to BE's #325 *merge commit* `d61b359f`, not develop
+   HEAD** — the minimal commit carrying stellar-xdr 27, avoiding 28 unrelated
+   xdr-parser commits.
+
+4. **`xdr-parser` kept on `branch = "develop"` (float), NOT `rev`-pinned.**
+   A code-review (PR #104) flagged the missing rev-pin as fragile; user chose to
+   keep it tracking develop so it auto-follows BE's decode stack. `stellar-xdr`
+   IS exact-pinned (`=27.0.0`) — deliberate asymmetry.
+
+5. **`stellar-xdr` tightened from `27` (caret) to `=27.0.0` (exact)** post-review,
+   so `cargo update` can't float to a 27.x that diverges from xdr-parser's types.
+
+6. **Task archived as code-complete with the operational tail split to 0094**,
+   mirroring the 0053→0088 pattern (code merged ≠ run/deployed).
+
+## Issues Encountered
+
+- **Task record stranded on an unmerged branch.** The 0091 file was spawned on
+  the still-open PR #103 (`docs/0090`) branch, so on `develop` the session
+  `current-task.md` symlink dangled after #104 merged. Reconciled by completing +
+  archiving 0091 here on the #103 branch (per user decision), then clearing the
+  dangling session task on `develop`.
 
 ## Future Work
 
-- Verify whether our live processor was actively dead-lettering (wall #2) vs
-  merely idle since the supply stall — inspect the live-ingestion Lambda DLQ
-  depth + error logs (outside ClickHouse).
-- Consider a CI guard / renovate policy so a future protocol bump surfaces the
-  `stellar-xdr` version gap before it freezes prod.
+Spawned as **task 0094** (operational remainder — priority-high, time-sensitive):
+deploy the xdr-27 `ledger-processor` before the 63,401,875 crossing, drain the
+live DLQ, replay the frozen gap (63,384,068 → tip) for all live sources, confirm
+`price_ohlcv_1m` max ledger climbs past 63,401,875, and add a version-gap CI
+guard so the next protocol bump surfaces before it freezes prod.
