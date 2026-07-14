@@ -180,6 +180,8 @@ to **task 0093**.
 
 ## Investigation artifact
 
-`packages/prices-ingest-core/examples/decode_probe.rs` was added to prove the
-extractor produces candles for pre-floor ledgers. Keep as a diagnostic or move to
-`.trash/` — it is not part of the fix.
+`decode_probe.rs` (proves the extractor produces candles for pre-floor ledgers)
+was **relocated to the task-0091 PR**, migrated to stellar-xdr 27. Its
+`stellar_xdr` import paths depend on the crate version, so it can only compile on
+the xdr-27 branch — keeping it here (xdr 26) would break once 0091 lands. Moved to
+`.trash/` on this branch; the live, migrated copy lives with 0091.
