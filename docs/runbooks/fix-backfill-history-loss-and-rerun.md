@@ -4,17 +4,14 @@
 > Soroban-era `price_ohlcv_1m` data **survived** (contiguous 2024-02 → 2026-05;
 > the cleanup rule is currently **DISABLED**). So **do NOT** TRUNCATE
 > `backfill_sdex_ledgers` (Step 3) or re-run the whole chain (Step 4) — that
-> re-downloads ~94% of data that already exists (weeks wasted). Instead:
+> re-downloads ~94% of data that already exists (weeks wasted). What actually
+> needs doing: **gap-fill the one hole** (single missing range
+> **`62,642,957 → 63,352,611`** ≈ June 2026, below the proto27 boundary so
+> `stellar-xdr 26` is fine), then **pre-roll** the result into the coarse tables;
+> the deep pre-Soroban tail (2015→2024) is a separate **decision** (task **0092**),
+> and cleanup (already disabled, §4) is re-enabled only after the pre-roll (§9).
 >
-> 1. **Pre-roll the existing 1m first** — run **§7 (Step 5)** against the current
->    `1m`. This alone yields ~2.3 years of durable coarse history, no download.
-> 2. **Gap-fill only the hole** — the single missing range is
->    **`62,642,957 → 63,352,611`** (≈ June 2026). Run Step 4 **bounded to that range
->    only** (below the proto27 boundary, so `stellar-xdr 26` is fine), then pre-roll it.
-> 3. **Deep pre-Soroban tail (2015→2024)** is a **decision**, not automatic — task **0092**.
-> 4. Cleanup is already disabled (§4 done); re-enable (§9) only after pre-roll.
->
-> **Order revised again (2026-07-14): gap-fill FIRST, then a single pre-roll.**
+> **Order (2026-07-14): gap-fill FIRST, then a single pre-roll.**
 > `preroll.sql` is full-range (no `WHERE`), so pre-rolling before the gap is filled
 > means two full aggregations on the shared cluster + a ReplacingMergeTree
 > reconciliation of the partial June bucket. Filling the gap first and pre-rolling
