@@ -56,6 +56,19 @@ history:
       Phase 2 gap-fill EXECUTION run on shared ch-prod-01 → owner sign-off +
       approval-gated, deferred to an explicit run. Branch
       feat/0090_backfill-preroll-cleanup-coordination.
+  - date: 2026-07-14
+    status: active
+    who: okarcz
+    note: >
+      REVISED phase order: gap-fill FIRST (Phase A), then ONE full pre-roll last
+      (Phase B), replacing the original pre-roll-first / re-roll-the-gap plan.
+      Rationale: preroll.sql is full-range (no WHERE), so pre-roll-first = two
+      full aggregations on the shared node + a ReplacingMergeTree reconciliation
+      of the partial June bucket; fill-first = one aggregation over contiguous
+      data, correct in a single pass. Safe because cleanup stays disabled until
+      Phase B. Insurance pre-roll-first only wins if Phase A is slow/uncertain
+      (home-line days), not a ~1h EC2 fill. Renamed Phases 1/2/3 to A/B/C and
+      reordered the ACs to match.
 ---
 
 # Backfill loses history — wire preroll + cleanup-coordination into the backfill workflow
@@ -138,27 +151,40 @@ Measurement changed the plan. The Soroban-era `1m` data **survived** — contigu
 gap). So the original "TRUNCATE `backfill_sdex_ledgers` + re-download the whole chain"
 is **wasteful** — it would re-fetch ~94% of data that already exists (weeks). Instead:
 
-**Phase 1 — Pre-roll the existing 1m (do FIRST; cheap, no download).**
-Apply `preroll.sql` to the current `price_ohlcv_1m` → populates the coarse
-`1h/4h/1d/1w/1M` tables. Delivers ~2.3 years of durable SDEX history (2024-02 →
-2026-05) immediately. Idempotent (optionally `TRUNCATE` coarse first for a clean run).
-Runs heavy aggregation on the **shared** ch-prod-01 → owner sign-off + low-traffic
-window + spill-to-disk flags. **Do NOT** TRUNCATE `backfill_sdex_ledgers`; **do NOT**
-re-run the full chain.
+> **Ordering (revised 2026-07-14): gap-fill FIRST, then a single full pre-roll.**
+> `preroll.sql` has no `WHERE` — every run re-aggregates the *entire* `1m` range.
+> So pre-rolling before the gap is filled means **two** full-range aggregations on
+> the shared node (one now + one after the fill) plus a `ReplacingMergeTree`
+> reconciliation of the partial June bucket. Filling the gap first and pre-rolling
+> **once** over contiguous data is cheaper (one aggregation), correct in a single
+> pass (no straddle-bucket replace), and simpler to verify. Safe because cleanup
+> stays **disabled** until the final pre-roll, so the surviving 2.3 yr `1m` is not
+> at risk during the fill. *(The old "pre-roll-first for insurance" order only
+> wins if Phase A will be slow/uncertain — e.g. run on a home line over days —
+> where locking the 2.3 yr into the forever-tables up front hedges the wait. On a
+> ~1 h us-east-2 EC2 fill, it doesn't.)*
 
-**Phase 2 — Gap-fill the one hole (`62,642,957 → 63,352,611`, ~710k ledgers = the
+**Phase A — Gap-fill the one hole (`62,642,957 → 63,352,611`, ~710k ledgers = the
 missing June-2026 range).** Bounded backfill of just this range — all **below** the
 proto27 boundary (63.4M), so `stellar-xdr 26` is fine (no 0091 dependency). Pool
-registry already seeded in prod → AMM resolves. Then pre-roll that range. ~1h on a
-us-east-2 EC2 / ~1 day local.
+registry already seeded in prod → AMM resolves. ~1h on a us-east-2 EC2 / ~1 day
+local. **Do NOT** TRUNCATE `backfill_sdex_ledgers`; **do NOT** re-run the full chain.
 
-**Phase 3 — Deep pre-Soroban tail (2015 → 2024-02): a DECISION, not automatic.**
+**Phase B — One full pre-roll over the now-contiguous `1m` (do LAST).**
+Apply `preroll.sql` to the completed `price_ohlcv_1m` → populates the coarse
+`1h/4h/1d/1w/1M` tables in a single pass across `2024-02 → tip-of-backfill`
+(~2.3 yr durable SDEX history + the filled June gap). Idempotent (optionally
+`TRUNCATE` coarse first for a clean rebuild). Runs heavy aggregation on the
+**shared** ch-prod-01 → owner sign-off + low-traffic window + spill-to-disk flags.
+
+**Phase C — Deep pre-Soroban tail (2015 → 2024-02): a DECISION, not automatic.**
 The only expensive piece (~50M ledgers, multi-week). Split to **task 0092** — decide
 with the BE consumer (0199) whether pre-2024 history is needed before downloading.
 
 **Cleanup:** already disabled (safe — protects the 1m meanwhile). Re-enable
-(`aws events enable-rule --name prices-production-cleanup`) only **after** pre-roll, so
-the coarse tables have captured the history before the redundant `1m` partitions drop.
+(`aws events enable-rule --name prices-production-cleanup`) only **after** the
+Phase B pre-roll is verified, so the coarse tables have captured the history before
+the redundant `1m` partitions drop.
 
 **Monitoring:** the backfill had no watchdog (a host kill became a 6-week gap silently);
 the live doorbell-lag alarm is blind to a drains-but-doesn't-write processor. Both split
@@ -166,10 +192,11 @@ to **task 0093**.
 
 ## Acceptance Criteria
 
-- [ ] **Phase 1:** `preroll.sql` applied to the existing `1m`; coarse `1h`/`1d` hold
-      `2024-02 → 2026-05` (verified per-source query). Owner sign-off obtained first.
-- [ ] **Phase 2:** June-2026 gap (`62.6M → floor`) backfilled + pre-rolled; the coarse
-      hole is closed (verified query).
+- [ ] **Phase A (first):** June-2026 gap (`62,642,957 → 63,352,611`) backfilled to
+      `price_ohlcv_1m`; `1m` now contiguous `2024-02 → tip-of-backfill` (verified query).
+- [ ] **Phase B (last):** single `preroll.sql` over the completed `1m`; coarse
+      `1h`/`1d` hold the whole contiguous range incl. the filled June gap (verified
+      per-source query). Owner sign-off obtained first.
 - [ ] `docs/runbooks/fix-backfill-history-loss-and-rerun.md` re-scoped (superseding
       banner: pre-roll-first / gap-fill, no blanket TRUNCATE+re-download). ✅ done 2026-07-14.
 - [x] `docs/runbooks/continue-soroban-backfill.md` gains the pre-roll + cleanup-
