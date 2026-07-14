@@ -2,7 +2,7 @@
 id: "0090"
 title: "Backfill loses history — wire preroll + cleanup-coordination into the backfill workflow"
 type: FEATURE
-status: backlog
+status: active
 related_adr: ["0007"]
 related_tasks: ["0088", "0053", "0039", "0051", "0059", "0060"]
 tags: [layer-infra, priority-high, effort-medium, milestone-M1, backfill, clickhouse, retention, rollup, data-loss, blocker]
@@ -45,6 +45,17 @@ history:
       Phase 1 pre-roll existing 1m (2.3yr durable history, no download); Phase 2
       gap-fill June only; Phase 3 deep 2015-2024 tail = DECISION → task 0092.
       Spawned 0092 (deep tail) + 0093 (backfill watchdog + live freshness alarm).
+  - date: 2026-07-14
+    status: active
+    who: okarcz
+    note: >
+      Promoted backlog → active; starting the backfill fix. First deliverable
+      is the non-prod-gated dev work: wire pre-roll + cleanup-coordination
+      steps into docs/runbooks/continue-soroban-backfill.md (AC #4) and
+      document the cleanup re-enable procedure (AC #5). Phase 1 pre-roll and
+      Phase 2 gap-fill EXECUTION run on shared ch-prod-01 → owner sign-off +
+      approval-gated, deferred to an explicit run. Branch
+      feat/0090_backfill-preroll-cleanup-coordination.
 ---
 
 # Backfill loses history — wire preroll + cleanup-coordination into the backfill workflow
