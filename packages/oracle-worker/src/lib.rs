@@ -13,7 +13,7 @@
 
 use base64::Engine;
 use prices_ingest_core::{AssetRegistry, OhlcvWriter, OracleSample, reflector_key_to_identity};
-use stellar_xdr::curr::{
+use stellar_xdr::{
     ContractId, Hash, HostFunction, Int128Parts, InvokeContractArgs, InvokeHostFunctionOp, Limits,
     Memo, MuxedAccount, Operation, OperationBody, Preconditions, ReadXdr, ScAddress, ScMap,
     ScSymbol, ScVal, ScVec, SequenceNumber, Transaction, TransactionEnvelope, TransactionExt,
@@ -43,7 +43,7 @@ pub enum OracleError {
     #[error("rpc json: {0}")]
     Json(#[from] serde_json::Error),
     #[error("xdr: {0}")]
-    Xdr(#[from] stellar_xdr::curr::Error),
+    Xdr(#[from] stellar_xdr::Error),
     #[error("strkey: {0}")]
     Strkey(#[from] stellar_strkey::DecodeError),
     #[error("base64: {0}")]
@@ -299,11 +299,11 @@ mod tests {
     #[test]
     fn parses_price_data_map() {
         let entries: VecM<_> = vec![
-            stellar_xdr::curr::ScMapEntry {
+            stellar_xdr::ScMapEntry {
                 key: ScVal::Symbol(sc_symbol("price").unwrap()),
                 val: ScVal::I128(Int128Parts { hi: 0, lo: 250 }),
             },
-            stellar_xdr::curr::ScMapEntry {
+            stellar_xdr::ScMapEntry {
                 key: ScVal::Symbol(sc_symbol("timestamp").unwrap()),
                 val: ScVal::U64(1700),
             },

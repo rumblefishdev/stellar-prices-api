@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use sha2::{Digest, Sha256};
-use stellar_xdr::curr::{
+use stellar_xdr::{
     AccountId, AlphaNum4, AlphaNum12, Asset, AssetCode4, AssetCode12, ContractIdPreimage, Hash,
     HashIdPreimage, HashIdPreimageContractId, Limits, PublicKey, Uint256, WriteXdr,
 };

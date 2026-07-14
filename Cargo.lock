@@ -1014,17 +1014,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
 
 [[package]]
-name = "cfg_eval"
-version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "45565fc9416b9896014f5732ac776f810ee53a66730c17e4020c3ec064a8f88f"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.117",
-]
-
-[[package]]
 name = "chrono"
 version = "0.4.44"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1399,7 +1388,7 @@ dependencies = [
 [[package]]
 name = "domain"
 version = "0.1.0"
-source = "git+https://github.com/rumblefishdev/soroban-block-explorer.git?branch=develop#039f77eb67ca4a15cd0fae2dafd11b182e96b668"
+source = "git+https://github.com/rumblefishdev/soroban-block-explorer.git?branch=develop#d61b359f39994c7ef5f5bde8a0d709cf81a1026c"
 dependencies = [
  "chrono",
  "serde",
@@ -3779,11 +3768,10 @@ dependencies = [
 
 [[package]]
 name = "stellar-xdr"
-version = "26.0.0"
+version = "27.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fea3195594b044ea3a5b05906f81d945480825f00db4e3ae7d77526bf546ff3a"
+checksum = "05ff843326969bdf1ef673dcdba94c08f4a3c8f1e58d6e6ef39b1bd4f749179a"
 dependencies = [
- "cfg_eval",
  "crate-git-revision",
  "escape-bytes",
  "ethnum",
@@ -4667,7 +4655,7 @@ dependencies = [
 [[package]]
 name = "xdr-parser"
 version = "0.1.0"
-source = "git+https://github.com/rumblefishdev/soroban-block-explorer.git?branch=develop#039f77eb67ca4a15cd0fae2dafd11b182e96b668"
+source = "git+https://github.com/rumblefishdev/soroban-block-explorer.git?branch=develop#d61b359f39994c7ef5f5bde8a0d709cf81a1026c"
 dependencies = [
  "base64",
  "domain",

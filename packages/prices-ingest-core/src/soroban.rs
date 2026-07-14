@@ -13,7 +13,7 @@ use std::collections::HashMap;
 
 use rust_decimal::Decimal;
 use serde_json::Value;
-use stellar_xdr::curr::{LedgerCloseMeta, TransactionMeta};
+use stellar_xdr::{LedgerCloseMeta, TransactionMeta};
 use tracing::warn;
 
 use extractors_core::{SorobanEventRow, TaggedValue, Venue, VenueRegistry};
