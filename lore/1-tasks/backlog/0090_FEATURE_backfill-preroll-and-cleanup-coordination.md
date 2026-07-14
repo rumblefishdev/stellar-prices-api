@@ -23,6 +23,28 @@ history:
       drops historical 1m partitions nightly (7d retention). Net: every
       backfilled candle is deleted un-rolled — the coarse forever-tables
       (1h/4h/1d/1w/1M) that the BE consumer reads are empty. BLOCKS 0088.
+  - date: 2026-07-14
+    status: backlog
+    who: okarcz
+    note: >
+      Root-caused a SECOND, distinct failure: the Soroban-era backfill also
+      STOPPED early (ledger 62,642,957) and was never resumed → unfilled gap
+      62,642,957→63,352,611 (~710k ledgers). CH forensics: candles ahead of the
+      completed-ledger batch = external mid-loop KILL (suspend/reboot/OOM), not a
+      clean exit; proto27 (0091) and parse-error ruled out. No watchdog on the
+      manual run → a momentary ~07-08 kill became a lasting gap. The re-run fixes
+      both (gap + durability). Also: the "live ingestion stopped" side-note is a
+      separate thread — Protocol-27, now task 0091; live processor is recovering.
+  - date: 2026-07-14
+    status: backlog
+    who: okarcz
+    note: >
+      RE-SCOPED after measuring surviving data: Soroban-era 1m SURVIVED
+      (contiguous 2024-02→2026-05; cleanup DISABLED), only June-2026 is a hole
+      (the 62.6M→floor gap). Dropped the blanket TRUNCATE+re-download. New plan:
+      Phase 1 pre-roll existing 1m (2.3yr durable history, no download); Phase 2
+      gap-fill June only; Phase 3 deep 2015-2024 tail = DECISION → task 0092.
+      Spawned 0092 (deep tail) + 0093 (backfill watchdog + live freshness alarm).
 ---
 
 # Backfill loses history — wire preroll + cleanup-coordination into the backfill workflow
@@ -47,6 +69,33 @@ This is a **workflow gap, not a code bug** — the extractor and rollup SQL are
 correct (proven below). It **blocks 0088** (the backfill produces nothing durable
 until fixed).
 
+## Backfill also STOPPED early — a SECOND, distinct failure (root-caused 2026-07-14)
+
+Beyond losing durability (above), the Soroban-era backfill **stopped short and was
+never resumed**, leaving an unfilled ledger gap **62,642,957 → 63,352,611** (~710k
+ledgers, the death point up to the floor). Forensics on ch-prod-01:
+
+- Stopped **mid-partition**: candles reach ledger **62,642,956**, but the per-partition
+  `backfill_sdex_ledgers` completed-batch only reaches **62,617,423**, and
+  `backfill_progress.soroban_amm` sits at **62,591,999**. Candles *ahead of* the
+  completed-ledger batch (which is written once, at end-of-partition) is the signature
+  of a **mid-loop kill**, not a clean error exit or completion.
+- **Ruled out:** proto27 (its parse boundary 63,401,875 is *above* the backfill floor,
+  never reached — see task 0091); XDR parse error (aborts *before* the completed batch,
+  yet completed rows exist); transient CH/AWS errors (the sink retries all of these; a
+  persistent one exits cleanly with a logged error).
+- **Cause = external host-level kill** of the operator backfill box (suspend/sleep,
+  reboot, or OOM). Inferred from the CH evidence; *which* kill is not yet confirmed —
+  pending `~/backfill.log` + `journalctl`/`last -x` on the backfill machine.
+- **Why it became a lasting gap:** the manual `continue-soroban-backfill` process has
+  **no watchdog / auto-restart / alarm**, so a single kill ended it permanently and it
+  was never re-run. A momentary kill (~2026-07-08) became a 6-day+ gap.
+
+The task's re-run (below) fixes **both** failures at once — it re-processes the
+62.6M→floor gap (and the 0%-done pre-Soroban tail) *and* pre-rolls for durability.
+Consider a follow-up to supervise/alarm the backfill so an interruption can't silently
+persist (the live processor has a doorbell-lag alarm; the backfill has nothing).
+
 ## Context / Evidence (measured on ch-prod-01, 2026-07-09)
 
 - `price_ohlcv_1m`: 40.4M sdex rows, oldest `2024-07-11`, newest `2026-07-08 00:37`.
@@ -64,42 +113,59 @@ until fixed).
 - Cleanup retention (`cleanup-worker/src/lib.rs`): `1m`=7d, `15m`=30d, `oracle`=13mo;
   `1h/4h/1d/1w/1M` retained forever.
 
-Also observed (separate, worth its own check): **live ingestion appears stopped** —
-newest `1m` row is `2026-07-08 00:37` (~1.3 days stale), which is also why the 2-hour
-live MVs currently produce nothing even for live data.
+Also observed (separate thread, now tracked as **task 0091**): live ingestion went
+stale (~2026-07-08) in the **Protocol-27** window. Investigated 2026-07-14 — the
+`prices-production-ledger-processor` Lambda is actually **healthy and catching up**
+(proto27 decode impact TBD at the ledger-63,401,875 crossing); this is **NOT** the same
+as the backfill's stop above. See task 0091 / memory `proto27-xdr26-live-freeze`.
 
-## Corrected workflow (the fix)
+## Recommended plan (RE-SCOPED 2026-07-14 after measuring the surviving data)
 
-A bulk historical backfill must keep the full `1m` range present long enough to
-pre-roll it into the coarse tables, then let cleanup reclaim the `1m` space. Order:
+Measurement changed the plan. The Soroban-era `1m` data **survived** — contiguous
+`2024-02 → 2026-05` (verified by per-month counts), and the cleanup rule is currently
+**DISABLED**, so nothing is dropping it. Only **June 2026 is a hole** (the 62.6M→floor
+gap). So the original "TRUNCATE `backfill_sdex_ledgers` + re-download the whole chain"
+is **wasteful** — it would re-fetch ~94% of data that already exists (weeks). Instead:
 
-1. **Disable the cleanup worker** for the duration:
-   `aws events disable-rule --name prices-production-cleanup` (re-enable after).
-2. **Run the backfill** into `1m` (task 0088). Disk on ch-prod-01 must hold the full
-   `1m` history transiently — size this first (see risks).
-3. **Pre-roll** the coarse tables from the fully-written `1m` via `preroll.sql`
-   (6 INSERT…SELECT statements, `1m→15m→1h→4h→1d→1w→1M`). Optionally `TRUNCATE`
-   the coarse tables first for a clean, idempotent result.
-4. **Verify** coarse tables now hold the full historical range (min timestamp back
-   to genesis / activation; per-source counts sane).
-5. **Re-enable the cleanup worker**:
-   `aws events enable-rule --name prices-production-cleanup`. It drops the now-redundant
-   historical `1m`/`15m` partitions; the coarse forever-tables retain the history.
+**Phase 1 — Pre-roll the existing 1m (do FIRST; cheap, no download).**
+Apply `preroll.sql` to the current `price_ohlcv_1m` → populates the coarse
+`1h/4h/1d/1w/1M` tables. Delivers ~2.3 years of durable SDEX history (2024-02 →
+2026-05) immediately. Idempotent (optionally `TRUNCATE` coarse first for a clean run).
+Runs heavy aggregation on the **shared** ch-prod-01 → owner sign-off + low-traffic
+window + spill-to-disk flags. **Do NOT** TRUNCATE `backfill_sdex_ledgers`; **do NOT**
+re-run the full chain.
 
-Alternative to weigh (design decision for the owner): have the backfill itself write
-directly to (or pre-roll per-chunk into) the coarse tables, avoiding the need to hold
-the entire `1m` history at once. Per-chunk preroll bounds disk but complicates the
-`FINAL`/dedup semantics at chunk seams.
+**Phase 2 — Gap-fill the one hole (`62,642,957 → 63,352,611`, ~710k ledgers = the
+missing June-2026 range).** Bounded backfill of just this range — all **below** the
+proto27 boundary (63.4M), so `stellar-xdr 26` is fine (no 0091 dependency). Pool
+registry already seeded in prod → AMM resolves. Then pre-roll that range. ~1h on a
+us-east-2 EC2 / ~1 day local.
+
+**Phase 3 — Deep pre-Soroban tail (2015 → 2024-02): a DECISION, not automatic.**
+The only expensive piece (~50M ledgers, multi-week). Split to **task 0092** — decide
+with the BE consumer (0199) whether pre-2024 history is needed before downloading.
+
+**Cleanup:** already disabled (safe — protects the 1m meanwhile). Re-enable
+(`aws events enable-rule --name prices-production-cleanup`) only **after** pre-roll, so
+the coarse tables have captured the history before the redundant `1m` partitions drop.
+
+**Monitoring:** the backfill had no watchdog (a host kill became a 6-week gap silently);
+the live doorbell-lag alarm is blind to a drains-but-doesn't-write processor. Both split
+to **task 0093**.
 
 ## Acceptance Criteria
 
-- [ ] Decision recorded: full-range preroll (disable-cleanup) vs per-chunk/direct-to-coarse.
-- [ ] `docs/runbooks/continue-soroban-backfill.md` updated with the preroll + cleanup-
+- [ ] **Phase 1:** `preroll.sql` applied to the existing `1m`; coarse `1h`/`1d` hold
+      `2024-02 → 2026-05` (verified per-source query). Owner sign-off obtained first.
+- [ ] **Phase 2:** June-2026 gap (`62.6M → floor`) backfilled + pre-rolled; the coarse
+      hole is closed (verified query).
+- [ ] `docs/runbooks/fix-backfill-history-loss-and-rerun.md` re-scoped (superseding
+      banner: pre-roll-first / gap-fill, no blanket TRUNCATE+re-download). ✅ done 2026-07-14.
+- [ ] `docs/runbooks/continue-soroban-backfill.md` gains the pre-roll + cleanup-
       coordination steps (currently stops at writing `1m`).
-- [ ] Cleanup-disable / re-enable procedure documented (rule name, env scoping, who owns it).
-- [ ] Disk-headroom check for holding full `1m` history on ch-prod-01 documented.
-- [ ] After a re-run: coarse `1h`/`1d` hold the backfilled historical range (verified query).
-- [ ] Separately: confirm/ξ triage whether live ingestion is stopped (newest `1m` stale).
+- [ ] Cleanup re-enable procedure documented; re-enabled only AFTER pre-roll.
+- [ ] Deep pre-Soroban tail (2015→2024) split to **task 0092** (decision w/ BE 0199).
+- [ ] Backfill watchdog + live candle-freshness alarm split to **task 0093**.
 
 ## Risks / Notes
 

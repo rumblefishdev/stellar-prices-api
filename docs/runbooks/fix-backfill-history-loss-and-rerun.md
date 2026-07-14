@@ -1,5 +1,23 @@
 # Runbook — Fix the backfill history-loss and re-run it correctly
 
+> **⚠️ SUPERSEDED IN PART (2026-07-14) — read this first.** Measurement showed the
+> Soroban-era `price_ohlcv_1m` data **survived** (contiguous 2024-02 → 2026-05;
+> the cleanup rule is currently **DISABLED**). So **do NOT** TRUNCATE
+> `backfill_sdex_ledgers` (Step 3) or re-run the whole chain (Step 4) — that
+> re-downloads ~94% of data that already exists (weeks wasted). Instead:
+>
+> 1. **Pre-roll the existing 1m first** — run **§7 (Step 5)** against the current
+>    `1m`. This alone yields ~2.3 years of durable coarse history, no download.
+> 2. **Gap-fill only the hole** — the single missing range is
+>    **`62,642,957 → 63,352,611`** (≈ June 2026). Run Step 4 **bounded to that range
+>    only** (below the proto27 boundary, so `stellar-xdr 26` is fine), then pre-roll it.
+> 3. **Deep pre-Soroban tail (2015→2024)** is a **decision**, not automatic — task **0092**.
+> 4. Cleanup is already disabled (§4 done); re-enable (§9) only after pre-roll.
+>
+> The steps below remain the reference for each individual action (pre-roll, cleanup
+> toggle, verify, and the deep-tail download if approved). **Skip Step 3 and the
+> full-range Step 4.** Rationale + re-scope: task **0090**.
+
 **Audience:** any operator, no prior project knowledge assumed. Follow the steps
 top to bottom, run each command, and check the **✅ Confirm** line under it before
 moving on. If a Confirm check fails, stop and see **Troubleshooting** at the end.
