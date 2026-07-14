@@ -172,9 +172,13 @@ to **task 0093**.
       hole is closed (verified query).
 - [ ] `docs/runbooks/fix-backfill-history-loss-and-rerun.md` re-scoped (superseding
       banner: pre-roll-first / gap-fill, no blanket TRUNCATE+re-download). ✅ done 2026-07-14.
-- [ ] `docs/runbooks/continue-soroban-backfill.md` gains the pre-roll + cleanup-
-      coordination steps (currently stops at writing `1m`).
-- [ ] Cleanup re-enable procedure documented; re-enabled only AFTER pre-roll.
+- [x] `docs/runbooks/continue-soroban-backfill.md` gains the pre-roll + cleanup-
+      coordination steps (currently stops at writing `1m`). ✅ 2026-07-14 — added
+      durability ⚠ callout + §9 pre-roll (`preroll.sql` via Route-A, spill flags,
+      owner sign-off) + §10 cleanup-coordination; renumbered stop/re-run → §11.
+- [~] Cleanup re-enable procedure documented; re-enabled only AFTER pre-roll.
+      **Documented** ✅ (§10: `describe-rule` → pre-roll → `enable-rule` order).
+      **Execution** pending (prod mutation — after Phase 1 pre-roll runs).
 - [ ] Deep pre-Soroban tail (2015→2024) split to **task 0092** (decision w/ BE 0199).
 - [ ] Backfill watchdog + live candle-freshness alarm split to **task 0093**.
 

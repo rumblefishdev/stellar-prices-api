@@ -16,6 +16,17 @@ The tool is the `sdex-backfill` binary in this repo. In `combined` mode it
 extracts **SDEX trades + Soroban AMM swaps + oracle prices** from a single
 download of each ledger.
 
+> **⚠ Writing `1m` is only half the job — the `1m` table is NOT durable.**
+> `prices.price_ohlcv_1m` is a **transient 7-day feeder**: the nightly cleanup
+> worker drops its month-partitions, and the live rollup MVs only aggregate the
+> last 2 h (`now() - INTERVAL 2 HOUR`), so they **ignore backfilled rows**. The
+> store of record is the coarse forever-tables (`1h/4h/1d/1w/1M`), and for
+> **historical** data those are filled by an explicit **pre-roll** (§9), never
+> the live MVs. **A backfilled range isn't "done" until it has been pre-rolled**
+> — otherwise its candles are silently dropped at the next 02:00 UTC cleanup.
+> Background + root-cause: task 0090 and
+> `docs/runbooks/fix-backfill-history-loss-and-rerun.md`.
+
 ### Where we are (update this line as you go)
 
 - **Done:** `[50457424, 51007999]` (the first tranche + first forward chunk).
@@ -169,7 +180,7 @@ curl -s 'https://horizon.stellar.org/' \
 ```
 
 **Point at your cert files and run inside `tmux`** (so an SSH drop can't kill
-the run — see §9 on why finishing matters):
+the run — see §11 on why finishing matters):
 
 ```bash
 tmux new -s backfill        # detach later with Ctrl-b then d; reattach: tmux attach -t backfill
@@ -277,7 +288,106 @@ complete.
 
 ---
 
-## 9. If you need to stop and re-run
+## 9. Pre-roll to the coarse forever-tables (REQUIRED for durability)
+
+Once the `1m` candles for the range you care about are written (a completed
+chunk, or the whole range), you **must** roll them up into the coarse
+forever-tables — otherwise the cleanup worker drops them (see the ⚠ box at the
+top). The live rollup MVs won't do it: they only look at the last 2 h, so
+historical rows need the **full-range pre-roll**, `schema/preroll.sql`.
+
+What it does: re-aggregates `1m → 15m → 1h → 4h → 1d → 1w → 1M` over the **whole**
+range, producing exactly one production-correct row per
+`(bucket, asset, quote, source)`. It is **idempotent** — the coarse tables are
+`ReplacingMergeTree(version)`, so a second run collapses duplicates. Six
+`INSERT … SELECT` statements, run in order (`1m`→`15m` first, each granularity
+feeds the next).
+
+> **⚠ Heavy aggregation on the SHARED `ch-prod-01`.** This scans the entire `1m`
+> history in one GROUP BY. Before running: get **prices-api owner sign-off**, pick
+> a **low-traffic window**, and pass the **spill-to-disk** settings below so it
+> can't OOM the shared node (it does **not** restart the container — pure SQL —
+> but it competes for RAM/CPU with the BE tenant). See
+> [[flag-container-restarts]] / [[feedback-prepare-not-deploy]].
+
+**Optional — clean rebuild.** For a from-scratch coarse build (recommended the
+first time, since prod's coarse tables are currently near-empty), truncate them
+first. Safe: the pre-roll rebuilds every row from `1m`.
+
+```bash
+# OPTIONAL clean-slate — only if you want a deterministic full rebuild:
+ssh -i ~/.ssh/sorban-prod_ed25519 deploy@168.119.73.161 \
+  "docker exec -i app-clickhouse-1 clickhouse-client --multiquery --query='
+     TRUNCATE TABLE prices.price_ohlcv_15m;
+     TRUNCATE TABLE prices.price_ohlcv_1h;
+     TRUNCATE TABLE prices.price_ohlcv_4h;
+     TRUNCATE TABLE prices.price_ohlcv_1d;
+     TRUNCATE TABLE prices.price_ohlcv_1w;
+     TRUNCATE TABLE prices.price_ohlcv_1M;'"
+```
+
+**Apply the pre-roll** (pipe the repo's `preroll.sql` into the prod client; the
+spill settings bound memory on the shared node):
+
+```bash
+cat packages/prices-clickhouse/schema/preroll.sql \
+| ssh -i ~/.ssh/sorban-prod_ed25519 deploy@168.119.73.161 \
+    "docker exec -i app-clickhouse-1 clickhouse-client --multiquery \
+       --max_bytes_before_external_group_by=20000000000 \
+       --max_memory_usage=40000000000"
+```
+
+**Verify** the coarse tables now hold the range (read-only):
+
+```bash
+ssh -i ~/.ssh/sorban-prod_ed25519 deploy@168.119.73.161 \
+  "docker exec -i app-clickhouse-1 clickhouse-client --query=\"
+     SELECT '1h' g, source, min(timestamp) oldest, max(timestamp) newest, count() rows
+       FROM prices.price_ohlcv_1h FINAL GROUP BY source
+     UNION ALL
+     SELECT '1d', source, min(timestamp), max(timestamp), count()
+       FROM prices.price_ohlcv_1d FINAL GROUP BY source
+     ORDER BY g, source FORMAT PrettyCompact\""
+```
+
+Good = `1h`/`1d` span your backfilled range per source (e.g. sdex `2024-02 →`
+whatever the newest `1m` is). Empty coarse tables after this = the pre-roll
+didn't run — do not re-enable cleanup (§10).
+
+---
+
+## 10. Cleanup coordination — re-enable ONLY after pre-roll
+
+The nightly cleanup rule (`prices-production-cleanup`, EventBridge
+`cron(0 2 * * *)` → the `prices-production-cleanup` Lambda) drops `1m` partitions
+older than 7 days. It is currently **disabled** to protect the un-rolled `1m`
+history while this backfill runs. **Do not re-enable it until §9's pre-roll has
+captured the history into the coarse tables** — otherwise the `1m` partitions
+drop at the next 02:00 UTC and the history is lost again (the exact 0090 bug).
+
+Confirm the current state first (read-only; profile `soroban-explorer`, region
+`eu-central-1`):
+
+```bash
+aws events describe-rule --name prices-production-cleanup \
+  --query State --output text            # expect: DISABLED
+```
+
+Re-enable **only after** §9 pre-roll is verified — this is a prod mutation, so
+**owner sign-off** and the standard approval gate apply:
+
+```bash
+aws events enable-rule --name prices-production-cleanup
+aws events describe-rule --name prices-production-cleanup \
+  --query State --output text            # now: ENABLED
+```
+
+Order that must hold: **write `1m` → pre-roll (§9) → verify coarse → re-enable
+cleanup (§10).** Never re-enable before the coarse tables are populated.
+
+---
+
+## 11. If you need to stop and re-run
 
 **Stopping is safe.** You can `Ctrl-C` the run (or the machine can reboot, or the
 network can drop) at any time without corrupting anything. Everything already
