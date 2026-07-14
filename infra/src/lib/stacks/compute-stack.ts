@@ -49,9 +49,12 @@ export function ingestDlqName(envName: string): string {
  * stack consumes the pre-built `provided.al2023` bootstrap via
  * `Code.fromAsset`. Build it first:
  *
- *     cargo lambda build -p prices-ledger-processor --release --arm64
+ *     cargo lambda build -p prices-ledger-processor --release --arm64 --features lambda
  *
- * which writes `target/lambda/prices-ledger-processor/bootstrap`.
+ * `--features lambda` is REQUIRED: the `prices-ledger-processor` bin is
+ * `required-features = ["lambda"]`, so a build without it silently skips
+ * the bin and produces no bootstrap — CDK would then package a stale
+ * asset. Writes `target/lambda/prices-ledger-processor/bootstrap`.
  * Production follow-up: add `cargo-lambda-cdk` and swap this for
  * `RustFunction` so synth builds the binary (mirrors BE exactly).
  * Override with `LEDGER_PROCESSOR_ASSET_DIR` if needed.
