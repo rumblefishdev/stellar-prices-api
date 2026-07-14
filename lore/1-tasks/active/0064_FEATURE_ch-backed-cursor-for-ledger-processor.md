@@ -91,32 +91,43 @@ concrete failure modes this task removes:
 Built on branch `feat/0064_ch-backed-cursor`:
 
 - **Schema** — `prices.ingest_cursor (id String, ledger UInt64, updated_at
-  DateTime64(3))`, `ReplacingMergeTree(updated_at) ORDER BY id`, in `init.sql`.
-  `init_sql_parses_into_statements` bumped 28 → 29.
+  DateTime64(3))`, `ReplacingMergeTree(ledger) ORDER BY id`, in `init.sql`
+  (`updated_at` is informational only). `init_sql_parses_into_statements`
+  bumped 28 → 29.
 - **`cursor::ClickHouseCursor`** — `read()` = `SELECT ledger … FINAL WHERE id=?`
-  via `fetch_optional` (None → `Read` error → seed path fires once); `write()` =
-  `INSERT … now64(3)`.
+  via `fetch_optional`; 0 rows → `CursorError::Empty` (seed signal), query error
+  → `Read` (never seeded on). `write()` = `INSERT … now64(3)`.
 - **`main.rs`** — swapped `StubFileCursor` → `ClickHouseCursor`, built from the
   sink's shared mTLS client (`sink.client().clone()`); dropped `CURSOR_FILE` /
   `/tmp`. Seed-on-empty from `INITIAL_CURSOR` retained (genuine first-run only).
-- **Tests** — `tests/cursor_ch_it.rs`, 4 cases, all green vs local CH 26.3.10.60
-  (= prod). `cargo check --workspace`, clippy, fmt all clean.
+- **Tests** — `tests/cursor_ch_it.rs`, 5 cases (incl. `a_lower_write_never_rewinds`
+  + Empty-vs-Read), all green vs local CH 26.3.10.60 (= prod), parallel-safe +
+  re-run-safe. `cargo check --workspace`, clippy, fmt all clean.
 
 ## Design Decisions
 
 ### Emerged
 
-1. **`ReplacingMergeTree(updated_at)` with `now64(3)`, not `ledger`-as-version.**
-   Millisecond version + strictly serial runs (reservedConcurrency=1) mean the
-   latest write always wins the FINAL read, and it still allows a deliberate
-   operator reset (a later `now64(3)` beats the stored row) — which a
-   `ReplacingMergeTree(ledger)` would silently ignore.
-2. **Share the sink's mTLS client** (`sink.client().clone()`) instead of opening
+1. **`ReplacingMergeTree(ledger)` — monotonic-forward, not `updated_at`-as-version.**
+   *(Reversed after the PR #108 code review — the first cut used
+   `ReplacingMergeTree(updated_at)`.)* Keying the RMT version on `ledger` means
+   FINAL always keeps the HIGHEST ledger for an `id`, so a stray lower write can
+   never rewind the cursor, and there is no same-millisecond version tie (which
+   `now64(3)` could hit and resolve arbitrarily → a backward read). The cost: a
+   deliberate operator rewind needs an explicit `DELETE`/`TRUNCATE`, not just a
+   lower `INSERT` — an acceptable, safer trade (accidental rewind was the bug).
+2. **Seed only on `CursorError::Empty`, never on `Read`.** *(PR #108 review.)*
+   `read()` distinguishes 0-rows (`Empty`) from a failed query (`Read`); `main`
+   seeds on `Empty` only. A transient CH read failure at cold start therefore
+   fails Init loudly instead of clobbering a healthy cursor with the floor seed
+   (which — combined with the old `updated_at` version — would have re-frozen the
+   frontier). Backstopped at the storage layer by decision 1.
+3. **Share the sink's mTLS client** (`sink.client().clone()`) instead of opening
    a second connection — no extra Secrets-extension fetch / handshake at cold
    start. Required exposing `ClickHouseSink::client()` and promoting `clickhouse`
    from dev- to a normal dependency (already compiled transitively — free).
-3. **Kept `INITIAL_CURSOR` as the genuine first-run bootstrap**, not retired. On
+4. **Kept `INITIAL_CURSOR` as the genuine first-run bootstrap**, not retired. On
    an empty table it seeds once; thereafter the CH value is authoritative. A
    missing table errors at Init (fail-loud, matching the pool_registry contract).
-4. **`id = "ledger-processor"`** constant — the table is multi-consumer by
+5. **`id = "ledger-processor"`** constant — the table is multi-consumer by
    design, so future consumers get their own row without schema change.

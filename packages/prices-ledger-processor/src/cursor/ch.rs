@@ -36,12 +36,14 @@ impl ClickHouseCursor {
 
 impl Cursor for ClickHouseCursor {
     async fn read(&self) -> Result<u64, CursorError> {
-        // FINAL collapses the ReplacingMergeTree(updated_at) rows to the latest
-        // write even before a background merge. `None` = no cursor row yet (a
-        // genuine first run) → surfaced as a Read error so `main`'s seed path
-        // fires exactly once. A missing table also errors here (fatal at init,
-        // matching the pool_registry "must exist" contract), which is correct —
-        // the schema must be applied before the processor is deployed.
+        // FINAL collapses the ReplacingMergeTree(ledger) rows to the highest
+        // ledger for this id (the latest checkpoint) even before a background
+        // merge. Two distinct outcomes, kept distinct on purpose:
+        //   - query error (transient CH failure, or a MISSING table) → `Read`,
+        //     which the caller must NOT treat as "seed me" — seeding on a
+        //     transient read would clobber a healthy cursor with the floor.
+        //   - query ok but 0 rows (`None`) → `Empty`, the genuine first-run
+        //     signal the caller seeds on.
         let stored = self
             .client
             .query("SELECT ledger FROM prices.ingest_cursor FINAL WHERE id = ?")
@@ -49,15 +51,16 @@ impl Cursor for ClickHouseCursor {
             .fetch_optional::<u64>()
             .await
             .map_err(|e| CursorError::Read(e.to_string()))?;
-        stored.ok_or_else(|| CursorError::Read(format!("no cursor row for id '{}'", self.id)))
+        stored.ok_or(CursorError::Empty)
     }
 
     async fn write(&self, value: u64) -> Result<(), CursorError> {
         // `id` is a fixed constant (no injection surface) and `value` is numeric,
         // so string interpolation is safe here (same pattern as the backfill's
-        // `backfill_progress` write). `updated_at` is server-side `now64(3)` —
-        // monotonic across the strictly serial reconcile runs
-        // (reservedConcurrency = 1), so the FINAL read always returns this write.
+        // `backfill_progress` write). The RMT version is `ledger`, so FINAL keeps
+        // the HIGHEST ledger written for this id — the cursor is monotonic-forward
+        // and a stray lower write (e.g. a spurious re-seed) can never rewind it.
+        // `updated_at` (now64(3)) is informational only: last-written wall time.
         let sql = format!(
             "INSERT INTO prices.ingest_cursor (id, ledger, updated_at) \
              VALUES ('{id}', {value}, now64(3))",
