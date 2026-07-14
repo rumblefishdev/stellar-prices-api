@@ -55,19 +55,18 @@ impl Cursor for ClickHouseCursor {
     }
 
     async fn write(&self, value: u64) -> Result<(), CursorError> {
-        // `id` is a fixed constant (no injection surface) and `value` is numeric,
-        // so string interpolation is safe here (same pattern as the backfill's
-        // `backfill_progress` write). The RMT version is `ledger`, so FINAL keeps
-        // the HIGHEST ledger written for this id — the cursor is monotonic-forward
-        // and a stray lower write (e.g. a spurious re-seed) can never rewind it.
-        // `updated_at` (now64(3)) is informational only: last-written wall time.
-        let sql = format!(
-            "INSERT INTO prices.ingest_cursor (id, ledger, updated_at) \
-             VALUES ('{id}', {value}, now64(3))",
-            id = self.id,
-        );
+        // Parameterised like `read()` (no ad-hoc string interpolation). The RMT
+        // version is `ledger`, so FINAL keeps the HIGHEST ledger written for this
+        // id — the cursor is monotonic-forward and a stray lower write (e.g. a
+        // spurious re-seed) can never rewind it. `updated_at` (now64(3)) is
+        // informational only: the last-written wall time.
         self.client
-            .query(&sql)
+            .query(
+                "INSERT INTO prices.ingest_cursor (id, ledger, updated_at) \
+                 VALUES (?, ?, now64(3))",
+            )
+            .bind(&self.id)
+            .bind(value)
             .execute()
             .await
             .map_err(|e| CursorError::Write(e.to_string()))

@@ -59,50 +59,15 @@ async fn main() -> Result<(), Error> {
     );
     let sink = sink?;
 
-    // Durable cursor in `prices.ingest_cursor` (task 0064), sharing the sink's
-    // mTLS client. Unlike the old `/tmp` file, it survives execution-environment
-    // recycles — so the loop resumes from the stored ledger instead of rewinding
-    // to INITIAL_CURSOR every cold start (the freeze this task fixes).
-    let cursor = ClickHouseCursor::new(sink.client().clone(), CURSOR_ID);
-    match cursor.read().await {
-        // Populated → resume where we left off.
-        Ok(at) => info!(at, "resumed cursor from ClickHouse"),
-        // Genuinely empty table (true first run) → seed once from INITIAL_CURSOR.
-        Err(CursorError::Empty) => {
-            match std::env::var(ENV_INITIAL_CURSOR)
-                .ok()
-                .and_then(|s| s.parse::<u64>().ok())
-            {
-                Some(seed) => {
-                    cursor.write(seed).await?;
-                    info!(
-                        seed,
-                        "seeded cursor from INITIAL_CURSOR (empty ingest_cursor)"
-                    );
-                }
-                // No seed configured: leave the table empty; the first reconcile
-                // run's read errors and DLQs (recoverable once a seed is set).
-                None => {
-                    info!("ingest_cursor empty and no INITIAL_CURSOR set — first doorbell will DLQ")
-                }
-            }
-        }
-        // Any OTHER read error (transient CH failure, or a missing table) must
-        // NOT be treated as empty: seeding here would clobber a healthy durable
-        // cursor with the floor value and re-freeze the frontier. Fail Init loudly
-        // instead — the retry cold-starts and reads cleanly once CH recovers, and
-        // a truly missing table stays a loud, alarmable Init failure.
-        Err(e) => {
-            return Err(Error::from(format!(
-                "ingest_cursor read failed at init: {e}"
-            )));
-        }
-    }
-    // Two independent ClickHouse reads on the cold path — joined so `try_join!`
-    // shaves a round-trip off Lambda Init (same reasoning as the fetcher+sink join
-    // above). Either failing still surfaces an unreachable cluster (or missing
-    // schema) as a Lambda Init error, so no separate preflight `SELECT 1` is needed.
+    // Three independent ClickHouse reads on the cold path — the durable cursor
+    // (task 0064) plus the two registries — joined so they overlap instead of
+    // running serially (same reasoning as the fetcher+sink join above). All use
+    // the sink's shared client; clients are cheap to clone and pool-backed, so
+    // concurrent queries are safe.
     //
+    // - cursor.read(): last processed ledger from `prices.ingest_cursor`. Durable,
+    //   so the loop resumes across execution-environment recycles instead of
+    //   rewinding to INITIAL_CURSOR every cold start (the freeze this task fixes).
     // - load_registry: existing asset surrogate ids from `prices.assets`.
     // - load_pool_registry: discovered AMM pool classification from
     //   `prices.pool_registry` (task 0078). The processor only READS this table —
@@ -111,8 +76,46 @@ async fn main() -> Result<(), Error> {
     //   yet seeded by the 0053 backfill) is fine: AMM swaps for pre-existing pools
     //   stay unresolved but SDEX is unaffected. ABSENT is NOT fine: the read errors
     //   and init fails (taking SDEX down too), so schema must be applied before deploy.
-    let (registry, pool_registry) =
-        tokio::try_join!(sink.load_registry(), sink.load_pool_registry())?;
+    let cursor = ClickHouseCursor::new(sink.client().clone(), CURSOR_ID);
+    let (cursor_state, registry, pool_registry) = tokio::join!(
+        cursor.read(),
+        sink.load_registry(),
+        sink.load_pool_registry(),
+    );
+    let registry = registry?;
+    let pool_registry = pool_registry?;
+
+    // Seed only on a genuinely empty table (true first run); any OTHER read error
+    // (transient CH failure, or a missing table) must NOT be treated as empty —
+    // seeding would clobber a healthy durable cursor with the floor value and
+    // re-freeze the frontier. Fail Init loudly instead: the retry cold-starts and
+    // reads cleanly once CH recovers, and a truly missing table stays a loud,
+    // alarmable Init failure.
+    match cursor_state {
+        Ok(at) => info!(at, "resumed cursor from ClickHouse"),
+        Err(CursorError::Empty) => match std::env::var(ENV_INITIAL_CURSOR)
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+        {
+            Some(seed) => {
+                cursor.write(seed).await?;
+                info!(
+                    seed,
+                    "seeded cursor from INITIAL_CURSOR (empty ingest_cursor)"
+                );
+            }
+            // No seed configured: leave the table empty; the first reconcile run's
+            // read errors and DLQs (recoverable once a seed is set).
+            None => {
+                info!("ingest_cursor empty and no INITIAL_CURSOR set — first doorbell will DLQ")
+            }
+        },
+        Err(e) => {
+            return Err(Error::from(format!(
+                "ingest_cursor read failed at init: {e}"
+            )));
+        }
+    }
 
     info!(
         %bucket,
