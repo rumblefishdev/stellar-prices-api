@@ -2,9 +2,9 @@
 id: "0088"
 title: "Execute + track the historical backfill run (SDEX + Soroban AMM) to completion"
 type: FEATURE
-status: active
+status: blocked
 related_adr: ["0005", "0009"]
-related_tasks: ["0053", "0028", "0082"]
+related_tasks: ["0053", "0028", "0082", "0090"]
 tags: [layer-infra, priority-medium, effort-large, milestone-M1, backfill, soroban, sdex, operational, tracker]
 milestone: 1
 links:
@@ -21,6 +21,17 @@ history:
       this task owns and tracks. Backfill currently PAUSED by operator decision,
       to be resumed (ideally from a us-east-2 EC2). First clean forward chunk
       [50688000, 51007999] already landed 2026-07-07.
+  - date: 2026-07-09
+    status: blocked
+    who: okarcz
+    by: ["0090"]
+    note: >
+      Blocked by 0090. Running the backfill revealed it produces nothing
+      durable: it writes only price_ohlcv_1m (a 7-day feeder); the rollup MVs
+      are live-only (2h window) and the historical preroll step is never run, so
+      the nightly cleanup drops backfilled 1m before it reaches the permanent
+      coarse tables the consumer reads. Resume once 0090 is applied. Fix runbook:
+      docs/runbooks/fix-backfill-history-loss-and-rerun.md (PR #103).
 ---
 
 # Execute + track the historical backfill run (SDEX + Soroban AMM)
