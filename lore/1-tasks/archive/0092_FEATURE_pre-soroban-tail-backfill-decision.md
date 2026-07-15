@@ -2,7 +2,7 @@
 id: "0092"
 title: "Decide + (optionally) run the deep pre-Soroban SDEX tail backfill (2015→2024)"
 type: FEATURE
-status: backlog
+status: done
 related_adr: []
 related_tasks: ["0090", "0088", "0061"]
 tags: ["backfill", "clickhouse", "priority-medium", "effort-large", "decision", "phase-future"]
@@ -18,6 +18,15 @@ history:
       1→50,457,423, ~2015→2024-02) is 0% done and is the only expensive piece of
       the historical program (~50M ledgers, multi-week download). Split out as a
       product DECISION rather than an automatic backfill step.
+  - date: 2026-07-15
+    status: done
+    who: okarcz
+    note: >
+      DECISION MADE: NO — BE (0199 consumer) needs Soroban-era ledgers only, not
+      pre-2024 history. Confirmed with the owner during the 0090 execution. The
+      deep tail that an unnoticed run-full-backfill.sh was mid-download of was
+      KILLED and its 28-row 2015-2016 fragment deleted from price_ohlcv_1m. No
+      download to run → task resolves as "not needed". Archived.
 ---
 
 # Decide + (optionally) run the deep pre-Soroban SDEX tail backfill (2015→2024)
