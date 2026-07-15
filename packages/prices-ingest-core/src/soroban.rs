@@ -830,6 +830,72 @@ mod tests {
     }
 
     #[test]
+    fn soroswap_pair_swap_prices_through_classify() {
+        // End-to-end at the classify seam — the layer where the prod "0 soroswap
+        // candles" originated (task 0096). A real SoroswapPair-shaped swap
+        // (`topics=[String("SoroswapPair"), Symbol("swap")]`, action in topic[1])
+        // for a venue-known + `reg.soroswap`-seeded pool must now dispatch through
+        // the fixed extractor and produce an `amm_tick` tagged `soroswap`.
+        const SEQ: u32 = 50_704_650;
+        const CLOSED_AT: i64 = 1_700_000_000;
+        const POOL: &str = "CDBBBNMCWRMWEIFHUD5BXBCRTW6QM33ZEXIOBGKKQNDSH3WEF7WVBGMI";
+        const T0: &str = "CAS3J7GYLGXMF6TDJBBYYSE3HQ6BBSMLNUQ34T6TZMYMW2EVH34XOWMA";
+        const T1: &str = "CAUIKL3IYGMERDRUN6YSCLWVAKIFG5Q4YJHUKM4S4NJZQIA3BAS6OJPK";
+
+        let swap = SorobanEventRow {
+            contract_id: POOL.to_string(),
+            transaction_id: "tx".to_string(),
+            ledger_sequence: SEQ as u64,
+            event_index: 5,
+            topics: vec![
+                TaggedValue::String("SoroswapPair".to_string()),
+                TaggedValue::Symbol("swap".to_string()),
+            ],
+            data: TaggedValue::Map(vec![
+                (
+                    TaggedValue::Symbol("amount_0_in".into()),
+                    TaggedValue::I128(1_000_000),
+                ),
+                (
+                    TaggedValue::Symbol("amount_0_out".into()),
+                    TaggedValue::I128(0),
+                ),
+                (
+                    TaggedValue::Symbol("amount_1_in".into()),
+                    TaggedValue::I128(0),
+                ),
+                (
+                    TaggedValue::Symbol("amount_1_out".into()),
+                    TaggedValue::I128(914_145),
+                ),
+            ]),
+        };
+
+        let mut groups: HashMap<String, Vec<SorobanEventRow>> = HashMap::new();
+        groups.insert(POOL.to_string(), vec![swap]);
+
+        let mut reg = Registries::new();
+        reg.venue.insert(POOL.to_string(), Venue::Soroswap);
+        reg.soroswap
+            .register(POOL.to_string(), T0.to_string(), T1.to_string());
+
+        let mut assets = AssetRegistry::from_existing(vec![]);
+        let mut out = LedgerSoroban::default();
+        classify_amm_groups(groups, &reg, &mut assets, SEQ, CLOSED_AT, &mut out);
+
+        assert_eq!(
+            out.amm_ticks.len(),
+            1,
+            "a SoroswapPair-shaped swap must now price (was 0 before the fix)"
+        );
+        assert_eq!(out.amm_ticks[0].0, "soroswap", "tick tagged soroswap");
+        assert!(
+            out.unresolved.is_empty(),
+            "a priced pool is not recorded as unresolved"
+        );
+    }
+
+    #[test]
     fn resolvable_soroswap_pool_with_no_priced_tick_is_not_recorded() {
         // Task 0096 (review follow-up): the silent-drop fix must fire ONLY for a
         // pair-resolution miss, never for any zero-tick outcome. A Soroswap pool
