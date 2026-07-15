@@ -1,6 +1,6 @@
 ---
 id: "0096"
-title: "Soroswap backfill coverage gap — close dispatch silent-drop (root cause: registry seed-timing)"
+title: "Soroswap coverage gap — extractor reads the swap action from the wrong topic"
 type: FEATURE
 status: active
 related_adr: []
@@ -34,27 +34,61 @@ history:
       (~07-04..08), so reg.soroswap was empty at run time → 0 candles. Re-scoped:
       0096 = dispatch observability hardening + root-cause record; the
       operational Soroswap re-run moves to 0088.
+  - date: 2026-07-15
+    status: active
+    who: okarcz
+    note: >
+      ROOT CAUSE SUPERSEDED (final) — it is an EXTRACTOR bug, not seed-timing.
+      BE's soroban_events (full history, activation→63.49M) shows our 221 pools
+      emit 824k swaps shaped `topics=[String("SoroswapPair"), Symbol("swap")]` —
+      the action is in topic[1], with the constant "SoroswapPair" in topic[0].
+      Our SoroswapPairExtractor read the action from topic[0] (== "swap"), so it
+      never matched → Ok(vec![]) → 0 candles AND 0 unresolved (the classify guard
+      also keys topic[0]). Seed-timing was a red herring: a re-run would still
+      emit nothing. Fix (this branch): recognize the SoroswapPair envelope
+      (action from topic[1]); data map is already the uniswap-v2 shape we decode.
+      Historical fill now a CH-to-CH derivation from soroban_events (no ledger
+      re-download); tracked in 0088.
 ---
 
-# Soroswap backfill coverage gap — close dispatch silent-drop (root cause: registry seed-timing)
+# Soroswap coverage gap — extractor reads the swap action from the wrong topic
 
 ## Summary
 
-The historical backfill produces **zero `soroswap` candles**, so the coarse
-tables (and `price_ohlcv_1m`) have no Soroswap prices at all. Aquarius and
-Phoenix are present; Soroswap is entirely missing.
+Everything (`price_ohlcv_1m` + coarse tables) has **zero `soroswap` candles**.
+Aquarius and Phoenix are present; Soroswap is entirely missing.
 
-**Root cause CONFIRMED (2026-07-15) = registry seed-timing, not a missing
-preload.** The original framing — "the backfill has no equivalent preload" —
-was **wrong**: `sdex-backfill` has preloaded `prices.pool_registry` (venue +
-Soroswap token pairs) since task 0053 (`run.rs:128` → `sink.load_pool_registry`,
-commit `1582905`). The real cause is that the Soroswap registry rows did not
-exist when the Soroban-era backfill ran — see below.
+**FINAL root cause (2026-07-15) = an extractor bug: we read the swap action from
+the wrong topic.** Two earlier hypotheses were both wrong: it is **not** a
+missing preload (the backfill has preloaded `pool_registry` since 0053), and
+**not** seed-timing (that was a red herring — a re-run would still emit nothing).
 
-This task is therefore **re-scoped** to (1) close the dispatch observability
-hole that let the gap go silent, and (2) record the confirmed root cause. The
-operational fix — re-running the Soroswap range now that the registry is seeded
-— moves to task **0088** (the paused backfill run-tracker).
+Diagnosed against BE's full-history `soroban_events` (activation → 63.49M): our
+221 seeded pools emit **824k swaps** shaped
+
+```
+topics = [ String("SoroswapPair"), Symbol("swap") ]   ← action in topic[1]
+data   = Map{ amount_0_in, amount_0_out, amount_1_in, amount_1_out, to }
+```
+
+`SoroswapPairExtractor` recognised the action in **topic[0]** (`== "swap"`), but
+Soroswap puts the constant `"SoroswapPair"` there and the action in **topic[1]**.
+So the filter never matched → `extract` returned `Ok(vec![])` → zero trades. The
+classify-layer guards (unresolved recording, `is_aquarius_router_swap`) also key
+topic[0], which is why the gap was **doubly silent** (0 candles AND 0
+`unresolved_pools`). The data map is already the uniswap-v2 shape `decode_swap`
+handles — only recognition was broken.
+
+**Fix (this branch):** `soroswap-extractor` recognises the `SoroswapPair`
+envelope (action read from topic[1] when topic[0] == `"SoroswapPair"`, else
+topic[0] for the older bare-`Symbol` fixtures). Live Soroswap prices correctly
+from deploy onward. The **historical fill** of the 824k past swaps becomes a
+**ClickHouse-to-ClickHouse derivation** from BE's `soroban_events` (no ledger
+re-download) — tracked in **0088**.
+
+The PR-#112 observability guard (record a venue-known-but-`reg.soroswap`-absent
+Soroswap pool) is retained as defence-in-depth but is now mostly moot — the real
+events are recognised and priced.
 
 ## Evidence (prod ch-prod-01, 2026-07-15)
 
@@ -123,14 +157,20 @@ must be closed so any future gap surfaces in `unresolved_pools`.
 
 ## Acceptance Criteria
 
-- [x] Root cause confirmed: registry **is** preloaded; gap is seed-timing (rows
-      seeded 2026-07-14, after the run) + a silent-drop observability hole. NOT
-      registry-not-loaded.
-- [ ] Silent-drop closed: a venue-known Soroswap pool that resolves to no trade
-      records an `unresolved_pools`/diagnostic row (never invisible), with a
-      regression test.
-- [ ] Operational Soroswap re-run yields non-zero `soroswap` candles — tracked
-      in **0088**, verified per-source there.
+- [x] Root cause confirmed (final): extractor read the swap action from topic[0],
+      but Soroswap events carry `String("SoroswapPair")` in topic[0] and the action
+      in topic[1]. NOT missing-preload, NOT seed-timing (both disproven against BE's
+      full-history `soroban_events`).
+- [x] `soroswap-extractor` recognises the `SoroswapPair` envelope (action from
+      topic[1]); the uniswap-v2 data map already decoded. Regression tests: real
+      SoroswapPair swap decodes; `sync`/`deposit` (non-swap actions) don't produce
+      trades.
+- [x] Observability guard retained (PR #112): a venue-known-but-`reg.soroswap`-absent
+      Soroswap pool is recorded, not silently dropped (defence-in-depth).
+- [ ] Deploy the fixed extractor so **live** Soroswap prices from tip onward.
+- [ ] **Historical fill** of the 824k past swaps → non-zero `soroswap` candles in
+      `price_ohlcv_1m` + coarse tables (per-source verified). CH-to-CH derivation
+      from BE `soroban_events`; tracked in **0088**.
 
 ## Notes
 
