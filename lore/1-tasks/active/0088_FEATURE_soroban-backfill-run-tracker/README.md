@@ -2,9 +2,9 @@
 id: "0088"
 title: "Execute + track the historical backfill run (SDEX + Soroban AMM) to completion"
 type: FEATURE
-status: blocked
+status: active
 related_adr: ["0005", "0009"]
-related_tasks: ["0053", "0028", "0082", "0090"]
+related_tasks: ["0053", "0028", "0082", "0090", "0096"]
 tags: [layer-infra, priority-medium, effort-large, milestone-M1, backfill, soroban, sdex, operational, tracker]
 milestone: 1
 links:
@@ -32,6 +32,17 @@ history:
       the nightly cleanup drops backfilled 1m before it reaches the permanent
       coarse tables the consumer reads. Resume once 0090 is applied. Fix runbook:
       docs/runbooks/fix-backfill-history-loss-and-rerun.md (PR #103).
+  - date: 2026-07-15
+    status: active
+    who: okarcz
+    note: >
+      UNBLOCKED (0090 DONE) + re-scoped. Most of the run is already complete: the
+      combined range [activation, 63352611] was written by the full-backfill (Phase 1
+      done) and durably pre-rolled in 0090; the pre-Soroban tail is WAIVED (BE
+      Soroban-only, 0092 resolved). Remaining: (1) OHLCV-for-soroswap AC is now
+      BLOCKED-in-effect by task 0096 (soroswap invisible to the backfill — needs the
+      pool_registry-preload fix + a range re-run); (2) confirm /backfill/status final
+      state; (3) the docker-gated CH integration tests. Not fully closeable until 0096.
 ---
 
 # Execute + track the historical backfill run (SDEX + Soroban AMM)
@@ -85,17 +96,20 @@ meanwhile.
 
 ## Acceptance Criteria
 
-- [ ] Combined range `[activation, 63352611]` fully written to Hetzner over the
-      chunked forward passes; the unregistered-pool guard never fires on a clean
-      chunk; `pool_registry` persisted at each run-end.
-- [ ] Pre-Soroban SDEX tail `[1, activation−1]` completed with `--mode sdex-only`
-      (`--tip <live tip>`); union coverage `[1, tip]`, no ledger downloaded twice,
-      no same-minute overlap with live (final-chunk floor re-derived before launch).
-- [ ] `GET /backfill/status` reports truthful, monotonic progress throughout;
-      `sdex_archive`→`completed` and `soroban_amm`→`completed`, `status='paused'`
-      set at combined-run completion.
-- [ ] **OHLCV for Soroswap pairs verifiable for Nov 2023 dates** (Tranche-1 AC) —
-      data spot-check after the run lands. *(Inherited from 0053 — its last open AC.)*
+- [x] Combined range `[activation, 63352611]` fully written to Hetzner. **Done
+      2026-07-15** (via the full-backfill that ran 07-08→07-14, Phase 1 complete;
+      verified in 0090: `price_ohlcv_1m` contiguous `2024-02-20 → 2026-07-08`, 532M
+      rows, gap `62,642,957→63,352,611` filled). Pre-rolled to the coarse tables in 0090.
+- [~] Pre-Soroban SDEX tail `[1, activation−1]` — **WAIVED 2026-07-15.** BE (0199)
+      needs Soroban-era ledgers only; the deep tail was killed and the decision task
+      **0092 resolved "not needed" + archived**. No union-to-1 coverage required.
+- [~] `GET /backfill/status` monotonic; `soroban_amm`→`completed` (reached the floor
+      63352611), `sdex_archive` tail run killed (not needed). Re-confirm the status
+      endpoint reflects the final state (`status='paused'`); minor remaining check.
+- [ ] **OHLCV for Soroswap pairs verifiable** — **BLOCKED by task 0096.** Investigated
+      2026-07-15: soroswap has 0 candles (invisible to the backfill — not registry-seed,
+      not pre-roll). Can't be satisfied until 0096 (backfill preload `pool_registry`)
+      restores Soroswap coverage and its range is re-run.
 - [ ] Docker-gated CH integration tests greened once locally against prod-pinned
       ClickHouse (`candles_it`, `pool_registry_it`, `progress_it`). *(0053 left
       these to run once against a local CH.)*
