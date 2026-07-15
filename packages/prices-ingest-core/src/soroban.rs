@@ -337,31 +337,35 @@ fn classify_amm_groups(
         };
 
         let source = venue.as_source();
-        let mut priced = 0usize;
         match dispatch(&rows, &reg.venue, &reg.phoenix, &reg.soroswap) {
             Ok(trades) => {
                 for t in trades {
                     if let Some(tick) = amm_trade_to_tick(&t, closed_at, assets) {
                         out.amm_ticks.push((source, tick));
-                        priced += 1;
                     }
                 }
             }
             Err(e) => warn!(contract_id, error = %e, "amm dispatch error"),
         }
 
-        // A venue-known pool that emitted a pool-level `swap` yet produced no
-        // priced tick would otherwise vanish with neither a candle NOR an
-        // `unresolved_pools` row — the silent-drop task 0096 closes. It happens
-        // when the pool is a known venue but not resolvable to a trade: a
-        // Soroswap pool absent from `reg.soroswap` (its pair tokens were not
-        // seeded before this run) makes `dispatch` return `Ok(vec![])`
-        // (see `dispatch.rs`), and a dispatch error / unmappable asset leaves
-        // `priced` at 0 too. Record it so the dropped volume is visible. The
-        // post-run re-check (`run.rs`) sees the pool IS venue-known, so
-        // `still_unresolved` is 0 — recorded and investigable, but not a fatal
-        // genuine-gap (which would wrongly abort an otherwise-clean run).
-        if priced == 0 {
+        // The one silent-drop task 0096 closes: a Soroswap pool that is
+        // venue-known but ABSENT from `reg.soroswap` (its pair tokens were not
+        // seeded before this run). A Soroswap `swap` omits the token pair, so
+        // `dispatch` cannot price it and returns `Ok(vec![])`; because the pool
+        // IS venue-known it never reached the unknown-venue branch, so its swap
+        // volume vanished with neither a candle NOR an `unresolved_pools` row.
+        // Record it once so the dropped volume is visible. Seeding the registry
+        // makes it resolvable, so `run.rs`'s re-check keeps `still_unresolved`
+        // 0 — recorded, recoverable, not a fatal genuine-gap.
+        //
+        // Scoped narrowly to this pair-resolution miss (checked directly against
+        // `reg.soroswap`, NOT inferred from a zero tick count): a *resolvable*
+        // pool that merely produced no tick — a zero-amount swap, an unmappable
+        // asset, or a Phoenix dispatch error — is NOT a dropped-pool gap and is
+        // deliberately not recorded here. Inferring the gap from "no tick" would
+        // flood `unresolved_pools` with false positives on healthy pools and
+        // grow the run's in-memory `unresolved` unboundedly.
+        if matches!(venue, Venue::Soroswap) && !reg.soroswap.contains(&contract_id) {
             if let Some(rec) = unresolved_from_swaps(contract_id, &swaps, ledger_seq) {
                 out.unresolved.push(rec);
             }
@@ -823,6 +827,71 @@ mod tests {
         );
         assert_eq!(out.unresolved[0].contract_id, SOROSWAP_POOL);
         assert_eq!(out.unresolved[0].swap_count, 1);
+    }
+
+    #[test]
+    fn resolvable_soroswap_pool_with_no_priced_tick_is_not_recorded() {
+        // Task 0096 (review follow-up): the silent-drop fix must fire ONLY for a
+        // pair-resolution miss, never for any zero-tick outcome. A Soroswap pool
+        // that IS in `reg.soroswap` but emits a zero-amount swap resolves fine —
+        // `amm_trade_to_tick` returns None (zero volume). It must NOT be recorded
+        // as an unresolved gap: that would be a false positive on a healthy pool
+        // and grow the run's in-memory `unresolved` list unboundedly.
+        const SEQ: u32 = 50_600_000;
+        const CLOSED_AT: i64 = 1_700_000_000;
+        const POOL: &str = "CCR2CH4GQVCZHG7CHFVMNANCK45CU5DVKXZIIITDZQAU3CEJZ7RQH2MQ";
+        const TOKEN0: &str = "CAS3J7GYLGXMF6TDJBBYYSE3HQ6BBSMLNUQ34T6TZMYMW2EVH34XOWMA";
+        const TOKEN1: &str = "CAUIKL3IYGMERDRUN6YSCLWVAKIFG5Q4YJHUKM4S4NJZQIA3BAS6OJPK";
+
+        // A uniswap-v2-shaped swap with all-zero amounts → decodes to a trade
+        // with amount_in == amount_out == 0 → `amm_trade_to_tick` returns None.
+        let zero_swap = SorobanEventRow {
+            contract_id: POOL.to_string(),
+            transaction_id: "tx-zero".to_string(),
+            ledger_sequence: SEQ as u64,
+            event_index: 4,
+            topics: vec![TaggedValue::Symbol("swap".to_string())],
+            data: TaggedValue::Map(vec![
+                (
+                    TaggedValue::Symbol("amount_0_in".to_string()),
+                    TaggedValue::I128(0),
+                ),
+                (
+                    TaggedValue::Symbol("amount_1_in".to_string()),
+                    TaggedValue::I128(0),
+                ),
+                (
+                    TaggedValue::Symbol("amount_0_out".to_string()),
+                    TaggedValue::I128(0),
+                ),
+                (
+                    TaggedValue::Symbol("amount_1_out".to_string()),
+                    TaggedValue::I128(0),
+                ),
+            ]),
+        };
+
+        let mut groups: HashMap<String, Vec<SorobanEventRow>> = HashMap::new();
+        groups.insert(POOL.to_string(), vec![zero_swap]);
+
+        // Venue-known AND resolvable — the pair IS present in `reg.soroswap`.
+        let mut reg = Registries::new();
+        reg.venue.insert(POOL.to_string(), Venue::Soroswap);
+        reg.soroswap
+            .register(POOL.to_string(), TOKEN0.to_string(), TOKEN1.to_string());
+
+        let mut assets = AssetRegistry::from_existing(vec![]);
+        let mut out = LedgerSoroban::default();
+        classify_amm_groups(groups, &reg, &mut assets, SEQ, CLOSED_AT, &mut out);
+
+        assert!(
+            out.amm_ticks.is_empty(),
+            "a zero-amount swap produces no tick"
+        );
+        assert!(
+            out.unresolved.is_empty(),
+            "a resolvable pool with a zero-amount swap must NOT be recorded as unresolved"
+        );
     }
 
     #[test]
