@@ -2,7 +2,7 @@
 id: "0096"
 title: "Backfill must preload pool_registry — Soroswap historical coverage gap"
 type: FEATURE
-status: backlog
+status: active
 related_adr: []
 related_tasks: ["0078", "0079", "0053", "0088", "0090"]
 tags: [layer-indexing, priority-high, effort-medium, milestone-M1, backfill, clickhouse, amm, soroswap, pool-registry, data-loss]
@@ -17,6 +17,12 @@ history:
       Surfaced during the 0090 pre-roll: prod coarse tables have ZERO soroswap
       candles despite the registry being seeded. The backfill-side twin of the
       live-only 0078 fix.
+  - date: 2026-07-15
+    status: active
+    who: okarcz
+    note: >
+      Promoted to active to begin implementation (backfill pool_registry
+      preload). Branch cut off develop.
 ---
 
 # Backfill must preload pool_registry — Soroswap historical coverage gap
