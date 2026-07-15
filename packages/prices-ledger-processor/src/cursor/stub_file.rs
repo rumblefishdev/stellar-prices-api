@@ -16,9 +16,13 @@ impl StubFileCursor {
 
 impl Cursor for StubFileCursor {
     async fn read(&self) -> Result<u64, CursorError> {
-        let raw = tokio::fs::read_to_string(&self.path)
-            .await
-            .map_err(|e| CursorError::Read(e.to_string()))?;
+        let raw = match tokio::fs::read_to_string(&self.path).await {
+            Ok(raw) => raw,
+            // No checkpoint file yet is the first-run signal, distinct from a
+            // real IO failure — mirrors ClickHouseCursor's Empty/Read split.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(CursorError::Empty),
+            Err(e) => return Err(CursorError::Read(e.to_string())),
+        };
         raw.trim()
             .parse::<u64>()
             .map_err(|e| CursorError::Parse(e.to_string()))
@@ -50,9 +54,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn missing_file_errors() {
+    async fn missing_file_is_empty_not_read_error() {
         let dir = tempdir().unwrap();
         let c = StubFileCursor::new(dir.path().join("nope.txt"));
-        assert!(matches!(c.read().await, Err(CursorError::Read(_))));
+        // A missing checkpoint is the first-run signal (Empty), NOT a read error.
+        assert!(matches!(c.read().await, Err(CursorError::Empty)));
     }
 }

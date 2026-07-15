@@ -77,6 +77,13 @@ impl ClickHouseSink {
         self.writer.preflight().await.map_err(redact)
     }
 
+    /// The underlying ClickHouse client, so a [`crate::cursor::ClickHouseCursor`]
+    /// can share this sink's connection (mTLS or plaintext) instead of opening a
+    /// second one. Clients are cheap to clone — the hyper pool is shared.
+    pub fn client(&self) -> &clickhouse::Client {
+        self.writer.client()
+    }
+
     /// Load the existing asset registry from `prices.assets` so surrogate ids
     /// are reused (not reassigned) across cold starts — the load-bearing
     /// guarantee that live ids match the backfill's.

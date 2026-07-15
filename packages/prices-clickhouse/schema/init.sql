@@ -323,3 +323,32 @@ CREATE TABLE IF NOT EXISTS prices.pool_registry (
 ENGINE = ReplacingMergeTree(updated_at)
 ORDER BY (contract_id)
 SETTINGS index_granularity = 8192;
+
+-- ---------------------------------------------------------------------
+-- Live ingestion cursor (task 0064). One row per consumer `id` holding the
+-- last contiguous ledger the doorbell-cursor reconcile loop has processed.
+-- Replaces the ledger-processor's ephemeral `/tmp` file cursor (StubFileCursor),
+-- which was wiped on every Lambda execution-environment recycle and reseeded
+-- from the static INITIAL_CURSOR — so the loop rewound to the backfill floor
+-- forever and the live frontier could never advance. Durable here, the cursor
+-- survives container churn and the processor resumes where it left off.
+-- The reconcile loop writes this row LAST each run (after the candle write), so
+-- a crash before it re-processes the run (idempotent — RMT candles). Read with
+-- FINAL; ReplacingMergeTree(**ledger**) collapses re-writes on the `id` key and
+-- keeps the HIGHEST ledger — the cursor is monotonic-forward, so a stray lower
+-- write (a spurious re-seed after a transient read error) can never rewind it,
+-- and equal-millisecond writes can't tie the way a time-based version would. A
+-- deliberate operator rewind therefore needs an explicit DELETE/TRUNCATE, not
+-- just a lower INSERT (intentional — accidental rewind is the bug we fixed).
+-- `updated_at` is informational (last-written wall time), not the version.
+-- Seeded once from INITIAL_CURSOR on an empty table (a genuine first run);
+-- thereafter the stored value is authoritative.
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS prices.ingest_cursor (
+    id          String,
+    ledger      UInt64,
+    updated_at  DateTime64(3) DEFAULT now64(3)
+)
+ENGINE = ReplacingMergeTree(ledger)
+ORDER BY (id)
+SETTINGS index_granularity = 8192;

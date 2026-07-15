@@ -347,15 +347,11 @@ export class ComputeStack extends cdk.Stack {
           // from the shared mtlsSecretName helper, so it can't drift from the
           // SecretsStack publication or the operator's create-secret.
           MTLS_SECRET_NAME: this.ledgerProcessorMtlsSecretName,
-          // Bootstrap cursor seed. main.rs writes the `/tmp` cursor file
-          // from this on a fresh container; without it `cursor.read()` errors
-          // and every doorbell DLQs (the Lambda never starts).
+          // First-run bootstrap seed for the durable cursor (task 0064). main.rs
+          // seeds `prices.ingest_cursor` from this ONLY when the table is empty
+          // (a genuine first run); thereafter the persisted ClickHouse value is
+          // authoritative and survives execution-environment recycles.
           INITIAL_CURSOR: initialCursor,
-          // Explicit cursor checkpoint path. `/tmp` is the only writable
-          // Lambda filesystem; matches the Rust default but pinned here so
-          // the runtime contract is visible. (Per-container ephemeral —
-          // durable cursor is task 0064.)
-          CURSOR_FILE: '/tmp/prices-cursor.txt',
           // Max contiguous ledgers per reconcile run (bounds fetch+decode
           // against the Lambda timeout).
           MAX_ITERATIONS: String(lp.maxIterations),
