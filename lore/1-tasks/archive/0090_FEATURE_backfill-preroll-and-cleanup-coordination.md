@@ -2,7 +2,7 @@
 id: "0090"
 title: "Backfill loses history — wire preroll + cleanup-coordination into the backfill workflow"
 type: FEATURE
-status: active
+status: done
 related_adr: ["0007"]
 related_tasks: ["0088", "0053", "0039", "0051", "0059", "0060"]
 tags: [layer-infra, priority-high, effort-medium, milestone-M1, backfill, clickhouse, retention, rollup, data-loss, blocker]
@@ -96,6 +96,19 @@ history:
       deeper than the original diagnosis; (3) re-run the chunked pre-roll. Spawned
       Layer-2 follow-up (MVs → APPEND, coupled to the live-freeze fix). Cleanup
       re-enable (AC #5 execution) still pending pre-roll completion + verify.
+  - date: 2026-07-15
+    status: done
+    who: okarcz
+    note: >
+      DONE. Phase B pre-roll landed durably: chunked by year + dropped FINAL on the
+      dup-free intermediate stages to fit the 5.59 GiB quota, after DROPping the six
+      replace-mode mv_ohlcv_* MVs (the real wiper). All six coarse tables populated
+      (15m 151.7M → 1M 1.3M, monotonic-decreasing = no double-count), 1h/1d hold
+      sdex+aquarius+phoenix 2024→2026-07-09. Cleanup rule prices-production-cleanup
+      re-ENABLED after verify. BE has its durable 1h/1d history. Spawned follow-ups:
+      0095 (rollup MVs → APPEND, Layer 2) and 0096 (backfill preload pool_registry —
+      soroswap has 0 candles, invisible to the backfill, a separate coverage gap).
+      Unblocks 0088.
 ---
 
 # Backfill loses history — wire preroll + cleanup-coordination into the backfill workflow
@@ -225,20 +238,25 @@ to **task 0093**.
       completed its Phase 1 (`combined activation→floor`, `PHASE 1 COMPLETE 07-14
       17:54Z`) which covers the gap. Verified: `1m` contiguous `2024-02-20 → 2026-07-08`,
       532M rows, gap range fully populated for sdex/aquarius/phoenix.
-- [~] **Phase B (last):** pre-roll over the completed `1m` into the coarse tables.
-      **In progress 2026-07-15.** Required THREE fixes the original plan missed
-      (see Execution findings): (1) delete the pre-Soroban fragment; (2) chunk
-      `preroll.sql` by year to fit the 5.59 GiB memory quota; (3) DROP the
-      replace-mode rollup MVs that were wiping the coarse tables. Owner sign-off held.
+- [x] **Phase B (last):** pre-roll over the completed `1m` into the coarse tables.
+      **DONE 2026-07-15** after THREE fixes the original plan missed (see Execution
+      findings): (1) deleted the pre-Soroban fragment; (2) chunked the rollup by
+      year + dropped `FINAL` on the dup-free intermediate stages to fit the 5.59 GiB
+      quota; (3) DROPped the replace-mode rollup MVs that were wiping the coarse
+      tables. Verified: all six coarse tables populated (15m 151.7M → 1M 1.3M rows,
+      monotonic-decreasing), `1h`/`1d` hold sdex+aquarius+phoenix `2024 → 2026-07-09`.
+      NOTE: `soroswap` absent — separate backfill-coverage gap, task **0096** (not
+      a pre-roll issue). Owner sign-off held.
 - [ ] `docs/runbooks/fix-backfill-history-loss-and-rerun.md` re-scoped (superseding
       banner: pre-roll-first / gap-fill, no blanket TRUNCATE+re-download). ✅ done 2026-07-14.
 - [x] `docs/runbooks/continue-soroban-backfill.md` gains the pre-roll + cleanup-
       coordination steps (currently stops at writing `1m`). ✅ 2026-07-14 — added
       durability ⚠ callout + §9 pre-roll (`preroll.sql` via Route-A, spill flags,
       owner sign-off) + §10 cleanup-coordination; renumbered stop/re-run → §11.
-- [~] Cleanup re-enable procedure documented; re-enabled only AFTER pre-roll.
+- [x] Cleanup re-enable procedure documented; re-enabled only AFTER pre-roll.
       **Documented** ✅ (§10: `describe-rule` → pre-roll → `enable-rule` order).
-      **Execution** pending (prod mutation — after Phase 1 pre-roll runs).
+      **Executed** ✅ 2026-07-15 — `prices-production-cleanup` re-ENABLED after the
+      coarse tables were verified populated.
 - [x] Deep pre-Soroban tail (2015→2024) split to **task 0092** (decision w/ BE 0199).
       ✅ `0092_FEATURE_pre-soroban-tail-backfill-decision` (backlog, related to 0090).
       **DECISION MADE 2026-07-15: BE needs Soroban-era ledgers only — pre-2024 NOT
