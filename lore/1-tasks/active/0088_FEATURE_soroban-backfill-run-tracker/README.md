@@ -43,6 +43,19 @@ history:
       BLOCKED-in-effect by task 0096 (soroswap invisible to the backfill — needs the
       pool_registry-preload fix + a range re-run); (2) confirm /backfill/status final
       state; (3) the docker-gated CH integration tests. Not fully closeable until 0096.
+  - date: 2026-07-15
+    status: active
+    who: okarcz
+    note: >
+      Soroswap root cause CONFIRMED (0096) = registry SEED-TIMING, not a missing
+      backfill preload. The backfill already preloads prices.pool_registry since
+      0053; the 221 soroswap rows carry tokens but were seeded 2026-07-14, AFTER
+      the Soroban run, so reg.soroswap was empty at run time → 0 soroswap candles.
+      0096 shipped the code side (closed a dispatch silent-drop so unresolvable
+      pools now surface in unresolved_pools) and HANDED THE OPERATIONAL RE-RUN TO
+      THIS TASK. Remaining Soroswap AC here = a bounded combined-mode re-run over
+      the Soroswap-affected range now that the registry is seeded (0090 runbook:
+      disable cleanup → backfill → pre-roll → re-enable), verified per-source.
 ---
 
 # Execute + track the historical backfill run (SDEX + Soroban AMM)
@@ -106,10 +119,15 @@ meanwhile.
 - [~] `GET /backfill/status` monotonic; `soroban_amm`→`completed` (reached the floor
       63352611), `sdex_archive` tail run killed (not needed). Re-confirm the status
       endpoint reflects the final state (`status='paused'`); minor remaining check.
-- [ ] **OHLCV for Soroswap pairs verifiable** — **BLOCKED by task 0096.** Investigated
-      2026-07-15: soroswap has 0 candles (invisible to the backfill — not registry-seed,
-      not pre-roll). Can't be satisfied until 0096 (backfill preload `pool_registry`)
-      restores Soroswap coverage and its range is re-run.
+- [ ] **OHLCV for Soroswap pairs verifiable** — **re-run owned HERE** (root cause
+      confirmed in 0096). Cause = **registry seed-timing**, not a missing preload:
+      the backfill already preloads `prices.pool_registry` (since 0053), but the 221
+      soroswap rows were seeded `2026-07-14`, AFTER the Soroban run, so `reg.soroswap`
+      was empty at run time → 0 soroswap candles. 0096 shipped the code fix (closed a
+      dispatch silent-drop; unresolvable pools now land in `unresolved_pools`). The
+      registry is now seeded, so satisfying this AC = a **bounded combined-mode re-run
+      over the Soroswap-affected range** (0090 runbook: disable cleanup → backfill →
+      pre-roll → re-enable), then verify non-zero `soroswap` candles per-source.
 - [ ] Docker-gated CH integration tests greened once locally against prod-pinned
       ClickHouse (`candles_it`, `pool_registry_it`, `progress_it`). *(0053 left
       these to run once against a local CH.)*

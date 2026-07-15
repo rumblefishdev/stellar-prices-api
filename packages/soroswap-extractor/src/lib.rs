@@ -72,6 +72,23 @@ fn map_get<'a>(map: &'a [(TaggedValue, TaggedValue)], key: &str) -> Option<&'a T
         .map(|(_, v)| v)
 }
 
+/// The pool action symbol for a Soroswap event.
+///
+/// Real `SoroswapPair` contracts emit `topics = [String("SoroswapPair"),
+/// Symbol(<action>)]` — the action (`swap`/`sync`/`deposit`/…) lives in
+/// **topic[1]**, with the constant `"SoroswapPair"` in topic[0]. The action is
+/// therefore read from topic[1] whenever topic[0] is `"SoroswapPair"`, and from
+/// topic[0] otherwise (a bare `Symbol("swap")`, as older fixtures use). Returns
+/// `None` when neither position carries a symbol/string.
+fn swap_action(row: &SorobanEventRow) -> Option<&str> {
+    let t0 = row.topics.first().and_then(|t| t.as_str())?;
+    if t0 == "SoroswapPair" {
+        row.topics.get(1).and_then(|t| t.as_str())
+    } else {
+        Some(t0)
+    }
+}
+
 /// Extracts Soroswap swaps for a single pool, using its registered token pair.
 pub struct SoroswapPairExtractor<'a> {
     pub pair: &'a SoroswapPair,
@@ -83,12 +100,7 @@ impl<'a> SoroswapPairExtractor<'a> {
     }
 
     fn decode_swap(&self, row: &SorobanEventRow) -> Result<TradeRow, ExtractError> {
-        let topic0 = row
-            .topics
-            .first()
-            .and_then(|t| t.as_str())
-            .ok_or(ExtractError::UnexpectedTopicShape(row.event_index))?;
-        if topic0 != "swap" {
+        if swap_action(row) != Some("swap") {
             return Err(ExtractError::UnexpectedTopicShape(row.event_index));
         }
 
@@ -154,6 +166,7 @@ impl<'a> SoroswapPairExtractor<'a> {
 
         let trader = map_get(map, "sender")
             .or_else(|| map_get(map, "recipient"))
+            .or_else(|| map_get(map, "to"))
             .and_then(|v| v.as_address())
             .map(String::from);
 
@@ -183,7 +196,7 @@ impl SwapExtractor for SoroswapPairExtractor<'_> {
         }
         let mut trades = Vec::new();
         for row in rows {
-            if row.topics.first().and_then(|t| t.as_str()) == Some("swap") {
+            if swap_action(row) == Some("swap") {
                 trades.push(self.decode_swap(row)?);
             }
         }
@@ -314,6 +327,106 @@ mod tests {
         assert_eq!(t.token_out, T1);
         assert_eq!(t.amount_in, 1000);
         assert_eq!(t.amount_out, 2490);
+    }
+
+    #[test]
+    fn decodes_real_soroswap_pair_swap_shape() {
+        // Real prod shape (BE soroban_events): topics = [String("SoroswapPair"),
+        // Symbol("swap")] — the action is in topic[1], not topic[0], and the
+        // trader is in `to`. This is the shape ALL of our 221 seeded pools emit
+        // (~824k swaps); the extractor previously read the action from topic[0]
+        // and silently produced zero trades (task 0096 root cause).
+        let pair = SoroswapPair {
+            token0: T0.into(),
+            token1: T1.into(),
+        };
+        let ev = SorobanEventRow {
+            contract_id: POOL.to_string(),
+            transaction_id: "TX".to_string(),
+            ledger_sequence: 50_704_650,
+            event_index: 5,
+            topics: vec![
+                TaggedValue::String("SoroswapPair".to_string()),
+                TaggedValue::Symbol("swap".to_string()),
+            ],
+            data: TaggedValue::Map(vec![
+                (
+                    TaggedValue::Symbol("amount_0_in".into()),
+                    TaggedValue::I128(1_000_000),
+                ),
+                (
+                    TaggedValue::Symbol("amount_0_out".into()),
+                    TaggedValue::I128(0),
+                ),
+                (
+                    TaggedValue::Symbol("amount_1_in".into()),
+                    TaggedValue::I128(0),
+                ),
+                (
+                    TaggedValue::Symbol("amount_1_out".into()),
+                    TaggedValue::I128(914_145),
+                ),
+                (
+                    TaggedValue::Symbol("to".into()),
+                    TaggedValue::Address(
+                        "GCEKBLVMSTPZDTQR263QKZYJNOXESD6LZYGN4SH64Z7FHW4TYR5Y235K".into(),
+                    ),
+                ),
+            ]),
+        };
+        let result = SoroswapPairExtractor::new(&pair).extract(&[ev]).unwrap();
+        assert_eq!(
+            result.trades.len(),
+            1,
+            "SoroswapPair-shaped swap must decode"
+        );
+        let t = &result.trades[0];
+        assert_eq!(t.token_in, T0);
+        assert_eq!(t.token_out, T1);
+        assert_eq!(t.amount_in, 1_000_000);
+        assert_eq!(t.amount_out, 914_145);
+        assert_eq!(
+            t.trader.as_deref(),
+            Some("GCEKBLVMSTPZDTQR263QKZYJNOXESD6LZYGN4SH64Z7FHW4TYR5Y235K"),
+            "trader resolved from the `to` field"
+        );
+    }
+
+    #[test]
+    fn ignores_non_swap_soroswap_pair_actions() {
+        // `sync` (826k events — MORE than swaps), `deposit`, `withdraw`, `skim`
+        // share the [String("SoroswapPair"), Symbol(action)] envelope but are not
+        // trades. `extract` must skip them, or they'd flood price_ohlcv_1m with
+        // garbage candles.
+        let pair = SoroswapPair {
+            token0: T0.into(),
+            token1: T1.into(),
+        };
+        let sync = SorobanEventRow {
+            contract_id: POOL.to_string(),
+            transaction_id: "TX".to_string(),
+            ledger_sequence: 50_688_706,
+            event_index: 7,
+            topics: vec![
+                TaggedValue::String("SoroswapPair".to_string()),
+                TaggedValue::Symbol("sync".to_string()),
+            ],
+            data: TaggedValue::Map(vec![
+                (
+                    TaggedValue::Symbol("new_reserve_0".into()),
+                    TaggedValue::I128(1_250_000_000_000),
+                ),
+                (
+                    TaggedValue::Symbol("new_reserve_1".into()),
+                    TaggedValue::I128(2_000_000_000_000),
+                ),
+            ]),
+        };
+        let result = SoroswapPairExtractor::new(&pair).extract(&[sync]).unwrap();
+        assert!(
+            result.trades.is_empty(),
+            "a non-swap SoroswapPair action must not produce a trade"
+        );
     }
 
     #[test]

@@ -306,38 +306,36 @@ fn classify_amm_groups(
     out: &mut LedgerSoroban,
 ) {
     for (contract_id, rows) in amm_groups {
+        // Pool-level `swap` events for this contract — the volume-bearing events
+        // whose loss must never be silent. Computed once and reused by both the
+        // unknown-venue branch and the venue-known-but-unpriced fallback below.
+        //
+        // Exception (task 0087): the Aquarius *router* emits a `swap` *summary*
+        // (address `Vec` at topic[1]) wrapping the pool-level `trade`. It is
+        // deliberately ignored for pricing — matching it would double-count the
+        // pool `trade` — and must NOT be flagged as a gap, or it fatal-trips the
+        // unresolved-pools guard. A genuine pool `swap` carries no address `Vec`
+        // at topic[1] and is still counted here.
+        let swaps: Vec<&SorobanEventRow> = rows
+            .iter()
+            .filter(|r| r.topics.first().and_then(|t| t.as_str()) == Some("swap"))
+            .filter(|r| !is_aquarius_router_swap(r))
+            .collect();
+
         let venue = match reg.venue.get(&contract_id) {
             Some(v) => v.clone(),
             None => {
                 // Unknown contract. Most are not AMM pools and are correctly
-                // ignored — but if this one emitted a `swap`, its volume is
-                // being dropped. Record it for the post-run re-check instead
-                // of silently skipping (guard from task 0053 decision #3).
-                //
-                // Exception (task 0087): the Aquarius *router* emits a `swap`
-                // *summary* wrapping the pool-level `trade`. The router is never
-                // factory-registered (only pools are), so it always reaches this
-                // branch, and it is deliberately ignored for pricing — matching
-                // it would double-count the pool `trade`. It must NOT be flagged
-                // as a gap, or it fatal-trips the unresolved-pools guard. A
-                // genuine unknown-pool `swap` carries no address `Vec` at
-                // topic[1] and is still recorded.
-                let swaps: Vec<&SorobanEventRow> = rows
-                    .iter()
-                    .filter(|r| r.topics.first().and_then(|t| t.as_str()) == Some("swap"))
-                    .filter(|r| !is_aquarius_router_swap(r))
-                    .collect();
-                if let Some(first) = swaps.first() {
-                    out.unresolved.push(UnresolvedPoolSwap {
-                        contract_id,
-                        ledger_sequence: ledger_seq,
-                        swap_count: swaps.len() as u32,
-                        sample_topics: format!("{:?}", first.topics),
-                    });
+                // ignored — but if this one emitted a pool-level `swap`, its
+                // volume is being dropped. Record it for the post-run re-check
+                // instead of silently skipping (guard from task 0053 decision #3).
+                if let Some(rec) = unresolved_from_swaps(contract_id, &swaps, ledger_seq) {
+                    out.unresolved.push(rec);
                 }
                 continue;
             }
         };
+
         let source = venue.as_source();
         match dispatch(&rows, &reg.venue, &reg.phoenix, &reg.soroswap) {
             Ok(trades) => {
@@ -349,7 +347,48 @@ fn classify_amm_groups(
             }
             Err(e) => warn!(contract_id, error = %e, "amm dispatch error"),
         }
+
+        // The one silent-drop task 0096 closes: a Soroswap pool that is
+        // venue-known but ABSENT from `reg.soroswap` (its pair tokens were not
+        // seeded before this run). A Soroswap `swap` omits the token pair, so
+        // `dispatch` cannot price it and returns `Ok(vec![])`; because the pool
+        // IS venue-known it never reached the unknown-venue branch, so its swap
+        // volume vanished with neither a candle NOR an `unresolved_pools` row.
+        // Record it once so the dropped volume is visible. Seeding the registry
+        // makes it resolvable, so `run.rs`'s re-check keeps `still_unresolved`
+        // 0 — recorded, recoverable, not a fatal genuine-gap.
+        //
+        // Scoped narrowly to this pair-resolution miss (checked directly against
+        // `reg.soroswap`, NOT inferred from a zero tick count): a *resolvable*
+        // pool that merely produced no tick — a zero-amount swap, an unmappable
+        // asset, or a Phoenix dispatch error — is NOT a dropped-pool gap and is
+        // deliberately not recorded here. Inferring the gap from "no tick" would
+        // flood `unresolved_pools` with false positives on healthy pools and
+        // grow the run's in-memory `unresolved` unboundedly.
+        if matches!(venue, Venue::Soroswap) && !reg.soroswap.contains(&contract_id) {
+            if let Some(rec) = unresolved_from_swaps(contract_id, &swaps, ledger_seq) {
+                out.unresolved.push(rec);
+            }
+        }
     }
+}
+
+/// Build an [`UnresolvedPoolSwap`] from a contract's pool-level `swap` events, or
+/// `None` if it emitted none. Shared by the unknown-venue branch and the
+/// venue-known-but-unpriced fallback in [`classify_amm_groups`] so both record
+/// the dropped volume identically (task 0096).
+fn unresolved_from_swaps(
+    contract_id: String,
+    swaps: &[&SorobanEventRow],
+    ledger_seq: u32,
+) -> Option<UnresolvedPoolSwap> {
+    let first = swaps.first()?;
+    Some(UnresolvedPoolSwap {
+        contract_id,
+        ledger_sequence: ledger_seq,
+        swap_count: swaps.len() as u32,
+        sample_topics: format!("{:?}", first.topics),
+    })
 }
 
 /// Recognise the Aquarius-router `swap` *summary* event by its topic shape.
@@ -737,6 +776,187 @@ mod tests {
         assert_eq!(
             out.amm_ticks[0].0, "phoenix",
             "tick tagged with the phoenix source"
+        );
+    }
+
+    #[test]
+    fn venue_known_but_unresolvable_soroswap_pool_is_recorded_not_silent() {
+        // Task 0096: a Soroswap pool present in `reg.venue` but ABSENT from
+        // `reg.soroswap` (its pair tokens were not seeded before this run) makes
+        // `dispatch` return `Ok(vec![])` — no trade, no error. Because the pool
+        // IS venue-known it never reaches the unknown-contract branch, so before
+        // this fix it produced NEITHER a candle NOR an `unresolved_pools` row:
+        // the swap volume vanished silently. It must now be recorded so the gap
+        // is visible. This is exactly the prod Soroswap gap (registry seeded
+        // 2026-07-14, after the Soroban backfill run).
+        const SEQ: u32 = 50_600_000;
+        const CLOSED_AT: i64 = 1_700_000_000;
+        const SOROSWAP_POOL: &str = "CCR2CH4GQVCZHG7CHFVMNANCK45CU5DVKXZIIITDZQAU3CEJZ7RQH2MQ";
+
+        let pool_swap = SorobanEventRow {
+            contract_id: SOROSWAP_POOL.to_string(),
+            transaction_id: "tx-soroswap".to_string(),
+            ledger_sequence: SEQ as u64,
+            event_index: 4,
+            // Single `swap` topic (no address Vec) — a genuine pool swap, not the
+            // Aquarius router summary. Data shape is irrelevant here: `dispatch`
+            // returns Ok(vec![]) at the `reg.soroswap` miss, before any decode.
+            topics: vec![TaggedValue::Symbol("swap".to_string())],
+            data: TaggedValue::Vec(vec![]),
+        };
+
+        let mut groups: HashMap<String, Vec<SorobanEventRow>> = HashMap::new();
+        groups.insert(SOROSWAP_POOL.to_string(), vec![pool_swap]);
+
+        // Venue-known as Soroswap, but the pair is NOT in `reg.soroswap`.
+        let mut reg = Registries::new();
+        reg.venue.insert(SOROSWAP_POOL.to_string(), Venue::Soroswap);
+
+        let mut assets = AssetRegistry::from_existing(vec![]);
+        let mut out = LedgerSoroban::default();
+        classify_amm_groups(groups, &reg, &mut assets, SEQ, CLOSED_AT, &mut out);
+
+        assert!(
+            out.amm_ticks.is_empty(),
+            "an unresolvable soroswap pool must not price"
+        );
+        assert_eq!(
+            out.unresolved.len(),
+            1,
+            "a venue-known but unresolvable soroswap swap must be recorded, not dropped"
+        );
+        assert_eq!(out.unresolved[0].contract_id, SOROSWAP_POOL);
+        assert_eq!(out.unresolved[0].swap_count, 1);
+    }
+
+    #[test]
+    fn soroswap_pair_swap_prices_through_classify() {
+        // End-to-end at the classify seam — the layer where the prod "0 soroswap
+        // candles" originated (task 0096). A real SoroswapPair-shaped swap
+        // (`topics=[String("SoroswapPair"), Symbol("swap")]`, action in topic[1])
+        // for a venue-known + `reg.soroswap`-seeded pool must now dispatch through
+        // the fixed extractor and produce an `amm_tick` tagged `soroswap`.
+        const SEQ: u32 = 50_704_650;
+        const CLOSED_AT: i64 = 1_700_000_000;
+        const POOL: &str = "CDBBBNMCWRMWEIFHUD5BXBCRTW6QM33ZEXIOBGKKQNDSH3WEF7WVBGMI";
+        const T0: &str = "CAS3J7GYLGXMF6TDJBBYYSE3HQ6BBSMLNUQ34T6TZMYMW2EVH34XOWMA";
+        const T1: &str = "CAUIKL3IYGMERDRUN6YSCLWVAKIFG5Q4YJHUKM4S4NJZQIA3BAS6OJPK";
+
+        let swap = SorobanEventRow {
+            contract_id: POOL.to_string(),
+            transaction_id: "tx".to_string(),
+            ledger_sequence: SEQ as u64,
+            event_index: 5,
+            topics: vec![
+                TaggedValue::String("SoroswapPair".to_string()),
+                TaggedValue::Symbol("swap".to_string()),
+            ],
+            data: TaggedValue::Map(vec![
+                (
+                    TaggedValue::Symbol("amount_0_in".into()),
+                    TaggedValue::I128(1_000_000),
+                ),
+                (
+                    TaggedValue::Symbol("amount_0_out".into()),
+                    TaggedValue::I128(0),
+                ),
+                (
+                    TaggedValue::Symbol("amount_1_in".into()),
+                    TaggedValue::I128(0),
+                ),
+                (
+                    TaggedValue::Symbol("amount_1_out".into()),
+                    TaggedValue::I128(914_145),
+                ),
+            ]),
+        };
+
+        let mut groups: HashMap<String, Vec<SorobanEventRow>> = HashMap::new();
+        groups.insert(POOL.to_string(), vec![swap]);
+
+        let mut reg = Registries::new();
+        reg.venue.insert(POOL.to_string(), Venue::Soroswap);
+        reg.soroswap
+            .register(POOL.to_string(), T0.to_string(), T1.to_string());
+
+        let mut assets = AssetRegistry::from_existing(vec![]);
+        let mut out = LedgerSoroban::default();
+        classify_amm_groups(groups, &reg, &mut assets, SEQ, CLOSED_AT, &mut out);
+
+        assert_eq!(
+            out.amm_ticks.len(),
+            1,
+            "a SoroswapPair-shaped swap must now price (was 0 before the fix)"
+        );
+        assert_eq!(out.amm_ticks[0].0, "soroswap", "tick tagged soroswap");
+        assert!(
+            out.unresolved.is_empty(),
+            "a priced pool is not recorded as unresolved"
+        );
+    }
+
+    #[test]
+    fn resolvable_soroswap_pool_with_no_priced_tick_is_not_recorded() {
+        // Task 0096 (review follow-up): the silent-drop fix must fire ONLY for a
+        // pair-resolution miss, never for any zero-tick outcome. A Soroswap pool
+        // that IS in `reg.soroswap` but emits a zero-amount swap resolves fine —
+        // `amm_trade_to_tick` returns None (zero volume). It must NOT be recorded
+        // as an unresolved gap: that would be a false positive on a healthy pool
+        // and grow the run's in-memory `unresolved` list unboundedly.
+        const SEQ: u32 = 50_600_000;
+        const CLOSED_AT: i64 = 1_700_000_000;
+        const POOL: &str = "CCR2CH4GQVCZHG7CHFVMNANCK45CU5DVKXZIIITDZQAU3CEJZ7RQH2MQ";
+        const TOKEN0: &str = "CAS3J7GYLGXMF6TDJBBYYSE3HQ6BBSMLNUQ34T6TZMYMW2EVH34XOWMA";
+        const TOKEN1: &str = "CAUIKL3IYGMERDRUN6YSCLWVAKIFG5Q4YJHUKM4S4NJZQIA3BAS6OJPK";
+
+        // A uniswap-v2-shaped swap with all-zero amounts → decodes to a trade
+        // with amount_in == amount_out == 0 → `amm_trade_to_tick` returns None.
+        let zero_swap = SorobanEventRow {
+            contract_id: POOL.to_string(),
+            transaction_id: "tx-zero".to_string(),
+            ledger_sequence: SEQ as u64,
+            event_index: 4,
+            topics: vec![TaggedValue::Symbol("swap".to_string())],
+            data: TaggedValue::Map(vec![
+                (
+                    TaggedValue::Symbol("amount_0_in".to_string()),
+                    TaggedValue::I128(0),
+                ),
+                (
+                    TaggedValue::Symbol("amount_1_in".to_string()),
+                    TaggedValue::I128(0),
+                ),
+                (
+                    TaggedValue::Symbol("amount_0_out".to_string()),
+                    TaggedValue::I128(0),
+                ),
+                (
+                    TaggedValue::Symbol("amount_1_out".to_string()),
+                    TaggedValue::I128(0),
+                ),
+            ]),
+        };
+
+        let mut groups: HashMap<String, Vec<SorobanEventRow>> = HashMap::new();
+        groups.insert(POOL.to_string(), vec![zero_swap]);
+
+        // Venue-known AND resolvable — the pair IS present in `reg.soroswap`.
+        let mut reg = Registries::new();
+        reg.venue.insert(POOL.to_string(), Venue::Soroswap);
+        reg.soroswap
+            .register(POOL.to_string(), TOKEN0.to_string(), TOKEN1.to_string());
+
+        let mut assets = AssetRegistry::from_existing(vec![]);
+        let mut out = LedgerSoroban::default();
+        classify_amm_groups(groups, &reg, &mut assets, SEQ, CLOSED_AT, &mut out);
+
+        assert!(
+            out.amm_ticks.is_empty(),
+            "a zero-amount swap produces no tick"
+        );
+        assert!(
+            out.unresolved.is_empty(),
+            "a resolvable pool with a zero-amount swap must NOT be recorded as unresolved"
         );
     }
 
