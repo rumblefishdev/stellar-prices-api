@@ -2,9 +2,9 @@
 id: "0082"
 title: "Post-deploy verification — periodic workers write their tables + current_prices MV populates + alarms don't false-fire"
 type: TEST
-status: active
+status: done
 related_adr: ["0007"]
-related_tasks: ["0070", "0056", "0083", "0084", "0086"]
+related_tasks: ["0070", "0056", "0083", "0084", "0086", "0096"]
 tags: [layer-ops, milestone-M1, priority-medium, effort-small, aws, clickhouse, observability, post-deploy]
 milestone: 1
 links:
@@ -35,6 +35,16 @@ history:
       end-to-end in prod; this closes the remaining post-deploy acceptance check —
       that each scheduled worker actually writes its table and the current_prices
       MV populates, and that the alarms are green under steady state.
+  - date: 2026-07-15
+    status: done
+    who: okarcz
+    note: >
+      DONE. All verification ACs resolved or forwarded: workers write (enrichment/
+      cleanup green via 0083; supply times out → 0084), current_prices MV populated,
+      alarms sane (folded into 0056). Final open AC — soroswap rows in
+      price_ohlcv_1m — investigated 2026-07-15: soroswap is absent (0 candles, 0
+      unresolved) because the backfill doesn't preload pool_registry; root-caused
+      and forwarded to new task 0096. Nothing left to verify here. Archived.
 ---
 
 # Post-deploy verification of periodic workers + MV + alarms
@@ -138,7 +148,10 @@ timestamps → junk `1970-01` `oracle_prices` rows).
       should now clear post-0083 (**re-check OK**); `sdex-push-freshness`
       false-positive + missing ledger-processor lag alarm + `EnrichmentRowsRemaining`
       floor **folded into 0056** (findings A/B + enrichment-floor).
-- [ ] `soroswap`-source rows confirmed present in `price_ohlcv_1m` — **watch**
-      (0 after 30 min, `unresolved_pools`=0; investigate if it persists).
+- [x] `soroswap`-source rows confirmed present in `price_ohlcv_1m` — **investigated
+      2026-07-15: they are NOT present** (0 soroswap candles, `unresolved_pools`=0 for
+      soroswap → swaps invisible to the backfill, despite 221 soroswap pools seeded in
+      `pool_registry`). Root-caused as a backfill coverage gap (backfill doesn't preload
+      `pool_registry`, the twin of the live-only 0078 fix) → forwarded to **task 0096**.
 - [~] `supply` writes `asset_supply` (1164 rows) but **does not complete** — it
       times out at 300s on every invoke; full-walk fix tracked in **0084**.
