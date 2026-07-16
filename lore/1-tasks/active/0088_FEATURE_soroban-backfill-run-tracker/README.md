@@ -56,6 +56,29 @@ history:
       THIS TASK. Remaining Soroswap AC here = a bounded combined-mode re-run over
       the Soroswap-affected range now that the registry is seeded (0090 runbook:
       disable cleanup → backfill → pre-roll → re-enable), verified per-source.
+  - date: 2026-07-16
+    status: active
+    who: okarcz
+    note: >
+      FINDING — pre-Soroban SDEX backfill run (fishuer-hero, direct-write to
+      Hetzner) DIED and left a large gap. Confirmed from prod CH ~08:12 UTC:
+      `sdex_archive` progress row frozen (`updated_at`/`last_push_at` pinned at
+      07:57:22 for ~15 min); two `backfill_sdex_ledgers` samples 89 s apart showed
+      EVERY write-marker identical (presoroban_done/max, total_done/max) — a live
+      pass cannot process a ledger without inserting into that table, so no writer
+      is active. `status='running'` is stale last-state, not liveness. Coverage:
+      combined `[activation, 63352611]` complete (534M candles, 2024→2026 healthy);
+      pre-Soroban only `[3 → 5,439,999]` done (contiguous, ~2015–mid-2016, 30
+      candles), so `price_ohlcv_1m` source='sdex' has ZERO rows for 2017–2023 — a
+      ~45M-ledger gap `5,439,999 → 50,457,424` (≈11% into the pre-Soroban span).
+      TENSION to reconcile: AC "Pre-Soroban SDEX tail — WAIVED (2026-07-15)" says
+      this tail is out of scope (BE Soroban-only, 0092), yet a pre-Soroban run was
+      started + died here. If the tail is genuinely un-waived, resume the sdex-only
+      pass (resume-safe; short-circuits `[3,5.44M]`, walks 5.44M→activation, stays
+      below the combined floor → no seam overlap): `sdex-backfill --mode sdex-only
+      --start 1 --end 50457423 --transport hetzner`. Blocked on fishuer-hero access
+      to confirm the process is gone + relaunch. If still waived, this gap is expected
+      and no action needed. Memory: [[sdex-backfill-presoroban-gap-0088]].
 ---
 
 # Execute + track the historical backfill run (SDEX + Soroban AMM)
@@ -101,7 +124,7 @@ meanwhile.
 | `[activation, 50687999]` | data + `pool_registry` landed; run fatal-exited on the 0087 router guard (fixed + merged, PR #92). |
 | `[50688000, 51007999]` | ✅ first clean forward chunk (2026-07-07) — 320k ledgers, SDEX 17.22M candles, AMM=0/oracle=0 (expected early epoch), 0 new unresolved. ~3.4 h, 59 GB. |
 | `[51008000, 63352611]` combined remainder | ⏳ ~12.3M ledgers ≈ ~2.3 TB / ~5.6 days continuous. |
-| `[1, 50457423]` pre-Soroban SDEX tail | ⏳ ~50.5M ledgers (~4× larger); run `--mode sdex-only` after combined, `--tip <live tip>`. |
+| `[1, 50457423]` pre-Soroban SDEX tail | 💀 **run DIED at ledger ~5,439,999 (2026-07-16)** — only `[3, 5.44M]` (~2015–mid-2016, 30 candles) landed; **2017–2023 = ZERO sdex candles**, ~45M-ledger gap `5.44M → activation` outstanding. Confirmed dead from prod CH (progress + ledger markers frozen ~15 min). Reconcile vs the 2026-07-15 WAIVER before resuming `--mode sdex-only`. |
 
 > Update this table as chunks land (ledger range, candle counts, duration, any
 > new unresolved pools). `GET /backfill/status` reports truthful monotonic
