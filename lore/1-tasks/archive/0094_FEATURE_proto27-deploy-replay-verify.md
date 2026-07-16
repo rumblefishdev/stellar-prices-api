@@ -39,8 +39,8 @@ history:
       2026-07-16 ~07:57 UTC: reconcile cursor 63,500,065 climbed well past the
       63,401,875 decode wall on xdr-27 code (AC #2); frontier caught up to real
       time, behind_sec ≈ 18 s across all four sources (AC #4, frozen gap
-      replayed). DLQ was 0 at deploy with zero parse-fails on the new code (AC #3
-      — operator re-confirming live SQS depth). AC #5 (version-gap CI guard)
+      replayed). DLQ confirmed drained (AC #3 — `prices-ingest-dlq-production`
+      0 visible / 0 in-flight via SQS, 2026-07-16). AC #5 (version-gap CI guard)
       DEFERRED to spawned backlog task 0098. This closes the live-ingestion
       freeze jointly with 0064 (durable CH cursor) — xdr-27 removed the decode
       wall, the cursor removed the ephemeral-reset rewind; the frontier only
@@ -84,10 +84,10 @@ avoids a stall (recoverable, but avoidable). Decode is BE's `xdr-parser` at
 - [x] Live ingestion advances past ledger 63,401,875. *(2026-07-16 — cursor
       63,500,065 ≫ wall, monotonic; crossing achieved on xdr-27 code, never
       stalled on old code — preventive deploy.)*
-- [x] Live DLQ drained; no residual "XDR parse failed". *(DLQ depth 0 at deploy +
-      zero parse-fails post-crossing on new code, so no new proto27 fails
-      produced; operator re-confirming live `prices-ingest-dlq-production` depth
-      via SQS — redrive if non-zero.)*
+- [x] Live DLQ drained; no residual "XDR parse failed". *(2026-07-16 — confirmed
+      `prices-ingest-dlq-production` = 0 visible / 0 in-flight via SQS
+      `get-queue-attributes`; consistent with DLQ 0 at deploy + zero parse-fails
+      on xdr-27 code.)*
 - [x] Frozen gap (63,384,068 → tip) replayed for all live sources. *(2026-07-16 —
       frontier caught up to real time, behind_sec ≈ 18 s; all four sources
       aquarius/sdex/phoenix/soroswap current within ~150 s.)*
