@@ -29,6 +29,23 @@ history:
       masked it until now. IMPLEMENTED the durable CH cursor + wired into main.rs;
       all 4 integration tests pass against local CH 26.3.10.60 (= prod). Blocks
       0094 AC #2 (live advances past 63,401,875). Branch feat/0064_ch-backed-cursor.
+  - date: 2026-07-15
+    status: active
+    who: okarcz
+    note: >
+      DEPLOYED to prod (AC #4). PR #108 merged to develop (squash 9855fb3, all
+      CI green; 6 code-review findings fixed pre-merge — RMT version updated_at→
+      ledger + Empty-vs-Read seed guard the headline two). Applied
+      prices.ingest_cursor to prod CH out-of-band (verified engine
+      ReplacingMergeTree(ledger), 0 rows, prices.* grant covers prices_writer);
+      built arm64 bootstrap (--features lambda) and ran make
+      deploy-production-compute → CloudFormation UPDATE_COMPLETE 07:41 UTC
+      (fn prices-production-ledger-processor, CodeSha256 mgMWYMvZKP13…, CURSOR_FILE
+      env removed). Cursor now durable + monotonic (63,354,435→63,354,595, +160/
+      58s, never rewinds to the 63,352,611 floor) — the freeze cause is gone.
+      Frontier still reads 2026-07-08 12:31 while the ~135k-ledger frozen backlog
+      drains (ETA ~12–15h); task stays active until the behind_sec inflection
+      confirms the visible unfreeze.
 ---
 
 # ClickHouse-backed cursor for the Prices Ledger Processor
@@ -82,9 +99,16 @@ concrete failure modes this task removes:
 - [x] Idempotent: re-run from the persisted cursor is a no-op past the tip
       (existing `reconcile_e2e::idempotent_on_re_run_from_same_cursor` + gap-stop;
       cursor persistence doesn't change candle idempotency — RMT by version).
-- [ ] **Deploy** the new processor to prod (approval-gated) — the freeze only
-      lifts once the xdr-27 **and** CH-cursor build is running. **Requires the
-      `prices.ingest_cursor` table applied to prod CH first** (init.sql, out-of-band).
+- [x] **Deploy** the new processor to prod (2026-07-15) — `prices.ingest_cursor`
+      applied to prod CH first (engine verified `ReplacingMergeTree(ledger)`, 0
+      rows, `prices_writer` covered by the `prices.*` grant), then
+      `make deploy-production-compute` swapped in the new `arm64` bootstrap
+      (CodeSha256 `mgMWYMvZKP13…`, `CURSOR_FILE` env dropped). Cursor is now
+      durable and advancing monotonically (`63,354,435 → 63,354,595`, +160 in
+      58 s, no snap-back to the `63,352,611` floor). **Frontier catch-up still
+      draining** the ~6-day frozen backlog (~135k ledgers, ETA ~12–15 h); the
+      `behind_sec` inflection is the visible unfreeze — verify before final
+      archive.
 
 ## Implementation Notes
 
@@ -103,6 +127,16 @@ Built on branch `feat/0064_ch-backed-cursor`:
 - **Tests** — `tests/cursor_ch_it.rs`, 5 cases (incl. `a_lower_write_never_rewinds`
   + Empty-vs-Read), all green vs local CH 26.3.10.60 (= prod), parallel-safe +
   re-run-safe. `cargo check --workspace`, clippy, fmt all clean.
+- **Deploy (2026-07-15)** — order: (1) `CREATE TABLE prices.ingest_cursor` on
+  prod `ch-prod-01` via `docker exec app-clickhouse-1 clickhouse-client` (pure
+  DDL, no restart; verified `ReplacingMergeTree(ledger)` + 0 rows + `prices.*`
+  grant). (2) `cargo lambda build -p prices-ledger-processor --release --arm64
+  --features lambda` → 13.4 MB aarch64 bootstrap. (3) `make
+  deploy-production-compute` (needs `AWS_PROFILE=soroban-explorer`, account
+  750702271865) → stack `UPDATE_COMPLETE` in ~22 s. Post-deploy the fn had the
+  new CodeSha256, `arm64`, no `CURSOR_FILE`, `INITIAL_CURSOR=63352611`. Cursor
+  seeded and advancing forward on first doorbells. Frontier catch-up monitored
+  by the combined cursor+frontier query on `ch-prod-01`.
 
 ## Design Decisions
 
