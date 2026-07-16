@@ -54,12 +54,16 @@ appended at all six granularities; a second run did not double-count.
 ## Run
 
 From your shell against prod CH (hand the SQL to the operator's client; do not
-run prod DDL from an agent). Substitute the confirmed boundary:
+run prod DDL from an agent). Use the **exact** activation timestamp from
+pre-flight step 2 — do NOT assume midnight; activation is intraday, and a
+midnight bound would drop the activation day's pre-activation SDEX slice:
 
 ```bash
+BOUNDARY="<paste the exact activation timestamp from pre-flight step 2>"
+
 ssh -i ~/.ssh/sorban-prod_ed25519 deploy@168.119.73.161 \
-  'docker exec -i app-clickhouse-1 clickhouse-client \
-     --param_boundary="2024-02-20 00:00:00" --multiquery' \
+  "docker exec -i app-clickhouse-1 clickhouse-client \
+     --param_boundary='$BOUNDARY' --multiquery" \
   < packages/prices-clickhouse/schema/preroll-incremental.sql
 ```
 
@@ -74,14 +78,18 @@ ssh -i ~/.ssh/sorban-prod_ed25519 deploy@168.119.73.161 \
 
 ## Post-run verification
 
+Run these with the **same** `--param_boundary='$BOUNDARY'` as the pre-roll (the
+`{boundary:DateTime}` placeholder needs the type annotation and the param, or CH
+errors on an unbound query parameter):
+
 ```sql
 -- Coarse now covers the pre-Soroban years (spot years):
 SELECT '1d' t, toYear(timestamp) y, count() FROM prices.price_ohlcv_1d
-WHERE timestamp < {boundary} GROUP BY y ORDER BY y;
+WHERE timestamp < {boundary:DateTime} GROUP BY y ORDER BY y;
 
 -- Boundary month preserved the Soroban value (version-wins), not clobbered:
 SELECT timestamp, close, version FROM prices.price_ohlcv_1M FINAL
-WHERE timestamp = toStartOfMonth({boundary}) AND source='sdex' LIMIT 5;
+WHERE timestamp = toStartOfMonth({boundary:DateTime}) AND source='sdex' LIMIT 5;
 ```
 
 Expect non-zero coarse rows for 2017–2023 and the boundary-month row unchanged

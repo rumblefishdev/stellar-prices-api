@@ -53,13 +53,13 @@
 
 -- =====================================================================
 -- STAGE 1 — 15m <- 1m, CHUNKED BY YEAR (heavy; FINAL to dedup re-ingests).
---   One statement per calendar year. 2015-16 are folded (pre-2017 SDEX is
---   sparse; earliest candle ~2016-03). The final block is the partial
---   activation year, bounded by {boundary}. Add earlier years only if a
---   pre-flight count shows rows before 2015.
+--   One statement per calendar year. The first block folds genesis (2015-09)
+--   through 2016 (pre-2017 SDEX is sparse; earliest candle ~2016-03). The final
+--   block is the partial activation year, bounded by {boundary}.
 -- =====================================================================
 
--- <= 2016
+-- 2015-16 (Stellar mainnet genesis is 2015-09-30; the lower bound excludes any
+-- spurious pre-genesis / epoch-dated rows from a bad decode).
 INSERT INTO prices.price_ohlcv_15m
 SELECT toStartOfInterval(t.timestamp, INTERVAL 15 MINUTE) AS timestamp,
        asset_id, quote_asset_id, source,
@@ -71,7 +71,7 @@ SELECT toStartOfInterval(t.timestamp, INTERVAL 15 MINUTE) AS timestamp,
        volume_quote / nullIf(volume_base, 0) AS vwap,
        sum(trade_count) AS trade_count, max(version) AS version
 FROM prices.price_ohlcv_1m AS t FINAL
-WHERE t.timestamp < '2017-01-01'
+WHERE t.timestamp >= '2015-09-01' AND t.timestamp < '2017-01-01'
 GROUP BY timestamp, asset_id, quote_asset_id, source;
 
 -- 2017
@@ -201,6 +201,12 @@ GROUP BY timestamp, asset_id, quote_asset_id, source;
 --   for correctness/idempotency; drop it here first if the quota is hit (0090).
 --   The chain is 15m -> 1h -> 4h -> 1d -> 1w -> 1M (identical to preroll.sql), so
 --   run STAGE 1 to completion before STAGE 2.
+--   If the heavy 1h<-15m step still exceeds the quota after dropping FINAL,
+--   chunk IT by year like STAGE 1 (add `AND t.timestamp >= 'YYYY-01-01' AND
+--   t.timestamp < 'YYYY+1-01-01'` per statement) — 1h/4h/1d buckets never
+--   straddle a calendar year so year-chunking is safe there. Do NOT chunk 1w/1M
+--   by year: their buckets straddle year boundaries, so they must stay a single
+--   full-range statement (they read the small 1d/1w tables, so memory is fine).
 -- =====================================================================
 
 INSERT INTO prices.price_ohlcv_1h
