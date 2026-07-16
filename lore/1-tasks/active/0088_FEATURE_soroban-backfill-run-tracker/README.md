@@ -148,3 +148,13 @@ meanwhile.
 - Measured throughput + EC2 rationale: [[local-backfill-throughput-measured]].
 - Prod CH access for progress checks (read-only SQL via `docker exec`):
   [[hetzner-ch-prod-ssh-access]].
+- **End-of-run pre-roll (prepared, DO NOT FORGET):** when the pre-Soroban SDEX
+  tail finishes, roll its `[genesis, activation)` `1m` up to the coarse tables
+  with the **incremental, non-truncating** pre-roll —
+  `packages/prices-clickhouse/schema/preroll-incremental.sql` — NOT `preroll.sql`
+  (a full rebuild would wipe the already-pre-rolled Soroban-era coarse). Appends
+  only; safe because RMT(version) lets the higher-version Soroban rows win at the
+  activation boundary. Verified locally (prod-pinned CH): append at all six
+  granularities, boundary preserved, idempotent. Procedure + pre-flight + the
+  cleanup re-enable step: [`docs/runbooks/preroll-incremental-presoroban.md`](../../../docs/runbooks/preroll-incremental-presoroban.md).
+  Cleanup rule `prices-production-cleanup` MUST stay disabled until after this runs.
