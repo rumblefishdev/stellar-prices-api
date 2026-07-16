@@ -2,7 +2,7 @@
 id: "0094"
 title: "Deploy xdr-27 ledger-processor + replay proto27 frozen gap + verify crossing"
 type: FEATURE
-status: active
+status: completed
 related_adr: []
 related_tasks: ["0091", "0090"]
 tags: ["milestone-M1", "priority-high", "effort-small", "phase-live"]
@@ -31,6 +31,20 @@ history:
       wall is no longer a code risk — zero "XDR parse failed", DLQ=0, cursor
       persisting every invoke. AC #2–#5 remain (crossing verify, DLQ drain,
       gap replay, CI guard). Followed docs/runbooks/deploy-ledger-processor.md.
+  - date: 2026-07-16
+    status: completed
+    who: okarcz
+    note: >
+      DONE — proto27 crossing VERIFIED, freeze lifted, archived. Prod CH
+      2026-07-16 ~07:57 UTC: reconcile cursor 63,500,065 climbed well past the
+      63,401,875 decode wall on xdr-27 code (AC #2); frontier caught up to real
+      time, behind_sec ≈ 18 s across all four sources (AC #4, frozen gap
+      replayed). DLQ confirmed drained (AC #3 — `prices-ingest-dlq-production`
+      0 visible / 0 in-flight via SQS, 2026-07-16). AC #5 (version-gap CI guard)
+      DEFERRED to spawned backlog task 0098. This closes the live-ingestion
+      freeze jointly with 0064 (durable CH cursor) — xdr-27 removed the decode
+      wall, the cursor removed the ephemeral-reset rewind; the frontier only
+      unfroze once BOTH shipped. Archived together.
 ---
 
 # Deploy xdr-27 ledger-processor + replay proto27 frozen gap + verify crossing
@@ -67,10 +81,19 @@ avoids a stall (recoverable, but avoidable). Decode is BE's `xdr-parser` at
 ## Acceptance Criteria
 
 - [x] xdr-27 processor deployed to production. *(2026-07-14 18:11 UTC — verified live)*
-- [ ] Live ingestion advances past ledger 63,401,875 (max ledger climbs to tip).
-- [ ] Live DLQ drained; no residual "XDR parse failed" errors.
-- [ ] Frozen gap (63,384,068 → tip) backfilled/replayed for all live sources.
-- [ ] Version-gap CI guard in place.
+- [x] Live ingestion advances past ledger 63,401,875. *(2026-07-16 — cursor
+      63,500,065 ≫ wall, monotonic; crossing achieved on xdr-27 code, never
+      stalled on old code — preventive deploy.)*
+- [x] Live DLQ drained; no residual "XDR parse failed". *(2026-07-16 — confirmed
+      `prices-ingest-dlq-production` = 0 visible / 0 in-flight via SQS
+      `get-queue-attributes`; consistent with DLQ 0 at deploy + zero parse-fails
+      on xdr-27 code.)*
+- [x] Frozen gap (63,384,068 → tip) replayed for all live sources. *(2026-07-16 —
+      frontier caught up to real time, behind_sec ≈ 18 s; all four sources
+      aquarius/sdex/phoenix/soroswap current within ~150 s.)*
+- [ ] Version-gap CI guard in place. **(deferred to 0098)** — spawned as backlog
+      task 0098 (renovate/CI check surfacing a `stellar-xdr` protocol lag before
+      it can freeze prod); forward-looking, not a blocker for closing the freeze.
 
 ## Implementation Notes
 
