@@ -2,7 +2,7 @@
 id: "0064"
 title: "ClickHouse-backed cursor for the Prices Ledger Processor"
 type: FEATURE
-status: active
+status: completed
 related_adr: ["0007"]
 related_tasks: ["0038", "0094", "0091"]
 tags: [layer-indexing, priority-high, effort-small, lambda, clickhouse, cursor]
@@ -46,6 +46,20 @@ history:
       Frontier still reads 2026-07-08 12:31 while the ~135k-ledger frozen backlog
       drains (ETA ~12–15h); task stays active until the behind_sec inflection
       confirms the visible unfreeze.
+  - date: 2026-07-16
+    status: completed
+    who: okarcz
+    note: >
+      DONE — visible unfreeze CONFIRMED, all ACs met, archived. Prod CH snapshot
+      2026-07-16 ~07:57 UTC: cursor 63,500,065 (well past the 63,401,875 proto27
+      wall, monotonic, no snap-back to the 63,352,611 floor); frontier caught up
+      to real time (behind_sec ≈ 18 s, was ~476k at the 07-15 deploy; all four
+      sources aquarius/sdex/phoenix/soroswap current within ~150 s). The ~6-day
+      frozen backlog fully drained — the durable cursor removed the ephemeral-/tmp
+      reset that caused the freeze. Deploy record landed via PR #109 (merged
+      2026-07-16, squash). Retired the [[ledger-processor-ephemeral-cursor-freeze]]
+      memory's watch. Archived alongside 0094 (xdr-27) — together the two closed
+      the live-ingestion freeze.
 ---
 
 # ClickHouse-backed cursor for the Prices Ledger Processor
