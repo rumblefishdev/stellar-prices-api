@@ -18,3 +18,6 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 prices-ingest-core = { path = "../prices-ingest-core" }
+
+[dev-dependencies]
+extractors-core = { path = "../extractors-core" }

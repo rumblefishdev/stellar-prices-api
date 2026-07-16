@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 
+use clickhouse::query::RowCursor;
 use clickhouse::{Client, Row};
 use serde::Deserialize;
 
@@ -69,9 +70,13 @@ pub async fn resolve_contract_ids(
     Ok(rows.into_iter().map(|r| (r.id, r.contract_id)).collect())
 }
 
-/// Read all events emitted by the given AMM contracts in `[start, end]`, ordered
-/// by `(ledger_sequence, transaction_id, event_index)` so the run can group them
-/// by ledger then transaction with per-tx event order preserved.
+/// Open a **streaming** cursor over all events emitted by the given AMM contracts
+/// in `[start, end]`, ordered by `(ledger_sequence, transaction_id, event_index)`
+/// so the run can group them by ledger then transaction with per-tx event order
+/// preserved. Rows are pulled one at a time (`cursor.next()`), so peak memory is
+/// one ledger's events — not the whole chunk (which, filtered to AMM pools, still
+/// includes Phoenix's 8 events/swap plus reserves/transfers and can be millions
+/// of rows on a dense range).
 ///
 /// Both source tables are ReplacingMergeTree; the join collapses `ledgers`
 /// duplicates via `GROUP BY sequence`, and `soroban_events` duplicates (identical
@@ -82,15 +87,14 @@ pub async fn resolve_contract_ids(
 /// is absent from `default.ledgers` still comes back (with `closed_at = 0`) so the
 /// run loop can count and skip it, instead of an INNER JOIN silently dropping the
 /// whole ledger's AMM swaps.
-pub async fn read_chunk(
+///
+/// Caller guarantees `contract_ids` is non-empty (an empty `IN ()` is invalid SQL).
+pub fn stream_chunk(
     client: &Client,
     contract_ids: &[i64],
     start: u32,
     end: u32,
-) -> Result<Vec<EventRow>, EventsBackfillError> {
-    if contract_ids.is_empty() {
-        return Ok(vec![]);
-    }
+) -> Result<RowCursor<EventRow>, EventsBackfillError> {
     let in_list = contract_ids
         .iter()
         .map(i64::to_string)
@@ -118,7 +122,7 @@ pub async fn read_chunk(
          ORDER BY e.ledger_sequence, e.transaction_id, e.event_index"
     );
 
-    Ok(client.query(&sql).fetch_all::<EventRow>().await?)
+    Ok(client.query(&sql).fetch::<EventRow>()?)
 }
 
 /// Advisory registry-completeness probe (dry-run only). Counts events and distinct
