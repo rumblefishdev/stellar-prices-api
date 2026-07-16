@@ -77,6 +77,11 @@ pub async fn resolve_contract_ids(
 /// duplicates via `GROUP BY sequence`, and `soroban_events` duplicates (identical
 /// `(contract_id, ledger, tx, event_index)` rows) are removed adjacently in the
 /// run loop — together deduping the RMT doubling without a full-table `FINAL`.
+///
+/// The join is a **LEFT** join with `ifNull(closed_at, 0)`: an event whose ledger
+/// is absent from `default.ledgers` still comes back (with `closed_at = 0`) so the
+/// run loop can count and skip it, instead of an INNER JOIN silently dropping the
+/// whole ledger's AMM swaps.
 pub async fn read_chunk(
     client: &Client,
     contract_ids: &[i64],
@@ -98,11 +103,11 @@ pub async fn read_chunk(
             e.transaction_id AS transaction_id, \
             toUInt32(e.ledger_sequence) AS ledger_sequence, \
             e.event_index AS event_index, \
-            l.closed_at AS closed_at, \
+            ifNull(l.closed_at, 0) AS closed_at, \
             e.topics_xdr AS topics_xdr, \
             e.data_xdr AS data_xdr \
          FROM default.soroban_events e \
-         INNER JOIN ( \
+         LEFT JOIN ( \
             SELECT sequence, toInt64(min(toUnixTimestamp(closed_at))) AS closed_at \
             FROM default.ledgers \
             WHERE sequence BETWEEN {start} AND {end} \
@@ -114,4 +119,52 @@ pub async fn read_chunk(
     );
 
     Ok(client.query(&sql).fetch_all::<EventRow>().await?)
+}
+
+/// Advisory registry-completeness probe (dry-run only). Counts events and distinct
+/// contracts in `[start, end]` that emitted a swap/trade-shaped event but are NOT
+/// in the resolved registry id set — i.e. AMM activity the reprice would miss
+/// because the pool is absent from `prices.pool_registry` (its events are never
+/// even fetched by [`read_chunk`], so it produces no candle AND no
+/// `unresolved_pools` record).
+///
+/// Heuristic: matches the common sym-`swap` / sym-`trade` signatures and the
+/// Soroswap-pair envelope (`String("SoroswapPair")`, whose `signature` is NULL).
+/// It may include non-AMM `swap`/`trade` emitters and misses the rare NULL-sig
+/// Phoenix micro-event shape, so it is a *verify-this* prompt, not a hard error.
+/// Returns `(distinct_contracts, events)`.
+pub async fn count_unregistered_amm_emitters(
+    client: &Client,
+    contract_ids: &[i64],
+    start: u32,
+    end: u32,
+) -> Result<(u64, u64), EventsBackfillError> {
+    let not_in = if contract_ids.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "AND e.contract_id NOT IN ({}) ",
+            contract_ids
+                .iter()
+                .map(i64::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
+        )
+    };
+    let sql = format!(
+        "SELECT uniqExact(e.contract_id) AS contracts, count() AS events \
+         FROM default.soroban_events e \
+         WHERE e.ledger_sequence BETWEEN {start} AND {end} \
+           AND (e.signature IN ('swap', 'trade') OR e.topics_xdr LIKE '%SoroswapPair%') \
+           {not_in}"
+    );
+
+    #[derive(Row, Deserialize)]
+    struct Counts {
+        contracts: u64,
+        events: u64,
+    }
+
+    let c = client.query(&sql).fetch_one::<Counts>().await?;
+    Ok((c.contracts, c.events))
 }

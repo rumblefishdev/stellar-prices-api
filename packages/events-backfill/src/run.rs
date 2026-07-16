@@ -15,13 +15,31 @@ use serde_json::Value;
 use tracing::{info, warn};
 
 use prices_ingest_core::{
-    AssetRegistry, CandleAccumulator, LedgerSoroban, OhlcvWriter, RawSorobanEvent, Registries,
-    UnresolvedPool, UnresolvedPoolSwap, process_soroban_event_rows,
+    AssetRegistry, CandleAccumulator, DEFAULT_BACKOFF_MS, LedgerSoroban, OhlcvWriter,
+    RawSorobanEvent, Registries, UnresolvedPool, UnresolvedPoolSwap, process_soroban_event_rows,
+    retry_with_backoff,
 };
 
 use crate::cli::Cli;
 use crate::error::EventsBackfillError;
-use crate::source::{read_chunk, resolve_contract_ids};
+use crate::source::{count_unregistered_amm_emitters, read_chunk, resolve_contract_ids};
+
+/// Run one idempotent `prices.*` write under the shared bounded backoff
+/// (`[50, 200, 800] ms`, every error treated as transient — safe because the
+/// writes are ReplacingMergeTree-idempotent). Without this a single transient
+/// ClickHouse/network blip would abort the whole reprice, which (having no
+/// resume cursor) then restarts from `--start`. Mirrors sdex-backfill's sink.
+async fn retry_write<F, Fut, E>(op: F) -> Result<(), EventsBackfillError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<(), E>>,
+    EventsBackfillError: From<E>,
+{
+    retry_with_backoff(&DEFAULT_BACKOFF_MS, |_| true, op)
+        .await
+        .map(|_| ())
+        .map_err(EventsBackfillError::from)
+}
 
 fn build_client(cli: &Cli) -> Client {
     let mut client = Client::default().with_url(&cli.clickhouse_url);
@@ -77,6 +95,11 @@ pub async fn execute(cli: &Cli) -> Result<(), EventsBackfillError> {
     let mut total_events: u64 = 0;
     let mut total_candles: u64 = 0;
     let mut raw_unresolved: Vec<UnresolvedPoolSwap> = Vec::new();
+    // Ledgers present in soroban_events but absent from default.ledgers (no close
+    // time): their events are skipped but COUNTED, so the gap is visible instead
+    // of a silent LEFT-JOIN drop.
+    let mut ledgers_missing_close: u64 = 0;
+    let mut events_missing_close: u64 = 0;
 
     let mut chunk_start = cli.start;
     loop {
@@ -97,6 +120,22 @@ pub async fn execute(cli: &Cli) -> Result<(), EventsBackfillError> {
         while i < rows.len() {
             let ledger = rows[i].ledger_sequence;
             let closed_at = rows[i].closed_at;
+
+            // closed_at == 0 is the LEFT-JOIN sentinel for a ledger missing from
+            // default.ledgers (no real ledger closed at unix 0). We cannot bucket
+            // without a close time, so skip the ledger's events but count them —
+            // surfacing the gap the earlier INNER JOIN dropped silently.
+            if closed_at == 0 {
+                let mut skipped = 0u64;
+                while i < rows.len() && rows[i].ledger_sequence == ledger {
+                    skipped += 1;
+                    i += 1;
+                }
+                ledgers_missing_close += 1;
+                events_missing_close += skipped;
+                continue;
+            }
+
             let mut events: Vec<RawSorobanEvent> = Vec::new();
             let mut last_key: Option<(i64, i64, i16)> = None;
 
@@ -144,17 +183,21 @@ pub async fn execute(cli: &Cli) -> Result<(), EventsBackfillError> {
                 "dry-run: classified chunk (no writes)"
             );
         } else {
+            // Persist newly-minted surrogate ids BEFORE the candles that
+            // reference them: a crash between the two writes must never leave
+            // prices.price_ohlcv_1m rows pointing at asset_ids absent from
+            // prices.assets. All `assets` mints for this chunk are already in the
+            // registry (done in the ledger loop above), so writing it now covers
+            // every base/quote id the candles use. Idempotent (RMT).
+            retry_write(|| async { writer.write_assets(&assets).await }).await?;
             for (source, acc) in accumulators.iter_mut() {
                 let candles = acc.flush_all();
                 if candles.is_empty() {
                     continue;
                 }
                 total_candles += candles.len() as u64;
-                writer.write_candles(&candles, source).await?;
+                retry_write(|| async { writer.write_candles(&candles, source).await }).await?;
             }
-            // Persist any newly-minted surrogate ids so a downstream read (or a
-            // resumed chunk) resolves the candles' base/quote assets. Idempotent.
-            writer.write_assets(&assets).await?;
             info!(chunk_start, chunk_end, events = rows.len(), "chunk written");
         }
 
@@ -173,11 +216,46 @@ pub async fn execute(cli: &Cli) -> Result<(), EventsBackfillError> {
             .iter()
             .filter(|u| u.still_unresolved == 1)
             .count();
-        writer.write_unresolved_pools(&unresolved).await?;
+        retry_write(|| async { writer.write_unresolved_pools(&unresolved).await }).await?;
         warn!(
             contracts = unresolved.len(),
             genuine, "recorded unresolved AMM pools to prices.unresolved_pools"
         );
+    }
+
+    if ledgers_missing_close > 0 {
+        warn!(
+            ledgers_missing_close,
+            events_missing_close,
+            "ledgers in range are absent from default.ledgers (no close time) — their AMM \
+             events were skipped, NOT repriced; verify BE's ledgers table fully covers the range"
+        );
+    }
+
+    // Dry-run only: advisory registry-completeness probe. Reads are filtered to
+    // seeded-registry contracts, so a pool missing from prices.pool_registry is
+    // invisible to the reprice (its swaps are never even fetched). This surfaces
+    // AMM-shaped activity from contracts outside the registry so the operator can
+    // verify coverage before committing writes (runbook §1). Scoped to dry-run to
+    // keep this extra full-range scan off the write path.
+    if cli.dry_run {
+        let (contracts, events) =
+            count_unregistered_amm_emitters(writer.client(), &contract_ids, cli.start, cli.end)
+                .await?;
+        if contracts > 0 {
+            warn!(
+                contracts,
+                events,
+                "dry-run coverage probe: contracts OUTSIDE the seeded registry emitted \
+                 swap/trade-shaped events in range — prices.pool_registry may be incomplete \
+                 (heuristic; may include non-AMM emitters — verify before the write run)"
+            );
+        } else {
+            info!(
+                "dry-run coverage probe: no swap/trade-shaped events from unregistered \
+                 contracts in range"
+            );
+        }
     }
 
     print_summary(&ticks_by_source, total_events, total_candles, cli.dry_run);
