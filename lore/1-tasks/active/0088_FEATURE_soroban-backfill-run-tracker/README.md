@@ -60,25 +60,26 @@ history:
     status: active
     who: okarcz
     note: >
-      FINDING — pre-Soroban SDEX backfill run (fishuer-hero, direct-write to
-      Hetzner) DIED and left a large gap. Confirmed from prod CH ~08:12 UTC:
-      `sdex_archive` progress row frozen (`updated_at`/`last_push_at` pinned at
-      07:57:22 for ~15 min); two `backfill_sdex_ledgers` samples 89 s apart showed
-      EVERY write-marker identical (presoroban_done/max, total_done/max) — a live
-      pass cannot process a ledger without inserting into that table, so no writer
-      is active. `status='running'` is stale last-state, not liveness. Coverage:
-      combined `[activation, 63352611]` complete (534M candles, 2024→2026 healthy);
-      pre-Soroban only `[3 → 5,439,999]` done (contiguous, ~2015–mid-2016, 30
-      candles), so `price_ohlcv_1m` source='sdex' has ZERO rows for 2017–2023 — a
-      ~45M-ledger gap `5,439,999 → 50,457,424` (≈11% into the pre-Soroban span).
-      TENSION to reconcile: AC "Pre-Soroban SDEX tail — WAIVED (2026-07-15)" says
-      this tail is out of scope (BE Soroban-only, 0092), yet a pre-Soroban run was
-      started + died here. If the tail is genuinely un-waived, resume the sdex-only
-      pass (resume-safe; short-circuits `[3,5.44M]`, walks 5.44M→activation, stays
-      below the combined floor → no seam overlap): `sdex-backfill --mode sdex-only
-      --start 1 --end 50457423 --transport hetzner`. Blocked on fishuer-hero access
-      to confirm the process is gone + relaunch. If still waived, this gap is expected
-      and no action needed. Memory: [[sdex-backfill-presoroban-gap-0088]].
+      PROGRESS + a debugging gotcha. The pre-Soroban SDEX tail run (fishuser-hero,
+      tmux `sdex-tail`, direct-write to Hetzner) is HEALTHY and advancing — it is
+      NOT waived (the run being live means the 2026-07-15 "WAIVED" AC is stale and
+      should be reconciled). As of 2026-07-16 ~09:50 UTC it has walked the floor up
+      to partition ~5.76M (from ~5.44M at 07:57), ~170k ledgers/hr; the full
+      pre-Soroban span `5.44M → activation (50,457,423)` is ~45M ledgers ≈ ~11 days
+      continuous at this rate. Coverage snapshot: combined `[activation, 63352611]`
+      complete (534M candles, 2024→2026); pre-Soroban is being FILLED bottom-up,
+      so 2017–2023 SDEX candles are still absent *for now* but arriving as the run
+      climbs.
+      ⚠️ GOTCHA (self-correction): I earlier misread this run as "dead" from prod
+      CH. The backfill is DOWNLOAD-BOUND — each 64k-file partition takes ~22.7 min
+      to `aws s3 sync`, so `backfill_sdex_ledgers.max` only jumps once per ~22 min,
+      and `last_push_at` only moves on a partition that yields candles (early-2016
+      SDEX is sparse → many 0-candle partitions freeze it for long stretches). Two
+      CH samples 89 s apart both landed inside one partition's download window and
+      showed no motion → a FALSE stall. Correct liveness check: `pgrep -af
+      sdex-backfill` + partition number climbing in `~/sdex-tail.log` over ≥25 min,
+      or `backfill_sdex_ledgers.max` sampled >22 min apart. Memory:
+      [[sdex-backfill-presoroban-gap-0088]], [[local-backfill-throughput-measured]].
 ---
 
 # Execute + track the historical backfill run (SDEX + Soroban AMM)
@@ -124,7 +125,7 @@ meanwhile.
 | `[activation, 50687999]` | data + `pool_registry` landed; run fatal-exited on the 0087 router guard (fixed + merged, PR #92). |
 | `[50688000, 51007999]` | ✅ first clean forward chunk (2026-07-07) — 320k ledgers, SDEX 17.22M candles, AMM=0/oracle=0 (expected early epoch), 0 new unresolved. ~3.4 h, 59 GB. |
 | `[51008000, 63352611]` combined remainder | ⏳ ~12.3M ledgers ≈ ~2.3 TB / ~5.6 days continuous. |
-| `[1, 50457423]` pre-Soroban SDEX tail | 💀 **run DIED at ledger ~5,439,999 (2026-07-16)** — only `[3, 5.44M]` (~2015–mid-2016, 30 candles) landed; **2017–2023 = ZERO sdex candles**, ~45M-ledger gap `5.44M → activation` outstanding. Confirmed dead from prod CH (progress + ledger markers frozen ~15 min). Reconcile vs the 2026-07-15 WAIVER before resuming `--mode sdex-only`. |
+| `[1, 50457423]` pre-Soroban SDEX tail | ⏳ **RUNNING (fishuser-hero, healthy)** — floor at ~5.76M and climbing (2026-07-16 09:50 UTC), ~170k ledgers/hr, download-bound (~22.7 min/partition); ~45M ledgers ≈ ~11 days continuous to activation. 2017–2023 candles arrive as it climbs. Un-waived → reconcile the stale 2026-07-15 WAIVER AC. (Liveness: `pgrep` + partition # climbing over ≥25 min; do NOT sample CH markers <22 min apart — download-bound cadence freezes them transiently.) |
 
 > Update this table as chunks land (ledger range, candle counts, duration, any
 > new unresolved pools). `GET /backfill/status` reports truthful monotonic
