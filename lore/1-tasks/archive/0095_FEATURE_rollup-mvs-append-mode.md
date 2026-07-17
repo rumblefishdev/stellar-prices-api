@@ -2,14 +2,28 @@
 id: "0095"
 title: "Rollup MVs → APPEND mode (stop them wiping pre-rolled history)"
 type: FEATURE
-status: active
+status: completed
 related_adr: ["0007"]
-related_tasks: ["0090", "0064", "0094"]
+related_tasks: ["0090", "0064", "0094", "0059", "0104", "0102"]
 tags: [layer-infra, priority-high, m1-blocker, effort-small, milestone-M1, clickhouse, rollup, materialized-view, data-loss]
 milestone: 1
 links:
   - "../../../packages/prices-clickhouse/schema/rollups.sql"
 history:
+  - date: 2026-07-17
+    status: completed
+    who: okarcz
+    note: >
+      DONE — merged (PR #121, squash fea922b) + deployed + verified on prod. All
+      7 ACs met. rollups.sql six MVs → APPEND + sum(version) + aligned windows;
+      preroll.sql / preroll-live-gap.sql → sum(version); new rollup_append_it.rs
+      (3 tests green on CH 26.3.10.60) + negative control. Prod: six coarse
+      tables backed up (verified faithful), gap pre-rolled, six MVs recreated in
+      APPEND (first refresh OK), deep history byte-identical to backup, 15m tip
+      advances autonomously. The last M1 blocker is cleared. Spawned 0104
+      (cadence tuning). 0102/PR #118 (SCF package) un-gated and updated to
+      describe the MVs as present. Housekeeping left: drop the six *_bak tables
+      after a watch period.
   - date: 2026-07-17
     status: active
     who: okarcz
