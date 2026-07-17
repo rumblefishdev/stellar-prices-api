@@ -2,7 +2,7 @@
 id: "0095"
 title: "Rollup MVs → APPEND mode (stop them wiping pre-rolled history)"
 type: FEATURE
-status: backlog
+status: active
 related_adr: ["0007"]
 related_tasks: ["0090", "0064", "0094"]
 tags: [layer-infra, priority-high, m1-blocker, effort-small, milestone-M1, clickhouse, rollup, materialized-view, data-loss]
@@ -10,6 +10,13 @@ milestone: 1
 links:
   - "../../../packages/prices-clickhouse/schema/rollups.sql"
 history:
+  - date: 2026-07-17
+    status: active
+    who: okarcz
+    note: >
+      Promoted backlog → active to start the fix on a fresh session, as the M1
+      blocker banner directs. Coarse backup is step 1; no prod SQL until the
+      backup is confirmed.
   - date: 2026-07-17
     status: backlog
     who: okarcz
