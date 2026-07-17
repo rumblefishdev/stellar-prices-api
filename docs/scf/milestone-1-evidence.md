@@ -456,14 +456,30 @@ The schema is applied from `packages/prices-clickhouse/schema/init.sql`
 SHOW TABLES FROM prices;
 ```
 
-<TODO: paste output — expect the base tables (assets, asset_metadata,
+<TODO: paste output — expect the base tables (assets, asset*metadata,
 asset_supply, price_ohlcv_1m/\_15m/\_1h/\_4h/\_1d/\_1w/\_1M, current_prices,
 oracle_prices, backfill_progress, backfill_sdex_ledgers, discovery_state,
-pool_registry, unresolved_pools, ingest_cursor), the 6 rollup MVs +
-mv_current_prices, and the 6 read views>
+pool_registry, unresolved_pools, ingest_cursor), mv_current_prices, and the 6
+read views. The 6 `mv_ohlcv*\*` rollup MVs are **deliberately absent** — see
+below.>
 
 _Figure 3 — `SHOW TABLES FROM prices` on production confirms the Section 3
-table set, the materialised-view rollup chain, and the read views._
+table set, `mv_current_prices`, and the read views._
+
+**Why the six `mv_ohlcv_*` rollup views are not in that list.** They are
+defined in `schema/rollups.sql` and were deployed, but they are **currently
+dropped on production**. In replace mode they overwrote coarse history that the
+historical backfill had already pre-rolled — a real incident, not a
+hypothetical — so they were removed for the duration of the backfill, and the
+coarse granularities (`1h/4h/1d/1w/1M`) are filled by an explicit **pre-roll**
+step instead. The coarse tables are correct and verified; what changed is _what
+writes them_, not the schema they conform to. Re-enabling the views in APPEND
+mode — where they can no longer clobber pre-rolled rows — is tracked as task
+0095 and is listed in [section 6](#6-what-is-deliberately-not-claimed).
+
+We flag this rather than quietly re-creating the views before recording,
+because a reviewer running `SHOW TABLES` themselves should find exactly what
+this document describes.
 
 **Query (2) — the 1-minute candle table's DDL:**
 
