@@ -53,6 +53,30 @@ history:
 
 # SCF Milestone 1 deliverable-verification package
 
+> ## ⛔ GATED ON 0095 — do not submit before it lands
+>
+> Decision (okarcz, 2026-07-17): **task 0095** (rollup MVs → APPEND) must land
+> first. Two reasons:
+>
+> 1. **AC 2** requires `prices.*` to match Section 3, whose Tranche 1 work list
+>    names the **MV chain**. The six `mv_ohlcv_*` views are dropped, so
+>    `SHOW TABLES` does not show them and a reviewer can call AC 2 unmet. This
+>    package currently *discloses* that (AC 2, §6, and the video script) — which
+>    is defensible, but 0095 removes the argument entirely.
+> 2. Submitting a milestone whose live rollup path is silently broken — and
+>    deleting live candles monthly — is a worse conversation after an award than
+>    a short delay now.
+>
+> **After 0095 lands, this package needs a pass:** AC 2's "the six MVs are
+> deliberately absent" explanation, §6's rollup row, the exec summary, the form
+> answers' point 4, and the video's `SHOW TABLES` scene all describe the MVs as
+> dropped. Once they are back, those become wrong in the other direction.
+> README **step 0** (pre-roll before capturing evidence) also becomes
+> unnecessary — the whole point of 0095 is that coarse tracks live on its own.
+>
+> Everything else is source-complete: the 10 `<TODO:>` markers (live query
+> output + screenshots), `build-pdf.sh`, the video, and the Drive links.
+
 ## Summary
 
 Produce the Stellar Community Fund **Deliverable Verification** package that
