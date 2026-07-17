@@ -30,6 +30,28 @@ history:
     status: active
     who: okarcz
     note: >
+      WRITE RUN + PRE-ROLL COMPLETE on prod. events-backfill wrote 2,560,166
+      candles to price_ohlcv_1m over [50457424, 63352611] in 251s (aquarius
+      3,842,273 / phoenix 242,201 / soroswap 536,318 ticks; 16 phoenix swaps
+      failed dispatch = 0.0066%, unpriceable fragments). Pre-roll ran via
+      preroll-amm-reprice.sql. VERIFIED: soroswap EXACT at all 7 granularities
+      (536,318 trades, identical volume 1m->1M) having been absent from coarse
+      entirely; phoenix coarse 242,224 (1h) vs pre-fix 237,026 => the 5,175
+      recovered swaps landed in the store of record; no level below 1m for any
+      source; SDEX untouched (14,140,873 1d rows, tip 2026-07-09). Coarse totals
+      drift slightly ABOVE 1m as buckets widen (aquarius +181/1h, +4,864/1d) —
+      expected boundary overhang: the bucket straddling end_ts holds the FULL
+      bucket from the earlier pre-roll, not just our window slice; the excess
+      matches each source's trade rate at every level. Pre-roll GOTCHA: FINAL is
+      MANDATORY (15m holds our rows ON TOP OF pre-existing ones, so 0090's
+      "drop FINAL" advice would DOUBLE-COUNT) and a year-bounded FINAL blows the
+      5.59 GiB quota (opens 12 partitions, reads all sources incl. sdex, which
+      the source filter cannot prune) — month-chunk to the toYYYYMM layout.
+      Cleanup rule re-enabled after verification.
+  - date: 2026-07-17
+    status: active
+    who: okarcz
+    note: >
       Full-range DRY-RUN verified on prod [50457424, 63352611]: soroswap
       536,318 ticks vs 536,319 swaps measured (off by 1); aquarius 3,842,273;
       phoenix 237,026 -> 242,201 after the fix below. pools=728 resolved=728,
@@ -118,9 +140,17 @@ of re-downloading + re-decoding ledgers.
       `swaps dropped 0`, `pools=728 resolved=728`, every SoroswapPair event in
       range from a REGISTERED pool (`outside_registry = 0`). The **write** run is
       still pending — runbook §2.
-- [ ] Pre-rolled into the coarse tables (with 0088 / cleanup coordination); BE's
-      1h/1d view shows Soroswap history. **Operator-run** — runbook §4 (cleanup
-      disabled → reprice → incremental pre-roll → re-enable).
+- [x] Pre-rolled into the coarse tables (with 0088 / cleanup coordination); BE's
+      1h/1d view shows Soroswap history. **DONE 2026-07-17** via
+      `schema/preroll-amm-reprice.sql` (STAGE 0 phoenix delete → STAGE 1 15m ←
+      1m → STAGE 2 month-chunked chain). Verified: **soroswap is EXACT at all 7
+      granularities** (536,318 trades / 2,849,662,048.74 volume_base identical
+      from 1m through 1M) — it was absent from `1d` entirely before. Phoenix
+      coarse reads 242,224 (1h) / 242,318 (1d) vs the pre-fix 237,026, so the
+      5,175 recovered swaps DID land in the store of record (what STAGE 0's
+      delete existed to guarantee). No level is BELOW `1m` for any source → no
+      lost buckets, no stale row surviving. SDEX untouched: 14,140,873 `1d` rows,
+      tip 2026-07-09, unchanged.
 - [x] Generalizes: documented as the reusable "reprice from BE events" path for any
       future extractor gap. `docs/runbooks/events-sourced-amm-reprice.md`.
 
