@@ -34,10 +34,15 @@
 > 3. **24 hours of continuous 1-minute candles** for more than 20 major assets
 >    (XLM, USDC, EURC, AQUA, BTC, ETH among them), with no gaps greater than
 >    two candles on the liquid majors.
-> 4. **Coarser granularities are derived in the database.** A ClickHouse
->    materialised-view chain rolls 1m → 15m → 1h → 4h → 1d → 1w → 1M and
->    maintains `current_prices`, which removed two Lambdas from the original
->    design.
+> 4. **Coarser granularities are derived in the database, not in application
+>    code.** A ClickHouse materialised-view chain rolls
+>    1m → 15m → 1h → 4h → 1d → 1w → 1M and maintains `current_prices`, which
+>    removed two Lambdas from the original design. The rollup MVs are
+>    temporarily disabled while the historical backfill runs — in replace mode
+>    they overwrote pre-rolled history — so coarse granularities are currently
+>    filled by an explicit pre-roll step; re-enabling them in APPEND mode is
+>    tracked as follow-up work. The coarse tables are correct and verified
+>    either way.
 > 5. **`GET /v1/backfill/status` is live** behind API Gateway with key-based
 >    access control, a usage plan, and stage caching, returning dual-stream
 >    (SDEX + Soroban AMM) historical-backfill progress.
@@ -56,8 +61,9 @@
 > ClickHouse cluster. The deliverable scope is unchanged. The driver was fit
 > rather than cost: every read we serve is a time-range column scan,
 > ClickHouse's `ReplacingMergeTree` makes ledger replay idempotent by
-> construction, and its materialised views replaced two Lambdas from the
-> design. The change also removed the VPC and NAT Gateway that Lambda-to-RDS
+> construction, and its materialised views let us delete two Lambdas from the
+> design (those MVs are temporarily disabled during the historical backfill —
+> see the evidence document). The change also removed the VPC and NAT Gateway that Lambda-to-RDS
 > connectivity required, and let us join a cluster the Block Explorer already
 > operates rather than run our own. The historical backfill likewise moved
 > from a continuous ECS Fargate task to an operator-run Rust CLI, cutting

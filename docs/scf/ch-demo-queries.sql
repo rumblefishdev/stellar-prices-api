@@ -86,12 +86,22 @@ ORDER BY candles_24h DESC;
 
 -- (6) Depth of history actually in the store. Cross-checks the
 --     earliest_data_available value that GET /v1/backfill/status reports.
---     Expect: days_of_history >= ~180.
+--     Expect: days_of_history >= ~180 for sdex; the AMM sources reach Soroban
+--     activation (2024-02-20), i.e. ~880 days.
+--
+--     NOTE — query the COARSE table, not price_ohlcv_1m. `1m` is a transient
+--     feeder on a 7-day retention (cleanup-worker/src/lib.rs drops its monthly
+--     partitions); `price_ohlcv_{1h,4h,1d,1w,1M}` are retained forever and are
+--     the permanent store of record. Asking `1m` for six months of history
+--     returns only the last few days and looks like a failure.
 SELECT
+    source,
     min(timestamp)                         AS earliest_candle,
     max(timestamp)                         AS latest_candle,
     dateDiff('day', min(timestamp), now()) AS days_of_history
-FROM prices.price_ohlcv_1m FINAL;
+FROM prices.price_ohlcv_1d FINAL
+GROUP BY source
+ORDER BY source;
 
 -- ---------------------------------------------------------------------------
 -- Supporting context (optional on camera; useful if a reviewer asks)

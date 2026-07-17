@@ -13,6 +13,29 @@ history:
     status: active
     who: okarcz
     note: >
+      Docs refreshed against live prod status. TWO REAL DEFECTS fixed, both of
+      which a reviewer could have caught: (1) AC 6's evidence query asked
+      `price_ohlcv_1m` for ~6 months of history, but 1m is a TRANSIENT 7-day
+      feeder (cleanup-worker RETENTION: 1m=7d, 15m=30d, oracle_prices=13mo;
+      1h/4h/1d/1w/1M retained FOREVER) — as written it would return ~days and
+      read as a FAILURE. Repointed to `price_ohlcv_1d`, per source, in both the
+      evidence doc and ch-demo-queries.sql. (2) The docs claimed coarse
+      granularities "are derived by a ClickHouse materialised-view chain" — the
+      six mv_ohlcv_* MVs are DROPPED on prod (0090; they overwrote pre-rolled
+      history in replace mode) and coarse is filled by explicit pre-roll instead.
+      Verified today: `system.tables` has zero mv_ohlcv* rows. Corrected in the
+      evidence exec summary + §6, the form answers, and the video scenario —
+      where the operator was scripted to narrate "the six rollup materialised
+      views" while `SHOW TABLES` would visibly NOT list them, on camera.
+      Strengthened by today's 0097: AC 6 depth is now ~880 days for the AMM
+      sources (Soroban activation) vs the ~180-day bar. Disclosed in §6 (per the
+      package's own "claim only what is demonstrated" rule): the AMM live-era
+      residuals — soroswap 9-day hole 2026-07-06 -> 07-15 and phoenix ~2% light
+      over the same window — both pending 0101.
+  - date: 2026-07-17
+    status: active
+    who: okarcz
+    note: >
       Renumbered 0099 -> 0102 to resolve an ID collision. This task claimed 0099
       on an unmerged branch (PR #118); task 0099 was independently created and
       MERGED to develop meanwhile (Phoenix variable-length swap fix — live

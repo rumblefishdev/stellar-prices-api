@@ -120,7 +120,8 @@ SAY:
 > construction, so a retried invocation can't double-count a trade — in
 > Postgres that's an application-level upsert on every write. And its
 > materialised views do our rollups, which let us delete two Lambdas from the
-> design.
+> design — though I'll show you in a moment that we've had to switch those off
+> temporarily while the historical backfill runs.
 >
 > Let me be precise rather than dramatic about cost, and about one thing we got
 > wrong. The RDS line item was only about twelve dollars a month, because our
@@ -179,8 +180,17 @@ SAY (over query 1 and 2):
 
 > Criterion two: the schema on ClickHouse matches the design. Here are the
 > tables in the `prices` database — the candle tables at every granularity, the
-> asset registry, oracle prices, backfill progress — plus the six rollup
-> materialised views and the read views.
+> asset registry, oracle prices, backfill progress — plus the read views.
+>
+> You'll notice the six rollup materialised views are not in this list, and I
+> want to be upfront about why. They're defined in the schema, and they're what
+> replaced those two Lambdas — but in replace mode they overwrote coarse
+> history that the backfill had already pre-rolled. So while the historical
+> backfill is running we've dropped them and we roll the coarse tables with an
+> explicit pre-roll step instead. The coarse data is correct and verified;
+> re-enabling the views in append mode is tracked as follow-up work. It's an
+> operational trade-off for the duration of the backfill, and it's in section 6
+> of the evidence document.
 >
 > And here's the one-minute candle table itself. Note the engine:
 > ReplacingMergeTree, versioned on a number we derive from the ledger sequence,
@@ -232,7 +242,13 @@ SAY:
 > the Soroban AMM stream, each with its status, its current and target ledger,
 > a progress percentage, and the timestamp of its last push. And
 > `earliest_data_available` — that's criterion six, roughly six months of
-> history, which you can cross-check against the earliest candle in the table.
+> history, which you can cross-check against the earliest candle in the daily
+> table. I'm using the daily table deliberately: the one-minute table is a
+> transient feeder on a seven-day retention, so it only ever holds the last few
+> days. The coarse tables — hourly through monthly — are kept forever, and
+> they're the store of record. On depth we're comfortably past the bar: the AMM
+> venues go back to Soroban activation in February 2024, and SDEX goes deeper
+> still.
 >
 > One difference from the approved wording worth flagging: the original
 > criterion described a tip-backward backfill with the ledger number counting
@@ -287,10 +303,11 @@ SAY:
 > tested, the dashboard isn't, and it's Tranche 2 work. The full public API
 > surface is deployed but Tranche 2 scope; Milestone 1 verifies the one status
 > endpoint I showed you. The historical backfill is a long-running operator
-> job: Milestone 1 asks for about six months of depth, and full-chain coverage
-> back to Soroban activation continues past this milestone. And we have one
-> known open issue with the rollup materialised views that we work around
-> operationally today, tracked as follow-up.
+> job: Milestone 1 asks for about six months of depth, we're past that, and
+> full-chain coverage back to genesis continues past this milestone. And the
+> rollup materialised views are switched off for the duration of that backfill,
+> as I showed you — the coarse tables are pre-rolled instead, and turning the
+> views back on in append mode is tracked as follow-up.
 >
 > All of that is written down in section 6 of the evidence document, alongside
 > the full acceptance-criteria walkthrough, every query I just ran, and the

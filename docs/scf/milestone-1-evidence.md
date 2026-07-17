@@ -51,8 +51,13 @@ payload, extracts **trades that actually happened on chain** — classic SDEX
 order-book trades plus Soroban AMM swaps from Soroswap, Aquarius, and
 Phoenix — and writes typed per-source 1-minute OHLCV candles into its own
 `prices` database. Coarser granularities (15m, 1h, 4h, 1d, 1w, 1M) are
-derived by a ClickHouse materialised-view chain rather than by application
-code, and a `current_prices` view is maintained the same way.
+derived **inside ClickHouse** rather than by application code — as a
+materialised-view chain (`packages/prices-clickhouse/schema/rollups.sql`),
+with `current_prices` maintained the same way. The rollup MVs are
+**temporarily disabled while the historical backfill runs**: in replace mode
+they overwrote pre-rolled history, so coarse granularities are currently
+filled by an explicit pre-roll step instead. Re-enabling them in APPEND mode
+is tracked as task 0095. See [section 6](#6-what-is-deliberately-not-claimed).
 
 Prices are **derived from observed on-chain trades, not from an oracle
 feed**. The Reflector SEP-40 oracle is ingested for reference and used to
@@ -694,28 +699,43 @@ thing that only shows up in production:
 > _"`sdex.earliest_data_available` in `GET /backfill/status` shows a date
 > approximately 6 months ago."_
 
-**Query (6) — earliest candle actually in the store, cross-checked against
-the API's own reported value:**
+**Which table holds history — and why it is not `price_ohlcv_1m`.**
+`price_ohlcv_1m` is a **transient feeder**: the nightly cleanup drops its
+monthly partitions on a 7-day retention (`packages/cleanup-worker/src/lib.rs`
+— `price_ohlcv_1m` 7 days, `price_ohlcv_15m` 30 days, `oracle_prices`
+13 months). The permanent store of record is the coarse set —
+`price_ohlcv_{1h,4h,1d,1w,1M}` are **retained forever**. Depth-of-history is
+therefore a question for the coarse tables; `1m` is only ever the last few
+days, by design.
+
+**Query (6) — earliest candle in the permanent store, per source,
+cross-checked against the API's own reported value:**
 
 ```sql
 SELECT
+    source,
     min(timestamp)                              AS earliest_candle,
     max(timestamp)                              AS latest_candle,
     dateDiff('day', min(timestamp), now())      AS days_of_history
-FROM prices.price_ohlcv_1m FINAL;
+FROM prices.price_ohlcv_1d FINAL
+GROUP BY source
+ORDER BY source;
 ```
 
-<TODO: paste output — expect days_of_history >= ~180>
+<TODO: paste output — expect days_of_history >= ~180 for sdex; the AMM sources
+reach back to Soroban activation (2024-02), i.e. ~880 days>
 
-_Figure 10 — Earliest and latest 1-minute candle in `price_ohlcv_1m`,
-cross-checking the `earliest_data_available` value reported by the API._
+_Figure 10 — Earliest and latest daily candle per source in the permanent
+store, cross-checking the `earliest_data_available` value reported by the API._
 
-The Tranche 1 criterion asks for roughly six months of history. The
-historical backfill is a deliberately long-running operator job and continues
-past this milestone toward full-chain coverage from Soroban activation; the
-Tranche 1 bar is depth-of-history, not completeness, and deeper coverage
-lands in later tranches. [Section 6](#6-what-is-deliberately-not-claimed)
-states exactly where that run stands.
+The Tranche 1 criterion asks for roughly six months of history, and the store
+exceeds it: the AMM sources (`soroswap`, `aquarius`, `phoenix`) reach back to
+**Soroban activation (ledger 50,457,424, 2024-02-20)**, and the SDEX stream is
+deeper still and continues to extend. The Tranche 1 bar is depth-of-history,
+not completeness; the backfill toward full-chain coverage is a deliberately
+long-running operator job that continues past this milestone.
+[Section 6](#6-what-is-deliberately-not-claimed) states exactly where that run
+stands.
 
 ## 6. What is deliberately not claimed
 
@@ -724,14 +744,15 @@ either later-tranche scope or known open work, and this submission does not
 claim them. We list them so a reviewer can calibrate what "complete" means
 here.
 
-| Item                                                    | Status                                                                                                                                                                                                     | Where it lands         |
-| ------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------- |
-| Full public API surface (assets, OHLCV, batch, oracles) | Deployed and routable, but Tranche 1 only requires and verifies `GET /backfill/status`.                                                                                                                    | Tranche 2 — Public API |
-| CloudWatch **dashboard**                                | `prices-production-overview` exists as a **scaffold with no data widgets**. The seven alarms are real, deployed, and fire-tested; the dashboard is not evidence and is not screenshotted in this document. | Tranche 2              |
-| Full-chain historical backfill                          | Running. Tranche 1 requires ~6 months (AC 6); full coverage from Soroban activation is a multi-week operator job that continues past this milestone.                                                       | Tranches 2–3           |
-| Rollup MVs in APPEND mode                               | Known issue: the rollup MVs run in replace mode, which can overwrite pre-rolled coarse history during backfill. Worked around operationally today via pre-roll ordering; the durable fix is tracked.       | Follow-up (task 0095)  |
-| Swagger **UI**                                          | Not deployed. The OpenAPI **specification** is served at `GET /api-docs-json`.                                                                                                                             | Tranche 2              |
-| Custom API domain, WAF, CORS preflight                  | Deliberately deferred; the API is served on the API Gateway execute-api URL.                                                                                                                               | Tranche 2              |
+| Item                                                    | Status                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     | Where it lands         |
+| ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------- |
+| Full public API surface (assets, OHLCV, batch, oracles) | Deployed and routable, but Tranche 1 only requires and verifies `GET /backfill/status`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    | Tranche 2 — Public API |
+| CloudWatch **dashboard**                                | `prices-production-overview` exists as a **scaffold with no data widgets**. The seven alarms are real, deployed, and fire-tested; the dashboard is not evidence and is not screenshotted in this document.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 | Tranche 2              |
+| Full-chain historical backfill                          | Running. Tranche 1 requires ~6 months (AC 6), and the store exceeds it — the AMM sources reach Soroban activation (2024-02). Full-chain coverage back to genesis is a multi-week operator job that continues past this milestone.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          | Tranches 2–3           |
+| Rollup MVs in APPEND mode                               | The rollup MVs are **currently dropped, not running**. In replace mode they overwrote pre-rolled coarse history during backfill, so they were removed and coarse granularities are filled by an explicit **pre-roll** step instead. This is a deliberate operational trade-off for the duration of the backfill, not a defect in the read path: the coarse tables are correct and verified. Re-enabling in APPEND mode is tracked.                                                                                                                                                                                                                                                                                                         | Follow-up (task 0095)  |
+| AMM live-era corrections                                | Two extractor defects were found and fixed **during** this tranche, and their historical effects are being repaired: Soroswap swaps were not being decoded until 2026-07-15 (the swap action sits in `topic[1]`, not `topic[0]`), and Phoenix was discarding ~2.1% of swaps whose event group omits optional fields. Both extractors are **fixed and deployed**, and history back to Soroban activation has been re-derived from on-chain events and verified. Residual: Soroswap has a 9-day hole (2026-07-06 → 07-15) and Phoenix is ~2% light over the same window, both pending a re-run. This affects AMM volume completeness in that window only — not the SDEX stream, not the live path, and not the ~6-month depth AC 6 asks for. | Follow-up (task 0101)  |
+| Swagger **UI**                                          | Not deployed. The OpenAPI **specification** is served at `GET /api-docs-json`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             | Tranche 2              |
+| Custom API domain, WAF, CORS preflight                  | Deliberately deferred; the API is served on the API Gateway execute-api URL.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               | Tranche 2              |
 
 _Table 4 — Out-of-scope and known-open items, stated explicitly._
 
