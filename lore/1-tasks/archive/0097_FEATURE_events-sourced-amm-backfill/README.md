@@ -2,7 +2,7 @@
 id: "0097"
 title: "Events-sourced AMM backfill — reprice from BE soroban_events (CH-to-CH), no ledger re-download"
 type: FEATURE
-status: active
+status: completed
 related_adr: ["0009"]
 related_tasks: ["0096", "0088", "0053", "0079"]
 tags: [layer-indexing, priority-high, effort-large, milestone-M1, backfill, clickhouse, amm, soroswap, reprice, tooling]
@@ -11,6 +11,28 @@ links:
   - "../../../packages/soroswap-extractor/src/lib.rs"
   - "../../../packages/prices-ingest-core/src/soroban.rs"
 history:
+  - date: 2026-07-17
+    status: completed
+    who: okarcz
+    note: >
+      DONE + archived. PR #117 merged (squash e55ef7e). All 4 ACs met and
+      VERIFIED ON PROD: the events-backfill crate reprices AMM candles CH-to-CH
+      from BE soroban_events via the shared live seam (no ledger re-download);
+      2,560,166 candles written over [50457424, 63352611] in 251s; soroswap EXACT
+      at all 7 granularities (536,318 trades, identical volume 1m->1M) where it
+      was absent from coarse entirely — the 0096 gap is filled AND rolled up;
+      SDEX untouched (14,140,873 1d rows, tip 2026-07-09). 202 tests, clippy
+      clean under -D warnings on CI's list. Delivered beyond the original scope:
+      TWO live bugs found + fixed (Phoenix variable-length swap groups, ~2.1% of
+      swaps discarded by an n>=8 gate; safe_log redaction that collapsed EVERY CH
+      error to "detail suppressed" in the live Lambda + SDEX backfill), the
+      missing dispatch-error counter, a scoped AMM pre-roll (neither existing
+      script fit; the runbook referenced the wrong one), and the correction of
+      0096's bogus "~824k swaps" baseline (ground truth 536,319). Spawned 0099
+      (deploy the Phoenix fix to live — live is STILL ~2% short until then — plus
+      the soroswap 2026-07-06 -> 07-15 live-era gap that nothing covers) and 0100
+      (triage 144 unregistered AMM-shaped emitters; establish aquarius/phoenix
+      swap baselines, which do not exist).
   - date: 2026-07-15
     status: backlog
     who: okarcz
