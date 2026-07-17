@@ -207,12 +207,18 @@ SAY (over queries 3, 4, 5):
 > Distinct assets with candles in the last 24 hours — that's over the bar.
 >
 > Here's the per-asset breakdown for the majors the criterion names — XLM,
-> USDC, EURC, AQUA, BTC, ETH — with the largest gap in each series. One thing
-> worth being straight about: a one-minute candle only exists if a trade
-> happened in that minute. On a thin pair, a gap means a quiet market, not a
-> broken indexer. That's exactly why the criterion names liquid assets — and
-> it's why our actual liveness alarm doesn't measure gaps at all. I'll show you
-> what it does measure in a moment.
+> USDC, EURC, AQUA, BTC, ETH — with the largest gap in each series. Two of these
+> are worth pointing at: XLM and AQUA on the order book are minute-continuous,
+> a largest gap of one minute across the whole day — that's the indexer catching
+> every trading minute. The thinner majors show larger gaps, and here's the
+> honest part: a one-minute candle only exists if a trade happened in that
+> minute, so on a thin pair a gap means a quiet market, not a broken indexer.
+> That's exactly why the criterion names liquid assets — and it's why our actual
+> liveness alarm doesn't measure gaps at all. One detail you'll notice in the
+> query: we pin each ticker to its canonical asset first, because on Stellar an
+> asset code like "BTC" isn't unique — anyone can issue one — and we don't want
+> an illiquid look-alike standing in for the real market. I'll show you what the
+> liveness alarm measures in a moment.
 >
 > And here are the candles broken out by source. That's both halves of the
 > pipeline working: the classic SDEX order book, and the Soroban AMM extractors

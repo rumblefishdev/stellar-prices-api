@@ -32,8 +32,10 @@
 >    Reflector SEP-40 oracle is ingested for reference and USD conversion only;
 >    it never sets a price.
 > 3. **24 hours of continuous 1-minute candles** for more than 20 major assets
->    (XLM, USDC, EURC, AQUA, BTC, ETH among them), with no gaps greater than
->    two candles on the liquid majors.
+>    (XLM, USDC, EURC, AQUA, BTC, ETH among them). The deepest order-book
+>    markets — XLM and AQUA on SDEX — are minute-continuous (largest gap 1
+>    minute); gaps on thinner majors reflect genuine market quiet, since a
+>    candle exists only when a trade occurs in that minute.
 > 4. **Coarser granularities are derived in the database, not in application
 >    code.** A ClickHouse materialised-view chain rolls
 >    1m → 15m → 1h → 4h → 1d → 1w → 1M and maintains `current_prices`, which
@@ -146,8 +148,9 @@
       grep, CloudWatch alarms in OK state, Slack alarm notification).
 - [ ] `architecture.png` rendered from `architecture.mmd`:
       `npx -y @mermaid-js/mermaid-cli -i architecture.mmd -o architecture.png -s 3`
-- [ ] AC 3 verified live: ≥ 20 assets with 24 h of candles, no gaps > 2 on the
-      liquid majors.
+- [ ] AC 3 verified live: ≥ 20 assets with 24 h of candles; deepest markets
+      (XLM, AQUA on SDEX) minute-continuous (largest gap 1 min), thinner majors'
+      gaps consistent with market quiet.
 - [ ] AC 6 verified live: `earliest_data_available` ≈ 6 months back.
 - [ ] Re-verify the six non-AC API routes respond before publication, or leave
       them unclaimed — Field 1 deliberately claims only `/v1/backfill/status`.

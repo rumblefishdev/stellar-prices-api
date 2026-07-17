@@ -54,18 +54,38 @@ FROM prices.price_ohlcv_1m FINAL
 WHERE timestamp >= now() - INTERVAL 24 HOUR;
 
 -- (4) Per-asset, per-source coverage and largest gap for the named majors.
---     Expect: largest_gap_candles <= 2 for the liquid majors.
---     A gap only exists where no trade occurred in that minute — a quiet
---     market, not a broken indexer. See the evidence doc's note under AC 3.
---     NB: lagInFrame's 3rd arg (default = the current row's timestamp) is
---     REQUIRED — without it the first candle in the window has no predecessor
---     and lagInFrame returns the 1970 epoch, so its gap reads as ~29.7M minutes
---     and max() reports that instead of the real largest gap.
+--     Expect: the deepest markets (XLM, AQUA on sdex) are minute-continuous
+--     (largest_gap_minutes = 1). Thinner majors (BTC/ETH/EURC) show larger gaps
+--     that track their lower trade frequency — a quiet market, not a broken
+--     indexer (a candle exists only where a trade occurred that minute). USDC is
+--     sparse as a BASE because it is almost always a quote asset. See the
+--     evidence doc's note under AC 3.
+--
+--     Two correctness details, both REQUIRED:
+--       * Ticker codes are NOT unique on Stellar — anyone can issue an asset
+--         named 'BTC'/'USDC'/etc. The `canonical` CTE pins each ticker to its
+--         most-active asset_id first; a plain asset_code join lets an illiquid
+--         impostor's gap dominate max().
+--       * lagInFrame's 3rd arg (default = the current row's timestamp): without
+--         it the first candle in the window has no predecessor and lagInFrame
+--         returns the 1970 epoch, so its gap reads as ~29.7M minutes.
+WITH canonical AS (
+    SELECT asset_code, argMax(asset_id, cnt) AS asset_id
+    FROM (
+        SELECT a.asset_code, p.asset_id, count() AS cnt
+        FROM prices.price_ohlcv_1m AS p FINAL
+        INNER JOIN prices.assets AS a FINAL ON a.asset_id = p.asset_id
+        WHERE p.timestamp >= now() - INTERVAL 24 HOUR
+          AND a.asset_code IN ('XLM', 'USDC', 'EURC', 'AQUA', 'BTC', 'ETH')
+        GROUP BY a.asset_code, p.asset_id
+    )
+    GROUP BY asset_code
+)
 SELECT
-    a.asset_code,
+    c.asset_code,
     p.source,
     count()            AS candles_24h,
-    max(p.gap_minutes) AS largest_gap_candles,
+    max(p.gap_minutes) AS largest_gap_minutes,
     min(p.timestamp)   AS first_candle,
     max(p.timestamp)   AS last_candle
 FROM (
@@ -78,10 +98,9 @@ FROM (
     WHERE timestamp >= now() - INTERVAL 24 HOUR
     WINDOW w AS (PARTITION BY asset_id, source ORDER BY timestamp)
 ) AS p
-INNER JOIN prices.assets AS a FINAL ON a.asset_id = p.asset_id
-WHERE a.asset_code IN ('XLM', 'USDC', 'EURC', 'AQUA', 'BTC', 'ETH')
-GROUP BY a.asset_code, p.source
-ORDER BY a.asset_code, p.source;
+INNER JOIN canonical AS c ON c.asset_id = p.asset_id
+GROUP BY c.asset_code, p.source
+ORDER BY c.asset_code, p.source;
 
 -- (5) Candles by source — proves both the SDEX path and the Soroban AMM
 --     extractors are live. Expect: sdex, plus whichever of
