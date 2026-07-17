@@ -1,5 +1,5 @@
 ---
-id: "0099"
+id: "0102"
 title: "SCF Milestone 1 deliverable-verification package (form answers + evidence PDF + video scenario)"
 type: DOCS
 status: active
@@ -9,6 +9,19 @@ tags: ["milestone-M1", "scf", "effort-medium", "priority-high"]
 links:
   - "https://github.com/rumblefishdev/soroban-block-explorer/tree/master/docs/scf"
 history:
+  - date: 2026-07-17
+    status: active
+    who: okarcz
+    note: >
+      Renumbered 0099 -> 0102 to resolve an ID collision. This task claimed 0099
+      on an unmerged branch (PR #118); task 0099 was independently created and
+      MERGED to develop meanwhile (Phoenix variable-length swap fix — live
+      deploy). Renumbering this one is the cheaper fix: its ID lived in a single
+      frontmatter line, whereas 0099's is referenced from 0101, 0097's archive,
+      and merged commits. Nothing external depends on this number — the SCF docs
+      reference "milestone 1", not the lore ID. The branch name
+      (docs/0099_scf-milestone-1-verification-package) and this PR's commit
+      scopes stay stale; cosmetic only.
   - date: 2026-07-17
     status: active
     who: okarcz
