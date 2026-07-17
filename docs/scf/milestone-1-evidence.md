@@ -58,9 +58,8 @@ with `current_prices` maintained the same way. The six rollup MVs run in
 caught and fixed (task 0095), so each refresh now inserts its window instead of
 replacing the table, rolling live candles forward without clobbering history.
 The coarse tables track the live frontier automatically and are correct and
-verified.
-Re-enabling the views in APPEND mode is tracked as task 0095. See
-[section 6](#6-what-is-deliberately-not-claimed).
+verified. Refresh-cadence tuning against production merge load is tracked as
+task 0104; see [section 6](#6-what-is-deliberately-not-claimed).
 
 Prices are **derived from observed on-chain trades, not from an oracle
 feed**. The Reflector SEP-40 oracle is ingested for reference and used to
