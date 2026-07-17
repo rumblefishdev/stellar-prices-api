@@ -31,9 +31,15 @@ pub struct Cli {
     #[arg(long, env = "CLICKHOUSE_URL", default_value = "http://localhost:8123")]
     pub clickhouse_url: String,
 
-    /// ClickHouse user (optional; `default` on ch-prod-01).
-    #[arg(long, env = "CLICKHOUSE_USER")]
-    pub clickhouse_user: Option<String>,
+    /// ClickHouse user. Defaults to `default` (the ch-prod-01 account that can
+    /// both read `default.*` and write `prices.*`).
+    ///
+    /// Must always be sent: the client sets `X-ClickHouse-User` and
+    /// `X-ClickHouse-Key` as independent headers, so a password with no user is
+    /// a key with nobody to authenticate — ClickHouse rejects it. Leaving this
+    /// unset while passing `CLICKHOUSE_PASSWORD` produced exactly that.
+    #[arg(long, env = "CLICKHOUSE_USER", default_value = "default")]
+    pub clickhouse_user: String,
 
     /// ClickHouse password (optional). Read from env to avoid shell history.
     #[arg(long, env = "CLICKHOUSE_PASSWORD")]

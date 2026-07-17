@@ -124,10 +124,9 @@ async fn emit_buffer(
 }
 
 fn build_client(cli: &Cli) -> Client {
-    let mut client = Client::default().with_url(&cli.clickhouse_url);
-    if let Some(user) = &cli.clickhouse_user {
-        client = client.with_user(user);
-    }
+    let mut client = Client::default()
+        .with_url(&cli.clickhouse_url)
+        .with_user(&cli.clickhouse_user);
     if let Some(password) = &cli.clickhouse_password {
         client = client.with_password(password);
     }
