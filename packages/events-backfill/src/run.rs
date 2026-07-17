@@ -366,31 +366,48 @@ pub async fn execute(cli: &Cli) -> Result<(), EventsBackfillError> {
     // AMM-shaped activity from contracts outside the registry so the operator can
     // verify coverage before committing writes (runbook §1). Scoped to dry-run to
     // keep this extra full-range scan off the write path.
-    if cli.dry_run {
-        let (contracts, events) =
-            count_unregistered_amm_emitters(writer.client(), &contract_ids, cli.start, cli.end)
-                .await?;
-        if contracts > 0 {
-            warn!(
-                contracts,
-                events,
-                "dry-run coverage probe: contracts OUTSIDE the seeded registry emitted \
-                 swap/trade-shaped events in range — prices.pool_registry may be incomplete \
-                 (heuristic; may include non-AMM emitters — verify before the write run)"
-            );
-        } else {
-            info!(
-                "dry-run coverage probe: no swap/trade-shaped events from unregistered \
-                 contracts in range"
-            );
-        }
-    }
-
+    // Print BEFORE the advisory probe: the reprice totals are this run's primary
+    // output and must never be hostage to an optional extra scan. (They were —
+    // the probe's `?` aborted a completed 12.9M-ledger dry-run and discarded
+    // every tick count with it.)
     print_summary(&ticks_by_source, total_events, total_candles, cli.dry_run);
     info!(
         elapsed_s = run_start.elapsed().as_secs(),
         "reprice complete"
     );
+
+    if cli.dry_run {
+        match count_unregistered_amm_emitters(
+            writer.client(),
+            &contract_ids,
+            cli.start,
+            cli.end,
+            cli.chunk_size,
+        )
+        .await
+        {
+            Ok((contracts, events)) if contracts > 0 => warn!(
+                contracts,
+                events,
+                "dry-run coverage probe: contracts OUTSIDE the seeded registry emitted \
+                 swap/trade-shaped events in range — prices.pool_registry may be incomplete \
+                 (heuristic; may include non-AMM emitters — verify before the write run)"
+            ),
+            Ok(_) => info!(
+                "dry-run coverage probe: no swap/trade-shaped events from unregistered \
+                 contracts in range"
+            ),
+            // Advisory only — never fail the run over it. The reprice totals are
+            // already printed above and remain valid; only registry-completeness
+            // assurance is lost.
+            Err(e) => warn!(
+                error = %e,
+                "dry-run coverage probe FAILED — advisory only, reprice totals above are \
+                 unaffected; registry completeness was NOT verified for this range"
+            ),
+        }
+    }
+
     Ok(())
 }
 

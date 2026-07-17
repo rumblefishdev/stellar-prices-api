@@ -3,13 +3,19 @@
 //! the strkey) so [`crate::run`] can feed them through the shared extraction
 //! seam. No ledger archive is touched — this is the whole point of task 0097.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use clickhouse::query::RowCursor;
 use clickhouse::{Client, Row};
 use serde::Deserialize;
 
 use crate::error::EventsBackfillError;
+
+/// Server-side read parallelism for the coverage probe. The probe's memory is
+/// dominated by per-part read buffers for the wide `topics_xdr` column held
+/// concurrently across threads, so capping threads caps peak memory — it trades
+/// probe speed (advisory, dry-run only) for staying inside the CH memory quota.
+const PROBE_MAX_THREADS: u32 = 2;
 
 /// One `soroban_events` row joined to its ledger close time. `topics_xdr` /
 /// `data_xdr` are the typed-JSON SCVal strings BE persists (misnamed — they are
@@ -142,6 +148,7 @@ pub async fn count_unregistered_amm_emitters(
     contract_ids: &[i64],
     start: u32,
     end: u32,
+    chunk_size: u32,
 ) -> Result<(u64, u64), EventsBackfillError> {
     let not_in = if contract_ids.is_empty() {
         String::new()
@@ -155,20 +162,50 @@ pub async fn count_unregistered_amm_emitters(
                 .join(",")
         )
     };
-    let sql = format!(
-        "SELECT uniqExact(e.contract_id) AS contracts, count() AS events \
-         FROM default.soroban_events e \
-         WHERE e.ledger_sequence BETWEEN {start} AND {end} \
-           AND (e.signature IN ('swap', 'trade') OR e.topics_xdr LIKE '%SoroswapPair%') \
-           {not_in}"
-    );
-
     #[derive(Row, Deserialize)]
-    struct Counts {
-        contracts: u64,
+    struct EmitterRow {
+        contract_id: i64,
         events: u64,
     }
 
-    let c = client.query(&sql).fetch_one::<Counts>().await?;
-    Ok((c.contracts, c.events))
+    // Walk the range in the SAME chunks as the reprice. As one query over the
+    // full range this read `topics_xdr` (a large JSON column) for EVERY event in
+    // range — the `NOT IN` and the `LIKE` leave nothing for the index to prune,
+    // unlike the main loop, which filters to registry contracts. On a 12.9M-ledger
+    // range that exceeded ch-prod-01's 5.59 GiB per-query memory quota
+    // (MEMORY_LIMIT_EXCEEDED while reading `topics_xdr`). The memory limit is
+    // per-query, so chunking bounds it; `max_threads` bounds the concurrent
+    // per-part read buffers that dominate the allocation.
+    //
+    // `uniqExact` over the whole range is replaced by a per-chunk `GROUP BY`
+    // whose distinct contracts are unioned client-side — the set of AMM-shaped
+    // emitters is small, so this stays exact without server-side state.
+    let mut seen: HashSet<i64> = HashSet::new();
+    let mut events_total: u64 = 0;
+    let mut chunk_start = start;
+    // `execute` rejects 0 before we get here; clamp anyway so this pub fn can
+    // never underflow into a panic on a direct call.
+    let step = chunk_size.max(1);
+    loop {
+        let chunk_end = chunk_start.saturating_add(step - 1).min(end);
+        let sql = format!(
+            "SELECT e.contract_id AS contract_id, count() AS events \
+             FROM default.soroban_events e \
+             WHERE e.ledger_sequence BETWEEN {chunk_start} AND {chunk_end} \
+               AND (e.signature IN ('swap', 'trade') OR e.topics_xdr LIKE '%SoroswapPair%') \
+               {not_in}\
+             GROUP BY e.contract_id \
+             SETTINGS max_threads = {PROBE_MAX_THREADS}"
+        );
+        for row in client.query(&sql).fetch_all::<EmitterRow>().await? {
+            seen.insert(row.contract_id);
+            events_total += row.events;
+        }
+        if chunk_end >= end {
+            break;
+        }
+        chunk_start = chunk_end + 1;
+    }
+
+    Ok((seen.len() as u64, events_total))
 }
