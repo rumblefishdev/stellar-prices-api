@@ -11,11 +11,14 @@ use serde::Deserialize;
 
 use crate::error::EventsBackfillError;
 
-/// Server-side read parallelism for the coverage probe. The probe's memory is
-/// dominated by per-part read buffers for the wide `topics_xdr` column held
-/// concurrently across threads, so capping threads caps peak memory — it trades
-/// probe speed (advisory, dry-run only) for staying inside the CH memory quota.
-const PROBE_MAX_THREADS: u32 = 2;
+// NOTE — no `SETTINGS` clause anywhere in this file, deliberately. The client
+// sends read queries as POST with an explicit `readonly=1` whenever the SQL
+// exceeds its GET-length threshold (clickhouse-0.13 `query.rs:158-166`), and our
+// reads always do: they embed the full registry contract-id list. Under
+// `readonly=1` ClickHouse rejects any per-query setting change with code 164
+// (READONLY) — which is exactly how a `SETTINGS max_threads` on the coverage
+// probe failed. Bound reads by CHUNKING (the memory limit is per-query), never
+// by per-query settings.
 
 /// One `soroban_events` row joined to its ledger close time. `topics_xdr` /
 /// `data_xdr` are the typed-JSON SCVal strings BE persists (misnamed — they are
@@ -174,8 +177,8 @@ pub async fn count_unregistered_amm_emitters(
     // unlike the main loop, which filters to registry contracts. On a 12.9M-ledger
     // range that exceeded ch-prod-01's 5.59 GiB per-query memory quota
     // (MEMORY_LIMIT_EXCEEDED while reading `topics_xdr`). The memory limit is
-    // per-query, so chunking bounds it; `max_threads` bounds the concurrent
-    // per-part read buffers that dominate the allocation.
+    // per-query, so chunking is what bounds it — capping `max_threads` is not an
+    // option here (see the `readonly=1` note at the top of this file).
     //
     // `uniqExact` over the whole range is replaced by a per-chunk `GROUP BY`
     // whose distinct contracts are unioned client-side — the set of AMM-shaped
@@ -194,8 +197,7 @@ pub async fn count_unregistered_amm_emitters(
              WHERE e.ledger_sequence BETWEEN {chunk_start} AND {chunk_end} \
                AND (e.signature IN ('swap', 'trade') OR e.topics_xdr LIKE '%SoroswapPair%') \
                {not_in}\
-             GROUP BY e.contract_id \
-             SETTINGS max_threads = {PROBE_MAX_THREADS}"
+             GROUP BY e.contract_id"
         );
         for row in client.query(&sql).fetch_all::<EmitterRow>().await? {
             seen.insert(row.contract_id);

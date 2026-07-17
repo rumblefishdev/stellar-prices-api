@@ -335,19 +335,25 @@ pub async fn execute(cli: &Cli) -> Result<(), EventsBackfillError> {
         }
     }
 
-    // Record any dropped-swap pools for operator visibility (should be empty:
-    // reads are filtered to venue-known contracts, so the only path here is a
-    // Soroswap pool seeded without its pair tokens).
-    if !cli.dry_run && !raw_unresolved.is_empty() {
-        let unresolved = aggregate_unresolved(&raw_unresolved, &reg);
-        let genuine = unresolved
-            .iter()
-            .filter(|u| u.still_unresolved == 1)
-            .count();
+    // Dropped-swap pools: reads are filtered to venue-known contracts, so the
+    // only path here is a pool seeded without its pair tokens. Aggregated in BOTH
+    // modes — these swaps are read but produce NO tick, so they are the
+    // difference between the raw swap count in `soroban_events` and the tick
+    // counts below. A dry-run that hides them looks like a clean run while
+    // silently dropping a third of the range's swaps, and the operator has no way
+    // to reconcile against an expected swap count. Only the WRITE is gated.
+    let unresolved = aggregate_unresolved(&raw_unresolved, &reg);
+    let unresolved_genuine: Vec<_> = unresolved
+        .iter()
+        .filter(|u| u.still_unresolved == 1)
+        .collect();
+    let dropped_swaps: u64 = unresolved_genuine.iter().map(|u| u.swap_count).sum();
+    if !cli.dry_run && !unresolved.is_empty() {
         retry_write(|| async { writer.write_unresolved_pools(&unresolved).await }).await?;
         warn!(
             contracts = unresolved.len(),
-            genuine, "recorded unresolved AMM pools to prices.unresolved_pools"
+            genuine = unresolved_genuine.len(),
+            "recorded unresolved AMM pools to prices.unresolved_pools"
         );
     }
 
@@ -370,7 +376,14 @@ pub async fn execute(cli: &Cli) -> Result<(), EventsBackfillError> {
     // output and must never be hostage to an optional extra scan. (They were —
     // the probe's `?` aborted a completed 12.9M-ledger dry-run and discarded
     // every tick count with it.)
-    print_summary(&ticks_by_source, total_events, total_candles, cli.dry_run);
+    print_summary(
+        &ticks_by_source,
+        total_events,
+        total_candles,
+        cli.dry_run,
+        unresolved_genuine.len(),
+        dropped_swaps,
+    );
     info!(
         elapsed_s = run_start.elapsed().as_secs(),
         "reprice complete"
@@ -460,6 +473,8 @@ fn print_summary(
     total_events: u64,
     total_candles: u64,
     dry_run: bool,
+    unresolved_contracts: usize,
+    dropped_swaps: u64,
 ) {
     println!();
     println!("=== events-backfill complete ===");
@@ -474,6 +489,11 @@ fn print_summary(
     } else {
         println!("price_ohlcv_1m rows:       {total_candles}");
     }
+    // Always printed, including the 0 case: "0 dropped" is the statement that
+    // lets an operator trust `ticks == swaps in soroban_events`. Silence would
+    // be indistinguishable from "not measured".
+    println!("unresolved pools:          {unresolved_contracts}");
+    println!("swaps dropped (no tick):   {dropped_swaps}");
 }
 
 #[cfg(test)]
