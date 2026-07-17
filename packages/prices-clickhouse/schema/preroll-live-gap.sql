@@ -64,6 +64,13 @@
 --   arbitrary row. Column order matches the target table (INSERT ... SELECT maps
 --   by position).
 --
+-- Version (task 0095): projects sum(version), matching the APPEND rollup MVs
+--   (rollups.sql) so the coarse tables carry ONE monotonic version scheme — a
+--   complete bucket sums more source versions than a partial one and therefore
+--   wins under RMT. This also strengthens the note above ("later ledgers =>
+--   higher version => fuller row wins"): with sum() a fuller bucket wins on
+--   version count, not just on the max ledger it happens to contain.
+--
 -- =====================================================================
 -- PARAMS
 --   {start_ts:DateTime}  Where the gap begins. Use a value at or BEFORE the
@@ -114,7 +121,7 @@ SELECT toStartOfInterval(t.timestamp, INTERVAL 15 MINUTE) AS timestamp,
        sum(volume_quote_usd) AS volume_quote_usd,
        argMax(close_usd, t.timestamp) AS close_usd,
        volume_quote / nullIf(volume_base, 0) AS vwap,
-       sum(trade_count) AS trade_count, max(version) AS version
+       sum(trade_count) AS trade_count, sum(version) AS version
 FROM prices.price_ohlcv_1m AS t FINAL
 WHERE t.timestamp >= toStartOfInterval({start_ts:DateTime}, INTERVAL 15 MINUTE)
   AND t.timestamp < {end_ts:DateTime}
@@ -137,7 +144,7 @@ SELECT toStartOfInterval(t.timestamp, INTERVAL 1 HOUR) AS timestamp,
        sum(volume_quote_usd) AS volume_quote_usd,
        argMax(close_usd, t.timestamp) AS close_usd,
        volume_quote / nullIf(volume_base, 0) AS vwap,
-       sum(trade_count) AS trade_count, max(version) AS version
+       sum(trade_count) AS trade_count, sum(version) AS version
 FROM prices.price_ohlcv_15m AS t FINAL
 WHERE t.timestamp >= toStartOfInterval({start_ts:DateTime}, INTERVAL 1 HOUR)
   AND t.timestamp < {end_ts:DateTime}
@@ -153,7 +160,7 @@ SELECT toStartOfInterval(t.timestamp, INTERVAL 4 HOUR) AS timestamp,
        sum(volume_quote_usd) AS volume_quote_usd,
        argMax(close_usd, t.timestamp) AS close_usd,
        volume_quote / nullIf(volume_base, 0) AS vwap,
-       sum(trade_count) AS trade_count, max(version) AS version
+       sum(trade_count) AS trade_count, sum(version) AS version
 FROM prices.price_ohlcv_1h AS t FINAL
 WHERE t.timestamp >= toStartOfInterval({start_ts:DateTime}, INTERVAL 4 HOUR)
   AND t.timestamp < {end_ts:DateTime}
@@ -169,7 +176,7 @@ SELECT toStartOfInterval(t.timestamp, INTERVAL 1 DAY) AS timestamp,
        sum(volume_quote_usd) AS volume_quote_usd,
        argMax(close_usd, t.timestamp) AS close_usd,
        volume_quote / nullIf(volume_base, 0) AS vwap,
-       sum(trade_count) AS trade_count, max(version) AS version
+       sum(trade_count) AS trade_count, sum(version) AS version
 FROM prices.price_ohlcv_4h AS t FINAL
 WHERE t.timestamp >= toStartOfInterval({start_ts:DateTime}, INTERVAL 1 DAY)
   AND t.timestamp < {end_ts:DateTime}
@@ -188,7 +195,7 @@ SELECT toStartOfInterval(t.timestamp, INTERVAL 1 WEEK) AS timestamp,
        sum(volume_quote_usd) AS volume_quote_usd,
        argMax(close_usd, t.timestamp) AS close_usd,
        volume_quote / nullIf(volume_base, 0) AS vwap,
-       sum(trade_count) AS trade_count, max(version) AS version
+       sum(trade_count) AS trade_count, sum(version) AS version
 FROM prices.price_ohlcv_1d AS t FINAL
 WHERE t.timestamp >= toStartOfInterval({start_ts:DateTime}, INTERVAL 1 WEEK)
   AND t.timestamp < {end_ts:DateTime}
@@ -205,7 +212,7 @@ SELECT toStartOfInterval(t.timestamp, INTERVAL 1 MONTH) AS timestamp,
        sum(volume_quote_usd) AS volume_quote_usd,
        argMax(close_usd, t.timestamp) AS close_usd,
        volume_quote / nullIf(volume_base, 0) AS vwap,
-       sum(trade_count) AS trade_count, max(version) AS version
+       sum(trade_count) AS trade_count, sum(version) AS version
 FROM prices.price_ohlcv_1w AS t FINAL
 WHERE t.timestamp >= toStartOfInterval({start_ts:DateTime}, INTERVAL 1 MONTH)
   AND t.timestamp < {end_ts:DateTime}

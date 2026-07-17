@@ -2,7 +2,7 @@
 id: "0095"
 title: "Rollup MVs → APPEND mode (stop them wiping pre-rolled history)"
 type: FEATURE
-status: backlog
+status: active
 related_adr: ["0007"]
 related_tasks: ["0090", "0064", "0094"]
 tags: [layer-infra, priority-high, m1-blocker, effort-small, milestone-M1, clickhouse, rollup, materialized-view, data-loss]
@@ -10,6 +10,28 @@ milestone: 1
 links:
   - "../../../packages/prices-clickhouse/schema/rollups.sql"
 history:
+  - date: 2026-07-17
+    status: active
+    who: okarcz
+    note: >
+      FIX DEPLOYED + VERIFIED ON PROD. rollups.sql → APPEND + sum(version) +
+      aligned windows; preroll.sql / preroll-live-gap.sql → sum(version); new
+      rollup_append_it.rs (3 tests, all green on CH 26.3.10.60) + negative
+      control (replace-mode wipes old bucket 1→0). Prod: backed up six coarse
+      tables (verified faithful by FINAL fingerprint), bounded pre-roll to close
+      a ~2.5 h gap, DROP + CREATE the six MVs in APPEND (first refresh of all six
+      OK, empty exceptions). Verified 15m tip advances autonomously (15:30→15:45)
+      and 1d/1M deep history byte-identical to backup. All ACs met. Emerged
+      decisions: window alignment, sum(version) on preroll, cadence unchanged
+      (spawned 0104). Follow-ups: revert 0102/PR #118 (MVs are back), drop *_bak
+      after a watch period. PR pending; archive on merge.
+  - date: 2026-07-17
+    status: active
+    who: okarcz
+    note: >
+      Promoted backlog → active to start the fix on a fresh session, as the M1
+      blocker banner directs. Coarse backup is step 1; no prod SQL until the
+      backup is confirmed.
   - date: 2026-07-17
     status: backlog
     who: okarcz
@@ -209,17 +231,118 @@ plus the 0097 reprice. **Back the coarse tables up before touching the MVs.**
 
 ## Acceptance Criteria
 
-- [ ] `rollups.sql` six `mv_ohlcv_*` use `REFRESH … APPEND …`; cadence/window
-      re-evaluated for RMT merge load.
-- [ ] **Strictly-increasing version projection** shipped with it — `max(version)`
-      is only sufficient under atomic replace (0059 finding #5).
-- [ ] **Regression test with rows OLDER than the refresh window** proving they
-      survive a refresh, on CH pinned to 26.3.10.60. The existing
-      `rollup_chain_it.rs` keeps all rows inside the window and therefore cannot
-      catch this — extend or replace it.
-- [ ] Prod coarse tables backed up before the change.
-- [ ] MVs recreated in prod; a coarse table keeps pre-rolled history across a
-      refresh AND picks up new live buckets (verified over ≥1 full cycle).
-- [ ] No replace-mode refreshable MV remains on any `price_ohlcv_*` table.
-- [ ] Coarse tips track the live frontier without a manual pre-roll — i.e. the
-      `preroll-live-gap.sql` obligation is retired for live data.
+- [x] `rollups.sql` six `mv_ohlcv_*` use `REFRESH … APPEND …`; cadence/window
+      re-evaluated for RMT merge load (kept as-is — see Design Decisions; tuning
+      spawned as backlog 0104).
+- [x] **Strictly-increasing version projection** shipped with it — `sum(version)`
+      on the MVs *and* `preroll.sql` / `preroll-live-gap.sql`, so the coarse
+      tables carry one monotonic scheme (0059 finding #5).
+- [x] **Regression test with rows OLDER than the refresh window** proving they
+      survive a refresh, on CH pinned to 26.3.10.60 — new `rollup_append_it.rs`
+      (3 tests), plus a negative control confirming the OLD replace DDL wipes the
+      old bucket (1 row → 0).
+- [x] Prod coarse tables backed up before the change (six `*_bak` tables, ~18
+      GiB, all six verified logical-identical by FINAL fingerprint).
+- [x] MVs recreated in prod; a coarse table keeps pre-rolled history across a
+      refresh AND picks up new live buckets (verified: deep history byte-identical
+      to backup; `15m` tip advanced 15:30 → 15:45 autonomously).
+- [x] No replace-mode refreshable MV remains on any `price_ohlcv_*` table.
+- [x] Coarse tips track the live frontier without a manual pre-roll — the six
+      APPEND MVs now roll live forward; the `preroll-live-gap.sql` obligation is
+      retired for live data.
+
+## Implementation Notes
+
+Landed on branch `feat/0095_rollup-mvs-append-mode`, deployed to `ch-prod-01`
+2026-07-17.
+
+**Code (`packages/prices-clickhouse/`):**
+- `schema/rollups.sql` — all six `mv_ohlcv_*`: `REFRESH EVERY <n> APPEND`;
+  `max(version)` → `sum(version)`; window lower bounds aligned to the coarse
+  bucket via `toStartOfInterval(now() - <window>, INTERVAL <grain>)`.
+- `schema/preroll.sql`, `schema/preroll-live-gap.sql` — `max(version)` →
+  `sum(version)` (both write coarse grains only, never `_1m`), so the whole
+  coarse table shares one monotonic version scheme. Header rationale added.
+- `tests/rollup_append_it.rs` (new) — 3 `#[ignore]` integration tests on CH
+  26.3.10.60: (1) a 30-day-old bucket survives a refresh + a fresh live bucket
+  is added; (2) the aligned oldest in-window bucket rebuilds complete, not
+  partial; (3) `sum(version)` wins an early-minute correction that leaves
+  `max(version)` tied. Negative control (ad-hoc) confirmed the replace-mode DDL
+  wipes the old bucket 1 → 0.
+- `tests/rollup_chain_it.rs` — updated version assertions for `sum` semantics
+  (3 then 6, not 1 then 2) and the stale "replace mode / max sufficient" doc.
+
+**Prod deploy sequence (all verified):**
+1. Backed up six coarse tables (`*_bak`), verified faithful by per-grain FINAL
+   `sipHash64(pk, version)` fingerprint — all six `src == bak`.
+2. Bounded pre-roll `2026-07-17 13:00 → last closed 15m boundary` to close a
+   ~2.5 h coarse gap (fine grains were frozen ~13:15 while `1m` was live at
+   15:48) and convert the recent region to `sum(version)`.
+3. `DROP … IF EXISTS` + `CREATE … APPEND` the six MVs (`allow_experimental_
+   refreshable_materialized_view=1`). First refresh of all six succeeded, empty
+   exceptions.
+4. Verified: `15m` tip advanced 15:30 → 15:45 with no manual action; `1d` and
+   `1M` deep history (`< 2025-06-01`, outside all windows) byte-identical to the
+   backup.
+
+## Design Decisions
+
+### From Plan
+
+1. **`APPEND` + `sum(version)`** — the two-change fix 0059 specified. `APPEND`
+   stops the atomic table-replace that wiped history; `sum(version)` strictly
+   increases under every real mutation (a correction raises one addend, a later
+   row adds one), so the freshest/fullest aggregation wins the RMT dedup where
+   `max(version)` would tie (finding #5).
+
+### Emerged
+
+2. **Window lower bounds aligned to the coarse bucket start.** Not in the
+   original two-change framing. A raw `now() - <window>` bound falls mid coarse
+   bucket, so the OLDEST in-window bucket would be re-aggregated from only its
+   post-bound source slice — a partial row. With `sum(version) ≫ max(version)`
+   for any multi-row bucket, that partial could outrank a complete pre-rolled
+   bucket and delete history. Aligning the bound to the coarse-bucket start
+   guarantees the oldest in-window bucket rebuilds complete. Proven by
+   `aligned_window_rebuilds_oldest_bucket_complete`.
+
+3. **`sum(version)` extended to `preroll.sql` and `preroll-live-gap.sql`**, so
+   past and future pre-rolls share the MVs' monotonic scheme. Mixing schemes
+   (preroll `max` vs MV `sum`) would let a partial MV bucket outrank a complete
+   pre-rolled one, because `sum ≫ max`. Left `preroll-amm-reprice.sql`
+   (archived 0097) and `preroll-incremental.sql` on `max` — some of their writes
+   target `_1m`, where `max` is the canonical ledger version; window alignment
+   protects their already-written rows.
+
+4. **Cadence and windows kept unchanged** despite the AC asking to re-evaluate.
+   Under APPEND each bucket is re-appended `window ÷ interval` times before
+   ageing out (120× for `15m`, 400× for `1M`) — this is RMT *merge load*, not a
+   correctness issue (alignment + `sum` hold at any window). Kept current values
+   to minimise behaviour change on the M1-blocking deploy; tuning is better done
+   against real prod merge metrics. Spawned backlog **0104**.
+
+## Issues Encountered
+
+- **Recipe assumed frozen coarse; prod was current.** The task/memory recorded
+  coarse frozen at 2026-07-09, but the step-1 snapshot showed tips current — a
+  pre-roll had been re-run since. The gap was still ~2.5 h (wider than the `15m`
+  2 h window), so the pre-roll step was still needed, just for a different
+  reason. Verified the gap against `now()` before sizing the pre-roll.
+- **Raw `count()` on the `_bak` verify looked like data loss** (0.1–0.5% lower
+  than the source snapshot). Expected: RMT background merges collapse duplicate
+  -PK rows continuously, so raw counts drift. Confirmed faithful by FINAL
+  (logical) fingerprint instead — all six `src == bak`.
+- **`1m` holds full history right now** (`floor_1m` = 2016-03-21), not the
+  assumed 7-day window — cleanup hasn't pruned the backfill/reprice partitions
+  yet. Made the pre-roll trivially safe (source covers the whole gap).
+
+## Future Work
+
+- **0104** — re-evaluate rollup MV cadence vs window against prod merge metrics
+  (the 120×/400× re-append amplification). Spawned.
+- **Follow-up on the SCF package (0102 / PR #118):** it describes the six MVs as
+  *dropped* in five places and adds a README step-0 pre-roll. Both are now wrong
+  in the other direction — the MVs are back and roll live automatically. Update
+  before the SCF submission (0102 was gated on this task).
+- **Drop the `*_bak` tables** (~18 GiB) after a day or so of watching the live
+  rollup hold. Not yet — they are the restore path.

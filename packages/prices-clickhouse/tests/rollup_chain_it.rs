@@ -13,10 +13,13 @@
 //!   with NO under-count and NO double-count of the summed volumes, and the
 //!   re-aggregated row WINS at every grain.
 //!
-//! The shipped chain is a TRUE refreshable MV in *replace* mode (atomic target
-//! swap) re-aggregating from the previous grain `FINAL` — so `max(version)` is
-//! a sufficient projection (the swap discards the stale row; there is no
-//! ReplacingMergeTree version tie to lose). This test pins that behaviour.
+//! The shipped chain is a refreshable MV in `APPEND` mode (task 0095)
+//! re-aggregating from the previous grain `FINAL` into a `ReplacingMergeTree`
+//! target, projecting `sum(version)`. This test pins that enrichment propagates
+//! and the summed volumes never under-/double-count; the OUTSIDE-the-window
+//! durability and version-tie properties the APPEND fix turns on live in
+//! `rollup_append_it.rs`. Versions are `sum(version)`, so the single-child
+//! bucket here carries 3 (three v=1 rows) then 6 (three v=2 rows), not max.
 //!
 //! Owns an isolated scratch database and drops it at the end. The 0059 G-note
 //! proof (`lore/.../proof/`) only covered the `_1m → _15m` hop by hand; this is
@@ -261,8 +264,9 @@ async fn enrichment_propagates_through_full_rollup_chain() {
     drive_chain(&admin, db, "sum(volume_base)", 30.0).await;
 
     // Every grain reflects the full summed bucket; USD volume still 0 pre-enrich.
+    // sum(version) of the three v=1 _1m rows = 3, carried up the single-child chain.
     for (_, target) in CHAIN {
-        assert_bucket(&admin, db, target, 0.0, 1).await;
+        assert_bucket(&admin, db, target, 0.0, 3).await;
     }
 
     // ---- Phase 2: enrichment re-INSERT — fill volume_quote_usd, bump version.
@@ -294,9 +298,10 @@ async fn enrichment_propagates_through_full_rollup_chain() {
     drive_chain(&admin, db, "sum(volume_quote_usd)", 300.0).await;
 
     // The enriched value wins at EVERY grain, volumes are NOT double-counted
-    // (volume_base still 30, not 60), and the projected version advanced 1 → 2.
+    // (volume_base still 30, not 60), and the projected version advanced 3 → 6
+    // (three v=2 rows summed) — a strict increase, so the corrected row wins.
     for (_, target) in CHAIN {
-        assert_bucket(&admin, db, target, 300.0, 2).await;
+        assert_bucket(&admin, db, target, 300.0, 6).await;
     }
 
     admin
@@ -346,8 +351,9 @@ async fn preroll_reaggregates_full_chain_ohlc_correctly() {
 
     for (_, target) in CHAIN {
         // open=1.00 (first minute), close=1.30 (last) — the argMin/argMax-by-time
-        // properties; volumes summed across the 3 minutes, version carried.
-        assert_bucket(&admin, db, target, 300.0, 1).await;
+        // properties; volumes summed across the 3 minutes. preroll.sql projects
+        // sum(version) too (task 0095), so version = 3 (three v=1 rows).
+        assert_bucket(&admin, db, target, 300.0, 3).await;
     }
 
     admin
