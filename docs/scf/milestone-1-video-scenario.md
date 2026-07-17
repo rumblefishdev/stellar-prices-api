@@ -248,13 +248,16 @@ SAY:
 > the Soroban AMM stream, each with its status, its current and target ledger,
 > a progress percentage, and the timestamp of its last push. And
 > `earliest_data_available` — that's criterion six, roughly six months of
-> history, which you can cross-check against the earliest candle in the daily
-> table. I'm using the daily table deliberately: the one-minute table is a
-> transient feeder on a seven-day retention, so it only ever holds the last few
-> days. The coarse tables — hourly through monthly — are kept forever, and
-> they're the store of record. On depth we're comfortably past the bar: the AMM
-> venues go back to Soroban activation in February 2024, and SDEX goes deeper
-> still.
+> history. One honest clarification: that field is the earliest ledger available
+> _to backfill_ — the floor of the public archive, back in 2015 — not the
+> earliest candle we've ingested. For the depth we actually hold, I'll show you
+> the daily table directly. I'm using the daily table deliberately: the
+> one-minute table is a transient feeder on a seven-day retention, so it only
+> ever holds the last few days. The coarse tables — hourly through monthly — are
+> kept forever, and they're the store of record. On depth we're comfortably past
+> the bar, about five times over: every source — SDEX and the AMM venues — goes
+> back to roughly Soroban activation in February 2024, around 880 days. The SDEX
+> pre-Soroban tail is still backfilling toward that 2015 archive floor.
 >
 > One difference from the approved wording worth flagging: the original
 > criterion described a tip-backward backfill with the ledger number counting

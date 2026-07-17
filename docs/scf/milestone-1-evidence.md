@@ -62,9 +62,9 @@ verified. Refresh-cadence tuning against production merge load is tracked as
 task 0104; see [section 6](#6-what-is-deliberately-not-claimed).
 
 Prices are **derived from observed on-chain trades, not from an oracle
-feed**. The Reflector SEP-40 oracle is ingested for reference and used to
-convert quote-asset volumes to USD, but it never sets a price. There is no
-third-party price API on the read path.
+feed**. Two reference oracles are ingested — the Reflector SEP-40 oracle (also
+used to convert quote-asset volumes to USD) and a Redstone feed — but neither
+ever sets a price. There is no third-party price API on the read path.
 
 The public REST API is live behind API Gateway with key-based access
 control, a usage plan, and stage caching. Infrastructure is defined entirely
@@ -625,9 +625,9 @@ message-age alarm, both described under AC 5.
 **Provenance, which matters more than the counts.** These candles are built
 from trades decoded out of ledger XDR — SDEX order-book trade operations, and
 Soroban swap events from Soroswap, Aquarius, and Phoenix, with ScVals decoded
-via `stellar-xdr`. No third-party price API is involved. The Reflector oracle
-is ingested separately into `oracle_prices` for reference and USD conversion
-and **never sets a price**.
+via `stellar-xdr`. No third-party price API is involved. The reference oracles
+(Reflector — also used for USD conversion — and Redstone) are ingested
+separately into `oracle_prices` and **never set a price**.
 
 _Evidence tasks:_ [0038](https://github.com/rumblefishdev/stellar-prices-api/blob/develop/lore/1-tasks/archive/0038_FEATURE_prices-ledger-processor-lambda/README.md)
 (live processor), [0054](https://github.com/rumblefishdev/stellar-prices-api/blob/develop/lore/1-tasks/archive/0054_FEATURE_asset-discovery-lambda-tranche-1-minimal.md)
@@ -758,8 +758,8 @@ monthly partitions on a 7-day retention (`packages/cleanup-worker/src/lib.rs`
 therefore a question for the coarse tables; `1m` is only ever the last few
 days, by design.
 
-**Query (6) — earliest candle in the permanent store, per source,
-cross-checked against the API's own reported value:**
+**Query (6) — earliest candle actually ingested in the permanent store, per
+source:**
 
 ```sql
 SELECT
@@ -772,20 +772,28 @@ GROUP BY source
 ORDER BY source;
 ```
 
-<TODO: paste output — expect days_of_history >= ~180 for sdex; the AMM sources
-reach back to Soroban activation (2024-02), i.e. ~880 days>
+<TODO: paste output — expect every source at ~820–880 days of history, reaching
+back to roughly Soroban activation (2024-02); ~5x the ~180-day (six-month) bar>
 
 _Figure 10 — Earliest and latest daily candle per source in the permanent
-store, cross-checking the `earliest_data_available` value reported by the API._
+store: every source holds ~820–880 days, ~5x the six-month bar._
 
 The Tranche 1 criterion asks for roughly six months of history, and the store
-exceeds it: the AMM sources (`soroswap`, `aquarius`, `phoenix`) reach back to
-**Soroban activation (ledger 50,457,424, 2024-02-20)**, and the SDEX stream is
-deeper still and continues to extend. The Tranche 1 bar is depth-of-history,
-not completeness; the backfill toward full-chain coverage is a deliberately
-long-running operator job that continues past this milestone.
-[Section 6](#6-what-is-deliberately-not-claimed) states exactly where that run
-stands.
+exceeds it about fivefold: every source in the permanent coarse store reaches
+back to roughly **Soroban activation (ledger 50,457,424, 2024-02-20)** — `sdex`
+to 2024-02-20, the AMM venues within weeks of it — i.e. ~820–880 days.
+
+A precise word on `earliest_data_available`: the value `GET /backfill/status`
+reports for `sdex` (2015-11) is the **earliest ledger available _to backfill_**
+— the floor of the public ledger archive — **not** the earliest candle
+_ingested_. The SDEX backfill is still working backward through the pre-Soroban
+tail toward that floor (its `current_ledger` sits at the Soroban-activation
+boundary), so the ingested depth in Figure 10 (2024-02) is the honest queryable
+number today — and it already clears the six-month bar many times over. The
+Tranche 1 bar is depth-of-history, not completeness; the backfill toward
+full-chain coverage is a deliberately long-running operator job that continues
+past this milestone. [Section 6](#6-what-is-deliberately-not-claimed) states
+exactly where that run stands.
 
 ## 6. What is deliberately not claimed
 

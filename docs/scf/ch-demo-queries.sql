@@ -118,10 +118,15 @@ ORDER BY candles_24h DESC;
 -- AC 6 — earliest_data_available reaches ~6 months back
 -- ---------------------------------------------------------------------------
 
--- (6) Depth of history actually in the store. Cross-checks the
---     earliest_data_available value that GET /v1/backfill/status reports.
---     Expect: days_of_history >= ~180 for sdex; the AMM sources reach Soroban
---     activation (2024-02-20), i.e. ~880 days.
+-- (6) Depth of history actually INGESTED in the store.
+--     Expect: every source ~820-880 days, back to roughly Soroban activation
+--     (2024-02-20) — ~5x the ~180-day (six-month) bar.
+--
+--     NB — this is the ingested/queryable depth, which is the honest number.
+--     GET /backfill/status reports sdex.earliest_data_available ~2015-11: that
+--     is the earliest ledger available TO BACKFILL (the archive floor), NOT the
+--     earliest candle ingested. The SDEX pre-Soroban tail is still backfilling
+--     toward that floor (current_ledger sits at the Soroban-activation boundary).
 --
 --     NOTE — query the COARSE table, not price_ohlcv_1m. `1m` is a transient
 --     feeder on a 7-day retention (cleanup-worker/src/lib.rs drops its monthly
@@ -165,7 +170,9 @@ FROM prices.backfill_progress FINAL
 ORDER BY task_name;
 
 -- (10) Oracle reference prices are ingested but never set a price.
---      Shown only to demonstrate the reference feed is live.
+--      Shown only to demonstrate the reference feeds are live.
+--      Expect two oracles: reflector (SEP-40, also drives quote->USD conversion)
+--      and redstone. Neither ever sets a candle price.
 SELECT
     oracle_name,
     count()                                    AS rows,

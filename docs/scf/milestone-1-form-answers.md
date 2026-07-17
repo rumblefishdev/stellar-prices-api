@@ -28,9 +28,9 @@
 >    database over HTTPS-mTLS.
 > 2. **Prices come from observed on-chain trades, not from an oracle feed.**
 >    We extract classic SDEX order-book trades plus Soroban AMM swaps from
->    Soroswap, Aquarius, and Phoenix (ScVals decoded via `stellar-xdr`). The
->    Reflector SEP-40 oracle is ingested for reference and USD conversion only;
->    it never sets a price.
+>    Soroswap, Aquarius, and Phoenix (ScVals decoded via `stellar-xdr`). Two
+>    reference oracles are ingested — Reflector SEP-40 (also used for USD
+>    conversion) and Redstone — but neither ever sets a price.
 > 3. **24 hours of continuous 1-minute candles** for more than 20 major assets
 >    (XLM, USDC, EURC, AQUA, BTC, ETH among them). The deepest order-book
 >    markets — XLM and AQUA on SDEX — are minute-continuous (largest gap 1
