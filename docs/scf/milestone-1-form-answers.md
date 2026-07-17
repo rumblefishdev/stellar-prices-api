@@ -137,23 +137,8 @@
 
 ## Pre-submission checklist
 
-> ### ⚠️ Blocker — the public repo's default branch is nearly empty
->
-> Every source link in Field 3 points at `/blob/develop/…`, which is correct:
-> `develop` carries the work. But GitHub's **default branch is `master`**, which
-> is **448 commits behind** and does **not contain** `lore/2-adrs/`, `packages/`,
-> or `infra/`. A reviewer who clicks the bare repository link lands on `master`
-> and sees almost nothing.
->
-> Resolve **before submitting**, either way:
->
-> - **Switch the GitHub default branch to `develop`** (Settings → Branches), or
-> - **Merge `develop` → `master`** so the default branch is current.
->
-> Then re-check every Field 3 link resolves anonymously in an incognito window.
-
-- [ ] Repo default-branch blocker above is resolved; all Field 3 links resolve
-      in an incognito window.
+- [ ] `master` merged up to date and all Field 3 links resolve anonymously in an
+      incognito window.
 - [ ] Operator has run [`ch-demo-queries.sql`](./ch-demo-queries.sql) against
       production and pasted every output into `milestone-1-evidence.md`
       (replacing the `<TODO: paste output>` markers).
