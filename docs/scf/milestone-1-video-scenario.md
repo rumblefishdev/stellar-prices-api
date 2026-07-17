@@ -185,12 +185,13 @@ SAY (over query 1 and 2):
 > You'll notice the six rollup materialised views are not in this list, and I
 > want to be upfront about why. They're defined in the schema, and they're what
 > replaced those two Lambdas — but in replace mode they overwrote coarse
-> history that the backfill had already pre-rolled. So while the historical
-> backfill is running we've dropped them and we roll the coarse tables with an
-> explicit pre-roll step instead. The coarse data is correct and verified;
-> re-enabling the views in append mode is tracked as follow-up work. It's an
-> operational trade-off for the duration of the backfill, and it's in section 6
-> of the evidence document.
+> history that the backfill had already pre-rolled. That's a real incident, not
+> a hypothetical. So we've dropped them, and we roll the coarse tables with an
+> explicit pre-roll step instead. The coarse data is correct, verified and
+> current — you'll see the tips tracking the live frontier in a moment. The
+> honest cost is that keeping them current is an operator step today rather than
+> a view firing on insert, and re-enabling the views in append mode is tracked
+> as follow-up. It's all in section 6 of the evidence document.
 >
 > And here's the one-minute candle table itself. Note the engine:
 > ReplacingMergeTree, versioned on a number we derive from the ledger sequence,

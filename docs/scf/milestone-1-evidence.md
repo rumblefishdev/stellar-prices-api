@@ -54,10 +54,12 @@ Phoenix — and writes typed per-source 1-minute OHLCV candles into its own
 derived **inside ClickHouse** rather than by application code — as a
 materialised-view chain (`packages/prices-clickhouse/schema/rollups.sql`),
 with `current_prices` maintained the same way. The rollup MVs are
-**temporarily disabled while the historical backfill runs**: in replace mode
-they overwrote pre-rolled history, so coarse granularities are currently
-filled by an explicit pre-roll step instead. Re-enabling them in APPEND mode
-is tracked as task 0095. See [section 6](#6-what-is-deliberately-not-claimed).
+**currently disabled**: in replace mode they overwrote pre-rolled history, so
+coarse granularities are filled by an explicit pre-roll step instead. The
+coarse tables are correct, verified and current; the trade-off is that their
+currency depends on that operator step rather than on a view firing on insert.
+Re-enabling the views in APPEND mode is tracked as task 0095. See
+[section 6](#6-what-is-deliberately-not-claimed).
 
 Prices are **derived from observed on-chain trades, not from an oracle
 feed**. The Reflector SEP-40 oracle is ingested for reference and used to
@@ -472,10 +474,15 @@ dropped on production**. In replace mode they overwrote coarse history that the
 historical backfill had already pre-rolled — a real incident, not a
 hypothetical — so they were removed for the duration of the backfill, and the
 coarse granularities (`1h/4h/1d/1w/1M`) are filled by an explicit **pre-roll**
-step instead. The coarse tables are correct and verified; what changed is _what
-writes them_, not the schema they conform to. Re-enabling the views in APPEND
-mode — where they can no longer clobber pre-rolled rows — is tracked as task
-0095 and is listed in [section 6](#6-what-is-deliberately-not-claimed).
+step instead (`schema/preroll-live-gap.sql`). The coarse tables are correct,
+verified, and current — Query (6) under AC 6 shows their tips tracking the live
+frontier. What changed is _what writes them_, not the schema they conform to.
+
+Being precise about the trade-off: because the pre-roll is an operator step
+rather than a view firing on insert, coarse currency depends on that step being
+run — it is not continuous. Re-enabling the views in APPEND mode, where they can
+no longer clobber pre-rolled rows, removes the manual dependency and is tracked
+as task 0095. It is listed in [section 6](#6-what-is-deliberately-not-claimed).
 
 We flag this rather than quietly re-creating the views before recording,
 because a reviewer running `SHOW TABLES` themselves should find exactly what
@@ -765,7 +772,7 @@ here.
 | Full public API surface (assets, OHLCV, batch, oracles) | Deployed and routable, but Tranche 1 only requires and verifies `GET /backfill/status`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    | Tranche 2 — Public API |
 | CloudWatch **dashboard**                                | `prices-production-overview` exists as a **scaffold with no data widgets**. The seven alarms are real, deployed, and fire-tested; the dashboard is not evidence and is not screenshotted in this document.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 | Tranche 2              |
 | Full-chain historical backfill                          | Running. Tranche 1 requires ~6 months (AC 6), and the store exceeds it — the AMM sources reach Soroban activation (2024-02). Full-chain coverage back to genesis is a multi-week operator job that continues past this milestone.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          | Tranches 2–3           |
-| Rollup MVs in APPEND mode                               | The rollup MVs are **currently dropped, not running**. In replace mode they overwrote pre-rolled coarse history during backfill, so they were removed and coarse granularities are filled by an explicit **pre-roll** step instead. This is a deliberate operational trade-off for the duration of the backfill, not a defect in the read path: the coarse tables are correct and verified. Re-enabling in APPEND mode is tracked.                                                                                                                                                                                                                                                                                                         | Follow-up (task 0095)  |
+| Rollup MVs in APPEND mode                               | The rollup MVs are **currently dropped, not running**. In replace mode they overwrote pre-rolled coarse history during backfill, so they were removed and coarse granularities are filled by an explicit **pre-roll** step instead. The coarse tables are correct, verified, and **current** — their tips track the live frontier (AC 6, Query (6)). The cost of the trade-off is that currency now depends on an operator step rather than on a view firing continuously; re-enabling the views in APPEND mode removes that dependency and is tracked.                                                                                                                                                                                    | Follow-up (task 0095)  |
 | AMM live-era corrections                                | Two extractor defects were found and fixed **during** this tranche, and their historical effects are being repaired: Soroswap swaps were not being decoded until 2026-07-15 (the swap action sits in `topic[1]`, not `topic[0]`), and Phoenix was discarding ~2.1% of swaps whose event group omits optional fields. Both extractors are **fixed and deployed**, and history back to Soroban activation has been re-derived from on-chain events and verified. Residual: Soroswap has a 9-day hole (2026-07-06 → 07-15) and Phoenix is ~2% light over the same window, both pending a re-run. This affects AMM volume completeness in that window only — not the SDEX stream, not the live path, and not the ~6-month depth AC 6 asks for. | Follow-up (task 0101)  |
 | Swagger **UI**                                          | Not deployed. The OpenAPI **specification** is served at `GET /api-docs-json`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             | Tranche 2              |
 | Custom API domain, WAF, CORS preflight                  | Deliberately deferred; the API is served on the API Gateway execute-api URL.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               | Tranche 2              |

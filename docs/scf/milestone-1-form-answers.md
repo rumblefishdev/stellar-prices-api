@@ -38,11 +38,10 @@
 >    code.** A ClickHouse materialised-view chain rolls
 >    1m → 15m → 1h → 4h → 1d → 1w → 1M and maintains `current_prices`, which
 >    removed two Lambdas from the original design. The rollup MVs are
->    temporarily disabled while the historical backfill runs — in replace mode
->    they overwrote pre-rolled history — so coarse granularities are currently
->    filled by an explicit pre-roll step; re-enabling them in APPEND mode is
->    tracked as follow-up work. The coarse tables are correct and verified
->    either way.
+>    currently disabled — in replace mode they overwrote pre-rolled history — so
+>    coarse granularities are filled by an explicit pre-roll step instead, and
+>    re-enabling them in APPEND mode is tracked as follow-up work. The coarse
+>    tables are correct, verified and current either way.
 > 5. **`GET /v1/backfill/status` is live** behind API Gateway with key-based
 >    access control, a usage plan, and stage caching, returning dual-stream
 >    (SDEX + Soroban AMM) historical-backfill progress.

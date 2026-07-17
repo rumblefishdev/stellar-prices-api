@@ -68,6 +68,20 @@ npx -y @mermaid-js/mermaid-cli -i architecture.mmd -o architecture.png -s 3
 ## Submission workflow (end-to-end)
 
 ```
+0. FIRST — refresh the coarse tables, or your evidence will look stale.
+   The rollup MVs are dropped (see "Ground rules"), so 1h/4h/1d/1w/1M only
+   advance when someone runs the pre-roll. If you skip this, AC 6's query
+   reports a latest_candle from whenever it was last run, and a reviewer
+   will ask why your daily data stops days before submission.
+
+       packages/prices-clickhouse/schema/preroll-live-gap.sql
+       --param_start_ts=<last coarse tip>  --param_end_ts=<a clean hour, just
+                                             behind the live 1m frontier>
+
+   Then confirm every tip moved (the verify block in that file). Do this in
+   the SAME session as the queries and the video, so the PDF and the video
+   show the same numbers.
+
 1. Run  ch-demo-queries.sql  against production ClickHouse over mTLS.
    Paste each output into milestone-1-evidence.md, replacing its
    <TODO: paste output> marker.
@@ -109,6 +123,17 @@ defensible.
 - **Never screenshot the CloudWatch dashboard.** `prices-production-overview`
   is a scaffold with no data widgets. The seven alarms are real and
   fire-tested; the dashboard is not evidence.
+- **Do not re-create the rollup MVs before recording.** The six `mv_ohlcv_*`
+  views are deliberately dropped on production (in replace mode they overwrote
+  pre-rolled coarse history — a real incident). `SHOW TABLES` will not list
+  them, the package says so explicitly, and a reviewer running that query
+  themselves must find exactly what we described. Re-creating them to make the
+  output "look right" would be both dishonest and an outage. Coarse is kept
+  current by the pre-roll in step 0 instead.
+- **History lives in the coarse tables, not `price_ohlcv_1m`.** `1m` is a
+  transient feeder pruned at 7 days (`15m` at 30); `1h/4h/1d/1w/1M` are kept
+  forever. Any depth-of-history claim or query must read the coarse tables —
+  asking `1m` for six months returns a few days and reads as a failure.
 - **Scope refinements get disclosed, not buried.** Every deviation from the
   approved plan (RDS → ClickHouse foremost) is named, rationalised, and linked
   to the ADR that records it, in both the PDF and the video.
