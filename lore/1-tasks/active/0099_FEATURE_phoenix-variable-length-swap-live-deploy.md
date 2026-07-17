@@ -2,7 +2,7 @@
 id: "0099"
 title: "Deploy the Phoenix variable-length swap fix to live + reprice the live-era gap"
 type: FEATURE
-status: backlog
+status: active
 related_adr: []
 related_tasks: ["0097", "0096"]
 tags: [layer-indexing, priority-high, effort-small, milestone-M1, amm, phoenix, live, deploy]
@@ -11,6 +11,13 @@ links:
   - "../../../packages/phoenix-extractor/src/xyk.rs"
   - "../../../packages/ledger-processor/src/dispatch.rs"
 history:
+  - date: 2026-07-17
+    status: active
+    who: okarcz
+    note: >
+      Promoted to active. 0097 is archived and PR #117 is merged (e55ef7e), so
+      the Phoenix variable-length fix is on develop but NOT deployed — live
+      Phoenix is still ~2% short. Starting the deploy + live-era reprice.
   - date: 2026-07-17
     status: backlog
     who: okarcz
