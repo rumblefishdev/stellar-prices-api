@@ -15,6 +15,28 @@ history:
     status: active
     who: okarcz
     note: >
+      DEPLOYED to prod 2026-07-17 11:57:52 UTC (ComputeStack only,
+      `make deploy-production-compute` from develop @ 06376ff; cdk diff showed
+      ONLY the Lambda code asset S3Key 33521e28... -> d2e17649..., no IAM/SQS/env
+      changes; bootstrap rebuilt first with `cargo lambda build -p
+      prices-ledger-processor --release --arm64 --features lambda` — CDK packages
+      a PRE-BUILT binary, so skipping the build silently redeploys the old one).
+      Lambda config verified: LastModified 11:57:52, arm64, provided.al2023.
+      INGESTION HEALTHY: sdex + aquarius both advanced to 12:09 (15s behind) —
+      aquarius is an AMM source on the same classify->dispatch path, so the AMM
+      chain works under the new code. NOT YET PROVEN LIVE: phoenix's own path —
+      its last event (~11:44) and soroswap's (~11:55) both predate the deploy, so
+      no phoenix swap has been priced by the new binary yet. Verified it is
+      market quiet, NOT a bug: per venue the last candle tracks the last event to
+      within ~1-2 min (phoenix last event 63517809 = ~27 min behind tip vs last
+      candle ~30 min; soroswap 63517940 = ~16 min vs ~17 min). SPOT-CHECK phoenix
+      latest_candle > 11:57:52 later; if phoenix events arrive with no candle,
+      roll back by redeploying bootstrap asset 33521e28...
+      Remaining: the live-era reprice.
+  - date: 2026-07-17
+    status: active
+    who: okarcz
+    note: >
       Promoted to active. 0097 is archived and PR #117 is merged (e55ef7e), so
       the Phoenix variable-length fix is on develop but NOT deployed — live
       Phoenix is still ~2% short. Starting the deploy + live-era reprice.
