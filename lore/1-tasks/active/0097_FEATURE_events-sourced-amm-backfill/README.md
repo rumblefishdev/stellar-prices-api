@@ -26,13 +26,44 @@ history:
     note: >
       Promoted to active. Starting implementation of the events-sourced
       repricer (CH-to-CH AMM backfill) on a dedicated branch.
+  - date: 2026-07-17
+    status: active
+    who: okarcz
+    note: >
+      Full-range DRY-RUN verified on prod [50457424, 63352611]: soroswap
+      536,318 ticks vs 536,319 swaps measured (off by 1); aquarius 3,842,273;
+      phoenix 237,026 -> 242,201 after the fix below. pools=728 resolved=728,
+      unresolved 0, dropped 0, no missing closed_at. TWO REAL BUGS FOUND +
+      FIXED (PR #117): (1) Phoenix XYK swap groups are VARIABLE length; the
+      `n >= 8` gate silently discarded 5,175 real 7-event swaps (~2.1%) — a
+      LIVE bug in shared dispatch code, sibling of 0096; live stays wrong till
+      the processor is deployed (-> 0099). (2) dispatch errors had NO counter
+      (unresolved fallback is Soroswap-scoped), so the summary read
+      "swaps dropped: 0" while 5,175 swaps died — took hand-grepping 19,624
+      log lines to see; LedgerSoroban now carries dispatch_errors. ALSO: the
+      "~824k soroswap swaps" baseline inherited from 0096 is WRONG and not
+      reproducible (ground truth 536,319; 824k likely swap+sync via a LIKE
+      overmatch) — it sent us on a 35%-shortfall hunt that was chasing a
+      phantom. Ops findings: CH user header has no default; safe_log ate every
+      CH error code; no SETTINGS allowed under readonly=1 (code 164); the
+      coverage probe was fatal + unbounded (code 241). Spawned 0099 (Phoenix
+      live deploy + live-era reprice) and 0100 (triage 144 unregistered
+      AMM-shaped emitters, 2.25M events). Write run + pre-roll still pending.
 ---
 
 # Events-sourced AMM backfill — reprice from BE `soroban_events`
 
 ## Summary
 
-Backfill historical AMM candles (starting with the ~824k Soroswap swaps the 0096
+> ⚠️ **The "~824k Soroswap swaps" figure carried from 0096 is WRONG** — see
+> Decision Log 2026-07-17. Measured ground truth is **536,319 swaps** in
+> `[50457424, 63352611]`. The 824k number is not reproducible from
+> `soroban_events` and appears to have counted `swap`+`sync` (or used a
+> `LIKE '%SoroswapPair%'` overmatch, which sweeps in sync/deposit/withdraw/skim
+> — ~2× the swap count). Every "824k" below is retained only as the historical
+> record of what this task was opened against.
+
+Backfill historical AMM candles (starting with the Soroswap swaps the 0096
 extractor fix unblocks) by reading **BE's `default.soroban_events`** directly and
 running the events through our existing extraction pipeline — a **ClickHouse-to-
 ClickHouse reprice**, no ledger archive re-download. Estimated minutes-to-low-hours
@@ -78,9 +109,15 @@ of re-downloading + re-decoding ledgers.
       `events-backfill` crate drives the shared `process_soroban_event_rows` seam;
       RMT doubling deduped (ledgers via `GROUP BY sequence`, events adjacently);
       writes are RMT-idempotent by `version`. 39 tests green.
-- [ ] Produces non-zero `soroswap` candles in `price_ohlcv_1m` for the historical
+- [x] Produces non-zero `soroswap` candles in `price_ohlcv_1m` for the historical
       range, per-source verified against the `soroban_events` swap counts.
-      **Operator-run** (needs `ch-prod-01` / BE tables) — runbook §1–3.
+      **Dry-run VERIFIED on prod 2026-07-17** over `[50457424, 63352611]`:
+      `soroswap 536,318` ticks vs **536,319** swaps measured in `soroban_events`
+      (off by 1 = 0.0002%); `aquarius 3,842,273`; `phoenix 237,026` → **242,201**
+      after the variable-length fix below. `unresolved pools 0`,
+      `swaps dropped 0`, `pools=728 resolved=728`, every SoroswapPair event in
+      range from a REGISTERED pool (`outside_registry = 0`). The **write** run is
+      still pending — runbook §2.
 - [ ] Pre-rolled into the coarse tables (with 0088 / cleanup coordination); BE's
       1h/1d view shows Soroswap history. **Operator-run** — runbook §4 (cleanup
       disabled → reprice → incremental pre-roll → re-enable).
@@ -147,6 +184,38 @@ per-source verification + incremental pre-roll (runbook). Not run here per
    resume mechanism; the `soroban_amm` progress stream is already `completed`
    (0090). A progress row for reprices is a possible follow-up if operator
    visibility is wanted.
+
+## Decision Log
+
+Full findings from the first prod run — measured baselines, two real bugs, and the
+operational traps — are in
+[`notes/S-prod-dry-run-findings.md`](notes/S-prod-dry-run-findings.md). Headlines:
+
+- **The inherited "~824k Soroswap swaps" baseline is WRONG** — ground truth is
+  **536,319**; we extract 536,318. It cost a long hunt for a phantom 35% shortfall.
+  Count Soroswap swaps by topic[1], never `LIKE '%SoroswapPair%'` (which matches
+  sync/deposit/withdraw too, ~2× the swaps).
+- **Phoenix XYK groups are VARIABLE length** — the `n >= 8` gate silently dropped
+  5,175 real 7-event swaps (~2.1%). A **LIVE** bug in shared dispatch code
+  (→ 0099), sibling of 0096.
+- **Dispatch errors had no counter** — the summary said `swaps dropped: 0` while
+  5,175 swaps died. Fixed via `LedgerSoroban::dispatch_errors`.
+
+## Future Work
+
+Spawned as backlog tasks (2026-07-17):
+
+- **0099** — deploy the Phoenix variable-length swap fix to live + reprice the
+  live-era gap. The fix landed here in SHARED code (`ledger-processor` /
+  `phoenix-extractor`), so live Phoenix stays ~2% short until deployed; 0097
+  only repriced `[50457424, 63352611]`. Also owns the split decision if PR #117
+  is separated into backfill vs live.
+- **0100** — triage the 144 unregistered AMM-shaped emitters (2.25M swap/trade
+  events) the coverage probe found. Confirmed NOT Soroswap; unknown whether
+  they are unregistered aquarius/phoenix pools (real lost volume) or non-AMM
+  noise. Includes establishing measured swap baselines for aquarius/phoenix —
+  neither has one, unlike Soroswap's 536,319, so their tick counts are
+  currently unverifiable.
 
 ## Notes
 
