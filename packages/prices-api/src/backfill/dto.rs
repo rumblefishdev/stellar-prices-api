@@ -1,10 +1,12 @@
 //! Response DTOs for `/v1/backfill/status`.
 //!
-//! NOTE: `earliest_data_available` from overview §4.5 is intentionally omitted —
-//! `prices.backfill_progress` has no such column yet (it's the backfill writers'
-//! to record). `realtime_tip_ledger` is derived from the SDEX stream's
-//! `target_ledger` (best available proxy; there is no live chain-tip table in
-//! the prices schema).
+//! NOTE: `earliest_data_available` is the earliest ledger available *to
+//! backfill* — the floor of the public ledger archive the backfill writers
+//! record — NOT the earliest candle ingested. The SDEX pre-Soroban tail is
+//! still backfilling toward it, so the ingested/queryable depth is shallower
+//! (query the coarse `price_ohlcv_1d` table for that). `realtime_tip_ledger` is
+//! derived from the SDEX stream's `target_ledger` (best available proxy; there
+//! is no live chain-tip table in the prices schema).
 
 use serde::Serialize;
 use utoipa::ToSchema;
@@ -35,6 +37,9 @@ pub struct SdexStream {
     pub ledgers_remaining: u64,
     /// Most recent successful push (`null` until the first push).
     pub last_push_at: Option<String>,
+    /// Earliest ledger available *to backfill* (public-archive floor), NOT the
+    /// earliest ingested candle (see the module note). `null` if unrecorded.
+    pub earliest_data_available: Option<String>,
 }
 
 /// Soroban AMM (one-shot) backfill progress.
@@ -43,4 +48,7 @@ pub struct AmmStream {
     pub status: String,
     pub last_push_at: Option<String>,
     pub completed_at: Option<String>,
+    /// Earliest ledger available *to backfill* (public-archive floor); see the
+    /// module note. `null` if unrecorded.
+    pub earliest_data_available: Option<String>,
 }
