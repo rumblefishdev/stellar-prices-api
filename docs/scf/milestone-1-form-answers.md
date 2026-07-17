@@ -37,11 +37,11 @@
 > 4. **Coarser granularities are derived in the database, not in application
 >    code.** A ClickHouse materialised-view chain rolls
 >    1m → 15m → 1h → 4h → 1d → 1w → 1M and maintains `current_prices`, which
->    removed two Lambdas from the original design. The rollup MVs are
->    currently disabled — in replace mode they overwrote pre-rolled history — so
->    coarse granularities are filled by an explicit pre-roll step instead, and
->    re-enabling them in APPEND mode is tracked as follow-up work. The coarse
->    tables are correct, verified and current either way.
+>    removed two Lambdas from the original design. The six rollup MVs run in
+>    APPEND mode (a replace-mode incident that overwrote pre-rolled history was
+>    caught and fixed), so they roll live candles forward without clobbering
+>    history; the coarse tables track the live frontier automatically and are
+>    correct and verified.
 > 5. **`GET /v1/backfill/status` is live** behind API Gateway with key-based
 >    access control, a usage plan, and stage caching, returning dual-stream
 >    (SDEX + Soroban AMM) historical-backfill progress.
@@ -61,7 +61,7 @@
 > rather than cost: every read we serve is a time-range column scan,
 > ClickHouse's `ReplacingMergeTree` makes ledger replay idempotent by
 > construction, and its materialised views let us delete two Lambdas from the
-> design (those MVs are temporarily disabled during the historical backfill —
+> design (those MVs run in APPEND mode —
 > see the evidence document). The change also removed the VPC and NAT Gateway that Lambda-to-RDS
 > connectivity required, and let us join a cluster the Block Explorer already
 > operates rather than run our own. The historical backfill likewise moved

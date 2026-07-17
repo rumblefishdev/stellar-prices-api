@@ -17,15 +17,15 @@
 -- ---------------------------------------------------------------------------
 
 -- (1) Every table, materialised view, and read view in the prices database.
---     Expect: base tables + mv_current_prices + 6 read views.
+--     Expect: base tables + mv_current_prices + the 6 mv_ohlcv_* rollup MVs
+--             + 6 read views.
 --
---     NOTE — the 6 mv_ohlcv_* rollup MVs are DELIBERATELY ABSENT. They are
---     defined in schema/rollups.sql and were deployed, but in replace mode they
---     overwrote coarse history the backfill had pre-rolled, so they are dropped
---     for the duration of the historical backfill; the coarse tables are filled
---     by an explicit pre-roll step instead. Re-enabling them in APPEND mode is
---     task 0095. This is stated in the evidence document (AC 2 and section 6) —
---     do not re-create them before recording.
+--     NOTE — the 6 mv_ohlcv_* rollup MVs (mv_ohlcv_1m_to_15m … mv_ohlcv_1w_to_1M)
+--     ARE PRESENT and running in APPEND mode. They were briefly dropped after a
+--     replace-mode incident (in replace mode a bounded refresh overwrote coarse
+--     history the backfill had pre-rolled); task 0095 recreated them in APPEND
+--     mode on 2026-07-17, so they roll live candles forward without clobbering
+--     history. This matches the evidence document (AC 2 and section 6).
 SHOW TABLES FROM prices;
 
 -- (2) The 1-minute candle table DDL.
@@ -35,11 +35,9 @@ SHOW TABLES FROM prices;
 SHOW CREATE TABLE prices.price_ohlcv_1m;
 
 -- (2b) Optional — rollups are database objects, not application code.
---      Returns mv_current_prices today; the mv_ohlcv_* chain is dropped for the
---      duration of the backfill (see the note on query (1)). To show the chain
---      as DESIGNED rather than as currently deployed, read
---      packages/prices-clickhouse/schema/rollups.sql instead — that is the
---      honest way to make this point on camera.
+--      Returns mv_current_prices AND the 6 mv_ohlcv_* rollup MVs, all
+--      MaterializedView engine (see the note on query (1)). The DDL that defines
+--      them is packages/prices-clickhouse/schema/rollups.sql.
 SELECT name, engine
 FROM system.tables
 WHERE database = 'prices' AND engine = 'MaterializedView'

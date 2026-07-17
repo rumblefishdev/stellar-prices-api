@@ -53,11 +53,12 @@ Phoenix — and writes typed per-source 1-minute OHLCV candles into its own
 `prices` database. Coarser granularities (15m, 1h, 4h, 1d, 1w, 1M) are
 derived **inside ClickHouse** rather than by application code — as a
 materialised-view chain (`packages/prices-clickhouse/schema/rollups.sql`),
-with `current_prices` maintained the same way. The rollup MVs are
-**currently disabled**: in replace mode they overwrote pre-rolled history, so
-coarse granularities are filled by an explicit pre-roll step instead. The
-coarse tables are correct, verified and current; the trade-off is that their
-currency depends on that operator step rather than on a view firing on insert.
+with `current_prices` maintained the same way. The six rollup MVs run in
+**APPEND mode**: a replace-mode incident that overwrote pre-rolled history was
+caught and fixed (task 0095), so each refresh now inserts its window instead of
+replacing the table, rolling live candles forward without clobbering history.
+The coarse tables track the live frontier automatically and are correct and
+verified.
 Re-enabling the views in APPEND mode is tracked as task 0095. See
 [section 6](#6-what-is-deliberately-not-claimed).
 
@@ -459,34 +460,29 @@ SHOW TABLES FROM prices;
 ```
 
 <TODO: paste output — expect the base tables (assets, asset*metadata,
-asset_supply, price_ohlcv_1m/\_15m/\_1h/\_4h/\_1d/\_1w/\_1M, current_prices,
+asset*supply, price_ohlcv_1m/\_15m/\_1h/\_4h/\_1d/\_1w/\_1M, current_prices,
 oracle_prices, backfill_progress, backfill_sdex_ledgers, discovery_state,
-pool_registry, unresolved_pools, ingest_cursor), mv_current_prices, and the 6
-read views. The 6 `mv_ohlcv*\*` rollup MVs are **deliberately absent** — see
-below.>
+pool_registry, unresolved_pools, ingest_cursor), mv_current_prices, the 6
+`mv_ohlcv**` rollup MVs, and the 6 read views.>
 
 _Figure 3 — `SHOW TABLES FROM prices` on production confirms the Section 3
-table set, `mv_current_prices`, and the read views._
+table set, `mv_current_prices`, the six `mv_ohlcv_\*` rollup MVs, and the read
+views.\_
 
-**Why the six `mv_ohlcv_*` rollup views are not in that list.** They are
-defined in `schema/rollups.sql` and were deployed, but they are **currently
-dropped on production**. In replace mode they overwrote coarse history that the
-historical backfill had already pre-rolled — a real incident, not a
-hypothetical — so they were removed for the duration of the backfill, and the
-coarse granularities (`1h/4h/1d/1w/1M`) are filled by an explicit **pre-roll**
-step instead (`schema/preroll-live-gap.sql`). The coarse tables are correct,
-verified, and current — Query (6) under AC 6 shows their tips tracking the live
-frontier. What changed is _what writes them_, not the schema they conform to.
-
-Being precise about the trade-off: because the pre-roll is an operator step
-rather than a view firing on insert, coarse currency depends on that step being
-run — it is not continuous. Re-enabling the views in APPEND mode, where they can
-no longer clobber pre-rolled rows, removes the manual dependency and is tracked
-as task 0095. It is listed in [section 6](#6-what-is-deliberately-not-claimed).
-
-We flag this rather than quietly re-creating the views before recording,
-because a reviewer running `SHOW TABLES` themselves should find exactly what
-this document describes.
+**The six `mv_ohlcv_*` rollup views run in APPEND mode.** They are defined in
+`schema/rollups.sql` and are deployed and running:
+`mv_ohlcv_1m_to_15m → mv_ohlcv_15m_to_1h → … → mv_ohlcv_1w_to_1M`. Their history
+is worth stating plainly: they originally ran in _replace_ mode, where a bounded
+refresh atomically replaces the whole target — so a refresh overwrote coarse
+history that the backfill had pre-rolled. That was a real incident, not a
+hypothetical. Task 0095 recreated them in **APPEND** mode (each refresh inserts
+its window into a `ReplacingMergeTree`, projecting a strictly-increasing
+`sum(version)`, with the window lower bound aligned to the coarse bucket), so a
+refresh can no longer clobber pre-rolled rows. Deployed 2026-07-17 and verified:
+deep coarse history is byte-identical to a pre-change backup after a refresh, and
+the coarse tips advance automatically — Query (6) under AC 6 shows them tracking
+the live frontier. Only refresh-cadence tuning against production merge load
+remains (task 0104).
 
 **Query (2) — the 1-minute candle table's DDL:**
 
@@ -772,7 +768,7 @@ here.
 | Full public API surface (assets, OHLCV, batch, oracles) | Deployed and routable, but Tranche 1 only requires and verifies `GET /backfill/status`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    | Tranche 2 — Public API |
 | CloudWatch **dashboard**                                | `prices-production-overview` exists as a **scaffold with no data widgets**. The seven alarms are real, deployed, and fire-tested; the dashboard is not evidence and is not screenshotted in this document.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 | Tranche 2              |
 | Full-chain historical backfill                          | Running. Tranche 1 requires ~6 months (AC 6), and the store exceeds it — the AMM sources reach Soroban activation (2024-02). Full-chain coverage back to genesis is a multi-week operator job that continues past this milestone.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          | Tranches 2–3           |
-| Rollup MVs in APPEND mode                               | The rollup MVs are **currently dropped, not running**. In replace mode they overwrote pre-rolled coarse history during backfill, so they were removed and coarse granularities are filled by an explicit **pre-roll** step instead. The coarse tables are correct, verified, and **current** — their tips track the live frontier (AC 6, Query (6)). The cost of the trade-off is that currency now depends on an operator step rather than on a view firing continuously; re-enabling the views in APPEND mode removes that dependency and is tracked.                                                                                                                                                                                    | Follow-up (task 0095)  |
+| Rollup MV cadence tuning                                | The six rollup MVs **run in APPEND mode** (task 0095, deployed 2026-07-17) — a replace-mode incident that overwrote pre-rolled coarse history was caught and fixed, so refreshes now insert their window without clobbering history. Verified: deep history byte-identical to a pre-change backup, coarse tips advancing automatically (AC 6, Query (6)). The only open item is tuning the per-grain refresh cadence vs window against production merge load — behaviour, not correctness.                                                                                                                                                                                                                                                 | Follow-up (task 0104)  |
 | AMM live-era corrections                                | Two extractor defects were found and fixed **during** this tranche, and their historical effects are being repaired: Soroswap swaps were not being decoded until 2026-07-15 (the swap action sits in `topic[1]`, not `topic[0]`), and Phoenix was discarding ~2.1% of swaps whose event group omits optional fields. Both extractors are **fixed and deployed**, and history back to Soroban activation has been re-derived from on-chain events and verified. Residual: Soroswap has a 9-day hole (2026-07-06 → 07-15) and Phoenix is ~2% light over the same window, both pending a re-run. This affects AMM volume completeness in that window only — not the SDEX stream, not the live path, and not the ~6-month depth AC 6 asks for. | Follow-up (task 0101)  |
 | Swagger **UI**                                          | Not deployed. The OpenAPI **specification** is served at `GET /api-docs-json`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             | Tranche 2              |
 | Custom API domain, WAF, CORS preflight                  | Deliberately deferred; the API is served on the API Gateway execute-api URL.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               | Tranche 2              |

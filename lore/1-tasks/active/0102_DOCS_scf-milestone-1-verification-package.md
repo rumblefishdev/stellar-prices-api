@@ -13,6 +13,21 @@ history:
     status: active
     who: okarcz
     note: >
+      GATE CLEARED — 0095 shipped. The six rollup MVs are recreated in APPEND
+      mode on prod (deployed + verified 2026-07-17, PR #121), so every place the
+      package described them as dropped/disabled/absent is now reverted to
+      "present and running in APPEND mode": evidence §3 exec summary, AC 2
+      Figure 3 + explanation, §6 table row (now "cadence tuning, task 0104"),
+      the form answers point 4 + the RDS→CH narrative, the video SHOW-TABLES
+      scene + the closing "not claimed" beat, and ch-demo-queries query (1)/(2b)
+      notes. README step 0 no longer runs a mandatory pre-roll (MVs keep coarse
+      current); the "do not re-create the MVs" ground rule is inverted. A
+      reviewer running SHOW TABLES will now see the six mv_ohlcv_* MVs — matching
+      the package. Submission is unblocked.
+  - date: 2026-07-17
+    status: active
+    who: okarcz
+    note: >
       Docs refreshed against live prod status. TWO REAL DEFECTS fixed, both of
       which a reviewer could have caught: (1) AC 6's evidence query asked
       `price_ohlcv_1m` for ~6 months of history, but 1m is a TRANSIENT 7-day

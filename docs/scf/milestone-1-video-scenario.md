@@ -182,16 +182,16 @@ SAY (over query 1 and 2):
 > tables in the `prices` database — the candle tables at every granularity, the
 > asset registry, oracle prices, backfill progress — plus the read views.
 >
-> You'll notice the six rollup materialised views are not in this list, and I
-> want to be upfront about why. They're defined in the schema, and they're what
-> replaced those two Lambdas — but in replace mode they overwrote coarse
-> history that the backfill had already pre-rolled. That's a real incident, not
-> a hypothetical. So we've dropped them, and we roll the coarse tables with an
-> explicit pre-roll step instead. The coarse data is correct, verified and
-> current — you'll see the tips tracking the live frontier in a moment. The
-> honest cost is that keeping them current is an operator step today rather than
-> a view firing on insert, and re-enabling the views in append mode is tracked
-> as follow-up. It's all in section 6 of the evidence document.
+> You'll see the six rollup materialised views right here in the list —
+> `mv_ohlcv_1m_to_15m` up through `mv_ohlcv_1w_to_1M`. These are what replaced
+> two Lambdas from the original design; the rollups run inside the database.
+> I want to be upfront about one thing in their history: they originally ran in
+> replace mode, and a bounded refresh in that mode overwrote coarse history the
+> backfill had pre-rolled — a real incident, not a hypothetical. We caught it,
+> and we recreated them in append mode, which inserts each refresh window
+> instead of replacing the whole table. So they roll live candles forward now
+> without touching history — you'll see the coarse tips tracking the live
+> frontier in a moment. It's all in section 6 of the evidence document.
 >
 > And here's the one-minute candle table itself. Note the engine:
 > ReplacingMergeTree, versioned on a number we derive from the ledger sequence,
@@ -305,10 +305,10 @@ SAY:
 > surface is deployed but Tranche 2 scope; Milestone 1 verifies the one status
 > endpoint I showed you. The historical backfill is a long-running operator
 > job: Milestone 1 asks for about six months of depth, we're past that, and
-> full-chain coverage back to genesis continues past this milestone. And the
-> rollup materialised views are switched off for the duration of that backfill,
-> as I showed you — the coarse tables are pre-rolled instead, and turning the
-> views back on in append mode is tracked as follow-up.
+> full-chain coverage back to genesis continues past this milestone. The rollup
+> materialised views are live in append mode, as I showed you — they roll the
+> coarse tables forward automatically; only cadence tuning against production
+> merge load is tracked as follow-up.
 >
 > All of that is written down in section 6 of the evidence document, alongside
 > the full acceptance-criteria walkthrough, every query I just ran, and the
