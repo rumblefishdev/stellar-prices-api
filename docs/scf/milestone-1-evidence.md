@@ -459,10 +459,11 @@ SHOW TABLES FROM prices;
 ```
 
 <TODO: paste output — expect the base tables (assets, asset*metadata,
-asset*supply, price_ohlcv_1m/\_15m/\_1h/\_4h/\_1d/\_1w/\_1M, current_prices,
+asset*supply, price*ohlcv_1m/\_15m/\_1h/\_4h/\_1d/\_1w/\_1M, current_prices,
 oracle_prices, backfill_progress, backfill_sdex_ledgers, discovery_state,
 pool_registry, unresolved_pools, ingest_cursor), mv_current_prices, the 6
-`mv_ohlcv**` rollup MVs, and the 6 read views.>
+`mv_ohlcv**` rollup MVs, the 6 read views, and 6 transient `price_ohlcv*\*\_bak`
+tables (see note below).>
 
 _Figure 3 — `SHOW TABLES FROM prices` on production confirms the Section 3
 table set, `mv_current_prices`, the six `mv_ohlcv_\*` rollup MVs, and the read
@@ -482,6 +483,12 @@ deep coarse history is byte-identical to a pre-change backup after a refresh, an
 the coarse tips advance automatically — Query (6) under AC 6 shows them tracking
 the live frontier. Only refresh-cadence tuning against production merge load
 remains (task 0104).
+
+**The six `price_ohlcv_*_bak` tables are transient backups.** Before the 0095
+migration, each coarse table was snapshotted to a `_bak` table as a restore
+path, and verified byte-identical afterwards. They are deliberately retained for
+a short post-migration watch period and dropped once the live rollup has proven
+stable (task 0105). They are not part of the schema and hold no live data.
 
 **Query (2) — the 1-minute candle table's DDL:**
 
