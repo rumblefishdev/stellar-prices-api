@@ -12,6 +12,7 @@ pub struct ProgressRow {
     pub status: String,
     pub last_push_at: Option<String>,
     pub completed_at: Option<String>,
+    pub earliest_data_available: Option<String>,
 }
 
 /// Fetch all backfill-progress rows (latest per stream via `FINAL`).
@@ -25,7 +26,9 @@ pub async fn all_progress(ch: &Client) -> Result<Vec<ProgressRow>, clickhouse::e
                  if(isNull(last_push_at), NULL, \
                     formatDateTime(last_push_at, '%Y-%m-%dT%H:%i:%SZ')) AS last_push_at, \
                  if(isNull(completed_at), NULL, \
-                    formatDateTime(completed_at, '%Y-%m-%dT%H:%i:%SZ')) AS completed_at \
+                    formatDateTime(completed_at, '%Y-%m-%dT%H:%i:%SZ')) AS completed_at, \
+                 if(isNull(earliest_data_available), NULL, \
+                    formatDateTime(earliest_data_available, '%Y-%m-%dT%H:%i:%SZ')) AS earliest_data_available \
                FROM backfill_progress FINAL \
                ORDER BY task_name";
     ch.query(sql).fetch_all::<ProgressRow>().await

@@ -88,9 +88,9 @@ async fn setup(db: &str) -> Client {
     admin
         .query(&format!(
             "INSERT INTO {db}.backfill_progress \
-             (task_name, start_ledger, target_ledger, current_ledger, status, last_push_at, completed_at) VALUES \
-             ('sdex_archive', 1, 57234198, 34891234, 'running', '2026-06-15 11:30:00', NULL), \
-             ('soroban_amm', 0, 0, 0, 'completed', '2026-04-14 08:23:11', '2026-04-14 08:23:11')"
+             (task_name, start_ledger, target_ledger, current_ledger, status, last_push_at, completed_at, earliest_data_available) VALUES \
+             ('sdex_archive', 1, 57234198, 34891234, 'running', '2026-06-15 11:30:00', NULL, '2015-11-18 03:47:00'), \
+             ('soroban_amm', 0, 0, 0, 'completed', '2026-04-14 08:23:11', '2026-04-14 08:23:11', '2024-02-20 17:00:00')"
         ))
         .execute()
         .await
@@ -262,6 +262,11 @@ async fn backfill_status_maps_both_streams() {
     // remaining = target - current = 57234198 - 34891234
     assert_eq!(json["sdex"]["ledgers_remaining"], 22342964u64);
     assert_eq!(json["sdex"]["last_push_at"], "2026-06-15T11:30:00Z");
+    // earliest_data_available = archive floor available to backfill (AC 6)
+    assert_eq!(
+        json["sdex"]["earliest_data_available"],
+        "2015-11-18T03:47:00Z"
+    );
     // done = (current - start) / (target - start) * 100
     //      = (34891234 - 1) / (57234198 - 1) * 100 ≈ 60.96
     let pct = json["sdex"]["progress_pct"].as_f64().unwrap();
@@ -269,5 +274,9 @@ async fn backfill_status_maps_both_streams() {
 
     assert_eq!(json["soroban_amm"]["status"], "completed");
     assert_eq!(json["soroban_amm"]["completed_at"], "2026-04-14T08:23:11Z");
+    assert_eq!(
+        json["soroban_amm"]["earliest_data_available"],
+        "2024-02-20T17:00:00Z"
+    );
     teardown(db).await;
 }

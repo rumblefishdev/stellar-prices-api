@@ -32,12 +32,14 @@ pub async fn get_status(State(state): State<AppState>) -> Response {
         progress_pct: progress_pct(r),
         ledgers_remaining: r.target_ledger.saturating_sub(r.current_ledger),
         last_push_at: r.last_push_at.clone(),
+        earliest_data_available: r.earliest_data_available.clone(),
     });
 
     let soroban_amm = find("soroban_amm").map(|r| AmmStream {
         status: r.status.clone(),
         last_push_at: r.last_push_at.clone(),
         completed_at: r.completed_at.clone(),
+        earliest_data_available: r.earliest_data_available.clone(),
     });
 
     let realtime_tip_ledger = sdex.as_ref().map(|s| s.target_ledger).unwrap_or(0);
