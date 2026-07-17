@@ -120,8 +120,7 @@ SAY:
 > construction, so a retried invocation can't double-count a trade — in
 > Postgres that's an application-level upsert on every write. And its
 > materialised views do our rollups, which let us delete two Lambdas from the
-> design — though I'll show you in a moment that we've had to switch those off
-> temporarily while the historical backfill runs.
+> design — I'll show you those views running in a moment.
 >
 > Let me be precise rather than dramatic about cost, and about one thing we got
 > wrong. The RDS line item was only about twelve dollars a month, because our
