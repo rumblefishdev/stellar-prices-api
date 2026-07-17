@@ -1,10 +1,10 @@
 ---
 id: "0099"
-title: "Deploy the Phoenix variable-length swap fix to live + reprice the live-era gap"
+title: "Deploy the Phoenix variable-length swap fix to live"
 type: FEATURE
 status: active
 related_adr: []
-related_tasks: ["0097", "0096"]
+related_tasks: ["0097", "0096", "0101"]
 tags: [layer-indexing, priority-high, effort-small, milestone-M1, amm, phoenix, live, deploy]
 milestone: 1
 links:
@@ -77,18 +77,25 @@ ledger-processor is **deployed**, and the live-era gap needs repricing.
 ## Implementation
 
 - Deploy the fixed `ledger-processor` to prod (`make deploy-production-compute`;
-  see `docs/runbooks/deploy-ledger-processor.md`).
-- Verify live Phoenix ticks resume at the corrected rate — the
-  `swaps failed dispatch` counter (added in 0097) should sit at ~0 for phoenix.
-- Reprice the live-era Phoenix gap `[63352612, live-floor]` with
-  `events-backfill` (same CH-to-CH path 0097 built; idempotent), then pre-roll
-  per `schema/preroll-amm-reprice.sql`.
-- Confirm no same-source minute overlap with live ingestion — keep ranges
-  disjoint per [[backfill-live-no-code-coordination]].
+  see `docs/runbooks/deploy-ledger-processor.md`). **DONE 2026-07-17 11:57:52.**
+- Verify live Phoenix prices 7-event groups under the new binary.
+
+**Scope note (2026-07-17):** the live-era **reprice** moved to **0101**
+(milestone 2). This task is the DEPLOY only — i.e. live correct going *forward*.
+0101 is the backward-looking half: Phoenix's ~2%-short candles from 07-06 and the
+Soroswap 07-06 → 07-15 hole.
 
 ## Acceptance Criteria
 
-- [ ] Fixed ledger-processor deployed to prod; deploy recorded here.
-- [ ] Live `phoenix` ticks show the ~2% recovery; `swaps failed dispatch` ≈ 0.
-- [ ] Live-era Phoenix gap repriced + pre-rolled.
-- [ ] 0097's historical range and this range are disjoint and both complete.
+- [x] Fixed ledger-processor deployed to prod; deploy recorded here.
+      **2026-07-17 11:57:52 UTC** — cdk diff showed ONLY the Lambda code asset
+      (`33521e28…` → `d2e17649…`); LastModified verified; arm64.
+- [x] Ingestion healthy under the new binary — sdex + aquarius advanced to 12:09
+      (15s behind); aquarius is an AMM source on the same classify→dispatch path.
+- [ ] **Spot-check:** phoenix `latest_candle` advances past 11:57:52, proving the
+      new dispatch prices a phoenix swap live. Blocked only on phoenix trading —
+      its last event (~11:44) predates the deploy. Verified NOT a bug: per venue
+      the last candle tracks the last event to within ~1–2 min. If phoenix events
+      arrive with no candle → roll back to bootstrap asset `33521e28…`.
+- [ ] ~~Live-era Phoenix gap repriced + pre-rolled~~ → **moved to 0101**
+      (milestone 2).
