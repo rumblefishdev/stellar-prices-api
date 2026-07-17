@@ -2,13 +2,30 @@
 id: "0103"
 title: "Investigate the ~45% volume dip on 2026-07-09→07-11 (proto27 freeze-window recovery)"
 type: BUG
-status: backlog
+status: completed
 related_adr: []
 related_tasks: ["0064", "0094", "0095"]
 tags: [layer-indexing, priority-medium, effort-small, clickhouse, ingestion, data-quality]
 links:
   - "../../../packages/prices-clickhouse/schema/preroll-live-gap.sql"
 history:
+  - date: 2026-07-17
+    status: completed
+    who: okarcz
+    note: >
+      RESOLVED — genuine market behaviour, NOT lost data. The dip is confined to
+      SDEX trade_count; SDEX volume_base is normal-to-high on the dip days and
+      candle coverage is a full 24 h/day (Query A/B below). You cannot lose ~45%
+      of trades while keeping 100% of their volume — every trade carries volume —
+      so nothing was dropped. Average SDEX trade size ~doubled (3.2M → 6–9M) then
+      returned, i.e. many small trades vanished while large trades continued —
+      the signature of HFT/market-maker order-book activity thinning around the
+      proto27 upgrade. Confirmed EXTERNALLY: Horizon trade_aggregations for
+      XLM/USDC shows the same shape independently — 63,393 (07-08) → 31,432 trough
+      (07-10, ~50%) → 79,129 recovery (07-12), matching our all-SDEX trough day
+      (07-10) and recovery day (07-12). Two extractor bugs (0096 soroswap, 0099
+      phoenix) are unrelated — AMM is a tiny share of trade_count. No re-ingest
+      needed; the OHLCV price/volume data for the week is complete.
   - date: 2026-07-17
     status: backlog
     who: okarcz
@@ -87,13 +104,46 @@ while the preceding Sat/Sun (07-04/05) are the *highest* days in the sample.
   the affected range (`events-backfill` for AMM; `sdex-backfill` for SDEX), then
   re-run `schema/preroll-live-gap.sql` over it.
 
+## Resolution (2026-07-17) — genuine market behaviour
+
+**Attributed: market, not lost data.** Three independent lines of evidence:
+
+1. **Per source (Query A):** the dip is entirely SDEX `trade_count`. AMM
+   (aquarius/phoenix/soroswap) is a tiny, steady share and does not move the
+   total. So this is not the 0096/0099 AMM extractor bugs.
+2. **Volume + coverage intact (Query A/B):** SDEX `volume_base` on 07-09→11
+   (4.86T / 5.98T / 3.44T) is normal-to-high — 07-10 is *above* the surrounding
+   days — and SDEX had candles in all **24 hours** every day. Losing trades
+   necessarily loses their volume; volume is whole, so nothing was dropped. What
+   changed is trade *size*: the SDEX average roughly doubled (3.2M → 6–9M) then
+   returned, i.e. many small trades disappeared while large trades continued —
+   the fingerprint of HFT / market-maker order-book activity pausing around the
+   proto27 network upgrade, then resuming (07-12/13 back to normal, same drain,
+   same build → not a decode/extractor artefact).
+3. **External cross-check (Horizon `trade_aggregations`, XLM/USDC daily
+   `trade_count`):** an independent source that never touched our pipeline shows
+   the same dip —
+
+   | day | Horizon XLM/USDC | vs 07-08 | our all-SDEX | vs 07-08 |
+   |---|---|---|---|---|
+   | 07-08 | 63,393 | — | 1,481,083 | — |
+   | 07-09 | 40,278 | 64% | 757,421 | 51% |
+   | 07-10 | 31,432 | 50% | 635,764 | 43% |
+   | 07-11 | 42,077 | 66% | 704,271 | 48% |
+   | 07-12 | 79,129 | 125% | 1,289,358 | 87% |
+
+   Same trough day (07-10, ~50%), same recovery (07-12). Reproduce with:
+   `GET https://horizon.stellar.org/trade_aggregations?base_asset_type=native&counter_asset_type=credit_alphanum4&counter_asset_code=USDC&counter_asset_issuer=GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN&resolution=86400000&start_time=1783468800000&end_time=1783900800000&order=asc`
+
+**No re-ingest needed.** The OHLCV price/volume data for the week is complete; only
+the discrete-trade count is lower, and that is real.
+
 ## Acceptance Criteria
 
-- [ ] Dip broken down per source, and attributed: market quiet vs lost data.
-- [ ] If data was lost: affected range re-ingested + pre-rolled, and the daily
-      counts land where the on-chain record says they should.
-- [ ] If market quiet: recorded here with the cross-check that proves it, so the
-      next person to notice this dip does not re-investigate it.
+- [x] Dip broken down per source, and attributed: **market**, not lost data.
+- [x] No re-ingest required — data was not lost (volume + 24 h coverage intact).
+- [x] Market behaviour recorded here with the external Horizon cross-check that
+      proves it, so the next person to notice this dip does not re-investigate it.
 
 ## Notes
 
