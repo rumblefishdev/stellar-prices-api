@@ -783,13 +783,14 @@ exceeds it about fivefold: every source in the permanent coarse store reaches
 back to roughly **Soroban activation (ledger 50,457,424, 2024-02-20)** — `sdex`
 to 2024-02-20, the AMM venues within weeks of it — i.e. ~820–880 days.
 
-A precise word on `earliest_data_available`: the value `GET /backfill/status`
-reports for `sdex` (2015-11) is the **earliest ledger available _to backfill_**
-— the floor of the public ledger archive — **not** the earliest candle
-_ingested_. The SDEX backfill is still working backward through the pre-Soroban
-tail toward that floor (its `current_ledger` sits at the Soroban-activation
-boundary), so the ingested depth in Figure 10 (2024-02) is the honest queryable
-number today — and it already clears the six-month bar many times over. The
+A precise word on `earliest_data_available` — the field AC 6 names, returned in
+the `sdex` block of `GET /backfill/status` (see AC 4, Figure 7): its value
+(2015-11) is the **earliest ledger available _to backfill_** — the floor of the
+public ledger archive — **not** the earliest candle _ingested_. The SDEX
+backfill is still working backward through the pre-Soroban tail toward that floor
+(its `current_ledger` sits at the Soroban-activation boundary), so the ingested
+depth in Figure 10 (2024-02) is the honest queryable number today — and it
+already clears the six-month bar many times over. The
 Tranche 1 bar is depth-of-history, not completeness; the backfill toward
 full-chain coverage is a deliberately long-running operator job that continues
 past this milestone. [Section 6](#6-what-is-deliberately-not-claimed) states
