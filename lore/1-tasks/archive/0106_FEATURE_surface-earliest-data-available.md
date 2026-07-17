@@ -2,13 +2,25 @@
 id: "0106"
 title: "Surface earliest_data_available in GET /backfill/status (AC 6)"
 type: FEATURE
-status: active
+status: completed
 related_adr: []
 related_tasks: ["0089", "0102"]
 tags: [layer-api, priority-medium, effort-small, milestone-M1, backfill, api]
 links:
   - "../../../packages/prices-api/src/backfill/dto.rs"
 history:
+  - date: 2026-07-17
+    status: completed
+    who: okarcz
+    note: >
+      DONE — merged (PR #125, 74b36df), deployed to prod (make
+      deploy-production-compute), and verified on the live endpoint:
+      `GET /v1/backfill/status` now returns
+      `sdex.earliest_data_available: "2015-11-18T03:47:00Z"` (and the AMM
+      stream's). AC 6 is now verifiable directly from the endpoint as worded.
+      Field threaded through queries_ch -> dto -> handler for both streams; DTO
+      comment corrected (archive floor / available-to-backfill, not ingested);
+      integration test seeds + asserts both streams. All ACs met.
   - date: 2026-07-17
     status: active
     who: okarcz
@@ -55,7 +67,7 @@ so exposing the archive-floor value is not an overclaim.
 
 ## Acceptance Criteria
 
-- [ ] `GET /v1/backfill/status` returns `sdex.earliest_data_available` (and the
-      AMM stream's) as an ISO datetime.
-- [ ] DTO comment corrected; no stale "no such column" claim.
-- [ ] Build + tests green; deployed to prod and verified on the live endpoint.
+- [x] `GET /v1/backfill/status` returns `sdex.earliest_data_available` (and the
+      AMM stream's) as an ISO datetime — verified live: `2015-11-18T03:47:00Z`.
+- [x] DTO comment corrected; no stale "no such column" claim.
+- [x] Build + tests green; deployed to prod and verified on the live endpoint.
