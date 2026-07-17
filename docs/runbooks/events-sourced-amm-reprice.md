@@ -43,17 +43,29 @@ The tool is the `events-backfill` binary in this repo. It writes
 
 ### 1. Dry-run to sanity-check coverage
 
+Read the password into the environment rather than typing it on the command
+line — `read -rs` keeps it out of shell history, and the tool takes it from the
+env, never from `argv` (which is world-readable via `/proc/<pid>/cmdline`, so
+`--clickhouse-password` and `curl -u` both expose it to any `ps` on the box):
+
 ```bash
-CLICKHOUSE_USER=default CLICKHOUSE_PASSWORD=<pw> \
-cargo run --release -p events-backfill -- \
+read -rs CH_PW
+CLICKHOUSE_PASSWORD="$CH_PW" ~/events-backfill \
   --start 50457424 --end 63352611 \
   --clickhouse-url http://localhost:8123 \
   --dry-run --verbose
 ```
 
+`--clickhouse-user` defaults to `default`. Run it under `tmux` — a full-range
+dry-run takes minutes and the coverage probe adds a second pass.
+
 Prints per-source tick counts without writing. Compare the `soroswap` tick count
 against the raw swap count in `soroban_events` for the same range (hand the
 per-source query to the operator — [[feedback-user-runs-prod-ch-queries]]).
+
+To debug a connection failure, do **not** raise `hyper` to `trace` on the box: it
+dumps raw request bytes including the `X-ClickHouse-Key` header (the password).
+`RUST_LOG=events_backfill=debug,hyper=debug` is safe.
 
 ### 2. Run the reprice
 
@@ -63,8 +75,8 @@ operator's disjoint-range rule). Chunks default to 320k ledgers, each read →
 classified → flushed → written before the next.
 
 ```bash
-CLICKHOUSE_USER=default CLICKHOUSE_PASSWORD=<pw> \
-cargo run --release -p events-backfill -- \
+read -rs CH_PW
+CLICKHOUSE_PASSWORD="$CH_PW" ~/events-backfill \
   --start 50457424 --end 63352611 \
   --clickhouse-url http://localhost:8123 --verbose
 ```
