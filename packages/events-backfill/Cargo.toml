@@ -1,0 +1,23 @@
+[package]
+name = "events-backfill"
+version = "0.1.0"
+edition = "2024"
+description = "Events-sourced AMM backfill — reprice historical AMM candles from BE's ClickHouse soroban_events (CH-to-CH), no ledger re-download (task 0097)"
+
+[[bin]]
+name = "events-backfill"
+path = "src/main.rs"
+
+[dependencies]
+clickhouse = { workspace = true }
+tokio = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+prices-ingest-core = { path = "../prices-ingest-core" }
+
+[dev-dependencies]
+extractors-core = { path = "../extractors-core" }

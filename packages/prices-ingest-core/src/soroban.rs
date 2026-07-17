@@ -129,6 +129,19 @@ pub struct LedgerSoroban {
     pub oracle: Vec<OracleSample>,
     /// Contracts that emitted a `swap` but were not in the venue registry.
     pub unresolved: Vec<UnresolvedPoolSwap>,
+    /// `(source, swap_events_in_group)` for every group whose dispatch FAILED.
+    ///
+    /// A dispatch error is a real loss channel with no other counter: the
+    /// `unresolved` fallback below is deliberately scoped to Soroswap
+    /// pair-resolution misses, so a failing Phoenix/Aquarius group produces no
+    /// tick, no `unresolved` row, and no metric — only a `warn!` nobody counts.
+    /// That is how 5,175 discarded Phoenix swaps hid behind a summary reading
+    /// `swaps dropped: 0` until the log warnings were grepped by hand.
+    ///
+    /// Only groups that actually contained pool-level `swap` events are
+    /// recorded, so routine non-swap traffic (liquidity events, which dispatch
+    /// also rejects) does not inflate it.
+    pub dispatch_errors: Vec<(&'static str, u32)>,
 }
 
 fn collect_tx_metas(lcm: &LedgerCloseMeta) -> Vec<&TransactionMeta> {
@@ -266,7 +279,7 @@ pub fn process_ledger(
                 Some("REDSTONE") => decode_redstone(ev, &mut out),
                 _ => {
                     // Factory events grow the registry; pool events are queued.
-                    learn_factory(ev, reg);
+                    learn_factory(&ev.topics, &ev.data, reg);
                     let row = SorobanEventRow {
                         contract_id: contract_id.clone(),
                         transaction_id: tx_id.clone(),
@@ -284,6 +297,93 @@ pub fn process_ledger(
     }
 
     out
+}
+
+/// A Soroban contract event sourced from an external store (BE's ClickHouse
+/// `default.soroban_events`) rather than decoded from `LedgerCloseMeta`.
+///
+/// `topics` / `data` are the **xdr-parser typed-JSON SCVal trees** — the exact
+/// shape BE persists in the `topics_xdr` / `data_xdr` columns (misnamed: they
+/// are JSON, not XDR). This is the same `serde_json::Value` shape
+/// [`process_ledger`] feeds through `json_to_tagged` / `topics_to_tagged`, so
+/// repricing from these rows is byte-identical to the live decode path.
+///
+/// `contract_id` is the resolved `C…` strkey (BE stores an Int64 surrogate;
+/// the caller resolves it via `soroban_contracts`). `transaction_id` is only a
+/// grouping key — any stable per-transaction identifier works.
+#[derive(Debug, Clone)]
+pub struct RawSorobanEvent {
+    pub contract_id: String,
+    pub transaction_id: String,
+    pub ledger_sequence: u32,
+    pub event_index: u32,
+    pub topics: Value,
+    pub data: Value,
+}
+
+/// Reprice AMM candles from externally-sourced Soroban events for **one ledger**
+/// — the CH-to-CH backfill seam (task 0097).
+///
+/// This mirrors the AMM path of [`process_ledger`] exactly: it runs the same
+/// private `learn_factory` → group-by-contract → `classify_amm_groups` →
+/// `dispatch` → `amm_trade_to_tick` chain, so a re-priced candle is identical to
+/// what the live processor would have written from the original ledger (same
+/// `asset_id`s, SAC collapse, canonical orientation, decimals, and RMT
+/// `version`). Keeping this in-module means the reuse costs zero duplicated
+/// extraction logic and no privates are leaked.
+///
+/// Scope: **AMM only.** Oracle events (`REFLECTOR` / `REDSTONE`) are skipped —
+/// oracle repricing is out of scope for 0097 and their `OhlcvWriter` oracle
+/// path is unchanged. Appends AMM ticks and unresolved-pool records to `out`.
+///
+/// `events` MUST all belong to `ledger_seq` and be pre-ordered by
+/// `(transaction_id, event_index)` — the run layer's `ORDER BY` guarantees this,
+/// so factory events register a pool before that pool's swaps within the window.
+pub fn process_soroban_event_rows(
+    ledger_seq: u32,
+    closed_at: i64,
+    events: &[RawSorobanEvent],
+    reg: &mut Registries,
+    assets: &mut AssetRegistry,
+    out: &mut LedgerSoroban,
+) {
+    // Contiguous group by transaction_id (input is pre-ordered), preserving the
+    // per-tx event order that `learn_factory` and `classify_amm_groups` rely on.
+    let mut tx_start = 0usize;
+    while tx_start < events.len() {
+        let tx_id = &events[tx_start].transaction_id;
+        let mut tx_end = tx_start + 1;
+        while tx_end < events.len() && &events[tx_end].transaction_id == tx_id {
+            tx_end += 1;
+        }
+
+        let mut amm_groups: HashMap<String, Vec<SorobanEventRow>> = HashMap::new();
+        for ev in &events[tx_start..tx_end] {
+            // Oracle signatures are out of scope for this seam; skip them so they
+            // are never mistaken for AMM pool events.
+            match signature(&ev.topics) {
+                Some("REFLECTOR") | Some("REDSTONE") => continue,
+                _ => {}
+            }
+            // Factory events grow the registry; pool events are queued.
+            learn_factory(&ev.topics, &ev.data, reg);
+            let row = SorobanEventRow {
+                contract_id: ev.contract_id.clone(),
+                transaction_id: ev.transaction_id.clone(),
+                ledger_sequence: ev.ledger_sequence as u64,
+                event_index: ev.event_index,
+                topics: topics_to_tagged(&ev.topics),
+                data: json_to_tagged(&ev.data),
+            };
+            amm_groups
+                .entry(ev.contract_id.clone())
+                .or_default()
+                .push(row);
+        }
+
+        classify_amm_groups(amm_groups, reg, assets, ledger_seq, closed_at, out);
+        tx_start = tx_end;
+    }
 }
 
 /// Classify each contract's queued AMM event rows against the current registry.
@@ -345,7 +445,15 @@ fn classify_amm_groups(
                     }
                 }
             }
-            Err(e) => warn!(contract_id, error = %e, "amm dispatch error"),
+            Err(e) => {
+                // Count it, don't just log it — see `LedgerSoroban::dispatch_errors`.
+                // Gated on `!swaps.is_empty()` so only groups carrying real
+                // pool-level `swap` events count as lost volume.
+                if !swaps.is_empty() {
+                    out.dispatch_errors.push((source, swaps.len() as u32));
+                }
+                warn!(contract_id, error = %e, "amm dispatch error");
+            }
         }
 
         // The one silent-drop task 0096 closes: a Soroswap pool that is
@@ -420,13 +528,13 @@ fn topics_to_tagged(topics: &Value) -> Vec<TaggedValue> {
 /// Phoenix (`create`) emit it there, but Soroswap's factory event is
 /// `[String("SoroswapFactory"), Symbol("new_pair")]`, so its action lives in
 /// topic[1]. We therefore check both positions.
-fn learn_factory(ev: &xdr_parser::types::ExtractedEvent, reg: &mut Registries) {
-    let sig0 = signature(&ev.topics);
-    let sig1 = topic_symbol(&ev.topics, 1);
+fn learn_factory(topics: &Value, data: &Value, reg: &mut Registries) {
+    let sig0 = signature(topics);
+    let sig1 = topic_symbol(topics, 1);
 
     // Aquarius router: Symbol("add_pool"), data (pool_address, pool_type)
     if sig0 == Some("add_pool") {
-        if let Some(pool) = first_address(&ev.data) {
+        if let Some(pool) = first_address(data) {
             reg.venue.insert(pool, Venue::Aquarius);
         }
         return;
@@ -435,7 +543,7 @@ fn learn_factory(ev: &xdr_parser::types::ExtractedEvent, reg: &mut Registries) {
     // Phoenix factory: [Symbol("create"), Symbol("liquidity_pool")], data Address(pool)
     if sig0 == Some("create") {
         if sig1 == Some("liquidity_pool") {
-            if let Some(pool) = address_value(&ev.data) {
+            if let Some(pool) = address_value(data) {
                 reg.venue.insert(pool.clone(), Venue::Phoenix);
                 reg.phoenix.register(pool, phoenix_extractor::POOL_TYPE_XYK);
             }
@@ -446,7 +554,7 @@ fn learn_factory(ev: &xdr_parser::types::ExtractedEvent, reg: &mut Registries) {
     // Soroswap factory: [String("SoroswapFactory"), Symbol("new_pair")],
     // data { token_0, token_1, pair, ... }. The action symbol is in topic[1].
     if sig1 == Some("new_pair") {
-        if let TaggedValue::Map(m) = json_to_tagged(&ev.data) {
+        if let TaggedValue::Map(m) = json_to_tagged(data) {
             let get = |k: &str| {
                 m.iter()
                     .find(|(key, _)| key.as_str() == Some(k))
@@ -1035,5 +1143,123 @@ mod tests {
         ]);
         assert_eq!(signature(&topics), Some("create"));
         assert_eq!(topic_symbol(&topics, 1), Some("liquidity_pool"));
+    }
+
+    #[test]
+    fn seam_reprices_soroswap_swap_from_typed_json_end_to_end() {
+        // Task 0097: the CH-to-CH repricer seam must produce a candle tick that is
+        // byte-identical to the live decode path. This drives a SoroswapPair-shaped
+        // swap in the **typed-JSON** shape BE persists in `soroban_events`
+        // (`topics_xdr`/`data_xdr`) straight through `process_soroban_event_rows`,
+        // proving the JSON → `TaggedValue` → `classify_amm_groups` → `dispatch` →
+        // `amm_trade_to_tick` chain is wired with zero reimplementation. Mirrors
+        // `soroswap_pair_swap_prices_through_classify` but from raw event rows.
+        const SEQ: u32 = 50_704_650;
+        const CLOSED_AT: i64 = 1_700_000_000;
+        const POOL: &str = "CDBBBNMCWRMWEIFHUD5BXBCRTW6QM33ZEXIOBGKKQNDSH3WEF7WVBGMI";
+        const T0: &str = "CAS3J7GYLGXMF6TDJBBYYSE3HQ6BBSMLNUQ34T6TZMYMW2EVH34XOWMA";
+        const T1: &str = "CAUIKL3IYGMERDRUN6YSCLWVAKIFG5Q4YJHUKM4S4NJZQIA3BAS6OJPK";
+
+        let swap = RawSorobanEvent {
+            contract_id: POOL.to_string(),
+            transaction_id: "tx".to_string(),
+            ledger_sequence: SEQ,
+            event_index: 5,
+            topics: json!([
+                {"type":"string","value":"SoroswapPair"},
+                {"type":"sym","value":"swap"}
+            ]),
+            data: json!({"type":"map","value":[
+                {"key":{"type":"sym","value":"amount_0_in"},"value":{"type":"i128","value":"1000000"}},
+                {"key":{"type":"sym","value":"amount_0_out"},"value":{"type":"i128","value":"0"}},
+                {"key":{"type":"sym","value":"amount_1_in"},"value":{"type":"i128","value":"0"}},
+                {"key":{"type":"sym","value":"amount_1_out"},"value":{"type":"i128","value":"914145"}}
+            ]}),
+        };
+
+        // Venue-known + pair seeded (same preload the live/backfill startup does).
+        let mut reg = Registries::new();
+        reg.venue.insert(POOL.to_string(), Venue::Soroswap);
+        reg.soroswap
+            .register(POOL.to_string(), T0.to_string(), T1.to_string());
+
+        let mut assets = AssetRegistry::from_existing(vec![]);
+        let mut out = LedgerSoroban::default();
+        process_soroban_event_rows(SEQ, CLOSED_AT, &[swap], &mut reg, &mut assets, &mut out);
+
+        assert_eq!(
+            out.amm_ticks.len(),
+            1,
+            "the seam must price a SoroswapPair swap from typed-JSON rows"
+        );
+        assert_eq!(out.amm_ticks[0].0, "soroswap", "tick tagged soroswap");
+        assert!(out.unresolved.is_empty(), "a priced pool is not unresolved");
+    }
+
+    #[test]
+    fn seam_learns_factory_and_skips_oracle_across_transactions() {
+        // The seam's own responsibilities beyond classify: (1) group by
+        // transaction_id, (2) run `learn_factory` so a `new_pair` factory event in
+        // the window registers the pool, and (3) skip oracle (`REFLECTOR`) events
+        // rather than treat them as AMM pool events. Two events in two different
+        // txs — an oracle update and a Soroswap factory create — must leave the
+        // pair registered and produce neither a tick nor an unresolved record.
+        const SEQ: u32 = 50_688_800;
+        const CLOSED_AT: i64 = 1_700_000_000;
+        const PAIR: &str = "CDBBBNMCWRMWEIFHUD5BXBCRTW6QM33ZEXIOBGKKQNDSH3WEF7WVBGMI";
+        const T0: &str = "CAS3J7GYLGXMF6TDJBBYYSE3HQ6BBSMLNUQ34T6TZMYMW2EVH34XOWMA";
+        const T1: &str = "CAUIKL3IYGMERDRUN6YSCLWVAKIFG5Q4YJHUKM4S4NJZQIA3BAS6OJPK";
+
+        let oracle = RawSorobanEvent {
+            contract_id: "CBKGPWGKSKZF52CFHMTRR23TBWTPMRDIYZ4O2P5VS65BMHYH4DXMCJZC".to_string(),
+            transaction_id: "tx-oracle".to_string(),
+            ledger_sequence: SEQ,
+            event_index: 0,
+            topics: json!([
+                {"type":"sym","value":"REFLECTOR"},
+                {"type":"sym","value":"update"}
+            ]),
+            data: json!({"type":"map","value":[]}),
+        };
+        let factory = RawSorobanEvent {
+            contract_id: "CBQDHNBFBZYE4MKPWBSJOPIYLW4SFSXAXUTSXJN76GNKYVYPCKWC6QUK".to_string(),
+            transaction_id: "tx-factory".to_string(),
+            ledger_sequence: SEQ,
+            event_index: 1,
+            topics: json!([
+                {"type":"string","value":"SoroswapFactory"},
+                {"type":"sym","value":"new_pair"}
+            ]),
+            data: json!({"type":"map","value":[
+                {"key":{"type":"sym","value":"token_0"},"value":{"type":"address","value":T0}},
+                {"key":{"type":"sym","value":"token_1"},"value":{"type":"address","value":T1}},
+                {"key":{"type":"sym","value":"pair"},"value":{"type":"address","value":PAIR}}
+            ]}),
+        };
+
+        let mut reg = Registries::new();
+        let mut assets = AssetRegistry::from_existing(vec![]);
+        let mut out = LedgerSoroban::default();
+        process_soroban_event_rows(
+            SEQ,
+            CLOSED_AT,
+            &[oracle, factory],
+            &mut reg,
+            &mut assets,
+            &mut out,
+        );
+
+        assert!(
+            reg.soroswap.contains(PAIR),
+            "the seam must learn the Soroswap pair from the factory event"
+        );
+        assert!(
+            matches!(reg.venue.get(PAIR), Some(Venue::Soroswap)),
+            "the pair must be venue-tagged Soroswap"
+        );
+        assert!(
+            out.amm_ticks.is_empty() && out.unresolved.is_empty(),
+            "an oracle + factory batch produces no AMM tick and no unresolved gap"
+        );
     }
 }
