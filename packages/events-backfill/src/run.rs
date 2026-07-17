@@ -67,6 +67,7 @@ fn accumulate_ledger(
     accumulators: &mut HashMap<&'static str, CandleAccumulator>,
     buffers: &mut HashMap<&'static str, Vec<OhlcvCandle>>,
     ticks_by_source: &mut HashMap<&'static str, u64>,
+    failed_by_source: &mut HashMap<&'static str, u64>,
     raw_unresolved: &mut Vec<UnresolvedPoolSwap>,
 ) {
     let mut out = LedgerSoroban::default();
@@ -74,6 +75,9 @@ fn accumulate_ledger(
     for (source, tick) in &out.amm_ticks {
         accumulators.entry(source).or_default().merge(tick);
         *ticks_by_source.entry(source).or_default() += 1;
+    }
+    for (source, swaps) in &out.dispatch_errors {
+        *failed_by_source.entry(source).or_default() += *swaps as u64;
     }
     raw_unresolved.extend(out.unresolved);
 
@@ -179,6 +183,9 @@ pub async fn execute(cli: &Cli) -> Result<(), EventsBackfillError> {
 
     let run_start = Instant::now();
     let mut ticks_by_source: HashMap<&'static str, u64> = HashMap::new();
+    // Swaps whose group FAILED dispatch, per source — a loss channel that had no
+    // counter (see LedgerSoroban::dispatch_errors).
+    let mut failed_by_source: HashMap<&'static str, u64> = HashMap::new();
     let mut total_events: u64 = 0;
     let mut total_candles: u64 = 0;
     let mut raw_unresolved: Vec<UnresolvedPoolSwap> = Vec::new();
@@ -228,6 +235,7 @@ pub async fn execute(cli: &Cli) -> Result<(), EventsBackfillError> {
                         &mut accumulators,
                         &mut buffers,
                         &mut ticks_by_source,
+                        &mut failed_by_source,
                         &mut raw_unresolved,
                     );
                 }
@@ -285,6 +293,7 @@ pub async fn execute(cli: &Cli) -> Result<(), EventsBackfillError> {
                 &mut accumulators,
                 &mut buffers,
                 &mut ticks_by_source,
+                &mut failed_by_source,
                 &mut raw_unresolved,
             );
         }
@@ -378,6 +387,7 @@ pub async fn execute(cli: &Cli) -> Result<(), EventsBackfillError> {
     // every tick count with it.)
     print_summary(
         &ticks_by_source,
+        &failed_by_source,
         total_events,
         total_candles,
         cli.dry_run,
@@ -470,6 +480,7 @@ fn aggregate_unresolved(raw: &[UnresolvedPoolSwap], reg: &Registries) -> Vec<Unr
 
 fn print_summary(
     ticks_by_source: &HashMap<&'static str, u64>,
+    failed_by_source: &HashMap<&'static str, u64>,
     total_events: u64,
     total_candles: u64,
     dry_run: bool,
@@ -482,7 +493,8 @@ fn print_summary(
     let mut sources: Vec<(&&str, &u64)> = ticks_by_source.iter().collect();
     sources.sort_by_key(|(s, _)| **s);
     for (source, ticks) in sources {
-        println!("{source:>10} ticks:          {ticks}");
+        let failed = failed_by_source.get(*source).copied().unwrap_or(0);
+        println!("{source:>10} ticks:          {ticks}  (swaps failed dispatch: {failed})");
     }
     if dry_run {
         println!("price_ohlcv_1m rows:       (dry-run — not written)");
@@ -493,7 +505,9 @@ fn print_summary(
     // lets an operator trust `ticks == swaps in soroban_events`. Silence would
     // be indistinguishable from "not measured".
     println!("unresolved pools:          {unresolved_contracts}");
-    println!("swaps dropped (no tick):   {dropped_swaps}");
+    println!("swaps dropped (unresolved):{dropped_swaps}");
+    let failed_total: u64 = failed_by_source.values().sum();
+    println!("swaps failed dispatch:     {failed_total}");
 }
 
 #[cfg(test)]
@@ -574,6 +588,7 @@ mod tests {
                 accs,
                 buffers,
                 ticks,
+                &mut HashMap::new(),
                 unresolved,
             );
         }

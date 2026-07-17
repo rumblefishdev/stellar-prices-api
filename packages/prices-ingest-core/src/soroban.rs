@@ -129,6 +129,19 @@ pub struct LedgerSoroban {
     pub oracle: Vec<OracleSample>,
     /// Contracts that emitted a `swap` but were not in the venue registry.
     pub unresolved: Vec<UnresolvedPoolSwap>,
+    /// `(source, swap_events_in_group)` for every group whose dispatch FAILED.
+    ///
+    /// A dispatch error is a real loss channel with no other counter: the
+    /// `unresolved` fallback below is deliberately scoped to Soroswap
+    /// pair-resolution misses, so a failing Phoenix/Aquarius group produces no
+    /// tick, no `unresolved` row, and no metric — only a `warn!` nobody counts.
+    /// That is how 5,175 discarded Phoenix swaps hid behind a summary reading
+    /// `swaps dropped: 0` until the log warnings were grepped by hand.
+    ///
+    /// Only groups that actually contained pool-level `swap` events are
+    /// recorded, so routine non-swap traffic (liquidity events, which dispatch
+    /// also rejects) does not inflate it.
+    pub dispatch_errors: Vec<(&'static str, u32)>,
 }
 
 fn collect_tx_metas(lcm: &LedgerCloseMeta) -> Vec<&TransactionMeta> {
@@ -432,7 +445,15 @@ fn classify_amm_groups(
                     }
                 }
             }
-            Err(e) => warn!(contract_id, error = %e, "amm dispatch error"),
+            Err(e) => {
+                // Count it, don't just log it — see `LedgerSoroban::dispatch_errors`.
+                // Gated on `!swaps.is_empty()` so only groups carrying real
+                // pool-level `swap` events count as lost volume.
+                if !swaps.is_empty() {
+                    out.dispatch_errors.push((source, swaps.len() as u32));
+                }
+                warn!(contract_id, error = %e, "amm dispatch error");
+            }
         }
 
         // The one silent-drop task 0096 closes: a Soroswap pool that is
