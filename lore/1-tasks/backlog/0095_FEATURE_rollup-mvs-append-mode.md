@@ -5,11 +5,26 @@ type: FEATURE
 status: backlog
 related_adr: ["0007"]
 related_tasks: ["0090", "0064", "0094"]
-tags: [layer-infra, priority-high, effort-small, milestone-M1, clickhouse, rollup, materialized-view, data-loss]
+tags: [layer-infra, priority-high, m1-blocker, effort-small, milestone-M1, clickhouse, rollup, materialized-view, data-loss]
 milestone: 1
 links:
   - "../../../packages/prices-clickhouse/schema/rollups.sql"
 history:
+  - date: 2026-07-17
+    status: backlog
+    who: okarcz
+    note: >
+      ⛔ PROMOTED TO M1 BLOCKER by explicit decision (okarcz, 2026-07-17). The
+      SCF Milestone 1 submission (0102) WAITS on this. Earlier call — "0095 is
+      not an M1 blocker, do it after the backfill" — is REVERSED, on two facts
+      found after it was made: (a) AC 2 requires the `prices.*` schema to match
+      Section 3, and Section 3's Tranche 1 work list names the **MV chain** —
+      `SHOW TABLES` does not show six of them, so a reviewer can point at the
+      output and say AC 2 is unmet; (b) the rollup path is silently broken in
+      prod and deleting live candles monthly, which is a far worse thing to
+      surface AFTER an award than a short delay now. START THE NEXT SESSION
+      HERE, fresh — not at the end of a long day. Everything needed is written
+      down below; do not re-derive it.
   - date: 2026-07-17
     status: backlog
     who: okarcz
@@ -35,6 +50,32 @@ history:
 ---
 
 # Rollup MVs → APPEND mode (stop them wiping pre-rolled history)
+
+> ## ⛔ M1 BLOCKER — start here, on a fresh session
+>
+> The SCF Milestone 1 submission (**0102**) waits on this. Two reasons:
+>
+> 1. **AC 2 is arguably unmet.** It requires `prices.*` to match Section 3, whose
+>    Tranche 1 work list names the **MV chain**. `SHOW TABLES` does not show six
+>    of them. Landing this makes AC 2 literally, unarguably met — no asterisk, no
+>    paragraph of explanation on camera.
+> 2. **The live rollup path is broken in production and deletes candles.** Live
+>    coarse only advances when an operator runs a pre-roll; anything not rolled
+>    before its `1m` monthly partition ages out is gone. Surfacing that after an
+>    award is a much worse conversation than a short delay now.
+>
+> **This is a SHORT task with a SHARP edge.** One wrong keyword deletes years of
+> history, and as of 2026-07-18 **coarse is the only copy** (the `1m` feeder
+> copy from the 0097 reprice is dropped by cleanup). Read "Why this shipped",
+> "The fix is TWO changes", and "Why the blast radius is now maximal" **before**
+> writing any SQL. The recipe is already worked out — do not re-derive it.
+>
+> Order of work: **back up coarse → pre-roll to a known-good current state →
+> write the outside-the-window test on CH 26.3.10.60 → APPEND + version
+> projection → apply → watch ≥1 refresh cycle.**
+>
+> Not urgent in the "do it tired" sense: `preroll-live-gap.sql` bought ~3 weeks.
+> Urgent in the "it is the last thing standing between you and a clean M1" sense.
 
 ## Summary
 
