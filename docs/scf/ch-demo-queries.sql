@@ -57,6 +57,10 @@ WHERE timestamp >= now() - INTERVAL 24 HOUR;
 --     Expect: largest_gap_candles <= 2 for the liquid majors.
 --     A gap only exists where no trade occurred in that minute — a quiet
 --     market, not a broken indexer. See the evidence doc's note under AC 3.
+--     NB: lagInFrame's 3rd arg (default = the current row's timestamp) is
+--     REQUIRED — without it the first candle in the window has no predecessor
+--     and lagInFrame returns the 1970 epoch, so its gap reads as ~29.7M minutes
+--     and max() reports that instead of the real largest gap.
 SELECT
     a.asset_code,
     p.source,
@@ -69,7 +73,7 @@ FROM (
         asset_id,
         source,
         timestamp,
-        dateDiff('minute', lagInFrame(timestamp) OVER w, timestamp) AS gap_minutes
+        dateDiff('minute', lagInFrame(timestamp, 1, timestamp) OVER w, timestamp) AS gap_minutes
     FROM prices.price_ohlcv_1m FINAL
     WHERE timestamp >= now() - INTERVAL 24 HOUR
     WINDOW w AS (PARTITION BY asset_id, source ORDER BY timestamp)

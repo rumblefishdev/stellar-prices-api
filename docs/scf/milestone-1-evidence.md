@@ -551,7 +551,7 @@ FROM (
         asset_id,
         source,
         timestamp,
-        dateDiff('minute', lagInFrame(timestamp) OVER w, timestamp) AS gap_minutes
+        dateDiff('minute', lagInFrame(timestamp, 1, timestamp) OVER w, timestamp) AS gap_minutes
     FROM prices.price_ohlcv_1m FINAL
     WHERE timestamp >= now() - INTERVAL 24 HOUR
     WINDOW w AS (PARTITION BY asset_id, source ORDER BY timestamp)
