@@ -222,34 +222,45 @@ GROUP BY timestamp, asset_id, quote_asset_id, source;
 
 -- =====================================================================
 -- STAGE 2 — coarse chain 15m -> 1h -> 4h -> 1d -> 1w -> 1M, each level FROM the
---   previous, scoped to the same sources and window. Run STAGE 1 to completion
---   first.
+--   previous, scoped to the same sources and window. Run STAGE 1 first.
 --
---   FINAL IS MANDATORY HERE — do NOT "drop FINAL if the quota bites" (the advice
---   0090 used, and what an earlier draft of this file said). That was safe only
---   when the target level was freshly TRUNCATEd. It is NOT safe now: `15m`
---   holds this run's aquarius/soroswap rows ON TOP OF the pre-existing rows from
---   the earlier pre-roll, so a non-FINAL read sums BOTH copies and
---   DOUBLE-COUNTS. Bound memory by CHUNKING instead.
+--   FINAL IS MANDATORY — do NOT "drop FINAL if the quota bites" (0090's advice,
+--   and what an earlier draft of this file said). It was safe only when the
+--   target level was freshly TRUNCATEd. `15m` now holds this run's
+--   aquarius/soroswap rows ON TOP OF the pre-existing rows from the earlier
+--   pre-roll, so a non-FINAL read sums BOTH copies and DOUBLE-COUNTS — silently,
+--   in the store of record. Bound memory by CHUNKING, never by dropping dedup.
 --
---   1h/4h/1d are year-chunked: a single full-window statement exceeded
---   ch-prod-01's 5.59 GiB quota with `Code: 241 ... While executing
---   ReplacingSorted` — the FINAL merge, not the aggregation. Year-chunking is
---   safe for these because 1h/4h/1d buckets never straddle a calendar year.
+--   1h/4h/1d are MONTH-chunked, matching `PARTITION BY toYYYYMM` exactly: one
+--   partition per statement. Measured on ch-prod-01 (5.59 GiB quota):
+--     * full window   -> Code: 241 (While executing ReplacingSorted)
+--     * year-chunked  -> 2024 OK, 2025 -> Code: 241 (reading 202512 .bin)
+--   A year-bounded FINAL opens all 12 monthly partitions at once and must read
+--   them in primary-key order across EVERY source — including the large `sdex`
+--   rows, which the `source` filter cannot prune (source is the 3rd key column,
+--   not a prefix, so it filters but never seeks). Month-chunking is the only
+--   bound that matches the physical layout. Safe for 1h/4h/1d: none of those
+--   buckets straddle a month boundary.
 --
---   1w/1M stay single full-window statements: their buckets DO straddle year
---   boundaries, so chunking them by year would split a bucket and write two
+--   1w/1M stay single full-window statements: their buckets DO straddle month
+--   AND year boundaries, so chunking them would split a bucket and write two
 --   partials. They read the small 1d/1w tables, so memory is not a concern.
 --
---   If a year still exceeds the quota, split THAT year in half (e.g. Jan-Jun /
---   Jul-Dec). Never remove FINAL.
+--   `SETTINGS max_threads = 4` further caps the concurrent per-part read buffers
+--   that dominate this stage's memory. NOTE: legal ONLY because this file is run
+--   via clickhouse-client. Our own tooling sends reads with `readonly=1` (long
+--   SQL -> POST), where any SETTINGS clause is rejected with Code: 164.
+--
+--   Idempotent: re-running a month re-inserts identical rows that RMT collapses
+--   (same key, same values, same version), so a partial run is safe to repeat
+--   from the top.
 -- =====================================================================
 
 -- ---------------------------------------------------------------------
--- 1h <- 15m (year-chunked)
+-- 1h <- 15m — MONTH-chunked (one partition per statement)
 -- ---------------------------------------------------------------------
 
--- 2024, from activation
+-- 2024-02
 INSERT INTO prices.price_ohlcv_1h
 SELECT toStartOfInterval(t.timestamp, INTERVAL 1 HOUR) AS timestamp,
        asset_id, quote_asset_id, source,
@@ -262,10 +273,11 @@ SELECT toStartOfInterval(t.timestamp, INTERVAL 1 HOUR) AS timestamp,
        sum(trade_count) AS trade_count, max(version) AS version
 FROM prices.price_ohlcv_15m AS t FINAL
 WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
-  AND t.timestamp >= {start_ts:DateTime} AND t.timestamp < '2025-01-01'
-GROUP BY timestamp, asset_id, quote_asset_id, source;
+  AND t.timestamp >= {start_ts:DateTime} AND t.timestamp < '2024-03-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
 
--- 2025
+-- 2024-03
 INSERT INTO prices.price_ohlcv_1h
 SELECT toStartOfInterval(t.timestamp, INTERVAL 1 HOUR) AS timestamp,
        asset_id, quote_asset_id, source,
@@ -278,10 +290,11 @@ SELECT toStartOfInterval(t.timestamp, INTERVAL 1 HOUR) AS timestamp,
        sum(trade_count) AS trade_count, max(version) AS version
 FROM prices.price_ohlcv_15m AS t FINAL
 WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
-  AND t.timestamp >= '2025-01-01' AND t.timestamp < '2026-01-01'
-GROUP BY timestamp, asset_id, quote_asset_id, source;
+  AND t.timestamp >= '2024-03-01' AND t.timestamp < '2024-04-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
 
--- 2026, to the SDEX live floor
+-- 2024-04
 INSERT INTO prices.price_ohlcv_1h
 SELECT toStartOfInterval(t.timestamp, INTERVAL 1 HOUR) AS timestamp,
        asset_id, quote_asset_id, source,
@@ -294,14 +307,474 @@ SELECT toStartOfInterval(t.timestamp, INTERVAL 1 HOUR) AS timestamp,
        sum(trade_count) AS trade_count, max(version) AS version
 FROM prices.price_ohlcv_15m AS t FINAL
 WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
-  AND t.timestamp >= '2026-01-01' AND t.timestamp < {end_ts:DateTime}
-GROUP BY timestamp, asset_id, quote_asset_id, source;
+  AND t.timestamp >= '2024-04-01' AND t.timestamp < '2024-05-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
+
+-- 2024-05
+INSERT INTO prices.price_ohlcv_1h
+SELECT toStartOfInterval(t.timestamp, INTERVAL 1 HOUR) AS timestamp,
+       asset_id, quote_asset_id, source,
+       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
+       argMax(close, t.timestamp) AS close,
+       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
+       sum(volume_quote_usd) AS volume_quote_usd,
+       argMax(close_usd, t.timestamp) AS close_usd,
+       volume_quote / nullIf(volume_base, 0) AS vwap,
+       sum(trade_count) AS trade_count, max(version) AS version
+FROM prices.price_ohlcv_15m AS t FINAL
+WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
+  AND t.timestamp >= '2024-05-01' AND t.timestamp < '2024-06-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
+
+-- 2024-06
+INSERT INTO prices.price_ohlcv_1h
+SELECT toStartOfInterval(t.timestamp, INTERVAL 1 HOUR) AS timestamp,
+       asset_id, quote_asset_id, source,
+       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
+       argMax(close, t.timestamp) AS close,
+       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
+       sum(volume_quote_usd) AS volume_quote_usd,
+       argMax(close_usd, t.timestamp) AS close_usd,
+       volume_quote / nullIf(volume_base, 0) AS vwap,
+       sum(trade_count) AS trade_count, max(version) AS version
+FROM prices.price_ohlcv_15m AS t FINAL
+WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
+  AND t.timestamp >= '2024-06-01' AND t.timestamp < '2024-07-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
+
+-- 2024-07
+INSERT INTO prices.price_ohlcv_1h
+SELECT toStartOfInterval(t.timestamp, INTERVAL 1 HOUR) AS timestamp,
+       asset_id, quote_asset_id, source,
+       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
+       argMax(close, t.timestamp) AS close,
+       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
+       sum(volume_quote_usd) AS volume_quote_usd,
+       argMax(close_usd, t.timestamp) AS close_usd,
+       volume_quote / nullIf(volume_base, 0) AS vwap,
+       sum(trade_count) AS trade_count, max(version) AS version
+FROM prices.price_ohlcv_15m AS t FINAL
+WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
+  AND t.timestamp >= '2024-07-01' AND t.timestamp < '2024-08-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
+
+-- 2024-08
+INSERT INTO prices.price_ohlcv_1h
+SELECT toStartOfInterval(t.timestamp, INTERVAL 1 HOUR) AS timestamp,
+       asset_id, quote_asset_id, source,
+       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
+       argMax(close, t.timestamp) AS close,
+       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
+       sum(volume_quote_usd) AS volume_quote_usd,
+       argMax(close_usd, t.timestamp) AS close_usd,
+       volume_quote / nullIf(volume_base, 0) AS vwap,
+       sum(trade_count) AS trade_count, max(version) AS version
+FROM prices.price_ohlcv_15m AS t FINAL
+WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
+  AND t.timestamp >= '2024-08-01' AND t.timestamp < '2024-09-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
+
+-- 2024-09
+INSERT INTO prices.price_ohlcv_1h
+SELECT toStartOfInterval(t.timestamp, INTERVAL 1 HOUR) AS timestamp,
+       asset_id, quote_asset_id, source,
+       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
+       argMax(close, t.timestamp) AS close,
+       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
+       sum(volume_quote_usd) AS volume_quote_usd,
+       argMax(close_usd, t.timestamp) AS close_usd,
+       volume_quote / nullIf(volume_base, 0) AS vwap,
+       sum(trade_count) AS trade_count, max(version) AS version
+FROM prices.price_ohlcv_15m AS t FINAL
+WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
+  AND t.timestamp >= '2024-09-01' AND t.timestamp < '2024-10-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
+
+-- 2024-10
+INSERT INTO prices.price_ohlcv_1h
+SELECT toStartOfInterval(t.timestamp, INTERVAL 1 HOUR) AS timestamp,
+       asset_id, quote_asset_id, source,
+       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
+       argMax(close, t.timestamp) AS close,
+       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
+       sum(volume_quote_usd) AS volume_quote_usd,
+       argMax(close_usd, t.timestamp) AS close_usd,
+       volume_quote / nullIf(volume_base, 0) AS vwap,
+       sum(trade_count) AS trade_count, max(version) AS version
+FROM prices.price_ohlcv_15m AS t FINAL
+WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
+  AND t.timestamp >= '2024-10-01' AND t.timestamp < '2024-11-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
+
+-- 2024-11
+INSERT INTO prices.price_ohlcv_1h
+SELECT toStartOfInterval(t.timestamp, INTERVAL 1 HOUR) AS timestamp,
+       asset_id, quote_asset_id, source,
+       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
+       argMax(close, t.timestamp) AS close,
+       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
+       sum(volume_quote_usd) AS volume_quote_usd,
+       argMax(close_usd, t.timestamp) AS close_usd,
+       volume_quote / nullIf(volume_base, 0) AS vwap,
+       sum(trade_count) AS trade_count, max(version) AS version
+FROM prices.price_ohlcv_15m AS t FINAL
+WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
+  AND t.timestamp >= '2024-11-01' AND t.timestamp < '2024-12-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
+
+-- 2024-12
+INSERT INTO prices.price_ohlcv_1h
+SELECT toStartOfInterval(t.timestamp, INTERVAL 1 HOUR) AS timestamp,
+       asset_id, quote_asset_id, source,
+       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
+       argMax(close, t.timestamp) AS close,
+       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
+       sum(volume_quote_usd) AS volume_quote_usd,
+       argMax(close_usd, t.timestamp) AS close_usd,
+       volume_quote / nullIf(volume_base, 0) AS vwap,
+       sum(trade_count) AS trade_count, max(version) AS version
+FROM prices.price_ohlcv_15m AS t FINAL
+WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
+  AND t.timestamp >= '2024-12-01' AND t.timestamp < '2025-01-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
+
+-- 2025-01
+INSERT INTO prices.price_ohlcv_1h
+SELECT toStartOfInterval(t.timestamp, INTERVAL 1 HOUR) AS timestamp,
+       asset_id, quote_asset_id, source,
+       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
+       argMax(close, t.timestamp) AS close,
+       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
+       sum(volume_quote_usd) AS volume_quote_usd,
+       argMax(close_usd, t.timestamp) AS close_usd,
+       volume_quote / nullIf(volume_base, 0) AS vwap,
+       sum(trade_count) AS trade_count, max(version) AS version
+FROM prices.price_ohlcv_15m AS t FINAL
+WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
+  AND t.timestamp >= '2025-01-01' AND t.timestamp < '2025-02-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
+
+-- 2025-02
+INSERT INTO prices.price_ohlcv_1h
+SELECT toStartOfInterval(t.timestamp, INTERVAL 1 HOUR) AS timestamp,
+       asset_id, quote_asset_id, source,
+       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
+       argMax(close, t.timestamp) AS close,
+       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
+       sum(volume_quote_usd) AS volume_quote_usd,
+       argMax(close_usd, t.timestamp) AS close_usd,
+       volume_quote / nullIf(volume_base, 0) AS vwap,
+       sum(trade_count) AS trade_count, max(version) AS version
+FROM prices.price_ohlcv_15m AS t FINAL
+WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
+  AND t.timestamp >= '2025-02-01' AND t.timestamp < '2025-03-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
+
+-- 2025-03
+INSERT INTO prices.price_ohlcv_1h
+SELECT toStartOfInterval(t.timestamp, INTERVAL 1 HOUR) AS timestamp,
+       asset_id, quote_asset_id, source,
+       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
+       argMax(close, t.timestamp) AS close,
+       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
+       sum(volume_quote_usd) AS volume_quote_usd,
+       argMax(close_usd, t.timestamp) AS close_usd,
+       volume_quote / nullIf(volume_base, 0) AS vwap,
+       sum(trade_count) AS trade_count, max(version) AS version
+FROM prices.price_ohlcv_15m AS t FINAL
+WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
+  AND t.timestamp >= '2025-03-01' AND t.timestamp < '2025-04-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
+
+-- 2025-04
+INSERT INTO prices.price_ohlcv_1h
+SELECT toStartOfInterval(t.timestamp, INTERVAL 1 HOUR) AS timestamp,
+       asset_id, quote_asset_id, source,
+       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
+       argMax(close, t.timestamp) AS close,
+       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
+       sum(volume_quote_usd) AS volume_quote_usd,
+       argMax(close_usd, t.timestamp) AS close_usd,
+       volume_quote / nullIf(volume_base, 0) AS vwap,
+       sum(trade_count) AS trade_count, max(version) AS version
+FROM prices.price_ohlcv_15m AS t FINAL
+WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
+  AND t.timestamp >= '2025-04-01' AND t.timestamp < '2025-05-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
+
+-- 2025-05
+INSERT INTO prices.price_ohlcv_1h
+SELECT toStartOfInterval(t.timestamp, INTERVAL 1 HOUR) AS timestamp,
+       asset_id, quote_asset_id, source,
+       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
+       argMax(close, t.timestamp) AS close,
+       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
+       sum(volume_quote_usd) AS volume_quote_usd,
+       argMax(close_usd, t.timestamp) AS close_usd,
+       volume_quote / nullIf(volume_base, 0) AS vwap,
+       sum(trade_count) AS trade_count, max(version) AS version
+FROM prices.price_ohlcv_15m AS t FINAL
+WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
+  AND t.timestamp >= '2025-05-01' AND t.timestamp < '2025-06-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
+
+-- 2025-06
+INSERT INTO prices.price_ohlcv_1h
+SELECT toStartOfInterval(t.timestamp, INTERVAL 1 HOUR) AS timestamp,
+       asset_id, quote_asset_id, source,
+       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
+       argMax(close, t.timestamp) AS close,
+       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
+       sum(volume_quote_usd) AS volume_quote_usd,
+       argMax(close_usd, t.timestamp) AS close_usd,
+       volume_quote / nullIf(volume_base, 0) AS vwap,
+       sum(trade_count) AS trade_count, max(version) AS version
+FROM prices.price_ohlcv_15m AS t FINAL
+WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
+  AND t.timestamp >= '2025-06-01' AND t.timestamp < '2025-07-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
+
+-- 2025-07
+INSERT INTO prices.price_ohlcv_1h
+SELECT toStartOfInterval(t.timestamp, INTERVAL 1 HOUR) AS timestamp,
+       asset_id, quote_asset_id, source,
+       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
+       argMax(close, t.timestamp) AS close,
+       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
+       sum(volume_quote_usd) AS volume_quote_usd,
+       argMax(close_usd, t.timestamp) AS close_usd,
+       volume_quote / nullIf(volume_base, 0) AS vwap,
+       sum(trade_count) AS trade_count, max(version) AS version
+FROM prices.price_ohlcv_15m AS t FINAL
+WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
+  AND t.timestamp >= '2025-07-01' AND t.timestamp < '2025-08-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
+
+-- 2025-08
+INSERT INTO prices.price_ohlcv_1h
+SELECT toStartOfInterval(t.timestamp, INTERVAL 1 HOUR) AS timestamp,
+       asset_id, quote_asset_id, source,
+       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
+       argMax(close, t.timestamp) AS close,
+       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
+       sum(volume_quote_usd) AS volume_quote_usd,
+       argMax(close_usd, t.timestamp) AS close_usd,
+       volume_quote / nullIf(volume_base, 0) AS vwap,
+       sum(trade_count) AS trade_count, max(version) AS version
+FROM prices.price_ohlcv_15m AS t FINAL
+WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
+  AND t.timestamp >= '2025-08-01' AND t.timestamp < '2025-09-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
+
+-- 2025-09
+INSERT INTO prices.price_ohlcv_1h
+SELECT toStartOfInterval(t.timestamp, INTERVAL 1 HOUR) AS timestamp,
+       asset_id, quote_asset_id, source,
+       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
+       argMax(close, t.timestamp) AS close,
+       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
+       sum(volume_quote_usd) AS volume_quote_usd,
+       argMax(close_usd, t.timestamp) AS close_usd,
+       volume_quote / nullIf(volume_base, 0) AS vwap,
+       sum(trade_count) AS trade_count, max(version) AS version
+FROM prices.price_ohlcv_15m AS t FINAL
+WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
+  AND t.timestamp >= '2025-09-01' AND t.timestamp < '2025-10-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
+
+-- 2025-10
+INSERT INTO prices.price_ohlcv_1h
+SELECT toStartOfInterval(t.timestamp, INTERVAL 1 HOUR) AS timestamp,
+       asset_id, quote_asset_id, source,
+       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
+       argMax(close, t.timestamp) AS close,
+       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
+       sum(volume_quote_usd) AS volume_quote_usd,
+       argMax(close_usd, t.timestamp) AS close_usd,
+       volume_quote / nullIf(volume_base, 0) AS vwap,
+       sum(trade_count) AS trade_count, max(version) AS version
+FROM prices.price_ohlcv_15m AS t FINAL
+WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
+  AND t.timestamp >= '2025-10-01' AND t.timestamp < '2025-11-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
+
+-- 2025-11
+INSERT INTO prices.price_ohlcv_1h
+SELECT toStartOfInterval(t.timestamp, INTERVAL 1 HOUR) AS timestamp,
+       asset_id, quote_asset_id, source,
+       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
+       argMax(close, t.timestamp) AS close,
+       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
+       sum(volume_quote_usd) AS volume_quote_usd,
+       argMax(close_usd, t.timestamp) AS close_usd,
+       volume_quote / nullIf(volume_base, 0) AS vwap,
+       sum(trade_count) AS trade_count, max(version) AS version
+FROM prices.price_ohlcv_15m AS t FINAL
+WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
+  AND t.timestamp >= '2025-11-01' AND t.timestamp < '2025-12-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
+
+-- 2025-12
+INSERT INTO prices.price_ohlcv_1h
+SELECT toStartOfInterval(t.timestamp, INTERVAL 1 HOUR) AS timestamp,
+       asset_id, quote_asset_id, source,
+       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
+       argMax(close, t.timestamp) AS close,
+       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
+       sum(volume_quote_usd) AS volume_quote_usd,
+       argMax(close_usd, t.timestamp) AS close_usd,
+       volume_quote / nullIf(volume_base, 0) AS vwap,
+       sum(trade_count) AS trade_count, max(version) AS version
+FROM prices.price_ohlcv_15m AS t FINAL
+WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
+  AND t.timestamp >= '2025-12-01' AND t.timestamp < '2026-01-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
+
+-- 2026-01
+INSERT INTO prices.price_ohlcv_1h
+SELECT toStartOfInterval(t.timestamp, INTERVAL 1 HOUR) AS timestamp,
+       asset_id, quote_asset_id, source,
+       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
+       argMax(close, t.timestamp) AS close,
+       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
+       sum(volume_quote_usd) AS volume_quote_usd,
+       argMax(close_usd, t.timestamp) AS close_usd,
+       volume_quote / nullIf(volume_base, 0) AS vwap,
+       sum(trade_count) AS trade_count, max(version) AS version
+FROM prices.price_ohlcv_15m AS t FINAL
+WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
+  AND t.timestamp >= '2026-01-01' AND t.timestamp < '2026-02-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
+
+-- 2026-02
+INSERT INTO prices.price_ohlcv_1h
+SELECT toStartOfInterval(t.timestamp, INTERVAL 1 HOUR) AS timestamp,
+       asset_id, quote_asset_id, source,
+       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
+       argMax(close, t.timestamp) AS close,
+       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
+       sum(volume_quote_usd) AS volume_quote_usd,
+       argMax(close_usd, t.timestamp) AS close_usd,
+       volume_quote / nullIf(volume_base, 0) AS vwap,
+       sum(trade_count) AS trade_count, max(version) AS version
+FROM prices.price_ohlcv_15m AS t FINAL
+WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
+  AND t.timestamp >= '2026-02-01' AND t.timestamp < '2026-03-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
+
+-- 2026-03
+INSERT INTO prices.price_ohlcv_1h
+SELECT toStartOfInterval(t.timestamp, INTERVAL 1 HOUR) AS timestamp,
+       asset_id, quote_asset_id, source,
+       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
+       argMax(close, t.timestamp) AS close,
+       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
+       sum(volume_quote_usd) AS volume_quote_usd,
+       argMax(close_usd, t.timestamp) AS close_usd,
+       volume_quote / nullIf(volume_base, 0) AS vwap,
+       sum(trade_count) AS trade_count, max(version) AS version
+FROM prices.price_ohlcv_15m AS t FINAL
+WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
+  AND t.timestamp >= '2026-03-01' AND t.timestamp < '2026-04-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
+
+-- 2026-04
+INSERT INTO prices.price_ohlcv_1h
+SELECT toStartOfInterval(t.timestamp, INTERVAL 1 HOUR) AS timestamp,
+       asset_id, quote_asset_id, source,
+       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
+       argMax(close, t.timestamp) AS close,
+       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
+       sum(volume_quote_usd) AS volume_quote_usd,
+       argMax(close_usd, t.timestamp) AS close_usd,
+       volume_quote / nullIf(volume_base, 0) AS vwap,
+       sum(trade_count) AS trade_count, max(version) AS version
+FROM prices.price_ohlcv_15m AS t FINAL
+WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
+  AND t.timestamp >= '2026-04-01' AND t.timestamp < '2026-05-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
+
+-- 2026-05
+INSERT INTO prices.price_ohlcv_1h
+SELECT toStartOfInterval(t.timestamp, INTERVAL 1 HOUR) AS timestamp,
+       asset_id, quote_asset_id, source,
+       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
+       argMax(close, t.timestamp) AS close,
+       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
+       sum(volume_quote_usd) AS volume_quote_usd,
+       argMax(close_usd, t.timestamp) AS close_usd,
+       volume_quote / nullIf(volume_base, 0) AS vwap,
+       sum(trade_count) AS trade_count, max(version) AS version
+FROM prices.price_ohlcv_15m AS t FINAL
+WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
+  AND t.timestamp >= '2026-05-01' AND t.timestamp < '2026-06-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
+
+-- 2026-06
+INSERT INTO prices.price_ohlcv_1h
+SELECT toStartOfInterval(t.timestamp, INTERVAL 1 HOUR) AS timestamp,
+       asset_id, quote_asset_id, source,
+       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
+       argMax(close, t.timestamp) AS close,
+       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
+       sum(volume_quote_usd) AS volume_quote_usd,
+       argMax(close_usd, t.timestamp) AS close_usd,
+       volume_quote / nullIf(volume_base, 0) AS vwap,
+       sum(trade_count) AS trade_count, max(version) AS version
+FROM prices.price_ohlcv_15m AS t FINAL
+WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
+  AND t.timestamp >= '2026-06-01' AND t.timestamp < '2026-07-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
+
+-- 2026-07
+INSERT INTO prices.price_ohlcv_1h
+SELECT toStartOfInterval(t.timestamp, INTERVAL 1 HOUR) AS timestamp,
+       asset_id, quote_asset_id, source,
+       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
+       argMax(close, t.timestamp) AS close,
+       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
+       sum(volume_quote_usd) AS volume_quote_usd,
+       argMax(close_usd, t.timestamp) AS close_usd,
+       volume_quote / nullIf(volume_base, 0) AS vwap,
+       sum(trade_count) AS trade_count, max(version) AS version
+FROM prices.price_ohlcv_15m AS t FINAL
+WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
+  AND t.timestamp >= '2026-07-01' AND t.timestamp < {end_ts:DateTime}
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
 
 -- ---------------------------------------------------------------------
--- 4h <- 1h (year-chunked)
+-- 4h <- 1h — MONTH-chunked (one partition per statement)
 -- ---------------------------------------------------------------------
 
--- 2024, from activation
+-- 2024-02
 INSERT INTO prices.price_ohlcv_4h
 SELECT toStartOfInterval(t.timestamp, INTERVAL 4 HOUR) AS timestamp,
        asset_id, quote_asset_id, source,
@@ -314,10 +787,11 @@ SELECT toStartOfInterval(t.timestamp, INTERVAL 4 HOUR) AS timestamp,
        sum(trade_count) AS trade_count, max(version) AS version
 FROM prices.price_ohlcv_1h AS t FINAL
 WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
-  AND t.timestamp >= {start_ts:DateTime} AND t.timestamp < '2025-01-01'
-GROUP BY timestamp, asset_id, quote_asset_id, source;
+  AND t.timestamp >= {start_ts:DateTime} AND t.timestamp < '2024-03-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
 
--- 2025
+-- 2024-03
 INSERT INTO prices.price_ohlcv_4h
 SELECT toStartOfInterval(t.timestamp, INTERVAL 4 HOUR) AS timestamp,
        asset_id, quote_asset_id, source,
@@ -330,10 +804,11 @@ SELECT toStartOfInterval(t.timestamp, INTERVAL 4 HOUR) AS timestamp,
        sum(trade_count) AS trade_count, max(version) AS version
 FROM prices.price_ohlcv_1h AS t FINAL
 WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
-  AND t.timestamp >= '2025-01-01' AND t.timestamp < '2026-01-01'
-GROUP BY timestamp, asset_id, quote_asset_id, source;
+  AND t.timestamp >= '2024-03-01' AND t.timestamp < '2024-04-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
 
--- 2026, to the SDEX live floor
+-- 2024-04
 INSERT INTO prices.price_ohlcv_4h
 SELECT toStartOfInterval(t.timestamp, INTERVAL 4 HOUR) AS timestamp,
        asset_id, quote_asset_id, source,
@@ -346,14 +821,474 @@ SELECT toStartOfInterval(t.timestamp, INTERVAL 4 HOUR) AS timestamp,
        sum(trade_count) AS trade_count, max(version) AS version
 FROM prices.price_ohlcv_1h AS t FINAL
 WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
-  AND t.timestamp >= '2026-01-01' AND t.timestamp < {end_ts:DateTime}
-GROUP BY timestamp, asset_id, quote_asset_id, source;
+  AND t.timestamp >= '2024-04-01' AND t.timestamp < '2024-05-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
+
+-- 2024-05
+INSERT INTO prices.price_ohlcv_4h
+SELECT toStartOfInterval(t.timestamp, INTERVAL 4 HOUR) AS timestamp,
+       asset_id, quote_asset_id, source,
+       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
+       argMax(close, t.timestamp) AS close,
+       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
+       sum(volume_quote_usd) AS volume_quote_usd,
+       argMax(close_usd, t.timestamp) AS close_usd,
+       volume_quote / nullIf(volume_base, 0) AS vwap,
+       sum(trade_count) AS trade_count, max(version) AS version
+FROM prices.price_ohlcv_1h AS t FINAL
+WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
+  AND t.timestamp >= '2024-05-01' AND t.timestamp < '2024-06-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
+
+-- 2024-06
+INSERT INTO prices.price_ohlcv_4h
+SELECT toStartOfInterval(t.timestamp, INTERVAL 4 HOUR) AS timestamp,
+       asset_id, quote_asset_id, source,
+       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
+       argMax(close, t.timestamp) AS close,
+       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
+       sum(volume_quote_usd) AS volume_quote_usd,
+       argMax(close_usd, t.timestamp) AS close_usd,
+       volume_quote / nullIf(volume_base, 0) AS vwap,
+       sum(trade_count) AS trade_count, max(version) AS version
+FROM prices.price_ohlcv_1h AS t FINAL
+WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
+  AND t.timestamp >= '2024-06-01' AND t.timestamp < '2024-07-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
+
+-- 2024-07
+INSERT INTO prices.price_ohlcv_4h
+SELECT toStartOfInterval(t.timestamp, INTERVAL 4 HOUR) AS timestamp,
+       asset_id, quote_asset_id, source,
+       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
+       argMax(close, t.timestamp) AS close,
+       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
+       sum(volume_quote_usd) AS volume_quote_usd,
+       argMax(close_usd, t.timestamp) AS close_usd,
+       volume_quote / nullIf(volume_base, 0) AS vwap,
+       sum(trade_count) AS trade_count, max(version) AS version
+FROM prices.price_ohlcv_1h AS t FINAL
+WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
+  AND t.timestamp >= '2024-07-01' AND t.timestamp < '2024-08-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
+
+-- 2024-08
+INSERT INTO prices.price_ohlcv_4h
+SELECT toStartOfInterval(t.timestamp, INTERVAL 4 HOUR) AS timestamp,
+       asset_id, quote_asset_id, source,
+       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
+       argMax(close, t.timestamp) AS close,
+       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
+       sum(volume_quote_usd) AS volume_quote_usd,
+       argMax(close_usd, t.timestamp) AS close_usd,
+       volume_quote / nullIf(volume_base, 0) AS vwap,
+       sum(trade_count) AS trade_count, max(version) AS version
+FROM prices.price_ohlcv_1h AS t FINAL
+WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
+  AND t.timestamp >= '2024-08-01' AND t.timestamp < '2024-09-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
+
+-- 2024-09
+INSERT INTO prices.price_ohlcv_4h
+SELECT toStartOfInterval(t.timestamp, INTERVAL 4 HOUR) AS timestamp,
+       asset_id, quote_asset_id, source,
+       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
+       argMax(close, t.timestamp) AS close,
+       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
+       sum(volume_quote_usd) AS volume_quote_usd,
+       argMax(close_usd, t.timestamp) AS close_usd,
+       volume_quote / nullIf(volume_base, 0) AS vwap,
+       sum(trade_count) AS trade_count, max(version) AS version
+FROM prices.price_ohlcv_1h AS t FINAL
+WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
+  AND t.timestamp >= '2024-09-01' AND t.timestamp < '2024-10-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
+
+-- 2024-10
+INSERT INTO prices.price_ohlcv_4h
+SELECT toStartOfInterval(t.timestamp, INTERVAL 4 HOUR) AS timestamp,
+       asset_id, quote_asset_id, source,
+       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
+       argMax(close, t.timestamp) AS close,
+       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
+       sum(volume_quote_usd) AS volume_quote_usd,
+       argMax(close_usd, t.timestamp) AS close_usd,
+       volume_quote / nullIf(volume_base, 0) AS vwap,
+       sum(trade_count) AS trade_count, max(version) AS version
+FROM prices.price_ohlcv_1h AS t FINAL
+WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
+  AND t.timestamp >= '2024-10-01' AND t.timestamp < '2024-11-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
+
+-- 2024-11
+INSERT INTO prices.price_ohlcv_4h
+SELECT toStartOfInterval(t.timestamp, INTERVAL 4 HOUR) AS timestamp,
+       asset_id, quote_asset_id, source,
+       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
+       argMax(close, t.timestamp) AS close,
+       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
+       sum(volume_quote_usd) AS volume_quote_usd,
+       argMax(close_usd, t.timestamp) AS close_usd,
+       volume_quote / nullIf(volume_base, 0) AS vwap,
+       sum(trade_count) AS trade_count, max(version) AS version
+FROM prices.price_ohlcv_1h AS t FINAL
+WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
+  AND t.timestamp >= '2024-11-01' AND t.timestamp < '2024-12-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
+
+-- 2024-12
+INSERT INTO prices.price_ohlcv_4h
+SELECT toStartOfInterval(t.timestamp, INTERVAL 4 HOUR) AS timestamp,
+       asset_id, quote_asset_id, source,
+       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
+       argMax(close, t.timestamp) AS close,
+       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
+       sum(volume_quote_usd) AS volume_quote_usd,
+       argMax(close_usd, t.timestamp) AS close_usd,
+       volume_quote / nullIf(volume_base, 0) AS vwap,
+       sum(trade_count) AS trade_count, max(version) AS version
+FROM prices.price_ohlcv_1h AS t FINAL
+WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
+  AND t.timestamp >= '2024-12-01' AND t.timestamp < '2025-01-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
+
+-- 2025-01
+INSERT INTO prices.price_ohlcv_4h
+SELECT toStartOfInterval(t.timestamp, INTERVAL 4 HOUR) AS timestamp,
+       asset_id, quote_asset_id, source,
+       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
+       argMax(close, t.timestamp) AS close,
+       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
+       sum(volume_quote_usd) AS volume_quote_usd,
+       argMax(close_usd, t.timestamp) AS close_usd,
+       volume_quote / nullIf(volume_base, 0) AS vwap,
+       sum(trade_count) AS trade_count, max(version) AS version
+FROM prices.price_ohlcv_1h AS t FINAL
+WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
+  AND t.timestamp >= '2025-01-01' AND t.timestamp < '2025-02-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
+
+-- 2025-02
+INSERT INTO prices.price_ohlcv_4h
+SELECT toStartOfInterval(t.timestamp, INTERVAL 4 HOUR) AS timestamp,
+       asset_id, quote_asset_id, source,
+       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
+       argMax(close, t.timestamp) AS close,
+       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
+       sum(volume_quote_usd) AS volume_quote_usd,
+       argMax(close_usd, t.timestamp) AS close_usd,
+       volume_quote / nullIf(volume_base, 0) AS vwap,
+       sum(trade_count) AS trade_count, max(version) AS version
+FROM prices.price_ohlcv_1h AS t FINAL
+WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
+  AND t.timestamp >= '2025-02-01' AND t.timestamp < '2025-03-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
+
+-- 2025-03
+INSERT INTO prices.price_ohlcv_4h
+SELECT toStartOfInterval(t.timestamp, INTERVAL 4 HOUR) AS timestamp,
+       asset_id, quote_asset_id, source,
+       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
+       argMax(close, t.timestamp) AS close,
+       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
+       sum(volume_quote_usd) AS volume_quote_usd,
+       argMax(close_usd, t.timestamp) AS close_usd,
+       volume_quote / nullIf(volume_base, 0) AS vwap,
+       sum(trade_count) AS trade_count, max(version) AS version
+FROM prices.price_ohlcv_1h AS t FINAL
+WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
+  AND t.timestamp >= '2025-03-01' AND t.timestamp < '2025-04-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
+
+-- 2025-04
+INSERT INTO prices.price_ohlcv_4h
+SELECT toStartOfInterval(t.timestamp, INTERVAL 4 HOUR) AS timestamp,
+       asset_id, quote_asset_id, source,
+       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
+       argMax(close, t.timestamp) AS close,
+       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
+       sum(volume_quote_usd) AS volume_quote_usd,
+       argMax(close_usd, t.timestamp) AS close_usd,
+       volume_quote / nullIf(volume_base, 0) AS vwap,
+       sum(trade_count) AS trade_count, max(version) AS version
+FROM prices.price_ohlcv_1h AS t FINAL
+WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
+  AND t.timestamp >= '2025-04-01' AND t.timestamp < '2025-05-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
+
+-- 2025-05
+INSERT INTO prices.price_ohlcv_4h
+SELECT toStartOfInterval(t.timestamp, INTERVAL 4 HOUR) AS timestamp,
+       asset_id, quote_asset_id, source,
+       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
+       argMax(close, t.timestamp) AS close,
+       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
+       sum(volume_quote_usd) AS volume_quote_usd,
+       argMax(close_usd, t.timestamp) AS close_usd,
+       volume_quote / nullIf(volume_base, 0) AS vwap,
+       sum(trade_count) AS trade_count, max(version) AS version
+FROM prices.price_ohlcv_1h AS t FINAL
+WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
+  AND t.timestamp >= '2025-05-01' AND t.timestamp < '2025-06-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
+
+-- 2025-06
+INSERT INTO prices.price_ohlcv_4h
+SELECT toStartOfInterval(t.timestamp, INTERVAL 4 HOUR) AS timestamp,
+       asset_id, quote_asset_id, source,
+       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
+       argMax(close, t.timestamp) AS close,
+       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
+       sum(volume_quote_usd) AS volume_quote_usd,
+       argMax(close_usd, t.timestamp) AS close_usd,
+       volume_quote / nullIf(volume_base, 0) AS vwap,
+       sum(trade_count) AS trade_count, max(version) AS version
+FROM prices.price_ohlcv_1h AS t FINAL
+WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
+  AND t.timestamp >= '2025-06-01' AND t.timestamp < '2025-07-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
+
+-- 2025-07
+INSERT INTO prices.price_ohlcv_4h
+SELECT toStartOfInterval(t.timestamp, INTERVAL 4 HOUR) AS timestamp,
+       asset_id, quote_asset_id, source,
+       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
+       argMax(close, t.timestamp) AS close,
+       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
+       sum(volume_quote_usd) AS volume_quote_usd,
+       argMax(close_usd, t.timestamp) AS close_usd,
+       volume_quote / nullIf(volume_base, 0) AS vwap,
+       sum(trade_count) AS trade_count, max(version) AS version
+FROM prices.price_ohlcv_1h AS t FINAL
+WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
+  AND t.timestamp >= '2025-07-01' AND t.timestamp < '2025-08-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
+
+-- 2025-08
+INSERT INTO prices.price_ohlcv_4h
+SELECT toStartOfInterval(t.timestamp, INTERVAL 4 HOUR) AS timestamp,
+       asset_id, quote_asset_id, source,
+       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
+       argMax(close, t.timestamp) AS close,
+       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
+       sum(volume_quote_usd) AS volume_quote_usd,
+       argMax(close_usd, t.timestamp) AS close_usd,
+       volume_quote / nullIf(volume_base, 0) AS vwap,
+       sum(trade_count) AS trade_count, max(version) AS version
+FROM prices.price_ohlcv_1h AS t FINAL
+WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
+  AND t.timestamp >= '2025-08-01' AND t.timestamp < '2025-09-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
+
+-- 2025-09
+INSERT INTO prices.price_ohlcv_4h
+SELECT toStartOfInterval(t.timestamp, INTERVAL 4 HOUR) AS timestamp,
+       asset_id, quote_asset_id, source,
+       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
+       argMax(close, t.timestamp) AS close,
+       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
+       sum(volume_quote_usd) AS volume_quote_usd,
+       argMax(close_usd, t.timestamp) AS close_usd,
+       volume_quote / nullIf(volume_base, 0) AS vwap,
+       sum(trade_count) AS trade_count, max(version) AS version
+FROM prices.price_ohlcv_1h AS t FINAL
+WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
+  AND t.timestamp >= '2025-09-01' AND t.timestamp < '2025-10-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
+
+-- 2025-10
+INSERT INTO prices.price_ohlcv_4h
+SELECT toStartOfInterval(t.timestamp, INTERVAL 4 HOUR) AS timestamp,
+       asset_id, quote_asset_id, source,
+       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
+       argMax(close, t.timestamp) AS close,
+       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
+       sum(volume_quote_usd) AS volume_quote_usd,
+       argMax(close_usd, t.timestamp) AS close_usd,
+       volume_quote / nullIf(volume_base, 0) AS vwap,
+       sum(trade_count) AS trade_count, max(version) AS version
+FROM prices.price_ohlcv_1h AS t FINAL
+WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
+  AND t.timestamp >= '2025-10-01' AND t.timestamp < '2025-11-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
+
+-- 2025-11
+INSERT INTO prices.price_ohlcv_4h
+SELECT toStartOfInterval(t.timestamp, INTERVAL 4 HOUR) AS timestamp,
+       asset_id, quote_asset_id, source,
+       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
+       argMax(close, t.timestamp) AS close,
+       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
+       sum(volume_quote_usd) AS volume_quote_usd,
+       argMax(close_usd, t.timestamp) AS close_usd,
+       volume_quote / nullIf(volume_base, 0) AS vwap,
+       sum(trade_count) AS trade_count, max(version) AS version
+FROM prices.price_ohlcv_1h AS t FINAL
+WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
+  AND t.timestamp >= '2025-11-01' AND t.timestamp < '2025-12-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
+
+-- 2025-12
+INSERT INTO prices.price_ohlcv_4h
+SELECT toStartOfInterval(t.timestamp, INTERVAL 4 HOUR) AS timestamp,
+       asset_id, quote_asset_id, source,
+       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
+       argMax(close, t.timestamp) AS close,
+       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
+       sum(volume_quote_usd) AS volume_quote_usd,
+       argMax(close_usd, t.timestamp) AS close_usd,
+       volume_quote / nullIf(volume_base, 0) AS vwap,
+       sum(trade_count) AS trade_count, max(version) AS version
+FROM prices.price_ohlcv_1h AS t FINAL
+WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
+  AND t.timestamp >= '2025-12-01' AND t.timestamp < '2026-01-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
+
+-- 2026-01
+INSERT INTO prices.price_ohlcv_4h
+SELECT toStartOfInterval(t.timestamp, INTERVAL 4 HOUR) AS timestamp,
+       asset_id, quote_asset_id, source,
+       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
+       argMax(close, t.timestamp) AS close,
+       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
+       sum(volume_quote_usd) AS volume_quote_usd,
+       argMax(close_usd, t.timestamp) AS close_usd,
+       volume_quote / nullIf(volume_base, 0) AS vwap,
+       sum(trade_count) AS trade_count, max(version) AS version
+FROM prices.price_ohlcv_1h AS t FINAL
+WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
+  AND t.timestamp >= '2026-01-01' AND t.timestamp < '2026-02-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
+
+-- 2026-02
+INSERT INTO prices.price_ohlcv_4h
+SELECT toStartOfInterval(t.timestamp, INTERVAL 4 HOUR) AS timestamp,
+       asset_id, quote_asset_id, source,
+       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
+       argMax(close, t.timestamp) AS close,
+       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
+       sum(volume_quote_usd) AS volume_quote_usd,
+       argMax(close_usd, t.timestamp) AS close_usd,
+       volume_quote / nullIf(volume_base, 0) AS vwap,
+       sum(trade_count) AS trade_count, max(version) AS version
+FROM prices.price_ohlcv_1h AS t FINAL
+WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
+  AND t.timestamp >= '2026-02-01' AND t.timestamp < '2026-03-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
+
+-- 2026-03
+INSERT INTO prices.price_ohlcv_4h
+SELECT toStartOfInterval(t.timestamp, INTERVAL 4 HOUR) AS timestamp,
+       asset_id, quote_asset_id, source,
+       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
+       argMax(close, t.timestamp) AS close,
+       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
+       sum(volume_quote_usd) AS volume_quote_usd,
+       argMax(close_usd, t.timestamp) AS close_usd,
+       volume_quote / nullIf(volume_base, 0) AS vwap,
+       sum(trade_count) AS trade_count, max(version) AS version
+FROM prices.price_ohlcv_1h AS t FINAL
+WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
+  AND t.timestamp >= '2026-03-01' AND t.timestamp < '2026-04-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
+
+-- 2026-04
+INSERT INTO prices.price_ohlcv_4h
+SELECT toStartOfInterval(t.timestamp, INTERVAL 4 HOUR) AS timestamp,
+       asset_id, quote_asset_id, source,
+       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
+       argMax(close, t.timestamp) AS close,
+       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
+       sum(volume_quote_usd) AS volume_quote_usd,
+       argMax(close_usd, t.timestamp) AS close_usd,
+       volume_quote / nullIf(volume_base, 0) AS vwap,
+       sum(trade_count) AS trade_count, max(version) AS version
+FROM prices.price_ohlcv_1h AS t FINAL
+WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
+  AND t.timestamp >= '2026-04-01' AND t.timestamp < '2026-05-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
+
+-- 2026-05
+INSERT INTO prices.price_ohlcv_4h
+SELECT toStartOfInterval(t.timestamp, INTERVAL 4 HOUR) AS timestamp,
+       asset_id, quote_asset_id, source,
+       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
+       argMax(close, t.timestamp) AS close,
+       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
+       sum(volume_quote_usd) AS volume_quote_usd,
+       argMax(close_usd, t.timestamp) AS close_usd,
+       volume_quote / nullIf(volume_base, 0) AS vwap,
+       sum(trade_count) AS trade_count, max(version) AS version
+FROM prices.price_ohlcv_1h AS t FINAL
+WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
+  AND t.timestamp >= '2026-05-01' AND t.timestamp < '2026-06-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
+
+-- 2026-06
+INSERT INTO prices.price_ohlcv_4h
+SELECT toStartOfInterval(t.timestamp, INTERVAL 4 HOUR) AS timestamp,
+       asset_id, quote_asset_id, source,
+       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
+       argMax(close, t.timestamp) AS close,
+       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
+       sum(volume_quote_usd) AS volume_quote_usd,
+       argMax(close_usd, t.timestamp) AS close_usd,
+       volume_quote / nullIf(volume_base, 0) AS vwap,
+       sum(trade_count) AS trade_count, max(version) AS version
+FROM prices.price_ohlcv_1h AS t FINAL
+WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
+  AND t.timestamp >= '2026-06-01' AND t.timestamp < '2026-07-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
+
+-- 2026-07
+INSERT INTO prices.price_ohlcv_4h
+SELECT toStartOfInterval(t.timestamp, INTERVAL 4 HOUR) AS timestamp,
+       asset_id, quote_asset_id, source,
+       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
+       argMax(close, t.timestamp) AS close,
+       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
+       sum(volume_quote_usd) AS volume_quote_usd,
+       argMax(close_usd, t.timestamp) AS close_usd,
+       volume_quote / nullIf(volume_base, 0) AS vwap,
+       sum(trade_count) AS trade_count, max(version) AS version
+FROM prices.price_ohlcv_1h AS t FINAL
+WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
+  AND t.timestamp >= '2026-07-01' AND t.timestamp < {end_ts:DateTime}
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
 
 -- ---------------------------------------------------------------------
--- 1d <- 4h (year-chunked)
+-- 1d <- 4h — MONTH-chunked (one partition per statement)
 -- ---------------------------------------------------------------------
 
--- 2024, from activation
+-- 2024-02
 INSERT INTO prices.price_ohlcv_1d
 SELECT toStartOfInterval(t.timestamp, INTERVAL 1 DAY) AS timestamp,
        asset_id, quote_asset_id, source,
@@ -366,10 +1301,11 @@ SELECT toStartOfInterval(t.timestamp, INTERVAL 1 DAY) AS timestamp,
        sum(trade_count) AS trade_count, max(version) AS version
 FROM prices.price_ohlcv_4h AS t FINAL
 WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
-  AND t.timestamp >= {start_ts:DateTime} AND t.timestamp < '2025-01-01'
-GROUP BY timestamp, asset_id, quote_asset_id, source;
+  AND t.timestamp >= {start_ts:DateTime} AND t.timestamp < '2024-03-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
 
--- 2025
+-- 2024-03
 INSERT INTO prices.price_ohlcv_1d
 SELECT toStartOfInterval(t.timestamp, INTERVAL 1 DAY) AS timestamp,
        asset_id, quote_asset_id, source,
@@ -382,10 +1318,11 @@ SELECT toStartOfInterval(t.timestamp, INTERVAL 1 DAY) AS timestamp,
        sum(trade_count) AS trade_count, max(version) AS version
 FROM prices.price_ohlcv_4h AS t FINAL
 WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
-  AND t.timestamp >= '2025-01-01' AND t.timestamp < '2026-01-01'
-GROUP BY timestamp, asset_id, quote_asset_id, source;
+  AND t.timestamp >= '2024-03-01' AND t.timestamp < '2024-04-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
 
--- 2026, to the SDEX live floor
+-- 2024-04
 INSERT INTO prices.price_ohlcv_1d
 SELECT toStartOfInterval(t.timestamp, INTERVAL 1 DAY) AS timestamp,
        asset_id, quote_asset_id, source,
@@ -398,11 +1335,471 @@ SELECT toStartOfInterval(t.timestamp, INTERVAL 1 DAY) AS timestamp,
        sum(trade_count) AS trade_count, max(version) AS version
 FROM prices.price_ohlcv_4h AS t FINAL
 WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
-  AND t.timestamp >= '2026-01-01' AND t.timestamp < {end_ts:DateTime}
-GROUP BY timestamp, asset_id, quote_asset_id, source;
+  AND t.timestamp >= '2024-04-01' AND t.timestamp < '2024-05-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
+
+-- 2024-05
+INSERT INTO prices.price_ohlcv_1d
+SELECT toStartOfInterval(t.timestamp, INTERVAL 1 DAY) AS timestamp,
+       asset_id, quote_asset_id, source,
+       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
+       argMax(close, t.timestamp) AS close,
+       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
+       sum(volume_quote_usd) AS volume_quote_usd,
+       argMax(close_usd, t.timestamp) AS close_usd,
+       volume_quote / nullIf(volume_base, 0) AS vwap,
+       sum(trade_count) AS trade_count, max(version) AS version
+FROM prices.price_ohlcv_4h AS t FINAL
+WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
+  AND t.timestamp >= '2024-05-01' AND t.timestamp < '2024-06-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
+
+-- 2024-06
+INSERT INTO prices.price_ohlcv_1d
+SELECT toStartOfInterval(t.timestamp, INTERVAL 1 DAY) AS timestamp,
+       asset_id, quote_asset_id, source,
+       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
+       argMax(close, t.timestamp) AS close,
+       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
+       sum(volume_quote_usd) AS volume_quote_usd,
+       argMax(close_usd, t.timestamp) AS close_usd,
+       volume_quote / nullIf(volume_base, 0) AS vwap,
+       sum(trade_count) AS trade_count, max(version) AS version
+FROM prices.price_ohlcv_4h AS t FINAL
+WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
+  AND t.timestamp >= '2024-06-01' AND t.timestamp < '2024-07-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
+
+-- 2024-07
+INSERT INTO prices.price_ohlcv_1d
+SELECT toStartOfInterval(t.timestamp, INTERVAL 1 DAY) AS timestamp,
+       asset_id, quote_asset_id, source,
+       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
+       argMax(close, t.timestamp) AS close,
+       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
+       sum(volume_quote_usd) AS volume_quote_usd,
+       argMax(close_usd, t.timestamp) AS close_usd,
+       volume_quote / nullIf(volume_base, 0) AS vwap,
+       sum(trade_count) AS trade_count, max(version) AS version
+FROM prices.price_ohlcv_4h AS t FINAL
+WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
+  AND t.timestamp >= '2024-07-01' AND t.timestamp < '2024-08-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
+
+-- 2024-08
+INSERT INTO prices.price_ohlcv_1d
+SELECT toStartOfInterval(t.timestamp, INTERVAL 1 DAY) AS timestamp,
+       asset_id, quote_asset_id, source,
+       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
+       argMax(close, t.timestamp) AS close,
+       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
+       sum(volume_quote_usd) AS volume_quote_usd,
+       argMax(close_usd, t.timestamp) AS close_usd,
+       volume_quote / nullIf(volume_base, 0) AS vwap,
+       sum(trade_count) AS trade_count, max(version) AS version
+FROM prices.price_ohlcv_4h AS t FINAL
+WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
+  AND t.timestamp >= '2024-08-01' AND t.timestamp < '2024-09-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
+
+-- 2024-09
+INSERT INTO prices.price_ohlcv_1d
+SELECT toStartOfInterval(t.timestamp, INTERVAL 1 DAY) AS timestamp,
+       asset_id, quote_asset_id, source,
+       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
+       argMax(close, t.timestamp) AS close,
+       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
+       sum(volume_quote_usd) AS volume_quote_usd,
+       argMax(close_usd, t.timestamp) AS close_usd,
+       volume_quote / nullIf(volume_base, 0) AS vwap,
+       sum(trade_count) AS trade_count, max(version) AS version
+FROM prices.price_ohlcv_4h AS t FINAL
+WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
+  AND t.timestamp >= '2024-09-01' AND t.timestamp < '2024-10-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
+
+-- 2024-10
+INSERT INTO prices.price_ohlcv_1d
+SELECT toStartOfInterval(t.timestamp, INTERVAL 1 DAY) AS timestamp,
+       asset_id, quote_asset_id, source,
+       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
+       argMax(close, t.timestamp) AS close,
+       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
+       sum(volume_quote_usd) AS volume_quote_usd,
+       argMax(close_usd, t.timestamp) AS close_usd,
+       volume_quote / nullIf(volume_base, 0) AS vwap,
+       sum(trade_count) AS trade_count, max(version) AS version
+FROM prices.price_ohlcv_4h AS t FINAL
+WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
+  AND t.timestamp >= '2024-10-01' AND t.timestamp < '2024-11-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
+
+-- 2024-11
+INSERT INTO prices.price_ohlcv_1d
+SELECT toStartOfInterval(t.timestamp, INTERVAL 1 DAY) AS timestamp,
+       asset_id, quote_asset_id, source,
+       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
+       argMax(close, t.timestamp) AS close,
+       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
+       sum(volume_quote_usd) AS volume_quote_usd,
+       argMax(close_usd, t.timestamp) AS close_usd,
+       volume_quote / nullIf(volume_base, 0) AS vwap,
+       sum(trade_count) AS trade_count, max(version) AS version
+FROM prices.price_ohlcv_4h AS t FINAL
+WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
+  AND t.timestamp >= '2024-11-01' AND t.timestamp < '2024-12-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
+
+-- 2024-12
+INSERT INTO prices.price_ohlcv_1d
+SELECT toStartOfInterval(t.timestamp, INTERVAL 1 DAY) AS timestamp,
+       asset_id, quote_asset_id, source,
+       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
+       argMax(close, t.timestamp) AS close,
+       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
+       sum(volume_quote_usd) AS volume_quote_usd,
+       argMax(close_usd, t.timestamp) AS close_usd,
+       volume_quote / nullIf(volume_base, 0) AS vwap,
+       sum(trade_count) AS trade_count, max(version) AS version
+FROM prices.price_ohlcv_4h AS t FINAL
+WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
+  AND t.timestamp >= '2024-12-01' AND t.timestamp < '2025-01-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
+
+-- 2025-01
+INSERT INTO prices.price_ohlcv_1d
+SELECT toStartOfInterval(t.timestamp, INTERVAL 1 DAY) AS timestamp,
+       asset_id, quote_asset_id, source,
+       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
+       argMax(close, t.timestamp) AS close,
+       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
+       sum(volume_quote_usd) AS volume_quote_usd,
+       argMax(close_usd, t.timestamp) AS close_usd,
+       volume_quote / nullIf(volume_base, 0) AS vwap,
+       sum(trade_count) AS trade_count, max(version) AS version
+FROM prices.price_ohlcv_4h AS t FINAL
+WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
+  AND t.timestamp >= '2025-01-01' AND t.timestamp < '2025-02-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
+
+-- 2025-02
+INSERT INTO prices.price_ohlcv_1d
+SELECT toStartOfInterval(t.timestamp, INTERVAL 1 DAY) AS timestamp,
+       asset_id, quote_asset_id, source,
+       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
+       argMax(close, t.timestamp) AS close,
+       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
+       sum(volume_quote_usd) AS volume_quote_usd,
+       argMax(close_usd, t.timestamp) AS close_usd,
+       volume_quote / nullIf(volume_base, 0) AS vwap,
+       sum(trade_count) AS trade_count, max(version) AS version
+FROM prices.price_ohlcv_4h AS t FINAL
+WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
+  AND t.timestamp >= '2025-02-01' AND t.timestamp < '2025-03-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
+
+-- 2025-03
+INSERT INTO prices.price_ohlcv_1d
+SELECT toStartOfInterval(t.timestamp, INTERVAL 1 DAY) AS timestamp,
+       asset_id, quote_asset_id, source,
+       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
+       argMax(close, t.timestamp) AS close,
+       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
+       sum(volume_quote_usd) AS volume_quote_usd,
+       argMax(close_usd, t.timestamp) AS close_usd,
+       volume_quote / nullIf(volume_base, 0) AS vwap,
+       sum(trade_count) AS trade_count, max(version) AS version
+FROM prices.price_ohlcv_4h AS t FINAL
+WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
+  AND t.timestamp >= '2025-03-01' AND t.timestamp < '2025-04-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
+
+-- 2025-04
+INSERT INTO prices.price_ohlcv_1d
+SELECT toStartOfInterval(t.timestamp, INTERVAL 1 DAY) AS timestamp,
+       asset_id, quote_asset_id, source,
+       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
+       argMax(close, t.timestamp) AS close,
+       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
+       sum(volume_quote_usd) AS volume_quote_usd,
+       argMax(close_usd, t.timestamp) AS close_usd,
+       volume_quote / nullIf(volume_base, 0) AS vwap,
+       sum(trade_count) AS trade_count, max(version) AS version
+FROM prices.price_ohlcv_4h AS t FINAL
+WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
+  AND t.timestamp >= '2025-04-01' AND t.timestamp < '2025-05-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
+
+-- 2025-05
+INSERT INTO prices.price_ohlcv_1d
+SELECT toStartOfInterval(t.timestamp, INTERVAL 1 DAY) AS timestamp,
+       asset_id, quote_asset_id, source,
+       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
+       argMax(close, t.timestamp) AS close,
+       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
+       sum(volume_quote_usd) AS volume_quote_usd,
+       argMax(close_usd, t.timestamp) AS close_usd,
+       volume_quote / nullIf(volume_base, 0) AS vwap,
+       sum(trade_count) AS trade_count, max(version) AS version
+FROM prices.price_ohlcv_4h AS t FINAL
+WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
+  AND t.timestamp >= '2025-05-01' AND t.timestamp < '2025-06-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
+
+-- 2025-06
+INSERT INTO prices.price_ohlcv_1d
+SELECT toStartOfInterval(t.timestamp, INTERVAL 1 DAY) AS timestamp,
+       asset_id, quote_asset_id, source,
+       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
+       argMax(close, t.timestamp) AS close,
+       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
+       sum(volume_quote_usd) AS volume_quote_usd,
+       argMax(close_usd, t.timestamp) AS close_usd,
+       volume_quote / nullIf(volume_base, 0) AS vwap,
+       sum(trade_count) AS trade_count, max(version) AS version
+FROM prices.price_ohlcv_4h AS t FINAL
+WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
+  AND t.timestamp >= '2025-06-01' AND t.timestamp < '2025-07-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
+
+-- 2025-07
+INSERT INTO prices.price_ohlcv_1d
+SELECT toStartOfInterval(t.timestamp, INTERVAL 1 DAY) AS timestamp,
+       asset_id, quote_asset_id, source,
+       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
+       argMax(close, t.timestamp) AS close,
+       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
+       sum(volume_quote_usd) AS volume_quote_usd,
+       argMax(close_usd, t.timestamp) AS close_usd,
+       volume_quote / nullIf(volume_base, 0) AS vwap,
+       sum(trade_count) AS trade_count, max(version) AS version
+FROM prices.price_ohlcv_4h AS t FINAL
+WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
+  AND t.timestamp >= '2025-07-01' AND t.timestamp < '2025-08-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
+
+-- 2025-08
+INSERT INTO prices.price_ohlcv_1d
+SELECT toStartOfInterval(t.timestamp, INTERVAL 1 DAY) AS timestamp,
+       asset_id, quote_asset_id, source,
+       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
+       argMax(close, t.timestamp) AS close,
+       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
+       sum(volume_quote_usd) AS volume_quote_usd,
+       argMax(close_usd, t.timestamp) AS close_usd,
+       volume_quote / nullIf(volume_base, 0) AS vwap,
+       sum(trade_count) AS trade_count, max(version) AS version
+FROM prices.price_ohlcv_4h AS t FINAL
+WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
+  AND t.timestamp >= '2025-08-01' AND t.timestamp < '2025-09-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
+
+-- 2025-09
+INSERT INTO prices.price_ohlcv_1d
+SELECT toStartOfInterval(t.timestamp, INTERVAL 1 DAY) AS timestamp,
+       asset_id, quote_asset_id, source,
+       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
+       argMax(close, t.timestamp) AS close,
+       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
+       sum(volume_quote_usd) AS volume_quote_usd,
+       argMax(close_usd, t.timestamp) AS close_usd,
+       volume_quote / nullIf(volume_base, 0) AS vwap,
+       sum(trade_count) AS trade_count, max(version) AS version
+FROM prices.price_ohlcv_4h AS t FINAL
+WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
+  AND t.timestamp >= '2025-09-01' AND t.timestamp < '2025-10-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
+
+-- 2025-10
+INSERT INTO prices.price_ohlcv_1d
+SELECT toStartOfInterval(t.timestamp, INTERVAL 1 DAY) AS timestamp,
+       asset_id, quote_asset_id, source,
+       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
+       argMax(close, t.timestamp) AS close,
+       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
+       sum(volume_quote_usd) AS volume_quote_usd,
+       argMax(close_usd, t.timestamp) AS close_usd,
+       volume_quote / nullIf(volume_base, 0) AS vwap,
+       sum(trade_count) AS trade_count, max(version) AS version
+FROM prices.price_ohlcv_4h AS t FINAL
+WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
+  AND t.timestamp >= '2025-10-01' AND t.timestamp < '2025-11-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
+
+-- 2025-11
+INSERT INTO prices.price_ohlcv_1d
+SELECT toStartOfInterval(t.timestamp, INTERVAL 1 DAY) AS timestamp,
+       asset_id, quote_asset_id, source,
+       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
+       argMax(close, t.timestamp) AS close,
+       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
+       sum(volume_quote_usd) AS volume_quote_usd,
+       argMax(close_usd, t.timestamp) AS close_usd,
+       volume_quote / nullIf(volume_base, 0) AS vwap,
+       sum(trade_count) AS trade_count, max(version) AS version
+FROM prices.price_ohlcv_4h AS t FINAL
+WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
+  AND t.timestamp >= '2025-11-01' AND t.timestamp < '2025-12-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
+
+-- 2025-12
+INSERT INTO prices.price_ohlcv_1d
+SELECT toStartOfInterval(t.timestamp, INTERVAL 1 DAY) AS timestamp,
+       asset_id, quote_asset_id, source,
+       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
+       argMax(close, t.timestamp) AS close,
+       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
+       sum(volume_quote_usd) AS volume_quote_usd,
+       argMax(close_usd, t.timestamp) AS close_usd,
+       volume_quote / nullIf(volume_base, 0) AS vwap,
+       sum(trade_count) AS trade_count, max(version) AS version
+FROM prices.price_ohlcv_4h AS t FINAL
+WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
+  AND t.timestamp >= '2025-12-01' AND t.timestamp < '2026-01-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
+
+-- 2026-01
+INSERT INTO prices.price_ohlcv_1d
+SELECT toStartOfInterval(t.timestamp, INTERVAL 1 DAY) AS timestamp,
+       asset_id, quote_asset_id, source,
+       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
+       argMax(close, t.timestamp) AS close,
+       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
+       sum(volume_quote_usd) AS volume_quote_usd,
+       argMax(close_usd, t.timestamp) AS close_usd,
+       volume_quote / nullIf(volume_base, 0) AS vwap,
+       sum(trade_count) AS trade_count, max(version) AS version
+FROM prices.price_ohlcv_4h AS t FINAL
+WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
+  AND t.timestamp >= '2026-01-01' AND t.timestamp < '2026-02-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
+
+-- 2026-02
+INSERT INTO prices.price_ohlcv_1d
+SELECT toStartOfInterval(t.timestamp, INTERVAL 1 DAY) AS timestamp,
+       asset_id, quote_asset_id, source,
+       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
+       argMax(close, t.timestamp) AS close,
+       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
+       sum(volume_quote_usd) AS volume_quote_usd,
+       argMax(close_usd, t.timestamp) AS close_usd,
+       volume_quote / nullIf(volume_base, 0) AS vwap,
+       sum(trade_count) AS trade_count, max(version) AS version
+FROM prices.price_ohlcv_4h AS t FINAL
+WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
+  AND t.timestamp >= '2026-02-01' AND t.timestamp < '2026-03-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
+
+-- 2026-03
+INSERT INTO prices.price_ohlcv_1d
+SELECT toStartOfInterval(t.timestamp, INTERVAL 1 DAY) AS timestamp,
+       asset_id, quote_asset_id, source,
+       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
+       argMax(close, t.timestamp) AS close,
+       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
+       sum(volume_quote_usd) AS volume_quote_usd,
+       argMax(close_usd, t.timestamp) AS close_usd,
+       volume_quote / nullIf(volume_base, 0) AS vwap,
+       sum(trade_count) AS trade_count, max(version) AS version
+FROM prices.price_ohlcv_4h AS t FINAL
+WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
+  AND t.timestamp >= '2026-03-01' AND t.timestamp < '2026-04-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
+
+-- 2026-04
+INSERT INTO prices.price_ohlcv_1d
+SELECT toStartOfInterval(t.timestamp, INTERVAL 1 DAY) AS timestamp,
+       asset_id, quote_asset_id, source,
+       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
+       argMax(close, t.timestamp) AS close,
+       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
+       sum(volume_quote_usd) AS volume_quote_usd,
+       argMax(close_usd, t.timestamp) AS close_usd,
+       volume_quote / nullIf(volume_base, 0) AS vwap,
+       sum(trade_count) AS trade_count, max(version) AS version
+FROM prices.price_ohlcv_4h AS t FINAL
+WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
+  AND t.timestamp >= '2026-04-01' AND t.timestamp < '2026-05-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
+
+-- 2026-05
+INSERT INTO prices.price_ohlcv_1d
+SELECT toStartOfInterval(t.timestamp, INTERVAL 1 DAY) AS timestamp,
+       asset_id, quote_asset_id, source,
+       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
+       argMax(close, t.timestamp) AS close,
+       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
+       sum(volume_quote_usd) AS volume_quote_usd,
+       argMax(close_usd, t.timestamp) AS close_usd,
+       volume_quote / nullIf(volume_base, 0) AS vwap,
+       sum(trade_count) AS trade_count, max(version) AS version
+FROM prices.price_ohlcv_4h AS t FINAL
+WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
+  AND t.timestamp >= '2026-05-01' AND t.timestamp < '2026-06-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
+
+-- 2026-06
+INSERT INTO prices.price_ohlcv_1d
+SELECT toStartOfInterval(t.timestamp, INTERVAL 1 DAY) AS timestamp,
+       asset_id, quote_asset_id, source,
+       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
+       argMax(close, t.timestamp) AS close,
+       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
+       sum(volume_quote_usd) AS volume_quote_usd,
+       argMax(close_usd, t.timestamp) AS close_usd,
+       volume_quote / nullIf(volume_base, 0) AS vwap,
+       sum(trade_count) AS trade_count, max(version) AS version
+FROM prices.price_ohlcv_4h AS t FINAL
+WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
+  AND t.timestamp >= '2026-06-01' AND t.timestamp < '2026-07-01'
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
+
+-- 2026-07
+INSERT INTO prices.price_ohlcv_1d
+SELECT toStartOfInterval(t.timestamp, INTERVAL 1 DAY) AS timestamp,
+       asset_id, quote_asset_id, source,
+       argMin(open, t.timestamp) AS open, max(high) AS high, min(low) AS low,
+       argMax(close, t.timestamp) AS close,
+       sum(volume_base) AS volume_base, sum(volume_quote) AS volume_quote,
+       sum(volume_quote_usd) AS volume_quote_usd,
+       argMax(close_usd, t.timestamp) AS close_usd,
+       volume_quote / nullIf(volume_base, 0) AS vwap,
+       sum(trade_count) AS trade_count, max(version) AS version
+FROM prices.price_ohlcv_4h AS t FINAL
+WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
+  AND t.timestamp >= '2026-07-01' AND t.timestamp < {end_ts:DateTime}
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
 
 -- ---------------------------------------------------------------------
--- 1w <- 1d (FULL WINDOW — weeks straddle year boundaries, never year-chunk)
+-- 1w <- 1d (FULL WINDOW — weeks straddle month/year boundaries, never chunk)
 -- ---------------------------------------------------------------------
 
 INSERT INTO prices.price_ohlcv_1w
@@ -418,10 +1815,11 @@ SELECT toStartOfInterval(t.timestamp, INTERVAL 1 WEEK) AS timestamp,
 FROM prices.price_ohlcv_1d AS t FINAL
 WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
   AND t.timestamp >= {start_ts:DateTime} AND t.timestamp < {end_ts:DateTime}
-GROUP BY timestamp, asset_id, quote_asset_id, source;
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
 
 -- ---------------------------------------------------------------------
--- 1M <- 1w (FULL WINDOW — kept unchunked alongside 1w; reads a tiny table)
+-- 1M <- 1w (FULL WINDOW — reads a tiny table)
 -- ---------------------------------------------------------------------
 
 INSERT INTO prices.price_ohlcv_1M
@@ -437,7 +1835,8 @@ SELECT toStartOfInterval(t.timestamp, INTERVAL 1 MONTH) AS timestamp,
 FROM prices.price_ohlcv_1w AS t FINAL
 WHERE t.source IN ('aquarius', 'phoenix', 'soroswap')
   AND t.timestamp >= {start_ts:DateTime} AND t.timestamp < {end_ts:DateTime}
-GROUP BY timestamp, asset_id, quote_asset_id, source;
+GROUP BY timestamp, asset_id, quote_asset_id, source
+SETTINGS max_threads = 4;
 
 -- =====================================================================
 -- §5 VERIFY (after the chain completes; before re-enabling cleanup)
