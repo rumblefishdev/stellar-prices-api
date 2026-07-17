@@ -88,11 +88,30 @@ GROUP BY source ORDER BY source;
 ### 4. Pre-roll into the coarse tables, then re-enable cleanup
 
 Roll the repriced `1m` up to `1h/4h/1d/1w/1M` with the **incremental,
-non-truncating** pre-roll (never the full-rebuild `preroll.sql`, which would wipe
-already-pre-rolled coarse). Procedure + pre-flight:
-[`preroll-incremental-presoroban.md`](preroll-incremental-presoroban.md).
+non-truncating** pre-roll scoped to this reprice:
+[`schema/preroll-amm-reprice.sql`](../../packages/prices-clickhouse/schema/preroll-amm-reprice.sql).
 
-Only after the pre-roll verifies: **re-enable `prices-production-cleanup`.**
+Neither other script fits, and both are actively wrong here:
+
+| Script                    | Why NOT this one                                                                                                                                                                     |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `preroll.sql`             | Full rebuild expecting TRUNCATE-d coarse — wipes every already-pre-rolled row (the 0090 history-loss incident).                                                                      |
+| `preroll-incremental.sql` | Bounded to the pre-Soroban SDEX tail `[genesis, activation)` — the _complement_ of the range this reprice touches. Rolls the wrong side of the boundary; touches nothing 0097 wrote. |
+
+`preroll-amm-reprice.sql` scopes every statement to
+`source IN ('aquarius','phoenix','soroswap')` and the repriced window. Because
+`source` is part of the table key (`ORDER BY (asset_id, quote_asset_id, source,
+timestamp)`), SDEX coarse — including the expensive pre-Soroban tail — cannot be
+touched by it.
+
+> ⚠️ The script is a **draft that has never been run against prod**, and it
+> carries two `OPEN QUESTION` blocks (RMT version ties on corrected
+> aquarius/phoenix rows; buckets straddling `{end_ts}`). Work its §0 pre-flight
+> first and settle both before executing — do not run it on the strength of this
+> runbook alone.
+
+Only after the pre-roll verifies (script §5): **re-enable
+`prices-production-cleanup`.**
 
 ## How it works (the reuse guarantee)
 
