@@ -116,11 +116,19 @@ Neither other script fits, and both are actively wrong here:
 timestamp)`), SDEX coarse — including the expensive pre-Soroban tail — cannot be
 touched by it.
 
-> ⚠️ The script is a **draft that has never been run against prod**, and it
-> carries two `OPEN QUESTION` blocks (RMT version ties on corrected
-> aquarius/phoenix rows; buckets straddling `{end_ts}`). Work its §0 pre-flight
-> first and settle both before executing — do not run it on the strength of this
-> runbook alone.
+Its **§0 pre-flight is complete** (2026-07-17, prod) and both former OPEN
+QUESTIONs are settled by measurement — see the script header. Params:
+`start_ts = '2024-02-20 17:00:10'`, `end_ts = '2026-07-06 09:35:16'`.
+
+> ⚠️ **STAGE 0 DELETEs phoenix coarse rows in-window before re-inserting.** This
+> is deliberate, not optional. `version = max(ledger*1000 + op_index)`, and the
+> 5,175 swaps recovered by the Phoenix fix sit mid-bucket — they raise volume
+> _without_ raising the bucket's max ledger, so a corrected row ties with the
+> stale one on version. RMT's tie-break is not contractual, so without the
+> DELETE the fix can silently fail to reach coarse (the store of record) while
+> `1m` looks perfect. Only phoenix: soroswap has no coarse rows to contest,
+> aquarius's are unchanged. `source` is part of the table key, so the DELETEs
+> cannot touch sdex/aquarius/soroswap.
 
 Only after the pre-roll verifies (script §5): **re-enable
 `prices-production-cleanup`.**

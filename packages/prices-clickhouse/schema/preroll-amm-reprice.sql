@@ -1,10 +1,11 @@
 -- prices coarse PRE-ROLL — INCREMENTAL, NON-TRUNCATING, scoped to the
 -- Soroban-era AMM sources corrected by the events-sourced reprice (task 0097).
 --
--- ⚠️ DRAFT — NOT YET RUN AGAINST PROD. Two open decisions are marked
---    `OPEN QUESTION` below and MUST be settled (with the pre-flight measurements
---    in §0) before this is executed. Do not run it on the strength of the
---    header comments alone.
+-- STATUS: pre-flight COMPLETE (2026-07-17, prod). Both former OPEN QUESTIONs are
+--    settled by measurement — see §0. Params are known:
+--      start_ts = '2024-02-20 17:00:10'   (close of ledger 50457424)
+--      end_ts   = '2026-07-06 09:35:16'   (close of ledger 63352611)
+--    Not yet executed against prod.
 --
 -- WHY THIS EXISTS — neither existing script fits:
 --   * `preroll.sql` is a FULL rebuild expecting TRUNCATE-d coarse tables. Running
@@ -51,71 +52,118 @@
 --   by position); kept identical to preroll.sql / preroll-incremental.sql.
 --
 -- =====================================================================
--- OPEN QUESTION 1 — RMT version TIES on corrected aquarius/phoenix rows.
---   `version = max(ledger_sequence*1000 + operation_index)` over a candle's ticks
---   (prices-ingest-core/src/bucket.rs:48,81). RMT keeps max(version); on a TIE it
---   keeps "the last row in the selection", which is NOT a contractual guarantee
---   about our insert winning.
---     * soroswap: SAFE regardless — there are ~no pre-existing rows to tie with,
---       so these are clean inserts on new keys.
---     * aquarius/phoenix: a tie with DIFFERENT values is possible where two pools
---       of the same venue map to the SAME canonical pair in the same minute (e.g.
---       Aquarius stable + constant-product on one pair) and the previously-
---       unresolved pool's trades all sit EARLIER than the already-counted pool's
---       last trade. Then max(version) is unchanged while volume grew, so the
---       corrected row does not reliably outrank the stale one.
---   DECIDE BEFORE RUNNING: accept (narrow, and our insert is last so it wins in
---   practice), or scope this pre-roll to `source = 'soroswap'` only, or verify
---   empirically post-run per §5. Measurement in §0.4 sizes the exposure.
+-- RESOLVED (2026-07-17) — RMT version TIES: why phoenix gets a DELETE first.
+--   `version = max(ledger_sequence*1000 + operation_index)` over a bucket's rows.
+--   RMT keeps max(version); on a TIE it keeps "the last row in the selection",
+--   which is NOT a contractual guarantee. Per source, measured:
+--     * soroswap — coarse rows do NOT EXIST (absent from price_ohlcv_1d
+--       entirely). Every row this script inserts lands on a NEW key, unopposed.
+--       No delete needed.
+--     * aquarius — coarse exists and its values are UNCHANGED by the reprice, so
+--       a tie is harmless either way. No delete needed.
+--     * phoenix  — coarse exists (1d tip 2026-07-09) and IS STALE: task 0097
+--       recovered 5,175 seven-event swaps. Those swaps mostly sit MID-bucket, so
+--       they raise volume/trade_count WITHOUT raising the bucket's max ledger →
+--       the corrected row carries the SAME version as the stale one. On that tie
+--       the fix might silently NOT land in coarse — the store of record — while
+--       `1m` looks perfect. STAGE 0 therefore DELETEs phoenix rows in-window
+--       first, making the outcome deterministic instead of a coin flip.
 --
--- OPEN QUESTION 2 — buckets STRADDLING `{end_ts}` (1w / 1M especially).
---   `{end_ts}` is an arbitrary ledger close time, not bucket-aligned. Any bucket
---   spanning it is rolled here from its `< {end_ts}` slice ONLY, so it is a
---   PARTIAL aggregate of a bucket whose remainder is live-era data.
---   Whether that partial can clobber a complete row depends on what maintains
---   coarse for the live era RIGHT NOW — and per 0090 the six replace-mode
---   `mv_ohlcv_*` MVs were DROPPED (restoring them as APPEND is task 0095). If
---   nothing currently maintains live coarse, there is no competing row and the
---   straddling bucket is simply incomplete until the next pre-roll; if something
---   does, the live row carries HIGHER versions (later ledgers) and wins, leaving
---   our repriced slice out of that bucket.
---   DECIDE BEFORE RUNNING: confirm §0.3, then either accept the residual (as the
---   pre-Soroban script does at its activation boundary) or repair the straddling
---   buckets afterwards by re-rolling them unbounded from full `15m`.
+-- RESOLVED (2026-07-17) — buckets STRADDLING {end_ts} are harmless.
+--   `system.tables` has NO `mv_ohlcv*` rows: the six replace-mode rollup MVs were
+--   dropped in 0090 (restoring them as APPEND is task 0095), so NOTHING maintains
+--   live-era coarse today. There is no competing row for the bucket spanning
+--   {end_ts}, hence nothing our partial slice can clobber and nothing that can
+--   outrank it. Accepted residual: the 1w/1M buckets containing {end_ts} reflect
+--   only their <= {end_ts} slice until the next pre-roll extends them. For
+--   soroswap the 2026-07-06 day/week/month are partial for a second reason
+--   anyway — live emitted NO soroswap candles until the 0096 fix deployed
+--   2026-07-15, so [63352612, deploy] is an uncovered gap owned by task 0099.
+--
+-- =====================================================================
+-- §0 PRE-FLIGHT — ALREADY RUN (2026-07-17, prod). Recorded for re-runs.
+-- =====================================================================
+--
+-- 0.1 {start_ts} = 2024-02-20 17:00:10 — close of activation ledger 50457424.
+-- 0.2 {end_ts}   = 2026-07-06 09:35:16 — close of ledger 63352611 (SDEX live floor - 1).
+--     SELECT sequence, min(closed_at) FROM default.ledgers
+--      WHERE sequence IN (50457424, 63352611) GROUP BY sequence;
+--     (`min` collapses the ledgers RMT, as source.rs does; closed_at is a DateTime.)
+--
+-- 0.3 Live-era coarse maintenance: NONE.
+--     SELECT name FROM system.tables WHERE database='prices' AND name LIKE 'mv_ohlcv%';
+--     -> 0 rows (MVs dropped in 0090). 1d tips: aquarius/phoenix/sdex all
+--        2026-07-09; soroswap ABSENT.
+--
+-- 0.4 Repriced `1m` verified in-window (sum(trade_count) vs run tick counts):
+--       soroswap 536,318 == 536,318 ticks  (EXACT)
+--       aquarius 3,842,335 vs 3,842,273    (+62,  0.0016% pre-existing excess)
+--       phoenix    242,218 vs   242,201    (+17)
+--     The excesses are pre-existing `1m` rows from earlier runs, NOT double
+--     counting (soroswap started from zero rows and matches exactly). Tracked in
+--     task 0100; not a pre-roll blocker.
+--
+-- 0.5 Disk: 577G available on /var/lib/docker (need >= 20G). OK.
+--
+-- 0.6 Cleanup rule `prices-production-cleanup` is DISABLED (verified) and MUST
+--     stay disabled until §5 verifies. `price_ohlcv_1m` is a 7-day transient
+--     feeder — if cleanup fires before the pre-roll, the repriced candles are
+--     dropped before reaching the coarse store of record (the 0090 incident).
+--
+-- PARAMS: pass both explicitly, e.g.
+--   clickhouse-client --param_start_ts='2024-02-20 17:00:10' \
+--                     --param_end_ts='2026-07-06 09:35:16' \
+--                     --queries-file preroll-amm-reprice.sql
 -- =====================================================================
 
 -- =====================================================================
--- §0 PRE-FLIGHT — run these FIRST; they supply the params and settle the
---   OPEN QUESTIONs above. Record the outputs in the 0097 task notes.
+-- STAGE 0 — DELETE stale phoenix coarse rows in-window, so the corrected
+--   re-roll cannot lose an RMT version tie (see RESOLVED note above).
+--   ONLY phoenix: soroswap has no rows to contest, aquarius's are unchanged.
+--   `source` is part of every table's key
+--   (ORDER BY (asset_id, quote_asset_id, source, timestamp)), so these DELETEs
+--   cannot touch sdex/aquarius/soroswap — the expensive pre-Soroban SDEX tail
+--   included.
+--
+--   `mutations_sync = 2` makes each DELETE SYNCHRONOUS: it must finish before
+--   STAGE 1 re-inserts, or the two race and the result is exactly the
+--   nondeterminism this stage exists to remove. Mutations only affect parts that
+--   existed when they were submitted, but do not rely on that — wait.
+--
+--   If a DELETE errors, STOP: an emptied coarse level with no re-insert is a
+--   history hole. Re-run this file from STAGE 0 (idempotent: deleting already
+--   deleted rows is a no-op).
 -- =====================================================================
---
--- 0.1 — {start_ts}: close time of the activation ledger (50457424).
---   SELECT toDateTime(closed_at) FROM default.ledgers WHERE sequence = 50457424;
---
--- 0.2 — {end_ts}: close time of the SDEX live floor - 1 (63352611).
---   SELECT toDateTime(closed_at) FROM default.ledgers WHERE sequence = 63352611;
---
--- 0.3 — OPEN QUESTION 2: does anything maintain live-era coarse today?
---   SELECT name FROM system.tables WHERE database = 'prices' AND name LIKE 'mv_ohlcv%';
---   -- plus the newest coarse row per source, to see if it tracks the live tip:
---   SELECT source, max(timestamp) FROM prices.price_ohlcv_1d
---    WHERE source IN ('aquarius','phoenix','soroswap') GROUP BY source;
---
--- 0.4 — OPEN QUESTION 1: how many aquarius/phoenix coarse rows could tie?
---   -- Same-source, same-pair, same-minute keys already present in coarse that
---   -- the reprice also rewrote. Zero here ⇒ OPEN QUESTION 1 is moot.
---   SELECT source, count() FROM prices.price_ohlcv_1m FINAL
---    WHERE source IN ('aquarius','phoenix')
---      AND timestamp >= {start_ts:DateTime} AND timestamp < {end_ts:DateTime}
---    GROUP BY source;
---
--- 0.5 — disk headroom (the 0097 runbook's Checkpoint C):  df -h /var/lib/docker
---
--- PARAMS: pass both explicitly, e.g.
---   clickhouse-client --param_start_ts='2024-02-20 00:00:00' \
---                     --param_end_ts='2026-07-08 00:00:00' \
---                     --queries-file preroll-amm-reprice.sql
--- =====================================================================
+
+ALTER TABLE prices.price_ohlcv_15m DELETE
+WHERE source = 'phoenix'
+  AND timestamp >= {start_ts:DateTime} AND timestamp < {end_ts:DateTime}
+SETTINGS mutations_sync = 2;
+
+ALTER TABLE prices.price_ohlcv_1h DELETE
+WHERE source = 'phoenix'
+  AND timestamp >= {start_ts:DateTime} AND timestamp < {end_ts:DateTime}
+SETTINGS mutations_sync = 2;
+
+ALTER TABLE prices.price_ohlcv_4h DELETE
+WHERE source = 'phoenix'
+  AND timestamp >= {start_ts:DateTime} AND timestamp < {end_ts:DateTime}
+SETTINGS mutations_sync = 2;
+
+ALTER TABLE prices.price_ohlcv_1d DELETE
+WHERE source = 'phoenix'
+  AND timestamp >= {start_ts:DateTime} AND timestamp < {end_ts:DateTime}
+SETTINGS mutations_sync = 2;
+
+ALTER TABLE prices.price_ohlcv_1w DELETE
+WHERE source = 'phoenix'
+  AND timestamp >= {start_ts:DateTime} AND timestamp < {end_ts:DateTime}
+SETTINGS mutations_sync = 2;
+
+ALTER TABLE prices.price_ohlcv_1M DELETE
+WHERE source = 'phoenix'
+  AND timestamp >= {start_ts:DateTime} AND timestamp < {end_ts:DateTime}
+SETTINGS mutations_sync = 2;
 
 -- =====================================================================
 -- STAGE 1 — 15m <- 1m, CHUNKED BY YEAR (heavy; FINAL to dedup re-ingests).
