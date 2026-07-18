@@ -50,11 +50,12 @@
 > 6. **Infrastructure as code:** five AWS CDK stacks deployed with
 >    `make deploy-production-*`. The synth output contains no RDS instance, no
 >    VPC, and no NAT Gateway.
-> 7. **Monitoring:** seven production CloudWatch alarms routed through SNS and
->    AWS Chatbot to a dedicated Slack channel, covering backfill-push
->    freshness, mTLS certificate expiry, ingestion lag, processor errors, DLQ
->    depth, ingestion silence, and enrichment progress. The alarm set has been
->    fire-tested against real metrics and is healthy.
+> 7. **Monitoring:** fourteen production CloudWatch alarms, all healthy — seven
+>    of them routed through SNS and AWS Chatbot to a dedicated Slack channel,
+>    covering backfill-push freshness, mTLS certificate expiry, ingestion lag,
+>    processor errors, DLQ depth, ingestion silence, and enrichment progress;
+>    the remainder are per-worker error catchers. The Slack-routed set has been
+>    fire-tested against real metrics.
 >
 > **In-tranche scope refinements.** The approved plan specified PostgreSQL on
 > AWS RDS as the primary datastore; the delivered system writes to a dedicated
@@ -96,8 +97,6 @@
 >
 > - API health probe:
 >   `https://02mabge71l.execute-api.eu-central-1.amazonaws.com/production/health`
-> - OpenAPI specification:
->   `https://02mabge71l.execute-api.eu-central-1.amazonaws.com/production/api-docs-json`
 >
 > **Key-gated (API key available to reviewers on request):**
 >
@@ -147,7 +146,7 @@
 - [ ] Screenshots captured for every `<TODO: screenshot>` marker (CDK synth
       grep, CloudWatch alarms in OK state, Slack alarm notification).
 - [ ] `architecture.png` rendered from `architecture.mmd`:
-      `npx -y @mermaid-js/mermaid-cli -i architecture.mmd -o architecture.png -s 3`
+      `npx -y @mermaid-js/mermaid-cli -i architecture.mmd -o architecture.png -s 3 -p puppeteer-config.json`
 - [ ] AC 3 verified live: ≥ 20 assets with 24 h of candles; deepest markets
       (XLM, AQUA on SDEX) minute-continuous (largest gap 1 min), thinner majors'
       gaps consistent with market quiet.
