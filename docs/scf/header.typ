@@ -1,6 +1,13 @@
 // Typst styling overrides for SCF Milestone 1 evidence PDF (stellar-prices-api).
 // Loaded via pandoc `--include-in-header=header.typ`.
 
+// Let figures — especially captioned tables — break across page boundaries.
+// Pandoc wraps a captioned table in `#figure`, and figures default to
+// `block(breakable: false)`, so a table taller than the remaining page space
+// overflows instead of breaking and its rows overlap the next ones (the
+// page-17 "two rows on top of each other" bug in the section 6 table).
+#show figure: set block(breakable: true)
+
 // Tables: visible row separators + left-aligned cells + a touch more padding.
 #set table(
   stroke: (x, y) => (

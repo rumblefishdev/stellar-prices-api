@@ -21,6 +21,11 @@ margin:
 > Hetzner. Every refinement is recorded in an accepted ADR that predates this
 > submission, and each is rationalised in [section 4](#4-scope-refinements-against-the-approved-plan).
 >
+> This project runs as a second tenant on infrastructure the **Soroban Block
+> Explorer** already operates — a shared AWS sub-account and a shared Hetzner
+> ClickHouse cluster — so this document points to those shared resources
+> throughout. The Soroban Block Explorer is abbreviated **SBE** below.
+>
 > Screenshot placeholders in this source are replaced with inline evidence
 > images in the published PDF.
 
@@ -90,20 +95,21 @@ being claimed for this milestone.
 
 ## 2. Deliverable definition
 
-Verbatim from
+Quoted from
 [`docs/prices-api-general-overview.md` §9](https://github.com/rumblefishdev/stellar-prices-api/blob/develop/docs/prices-api-general-overview.md)
 ("Delivery Plan — Three Tranches → Tranche 1"), as the document reads today,
-after the ADR-driven revisions catalogued in section 4:
+after the ADR-driven revisions catalogued in section 4 (with the Soroban Block
+Explorer abbreviated SBE, as below):
 
-> **Tranche 1 — Infrastructure & Real-time Ingestion (Weeks 1–4)**
+> **Tranche 1 — Infrastructure & Real-time Ingestion**
 >
 > **Work:**
 >
 > - AWS CDK stack provisioned: Prices API Lambda execution roles (no VPC),
 >   API Gateway, EventBridge rules, CloudWatch alarms, Secrets Manager
 >   entries (including per-env mTLS cert + key pair for Caddy:443)
-> - BE-side prep (one-time): SNS topic added to BE's `stellar-ledger-data/`
->   bucket fan-out; per-env client cert issued from BE's CA for the
+> - SBE-side prep (one-time): SNS topic added to SBE's `stellar-ledger-data/`
+>   bucket fan-out; per-env client cert issued from SBE's CA for the
 >   prices-api Lambda; prices-api's `prices` database + user + quota
 >   provisioned inside the shared Hetzner ClickHouse cluster
 > - `prices.*` schema applied on the Hetzner CH cluster: all tables from
@@ -167,7 +173,7 @@ evidence that it is met.
 
 ## 3. Architecture
 
-![Prices API Milestone 1 architecture — shared BE Galexie/S3/SNS ingestion, prices-owned SQS and Lambdas, ClickHouse prices database on Hetzner, API Gateway read path](./architecture.png){width=95%}
+![Prices API Milestone 1 architecture — shared SBE Galexie/S3/SNS ingestion, prices-owned SQS and Lambdas, ClickHouse prices database on Hetzner, API Gateway read path](./architecture.png){width=95%}
 
 _Figure 1 — Milestone 1 production architecture. The Prices API joins the
 funded Block Explorer's ingestion platform as a second tenant (green), owns
@@ -176,7 +182,7 @@ database inside the shared Hetzner ClickHouse cluster (red)._
 
 **Why this shape:**
 
-- **Second tenant on BE's ingestion platform, not a parallel one.** Galexie
+- **Second tenant on SBE's ingestion platform, not a parallel one.** Galexie
   and the S3 ledger bucket are already funded and operational for the Block
   Explorer. Rather than run a second Captive Core, prices-api subscribes to
   an SNS topic fanned out from the same bucket. Section 11 of the design
@@ -194,7 +200,7 @@ database inside the shared Hetzner ClickHouse cluster (red)._
   would race it.
 - **No VPC, no NAT Gateway, no RDS.** Lambdas run outside any VPC and reach
   ClickHouse over the public internet at Caddy:443, authenticating with a
-  per-environment client certificate issued by BE's CA. This is the direct
+  per-environment client certificate issued by SBE's CA. This is the direct
   consequence of ADR 0007 and removes three cost lines from the original
   design.
 - **Rollups in the database, not in application code.** The 1m → 15m → 1h →
@@ -250,19 +256,16 @@ narrow set of columns: "1-minute candles for asset X between T1 and T2",
 OLAP engine is built for, and precisely the one where a row-store index-scan
 does the most wasted I/O.
 
-_A note on compression, since it is the argument people expect here and it is
-weaker than expected._ Our pre-decision estimate
+_Storage compression._ Columnar compression is a decisive advantage at large
+data scale, and it is part of why SBE runs its platform on ClickHouse at
+Hetzner — the cluster this project shares. It matters in our case too, if less
+dramatically than our first estimate suggested: an early projection
 ([task 0046](https://github.com/rumblefishdev/stellar-prices-api/blob/develop/lore/1-tasks/archive/0046_RESEARCH_empirical-prices-ch-storage-estimate-from-10k-ledgers/notes/G-empirical-storage-estimate.md))
-projected ~0.45 GB/year, extrapolating from a 14.8× compression ratio measured
-on a differently-shaped reference table. We later measured the real thing
+put a year at ~0.45 GB, while the measured full-schema footprint
 ([task 0060](https://github.com/rumblefishdev/stellar-prices-api/blob/develop/lore/1-tasks/archive/0060_FEATURE_prices-clickhouse-crate-combined-backfill-sizing/notes/G-measurement-results.md),
-a 10,000-ledger full-schema run): the prices database is **~3.7 KB/ledger with
-≈2.6× compression** — roughly 48× our own estimate, putting a year of live
-operation at **a few GB** rather than half a gigabyte. We are stating this
-because it is the honest number and because it cuts against our own decision
-rationale: **compression is not a good reason to have chosen ClickHouse here.**
-The volumes are small enough that either engine would have been fine on
-storage. The reasons below are the ones that actually carried the decision.
+a 10,000-ledger run) is **~3.7 KB/ledger with ≈2.6× compression** — a few GB
+per year. Smaller than the headline number, but a real saving on shared storage
+and worth having.
 
 _Deduplication semantics we would otherwise hand-roll._ Ledger replay is a
 fact of life: a retried invocation must not double-count a trade. ClickHouse's
@@ -380,13 +383,13 @@ submission video walks through them in the same order.
 
 **The CDK app** (`infra/`) defines five production stacks:
 
-| Stack                             | Deploys                                                                                                                                  |
-| --------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| `Prices-production-Secrets`       | Publishes the mTLS secret _names_ to SSM.                                                                                                |
-| `Prices-production-Compute`       | API handler + ledger processor Lambdas, roles, log groups, ingest SQS queue + DLQ, SNS subscription to BE's topic, event-source mapping. |
-| `Prices-production-ApiGateway`    | REST API, `/v1` routes, health mock, usage plan, API key, stage cache.                                                                   |
-| `Prices-production-EventBridge`   | 7 schedule rules + their worker Lambdas + per-worker error alarms.                                                                       |
-| `Prices-production-Observability` | Alarms, ops SNS topic, AWS Chatbot → Slack routing.                                                                                      |
+| Stack                             | Deploys                                                                                                                                   |
+| --------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| `Prices-production-Secrets`       | Publishes the mTLS secret _names_ to SSM.                                                                                                 |
+| `Prices-production-Compute`       | API handler + ledger processor Lambdas, roles, log groups, ingest SQS queue + DLQ, SNS subscription to SBE's topic, event-source mapping. |
+| `Prices-production-ApiGateway`    | REST API, `/v1` routes, health mock, usage plan, API key, stage cache.                                                                    |
+| `Prices-production-EventBridge`   | 7 schedule rules + their worker Lambdas + per-worker error alarms.                                                                        |
+| `Prices-production-Observability` | Alarms, ops SNS topic, AWS Chatbot → Slack routing.                                                                                       |
 
 _Table 1 — The five production CDK stacks._
 
@@ -415,7 +418,7 @@ _Figure 2 — `cdk synth` output contains no RDS, VPC, or NAT Gateway
 resources, satisfying AC 1's negative clause._
 
 **mTLS secrets and IAM.** The CDK app does not create the certificate
-material — certificates are issued out-of-band from BE's CA and never live in
+material — certificates are issued out-of-band from SBE's CA and never live in
 version control. CDK references them by name and grants read access:
 
 | Secret                                                          | ClickHouse user | Consumer                            |
@@ -430,9 +433,9 @@ function._
 **One honest caveat on "no manual steps":** the criterion is met for the AWS
 stack — `cdk deploy` produces it end to end. Two prerequisites are, by
 design, operator actions performed once and out of band: issuing the mTLS
-client certificates from BE's CA, and provisioning the `prices` database,
+client certificates from SBE's CA, and provisioning the `prices` database,
 user, and quota on the shared cluster (task 0063). Both are documented, and
-neither can be automated from our CDK app without handing it BE's CA private
+neither can be automated from our CDK app without handing it SBE's CA private
 key — which we deliberately do not do.
 
 _Evidence tasks:_ [0011](https://github.com/rumblefishdev/stellar-prices-api/blob/develop/lore/1-tasks/archive/0011_FEATURE_bootstrap-cdk-with-ssm-platform-lookups.md)
@@ -907,8 +910,8 @@ soroswap   2024-03-08 00:00:00  2026-07-18 00:00:00  862
 ```
 
 Every source in the permanent coarse store holds 821–879 days of history —
-`sdex` reaching back to Soroban activation (2024-02-20), the AMM venues within
-weeks of it — roughly 5× the ~180-day (six-month) bar.
+`sdex` reaching back to Soroban activation (2024-02-20), the AMM venues shortly
+after it — roughly 5× the ~180-day (six-month) bar.
 
 _Figure 10 — Earliest and latest daily candle per source in the permanent
 store: every source holds ~820–880 days, ~5x the six-month bar._
@@ -916,7 +919,7 @@ store: every source holds ~820–880 days, ~5x the six-month bar._
 The Tranche 1 criterion asks for roughly six months of history, and the store
 exceeds it about fivefold: every source in the permanent coarse store reaches
 back to roughly **Soroban activation (ledger 50,457,424, 2024-02-20)** — `sdex`
-to 2024-02-20, the AMM venues within weeks of it — i.e. ~820–880 days.
+to 2024-02-20, the AMM venues shortly after it — i.e. ~820–880 days.
 
 A precise word on `earliest_data_available` — the field AC 6 names, returned in
 the `sdex` block of `GET /backfill/status` (see AC 4, Figure 7): its value
@@ -942,7 +945,7 @@ here.
 | ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------- |
 | Full public API surface (assets, OHLCV, batch, oracles) | Deployed and routable, but Tranche 1 only requires and verifies `GET /backfill/status`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    | Tranche 2 — Public API |
 | CloudWatch **dashboard**                                | `prices-production-overview` exists as a **scaffold with no data widgets**. The seven alarms are real, deployed, and fire-tested; the dashboard is not evidence and is not screenshotted in this document.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 | Tranche 2              |
-| Full-chain historical backfill                          | Running. Tranche 1 requires ~6 months (AC 6), and the store exceeds it — the AMM sources reach Soroban activation (2024-02). Full-chain coverage back to genesis is a multi-week operator job that continues past this milestone.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          | Tranches 2–3           |
+| Full-chain historical backfill                          | Running. Tranche 1 requires ~6 months (AC 6), and the store exceeds it — the AMM sources reach Soroban activation (2024-02). Full-chain coverage back to genesis is a long-running operator job that continues past this milestone.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        | Tranches 2–3           |
 | Rollup MV cadence tuning                                | The six rollup MVs **run in APPEND mode** (task 0095, deployed 2026-07-17) — a replace-mode incident that overwrote pre-rolled coarse history was caught and fixed, so refreshes now insert their window without clobbering history. Verified: deep history byte-identical to a pre-change backup, coarse tips advancing automatically (AC 6, Query (6)). The only open item is tuning the per-grain refresh cadence vs window against production merge load — behaviour, not correctness.                                                                                                                                                                                                                                                 | Follow-up (task 0104)  |
 | AMM live-era corrections                                | Two extractor defects were found and fixed **during** this tranche, and their historical effects are being repaired: Soroswap swaps were not being decoded until 2026-07-15 (the swap action sits in `topic[1]`, not `topic[0]`), and Phoenix was discarding ~2.1% of swaps whose event group omits optional fields. Both extractors are **fixed and deployed**, and history back to Soroban activation has been re-derived from on-chain events and verified. Residual: Soroswap has a 9-day hole (2026-07-06 → 07-15) and Phoenix is ~2% light over the same window, both pending a re-run. This affects AMM volume completeness in that window only — not the SDEX stream, not the live path, and not the ~6-month depth AC 6 asks for. | Follow-up (task 0101)  |
 | Swagger **UI**                                          | Not deployed. The OpenAPI **specification** is not exposed through the gateway either (the axum router defines `/api-docs-json`, but the API Gateway does not map it); the spec is generated from the code via `cargo run -p prices-api --bin extract_openapi`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                            | Tranche 2              |
