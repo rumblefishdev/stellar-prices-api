@@ -76,19 +76,19 @@
 > **Full evidence — acceptance-criteria mapping, live ClickHouse query output,
 > architecture diagram, ADR references, the complete refinement rationale, and
 > an explicit statement of what is _not_ claimed for this milestone:**
-> `<DRIVE_LINK_TO_milestone-1-evidence.pdf>`
+> https://drive.google.com/drive/folders/1t-diBX9wVlr8dWgc0iTk1cgg-9BARTV2?usp=drive_link
 
 ---
 
 ## Field 2 — Deliverable Verification - Video
 
-> `<VIDEO_URL>`
+> https://drive.google.com/drive/folders/1t-diBX9wVlr8dWgc0iTk1cgg-9BARTV2?usp=drive_link
 
 ---
 
 ## Field 3 — Additional Deliverable Verification
 
-> **Evidence package (Google Drive):** `<DRIVE_FOLDER_LINK>` — contains
+> **Evidence package (Google Drive):** https://drive.google.com/drive/folders/1t-diBX9wVlr8dWgc0iTk1cgg-9BARTV2?usp=drive_link — contains
 > `milestone-1-evidence.pdf` (full acceptance-criteria walkthrough,
 > architecture diagram, current ClickHouse query outputs, AWS screenshots,
 > refinement rationale) and the demo video.
