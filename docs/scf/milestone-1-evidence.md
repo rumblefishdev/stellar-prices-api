@@ -411,7 +411,7 @@ grep -RE '"AWS::RDS::|"AWS::EC2::VPC"|"AWS::EC2::NatGateway"' cdk.out/*.template
 # expected: no matches
 ```
 
-<TODO: screenshot — terminal showing `make synth-production` succeeding and the grep above returning no matches>
+![cdk synth succeeds for all five production stacks and the grep for AWS::RDS::, AWS::EC2::VPC, and AWS::EC2::NatGateway returns no matches](./screenshots/ac1-synth-no-rds.png){width=95%}
 
 _Figure 2 — `cdk synth` output contains no RDS, VPC, or NAT Gateway
 resources, satisfying AC 1's negative clause._
@@ -820,9 +820,15 @@ _Evidence task:_ [0089](https://github.com/rumblefishdev/stellar-prices-api/blob
 > freshness alarm fires once `sdex.last_push_at` exceeds the configured
 > Tranche 1 threshold."_
 
-Seven production alarms are deployed, all with both ALARM and OK actions
-routed to the SNS topic `prices-production-ops-alarms` → AWS Chatbot → a
-dedicated Slack channel.
+Fourteen production alarms are deployed and healthy. The **seven in Table 3** —
+the milestone-relevant set — each route **both ALARM and OK actions** to the SNS
+topic `prices-production-ops-alarms` → AWS Chatbot → a dedicated Slack channel.
+The remaining seven are per-worker error catchers on the scheduled worker Lambdas
+(`asset-discovery`, `cleanup`, `enrichment`, `oracle`, `supply`) plus two probe
+alarms (`backfill-freshness-probe`, `mtls-notafter-probe`); they are deployed and
+sit in `OK` — and so appear in the Figure 8 alarm list — but are latent
+error-catchers not yet wired to Slack notifications (notification routing for
+them is Tranche-2 work).
 
 | Alarm                                               | Metric                                                   | Condition                                      |
 | --------------------------------------------------- | -------------------------------------------------------- | ---------------------------------------------- |
@@ -834,8 +840,9 @@ dedicated Slack channel.
 | `prices-production-ledger-processor-no-invocations` | `AWS/Lambda Invocations`                                 | < 1 per 15 min (`treatMissingData: BREACHING`) |
 | `prices-production-enrichment-backlog`              | math on `Prices/Enrichment`                              | no progress across 3 hourly passes             |
 
-_Table 3 — Production alarms. The first is the AC 5 alarm; the rest are the
-supporting production alarm set._
+_Table 3 — The seven Slack-routed production alarms. The first is the AC 5
+alarm; the rest are the supporting set. Figure 8 shows the full deployed set of
+fourteen — the additional seven are per-worker error catchers described above._
 
 **The AC 5 alarm was fire-tested**, not merely deployed: the freshness alarm
 and the mTLS NotAfter alarm were both driven into ALARM against real metrics
@@ -843,13 +850,11 @@ and observed to recover to OK, under
 [task 0056](https://github.com/rumblefishdev/stellar-prices-api/blob/develop/lore/1-tasks/archive/0056_FEATURE_cloudwatch-alarms-push-freshness-mtls-notafter/README.md)
 (fire-test record committed as `c7c1bb1`).
 
-<TODO: screenshot — CloudWatch alarms list showing the prices-production-\*
-alarm set in OK state>
+![The full set of fourteen prices-production CloudWatch alarms, all in OK state](./screenshots/ac5-alarms-ok.png){width=95%}
 
 _Figure 8 — The production alarm set in `OK` state._
 
-<TODO: screenshot — Slack notification received from AWS Chatbot during the
-0056 alarm fire-test>
+![AWS Chatbot posts to Slack for the sdex-push-freshness fire-test: the OK to ALARM breach and the ALARM to OK recovery, both delivered end to end](./screenshots/ac5-slack-notification.png){width=95%}
 
 _Figure 9 — Alarm routing verified end to end: CloudWatch → SNS → AWS Chatbot
 → Slack._
