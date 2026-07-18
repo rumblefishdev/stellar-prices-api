@@ -1192,14 +1192,15 @@ on ClickHouse, that machinery is not part of the prices-api budget at any traffi
   `prices.price_ohlcv_1m` over HTTPS-mTLS)
 - Asset Discovery Lambda running; `prices.assets` populated for at least 20 major assets
 - Local SDEX backfill CLI (`sdex-backfill`, ADR 0005) operating on the operator's
-  workstation against `s3://aws-public-blockchain`. First tip-backward chunk (~6 months)
-  processed locally and pushed to Hetzner CH via `sdex-cloud-push` by end of Tranche 1
-- Soroban AMM Stream 1 fully delivered (ADR 0001): operator runs BE's
-  `backfill-runner --target=clickhouse` on the workstation to populate a local ClickHouse
-  instance with `soroban_events` from Soroban activation to tip (~8.5M ledgers); the
-  `soroban-amm-backfill` Rust CLI then extracts Soroswap/Aquarius/Phoenix swaps (ScVal
-  decoded via `stellar-xdr`), buckets to per-source 1-min rows, and runs the one-shot
-  completion push to Hetzner ClickHouse `prices.*`. Local CH instance is torn down post-push
+  workstation against `s3://aws-public-blockchain`, decoding historical SDEX trades and
+  writing them **directly to Hetzner ClickHouse `prices.*` over the 0052 mTLS client**
+  (ADR 0009 — no local mirror, no separate `sdex-cloud-push` step)
+- Soroban AMM Stream 1 fully delivered (ADR 0001): the `soroban-amm-backfill` Rust CLI
+  reads BE's `soroban_events`, extracts Soroswap/Aquarius/Phoenix swaps (ScVal decoded via
+  `stellar-xdr`), buckets them to per-source 1-min rows, and **writes directly to Hetzner
+  ClickHouse `prices.*` over the same mTLS path the live Lambda uses** (ADR 0009). The asset
+  registry is loaded from the target at run start so surrogate ids align with the live path;
+  there is no intermediate local ClickHouse mirror or completion push
 - `GET /backfill/status` endpoint live and returning valid progress data
 - CloudWatch alarms: `sdex.last_push_at` older than the Tranche 1 push-cadence threshold
   (e.g. 7 days) → SNS notification; mTLS cert NotAfter < 30 days → SNS notification
