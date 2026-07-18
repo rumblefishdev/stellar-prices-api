@@ -176,7 +176,7 @@ evidence that it is met.
 ![Prices API Milestone 1 architecture — shared SBE Galexie/S3/SNS ingestion, prices-owned SQS and Lambdas, ClickHouse prices database on Hetzner, API Gateway read path](./architecture.png){width=95%}
 
 _Figure 1 — Milestone 1 production architecture. The Prices API joins the
-funded Block Explorer's ingestion platform as a second tenant (green), owns
+funded SBE's ingestion platform as a second tenant (green), owns
 its AWS compute and queues (amber), and reads/writes a dedicated `prices`
 database inside the shared Hetzner ClickHouse cluster (red)._
 
@@ -234,14 +234,14 @@ The approved Tranche 1 plan read:
 > **Acceptance criteria:**
 >
 > 1. `cdk deploy` from a clean AWS account (sharing only the existing VPC/S3
->    bucket from Block Explorer) produces the full Prices API stack with no
+>    bucket from SBE) produces the full Prices API stack with no
 >    manual steps
 > 2. **Prices RDS schema matches Section 3**: all tables, partitions for
 >    current + next 2 months, all indexes present (**verifiable via `\d+`
 >    psql output**)
 
 The delivered system instead writes to a dedicated `prices` **database inside
-the Block Explorer's existing Hetzner ClickHouse cluster** (`ch-prod-01`),
+SBE's existing Hetzner ClickHouse cluster** (`ch-prod-01`),
 over HTTPS-mTLS to Caddy:443, from Lambdas that run outside any VPC.
 
 Recorded in
@@ -282,14 +282,14 @@ _Cost and shared infrastructure._ This also cuts against the usual narrative
 and is worth stating precisely rather than inflating: the approved RDS line
 item was small — about **$12/month** — because this project's data volume is
 small. The Hetzner cost-share is smaller still, roughly **$1–2 per environment
-per month**, since prices-api joins a cluster the Block Explorer already funds
+per month**, since prices-api joins a cluster SBE already funds
 and operates. That delta alone would not justify a datastore change. The
 saving that matters is second-order: dropping RDS also dropped the **VPC and
 the NAT Gateway** that Lambda-to-RDS connectivity required, and removed two
 Lambdas from the design. Cost was a contributing factor, not the driver;
 **fit was the driver**.
 
-_Operational leverage._ The Block Explorer team already runs this cluster,
+_Operational leverage._ The SBE team already runs this cluster,
 its backups, and its mTLS CA. Joining it as a tenant with ClickHouse-native
 isolation (separate database, user, quota, profile) meant no new operational
 surface for this project. The cross-team agreement gating this decision is
