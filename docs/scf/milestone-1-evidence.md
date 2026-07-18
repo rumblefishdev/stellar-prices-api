@@ -458,12 +458,50 @@ The schema is applied from `packages/prices-clickhouse/schema/init.sql`
 SHOW TABLES FROM prices;
 ```
 
-<TODO: paste output — expect the base tables (assets, asset*metadata,
-asset*supply, price*ohlcv_1m/\_15m/\_1h/\_4h/\_1d/\_1w/\_1M, current_prices,
-oracle_prices, backfill_progress, backfill_sdex_ledgers, discovery_state,
-pool_registry, unresolved_pools, ingest_cursor), mv_current_prices, the 6
-`mv_ohlcv**` rollup MVs, the 6 read views, and 6 transient `price_ohlcv*\*\_bak`
-tables (see note below).>
+```
+asset_metadata
+asset_supply
+assets
+backfill_progress
+backfill_sdex_ledgers
+current_price_usd
+current_prices
+discovery_state
+identity_by_contract
+ingest_cursor
+mv_current_prices
+mv_ohlcv_15m_to_1h
+mv_ohlcv_1d_to_1w
+mv_ohlcv_1h_to_4h
+mv_ohlcv_1m_to_15m
+mv_ohlcv_1w_to_1M
+mv_ohlcv_4h_to_1d
+oracle_prices
+pool_registry
+price_ohlcv_15m
+price_ohlcv_15m_bak
+price_ohlcv_1M
+price_ohlcv_1M_bak
+price_ohlcv_1d
+price_ohlcv_1d_bak
+price_ohlcv_1h
+price_ohlcv_1h_bak
+price_ohlcv_1m
+price_ohlcv_1w
+price_ohlcv_1w_bak
+price_ohlcv_4h
+price_ohlcv_4h_bak
+price_usd_series
+price_usd_series_1h
+unresolved_pools
+usd_reference
+usd_reference_1h
+```
+
+The 18 base tables, `mv_current_prices`, the six `mv_ohlcv_*` rollup MVs, the
+six read views (`usd_reference`, `usd_reference_1h`, `price_usd_series`,
+`price_usd_series_1h`, `identity_by_contract`, `current_price_usd`), and the six
+transient `price_ohlcv_*_bak` backups are all present.
 
 _Figure 3 — `SHOW TABLES FROM prices` on production confirms the Section 3
 table set, `mv_current_prices`, the six `mv_ohlcv_\*` rollup MVs, and the read
@@ -496,8 +534,30 @@ stable (task 0105). They are not part of the schema and hold no live data.
 SHOW CREATE TABLE prices.price_ohlcv_1m;
 ```
 
-<TODO: paste output — expect ReplacingMergeTree(version), ORDER BY
-(asset_id, quote_asset_id, source, timestamp), PARTITION BY toYYYYMM(timestamp)>
+```sql
+CREATE TABLE prices.price_ohlcv_1m
+(
+    `timestamp` DateTime CODEC(DoubleDelta),
+    `asset_id` UInt32,
+    `quote_asset_id` UInt32,
+    `source` LowCardinality(String),
+    `open` Decimal(38, 14),
+    `high` Decimal(38, 14),
+    `low` Decimal(38, 14),
+    `close` Decimal(38, 14),
+    `volume_base` Decimal(38, 14) DEFAULT 0,
+    `volume_quote` Decimal(38, 14) DEFAULT 0,
+    `volume_quote_usd` Decimal(38, 14) DEFAULT 0,
+    `close_usd` Decimal(38, 14) DEFAULT 0,
+    `vwap` Decimal(38, 14),
+    `trade_count` UInt32 DEFAULT 0,
+    `version` UInt64
+)
+ENGINE = ReplacingMergeTree(version)
+PARTITION BY toYYYYMM(timestamp)
+ORDER BY (asset_id, quote_asset_id, source, timestamp)
+SETTINGS index_granularity = 8192
+```
 
 _Figure 4 — `price_ohlcv_1m` is a `ReplacingMergeTree(version)` ordered by
 `(asset_id, quote_asset_id, source, timestamp)` and partitioned by month._
@@ -541,7 +601,13 @@ FROM prices.price_ohlcv_1m FINAL
 WHERE timestamp >= now() - INTERVAL 24 HOUR;
 ```
 
-<TODO: paste output — expect >= 20>
+```
+assets_with_candles
+3314
+```
+
+3314 distinct assets carried at least one 1-minute candle in the last 24 hours —
+well past the ≥ 20 bar.
 
 **Query (4) — per-asset coverage and largest gap, for the named majors:**
 
@@ -585,10 +651,32 @@ GROUP BY c.asset_code, p.source
 ORDER BY c.asset_code, p.source;
 ```
 
-<TODO: paste output — the deepest markets (XLM, AQUA) on sdex are
-minute-continuous (largest_gap_minutes = 1); thinner majors (BTC/ETH/EURC) show
-larger gaps that track their lower trade frequency (market quiet, not a missing
-candle); USDC is sparse as a base because it is almost always a quote asset>
+```
+asset_code  source     candles_24h  largest_gap_minutes  first_candle         last_candle
+AQUA        aquarius    653          47                   2026-07-17 10:16:00  2026-07-18 09:52:00
+AQUA        sdex        16857        1                    2026-07-17 10:01:00  2026-07-18 10:00:00
+AQUA        soroswap    3            480                  2026-07-17 11:51:00  2026-07-17 19:52:00
+BTC         aquarius    40           188                  2026-07-17 12:40:00  2026-07-18 01:39:00
+BTC         sdex        1088         14                   2026-07-17 10:10:00  2026-07-18 09:59:00
+ETH         aquarius    60           570                  2026-07-17 10:50:00  2026-07-18 09:29:00
+ETH         sdex        703          25                   2026-07-17 10:08:00  2026-07-18 09:59:00
+EURC        aquarius    34           153                  2026-07-17 14:08:00  2026-07-18 09:29:00
+EURC        phoenix     3            122                  2026-07-17 14:06:00  2026-07-17 16:10:00
+EURC        sdex        2157         13                   2026-07-17 10:02:00  2026-07-18 09:58:00
+EURC        soroswap    64           316                  2026-07-17 10:39:00  2026-07-18 09:30:00
+USDC        sdex        31           122                  2026-07-17 10:01:00  2026-07-17 22:36:00
+XLM         aquarius    670          13                   2026-07-17 10:01:00  2026-07-18 09:43:00
+XLM         phoenix     44           307                  2026-07-17 10:08:00  2026-07-18 09:29:00
+XLM         sdex        1474         1                    2026-07-17 10:01:00  2026-07-18 10:00:00
+XLM         soroswap    50           286                  2026-07-17 10:01:00  2026-07-18 09:23:00
+```
+
+The two deepest order-book markets — **XLM and AQUA on SDEX** — are
+minute-continuous across the full day (`largest_gap_minutes = 1`). The thinner
+majors (BTC 14, ETH 25, EURC 13 minutes on SDEX) show larger gaps that track
+their lower on-chain trade frequency — a quiet minute, not a missing candle — and
+USDC is sparse **as a base** (31 candles) because it is almost always the quote
+side of a pair.
 
 _Figure 5 — Per-asset, per-source 1-minute candle coverage over the last 24
 hours, with the largest observed gap._
@@ -603,8 +691,17 @@ GROUP BY source
 ORDER BY candles_24h DESC;
 ```
 
-<TODO: paste output — expect rows for sdex, and for the AMM venues
-(soroswap / aquarius / phoenix) that traded in the window>
+```
+source     candles_24h  assets
+sdex       371767       3306
+aquarius   3963         45
+soroswap   168          9
+phoenix    49           3
+```
+
+All four price sources are live in the window: the classic SDEX order-book path
+(371 767 candles across 3306 assets) plus the three Soroban AMM extractors —
+Aquarius, Soroswap, and Phoenix.
 
 _Figure 6 — Candle counts by source confirm both the classic SDEX order-book
 path and the Soroban AMM extractors are live._
@@ -653,9 +750,35 @@ API=https://02mabge71l.execute-api.eu-central-1.amazonaws.com/production
 curl -sS -H "x-api-key: $KEY" "$API/v1/backfill/status" | jq .
 ```
 
-<TODO: paste live response — dual-stream sdex + soroban_amm object with
-status, current_ledger, target_ledger, progress_pct, last_push_at,
-earliest_data_available, realtime_tip_ledger>
+```json
+{
+  "realtime_tip_ledger": 63490231,
+  "sdex": {
+    "status": "running",
+    "current_ledger": 50457424,
+    "start_ledger": 1,
+    "target_ledger": 63490231,
+    "progress_pct": 79.47273619893959,
+    "ledgers_remaining": 13032807,
+    "last_push_at": "2026-07-18T10:07:28Z",
+    "earliest_data_available": "2015-11-18T03:47:00Z"
+  },
+  "soroban_amm": {
+    "status": "running",
+    "last_push_at": "2026-07-14T17:54:24Z",
+    "completed_at": null,
+    "earliest_data_available": "2024-02-20T17:00:00Z"
+  }
+}
+```
+
+Both streams report `status: "running"`. The `sdex` stream is ~79 % through the
+chain with a fresh `last_push_at` and `current_ledger` at ledger 50 457 424 — the
+Soroban-activation boundary, exactly as the AC 6 discussion describes. Its
+`earliest_data_available` (2015-11-18) is the public archive floor — the earliest
+ledger available _to backfill_, not the ingested depth (see AC 6). The
+`soroban_amm` stream's older `last_push_at` reflects the paused AMM run disclosed
+in [Section 6](#6-what-is-deliberately-not-claimed).
 
 _Figure 7 — Live `GET /v1/backfill/status` response showing dual-stream
 progress._
@@ -772,8 +895,17 @@ GROUP BY source
 ORDER BY source;
 ```
 
-<TODO: paste output — expect every source at ~820–880 days of history, reaching
-back to roughly Soroban activation (2024-02); ~5x the ~180-day (six-month) bar>
+```
+source     earliest_candle      latest_candle        days_of_history
+aquarius   2024-04-18 00:00:00  2026-07-18 00:00:00  821
+phoenix    2024-03-21 00:00:00  2026-07-18 00:00:00  849
+sdex       2024-02-20 00:00:00  2026-07-18 00:00:00  879
+soroswap   2024-03-08 00:00:00  2026-07-18 00:00:00  862
+```
+
+Every source in the permanent coarse store holds 821–879 days of history —
+`sdex` reaching back to Soroban activation (2024-02-20), the AMM venues within
+weeks of it — roughly 5× the ~180-day (six-month) bar.
 
 _Figure 10 — Earliest and latest daily candle per source in the permanent
 store: every source holds ~820–880 days, ~5x the six-month bar._
