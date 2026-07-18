@@ -128,14 +128,13 @@ SAY:
 > saving is that dropping RDS also dropped the VPC and the NAT Gateway that
 > Lambda-to-RDS connectivity needed.
 >
-> And the thing we got wrong: we expected compression to be a big win, and
-> estimated under half a gigabyte a year. When we later measured the real
-> schema, it was about forty-eight times that — a few gigabytes a year, at
-> roughly 2.6× compression, not the fourteen-odd we'd extrapolated from a
-> different table. It's in the evidence document. It doesn't change the
-> decision, but it does mean compression was never a good reason for it, and
-> I'd rather tell you that than quote you an estimate our own measurement
-> disproved.
+> On compression: it's a real advantage at large data scale, and it's part of
+> why the Soroban Block Explorer runs its own platform on ClickHouse at Hetzner
+> in the first place. For our own volumes it matters too, if less dramatically
+> than we first estimated — we projected under a gigabyte a year, and the
+> measured schema came in at a few gigabytes, around 2.6× compression. Smaller
+> than the headline number, but still a genuine saving on a shared cluster, and
+> it's documented in the evidence package.
 >
 > This is ADR 0007, accepted in May, after a cross-team agreement with the
 > Block Explorer team. Every refinement in this milestone has an ADR like this
@@ -277,8 +276,9 @@ Slack channel with the fire-test notification.
 SAY:
 
 > Criterion five: the freshness alarm fires when a backfill push cycle is
-> skipped. Here's the production alarm set — seven alarms, all currently OK,
-> each routed through SNS and AWS Chatbot into a Slack channel.
+> skipped. Here's the production alarm set — fourteen alarms, all currently OK.
+> Seven of them, including this milestone's freshness alarm, route through SNS
+> and AWS Chatbot into a Slack channel; the rest are per-worker error catchers.
 >
 > The criterion's alarm is this one: backfill push freshness. We didn't just
 > deploy it — we fire-tested it against real metrics, drove it into ALARM, and
