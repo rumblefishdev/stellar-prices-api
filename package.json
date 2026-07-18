@@ -1,0 +1,60 @@
+{
+  "name": "@rumblefish/stellar-prices-api",
+  "version": "0.0.0",
+  "license": "MIT",
+  "scripts": {
+    "build": "npx nx run-many -t build",
+    "format": "npx nx format:write --all",
+    "format:check": "npx nx format:check --all",
+    "graph": "npx nx graph",
+    "lint": "npx nx run-many -t lint",
+    "test": "npx nx run-many -t test",
+    "typecheck": "npx nx run-many -t typecheck",
+    "prepare": "husky",
+    "verify:staged": "node tools/scripts/run-affected-checks.mjs staged",
+    "verify:push": "node tools/scripts/run-affected-checks.mjs push",
+    "board": "node tools/scripts/generate-lore-board.mjs",
+    "infra:bootstrap": "make -C infra bootstrap",
+    "infra:synth:cicd": "make -C infra synth-cicd",
+    "infra:diff:cicd": "make -C infra diff-cicd",
+    "infra:deploy:cicd": "make -C infra deploy-cicd",
+    "infra:synth:production": "make -C infra synth-production",
+    "infra:diff:production": "make -C infra diff-production",
+    "infra:deploy:production": "make -C infra deploy-production"
+  },
+  "private": true,
+  "dependencies": {},
+  "devDependencies": {
+    "@eslint/js": "^9.8.0",
+    "@nx/eslint": "22.7.0",
+    "@nx/eslint-plugin": "22.7.0",
+    "@nx/js": "22.7.0",
+    "@nx/vitest": "22.7.0",
+    "@swc-node/register": "1.11.1",
+    "@swc/core": "1.15.8",
+    "@swc/helpers": "0.5.18",
+    "@types/node": "^22.0.0",
+    "@vitest/coverage-v8": "^4.0.0",
+    "eslint": "^9.8.0",
+    "husky": "^9.1.7",
+    "lint-staged": "^16.4.0",
+    "nx": "22.7.0",
+    "prettier": "^3.8.1",
+    "tslib": "^2.3.0",
+    "typescript": "~5.9.2",
+    "typescript-eslint": "^8.40.0",
+    "vitest": "^4.0.0"
+  },
+  "lint-staged": {
+    "*.rs": [
+      "rustfmt --edition 2024"
+    ],
+    "!(*.rs)": [
+      "npx nx format:write --files"
+    ]
+  },
+  "workspaces": [
+    "packages/*",
+    "infra"
+  ]
+}

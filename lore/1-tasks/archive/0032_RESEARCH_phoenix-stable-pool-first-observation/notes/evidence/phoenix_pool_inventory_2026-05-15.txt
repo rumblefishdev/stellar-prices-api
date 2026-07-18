@@ -1,0 +1,38 @@
+# Phoenix factory pool inventory — captured 2026-05-15
+#
+# Factory: CB4SVAWJA6TSRNOJZ7W2AWFW46D5VR4ZMFZKDIKXEINZCZEGZCJZCKMI
+# Method: stellar contract invoke ... -- query_pools
+# RPC:    https://mainnet.sorobanrpc.com
+# Network passphrase: "Public Global Stellar Network ; September 2015"
+#
+# For each pool address, the WASM was fetched with
+# `stellar contract fetch --id <addr> -o pool_<addr>.wasm` and the
+# binary was hashed with `sha256sum`.
+#
+# Total pools: 11
+# Distinct WASM hashes: 2
+#
+# Format: <sha256-of-wasm>  <pool-contract-id>
+
+167ab414a226427de34c19947ef9c5cf38c6c0ed91ecf9392f7cef3278ff506c  CBHCRSVX3ZZ7EGTSYMKPEFGZNWRVCSESQR3UABET4MIW52N4EVU6BIZX
+167ab414a226427de34c19947ef9c5cf38c6c0ed91ecf9392f7cef3278ff506c  CBCZGGNOEUZG4CAAE7TGTQQHETZMKUT4OIPFHHPKEUX46U4KXBBZ3GLH
+167ab414a226427de34c19947ef9c5cf38c6c0ed91ecf9392f7cef3278ff506c  CBISULYO5ZGS32WTNCBMEFCNKNSLFXCQ4Z3XHVDP4X4FLPSEALGSY3PS
+167ab414a226427de34c19947ef9c5cf38c6c0ed91ecf9392f7cef3278ff506c  CDQLKNH3725BUP4HPKQKMM7OO62FDVXVTO7RCYPID527MZHJG2F3QBJW
+167ab414a226427de34c19947ef9c5cf38c6c0ed91ecf9392f7cef3278ff506c  CBW5G5SO5SDYUGQVU7RMZ2KJ34POM3AMODOBIV2RQYG4KJDUUBVC3P2T
+167ab414a226427de34c19947ef9c5cf38c6c0ed91ecf9392f7cef3278ff506c  CDMXKSLG5GITGFYERUW2MRYOBUQCMRT2QE5Y4PU3QZ53EBFWUXAXUTBC
+13b158655e40396957537bf1c528c6542b315930c1c9e0df640f57293c8af2ca  CD5XNKK3B6BEF2N7ULNHHGAMOKZ7P6456BFNIHRF4WNTEDKBRWAE7IAA
+167ab414a226427de34c19947ef9c5cf38c6c0ed91ecf9392f7cef3278ff506c  CC6MJZN3HFOJKXN42ANTSCLRFOMHLFXHWPNAX64DQNUEBDMUYMPHASAV
+167ab414a226427de34c19947ef9c5cf38c6c0ed91ecf9392f7cef3278ff506c  CB5QUVK5GS3IU23TMFZQ3P5J24YBBZP5PHUQAEJ2SP5K55PFTJRUQG2L
+167ab414a226427de34c19947ef9c5cf38c6c0ed91ecf9392f7cef3278ff506c  CCKOC2LJTPDBKDHTL3M5UO7HFZ2WFIHSOKCELMKQP3TLCIVUBKOQL4HB
+167ab414a226427de34c19947ef9c5cf38c6c0ed91ecf9392f7cef3278ff506c  CCUCE5H5CKW3S7JBESGCES6ZGDMWLNRY3HOFET3OH33MXZWKXNJTKSM3
+
+# Grouped:
+# 167ab414...506c  (10 pools)  — Phoenix XYK build A. WASM size 36810 B.
+# 13b158655e...f2ca  ( 1 pool)  — Phoenix XYK build B. WASM size 37047 B.
+#                                 Pool: CD5XNKK3...IAA (PHO/USDC).
+#                                 Same Soroban interface, same meta string
+#                                 "Phoenix Protocol XYK Liquidity Pool",
+#                                 same query_version() -> "2.0.0".
+#
+# Notably absent: any WASM matching Phoenix pool_stable. The task assumed
+# at least one stable pool might be deployed; none is.

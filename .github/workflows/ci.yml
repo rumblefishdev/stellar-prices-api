@@ -1,0 +1,132 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    outputs:
+      rust: ${{ steps.filter.outputs.rust }}
+      typescript: ${{ steps.filter.outputs.typescript }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@d1c1ffe0248fe513906c8e24db8ea791d46f8590 # v3.0.3
+        id: filter
+        with:
+          filters: |
+            rust:
+              - 'packages/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - '.github/workflows/ci.yml'
+            typescript:
+              - 'libs/**'
+              - 'infra/**'
+              - 'package.json'
+              - 'package-lock.json'
+              - 'tsconfig*.json'
+              - 'nx.json'
+              - '.github/workflows/ci.yml'
+
+  typescript:
+    name: TypeScript (lint, build, typecheck)
+    needs: changes
+    if: |
+      needs.changes.outputs.typescript == 'true' ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/master')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - run: npm ci
+      - run: npx nx format:check --all
+      - run: npx nx run-many -t lint build typecheck
+
+  rust:
+    name: Rust (fmt, clippy, test, lambda build)
+    needs: changes
+    if: |
+      needs.changes.outputs.rust == 'true' ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/master')
+    # Native ARM runner so `cargo lambda build --arm64` is a plain native
+    # build (no cross-compile/zig toolchain), mirroring the BE repo.
+    runs-on: ubuntu-24.04-arm
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-lambda
+        run: pip3 install cargo-lambda
+
+      - run: cargo fmt --all -- --check
+      - run: cargo check --workspace
+      - run: cargo clippy -p extractors-core -p phoenix-extractor -p soroswap-extractor -p aquarius-extractor -p ledger-processor -- -D warnings
+      - run: cargo test --workspace
+
+      # Build the Lambda bootstrap binaries the CDK app packages via
+      # `Code.fromAsset`. CI never ran this before, so a worker that
+      # compiled under `cargo check` but failed to package for the Lambda
+      # target only surfaced at `cdk synth`/deploy time. This is the guard.
+      #
+      # Each Lambda bin is gated behind the crate's `lambda` feature
+      # (`required-features = ["lambda"]`) so a default build stays lean, so
+      # `--features lambda` and explicit `-p` per crate are BOTH required —
+      # a bare `cargo lambda build` silently skips these bins and produces
+      # only unrelated CLI binaries.
+      - run: >-
+          cargo lambda build --release --arm64 --features lambda
+          -p prices-ledger-processor
+          -p asset-discovery
+          -p cleanup-worker
+          -p supply-worker
+          -p oracle-worker
+          -p enrichment-worker
+
+      # Assert every bootstrap the CDK app references actually built. A bare
+      # "any bootstrap exists" glob would false-pass on the unrelated CLIs,
+      # so check each expected path explicitly.
+      - name: Verify Lambda artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected=(
+            prices-ledger-processor
+            asset-discovery
+            cleanup-worker
+            supply-worker
+            oracle-worker
+          )
+          echo "=== Lambda bootstrap binaries ==="
+          missing=0
+          for name in "${expected[@]}"; do
+            bin="target/lambda/${name}/bootstrap"
+            if [[ -x "$bin" ]]; then
+              echo "$(sha256sum "$bin") $(stat --format='%s bytes' "$bin")"
+            else
+              echo "::error::missing Lambda bootstrap: $bin"
+              missing=1
+            fi
+          done
+          exit $missing

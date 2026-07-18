@@ -1,0 +1,52 @@
+[package]
+name = "enrichment-worker"
+version = "0.1.0"
+edition = "2024"
+description = "close_usd / volume_quote_usd enrichment Lambda — EventBridge cron worker (task 0026)"
+
+[lib]
+name = "enrichment_worker"
+path = "src/lib.rs"
+
+# EventBridge cron Lambda entrypoint (task 0026). Behind `lambda` so the
+# default build/test exercises `ch_enrich` + the prototype CLI without the AWS
+# runtime / mTLS stack. Deployable: cargo lambda build -p enrichment-worker
+# --release --arm64 --features lambda (the `lambda` feature is required or the
+# bin is skipped; ADR 0006).
+[[bin]]
+name = "enrichment-worker"
+path = "src/main.rs"
+required-features = ["lambda"]
+
+[[bin]]
+name = "enrichment-cli"
+path = "src/bin/cli.rs"
+
+[features]
+default = []
+aws-mtls = ["prices-clickhouse/aws-mtls"]
+lambda = [
+    "aws-mtls",
+    "dep:lambda_runtime",
+    "dep:aws-config",
+    "dep:aws-sdk-cloudwatch",
+]
+
+[dependencies]
+clap = { workspace = true }
+clickhouse = { workspace = true }
+rust_decimal = { workspace = true }
+serde = { workspace = true }
+serde_json = "1"
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+prices-clickhouse = { path = "../prices-clickhouse" }
+
+lambda_runtime = { workspace = true, optional = true }
+aws-config = { workspace = true, optional = true }
+aws-sdk-cloudwatch = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile = "3"

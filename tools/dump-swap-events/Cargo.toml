@@ -1,0 +1,18 @@
+[package]
+name = "dump-swap-events"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Investigative tool: dump Soroban contract event topics+data from zstd-compressed LedgerCloseMetaBatch files. See lore task 0001."
+
+[dependencies]
+stellar-xdr = { version = "27", default-features = true, features = ["serde", "serde_json", "base64"] }
+stellar-strkey = "0.0.13"
+zstd = "0.13"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+hex = "0.4"
+
+[profile.release]
+opt-level = 3
+lto = "thin"

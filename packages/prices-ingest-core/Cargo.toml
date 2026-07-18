@@ -1,0 +1,34 @@
+[package]
+name = "prices-ingest-core"
+version = "0.1.0"
+edition = "2024"
+description = "Shared ledger→OHLCV ingestion core (decode, extract, canonicalise, bucket, write) used by both the SDEX backfill CLI and the live Prices Ledger Processor Lambda"
+
+[lib]
+name = "prices_ingest_core"
+path = "src/lib.rs"
+
+[dependencies]
+stellar-xdr = { workspace = true }
+stellar-strkey = { workspace = true }
+sha2 = { workspace = true }
+xdr-parser = { workspace = true }
+clickhouse = { workspace = true }
+tokio = { workspace = true }
+rust_decimal = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+hex = "0.4"
+
+prices-clickhouse = { path = "../prices-clickhouse" }
+extractors-core = { path = "../extractors-core" }
+phoenix-extractor = { path = "../phoenix-extractor" }
+soroswap-extractor = { path = "../soroswap-extractor" }
+aquarius-extractor = { path = "../aquarius-extractor" }
+ledger-processor = { path = "../ledger-processor" }
+
+[dev-dependencies]
+# task 0078: reuse the shared Phoenix xyk swap fixture in the classify-seam test.
+phoenix-extractor = { path = "../phoenix-extractor", features = ["test-fixtures"] }

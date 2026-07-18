@@ -1,0 +1,62 @@
+[workspace]
+resolver = "3"
+members = [
+    "packages/prices-clickhouse",
+    "packages/sdex-backfill",
+    "packages/events-backfill",
+    "packages/extractors-core",
+    "packages/phoenix-extractor",
+    "packages/soroswap-extractor",
+    "packages/aquarius-extractor",
+    "packages/ledger-processor",
+    "packages/prices-ingest-core",
+    "packages/prices-ledger-processor",
+    "packages/asset-discovery",
+    "packages/cleanup-worker",
+    "packages/supply-worker",
+    "packages/oracle-worker",
+    "packages/enrichment-worker",
+    "packages/prices-api",
+    "packages/backfill-freshness-probe",
+    "packages/mtls-notafter-probe",
+    "packages/pool-registry-seed",
+]
+
+[workspace.dependencies]
+stellar-xdr = { version = "=27.0.0" }
+stellar-strkey = "0.0.13"
+sha2 = "0.10"
+xdr-parser = { git = "https://github.com/rumblefishdev/soroban-block-explorer.git", branch = "develop" }
+clickhouse = { version = "0.13", features = ["inserter"] }
+tokio = { version = "1", features = ["full"] }
+
+# HTTP / API surface (task 0040 — public Prices API; ADR 0008 single axum
+# Lambda). Versions mirror BE's proven crates/api combo (axum 0.8 + lambda_http 1
+# + tower-http 0.6). lambda_http 1 pulls lambda_runtime 1 alongside the workers'
+# 0.13 — acceptable; unify on lambda_runtime 1 as a later cleanup.
+axum = "0.8"
+lambda_http = "1"
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+utoipa = { version = "5", features = ["axum_extras"] }
+utoipa-axum = "0.2"
+clap = { version = "4", features = ["derive", "env"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rust_decimal = { version = "1", features = ["serde-with-str"] }
+thiserror = "2"
+
+# AWS / Lambda — used only by the live Prices Ledger Processor (task 0038),
+# behind its `lambda` / `aws-mtls` cargo features so default builds stay lean.
+lambda_runtime = "0.13"
+aws-config = "1"
+aws-sdk-s3 = "1"
+aws-sdk-cloudwatch = "1"
+aws_lambda_events = { version = "0.16", default-features = false, features = ["sqs"] }
+tempfile = "3"
+
+# X.509 parsing for the mTLS-NotAfter probe (task 0056) — extract cert validity
+# to publish days-to-expiry. Pure/no-AWS, so the probe's day-math stays testable
+# in the default build.
+x509-parser = "0.16"

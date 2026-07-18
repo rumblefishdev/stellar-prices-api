@@ -1,6 +1,17 @@
 # Add files here to ignore them from prettier formatting
 dist
 coverage
+target
+Cargo.lock
+packages/
 .nx
+board.html
 AGENTS.md
 CLAUDE.md
+
+# Lore task/ADR files — YAML frontmatter with inline arrays breaks the board parser
+lore/1-tasks/
+lore/2-adrs/
+
+# JSONL evidence files (multi-object, not valid JSON)
+lore/**/evidence/*.json

@@ -1,0 +1,40 @@
+{
+  "envName": "production",
+  "awsRegion": "eu-central-1",
+  "apiGatewayThrottleRate": 200,
+  "apiGatewayThrottleBurst": 400,
+  "apiGatewayPartnerDailyQuota": 10000,
+  "apiKeyRateLimit": 100,
+  "apiKeyBurstLimit": 200,
+  "apiGatewayCacheEnabled": true,
+  "apiHandler": {
+    "memoryMb": 512,
+    "timeoutSeconds": 15
+  },
+  "scheduleExpressions": {
+    "assetSupply": "rate(1 hour)",
+    "oracleWatcher": "rate(5 minutes)",
+    "assetDiscovery": "rate(1 hour)",
+    "cleanup": "cron(0 3 * * ? *)",
+    "enrichment": "rate(1 hour)",
+    "backfillFreshnessProbe": "rate(15 minutes)",
+    "mtlsNotafterProbe": "rate(1 day)"
+  },
+  "opsAlarms": {
+    "sdexPushFreshnessSeconds": 604800,
+    "mtlsNotAfterDaysThreshold": 30,
+    "ledgerProcessorLagSeconds": 120,
+    "slack": {
+      "workspaceIdSsmParam": "/prices/production/slack-workspace-id",
+      "channelIdSsmParam": "/prices/production/slack-channel-id"
+    }
+  },
+  "ledgerProcessor": {
+    "memoryMb": 512,
+    "timeoutSeconds": 60,
+    "reservedConcurrency": 1,
+    "sqsBatchSize": 1,
+    "maxReceiveCount": 10,
+    "maxIterations": 16
+  }
+}

@@ -13,6 +13,9 @@ coverage
 .nx/cache
 .nx/workspace-data
 .nx/polygraph
+.nx/self-healing
+.cursor/rules/nx-rules.mdc
+.github/instructions/nx.instructions.md
 
 # environment
 .env
@@ -68,3 +71,7 @@ target/
 # Local Docker compose overrides (perf tunings, env-specific paths)
 docker-compose.override.yml
 docker-compose.override.yaml
+
+# Downloaded raw ledger fixtures (backfill test data) — large, regenerable from
+# the public ledger store; never committed.
+**/fixtures/ledgers/

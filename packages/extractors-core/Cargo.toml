@@ -1,0 +1,8 @@
+[package]
+name = "extractors-core"
+version = "0.1.0"
+edition = "2024"
+description = "Per-venue swap extractor trait and shared types for the Tranche 1 Ledger Processor"
+
+[dependencies]
+thiserror = { workspace = true }

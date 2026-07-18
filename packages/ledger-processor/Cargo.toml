@@ -1,0 +1,23 @@
+[package]
+name = "ledger-processor"
+version = "0.1.0"
+edition = "2024"
+description = "Tranche 1 Ledger Processor — dispatches Soroban swap events to per-venue extractors"
+
+[lib]
+name = "ledger_processor"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ledger-processor"
+path = "src/main.rs"
+
+[dependencies]
+extractors-core = { path = "../extractors-core" }
+phoenix-extractor = { path = "../phoenix-extractor" }
+soroswap-extractor = { path = "../soroswap-extractor" }
+aquarius-extractor = { path = "../aquarius-extractor" }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+phoenix-extractor = { path = "../phoenix-extractor", features = ["test-fixtures"] }

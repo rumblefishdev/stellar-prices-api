@@ -1,0 +1,192 @@
+//! Enrichment telemetry — the CloudWatch metrics from the 0024 design spec §5
+//! (plus two refinements from task 0026 review findings), derived from a
+//! completed pass's [`ChPassStats`].
+//!
+//! Spec §5 named four metrics; this maps the equivalents plus:
+//!   * `EnrichmentRowsRemainingRecent` — the recency-bounded backlog that
+//!     excludes the permanent exotic-quote floor, so the stall alarm does not
+//!     false-fire on an idle env (finding #5).
+//!   * `EnrichmentPassDurationMs` (renamed from the misleading
+//!     `EnrichmentBatchDurationMs`) + a derived per-batch
+//!     `EnrichmentAvgBatchDurationMs`, so operators size batch/timeout headroom
+//!     off a true per-batch figure rather than a whole-pass value that grows
+//!     with backlog and one-shot mode (finding #7).
+//!
+//! The mapping ([`pass_metrics`]) is a pure function compiled in every build, so
+//! it is unit-testable without the AWS SDK. The actual publish ([`publish`]) is
+//! gated behind the `lambda` feature (it pulls `aws-sdk-cloudwatch`); the
+//! default build / prototype CLI never links it. Publish is best-effort: the
+//! Lambda logs a warning on failure rather than failing the invocation, so a
+//! transient CloudWatch error never blocks enrichment.
+
+use crate::ch_enrich::ChPassStats;
+
+/// CloudWatch namespace for all enrichment metrics. Matches the
+/// `cloudwatch:namespace` condition on the Lambda role's `PutMetricData` grant
+/// and the alarm/dashboard wiring in `infra/`.
+pub const METRIC_NAMESPACE: &str = "Prices/Enrichment";
+
+/// CloudWatch unit for a [`Metric`]. Kept minimal — the enrichment metrics are
+/// either counts or a duration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unit {
+    Count,
+    Milliseconds,
+}
+
+/// One CloudWatch datum: a spec §5 metric name, its value, and unit.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Metric {
+    pub name: &'static str,
+    pub value: f64,
+    pub unit: Unit,
+}
+
+/// Map a completed pass's stats to its CloudWatch metrics: the spec §5
+/// `EnrichmentRowsEnriched`, `EnrichmentOracleMiss`,
+/// `EnrichmentRowsRemainingAtVolumeZero`, plus the task 0026 refinements
+/// `EnrichmentRowsRemainingRecent` (finding #5) and `EnrichmentPassDurationMs`
+/// / `EnrichmentAvgBatchDurationMs` (finding #7).
+pub fn pass_metrics(stats: &ChPassStats) -> Vec<Metric> {
+    let mut metrics = vec![
+        Metric {
+            name: "EnrichmentRowsEnriched",
+            value: stats.rows_enriched as f64,
+            unit: Unit::Count,
+        },
+        Metric {
+            name: "EnrichmentOracleMiss",
+            value: stats.oracle_misses as f64,
+            unit: Unit::Count,
+        },
+        // Full volume-zero backlog — kept for the dashboard / forensic value.
+        Metric {
+            name: "EnrichmentRowsRemainingAtVolumeZero",
+            value: stats.rows_remaining_at_volume_zero as f64,
+            unit: Unit::Count,
+        },
+        // Recency-bounded backlog (excludes the permanent exotic-quote floor) —
+        // the series the stall alarm gates on so an idle env reads zero (finding #5).
+        Metric {
+            name: "EnrichmentRowsRemainingRecent",
+            value: stats.rows_remaining_recent as f64,
+            unit: Unit::Count,
+        },
+        // Whole-pass wall-clock (all batches + the FINAL count scans), NOT
+        // per-batch — renamed from the misleading `EnrichmentBatchDurationMs`
+        // (finding #7).
+        Metric {
+            name: "EnrichmentPassDurationMs",
+            value: stats.duration_ms as f64,
+            unit: Unit::Milliseconds,
+        },
+    ];
+
+    // True per-batch figure for sizing batch/timeout headroom — only meaningful
+    // when a batch actually ran (an empty-backlog pass does 0 batches, which
+    // would divide by zero and carries no per-batch signal anyway).
+    if stats.batches > 0 {
+        metrics.push(Metric {
+            name: "EnrichmentAvgBatchDurationMs",
+            value: stats.duration_ms as f64 / stats.batches as f64,
+            unit: Unit::Milliseconds,
+        });
+    }
+
+    metrics
+}
+
+/// Publish `metrics` to CloudWatch under [`METRIC_NAMESPACE`], tagged with an
+/// `Environment` dimension. One `PutMetricData` call for the whole batch.
+#[cfg(feature = "lambda")]
+pub async fn publish(
+    client: &aws_sdk_cloudwatch::Client,
+    environment: &str,
+    metrics: &[Metric],
+) -> Result<(), aws_sdk_cloudwatch::Error> {
+    use aws_sdk_cloudwatch::types::{Dimension, MetricDatum, StandardUnit};
+
+    let dimension = Dimension::builder()
+        .name("Environment")
+        .value(environment)
+        .build();
+
+    let data = metrics
+        .iter()
+        .map(|m| {
+            MetricDatum::builder()
+                .metric_name(m.name)
+                .value(m.value)
+                .unit(match m.unit {
+                    Unit::Count => StandardUnit::Count,
+                    Unit::Milliseconds => StandardUnit::Milliseconds,
+                })
+                .dimensions(dimension.clone())
+                .build()
+        })
+        .collect::<Vec<_>>();
+
+    client
+        .put_metric_data()
+        .namespace(METRIC_NAMESPACE)
+        .set_metric_data(Some(data))
+        .send()
+        .await?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn maps_all_spec_metrics() {
+        let stats = ChPassStats {
+            batches: 3,
+            candidates_before: 100,
+            candidates_after: 7,
+            rows_enriched: 93,
+            oracle_misses: 12,
+            rows_remaining_at_volume_zero: 4,
+            rows_remaining_recent: 1,
+            duration_ms: 4500,
+        };
+        let m = pass_metrics(&stats);
+        let by = |name: &str| m.iter().find(|x| x.name == name).expect("metric present");
+
+        assert_eq!(by("EnrichmentRowsEnriched").value, 93.0);
+        assert_eq!(by("EnrichmentOracleMiss").value, 12.0);
+        // The volume-zero metric tracks `rows_remaining_at_volume_zero` (4), NOT
+        // the general `candidates_after` remainder (7).
+        assert_eq!(by("EnrichmentRowsRemainingAtVolumeZero").value, 4.0);
+        // The recency-bounded subset (1) is a distinct series from the full
+        // backlog (4) — the stall alarm gates on this one.
+        assert_eq!(by("EnrichmentRowsRemainingRecent").value, 1.0);
+        // Whole-pass duration (renamed from EnrichmentBatchDurationMs) …
+        let dur = by("EnrichmentPassDurationMs");
+        assert_eq!(dur.value, 4500.0);
+        assert_eq!(dur.unit, Unit::Milliseconds);
+        // … and the derived true per-batch figure: 4500ms / 3 batches.
+        let avg = by("EnrichmentAvgBatchDurationMs");
+        assert_eq!(avg.value, 1500.0);
+        assert_eq!(avg.unit, Unit::Milliseconds);
+        assert_eq!(m.len(), 6);
+    }
+
+    /// A pass that ran zero batches (empty backlog) has no per-batch figure, so
+    /// `EnrichmentAvgBatchDurationMs` is omitted rather than dividing by zero.
+    #[test]
+    fn omits_avg_batch_duration_when_no_batches_ran() {
+        let stats = ChPassStats {
+            batches: 0,
+            duration_ms: 120,
+            ..Default::default()
+        };
+        let m = pass_metrics(&stats);
+        assert!(
+            !m.iter().any(|x| x.name == "EnrichmentAvgBatchDurationMs"),
+            "avg-batch metric must be absent when batches == 0"
+        );
+        assert_eq!(m.len(), 5);
+    }
+}

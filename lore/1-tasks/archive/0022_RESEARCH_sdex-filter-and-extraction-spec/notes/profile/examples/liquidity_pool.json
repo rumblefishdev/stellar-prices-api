@@ -1,0 +1,25 @@
+{
+  "atom": {
+    "amount_bought_stroops": 10000000,
+    "amount_sold_stroops": 1200406,
+    "asset_bought": {
+      "code": "aTTaiN",
+      "issuer": "GDKS7XTNEVCPGVUT2ZPPOU5CHHF3NH6NX7P3ROSFSDAO6NQDS3C74Y6C",
+      "type": "credit_alphanum12"
+    },
+    "asset_sold": {
+      "code": "3qualiT",
+      "issuer": "GAVVNJKEM4XFXBPYITFCDVKOZRI3PAXJHDH666MDQIXJAJ4H7HO3722C",
+      "type": "credit_alphanum12"
+    },
+    "pool_id_hex": "2d6442c3d3c0eeec077f3ef9054bf26ca4eac7ea5c53063dcf3a6dc45f08fc14",
+    "variant": "liquidity_pool"
+  },
+  "claim_index_0based": 0,
+  "close_time_unix": 1778016742,
+  "ledger_sequence": 62435141,
+  "op_kind": "PathPaymentStrictSend",
+  "operation_index_0based": 0,
+  "source_file": ".temp/FC47D9FF--62400000-62463999/FC4750BA--62435141.xdr.zst",
+  "transaction_hash": "fe2017b1508e0b4060fb878641b8a62ededda3139b61be917e43fa7762b85d88"
+}

@@ -1,0 +1,111 @@
+{
+  "ledger_seq": 62459164,
+  "tx_hash": "f89c783d0172c02b63687ce654557c8070d95d14159e3e18c6c204b8c7e1d618",
+  "event_index": 13,
+  "source": "PerOp",
+  "inner_type": "Contract",
+  "contract_id": "CAYP3UWLJM7ZPTUKL6R6BFGTRWLZ46LRKOXTERI2K6BIJAWGYY62TXTO",
+  "topic_0": "SoroswapAggregator",
+  "topics": [
+    {
+      "string": "SoroswapAggregator"
+    },
+    {
+      "symbol": "swap"
+    }
+  ],
+  "data": {
+    "map": [
+      {
+        "key": {
+          "symbol": "amount_in"
+        },
+        "val": {
+          "i128": "10000000"
+        }
+      },
+      {
+        "key": {
+          "symbol": "amount_out"
+        },
+        "val": {
+          "i128": "6010079"
+        }
+      },
+      {
+        "key": {
+          "symbol": "distribution"
+        },
+        "val": {
+          "vec": [
+            {
+              "map": [
+                {
+                  "key": {
+                    "symbol": "bytes"
+                  },
+                  "val": "void"
+                },
+                {
+                  "key": {
+                    "symbol": "parts"
+                  },
+                  "val": {
+                    "u32": 10
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "path"
+                  },
+                  "val": {
+                    "vec": [
+                      {
+                        "address": "CBCO65UOWXY2GR66GOCMCN6IU3Y45TXCPBY3FLUNL4AOUMOCKVIVV6JC"
+                      },
+                      {
+                        "address": "CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75"
+                      }
+                    ]
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "protocol_id"
+                  },
+                  "val": {
+                    "u32": 1
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "key": {
+          "symbol": "to"
+        },
+        "val": {
+          "address": "GBTC6T3LZ5YXZTKHROU52XVU5XMLFGOREG3E3M3S2M4QIEINRAKOEHOL"
+        }
+      },
+      {
+        "key": {
+          "symbol": "token_in"
+        },
+        "val": {
+          "address": "CBCO65UOWXY2GR66GOCMCN6IU3Y45TXCPBY3FLUNL4AOUMOCKVIVV6JC"
+        }
+      },
+      {
+        "key": {
+          "symbol": "token_out"
+        },
+        "val": {
+          "address": "CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75"
+        }
+      }
+    ]
+  }
+}

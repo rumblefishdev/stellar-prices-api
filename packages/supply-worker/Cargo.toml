@@ -1,0 +1,40 @@
+[package]
+name = "supply-worker"
+version = "0.1.0"
+edition = "2024"
+description = "Prices supply worker — best-effort circulating supply into prices.asset_supply (task 0039)"
+
+[lib]
+name = "supply_worker"
+path = "src/lib.rs"
+
+# EventBridge rate(1 hour) Lambda entrypoint. Behind `lambda` so default
+# build/test stays free of the AWS runtime / mTLS stack (reqwest + the CH read
+# path still build, so the parse + write logic is testable without `lambda`).
+[[bin]]
+name = "supply-worker"
+path = "src/main.rs"
+required-features = ["lambda"]
+
+[features]
+default = []
+aws-mtls = ["prices-clickhouse/aws-mtls"]
+lambda = ["aws-mtls", "dep:lambda_runtime"]
+
+[dependencies]
+prices-clickhouse = { path = "../prices-clickhouse" }
+clickhouse = { workspace = true }
+# Public HTTPS to Horizon; webpki roots so no system-cert dependency in Lambda.
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls-webpki-roots",
+    "json",
+] }
+rust_decimal = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+thiserror = { workspace = true }
+
+lambda_runtime = { workspace = true, optional = true }
