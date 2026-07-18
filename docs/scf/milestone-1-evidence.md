@@ -115,10 +115,13 @@ after the ADR-driven revisions catalogued in section 4:
 > - Asset Discovery Lambda running; `prices.assets` populated for at least
 >   20 major assets
 > - Local SDEX backfill CLI (`sdex-backfill`, ADR 0005) operating on the
->   operator's workstation against `s3://aws-public-blockchain`
+>   operator's workstation against `s3://aws-public-blockchain`, writing
+>   decoded rows directly to Hetzner ClickHouse `prices.*` over the mTLS
+>   client (ADR 0009 — no local mirror, no separate push step)
 > - Soroban AMM Stream 1 delivered (ADR 0001): the `soroban-amm-backfill`
 >   Rust CLI extracts Soroswap/Aquarius/Phoenix swaps (ScVal decoded via
->   `stellar-xdr`) and buckets them to per-source 1-min rows
+>   `stellar-xdr`), buckets them to per-source 1-min rows, and writes them
+>   directly to Hetzner ClickHouse `prices.*` over mTLS (ADR 0009)
 > - `GET /backfill/status` endpoint live and returning valid progress data
 > - CloudWatch alarms: `sdex.last_push_at` older than the Tranche 1
 >   push-cadence threshold (e.g. 7 days) → SNS notification; mTLS cert
@@ -344,13 +347,8 @@ production cluster over the same mTLS path the live Lambda uses.
 **Why.** The staging hop doubled the storage requirement and added a bulk
 transfer step that could fail after hours of work. Writing directly means the
 backfill shares one write path — and therefore one set of correctness
-guarantees — with live ingestion.
-
-_Known documentation debt, disclosed:_ the §9 "Work" prose quoted in section 2
-still describes the retired push model ("one-shot completion push … Local CH
-instance is torn down post-push"). ADR 0009 supersedes it; the §9 text has not
-yet been re-swept. This does not affect any acceptance criterion, and the
-correction is tracked as follow-up documentation work.
+guarantees — with live ingestion. The §9 "Work" prose quoted in section 2 has
+been updated to match (ADR 0009 — direct mTLS write, no local mirror or push).
 
 ### 4.4 API shape: per-endpoint handlers → one axum Lambda
 
