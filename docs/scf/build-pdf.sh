@@ -52,6 +52,8 @@ pandoc "$SRC" -o "$OUT" \
     --from=gfm+wikilinks_title_after_pipe+attributes+yaml_metadata_block \
     --include-in-header=header.typ \
     --lua-filter=full-width-tables.lua \
+    -V mainfont="Libertinus Serif" \
+    -V monofont="DejaVu Sans Mono" \
     -V linkcolor:0066CC \
     -V urlcolor:0066CC
 
