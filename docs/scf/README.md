@@ -52,10 +52,13 @@ screenshots before the final upload.
 ## Render the architecture diagram
 
 ```bash
-npx -y @mermaid-js/mermaid-cli -i architecture.mmd -o architecture.png -s 3
+npx -y @mermaid-js/mermaid-cli -i architecture.mmd -o architecture.png -s 3 -p puppeteer-config.json
 ```
 
 `-s 3` renders at 3× scale so the diagram stays legible in the PDF.
+`-p puppeteer-config.json` launches headless Chromium with `--no-sandbox`,
+required on Ubuntu 23.10+ where AppArmor blocks unprivileged user namespaces
+(otherwise the render fails with "No usable sandbox!").
 
 ### Why this toolchain
 
