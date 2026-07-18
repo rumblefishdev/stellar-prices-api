@@ -82,7 +82,7 @@
 
 ## Field 2 — Deliverable Verification - Video
 
-> https://drive.google.com/drive/folders/1t-diBX9wVlr8dWgc0iTk1cgg-9BARTV2?usp=drive_link
+> https://drive.google.com/file/d/1F6vOYCteTD_RF-f6-vE2QkfcfLlD9PvL/view?usp=drive_link
 
 ---
 
