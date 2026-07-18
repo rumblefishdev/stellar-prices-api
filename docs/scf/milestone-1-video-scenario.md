@@ -122,11 +122,10 @@ SAY:
 > materialised views do our rollups, which let us delete two Lambdas from the
 > design — I'll show you those views running in a moment.
 >
-> Let me be precise rather than dramatic about cost, and about one thing we got
-> wrong. The RDS line item was only about twelve dollars a month, because our
-> data volume is small — that alone wouldn't justify changing engines. The real
-> saving is that dropping RDS also dropped the VPC and the NAT Gateway that
-> Lambda-to-RDS connectivity needed.
+> Let me be precise rather than dramatic about cost. The RDS line item was only
+> about twelve dollars a month, because our data volume is small — that alone
+> wouldn't justify changing engines. The real saving is that dropping RDS also
+> dropped the VPC and the NAT Gateway that Lambda-to-RDS connectivity needed.
 >
 > On compression: it's a real advantage at large data scale, and it's part of
 > why the Soroban Block Explorer runs its own platform on ClickHouse at Hetzner
