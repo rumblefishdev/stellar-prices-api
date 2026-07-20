@@ -54,12 +54,13 @@ FROM prices.price_ohlcv_1m FINAL
 WHERE timestamp >= now() - INTERVAL 24 HOUR;
 
 -- (4) Per-asset, per-source coverage and largest gap for the named majors.
---     Expect: the deepest markets (XLM, AQUA on sdex) are minute-continuous
---     (largest_gap_minutes = 1). Thinner majors (BTC/ETH/EURC) show larger gaps
---     that track their lower trade frequency — a quiet market, not a broken
---     indexer (a candle exists only where a trade occurred that minute). USDC is
---     sparse as a BASE because it is almost always a quote asset. See the
---     evidence doc's note under AC 3.
+--     Expect: the deepest markets (XLM, AQUA on sdex) stay within the criterion's
+--     two-candle bound (largest_gap_minutes <= 2; the exact value drifts 1-2
+--     day to day). Thinner majors (BTC/ETH/EURC) show larger gaps that track
+--     their lower trade frequency — a quiet market, not a broken indexer (a candle
+--     exists only where a trade occurred that minute). USDC is sparse as a BASE
+--     because it is almost always a quote asset. See the evidence doc's note
+--     under AC 3.
 --
 --     Two correctness details, both REQUIRED:
 --       * Ticker codes are NOT unique on Stellar — anyone can issue an asset
@@ -119,7 +120,7 @@ ORDER BY candles_24h DESC;
 -- ---------------------------------------------------------------------------
 
 -- (6) Depth of history actually INGESTED in the store.
---     Expect: every source ~820-880 days, back to roughly Soroban activation
+--     Expect: every source ~820-885 days, back to roughly Soroban activation
 --     (2024-02-20) — ~5x the ~180-day (six-month) bar.
 --
 --     NB — this is the ingested/queryable depth, which is the honest number.
