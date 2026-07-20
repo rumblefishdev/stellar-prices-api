@@ -57,6 +57,30 @@ jobs:
       - run: npx nx format:check --all
       - run: npx nx run-many -t lint build typecheck
 
+      # Cheap counterpart to the rust job's build+verify+synth guard.
+      #
+      # The heavy guard lives in the `rust` job, which only runs when
+      # `packages/**` changes. An infra-only PR can still break the deploy by
+      # pointing `Code.fromAsset` at a crate that does not exist (a typo, or a
+      # crate that was renamed), and that would go unnoticed until an operator
+      # synthed by hand — exactly the 0070 failure. This asserts the mapping
+      # without building anything, so infra PRs do not pay for a Rust build.
+      - name: Verify Lambda asset names map to real crates
+        shell: bash
+        run: |
+          set -euo pipefail
+          missing=0
+          while IFS= read -r name; do
+            [[ -z "$name" ]] && continue
+            if grep -rqx "name = \"${name}\"" --include=Cargo.toml packages/; then
+              echo "ok: ${name}"
+            else
+              echo "::error::CDK references target/lambda/${name} but no crate is named '${name}'"
+              missing=1
+            fi
+          done < <(tools/scripts/lambda-assets.sh)
+          exit $missing
+
   rust:
     name: Rust (fmt, clippy, test, lambda build)
     needs: changes
@@ -85,6 +109,27 @@ jobs:
       - run: cargo clippy -p extractors-core -p phoenix-extractor -p soroswap-extractor -p aquarius-extractor -p ledger-processor -- -D warnings
       - run: cargo test --workspace
 
+      # The set of Lambda assets is DERIVED from the CDK source rather than
+      # hand-listed here. Three hand-maintained copies (build list, verify
+      # list, CDK `Code.fromAsset` paths) drifted twice: task 0070 hit
+      # `CannotFindAsset` at deploy time because only 6 of 9 assets were
+      # built, and the verify list checked only 5 of those 6 — so
+      # `enrichment-worker` was built and never asserted. See task 0077.
+      - name: Resolve Lambda assets from the CDK app
+        id: lambda-assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          assets="$(tools/scripts/lambda-assets.sh)"
+          echo "=== Lambda assets referenced by the CDK app ==="
+          echo "$assets"
+          echo "count=$(echo "$assets" | wc -l)"
+          {
+            echo 'names<<EOF'
+            echo "$assets"
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
       # Build the Lambda bootstrap binaries the CDK app packages via
       # `Code.fromAsset`. CI never ran this before, so a worker that
       # compiled under `cargo check` but failed to package for the Lambda
@@ -95,14 +140,16 @@ jobs:
       # `--features lambda` and explicit `-p` per crate are BOTH required —
       # a bare `cargo lambda build` silently skips these bins and produces
       # only unrelated CLI binaries.
-      - run: >-
-          cargo lambda build --release --arm64 --features lambda
-          -p prices-ledger-processor
-          -p asset-discovery
-          -p cleanup-worker
-          -p supply-worker
-          -p oracle-worker
-          -p enrichment-worker
+      - name: Build Lambda bootstraps
+        shell: bash
+        run: |
+          set -euo pipefail
+          args=()
+          while IFS= read -r name; do
+            [[ -n "$name" ]] && args+=(-p "$name")
+          done <<< "${{ steps.lambda-assets.outputs.names }}"
+          echo "cargo lambda build --release --arm64 --features lambda ${args[*]}"
+          cargo lambda build --release --arm64 --features lambda "${args[@]}"
 
       # Assert every bootstrap the CDK app references actually built. A bare
       # "any bootstrap exists" glob would false-pass on the unrelated CLIs,
@@ -111,16 +158,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          expected=(
-            prices-ledger-processor
-            asset-discovery
-            cleanup-worker
-            supply-worker
-            oracle-worker
-          )
           echo "=== Lambda bootstrap binaries ==="
           missing=0
-          for name in "${expected[@]}"; do
+          while IFS= read -r name; do
+            [[ -z "$name" ]] && continue
             bin="target/lambda/${name}/bootstrap"
             if [[ -x "$bin" ]]; then
               echo "$(sha256sum "$bin") $(stat --format='%s bytes' "$bin")"
@@ -128,5 +169,26 @@ jobs:
               echo "::error::missing Lambda bootstrap: $bin"
               missing=1
             fi
-          done
+          done <<< "${{ steps.lambda-assets.outputs.names }}"
           exit $missing
+
+      # Final proof that the app the operator deploys actually synthesizes
+      # with the assets this job just built. The build+verify steps above
+      # guarantee the SET matches; synth additionally catches stack-level
+      # errors and any asset an operator would only discover mid-deploy
+      # (which is how 0070's CannotFindAsset surfaced).
+      #
+      # Credential-free: every SSM read in the stacks is
+      # `valueForStringParameter`, which emits a CloudFormation dynamic
+      # reference resolved at DEPLOY time. There are no `fromLookup` /
+      # `valueFromLookup` context lookups, which are the calls that would
+      # need real AWS credentials at synth time.
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - run: npm ci
+
+      - name: Synth production app
+        run: make -C infra synth-production
