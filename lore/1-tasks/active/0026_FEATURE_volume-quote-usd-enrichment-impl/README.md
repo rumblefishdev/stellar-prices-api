@@ -4,7 +4,7 @@ title: "volume_quote_usd enrichment Lambda — implement the Phase 1 spec from t
 type: FEATURE
 status: active
 related_adr: ["0003", "0004", "0007"]
-related_tasks: ["0024", "0012", "0022", "0023", "0038", "0058", "0059"]
+related_tasks: ["0024", "0012", "0022", "0023", "0038", "0058", "0059", "0107"]
 tags: [layer-indexing, priority-medium, effort-medium, lambda, ohlcv, enrichment, oracle, phase-2, clickhouse]
 links:
   - "../../archive/0024_FEATURE_volume-quote-usd-enrichment/notes/G-enrichment-pass-design.md"
@@ -310,9 +310,16 @@ Carried over from task 0024's design spec §7:
       credible against Horizon's historical aggregates).
       — one-shot mode exists (`MAX_BATCHES=0`, Option 2), and **live enrichment
       is CONFIRMED writing `volume_quote_usd` in prod** (132k sdex candles/24h,
-      2026-07-20). **The only genuinely-open item:** the *historical* credibility
-      check vs Horizon, gated on **0088**'s full SDEX backfill depth + a one-shot
-      historical pass over it.
+      2026-07-20). Horizon spot-check 2026-07-20 (fixed UTC day, top XLM-quoted
+      SDEX pairs SHX/XRP/VELO): our **prices match Horizon to <0.2%**, but our
+      **volume is ~1/6 of Horizon's all-trade-types aggregate** — Horizon blends
+      order-book + classic protocol-18 liquidity-pool + path-payment trades, our
+      `sdex` is order-book offers only. NOT a query artifact (direction-split
+      ruled out; LP trades confirmed live on the pairs). ⇒ this AC cannot be
+      closed on a raw match; the like-for-like (order-book-only) reconciliation +
+      the classic-LP coverage decision are spawned as **[[0107]]**. USD depth also
+      only exists Soroban-era (oracles are Soroban-only), so the pre-Soroban 0088
+      tail is NOT a blocker here — 0107 is.
 - [~] CloudWatch metrics from spec §5 are emitted and visible in
       the dashboard. — **emit DONE, confirmed LIVE in prod 2026-07-20**
       (Option 2 + the 2026-07-02 metric
