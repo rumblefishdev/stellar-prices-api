@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "packages/prices-clickhouse",
     "packages/sdex-backfill",
+    "packages/events-backfill",
     "packages/extractors-core",
     "packages/phoenix-extractor",
     "packages/soroswap-extractor",

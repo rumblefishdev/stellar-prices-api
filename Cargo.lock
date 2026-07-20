@@ -1506,6 +1506,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40404c3f5f511ec4da6fe866ddf6a717c309fdbb69fbbad7b0f3edab8f2e835f"
 
 [[package]]
+name = "events-backfill"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "clickhouse",
+ "extractors-core",
+ "prices-ingest-core",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "extractors-core"
 version = "0.1.0"
 dependencies = [

@@ -19,6 +19,13 @@
 -- (This INSERT … SELECT maps to the target BY POSITION, so the bucket COULD be
 -- renamed here — but `rollups.sql`'s MVs match BY NAME and require `AS timestamp`
 -- (task 0071), so both files keep the same alias for consistency.)
+--
+-- version = sum(version), NOT max(version) (task 0095). The coarse tables share
+-- one monotonic version scheme with the APPEND rollup MVs (rollups.sql): a
+-- fuller aggregation sums more source versions than a partial one, so a complete
+-- bucket always outranks a partial re-roll of itself under RMT. Mixing schemes
+-- (preroll max vs MV sum) would let a partial MV bucket outrank a complete
+-- pre-rolled one, because sum ≫ max for any multi-row bucket.
 
 INSERT INTO prices.price_ohlcv_15m
 SELECT
@@ -34,7 +41,7 @@ SELECT
     argMax(close_usd, t.timestamp)            AS close_usd,
     volume_quote / nullIf(volume_base, 0)                AS vwap,
     sum(trade_count)                          AS trade_count,
-    max(version)                              AS version
+    sum(version)                              AS version
 FROM prices.price_ohlcv_1m AS t FINAL
 GROUP BY timestamp, asset_id, quote_asset_id, source;
 
@@ -52,7 +59,7 @@ SELECT
     argMax(close_usd, t.timestamp)            AS close_usd,
     volume_quote / nullIf(volume_base, 0)                AS vwap,
     sum(trade_count)                          AS trade_count,
-    max(version)                              AS version
+    sum(version)                              AS version
 FROM prices.price_ohlcv_15m AS t FINAL
 GROUP BY timestamp, asset_id, quote_asset_id, source;
 
@@ -70,7 +77,7 @@ SELECT
     argMax(close_usd, t.timestamp)            AS close_usd,
     volume_quote / nullIf(volume_base, 0)                AS vwap,
     sum(trade_count)                          AS trade_count,
-    max(version)                              AS version
+    sum(version)                              AS version
 FROM prices.price_ohlcv_1h AS t FINAL
 GROUP BY timestamp, asset_id, quote_asset_id, source;
 
@@ -88,7 +95,7 @@ SELECT
     argMax(close_usd, t.timestamp)            AS close_usd,
     volume_quote / nullIf(volume_base, 0)                AS vwap,
     sum(trade_count)                          AS trade_count,
-    max(version)                              AS version
+    sum(version)                              AS version
 FROM prices.price_ohlcv_4h AS t FINAL
 GROUP BY timestamp, asset_id, quote_asset_id, source;
 
@@ -106,7 +113,7 @@ SELECT
     argMax(close_usd, t.timestamp)            AS close_usd,
     volume_quote / nullIf(volume_base, 0)                AS vwap,
     sum(trade_count)                          AS trade_count,
-    max(version)                              AS version
+    sum(version)                              AS version
 FROM prices.price_ohlcv_1d AS t FINAL
 GROUP BY timestamp, asset_id, quote_asset_id, source;
 
@@ -124,6 +131,6 @@ SELECT
     argMax(close_usd, t.timestamp)            AS close_usd,
     volume_quote / nullIf(volume_base, 0)                AS vwap,
     sum(trade_count)                          AS trade_count,
-    max(version)                              AS version
+    sum(version)                              AS version
 FROM prices.price_ohlcv_1w AS t FINAL
 GROUP BY timestamp, asset_id, quote_asset_id, source;

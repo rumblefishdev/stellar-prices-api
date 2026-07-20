@@ -3,7 +3,7 @@ use extractors_core::{
     ExtractError, SorobanEventRow, SwapExtractor, TradeRow, Venue, VenueRegistry,
 };
 use phoenix_extractor::{
-    PHOENIX_STABLE_EVENT_COUNT, PHOENIX_XYK_EVENT_COUNT, POOL_TYPE_XYK, PhoenixPoolRegistry,
+    PHOENIX_STABLE_EVENT_COUNT, PHOENIX_XYK_MIN_EVENT_COUNT, POOL_TYPE_XYK, PhoenixPoolRegistry,
     PhoenixXykExtractor,
 };
 use soroswap_extractor::{SoroswapPairExtractor, SoroswapPoolRegistry};
@@ -46,7 +46,13 @@ pub fn dispatch_phoenix(
         })?;
 
     match (pool.pool_type, rows.len()) {
-        (POOL_TYPE_XYK, n) if n >= PHOENIX_XYK_EVENT_COUNT => {
+        // Gate on the MINIMUM priceable group, not the fully-populated one.
+        // Phoenix omits optional fields, so swap groups are variable length;
+        // `>= PHOENIX_XYK_EVENT_COUNT` (8) discarded every 7-event swap — 5,175
+        // of them (~2.1%) over the Soroban era, in live as well as backfill.
+        // The extractor validates the four required fields and rejects
+        // non-swap groups (liquidity events) on topic0 / missing fields.
+        (POOL_TYPE_XYK, n) if n >= PHOENIX_XYK_MIN_EVENT_COUNT => {
             let result = PhoenixXykExtractor.extract(rows)?;
             Ok(result.trades)
         }
