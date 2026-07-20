@@ -2,9 +2,9 @@
 id: "0077"
 title: "CI should build all 9 Lambda assets + run synth-production so a missing asset fails loudly"
 type: FEATURE
-status: backlog
+status: active
 related_adr: []
-related_tasks: ["0070", "0056", "0026"]
+related_tasks: ["0070", "0056", "0026", "0108"]
 tags: [layer-ops, ci, cdk, cargo-lambda, priority-medium, effort-small]
 links: []
 history:
@@ -19,6 +19,16 @@ history:
       enrichment, backfill-freshness-probe, mtls-notafter-probe) but ci.yml
       builds only SIX (missing the two 0056 probes + prices-api) and never runs
       synth-production, so the drift is invisible until an operator synths by hand.
+  - date: 2026-07-20
+    status: active
+    who: okarcz
+    note: >
+      Activated from the 0108 grooming sweep, which re-verified the gap and found
+      it **worse than described**: CI builds 6 crates but the "Verify Lambda
+      artifacts" `expected=()` array lists only **5** — `enrichment-worker` is
+      built and never checked, so its bootstrap could silently fail to package
+      and still pass CI. Confirmed 9 assets are referenced by the production app
+      (7 in eventbridge-stack.ts, 2 in compute-stack.ts).
 ---
 
 # CI should build all 9 Lambda assets + run synth-production
