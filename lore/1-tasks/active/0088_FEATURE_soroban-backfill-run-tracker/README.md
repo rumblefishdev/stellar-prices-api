@@ -233,6 +233,27 @@ per-chunk pre-roll variant. Give the cluster owner a heads-up for the window.
       destroyed. Verify with the year-histogram in §Recovery plan — a smooth ramp
       from 2015, no absent years. (Historical note: 0092 resolved "BE needs
       Soroban-era only", so this is coverage-completeness, not a BE blocker.)
+- [ ] 🔴 **`prices-production-cleanup` stays DISABLED for the entire recovery** — from
+      2026-07-20 until **after** `preroll-incremental.sql` has landed the pre-Soroban
+      `1m` in the coarse forever-tables (~12 days: pass 1 ~6.3d + pass 2 ~5d + pre-roll).
+      **Enabling it early is destructive, not merely a paused retention policy:** it
+      deletes the run's output as fast as the backfill writes it and re-creates the exact
+      history gap this task exists to close — unrecoverable except by re-downloading the
+      span. `price_ohlcv_1m` is the ONLY copy until the pre-roll runs. Re-check before
+      each recovery step:
+      ```bash
+      aws events describe-rule --name prices-production-cleanup --region eu-central-1 \
+        --profile soroban-explorer --query 'State'   # MUST be "DISABLED"
+      ```
+      If something appears to require enabling it (e.g. disk pressure — 564 GB was free
+      on 2026-07-20, so there is no headroom argument), **stop and escalate to the
+      cluster owner** rather than flipping the rule. Close this AC only once cleanup has
+      been deliberately re-enabled as the final recovery step, with coarse coverage back
+      to genesis verified first. Memory: [[cleanup-rule-shreds-backfill-output]].
+- [ ] **Pre-Soroban `1m` rolled up before cleanup returns** — `preroll-incremental.sql`
+      (NOT `preroll.sql`) run per `docs/runbooks/preroll-incremental-presoroban.md`,
+      coarse tables verified to cover genesis → activation, and only then
+      `aws events enable-rule`. This is recovery step 3→4 in §Recovery plan.
 - [~] `GET /backfill/status` monotonic; `soroban_amm`→`completed` (reached the floor
       63352611), `sdex_archive` tail run killed (not needed). Re-confirm the status
       endpoint reflects the final state (`status='paused'`); minor remaining check.
