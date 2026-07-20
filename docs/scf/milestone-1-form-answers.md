@@ -33,8 +33,8 @@
 >    conversion) and Redstone — but neither ever sets a price.
 > 3. **24 hours of continuous 1-minute candles** for more than 20 major assets
 >    (XLM, USDC, EURC, AQUA, BTC, ETH among them). The deepest order-book
->    markets — XLM and AQUA on SDEX — are minute-continuous (largest gap 1
->    minute); gaps on thinner majors reflect genuine market quiet, since a
+>    markets — XLM and AQUA on SDEX — stay within the two-candle bound (largest
+>    gap 2 minutes); gaps on thinner majors reflect genuine market quiet, since a
 >    candle exists only when a trade occurs in that minute.
 > 4. **Coarser granularities are derived in the database, not in application
 >    code.** A ClickHouse materialised-view chain rolls
@@ -82,7 +82,7 @@
 
 ## Field 2 — Deliverable Verification - Video
 
-> https://drive.google.com/file/d/1F6vOYCteTD_RF-f6-vE2QkfcfLlD9PvL/view?usp=drive_link
+> https://drive.google.com/file/d/1OF7MSpFB0ZE1Qx5dcKRp6ZV1yVa0MQpP/view?usp=drive_link
 
 ---
 
@@ -138,32 +138,32 @@
 
 ## Pre-submission checklist
 
-- [ ] `master` merged up to date and all Field 3 links resolve anonymously in an
+- [x] `master` merged up to date and all Field 3 links resolve anonymously in an
       incognito window.
-- [ ] Operator has run [`ch-demo-queries.sql`](./ch-demo-queries.sql) against
+- [x] Operator has run [`ch-demo-queries.sql`](./ch-demo-queries.sql) against
       production and pasted every output into `milestone-1-evidence.md`
       (replacing the `<TODO: paste output>` markers).
-- [ ] Screenshots captured for every `<TODO: screenshot>` marker (CDK synth
+- [x] Screenshots captured for every `<TODO: screenshot>` marker (CDK synth
       grep, CloudWatch alarms in OK state, Slack alarm notification).
-- [ ] `architecture.png` rendered from `architecture.mmd`:
+- [x] `architecture.png` rendered from `architecture.mmd`:
       `npx -y @mermaid-js/mermaid-cli -i architecture.mmd -o architecture.png -s 3 -p puppeteer-config.json`
-- [ ] AC 3 verified live: ≥ 20 assets with 24 h of candles; deepest markets
-      (XLM, AQUA on SDEX) minute-continuous (largest gap 1 min), thinner majors'
-      gaps consistent with market quiet.
-- [ ] AC 6 verified live: `earliest_data_available` ≈ 6 months back.
-- [ ] Re-verify the six non-AC API routes respond before publication, or leave
+- [x] AC 3 verified live: ≥ 20 assets with 24 h of candles; deepest markets
+      (XLM, AQUA on SDEX) within the two-candle bound (largest gap 2 min),
+      thinner majors' gaps consistent with market quiet.
+- [x] AC 6 verified live: `earliest_data_available` ≈ 6 months back.
+- [x] Re-verify the six non-AC API routes respond before publication, or leave
       them unclaimed — Field 1 deliberately claims only `/v1/backfill/status`.
-- [ ] `milestone-1-evidence.md` finalised and exported: `./build-pdf.sh`.
-- [ ] PDF uploaded to a Google Drive folder with link-sharing set to
+- [x] `milestone-1-evidence.md` finalised and exported: `./build-pdf.sh`.
+- [x] PDF uploaded to a Google Drive folder with link-sharing set to
       "anyone with the link can view".
-- [ ] Drive folder link copied into Field 1 closer **and** Field 3 opener
+- [x] Drive folder link copied into Field 1 closer **and** Field 3 opener
       (replace both `<DRIVE_*>` placeholders).
-- [ ] Video uploaded with public sharing; URL pasted into Field 2.
-- [ ] All `<ANGLE_BRACKET>` placeholders in this file replaced.
-- [ ] `curl -sS https://02mabge71l.execute-api.eu-central-1.amazonaws.com/production/health`
+- [x] Video uploaded with public sharing; URL pasted into Field 2.
+- [x] All `<ANGLE_BRACKET>` placeholders in this file replaced.
+- [x] `curl -sS https://02mabge71l.execute-api.eu-central-1.amazonaws.com/production/health`
       returns 200.
-- [ ] No API key, certificate, or other secret material visible in the PDF, the
+- [x] No API key, certificate, or other secret material visible in the PDF, the
       screenshots, or any video frame.
-- [ ] Field 4 — decide between `—` and a specific support request.
-- [ ] English-only across all four blocks (no Polish, no internal slang, no
+- [x] Field 4 — decide between `—` and a specific support request.
+- [x] English-only across all four blocks (no Polish, no internal slang, no
       personal usernames).
