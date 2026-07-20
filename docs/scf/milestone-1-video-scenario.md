@@ -191,9 +191,9 @@ SAY:
 > endpoint Milestone 1 requires — the full public API surface is Tranche 2.
 >
 > Without a key: 403 — access control is enforced at the gateway. With the key:
-> the dual-stream progress payload — the SDEX archive stream and the Soroban AMM
-> stream, each with its status, current and target ledger, progress percentage,
-> and the timestamp of its last push.
+> the dual-stream progress payload — the SDEX archive stream with its current and
+> target ledger and progress percentage, and the Soroban AMM stream with its
+> status and last push.
 >
 > For the depth of history — criterion six — here's the daily table directly:
 > every source goes back to roughly Soroban activation, around 880 days,
