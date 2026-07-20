@@ -2,9 +2,9 @@
 id: "0073"
 title: "Store earliest_data_available on backfill_progress + populate it in the backfill push steps"
 type: FEATURE
-status: backlog
+status: completed
 related_adr: []
-related_tasks: ["0040", "0051"]
+related_tasks: ["0040", "0051", "0053", "0106", "0108"]
 tags: ["phase-future", "effort-medium", "priority-medium"]
 links: []
 history:
@@ -32,6 +32,22 @@ history:
       it lands older candles. **This task now owns only the 0040 read-side
       upgrade**: swap `/backfill/status` + the OHLCV `backfill_note` from the
       interim live per-asset `min(timestamp)` to the stored column.
+  - date: 2026-07-20
+    status: completed
+    who: okarcz
+    note: >
+      **DONE — completed under task 0106** (PR #125 impl, PR #126 archive), which
+      shipped this task's remaining read-side scope without ever closing this ID.
+      Found and verified during the 0108 post-M1 grooming sweep.
+      Evidence: `packages/prices-api/src/backfill/queries_ch.rs:30` selects the
+      stored `earliest_data_available` from `backfill_progress FINAL`; no
+      `min(timestamp)` remains anywhere in the backfill module. Carried on
+      `ProgressRow` (queries_ch.rs:15), mapped into both DTO variants
+      (handlers.rs:35, :42), declared at dto.rs:42, :53. The OHLCV
+      `backfill_note` no longer runs a per-asset min() either — it derives its
+      "from" date from the first already-fetched candle
+      (`assets/handlers.rs:344-360`), so the interim scan is gone as required.
+      Producer half had already landed in 0053. Archived, no work remaining.
 ---
 
 # Store earliest_data_available on backfill_progress
@@ -73,5 +89,8 @@ expensive at scale). Same producer-gap shape as task 0072.
 - [x] `backfill_progress.earliest_data_available` column exists (init.sql). — **done in 0053**
 - [ ] The backfill populates/lowers it; integration test asserts it reflects
       the oldest landed candle. — **producer done in 0053; assertion tracked there**
-- [ ] `/backfill/status` exposes it per stream (no live min scan).
-- [ ] 0040 OHLCV `backfill_note` reads the stored value; interim min() removed.
+- [x] `/backfill/status` exposes it per stream (no live min scan). — **done in 0106**
+- [x] 0040 OHLCV `backfill_note` reads the stored value; interim min() removed. — **done in 0106**
+      (resolved slightly differently than specced: the note reuses the first
+      already-fetched candle rather than reading the stored column, which meets the
+      intent — no extra scan on the hot path — at per-asset granularity.)

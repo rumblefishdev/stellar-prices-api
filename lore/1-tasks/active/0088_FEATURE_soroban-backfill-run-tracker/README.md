@@ -204,6 +204,8 @@ per-chunk pre-roll variant. Give the cluster owner a heads-up for the window.
   `prices-production-cleanup` is ENABLED. The precondition currently lives only in
   runbook prose and demonstrably did not survive the gap between the 0090 rerun and
   the 2026-07-15 tail start. This is the fix that actually prevents recurrence.
+  → **spawned as task 0109** (2026-07-20). Scoped so it cannot block the recovery
+  run currently in flight.
 - **`CH()` helper is broken** in `docs/runbooks/fix-backfill-history-loss-and-rerun.md:97` —
   it passes `$*`, which drops quoting, so the remote shell splits the query and
   every multi-line example in that runbook fails with
