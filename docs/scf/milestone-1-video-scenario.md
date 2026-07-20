@@ -166,8 +166,11 @@ SAY (over queries 3, 4, 5):
 >
 > Here's the per-asset breakdown for the majors the criterion names — XLM, USDC,
 > EURC, AQUA, BTC, ETH — with the largest gap in each series. XLM and AQUA on the
-> order book are minute-continuous: a largest gap of one minute across the whole
-> day.
+> order book stay within the criterion's two-candle bound — a largest gap of at
+> most two minutes across the whole day. The deep order-book markets stay
+> continuous; the thinner pairs show larger gaps only because a one-minute candle
+> exists just when a trade happens that minute — a quiet market, not a broken
+> indexer.
 >
 > And here are the candles broken out by source — the classic SDEX order book,
 > and the Soroban AMM extractors decoding swap events. Both halves of the

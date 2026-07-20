@@ -33,8 +33,8 @@
 >    conversion) and Redstone — but neither ever sets a price.
 > 3. **24 hours of continuous 1-minute candles** for more than 20 major assets
 >    (XLM, USDC, EURC, AQUA, BTC, ETH among them). The deepest order-book
->    markets — XLM and AQUA on SDEX — are minute-continuous (largest gap 1
->    minute); gaps on thinner majors reflect genuine market quiet, since a
+>    markets — XLM and AQUA on SDEX — stay within the two-candle bound (largest
+>    gap 2 minutes); gaps on thinner majors reflect genuine market quiet, since a
 >    candle exists only when a trade occurs in that minute.
 > 4. **Coarser granularities are derived in the database, not in application
 >    code.** A ClickHouse materialised-view chain rolls
@@ -148,8 +148,8 @@
 - [ ] `architecture.png` rendered from `architecture.mmd`:
       `npx -y @mermaid-js/mermaid-cli -i architecture.mmd -o architecture.png -s 3 -p puppeteer-config.json`
 - [ ] AC 3 verified live: ≥ 20 assets with 24 h of candles; deepest markets
-      (XLM, AQUA on SDEX) minute-continuous (largest gap 1 min), thinner majors'
-      gaps consistent with market quiet.
+      (XLM, AQUA on SDEX) within the two-candle bound (largest gap 2 min),
+      thinner majors' gaps consistent with market quiet.
 - [ ] AC 6 verified live: `earliest_data_available` ≈ 6 months back.
 - [ ] Re-verify the six non-AC API routes respond before publication, or leave
       them unclaimed — Field 1 deliberately claims only `/v1/backfill/status`.

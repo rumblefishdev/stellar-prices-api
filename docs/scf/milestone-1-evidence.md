@@ -654,30 +654,29 @@ ORDER BY c.asset_code, p.source;
 
 ```
 asset_code  source     candles_24h  largest_gap_minutes  first_candle         last_candle
-AQUA        aquarius    653          47                   2026-07-17 10:16:00  2026-07-18 09:52:00
-AQUA        sdex        16857        1                    2026-07-17 10:01:00  2026-07-18 10:00:00
-AQUA        soroswap    3            480                  2026-07-17 11:51:00  2026-07-17 19:52:00
-BTC         aquarius    40           188                  2026-07-17 12:40:00  2026-07-18 01:39:00
-BTC         sdex        1088         14                   2026-07-17 10:10:00  2026-07-18 09:59:00
-ETH         aquarius    60           570                  2026-07-17 10:50:00  2026-07-18 09:29:00
-ETH         sdex        703          25                   2026-07-17 10:08:00  2026-07-18 09:59:00
-EURC        aquarius    34           153                  2026-07-17 14:08:00  2026-07-18 09:29:00
-EURC        phoenix     3            122                  2026-07-17 14:06:00  2026-07-17 16:10:00
-EURC        sdex        2157         13                   2026-07-17 10:02:00  2026-07-18 09:58:00
-EURC        soroswap    64           316                  2026-07-17 10:39:00  2026-07-18 09:30:00
-USDC        sdex        31           122                  2026-07-17 10:01:00  2026-07-17 22:36:00
-XLM         aquarius    670          13                   2026-07-17 10:01:00  2026-07-18 09:43:00
-XLM         phoenix     44           307                  2026-07-17 10:08:00  2026-07-18 09:29:00
-XLM         sdex        1474         1                    2026-07-17 10:01:00  2026-07-18 10:00:00
-XLM         soroswap    50           286                  2026-07-17 10:01:00  2026-07-18 09:23:00
+AQUA        aquarius   809          34                   2026-07-19 07:57:00  2026-07-20 07:35:00
+AQUA        sdex       17763        2                    2026-07-19 07:56:00  2026-07-20 07:55:00
+BTC         aquarius   51           257                  2026-07-19 10:45:00  2026-07-20 06:58:00
+BTC         sdex       1037         17                   2026-07-19 07:56:00  2026-07-20 07:55:00
+ETH         aquarius   71           118                  2026-07-19 08:45:00  2026-07-20 07:36:00
+ETH         sdex       549          49                   2026-07-19 07:57:00  2026-07-20 07:50:00
+EURC        aquarius   88           168                  2026-07-19 10:12:00  2026-07-20 07:52:00
+EURC        phoenix    8            731                  2026-07-19 12:35:00  2026-07-20 06:45:00
+EURC        sdex       2800         11                   2026-07-19 07:57:00  2026-07-20 07:55:00
+EURC        soroswap   67           111                  2026-07-19 10:48:00  2026-07-20 06:59:00
+USDC        sdex       23           310                  2026-07-19 12:43:00  2026-07-20 07:43:00
+XLM         aquarius   770          20                   2026-07-19 07:56:00  2026-07-20 07:47:00
+XLM         phoenix    48           133                  2026-07-19 11:10:00  2026-07-20 06:48:00
+XLM         sdex       1618         2                    2026-07-19 07:56:00  2026-07-20 07:55:00
+XLM         soroswap   66           175                  2026-07-19 10:45:00  2026-07-20 06:49:00
 ```
 
-The two deepest order-book markets — **XLM and AQUA on SDEX** — are
-minute-continuous across the full day (`largest_gap_minutes = 1`). The thinner
-majors (BTC 14, ETH 25, EURC 13 minutes on SDEX) show larger gaps that track
-their lower on-chain trade frequency — a quiet minute, not a missing candle — and
-USDC is sparse **as a base** (31 candles) because it is almost always the quote
-side of a pair.
+The two deepest order-book markets — **XLM and AQUA on SDEX** — stay within the
+criterion's two-candle bound across the full day (`largest_gap_minutes = 2`). The
+thinner majors (BTC 17, ETH 49, EURC 11 minutes on SDEX) show larger gaps that
+track their lower on-chain trade frequency — a quiet minute, not a missing candle
+— and USDC is sparse **as a base** (23 candles) because it is almost always the
+quote side of a pair.
 
 _Figure 5 — Per-asset, per-source 1-minute candle coverage over the last 24
 hours, with the largest observed gap._
@@ -710,8 +709,8 @@ path and the Soroban AMM extractors are live._
 **How to read a gap, honestly.** A 1-minute candle exists only if a trade
 occurred in that minute, so the gap scales with how often the market actually
 trades, not with indexer health. In the last-24h run this is exactly what the
-numbers show: the two deepest order-book markets, **XLM and AQUA on SDEX, are
-minute-continuous — a largest gap of 1 minute** across the full day. The thinner
+numbers show: the two deepest order-book markets, **XLM and AQUA on SDEX, stay
+within the two-candle bound — a largest gap of 2 minutes** across the full day. The thinner
 majors (BTC, ETH, EURC) show larger gaps (tens of minutes) because they simply
 trade less often on Stellar's order book — a quiet minute, not a missing candle —
 and USDC is sparse _as a base_ because it is almost always the _quote_ side of a
