@@ -210,6 +210,32 @@ history:
       prettier clean; `cdk synth` of the Observability stack confirms the alarm
       renders on `EnrichmentRowsRemainingRecent` with the SNS action wired.
       Task stays `active` (deploy-gated ACs unchanged).
+  - date: 2026-07-20
+    status: active
+    who: okarcz
+    note: >
+      RECONCILIATION — the "deploy-gated / not deployed" premise is STALE: the
+      enrichment Lambda is deployed and fully operational in prod. Verified
+      2026-07-20 via read-only AWS + CH. `prices-production-enrichment` Active,
+      LastModified 2026-07-07 (post-dates the last 0026 code change 07-02, so the
+      live binary is current); CloudFormation `Prices-production-EventBridge`
+      carries the full enrichment set (Function/Rule/Role/Policy/ErrorAlarm/
+      LogGroup/InvokePermission, all *_COMPLETE); rule `prices-production-enrichment`
+      ENABLED rate(1 hour). Running clean hourly — 24×1 invocations over 24h, 0
+      errors. All `Prices/Enrichment` metrics live: `EnrichmentRowsEnriched`
+      3.7k–7.6k/hr; `EnrichmentRowsRemainingRecent` ~30–32k FLAT (keeps pace with
+      live ingestion — alarm stays OK since Enriched>0); `EnrichmentOracleMiss` ≈
+      `EnrichmentRowsRemainingAtVolumeZero` ~5.4M→6.0M climbing = the expected
+      permanent deep-history exotic-quote floor (exactly finding #5's rationale
+      for the recency-bounded alarm), growing as 0088 backfills no-reference
+      history. CH effect confirmed: `close_usd`/`volume_quote_usd` set on 132,120
+      sdex / 2,192 aquarius / 185 soroswap / 75 phoenix candles in the last 24h.
+      ⇒ the deploy + IAM + metrics-EMIT ACs are met LIVE (not just synth); only
+      the Horizon volume-credibility AC remains, gated on 0088's backfill depth +
+      a one-shot historical pass. Status stays `active`. NB the deploy happened
+      despite this task's standing prepare-not-deploy note — most likely carried
+      by a whole-`Prices-production-EventBridge` stack deploy; flagged for
+      awareness, not a regression.
 ---
 
 # `volume_quote_usd` enrichment Lambda — implementation
@@ -261,33 +287,43 @@ notes when made.
 Carried over from task 0024's design spec §7:
 
 - [x] EventBridge cron Lambda exists with the schema in §2 wired up.
-      — CDK authored in `eventbridge-stack.ts` (`EnrichmentRule` rate(1 hour)
-      → worker Function), `cdk synth` verified; live deploy still pending.
+      — CDK in `eventbridge-stack.ts` (`EnrichmentRule` rate(1 hour) → worker
+      Function). **DEPLOYED to prod (Lambda LastModified 2026-07-07), rule
+      ENABLED, verified live 2026-07-20.**
 - [x] CDK + IAM matches §1.1 / §1.2.
       — `createWorkerLambda` (IAM role + mTLS-secret read + SSM read + error
-      alarm + log group), arm64/PROVIDED_AL2023; synth-verified. Deploy pending.
+      alarm + log group), arm64/PROVIDED_AL2023. **Deployed + verified live
+      2026-07-20** (all enrichment resources `*_COMPLETE` in
+      `Prices-production-EventBridge`).
 - [x] Re-running on already-enriched rows produces zero changes
       (idempotency test). — `ch_enrich_it.rs` vs prod-pinned CH 26.3.10.60.
 - [x] Rows with missing oracle stay at `volume_quote_usd = 0`,
       `EnrichmentOracleMiss` metric increments. — "no reference stays 0"
       verified by `ch_enrich_it.rs`; the `EnrichmentOracleMiss` metric is now
       emitted (Option 2: `metrics.rs` maps `ChPassStats.oracle_misses` →
-      CloudWatch, alarm wired). Live increment observable only post-deploy.
+      CloudWatch, alarm wired). **Live increment CONFIRMED in prod 2026-07-20**
+      (`EnrichmentOracleMiss` ~5.4M→6.0M, climbing as 0088 backfills no-reference
+      history).
 - [ ] After full SDEX backfill + a one-shot historical enrichment
       pass, `current_prices.volume_24h_usd` for at least 3
       XLM-quoted assets reflects SDEX-sourced volume (>0 and
       credible against Horizon's historical aggregates).
-      — one-shot mode now exists (`MAX_BATCHES=0`, Option 2); the live
-      credibility check is still deploy-gated (Option 3).
-- [ ] CloudWatch metrics from spec §5 are emitted and visible in
-      the dashboard. — **emit half done** (Option 2 + the 2026-07-02 metric
+      — one-shot mode exists (`MAX_BATCHES=0`, Option 2), and **live enrichment
+      is CONFIRMED writing `volume_quote_usd` in prod** (132k sdex candles/24h,
+      2026-07-20). **The only genuinely-open item:** the *historical* credibility
+      check vs Horizon, gated on **0088**'s full SDEX backfill depth + a one-shot
+      historical pass over it.
+- [~] CloudWatch metrics from spec §5 are emitted and visible in
+      the dashboard. — **emit DONE, confirmed LIVE in prod 2026-07-20**
+      (Option 2 + the 2026-07-02 metric
       items: `EnrichmentRowsEnriched` / `EnrichmentOracleMiss` /
       `EnrichmentRowsRemainingAtVolumeZero` / `EnrichmentRowsRemainingRecent` /
       `EnrichmentPassDurationMs` / `EnrichmentAvgBatchDurationMs` published via
       `aws_sdk_cloudwatch` under `Prices/Enrichment`; the progress-based stall
-      alarm now gates on `EnrichmentRowsRemainingRecent`, synth-verified).
-      Dashboard widgets + live visibility remain deploy-gated (task 0056 owns
-      the dashboard; observability-stack is still a scaffold).
+      alarm gates on `EnrichmentRowsRemainingRecent`). All six metrics confirmed
+      publishing live 2026-07-20. Marked `[~]`: emission is done + live; only the
+      **dashboard widget** remains, which is **task 0056's** scope (the
+      observability-stack dashboard is still a scaffold).
 
 ## Future Work
 
