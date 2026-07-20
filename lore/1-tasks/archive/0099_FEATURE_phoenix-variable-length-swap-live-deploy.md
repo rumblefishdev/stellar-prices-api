@@ -2,7 +2,7 @@
 id: "0099"
 title: "Deploy the Phoenix variable-length swap fix to live"
 type: FEATURE
-status: active
+status: completed
 related_adr: []
 related_tasks: ["0097", "0096", "0101"]
 tags: [layer-indexing, priority-high, effort-small, milestone-M1, amm, phoenix, live, deploy]
@@ -11,6 +11,17 @@ links:
   - "../../../packages/phoenix-extractor/src/xyk.rs"
   - "../../../packages/ledger-processor/src/dispatch.rs"
 history:
+  - date: 2026-07-20
+    status: completed
+    who: okarcz
+    note: >
+      COMPLETED. The only open AC — phoenix `latest_candle` advancing past the
+      deploy (2026-07-17 11:57:52) under the new variable-length dispatch — is
+      confirmed on live prod: phoenix priced candles on 2026-07-20, max
+      `latest_candle` 2026-07-20 11:36:00 (per-asset: XLM 06:48, EURC 06:45),
+      ~3 days after deploy with no rollback. The new binary prices Phoenix
+      7-event (variable-length) swaps live. The live-era reprice was already
+      moved to 0101 (M2), so nothing else remains here. Archived.
   - date: 2026-07-17
     status: active
     who: okarcz
@@ -92,10 +103,10 @@ Soroswap 07-06 → 07-15 hole.
       (`33521e28…` → `d2e17649…`); LastModified verified; arm64.
 - [x] Ingestion healthy under the new binary — sdex + aquarius advanced to 12:09
       (15s behind); aquarius is an AMM source on the same classify→dispatch path.
-- [ ] **Spot-check:** phoenix `latest_candle` advances past 11:57:52, proving the
-      new dispatch prices a phoenix swap live. Blocked only on phoenix trading —
-      its last event (~11:44) predates the deploy. Verified NOT a bug: per venue
-      the last candle tracks the last event to within ~1–2 min. If phoenix events
-      arrive with no candle → roll back to bootstrap asset `33521e28…`.
+- [x] **Spot-check:** phoenix `latest_candle` advances past 11:57:52, proving the
+      new dispatch prices a phoenix swap live. **Confirmed 2026-07-20** — phoenix
+      `max(latest_candle)` = 2026-07-20 11:36:00 (XLM 06:48, EURC 06:45), ~3 days
+      after deploy, so the new binary prices Phoenix swaps live. No rollback
+      needed.
 - [ ] ~~Live-era Phoenix gap repriced + pre-rolled~~ → **moved to 0101**
       (milestone 2).
