@@ -204,6 +204,18 @@ aws events describe-rule --name prices-production-cleanup --region eu-central-1 
 | 3 | **Incremental pre-roll** — `preroll-incremental.sql` | hours | `docs/runbooks/preroll-incremental-presoroban.md`. NOT `preroll.sql` (full rebuild wipes the Soroban-era coarse). Pre-flight: floor ≈ 50,457,423, exact activation boundary timestamp, cleanup still DISABLED. |
 | 4 | **Re-enable cleanup** — `aws events enable-rule` | — | Only after step 3 verifies coarse coverage back to genesis. |
 
+> 🔴 **Step 3 pre-flight — USD coverage gate (added 2026-07-21, see [[0114]]).**
+> The pre-roll copies `price_ohlcv_1m` **as-is**, and nothing ever re-enriches a
+> coarse row afterwards. Measured 2026-07-21, 1m is **62% `close_usd = 0`** — so
+> pre-rolling now would bake a near-empty USD column into the forever-tables for
+> the tail this task spent two weeks rebuilding, permanently (0114 defect 1).
+> Before running step 3, **either** enrich the 1m tail first, **or** consciously
+> accept the gap and schedule a coarse repair pass after. Check:
+> ```sql
+> SELECT round(100 * countIf(close_usd = 0) / count(), 1) AS pct_zero
+> FROM prices.price_ohlcv_1m FINAL WHERE timestamp < '2024-02-20';
+> ```
+
 **Why re-run the full `[1, 23423999]` rather than preserving the trusted
 `201901`–`201904`:** `price_ohlcv_1m` has no ledger column, so mapping a month
 boundary back to a ledger is awkward and error-prone; the saving is only ~2M
