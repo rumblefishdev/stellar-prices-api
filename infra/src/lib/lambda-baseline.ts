@@ -87,6 +87,24 @@ export function lambdaLogGroupName(
 }
 
 /**
+ * Deployed function name for a scheduled worker Lambda.
+ *
+ * Single source of truth: {@link createWorkerLambda} sets `functionName` from
+ * this, and ObservabilityStack builds its `FunctionName` alarm dimension from
+ * it too (task 0112). Alarms key on the deployed name as a plain string — an
+ * alarm pointed at a name that does not exist does not error, it just never
+ * fires — so a rename that updated only the stack would silently disarm the
+ * alarms rather than break the build. Deriving both from here removes that
+ * failure mode instead of relying on a reviewer to notice.
+ */
+export function workerFunctionName(
+  envName: string,
+  lambdaName: string,
+): string {
+  return `prices-${envName}-${lambdaName}`;
+}
+
+/**
  * Creates an IAM role for a prices-api Lambda with the baseline
  * permissions applied (CloudWatch Logs + mTLS secrets + SSM read).
  *
@@ -257,7 +275,7 @@ export function createWorkerLambda(
 
   const fn = new lambda.Function(scope, `${idPrefix}Function`, {
     ...pricesLambdaDefaults, // ARM64 + PROVIDED_AL2023 (ADR 0006/0007)
-    functionName: `prices-${env}-${name}`,
+    functionName: workerFunctionName(env, name),
     handler: 'bootstrap',
     code: lambda.Code.fromAsset(assetDir),
     role,

@@ -101,6 +101,24 @@ export class EventBridgeStack extends cdk.Stack {
     const accountId = this.account;
     const schedules = config.scheduleExpressions;
 
+    // Shared ops SNS action, wired to EVERY worker's `-errors` alarm.
+    //
+    // createWorkerLambda creates `prices-{env}-{name}-errors` for each worker,
+    // but an alarm with no action is inert: it transitions to ALARM and tells
+    // nobody. Only the two probes passed `errorAlarmActions`, so the five cron
+    // workers had error alarms that could never notify. That is how
+    // prices-production-enrichment failed 72/72 invocations a day for four days
+    // (2026-07-14 to 07-17) with nobody paged (task 0112).
+    //
+    // Imported by deterministic name — no cross-stack CFN reference, so the two
+    // stacks stay independently deployable (see `opsAlarmsTopicName`).
+    const opsAlarmsTopic = sns.Topic.fromTopicArn(
+      this,
+      'OpsAlarmsTopicRef',
+      `arn:aws:sns:${region}:${accountId}:${opsAlarmsTopicName(env)}`,
+    );
+    const opsAlarmAction = new cw_actions.SnsAction(opsAlarmsTopic);
+
     this.assetSupplyRule = new events.Rule(this, 'AssetSupplyRule', {
       ruleName: `prices-${env}-asset-supply`,
       description: `Per-asset circulating-supply fetch → asset_supply (${env})`,
@@ -190,6 +208,7 @@ export class EventBridgeStack extends cdk.Stack {
       mtlsSecretName: discoveryMtlsSecretName,
       idPrefix: 'AssetDiscovery',
       name: 'asset-discovery',
+      errorAlarmActions: [opsAlarmAction],
       assetDir: ASSET_DISCOVERY_ASSET_DIR,
       memorySize: 512,
       // Bounded by MAX_LEDGERS in the binary; a catch-up run fetches+decodes
@@ -237,6 +256,7 @@ export class EventBridgeStack extends cdk.Stack {
       mtlsSecretName: discoveryMtlsSecretName,
       idPrefix: 'Cleanup',
       name: 'cleanup',
+      errorAlarmActions: [opsAlarmAction],
       assetDir: CLEANUP_WORKER_ASSET_DIR,
       memorySize: 256,
       // DROP PARTITION is metadata-only; the run is a handful of queries.
@@ -261,6 +281,7 @@ export class EventBridgeStack extends cdk.Stack {
       mtlsSecretName: discoveryMtlsSecretName,
       idPrefix: 'Supply',
       name: 'supply',
+      errorAlarmActions: [opsAlarmAction],
       assetDir: SUPPLY_WORKER_ASSET_DIR,
       memorySize: 512,
       // Sequential Horizon GETs across the asset registry. The worker walks the
@@ -321,6 +342,7 @@ export class EventBridgeStack extends cdk.Stack {
       mtlsSecretName: discoveryMtlsSecretName,
       idPrefix: 'Oracle',
       name: 'oracle',
+      errorAlarmActions: [opsAlarmAction],
       assetDir: ORACLE_WORKER_ASSET_DIR,
       memorySize: 256,
       timeout: cdk.Duration.minutes(2),
@@ -352,6 +374,7 @@ export class EventBridgeStack extends cdk.Stack {
       mtlsSecretName: discoveryMtlsSecretName,
       idPrefix: 'Enrichment',
       name: 'enrichment',
+      errorAlarmActions: [opsAlarmAction],
       assetDir: ENRICHMENT_WORKER_ASSET_DIR,
       memorySize: 512,
       // A bounded pass is MAX_BATCHES × BATCH_SIZE rows of set-based
@@ -412,12 +435,6 @@ export class EventBridgeStack extends cdk.Stack {
     // Imported by deterministic name — no cross-stack CFN reference, so the two
     // stacks stay independently deployable (see `opsAlarmsTopicName`).
     // -----------------------------------------------------------------
-    const opsAlarmsTopic = sns.Topic.fromTopicArn(
-      this,
-      'OpsAlarmsTopicRef',
-      `arn:aws:sns:${region}:${accountId}:${opsAlarmsTopicName(env)}`,
-    );
-    const opsAlarmAction = new cw_actions.SnsAction(opsAlarmsTopic);
 
     // -----------------------------------------------------------------
     // Backfill freshness probe (task 0056) + its rate(15m) target. CH-only
