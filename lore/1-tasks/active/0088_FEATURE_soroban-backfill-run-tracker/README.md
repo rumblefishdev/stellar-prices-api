@@ -107,6 +107,32 @@ history:
       check the cleanup rule state before reaching for any data-shape explanation.
       Recovery plan added below (§Recovery plan). Memory:
       [[cleanup-rule-shreds-backfill-output]].
+  - date: 2026-07-21
+    status: active
+    who: okarcz
+    note: >
+      Health check. Pass 1 RUNNING and ON RATE: floor 27,583,999 at 13:35 UTC,
+      up 4.16M ledgers in 23h20m = 178.3k/hr, within 1% of the documented rate.
+      Markers contiguous 3 -> 27,583,999. Pass 1 ETA 2026-07-26/27 (~5.3 days);
+      with pass 2 the real remaining total is ~10.8 days.
+      prices-production-cleanup re-verified DISABLED.
+      Durable data measured: sdex pre-activation spans 2018-12-13 06:55 ->
+      2020-01-07 22:23, 3,588,820 candles. This PINS the wipe boundary at
+      2018-12-13, refining the earlier "genesis -> Nov 2018" estimate, and
+      confirms the recovery plan: pass 2 must fill 2015 -> 2018-12-13. The plan
+      re-walks to 23,423,999 which overshoots the real gap (~21.4M) by ~2M
+      ledgers; harmless RMT-dedup overlap, and the wider range is deliberate to
+      avoid a boundary error.
+      GOTCHA for future checks: max(sequence) on backfill_sdex_ledgers WITHOUT
+      a "WHERE sequence < 50457424" filter returns 63,352,611 -- the completed
+      combined run's ceiling, not the tail position -- and yields a nonsense
+      >100% figure. Always filter to the pre-activation range
+      (preroll-incremental-presoroban.md:35 has the correct form).
+      GOTCHA 2: the marker percentage OVERSTATES progress. 54.7% of ledgers are
+      marked but only ~6.2M of 27.58M have surviving candles, because cleanup
+      dropped price_ohlcv_1m partitions while leaving markers intact. That is
+      also exactly why recovery step 2 must DELETE the markers before pass 2,
+      or the resume logic skips the whole span.
 ---
 
 # Execute + track the historical backfill run (SDEX + Soroban AMM)
@@ -152,8 +178,9 @@ meanwhile.
 | `[activation, 50687999]` | data + `pool_registry` landed; run fatal-exited on the 0087 router guard (fixed + merged, PR #92). |
 | `[50688000, 51007999]` | ✅ first clean forward chunk (2026-07-07) — 320k ledgers, SDEX 17.22M candles, AMM=0/oracle=0 (expected early epoch), 0 new unresolved. ~3.4 h, 59 GB. |
 | `[51008000, 63352611]` combined remainder | ⏳ ~12.3M ledgers ≈ ~2.3 TB / ~5.6 days continuous. |
-| `[1, 50457423]` pre-Soroban SDEX tail — **pass 1** | ⏳ **RUNNING (fishuser-hero, tmux `sdex-tail`, healthy)** — floor **23,423,999 = 46.4%** (2026-07-20 14:15 UTC), **~177k ledgers/hr** (~21.7 min/partition, download-bound), ~27.0M ledgers ≈ **~6.3 days** to activation. Un-waived → reconcile the stale 2026-07-15 WAIVER AC. ⚠️ Its output for `1 → ~21.4M` was WIPED by the enabled cleanup rule (see 2026-07-20 history) — durable only from 2026-07-20 forward. (Liveness: `pgrep` + partition # climbing over ≥25 min; do NOT sample CH markers <22 min apart — download-bound cadence freezes them transiently.) |
+| `[1, 50457423]` pre-Soroban SDEX tail — **pass 1** | ⏳ **RUNNING, HEALTHY, ON RATE** (fishuser-hero, tmux `sdex-tail`). **2026-07-21 13:35 UTC: floor 27,583,999** (was 23,423,999 at 07-20 14:15 → **4.16M ledgers in 23h20m = 178.3k/hr**, within 1% of the documented 177k). Markers contiguous: 27,583,997 over `3 → 27,583,999`, no gaps. Remaining 22.87M ledgers ≈ **5.3 days → ETA 2026-07-26/27**. ⚠️ The 54.7% marker figure OVERSTATES real progress — see the durable-data row below. (Liveness: `pgrep -af sdex-backfill` + partition # climbing in `~/sdex-tail.log` over ≥25 min; do NOT sample CH markers <22 min apart — download-bound cadence freezes them transiently.) |
 | `[1, 23423999]` pre-Soroban SDEX tail — **pass 2 (recovery)** | 🔜 **REQUIRED, not started** — re-walk of the span pass 1 lost to cleanup. ~5 days. **Blocked on pass 1 finishing** (don't interrupt a healthy run to restart at the bottom). Requires clearing `backfill_sdex_ledgers` markers first — see §Recovery plan. |
+| **durable pre-Soroban data (measured 2026-07-21)** | `price_ohlcv_1m` sdex pre-activation spans **`2018-12-13 06:55` → `2020-01-07 22:23`, 3,588,820 candles**. Years: 2015–2017 **absent** (wiped), 2018 partial (207,021 — cleanup drops whole partitions, so only post-fire Dec 2018 survived), 2019 full (3,331,951), 2020 partial (43,559 — the live write frontier), **2021–2023 absent because pass 1 has not reached them yet**. Only ~6.2M of the 27.58M marked ledgers have surviving candles. |
 
 > Update this table as chunks land (ledger range, candle counts, duration, any
 > new unresolved pools). `GET /backfill/status` reports truthful monotonic
