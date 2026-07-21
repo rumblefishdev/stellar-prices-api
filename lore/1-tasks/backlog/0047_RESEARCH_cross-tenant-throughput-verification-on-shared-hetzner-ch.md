@@ -53,6 +53,20 @@ history:
       combined load). Kept in backlog, re-tagged `deferred`/`phase-post-deploy`,
       priority dropped high → low. Do later; do not block downstream tasks
       on it.
+  - date: 2026-07-20
+    status: backlog
+    who: okarcz
+    note: >
+      **Reviewed for closure in the 0108 post-M1 sweep and deliberately KEPT.**
+      The closure argument was that the full system (6 Lambdas + API + MV chain
+      + multi-day backfills) has now run against ch-prod-01 alongside BE for
+      weeks with no contention incident, so the probe is moot. Rejected: "ran
+      without incident" is an inference, not the measurement this task asks for,
+      and the task was always scoped as a JOINT look at system.query_log /
+      metric_log with the BE team under genuine combined load. That joint
+      verification has not happened. Stays in backlog, unchanged in scope.
+      The precondition it was waiting for is now fully satisfied — real combined
+      load exists — so this is closer to actionable than it has ever been.
 ---
 
 # Cross-tenant throughput verification on shared Hetzner CH

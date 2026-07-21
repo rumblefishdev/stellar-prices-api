@@ -2,9 +2,9 @@
 id: "0030"
 title: "Surface BE soroban_events.topics_xdr / .data_xdr column-naming issue"
 type: DOCS
-status: backlog
+status: completed
 related_adr: []
-related_tasks: ["0018"]
+related_tasks: ["0018", "0108"]
 tags: [layer-database, priority-low, effort-small, cross-repo, be-feedback, clickhouse, soroban-events]
 links:
   - "../active/0018_RESEARCH_decode-per-amm-swap-event-shapes/notes/R-be-storage-format.md"
@@ -15,6 +15,22 @@ history:
     status: backlog
     who: claude
     note: "Spawned from 0018 Appendix B item 1."
+  - date: 2026-07-20
+    status: completed
+    who: okarcz
+    note: >
+      **CLOSED as won't-do** in the 0108 post-M1 grooming sweep. This was a
+      cross-repo courtesy signal to soroban-block-explorer about columns named
+      topics_xdr / data_xdr that actually hold BE's tagged-JSON ScVal rather
+      than XDR bytes. It requires no prices-api change and blocks nothing.
+      On our side the hazard is fully retired: the format is documented in the
+      0018 research note, captured in memory (soroban-events-gotchas: "topics_xdr
+      is JSON"), and we have since consumed the column correctly at scale — the
+      0097 events-sourced AMM reprice read millions of rows from it against
+      exactly this format. The naming can only mislead a first-time reader of
+      BE's schema, and that is BE's call to make on their own timeline.
+      Not worth carrying as a standing task. If it comes up again, the fix BE
+      would want is COMMENT ON COLUMN + a README line, per the body below.
 ---
 
 # Surface BE soroban_events.topics_xdr / .data_xdr column-naming issue

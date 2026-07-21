@@ -4,7 +4,7 @@ title: "Materialize current_prices v1-deferred columns (sources breakdown, price
 type: FEATURE
 status: backlog
 related_adr: []
-related_tasks: ["0040", "0039"]
+related_tasks: ["0040", "0039", "0068", "0108"]
 tags: ["phase-future", "effort-medium", "priority-medium"]
 links: []
 history:
@@ -17,6 +17,18 @@ history:
       because mv_current_prices (current.sql, task 0039) writes only the v1
       subset. This task materializes the deferred columns producer-side so the
       API upgrades to pass-through without adding a hot-path query.
+  - date: 2026-07-20
+    status: backlog
+    who: okarcz
+    note: >
+      **Absorbed task 0068** (duplicate — same four DEFAULT columns, same MV)
+      during the 0108 post-M1 grooming sweep. Salvaged from it: the §5.5
+      inter-source median-outlier filter on vwap_24h, the "a refreshable MV's
+      definition is fixed at create time → DROP VIEW + re-CREATE" redeploy
+      gotcha, and the explicit TO(...) column-list footgun from the 0039 review.
+      0068 archived. Verified still open: current.sql:52 lists only the six v1
+      columns, and price_xlm / change_24h_pct / change_7d_pct / sources remain
+      at their table DEFAULTs (current.sql:25-27).
 ---
 
 # Materialize current_prices v1-deferred columns in the MV
@@ -54,6 +66,16 @@ endpoint and undermine the p95<200ms SLO).
   comment §"follow-ups").
 - **`change_24h_pct`** (and optionally **`change_7d_pct`**): the 24h/7d
   reference-close self-join.
+- **`vwap_24h` refinement** (salvaged from 0068): apply the general-overview §5.5
+  inter-source **median-outlier filter** on top of the existing volume-weighted
+  mean, so one divergent venue cannot drag the published VWAP.
+- **Redeploy mechanics** (salvaged from 0068): a refreshable MV's definition is
+  **fixed at create time**, so landing any of this is `DROP VIEW` + re-`CREATE`,
+  not `ALTER`. No backfill or migration is needed either way — the MV fully
+  recomputes every row on each `REFRESH EVERY 1 MINUTE`, so the first refresh
+  after the change populates the new columns for all assets.
+- **Positional-insert footgun** (from the 0039 review): every new column must be
+  added to the explicit `TO prices.current_prices (...)` column list.
 - Decide: extend `mv_current_prices`'s SELECT + target column list in-place, or
   add a companion MV — weigh refresh cost vs. keeping a single ReplacingMergeTree
   row per asset (the supply worker already uses a separate table to avoid row
@@ -74,3 +96,6 @@ endpoint and undermine the p95<200ms SLO).
       asset yields the expected per-source breakdown + scalar fields.
 - [ ] `current_price_usd` view (or read surface) exposes the new columns.
 - [ ] 0040 `/price` handler switched to pass-through; `sources` stub removed.
+- [ ] `vwap_24h` applies the §5.5 inter-source median-outlier filter (from 0068).
+- [ ] All new columns present in the explicit `TO (...)` column list;
+      `current_mv_it.rs` extended to assert each (from 0068).

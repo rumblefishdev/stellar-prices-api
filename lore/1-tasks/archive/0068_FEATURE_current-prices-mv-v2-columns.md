@@ -2,9 +2,9 @@
 id: "0068"
 title: "current_prices MV v2 columns — price_xlm, change_24h/7d_pct, sources, §5.5 outlier filter"
 type: FEATURE
-status: backlog
+status: completed
 related_adr: ["0003", "0007"]
-related_tasks: ["0039"]
+related_tasks: ["0039", "0072", "0108"]
 tags: [layer-backend, priority-low, effort-small, clickhouse, materialized-view, current-prices]
 links:
   - "../../../packages/prices-clickhouse/schema/current.sql"
@@ -16,6 +16,23 @@ history:
     status: backlog
     who: claude
     note: "Spawned from 0039 future work — current_prices MV v1 leaves 4 columns at DEFAULT."
+  - date: 2026-07-20
+    status: completed
+    who: okarcz
+    note: >
+      **CLOSED as a duplicate of 0072** in the 0108 post-M1 grooming sweep. Both
+      tasks target the same four DEFAULT columns (price_xlm, change_24h_pct,
+      change_7d_pct, sources) on the same sole writer (mv_current_prices), and
+      both were spawned independently — this one from 0039, 0072 from 0040.
+      0072 kept because it additionally owns the consumer-side switch (flipping
+      the /price handler off its sources={} stub to pass-through), so it closes
+      the loop end-to-end.
+      Salvaged into 0072 before archiving: the §5.5 inter-source median-outlier
+      filter on vwap_24h, the "a refreshable MV's definition is fixed at create
+      time → redeploy is DROP VIEW + re-CREATE" gotcha, and the explicit TO(...)
+      column-list positional-insert footgun. Nothing unique remains here.
+      The work itself is NOT done — see 0072 (current.sql:52 still lists only
+      the six v1 columns).
 ---
 
 # current_prices MV v2 columns
