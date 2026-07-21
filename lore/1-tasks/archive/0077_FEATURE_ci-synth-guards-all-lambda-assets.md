@@ -2,9 +2,9 @@
 id: "0077"
 title: "CI should build all 9 Lambda assets + run synth-production so a missing asset fails loudly"
 type: FEATURE
-status: active
+status: completed
 related_adr: []
-related_tasks: ["0070", "0056", "0026", "0108"]
+related_tasks: ["0070", "0056", "0026", "0108", "0110"]
 tags: [layer-ops, ci, cdk, cargo-lambda, priority-medium, effort-small]
 links: []
 history:
@@ -29,6 +29,27 @@ history:
       built and never checked, so its bootstrap could silently fail to package
       and still pass CI. Confirmed 9 assets are referenced by the production app
       (7 in eventbridge-stack.ts, 2 in compute-stack.ts).
+  - date: 2026-07-21
+    status: completed
+    who: okarcz
+    note: >
+      DONE. PR #134 merged. 3 files changed on the first pass (ci.yml,
+      lambda-assets.sh, task doc), then 3 review commits hardening it. The
+      build/verify/CDK asset lists are now one derived list; CI builds and
+      verifies all 9 bootstraps and runs synth-production. Verified in CI run
+      29819637086 (logs read, not just the green check): 9 bootstraps hashed
+      6.7-13.8MB, "verified 9 Lambda asset(s) against 9 eligible crate(s)" in
+      1.4s on a Node-only runner, "Successfully synthesized".
+      Code review found 9 issues; 6 fixed here. The material one: the cheap
+      infra-only guard tested crate EXISTENCE, not buildability, so four names
+      that cannot produce a bootstrap passed it -- reopening the exact 0070
+      CannotFindAsset path on infra-only PRs. Replaced with a cargo-metadata
+      check requiring package + bin + lambda feature. Also removed every
+      vacuous-pass path (empty list, dropped literals, empty step output) and
+      put tools/scripts/** under both paths filters.
+      Deferred to 0110: the rust job now pays for a Node/TS build because
+      synth-production depends on the Makefile build target (~2-3 min). Cost,
+      not correctness, and 0110 permits closing it won't-do once measured.
 ---
 
 # CI should build all 9 Lambda assets + run synth-production
@@ -62,8 +83,27 @@ fails loudly instead.
 ## Acceptance Criteria
 
 - [x] CI builds all 9 arm64 bootstraps the production app references.
+      *Verified in CI run 29819637086: 9 distinct bootstraps hashed, 6.7–13.8 MB.*
 - [x] CI runs `synth-production` (or equivalent) and fails on any missing asset.
+      *`Successfully synthesized` in the same run; failure proven locally by
+      pointing `BACKFILL_FRESHNESS_PROBE_ASSET_DIR` at a nonexistent dir.*
 - [x] Verify array / crate list is single-sourced or otherwise drift-resistant.
+      *Derived from the CDK source by `tools/scripts/lambda-assets.sh`; the two
+      hand-maintained arrays are gone.*
+
+Added after the code review of PR #134 (see §Design Decisions post-review):
+
+- [x] The infra-only path asserts assets are **buildable**, not merely named —
+      a package of that name, with a bin of that name, gated by a `lambda`
+      feature. Four false-pass classes that the old `grep` accepted
+      (`extractors-core`, `enrichment-cli`, `prices-clickhouse`,
+      `events-backfill`) now each exit 1, verified against a fixture root.
+- [x] No guard can pass vacuously: `lambda-assets.sh` fails on an empty list,
+      every literal is accounted for rather than silently dropped, and Build and
+      Verify both fail on a zero count. *Confirmed the Verify loop over an empty
+      list returned 0 before the fix and 1 after.*
+- [x] `tools/scripts/**` is in both paths filters, so the scripts the guards
+      depend on are themselves exercised by CI.
 
 ## Implementation Notes
 
