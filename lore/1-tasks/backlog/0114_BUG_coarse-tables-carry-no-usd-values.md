@@ -156,26 +156,64 @@ instead. **Run the per-quote breakdown against `price_ohlcv_1m` (the same query
 used on `1h`) before committing engineering time** — 1m's own 62%-zero rate is
 high enough to be worth explaining first.
 
-## 🔴 Time-sensitive: gate 0088's recovery pre-roll
+### Pre-check RESULT (2026-07-21) — the 62% is `no_reference`, not backlog
+
+Measured, current month, excluding the last 3 h of normal enrichment lag:
+
+| quote class | rows | pct `close_usd = 0` |
+|---|---|---|
+| stablecoin (USDC/USDT) | 1,094,423 | **0.3%** |
+| XLM pivot | 2,083,366 | **0.3%** |
+| other (exotic quotes) | 5,097,594 | **100%** |
+
+5.10M of 8.28M = 61.7%, which accounts for the entire measured 61.9%. **Live
+enrichment is working at 99.7% on everything it can reach.** Every zero in 1m is
+an exotic quote with no USD path (`ch_enrich.rs:499-504` treats these as
+unreachable by design).
+
+This does **not** invalidate the historical repair: 2024-02 → 2026-02 has
+100k–330k *USDC-quoted* rows/month sitting at zero in the coarse tables, and the
+live figures above prove that same logic reaches 99.7% when it runs. The repair
+target is those rows, not the exotic ones.
+
+## Gate 0088's recovery pre-roll — check, but the alarm was overstated
 
 [[0088]] recovery **step 3** runs `preroll-incremental.sql` over the pre-Soroban
-tail in ~10 days (~2026-08-01). Defect 1 means it will bake whatever coverage
-`price_ohlcv_1m` has at that moment into the coarse tables — currently **62%
-zero** — for the data 0088 spent two weeks rebuilding. There is no coverage
-check anywhere in that runbook.
+tail in ~10 days (~2026-08-01), and nothing in that runbook checks USD coverage.
 
-**Either** enrich the 1m tail before pre-rolling, **or** accept the gap and plan
-a coarse-table repair pass after. Not deciding is the one option that silently
-loses it.
+> **Correction (2026-07-21).** This was first written as a 🔴 blocking gate on the
+> grounds that pre-rolling would bake a 62%-zero USD column into the
+> forever-tables. The pre-check above refutes the premise: those zeros are exotic
+> quotes with no reference, so **enriching the 1m tail first would change
+> nothing**. The pre-Soroban era is starker still — 2018-2019 has 100k–200k
+> XLM-quoted rows/month at 100% zero because USDC barely existed then (6–45
+> rows/month) and `oracle_prices` does not start until 2025-09. There is no
+> contemporaneous USD price to pivot through. **The pre-Soroban tail will be
+> USD-less regardless of what we do** — a data-availability fact, not a defect.
+
+Keep a coverage check in the step-3 pre-flight as a cheap regression guard, but
+it is not a blocker and does not gate the recovery.
+
+## Related finding — 62% of all candles have no USD path at all
+
+`3_other` is 5.1M rows/month, permanently zero, **by design**. Whether that is
+acceptable is a product question nobody has asked. A **two-hop pivot** (exotic →
+XLM → USD) would likely reach a large share, since most Stellar assets trade
+against XLM. This is plausibly a bigger coverage lever than the historical
+repair, and it needs its own task.
+
+**Strong [[0107]] candidate.** If 62% of candles carry zero USD volume, any USD
+volume total is missing the majority of trades — against a measured gap of ~1/6
+versus Horizon. Not yet checked for volume-weighting; test before believing it.
 
 ## Acceptance Criteria
 
 - [ ] Coarse tables re-enriched for 2024-02 → present; per-month `close_usd = 0`
       rate drops to the genuine `no_reference` floor (exotic quotes only), not
       86–100%.
-- [ ] **Pre-check before any implementation:** per-quote breakdown run against
-      `price_ohlcv_1m` to confirm the 62%-zero rate is un-enriched backlog and
-      not genuine `no_reference`. Reverses the approach if it is the latter.
+- [x] **Pre-check before any implementation** — DONE 2026-07-21. The 62% is
+      genuine `no_reference` (exotic quotes), not backlog; live enrichment runs
+      at 99.7% on pivotable quotes. Approach holds for the historical repair.
 - [ ] The rollup path no longer freezes un-enriched values — implemented as a
       **scheduled, partition-bounded enrichment pass over the coarse tables**
       (see §Chosen approach; the ordering-based alternatives were rejected).
