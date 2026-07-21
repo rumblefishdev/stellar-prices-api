@@ -314,8 +314,14 @@ export function createWorkerLambda(
     evaluationPeriods: 1,
     treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
   });
+  // Both directions. Only the ALARM action was wired before, so a worker that
+  // broke and later recovered produced one notification and then silence —
+  // leaving the reader unable to tell "still broken" from "fixed itself".
+  // Every alarm in ObservabilityStack already wires both; this brings the
+  // per-worker error alarms in line (task 0112).
   for (const action of props.errorAlarmActions ?? []) {
     errorAlarm.addAlarmAction(action);
+    errorAlarm.addOkAction(action);
   }
 
   return { function: fn, role, errorAlarm };

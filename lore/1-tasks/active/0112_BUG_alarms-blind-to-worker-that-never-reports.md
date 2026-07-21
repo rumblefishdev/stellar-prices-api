@@ -98,9 +98,13 @@ codebase; it just was not applied here.
       without depending on any metric the worker publishes. *Two routes now:
       the pre-existing `-errors` alarm has an action wired (~2 h), and
       `-duration-near-timeout` warns before failures start.*
-- [ ] Verified by a real fire-test (the 0056 precedent: breach + recovery), not
+- [x] Verified by a real fire-test (the 0056 precedent: breach + recovery), not
       only by synth — an alarm nobody has seen fire is an untested alarm, which
-      is exactly what this incident was. **Operator-run; requires deploy.**
+      is exactly what this incident was. **PASSED 2026-07-21** — 6 messages in
+      `#stellar-prices-api-bot` covering both new alarm types across all three
+      workers, plus `enrichment-errors` (the alarm that was mute for 4.5 days).
+      Five of the six were REAL metric-driven transitions, not `set-alarm-state`
+      pokes. See §Fire-test result.
 - [x] Duration-approaching-timeout warns *before* the timeout, so [[0111]]-class
       regressions surface as a warning rather than an outage. *80% of timeout,
       2 consecutive periods.*
@@ -112,6 +116,12 @@ codebase; it just was not applied here.
       synthesised templates.*
 - [x] **The five workers with inert `-errors` alarms are wired.** *Emerged
       during implementation and is the primary defect — see §Implementation.*
+      *Deployed and fire-test-verified 2026-07-21.*
+- [ ] **Recovery notifications on the `-errors` alarms.** *Emerged from the
+      fire-test: `createWorkerLambda` wired only `addAlarmAction`, so all seven
+      have `OKActions=0` and you learn a worker broke but never that it
+      recovered. Fixed in PR #138; **needs `deploy-production-eventbridge` to
+      close.** Blocks archiving this task.*
 
 ## Out of scope
 
@@ -279,3 +289,149 @@ having. But they were the *second* problem. The first was that we had already
 built the right alarm and never plugged it in — and no amount of additional
 alarm design would have helped, because every new alarm would have been wired
 the same way.
+
+## Fire-test 2026-07-21 — initially read as PARTIAL (superseded; see §Fire-test result)
+
+Deployed `Prices-production-Observability` and `Prices-production-EventBridge`
+(Compute deliberately skipped — its only diff was asset-hash drift plus the
+undeployed 0106 API change, neither related to this task).
+
+Post-deploy: **20 alarms, every one with ≥1 action.** Before, 2 of 7 worker
+error alarms had any action at all.
+
+### Result: 1 of 4 test notifications reached Slack
+
+| # | action | Slack | verdict |
+|---|---|---|---|
+| 1 | `enrichment-errors` → ALARM | ✅ | the wire that was missing now works |
+| 2 | `enrichment-errors` → OK | ❌ | **expected** — no OK action existed (see below) |
+| 3 | `enrichment-duration-near-timeout` → ALARM | ❌ | **unexplained** |
+| 4 | same → OK | ❌ | **unexplained** |
+
+### #2 was my error, not a defect in the deploy
+
+`createWorkerLambda` only ever called `addAlarmAction`, never `addOkAction`, so
+the seven `-errors` alarms had `OKActions=0`. The fire-test instructions claimed
+otherwise without checking. Fixed here — both directions now wired, matching
+every alarm in ObservabilityStack. Without it you learn a worker broke and never
+learn it recovered.
+
+### #3/#4 are real and NOT in this task's code
+
+`describe-alarm-history` on `enrichment-duration-near-timeout`:
+
+```
+12:41:55  StateUpdate  OK → ALARM
+12:41:55  Action       Successfully executed action arn:aws:sns:…:prices-production-ops-alarms
+12:42:16  StateUpdate  ALARM → OK
+12:42:16  Action       Successfully executed action arn:aws:sns:…:prices-production-ops-alarms
+```
+
+CloudWatch evaluated, transitioned, and **successfully published to SNS three
+times** (including one on creation). The topic has exactly one subscription —
+the Chatbot HTTPS endpoint — and the Chatbot config is correct: subscribed to
+that topic, pointed at the right channel. Yet nothing rendered in Slack.
+
+**So the CloudWatch → SNS half is proven end to end, and the SNS → Chatbot →
+Slack half is not.** The break is downstream of everything this task changed.
+
+Undetermined between:
+- Chatbot throttling / dedup — the four commands ran seconds apart, and the one
+  that DID arrive was the first;
+- a genuine Chatbot drop for these alarms.
+
+**It could not be determined, because `LoggingLevel` was `NONE`.** That is its
+own finding: we had an alerting path with no audit trail, so CloudWatch reports
+"Successfully executed action" whether or not a human is ever told. Same class
+of defect as an alarm firing into an empty action list — just one hop later.
+Set to `ERROR` here.
+
+### Why this AC stays open
+
+The point of a fire-test is proving a human gets told. One message out of four
+does not prove that; it proves the path can work, not that it does. Marking it
+passed on 25% would repeat the mistake this whole task exists to correct.
+
+**Retest procedure** — one alarm, alone, spaced, after deploying this branch:
+
+```bash
+# ALARM, then WAIT at least 2 minutes before the recovery command
+aws cloudwatch set-alarm-state --region eu-central-1 --profile soroban-explorer \
+  --alarm-name prices-production-enrichment-duration-near-timeout \
+  --state-value ALARM --state-reason "0112 retest"
+# ...confirm Slack, wait 2 min...
+aws cloudwatch set-alarm-state --region eu-central-1 --profile soroban-explorer \
+  --alarm-name prices-production-enrichment-duration-near-timeout \
+  --state-value OK --state-reason "0112 retest recovery"
+```
+
+Arrives when spaced ⇒ Chatbot throttling; the alarms are fine and the finding is
+"do not batch fire-tests". Still absent ⇒ a real routing defect for
+Observability-stack alarms, and `LoggingLevel: ERROR` should now say why.
+
+## Fire-test result — PASSED. The "missing" messages were per-alarm suppression.
+
+The partial reading above was wrong, twice. First diagnosed as Chatbot dropping
+messages, then as delay. Both were wrong; the record is kept because the
+reasoning errors matter more than the conclusion.
+
+Six messages landed in `#stellar-prices-api-bot`. Matching them against the nine
+SNS deliveries:
+
+| time (UTC) | alarm | rendered |
+|---|---|---|
+| 12:36:46 | `enrichment-duration-near-timeout` → OK | ✅ |
+| 12:36:54 | `enrichment-no-invocations` → OK | ✅ |
+| 12:37:17 | `backfill-freshness-probe-no-invocations` → OK | ✅ |
+| 12:37:20 | `backfill-freshness-probe-duration-near-timeout` → OK | ✅ |
+| 12:39:57 | `enrichment-errors` → **ALARM** (fire-test) | ✅ |
+| 12:41:55 | `enrichment-duration-near-timeout` → ALARM | ❌ |
+| 12:42:16 | `enrichment-duration-near-timeout` → OK | ❌ |
+| ~12:55 | `enrichment-duration-near-timeout` → ALARM (retest) | ❌ |
+| 13:01:46 | `mtls-notafter-probe-no-invocations` → OK | ✅ |
+
+**Every missing message is the same alarm, after it had already notified once.**
+Its first transition rendered; everything after was suppressed. `enrichment-errors`
+notified exactly once all day and got through. That is per-alarm suppression of
+repeat notifications, not loss.
+
+The "isolated" retest failed because it was isolated from *other* alarms but not
+from that alarm's own earlier notifications — the wrong variable was controlled.
+
+### What is proven
+
+- **`prices-production-enrichment-errors` reaches Slack.** The alarm that held
+  ALARM for 4 days 10 hours in July and told nobody. This is the fix, verified.
+- **Both new alarm types** (`-duration-near-timeout`, `-no-invocations`) route,
+  across **all three workers**.
+- **Five of the six were real metric-driven transitions**, not `set-alarm-state`.
+  Stronger than the planned artificial test and what the 0056 precedent asked for.
+- **Alarm descriptions render in full**, impact text included — an operator paged
+  at 3am gets the reasoning, not a metric name.
+
+### Incidental signal
+
+Message #2: enrichment recorded 1 invocation/hour for three consecutive hours —
+alive and on schedule. Message #1: durations of 4,575 ms and 4,471 ms against a
+240,000 ms threshold, i.e. **~2% of the timeout budget**. Consistent with the
+drained backlog, and now visible rather than inferred. That is the leading
+indicator [[0111]] will be judged against when backfill load returns.
+
+### Still open (→ PR #138)
+
+`-errors` alarms have `OKActions=0`, so **recovery is still silent**: you learn a
+worker broke and never learn it recovered. Unaffected by the suppression finding.
+
+### Chatbot `LoggingLevel: ERROR` — keep, but downgrade the rationale
+
+Argued as *necessary* to diagnose a drop that turned out not to exist. It is
+still worth having (an alerting path with no audit trail is a real gap) but it is
+a nice-to-have, not a fix. Recorded so the justification is not read as stronger
+than it is.
+
+### Operational note
+
+**Do not batch fire-tests on a single alarm.** Repeat notifications within a
+short window are suppressed, and the silence reads as a broken alerting path —
+it cost two wrong diagnoses here. Test one transition per alarm, or space them
+well apart.
