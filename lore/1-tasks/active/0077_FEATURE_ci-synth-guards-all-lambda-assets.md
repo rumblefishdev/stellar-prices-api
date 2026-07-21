@@ -116,7 +116,51 @@ script.
    The expensive filter change buys full synth on infra-only PRs; judged not
    worth a multi-minute Rust build on every infra edit, since adding a Lambda
    in practice also adds a crate under `packages/**`, which already triggers
-   the rust job.
+   the rust job. **Held after review** — the cost split survived; what changed
+   is that the cheap check became strong enough to carry it (#5 below).
+
+### Post-review (code review of PR #134, three findings fixed in-branch)
+
+5. **The cheap check tested the wrong property.** It asked "does a crate by
+   this name exist" (`grep -rqx 'name = "<x>"' --include=Cargo.toml packages/`)
+   when what matters is "will this name produce `target/lambda/<name>/bootstrap`".
+   `grep` is section-blind, so it matched `[[bin]]` and `[lib]` names as readily
+   as `[package]` ones. Three false-pass classes, each verified against the old
+   check:
+
+   | asset name | why it cannot build | old check |
+   |---|---|---|
+   | `extractors-core` | pure library, no `[[bin]]` at all | passed |
+   | `enrichment-cli` | a bin name, not a package — `-p` cannot resolve it | passed |
+   | `prices-clickhouse` | its only bin is `prices-clickhouse-init` → wrong asset dir | passed |
+   | `events-backfill` | has a bin but no `lambda` feature → wrong binary shipped | passed |
+
+   Replaced by `tools/scripts/verify-lambda-assets.sh`, which requires all
+   three of: a package by that name, a bin target of the same name, and a
+   `lambda` feature on that package. Uses `cargo metadata --no-deps --offline`
+   — compiles nothing, needs no network, so the check stays build-free and the
+   cost split holds. The eligible set it computes is exactly the 9 CDK assets.
+
+6. **`tools/scripts/**` was in neither paths filter.** The script both guards
+   depend on was the one file CI never exercised: a PR editing only it ran no
+   job at all. Added to both filters.
+
+7. **Dropped the `$GITHUB_OUTPUT` plumbing between steps.** `lambda-assets.sh`
+   refuses to emit an empty list, but that guarantee did not survive a step
+   boundary — if the producing step were renamed or its `id` changed, the
+   consumer's `${{ steps.… }}` would expand to empty, the loop would run zero
+   iterations, and Verify would exit 0 having asserted nothing (confirmed: it
+   did). Each step now reads the script directly via process substitution, and
+   both Build and Verify additionally fail on a zero count. Re-running a grep is
+   far cheaper than that failure mode; it also removes workflow-expression text
+   from the shell body, so the guard no longer depends on the script's character
+   class for shell safety.
+
+**Not fixed here** (recorded, lower severity): the asset-name regex excludes
+`_`, so a `my_worker` asset would be silently dropped from the list while the
+list stays non-empty and no tripwire fires; and the derived count is logged but
+never asserted against a floor, so a refactor that drops 7 of 9 literals still
+passes. Both are partial-coverage variants of the empty-list case.
 
 ## Verification
 
@@ -129,6 +173,16 @@ Run locally against the real repo:
 - All 9 crates confirmed to declare a `lambda` feature (a missing one would
   fail the whole `cargo lambda build` invocation).
 - Crate-mapping check passes for all 9; verified a bogus name fails.
+- **Post-review, against a fixture root** (real `packages/` + `Cargo.toml`, a
+  scratch copy of `infra/src` with one bad literal appended): all four
+  false-pass classes in the table above now exit 1, each with an error naming
+  the missing bootstrap path. The old `grep` check passed all four.
+- `cargo metadata --no-deps --offline` succeeds with no network and no
+  registry access; eligible set == the 9 CDK assets exactly (`diff` clean).
+- Vacuous-pass guard: a Verify loop over an empty list now exits 1 (it
+  exited 0 before).
+- `ci.yml` parses as YAML; no `${{ steps.… }}` expressions remain in any
+  shell body.
 - **`make -C infra synth-production` succeeds credential-free** — every SSM read
   is `valueForStringParameter` (a deploy-time CloudFormation dynamic reference);
   there are no `fromLookup` / `valueFromLookup` context lookups, which are what

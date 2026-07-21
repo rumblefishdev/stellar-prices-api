@@ -27,6 +27,11 @@ jobs:
               - 'Cargo.toml'
               - 'Cargo.lock'
               - '.github/workflows/ci.yml'
+              # The Lambda asset guards are implemented here. Without this,
+              # a PR touching only the guard scripts runs no job at all and
+              # the thing both jobs depend on is the one file CI never
+              # exercises.
+              - 'tools/scripts/**'
             typescript:
               - 'libs/**'
               - 'infra/**'
@@ -35,6 +40,7 @@ jobs:
               - 'tsconfig*.json'
               - 'nx.json'
               - '.github/workflows/ci.yml'
+              - 'tools/scripts/**'
 
   typescript:
     name: TypeScript (lint, build, typecheck)
@@ -61,25 +67,21 @@ jobs:
       #
       # The heavy guard lives in the `rust` job, which only runs when
       # `packages/**` changes. An infra-only PR can still break the deploy by
-      # pointing `Code.fromAsset` at a crate that does not exist (a typo, or a
-      # crate that was renamed), and that would go unnoticed until an operator
-      # synthed by hand — exactly the 0070 failure. This asserts the mapping
-      # without building anything, so infra PRs do not pay for a Rust build.
-      - name: Verify Lambda asset names map to real crates
+      # pointing `Code.fromAsset` at a name that cannot produce a bootstrap,
+      # and that would go unnoticed until an operator synthed by hand —
+      # exactly the 0070 failure. This asserts the mapping without building
+      # anything, so infra PRs do not pay for a Rust build.
+      #
+      # Deliberately NOT a "does a crate by this name exist" check: that is
+      # too weak in three ways (pure libraries, bin names that are not
+      # packages, and packages whose bin is named differently all pass it).
+      # See the header of verify-lambda-assets.sh for the full reasoning.
+      #
+      # `cargo metadata --no-deps --offline` compiles nothing and needs no
+      # network, so this stays a seconds-long step on a Node-only runner.
+      - name: Verify Lambda assets map to buildable crates
         shell: bash
-        run: |
-          set -euo pipefail
-          missing=0
-          while IFS= read -r name; do
-            [[ -z "$name" ]] && continue
-            if grep -rqx "name = \"${name}\"" --include=Cargo.toml packages/; then
-              echo "ok: ${name}"
-            else
-              echo "::error::CDK references target/lambda/${name} but no crate is named '${name}'"
-              missing=1
-            fi
-          done < <(tools/scripts/lambda-assets.sh)
-          exit $missing
+        run: tools/scripts/verify-lambda-assets.sh
 
   rust:
     name: Rust (fmt, clippy, test, lambda build)
@@ -115,21 +117,6 @@ jobs:
       # `CannotFindAsset` at deploy time because only 6 of 9 assets were
       # built, and the verify list checked only 5 of those 6 — so
       # `enrichment-worker` was built and never asserted. See task 0077.
-      - name: Resolve Lambda assets from the CDK app
-        id: lambda-assets
-        shell: bash
-        run: |
-          set -euo pipefail
-          assets="$(tools/scripts/lambda-assets.sh)"
-          echo "=== Lambda assets referenced by the CDK app ==="
-          echo "$assets"
-          echo "count=$(echo "$assets" | wc -l)"
-          {
-            echo 'names<<EOF'
-            echo "$assets"
-            echo 'EOF'
-          } >> "$GITHUB_OUTPUT"
-
       # Build the Lambda bootstrap binaries the CDK app packages via
       # `Code.fromAsset`. CI never ran this before, so a worker that
       # compiled under `cargo check` but failed to package for the Lambda
@@ -140,14 +127,28 @@ jobs:
       # `--features lambda` and explicit `-p` per crate are BOTH required —
       # a bare `cargo lambda build` silently skips these bins and produces
       # only unrelated CLI binaries.
+      #
+      # The list is read straight from the script in each step rather than
+      # passed between steps through `$GITHUB_OUTPUT`. The script refuses to
+      # emit an empty list, but that guarantee does not survive a step
+      # boundary: if the producing step were renamed or its id changed, the
+      # consumer's `${{ steps.… }}` would expand to nothing, the loop would
+      # run zero iterations and the guard would report success having checked
+      # nothing. Re-running a grep is cheaper than that failure mode. It also
+      # keeps workflow-expression text out of the shell body entirely.
       - name: Build Lambda bootstraps
         shell: bash
         run: |
           set -euo pipefail
           args=()
           while IFS= read -r name; do
-            [[ -n "$name" ]] && args+=(-p "$name")
-          done <<< "${{ steps.lambda-assets.outputs.names }}"
+            [[ -z "$name" ]] && continue
+            args+=(-p "$name")
+          done < <(tools/scripts/lambda-assets.sh)
+          if [[ ${#args[@]} -eq 0 ]]; then
+            echo "::error::resolved zero Lambda assets; refusing to run a no-op build" >&2
+            exit 1
+          fi
           echo "cargo lambda build --release --arm64 --features lambda ${args[*]}"
           cargo lambda build --release --arm64 --features lambda "${args[@]}"
 
@@ -160,8 +161,10 @@ jobs:
           set -euo pipefail
           echo "=== Lambda bootstrap binaries ==="
           missing=0
+          checked=0
           while IFS= read -r name; do
             [[ -z "$name" ]] && continue
+            checked=$((checked + 1))
             bin="target/lambda/${name}/bootstrap"
             if [[ -x "$bin" ]]; then
               echo "$(sha256sum "$bin") $(stat --format='%s bytes' "$bin")"
@@ -169,7 +172,14 @@ jobs:
               echo "::error::missing Lambda bootstrap: $bin"
               missing=1
             fi
-          done <<< "${{ steps.lambda-assets.outputs.names }}"
+          done < <(tools/scripts/lambda-assets.sh)
+          # A loop over an empty list exits 0 having asserted nothing, which
+          # reads as success. Fail instead.
+          if [[ $checked -eq 0 ]]; then
+            echo "::error::verified 0 Lambda bootstraps; the guard passed vacuously" >&2
+            exit 1
+          fi
+          echo "verified ${checked} bootstrap(s)"
           exit $missing
 
       # Final proof that the app the operator deploys actually synthesizes
