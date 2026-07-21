@@ -92,6 +92,70 @@ So the repair is: retarget the existing enrichment SQL from `price_ohlcv_1m` to
 each coarse table and run it over the affected span. Bounded, and it reuses
 tiers that already exist.
 
+## Chosen approach for defect 1 — a repair pass over the coarse tables
+
+Three options were considered for stopping the recurrence. **Decision: run
+enrichment against the coarse tables on a schedule**, rather than re-ordering the
+pipeline or enriching at ingest.
+
+### Why not "roll up later, after enrichment"
+
+The rollups are **not** triggered per row — they are refreshable MVs on timers
+that re-aggregate a bounded recent window (1m→15m every minute, 15m→1h every
+15 min, cascading up; `rollups.sql:77-140`). A row is only picked up if
+enrichment fills it *while its window is still open*.
+
+Enrichment lag is **unbounded** — it was four days during the [[0111]] outage.
+A bounded window cannot cover an unbounded lag, so this does not solve the
+problem even in principle; it would still need a repair pass for the overruns.
+Rejected on correctness, not just cost.
+
+### Why not "compute USD at ingest"
+
+A candle's USD value needs a reference price for the *same* minute, which is
+being computed in the same batch — circular, and presumably why enrichment is a
+separate later pass at all. It would also mean changing live ingestion (the
+component with the [[0064]] / [[0094]] freeze history) and fixes nothing
+historical.
+
+### Why the repair pass
+
+1. **The schema already supports it.** Coarse targets are
+   `ReplacingMergeTree(version)` with `sum(version)` chosen specifically so a
+   re-inserted corrected row outranks the old one — `rollups.sql:12-36` calls
+   this "the load-bearing correctness fix" (0059/[[0095]]). The repair uses the
+   mechanism that already exists and is already depended on.
+2. **Same code as the historical repair.** The one-off fix for 2025-02 → 2026-02
+   and the recurring guard are the same job, built once.
+3. **Converts permanent corruption into temporary lag.** The decisive argument.
+   The other two options make correctness depend on ordering holding forever, and
+   ordering in this system has broken repeatedly (enrichment outage, cleanup
+   enabled mid-backfill, cursor freeze). With a repair pass the next failure
+   means "USD values are late", not "USD values are gone".
+4. **Converges with 0111.** The pass must be partition-bounded or it re-creates
+   the same full-scan cost — which is 0111's option 1. One fix shape covers both.
+
+### Costs and risks, acknowledged
+
+- **Merge pressure** on a shared cluster from rewriting RMT rows. Mitigate by
+  touching only partitions that actually contain zeros, and stopping once
+  coverage reaches the genuine `no_reference` floor.
+- **⚠️ Version arithmetic is the main technical risk.** Coarse `version` values
+  are a *sum* of source versions, so a repair row must outrank a potentially
+  large existing value — **not** a naive `+1` from a fresh row.
+  `ch_enrich.rs:354` mentions `version + 1`, but it is unconfirmed whether that
+  derives from the existing row. Get this wrong and the repair silently writes
+  rows that lose to the zeros they were meant to replace. **This fails quietly —
+  it needs a test, and it is the first thing to verify when implementing.**
+
+### What would reverse this decision
+
+If the un-enriched rows turn out to be dominated by pairs with genuinely no USD
+reference, the repair has little to fix and the real work is reference coverage
+instead. **Run the per-quote breakdown against `price_ohlcv_1m` (the same query
+used on `1h`) before committing engineering time** — 1m's own 62%-zero rate is
+high enough to be worth explaining first.
+
 ## 🔴 Time-sensitive: gate 0088's recovery pre-roll
 
 [[0088]] recovery **step 3** runs `preroll-incremental.sql` over the pre-Soroban
@@ -109,9 +173,15 @@ loses it.
 - [ ] Coarse tables re-enriched for 2024-02 → present; per-month `close_usd = 0`
       rate drops to the genuine `no_reference` floor (exotic quotes only), not
       86–100%.
-- [ ] The rollup path no longer freezes un-enriched values — either enrichment
-      runs before rollup, or a repair pass runs after, or the coarse tables are
-      enriched in place on a schedule. Pick one and make it structural.
+- [ ] **Pre-check before any implementation:** per-quote breakdown run against
+      `price_ohlcv_1m` to confirm the 62%-zero rate is un-enriched backlog and
+      not genuine `no_reference`. Reverses the approach if it is the latter.
+- [ ] The rollup path no longer freezes un-enriched values — implemented as a
+      **scheduled, partition-bounded enrichment pass over the coarse tables**
+      (see §Chosen approach; the ordering-based alternatives were rejected).
+- [ ] **Version arithmetic proven by test:** a repair row outranks the existing
+      coarse row under `sum(version)` RMT semantics. This fails silently, so a
+      passing test is the only acceptable evidence — not a manual spot-check.
 - [ ] `price_ohlcv_1h` / `1d` USD coverage verified for a sample of liquid pairs
       against an independent source before declaring the repair good.
 - [ ] 0088 step 3 gated: pre-roll refuses to run, or warns loudly, when 1m USD
