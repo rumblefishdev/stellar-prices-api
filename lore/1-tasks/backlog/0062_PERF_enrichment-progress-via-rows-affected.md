@@ -4,8 +4,8 @@ title: "Enrichment loop: drive progress from INSERT rows-affected (gated on clic
 type: PERF
 status: backlog
 related_adr: ["0007"]
-related_tasks: ["0061", "0026", "0039"]
-tags: [layer-database, clickhouse, enrichment, perf, priority-low, effort-small, blocked-on-dependency]
+related_tasks: ["0061", "0026", "0039", "0111", "0085"]
+tags: [layer-database, clickhouse, enrichment, perf, priority-medium, effort-small, blocked-on-dependency]
 links:
   - "../../../packages/enrichment-worker/src/ch_enrich.rs"
 history:
@@ -17,6 +17,19 @@ history:
       XLM/USDC pivot reference once per run) shipped on the 0061 branch; part 2 is
       deferred because the clean fix needs a clickhouse-crate capability we don't
       have pinned.
+  - date: 2026-07-21
+    status: backlog
+    who: okarcz
+    note: >
+      RE-SCOPED from priority-low to priority-medium, and confirmed real by
+      measurement. count_candidates ran 545 times/day at ~11s each reading 544M
+      rows during the 07-10 to 07-18 enrichment outage (prod system.query_log).
+      That is roughly a THIRD of a ~35s batch, so this is a genuine contributor
+      -- but not the driver: the enrichment INSERT outer scan is ~24s. Fixing
+      only this leaves a 24s batch and still times out. Sequence behind 0111.
+      NOTE: PR #133 (0108 grooming, unmerged) archives this task as completed
+      on the strength of the crate-upgrade blocker; that closure is WRONG on
+      this evidence and must be reverted before #133 merges.
 ---
 
 # Enrichment loop: drive progress from INSERT rows-affected
@@ -87,3 +100,30 @@ route on its own).
       `oracle_budget_exhaustion_defers_instead_of_pegging` and
       `watermark_defers_candles_newer_than_the_snapshot` cases.
 - [ ] `count_candidates` doc note updated to reflect the new signal.
+
+## Re-scope 2026-07-21 — measured, real, but secondary to 0111
+
+Prod `system.query_log` over the 07-10 → 07-18 enrichment outage:
+
+| date | `count_candidates` runs | avg | rows read/run |
+|---|---|---|---|
+| 07-15 | 143 | 15.0 s | 533 M |
+| 07-16 | 545 | 11.7 s | 537 M |
+| 07-17 | 622 | 11.2 s | 544 M |
+
+So the concern in this task is **confirmed**, not theoretical: the per-batch
+`FINAL` count is a full-table scan costing ~11 s and reading 544M rows.
+
+But it is **~1/3 of a ~35 s batch**. The enrichment `INSERT … SELECT` outer scan
+is the other ~24 s, and for the same reason (predicates not in the sort key).
+Fixing only this task leaves a 24 s batch — still over the 300 s budget at
+~12 batches. Sequence this **behind [[0111]]**, and note that 0111's option 3
+(a pending-work table) would remove `count_candidates` entirely, making this
+task moot rather than merely deferred.
+
+The original blocker still stands: the clean fix needs `X-ClickHouse-Summary` /
+`written_rows`, which the pinned `clickhouse` 0.13 crate does not surface.
+
+> ⚠️ **PR #133 (0108 grooming, unmerged) archives this task as `completed`.**
+> That closure predates this measurement and is wrong. Revert it before #133
+> merges, or this reopens as a surprise later.
