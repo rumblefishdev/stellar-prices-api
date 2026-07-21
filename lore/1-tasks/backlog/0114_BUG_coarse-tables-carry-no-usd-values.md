@@ -196,15 +196,46 @@ it is not a blocker and does not gate the recovery.
 
 ## Related finding — 62% of all candles have no USD path at all
 
-`3_other` is 5.1M rows/month, permanently zero, **by design**. Whether that is
-acceptable is a product question nobody has asked. A **two-hop pivot** (exotic →
-XLM → USD) would likely reach a large share, since most Stellar assets trade
-against XLM. This is plausibly a bigger coverage lever than the historical
-repair, and it needs its own task.
+`3_other` is 5.1M rows/month (55.2% of *trades*), permanently zero, **by design**.
+A **two-hop pivot** (exotic → XLM → USD) may reach a large share, since most
+Stellar assets trade against XLM. → **spawned as [[0115]]** (priority-medium:
+a known design boundary with a correct sentinel, not an active corruption —
+sequence it behind this task's repair).
 
-**Strong [[0107]] candidate.** If 62% of candles carry zero USD volume, any USD
-volume total is missing the majority of trades — against a measured gap of ~1/6
-versus Horizon. Not yet checked for volume-weighting; test before believing it.
+### ❌ REFUTED — this does NOT explain [[0107]] (tested 2026-07-21)
+
+It was proposed that the no-USD-path gap explained 0107's volume shortfall. A
+pre-registered threshold was set (reachable share ≈ 15% would confirm) and then
+measured, trade-weighted, over 2026-07-14 → 07-21:
+
+| quote class | trades | share |
+|---|---|---|
+| stablecoin | 727,833 | 15.9% |
+| XLM pivot | 1,322,738 | 28.9% |
+| **reachable total** | **2,050,571** | **44.8%** |
+| other (unpriceable) | 2,530,298 | 55.2% |
+
+**44.8% reachable ⇒ a ~2.2× understatement**, against 0107's measured **6× volume
+/ 7.5–9× trade-count** gap. Off by 3–4×; the pricing gap cannot be the primary
+cause.
+
+**The categorical reason, which matters more than the arithmetic:** 0107 is about
+trades **absent from our database entirely**; this task is about trades we
+**hold but cannot price in USD**. Orthogonal failures. No amount of USD-pricing
+work creates a trade that was never ingested.
+
+The numbers also argue against a link: had 0107's volume figure been computed
+through the zero-USD column, the two effects would compound to ~16×, not the 6×
+measured — so 0107's volume gap most likely tracks its own trade-count gap and
+shares one upstream ingestion cause.
+
+*Caveat: measured on the current week; 0107's Horizon window was not inspected. A
+3–4× discrepancy is far too large to be a windowing artifact, so the refutation
+holds, but the exact multiplier should not be quoted as precise.*
+
+**Do not re-propose this link** without new evidence — it is the cheapest
+available explanation for 0107 and will suggest itself again to anyone who reads
+the 55%/62% figures.
 
 ## Acceptance Criteria
 
@@ -224,7 +255,8 @@ versus Horizon. Not yet checked for volume-weighting; test before believing it.
       against an independent source before declaring the repair good.
 - [ ] 0088 step 3 gated: pre-roll refuses to run, or warns loudly, when 1m USD
       coverage for the target span is below a threshold.
-- [ ] Re-check whether this explains [[0107]]'s volume gap (see below).
+- [x] Re-check whether this explains [[0107]]'s volume gap — **REFUTED
+      2026-07-21**, see §REFUTED below. Orthogonal problem; 0107 unaffected.
 
 ## Notes
 
