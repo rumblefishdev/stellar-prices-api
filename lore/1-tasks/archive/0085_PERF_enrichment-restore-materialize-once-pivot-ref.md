@@ -18,6 +18,23 @@ history:
       subquery — correct + validated, but it reverses review #10's materialize-once
       and re-aggregates the ref per batch. Cheap now (prod has no backfill; the
       XLM/USDC slice is tiny), but grows with backfill depth × batch count.
+  - date: 2026-07-20
+    status: backlog
+    who: okarcz
+    note: >
+      **Gate has EXPIRED — this is now overdue, not pending.** The task says
+      "do this before the 0053 backfill runs"; that backfill has since run (the
+      Soroban-era combined range completed 2026-07-15, and the pre-Soroban SDEX
+      tail is in flight), so the multi-year XLM/USDC slice this was sized against
+      now exists. Flagged during the 0108 grooming sweep.
+      Re-verified unchanged: the pivot reference is still built inline per batch
+      as an ASOF LEFT JOIN subquery (enrichment-worker/src/ch_enrich.rs:719-751),
+      so ref work remains O(slice × batches) — up to max_batches=20 per hourly
+      pass and unbounded in one_shot. The 300s Lambda-timeout risk this task
+      predicted is now live rather than theoretical.
+      Also noted while reading: the comment at ch_enrich.rs:293-294 still claims
+      the reference is "materialized once in run_peg_pivot_tier", contradicting
+      the actual code — fix that alongside.
   - date: 2026-07-21
     status: completed
     who: okarcz

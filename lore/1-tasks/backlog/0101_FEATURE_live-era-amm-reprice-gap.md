@@ -4,7 +4,7 @@ title: "Reprice the live-era AMM gap (Phoenix ~2% short + Soroswap 2026-07-06→
 type: FEATURE
 status: backlog
 related_adr: []
-related_tasks: ["0099", "0097", "0096"]
+related_tasks: ["0099", "0097", "0096", "0065", "0108"]
 tags: [layer-indexing, priority-medium, effort-medium, milestone-M2, amm, phoenix, soroswap, backfill, clickhouse]
 milestone: 2
 links:
@@ -21,6 +21,16 @@ history:
       live processor wrote. Deliberately MILESTONE 2: not needed for M1, no
       urgency, do not pull focus. Both gaps are bounded, well-understood, and the
       tooling + runbook already exist from 0097.
+  - date: 2026-07-20
+    status: backlog
+    who: okarcz
+    note: >
+      Absorbed the surviving residual of task 0065 (cross-chunk intra-minute
+      candles) during the 0108 grooming sweep. 0065's main body is fixed and
+      archived — the accumulator now keeps the boundary minute open across
+      chunks — but the fix is per-process, so the cross-INVOCATION case lands
+      here, on the task that actually chooses run boundaries. See
+      §Cross-invocation minute boundary.
 ---
 
 # Reprice the live-era AMM gap
@@ -86,6 +96,21 @@ reason this isn't a trivial repeat:
 5. **Verify** per script §5 — per-source conservation, one granularity at a time
    (a multi-way `UNION ALL` of FINAL scans runs concurrently and blows the quota).
 
+## Cross-invocation minute boundary (absorbed from 0065)
+
+The `CandleAccumulator` keeps a boundary minute open **within one process run**
+(`events-backfill/src/run.rs:198`, flushing via `flush_older_than`; regression
+test `minute_split_across_calls_is_summed_once_not_undercounted`, `run.rs:544`).
+That guard does **not** span separate invocations: two runs whose ranges split a
+minute each emit a partial candle for it, and because `price_ohlcv_1m` is
+`ReplacingMergeTree(version)` the higher-version partial simply **replaces** the
+other — a silent undercount, never a duplicate.
+
+This is exactly the hazard §1 already guards for `--end`, so treat it as one
+rule rather than two: **every run boundary must be minute-aligned**, at the
+start as well as the end. `--start = 63352612` inherits its alignment from
+0097's end, so it is safe as written; re-verify if either bound moves.
+
 ## Acceptance Criteria
 
 - [ ] Phoenix candles in `[63352612, end]` reflect the variable-length fix
@@ -97,6 +122,8 @@ reason this isn't a trivial repeat:
 - [ ] SDEX untouched (row count + `1d` tip unchanged — **capture the baseline
       BEFORE the run this time**; 0097 skipped it and could only sanity-check).
 - [ ] `prices-production-cleanup` re-enabled after verification.
+- [ ] Both run bounds minute-aligned (not just `--end`) — see
+      §Cross-invocation minute boundary.
 
 ## Notes
 
