@@ -394,6 +394,15 @@ export class ObservabilityStack extends cdk.Stack {
           slackWorkspaceId,
           slackChannelId,
           notificationTopics: [this.opsAlarmsTopic],
+          // Chatbot defaults to LoggingLevel NONE, which makes the last hop of
+          // the alerting path unobservable: CloudWatch reports "Successfully
+          // executed action <sns-arn>" whether or not Chatbot then renders
+          // anything in Slack, and with logging off there is no record either
+          // way. During the 0112 fire-test three SNS publishes succeeded and
+          // produced no Slack message, and the reason could not be determined
+          // because this was NONE. An alerting path we cannot audit is the same
+          // class of problem as the alarm that fired into an empty action list.
+          loggingLevel: chatbot.LoggingLevel.ERROR,
           role: new iam.Role(this, 'OpsAlarmsChatbotRole', {
             assumedBy: new iam.ServicePrincipal('chatbot.amazonaws.com'),
             managedPolicies: [

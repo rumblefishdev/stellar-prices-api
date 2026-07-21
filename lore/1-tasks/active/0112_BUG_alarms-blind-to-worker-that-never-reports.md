@@ -279,3 +279,82 @@ having. But they were the *second* problem. The first was that we had already
 built the right alarm and never plugged it in — and no amount of additional
 alarm design would have helped, because every new alarm would have been wired
 the same way.
+
+## Fire-test 2026-07-21 — PARTIAL. Deploy is correct; the Slack hop is not proven.
+
+Deployed `Prices-production-Observability` and `Prices-production-EventBridge`
+(Compute deliberately skipped — its only diff was asset-hash drift plus the
+undeployed 0106 API change, neither related to this task).
+
+Post-deploy: **20 alarms, every one with ≥1 action.** Before, 2 of 7 worker
+error alarms had any action at all.
+
+### Result: 1 of 4 test notifications reached Slack
+
+| # | action | Slack | verdict |
+|---|---|---|---|
+| 1 | `enrichment-errors` → ALARM | ✅ | the wire that was missing now works |
+| 2 | `enrichment-errors` → OK | ❌ | **expected** — no OK action existed (see below) |
+| 3 | `enrichment-duration-near-timeout` → ALARM | ❌ | **unexplained** |
+| 4 | same → OK | ❌ | **unexplained** |
+
+### #2 was my error, not a defect in the deploy
+
+`createWorkerLambda` only ever called `addAlarmAction`, never `addOkAction`, so
+the seven `-errors` alarms had `OKActions=0`. The fire-test instructions claimed
+otherwise without checking. Fixed here — both directions now wired, matching
+every alarm in ObservabilityStack. Without it you learn a worker broke and never
+learn it recovered.
+
+### #3/#4 are real and NOT in this task's code
+
+`describe-alarm-history` on `enrichment-duration-near-timeout`:
+
+```
+12:41:55  StateUpdate  OK → ALARM
+12:41:55  Action       Successfully executed action arn:aws:sns:…:prices-production-ops-alarms
+12:42:16  StateUpdate  ALARM → OK
+12:42:16  Action       Successfully executed action arn:aws:sns:…:prices-production-ops-alarms
+```
+
+CloudWatch evaluated, transitioned, and **successfully published to SNS three
+times** (including one on creation). The topic has exactly one subscription —
+the Chatbot HTTPS endpoint — and the Chatbot config is correct: subscribed to
+that topic, pointed at the right channel. Yet nothing rendered in Slack.
+
+**So the CloudWatch → SNS half is proven end to end, and the SNS → Chatbot →
+Slack half is not.** The break is downstream of everything this task changed.
+
+Undetermined between:
+- Chatbot throttling / dedup — the four commands ran seconds apart, and the one
+  that DID arrive was the first;
+- a genuine Chatbot drop for these alarms.
+
+**It could not be determined, because `LoggingLevel` was `NONE`.** That is its
+own finding: we had an alerting path with no audit trail, so CloudWatch reports
+"Successfully executed action" whether or not a human is ever told. Same class
+of defect as an alarm firing into an empty action list — just one hop later.
+Set to `ERROR` here.
+
+### Why this AC stays open
+
+The point of a fire-test is proving a human gets told. One message out of four
+does not prove that; it proves the path can work, not that it does. Marking it
+passed on 25% would repeat the mistake this whole task exists to correct.
+
+**Retest procedure** — one alarm, alone, spaced, after deploying this branch:
+
+```bash
+# ALARM, then WAIT at least 2 minutes before the recovery command
+aws cloudwatch set-alarm-state --region eu-central-1 --profile soroban-explorer \
+  --alarm-name prices-production-enrichment-duration-near-timeout \
+  --state-value ALARM --state-reason "0112 retest"
+# ...confirm Slack, wait 2 min...
+aws cloudwatch set-alarm-state --region eu-central-1 --profile soroban-explorer \
+  --alarm-name prices-production-enrichment-duration-near-timeout \
+  --state-value OK --state-reason "0112 retest recovery"
+```
+
+Arrives when spaced ⇒ Chatbot throttling; the alarms are fine and the finding is
+"do not batch fire-tests". Still absent ⇒ a real routing defect for
+Observability-stack alarms, and `LoggingLevel: ERROR` should now say why.
