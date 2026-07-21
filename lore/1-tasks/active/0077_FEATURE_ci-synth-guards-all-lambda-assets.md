@@ -156,11 +156,40 @@ script.
    from the shell body, so the guard no longer depends on the script's character
    class for shell safety.
 
-**Not fixed here** (recorded, lower severity): the asset-name regex excludes
-`_`, so a `my_worker` asset would be silently dropped from the list while the
-list stays non-empty and no tripwire fires; and the derived count is logged but
-never asserted against a floor, so a refactor that drops 7 of 9 literals still
-passes. Both are partial-coverage variants of the empty-list case.
+8. **Extraction is permissive; validation is separate.** The narrow
+   `[a-z0-9-]+` extraction pattern had the same defect as the empty-list case,
+   just partial: a name the pattern could not express (`my_worker`, `MyWorker`,
+   a `${...}` fragment, a nested path) vanished from the list rather than
+   failing. The list stayed non-empty, so no tripwire fired, and CI guarded 8
+   of 9 assets while reporting success — measured: the old pattern found 9
+   literals in a tree containing 10.
+
+   Now the grep matches anything up to the closing quote and each literal is
+   validated against `^[A-Za-z0-9_-]+$` afterwards. Valid-but-unknown names
+   (`my_worker`) flow through to `verify-lambda-assets.sh` and are rejected
+   there with a real diagnostic; genuinely unusable literals (template
+   fragments, nested paths) fail here, naming the offender. Nothing is dropped
+   silently. This subsumes the "assert a count floor" idea — a floor would need
+   a hardcoded 9, reintroducing the hand-maintained constant this task exists
+   to remove.
+
+9. **grep's exit status is captured, not piped.** `set -o pipefail` does not
+   reach into process substitution, so an operational grep failure (unreadable
+   file, arg-list overflow, locale error on `-E`) was indistinguishable from
+   "no matches" and got reported as *"The CDK likely changed how asset dirs are
+   declared"* — sending the next engineer after a refactor that never happened.
+   Status is now checked explicitly: `1` = no match (refactor message), `>1` =
+   tooling failure (distinct message). Both paths tested.
+
+**Not fixed here** (recorded, judged not worth it): the `rust` job now installs
+Node and runs `npx nx build` because `make synth-production` depends on the
+Makefile `build` target, so a one-line Rust change pays for a TypeScript build
+(~2–3 min). Fixing it properly means splitting synth into its own job with its
+own paths filter — real restructuring for a modest CI-time saving, and it is
+cost rather than correctness. Also unaddressed: `on: push` covers `master` only
+while PRs target `develop`, so the guards do not run on a `develop` push;
+largely defused by putting `infra/**`-adjacent changes under a filter that does
+run on PRs, but worth its own task if branch protection ever depends on it.
 
 ## Verification
 
@@ -183,6 +212,18 @@ Run locally against the real repo:
   exited 0 before).
 - `ci.yml` parses as YAML; no `${{ steps.… }}` expressions remain in any
   shell body.
+- **CI run 29818521440 (green) inspected rather than trusted** — the point of
+  this task is guards that pass without working, so the logs were read:
+  typescript job printed `verified 9 Lambda asset(s) against 9 eligible
+  crate(s)` in 1.4 s on a Node-only runner (confirming the check is genuinely
+  build-free and that `cargo`/`jq` are present on `ubuntu-latest`); rust job
+  hashed 9 distinct bootstraps at 6.7–13.8 MB, then `Successfully synthesized`.
+- **Silent-drop cases**, against a fixture root: `my_worker` and `MyWorker` are
+  now carried through and rejected downstream by name; `${name}` and
+  `nested/thing` fail in `lambda-assets.sh` naming the literal. Old pattern
+  found 9 literals where the new one finds 10 — the dropped one was invisible.
+- **grep status**: no-match (exit 1) yields the refactor message; an unreadable
+  subdirectory (exit 2) yields the distinct tooling-failure message.
 - **`make -C infra synth-production` succeeds credential-free** — every SSM read
   is `valueForStringParameter` (a deploy-time CloudFormation dynamic reference);
   there are no `fromLookup` / `valueFromLookup` context lookups, which are what
