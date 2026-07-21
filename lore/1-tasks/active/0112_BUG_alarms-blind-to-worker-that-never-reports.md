@@ -232,8 +232,8 @@ Standing prepare-not-deploy rule — this branch synths only.
 
 - **Fire-test** (breach + recovery), per the 0056 precedent. An alarm nobody has
   watched fire is an untested alarm, which is exactly what this incident was.
-- **Confirm the inert-alarm theory empirically.** Code proves the action list was
-  empty; this proves the alarm actually fired into it:
+- ~~**Confirm the inert-alarm theory empirically.**~~ **CONFIRMED 2026-07-21** —
+  see §Confirmation below. Command retained for reference:
   ```bash
   aws cloudwatch describe-alarm-history --region eu-central-1 \
     --profile soroban-explorer --alarm-name prices-production-enrichment-errors \
@@ -244,3 +244,38 @@ Standing prepare-not-deploy rule — this branch synths only.
   ```
   A transition to ALARM on 07-14 with no notification confirms it. If it never
   transitioned, the diagnosis above is wrong and this needs re-opening.
+
+
+## Confirmation — the alarm fired for 4.5 days into nothing (2026-07-21)
+
+`describe-alarm-history` on `prices-production-enrichment-errors`:
+
+```
+2026-07-13T04:23:59  OK → ALARM
+2026-07-13T05:31:59  ALARM → OK
+2026-07-13T11:19:59  OK → ALARM
+2026-07-13T12:24:59  ALARM → OK
+2026-07-13T14:23:59  OK → ALARM
+2026-07-13T15:24:59  ALARM → OK
+2026-07-13T17:18:59  OK → ALARM      <- and stayed there
+2026-07-18T03:31:02  ALARM → OK
+```
+
+**Continuously in ALARM for 4 days, 10 hours, 12 minutes**, preceded by three
+flaps as the degradation set in.
+
+This settles the diagnosis with no inference left. The alarm was **correct and
+timely**: it caught the onset on 07-13 at 17:18, **7.5 days before** a human
+noticed on 07-21, and held ALARM for the whole outage. Detection was never the
+problem.
+
+It was **mute**. `errorAlarmActions` was empty, so a perfectly functioning alarm
+transitioned, held, and recovered without notifying anyone. The entire fix for
+the primary defect is one line per worker.
+
+Worth keeping in mind when reading the rest of this task: the custom-metric
+blind spot documented above is real, and the platform-metric backstops are worth
+having. But they were the *second* problem. The first was that we had already
+built the right alarm and never plugged it in — and no amount of additional
+alarm design would have helped, because every new alarm would have been wired
+the same way.
