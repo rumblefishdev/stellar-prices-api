@@ -181,15 +181,19 @@ script.
    Status is now checked explicitly: `1` = no match (refactor message), `>1` =
    tooling failure (distinct message). Both paths tested.
 
-**Not fixed here** (recorded, judged not worth it): the `rust` job now installs
-Node and runs `npx nx build` because `make synth-production` depends on the
-Makefile `build` target, so a one-line Rust change pays for a TypeScript build
-(~2–3 min). Fixing it properly means splitting synth into its own job with its
-own paths filter — real restructuring for a modest CI-time saving, and it is
-cost rather than correctness. Also unaddressed: `on: push` covers `master` only
-while PRs target `develop`, so the guards do not run on a `develop` push;
-largely defused by putting `infra/**`-adjacent changes under a filter that does
-run on PRs, but worth its own task if branch protection ever depends on it.
+**Not fixed here → spawned as [0110](../backlog/0110_PERF_ci-split-synth-job-drop-node-from-rust.md):**
+the `rust` job now installs Node and runs `npx nx build`, because
+`make synth-production` depends on the Makefile `build` target — so a one-line
+Rust change pays for a TypeScript build (~2–3 min), and when both jobs fire that
+build runs twice. Cost rather than correctness, and splitting synth out means
+moving the nine bootstraps across a job boundary, which is a design question of
+its own. 0110 carries it, including the option of closing it won't-do once the
+saving is actually measured.
+
+Also unaddressed and noted in 0110's out-of-scope: `on: push` covers `master`
+only while PRs target `develop`, so a `develop` push runs no CI. Largely defused
+by the paths filters catching the relevant PRs, but it is a trigger-policy
+decision — worth its own task if branch protection ever depends on these checks.
 
 ## Verification
 
