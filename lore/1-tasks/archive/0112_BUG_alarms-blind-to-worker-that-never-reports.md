@@ -2,7 +2,7 @@
 id: "0112"
 title: "Progress alarms are blind to a worker that dies — enrichment failed 4 days with no alert"
 type: BUG
-status: active
+status: completed
 related_adr: []
 related_tasks: ["0026", "0056", "0111"]
 tags: [layer-ops, observability, cloudwatch, alarms, priority-high, effort-small, incident]
@@ -36,6 +36,26 @@ history:
       share the defect, not one; mtls is the worst (expired cert breaks all
       ingestion). Caught a 259200s alarm period that synth accepts and
       CloudFormation would reject. Fire-test remains operator-run.
+  - date: 2026-07-21
+    status: completed
+    who: okarcz
+    note: >
+      DONE. Deployed and verified end-to-end. All 8 -errors alarms now
+      AlarmActions=1 OKActions=1; before today 5 of 7 worker alarms had no
+      action at all. Six Slack messages covering both new alarm types across
+      all three workers, five of them real metric-driven transitions rather
+      than set-alarm-state pokes. Recovery verified on supply-errors, where
+      CloudWatch re-evaluated the real metric and transitioned back to OK by
+      itself and the OK action fired.
+      Three defects fixed, only one of which this task originally identified:
+      five inert error alarms (the actual cause of the 4-day silence), three
+      custom-metric alarms blind to a dead emitter, and no recovery
+      notification anywhere. Two wrong diagnoses during the fire-test (drop,
+      then delay) are kept in the record; the real cause was per-alarm
+      suppression of repeat notifications, and the operational lesson -- do
+      not batch fire-tests on one alarm -- is recorded with it.
+      Remaining risk moves to 0111: the duration alarm now gives days of
+      warning, with enrichment at ~2% of its timeout budget as the baseline.
 ---
 
 # Progress alarms are blind to a worker that never reports
@@ -117,11 +137,12 @@ codebase; it just was not applied here.
 - [x] **The five workers with inert `-errors` alarms are wired.** *Emerged
       during implementation and is the primary defect — see §Implementation.*
       *Deployed and fire-test-verified 2026-07-21.*
-- [ ] **Recovery notifications on the `-errors` alarms.** *Emerged from the
+- [x] **Recovery notifications on the `-errors` alarms.** *Emerged from the
       fire-test: `createWorkerLambda` wired only `addAlarmAction`, so all seven
-      have `OKActions=0` and you learn a worker broke but never that it
-      recovered. Fixed in PR #138; **needs `deploy-production-eventbridge` to
-      close.** Blocks archiving this task.*
+      had `OKActions=0` — you learned a worker broke but never that it
+      recovered. Fixed in PR #138, deployed 2026-07-21: all 8 error alarms now
+      read `AlarmActions=1, OKActions=1`. Verified end-to-end on
+      `supply-errors` — see §Recovery test.*
 
 ## Out of scope
 
@@ -435,3 +456,56 @@ than it is.
 short window are suppressed, and the silence reads as a broken alerting path —
 it cost two wrong diagnoses here. Test one transition per alarm, or space them
 well apart.
+
+## Recovery test 2026-07-21 — PASSED, metric-driven
+
+Deployed `deploy-production-eventbridge` (7 × `[+] OKActions`, no Lambda
+functions in the diff — asset hashes had settled) and
+`deploy-production-observability` (Chatbot `LoggingLevel: ERROR`).
+
+All 8 `-errors` alarms now read `AlarmActions=1, OKActions=1`. Before today,
+5 of 7 worker alarms had **no action at all**, and none had an OK action.
+
+Test on `supply-errors`, chosen because it had not notified that day (repeat
+suppression had already produced two wrong diagnoses):
+
+| time | event | Slack |
+|---|---|---|
+| 13:14 | forced OK → ALARM | 🚨 delivered |
+| 13:16 | **CloudWatch re-evaluated the real metric (`Errors = 0.0`) and transitioned ALARM → OK by itself** | ✅ delivered |
+
+The recovery was **not** triggered manually — the alarm recovered on its own
+against a real datapoint and the OK action fired. That is a stronger result than
+the planned `set-alarm-state` recovery: a genuine metric-driven round trip.
+
+Also settled here: `mtls-notafter-probe-duration-near-timeout`, the last
+`INSUFFICIENT_DATA` alarm, accumulated its two daily periods and resolved to OK
+(1,046 ms and 958 ms against a 48,000 ms threshold). **Every alarm in the set is
+now evaluated and healthy — no unknowns left.**
+
+### Cosmetic note for whoever reads these at 3am
+
+The red message rendered with `Latest Update: ✅ ... is in OK state`. Chatbot
+shows the alarm's state **at render time**, not at event time, and CloudWatch had
+already recovered it. Not a fault; do not read it as a contradiction mid-incident.
+
+## Outcome
+
+An enrichment failure now reaches Slack within ~2 h, and recovery is announced.
+In July the same failure ran **4 days 10 hours** with the correct alarm sitting in
+ALARM, unwired, telling nobody — and was found by hand six days after it
+recovered.
+
+Three defects fixed, of which only the second was in the original diagnosis:
+
+1. **Five worker `-errors` alarms had no action.** The alarms existed and worked;
+   nobody had connected them. This was the outage.
+2. **Three custom-metric alarms cannot see a dead emitter.** Now backstopped by
+   platform-metric `-duration-near-timeout` and `-no-invocations` on all three
+   affected workers.
+3. **No `-errors` alarm announced recovery.** Fixed.
+
+Follow-on value: `-duration-near-timeout` gives days of warning on the class of
+degradation that caused the outage. Enrichment currently runs at ~4.5 s against a
+240 s threshold — about 2% of budget. That is the baseline [[0111]] will be
+judged against when backfill load returns.
