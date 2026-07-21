@@ -2,9 +2,9 @@
 id: "0062"
 title: "Enrichment loop: drive progress from INSERT rows-affected (gated on clickhouse-crate upgrade)"
 type: PERF
-status: completed
+status: backlog
 related_adr: ["0007"]
-related_tasks: ["0061", "0026", "0039", "0085", "0108"]
+related_tasks: ["0061", "0026", "0039"]
 tags: [layer-database, clickhouse, enrichment, perf, priority-low, effort-small, blocked-on-dependency]
 links:
   - "../../../packages/enrichment-worker/src/ch_enrich.rs"
@@ -17,27 +17,6 @@ history:
       XLM/USDC pivot reference once per run) shipped on the 0061 branch; part 2 is
       deferred because the clean fix needs a clickhouse-crate capability we don't
       have pinned.
-  - date: 2026-07-20
-    status: completed
-    who: okarcz
-    note: >
-      **CLOSED as won't-do (dependency-gated)** in the 0108 post-M1 grooming
-      sweep. Re-verified: the gate has NOT moved. The `clickhouse` crate is
-      still 0.13, whose query().execute() returns () and discards the
-      X-ClickHouse-Summary written_rows this task depends on — the constraint is
-      still recorded in-code at enrichment-worker/src/ch_enrich.rs:285-291, and
-      count_candidates() still runs per batch in both tier loops (:496, :572).
-      Closing rather than carrying it because the task cannot be started by a
-      decision on our side: it is 100% blocked on a workspace-wide crate
-      upgrade that is its own migration (clickhouse is shared by
-      prices-clickhouse, sdex-backfill and enrichment-worker), and the payoff is
-      purely cost. The correctness hazard that once lived here (#5, concurrent
-      live inserts tripping the no-progress break) was already fixed under 0061
-      by the max(timestamp) watermark.
-      This will re-surface naturally at the crate bump — the constraint comment
-      in ch_enrich.rs is the durable pointer, not this task file. If enrichment
-      cost becomes acute BEFORE then, the live concern is 0085 (per-batch pivot
-      re-aggregation), which is the dominant cost and is actionable today.
 ---
 
 # Enrichment loop: drive progress from INSERT rows-affected

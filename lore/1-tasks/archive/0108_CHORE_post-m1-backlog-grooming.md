@@ -4,7 +4,7 @@ title: "Post-M1 backlog grooming — close done/superseded tasks, salvage their 
 type: CHORE
 status: completed
 related_adr: []
-related_tasks: ["0073", "0068", "0065", "0036", "0035", "0030", "0062", "0072", "0101", "0088"]
+related_tasks: ["0073", "0068", "0065", "0036", "0035", "0030", "0062", "0072", "0101", "0088", "0111"]
 tags: ["layer-ops", "priority-medium", "effort-small", "housekeeping", "lore"]
 links: []
 history:
@@ -13,7 +13,7 @@ history:
     who: okarcz
     note: >
       Milestone 1 delivered, so the backlog was swept for tasks that are already
-      done, duplicated, or answered by later work. Seven closures identified and
+      done, duplicated, or answered by later work. Closures identified and
       each verified against the code (not against the task's own prose) before
       being proposed. 0047 was reviewed for closure and deliberately KEPT — see
       §Kept open.
@@ -21,8 +21,8 @@ history:
     status: completed
     who: okarcz
     note: >
-      Done. 7 tasks archived (0030, 0035, 0036, 0062, 0065, 0068, 0073);
-      backlog 23 → 17 (7 closed, 1 spawned). Content salvaged into 0072 (0068's
+      Done. 6 tasks archived (0030, 0035, 0036, 0065, 0068, 0073);
+      backlog 23 → 18 (6 closed, 1 spawned; 0062 closure withdrawn 07-21). Content salvaged into 0072 (0068's
       §5.5 outlier filter + DROP/CREATE redeploy gotcha + TO(...) footgun) and
       0101 (0065's cross-invocation minute-boundary residual, folded into its
       existing minute-alignment rule). 0109 spawned for the backfill preflight
@@ -68,7 +68,24 @@ state the repo has since moved past. The two that matter most:
 | **0036** Phoenix 237-byte XYK WASM delta | **superseded** | The question was whether the second XYK build alters event emission. **0099 answered it**: Phoenix emits variable-length swap groups (7-event as well as 8-event); the `n >= 8` gate dropped ~2.1%. Fixed and deployed 2026-07-17 11:57:52. |
 | **0035** Phoenix stable-pool re-survey | **won't-do** | Speculative monitoring with no consumer — the seeder does not seed Phoenix `stable` at all (`packages/pool-registry-seed/src/lib.rs:88` maps it to `None`). If wanted later this is a scheduled check, not a task. |
 | **0030** BE `topics_xdr` column-naming | **won't-do** | Cross-repo courtesy note to `soroban-block-explorer`; no prices-api change and no blocker. The decode assumption it warns about is long since settled on our side. |
-| **0062** enrichment progress via rows-affected | **won't-do (gated)** | Hard-gated on a `clickhouse` crate upgrade that has not happened — still 0.13, whose `query().execute()` discards `written_rows` (`packages/enrichment-worker/src/ch_enrich.rs:285`). Purely a cost optimisation; the correctness hazard in the area was already fixed under 0061. Will re-surface naturally with the crate bump. |
+| **0062** enrichment progress via rows-affected | ⚠️ **CLOSURE WITHDRAWN 2026-07-21** — kept in backlog | Hard-gated on a `clickhouse` crate upgrade that has not happened — still 0.13, whose `query().execute()` discards `written_rows` (`packages/enrichment-worker/src/ch_enrich.rs:285`). Purely a cost optimisation; the correctness hazard in the area was already fixed under 0061. Will re-surface naturally with the crate bump. **This reasoning was refuted five days later by measurement — see the note below the table.** |
+
+> ⚠️ **0062's closure was withdrawn on 2026-07-21, before this PR merged.**
+> Prod `system.query_log` shows `count_candidates` ran 545×/day at ~11 s each,
+> reading 544M rows, during a four-day enrichment outage (07-14 → 07-17, 72/72
+> invocations failing daily). So the task is not merely a deferred cost
+> optimisation — it is a measured contributor to roughly a third of a ~35 s
+> batch against a 300 s Lambda timeout.
+>
+> The closure note also ended by directing a future reader to 0085 as *"the
+> dominant cost and actionable today"*. That was wrong in the other direction:
+> 0085's pivot reference measures **0.029 s** and has since been closed as
+> not-the-bottleneck. Both judgements were made by reading code rather than
+> measuring it.
+>
+> 0062 stays in `backlog/`, re-scoped to priority-medium and sequenced behind
+> [[0111]], which owns the dominant ~24 s INSERT scan.
+> Grooming closures 7 → **6**.
 
 ## Content salvage (do before archiving)
 
@@ -110,7 +127,8 @@ Closing these files must not lose information:
 - [x] 0065's cross-invocation residual present in 0101.
 - [x] 0109 created in backlog, linked from 0088.
 - [x] 0047 left in backlog, with the review outcome recorded on it.
-- [x] Index regenerated; backlog count reflects the closures (23 → 17).
+- [x] Index regenerated; backlog count reflects the closures (23 → 18 — 6 closed,
+      1 spawned; 0062's closure was withdrawn 2026-07-21 on measurement).
 
 ## Out of scope
 
