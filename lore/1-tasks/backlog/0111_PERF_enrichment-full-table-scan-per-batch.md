@@ -114,9 +114,22 @@ Options 1 and 3 are complementary; 2 may be a fast stopgap.
 - [ ] 0026's `EnrichmentPassDurationMs` stays well clear of 300 s for a week
       spanning active backfill.
 
+**Baseline to judge the fix against** (drained state, measured 2026-07-21 via the
+alarms deployed in [[0112]]): enrichment runs at **~4,500 ms against a 240,000 ms
+warning threshold — about 2% of the timeout budget**, 1 invocation/hour on
+schedule. That is a *quiet-cluster* number: the same work cost ~35 s/batch under
+backfill load. A fix is only demonstrated when the loaded figure stays low, not
+when the quiet one does.
+
+`prices-production-enrichment-duration-near-timeout` now fires at 80% of the
+timeout, so a recurrence surfaces as days of warning rather than a silent
+outage — but it does not prevent one.
+
 ## Out of scope
 
 - The alarm blind spot that let this run four days unnoticed — that is [[0112]].
-- The `price_ohlcv_15m` pre-roll INSERT, which the same query log shows at
-  217 s avg / 301 s max reading 177M rows. Same 300 s wall, different statement;
-  needs its own task if it is not already covered by the pre-roll runbook.
+- The `price_ohlcv_15m` pre-roll INSERT (217 s avg / 301 s max, 177M rows) —
+  **now [[0113]]**. Note the description above was wrong when first written: it
+  called this "the same 300 s wall", implying a Lambda timeout. The pre-roll is
+  operator-run SQL, not a Lambda, so no timeout applies; the real exposure is
+  memory (2,938 MB of a 5.59 GiB quota). 0113 carries the corrected framing.
