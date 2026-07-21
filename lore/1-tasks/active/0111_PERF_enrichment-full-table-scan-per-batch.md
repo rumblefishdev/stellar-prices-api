@@ -2,7 +2,7 @@
 id: "0111"
 title: "Enrichment re-scans the whole table every batch — 545M rows/batch, caused a 4-day production outage"
 type: PERF
-status: backlog
+status: active
 related_adr: ["0007"]
 related_tasks: ["0026", "0062", "0085", "0112", "0088"]
 tags: [layer-indexing, clickhouse, enrichment, perf, priority-high, effort-medium, incident]
@@ -18,6 +18,13 @@ history:
       490–545M rows each because their predicates are not in the sort key.
       Supersedes 0085 (closed — the pivot ref it targets measured 0.029s) and
       demotes 0062 to secondary (~11s of a ~35s batch).
+  - date: 2026-07-21
+    status: active
+    who: okarcz
+    note: >
+      Promoted to active. Time-boxed: the ACs require re-measuring under the
+      active backfill write load from 0088, which ends when its pass 2 finishes
+      (~2026-07-31). Measure before choosing among the four options.
 ---
 
 # Enrichment re-scans the whole table every batch
