@@ -818,6 +818,20 @@ INSERT opens a fresh connection.
 
 ### 5.3 Ingestion Workers
 
+> **⚠️ Backfill sink model superseded by ADR 0009 (direct-write).** The two SDEX
+> rows below (`sdex-backfill` writing to a **local ClickHouse** on the
+> workstation, then a separate **`sdex-cloud-push`** step streaming those rows to
+> Hetzner) and the AMM row's "completion cloud push" describe the **original
+> ADR 0005 / ADR 0001** local-stage-then-push design. **[ADR 0009](../lore/2-adrs/0009_backfill-direct-write-to-hetzner-clickhouse.md)
+> retired it:** both backfill CLIs now write **directly to Hetzner `prices.*`
+> over the 0052 mTLS client as they decode** — there is **no local ClickHouse
+> mirror and no separate `sdex-cloud-push` step**. §9 (Tranche-1 Work) already
+> reflects the delivered direct-write path. Throughout §5.3–§5.6 and the §5.5
+> data-flow diagram, read every `sdex-cloud-push` / "cloud-push cadence" /
+> "local ClickHouse sink" reference as the backfill CLI's **direct write** to
+> Hetzner; `backfill_progress.last_push_at` (a real, retained column) is the
+> timestamp of the most recent such write.
+
 | Worker                                                          | Trigger                                                                                  | Source                                                                                                                                          | Data                                                                                                                                                                                                                               |
 | --------------------------------------------------------------- | ---------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Prices Ledger Processor**                                     | SNS message (per S3 PutObject; ~every 5–6 s)                                             | `LedgerCloseMeta` from BE's S3                                                                                                                  | SDEX trades + all Soroban AMM swap events → per-source 1-min OHLCV rows in `prices.price_ohlcv_1m`                                                                                                                                 |
