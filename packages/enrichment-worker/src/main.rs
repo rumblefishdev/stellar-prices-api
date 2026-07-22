@@ -50,6 +50,10 @@ async fn main() -> Result<(), lambda_runtime::Error> {
         // (spec §4), ignoring max_batches. An explicit flag, not a MAX_BATCHES
         // sentinel, so MAX_BATCHES keeps its literal meaning.
         one_shot: env_parse_or("ENRICHMENT_ONE_SHOT", false),
+        // The scheduled Lambda always runs the unbounded hourly pass over
+        // price_ohlcv_1m; the partition-bounded window is only set by the 0114
+        // coarse-repair driver (operator-run), never here.
+        time_window: None,
     };
 
     tracing::info!(

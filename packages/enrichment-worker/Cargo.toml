@@ -22,6 +22,15 @@ required-features = ["lambda"]
 name = "enrichment-cli"
 path = "src/bin/cli.rs"
 
+# Operator entrypoint for the task 0114 coarse-table USD repair driver. Needs
+# `aws-mtls` for the `--transport hetzner` (prod) path — the `mtls` module in
+# prices-clickhouse is behind that feature. Build/run:
+#   cargo run -p enrichment-worker --features aws-mtls --bin coarse-repair -- …
+[[bin]]
+name = "coarse-repair"
+path = "src/bin/coarse-repair.rs"
+required-features = ["aws-mtls"]
+
 [features]
 default = []
 aws-mtls = ["prices-clickhouse/aws-mtls"]
