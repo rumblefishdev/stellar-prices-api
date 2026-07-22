@@ -1,0 +1,68 @@
+%%{init: {"flowchart": {"curve": "basis"}}}%%
+flowchart TB
+    SP["Stellar mainnet peers"]
+    ARCH["Public ledger archive<br/><i>s3://aws-public-blockchain</i><br/><i>anonymous read · backfill only</i>"]
+    RPC["Reflector oracle · Soroban RPC<br/><i>SEP-40 · reference prices only</i>"]
+    HOR["Horizon<br/><i>circulating supply</i>"]
+
+    subgraph BE["Shared platform — funded Soroban Block Explorer (same AWS sub-account)"]
+        direction TB
+        GAL["<b>Galexie · Captive Core</b><br/>production-galexie-live<br/><i>ECS Fargate · always-on</i>"]
+        S3["<b>S3 bucket</b><br/>production-stellar-ledger-data<br/><i>one XDR file per ledger</i>"]
+        SNS["<b>SNS topic</b><br/><i>fan-out to both tenants</i>"]
+    end
+
+    subgraph AWS["AWS — eu-central-1 · Prices API (no VPC, no NAT, no RDS)"]
+        direction TB
+        SQS["<b>SQS queue</b><br/>prices-ingest-production<br/><i>batchSize 1 · reportBatchItemFailures</i>"]
+        DLQ["<b>DLQ</b><br/>prices-ingest-dlq-production"]
+        LP["<b>Prices Ledger Processor · Lambda (Rust)</b><br/>prices-production-ledger-processor<br/><i>reservedConcurrentExecutions=1</i><br/><i>decode XDR → SDEX + AMM trades → 1m candles</i>"]
+        WRK["<b>Periodic workers · Lambda (Rust)</b><br/><i>EventBridge-scheduled</i><br/>asset-discovery · oracle · supply<br/>enrichment · cleanup · probes"]
+        API["<b>Prices API · Lambda (Rust, axum)</b><br/>prices-production-api-handler"]
+        AGW["<b>API Gateway</b><br/>prices-production-api<br/><i>x-api-key · usage plan · stage cache</i>"]
+    end
+
+    CLI["<b>sdex-backfill · Rust CLI</b><br/><i>operator workstation · historical</i>"]
+
+    subgraph HET[" "]
+        CH[("<b>ClickHouse — database <i>prices</i></b><br/><i>Hetzner ch-prod-01 · shared with SBE</i><br/>ch.sorobanscan.rumblefish.dev<br/><i>ReplacingMergeTree · MV rollup chain</i><br/><i>Caddy:443 · HTTPS-mTLS</i>")]
+    end
+
+    IAC["<b>Infrastructure as code</b><br/><i>AWS CDK · 5 stacks</i>"]
+
+    SP -->|"streams closed ledgers"| GAL
+    GAL -->|"~1 file every 5-6 s"| S3
+    S3 -->|"S3:ObjectCreated"| SNS
+    SNS -->|"fan-out subscription"| SQS
+    SQS -->|"doorbell · triggers Lambda"| LP
+    LP -.->|"persistent failure"| DLQ
+    LP -->|"reads ledger XDR by sequence"| S3
+    LP -->|"INSERT 1m candles<br/>over mTLS"| CH
+    RPC --> WRK
+    HOR --> WRK
+    WRK -->|"oracle_prices · assets · asset_supply<br/>enrichment · retention"| CH
+    ARCH -->|"64k-ledger partitions"| CLI
+    CLI -->|"direct write over mTLS<br/><i>ADR 0009</i>"| CH
+    CH -->|"SELECT over mTLS"| API
+    AGW --> API
+
+    IAC -.-> AWS
+    IAC -.-> AGW
+
+    classDef ingestion fill:#FFE0B2,stroke:#E65100,stroke-width:1.5px,color:#BF360C
+    classDef external  fill:#E3F2FD,stroke:#1565C0,stroke-width:1.5px,color:#0D47A1
+    classDef database  fill:#FFCDD2,stroke:#B71C1C,stroke-width:2px,color:#B71C1C
+    classDef iac       fill:#FAFAFA,stroke:#9E9E9E,stroke-width:1.5px,color:#424242,stroke-dasharray:4 3
+    classDef shared    fill:#E8F5E9,stroke:#2E7D32,stroke-width:1.5px,color:#1B5E20
+    classDef local     fill:#EDE7F6,stroke:#4527A0,stroke-width:1.5px,color:#311B92
+
+    class SP,ARCH,RPC,HOR external
+    class GAL,S3,SNS shared
+    class SQS,DLQ,LP,WRK,API,AGW ingestion
+    class CH database
+    class IAC iac
+    class CLI local
+
+    style AWS fill:#FFF8E1,stroke:#FF8F00,stroke-width:2px,color:#E65100
+    style BE  fill:#F1F8E9,stroke:#558B2F,stroke-width:2px,color:#33691E
+    style HET fill:#FFEBEE,stroke:#C62828,stroke-width:2px,color:#B71C1C

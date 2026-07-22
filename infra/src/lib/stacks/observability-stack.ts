@@ -9,6 +9,7 @@ import * as ssm from 'aws-cdk-lib/aws-ssm';
 import type { Construct } from 'constructs';
 
 import type { EnvironmentConfig } from '../types.js';
+import { workerFunctionName } from '../lambda-baseline.js';
 import {
   ingestDlqName,
   ingestQueueName,
@@ -28,6 +29,153 @@ export function opsAlarmsTopicName(envName: string): string {
 
 export interface ObservabilityStackProps extends cdk.StackProps {
   readonly config: EnvironmentConfig;
+}
+
+/**
+ * The platform-metric alarms this module adds per scheduled worker (task 0112).
+ *
+ * Deliberately does NOT include an invocation-errors alarm: `createWorkerLambda`
+ * already creates `prices-{env}-{name}-errors` for every worker. That alarm was
+ * never the gap — the gap was that most workers never passed
+ * `errorAlarmActions`, leaving it inert. Adding a second alarm here would
+ * collide on `alarmName` and mask the real defect instead of fixing it.
+ */
+export interface WorkerHealthAlarms {
+  /** Duration approaching the configured timeout — warns BEFORE it becomes errors. */
+  readonly duration: cloudwatch.Alarm;
+  /** Zero invocations — the worker is not running at all. */
+  readonly noInvocations: cloudwatch.Alarm;
+}
+
+/** Inputs for {@link addWorkerHealthAlarms}. */
+interface WorkerHealthAlarmProps {
+  /** Worker name as passed to `createWorkerLambda` (e.g. `enrichment`). */
+  readonly name: string;
+  /** CDK construct-id prefix (e.g. `Enrichment`). */
+  readonly idPrefix: string;
+  /** Deployed Lambda function name — `prices-${env}-${name}`. */
+  readonly functionName: string;
+  /** The worker's configured Lambda timeout. */
+  readonly timeout: cdk.Duration;
+  /** How often EventBridge invokes it — sets the evaluation windows. */
+  readonly cadence: cdk.Duration;
+  /** Appended to each alarm description: what breaks when this worker stops. */
+  readonly impact: string;
+}
+
+/**
+ * Create the platform-metric health alarms for one scheduled worker.
+ *
+ * WHY THIS EXISTS (task 0112)
+ * ---------------------------
+ * `prices-production-enrichment` failed 72/72 invocations per day for four
+ * consecutive days (2026-07-14 → 07-17), `Duration.Maximum` pinned at the 300 s
+ * wall, and nobody was told. It was found by hand six days after it recovered.
+ *
+ * Two separate defects produced that silence, and they need different fixes:
+ *
+ * 1. **The errors alarm existed but was inert.** `createWorkerLambda` creates
+ *    `prices-{env}-{name}-errors` for every worker, but only the two probes
+ *    passed `errorAlarmActions`. Enrichment's alarm almost certainly went to
+ *    ALARM on 07-14 and notified no one. Fixed by wiring the action — NOT by
+ *    adding another alarm here, which would collide on `alarmName`.
+ *
+ * 2. **The progress alarm cannot see a dead worker.** `enrichmentBacklogAlarm`
+ *    reads `Prices/Enrichment` metrics the worker publishes at the END of a
+ *    pass. A worker killed by its timeout never reaches that publish call, so
+ *    it emits nothing — and `treatMissingData: NOT_BREACHING` scores "nothing"
+ *    as healthy. It can detect "ran and made no progress", never "did not run".
+ *    The same defect applies to `sdexPushFreshnessAlarm` (Prices/Backfill) and
+ *    `mtlsNotAfterAlarm` (Prices/Mtls).
+ *
+ * This function adds the two alarms nothing else covers, both on `AWS/Lambda`
+ * metrics the platform emits whether or not our code survives:
+ *
+ * - **duration** — the one that would have PREVENTED the outage rather than
+ *   reported it. Enrichment's batch cost climbed for days before crossing the
+ *   wall, so a threshold at 80% of the timeout converts a silent degradation
+ *   into days of warning.
+ * - **noInvocations** — catches a disabled or deleted schedule rule, which the
+ *   errors alarm cannot see (no invocations means no error datapoints either).
+ *
+ * The pattern is not new: the ledger-processor's no-invocations alarm below
+ * already does exactly this, `treatMissingData: BREACHING` and all. It simply
+ * was never applied to the scheduled workers.
+ */
+function addWorkerHealthAlarms(
+  scope: Construct,
+  envName: string,
+  snsAction: cw_actions.SnsAction,
+  props: WorkerHealthAlarmProps,
+): WorkerHealthAlarms {
+  const { name, idPrefix, functionName, timeout, cadence, impact } = props;
+
+  const metric = (
+    metricName: string,
+    statistic: string,
+    period: cdk.Duration,
+  ) =>
+    new cloudwatch.Metric({
+      namespace: 'AWS/Lambda',
+      metricName,
+      dimensionsMap: { FunctionName: functionName },
+      statistic,
+      period,
+    });
+
+  // 80% of the timeout. A worker creeping toward its limit is the leading
+  // indicator; once it crosses, every run fails and the errors alarm is
+  // reporting an outage that already started.
+  const durationThresholdMs = Math.floor(timeout.toMilliseconds() * 0.8);
+  const duration = new cloudwatch.Alarm(
+    scope,
+    `${idPrefix}WorkerDurationAlarm`,
+    {
+      alarmName: `prices-${envName}-${name}-duration-near-timeout`,
+      alarmDescription: `The ${name} worker is running at ≥80% of its ${timeout.toHumanString()} Lambda timeout (Duration.Maximum ≥ ${durationThresholdMs} ms for two consecutive periods). It has not failed yet, but it is trending at the wall and will start timing out. ${impact} Investigate before it becomes an outage — this is the warning enrichment did not have in 2026-07.`,
+      metric: metric('Duration', 'Maximum', cadence),
+      threshold: durationThresholdMs,
+      evaluationPeriods: 2,
+      datapointsToAlarm: 2,
+      comparisonOperator:
+        cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    },
+  );
+  duration.addAlarmAction(snsAction);
+  duration.addOkAction(snsAction);
+
+  // Three cadences of total silence: the schedule rule was disabled, deleted,
+  // or is failing to invoke. `treatMissingData: BREACHING` is load-bearing —
+  // Lambda publishes NO Invocations datapoint for a period with zero
+  // invocations, so a LESS_THAN threshold alone would never evaluate.
+  //
+  // Expressed as three periods of one cadence rather than one period of three
+  // cadences, which would be equivalent here but exceeds CloudWatch's 86400 s
+  // maximum alarm period for the daily mtls probe (3 × 1 day = 259200 s). That
+  // is a DEPLOY-time validation failure, not a synth-time one, so it would have
+  // passed every local check and failed in CloudFormation.
+  //
+  // Three periods (not one) also absorbs a deploy window or a delayed datapoint.
+  const noInvocations = new cloudwatch.Alarm(
+    scope,
+    `${idPrefix}WorkerNoInvocationsAlarm`,
+    {
+      alarmName: `prices-${envName}-${name}-no-invocations`,
+      alarmDescription: `The ${name} worker recorded zero invocations for three consecutive ${cadence.toHumanString()} periods despite being scheduled at that cadence: the EventBridge rule is disabled or deleted, or invocation is failing before the function runs. ${impact} Fires on the ABSENCE of activity, which neither the -errors alarm (no invocations means no error datapoints) nor any custom-metric alarm can do.`,
+      metric: metric('Invocations', 'Sum', cadence),
+      threshold: 1,
+      evaluationPeriods: 3,
+      datapointsToAlarm: 3,
+      comparisonOperator: cloudwatch.ComparisonOperator.LESS_THAN_THRESHOLD,
+      // Missing = zero invocations = the halt we are looking for.
+      treatMissingData: cloudwatch.TreatMissingData.BREACHING,
+    },
+  );
+  noInvocations.addAlarmAction(snsAction);
+  noInvocations.addOkAction(snsAction);
+
+  return { duration, noInvocations };
 }
 
 /**
@@ -91,6 +239,12 @@ export class ObservabilityStack extends cdk.Stack {
   public readonly ledgerProcessorDlqAlarm: cloudwatch.Alarm;
   /** Live ledger-processor total-halt alarm — zero invocations (finding B / halt gap). */
   public readonly ledgerProcessorNoInvocationsAlarm: cloudwatch.Alarm;
+  /**
+   * Platform-metric health alarms for the scheduled workers whose only other
+   * alarm reads a metric the worker itself publishes (task 0112). Keyed by
+   * worker name: `errors`, `duration`, `noInvocations`.
+   */
+  public readonly workerHealthAlarms: Record<string, WorkerHealthAlarms>;
 
   constructor(scope: Construct, id: string, props: ObservabilityStackProps) {
     super(scope, id, props);
@@ -240,6 +394,15 @@ export class ObservabilityStack extends cdk.Stack {
           slackWorkspaceId,
           slackChannelId,
           notificationTopics: [this.opsAlarmsTopic],
+          // Chatbot defaults to LoggingLevel NONE, which makes the last hop of
+          // the alerting path unobservable: CloudWatch reports "Successfully
+          // executed action <sns-arn>" whether or not Chatbot then renders
+          // anything in Slack, and with logging off there is no record either
+          // way. During the 0112 fire-test three SNS publishes succeeded and
+          // produced no Slack message, and the reason could not be determined
+          // because this was NONE. An alerting path we cannot audit is the same
+          // class of problem as the alarm that fired into an empty action list.
+          loggingLevel: chatbot.LoggingLevel.ERROR,
           role: new iam.Role(this, 'OpsAlarmsChatbotRole', {
             assumedBy: new iam.ServicePrincipal('chatbot.amazonaws.com'),
             managedPolicies: [
@@ -470,6 +633,66 @@ export class ObservabilityStack extends cdk.Stack {
     );
     this.ledgerProcessorNoInvocationsAlarm.addAlarmAction(snsAction);
     this.ledgerProcessorNoInvocationsAlarm.addOkAction(snsAction);
+
+    // Platform-metric health alarms for the scheduled workers (task 0112).
+    //
+    // These three workers each had exactly ONE alarm, and each of those reads a
+    // custom metric the worker publishes only if it survives to the end of a
+    // pass — so none of them could detect the worker dying. See
+    // `addWorkerHealthAlarms` for the full reasoning and the incident that
+    // exposed it.
+    //
+    // Function names come from `workerFunctionName`, the same helper
+    // `createWorkerLambda` uses, so a rename cannot leave an alarm pointing at
+    // a name that no longer exists — which would not error, it would just
+    // never fire.
+    //
+    // Timeouts and cadences ARE duplicated from eventbridge-stack.ts /
+    // production.json, because ObservabilityStack does not receive the
+    // functions as props. That drift is real but benign: a stale timeout only
+    // mis-tunes the 80% threshold, and a stale cadence only widens the
+    // detection window. Neither can silently disarm an alarm. Threading the
+    // functions through was judged not worth the stack coupling — see
+    // §Design Decisions in task 0112.
+    const workerHealth: Array<WorkerHealthAlarmProps> = [
+      {
+        name: 'enrichment',
+        idPrefix: 'Enrichment',
+        functionName: workerFunctionName(config.envName, 'enrichment'),
+        timeout: cdk.Duration.minutes(5),
+        cadence: cdk.Duration.hours(1),
+        impact:
+          'USD columns (close_usd / volume_quote_usd) stop being filled in, so new candles serve as 0 to the API.',
+      },
+      {
+        name: 'backfill-freshness-probe',
+        idPrefix: 'BackfillFreshness',
+        functionName: workerFunctionName(
+          config.envName,
+          'backfill-freshness-probe',
+        ),
+        timeout: cdk.Duration.minutes(1),
+        cadence: cdk.Duration.minutes(15),
+        impact:
+          'The sdex-push-freshness alarm goes dark: it reads Prices/Backfill PushAgeSeconds, which only this probe publishes, so a stalled backfill would stop being reported rather than reported as stalled.',
+      },
+      {
+        name: 'mtls-notafter-probe',
+        idPrefix: 'MtlsNotAfter',
+        functionName: workerFunctionName(config.envName, 'mtls-notafter-probe'),
+        timeout: cdk.Duration.minutes(1),
+        cadence: cdk.Duration.days(1),
+        impact:
+          'Client-certificate expiry monitoring goes dark: the mtls-notafter alarm reads Prices/Mtls MinDaysToNotAfter, which only this probe publishes. An expired cert breaks ALL ClickHouse ingestion, so silence here is the most expensive of the three.',
+      },
+    ];
+
+    this.workerHealthAlarms = Object.fromEntries(
+      workerHealth.map((w) => [
+        w.name,
+        addWorkerHealthAlarms(this, config.envName, snsAction, w),
+      ]),
+    );
 
     new cdk.CfnOutput(this, 'OpsAlarmsTopicArn', {
       value: this.opsAlarmsTopic.topicArn,

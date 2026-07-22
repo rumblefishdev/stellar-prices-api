@@ -2,9 +2,9 @@
 id: "0036"
 title: "What is the 237-byte delta between Phoenix XYK WASM builds 167ab414... and 13b158655e...?"
 type: RESEARCH
-status: backlog
+status: completed
 related_adr: []
-related_tasks: ["0032", "0034"]
+related_tasks: ["0032", "0034", "0099", "0108"]
 tags: [layer-research, priority-low, effort-small, phoenix, wasm-analysis, defensive]
 links:
   - "../archive/0032_RESEARCH_phoenix-stable-pool-first-observation/notes/S-no-stable-pool-deployed.md"
@@ -14,6 +14,25 @@ history:
     status: backlog
     who: oski
     note: "Spawned from 0032 — defensive: confirm 8-event grouping holds on second XYK build."
+  - date: 2026-07-20
+    status: completed
+    who: okarcz
+    note: >
+      **SUPERSEDED by task 0099 — the question is answered, and the answer was
+      "no, the grouping does not hold".** Closed in the 0108 post-M1 sweep.
+      This task asked whether the 237-byte delta between the two production
+      Phoenix XYK WASMs changes event emission, and predicted that if it did,
+      the consumer's 8-event assumption would silently mis-parse. That is
+      precisely what 0099 found in production: Phoenix emits VARIABLE-LENGTH
+      swap groups, and dispatch_phoenix gated on n >= 8 (the fully-populated
+      shape) while Phoenix omits optional fields — discarding 5,175 real
+      7-event swaps, ~2.1% of Phoenix volume. Fixed and deployed to live
+      2026-07-17 11:57:52.
+      So the defensive hypothesis was correct and has been closed empirically,
+      via production data rather than the planned swap-dump + wasm-tools diff.
+      The step-3 disassembly is moot: we now know the behavioural difference
+      directly, which is all the disassembly was ever a proxy for.
+      Backward-looking reprice of what live wrote under the bug → 0101.
 ---
 
 # Phoenix XYK 237-byte WASM delta

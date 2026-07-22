@@ -80,6 +80,59 @@ history:
       sdex-backfill` + partition number climbing in `~/sdex-tail.log` over ≥25 min,
       or `backfill_sdex_ledgers.max` sampled >22 min apart. Memory:
       [[sdex-backfill-presoroban-gap-0088]], [[local-backfill-throughput-measured]].
+  - date: 2026-07-20
+    status: active
+    who: okarcz
+    note: >
+      🔴 DATA LOSS FOUND + CONTAINED. The tail run is healthy (floor 23,423,999 =
+      46.4%, ~177k ledgers/hr, ~6.3 days to activation) but had been DESTROYING ITS
+      OWN OUTPUT since it started 2026-07-15: the nightly `prices-production-cleanup`
+      EventBridge rule was ENABLED (re-enabled after 0090's rerun; the tail start
+      never re-checked it). `cleanup-worker` drops whole monthly partitions where
+      `toUInt32(partition) < toYYYYMM(now() - INTERVAL 7 DAY)` — backfilled candles
+      carry HISTORICAL timestamps, so their partitions are eligible the moment they
+      land. The "7 day retention" gives backfill output ZERO grace, and each nightly
+      fire wiped that day's work.
+      LOST: genesis → ~Nov 2018 (ledgers 1 → ~21.4M, ~4.5 of the 5 days spent).
+      SURVIVING `price_ohlcv_1m`: `201812` 207,021 rows (PARTIAL — pre-fire portion
+      dropped), `201901`–`201904` 1,160,062 rows (trusted, written post-fire),
+      `202607` 10.0M (live current month, never eligible). Soroban-era coarse
+      UNTOUCHED (1h…1M are not in `RETENTION`).
+      CONTAINED 2026-07-20: rule now DISABLED (operator-run `aws events disable-rule`);
+      disk headroom verified 564 GB free on ch-prod-01 (gate is ≥20 GB) so cleanup can
+      stay off for the full ~12-day recovery. Run left going — everything from the
+      containment point forward is durable.
+      ⚠️ DETECTION GOTCHA: the tell was a `price_ohlcv_1m` year histogram showing
+      2015–2017 entirely absent. That is NOT explainable as "early SDEX was sparse" —
+      check the cleanup rule state before reaching for any data-shape explanation.
+      Recovery plan added below (§Recovery plan). Memory:
+      [[cleanup-rule-shreds-backfill-output]].
+  - date: 2026-07-21
+    status: active
+    who: okarcz
+    note: >
+      Health check. Pass 1 RUNNING and ON RATE: floor 27,583,999 at 13:35 UTC,
+      up 4.16M ledgers in 23h20m = 178.3k/hr, within 1% of the documented rate.
+      Markers contiguous 3 -> 27,583,999. Pass 1 ETA 2026-07-26/27 (~5.3 days);
+      with pass 2 the real remaining total is ~10.8 days.
+      prices-production-cleanup re-verified DISABLED.
+      Durable data measured: sdex pre-activation spans 2018-12-13 06:55 ->
+      2020-01-07 22:23, 3,588,820 candles. This PINS the wipe boundary at
+      2018-12-13, refining the earlier "genesis -> Nov 2018" estimate, and
+      confirms the recovery plan: pass 2 must fill 2015 -> 2018-12-13. The plan
+      re-walks to 23,423,999 which overshoots the real gap (~21.4M) by ~2M
+      ledgers; harmless RMT-dedup overlap, and the wider range is deliberate to
+      avoid a boundary error.
+      GOTCHA for future checks: max(sequence) on backfill_sdex_ledgers WITHOUT
+      a "WHERE sequence < 50457424" filter returns 63,352,611 -- the completed
+      combined run's ceiling, not the tail position -- and yields a nonsense
+      >100% figure. Always filter to the pre-activation range
+      (preroll-incremental-presoroban.md:35 has the correct form).
+      GOTCHA 2: the marker percentage OVERSTATES progress. 54.7% of ledgers are
+      marked but only ~6.2M of 27.58M have surviving candles, because cleanup
+      dropped price_ohlcv_1m partitions while leaving markers intact. That is
+      also exactly why recovery step 2 must DELETE the markers before pass 2,
+      or the resume logic skips the whole span.
 ---
 
 # Execute + track the historical backfill run (SDEX + Soroban AMM)
@@ -125,11 +178,95 @@ meanwhile.
 | `[activation, 50687999]` | data + `pool_registry` landed; run fatal-exited on the 0087 router guard (fixed + merged, PR #92). |
 | `[50688000, 51007999]` | ✅ first clean forward chunk (2026-07-07) — 320k ledgers, SDEX 17.22M candles, AMM=0/oracle=0 (expected early epoch), 0 new unresolved. ~3.4 h, 59 GB. |
 | `[51008000, 63352611]` combined remainder | ⏳ ~12.3M ledgers ≈ ~2.3 TB / ~5.6 days continuous. |
-| `[1, 50457423]` pre-Soroban SDEX tail | ⏳ **RUNNING (fishuser-hero, healthy)** — floor at ~5.76M and climbing (2026-07-16 09:50 UTC), ~170k ledgers/hr, download-bound (~22.7 min/partition); ~45M ledgers ≈ ~11 days continuous to activation. 2017–2023 candles arrive as it climbs. Un-waived → reconcile the stale 2026-07-15 WAIVER AC. (Liveness: `pgrep` + partition # climbing over ≥25 min; do NOT sample CH markers <22 min apart — download-bound cadence freezes them transiently.) |
+| `[1, 50457423]` pre-Soroban SDEX tail — **pass 1** | ⏳ **RUNNING, HEALTHY, ON RATE** (fishuser-hero, tmux `sdex-tail`). **2026-07-21 13:35 UTC: floor 27,583,999** (was 23,423,999 at 07-20 14:15 → **4.16M ledgers in 23h20m = 178.3k/hr**, within 1% of the documented 177k). Markers contiguous: 27,583,997 over `3 → 27,583,999`, no gaps. Remaining 22.87M ledgers ≈ **5.3 days → ETA 2026-07-26/27**. ⚠️ The 54.7% marker figure OVERSTATES real progress — see the durable-data row below. (Liveness: `pgrep -af sdex-backfill` + partition # climbing in `~/sdex-tail.log` over ≥25 min; do NOT sample CH markers <22 min apart — download-bound cadence freezes them transiently.) |
+| `[1, 23423999]` pre-Soroban SDEX tail — **pass 2 (recovery)** | 🔜 **REQUIRED, not started** — re-walk of the span pass 1 lost to cleanup. ~5 days. **Blocked on pass 1 finishing** (don't interrupt a healthy run to restart at the bottom). Requires clearing `backfill_sdex_ledgers` markers first — see §Recovery plan. |
+| **durable pre-Soroban data (measured 2026-07-21)** | `price_ohlcv_1m` sdex pre-activation spans **`2018-12-13 06:55` → `2020-01-07 22:23`, 3,588,820 candles**. Years: 2015–2017 **absent** (wiped), 2018 partial (207,021 — cleanup drops whole partitions, so only post-fire Dec 2018 survived), 2019 full (3,331,951), 2020 partial (43,559 — the live write frontier), **2021–2023 absent because pass 1 has not reached them yet**. Only ~6.2M of the 27.58M marked ledgers have surviving candles. |
 
 > Update this table as chunks land (ledger range, candle counts, duration, any
 > new unresolved pools). `GET /backfill/status` reports truthful monotonic
 > progress for both streams.
+
+## Recovery plan (pre-Soroban gap, from the 2026-07-20 cleanup incident)
+
+**Invariant for the whole sequence: `prices-production-cleanup` stays DISABLED
+until step 4.** `price_ohlcv_1m` is the *only* copy of the pre-Soroban tail until
+the pre-roll lands it in the coarse forever-tables. Re-check before each step:
+
+```bash
+aws events describe-rule --name prices-production-cleanup --region eu-central-1 \
+  --profile soroban-explorer --query 'State'   # MUST stay "DISABLED"
+```
+
+| # | Step | Duration | Notes |
+|---|------|----------|-------|
+| 1 | **Let pass 1 finish** to activation (floor → 50,457,423) | ~6.3 days | Do NOT kill it to restart from ledger 1 — that discards 6.3 days of forward progress for no gain. Output is durable now that cleanup is off. |
+| 2 | **Clear markers, then re-run `[1, 23423999]`** (pass 2) | ~5 days | `DELETE FROM prices.backfill_sdex_ledgers WHERE sequence <= 23423999` **before** launching, else the resume set short-circuits done ledgers (`running-ingestion-components.md:122`) and the re-run silently skips the whole span, leaving an empty 2015–2018 forever. |
+| 3 | **Incremental pre-roll** — `preroll-incremental.sql` | hours | `docs/runbooks/preroll-incremental-presoroban.md`. NOT `preroll.sql` (full rebuild wipes the Soroban-era coarse). Pre-flight: floor ≈ 50,457,423, exact activation boundary timestamp, cleanup still DISABLED. |
+| 4 | **Re-enable cleanup** — `aws events enable-rule` | — | Only after step 3 verifies coarse coverage back to genesis. |
+
+> **Step 3 pre-flight — USD coverage note (added 2026-07-21, see [[0114]]).**
+> The pre-roll copies `price_ohlcv_1m` **as-is** and nothing re-enriches a coarse
+> row afterwards, so the pre-Soroban tail's USD columns will be whatever 1m holds
+> at that moment.
+>
+> **This is NOT a blocker.** An earlier version of this note called it one, on the
+> grounds that 1m is 62% `close_usd = 0`. That premise was wrong: those zeros are
+> exotic quotes with no USD reference, and the pre-Soroban era has no reference at
+> all — 2018-2019 carries 100k–200k XLM-quoted rows/month at 100% zero because
+> USDC barely existed then (6–45 rows/month) and `prices.oracle_prices` only
+> starts 2025-09. **Enriching before pre-rolling would change nothing.** The
+> pre-Soroban tail is USD-less as a data-availability fact.
+>
+> Run this as a cheap regression guard, not a gate — expect a high number and
+> proceed:
+> ```sql
+> SELECT round(100 * countIf(close_usd = 0) / count(), 1) AS pct_zero
+> FROM prices.price_ohlcv_1m FINAL WHERE timestamp < '2024-02-20';
+> ```
+
+**Why re-run the full `[1, 23423999]` rather than preserving the trusted
+`201901`–`201904`:** `price_ohlcv_1m` has no ledger column, so mapping a month
+boundary back to a ledger is awkward and error-prone; the saving is only ~2M
+ledgers (~8%). `price_ohlcv_1m` is a `ReplacingMergeTree`, so rewriting identical
+keys dedups harmlessly. Not worth a boundary-error risk to save ~half a day.
+`201812` is *partial* (cleanup drops whole partitions, so its pre-fire portion is
+gone) and must be inside the re-run range regardless.
+
+**Verify after step 2** — expect a smooth ramp from 2015, no missing years:
+
+```sql
+SELECT toYear(timestamp) AS yr, count() AS candles
+FROM prices.price_ohlcv_1m
+WHERE source='sdex' AND timestamp < '2024-02-20'
+GROUP BY yr ORDER BY yr;
+```
+
+**Disk:** cleanup stays off ~12 days on a **shared** cluster. Verified 2026-07-20:
+564 GB avail on `/var/lib/docker` (gate ≥20 GB) — ample, no need for the bounded
+per-chunk pre-roll variant. Give the cluster owner a heads-up for the window.
+
+### Follow-up fixes this incident earns
+
+- **Preflight guard in `sdex-backfill`** — refuse to start (or loudly warn) when
+  `prices-production-cleanup` is ENABLED. The precondition currently lives only in
+  runbook prose and demonstrably did not survive the gap between the 0090 rerun and
+  the 2026-07-15 tail start. This is the fix that actually prevents recurrence.
+  → **spawned as task 0109** (2026-07-20). Scoped so it cannot block the recovery
+  run currently in flight.
+- **`CH()` helper is broken** in `docs/runbooks/fix-backfill-history-loss-and-rerun.md:97` —
+  it passes `$*`, which drops quoting, so the remote shell splits the query and
+  every multi-line example in that runbook fails with
+  `Bad arguments: the argument for option '--query' should follow immediately after
+  the equal sign`. Replace with a stdin form:
+  ```bash
+  CHQ() { ssh -i ~/.ssh/sorban-prod_ed25519 deploy@168.119.73.161 \
+    "docker exec -i app-clickhouse-1 clickhouse-client"; }
+  CHQ <<'SQL'
+  SELECT 1
+  SQL
+  ```
+- Per §Out of scope these are code/doc changes, not operational — spawn them as
+  their own task(s) rather than doing them under this tracker.
 
 ## Acceptance Criteria
 
@@ -137,9 +274,35 @@ meanwhile.
       2026-07-15** (via the full-backfill that ran 07-08→07-14, Phase 1 complete;
       verified in 0090: `price_ohlcv_1m` contiguous `2024-02-20 → 2026-07-08`, 532M
       rows, gap `62,642,957→63,352,611` filled). Pre-rolled to the coarse tables in 0090.
-- [~] Pre-Soroban SDEX tail `[1, activation−1]` — **WAIVED 2026-07-15.** BE (0199)
-      needs Soroban-era ledgers only; the deep tail was killed and the decision task
-      **0092 resolved "not needed" + archived**. No union-to-1 coverage required.
+- [ ] Pre-Soroban SDEX tail `[1, activation−1]` — ~~WAIVED 2026-07-15~~ **UN-WAIVED
+      (waiver stale).** The 2026-07-15 waiver assumed the deep tail had been killed;
+      it is in fact live and 46.4% done (fishuser-hero, since 2026-07-15). Closing
+      this AC now needs **both** passes: pass 1 → activation (~6.3 days) **and**
+      pass 2 re-walking `[1, 23423999]` (~5 days), which the enabled cleanup rule
+      destroyed. Verify with the year-histogram in §Recovery plan — a smooth ramp
+      from 2015, no absent years. (Historical note: 0092 resolved "BE needs
+      Soroban-era only", so this is coverage-completeness, not a BE blocker.)
+- [ ] 🔴 **`prices-production-cleanup` stays DISABLED for the entire recovery** — from
+      2026-07-20 until **after** `preroll-incremental.sql` has landed the pre-Soroban
+      `1m` in the coarse forever-tables (~12 days: pass 1 ~6.3d + pass 2 ~5d + pre-roll).
+      **Enabling it early is destructive, not merely a paused retention policy:** it
+      deletes the run's output as fast as the backfill writes it and re-creates the exact
+      history gap this task exists to close — unrecoverable except by re-downloading the
+      span. `price_ohlcv_1m` is the ONLY copy until the pre-roll runs. Re-check before
+      each recovery step:
+      ```bash
+      aws events describe-rule --name prices-production-cleanup --region eu-central-1 \
+        --profile soroban-explorer --query 'State'   # MUST be "DISABLED"
+      ```
+      If something appears to require enabling it (e.g. disk pressure — 564 GB was free
+      on 2026-07-20, so there is no headroom argument), **stop and escalate to the
+      cluster owner** rather than flipping the rule. Close this AC only once cleanup has
+      been deliberately re-enabled as the final recovery step, with coarse coverage back
+      to genesis verified first. Memory: [[cleanup-rule-shreds-backfill-output]].
+- [ ] **Pre-Soroban `1m` rolled up before cleanup returns** — `preroll-incremental.sql`
+      (NOT `preroll.sql`) run per `docs/runbooks/preroll-incremental-presoroban.md`,
+      coarse tables verified to cover genesis → activation, and only then
+      `aws events enable-rule`. This is recovery step 3→4 in §Recovery plan.
 - [~] `GET /backfill/status` monotonic; `soroban_amm`→`completed` (reached the floor
       63352611), `sdex_archive` tail run killed (not needed). Re-confirm the status
       endpoint reflects the final state (`status='paused'`); minor remaining check.

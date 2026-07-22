@@ -2,9 +2,9 @@
 id: "0035"
 title: "Periodically re-survey Phoenix factory; catch first stable pool when deployed"
 type: RESEARCH
-status: backlog
+status: completed
 related_adr: []
-related_tasks: ["0032", "0018"]
+related_tasks: ["0032", "0018", "0108"]
 tags: [layer-research, priority-low, effort-small, phoenix, stable-pool, monitoring]
 links:
   - "../archive/0032_RESEARCH_phoenix-stable-pool-first-observation/notes/S-no-stable-pool-deployed.md"
@@ -13,6 +13,23 @@ history:
     status: backlog
     who: oski
     note: "Spawned from 0032 — replaces 0032 as the ongoing concern."
+  - date: 2026-07-20
+    status: completed
+    who: okarcz
+    note: >
+      **CLOSED as won't-do** in the 0108 post-M1 grooming sweep. This is
+      open-ended monitoring for an event (a first Phoenix stable pool) that has
+      no downstream consumer: the seeder does not seed Phoenix `stable` pools at
+      all — packages/pool-registry-seed/src/lib.rs:88 maps every Phoenix type
+      except `xyk` to None, asserted by the test at lib.rs:271. So even if a
+      stable pool appeared tomorrow and this survey caught it, nothing would
+      consume the finding until a stable-pool decoder is scoped, which is itself
+      unscheduled.
+      A perpetual watch task also never completes — it accumulates in the
+      backlog and rots. If Phoenix stable-pool support is wanted later, the
+      trigger is that decision, and the watcher belongs in scheduling (a cron /
+      routine), not as a lore task. The 0032 survey method is preserved in the
+      archive and is cheap to re-run on demand.
 ---
 
 # Periodic Phoenix factory re-survey

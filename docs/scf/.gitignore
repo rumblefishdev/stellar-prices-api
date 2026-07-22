@@ -1,0 +1,3 @@
+# Built PDF is a regenerable artifact (./build-pdf.sh) and the submission
+# copy lives in Google Drive — keep the large binary out of git.
+milestone-1-evidence.pdf

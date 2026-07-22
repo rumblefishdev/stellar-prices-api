@@ -87,6 +87,24 @@ export function lambdaLogGroupName(
 }
 
 /**
+ * Deployed function name for a scheduled worker Lambda.
+ *
+ * Single source of truth: {@link createWorkerLambda} sets `functionName` from
+ * this, and ObservabilityStack builds its `FunctionName` alarm dimension from
+ * it too (task 0112). Alarms key on the deployed name as a plain string — an
+ * alarm pointed at a name that does not exist does not error, it just never
+ * fires — so a rename that updated only the stack would silently disarm the
+ * alarms rather than break the build. Deriving both from here removes that
+ * failure mode instead of relying on a reviewer to notice.
+ */
+export function workerFunctionName(
+  envName: string,
+  lambdaName: string,
+): string {
+  return `prices-${envName}-${lambdaName}`;
+}
+
+/**
  * Creates an IAM role for a prices-api Lambda with the baseline
  * permissions applied (CloudWatch Logs + mTLS secrets + SSM read).
  *
@@ -257,7 +275,7 @@ export function createWorkerLambda(
 
   const fn = new lambda.Function(scope, `${idPrefix}Function`, {
     ...pricesLambdaDefaults, // ARM64 + PROVIDED_AL2023 (ADR 0006/0007)
-    functionName: `prices-${env}-${name}`,
+    functionName: workerFunctionName(env, name),
     handler: 'bootstrap',
     code: lambda.Code.fromAsset(assetDir),
     role,
@@ -296,8 +314,14 @@ export function createWorkerLambda(
     evaluationPeriods: 1,
     treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
   });
+  // Both directions. Only the ALARM action was wired before, so a worker that
+  // broke and later recovered produced one notification and then silence —
+  // leaving the reader unable to tell "still broken" from "fixed itself".
+  // Every alarm in ObservabilityStack already wires both; this brings the
+  // per-worker error alarms in line (task 0112).
   for (const action of props.errorAlarmActions ?? []) {
     errorAlarm.addAlarmAction(action);
+    errorAlarm.addOkAction(action);
   }
 
   return { function: fn, role, errorAlarm };

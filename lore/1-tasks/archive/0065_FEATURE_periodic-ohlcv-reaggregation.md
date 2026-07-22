@@ -2,9 +2,9 @@
 id: "0065"
 title: "Periodic OHLCV re-aggregation for cross-chunk intra-minute candles"
 type: FEATURE
-status: backlog
+status: completed
 related_adr: ["0004", "0007"]
-related_tasks: ["0038", "0039"]
+related_tasks: ["0038", "0039", "0101", "0108"]
 tags: [layer-indexing, priority-medium, effort-medium, clickhouse, ohlcv]
 links:
   - "../archive/0048_RESEARCH_soroban-events-pricing-decoder-spec/notes/G-soroban-events-pricing-decoder.md"
@@ -17,6 +17,30 @@ history:
     status: backlog
     who: claude
     note: "Added PR #34 review context: finding #1 (live-path frequency correction) and finding #5 (version-namespace overflow caveat for the merge fix)."
+  - date: 2026-07-20
+    status: completed
+    who: okarcz
+    note: >
+      **DONE — fixed in the backfill/live rewrite, never closed.** Verified in
+      the 0108 post-M1 grooming sweep by reading the code, not the task prose.
+      Both writers now hold the boundary minute open instead of emitting two
+      partial candles for it:
+      (1) backfill — run-level accumulator state persists across chunks and
+      drains via flush_older_than(current_minute), so a minute straddling a
+      chunk boundary stays open (events-backfill/src/run.rs:198-205, :85-93);
+      final flush_all() drains the trailing minute (:326-333). There is a
+      regression test named for this exact failure mode:
+      minute_split_across_calls_is_summed_once_not_undercounted (run.rs:544).
+      (2) live — one accumulator per contiguous run with a single flush_all() at
+      the end (prices-ledger-processor/src/reconcile.rs:100-101, :151-157),
+      which also retires review finding #1 (the "every invocation" framing).
+      Chosen approach was accumulator lifetime, not the engine change the task
+      sketched — price_ohlcv_1m is still ReplacingMergeTree(version)
+      (init.sql:120), so review finding #5 (version-namespace overflow) never
+      became load-bearing and is moot as written.
+      Residual: the guard is per-process, so two SEPARATE invocations splitting a
+      minute still under-count. Salvaged to 0101 §Cross-invocation minute
+      boundary, which is the task that actually picks run bounds.
 ---
 
 # Periodic OHLCV re-aggregation for cross-chunk intra-minute candles
@@ -73,6 +97,8 @@ decision.
 
 ## Acceptance Criteria
 
-- [ ] A minute split across two runs/chunks aggregates to one correct candle.
-- [ ] Fix applies to both live (0038) and backfill writers (shared core).
-- [ ] Regression test with a deliberately split-minute fixture.
+- [x] A minute split across two runs/chunks aggregates to one correct candle.
+      — within a process run; cross-invocation residual → 0101.
+- [x] Fix applies to both live (0038) and backfill writers (shared core).
+- [x] Regression test with a deliberately split-minute fixture.
+      — `minute_split_across_calls_is_summed_once_not_undercounted`, `run.rs:544`.

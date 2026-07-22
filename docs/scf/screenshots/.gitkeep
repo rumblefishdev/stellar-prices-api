@@ -1,0 +1,9 @@
+# Evidence screenshots referenced from milestone-1-evidence.md land here.
+#
+# Expected for Milestone 1 (see the <TODO: screenshot> markers in the source):
+#   - `make synth-production` + the no-RDS/VPC/NAT grep returning no matches
+#   - CloudWatch alarms list, prices-production-* filter, all OK
+#   - Slack notification from the task 0056 alarm fire-test
+#
+# Do NOT add a CloudWatch dashboard screenshot — prices-production-overview is
+# a scaffold with no data widgets. See ../README.md "Ground rules".
