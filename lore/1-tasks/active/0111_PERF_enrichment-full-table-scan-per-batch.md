@@ -65,6 +65,47 @@ Per batch ≈ **24 s + 11 s ≈ 35 s**, matching the CloudWatch
 `EnrichmentAvgBatchDurationMs` peak of 43,249 ms. Run counts corroborate:
 07-17 had 620 INSERTs ≈ 24 invocations × 3 retries × ~8 batches.
 
+## Re-measured under load, 2026-07-21 — the framing above is incomplete
+
+Measured while the tail backfill was actively writing (7,336 inserts/30 min), so
+this is **not** the quiet-cluster illusion the ACs warn about:
+
+| | before 2026-07-18 03:00 | after |
+|---|---|---|
+| `INSERT … SELECT` | 24–26 s, 549 M rows | **0.6–0.7 s, ~11–14 M rows** |
+| `count_candidates` | 11–12 s, 549 M rows | **0.2–0.3 s, ~11–14 M rows** |
+| runs/hr | 24–27 (3 retries × ~8 batches) | 20–21 (full pass), then 4–6 |
+
+Per-batch went 35 s → ~1 s in one hour. `read_rows` is structural, not
+load-dependent, so this is a change in the query's input, not the cluster's mood.
+
+**Cause: `price_ohlcv_1m` returned to its designed size.** It is a rolling 7-day
+window — history lives in the coarse tables (`init.sql:129-134`). Cleanup was
+disabled ~07-08 for the backfill, so 1m grew to 545 M; [[0090]] re-enabled it
+07-15; it fired 07-18 03:00 and dropped everything >7 d. The table is now 14.0 M
+rows (3.69 M pre-Soroban + 10.3 M current month), matching the measured
+`read_rows` exactly.
+
+**So the exposure is not "enrichment is slow" — it is:**
+
+> Enrichment's per-batch cost scales with `price_ohlcv_1m` size, which is bounded
+> only by the cleanup rule — and every [[0088]] backfill or recovery requires
+> disabling that rule for days.
+
+That coupling is **live right now**: cleanup has been off since 07-20 and stays
+off until ~2026-08-01, and the table is already climbing (11.3 M → 14.2 M over
+3.5 days). Expect a recurrence before the recovery ends; 0112's
+`-duration-near-timeout` alarm should now catch it.
+
+This **demotes option 2** (skip-index/projection — it optimises a state that only
+exists during backfills) and **promotes option 1** (partition-bounded passes —
+partition pruning is exactly what makes cost independent of how many historical
+partitions are sitting in the table).
+
+⚠️ Chasing this step change is what surfaced [[0114]] — the coarse tables carry
+no USD values for 2025-02 → 2026-02. That is the more serious defect and
+outranks this task.
+
 ## Root cause
 
 `price_ohlcv_1m` is `ORDER BY (asset_id, quote_asset_id, source, timestamp)`

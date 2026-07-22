@@ -204,6 +204,26 @@ aws events describe-rule --name prices-production-cleanup --region eu-central-1 
 | 3 | **Incremental pre-roll** — `preroll-incremental.sql` | hours | `docs/runbooks/preroll-incremental-presoroban.md`. NOT `preroll.sql` (full rebuild wipes the Soroban-era coarse). Pre-flight: floor ≈ 50,457,423, exact activation boundary timestamp, cleanup still DISABLED. |
 | 4 | **Re-enable cleanup** — `aws events enable-rule` | — | Only after step 3 verifies coarse coverage back to genesis. |
 
+> **Step 3 pre-flight — USD coverage note (added 2026-07-21, see [[0114]]).**
+> The pre-roll copies `price_ohlcv_1m` **as-is** and nothing re-enriches a coarse
+> row afterwards, so the pre-Soroban tail's USD columns will be whatever 1m holds
+> at that moment.
+>
+> **This is NOT a blocker.** An earlier version of this note called it one, on the
+> grounds that 1m is 62% `close_usd = 0`. That premise was wrong: those zeros are
+> exotic quotes with no USD reference, and the pre-Soroban era has no reference at
+> all — 2018-2019 carries 100k–200k XLM-quoted rows/month at 100% zero because
+> USDC barely existed then (6–45 rows/month) and `prices.oracle_prices` only
+> starts 2025-09. **Enriching before pre-rolling would change nothing.** The
+> pre-Soroban tail is USD-less as a data-availability fact.
+>
+> Run this as a cheap regression guard, not a gate — expect a high number and
+> proceed:
+> ```sql
+> SELECT round(100 * countIf(close_usd = 0) / count(), 1) AS pct_zero
+> FROM prices.price_ohlcv_1m FINAL WHERE timestamp < '2024-02-20';
+> ```
+
 **Why re-run the full `[1, 23423999]` rather than preserving the trusted
 `201901`–`201904`:** `price_ohlcv_1m` has no ledger column, so mapping a month
 boundary back to a ledger is awkward and error-prone; the saving is only ~2M

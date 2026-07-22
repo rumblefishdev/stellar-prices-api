@@ -29,6 +29,29 @@ whether the gap is (a) **classic protocol-18 liquidity-pool** trades we don't
 capture (a scope decision), or (b) **order-book trades from path-payment
 operations** we miss (a real extractor bug), then act accordingly.
 
+## ❌ Ruled out: the USD-enrichment gap ([[0114]]) does NOT explain this
+
+Tested 2026-07-21 and refuted. Recorded because it is the cheapest available
+explanation and will suggest itself again to anyone who reads 0114's headline
+figure (55–62% of candles carry no USD value).
+
+Three independent reasons, strongest first:
+
+1. **This task's numbers are denominated in XLM, not USD** — see the table below
+   ("our XLM vol" vs "Horizon XLM vol"). USD enrichment cannot move a figure that
+   is never expressed in USD.
+2. **The affected pairs are the ones we price best.** 0107 measures XLM-quoted
+   pairs; those are 99.7% USD-enriched on live data. The unpriced population is
+   exotic quotes, which this task does not measure.
+3. **Wrong magnitude anyway.** Trade-weighted, the USD-reachable share is 44.8%
+   (2026-07-14 → 07-21), implying a ~2.2× understatement against the 6× volume /
+   7.5–9× trade gap here. Off by 3–4×.
+
+**Categorically:** 0107 is about trades **absent from our database**; 0114 is
+about trades we **hold but cannot price**. Orthogonal. No USD-pricing work
+creates a trade that was never ingested. The two hypotheses in §Summary —
+classic-LP trades or path-payment order-book trades — remain the live ones.
+
 ## Context
 
 From the 2026-07-20 0026 Horizon check (fixed UTC day 2026-07-19), top

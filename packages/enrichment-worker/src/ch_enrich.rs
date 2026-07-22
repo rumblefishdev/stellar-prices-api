@@ -110,6 +110,16 @@ pub struct ChEnrichConfig {
     /// flag, not a `max_batches` sentinel — `max_batches = 0` keeps its literal
     /// meaning (zero batches) so it can never silently become an unbounded drain.
     pub one_shot: bool,
+    /// Optional `[start, end)` candle-`timestamp` window (unix seconds) that
+    /// bounds every candidate scan to a single monthly partition — the task 0114
+    /// coarse-repair driver sets this per month so a pass prunes to one
+    /// `toYYYYMM(timestamp)` partition instead of full-scanning the table (task
+    /// 0111 option 1). `None` (the default) is the unbounded hourly pass over
+    /// `price_ohlcv_1m` and is byte-identical to the pre-0114 behaviour. Only the
+    /// **candidate** side is bounded; the pivot tier's inline XLM/USDC reference
+    /// still forward-fills from earlier months (a cheap sort-key-prefix scan), so
+    /// a month's first buckets keep a valid pivot anchor.
+    pub time_window: Option<(u32, u32)>,
 }
 
 impl Default for ChEnrichConfig {
@@ -125,6 +135,7 @@ impl Default for ChEnrichConfig {
             batch_size: 10_000,
             max_batches: 20,
             one_shot: false,
+            time_window: None,
         }
     }
 }
@@ -260,6 +271,24 @@ impl ChEnrichmentPass {
         }
     }
 
+    /// SQL fragment restricting a candidate scan to `cfg.time_window` — the task
+    /// 0114 partition bound. Returns `""` when unset, so the unbounded pass is
+    /// byte-for-byte unchanged. The bounds are internal u32 unix timestamps (not
+    /// user input), so they are inlined as `toDateTime(N)` literals rather than
+    /// bound parameters — that keeps each statement's positional `bind()` order
+    /// untouched. Paired with `PARTITION BY toYYYYMM(timestamp)`, the
+    /// `col >= start AND col < end` predicate lets ClickHouse prune to the single
+    /// month's parts, which is what makes per-pass cost independent of total table
+    /// size (task 0111 option 1).
+    fn window_pred(&self, col: &str) -> String {
+        match self.cfg.time_window {
+            Some((start, end)) => {
+                format!(" AND {col} >= toDateTime({start}) AND {col} < toDateTime({end})")
+            }
+            None => String::new(),
+        }
+    }
+
     /// The newest candle `timestamp` (unix seconds) at pass start, used as a
     /// snapshot watermark. The pass only counts and enriches candidates at or
     /// before it, so candles the live Ledger Processor (task 0038) inserts *during*
@@ -295,9 +324,10 @@ impl ChEnrichmentPass {
         let sql = format!(
             "SELECT count() FROM {db}.{tbl} FINAL \
              WHERE (volume_quote_usd = 0 OR close_usd = 0) AND volume_quote > 0 \
-               AND timestamp <= toDateTime(?)",
+               AND timestamp <= toDateTime(?){win}",
             db = self.cfg.database,
             tbl = self.cfg.table,
+            win = self.window_pred("timestamp"),
         );
         Ok(self
             .client
@@ -333,9 +363,10 @@ impl ChEnrichmentPass {
                     countIf(timestamp >= now() - ?) AS recent \
              FROM {db}.{tbl} FINAL \
              WHERE volume_quote_usd = 0 AND volume_quote > 0 \
-               AND timestamp <= toDateTime(?)",
+               AND timestamp <= toDateTime(?){win}",
             db = self.cfg.database,
             tbl = self.cfg.table,
+            win = self.window_pred("timestamp"),
         );
         Ok(self
             .client
@@ -387,11 +418,12 @@ impl ChEnrichmentPass {
                AND p.volume_quote > 0 \
                AND o.price_usd IS NOT NULL \
                AND (p.timestamp - o.timestamp) <= ? \
-               AND p.timestamp <= toDateTime(?) \
+               AND p.timestamp <= toDateTime(?){win} \
              ORDER BY p.timestamp \
              LIMIT ?",
             db = self.cfg.database,
             tbl = self.cfg.table,
+            win = self.window_pred("p.timestamp"),
         );
         self.client
             .query(&sql)
@@ -446,7 +478,13 @@ impl ChEnrichmentPass {
         refs: &ReferenceIds,
         watermark: u32,
     ) -> Result<(), ChEnrichError> {
-        if let Some(sql) = peg_sql(&self.cfg.database, &self.cfg.table, &refs.stable_ids()) {
+        let window = self.window_pred("p.timestamp");
+        if let Some(sql) = peg_sql(
+            &self.cfg.database,
+            &self.cfg.table,
+            &refs.stable_ids(),
+            &window,
+        ) {
             self.client
                 .query(&sql)
                 .bind(watermark)
@@ -455,7 +493,13 @@ impl ChEnrichmentPass {
                 .await?;
         }
         if let (Some(xlm_id), Some(usdc_id)) = (refs.xlm, refs.usdc) {
-            let sql = pivot_sql(&self.cfg.database, &self.cfg.table, xlm_id, usdc_id);
+            let sql = pivot_sql(
+                &self.cfg.database,
+                &self.cfg.table,
+                xlm_id,
+                usdc_id,
+                &window,
+            );
             self.client
                 .query(&sql)
                 .bind(watermark)
@@ -675,7 +719,7 @@ const INSERT_COLUMNS: &str = "timestamp, asset_id, quote_asset_id, source, \
 /// shared with the rest of the pass — see [`ChEnrichmentPass::watermark`]) and the
 /// `LIMIT` (batch size). `volume_quote_usd` is only filled when still zero, so an
 /// oracle-set (depeg-aware) value survives.
-fn peg_sql(db: &str, tbl: &str, stable_ids: &[u32]) -> Option<String> {
+fn peg_sql(db: &str, tbl: &str, stable_ids: &[u32], window: &str) -> Option<String> {
     if stable_ids.is_empty() {
         return None;
     }
@@ -698,7 +742,7 @@ fn peg_sql(db: &str, tbl: &str, stable_ids: &[u32]) -> Option<String> {
          WHERE p.close_usd = 0 \
            AND p.volume_quote > 0 \
            AND p.quote_asset_id IN ({in_list}) \
-           AND p.timestamp <= toDateTime(?) \
+           AND p.timestamp <= toDateTime(?){window} \
          ORDER BY p.timestamp \
          LIMIT ?"
     ))
@@ -716,7 +760,7 @@ fn peg_sql(db: &str, tbl: &str, stable_ids: &[u32]) -> Option<String> {
 /// watermark (ref subquery), the pivot staleness window (seconds), the snapshot
 /// watermark again (outer, shared with the rest of the pass — see
 /// [`ChEnrichmentPass::watermark`]), and the `LIMIT`.
-fn pivot_sql(db: &str, tbl: &str, xlm_id: u32, usdc_id: u32) -> String {
+fn pivot_sql(db: &str, tbl: &str, xlm_id: u32, usdc_id: u32, window: &str) -> String {
     format!(
         "INSERT INTO {db}.{tbl} ({INSERT_COLUMNS}) \
          SELECT \
@@ -744,7 +788,7 @@ fn pivot_sql(db: &str, tbl: &str, xlm_id: u32, usdc_id: u32) -> String {
            AND p.volume_quote > 0 \
            AND r.usd IS NOT NULL \
            AND (p.timestamp - r.timestamp) <= ? \
-           AND p.timestamp <= toDateTime(?) \
+           AND p.timestamp <= toDateTime(?){window} \
          ORDER BY p.timestamp \
          LIMIT ?"
     )
@@ -756,12 +800,12 @@ mod tests {
 
     #[test]
     fn peg_sql_is_none_without_stablecoins() {
-        assert!(peg_sql("prices", "price_ohlcv_1m", &[]).is_none());
+        assert!(peg_sql("prices", "price_ohlcv_1m", &[], "").is_none());
     }
 
     #[test]
     fn peg_sql_fills_close_usd_for_stable_quotes() {
-        let sql = peg_sql("prices", "price_ohlcv_1m", &[3, 7]).unwrap();
+        let sql = peg_sql("prices", "price_ohlcv_1m", &[3, 7], "").unwrap();
         // close_usd column present and positionally after volume_quote_usd.
         assert!(sql.contains("volume_quote_usd, close_usd, vwap"));
         assert!(sql.contains("CAST(p.close AS Decimal(38, 14)) AS close_usd"));
@@ -780,7 +824,7 @@ mod tests {
 
     #[test]
     fn pivot_sql_computes_the_xlm_usdc_reference_inline() {
-        let sql = pivot_sql("prices", "price_ohlcv_1m", 5, 3);
+        let sql = pivot_sql("prices", "price_ohlcv_1m", 5, 3, "");
         // Reference is an inline ASOF-join subquery — NOT a pre-materialized table
         // (task 0083: no CREATE TABLE grant needed on the shared tenant).
         assert!(sql.contains("ASOF LEFT JOIN ("));
@@ -801,6 +845,51 @@ mod tests {
             sub_wm < win && win < outer_wm && outer_wm < lim,
             "bind order: watermark, window, watermark, limit"
         );
+    }
+
+    #[test]
+    fn peg_sql_threads_the_partition_window_into_the_outer_where() {
+        // Unbounded (window = "") is byte-identical to the pre-0114 statement:
+        // no extra timestamp predicate.
+        let unbounded = peg_sql("prices", "price_ohlcv_1h", &[3], "").unwrap();
+        assert!(!unbounded.contains(">= toDateTime("));
+
+        // A window fragment is inlined verbatim after the outer watermark bound,
+        // so ClickHouse can prune to the month's partition.
+        let win = " AND p.timestamp >= toDateTime(100) AND p.timestamp < toDateTime(200)";
+        let bounded = peg_sql("prices", "price_ohlcv_1h", &[3], win).unwrap();
+        assert!(bounded.contains(win));
+        assert!(
+            bounded.find("p.timestamp <= toDateTime(?)").unwrap()
+                < bounded.find("p.timestamp >= toDateTime(100)").unwrap(),
+            "window predicate follows the watermark bound"
+        );
+        // The window must NOT precede LIMIT's bind position in a way that reorders
+        // params — it is inlined (no `?`), so the single `?`s stay watermark, limit.
+        assert_eq!(
+            bounded.matches('?').count(),
+            2,
+            "window adds no bind params"
+        );
+    }
+
+    #[test]
+    fn pivot_sql_bounds_only_the_candidate_side_not_the_reference() {
+        let win = " AND p.timestamp >= toDateTime(100) AND p.timestamp < toDateTime(200)";
+        let sql = pivot_sql("prices", "price_ohlcv_1h", 5, 3, win);
+        // The candidate outer scan is bounded …
+        assert!(sql.contains(win));
+        // … but the inline XLM/USDC reference subquery is NOT: it must still
+        // forward-fill an anchor from earlier months, so the month's first buckets
+        // keep a valid pivot reference. The only window fragment present is the one
+        // on `p.timestamp`; the subquery filters on a bare `timestamp`.
+        assert_eq!(
+            sql.matches("toDateTime(100)").count(),
+            1,
+            "the partition lower bound appears once — on the candidate side only"
+        );
+        // Inlining adds no bind params: still watermark, window, watermark, limit.
+        assert_eq!(sql.matches('?').count(), 4, "window adds no bind params");
     }
 
     #[test]

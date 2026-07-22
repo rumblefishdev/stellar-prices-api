@@ -10,6 +10,7 @@
 
 use clickhouse::Client;
 use enrichment_worker::ch_enrich::{ChEnrichConfig, ChEnrichmentPass};
+use enrichment_worker::repair::{CoarseRepairConfig, CoarseRepairDriver};
 use prices_clickhouse::USDC_ISSUER;
 
 fn ch_url() -> String {
@@ -54,6 +55,51 @@ async fn close_usd(client: &Client, db: &str, asset: u32, quote: u32, ts: u32) -
         .unwrap()
 }
 
+/// Read a scalar `Float64` expression from the FOO/USDC bucket of the coarse
+/// `price_ohlcv_1h` table (task 0114 repair-target). `FINAL` collapses the RMT so
+/// the value returned is the version-winning row.
+async fn coarse_1h_f64(client: &Client, db: &str, col_expr: &str, ts: u32) -> f64 {
+    client
+        .query(&format!(
+            "SELECT toFloat64({col_expr}) FROM {db}.price_ohlcv_1h FINAL \
+             WHERE asset_id = 10 AND quote_asset_id = 2 AND timestamp = ?"
+        ))
+        .bind(ts)
+        .fetch_one::<f64>()
+        .await
+        .unwrap()
+}
+
+/// Read a scalar `UInt64` expression from the same coarse bucket (used for
+/// `version` and `trade_count`).
+async fn coarse_1h_u64(client: &Client, db: &str, col_expr: &str, ts: u32) -> u64 {
+    client
+        .query(&format!(
+            "SELECT toUInt64({col_expr}) FROM {db}.price_ohlcv_1h FINAL \
+             WHERE asset_id = 10 AND quote_asset_id = 2 AND timestamp = ?"
+        ))
+        .bind(ts)
+        .fetch_one::<u64>()
+        .await
+        .unwrap()
+}
+
+/// `close_usd` of an arbitrary `price_ohlcv_1h` bucket (asset/quote/ts), for the
+/// coarse-repair driver test which spans multiple pairs and months.
+async fn coarse_1h_close_usd_of(client: &Client, db: &str, asset: u32, quote: u32, ts: u32) -> f64 {
+    client
+        .query(&format!(
+            "SELECT toFloat64(close_usd) FROM {db}.price_ohlcv_1h FINAL \
+             WHERE asset_id = ? AND quote_asset_id = ? AND timestamp = ?"
+        ))
+        .bind(asset)
+        .bind(quote)
+        .bind(ts)
+        .fetch_one::<f64>()
+        .await
+        .unwrap()
+}
+
 fn cfg(db: &str) -> ChEnrichConfig {
     ChEnrichConfig {
         url: ch_url(),
@@ -69,6 +115,7 @@ fn cfg(db: &str) -> ChEnrichConfig {
         batch_size: 1000,
         max_batches: 10,
         one_shot: false,
+        time_window: None,
     }
 }
 
@@ -465,6 +512,285 @@ async fn recency_bounded_backlog_excludes_deep_history_floor() {
         "recency-bounded count excludes the deep-history floor"
     );
 
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// Version-arithmetic safety for the coarse-table repair (task 0114).
+///
+/// The repair retargets the enrichment INSERT at a coarse table (`price_ohlcv_1h`)
+/// whose `version` is a *sum* of source versions (`rollups.sql:24-37`), so a
+/// repair row must outrank a potentially large existing value — not a naive `+1`
+/// from a fresh row. Every write statement projects `p.version + 1 AS version`
+/// reading `FROM {tbl} AS p FINAL` (`ch_enrich.rs:380`/`:696`/`:729`), i.e. it
+/// derives the new version from the existing (post-collapse) row, so V → V+1 wins
+/// even when V is large.
+///
+/// This is the AC that "fails silently": a constant/fresh version would LOSE the
+/// RMT race to the seeded sum, leaving the zero in place — a repair that appears
+/// to run yet changes nothing. The test seeds a large summed version and pins the
+/// win. It also asserts the repair is ADDITIVE and non-destructive (OHLC/volume
+/// carried through verbatim; two physical rows coexist pre-merge — no in-place
+/// DELETE/UPDATE), which is the sole-copy safety property: the 1m source for the
+/// affected historical span is gone, so the coarse table cannot be rebuilt.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn coarse_repair_row_outranks_large_summed_version() {
+    let db = "it_enrich_coarse_version";
+    let client = setup_scratch(db).await;
+
+    client
+        .query(&ASSETS.replace("{db}", db).replace("{usdc}", USDC_ISSUER))
+        .execute()
+        .await
+        .unwrap();
+
+    // One coarse FOO/USDC `price_ohlcv_1h` bucket, zero USD, carrying a LARGE
+    // version that stands in for a rolled-up `sum(version)`. Distinct OHLC values
+    // (7/9/6/8) and volume (base 5, quote 40, trade_count 3) so the pass-through
+    // assertion is meaningful. A fresh-row `+1` (=2) would lose to 5000; only
+    // `existing + 1` (=5001) wins the ReplacingMergeTree merge.
+    let ts = 1_600_000_000u32;
+    let seeded_version = 5000u64;
+    client
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1h \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
+             ({ts},10,2,'sdex', 7,9,6,8, 5,40,0,0, 8, 3, {seeded_version})"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    // Enrichment retargeted at the coarse table (the whole point of the repair):
+    // FOO/USDC hits the stablecoin-direct (peg) tier — no oracle row seeded.
+    let mut coarse = cfg(db);
+    coarse.table = "price_ohlcv_1h".to_string();
+    ChEnrichmentPass::new(coarse).run().await.unwrap();
+
+    let approx = |a: f64, b: f64| (a - b).abs() < 1e-4;
+
+    // 1) The zero was repaired: peg ($1) → close_usd = close = 8.0,
+    //    volume_quote_usd = volume_quote = 40.0. If the repair row had LOST the
+    //    version race, FINAL would still return the seeded zeros — this is the
+    //    core silent-failure assertion.
+    assert!(
+        approx(coarse_1h_f64(&client, db, "close_usd", ts).await, 8.0),
+        "coarse close_usd repaired via peg"
+    );
+    assert!(
+        approx(
+            coarse_1h_f64(&client, db, "volume_quote_usd", ts).await,
+            40.0
+        ),
+        "coarse volume_quote_usd repaired via peg"
+    );
+
+    // 2) The winning row's version strictly increased and derives from the
+    //    existing summed value: 5000 → 5001. NOT a constant/fresh version.
+    assert_eq!(
+        coarse_1h_u64(&client, db, "version", ts).await,
+        seeded_version + 1,
+        "repair version = existing sum + 1 (derives from the existing row)"
+    );
+
+    // 3) Non-USD columns carried through verbatim — additive enrichment, NOT a
+    //    re-aggregation. Any drift here would mean the repair rewrote price/volume
+    //    data it was only meant to leave alone.
+    assert!(
+        approx(coarse_1h_f64(&client, db, "open", ts).await, 7.0),
+        "open kept"
+    );
+    assert!(
+        approx(coarse_1h_f64(&client, db, "high", ts).await, 9.0),
+        "high kept"
+    );
+    assert!(
+        approx(coarse_1h_f64(&client, db, "low", ts).await, 6.0),
+        "low kept"
+    );
+    assert!(
+        approx(coarse_1h_f64(&client, db, "close", ts).await, 8.0),
+        "close kept"
+    );
+    assert!(
+        approx(coarse_1h_f64(&client, db, "volume_base", ts).await, 5.0),
+        "volume_base kept"
+    );
+    assert!(
+        approx(coarse_1h_f64(&client, db, "volume_quote", ts).await, 40.0),
+        "volume_quote kept"
+    );
+    assert_eq!(
+        coarse_1h_u64(&client, db, "trade_count", ts).await,
+        3,
+        "trade_count kept"
+    );
+
+    // 4) ADDITIVE, not in-place: two physical rows exist pre-merge (the seeded
+    //    zero at v5000 and the repair at v5001) — the enrichment issued no
+    //    DELETE/UPDATE, only an INSERT. Sole-copy safety: nothing is destroyed at
+    //    write time, so a bad run can be reverted from the pre-merge state.
+    let physical: u64 = client
+        .query(&format!(
+            "SELECT count() FROM {db}.price_ohlcv_1h \
+             WHERE asset_id = 10 AND quote_asset_id = 2 AND timestamp = ?"
+        ))
+        .bind(ts)
+        .fetch_one::<u64>()
+        .await
+        .unwrap();
+    assert_eq!(physical, 2, "append-only: seed + repair coexist pre-merge");
+
+    // 5) Idempotent: the FINAL row is now fully enriched (volume_quote_usd>0 AND
+    //    close_usd>0), so a second pass admits no candidate and writes nothing —
+    //    version stays 5001. Re-running the repair is safe.
+    let mut coarse2 = cfg(db);
+    coarse2.table = "price_ohlcv_1h".to_string();
+    ChEnrichmentPass::new(coarse2).run().await.unwrap();
+    assert_eq!(
+        coarse_1h_u64(&client, db, "version", ts).await,
+        seeded_version + 1,
+        "idempotent: no re-write on an already-enriched coarse row"
+    );
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// The coarse-repair driver (task 0114): enumerate months-with-zeros in a span,
+/// snapshot + partition-bounded-repair each, and report per-month before/after.
+///
+/// Fixture — all in `price_ohlcv_1h`, each a zero-USD FOO/USDC (peg-enrichable)
+/// bucket except one exotic FOO/EXO with no reference, seeded at a large
+/// `version` so the repair also has to win the RMT race:
+///   - 2025-02 FOO/USDC (in span)      → repaired to close_usd = 8
+///   - 2025-02 FOO/EXO  (in span)      → no reference → stays 0 (the floor)
+///   - 2025-05 FOO/USDC (in span)      → repaired to close_usd = 11
+///   - 2024-01 FOO/USDC (OUT of span)  → untouched → stays 0
+///
+/// Asserts: only the two in-span USDC buckets are repaired; the exotic row and
+/// the out-of-span row stay zero (span + reference bounding both hold); and the
+/// summary reports the correct per-month before/after (exotic floor surfaces as
+/// `zeros_after = 1`, not a failure).
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn coarse_repair_driver_bounds_span_and_reports_per_month() {
+    let db = "it_coarse_repair_driver";
+    let client = setup_scratch(db).await;
+
+    client
+        .query(&ASSETS.replace("{db}", db).replace("{usdc}", USDC_ISSUER))
+        .execute()
+        .await
+        .unwrap();
+
+    // Month anchors (unix seconds, 15th 00:00 UTC): 2025-02, 2025-05, 2024-01.
+    let (feb2025, may2025, jan2024) = (1_739_577_600u32, 1_747_267_200u32, 1_705_276_800u32);
+    let v = 5000u64; // large seeded version — repair must outrank it
+    client
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1h \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
+             ({feb2025},10, 2,'sdex', 8,8,8,8,     1,40,0,0, 8,1,{v}), \
+             ({feb2025},10,20,'sdex', 9,9,9,9,     1,40,0,0, 9,1,{v}), \
+             ({may2025},10, 2,'sdex', 11,11,11,11, 1,40,0,0,11,1,{v}), \
+             ({jan2024},10, 2,'sdex', 5,5,5,5,     1,40,0,0, 5,1,{v})"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    // Repair the span [2025-02, 2025-05], snapshotting each partition first.
+    let mut enrich = cfg(db);
+    enrich.table = "price_ohlcv_1h".to_string();
+    let driver = CoarseRepairDriver::with_client(
+        client.clone(),
+        CoarseRepairConfig {
+            enrich,
+            start_month: 202_502,
+            end_month: 202_505,
+            snapshot: true,
+            dry_run: false,
+        },
+    );
+    let summary = driver.run().await.unwrap();
+
+    let approx = |a: f64, b: f64| (a - b).abs() < 1e-4;
+
+    // In-span USDC buckets repaired via the peg tier …
+    assert!(
+        approx(
+            coarse_1h_close_usd_of(&client, db, 10, 2, feb2025).await,
+            8.0
+        ),
+        "2025-02 FOO/USDC repaired"
+    );
+    assert!(
+        approx(
+            coarse_1h_close_usd_of(&client, db, 10, 2, may2025).await,
+            11.0
+        ),
+        "2025-05 FOO/USDC repaired"
+    );
+    // … the exotic in-span pair has no reference → stays the no_reference floor …
+    assert!(
+        approx(
+            coarse_1h_close_usd_of(&client, db, 10, 20, feb2025).await,
+            0.0
+        ),
+        "2025-02 FOO/EXO has no USD path — stays 0"
+    );
+    // … and the out-of-span month is never touched (span bound holds).
+    assert!(
+        approx(
+            coarse_1h_close_usd_of(&client, db, 10, 2, jan2024).await,
+            0.0
+        ),
+        "2024-01 is outside [202502,202505] — untouched"
+    );
+
+    // Summary: two months with zeros, in order; per-month before/after correct.
+    assert_eq!(
+        summary.months.len(),
+        2,
+        "only the two in-span months had zeros"
+    );
+    let feb = &summary.months[0];
+    assert_eq!(feb.month, 202_502);
+    assert_eq!(feb.zeros_before, 2, "2025-02 had USDC + EXO zeros");
+    assert_eq!(feb.zeros_after, 1, "EXO remains — the no_reference floor");
+    assert_eq!(feb.rows_enriched, 1);
+    assert!(feb.snapshot_name.is_some(), "partition was frozen");
+    let may = &summary.months[1];
+    assert_eq!(may.month, 202_505);
+    assert_eq!(may.zeros_before, 1);
+    assert_eq!(may.zeros_after, 0);
+    assert_eq!(may.rows_enriched, 1);
+    assert_eq!(summary.total_enriched(), 2);
+    assert_eq!(
+        summary.total_remaining(),
+        1,
+        "one exotic floor row across the span"
+    );
+
+    // Clean up the server-global FREEZE snapshots this test created.
+    for m in &summary.months {
+        if let Some(name) = &m.snapshot_name {
+            let _ = client
+                .query(&format!("SYSTEM UNFREEZE WITH NAME '{name}'"))
+                .execute()
+                .await;
+        }
+    }
     client
         .query(&format!("DROP DATABASE {db}"))
         .execute()
