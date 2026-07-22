@@ -6,6 +6,25 @@ that will host `prices.*` alongside BE's `default.*`.
 **Status:** Empirical, measured against a 60k-ledger mainnet backfill
 on the local soroban-block-explorer ClickHouse.
 
+> ## ⚠️ Superseded per-ledger figure — read this first
+>
+> The **~77.7 bytes/ledger → ~0.48 GB/year** central estimate below (and the
+> ~0.45 GB/yr / 14.8× figure copied from [task 0046](../lore/1-tasks/archive/0046_RESEARCH_empirical-prices-ch-storage-estimate-from-10k-ledgers/notes/G-empirical-storage-estimate.md))
+> is **superseded** by a direct measurement of the real `prices.*` schema in
+> [task 0060](../lore/1-tasks/archive/0060_FEATURE_prices-clickhouse-crate-combined-backfill-sizing/README.md):
+>
+> - **100k-ledger mainnet backfill = 350.5 MiB ≈ 3.7 KB/ledger — ~48× the
+>   74 B/ledger estimate here.** The gap is real asset-pair diversity (12,770
+>   pairs; `price_ohlcv_1m` dominates), which the per-ledger row-count model below
+>   under-counted. At that rate the annual write is **~20–25 GB/yr** (order a few
+>   tens of GB), not ~0.48 GB/yr.
+>
+> **The headline conclusion still holds:** prices-api does **not** drive the
+> Hetzner tier — BE's `default.*` (~395 GB/yr) dominates, and prices-api is still
+> a small single-digit-% share even at the measured rate. Keep this document for
+> its method and row-level breakdown; trust **0060** for the absolute
+> bytes/ledger and annual figures.
+
 **TL;DR (numbers BE cares about):**
 
 | Question                                                 | Answer                                                                          |
