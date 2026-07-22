@@ -407,6 +407,147 @@ against prod.
   WITH NAME`, no automated ATTACH restore); the coverage-verification and 0088
   step-3 gate ACs; a runbook; then the actual prod run against 2024-02 → present.
 
+## Prod-run session — 2026-07-22 (PAUSED before the first write)
+
+Runbook steps 0–3 done against prod. **Nothing has been written yet.** Resume at
+the 202502 pilot below.
+
+### Done
+
+- **Step 1 build.** `cargo build --release -p enrichment-worker --features
+  aws-mtls --bin coarse-repair` → `./target/release/coarse-repair`. Writer certs
+  present at `$HOME/prices-mtls/prices_writer.{crt,key}` + `ca.crt`.
+- **Step 2 dry run** (`price_ohlcv_1h`, 202402→202607): 30 months,
+  **79,633,858** zero rows, 0 enriched, nothing written. Connection, month
+  enumeration and partition-bounding all confirmed working against prod.
+- **Step 3 baseline recorded** (see table below).
+- **Only `1h` was dry-run.** `_4h`, `_1d`, `_1w`, `_1M` are still untouched.
+
+### Yield: ~31.6M of the 79.6M are repairable (≈40%)
+
+The driver counts `(volume_quote_usd = 0 OR close_usd = 0) AND volume_quote > 0`
+with **no quote-class filter** (`repair.rs:132`), so its "months with enrichable
+zeros" log line overstates the work — it includes the exotic floor. Split by the
+classes the tiers actually reach:
+
+| span | peg_reachable/mo | pivot_reachable/mo | exotic floor/mo |
+|---|---|---|---|
+| 202402 | 0 | 51 | 620,846 (unrepairable — expect a no-op) |
+| 202403 → 202412 | **39–940** | 1.0M–1.6M | 1.3M–2.0M |
+| 202501 → 202607 | **150k–340k** | 0.30M–1.10M | 1.2M–2.5M |
+
+Totals ≈ **28.0M pivot + 3.6M peg = 31.6M** rewrites; the remaining ~48M stay
+zero correctly.
+
+> **📌 Corrects this task's own §Recovery claim.** "USDC-quoted: 100k–330k
+> rows/month, every month 2024-02 → 2026-07, at `close_usd = 0`" is **wrong for
+> 2024**: `peg_reachable` is 39–940 rows/month for 2024-03 → 2024-12, because
+> those USDC rows were already enriched (the ~99% figure). The 2024 remainder is
+> **XLM-pivot work, not USDC work**. The repair target for 2024 is the pivot tier.
+
+> **✅ Independently confirms Defect 2.** `peg_reachable` jumps **940 → 173,137
+> at 202501** and holds 150–340k through 202607 — the enrichment march's stall
+> boundary, visible in a column derived completely differently from the original
+> per-quote breakdown.
+
+### Baseline (before) — `price_ohlcv_1h`, `volume_quote > 0`, FINAL
+
+| month | pct_zero |
+|---|---|
+| 202402 | 53.0% |
+| 202403 | 86.1% |
+| 202404 → 202412 | 91.2–96.6% |
+| 202501 | 99.5% |
+| **202502 → 202602** | **100.0% unbroken** (13 months) |
+| 202603 / 202604 | 93.6% / 99.5% |
+| 202605 / 202606 | 100.0% |
+| 202607 | 92.4% |
+
+Matches the task's headline claim exactly, and the 202501→202502 step is the same
+boundary the peg column shows.
+
+### Pivot reference verified present — the repair can work
+
+`price_ohlcv_1h` holds an XLM/USDC market in **every** month of the span
+(223–2,788 buckets/mo; ~2,600/mo vs ~720 hours = multiple sources per bucket, as
+expected). The `close` band tracks real XLM history — ~$0.11 early 2024, the
+~$0.60 spike in 2024-11, $0.25–0.42 through 2025, $0.15–0.18 in 2026. This is the
+strongest evidence so far that the peg-pivot tier will emit sane USD values.
+
+**⚠️ Outlier reference buckets to watch in verification:** `202407 min_close =
+0.0027`, and `202505` / `202607 max_close = 1.0000` exactly. A round 1.0 smells
+like a degenerate/thin bucket. The pivot forward-fills the volume-weighted close
+at-or-before each candle, so a bad bucket can leak into neighbours; volume
+weighting should suppress it, but check the repaired value distribution.
+
+### ▶️ RESUME HERE — pilot 202502 (single month, not the full span)
+
+Deliberate deviation from runbook Step 4, which runs all 30 months at once: prove
+the mechanism on one partition of the 100%-zero block first.
+
+```bash
+export CH_DOMAIN=ch.sorobanscan.rumblefish.dev
+export MTLS_CERT_PATH=$HOME/prices-mtls/prices_writer.crt
+export MTLS_KEY_PATH=$HOME/prices-mtls/prices_writer.key
+export MTLS_CA_PATH=$HOME/prices-mtls/ca.crt
+
+time ./target/release/coarse-repair \
+  --transport hetzner --table price_ohlcv_1h \
+  --start-month 202502 --end-month 202502
+```
+
+**Pre-registered expectation** (recorded before the run so it cannot be
+rationalised after): `zeros_before 2,788,693` → `enriched ≈ 1,000,975`
+(184,864 peg + 816,111 pivot) → `zeros_after ≈ 1,787,718` → snapshot
+`repair_0114_prices_price_ohlcv_1h_202502`.
+
+**Two distinct failure signatures, both of which look like success:**
+
+1. `enriched ≈ 0`, `zeros_after` unmoved → the **silent no-op** this task warned
+   about. Stop; do not run the other 29 months.
+2. `enriched ≈` exactly **200,000** → `one_shot` did not take effect.
+   `coarse-repair.rs:160` hardcodes `max_batches: 20`, which at the default
+   10k batch caps a run at 200k rows; `repair.rs` overrides it with
+   `one_shot = true`, so that override is load-bearing. Not a data limit.
+
+**Timing estimate.** Calibration: the dry-run enumeration `FINAL`-scanned ~80M
+rows in **6.7s** (~12M rows/s on that host). The pilot is ~101 batches
+(19 peg + 82 pivot; the oracle tier no-ops since `oracle_prices` starts 2025-09),
+each re-scanning the ~2.8M-row partition → **3–10 min expected**. Extrapolated,
+the full 30-month `1h` span is **~1.5–2.5 h**, before the other four tables.
+`--batch-size 100000` is the lever if it runs long (scan cost is per batch, not
+per row). **Merge pressure outlives the process** — ~1M re-inserted RMT rows keep
+collapsing in background merges after the tool exits; `zeros_after` reads `FINAL`
+so it is correct immediately, but the shared host keeps working.
+
+### Post-pilot value check (counts alone are not enough)
+
+```bash
+cat > /tmp/0114_pilot_check.sql <<'SQL'
+SELECT 'repaired_202502'                              AS scope,
+       count()                                        AS rows,
+       round(quantile(0.01)(toFloat64(close_usd)), 6) AS p01,
+       round(median(toFloat64(close_usd)), 6)         AS p50,
+       round(quantile(0.99)(toFloat64(close_usd)), 6) AS p99,
+       round(max(toFloat64(close_usd)), 2)            AS max_usd,
+       countIf(close_usd > 1000000)                   AS absurd_high
+FROM prices.price_ohlcv_1h FINAL
+WHERE toYYYYMM(timestamp) = 202502 AND close_usd > 0 AND volume_quote > 0
+FORMAT PrettyCompact;
+SQL
+
+ssh -i ~/.ssh/sorban-prod_ed25519 deploy@168.119.73.161 \
+  'docker exec -i app-clickhouse-1 clickhouse-client' < /tmp/0114_pilot_check.sql
+```
+
+`absurd_high` must be 0; `p50` must be a plausible token price.
+
+### Operator note
+
+Prod-touching commands are run by the operator, not the agent — **including
+`--dry-run` and read-only queries**. Heredoc-into-`ssh` is fragile on paste; write
+the SQL to a local file and pipe it (`… clickhouse-client < /tmp/q.sql`).
+
 ## Notes
 
 - **Possible [[0107]] link, unconfirmed.** SDEX volume measuring ~1/6 of
