@@ -2,13 +2,26 @@
 id: "0102"
 title: "SCF Milestone 1 deliverable-verification package (form answers + evidence PDF + video scenario)"
 type: DOCS
-status: active
+status: completed
 related_adr: []
 related_tasks: ["0012", "0026", "0038", "0040", "0053", "0061", "0088", "0089"]
 tags: ["milestone-M1", "scf", "effort-medium", "priority-high"]
 links:
   - "https://github.com/rumblefishdev/soroban-block-explorer/tree/master/docs/scf"
 history:
+  - date: 2026-07-22
+    status: completed
+    who: okarcz
+    note: >
+      ACCEPTED — the SCF reviewer approved Milestone 1; video + evidence
+      documents reviewed and form answers submitted. Operator-gated remainder
+      closed at submission: the 10 <TODO:> markers (live prod query output + 3
+      screenshots) filled, milestone-1-evidence.pdf rendered (pandoc + typst on
+      the operator box) and uploaded, architecture.png rendered, video
+      recorded then re-recorded as a shorter cut (PR #128) and uploaded. The
+      0095 gate cleared long ago. The last repo-hygiene item — the public
+      default branch trailing develop — is addressed by the develop→master
+      release this completion ships with. Archiving.
   - date: 2026-07-17
     status: active
     who: okarcz
@@ -68,29 +81,17 @@ history:
 
 # SCF Milestone 1 deliverable-verification package
 
-> ## ⛔ GATED ON 0095 — do not submit before it lands
+> ## ✅ SUBMITTED & ACCEPTED (2026-07-22)
 >
-> Decision (okarcz, 2026-07-17): **task 0095** (rollup MVs → APPEND) must land
-> first. Two reasons:
+> Milestone 1 was submitted and **approved by the SCF reviewer**. The 0095 gate
+> below cleared when the rollup MVs returned in APPEND mode (2026-07-17, PR #121)
+> and the package was reconciled to match. Retained for history; no action
+> remains.
 >
-> 1. **AC 2** requires `prices.*` to match Section 3, whose Tranche 1 work list
->    names the **MV chain**. The six `mv_ohlcv_*` views are dropped, so
->    `SHOW TABLES` does not show them and a reviewer can call AC 2 unmet. This
->    package currently *discloses* that (AC 2, §6, and the video script) — which
->    is defensible, but 0095 removes the argument entirely.
-> 2. Submitting a milestone whose live rollup path is silently broken — and
->    deleting live candles monthly — is a worse conversation after an award than
->    a short delay now.
->
-> **After 0095 lands, this package needs a pass:** AC 2's "the six MVs are
-> deliberately absent" explanation, §6's rollup row, the exec summary, the form
-> answers' point 4, and the video's `SHOW TABLES` scene all describe the MVs as
-> dropped. Once they are back, those become wrong in the other direction.
-> README **step 0** (pre-roll before capturing evidence) also becomes
-> unnecessary — the whole point of 0095 is that coarse tracks live on its own.
->
-> Everything else is source-complete: the 10 `<TODO:>` markers (live query
-> output + screenshots), `build-pdf.sh`, the video, and the Drive links.
+> _Original gate (resolved): submission was held until **task 0095** (rollup MVs
+> → APPEND) landed, so `SHOW TABLES` would show the six `mv_ohlcv_*` views the
+> package's AC 2 / §6 / video `SHOW TABLES` scene describe, rather than the
+> dropped-MV disclosure the package carried while they were absent._
 
 ## Summary
 
@@ -154,8 +155,8 @@ screenshots/query outputs the operator must capture.
 - [x] `milestone-1-form-answers.md` covers all four SCF form fields.
 - [x] `milestone-1-evidence.md` maps every M1 acceptance criterion to concrete
       evidence. — All 6 ACs from design-doc §9 have a section; resource names,
-      code refs, and ADR links are in place. **Live SQL output + screenshots
-      remain `<TODO:>` (10 markers)** — operator-gated, see Notes.
+      code refs, and ADR links are in place. The 10 operator-gated `<TODO:>`
+      markers (live prod SQL output + 3 screenshots) were filled at submission.
 - [x] Every scope refinement vs. the approved deliverable is disclosed with a
       rationale and an ADR reference. — §4 covers four refinements:
       RDS→ClickHouse (ADR 0007), Fargate→CLI backfill (ADR 0005/0001),
@@ -164,10 +165,10 @@ screenshots/query outputs the operator must capture.
       the delivered text.
 - [x] `milestone-1-video-scenario.md` is a scene-by-scene script targeting
       5–7 minutes. — 8 scenes, ~6:00 budgeted.
-- [ ] `build-pdf.sh` renders `milestone-1-evidence.pdf` successfully.
-      — **deferred:** pandoc + typst are not installed on this machine. Script
-      syntax-checked and its tool/version guards verified to fire correctly;
-      install notes rewritten for Linux (BE's were macOS/Homebrew-only).
+- [x] `build-pdf.sh` renders `milestone-1-evidence.pdf` successfully.
+      — Rendered by the operator (pandoc + typst on the operator box; not
+      installed on the authoring machine, which is why it was deferred here) and
+      uploaded to the SCF submission Drive. Confirmed at acceptance.
 - [x] No personal names, no Polish, no secrets (API keys / certs) in any
       committed artifact. — grep-verified.
 
@@ -272,7 +273,8 @@ operator:
 - Live query outputs against prod CH must be run by the operator and pasted
   back (see the "user runs prod CH queries" convention). `ch-demo-queries.sql`
   is the operator's script; it is read-only by construction.
-- **Task stays `active`**: the package is authored but not yet submittable.
-  Remaining operator-gated work is the 10 `<TODO:>` markers (live query output
-  + 3 screenshots), the PDF render (needs pandoc + typst installed), the
-  `architecture.png` render, and the default-branch fix.
+- **COMPLETED 2026-07-22**: submitted and accepted by the SCF reviewer. All
+  operator-gated work closed at submission — the 10 `<TODO:>` markers, the PDF
+  render, `architecture.png`, and the video (re-recorded shorter, PR #128). The
+  default-branch/public-review item is resolved by the develop→master release
+  this completion ships with.
