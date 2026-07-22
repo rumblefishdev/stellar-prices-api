@@ -2,7 +2,7 @@
 id: "0114"
 title: "Coarse OHLCV tables carry no USD values for 2025-02 → 2026-02; enrichment never revisits rolled-up rows"
 type: BUG
-status: backlog
+status: active
 related_adr: ["0007"]
 related_tasks: ["0111", "0090", "0095", "0088", "0026", "0107"]
 tags: [clickhouse, enrichment, rollup, data-quality, priority-high, effort-medium, incident]
@@ -19,6 +19,57 @@ history:
       led to the coarse tables: `close_usd = 0` for 86–100% of the Soroban era,
       with a hard zero block 2025-02 → 2026-02. Two distinct defects, both
       confirmed by measurement against prod.
+  - date: 2026-07-22
+    status: active
+    who: okarcz
+    note: >
+      Activated. Added data-safety analysis before implementation: the repair is
+      non-destructive as a pure additive enrichment INSERT (OHLC carried through,
+      zero-scoped, write-once volume, RMT append), and inspection of
+      ch_enrich.rs:380 (`p.version + 1` from the existing row) downgrades the
+      version risk from data-loss to silent-no-op. Added two ACs — additive-only
+      / never-truncate, and snapshot-before-run — because the 2025-02 → 2026-02
+      span lost its 1m source on 07-18 and the coarse tables are now the sole
+      copy. Next: the version-arithmetic test.
+  - date: 2026-07-22
+    status: active
+    who: okarcz
+    note: >
+      Added the operator entrypoint bin/coarse-repair.rs (--features aws-mtls):
+      clap CLI, --transport local|hetzner mTLS, --dry-run preview, guards against
+      1m/non-coarse/bad-month, snapshot-on-by-default. Added CoarseRepairConfig
+      .dry_run. Smoke-tested end-to-end vs local CH: real run repaired in-span
+      rows (close_usd 8/11, version→5001) and left the out-of-span month
+      untouched; FREEZE snapshots emitted + unfrozen in cleanup. clippy clean,
+      all tests green. Remaining: FREEZE revert automation, coverage-verify AC,
+      0088 step-3 gate, runbook, prod run.
+  - date: 2026-07-22
+    status: active
+    who: okarcz
+    note: >
+      Built the partition-bounded repair driver. Added
+      ChEnrichConfig::time_window threaded into every candidate scan (pivot
+      reference left unbounded so cross-month anchors survive); new
+      repair.rs::CoarseRepairDriver enumerates months-with-zeros in a span,
+      FREEZE-snapshots each partition, runs a partition-bounded one-shot repair,
+      reports per-month before/after. No TRUNCATE path — additive INSERT+FREEZE
+      only. New integration test coarse_repair_driver_bounds_span_and_reports_per_month
+      + peg/pivot window unit tests. 27 lib + 7 integration tests green; example
+      + lambda-feature build clean; clippy clean. Unbounded hourly Lambda path
+      byte-identical (time_window=None). Remaining: operator entrypoint, coverage
+      verification, 0088 step-3 gate, prod run.
+  - date: 2026-07-22
+    status: active
+    who: okarcz
+    note: >
+      Version-arithmetic AC proven. Added integration test
+      coarse_repair_row_outranks_large_summed_version (ch_enrich_it.rs): repair
+      wins against a seeded sum(version)=5000 (close_usd 0→8, version→5001), OHLC
+      carried through verbatim, append-only (2 physical rows), idempotent. All 6
+      ch_enrich_it tests green against local CH 26.3.10.60. Negative control
+      confirms a fresh/constant version loses to the seeded sum — the silent-no-op
+      failure mode is real and this catches it. Next: build the partition-bounded
+      repair driver + snapshot step, then run the historical span.
 ---
 
 # Coarse OHLCV tables carry no USD values
@@ -148,6 +199,45 @@ historical.
   rows that lose to the zeros they were meant to replace. **This fails quietly —
   it needs a test, and it is the first thing to verify when implementing.**
 
+  > **Update (2026-07-22) — inspection makes this milder than feared.** The
+  > enrichment SELECT is `p.version + 1` reading `FROM {tbl} AS p FINAL`
+  > (`ch_enrich.rs:380`), i.e. it *does* derive from the existing (post-collapse)
+  > row: against a coarse `sum(version)` value V it writes V+1 > V, and the
+  > historical span sits outside every live-MV window so nothing re-appends a
+  > competing sum afterward. So the realistic failure mode is **"the repair
+  > silently no-ops" (zeros remain), not "existing data is destroyed."** The test
+  > AC still stands — but this is a fill-failure risk, not a data-loss risk.
+
+### Data-safety — additive-only, NEVER truncate-rebuild
+
+The repair is **non-destructive by construction** *as long as it is the additive
+enrichment `INSERT … SELECT`* (`ch_enrich.rs:367-405`): no `DELETE`/`UPDATE`/
+`TRUNCATE`; OHLC/volume/`trade_count` carried through verbatim from the existing
+row (`p.open … p.trade_count`); scoped to `volume_quote_usd = 0 OR close_usd = 0`
+so enriched rows are never re-touched; `volume_quote_usd` write-once; append into
+`ReplacingMergeTree`, so rows are only collapsed at merge, keeping highest
+`version`. Worst realistic bug = some zeros stay zero.
+
+**The trap:** the pre-roll runbook (`continue-soroban-backfill.md §9`) offers a
+`TRUNCATE TABLE price_ohlcv_1h; … rebuild-from-1m` clean-slate path. That assumes
+1m still holds the history. **For 2025-02 → 2026-02 the 1m source was dropped by
+cleanup on 07-18 — the coarse tables are the SOLE surviving copy.** A
+truncate-rebuild there deletes the only copy with nothing to rebuild from. The
+repair MUST be pure additive enrichment; the truncate path is forbidden for this
+span.
+
+**Because it is a sole copy, snapshot before running.** `ALTER TABLE
+prices.price_ohlcv_1h FREEZE PARTITION <id>` (cheap hardlink) or `INSERT INTO
+…_backup SELECT * … WHERE <span>` on every affected coarse partition, and
+dry-run the repair against a restored copy / scratch DB first.
+
+**The historical span cannot use the oracle-ASOF statement.** `oracle_prices`
+starts 2025-09, so the shown statement's `o.price_usd IS NOT NULL` filter drops
+every pre-2025-09 row → nothing inserted. The repair must run the **peg-pivot /
+stablecoin-direct tiers** (`ch_enrich.rs:688-736`, reference derived inline from
+the candle table). Using the oracle statement over that span is a silent no-op,
+not corruption — but it means the repair did nothing.
+
 ### What would reverse this decision
 
 If the un-enriched rows turn out to be dominated by pairs with genuinely no USD
@@ -248,15 +338,74 @@ the 55%/62% figures.
 - [ ] The rollup path no longer freezes un-enriched values — implemented as a
       **scheduled, partition-bounded enrichment pass over the coarse tables**
       (see §Chosen approach; the ordering-based alternatives were rejected).
-- [ ] **Version arithmetic proven by test:** a repair row outranks the existing
-      coarse row under `sum(version)` RMT semantics. This fails silently, so a
-      passing test is the only acceptable evidence — not a manual spot-check.
+      *In progress (2026-07-22): partition-bounding + driver built and tested
+      locally (see §Implementation progress); scheduling + prod run remain.*
+- [x] **Version arithmetic proven by test** — DONE 2026-07-22. A repair row
+      outranks the existing coarse row under `sum(version)` RMT semantics.
+      `enrichment-worker/tests/ch_enrich_it.rs::coarse_repair_row_outranks_large_summed_version`
+      seeds a `price_ohlcv_1h` bucket at `version = 5000` and asserts the repair
+      wins (`close_usd 0 → 8`, `version → 5001`), carries OHLC through verbatim,
+      appends (2 physical rows pre-merge), and is idempotent. A negative control
+      against local CH confirms the teeth: a fresh/constant version loses to the
+      seeded sum (FINAL keeps the zero) — the exact silent-no-op this guards. All
+      three write tiers (`ch_enrich.rs:380`/`:696`/`:729`) project `p.version + 1`
+      from `FROM {tbl} AS p FINAL`, so the +1 derives from the existing row.
+- [ ] **Additive-only, never truncate-rebuild.** The repair is a pure enrichment
+      `INSERT … SELECT` that carries OHLC/volume through verbatim; the pre-roll
+      `TRUNCATE`+rebuild path is forbidden for 2025-02 → 2026-02, where 1m is gone
+      and the coarse tables are the sole copy (see §Data-safety). Verify the run
+      path issues no `DELETE`/`TRUNCATE` against coarse tables.
+- [ ] **Snapshot before running.** Every affected coarse partition is backed up
+      (`FREEZE PARTITION` or `INSERT INTO …_backup`) and the repair is dry-run
+      against a restored copy / scratch DB before touching prod — mandatory
+      because the affected span is a sole copy with no re-derivation fallback.
+      Confirm the repair uses the peg-pivot / stablecoin-direct tiers (not the
+      oracle-ASOF statement) for the pre-2025-09 span.
 - [ ] `price_ohlcv_1h` / `1d` USD coverage verified for a sample of liquid pairs
       against an independent source before declaring the repair good.
 - [ ] 0088 step 3 gated: pre-roll refuses to run, or warns loudly, when 1m USD
       coverage for the target span is below a threshold.
 - [x] Re-check whether this explains [[0107]]'s volume gap — **REFUTED
       2026-07-21**, see §REFUTED below. Orthogonal problem; 0107 unaffected.
+
+## Implementation progress (2026-07-22)
+
+Driver built and tested locally against CH 26.3.10.60; not yet scheduled or run
+against prod.
+
+- **Partition-bounding (converges with 0111 option 1).** Added
+  `ChEnrichConfig::time_window: Option<(u32,u32)>` and threaded a
+  `timestamp >= start AND timestamp < end` predicate (inlined literals, no bind-
+  order change) into every candidate scan — `count_candidates`,
+  `count_remaining_at_volume_zero`, `enrich_batch`, `peg_sql`, `pivot_sql`. Only
+  the **candidate** side is bounded; the pivot tier's inline XLM/USDC reference
+  still forward-fills from earlier months (cheap sort-key-prefix scan), so a
+  month's first buckets keep a valid pivot anchor. `None` (the hourly Lambda over
+  1m) is byte-identical to before — verified by unit tests + all pre-existing
+  integration tests still green.
+- **Driver** (`enrichment-worker/src/repair.rs`, `CoarseRepairDriver`): one
+  grouped scan enumerates months-with-zeros in `[start_month, end_month]` with
+  their exact `[start,end)` windows; each month is `FREEZE`d (server-side hardlink
+  snapshot, `snapshot: true`) then repaired with a partition-bounded one-shot
+  pass; returns per-month before/after counts. **No `TRUNCATE`/rebuild path
+  exists in the driver** — additive `INSERT`+`FREEZE` only.
+- **Tests** (`ch_enrich_it.rs`): `coarse_repair_driver_bounds_span_and_reports_per_month`
+  proves span bounding (out-of-span month untouched), reference bounding (exotic
+  FOO/EXO stays the `no_reference` floor), the version race under a seeded
+  `sum(version)=5000`, and correct per-month before/after. Plus `peg_sql` /
+  `pivot_sql` window unit tests (candidate-side bounded, reference NOT, no extra
+  bind params).
+- **Operator entrypoint** (`enrichment-worker/src/bin/coarse-repair.rs`, needs
+  `--features aws-mtls`): clap CLI mirroring sdex-backfill (`--transport
+  local|hetzner` + mTLS cert-path env). Guards refuse `price_ohlcv_1m` and the
+  non-coarse / bad-`YYYYMM` / start>end cases; `--dry-run` previews
+  months-with-zeros without writing; snapshot on by default (`--skip-snapshot`
+  is the scary opt-out). Smoke-tested end-to-end against local CH: dry-run vs
+  real run, in-span rows repaired (`close_usd` 8/11, `version`→5001), out-of-span
+  month untouched, per-partition FREEZE emitted.
+- **Still to do:** revert-cleanup story for `FREEZE` (currently `SYSTEM UNFREEZE
+  WITH NAME`, no automated ATTACH restore); the coverage-verification and 0088
+  step-3 gate ACs; a runbook; then the actual prod run against 2024-02 → present.
 
 ## Notes
 
