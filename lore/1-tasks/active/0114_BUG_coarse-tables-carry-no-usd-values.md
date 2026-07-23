@@ -70,6 +70,29 @@ history:
       confirms a fresh/constant version loses to the seeded sum — the silent-no-op
       failure mode is real and this catches it. Next: build the partition-bounded
       repair driver + snapshot step, then run the historical span.
+  - date: 2026-07-23
+    status: active
+    who: okarcz
+    note: >
+      Phase C COMPLETE — _4h/_1d/_1w/_1M repaired (~20.1M rows), so with _1h
+      (~30.8M + 1.0M pilot) all five coarse tables now sit at the no_reference
+      floor; ~52.5M rows repaired total. The 4h run was interrupted by a power
+      loss and resumed from the boundary month 202603 (75.8% zero vs a repaired
+      neighbour's 66.4% identified it as half-written); 5 months in 3m30s, every
+      month reconciling before-enriched=after exactly. Two Phase-C estimates in
+      this file were wrong and are corrected in place - yield ~30% not 39%, and
+      runtime minutes not ~3h (on 202606/07 the oracle tier claims the reachable
+      rows and peg-pivot correctly no-ops, so 23-51 batches/month not ~100).
+      Scope correction - the 1m hole is 2021-07 to 2026-06, ~4x wider than the
+      recorded 13 months, and its stated cause (cleanup drop on 07-18) is
+      UNVERIFIED - no DropPart in part_log, no matching mutation, no TTL. Three
+      cluster findings recorded - cleanup deletes by ALTER DELETE mutation not
+      partition drop (so 0109's guard must watch system.mutations, never
+      DropPart); six Phoenix DELETE mutations starved since 07-17 across all
+      coarse tables, meaning 0097's rework is incomplete until the backfill frees
+      the merge pool (~07-27/28, do not KILL); EventBridge cleanup rule confirmed
+      DISABLED and 1m has no TTL. Remaining: _4h composition breakdown,
+      scheduling the recurring pass, 0088 step-3 gate.
 ---
 
 # Coarse OHLCV tables carry no USD values
@@ -220,11 +243,36 @@ so enriched rows are never re-touched; `volume_quote_usd` write-once; append int
 
 **The trap:** the pre-roll runbook (`continue-soroban-backfill.md §9`) offers a
 `TRUNCATE TABLE price_ohlcv_1h; … rebuild-from-1m` clean-slate path. That assumes
-1m still holds the history. **For 2025-02 → 2026-02 the 1m source was dropped by
-cleanup on 07-18 — the coarse tables are the SOLE surviving copy.** A
-truncate-rebuild there deletes the only copy with nothing to rebuild from. The
-repair MUST be pure additive enrichment; the truncate path is forbidden for this
-span.
+1m still holds the history. It does not: **the coarse tables are the SOLE
+surviving copy.** A truncate-rebuild deletes the only copy with nothing to
+rebuild from. The repair MUST be pure additive enrichment; the truncate path is
+forbidden for this span.
+
+> **📌 Scope correction (2026-07-23) — the 1m hole is 5 years, not 13 months.**
+> This section originally read "for 2025-02 → 2026-02 the 1m source was dropped
+> by cleanup on 07-18". Measured directly (`GROUP BY toYYYYMM(timestamp)` over
+> `price_ohlcv_1m`), the table holds **only two spans**:
+>
+> | span | origin | rows |
+> |---|---|---|
+> | 2018-12-13 → 2021-06-14 | the running [[0088]] backfill's output | ~9.5M |
+> | 2026-07-01 → present | live ingestion | 11.1M |
+>
+> **Everything between 2021-06-14 and 2026-07-01 is absent** — ~4× wider than
+> recorded. The sole-copy rule therefore covers **2021-07 → 2026-06**, and any
+> procedure anywhere that assumes 1m can rebuild a coarse table over that span is
+> wrong. The upper bound moves as the backfill advances (its frontier was ledger
+> 35.84M ≈ 2021-06-14 on 07-23).
+>
+> **⚠️ The stated cause is unverified.** No evidence for the "dropped by cleanup
+> on 07-18" claim survives: `system.part_log` covers 2026-06-22 → now and contains
+> **zero `DropPart` events** (its event-type set is `RemovePart`, `MergeParts`,
+> `MutatePart`, `NewPart` and the `*Start` variants — `DropPart` never appears);
+> `system.mutations` holds no 1m delete for that span; and `SHOW CREATE TABLE
+> prices.price_ohlcv_1m` has **no TTL clause**. So the deletion either predates
+> `part_log`'s window or ran by a path that leaves no trace in it. Treat the
+> mechanism as unknown — the sole-copy *fact* is measured and solid, its *cause*
+> is not.
 
 **Because it is a sole copy, snapshot before running.** `ALTER TABLE
 prices.price_ohlcv_1h FREEZE PARTITION <id>` (cheap hardlink) or `INSERT INTO
@@ -334,16 +382,22 @@ the 55%/62% figures.
       **95.5% → 58.1%** zero across the 30-month span; the unbroken 100.0% block
       (202502→202602) is gone, now 55.6–69.8%. Composition proven exotic-only by
       a per-quote-class breakdown (see §Repair result), so the residual IS the
-      floor rather than remaining backlog. *`_4h`/`_1d`/`_1w`/`_1M` still to do —
-      see §Phase C.*
+      floor rather than remaining backlog.
+- [x] **`_4h`/`_1d`/`_1w`/`_1M` re-enriched — DONE 2026-07-23 (§Phase C).**
+      ~20.1M rows enriched across the four tables; combined with `_1h`, ~52.5M
+      rows repaired in total and **every coarse OHLCV table is now at the
+      `no_reference` floor**. The `4h` run was interrupted by a power loss and
+      resumed cleanly from the boundary month. *Composition breakdown on `_4h`
+      still outstanding — the counts are in, the exotic-only proof is not.*
 - [x] **Pre-check before any implementation** — DONE 2026-07-21. The 62% is
       genuine `no_reference` (exotic quotes), not backlog; live enrichment runs
       at 99.7% on pivotable quotes. Approach holds for the historical repair.
 - [ ] The rollup path no longer freezes un-enriched values — implemented as a
       **scheduled, partition-bounded enrichment pass over the coarse tables**
       (see §Chosen approach; the ordering-based alternatives were rejected).
-      *In progress (2026-07-22): partition-bounding + driver built and tested
-      locally (see §Implementation progress); scheduling + prod run remain.*
+      *In progress: driver built, tested, and now proven across five tables in
+      prod; **scheduling is the only remaining piece**. Both historical runs were
+      manual one-shots.*
 - [x] **Version arithmetic proven by test** — DONE 2026-07-22. A repair row
       outranks the existing coarse row under `sum(version)` RMT semantics.
       `enrichment-worker/tests/ch_enrich_it.rs::coarse_repair_row_outranks_large_summed_version`
@@ -368,7 +422,10 @@ the 55%/62% figures.
       it (see §Blocker). Repair then runs `--skip-snapshot`. Confirmed the
       peg-pivot / stablecoin-direct tiers are what ran: `implied_ref_usd` = real
       XLM/USD for the era and exactly 1.0 for USDC, and the oracle tier no-ops
-      pre-2025-09 as predicted. *Still to do for `_4h`/`_1d`/`_1w`/`_1M`.*
+      pre-2025-09 as predicted. **Extended to `_4h`/`_1d`/`_1w`/`_1M` 2026-07-23**
+      — all four frozen by the CH admin before their run (150 dirs, 12 GB under
+      `shadow/`, verified by `ls | grep repair_0114` + `du`), repair ran
+      `--skip-snapshot`.
 - [x] **Reference correctness verified across the span — DONE 2026-07-23.**
       *Superseded criterion: the check is `implied_ref_usd` correctness, NOT a
       `close_usd` value ceiling — a ceiling can never pass while dust-trade
@@ -740,30 +797,150 @@ references, not a defect.
 > this. Immaterial here (0.4% against a 100%-vs-0.9% split), but it is a live
 > correctness hazard elsewhere → **spawned as [[0129]]**.
 
-## Phase C — `_4h`/`_1d`/`_1w`/`_1M`, dry-run 2026-07-23, NOT yet run
+## ✅ Phase C — `_4h`/`_1d`/`_1w`/`_1M`, COMPLETE 2026-07-23
 
-| table | zeros | est. repairable (~39%) | est. runtime |
+All four remaining coarse tables are repaired. Combined with the `_1h` run above,
+**every coarse OHLCV table now sits at the genuine `no_reference` floor.**
+
+| table | dry-run zeros | zeros after | enriched |
 |---|---|---|---|
-| `price_ohlcv_4h` | 41,019,676 | ~16M | ~2 h |
-| `price_ohlcv_1d` | 14,047,080 | ~5.5M | ~45 min |
-| `price_ohlcv_1w` | 3,629,865 | ~1.4M | ~12 min |
-| `price_ohlcv_1M` | 1,305,124 | ~0.5M | ~5 min |
-| **total** | **59,901,745** | **~23M** | **~3 h** |
+| `price_ohlcv_4h` | 41,019,676 | 28,062,132 | ~12.96M |
+| `price_ohlcv_1d` | 14,047,080 | 9,127,070 | ~4.92M |
+| `price_ohlcv_1w` | 3,629,865 | 2,064,862 | ~1.57M |
+| `price_ohlcv_1M` | 1,305,124 | 628,710 | ~0.68M |
+| **total** | **59,901,745** | **39,882,774** | **~20.1M** |
 
-`_4h` alone is two-thirds of the remaining work. The 39% ratio is carried from
-`_1h`'s measured 30.83M / 78.63M — the driver's own count has no quote-class
-filter and so always overstates.
+Deltas are approximate — live ingestion added rows between the dry run and the
+after-measurement. Snapshots were taken by the CH admin for all four tables
+before the run (150 dirs, 12 GB under `shadow/`); the repair ran
+`--skip-snapshot` per the §Blocker path.
+
+### The run was interrupted mid-`4h` and resumed cleanly
+
+The operator's laptop lost power during the `4h` table, killing the client (the
+work runs from the laptop; `/tmp/0114_phasec.log` was lost with it). Recovery was
+mechanical and is the template for next time:
+
+1. **Locate the stop point from data, not from the log** — a per-month `pct_zero`
+   scan showed `4h` repaired through 202603 and untouched at 202604 (99.6%),
+   202605/202606 (100.0%), 202607 (93.1%).
+2. **Include the boundary month in the resume.** 202603 read **75.8%**, ~9 points
+   above its repaired neighbour 202602 (66.4%) — the signature of a month written
+   only partway. Resuming from 202604 would have left it half-done.
+3. **Re-run the span.** `--start-month 202603 --end-month 202607`. 202603 came
+   back with `enriched 114,514` (small, as predicted for a partial month) and the
+   rest with full yields.
+
+Resume is safe by construction: the pass is scoped to `close_usd = 0`, so
+already-enriched rows are skipped and a re-run over completed work is a no-op.
+
+```
+  month  zeros_before      enriched   zeros_after
+ 202603       1027824        114514        913310
+ 202604       1228639        379610        849029
+ 202605       1425364        408287       1017077
+ 202606       1758902        485035       1273867
+ 202607        878203        204115        674088
+5 month(s): 1,591,561 enriched, 4,727,371 left at the no_reference floor
+```
+
+`real 3m30s`. Every month reconciles exactly (`before − enriched = after`), so
+the additive-only property held again — now demonstrated across two independent
+runs and five tables.
+
+### 📌 Two Phase-C estimates in this file were wrong — both corrected
+
+- **Yield: predicted ~39%, actual ~30% overall and ~25–31% on 2026 months.** The
+  39% was carried from `_1h`'s span-wide average, which is dominated by
+  pivot-heavy 2024 months. The per-month figures track `_1h`'s *same months*
+  closely (202604: 30.9% here vs 34% there; 202607: 23.2% vs 24%) — the
+  extrapolation was mis-based, not the measurement.
+- **Runtime: predicted ~3 h, actual minutes.** The `4h` resume did 5 months in
+  **3m30s** against an 8 min/month expectation from `_1h`. Cause: on 202606/202607
+  the **oracle tier** claimed all the reachable rows (`oracle_prices` broadens
+  from 2026-03) and peg-pivot then correctly reported *"made no progress —
+  remaining candles have no USD reference"*, so each month ran 23–51 batches
+  instead of ~100. On `_1h` peg-pivot carried the work. **A tier split that
+  differs from `_1h` is expected, not a fault.**
+
+Resulting zero rates run **~3–4 points above `_1h`** on the same months (67.4 /
+68.8 / 71.4 / 72.4 / 71.5% vs 61.7 / 65.3 / 68.6 / 68.5 / 68.4%). Expected:
+coarser buckets are more exotic-dominated.
 
 > **📌 `enriched: 0` in a dry-run summary is an artifact, not a signal.** A dry run
 > only counts zeros; it never attempts enrichment, so all four tables report
 > `0 enriched` by construction. Do **not** read this as the silent-no-op failure
 > mode — that signature only means anything on a real run.
 
-**Gated on snapshots.** Each table's partitions must be frozen by the CH admin
-first (`prices_writer` still cannot FREEZE and cannot be granted it), verified via
-`ls /var/lib/clickhouse/shadow/ | grep repair_0114` plus a non-trivial `du`,
-before `--skip-snapshot` is safe. Re-freezing is **not** idempotent and that
-failure is protective.
+**Snapshot gate (held for this run).** Each table's partitions must be frozen by
+the CH admin first (`prices_writer` still cannot FREEZE and cannot be granted it),
+verified via `ls /var/lib/clickhouse/shadow/ | grep repair_0114` plus a
+non-trivial `du`, before `--skip-snapshot` is safe. Re-freezing is **not**
+idempotent and that failure is protective.
+
+**Remaining for this AC:** the per-quote-class composition breakdown on `_4h`
+(counts alone cannot close it — see §The residual is exotic-only). Use the
+`GROUP BY asset_id` subquery form, not a direct join on `assets`, to avoid the
+[[0129]] fan-out.
+
+## Cluster findings from the Phase C session (2026-07-23)
+
+Surfaced while verifying that nothing was deleting data mid-repair. None are
+0114 defects; all three are recorded because they are invisible without querying
+`system.*` and each misleads a reader who assumes otherwise.
+
+### Cleanup deletes by **mutation**, not by dropping partitions
+
+The EventBridge rule `prices-production-cleanup` is **`DISABLED`** (verified) and
+`price_ohlcv_1m` has **no TTL**, so nothing is currently deleting. But the
+mechanism recorded elsewhere is wrong: the destructive 2026-07-15 event was
+
+```sql
+-- price_ohlcv_1m, mutation_2496036, create_time 2026-07-15 10:24:36, is_done 1
+DELETE WHERE intDiv(toUInt64(version), 1000) < 50457424
+```
+
+i.e. an `ALTER … DELETE` **mutation** removing every pre-Soroban row — which is
+precisely the [[0088]] backfill's output, in the incident's own words. This fits
+the access model: `prices_writer` holds `SELECT, INSERT, ALTER DELETE, OPTIMIZE`
+and **cannot** drop partitions (the same grant wall that blocked `FREEZE`, see
+§Blocker). Deleting by mutation is the only path available to it.
+
+> **⚠️ Consequence for [[0109]] (the machine-checked cleanup guard): a guard that
+> watches for `DropPart` will never fire.** `system.part_log` shows zero
+> `DropPart` events across its whole retained window. The guard must watch
+> **`system.mutations`** for `DELETE WHERE` commands against `prices.*`, and
+> should treat `is_done = 0` as "armed and pending", not "safe".
+
+### Six Phoenix DELETE mutations have been starved since 2026-07-17
+
+```
+create_time 2026-07-17 11:06:52, is_done 0, latest_fail_reason ''
+DELETE WHERE source = 'phoenix'
+  AND timestamp >= 2024-02-20 17:00:10 AND timestamp < 2026-07-06 09:35:16
+```
+
+on all six coarse tables — `_15m` (52 parts to do), `_1h` (779), `_4h` (431),
+`_1d` (159), `_1w` (120), `_1M` (60). Empty `latest_fail_reason` and epoch
+`latest_fail_time` on every one: **starved, not failing.** ClickHouse gates
+mutation execution behind free slots in the background merge pool
+(`number_of_free_entries_in_pool_to_execute_mutation`), and the pool has been
+saturated continuously since 07-15 by the backfill (a 64k-file partition every
+~25 min) plus this task's ~32M re-inserted RMT rows.
+
+They should drain on their own once the backfill finishes (~2026-07-27/28).
+**Do not `KILL MUTATION`** — half-applied Phoenix deletes across six tables is a
+worse state than not-applied.
+
+Two consequences worth carrying:
+
+- **[[0097]]'s Phoenix rework is incomplete.** The delete half never ran, so
+  pre-fix Phoenix rows are still live in all six coarse tables for
+  2024-02 → 2026-07. Invisible unless you query `system.mutations`.
+- **Some of this task's repair work was spent on rows that mutation intends to
+  delete.** Harmless — mutations only target parts that existed when they were
+  created, so today's inserts are not affected — but a slice of the 32.4M
+  enriched rows is Phoenix data with a pending deletion.
 
 ## Notes
 
