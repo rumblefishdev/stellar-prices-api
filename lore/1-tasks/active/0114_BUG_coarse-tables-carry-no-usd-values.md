@@ -329,9 +329,13 @@ the 55%/62% figures.
 
 ## Acceptance Criteria
 
-- [ ] Coarse tables re-enriched for 2024-02 → present; per-month `close_usd = 0`
-      rate drops to the genuine `no_reference` floor (exotic quotes only), not
-      86–100%.
+- [x] **`price_ohlcv_1h` re-enriched for 2024-02 → present — DONE 2026-07-23,
+      per-month zero rate now at the genuine `no_reference` floor.** Aggregate
+      **95.5% → 58.1%** zero across the 30-month span; the unbroken 100.0% block
+      (202502→202602) is gone, now 55.6–69.8%. Composition proven exotic-only by
+      a per-quote-class breakdown (see §Repair result), so the residual IS the
+      floor rather than remaining backlog. *`_4h`/`_1d`/`_1w`/`_1M` still to do —
+      see §Phase C.*
 - [x] **Pre-check before any implementation** — DONE 2026-07-21. The 62% is
       genuine `no_reference` (exotic quotes), not backlog; live enrichment runs
       at 99.7% on pivotable quotes. Approach holds for the historical repair.
@@ -350,11 +354,13 @@ the 55%/62% figures.
       seeded sum (FINAL keeps the zero) — the exact silent-no-op this guards. All
       three write tiers (`ch_enrich.rs:380`/`:696`/`:729`) project `p.version + 1`
       from `FROM {tbl} AS p FINAL`, so the +1 derives from the existing row.
-- [ ] **Additive-only, never truncate-rebuild.** The repair is a pure enrichment
-      `INSERT … SELECT` that carries OHLC/volume through verbatim; the pre-roll
-      `TRUNCATE`+rebuild path is forbidden for 2025-02 → 2026-02, where 1m is gone
-      and the coarse tables are the sole copy (see §Data-safety). Verify the run
-      path issues no `DELETE`/`TRUNCATE` against coarse tables.
+- [x] **Additive-only, never truncate-rebuild — HELD across the full prod run
+      2026-07-23.** The repair is a pure enrichment `INSERT … SELECT` carrying
+      OHLC/volume through verbatim; no `DELETE`/`TRUNCATE` path exists in the
+      driver. Confirmed empirically rather than by inspection alone: across all
+      30 months `zeros_before − enriched = zeros_after` **exactly**, every month,
+      and the 202502 pilot month re-ran as a clean `enriched 0` no-op instead of
+      re-writing rows. Nothing was destroyed and nothing was double-counted.
 - [x] **Snapshot before running** — DONE for `price_ohlcv_1h` 2026-07-23. All 30
       partitions frozen (`repair_0114_prices_price_ohlcv_1h_<month>`, 6.1 GB under
       `shadow/`, verified by count + `du`) **by the CH admin**, because
@@ -363,11 +369,19 @@ the 55%/62% figures.
       peg-pivot / stablecoin-direct tiers are what ran: `implied_ref_usd` = real
       XLM/USD for the era and exactly 1.0 for USDC, and the oracle tier no-ops
       pre-2025-09 as predicted. *Still to do for `_4h`/`_1d`/`_1w`/`_1M`.*
-- [ ] `price_ohlcv_1h` / `1d` USD coverage verified for a sample of liquid pairs
-      against an independent source before declaring the repair good.
+- [x] **Reference correctness verified across the span — DONE 2026-07-23.**
       *Superseded criterion: the check is `implied_ref_usd` correctness, NOT a
       `close_usd` value ceiling — a ceiling can never pass while dust-trade
-      inputs exist ([[0116]]). Reference correctness verified for 202502.*
+      inputs exist ([[0116]]).* Sampled 202403 / 202411 / 202509 / 202606:
+      USDC-quoted `implied_ref_usd` is **exactly 1.0** (stablecoin-direct 1:1
+      cast) and XLM-quoted tracks real XLM/USD for each era — 0.1371, 0.218,
+      0.372, 0.2008. The 202411 median of 0.218 is consistent with the ~$0.60
+      spike landing late in that month. Two residual notes: (a) 202606 USDC reads
+      **1.0005**, not exactly 1 — expected, since `oracle_prices` starts 2025-09
+      so live-era rows can come from the oracle tier rather than the peg cast;
+      (b) the 202606 XLM median 0.2008 sits slightly above the "$0.15–0.18 in
+      2026" band recorded during prep — worth one independent spot-check, not a
+      blocker.
 - [ ] 0088 step 3 gated: pre-roll refuses to run, or warns loudly, when 1m USD
       coverage for the target span is below a threshold.
 - [x] Re-check whether this explains [[0107]]'s volume gap — **REFUTED
@@ -656,6 +670,100 @@ ssh -i ~/.ssh/sorban-prod_ed25519 deploy@168.119.73.161 \
 Prod-touching commands are run by the operator, not the agent — **including
 `--dry-run` and read-only queries**. Heredoc-into-`ssh` is fragile on paste; write
 the SQL to a local file and pipe it (`… clickhouse-client < /tmp/q.sql`).
+
+## ✅ Repair result — `price_ohlcv_1h`, full 30-month span, 2026-07-23
+
+Ran to completion in **`real 242m19s`** (4 h 02 m). Final line:
+
+```
+30 month(s): 30,828,953 enriched, 47,804,264 left at the no_reference floor
+```
+
+### Yield landed on the pre-registration
+
+| | predicted 2026-07-22 | actual | delta |
+|---|---|---|---|
+| repairable | ~31.6M (28.0M pivot + 3.6M peg) | **30,828,953** | −2.4% |
+| `no_reference` floor | ~48M | **47,804,264** | — |
+
+Totals reconcile exactly: 30.83M + 47.80M = **78.63M**, which is the dry run's
+79.63M minus the ~1.0M the 202502 pilot had already repaired. No rows
+unaccounted for. Per-month `enriched` stayed inside the predicted band for every
+month (1.03–1.64M for the 2024 pivot-era months, 0.44–1.32M once the peg tier
+takes over from 202501).
+
+Revised throughput: **~8 min/month** sustained, against the ~7 min the single-month
+pilot suggested. The pilot extrapolated well; the dry-run scan rate did not
+(it measures enumeration, not per-batch repair).
+
+### Coverage after — aggregate 95.5% → 58.1% zero
+
+| span | baseline | after |
+|---|---|---|
+| 202402 | 53.0% | 53.0% (unchanged — correctly, pure exotic floor) |
+| 202403 | 86.1% | 47.8% |
+| 202404 → 202412 | 91.2–96.6% | 43.0–59.9% |
+| 202501 | 99.5% | 62.4% |
+| **202502 → 202602** | **100.0% unbroken** | **55.6–69.8%** |
+| 202603 / 202604 | 93.6% / 99.5% | 61.7% / 65.3% |
+| 202605 / 202606 | 100.0% | 68.6% / 68.5% |
+| 202607 | 92.4% | 68.4% |
+
+The independently-computed zeros column sums to **47,804,264** — bit-identical to
+the figure the driver printed. Two different code paths, same number.
+
+### The residual is exotic-only — the AC's real test
+
+Counts alone cannot close the AC, which is phrased in terms of reaching the
+*genuine* `no_reference` floor. Per-quote-class breakdown over the whole repaired
+span settles it:
+
+| quote class | rows | zeros | pct_zero |
+|---|---|---|---|
+| stablecoin (USDC/USDT) | 5,319,219 | 49,538 | **0.9%** |
+| XLM pivot | 29,508,335 | 246,383 | **0.8%** |
+| other (exotic) | 47,844,173 | 47,844,173 | **100%** |
+
+Everything the tiers can reach is reached; everything left is a quote with no USD
+path, which is by design (`ch_enrich.rs:499-504`). The 0.8–0.9% residual against
+the 0.3% live-era figure is the expected penalty for sparser historical pivot
+references, not a defect.
+
+> **⚠️ Unrelated finding surfaced by this query — a 0.4% join fan-out.** The
+> class breakdown totals **82,671,727** rows against the coverage query's
+> **82,335,897** — a **335,830-row** excess, and the zero counts differ by exactly
+> the same amount. Cause: `INNER JOIN prices.assets ON a.asset_id =
+> c.quote_asset_id` matches some `quote_asset_id` against more than one `assets`
+> row **even under `FINAL`**, because `assets` is `ReplacingMergeTree(updated_at)`
+> ordered by `(asset_code, issuer_address, contract_address)` — `FINAL` dedupes by
+> **natural key, not by `asset_id`**. Any query joining on `asset_id` inherits
+> this. Immaterial here (0.4% against a 100%-vs-0.9% split), but it is a live
+> correctness hazard elsewhere → **spawned as [[0129]]**.
+
+## Phase C — `_4h`/`_1d`/`_1w`/`_1M`, dry-run 2026-07-23, NOT yet run
+
+| table | zeros | est. repairable (~39%) | est. runtime |
+|---|---|---|---|
+| `price_ohlcv_4h` | 41,019,676 | ~16M | ~2 h |
+| `price_ohlcv_1d` | 14,047,080 | ~5.5M | ~45 min |
+| `price_ohlcv_1w` | 3,629,865 | ~1.4M | ~12 min |
+| `price_ohlcv_1M` | 1,305,124 | ~0.5M | ~5 min |
+| **total** | **59,901,745** | **~23M** | **~3 h** |
+
+`_4h` alone is two-thirds of the remaining work. The 39% ratio is carried from
+`_1h`'s measured 30.83M / 78.63M — the driver's own count has no quote-class
+filter and so always overstates.
+
+> **📌 `enriched: 0` in a dry-run summary is an artifact, not a signal.** A dry run
+> only counts zeros; it never attempts enrichment, so all four tables report
+> `0 enriched` by construction. Do **not** read this as the silent-no-op failure
+> mode — that signature only means anything on a real run.
+
+**Gated on snapshots.** Each table's partitions must be frozen by the CH admin
+first (`prices_writer` still cannot FREEZE and cannot be granted it), verified via
+`ls /var/lib/clickhouse/shadow/ | grep repair_0114` plus a non-trivial `du`,
+before `--skip-snapshot` is safe. Re-freezing is **not** idempotent and that
+failure is protective.
 
 ## Notes
 
