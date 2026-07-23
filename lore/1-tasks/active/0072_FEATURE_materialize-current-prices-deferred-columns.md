@@ -2,7 +2,7 @@
 id: "0072"
 title: "Materialize current_prices v1-deferred columns (sources breakdown, price_xlm, change_24h_pct) in the MV"
 type: FEATURE
-status: backlog
+status: active
 related_adr: []
 related_tasks: ["0040", "0039", "0068", "0108", "0117", "0118", "0120", "0123"]
 tags: ["phase-future", "effort-medium", "priority-high", "milestone-M2", "vwap", "clickhouse", "materialized-view"]
@@ -46,6 +46,32 @@ history:
       delivered, since `sources` is the only place any source is named.
       Land 0072 before 0118 so `current.sql` is dropped and re-created once,
       not twice.
+  - date: 2026-07-23
+    status: active
+    who: okarcz
+    note: >
+      Promoted to active as the **first task of Milestone 2** — it is the M2
+      critical path per [[0117]]. Four `current_prices` columns
+      (`sources`, `price_xlm`, `change_24h_pct`, `change_7d_pct`) sit at their
+      table DEFAULTs, so §4.1/§4.2's documented response shape is unmet and no
+      price source is named anywhere; §9's "Aquarius appearing as a named
+      source in VWAP" is delivered here, not in an extractor. Gates [[0118]]
+      (threshold sits on top of the outlier filter), [[0120]] (AC 1
+      conformance) and [[0123]] (AC 4 reconciliation).
+
+      Two things to have in hand before touching `current.sql`:
+      (1) a refreshable MV's definition is fixed at create time, so this is a
+      `DROP VIEW` + re-`CREATE`, not an `ALTER` — `current_prices` keeps
+      serving its last-written rows in the gap, so the exposure is staleness,
+      not an outage; and (2) the `TO (...)` explicit column-list footgun from
+      the 0039 review — an MV inserts **positionally** without it.
+
+      ⚠️ **Sequencing note:** [[0114]]'s coarse repair is running against prod
+      CH at promotion time (month 202412 of 30). It writes ~1M RMT rows per
+      month into `price_ohlcv_1h` and leaves background merge pressure behind
+      it on the SHARED cluster. This MV reads `price_ohlcv_1m` (a different
+      table), so there is no correctness interaction — but do not benchmark
+      refresh cost, and do not judge merge load, until that run is done.
 ---
 
 # Materialize current_prices v1-deferred columns in the MV
