@@ -200,10 +200,48 @@ mod tests {
     }
 
     #[test]
-    fn current_sql_is_one_materialized_view() {
+    fn current_sql_is_a_drop_then_create_of_one_materialized_view() {
+        // Was `stmts.len() == 1` (CREATE only) until task 0072. A refreshable
+        // MV's definition is FIXED AT CREATE TIME, so changing the SELECT needs
+        // DROP + re-CREATE — an ALTER does not take. The DROP is therefore part
+        // of the deploy contract, not a stray statement, and the ORDER is
+        // load-bearing: a CREATE-then-DROP file would leave no view at all.
         let stmts = split_statements(CURRENT_SQL);
-        assert_eq!(stmts.len(), 1, "got {}", stmts.len());
-        assert!(stmts[0].contains("prices.mv_current_prices"));
+        assert_eq!(stmts.len(), 2, "got {}", stmts.len());
+        assert!(
+            stmts[0].contains("DROP VIEW") && stmts[0].contains("prices.mv_current_prices"),
+            "first statement must drop the MV, got: {}",
+            stmts[0]
+        );
+        assert!(
+            stmts[1].contains("CREATE MATERIALIZED VIEW")
+                && stmts[1].contains("prices.mv_current_prices"),
+            "second statement must re-create the MV"
+        );
+    }
+
+    /// The `TO prices.current_prices (...)` column list must name every column
+    /// the SELECT projects: a materialised view inserts POSITIONALLY, so an
+    /// omitted column silently shifts every value one slot left (0039 review).
+    #[test]
+    fn current_sql_to_clause_names_all_ten_written_columns() {
+        for col in [
+            "asset_id",
+            "price_usd",
+            "price_xlm",
+            "change_24h_pct",
+            "change_7d_pct",
+            "volume_24h_usd",
+            "market_cap_usd",
+            "vwap_24h",
+            "sources",
+            "updated_at",
+        ] {
+            assert!(
+                CURRENT_SQL.contains(col),
+                "current.sql must write column `{col}`"
+            );
+        }
     }
 
     #[test]

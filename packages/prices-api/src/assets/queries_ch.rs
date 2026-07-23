@@ -15,8 +15,13 @@ use crate::identity::AssetIdentifier;
 #[derive(Debug, clickhouse::Row, serde::Deserialize)]
 pub struct CurrentPriceRow {
     pub price_usd: String,
+    pub price_xlm: String,
     pub vwap_24h: String,
     pub volume_24h_usd: String,
+    pub change_24h_pct: String,
+    /// Per-source breakdown, carried as the raw JSON **string** the MV wrote.
+    /// Parsed into a `serde_json::Value` at the DTO boundary, not here.
+    pub sources: String,
     pub updated_at: String,
 }
 
@@ -48,6 +53,8 @@ pub struct AssetListRow {
     pub change_7d_pct: String,
     pub volume_24h_usd: String,
     pub vwap_24h: String,
+    /// Raw JSON string from the MV; parsed at the DTO boundary.
+    pub sources: String,
     pub updated_at: String,
     /// String form of the sort-column value for this row (cursor payload).
     pub sort_key: String,
@@ -194,6 +201,7 @@ pub async fn list_assets(
            toString(c.change_7d_pct) AS change_7d_pct, \
            toString(c.volume_24h_usd) AS volume_24h_usd, \
            toString(c.vwap_24h) AS vwap_24h, \
+           c.sources AS sources, \
            formatDateTime(c.updated_at, '%Y-%m-%dT%H:%i:%SZ') AS updated_at, \
            {sort_key_expr} AS sort_key \
          FROM current_prices AS c FINAL \
@@ -247,8 +255,11 @@ pub async fn current_price(
     let sql = format!(
         "SELECT \
            toString(c.price_usd) AS price_usd, \
+           toString(c.price_xlm) AS price_xlm, \
            toString(c.vwap_24h) AS vwap_24h, \
            toString(c.volume_24h_usd) AS volume_24h_usd, \
+           toString(c.change_24h_pct) AS change_24h_pct, \
+           c.sources AS sources, \
            formatDateTime(c.updated_at, '%Y-%m-%dT%H:%i:%SZ') AS updated_at \
          FROM current_prices AS c FINAL \
          INNER JOIN assets AS a FINAL ON a.asset_id = c.asset_id \
@@ -270,8 +281,13 @@ pub struct BatchPriceRow {
     pub issuer_address: String,
     pub contract_address: String,
     pub price_usd: String,
+    pub price_xlm: String,
     pub vwap_24h: String,
     pub volume_24h_usd: String,
+    pub change_24h_pct: String,
+    /// Raw JSON string from the MV; parsed at the DTO boundary. Kept in lockstep
+    /// with [`CurrentPriceRow`] so `/price` and `/prices/batch` cannot drift.
+    pub sources: String,
     pub updated_at: String,
 }
 
@@ -327,8 +343,11 @@ pub async fn current_prices_batch(
     let sql = format!(
         "SELECT a.asset_code, a.issuer_address, a.contract_address, \
            toString(c.price_usd) AS price_usd, \
+           toString(c.price_xlm) AS price_xlm, \
            toString(c.vwap_24h) AS vwap_24h, \
            toString(c.volume_24h_usd) AS volume_24h_usd, \
+           toString(c.change_24h_pct) AS change_24h_pct, \
+           c.sources AS sources, \
            formatDateTime(c.updated_at, '%Y-%m-%dT%H:%i:%SZ') AS updated_at \
          FROM current_prices AS c FINAL \
          INNER JOIN assets AS a FINAL ON a.asset_id = c.asset_id \

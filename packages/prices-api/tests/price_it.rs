@@ -52,12 +52,18 @@ async fn setup(db: &str) -> Client {
         .execute()
         .await
         .unwrap();
+    // asset 1 carries the task-0072 columns populated (the mv_current_prices
+    // shape); asset 2 deliberately leaves them at their table DEFAULTs, so both
+    // the pass-through path and the empty-producer path are covered.
     admin
         .query(&format!(
             "INSERT INTO {db}.current_prices \
-             (asset_id, price_usd, vwap_24h, volume_24h_usd, updated_at) VALUES \
-             (1, 0.5, 0.51, 1234.5, '2026-02-10 12:00:30'), \
-             (2, 1.0001, 1.0002, 999999.25, '2026-02-10 12:00:30')"
+             (asset_id, price_usd, price_xlm, change_24h_pct, change_7d_pct, \
+              vwap_24h, volume_24h_usd, sources, updated_at) VALUES \
+             (1, 0.5, 1.25, -2.5, 7.25, 0.51, 1234.5, \
+              '{{\"sdex\":{{\"price\":\"0.5\",\"volume_24h\":\"1000\"}}}}', \
+              '2026-02-10 12:00:30'), \
+             (2, 1.0001, 0, 0, 0, 1.0002, 999999.25, '', '2026-02-10 12:00:30')"
         ))
         .execute()
         .await
@@ -117,10 +123,37 @@ async fn price_native_returns_seeded_row() {
     approx(&json["vwap_24h"], 0.51);
     approx(&json["volume_24h_usd"], 1234.5);
     assert_eq!(json["updated_at"], "2026-02-10T12:00:30Z");
-    // v1 stubs (task 0072):
-    assert_eq!(json["price_xlm"], "0");
-    assert_eq!(json["change_24h_pct"], "0");
+
+    // Task 0072 — these three were hardcoded stubs ("0"/"0"/{}) until the MV
+    // materialized them. They now PASS THROUGH from current_prices, so the
+    // assertions must be seeded values, not constants: a test asserting "0"
+    // would pass just as happily against a handler that still hardcodes it.
+    approx(&json["price_xlm"], 1.25);
+    approx(&json["change_24h_pct"], -2.5);
+    assert_eq!(
+        json["sources"],
+        serde_json::json!({"sdex": {"price": "0.5", "volume_24h": "1000"}}),
+        "sources must be parsed from the MV's JSON string into an object"
+    );
+
+    teardown(db).await;
+}
+
+/// The producer has not written `sources` yet (table DEFAULT `''`). The response
+/// must still be a well-formed empty object — never `null`, never a 500. This is
+/// also the live shape for an exotic-quote asset, where no source has a
+/// USD-priceable close (~62% of candles per task 0114).
+#[tokio::test]
+#[ignore = "requires a local ClickHouse"]
+async fn price_empty_sources_degrades_to_empty_object() {
+    let db = "it_price_empty_sources_0072";
+    let client = setup(db).await;
+
+    let uri = format!("/v1/assets/USDC:{}/price", prices_clickhouse::USDC_ISSUER);
+    let (status, json) = get(client, &uri).await;
+    assert_eq!(status, StatusCode::OK, "body={json}");
     assert_eq!(json["sources"], serde_json::json!({}));
+    assert!(json["sources"].is_object(), "must be {{}}, not null");
 
     teardown(db).await;
 }
