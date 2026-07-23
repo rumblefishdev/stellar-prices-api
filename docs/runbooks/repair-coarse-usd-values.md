@@ -35,6 +35,21 @@ per forever-table.
 | 4   | **Disk headroom on the CH host** for `FREEZE` snapshots (hardlinks under `shadow/`, cheap, but non-zero). Pure SQL — **no container restart**.                                                                                  | `ssh … 'df -h /var/lib/docker'`                       |
 | 5   | **mTLS writer certs present** on the operator box.                                                                                                                                                                              | `$HOME/prices-mtls/prices_writer.{crt,key}`, `ca.crt` |
 | 6   | Version-arithmetic + additive-only already proven by test (`ch_enrich_it.rs`).                                                                                                                                                  | no action                                             |
+| 7   | **`ALTER FREEZE PARTITION` — decide the snapshot path.** `prices_writer` does **not** hold it, and cannot be granted it (see below), so the tool's built-in `FREEZE` fails. Use the operator pre-freeze path in Step 3b.        | `SHOW GRANTS FOR CURRENT_USER`                        |
+
+> **Snapshots must be taken by the CH admin, not by the tool** (learned the hard
+> way on the 2026-07-23 prod run). `coarse-repair` connects as `prices_writer`,
+> which holds only `SELECT, INSERT, ALTER DELETE, OPTIMIZE`. Its `FREEZE` is
+> refused with `ACCESS_DENIED` — and the clickhouse driver surfaces that as a
+> bare `Clickhouse(BadResponse(""))` with no message, so replay the statement
+> over `curl` to see the real error.
+>
+> `GRANT ALTER FREEZE PARTITION ON prices.* TO prices_writer` does **not** fix
+> it: `prices_writer` is defined in `users.xml`, which is read-only storage, so
+> the grant fails with `ACCESS_STORAGE_READONLY` **even as the container's
+> superuser**. Nobody can grant it at runtime. Editing the XML on a shared prod
+> cluster is not worth it for a one-off repair — take the snapshots as admin
+> instead (Step 3b) and run with `--skip-snapshot`.
 
 ---
 
@@ -91,29 +106,96 @@ Expect a per-month table showing `zeros_before` counts, heaviest across
 Hand this to the prod CH shell and **keep the output** — it is the before/after
 evidence the ACs require. Repeat per table (`1h` shown).
 
+`FINAL` is mandatory — these are `ReplacingMergeTree` tables and an
+un-collapsed read counts superseded rows, inflating `pct_zero`.
+
+```bash
+cat > /tmp/0114_cov.sql <<'SQL'
+SELECT toYYYYMM(timestamp) AS month,
+       count() AS rows,
+       countIf(close_usd = 0) AS zero_usd,
+       round(100 * zero_usd / rows, 1) AS pct_zero
+FROM prices.price_ohlcv_1h FINAL
+WHERE volume_quote > 0 AND toYYYYMM(timestamp) BETWEEN 202402 AND 202607
+GROUP BY month ORDER BY month FORMAT PrettyCompact;
+SQL
+
+ssh -i ~/.ssh/sorban-prod_ed25519 deploy@168.119.73.161 \
+  'docker exec -i app-clickhouse-1 clickhouse-client' < /tmp/0114_cov.sql
+```
+
+## Step 3b — snapshot every affected partition (as CH admin)
+
+Because of precondition 7 the operator takes the snapshots, not the tool. Freeze
+**before** repairing, and use the tool's own naming so the rollback and cleanup
+steps below apply unchanged.
+
+```bash
+cat > /tmp/0114_freeze.sh <<'EOF'
+#!/bin/sh
+# Freeze every active partition of $1 in the repair span. Idempotent-ish: an
+# already-frozen partition errors with DIRECTORY_ALREADY_EXISTS, which is
+# reported as `already-frozen` rather than silently counted as success — a
+# re-freeze would otherwise overwrite a pre-repair snapshot with a post-repair
+# one, destroying the rollback point.
+TBL="$1"
+clickhouse-client -q "SELECT DISTINCT partition FROM system.parts
+  WHERE database='prices' AND table='$TBL' AND active
+    AND toUInt32(partition) BETWEEN 202402 AND 202607
+  ORDER BY partition FORMAT TabSeparated" |
+while read p; do
+  NAME="repair_0114_prices_${TBL}_${p}"
+  if clickhouse-client -q "ALTER TABLE prices.$TBL FREEZE PARTITION $p WITH NAME '$NAME'" 2>/tmp/freeze_err; then
+    echo "frozen $TBL $p"
+  elif grep -q DIRECTORY_ALREADY_EXISTS /tmp/freeze_err; then
+    echo "already-frozen $TBL $p (pre-existing snapshot KEPT)"
+  else
+    echo "FAILED $TBL $p: $(cat /tmp/freeze_err)" >&2
+  fi
+done
+EOF
+
+scp -i ~/.ssh/sorban-prod_ed25519 /tmp/0114_freeze.sh deploy@168.119.73.161:/tmp/
+ssh -i ~/.ssh/sorban-prod_ed25519 deploy@168.119.73.161 \
+  'docker cp /tmp/0114_freeze.sh app-clickhouse-1:/tmp/ && docker exec app-clickhouse-1 sh /tmp/0114_freeze.sh price_ohlcv_1h' \
+  | tee /tmp/0114_freeze_1h.log
+```
+
+Verify the count matches the months the dry run reported, and that the snapshots
+hold real data, **before** any write:
+
 ```bash
 ssh -i ~/.ssh/sorban-prod_ed25519 deploy@168.119.73.161 \
-  "docker exec -i app-clickhouse-1 clickhouse-client --query=\"
-     SELECT toYYYYMM(timestamp) AS month,
-            count() AS rows,
-            countIf(close_usd = 0) AS zero_usd,
-            round(100 * zero_usd / rows, 1) AS pct_zero
-     FROM prices.price_ohlcv_1h
-     WHERE volume_quote > 0 AND toYYYYMM(timestamp) BETWEEN 202402 AND 202607
-     GROUP BY month ORDER BY month FORMAT PrettyCompact\""
+  'docker exec app-clickhouse-1 ls /var/lib/clickhouse/shadow/ | grep -c repair_0114_prices_price_ohlcv_1h_'
+ssh -i ~/.ssh/sorban-prod_ed25519 deploy@168.119.73.161 \
+  'docker exec app-clickhouse-1 du -sh /var/lib/clickhouse/shadow/'
 ```
+
+A near-zero `du` means the partitions were not captured — stop.
 
 ## Step 4 — the real run (snapshot ON), one table at a time
 
 Start with `price_ohlcv_1h` (the table BE consumes). Review its result before
 moving to the next table.
 
+Run under `tmux` — the full `1h` span measured **~7 min/month**, so budget 3–4 h.
+
 ```bash
+tmux new -s repair0114
 ./target/release/coarse-repair \
   --transport hetzner --table price_ohlcv_1h \
-  --start-month 202402 --end-month 202607
-# snapshot is ON by default; do NOT pass --skip-snapshot for this span.
+  --start-month 202402 --end-month 202607 \
+  --skip-snapshot 2>&1 | tee /tmp/0114_run_1h.log
 ```
+
+> `--skip-snapshot` is correct **only because Step 3b already took the
+> snapshots**. The tool prints a loud warning saying partitions have no backup;
+> that warning is false here and the `ls`/`du` output from Step 3b is the
+> evidence. Without Step 3b the warning is exactly as serious as it sounds — this
+> span is the sole surviving copy.
+
+Keep the default batch size. `--batch-size 100000` cuts per-batch re-scans but
+raises per-query memory on a shared cluster (the concern tracked by task 0113).
 
 The summary prints per month: `zeros_before | enriched | zeros_after |
 snapshot`. `zeros_after` settling to a small residual is expected — those are
@@ -126,7 +208,39 @@ Then repeat for `_4h`, `_1d`, `_1w`, `_1M`, one at a time.
 **a) Coverage dropped.** Re-run the Step-3 query. `pct_zero` for 2024-02 → 2026-02
 should fall from 86–100% to the exotic-only floor.
 
-**b) Spot-check liquid pairs against an independent source.** Pick a couple of
+**b) Check the reference, not the value ceiling.** The correct test is whether
+the implied USD reference is right for the era — **not** whether every
+`close_usd` looks sane. Some inputs are junk and the repair faithfully
+multiplies them (see the dust-trade note below), so a value ceiling will always
+"fail" on data the repair cannot fix.
+
+```sql
+SELECT b.asset_code AS base, q.asset_code AS quote,
+       round(toFloat64(p.close_usd) / nullIf(toFloat64(p.close), 0), 8) AS implied_ref_usd,
+       count() AS rows
+FROM prices.price_ohlcv_1h p FINAL
+JOIN prices.assets b FINAL ON b.asset_id = p.asset_id
+JOIN prices.assets q FINAL ON q.asset_id = p.quote_asset_id
+WHERE toYYYYMM(p.timestamp) = <month> AND p.close_usd > 0
+GROUP BY base, quote, implied_ref_usd ORDER BY rows DESC LIMIT 20
+```
+
+`implied_ref_usd` must be **1.0 exactly** for USDC/USDT-quoted rows (the
+stablecoin-direct 1:1 cast) and the **real XLM/USD price for that month** for
+XLM-quoted rows. On the 2026-07-23 pilot over 202502 it was 0.312–0.408, which
+is correct for February 2025 — the strongest evidence the pivot tier works.
+
+> **Dust-trade candles — expected, not a repair defect.** A tail of absurd
+> `close_usd` values survives the repair (202502: 40 rows > $1M, max $29.6M,
+> 0.004%). Every one is a single dust trade — `trade_count = 1`, a few XLM of
+> volume, a nonsense unit price like 94,810,046 XLM/token — multiplied by a
+> _correct_ reference. Live-enriched data has the same tail (`price_ohlcv_1h`
+> 202607, written by the live path: max $24.0M, 0.0015%), so this predates the
+> repair and is inherited from source candles. `volume_quote_usd` is unaffected
+> (those rows carry ~$3 of volume), so BE's volume analytics do not see it.
+> Tracked separately as a data-quality task.
+
+**c) Spot-check liquid pairs against an independent source.** Pick a couple of
 well-known pairs and eyeball `close_usd` against a known market price for that
 month (e.g. CoinGecko historical). It should be in the right ballpark.
 

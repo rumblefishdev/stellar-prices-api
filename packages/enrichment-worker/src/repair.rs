@@ -110,10 +110,47 @@ impl CoarseRepairDriver {
         Self { client, cfg }
     }
 
-    /// Cold-start health check.
+    /// Cold-start health check. When snapshots are enabled this also probes the
+    /// `FREEZE` grant, because the alternative is discovering it at the first
+    /// write — after the operator has already committed to a long run.
     pub async fn preflight(&self) -> Result<(), ChEnrichError> {
         self.client.query("SELECT 1").execute().await?;
+        if self.cfg.snapshot && !self.cfg.dry_run {
+            self.warn_if_no_freeze_grant().await;
+        }
         Ok(())
+    }
+
+    /// Warn — never fail — when the connected user shows no grant that could
+    /// cover `ALTER FREEZE PARTITION`. Deliberately advisory: grant text has
+    /// several shapes (`ALL`, a bare `ALTER`, the explicit privilege), so a
+    /// hard gate here risks refusing a legitimate run over a parsing miss. The
+    /// authoritative check remains the statement itself, which now fails with
+    /// [`ChEnrichError::FreezeDenied`] and its remedy.
+    async fn warn_if_no_freeze_grant(&self) {
+        let grants = match self
+            .client
+            .query("SHOW GRANTS FOR CURRENT_USER")
+            .fetch_all::<String>()
+            .await
+        {
+            Ok(rows) => rows.join("; "),
+            // Probe failure is not itself a problem — proceed and let the real
+            // FREEZE report the truth.
+            Err(e) => {
+                warn!(error = %e, "coarse repair: could not read grants; skipping FREEZE pre-check");
+                return;
+            }
+        };
+        let upper = grants.to_uppercase();
+        if !(upper.contains("FREEZE") || upper.contains("GRANT ALL")) {
+            warn!(
+                grants = %grants,
+                "coarse repair: connected user shows no ALTER FREEZE PARTITION grant — \
+                 per-partition snapshots will likely fail. Either grant it, or pre-FREEZE \
+                 as CH admin and re-run with --skip-snapshot (see the 0114 runbook)."
+            );
+        }
     }
 
     /// The months in the span that still hold enrichable zeros, each with its
@@ -157,7 +194,15 @@ impl CoarseRepairDriver {
             db = self.cfg.enrich.database,
             tbl = self.cfg.enrich.table,
         );
-        self.client.query(&sql).execute().await?;
+        self.client
+            .query(&sql)
+            .execute()
+            .await
+            .map_err(|source| ChEnrichError::FreezeDenied {
+                table: self.cfg.enrich.table.clone(),
+                month,
+                source,
+            })?;
         info!(month, backup = %name, table = %self.cfg.enrich.table,
               "coarse repair: partition frozen (server-side snapshot)");
         Ok(name)

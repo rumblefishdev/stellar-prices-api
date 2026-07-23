@@ -70,6 +70,27 @@ use prices_clickhouse::{USDC_ISSUER, USDT_ISSUER};
 pub enum ChEnrichError {
     #[error("clickhouse: {0}")]
     Clickhouse(#[from] clickhouse::error::Error),
+
+    /// A per-partition `FREEZE` snapshot was refused. Carries its own remedy
+    /// because the underlying driver error is frequently opaque: the prod run on
+    /// 2026-07-23 surfaced this as `Clickhouse(BadResponse(""))` — an empty body
+    /// — when the real cause was a missing `ALTER FREEZE PARTITION` grant, only
+    /// visible by replaying the statement over curl.
+    #[error(
+        "FREEZE snapshot failed on {table} partition {month}: {source}\n\
+         The repair user most likely lacks `ALTER FREEZE PARTITION ON <db>.*`. Either:\n\
+         (a) grant it — note this is impossible for users defined in users.xml, \
+         which is read-only storage (ACCESS_STORAGE_READONLY); or\n\
+         (b) have an operator FREEZE the partitions as CH admin, verify them under \
+         shadow/, then re-run with --skip-snapshot.\n\
+         See docs/runbooks/repair-coarse-usd-values.md."
+    )]
+    FreezeDenied {
+        table: String,
+        month: u32,
+        #[source]
+        source: clickhouse::error::Error,
+    },
 }
 
 /// Config for one production enrichment run. Mirrors the prototype's
