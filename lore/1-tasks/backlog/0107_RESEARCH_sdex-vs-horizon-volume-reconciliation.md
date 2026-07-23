@@ -7,7 +7,7 @@ related_adr: []
 related_tasks: ["0026", "0096", "0099"]
 tags: [layer-indexing, priority-medium, effort-medium, sdex, horizon, volume, investigation, amm, liquidity-pool]
 links:
-  - "../active/0026_FEATURE_volume-quote-usd-enrichment-impl/README.md"
+  - "../archive/0026_FEATURE_volume-quote-usd-enrichment-impl/README.md"
 history:
   - date: 2026-07-20
     status: backlog
@@ -17,6 +17,27 @@ history:
       SDEX **prices** match Horizon to <0.2%, but our **volume** is ~1/6 of
       Horizon's all-trade-types aggregate for the same XLM-quoted pairs — a real
       gap to explain, not a query artifact (both-direction summing was ruled out).
+  - date: 2026-07-23
+    status: backlog
+    who: okarcz
+    note: >
+      **Now carries a full acceptance criterion, not just a follow-up
+      question.** [[0026]] was archived today and its last open AC —
+      "`current_prices.volume_24h_usd` for ≥3 XLM-quoted assets is credible
+      against Horizon's historical aggregates" — closed as a **deferral to
+      this task**, explicitly NOT as a pass. Nothing about that AC can be
+      satisfied by more enrichment work: the decoder is correct (prices match
+      to <0.2%), and the gap is a **population** difference — Horizon
+      aggregates order-book + classic protocol-18 LP + path-payment trades,
+      our `sdex` decodes order-book offers only. So this task's real output is
+      a DECISION on whether to ingest the other trade types, plus a
+      like-for-like order-book-only reconciliation that would let the AC be
+      judged fairly. Also updated the frontmatter link, which pointed into
+      `active/` and broke when 0026 moved to `archive/`.
+      ⚠️ Do NOT re-propose the USD-pricing-gap explanation: [[0114]]
+      pre-registered a threshold, measured it at ~2.2× against this 6× gap,
+      and REFUTED it. The two are orthogonal — 0107 is about trades absent
+      from the database, 0114 about trades held but unpriceable.
 ---
 
 # Reconcile SDEX order-book volume vs Horizon + classic-LP coverage decision

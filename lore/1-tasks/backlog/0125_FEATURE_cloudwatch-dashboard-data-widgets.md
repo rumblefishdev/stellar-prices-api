@@ -4,7 +4,7 @@ title: "CloudWatch dashboard — replace the empty prices-production-overview sc
 type: FEATURE
 status: backlog
 related_adr: ["0007"]
-related_tasks: ["0056", "0093", "0121", "0128"]
+related_tasks: ["0056", "0093", "0121", "0128", "0026"]
 tags: [layer-infra, priority-medium, effort-medium, milestone-M2, observability, cloudwatch, dashboard]
 milestone: 2
 links:
@@ -19,6 +19,23 @@ history:
       dashboard" row of `milestone-1-evidence.md` Table 4 — the M1 submission
       states `prices-production-overview` exists as "a scaffold with no data
       widgets" and explicitly does not offer it as evidence.
+  - date: 2026-07-23
+    status: backlog
+    who: okarcz
+    note: >
+      **Inherited an acceptance criterion from [[0026]] on its archival.**
+      0026's "CloudWatch metrics emitted AND visible in the dashboard" AC
+      closed as emit-done / display-deferred; the widget half is now owned
+      here. That AC previously pointed at task 0056, which is itself
+      archived — a dangling reference corrected during the 0026 close-out.
+      Concretely: the six `Prices/Enrichment` metrics
+      (`EnrichmentRowsEnriched`, `EnrichmentOracleMiss`,
+      `EnrichmentRowsRemainingAtVolumeZero`, `EnrichmentRowsRemainingRecent`,
+      `EnrichmentPassDurationMs`, `EnrichmentAvgBatchDurationMs`) already
+      publish live and must appear as widgets. ⚠️ Note
+      `EnrichmentRowsRemainingAtVolumeZero` climbs permanently by design — it
+      tracks the exotic-quote no-reference floor, not a backlog — so do not
+      render it as a queue depth or alarm on its growth.
 ---
 
 # CloudWatch dashboard with real data widgets
