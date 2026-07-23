@@ -8,13 +8,18 @@ present**.
 
 The tool is `enrichment-worker`'s `coarse-repair` binary. It is **additive-only**
 (re-inserts corrected rows the `ReplacingMergeTree` collapses by higher
-`version`), **partition-bounded** (one month at a time, so cost is independent of
-table size), and **snapshots each partition** before touching it.
+`version`) and **partition-bounded** (one month at a time, so cost is independent
+of table size).
+
+It can also `FREEZE` each partition before touching it, but **in practice the
+operator takes the snapshots** — `prices_writer` cannot hold the required
+privilege (precondition 7 / Step 3b). Either way, every partition is snapshotted
+before it is written.
 
 > ⚠️ For 2025-02 → 2026-02 the `price_ohlcv_1m` source was dropped by cleanup on
 > 2026-07-18. The coarse tables are the **sole surviving copy**. NEVER truncate or
 > rebuild them — this tool never does; do not substitute the pre-roll's
-> clean-slate path. Keep snapshots ON.
+> clean-slate path. **Never run without a verified snapshot**, whoever took it.
 
 ---
 
