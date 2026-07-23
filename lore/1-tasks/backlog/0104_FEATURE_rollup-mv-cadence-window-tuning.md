@@ -4,8 +4,9 @@ title: "Tune rollup MV cadence vs window against prod merge load"
 type: FEATURE
 status: backlog
 related_adr: ["0007"]
-related_tasks: ["0095", "0059"]
-tags: [layer-infra, priority-low, effort-small, clickhouse, rollup, materialized-view, performance]
+related_tasks: ["0095", "0059", "0117", "0121", "0127"]
+tags: [layer-infra, priority-low, effort-small, milestone-M2, clickhouse, rollup, materialized-view, performance]
+milestone: 2
 links:
   - "../../../packages/prices-clickhouse/schema/rollups.sql"
 history:
@@ -13,6 +14,18 @@ history:
     status: backlog
     who: okarcz
     note: "Spawned from 0095 future work — cadence/window re-eval deferred to real prod merge metrics."
+  - date: 2026-07-23
+    status: backlog
+    who: okarcz
+    note: >
+      Tagged `milestone-M2` during the [[0117]] Tranche 2 task-set definition.
+      Listed in `milestone-1-evidence.md` Table 4 as the one open rollup item
+      ("behaviour, not correctness"). It becomes M2-relevant because the coarse
+      tables the re-append load falls on are exactly the ones serving Tranche 2
+      reads: the 1d candles [[0127]] spot-checks and the OHLCV path [[0121]]
+      load-tests both come out of that chain. Stays priority-low — it is a
+      tuning job, not a blocker, and the numbers to tune against are easier to
+      read once [[0125]]'s dashboard surfaces merge load.
 ---
 
 # Tune rollup MV cadence vs window against prod merge load

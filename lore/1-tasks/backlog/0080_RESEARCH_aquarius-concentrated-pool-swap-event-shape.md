@@ -4,8 +4,9 @@ title: "Verify Aquarius concentrated-liquidity pool swap-event shape against Aqu
 type: RESEARCH
 status: backlog
 related_adr: []
-related_tasks: ["0079", "0018", "0087", "0053"]
-tags: [layer-research, priority-medium, effort-small, amm, aquarius, pool-registry, extractor, decode, router]
+related_tasks: ["0079", "0018", "0087", "0053", "0117", "0072", "0120"]
+tags: [layer-research, priority-medium, effort-small, milestone-M2, amm, aquarius, pool-registry, extractor, decode, router]
+milestone: 2
 links:
   - "../active/0079_FEATURE_pool-registry-seed-from-soroswap-api.md"
   - "../active/0087_BUG_unresolved-guard-fatal-on-aquarius-router-swap.md"
@@ -30,6 +31,20 @@ history:
       idempotently re-fillable). Full design + quantification + open decisions in
       the new "Related gap" section below. May warrant splitting into its own
       FEATURE task when picked up.
+  - date: 2026-07-23
+    status: backlog
+    who: okarcz
+    note: >
+      Tagged `milestone-M2` during the [[0117]] Tranche 2 task-set definition.
+      Overview §9 lists "Aquarius pool metadata integration: Aquarius appearing
+      as a named source in VWAP" as Tranche 2 work. The naming itself is
+      [[0072]]'s `sources` column, but Aquarius's *coverage* is only as complete
+      as its extraction — 20 concentrated pools are still held back from the
+      seed, so any volume they carry is absent from the source's 24h figure and
+      may push it under [[0118]]'s `min_volume_usd` threshold. Scope stays
+      RESEARCH: the M2 bar is a decided, documented answer (seed them, or
+      record the divergence and scope a variant), not necessarily a shipped
+      extractor.
 ---
 
 # Verify Aquarius concentrated-pool swap-event shape
