@@ -206,6 +206,38 @@ The summary prints per month: `zeros_before | enriched | zeros_after |
 snapshot`. `zeros_after` settling to a small residual is expected — those are
 exotic quotes with no USD path (the genuine `no_reference` floor), not a failure.
 
+### Log lines that look like failures but are not
+
+Do **not** abort the run on these. They are written for the live 1m pass, where
+they do signal a real fault; on the historical coarse repair they are normal.
+
+| Log line                                                                                               | Why it is expected here                                                                                                                                                                                                                                  |
+| ------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `enrichment pass enriched 0 rows despite a non-empty backlog — check oracle↔asset-id reconciliation …` | Emitted for any month that is **entirely exotic quotes**. The preceding `peg-pivot tier made no progress — remaining candles have no USD reference (exotic quotes)` is the accurate description. 202402 is wholly like this (~620 k rows, `enriched 0`). |
+| `oracle tier drained — handing remaining candles to peg-pivot tier`, `remaining` unchanged             | `prices.oracle_prices` starts **2025-09**, so the oracle tier no-ops across most of the span **by design**. The peg-pivot / stablecoin-direct tiers do the work.                                                                                         |
+| `snapshot DISABLED for this partition` (per month)                                                     | Correct under the Step 3b path — the operator already froze it. Verify once via `ls`/`du`, then ignore the repetition.                                                                                                                                   |
+
+**These are the signals that DO mean stop:**
+
+- A month reporting **exactly 200,000** enriched — `one_shot` did not take
+  effect; `coarse-repair.rs` hard-codes `max_batches: 20`, which at the default
+  10 k batch caps a run at 200 k rows. Not a data limit.
+- `enriched 0` on a month known to hold **peg- or pivot-reachable** rows (any
+  month 2025-01 onward holds 150 k–340 k USDC-quoted rows) — that is the silent
+  no-op this repair exists to avoid.
+- A `FreezeDenied` error — snapshots are missing; see precondition 7.
+
+### Timing
+
+Measured 2026-07-23 on `price_ohlcv_1h`: **~7 min per month** at ~2.8 M
+candidates, so the 30-month span runs **4–5 h**. Cost scales with candidate
+count, not partition size. The dry run's scan rate (~12 M rows/s) does **not**
+predict this — it measures enumeration only, and underestimated the run by ~2×.
+
+**Merge pressure outlives the process.** Re-inserted RMT rows keep collapsing in
+background merges after the tool exits. `zeros_after` reads `FINAL` so it is
+correct immediately, but the shared host keeps working for a while.
+
 Then repeat for `_4h`, `_1d`, `_1w`, `_1M`, one at a time.
 
 ## Step 5 — verify (after)
