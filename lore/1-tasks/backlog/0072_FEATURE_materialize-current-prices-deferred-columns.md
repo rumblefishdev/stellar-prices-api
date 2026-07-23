@@ -4,8 +4,9 @@ title: "Materialize current_prices v1-deferred columns (sources breakdown, price
 type: FEATURE
 status: backlog
 related_adr: []
-related_tasks: ["0040", "0039", "0068", "0108"]
-tags: ["phase-future", "effort-medium", "priority-medium"]
+related_tasks: ["0040", "0039", "0068", "0108", "0117", "0118", "0120", "0123"]
+tags: ["phase-future", "effort-medium", "priority-high", "milestone-M2", "vwap", "clickhouse", "materialized-view"]
+milestone: 2
 links: []
 history:
   - date: 2026-06-30
@@ -29,6 +30,22 @@ history:
       0068 archived. Verified still open: current.sql:52 lists only the six v1
       columns, and price_xlm / change_24h_pct / change_7d_pct / sources remain
       at their table DEFAULTs (current.sql:25-27).
+  - date: 2026-07-23
+    status: backlog
+    who: okarcz
+    note: >
+      Tagged `milestone-M2` during the [[0117]] Tranche 2 task-set definition
+      and raised to priority-high. This task is the **critical path** of M2:
+      overview §9's "Full VWAP formula wired into the Current Price Updater"
+      and "Outlier detection" both land here, and §4.1/§4.2's documented
+      response shape cannot be honoured while `sources` / `price_xlm` /
+      `change_24h_pct` / `change_7d_pct` are DEFAULT stubs. It also gates
+      [[0118]] (threshold sits on top of the outlier filter), [[0120]]
+      (AC 1 conformance) and [[0123]] (AC 4 reconciliation) — and it is where
+      §9's "Aquarius appearing as a named source in VWAP" is actually
+      delivered, since `sources` is the only place any source is named.
+      Land 0072 before 0118 so `current.sql` is dropped and re-created once,
+      not twice.
 ---
 
 # Materialize current_prices v1-deferred columns in the MV

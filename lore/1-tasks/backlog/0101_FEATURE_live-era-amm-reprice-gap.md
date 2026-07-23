@@ -4,7 +4,7 @@ title: "Reprice the live-era AMM gap (Phoenix ~2% short + Soroswap 2026-07-06→
 type: FEATURE
 status: backlog
 related_adr: []
-related_tasks: ["0099", "0097", "0096", "0065", "0108"]
+related_tasks: ["0099", "0097", "0096", "0065", "0108", "0117", "0127", "0128"]
 tags: [layer-indexing, priority-medium, effort-medium, milestone-M2, amm, phoenix, soroswap, backfill, clickhouse]
 milestone: 2
 links:
