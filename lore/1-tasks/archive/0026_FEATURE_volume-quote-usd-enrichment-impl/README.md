@@ -2,7 +2,7 @@
 id: "0026"
 title: "volume_quote_usd enrichment Lambda — implement the Phase 1 spec from task 0024"
 type: FEATURE
-status: active
+status: completed
 related_adr: ["0003", "0004", "0007"]
 related_tasks: ["0024", "0012", "0022", "0023", "0038", "0058", "0059", "0107"]
 tags: [layer-indexing, priority-medium, effort-medium, lambda, ohlcv, enrichment, oracle, phase-2, clickhouse]
@@ -236,6 +236,42 @@ history:
       despite this task's standing prepare-not-deploy note — most likely carried
       by a whole-`Prices-production-EventBridge` stack deploy; flagged for
       awareness, not a regression.
+  - date: 2026-07-23
+    status: completed
+    who: okarcz
+    note: >
+      COMPLETED. The 0024 Phase 1 spec is implemented, deployed and running
+      in production: hourly Lambda, 24/24 invocations clean, all six
+      `Prices/Enrichment` metrics publishing, and CH writes confirmed
+      (132,120 sdex + 2,192 aquarius + 185 soroswap + 75 phoenix candles
+      enriched in 24h). 4 of 6 ACs met and verified LIVE, not merely
+      synthesised. Both spawned follow-ups — 0058 (writers populate
+      `volume_quote`) and 0059 (MV version propagation) — are archived.
+
+      TWO ACs CLOSE AS DEFERRALS, each to an existing owner, and neither
+      is claimed as passed:
+
+      (1) **Horizon volume credibility → [[0107]].** NOT met. Our volume is
+      ~1/6 of Horizon's because Horizon aggregates order-book + classic
+      protocol-18 LP + path-payment trades while our `sdex` decodes
+      order-book offers only. Prices match to <0.2%, so the decoder is
+      correct — the two numbers count different populations. Closing this
+      requires DECIDING whether to ingest the other trade types, which is
+      a scope change beyond "implement the Phase 1 spec". [[0114]] measured
+      and REFUTED the USD-pricing-gap hypothesis as the explanation
+      (~2.2× vs the 6× measured); do not re-propose that link.
+
+      (2) **Dashboard widget → [[0125]].** Emission half done and live;
+      only the display widget remains, in a different CDK stack. Corrected
+      a dangling reference while archiving: the AC pointed at task 0056,
+      which is itself archived. The dashboard is now owned by 0125 (M2),
+      created because `milestone-1-evidence.md` Table 4 records
+      `prices-production-overview` as a scaffold with no data widgets.
+
+      SCOPE BOUNDARY worth stating so "0026 done" is not over-read: this
+      task enriches `price_ohlcv_1m` ONLY. The coarse tables (`_1h` and up)
+      carrying no USD values is a separate defect, [[0114]], whose repair
+      was still running when this task was archived.
 ---
 
 # `volume_quote_usd` enrichment Lambda — implementation
@@ -304,10 +340,31 @@ Carried over from task 0024's design spec §7:
       CloudWatch, alarm wired). **Live increment CONFIRMED in prod 2026-07-20**
       (`EnrichmentOracleMiss` ~5.4M→6.0M, climbing as 0088 backfills no-reference
       history).
-- [ ] After full SDEX backfill + a one-shot historical enrichment
+- [ ] **DEFERRED to [[0107]] — not met, and deliberately not claimed.**
+      After full SDEX backfill + a one-shot historical enrichment
       pass, `current_prices.volume_24h_usd` for at least 3
       XLM-quoted assets reflects SDEX-sourced volume (>0 and
       credible against Horizon's historical aggregates).
+
+      > **Why this is a deferral, not a pass.** The `>0` half is met and
+      > verified live. The *credibility* half is **not**: measured
+      > 2026-07-20, our volume is **~1/6 of Horizon's**. That gap is
+      > explained, not mysterious — Horizon aggregates order-book +
+      > classic protocol-18 liquidity-pool + path-payment trades, while
+      > our `sdex` source decodes **order-book offers only**. Prices
+      > match to <0.2%, so the decoder is right; the two figures simply
+      > count different populations.
+      >
+      > Closing this AC is therefore **a product decision, not a fix**:
+      > it requires deciding whether to ingest classic LP and
+      > path-payment trades at all. That is a scope change beyond this
+      > task's "implement the 0024 Phase 1 spec" charter, and it is
+      > owned by **[[0107]]** (like-for-like order-book-only
+      > reconciliation + the classic-LP coverage decision).
+      >
+      > Related but **not** the cause — [[0114]] measured the pricing-gap
+      > hypothesis at ~2.2× against this 6× gap and **refuted** it as the
+      > explanation. Do not re-propose that link without new evidence.
       — one-shot mode exists (`MAX_BATCHES=0`, Option 2), and **live enrichment
       is CONFIRMED writing `volume_quote_usd` in prod** (132k sdex candles/24h,
       2026-07-20). Horizon spot-check 2026-07-20 (fixed UTC day, top XLM-quoted
@@ -329,8 +386,24 @@ Carried over from task 0024's design spec §7:
       `aws_sdk_cloudwatch` under `Prices/Enrichment`; the progress-based stall
       alarm gates on `EnrichmentRowsRemainingRecent`). All six metrics confirmed
       publishing live 2026-07-20. Marked `[~]`: emission is done + live; only the
-      **dashboard widget** remains, which is **task 0056's** scope (the
-      observability-stack dashboard is still a scaffold).
+      **dashboard widget** remains.
+
+      > **Emit half: DONE. Display half: DEFERRED to [[0125]].**
+      > All six metrics publish under `Prices/Enrichment` and are
+      > queryable today; the progress-based stall alarm already consumes
+      > `EnrichmentRowsRemainingRecent`, so the metrics are load-bearing,
+      > not decorative. What is missing is only a **widget** on the
+      > `prices-production-overview` dashboard, which is a different
+      > CDK stack and not this task's code.
+      >
+      > ⚠️ **Corrected pointer.** This AC previously assigned the widget
+      > to **task 0056** — but 0056 (`cloudwatch-alarms-push-freshness-
+      > mtls-notafter`) is **archived/completed**, so that was a dangling
+      > reference to a closed task. The dashboard is now owned by
+      > **[[0125]]** (M2), which exists specifically because
+      > `milestone-1-evidence.md` Table 4 records the dashboard as "a
+      > scaffold with no data widgets". 0125's widget list explicitly
+      > includes the enrichment metrics.
 
 ## Future Work
 
