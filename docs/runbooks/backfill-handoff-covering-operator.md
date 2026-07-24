@@ -165,6 +165,87 @@ ssh fishuser-hero 'pgrep -af sdex-backfill; echo "---"; tail -n 15 ~/sdex-tail.l
 are recent (partition numbers climbing). If §4.1 shows progress, the run is fine
 even if you can't reach fishuser-hero.
 
+### 4.5 [LAPTOP] Verify candles are actually being SAVED (not just markers)
+
+§4.1 checks the progress markers. But markers advancing does **not** by itself prove
+the price candles landed — the whole point of keeping cleanup disabled is that a
+marker can exist while its `price_ohlcv_1m` partition was dropped. These four checks
+confirm the backfill is genuinely writing 1-minute candles. All are scoped to the
+pre-Soroban tail with `timestamp < '2024-02-20'`, which prunes partitions so they
+stay cheap on the shared cluster. **These same checks apply to pass 2** (§6.5).
+
+**a) Candles vs markers cross-check — THE key one.** `candle_frontier` should equal
+(or trail by at most a partition or two) `marker_frontier`, and both should advance
+between samples.
+
+```bash
+CHQ <<'SQL'
+SELECT
+  (SELECT max(sequence) FROM prices.backfill_sdex_ledgers
+     WHERE sequence < 50457424)                              AS marker_frontier,
+  (SELECT max(version) DIV 1000 FROM prices.price_ohlcv_1m
+     WHERE source='sdex' AND timestamp < '2024-02-20')       AS candle_frontier,
+  marker_frontier - candle_frontier                          AS gap_ledgers;
+SQL
+```
+
+**✅ Checkpoint:** `gap_ledgers` ≈ **0** (a small positive number is fine).
+🚩 If `marker_frontier` keeps climbing but `candle_frontier` is **stuck / far behind
+and not moving** across samples, candles are NOT being persisted — **stop**, confirm
+the cleanup rule is `DISABLED` (§4.3), and escalate.
+
+**b) Is candle data landing? — run twice, ≥25 min apart.** Both counts should rise.
+
+```bash
+CHQ <<'SQL'
+SELECT
+  count()               AS tail_candles,
+  min(timestamp)        AS oldest_ts,
+  max(timestamp)        AS newest_ts_written,
+  max(version) DIV 1000 AS newest_ledger_written
+FROM prices.price_ohlcv_1m
+WHERE source = 'sdex' AND timestamp < '2024-02-20';
+SQL
+```
+
+(No `FINAL` — counts are pre-merge approximate, which is fine for a trend.)
+
+**c) Coverage by year — what has landed so far.** Years fill in **from the bottom**
+as the run climbs; years above the current frontier being absent is normal.
+
+```bash
+CHQ <<'SQL'
+SELECT toYear(timestamp) AS yr, count() AS candles,
+       min(timestamp) AS first, max(timestamp) AS last
+FROM prices.price_ohlcv_1m
+WHERE source = 'sdex' AND timestamp < '2024-02-20'
+GROUP BY yr ORDER BY yr;
+SQL
+```
+
+**d) Eyeball real candles — sanity-check the values.**
+
+```bash
+CHQ <<'SQL'
+SELECT timestamp, asset_id, quote_asset_id,
+       open, high, low, close, volume_base, trade_count,
+       version DIV 1000 AS ledger
+FROM prices.price_ohlcv_1m
+WHERE source = 'sdex' AND timestamp < '2024-02-20'
+ORDER BY timestamp DESC
+LIMIT 10 FORMAT PrettyCompact;
+SQL
+```
+
+**✅ Checkpoint:** 10 rows near the current frontier ledger, with sane OHLC
+(`high ≥ open/close ≥ low`) and non-zero `trade_count`. Stablecoin pairs should
+close near their peg (~1.0); nothing should be zero or absurd.
+
+> **Reference reading (healthy, 2026-07-24):** `gap_ledgers = 0` at frontier
+> 38,847,999; ~27.3M tail candles spanning 2018-12-13 → 2021-12-23; years 2018
+> (partial) → 2021 present, 2015–2017 absent (pass-2 target). Use as a shape guide,
+> not exact targets.
+
 ---
 
 ## 5. Phase 2 — Detect that Pass 1 is done
@@ -357,6 +438,11 @@ SQL
 **✅ Checkpoint:** `high` climbing toward **23,423,999**; `low` back down near **1–3**.
 Expect **~4–5 days** at the same rate. Keep §4.3 (cleanup DISABLED) checked daily
 throughout.
+
+Also run the **candles-are-being-saved checks (§4.5)** for pass 2 — they apply
+unchanged. During pass 2, years **2015–2018** should start appearing in the §4.5(c)
+year histogram (that is the hole pass 2 exists to fill), and §4.5(a) `gap_ledgers`
+should stay ≈ 0.
 
 **✅ Pass 2 done when:** `high` ≈ 23,423,999 and [FISHUSER-HERO] `pgrep -af
 sdex-backfill` prints nothing / the log shows completion.
