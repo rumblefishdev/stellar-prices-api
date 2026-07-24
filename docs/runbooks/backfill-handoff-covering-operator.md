@@ -169,20 +169,47 @@ even if you can't reach fishuser-hero.
 
 ## 5. Phase 2 — Detect that Pass 1 is done
 
-Pass 1 is **done** when the frontier reaches activation. Run §4.1 and check:
+Pass 1 is **done** when the frontier reaches activation. Run this query — it prints
+a plain-English verdict in the `status` column so you don't have to eyeball numbers:
 
-**✅ Done when ALL of:**
+```bash
+# [LAPTOP]
+CHQ <<'SQL'
+SELECT
+  max(sequence)                                 AS frontier,
+  50457423 - max(sequence)                      AS remaining_to_activation,
+  count() = (max(sequence) - min(sequence) + 1) AS contiguous_no_gaps,
+  multiIf(
+    max(sequence) >= 50457423 AND count() = (max(sequence) - min(sequence) + 1),
+      'DONE AND READY TO START PHASE 2',
+    max(sequence) >= 50457423,
+      'AT ACTIVATION BUT GAPS PRESENT — do NOT proceed, escalate',
+    'IN PROGRESS'
+  )                                             AS status
+FROM prices.backfill_sdex_ledgers
+WHERE sequence < 50457424;
+SQL
+```
 
-- `frontier` ≈ **50,457,423** (activation − 1).
-- `remaining_to_activation` ≈ **0**.
-- `contiguous_no_gaps` = **1**.
+**✅ Read the `status` column:**
+
+- **`IN PROGRESS`** → pass 1 is still running. Keep monitoring (Phase 1); do not
+  start Phase 3.
+- **`DONE AND READY TO START PHASE 2`** → the database side is complete. Do the one
+  remaining confirmation below, then proceed to Phase 3.
+- **`AT ACTIVATION BUT GAPS PRESENT …`** → frontier reached activation but the marker
+  span has holes. Do **not** proceed — see §9 _Troubleshooting_ / escalate.
+
+**One more confirmation before Phase 3** (only when `status` says DONE):
+
 - [FISHUSER-HERO, if reachable] `pgrep -af sdex-backfill` prints **nothing**, and
-  `~/sdex-tail.log` shows a completion line.
+  `~/sdex-tail.log` shows a completion line — i.e. the process has actually exited,
+  not just paused.
 
 If the frontier has plateaued **well below** 50,457,423 for hours _and_ no process
 is running, the run died early — see §9 _Troubleshooting_ (it is resume-safe).
 
-**Do not start Phase 3 until Pass 1 is confirmed done.**
+**Do not start Phase 3 until `status` reads `DONE AND READY TO START PHASE 2`.**
 
 ---
 
