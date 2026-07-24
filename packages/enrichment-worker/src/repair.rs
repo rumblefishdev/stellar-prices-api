@@ -36,8 +36,9 @@ use crate::ch_enrich::{ChEnrichConfig, ChEnrichError, ChEnrichmentPass};
 #[derive(Debug, Clone)]
 pub struct CoarseRepairConfig {
     /// Base enrichment config. `table` must be a coarse table (e.g.
-    /// `price_ohlcv_1h`); `time_window` and `one_shot` are set per month by the
-    /// driver and any pre-set values are overwritten.
+    /// `price_ohlcv_1h`); `time_window` is set per month by the driver and any
+    /// pre-set value is overwritten. `one_shot` on this inner config is ignored —
+    /// the driver drives it from [`Self::one_shot`] below.
     pub enrich: ChEnrichConfig,
     /// First month to repair, inclusive, as `YYYYMM` (e.g. `202502`).
     pub start_month: u32,
@@ -50,6 +51,19 @@ pub struct CoarseRepairConfig {
     /// nothing (no snapshot, no enrichment). The operator's preview before
     /// committing a real run against the shared prod cluster.
     pub dry_run: bool,
+    /// Per-month drain mode.
+    ///
+    /// - `true` — **one-shot**: each month drains its *entire* backlog in the one
+    ///   pass, ignoring `enrich.max_batches`. This is the manual historical
+    ///   repair (the operator CLI): bounded run time is not a concern and the
+    ///   goal is to reach the `no_reference` floor in a single invocation.
+    /// - `false` — **bounded**: each month runs at most `enrich.max_batches`
+    ///   batches, then stops; any overflow defers to the next run. This is the
+    ///   recurring sweep folded into the hourly enrichment Lambda, where an
+    ///   unbounded per-month drain could exceed the function timeout. In steady
+    ///   state the recent backlog is near-empty, so a bounded pass early-exits
+    ///   cheaply.
+    pub one_shot: bool,
 }
 
 /// A month that still holds enrichable zeros, with the exact `[start, end)`
@@ -249,10 +263,13 @@ impl CoarseRepairDriver {
                 None
             };
 
-            // Partition-bounded, one-shot: drain this one month's backlog.
+            // Partition-bounded pass over this one month. `one_shot` decides
+            // whether it drains the month fully (manual repair) or a bounded
+            // `max_batches` chunk with overflow deferring to the next run (the
+            // recurring hourly sweep) — see [`CoarseRepairConfig::one_shot`].
             let mut ecfg = self.cfg.enrich.clone();
             ecfg.time_window = Some((mw.start_ts, mw.end_ts));
-            ecfg.one_shot = true;
+            ecfg.one_shot = self.cfg.one_shot;
             let stats = ChEnrichmentPass::with_client(self.client.clone(), ecfg)
                 .run()
                 .await?;
@@ -285,4 +302,183 @@ impl CoarseRepairDriver {
         }
         Ok(summary)
     }
+}
+
+// ---------------------------------------------------------------------------
+// Recurring bounded sweep (task 0114 — folded into the hourly enrichment Lambda)
+// ---------------------------------------------------------------------------
+
+/// Configuration for the recurring coarse-table sweep folded into the hourly
+/// enrichment Lambda (task 0114).
+///
+/// This is the *going-forward guard* against the rollup path re-freezing
+/// un-enriched USD values, distinct from the operator [`CoarseRepairConfig`]
+/// historical one-off. Where the historical repair drains a fixed
+/// `[start_month, end_month]` fully and FREEZE-snapshots each partition, the
+/// sweep:
+///
+///   * recomputes a **trailing** month window from `now()` every run, so it only
+///     ever touches recent partitions — task 0111: partition-bounded, never a
+///     full-history scan;
+///   * runs **bounded** (`one_shot = false`) so a single run cannot exceed the
+///     Lambda timeout — any overflow defers to the next hourly run;
+///   * takes **no snapshot** — recent live-era partitions are not the sole copy
+///     (1m still holds them) and `prices_writer` cannot FREEZE anyway.
+///
+/// It reuses the exact enrichment tiers and the additive `INSERT … SELECT` the
+/// historical repair proved, so it is non-destructive by the same construction.
+#[derive(Debug, Clone)]
+pub struct CoarseSweepConfig {
+    /// Shared enrichment base (oracle name, forward-fill / pivot windows, batch
+    /// size, database). `table`, `time_window`, `one_shot` and `max_batches` are
+    /// set per table/month by the sweep; any preset values are overwritten.
+    pub base: ChEnrichConfig,
+    /// Coarse tables to sweep, e.g. `["price_ohlcv_1h", "price_ohlcv_4h", …]`.
+    /// `price_ohlcv_1m` and non-`price_ohlcv_*` names are rejected (skipped with
+    /// a warning) — the sweep only ever touches coarse rollups.
+    pub tables: Vec<String>,
+    /// Months the trailing window covers, **inclusive of the current month**
+    /// (clamped to `>= 1`). `2` → current + previous month; covers month-boundary
+    /// rollups plus multi-day enrichment lag.
+    pub lookback_months: u32,
+    /// Per-tier batch budget for each month's bounded pass (the `max_batches` the
+    /// driver hands the enrichment pass in `one_shot = false` mode).
+    pub max_batches: u32,
+}
+
+/// One table's sweep outcome — its name and per-month [`RepairSummary`].
+#[derive(Debug, Clone, Serialize)]
+pub struct TableSweep {
+    pub table: String,
+    pub summary: RepairSummary,
+}
+
+/// Whole-sweep result: the trailing window actually swept, each table's outcome,
+/// and any tables whose pass errored (isolated — one bad table never starves the
+/// rest; see [`run_coarse_sweep`]).
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct CoarseSweepSummary {
+    pub start_month: u32,
+    pub end_month: u32,
+    pub tables: Vec<TableSweep>,
+    pub failed_tables: Vec<String>,
+}
+
+impl CoarseSweepSummary {
+    pub fn total_enriched(&self) -> u64 {
+        self.tables.iter().map(|t| t.summary.total_enriched()).sum()
+    }
+    pub fn total_remaining(&self) -> u64 {
+        self.tables
+            .iter()
+            .map(|t| t.summary.total_remaining())
+            .sum()
+    }
+}
+
+/// A coarse rollup the sweep may touch: `price_ohlcv_*` except the live base
+/// table `price_ohlcv_1m`. Mirrors the operator CLI's table guard.
+fn is_coarse_table(table: &str) -> bool {
+    table.starts_with("price_ohlcv_") && table != "price_ohlcv_1m"
+}
+
+/// Resolve the trailing `[start_month, end_month]` window (inclusive `YYYYMM`)
+/// from the **ClickHouse server clock**, so the sweep's month boundaries align
+/// with the same `now()` the refreshable rollup MVs use. `lookback_months` counts
+/// inclusively (1 = current month only), so it subtracts `lookback_months - 1`.
+async fn current_month_window(
+    client: &Client,
+    lookback_months: u32,
+) -> Result<(u32, u32), ChEnrichError> {
+    #[derive(Row, Deserialize)]
+    struct Window {
+        start_m: u32,
+        end_m: u32,
+    }
+    let back = lookback_months.max(1) - 1;
+    let sql = format!(
+        "SELECT toYYYYMM(now() - INTERVAL {back} MONTH) AS start_m, \
+                toYYYYMM(now()) AS end_m"
+    );
+    let w = client.query(&sql).fetch_one::<Window>().await?;
+    Ok((w.start_m, w.end_m))
+}
+
+/// Run the recurring bounded sweep over the configured coarse tables for the
+/// trailing month window. Non-destructive and additive — the same
+/// [`CoarseRepairDriver`] as the historical repair, just bounded (`one_shot =
+/// false`) and snapshotless.
+///
+/// Per-table failure isolation: a table whose pass errors is recorded in
+/// [`CoarseSweepSummary::failed_tables`] and the sweep continues with the rest,
+/// so one unhealthy table cannot starve the others. Only a failure of the window
+/// query itself (nothing can proceed without a window) returns `Err`. The Lambda
+/// treats the whole call as best-effort regardless.
+pub async fn run_coarse_sweep(
+    client: &Client,
+    cfg: &CoarseSweepConfig,
+) -> Result<CoarseSweepSummary, ChEnrichError> {
+    let (start_month, end_month) = current_month_window(client, cfg.lookback_months).await?;
+    info!(
+        start_month,
+        end_month,
+        tables = cfg.tables.len(),
+        max_batches = cfg.max_batches,
+        "coarse sweep: starting over trailing window"
+    );
+
+    let mut summary = CoarseSweepSummary {
+        start_month,
+        end_month,
+        ..Default::default()
+    };
+
+    for table in &cfg.tables {
+        if !is_coarse_table(table) {
+            warn!(
+                table = %table,
+                "coarse sweep: refusing non-coarse table (price_ohlcv_1m or non-OHLCV) — skipped"
+            );
+            summary.failed_tables.push(table.clone());
+            continue;
+        }
+
+        let mut enrich = cfg.base.clone();
+        enrich.table = table.clone();
+        enrich.max_batches = cfg.max_batches;
+        let repair_cfg = CoarseRepairConfig {
+            enrich,
+            start_month,
+            end_month,
+            snapshot: false,
+            dry_run: false,
+            one_shot: false,
+        };
+
+        match CoarseRepairDriver::with_client(client.clone(), repair_cfg)
+            .run()
+            .await
+        {
+            Ok(table_summary) => {
+                info!(
+                    table = %table,
+                    enriched = table_summary.total_enriched(),
+                    remaining = table_summary.total_remaining(),
+                    "coarse sweep: table done"
+                );
+                summary.tables.push(TableSweep {
+                    table: table.clone(),
+                    summary: table_summary,
+                });
+            }
+            Err(e) => {
+                // Isolated — log and carry on so a single unhealthy table does
+                // not block the sweep of the others this run.
+                warn!(table = %table, error = %e, "coarse sweep: table failed (continuing)");
+                summary.failed_tables.push(table.clone());
+            }
+        }
+    }
+
+    Ok(summary)
 }

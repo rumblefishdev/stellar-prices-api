@@ -294,19 +294,82 @@ ssh -i ~/.ssh/sorban-prod_ed25519 deploy@168.119.73.161 \
      ORDER BY p.volume_quote DESC LIMIT 10 FORMAT PrettyCompact\""
 ```
 
-## Step 6 — schedule the recurring guard
+## Step 6 — the recurring guard (automated: folded into the enrichment Lambda)
 
-The one-off historical repair and the ongoing guard are the same job. Once the
-historical run is verified, schedule a periodic pass over a **recent** window so
-any rows the rollup path freezes going forward get mopped up — turning permanent
-corruption into temporary lag.
+The one-off historical repair (Steps 0–7) and the ongoing guard are the same job.
+The guard is **not** a separate cron or a separate Lambda — it is folded into the
+existing hourly `enrichment` Lambda (`prices-<env>-enrichment`), which already
+owns `close_usd` for `price_ohlcv_1m`. After each 1m pass it also re-sweeps the
+recent coarse partitions, so any USD value the rollup path freezes going forward
+is corrected **within the hour** instead of permanently. Permanent corruption
+becomes at-most-one-hour lag.
 
-- Cron target: run `coarse-repair` per forever-table over the trailing ~2 months
-  (`--start-month`/`--end-month` = last two `YYYYMM`).
-- Snapshot can be OFF for the recent window (1m still holds it and can rebuild),
-  but leave it ON if unsure.
-- Wire it like the enrichment Lambda's EventBridge schedule (infra), or as an
-  operator cron on a schedule box. (Infra wiring is a follow-up — prepare-only.)
+**Why a sweep is needed at all (and why it isn't "just make enrichment correct").**
+The rollup MVs re-aggregate only a bounded recent window (`1m→15m` 2 h, `15m→1h`
+8 h, `1h→4h` 1 day, …; `rollups.sql`). A 1m row enriched _after_ its window closes
+— routine enrichment lag, or a multi-day stall like the 0111 outage — never rolls
+its correction up, so the coarse row stays zero forever. Making enrichment fast
+enough that lag never exceeds the window is the _root_ fix (**task 0111**); this
+sweep is the **backstop** for when it doesn't, and this system's ordering has
+broken repeatedly (cursor freeze, cleanup mid-backfill, the 4-day outage).
+
+### What it does each run
+
+- Runs **after** the 1m pass and is **best-effort**: any sweep failure is logged
+  and swallowed, so it can never fail the invocation or delay/regress the 1m pass.
+- **Bounded** (`one_shot = false`): each table/month runs at most
+  `COARSE_SWEEP_MAX_BATCHES` batches, then stops; overflow defers to the next
+  hourly run, so a run cannot approach the 5-min timeout.
+- **Partition-bounded to a trailing window** recomputed from the ClickHouse server
+  clock each run — so it only ever touches recent partitions, never a
+  full-history scan (task 0111).
+- **No snapshot** — recent live-era partitions are not the sole copy and
+  `prices_writer` cannot FREEZE anyway. Same additive `INSERT … SELECT` as the
+  manual repair, so it is non-destructive by construction.
+- **Steady state is cheap:** recent partitions already sit at the `no_reference`
+  floor, so each table/month early-exits after ~2 no-op batches.
+
+### Enable / disable / tune — env vars on the enrichment Lambda
+
+Set in CDK (`infra/src/lib/stacks/eventbridge-stack.ts`, the enrichment Lambda's
+`environment`). Takes effect on the next deploy of the `*-EventBridge` stack.
+
+| var                            | default                               | meaning                                                                                                                                                                        |
+| ------------------------------ | ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `COARSE_SWEEP_TABLES`          | `price_ohlcv_15m,_1h,_4h,_1d,_1w,_1M` | comma list of coarse tables to sweep. **This is the on/off switch — clear it to disable the sweep, no code change.** `price_ohlcv_1m` (or any non-`price_ohlcv_*`) is refused. |
+| `COARSE_SWEEP_LOOKBACK_MONTHS` | `2`                                   | trailing months swept, inclusive of the current month (2 = current + previous). Covers month-boundary rollups + multi-day lag.                                                 |
+| `COARSE_SWEEP_MAX_BATCHES`     | `20`                                  | per-tier batch budget per month; caps a catch-up run.                                                                                                                          |
+
+> **Emergency off switch (no deploy):** in the AWS console set the enrichment
+> Lambda's `COARSE_SWEEP_TABLES` env var to empty. The next hourly run skips the
+> sweep; the 1m pass is unaffected. A redeploy restores the CDK value.
+
+Note `_15m` **is** in the recurring scope even though it is excluded from the
+_historical_ repair (see §Which tables): the historical repair skips it because
+its 30-day retention holds no deep history to fix, but the guard keeps its recent
+~30 days correct going forward (the 2-month lookback simply finds less `_15m`
+data, since cleanup has dropped the older partition — harmless).
+
+### Metrics to watch (`Prices/Enrichment` namespace, `Environment` dimension)
+
+- `CoarseSweepRowsEnriched` — coarse rows corrected per run. **Steady state ≈ 0**
+  once the tables sit at the floor. A _sustained_ non-zero means the rollup path
+  is re-freezing zeros — enrichment lag is exceeding the MV windows (task 0111
+  territory) and the guard is earning its keep.
+- `CoarseSweepRowsRemaining` — coarse zeros left in the trailing window after the
+  run (the `no_reference` floor plus any bounded overflow deferred to next run).
+- `CoarseSweepTableFailures` — tables refused or errored this run. **Alarm on
+  `> 0`** — this is the dead-sweep signal. The enrichment `-errors` alarm will
+  **not** catch a sweep failure, because the sweep is best-effort and never fails
+  the invocation.
+
+### Verifying it after deploy
+
+Use the same per-quote-class composition query as §Step 5: in the current month
+the reachable classes (stablecoin, XLM-pivot) should stay near-zero `pct_zero`
+and the exotic class stays 100% (by design). If a reachable class climbs over
+time, the sweep is falling behind — check that `CoarseSweepRowsEnriched` is
+non-zero (it is trying) and investigate enrichment lag (task 0111).
 
 ## Step 7 — clean up the snapshots
 

@@ -396,6 +396,34 @@ export class EventBridgeStack extends cdk.Stack {
         // (reflector / 300 / 86400 / 10000 / 20). ENRICHMENT_ONE_SHOT is left
         // unset (false) here — it belongs only on a dedicated one-time drain
         // invocation, never this hourly target (see the timeout note above).
+        //
+        // Recurring coarse-table USD sweep (task 0114). The rollup MVs only
+        // re-aggregate a bounded recent window, so any 1m row enriched *after*
+        // that window closes (enrichment lag / a stall) leaves its coarse
+        // counterpart frozen at zero forever. Rather than a second Lambda to
+        // repair that, this same worker re-sweeps the recent coarse partitions
+        // after each 1m pass — one owner of close_usd across 1m AND the rollups.
+        // The handler runs it bounded (overflow defers to the next hour) and
+        // best-effort (a sweep failure never fails the invocation or the 1m
+        // pass), so it is safe on the shared cluster and under the 5-min timeout.
+        // COARSE_SWEEP_TABLES being non-empty is the on switch; clearing it
+        // disables the sweep with no code change.
+        //
+        // Every rollup table is included so no stored USD value is left wrong.
+        // `_15m` is a 30-day rolling window (cleanup-worker RETENTION), unlike the
+        // {1h,4h,1d,1w,1M} which are retained forever — so the 2-month lookback
+        // naturally only finds ~30 days of `_15m` data (older partitions are
+        // already dropped); that is harmless, the sweep just covers whatever
+        // exists. `_1m` is the live base table and is refused by the handler.
+        COARSE_SWEEP_TABLES:
+          'price_ohlcv_15m,price_ohlcv_1h,price_ohlcv_4h,price_ohlcv_1d,price_ohlcv_1w,price_ohlcv_1M',
+        // Trailing months swept each run, inclusive of the current month: 2 =
+        // current + previous (covers month-boundary rollups + multi-day lag).
+        COARSE_SWEEP_LOOKBACK_MONTHS: '2',
+        // Per-tier batch budget for each month's bounded sweep pass. Steady state
+        // early-exits (recent partitions already at the no_reference floor); this
+        // caps a catch-up run so it cannot approach the timeout.
+        COARSE_SWEEP_MAX_BATCHES: '20',
       },
       alarmDescription:
         'Enrichment Lambda invocation errors (close_usd / volume_quote_usd enrichment pass failed).',

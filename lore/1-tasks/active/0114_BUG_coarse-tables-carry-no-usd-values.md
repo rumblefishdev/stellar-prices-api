@@ -387,17 +387,21 @@ the 55%/62% figures.
       ~20.1M rows enriched across the four tables; combined with `_1h`, ~52.5M
       rows repaired in total and **every coarse OHLCV table is now at the
       `no_reference` floor**. The `4h` run was interrupted by a power loss and
-      resumed cleanly from the boundary month. *Composition breakdown on `_4h`
-      still outstanding — the counts are in, the exotic-only proof is not.*
+      resumed cleanly from the boundary month. **Composition breakdown on `_4h`
+      DONE 2026-07-24** — exotic-only proven (§Phase C `_4h` composition):
+      stablecoin 0.012% / xlm_pivot 0.046% / other 100% zero.
 - [x] **Pre-check before any implementation** — DONE 2026-07-21. The 62% is
       genuine `no_reference` (exotic quotes), not backlog; live enrichment runs
       at 99.7% on pivotable quotes. Approach holds for the historical repair.
 - [ ] The rollup path no longer freezes un-enriched values — implemented as a
       **scheduled, partition-bounded enrichment pass over the coarse tables**
       (see §Chosen approach; the ordering-based alternatives were rejected).
-      *In progress: driver built, tested, and now proven across five tables in
-      prod; **scheduling is the only remaining piece**. Both historical runs were
-      manual one-shots.*
+      *Code + infra DONE 2026-07-24 (prepare-only, see §Recurring guard
+      implementation) — folded into the hourly enrichment Lambda, not a separate
+      cron/Lambda; env-gated, tested, and wired in CDK for all six rollup tables
+      incl. `_15m`. **Remaining: deploy the `*-EventBridge` stack, then verify via
+      the composition query + `CoarseSweep*` metrics.** Box stays unchecked until
+      verified in prod (per keep-open-until-verified).*
 - [x] **Version arithmetic proven by test** — DONE 2026-07-22. A repair row
       outranks the existing coarse row under `sum(version)` RMT semantics.
       `enrichment-worker/tests/ch_enrich_it.rs::coarse_repair_row_outranks_large_summed_version`
@@ -878,10 +882,88 @@ verified via `ls /var/lib/clickhouse/shadow/ | grep repair_0114` plus a
 non-trivial `du`, before `--skip-snapshot` is safe. Re-freezing is **not**
 idempotent and that failure is protective.
 
-**Remaining for this AC:** the per-quote-class composition breakdown on `_4h`
-(counts alone cannot close it — see §The residual is exotic-only). Use the
-`GROUP BY asset_id` subquery form, not a direct join on `assets`, to avoid the
-[[0129]] fan-out.
+### ✅ `_4h` composition — exotic-only, AC closed 2026-07-24
+
+Per-quote-class breakdown over `price_ohlcv_4h` (`volume_quote > 0`, FINAL). The
+asset→class map is deduped with a `GROUP BY asset_id` + `argMax` subquery, **not**
+a direct `assets FINAL` join, to avoid the [[0129]] natural-key fan-out.
+
+| quote class | rows | zeros | pct_zero |
+|---|---|---|---|
+| stablecoin (USDC/USDT) | 2,221,777 | 263 | **0.012%** |
+| xlm_pivot | 13,529,848 | 6,255 | **0.046%** |
+| other (exotic) | 26,464,021 | 26,464,021 | **100%** |
+
+Both reachable classes are effectively fully enriched — *tighter* than `_1h`'s
+0.9% / 0.8%, as expected since the `argMax` dedup removes the [[0129]] inflation
+that `_1h`'s figure still carried. The entire 26.5M residual is exotic quotes
+with no USD path (`ch_enrich.rs:31-32`), i.e. the genuine `no_reference` floor,
+not backlog. This is the composition proof counts alone could not give; the
+`_4h`/Phase-C composition AC is closed. `_1d`/`_1w`/`_1M` were not separately
+broken down — same tiers, same span, same result expected.
+
+## ✅ Recurring guard implementation — 2026-07-24 (prepare-only, not yet deployed)
+
+The going-forward guard against the rollup path re-freezing zeros. **Folded into
+the existing hourly `enrichment` Lambda, not a separate cron/Lambda** — the
+enrichment worker becomes the single owner of `close_usd` across `1m` AND the
+rollups, rather than a first job plus a mop. (Chosen over a standalone repair
+Lambda at the operator's direction: "fix the dedicated lambda, don't create a new
+one which repairs what the dedicated one did badly.")
+
+### Why a sweep is unavoidable (not just "make enrichment correct")
+
+Verified against `rollups.sql`: the coarse tables are **refreshable MVs** that
+re-aggregate a *bounded recent window* from the enriched finer table (`1m→15m`
+2 h, `15m→1h` 8 h, `1h→4h` 1 day, …) and read `FROM …_finer FINAL`. So a
+correction **does** roll up on its own — *if enrichment lands while the window is
+still open*. The zeros are precisely the rows enriched *after* their window closed
+(routine lag, or a multi-day stall like [[0111]]). No single-pass ordering fixes
+that in principle; the fix is necessarily a revisiting pass. The only choice is
+*where it lives* — and it lives in the enrichment Lambda. Making lag < window is
+the root fix (0111); this sweep is the backstop, justified because ordering has
+broken repeatedly here.
+
+### What was built (all tested; local CH pinned to prod 26.3.10.60)
+
+- **Driver knob** (`repair.rs`): `CoarseRepairConfig.one_shot` — `true` = manual
+  full drain (unchanged), `false` = **bounded** (per-month `max_batches`, overflow
+  defers). Test `coarse_repair_bounded_mode_defers_overflow_across_runs` proves
+  4-of-7 enriched then converge. CLI passes `one_shot: true` (behaviour identical).
+- **Sweep runner** (`repair.rs::run_coarse_sweep` + `CoarseSweepConfig`):
+  recomputes a **trailing month window from the CH server clock** each run
+  (aligned to the same `now()` the MVs use), snapshotless, per-table failure
+  isolation, refuses `price_ohlcv_1m`/non-coarse. Test
+  `coarse_sweep_bounds_trailing_window_and_refuses_the_1m_base` proves window
+  bounding (6-mo-ago row untouched), multi-table, and 1m refused.
+- **Handler** (`main.rs`): runs the sweep **after** the 1m pass, **best-effort**
+  (failure logged + swallowed — never fails the invocation or regresses 1m),
+  bounded (can't blow the 5-min timeout). Inert unless `COARSE_SWEEP_TABLES` set,
+  so it ships dormant until CDK turns it on.
+- **Metrics** (`metrics.rs::sweep_metrics`, reuses `Prices/Enrichment` namespace
+  so no IAM change): `CoarseSweepRowsEnriched` / `CoarseSweepRowsRemaining` /
+  `CoarseSweepTableFailures` (alarm-on-`>0` dead-sweep signal — the `-errors`
+  alarm can't see a best-effort failure). Unit-tested.
+- **CDK** (`eventbridge-stack.ts`): env on the enrichment Lambda —
+  `COARSE_SWEEP_TABLES=price_ohlcv_15m,_1h,_4h,_1d,_1w,_1M`,
+  `COARSE_SWEEP_LOOKBACK_MONTHS=2`, `COARSE_SWEEP_MAX_BATCHES=20`. Confirmed via
+  `cdk synth` that the vars land on `EnrichmentFunction` **only**. `_15m` **is**
+  in recurring scope (operator's call — "no stored USD value left wrong"), unlike
+  the historical repair which skips it (30-day retention → no deep history).
+- **Runbook** `docs/runbooks/repair-coarse-usd-values.md` **§Step 6** rewritten
+  from placeholder to the real automated design: enable/disable/tune table, the
+  emergency env off-switch, metrics, 0111 relationship, post-deploy verification.
+
+Verification run: 28 unit + 9 integration tests green; compiles under
+`aws-mtls`/`lambda`/default; clippy clean; infra typecheck+lint+synth clean.
+
+### Remaining
+
+1. **Deploy** the `*-EventBridge` stack (operator; activates the sweep).
+2. **Verify in prod** — composition query stays at floor + `CoarseSweep*` metrics
+   sane — then check this AC's box.
+3. *(Optional, follow-up)* a CloudWatch alarm on `CoarseSweepTableFailures > 0`
+   in the observability stack.
 
 ## Cluster findings from the Phase C session (2026-07-23)
 

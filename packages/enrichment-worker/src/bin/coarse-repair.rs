@@ -168,6 +168,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         end_month: args.end_month,
         snapshot: !args.skip_snapshot,
         dry_run: args.dry_run,
+        // Manual historical repair: drain each month to the no_reference floor in
+        // one pass. (The recurring hourly sweep sets this false — bounded.)
+        one_shot: true,
     };
 
     // Build the CH client per transport, then hand it to the driver.

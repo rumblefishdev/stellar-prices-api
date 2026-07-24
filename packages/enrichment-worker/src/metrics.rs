@@ -20,6 +20,7 @@
 //! transient CloudWatch error never blocks enrichment.
 
 use crate::ch_enrich::ChPassStats;
+use crate::repair::CoarseSweepSummary;
 
 /// CloudWatch namespace for all enrichment metrics. Matches the
 /// `cloudwatch:namespace` condition on the Lambda role's `PutMetricData` grant
@@ -94,6 +95,40 @@ pub fn pass_metrics(stats: &ChPassStats) -> Vec<Metric> {
     }
 
     metrics
+}
+
+/// Metrics for the recurring coarse-table sweep (task 0114). Published under the
+/// **same** [`METRIC_NAMESPACE`] as the 1m pass, so the existing `PutMetricData`
+/// grant (scoped to that namespace) covers them without an IAM change.
+///
+///   * `CoarseSweepRowsEnriched` — coarse rows corrected this run, across all
+///     swept tables. Steady-state ≈ 0 once the tables sit at the floor; a
+///     sustained non-zero means the rollup path is re-freezing zeros (i.e. the
+///     guard is earning its keep, likely because enrichment lag exceeded the MV
+///     windows — task 0111 territory).
+///   * `CoarseSweepRowsRemaining` — coarse zeros still left in the trailing
+///     window after the run (the `no_reference` floor plus any bounded overflow
+///     deferred to the next run).
+///   * `CoarseSweepTableFailures` — tables skipped (non-coarse) or whose pass
+///     errored this run; a non-zero here is the dead-sweep signal to alarm on.
+pub fn sweep_metrics(summary: &CoarseSweepSummary) -> Vec<Metric> {
+    vec![
+        Metric {
+            name: "CoarseSweepRowsEnriched",
+            value: summary.total_enriched() as f64,
+            unit: Unit::Count,
+        },
+        Metric {
+            name: "CoarseSweepRowsRemaining",
+            value: summary.total_remaining() as f64,
+            unit: Unit::Count,
+        },
+        Metric {
+            name: "CoarseSweepTableFailures",
+            value: summary.failed_tables.len() as f64,
+            unit: Unit::Count,
+        },
+    ]
 }
 
 /// Publish `metrics` to CloudWatch under [`METRIC_NAMESPACE`], tagged with an
@@ -171,6 +206,39 @@ mod tests {
         assert_eq!(avg.value, 1500.0);
         assert_eq!(avg.unit, Unit::Milliseconds);
         assert_eq!(m.len(), 6);
+    }
+
+    #[test]
+    fn sweep_metrics_sum_across_tables_and_count_failures() {
+        use crate::repair::{CoarseSweepSummary, MonthRepair, RepairSummary, TableSweep};
+
+        let table = |name: &str, enriched: u64, remaining: u64| TableSweep {
+            table: name.to_string(),
+            summary: RepairSummary {
+                months: vec![MonthRepair {
+                    month: 202_606,
+                    zeros_before: enriched + remaining,
+                    zeros_after: remaining,
+                    rows_enriched: enriched,
+                    snapshot_name: None,
+                }],
+            },
+        };
+        let summary = CoarseSweepSummary {
+            start_month: 202_605,
+            end_month: 202_606,
+            tables: vec![table("price_ohlcv_1h", 8, 2), table("price_ohlcv_4h", 4, 1)],
+            failed_tables: vec!["price_ohlcv_1m".to_string()],
+        };
+
+        let m = sweep_metrics(&summary);
+        let by = |name: &str| m.iter().find(|x| x.name == name).expect("metric present");
+        // Enriched / remaining are summed across every swept table (8+4, 2+1).
+        assert_eq!(by("CoarseSweepRowsEnriched").value, 12.0);
+        assert_eq!(by("CoarseSweepRowsRemaining").value, 3.0);
+        // One table was refused/failed → the dead-sweep alarm series reads 1.
+        assert_eq!(by("CoarseSweepTableFailures").value, 1.0);
+        assert_eq!(m.len(), 3);
     }
 
     /// A pass that ran zero batches (empty backlog) has no per-batch figure, so
