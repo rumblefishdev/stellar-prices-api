@@ -10,7 +10,9 @@
 
 use clickhouse::Client;
 use enrichment_worker::ch_enrich::{ChEnrichConfig, ChEnrichmentPass};
-use enrichment_worker::repair::{CoarseRepairConfig, CoarseRepairDriver};
+use enrichment_worker::repair::{
+    CoarseRepairConfig, CoarseRepairDriver, CoarseSweepConfig, run_coarse_sweep,
+};
 use prices_clickhouse::USDC_ISSUER;
 
 fn ch_url() -> String {
@@ -720,6 +722,8 @@ async fn coarse_repair_driver_bounds_span_and_reports_per_month() {
             end_month: 202_505,
             snapshot: true,
             dry_run: false,
+            one_shot: true,
+            deadline: None,
         },
     );
     let summary = driver.run().await.unwrap();
@@ -791,6 +795,302 @@ async fn coarse_repair_driver_bounds_span_and_reports_per_month() {
                 .await;
         }
     }
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// The recurring coarse sweep folded into the hourly enrichment Lambda (task
+/// 0114). Exercises the three properties the handler relies on:
+///
+///   1. **Trailing window from `now()`** — the sweep computes `[prev-month,
+///      this-month]` (lookback 2) off the CH server clock, so an in-window bucket
+///      is enriched while a 6-months-ago bucket (out of window) is left at zero,
+///      proving partition-bounding (task 0111) without a fixed month argument.
+///   2. **Multi-table** — it sweeps every configured coarse table.
+///   3. **Non-coarse tables are refused** — `price_ohlcv_1m` (the live base) is
+///      recorded under `skipped_tables` (NOT `failed_tables`, which is the alarm
+///      series) and never touched.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn coarse_sweep_bounds_trailing_window_and_refuses_the_1m_base() {
+    let db = "it_coarse_sweep";
+    let client = setup_scratch(db).await;
+
+    client
+        .query(&ASSETS.replace("{db}", db).replace("{usdc}", USDC_ISSUER))
+        .execute()
+        .await
+        .unwrap();
+
+    // Peg-enrichable FOO/USDC buckets. For each coarse table: one in the current
+    // month, one in the previous month (both inside a lookback-2 window), and one
+    // six months back (outside it). The 1m base gets one current-month zero row
+    // to prove the sweep refuses it. All timestamps are computed from now() so the
+    // window match is clock-relative, not hard-coded.
+    for tbl in ["price_ohlcv_1h", "price_ohlcv_4h", "price_ohlcv_1m"] {
+        let rows = if tbl == "price_ohlcv_1m" {
+            "(toUnixTimestamp(toStartOfMonth(now())), 10,2,'sdex', 8,8,8,8, 1,40,0,0,8,1,1)"
+                .to_string()
+        } else {
+            "(toUnixTimestamp(toStartOfMonth(now())),                    10,2,'sdex', 8,8,8,8, 1,40,0,0,8,1,1), \
+             (toUnixTimestamp(toStartOfMonth(now() - INTERVAL 1 MONTH)), 10,2,'sdex', 8,8,8,8, 1,40,0,0,8,1,1), \
+             (toUnixTimestamp(now() - INTERVAL 6 MONTH),                 10,2,'sdex', 5,5,5,5, 1,40,0,0,5,1,1)".to_string()
+        };
+        client
+            .query(&format!(
+                "INSERT INTO {db}.{tbl} \
+                 (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+                  volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) \
+                 VALUES {rows}"
+            ))
+            .execute()
+            .await
+            .unwrap();
+    }
+
+    // Expected trailing window, straight from the same clock the sweep reads.
+    let start_expected: u32 = client
+        .query("SELECT toYYYYMM(now() - INTERVAL 1 MONTH)")
+        .fetch_one::<u32>()
+        .await
+        .unwrap();
+    let end_expected: u32 = client
+        .query("SELECT toYYYYMM(now())")
+        .fetch_one::<u32>()
+        .await
+        .unwrap();
+
+    let sweep_cfg = CoarseSweepConfig {
+        base: cfg(db),
+        // 1m is deliberately included to prove it is refused, not swept.
+        tables: vec![
+            "price_ohlcv_1h".to_string(),
+            "price_ohlcv_4h".to_string(),
+            "price_ohlcv_1m".to_string(),
+        ],
+        lookback_months: 2,
+        max_batches: 10,
+    };
+    // No wall-clock limit for this test — exercise the full window.
+    let sum = run_coarse_sweep(&client, &sweep_cfg, None).await.unwrap();
+
+    // Window resolved from now() …
+    assert_eq!(sum.start_month, start_expected);
+    assert_eq!(sum.end_month, end_expected);
+    // … two coarse tables swept, the 1m base refused.
+    assert_eq!(sum.tables.len(), 2, "1h and 4h swept");
+    // The refusal lands on `skipped_tables` (benign config), NOT `failed_tables`
+    // (the dead-sweep alarm series) — a mis-config must never trip the alarm.
+    assert!(sum.failed_tables.is_empty(), "no runtime failures");
+    assert_eq!(
+        sum.skipped_tables,
+        vec!["price_ohlcv_1m".to_string()],
+        "the live 1m base is refused (skipped), never swept"
+    );
+    // Two in-window rows per table enriched; the out-of-window rows aren't even
+    // enumerated, so nothing is left "remaining" in the swept months.
+    assert_eq!(
+        sum.total_enriched(),
+        4,
+        "2 in-window rows × 2 coarse tables"
+    );
+    assert_eq!(sum.total_remaining(), 0);
+
+    // Partition-bounding held: each coarse table keeps exactly ONE zero — the
+    // six-months-ago bucket the trailing window never reached.
+    for tbl in ["price_ohlcv_1h", "price_ohlcv_4h"] {
+        let zeros: u64 = client
+            .query(&format!(
+                "SELECT count() FROM {db}.{tbl} FINAL WHERE close_usd = 0"
+            ))
+            .fetch_one::<u64>()
+            .await
+            .unwrap();
+        assert_eq!(zeros, 1, "{tbl}: only the out-of-window bucket stays zero");
+    }
+    // And the 1m base is untouched — its current-month zero is still zero.
+    let base_zeros: u64 = client
+        .query(&format!(
+            "SELECT count() FROM {db}.price_ohlcv_1m FINAL WHERE close_usd = 0"
+        ))
+        .fetch_one::<u64>()
+        .await
+        .unwrap();
+    assert_eq!(base_zeros, 1, "the sweep never wrote the 1m base table");
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// Wall-clock budget (task 0114). A slow catch-up must not run into the Lambda
+/// hard-timeout — which is an invocation error the best-effort handler cannot
+/// catch — so the sweep stops at its deadline and defers the rest. With an
+/// already-elapsed deadline it must enrich NOTHING and record no failures/skips
+/// (deferred ≠ failed), leaving the seeded zero for the next run.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn coarse_sweep_defers_all_work_past_its_deadline() {
+    let db = "it_coarse_sweep_deadline";
+    let client = setup_scratch(db).await;
+
+    client
+        .query(&ASSETS.replace("{db}", db).replace("{usdc}", USDC_ISSUER))
+        .execute()
+        .await
+        .unwrap();
+
+    // One in-window, peg-enrichable FOO/USDC bucket that WOULD be repaired with no
+    // deadline.
+    client
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1h \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) \
+             VALUES (toUnixTimestamp(toStartOfMonth(now())), 10,2,'sdex', 8,8,8,8, 1,40,0,0,8,1,1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    let sweep_cfg = CoarseSweepConfig {
+        base: cfg(db),
+        tables: vec!["price_ohlcv_1h".to_string()],
+        lookback_months: 2,
+        max_batches: 10,
+    };
+    // Deadline already in the past → the pre-table check trips immediately.
+    let past = std::time::Instant::now();
+    let sum = run_coarse_sweep(&client, &sweep_cfg, Some(past))
+        .await
+        .unwrap();
+
+    // Nothing swept, and — crucially — the deferred table is NOT a failure/skip.
+    assert!(
+        sum.tables.is_empty(),
+        "deadline stopped the sweep before any table"
+    );
+    assert!(sum.failed_tables.is_empty(), "deferred is not failed");
+    assert!(sum.skipped_tables.is_empty(), "deferred is not skipped");
+    assert_eq!(sum.total_enriched(), 0);
+
+    // The seeded zero is untouched — it will be picked up on a future run.
+    let zeros: u64 = client
+        .query(&format!(
+            "SELECT count() FROM {db}.price_ohlcv_1h FINAL WHERE close_usd = 0"
+        ))
+        .fetch_one::<u64>()
+        .await
+        .unwrap();
+    assert_eq!(zeros, 1, "the in-window zero was deferred, not repaired");
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// The `one_shot` knob for the recurring sweep (task 0114).
+///
+/// The manual historical repair drains each month fully (`one_shot: true`, proven
+/// by `coarse_repair_driver_bounds_span_and_reports_per_month`). The recurring
+/// sweep folded into the hourly enrichment Lambda must instead be **bounded**
+/// (`one_shot: false`): each run enriches at most `max_batches × batch_size` rows
+/// of a month and defers the overflow to the next run, so an unexpectedly large
+/// recent backlog can never exceed the function timeout. This proves both halves —
+/// a single bounded run does NOT drain the whole backlog, and successive runs
+/// converge it to the `no_reference` floor.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn coarse_repair_bounded_mode_defers_overflow_across_runs() {
+    let db = "it_coarse_repair_bounded";
+    let client = setup_scratch(db).await;
+
+    client
+        .query(&ASSETS.replace("{db}", db).replace("{usdc}", USDC_ISSUER))
+        .execute()
+        .await
+        .unwrap();
+
+    // Seven peg-enrichable FOO/USDC 1h buckets in one month (2025-02), all at
+    // close_usd = 0. The peg tier fills close_usd = close × $1.
+    let feb2025 = 1_739_577_600u32; // 2025-02-15 00:00 UTC
+    let values: Vec<String> = (0..7u32)
+        .map(|i| {
+            let (ts, c) = (feb2025 + i * 3600, i + 2);
+            format!("({ts},10,2,'sdex', {c},{c},{c},{c}, 1,40,0,0,{c},1,1)")
+        })
+        .collect();
+    client
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1h \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) \
+             VALUES {}",
+            values.join(", ")
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    // Bounded config: max_batches = 2, batch_size = 2 → at most 4 rows per run.
+    // (One oracle batch no-ops and drains — no oracle_prices — then the peg tier
+    // runs its own 2-batch budget: 2 batches × 2 rows = 4 enriched, 3 deferred.)
+    let mut enrich = cfg(db);
+    enrich.table = "price_ohlcv_1h".to_string();
+    enrich.max_batches = 2;
+    enrich.batch_size = 2;
+    let repair_cfg = CoarseRepairConfig {
+        enrich,
+        start_month: 202_502,
+        end_month: 202_502,
+        snapshot: false, // the recurring sweep never freezes (recent, not sole-copy)
+        dry_run: false,
+        one_shot: false, // ← the knob under test: BOUNDED, not full-drain
+        deadline: None,  // no wall-clock limit here — testing the batch bound
+    };
+
+    // Run 1 — bounded: 4 of the 7 enriched, the overflow deferred (not drained).
+    let s1 = CoarseRepairDriver::with_client(client.clone(), repair_cfg.clone())
+        .run()
+        .await
+        .unwrap();
+    assert_eq!(s1.months.len(), 1);
+    let feb1 = &s1.months[0];
+    assert_eq!(feb1.month, 202_502);
+    assert_eq!(feb1.zeros_before, 7, "full month backlog before run 1");
+    assert_eq!(
+        feb1.rows_enriched, 4,
+        "bounded run capped at max_batches × batch_size = 4 (overflow deferred)"
+    );
+    assert_eq!(
+        feb1.zeros_after, 3,
+        "3 rows deferred to the next run, not drained"
+    );
+    assert!(
+        feb1.snapshot_name.is_none(),
+        "recurring sweep does not FREEZE"
+    );
+
+    // Run 2 — same bounded config: sees only the deferred overflow and converges.
+    let s2 = CoarseRepairDriver::with_client(client.clone(), repair_cfg.clone())
+        .run()
+        .await
+        .unwrap();
+    let feb2 = &s2.months[0];
+    assert_eq!(feb2.zeros_before, 3, "run 2 sees only the run-1 overflow");
+    assert_eq!(feb2.rows_enriched, 3);
+    assert_eq!(
+        feb2.zeros_after, 0,
+        "backlog converged to the floor after run 2"
+    );
+
     client
         .query(&format!("DROP DATABASE {db}"))
         .execute()
