@@ -67,8 +67,11 @@ pub async fn post_batch(State(state): State<AppState>, Json(req): Json<BatchRequ
                 id.to_canonical(),
                 queries_ch::CurrentPriceRow {
                     price_usd: row.price_usd.clone(),
+                    price_xlm: row.price_xlm.clone(),
                     vwap_24h: row.vwap_24h.clone(),
                     volume_24h_usd: row.volume_24h_usd.clone(),
+                    change_24h_pct: row.change_24h_pct.clone(),
+                    sources: row.sources.clone(),
                     updated_at: row.updated_at.clone(),
                 },
             )),

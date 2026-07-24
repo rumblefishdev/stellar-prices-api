@@ -1,8 +1,9 @@
--- prices.current_prices refreshable MV (task 0039) — replaces the per-minute
--- "Current Price Updater" Lambda (ADR 0007 / 0039 Q#1). The scheduler lives
--- inside ClickHouse: REFRESH EVERY 1 MINUTE re-derives one row per asset from
--- price_ohlcv_1m and writes prices.current_prices (ReplacingMergeTree → latest
--- per asset_id; read with FINAL). The MV is the SOLE writer of current_prices.
+-- prices.current_prices refreshable MV (task 0039, extended by task 0072) —
+-- replaces the per-minute "Current Price Updater" Lambda (ADR 0007 / 0039 Q#1).
+-- The scheduler lives inside ClickHouse: REFRESH EVERY 1 MINUTE re-derives one
+-- row per asset from price_ohlcv_1m and writes prices.current_prices
+-- (ReplacingMergeTree → latest per asset_id; read with FINAL). The MV is the
+-- SOLE writer of current_prices.
 --
 -- NOT applied by prices-clickhouse-init (kept out of init.sql so schema-apply
 -- stays version-agnostic). Refreshable MVs require ClickHouse ≥ 23.12.
@@ -14,24 +15,40 @@
 -- vwap_24h / market_cap_usd = 0 for every asset. Apply this MV only once
 -- enrichment is live, otherwise current_prices serves all-zero rows.
 --
--- v1 columns (the cleanly price-data-derivable + market cap):
+-- ⚠️ REDEPLOY MECHANICS (task 0068 → 0072): a refreshable MV's definition is
+-- FIXED AT CREATE TIME. Changing this SELECT requires DROP VIEW + re-CREATE —
+-- an ALTER does not take. No backfill/migration is needed: the MV fully
+-- recomputes every row on each refresh, so the first refresh after the change
+-- populates the new columns for all assets. current_prices keeps serving its
+-- last-written rows in the gap, so the exposure is a staleness window (≤ ~1 min
+-- plus refresh duration), not an outage.
+--
+-- ⚠️ POSITIONAL-INSERT FOOTGUN (0039 review): the TO clause carries an EXPLICIT
+-- target column list. A materialised view inserts into its target POSITIONALLY
+-- otherwise, and this SELECT's projection order is not the table's column order.
+-- EVERY new column must be added to BOTH the TO(...) list and the SELECT, in
+-- matching order.
+--
+-- Columns (task 0072 completes the set; all ten are now written):
 --   price_usd       — latest USD close (argMax over the 24h window)
---   volume_24h_usd  — trailing-24h USD volume
---   vwap_24h        — USD volume-weighted close across sources (the §5.5
---                     inter-source median-outlier filter is a follow-up)
+--   price_xlm       — price_usd re-expressed in XLM (÷ the XLM/USD close)
+--   change_24h_pct  — vs the oldest close inside the 24h window
+--   change_7d_pct   — vs the oldest close inside a 7d window of price_ohlcv_1h
+--   volume_24h_usd  — trailing-24h USD volume, ALL sources (a total, never filtered)
 --   market_cap_usd  — price_usd × circulating supply from prices.asset_supply
---                     (LEFT JOIN; 0 when supply absent — best-effort, the column
---                     is non-nullable so 0 is the "unavailable" sentinel)
--- price_xlm / change_24h_pct / change_7d_pct / sources keep their column
--- DEFAULTs (0 / '') in v1 — tracked as follow-ups (XLM-quote orientation, the
--- 24h/7d reference-close self-join, and the per-source JSON breakdown).
-
+--   vwap_24h        — USD volume-weighted close across sources, with the §5.5
+--                     inter-source median-outlier filter applied
+--   sources         — JSON per-source {price, volume_24h}; outlier-excluded
+--                     sources are ABSENT from the object (general-overview §3.3)
+--
+-- ── Numeric strategy ────────────────────────────────────────────────────────
 -- Decimal×Decimal widens scale past Decimal(38,14)'s budget (14+14=28 scale
--- leaves only 10 integer digits → overflow at ~1e10), so the two arithmetic
--- columns can't multiply natively:
---   vwap_24h       — a volume-weighted *price*, so it stays price-magnitude and
---                    can't overflow; computed in Float64 (≈15-16 sig digits,
---                    ample for a price) and cast back with toDecimal128(…,14).
+-- leaves only 10 integer digits → overflow at ~1e10), so arithmetic columns
+-- cannot multiply natively:
+--   vwap_24h / price_xlm / change_*_pct — all price-magnitude or ratios, so they
+--                    cannot overflow; computed in Float64 (≈15-16 sig digits,
+--                    ample for a price) and cast back with toDecimal128(…,14) /
+--                    toDecimal64(…,4).
 --   market_cap_usd — price × supply can be huge, so Float64 would both lose
 --                    low-order digits AND throw on overflow (poisoning the whole
 --                    refresh). Computed as an EXACT Decimal256 product instead,
@@ -39,35 +56,221 @@
 --                    → NULL → 0 (the column's "unavailable" sentinel) rather than
 --                    a refresh-killing exception.
 -- price_usd (argMax, no arithmetic) and volume_24h_usd (a plain sum) stay native
--- Decimal.
+-- Decimal. The `sources` JSON serialises its numbers via toString() on the
+-- NATIVE Decimal — never through Float64 — so the JSON preserves full
+-- Decimal(38,14) precision, matching general-overview §3.3's "numeric values
+-- serialised as strings to preserve precision".
 --
--- The TO clause carries an EXPLICIT target column list: a materialised view
--- inserts into its target POSITIONALLY otherwise, and this SELECT projects only
--- the v1 subset (not all 10 current_prices columns, nor in table order). The
--- column list maps each projection to its named column; the unlisted columns
--- (price_xlm, change_24h_pct, change_7d_pct, sources) take their table DEFAULTs.
-CREATE MATERIALIZED VIEW IF NOT EXISTS prices.mv_current_prices
+-- ── §5.5 inter-source median-outlier filter ─────────────────────────────────
+-- "Before a source's price is included in the VWAP, it is compared against the
+-- inter-source median. Sources deviating by more than a configurable percentage
+-- are excluded from that update cycle." Implemented as an array pipeline per
+-- asset (arrayReduce('median', …) + arrayFilter) rather than a window function,
+-- because CH's window-function surface does not cover quantile aggregates.
+--
+-- ⚠️ THE FILTER ONLY ARMS AT >= 3 SOURCES, and that guard is load-bearing.
+-- With 2 sources the median IS the midpoint, so both sources deviate from it by
+-- exactly the same amount: any threshold either keeps both or drops BOTH, and
+-- dropping both leaves the asset with no VWAP at all. With 1 source the median
+-- is that source (deviation 0, always kept) — harmless but pointless. So the
+-- filter is a no-op below 3 sources by construction, not by luck.
+--
+-- OUTLIER_PCT = 0.20 (20%). A starting value, deliberately loose. The asymmetry
+-- matters: wrongly EXCLUDING a legitimate venue silently removes it from the
+-- `sources` JSON and from the VWAP weighting (a visible, wrong answer), while
+-- wrongly INCLUDING a mildly-divergent venue only nudges a volume-weighted mean
+-- (a small, self-limiting error). Thin markets legitimately spread several
+-- percent between venues, so a tight threshold costs more than it saves. Tune
+-- against real multi-source assets — see task 0123's reconciliation.
+--
+-- NOTE: the §5.5 `min_volume_usd` inclusion threshold is deliberately NOT here;
+-- it is task 0118, which layers it on top of this filter (cheap sources are
+-- dropped BEFORE the median is taken, so they cannot skew it either).
+
+DROP VIEW IF EXISTS prices.mv_current_prices;
+
+CREATE MATERIALIZED VIEW prices.mv_current_prices
 REFRESH EVERY 1 MINUTE
 TO prices.current_prices
-   (asset_id, price_usd, volume_24h_usd, vwap_24h, market_cap_usd, updated_at) AS
+   (asset_id, price_usd, price_xlm, change_24h_pct, change_7d_pct,
+    volume_24h_usd, market_cap_usd, vwap_24h, sources, updated_at) AS
+WITH
+    -- XLM's own USD close, as a scalar. Resolved by natural key exactly the way
+    -- the enrichment worker's resolve_reference_ids() does (ch_enrich.rs:447):
+    -- XLM is the row with no issuer AND no contract address. 0 when unknown,
+    -- which the nullIf() below turns into a NULL price_xlm → 0.
+    (
+        SELECT argMax(close_usd, timestamp)
+        FROM prices.price_ohlcv_1m FINAL
+        WHERE asset_id = (
+                  SELECT asset_id FROM prices.assets FINAL
+                  WHERE asset_code = 'XLM'
+                    AND issuer_address = ''
+                    AND contract_address = ''
+                  LIMIT 1
+              )
+          AND timestamp >= now() - INTERVAL 24 HOUR
+          AND close_usd > 0
+    ) AS xlm_usd,
+
+    -- Level 1 — one row per (asset, source) over the trailing 24h.
+    per_source AS (
+        SELECT
+            asset_id                          AS asset_id,
+            source                            AS source,
+            argMax(close_usd, timestamp)      AS src_price,
+            sum(volume_quote_usd)             AS src_volume
+        FROM prices.price_ohlcv_1m FINAL
+        WHERE timestamp >= now() - INTERVAL 24 HOUR
+        GROUP BY asset_id, source
+    ),
+
+    -- Level 2 — collapse sources into per-asset arrays so the median filter can
+    -- run as an array pipeline. Decimal arrays are kept for the JSON (exact),
+    -- Float64 arrays for the arithmetic (see numeric strategy above).
+    per_asset AS (
+        SELECT
+            asset_id,
+            groupArray(source)                    AS srcs,
+            groupArray(src_price)                 AS prices_dec,
+            groupArray(src_volume)                AS vols_dec,
+            groupArray(toFloat64(src_price))      AS prices_f,
+            groupArray(toFloat64(src_volume))     AS vols_f
+        FROM per_source
+        WHERE src_price > 0            -- an unpriced source carries no signal and
+                                        -- would drag the median toward zero
+        GROUP BY asset_id
+    ),
+
+    -- Level 2b — the keep-mask. Below 3 sources the mask is all-true (see the
+    -- guard note above); at >= 3 it is |p − median| / median <= OUTLIER_PCT.
+    masked AS (
+        SELECT
+            asset_id,
+            srcs,
+            prices_dec,
+            vols_dec,
+            prices_f,
+            vols_f,
+            arrayReduce('median', prices_f) AS med,
+            if(
+                length(prices_f) >= 3 AND med > 0,
+                arrayMap(p -> abs(p - med) / med <= 0.20, prices_f),
+                arrayMap(p -> 1, prices_f)
+            ) AS keep
+        FROM per_asset
+    ),
+
+    -- Level 2c — apply the mask, then build the surviving aggregates.
+    kept AS (
+        SELECT
+            asset_id,
+            arrayFilter((s, k) -> k, srcs,       keep) AS k_srcs,
+            arrayFilter((p, k) -> k, prices_dec, keep) AS k_prices_dec,
+            arrayFilter((v, k) -> k, vols_dec,   keep) AS k_vols_dec,
+            arrayFilter((p, k) -> k, prices_f,   keep) AS k_prices_f,
+            arrayFilter((v, k) -> k, vols_f,     keep) AS k_vols_f
+        FROM masked
+    ),
+
+    -- The 7-day reference close. Deliberately read from price_ohlcv_1h, NOT
+    -- price_ohlcv_1m: cleanup-worker retains _1m for INTERVAL 7 DAY
+    -- (cleanup-worker/src/lib.rs:22), so a 7-day-old row sits exactly on the
+    -- retention floor — present or absent depending on where "today" falls in
+    -- the month, and wholly unpredictable while cleanup is disabled for a
+    -- backfill. _1h is kept forever (general-overview §3.6).
+    -- close_usd > 0 excludes un-enriched rows, which would otherwise read as a
+    -- -100% change. See task 0114: coarse close_usd was zero across most of
+    -- history until the repair, so this guard is what keeps the column honest.
+    ref_7d AS (
+        SELECT
+            asset_id                     AS asset_id,
+            argMin(close_usd, timestamp) AS close_7d_ago
+        FROM prices.price_ohlcv_1h FINAL
+        WHERE timestamp >= now() - INTERVAL 7 DAY
+          AND close_usd > 0
+        GROUP BY asset_id
+    ),
+
+    -- Whole-asset figures that must NOT be outlier-filtered: price_usd is the
+    -- latest observed close and volume_24h_usd is an actual traded total —
+    -- filtering either would misreport reality rather than de-noise it.
+    -- open_24h is the oldest close inside the same window, which is what makes
+    -- change_24h_pct a plain window read instead of a self-join.
+    unfiltered AS (
+        SELECT
+            asset_id                          AS asset_id,
+            argMax(close_usd, timestamp)      AS price_usd,
+            argMinIf(close_usd, timestamp, close_usd > 0) AS open_24h,
+            sum(volume_quote_usd)             AS volume_24h_usd
+        FROM prices.price_ohlcv_1m FINAL
+        WHERE timestamp >= now() - INTERVAL 24 HOUR
+        GROUP BY asset_id
+    )
 SELECT
-    c.asset_id                                              AS asset_id,
-    argMax(c.close_usd, c.timestamp)                        AS price_usd,
-    sum(c.volume_quote_usd)                                 AS volume_24h_usd,
+    u.asset_id                                              AS asset_id,
+    u.price_usd                                             AS price_usd,
+
+    -- price_xlm — price_usd ÷ XLM/USD. nullIf guards both a missing XLM market
+    -- and a zero price; ifNull lands on the column's 0 = "unavailable" sentinel.
     toDecimal128(
-        ifNull(
-            sum(toFloat64(c.close_usd) * toFloat64(c.volume_quote_usd))
-                / nullIf(sum(toFloat64(c.volume_quote_usd)), 0),
-            0),
-        14)                                                 AS vwap_24h,
+        ifNull(toFloat64(u.price_usd) / nullIf(toFloat64(xlm_usd), 0), 0),
+        14)                                                 AS price_xlm,
+
+    -- change_24h_pct / change_7d_pct — Decimal(10,4), so ±999999.9999 is the
+    -- representable band. A brand-new microcap can genuinely exceed that, and an
+    -- overflow would poison the entire refresh, so both are clamped with least()
+    -- /greatest() rather than left to throw.
+    toDecimal64(
+        greatest(-999999.0, least(999999.0,
+            ifNull(
+                (toFloat64(u.price_usd) - toFloat64(u.open_24h))
+                    / nullIf(toFloat64(u.open_24h), 0) * 100,
+                0))),
+        4)                                                  AS change_24h_pct,
+    toDecimal64(
+        greatest(-999999.0, least(999999.0,
+            ifNull(
+                (toFloat64(u.price_usd) - toFloat64(r.close_7d_ago))
+                    / nullIf(toFloat64(r.close_7d_ago), 0) * 100,
+                0))),
+        4)                                                  AS change_7d_pct,
+
+    u.volume_24h_usd                                        AS volume_24h_usd,
+
     ifNull(
         accurateCastOrNull(
-            toDecimal256(argMax(c.close_usd, c.timestamp), 14)
-                * toDecimal256(ifNull(max(s.token_supply), 0), 14),
+            toDecimal256(u.price_usd, 14)
+                * toDecimal256(ifNull(sup.token_supply, 0), 14),
             'Decimal128(14)'),
         toDecimal128(0, 14))                                AS market_cap_usd,
+
+    -- vwap_24h — volume-weighted across the SURVIVING sources only.
+    toDecimal128(
+        ifNull(
+            arraySum(arrayMap((p, v) -> p * v, k.k_prices_f, k.k_vols_f))
+                / nullIf(arraySum(k.k_vols_f), 0),
+            0),
+        14)                                                 AS vwap_24h,
+
+    -- sources — {"sdex": {"price": "…", "volume_24h": "…"}, …} built from the
+    -- NATIVE Decimal arrays via toString(), so no precision is lost. Excluded
+    -- sources are absent, per general-overview §3.3.
+    toJSONString(
+        CAST(
+            (
+                k.k_srcs,
+                arrayMap((p, v) -> map('price', toString(p), 'volume_24h', toString(v)),
+                         k.k_prices_dec, k.k_vols_dec)
+            ),
+            'Map(String, Map(String, String))'
+        )
+    )                                                       AS sources,
+
     now()                                                   AS updated_at
-FROM prices.price_ohlcv_1m AS c FINAL
-LEFT JOIN prices.asset_supply AS s FINAL ON s.asset_id = c.asset_id
-WHERE c.timestamp >= now() - INTERVAL 24 HOUR
-GROUP BY c.asset_id;
+FROM unfiltered AS u
+LEFT JOIN kept   AS k   ON k.asset_id   = u.asset_id
+LEFT JOIN ref_7d AS r   ON r.asset_id   = u.asset_id
+LEFT JOIN (
+    SELECT asset_id, token_supply FROM prices.asset_supply FINAL
+) AS sup ON sup.asset_id = u.asset_id;

@@ -4,7 +4,6 @@ use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
-use serde_json::json;
 
 use crate::assets::dto::{
     AssetDetail, AssetListItem, AssetListResponse, OhlcvResponse, PriceResponse,
@@ -26,8 +25,9 @@ const MAX_LIMIT: u32 = 200;
 /// `GET /assets/{asset_identifier}/price` — current price for one asset.
 ///
 /// Parsing/validation runs before any DB call, so a malformed identifier 400s
-/// without touching ClickHouse. `price_xlm`, `change_24h_pct`, and `sources` are
-/// v1 stubs (task 0072 fills them producer-side).
+/// without touching ClickHouse. `price_xlm`, `change_24h_pct` and `sources` are
+/// materialized producer-side by `mv_current_prices` (task 0072) and pass
+/// straight through, so this stays a point lookup.
 #[utoipa::path(
     get,
     path = "/assets/{asset_identifier}/price",
@@ -202,7 +202,7 @@ pub async fn get_assets(State(state): State<AppState>, Query(p): Query<ListParam
             change_7d_pct: r.change_7d_pct,
             volume_24h_usd: r.volume_24h_usd,
             vwap_24h: r.vwap_24h,
-            sources: json!({}),
+            sources: crate::assets::dto::parse_sources(&r.sources),
             updated_at: r.updated_at,
         })
         .collect();
