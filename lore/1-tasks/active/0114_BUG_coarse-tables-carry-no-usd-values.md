@@ -393,15 +393,19 @@ the 55%/62% figures.
 - [x] **Pre-check before any implementation** — DONE 2026-07-21. The 62% is
       genuine `no_reference` (exotic quotes), not backlog; live enrichment runs
       at 99.7% on pivotable quotes. Approach holds for the historical repair.
-- [ ] The rollup path no longer freezes un-enriched values — implemented as a
+- [x] The rollup path no longer freezes un-enriched values — implemented as a
       **scheduled, partition-bounded enrichment pass over the coarse tables**
       (see §Chosen approach; the ordering-based alternatives were rejected).
-      *Code + infra DONE 2026-07-24 (prepare-only, see §Recurring guard
-      implementation) — folded into the hourly enrichment Lambda, not a separate
-      cron/Lambda; env-gated, tested, and wired in CDK for all six rollup tables
-      incl. `_15m`. **Remaining: deploy the `*-EventBridge` stack, then verify via
-      the composition query + `CoarseSweep*` metrics.** Box stays unchecked until
-      verified in prod (per keep-open-until-verified).*
+      **DEPLOYED + VERIFIED in prod 2026-07-24** (PR #151 → `1f636f7`;
+      `Prices-production-EventBridge` deployed). Folded into the hourly enrichment
+      Lambda, not a separate cron/Lambda; env-gated, best-effort, wall-clock
+      bounded. Verified live: `coarse sweep complete tables_swept=5
+      tables_failed=0`, budget + best-effort proven. **Scoped to the 5
+      forever-tables** (`1h/4h/1d/1w/1M`); `_15m` was dropped because its `FINAL`
+      scan 504s on the ~30s mTLS-proxy timeout under load → **spawned [[0130]]**
+      (re-measure quiet + fix or permanently exclude; reconcile the CDK drift).
+      Steady-state `rows_enriched=0` is healthy (live MVs keep recent months up;
+      the guard is a backstop for when lag spikes past the MV windows).
 - [x] **Version arithmetic proven by test** — DONE 2026-07-22. A repair row
       outranks the existing coarse row under `sum(version)` RMT semantics.
       `enrichment-worker/tests/ch_enrich_it.rs::coarse_repair_row_outranks_large_summed_version`
@@ -971,13 +975,44 @@ design). The 5th finding (batch the 2 PutMetricData calls) was declined —
 batching would delay the critical-path 1m metric behind the best-effort sweep.
 New test `coarse_sweep_defers_all_work_past_its_deadline` proves the budget.
 
+### ✅ Deployed + verified in prod — 2026-07-24
+
+PR #151 squash-merged (`1f636f7`); `Prices-production-EventBridge` deployed via
+`make deploy-production-eventbridge`. The Step-3 `cdk diff` was the safety gate —
+**only `EnrichmentFunction` changed** (its 4 `COARSE_SWEEP_*` env vars + a new code
+asset, no IAM, no other worker), confirming no develop-drift on the six shared
+cron workers a full-stack EventBridge deploy rebuilds.
+
+Live verification: `coarse sweep config enabled=true tables=5` → `coarse sweep
+complete tables_swept=5 tables_failed=0 tables_skipped=0`. The **wall-clock budget
+and best-effort isolation are both proven in prod** — on an early run (cluster
+heavily loaded) the sweep hit its budget and logged `time budget reached —
+deferring remaining tables`, and a mid-run table error was swallowed without
+failing the invocation or the 1m pass.
+
+> **📌 `_15m` was dropped — it 504s.** Its `FINAL` scan exceeds the ~30s mTLS
+> front-proxy (Caddy) response timeout on the loaded cluster → HTTP 504 → empty
+> `BadResponse("")` → `tables_failed=1`. Measured as `prices_writer` over curl:
+> trivial `count()` 200/0.17s, `FINAL` scan **504/30.14s**. Mitigated by setting
+> `COARSE_SWEEP_TABLES` to the 5 forever-tables at runtime. **CDK still lists 15m
+> → drift.** → [[0130]] owns the fix + CDK reconciliation.
+
+> **📌 Deploy gotchas worth carrying.** (a) Deploying `*-EventBridge` rebuilds ALL
+> 7 cron workers — the `cdk diff` is the gate against shipping unintended worker
+> changes. (b) A synchronous `aws lambda invoke` times out client-side at 60s (the
+> cold-start run exceeds it) — use `--invocation-type Event` + tail logs. (c) Merge
+> order mattered: #151 before #150, because #150 edits `prices-clickhouse/src/lib.rs`
+> which every worker links, so merging it first would have made this EventBridge
+> deploy rebuild all 7 workers with #150's change.
+
 ### Remaining
 
-1. **Deploy** the `*-EventBridge` stack (operator; activates the sweep).
-2. **Verify in prod** — composition query stays at floor + `CoarseSweep*` metrics
-   sane — then check this AC's box.
-3. *(Optional, follow-up)* a CloudWatch alarm on `CoarseSweepTableFailures > 0`
+1. *(Longer-term)* confirm the tables hold at the floor over the coming days via
+   the per-quote-class composition query, and that `CoarseSweepRowsEnriched`
+   stays ≈ 0 in steady state (a sustained non-zero ⇒ enrichment lag / 0111).
+2. *(Optional, follow-up)* a CloudWatch alarm on `CoarseSweepTableFailures > 0`
    in the observability stack.
+3. **`_15m` coverage** → tracked in [[0130]] (includes the CDK-drift reconcile).
 
 ## Cluster findings from the Phase C session (2026-07-23)
 
