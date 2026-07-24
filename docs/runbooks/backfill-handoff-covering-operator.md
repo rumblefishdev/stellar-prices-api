@@ -245,10 +245,48 @@ SQL
 
 **✅ Checkpoint:** `leftover_low_markers` = **0**. Do not launch pass 2 until it is 0.
 
-### 6.3 [FISHUSER-HERO] Launch pass 2 in tmux
+### 6.3 [FISHUSER-HERO] Prepare the binary
 
 > Requires being on fishuser-hero (see _Access_, §3). All commands run **on
 > fishuser-hero**.
+
+**Prefer the binary that pass 1 already used** — it lives at
+`~/stellar-prices-api/target/release/sdex-backfill` and is proven for this run.
+Rebuild **only if it is missing**; a rebuild from newer code could change backfill
+behaviour mid-recovery. If you do rebuild, build from the same branch pass 1 used
+(`develop`).
+
+```bash
+# a) does the repo exist? if not, clone it
+REPO=$HOME/stellar-prices-api
+if [ -d "$REPO/.git" ]; then
+  echo "repo present at $REPO"
+else
+  git clone git@github.com:rumblefishdev/stellar-prices-api.git "$REPO"
+fi
+cd "$REPO"
+
+# b) is the prebuilt binary already there? if yes, skip the build entirely
+BIN=$REPO/target/release/sdex-backfill
+if [ -x "$BIN" ]; then
+  echo "using existing binary — no rebuild"; "$BIN" --version 2>/dev/null || true
+else
+  # c) only if missing: get onto the right branch, pull, and build
+  git fetch origin
+  git checkout develop
+  git pull --ff-only origin develop
+  git log -1 --oneline                       # note the commit you built from
+  cargo build --release -p sdex-backfill --features aws-mtls
+fi
+```
+
+**✅ Checkpoint — build success:** `ls -l "$BIN"` shows the file exists and is
+executable, and `echo "cargo exit = $?"` right after the build prints `0` (a
+non-zero exit means the build failed — do **not** proceed; see §9). If you cloned
+fresh, also confirm the write certs are present: `ls ~/prices-mtls/` shows
+`prices_writer.crt`, `prices_writer.key`, `ca.crt`.
+
+### 6.4 [FISHUSER-HERO] Launch pass 2 in tmux
 
 ```bash
 # 1) certs + CH endpoint (the write path)
@@ -257,10 +295,8 @@ export MTLS_CERT_PATH=$HOME/prices-mtls/prices_writer.crt
 export MTLS_KEY_PATH=$HOME/prices-mtls/prices_writer.key
 export MTLS_CA_PATH=$HOME/prices-mtls/ca.crt
 
-# 2) binary (build it if missing)
+# 2) binary from §6.3
 BIN=$HOME/stellar-prices-api/target/release/sdex-backfill
-ls "$BIN" || ( cd ~/stellar-prices-api && \
-  cargo build --release -p sdex-backfill --features aws-mtls )
 
 # 3) live chain tip (upper bound; only moves forward, so any current value is safe)
 TIP=$(curl -s 'https://horizon.stellar.org/' \
@@ -279,7 +315,7 @@ with **Ctrl-b then d**. Reattach any time with `tmux attach -t sdex-pass2`.
 **✅ Checkpoint (right after launch):** the log shows pre-flight passed and
 partition downloads starting — no immediate error/exit.
 
-### 6.4 Monitor pass 2 (same as Phase 1)
+### 6.5 Monitor pass 2 (same as Phase 1)
 
 Pass 2 rebuilds markers from ledger 1 upward again, so use the **same** query but
 watch it climb toward the pass-2 target `23,423,999`:
@@ -405,7 +441,7 @@ aws events describe-rule --name prices-production-cleanup --region eu-central-1 
 expected. Confirm with samples > 25 min apart and check `contiguous_no_gaps = 1`.
 
 **"A pass died / the process is gone before reaching target."** It is resume-safe.
-Re-launch the **same command** (§6.3 for pass 2; for pass 1 the command is the same
+Re-launch the **same command** (§6.4 for pass 2; for pass 1 the command is the same
 but with `--end 50457423`). Markers already written are skipped automatically.
 
 **"`ENABLED` appeared on the cleanup rule."** Disable it immediately (§4.3) and call
