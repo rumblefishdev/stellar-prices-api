@@ -349,15 +349,46 @@ This phase runs from **wherever the repo is checked out** — fishuser-hero has 
 `~/stellar-prices-api`; your laptop works too if you have the repo cloned. The SQL
 is piped over SSH to prod CH either way.
 
-### 7.1 Pre-flight
+> 🛑 **Run this phase ONLY after the backfill is fully finished — i.e. BOTH pass 1
+> AND pass 2 are complete.** Pre-rolling early bakes an incomplete history into the
+> permanent coarse tables, and because the next step re-enables cleanup, the still-
+> missing 1-minute data would then be deleted before it is ever captured. If any of
+> `[1, 50,457,423]` is not yet in `price_ohlcv_1m`, **stop and finish the backfill
+> first.** The gate in §7.1 checks this for you.
+
+### 7.1 Pre-flight — verify the backfill is COMPLETE (hard gate)
+
+Run this first. It prints a verdict telling you whether the full pre-Soroban span
+`[1, 50,457,423]` is present and contiguous — i.e. both passes are done:
 
 ```bash
-# [LAPTOP or FISHUSER-HERO] confirm the tail reached activation
+# [LAPTOP] backfill-complete gate
 CHQ <<'SQL'
-SELECT max(sequence) AS frontier FROM prices.backfill_sdex_ledgers WHERE sequence < 50457424;
+SELECT
+  min(sequence)                                 AS low,
+  max(sequence)                                 AS high,
+  count()                                       AS markers,
+  count() = (max(sequence) - min(sequence) + 1) AS contiguous_no_gaps,
+  multiIf(
+    min(sequence) <= 3 AND max(sequence) >= 50457423
+      AND count() = (max(sequence) - min(sequence) + 1),
+      'BACKFILL COMPLETE — READY TO PRE-ROLL',
+    max(sequence) >= 50457423,
+      'INCOMPLETE — reaches activation but has GAPS (pass 2 not done?) — do NOT pre-roll',
+    'INCOMPLETE — backfill still running — do NOT pre-roll'
+  )                                             AS status
+FROM prices.backfill_sdex_ledgers
+WHERE sequence < 50457424;
 SQL
-# expect ~50,457,423
+```
 
+**✅ Gate:** the `status` column MUST read **`BACKFILL COMPLETE — READY TO PRE-ROLL`**
+(`low` ≈ 1–3, `high` ≈ 50,457,423, `contiguous_no_gaps` = 1). Anything else → **stop**,
+finish the outstanding pass, and do not continue this phase.
+
+Only once the gate passes, gather the rest of the pre-flight:
+
+```bash
 # [LAPTOP] cleanup STILL disabled (must be)
 aws events describe-rule --name prices-production-cleanup --region eu-central-1 \
   --profile soroban-explorer --query State --output text        # expect DISABLED
