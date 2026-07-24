@@ -288,32 +288,57 @@ fresh, also confirm the write certs are present: `ls ~/prices-mtls/` shows
 
 ### 6.4 [FISHUSER-HERO] Launch pass 2 in tmux
 
+**Run the two blocks below one at a time, in order** — first create the tmux
+session, then run the backfill _inside_ it.
+
+**Step 1 — create the tmux session.** Pass 2 runs for ~4–5 days. `tmux` keeps it
+alive: the process runs inside a session on fishuser-hero that **survives your SSH
+disconnect** (close the laptop, drop off VPN — the backfill keeps going). Without
+tmux, the run would be killed the moment your SSH connection drops.
+
 ```bash
-# 1) certs + CH endpoint (the write path)
+tmux new -s sdex-pass2
+```
+
+Your shell is now **inside** the tmux session (the env vars and process in Step 2
+must run here, not in the outer shell).
+
+**Step 2 — inside tmux, start the backfill.** Paste this whole block into the tmux
+session:
+
+```bash
+# certs + CH endpoint (the write path)
 export CH_DOMAIN=ch.sorobanscan.rumblefish.dev
 export MTLS_CERT_PATH=$HOME/prices-mtls/prices_writer.crt
 export MTLS_KEY_PATH=$HOME/prices-mtls/prices_writer.key
 export MTLS_CA_PATH=$HOME/prices-mtls/ca.crt
 
-# 2) binary from §6.3
+# binary from §6.3
 BIN=$HOME/stellar-prices-api/target/release/sdex-backfill
 
-# 3) live chain tip (upper bound; only moves forward, so any current value is safe)
+# live chain tip (upper bound; only moves forward, so any current value is safe)
 TIP=$(curl -s 'https://horizon.stellar.org/' \
   | python3 -c 'import sys,json;print(json.load(sys.stdin)["core_latest_ledger"])')
 echo "tip = $TIP"
 
-# 4) run it inside tmux so it survives disconnects; log OUTSIDE /tmp
-tmux new -s sdex-pass2       # detach with:  Ctrl-b  then  d
+# run it; log OUTSIDE /tmp so a reboot/cleanup can't wipe the log
 "$BIN" --mode sdex-only --start 1 --end 23423999 --tip "$TIP" \
   --transport hetzner --verbose 2>&1 | tee -a "$HOME/sdex-pass2.log"
 ```
 
-A healthy start prints pre-flight checks passing and begins downloading. Detach
-with **Ctrl-b then d**. Reattach any time with `tmux attach -t sdex-pass2`.
+**Detach / reattach:**
+
+- **Detach** (leave it running, return to your normal shell): press **Ctrl-b**,
+  release, then press **d**.
+- **Reattach** later (from a fresh SSH session into fishuser-hero):
+  `tmux attach -t sdex-pass2`.
+- **List sessions:** `tmux ls` (you should see `sdex-pass2`).
+
+A healthy start prints pre-flight checks passing and begins downloading.
 
 **✅ Checkpoint (right after launch):** the log shows pre-flight passed and
-partition downloads starting — no immediate error/exit.
+partition downloads starting — no immediate error/exit. Then detach and monitor
+from your laptop (§6.5).
 
 ### 6.5 Monitor pass 2 (same as Phase 1)
 
