@@ -954,8 +954,22 @@ broken repeatedly here.
   from placeholder to the real automated design: enable/disable/tune table, the
   emergency env off-switch, metrics, 0111 relationship, post-deploy verification.
 
-Verification run: 28 unit + 9 integration tests green; compiles under
+Verification run: 28 unit + 10 integration tests green; compiles under
 `aws-mtls`/`lambda`/default; clippy clean; infra typecheck+lint+synth clean.
+
+**Hardened after `/code-review` (2026-07-24):** four findings fixed —
+(1) **wall-clock budget** (`COARSE_SWEEP_TIME_BUDGET_SECS=120`, capped a margin
+under the Lambda deadline read from the invocation context): without it a slow
+catch-up would hit the hard timeout, which is an invocation error the best-effort
+handler cannot catch, so it would fail the invocation and trip the alarm —
+directly contradicting the design guarantee; (2) non-coarse config names now go
+to `skipped_tables`, not `failed_tables`, so a config typo can't false-fire the
+dead-sweep alarm every run (and are dropped once at cold start); (3) dropped the
+`CoarseSweepRowsRemaining` metric — floor-dominated, couldn't show lag; (4) the
+snapshot-disabled per-month log downgraded `warn!`→`debug!` (fired ~12×/hr by
+design). The 5th finding (batch the 2 PutMetricData calls) was declined —
+batching would delay the critical-path 1m metric behind the best-effort sweep.
+New test `coarse_sweep_defers_all_work_past_its_deadline` proves the budget.
 
 ### Remaining
 

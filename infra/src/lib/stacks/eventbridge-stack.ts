@@ -424,6 +424,13 @@ export class EventBridgeStack extends cdk.Stack {
         // early-exits (recent partitions already at the no_reference floor); this
         // caps a catch-up run so it cannot approach the timeout.
         COARSE_SWEEP_MAX_BATCHES: '20',
+        // Wall-clock budget (seconds) for the sweep per invocation. The handler
+        // stops it this long after it starts — and always a margin before the
+        // Lambda deadline — so a slow catch-up defers to the next run instead of
+        // being hard-killed by the 5-min timeout (a timeout is an invocation
+        // error the best-effort handler cannot catch, so without this a long
+        // sweep would fail the invocation and trip the enrichment alarm).
+        COARSE_SWEEP_TIME_BUDGET_SECS: '120',
       },
       alarmDescription:
         'Enrichment Lambda invocation errors (close_usd / volume_quote_usd enrichment pass failed).',

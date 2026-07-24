@@ -171,6 +171,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Manual historical repair: drain each month to the no_reference floor in
         // one pass. (The recurring hourly sweep sets this false — bounded.)
         one_shot: true,
+        // No wall-clock budget — the operator run must drain in full, not defer.
+        deadline: None,
     };
 
     // Build the CH client per transport, then hand it to the driver.

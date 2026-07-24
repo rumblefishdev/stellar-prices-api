@@ -103,14 +103,21 @@ pub fn pass_metrics(stats: &ChPassStats) -> Vec<Metric> {
 ///
 ///   * `CoarseSweepRowsEnriched` — coarse rows corrected this run, across all
 ///     swept tables. Steady-state ≈ 0 once the tables sit at the floor; a
-///     sustained non-zero means the rollup path is re-freezing zeros (i.e. the
-///     guard is earning its keep, likely because enrichment lag exceeded the MV
-///     windows — task 0111 territory).
-///   * `CoarseSweepRowsRemaining` — coarse zeros still left in the trailing
-///     window after the run (the `no_reference` floor plus any bounded overflow
-///     deferred to the next run).
-///   * `CoarseSweepTableFailures` — tables skipped (non-coarse) or whose pass
-///     errored this run; a non-zero here is the dead-sweep signal to alarm on.
+///     sustained non-zero is the actionable signal — the rollup path is
+///     re-freezing zeros (enrichment lag exceeded the MV windows — task 0111
+///     territory) and the guard is earning its keep.
+///   * `CoarseSweepTableFailures` — tables whose pass **errored** this run. The
+///     dead-sweep signal to alarm on. Deliberately excludes config-skipped
+///     tables (below), so a benign mis-config cannot false-fire the alarm.
+///   * `CoarseSweepTablesSkipped` — non-coarse names left in the config
+///     (`price_ohlcv_1m` / typos). Visible for hygiene, but a static condition,
+///     not a runtime failure — kept off the alarm series.
+///
+/// A `RowsRemaining` metric is intentionally NOT published: `zeros_after` is
+/// dominated by the permanent multi-million exotic `no_reference` floor, so it
+/// sits near-constant whether or not the sweep is keeping up and cannot observe
+/// the lag it would exist to catch. `RowsEnriched` is the usable signal; the
+/// floor size is available on demand via the per-quote-class composition query.
 pub fn sweep_metrics(summary: &CoarseSweepSummary) -> Vec<Metric> {
     vec![
         Metric {
@@ -119,13 +126,13 @@ pub fn sweep_metrics(summary: &CoarseSweepSummary) -> Vec<Metric> {
             unit: Unit::Count,
         },
         Metric {
-            name: "CoarseSweepRowsRemaining",
-            value: summary.total_remaining() as f64,
+            name: "CoarseSweepTableFailures",
+            value: summary.failed_tables.len() as f64,
             unit: Unit::Count,
         },
         Metric {
-            name: "CoarseSweepTableFailures",
-            value: summary.failed_tables.len() as f64,
+            name: "CoarseSweepTablesSkipped",
+            value: summary.skipped_tables.len() as f64,
             unit: Unit::Count,
         },
     ]
@@ -209,7 +216,7 @@ mod tests {
     }
 
     #[test]
-    fn sweep_metrics_sum_across_tables_and_count_failures() {
+    fn sweep_metrics_sum_enriched_and_split_failed_from_skipped() {
         use crate::repair::{CoarseSweepSummary, MonthRepair, RepairSummary, TableSweep};
 
         let table = |name: &str, enriched: u64, remaining: u64| TableSweep {
@@ -228,16 +235,21 @@ mod tests {
             start_month: 202_605,
             end_month: 202_606,
             tables: vec![table("price_ohlcv_1h", 8, 2), table("price_ohlcv_4h", 4, 1)],
-            failed_tables: vec!["price_ohlcv_1m".to_string()],
+            // A genuine runtime pass error vs a benign config skip — distinct series.
+            failed_tables: vec!["price_ohlcv_1d".to_string()],
+            skipped_tables: vec!["price_ohlcv_1m".to_string()],
         };
 
         let m = sweep_metrics(&summary);
         let by = |name: &str| m.iter().find(|x| x.name == name).expect("metric present");
-        // Enriched / remaining are summed across every swept table (8+4, 2+1).
+        // Enriched is summed across every swept table (8+4).
         assert_eq!(by("CoarseSweepRowsEnriched").value, 12.0);
-        assert_eq!(by("CoarseSweepRowsRemaining").value, 3.0);
-        // One table was refused/failed → the dead-sweep alarm series reads 1.
+        // The alarm series counts ONLY the errored table, not the config skip …
         assert_eq!(by("CoarseSweepTableFailures").value, 1.0);
+        // … which is surfaced on its own, non-alarming series instead.
+        assert_eq!(by("CoarseSweepTablesSkipped").value, 1.0);
+        // RowsRemaining is deliberately not published (floor-dominated).
+        assert!(!m.iter().any(|x| x.name == "CoarseSweepRowsRemaining"));
         assert_eq!(m.len(), 3);
     }
 

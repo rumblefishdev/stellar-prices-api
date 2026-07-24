@@ -26,9 +26,11 @@
 //! `FREEZE`d first (a cheap server-side hardlink under `shadow/`) before it is
 //! touched, so a bad run can be reverted with `ATTACH PARTITION`.
 
+use std::time::Instant;
+
 use clickhouse::{Client, Row};
 use serde::{Deserialize, Serialize};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::ch_enrich::{ChEnrichConfig, ChEnrichError, ChEnrichmentPass};
 
@@ -64,6 +66,14 @@ pub struct CoarseRepairConfig {
     ///   state the recent backlog is near-empty, so a bounded pass early-exits
     ///   cheaply.
     pub one_shot: bool,
+    /// Optional wall-clock stop time. When set, [`CoarseRepairDriver::run`]
+    /// checks it before each month and stops cleanly once reached, returning what
+    /// it finished; the unreached months defer to the next run. `None` = no
+    /// deadline (the manual CLI historical repair, which must drain in full). The
+    /// recurring sweep sets this so a slow catch-up can never run past the Lambda
+    /// timeout — a hard timeout is not a Rust `Err` and would otherwise escape the
+    /// best-effort handler and fail the invocation.
+    pub deadline: Option<Instant>,
 }
 
 /// A month that still holds enrichable zeros, with the exact `[start, end)`
@@ -237,6 +247,20 @@ impl CoarseRepairDriver {
 
         let mut summary = RepairSummary::default();
         for mw in months {
+            // Wall-clock budget (recurring sweep): stop cleanly before the Lambda
+            // timeout would hard-kill the process. The unreached months defer to
+            // the next run. No-op for the CLI (deadline = None).
+            if let Some(deadline) = self.cfg.deadline
+                && Instant::now() >= deadline
+            {
+                info!(
+                    table = %self.cfg.enrich.table,
+                    next_month = mw.month,
+                    "coarse repair: time budget reached — deferring remaining months to the next run"
+                );
+                break;
+            }
+
             if self.cfg.dry_run {
                 info!(
                     month = mw.month,
@@ -256,9 +280,14 @@ impl CoarseRepairDriver {
             let snapshot_name = if self.cfg.snapshot {
                 Some(self.freeze_partition(mw.month).await?)
             } else {
-                warn!(
+                // debug!, not warn!: the recurring sweep runs snapshotless by
+                // design (recent partitions are not the sole copy), so this fires
+                // every month every run — a warn here would bury real warnings.
+                // The operator CLI's own top-level `--skip-snapshot` warning
+                // (coarse-repair.rs) covers the deliberate manual case.
+                debug!(
                     month = mw.month,
-                    "coarse repair: snapshot DISABLED for this partition"
+                    "coarse repair: snapshot disabled for this partition"
                 );
                 None
             };
@@ -354,14 +383,22 @@ pub struct TableSweep {
 }
 
 /// Whole-sweep result: the trailing window actually swept, each table's outcome,
-/// and any tables whose pass errored (isolated — one bad table never starves the
-/// rest; see [`run_coarse_sweep`]).
+/// and the two disjoint problem buckets — kept separate so a benign static
+/// mis-config cannot masquerade as a runtime failure on the alarm series.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct CoarseSweepSummary {
     pub start_month: u32,
     pub end_month: u32,
     pub tables: Vec<TableSweep>,
+    /// Tables whose enrichment pass **errored** this run (isolated — one bad
+    /// table never starves the rest). This is the true dead-sweep signal.
     pub failed_tables: Vec<String>,
+    /// Tables **refused** because they are not coarse rollups (`price_ohlcv_1m`
+    /// or a non-`price_ohlcv_*` name left in the config). A static, benign
+    /// condition — NOT a runtime failure, so it is reported on its own series and
+    /// never counted as a `failed_table` (which would false-fire the alarm every
+    /// run for a config typo).
+    pub skipped_tables: Vec<String>,
 }
 
 impl CoarseSweepSummary {
@@ -377,8 +414,10 @@ impl CoarseSweepSummary {
 }
 
 /// A coarse rollup the sweep may touch: `price_ohlcv_*` except the live base
-/// table `price_ohlcv_1m`. Mirrors the operator CLI's table guard.
-fn is_coarse_table(table: &str) -> bool {
+/// table `price_ohlcv_1m`. Mirrors the operator CLI's table guard. Public so the
+/// Lambda entrypoint can drop mis-configured names at cold start (a loud,
+/// once-per-container signal) rather than every hourly run.
+pub fn is_coarse_table(table: &str) -> bool {
     table.starts_with("price_ohlcv_") && table != "price_ohlcv_1m"
 }
 
@@ -409,14 +448,23 @@ async fn current_month_window(
 /// [`CoarseRepairDriver`] as the historical repair, just bounded (`one_shot =
 /// false`) and snapshotless.
 ///
-/// Per-table failure isolation: a table whose pass errors is recorded in
-/// [`CoarseSweepSummary::failed_tables`] and the sweep continues with the rest,
-/// so one unhealthy table cannot starve the others. Only a failure of the window
-/// query itself (nothing can proceed without a window) returns `Err`. The Lambda
-/// treats the whole call as best-effort regardless.
+/// `deadline` is an optional wall-clock stop time: the sweep checks it before
+/// each table (and the driver before each month), so a slow catch-up run stops
+/// cleanly and defers the rest rather than being hard-killed by the Lambda
+/// timeout — which, being an invocation-level error rather than a Rust `Err`,
+/// would escape the caller's best-effort handling. `None` = no limit.
+///
+/// Two disjoint problem buckets: a table whose pass **errors** goes to
+/// [`CoarseSweepSummary::failed_tables`] (the dead-sweep signal), while a
+/// non-coarse table left in the config goes to
+/// [`CoarseSweepSummary::skipped_tables`] (benign, never alarmed). Either way the
+/// sweep continues, so one bad table never starves the rest. Only a failure of
+/// the window query itself returns `Err`; the Lambda treats the call as
+/// best-effort regardless.
 pub async fn run_coarse_sweep(
     client: &Client,
     cfg: &CoarseSweepConfig,
+    deadline: Option<Instant>,
 ) -> Result<CoarseSweepSummary, ChEnrichError> {
     let (start_month, end_month) = current_month_window(client, cfg.lookback_months).await?;
     info!(
@@ -434,12 +482,23 @@ pub async fn run_coarse_sweep(
     };
 
     for table in &cfg.tables {
+        // Wall-clock budget: stop before the Lambda timeout would hard-kill us.
+        if let Some(deadline) = deadline
+            && Instant::now() >= deadline
+        {
+            info!(
+                next_table = %table,
+                "coarse sweep: time budget reached — deferring remaining tables to the next run"
+            );
+            break;
+        }
+
         if !is_coarse_table(table) {
             warn!(
                 table = %table,
                 "coarse sweep: refusing non-coarse table (price_ohlcv_1m or non-OHLCV) — skipped"
             );
-            summary.failed_tables.push(table.clone());
+            summary.skipped_tables.push(table.clone());
             continue;
         }
 
@@ -453,6 +512,7 @@ pub async fn run_coarse_sweep(
             snapshot: false,
             dry_run: false,
             one_shot: false,
+            deadline,
         };
 
         match CoarseRepairDriver::with_client(client.clone(), repair_cfg)

@@ -723,6 +723,7 @@ async fn coarse_repair_driver_bounds_span_and_reports_per_month() {
             snapshot: true,
             dry_run: false,
             one_shot: true,
+            deadline: None,
         },
     );
     let summary = driver.run().await.unwrap();
@@ -810,7 +811,8 @@ async fn coarse_repair_driver_bounds_span_and_reports_per_month() {
 ///      proving partition-bounding (task 0111) without a fixed month argument.
 ///   2. **Multi-table** — it sweeps every configured coarse table.
 ///   3. **Non-coarse tables are refused** — `price_ohlcv_1m` (the live base) is
-///      recorded under `failed_tables` and never touched.
+///      recorded under `skipped_tables` (NOT `failed_tables`, which is the alarm
+///      series) and never touched.
 #[tokio::test]
 #[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
 async fn coarse_sweep_bounds_trailing_window_and_refuses_the_1m_base() {
@@ -872,17 +874,21 @@ async fn coarse_sweep_bounds_trailing_window_and_refuses_the_1m_base() {
         lookback_months: 2,
         max_batches: 10,
     };
-    let sum = run_coarse_sweep(&client, &sweep_cfg).await.unwrap();
+    // No wall-clock limit for this test — exercise the full window.
+    let sum = run_coarse_sweep(&client, &sweep_cfg, None).await.unwrap();
 
     // Window resolved from now() …
     assert_eq!(sum.start_month, start_expected);
     assert_eq!(sum.end_month, end_expected);
     // … two coarse tables swept, the 1m base refused.
     assert_eq!(sum.tables.len(), 2, "1h and 4h swept");
+    // The refusal lands on `skipped_tables` (benign config), NOT `failed_tables`
+    // (the dead-sweep alarm series) — a mis-config must never trip the alarm.
+    assert!(sum.failed_tables.is_empty(), "no runtime failures");
     assert_eq!(
-        sum.failed_tables,
+        sum.skipped_tables,
         vec!["price_ohlcv_1m".to_string()],
-        "the live 1m base is refused, never swept"
+        "the live 1m base is refused (skipped), never swept"
     );
     // Two in-window rows per table enriched; the out-of-window rows aren't even
     // enumerated, so nothing is left "remaining" in the swept months.
@@ -914,6 +920,74 @@ async fn coarse_sweep_bounds_trailing_window_and_refuses_the_1m_base() {
         .await
         .unwrap();
     assert_eq!(base_zeros, 1, "the sweep never wrote the 1m base table");
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// Wall-clock budget (task 0114). A slow catch-up must not run into the Lambda
+/// hard-timeout — which is an invocation error the best-effort handler cannot
+/// catch — so the sweep stops at its deadline and defers the rest. With an
+/// already-elapsed deadline it must enrich NOTHING and record no failures/skips
+/// (deferred ≠ failed), leaving the seeded zero for the next run.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn coarse_sweep_defers_all_work_past_its_deadline() {
+    let db = "it_coarse_sweep_deadline";
+    let client = setup_scratch(db).await;
+
+    client
+        .query(&ASSETS.replace("{db}", db).replace("{usdc}", USDC_ISSUER))
+        .execute()
+        .await
+        .unwrap();
+
+    // One in-window, peg-enrichable FOO/USDC bucket that WOULD be repaired with no
+    // deadline.
+    client
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1h \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) \
+             VALUES (toUnixTimestamp(toStartOfMonth(now())), 10,2,'sdex', 8,8,8,8, 1,40,0,0,8,1,1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    let sweep_cfg = CoarseSweepConfig {
+        base: cfg(db),
+        tables: vec!["price_ohlcv_1h".to_string()],
+        lookback_months: 2,
+        max_batches: 10,
+    };
+    // Deadline already in the past → the pre-table check trips immediately.
+    let past = std::time::Instant::now();
+    let sum = run_coarse_sweep(&client, &sweep_cfg, Some(past))
+        .await
+        .unwrap();
+
+    // Nothing swept, and — crucially — the deferred table is NOT a failure/skip.
+    assert!(
+        sum.tables.is_empty(),
+        "deadline stopped the sweep before any table"
+    );
+    assert!(sum.failed_tables.is_empty(), "deferred is not failed");
+    assert!(sum.skipped_tables.is_empty(), "deferred is not skipped");
+    assert_eq!(sum.total_enriched(), 0);
+
+    // The seeded zero is untouched — it will be picked up on a future run.
+    let zeros: u64 = client
+        .query(&format!(
+            "SELECT count() FROM {db}.price_ohlcv_1h FINAL WHERE close_usd = 0"
+        ))
+        .fetch_one::<u64>()
+        .await
+        .unwrap();
+    assert_eq!(zeros, 1, "the in-window zero was deferred, not repaired");
 
     client
         .query(&format!("DROP DATABASE {db}"))
@@ -979,6 +1053,7 @@ async fn coarse_repair_bounded_mode_defers_overflow_across_runs() {
         snapshot: false, // the recurring sweep never freezes (recent, not sole-copy)
         dry_run: false,
         one_shot: false, // ← the knob under test: BOUNDED, not full-drain
+        deadline: None,  // no wall-clock limit here — testing the batch bound
     };
 
     // Run 1 — bounded: 4 of the 7 enriched, the overflow deferred (not drained).

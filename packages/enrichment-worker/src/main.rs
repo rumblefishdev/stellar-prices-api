@@ -21,10 +21,11 @@
 #[tokio::main]
 async fn main() -> Result<(), lambda_runtime::Error> {
     use enrichment_worker::ch_enrich::{ChEnrichConfig, ChEnrichmentPass};
-    use enrichment_worker::repair::CoarseSweepConfig;
+    use enrichment_worker::repair::{CoarseSweepConfig, is_coarse_table};
     use lambda_runtime::{LambdaEvent, run, service_fn};
     use prices_clickhouse::env::{env_or, env_parse_or};
     use std::sync::Arc;
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
@@ -79,11 +80,26 @@ async fn main() -> Result<(), lambda_runtime::Error> {
     // set, so the code ships inert until the CDK env turns it on. It runs AFTER
     // the 1m pass, bounded (one_shot = false) and best-effort (see the handler).
     let sweep_cfg: Option<CoarseSweepConfig> = {
-        let tables: Vec<String> = env_or("COARSE_SWEEP_TABLES", "")
+        // Validate the table list ONCE at cold start: drop any non-coarse name
+        // (a typo, or the off-limits live `price_ohlcv_1m`) with a loud warning
+        // here rather than refusing it on every hourly run — the latter would
+        // permanently mark the run as having a skipped table.
+        let mut tables = Vec::new();
+        for name in env_or("COARSE_SWEEP_TABLES", "")
             .split(',')
-            .map(|s| s.trim().to_string())
+            .map(str::trim)
             .filter(|s| !s.is_empty())
-            .collect();
+        {
+            if is_coarse_table(name) {
+                tables.push(name.to_string());
+            } else {
+                tracing::warn!(
+                    table = %name,
+                    "coarse sweep: ignoring non-coarse table in COARSE_SWEEP_TABLES \
+                     (expected price_ohlcv_15m … _1M; price_ohlcv_1m is the live base and off-limits)"
+                );
+            }
+        }
         if tables.is_empty() {
             None
         } else {
@@ -97,11 +113,18 @@ async fn main() -> Result<(), lambda_runtime::Error> {
             })
         }
     };
+    // Per-invocation wall-clock budget for the sweep. It stops after this many
+    // seconds — further capped by the Lambda deadline minus a margin below — so a
+    // slow catch-up defers to the next run instead of being hard-killed by the
+    // function timeout (which is an invocation error, not a Rust Err, and would
+    // escape the best-effort handling and fail the invocation).
+    let sweep_budget_secs: u64 = env_parse_or("COARSE_SWEEP_TIME_BUDGET_SECS", 120);
     tracing::info!(
         enabled = sweep_cfg.is_some(),
         tables = sweep_cfg.as_ref().map_or(0, |s| s.tables.len()),
         lookback_months = sweep_cfg.as_ref().map_or(0, |s| s.lookback_months),
         max_batches = sweep_cfg.as_ref().map_or(0, |s| s.max_batches),
+        time_budget_secs = sweep_budget_secs,
         "coarse sweep config"
     );
     let sweep = Arc::new(sweep_cfg);
@@ -125,12 +148,14 @@ async fn main() -> Result<(), lambda_runtime::Error> {
     let env_name = Arc::new(env_name);
     tracing::info!("enrichment-worker cold start ready");
 
-    run(service_fn(move |_event: LambdaEvent<serde_json::Value>| {
+    run(service_fn(move |event: LambdaEvent<serde_json::Value>| {
         let pass = pass.clone();
         let cw = cw.clone();
         let env_name = env_name.clone();
         let sweep = sweep.clone();
         let sweep_client = sweep_client.clone();
+        // The Lambda invocation deadline (epoch ms) — bounds the sweep's budget.
+        let lambda_deadline_ms = event.context.deadline;
         async move {
             let stats = pass.run().await?;
             tracing::info!(
@@ -154,9 +179,30 @@ async fn main() -> Result<(), lambda_runtime::Error> {
             // Recurring coarse-table sweep (task 0114), AFTER the critical-path 1m
             // pass and strictly best-effort: any failure is logged and swallowed so
             // a coarse hiccup can never fail the invocation or regress 1m
-            // enrichment. Bounded per run, so it also cannot blow the timeout.
+            // enrichment. Time-bounded (below), so it also cannot blow the timeout.
             if let Some(sweep_cfg) = sweep.as_ref() {
-                match enrichment_worker::repair::run_coarse_sweep(&sweep_client, sweep_cfg).await {
+                // Stop time = now + budget, capped so the sweep always finishes a
+                // margin BEFORE the Lambda deadline. If the 1m pass already
+                // consumed most of the budget, `remaining` is small and the sweep
+                // does little/nothing this run, deferring to the next — the point
+                // is that it never runs into the hard timeout.
+                const MARGIN_MS: u64 = 60_000;
+                let now_ms = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map_or(0, |d| d.as_millis() as u64);
+                let remaining_ms = lambda_deadline_ms
+                    .saturating_sub(now_ms)
+                    .saturating_sub(MARGIN_MS);
+                let budget_ms = sweep_budget_secs.saturating_mul(1_000).min(remaining_ms);
+                let sweep_deadline = Instant::now() + Duration::from_millis(budget_ms);
+
+                match enrichment_worker::repair::run_coarse_sweep(
+                    &sweep_client,
+                    sweep_cfg,
+                    Some(sweep_deadline),
+                )
+                .await
+                {
                     Ok(sum) => {
                         tracing::info!(
                             start_month = sum.start_month,
@@ -165,6 +211,7 @@ async fn main() -> Result<(), lambda_runtime::Error> {
                             rows_remaining = sum.total_remaining(),
                             tables_swept = sum.tables.len(),
                             tables_failed = sum.failed_tables.len(),
+                            tables_skipped = sum.skipped_tables.len(),
                             "coarse sweep complete"
                         );
                         let sm = enrichment_worker::metrics::sweep_metrics(&sum);

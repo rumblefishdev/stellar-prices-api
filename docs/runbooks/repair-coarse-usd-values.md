@@ -334,11 +334,12 @@ broken repeatedly (cursor freeze, cleanup mid-backfill, the 4-day outage).
 Set in CDK (`infra/src/lib/stacks/eventbridge-stack.ts`, the enrichment Lambda's
 `environment`). Takes effect on the next deploy of the `*-EventBridge` stack.
 
-| var                            | default                               | meaning                                                                                                                                                                        |
-| ------------------------------ | ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `COARSE_SWEEP_TABLES`          | `price_ohlcv_15m,_1h,_4h,_1d,_1w,_1M` | comma list of coarse tables to sweep. **This is the on/off switch — clear it to disable the sweep, no code change.** `price_ohlcv_1m` (or any non-`price_ohlcv_*`) is refused. |
-| `COARSE_SWEEP_LOOKBACK_MONTHS` | `2`                                   | trailing months swept, inclusive of the current month (2 = current + previous). Covers month-boundary rollups + multi-day lag.                                                 |
-| `COARSE_SWEEP_MAX_BATCHES`     | `20`                                  | per-tier batch budget per month; caps a catch-up run.                                                                                                                          |
+| var                             | default                               | meaning                                                                                                                                                                                                                                        |
+| ------------------------------- | ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `COARSE_SWEEP_TABLES`           | `price_ohlcv_15m,_1h,_4h,_1d,_1w,_1M` | comma list of coarse tables to sweep. **This is the on/off switch — clear it to disable the sweep, no code change.** Non-coarse names (`price_ohlcv_1m` / typos) are dropped at cold start with a warning; they do NOT fire the failure alarm. |
+| `COARSE_SWEEP_LOOKBACK_MONTHS`  | `2`                                   | trailing months swept, inclusive of the current month (2 = current + previous). Covers month-boundary rollups + multi-day lag.                                                                                                                 |
+| `COARSE_SWEEP_MAX_BATCHES`      | `20`                                  | per-tier batch budget per month; caps a catch-up run.                                                                                                                                                                                          |
+| `COARSE_SWEEP_TIME_BUDGET_SECS` | `120`                                 | wall-clock budget per invocation; the sweep stops after this long (and always a margin before the Lambda deadline) and defers the rest, so a slow catch-up can never hit the hard timeout and fail the invocation.                             |
 
 > **Emergency off switch (no deploy):** in the AWS console set the enrichment
 > Lambda's `COARSE_SWEEP_TABLES` env var to empty. The next hourly run skips the
@@ -353,15 +354,21 @@ data, since cleanup has dropped the older partition — harmless).
 ### Metrics to watch (`Prices/Enrichment` namespace, `Environment` dimension)
 
 - `CoarseSweepRowsEnriched` — coarse rows corrected per run. **Steady state ≈ 0**
-  once the tables sit at the floor. A _sustained_ non-zero means the rollup path
-  is re-freezing zeros — enrichment lag is exceeding the MV windows (task 0111
-  territory) and the guard is earning its keep.
-- `CoarseSweepRowsRemaining` — coarse zeros left in the trailing window after the
-  run (the `no_reference` floor plus any bounded overflow deferred to next run).
-- `CoarseSweepTableFailures` — tables refused or errored this run. **Alarm on
-  `> 0`** — this is the dead-sweep signal. The enrichment `-errors` alarm will
-  **not** catch a sweep failure, because the sweep is best-effort and never fails
-  the invocation.
+  once the tables sit at the floor. A _sustained_ non-zero is the actionable
+  signal: the rollup path is re-freezing zeros, enrichment lag is exceeding the MV
+  windows (task 0111 territory) and the guard is earning its keep.
+- `CoarseSweepTableFailures` — tables whose pass **errored** this run. **Alarm on
+  `> 0`** — the dead-sweep signal. (The enrichment `-errors` alarm will **not**
+  catch a sweep failure: the sweep is best-effort and never fails the invocation.)
+  Config skips are deliberately excluded so a benign typo can't false-fire it.
+- `CoarseSweepTablesSkipped` — non-coarse names left in the config. Informational
+  hygiene, not an alarm series.
+
+> No `CoarseSweepRowsRemaining` metric is published: the trailing window's
+> `zeros_after` is dominated by the permanent multi-million exotic `no_reference`
+> floor, so it would sit near-constant whether or not the sweep is keeping up —
+> useless as a lag signal. `RowsEnriched` is the signal; the floor size comes from
+> the composition query on demand.
 
 ### Verifying it after deploy
 
