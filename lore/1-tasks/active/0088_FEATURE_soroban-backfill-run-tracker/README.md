@@ -133,6 +133,26 @@ history:
       dropped price_ohlcv_1m partitions while leaving markers intact. That is
       also exactly why recovery step 2 must DELETE the markers before pass 2,
       or the resume logic skips the whole span.
+  - date: 2026-07-23
+    status: active
+    who: okarcz
+    note: >
+      Health check during the 0114 Phase C session. Pass 1 HEALTHY - frontier
+      35,839,999, markers contiguous with zero gaps, 14.62M remaining. Rate has
+      eased to ~151k/hr (25.4 min per 64k partition) from a 165k/hr two-day
+      average because the run is download-bound and partitions are growing
+      (4.90 to 5.49 GB, sync 1483 to 1568s, index flat at ~940s), so ETA slips
+      to 2026-07-27/28. NEW FINDING - the soroban_amm leg is DEAD and its status
+      field lies: backfill_progress says status=running but last_push_at is
+      2026-07-14 17:54:24 and no process exists on fishuser-hero, stopping
+      122,864 ledgers short of target at the start of the 0111 outage window.
+      Nothing writes a terminal state on crash. ~1h to recover, needs the pool
+      registry seeded first. Also confirmed the cleanup EventBridge rule is
+      DISABLED and price_ohlcv_1m has NO TTL, so nothing is deleting now -- but
+      the 1m hole is far wider than recorded (only 2018-12-13 to 2021-06-14, the
+      backfill's own output, plus 2026-07-01 onward from live; everything
+      between is gone) and the mechanism of that loss is UNVERIFIED. See 0114
+      for the mutation-vs-DropPart correction that follows from it.
 ---
 
 # Execute + track the historical backfill run (SDEX + Soroban AMM)
@@ -177,8 +197,8 @@ meanwhile.
 |-------|--------|
 | `[activation, 50687999]` | data + `pool_registry` landed; run fatal-exited on the 0087 router guard (fixed + merged, PR #92). |
 | `[50688000, 51007999]` | ✅ first clean forward chunk (2026-07-07) — 320k ledgers, SDEX 17.22M candles, AMM=0/oracle=0 (expected early epoch), 0 new unresolved. ~3.4 h, 59 GB. |
-| `[51008000, 63352611]` combined remainder | ⏳ ~12.3M ledgers ≈ ~2.3 TB / ~5.6 days continuous. |
-| `[1, 50457423]` pre-Soroban SDEX tail — **pass 1** | ⏳ **RUNNING, HEALTHY, ON RATE** (fishuser-hero, tmux `sdex-tail`). **2026-07-21 13:35 UTC: floor 27,583,999** (was 23,423,999 at 07-20 14:15 → **4.16M ledgers in 23h20m = 178.3k/hr**, within 1% of the documented 177k). Markers contiguous: 27,583,997 over `3 → 27,583,999`, no gaps. Remaining 22.87M ledgers ≈ **5.3 days → ETA 2026-07-26/27**. ⚠️ The 54.7% marker figure OVERSTATES real progress — see the durable-data row below. (Liveness: `pgrep -af sdex-backfill` + partition # climbing in `~/sdex-tail.log` over ≥25 min; do NOT sample CH markers <22 min apart — download-bound cadence freezes them transiently.) |
+| `[51008000, 63352611]` combined remainder | 🔴 **STALLED SINCE 2026-07-14 — and its status field lies.** `prices.backfill_progress` reads `task_name: soroban_amm, status: running, current_ledger: 63,352,611`, but `last_push_at` is **2026-07-14 17:54:24** (9 days stale as of 07-23) and **no process exists** — `pgrep -af "sdex-backfill.*soroban"` on fishuser-hero returns nothing, and only `sdex-tail` is in tmux. It stopped **122,864 ledgers short** of its 63,475,475 target, at the start of the [[0111]] enrichment-outage window. Nothing writes a terminal state on a crash, so `status` stayed `running`. Recovery is ~1 h of runtime. ⚠️ Re-run needs the **pool registry seeded first** (a mid-chain AMM backfill with no seed loses volume to `unresolved_pools`) and ranges kept disjoint from live ingestion. |
+| `[1, 50457423]` pre-Soroban SDEX tail — **pass 1** | ⏳ **RUNNING, HEALTHY** (fishuser-hero, tmux `sdex-tail`). **2026-07-23 16:00 UTC: frontier 35,839,999**, markers contiguous (35,839,997 over `3 → 35,839,999`, zero gaps), remaining **14,617,424**. Rate has eased to **~151k/hr** (25.4 min per 64k-ledger partition, measured from consecutive `indexing complete` lines) against a 165k/hr two-day average — the run is **download-bound and partitions are growing** (4.90 → 5.49 GB, sync 1483 → 1568 s while index time stays flat at ~940 s), so expect further easing. **Revised ETA 2026-07-27/28**, ~1 day later than the earlier estimate. *Prior reading:* **2026-07-21 13:35 UTC: floor 27,583,999** (was 23,423,999 at 07-20 14:15 → **4.16M ledgers in 23h20m = 178.3k/hr**, within 1% of the documented 177k). Markers contiguous: 27,583,997 over `3 → 27,583,999`, no gaps. Remaining 22.87M ledgers ≈ **5.3 days → ETA 2026-07-26/27**. ⚠️ The 54.7% marker figure OVERSTATES real progress — see the durable-data row below. (Liveness: `pgrep -af sdex-backfill` + partition # climbing in `~/sdex-tail.log` over ≥25 min; do NOT sample CH markers <22 min apart — download-bound cadence freezes them transiently.) |
 | `[1, 23423999]` pre-Soroban SDEX tail — **pass 2 (recovery)** | 🔜 **REQUIRED, not started** — re-walk of the span pass 1 lost to cleanup. ~5 days. **Blocked on pass 1 finishing** (don't interrupt a healthy run to restart at the bottom). Requires clearing `backfill_sdex_ledgers` markers first — see §Recovery plan. |
 | **durable pre-Soroban data (measured 2026-07-21)** | `price_ohlcv_1m` sdex pre-activation spans **`2018-12-13 06:55` → `2020-01-07 22:23`, 3,588,820 candles**. Years: 2015–2017 **absent** (wiped), 2018 partial (207,021 — cleanup drops whole partitions, so only post-fire Dec 2018 survived), 2019 full (3,331,951), 2020 partial (43,559 — the live write frontier), **2021–2023 absent because pass 1 has not reached them yet**. Only ~6.2M of the 27.58M marked ledgers have surviving candles. |
 

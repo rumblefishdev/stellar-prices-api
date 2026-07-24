@@ -20,6 +20,7 @@
 //! transient CloudWatch error never blocks enrichment.
 
 use crate::ch_enrich::ChPassStats;
+use crate::repair::CoarseSweepSummary;
 
 /// CloudWatch namespace for all enrichment metrics. Matches the
 /// `cloudwatch:namespace` condition on the Lambda role's `PutMetricData` grant
@@ -94,6 +95,47 @@ pub fn pass_metrics(stats: &ChPassStats) -> Vec<Metric> {
     }
 
     metrics
+}
+
+/// Metrics for the recurring coarse-table sweep (task 0114). Published under the
+/// **same** [`METRIC_NAMESPACE`] as the 1m pass, so the existing `PutMetricData`
+/// grant (scoped to that namespace) covers them without an IAM change.
+///
+///   * `CoarseSweepRowsEnriched` — coarse rows corrected this run, across all
+///     swept tables. Steady-state ≈ 0 once the tables sit at the floor; a
+///     sustained non-zero is the actionable signal — the rollup path is
+///     re-freezing zeros (enrichment lag exceeded the MV windows — task 0111
+///     territory) and the guard is earning its keep.
+///   * `CoarseSweepTableFailures` — tables whose pass **errored** this run. The
+///     dead-sweep signal to alarm on. Deliberately excludes config-skipped
+///     tables (below), so a benign mis-config cannot false-fire the alarm.
+///   * `CoarseSweepTablesSkipped` — non-coarse names left in the config
+///     (`price_ohlcv_1m` / typos). Visible for hygiene, but a static condition,
+///     not a runtime failure — kept off the alarm series.
+///
+/// A `RowsRemaining` metric is intentionally NOT published: `zeros_after` is
+/// dominated by the permanent multi-million exotic `no_reference` floor, so it
+/// sits near-constant whether or not the sweep is keeping up and cannot observe
+/// the lag it would exist to catch. `RowsEnriched` is the usable signal; the
+/// floor size is available on demand via the per-quote-class composition query.
+pub fn sweep_metrics(summary: &CoarseSweepSummary) -> Vec<Metric> {
+    vec![
+        Metric {
+            name: "CoarseSweepRowsEnriched",
+            value: summary.total_enriched() as f64,
+            unit: Unit::Count,
+        },
+        Metric {
+            name: "CoarseSweepTableFailures",
+            value: summary.failed_tables.len() as f64,
+            unit: Unit::Count,
+        },
+        Metric {
+            name: "CoarseSweepTablesSkipped",
+            value: summary.skipped_tables.len() as f64,
+            unit: Unit::Count,
+        },
+    ]
 }
 
 /// Publish `metrics` to CloudWatch under [`METRIC_NAMESPACE`], tagged with an
@@ -171,6 +213,44 @@ mod tests {
         assert_eq!(avg.value, 1500.0);
         assert_eq!(avg.unit, Unit::Milliseconds);
         assert_eq!(m.len(), 6);
+    }
+
+    #[test]
+    fn sweep_metrics_sum_enriched_and_split_failed_from_skipped() {
+        use crate::repair::{CoarseSweepSummary, MonthRepair, RepairSummary, TableSweep};
+
+        let table = |name: &str, enriched: u64, remaining: u64| TableSweep {
+            table: name.to_string(),
+            summary: RepairSummary {
+                months: vec![MonthRepair {
+                    month: 202_606,
+                    zeros_before: enriched + remaining,
+                    zeros_after: remaining,
+                    rows_enriched: enriched,
+                    snapshot_name: None,
+                }],
+            },
+        };
+        let summary = CoarseSweepSummary {
+            start_month: 202_605,
+            end_month: 202_606,
+            tables: vec![table("price_ohlcv_1h", 8, 2), table("price_ohlcv_4h", 4, 1)],
+            // A genuine runtime pass error vs a benign config skip — distinct series.
+            failed_tables: vec!["price_ohlcv_1d".to_string()],
+            skipped_tables: vec!["price_ohlcv_1m".to_string()],
+        };
+
+        let m = sweep_metrics(&summary);
+        let by = |name: &str| m.iter().find(|x| x.name == name).expect("metric present");
+        // Enriched is summed across every swept table (8+4).
+        assert_eq!(by("CoarseSweepRowsEnriched").value, 12.0);
+        // The alarm series counts ONLY the errored table, not the config skip …
+        assert_eq!(by("CoarseSweepTableFailures").value, 1.0);
+        // … which is surfaced on its own, non-alarming series instead.
+        assert_eq!(by("CoarseSweepTablesSkipped").value, 1.0);
+        // RowsRemaining is deliberately not published (floor-dominated).
+        assert!(!m.iter().any(|x| x.name == "CoarseSweepRowsRemaining"));
+        assert_eq!(m.len(), 3);
     }
 
     /// A pass that ran zero batches (empty backlog) has no per-batch figure, so
