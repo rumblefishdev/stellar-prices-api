@@ -2,9 +2,9 @@
 id: "0114"
 title: "Coarse OHLCV tables carry no USD values for 2025-02 → 2026-02; enrichment never revisits rolled-up rows"
 type: BUG
-status: active
+status: completed
 related_adr: ["0007"]
-related_tasks: ["0111", "0090", "0095", "0088", "0026", "0107"]
+related_tasks: ["0111", "0090", "0095", "0088", "0026", "0107", "0116", "0129", "0130", "0131"]
 tags: [clickhouse, enrichment, rollup, data-quality, priority-high, effort-medium, incident]
 links:
   - "../../../packages/enrichment-worker/src/ch_enrich.rs"
@@ -93,6 +93,27 @@ history:
       the merge pool (~07-27/28, do not KILL); EventBridge cleanup rule confirmed
       DISABLED and 1m has no TTL. Remaining: _4h composition breakdown,
       scheduling the recurring pass, 0088 step-3 gate.
+  - date: 2026-07-24
+    status: completed
+    who: okarcz
+    note: >
+      COMPLETED. The core defect is fixed, deployed, and verified in prod.
+      Historical repair: ~52.5M coarse rows re-enriched across all five
+      forever-tables (_1h 30.8M; _4h/_1d/_1w/_1M ~20.1M), every table now at the
+      genuine no_reference floor, proven by per-quote-class composition (reachable
+      classes <1% zero, exotic 100% by design). Going-forward guard: a bounded,
+      partition-bounded, best-effort coarse-USD sweep folded into the hourly
+      enrichment Lambda (not a separate cron/Lambda), deployed via
+      Prices-production-EventBridge and verified live (tables_swept=5,
+      tables_failed=0; wall-clock budget + best-effort isolation both proven in a
+      real prod failure). Shipped across PRs #151 (1f636f7, incl. code-review
+      hardening) and #152. 9 of 10 ACs met; the 10th (0088 step-3 coverage gate)
+      deferred to 0131 as a cheap non-blocking guard that belongs in 0088's
+      pre-roll. Spawned during the task: 0116 (dust-trade absurd USD), 0129
+      (assets asset_id join fan-out), 0130 (sweep can't scan 15m under the ~30s
+      mTLS-proxy timeout — CDK drift to reconcile), 0131 (the deferred gate).
+      Follow-ups tracked: 15m coverage (0130), longer-term composition/metric
+      watch, optional CoarseSweepTableFailures alarm.
 ---
 
 # Coarse OHLCV tables carry no USD values
@@ -448,7 +469,10 @@ the 55%/62% figures.
       2026" band recorded during prep — worth one independent spot-check, not a
       blocker.
 - [ ] 0088 step 3 gated: pre-roll refuses to run, or warns loudly, when 1m USD
-      coverage for the target span is below a threshold.
+      coverage for the target span is below a threshold. **(deferred to [[0131]])**
+      — a cheap regression guard, not a blocker (this task's own §Gate analysis
+      downgraded it); it belongs in 0088's step-3 pre-roll flow, which has not run
+      yet (~2026-08-01), so it can only be exercised there.
 - [x] Re-check whether this explains [[0107]]'s volume gap — **REFUTED
       2026-07-21**, see §REFUTED below. Orthogonal problem; 0107 unaffected.
 
