@@ -245,6 +245,33 @@ impl AssetRegistry {
     pub fn assets(&self) -> impl Iterator<Item = (&AssetIdentity, &u32)> {
         self.by_identity.iter()
     }
+
+    /// The next surrogate id that will be assigned. Ids are handed out
+    /// monotonically by [`get_or_assign`], so every asset interned *after* this
+    /// value is captured receives an id `>= watermark`. Capturing it before a
+    /// run and passing it to [`assets_since`] yields exactly the assets that run
+    /// newly discovered — the basis for writing only new assets instead of
+    /// re-emitting the whole registry every reconcile (task 0132).
+    ///
+    /// [`get_or_assign`]: AssetRegistry::get_or_assign
+    /// [`assets_since`]: AssetRegistry::assets_since
+    pub fn watermark(&self) -> u32 {
+        self.next_id
+    }
+
+    /// Iterate the assets interned on/after the `since` watermark — those newly
+    /// assigned since [`watermark`] was captured. `since == 0` (or any value
+    /// `<=` the lowest live id) yields the whole registry, so this generalises
+    /// [`assets`]. An asset's `sac_address` is a deterministic function of its
+    /// identity ([`sac_address_of`]), fully known the moment the asset is
+    /// interned, so a newly-written row needs no later correction.
+    ///
+    /// [`watermark`]: AssetRegistry::watermark
+    /// [`assets`]: AssetRegistry::assets
+    /// [`sac_address_of`]: AssetRegistry::sac_address_of
+    pub fn assets_since(&self, since: u32) -> impl Iterator<Item = (&AssetIdentity, &u32)> {
+        self.by_identity.iter().filter(move |&(_, &id)| id >= since)
+    }
 }
 
 pub fn canonicalise(
@@ -380,6 +407,51 @@ mod tests {
         assert_eq!(
             reg.resolve_sac("CNOTASACADDRESSxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"),
             None
+        );
+    }
+
+    // The incremental-write watermark (task 0132): `assets_since(watermark)`
+    // yields exactly the assets interned after `watermark` was captured, so the
+    // live processor writes only new assets instead of re-emitting all ~200k.
+    #[test]
+    fn assets_since_watermark_isolates_newly_interned_assets() {
+        // Two assets loaded from `prices.assets` at cold start (ids 1, 2).
+        let mut reg = AssetRegistry::from_existing(vec![
+            (1, AssetIdentity::Native),
+            (2, AssetIdentity::Contract("CEXISTING".to_string())),
+        ]);
+        let watermark = reg.watermark();
+        assert_eq!(watermark, 3, "next id after loading ids 1,2");
+        assert_eq!(reg.assets().count(), 2);
+        // No new assets yet → nothing at/after the watermark → an empty write set.
+        assert_eq!(reg.assets_since(watermark).count(), 0);
+
+        // This run interns one brand-new asset.
+        let new_id = reg.get_or_assign(&AssetIdentity::Contract("CNEW".to_string()));
+        assert_eq!(new_id, 3);
+
+        // Only that new asset is at/after the watermark — the sole row written.
+        let since: Vec<_> = reg.assets_since(watermark).collect();
+        assert_eq!(since.len(), 1);
+        assert_eq!(*since[0].1, 3);
+        assert_eq!(since[0].0, &AssetIdentity::Contract("CNEW".to_string()));
+
+        // `since == 0` generalises to the whole registry (the backfill's path).
+        assert_eq!(reg.assets_since(0).count(), 3);
+    }
+
+    #[test]
+    fn reinterning_a_known_asset_adds_nothing_since_watermark() {
+        let mut reg = AssetRegistry::from_existing(vec![(1, AssetIdentity::Native)]);
+        let watermark = reg.watermark();
+        // Re-seeing an already-known asset returns its existing id and interns
+        // nothing new → the write set stays empty (the common steady-state case).
+        let id = reg.get_or_assign(&AssetIdentity::Native);
+        assert_eq!(id, 1);
+        assert_eq!(
+            reg.assets_since(watermark).count(),
+            0,
+            "no new asset → no rows to write"
         );
     }
 }

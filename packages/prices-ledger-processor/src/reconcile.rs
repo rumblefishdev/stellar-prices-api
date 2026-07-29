@@ -56,6 +56,16 @@ pub struct RunStats {
 pub struct ProcessingState {
     pub assets: AssetRegistry,
     pub registries: Registries,
+    /// Highest surrogate-id watermark whose assets are known **durably written**
+    /// to `prices.assets`. Each run writes `assets_since(this)` and advances it
+    /// only *after* that write succeeds (task 0132). Because the registry is warm
+    /// across invocations, a run that interns new assets and then fails a later
+    /// write leaves `next_id` advanced but this watermark unmoved — so the *next*
+    /// run re-writes those assets instead of orphaning them (they would otherwise
+    /// sit below a freshly-captured `next_id` and never be written, stranding the
+    /// candles that reference their ids). Init: every asset loaded at cold start
+    /// is already in `prices.assets`, so it starts at the loaded `watermark()`.
+    pub persisted_asset_watermark: u32,
 }
 
 pub struct Reconciler<F, C, S> {
@@ -78,11 +88,18 @@ where
         assets: AssetRegistry,
         registries: Registries,
     ) -> Self {
+        // Everything loaded from `prices.assets` at cold start is already durable,
+        // so the persisted watermark starts at the loaded registry's next id.
+        let persisted_asset_watermark = assets.watermark();
         Self {
             fetcher,
             cursor,
             sink,
-            state: Mutex::new(ProcessingState { assets, registries }),
+            state: Mutex::new(ProcessingState {
+                assets,
+                registries,
+                persisted_asset_watermark,
+            }),
         }
     }
 
@@ -145,7 +162,20 @@ where
             });
         }
 
-        // Flush + write, then advance the cursor LAST (ordering barrier).
+        // Write newly-interned assets FIRST — the candles below reference their
+        // surrogate ids, so persisting the dimension row before the fact rows
+        // keeps `prices.assets` referentially ahead of `price_ohlcv_*`. Only the
+        // assets not yet durably written (id >= the persisted watermark), not the
+        // whole registry (task 0132); a run that discovered nothing new writes
+        // nothing. Advance the durable watermark ONLY after the write succeeds —
+        // if it fails here the run returns early (cursor unmoved, doorbell
+        // redelivered) and the next run retries these same assets.
+        self.sink
+            .write_new_assets(&state.assets, state.persisted_asset_watermark)
+            .await?;
+        state.persisted_asset_watermark = state.assets.watermark();
+
+        // Flush + write candles/oracle, then advance the cursor LAST (barrier).
         let mut rows_emitted = 0u64;
 
         let sdex_candles = sdex.flush_all();
@@ -159,7 +189,6 @@ where
         }
 
         self.sink.write_oracle(&oracle).await?;
-        self.sink.write_assets(&state.assets).await?;
         self.cursor.write(current).await?;
 
         info!(
