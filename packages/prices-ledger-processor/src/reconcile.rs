@@ -97,6 +97,13 @@ where
         let mut current = start;
         let mut persisted = 0u64;
 
+        // Surrogate-id watermark captured BEFORE any asset is interned this run.
+        // Assets discovered during the loop below get ids >= this, so we can
+        // write only the newly-seen ones instead of re-emitting the whole
+        // registry every reconcile (task 0132 — the full re-emit was a 9,413×
+        // write amplification / ~$337/mo of AWS→Hetzner egress).
+        let asset_watermark = state.assets.watermark();
+
         // Accumulate across the whole contiguous run, flush once at the end.
         let mut sdex = CandleAccumulator::new();
         let mut amm: HashMap<&'static str, CandleAccumulator> = HashMap::new();
@@ -159,7 +166,11 @@ where
         }
 
         self.sink.write_oracle(&oracle).await?;
-        self.sink.write_assets(&state.assets).await?;
+        // Only assets this run newly interned (id >= watermark), not the whole
+        // registry. A run that discovered no new assets writes nothing (0132).
+        self.sink
+            .write_new_assets(&state.assets, asset_watermark)
+            .await?;
         self.cursor.write(current).await?;
 
         info!(

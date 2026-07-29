@@ -184,12 +184,56 @@ impl OhlcvWriter {
         Ok(())
     }
 
-    /// Write the asset registry into `prices.assets` (idempotent via
-    /// ReplacingMergeTree on the asset sort key).
+    /// Write the **whole** asset registry into `prices.assets` (idempotent via
+    /// ReplacingMergeTree on the asset sort key). Used by one-shot paths — the
+    /// backfill's end-of-run persist and the discovery/oracle workers — where a
+    /// single full write per run is cheap.
+    ///
+    /// The **live** ledger-processor must NOT use this: re-emitting all ~200k
+    /// rows on every reconcile is a 9,413× write amplification billed as AWS→
+    /// Hetzner egress (task 0132). It uses [`write_new_assets`] instead.
+    ///
+    /// [`write_new_assets`]: OhlcvWriter::write_new_assets
     pub async fn write_assets(&self, registry: &AssetRegistry) -> Result<(), IngestError> {
-        let mut insert = self.client.insert("prices.assets")?;
+        self.write_asset_rows(registry, registry.assets()).await
+    }
 
-        for (identity, &id) in registry.assets() {
+    /// Write only the assets interned on/after the `since` watermark — the
+    /// surrogate-id watermark captured *before* a run (see
+    /// [`AssetRegistry::watermark`]). A run that discovered no new assets writes
+    /// **nothing** (early return, no INSERT). This is the live processor's asset
+    /// write path: it replaces the full-registry re-emit that caused ~$337/mo of
+    /// redundant egress (task 0132). Correctness is unchanged — a new asset's
+    /// row (including its deterministic `sac_address`) is complete when interned.
+    pub async fn write_new_assets(
+        &self,
+        registry: &AssetRegistry,
+        since: u32,
+    ) -> Result<(), IngestError> {
+        self.write_asset_rows(registry, registry.assets_since(since))
+            .await
+    }
+
+    /// Shared row-builder for [`write_assets`] / [`write_new_assets`]. Skips the
+    /// INSERT entirely when `rows` is empty (matching every other writer here),
+    /// so an idle reconcile makes no network round-trip. `registry` is borrowed
+    /// for the deterministic `sac_address` derivation.
+    ///
+    /// [`write_assets`]: OhlcvWriter::write_assets
+    /// [`write_new_assets`]: OhlcvWriter::write_new_assets
+    async fn write_asset_rows<'a>(
+        &self,
+        registry: &AssetRegistry,
+        rows: impl Iterator<Item = (&'a AssetIdentity, &'a u32)>,
+    ) -> Result<(), IngestError> {
+        let mut rows = rows.peekable();
+        if rows.peek().is_none() {
+            return Ok(());
+        }
+
+        let mut insert = self.client.insert("prices.assets")?;
+        let mut written = 0u64;
+        for (identity, &id) in rows {
             let (asset_code, asset_type, issuer_address, contract_address) = match identity {
                 AssetIdentity::Native => {
                     ("XLM".to_string(), "classic", String::new(), String::new())
@@ -216,8 +260,10 @@ impl OhlcvWriter {
                     is_active: 1,
                 })
                 .await?;
+            written += 1;
         }
         insert.end().await?;
+        info!(assets = written, "wrote asset rows");
         Ok(())
     }
 
