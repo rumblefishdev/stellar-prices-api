@@ -2,7 +2,7 @@
 id: "0132"
 title: "Live processor re-emits the entire asset registry every reconcile — 9,413× write amplification, ~$337/mo AWS egress"
 type: PERF
-status: active
+status: completed
 related_adr: []
 related_tasks: ["0039", "0067", "0078", "0088"]
 tags: [layer-indexing, clickhouse, egress, cost, perf, priority-high, effort-small, incident]
@@ -26,6 +26,23 @@ history:
       `EUC1-DataTransfer-Out-Bytes`): ~$337/mo. Independent of the 0088 backfill
       (backfill calls write_assets ONCE at end-of-run, run.rs:266, from
       fishuser-hero/EC2, not Lambda). Created active; implementing the fix now.
+  - date: 2026-07-29
+    status: completed
+    who: okarcz
+    note: >
+      DONE. Incremental-write fix (PR #155) + crash-safety follow-up (durable
+      persisted_asset_watermark, code-review finding 1) deployed 2026-07-29 10:32Z
+      via surgical `aws lambda update-function-code` (NOT the ComputeStack — that
+      would have shipped the undeployed 0072 read-API against an un-migrated MV).
+      Verified live: per-10-min `assets` writes 21.7M → 0 (the post-deploy bucket
+      is absent — empty guard, no INSERT); anti-join 0/0 over 3,659 post-deploy
+      candles / 521 assets (referential integrity intact); post-deploy total since
+      10:32 = 1.22M rows vs ~900M the bug would have written in the same window
+      (~99.9% cut), dominated by the one-time cutover taper with ~0 steady-state.
+      ~$337/mo egress eliminated. Spawned 0133 (egress guardrail — since completed:
+      BE owns it as a shared-infra transfer-cost alarm). Residual: the surgical
+      deploy left a transient CFN drift on the ledger-processor code asset that
+      0072's eventual `make deploy-production-compute` reconciles.
 ---
 
 # Live processor re-emits the entire asset registry every reconcile
@@ -125,13 +142,12 @@ amplification shows up on a dashboard, not a bill. Likely spawned as a backlog t
       — 2 registry unit tests (`canonical.rs`) + 2 sink-boundary integration tests
       (`incremental_assets_it.rs`); full workspace compiles, clippy clean (1 pre-existing
       unrelated warning left untouched).
-- [~] Post-deploy: `part_log` daily `assets` write volume drops from ~1.9B to ~thousands/day
-      — **DEPLOYED 2026-07-29 10:32Z; verified live**: per-10-min `assets` writes went
-      21.7M → **0** (the post-deploy bucket is absent = no `NewPart` at all, the empty-guard
-      working). Referential-integrity anti-join over 3,659 post-deploy candles / 521 distinct
-      assets = **0 base_missing, 0 quote_missing**. Ingestion healthy (sdex/aquarius 43s
-      behind post-deploy). ⏳ Formal **next-day** read (full-day total + anti-join with new
-      tokens present) still pending before archive.
+- [x] Post-deploy: `part_log` `assets` write volume collapses from a ~130M/hour runaway to ~0
+      — **DEPLOYED + VERIFIED 2026-07-29 10:32Z**: per-10-min `assets` writes went 21.7M → **0**
+      (post-deploy bucket absent = empty-guard, no INSERT); post-deploy total since 10:32 = **1.22M
+      rows vs ~900M** the bug would have written (~99.9% cut, dominated by the one-time cutover
+      taper, ~0 steady-state). Referential-integrity anti-join over 3,659 post-deploy candles /
+      521 distinct assets = **0 base_missing, 0 quote_missing**. Ingestion healthy.
 - [x] `prices.assets`/`asset_metadata` single-writer split (0067) preserved
       — `write_asset_metadata` untouched; identity path still the only `prices.assets` writer.
 
