@@ -199,17 +199,24 @@ impl OhlcvWriter {
     }
 
     /// Write only the assets interned on/after the `since` watermark — the
-    /// surrogate-id watermark captured *before* a run (see
+    /// caller's high-water mark of assets already durably in `prices.assets` (see
     /// [`AssetRegistry::watermark`]). A run that discovered no new assets writes
-    /// **nothing** (early return, no INSERT). This is the live processor's asset
-    /// write path: it replaces the full-registry re-emit that caused ~$337/mo of
-    /// redundant egress (task 0132). Correctness is unchanged — a new asset's
-    /// row (including its deterministic `sac_address`) is complete when interned.
+    /// **nothing**. This is the live processor's asset write path: it replaces the
+    /// full-registry re-emit that caused ~$337/mo of redundant egress (task 0132).
+    /// Correctness is unchanged — a new asset's row (including its deterministic
+    /// `sac_address`) is complete when interned.
     pub async fn write_new_assets(
         &self,
         registry: &AssetRegistry,
         since: u32,
     ) -> Result<(), IngestError> {
+        // O(1) steady-state fast path (the common case — no new assets). Ids are
+        // handed out monotonically, so once `since` has caught up to the next id
+        // no asset can have `id >= since`; skip without scanning the whole
+        // ~200k-entry registry to conclude the set is empty.
+        if since >= registry.watermark() {
+            return Ok(());
+        }
         self.write_asset_rows(registry, registry.assets_since(since))
             .await
     }
@@ -269,12 +276,16 @@ impl OhlcvWriter {
 
     /// Write asset enrichment (`home_domain`, …) into `prices.asset_metadata`
     /// (task 0067). This is the **single-writer** enrichment surface: identity
-    /// columns live in `prices.assets` (re-emitted in full by `write_assets` on
-    /// the ledger processor), enrichment lives here (written only by the
-    /// discovery/enrichment worker). Splitting them stops a full-row
-    /// `write_assets` re-emit from clobbering enrichment back to its default on
-    /// the shared ReplacingMergeTree row. Idempotent (RMT on `asset_id`); a no-op
-    /// when `entries` is empty.
+    /// columns live in `prices.assets` (written by the ledger processor — a delta
+    /// of newly-interned assets per run via [`write_new_assets`], and in full by
+    /// the one-shot backfill/discovery paths via [`write_assets`]), enrichment
+    /// lives here (written only by the discovery/enrichment worker). Keeping them
+    /// in separate tables stops any `prices.assets` re-emit from clobbering
+    /// enrichment back to its default on a shared ReplacingMergeTree row.
+    /// Idempotent (RMT on `asset_id`); a no-op when `entries` is empty.
+    ///
+    /// [`write_assets`]: OhlcvWriter::write_assets
+    /// [`write_new_assets`]: OhlcvWriter::write_new_assets
     pub async fn write_asset_metadata(&self, entries: &[AssetMetadata]) -> Result<(), IngestError> {
         if entries.is_empty() {
             return Ok(());

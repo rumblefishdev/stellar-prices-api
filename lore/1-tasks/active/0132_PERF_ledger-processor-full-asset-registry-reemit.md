@@ -147,6 +147,33 @@ Four small changes, no schema change, no migration:
 4. **`prices-ledger-processor/src/reconcile.rs`** — capture `asset_watermark = state.assets.watermark()`
    before the processing loop; write only `write_new_assets(&state.assets, asset_watermark)`.
 
+## Issues Encountered
+
+- **Code-review finding 1 (data-loss regression I introduced) — FIXED.** The first cut
+  recaptured the watermark from the in-memory registry (`state.assets.watermark()`) at the
+  start of each run. But the `Reconciler` is a warm `Arc` singleton across Lambda
+  invocations (`main.rs:127`, `reservedConcurrency=1`), so a run that interned new assets
+  and then failed a later write would leave `next_id` advanced while those assets were never
+  persisted; the redelivered doorbell's next run would recapture a watermark *past* them and
+  skip them forever, orphaning the candles that reference their ids. The old full re-emit
+  self-healed this. **Fix:** a durable `persisted_asset_watermark` in `ProcessingState` that
+  advances *only after* a successful asset write; a failed run leaves it unmoved so the retry
+  re-writes those assets. Regression test `assets_from_a_failed_run_are_written_on_the_next_run`
+  fails against the old code, passes now.
+- **Finding 2 (write ordering) — FIXED.** Assets are now written *before* candles (dimension
+  ahead of facts), so `prices.assets` is referentially ahead of `price_ohlcv_*`.
+- **Finding 3 (stale doc) — FIXED.** `write_asset_metadata`'s comment no longer claims the
+  processor "re-emits in full"; it now describes the delta (`write_new_assets`) vs full
+  (`write_assets`) split.
+- **Finding 4 (O(n) steady-state scan) — FIXED.** `write_new_assets` short-circuits in O(1)
+  when `since >= registry.watermark()` (no id can qualify), avoiding a ~200k-entry scan on
+  every idle reconcile.
+- **Finding 5 (self-referential test oracle) — mitigated.** `CountingSink` necessarily
+  filters via `assets_since` (that *is* the definition of what would be written); the
+  independent boundary check lives in the `canonical.rs` unit tests, which pin `assets_since`
+  membership/counts against hardcoded expectations. The new fault-injection reconcile test
+  adds independent end-to-end coverage.
+
 ## Design Decisions
 
 ### From Plan
