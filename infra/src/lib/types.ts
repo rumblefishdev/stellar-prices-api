@@ -153,10 +153,16 @@ export interface EnvironmentConfig {
     readonly mtlsNotAfterDaysThreshold: number;
     /**
      * Rows-written-per-hour to any single `prices.*` table above which the
-     * write-amplification alarm fires (task 0133). The busiest legitimate table
-     * (the 15m rollup) writes well under 1M rows/hour; task 0132 wrote ~130M/hour.
-     * Default 10,000,000 sits with wide margin above legit traffic and far below
-     * a 0132-class runaway. Operator-tunable.
+     * write-amplification alarm fires — for the required 3-hour sustained window
+     * (task 0133; see the alarm in observability-stack.ts). Default 50,000,000,
+     * set from a 14-day `system.part_log` measurement, NOT a guess: the highest
+     * *sustained* legitimate load is `price_ohlcv_1m` at ~16M rows/hour during a
+     * backfill/reprice day (07-26, ~18h). One-hour bulk spikes go higher
+     * (rollup-rework `_bak` copies hit 154M/hour) but clear within the 3-hour
+     * window. Task 0132 ran ~130M/hour for days. 50M sits ~3× above the sustained
+     * legit peak (headroom for backfill growth) and ~2.6× below a 0132-class
+     * runaway, and no legit event in the measured window breaches it for 3
+     * sustained hours. Operator-tunable; raise it during a known heavy migration.
      */
     readonly writeAmplificationRowsPerHour: number;
     /**

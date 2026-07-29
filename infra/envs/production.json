@@ -25,7 +25,7 @@
     "sdexPushFreshnessSeconds": 604800,
     "mtlsNotAfterDaysThreshold": 30,
     "ledgerProcessorLagSeconds": 120,
-    "writeAmplificationRowsPerHour": 10000000,
+    "writeAmplificationRowsPerHour": 50000000,
     "slack": {
       "workspaceIdSsmParam": "/prices/production/slack-workspace-id",
       "channelIdSsmParam": "/prices/production/slack-channel-id"

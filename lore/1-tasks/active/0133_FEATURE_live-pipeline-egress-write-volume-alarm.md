@@ -136,17 +136,19 @@ full app `cdk synth` succeeds, and the alarm/probe/IAM land correctly in the syn
 
 ## Issues Encountered (code review, PR #156)
 
-- **Finding 1 (false-positive on legit bulk loads) — REAL, partially mitigated.** `system.part_log`
-  counts *all* writes to `prices.*`, including legit bulk INSERTs (the 0088 backfill, coarse
-  pre-rolls at tens of millions/pass, enrichment bursts). An **absolute** row count can't tell
-  "writing lots of new data" (legit) from "re-writing the same rows" (amplification) — only a
-  written÷*deduplicated*-rows ratio can. Mitigations applied: (a) alarm now requires a **sustained
-  3-hour breach** (a 0132 runaway persists for weeks; most legit bulk is bursty), (b) threshold is
-  operator-tunable and documented as ack-able during known heavy backfills. ⚠️ **Residual: the
-  10M default MUST be validated against real backfill/pre-roll hourly peaks before the alarm is
-  trusted** (measure `MAX(sum(rows))` per hour over the last few weeks from `part_log`). The robust
-  fix (the written-vs-real ratio) is deferred as a future enhancement (needs a deduplicated-count
-  denominator — `count() FINAL` is heavy, `system.parts` is diluted by un-merged parts).
+- **Finding 1 (false-positive on legit bulk loads) — REAL, RESOLVED with measured tuning.**
+  `system.part_log` counts *all* writes to `prices.*`, so legit bulk (0088 backfill, pre-rolls,
+  enrichment) is indistinguishable from a re-emit by *magnitude*. A 14-day `part_log` measurement
+  proved this is not hypothetical: a legit one-hour `price_ohlcv_15m_bak` copy (07-17 rollup rework)
+  wrote **154M rows/hour — higher than the 0132 bug's ~130M**. So no absolute threshold works on
+  value alone. **But the discriminator is duration:** the `_bak` spike was **one hour**; the highest
+  *sustained* legit load is `price_ohlcv_1m` at **~16M/hour** (07-26 backfill day, ~18h); the 0132
+  bug ran ~130M/hour for **days**. Resolution: (a) **sustained 3-hour breach** clears the one-hour
+  spikes; (b) **threshold set to 50M** (measured: ~3× above the 16M sustained legit peak, ~2.6×
+  below the 130M bug) — no legit event in the 14-day window breaches it for 3 sustained hours, and a
+  0132-class runaway still does. Threshold operator-tunable / ack-able during known migrations. The
+  written-vs-real *ratio* (legit bulk ~1×, re-emit high) remains the robust future enhancement (needs
+  a deduplicated-count denominator — `count() FINAL` heavy, `system.parts` diluted by un-merged parts).
 - **Finding 2 (single-hour trigger) — FIXED.** `evaluationPeriods`/`datapointsToAlarm` 1→3, so a
   lone anomalous hour no longer pages; matches the "sustained runaway" intent.
 - **Finding 3 (window coupled across 3 files) — FIXED.** Added `WINDOW_HOURS` const + explicit
@@ -192,8 +194,9 @@ full app `cdk synth` succeeds, and the alarm/probe/IAM land correctly in the syn
 - [x] EventBridge rule schedules it `rate(1 hour)`, with `errorAlarmActions` so a dead probe alarms.
 - [x] CloudWatch alarm on the metric breaching the threshold → 0056 SNS/Slack; `OkAction` set.
       Verified in synthesized CFN (threshold 10,000,000, GreaterThanThreshold, notBreaching).
-- [x] Threshold operator-tunable via `config.opsAlarms.writeAmplificationRowsPerHour` (default 10M);
-      documented (busiest legit table <1M/h vs 0132's ~130M/h).
+- [x] Threshold operator-tunable via `config.opsAlarms.writeAmplificationRowsPerHour`; set to
+      **50M from a 14-day part_log measurement** (sustained legit peak ~16M/h, bug ~130M/h) with a
+      3-hour sustained window — validated against real backfill/pre-roll peaks, not a guess.
 - [~] Runbook: the alarm *description* embeds "check `system.part_log` per table to find the
       offender"; a fuller runbook note (links 0132's part_log day-slice + anti-join) is a small
       follow-up.

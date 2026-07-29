@@ -494,18 +494,20 @@ export class ObservabilityStack extends cdk.Stack {
     //
     // ⚠️ system.part_log counts ALL writes to prices.* — including legitimate
     // BULK loads (the 0088 backfill, coarse pre-rolls, enrichment bursts), which
-    // an absolute row count cannot distinguish from a re-emit amplification. Two
-    // mitigations: (1) datapointsToAlarm=3 over 1h periods requires a *sustained*
-    // 3-hour breach — a 0132-class runaway persists indefinitely (it "bled for
-    // weeks"), whereas most legit bulk loads are bursty and clear within an hour
-    // or two; (2) the threshold is operator-tunable, and an operator running a
-    // known heavy backfill/pre-roll should expect this to fire and either ack it
-    // or raise config.opsAlarms.writeAmplificationRowsPerHour for that window.
-    // The threshold MUST be validated against real backfill/pre-roll peaks before
-    // it is trusted (task 0133 — the busiest legit hour, not just steady-state
-    // live traffic). A true "written vs deduplicated real rows" ratio (which a
-    // legit bulk load keeps ~1× while a re-emit pushes high) is the robust fix and
-    // a documented future enhancement.
+    // an absolute row count cannot distinguish from a re-emit amplification by
+    // *magnitude*: a 14-day part_log measurement (task 0133) found a legit
+    // one-hour `_bak` copy at 154M rows/hour — HIGHER than the 0132 bug's ~130M.
+    // What separates them is DURATION: legit bulk is bursty (the `_bak` was one
+    // hour; the sustained legit peak is price_ohlcv_1m at ~16M/hour on a backfill
+    // day), while a 0132-class runaway persists for days. Hence: (1) the alarm
+    // requires a *sustained* 3-hour breach (datapointsToAlarm=3), which clears the
+    // one-hour spikes; (2) the threshold (default 50M, measured to sit ~3× above
+    // the ~16M sustained legit peak and ~2.6× below the ~130M bug) is set so no
+    // legit event in the measured window breaches it for 3 sustained hours. An
+    // operator running a known heavy migration should still expect a possible fire
+    // and ack it or raise config.opsAlarms.writeAmplificationRowsPerHour for the
+    // window. A true "written vs deduplicated real rows" ratio (which a legit bulk
+    // load keeps ~1× while a re-emit pushes high) is the robust future enhancement.
     //
     // The 1h metric period is coupled to the probe's SQL window (INTERVAL 1 HOUR)
     // and its rate(1 hour) schedule — see WINDOW_HOURS in the probe crate. All
