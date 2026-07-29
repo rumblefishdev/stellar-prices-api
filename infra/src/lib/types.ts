@@ -113,6 +113,20 @@ export interface EnvironmentConfig {
      * Daily is ample for a 30-day threshold.
      */
     readonly mtlsNotafterProbe: string;
+    /**
+     * Write-amplification probe (task 0133). Reads rows-written-per-hour per
+     * `prices.*` table from `system.part_log` (as `prices_reader`, which is
+     * granted `SELECT ON system.part_log`) and republishes the max as the
+     * `Prices/Ingest` `MaxRowsWrittenPerHour` metric the write-amplification
+     * alarm watches. Hourly is ample — the guardrail catches a sustained
+     * runaway (0132 bled for weeks), not a sub-hour spike.
+     *
+     * ⚠️ Must stay `rate(1 hour)`: it is coupled to the probe's trailing SQL
+     * window (`INTERVAL 1 HOUR`, `WINDOW_HOURS`) and the alarm's 1h metric
+     * period. Changing the cadence without changing the SQL window makes
+     * consecutive runs overlap (double-count) or gap the window.
+     */
+    readonly writeAmplificationProbe: string;
   };
 
   // Ops alarms + notification (consumed by ObservabilityStack — task 0056)
@@ -137,6 +151,20 @@ export interface EnvironmentConfig {
     readonly sdexPushFreshnessSeconds: number;
     /** Days-to-NotAfter below which the mTLS cert-expiry alarm fires (30). */
     readonly mtlsNotAfterDaysThreshold: number;
+    /**
+     * Rows-written-per-hour to any single `prices.*` table above which the
+     * write-amplification alarm fires — for the required 3-hour sustained window
+     * (task 0133; see the alarm in observability-stack.ts). Default 50,000,000,
+     * set from a 14-day `system.part_log` measurement, NOT a guess: the highest
+     * *sustained* legitimate load is `price_ohlcv_1m` at ~16M rows/hour during a
+     * backfill/reprice day (07-26, ~18h). One-hour bulk spikes go higher
+     * (rollup-rework `_bak` copies hit 154M/hour) but clear within the 3-hour
+     * window. Task 0132 ran ~130M/hour for days. 50M sits ~3× above the sustained
+     * legit peak (headroom for backfill growth) and ~2.6× below a 0132-class
+     * runaway, and no legit event in the measured window breaches it for 3
+     * sustained hours. Operator-tunable; raise it during a known heavy migration.
+     */
+    readonly writeAmplificationRowsPerHour: number;
     /**
      * Ingestion-lag threshold (seconds) for the live ledger-processor alarm
      * (task 0056 finding B). Watches the `prices-ingest-{env}` SQS queue's
@@ -330,6 +358,7 @@ export function validateConfig(config: EnvironmentConfig): void {
       'enrichment',
       'backfillFreshnessProbe',
       'mtlsNotafterProbe',
+      'writeAmplificationProbe',
     ] as const;
     for (const key of expectedKeys) {
       const value = schedules[key];
@@ -369,6 +398,14 @@ export function validateConfig(config: EnvironmentConfig): void {
     ) {
       errors.push(
         `opsAlarms.ledgerProcessorLagSeconds must be a positive integer (seconds), got: ${ops.ledgerProcessorLagSeconds}`,
+      );
+    }
+    if (
+      !Number.isInteger(ops.writeAmplificationRowsPerHour) ||
+      ops.writeAmplificationRowsPerHour < 1
+    ) {
+      errors.push(
+        `opsAlarms.writeAmplificationRowsPerHour must be a positive integer (rows/hour), got: ${ops.writeAmplificationRowsPerHour}`,
       );
     }
     if (ops.slack !== undefined) {
