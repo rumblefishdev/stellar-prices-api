@@ -45,21 +45,125 @@ alarm, not a bill.
 - Alarm plumbing already exists (task 0056 → Slack `#stellar-prices-api-bot`); this
   should reuse it.
 
-## Implementation (sketch — refine when picked up)
+## Chosen signal: CH **write amplification**, not egress
 
-- Pick the signal(s):
-  - **Lambda egress** — CloudWatch `AWS/Lambda` DataTransfer / a CloudWatch alarm on
-    the `EUC1-DataTransfer-Out-Bytes` usage, threshold well above the legitimate
-    candle stream (~3 GB/day) but below a runaway (e.g. alert > ~20 GB/day).
-  - **CH write volume** — a scheduled probe over `system.part_log`
-    (`sum(rows)`/`sum(size_in_bytes)` per table per day) that flags any single table
-    exceeding an amplification factor vs its `... FINAL` real row count.
-- Wire the breach to the existing 0056 Slack alarm path.
-- Document the thresholds + the "what to check first" runbook pointer (link 0132).
+Two candidate signals; write amplification wins:
+
+- ❌ **Lambda egress (`EUC1-DataTransfer-Out-Bytes`)** — a *lagging cost* signal, not a
+  CloudWatch metric. Lambda emits no per-function egress metric; it only surfaces in
+  Cost Explorer / Budgets (hours-to-a-day late, account-scoped, hard to attribute to
+  one function). A Budgets/Cost-Anomaly alarm is coarse and slow.
+- ✅ **Per-table write amplification from `system.part_log`** — the *leading cause*
+  (write volume drives egress) and directly attributable. This is what BE actually
+  used to find 0132. Measurable server-side on prod CH, off the hot path, and general:
+  it watches **every** `prices.*` table, so it catches the *next unknown* amplification,
+  not just a re-run of the asset bug.
+
+## Implementation — mirror the existing probe pattern (task 0056)
+
+Model it on `backfill-freshness-probe` / `mtls-notafter-probe`: a scheduled Rust Lambda
+that queries CH (invisible to CloudWatch), republishes a custom metric, and an alarm
+fires on it → the 0056 SNS topic → AWS Chatbot Slack (`#stellar-prices-api-bot`).
+
+New crate **`write-amplification-probe`**:
+
+- **Query** (server-side, one round-trip): over the trailing window (e.g. 1h), for each
+  `prices.*` table, `sum(rows)` written (`part_log` `event_type='NewPart'`) divided by
+  the table's real deduplicated row count → an **amplification factor** per table.
+  ```sql
+  -- shape; refine at implementation
+  SELECT table, sum(rows) AS written_1h
+  FROM system.part_log
+  WHERE database='prices' AND event_type='NewPart' AND event_time >= now()-INTERVAL 1 HOUR
+  GROUP BY table
+  ```
+  Real row counts per table come from a cheap `count()` (or a maintained size), so the
+  factor = `written_1h / real_rows`. (0132 read 9,413×; legit RMT churn is a few ×.)
+- **Metric:** publish `WriteAmplificationFactor` (and optionally `RowsWrittenPerHour`)
+  under namespace **`Prices/Ingest`**, dimensioned by `Table`. Split for testability
+  exactly like the other probes: pure factor-math + query-shaping are feature-free and
+  unit-tested; the CH fetch + `PutMetricData` are gated behind `lambda`/`aws-mtls`.
+- **CH identity:** the probe reads over mTLS as the existing **`prices_reader`** user (reuse
+  the reader cert/secret — no new identity). This requires the one-time prerequisite grant
+  below; `prices_reader` otherwise stays SELECT-only on `prices.*`.
+- **IAM:** Lambda role gets `PutMetricData` scoped by a `cloudwatch:namespace = Prices/Ingest`
+  condition (same shape as `Prices/Backfill` / `Prices/Mtls`).
+
+## Prerequisite: one-time CH grant (RESOLVED 2026-07-29)
+
+`prices_reader` is DB-scoped and cannot read `system.part_log` — confirmed via
+`system.grants`: `prices_reader` has only `SELECT ON prices.*`; `prices_writer` has
+`prices.*` **plus** `SELECT ON system.parts` (so a prices user reading a *system* table is
+already an established, deliberate pattern here — we add one more). **Decision (Plan A):**
+grant `prices_reader` read access to the write-log, run **once by a CH admin** on ch-prod-01
+before the alarm is meaningful:
+
+```sql
+GRANT SELECT ON system.part_log TO prices_reader;
+```
+
+Read-only, low-sensitivity (metadata only — no price data), and fully reversible
+(`REVOKE SELECT ON system.part_log FROM prices_reader`). Reusing `prices_reader` (rather than
+a dedicated probe user) is the deliberate choice: no new mTLS cert/identity to provision. The
+mild trade-off — the read-API's identity also gains this one metadata read — is accepted;
+it grants no write/alter/delete and touches no `prices.*` data. `system.parts` (already
+granted to the writer) is **not** a substitute: it is a current-parts snapshot, so the
+over-written rows are merged away before it could see them; `part_log` is the event log that
+records the write *rate*, which is what detects amplification.
+- **Schedule:** an `events.Rule` in `eventbridge-stack.ts` (hourly is enough; the bug
+  bled for weeks — sub-hour detection is unnecessary), passing `errorAlarmActions` like
+  the other two probes so a *dead probe* also alarms.
+- **Alarm:** in `observability-stack.ts`, fire when `max(WriteAmplificationFactor)`
+  across tables breaches the threshold for N datapoints → `opsAlarmsTopic` (SNS) →
+  existing Slack channel. Add `OkAction` too (recovery notice), matching the repo.
+
+## Threshold
+
+Operator-tunable via `config`. Legit ReplacingMergeTree churn is single-digit × (BE's
+sister `default.assets` ran 4.6×); 0132 ran 9,413×. A threshold of **~50×** catches a
+runaway with wide margin above normal churn. Also consider an absolute floor (e.g.
+`RowsWrittenPerHour` per table) so a low-real-row table can't hide a large absolute write.
+
+## Design Decisions
+
+### Emerged
+
+1. **Amplification factor, not raw rows** — a table legitimately grows; what's pathological
+   is writing many multiples of the real row count. The ratio normalises table size and is
+   what made 0132 obvious (9,413× vs a 60 MiB table).
+2. **General per-table sweep, not an assets-specific watch** — the point of a guardrail is
+   the *next* unknown regression, not re-watching the one we already fixed.
+
+## Open Questions / Risks
+
+- ✅ **`system.part_log` read grant — RESOLVED** (see Prerequisite above): Plan A, grant
+  `SELECT ON system.part_log TO prices_reader`. The Plan-B fallback (ledger-processor emits
+  its own `AssetRowsWrittenPerRun`) is no longer needed but kept in Alternatives for record.
+- **`part_log` TTL** — hourly window is well inside typical retention; verify on ch-prod-01.
+- Threshold false-positives during a legitimate heavy backfill/pre-roll writing to a
+  live table — document the "expected during a known backfill" caveat in the runbook.
 
 ## Acceptance Criteria
 
-- [ ] A metric/alarm exists on live-pipeline egress (or per-table CH write volume)
-- [ ] Threshold set above the legitimate baseline, below a 0132-class runaway
-- [ ] Breach notifies the existing Slack channel (0056)
-- [ ] Brief runbook note on interpreting a breach (links 0132)
+- [ ] Prerequisite grant applied on ch-prod-01: `GRANT SELECT ON system.part_log TO prices_reader`
+      (one-time admin op; verify the probe can then read `system.part_log` as `prices_reader`).
+- [ ] `write-amplification-probe` crate: pure factor-math + query-shaping unit-tested;
+      CH fetch (as `prices_reader` over mTLS) + `PutMetricData` gated behind `lambda`/`aws-mtls`
+      (mirrors 0056 probes).
+- [ ] Publishes `WriteAmplificationFactor` (per-`Table`) under `Prices/Ingest`; IAM
+      `PutMetricData` scoped by namespace condition.
+- [ ] EventBridge rule schedules it (hourly), with `errorAlarmActions` so a dead probe alarms.
+- [ ] CloudWatch alarm on the metric breaching the threshold → 0056 SNS/Slack; `OkAction` set.
+- [ ] Threshold operator-tunable via `config`; documented (legit few× vs 0132's 9,413×).
+- [ ] Brief runbook note: what a breach means + "what to check first" (links 0132's
+      `part_log` day-slice + anti-join queries).
+- [x] `system.part_log` read-access question resolved — Plan A (grant to `prices_reader`);
+      see Prerequisite. Grant *application* tracked as the first AC above.
+
+## Alternatives Considered
+
+- **AWS Budgets / Cost Anomaly Detection on DataTransfer** — coarse, account-scoped, and
+  lags by up to a day; useful as a cheap backstop but not the primary (it's what let 0132
+  run for weeks). Could add later as a low-effort secondary net.
+- **In-processor `PutMetricData` per run** — narrow (asset write only) and on the hot path;
+  kept as the fallback if `system.part_log` proves ungrantable.
