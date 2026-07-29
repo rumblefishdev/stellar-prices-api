@@ -2,7 +2,7 @@
 id: "0133"
 title: "Guardrail: egress / write-volume alarm on the live pipeline so amplification shows on a dashboard, not a bill"
 type: FEATURE
-status: active
+status: completed
 related_adr: []
 related_tasks: ["0132", "0039", "0056"]
 tags: [observability, cost, clickhouse, egress, perf, priority-medium, effort-small, phase-future]
@@ -25,9 +25,47 @@ history:
       (writes 21.7M/10min → 0). The guardrail is the direct lesson of 0132:
       the amplification ran undetected for weeks. Prioritised so the next one
       hits a dashboard, not a bill.
+  - date: 2026-07-29
+    status: completed
+    who: okarcz
+    note: >
+      Completed via a different solution after the BE response. Our own
+      write-amplification-probe (PR #156 — new Lambda + Prices/Ingest metric +
+      alarm) was built, reviewed, threshold-tuned from a 14-day part_log
+      measurement, and merged — but the deploy hit a hard blocker: the prices CH
+      users are XML-managed in BE's users_xml (readonly to SQL), so the required
+      `SELECT ON system.part_log` grant for prices_reader could not be applied
+      (Code 495 ACCESS_STORAGE_READONLY) and would need a BE services.xml change.
+      On raising it, BE opted to cover this at the shared-infra layer instead: a
+      transfer-cost alarm they own. That satisfies the task goal (a guardrail so
+      the next amplification hits an alarm, not a bill) without a prices-owned
+      probe, so **PR #156 was reverted** (unused code) and this task is closed.
+      Guardrail responsibility now sits with BE's shared infra alarm.
 ---
 
 # Egress / write-volume alarm on the live pipeline
+
+## ✅ Resolution (2026-07-29) — solved by BE shared-infra alarm; our probe reverted
+
+**Goal met, but not with our code.** We built the prices-owned probe (PR #156: new
+`write-amplification-probe` Lambda → `Prices/Ingest MaxRowsWrittenPerHour` metric →
+CloudWatch alarm → Slack), reviewed it, and tuned the threshold to **50M/hour over a
+3-hour sustained window** from a 14-day `system.part_log` measurement (the measurement
+also surfaced that a legit one-hour `_bak` copy hit 154M/hour — *above* the 0132 bug's
+130M — so only a sustained window separates legit bulk from a runaway).
+
+**Blocker that forced the pivot:** the deploy needs `prices_reader` to read
+`system.part_log`, but the prices CH users are **XML-managed in BE's `users_xml`**
+(readonly to SQL) — a SQL `GRANT` fails with `Code 495 ACCESS_STORAGE_READONLY`, so the
+grant would require a change to BE's `soroban-block-explorer/.../users.d/services.xml`.
+On raising it with BE, they chose to cover it at the **shared-infra layer instead: a
+transfer-cost alarm they own**. That satisfies the task goal (a guardrail so the next
+amplification hits an alarm, not a bill) without a prices-owned probe or a CH grant.
+
+**Outcome:** PR #156 **reverted** (unused code removed from `develop`); guardrail
+responsibility now sits with **BE's shared-infra transfer-cost alarm**. The design
+below is retained for the record (and if a prices-owned probe is ever wanted, the
+`system.part_log`-grant path and the measured threshold are documented here).
 
 ## Summary
 
