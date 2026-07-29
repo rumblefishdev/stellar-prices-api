@@ -488,17 +488,35 @@ export class ObservabilityStack extends cdk.Stack {
     // Write amplification (task 0133 — the guardrail for the 0132 egress bug).
     // The write-amplification-probe publishes the max rows-written-per-hour
     // across all prices tables as Prices/Ingest MaxRowsWrittenPerHour; alarm
-    // when it exceeds the operator-tuned threshold (well above the busiest legit
-    // table, far below a 0132-class ~130M/hour runaway). A quiet hour publishes a
+    // when it stays above the operator-tuned threshold. A quiet hour publishes a
     // real 0 (healthy), so missing data is non-breaching — probe-down is covered
     // by the probe's own error alarm.
+    //
+    // ⚠️ system.part_log counts ALL writes to prices.* — including legitimate
+    // BULK loads (the 0088 backfill, coarse pre-rolls, enrichment bursts), which
+    // an absolute row count cannot distinguish from a re-emit amplification. Two
+    // mitigations: (1) datapointsToAlarm=3 over 1h periods requires a *sustained*
+    // 3-hour breach — a 0132-class runaway persists indefinitely (it "bled for
+    // weeks"), whereas most legit bulk loads are bursty and clear within an hour
+    // or two; (2) the threshold is operator-tunable, and an operator running a
+    // known heavy backfill/pre-roll should expect this to fire and either ack it
+    // or raise config.opsAlarms.writeAmplificationRowsPerHour for that window.
+    // The threshold MUST be validated against real backfill/pre-roll peaks before
+    // it is trusted (task 0133 — the busiest legit hour, not just steady-state
+    // live traffic). A true "written vs deduplicated real rows" ratio (which a
+    // legit bulk load keeps ~1× while a re-emit pushes high) is the robust fix and
+    // a documented future enhancement.
+    //
+    // The 1h metric period is coupled to the probe's SQL window (INTERVAL 1 HOUR)
+    // and its rate(1 hour) schedule — see WINDOW_HOURS in the probe crate. All
+    // three must change together.
     this.writeAmplificationAlarm = new cloudwatch.Alarm(
       this,
       'WriteAmplificationAlarm',
       {
         alarmName: `prices-${config.envName}-write-amplification`,
         alarmDescription:
-          'A prices table is being written far more than any legitimate table (rows-written-per-hour above config.opsAlarms.writeAmplificationRowsPerHour). Likely a write-amplification regression like task 0132 (full-registry re-emit). Check system.part_log per table to find the offender.',
+          'A prices table has been written far above any legitimate steady-state rate for 3 consecutive hours (rows-written/hour above config.opsAlarms.writeAmplificationRowsPerHour). Likely a write-amplification regression like task 0132 (full-registry re-emit) — but a sustained heavy backfill/pre-roll can also trip it. Check system.part_log per table to find the offender; if it is a known bulk load, ack or raise the threshold for that window.',
         metric: new cloudwatch.Metric({
           namespace: 'Prices/Ingest',
           metricName: 'MaxRowsWrittenPerHour',
@@ -507,8 +525,11 @@ export class ObservabilityStack extends cdk.Stack {
           period: cdk.Duration.hours(1),
         }),
         threshold: config.opsAlarms.writeAmplificationRowsPerHour,
-        evaluationPeriods: 1,
-        datapointsToAlarm: 1,
+        // Sustained 3-hour breach, not a single anomalous hour (task 0133
+        // review): the guardrail targets a persistent runaway, not a one-off
+        // legit burst.
+        evaluationPeriods: 3,
+        datapointsToAlarm: 3,
         comparisonOperator:
           cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
         treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,

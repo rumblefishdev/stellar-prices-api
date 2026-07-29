@@ -60,6 +60,14 @@ pub const METRIC_NAMESPACE: &str = "Prices/Ingest";
 /// growing set of table dimensions.
 pub const METRIC_NAME: &str = "MaxRowsWrittenPerHour";
 
+/// The trailing window (hours) summed by [`WRITE_VOLUME_QUERY`]. It is baked into
+/// the SQL literal (`INTERVAL 1 HOUR`), so this const is the single documented
+/// source of truth for the value and the anchor for the coupling note on the
+/// query: the EventBridge schedule and the alarm metric period must both equal
+/// this. If it ever needs to change, update the SQL, the schedule
+/// (`scheduleExpressions.writeAmplificationProbe`), and the alarm period together.
+pub const WINDOW_HOURS: u32 = 1;
+
 /// One table's rows-written total over the trailing window, as read from
 /// `system.part_log`. `sum(rows)` over `NewPart` events is a `UInt64`, so this
 /// deserializes into a plain `u64`; a table not written to in the window simply
@@ -91,6 +99,16 @@ pub fn max_rows_written(rows: &[TableWrite]) -> f64 {
 ///
 /// Ordered by volume so the caller can log the top writers for forensics when
 /// the alarm fires.
+///
+/// ⚠️ **This trailing-hour window is coupled to two infra values and they must
+/// stay in lockstep — there is no compile-time link:**
+/// 1. the EventBridge schedule `scheduleExpressions.writeAmplificationProbe`
+///    (must be `rate(1 hour)`), so runs neither overlap (double-count) nor gap
+///    the window, and
+/// 2. the alarm metric `period` in `observability-stack.ts` (must be 1 hour),
+///    so the threshold is compared against a whole window's writes.
+///
+/// Changing the window here **requires** changing both. See [`WINDOW_HOURS`].
 pub const WRITE_VOLUME_QUERY: &str = "SELECT \
      table, \
      sum(rows) AS rows_written \

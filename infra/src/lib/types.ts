@@ -120,6 +120,11 @@ export interface EnvironmentConfig {
      * `Prices/Ingest` `MaxRowsWrittenPerHour` metric the write-amplification
      * alarm watches. Hourly is ample — the guardrail catches a sustained
      * runaway (0132 bled for weeks), not a sub-hour spike.
+     *
+     * ⚠️ Must stay `rate(1 hour)`: it is coupled to the probe's trailing SQL
+     * window (`INTERVAL 1 HOUR`, `WINDOW_HOURS`) and the alarm's 1h metric
+     * period. Changing the cadence without changing the SQL window makes
+     * consecutive runs overlap (double-count) or gap the window.
      */
     readonly writeAmplificationProbe: string;
   };

@@ -134,6 +134,25 @@ workspace members. Infra: `eventbridge-stack.ts` (rule + `createWorkerLambda` on
 Verified: 4 unit tests pass, clippy clean, arm64 bootstrap builds, infra `tsc` build passes,
 full app `cdk synth` succeeds, and the alarm/probe/IAM land correctly in the synthesized CFN.
 
+## Issues Encountered (code review, PR #156)
+
+- **Finding 1 (false-positive on legit bulk loads) — REAL, partially mitigated.** `system.part_log`
+  counts *all* writes to `prices.*`, including legit bulk INSERTs (the 0088 backfill, coarse
+  pre-rolls at tens of millions/pass, enrichment bursts). An **absolute** row count can't tell
+  "writing lots of new data" (legit) from "re-writing the same rows" (amplification) — only a
+  written÷*deduplicated*-rows ratio can. Mitigations applied: (a) alarm now requires a **sustained
+  3-hour breach** (a 0132 runaway persists for weeks; most legit bulk is bursty), (b) threshold is
+  operator-tunable and documented as ack-able during known heavy backfills. ⚠️ **Residual: the
+  10M default MUST be validated against real backfill/pre-roll hourly peaks before the alarm is
+  trusted** (measure `MAX(sum(rows))` per hour over the last few weeks from `part_log`). The robust
+  fix (the written-vs-real ratio) is deferred as a future enhancement (needs a deduplicated-count
+  denominator — `count() FINAL` is heavy, `system.parts` is diluted by un-merged parts).
+- **Finding 2 (single-hour trigger) — FIXED.** `evaluationPeriods`/`datapointsToAlarm` 1→3, so a
+  lone anomalous hour no longer pages; matches the "sustained runaway" intent.
+- **Finding 3 (window coupled across 3 files) — FIXED.** Added `WINDOW_HOURS` const + explicit
+  coupling notes on the SQL query, the schedule config doc, and the alarm period.
+- **Finding 4 (unused `thiserror` dep) — FIXED.** Removed (copy-paste from the freshness probe).
+
 ## Design Decisions
 
 ### Emerged
