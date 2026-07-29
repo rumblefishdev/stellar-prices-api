@@ -18,12 +18,14 @@
     "cleanup": "cron(0 3 * * ? *)",
     "enrichment": "rate(1 hour)",
     "backfillFreshnessProbe": "rate(15 minutes)",
-    "mtlsNotafterProbe": "rate(1 day)"
+    "mtlsNotafterProbe": "rate(1 day)",
+    "writeAmplificationProbe": "rate(1 hour)"
   },
   "opsAlarms": {
     "sdexPushFreshnessSeconds": 604800,
     "mtlsNotAfterDaysThreshold": 30,
     "ledgerProcessorLagSeconds": 120,
+    "writeAmplificationRowsPerHour": 10000000,
     "slack": {
       "workspaceIdSsmParam": "/prices/production/slack-workspace-id",
       "channelIdSsmParam": "/prices/production/slack-channel-id"

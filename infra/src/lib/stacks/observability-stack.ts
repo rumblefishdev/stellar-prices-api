@@ -231,6 +231,9 @@ export class ObservabilityStack extends cdk.Stack {
   public readonly sdexPushFreshnessAlarm: cloudwatch.Alarm;
   /** mTLS client-cert expiry alarm (§7 / §11.4). */
   public readonly mtlsNotAfterAlarm: cloudwatch.Alarm;
+
+  /** Write-amplification guardrail (task 0133). */
+  public readonly writeAmplificationAlarm: cloudwatch.Alarm;
   /** Live ledger-processor ingestion-lag alarm (task 0056 finding B). */
   public readonly ledgerProcessorLagAlarm: cloudwatch.Alarm;
   /** Live ledger-processor invocation-error alarm (task 0056 finding B). */
@@ -481,6 +484,38 @@ export class ObservabilityStack extends cdk.Stack {
     });
     this.mtlsNotAfterAlarm.addAlarmAction(snsAction);
     this.mtlsNotAfterAlarm.addOkAction(snsAction);
+
+    // Write amplification (task 0133 — the guardrail for the 0132 egress bug).
+    // The write-amplification-probe publishes the max rows-written-per-hour
+    // across all prices tables as Prices/Ingest MaxRowsWrittenPerHour; alarm
+    // when it exceeds the operator-tuned threshold (well above the busiest legit
+    // table, far below a 0132-class ~130M/hour runaway). A quiet hour publishes a
+    // real 0 (healthy), so missing data is non-breaching — probe-down is covered
+    // by the probe's own error alarm.
+    this.writeAmplificationAlarm = new cloudwatch.Alarm(
+      this,
+      'WriteAmplificationAlarm',
+      {
+        alarmName: `prices-${config.envName}-write-amplification`,
+        alarmDescription:
+          'A prices table is being written far more than any legitimate table (rows-written-per-hour above config.opsAlarms.writeAmplificationRowsPerHour). Likely a write-amplification regression like task 0132 (full-registry re-emit). Check system.part_log per table to find the offender.',
+        metric: new cloudwatch.Metric({
+          namespace: 'Prices/Ingest',
+          metricName: 'MaxRowsWrittenPerHour',
+          dimensionsMap: { Environment: config.envName },
+          statistic: 'Maximum',
+          period: cdk.Duration.hours(1),
+        }),
+        threshold: config.opsAlarms.writeAmplificationRowsPerHour,
+        evaluationPeriods: 1,
+        datapointsToAlarm: 1,
+        comparisonOperator:
+          cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      },
+    );
+    this.writeAmplificationAlarm.addAlarmAction(snsAction);
+    this.writeAmplificationAlarm.addOkAction(snsAction);
 
     // -----------------------------------------------------------------
     // Live ledger-processor health (task 0056 finding B). The core ingestion

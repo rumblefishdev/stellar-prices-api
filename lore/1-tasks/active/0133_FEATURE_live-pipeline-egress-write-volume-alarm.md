@@ -124,15 +124,33 @@ sister `default.assets` ran 4.6×); 0132 ran 9,413×. A threshold of **~50×** c
 runaway with wide margin above normal churn. Also consider an absolute floor (e.g.
 `RowsWrittenPerHour` per table) so a low-real-row table can't hide a large absolute write.
 
+## Implementation Notes (built 2026-07-29)
+
+Mirrors the 0056 probe pattern end-to-end. New crate **`write-amplification-probe`**
+(`src/lib.rs` pure logic + tests, `src/main.rs` `lambda`-gated entrypoint), added to the
+workspace members. Infra: `eventbridge-stack.ts` (rule + `createWorkerLambda` on the `api`/
+`prices_reader` bundle + `PutMetricData` scoped to `Prices/Ingest`), `observability-stack.ts`
+(alarm → existing SNS/Slack), `types.ts` + `envs/production.json` (schedule + threshold).
+Verified: 4 unit tests pass, clippy clean, arm64 bootstrap builds, infra `tsc` build passes,
+full app `cdk synth` succeeds, and the alarm/probe/IAM land correctly in the synthesized CFN.
+
 ## Design Decisions
 
 ### Emerged
 
-1. **Amplification factor, not raw rows** — a table legitimately grows; what's pathological
-   is writing many multiples of the real row count. The ratio normalises table size and is
-   what made 0132 obvious (9,413× vs a 60 MiB table).
-2. **General per-table sweep, not an assets-specific watch** — the point of a guardrail is
-   the *next* unknown regression, not re-watching the one we already fixed.
+1. **General sweep, not an assets-specific watch** — the point of a guardrail is the *next*
+   unknown regression, not re-watching the one we already fixed. The probe reads every
+   `prices.*` table's write volume.
+2. **`prices_reader`, not a dedicated probe user** — reuse the existing `api` mTLS bundle (no
+   new cert to provision); the trade-off (the read-API identity gains one metadata read) is
+   accepted (user decision).
+3. **Absolute `MaxRowsWrittenPerHour`, not a written÷real *ratio*** — the ratio would need
+   `system.parts` too, but `prices_reader` is granted only `system.part_log` (+ `prices.*`).
+   For a guardrail, absolute rows/hour is sufficient: the busiest legit table is <1M/h and
+   0132 was ~130M/h, so a 10M threshold has wide margin both ways. Publishing a single scalar
+   (max across tables) rather than a per-`Table` metric also keeps CloudWatch dimensions
+   bounded and the alarm a trivial threshold. A true ratio is a documented future enhancement
+   that would add a `system.parts` read grant.
 
 ## Open Questions / Risks
 
@@ -146,17 +164,20 @@ runaway with wide margin above normal churn. Also consider an absolute floor (e.
 ## Acceptance Criteria
 
 - [ ] Prerequisite grant applied on ch-prod-01: `GRANT SELECT ON system.part_log TO prices_reader`
-      (one-time admin op; verify the probe can then read `system.part_log` as `prices_reader`).
-- [ ] `write-amplification-probe` crate: pure factor-math + query-shaping unit-tested;
-      CH fetch (as `prices_reader` over mTLS) + `PutMetricData` gated behind `lambda`/`aws-mtls`
-      (mirrors 0056 probes).
-- [ ] Publishes `WriteAmplificationFactor` (per-`Table`) under `Prices/Ingest`; IAM
-      `PutMetricData` scoped by namespace condition.
-- [ ] EventBridge rule schedules it (hourly), with `errorAlarmActions` so a dead probe alarms.
-- [ ] CloudWatch alarm on the metric breaching the threshold → 0056 SNS/Slack; `OkAction` set.
-- [ ] Threshold operator-tunable via `config`; documented (legit few× vs 0132's 9,413×).
-- [ ] Brief runbook note: what a breach means + "what to check first" (links 0132's
-      `part_log` day-slice + anti-join queries).
+      (one-time admin op at **deploy time**; verify the probe can then read `system.part_log`).
+- [x] `write-amplification-probe` crate: pure metric-shaping (`max_rows_written`) + query-shaping
+      unit-tested (4 tests); CH fetch (as `prices_reader` over mTLS) + `PutMetricData` gated behind
+      `lambda`/`aws-mtls` (mirrors 0056 probes). Clippy clean; arm64 bootstrap builds.
+- [x] Publishes `MaxRowsWrittenPerHour` (see Emerged #3 — scalar max, not per-`Table` ratio)
+      under `Prices/Ingest`; IAM `PutMetricData` scoped by the namespace condition.
+- [x] EventBridge rule schedules it `rate(1 hour)`, with `errorAlarmActions` so a dead probe alarms.
+- [x] CloudWatch alarm on the metric breaching the threshold → 0056 SNS/Slack; `OkAction` set.
+      Verified in synthesized CFN (threshold 10,000,000, GreaterThanThreshold, notBreaching).
+- [x] Threshold operator-tunable via `config.opsAlarms.writeAmplificationRowsPerHour` (default 10M);
+      documented (busiest legit table <1M/h vs 0132's ~130M/h).
+- [~] Runbook: the alarm *description* embeds "check `system.part_log` per table to find the
+      offender"; a fuller runbook note (links 0132's part_log day-slice + anti-join) is a small
+      follow-up.
 - [x] `system.part_log` read-access question resolved — Plan A (grant to `prices_reader`);
       see Prerequisite. Grant *application* tracked as the first AC above.
 
