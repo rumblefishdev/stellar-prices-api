@@ -19,7 +19,6 @@ members = [
     "packages/prices-api",
     "packages/backfill-freshness-probe",
     "packages/mtls-notafter-probe",
-    "packages/write-amplification-probe",
     "packages/pool-registry-seed",
 ]
 

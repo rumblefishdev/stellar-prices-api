@@ -2,7 +2,7 @@
 id: "0133"
 title: "Guardrail: egress / write-volume alarm on the live pipeline so amplification shows on a dashboard, not a bill"
 type: FEATURE
-status: active
+status: completed
 related_adr: []
 related_tasks: ["0132", "0039", "0056"]
 tags: [observability, cost, clickhouse, egress, perf, priority-medium, effort-small, phase-future]
@@ -25,9 +25,47 @@ history:
       (writes 21.7M/10min → 0). The guardrail is the direct lesson of 0132:
       the amplification ran undetected for weeks. Prioritised so the next one
       hits a dashboard, not a bill.
+  - date: 2026-07-29
+    status: completed
+    who: okarcz
+    note: >
+      Completed via a different solution after the BE response. Our own
+      write-amplification-probe (PR #156 — new Lambda + Prices/Ingest metric +
+      alarm) was built, reviewed, threshold-tuned from a 14-day part_log
+      measurement, and merged — but the deploy hit a hard blocker: the prices CH
+      users are XML-managed in BE's users_xml (readonly to SQL), so the required
+      `SELECT ON system.part_log` grant for prices_reader could not be applied
+      (Code 495 ACCESS_STORAGE_READONLY) and would need a BE services.xml change.
+      On raising it, BE opted to cover this at the shared-infra layer instead: a
+      transfer-cost alarm they own. That satisfies the task goal (a guardrail so
+      the next amplification hits an alarm, not a bill) without a prices-owned
+      probe, so **PR #156 was reverted** (unused code) and this task is closed.
+      Guardrail responsibility now sits with BE's shared infra alarm.
 ---
 
 # Egress / write-volume alarm on the live pipeline
+
+## ✅ Resolution (2026-07-29) — solved by BE shared-infra alarm; our probe reverted
+
+**Goal met, but not with our code.** We built the prices-owned probe (PR #156: new
+`write-amplification-probe` Lambda → `Prices/Ingest MaxRowsWrittenPerHour` metric →
+CloudWatch alarm → Slack), reviewed it, and tuned the threshold to **50M/hour over a
+3-hour sustained window** from a 14-day `system.part_log` measurement (the measurement
+also surfaced that a legit one-hour `_bak` copy hit 154M/hour — *above* the 0132 bug's
+130M — so only a sustained window separates legit bulk from a runaway).
+
+**Blocker that forced the pivot:** the deploy needs `prices_reader` to read
+`system.part_log`, but the prices CH users are **XML-managed in BE's `users_xml`**
+(readonly to SQL) — a SQL `GRANT` fails with `Code 495 ACCESS_STORAGE_READONLY`, so the
+grant would require a change to BE's `soroban-block-explorer/.../users.d/services.xml`.
+On raising it with BE, they chose to cover it at the **shared-infra layer instead: a
+transfer-cost alarm they own**. That satisfies the task goal (a guardrail so the next
+amplification hits an alarm, not a bill) without a prices-owned probe or a CH grant.
+
+**Outcome:** PR #156 **reverted** (unused code removed from `develop`); guardrail
+responsibility now sits with **BE's shared-infra transfer-cost alarm**. The design
+below is retained for the record (and if a prices-owned probe is ever wanted, the
+`system.part_log`-grant path and the measured threshold are documented here).
 
 ## Summary
 
@@ -124,54 +162,15 @@ sister `default.assets` ran 4.6×); 0132 ran 9,413×. A threshold of **~50×** c
 runaway with wide margin above normal churn. Also consider an absolute floor (e.g.
 `RowsWrittenPerHour` per table) so a low-real-row table can't hide a large absolute write.
 
-## Implementation Notes (built 2026-07-29)
-
-Mirrors the 0056 probe pattern end-to-end. New crate **`write-amplification-probe`**
-(`src/lib.rs` pure logic + tests, `src/main.rs` `lambda`-gated entrypoint), added to the
-workspace members. Infra: `eventbridge-stack.ts` (rule + `createWorkerLambda` on the `api`/
-`prices_reader` bundle + `PutMetricData` scoped to `Prices/Ingest`), `observability-stack.ts`
-(alarm → existing SNS/Slack), `types.ts` + `envs/production.json` (schedule + threshold).
-Verified: 4 unit tests pass, clippy clean, arm64 bootstrap builds, infra `tsc` build passes,
-full app `cdk synth` succeeds, and the alarm/probe/IAM land correctly in the synthesized CFN.
-
-## Issues Encountered (code review, PR #156)
-
-- **Finding 1 (false-positive on legit bulk loads) — REAL, RESOLVED with measured tuning.**
-  `system.part_log` counts *all* writes to `prices.*`, so legit bulk (0088 backfill, pre-rolls,
-  enrichment) is indistinguishable from a re-emit by *magnitude*. A 14-day `part_log` measurement
-  proved this is not hypothetical: a legit one-hour `price_ohlcv_15m_bak` copy (07-17 rollup rework)
-  wrote **154M rows/hour — higher than the 0132 bug's ~130M**. So no absolute threshold works on
-  value alone. **But the discriminator is duration:** the `_bak` spike was **one hour**; the highest
-  *sustained* legit load is `price_ohlcv_1m` at **~16M/hour** (07-26 backfill day, ~18h); the 0132
-  bug ran ~130M/hour for **days**. Resolution: (a) **sustained 3-hour breach** clears the one-hour
-  spikes; (b) **threshold set to 50M** (measured: ~3× above the 16M sustained legit peak, ~2.6×
-  below the 130M bug) — no legit event in the 14-day window breaches it for 3 sustained hours, and a
-  0132-class runaway still does. Threshold operator-tunable / ack-able during known migrations. The
-  written-vs-real *ratio* (legit bulk ~1×, re-emit high) remains the robust future enhancement (needs
-  a deduplicated-count denominator — `count() FINAL` heavy, `system.parts` diluted by un-merged parts).
-- **Finding 2 (single-hour trigger) — FIXED.** `evaluationPeriods`/`datapointsToAlarm` 1→3, so a
-  lone anomalous hour no longer pages; matches the "sustained runaway" intent.
-- **Finding 3 (window coupled across 3 files) — FIXED.** Added `WINDOW_HOURS` const + explicit
-  coupling notes on the SQL query, the schedule config doc, and the alarm period.
-- **Finding 4 (unused `thiserror` dep) — FIXED.** Removed (copy-paste from the freshness probe).
-
 ## Design Decisions
 
 ### Emerged
 
-1. **General sweep, not an assets-specific watch** — the point of a guardrail is the *next*
-   unknown regression, not re-watching the one we already fixed. The probe reads every
-   `prices.*` table's write volume.
-2. **`prices_reader`, not a dedicated probe user** — reuse the existing `api` mTLS bundle (no
-   new cert to provision); the trade-off (the read-API identity gains one metadata read) is
-   accepted (user decision).
-3. **Absolute `MaxRowsWrittenPerHour`, not a written÷real *ratio*** — the ratio would need
-   `system.parts` too, but `prices_reader` is granted only `system.part_log` (+ `prices.*`).
-   For a guardrail, absolute rows/hour is sufficient: the busiest legit table is <1M/h and
-   0132 was ~130M/h, so a 10M threshold has wide margin both ways. Publishing a single scalar
-   (max across tables) rather than a per-`Table` metric also keeps CloudWatch dimensions
-   bounded and the alarm a trivial threshold. A true ratio is a documented future enhancement
-   that would add a `system.parts` read grant.
+1. **Amplification factor, not raw rows** — a table legitimately grows; what's pathological
+   is writing many multiples of the real row count. The ratio normalises table size and is
+   what made 0132 obvious (9,413× vs a 60 MiB table).
+2. **General per-table sweep, not an assets-specific watch** — the point of a guardrail is
+   the *next* unknown regression, not re-watching the one we already fixed.
 
 ## Open Questions / Risks
 
@@ -185,21 +184,17 @@ full app `cdk synth` succeeds, and the alarm/probe/IAM land correctly in the syn
 ## Acceptance Criteria
 
 - [ ] Prerequisite grant applied on ch-prod-01: `GRANT SELECT ON system.part_log TO prices_reader`
-      (one-time admin op at **deploy time**; verify the probe can then read `system.part_log`).
-- [x] `write-amplification-probe` crate: pure metric-shaping (`max_rows_written`) + query-shaping
-      unit-tested (4 tests); CH fetch (as `prices_reader` over mTLS) + `PutMetricData` gated behind
-      `lambda`/`aws-mtls` (mirrors 0056 probes). Clippy clean; arm64 bootstrap builds.
-- [x] Publishes `MaxRowsWrittenPerHour` (see Emerged #3 — scalar max, not per-`Table` ratio)
-      under `Prices/Ingest`; IAM `PutMetricData` scoped by the namespace condition.
-- [x] EventBridge rule schedules it `rate(1 hour)`, with `errorAlarmActions` so a dead probe alarms.
-- [x] CloudWatch alarm on the metric breaching the threshold → 0056 SNS/Slack; `OkAction` set.
-      Verified in synthesized CFN (threshold 10,000,000, GreaterThanThreshold, notBreaching).
-- [x] Threshold operator-tunable via `config.opsAlarms.writeAmplificationRowsPerHour`; set to
-      **50M from a 14-day part_log measurement** (sustained legit peak ~16M/h, bug ~130M/h) with a
-      3-hour sustained window — validated against real backfill/pre-roll peaks, not a guess.
-- [~] Runbook: the alarm *description* embeds "check `system.part_log` per table to find the
-      offender"; a fuller runbook note (links 0132's part_log day-slice + anti-join) is a small
-      follow-up.
+      (one-time admin op; verify the probe can then read `system.part_log` as `prices_reader`).
+- [ ] `write-amplification-probe` crate: pure factor-math + query-shaping unit-tested;
+      CH fetch (as `prices_reader` over mTLS) + `PutMetricData` gated behind `lambda`/`aws-mtls`
+      (mirrors 0056 probes).
+- [ ] Publishes `WriteAmplificationFactor` (per-`Table`) under `Prices/Ingest`; IAM
+      `PutMetricData` scoped by namespace condition.
+- [ ] EventBridge rule schedules it (hourly), with `errorAlarmActions` so a dead probe alarms.
+- [ ] CloudWatch alarm on the metric breaching the threshold → 0056 SNS/Slack; `OkAction` set.
+- [ ] Threshold operator-tunable via `config`; documented (legit few× vs 0132's 9,413×).
+- [ ] Brief runbook note: what a breach means + "what to check first" (links 0132's
+      `part_log` day-slice + anti-join queries).
 - [x] `system.part_log` read-access question resolved — Plan A (grant to `prices_reader`);
       see Prerequisite. Grant *application* tracked as the first AC above.
 
