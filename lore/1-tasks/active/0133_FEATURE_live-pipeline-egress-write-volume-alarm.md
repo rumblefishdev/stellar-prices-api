@@ -2,7 +2,7 @@
 id: "0133"
 title: "Guardrail: egress / write-volume alarm on the live pipeline so amplification shows on a dashboard, not a bill"
 type: FEATURE
-status: backlog
+status: active
 related_adr: []
 related_tasks: ["0132", "0039", "0056"]
 tags: [observability, cost, clickhouse, egress, perf, priority-medium, effort-small, phase-future]
@@ -17,6 +17,14 @@ history:
       re-emit ran for weeks billing ~$337/mo of AWS→Hetzner egress with nothing
       watching. This adds the missing meter so the next amplification surfaces on
       a dashboard/alarm instead of a surprise invoice.
+  - date: 2026-07-29
+    status: active
+    who: okarcz
+    note: >
+      Promoted to active right after 0132's fix deployed + verified live
+      (writes 21.7M/10min → 0). The guardrail is the direct lesson of 0132:
+      the amplification ran undetected for weeks. Prioritised so the next one
+      hits a dashboard, not a bill.
 ---
 
 # Egress / write-volume alarm on the live pipeline
