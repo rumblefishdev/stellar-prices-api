@@ -261,4 +261,43 @@ mod tests {
             assert!(stmts.iter().any(|s| s.contains(v)), "missing {v}");
         }
     }
+
+    /// The live-spot view must forward every column `mv_current_prices` writes
+    /// (task 0072). BE consumes this view IN-CLUSTER — named views, no HTTP —
+    /// so a column the view omits is unreachable to that consumer no matter how
+    /// well the MV populates it.
+    #[test]
+    fn views_sql_current_price_usd_forwards_every_current_prices_column() {
+        let stmt = split_statements(VIEWS_SQL)
+            .into_iter()
+            .find(|s| s.contains("prices.current_price_usd"))
+            .expect("current_price_usd view statement");
+
+        for col in [
+            "price_usd",
+            "price_xlm",
+            "change_24h_pct",
+            "change_7d_pct",
+            "volume_24h_usd",
+            "market_cap_usd",
+            "vwap_24h",
+            "sources",
+            "updated_at",
+        ] {
+            assert!(
+                stmt.contains(&format!("c.{col}")),
+                "current_price_usd must forward `{col}` from current_prices"
+            );
+        }
+
+        // `CREATE VIEW IF NOT EXISTS` does NOT redefine a view that already
+        // exists — the apply silently no-ops and the new columns never land on
+        // a target that already has the old definition. A plain view supports
+        // atomic OR REPLACE (the refreshable MV in current.sql cannot, hence
+        // its DROP + re-CREATE).
+        assert!(
+            stmt.contains("CREATE OR REPLACE VIEW"),
+            "current_price_usd must REPLACE rather than IF NOT EXISTS"
+        );
+    }
 }

@@ -205,10 +205,18 @@ async fn views_expose_usd_series_and_reference() {
 
     // current_price_usd (live spot): one row per asset, natural-identity keyed.
     // Include the contract token (30) to confirm the same #6 normalization here.
+    // Asset 1 carries every task-0072 column with a DISTINCT value, so a view
+    // that mixed up two forwarded columns cannot pass; asset 30 stays on the
+    // table DEFAULTs, standing in for an asset the MV has no breakdown for.
     client
         .query(&format!(
-            "INSERT INTO {db}.current_prices (asset_id, price_usd, updated_at) VALUES \
-             (1, 0.1600, toDateTime(1620100000)), (30, 2.5000, toDateTime(1620100000))"
+            "INSERT INTO {db}.current_prices \
+             (asset_id, price_usd, price_xlm, change_24h_pct, change_7d_pct, \
+              volume_24h_usd, market_cap_usd, vwap_24h, sources, updated_at) VALUES \
+             (1, 0.1600, 1.0000, -3.2500, 7.7500, 125000.0000, 4500000.0000, 0.1580, \
+              '{{\"sdex\":{{\"price\":\"0.16\",\"volume_24h\":\"125000\"}}}}', \
+              toDateTime(1620100000)), \
+             (30, 2.5000, 0, 0, 0, 0, 0, 0, '', toDateTime(1620100000))"
         ))
         .execute()
         .await
@@ -232,6 +240,50 @@ async fn views_expose_usd_series_and_reference() {
         (ckind.as_str(), ccode.as_str()),
         ("contract", ""),
         "current_price_usd blanks the contract token's asset_code"
+    );
+
+    // Task 0072 — the view forwards the rest of current_prices. BE reads this
+    // surface in-cluster, so a column the view drops is unreachable to them
+    // however well the MV writes it. Distinct seeded values catch a swap.
+    let (xlm, ch24, ch7d, vol, mcap, vwap, sources): (f64, f64, f64, f64, f64, f64, String) =
+        client
+            .query(&format!(
+                "SELECT toFloat64(price_xlm), toFloat64(change_24h_pct), \
+                    toFloat64(change_7d_pct), toFloat64(volume_24h_usd), \
+                    toFloat64(market_cap_usd), toFloat64(vwap_24h), sources \
+             FROM {db}.current_price_usd WHERE asset_kind = 'native'"
+            ))
+            .fetch_one()
+            .await
+            .unwrap();
+    assert!(approx(xlm, 1.0), "price_xlm forwarded, got {xlm}");
+    assert!(approx(ch24, -3.25), "change_24h_pct forwarded, got {ch24}");
+    assert!(approx(ch7d, 7.75), "change_7d_pct forwarded, got {ch7d}");
+    assert!(approx(vol, 125000.0), "volume_24h_usd forwarded, got {vol}");
+    assert!(
+        approx(mcap, 4500000.0),
+        "market_cap_usd forwarded, got {mcap}"
+    );
+    assert!(approx(vwap, 0.158), "vwap_24h forwarded, got {vwap}");
+    assert_eq!(
+        sources, r#"{"sdex":{"price":"0.16","volume_24h":"125000"}}"#,
+        "sources JSON forwarded verbatim — the view must not re-serialise it"
+    );
+
+    // An asset the MV has no breakdown for still reads cleanly: the columns are
+    // the table's DEFAULT sentinels, never an error or a dropped row.
+    let (dxlm, dsources): (f64, String) = client
+        .query(&format!(
+            "SELECT toFloat64(price_xlm), sources FROM {db}.current_price_usd \
+             WHERE contract_address = 'CTOKEN7XYZ'"
+        ))
+        .fetch_one()
+        .await
+        .unwrap();
+    assert!(approx(dxlm, 0.0), "unpopulated price_xlm reads as 0");
+    assert_eq!(
+        dsources, "",
+        "unpopulated sources reads as the empty string"
     );
 
     client
