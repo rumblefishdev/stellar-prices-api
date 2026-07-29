@@ -72,6 +72,29 @@ history:
       it on the SHARED cluster. This MV reads `price_ohlcv_1m` (a different
       table), so there is no correctness interaction — but do not benchmark
       refresh cost, and do not judge merge load, until that run is done.
+  - date: 2026-07-29
+    status: active
+    who: okarcz
+    note: >
+      **All seven acceptance criteria are met in code; the task stays active
+      until the prod rollout is verified.** PR #150 (2026-07-24, `47ad4e1`)
+      landed six of them. The seventh — AC 4, the `current_price_usd` read
+      surface — was missed by that PR and is closed here: the view still
+      exposed only `price_usd` + `updated_at`, and since BE consumes
+      `prices.*` views IN-CLUSTER (their 0199 contract — named views, no
+      HTTP), `sources` / `price_xlm` / `change_*_pct` / `vwap_24h` were
+      unreachable to that consumer no matter what the MV wrote.
+
+      Rollout is now UNBLOCKED: PR #150 deferred the prod apply and the
+      refresh-cost measurement until [[0114]]'s coarse repair finished, and
+      0114 is complete and archived (`ee97db2`). Steps are written up in
+      `docs/runbooks/0072-current-prices-mv-rollout.md` — cost probe, MV
+      DROP + re-CREATE, view apply, Compute-stack deploy, per-layer rollback.
+
+      ⚠️ The API deploy is `make deploy-production-compute`, which is exactly
+      the deploy [[0132]] avoided by shipping its egress fix through a
+      surgical `aws lambda update-function-code`. Running it now also heals
+      that CFN drift, and ships every Lambda in the stack from the tree.
 ---
 
 # Materialize current_prices v1-deferred columns in the MV
@@ -131,14 +154,67 @@ endpoint and undermine the p95<200ms SLO).
 
 ## Acceptance Criteria
 
-- [ ] `mv_current_prices` (or companion) writes `sources` as a valid JSON string
-      matching the §4.2 `/price` `sources` shape.
-- [ ] `price_xlm` and `change_24h_pct` are populated (non-DEFAULT) for assets
-      with sufficient data; `change_7d_pct` decided (populate or document defer).
-- [ ] Integration test vs prod-pinned CH 26.3.10.60 asserts a seeded multi-source
-      asset yields the expected per-source breakdown + scalar fields.
-- [ ] `current_price_usd` view (or read surface) exposes the new columns.
-- [ ] 0040 `/price` handler switched to pass-through; `sources` stub removed.
-- [ ] `vwap_24h` applies the §5.5 inter-source median-outlier filter (from 0068).
-- [ ] All new columns present in the explicit `TO (...)` column list;
-      `current_mv_it.rs` extended to assert each (from 0068).
+- [x] `mv_current_prices` (or companion) writes `sources` as a valid JSON string
+      matching the §4.2 `/price` `sources` shape. *(PR #150)*
+- [x] `price_xlm` and `change_24h_pct` are populated (non-DEFAULT) for assets
+      with sufficient data; `change_7d_pct` decided — **populated**, read from
+      `price_ohlcv_1h` rather than `_1m`. *(PR #150)*
+- [x] Integration test vs prod-pinned CH 26.3.10.60 asserts a seeded multi-source
+      asset yields the expected per-source breakdown + scalar fields. *(PR #150,
+      `current_prices_mv_writes_0072_columns_and_filters_outliers`)*
+- [x] `current_price_usd` view (or read surface) exposes the new columns.
+      *(2026-07-29 — missed by PR #150, see Design Decisions)*
+- [x] 0040 `/price` handler switched to pass-through; `sources` stub removed.
+      *(PR #150 — also `/prices/batch` and `/assets`)*
+- [x] `vwap_24h` applies the §5.5 inter-source median-outlier filter (from 0068).
+      *(PR #150, `OUTLIER_PCT = 0.20`, arms only at >= 3 sources)*
+- [x] All new columns present in the explicit `TO (...)` column list;
+      `current_mv_it.rs` extended to assert each (from 0068). *(PR #150)*
+
+**Not an AC, but gates completion:** the prod rollout below is unverified. Do not
+archive this task until step 7 of the runbook passes.
+
+## Rollout status
+
+Code is on `develop`; **production still runs the v1 six-column MV and the
+stubbed API build.** Runbook: `docs/runbooks/0072-current-prices-mv-rollout.md`.
+
+| Step | State |
+|------|-------|
+| Cost probe on ch-prod-01 (read-only) | ⏳ pending |
+| `current.sql` DROP + re-CREATE | ⏳ pending |
+| `views.sql` apply (`current_price_usd`) | ⏳ pending |
+| `make deploy-production-compute` | ⏳ pending |
+| `/price` returns a populated `sources` | ⏳ pending |
+
+## Design Decisions
+
+### Emerged
+
+1. **`current_price_usd` moves to `CREATE OR REPLACE`, not `CREATE … IF NOT
+   EXISTS`.** The rest of `views.sql` uses `IF NOT EXISTS`, which does **not**
+   redefine a view that already exists — against a target already holding the v1
+   shape the apply silently no-ops and the new columns never land. Verified on
+   local CH 26.3.10.60 against a hand-built v1 view: the `IF NOT EXISTS` form
+   left it at 6 columns, `OR REPLACE` took it to 13. A plain view replaces
+   atomically, so this needs no DROP window (unlike the refreshable MV).
+
+2. **New view columns are appended, not inserted.** The six columns that shipped
+   keep their positions, so a `SELECT *` consumer is not re-ordered underneath
+   itself — hence `updated_at` sitting mid-list rather than last.
+
+3. **The other five views in `views.sql` were left on `IF NOT EXISTS`.** They
+   carry the same latent footgun (any future edit to them silently won't land on
+   a target that already has them), but converting them is beyond this task. See
+   Future Work.
+
+## Future Work
+
+- Convert the remaining five `views.sql` views to `CREATE OR REPLACE` so schema
+  edits actually land on an already-provisioned target — a latent silent-no-op
+  footgun, and a plausible contributor to the kind of drift [[0076]] had to
+  reconcile by hand. → **[[0134]]**
+- `price_usd` is still not outlier-filtered (flagged in PR #150): the headline
+  price can come from a manipulated venue while `vwap_24h` is protected, and it
+  propagates into `market_cap_usd`. §7 scopes outlier detection to the VWAP, so
+  this is a deliberate gap needing its own decision. → **[[0135]]**
