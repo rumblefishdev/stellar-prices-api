@@ -57,11 +57,6 @@ const MTLS_NOTAFTER_PROBE_ASSET_DIR =
   process.env['MTLS_NOTAFTER_PROBE_ASSET_DIR'] ??
   '../target/lambda/mtls-notafter-probe';
 
-/** Cargo-lambda build output for the `write-amplification-probe` (task 0133). */
-const WRITE_AMPLIFICATION_PROBE_ASSET_DIR =
-  process.env['WRITE_AMPLIFICATION_PROBE_ASSET_DIR'] ??
-  '../target/lambda/write-amplification-probe';
-
 export interface EventBridgeStackProps extends cdk.StackProps {
   readonly config: EnvironmentConfig;
 }
@@ -89,7 +84,6 @@ export class EventBridgeStack extends cdk.Stack {
   public readonly enrichmentRule: events.Rule;
   public readonly backfillFreshnessProbeRule: events.Rule;
   public readonly mtlsNotafterProbeRule: events.Rule;
-  public readonly writeAmplificationProbeRule: events.Rule;
   public readonly assetDiscoveryFunction: lambda.Function;
   public readonly cleanupFunction: lambda.Function;
   public readonly supplyFunction: lambda.Function;
@@ -97,7 +91,6 @@ export class EventBridgeStack extends cdk.Stack {
   public readonly enrichmentFunction: lambda.Function;
   public readonly backfillFreshnessProbeFunction: lambda.Function;
   public readonly mtlsNotafterProbeFunction: lambda.Function;
-  public readonly writeAmplificationProbeFunction: lambda.Function;
 
   constructor(scope: Construct, id: string, props: EventBridgeStackProps) {
     super(scope, id, props);
@@ -173,16 +166,6 @@ export class EventBridgeStack extends cdk.Stack {
         ruleName: `prices-${env}-mtls-notafter-probe`,
         description: `Publishes mTLS cert days-to-NotAfter → Prices/Mtls (${env})`,
         schedule: events.Schedule.expression(schedules.mtlsNotafterProbe),
-      },
-    );
-
-    this.writeAmplificationProbeRule = new events.Rule(
-      this,
-      'WriteAmplificationProbeRule',
-      {
-        ruleName: `prices-${env}-write-amplification-probe`,
-        description: `Publishes max rows-written/hour per prices table → Prices/Ingest MaxRowsWrittenPerHour (${env})`,
-        schedule: events.Schedule.expression(schedules.writeAmplificationProbe),
       },
     );
 
@@ -577,55 +560,11 @@ export class EventBridgeStack extends cdk.Stack {
       }),
     );
 
-    // -----------------------------------------------------------------
-    // Write-amplification probe (task 0133) + its rate(1h) target. CH-only
-    // (no S3, no VPC): reads rows-written-per-hour per prices table from
-    // system.part_log and republishes the max as Prices/Ingest
-    // MaxRowsWrittenPerHour — the guardrail that would have caught the 0132
-    // egress bug (9,413× re-emit) in minutes instead of weeks. Reads as the
-    // `api` (prices_reader) identity, which is granted SELECT on system.part_log
-    // (task 0133 prerequisite) alongside its prices.* read — NOT the ingestion
-    // identity, keeping the probe read-only.
-    // -----------------------------------------------------------------
-    const writeAmplification = createWorkerLambda(this, {
-      config,
-      accountId,
-      mtlsSecretName: apiMtlsSecretName,
-      idPrefix: 'WriteAmplificationProbe',
-      name: 'write-amplification-probe',
-      assetDir: WRITE_AMPLIFICATION_PROBE_ASSET_DIR,
-      memorySize: 256,
-      // One aggregate SELECT over system.part_log + one PutMetricData; fast.
-      timeout: cdk.Duration.minutes(1),
-      secretsExtensionLayer,
-      chDomain,
-      rule: this.writeAmplificationProbeRule,
-      alarmDescription:
-        'Write-amplification probe invocation errors — the rows-written metric may be stale, blinding the write-amplification alarm.',
-      alarmPeriod: cdk.Duration.hours(1),
-      errorAlarmActions: [opsAlarmAction],
-    });
-    this.writeAmplificationProbeFunction = writeAmplification.function;
-
-    writeAmplification.role.addToPolicy(
-      new iam.PolicyStatement({
-        sid: 'PublishIngestMetrics',
-        actions: ['cloudwatch:PutMetricData'],
-        resources: ['*'],
-        conditions: {
-          StringEquals: { 'cloudwatch:namespace': 'Prices/Ingest' },
-        },
-      }),
-    );
-
     new cdk.CfnOutput(this, 'BackfillFreshnessProbeFunctionName', {
       value: this.backfillFreshnessProbeFunction.functionName,
     });
     new cdk.CfnOutput(this, 'MtlsNotafterProbeFunctionName', {
       value: this.mtlsNotafterProbeFunction.functionName,
-    });
-    new cdk.CfnOutput(this, 'WriteAmplificationProbeFunctionName', {
-      value: this.writeAmplificationProbeFunction.functionName,
     });
 
     cdk.Tags.of(this).add('Project', 'stellar-prices-api');
