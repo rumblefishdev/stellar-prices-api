@@ -125,8 +125,13 @@ amplification shows up on a dashboard, not a bill. Likely spawned as a backlog t
       — 2 registry unit tests (`canonical.rs`) + 2 sink-boundary integration tests
       (`incremental_assets_it.rs`); full workspace compiles, clippy clean (1 pre-existing
       unrelated warning left untouched).
-- [ ] Post-deploy: `part_log` daily `assets` write volume drops from ~1.9B to ~thousands/day
-      — **deferred to post-deploy verification** (needs the Lambda shipped).
+- [~] Post-deploy: `part_log` daily `assets` write volume drops from ~1.9B to ~thousands/day
+      — **DEPLOYED 2026-07-29 10:32Z; verified live**: per-10-min `assets` writes went
+      21.7M → **0** (the post-deploy bucket is absent = no `NewPart` at all, the empty-guard
+      working). Referential-integrity anti-join over 3,659 post-deploy candles / 521 distinct
+      assets = **0 base_missing, 0 quote_missing**. Ingestion healthy (sdex/aquarius 43s
+      behind post-deploy). ⏳ Formal **next-day** read (full-day total + anti-join with new
+      tokens present) still pending before archive.
 - [x] `prices.assets`/`asset_metadata` single-writer split (0067) preserved
       — `write_asset_metadata` untouched; identity path still the only `prices.assets` writer.
 
@@ -173,6 +178,23 @@ Four small changes, no schema change, no migration:
   independent boundary check lives in the `canonical.rs` unit tests, which pin `assets_since`
   membership/counts against hardcoded expectations. The new fault-injection reconcile test
   adds independent end-to-end coverage.
+
+## Deployment (2026-07-29)
+
+- **Surgical `aws lambda update-function-code`, NOT `make deploy-production-compute`.**
+  Checkpoint E (`make diff-production`) revealed the ComputeStack diff would also ship the
+  **`ApiHandlerFunction`** asset — the **undeployed task-0072 read-API code** (0072's rollout
+  is deferred, coupled to a `mv_current_prices` DROP+re-CREATE). Verified against prod:
+  `current_prices` columns all still stubs (`has_price_xlm=0, has_sources=0, has_change_24h=0`),
+  so deploying the ComputeStack would have degraded `/price` responses. To isolate the egress
+  fix, deployed the ledger-processor binary directly (`zip -j bootstrap.zip bootstrap` →
+  `update-function-code --function-name prices-production-ledger-processor`), leaving the
+  api-handler untouched. **Tradeoff:** transient CFN drift on the ledger-processor's code
+  asset until 0072's proper `make deploy-production-compute` reconciles it (self-healing, no
+  functional impact). `CodeSha256=mqHJbF…RzgBA=`, arm64, LastModified 10:32:10Z.
+- **Follow-up:** 0072 needs its own controlled rollout (MV migration + api-handler deploy +
+  verification); see its task. It is the M2 critical path and must not be shipped as a
+  side effect of an unrelated fix.
 
 ## Design Decisions
 
