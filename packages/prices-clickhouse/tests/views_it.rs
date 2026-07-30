@@ -293,6 +293,133 @@ async fn views_expose_usd_series_and_reference() {
         .unwrap();
 }
 
+/// Task 0072 — `views.sql` must REPLACE an existing `current_price_usd`, not
+/// silently skip it.
+///
+/// `setup_scratch` always builds on a freshly-created database, so every other
+/// assertion in this file lands on a target with no pre-existing view and would
+/// pass identically under the old `CREATE VIEW IF NOT EXISTS` form. This test
+/// seeds the v1 six-column shape first and re-applies, which is the actual
+/// production upgrade path — ch-prod-01 already holds the v1 view.
+///
+/// The `IF NOT EXISTS` half is the control: it pins *why* the statement had to
+/// change, so an edit back to that form fails here rather than as a silent
+/// no-op against prod. Without it the assertion below only proves that applying
+/// `views.sql` twice is harmless.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn views_sql_replaces_an_existing_v1_current_price_usd() {
+    let db = "it_views_replace";
+    let client = setup_scratch(db).await;
+
+    let columns = || {
+        let client = client.clone();
+        let db = db.to_string();
+        async move {
+            client
+                .query(
+                    "SELECT name FROM system.columns \
+                     WHERE database = ? AND table = 'current_price_usd' ORDER BY position",
+                )
+                .bind(db)
+                .fetch_all::<String>()
+                .await
+                .unwrap()
+        }
+    };
+
+    // Rewind to v1: the six columns current_price_usd shipped with (task 0039).
+    client
+        .query(&format!("DROP VIEW IF EXISTS {db}.current_price_usd"))
+        .execute()
+        .await
+        .unwrap();
+    client
+        .query(&format!(
+            "CREATE VIEW {db}.current_price_usd AS SELECT \
+             multiIf(a.contract_address != '', 'contract', \
+                     a.asset_code = 'XLM' AND a.issuer_address = '', 'native', \
+                     'credit') AS asset_kind, \
+             if(a.contract_address != '', '', a.asset_code)     AS asset_code, \
+             if(a.contract_address != '', '', a.issuer_address) AS issuer_address, \
+             a.contract_address AS contract_address, \
+             c.price_usd        AS price_usd, \
+             c.updated_at       AS updated_at \
+             FROM {db}.current_prices AS c FINAL \
+             INNER JOIN {db}.assets AS a FINAL ON a.asset_id = c.asset_id"
+        ))
+        .execute()
+        .await
+        .unwrap();
+    assert_eq!(columns().await.len(), 6, "seeded the v1 shape");
+
+    // Control — the OLD statement form leaves the v1 view standing. This is the
+    // silent no-op that would have shipped a green deploy with none of the
+    // task-0072 columns actually reachable.
+    let as_if_not_exists = rewrite(prices_clickhouse::VIEWS_SQL, db)
+        .replace("CREATE OR REPLACE VIEW", "CREATE VIEW IF NOT EXISTS");
+    assert!(
+        as_if_not_exists.contains("CREATE VIEW IF NOT EXISTS")
+            && !as_if_not_exists.contains("CREATE OR REPLACE VIEW"),
+        "control rewrite must actually swap the statement form"
+    );
+    prices_clickhouse::apply_sql(&client, &as_if_not_exists)
+        .await
+        .unwrap();
+    assert_eq!(
+        columns().await.len(),
+        6,
+        "CREATE VIEW IF NOT EXISTS must NOT redefine an existing view — if this \
+         reports 13, the OR REPLACE form is no longer load-bearing and the \
+         comment in views.sql is wrong"
+    );
+
+    // The shipped form replaces it in place.
+    prices_clickhouse::apply_sql(&client, &rewrite(prices_clickhouse::VIEWS_SQL, db))
+        .await
+        .unwrap();
+    let after = columns().await;
+    assert_eq!(
+        after.len(),
+        13,
+        "views.sql must replace the v1 view, got {after:?}"
+    );
+    for col in [
+        "price_xlm",
+        "change_24h_pct",
+        "change_7d_pct",
+        "volume_24h_usd",
+        "market_cap_usd",
+        "vwap_24h",
+        "sources",
+    ] {
+        assert!(
+            after.contains(&col.to_string()),
+            "{col} missing after replace"
+        );
+    }
+    // Appended, not inserted — the six v1 columns keep their positions, so an
+    // ordinal-based consumer of the original shape still reads the same fields.
+    assert_eq!(
+        &after[..6],
+        &[
+            "asset_kind".to_string(),
+            "asset_code".to_string(),
+            "issuer_address".to_string(),
+            "contract_address".to_string(),
+            "price_usd".to_string(),
+            "updated_at".to_string(),
+        ],
+        "the v1 columns must keep positions 1-6"
+    );
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
 /// `backfill_progress` is seeded with exactly the two canonical streams, and
 /// re-running the seed is a no-op that does not reset live progress (task 0051
 /// Step 1). `setup_scratch` already applies `SEED_SQL` once.
