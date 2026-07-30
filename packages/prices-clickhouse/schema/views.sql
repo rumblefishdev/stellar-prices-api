@@ -77,6 +77,36 @@
 --   close_usd / price_usd  Decimal(38, 14).
 -- native XLM key is ('native','XLM','',''). One canonical XLM row (the native
 -- identity); the writer's stored asset_type='classic' is mapped to 'native' here.
+--
+-- ### current_price_usd only (task 0072)
+-- These carry SENTINELS, not NULLs — `current_prices`' columns are
+-- non-nullable, so "unavailable" and a real value share a type and can only be
+-- told apart by value. That is a weaker contract than the value-or-absent one
+-- above, and consumers have to handle it explicitly:
+--   price_xlm        Decimal(38,14). 0 = unavailable (no XLM market, or an
+--                    un-enriched tip) — indistinguishable from a true 0.
+--   change_24h_pct / change_7d_pct
+--                    Decimal(10,4) percent, clamped to ±999999.9999 (an
+--                    overflow would poison the whole MV refresh). 0 =
+--                    unavailable AND 0 = a genuinely flat 24h/7d; the two are
+--                    NOT distinguishable. Treat 0 as "no signal".
+--   volume_24h_usd / market_cap_usd / vwap_24h
+--                    Decimal(38,14). 0 = unavailable. market_cap_usd is 0
+--                    whenever circulating supply is absent (best-effort join).
+--   sources          String holding a JSON object — NOT a JSON-typed column.
+--                    THREE states, and '' is the trap:
+--                      ''   — the MV has never rewritten this row (table
+--                             DEFAULT). NOT VALID JSON; a parser will throw.
+--                      '{}' — refreshed, but no source had a priced 24h candle
+--                             or survived the §5.5 outlier filter.
+--                      '{"sdex":{"price":"…","volume_24h":"…"}, …}' — populated.
+--                    Numbers are serialised as STRINGS to preserve
+--                    Decimal(38,14) precision (general-overview §3.3).
+--                    Outlier-excluded venues are ABSENT from the object, so the
+--                    volumes here can sum to LESS than volume_24h_usd (a total
+--                    across all sources) — that asymmetry is intentional.
+--                    Guard the '' case explicitly; our own API does, in
+--                    `prices-api/src/assets/dto.rs::parse_sources`.
 
 ----------------------------------------------------------------------
 -- prices.usd_reference — per-bucket USD reference availability.
@@ -199,9 +229,31 @@ WHERE sac_address != '';
 -- price + `updated_at` for the consumer's own staleness policy. Reads
 -- current_prices, which is written by the Current Price Updater (task 0039) —
 -- this view is the read surface; it is empty until that writer runs.
+--
+-- Task 0072 forwards the remaining current_prices columns. BE reads this surface
+-- IN-CLUSTER (named views, no HTTP — see their 0199 contract), so until the view
+-- named them, `sources` / `price_xlm` / `change_*_pct` / `vwap_24h` were
+-- unreachable to that consumer no matter what the MV wrote.
+--
+-- ⚠️ NEW COLUMNS ARE APPENDED, NEVER INSERTED — which protects column ORDER,
+-- not ARITY. The first six keep the positions they shipped with (hence
+-- `updated_at` sitting mid-list rather than last), so nothing is re-ordered
+-- underneath a consumer; but every consumer now gets 13 columns where it got 6.
+-- Anything decoding POSITIONALLY off `SELECT *` — a fixed-arity tuple fetch, a
+-- clickhouse-crate row struct, `INSERT INTO t SELECT * FROM …` — breaks on the
+-- extra columns. In-cluster consumers (BE's 0199 contract) should pin an
+-- explicit column list rather than rely on `SELECT *`. See the sentinel table
+-- in the JOIN interop contract above for what each new column means.
+--
+-- ⚠️ CREATE OR REPLACE, not CREATE … IF NOT EXISTS (which the other views here
+-- still use). A view that already exists on the target is NOT redefined by
+-- `IF NOT EXISTS` — the apply silently no-ops and the edit never lands. This
+-- view's definition changes with the MV's column set, so it must actually
+-- replace. Unlike the refreshable MV in current.sql, a plain view supports
+-- atomic OR REPLACE and needs no DROP window.
 ----------------------------------------------------------------------
 
-CREATE VIEW IF NOT EXISTS prices.current_price_usd AS
+CREATE OR REPLACE VIEW prices.current_price_usd AS
 SELECT
     multiIf(
         a.contract_address != '', 'contract',
@@ -211,6 +263,13 @@ SELECT
     if(a.contract_address != '', '', a.issuer_address) AS issuer_address,
     a.contract_address AS contract_address,
     c.price_usd        AS price_usd,
-    c.updated_at       AS updated_at
+    c.updated_at       AS updated_at,
+    c.price_xlm        AS price_xlm,
+    c.change_24h_pct   AS change_24h_pct,
+    c.change_7d_pct    AS change_7d_pct,
+    c.volume_24h_usd   AS volume_24h_usd,
+    c.market_cap_usd   AS market_cap_usd,
+    c.vwap_24h         AS vwap_24h,
+    c.sources          AS sources
 FROM prices.current_prices AS c FINAL
 INNER JOIN prices.assets AS a FINAL ON a.asset_id = c.asset_id;
