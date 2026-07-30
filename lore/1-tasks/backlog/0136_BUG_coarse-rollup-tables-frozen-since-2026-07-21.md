@@ -153,8 +153,8 @@ any kind on `price_ohlcv_15m` in 24h** — ClickHouse is not touching the table.
 ## Mechanism — REPRODUCED LOCALLY (2026-07-30)
 
 Merges and mutations are **administratively stopped on these six tables**
-(`SYSTEM STOP MERGES <table>`), most plausibly during the 07-17 Phoenix delete
-operation and never reversed. It halts merges *and* mutations, persists until
+(`SYSTEM STOP MERGES <table>`), plausibly during the 07-17 operations and never
+reversed. It halts merges *and* mutations, persists until
 explicitly started or the server restarts, raises no error, logs nothing, and —
 for non-replicated MergeTree — **is exposed in no system table**, which is why
 every read-only diagnostic came back silent.
@@ -210,6 +210,30 @@ The timestamps remain the strongest circumstantial support: the mutations were
 created at 11:06:52 and the last merge on `202606` landed at 11:07:07, fifteen
 seconds apart, after which both stopped permanently.
 
+### Provenance of the 07-17 window — it was OURS, and the trigger is unrecorded
+
+Worth stating plainly, because the `_bak` tables look like evidence of an
+unexplained third-party operation and are not:
+
+- The six `price_ohlcv_*_bak` tables were created by **[[0095]]** on 2026-07-17
+  as the restore path before the APPEND rollup-MV recreate. Already tracked for
+  deletion by **[[0105]]**, which is now **blocked until this task is verified** —
+  they are the only rollback for the recovery.
+- The six Phoenix `ALTER … DELETE` mutations are **[[0097]]**'s
+  `schema/preroll-amm-reprice.sql` **STAGE 0**, run on prod the same day.
+
+So two of our own heavy operations ran minutes apart in that window. **But
+`SYSTEM STOP MERGES` appears nowhere in the repository** — not in
+`preroll-amm-reprice.sql`, not in 0095's steps, not in any runbook or script. The
+operator does not recall running it. Most likely it was typed at the console
+before a bulk delete (a reasonable thing to do) and never written down.
+
+**The trigger is unresolved and does not gate recovery** — the fix is identical
+either way. Do not spend time on attribution first. The lesson worth keeping is
+narrower and actionable: an ad-hoc `SYSTEM STOP MERGES` is invisible afterwards,
+so if one is ever issued it must be paired with its `START` in the same runbook
+step.
+
 Reproduction script: `scripts/repro-0136-merge-freeze.sh` (local docker CH only;
 the `SYSTEM STOP MERGES` in it must never be pointed at ch-prod-01). Core of it:
 
@@ -226,27 +250,38 @@ ALTER TABLE t DELETE WHERE source = 'phoenix';
 
 ## Implementation
 
-- **Decide with BE first.** ch-prod-01 is shared and this is plausibly the
-  residue of an operation someone ran deliberately. Establish whether merges
-  were stopped on these tables and by whom before changing anything.
-- If stopped: `SYSTEM START MERGES` per table, starting with `price_ohlcv_15m`
-  alone and observing before doing the remaining five. Expect a merge burst over
-  ~5,000 parts / 4.55 GiB; the pool is idle and there is 496 GiB free.
-- **Recovery is two-stage.** Starting merges is not sufficient — `_15m` keeps
-  rejecting inserts until its `202607` partition drains below
-  `parts_to_throw_insert = 5000`, and only then does the `15m → 1h → 4h → 1d →
-  1w → 1M` chain refill. Expect the coarse tables to backfill over several
-  refresh cycles, not instantly.
-- **Do not `KILL MUTATION`.** The six Phoenix deletes are the [[0097]] rework;
-  killing them abandons a half-applied delete. If merges resume they drain on
-  their own.
-- **Then close the detection gap** — this is the real lesson. Nine days of
-  frozen data produced no alarm because the failing MV is upstream of six that
-  all report success. A freshness check per rollup table (`max(timestamp)`
-  vs. expected cadence) would have caught it on day one. Consider folding into
-  [[0109]]'s guard, which already has to watch `system.mutations`.
-- Re-verify `change_7d_pct` on [[0072]] once `_1h` is current; the column is
-  correct and the data is not.
+Full recovery plan: **`docs/runbooks/0136-coarse-rollup-merge-recovery.md`**.
+Shape of it:
+
+- **Step 0 — pre-flight snapshot** (read-only). Per-source row counts, `_bak`
+  tables confirmed present, mutations still pending, uptime unchanged. This is
+  the baseline that later distinguishes "the numbers moved" from "the numbers
+  moved wrongly".
+- **Step 1 — probe on `price_ohlcv_1M`**, not `_15m`. It is the leaf of the
+  chain (nothing rolls up from it), the smallest by parts, and off the critical
+  path — so a wrong hypothesis costs one small table's merges. **Hard decision
+  gate:** if nothing happens within ~5 minutes the hypothesis is dead, stop, and
+  record the negative result.
+- **Step 2 — unblock the chain head** (`_15m`), watching parts fall well below
+  `parts_to_throw_insert = 5000`. The freeze ends when `mv_ohlcv_1m_to_15m`
+  reports a success with an empty exception.
+- **Step 3 — the remaining four**, one at a time, pausing if the merge pool
+  approaches saturation. This is a shared cluster and there is no deadline.
+- **Step 4 — the 07-21 gap does NOT self-heal.** The rollup MVs read a bounded
+  recent window; they will not reach back nine days. Closing the hole needs a
+  bounded incremental pre-roll, and **never `preroll.sql`** — that expects
+  TRUNCATE-d tables and would re-run the [[0090]] history-loss incident.
+- **Step 5 — verify data, not just freshness.** Deep history against `_bak`,
+  per-source deltas explainable by the Phoenix delete and RMT dedup.
+- **Do not `KILL MUTATION`.** The six deletes are [[0097]]'s STAGE 0; killing
+  them abandons a half-applied delete. If merges resume they drain on their own.
+- **Expect row counts to change**, in both directions of surprise: merges
+  collapse duplicate-PK rows the idempotent [[0097]] pre-roll wrote, and the
+  pending delete removes `phoenix` rows in range. Both are intended.
+- Re-verify `change_7d_pct` on [[0072]] afterwards; the column is correct and the
+  data is not. It stays 0 until `_1h` holds a full 7 days again.
+
+Detection is a separate deliverable → **[[0137]]**.
 
 ## Acceptance Criteria
 
@@ -259,10 +294,15 @@ ALTER TABLE t DELETE WHERE source = 'phoenix';
 - [ ] `price_ohlcv_15m` accepting inserts; `TOO_MANY_PARTS` no longer firing.
 - [ ] The six Phoenix mutations either completed or explicitly re-planned — not
       killed.
-- [ ] A freshness alarm exists that would have caught this within a day.
+- [ ] The 2026-07-21 → recovery gap closed by a **bounded incremental** pre-roll
+      (never `preroll.sql`), with deep history verified against `_bak`.
+- [ ] A freshness alarm exists that would have caught this within a day →
+      **[[0137]]**.
 - [ ] [[0072]]'s `change_7d_pct` verified non-zero for assets with 7d of data.
-- [ ] Findings shared with BE, since the cluster and the likely trigger are
-      shared.
+- [ ] BE told that coarse `prices` data was stale and has moved — their 0199
+      LP-analytics contract reads the 1h/1d views. **Not** framed as their
+      operation: the 07-17 window was ours (see Provenance).
+- [ ] [[0105]] unblocked only after the above holds for a watch period.
 
 ## Notes
 
