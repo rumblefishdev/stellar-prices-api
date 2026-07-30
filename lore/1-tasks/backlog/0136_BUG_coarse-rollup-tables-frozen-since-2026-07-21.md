@@ -28,6 +28,22 @@ history:
       `price_ohlcv_1m` is live. Diagnosis is read-only and incomplete by
       choice — the remaining discriminating test is a state change on a shared
       production cluster and was deliberately not run.
+  - date: 2026-07-30
+    status: backlog
+    who: okarcz
+    note: >
+      **Mechanism reproduced locally on CH 26.3.10.60.** `SYSTEM STOP MERGES` +
+      `ALTER … DELETE` reproduces every prod observable — mutation `is_done=0`,
+      `parts_to_do` non-zero, `latest_fail_time` 1970, empty `fail_reason`,
+      parts accumulating while inserts still succeed, and `part_log` showing
+      `NewPart` only. The control (same mutation, merges normal) completed in
+      seconds with `MutatePart` events, so a pending mutation alone does NOT
+      freeze a table — that alternative is eliminated. Also corrected a wrong
+      reading recorded earlier: a fresh INSERT into a ReplacingMergeTree yields
+      a **level-1** part (a plain MergeTree yields level 0), so prod's uniform
+      level 1 across 5,000 parts means nothing has EVER been merged, not
+      "merged exactly once". Proving prod is actually in the stopped state
+      still requires `SYSTEM START MERGES` there — not run, by standing rule.
 ---
 
 # Every coarse OHLCV table has been frozen for nine days
@@ -85,8 +101,15 @@ price_ohlcv_15m  partition 202607: 5000 parts  (parts_to_throw_insert = 5000)
                  partition 202606:   27 parts
 ```
 
-Every active part is **level 1** — merged exactly once, never again. Partition
-`202606` was last touched **2026-07-17 11:07:07**.
+Every active part is **level 1**, and partition `202606` was last touched
+**2026-07-17 11:07:07**.
+
+> ⚠️ Level 1 does **not** mean "merged once" here. A fresh `INSERT` into a
+> **ReplacingMergeTree** produces a level-**1** part (insert-time dedup);
+> a plain `MergeTree` produces level 0. Verified locally on 26.3.10.60 — see the
+> reproduction below. So `min_level = max_level = 1` across all 5,000 parts means
+> **not one of them has ever been merged**, which is stronger evidence for the
+> freeze than the "merged exactly once" reading first recorded here.
 
 **Six mutations created 2026-07-17 11:06:52, never executed:**
 
@@ -127,24 +150,79 @@ Also ruled out along the way: no detached parts, no merge errors in
 `system.part_log` (`error != 0` returns nothing), and **no `part_log` activity of
 any kind on `price_ohlcv_15m` in 24h** — ClickHouse is not touching the table.
 
-## Leading hypothesis — untested by choice
+## Mechanism — REPRODUCED LOCALLY (2026-07-30)
 
 Merges and mutations are **administratively stopped on these six tables**
 (`SYSTEM STOP MERGES <table>`), most plausibly during the 07-17 Phoenix delete
-operation and never reversed. It fits every observation: it halts merges *and*
-mutations, persists until explicitly started or the server restarts, raises no
-error, logs nothing, and — for non-replicated MergeTree — **is exposed in no
-system table**, which is why every read-only diagnostic came back silent.
+operation and never reversed. It halts merges *and* mutations, persists until
+explicitly started or the server restarts, raises no error, logs nothing, and —
+for non-replicated MergeTree — **is exposed in no system table**, which is why
+every read-only diagnostic came back silent.
 
-The timestamps are the strongest support: the mutations were created at
-11:06:52 and the last merge on `202606` landed at 11:07:07, fifteen seconds
-apart, after which both stopped permanently.
+Reproduced on local docker ClickHouse **26.3.10.60** (the prod pin), on a
+`ReplacingMergeTree` partitioned by month, seeded one part per `INSERT` to mimic
+the 1-minute rollup MV appending forever.
 
-**This cannot be confirmed by reading.** The discriminating test is
-`SYSTEM START MERGES prices.price_ohlcv_15m`, which is a state change on a
-**shared production cluster** and was deliberately **not run** — the operator's
-standing rule is that we do not take risks on production. It is recorded here as
-the next step for whoever owns that decision, not as a pending action.
+**Test A — merges normal, then `ALTER … DELETE WHERE source = 'phoenix'`:**
+
+```
+mutation_id  is_done  parts_to_do  latest_fail_time      fail_reason
+mutation_13        1            0  1970-01-01 00:00:00   (empty)
+part_log: NewPart 12 | MutatePart 4 | MutatePartStart 4 | MergeParts 2
+rows 800 -> 532 ; active_parts 12 -> 4
+```
+
+The mutation completes in seconds. **A pending mutation on its own does not
+freeze anything** — this rules out the alternative mechanism.
+
+**Test B — `SYSTEM STOP MERGES`, then the same `ALTER … DELETE`, then more
+inserts:**
+
+```
+mutation_id  is_done  parts_to_do  latest_fail_time      fail_reason
+mutation_13        0            4  1970-01-01 00:00:00   (empty)
+part_log after the stop: NewPart only — no MergeParts, no MutatePart
+active_parts 4 -> 16 (inserts keep working, nothing merges)
+```
+
+| Signal | ch-prod-01 | Test B |
+|---|---|---|
+| `is_done` | 0 | 0 |
+| `latest_fail_time` | 1970-01-01 | 1970-01-01 |
+| `latest_fail_reason` | empty | empty |
+| mutation ever attempted | no | no |
+| parts accumulate unboundedly | yes (5,000) | yes (4 → 16) |
+| `part_log` merges/mutations after the freeze | none | none |
+| inserts still succeed | yes, until the throw limit | yes |
+
+Every observable matches, and Test A rules out the only competing explanation.
+
+**What this does and does not establish.** It establishes that
+`SYSTEM STOP MERGES` produces exactly ch-prod-01's signature, and that a pending
+mutation alone does not. It does **not** prove that someone ran that command on
+prod — that state is unreadable, so it can only be shown by
+`SYSTEM START MERGES` taking effect. That is a state change on a **shared
+production cluster** and was deliberately **not run**: the operator's standing
+rule is that we do not take risks on production. It is recorded as the decision
+for whoever owns the cluster, not as a pending action.
+
+The timestamps remain the strongest circumstantial support: the mutations were
+created at 11:06:52 and the last merge on `202606` landed at 11:07:07, fifteen
+seconds apart, after which both stopped permanently.
+
+Reproduction script: `scripts/repro-0136-merge-freeze.sh` (local docker CH only;
+the `SYSTEM STOP MERGES` in it must never be pointed at ch-prod-01). Core of it:
+
+```sql
+CREATE TABLE t (timestamp DateTime, asset_id UInt64, source String,
+                close Decimal(38,14), version UInt64)
+ENGINE = ReplacingMergeTree(version)
+PARTITION BY toYYYYMM(timestamp) ORDER BY (asset_id, timestamp, source);
+-- 12 separate INSERTs == 12 parts, then:
+SYSTEM STOP MERGES t;
+ALTER TABLE t DELETE WHERE source = 'phoenix';
+-- mutation never runs; parts accumulate; part_log shows NewPart only.
+```
 
 ## Implementation
 
@@ -172,8 +250,10 @@ the next step for whoever owns that decision, not as a pending action.
 
 ## Acceptance Criteria
 
-- [ ] Root cause established — the stopped-merges hypothesis confirmed or
-      replaced, with evidence.
+- [~] Root cause established — **mechanism confirmed by local reproduction on
+      26.3.10.60** (`SYSTEM STOP MERGES` reproduces every observable; a pending
+      mutation alone does not). Still open: proving prod is in that state, which
+      is only observable by starting merges there.
 - [ ] All six coarse tables current again, `max(timestamp)` within one refresh
       cadence of now.
 - [ ] `price_ohlcv_15m` accepting inserts; `TOO_MANY_PARTS` no longer firing.
