@@ -126,6 +126,33 @@ DELETE WHERE source = 'phoenix' AND timestamp >= …    (the 0097 Phoenix rework
 They are not failing. They have never been attempted in 13 days. Partition
 `202606` stopped being touched **15 seconds after these were created**.
 
+## Second-order effect — unmerged duplicate backlog (measured 2026-07-30)
+
+Frozen merges mean `ReplacingMergeTree` has collapsed nothing since 07-17, so the
+coarse tables hold heavy same-key duplication:
+
+| scope | raw rows | distinct keys | blowup |
+|---|---|---|---|
+| `sdex`, partition **202607 only** | 11,654,728 | 1,786,458 | **6.52×** |
+| `phoenix`, whole table | 124,930 | 40,799 | 3.06× |
+| `aquarius`, whole table | 1,269,152 | 469,597 | 2.70× |
+| `soroswap`, whole table | 179,302 | 86,442 | 2.07× |
+
+**This is NOT a correctness problem, and it is NOT [[0097]]-specific.** A working
+hypothesis that phoenix was double-counted because STAGE 0's delete never applied
+was **tested and rejected**: `sdex` — untouched by 0097 — is the most duplicated
+of all, and the AMM figures are table-wide (diluted by older merged partitions)
+while sdex's is the frozen partition alone.
+
+Every consumer reads with `FINAL` — the OHLCV API query
+(`prices-api/src/assets/queries_ch.rs:578`, `FROM {table} FINAL`) and the
+`views.sql` read surfaces BE uses in-cluster — so duplicates are collapsed at read
+time and no wrong number has been served.
+
+The cost is real though: ~9.9 M redundant rows in one sdex partition, and nine
+days of `FINAL` running over 5,000 unmerged parts on every `/ohlcv` request and
+every BE view query. Recovery reclaims both the space and the read latency.
+
 ## Hypotheses tested and rejected
 
 Recording these so they are not re-run — each looked likely and each is dead:
