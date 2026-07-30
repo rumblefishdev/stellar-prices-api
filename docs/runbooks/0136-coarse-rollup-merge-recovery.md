@@ -79,6 +79,24 @@ SQL
 still `is_done = 0`. Save this output — it is the baseline for every later
 comparison.
 
+## ⛔ Step 1 WAS RUN ON 2026-07-30 AND FAILED ITS GATE
+
+`SYSTEM START MERGES prices.price_ohlcv_1M` had **no effect** — six minutes on,
+parts unchanged at 750, `parts_to_do` unchanged at 60, `part_log` empty. The
+stopped-merges hypothesis is falsified in production.
+
+Trace logging then showed the tables emit **no merge-machinery lines at all**,
+while `price_ohlcv_1m` and the rest of the cluster log normally: the background
+operations assignee is not being scheduled for them. See 0136.
+
+**Steps 1–3 below are therefore superseded until that is resolved** — most likely
+by a ClickHouse server restart, which re-initializes every table's background
+assignee and is **BE's call**. Steps 0 and 4–7 remain valid as written: once the
+tables can merge again, the drain-and-verify sequence is unchanged.
+
+Kept below as the record of what was tried, and because the same probe-then-gate
+shape applies to whatever the next hypothesis turns out to be.
+
 ## Step 1 — probe on the smallest leaf table
 
 `price_ohlcv_1M` is the **leaf** of the rollup chain (nothing rolls up from it),

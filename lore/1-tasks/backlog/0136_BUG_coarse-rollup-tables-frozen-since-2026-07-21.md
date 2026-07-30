@@ -177,7 +177,58 @@ Also ruled out along the way: no detached parts, no merge errors in
 `system.part_log` (`error != 0` returns nothing), and **no `part_log` activity of
 any kind on `price_ohlcv_15m` in 24h** — ClickHouse is not touching the table.
 
-## Mechanism — REPRODUCED LOCALLY (2026-07-30)
+## ⛔ TESTED ON PROD 2026-07-30 — `SYSTEM START MERGES` had NO EFFECT
+
+The stopped-merges hypothesis was **falsified in production**. `SYSTEM START
+MERGES prices.price_ohlcv_1M` was run (the leaf table, chosen as the smallest
+blast radius). Six minutes later: parts still 750, `parts_to_do` still 60, and
+`system.part_log` **completely empty** for that table. No state changed — the
+command is a no-op where merges were never stopped — so nothing needed undoing.
+
+The local reproduction remains valid: `SYSTEM STOP MERGES` *does* produce this
+exact signature. It simply is not what is happening here. A matching signature
+was never proof of a matching cause.
+
+### What the trace log then showed — the actual finding
+
+`text_log` is enabled and `logger.level = trace`, so scheduling decisions are
+recorded. Over 30 minutes:
+
+- **`price_ohlcv_15m` emits ZERO merge-machinery lines.** The only entries are
+  `Create MergeTreeSink` (the MV's insert attempt) and `Code: 252 TOO_MANY_PARTS`
+  (that insert failing), once a minute. No merge selection, no reservation
+  attempt, nothing.
+- **`price_ohlcv_1m` (the control) is loud** — block allocation, reservations,
+  part renames, continuously.
+- **The background pool is working**: `Background process (mutate/merge) peak
+  memory usage` fires dozens of times a minute for other tables.
+- Even **`price_ohlcv_15m_bak` has a live `CleanupThread`** scheduling itself.
+  The backup copy has healthier background threads than the live table.
+
+**The selector is not declining these tables — it is never being asked about
+them.** A selector that ran and found nothing would log that at `trace`. Silence
+means the storage's background operations assignee is not being scheduled at all.
+
+That is a level *below* merge policy, which is why every knob checked came back
+innocent: disk, pool, thresholds, table settings and the merge-stop flag are all
+inputs to a decision that is never made. It is also why `SYSTEM START MERGES`
+did nothing — it releases a lock on the decision, it does not restart a task that
+is not running.
+
+### Handover point
+
+The background assignee is initialized at **table startup**, so the action that
+reliably re-establishes it for every table is a **ClickHouse server restart** —
+which would also clear in-memory locks of every kind in one step.
+
+That is **BE's decision, not ours**: shared production cluster, their tables on
+it, and precisely the class of action our standing no-risk-on-prod rule exists to
+prevent drifting into. Uptime is 24 days; the freeze began 11 days in.
+
+An `OPTIMIZE TABLE … PARTITION …` would further discriminate (forcing a merge
+rather than waiting to be selected) but is a state change and was **not** run.
+
+## Mechanism — reproduced locally, but NOT the cause (2026-07-30)
 
 Merges and mutations are **administratively stopped on these six tables**
 (`SYSTEM STOP MERGES <table>`), plausibly during the 07-17 operations and never
