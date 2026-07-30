@@ -77,6 +77,36 @@
 --   close_usd / price_usd  Decimal(38, 14).
 -- native XLM key is ('native','XLM','',''). One canonical XLM row (the native
 -- identity); the writer's stored asset_type='classic' is mapped to 'native' here.
+--
+-- ### current_price_usd only (task 0072)
+-- These carry SENTINELS, not NULLs — `current_prices`' columns are
+-- non-nullable, so "unavailable" and a real value share a type and can only be
+-- told apart by value. That is a weaker contract than the value-or-absent one
+-- above, and consumers have to handle it explicitly:
+--   price_xlm        Decimal(38,14). 0 = unavailable (no XLM market, or an
+--                    un-enriched tip) — indistinguishable from a true 0.
+--   change_24h_pct / change_7d_pct
+--                    Decimal(10,4) percent, clamped to ±999999.9999 (an
+--                    overflow would poison the whole MV refresh). 0 =
+--                    unavailable AND 0 = a genuinely flat 24h/7d; the two are
+--                    NOT distinguishable. Treat 0 as "no signal".
+--   volume_24h_usd / market_cap_usd / vwap_24h
+--                    Decimal(38,14). 0 = unavailable. market_cap_usd is 0
+--                    whenever circulating supply is absent (best-effort join).
+--   sources          String holding a JSON object — NOT a JSON-typed column.
+--                    THREE states, and '' is the trap:
+--                      ''   — the MV has never rewritten this row (table
+--                             DEFAULT). NOT VALID JSON; a parser will throw.
+--                      '{}' — refreshed, but no source had a priced 24h candle
+--                             or survived the §5.5 outlier filter.
+--                      '{"sdex":{"price":"…","volume_24h":"…"}, …}' — populated.
+--                    Numbers are serialised as STRINGS to preserve
+--                    Decimal(38,14) precision (general-overview §3.3).
+--                    Outlier-excluded venues are ABSENT from the object, so the
+--                    volumes here can sum to LESS than volume_24h_usd (a total
+--                    across all sources) — that asymmetry is intentional.
+--                    Guard the '' case explicitly; our own API does, in
+--                    `prices-api/src/assets/dto.rs::parse_sources`.
 
 ----------------------------------------------------------------------
 -- prices.usd_reference — per-bucket USD reference availability.
@@ -205,9 +235,15 @@ WHERE sac_address != '';
 -- named them, `sources` / `price_xlm` / `change_*_pct` / `vwap_24h` were
 -- unreachable to that consumer no matter what the MV wrote.
 --
--- ⚠️ NEW COLUMNS ARE APPENDED, NEVER INSERTED. The first six columns keep the
--- positions they shipped with, so a `SELECT *` consumer is not re-ordered
--- underneath itself — hence `updated_at` sitting mid-list rather than last.
+-- ⚠️ NEW COLUMNS ARE APPENDED, NEVER INSERTED — which protects column ORDER,
+-- not ARITY. The first six keep the positions they shipped with (hence
+-- `updated_at` sitting mid-list rather than last), so nothing is re-ordered
+-- underneath a consumer; but every consumer now gets 13 columns where it got 6.
+-- Anything decoding POSITIONALLY off `SELECT *` — a fixed-arity tuple fetch, a
+-- clickhouse-crate row struct, `INSERT INTO t SELECT * FROM …` — breaks on the
+-- extra columns. In-cluster consumers (BE's 0199 contract) should pin an
+-- explicit column list rather than rely on `SELECT *`. See the sentinel table
+-- in the JOIN interop contract above for what each new column means.
 --
 -- ⚠️ CREATE OR REPLACE, not CREATE … IF NOT EXISTS (which the other views here
 -- still use). A view that already exists on the target is NOT redefined by

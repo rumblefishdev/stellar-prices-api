@@ -61,6 +61,37 @@ ssh -i ~/.ssh/sorban-prod_ed25519 deploy@168.119.73.161 \
   > /tmp/0072-rollback-current_price_usd.sql
 ```
 
+### Make the artifacts replay-able (do it now, not at incident time)
+
+`SHOW CREATE` emits a bare `CREATE …` statement. **Neither file can be fed back
+as captured** — replaying either while the object exists fails with
+`Code: 57 TABLE_ALREADY_EXISTS`. Fix both here, while nothing is on fire:
+
+```bash
+# View: SHOW CREATE emits `CREATE VIEW …`; it must REPLACE, since the rollback
+# target already exists (the OR REPLACE in step 4 overwrote it in place).
+sed -i '1s/^CREATE VIEW /CREATE OR REPLACE VIEW /' \
+  /tmp/0072-rollback-current_price_usd.sql
+
+# MV: a refreshable MV has no OR REPLACE form, so the DROP must precede it —
+# the same reason current.sql itself is DROP + re-CREATE.
+sed -i '1i DROP VIEW IF EXISTS prices.mv_current_prices;' \
+  /tmp/0072-rollback-mv_current_prices.sql
+```
+
+Verify both before proceeding — this is the whole point of the step:
+
+```bash
+head -1 /tmp/0072-rollback-current_price_usd.sql   # CREATE OR REPLACE VIEW …
+head -1 /tmp/0072-rollback-mv_current_prices.sql   # DROP VIEW IF EXISTS …
+grep -c "arrayReduce('median'" /tmp/0072-rollback-mv_current_prices.sql  # expect 0
+```
+
+That last check is the sanity gate: **0** means the captured MV is the v1
+definition, which is what a rollback needs. A non-zero count means the MV on
+prod is already the 0072 one and this rollback artifact would restore nothing —
+stop and re-plan before anything mutates.
+
 ## Step 1 — cost probe (READ-ONLY, run before anything mutates)
 
 The new SELECT does materially more work per refresh than the v1 one: a
@@ -221,11 +252,39 @@ WHERE asset_kind = 'native'
 FORMAT Vertical;
 ```
 
-XLM's own `price_xlm` must be exactly `1`. New columns are **appended**, so the
-first six keep their positions and any `SELECT *` consumer is unaffected.
+XLM's own `price_xlm` should be `1` — but **do not treat anything else as an
+abort**. The MV divides `price_usd` by the `xlm_usd` scalar, and the two are not
+computed identically: `price_usd` is `argMax(close_usd, timestamp)` with **no**
+`close_usd > 0` filter (`current.sql:203`), while `xlm_usd` filters
+`close_usd > 0` (`current.sql:113`). So if XLM's newest `price_ohlcv_1m` candle
+is un-enriched — enrichment is a separate, lagging pass — `price_usd` reads 0
+and `price_xlm` is 0, not 1. A tie at the max timestamp can likewise let the two
+aggregations pick different rows and land slightly off 1.
+
+A `price_xlm` of 0 or ≈1-but-not-exactly-1 for XLM therefore diagnoses
+**enrichment lag, not a broken view**. Confirm before reacting:
+
+```sql
+-- Is XLM's own tip enriched? A zero close_usd at the newest timestamp is the cause.
+SELECT timestamp, toString(close), toString(close_usd)
+FROM prices.price_ohlcv_1m FINAL
+WHERE asset_id = (SELECT asset_id FROM prices.assets FINAL
+                  WHERE asset_code = 'XLM' AND issuer_address = '' AND contract_address = '')
+ORDER BY timestamp DESC LIMIT 5;
+```
+
+New columns are **appended**, so the first six keep their positions and no
+consumer is re-ordered. Note this is not the same as being unaffected: the view
+now returns **13 columns where it returned 6**, which breaks any consumer
+decoding positionally off `SELECT *` (fixed-arity tuple, row struct,
+`INSERT … SELECT *`). That is what the heads-up below is for.
 
 This view is BE's in-cluster read path (their 0199 contract — named views, no
-HTTP). Worth telling them the columns are live.
+HTTP). Tell them two things, not one: the columns are live, **and** the view
+went from 6 to 13 columns, so any `SELECT *` on their side should be pinned to
+an explicit column list. Point them at the sentinel table in `views.sql`'s JOIN
+interop contract — `sources` is `''` (not valid JSON) on a row the MV has never
+rewritten, and `0` means "unavailable" on every new numeric column.
 
 ## Step 6 — deploy the API
 
@@ -263,11 +322,29 @@ re-check step 6 shipped.
 
 Independent per layer; nothing here is one-way.
 
+Both CH layers replay the step-0 artifacts, which is why step 0 rewrites them
+into runnable form at capture time. **As emitted by `SHOW CREATE` neither one
+replays** — both fail `Code: 57 TABLE_ALREADY_EXISTS`. If step 0's `sed` fixups
+were skipped, apply them now, before running either command below.
+
+```bash
+# View — atomic, no window.
+ssh -i ~/.ssh/sorban-prod_ed25519 deploy@168.119.73.161 \
+  'docker exec -i app-clickhouse-1 clickhouse-client --multiquery' \
+  < /tmp/0072-rollback-current_price_usd.sql
+
+# MV — the artifact leads with its own DROP (see step 0).
+ssh -i ~/.ssh/sorban-prod_ed25519 deploy@168.119.73.161 \
+  'docker exec -i app-clickhouse-1 clickhouse-client --multiquery' \
+  < /tmp/0072-rollback-mv_current_prices.sql
+```
+
 - **API** — redeploy the Compute stack from the previous commit. The stub build
   reads the same columns and simply ignores them.
-- **View** — re-apply the captured `current_price_usd` definition from step 0.
-  Consumers of the first six columns are unaffected either way.
-- **MV** — re-apply the captured definition from step 0. The v1 MV writes only 6
+- **View** — replays the captured definition. Consumers of the first six columns
+  are unaffected either way; anything that started reading the seven new ones
+  loses them, so revert the API first if both are coming back.
+- **MV** — replays the captured definition. The v1 MV writes only 6
   of the 10 columns, so the other four **freeze at their last written values**
   rather than reverting to DEFAULT: `current_prices` is a ReplacingMergeTree and
   the v1 MV's INSERT does not touch them. If stale non-zero columns would be
