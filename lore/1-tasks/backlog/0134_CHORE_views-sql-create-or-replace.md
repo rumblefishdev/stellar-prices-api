@@ -4,7 +4,7 @@ title: "views.sql edits silently don't land — convert the remaining five views
 type: CHORE
 status: backlog
 related_adr: []
-related_tasks: ["0072", "0076", "0061"]
+related_tasks: ["0072", "0076", "0061", "0133"]
 tags: ["phase-future", "effort-small", "priority-medium", "clickhouse", "schema-drift"]
 links: []
 history:
@@ -17,6 +17,20 @@ history:
       `CREATE OR REPLACE` because `CREATE VIEW IF NOT EXISTS` does not redefine
       a view that already exists. The other five views in `views.sql` still
       carry the same footgun.
+  - date: 2026-07-30
+    status: backlog
+    who: okarcz
+    note: >
+      Scope grew. The PR #158 review found that `CREATE OR REPLACE VIEW`
+      requires a `DROP VIEW` grant on CH 26.3.10.60 — unconditionally, even
+      when the view does not exist — so `prices-clickhouse-init` now aborts for
+      any scoped applier, and the prod `prices_*` users are XML-managed in BE's
+      `services.xml` and cannot be SQL-GRANTed by us. 0072 made that true for
+      one view; this task would make it true for all six. Recorded as a
+      prerequisite with three resolution options; deciding between them is now
+      the substance of the task rather than the `sed`. Also carries the
+      correction of the "every statement is CREATE … IF NOT EXISTS" doc claims
+      that 0072 falsified.
 ---
 
 # views.sql edits silently don't land on an already-provisioned target
@@ -48,6 +62,52 @@ Plain views replace atomically, so there is no DROP window and no read-side
 exposure. This is not true of the refreshable MVs (`current.sql`, `rollups.sql`),
 which genuinely require DROP + re-CREATE — leave those alone.
 
+## ⚠️ Prerequisite — `CREATE OR REPLACE VIEW` needs a `DROP VIEW` grant
+
+Found in the PR #158 review (2026-07-29), **after** 0072 shipped the first
+conversion. This is the real work of this task; the `sed` is trivial by
+comparison.
+
+Verified on CH 26.3.10.60: a user holding only `CREATE VIEW, SELECT ON prices.*`
+gets
+
+```
+Code: 497. DB::Exception: … Not enough privileges.
+(Missing permissions: DROP VIEW ON prices.current_price_usd)
+```
+
+— and it fails **even when the view does not exist yet**, so the grant is
+unconditional, not a rollout-time-only need.
+
+Consequences:
+
+- `apply_sql` propagates the first error, and `prices-clickhouse-init` applies
+  `VIEWS_SQL` unconditionally, so the init binary now **aborts** for any scoped
+  applier. 0072 made that true for one view; this task makes it true for all six.
+- The prod `prices_*` users are **XML-managed in BE's `services.xml`** and cannot
+  be SQL-`GRANT`ed by us — the same constraint that moved the [[0133]] alarm to
+  BE. Widening them is a BE-side change with its own coordination cost.
+- The doc comments on `prices-clickhouse-init.rs:3` and `lib.rs:120` still claim
+  *"Idempotent — every statement is `CREATE … IF NOT EXISTS`"*. 0072 falsified
+  that and did not correct it; this task should.
+
+Not currently biting: the 0072 rollout applies `views.sql` via
+`docker exec … clickhouse-client`, which runs as the container's `default` user.
+So the failure only appears the first time a scoped user runs the init path.
+
+**Decide before converting** — the options are not equivalent, and picking one
+is arguably the whole design content of this task:
+
+1. Ask BE to add `DROP VIEW ON prices.*` to the prices users in `services.xml`.
+   Cleanest end state, but a cross-team dependency, and it hands the applier a
+   privilege it only needs for a no-op-shaped statement.
+2. Split the view DDL out of the init path so scoped appliers never execute it,
+   and apply `views.sql` only as a privileged operation (which is already how
+   the runbook does it).
+3. Make `apply_sql` tolerate `Code: 497` for view statements specifically. Cheap,
+   but it re-introduces a silent no-op — the exact failure class this task
+   exists to remove. Probably reject; recorded so it is not re-derived.
+
 ## Implementation
 
 - Convert the five `CREATE VIEW IF NOT EXISTS prices.<v>` to
@@ -60,11 +120,25 @@ which genuinely require DROP + re-CREATE — leave those alone.
   added with `IF NOT EXISTS` fails the build rather than shipping the footgun.
 - Consider the same audit for `init.sql` — `CREATE TABLE IF NOT EXISTS` is
   correct there (tables must not be recreated), so this is views-only.
+- Resolve the grant prerequisite above **first** — converting the other five
+  before deciding just widens a known break.
+- Correct the falsified idempotency claims in `prices-clickhouse-init.rs:3` and
+  `lib.rs:120`, and record the grant requirement where an operator will meet it
+  (the `views.sql` header and the init binary's doc comment).
+- Reuse the upgrade-path test 0072 added — `views_sql_replaces_an_existing_v1_current_price_usd`
+  in `views_it.rs` — as the pattern for the other five: seed the old shape, apply,
+  assert it changed, with an `IF NOT EXISTS` control run to keep it non-vacuous.
 
 ## Acceptance Criteria
 
+- [ ] The `DROP VIEW` grant question is decided and recorded (option 1/2/3
+      above), and the chosen path is implemented — not just noted.
 - [ ] All six views in `views.sql` use `CREATE OR REPLACE VIEW`.
 - [ ] A unit test fails if any view in `views.sql` is declared `IF NOT EXISTS`.
+- [ ] `prices-clickhouse-init` runs to completion as a **scoped** user (or the
+      view DDL is provably no longer on its path).
+- [ ] The "every statement is `CREATE … IF NOT EXISTS`" doc claims are corrected.
 - [ ] `views_it.rs` passes against pinned CH 26.3.10.60.
 - [ ] Re-applying `views.sql` to a target that already has the old definitions
-      demonstrably updates them (verify on local CH before prod).
+      demonstrably updates them (verify on local CH before prod), with an
+      `IF NOT EXISTS` control proving the assertion is non-vacuous.
