@@ -17,6 +17,7 @@ tags:
 milestone: 2
 links:
   - "../../../docs/runbooks/0072-current-prices-mv-rollout.md"
+  - "../../../docs/runbooks/0136-coarse-rollup-merge-recovery.md"
 history:
   - date: 2026-07-30
     status: backlog
@@ -44,9 +45,27 @@ history:
       level 1 across 5,000 parts means nothing has EVER been merged, not
       "merged exactly once". Proving prod is actually in the stopped state
       still requires `SYSTEM START MERGES` there — not run, by standing rule.
+  - date: 2026-07-31
+    status: backlog
+    who: okarcz
+    note: >
+      **Recovery found, validated locally, and NOT yet run on prod.** A cluster
+      restart is ruled out by the operator (shared with BE; we may touch
+      `prices.*` only), so the handover-to-BE framing recorded on 07-30 is
+      superseded. `DETACH TABLE` + `ATTACH TABLE` re-runs `startup()` for a
+      single table, rebuilding the background operations assignee. Four tests on
+      the prod CH pin (`scripts/test-0136-detach-attach-recovery.sh`): a table
+      pinned at `parts_to_throw_insert` and failing with the identical
+      `Code: 252` recovered to parts 30→1 within 10 s with inserts accepted
+      again; a pending `ALTER DELETE` survives the detach and completes after
+      the attach; `DETACH` of a live refreshable MV's `TO` target is allowed and
+      the MV self-recovers with no recreate; `count() FINAL` unchanged. Runbook
+      rewritten around it (PR #159). Deliberately deferred past the weekend —
+      the freeze is a stable state, not a decaying one, and a hung `DETACH` is
+      the one bad outcome, so it wants BE reachable and a watcher.
 ---
 
-# Every coarse OHLCV table has been frozen for nine days
+# Every coarse OHLCV table has been frozen since 2026-07-21
 
 ## Summary
 
@@ -215,24 +234,70 @@ inputs to a decision that is never made. It is also why `SYSTEM START MERGES`
 did nothing — it releases a lock on the decision, it does not restart a task that
 is not running.
 
-### Handover point
+## ✅ Recovery — `DETACH`/`ATTACH`, validated locally 2026-07-31
 
-The background assignee is initialized at **table startup**, so the action that
-reliably re-establishes it for every table is a **ClickHouse server restart** —
-which would also clear in-memory locks of every kind in one step.
+The background assignee is created in `IStorage::startup()`. A **ClickHouse
+server restart** would therefore re-establish it for every table — and was the
+recorded handover point on 07-30, as BE's call on a shared cluster.
 
-That is **BE's decision, not ours**: shared production cluster, their tables on
-it, and precisely the class of action our standing no-risk-on-prod rule exists to
-prevent drifting into. Uptime is 24 days; the freeze began 11 days in.
+**That is now ruled out.** The operator's decision (2026-07-31): a cluster
+restart is too broad a risk, and our authorisation extends to `prices.*` only.
 
-An `OPTIMIZE TABLE … PARTITION …` would further discriminate (forcing a merge
-rather than waiting to be selected) but is a state change and was **not** run.
+`DETACH TABLE` + `ATTACH TABLE` re-runs `startup()` for **one table** — the
+per-table equivalent of a restart, scoped to a single table in a single
+database, and reachable with the operator's `default`-user loopback path that
+all schema DDL here already uses.
+
+Validated on local docker CH **26.3.10.60** (the prod pin) —
+`scripts/test-0136-detach-attach-recovery.sh`:
+
+| Test | Result |
+| ---- | ------ |
+| **T4 — prod-shaped.** Table pinned at `parts_to_throw_insert`, inserts failing with the identical `Code: 252` | detach 106 ms / attach 105 ms → **parts 30 → 1 within 10 s, INSERT accepted again** |
+| **T1 — pending mutation.** Wedged table carrying an unexecuted `ALTER DELETE` | mutation **survives** the detach and **completes** after attach (`is_done` 0 → 1); `MergeParts` + `MutatePart` resume |
+| **T3 — dependent MV.** `DETACH` of a refreshable MV's `TO` target while the MV is live | **allowed**; MV errors `Code: 60` during the window only, then **self-recovers after `ATTACH`**, no recreate |
+| **Data integrity** | `count() FINAL` unchanged (200 → 200) across detach/attach |
+
+### Limits of that evidence
+
+- **The local wedge is built with `SYSTEM STOP MERGES`, which prod falsified.**
+  So this proves the command rebuilds a table's scheduler and clears in-memory
+  state — **not** that it clears prod's specific unknown cause. What carries is
+  the mechanism: `ATTACH` builds a new storage object from scratch, so no
+  in-memory state survives it.
+- **`OPTIMIZE` as a by-hand stopgap is UNVALIDATED.** It bypasses the assignee
+  and merges synchronously on the query thread, so it *should* work on prod —
+  but locally it returned `Code: 236 Cancelled merging parts`, purely because
+  the simulation stops merges. Untested either way; unused in the runbook.
+- **Do not quote the 105 ms attach for prod.** That was 30 parts; `_15m` has
+  ~5,000 part descriptors to load. Expect meaningfully slower.
+- **A hung `DETACH` is the one bad outcome** — it would mean a background task
+  holds a lock, leaving the table inaccessible. Hence the leaf-table-first order
+  and the 60 s hang gate in the runbook.
+
+### Why it has not been run yet (2026-07-31)
+
+Deliberately deferred past the weekend. **The freeze is a stable state, not a
+decaying one:** `_15m` is pinned at `parts_to_throw_insert` so parts stop
+growing, the other five receive no inserts, and `price_ohlcv_1m` is healthy — so
+no raw data is being lost and the gap stays reconstructible. Against that, a hung
+`DETACH` wants BE reachable, and step 2 is tens of minutes of watched merging.
+
+**Two holds to confirm before acting:** `prices-production-cleanup` must still be
+**disabled** (it drops historical partitions immediately and would eat the `_1m`
+history the recovery depends on — **unverified on 07-31, operator creds expired**),
+and [[0105]] must not have run (`_bak` is the only rollback).
 
 ## Mechanism — reproduced locally, but NOT the cause (2026-07-30)
 
-Merges and mutations are **administratively stopped on these six tables**
-(`SYSTEM STOP MERGES <table>`), plausibly during the 07-17 operations and never
-reversed. It halts merges *and* mutations, persists until
+> ⛔ **The hypothesis below was FALSIFIED on prod** (see the START MERGES section
+> above). It is kept because the reproduction is still the best available model
+> of the *signature*, and because it is what the local recovery test wedges a
+> table with. Do not read it as the cause.
+
+The hypothesis was that merges and mutations are **administratively stopped on
+these six tables** (`SYSTEM STOP MERGES <table>`), plausibly during the 07-17
+operations and never reversed. It halts merges *and* mutations, persists until
 explicitly started or the server restarts, raises no error, logs nothing, and —
 for non-replicated MergeTree — **is exposed in no system table**, which is why
 every read-only diagnostic came back silent.
@@ -335,16 +400,29 @@ Shape of it:
   tables confirmed present, mutations still pending, uptime unchanged. This is
   the baseline that later distinguishes "the numbers moved" from "the numbers
   moved wrongly".
-- **Step 1 — probe on `price_ohlcv_1M`**, not `_15m`. It is the leaf of the
-  chain (nothing rolls up from it), the smallest by parts, and off the critical
-  path — so a wrong hypothesis costs one small table's merges. **Hard decision
-  gate:** if nothing happens within ~5 minutes the hypothesis is dead, stop, and
-  record the negative result.
+- **Step 1 — `DETACH` + `ATTACH` `price_ohlcv_1M`**, not `_15m`. It is the leaf
+  of the chain (nothing rolls up from it), the smallest by parts, and off the
+  critical path — so a wrong approach costs the least. Issue both statements in
+  **one invocation** so there is no human-sized gap. **Hard decision gate:** if
+  `system.part_log` is still empty after ~5 minutes, stop and record the
+  negative result — it would mean the failure survives a storage rebuild, which
+  is new information. **If `DETACH` itself does not return within ~60 s it is
+  hung** — stop, do not touch the other five, escalate.
 - **Step 2 — unblock the chain head** (`_15m`), watching parts fall well below
-  `parts_to_throw_insert = 5000`. The freeze ends when `mv_ohlcv_1m_to_15m`
-  reports a success with an empty exception.
+  `parts_to_throw_insert = 5000`. Expect a slower `ATTACH` here (~5,000 part
+  descriptors) and an MV refresh failing `Code: 60` during the window — both
+  expected, the latter self-corrects. The freeze ends when `mv_ohlcv_1m_to_15m`
+  reports a success with an empty exception **and** `part_log` shows a `NewPart`
+  newer than the attach.
 - **Step 3 — the remaining four**, one at a time, pausing if the merge pool
   approaches saturation. This is a shared cluster and there is no deadline.
+- ⚠️ **Plain `DETACH`, never `DETACH … PERMANENTLY`** — plain detach leaves the
+  metadata file in place, so `ATTACH TABLE` reads it straight back and the table
+  cannot be lost even if the attach fails.
+- ⚠️ **`count()` is a useless health probe here.** RMT dedup makes it fall while
+  writes land perfectly (observed 800 → 400 locally while the MV inserted every
+  5 s). Every gate runs off `system.part_log` — `NewPart` proves inserts land,
+  `MergeParts` proves merging resumed.
 - **Step 4 — the 07-21 gap does NOT self-heal.** The rollup MVs read a bounded
   recent window; they will not reach back nine days. Closing the hole needs a
   bounded incremental pre-roll, and **never `preroll.sql`** — that expects
@@ -353,9 +431,13 @@ Shape of it:
   per-source deltas explainable by the Phoenix delete and RMT dedup.
 - **Do not `KILL MUTATION`.** The six deletes are [[0097]]'s STAGE 0; killing
   them abandons a half-applied delete. If merges resume they drain on their own.
-- **Expect row counts to change**, in both directions of surprise: merges
-  collapse duplicate-PK rows the idempotent [[0097]] pre-roll wrote, and the
-  pending delete removes `phoenix` rows in range. Both are intended.
+- **Expect row counts to change**, but precisely: **physical** rows drop hard as
+  merges collapse the duplicate-PK rows the idempotent [[0097]] pre-roll wrote
+  (2,400 → 466 on a local test table), while **`count() FINAL` should NOT move**
+  — those duplicates were never visible to readers. The one real logical change
+  is the pending delete removing `phoenix` rows, and only from parts that
+  existed when the mutation was created on 07-17; rows inserted after that are
+  untouched, so expect a **partial**, not total, phoenix reduction.
 - Re-verify `change_7d_pct` on [[0072]] afterwards; the column is correct and the
   data is not. It stays 0 until `_1h` holds a full 7 days again.
 
@@ -363,10 +445,16 @@ Detection is a separate deliverable → **[[0137]]**.
 
 ## Acceptance Criteria
 
-- [~] Root cause established — **mechanism confirmed by local reproduction on
-      26.3.10.60** (`SYSTEM STOP MERGES` reproduces every observable; a pending
-      mutation alone does not). Still open: proving prod is in that state, which
-      is only observable by starting merges there.
+- [~] Root cause established — **mechanism identified**: the storage's
+      background operations assignee is never scheduled for these six tables
+      (zero merge-machinery lines in `text_log` over 30 min, against a loud
+      control). `SYSTEM STOP MERGES` reproduces every observable locally but was
+      **falsified on prod**, so the signature is confirmed and the *trigger*
+      remains unknown. A recovery exists that does not require knowing it.
+- [~] Recovery method chosen and validated — **`DETACH`/`ATTACH` per table**,
+      four tests green on the prod pin 2026-07-31 (PR #159). Ruled out: cluster
+      restart (operator, too broad). Unvalidated: `OPTIMIZE` as a stopgap.
+      **Not yet run against production.**
 - [ ] All six coarse tables current again, `max(timestamp)` within one refresh
       cadence of now.
 - [ ] `price_ohlcv_15m` accepting inserts; `TOO_MANY_PARTS` no longer firing.
