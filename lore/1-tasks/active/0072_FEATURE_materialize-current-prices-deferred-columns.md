@@ -95,6 +95,38 @@ history:
       the deploy [[0132]] avoided by shipping its egress fix through a
       surgical `aws lambda update-function-code`. Running it now also heals
       that CFN drift, and ships every Lambda in the stack from the tree.
+  - date: 2026-07-30
+    status: active
+    who: okarcz
+    note: >
+      **Rollout started and paused halfway — the new MV is LIVE on ch-prod-01
+      and healthy; the read view and the API are not yet rolled.** Steps 0-3
+      of the runbook are done: rollback artifacts captured and made
+      replay-able, cost probe measured (176-211 ms / 1.69 M rows vs the v1
+      MV's 85 ms / 930 k — comfortably inside the 60 s refresh), MV dropped
+      and re-created, refresh verified with an empty `exception` and 3,023
+      rows written. `sources` (2,278), `price_xlm` (2,257), `change_24h_pct`
+      (1,792) and `vwap_24h` (2,278) all populate correctly in production.
+
+      Paused at step 4 because verification surfaced a nine-day production
+      incident unrelated to this task: `change_7d_pct` is 0 for every asset
+      because `price_ohlcv_1h` — and every other coarse table — has had no
+      rows since 2026-07-21. Spawned **[[0136]]**. The remaining
+      discriminating test for that incident is a state change on the shared
+      production cluster and was deliberately NOT run.
+
+      PR #158 merged (`34ebcbc`) after a `/code-review` that produced six
+      findings; five were fixed in-PR (rollback artifacts that could not
+      replay, a false-abort `price_xlm == 1` check, the `SELECT *` arity
+      claim, the sentinel contract for the seven new columns, and a real
+      upgrade-path test with an `IF NOT EXISTS` control). The sixth — view
+      DDL needs a `DROP VIEW` grant — went to [[0134]], where measuring the
+      prod grants showed the runtime users have no DDL at all and the fix is
+      option 2, documentation rather than a BE grant request.
+
+      Also folded the un-enriched-tip `price_usd = 0` defect (21 assets) into
+      [[0135]]. Pre-existing, not a regression — v1 used the same unfiltered
+      argMax.
 ---
 
 # Materialize current_prices v1-deferred columns in the MV
@@ -156,9 +188,13 @@ endpoint and undermine the p95<200ms SLO).
 
 - [x] `mv_current_prices` (or companion) writes `sources` as a valid JSON string
       matching the §4.2 `/price` `sources` shape. *(PR #150)*
-- [x] `price_xlm` and `change_24h_pct` are populated (non-DEFAULT) for assets
+- [~] `price_xlm` and `change_24h_pct` are populated (non-DEFAULT) for assets
       with sufficient data; `change_7d_pct` decided — **populated**, read from
-      `price_ohlcv_1h` rather than `_1m`. *(PR #150)*
+      `price_ohlcv_1h` rather than `_1m`. *(PR #150)* — **`price_xlm` (2,257) and
+      `change_24h_pct` (1,792) verified live 2026-07-30. `change_7d_pct` is 0 for
+      all 3,023 assets: the column is correct, but `price_ohlcv_1h` has no rows
+      inside the 7-day window — it froze on 2026-07-21. Blocked on [[0136]], not
+      re-openable here.*
 - [x] Integration test vs prod-pinned CH 26.3.10.60 asserts a seeded multi-source
       asset yields the expected per-source breakdown + scalar fields. *(PR #150,
       `current_prices_mv_writes_0072_columns_and_filters_outliers`)*
@@ -176,16 +212,104 @@ archive this task until step 7 of the runbook passes.
 
 ## Rollout status
 
-Code is on `develop`; **production still runs the v1 six-column MV and the
-stubbed API build.** Runbook: `docs/runbooks/0072-current-prices-mv-rollout.md`.
+**The MV and the read view are both LIVE on ch-prod-01. The API deploy is HELD
+on [[0138]].** Steps 4–5 completed 2026-08-03 once [[0136]] was recovered and no
+longer blocked progress; step 5's verification then surfaced two defects, one of
+which must not reach the public API. Runbook:
+`docs/runbooks/0072-current-prices-mv-rollout.md`.
 
 | Step | State |
 |------|-------|
-| Cost probe on ch-prod-01 (read-only) | ⏳ pending |
-| `current.sql` DROP + re-CREATE | ⏳ pending |
-| `views.sql` apply (`current_price_usd`) | ⏳ pending |
-| `make deploy-production-compute` | ⏳ pending |
-| `/price` returns a populated `sources` | ⏳ pending |
+| 0 — capture + repair rollback artifacts | ✅ 2026-07-30 |
+| 1 — cost probe on ch-prod-01 (read-only) | ✅ 2026-07-30 |
+| 2 — `current.sql` DROP + re-CREATE | ✅ 2026-07-30 |
+| 3 — verify the MV | ✅ 2026-07-30 |
+| 4 — `views.sql` apply (`current_price_usd`) | ✅ 2026-08-03 — 13 columns live |
+| 5 — verify the read surface | ✅ 2026-08-03 — **surfaced [[0138]] + [[0139]]** |
+| 6 — `make deploy-production-compute` | ⛔ **HELD on [[0138]]** |
+| 7 — `/price` returns a populated `sources` | ⛔ blocked by step 6 |
+
+**Still a stable state to sit in.** The MV writes all ten columns and the view
+now forwards all thirteen, so BE's in-cluster 0199 consumer has them; the public
+API keeps serving its stubs until step 6. Serving a stub is strictly better than
+serving the `-100` that step 6 would currently publish.
+
+**Rollback artifacts re-captured 2026-08-03** at
+`~/0072-rollback-current_price_usd.sql` and `~/0072-rollback-mv_current_prices.sql`
+on the operator's machine, both verified replay-able. **The 07-30 copies in
+`/tmp` were gone** — confirmed by checking, before relying on them. Written to
+`~` this time for exactly that reason.
+
+⚠️ **The MV artifact is no longer a v1 rollback.** Step 2 already ran, so
+`SHOW CREATE` now captures the *0072* MV. The runbook's step-0 gate
+(`grep -c "arrayReduce('median'"` **must be 0**) is therefore obsolete — it now
+correctly returns 1, and following the instruction literally would abort the
+run. Reverting the MV to v1 would have to come from git
+(`current.sql` before PR #150), not from prod.
+
+### Step 4–5 verification (2026-08-03)
+
+```
+cols on current_price_usd: 13         <- was 6
+rows_total 4,442 | with_sources 3,465 | with_price_xlm 3,448
+with_change_24h 2,263 | with_change_7d 590 | with_vwap 3,465
+```
+
+BE was notified before the apply — both that the columns are live **and** that
+the view went 6 → 13 columns, so any `SELECT *` on their side should be pinned
+to an explicit column list.
+
+### ⛔ Why step 6 is held — two defects step 5 exposed
+
+Neither is caused by this task; applying the read view made them **measurable**,
+which is arguably the most valuable thing step 4 did.
+
+1. **`change_*_pct` publishes a fabricated `-100`** on every zero-price asset —
+   **889 of 4,442 (20%)**, plus 396 on `change_7d_pct`, **XLM included**. The
+   numerator of `(price_usd - open_24h) / open_24h` was never guarded, while
+   `price_usd` is an unfiltered `argMax` and `open_24h` filters `close_usd > 0`.
+   `-100` is **not** a sentinel: it passes every consumer-side "0 means
+   unavailable" guard our own interop contract documents, because it looks like
+   data. → **[[0138]]**, fixed in PR #160, needs a prod apply (steps 2–3 re-run)
+   before step 6.
+
+   Note the amplification: only **17** assets show 0135's own
+   `price_usd = 0 while vwap_24h knows the price` signature, but **889** publish
+   a wrong percentage off the back of it. A zero price is a missing value; a
+   -100% change is a confident wrong answer.
+
+2. **`current_price_usd` fans out** — 4,442 rows for 4,068 `current_prices`
+   rows. `prices.assets` is keyed `ORDER BY (asset_code, issuer_address,
+   contract_address)`, so `FINAL` does **not** dedup on `asset_id`, and 3,275
+   asset_ids map to 2+ natural identities. Believed **pre-existing** (the v1
+   six-column view carried the same join). → **[[0139]]**
+
+### Measured cost (step 1, ch-prod-01, 2026-07-30)
+
+| | v1 MV | 0072 MV |
+|---|---|---|
+| refresh duration | 85 ms | **176–211 ms** |
+| rows read | 929,852 | **1.69 M** |
+| peak memory | — | 153 MiB |
+| rows written | 3,024 | **3,023** |
+
+Comfortably inside the runbook's `< 15s` accept band and inside the 60s refresh
+interval — no cadence follow-up needed. The ~2× cost is the extra 7-day
+`price_ohlcv_1h FINAL` scan for `change_7d_pct`. Write volume is unchanged from
+v1, so the MV neither caused nor aggravates [[0136]].
+
+### Step 3 verification (2026-07-30)
+
+```
+exception: (empty)        status: Scheduled        last_success_duration_ms: 211
+new_cols on mv_current_prices: 4          assets: 3,023
+with_sources 2,278 | with_price_xlm 2,257 | with_change_24h 1,792
+with_change_7d 0  <- blocked on 0136      | with_vwap 2,278
+```
+
+`sources` verified as a JSON object keyed by venue with string-serialised
+decimals, e.g.
+`{"sdex":{"price":"1.0004648975275","volume_24h":"42025900.56744495766908"}}`.
 
 ## Design Decisions
 
@@ -208,6 +332,38 @@ stubbed API build.** Runbook: `docs/runbooks/0072-current-prices-mv-rollout.md`.
    a target that already has them), but converting them is beyond this task. See
    Future Work.
 
+4. **Paused mid-rollout after step 3 rather than pressing on.** Steps 4–5 are
+   cheap and low-risk, but step 3's verification surfaced [[0136]], and the
+   operator's standing rule is that production is not a place to take risks.
+   The half-rolled state is coherent and indefinitely stable (new MV + old view),
+   so there was no cost to stopping. Recorded because the obvious alternative —
+   "finish the two cheap steps while we're here" — was considered and rejected.
+
+## Issues Encountered
+
+- **`change_7d_pct` is 0 for every asset in production.** Not a defect in this
+  task: the column reads `price_ohlcv_1h` and that table has had no rows since
+  2026-07-21. Diagnosed to a nine-day freeze of all six coarse OHLCV tables →
+  spawned **[[0136]]**. The AC is marked `[~]` rather than `[x]`; it cannot be
+  closed here.
+
+- **777 of 3,022 assets carry `price_usd = 0`, and 21 of those have a working
+  `vwap_24h`.** The 756 with neither are genuinely unpriced and correctly report
+  the 0 sentinel. The 21 are a real defect: `unfiltered.price_usd` is
+  `argMax(close_usd, timestamp)` with **no `close_usd > 0` filter**
+  (`current.sql:203`), while the per-source path filters `src_price > 0`, so an
+  un-enriched newest candle zeroes the headline price while `sources`/`vwap_24h`
+  demonstrably know it. Observed live on `asset_id 4`
+  (`price_usd 0`, `vwap_24h 0.17281880272617`). **Pre-existing, not a
+  regression** — the v1 MV used the identical unfiltered `argMax`; 0072 only made
+  it visible by putting a real VWAP beside the zero. Folded into **[[0135]]**,
+  which already owns `price_usd`'s correctness.
+
+- **The same asymmetry falsified a runbook check.** Step 5 asserted XLM's
+  `price_xlm` must be exactly `1`; an un-enriched XLM tip makes it 0. Softened to
+  a diagnostic during the PR #158 review before it could trigger a false abort
+  mid-rollout.
+
 ## Future Work
 
 - Convert the remaining five `views.sql` views to `CREATE OR REPLACE` so schema
@@ -217,4 +373,9 @@ stubbed API build.** Runbook: `docs/runbooks/0072-current-prices-mv-rollout.md`.
 - `price_usd` is still not outlier-filtered (flagged in PR #150): the headline
   price can come from a manipulated venue while `vwap_24h` is protected, and it
   propagates into `market_cap_usd`. §7 scopes outlier detection to the VWAP, so
-  this is a deliberate gap needing its own decision. → **[[0135]]**
+  this is a deliberate gap needing its own decision. **Plus the un-enriched-tip
+  zero measured above — 21 assets publishing `price_usd = 0` while `vwap_24h`
+  knows the price.** → **[[0135]]**
+- Every coarse OHLCV table (`_15m` through `_1M`) has been frozen since
+  2026-07-21, which is why `change_7d_pct` cannot populate. Found by this task's
+  step-3 verification; far wider than this task. → **[[0136]]**
