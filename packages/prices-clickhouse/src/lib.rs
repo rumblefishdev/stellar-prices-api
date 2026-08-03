@@ -40,6 +40,17 @@ pub const CURRENT_SQL: &str = include_str!("../schema/current.sql");
 /// Read-surface views (task 0061 Step 5): `prices.price_usd_series` (USD close
 /// per natural-identity asset/bucket) + `prices.usd_reference` (per-bucket USD
 /// reference availability). Plain views — applied after the init tables.
+///
+/// Every statement here is `CREATE OR REPLACE VIEW`, NOT `CREATE … IF NOT
+/// EXISTS` (task 0134): the latter does not redefine a view that already exists,
+/// so an edit to a body would silently no-op against a provisioned target.
+/// Re-applying therefore always re-lands the definitions.
+///
+/// ⚠️ Consequence: this file needs a privileged applier. `CREATE OR REPLACE
+/// VIEW` requires a `DROP VIEW` grant unconditionally, which the scoped
+/// production users do not have (and cannot be granted by us — they are
+/// XML-managed by BE). Applying it is an operator action; see the header of
+/// `schema/views.sql`.
 pub const VIEWS_SQL: &str = include_str!("../schema/views.sql");
 
 /// Canonical `backfill_progress` seed (task 0051 / §3.5): the `sdex_archive` and
@@ -259,6 +270,37 @@ mod tests {
             "prices.current_price_usd",
         ] {
             assert!(stmts.iter().any(|s| s.contains(v)), "missing {v}");
+        }
+    }
+
+    /// Task 0134 — no view in `views.sql` may be declared `IF NOT EXISTS`.
+    ///
+    /// `CREATE VIEW IF NOT EXISTS` does not redefine a view that already exists,
+    /// so on a provisioned target (ch-prod-01) an edit to a view body silently
+    /// no-ops: the apply reports success and the definition never changes. Task
+    /// 0072 hit exactly that on `current_price_usd`. This test exists so a view
+    /// added later in the wrong form fails the build instead of shipping the
+    /// footgun to prod, where it is invisible.
+    ///
+    /// Views only. `init.sql` stays `IF NOT EXISTS` — tables must NOT be
+    /// recreated — and the refreshable MVs (`current.sql`, `rollups.sql`) cannot
+    /// use OR REPLACE at all; they require DROP + re-CREATE.
+    #[test]
+    fn views_sql_uses_create_or_replace_for_every_view() {
+        let stmts = split_statements(VIEWS_SQL);
+        assert_eq!(stmts.len(), 6, "guard is vacuous if the file is empty");
+
+        for stmt in &stmts {
+            let head: String = stmt.chars().take(80).collect();
+            assert!(
+                stmt.contains("CREATE OR REPLACE VIEW"),
+                "every view must use CREATE OR REPLACE VIEW (task 0134); got: {head}"
+            );
+            assert!(
+                !stmt.contains("IF NOT EXISTS"),
+                "CREATE VIEW IF NOT EXISTS silently fails to redefine an existing \
+                 view — the edit would never land on ch-prod-01; got: {head}"
+            );
         }
     }
 

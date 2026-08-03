@@ -1,9 +1,21 @@
 //! Apply the prices ClickHouse schema to a target instance.
 //!
-//! Idempotent — every statement is `CREATE … IF NOT EXISTS`. Applies the init
-//! tables, seeds the canonical `backfill_progress` streams, and applies the
-//! read-surface views (`prices.price_usd_series`, `prices.usd_reference`); the
-//! refreshable rollup MVs are opt-in (`--rollups`).
+//! Idempotent, but NOT uniformly `CREATE … IF NOT EXISTS` (task 0134). The init
+//! tables are `IF NOT EXISTS` — they must never be recreated. The views are
+//! `CREATE OR REPLACE`, because `IF NOT EXISTS` silently fails to redefine a
+//! view that already exists; re-running this binary therefore RE-APPLIES every
+//! view definition rather than skipping it. Applies the init tables, seeds the
+//! canonical `backfill_progress` streams, and applies the read-surface views
+//! (`prices.price_usd_series`, `prices.usd_reference`); the refreshable rollup
+//! MVs are opt-in (`--rollups`).
+//!
+//! ⚠️ REQUIRES A PRIVILEGED USER. `CREATE OR REPLACE VIEW` needs a `DROP VIEW`
+//! grant unconditionally (even when the view does not exist), and `init.sql`
+//! opens with `CREATE DATABASE IF NOT EXISTS`. The scoped production users
+//! (`prices_writer` / `prices_reader`) hold no DDL grants at all and cannot run
+//! this — on ch-prod-01 schema DDL is an operator action as the container's
+//! `default` user over the loopback native port. See the header of
+//! `schema/views.sql` for the measured grants and the reasoning.
 //! Used by local dev / CI: `cargo run -p prices-clickhouse --bin prices-clickhouse-init`.
 //!
 //! Reads `CLICKHOUSE_URL`, `CLICKHOUSE_USER`, `CLICKHOUSE_PASSWORD`,

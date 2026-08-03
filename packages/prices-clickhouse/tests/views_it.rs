@@ -14,9 +14,31 @@ fn ch_url() -> String {
     std::env::var("CLICKHOUSE_URL").unwrap_or_else(|_| "http://localhost:8123".to_string())
 }
 
+/// Retarget embedded schema SQL onto a scratch database.
+///
+/// The second replace looks like it exists for the views, but it does not, and
+/// task 0134 did NOT make it dead (as that task's plan assumed). The first
+/// replace already catches every `prices.<object>` reference — including the
+/// view names, which are all qualified — so the only thing reaching the second
+/// replace is `init.sql`'s unqualified `CREATE DATABASE IF NOT EXISTS prices`.
+/// It stays load-bearing: drop it and `setup_scratch` creates the real `prices`
+/// database instead of the scratch one.
 fn rewrite(sql: &str, db: &str) -> String {
     sql.replace("prices.", &format!("{db}."))
         .replace("IF NOT EXISTS prices", &format!("IF NOT EXISTS {db}"))
+}
+
+async fn view_columns(client: &Client, db: &str, view: &str) -> Vec<String> {
+    client
+        .query(
+            "SELECT name FROM system.columns \
+             WHERE database = ? AND table = ? ORDER BY position",
+        )
+        .bind(db)
+        .bind(view)
+        .fetch_all::<String>()
+        .await
+        .unwrap()
 }
 
 async fn setup_scratch(db: &str) -> Client {
@@ -478,6 +500,100 @@ async fn backfill_progress_seed_is_idempotent() {
         .await
         .unwrap();
     assert_eq!(current, 500, "re-running the seed preserves live progress");
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// Task 0134 — EVERY view in `views.sql` must replace an existing definition,
+/// not just `current_price_usd` (which 0072 converted).
+///
+/// `setup_scratch` builds on a freshly-created database, so every other
+/// assertion in this file lands on a target with no pre-existing view and would
+/// pass identically under the old `CREATE VIEW IF NOT EXISTS` form. This test
+/// rewinds all six views to a one-column stub first and re-applies, which is the
+/// actual production upgrade path — ch-prod-01 already holds all six.
+///
+/// The `IF NOT EXISTS` half is the control: it pins *why* the statement form is
+/// load-bearing, so a revert to that form fails here rather than as a silent
+/// no-op against prod.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn views_sql_replaces_every_existing_view() {
+    let db = "it_views_replace_all";
+    let client = setup_scratch(db).await;
+
+    // (view, a column that only the REAL definition has)
+    let views = [
+        ("usd_reference", "xlm_usd"),
+        ("price_usd_series", "close_usd"),
+        ("usd_reference_1h", "xlm_usd"),
+        ("price_usd_series_1h", "close_usd"),
+        ("identity_by_contract", "contract"),
+        ("current_price_usd", "vwap_24h"),
+    ];
+
+    // Rewind every view to a stub shape that shares no column with the real one.
+    for (v, _) in views {
+        client
+            .query(&format!("DROP VIEW IF EXISTS {db}.{v}"))
+            .execute()
+            .await
+            .unwrap();
+        client
+            .query(&format!(
+                "CREATE VIEW {db}.{v} AS SELECT 1 AS stub_sentinel"
+            ))
+            .execute()
+            .await
+            .unwrap();
+        assert_eq!(
+            view_columns(&client, db, v).await,
+            vec!["stub_sentinel".to_string()],
+            "seeded the stub shape for {v}"
+        );
+    }
+
+    // Control — the OLD statement form leaves every stub standing. This is the
+    // silent no-op the task exists to remove: a green apply that changes nothing.
+    let as_if_not_exists = rewrite(prices_clickhouse::VIEWS_SQL, db)
+        .replace("CREATE OR REPLACE VIEW", "CREATE VIEW IF NOT EXISTS");
+    assert!(
+        as_if_not_exists.contains("CREATE VIEW IF NOT EXISTS")
+            && !as_if_not_exists.contains("CREATE OR REPLACE VIEW"),
+        "control rewrite must actually swap the statement form"
+    );
+    prices_clickhouse::apply_sql(&client, &as_if_not_exists)
+        .await
+        .unwrap();
+    for (v, _) in views {
+        assert_eq!(
+            view_columns(&client, db, v).await,
+            vec!["stub_sentinel".to_string()],
+            "CREATE VIEW IF NOT EXISTS must NOT redefine the existing {v} — if \
+             this fails, the OR REPLACE form is no longer load-bearing and the \
+             views.sql header is wrong"
+        );
+    }
+
+    // The shipped form replaces all six in place.
+    prices_clickhouse::apply_sql(&client, &rewrite(prices_clickhouse::VIEWS_SQL, db))
+        .await
+        .unwrap();
+    for (v, real_col) in views {
+        let cols = view_columns(&client, db, v).await;
+        assert!(
+            !cols.contains(&"stub_sentinel".to_string()),
+            "views.sql must replace the stub {v}, got {cols:?}"
+        );
+        assert!(
+            cols.contains(&real_col.to_string()),
+            "{v} must expose `{real_col}` after the apply, got {cols:?}"
+        );
+    }
 
     client
         .query(&format!("DROP DATABASE {db}"))
