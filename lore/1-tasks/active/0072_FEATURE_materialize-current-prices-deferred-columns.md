@@ -212,11 +212,10 @@ archive this task until step 7 of the runbook passes.
 
 ## Rollout status
 
-**Halfway. The new MV is LIVE on ch-prod-01 and healthy; the read view and the
-API are not yet rolled.** Paused 2026-07-30 after step 3 — not because anything
-failed, but because verification surfaced [[0136]] (all six coarse OHLCV tables
-frozen since 07-21) and the session was stopped rather than take any further risk
-on the shared production cluster. Runbook:
+**The MV and the read view are both LIVE on ch-prod-01. The API deploy is HELD
+on [[0138]].** Steps 4–5 completed 2026-08-03 once [[0136]] was recovered and no
+longer blocked progress; step 5's verification then surfaced two defects, one of
+which must not reach the public API. Runbook:
 `docs/runbooks/0072-current-prices-mv-rollout.md`.
 
 | Step | State |
@@ -225,20 +224,65 @@ on the shared production cluster. Runbook:
 | 1 — cost probe on ch-prod-01 (read-only) | ✅ 2026-07-30 |
 | 2 — `current.sql` DROP + re-CREATE | ✅ 2026-07-30 |
 | 3 — verify the MV | ✅ 2026-07-30 |
-| 4 — `views.sql` apply (`current_price_usd`) | ⏳ pending |
-| 5 — verify the read surface | ⏳ pending |
-| 6 — `make deploy-production-compute` | ⏳ pending |
-| 7 — `/price` returns a populated `sources` | ⏳ pending |
+| 4 — `views.sql` apply (`current_price_usd`) | ✅ 2026-08-03 — 13 columns live |
+| 5 — verify the read surface | ✅ 2026-08-03 — **surfaced [[0138]] + [[0139]]** |
+| 6 — `make deploy-production-compute` | ⛔ **HELD on [[0138]]** |
+| 7 — `/price` returns a populated `sources` | ⛔ blocked by step 6 |
 
-**This is a stable state to sit in indefinitely.** The new MV writes all ten
-columns; the old six-column `current_price_usd` keeps serving exactly what it
-served before. No consumer sees a change until step 4, and the API keeps
-serving its stubs until step 6.
+**Still a stable state to sit in.** The MV writes all ten columns and the view
+now forwards all thirteen, so BE's in-cluster 0199 consumer has them; the public
+API keeps serving its stubs until step 6. Serving a stub is strictly better than
+serving the `-100` that step 6 would currently publish.
 
-**Rollback artifacts** are at `/tmp/0072-rollback-mv_current_prices.sql` and
-`/tmp/0072-rollback-current_price_usd.sql` on the operator's machine, both
-verified replay-able (they are in `/tmp` — re-capture per step 0 if the machine
-has rebooted).
+**Rollback artifacts re-captured 2026-08-03** at
+`~/0072-rollback-current_price_usd.sql` and `~/0072-rollback-mv_current_prices.sql`
+on the operator's machine, both verified replay-able. **The 07-30 copies in
+`/tmp` were gone** — confirmed by checking, before relying on them. Written to
+`~` this time for exactly that reason.
+
+⚠️ **The MV artifact is no longer a v1 rollback.** Step 2 already ran, so
+`SHOW CREATE` now captures the *0072* MV. The runbook's step-0 gate
+(`grep -c "arrayReduce('median'"` **must be 0**) is therefore obsolete — it now
+correctly returns 1, and following the instruction literally would abort the
+run. Reverting the MV to v1 would have to come from git
+(`current.sql` before PR #150), not from prod.
+
+### Step 4–5 verification (2026-08-03)
+
+```
+cols on current_price_usd: 13         <- was 6
+rows_total 4,442 | with_sources 3,465 | with_price_xlm 3,448
+with_change_24h 2,263 | with_change_7d 590 | with_vwap 3,465
+```
+
+BE was notified before the apply — both that the columns are live **and** that
+the view went 6 → 13 columns, so any `SELECT *` on their side should be pinned
+to an explicit column list.
+
+### ⛔ Why step 6 is held — two defects step 5 exposed
+
+Neither is caused by this task; applying the read view made them **measurable**,
+which is arguably the most valuable thing step 4 did.
+
+1. **`change_*_pct` publishes a fabricated `-100`** on every zero-price asset —
+   **889 of 4,442 (20%)**, plus 396 on `change_7d_pct`, **XLM included**. The
+   numerator of `(price_usd - open_24h) / open_24h` was never guarded, while
+   `price_usd` is an unfiltered `argMax` and `open_24h` filters `close_usd > 0`.
+   `-100` is **not** a sentinel: it passes every consumer-side "0 means
+   unavailable" guard our own interop contract documents, because it looks like
+   data. → **[[0138]]**, fixed in PR #160, needs a prod apply (steps 2–3 re-run)
+   before step 6.
+
+   Note the amplification: only **17** assets show 0135's own
+   `price_usd = 0 while vwap_24h knows the price` signature, but **889** publish
+   a wrong percentage off the back of it. A zero price is a missing value; a
+   -100% change is a confident wrong answer.
+
+2. **`current_price_usd` fans out** — 4,442 rows for 4,068 `current_prices`
+   rows. `prices.assets` is keyed `ORDER BY (asset_code, issuer_address,
+   contract_address)`, so `FINAL` does **not** dedup on `asset_id`, and 3,275
+   asset_ids map to 2+ natural identities. Believed **pre-existing** (the v1
+   six-column view carried the same join). → **[[0139]]**
 
 ### Measured cost (step 1, ch-prod-01, 2026-07-30)
 
