@@ -6,6 +6,41 @@
 -- and strips `-- …` line comments only. Keep this file free of inline string
 -- literals containing `;` and of block comments.
 --
+-- ## Statement form: CREATE OR REPLACE VIEW, never CREATE VIEW IF NOT EXISTS
+-- Every view in this file MUST use `CREATE OR REPLACE VIEW` (task 0134; enforced
+-- by `views_sql_uses_create_or_replace_for_every_view` in src/lib.rs).
+--
+-- `CREATE VIEW IF NOT EXISTS` does NOT redefine a view that already exists: on a
+-- provisioned target — i.e. ch-prod-01 — editing a body here and re-applying
+-- SILENTLY NO-OPS. The apply reports success, the definition does not change,
+-- and nothing surfaces the divergence between this repo and the live cluster.
+-- The failure is invisible, which is the expensive part; task 0072 hit it on
+-- current_price_usd, where the six-column v1 view survived an apply that should
+-- have taken it to 13.
+--
+-- Plain views replace ATOMICALLY, so there is no DROP window and no read-side
+-- exposure. This is NOT true of the refreshable MVs in current.sql / rollups.sql,
+-- which genuinely require DROP + re-CREATE — leave those on their own form.
+--
+-- ## ⚠️ This file requires a PRIVILEGED applier (task 0134, decision: option 2)
+-- `CREATE OR REPLACE VIEW` needs a `DROP VIEW` grant on CH 26.3.10.60 —
+-- UNCONDITIONALLY, even when the view does not exist yet. Otherwise:
+--   Code: 497. DB::Exception: … Not enough privileges.
+--   (Missing permissions: DROP VIEW ON prices.current_price_usd)
+--
+-- The scoped runtime users CANNOT apply this file, by design, and never could:
+-- measured on ch-prod-01 2026-07-30, `prices_writer` holds only SELECT / INSERT /
+-- ALTER DELETE / OPTIMIZE on prices.* and `prices_reader` only SELECT — neither
+-- has DROP VIEW, CREATE VIEW, CREATE TABLE or CREATE DATABASE. They are
+-- XML-managed in BE's `services.xml` and cannot be SQL-GRANTed by us.
+--
+-- Schema DDL on ch-prod-01 is therefore an OPERATOR action as the container's
+-- `default` user over the loopback native port, which bypasses Caddy and the
+-- mTLS CN map entirely:
+--   docker exec -i app-clickhouse-1 clickhouse-client   (no --user)
+-- Do not add this file to a scoped-user apply path; requesting a broad DDL grant
+-- for the ingestion writer was considered and rejected.
+--
 -- ## Design references
 --   - R-historical-usd-close-design.md §8 (view), §12.2 (natural-identity key),
 --     §12.3 (NULL + status discriminator + usd_reference companion)
@@ -117,7 +152,7 @@
 -- present from the backfill), independent of enrichment timing.
 ----------------------------------------------------------------------
 
-CREATE VIEW IF NOT EXISTS prices.usd_reference AS
+CREATE OR REPLACE VIEW prices.usd_reference AS
 SELECT
     p.timestamp AS bucket,
     CAST(sum(toFloat64(p.close) * toFloat64(p.volume_base)) / nullIf(sum(toFloat64(p.volume_base)), 0) AS Decimal(38, 14)) AS xlm_usd
@@ -138,7 +173,7 @@ GROUP BY p.timestamp;
 -- classified by the reader against usd_reference (see header).
 ----------------------------------------------------------------------
 
-CREATE VIEW IF NOT EXISTS prices.price_usd_series AS
+CREATE OR REPLACE VIEW prices.price_usd_series AS
 SELECT
     multiIf(
         a.contract_address != '', 'contract',
@@ -163,7 +198,7 @@ GROUP BY asset_kind, asset_code, issuer_address, contract_address, bucket;
 -- read latency demands it (design note §6).
 ----------------------------------------------------------------------
 
-CREATE VIEW IF NOT EXISTS prices.usd_reference_1h AS
+CREATE OR REPLACE VIEW prices.usd_reference_1h AS
 SELECT
     p.timestamp AS bucket,
     CAST(sum(toFloat64(p.close) * toFloat64(p.volume_base)) / nullIf(sum(toFloat64(p.volume_base)), 0) AS Decimal(38, 14)) AS xlm_usd
@@ -176,7 +211,7 @@ WHERE base.asset_code = 'XLM' AND base.issuer_address = '' AND base.contract_add
   AND p.close > 0
 GROUP BY p.timestamp;
 
-CREATE VIEW IF NOT EXISTS prices.price_usd_series_1h AS
+CREATE OR REPLACE VIEW prices.price_usd_series_1h AS
 SELECT
     multiIf(
         a.contract_address != '', 'contract',
@@ -203,7 +238,7 @@ GROUP BY asset_kind, asset_code, issuer_address, contract_address, bucket;
 -- address on `contract`, then join the resulting identity to price_usd_series.
 ----------------------------------------------------------------------
 
-CREATE VIEW IF NOT EXISTS prices.identity_by_contract AS
+CREATE OR REPLACE VIEW prices.identity_by_contract AS
 SELECT
     contract_address AS contract,
     'contract'       AS asset_kind,
@@ -245,12 +280,10 @@ WHERE sac_address != '';
 -- explicit column list rather than rely on `SELECT *`. See the sentinel table
 -- in the JOIN interop contract above for what each new column means.
 --
--- ⚠️ CREATE OR REPLACE, not CREATE … IF NOT EXISTS (which the other views here
--- still use). A view that already exists on the target is NOT redefined by
--- `IF NOT EXISTS` — the apply silently no-ops and the edit never lands. This
--- view's definition changes with the MV's column set, so it must actually
--- replace. Unlike the refreshable MV in current.sql, a plain view supports
--- atomic OR REPLACE and needs no DROP window.
+-- ⚠️ CREATE OR REPLACE — see the "Statement form" section in the file header.
+-- This view is the reason that rule exists: its definition changes with the MV's
+-- column set, so an `IF NOT EXISTS` apply would silently leave the old shape
+-- standing. Task 0134 converted the remaining five views to match.
 ----------------------------------------------------------------------
 
 CREATE OR REPLACE VIEW prices.current_price_usd AS

@@ -596,6 +596,18 @@ natural Stellar identity** (`asset_kind ∈ ('native','credit','contract')`,
 `asset_code`, `issuer_address`, `contract_address`) so the surface survives
 asset-id reassignment.
 
+> **Applying `views.sql` needs a privileged user** (task 0134). Every view is
+> `CREATE OR REPLACE VIEW`, never `CREATE … IF NOT EXISTS` — the latter does not
+> redefine a view that already exists, so an edit would silently no-op against a
+> provisioned target while the apply reports success. `CREATE OR REPLACE VIEW`
+> requires a `DROP VIEW` grant unconditionally, and the scoped runtime users
+> (`prices_writer` / `prices_reader`) hold **no** DDL grants — they are
+> XML-managed in BE's `services.xml`. On ch-prod-01 this file is applied by the
+> operator as the container's `default` user over the loopback native port
+> (`docker exec -i app-clickhouse-1 clickhouse-client`), which bypasses Caddy and
+> the mTLS CN map. This is by design, not an oversight; do not add `views.sql` to
+> a scoped-user apply path.
+
 | View                          | Grain  | Returns                                         | Purpose                                                                                                          |
 | ----------------------------- | ------ | ----------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
 | `prices.price_usd_series`     | daily  | `close_usd` per (natural identity, day bucket)  | long-range USD charts                                                                                            |
@@ -609,7 +621,7 @@ asset-id reassignment.
 -- cross-source/cross-quote collapse: volume-weighted close_usd over every candle
 -- of the asset in the bucket (ADR 0004 per-source rows merge at read time). Only
 -- priced rows (close_usd > 0). _1h is identical but reads price_ohlcv_1h.
-CREATE VIEW IF NOT EXISTS prices.price_usd_series AS
+CREATE OR REPLACE VIEW prices.price_usd_series AS
 SELECT
     multiIf(
         a.contract_address != '', 'contract',
@@ -629,7 +641,7 @@ GROUP BY asset_kind, asset_code, issuer_address, contract_address, bucket;
 -- The XLM/USDC volume-weighted close (XLM's USD price under the USDC≡$1 peg) per
 -- bucket. A bucket's PRESENCE is the durable "USD reference is up at T" signal.
 -- Reads `close` (always present from the backfill), independent of enrichment.
-CREATE VIEW IF NOT EXISTS prices.usd_reference AS
+CREATE OR REPLACE VIEW prices.usd_reference AS
 SELECT
     p.timestamp AS bucket,
     CAST(sum(toFloat64(p.close) * toFloat64(p.volume_base))
