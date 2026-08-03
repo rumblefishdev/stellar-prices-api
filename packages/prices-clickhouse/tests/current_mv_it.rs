@@ -170,6 +170,8 @@ async fn current_prices_mv_computes_price_volume_and_market_cap() {
 ///   4 BAR — one source → the filter must be a NO-OP
 ///   5 DUO — exactly two far-apart sources → the >=3 guard must keep BOTH
 ///   6 EXO — every source unpriced → no divide-by-zero, `sources` = `{}`
+///   7 ZER — priced HISTORY, un-enriched TIP → the task-0138 -100% case
+///   8 DIP — a genuine ~-100% crash → must NOT be swallowed by 0138's guard
 #[tokio::test]
 #[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
 async fn current_prices_mv_writes_0072_columns_and_filters_outliers() {
@@ -184,7 +186,8 @@ async fn current_prices_mv_writes_0072_columns_and_filters_outliers() {
              (asset_id, asset_code, asset_type, issuer_address, contract_address, is_active) \
              VALUES (1,'XLM','classic','','',1), (3,'FOO','classic','GFOO','',1), \
                     (4,'BAR','classic','GBAR','',1), (5,'DUO','classic','GDUO','',1), \
-                    (6,'EXO','classic','GEXO','',1)"
+                    (6,'EXO','classic','GEXO','',1), (7,'ZER','classic','GZER','',1), \
+                    (8,'DIP','classic','GDIP','',1)"
         ))
         .execute()
         .await
@@ -201,6 +204,14 @@ async fn current_prices_mv_writes_0072_columns_and_filters_outliers() {
         (5, 7, "1.00", "1000", "sdex"),
         (5, 6, "3.00", "3000", "soroswap"),
         (6, 4, "0", "0", "sdex"), // exotic: never USD-priceable
+        // 0138: priced history + an UN-ENRICHED TIP. price_usd is an unfiltered
+        // argMax so it lands on the 0, while open_24h filters close_usd > 0 and
+        // lands on the real 2.00 — the exact prod shape that yielded -100%.
+        (7, 30, "2.00", "500", "sdex"),
+        (7, 1, "0", "0", "sdex"),
+        // 0138 control: a REAL near-total crash. The guard must leave this alone.
+        (8, 30, "2.00", "500", "sdex"),
+        (8, 1, "0.0001", "10", "sdex"),
     ];
     for (i, (asset, mins, cu, vol, src)) in rows.iter().enumerate() {
         admin
@@ -235,6 +246,23 @@ async fn current_prices_mv_writes_0072_columns_and_filters_outliers() {
             .expect("1h ref row");
     }
 
+    // 7d references for the 0138 pair, so change_7d_pct has a real denominator
+    // to divide the zero/near-zero tip by.
+    for asset in [7_u32, 8] {
+        admin
+            .query(&format!(
+                "INSERT INTO {db}.price_ohlcv_1h \
+                 (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+                  volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) \
+                 VALUES (now() - INTERVAL {mins} MINUTE, {asset}, 2, 'sdex', \
+                  1.00,1.00,1.00,1.00, 10, 5, 5, 1.00, 1.00, 1, 1)",
+                mins = 6 * 24 * 60_i64
+            ))
+            .execute()
+            .await
+            .expect("0138 7d ref row");
+    }
+
     admin
         .query(&format!("SYSTEM REFRESH VIEW {db}.mv_current_prices"))
         .execute()
@@ -247,7 +275,7 @@ async fn current_prices_mv_writes_0072_columns_and_filters_outliers() {
             .fetch_one()
             .await
             .expect("count");
-        if n >= 5 {
+        if n >= 7 {
             ready = true;
             break;
         }
@@ -355,6 +383,69 @@ async fn current_prices_mv_writes_0072_columns_and_filters_outliers() {
         "change must be 0, not -100, got {exo_c}"
     );
     assert_eq!(exo_s, "{}", "exotic sources must be an empty object");
+
+    // ── task 0138: an un-enriched TIP must not fabricate -100% ─────────────
+    // Distinct from asset 6 above: there, EVERY close_usd is 0, so open_24h is
+    // 0 too and the denominator guard alone lands on the sentinel. Here the
+    // history IS priced, so the denominator is real and only the NUMERATOR
+    // guard can save it. That is the case prod hit on 889 assets.
+    //
+    // Control first — prove the fixture genuinely reproduces the bug, so the
+    // assertions below cannot pass vacuously.
+    let unguarded = scalar_f64(
+        &admin,
+        &format!(
+            // ifNull because the division yields Nullable(Float64), which
+            // fetch_one::<f64> decodes as garbage. A NULL here would surface as
+            // 0 and fail the assert below, which is the correct outcome anyway.
+            "SELECT ifNull( \
+                    (toFloat64(argMax(close_usd, timestamp)) \
+                     - toFloat64(argMinIf(close_usd, timestamp, close_usd > 0))) \
+                    / nullIf(toFloat64(argMinIf(close_usd, timestamp, close_usd > 0)), 0) * 100, \
+                    0) \
+             FROM {db}.price_ohlcv_1m FINAL \
+             WHERE asset_id = 7 AND timestamp >= now() - INTERVAL 24 HOUR"
+        ),
+    )
+    .await;
+    assert!(
+        (unguarded + 100.0).abs() < 1e-6,
+        "control: the UNGUARDED expression must yield -100 on this fixture, else \
+         the test below proves nothing; got {unguarded}"
+    );
+
+    let zer_p = scalar_f64(&admin, &f("price_usd", 7)).await;
+    assert!(
+        zer_p.abs() < 1e-9,
+        "fixture precondition: un-enriched tip means price_usd 0, got {zer_p}"
+    );
+    let zer_24 = scalar_f64(&admin, &f("change_24h_pct", 7)).await;
+    assert!(
+        zer_24.abs() < 1e-9,
+        "an un-enriched tip must yield the 0 = 'no signal' sentinel, NOT -100 \
+         (task 0138: 889 prod assets published -100 this way), got {zer_24}"
+    );
+    let zer_7d = scalar_f64(&admin, &f("change_7d_pct", 7)).await;
+    assert!(
+        zer_7d.abs() < 1e-9,
+        "change_7d_pct must be sentinel 0, not -100, got {zer_7d}"
+    );
+
+    // ── task 0138: the guard must NOT swallow a genuine crash ──────────────
+    // 2.00 -> 0.0001 is a real -99.995%. It keys on price_usd being exactly the
+    // 0 sentinel, so a real near-zero price stays fully reportable.
+    let dip_24 = scalar_f64(&admin, &f("change_24h_pct", 8)).await;
+    assert!(
+        (dip_24 + 99.995).abs() < 1e-2,
+        "a REAL ~-100% crash must survive the 0138 guard (expect -99.995), got {dip_24}"
+    );
+
+    // price_xlm's own zero-guard, asserted rather than assumed (0138 AC).
+    let zer_xlm = scalar_f64(&admin, &f("price_xlm", 7)).await;
+    assert!(
+        zer_xlm.abs() < 1e-9,
+        "price_xlm must land on the 0 sentinel for a zero price_usd, got {zer_xlm}"
+    );
 
     teardown(db).await;
 }
