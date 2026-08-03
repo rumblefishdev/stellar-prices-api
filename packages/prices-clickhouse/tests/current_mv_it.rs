@@ -207,7 +207,17 @@ async fn current_prices_mv_writes_0072_columns_and_filters_outliers() {
         // 0138: priced history + an UN-ENRICHED TIP. price_usd is an unfiltered
         // argMax so it lands on the 0, while open_24h filters close_usd > 0 and
         // lands on the real 2.00 — the exact prod shape that yielded -100%.
+        //
+        // TWO sources on purpose. per_source takes argMax(close_usd) per source
+        // and per_asset then drops `src_price > 0`, so a single-source asset
+        // whose tip is un-enriched loses its ONLY source and degrades to
+        // sources='{}' / vwap=0 — which is "no data at all", not the prod shape.
+        // Production XLM had price_usd = 0 *while* sources carried two live
+        // venues and vwap_24h read 0.17093839119102. soroswap's priced tip
+        // reproduces that, and pins the argMax-picks-the-un-enriched-source
+        // interaction the single-source fixture cannot distinguish.
         (7, 30, "2.00", "500", "sdex"),
+        (7, 2, "1.90", "400", "soroswap"),
         (7, 1, "0", "0", "sdex"),
         // 0138 control: a REAL near-total crash. The guard must leave this alone.
         (8, 30, "2.00", "500", "sdex"),
@@ -357,6 +367,18 @@ async fn current_prices_mv_writes_0072_columns_and_filters_outliers() {
     );
 
     // ── change columns ─────────────────────────────────────────────────────
+    // ⚠️ This asserts CURRENT behaviour, and that behaviour is questionable.
+    // change_*_pct reads price_usd from the `unfiltered` CTE, which includes
+    // venues the §5.5 median filter REJECTED. aquarius (5.00) is asserted above
+    // to be excluded from vwap_24h and absent from `sources` — yet it is the
+    // newest candle, so argMax makes it price_usd and the row publishes
+    // "+525% in 24h" beside a sources object showing only ~1.00/1.02 and a VWAP
+    // of 1.0067. That is the same class of confident-wrong-answer as the -100
+    // this task fixes, by a different route: an outlier venue rather than a
+    // zero. Fixing it means outlier-filtering price_usd itself, which is
+    // [[0135]]'s scope (it already owns "price_usd is not outlier-filtered" and
+    // its propagation into market_cap_usd) — NOT the nullIf guard here.
+    // Asserted so the behaviour is pinned and visible, not endorsed.
     let c24 = scalar_f64(&admin, &f("change_24h_pct", 3)).await;
     assert!(
         (c24 - 525.0).abs() < 1e-2,
@@ -431,6 +453,26 @@ async fn current_prices_mv_writes_0072_columns_and_filters_outliers() {
         "change_7d_pct must be sentinel 0, not -100, got {zer_7d}"
     );
 
+    // The fixture must be the PROD shape, not "no data at all": a zero
+    // price_usd sitting beside a populated sources object and a real vwap is
+    // exactly what made the -100 indefensible in production.
+    let zer_vwap = scalar_f64(&admin, &f("vwap_24h", 7)).await;
+    let zer_srcs: String = admin
+        .query(&s("sources", 7))
+        .fetch_one()
+        .await
+        .expect("zer sources");
+    assert!(
+        (zer_vwap - 1.9).abs() < 1e-6,
+        "soroswap's priced tip must still yield a real vwap (1.9) beside the \
+         zero price_usd, got {zer_vwap}"
+    );
+    assert!(
+        zer_srcs.contains("soroswap"),
+        "sources must be POPULATED while price_usd is 0 — that pairing is the \
+         prod shape this task exists for, got {zer_srcs}"
+    );
+
     // ── task 0138: the guard must NOT swallow a genuine crash ──────────────
     // 2.00 -> 0.0001 is a real -99.995%. It keys on price_usd being exactly the
     // 0 sentinel, so a real near-zero price stays fully reportable.
@@ -440,11 +482,83 @@ async fn current_prices_mv_writes_0072_columns_and_filters_outliers() {
         "a REAL ~-100% crash must survive the 0138 guard (expect -99.995), got {dip_24}"
     );
 
-    // price_xlm's own zero-guard, asserted rather than assumed (0138 AC).
-    let zer_xlm = scalar_f64(&admin, &f("price_xlm", 7)).await;
+    // NOTE: price_xlm for asset 7 is trivially 0 here (0 / anything), so it is
+    // NOT evidence that its nullIf guard works — that needs a missing DIVISOR
+    // with a non-zero price_usd, which is
+    // `price_xlm_lands_on_the_sentinel_when_the_xlm_divisor_is_missing` below.
+
+    teardown(db).await;
+}
+
+/// Task 0138 — `price_xlm`'s divisor guard, exercised rather than assumed.
+///
+/// The obvious assertion (`price_usd = 0` ⇒ `price_xlm = 0`) is **vacuous**:
+/// `0 / anything` is 0 whether or not the `nullIf` is present. The guard only
+/// does work when the DIVISOR is missing — no XLM market at all — while the
+/// asset itself is priced. Without `nullIf(toFloat64(xlm_usd), 0)` that is a
+/// division by zero rather than the 0 = "unavailable" sentinel.
+///
+/// Needs its own scratch database because `xlm_usd` is a single scalar for the
+/// whole MV: the only way to make it absent is to have no XLM row anywhere.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+async fn price_xlm_lands_on_the_sentinel_when_the_xlm_divisor_is_missing() {
+    let db = "it_current_mv_0138_no_xlm";
+    let admin = setup(db).await;
+
+    // Deliberately NO XLM row — the xlm_usd subquery finds nothing.
+    admin
+        .query(&format!(
+            "INSERT INTO {db}.assets \
+             (asset_id, asset_code, asset_type, issuer_address, contract_address, is_active) \
+             VALUES (9,'SOLO','classic','GSOLO','',1)"
+        ))
+        .execute()
+        .await
+        .expect("assets");
+    admin
+        .query(&insert_row(db, 9, "2.00", "100"))
+        .execute()
+        .await
+        .expect("ohlcv 9");
+
+    admin
+        .query(&format!("SYSTEM REFRESH VIEW {db}.mv_current_prices"))
+        .execute()
+        .await
+        .expect("refresh view");
+    let mut ready = false;
+    for _ in 0..30 {
+        let n: u64 = admin
+            .query(&format!("SELECT count() FROM {db}.current_prices FINAL"))
+            .fetch_one()
+            .await
+            .expect("count");
+        if n >= 1 {
+            ready = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    assert!(ready, "MV did not populate current_prices in time");
+
+    let q = |col: &str| {
+        format!("SELECT toFloat64({col}) FROM {db}.current_prices FINAL WHERE asset_id = 9")
+    };
+
+    // Non-vacuity: the numerator is genuinely non-zero, so a passing price_xlm
+    // of 0 can only come from the divisor guard.
+    let p = scalar_f64(&admin, &q("price_usd")).await;
     assert!(
-        zer_xlm.abs() < 1e-9,
-        "price_xlm must land on the 0 sentinel for a zero price_usd, got {zer_xlm}"
+        (p - 2.0).abs() < 1e-6,
+        "precondition: the asset must be priced, else this proves nothing, got {p}"
+    );
+
+    let xlm = scalar_f64(&admin, &q("price_xlm")).await;
+    assert!(
+        xlm.abs() < 1e-9,
+        "a missing XLM divisor must land on the 0 = 'unavailable' sentinel, \
+         not divide by zero, got {xlm}"
     );
 
     teardown(db).await;

@@ -62,11 +62,25 @@ missing value; a -100 percent change is a confident wrong answer.
 
 ```
 rows_total 4,442
-exactly_minus_100 (change_24h_pct)      889   (20%)
+exactly_minus_100 (change_24h_pct)      889   (20% of ROWS)
   of which price_usd = 0                889   (100%)
 chg7d_minus_100                         396
 zero_price_but_vwap_known                17   <- 0135's own population
 ```
+
+⚠️ **These are ROW counts, not asset counts, and they are inflated.** They were
+measured over `prices.current_price_usd`, which [[0139]] shows returns **4,442
+rows for only 4,068 `current_prices` rows** — the view fans out because
+`prices.assets` is keyed on natural identity, not `asset_id`. So "889 assets
+(20%)" — as first recorded here, in PR #160's description and in the session
+notes — is **wrong**: 889 is a row count, the true affected-asset figure is
+lower and is currently **unknown**.
+
+The finding itself is unaffected — the defect is real, `price_usd = 0` accounts
+for 100% of the −100s either way, and the ratio is the right order of magnitude.
+Only the headline number is overstated. **Re-measure against
+`prices.current_prices FINAL` (never the view) before quoting a figure**, and
+use that same table for the before/after comparison.
 
 XLM itself:
 
@@ -119,6 +133,26 @@ so the headline price stops being 0. That is [[0135]], it changes what the
 flagship field reports, and it deserves its own decision. This task only stops a
 zero price from being laundered into a fabricated percentage.
 
+**The second fabrication path: an OUTLIER venue driving `change_*_pct`.**
+Found in the PR #160 review. `change_*_pct` reads `price_usd` from the
+`unfiltered` CTE, which deliberately includes venues the §5.5 median filter
+**rejected**. So an outlier venue that happens to hold the newest candle becomes
+`price_usd` — and the row publishes a change computed against it while the
+`sources` object shipped alongside excludes that venue entirely.
+
+`current_mv_it.rs`'s own fixture demonstrates it: asset 3's `aquarius` leg at
+5.00 is asserted **absent from `sources`** and **excluded from `vwap_24h`**
+(1.0067), yet `change_24h_pct` is asserted at **+525%** against it, beside a
+sources object showing only ~1.00/1.02.
+
+Same class of defect as the -100 — a confident wrong answer that passes every
+`0`-means-unavailable guard — but a different cause, and **not fixed by the
+`nullIf` here**. It needs `price_usd` to be outlier-filtered, which is already
+[[0135]]'s scope ("`price_usd` is still not outlier-filtered … it propagates
+into `market_cap_usd`"). Recorded there as also propagating into
+`change_24h_pct`/`change_7d_pct`. The test assertion is annotated so the
+behaviour is pinned and visible rather than tacitly endorsed.
+
 ## Implementation Notes (2026-08-03)
 
 `current.sql` — one `nullIf` per column, wrapping the numerator so it mirrors the
@@ -166,6 +200,15 @@ integration.
 - [x] `current_mv_it.rs` covers both, against pinned CH 26.3.10.60, with a
       non-vacuous control that the un-guarded form produces -100.
 - [x] `price_xlm`'s equivalent guard asserted rather than assumed.
-- [ ] Applied to ch-prod-01 and verified: `countIf(change_24h_pct = -100)` drops
-      to approximately the count of assets that genuinely fell ~100%.
+      *(PR #160 review: the first attempt was **vacuous** — with `price_usd = 0`
+      the expression is `0 / anything`, which is 0 with or without the `nullIf`.
+      Replaced with `price_xlm_lands_on_the_sentinel_when_the_xlm_divisor_is_missing`,
+      which removes the DIVISOR while keeping a non-zero numerator, and is
+      verified to fail when the guard is stripped.)*
+- [ ] Applied to ch-prod-01 and verified: `countIf(change_24h_pct = -100)`
+      measured **against `prices.current_prices FINAL`, NOT `current_price_usd`**
+      (the view fans out — see [[0139]]), drops to approximately the count of
+      assets that genuinely fell ~100%. Capture the *before* figure from the same
+      table first; the pre-fix number on record (889) came from the view and is
+      not comparable.
 - [ ] [[0072]] step 6 unblocked.

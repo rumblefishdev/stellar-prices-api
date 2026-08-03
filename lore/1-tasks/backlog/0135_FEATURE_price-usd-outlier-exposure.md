@@ -44,6 +44,30 @@ Note this compounds with `market_cap_usd`, which is `price_usd × supply`: an
 outlier price propagates into market cap, where the error is multiplied by a
 potentially very large supply figure.
 
+### It also propagates into `change_24h_pct` / `change_7d_pct` (found 2026-08-03)
+
+Surfaced by the [[0138]] PR #160 review, and sharper than the `market_cap_usd`
+case because the resulting row is **self-contradictory on its face**.
+
+`change_*_pct` reads `price_usd` from the `unfiltered` CTE, so an outlier venue
+holding the newest candle becomes the numerator — while the `sources` object
+published in the same row **excludes that venue** and `vwap_24h` is computed
+without it. `current_mv_it.rs`'s existing fixture demonstrates it exactly: asset
+3's `aquarius` leg at 5.00 is asserted absent from `sources` and excluded from
+`vwap_24h` (1.0067), yet `change_24h_pct` is asserted at **+525%** against it,
+beside a sources object showing only ~1.00/1.02.
+
+This is the same failure class 0138 fixed for zero prices — a confident wrong
+answer that passes every `0`-means-unavailable consumer guard — reached by a
+different route. **0138's `nullIf` does not address it**; only outlier-filtering
+`price_usd` does, which is this task.
+
+Whichever option below is chosen must therefore also state what happens to the
+two change columns. "Leave as-is, document" is a materially weaker answer here
+than it is for `market_cap_usd`: a caller can reasonably be told "the headline
+price is unfiltered, use the VWAP", but there is no filtered alternative to
+`change_24h_pct` to point them at.
+
 ## Implementation
 
 Decide between, roughly:
@@ -66,7 +90,9 @@ base for whichever option is chosen.
 ## Acceptance Criteria
 
 - [ ] Decision recorded (ADR or task note) with the reasoning, including the
-      `market_cap_usd` propagation.
+      `market_cap_usd` propagation **and the `change_24h_pct`/`change_7d_pct`
+      propagation** (see above — the latter yields rows that contradict their own
+      `sources` field).
 - [ ] If filtered: `current.sql` updated, `current_mv_it.rs` asserts the new
       behaviour, and the change is called out as a published-value change.
 - [ ] If left as-is: the §4.2 `/price` docs state that `price_usd` is unfiltered
