@@ -82,6 +82,44 @@ Only the headline number is overstated. **Re-measure against
 `prices.current_prices FINAL` (never the view) before quoting a figure**, and
 use that same table for the before/after comparison.
 
+### ✅ Corrected baseline — ch-prod-01, `current_prices FINAL`, 2026-08-03 12:53Z
+
+Captured immediately before the fix was applied, so step 5 has something
+comparable:
+
+| metric | before |
+|---|---|
+| assets | **4,165** |
+| `change_24h_pct = -100` | **817 (19.6%)** |
+| `change_7d_pct = -100` | **502** |
+| `price_usd = 0` | 1,036 |
+| `price_usd = 0` AND `vwap_24h > 0` | 20 |
+| `change_24h_pct != 0` | 2,186 |
+| view rows vs table rows | 4,554 vs 4,165 (**389** fan-out dupes, [[0139]]) |
+
+So the corrected headline is **817 of 4,165 (19.6%)**, not "889 of 4,442 (20%)".
+
+**These numbers independently corroborate the diagnosis.** 1,036 assets carry a
+zero `price_usd`, but only **817** report -100. The 219-asset gap is exactly the
+group whose `open_24h` is *also* zero — no priced candle anywhere in the 24h
+window — which the **pre-existing denominator guard already handled**. That the
+population splits precisely along "does a real reference close exist" is what the
+numerator-only hypothesis predicts, and nothing else in the CTE would produce it.
+
+MV state going in: `Scheduled`, 185 ms, 4,165 rows written, empty `exception`.
+
+### Falsifiable predictions for the post-apply check
+
+Recorded before applying so the verification cannot be rationalised after it:
+
+- `chg24_minus_100` 817 → **~0**
+- `chg7d_minus_100` 502 → **~0**
+- `zero_price` 1,036 → **UNCHANGED** (this task does not touch `price_usd`)
+- `chg24_nonzero` 2,186 → **~1,369** (down by ~817)
+
+A drop in `zero_price` would mean something unintended changed and should be
+investigated before proceeding to [[0072]] step 6.
+
 XLM itself:
 
 ```
