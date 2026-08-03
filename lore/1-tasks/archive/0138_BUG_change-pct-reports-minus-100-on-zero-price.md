@@ -1,8 +1,8 @@
 ---
 id: "0138"
-title: "change_24h_pct/change_7d_pct publish a fabricated -100% for every zero-price asset (889 assets, incl. XLM)"
+title: "change_24h_pct/change_7d_pct publish a fabricated -100% for every zero-price asset (817 of 4,165, incl. XLM)"
 type: BUG
-status: active
+status: completed
 related_adr: []
 related_tasks: ["0072", "0135", "0040"]
 tags:
@@ -23,6 +23,28 @@ history:
       `price_usd = 0`. Blocks 0072 step 6 (the API deploy): the handler would
       serve a fabricated total price collapse on a fifth of all assets, XLM
       included.
+  - date: 2026-08-03
+    status: completed
+    who: okarcz
+    note: >
+      **Fixed, reviewed, merged (PR #160) and applied to ch-prod-01 the same
+      day.** `change_24h_pct = -100` went 817 -> 0 and `change_7d_pct` 502 -> 0,
+      measured against `prices.current_prices FINAL`; the `price_usd = 0`
+      control rose with the asset population rather than falling, confirming
+      nothing outside this task's scope moved. All four pre-registered
+      predictions met.
+
+      The `/code-review` on #160 found six issues, all addressed: a runbook
+      false-abort gate that would have reported a CORRECT rollout as failed
+      (the third such assertion from the same price_usd asymmetry), a VACUOUS
+      price_xlm assertion that an AC had been checked off against, a fixture
+      that was not actually the prod shape, an overstated headline figure
+      (889 was a ROW count over the fanned-out view, not assets - the true
+      figure is 817 of 4,165), and a second fabrication path via outlier
+      venues, recorded against [[0135]] rather than silently asserted as
+      correct in the test.
+
+      Unblocked [[0072]] step 6.
 ---
 
 # `change_*_pct` fabricates -100% whenever `price_usd` is 0
@@ -243,10 +265,41 @@ integration.
       Replaced with `price_xlm_lands_on_the_sentinel_when_the_xlm_divisor_is_missing`,
       which removes the DIVISOR while keeping a non-zero numerator, and is
       verified to fail when the guard is stripped.)*
-- [ ] Applied to ch-prod-01 and verified: `countIf(change_24h_pct = -100)`
+- [x] Applied to ch-prod-01 and verified: `countIf(change_24h_pct = -100)`
       measured **against `prices.current_prices FINAL`, NOT `current_price_usd`**
       (the view fans out — see [[0139]]), drops to approximately the count of
-      assets that genuinely fell ~100%. Capture the *before* figure from the same
-      table first; the pre-fix number on record (889) came from the view and is
-      not comparable.
-- [ ] [[0072]] step 6 unblocked.
+      assets that genuinely fell ~100%. **Result: 817 → 0.**
+- [x] [[0072]] step 6 unblocked — and step 7 verified end-to-end on the public API.
+
+## ✅ Applied to ch-prod-01 — 2026-08-03 13:5xZ
+
+`current.sql` re-applied (DROP + re-CREATE) from `develop` after PR #160 merged.
+MV healthy immediately: 188 ms refresh vs 185 ms before, empty `exception`.
+
+**Every prediction recorded above was met:**
+
+| metric | before | predicted | actual |
+|---|---|---|---|
+| `change_24h_pct = -100` | 817 | ~0 | **0** ✅ |
+| `change_7d_pct = -100` | 502 | ~0 | **0** ✅ |
+| `price_usd = 0` (control) | 1,036 | unchanged | 1,095 — **did not fall** ✅ |
+| `change_24h_pct != 0` | 2,186 | ~1,369 | **1,360** ✅ |
+
+The control behaved exactly as required: `zero_price` *rose* (1,036 → 1,095)
+while the asset count rose 4,165 → 4,243 over the same hour — growing with the
+population rather than falling, confirming `price_usd` was untouched. The
+`chg24_nonzero` figure landed within 9 of prediction, the gap being an hour of
+new assets and genuine price movement.
+
+XLM after the fix:
+
+```
+price_usd 0   price_xlm 0   change_24h_pct 0   change_7d_pct 0
+vwap_24h  0.17105508082242
+sources   {"phoenix":{…},"soroswap":{…}}
+```
+
+Still not a *good* row — `price_usd` is 0 while the system demonstrably knows the
+price, which is [[0135]]'s to fix — but it no longer claims XLM lost all its
+value. A `0` beside a real VWAP is a sentinel every documented consumer guard
+already handles.

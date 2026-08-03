@@ -2,7 +2,7 @@
 id: "0072"
 title: "Materialize current_prices v1-deferred columns (sources breakdown, price_xlm, change_24h_pct) in the MV"
 type: FEATURE
-status: active
+status: completed
 related_adr: []
 related_tasks: ["0040", "0039", "0068", "0108", "0117", "0118", "0120", "0123"]
 tags: ["phase-future", "effort-medium", "priority-high", "milestone-M2", "vwap", "clickhouse", "materialized-view"]
@@ -127,6 +127,29 @@ history:
       Also folded the un-enriched-tip `price_usd = 0` defect (21 assets) into
       [[0135]]. Pre-existing, not a regression — v1 used the same unfiltered
       argMax.
+  - date: 2026-08-03
+    status: completed
+    who: okarcz
+    note: >
+      **ROLLOUT COMPLETE — all 7 steps applied and verified on production.**
+      Steps 4-5 applied the read view (6 -> 13 columns, BE notified beforehand);
+      step 5's verification surfaced [[0138]] (change_*_pct fabricating -100 on
+      817 of 4,165 assets, XLM included) and [[0139]] (the view fans out because
+      `assets` is keyed on natural identity, not `asset_id`). Step 6 was HELD on
+      0138 rather than ship a fabricated total price collapse on a fifth of all
+      assets; once 0138 landed and dropped the -100s to zero, steps 6-7
+      completed. `/price` now returns real `sources`, `price_xlm` and
+      `change_24h_pct` by pass-through.
+
+      Step 6 needed two attempts: the first shipped a STALE `prices-api` binary
+      because the deploy path builds only the CDK TypeScript and takes the
+      Lambda code from whatever sits in `target/lambda/` -> spawned [[0141]].
+      Every routine signal (clean diff, CDK success, /health) reported success;
+      only step 7's assertion on response CONTENT caught it. Verifying step 6
+      also surfaced [[0140]] (asset-discovery re-emits the full ~204k-row
+      registry hourly - 0132's defect in a second component).
+
+      Spawned: 0138 (fixed, PR #160, applied), 0139, 0140, 0141.
 ---
 
 # Materialize current_prices v1-deferred columns in the MV
@@ -226,8 +249,8 @@ which must not reach the public API. Runbook:
 | 3 — verify the MV | ✅ 2026-07-30 |
 | 4 — `views.sql` apply (`current_price_usd`) | ✅ 2026-08-03 — 13 columns live |
 | 5 — verify the read surface | ✅ 2026-08-03 — **surfaced [[0138]] + [[0139]]** |
-| 6 — `make deploy-production-compute` | ⛔ **HELD on [[0138]]** |
-| 7 — `/price` returns a populated `sources` | ⛔ blocked by step 6 |
+| 6 — `make deploy-production-compute` | ✅ 2026-08-03 — **needed two attempts, see [[0141]]** |
+| 7 — `/price` returns a populated `sources` | ✅ 2026-08-03 — **ROLLOUT COMPLETE** |
 
 **Still a stable state to sit in.** The MV writes all ten columns and the view
 now forwards all thirteen, so BE's in-cluster 0199 consumer has them; the public
@@ -283,6 +306,67 @@ which is arguably the most valuable thing step 4 did.
    contract_address)`, so `FINAL` does **not** dedup on `asset_id`, and 3,275
    asset_ids map to 2+ natural identities. Believed **pre-existing** (the v1
    six-column view carried the same join). → **[[0139]]**
+
+## ✅ Steps 6–7 — ROLLOUT COMPLETE (2026-08-03)
+
+[[0138]] landed (PR #160) and was applied to prod, dropping
+`change_24h_pct = -100` from 817 assets to **0**. Step 6 then ran.
+
+### ⚠️ Step 6 shipped a STALE binary the first time — [[0141]]
+
+`make deploy-production-compute` succeeded, the CDK diff showed a clean S3Key
+change, and `/v1/assets/native/price` still returned stubs. Cause: `build:` runs
+`nx build` on the **CDK TypeScript only**, while the Lambda code comes from
+`Code.fromAsset('../target/lambda/prices-api')` — whatever binary is on disk.
+**Nothing in the deploy path builds the Rust or checks it against the tree.** The
+artifact predated PR #150's pass-through handler.
+
+Fixed with `cargo lambda build --release --arm64 --features lambda -p prices-api`
+followed by a redeploy; the second diff showed only `ApiHandlerFunction`, and its
+S3Key differed from the first deploy's — confirming the first had shipped
+different bytes.
+
+**Every routine signal said the deploy worked.** Clean diff, `✅` from CDK,
+`/health` passing (it is a keyless API Gateway *mock* — it passes even when the
+handler is entirely wrong), and a correctly-shaped response, since both builds
+serialise the same DTO. Only step 7's assertion on response *content* caught it.
+
+⚠️ **And the pre-0138 step-7 wording would have missed it too**, because it
+gated on `change_24h_pct != "0"` — which the stub also fails. The gate only
+worked because it had been narrowed to `sources` that same morning.
+
+### ⚠️ `native` is a degenerate probe — do not verify with it
+
+XLM's genuine CH values are `price_usd 0`, `price_xlm 0`, `change_24h_pct 0`,
+and its `sources` flickers as un-enriched candles enter and leave the 24h window.
+Those are **exactly** the values the stub hardcodes, so both builds emit a
+byte-identical response for `native` and the endpoint cannot discriminate.
+
+Discriminating required an asset with a populated `sources`. `USDCAllow`
+(`GDIEKKIQWMIZ4LD3RP3ABPN7X5KEAEWYMR634BRHB7EULIMEVREWLF3G`) returned:
+
+```json
+{
+  "price_usd": "1.00105502303414",
+  "price_xlm": "5.81383067688783",   // stub: "0"
+  "change_24h_pct": "0.003",         // stub: "0"
+  "sources": { "sdex": { "price": "1.00105502303414", … } }   // stub: {}
+}
+```
+
+### Cluster health at completion
+
+4,137 assets · 3,386 with `sources` · 3,386 with `vwap_24h` · 3,368 with
+`price_usd`. Enrichment healthy cluster-wide; XLM's zeros are the [[0135]]
+un-enriched-tip case, not a systemic failure.
+
+### Also found while verifying step 6 — [[0140]]
+
+Checking that the deploy had not reverted [[0132]] revealed **~204k rows written
+to `prices.assets` every hour**, flat before and after the deploy. `asset-discovery`
+calls `write_assets` unconditionally on every hourly run — 0132's defect in a
+second component, with the explanatory comment sitting above the *unguarded*
+line, which is very likely why it survived the 0132 audit.
 
 ### Measured cost (step 1, ch-prod-01, 2026-07-30)
 
