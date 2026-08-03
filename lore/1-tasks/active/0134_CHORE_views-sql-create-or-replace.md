@@ -2,7 +2,7 @@
 id: "0134"
 title: "views.sql edits silently don't land — convert the remaining five views to CREATE OR REPLACE"
 type: CHORE
-status: backlog
+status: active
 related_adr: []
 related_tasks: ["0072", "0076", "0061", "0133"]
 tags: ["phase-future", "effort-small", "priority-medium", "clickhouse", "schema-drift"]
@@ -47,6 +47,16 @@ history:
       DDL grant from BE (option 1, now known to be insufficient as well as
       over-broad) or swallow Code: 497 (option 3, re-introduces the silent
       no-op). No BE dependency; the conversion work itself is unstarted.
+  - date: 2026-08-03
+    status: active
+    who: okarcz
+    note: >
+      Activated. The prerequisite decision (option 2) was already settled on
+      measured ch-prod-01 grants, so the remaining work is local and
+      dependency-free: the five conversions, a form assertion in the unit test,
+      the falsified idempotency doc claims, and the `views_it.rs` `rewrite()`
+      branch. The [[0072]] step-4 coupling that held this back is resolved —
+      0072 completed and archived earlier today.
 ---
 
 # views.sql edits silently don't land on an already-provisioned target
