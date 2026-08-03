@@ -497,6 +497,59 @@ Corollary: the raw phoenix drop (124,930 → 76,070) was pure dedup, **not**
 deletion — retiring the "the excess drop is the delete applying" reading recorded
 mid-run.
 
+### Watch period — 14:25Z, ~4.5 h after recovery ✅ HELD
+
+| table | frozen at | 14:25Z |
+|---|---|---|
+| `_1m` | (never froze) | 14:25 |
+| `_15m` | 07-21 02:30 | **14:15** ✅ |
+| `_1h` | 07-21 02:00 | **14:00** ✅ |
+| `_4h` | 07-21 00:00 | **12:00** ✅ |
+| `_1d` | 07-21 00:00 | **08-03 00:00** ✅ |
+| `_1w` | 07-20 00:00 | unchanged — **expected** |
+| `_1M` | 07-01 00:00 | unchanged — **expected** |
+
+`_4h` and `_1d` were the discriminating pair and both advanced. `_1w`/`_1M` have
+not because their MVs last ran at **00:00 today — nine hours before the
+recovery** — so they read a still-frozen `_1d`. They pick up at 00:00 tonight.
+Cascade behaving as predicted, not a residual fault.
+
+All nine MVs `Scheduled`, empty `exception`. Part counts flat against the
+post-recovery baseline (17/113/122/179/108/151 vs 15/113/122/179/108/149) —
+ordinary insert growth, nowhere near the thousands that would signal the
+assignee stopping again.
+
+### ✅ `prices-production-cleanup` confirmed DISABLED (2026-08-03)
+
+Outstanding since 2026-07-31 (operator credentials had expired, twice). Now
+verified:
+
+```
+aws events describe-rule --name prices-production-cleanup \
+  --region eu-central-1 --query State --output text
+→ DISABLED
+```
+
+⚠️ **Drop `--profile soroban-explorer` from these commands** — that profile's
+token is expired; the default SSO identity
+(`AWSReservedSSO_AdministratorAccess/oskar.karcz`, account 750702271865) works.
+Every runbook here still carries the `--profile` form.
+
+**This was the last hold on the gap pre-roll.** Both preconditions are now
+satisfied: cleanup is off, and the `_bak` tables are intact ([[0105]] has not run).
+
+## Remaining work
+
+1. **Confirm `_1w` / `_1M` advance after 00:00** tonight. That completes the
+   watch period and unblocks [[0105]].
+2. **The 07-21 → 08-03 gap pre-roll** — now unblocked. `_1d` jumping straight
+   from 07-21 to 08-03 is the hole made visible. **BOUNDED INCREMENTAL only —
+   never `preroll.sql`**, which expects TRUNCATE-d tables and would re-run the
+   [[0090]] history loss.
+3. **[[0137]]** — the freshness alarm. Health was measured on MV status, not on
+   the data, which is why this ran ten days silent. Recovery is not complete
+   without it.
+
 ## Mechanism — reproduced locally, but NOT the cause (2026-07-30)
 
 > ⛔ **The hypothesis below was FALSIFIED on prod** (see the START MERGES section
