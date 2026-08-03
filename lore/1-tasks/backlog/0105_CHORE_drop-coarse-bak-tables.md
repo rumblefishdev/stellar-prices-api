@@ -12,9 +12,31 @@ history:
     status: backlog
     who: okarcz
     note: "Spawned from 0095 — coarse backup taken before the APPEND MV recreate; drop once the live rollup has held for a watch period."
+  - date: 2026-07-30
+    status: backlog
+    who: okarcz
+    note: >
+      **BLOCKED on [[0136]].** The live rollup did not hold — every coarse table
+      froze on 2026-07-21, four days after the 0095 change. These backups are the
+      only rollback path for the 0136 recovery, which resumes merges and lets six
+      pending ALTER DELETE mutations execute. Do not drop them until that is
+      verified, and restart the watch period from the recovery rather than from
+      2026-07-17.
 ---
 
 # Drop the six price_ohlcv_*_bak coarse backup tables
+
+> ## ⛔ BLOCKED — do not run until [[0136]] is verified (added 2026-07-30)
+>
+> All six coarse tables have been frozen since 2026-07-21 and the recovery
+> (`docs/runbooks/0136-coarse-rollup-merge-recovery.md`) resumes merges and lets
+> six pending `ALTER … DELETE` mutations execute. **These `_bak` tables are the
+> only rollback path for that.** Dropping them now would leave the recovery
+> irreversible.
+>
+> The watch period this task waits for was also never really satisfied: the live
+> rollup did *not* hold — it stalled four days after the 0095 change. Restart the
+> watch clock from the 0136 recovery, not from 2026-07-17.
 
 ## Summary
 
