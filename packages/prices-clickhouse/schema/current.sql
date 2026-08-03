@@ -221,17 +221,33 @@ SELECT
     -- representable band. A brand-new microcap can genuinely exceed that, and an
     -- overflow would poison the entire refresh, so both are clamped with least()
     -- /greatest() rather than left to throw.
+    --
+    -- ⚠️ BOTH operands are nullIf-guarded, not just the denominator (task 0138).
+    -- `price_usd` above is an UNFILTERED argMax while `open_24h` filters
+    -- `close_usd > 0`, so an un-enriched newest candle yields a zero numerator
+    -- beside a real denominator — and `(0 - open) / open * 100` is exactly
+    -- **-100**, a fabricated total price collapse. Measured on ch-prod-01
+    -- 2026-08-03: 889 of 4,442 assets (20%) published -100 on change_24h_pct,
+    -- 396 on change_7d_pct, XLM among them, while their `vwap_24h` and `sources`
+    -- carried the real price. -100 is NOT a sentinel — it passes every
+    -- consumer-side "0 means unavailable" guard the views.sql interop contract
+    -- documents, because it looks like data. Guarding the numerator lands it on
+    -- the 0 = "no signal" sentinel instead.
+    --
+    -- A genuine -100% (a real price falling to a real near-zero) is unaffected:
+    -- the guard keys on price_usd being exactly the 0 sentinel, not on the
+    -- computed value.
     toDecimal64(
         greatest(-999999.0, least(999999.0,
             ifNull(
-                (toFloat64(u.price_usd) - toFloat64(u.open_24h))
+                (nullIf(toFloat64(u.price_usd), 0) - toFloat64(u.open_24h))
                     / nullIf(toFloat64(u.open_24h), 0) * 100,
                 0))),
         4)                                                  AS change_24h_pct,
     toDecimal64(
         greatest(-999999.0, least(999999.0,
             ifNull(
-                (toFloat64(u.price_usd) - toFloat64(r.close_7d_ago))
+                (nullIf(toFloat64(u.price_usd), 0) - toFloat64(r.close_7d_ago))
                     / nullIf(toFloat64(r.close_7d_ago), 0) * 100,
                 0))),
         4)                                                  AS change_7d_pct,

@@ -313,10 +313,34 @@ curl -sS -H "x-api-key: $PRICES_API_KEY" \
   "https://<api-host>/production/v1/assets/native/price" | jq .
 ```
 
-`sources` must be a populated JSON **object** (not `{}`), and `price_xlm` /
-`change_24h_pct` must be non-`"0"` strings for an asset with 24h data. A `{}`
-here with populated CH columns means the handler is still the stubbed build —
-re-check step 6 shipped.
+**The gate is `sources`, and only `sources`.** It must be a populated JSON
+**object** (not `{}`). A `{}` here while the CH columns are populated means the
+handler is still the stubbed build — re-check step 6 shipped.
+
+> ⚠️ **Do NOT gate on `price_xlm` / `change_24h_pct` being non-`"0"` — least of
+> all on `native`.** An earlier version of this step did, and it is a
+> **false-abort trigger** on exactly the asset it curls. XLM's own
+> `price_usd` is an unfiltered `argMax(close_usd, timestamp)`, so an un-enriched
+> tip zeroes it; `price_xlm` is then `0`, and since [[0138]] `change_24h_pct` is
+> `0` too (before 0138 it was **`-100`**, which passed this check while being
+> flatly wrong). A correct rollout therefore reads as "still stubbed" and the
+> operator redeploys or aborts for nothing.
+>
+> This is the third place the same asymmetry has produced a bad assertion —
+> step 5's "XLM `price_xlm` must be exactly 1" was softened during the PR #158
+> review for the identical reason. Treat any "must be non-zero" check on a
+> price-derived column as suspect until [[0135]] closes.
+
+If you want a positive check on the numeric columns, pick an asset **known to
+have an enriched tip** rather than `native`, and read it from ClickHouse first
+so the API is compared against a known value:
+
+```sql
+SELECT asset_kind, asset_code, toString(price_xlm), toString(change_24h_pct)
+FROM prices.current_price_usd
+WHERE price_usd > 0 AND change_24h_pct != 0
+ORDER BY volume_24h_usd DESC LIMIT 5;
+```
 
 ## Rollback
 
