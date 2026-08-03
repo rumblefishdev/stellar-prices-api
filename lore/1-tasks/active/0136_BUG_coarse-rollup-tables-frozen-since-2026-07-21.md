@@ -2,7 +2,7 @@
 id: "0136"
 title: "Every coarse OHLCV table frozen since 2026-07-21 — merges and mutations inert on six tables"
 type: BUG
-status: backlog
+status: active
 related_adr: []
 related_tasks: ["0072", "0097", "0104", "0109", "0114", "0127"]
 tags:
@@ -63,6 +63,14 @@ history:
       rewritten around it (PR #159). Deliberately deferred past the weekend —
       the freeze is a stable state, not a decaying one, and a hung `DETACH` is
       the one bad outcome, so it wants BE reachable and a watcher.
+  - date: 2026-08-03
+    status: active
+    who: okarcz
+    note: >
+      Promoted to active to run the recovery on ch-prod-01, per the
+      `docs/runbooks/0136-coarse-rollup-merge-recovery.md` sequence. Monday,
+      BE reachable, watcher present — the conditions the 07-31 deferral asked
+      for. Execution log below.
 ---
 
 # Every coarse OHLCV table has been frozen since 2026-07-21
@@ -287,6 +295,207 @@ no raw data is being lost and the gap stays reconstructible. Against that, a hun
 **disabled** (it drops historical partitions immediately and would eat the `_1m`
 history the recovery depends on — **unverified on 07-31, operator creds expired**),
 and [[0105]] must not have run (`_bak` is the only rollback).
+
+## Prod recovery run — 2026-08-03
+
+### Step 0 — pre-flight snapshot ✅
+
+All three gates passed: six `_bak` tables present and untouched since 07-17
+(so [[0105]] has not run), six mutations still `is_done = 0` at exactly the
+07-30 `parts_to_do` figures, `SHOW CREATE` captured off-cluster.
+
+**`uptime()` = 2,399,533 s — the cluster started 2026-07-06 14:59:19 and has
+NOT restarted since.** This matters: the assignee was alive at startup and died
+11 days later (07-17 11:06:52, with the mutations). Nothing has yet tried and
+failed to rebuild it, which is the precondition under which
+`ATTACH` → `startup()` is expected to work. A restart *after* 07-21 with the
+tables still frozen would have falsified the mechanism outright.
+
+**Baseline — the "before" picture:**
+
+| table | parts | raw rows | `count() FINAL` | blowup | size |
+|---|---|---|---|---|---|
+| `_15m` | 5,027 | 68,400,564 | 9,405,741 | 7.27× | 4.55 GiB |
+| `_1h` | 6,325 | 124,691,905 | 82,335,897 | 1.51× | 7.79 GiB |
+| `_4h` | 3,124 | 61,444,661 | — | — | 4.02 GiB |
+| `_1d` | 1,395 | 24,506,433 | — | — | 1.64 GiB |
+| `_1w` | 819 | 9,956,812 | — | — | 678 MiB |
+| `_1M` | 806 | 13,037,820 | 1,343,906 | 9.70× | 851 MiB |
+| `_1m` (healthy) | 269 | 724,022,054 | — | — | 17.69 GiB |
+
+Per-source `_1h`: sdex 123,118,521 · aquarius 1,269,152 · soroswap 179,302 ·
+phoenix 124,930. **Only phoenix may drop** after recovery (the [[0097]] delete
+finally applying); the other three must be unchanged.
+
+### ⚠️ Correction — the freeze is NOT fully static
+
+The 07-31 note claimed "`_15m` is pinned so parts stop growing, the other five
+receive no inserts." **Half wrong.** Against the 07-30 figures, `_15m` (5,027),
+`_4h` (3,124) and `_1d` (1,395) are unchanged to the part — but **`_1M` grew
+750 → 806 (+56) and `_1w` 811 → 819 (+8)** over four days.
+
+The coarsest two are still being written. The likely reason is window width: a
+rollup MV re-reads a bounded recent window of its source, and for `_1w`/`_1M`
+that window is wide enough to still contain rows from before the 07-21 freeze,
+so every refresh re-appends the same stale rows. `_4h`/`_1d` read narrower
+windows that have now moved entirely past the freeze, find nothing, and insert
+nothing.
+
+Consequences: the `_1M` duplicate blowup (9.70×) is still growing, and those two
+tables are slowly marching toward the same per-partition
+`parts_to_throw_insert = 5000` wall that pinned `_15m`. Adds mild urgency; does
+not change the recovery.
+
+### Step 1 — `price_ohlcv_1M` probe ✅ **RECOVERY CONFIRMED ON PROD**
+
+`DETACH` + `ATTACH` in one invocation, 2026-08-03 ~09:47Z. Returned promptly,
+no output, no hang. Within ~5 minutes:
+
+| | baseline (step 0) | after attach |
+|---|---|---|
+| active parts | 806 | **113** |
+| mutation `parts_to_do` | 60 | **0** |
+| mutation `is_done` | 0 | **1** |
+| `part_log` (10 min window) | empty for 13 days | `MergeParts` 49 · `MergePartsStart` 49 · `MutatePart` 60 · `MutatePartStart` 60 |
+
+**The hypothesis is confirmed in production, not just locally.** `ATTACH`
+constructs a fresh storage object and runs `startup()`, which rebuilt the
+background operations assignee; merges *and* mutations resumed immediately.
+
+The **17-day-old [[0097]] Phoenix `ALTER DELETE` completed** — it had never been
+attempted once since 2026-07-17 11:06:52. That is the sharpest possible evidence
+for the diagnosis: the mutation was never failing, it was never being *scheduled*.
+
+It also closes out the `SYSTEM START MERGES` negative recorded on 07-30. That
+command released a lock on a decision nothing was left to make; `ATTACH` restores
+the thing that makes it.
+
+Faster than the local test led us to expect — 806 parts collapsed to 113 inside
+the 5-minute window, with no observable impact on the shared cluster.
+
+### Step 2 — `price_ohlcv_15m` ✅ **THE FREEZE IS OVER**
+
+`DETACH` + `ATTACH` at ~09:52Z. Returned promptly despite ~5,027 part
+descriptors — the feared slow attach did not materialise.
+
+| | baseline (step 0) | after attach |
+|---|---|---|
+| active parts | 5,027 (pinned at `parts_to_throw_insert`) | **12** |
+| raw rows | 68,400,564 | 9,596,297 |
+| mutation `parts_to_do` | 52 | **0** / `is_done 1` |
+| `part_log` | `Code: 252` × 40,377, no merge lines | `MergeParts` 68 · `MutatePart` 2 · **`NewPart` 09:54:00** |
+
+**`NewPart` at 09:54:00 is the end of the freeze** — the first insert accepted
+by `price_ohlcv_15m` since 2026-07-21 02:44. `mv_ohlcv_1m_to_15m` is writing
+again with no recreate, as the local T3 test predicted.
+
+**The row arithmetic confirms the "storage shrinks, readers see the same data"
+prediction exactly.** Raw 68,400,564 → 9,596,297, against a step-0 `count() FINAL`
+of 9,405,741: dedup collapsed the 7.27× duplicate backlog down to precisely what
+readers always saw, and the ~190k excess over the old FINAL is genuinely new data
+landing. A 7× storage reduction with zero reader-visible loss.
+
+### Step 3 — remaining four ✅ all six tables recovered
+
+`_1h` first (heaviest), then `_4h`/`_1d`/`_1w` in one sequential invocation.
+Running the last three together was a deliberate deviation from the runbook's
+one-at-a-time rule: the shell executes them in order, so a hang on `_4h` still
+blocks the two after it exactly as the rule intends, and the pool was idle at
+**0 / 32** with the three collectively smaller than `_1h`, which had just drained
+in about a minute.
+
+| table | parts before | after | raw rows before | after | mutation |
+|---|---|---|---|---|---|
+| `_15m` | 5,027 | **15** | 68,400,564 | 9,625,597 | ✅ 52 |
+| `_1h` | 6,325 | **179** | 124,691,905 | 114,744,527 | ✅ 779 |
+| `_4h` | 3,124 | **149** | 61,444,661 | 57,098,077 | ✅ 431 |
+| `_1d` | 1,395 | **122** | 24,506,433 | 19,550,735 | ✅ 159 |
+| `_1w` | 819 | **108** | 9,956,812 | 5,509,296 | ✅ 120 |
+| `_1M` | 806 | **113** | 13,037,820 | 2,326,776 | ✅ 60 |
+
+**17,496 parts → 686 (96% reduction).** `system.mutations WHERE is_done=0`
+returns **zero rows** — all six [[0097]] Phoenix deletes executed, ~1,601 parts
+rewritten, 17 days after they were created. `active_merges 0` afterwards: fully
+settled, nothing left running on BE's shared cluster. `price_ohlcv_1m` stayed
+healthy throughout (269 → 240 parts).
+
+The whole recovery — all six tables, six mutations, 17k parts — took roughly
+**10 minutes** of wall clock (09:47Z → 09:57Z).
+
+**Note on residual duplication (not a defect).** `_1h` shed only 8% of its rows
+(114.7M raw vs an 82.3M `FINAL`), where `_15m` shed 86%. ClickHouse merges by
+size-tier policy and never merges across partitions, so a settled table can
+retain duplicates indefinitely. Every consumer reads `FINAL`, so this is a
+storage-efficiency observation only.
+
+### Steps 4–5 — freshness + data integrity ✅
+
+**Freshness (10:06Z, ~10 min after recovery):**
+
+| table | before | after |
+|---|---|---|
+| `_1m` | live | 2026-08-03 10:06 |
+| `_15m` | 2026-07-21 02:30 | **2026-08-03 10:00** ✅ |
+| `_1h` | 2026-07-21 02:00 | **2026-08-03 09:00** ✅ |
+| `_4h` | 2026-07-21 00:00 | pending — MV cadence |
+| `_1d` | 2026-07-21 00:00 | pending |
+| `_1w` | 2026-07-20 00:00 | pending |
+| `_1M` | 2026-07-01 00:00 | pending |
+
+The head of the chain caught up within minutes. The four coarser tips lag on
+their own cadences (`4h_to_1d` last ran 08:00, `1d_to_1w` / `1w_to_1M` at 00:00)
+and advance over the following hours, as the runbook predicted. **All nine
+refreshable MVs report `Scheduled` with empty `exception`**, including
+`mv_current_prices`.
+
+**Data integrity — live vs `_bak`, `FINAL`, window `timestamp < 2026-07-17`
+(predates both the freeze and the mutation):**
+
+| source | live | backup | delta |
+|---|---|---|---|
+| sdex | 81,415,340 | 81,415,340 | **0** |
+| aquarius | 465,795 | 465,795 | **0** |
+| soroswap | 86,093 | 86,093 | **0** |
+| phoenix | 40,693 | 40,693 | **0** |
+
+Plus `price_ohlcv_1d` deep history (`< 2025-06-01`): live 7,763,189 = backup
+7,763,189. **Zero data loss.**
+
+`FINAL` counts rose rather than fell — `_15m` 9,405,741 → 9,417,194, `_1h`
+82,335,897 → 82,342,912, `_1M` unchanged — i.e. new data arriving with nothing
+lost, against a 96% reduction in physical parts.
+
+### ⚠️ Runbook defect found and fixed — step 5's per-source gate was unsound
+
+The runbook's step 5 compared per-source counts **without `FINAL`**. Collapsing a
+duplicate backlog necessarily reduces raw counts for *every* source, so the
+stated expectation ("sdex must be unchanged; phoenix should DROP") is
+unsatisfiable after a dedup event: the observed raw deltas were sdex −7.9%,
+aquarius −9.9%, soroswap −10.0%, phoenix −39.1%. Followed literally, that gate
+reads as unexplained loss on three sources and would have triggered a false
+"stop and restore from `_bak`" mid-recovery.
+
+Replaced with a live-vs-`_bak` `FINAL` comparison over a fixed pre-incident
+window, which is what actually discriminates loss from dedup.
+
+### Surprise — the Phoenix delete removed nothing reader-visible
+
+Phoenix `delta = 0` as well, which was not predicted. Essentially all phoenix
+data lies inside the delete's range (decoded predicate: `source = 'phoenix' AND
+timestamp >= 2024-02-20 17:00:10 AND timestamp < 2026-07-06 09:35:16`; only ~106
+phoenix rows postdate 07-17), yet live still matches the backup exactly. The
+mutation physically completed while changing nothing a reader could see.
+
+**Likely cause: `apply_mutations_on_fly`**, default-on in modern ClickHouse —
+`SELECT`s apply pending mutations logically, so the delete has been *in effect*
+since 07-17 despite no part being rewritten. Consistent with `_1h` `FINAL` rising
+rather than falling when the mutation completed. **Inference, not proof**
+(`SELECT value FROM system.settings WHERE name='apply_mutations_on_fly'` would
+settle it); nothing downstream depends on it.
+
+Corollary: the raw phoenix drop (124,930 → 76,070) was pure dedup, **not**
+deletion — retiring the "the excess drop is the delete applying" reading recorded
+mid-run.
 
 ## Mechanism — reproduced locally, but NOT the cause (2026-07-30)
 

@@ -2,7 +2,13 @@
 
 Restores `price_ohlcv_15m`, `_1h`, `_4h`, `_1d`, `_1w`, `_1M`, frozen since
 **2026-07-21 02:44 UTC**. Diagnosis, evidence and both local test harnesses are
-in `lore/1-tasks/backlog/0136_BUG_coarse-rollup-tables-frozen-since-2026-07-21.md`.
+in `lore/1-tasks/active/0136_BUG_coarse-rollup-tables-frozen-since-2026-07-21.md`.
+
+> ✅ **EXECUTED SUCCESSFULLY ON ch-prod-01, 2026-08-03 09:47–09:57Z.** All six
+> tables recovered, 17,496 parts → 686, all six mutations completed, zero data
+> loss against `_bak`. The step-by-step results are in the task file. This
+> runbook has been corrected against what the run actually measured — the
+> annotations below marked "08-03 run" are observed, not predicted.
 
 **Mechanism.** Background merges are inert on exactly these six tables. Trace
 logging on ch-prod-01 showed they emit **no merge-machinery lines at all**, while
@@ -81,17 +87,22 @@ Three things happen at once, and all are wanted:
    by `version` during merge, so duplicate-PK rows written by the [[0097]]
    idempotent pre-roll collapse. **Physical** row counts drop hard — locally
    2,400 → 466 on a test table.
-2. **`count() FINAL` should NOT change**, because those duplicates were never
-   visible to readers. Confirmed locally. This is the sharper version of the
-   older "row counts will drop" warning: storage shrinks, readers see the same
-   data.
+   **08-03 run:** 17,496 parts → 686 across the six tables (96%), `_15m` alone
+   68,400,564 raw rows → 9,625,597.
+2. **`count() FINAL` should NOT fall**, because those duplicates were never
+   visible to readers. Storage shrinks, readers see the same data. **08-03 run:**
+   it rose slightly (`_15m` 9,405,741 → 9,417,194, `_1h` 82,335,897 → 82,342,912,
+   `_1M` unchanged) — the increase is new data arriving once the freeze lifted.
+   Treat _unchanged or higher_ as the pass condition; only a fall is a problem.
 3. **The six pending Phoenix deletes execute** (1,601 parts to rewrite in total).
-   This _is_ a real logical change: `phoenix` rows are removed from parts that
-   existed when the mutation was created on 07-17. Rows inserted **after** that
-   point are untouched by it — a `ALTER DELETE` only applies to parts existing at
-   creation time — so expect a partial, not total, phoenix reduction.
+   ⚠️ **Do NOT expect this to remove anything reader-visible.** An earlier version
+   of this runbook predicted "a partial phoenix reduction"; the 08-03 run measured
+   phoenix `delta = 0` against `_bak`, identical to the three sources the delete
+   never touched. `apply_mutations_on_fly` (default-on in modern ClickHouse) means
+   `SELECT`s had been applying the pending delete logically since 07-17, so
+   completing it physically is **storage work, not a data change**.
 
-Neither 1 nor 3 is data loss. But capture counts first (Step 0) so "the numbers
+None of 1–3 is data loss. But capture counts first (Step 0) so "the numbers
 moved" can be told apart from "the numbers moved _wrongly_".
 
 > ⚠️ **`count()` is a useless health probe during recovery.** RMT dedup makes it
@@ -309,25 +320,47 @@ already-pre-rolled row: that is precisely the [[0090]] history-loss incident.
 
 ## Step 5 — verify the data, not just the freshness
 
-```sql
--- Per-source 1h counts vs the step-0 baseline. sdex must be unchanged;
--- phoenix should DROP (the delete finally applied); soroswap unchanged.
-SELECT source, count() AS rows_1h FROM prices.price_ohlcv_1h
-GROUP BY source ORDER BY rows_1h DESC;
+> ⚠️ **Never compare per-source counts WITHOUT `FINAL` across this recovery.**
+> Collapsing the duplicate backlog reduces **raw** counts for _every_ source, so
+> a raw comparison cannot distinguish dedup from loss. An earlier version of this
+> step did exactly that and expected "sdex unchanged, phoenix drops"; the 08-03
+> run measured raw sdex −7.9%, aquarius −9.9%, soroswap −10.0%, phoenix −39.1%,
+> which reads as catastrophic loss on three untouched sources and would have
+> triggered a **false** "stop and restore from `_bak`". All four were in fact
+> byte-identical to the backup. Use the `FINAL` comparison below.
 
--- FINAL counts vs step 0 — these should be unchanged except for phoenix.
+```sql
+-- Live vs the pre-incident backup, per source, over a window that predates both
+-- the freeze and the mutation. THIS is the gate that discriminates loss from dedup.
+SELECT source, sum(l) AS live_rows, sum(b) AS bak_rows, sum(l) - sum(b) AS delta FROM (
+    SELECT source, count() AS l, 0 AS b FROM prices.price_ohlcv_1h FINAL
+      WHERE timestamp < '2026-07-17' GROUP BY source
+    UNION ALL
+    SELECT source, 0 AS l, count() AS b FROM prices.price_ohlcv_1h_bak FINAL
+      WHERE timestamp < '2026-07-17' GROUP BY source
+) GROUP BY source ORDER BY live_rows DESC;
+
+-- FINAL counts vs step 0. Expect unchanged-or-HIGHER (new data arriving),
+-- never lower.
 SELECT 'price_ohlcv_15m' AS t, count() AS rows_final FROM prices.price_ohlcv_15m FINAL
 UNION ALL SELECT 'price_ohlcv_1h', count() FROM prices.price_ohlcv_1h FINAL
 UNION ALL SELECT 'price_ohlcv_1M', count() FROM prices.price_ohlcv_1M FINAL;
 
 -- Deep history intact — compare against the backup that predates all of this.
-SELECT count() AS live FROM prices.price_ohlcv_1d FINAL WHERE timestamp < '2025-06-01';
-SELECT count() AS backup FROM prices.price_ohlcv_1d_bak FINAL WHERE timestamp < '2025-06-01';
+SELECT 'live' AS src, count() AS rows FROM prices.price_ohlcv_1d FINAL WHERE timestamp < '2025-06-01'
+UNION ALL
+SELECT 'backup', count() FROM prices.price_ohlcv_1d_bak FINAL WHERE timestamp < '2025-06-01';
 ```
 
-**Gate:** deep history matches the backup, and every per-source delta is
-explainable by the Phoenix delete or RMT dedup. An unexplained drop means stop
+**Gate:** every per-source `delta = 0`, deep history matches the backup, and the
+`FINAL` counts are unchanged or higher. A non-zero delta on any source means stop
 and restore from `_bak`.
+
+> **Do not expect the Phoenix delete to reduce anything.** On the 08-03 run
+> phoenix came back `delta = 0` like the rest. `apply_mutations_on_fly` (default-on)
+> means `SELECT`s had been applying the pending delete logically since 07-17, so
+> completing it physically changed no reader-visible row. Budget for the mutation
+> as _storage_ work, not a data change.
 
 Then re-check the [[0072]] column this incident blocked:
 
