@@ -542,6 +542,16 @@ satisfied: cleanup is off, and the `_bak` tables are intact ([[0105]] has not ru
 
 1. **Confirm `_1w` / `_1M` advance after 00:00** tonight. That completes the
    watch period and unblocks [[0105]].
+
+   > **2026-08-04 — half done.** `_1w` reached `2026-08-03` ✅. `_1M` stayed at
+   > `2026-07-01` ❌ — but **not** a re-freeze: `mv_ohlcv_1w_to_1M` ran cleanly
+   > at 00:00 (status `Scheduled`, empty exception) and simply read `_1w` before
+   > `mv_ohlcv_1d_to_1w` had written the `08-03` week row. Both are
+   > `REFRESH EVERY 1 DAY` with no `DEPENDS ON`, so they race. Spawned as
+   > [[0143]]. The data is present (`_1w` yields an `2026-08-01` bucket of
+   > 11,506 rows), so `_1M` should reach `2026-08-01` at the `2026-08-05
+   > 00:00:00` refresh. **Re-run the verdict query then — [[0105]] stays blocked
+   > until it does.**
 2. **The 07-21 → 08-03 gap pre-roll** — now unblocked. `_1d` jumping straight
    from 07-21 to 08-03 is the hole made visible. **BOUNDED INCREMENTAL only —
    never `preroll.sql`**, which expects TRUNCATE-d tables and would re-run the

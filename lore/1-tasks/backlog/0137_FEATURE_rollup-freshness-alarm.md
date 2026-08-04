@@ -4,7 +4,7 @@ title: "Rollup freshness alarm — a starved rollup MV reports success and nothi
 type: FEATURE
 status: backlog
 related_adr: []
-related_tasks: ["0136", "0104", "0109", "0056"]
+related_tasks: ["0136", "0104", "0109", "0056", "0143"]
 tags:
   [
     "priority-high",
