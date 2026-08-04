@@ -2,7 +2,7 @@
 id: "0075"
 title: "Update DB schema overview for newer prices.* tables (unresolved_pools, discovery_state, backfill_progress columns)"
 type: DOCS
-status: active
+status: completed
 related_adr: []
 related_tasks: ["0053", "0054", "0073"]
 tags: ["phase-future", "effort-small", "priority-medium", "docs"]
@@ -24,6 +24,17 @@ history:
       Promoted from backlog. Blocking deps are all archived (0053, 0054, 0073),
       so backfill_progress has its final shape and the doc can be brought up to
       date against it.
+  - date: 2026-08-04
+    status: completed
+    who: akot
+    note: >
+      All 3 acceptance criteria met. docs/database-schema/database-schema-overview.md
+      +328/-20: six new sections (§3.7-§3.12) plus a §3.5 refresh, taking the
+      overview from 6 of 13 prices.* tables documented to all 13. §5, §13, §2 and
+      Appendix A extended to match; §3.0 scoped explicitly to the core price path.
+      Four tables beyond the task's original list turned out to be undocumented
+      too (asset_metadata, asset_supply, backfill_sdex_ledgers, ingest_cursor) -
+      AC 3 could not be met without them. No follow-up tasks spawned.
 ---
 
 # Update DB schema overview for newer prices.* tables
