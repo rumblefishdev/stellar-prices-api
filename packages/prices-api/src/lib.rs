@@ -24,6 +24,7 @@ use std::sync::Arc;
 
 use axum::Router;
 use axum::http::header::CONTENT_TYPE;
+use axum::response::IntoResponse;
 use axum::routing::get;
 
 pub use config::AppConfig;
@@ -46,17 +47,22 @@ pub fn app(config: &AppConfig, state: AppState) -> Router {
         .with_state(state)
         .split_for_parts();
 
-    if let Some(base) = &config.base_url {
-        spec.servers = Some(vec![utoipa::openapi::Server::new(base)]);
-    }
+    openapi::stamp_servers(&mut spec, config);
 
     // Serialize once at startup; serve the cached string (no per-request work).
+    // `DEPLOY_STATIC` (1h) mirrors the gateway stage-cache TTL for this route —
+    // the document only changes when a new build ships (task 0124).
     let spec_json = Arc::new(spec.to_json().unwrap_or_else(|_| "{}".to_string()));
     let router = router.route(
         "/api-docs-json",
         get(move || {
             let spec_json = spec_json.clone();
-            async move { ([(CONTENT_TYPE, "application/json")], (*spec_json).clone()) }
+            async move {
+                let mut resp =
+                    ([(CONTENT_TYPE, "application/json")], (*spec_json).clone()).into_response();
+                common::cache_control::attach(&mut resp, common::cache_control::DEPLOY_STATIC);
+                resp
+            }
         }),
     );
 

@@ -48,7 +48,23 @@ cargo lambda build -p prices-api --release --arm64 --features lambda
 |-----|---------|
 | `CH_ENABLED` | build the mTLS CH client at cold start (default true; `0`/`false` to skip) |
 | `MTLS_SECRET_NAME`, `CH_DOMAIN` | mTLS bundle + endpoint (read by `prices-clickhouse::mtls`) |
-| `API_BASE_URL` | OpenAPI `servers` URL (Phase 1) |
+| `API_BASE_URL` | OpenAPI `servers` URL. Set by `ComputeStack` from `apiBaseUrl` in `infra/envs/production.json`; MUST include the stage path (`…/production`) |
+
+## OpenAPI
+
+The spec is generated from the axum routes by `utoipa`, so it cannot drift from
+the implementation. It is served at `GET /api-docs-json` — **anonymous**, both
+at the API Gateway (`apiKeyRequired: false`) and in the in-app key gate
+(`auth::is_exempt`) — and cached for an hour.
+
+```bash
+npm run openapi:extract   # → target/openapi.json (servers stamped from config)
+npm run openapi:lint      # extract + Redocly recommended ruleset; runs in CI
+```
+
+`tests/openapi.rs` asserts the document's contract: route coverage against the
+gateway in both directions, the `x-api-key` scheme, the anonymous opt-outs, and
+the `servers` stamp.
 
 ## Cache-Control / TTL decisions
 

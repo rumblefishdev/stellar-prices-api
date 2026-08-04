@@ -27,6 +27,13 @@ jobs:
               - 'Cargo.toml'
               - 'Cargo.lock'
               - '.github/workflows/ci.yml'
+              # The OpenAPI lint gate (task 0124) runs in the rust job — the
+              # document is produced by a cargo bin, so only that job can
+              # extract it. Its config lives at the repo root.
+              - 'redocly.yaml'
+              - '.redocly.lint-ignore.yaml'
+              # The `servers` URL the linted document is stamped with.
+              - 'infra/envs/production.json'
               # The Lambda asset guards are implemented here. Without this,
               # a PR touching only the guard scripts runs no job at all and
               # the thing both jobs depend on is the one file CI never
@@ -199,6 +206,17 @@ jobs:
           cache: npm
 
       - run: npm ci
+
+      # The OpenAPI document is a public promise about the deployed API (task
+      # 0124): it is served at `GET /api-docs-json` and is what partner clients
+      # are generated from. Lint the extracted document — the same bytes the
+      # handler serves — so a malformed or under-described spec fails here
+      # rather than in a consumer's generator.
+      #
+      # Lives in this job because extraction runs a cargo bin; the node setup
+      # below is already here for the synth step, so this costs one npx call.
+      - name: Lint OpenAPI document
+        run: npm run openapi:lint
 
       - name: Synth production app
         run: make -C infra synth-production

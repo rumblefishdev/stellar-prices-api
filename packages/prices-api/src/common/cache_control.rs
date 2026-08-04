@@ -15,6 +15,9 @@ pub const SHORT: HeaderValue = HeaderValue::from_static("public, max-age=10");
 pub const MEDIUM: HeaderValue = HeaderValue::from_static("public, max-age=60");
 /// 300s — slow-moving data.
 pub const LONG: HeaderValue = HeaderValue::from_static("public, max-age=300");
+/// 3600s — documents that are static for the life of a deployment and change
+/// only when a new build ships (the OpenAPI spec, task 0124).
+pub const DEPLOY_STATIC: HeaderValue = HeaderValue::from_static("public, max-age=3600");
 /// Never store — error responses.
 pub const NO_STORE: HeaderValue = HeaderValue::from_static("no-store");
 

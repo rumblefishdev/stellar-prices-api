@@ -29,6 +29,9 @@ struct Health {
     get,
     path = "/health",
     tag = "ops",
+    // Opts out of the global `x-api-key` requirement — /health is a keyless
+    // API Gateway mock and is exempt from the in-app gate (task 0124).
+    security(()),
     responses((status = 200, description = "Service is healthy"))
 )]
 pub async fn health() -> Response {

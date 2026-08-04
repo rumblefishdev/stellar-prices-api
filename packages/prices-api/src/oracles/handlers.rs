@@ -5,6 +5,7 @@ use axum::extract::{Path, State};
 use axum::response::{IntoResponse, Response};
 
 use crate::assets::queries_ch as assets_q;
+use crate::common::errors::ErrorEnvelope;
 use crate::common::{cache_control, errors};
 use crate::identity::AssetIdentifier;
 use crate::oracles::dto::OraclesResponse;
@@ -25,8 +26,10 @@ use crate::state::AppState;
     ),
     responses(
         (status = 200, description = "Oracle readings", body = OraclesResponse),
-        (status = 400, description = "Invalid asset identifier"),
-        (status = 404, description = "Unknown asset"),
+        (status = 400, description = "Invalid asset identifier", body = ErrorEnvelope),
+        (status = 401, description = "Missing or invalid `x-api-key`", body = ErrorEnvelope),
+        (status = 403, description = "Rejected by the API Gateway usage plan"),
+        (status = 404, description = "Unknown asset", body = ErrorEnvelope),
     )
 )]
 pub async fn get_oracles(State(state): State<AppState>, Path(raw): Path<String>) -> Response {

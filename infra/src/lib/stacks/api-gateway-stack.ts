@@ -25,7 +25,7 @@ export interface ApiGatewayStackProps extends cdk.StackProps {
  * `packages/prices-api/src/common/cache_control.rs` (the gateway stage cache and
  * the client/CDN max-age must agree, or one serves staler data than the other).
  * Mapping: SHORT=10s → price; MEDIUM=60s → assetsList / assetDetail / ohlcv /
- * oracles / backfill.
+ * oracles / backfill; DEPLOY_STATIC=3600s → apiDocs.
  */
 const CACHE_TTL = {
   assetsList: cdk.Duration.seconds(60), // MEDIUM
@@ -34,6 +34,10 @@ const CACHE_TTL = {
   ohlcv: cdk.Duration.seconds(60), // MEDIUM
   oracles: cdk.Duration.seconds(60), // MEDIUM
   backfill: cdk.Duration.seconds(60), // MEDIUM
+  // The spec is byte-identical for the life of a deployment, so the longest
+  // TTL API Gateway allows is free and keeps the document off the Lambda
+  // entirely (task 0124).
+  apiDocs: cdk.Duration.seconds(3600), // DEPLOY_STATIC
 } as const;
 
 /** 0.5 GB stage cache (overview §2.1). */
@@ -50,7 +54,9 @@ const CACHE_CLUSTER_SIZE = '0.5';
  *
  * - **Auth / rate limit**: data routes set `apiKeyRequired: true`; the UsagePlan
  *   enforces the §2.1/§7 per-key 100 req/s (`apiKeyRateLimit`) + a daily quota.
- *   `GET /health` stays a keyless mock (cheapest liveness probe).
+ *   `GET /health` stays a keyless mock (cheapest liveness probe), and
+ *   `GET /api-docs-json` is a keyless proxy to the handler (task 0124 — public
+ *   documentation).
  * - **Response cache**: 0.5 GB stage cache with per-endpoint TTLs (`CACHE_TTL`);
  *   each cached method declares its query params as cache keys.
  *
@@ -130,6 +136,23 @@ export class ApiGatewayStack extends cdk.Stack {
         apiKeyRequired: true,
         requestParameters: declare(cacheKeys),
       });
+
+    // ---------------------------------------------------------------
+    // GET /api-docs-json — the OpenAPI spec, anonymous (task 0124).
+    // ---------------------------------------------------------------
+    // Proxies to the same axum handler as the data routes (one integration
+    // mechanism, one source of truth) rather than serving a second, separately
+    // maintained copy of the document.
+    //
+    // Keyless on purpose: an API description is public documentation, and
+    // gating it behind a key the reader does not have yet is a self-service
+    // dead end. `/health` already establishes the anonymous-route precedent.
+    // The in-app gate exempts this path too (`auth::is_exempt`), so the posture
+    // holds even when `API_KEYS` is armed. Safe to cache for everyone because
+    // the document contains nothing key-specific.
+    this.api.root.addResource('api-docs-json').addMethod('GET', proxy([]), {
+      apiKeyRequired: false,
+    });
 
     const PATH_ID = 'method.request.path.asset_identifier';
     const qs = (name: string) => `method.request.querystring.${name}`;
@@ -228,6 +251,12 @@ export class ApiGatewayStack extends cdk.Stack {
           httpMethod: 'GET',
           cachingEnabled: true,
           cacheTtlInSeconds: CACHE_TTL.backfill.toSeconds(),
+        },
+        {
+          resourcePath: '/api-docs-json',
+          httpMethod: 'GET',
+          cachingEnabled: true,
+          cacheTtlInSeconds: CACHE_TTL.apiDocs.toSeconds(),
         },
         // Explicitly uncached:
         {

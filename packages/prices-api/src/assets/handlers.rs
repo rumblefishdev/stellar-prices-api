@@ -11,6 +11,7 @@ use crate::assets::dto::{
 use crate::assets::queries_ch::{
     self, BaseCurrency, Granularity, ListArgs, OhlcvArgs, Order, SortCol, Timeframe, TypeFilter,
 };
+use crate::common::errors::ErrorEnvelope;
 use crate::common::{cache_control, cursor, errors};
 use crate::identity::AssetIdentifier;
 use crate::state::AppState;
@@ -38,8 +39,10 @@ const MAX_LIMIT: u32 = 200;
     ),
     responses(
         (status = 200, description = "Current price", body = PriceResponse),
-        (status = 400, description = "Invalid asset identifier"),
-        (status = 404, description = "No current price for the asset"),
+        (status = 400, description = "Invalid asset identifier", body = ErrorEnvelope),
+        (status = 401, description = "Missing or invalid `x-api-key`", body = ErrorEnvelope),
+        (status = 403, description = "Rejected by the API Gateway usage plan"),
+        (status = 404, description = "No current price for the asset", body = ErrorEnvelope),
     )
 )]
 pub async fn get_price(State(state): State<AppState>, Path(raw): Path<String>) -> Response {
@@ -71,8 +74,10 @@ pub async fn get_price(State(state): State<AppState>, Path(raw): Path<String>) -
     ),
     responses(
         (status = 200, description = "Asset detail", body = AssetDetail),
-        (status = 400, description = "Invalid asset identifier"),
-        (status = 404, description = "Unknown asset"),
+        (status = 400, description = "Invalid asset identifier", body = ErrorEnvelope),
+        (status = 401, description = "Missing or invalid `x-api-key`", body = ErrorEnvelope),
+        (status = 403, description = "Rejected by the API Gateway usage plan"),
+        (status = 404, description = "Unknown asset", body = ErrorEnvelope),
     )
 )]
 pub async fn get_asset(State(state): State<AppState>, Path(raw): Path<String>) -> Response {
@@ -136,7 +141,9 @@ pub struct ListParams {
     ),
     responses(
         (status = 200, description = "Asset list page", body = AssetListResponse),
-        (status = 400, description = "Invalid query parameter"),
+        (status = 400, description = "Invalid query parameter", body = ErrorEnvelope),
+        (status = 401, description = "Missing or invalid `x-api-key`", body = ErrorEnvelope),
+        (status = 403, description = "Rejected by the API Gateway usage plan"),
     )
 )]
 pub async fn get_assets(State(state): State<AppState>, Query(p): Query<ListParams>) -> Response {
@@ -248,8 +255,12 @@ pub struct OhlcvParams {
     ),
     responses(
         (status = 200, description = "Candlestick series", body = OhlcvResponse),
-        (status = 400, description = "Invalid parameter"),
-        (status = 404, description = "Unknown asset"),
+        (status = 400, description = "Invalid parameter", body = ErrorEnvelope),
+        (status = 401, description = "Missing or invalid `x-api-key`", body = ErrorEnvelope),
+        (status = 403, description = "Rejected by the API Gateway usage plan"),
+        (status = 404, description = "Unknown asset", body = ErrorEnvelope),
+        (status = 503, description = "The requested `base_currency` quote asset is not \
+                                      tracked (`quote_unavailable`)", body = ErrorEnvelope),
     )
 )]
 pub async fn get_ohlcv(

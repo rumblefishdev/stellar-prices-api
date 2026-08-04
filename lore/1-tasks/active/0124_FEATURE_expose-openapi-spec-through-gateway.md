@@ -84,21 +84,154 @@ unauthenticated route exists. Record the choice either way.
 
 ## Acceptance Criteria
 
-- [ ] `GET <base>/api-docs-json` (or the agreed public path) returns the spec
-      from the deployed production API
-- [ ] Auth posture decided, applied, and recorded
-- [ ] Document is valid OpenAPI 3.0 and passes a linter cleanly
-- [ ] `servers` resolves to a URL that actually serves the API, stage path
-      included — verified by fetching a route from it
-- [ ] Route coverage matches the deployed router exactly, both directions
-- [ ] Security scheme (`x-api-key`) declared for the key-gated routes
-- [ ] Response cached with a TTL appropriate to a per-deployment-static document
-- [ ] Path recorded in `docs/scf/` so [[0128]] can cite it
+- [x] `GET <base>/api-docs-json` (or the agreed public path) returns the spec
+      from the deployed production API — **route implemented and synth-verified;
+      the live fetch needs a deploy** (see Verification below)
+- [x] Auth posture decided, applied, and recorded — anonymous
+- [x] Document is valid OpenAPI (3.1.0, not 3.0 — see Design Decisions) and
+      passes Redocly's recommended ruleset with 0 errors / 0 warnings
+- [x] `servers` resolves to a URL that actually serves the API, stage path
+      included — stamped from config, invariant enforced at synth; the fetch
+      needs a deploy
+- [x] Route coverage matches the deployed router exactly, both directions
+- [x] Security scheme (`x-api-key`) declared for the key-gated routes
+- [x] Response cached with a TTL appropriate to a per-deployment-static document
+      — 3600 s, gateway + handler agreeing
+- [x] Path recorded in `docs/scf/` so [[0128]] can cite it —
+      `docs/scf/api-endpoints.md`
+
+## Implementation Notes
+
+**Rust (`packages/prices-api`)**
+
+- `openapi/mod.rs` — `SecurityAddon` declares the `x-api-key` scheme; a
+  document-wide `security(("api_key" = []))` requirement makes key-gating the
+  default; `/health` and `/api-docs-json` opt out with `security(())`, mirroring
+  the two exemptions already in `auth::is_exempt`. Added a documentation-only
+  `#[utoipa::path]` stub for `/api-docs-json` (the real route is wired after
+  `split_for_parts()`, since it serves the document that split produces) so the
+  route list is complete. New `stamp_servers()` shared by `app()` and the
+  extract bin.
+- `common/errors.rs` — `ErrorEnvelope` is now `ToSchema` and is the documented
+  body of every 4xx/5xx. Seven key-gated operations gained `401`/`403`; the
+  ohlcv route gained its real `503 quote_unavailable`.
+- `lib.rs` — the spec response carries `Cache-Control: public, max-age=3600`
+  (new `cache_control::DEPLOY_STATIC` tier).
+- `bin/extract_openapi.rs` — reads `AppConfig::from_env()` and stamps `servers`,
+  so the linted document is the served document rather than a variant of it.
+- `tests/openapi.rs` — 7 new tests (route coverage both ways, security scheme,
+  per-route auth posture, `servers` stamp incl. stage path, reachable with the
+  gate armed, cache header, OpenAPI 3.x).
+
+**Infra**
+
+- `api-gateway-stack.ts` — `GET /api-docs-json` as a keyless Lambda proxy
+  (`apiKeyRequired: false`), 3600 s stage-cache TTL via `CACHE_TTL.apiDocs`.
+- `types.ts` / `envs/production.json` / `compute-stack.ts` — new `apiBaseUrl`
+  config → `API_BASE_URL` on the api-handler, validated at synth (https, no
+  trailing slash, stage path present for execute-api hosts).
+
+**Lint gate**
+
+- `redocly.yaml`, `.redocly.lint-ignore.yaml`, `tools/scripts/extract-openapi.sh`,
+  `npm run openapi:{extract,lint}`, and a CI step in the `rust` job (the only
+  job with both cargo and node).
+
+## Verification
+
+- `cargo test --workspace` — 223 passed, 0 failed
+- `cargo fmt --check`, `cargo clippy -p prices-api --all-targets` — clean
+- `npm run openapi:lint` — "Your API description is valid", 0 errors, 0 warnings
+- `cdk synth Prices-production-ApiGateway` — `/api-docs-json` resource present,
+  `ApiKeyRequired: false`, `CacheTtlInSeconds: 3600`; the 9 mapped routes match
+  the 9 documented paths exactly
+- `cdk synth Prices-production-Compute` — `API_BASE_URL` on the api-handler
+
+**Not verified — needs a deploy.** Two ACs are about the *deployed* API: the
+live `GET …/production/api-docs-json` fetch and confirming the advertised
+`servers` URL serves a route. Both are one `make -C infra deploy-production`
+away, and `docs/scf/api-endpoints.md` carries the curl to confirm.
+
+## Design Decisions
+
+### From Plan
+
+1. **Anonymous.** As the task recommended. An API description is public
+   documentation; gating it behind a key the reader does not yet have is a
+   self-service dead end, and `/health` already established the anonymous-route
+   precedent (`api-gateway-stack.ts`). Applied at both layers — the gateway
+   (`apiKeyRequired: false`) and the in-app gate, which already exempted the
+   path. Safe to cache for all callers because the document holds nothing
+   key-specific.
+
+2. **Existing proxy integration, not a second mechanism.** The route proxies to
+   the same axum handler as the data routes, so there is one place the document
+   comes from.
+
+3. **3600 s TTL**, gateway and handler agreeing, per the `CACHE_TTL` /
+   `cache_control.rs` single-source-of-truth rule.
+
+### Emerged
+
+4. **The document is OpenAPI 3.1.0, not 3.0.** utoipa 5 has no 3.0 emit mode
+   (`OpenApiVersion` has exactly one variant). Reaching 3.0 would mean
+   downgrading utoipa or post-processing the document — both worse than the
+   deviation. 3.1 is a valid major release and reads natively in modern tooling
+   including Swagger UI 4+, which Tranche 3 will use. The AC wording was taken
+   as "valid OpenAPI, lints clean".
+
+5. **`apiBaseUrl` is configured, not derived.** ComputeStack owns the Lambda's
+   environment but ApiGatewayStack owns the URL, and Compute is already a
+   *dependency* of ApiGateway — reading `api.url` in Compute closes a cycle and
+   fails synth. SSM would work but breaks on a first-ever deploy (Compute runs
+   before Gateway, so the parameter does not exist yet). One config value, with
+   synth-time validation for the stage-prefix trap, is the honest option. Task
+   [[0126]] changes exactly this one value.
+
+6. **The linter found real gaps, so the fix widened.** Redocly's recommended
+   ruleset flagged an empty `servers` (only because `extract_openapi` did not
+   stamp it — fixed by sharing `stamp_servers`), and seven key-gated operations
+   documenting no `401`/`403` at all. Documenting them meant making
+   `ErrorEnvelope` a published schema. All of this is inside "passes a linter
+   cleanly", but it is more than a route mapping.
+
+7. **`operation-4xx-response` kept on, with two path exceptions.** `/health` and
+   `/api-docs-json` genuinely have no 4xx. Weakening the rule globally would
+   have thrown away the check that caught #6, so the two paths are excepted in
+   `.redocly.lint-ignore.yaml` with a note to delete the entry if either route
+   ever gains an error path.
+
+8. **`info.license` left empty; spawned [[0144]].** utoipa emits `{"name": ""}`
+   from an unset `CARGO_PKG_LICENSE`. The repo has no `LICENSE` file and no
+   Cargo `license` field; the only "MIT" is in a `private: true` root
+   `package.json` and reads as generator boilerplate. Declaring a license in a
+   public API document on that basis would be inventing a legal position, so the
+   rule is off with a pointer to the follow-up. **Adam: this one needs your
+   call.**
+
+9. **`servers` stamping moved into a shared helper** so the CI-linted document
+   and the served document cannot disagree. Previously `extract_openapi` emitted
+   a `servers`-less variant — linting that would have blessed a document no
+   reader ever receives.
+
+10. **`docs/scf/api-endpoints.md` is a new running record**, not a line appended
+    to `milestone-1-evidence.md`. M1 is submitted; its Table 4 correctly
+    describes the state at submission time and rewriting it would falsify the
+    record. [[0128]] cites the new file.
+
+## Future Work
+
+- [[0144]] — decide and declare the API license (spawned).
+- [[0126]] — when the custom domain lands, `apiBaseUrl` and the base URL in
+  `docs/scf/api-endpoints.md` change together.
+- Spec-diff check in CI (fail a PR that changes the published surface without
+  saying so) — `extract_openapi` makes it cheap, but it is not this task.
 
 ## Notes
 
 - The `extract_openapi` binary stays useful for CI (spec-diff checks, client
   generation); this task adds a runtime surface, it does not replace the binary.
+  It now also feeds the lint gate.
 - Tranche 3 AC 2 requires *"OpenAPI spec passes `openapi-validator` lint with no
   errors; Swagger UI deployed"*. Doing the lint half now is cheap and de-risks
-  M3 — hence its inclusion above.
+  M3 — hence its inclusion above. Done, with Redocly as the linter.

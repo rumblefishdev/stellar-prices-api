@@ -15,6 +15,7 @@ The structure mirrors the sibling Soroban Block Explorer repository's
 | `milestone-1-evidence.md`             | Full evidence companion to the M1 submission video — **source of truth**.                                   |
 | `milestone-1-evidence.pdf`            | PDF render of the above, attached in Google Drive next to the video. **Build output.**                      |
 | `milestone-1-video-scenario.md`       | Scene-by-scene recording script for the 5–7 minute demo video.                                              |
+| `api-endpoints.md`                    | Live API surface: every mapped route, its auth posture, and its cache TTL. Kept current as M2 lands.        |
 | `ch-demo-queries.sql`                 | Read-only ClickHouse queries the operator runs against production; outputs feed both the video and the PDF. |
 | `architecture.mmd`                    | Mermaid source for the architecture diagram.                                                                |
 | `architecture.png`                    | Rendered diagram, embedded in the evidence PDF. **Build output.**                                           |

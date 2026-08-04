@@ -9,6 +9,7 @@ use axum::response::{IntoResponse, Response};
 use crate::assets::dto::PriceResponse;
 use crate::assets::queries_ch;
 use crate::batch::dto::{BatchRequest, BatchResponse, MAX_BATCH};
+use crate::common::errors::ErrorEnvelope;
 use crate::common::{cache_control, errors};
 use crate::identity::AssetIdentifier;
 use crate::state::AppState;
@@ -25,7 +26,10 @@ use crate::state::AppState;
     request_body = BatchRequest,
     responses(
         (status = 200, description = "Current prices + not-found list", body = BatchResponse),
-        (status = 400, description = "Empty/oversized batch or invalid identifier"),
+        (status = 400, description = "Empty/oversized batch or invalid identifier",
+         body = ErrorEnvelope),
+        (status = 401, description = "Missing or invalid `x-api-key`", body = ErrorEnvelope),
+        (status = 403, description = "Rejected by the API Gateway usage plan"),
     )
 )]
 pub async fn post_batch(State(state): State<AppState>, Json(req): Json<BatchRequest>) -> Response {

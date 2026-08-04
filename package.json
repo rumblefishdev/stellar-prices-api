@@ -14,6 +14,8 @@
     "verify:staged": "node tools/scripts/run-affected-checks.mjs staged",
     "verify:push": "node tools/scripts/run-affected-checks.mjs push",
     "board": "node tools/scripts/generate-lore-board.mjs",
+    "openapi:extract": "tools/scripts/extract-openapi.sh",
+    "openapi:lint": "npm run openapi:extract && redocly lint target/openapi.json",
     "infra:bootstrap": "make -C infra bootstrap",
     "infra:synth:cicd": "make -C infra synth-cicd",
     "infra:diff:cicd": "make -C infra diff-cicd",
@@ -23,13 +25,13 @@
     "infra:deploy:production": "make -C infra deploy-production"
   },
   "private": true,
-  "dependencies": {},
   "devDependencies": {
     "@eslint/js": "^9.8.0",
     "@nx/eslint": "22.7.0",
     "@nx/eslint-plugin": "22.7.0",
     "@nx/js": "22.7.0",
     "@nx/vitest": "22.7.0",
+    "@redocly/cli": "2.44.0",
     "@swc-node/register": "1.11.1",
     "@swc/core": "1.15.8",
     "@swc/helpers": "0.5.18",
