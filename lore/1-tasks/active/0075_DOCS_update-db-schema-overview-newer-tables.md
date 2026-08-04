@@ -2,7 +2,7 @@
 id: "0075"
 title: "Update DB schema overview for newer prices.* tables (unresolved_pools, discovery_state, backfill_progress columns)"
 type: DOCS
-status: backlog
+status: active
 related_adr: []
 related_tasks: ["0053", "0054", "0073"]
 tags: ["phase-future", "effort-small", "priority-medium", "docs"]
@@ -17,6 +17,13 @@ history:
       general DB schema overview, noticed several newer prices.* tables are
       missing or stale there. Do this once 0053 lands so the doc reflects the
       final schema.
+  - date: 2026-08-04
+    status: active
+    who: akot
+    note: >
+      Promoted from backlog. Blocking deps are all archived (0053, 0054, 0073),
+      so backfill_progress has its final shape and the doc can be brought up to
+      date against it.
 ---
 
 # Update DB schema overview for newer prices.* tables
