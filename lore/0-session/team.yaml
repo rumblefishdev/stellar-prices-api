@@ -2,3 +2,8 @@ okarcz:
   name: 'Oskar Karcz'
   role: 'Developer'
   focus: 'Stellar prices API'
+
+akot:
+  name: 'Adam Kot'
+  role: 'Developer'
+  focus: 'Stellar prices API'
