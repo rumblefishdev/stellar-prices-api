@@ -57,8 +57,61 @@ shape.
 
 ## Acceptance Criteria
 
-- [ ] `unresolved_pools` and `discovery_state` each have a §3.x DDL + role
-      section and a §5 sort-key row.
-- [ ] §3.5 `backfill_progress` DDL includes `earliest_data_available` +
-      `newest_data_available` with a one-line semantics note.
-- [ ] No remaining `prices.*` table in `init.sql` is absent from the overview.
+- [x] `unresolved_pools` and `discovery_state` each have a §3.x DDL + role
+      section and a §5 sort-key row. — §3.7 and §3.8.
+- [x] §3.5 `backfill_progress` DDL includes `earliest_data_available` +
+      `newest_data_available` with a one-line semantics note. — DDL plus a
+      "Covered time-window" subsection contrasting the pair with the
+      ledger-directional `current_ledger`.
+- [x] No remaining `prices.*` table in `init.sql` is absent from the overview.
+      — the four beyond the task's original list are covered too: §3.9
+      `asset_metadata`, §3.10 `asset_supply`, §3.11 `backfill_sdex_ledgers`,
+      §3.12 `ingest_cursor`.
+
+## Implementation Notes
+
+`docs/database-schema/database-schema-overview.md`, +328/−20.
+
+- **New sections §3.7–§3.12** — six tables, each DDL + role. Sourced from
+  `packages/prices-clickhouse/schema/init.sql` (the source of truth), not from
+  memory of the design docs.
+- **§3.5 refresh** — the two columns plus the covered-time-window semantics:
+  written by the backfill as it lands candles, read O(1), never a live
+  `MIN`/`MAX` (timestamp is not the leading sort key → full scan).
+- **§5 sort keys, §13 at-a-glance, §2 engine summary** — extended for all six
+  new tables. §13 also gained the `pool_registry` row it was missing.
+- **Appendix A** — added all seven missing entities so the "every `prices.*`
+  table, every column" claim in its preamble is true again; noted the two
+  non-timestamp version columns and the composite `unresolved_pools` key.
+- **§3.0** — added the two new `backfill_progress` columns and an explicit
+  scope note that the diagram is core-path-only (Appendix A is the exhaustive
+  one). Left the side tables out of it deliberately: adding seven entities
+  would cost the price path its legibility.
+
+## Design Decisions
+
+### Emerged
+
+1. **Documented all seven missing tables, not just the two named.** AC #3 ("no
+   remaining `prices.*` table absent") could not be met by covering only
+   `unresolved_pools` + `discovery_state` — `asset_metadata`, `asset_supply`,
+   `backfill_sdex_ledgers`, and `ingest_cursor` were also undocumented. The doc
+   covered 6 of 13 tables; it now covers all 13.
+
+2. **§3.0 kept core-path-only; Appendix A made exhaustive.** The two ER diagrams
+   had drifted into overlapping roles. Split them explicitly by scope rather
+   than duplicating seven entities into both, and stated the split in-line so
+   the next editor knows which diagram to extend.
+
+3. **Section numbering appends rather than inserts.** `unresolved_pools` is
+   §3.7 (right after its §3.6 `pool_registry` companion) and the rest follow in
+   init.sql order. Inserting to group them thematically would have renumbered
+   §3.6 and broken inbound cross-references from other docs and task notes.
+
+## Issues Encountered
+
+- **Diagram rendering not machine-verified.** Mermaid is not a workspace
+  dependency, so the two edited `erDiagram` blocks were checked structurally
+  (fence balance, type-token stand-ins, attribute-line shape against the
+  existing entities in the same file) rather than rendered. Worth an eye on the
+  GitHub preview during review.
