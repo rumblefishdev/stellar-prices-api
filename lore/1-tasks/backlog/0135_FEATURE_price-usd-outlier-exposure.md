@@ -4,7 +4,7 @@ title: "Decide whether the headline price_usd should be outlier-protected like v
 type: FEATURE
 status: backlog
 related_adr: []
-related_tasks: ["0072", "0118", "0123"]
+related_tasks: ["0072", "0118", "0123", "0144"]
 tags: ["phase-future", "effort-medium", "priority-medium", "milestone-M2", "vwap", "clickhouse"]
 milestone: 2
 links: []
