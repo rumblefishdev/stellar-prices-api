@@ -1,12 +1,19 @@
 //! Response DTOs for `/v1/backfill/status`.
 //!
-//! NOTE: `earliest_data_available` is the earliest ledger available *to
-//! backfill* — the floor of the public ledger archive the backfill writers
-//! record — NOT the earliest candle ingested. The SDEX pre-Soroban tail is
-//! still backfilling toward it, so the ingested/queryable depth is shallower
-//! (query the coarse `price_ohlcv_1d` table for that). `realtime_tip_ledger` is
+//! NOTE: `earliest_data_available` is the timestamp of the **oldest OHLCV row
+//! this stream has actually landed** — the backfill writers merge it down from
+//! each partition's minimum candle `minute_start` (`sdex-backfill`'s
+//! `PartitionStats::earliest_minute` → `sink`'s monotonic `merge_min`), so it
+//! tracks ingested depth and moves as the pre-Soroban tail walks backward. It
+//! is NOT the floor of the public ledger archive. (An earlier revision of this
+//! note said the opposite; the writer, `schema/init.sql`, and the schema
+//! overview §3.5 all agree on the definition above.) `realtime_tip_ledger` is
 //! derived from the SDEX stream's `target_ledger` (best available proxy; there
 //! is no live chain-tip table in the prices schema).
+//!
+//! `newest_data_available` — the other end of the covered window — exists in
+//! `prices.backfill_progress` but is deliberately not surfaced here yet: it is
+//! neither selected in `queries_ch` nor carried on these DTOs.
 
 use serde::Serialize;
 use utoipa::ToSchema;
@@ -37,8 +44,8 @@ pub struct SdexStream {
     pub ledgers_remaining: u64,
     /// Most recent successful push (`null` until the first push).
     pub last_push_at: Option<String>,
-    /// Earliest ledger available *to backfill* (public-archive floor), NOT the
-    /// earliest ingested candle (see the module note). `null` if unrecorded.
+    /// Timestamp of the oldest OHLCV row this stream has landed (see the module
+    /// note). `null` until the stream lands its first candle.
     pub earliest_data_available: Option<String>,
 }
 
@@ -48,7 +55,7 @@ pub struct AmmStream {
     pub status: String,
     pub last_push_at: Option<String>,
     pub completed_at: Option<String>,
-    /// Earliest ledger available *to backfill* (public-archive floor); see the
-    /// module note. `null` if unrecorded.
+    /// Timestamp of the oldest OHLCV row this stream has landed; see the module
+    /// note. `null` until the stream lands its first candle.
     pub earliest_data_available: Option<String>,
 }

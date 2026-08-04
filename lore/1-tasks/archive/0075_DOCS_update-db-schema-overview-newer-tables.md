@@ -35,6 +35,30 @@ history:
       Four tables beyond the task's original list turned out to be undocumented
       too (asset_metadata, asset_supply, backfill_sdex_ledgers, ingest_cursor) -
       AC 3 could not be met without them. No follow-up tasks spawned.
+  - date: 2026-08-04
+    status: completed
+    who: okarcz
+    note: >
+      Code review on PR #164 found 10 inaccuracies, all in prose the new
+      sections had inherited from init.sql comments and older task files rather
+      than in the DDL blocks (those verified clean against init.sql). All 10
+      fixed on the branch and re-checked against the writers/readers. Two were
+      actively misleading for operators: unresolved_pools documented the live
+      Ledger Processor as a writer (it has no write path - a live unclassified
+      swap leaves no row, so an empty table reads as "live path healthy" when it
+      is not), and asset_supply documented missing supply as a NULL market cap
+      when the non-nullable Decimal yields 0. Also corrected the source domain
+      ('backfill'/'events-backfill', never 'live'), the /backfill/status and
+      backfill_note read paths, the pool_registry writer list (asset-discovery
+      is a third), the asset_metadata reader (the two /assets endpoints, no
+      view), an inverted ER cardinality, and the last gaps in Appendix A's
+      "every column" claim (assets.sac_address, the String-not-FixedString
+      types, price_ohlcv_1m.volume_quote/close_usd, deprecated home_domain).
+      One fix landed outside docs/: backfill/dto.rs's OpenAPI description of
+      earliest_data_available asserted the opposite of what the writer stores,
+      so the doc and the published API contract disagreed - corrected the DTO
+      text (doc comments only, no behaviour change) since the writer and
+      init.sql both back the doc's definition.
 ---
 
 # Update DB schema overview for newer prices.* tables

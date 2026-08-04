@@ -262,7 +262,7 @@ async fn backfill_status_maps_both_streams() {
     // remaining = target - current = 57234198 - 34891234
     assert_eq!(json["sdex"]["ledgers_remaining"], 22342964u64);
     assert_eq!(json["sdex"]["last_push_at"], "2026-06-15T11:30:00Z");
-    // earliest_data_available = archive floor available to backfill (AC 6)
+    // earliest_data_available = oldest OHLCV row this stream has landed (AC 6)
     assert_eq!(
         json["sdex"]["earliest_data_available"],
         "2015-11-18T03:47:00Z"
