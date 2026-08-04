@@ -1,5 +1,12 @@
 name: CI
 
+# TASK 0110 MEASUREMENT — BASELINE COMMIT (do not merge).
+# This comment exists only to trigger a `rust` job run on this branch, so the
+# baseline and the experiment share the same runner and cache conditions.
+# The next commit removes the Node/TS tail; the delta between the two job
+# totals is the real saving. Both commits get reverted before this branch
+# carries any actual change.
+
 on:
   push:
     branches:
