@@ -153,6 +153,34 @@ history:
       backfill's own output, plus 2026-07-01 onward from live; everything
       between is gone) and the mechanism of that loss is UNVERIFIED. See 0114
       for the mutation-vs-DropPart correction that follows from it.
+  - date: 2026-08-04
+    status: active
+    who: okarcz
+    note: >
+      PASS 1 COMPLETE (2026-07-27 21:24 UTC, 12.2 days, 746 partitions,
+      689,676,890 rows, 3.13 TB). And the loss mechanism flagged UNVERIFIED on
+      07-23 is now CONFIRMED from system.part_log: a daily ~03:00 UTC sweep
+      dropped every historical partition as fast as pass 1 wrote it - last
+      removals 07-18 03:08:39, 07-19 03:08:20, 07-20 03:08:30, then nothing.
+      The writes were real (201811 alone merged 393,886,653 rows; RemovePart
+      75,364 = NewPart 43,059 + MergeParts 32,305 exactly, i.e. every part ever
+      created was removed), so this was never a write-path failure. 201812
+      survives only because it was first written 2026-07-20 04:11:24, minutes
+      after that day's final sweep, and cleanup was disabled before the 07-21
+      one. CORRECTION - the 2018-12-13 boundary is therefore an artifact of the
+      incident, NOT a data-availability fact, and the 07-21 "durable data" row
+      that read it as a wipe line is superseded. CORRECTION 2 - the sweep used
+      DROP PARTITION, not ALTER DELETE: there are NO MutatePart events on
+      201603+, so the 0114-derived mutation-vs-DropPart note is wrong for this
+      incident and a system.mutations diagnostic would wrongly exonerate
+      cleanup. Pass 2 is UNBLOCKED (cleanup verified DISABLED via profile
+      soroban-admin, not the documented soroban-explorer) and recovers
+      3,738,473 candles. Also found - pass 1 never walked ledgers 64,000-
+      2,815,999 (43 partitions, ~0 trades, subsumed by pass 2's range); the
+      handoff runbook's §7.1 pre-roll gate is marker-based and currently prints
+      READY TO PRE-ROLL while four years of candles are missing; and the
+      pre-Soroban DELETE mutation would erase pass 2's whole output if re-run.
+      Full forensics in notes/S-presoroban-loss-chain-confirmed.md.
 ---
 
 # Execute + track the historical backfill run (SDEX + Soroban AMM)
@@ -198,9 +226,9 @@ meanwhile.
 | `[activation, 50687999]` | data + `pool_registry` landed; run fatal-exited on the 0087 router guard (fixed + merged, PR #92). |
 | `[50688000, 51007999]` | ✅ first clean forward chunk (2026-07-07) — 320k ledgers, SDEX 17.22M candles, AMM=0/oracle=0 (expected early epoch), 0 new unresolved. ~3.4 h, 59 GB. |
 | `[51008000, 63352611]` combined remainder | 🔴 **STALLED SINCE 2026-07-14 — and its status field lies.** `prices.backfill_progress` reads `task_name: soroban_amm, status: running, current_ledger: 63,352,611`, but `last_push_at` is **2026-07-14 17:54:24** (9 days stale as of 07-23) and **no process exists** — `pgrep -af "sdex-backfill.*soroban"` on fishuser-hero returns nothing, and only `sdex-tail` is in tmux. It stopped **122,864 ledgers short** of its 63,475,475 target, at the start of the [[0111]] enrichment-outage window. Nothing writes a terminal state on a crash, so `status` stayed `running`. Recovery is ~1 h of runtime. ⚠️ Re-run needs the **pool registry seeded first** (a mid-chain AMM backfill with no seed loses volume to `unresolved_pools`) and ranges kept disjoint from live ingestion. |
-| `[1, 50457423]` pre-Soroban SDEX tail — **pass 1** | ⏳ **RUNNING, HEALTHY** (fishuser-hero, tmux `sdex-tail`). **2026-07-23 16:00 UTC: frontier 35,839,999**, markers contiguous (35,839,997 over `3 → 35,839,999`, zero gaps), remaining **14,617,424**. Rate has eased to **~151k/hr** (25.4 min per 64k-ledger partition, measured from consecutive `indexing complete` lines) against a 165k/hr two-day average — the run is **download-bound and partitions are growing** (4.90 → 5.49 GB, sync 1483 → 1568 s while index time stays flat at ~940 s), so expect further easing. **Revised ETA 2026-07-27/28**, ~1 day later than the earlier estimate. *Prior reading:* **2026-07-21 13:35 UTC: floor 27,583,999** (was 23,423,999 at 07-20 14:15 → **4.16M ledgers in 23h20m = 178.3k/hr**, within 1% of the documented 177k). Markers contiguous: 27,583,997 over `3 → 27,583,999`, no gaps. Remaining 22.87M ledgers ≈ **5.3 days → ETA 2026-07-26/27**. ⚠️ The 54.7% marker figure OVERSTATES real progress — see the durable-data row below. (Liveness: `pgrep -af sdex-backfill` + partition # climbing in `~/sdex-tail.log` over ≥25 min; do NOT sample CH markers <22 min apart — download-bound cadence freezes them transiently.) |
-| `[1, 23423999]` pre-Soroban SDEX tail — **pass 2 (recovery)** | 🔜 **REQUIRED, not started** — re-walk of the span pass 1 lost to cleanup. ~5 days. **Blocked on pass 1 finishing** (don't interrupt a healthy run to restart at the bottom). Requires clearing `backfill_sdex_ledgers` markers first — see §Recovery plan. |
-| **durable pre-Soroban data (measured 2026-07-21)** | `price_ohlcv_1m` sdex pre-activation spans **`2018-12-13 06:55` → `2020-01-07 22:23`, 3,588,820 candles**. Years: 2015–2017 **absent** (wiped), 2018 partial (207,021 — cleanup drops whole partitions, so only post-fire Dec 2018 survived), 2019 full (3,331,951), 2020 partial (43,559 — the live write frontier), **2021–2023 absent because pass 1 has not reached them yet**. Only ~6.2M of the 27.58M marked ledgers have surviving candles. |
+| `[1, 50457423]` pre-Soroban SDEX tail — **pass 1** | ✅ **COMPLETE 2026-07-27 21:24 UTC** (12.2 days). 746 partitions, 47,641,424 ledgers indexed, 689,676,890 `price_ohlcv_1m` rows, 3.13 TB downloaded; process exited cleanly. Marker state: frontier **50,457,423** (= activation − 1), min 3, contiguous, zero gaps. ⚠️ **Its 2016 → 2018-12-13 output was destroyed by the nightly cleanup sweep and must be recovered by pass 2** — see [[S-presoroban-loss-chain-confirmed]]. ⚠️ Pass 1 also never walked ledgers **64,000 – 2,815,999** (43 partitions; ~0 trades there, and pass 2's range covers them). *Prior reading:* **2026-07-23 16:00 UTC: frontier 35,839,999**, markers contiguous (35,839,997 over `3 → 35,839,999`, zero gaps), remaining **14,617,424**. Rate has eased to **~151k/hr** (25.4 min per 64k-ledger partition, measured from consecutive `indexing complete` lines) against a 165k/hr two-day average — the run is **download-bound and partitions are growing** (4.90 → 5.49 GB, sync 1483 → 1568 s while index time stays flat at ~940 s), so expect further easing. **Revised ETA 2026-07-27/28**, ~1 day later than the earlier estimate. *Prior reading:* **2026-07-21 13:35 UTC: floor 27,583,999** (was 23,423,999 at 07-20 14:15 → **4.16M ledgers in 23h20m = 178.3k/hr**, within 1% of the documented 177k). Markers contiguous: 27,583,997 over `3 → 27,583,999`, no gaps. Remaining 22.87M ledgers ≈ **5.3 days → ETA 2026-07-26/27**. ⚠️ The 54.7% marker figure OVERSTATES real progress — see the durable-data row below. (Liveness: `pgrep -af sdex-backfill` + partition # climbing in `~/sdex-tail.log` over ≥25 min; do NOT sample CH markers <22 min apart — download-bound cadence freezes them transiently.) |
+| `[1, 23423999]` pre-Soroban SDEX tail — **pass 2 (recovery)** | 🟢 **REQUIRED and now UNBLOCKED** (2026-08-04). Pass 1 is done and `prices-production-cleanup` verified `DISABLED`, so the cause of the loss is inert. ~5 days. Recovers **3,738,473 candles**. ⚠️ **Clear `backfill_sdex_ledgers` markers first** (§Recovery plan step 2) — the markers survived every cleanup sweep, so without the clear the re-run silently skips the whole span. |
+| **durable pre-Soroban data (re-measured 2026-08-04)** | Pre-2019, `price_ohlcv_1m` holds **only `201812`: 207,021 rows, `2018-12-13 06:55` → `2018-12-31 23:58`**. 2015–2018-11 are **absent** — `system.parts` has no partition below `201812` at all. ⚠️ **The `2018-12-13` boundary is an artifact of the incident, not a data-availability fact**: it is simply where the backfill had walked when cleanup was disabled on 2026-07-20 (`201812` first_seen `2026-07-20 04:11:24`, minutes after that day's final 03:08 sweep). Full forensics: [[S-presoroban-loss-chain-confirmed]]. *Supersedes the 2026-07-21 measurement, which read the boundary as a wipe line and reported spans that pass 1 has since rewritten.* |
 
 > Update this table as chunks land (ledger range, candle counts, duration, any
 > new unresolved pools). `GET /backfill/status` reports truthful monotonic
@@ -214,15 +242,45 @@ the pre-roll lands it in the coarse forever-tables. Re-check before each step:
 
 ```bash
 aws events describe-rule --name prices-production-cleanup --region eu-central-1 \
-  --profile soroban-explorer --query 'State'   # MUST stay "DISABLED"
+  --profile soroban-admin --query 'State'   # MUST stay "DISABLED"
 ```
+
+> Profile is **`soroban-admin`** (verified 2026-08-04). The runbooks say
+> `soroban-explorer`, which no longer works.
+>
+> ⚠️ **The rule's state is a necessary but not sufficient check.** It read
+> "disabled" in prose through the 2026-07-15→20 window while the sweep ran every
+> night. The authoritative signal is `RemovePart` activity on old partitions:
+>
+> ```sql
+> SELECT partition_id, max(event_time) AS last_removal
+> FROM system.part_log
+> WHERE table = 'price_ohlcv_1m' AND event_type = 'RemovePart'
+>   AND partition_id < '202000'
+> GROUP BY partition_id ORDER BY partition_id;
+> ```
+>
+> Any removal timestamped *after* pass 2 starts means cleanup is live again —
+> stop the run.
 
 | # | Step | Duration | Notes |
 |---|------|----------|-------|
-| 1 | **Let pass 1 finish** to activation (floor → 50,457,423) | ~6.3 days | Do NOT kill it to restart from ledger 1 — that discards 6.3 days of forward progress for no gain. Output is durable now that cleanup is off. |
-| 2 | **Clear markers, then re-run `[1, 23423999]`** (pass 2) | ~5 days | `DELETE FROM prices.backfill_sdex_ledgers WHERE sequence <= 23423999` **before** launching, else the resume set short-circuits done ledgers (`running-ingestion-components.md:122`) and the re-run silently skips the whole span, leaving an empty 2015–2018 forever. |
-| 3 | **Incremental pre-roll** — `preroll-incremental.sql` | hours | `docs/runbooks/preroll-incremental-presoroban.md`. NOT `preroll.sql` (full rebuild wipes the Soroban-era coarse). Pre-flight: floor ≈ 50,457,423, exact activation boundary timestamp, cleanup still DISABLED. |
+| 1 | ✅ **Let pass 1 finish** to activation (floor → 50,457,423) | done | **COMPLETE 2026-07-27 21:24 UTC.** |
+| 2 | 🟢 **Clear markers, then re-run `[1, 23423999]`** (pass 2) | ~5 days | **Next action.** `DELETE FROM prices.backfill_sdex_ledgers WHERE sequence <= 23423999` **before** launching, else the resume set short-circuits done ledgers (`running-ingestion-components.md:122`) and the re-run silently skips the whole span, leaving an empty 2015–2018 forever. Verify `leftover_low_markers = 0` before launch. Use the existing binary at `~/stellar-prices-api/target/release/sdex-backfill` — a rebuild from newer code could change behaviour mid-recovery. |
+| 3 | **Incremental pre-roll** — `preroll-incremental.sql` | hours | `docs/runbooks/preroll-incremental-presoroban.md`. NOT `preroll.sql` (full rebuild wipes the Soroban-era coarse). Pre-flight: floor ≈ 50,457,423, exact activation boundary timestamp, cleanup still DISABLED. ⚠️ **Do NOT gate this on the runbook's §7.1 marker query** — see below. |
 | 4 | **Re-enable cleanup** — `aws events enable-rule` | — | Only after step 3 verifies coarse coverage back to genesis. |
+
+> ⚠️ **The pre-roll gate in `backfill-handoff-covering-operator.md` §7.1 is
+> marker-based and unsafe.** As of 2026-08-04 it prints `BACKFILL COMPLETE —
+> READY TO PRE-ROLL` (`min 3`, `max 50,457,423`, contiguous) while **four years
+> of candles are missing** — the markers survived every cleanup sweep, the
+> candles did not. Gate step 3 on the per-year candle counts below instead, and
+> treat `backfill_sdex_ledgers` as a resume aid only, never as evidence of data.
+>
+> ⚠️ **Do not re-run `DELETE WHERE intDiv(toUInt64(version), 1000) < 50457424`.**
+> `version` = `ledger_seq × 1000 + intra-ledger order`, so it targets exactly the
+> pre-Soroban rows and would erase pass 2's entire output in one statement. It
+> last ran 2026-07-15 10:24 against an earlier run's data.
 
 > **Step 3 pre-flight — USD coverage note (added 2026-07-21, see [[0114]]).**
 > The pre-roll copies `price_ohlcv_1m` **as-is** and nothing re-enriches a coarse
@@ -285,6 +343,19 @@ per-chunk pre-roll variant. Give the cluster owner a heads-up for the window.
   SELECT 1
   SQL
   ```
+- **Marker-based gates must go.** `backfill-handoff-covering-operator.md` §7.1
+  gates the pre-roll on `backfill_sdex_ledgers` contiguity, which survived every
+  cleanup sweep — it currently clears a four-year hole for pre-rolling. Any
+  "is the data there?" gate must count candles, not markers. Fold into [[0109]]
+  or spawn separately.
+- **Nothing writes a terminal state on crash** — the dead `soroban_amm` leg has
+  read `status: running` since 2026-07-14. Same class of lying health signal as
+  the sweep that reported nothing and the [[0136]] freeze.
+- **Straddled activation minute.** Pass 1 logged a WARN: the activation split is
+  not minute-aligned, so minute `1708448400` is written partially by both range
+  runs and, since RMT replaces rather than sums, **undercounts**. Reconcile it
+  from one pass after both runs, or accept it as a documented artifact — but
+  decide explicitly.
 - Per §Out of scope these are code/doc changes, not operational — spawn them as
   their own task(s) rather than doing them under this tracker.
 
