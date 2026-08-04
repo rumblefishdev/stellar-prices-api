@@ -158,4 +158,30 @@ print("candles logged below ledger 23,424,000:", pre)
 '
 ```
 
-Note the AWS profile: `soroban-admin` works; the runbooks say `soroban-explorer`.
+AWS profile: `soroban-admin` worked on 2026-08-04; the runbooks say
+`soroban-explorer`. Either may be correct — a `UnrecognizedClientException:
+security token ... invalid` is an expired SSO session, not a wrong profile.
+
+## Pass 2 — launched 2026-08-04 13:25:15 UTC
+
+Same binary as pass 1 (`target/release/sdex-backfill`, built 2026-07-15 18:22),
+tmux `sdex-pass2` on fishuser-hero, log `~/sdex-pass2.log`, `tip 63795749`.
+
+```
+loaded completed ledgers from backfill_sdex_ledgers  start:1 end:23423999 completed:0
+backfill starting  total_partitions:366  already_done:0  to_process:366
+```
+
+`completed: 0` is the confirmation that the §6.2 marker clear worked — with
+markers present the run would have skipped all 23.4M ledgers and exited
+reporting success. ETA ~2026-08-09/10.
+
+Gates cleared before launch: cleanup `DISABLED`; no sweep-signature removal since
+2026-07-20 03:08:30; every partition below `202001` still holds rows (so the
+post-07-20 `RemovePart` events were merges, not drops); no backfill process
+running; `leftover_low_markers = 0`.
+
+> The unfiltered marker total after the clear is **39,928,612**, not the
+> 27,033,424 you get for the pre-Soroban span — the difference is exactly the
+> Soroban-era run's `63,352,611 − 50,457,424 + 1 = 12,895,188` markers. Same
+> trap as the frontier query: **always filter `WHERE sequence < 50457424`.**

@@ -146,6 +146,11 @@ aws events describe-rule --name prices-production-cleanup --region eu-central-1 
   --profile soroban-explorer --query State --output text
 ```
 
+> **Profile note.** `soroban-explorer` is the conventional name; on 2026-08-04
+> the profile that worked was **`soroban-admin`**. Use whichever is live for you.
+> A `UnrecognizedClientException: security token ... invalid` means an expired
+> SSO session, not a wrong profile — re-login before concluding anything.
+
 **✅ Checkpoint:** prints **`DISABLED`**. If it EVER prints `ENABLED`, **stop and
 call the primary operator immediately** — do not try to fix data, just get it
 disabled again:
@@ -154,6 +159,26 @@ disabled again:
 aws events disable-rule --name prices-production-cleanup --region eu-central-1 \
   --profile soroban-explorer
 ```
+
+> ⚠️ **The rule's state is necessary but NOT sufficient.** During 2026-07-15→20
+> the precondition was believed satisfied while the sweep ran every night and
+> destroyed ~3.7M candles of pass-1 output. Check the **data** too, daily:
+>
+> ```bash
+> CHQ <<'SQL'
+> SELECT partition_id, max(event_time) AS last_removal, count() AS removals
+> FROM system.part_log
+> WHERE table = 'price_ohlcv_1m' AND event_type = 'RemovePart'
+>   AND partition_id < '202000'
+> GROUP BY partition_id ORDER BY last_removal DESC;
+> SQL
+> ```
+>
+> **✅ Checkpoint:** no two partitions share a removal timestamp. **Many
+> partitions removed at the identical second = the sweep is live** (it looked
+> like `2026-07-18 03:08:39` across 21 partitions at once) → stop the run and get
+> cleanup disabled. Scattered per-partition times are background merges and are
+> expected, especially for days after a run ends.
 
 ### 4.4 [FISHUSER-HERO] Liveness (only if you can reach the LAN — optional)
 
@@ -469,33 +494,67 @@ is piped over SSH to prod CH either way.
 
 ### 7.1 Pre-flight — verify the backfill is COMPLETE (hard gate)
 
-Run this first. It prints a verdict telling you whether the full pre-Soroban span
-`[1, 50,457,423]` is present and contiguous — i.e. both passes are done:
+> 🛑 **Do NOT gate this phase on `prices.backfill_sdex_ledgers`.** An earlier
+> version of this section did, and it was unsafe. **Markers survive cleanup;
+> candles do not.** On 2026-08-04 the marker query below reported
+> `BACKFILL COMPLETE — READY TO PRE-ROLL` — `min 3`, `max 50,457,423`,
+> contiguous, zero gaps — while **2015 through 2018-12-13 held no candles at
+> all**, because the nightly sweep had dropped every partition pass 1 wrote
+> while leaving its markers untouched. Pre-rolling on that verdict would have
+> baked a four-year hole into the coarse forever-tables.
+>
+> `backfill_sdex_ledgers` is a **resume aid only**. It records what was
+> _processed_, never what _survived_. Gate on the data.
+
+**The gate — count candles, per year:**
 
 ```bash
-# [LAPTOP] backfill-complete gate
+# [LAPTOP] backfill-complete gate (authoritative)
+CHQ <<'SQL'
+SELECT toYear(timestamp) AS yr, count() AS candles
+FROM prices.price_ohlcv_1m
+WHERE source = 'sdex' AND timestamp < '2024-02-20'
+GROUP BY yr ORDER BY yr;
+SQL
+```
+
+**✅ Gate:** **every year from 2015 to the activation year is present**, with no
+missing years and no year collapsing to a token count. 2015–2016 are legitimately
+thin (those ledgers carry almost no SDEX trades — pass 1 logged 0–6 trade ticks
+per 64k-ledger partition), but they must not be _absent_. A missing year means an
+outstanding pass or a deletion event — **stop**, do not pre-roll.
+
+**Secondary check — has anything been deleted since the run started?**
+
+```bash
+CHQ <<'SQL'
+SELECT partition_id, max(event_time) AS last_removal, count() AS removals
+FROM system.part_log
+WHERE table = 'price_ohlcv_1m' AND event_type = 'RemovePart'
+  AND partition_id < '202000'
+GROUP BY partition_id ORDER BY last_removal DESC;
+SQL
+```
+
+**✅ Gate:** no two partitions share a removal timestamp. **Several partitions
+removed at the _identical_ second is the cleanup sweep's signature**; scattered
+per-partition times are ordinary background merges and are fine.
+
+The marker query below is kept **for progress tracking only** — it tells you
+where the walk has reached, never whether the data is there:
+
+```bash
+# [LAPTOP] progress only — NOT a data-completeness gate
 CHQ <<'SQL'
 SELECT
   min(sequence)                                 AS low,
   max(sequence)                                 AS high,
   count()                                       AS markers,
-  count() = (max(sequence) - min(sequence) + 1) AS contiguous_no_gaps,
-  multiIf(
-    min(sequence) <= 3 AND max(sequence) >= 50457423
-      AND count() = (max(sequence) - min(sequence) + 1),
-      'BACKFILL COMPLETE — READY TO PRE-ROLL',
-    max(sequence) >= 50457423,
-      'INCOMPLETE — reaches activation but has GAPS (pass 2 not done?) — do NOT pre-roll',
-    'INCOMPLETE — backfill still running — do NOT pre-roll'
-  )                                             AS status
+  count() = (max(sequence) - min(sequence) + 1) AS contiguous_no_gaps
 FROM prices.backfill_sdex_ledgers
 WHERE sequence < 50457424;
 SQL
 ```
-
-**✅ Gate:** the `status` column MUST read **`BACKFILL COMPLETE — READY TO PRE-ROLL`**
-(`low` ≈ 1–3, `high` ≈ 50,457,423, `contiguous_no_gaps` = 1). Anything else → **stop**,
-finish the outstanding pass, and do not continue this phase.
 
 Only once the gate passes, gather the rest of the pre-flight:
 
