@@ -28,6 +28,19 @@ history:
       because the `close_usd > 0` filter changes the weighting population
       mid-enrichment. Findings 1 and 3 share one root cause; finding 2 is
       independent but ordered behind 3.
+  - date: 2026-08-04
+    status: backlog
+    who: okarcz
+    note: >
+      All findings reproduced locally on CH **26.3.10.60** (the prod pin) —
+      scripts in `repro/`, results inline below. **All three are bugs**, and the
+      root cause of finding 3's second half is NOT the two-writer version race
+      first hypothesised: it is an unguarded `argMax(close_usd, t.timestamp)` in
+      **all six rollup MVs**, the same defect pattern as finding 1. The version
+      collision is real but is the reason the [[0114]] sweep's repair does not
+      stick, not the reason the value is zero. Also measured: removing the
+      `close_usd > 0` filter (BE's option B, taken literally) is **worse** than
+      keeping it.
 ---
 
 # BE 0199 report — three defects in the USD read surfaces
@@ -46,6 +59,34 @@ produces a confidently wrong number rather than an absent one.
 
 This is our first external consumer measuring these views, so treat their
 numbers as the ground truth about what we actually ship.
+
+## Verdict
+
+All five mechanisms below were **reproduced locally on CH 26.3.10.60**, the prod
+pin, using the shipped SELECTs verbatim. Scripts and run instructions:
+[`repro/`](repro/README.md).
+
+| # | BE finding | Bug? | Root cause |
+|---|---|---|---|
+| 1 | native XLM `price_usd` = 0 | **Yes** | `argMax(close_usd, …)` with no `> 0` guard in `mv_current_prices` |
+| 2 | `price_usd_series*` read cost | **No** — a valid request | but ~2× of the measured scan **is** a bug: [[0139]]'s `asset_id` fan-out |
+| 3i | dust print becomes the bucket price | **Yes** | `WHERE close_usd > 0` makes the weighting population depend on enrichment timing |
+| 3ii | priced bucket reverts to unpriced | **Yes** | `argMax(close_usd, …)` with no `> 0` guard in **all six rollup MVs** |
+| 3ii-b | [[0114]]'s repair does not stick | **Yes** | MV re-append at `sum(version)` overtakes the sweep's `version + 1` |
+
+**One defect pattern explains 1, 3ii and (indirectly) 3i:** `close_usd`'s
+"missing" value is `0`, a number that is valid input to every aggregate we run
+over it. `argMax` happily returns it, `sum(x*w)` happily weights it, and
+`WHERE close_usd > 0` — the one place we do guard — fixes the arithmetic by
+silently changing the population instead.
+
+> ⚠️ **Correction to this task's first revision.** Finding 3ii was filed as a
+> suspected two-writer version race. That was wrong as a *root cause*: TEST A
+> reproduces BE's exact observation with a single writer and no version
+> interaction at all. The version collision is real and independently confirmed
+> (TEST E) — it is why the sweep's repair does not survive — but it is
+> downstream. Fixing only the version arithmetic would leave the zero-propagation
+> intact.
 
 ---
 
@@ -82,6 +123,17 @@ XLM is the worst possible case for that, for two compounding reasons:
    at all (`ch_enrich.rs`, `count_remaining_at_volume_zero` docs).
 
 For XLM, then, this is not intermittent — it is close to chronic.
+
+**Reproduced (TEST C).** Four `_1m` candles for native XLM, the two newest
+unpriced — 13:59 because enrichment has not run yet, 14:00 because its quote is
+exotic and so will *never* be enriched:
+
+```
+asset_id   price_usd_asis   price_usd_if_guarded
+       9                0                  0.421
+```
+
+One `argMaxIf` recovers the real price. The un-enriched tip is the whole story.
 
 ### This is [[0135]], now measured on the one asset that matters most
 
@@ -157,8 +209,24 @@ a second identity would publish a price series it never traded. The volume
 weighting itself is invariant to uniform duplication, so the *numbers* stay
 right for the real identity; the *rows* do not.
 
-Materializing before checking this bakes the fan-out into a physical table.
-Check it first (query below).
+**Reproduced (TEST D).** One `_1d` candle on an `asset_id` shared by two
+identities, joined exactly as the view does:
+
+```
+joined_rows   distinct_candles
+          2                  1
+
+asset_code   issuer_address   bucket                 close_usd   volume_base
+DUPA         …AAA1            2026-08-03 00:00:00         1.05          5000
+DUPB         …AAA2            2026-08-03 00:00:00         1.05          5000
+```
+
+Both halves confirmed: **2× read amplification** (BE's "twice") *and* `DUPB`
+publishing a price series for a candle it never traded. The prod magnitude
+depends on how many of 0139's 3,275 duplicate `asset_id`s carry candles — that
+part still needs the query below.
+
+Materializing before fixing this bakes the fan-out into a physical table.
 
 ### 2b. It must be ordered behind finding 3
 
@@ -217,30 +285,74 @@ arbitrary population from one minute to the next.
 
 ### There are two distinct mechanisms here, and BE saw both
 
-**(i) Partial enrichment (13:29).** Enrichment runs `rate(1 hour)`, so a live
-bucket is routinely part-priced. Whichever rows happen to be enriched become
-100% of the weight. A dust print is the pathological case because it carries
-real volume ≈ 0 but a wildly off unit price — which is [[0116]] (single-trade
-candles carrying nonsense unit prices, measured up to $29.6M `close_usd`).
-0116 makes the input junk; this filter is what lets one junk row *be* the answer.
+**(i) Partial enrichment (13:29) — the filter.** Enrichment runs `rate(1 hour)`,
+so a live bucket is routinely part-priced. Whichever rows happen to be enriched
+become 100% of the weight. A dust print is the pathological case because it
+carries real volume ≈ 0 but a wildly off unit price — which is [[0116]]
+(single-trade candles carrying nonsense unit prices, measured up to $29.6M
+`close_usd`). 0116 makes the input junk; this filter is what lets one junk row
+*be* the answer.
 
-**(ii) An enriched value going back to zero (14:13).** Partial enrichment does
-not explain a bucket that had a priced row and then had none — that is data
-moving **backwards**. Suspected cause: `price_ohlcv_1h` has **two writers on
-`close_usd` with incompatible version arithmetic**.
+**Reproduced (TEST B).** BE's exact scenario — a 42,038-unit row not yet
+enriched beside a 0.764-unit dust print that is, with a fully-enriched 12:00
+control:
 
-- The rollup MV `mv_ohlcv_15m_to_1h` appends the bucket with
-  `argMax(close_usd, …)` from `_15m` and `version = sum(version)`
-  (`rollups.sql:98-114`).
-- The [[0114]] coarse sweep re-enriches the same coarse rows in place and wins by
-  **`version + 1`** (`repair.rs:20-22`).
+```
+asset_code   bucket                 close_usd          <- the shipped view
+yXLM         2026-08-04 12:00:00    0.17002069076055
+yXLM         2026-08-04 13:00:00    1.30850000000000   <- 7.7x, BE's number
+```
 
-For a *live, still-accumulating* bucket, `_15m` keeps gaining rows every refresh,
-so the MV's `sum(version)` keeps climbing and can overtake — or tie — the
-sweep's `version + 1`, re-appending `close_usd = 0` on top of the swept value.
-`rollups.sql:29` states outright that the RMT tie-break "is not contractual".
-**Unverified — this is the hypothesis to test first**, and if it holds it is a
-separate defect from the filter and probably deserves its own task.
+**(ii) An enriched value going back to zero (14:13) — the rollup chain.**
+Partial enrichment does not explain a bucket that had a priced row and then had
+none; that is data moving **backwards**. The cause is the *same* unguarded
+`argMax` as finding 1, one layer down. Every rollup tier carries `close_usd`
+forward with
+
+```sql
+argMax(close_usd, t.timestamp)            AS close_usd
+```
+
+(`rollups.sql:90, 111, 132, 153, 174, 195` — **all six MVs**). `argMax` takes
+the value from the *latest* sub-bucket. When the latest sub-bucket is not yet
+enriched, the coarse row inherits **0** — discarding the priced sub-buckets
+underneath it. A partly-enriched hour does not roll up as partly priced; it
+rolls up as **unpriced**.
+
+**Reproduced (TEST A).** One hour of `_15m` sub-buckets, the two earlier ones
+priced and the two later ones not, through `mv_ohlcv_15m_to_1h`'s SELECT
+verbatim:
+
+```
+timestamp             close   volume_base   close_usd_asis   close_usd_if_guarded
+2026-08-04 13:00:00   0.172         42000                0                  0.171
+```
+
+No second writer, no version interaction, no race — a single pass over the data
+returns zero. This is the mechanism behind BE's 14:13 reading.
+
+**(ii-b) And the [[0114]] sweep cannot durably repair it.** The coarse sweep
+exists precisely to re-derive `close_usd` on coarse rows, and it wins by
+`version + 1` (`repair.rs:20-22`). But `mv_ohlcv_15m_to_1h` re-appends the same
+hour **every 15 minutes for 8 hours** (`REFRESH EVERY 15 MINUTE`, window
+`now() - INTERVAL 8 HOUR`) at `version = sum(version)` over its `_15m` rows —
+and every enrichment event under those sub-rows adds 1 to that sum. Two such
+events and the MV overtakes the sweep.
+
+**Reproduced (TEST E):**
+
+```
+after the sweep repairs it        close_usd 0.171   version 401
+after the next MV refresh         close_usd 0       version 402
+what the view publishes now       (empty)
+```
+
+The bucket vanishes from the view — BE's observation exactly. So the repair path
+we already built is defeated inside the re-aggregation window. This *is* a
+distinct defect from the filter and probably deserves its own task, but note the
+ordering: **fix the `argMax` and this mostly stops mattering**, because the MV
+would re-append a correct value rather than a zero. Fix only the version
+arithmetic and the zero-propagation survives untouched.
 
 ### BE's two proposed options — one is unimplementable as stated
 
@@ -263,6 +375,13 @@ the unenriched rows too once they land.
 - **Worth pairing with [[0118]]** (`min_volume_usd` inclusion threshold), which
   drops dust rows before they can be weighted at all. Coverage gate and dust
   threshold are complementary, not alternatives.
+- **⚠️ Their option B, taken literally, is worse than the status quo.** TEST B
+  measured it: weighting over all rows with the filter removed returns
+  **0.000023** against a true ~0.170, because an unpriced row enters as a zero
+  numerator against a full-weight denominator. Their wording ("weight over the
+  unenriched rows too **once they land**") suggests they mean *defer until
+  enriched*, which is the coverage gate — but the literal reading is a trap and
+  the reply should say so.
 - **A `status` column beats silent absence.** The header already promises
   value-or-absent semantics classified against `usd_reference`; "partially
   enriched" is a third state that today masquerades as a good value. Consider
@@ -273,7 +392,9 @@ the unenriched rows too once they land.
 
 ## Verification queries (prod, ch-prod-01 — operator-run)
 
-Run before designing the fix. Read-only.
+> The **mechanisms** are settled — see `repro/`. These queries no longer decide
+> *whether* the bugs are real; they size the **blast radius** on prod, which is
+> what the fix priority and the BE reply should be calibrated against. Read-only.
 
 **A. Confirm the XLM tip is un-enriched and identify its quote (finding 1):**
 
@@ -327,55 +448,76 @@ GROUP BY bucket ORDER BY bucket DESC;
 `priced_volume_share` is the proposed gate's input — check what it looks like
 across a normal day before picking X.
 
-**D. Test the version-clobber hypothesis (finding 3ii):**
+**D. Size the zero-propagation across the rollup tiers (finding 3ii):**
 
 ```sql
--- per-row versions in a recent live bucket, WITHOUT final — shows both writers
-SELECT timestamp, source, quote_asset_id, close_usd, version, _part
-FROM prices.price_ohlcv_1h
-WHERE asset_id = (SELECT asset_id FROM prices.assets FINAL
-                  WHERE asset_code = 'yXLM' AND issuer_address = 'GARDNV3Q…' LIMIT 1)
-  AND timestamp >= now() - INTERVAL 4 HOUR
-ORDER BY timestamp DESC, version DESC;
+-- how many recent coarse rows carry close_usd = 0 while their own `close` is
+-- non-zero — i.e. rows the argMax zeroed rather than rows with no market
+SELECT
+    'price_ohlcv_1h' AS tbl,
+    countIf(close_usd = 0 AND close > 0) AS zeroed,
+    count()                              AS total,
+    round(countIf(close_usd = 0 AND close > 0) / count(), 4) AS share
+FROM prices.price_ohlcv_1h FINAL
+WHERE timestamp >= now() - INTERVAL 48 HOUR
+UNION ALL
+SELECT 'price_ohlcv_1d', countIf(close_usd = 0 AND close > 0), count(),
+       round(countIf(close_usd = 0 AND close > 0) / count(), 4)
+FROM prices.price_ohlcv_1d FINAL
+WHERE timestamp >= now() - INTERVAL 30 DAY;
 ```
 
-Looking for: a row with `close_usd > 0` at version V sitting under a row with
-`close_usd = 0` at version ≥ V. That is the clobber, and it makes 3ii a separate
-bug from the filter.
+This is the number that decides how much of the historical `close_usd` estate is
+affected, and whether a backfill/re-sweep is needed after the MV fix.
 
 ---
 
 ## Implementation sketch
 
-Ordered by dependency, not by importance.
+Ordered by dependency, not by importance. Steps 1 and 2 are the same one-line
+defect in two places and should ship together.
 
-1. **Run the verification queries.** They decide whether 3ii and 2a are real, and
-   they change the scope of everything below.
-2. **Finding 3ii, if confirmed** — one owner for `close_usd` per coarse row.
-   Either the rollup MV must not overwrite a swept value (carry the swept version
-   forward / exclude already-priced rows from re-append) or the sweep must win
-   unconditionally. Spawn as its own BUG; it is a data-regression, not a view bug.
+1. **Guard the `argMax` in the rollup chain** — `argMaxIf(close_usd,
+   t.timestamp, close_usd > 0)` in all six MVs in `rollups.sql`. Carries the
+   latest *priced* close instead of a zero. Note this deliberately decouples
+   `close_usd` from `close` (they may come from different sub-buckets); that is
+   the right trade — an approximately-right USD close beats a fabricated zero —
+   but **write it down in the header**, because the two columns silently ceasing
+   to be same-row is exactly the kind of thing that bites a future reader.
+   Delivery is blocked on [[0142]]: `rollups.sql` is `IF NOT EXISTS` with no
+   `DROP`, so editing the file and re-applying **changes nothing** on prod.
+2. **Guard the `argMax` in `mv_current_prices`** (finding 1) — same fix, and the
+   decision belongs to [[0135]]. Cheap; blocked only on the contract call.
 3. **Finding 3i — the coverage gate.** Replace the bare `close_usd > 0` filter in
    `price_usd_series` / `price_usd_series_1h` with a volume-share gate, and/or
-   expose `priced_volume_share` so consumers can set their own bar. Pick X from
-   query C's real distribution, not from taste. Coordinate with [[0118]] and
-   [[0131]] so we ship one definition of "priced enough", not three.
-4. **Finding 1 — decide [[0135]].** Guard the `argMax` in `mv_current_prices`.
-   Cheap; blocked only on the contract decision.
+   expose `priced_volume_share` so consumers set their own bar. Pick the
+   threshold from query C's real distribution, not from taste. Coordinate with
+   [[0118]] and [[0131]] so we ship one definition of "priced enough", not three.
+   Still needed after step 1 — the gate covers the case where the *base* table's
+   own rows are unpriced, which no rollup fix can reach.
+4. **Sweep/MV version ownership** (3ii-b) — after step 1 this is much less
+   urgent, but two writers with incompatible version arithmetic on one column is
+   a latent trap worth closing. Own it in a follow-up.
 5. **Finding 2 — materialize**, under the population rule settled in step 3 and
-   after 2a is resolved. Refresh mode per §2c; delivery per [[0142]].
+   after 2a ([[0139]]) is fixed. Refresh mode per §2c; delivery per [[0142]].
 
-Each of 2–5 is independently shippable. Splitting them into separate tasks once
-the verification lands is expected — this task is the triage and the BE-facing
-contract, not the implementation.
+Steps 1–5 are independently shippable. Splitting them into separate tasks is
+expected — this task is the triage and the BE-facing contract, not the
+implementation.
 
 ## Acceptance Criteria
 
-- [ ] Verification queries A–D run on prod and their results recorded in this
-      task; 2a and 3ii confirmed or ruled out.
+- [x] Mechanisms reproduced on CH 26.3.10.60 (`repro/`) — all three findings are
+      bugs; root cause of 3ii corrected from the version race to the unguarded
+      `argMax`.
+- [ ] Verification queries A–D run on prod and their results recorded here, to
+      size the blast radius (how many assets, how much of the coarse estate).
 - [ ] BE has a written answer covering: 0039's actual status and the real owner
       of native XLM pricing; **why "wait until every row is enriched" cannot
-      terminate**; and what we will ship instead.
+      terminate**; **why removing the filter outright is worse than keeping it**;
+      and what we will ship instead.
+- [ ] No coarse row carries `close_usd = 0` while its own `close > 0` and a
+      priced sub-bucket exists underneath it — regression test on the prod pin.
 - [ ] `price_usd_series` / `price_usd_series_1h` cannot return a bucket whose
       published price rests on a negligible share of the bucket's volume — with
       a regression test on CH **26.3.10.60** that reproduces BE's yXLM case.
@@ -404,3 +546,17 @@ contract, not the implementation.
 - Their measured numbers are worth keeping: 19.6M daily candle rows total, 1.89M
   for a 90-day window, 70.7M read rows / 4.6 s / 2.1 GiB for 104 weeks, 3,316
   assets ticking in `current_prices`. Useful baselines for whatever we ship.
+- **The `argMax` fix has a historical tail.** It corrects the coarse tables from
+  the moment it lands; it does not retroactively repair rows already zeroed and
+  aged out of the MVs' re-aggregation windows. Query D sizes that estate. The
+  [[0114]] sweep is the existing repair path and should pick them up once it can
+  no longer be clobbered (step 4) — confirm rather than assume.
+- **`zero-as-missing` is the design choice underneath all of this.** `close_usd`
+  is `Decimal(38,14) DEFAULT 0` on a non-nullable column (`init.sql:114`), so
+  "not yet priced", "will never be priced" and "genuinely worth nothing" are one
+  value. Every bug in this task is a different aggregate meeting that value. A
+  `Nullable(Decimal)` or a companion status column would make the whole class
+  unrepresentable — expensive and invasive now, but worth an ADR before the next
+  surface is built on the same footing. Note `views.sql` already promises
+  consumers value-or-absent semantics, which is the contract the storage does
+  not actually implement.
