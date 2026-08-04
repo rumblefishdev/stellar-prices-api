@@ -1,12 +1,5 @@
 name: CI
 
-# TASK 0110 MEASUREMENT — BASELINE COMMIT (do not merge).
-# This comment exists only to trigger a `rust` job run on this branch, so the
-# baseline and the experiment share the same runner and cache conditions.
-# The next commit removes the Node/TS tail; the delta between the two job
-# totals is the real saving. Both commits get reverted before this branch
-# carries any actual change.
-
 on:
   push:
     branches:
@@ -200,10 +193,12 @@ jobs:
       # reference resolved at DEPLOY time. There are no `fromLookup` /
       # `valueFromLookup` context lookups, which are the calls that would
       # need real AWS credentials at synth time.
-      # TASK 0110 MEASUREMENT — EXPERIMENT COMMIT (do not merge).
-      # The three steps that stood here — actions/setup-node, npm ci, and
-      # `make -C infra synth-production` — are removed so the job total can be
-      # compared against the baseline commit. The delta IS the saving a synth
-      # split would buy. Restored (or properly relocated) before this branch
-      # carries any real change; removing the synth guard for real would
-      # re-open the task 0070 CannotFindAsset failure mode.
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - run: npm ci
+
+      - name: Synth production app
+        run: make -C infra synth-production
