@@ -200,12 +200,10 @@ jobs:
       # reference resolved at DEPLOY time. There are no `fromLookup` /
       # `valueFromLookup` context lookups, which are the calls that would
       # need real AWS credentials at synth time.
-      - uses: actions/setup-node@v4
-        with:
-          node-version-file: .nvmrc
-          cache: npm
-
-      - run: npm ci
-
-      - name: Synth production app
-        run: make -C infra synth-production
+      # TASK 0110 MEASUREMENT — EXPERIMENT COMMIT (do not merge).
+      # The three steps that stood here — actions/setup-node, npm ci, and
+      # `make -C infra synth-production` — are removed so the job total can be
+      # compared against the baseline commit. The delta IS the saving a synth
+      # split would buy. Restored (or properly relocated) before this branch
+      # carries any real change; removing the synth guard for real would
+      # re-open the task 0070 CannotFindAsset failure mode.
