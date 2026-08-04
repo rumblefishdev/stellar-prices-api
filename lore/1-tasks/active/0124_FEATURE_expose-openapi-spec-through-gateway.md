@@ -93,7 +93,9 @@ unauthenticated route exists. Record the choice either way.
 - [x] `servers` resolves to a URL that actually serves the API, stage path
       included — stamped from config, invariant enforced at synth; the fetch
       needs a deploy
-- [x] Route coverage matches the deployed router exactly, both directions
+- [x] Route coverage matches the deployed router exactly, both directions —
+      enforced twice: a fast in-process test, and a CI check deriving both sides
+      from the synthesized template and the extracted document
 - [x] Security scheme (`x-api-key`) declared for the key-gated routes
 - [x] Response cached with a TTL appropriate to a per-deployment-static document
       — 3600 s, gateway + handler agreeing
@@ -137,11 +139,39 @@ unauthenticated route exists. Record the choice either way.
   `npm run openapi:{extract,lint}`, and a CI step in the `rust` job (the only
   job with both cargo and node).
 
+## Issues Encountered
+
+Both found by reviewing the first commit, not by a failing test — worth
+recording because both were guards that looked like they worked.
+
+- **The lint gate did not fail on warnings.** `redocly lint` exits 0 with
+  warnings, and under the `recommended` ruleset most checks — including
+  `operation-4xx-response`, the rule that found seven undocumented 401/403 —
+  report as warnings. So CI would have accepted the exact regression the step
+  was added to catch. Fixed by extending `recommended-strict`, which promotes
+  them to errors, and pinning `operation-4xx-response: error` explicitly so a
+  future switch back to `recommended` cannot silently demote it. Verified by
+  stripping the 4xx responses off a route and confirming exit 1.
+
+- **"Both directions" was only one and a half directions.** The Rust test
+  compares the spec against a hand-written `EXPECTED_ROUTES` mirroring the CDK
+  source. It catches a gateway route the spec omits and a spec path the gateway
+  does not map — but *not* a route added to axum with a plain `.route()` call
+  and never documented or mapped, which is precisely how `/api-docs-json` went
+  unroutable for months. Added `tools/scripts/verify-openapi-routes.mjs`, which
+  derives both sides from artifacts (the synthesized CloudFormation template and
+  the extracted document) and runs in CI after synth. Same reasoning as
+  `lambda-assets.sh` / task 0077: this repo has been bitten three times by
+  hand-maintained mirrors. Verified failing in both directions before wiring in.
+
 ## Verification
 
 - `cargo test --workspace` — 223 passed, 0 failed
 - `cargo fmt --check`, `cargo clippy -p prices-api --all-targets` — clean
 - `npm run openapi:lint` — "Your API description is valid", 0 errors, 0 warnings
+  (`recommended-strict`; regression case confirmed to exit 1)
+- `npm run openapi:verify-routes` — gateway and document agree on all 9 routes;
+  confirmed to fail in both drift directions
 - `cdk synth Prices-production-ApiGateway` — `/api-docs-json` resource present,
   `ApiKeyRequired: false`, `CacheTtlInSeconds: 3600`; the 9 mapped routes match
   the 9 documented paths exactly

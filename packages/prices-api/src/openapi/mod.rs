@@ -18,8 +18,11 @@ use crate::state::AppState;
 pub const API_KEY_HEADER: &str = "x-api-key";
 
 /// Name of the `x-api-key` security scheme in `components.securitySchemes`.
-/// Referenced by the global `security` requirement below and by the per-route
-/// opt-outs (`security(())`) on the two anonymous routes.
+///
+/// The global requirement in the `#[openapi(...)]` attribute below must spell
+/// the same name, and has to spell it as a literal — attribute macros cannot
+/// read a const. Change one and the requirement points at a scheme that does
+/// not exist; `tests/openapi.rs` asserts both spellings so that fails loudly.
 pub const API_KEY_SCHEME: &str = "api_key";
 
 /// Declares the `x-api-key` scheme in `components.securitySchemes`.

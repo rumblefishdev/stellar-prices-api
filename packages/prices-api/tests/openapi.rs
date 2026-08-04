@@ -7,15 +7,22 @@
 //! routes need, and its route list matches the deployed router **in both
 //! directions**.
 //!
-//! `EXPECTED_ROUTES` is the hinge. It is deliberately a hand-written list
-//! rather than something derived from the router: derived-from-the-router would
-//! make this test tautological (the spec is generated from that same router, so
-//! it could only ever agree with itself). What this list actually mirrors is
+//! `EXPECTED_ROUTES` is deliberately a hand-written list rather than something
+//! derived from the router: derived-from-the-router would make the coverage
+//! test tautological, since the spec is generated from that same router and
+//! could only ever agree with itself. What the list mirrors is
 //! `infra/src/lib/stacks/api-gateway-stack.ts` — the routes API Gateway maps.
-//! When a route is added there, add it here; when a route lands only in axum
-//! and never gets a gateway mapping, this test is what catches it. That is the
-//! exact drift 0124 exists to fix: `/api-docs-json` was in the router for
-//! months while the gateway never mapped it.
+//!
+//! Being hand-written, it can itself go stale, so it is the *fast* half of a
+//! two-part guard. The authoritative half is
+//! `tools/scripts/verify-openapi-routes.mjs`, which runs in CI and derives both
+//! sides from artifacts — the synthesized CloudFormation template and the
+//! extracted document — so neither side can drift unnoticed. This test fails in
+//! milliseconds on `cargo test` and needs no synth; that one cannot be fooled by
+//! a stale mirror. Keep both.
+//!
+//! The drift they exist to catch is real: `/api-docs-json` was in the axum
+//! router for months while the gateway never mapped it, and nothing failed.
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};

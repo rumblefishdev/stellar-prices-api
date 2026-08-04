@@ -8,8 +8,15 @@
 # The document is OpenAPI 3.1.0: utoipa 5 has no 3.0 emit mode. 3.1 is a valid
 # OpenAPI major release and what modern tooling (including Swagger UI 4+, which
 # task 0128's Tranche-3 UI will use) reads natively.
+#
+# `recommended-strict`, not `recommended`: the plain ruleset reports most of its
+# checks as WARNINGS, and `redocly lint` exits 0 with warnings. A gate that only
+# fails on errors would have accepted the exact regression it exists to catch —
+# `operation-4xx-response`, the rule that found seven key-gated operations
+# documenting no 401/403, is a warning under `recommended`. Strict promotes them
+# to errors so CI actually blocks.
 extends:
-  - recommended
+  - recommended-strict
 
 rules:
   # OFF, deliberately. utoipa fills `info.license` from CARGO_PKG_LICENSE, which
@@ -19,8 +26,10 @@ rules:
   # made, the empty object stays and this rule stays off. See task 0144.
   info-license-strict: off
 
-  # Kept ON. Every key-gated operation documents 401/403 + the ErrorEnvelope
-  # body. The two anonymous routes (/health, /api-docs-json) have no 4xx at all
-  # and are excepted in redocly.lint-ignore.yaml rather than by weakening the
-  # rule for the routes where it earns its keep.
-  operation-4xx-response: warn
+  # Kept ON, at error severity (redundant under recommended-strict, but stated
+  # so a future switch back to `recommended` cannot silently demote it). Every
+  # key-gated operation documents 401/403 + the ErrorEnvelope body. The two
+  # anonymous routes (/health, /api-docs-json) have no 4xx at all and are
+  # excepted in .redocly.lint-ignore.yaml rather than by weakening the rule for
+  # the routes where it earns its keep.
+  operation-4xx-response: error

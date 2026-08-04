@@ -220,3 +220,12 @@ jobs:
 
       - name: Synth production app
         run: make -C infra synth-production
+
+      # Both sides of the route contract now exist as artifacts: the
+      # synthesized template above (what CDK will deploy) and target/openapi.json
+      # from the lint step (what the handler will serve). Compare them rather
+      # than trusting a hand-maintained mirror — `/api-docs-json` sat in the
+      # axum router for months while the gateway never mapped it, and nothing
+      # failed. Same reasoning as tools/scripts/lambda-assets.sh (task 0077).
+      - name: Verify OpenAPI routes match API Gateway
+        run: npm run openapi:verify-routes

@@ -16,22 +16,25 @@ without it serves nothing.
 
 ## Routes
 
-| Route                                | Auth          | Gateway cache TTL |
-| ------------------------------------ | ------------- | ----------------- |
-| `GET /health`                        | Anonymous     | uncached          |
-| `GET /api-docs-json`                 | **Anonymous** | 3600 s            |
-| `GET /v1/assets`                     | `x-api-key`   | 60 s              |
-| `GET /v1/assets/{asset_identifier}`  | `x-api-key`   | 60 s              |
-| `GET /v1/assets/{id}/price`          | `x-api-key`   | 10 s              |
-| `GET /v1/assets/{id}/ohlcv`          | `x-api-key`   | 60 s              |
-| `GET /v1/oracles/{asset_identifier}` | `x-api-key`   | 60 s              |
-| `GET /v1/backfill/status`            | `x-api-key`   | 60 s              |
-| `POST /v1/prices/batch`              | `x-api-key`   | uncached          |
+| Route                                     | Auth          | Gateway cache TTL |
+| ----------------------------------------- | ------------- | ----------------- |
+| `GET /health`                             | Anonymous     | uncached          |
+| `GET /api-docs-json`                      | **Anonymous** | 3600 s            |
+| `GET /v1/assets`                          | `x-api-key`   | 60 s              |
+| `GET /v1/assets/{asset_identifier}`       | `x-api-key`   | 60 s              |
+| `GET /v1/assets/{asset_identifier}/price` | `x-api-key`   | 10 s              |
+| `GET /v1/assets/{asset_identifier}/ohlcv` | `x-api-key`   | 60 s              |
+| `GET /v1/oracles/{asset_identifier}`      | `x-api-key`   | 60 s              |
+| `GET /v1/backfill/status`                 | `x-api-key`   | 60 s              |
+| `POST /v1/prices/batch`                   | `x-api-key`   | uncached          |
 
-Source of truth: `infra/src/lib/stacks/api-gateway-stack.ts`. The table is
-asserted against the published document by
-`packages/prices-api/tests/openapi.rs::spec_route_coverage_matches_the_deployed_gateway_both_ways`,
-which fails if a route exists on one side and not the other.
+Source of truth: `infra/src/lib/stacks/api-gateway-stack.ts`. This table is
+documentation and is not itself asserted — what CI enforces is that the
+**gateway and the published document** describe the same routes, via
+`tools/scripts/verify-openapi-routes.mjs` (derived from the synthesized template
+and the extracted spec) plus the faster in-process check in
+`packages/prices-api/tests/openapi.rs`. If this table drifts from either, fix
+the table.
 
 ## OpenAPI specification (task 0124)
 
@@ -60,8 +63,11 @@ curl -sS https://02mabge71l.execute-api.eu-central-1.amazonaws.com/production/ap
   `Cache-Control: public, max-age=3600`. The document is byte-identical for the
   life of a deployment.
 - **Lint:** `npm run openapi:lint` extracts the served document and runs
-  Redocly's recommended ruleset over it; wired into the `rust` CI job. Config in
-  `redocly.yaml`, documented exceptions in `.redocly.lint-ignore.yaml`.
+  Redocly's `recommended-strict` ruleset over it; wired into the `rust` CI job.
+  Strict, not `recommended`, because plain `redocly lint` exits 0 on warnings —
+  a gate that only fails on errors would not have blocked the very regressions
+  it was added for. Config in `redocly.yaml`, documented exceptions in
+  `.redocly.lint-ignore.yaml`.
 
 The `extract_openapi` binary remains the way to get the document without a
 deployment (client generation, spec diffs in CI):
