@@ -2,7 +2,7 @@
 id: "0124"
 title: "Expose the OpenAPI spec through API Gateway — /api-docs-json is unroutable in production"
 type: FEATURE
-status: backlog
+status: active
 related_adr: ["0008"]
 related_tasks: ["0119", "0120", "0128"]
 tags: [layer-infra, layer-backend, priority-medium, effort-small, milestone-M2, api-gateway, openapi, documentation]
@@ -21,6 +21,15 @@ history:
       defines `/api-docs-json` but the API Gateway does not map it. Scoped to
       the **spec**; the Swagger **UI** and the onboarding portal stay
       Tranche 3 per overview §9.
+  - date: 2026-08-04
+    status: active
+    who: akot
+    note: >
+      Promoted to active, picked up by Adam. Scope unchanged: the spec
+      document over the deployed API, not the Swagger UI. First open
+      question is the auth posture — the task recommends anonymous to
+      match `/health` (`api-gateway-stack.ts:238`); the decision needs
+      recording either way before implementation.
 ---
 
 # Expose the OpenAPI spec through API Gateway
