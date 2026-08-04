@@ -2,7 +2,7 @@
 id: "0110"
 title: "CI: split synth into its own job so the rust job stops paying for a Node/TS build"
 type: PERF
-status: backlog
+status: active
 related_adr: []
 related_tasks: ["0077", "0070"]
 tags: [layer-ops, ci, cdk, priority-low, effort-small]
@@ -17,6 +17,13 @@ history:
       rust job install Node and run a full TypeScript build. Recorded as
       cost-not-correctness at the time and deliberately deferred so the
       correctness fixes could land; this task carries it.
+  - date: 2026-08-04
+    status: active
+    who: akot
+    note: >
+      Picked up. Starting from the measurement the task asks for: establish what
+      fraction of the ~6m20s rust job is actually the Node install + TS build
+      before choosing between the artifact-split and won't-do options.
 ---
 
 # CI: split synth into its own job
