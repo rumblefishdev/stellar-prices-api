@@ -1,5 +1,5 @@
 ---
-id: "0145"
+id: "0153"
 title: "CI: cdk synth never runs on infra-only PRs — the 0070 guard has a hole"
 type: BUG
 status: backlog
@@ -16,6 +16,17 @@ history:
       task. 0110 ticked an acceptance criterion asserting "synth still runs on
       every PR that could break it"; the reviewer checked and it does not. The
       overclaim has been withdrawn in 0110; the gap is this task.
+  - date: 2026-08-05
+    status: backlog
+    who: okarcz
+    note: >
+      Renumbered 0145 → 0153. The ID collided: this task was spawned onto
+      `develop` with PR #165 while the unmerged PR #168 branch had already
+      claimed 0145 for the pre-roll `argMax(close_usd, …)` guard. That task is
+      referenced nine times across four files and gates two queued pre-roll
+      operations, so it keeps the number and this one moves. Nothing about the
+      work here changed. 0152 is deliberately left free for the OpenAPI license
+      task on PR #169, which collides with 0144 the same way.
 ---
 
 # CI: `cdk synth` never runs on infra-only PRs
