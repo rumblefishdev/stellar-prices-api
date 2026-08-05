@@ -194,11 +194,21 @@ materialising first, because that would bake those 548,439 rows of
 wrong-identity attribution into a physical table where they become a stored
 fact instead of a view artefact.
 
-**One thing we still owe you:** we do not yet know where your 70.7M read rows
-come from. It is not the fan-out. Likely candidates are `FINAL` on both sides of
-the join and the identity columns not being able to push down, but we would
-rather measure that than guess — and we need the answer anyway to design the
-materialised table's key properly.
+**Where your 4.6 s actually goes — we measured this too.** Running the identical
+`FINAL` join over your identical 104-week window, but *only counting rows*,
+costs **344 ms and 33M read rows**. So neither the join nor the fan-out is your
+bottleneck. The cost is what that count skipped: the weighted aggregation and
+the `GROUP BY` on four **computed** identity columns, which no index can help
+with and which forces the whole window to be materialised before grouping.
+
+That is genuinely good news for your request — **it means the materialised table
+attacks the real bottleneck**, because it precomputes exactly that aggregate. If
+the cost had been in the join, the identity-keyed table you asked for would have
+helped much less than you expect.
+
+One caveat on comparing our number to yours: you measured 4.6 s uncached and
+ours may have hit a warm cache, so treat the row counts as comparable and the
+wall-clock as not.
 
 We will come back to you with a date on the materialized table once the two
 prerequisites land. We are not going to give you one now and miss it.

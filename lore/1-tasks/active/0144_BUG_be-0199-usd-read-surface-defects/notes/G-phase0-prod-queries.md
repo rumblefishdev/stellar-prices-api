@@ -398,7 +398,7 @@ Fill in as they come back; then fold into the task README's acceptance criteria.
 | **A4** | enrichment frontier / cadence | `newest_candle 13:22`, `newest_priced 13:20`, `lag_minutes = 2`. ⚠️ **Not the steady state** — this and the A sample both landed in the catch-up window of the pass that began ~13:17. Deployed rule confirmed `rate(1 hour)`, `ENABLED`, no drift from `production.json`. **Re-run at :45–:55 past the hour** for the worst-case lag. | 2026-08-05 13:23Z |
 | **B1** | fan-out ratio (expected ~2.0) | 🔵 **1.047 — the ~2× expectation is falsified.** `candles 11,685,065`, `joined_rows 12,233,490`; the join adds **548,425 rows = +4.7%**. | 2026-08-05 ~13:55Z |
 | **B2** | duplicate `asset_id`s that carry candles | **3,278** dup `asset_id`s / 6,562 identities; **2,493 carry candles**, totalling **548,439 candle rows**. Cross-checks B1's surplus to within 14 rows. | 2026-08-05 ~13:55Z |
-| B3 | our read cost vs BE's 70.7M / 4.6 s / 2.1 GiB | ❌ returned empty — `query_log` flush lag. Re-run. | 2026-08-05 ~13:55Z |
+| **B3** | our read cost vs BE's 70.7M / 4.6 s / 2.1 GiB | **B1: 344 ms, 33,003,949 read rows, 707.33 MiB, 274 MiB peak. B2: 255 ms, 16,943,576 rows, 385.69 MiB.** The join is *not* the cost — see below. (First attempt returned empty on `query_log` flush lag; needed `SYSTEM FLUSH LOGS`.) | 2026-08-05 13:50:25Z |
 | C1 | yXLM `priced_volume_share`; shipped vs unfiltered close | | |
 | C2 | distribution of `priced_volume_share` → picks [[0147]]'s X | | |
 | D | unpriced coarse rows, six tiers (upper bound) | | |
@@ -531,12 +531,38 @@ higher. The fan-out is a **correctness** bug affecting the long tail, not a
    wrong-identity attribution into a physical table. Only the *performance*
    rationale for that ordering is withdrawn.
 
-**Still unexplained: where BE's 70.7M read rows come from.** It is not the
-fan-out. Candidates worth one query each — `FINAL` on both sides of the join,
-the `assets` scan itself, and the fact that the identity columns cannot push
-down so the whole window is materialised before filtering. B3 (re-run) starts
-this; if it matters to [[0150]]'s design, it deserves its own measurement rather
-than a guess.
+### B3 — the join is cheap; the *aggregation* is the cost
+
+```
+B1  344 ms   33,003,949 read rows   707.33 MiB   274 MiB peak
+B2  255 ms   16,943,576 read rows   385.69 MiB   290 MiB peak
+BE  4.6 s    70,700,000 read rows   2.1 GiB      (their 104-week window)
+```
+
+**B1 performs the identical `FINAL` join over the identical window and costs
+344 ms.** BE's query costs 4.6 s — 13× more. The difference is not the join and
+not the fan-out; it is everything B1 deliberately skipped: the weighted
+aggregation `sum(close_usd × volume_base) / sum(volume_base)` and the `GROUP BY`
+on **four computed identity columns** (`multiIf`/`if` expressions, so no index
+can help and the whole window must be materialised before grouping).
+
+**This is good news for [[0150]]** — it means the pre-authorised fix targets the
+actual bottleneck. Materialising precomputes exactly the aggregate that costs
+the 4.6 s. Had the cost been in the join, an identity-keyed table would have
+helped far less.
+
+**A second reading, worth confirming:** B1 scans the window twice (two
+subqueries) and read 33.0M rows against 11.685M deduped — ~16.5M raw per scan,
+a **raw:deduped ratio of ~1.41**. B2's single scan read 16.9M, corroborating.
+So roughly **30% of the rows `FINAL` reads in that window are unmerged RMT
+duplicates**. That is a real cost multiplier on every read of these views, it is
+independent of the fan-out, and it may be a [[0136]] after-effect — the coarse
+tables were frozen for 17 days and merges only resumed on 08-03. Worth
+re-measuring once merges have caught up, before sizing [[0150]] against it.
+
+⚠️ **Caveat: cache state.** BE reported 4.6 s "per uncached request"; our 344 ms
+may have hit a warm page cache. The read-row counts are comparable regardless —
+the wall-clock is not.
 
 ### C2 confirmed — and the filter discriminates against the busiest venue
 
