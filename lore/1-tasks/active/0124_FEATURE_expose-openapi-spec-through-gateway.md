@@ -28,7 +28,8 @@ history:
       Promoted to active, picked up by Adam. Scope unchanged: the spec
       document over the deployed API, not the Swagger UI. First open
       question is the auth posture — the task recommends anonymous to
-      match `/health` (`api-gateway-stack.ts:238`); the decision needs
+      match `/health` (the keyless-mock block in `api-gateway-stack.ts`);
+      the decision needs
       recording either way before implementation.
 ---
 
@@ -57,7 +58,10 @@ responses against, and the natural home for the enumerations and ranges
 Design decision needed: **should the spec require an API key?** Recommendation
 is **no** — an API description is public documentation, and gating it behind the
 key a developer does not yet have is a self-service dead end. `/health` is
-already anonymous (`api-gateway-stack.ts:238`), so the precedent for an
+already anonymous (the keyless-mock block in `api-gateway-stack.ts` — this
+Context originally cited line 238, which this task's own edits have since
+shifted; line citations rot, so it is named rather than numbered), so the
+precedent for an
 unauthenticated route exists. Record the choice either way.
 
 ## Implementation
@@ -117,6 +121,10 @@ unauthenticated route exists. Record the choice either way.
 - `common/errors.rs` — `ErrorEnvelope` is now `ToSchema` and is the documented
   body of every 4xx/5xx. Seven key-gated operations gained `401`/`403`; the
   ohlcv route gained its real `503 quote_unavailable`.
+- `backfill/dto.rs`, `assets/handlers.rs`, `ops/mod.rs` — published bounds that
+  already existed in the code but not in the document: `maximum` on the five
+  ledger-sequence fields, `minimum`/`maximum` on the `limit` param, and a
+  one-line `summary` for `/health`. See "The `openapi-validator` result".
 - `lib.rs` — the spec response carries `Cache-Control: public, max-age=3600`
   (new `cache_control::DEPLOY_STATIC` tier).
 - `bin/extract_openapi.rs` — reads `AppConfig::from_env()` and stamps `servers`,
@@ -163,6 +171,65 @@ recording because both were guards that looked like they worked.
   the extracted document) and runs in CI after synth. Same reasoning as
   `lambda-assets.sh` / task 0077: this repo has been bitten three times by
   hand-maintained mirrors. Verified failing in both directions before wiring in.
+
+- **A second validator disagreed, and most of it was worth listening to.** The
+  Notes justify the lint gate as de-risking Tranche 3 AC 2, which names
+  `openapi-validator`. The shipped gate is Redocly and the document passes it
+  cleanly, so the AC as written ("passes **a** linter cleanly") is met. But
+  IBM's `ibm-openapi-validator` — the tool that owns that name on npm — reported
+  **13 errors** on the same bytes. Seven were fixed, six are deliberate; see
+  "The `openapi-validator` result" below for the full accounting.
+
+  The AC's source text is in this repo, at
+  `docs/prices-api-general-overview.md:1332` — our own document, reviewed by
+  SCF. Since the wording is ours, `openapi-validator` is almost certainly
+  generic rather than a procurement of IBM's package. Worth one confirming
+  question to Oskar, who wrote the overview. **Do not edit that AC's wording**:
+  it is a submitted, reviewed document, and rewriting an acceptance criterion
+  after the fact reads as moving goalposts even when the intent is
+  clarification. Record the interpretation in the [[0128]] evidence instead.
+
+## The `openapi-validator` result
+
+`npx ibm-openapi-validator target/openapi.json --errors-only` — **13 errors,
+now 6**. Kept here rather than in a spawned task: the fixable half was fixed,
+and the rest are decisions with reasons, not open work.
+
+### Fixed (7)
+
+| Error | Count | Why it was real |
+| ----- | ----- | --------------- |
+| `ibm-integer-attributes` on 5 ledger fields | 5 | A Stellar ledger sequence is `uint32` in the protocol's `LedgerHeader`. The DTOs carry `u64` because ClickHouse returns `UInt64`, so the document promised a range 4 billion times wider than reality. `maximum: 4294967295` is a domain fact, not a limit we impose. |
+| `ibm-integer-attributes` on the `limit` param | 1 | The 1..=200 bound was **already enforced** (`limit == 0 \|\| limit > MAX_LIMIT` → 400) and entirely invisible to clients — a caller sending `limit=500` got a 400 the document did not explain. Now `minimum: 1, maximum: 200`. [[0119]] owns extending this to the remaining params. |
+| `ibm-operation-summary-length` on `/health` | 1 | utoipa publishes the whole rustdoc as `summary` — 223 characters of maintainer-facing prose where a one-line label belongs. Split into `summary` + `description`. |
+
+### Left, deliberately (6)
+
+| Error | Count | Why not |
+| ----- | ----- | ------- |
+| `ibm-schema-type-format` — "invalid type" | 2 | `Option<T>` renders as `oneOf: [{type: null}, …]`. `"type": "null"` is valid OpenAPI 3.1 / JSON Schema 2020-12; the validator is applying 3.0's type list. |
+| `$ref` must not sit beside other properties | 2 | Same construct: `{$ref, description}`. Legal in 3.1, illegal in 3.0. Removing it would mean dropping the field descriptions. |
+| `ibm-integer-attributes` on `Candle.trade_count` | 1 | **No truthful maximum exists.** A trade count in a candle has no protocol bound. Publishing `u64::MAX` would exceed JSON's safe-integer range and imply clients may receive values they cannot represent; inventing a smaller one risks our own document contradicting a future response. Silence is more honest than a fabricated ceiling. |
+| `ibm-path-segment-casing-convention` | 1 | `/api-docs-json` is not snake_case. Kept — see below. |
+
+The four 3.1 entries are the same root cause and the concrete form of design
+decision #4: they are not quality signals, they are a tool that predates 3.1.
+If the project ever concludes it must satisfy a 3.0-era validator, that is a
+dependency decision (downgrade utoipa) with a cost far beyond this task.
+
+### The path question — decided: keep `/api-docs-json`
+
+The AC allowed "or the agreed public path", and this PR is the last cheap moment
+to rename, so it was weighed rather than defaulted:
+
+- It already exists in the axum router and predates this task.
+- `milestone-1-evidence.md` documents it as the path the router defines.
+- Hyphenated path segments are ordinary REST; snake_case is IBM house style, not
+  a spec requirement. `/openapi.json`, the industry convention, fails the same
+  rule.
+
+Renaming buys one lint error against churn in a submitted document and a broken
+path for anyone already reading it.
 
 ## Verification
 
@@ -252,6 +319,13 @@ away, and `docs/scf/api-endpoints.md` carries the curl to confirm.
 ## Future Work
 
 - [[0144]] — decide and declare the API license (spawned).
+- Ask Oskar whether Tranche 3 AC 2's `openapi-validator` names a specific tool.
+  Deliberately **not** a task: the measurement and the reasoning are recorded
+  above, so it is one question, not a work item. If the answer is "IBM's
+  specifically", that is when it becomes a task — and its first line is the
+  utoipa downgrade.
+- [[0119]] — extend the declared ranges to the params `limit` now models
+  (`type`/`sort`/`order` enums, `search` length, date ranges).
 - [[0126]] — when the custom domain lands, `apiBaseUrl` and the base URL in
   `docs/scf/api-endpoints.md` change together.
 - Spec-diff check in CI (fail a PR that changes the published surface without

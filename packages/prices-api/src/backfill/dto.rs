@@ -18,10 +18,21 @@
 use serde::Serialize;
 use utoipa::ToSchema;
 
+/// Upper bound published for every ledger-sequence field.
+///
+/// These are `u64` in Rust (ClickHouse hands back `UInt64`), but a Stellar
+/// ledger sequence is `uint32` in the protocol's `LedgerHeader`, so `u32::MAX`
+/// is the real ceiling — a domain fact, not a limit we impose. Stated so a
+/// client knows the value always fits in 32 bits. Repeated as a literal on each
+/// field because `#[schema(...)]` is an attribute macro and cannot read a const.
+const LEDGER_SEQ_MAX: u64 = u32::MAX as u64;
+const _: () = assert!(LEDGER_SEQ_MAX == 4_294_967_295);
+
 /// `GET /backfill/status` response.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct BackfillStatus {
     /// Approximate current chain tip (SDEX `target_ledger`).
+    #[schema(maximum = 4_294_967_295u64)]
     pub realtime_tip_ledger: u64,
     /// SDEX archive stream (absent if its row is missing).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -35,12 +46,17 @@ pub struct BackfillStatus {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct SdexStream {
     pub status: String,
+    #[schema(maximum = 4_294_967_295u64)]
     pub current_ledger: u64,
+    #[schema(maximum = 4_294_967_295u64)]
     pub start_ledger: u64,
+    #[schema(maximum = 4_294_967_295u64)]
     pub target_ledger: u64,
     /// `(current - start) / (target - start) * 100`, computed at read time.
     pub progress_pct: f64,
-    /// `target_ledger - current_ledger`, computed at read time.
+    /// `target_ledger - current_ledger`, computed at read time. Bounded by the
+    /// same ledger-sequence ceiling, being a difference of two of them.
+    #[schema(maximum = 4_294_967_295u64)]
     pub ledgers_remaining: u64,
     /// Most recent successful push (`null` until the first push).
     pub last_push_at: Option<String>,

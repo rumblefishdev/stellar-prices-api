@@ -137,7 +137,13 @@ pub struct ListParams {
          description = "price | volume_24h | change_24h | code (default volume_24h)"),
         ("order" = Option<String>, Query, description = "asc | desc (default desc)"),
         ("cursor" = Option<String>, Query, description = "opaque pagination cursor"),
-        ("limit" = Option<u32>, Query, description = "1..=200 (default 50)"),
+        // The bound is enforced (`limit == 0 || limit > MAX_LIMIT` → 400) but was
+        // invisible to clients until now: a caller sending limit=500 got a 400
+        // with nothing in the document explaining why. Task 0119 owns extending
+        // this treatment to the remaining params (enums, `search` length, date
+        // ranges); this one is declared here because it is already enforced.
+        ("limit" = Option<u32>, Query, description = "1..=200 (default 50)",
+         minimum = 1, maximum = 200),
     ),
     responses(
         (status = 200, description = "Asset list page", body = AssetListResponse),
