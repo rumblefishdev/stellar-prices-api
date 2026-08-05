@@ -368,26 +368,35 @@ The six windows, read from `rollups.sql:95,116,137,158,179,200`:
 **Run these one tier at a time.** They are unbounded in time by design — that is
 the point — so they scan whole tables and will not prune partitions.
 
+**Run it as a per-month breakdown, not a single total.** Same scan cost, far more
+information: the months tell us immediately whether the frozen estate is
+concentrated in the known incident windows — [[0136]]'s 2026-07-21 → 08-03
+freeze and [[0111]]'s four-day enrichment outage — or spread evenly, which would
+mean a different cause. Only the current month can contain inside-window rows,
+so the window question answers itself.
+
 ```sql
--- template: substitute TABLE and WINDOW from the table above
+-- template: substitute the tier. 24 months bounds the scan and prunes partitions.
 SELECT
-    'price_ohlcv_1h'                                              AS tbl,
-    countIf(ts_in)                                                AS zeroed_inside_window,
-    countIf(NOT ts_in)                                            AS zeroed_outside_window,   -- <- sizes 0148
-    uniqExactIf(asset_id, NOT ts_in)                              AS assets_outside,
-    minIf(timestamp, NOT ts_in)                                   AS oldest_outside,
-    maxIf(timestamp, NOT ts_in)                                   AS newest_outside
-FROM (
-    SELECT asset_id, timestamp, close, close_usd,
-           timestamp >= toStartOfInterval(now() - INTERVAL 8 HOUR, INTERVAL 1 HOUR) AS ts_in
-    FROM prices.price_ohlcv_1h FINAL
-    WHERE close_usd = 0 AND close > 0
-)
+    toYYYYMM(timestamp)                                             AS month,
+    count()                                                         AS total_rows,
+    countIf(close_usd = 0 AND close > 0)                            AS zeroed,
+    round(countIf(close_usd = 0 AND close > 0) / count(), 4)        AS share,
+    uniqExactIf(asset_id, close_usd = 0 AND close > 0)              AS assets_zeroed
+FROM prices.price_ohlcv_1d FINAL
+WHERE timestamp >= now() - INTERVAL 24 MONTH
+GROUP BY month
+ORDER BY month DESC
 SETTINGS do_not_merge_across_partitions_select_final = 1;
 ```
 
-Repeat with `(_15m, 2 HOUR, 15 MINUTE)`, `(_4h, 1 DAY, 4 HOUR)`,
-`(_1d, 7 DAY, 1 DAY)`, `(_1w, 60 DAY, 1 WEEK)`, `(_1M, 400 DAY, 1 MONTH)`.
+Repeat per tier. Cheapest first — `_1M`, `_1w`, `_1d` — then `_4h`, `_1h`,
+`_15m`. Widen past 24 months only once the recent shape is known.
+
+⚠️ Remember this is D's upper-bound predicate, so it counts the permanent
+exotic-quote floor too. **A month's `zeroed` is the ceiling; the D2 join gives
+the true figure.** Given the resolver finding above, expect the ceiling to be
+substantially higher than the defect.
 
 **Read it as:** `zeroed_outside_window` is the estate that will still be wrong
 the day after [[0146]] ships. If it is small, [[0148]] is a footnote and the
