@@ -43,18 +43,40 @@ workaround you adopted for finding 1 walks you straight into finding 3.** See
 
 ## Finding 1 — native XLM `price_usd` = 0
 
-**Confirmed, and it is close to chronic for XLM specifically** — not
-intermittent as it might look from a single sample. ⟪PENDING A2: XLM publishes
-`price_usd = 0` for N of the last 24 hours.⟫
+**Confirmed on production, and it is not intermittent — it is continuous.**
+Measured 2026-08-05 13:22 UTC:
+
+```
+prices.current_prices, native XLM (asset_id 4)
+  price_usd  (what you read) : 0
+  vwap_24h                   : 0.16726314490953
+  with the one-line guard    : 0.16720799309045
+  updated_at                 : 13:22:00   <- the view is ticking normally
+```
 
 **Cause.** `mv_current_prices` computes the headline price as
 `argMax(close_usd, timestamp)` over the trailing 24h of 1-minute candles, with
-**no `close_usd > 0` guard**. `close_usd` is baked by a separate enrichment pass
-that runs hourly, so the newest candle is usually not yet priced — and `argMax`
-returns whatever the newest candle holds, including the zero. XLM is the worst
-case because it is the most-traded asset (so it almost always has a candle newer
-than the last enrichment pass) and it has the widest set of counter-assets (so
-its newest candle is often an exotic-quote pair that will *never* be priced).
+**no `close_usd > 0` guard**. `close_usd` is written by a separate enrichment
+pass that runs behind the candle tip — we measure the frontier at **~2 minutes**
+behind live. `argMax` takes the *newest* candle, so it returns whatever that
+candle holds, including the zero.
+
+The short lag does not make this rare — **it is what makes it permanent.** XLM
+produces a candle nearly every minute, so its newest candle is always inside the
+2-minute unpriced window. The aggregate therefore reads a zero on essentially
+every refresh. This is why you see it constantly rather than occasionally.
+
+It also bounds the cost of the fix, which matters for the contract question
+below: **the guarded value is ~2–3 minutes stale, not an hour.** The trade is a
+two-minute-old real price against a permanent zero.
+
+For completeness, since it affects the *shape* of the fix and not this finding:
+we do have candles that can never be priced — pairs whose quote is not
+USDC/USDT/XLM and which have no oracle. **That is not what is happening to
+XLM.** The tip we sampled was XLM/USDC on the SDEX orderbook, which we price
+from an oracle, and every completed hour in the last 24 was fully priced. Plain
+lag explains your finding entirely. We mention the unpriceable class only
+because it is the reason your option A cannot work — see finding 3.
 
 The fix is one line — `argMaxIf(close_usd, timestamp, close_usd > 0)`.
 
@@ -76,13 +98,31 @@ of being zero. We think that is obviously the right trade for your use case, but
 say so if a stale-but-real price is worse for you than an explicit absence —
 because the third option is to publish `NULL`/absent and make you handle it.
 
-**A consequence we found that you have not hit yet, but will.** The same
-unguarded pattern sits in the `per_source` CTE, where it is "rescued" downstream
-by a `WHERE src_price > 0`. The effect: **a source whose newest candle is not yet
-enriched disappears entirely from the `sources` JSON and from the `vwap_24h`
-weighting.** So during enrichment lag you are not just seeing a wrong
-`price_usd` — you may be seeing a `vwap_24h` computed over a subset of venues,
-with no indication that happened. Same fix, same task.
+**A second consequence you have not hit yet, but will — and we only found it
+because of your report.** The same unguarded pattern sits in the `per_source`
+CTE, where it is "rescued" downstream by a `WHERE src_price > 0`. The effect:
+**a venue whose newest candle is not yet enriched disappears entirely from the
+`sources` JSON and from the `vwap_24h` weighting.** In the same sample:
+
+```
+sources: {"aquarius": …, "phoenix": …, "soroswap": …}      <- sdex absent
+```
+
+`sdex` had traded in almost every minute of the preceding 20, including a
+24,079-unit print. It is missing because its newest candle was not yet enriched.
+So the `vwap_24h` above is not "the 24h VWAP" — it is the VWAP over whichever
+venues happened to be enriched at refresh time, with nothing in the payload
+saying so.
+
+**The bias runs the wrong way.** A venue is dropped precisely when its newest
+candle is inside the enrichment lag — which is *more* likely the more actively it
+trades. A quiet venue's newest candle is usually behind the frontier and
+therefore already priced. **The busier the venue, the more likely it is to be
+excluded from the number.**
+
+If you are using `vwap_24h` or reading `sources` for venue coverage, treat both
+as unreliable during the lag window until this ships. Same one-line fix, same
+task.
 
 ---
 
