@@ -241,11 +241,27 @@ coarse estate this has already zeroed.⟫
 ### On your two proposed options
 
 **Option A — "exclude the bucket until all its rows are enriched" — cannot
-terminate, and we want to be blunt about why.** Our enrichment has a
-**permanent** floor by design: candles whose quote is not USDC/USDT/XLM and which
-have no oracle keep `close_usd = 0` **forever**. Any bucket containing one such
-row would be suppressed in perpetuity. This is the kind of gate that looks
-correct in a test fixture and silently strands real assets in production.
+terminate, and we want to be blunt about why.** Our enrichment resolves a USD
+price only when the candle's **quote** is USDC, USDT or XLM, or has a Reflector
+oracle row. Everything else keeps `close_usd = 0` indefinitely, so any bucket
+containing one such row would be suppressed in perpetuity. This is the kind of
+gate that looks correct in a test fixture and silently strands real assets in
+production.
+
+**We should be straight with you about one thing here, because it cuts against
+us.** That floor is the reach of our current resolver, not a fact about the
+market. Measured over seven days: yXLM-quoted candles are **never** priced —
+114,330 of them — even though we price yXLM itself perfectly well as a base
+asset and publish its USD price. Same for XRP, 42,296 rows. Across five quote
+assets we sampled, **18.4% of candles are unpriceable purely because the
+resolver does not pivot through an already-priced quote.**
+
+So option A cannot terminate *against today's resolver*, which is the honest
+version of the claim. Adding that second pivot hop is now on our list — it
+shrinks the problem at the source instead of working around it downstream, and
+it would shrink the population every other fix here has to handle. It does not
+change our recommendation below, but you should know the constraint we are
+citing is one we can partly remove.
 
 **Option B — "weight over the unenriched rows too" — taken literally, is worse
 than the status quo.** We measured it: removing the filter returns **0.000023**

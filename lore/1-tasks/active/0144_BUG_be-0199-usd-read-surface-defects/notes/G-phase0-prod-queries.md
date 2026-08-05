@@ -837,8 +837,57 @@ the gate's denominator depends on it. Either 0151 lands first, or 0147 derives
 priceability at read time by joining the quote asset against the oracle set,
 which is a design decision that belongs in the ADR anyway.
 
-⚠️ **One confirmation still owed:** that quotes `261`, `40`, `10`, `174` really
-are unpriceable rather than merely un-enriched. Query below.
+#### Confirmed — and the floor is bigger and more fixable than documented
+
+```
+quote_asset_id  asset            ever_priced_as_quote / rows_as_quote   (7 days)
+  3  USDC       GA5ZSEJY…                248,132 / 248,223   (99.96%)
+  4  XLM        native                   487,424 / 487,645   (99.95%)
+ 10  yXLM       GARDNV3Q7…                     0 / 114,330   ← the real yXLM
+ 40  XRP        GBXRPL45…                      0 /  42,296
+174  AFR        GBX6YI45…                      0 /   6,400
+261  WHIPLASH   GC7NQHBF…                      0 /   2,982
+2267 yXLM       GD23M4RJ…                      0 /     128
+```
+
+The USDC/XLM quotes price at 99.95%+ — the residual is the enrichment-lag tip,
+a clean cross-check on finding 1. The other five never price at all, confirming
+the permanent floor.
+
+**But look at quote `10`.** That is **Ultra Capital's real yXLM** — the same
+asset C1 showed us pricing perfectly well at ~0.167 **as a base**. We know its
+USD price. We publish its USD price. Yet **114,330 candles quoted in yXLM over
+seven days carry `close_usd = 0`**, because `ch_enrich.rs` resolves only:
+
+- the Reflector oracle tier, where a `quote_asset_id` has an oracle row; and
+- the peg-pivot tier, which handles **USDC/USDT** (peg to $1) and **XLM**
+  (pivot through XLM/USDC) — `ch_enrich.rs:25-31`.
+
+yXLM is in neither set, so every yXLM-quoted pair is unpriceable **by
+construction, not by necessity**. The same holds for XRP (42,296 rows).
+
+**This reframes "permanent".** The exotic-quote floor is not a fact about the
+market — it is the current reach of a two-tier resolver. A **second pivot hop**
+— price a candle whose quote is any asset we already have a USD close for —
+would resolve yXLM, XRP and everything else in the long tail that trades against
+a priced asset. On this sample that is **166,136 of 902,004 rows (18.4%)** in
+seven days, from five quotes alone.
+
+**Consequences:**
+
+1. **The "cannot terminate" argument to BE stays correct**, but should be stated
+   honestly as *"cannot terminate against today's resolver"* rather than as a
+   law of nature. We should not use a limitation we can fix to justify declining
+   a request.
+2. **"Priceable" is not a static property of a quote asset.** [[0147]]'s
+   denominator cannot be a hard-coded quote allowlist, because the set grows the
+   moment the resolver does. It has to be derived — "do we have a USD price for
+   this quote in this bucket?" — which is the same read-time derivation the
+   [[0151]] ADR needs to specify.
+3. **This looks like a new task**, and a valuable one: it shrinks the unpriced
+   estate at the source rather than papering over it downstream, and it would
+   reduce the population every other fix in this plan has to cope with. Not in
+   0144's scope — proposed, not filed.
 
 ### C2 confirmed — and the filter discriminates against the busiest venue
 
