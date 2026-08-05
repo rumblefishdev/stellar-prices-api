@@ -719,13 +719,13 @@ the fixes ship.
       [`notes/G-phase0-prod-queries.md`](notes/G-phase0-prod-queries.md), A–E
       including the four additions listed above. Read-only; no write statement
       appears in it by design.
-- [ ] Queries A–D run on prod and their results recorded in that note's results
-      table, to size the blast radius (how many assets, how much of the coarse
-      estate). **Note D2, not D, is the defect count** — D over-counts by
-      including the permanent exotic-quote floor.
-- [ ] **Query E** run — how many coarse rows carry `close_usd = 0 AND close > 0`
-      *outside* the current MV re-aggregation windows, i.e. the estate only the
-      [[0114]] sweep can reach. Sizes [[0148]].
+- [x] Queries A–D run on prod and their results recorded in that note's results
+      table. **D2, not D, is the defect count** — and it came in at 115 `_1h`
+      rows / 449 `_1d` rows, **all in the in-flight bucket**. D's ceiling (~68%)
+      turned out to be the enrichment resolver's reach → [[0154]].
+- [x] **Query E** run, as a per-month breakdown across `_1d`/`_1w`/`_1M`. The
+      frozen estate is **flat at 65–72% for 24 months with no incident spike**,
+      so it is not [[0136]]/[[0111]] damage and [[0148]] shrinks accordingly.
 - [x] BE reply drafted —
       [`notes/G-be-0199-reply.md`](notes/G-be-0199-reply.md). Covers 0039's
       actual status and 0135 as the real owner of native XLM pricing; why "wait
@@ -734,8 +734,12 @@ the fixes ship.
       `priced_volume_share` we will ship instead; the fan-out's *correctness*
       consequence for their identity keying; and the multi-hour-median advice for
       the window before the gate lands.
-- [ ] BE reply **sent** — blocked only on the ⟪PENDING⟫ figures from A–E and on
-      [[0135]]'s contract call, which the reply asks them to weigh in on.
+- [x] Contract call settled (latest *priced* close; C2 guarded the same way) —
+      see Decisions below. The reply now states it rather than asking.
+- [~] BE reply **handed over 2026-08-05** for the operator to send —
+      [`notes/G-be-0199-reply-short.md`](notes/G-be-0199-reply-short.md), the
+      plain-language version. **Closes when the operator confirms it is sent**;
+      that is the last act of this task.
 - [ ] No pre-roll can write a coarse row whose `close_usd` is 0 while a priced
       sub-bucket exists underneath it — **before** the [[0088]] / [[0136]]
       pre-rolls run. → [[0145]]
