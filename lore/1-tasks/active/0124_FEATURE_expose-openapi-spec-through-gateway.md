@@ -273,6 +273,28 @@ decision #4: they are not quality signals, they are a tool that predates 3.1.
 If the project ever concludes it must satisfy a 3.0-era validator, that is a
 dependency decision (downgrade utoipa) with a cost far beyond this task.
 
+**Decided: stay at 5.** Reaching 0 is available and was measured, not assumed —
+`ibm-openapi-validator -r <ruleset>` accepts a Spectral ruleset, and switching
+off `ibm-schema-type-format`, `no-$ref-siblings` and
+`ibm-path-segment-casing-convention` produces "passed the validator". It is not
+taken, for two reasons.
+
+The document is already right: `type: "null"` and `{$ref, description}` are
+valid 3.1, so removing the findings would mean either disabling rules globally
+(broader than the two narrow path entries in `.redocly.lint-ignore.yaml`) or
+down-converting to 3.0 before linting — and the latter breaks decision #9 by
+making the linted document stop being the served one.
+
+Second, and the part that was not known when the six were first accounted for:
+**errors are not where IBM's ruleset stops.** At warning level it also reports
+`ibm-error-response-schemas` against `ErrorEnvelope`, demanding a `trace` string
+and an `errors` array — IBM's error-container shape, not ours. No ruleset toggle
+removes that honestly, and satisfying it means redesigning the error body on
+every endpoint, breaking every client. So "adopt IBM's validator" is not a lint
+cleanup; it is an API redesign plus a utoipa downgrade. That materially raises
+the cost of a "yes, IBM's specifically" answer to the open question for Oskar,
+and should be said out loud when asking it.
+
 ### The path question — decided: keep `/api-docs-json`
 
 The AC allowed "or the agreed public path", and this PR is the last cheap moment
@@ -378,7 +400,9 @@ away, and `docs/scf/api-endpoints.md` carries the curl to confirm.
 - [[0144]] — decide and declare the API license (spawned).
 - Ask Oskar whether Tranche 3 AC 2's `openapi-validator` names a specific tool.
   Deliberately **not** a task: the measurement and the reasoning are recorded
-  above, so it is one question, not a work item. If the answer is "IBM's
+  above, so it is one question, not a work item. Ask it with the cost attached —
+  "IBM's specifically" now means a utoipa downgrade **and** an `ErrorEnvelope`
+  redesign, not a lint pass. If the answer is "IBM's
   specifically", that is when it becomes a task — and its first line is the
   utoipa downgrade.
 - [[0119]] — extend the declared ranges to the params `limit` now models
