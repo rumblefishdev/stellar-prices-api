@@ -71,6 +71,26 @@ history:
       `docs/runbooks/0136-coarse-rollup-merge-recovery.md` sequence. Monday,
       BE reachable, watcher present — the conditions the 07-31 deferral asked
       for. Execution log below.
+  - date: 2026-08-05
+    status: active
+    who: okarcz
+    note: >
+      WATCH PERIOD CLOSED - all six tiers current. `_1M` reached 2026-08-01 at
+      the 00:00 refresh, which was the last outstanding tip. Full reading
+      10:15Z: _15m 10:15, _1h 10:00, _4h 08:00, _1d 08-05 00:00, _1w 08-03,
+      _1M 08-01. All nine refreshable MVs Scheduled with empty exception. That
+      confirms the 08-04 diagnosis was right - `_1M` was not re-freezing, it
+      read `_1w` before `mv_ohlcv_1d_to_1w` had written the week row. So
+      [[0143]]'s "bounded, self-healing" framing HOLDS and its severity does
+      not need revisiting. The race itself is unchanged though:
+      mv_ohlcv_1d_to_1w and mv_ohlcv_1w_to_1M both show last_refresh_time
+      2026-08-05 00:00:01, same second, no DEPENDS ON - it resolved in our
+      favour, which is ordering luck, not a fix. [[0105]] is UNBLOCKED (the
+      `_bak` rollback path is no longer needed). Remaining here is the
+      07-21 -> 08-03 gap pre-roll, which has picked up a NEW dependency:
+      [[0144]] C1 found the same unguarded argMax(close_usd, ...) in all four
+      pre-roll scripts, so running the gap pre-roll before [[0145]] lands would
+      manufacture a fresh estate of coarse rows with close_usd = 0.
 ---
 
 # Every coarse OHLCV table has been frozen since 2026-07-21
@@ -540,22 +560,45 @@ satisfied: cleanup is off, and the `_bak` tables are intact ([[0105]] has not ru
 
 ## Remaining work
 
-1. **Confirm `_1w` / `_1M` advance after 00:00** tonight. That completes the
-   watch period and unblocks [[0105]].
+1. ✅ **DONE 2026-08-05 — the watch period is closed and [[0105]] is unblocked.**
 
    > **2026-08-04 — half done.** `_1w` reached `2026-08-03` ✅. `_1M` stayed at
    > `2026-07-01` ❌ — but **not** a re-freeze: `mv_ohlcv_1w_to_1M` ran cleanly
    > at 00:00 (status `Scheduled`, empty exception) and simply read `_1w` before
    > `mv_ohlcv_1d_to_1w` had written the `08-03` week row. Both are
    > `REFRESH EVERY 1 DAY` with no `DEPENDS ON`, so they race. Spawned as
-   > [[0143]]. The data is present (`_1w` yields an `2026-08-01` bucket of
-   > 11,506 rows), so `_1M` should reach `2026-08-01` at the `2026-08-05
-   > 00:00:00` refresh. **Re-run the verdict query then — [[0105]] stays blocked
-   > until it does.**
-2. **The 07-21 → 08-03 gap pre-roll** — now unblocked. `_1d` jumping straight
-   from 07-21 to 08-03 is the hole made visible. **BOUNDED INCREMENTAL only —
-   never `preroll.sql`**, which expects TRUNCATE-d tables and would re-run the
+   > [[0143]].
+   >
+   > **2026-08-05 10:15Z — `_1M` reached `2026-08-01` ✅.** Every tier is now
+   > current, ten days after the freeze ended:
+   >
+   > | `_1m` | `_15m` | `_1h` | `_4h` | `_1d` | `_1w` | `_1M` |
+   > |---|---|---|---|---|---|---|
+   > | live | 10:15 | 10:00 | 08:00 | 08-05 00:00 | 08-03 | **08-01** |
+   >
+   > All nine refreshable MVs `Scheduled`, empty `exception`. This confirms the
+   > 08-04 read — it was the cascade racing, not the assignee dying again — so
+   > **[[0143]]'s "bounded, self-healing" framing holds** and its severity does
+   > not need revisiting. ⚠️ The race is still uncontrolled: `mv_ohlcv_1d_to_1w`
+   > and `mv_ohlcv_1w_to_1M` both report `last_refresh_time 2026-08-05 00:00:01`
+   > — the same second, with no `DEPENDS ON`. It resolved in our favour this
+   > time. That is ordering luck, not a fix, and it stays [[0143]]'s to close.
+
+2. **The 07-21 → 08-03 gap pre-roll.** `_1d` jumping straight from 07-21 to
+   08-03 is the hole made visible. **BOUNDED INCREMENTAL only — never
+   `preroll.sql`**, which expects TRUNCATE-d tables and would re-run the
    [[0090]] history loss.
+
+   > ⛔ **New dependency added 2026-08-05: this now waits on [[0145]].**
+   > [[0144]]'s schema-wide audit (C1) found the same unguarded
+   > `argMax(close_usd, …)` in **all four pre-roll scripts** — 121 sites — that
+   > the report had only pinned on the rollup MVs. Run the gap pre-roll against
+   > today's scripts and every coarse row whose newest sub-bucket is not yet
+   > enriched lands with `close_usd = 0`, manufacturing a fresh zeroed estate at
+   > backfill scale — rows that then age out of the MV re-aggregation windows
+   > and need the [[0114]] sweep to repair. [[0145]] is mechanical and unblocked
+   > (plain scripts, no provisioned object, no [[0142]] no-op trap), so the
+   > ordering costs little.
 3. **[[0137]]** — the freshness alarm. Health was measured on MV status, not on
    the data, which is why this ran ten days silent. Recovery is not complete
    without it.
@@ -727,20 +770,28 @@ Detection is a separate deliverable → **[[0137]]**.
       four tests green on the prod pin 2026-07-31 (PR #159). Ruled out: cluster
       restart (operator, too broad). Unvalidated: `OPTIMIZE` as a stopgap.
       **Not yet run against production.**
-- [ ] All six coarse tables current again, `max(timestamp)` within one refresh
-      cadence of now.
-- [ ] `price_ohlcv_15m` accepting inserts; `TOO_MANY_PARTS` no longer firing.
-- [ ] The six Phoenix mutations either completed or explicitly re-planned — not
-      killed.
+- [x] All six coarse tables current again, `max(timestamp)` within one refresh
+      cadence of now — **verified 2026-08-05 10:15Z**, `_1M` (the last tip) at
+      `2026-08-01`. All nine MVs `Scheduled`, empty `exception`.
+- [x] `price_ohlcv_15m` accepting inserts; `TOO_MANY_PARTS` no longer firing —
+      `NewPart` at 2026-08-03 09:54:00 ended the freeze; parts 5,027 → 15.
+- [x] The six Phoenix mutations either completed or explicitly re-planned — not
+      killed. All six executed on attach; `system.mutations WHERE is_done = 0`
+      returns zero rows.
 - [ ] The 2026-07-21 → recovery gap closed by a **bounded incremental** pre-roll
       (never `preroll.sql`), with deep history verified against `_bak`.
+      **⛔ Gated on [[0145]] since 2026-08-05** — the pre-roll scripts carry
+      [[0144]]'s unguarded `argMax(close_usd, …)`.
 - [ ] A freshness alarm exists that would have caught this within a day →
       **[[0137]]**.
 - [ ] [[0072]]'s `change_7d_pct` verified non-zero for assets with 7d of data.
 - [ ] BE told that coarse `prices` data was stale and has moved — their 0199
       LP-analytics contract reads the 1h/1d views. **Not** framed as their
       operation: the 07-17 window was ours (see Provenance).
-- [ ] [[0105]] unblocked only after the above holds for a watch period.
+- [x] [[0105]] unblocked only after the above holds for a watch period —
+      **unblocked 2026-08-05**, two days of healthy autonomous rollups with
+      every tier current. The `_bak` tables are no longer the rollback path for
+      anything pending.
 
 ## Notes
 

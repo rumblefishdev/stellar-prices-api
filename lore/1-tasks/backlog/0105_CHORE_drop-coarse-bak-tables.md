@@ -22,21 +22,41 @@ history:
       pending ALTER DELETE mutations execute. Do not drop them until that is
       verified, and restart the watch period from the recovery rather than from
       2026-07-17.
+  - date: 2026-08-05
+    status: backlog
+    who: okarcz
+    note: >
+      UNBLOCKED. [[0136]]'s watch period closed today - the DETACH/ATTACH
+      recovery ran 2026-08-03 and all six tiers are current as of 10:15Z, with
+      `_1M` reaching 2026-08-01 at the 00:00 refresh (the last outstanding tip).
+      All nine refreshable MVs Scheduled with empty exception, part counts flat
+      against the post-recovery baseline, and the six 0097 Phoenix mutations
+      completed on attach. The watch clock restarted from the recovery as this
+      task required, not from 2026-07-17. Data integrity was already verified
+      live-vs-_bak with FINAL over a pre-incident window: zero delta on all four
+      sources plus `_1d` deep history. Ready to run whenever it is picked up -
+      still just DROP TABLE on prod, hand the block to the operator.
 ---
 
 # Drop the six price_ohlcv_*_bak coarse backup tables
 
-> ## ⛔ BLOCKED — do not run until [[0136]] is verified (added 2026-07-30)
+> ## ✅ UNBLOCKED 2026-08-05 — [[0136]] is verified
 >
-> All six coarse tables have been frozen since 2026-07-21 and the recovery
-> (`docs/runbooks/0136-coarse-rollup-merge-recovery.md`) resumes merges and lets
-> six pending `ALTER … DELETE` mutations execute. **These `_bak` tables are the
-> only rollback path for that.** Dropping them now would leave the recovery
-> irreversible.
+> *Was blocked 2026-07-30 through 2026-08-05: the six coarse tables had been
+> frozen since 07-21 and these `_bak` copies were the only rollback path for the
+> recovery, which resumed merges and let six pending `ALTER … DELETE` mutations
+> execute.*
 >
-> The watch period this task waits for was also never really satisfied: the live
-> rollup did *not* hold — it stalled four days after the 0095 change. Restart the
-> watch clock from the 0136 recovery, not from 2026-07-17.
+> The recovery ran on 2026-08-03 (`DETACH`/`ATTACH` per table) and the watch
+> period — restarted from the recovery, as this task demanded, **not** from
+> 2026-07-17 — closed on 2026-08-05 with every tier current: `_15m` 10:15,
+> `_1h` 10:00, `_4h` 08:00, `_1d` 08-05, `_1w` 08-03, `_1M` **08-01**. All nine
+> refreshable MVs `Scheduled` with empty `exception`; part counts flat against
+> the post-recovery baseline.
+>
+> Integrity was verified live-vs-`_bak` with `FINAL` over a pre-incident window:
+> **zero delta on all four sources**, plus `_1d` deep history identical. The
+> backups have nothing left to roll back.
 
 ## Summary
 
