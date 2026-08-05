@@ -25,6 +25,22 @@ history:
       Promoted to active. Time-boxed: the ACs require re-measuring under the
       active backfill write load from 0088, which ends when its pass 2 finishes
       (~2026-07-31). Measure before choosing among the four options.
+  - date: 2026-08-05
+    status: active
+    who: okarcz
+    note: >
+      **This task now blocks the largest win in the [[0144]] plan.** 0144's
+      phase 0 measured that ~68% of every OHLCV tier has no USD price — 100.0%
+      of exotic-quote rows, 71.9% of `_1d`, stable for 24 months — and the cause
+      is the enrichment resolver's reach, not any read-surface bug. The fix is
+      [[0154]] (a second pivot hop), which adds a join to this pass. Decided
+      2026-08-05: **0111 ships before 0154.** So the existing framing —
+      "not acutely urgent, cost scales with table size not era" — remains
+      accurate about the *risk* and is now wrong about the *priority*: it is on
+      the critical path of the biggest coverage improvement available to BE.
+      Note also that the 0144 measurements re-confirmed the hourly cadence
+      (`rate(1 hour)`, deployed rule matches `production.json`, no drift), so
+      this task's schedule assumptions are unchanged.
 ---
 
 # Enrichment re-scans the whole table every batch

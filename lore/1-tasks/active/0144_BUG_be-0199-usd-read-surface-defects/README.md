@@ -608,11 +608,11 @@ Everything here is measured — details and queries in
 
 | # | Work | Task | Blocked on | Why here |
 |---|---|---|---|---|
-| 0 | Queries A–E on prod; written reply to BE | **0144** (this) | [[0135]] call before sending | ✅ measurements done; reply drafted |
-| 1 | Guard `argMax` in the 4 pre-roll scripts (121 sites) | **[[0145]]** | — | ⏰ **unchanged** — must precede the 0088 / 0136 pre-rolls |
+| 0 | Queries A–E on prod; written reply to BE | **0144** (this) | — | ✅ **complete** — measurements recorded, contract decided, reply ready to send |
+| 1 | Guard `argMax` in the 4 pre-roll scripts (121 sites) | **[[0145]]** | — | ⏰ **PREEMPTS THE QUEUE** (decided 08-05) — must precede the 0088 / 0136 pre-rolls |
 | 2 | Guard `argMax` in `current.sql` (2 sites) + the `sources`/`vwap_24h` contract call | **[[0135]]** | contract decision only | Fixes the XLM symptom BE led with; still the fastest visible win |
 | 3 | Guard `argMax` in the 6 rollup MVs | **[[0146]]** | [[0142]] drift detection, [[0137]] alarm | **Re-justified:** live-edge correctness, not historical rescue |
-| 4 | **Second pivot hop in enrichment** | **[[0154]]** | [[0111]] (cost) | ⬆️ **NEW, and the largest win available** — moves ~68% of the estate |
+| 4 | **Second pivot hop in enrichment** | **[[0154]]** | **[[0111]] — decided 08-05, hard blocker** | ⬆️ **NEW, and the largest win available** — moves ~68% of the estate |
 | 5 | ADR — `close_usd` zero-as-missing | **[[0151]]** | — | ⬆️ **moved from last to here** — [[0147]] and [[0154]] both need its definition |
 | 6 | Volume-coverage gate on `price_usd_series*` | **[[0147]]** | Phase 5 | ⬇️ **denominator must be priceable volume**, not total |
 | 7 | Identity fan-out | **[[0139]]** | — | **Runs in parallel from day one.** Correctness only — the ~2× read claim was falsified |
@@ -627,8 +627,8 @@ Phase 0 ✅ ─┬─> Phase 1 (preroll, 0145) ──────────> [
             ├─> Phase 2 (current.sql, 0135) ──────> [XLM off the 0 sentinel]
             ├─> 0142 drift + 0137 alarm ─> Phase 3 (0146) ─┬─> Phase 8 (0148)
             │                                              └─> Phase 9 (0149)
-            ├─> Phase 5 (ADR, 0151) ─┬─> Phase 6 (gate, 0147) ─┐
-            │                        └─> Phase 4 (0154) ──> [~68% of the estate]
+            ├─> Phase 5 (ADR, 0151) ──> Phase 6 (gate, 0147) ──┐
+            ├─> 0111 (now a blocker) ─> Phase 4 (0154) ──> [~68% of the estate]
             └─> Phase 7 (fan-out, 0139) ───────────────────────┴─> Phase 10 (0150)
 ```
 
@@ -642,18 +642,24 @@ Phase 0 ✅ ─┬─> Phase 1 (preroll, 0145) ──────────> [
   "prevents the next surface inheriting it"; it is now a prerequisite of two
   tasks.
 
-### Open decisions
+### Decisions — all four settled 2026-08-05
 
-1. **[[0135]]'s contract call** — "latest close" (today: `0` for XLM
-   essentially always) vs "latest *priced* close" vs **absent/`NULL`**. Phase 0
-   priced the trade: the guarded value is **up to ~50 minutes stale, averaging
-   ~25**. Recommend latest-priced. **Blocks the BE reply from being sent**, not
-   just Phase 2. Also carries the C2 question about `sources`/`vwap_24h`.
-2. **Does Phase 1 preempt the active queue?** Unchanged and still open.
-3. **Does [[0154]] wait for [[0111]]?** 0154 adds a join to a pass that already
-   re-scans the whole table each batch. Shipping it on today's enrichment may
-   reproduce 0111's outage at a larger scale. Recommend 0111 first — which
-   raises 0111 from "not acutely urgent" to a blocker of the biggest win.
+| # | Decision | Answer |
+|---|---|---|
+| 1 | `price_usd` when the tip is un-enriched | ✅ **Latest *priced* close** — `argMaxIf(close_usd, timestamp, close_usd > 0)`. Contract becomes "latest priced close"; value is up to ~50 min stale, ~25 avg, against today's permanent zero. No schema change. → [[0135]] |
+| 2 | An un-enriched venue in `sources` / `vwap_24h` (C2) | ✅ **Guard it the same way** — `argMaxIf` on `per_source.src_price` so the venue carries its latest *priced* close and stays in the payload. `vwap_24h` returns to being weighted over all venues. → [[0135]] |
+| 3 | Does [[0145]] preempt the queue? | ✅ **Yes — it jumps the queue now.** Mechanical, unblocked, and both queued pre-rolls depend on it. Not left to chance against pass 2's ETA. |
+| 4 | Does [[0154]] wait for [[0111]]? | ✅ **Yes — 0111 first.** 0154 adds a join to a pass that already re-scans the whole table per batch. **This promotes [[0111]] to a blocker of the largest win in the plan.** |
+
+**Consequences of decision 1+2 for the BE reply:** it can now be sent. The reply
+states the chosen contract rather than asking BE to pick, while still inviting
+them to object if a stale-but-real price is worse for their use case than an
+explicit absence.
+
+**Consequence of decision 4 for the phase order:** [[0111]] is no longer an
+independent performance task — it sits directly in front of Phase 4. Its own
+framing ("not acutely urgent, cost scales with table size not era") is accurate
+but no longer the whole picture, and its file has been updated to say so.
 
 ---
 

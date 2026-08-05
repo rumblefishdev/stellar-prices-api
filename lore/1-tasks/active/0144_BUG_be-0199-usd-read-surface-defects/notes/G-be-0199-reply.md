@@ -1,9 +1,9 @@
 ---
 title: "Reply to BE on their 0199 report — the three USD read-surface findings"
 type: generation
-status: developing
+status: mature
 spawns: []
-tags: [be-facing, contract, prices-api, draft]
+tags: [be-facing, contract, prices-api, ready-to-send]
 links:
   - "../../../../../packages/prices-clickhouse/schema/views.sql"
   - "../../../../../packages/prices-clickhouse/schema/current.sql"
@@ -21,15 +21,24 @@ history:
       the answer: the argMax defect reaches only the in-flight bucket, and the
       68% unpriced estate is the resolver's reach rather than any bug in this
       report. Blocked on 0135's contract call before sending.
+  - date: 2026-08-05
+    status: mature
+    who: okarcz
+    note: >
+      **Ready to send.** 0135's contract call settled: `price_usd` publishes the
+      latest *priced* close, and an un-enriched venue keeps its latest priced
+      close in `sources` / `vwap_24h` rather than vanishing. The reply now
+      states both decisions instead of asking BE to make them, records why
+      absent/`NULL` was rejected for now, and still invites BE to object since
+      they are the only consumer.
 ---
 
 # Reply to BE — 0199 USD read-surface findings
 
-> **Status: draft, not sent.** All measured figures are now filled in from
-> [`G-phase0-prod-queries.md`](G-phase0-prod-queries.md) — phase 0 is complete.
-> **One thing still blocks sending: [[0135]]'s contract call**, since this reply
-> asks BE to choose between a stale-but-real price, a zero, and an explicit
-> absence, and we should state our own recommendation alongside the question.
+> **Status: ready to send.** All measured figures filled from
+> [`G-phase0-prod-queries.md`](G-phase0-prod-queries.md); phase 0 complete; the
+> [[0135]] contract call was settled 2026-08-05 and this reply now **states** the
+> decision rather than asking BE to make it.
 
 ---
 
@@ -87,11 +96,17 @@ rather than quoting you the schedule:
   → worst case just before the next pass ≈ 52 min
 ```
 
-**So the guarded `price_usd` would be a real price up to ~50 minutes old,
-averaging ~25 — against today's permanent zero.** We think that is obviously the
-better of the two, but you own the call for your use case, and there is a third
-option if neither works: publish absent/`NULL` and let you handle the gap
-explicitly. Tell us which you want.
+**So the guarded `price_usd` will be a real price up to ~50 minutes old,
+averaging ~25 — against today's permanent zero.**
+
+**We have made that call: `price_usd` becomes the latest *priced* close.** We
+considered publishing absent/`NULL` instead, which is arguably more honest, and
+rejected it for now — it needs a nullable column or a companion status field,
+and we would rather ship you a working number this week than a schema change
+next month. That option stays open and is the subject of a design note we are
+writing anyway. **If a stale-but-real price is actively worse for your LP
+analytics than an explicit absence, say so now and we will revisit** — you are
+the only consumer, so your objection wins.
 
 **If ~50 minutes is too stale, say so now**, because the fix is different work.
 Making the value *fresher* means shortening the enrichment cadence, and that is
@@ -108,7 +123,8 @@ from an oracle, and every completed hour in the last 24 was fully priced. Plain
 lag explains your finding entirely. We mention the unpriceable class only
 because it is the reason your option A cannot work — see finding 3.
 
-The fix is one line — `argMaxIf(close_usd, timestamp, close_usd > 0)`.
+The fix is one line — `argMaxIf(close_usd, timestamp, close_usd > 0)` — and the
+contract change it implies is decided, above.
 
 **On your 0039 question — the premise doesn't hold, and this is our
 documentation failing you.** 0039 is completed and archived, and the "Current
@@ -119,14 +135,6 @@ you observe ticking every minute is that view. So "is native pricing in 0039's
 scope" has no yes/no answer as posed — **the owner is our task 0135**, against
 `current.sql`, and your XLM measurement is the strongest argument yet for doing
 it. It is now our highest-priority quick win.
-
-**One decision we owe you, and you should have an opinion.** Guarding the
-`argMax` changes the published contract: `price_usd` becomes *"the latest
-**priced** close"* rather than *"the latest close"*. In practice that means the
-number can be a few minutes to an hour stale during the enrichment lag, instead
-of being zero. We think that is obviously the right trade for your use case, but
-say so if a stale-but-real price is worse for you than an explicit absence —
-because the third option is to publish `NULL`/absent and make you handle it.
 
 **A second consequence you have not hit yet, but will — and we only found it
 because of your report.** The same unguarded pattern sits in the `per_source`
@@ -150,9 +158,13 @@ trades. A quiet venue's newest candle is usually behind the frontier and
 therefore already priced. **The busier the venue, the more likely it is to be
 excluded from the number.**
 
-If you are using `vwap_24h` or reading `sources` for venue coverage, treat both
-as unreliable during the lag window until this ships. Same one-line fix, same
-task.
+**We are fixing this the same way** — the venue will carry its latest *priced*
+close and stay in the payload, so `vwap_24h` goes back to being weighted across
+all venues rather than across whichever ones happened to be enriched. Same
+one-line change, same task, same release.
+
+Until it ships: if you are using `vwap_24h`, or reading `sources` for venue
+coverage, treat both as unreliable inside the enrichment lag window.
 
 ---
 

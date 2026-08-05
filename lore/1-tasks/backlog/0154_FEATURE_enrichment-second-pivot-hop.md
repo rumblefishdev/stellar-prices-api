@@ -100,9 +100,13 @@ Sketch only; measure before committing to a shape.
    evidence than a peg. If [[0151]] introduces a status/provenance column, this
    tier is its first real consumer — coordinate rather than inventing a second
    vocabulary.
-4. **Cost.** [[0111]] already has enrichment re-scanning the whole table each
-   batch; this adds another join over a larger candidate set. **Do not ship
-   before 0111**, or measure carefully enough to prove it does not matter.
+4. **Cost — [[0111]] is a hard blocker, decided 2026-08-05.** Enrichment
+   already re-scans the whole table each batch (490–545M rows, ~35 s/batch
+   under load, and a four-day production outage on that account). This task
+   adds another join over a larger candidate set. **0111 ships first.** The
+   alternative — prototype and measure — was considered and rejected: 0111's
+   own baseline was taken on a quiet cluster and proved 80× optimistic, so a
+   measurement here would carry the same risk of being reassuring and wrong.
 5. **Backfill.** Fixing the resolver prices new candles. The two-year historical
    estate needs a re-run — likely the largest part of the work, and it collides
    with the same pre-roll/window hazards as [[0148]].

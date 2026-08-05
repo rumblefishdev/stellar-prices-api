@@ -39,6 +39,23 @@ history:
       `WHERE src_price > 0` rescue makes `sources` and `vwap_24h`
       enrichment-timing-dependent. This task remains the owner of finding 1;
       no duplicate was spawned.
+  - date: 2026-08-05
+    status: backlog
+    who: okarcz
+    note: >
+      **Contract decided.** [[0144]] phase 0 measured the trade on prod and the
+      call is made: `price_usd` publishes the **latest *priced* close** —
+      `argMaxIf(close_usd, timestamp, close_usd > 0)` in `mv_current_prices`.
+      Cost is up to ~50 minutes of staleness (~25 avg, measured from one full
+      enrichment cycle) against today's permanent zero; native XLM currently
+      publishes 0 essentially always, while the guarded aggregate returns
+      0.16720799309045. Rejected: keeping the zero, and absent/`NULL` (correct
+      semantically but needs Nullable or a status column — that belongs to
+      [[0151]], not here). **Scope correction C2 decided the same way**: guard
+      `per_source.src_price` too, so a venue whose newest candle is un-enriched
+      carries its latest priced close and stays in `sources` and in the
+      `vwap_24h` weighting, instead of silently vanishing. Both are one-line
+      changes in `current.sql`, which self-DROPs, so delivery is unblocked.
 ---
 
 # price_usd is not outlier-protected
