@@ -6,7 +6,8 @@ status: active
 related_adr: []
 related_tasks:
   ["0135", "0139", "0116", "0114", "0061", "0072", "0118", "0131", "0138", "0142", "0143",
-   "0145", "0146", "0147", "0148", "0149", "0150", "0151", "0137", "0088", "0136"]
+   "0145", "0146", "0147", "0148", "0149", "0150", "0151", "0154", "0137", "0088", "0136",
+   "0111"]
 tags:
   ["priority-high", "effort-medium", "clickhouse", "data-correctness", "be-interop", "milestone-M2"]
 milestone: 2
@@ -55,6 +56,30 @@ history:
       enrichment-timing-dependent (finding 3i's pattern, third instance). Fix
       plan added below and split into [[0145]]–[[0151]]; finding 1 stays with
       [[0135]] rather than spawning a duplicate.
+  - date: 2026-08-05
+    status: active
+    who: okarcz
+    note: >
+      Phase 0 complete — queries A–E run on prod, recorded in
+      `notes/G-phase0-prod-queries.md`, BE reply drafted in
+      `notes/G-be-0199-reply.md`. The measurements reversed three of this
+      task's own claims and forced a fix-plan rewrite. (1) The `argMax` defect
+      reaches only the in-flight bucket: 115 `_1h` and 449 `_1d` rows, all in
+      the currently-forming period, because the MV re-appends a priced value
+      inside its re-aggregation window. So [[0146]] fixes the live edge, not
+      history, and [[0148]] shrinks. (2) ~68% of every tier has no USD price
+      and never has — 100.0% of exotic-quote rows, which are 71.9% of `_1d`,
+      flat for 24 months with no spike in [[0136]]'s freeze or [[0111]]'s
+      outage. That is the resolver's reach, spawned as **[[0154]]**, and it
+      dwarfs every item this task split out. (3) The coverage gate cannot use
+      total volume as its denominator: 16.9% of buckets sit at exactly 50%
+      **permanently** because path payments book one trade against two quotes
+      and only one is priceable, so a gate at X > 0.5 reproduces the
+      non-termination defect we are telling BE sinks their option A. [[0151]]
+      moves from phase 9 to phase 5 as a prerequisite of [[0147]]. Also
+      falsified: finding 2a's "~2× read amplification" is **+4.7%** on prod, so
+      [[0139]] keeps only its correctness justification and BE must not be
+      promised a speed-up.
 ---
 
 # BE 0199 report — three defects in the USD read surfaces
@@ -535,73 +560,110 @@ the same time, because BE will hit it next.
 
 ## Fix plan
 
-Supersedes the sketch below, which is kept for its per-step reasoning. Split
-into [[0145]]–[[0151]]; this task retains Phase 0 (measurement + the BE reply)
-and stays the BE-facing contract.
+**Revised 2026-08-05 after phase 0.** The measurements moved three things, so
+the ordering below is not the one this task filed. Superseded plan and the
+original sketch are kept further down for their per-step reasoning. Split into
+[[0145]]–[[0151]] plus **[[0154]]**; this task retains Phase 0 and stays the
+BE-facing contract.
+
+### What phase 0 changed
+
+Everything here is measured — details and queries in
+[`notes/G-phase0-prod-queries.md`](notes/G-phase0-prod-queries.md).
+
+1. **The `argMax` defect reaches only the in-flight bucket.** 115 `_1h` rows and
+   449 `_1d` rows wrongly zeroed, **all of them in the currently-forming
+   period**. Inside the re-aggregation window the MV re-appends a priced value
+   and the zero clears itself. So [[0146]] fixes the **live edge** — which is
+   exactly what BE reads and exactly why they saw a bucket flap — but it is not
+   a historical rescue, and **[[0148]]'s repair estate is small**.
+2. **~68% of every tier has no USD price, and it is not our bug.** Exotic-quote
+   rows are 71.9% of `_1d` and **100.0% of them are unpriced** — stable for 24
+   months, no spike in [[0136]]'s freeze or [[0111]]'s outage. That is the
+   resolver's reach, now **[[0154]]**, and it dwarfs every other item here.
+3. **The coverage gate cannot be specified against total volume.** 16.9% of
+   buckets sit at exactly 50% coverage *permanently*, because path payments book
+   one trade against two quotes and only one is priceable. A gate at any X > 0.5
+   would black them out forever — the same non-termination defect we are telling
+   BE sinks their option A. The denominator must be **priceable** volume, which
+   is a derivation [[0151]] has to define and which [[0154]] keeps changing.
 
 ### Ordering rules
 
-Three rules generate the sequence; everything else follows from them.
-
 1. **Stop making new zeros before repairing old ones.** Any repair that runs
-   before the write path is fixed is overwritten or duplicated. This is what
-   puts the pre-roll scripts (C1) ahead of everything else.
+   before the write path is fixed is overwritten or duplicated. This still puts
+   the pre-roll scripts (C1) ahead of everything else — and their deadline is
+   unchanged and unaffected by the re-ordering.
 2. **Cheapest unblocked delivery first.** Pre-roll scripts have no provisioned
    object; `current.sql` already DROPs and re-creates itself; only
    `rollups.sql` needs a delivery mechanism built before it can be touched.
-3. **The version race (3ii-b) is hygiene, not a blocker** — for a sharper
-   reason than this task first gave. After the `argMax` fix, rows *inside* the
-   MV re-aggregation window self-heal, because the MV re-appends a correct
-   value instead of a zero. Rows *outside* the window stay frozen — but they
-   are also outside the clobber zone, so the [[0114]] sweep can repair them
-   without the version fix landing first. The two problems do not overlap.
+3. **Fix the live edge before the history.** Phase 0 showed the history is not
+   degrading from these defects; the live edge is wrong continuously. This
+   demotes [[0148]] and keeps [[0146]] high.
+4. **Coverage work waits on the definition of "priceable".** New rule, forced by
+   the path-payment result. [[0147]] cannot be written until [[0151]] settles
+   how priceability is derived — which is why the ADR moves from last to early.
 
 ### Phases
 
 | # | Work | Task | Blocked on | Why here |
 |---|---|---|---|---|
-| 0 | Queries A–E on prod; written reply to BE | **0144** (this) | — | Read-only; calibrates every threshold below |
-| 1 | Guard `argMax` in the 4 pre-roll scripts (121 sites) | **[[0145]]** | — | ⏰ must precede the 0088 / 0136 pre-rolls |
-| 2 | Guard `argMax` in `current.sql` (2 sites) + the `sources`/`vwap_24h` contract call | **[[0135]]** | contract decision only | Fixes the XLM symptom BE led with |
-| 3 | Guard `argMax` in the 6 rollup MVs | **[[0146]]** | [[0142]] drift detection, [[0137]] alarm | Highest value, only real delivery problem |
-| 4 | Repair the frozen historical estate | **[[0148]]** | Phase 3; query D/E sizing | Must not run before the write path is fixed |
-| 5 | Volume-coverage gate on `price_usd_series*` | **[[0147]]** | query C's real distribution | Reaches base-table zeros no rollup fix can |
-| 6 | Identity fan-out | **[[0139]]** | — | **Runs in parallel from day one** |
-| 7 | Sweep/MV version ownership | **[[0149]]** | Phase 3 | Demoted by rule 3 |
-| 8 | Materialize `price_usd_series*` | **[[0150]]** | Phases 5 + 6 | Baking in an unfixed population is the trap |
-| 9 | ADR — `close_usd` zero-as-missing | **[[0151]]** | — | Prevents the next surface inheriting it |
+| 0 | Queries A–E on prod; written reply to BE | **0144** (this) | [[0135]] call before sending | ✅ measurements done; reply drafted |
+| 1 | Guard `argMax` in the 4 pre-roll scripts (121 sites) | **[[0145]]** | — | ⏰ **unchanged** — must precede the 0088 / 0136 pre-rolls |
+| 2 | Guard `argMax` in `current.sql` (2 sites) + the `sources`/`vwap_24h` contract call | **[[0135]]** | contract decision only | Fixes the XLM symptom BE led with; still the fastest visible win |
+| 3 | Guard `argMax` in the 6 rollup MVs | **[[0146]]** | [[0142]] drift detection, [[0137]] alarm | **Re-justified:** live-edge correctness, not historical rescue |
+| 4 | **Second pivot hop in enrichment** | **[[0154]]** | [[0111]] (cost) | ⬆️ **NEW, and the largest win available** — moves ~68% of the estate |
+| 5 | ADR — `close_usd` zero-as-missing | **[[0151]]** | — | ⬆️ **moved from last to here** — [[0147]] and [[0154]] both need its definition |
+| 6 | Volume-coverage gate on `price_usd_series*` | **[[0147]]** | Phase 5 | ⬇️ **denominator must be priceable volume**, not total |
+| 7 | Identity fan-out | **[[0139]]** | — | **Runs in parallel from day one.** Correctness only — the ~2× read claim was falsified |
+| 8 | Repair the frozen historical estate | **[[0148]]** | Phase 3; coordinate with [[0154]] | ⬇️ **demoted** — estate is small; do not double-rewrite 0154's rows |
+| 9 | Sweep/MV version ownership | **[[0149]]** | Phase 3 | Hygiene; mechanism confirmed on prod (32-bump version gap) |
+| 10 | Materialize `price_usd_series*` | **[[0150]]** | Phases 6 + 7 | Cost is the **aggregation**, not the join — so this attacks the real bottleneck |
 
 ### Critical path
 
 ```
-Phase 0 (measure) ─┬─> Phase 1 (preroll, 0145) ────────> [0088 / 0136 pre-rolls safe]
-                   ├─> Phase 2 (current.sql, 0135) ────> [XLM off the 0 sentinel]
-                   ├─> 0142 drift + 0137 alarm ─> Phase 3 (0146) ─> Phase 4 (0148) ─┐
-                   │                                             └─> Phase 7 (0149) │
-                   ├─> Phase 5 (gate, 0147; needs query C) ───────────────────────────┼─> Phase 8 (0150)
-                   └─> Phase 6 (fan-out, 0139) ──────────────────────────────────────┘
+Phase 0 ✅ ─┬─> Phase 1 (preroll, 0145) ──────────> [0088 / 0136 pre-rolls safe]  ⏰
+            ├─> Phase 2 (current.sql, 0135) ──────> [XLM off the 0 sentinel]
+            ├─> 0142 drift + 0137 alarm ─> Phase 3 (0146) ─┬─> Phase 8 (0148)
+            │                                              └─> Phase 9 (0149)
+            ├─> Phase 5 (ADR, 0151) ─┬─> Phase 6 (gate, 0147) ─┐
+            │                        └─> Phase 4 (0154) ──> [~68% of the estate]
+            └─> Phase 7 (fan-out, 0139) ───────────────────────┴─> Phase 10 (0150)
 ```
 
-- **Fastest visible win:** Phases 1 + 2. Both mechanical, both unblocked, both
-  shippable inside a week. Phase 2 alone answers BE's opening complaint.
-- **Longest lead time:** Phase 3 — [[0142]] and [[0137]] must both land before
-  a rollup MV can be safely dropped and re-created.
-- **Parallelisable:** Phase 6 ([[0139]]) touches only `views.sql`, which
-  [[0134]] converted to `CREATE OR REPLACE`, so it shares no delivery path with
-  the `argMax` work.
+- **Unchanged deadline:** Phase 1. [[0088]] pass 2 lands ~08-10 and [[0136]]'s
+  gap pre-roll is gated on it. Nothing in this revision touches that.
+- **Fastest visible win:** Phase 2, one contract decision away.
+- **Biggest win:** Phase 4 ([[0154]]). Also the only item that changes what BE
+  can actually build on.
+- **Longest lead time:** Phase 3 — [[0142]] and [[0137]] must both land first.
+- **Now on the critical path:** Phase 5 ([[0151]]). It was Phase 9 filed as
+  "prevents the next surface inheriting it"; it is now a prerequisite of two
+  tasks.
 
 ### Open decisions
 
-1. **[[0135]]'s contract call** — "latest close" (today: `0` for XLM most of
-   every hour) vs "latest *priced* close". Recommend latest-priced; there is no
-   real third option. Fast decision, unblocks Phase 2 immediately. Now also
-   carries the C2 question about `sources`/`vwap_24h`.
-2. **Does Phase 1 preempt the active queue?** [[0088]] pass 2 is mid-flight. If
-   its pre-roll is imminent, [[0145]] should jump ahead of whatever is active.
+1. **[[0135]]'s contract call** — "latest close" (today: `0` for XLM
+   essentially always) vs "latest *priced* close" vs **absent/`NULL`**. Phase 0
+   priced the trade: the guarded value is **up to ~50 minutes stale, averaging
+   ~25**. Recommend latest-priced. **Blocks the BE reply from being sent**, not
+   just Phase 2. Also carries the C2 question about `sources`/`vwap_24h`.
+2. **Does Phase 1 preempt the active queue?** Unchanged and still open.
+3. **Does [[0154]] wait for [[0111]]?** 0154 adds a join to a pass that already
+   re-scans the whole table each batch. Shipping it on today's enrichment may
+   reproduce 0111's outage at a larger scale. Recommend 0111 first — which
+   raises 0111 from "not acutely urgent" to a blocker of the biggest win.
 
 ---
 
 ## Implementation sketch
+
+> ⚠️ **Historical — superseded twice.** First by the fix plan above, then by the
+> 2026-08-05 phase 0 revision of it. Step 3's "pick the threshold from query C's
+> distribution" is now known to be the wrong shape (the denominator must be
+> priceable volume), and none of the steps knew about [[0154]]. Kept only for
+> the per-step reasoning that survived.
 
 Ordered by dependency, not by importance. Steps 1 and 2 are the same one-line
 defect in two places and should ship together.
@@ -695,19 +757,26 @@ the fixes ship.
 ## Future Work
 
 Spawned 2026-08-05 from the fix plan above. Each is independently shippable.
+**Phases and priorities below are the post-phase-0 revision.**
 
-| Task | Phase | Priority |
-|---|---|---|
-| [[0145]] — guard `argMax` in the four pre-roll scripts (121 sites) | 1 | high ⏰ |
-| [[0146]] — guard `argMax` in the six rollup MVs | 3 | high |
-| [[0147]] — volume-coverage gate on the `price_usd_series*` views | 5 | high |
-| [[0148]] — repair the frozen historical `close_usd` estate | 4 | medium |
-| [[0149]] — sweep/MV version ownership on `close_usd` | 7 | medium |
-| [[0150]] — materialize `price_usd_series*` identity-keyed (BE §6) | 8 | medium |
-| [[0151]] — ADR: `close_usd` zero-as-missing | 9 | low |
+| Task | Phase | Priority | Changed by phase 0 |
+|---|---|---|---|
+| [[0145]] — guard `argMax` in the four pre-roll scripts (121 sites) | 1 | high ⏰ | — deadline unchanged |
+| [[0146]] — guard `argMax` in the six rollup MVs | 3 | high | re-justified: live edge, not history |
+| **[[0154]]** — **enrichment second pivot hop** | **4** | **high** | ⬆️ **new; ~68% of the estate** |
+| [[0151]] — ADR: `close_usd` zero-as-missing | 5 | **high** | ⬆️ from phase 9 / low — now blocks [[0147]] |
+| [[0147]] — volume-coverage gate on the `price_usd_series*` views | 6 | high | ⬇️ blocked on 0151; denominator changed |
+| [[0148]] — repair the frozen historical `close_usd` estate | 8 | **low** | ⬇️ from medium — estate is small |
+| [[0149]] — sweep/MV version ownership on `close_usd` | 9 | medium | mechanism now confirmed on prod |
+| [[0150]] — materialize `price_usd_series*` identity-keyed (BE §6) | 10 | medium | cost is the aggregation, not the join |
 
 Finding 1 deliberately did **not** spawn a task — [[0135]] already owns it, and
 C2 was added to its scope instead.
+
+**[[0139]]** (identity fan-out) predates this task and runs in parallel. Phase 0
+falsified its performance justification here — the fan-out is **+4.7%, not
+~2×** — but its correctness justification stands: 548,439 candle rows publish
+under identities that never traded them.
 
 ## Notes
 
