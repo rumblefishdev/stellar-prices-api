@@ -12,14 +12,24 @@ history:
     status: seed
     who: okarcz
     note: "Draft reply. Substance is complete and independent of the prod measurements; figures marked PENDING are filled from G-phase0-prod-queries.md before sending."
+  - date: 2026-08-05
+    status: developing
+    who: okarcz
+    note: >
+      All PENDING figures filled from the completed A-E measurements. Finding 1
+      and 2 sections final. Finding 3 rewritten around two results that changed
+      the answer: the argMax defect reaches only the in-flight bucket, and the
+      68% unpriced estate is the resolver's reach rather than any bug in this
+      report. Blocked on 0135's contract call before sending.
 ---
 
 # Reply to BE — 0199 USD read-surface findings
 
-> **Status: draft, not sent.** Everything below is settled except the figures
-> marked **⟪PENDING …⟫**, which come from
-> [`G-phase0-prod-queries.md`](G-phase0-prod-queries.md). The argument does not
-> depend on them — they only size it. Send once A–E are back.
+> **Status: draft, not sent.** All measured figures are now filled in from
+> [`G-phase0-prod-queries.md`](G-phase0-prod-queries.md) — phase 0 is complete.
+> **One thing still blocks sending: [[0135]]'s contract call**, since this reply
+> asks BE to choose between a stale-but-real price, a zero, and an explicit
+> absence, and we should state our own recommendation alongside the question.
 
 ---
 
@@ -227,7 +237,13 @@ matters because they have different fixes:
 **(i) Your 13:29 reading — partial enrichment.** Enrichment runs hourly, so a
 live bucket is routinely part-priced. Whichever rows happen to be enriched become
 100% of the weight. A dust print is the pathological case: near-zero volume but a
-wildly off unit price. ⟪PENDING C1: yXLM `priced_volume_share` by hour.⟫
+wildly off unit price.
+
+We re-ran your asset. Your 12:00 bucket reads `volume_base 42,037.752` — your
+42,038, so we are looking at exactly your rows. **Your 13:00 bucket, which you
+watched read 1.3085, now reads 0.16931024.** That is the part we think should
+worry you most: not that it was wrong live, but that **the published value for a
+closed historical bucket changed underneath you**, with nothing to signal it.
 
 **(ii) Your 14:13 reading — the bucket reverting to unpriced.** Partial
 enrichment does not explain a bucket that *had* a priced row and then had none —
@@ -235,8 +251,18 @@ that is data moving backwards. Different cause: every rollup tier carries
 `close_usd` forward with the same unguarded `argMax` as finding 1. When the
 latest sub-bucket is not yet enriched, the coarse row inherits **0**, discarding
 the priced sub-buckets underneath it. **A partly-enriched hour does not roll up
-as partly priced — it rolls up as unpriced.** ⟪PENDING D2/E: how much of the
-coarse estate this has already zeroed.⟫
+as partly priced — it rolls up as unpriced.**
+
+We caught this live while investigating: an hour whose four 15-minute
+sub-buckets were **all priced**, rolling up to a 1-hour row reading `close_usd =
+0`. So the mechanism is confirmed on production, not just in a test.
+
+**But we also measured how far it reaches, and the answer should reassure you
+about your history.** Across seven days of hourly rows and thirty days of daily
+rows, *every* wrongly-zeroed row was in the **bucket currently being formed** —
+115 hourly rows, all in the current hour; 449 daily rows, all in the current
+day. Once a bucket closes and enrichment catches up, the rollup re-runs and
+repairs it. **This bug costs you the live edge, not your history.**
 
 ### On your two proposed options
 
@@ -282,8 +308,18 @@ account for at least X% of the bucket's `volume_base`. This:
   not 90% of anything;
 - terminates, unlike option A.
 
-We are picking X from the measured distribution of coverage across a normal day,
-not from taste. ⟪PENDING C2: the distribution, and the X it implies.⟫
+We are picking X from the measured distribution, not from taste — and that
+measurement has already changed the design. Over 48 hours, **~51% of buckets sit
+strictly between 0% and 100% coverage**, so this is not the thin tail we assumed.
+Worse, there is a hard mode at **exactly 50%** holding 16.9% of all buckets, and
+we traced it: those are **path payments**, where your base asset is the
+intermediate hop and the trade is booked against two quotes — one of which we
+can price and one of which we cannot. Those buckets sit at 50% *permanently*.
+
+**A naive gate at any X above 0.5 would therefore black out ~15% of buckets
+forever — the exact defect we just told you sinks your option A.** So the gate
+will measure coverage against **priceable** volume rather than total volume,
+which scores those path-payment buckets at 100% where they belong.
 
 **Plus a coverage column, which we think you actually want more than the gate.**
 Any single threshold we choose is our judgment imposed on your use case. We
@@ -298,6 +334,45 @@ different aggregate meeting that ambiguity. We are writing that up as an ADR so
 the next surface we build doesn't inherit it.
 
 ---
+
+---
+
+## The thing you did not ask about, which matters more than all three
+
+While sizing the above we measured the whole daily estate, and you should have
+this number before you build on it:
+
+```
+prices.price_ohlcv_1d, 90 days, by the class of the candle's quote asset
+  quote is USDC          59,229 rows     1.6% unpriced
+  quote is XLM          308,436 rows     0.1% unpriced
+  quote is USDT           1,943 rows    18.1% unpriced
+  quote is anything else 945,752 rows  100.0% unpriced   <- 72% of the table
+```
+
+**About two-thirds of our daily candles have no USD price at all, and never
+have** — stable at 65–72% every month for the last 24 months, rising slowly as
+the long tail grows. This is not caused by anything in your report, it predates
+every incident on our side, and no fix in the list below moves it.
+
+The cause is that our enrichment resolves USD only when the candle's **quote**
+is USDC, USDT or XLM, or has an oracle. Everything else stays at zero. That
+includes cases that are frankly embarrassing: **yXLM-quoted candles are never
+priced even though we price yXLM itself perfectly well** and publish its USD
+value — 114,330 such candles in seven days. Same for XRP.
+
+**Practical consequence for your LP analytics:** if a pool's assets trade mainly
+against exotic quotes, you will get sparse or empty series from us regardless of
+everything else we fix here, and the sparsity is worst in exactly the long tail
+where LP coverage is most interesting. **Check your asset set against this
+before sizing your own work** — we would rather you find out now than after we
+ship the fixes below and coverage barely moves.
+
+We are adding a second pivot hop — price a candle whose quote is any asset we
+already have a USD close for — which resolves yXLM, XRP and most of that tail.
+On the sample above it recovers 18.4% of rows from five quote assets alone.
+**This is now the largest single improvement available to you**, larger than any
+of the three findings you filed, and your report is what surfaced it.
 
 ## What to do meanwhile
 

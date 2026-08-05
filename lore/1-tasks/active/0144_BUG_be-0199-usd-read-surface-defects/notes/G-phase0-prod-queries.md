@@ -948,12 +948,43 @@ zero, needing a [[0148]] repair. **The data says otherwise:**
   market.** More assets, more exotic quotes, same two-tier resolver. It will
   keep rising until the pivot hop lands.
 
-⚠️ **One attribution check before this is load-bearing.** D2's join only counts a
-coarse row as wrongly-zeroed when its *sub-tier* row is priced. If the zero
-propagated all the way down the chain, D2 cannot see it. The 68% must be split
-by cause — quote in {USDC, USDT, XLM} versus not — to confirm it is the resolver
-rather than a deeper propagation. That query is below and it is the last thing
-phase 0 needs.
+#### ✅ Attribution settled — it is the resolver, unambiguously
+
+`_1d`, 90 days, split by the class of the candle's **quote** asset:
+
+| quote class | rows | zeroed | share |
+|---|---|---|---|
+| **quote_OTHER** | 945,752 | 945,731 | **1.0000** |
+| quote_XLM | 308,436 | 354 | 0.0011 |
+| quote_USDC | 59,229 | 932 | 0.0157 |
+| quote_USDT | 1,943 | 351 | **0.1806** |
+
+**Every exotic-quote row is unpriced — 945,731 of 945,752, a share of 1.0000.**
+And `quote_OTHER` is 71.9% of the daily table, which is the 68% almost exactly.
+The unpriced estate is the resolver's reach. It is not propagation, not the
+`argMax`, not [[0136]], not [[0111]]. **Phase 0's attribution question is
+closed.**
+
+The priceable classes' residuals are the enrichment-lag tip and are tiny —
+0.11% for XLM, 1.57% for USDC — which is a third independent confirmation of
+finding 1's mechanism.
+
+> 🔸 **Except USDT, at 18.06% — 11× the USDC rate.** USDT is peg-priced to $1 by
+> the same tier that handles USDC (`ch_enrich.rs:25-26`), so its rows should
+> price at USDC's rate. The peg tier recognises the two stablecoins by the
+> `USDC_ISSUER` / `USDT_ISSUER` constants (`ch_enrich.rs:67`), so the likeliest
+> explanation is **a second USDT issuer in the wild that the constant does not
+> match**. Only 1,943 rows in 90 days, so it is low-priority — but it is a
+> concrete, cheap gap in the peg tier and belongs with the resolver work rather
+> than getting lost here.
+
+#### Coarse tiers — same picture, slightly lower
+
+`_1w` runs ~55–65% zeroed and `_1M` ~48–52%, against `_1d`'s ~68%, stable across
+all 24 months. The coarser the tier the lower the share, which is consistent
+with weekly/monthly buckets existing mainly for assets with sustained trading —
+a population skewed toward priceable quotes. Nothing here suggests a distinct
+mechanism, and no incident month stands out on either tier.
 
 #### Consequence for the BE reply
 
