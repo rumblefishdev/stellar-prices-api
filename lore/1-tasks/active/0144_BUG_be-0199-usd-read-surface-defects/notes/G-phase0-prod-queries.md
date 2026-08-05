@@ -428,9 +428,10 @@ Fill in as they come back; then fold into the task README's acceptance criteria.
 | **D2-live** | did the `argMax` zero yXLM's 08-05 13:00 hour? | 🔴 **YES — 3ii caught live.** `_1h` reads `close_usd = 0` while **all four `_15m` sub-buckets are priced**; `_1h.close` matches the 13:45 sub-bucket exactly. Version `…057` vs sub-row sum `…089` = **32 enrichment bumps**, confirming 3ii-b's arithmetic on prod. | 2026-08-05 ~14:15Z |
 | **SPIKE** | shape of the 0.50 buckets | **5,180 of 5,920 (87.5%) are exactly 2 rows / 1 priced.** 🔴 **Settled: two legs of a path payment**, same source/volume/trade_count, different quote — one leg priceable, one permanently not. **Stable at 0.5 forever**, so a gate at X > 0.5 blacks out 14.8% of buckets permanently. Forces the gate's denominator to be *priceable* volume. | 2026-08-05 ~14:20Z |
 | **NEG** | negative `volume_base` | ✅ **Zero rows** in `_1m`/`_1h`/`_1d` over 90 days. Retracts the previous revision's claim. | 2026-08-05 ~14:15Z |
-| D | unpriced coarse rows, six tiers (upper bound) | | |
-| D2 | **wrongly zeroed** rows (the real defect count) | | |
-| E | frozen estate outside the MV windows → sizes [[0148]] | | |
+| **D2a** | `_1h` rows the `argMax` actually zeroed, 7 days | **115 rows / 90 assets — and `oldest = newest = 2026-08-05 14:00`.** Every one is in the *current* hour. | 2026-08-05 ~14:30Z |
+| **D2b** | same for `_1d`, 30 days | **449 rows / 318 assets, all at 2026-08-05 00:00** — the current day only. | 2026-08-05 ~14:30Z |
+| **E-1d** | frozen estate by month, 24 months | 🔴 **~65–72% of *all* `_1d` rows carry `close_usd = 0 AND close > 0`, every month for two years.** No spike in [[0136]]'s freeze or [[0111]]'s outage. Share *rises* over time: 0.58 (202408) → 0.73 (202607). | 2026-08-05 ~14:30Z |
+| E-1w / E-1M | coarsest tiers | ❌ syntax error — `month` alias missing in the second UNION branch. Re-run. | — |
 
 ### What A–A4 changed in the task's account of finding 1
 
@@ -897,6 +898,71 @@ seven days, from five quotes alone.
    estate at the source rather than papering over it downstream, and it would
    reduce the population every other fix in this plan has to cope with. Not in
    0144's scope — proposed, not filed.
+
+### 🔴 D2 + E together reverse this task's central assumption
+
+**D2 — the `argMax` defect touches only the bucket currently being formed.**
+
+```
+_1h, 7 days : 115 rows / 90 assets   — oldest = newest = 2026-08-05 14:00
+_1d, 30 days: 449 rows / 318 assets  — oldest = newest = 2026-08-05 00:00
+```
+
+Not "115 rows spread over a week" — **every single one is in the in-flight
+period**. This is D2-live's self-healing confirmed at population scale: inside
+the re-aggregation window the MV re-appends a priced value and the zero is gone.
+The moment a bucket closes and enrichment catches up, it repairs itself.
+
+**E — but ~68% of the whole daily estate is unpriced, and always has been.**
+
+```
+month    total_rows   zeroed    share   assets_zeroed
+202608       37,420   26,879   0.7183           2,827
+202607      327,007  237,703   0.7269           4,939
+202606      554,445  399,928   0.7213           5,956
+…
+202408      466,525  271,922   0.5829           6,846
+```
+
+Flat at two-thirds for **24 consecutive months**, and — the part that matters —
+**no spike in 202607**, despite [[0136]]'s 17-day freeze and [[0111]]'s four-day
+outage both falling inside it. 202607 (0.7269) is indistinguishable from 202606
+(0.7213). The incidents left no mark on this measure at all.
+
+#### What that combination means
+
+The task has assumed a large historical estate of rows the `argMax` froze at
+zero, needing a [[0148]] repair. **The data says otherwise:**
+
+- **The `argMax` bug is real but self-limiting.** Its blast radius is the
+  in-flight bucket, continuously — which is exactly why BE saw a bucket flap
+  between a value and nothing, and it is still worth fixing for that reason.
+  But it is **not** corrupting history.
+- **The 68% is almost certainly the resolver's reach, not our bug** — the
+  exotic-quote floor from the section above, at population scale. It predates
+  every incident and grows as the long tail grows.
+- **So [[0148]]'s repair estate is small, and [[0146]]'s value is live
+  correctness rather than historical rescue.** Both tasks keep their
+  justification; both change shape.
+- **The rising trend (0.58 → 0.73) is the resolver falling further behind the
+  market.** More assets, more exotic quotes, same two-tier resolver. It will
+  keep rising until the pivot hop lands.
+
+⚠️ **One attribution check before this is load-bearing.** D2's join only counts a
+coarse row as wrongly-zeroed when its *sub-tier* row is priced. If the zero
+propagated all the way down the chain, D2 cannot see it. The 68% must be split
+by cause — quote in {USDC, USDT, XLM} versus not — to confirm it is the resolver
+rather than a deeper propagation. That query is below and it is the last thing
+phase 0 needs.
+
+#### Consequence for the BE reply
+
+**Historical `close_usd` is not unreliable *because of the bugs in this
+report*.** It is ~68% absent because we cannot price those pairs at all, and
+that has been true and stable for two years. That is a completely different
+message from "our rollup bug corrupted your history", and it is the honest one.
+What the bugs in this report actually cost BE is **the live edge** — the bucket
+currently forming — which is precisely where they were reading.
 
 ### C2 confirmed — and the filter discriminates against the busiest venue
 
