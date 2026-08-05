@@ -406,83 +406,31 @@ the unenriched rows too once they land.
 
 ## Verification queries (prod, ch-prod-01 — operator-run)
 
-> The **mechanisms** are settled — see `repro/`. These queries no longer decide
-> *whether* the bugs are real; they size the **blast radius** on prod, which is
-> what the fix priority and the BE reply should be calibrated against. Read-only.
+> The **mechanisms** are settled — see [`repro/`](repro/README.md). These queries
+> no longer decide *whether* the bugs are real; they size the **blast radius** on
+> prod, which is what the fix priority and the BE reply are calibrated against.
+> Read-only.
 
-**A. Confirm the XLM tip is un-enriched and identify its quote (finding 1):**
+**→ The full query pack lives in
+[`notes/G-phase0-prod-queries.md`](notes/G-phase0-prod-queries.md)**, which
+supersedes the A–D sketches that were inline here. It adds:
 
-```sql
-SELECT p.timestamp, p.source, q.asset_code AS quote, p.close, p.close_usd, p.volume_base
-FROM prices.price_ohlcv_1m AS p FINAL
-LEFT JOIN prices.assets AS q FINAL ON q.asset_id = p.quote_asset_id
-WHERE p.asset_id = (
-        SELECT asset_id FROM prices.assets FINAL
-        WHERE asset_code = 'XLM' AND issuer_address = '' AND contract_address = '' LIMIT 1)
-  AND p.timestamp >= now() - INTERVAL 2 HOUR
-ORDER BY p.timestamp DESC
-LIMIT 20;
-```
+- **A2** — how many hours of each day XLM actually publishes `price_usd = 0`
+  (the figure [[0135]]'s contract call should be decided against).
+- **B2** — how many of [[0139]]'s 3,275 duplicate `asset_id`s carry candles;
+  the README previously noted this was the missing half of finding 2a.
+- **C2** — the *distribution* of `priced_volume_share` across all assets, which
+  is what [[0147]]'s threshold X must be picked from. One asset cannot tell us.
+- **D2** — the rows the `argMax` **actually zeroed** (a priced sub-bucket exists
+  underneath), as distinct from D's `close_usd = 0 AND close > 0`, which is an
+  **upper bound** that also counts the permanent exotic-quote floor working as
+  designed. D2 is the number to quote; D is not.
+- **E** — the frozen estate *outside* each MV's re-aggregation window, i.e. the
+  rows that will still be wrong the day after [[0146]] ships. Sizes [[0148]].
+  The six windows are tabulated there from `rollups.sql:95,116,137,158,179,200`.
 
-Expect: the newest rows carry `close_usd = 0`; older rows carry a real value.
-Note which quote the newest row uses — if it is an exotic quote, that row will
-*never* be enriched.
-
-**B. Confirm/deny the [[0139]] fan-out in `price_usd_series` (finding 2a):**
-
-```sql
--- how many candle rows the join multiplies out
-SELECT
-    count()                                        AS joined_rows,
-    countDistinct(p.asset_id, p.timestamp, p.source, p.quote_asset_id) AS distinct_candles
-FROM prices.price_ohlcv_1d AS p FINAL
-INNER JOIN prices.assets AS a FINAL ON a.asset_id = p.asset_id
-WHERE p.timestamp >= now() - INTERVAL 104 WEEK;
-```
-
-A ratio near 2.0 confirms BE's "twice" is our fan-out, not their query.
-
-**C. Reproduce the population shift on a live bucket (finding 3i):**
-
-```sql
-SELECT
-    p.timestamp AS bucket,
-    count()                                        AS rows_total,
-    countIf(p.close_usd > 0)                       AS rows_priced,
-    sum(p.volume_base)                             AS vol_total,
-    sumIf(p.volume_base, p.close_usd > 0)          AS vol_priced,
-    sumIf(p.volume_base, p.close_usd > 0) / nullIf(sum(p.volume_base), 0) AS priced_volume_share
-FROM prices.price_ohlcv_1h AS p FINAL
-INNER JOIN prices.assets AS a FINAL ON a.asset_id = p.asset_id
-WHERE a.asset_code = 'yXLM' AND a.issuer_address = 'GARDNV3Q…'   -- full G-address
-  AND p.timestamp >= now() - INTERVAL 12 HOUR
-GROUP BY bucket ORDER BY bucket DESC;
-```
-
-`priced_volume_share` is the proposed gate's input — check what it looks like
-across a normal day before picking X.
-
-**D. Size the zero-propagation across the rollup tiers (finding 3ii):**
-
-```sql
--- how many recent coarse rows carry close_usd = 0 while their own `close` is
--- non-zero — i.e. rows the argMax zeroed rather than rows with no market
-SELECT
-    'price_ohlcv_1h' AS tbl,
-    countIf(close_usd = 0 AND close > 0) AS zeroed,
-    count()                              AS total,
-    round(countIf(close_usd = 0 AND close > 0) / count(), 4) AS share
-FROM prices.price_ohlcv_1h FINAL
-WHERE timestamp >= now() - INTERVAL 48 HOUR
-UNION ALL
-SELECT 'price_ohlcv_1d', countIf(close_usd = 0 AND close > 0), count(),
-       round(countIf(close_usd = 0 AND close > 0) / count(), 4)
-FROM prices.price_ohlcv_1d FINAL
-WHERE timestamp >= now() - INTERVAL 30 DAY;
-```
-
-This is the number that decides how much of the historical `close_usd` estate is
-affected, and whether a backfill/re-sweep is needed after the MV fix.
+Results are recorded in that note's table, then folded back into the acceptance
+criteria below.
 
 ---
 
@@ -661,15 +609,27 @@ the fixes ship.
 - [x] Full-schema audit of the defect: **130 unguarded sites across 6 files**
       (C1), and `current.sql`'s second site making `sources`/`vwap_24h`
       enrichment-timing-dependent (C2).
-- [ ] Verification queries A–D run on prod and their results recorded here, to
-      size the blast radius (how many assets, how much of the coarse estate).
-- [ ] **Query E** — how many coarse rows carry `close_usd = 0 AND close > 0`
+- [x] Query pack written and ready to run —
+      [`notes/G-phase0-prod-queries.md`](notes/G-phase0-prod-queries.md), A–E
+      including the four additions listed above. Read-only; no write statement
+      appears in it by design.
+- [ ] Queries A–D run on prod and their results recorded in that note's results
+      table, to size the blast radius (how many assets, how much of the coarse
+      estate). **Note D2, not D, is the defect count** — D over-counts by
+      including the permanent exotic-quote floor.
+- [ ] **Query E** run — how many coarse rows carry `close_usd = 0 AND close > 0`
       *outside* the current MV re-aggregation windows, i.e. the estate only the
       [[0114]] sweep can reach. Sizes [[0148]].
-- [ ] BE has a written answer covering: 0039's actual status and the real owner
-      of native XLM pricing; **why "wait until every row is enriched" cannot
-      terminate**; **why removing the filter outright is worse than keeping it**;
-      and what we will ship instead.
+- [x] BE reply drafted —
+      [`notes/G-be-0199-reply.md`](notes/G-be-0199-reply.md). Covers 0039's
+      actual status and 0135 as the real owner of native XLM pricing; why "wait
+      until every row is enriched" **cannot terminate**; why removing the filter
+      outright measures **0.000023 against a true ~0.170**; the coverage gate and
+      `priced_volume_share` we will ship instead; the fan-out's *correctness*
+      consequence for their identity keying; and the multi-hour-median advice for
+      the window before the gate lands.
+- [ ] BE reply **sent** — blocked only on the ⟪PENDING⟫ figures from A–E and on
+      [[0135]]'s contract call, which the reply asks them to weigh in on.
 - [ ] No pre-roll can write a coarse row whose `close_usd` is 0 while a priced
       sub-bucket exists underneath it — **before** the [[0088]] / [[0136]]
       pre-rolls run. → [[0145]]
