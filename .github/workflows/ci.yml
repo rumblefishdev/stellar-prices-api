@@ -199,11 +199,13 @@ jobs:
       # moving it out means shipping ~110 MB across a job boundary. Task 0110
       # measured the trade: this tail costs 29s of a 5m08s job (of which only
       # ~20s is removable — synth's own 9s relocates), while a separate synth
-      # job costs ~50-70s serialized after this one. The split makes both
-      # wall-clock and billed minutes worse and does not remove the duplicate
-      # TS build either. Closed won't-do; numbers in lore/3-wiki/project/
-      # ci-pipeline.md. The real cost here is `Build Lambda bootstraps` above,
-      # at 3m24s = 67% of the job.
+      # job costs ~50-70s serialized after this one. The split makes PR
+      # wall-clock worse, saves nothing on billing (GitHub bills each job
+      # rounded up to the whole minute at per-runner-class rates: 6 ARM
+      # minutes today vs 5 ARM plus 1-2 on the synth runner), and does not
+      # remove the duplicate TS build either. Closed won't-do; numbers in
+      # lore/3-wiki/project/ci-pipeline.md. The real cost here is
+      # `Build Lambda bootstraps` above, at 3m24s = 67% of the job.
       - uses: actions/setup-node@v4
         with:
           node-version-file: .nvmrc
