@@ -172,6 +172,41 @@ recording because both were guards that looked like they worked.
   `lambda-assets.sh` / task 0077: this repo has been bitten three times by
   hand-maintained mirrors. Verified failing in both directions before wiring in.
 
+- **Three of the four gates had holes, found by the PR #169 review.** Same
+  theme as the two above — guards that looked like they worked:
+
+  1. `npm run openapi:verify-routes` did not chain `openapi:extract`, unlike
+     `openapi:lint` which did. So it compared the synthesized template against
+     whatever `target/openapi.json` happened to hold — in this working tree,
+     a file from another branch. A stale spec reads as a pass, or as drift
+     nobody can reproduce. Now chained, and the script header says what
+     invoking the file directly still skips.
+  2. The `rust` paths filter omitted `package.json` / `package-lock.json`,
+     while `@redocly/cli` is a devDependency and this is the only job that
+     runs it. A PR dropping or bumping it merged green; the failure landed on
+     the next author to touch `packages/**`. Both files added to the filter.
+  3. `HTTP_METHODS` included `options` and `head`, so [[0126]]'s
+     `addCorsPreflight` — which emits an OPTIONS method on every resource —
+     would have failed this gate with the remedy "add a `#[utoipa::path]` for
+     each", for methods OpenAPI does not conventionally describe. Both are now
+     excluded from *both* sides (excluding one side only manufactures drift).
+     `ANY` is rejected loudly rather than skipped: it can never match an
+     operation key, and skipping it silently would hide a mapped route from
+     the check.
+
+  The fourth was not a gate: seven key-gated operations documented 401/403 but
+  not 429 or 500 — the two statuses a partner is most likely to meet, since the
+  usage plan throttles and every one of the seven reaches `errors::db_error`.
+  A generated client fell into its "unexpected response" branch for both. The
+  403 description was also wrong ("Rejected by the API Gateway usage plan"):
+  403 is the key being missing or unauthorized, 429 is the usage plan. Fixed
+  together.
+
+  Verified by injection rather than by reading: an OPTIONS method added to the
+  synthesized template is ignored, an ANY method exits 1, and deleting
+  `/v1/prices/batch` from the document still reports it undocumented — so the
+  exclusion did not cost the drift detection it sits next to.
+
 - **A second validator disagreed, and most of it was worth listening to.** The
   Notes justify the lint gate as de-risking Tranche 3 AC 2, which names
   `openapi-validator`. The shipped gate is Redocly and the document passes it
@@ -238,7 +273,8 @@ path for anyone already reading it.
 - `npm run openapi:lint` — "Your API description is valid", 0 errors, 0 warnings
   (`recommended-strict`; regression case confirmed to exit 1)
 - `npm run openapi:verify-routes` — gateway and document agree on all 9 routes;
-  confirmed to fail in both drift directions
+  confirmed to fail in both drift directions, and re-confirmed after the
+  OPTIONS/HEAD exclusion landed
 - `cdk synth Prices-production-ApiGateway` — `/api-docs-json` resource present,
   `ApiKeyRequired: false`, `CacheTtlInSeconds: 3600`; the 9 mapped routes match
   the 9 documented paths exactly

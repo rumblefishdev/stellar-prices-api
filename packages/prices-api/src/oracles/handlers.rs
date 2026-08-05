@@ -28,8 +28,10 @@ use crate::state::AppState;
         (status = 200, description = "Oracle readings", body = OraclesResponse),
         (status = 400, description = "Invalid asset identifier", body = ErrorEnvelope),
         (status = 401, description = "Missing or invalid `x-api-key`", body = ErrorEnvelope),
-        (status = 403, description = "Rejected by the API Gateway usage plan"),
+        (status = 403, description = "API key missing, invalid, or not authorized for this API"),
         (status = 404, description = "Unknown asset", body = ErrorEnvelope),
+        (status = 429, description = "Rate limit or daily quota exceeded (API Gateway usage plan)"),
+        (status = 500, description = "Query or upstream failure (`db_error`)", body = ErrorEnvelope),
     )
 )]
 pub async fn get_oracles(State(state): State<AppState>, Path(raw): Path<String>) -> Response {

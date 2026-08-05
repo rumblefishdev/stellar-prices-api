@@ -34,6 +34,11 @@ jobs:
               - '.redocly.lint-ignore.yaml'
               # The `servers` URL the linted document is stamped with.
               - 'infra/envs/production.json'
+              # `redocly` is a devDependency and this is the only job that runs
+              # it. Without these, a PR that drops or bumps it merges green and
+              # the failure lands on the next author to touch packages/**.
+              - 'package.json'
+              - 'package-lock.json'
               # The Lambda asset guards are implemented here. Without this,
               # a PR touching only the guard scripts runs no job at all and
               # the thing both jobs depend on is the one file CI never

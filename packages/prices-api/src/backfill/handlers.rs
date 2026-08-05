@@ -18,7 +18,9 @@ use crate::state::AppState;
     responses(
         (status = 200, description = "Backfill progress", body = BackfillStatus),
         (status = 401, description = "Missing or invalid `x-api-key`", body = ErrorEnvelope),
-        (status = 403, description = "Rejected by the API Gateway usage plan"),
+        (status = 403, description = "API key missing, invalid, or not authorized for this API"),
+        (status = 429, description = "Rate limit or daily quota exceeded (API Gateway usage plan)"),
+        (status = 500, description = "Query or upstream failure (`db_error`)", body = ErrorEnvelope),
     )
 )]
 pub async fn get_status(State(state): State<AppState>) -> Response {

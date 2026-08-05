@@ -21,10 +21,15 @@
  * Add a route to the gateway and forget to document it — or document one the
  * gateway never maps — and this fails, in CI, before either reaches a reader.
  *
- * Usage (both inputs must already exist):
+ * Usage:
  *   npm run infra:synth:production   # → infra/cdk.out/*.template.json
- *   npm run openapi:extract          # → target/openapi.json
- *   node tools/scripts/verify-openapi-routes.mjs
+ *   npm run openapi:verify-routes    # re-extracts the document, then compares
+ *
+ * `npm run openapi:verify-routes` re-runs the extraction itself, so the
+ * document compared is always the current one. Invoking this file directly
+ * skips that and compares whatever target/openapi.json happens to hold — a
+ * stale file from another branch reads as a pass, or as drift that cannot be
+ * reproduced. The synthesized template is still the caller's responsibility.
  */
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -87,10 +92,33 @@ function fullPath(id) {
   return '/' + segments.join('/');
 }
 
+// CORS preflight and HEAD are not conventionally described in an OpenAPI
+// document, so they are excluded from BOTH sides rather than compared. Task
+// 0126 adds `addCorsPreflight`, which emits an OPTIONS method on every
+// resource; without this the gate would fail that PR with the misleading
+// remedy "add a #[utoipa::path] for each". The tradeoff is that a documented
+// OPTIONS/HEAD path is not checked against the gateway either — acceptable
+// only because preflight is out of scope for the document by convention.
+const UNCOMPARED_METHODS = new Set(['options', 'head']);
+
 const gatewayRoutes = new Set();
 for (const [, res] of resources) {
   if (res.Type !== 'AWS::ApiGateway::Method') continue;
   const method = String(res.Properties?.HttpMethod ?? '').toLowerCase();
+  if (UNCOMPARED_METHODS.has(method)) continue;
+  // `ANY` maps every verb at once and can never equal an OpenAPI operation
+  // key, so it would report as undocumented forever. Skipping it silently
+  // would instead hide a mapped route from the check — fail loudly and make
+  // the next person decide, which is the same stance as the root-method case
+  // below.
+  if (method === 'any') {
+    console.error(
+      `error: method ANY on ${fullPath(res.Properties?.ResourceId?.Ref)} has ` +
+        `no OpenAPI equivalent. Expand it into explicit verbs, or teach this ` +
+        `check how to compare it.`,
+    );
+    process.exit(1);
+  }
   const resourceId = res.Properties?.ResourceId?.Ref;
   // A method on the API root itself has no Ref'd resource; none exist today,
   // and silently skipping one would be a hole in the check.
@@ -107,14 +135,14 @@ for (const [, res] of resources) {
 // ---------------------------------------------------------------------------
 // Spec side.
 // ---------------------------------------------------------------------------
+// `head` and `options` are absent deliberately — see UNCOMPARED_METHODS above.
+// Both sides must exclude the same set or the exclusion creates false drift.
 const HTTP_METHODS = new Set([
   'get',
   'put',
   'post',
   'delete',
   'patch',
-  'head',
-  'options',
   'trace',
 ]);
 const specRoutes = new Set();
