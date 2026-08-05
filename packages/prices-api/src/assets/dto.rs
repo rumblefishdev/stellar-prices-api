@@ -136,6 +136,12 @@ pub struct Candle {
     /// USD-denominated quote volume (the one USD figure on the candle).
     pub volume_quote_usd: String,
     pub vwap: String,
+    /// Trades in the bucket. The ceiling is `2^53 - 1`, the largest integer a
+    /// JSON number carries without loss — not a domain limit (no protocol bound
+    /// exists on a trade count) but a transport one, so a client knows the value
+    /// always survives parsing. Stellar's actual volumes are ~10 orders of
+    /// magnitude below it, so it never binds in practice.
+    #[schema(maximum = 9_007_199_254_740_991u64)]
     pub trade_count: u64,
 }
 

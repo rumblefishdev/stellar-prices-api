@@ -212,7 +212,7 @@ recording because both were guards that looked like they worked.
   `openapi-validator`. The shipped gate is Redocly and the document passes it
   cleanly, so the AC as written ("passes **a** linter cleanly") is met. But
   IBM's `ibm-openapi-validator` — the tool that owns that name on npm — reported
-  **13 errors** on the same bytes. Seven were fixed, six are deliberate; see
+  **13 errors** on the same bytes. Eight were fixed, five are deliberate; see
   "The `openapi-validator` result" below for the full accounting.
 
   The AC's source text is in this repo, at
@@ -227,25 +227,46 @@ recording because both were guards that looked like they worked.
 ## The `openapi-validator` result
 
 `npx ibm-openapi-validator target/openapi.json --errors-only` — **13 errors,
-now 6**. Kept here rather than in a spawned task: the fixable half was fixed,
+now 5**. Kept here rather than in a spawned task: the fixable half was fixed,
 and the rest are decisions with reasons, not open work.
 
-### Fixed (7)
+### Fixed (8)
 
 | Error | Count | Why it was real |
 | ----- | ----- | --------------- |
 | `ibm-integer-attributes` on 5 ledger fields | 5 | A Stellar ledger sequence is `uint32` in the protocol's `LedgerHeader`. The DTOs carry `u64` because ClickHouse returns `UInt64`, so the document promised a range 4 billion times wider than reality. `maximum: 4294967295` is a domain fact, not a limit we impose. |
 | `ibm-integer-attributes` on the `limit` param | 1 | The 1..=200 bound was **already enforced** (`limit == 0 \|\| limit > MAX_LIMIT` → 400) and entirely invisible to clients — a caller sending `limit=500` got a 400 the document did not explain. Now `minimum: 1, maximum: 200`. [[0119]] owns extending this to the remaining params. |
 | `ibm-operation-summary-length` on `/health` | 1 | utoipa publishes the whole rustdoc as `summary` — 223 characters of maintainer-facing prose where a one-line label belongs. Split into `summary` + `description`. |
+| `ibm-integer-attributes` on `Candle.trade_count` | 1 | Reversed on review — see below. `maximum: 9007199254740991` (`2^53 - 1`). |
 
-### Left, deliberately (6)
+### Left, deliberately (5)
 
 | Error | Count | Why not |
 | ----- | ----- | ------- |
 | `ibm-schema-type-format` — "invalid type" | 2 | `Option<T>` renders as `oneOf: [{type: null}, …]`. `"type": "null"` is valid OpenAPI 3.1 / JSON Schema 2020-12; the validator is applying 3.0's type list. |
 | `$ref` must not sit beside other properties | 2 | Same construct: `{$ref, description}`. Legal in 3.1, illegal in 3.0. Removing it would mean dropping the field descriptions. |
-| `ibm-integer-attributes` on `Candle.trade_count` | 1 | **No truthful maximum exists.** A trade count in a candle has no protocol bound. Publishing `u64::MAX` would exceed JSON's safe-integer range and imply clients may receive values they cannot represent; inventing a smaller one risks our own document contradicting a future response. Silence is more honest than a fabricated ceiling. |
 | `ibm-path-segment-casing-convention` | 1 | `/api-docs-json` is not snake_case. Kept — see below. |
+
+### The `trade_count` reversal
+
+This was originally left as "no truthful maximum exists", reasoning that a trade
+count has no protocol bound, `u64::MAX` exceeds JSON's safe-integer range, and
+anything smaller would be invented. The first two halves of that are right and
+the conclusion still didn't follow: **the ceiling is the safe-integer range
+itself.**
+
+`2^53 - 1` is the largest integer an IEEE 754 double represents exactly, and
+JSON has no integer type — so above it a client's parser silently rounds
+(`JSON.parse("9007199254740993")` yields `…992`). Publishing `maximum:
+9007199254740991` therefore states a fact about the wire format, not a limit we
+impose: values above it cannot be delivered correctly whatever the database
+holds. That is the same *kind* of claim as the ledger bound, sourced one layer
+down — the ledger ceiling is a protocol fact, this one is a transport fact.
+
+Stellar's real volumes sit ~10 orders of magnitude below it, so it never binds
+in practice and cannot make a future response contradict the document — which
+was the actual worry behind the original decision. Same caveat as the ledger
+fields, noted in review: it is a published ceiling, not a runtime clamp.
 
 The four 3.1 entries are the same root cause and the concrete form of design
 decision #4: they are not quality signals, they are a tool that predates 3.1.
