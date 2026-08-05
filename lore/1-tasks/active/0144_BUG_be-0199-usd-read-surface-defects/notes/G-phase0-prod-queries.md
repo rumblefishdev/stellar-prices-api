@@ -415,7 +415,10 @@ Fill in as they come back; then fold into the task README's acceptance criteria.
 | **B2** | duplicate `asset_id`s that carry candles | **3,278** dup `asset_id`s / 6,562 identities; **2,493 carry candles**, totalling **548,439 candle rows**. Cross-checks B1's surplus to within 14 rows. | 2026-08-05 ~13:55Z |
 | **B3** | our read cost vs BE's 70.7M / 4.6 s / 2.1 GiB | **B1: 344 ms, 33,003,949 read rows, 707.33 MiB, 274 MiB peak. B2: 255 ms, 16,943,576 rows, 385.69 MiB.** The join is *not* the cost — see below. (First attempt returned empty on `query_log` flush lag; needed `SYSTEM FLUSH LOGS`.) | 2026-08-05 13:50:25Z |
 | **C1** | yXLM `priced_volume_share`; shipped vs unfiltered close | **BE's 08-04 13:00 bucket now reads 0.16931** against the **1.3085** they saw live — the retroactive change, confirmed. Their 12:00 bucket reads `vol_total 42,037.752` = their "42,038", so we are on exactly their data. **The two newest buckets (08-05 13:00, 14:00) are 100% unpriced and absent from the view.** | 2026-08-05 ~14:05Z |
-| **C2** | distribution of `priced_volume_share` → picks [[0147]]'s X | 🔴 **Not bimodal — three modes and a fat middle.** 1.00: 32.1% · **0.50: 16.9%** · 0.00: 16.8% · ~34% spread across (0,1). **Plus 11 buckets with a *negative* share.** ~34,970 buckets over 48h. | 2026-08-05 ~14:05Z |
+| **C2** | distribution of `priced_volume_share` → picks [[0147]]'s X | 🔴 **Not bimodal — three modes and a fat middle.** 1.00: 32.1% · **0.50: 16.9%** · 0.00: 16.8% · ~34% spread across (0,1). ~34,970 buckets over 48h. (11 negative shares were Decimal overflow **in this query**, not data — see retraction.) | 2026-08-05 ~14:05Z |
+| **D2-live** | did the `argMax` zero yXLM's 08-05 13:00 hour? | 🔴 **YES — 3ii caught live.** `_1h` reads `close_usd = 0` while **all four `_15m` sub-buckets are priced**; `_1h.close` matches the 13:45 sub-bucket exactly. Version `…057` vs sub-row sum `…089` = **32 enrichment bumps**, confirming 3ii-b's arithmetic on prod. | 2026-08-05 ~14:15Z |
+| **SPIKE** | shape of the 0.50 buckets | **5,180 of 5,920 (87.5%) are exactly 2 rows / 1 priced.** Structural, not chance — needs the row-level sample to tell double-counting from two quote legs. | 2026-08-05 ~14:15Z |
+| **NEG** | negative `volume_base` | ✅ **Zero rows** in `_1m`/`_1h`/`_1d` over 90 days. Retracts the previous revision's claim. | 2026-08-05 ~14:15Z |
 | D | unpriced coarse rows, six tiers (upper bound) | | |
 | D2 | **wrongly zeroed** rows (the real defect count) | | |
 | E | frozen estate outside the MV windows → sizes [[0148]] | | |
@@ -643,34 +646,95 @@ dominates by count — dominates here too. A volume-weighted distribution could
 look completely different and is the one that matters for a consumer reading
 majors. **Re-run weighted by `vol_total` before fixing X.**
 
-### 🔴 New finding: `volume_base` can be negative
+### 🔴 D2-live — finding 3ii caught in the act on production
 
-**11 buckets returned a *negative* `priced_volume_share`** (−0.63, −0.48, −0.46,
-−0.38, −0.11, −0.08, −0.07, −0.03 ×2, −0.01 ×2). The expression is
-`sumIf(volume_base, close_usd > 0) / nullIf(sum(volume_base), 0)`; a negative
-result requires numerator and denominator of opposite sign, so **at least one
-`price_ohlcv_1h` row carries a negative `volume_base`.**
+**The strongest evidence in this task.** yXLM's `_1h` bucket for 2026-08-05
+13:00, quote `3`:
 
-`volume_base` is `Decimal(38,14) DEFAULT 0` with no constraint
-(`init.sql:112`). Nothing prevents it.
+```
+tier      timestamp   close                 close_usd            version
+_1h       13:00       0.16638497573823      0                    3,509,614,804,057
+ _15m     13:00       0.16668513404178      0.16681263367531       893,353,070,016
+ _15m     13:15       0.16668070441417      0.16680133561383       829,544,246,020
+ _15m     13:30       0.16608526678061      0.16620974134625       829,546,274,027
+ _15m     13:45       0.16638497573823      0.16650590611438       957,171,214,026
+```
 
-This matters beyond a curiosity:
+**All four sub-buckets are priced. The hour reads zero.** And note the `_1h`
+row's `close` is `0.16638497573823` — byte-identical to the 13:45 sub-bucket, so
+`argMax` picked the right *row*; it is the `close_usd` from that row that was 0
+at the time the MV ran. This is not enrichment lag at the hourly level and not a
+synthetic reproduction: it is `argMax(close_usd, t.timestamp)` carrying a zero
+forward over four priced inputs, on prod, live.
 
-- **It breaks the coverage gate's arithmetic.** A share can be negative or
-  exceed 1, so `share >= X` is not a safe predicate as written. [[0147]] must
-  either clamp or exclude non-positive volume explicitly.
-- **It corrupts the volume-weighted mean itself** — `sum(close_usd × volume) /
-  sum(volume)` with a negative weight can produce a price outside the range of
-  its inputs, in *any* bucket containing one, priced or not. That is a
-  correctness bug in `price_usd_series*` independent of every finding in this
-  task.
-- 11 of ~34,970 buckets is small, but the *unweighted* count says nothing about
-  the volume involved.
+**The version arithmetic of 3ii-b confirms itself in the same rows.** The four
+`_15m` versions sum to **3,509,614,804,089**; the `_1h` row carries
+**3,509,614,804,057** — exactly **32 lower**. So the `_1h` row was appended when
+the sub-rows summed to `…057`, and 32 enrichment events have bumped them since.
+Every one of those adds 1 to the sum the MV will next append at, which is
+precisely the mechanism by which the MV overtakes the [[0114]] sweep's
+`version + 1`. TEST E's synthetic result now has a production counterpart.
 
-**This is not in scope for 0144 and should not be absorbed into it.** It needs
-sizing (how many rows, which sources, since when) and probably its own task
-under [[0116]]'s umbrella — that task already owns junk candles reaching every
-granularity. Query below.
+#### ⚠️ But this refines 3ii's blast radius, and the refinement matters
+
+The `_1h` row **will heal at the next MV refresh**. `mv_ohlcv_15m_to_1h` runs
+every 15 minutes over a `now() - 8 HOUR` window, so it re-appends this hour at
+version `…089` with a priced `close_usd`, which wins under RMT. We caught the
+gap between "enrichment priced the sub-rows" and "the MV re-ran" — a window of
+**up to 15 minutes after each hourly enrichment pass**.
+
+So the zero-propagation is, for the common case, **transient**: a rolling
+blackout that recurs every hour and clears itself. That is still unacceptable
+for BE — a bucket that reads 0, then a real number, then 0 again is unusable —
+but it is *not* the same claim as "the coarse estate is permanently corrupted".
+
+**The permanent cases are a strict subset**, and naming them changes [[0148]]:
+
+1. **The newest sub-bucket is permanently unpriceable.** Then `argMax` returns 0
+   on *every* refresh, forever, discarding the priced sub-buckets underneath.
+   The quote-`2267` row in the same sample is exactly this shape — its only
+   sub-bucket carries `close 32111.91917591125198` on `volume_base 0.0000631`,
+   a [[0116]] junk candle that will never enrich.
+2. **The hour ages out of the 8-hour window while still zero** — which is what
+   happens whenever enrichment falls more than 8 hours behind. [[0111]]'s
+   four-day outage and [[0136]]'s 17-day freeze are both exactly that.
+
+**So [[0148]]'s repair estate is not "every row with `close_usd = 0`" — it is
+rows frozen at zero *outside* the re-aggregation windows.** That is what query E
+was already designed to measure, and this raises E from useful to load-bearing.
+
+### ~~🔴 New finding: `volume_base` can be negative~~ — RETRACTED
+
+**Measured: there are zero negative `volume_base` rows** in `_1m`, `_1h` or
+`_1d` over 90 days. The inference in the previous revision was wrong, and the
+real cause is more useful.
+
+C2 computed the share as `sumIf(volume_base, …) / nullIf(sum(volume_base), 0)`
+**on the raw `Decimal(38,14)` column**. That type holds at most ~10²⁴ in its
+integer part, and ClickHouse does not check Decimal overflow by default — it
+wraps, silently, and a wrapped sum can come out negative. The 11 negative shares
+are **arithmetic overflow in my query**, produced by buckets containing
+extreme `volume_base` magnitudes.
+
+**Two things follow, and the second is the one that matters:**
+
+1. **The shipped views are not affected.** `price_usd_series*` casts *before*
+   summing — `sum(toFloat64(p.close_usd) * toFloat64(p.volume_base))` — and
+   Float64 reaches ~10³⁰⁸. There is no overflow bug in what we publish. Good:
+   the earlier revision claimed one, and it was wrong.
+2. **[[0147]]'s gate must cast the same way.** A coverage predicate written the
+   obvious way, over the raw Decimal, overflows on exactly the buckets a gate
+   exists to catch — the ones with junk magnitudes. Writing `share >= X` against
+   `sum(volume_base)` would have shipped a gate that silently mis-classifies its
+   most important inputs. **Record this as an implementation constraint on
+   0147**, with the same `toFloat64`-before-`sum` discipline the views already
+   use.
+
+**Still worth its own look, but as a [[0116]] question rather than a new bug:**
+whatever `volume_base` magnitudes overflow a Decimal(38,14) sum are junk on
+their face, and 0116 already owns junk candles reaching every granularity. Size
+them (`max(volume_base)`, which assets, which sources) before deciding whether
+0116 covers it or it needs its own task.
 
 ### The 0.50 spike needs explaining before X is chosen
 
@@ -679,11 +743,30 @@ rounding to 2 decimals would put ~1% in that bin — this is ~17×. Something
 structural produces "exactly half the volume is priced", and until we know what,
 any threshold near 0.5 is being set against a mechanism we do not understand.
 
-The obvious hypothesis is **two rows per bucket with equal `volume_base`, one
-priced and one not** — which would follow if the same logical candle exists
-twice under different `(quote_asset_id, source)` keys, or if an enriched and an
-un-enriched copy of a row are both surviving `FINAL`. The latter would tie
-directly to [[0149]]'s version-ownership problem. Query below.
+**Measured — the hypothesis holds:** of the 5,920 buckets at 0.50, **5,180
+(87.5%) have exactly 2 rows with exactly 1 priced.** The rest tail off
+(3 rows/1 priced: 367; 4/2: 123; 4/1: 67).
+
+For two rows to give a share in the `[0.495, 0.505)` bin, their `volume_base`
+must agree to within ~1%. Across 5,180 buckets that is not chance. The
+structural explanations worth testing, in order of how much they would matter:
+
+1. **The same trade recorded twice** — once per `source` (e.g. an AMM pool trade
+   seen by both the SDEX path and the AMM path), which would produce *identical*
+   `volume_base` under two source keys. This would be a **double-counting bug in
+   ingestion**, and it would inflate every volume figure we publish.
+2. **Two quote legs of one trade** (`quote_asset_id` 3 and 4 appear constantly
+   in the D2-live sample), where the base volume is genuinely the same asset
+   moving. Not a bug, but it means "2 rows, 1 priced" is the *normal* shape and
+   the gate will see 0.5 constantly.
+3. An enriched and un-enriched copy of one row both surviving `FINAL` — would
+   tie to [[0149]], but D2-live shows `FINAL` collapsing correctly, so this is
+   the least likely.
+
+**(1) and (2) have very different consequences and the row-level sample below
+distinguishes them in one query.** Until it is settled, do not pick X anywhere
+near 0.5 — that bin holds 17% of all buckets and we do not yet know whether it
+represents a real 50% coverage or an artefact.
 
 ### C2 confirmed — and the filter discriminates against the busiest venue
 
