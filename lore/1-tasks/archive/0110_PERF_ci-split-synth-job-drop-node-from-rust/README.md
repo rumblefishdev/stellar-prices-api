@@ -2,9 +2,9 @@
 id: "0110"
 title: "CI: split synth into its own job so the rust job stops paying for a Node/TS build"
 type: PERF
-status: done
+status: canceled
 related_adr: []
-related_tasks: ["0077", "0070"]
+related_tasks: ["0077", "0070", "0145"]
 tags: [layer-ops, ci, cdk, priority-low, effort-small, decision, wont-do]
 links: []
 history:
@@ -25,18 +25,33 @@ history:
       fraction of the ~6m20s rust job is actually the Node install + TS build
       before choosing between the artifact-split and won't-do options.
   - date: 2026-08-04
-    status: done
+    status: canceled
     who: akot
+    reason: obsolete
     note: >
       DECISION: WON'T-DO — closed under acceptance criterion 2's second clause.
       A/B measured on this branch (runs 30904595104 baseline / 30904701513
       experiment): the Node/TS tail is 29s of a 5m08s rust job, not the 2-3
       minutes the task premise assumed — off by ~5x. Only ~20s is removable;
       synth's 9s relocates rather than disappearing, and the new synth job would
-      cost ~50-70s serialized AFTER rust, making PR wall-clock and billed minutes
-      WORSE. The real cost centre is `Build Lambda bootstraps` at 3m24s = 67% of
-      the job. Both measurement commits reverted; ci.yml is byte-identical to its
-      pre-0110 state (blob 91e84b7), so the 0077 guards are untouched.
+      cost ~50-70s serialized AFTER rust, making PR wall-clock and elapsed job
+      time WORSE. The real cost centre is `Build Lambda bootstraps` at 3m24s =
+      67% of the job. Both measurement commits reverted; ci.yml is unchanged
+      from its pre-0110 state apart from one added comment block, so the 0077
+      guards are untouched.
+  - date: 2026-08-05
+    status: canceled
+    who: akot
+    reason: obsolete
+    note: >
+      PR #165 review applied. Six findings: status encoding corrected to
+      canceled/obsolete (the archive convention for a won't-do); the
+      "byte-identical" claim replaced with the check that actually passes;
+      the option-1 implementation moved out of a local git stash into
+      notes/G-option-1-synth-split.md; the decision table's double-counted 9s
+      corrected and the mislabelled "billed minutes" column fixed; the
+      infra-only synth-coverage gap spawned as 0145 and the overclaim in
+      AC #1 withdrawn.
 ---
 
 # CI: split synth into its own job
@@ -107,33 +122,62 @@ rust job. Synth's 9s relocates. The proposed `synth` job then pays, serialized
     checkout ~2s + download ~110 MB artifact + chmod + re-verify
       + setup-node 7s + npm ci 13s + synth 9s  ≈  50-70s
 
-| | rust job | PR wall-clock | billed minutes |
-|---|---|---|---|
-| today | 5m08s | 5m08s | 5m08s |
-| after split | ~4m48s | **~5m50s** | **~5m48s** |
+| | rust job | PR wall-clock |
+|---|---|---|
+| today | 5m08s | 5m08s |
+| after split | ~4m39s | **~5m29s – 5m49s** |
 
-Both wall-clock and billed minutes get worse. The split also does **not** fix the
-"the same TS build runs twice" complaint in the original summary: the
-`typescript` job would still build, and the new `synth` job would build again.
+The rust job loses the full 29s, not 20s — synth's 9s leaves it too, it just
+reappears in the new job's ~50-70s. Charging that 9s to both sides is the error
+this table made until the PR #165 review caught it.
+
+The split also **adds** an `actions/upload-artifact` step to the rust job for
+~110 MB, on the critical path between the two jobs. It is not in the estimate
+above because it was never measured, so the ~5m29s end of the range is
+optimistic by whatever it costs.
+
+**On billing:** GitHub bills each job rounded up to the whole minute, at
+different per-minute rates per runner class, so no column here is an invoice
+figure. Today: one ARM job at 5m08s = 6 ARM minutes. After the split: 5 ARM
+minutes + 1–2 minutes on whatever runner `synth` uses. The conclusion holds
+under real billing — it just is not the second-granularity arithmetic an
+earlier version of this table implied.
+
+The split also does **not** fix the "the same TS build runs twice" complaint in
+the original summary: the `typescript` job would still build, and the new
+`synth` job would build again.
 
 `Build Lambda bootstraps` is **3m24s — 67% of the rust job**. This task optimizes
 the wrong 10%.
 
 ## Acceptance Criteria
 
-- [x] Synth still runs on every PR that could break it, and still fails on a
-      missing asset. Unchanged — ci.yml is byte-identical to its pre-0110 state,
-      so the 0077 behaviour verified on run 29818521440 stands as-is. No
-      re-reproduction of the bad `*_ASSET_DIR` case was needed because nothing
-      about the guard moved.
+- [x] Synth still fails on a missing asset, and nothing about that guard moved.
+      `ci.yml` is unchanged from its pre-0110 state apart from one added comment
+      block — `git diff develop -- .github/workflows/ci.yml` shows only `#`
+      lines — so the 0077 behaviour verified on run 29818521440 stands as-is.
+      No re-reproduction of the bad `*_ASSET_DIR` case was needed.
+
+      **The "every PR that could break it" half of this criterion was not true
+      when ticked, and is not true now.** Synth runs in the `rust` job, whose
+      paths filter covers `packages/**`, `Cargo.{toml,lock}`, `ci.yml` and
+      `tools/scripts/**` — but **not** the CDK source directory, `infra/**`.
+      An infra-only PR introducing a
+      stack-level construct error runs only the `typescript` job, which lints,
+      builds and typechecks but never invokes `cdk synth`; CI goes green and it
+      surfaces at deploy, which is precisely the 0070 failure mode.
+      `verify-lambda-assets.sh` closes only the asset-name-mapping subset.
+      Pre-existing, not caused by this task, and out of scope for a won't-do
+      closure — spawned as [[0145]]. Found by the PR #165 review.
 - [x] Closed under the second clause: *"the measured saving is documented as too
       small to justify the split and this task is closed as won't-do with that
       number recorded."* **The number is 29s, of which ~20s is removable, against
       a ~50-70s cost for the new job.** The rust job therefore still installs
       Node — deliberately.
 - [x] No regression in the 0077 guards: all 9 assets still built, verified and
-      synthesized; `verify-lambda-assets.sh` still runs on infra-only PRs. Byte
-      identity with the pre-task blob is the proof.
+      synthesized; `verify-lambda-assets.sh` still runs on infra-only PRs. The
+      proof is that `git diff develop -- .github/workflows/ci.yml` shows only
+      added `#` lines — every executable step is untouched.
 
 ## Implementation Notes
 
@@ -148,17 +192,19 @@ What was actually done:
    baseline.
 3. Reverted both commits in one revert commit. Verified the restored blob hash
    (`91e84b7`) equals the blob at `5c37ad7` — the commit that activated this
-   task — so the file is provably back to where it started.
+   task — so the executable content is provably back where it started. The
+   pointer comment in step 4 then moved the blob to `f305ff6`; from that point
+   the check is `git diff develop -- .github/workflows/ci.yml`, which shows
+   only `#` lines.
 4. Documented the finding here and in `lore/3-wiki/project/ci-pipeline.md`, and
    left a pointer comment at the `setup-node` step in `ci.yml` itself.
 
 A complete implementation of option 1 (artifact upload + third `synth` job,
 ~82 lines, including the fix for zip not carrying the Unix executable bit) was
-written before the measurement landed and is **not** committed. It was never
-CI-tested. It is preserved in a git stash on this branch — if the decision is
-ever revisited, recover it rather than rewriting it:
-
-    git stash list | grep lore-0110
+written before the measurement landed and is **not** applied to `ci.yml`. It
+was never CI-tested. The patch and its rationale are in
+[`notes/G-option-1-synth-split.md`](notes/G-option-1-synth-split.md) — if the
+decision is ever revisited, recover it from there rather than rewriting it.
 
 ## Issues Encountered
 
@@ -196,19 +242,33 @@ ever revisited, recover it rather than rewriting it:
    see the experiment and the revert, which is more useful than a branch that
    silently never had them.
 
-4. **Stashed rather than deleted the option-1 implementation.** It is working,
+4. **Kept rather than deleted the option-1 implementation.** It is working,
    non-trivial code (the executable-bit restore after artifact download is a
    real trap, correctly handled). If the bootstrap build ever shrinks enough to
    change the arithmetic, this becomes worth revisiting and the code should not
    have to be rewritten.
 
+   Originally kept in a `git stash`, which was wrong: a stash lives in one
+   working copy, is not on a branch, is not pushed, and dies with a
+   `git stash clear` or a fresh clone. The PR #165 reviewer followed the
+   documented recovery command and got nothing. Now committed as
+   `notes/G-option-1-synth-split.md`, which is also what forced this task from
+   a single file into a directory.
+
 5. **Left a pointer comment in `ci.yml` at the `setup-node` step.** The three
    tail steps look exactly like something to clean up. Without a note carrying
    the number, this task gets re-opened by the next person who reads the file.
-   This is the one deliberate deviation from byte-identity, and it is a comment.
+   It is the only deviation from the pre-task file, and it is comment-only —
+   which is why the verification above is a `git diff` showing `#` lines rather
+   than a blob-hash comparison.
 
 ## Future Work
 
+- [[0145]] — **`cdk synth` never runs on infra-only PRs** (spawned). Found by
+  the PR #165 review, not by this task's own work: the `rust` job's paths filter
+  omits `infra/**`, so the guard this task spent its whole life protecting has a
+  hole in exactly the direction that matters — the PRs most likely to break
+  synth are the ones that never run it. See AC #1 above.
 - **The rust job's real cost is `Build Lambda bootstraps` (3m24s, 67%).** Worth
   investigating whether `Swatinem/rust-cache` covers `target/lambda` across runs
   at all, and whether nine `-p` crates in one `cargo lambda build --release`

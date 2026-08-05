@@ -42,8 +42,12 @@ Two tiers, split by cost:
 - **`rust` job — build, verify, synth.** Builds all 9 bootstraps
   (`--features lambda`, explicit `-p` per crate — a bare `cargo lambda build`
   silently skips them), asserts each expected path exists and is executable,
-  then runs `make -C infra synth-production` as final proof the app the
-  operator deploys actually synthesizes.
+  then runs `make -C infra synth-production` — proof that the app the operator
+  deploys actually synthesizes **against the assets this job just built**.
+
+  Read that scope literally: synth runs in the `rust` job, so it only runs on
+  PRs matching the `rust` filter. **An infra-only PR is never synthesized** —
+  see [Known gaps](#known-gaps).
 
 Both loops fail explicitly on an empty asset list rather than passing
 vacuously. Synth is credential-free: every SSM read is
@@ -84,24 +88,51 @@ after `rust` because it depends on that artifact.
 
 Task 0110 measured the trade in both directions:
 
-|                             | rust job | PR wall-clock | billed minutes |
-| --------------------------- | -------- | ------------- | -------------- |
-| today                       | 5m08s    | 5m08s         | 5m08s          |
-| with a separate `synth` job | ~4m48s   | ~5m50s        | ~5m48s         |
+|                             | rust job | PR wall-clock  |
+| --------------------------- | -------- | -------------- |
+| today                       | 5m08s    | 5m08s          |
+| with a separate `synth` job | ~4m39s   | ~5m29s – 5m49s |
 
-The tail costs **29s**, of which only ~20s is removable — synth's own 9s
-relocates rather than disappearing. The replacement job costs ~50–70s
-(checkout + artifact download + `setup-node` + `npm ci` + synth). Splitting
-makes both wall-clock and billed minutes **worse**, and does not even remove the
-duplicate TypeScript build, since `typescript` and `synth` would each run one.
+The tail costs **29s**, all of which leaves the `rust` job — but only ~20s
+disappears, because synth's own 9s reappears in the new job. That job costs
+~50–70s (checkout + artifact download + `chmod` + re-verify + `setup-node` +
+`npm ci` + synth), serialized after `rust` because it needs its artifact. The
+split also adds an `actions/upload-artifact` step for ~110 MB that was never
+measured, so the low end of that range is optimistic.
+
+Splitting makes wall-clock **worse**, and does not even remove the duplicate
+TypeScript build, since `typescript` and `synth` would each run one.
+
+These are elapsed times, not invoice figures — GitHub bills per job rounded up
+to the whole minute at per-runner-class rates. Today that is 6 ARM minutes;
+after a split, 5 ARM minutes plus 1–2 on the `synth` runner. The conclusion
+holds either way.
 
 Closed won't-do. Full numbers and method:
-[0110](../../1-tasks/archive/0110_PERF_ci-split-synth-job-drop-node-from-rust.md).
-A complete, untested implementation of the split is preserved in a git stash on
-the `perf/0110_*` branch if the arithmetic ever changes — which it would only do
-if the bootstrap build shrank by an order of magnitude.
+[0110](../../1-tasks/archive/0110_PERF_ci-split-synth-job-drop-node-from-rust/README.md).
+A complete but never-CI-tested implementation of the split is committed at
+[`notes/G-option-1-synth-split.md`](../../1-tasks/archive/0110_PERF_ci-split-synth-job-drop-node-from-rust/notes/G-option-1-synth-split.md)
+if the arithmetic ever changes — which it would only do if the bootstrap build
+shrank by an order of magnitude.
 
-## Known gap: `develop` pushes run no CI
+## Known gaps
+
+### `cdk synth` never runs on infra-only PRs
+
+The `rust` job owns synth, and its filter is `packages/**`, `Cargo.{toml,lock}`,
+`ci.yml`, `tools/scripts/**`. The CDK source directory is **not among them**. A
+PR touching only `infra/` therefore runs the `typescript` job, which lints,
+builds and typechecks but never synthesizes. A stack-level construct error goes
+green and surfaces at deploy, which is how 0070's `CannotFindAsset` happened.
+
+`verify-lambda-assets.sh` does run on those PRs, but it only asserts that each
+`Code.fromAsset` path maps to a buildable crate — it instantiates no stacks.
+
+This is the larger of the two gaps and the one most likely to bite. Owned by
+[0145](../../1-tasks/backlog/0145_BUG_synth-not-run-on-infra-only-prs.md). Note
+also that `synth-cicd` is never run by CI at all.
+
+### `develop` pushes run no CI
 
 `on: push` covers `master` only, while PRs target `develop`. A direct push to
 `develop` therefore runs nothing. Largely defused in practice because the paths
