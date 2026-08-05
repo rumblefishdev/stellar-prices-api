@@ -4,7 +4,7 @@ title: "CI: split synth into its own job so the rust job stops paying for a Node
 type: PERF
 status: canceled
 related_adr: []
-related_tasks: ["0077", "0070", "0145"]
+related_tasks: ["0077", "0070", "0153"]
 tags: [layer-ops, ci, cdk, priority-low, effort-small, decision, wont-do]
 links: []
 history:
@@ -50,7 +50,7 @@ history:
       the option-1 implementation moved out of a local git stash into
       notes/G-option-1-synth-split.md; the decision table's double-counted 9s
       corrected and the mislabelled "billed minutes" column fixed; the
-      infra-only synth-coverage gap spawned as 0145 and the overclaim in
+      infra-only synth-coverage gap spawned as 0153 and the overclaim in
       AC #1 withdrawn.
 ---
 
@@ -168,7 +168,7 @@ the wrong 10%.
       surfaces at deploy, which is precisely the 0070 failure mode.
       `verify-lambda-assets.sh` closes only the asset-name-mapping subset.
       Pre-existing, not caused by this task, and out of scope for a won't-do
-      closure — spawned as [[0145]]. Found by the PR #165 review.
+      closure — spawned as [[0153]]. Found by the PR #165 review.
 - [x] Closed under the second clause: *"the measured saving is documented as too
       small to justify the split and this task is closed as won't-do with that
       number recorded."* **The number is 29s, of which ~20s is removable, against
@@ -264,7 +264,7 @@ decision is ever revisited, recover it from there rather than rewriting it.
 
 ## Future Work
 
-- [[0145]] — **`cdk synth` never runs on infra-only PRs** (spawned). Found by
+- [[0153]] — **`cdk synth` never runs on infra-only PRs** (spawned). Found by
   the PR #165 review, not by this task's own work: the `rust` job's paths filter
   omits `infra/**`, so the guard this task spent its whole life protecting has a
   hole in exactly the direction that matters — the PRs most likely to break

@@ -129,7 +129,7 @@ green and surfaces at deploy, which is how 0070's `CannotFindAsset` happened.
 `Code.fromAsset` path maps to a buildable crate — it instantiates no stacks.
 
 This is the larger of the two gaps and the one most likely to bite. Owned by
-[0145](../../1-tasks/backlog/0145_BUG_synth-not-run-on-infra-only-prs.md). Note
+[0153](../../1-tasks/backlog/0153_BUG_synth-not-run-on-infra-only-prs.md). Note
 also that `synth-cicd` is never run by CI at all.
 
 ### `develop` pushes run no CI
