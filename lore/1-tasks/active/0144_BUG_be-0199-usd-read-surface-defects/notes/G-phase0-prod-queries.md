@@ -224,16 +224,31 @@ SELECT
 FROM prices.price_ohlcv_1h AS p FINAL
 INNER JOIN prices.assets AS a FINAL ON a.asset_id = p.asset_id
 WHERE a.asset_code = 'yXLM'
-  AND p.timestamp >= now() - INTERVAL 24 HOUR
+  AND p.timestamp >= now() - INTERVAL 48 HOUR
 GROUP BY issuer, bucket
 ORDER BY bucket DESC
 SETTINGS do_not_merge_across_partitions_select_final = 1;
 ```
 
+**48 hours, not 24, deliberately:** BE measured the **2026-08-04 13:00** bucket,
+which a 24-hour window run on 08-05 afternoon would just miss.
+
 The last two columns are BE's two options side by side, per bucket. Expect
 `close_usd_if_unfiltered` to be **catastrophically low** wherever
 `priced_volume_share < 1` — that is TEST B's 0.000023 reproducing on prod, and
 it is the evidence for telling BE their option B is worse than the status quo.
+
+**Two things to expect, so the output is not misread:**
+
+- **BE's own 08-04 13:00 bucket should now read `priced_volume_share = 1.0`
+  and a sane `close_usd` (~0.170).** Enrichment has had a day to finish it. That
+  is not a refutation of their report — it is the *proof* of it: the bucket they
+  saw at 1.3085 has silently become a different number, so **the view's answer
+  for a historical bucket changed retroactively**, which is precisely the
+  behaviour BE cannot build on. Compare it against their reported 1.3085.
+- **The live case is only visible in the newest one or two buckets.** The
+  current hour is the one that can still be part-enriched, so that is where a
+  `priced_volume_share < 1` will show up.
 
 ### C2 — the distribution the threshold must be picked from
 
