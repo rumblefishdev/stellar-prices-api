@@ -413,10 +413,47 @@ the aggregate *always* reads a zero. A3 measured exactly that:
 > permanent zero, but it is a different number and [[0135]]'s contract call
 > should be decided against the real one.
 
-**Still to measure: the steady-state lag.** Re-run A4 at ~45–55 minutes past the
-hour, when the frontier is furthest behind. That single sample gives the
-worst-case staleness of the guarded value, which is what [[0135]] needs and what
-the BE reply should quote.
+**Measured 2026-08-05 13:45:40 — the sawtooth is confirmed, and it is the
+README's original picture.**
+
+```
+sampled_at 13:45:40   newest_candle 13:45   newest_priced 13:24   lag_minutes 21
+```
+
+Reconstructing the cycle from the three samples: the pass began ~13:17, ran for
+about 7 minutes, carried the frontier to **13:24**, and stopped. The frontier
+has been **static at 13:24 ever since** while candles kept arriving every minute
+— which is why the lag reads 2 minutes mid-pass and 21 minutes twenty-one
+minutes later. It grows linearly until the next pass.
+
+| Time | Frontier | Lag | Phase |
+|---|---|---|---|
+| 13:19:41 | 13:17 | ~2 min | pass running |
+| 13:23:00 | 13:20 | 2 min | pass running |
+| 13:45:40 | **13:24** | **21 min** | frozen — pass finished |
+
+**Worst case ≈ 52 minutes**, just before the next pass at ~14:17 (13:24 frontier
+→ 14:16 tip). That is an extrapolation from a static frontier, not a
+measurement; one more A4 at ~14:15 would confirm it, but the shape is no longer
+in doubt.
+
+**So the guarded value is up to ~50 minutes stale, averaging ~25.** That is the
+number [[0135]] must decide against — not the "2–3 minutes" this note first
+claimed, and not zero.
+
+### Consequence: freshness improvements are gated on [[0111]]
+
+If ~50 minutes is too stale for BE, the fix is a shorter enrichment cadence —
+and **that is blocked by [[0111]]**, which measured enrichment re-scanning the
+whole table every batch (490–545M rows, ~35 s/batch under backfill load). Going
+from hourly to, say, 5-minutely multiplies that cost by 12 and walks straight
+back into the outage 0111 documents.
+
+This is a dependency the fix plan does not currently record: **[[0135]] fixes
+the zero, but only [[0111]] can make the guarded value fresh.** Worth stating in
+the BE reply so they calibrate expectations, and worth reconsidering 0111's
+priority — it is currently filed as "not acutely urgent" on the grounds that
+cost scales with table size rather than era.
 
 **3. A2 could not see the defect** — it grouped by hour, while
 `mv_current_prices` aggregates over the trailing 24h as a whole, so only the

@@ -66,12 +66,29 @@ candle nearly every minute; the frontier moves at most once an hour. So except
 for the moment just after a pass completes, XLM's newest candle is always behind
 the frontier and the aggregate always reads a zero.
 
-The cost of the fix is therefore bounded by the enrichment cycle: **the guarded
-value is the most recent *priced* close, up to one cycle old.** ⟪PENDING A4 at
-:45–:55 past the hour: the measured worst-case staleness.⟫ We are measuring the
-real distribution rather than quoting the schedule at you, and if the worst case
-is uncomfortable for your use case that is an argument for shortening the
-enrichment cadence — say so and we will size it.
+The cost of the fix is therefore bounded by the enrichment cycle. We measured it
+rather than quoting you the schedule:
+
+```
+2026-08-05, one enrichment cycle observed
+  pass ran ~13:17–13:24, carried the priced frontier to 13:24
+  13:23  frontier 13:20   lag  2 min   (pass still running)
+  13:45  frontier 13:24   lag 21 min   (frontier static, candles still arriving)
+  → worst case just before the next pass ≈ 52 min
+```
+
+**So the guarded `price_usd` would be a real price up to ~50 minutes old,
+averaging ~25 — against today's permanent zero.** We think that is obviously the
+better of the two, but you own the call for your use case, and there is a third
+option if neither works: publish absent/`NULL` and let you handle the gap
+explicitly. Tell us which you want.
+
+**If ~50 minutes is too stale, say so now**, because the fix is different work.
+Making the value *fresher* means shortening the enrichment cadence, and that is
+currently blocked by a known cost problem on our side — the pass re-scans the
+whole candle table on every batch, so running it 12× more often is not a
+configuration change. We would need to fix that first. It is on our list either
+way; your answer decides whether it moves up.
 
 For completeness, since it affects the *shape* of the fix and not this finding:
 we do have candles that can never be priced — pairs whose quote is not
