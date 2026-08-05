@@ -153,8 +153,8 @@ trigger.** Our own schema header says "promote to a materialized table only if
 measured read latency demands it", and the design note says the same. 70.7M read
 rows / 4.6 s / 2.1 GiB for a 104-week window is the demand.
 
-**But roughly half of that scan is our bug, not physics, and we want to fix it
-before we bake it into a table.** Both series views join
+**We suspected half your scan was a bug of ours. We measured it, and it is
+not — so your request stands on its own merits.** Both series views join
 
 ```sql
 INNER JOIN prices.assets AS a FINAL ON a.asset_id = p.asset_id
@@ -163,22 +163,42 @@ INNER JOIN prices.assets AS a FINAL ON a.asset_id = p.asset_id
 and `prices.assets` is a `ReplacingMergeTree` ordered by *natural identity*
 (`asset_code, issuer_address, contract_address`) — **not** by `asset_id`. So
 `FINAL` dedups on identity, and any `asset_id` mapped to more than one natural
-identity multiplies its candles. We have 3,275 such `asset_id`s in production.
-That is precisely your "scans every asset's daily candles twice".
-⟪PENDING B1: measured fan-out ratio.⟫ ⟪PENDING B2: how many duplicate ids carry
-candles.⟫
+identity multiplies its candles. We expected that to be your "scans every
+asset's daily candles twice". Measured over your 104-week window:
 
-**This one matters to you beyond cost.** In `price_usd_series` the fan-out feeds
-a `GROUP BY` on identity, so one `asset_id`'s candles are attributed to *every*
-natural identity sharing that id — meaning **a second identity publishes a price
-series for volume it never traded.** The weighted numbers for the real identity
-stay correct (uniform duplication cancels), but the extra rows are fiction. If
-you are keying LP analytics on natural identity, check whether you are picking
-up identities you don't expect.
+```
+candles 11,685,065   joined rows 12,233,490   ratio 1.047
+3,278 asset_ids carry duplicate identities; 2,493 of them have candles,
+totalling 548,439 candle rows
+```
+
+**+4.7%, not 2×.** The duplicated identities sit almost entirely in thin
+long-tail assets. **So fixing it will not measurably improve your read cost, and
+we are not going to imply otherwise** — your 4.6 s is the shape of the view, not
+our defect, which makes the materialised table the right answer rather than a
+workaround for a bug.
+
+**It is still a correctness problem for you, though, and that is the reason it
+is ordered ahead of the materialisation.** In `price_usd_series` the fan-out
+feeds a `GROUP BY` on identity, so one `asset_id`'s candles are attributed to
+*every* natural identity sharing that id — meaning **a second identity publishes
+a price series for volume it never traded**, across those 548,439 rows. The
+weighted numbers for the real identity stay correct (uniform duplication
+cancels), but the extra rows are fiction. **If you are keying LP analytics on
+natural identity, you are picking up identities that never traded** — worth
+checking your long tail specifically, since that is where these sit.
 
 **Order of work:** fix the fan-out (our task 0139) → settle the population rule
-from finding 3 → then materialize, identity-keyed as you asked. Materializing
-first would make both defects durable instead of transient.
+from finding 3 → then materialise, identity-keyed as you asked. We are not
+materialising first, because that would bake those 548,439 rows of
+wrong-identity attribution into a physical table where they become a stored
+fact instead of a view artefact.
+
+**One thing we still owe you:** we do not yet know where your 70.7M read rows
+come from. It is not the fan-out. Likely candidates are `FINAL` on both sides of
+the join and the identity columns not being able to push down, but we would
+rather measure that than guess — and we need the answer anyway to design the
+materialised table's key properly.
 
 We will come back to you with a date on the materialized table once the two
 prerequisites land. We are not going to give you one now and miss it.

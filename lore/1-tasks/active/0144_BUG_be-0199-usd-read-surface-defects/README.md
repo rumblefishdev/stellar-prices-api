@@ -83,7 +83,7 @@ pin, using the shipped SELECTs verbatim. Scripts and run instructions:
 | # | BE finding | Bug? | Root cause |
 |---|---|---|---|
 | 1 | native XLM `price_usd` = 0 | **Yes** | `argMax(close_usd, …)` with no `> 0` guard in `mv_current_prices` |
-| 2 | `price_usd_series*` read cost | **No** — a valid request | but ~2× of the measured scan **is** a bug: [[0139]]'s `asset_id` fan-out |
+| 2 | `price_usd_series*` read cost | **No** — a valid request | and the scan is **not** meaningfully ours: [[0139]]'s fan-out measured **+4.7%**, not the ~2× first claimed (falsified 08-05). Separate correctness bug on 548,439 long-tail rows |
 | 3i | dust print becomes the bucket price | **Yes** | `WHERE close_usd > 0` makes the weighting population depend on enrichment timing |
 | 3ii | priced bucket reverts to unpriced | **Yes** | `argMax(close_usd, …)` with no `> 0` guard in **all six rollup MVs** |
 | 3ii-b | [[0114]]'s repair does not stick | **Yes** | MV re-append at `sum(version)` overtakes the sweep's `version + 1` |
@@ -137,6 +137,28 @@ XLM is the worst possible case for that, for two compounding reasons:
    at all (`ch_enrich.rs`, `count_remaining_at_volume_zero` docs).
 
 For XLM, then, this is not intermittent — it is close to chronic.
+
+> **Measured on prod 2026-08-05** —
+> [`notes/G-phase0-prod-queries.md`](notes/G-phase0-prod-queries.md), queries
+> A–A4. Confirmed on the published surface: `prices.current_prices` serves
+> `price_usd = 0` while the guarded aggregate returns **0.16720799309045** and
+> `vwap_24h` carries 0.16726314490953.
+>
+> - **Reason 1 confirmed, and it is stronger than "most of every hour".** The
+>   enrichment sawtooth was measured directly: a pass ran ~13:17–13:24 and the
+>   priced frontier then sat **static at 13:24** while candles kept arriving —
+>   lag 2 min mid-pass, 21 min at 13:45, ~52 min just before the next pass.
+>   Since XLM emits a candle nearly every minute and `argMax` takes the newest
+>   one, it publishes 0 **all but the moment right after each pass**.
+> - **Reason 2 was not what was biting.** The sampled tip was XLM/**USDC** on
+>   `sdex` — an oracle-priced pair, not an exotic quote — and all 24 completed
+>   hours were fully priced. Plain lag explains finding 1 by itself. The
+>   permanent exotic-quote floor is still real and still matters, but only as
+>   the reason BE's option A cannot terminate (finding 3), not as a cause here.
+> - **The number [[0135]] needs:** guarding costs **up to ~50 minutes of
+>   staleness, averaging ~25** — against a permanent zero. And note only
+>   [[0111]] can make that fresher: a shorter enrichment cadence multiplies the
+>   full-table re-scan it filed.
 
 **Reproduced (TEST C).** Four `_1m` candles for native XLM, the two newest
 unpriced — 13:59 because enrichment has not run yet, 14:00 because its quote is
@@ -213,8 +235,9 @@ which is the *identical* join shape 0139 filed against `current_price_usd`:
 `prices.assets` is `ReplacingMergeTree(updated_at) ORDER BY (asset_code,
 issuer_address, contract_address)`, so `FINAL` dedups on **natural identity, not
 `asset_id`** — and 0139 measured **3,275 `asset_id`s mapped to two or more
-natural identities** on prod. A ~2× row multiplication is exactly what that
-produces.
+natural identities** on prod (re-measured 08-05: **3,278**, so 0139's figure is
+still current). Row multiplication follows; **its magnitude does not** — see the
+falsification note below.
 
 If confirmed, the consequence here is worse than 0139's duplicate rows. In
 `price_usd_series` the fan-out feeds a `GROUP BY` on identity, so **one
@@ -235,12 +258,27 @@ DUPA         …AAA1            2026-08-03 00:00:00         1.05          5000
 DUPB         …AAA2            2026-08-03 00:00:00         1.05          5000
 ```
 
-Both halves confirmed: **2× read amplification** (BE's "twice") *and* `DUPB`
-publishing a price series for a candle it never traded. The prod magnitude
-depends on how many of 0139's 3,275 duplicate `asset_id`s carry candles — that
-part still needs the query below.
+`DUPB` publishes a price series for a candle it never traded, and this one
+`asset_id` does join to two rows.
 
-Materializing before fixing this bakes the fan-out into a physical table.
+> ⚠️ **Falsified on prod 2026-08-05 — the "~2× read amplification" half of this
+> does not generalise.** TEST D is a valid *mechanism* demo; extrapolating its
+> ratio to the table was not. B1/B2 measured
+> [`notes/G-phase0-prod-queries.md`](notes/G-phase0-prod-queries.md):
+>
+> ```
+> candles 11,685,065   joined_rows 12,233,490   fanout_ratio 1.047
+> 3,278 duplicate asset_ids, 2,493 of them carrying 548,439 candle rows
+> ```
+>
+> **4.7%, not 2×** — the duplicated identities sit in thin long-tail assets
+> (~220 candles each). The fan-out is a **correctness** bug on the long tail,
+> not a **performance** bug on the headline scan, and **BE's read cost is not
+> half our defect.** Do not offer them a speed-up from fixing [[0139]].
+
+Materializing before fixing this still bakes 548,439 rows' worth of
+wrong-identity attribution into a physical table — the ordering below survives
+on correctness grounds, only its performance rationale is withdrawn.
 
 ### 2b. It must be ordered behind finding 3
 

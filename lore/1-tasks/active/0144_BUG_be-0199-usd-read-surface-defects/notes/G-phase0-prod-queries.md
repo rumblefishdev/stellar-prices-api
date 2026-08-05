@@ -396,8 +396,9 @@ Fill in as they come back; then fold into the task README's acceptance criteria.
 | A2 | hours/24 where XLM publishes `price_usd = 0` | **Query was mis-specified — see below.** Per-hour `argMax` returns `published_now == if_guarded` for all 24 completed hours; only the in-flight hour shows 0 (2 of 27 candles unpriced, share 0.0741). `mv_current_prices` aggregates over the trailing **24h as a whole**, not per hour, so this framing cannot see the defect. **A3 replaces it.** | 2026-08-05 13:19:41Z |
 | **A3** | **what `/price` actually serves for XLM** | 🔴 **`published_now = 0`, `if_guarded = 0.16720799309045`.** Finding 1 confirmed on the published surface. `vwap_24h = 0.16726314490953` (non-zero), `updated_at 13:22:00` (MV ticking normally). **`sources` omits `sdex` entirely** — see C2 below. | 2026-08-05 13:22Z |
 | **A4** | enrichment frontier / cadence | `newest_candle 13:22`, `newest_priced 13:20`, `lag_minutes = 2`. ⚠️ **Not the steady state** — this and the A sample both landed in the catch-up window of the pass that began ~13:17. Deployed rule confirmed `rate(1 hour)`, `ENABLED`, no drift from `production.json`. **Re-run at :45–:55 past the hour** for the worst-case lag. | 2026-08-05 13:23Z |
-| B1 | fan-out ratio (expect ~2.0) + read rows vs BE's 70.7M | | |
-| B2 | duplicate `asset_id`s that carry candles | | |
+| **B1** | fan-out ratio (expected ~2.0) | 🔵 **1.047 — the ~2× expectation is falsified.** `candles 11,685,065`, `joined_rows 12,233,490`; the join adds **548,425 rows = +4.7%**. | 2026-08-05 ~13:55Z |
+| **B2** | duplicate `asset_id`s that carry candles | **3,278** dup `asset_id`s / 6,562 identities; **2,493 carry candles**, totalling **548,439 candle rows**. Cross-checks B1's surplus to within 14 rows. | 2026-08-05 ~13:55Z |
+| B3 | our read cost vs BE's 70.7M / 4.6 s / 2.1 GiB | ❌ returned empty — `query_log` flush lag. Re-run. | 2026-08-05 ~13:55Z |
 | C1 | yXLM `priced_volume_share`; shipped vs unfiltered close | | |
 | C2 | distribution of `priced_volume_share` → picks [[0147]]'s X | | |
 | D | unpriced coarse rows, six tiers (upper bound) | | |
@@ -491,6 +492,51 @@ cost scales with table size rather than era.
 **3. A2 could not see the defect** — it grouped by hour, while
 `mv_current_prices` aggregates over the trailing 24h as a whole, so only the
 in-flight hour could ever show a zero. A3 replaces it.
+
+### What B1/B2 changed in finding 2a — the "~2×" claim is falsified
+
+The task's verdict table records finding 2 as *"**No** — a valid request, but
+~2× of the measured scan **is** a bug: [[0139]]'s `asset_id` fan-out"*, and §2a
+calls a 2× multiplication "exactly what that produces". **At prod scale it
+produces 4.7%.**
+
+Both halves of §2a's TEST D were sound *as a mechanism demo* — one `asset_id`
+with two identities does join to two rows, and the second identity does publish
+a series it never traded. What does not survive is the **generalisation from one
+synthetic asset to the whole table**. The population is what decides the ratio,
+and the population is thin:
+
+- 3,278 `asset_id`s carry two or more natural identities (0139 measured 3,275 —
+  it has drifted by 3, consistent and still current).
+- Only **2,493** of them carry daily candles at all.
+- Those account for **548,439 of 11,685,065** candle rows — **4.7%**.
+
+So the duplicated identities are concentrated in **thin, long-tail assets**:
+220 candles each on average, against a table-wide mean that is several times
+higher. The fan-out is a **correctness** bug affecting the long tail, not a
+**performance** bug affecting the headline scan.
+
+**Three consequences:**
+
+1. **The BE reply must not promise a read-cost improvement from fixing 0139.**
+   The draft said "roughly half of that scan is our bug". It is 4.7%. Fixing the
+   fan-out will not measurably change BE's 4.6 s, and telling them otherwise
+   sets up a broken promise at exactly the moment we are rebuilding their trust
+   in these views.
+2. **BE's finding 2 is therefore *more* clearly a real request, not less.** Their
+   read cost is not half our defect — it is the shape of the view. The
+   pre-authorised materialisation ([[0150]]) is justified on its own merits.
+3. **[[0139]]'s ordering ahead of [[0150]] still holds, on the original
+   correctness grounds** — materialising would bake 548,439 rows' worth of
+   wrong-identity attribution into a physical table. Only the *performance*
+   rationale for that ordering is withdrawn.
+
+**Still unexplained: where BE's 70.7M read rows come from.** It is not the
+fan-out. Candidates worth one query each — `FINAL` on both sides of the join,
+the `assets` scan itself, and the fact that the identity columns cannot push
+down so the whole window is materialised before filtering. B3 (re-run) starts
+this; if it matters to [[0150]]'s design, it deserves its own measurement rather
+than a guess.
 
 ### C2 confirmed — and the filter discriminates against the busiest venue
 
