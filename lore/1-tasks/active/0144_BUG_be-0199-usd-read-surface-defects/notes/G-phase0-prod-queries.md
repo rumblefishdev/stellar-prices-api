@@ -417,7 +417,7 @@ Fill in as they come back; then fold into the task README's acceptance criteria.
 | **C1** | yXLM `priced_volume_share`; shipped vs unfiltered close | **BE's 08-04 13:00 bucket now reads 0.16931** against the **1.3085** they saw live — the retroactive change, confirmed. Their 12:00 bucket reads `vol_total 42,037.752` = their "42,038", so we are on exactly their data. **The two newest buckets (08-05 13:00, 14:00) are 100% unpriced and absent from the view.** | 2026-08-05 ~14:05Z |
 | **C2** | distribution of `priced_volume_share` → picks [[0147]]'s X | 🔴 **Not bimodal — three modes and a fat middle.** 1.00: 32.1% · **0.50: 16.9%** · 0.00: 16.8% · ~34% spread across (0,1). ~34,970 buckets over 48h. (11 negative shares were Decimal overflow **in this query**, not data — see retraction.) | 2026-08-05 ~14:05Z |
 | **D2-live** | did the `argMax` zero yXLM's 08-05 13:00 hour? | 🔴 **YES — 3ii caught live.** `_1h` reads `close_usd = 0` while **all four `_15m` sub-buckets are priced**; `_1h.close` matches the 13:45 sub-bucket exactly. Version `…057` vs sub-row sum `…089` = **32 enrichment bumps**, confirming 3ii-b's arithmetic on prod. | 2026-08-05 ~14:15Z |
-| **SPIKE** | shape of the 0.50 buckets | **5,180 of 5,920 (87.5%) are exactly 2 rows / 1 priced.** Structural, not chance — needs the row-level sample to tell double-counting from two quote legs. | 2026-08-05 ~14:15Z |
+| **SPIKE** | shape of the 0.50 buckets | **5,180 of 5,920 (87.5%) are exactly 2 rows / 1 priced.** 🔴 **Settled: two legs of a path payment**, same source/volume/trade_count, different quote — one leg priceable, one permanently not. **Stable at 0.5 forever**, so a gate at X > 0.5 blacks out 14.8% of buckets permanently. Forces the gate's denominator to be *priceable* volume. | 2026-08-05 ~14:20Z |
 | **NEG** | negative `volume_base` | ✅ **Zero rows** in `_1m`/`_1h`/`_1d` over 90 days. Retracts the previous revision's claim. | 2026-08-05 ~14:15Z |
 | D | unpriced coarse rows, six tiers (upper bound) | | |
 | D2 | **wrongly zeroed** rows (the real defect count) | | |
@@ -763,10 +763,82 @@ structural explanations worth testing, in order of how much they would matter:
    tie to [[0149]], but D2-live shows `FINAL` collapsing correctly, so this is
    the least likely.
 
-**(1) and (2) have very different consequences and the row-level sample below
-distinguishes them in one query.** Until it is settled, do not pick X anywhere
-near 0.5 — that bin holds 17% of all buckets and we do not yet know whether it
-represents a real 50% coverage or an artefact.
+#### Settled: it is (2), and it breaks the coverage gate as designed
+
+```
+asset  bucket             source  quote  close                close_usd          volume_base  tc  version
+   64  08-04 12:00        sdex       4   0.00491527792567     0.00083861947406     0.300512   1   …921001
+   64  08-04 12:00        sdex     261   4857.23646576509424  0                    0.300512   1   …921000
+  558  08-04 16:00        sdex       4   73.34965034965035    12.39811827080554    0.0003432  1   …673001
+  558  08-04 16:00        sdex      40   11.57517482517483    0                    0.0003432  1   …673000
+  604  08-05 00:00        sdex       3   0.00001388063081     0.00001388926841    30.1499266  1   …052001
+  604  08-05 00:00        sdex      10   0.0000829189415      0                   30.1499266  1   …052000
+  727  08-04 05:00        sdex       4   2.32416998057893     0.39816643254139     0.0054144  2   …678002
+  727  08-04 05:00        sdex     174   646.54027559419218   0                    0.0054144  2   …678000
+```
+
+**Same `source`, same `volume_base`, same `trade_count`, different
+`quote_asset_id`, versions one apart.** These are the two legs of a path payment
+— the base asset is the intermediate hop, bought against one quote and sold
+against another — so identical base volume on both legs is correct by
+construction. **Not a double-count.** Hypothesis (1) is dead; ingestion is
+behaving.
+
+**But in all four pairs, exactly one leg is priceable.** Quote `3`/`4` carries a
+`close_usd`; quotes `261`, `40`, `10`, `174` are zero every time. Those are
+exotic quotes on the **permanent** enrichment floor — they will never be priced,
+by design.
+
+**Therefore these buckets sit at `priced_volume_share = 0.5` forever.** The 0.50
+mode is not partial enrichment waiting to resolve. It is a **stable, correct,
+permanent state**, and it is 16.9% of all buckets.
+
+#### 🔴 This is the "cannot terminate" trap, in our own proposed fix
+
+We are about to tell BE that their option A — *"exclude the bucket until all its
+rows are enriched"* — **cannot terminate**, because the permanent exotic-quote
+floor means some rows never enrich. That argument is correct.
+
+**A volume-coverage gate at any X > 0.5 has exactly the same defect.** It would
+permanently black out every two-legged path-payment bucket — ~5,180 buckets in
+48 hours, **14.8% of all buckets** — for precisely the reason we are rejecting
+BE's proposal. We would be shipping the flaw we are declining to build.
+
+And note what today's filter does with these buckets: `WHERE close_usd > 0`
+drops the unpriceable leg and publishes the priced one. **That is the right
+answer.** For the permanent case the filter is not a bug at all — it is correct
+behaviour that a naive gate would undo.
+
+#### What this actually means for [[0147]]
+
+The filter's defect (finding 3i) is that it changes the population when
+enrichment is **in flight**. Its behaviour is *correct* when the unpriced rows
+are **permanently unpriceable**. The filter cannot tell those two cases apart —
+and neither can a volume-share gate computed over total volume.
+
+**So the gate cannot be specified against `volume_base` alone.** The denominator
+has to be **priceable** volume, not total volume:
+
+```
+priced_volume_share = priced_volume / priceable_volume
+```
+
+where "priceable" means the quote is USDC/USDT/XLM or has an oracle. Under that
+definition the path-payment buckets score **1.0** — fully priced, because their
+unpriceable leg is excluded from the denominator rather than counted against
+them — and the buckets that score below 1.0 are genuinely mid-enrichment, which
+is what the gate is for.
+
+**This makes [[0151]] a prerequisite, not a postscript.** The ADR on
+`close_usd`'s zero-as-missing is currently Phase 9, filed as "prevents the next
+surface inheriting it". But **0147 cannot be built without the distinction that
+ADR is about** — pending vs never — because the storage does not record it and
+the gate's denominator depends on it. Either 0151 lands first, or 0147 derives
+priceability at read time by joining the quote asset against the oracle set,
+which is a design decision that belongs in the ADR anyway.
+
+⚠️ **One confirmation still owed:** that quotes `261`, `40`, `10`, `174` really
+are unpriceable rather than merely un-enriched. Query below.
 
 ### C2 confirmed — and the filter discriminates against the busiest venue
 
