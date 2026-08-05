@@ -57,18 +57,21 @@ prices.current_prices, native XLM (asset_id 4)
 **Cause.** `mv_current_prices` computes the headline price as
 `argMax(close_usd, timestamp)` over the trailing 24h of 1-minute candles, with
 **no `close_usd > 0` guard**. `close_usd` is written by a separate enrichment
-pass that runs behind the candle tip — we measure the frontier at **~2 minutes**
-behind live. `argMax` takes the *newest* candle, so it returns whatever that
-candle holds, including the zero.
+pass on an hourly schedule, so it necessarily sits behind the candle tip.
+`argMax` takes the *newest* candle, so it returns whatever that candle holds,
+including the zero.
 
-The short lag does not make this rare — **it is what makes it permanent.** XLM
-produces a candle nearly every minute, so its newest candle is always inside the
-2-minute unpriced window. The aggregate therefore reads a zero on essentially
-every refresh. This is why you see it constantly rather than occasionally.
+**This is why you see it constantly rather than occasionally.** XLM produces a
+candle nearly every minute; the frontier moves at most once an hour. So except
+for the moment just after a pass completes, XLM's newest candle is always behind
+the frontier and the aggregate always reads a zero.
 
-It also bounds the cost of the fix, which matters for the contract question
-below: **the guarded value is ~2–3 minutes stale, not an hour.** The trade is a
-two-minute-old real price against a permanent zero.
+The cost of the fix is therefore bounded by the enrichment cycle: **the guarded
+value is the most recent *priced* close, up to one cycle old.** ⟪PENDING A4 at
+:45–:55 past the hour: the measured worst-case staleness.⟫ We are measuring the
+real distribution rather than quoting the schedule at you, and if the worst case
+is uncomfortable for your use case that is an argument for shortening the
+enrichment cadence — say so and we will size it.
 
 For completeness, since it affects the *shape* of the fix and not this finding:
 we do have candles that can never be priced — pairs whose quote is not

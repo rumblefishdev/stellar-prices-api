@@ -362,7 +362,7 @@ Fill in as they come back; then fold into the task README's acceptance criteria.
 | A | XLM tip state + quote of newest candle | **UNPRICED tip confirmed.** 13:18 + 13:19 `close_usd = 0`, 13:17 and older priced. **Quote is USDC** (`GA5ZSEJY…`), *not* an exotic pair — so this is plain enrichment lag, not the permanent floor. | 2026-08-05 13:19:41Z |
 | A2 | hours/24 where XLM publishes `price_usd = 0` | **Query was mis-specified — see below.** Per-hour `argMax` returns `published_now == if_guarded` for all 24 completed hours; only the in-flight hour shows 0 (2 of 27 candles unpriced, share 0.0741). `mv_current_prices` aggregates over the trailing **24h as a whole**, not per hour, so this framing cannot see the defect. **A3 replaces it.** | 2026-08-05 13:19:41Z |
 | **A3** | **what `/price` actually serves for XLM** | 🔴 **`published_now = 0`, `if_guarded = 0.16720799309045`.** Finding 1 confirmed on the published surface. `vwap_24h = 0.16726314490953` (non-zero), `updated_at 13:22:00` (MV ticking normally). **`sources` omits `sdex` entirely** — see C2 below. | 2026-08-05 13:22Z |
-| **A4** | enrichment frontier / cadence | `newest_candle 13:22`, `newest_priced 13:20`, **`lag_minutes = 2`**. Second sample: frontier had advanced 13:17 → 13:20 in 4 min of wall clock. ⚠️ **Contradicts `rate(1 hour)`** — see "Cadence discrepancy". | 2026-08-05 13:23Z |
+| **A4** | enrichment frontier / cadence | `newest_candle 13:22`, `newest_priced 13:20`, `lag_minutes = 2`. ⚠️ **Not the steady state** — this and the A sample both landed in the catch-up window of the pass that began ~13:17. Deployed rule confirmed `rate(1 hour)`, `ENABLED`, no drift from `production.json`. **Re-run at :45–:55 past the hour** for the worst-case lag. | 2026-08-05 13:23Z |
 | B1 | fan-out ratio (expect ~2.0) + read rows vs BE's 70.7M | | |
 | B2 | duplicate `asset_id`s that carry candles | | |
 | C1 | yXLM `priced_volume_share`; shipped vs unfiltered close | | |
@@ -385,34 +385,42 @@ lag fully explains finding 1 on its own.** The exotic-quote floor is real (it is
 why option A cannot terminate) but it is a *separate* argument and should not be
 offered to BE as the cause of the XLM zero.
 
-**2. The lag is ~2 minutes, not an hourly sawtooth — and that makes it chronic,
-not intermittent.** The README reasons that hourly enrichment leaves the tip
-un-enriched "for most of every hour". What is measured is a *steady* ~2-minute
-frontier lag that advances continuously (13:17 → 13:20 across two samples 4
-minutes apart). XLM produces a candle nearly every minute, so its newest candle
-is **permanently** inside that 2-minute window. `argMax(close_usd, timestamp)`
-takes the newest candle. Therefore XLM does not publish 0 "most of the time" —
-**it publishes 0 essentially all of the time**, which is exactly what A3 shows.
+**2. XLM publishes 0 essentially *always*, not "most of every hour".** The
+README's reasoning — hourly enrichment leaves the tip un-enriched for most of
+the hour — is correct as far as it goes, but understates the result. `argMax`
+takes the **newest** candle, and XLM emits one nearly every minute. Enrichment
+advances the frontier at most once an hour. So except for the brief moment right
+after a pass completes, XLM's newest candle is *always* behind the frontier and
+the aggregate *always* reads a zero. A3 measured exactly that:
+`published_now = 0` against `if_guarded = 0.16720799309045`.
 
-This also settles the cost side of [[0135]]'s contract call: guarding the
-`argMax` yields a value **~2–3 minutes stale**, not up to an hour. The trade is
-"a 2-minute-old real price" against "a permanent zero". There is no argument for
-the zero.
+> ⚠️ **Correction (2026-08-05, same session).** This section first claimed the
+> lag was a *steady ~2 minutes* rather than an hourly sawtooth, inferred from
+> `newest_priced` sitting 2 minutes behind `newest_candle` in two samples and
+> the frontier advancing 13:17 → 13:20 in 4 minutes of wall clock. **That was
+> wrong.** `aws events describe-rule --name prices-production-enrichment`
+> returns `"ScheduleExpression": "rate(1 hour)", "State": "ENABLED"` — the
+> deployed rule matches `production.json` exactly, no drift. Both samples fell
+> inside the *same* catch-up window right after a pass that began around 13:17;
+> a frontier advancing while the pass executes is the pass walking forward to
+> live, not a steady state. **The steady-state lag remains unmeasured and can be
+> up to ~60 minutes just before the next run.**
+>
+> The conclusion above survives the correction — it holds *a fortiori* under
+> hourly enrichment — but the **cost** estimate it was used for does not. The
+> claim that guarding costs "~2–3 minutes of staleness" is **withdrawn**: the
+> guarded value is up to **one enrichment cycle** old. That still beats a
+> permanent zero, but it is a different number and [[0135]]'s contract call
+> should be decided against the real one.
 
-**3. ⚠️ Cadence discrepancy — measured behaviour contradicts the config.**
-`infra/envs/production.json:19` declares `"enrichment": "rate(1 hour)"`, and
-`eventbridge-stack.ts:146-150` wires that straight to the rule. An hourly pass
-cannot produce a frontier that advances 3 minutes in 4 minutes of wall clock.
-Either the deployed EventBridge rule has drifted from the repo, or something
-else is enriching. **Resolve before quoting a cadence to BE**, read-only:
+**Still to measure: the steady-state lag.** Re-run A4 at ~45–55 minutes past the
+hour, when the frontier is furthest behind. That single sample gives the
+worst-case staleness of the guarded value, which is what [[0135]] needs and what
+the BE reply should quote.
 
-```bash
-aws events describe-rule --name prices-production-enrichment --profile soroban-admin
-```
-
-Note this cuts both ways for [[0111]] (enrichment re-scans the whole table every
-batch): if the pass is really running every ~2 minutes rather than hourly, 0111's
-cost model and its "1 invocation/hour on schedule" baseline are both wrong.
+**3. A2 could not see the defect** — it grouped by hour, while
+`mv_current_prices` aggregates over the trailing 24h as a whole, so only the
+in-flight hour could ever show a zero. A3 replaces it.
 
 ### C2 confirmed — and the filter discriminates against the busiest venue
 
