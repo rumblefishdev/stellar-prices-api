@@ -414,8 +414,8 @@ Fill in as they come back; then fold into the task README's acceptance criteria.
 | **B1** | fan-out ratio (expected ~2.0) | 🔵 **1.047 — the ~2× expectation is falsified.** `candles 11,685,065`, `joined_rows 12,233,490`; the join adds **548,425 rows = +4.7%**. | 2026-08-05 ~13:55Z |
 | **B2** | duplicate `asset_id`s that carry candles | **3,278** dup `asset_id`s / 6,562 identities; **2,493 carry candles**, totalling **548,439 candle rows**. Cross-checks B1's surplus to within 14 rows. | 2026-08-05 ~13:55Z |
 | **B3** | our read cost vs BE's 70.7M / 4.6 s / 2.1 GiB | **B1: 344 ms, 33,003,949 read rows, 707.33 MiB, 274 MiB peak. B2: 255 ms, 16,943,576 rows, 385.69 MiB.** The join is *not* the cost — see below. (First attempt returned empty on `query_log` flush lag; needed `SYSTEM FLUSH LOGS`.) | 2026-08-05 13:50:25Z |
-| C1 | yXLM `priced_volume_share`; shipped vs unfiltered close | | |
-| C2 | distribution of `priced_volume_share` → picks [[0147]]'s X | | |
+| **C1** | yXLM `priced_volume_share`; shipped vs unfiltered close | **BE's 08-04 13:00 bucket now reads 0.16931** against the **1.3085** they saw live — the retroactive change, confirmed. Their 12:00 bucket reads `vol_total 42,037.752` = their "42,038", so we are on exactly their data. **The two newest buckets (08-05 13:00, 14:00) are 100% unpriced and absent from the view.** | 2026-08-05 ~14:05Z |
+| **C2** | distribution of `priced_volume_share` → picks [[0147]]'s X | 🔴 **Not bimodal — three modes and a fat middle.** 1.00: 32.1% · **0.50: 16.9%** · 0.00: 16.8% · ~34% spread across (0,1). **Plus 11 buckets with a *negative* share.** ~34,970 buckets over 48h. | 2026-08-05 ~14:05Z |
 | D | unpriced coarse rows, six tiers (upper bound) | | |
 | D2 | **wrongly zeroed** rows (the real defect count) | | |
 | E | frozen estate outside the MV windows → sizes [[0148]] | | |
@@ -578,6 +578,112 @@ re-measuring once merges have caught up, before sizing [[0150]] against it.
 ⚠️ **Caveat: cache state.** BE reported 4.6 s "per uncached request"; our 344 ms
 may have hit a warm page cache. The read-row counts are comparable regardless —
 the wall-clock is not.
+
+### What C1 established
+
+**BE's report is corroborated on their own data, down to the volume figure.**
+The 2026-08-04 12:00 bucket reads `vol_total 42,037.752` — their "42,038 units".
+Same rows, same asset, same window.
+
+**The retroactive change is real and now documented.** Their 13:00 bucket, which
+they watched read **1.3085** at 13:29 and then vanish by 14:13, today reads
+**0.16931024**. A consumer that stored the published value at 13:29 holds a
+number our own view no longer agrees with, and nothing signalled the change.
+That is the part of finding 3 that makes these views unusable for BE's purpose,
+independent of the dust-print magnitude.
+
+**Finding 3ii is happening live, right now.** The two newest buckets —
+2026-08-05 13:00 and 14:00 — have `rows_priced = 0` of 3, so
+`close_usd_as_shipped` is `NULL` and **both are absent from
+`price_usd_series_1h` entirely**. That is BE's 14:13 observation reproducing on
+prod while we watch. ⚠️ **It is not yet proven that the `argMax` zeroed them**
+rather than there being no priced data underneath — the `_1m` frontier was at
+13:24, so the 13:00 bucket *should* have priced sub-buckets. **D2 settles it**,
+and this is now the sharpest possible test case for it.
+
+**The filter behaves correctly where coverage is high**, which is worth saying
+plainly because it bounds the fix: at `priced_volume_share` 0.999997 (08-05
+01:00) the shipped and unfiltered closes differ in the 7th decimal. The filter
+only misleads when coverage is *low* — which is exactly what the gate targets.
+
+**Incidental: `asset_code = 'yXLM'` is ambiguous across three issuers.** Besides
+Ultra Capital's `GARDNV3Q7…` (the real one, ~0.167), the window contains
+`GCWXXTUR…` and `GD23M4RJ…YXLM` — both trading at **~0.000009 USD**, i.e.
+imitations. BE keys on natural identity so they are not exposed, but anyone
+keying on `asset_code` alone would blend a real asset with two worthless ones.
+Worth a line in the reply.
+
+### 🔴 C2 — the distribution is not bimodal, and it changes [[0147]]'s design
+
+The note above predicted "a healthy world is bimodal". It is not:
+
+| `priced_volume_share` | buckets | share |
+|---|---|---|
+| **1.00** (fully priced) | 11,226 | **32.1%** |
+| **0.50** exactly | 5,920 | **16.9%** |
+| **0.00** (fully unpriced) | 5,885 | 16.8% |
+| everything in (0,1) | ~11,900 | ~34% |
+| **negative** | 11 | — |
+
+**~51% of buckets sit strictly between 0 and 1.** A gate at X = 0.95 would
+therefore suppress roughly **half of all buckets**, not the thin tail the design
+assumed. That is the single most important number for [[0147]] and it argues
+strongly that:
+
+1. **The threshold cannot be chosen for BE.** Shipping `priced_volume_share` as
+   a column so consumers set their own bar moves from "nice to have" to
+   **required** — the alternative is imposing a 50% blackout on a consumer who
+   may be perfectly happy weighting a 0.7-coverage bucket.
+2. **A single global X is probably the wrong shape.** The middle is broad and
+   flat (~0.3–0.5% per 0.01 bin), so no threshold is a natural cut point.
+
+⚠️ **Caveat before this drives a decision: the distribution is unweighted.**
+Every bucket counts equally, so the thin long tail — which [[B2]] already showed
+dominates by count — dominates here too. A volume-weighted distribution could
+look completely different and is the one that matters for a consumer reading
+majors. **Re-run weighted by `vol_total` before fixing X.**
+
+### 🔴 New finding: `volume_base` can be negative
+
+**11 buckets returned a *negative* `priced_volume_share`** (−0.63, −0.48, −0.46,
+−0.38, −0.11, −0.08, −0.07, −0.03 ×2, −0.01 ×2). The expression is
+`sumIf(volume_base, close_usd > 0) / nullIf(sum(volume_base), 0)`; a negative
+result requires numerator and denominator of opposite sign, so **at least one
+`price_ohlcv_1h` row carries a negative `volume_base`.**
+
+`volume_base` is `Decimal(38,14) DEFAULT 0` with no constraint
+(`init.sql:112`). Nothing prevents it.
+
+This matters beyond a curiosity:
+
+- **It breaks the coverage gate's arithmetic.** A share can be negative or
+  exceed 1, so `share >= X` is not a safe predicate as written. [[0147]] must
+  either clamp or exclude non-positive volume explicitly.
+- **It corrupts the volume-weighted mean itself** — `sum(close_usd × volume) /
+  sum(volume)` with a negative weight can produce a price outside the range of
+  its inputs, in *any* bucket containing one, priced or not. That is a
+  correctness bug in `price_usd_series*` independent of every finding in this
+  task.
+- 11 of ~34,970 buckets is small, but the *unweighted* count says nothing about
+  the volume involved.
+
+**This is not in scope for 0144 and should not be absorbed into it.** It needs
+sizing (how many rows, which sources, since when) and probably its own task
+under [[0116]]'s umbrella — that task already owns junk candles reaching every
+granularity. Query below.
+
+### The 0.50 spike needs explaining before X is chosen
+
+**16.9% of all buckets land on exactly 0.50.** A continuous distribution
+rounding to 2 decimals would put ~1% in that bin — this is ~17×. Something
+structural produces "exactly half the volume is priced", and until we know what,
+any threshold near 0.5 is being set against a mechanism we do not understand.
+
+The obvious hypothesis is **two rows per bucket with equal `volume_base`, one
+priced and one not** — which would follow if the same logical candle exists
+twice under different `(quote_asset_id, source)` keys, or if an enriched and an
+un-enriched copy of a row are both surviving `FINAL`. The latter would tie
+directly to [[0149]]'s version-ownership problem. Query below.
 
 ### C2 confirmed — and the filter discriminates against the busiest venue
 
