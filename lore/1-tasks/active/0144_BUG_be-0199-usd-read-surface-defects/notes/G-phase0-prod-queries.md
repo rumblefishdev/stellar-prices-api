@@ -117,14 +117,26 @@ of hours where `published_now = 0` is how often XLM publishes nothing.
 
 ```sql
 SELECT
-    count()                                                            AS joined_rows,
-    countDistinct(p.asset_id, p.timestamp, p.source, p.quote_asset_id) AS distinct_candles,
-    round(count() / countDistinct(p.asset_id, p.timestamp, p.source, p.quote_asset_id), 3) AS fanout_ratio
-FROM prices.price_ohlcv_1d AS p FINAL
-INNER JOIN prices.assets AS a FINAL ON a.asset_id = p.asset_id
-WHERE p.timestamp >= now() - INTERVAL 104 WEEK
+    candles,
+    joined_rows,
+    round(joined_rows / candles, 3) AS fanout_ratio
+FROM (
+    SELECT
+        (SELECT count() FROM prices.price_ohlcv_1d FINAL
+         WHERE timestamp >= now() - INTERVAL 104 WEEK)                        AS candles,
+        (SELECT count() FROM prices.price_ohlcv_1d AS p FINAL
+         INNER JOIN prices.assets AS a FINAL ON a.asset_id = p.asset_id
+         WHERE p.timestamp >= now() - INTERVAL 104 WEEK)                      AS joined_rows
+)
 SETTINGS do_not_merge_across_partitions_select_final = 1;
 ```
+
+> ⚠️ **Do not use `countDistinct(asset_id, timestamp, source, quote_asset_id)`
+> here** — the first draft of this query did. It builds exact `uniqExact` state
+> over ~35M distinct 4-tuples and is a good bet to hit the **5.59 GiB memory
+> quota** that already bit the [[0090]] pre-roll. Two plain `count()`s give the
+> same ratio *exactly*, for almost nothing: the un-joined count is the candle
+> population by definition, since the join adds rows and never removes them.
 
 A ratio near **2.0** confirms BE's "scans every asset's daily candles twice" is
 [[0139]]'s identity fan-out, not their query. This is the heaviest query in the
@@ -162,6 +174,27 @@ SETTINGS do_not_merge_across_partitions_select_final = 1;
 
 `dup_ids_with_candles` is the real exposure: every one of those publishes a
 price series under an identity that never traded it (TEST D's `DUPB`).
+
+### B3 — compare our read cost against BE's measurement
+
+Run **immediately after B1**, in the same session. BE measured 70.7M read rows /
+4.6 s / 2.1 GiB for the 104-week window; this says what the same shape costs us
+and how much of it the fan-out accounts for.
+
+```sql
+SELECT
+    query_duration_ms,
+    read_rows,
+    formatReadableSize(read_bytes)   AS read_bytes,
+    formatReadableSize(memory_usage) AS peak_memory
+FROM system.query_log
+WHERE type = 'QueryFinish'
+  AND event_time >= now() - INTERVAL 15 MINUTE
+  AND query LIKE '%fanout_ratio%'
+  AND query NOT LIKE '%system.query_log%'
+ORDER BY event_time DESC
+LIMIT 3;
+```
 
 ---
 
