@@ -258,6 +258,34 @@ meanwhile.
 > new unresolved pools). `GET /backfill/status` reports truthful monotonic
 > progress for both streams.
 
+### How pass 2 is tracked
+
+**This file is the tracker — no PR is held open for the run.** Each daily check
+appends to the pass 2 row above and lands on `develop` as its own small commit.
+Decided 2026-08-05: an open PR spanning a multi-day operation makes the run's
+state readable only through a diff, and the branch drifts behind `develop` for
+no benefit. The task file is the durable record; PRs stay short-lived.
+
+**Next check:** daily until the frontier reaches **23,423,999**. Read
+`~/sdex-pass2.log` on fishuser-hero (tmux `sdex-pass2`) and the marker frontier
+in CH. Three gotchas that each produced a wrong reading before:
+
+- **Never sample markers <22 min apart** — the run is download-bound and the
+  frontier freezes transiently between partitions. Liveness is `pgrep -af
+  sdex-backfill` plus the partition number climbing over ≥25 min.
+- **Always filter `WHERE sequence < 50457424`** when counting pre-Soroban
+  markers, or the Soroban-era run's 12,895,188 markers inflate the figure.
+- **Markers are never evidence of data.** Pass 1 finished with a contiguous
+  marker frontier and no candles below `201812`. Count candles, and judge
+  cleanup by **surviving active parts**, not by `RemovePart` timestamps — see
+  [[S-presoroban-loss-chain-confirmed]] §4.3.
+
+**The run ends when** the frontier reaches 23,423,999 *and* the candle count
+below `201812` accounts for the 3,738,473 expected. Then the §7.1 pre-roll gate
+applies — and note that the gap pre-roll it feeds is now ⛔ **gated on [[0145]]**
+(the pre-roll scripts carry [[0144]]'s unguarded `argMax(close_usd, …)`), so
+finishing pass 2 does not clear the way to pre-roll on its own.
+
 ## Recovery plan (pre-Soroban gap, from the 2026-07-20 cleanup incident)
 
 **Invariant for the whole sequence: `prices-production-cleanup` stays DISABLED
