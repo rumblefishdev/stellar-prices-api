@@ -4,8 +4,8 @@ title: "Decide whether the headline price_usd should be outlier-protected like v
 type: FEATURE
 status: backlog
 related_adr: []
-related_tasks: ["0072", "0118", "0123", "0144"]
-tags: ["phase-future", "effort-medium", "priority-medium", "milestone-M2", "vwap", "clickhouse"]
+related_tasks: ["0072", "0118", "0123", "0144", "0145", "0146", "0147"]
+tags: ["phase-future", "effort-large", "priority-high", "milestone-M2", "vwap", "clickhouse"]
 milestone: 2
 links: []
 history:
@@ -27,6 +27,18 @@ history:
       un-enriched newest candle zeroes it (and `market_cap_usd` and `price_xlm`
       with it). Pre-existing, not a 0072 regression. Both failure modes are the
       same column and should be decided together.
+  - date: 2026-08-05
+    status: backlog
+    who: okarcz
+    note: >
+      Raised to priority-high and scope widened again from [[0144]]'s BE 0199
+      triage. BE measured the un-enriched-tip zero **on native XLM itself** —
+      the worst possible asset for it, and close to chronic rather than
+      intermittent. [[0144]] also found a **third** unguarded site in the same
+      file (`current.sql:121`, `per_source.src_price`) whose downstream
+      `WHERE src_price > 0` rescue makes `sources` and `vwap_24h`
+      enrichment-timing-dependent. This task remains the owner of finding 1;
+      no duplicate was spawned.
 ---
 
 # price_usd is not outlier-protected
@@ -130,6 +142,39 @@ which is why it belongs with the decision below rather than as a drive-by patch.
 > unlike a zero, an outlier price is a perfectly ordinary-looking number.
 > **This task owns all of that.**
 
+## Third failure mode — the `src_price > 0` rescue is itself a population shift
+
+Found 2026-08-05 in [[0144]]'s full-schema audit (its scope correction **C2**),
+and it complicates the framing above.
+
+The text above treats `per_source`'s `src_price > 0` filter as the *correct*
+counterpart to `unfiltered`'s missing guard. It is not — it is the same defect
+one step later. `per_source.src_price` is **also** an unguarded
+`argMax(close_usd, timestamp)` (`current.sql:121`); the zero is then dropped by
+`WHERE src_price > 0` at `current.sql:140`. That fixes the arithmetic by
+**silently changing the population**, which is exactly the mechanism [[0144]]
+filed as BE 0199 finding 3i against `price_usd_series*`.
+
+Consequence, not previously recorded here:
+
+- **A source whose newest 1m candle is un-enriched disappears entirely from the
+  `sources` JSON and from the `vwap_24h` weighting** — not because it is an
+  outlier, but because enrichment has not reached it yet. A consumer cannot
+  distinguish the two.
+- The median filter's documented "**no-op below 3 sources by construction, not
+  by luck**" property (`current.sql:72-76`) is then evaluated against that
+  shrunken population. A three-source asset with one lagging source is silently
+  a two-source asset for that refresh, so the safety argument for the filter is
+  itself enrichment-timing-dependent.
+
+This means the decision below cannot be made for `price_usd` alone. Whichever
+option is chosen must also state **whether an unpriced source should be absent
+from `sources` / `vwap_24h`, or carried at its last known price** — and BE will
+hit this next, having already switched to a `price_usd_series_1h` workaround.
+
+[[0147]] is settling the same question ("what counts as priced enough") for the
+read surfaces; the answers should agree.
+
 ## Implementation
 
 Decide between, roughly:
@@ -164,3 +209,11 @@ base for whichever option is chosen.
       staleness bound. `zero_but_vwap_ok` should be 0 afterwards.
 - [ ] `market_cap_usd` and `price_xlm` no longer collapse to 0 purely because the
       newest candle is un-enriched.
+- [ ] Native **XLM** specifically publishes a real `price_usd` — the case BE
+      measured and the one [[0144]] shows is close to chronic, since XLM's
+      newest candle is both usually newer than the last enrichment pass and
+      often an exotic-quote pair that will never be enriched at all.
+- [ ] The C2 question answered: an unpriced source is either absent from
+      `sources`/`vwap_24h` *by an explicit rule*, or carried at its last known
+      price — not dropped as a side effect of enrichment timing. Answer
+      consistent with [[0147]]'s coverage gate.

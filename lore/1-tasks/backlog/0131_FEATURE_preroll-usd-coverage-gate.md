@@ -4,7 +4,7 @@ title: "0088 step-3 pre-roll: gate/warn when 1m USD coverage for the span is bel
 type: FEATURE
 status: backlog
 related_adr: []
-related_tasks: ["0114", "0088", "0144"]
+related_tasks: ["0114", "0088", "0144", "0147", "0145"]
 tags: [clickhouse, enrichment, backfill, pre-roll, guard, priority-low, effort-small]
 links:
   - "../../../packages/prices-clickhouse/schema/preroll-incremental.sql"

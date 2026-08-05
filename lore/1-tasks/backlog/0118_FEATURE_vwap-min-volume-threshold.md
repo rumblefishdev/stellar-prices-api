@@ -4,7 +4,7 @@ title: "§5.5 VWAP completion — min_volume_usd source threshold + per-request 
 type: FEATURE
 status: backlog
 related_adr: ["0007"]
-related_tasks: ["0072", "0039", "0040", "0123", "0144"]
+related_tasks: ["0072", "0039", "0040", "0123", "0144", "0147", "0135"]
 tags: [layer-backend, layer-database, priority-high, effort-medium, milestone-M2, vwap, clickhouse, materialized-view, api]
 milestone: 2
 links:

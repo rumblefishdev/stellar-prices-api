@@ -4,7 +4,7 @@ title: "current_price_usd returns duplicate rows — assets is keyed on natural 
 type: BUG
 status: backlog
 related_adr: []
-related_tasks: ["0072", "0061", "0067", "0144"]
+related_tasks: ["0072", "0061", "0067", "0144", "0150"]
 tags:
   ["priority-high", "effort-medium", "clickhouse", "data-correctness", "milestone-M2"]
 milestone: 2

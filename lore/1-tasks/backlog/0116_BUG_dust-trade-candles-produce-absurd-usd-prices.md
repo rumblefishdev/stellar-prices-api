@@ -4,7 +4,7 @@ title: "Dust-trade candles produce absurd close_usd values (up to $29.6M) in eve
 type: BUG
 status: backlog
 related_adr: []
-related_tasks: ["0114", "0115", "0026", "0144"]
+related_tasks: ["0114", "0115", "0026", "0144", "0147"]
 tags: [clickhouse, data-quality, sdex, enrichment, priority-medium, effort-small]
 links:
   - "../../../packages/enrichment-worker/src/ch_enrich.rs"

@@ -2,10 +2,11 @@
 id: "0144"
 title: "BE 0199 report: close_usd read surfaces publish a wrong answer while enrichment is in flight, and price_usd_series won't scale"
 type: BUG
-status: backlog
+status: active
 related_adr: []
 related_tasks:
-  ["0135", "0139", "0116", "0114", "0061", "0072", "0118", "0131", "0138", "0142", "0143"]
+  ["0135", "0139", "0116", "0114", "0061", "0072", "0118", "0131", "0138", "0142", "0143",
+   "0145", "0146", "0147", "0148", "0149", "0150", "0151", "0137", "0088", "0136"]
 tags:
   ["priority-high", "effort-medium", "clickhouse", "data-correctness", "be-interop", "milestone-M2"]
 milestone: 2
@@ -41,6 +42,19 @@ history:
       stick, not the reason the value is zero. Also measured: removing the
       `close_usd > 0` filter (BE's option B, taken literally) is **worse** than
       keeping it.
+  - date: 2026-08-05
+    status: active
+    who: okarcz
+    note: >
+      Promoted to active. Two scope corrections found by grepping the schema
+      rather than reading the two files the report named: the unguarded
+      `argMax(close_usd, …)` is at **130 sites across 6 files**, not 6 — every
+      pre-roll script carries it, which puts it on the critical path of the
+      [[0088]] pass-2 and [[0136]] gap pre-rolls; and `current.sql` has **two**
+      unguarded sites, the second of which makes `sources`/`vwap_24h`
+      enrichment-timing-dependent (finding 3i's pattern, third instance). Fix
+      plan added below and split into [[0145]]–[[0151]]; finding 1 stays with
+      [[0135]] rather than spawning a duplicate.
 ---
 
 # BE 0199 report — three defects in the USD read surfaces
@@ -472,6 +486,135 @@ affected, and whether a backfill/re-sweep is needed after the MV fix.
 
 ---
 
+## Scope corrections (2026-08-05)
+
+Both found by grepping the whole schema rather than reading only the two files
+BE's report pointed at. Both change the fix ordering.
+
+### C1 — it is 130 unguarded sites across 6 files, not 6
+
+The report and this task's first two revisions name `rollups.sql`'s six MVs. The
+identical `argMax(close_usd, t.timestamp)` is in **every pre-roll script too**:
+
+| File | Unguarded `argMax(close_usd, …)` | Provisioned object? |
+|---|---|---|
+| `rollups.sql` | 6 | Yes — delivery blocked on [[0142]] |
+| `preroll.sql` | 6 | No — plain script |
+| `preroll-incremental.sql` | 14 | No |
+| `preroll-live-gap.sql` | 6 | No |
+| `preroll-amm-reprice.sql` | 95 | No |
+| `current.sql` | 2 (see C2) | Yes — but self-DROPs, delivery fine |
+| `views.sql` | 0 | — |
+
+Counted with `grep -c 'argMax(close_usd' packages/prices-clickhouse/schema/*.sql`;
+`argMaxIf(close_usd` returns 0 everywhere.
+
+**This is a deadline, not just a bigger number.** [[0088]] pass 2 lands
+~2026-08-09/10 and needs a pre-roll; [[0136]]'s 2026-07-21→08-03 gap needs a
+bounded incremental pre-roll. Run either against today's scripts and it
+manufactures a **fresh estate of zeroed coarse rows at backfill scale** — rows
+that then age out of the MV re-aggregation windows and need the [[0114]] sweep
+to repair. Fixing the pre-roll scripts is mechanical, unblocked (no provisioned
+object, no DROP window, no 0142 dependency) and must precede both runs.
+
+`preroll-amm-reprice.sql`'s 95 sites are clearly unrolled/generated — check for
+a generator and fix that rather than the output.
+
+### C2 — `current.sql` has a second unguarded site, and it is finding 3i again
+
+`per_source.src_price` (`current.sql:121`) is unguarded. It is rescued
+downstream by `WHERE src_price > 0` (`current.sql:140`) — which is **exactly
+finding 3i's defect pattern**: the arithmetic is fixed by silently changing the
+population.
+
+Consequence, not previously recorded: **a source whose newest 1m candle is not
+yet enriched disappears entirely from the `sources` JSON and from the
+`vwap_24h` weighting.** And the median outlier filter's documented
+"no-op below 3 sources by construction" property (`current.sql:72-76`) is then
+evaluated against that shrunken population — so the filter's own safety
+argument is enrichment-timing-dependent.
+
+This task's finding-1 section claims "unlike every neighbouring CTE
+(`per_asset`, `ref_7d`, `open_24h`), all of which filter". That is right about
+the arithmetic and wrong about the consequence: `per_source` filters *after*
+aggregating, which is the bug, not the fix. `current.sql:103` (`xlm_usd`) and
+`current.sql:204` (`open_24h`, [[0138]]'s fix) are genuinely guarded.
+
+So finding 1's blast radius is not just `price_usd` — it is `price_usd`,
+`sources` and `vwap_24h`. Whether an unpriced source should be *absent* or
+carried at its last known price is a contract question [[0135]] must answer at
+the same time, because BE will hit it next.
+
+---
+
+## Fix plan
+
+Supersedes the sketch below, which is kept for its per-step reasoning. Split
+into [[0145]]–[[0151]]; this task retains Phase 0 (measurement + the BE reply)
+and stays the BE-facing contract.
+
+### Ordering rules
+
+Three rules generate the sequence; everything else follows from them.
+
+1. **Stop making new zeros before repairing old ones.** Any repair that runs
+   before the write path is fixed is overwritten or duplicated. This is what
+   puts the pre-roll scripts (C1) ahead of everything else.
+2. **Cheapest unblocked delivery first.** Pre-roll scripts have no provisioned
+   object; `current.sql` already DROPs and re-creates itself; only
+   `rollups.sql` needs a delivery mechanism built before it can be touched.
+3. **The version race (3ii-b) is hygiene, not a blocker** — for a sharper
+   reason than this task first gave. After the `argMax` fix, rows *inside* the
+   MV re-aggregation window self-heal, because the MV re-appends a correct
+   value instead of a zero. Rows *outside* the window stay frozen — but they
+   are also outside the clobber zone, so the [[0114]] sweep can repair them
+   without the version fix landing first. The two problems do not overlap.
+
+### Phases
+
+| # | Work | Task | Blocked on | Why here |
+|---|---|---|---|---|
+| 0 | Queries A–E on prod; written reply to BE | **0144** (this) | — | Read-only; calibrates every threshold below |
+| 1 | Guard `argMax` in the 4 pre-roll scripts (121 sites) | **[[0145]]** | — | ⏰ must precede the 0088 / 0136 pre-rolls |
+| 2 | Guard `argMax` in `current.sql` (2 sites) + the `sources`/`vwap_24h` contract call | **[[0135]]** | contract decision only | Fixes the XLM symptom BE led with |
+| 3 | Guard `argMax` in the 6 rollup MVs | **[[0146]]** | [[0142]] drift detection, [[0137]] alarm | Highest value, only real delivery problem |
+| 4 | Repair the frozen historical estate | **[[0148]]** | Phase 3; query D/E sizing | Must not run before the write path is fixed |
+| 5 | Volume-coverage gate on `price_usd_series*` | **[[0147]]** | query C's real distribution | Reaches base-table zeros no rollup fix can |
+| 6 | Identity fan-out | **[[0139]]** | — | **Runs in parallel from day one** |
+| 7 | Sweep/MV version ownership | **[[0149]]** | Phase 3 | Demoted by rule 3 |
+| 8 | Materialize `price_usd_series*` | **[[0150]]** | Phases 5 + 6 | Baking in an unfixed population is the trap |
+| 9 | ADR — `close_usd` zero-as-missing | **[[0151]]** | — | Prevents the next surface inheriting it |
+
+### Critical path
+
+```
+Phase 0 (measure) ─┬─> Phase 1 (preroll, 0145) ────────> [0088 / 0136 pre-rolls safe]
+                   ├─> Phase 2 (current.sql, 0135) ────> [XLM off the 0 sentinel]
+                   ├─> 0142 drift + 0137 alarm ─> Phase 3 (0146) ─> Phase 4 (0148) ─┐
+                   │                                             └─> Phase 7 (0149) │
+                   ├─> Phase 5 (gate, 0147; needs query C) ───────────────────────────┼─> Phase 8 (0150)
+                   └─> Phase 6 (fan-out, 0139) ──────────────────────────────────────┘
+```
+
+- **Fastest visible win:** Phases 1 + 2. Both mechanical, both unblocked, both
+  shippable inside a week. Phase 2 alone answers BE's opening complaint.
+- **Longest lead time:** Phase 3 — [[0142]] and [[0137]] must both land before
+  a rollup MV can be safely dropped and re-created.
+- **Parallelisable:** Phase 6 ([[0139]]) touches only `views.sql`, which
+  [[0134]] converted to `CREATE OR REPLACE`, so it shares no delivery path with
+  the `argMax` work.
+
+### Open decisions
+
+1. **[[0135]]'s contract call** — "latest close" (today: `0` for XLM most of
+   every hour) vs "latest *priced* close". Recommend latest-priced; there is no
+   real third option. Fast decision, unblocks Phase 2 immediately. Now also
+   carries the C2 question about `sources`/`vwap_24h`.
+2. **Does Phase 1 preempt the active queue?** [[0088]] pass 2 is mid-flight. If
+   its pre-roll is imminent, [[0145]] should jump ahead of whatever is active.
+
+---
+
 ## Implementation sketch
 
 Ordered by dependency, not by importance. Steps 1 and 2 are the same one-line
@@ -507,28 +650,66 @@ implementation.
 
 ## Acceptance Criteria
 
+This task retains Phase 0 — measurement and the BE-facing contract. Every
+implementation criterion below is annotated with the child task that owns it;
+0144 closes when the measurements are recorded and BE has its answer, not when
+the fixes ship.
+
 - [x] Mechanisms reproduced on CH 26.3.10.60 (`repro/`) — all three findings are
       bugs; root cause of 3ii corrected from the version race to the unguarded
       `argMax`.
+- [x] Full-schema audit of the defect: **130 unguarded sites across 6 files**
+      (C1), and `current.sql`'s second site making `sources`/`vwap_24h`
+      enrichment-timing-dependent (C2).
 - [ ] Verification queries A–D run on prod and their results recorded here, to
       size the blast radius (how many assets, how much of the coarse estate).
+- [ ] **Query E** — how many coarse rows carry `close_usd = 0 AND close > 0`
+      *outside* the current MV re-aggregation windows, i.e. the estate only the
+      [[0114]] sweep can reach. Sizes [[0148]].
 - [ ] BE has a written answer covering: 0039's actual status and the real owner
       of native XLM pricing; **why "wait until every row is enriched" cannot
       terminate**; **why removing the filter outright is worse than keeping it**;
       and what we will ship instead.
+- [ ] No pre-roll can write a coarse row whose `close_usd` is 0 while a priced
+      sub-bucket exists underneath it — **before** the [[0088]] / [[0136]]
+      pre-rolls run. → [[0145]]
 - [ ] No coarse row carries `close_usd = 0` while its own `close > 0` and a
       priced sub-bucket exists underneath it — regression test on the prod pin.
+      → [[0146]]
 - [ ] `price_usd_series` / `price_usd_series_1h` cannot return a bucket whose
       published price rests on a negligible share of the bucket's volume — with
       a regression test on CH **26.3.10.60** that reproduces BE's yXLM case.
+      → [[0147]]
 - [ ] A bucket that is fully unpriceable is absent; a bucket that is *pending*
       enrichment is distinguishable from one that is *priced* — not conflated.
+      → [[0147]]
+- [ ] `sources` / `vwap_24h` no longer drop a source purely because its newest
+      candle is un-enriched. → [[0135]] (C2)
 - [ ] No enriched `close_usd` can be overwritten by a later zero (or the
-      mechanism is documented as impossible, with evidence).
+      mechanism is documented as impossible, with evidence). → [[0149]]
+- [ ] The historical estate sized by queries D/E is repaired or explicitly
+      written off. → [[0148]]
 - [ ] If materialized: identity-keyed as BE requested, refresh mode justified
       against [[0095]], and the [[0142]] no-op trap accounted for so the DDL
-      actually lands on prod.
-- [ ] BE re-measures the 104-week window and confirms the seek.
+      actually lands on prod. → [[0150]]
+- [ ] BE re-measures the 104-week window and confirms the seek. → [[0150]]
+
+## Future Work
+
+Spawned 2026-08-05 from the fix plan above. Each is independently shippable.
+
+| Task | Phase | Priority |
+|---|---|---|
+| [[0145]] — guard `argMax` in the four pre-roll scripts (121 sites) | 1 | high ⏰ |
+| [[0146]] — guard `argMax` in the six rollup MVs | 3 | high |
+| [[0147]] — volume-coverage gate on the `price_usd_series*` views | 5 | high |
+| [[0148]] — repair the frozen historical `close_usd` estate | 4 | medium |
+| [[0149]] — sweep/MV version ownership on `close_usd` | 7 | medium |
+| [[0150]] — materialize `price_usd_series*` identity-keyed (BE §6) | 8 | medium |
+| [[0151]] — ADR: `close_usd` zero-as-missing | 9 | low |
+
+Finding 1 deliberately did **not** spawn a task — [[0135]] already owns it, and
+C2 was added to its scope instead.
 
 ## Notes
 
