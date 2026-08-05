@@ -166,19 +166,45 @@ aws events disable-rule --name prices-production-cleanup --region eu-central-1 \
 >
 > ```bash
 > CHQ <<'SQL'
-> SELECT partition_id, max(event_time) AS last_removal, count() AS removals
-> FROM system.part_log
-> WHERE table = 'price_ohlcv_1m' AND event_type = 'RemovePart'
->   AND partition_id < '202000'
-> GROUP BY partition_id ORDER BY last_removal DESC;
+> SELECT partition, count() AS active_parts, sum(rows) AS rows,
+>        max(modification_time) AS last_touched
+> FROM system.parts
+> WHERE database = 'prices' AND table = 'price_ohlcv_1m' AND active
+>   AND partition < '202000'
+> GROUP BY partition ORDER BY partition;
 > SQL
 > ```
 >
-> **✅ Checkpoint:** no two partitions share a removal timestamp. **Many
-> partitions removed at the identical second = the sweep is live** (it looked
-> like `2026-07-18 03:08:39` across 21 partitions at once) → stop the run and get
-> cleanup disabled. Scattered per-partition times are background merges and are
-> expected, especially for days after a run ends.
+> **✅ Checkpoint:** every partition that appeared on the previous check is still
+> here, with ≥ 1 active part and non-zero rows, and new ones appear as the walk
+> advances. **A partition that was present yesterday and is absent today = the
+> sweep is live** → stop the run and get cleanup disabled.
+>
+> ⚠️ **Do NOT gate this on "no two partitions share a `RemovePart` timestamp".**
+> That was this runbook's check until 2026-08-05 and it **false-alarms during a
+> live backfill**: the run writes into pre-2019 partitions, so ordinary merges
+> compact its small parts and emit `RemovePart` on exactly the partitions being
+> watched. Measured 2026-08-05 over 3 h of pass 2 — `RemovePart` 3,753 ·
+> `MergeParts` 1,243 · `NewPart` 2,459, i.e. **3.02 source parts per merge** with
+> every removal accounted for, and batches spanning 2–10 partitions in the same
+> second all morning. **The discriminator is what is left behind, not what was
+> removed:** a sweep DROPs whole partitions and leaves **zero** active parts; a
+> merge always leaves ≥ 1. If you want the removal side as a cross-check, verify
+> the merge accounting rather than the timestamps:
+>
+> ```bash
+> CHQ <<'SQL'
+> SELECT event_type, count() AS n
+> FROM system.part_log
+> WHERE database = 'prices' AND table = 'price_ohlcv_1m'
+>   AND event_time >= now() - INTERVAL 3 HOUR
+> GROUP BY event_type ORDER BY n DESC;
+> SQL
+> ```
+>
+> **✅ Checkpoint:** `RemovePart` ≈ a small multiple of `MergeParts` (2–4×), and
+> `NewPart` − `MergeParts` > 0 (the run's own inserts). `RemovePart` with **no
+> matching `MergeParts`** is the sweep's fingerprint.
 
 ### 4.4 [FISHUSER-HERO] Liveness (only if you can reach the LAN — optional)
 
@@ -528,17 +554,26 @@ outstanding pass or a deletion event — **stop**, do not pre-roll.
 
 ```bash
 CHQ <<'SQL'
-SELECT partition_id, max(event_time) AS last_removal, count() AS removals
-FROM system.part_log
-WHERE table = 'price_ohlcv_1m' AND event_type = 'RemovePart'
-  AND partition_id < '202000'
-GROUP BY partition_id ORDER BY last_removal DESC;
+SELECT partition, count() AS active_parts, sum(rows) AS rows,
+       max(modification_time) AS last_touched
+FROM system.parts
+WHERE database = 'prices' AND table = 'price_ohlcv_1m' AND active
+  AND partition < '202000'
+GROUP BY partition ORDER BY partition;
 SQL
 ```
 
-**✅ Gate:** no two partitions share a removal timestamp. **Several partitions
-removed at the _identical_ second is the cleanup sweep's signature**; scattered
-per-partition times are ordinary background merges and are fine.
+**✅ Gate:** every month the backfill walked is present with ≥ 1 active part and
+non-zero rows. **A partition that the run demonstrably wrote and that now has no
+active parts is the cleanup sweep's signature** — stop, do not pre-roll.
+
+> ⚠️ The earlier form of this gate — _"no two partitions share a `RemovePart`
+> timestamp"_ — was **replaced on 2026-08-05**. It false-alarms while a backfill
+> is live, because the run's inserts into old partitions are merged and those
+> merges emit `RemovePart` on exactly the partitions under watch (measured: 3.02
+> source parts removed per merge, batches of up to 10 partitions in one second,
+> all benign). Judge by surviving parts, not by removal timestamps. See §4.3 for
+> the merge-accounting cross-check.
 
 The marker query below is kept **for progress tracking only** — it tells you
 where the walk has reached, never whether the data is there:
