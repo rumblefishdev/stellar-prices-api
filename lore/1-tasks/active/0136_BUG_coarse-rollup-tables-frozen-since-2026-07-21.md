@@ -589,16 +589,33 @@ satisfied: cleanup is off, and the `_bak` tables are intact ([[0105]] has not ru
    `preroll.sql`**, which expects TRUNCATE-d tables and would re-run the
    [[0090]] history loss.
 
-   > ⛔ **New dependency added 2026-08-05: this now waits on [[0145]].**
-   > [[0144]]'s schema-wide audit (C1) found the same unguarded
-   > `argMax(close_usd, …)` in **all four pre-roll scripts** — 121 sites — that
-   > the report had only pinned on the rollup MVs. Run the gap pre-roll against
-   > today's scripts and every coarse row whose newest sub-bucket is not yet
-   > enriched lands with `close_usd = 0`, manufacturing a fresh zeroed estate at
-   > backfill scale — rows that then age out of the MV re-aggregation windows
-   > and need the [[0114]] sweep to repair. [[0145]] is mechanical and unblocked
-   > (plain scripts, no provisioned object, no [[0142]] no-op trap), so the
-   > ordering costs little.
+   > ✅ **[[0145]] dependency CLEARED 2026-08-06** (PR #176, `4e35dc6`). All 121
+   > unguarded `argMax(close_usd, …)` sites across the four pre-roll scripts are
+   > now `argMaxIf(close_usd, t.timestamp, close_usd > 0)`. Without it, every
+   > coarse row whose newest sub-bucket was not yet enriched would have landed
+   > with `close_usd = 0`, manufacturing a fresh zeroed estate at backfill scale
+   > — rows that then age out of the MV re-aggregation windows and need the
+   > [[0114]] sweep to repair.
+   >
+   > ⚠️ **But 0145 shipped no deployable artifact, so verify before you run.**
+   > These are operator-run scripts — nothing embeds them (`prices-clickhouse-init`
+   > applies `INIT`/`VIEWS`/`ROLLUPS`/`SEED`, never `PREROLL`), so there was
+   > nothing to deploy and there is no build to confirm. The fix applies only to
+   > whoever runs the script **from an up-to-date checkout**. Running it from a
+   > stale one silently executes the pre-0145 SQL and every signal reports
+   > success. **Immediately before the gap pre-roll, from the checkout you are
+   > actually pasting from:**
+   >
+   > ```bash
+   > # must print 0 — any non-zero means this is the pre-0145 script
+   > grep -c 'argMax(close_usd, t.timestamp)' \
+   >   packages/prices-clickhouse/schema/preroll-live-gap.sql
+   > ```
+   >
+   > `preroll-live-gap.sql` is the live-era script and the right one for this
+   > gap. (Counting `argMaxIf` instead is the wrong check — the file header
+   > quotes the guard expression verbatim, so that count is one higher than the
+   > number of real sites.)
 3. **[[0137]]** — the freshness alarm. Health was measured on MV status, not on
    the data, which is why this ran ten days silent. Recovery is not complete
    without it.
@@ -780,8 +797,10 @@ Detection is a separate deliverable → **[[0137]]**.
       returns zero rows.
 - [ ] The 2026-07-21 → recovery gap closed by a **bounded incremental** pre-roll
       (never `preroll.sql`), with deep history verified against `_bak`.
-      **⛔ Gated on [[0145]] since 2026-08-05** — the pre-roll scripts carry
-      [[0144]]'s unguarded `argMax(close_usd, …)`.
+      ✅ **[[0145]] gate cleared 2026-08-06** — but 0145 shipped no deployable
+      artifact, so the guard must be **verified in the checkout the SQL is
+      pasted from**: `grep -c 'argMax(close_usd, t.timestamp)'
+      packages/prices-clickhouse/schema/preroll-live-gap.sql` must print `0`.
 - [ ] A freshness alarm exists that would have caught this within a day →
       **[[0137]]**.
 - [ ] [[0072]]'s `change_7d_pct` verified non-zero for assets with 7d of data.

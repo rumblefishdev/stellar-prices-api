@@ -244,6 +244,33 @@ history:
       no cleanup - sync_partition counts local files and re-syncs to top up
       (sync.rs:32-45), and one still short returns S3Incomplete and is skipped
       WITHOUT a marker (run.rs:154), so it is retried rather than half-indexed.
+  - date: 2026-08-06
+    status: active
+    who: okarcz
+    note: >
+      Daily check 13:47:08Z - HEALTHY on every gate. Frontier 4,735,999
+      (20.22%), markers 4,735,997 contiguous, remaining 18,688,000. Cleanup
+      watch clean (no sweep since launch), candles landing, process alive with
+      a log line stamped the same minute as the check.
+      ETA REVISED 08-10/11 -> ~2026-08-12. Measured 19.13% -> 20.22% over
+      110.5 min = ~138.6k ledgers/hr, i.e. ~27.7 min/partition against the
+      ~21 min the post-outage estimate assumed; 292 partitions remaining
+      ~= 5.6 days. TREAT 08-12 AS A FLOOR, NOT A MIDPOINT: the run is in the
+      cheapest terrain of the whole span - partition 4,672,000 logged
+      bytes 23,791,875 (~23.8 MB), wall_secs 1.2, candles 0 - whereas pass 1
+      measured 4.90-5.49 GB per partition crossing 27M-38M. The run is
+      download-bound, so a ~200x growth in bytes/partition ahead will slow it
+      further. Counter-caveat: the sample window opens at the 11:56Z restart,
+      so post-restart ramp may understate the steady-state rate. One interval
+      only - re-measure on a clean one before treating any date as firm.
+      A READING TRAP worth recording: the candles-landing output shows
+      "2018 | 207,021", which is PASS 1 RESIDUAL - the post-2018-12-13 tail
+      that survived the sweep - not pass-2 output. The frontier is nowhere
+      near 2018 and that row will not move for weeks. Judge pass 2 by the
+      2015/2016 counts, which track the frontier.
+      Consequence for the queue: 0145 landed the same day (PR #176) so the
+      pre-roll gate is cleared regardless; the extra slack is now spent, not
+      needed.
 ---
 
 # Execute + track the historical backfill run (SDEX + Soroban AMM)
@@ -290,7 +317,7 @@ meanwhile.
 | `[50688000, 51007999]` | ✅ first clean forward chunk (2026-07-07) — 320k ledgers, SDEX 17.22M candles, AMM=0/oracle=0 (expected early epoch), 0 new unresolved. ~3.4 h, 59 GB. |
 | `[51008000, 63352611]` combined remainder | 🔴 **STALLED SINCE 2026-07-14 — and its status field lies.** `prices.backfill_progress` reads `task_name: soroban_amm, status: running, current_ledger: 63,352,611`, but `last_push_at` is **2026-07-14 17:54:24** (9 days stale as of 07-23) and **no process exists** — `pgrep -af "sdex-backfill.*soroban"` on fishuser-hero returns nothing, and only `sdex-tail` is in tmux. It stopped **122,864 ledgers short** of its 63,475,475 target, at the start of the [[0111]] enrichment-outage window. Nothing writes a terminal state on a crash, so `status` stayed `running`. Recovery is ~1 h of runtime. ⚠️ Re-run needs the **pool registry seeded first** (a mid-chain AMM backfill with no seed loses volume to `unresolved_pools`) and ranges kept disjoint from live ingestion. |
 | `[1, 50457423]` pre-Soroban SDEX tail — **pass 1** | ✅ **COMPLETE 2026-07-27 21:24 UTC** (12.2 days). 746 partitions, 47,641,424 ledgers indexed, 689,676,890 `price_ohlcv_1m` rows, 3.13 TB downloaded; process exited cleanly. Marker state: frontier **50,457,423** (= activation − 1), min 3, contiguous, zero gaps. ⚠️ **Its 2016 → 2018-12-13 output was destroyed by the nightly cleanup sweep and must be recovered by pass 2** — see [[S-presoroban-loss-chain-confirmed]]. ⚠️ Pass 1 also never walked ledgers **64,000 – 2,815,999** (43 partitions; ~0 trades there, and pass 2's range covers them). *Prior reading:* **2026-07-23 16:00 UTC: frontier 35,839,999**, markers contiguous (35,839,997 over `3 → 35,839,999`, zero gaps), remaining **14,617,424**. Rate has eased to **~151k/hr** (25.4 min per 64k-ledger partition, measured from consecutive `indexing complete` lines) against a 165k/hr two-day average — the run is **download-bound and partitions are growing** (4.90 → 5.49 GB, sync 1483 → 1568 s while index time stays flat at ~940 s), so expect further easing. **Revised ETA 2026-07-27/28**, ~1 day later than the earlier estimate. *Prior reading:* **2026-07-21 13:35 UTC: floor 27,583,999** (was 23,423,999 at 07-20 14:15 → **4.16M ledgers in 23h20m = 178.3k/hr**, within 1% of the documented 177k). Markers contiguous: 27,583,997 over `3 → 27,583,999`, no gaps. Remaining 22.87M ledgers ≈ **5.3 days → ETA 2026-07-26/27**. ⚠️ The 54.7% marker figure OVERSTATES real progress — see the durable-data row below. (Liveness: `pgrep -af sdex-backfill` + partition # climbing in `~/sdex-tail.log` over ≥25 min; do NOT sample CH markers <22 min apart — download-bound cadence freezes them transiently.) |
-| `[1, 23423999]` pre-Soroban SDEX tail — **pass 2 (recovery)** | ⏳ **RUNNING — launched 2026-08-04 13:25:15 UTC** (fishuser-hero, tmux `sdex-pass2`, log `~/sdex-pass2.log`, `tip 63795749`, the same binary pass 1 used). Pre-flight passed; **`completed: 0`, `already_done: 0`, `to_process: 366`** — the marker clear worked and nothing is being skipped. 366 partitions × 64k = 23,424,000 ledgers; also covers the 64,000–2,815,999 span pass 1 never walked. ETA **~2026-08-09/10** at pass 1's ~23.5 min/partition. Recovers **3,738,473 candles**. **Daily check 2026-08-05 ~10:15Z: HEALTHY — frontier 3,583,999 (15.3%), markers 3,583,997 contiguous, remaining 19,840,000.** 3.58M ledgers in 20 h 50 m = **172.1k/hr**, 56 partitions at **22.3 min each** — within 1% of pass 1's rate. **Revised ETA 2026-08-10 ~05:00 UTC.** Candles landing with the frontier (2015: 23, 2016: 11, newest `2016-03-29 00:53` — the frontier ledger's own month), so markers and data are advancing *together*, which is exactly what pass 1 failed to do. Cleanup quiet — see the corrected discriminator above. Gates cleared before launch: cleanup `DISABLED`; no sweep-signature removal since 2026-07-20 03:08:30; all partitions below `202001` still hold rows; no backfill process running; `leftover_low_markers = 0` (total markers 50,457,421 → 39,928,612, which includes the Soroban-era run's 12,895,188 — the filtered pre-Soroban figure is 27,033,424). ⚡ **OUTAGE 2026-08-06: fishuser-hero was powered off.** The run died **2026-08-05 15:00:20 UTC**, was dead **20h 56m**, and was relaunched **2026-08-06 11:56:36 UTC** at frontier **4,479,999 (19.13%)**, `already_done: 69` / `to_process: 297`. It stopped at a **clean partition boundary** — markers are written per-partition *after* every candle flush (`ingest.rs:180-195`) and frontier `4,479,999` = `4416000 + 63999` exactly — so no orphan candles, no partial partition, nothing to repair. **Revised ETA 2026-08-10 evening → 08-11 early UTC** (297 partitions at ~21 min; bracketed by 20.4 min/partition measured at this end of the span and pass 1's 21.5 min/partition crossing 23.4M–27.6M). ~1 day past the previous estimate, which **adds slack to [[0145]]**, the gate on pass 2's incremental pre-roll. Restart runbook, the never-re-run-the-marker-`DELETE` rule, the `already_done=69` expectation and **two false health signals** (`pgrep` over `ssh` self-matches; `aws sts` is irrelevant — all S3 is `--no-sign-request`) are in the 2026-08-06 history entry above. |
+| `[1, 23423999]` pre-Soroban SDEX tail — **pass 2 (recovery)** | ⏳ **RUNNING — launched 2026-08-04 13:25:15 UTC** (fishuser-hero, tmux `sdex-pass2`, log `~/sdex-pass2.log`, `tip 63795749`, the same binary pass 1 used). Pre-flight passed; **`completed: 0`, `already_done: 0`, `to_process: 366`** — the marker clear worked and nothing is being skipped. 366 partitions × 64k = 23,424,000 ledgers; also covers the 64,000–2,815,999 span pass 1 never walked. ETA **~2026-08-09/10** at pass 1's ~23.5 min/partition. Recovers **3,738,473 candles**. **Daily check 2026-08-05 ~10:15Z: HEALTHY — frontier 3,583,999 (15.3%), markers 3,583,997 contiguous, remaining 19,840,000.** 3.58M ledgers in 20 h 50 m = **172.1k/hr**, 56 partitions at **22.3 min each** — within 1% of pass 1's rate. **Revised ETA 2026-08-10 ~05:00 UTC.** Candles landing with the frontier (2015: 23, 2016: 11, newest `2016-03-29 00:53` — the frontier ledger's own month), so markers and data are advancing *together*, which is exactly what pass 1 failed to do. Cleanup quiet — see the corrected discriminator above. Gates cleared before launch: cleanup `DISABLED`; no sweep-signature removal since 2026-07-20 03:08:30; all partitions below `202001` still hold rows; no backfill process running; `leftover_low_markers = 0` (total markers 50,457,421 → 39,928,612, which includes the Soroban-era run's 12,895,188 — the filtered pre-Soroban figure is 27,033,424). ⚡ **OUTAGE 2026-08-06: fishuser-hero was powered off.** The run died **2026-08-05 15:00:20 UTC**, was dead **20h 56m**, and was relaunched **2026-08-06 11:56:36 UTC** at frontier **4,479,999 (19.13%)**, `already_done: 69` / `to_process: 297`. It stopped at a **clean partition boundary** — markers are written per-partition *after* every candle flush (`ingest.rs:180-195`) and frontier `4,479,999` = `4416000 + 63999` exactly — so no orphan candles, no partial partition, nothing to repair. ~~Revised ETA 2026-08-10 evening → 08-11 early UTC~~ (297 partitions at ~21 min; bracketed by 20.4 min/partition measured at this end of the span and pass 1's 21.5 min/partition crossing 23.4M–27.6M) — **superseded by the 08-06 13:47Z check below, which measured a slower rate than that bracket assumed.** Restart runbook, the never-re-run-the-marker-`DELETE` rule, the `already_done=69` expectation and **two false health signals** (`pgrep` over `ssh` self-matches; `aws sts` is irrelevant — all S3 is `--no-sign-request`) are in the 2026-08-06 history entry above. **Daily check 2026-08-06 13:47:08Z: HEALTHY — frontier 4,735,999 (20.22%), markers 4,735,997 contiguous, remaining 18,688,000.** Cleanup watch clean (`no sweep since launch`, 0 partitions in batch); candles landing (2015: 23, 2016: 18); process alive (PID 9793) with a log line stamped the same minute as the check, so liveness is real and not a stale tail. **⚠️ Revised ETA ~2026-08-12**: 19.13% → 20.22% over 110.5 min = **~138.6k ledgers/hr**, i.e. ~27.7 min/partition against the ~21 min the previous estimate assumed; 292 partitions remaining ≈ 5.6 days. **Two caveats pulling in opposite directions, so re-measure on a clean interval before treating 08-12 as firm.** (a) The sample window opens at the 11:56Z restart, so post-restart ramp may *understate* the steady-state rate. (b) Far more significantly, the run is in the cheapest terrain it will ever see — partition 4,672,000 logged `bytes: 23791875` (~23.8 MB) and `wall_secs: 1.2` with `candles: 0` — whereas pass 1 measured **4.90–5.49 GB per partition** crossing 27M–38M. This is download-bound, so a ~200× growth in bytes/partition ahead means **08-12 is a floor, not a midpoint.** ⚠️ The `2018 | 207,021` row in the candles-landing output is **pass-1 residual** (the post-`2018-12-13` tail that survived the sweep), NOT pass-2 output — the frontier is nowhere near 2018. Do not read it as progress. |
 | **durable pre-Soroban data (re-measured 2026-08-04)** | Pre-2019, `price_ohlcv_1m` holds **only `201812`: 207,021 rows, `2018-12-13 06:55` → `2018-12-31 23:58`**. 2015–2018-11 are **absent** — `system.parts` has no partition below `201812` at all. ⚠️ **The `2018-12-13` boundary is an artifact of the incident, not a data-availability fact**: it is simply where the backfill had walked when cleanup was disabled on 2026-07-20 (`201812` first_seen `2026-07-20 04:11:24`, minutes after that day's final 03:08 sweep). Full forensics: [[S-presoroban-loss-chain-confirmed]]. *Supersedes the 2026-07-21 measurement, which read the boundary as a wipe line and reported spans that pass 1 has since rewritten.* **Update 2026-08-05:** pass 2 has begun refilling below that boundary — `201511` (19 rows), `201512` (4), `201601` (3), `201602` (2), `201603` (6) now exist, 34 rows total against `201812`'s unchanged 207,021. Thin is **expected** here (pass 1 logged 0–6 trade ticks per 64k partition in 2015–16); thin ≠ absent, and the §7.1 gate must not read it as a hole. |
 
 > Update this table as chunks land (ledger range, candle counts, duration, any
@@ -321,9 +348,47 @@ in CH. Three gotchas that each produced a wrong reading before:
 
 **The run ends when** the frontier reaches 23,423,999 *and* the candle count
 below `201812` accounts for the 3,738,473 expected. Then the §7.1 pre-roll gate
-applies — and note that the gap pre-roll it feeds is now ⛔ **gated on [[0145]]**
-(the pre-roll scripts carry [[0144]]'s unguarded `argMax(close_usd, …)`), so
-finishing pass 2 does not clear the way to pre-roll on its own.
+applies.
+
+### ⚠️ Verify the pre-roll guard before running it — there is no deploy to check
+
+✅ The [[0145]] gate on this pre-roll **cleared 2026-08-06** (PR #176,
+`4e35dc6`): all 121 unguarded `argMax(close_usd, …)` sites across the four
+pre-roll scripts are now `argMaxIf(close_usd, t.timestamp, close_usd > 0)`.
+Without it, every coarse row whose newest sub-bucket was not yet enriched would
+land with `close_usd = 0` — a fresh zeroed estate at *backfill* scale, over a
+span where enrichment is incomplete by definition, and those rows then age out
+of the MV re-aggregation windows where only the [[0114]] sweep can reach them.
+
+⚠️ **0145 shipped no deployable artifact.** The pre-roll scripts are operator-run
+plain SQL — nothing embeds them (`prices-clickhouse-init` applies
+`INIT`/`VIEWS`/`ROLLUPS`/`SEED`, never `PREROLL`), so there was nothing to deploy
+and there is no build or release to confirm against. **The fix applies only to
+whoever runs the script from an up-to-date checkout.** Run it from a stale one
+and it silently executes the pre-0145 SQL while every signal reports success.
+
+**This is a live risk here specifically**, because fishuser-hero carries its own
+`~/stellar-prices-api` checkout at whatever commit it was left on — and the
+env-loss-on-every-reboot problem means that box gets touched by hand a lot.
+
+Immediately before the pass-2 pre-roll, **from the checkout the SQL is actually
+being pasted from** (`git pull` first if that is fishuser-hero):
+
+```bash
+# must print 0 — any non-zero means this is the pre-0145 script
+grep -c 'argMax(close_usd, t.timestamp)' \
+  packages/prices-clickhouse/schema/preroll-incremental.sql
+```
+
+`preroll-incremental.sql` is the pre-Soroban script and the right one for pass 2
+— **never `preroll.sql`**, which is a full rebuild expecting TRUNCATE-d coarse
+tables and would re-run the [[0090]] history loss.
+
+Do **not** invert the check by counting `argMaxIf` instead: each file's header
+disclosure block quotes the guard expression verbatim, so that count is one
+higher than the number of real sites. (That exact trap broke 0145's own guard
+test on first write — it failed 7-not-6 — which is why the shipped test asserts
+over comment-stripped statements.)
 
 ## Recovery plan (pre-Soroban gap, from the 2026-07-20 cleanup incident)
 

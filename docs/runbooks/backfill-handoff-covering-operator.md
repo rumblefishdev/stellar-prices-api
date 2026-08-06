@@ -511,6 +511,33 @@ This phase runs from **wherever the repo is checked out** — fishuser-hero has 
 `~/stellar-prices-api`; your laptop works too if you have the repo cloned. The SQL
 is piped over SSH to prod CH either way.
 
+> 🛑 **Because of that, `git pull` first — and then run this one-line check.**
+>
+> ```bash
+> git pull
+> grep -c 'argMax(close_usd, t.timestamp)' \
+>   packages/prices-clickhouse/schema/preroll-incremental.sql
+> # MUST print 0. Anything else = an out-of-date script. STOP.
+> ```
+>
+> The script was fixed on 2026-08-06 (task 0145) to stop writing a fake USD
+> price of `0` onto coarse rows whose newest minute has not been priced yet.
+> The USD prices are filled in by a _separate, slower_ job, so during a backfill
+> most recent minutes have no price yet — and the old script would copy that
+> "no price yet" zero upward as if it were a real value, throwing away the real
+> prices underneath it. At backfill scale that is a large amount of quietly
+> wrong data that is expensive to repair afterwards.
+>
+> **There is no deploy or release that fixes this for you.** These are plain SQL
+> files you copy and run by hand — nothing ships them anywhere. So the fix only
+> exists in a checkout that has been pulled. An old checkout runs the old SQL
+> and **everything will look like it succeeded.** That is why the check is here
+> and not left to trust.
+>
+> (Don't try to verify by counting `argMaxIf` instead — the file's own comment
+> header quotes that expression, so the count is always one higher than the real
+> number of places and will mislead you.)
+
 > 🛑 **Run this phase ONLY after the backfill is fully finished — i.e. BOTH pass 1
 > AND pass 2 are complete.** Pre-rolling early bakes an incomplete history into the
 > permanent coarse tables, and because the next step re-enables cleanup, the still-

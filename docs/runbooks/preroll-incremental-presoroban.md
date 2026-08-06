@@ -29,6 +29,41 @@ appended at all six granularities; a second run did not double-count.
 
 ## Pre-flight (confirm before running)
 
+0. ⚠️ **The script carries the `close_usd` guard (task 0145). Verify it — there
+   is no deploy to check.**
+
+   ```bash
+   # run in the checkout you are actually pasting the SQL from
+   grep -c 'argMax(close_usd, t.timestamp)' \
+     packages/prices-clickhouse/schema/preroll-incremental.sql
+   # MUST print 0. Non-zero = this is the pre-0145 script. STOP and `git pull`.
+   ```
+
+   **Why this step exists.** Until 2026-08-06 this script had 14 unguarded
+   `argMax(close_usd, t.timestamp)` sites (0144 scope correction C1 found 121
+   across the four pre-roll scripts). `close_usd` is baked by a separate,
+   _lagging_ enrichment pass onto a non-nullable `Decimal(38,14) DEFAULT 0`
+   column, so "not yet enriched" and "no USD price exists" are the same value —
+   zero. Unguarded, a coarse bucket inherits that zero whenever its **newest**
+   sub-bucket is un-enriched, discarding every priced sub-bucket beneath it.
+   Here that happens at _backfill_ scale, over a span where enrichment is
+   incomplete by definition, and the zeroed rows then age out of the MV
+   re-aggregation windows where only the 0114 sweep can reach them (task 0148).
+
+   **Why a check rather than a build gate.** 0145 shipped **no deployable
+   artifact**. These are operator-run plain SQL scripts — nothing embeds them
+   (`prices-clickhouse-init` applies `INIT`/`VIEWS`/`ROLLUPS`/`SEED`, never
+   `PREROLL`), so there was nothing to deploy and there is no release to confirm
+   against. The fix applies _only_ to whoever runs the script from an up-to-date
+   checkout. A stale checkout silently executes the old SQL and every signal
+   reports success. **fishuser-hero keeps its own `~/stellar-prices-api` at
+   whatever commit it was left on** — `git pull` there before copying anything.
+
+   Do **not** invert this by counting `argMaxIf` instead: the file header quotes
+   the guard expression verbatim, so that count is one higher than the number of
+   real sites. (This broke 0145's own guard test on first write — 7 not 6 — which
+   is why the shipped test asserts over comment-stripped statements.)
+
 1. **Tail is done.** `pgrep -af sdex-backfill` is gone / the run reports complete,
    and the floor reached activation-1:
    ```sql
