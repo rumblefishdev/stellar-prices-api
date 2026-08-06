@@ -32,6 +32,28 @@ pub const ROLLUPS_SQL: &str = include_str!("../schema/rollups.sql");
 /// sizing measurement (re-aggregates `_1m FINAL` into `_15m … _1M`).
 pub const PREROLL_SQL: &str = include_str!("../schema/preroll.sql");
 
+/// Incremental, non-truncating pre-roll bounded to the pre-Soroban SDEX tail
+/// `[genesis, activation)` (task 0088).
+pub const PREROLL_INCREMENTAL_SQL: &str = include_str!("../schema/preroll-incremental.sql");
+
+/// Incremental pre-roll for the live-era coarse gap, all sources (task 0090 —
+/// the six rollup MVs are dropped on production, so nothing else rolls up).
+pub const PREROLL_LIVE_GAP_SQL: &str = include_str!("../schema/preroll-live-gap.sql");
+
+/// Incremental pre-roll scoped to the Soroban-era AMM sources corrected by the
+/// events-sourced reprice (task 0097).
+pub const PREROLL_AMM_REPRICE_SQL: &str = include_str!("../schema/preroll-amm-reprice.sql");
+
+/// Every pre-roll script, for guards that must hold across all of them.
+/// Operator-run scripts are embedded here only so the test suite can see them —
+/// `apply_sql` is never pointed at the incremental three.
+pub const ALL_PREROLL_SQL: [(&str, &str); 4] = [
+    ("preroll.sql", PREROLL_SQL),
+    ("preroll-incremental.sql", PREROLL_INCREMENTAL_SQL),
+    ("preroll-live-gap.sql", PREROLL_LIVE_GAP_SQL),
+    ("preroll-amm-reprice.sql", PREROLL_AMM_REPRICE_SQL),
+];
+
 /// Refreshable MV maintaining `prices.current_prices` (task 0039 — replaces the
 /// price-updater Lambda). Applied separately like [`ROLLUPS_SQL`] (needs
 /// ClickHouse ≥ 23.12); not part of the default init flow.
@@ -302,6 +324,85 @@ mod tests {
                  view — the edit would never land on ch-prod-01; got: {head}"
             );
         }
+    }
+
+    /// `close_usd` is baked by a separate, lagging enrichment pass onto a
+    /// non-nullable `Decimal(38,14) DEFAULT 0` column, so an unguarded
+    /// `argMax(close_usd, t.timestamp)` hands a coarse bucket a fabricated zero
+    /// whenever its newest sub-bucket is not yet enriched — throwing away every
+    /// priced sub-bucket underneath it (task 0145, from BE's 0199 report via
+    /// 0144). The pre-rolls are where this is most damaging: they run over
+    /// historical spans where enrichment is incomplete *by definition*, at
+    /// backfill scale, and the rows they zero then age out of the MV
+    /// re-aggregation windows where only the 0114 sweep can still reach them.
+    ///
+    /// Asserted over `split_statements`, which strips comments — so the header
+    /// disclosure block in each file cannot make this guard pass or fail.
+    #[test]
+    fn no_preroll_script_uses_an_unguarded_argmax_on_close_usd() {
+        for (name, sql) in ALL_PREROLL_SQL {
+            let stmts = split_statements(sql);
+            assert!(
+                !stmts.is_empty(),
+                "{name}: guard is vacuous if the file yields no statements"
+            );
+
+            let mut guarded = 0usize;
+            for stmt in &stmts {
+                if let Some(offset) = stmt.find("argMax(close_usd") {
+                    let head: String = stmt[offset..].chars().take(90).collect();
+                    panic!(
+                        "{name}: unguarded argMax on close_usd — use \
+                         argMaxIf(close_usd, t.timestamp, close_usd > 0) so the bucket \
+                         carries its latest *priced* close instead of inheriting the \
+                         un-enriched sentinel 0 (task 0145); got: {head}"
+                    );
+                }
+                guarded += stmt
+                    .matches("argMaxIf(close_usd, t.timestamp, close_usd > 0)")
+                    .count();
+            }
+
+            // Non-vacuity: the file must still be projecting close_usd at all.
+            // Without this, deleting every close_usd projection would "pass".
+            assert!(
+                guarded > 0,
+                "{name}: no guarded close_usd projection found — either the file \
+                 stopped projecting close_usd, or the guard expression was reworded \
+                 and this test has gone blind"
+            );
+        }
+    }
+
+    /// The 121 sites are the whole point: 6 + 14 + 6 + 95, matching scope
+    /// correction C1 in task 0144. A count regression here means a pre-roll
+    /// projection was added without the guard, or one was silently dropped.
+    #[test]
+    fn preroll_guarded_close_usd_site_counts_match_the_0144_audit() {
+        let expected = [
+            ("preroll.sql", 6usize),
+            ("preroll-incremental.sql", 14),
+            ("preroll-live-gap.sql", 6),
+            ("preroll-amm-reprice.sql", 95),
+        ];
+
+        let mut total = 0usize;
+        for ((name, sql), (expected_name, want)) in ALL_PREROLL_SQL.iter().zip(expected) {
+            assert_eq!(*name, expected_name, "ALL_PREROLL_SQL order changed");
+            // Count over statements, not raw text: each file's header disclosure
+            // block quotes the guard expression verbatim, which would otherwise
+            // inflate every count by one.
+            let got: usize = split_statements(sql)
+                .iter()
+                .map(|s| {
+                    s.matches("argMaxIf(close_usd, t.timestamp, close_usd > 0)")
+                        .count()
+                })
+                .sum();
+            assert_eq!(got, want, "{name}: guarded close_usd site count");
+            total += got;
+        }
+        assert_eq!(total, 121, "total guarded pre-roll sites (task 0144 C1)");
     }
 
     /// The live-spot view must forward every column `mv_current_prices` writes
