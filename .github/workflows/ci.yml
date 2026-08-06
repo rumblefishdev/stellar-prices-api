@@ -42,6 +42,14 @@ jobs:
               # as the single file rather than `infra/**` so unrelated CDK edits
               # do not pay for an ARM Rust build.
               - 'infra/src/lib/stacks/api-gateway-stack.ts'
+              # Same reasoning for the document's `servers` block:
+              # compute-stack.ts is what actually puts API_BASE_URL on the
+              # api-handler, and types.ts is what asserts the value carries the
+              # stage path. `openapi:verify-servers` compares both against the
+              # extracted document — but only if this job runs, and dropping
+              # the env var is a pure-infra edit.
+              - 'infra/src/lib/stacks/compute-stack.ts'
+              - 'infra/src/lib/types.ts'
               # `redocly` is a devDependency and this is the only job that runs
               # it. Without these, a PR that drops or bumps it merges green and
               # the failure lands on the next author to touch packages/**.
@@ -242,3 +250,11 @@ jobs:
       # failed. Same reasoning as tools/scripts/lambda-assets.sh (task 0077).
       - name: Verify OpenAPI routes match API Gateway
         run: npm run openapi:verify-routes
+
+      # Routes are one half of the contract; the base URL is the other. The
+      # extraction stamps `servers` from infra/envs/production.json, which never
+      # observes ComputeStack actually putting API_BASE_URL on the Lambda — so
+      # dropping or renaming that variable would leave the linted document with
+      # a `servers` block the deployed one does not have. Compare the two.
+      - name: Verify OpenAPI servers match the deployed handler
+        run: npm run openapi:verify-servers

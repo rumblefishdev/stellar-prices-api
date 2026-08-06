@@ -65,16 +65,38 @@ const spec = readJson(specPath, 'run `npm run openapi:extract` first');
 // ---------------------------------------------------------------------------
 const resources = Object.entries(template.Resources ?? {});
 
-/** logicalId -> { pathPart, parentLogicalId | null (null = the API root) } */
+/**
+ * Classify a `ParentId` property into one of three cases. The distinction
+ * matters: an earlier revision collapsed "root" and "anything I don't
+ * understand" into the same `null`, and `null` is the walk's "path is
+ * complete" signal — so an unrecognized parent silently produced a *truncated*
+ * path (`/status` for `/v1/backfill/status`) instead of failing. That is the
+ * one outcome this script must never produce, because a truncated path still
+ * looks like a route: it reports as drift on a path that is almost right, and
+ * if it happens to collide with a documented one, genuine drift passes.
+ *
+ * Today only the first two cases occur. The third exists for when they stop
+ * being the only ones — an imported `RestApi` or a gateway split across stacks
+ * (task 0126) emits `Fn::ImportValue`, and a second `RestApi` in one template
+ * emits a `Fn::GetAtt` this does not recognize.
+ */
+function classifyParent(parentId) {
+  // Nested resources reference their parent resource via Ref.
+  if (parentId?.Ref) return { kind: 'ref', id: parentId.Ref };
+  // Root children reference the API's RootResourceId via Fn::GetAtt.
+  const att = parentId?.['Fn::GetAtt'];
+  if (Array.isArray(att) && att[1] === 'RootResourceId')
+    return { kind: 'root' };
+  return { kind: 'unresolved', raw: parentId };
+}
+
+/** logicalId -> { pathPart, parent: {kind: 'ref'|'root'|'unresolved'} } */
 const nodes = new Map();
 for (const [id, res] of resources) {
   if (res.Type !== 'AWS::ApiGateway::Resource') continue;
-  const parent = res.Properties?.ParentId;
-  // Root children reference the API's RootResourceId via Fn::GetAtt; nested
-  // resources reference their parent resource via Ref.
   nodes.set(id, {
     pathPart: res.Properties?.PathPart,
-    parent: parent && parent.Ref ? parent.Ref : null,
+    parent: classifyParent(res.Properties?.ParentId),
   });
 }
 
@@ -82,11 +104,10 @@ function fullPath(id) {
   const segments = [];
   let cursor = id;
   // The template is a DAG rooted at the RestApi; bound the walk anyway so a
-  // malformed template fails loudly instead of hanging CI. Both exits below
-  // throw rather than returning what was resolved so far: a truncated path
-  // still *looks* like a route, so it would surface as drift on a path that is
-  // almost right, which is harder to read than the parse failure it actually
-  // is. Same stance as the ANY and root-method cases below.
+  // malformed template fails loudly instead of hanging CI. Every exit below
+  // throws rather than returning what was resolved so far — see classifyParent
+  // for why a partial path is the worst possible outcome. Same stance as the
+  // ANY and root-method cases below.
   for (let hops = 0; hops <= nodes.size; hops++) {
     const node = nodes.get(cursor);
     if (!node) {
@@ -95,10 +116,27 @@ function fullPath(id) {
           `AWS::ApiGateway::Resource in this template — cannot resolve its path`,
       );
     }
+    // PathPart is a literal in every resource CDK emits for this app. If one
+    // is ever an intrinsic or absent, `unshift`ing it would put `[object
+    // Object]` or `undefined` in the middle of a path and compare that.
+    if (typeof node.pathPart !== 'string' || !node.pathPart) {
+      throw new Error(
+        `resource ${cursor}: PathPart is not a non-empty literal string ` +
+          `(${JSON.stringify(node.pathPart)}) — cannot compare a path built ` +
+          `from it`,
+      );
+    }
     segments.unshift(node.pathPart);
-    cursor = node.parent;
-    // `parent: null` is the API root: the path is complete.
-    if (cursor === null) return '/' + segments.join('/');
+    if (node.parent.kind === 'root') return '/' + segments.join('/');
+    if (node.parent.kind === 'unresolved') {
+      throw new Error(
+        `resource ${cursor}: ParentId ${JSON.stringify(node.parent.raw)} is ` +
+          `neither a Ref to another resource nor the API's RootResourceId, so ` +
+          `its path cannot be resolved. Teach classifyParent() about it — do ` +
+          `not let it read as the API root, which would truncate the path.`,
+      );
+    }
+    cursor = node.parent.id;
   }
   throw new Error(
     `resource ${id}: ParentId walk exceeded ${nodes.size} hops without ` +
@@ -106,20 +144,39 @@ function fullPath(id) {
   );
 }
 
-// CORS preflight and HEAD are not conventionally described in an OpenAPI
-// document, so they are excluded from BOTH sides rather than compared. Task
-// 0126 adds `addCorsPreflight`, which emits an OPTIONS method on every
-// resource; without this the gate would fail that PR with the misleading
-// remedy "add a #[utoipa::path] for each". The tradeoff is that a documented
-// OPTIONS/HEAD path is not checked against the gateway either — acceptable
-// only because preflight is out of scope for the document by convention.
-const UNCOMPARED_METHODS = new Set(['options', 'head']);
+// CORS preflight is not conventionally described in an OpenAPI document, so
+// OPTIONS is skipped on the GATEWAY side: task 0126 adds `addCorsPreflight`,
+// which emits an OPTIONS method on every resource, and without this the gate
+// would fail that PR with the misleading remedy "add a #[utoipa::path] for
+// each".
+//
+// The exclusion is deliberately one-sided. An earlier revision dropped OPTIONS
+// *and* HEAD from both sides to keep the two guards' method sets identical,
+// which left a hole: a documented HEAD or OPTIONS operation was then checked by
+// neither guard in either direction, so documenting `head /v1/assets/{id}` and
+// never mapping it reproduced the exact unroutable-documented-route defect task
+// 0124 exists to fix. HEAD is therefore compared normally — nothing generates
+// it automatically on either side — and a documented OPTIONS fails loudly on
+// the spec side below rather than passing unnoticed.
+const GATEWAY_SKIPPED_METHODS = new Set(['options']);
 
 const gatewayRoutes = new Set();
 for (const [, res] of resources) {
   if (res.Type !== 'AWS::ApiGateway::Method') continue;
-  const method = String(res.Properties?.HttpMethod ?? '').toLowerCase();
-  if (UNCOMPARED_METHODS.has(method)) continue;
+  // Every method CDK emits declares HttpMethod as a literal. A non-string would
+  // stringify to `[object Object]`, which matches no OpenAPI operation key and
+  // would report as permanent, unexplainable drift.
+  const rawMethod = res.Properties?.HttpMethod;
+  if (typeof rawMethod !== 'string' || !rawMethod) {
+    console.error(
+      `error: an AWS::ApiGateway::Method declares HttpMethod ` +
+        `${JSON.stringify(rawMethod)}, which is not a literal verb this check ` +
+        `can compare.`,
+    );
+    process.exit(1);
+  }
+  const method = rawMethod.toLowerCase();
+  if (GATEWAY_SKIPPED_METHODS.has(method)) continue;
   const resourceId = res.Properties?.ResourceId?.Ref;
   // A method on the API root itself has no Ref'd resource; none exist today,
   // and silently skipping one would be a hole in the check. Checked before the
@@ -156,21 +213,42 @@ for (const [, res] of resources) {
 // ---------------------------------------------------------------------------
 // Spec side.
 // ---------------------------------------------------------------------------
-// `head` and `options` are absent deliberately — see UNCOMPARED_METHODS above.
-// Both sides must exclude the same set or the exclusion creates false drift.
+// `head` IS compared — see GATEWAY_SKIPPED_METHODS above. `options` is absent
+// because a documented OPTIONS is rejected outright a few lines down rather
+// than silently ignored.
 const HTTP_METHODS = new Set([
   'get',
   'put',
   'post',
   'delete',
   'patch',
+  'head',
   'trace',
 ]);
 const specRoutes = new Set();
+const documentedOptions = [];
 for (const [path, item] of Object.entries(spec.paths ?? {})) {
   for (const key of Object.keys(item)) {
+    if (key === 'options') documentedOptions.push(path);
     if (HTTP_METHODS.has(key)) specRoutes.add(`${key} ${path}`);
   }
+}
+
+// The gateway side cannot distinguish a CDK-generated preflight from a
+// deliberately mapped OPTIONS, so it skips all of them. That makes a documented
+// OPTIONS uncheckable in either direction — the one thing this script must not
+// pass over in silence.
+if (documentedOptions.length) {
+  console.error(
+    'error: the OpenAPI document describes OPTIONS operations, which this ' +
+      'check cannot compare against the gateway (preflight is skipped there):',
+  );
+  for (const p of documentedOptions.sort()) console.error(`  options ${p}`);
+  console.error(
+    '  → stop documenting them, or teach this check how to tell a mapped ' +
+      'OPTIONS from a generated preflight',
+  );
+  process.exit(1);
 }
 
 // ---------------------------------------------------------------------------

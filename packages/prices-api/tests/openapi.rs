@@ -94,17 +94,19 @@ fn spec_routes(spec: &Value) -> Vec<(String, String)> {
                 .expect("path item is an object")
                 .keys()
                 // Path items may carry non-operation keys (parameters, summary).
-                // `head`/`options` are excluded to match `HTTP_METHODS` in
-                // `tools/scripts/verify-openapi-routes.mjs`: that script drops
-                // them from BOTH sides so task 0126's `addCorsPreflight` does
-                // not read as undocumented drift. Including them here would put
-                // the two guards on different method sets, and the day an
-                // OPTIONS operation appears this test would flag what the
-                // authoritative check deliberately ignores.
+                // Matches `HTTP_METHODS` in
+                // `tools/scripts/verify-openapi-routes.mjs`, including `head`:
+                // that script skips OPTIONS only on the *gateway* side (task
+                // 0126's `addCorsPreflight` emits one per resource) and rejects
+                // a documented OPTIONS outright. Excluding `head` from both
+                // guards, as an earlier revision did, left documented HEAD
+                // operations checked by neither — the same unroutable-route
+                // hole task 0124 exists to close. `options` is absent here for
+                // the same reason it is there: it gets its own assertion below.
                 .filter(|k| {
                     matches!(
                         k.as_str(),
-                        "get" | "put" | "post" | "delete" | "patch" | "trace"
+                        "get" | "put" | "post" | "delete" | "patch" | "head" | "trace"
                     )
                 })
                 .map(|method| (method.clone(), path.clone()))
@@ -162,6 +164,72 @@ async fn spec_route_coverage_matches_the_deployed_gateway_both_ways() {
     );
 }
 
+/// Every `$ref` target name appearing anywhere under `node`.
+fn referenced_schemas(node: &Value, out: &mut Vec<String>) {
+    match node {
+        Value::Object(map) => {
+            for (key, value) in map {
+                if key == "$ref" {
+                    if let Some(name) = value
+                        .as_str()
+                        .and_then(|r| r.strip_prefix("#/components/schemas/"))
+                    {
+                        out.push(name.to_string());
+                    }
+                } else {
+                    referenced_schemas(value, out);
+                }
+            }
+        }
+        Value::Array(items) => items.iter().for_each(|i| referenced_schemas(i, out)),
+        _ => {}
+    }
+}
+
+/// Schema names reachable from `root`, transitively. Walks `$ref` wherever it
+/// appears, so `Option<T>`'s `oneOf: [{type: null}, {$ref}]` is followed like
+/// any other reference.
+fn reachable_schemas(spec: &Value, root: &Value) -> Vec<String> {
+    let mut pending = Vec::new();
+    referenced_schemas(root, &mut pending);
+    let mut seen: Vec<String> = Vec::new();
+    while let Some(name) = pending.pop() {
+        if seen.contains(&name) {
+            continue;
+        }
+        referenced_schemas(&spec["components"]["schemas"][&name], &mut pending);
+        seen.push(name);
+    }
+    seen.sort();
+    seen
+}
+
+/// Whether a property definition declares an integer type (`"integer"` or a
+/// nullable `["integer", "null"]`).
+fn is_integer(definition: &Value) -> bool {
+    match &definition["type"] {
+        Value::String(t) => t == "integer",
+        Value::Array(types) => types.iter().any(|t| t == "integer"),
+        _ => false,
+    }
+}
+
+fn assert_uint32_ceiling(schema: &str, field: &str, definition: &Value) {
+    let maximum = definition["maximum"].as_u64().unwrap_or_else(|| {
+        panic!(
+            "{schema}.{field} carries a ledger sequence but publishes no `maximum` \
+             — add #[schema(maximum = 4_294_967_295u64)]"
+        )
+    });
+    assert_eq!(
+        maximum,
+        u64::from(u32::MAX),
+        "{schema}.{field} publishes maximum {maximum}, but a ledger sequence is \
+         uint32 (max {})",
+        u32::MAX
+    );
+}
+
 #[tokio::test]
 async fn every_ledger_field_publishes_the_uint32_ceiling() {
     let (_, _, spec) = fetch_spec(&config_with(None, vec![])).await;
@@ -173,45 +241,95 @@ async fn every_ledger_field_publishes_the_uint32_ceiling() {
     // place they are observable: a const in the DTO module can assert things
     // about itself but nothing about what the attributes emitted.
     //
-    // The field set is derived from the document rather than listed here, so a
-    // ledger field added later without the attribute fails as a missing
-    // `maximum` instead of passing unnoticed.
-    let schemas = spec["components"]["schemas"]
-        .as_object()
-        .expect("spec has component schemas");
+    // Two complementary rules, because either alone has a blind spot.
 
-    let mut checked = 0;
-    for (schema_name, schema) in schemas {
+    // Rule 1 — by TYPE, over the schemas the backfill endpoint actually
+    // returns. Those schemas are reached from the response `$ref`, not named
+    // here, so renaming a DTO cannot quietly drop it from the check. Every
+    // integer they publish is a ledger sequence (the only other numeric field
+    // is `progress_pct`, a double), so this catches a new ledger field whatever
+    // it is called — which a name-shaped filter cannot.
+    let response = &spec["paths"]["/v1/backfill/status"]["get"]["responses"]["200"]["content"]["application/json"]
+        ["schema"];
+    let backfill_schemas = reachable_schemas(&spec, response);
+    assert!(
+        !backfill_schemas.is_empty(),
+        "no schemas reachable from the /v1/backfill/status response — the \
+         response shape changed and this test is checking nothing"
+    );
+
+    let mut by_type = 0;
+    for name in &backfill_schemas {
+        let Some(properties) = spec["components"]["schemas"][name]["properties"].as_object() else {
+            continue;
+        };
+        for (field, definition) in properties {
+            if !is_integer(definition) {
+                continue;
+            }
+            assert_uint32_ceiling(name, field, definition);
+            by_type += 1;
+        }
+    }
+
+    // realtime_tip_ledger + SdexStream's four. Guards against a response-shape
+    // change that empties the walk, and forces a decision if a non-ledger
+    // integer is ever added to these DTOs.
+    assert_eq!(
+        by_type, 5,
+        "expected 5 integer fields across the backfill DTOs, found {by_type} — \
+         if a non-ledger integer was added, this rule needs to stop assuming \
+         every integer here is a ledger sequence"
+    );
+
+    // Rule 2 — by NAME, over the WHOLE document. Rule 1 cannot see a ledger
+    // field on a schema some other endpoint returns; this one can. Deliberately
+    // `contains`, not a suffix match: `newest_data_ledger_seq` and
+    // `tip_ledger_num` are exactly the names a suffix rule misses.
+    let mut by_name = 0;
+    for (name, schema) in spec["components"]["schemas"]
+        .as_object()
+        .expect("spec has component schemas")
+    {
         let Some(properties) = schema["properties"].as_object() else {
             continue;
         };
         for (field, definition) in properties {
-            if !(field.ends_with("_ledger") || field == "ledgers_remaining") {
+            if !field.contains("ledger") {
                 continue;
             }
-            let maximum = definition["maximum"].as_u64().unwrap_or_else(|| {
-                panic!(
-                    "{schema_name}.{field} is a ledger sequence but publishes no \
-                     `maximum` — add #[schema(maximum = 4_294_967_295u64)]"
-                )
-            });
-            assert_eq!(
-                maximum,
-                u64::from(u32::MAX),
-                "{schema_name}.{field} publishes maximum {maximum}, but a ledger \
-                 sequence is uint32 (max {})",
-                u32::MAX
-            );
-            checked += 1;
+            assert_uint32_ceiling(name, field, definition);
+            by_name += 1;
         }
     }
+    assert!(
+        by_name >= 5,
+        "expected at least the 5 known ledger-named fields, found {by_name}"
+    );
+}
 
-    // realtime_tip_ledger + SdexStream's four. A rename that empties the filter
-    // would otherwise pass vacuously.
-    assert_eq!(
-        checked, 5,
-        "expected 5 ledger-valued fields in the document, found {checked} — \
-         update this count if the DTOs genuinely changed"
+#[tokio::test]
+async fn no_options_operations_are_documented() {
+    let (_, _, spec) = fetch_spec(&config_with(None, vec![])).await;
+
+    // `verify-openapi-routes.mjs` skips OPTIONS on the gateway side, because it
+    // cannot tell a CDK-generated preflight (task 0126's `addCorsPreflight`)
+    // from a deliberately mapped one. That makes a documented OPTIONS
+    // uncheckable against the gateway in either direction, so it is rejected
+    // here instead of passing over in silence.
+    let documented: Vec<&String> = spec["paths"]
+        .as_object()
+        .expect("spec has a paths object")
+        .iter()
+        .filter(|(_, ops)| ops.get("options").is_some())
+        .map(|(path, _)| path)
+        .collect();
+
+    assert!(
+        documented.is_empty(),
+        "OPTIONS operations are documented but cannot be compared against the \
+         gateway: {documented:?} — stop documenting them, or teach \
+         verify-openapi-routes.mjs to tell a mapped OPTIONS from a preflight"
     );
 }
 
