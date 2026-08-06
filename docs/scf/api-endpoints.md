@@ -82,5 +82,5 @@ npm run openapi:extract   # → target/openapi.json, servers stamped from config
   `infra/envs/production.json` changes and `servers` follows automatically. This
   file's base URL must be updated in the same change.
 - **Swagger UI + onboarding portal** — Tranche 3, out of scope for M2.
-- **`info.license`** (task 0144) — currently emitted empty; the licensing
+- **`info.license`** (task 0155) — currently emitted empty; the licensing
   decision is open.

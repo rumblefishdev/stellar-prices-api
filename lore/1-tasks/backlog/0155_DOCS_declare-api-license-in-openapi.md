@@ -1,5 +1,5 @@
 ---
-id: "0144"
+id: "0155"
 title: "Decide and declare the API license — the published OpenAPI document emits an empty license object"
 type: DOCS
 status: backlog
@@ -18,6 +18,19 @@ history:
       /api-docs-json, so `info.license` is public too — and it is
       currently `{"name": ""}`. Not fixed in 0124 because picking a
       license is a business decision, not a lint fix.
+  - date: 2026-08-06
+    status: backlog
+    who: akot
+    note: >
+      Renumbered 0144 → 0155 (PR #169 review, okarcz). The ID collided:
+      this task was spawned on the 0124 branch while the unmerged PR #168
+      branch had already claimed 0144 for the BE-0199 USD read-surface
+      defects. That task is cited by 0145–0151 and 0154 plus the BE-facing
+      reply and the phase plan, so it keeps the number and this one moves.
+      0152 was reserved for this task by 0153's renumber note, but has
+      since been taken by the self-service onboarding portal (#172); 0153
+      and 0154 are also claimed, so 0155 is the next free ID. Nothing about
+      the work here changed.
 ---
 
 # Declare the API license in the OpenAPI document
