@@ -146,6 +146,11 @@ aws events describe-rule --name prices-production-cleanup --region eu-central-1 
   --profile soroban-explorer --query State --output text
 ```
 
+> **Profile note.** `soroban-explorer` is the conventional name; on 2026-08-04
+> the profile that worked was **`soroban-admin`**. Use whichever is live for you.
+> A `UnrecognizedClientException: security token ... invalid` means an expired
+> SSO session, not a wrong profile — re-login before concluding anything.
+
 **✅ Checkpoint:** prints **`DISABLED`**. If it EVER prints `ENABLED`, **stop and
 call the primary operator immediately** — do not try to fix data, just get it
 disabled again:
@@ -154,6 +159,52 @@ disabled again:
 aws events disable-rule --name prices-production-cleanup --region eu-central-1 \
   --profile soroban-explorer
 ```
+
+> ⚠️ **The rule's state is necessary but NOT sufficient.** During 2026-07-15→20
+> the precondition was believed satisfied while the sweep ran every night and
+> destroyed ~3.7M candles of pass-1 output. Check the **data** too, daily:
+>
+> ```bash
+> CHQ <<'SQL'
+> SELECT partition, count() AS active_parts, sum(rows) AS rows,
+>        max(modification_time) AS last_touched
+> FROM system.parts
+> WHERE database = 'prices' AND table = 'price_ohlcv_1m' AND active
+>   AND partition < '202000'
+> GROUP BY partition ORDER BY partition;
+> SQL
+> ```
+>
+> **✅ Checkpoint:** every partition that appeared on the previous check is still
+> here, with ≥ 1 active part and non-zero rows, and new ones appear as the walk
+> advances. **A partition that was present yesterday and is absent today = the
+> sweep is live** → stop the run and get cleanup disabled.
+>
+> ⚠️ **Do NOT gate this on "no two partitions share a `RemovePart` timestamp".**
+> That was this runbook's check until 2026-08-05 and it **false-alarms during a
+> live backfill**: the run writes into pre-2019 partitions, so ordinary merges
+> compact its small parts and emit `RemovePart` on exactly the partitions being
+> watched. Measured 2026-08-05 over 3 h of pass 2 — `RemovePart` 3,753 ·
+> `MergeParts` 1,243 · `NewPart` 2,459, i.e. **3.02 source parts per merge** with
+> every removal accounted for, and batches spanning 2–10 partitions in the same
+> second all morning. **The discriminator is what is left behind, not what was
+> removed:** a sweep DROPs whole partitions and leaves **zero** active parts; a
+> merge always leaves ≥ 1. If you want the removal side as a cross-check, verify
+> the merge accounting rather than the timestamps:
+>
+> ```bash
+> CHQ <<'SQL'
+> SELECT event_type, count() AS n
+> FROM system.part_log
+> WHERE database = 'prices' AND table = 'price_ohlcv_1m'
+>   AND event_time >= now() - INTERVAL 3 HOUR
+> GROUP BY event_type ORDER BY n DESC;
+> SQL
+> ```
+>
+> **✅ Checkpoint:** `RemovePart` ≈ a small multiple of `MergeParts` (2–4×), and
+> `NewPart` − `MergeParts` > 0 (the run's own inserts). `RemovePart` with **no
+> matching `MergeParts`** is the sweep's fingerprint.
 
 ### 4.4 [FISHUSER-HERO] Liveness (only if you can reach the LAN — optional)
 
@@ -469,33 +520,76 @@ is piped over SSH to prod CH either way.
 
 ### 7.1 Pre-flight — verify the backfill is COMPLETE (hard gate)
 
-Run this first. It prints a verdict telling you whether the full pre-Soroban span
-`[1, 50,457,423]` is present and contiguous — i.e. both passes are done:
+> 🛑 **Do NOT gate this phase on `prices.backfill_sdex_ledgers`.** An earlier
+> version of this section did, and it was unsafe. **Markers survive cleanup;
+> candles do not.** On 2026-08-04 the marker query below reported
+> `BACKFILL COMPLETE — READY TO PRE-ROLL` — `min 3`, `max 50,457,423`,
+> contiguous, zero gaps — while **2015 through 2018-12-13 held no candles at
+> all**, because the nightly sweep had dropped every partition pass 1 wrote
+> while leaving its markers untouched. Pre-rolling on that verdict would have
+> baked a four-year hole into the coarse forever-tables.
+>
+> `backfill_sdex_ledgers` is a **resume aid only**. It records what was
+> _processed_, never what _survived_. Gate on the data.
+
+**The gate — count candles, per year:**
 
 ```bash
-# [LAPTOP] backfill-complete gate
+# [LAPTOP] backfill-complete gate (authoritative)
+CHQ <<'SQL'
+SELECT toYear(timestamp) AS yr, count() AS candles
+FROM prices.price_ohlcv_1m
+WHERE source = 'sdex' AND timestamp < '2024-02-20'
+GROUP BY yr ORDER BY yr;
+SQL
+```
+
+**✅ Gate:** **every year from 2015 to the activation year is present**, with no
+missing years and no year collapsing to a token count. 2015–2016 are legitimately
+thin (those ledgers carry almost no SDEX trades — pass 1 logged 0–6 trade ticks
+per 64k-ledger partition), but they must not be _absent_. A missing year means an
+outstanding pass or a deletion event — **stop**, do not pre-roll.
+
+**Secondary check — has anything been deleted since the run started?**
+
+```bash
+CHQ <<'SQL'
+SELECT partition, count() AS active_parts, sum(rows) AS rows,
+       max(modification_time) AS last_touched
+FROM system.parts
+WHERE database = 'prices' AND table = 'price_ohlcv_1m' AND active
+  AND partition < '202000'
+GROUP BY partition ORDER BY partition;
+SQL
+```
+
+**✅ Gate:** every month the backfill walked is present with ≥ 1 active part and
+non-zero rows. **A partition that the run demonstrably wrote and that now has no
+active parts is the cleanup sweep's signature** — stop, do not pre-roll.
+
+> ⚠️ The earlier form of this gate — _"no two partitions share a `RemovePart`
+> timestamp"_ — was **replaced on 2026-08-05**. It false-alarms while a backfill
+> is live, because the run's inserts into old partitions are merged and those
+> merges emit `RemovePart` on exactly the partitions under watch (measured: 3.02
+> source parts removed per merge, batches of up to 10 partitions in one second,
+> all benign). Judge by surviving parts, not by removal timestamps. See §4.3 for
+> the merge-accounting cross-check.
+
+The marker query below is kept **for progress tracking only** — it tells you
+where the walk has reached, never whether the data is there:
+
+```bash
+# [LAPTOP] progress only — NOT a data-completeness gate
 CHQ <<'SQL'
 SELECT
   min(sequence)                                 AS low,
   max(sequence)                                 AS high,
   count()                                       AS markers,
-  count() = (max(sequence) - min(sequence) + 1) AS contiguous_no_gaps,
-  multiIf(
-    min(sequence) <= 3 AND max(sequence) >= 50457423
-      AND count() = (max(sequence) - min(sequence) + 1),
-      'BACKFILL COMPLETE — READY TO PRE-ROLL',
-    max(sequence) >= 50457423,
-      'INCOMPLETE — reaches activation but has GAPS (pass 2 not done?) — do NOT pre-roll',
-    'INCOMPLETE — backfill still running — do NOT pre-roll'
-  )                                             AS status
+  count() = (max(sequence) - min(sequence) + 1) AS contiguous_no_gaps
 FROM prices.backfill_sdex_ledgers
 WHERE sequence < 50457424;
 SQL
 ```
-
-**✅ Gate:** the `status` column MUST read **`BACKFILL COMPLETE — READY TO PRE-ROLL`**
-(`low` ≈ 1–3, `high` ≈ 50,457,423, `contiguous_no_gaps` = 1). Anything else → **stop**,
-finish the outstanding pass, and do not continue this phase.
 
 Only once the gate passes, gather the rest of the pre-flight:
 
