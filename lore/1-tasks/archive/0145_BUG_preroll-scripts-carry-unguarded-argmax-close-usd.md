@@ -2,7 +2,7 @@
 id: "0145"
 title: "All four pre-roll scripts carry the unguarded argMax(close_usd) — 121 sites that will bake zeros into the 0088 and 0136 pre-rolls"
 type: BUG
-status: active
+status: completed
 related_adr: []
 related_tasks: ["0144", "0146", "0088", "0136", "0114", "0131"]
 tags:
@@ -54,6 +54,24 @@ history:
       is vacuous. Also pinned as a test: when *every* sub-bucket is un-enriched
       the guard correctly still yields 0 — it does not make 0 readable as "worth
       nothing", which stays [[0151]]'s problem.
+  - date: 2026-08-06
+    status: completed
+    who: okarcz
+    note: >
+      **PR #176 merged (`4e35dc6`); all five criteria met.** 121 sites guarded
+      across four scripts (6/14/6/95), header disclosure in each, 2 guard tests
+      + 2 integration cases, 11 unit + 14 integration green on CH 26.3.10.60.
+      **Phase 1 of [[0144]] is closed and both queued pre-rolls are unblocked** —
+      [[0088]] pass 2 (20.22%, ETA ~08-12) and [[0136]]'s 07-21→08-03 gap, which
+      will now run against guarded scripts rather than manufacturing a fresh
+      estate of zeroed coarse rows at backfill scale. One task premise was
+      **wrong and is worth not re-deriving**: `preroll-amm-reprice.sql` is not
+      generated, so there was no generator to fix. Next in the chain is
+      [[0135]] (both contract calls already settled) or [[0111]] → [[0154]]
+      (largest win by BE's numbers); [[0146]] still waits on [[0142]] + [[0137]].
+      Not fixed here and not this task's: a pre-existing `doc_lazy_continuation`
+      clippy failure in `tests/rollup_append_it.rs`, invisible to CI because the
+      clippy step does not lint this package.
 ---
 
 # Pre-roll scripts carry the same unguarded `argMax(close_usd, …)`
@@ -125,8 +143,10 @@ trap, no DROP window and no freshness exposure**. It merges and it is live.
       `tests/preroll_close_usd_guard_it.rs`, two cases through the real shipped
       `preroll.sql` chain. **Verified to fail without the fix** (reverting the
       six `preroll.sql` sites turns `price_ohlcv_15m` back to `close_usd = 0`).
-- [ ] Merged **before** the [[0088]] pass-2 pre-roll and the [[0136]] gap
-      pre-roll are run. → PR open; 0088 pass 2 now ETAs ~08-12.
+- [x] Merged **before** the [[0088]] pass-2 pre-roll and the [[0136]] gap
+      pre-roll are run — PR #176 merged 2026-08-06 (`4e35dc6`), with 0088 pass 2
+      at 20.22% and ETAing ~08-12. Both queued pre-rolls are now unblocked and
+      will run against guarded scripts.
 - [x] Header disclosure of the `close` / `close_usd` decoupling in each of the
       four files.
 
