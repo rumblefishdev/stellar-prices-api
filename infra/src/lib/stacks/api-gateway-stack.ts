@@ -150,6 +150,18 @@ export class ApiGatewayStack extends cdk.Stack {
     // The in-app gate exempts this path too (`auth::is_exempt`), so the posture
     // holds even when `API_KEYS` is armed. Safe to cache for everyone because
     // the document contains nothing key-specific.
+    //
+    // The `/health` precedent covers the *posture*, not the cost profile:
+    // `/health` is a MockIntegration and can never invoke anything, whereas a
+    // cache miss here reaches the Lambda, and an anonymous route sits outside
+    // the usage plan, so the only limiter it has is the stage-wide throttle it
+    // shares with paying traffic. Two things keep the residual small: the
+    // 3600s TTL below with **no** cache-key parameters, so all callers collapse
+    // onto one entry, and API Gateway's default
+    // `requireAuthorizationForCacheControl: true`, which stops an anonymous
+    // caller busting that entry with `Cache-Control: max-age=0`. If this ever
+    // needs a harder bound, the lever is a method-level throttle here, not a
+    // key requirement.
     this.api.root.addResource('api-docs-json').addMethod('GET', proxy([]), {
       apiKeyRequired: false,
     });

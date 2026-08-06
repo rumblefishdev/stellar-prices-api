@@ -31,6 +31,17 @@ history:
       match `/health` (the keyless-mock block in `api-gateway-stack.ts`);
       the decision needs
       recording either way before implementation.
+  - date: 2026-08-06
+    status: active
+    who: akot
+    note: >
+      PR #169 review (okarcz) addressed — all seven points taken. Blocking
+      ID collision fixed (spawned license task renumbered 0144 → [[0155]],
+      five reference sites). `openapi:verify-routes` now runs on infra-only
+      PRs that touch the gateway stack, closing the gateway→spec direction
+      it could not previously see. The tautological `LEDGER_SEQ_MAX` assert
+      replaced with a document-derived test. Full accounting in the
+      "PR #169 review" section.
 ---
 
 # Expose the OpenAPI spec through API Gateway
@@ -323,10 +334,97 @@ path for anyone already reading it.
   the 9 documented paths exactly
 - `cdk synth Prices-production-Compute` — `API_BASE_URL` on the api-handler
 
+After the PR #169 review fixes:
+
+- `cargo test -p prices-api --test openapi` — 8 passed (was 7), including the
+  new ledger-ceiling test; mutation-checked as described above
+- `cargo clippy -p prices-api --all-targets`, `npx prettier --check` — clean
+- `npm run openapi:lint` — still valid, 0 errors / 0 warnings, 2 ignored
+- `npm run openapi:verify-routes` — still 9/9; the rewritten `fullPath()`
+  confirmed to exit 1 on both an unresolved parent and a resource cycle
+- `cdk synth` **not** re-run for the review fixes: the only infra edit is a
+  comment, so the synthesized template is unchanged (verify-routes ran against
+  it and still agrees on all 9 routes)
+
 **Not verified — needs a deploy.** Two ACs are about the *deployed* API: the
 live `GET …/production/api-docs-json` fetch and confirming the advertised
 `servers` URL serves a route. Both are one `make -C infra deploy-production`
 away, and `docs/scf/api-endpoints.md` carries the curl to confirm.
+
+## PR #169 review (okarcz, 2026-08-05)
+
+All seven points taken; nothing declined. Two of them were about guards that
+looked like guards, which is the same failure this task exists to fix.
+
+1. **`0144` collided (blocking).** PR #168 had already claimed it for the
+   BE-0199 USD read-surface defects, unmerged when this branch was cut, so the
+   ID never showed in the tree. That side is cited by 0145–0151 and 0154 plus
+   the phase plan; this side moved. Renumbered to **0155** — 0152 (#172), 0153
+   and 0154 are all taken, and 0153's own renumber note reserving 0152 for this
+   task has been overtaken. Five sites, not four: the reviewer's list plus
+   `redocly.yaml:26`, where the `info-license-strict: off` comment points here.
+
+2. **The route-drift gate never ran on the PRs most likely to trip it.**
+   `openapi:verify-routes` lives in the `rust` job and `infra/**` was not in its
+   paths filter, so an infra-only PR adding a gateway route skipped the only
+   check that sees the gateway→spec direction — and adding a gateway route *is*
+   a pure-infra edit, while adding an axum route touches `packages/**`. So the
+   uncovered direction was the more likely one. Fixed by listing
+   `infra/src/lib/stacks/api-gateway-stack.ts` specifically, not `infra/**`, so
+   unrelated CDK edits do not pay for an ARM Rust build. Same hole class this PR
+   already closed twice (`package.json`, `tools/scripts/**`); the general form
+   is [[0153]].
+
+3. **`LEDGER_SEQ_MAX` asserted a tautology.**
+   `assert!(LEDGER_SEQ_MAX == 4_294_967_295)` only restated
+   `u32::MAX as u64 == 4_294_967_295`; it tied the five `#[schema(maximum = …)]`
+   literals to nothing. Const and assert deleted, replaced with
+   `every_ledger_field_publishes_the_uint32_ceiling` in `tests/openapi.rs`,
+   which reads the bounds back out of the served document — the artifact-derived
+   form the rest of this PR argues for. Its field set is derived from the
+   document (any `*_ledger` / `ledgers_remaining` property) rather than listed,
+   so a ledger field added later without the attribute fails as a missing
+   `maximum` instead of passing unnoticed; a count assertion stops a rename from
+   emptying the filter and passing vacuously. Mutation-checked: setting one
+   literal to `4_294_967_296` leaves the old assert green and fails the new test
+   with the field named.
+
+4. **`/health` is the precedent for the posture, not the cost profile.**
+   Correct — `/health` is a `MockIntegration` and can never invoke anything;
+   `/api-docs-json` is `proxy([])`, so a cache miss reaches the Lambda, and it
+   sits outside the usage plan with only the stage-wide throttle. The
+   mitigations the reviewer names are real and already in place (3600s TTL with
+   no cache-key parameters, so all callers collapse onto one entry; API
+   Gateway's default `requireAuthorizationForCacheControl: true` blocks
+   anonymous cache-busting), so the residual stays small and the posture stands.
+   Written into the stack comment so it stops reading as "same cost profile",
+   with the lever named for anyone who needs a harder bound: a method-level
+   throttle, not a key requirement.
+
+5. **Method sets disagreed between the two guards.** `spec_routes()` matched
+   `head`/`options`; `verify-openapi-routes.mjs` drops both from both sides so
+   0126's `addCorsPreflight` does not read as drift. Rust filter aligned to
+   `HTTP_METHODS`, with the reason stated in both files.
+
+6. **`fullPath()` truncated silently.** Both exits returned a *partial* path
+   despite the comment promising to fail loudly — which surfaces as drift on a
+   path that looks almost right, not as the parse failure it is. Both now throw,
+   caught at the call site and printed as `error:`. Verified against a mutated
+   template in each direction: an unresolved parent and a resource cycle both
+   exit 1 with the resource named (the unresolved-parent case previously
+   reported `/assets` as undocumented drift). The root-method check moved above
+   the `ANY` check so the `ANY` message always has a path to name.
+
+7. **`extract-openapi.sh` used `node -p "require('…json')"`.** Switched to
+   `JSON.parse(readFileSync(…))`. Worth noting the stated hazard does not
+   reproduce: `node -p` is still evaluated as CommonJS under
+   `"type": "module"` (measured on v26), and the root `package.json` has no
+   `type` anyway. The change stands because the old form depended on both of
+   those staying true and the new one depends on neither.
+
+**Double extraction** (`openapi:lint` and `openapi:verify-routes` each chaining
+`openapi:extract`) left as-is, per the reviewer — the chaining is what makes
+each script correct standalone, and the second `cargo run` is a no-op rebuild.
 
 ## Design Decisions
 
@@ -377,7 +475,7 @@ away, and `docs/scf/api-endpoints.md` carries the curl to confirm.
    `.redocly.lint-ignore.yaml` with a note to delete the entry if either route
    ever gains an error path.
 
-8. **`info.license` left empty; spawned [[0144]].** utoipa emits `{"name": ""}`
+8. **`info.license` left empty; spawned [[0155]].** utoipa emits `{"name": ""}`
    from an unset `CARGO_PKG_LICENSE`. The repo has no `LICENSE` file and no
    Cargo `license` field; the only "MIT" is in a `private: true` root
    `package.json` and reads as generator boilerplate. Declaring a license in a
@@ -397,7 +495,8 @@ away, and `docs/scf/api-endpoints.md` carries the curl to confirm.
 
 ## Future Work
 
-- [[0144]] — decide and declare the API license (spawned).
+- [[0155]] — decide and declare the API license (spawned; renumbered from 0144,
+  which PR #168 had already claimed).
 - Ask Oskar whether Tranche 3 AC 2's `openapi-validator` names a specific tool.
   Deliberately **not** a task: the measurement and the reasoning are recorded
   above, so it is one question, not a work item. Ask it with the cost attached —
