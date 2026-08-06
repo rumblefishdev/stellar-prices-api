@@ -54,6 +54,24 @@ export interface EnvironmentConfig {
    */
   readonly apiGatewayCacheEnabled: boolean;
 
+  /**
+   * Public base URL of the deployed API, passed to the api-handler as
+   * `API_BASE_URL` and stamped into the OpenAPI `servers` block (task 0124).
+   *
+   * MUST include the stage path. API Gateway serves the REST API at
+   * `https://{id}.execute-api.{region}.amazonaws.com/{stage}`, so a value
+   * without `/production` advertises a base that 403s on every route — the same
+   * stage-prefix trap that made `AWS_LAMBDA_HTTP_IGNORE_STAGE_IN_PATH=true`
+   * necessary for `/v1` (task 0089).
+   *
+   * Configured rather than derived because ComputeStack (which owns the
+   * function's environment) is a *dependency* of ApiGatewayStack (which owns
+   * the URL) — reading `api.url` here would close the cycle Compute → Gateway →
+   * Compute and fail synth. Update this one value when task 0126 lands the
+   * custom domain.
+   */
+  readonly apiBaseUrl: string;
+
   // API handler Lambda (consumed by ComputeStack + ApiGatewayStack — task 0040)
 
   /**
@@ -280,6 +298,37 @@ export function validateConfig(config: EnvironmentConfig): void {
       `apiGatewayCacheEnabled must be a boolean, got: ${config.apiGatewayCacheEnabled}`,
     );
   }
+  // `servers` in the published OpenAPI document is a promise that the URL
+  // serves the API. Assert the shape here rather than discovering at runtime
+  // that the advertised base is missing its stage path and 403s (task 0124).
+  if (typeof config.apiBaseUrl !== 'string' || !config.apiBaseUrl) {
+    errors.push(
+      `apiBaseUrl must be a non-empty string, got: ${config.apiBaseUrl}`,
+    );
+  } else {
+    if (!config.apiBaseUrl.startsWith('https://')) {
+      errors.push(
+        `apiBaseUrl must start with "https://", got: "${config.apiBaseUrl}"`,
+      );
+    }
+    if (config.apiBaseUrl.endsWith('/')) {
+      errors.push(
+        `apiBaseUrl must not end with "/" (routes are appended as "/v1/..."), got: "${config.apiBaseUrl}"`,
+      );
+    }
+    // An execute-api host serves the API only under /{stage}; a bare host is
+    // the stage-prefix trap. A custom domain (task 0126) has no such
+    // requirement, so only enforce this for execute-api URLs.
+    if (
+      config.apiBaseUrl.includes('.execute-api.') &&
+      !config.apiBaseUrl.endsWith(`/${config.envName}`)
+    ) {
+      errors.push(
+        `apiBaseUrl is an execute-api URL and must end with the stage path "/${config.envName}", got: "${config.apiBaseUrl}"`,
+      );
+    }
+  }
+
   // The stage-wide throttle is a hard ceiling across ALL keys, so it must be at
   // least the advertised per-key rate — otherwise a single key can never reach
   // its SLA and compliant traffic gets spurious 429s.

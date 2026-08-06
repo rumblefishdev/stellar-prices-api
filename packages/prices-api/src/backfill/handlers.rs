@@ -6,6 +6,7 @@ use axum::response::{IntoResponse, Response};
 
 use crate::backfill::dto::{AmmStream, BackfillStatus, SdexStream};
 use crate::backfill::queries_ch::{self, ProgressRow};
+use crate::common::errors::ErrorEnvelope;
 use crate::common::{cache_control, errors};
 use crate::state::AppState;
 
@@ -14,7 +15,13 @@ use crate::state::AppState;
     get,
     path = "/backfill/status",
     tag = "backfill",
-    responses((status = 200, description = "Backfill progress", body = BackfillStatus))
+    responses(
+        (status = 200, description = "Backfill progress", body = BackfillStatus),
+        (status = 401, description = "Missing or invalid `x-api-key`", body = ErrorEnvelope),
+        (status = 403, description = "API key missing, invalid, or not authorized for this API"),
+        (status = 429, description = "Rate limit or daily quota exceeded (API Gateway usage plan)"),
+        (status = 500, description = "Query or upstream failure (`db_error`)", body = ErrorEnvelope),
+    )
 )]
 pub async fn get_status(State(state): State<AppState>) -> Response {
     let rows = match queries_ch::all_progress(state.ch()).await {

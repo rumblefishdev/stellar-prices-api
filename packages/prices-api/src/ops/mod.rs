@@ -25,11 +25,29 @@ struct Health {
 /// `GET /health` — liveness probe. Returns 200 with a tiny JSON body and a
 /// non-cacheable `Cache-Control`. Deliberately does NOT touch ClickHouse, so it
 /// answers even when the CH client is absent (mirrors BE's health exemption).
+// Explicit `summary`/`description`: without them utoipa publishes the whole
+// rustdoc above as the summary — 223 characters of maintainer-facing prose
+// where a one-line label belongs (task 0124).
 #[utoipa::path(
     get,
     path = "/health",
     tag = "ops",
-    responses((status = 200, description = "Service is healthy"))
+    summary = "`GET /health` — liveness probe.",
+    description = "Returns 200 with a small JSON body and a non-cacheable \
+                   `Cache-Control`. Does not touch ClickHouse, so it answers \
+                   even when the database client is unavailable.",
+    // Opts out of the global `x-api-key` requirement — /health is a keyless
+    // API Gateway mock and is exempt from the in-app gate (task 0124).
+    security(()),
+    responses(
+        (status = 200, description = "Service is healthy"),
+        // Keyless does not mean unthrottled: the stage-wide throttle covers
+        // `/*` `*`, so API Gateway can 429 this route too. No body — the
+        // gateway produces this response, not the handler (there is none: this
+        // is a MockIntegration). Documented so a generated client has an error
+        // branch instead of trying to deserialize `{"message": …}` as `Health`.
+        (status = 429, description = "Rate limit exceeded (API Gateway stage throttle)"),
+    )
 )]
 pub async fn health() -> Response {
     let mut resp = (

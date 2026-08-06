@@ -7,6 +7,7 @@
   "apiKeyRateLimit": 100,
   "apiKeyBurstLimit": 200,
   "apiGatewayCacheEnabled": true,
+  "apiBaseUrl": "https://02mabge71l.execute-api.eu-central-1.amazonaws.com/production",
   "apiHandler": {
     "memoryMb": 512,
     "timeoutSeconds": 15

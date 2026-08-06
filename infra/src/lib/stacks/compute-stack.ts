@@ -480,6 +480,12 @@ export class ComputeStack extends cdk.Stack {
         // Lambda route, which is why this went unnoticed until the first real
         // deploy (0040's tests are all in-process `tower::oneshot`).
         AWS_LAMBDA_HTTP_IGNORE_STAGE_IN_PATH: 'true',
+        // Stamped into the OpenAPI `servers` block served at /api-docs-json
+        // (task 0124). Config-supplied, not derived from `api.url`: this stack
+        // is a dependency of ApiGatewayStack, so reading the gateway's URL here
+        // would close a Compute → Gateway → Compute cycle. Includes the stage
+        // path — see the `apiBaseUrl` validation in types.ts.
+        API_BASE_URL: config.apiBaseUrl,
       },
     });
 

@@ -27,6 +27,34 @@ jobs:
               - 'Cargo.toml'
               - 'Cargo.lock'
               - '.github/workflows/ci.yml'
+              # The OpenAPI lint gate (task 0124) runs in the rust job — the
+              # document is produced by a cargo bin, so only that job can
+              # extract it. Its config lives at the repo root.
+              - 'redocly.yaml'
+              - '.redocly.lint-ignore.yaml'
+              # The `servers` URL the linted document is stamped with.
+              - 'infra/envs/production.json'
+              # `openapi:verify-routes` compares this file's synthesized output
+              # against the extracted document, and it is the only check that
+              # sees the gateway→spec direction. `infra/**` is otherwise absent
+              # here, so an infra-only PR adding a gateway route would skip the
+              # rust job entirely and map a route no document describes. Listed
+              # as the single file rather than `infra/**` so unrelated CDK edits
+              # do not pay for an ARM Rust build.
+              - 'infra/src/lib/stacks/api-gateway-stack.ts'
+              # Same reasoning for the document's `servers` block:
+              # compute-stack.ts is what actually puts API_BASE_URL on the
+              # api-handler, and types.ts is what asserts the value carries the
+              # stage path. `openapi:verify-servers` compares both against the
+              # extracted document — but only if this job runs, and dropping
+              # the env var is a pure-infra edit.
+              - 'infra/src/lib/stacks/compute-stack.ts'
+              - 'infra/src/lib/types.ts'
+              # `redocly` is a devDependency and this is the only job that runs
+              # it. Without these, a PR that drops or bumps it merges green and
+              # the failure lands on the next author to touch packages/**.
+              - 'package.json'
+              - 'package-lock.json'
               # The Lambda asset guards are implemented here. Without this,
               # a PR touching only the guard scripts runs no job at all and
               # the thing both jobs depend on is the one file CI never
@@ -213,5 +241,33 @@ jobs:
 
       - run: npm ci
 
+      # The OpenAPI document is a public promise about the deployed API (task
+      # 0124): it is served at `GET /api-docs-json` and is what partner clients
+      # are generated from. Lint the extracted document — the same bytes the
+      # handler serves — so a malformed or under-described spec fails here
+      # rather than in a consumer's generator.
+      #
+      # Lives in this job because extraction runs a cargo bin; the node setup
+      # below is already here for the synth step, so this costs one npx call.
+      - name: Lint OpenAPI document
+        run: npm run openapi:lint
+
       - name: Synth production app
         run: make -C infra synth-production
+
+      # Both sides of the route contract now exist as artifacts: the
+      # synthesized template above (what CDK will deploy) and target/openapi.json
+      # from the lint step (what the handler will serve). Compare them rather
+      # than trusting a hand-maintained mirror — `/api-docs-json` sat in the
+      # axum router for months while the gateway never mapped it, and nothing
+      # failed. Same reasoning as tools/scripts/lambda-assets.sh (task 0077).
+      - name: Verify OpenAPI routes match API Gateway
+        run: npm run openapi:verify-routes
+
+      # Routes are one half of the contract; the base URL is the other. The
+      # extraction stamps `servers` from infra/envs/production.json, which never
+      # observes ComputeStack actually putting API_BASE_URL on the Lambda — so
+      # dropping or renaming that variable would leave the linted document with
+      # a `servers` block the deployed one does not have. Compare the two.
+      - name: Verify OpenAPI servers match the deployed handler
+        run: npm run openapi:verify-servers

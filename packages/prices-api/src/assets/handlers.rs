@@ -11,6 +11,7 @@ use crate::assets::dto::{
 use crate::assets::queries_ch::{
     self, BaseCurrency, Granularity, ListArgs, OhlcvArgs, Order, SortCol, Timeframe, TypeFilter,
 };
+use crate::common::errors::ErrorEnvelope;
 use crate::common::{cache_control, cursor, errors};
 use crate::identity::AssetIdentifier;
 use crate::state::AppState;
@@ -38,8 +39,12 @@ const MAX_LIMIT: u32 = 200;
     ),
     responses(
         (status = 200, description = "Current price", body = PriceResponse),
-        (status = 400, description = "Invalid asset identifier"),
-        (status = 404, description = "No current price for the asset"),
+        (status = 400, description = "Invalid asset identifier", body = ErrorEnvelope),
+        (status = 401, description = "Missing or invalid `x-api-key`", body = ErrorEnvelope),
+        (status = 403, description = "API key missing, invalid, or not authorized for this API"),
+        (status = 404, description = "No current price for the asset", body = ErrorEnvelope),
+        (status = 429, description = "Rate limit or daily quota exceeded (API Gateway usage plan)"),
+        (status = 500, description = "Query or upstream failure (`db_error`)", body = ErrorEnvelope),
     )
 )]
 pub async fn get_price(State(state): State<AppState>, Path(raw): Path<String>) -> Response {
@@ -71,8 +76,12 @@ pub async fn get_price(State(state): State<AppState>, Path(raw): Path<String>) -
     ),
     responses(
         (status = 200, description = "Asset detail", body = AssetDetail),
-        (status = 400, description = "Invalid asset identifier"),
-        (status = 404, description = "Unknown asset"),
+        (status = 400, description = "Invalid asset identifier", body = ErrorEnvelope),
+        (status = 401, description = "Missing or invalid `x-api-key`", body = ErrorEnvelope),
+        (status = 403, description = "API key missing, invalid, or not authorized for this API"),
+        (status = 404, description = "Unknown asset", body = ErrorEnvelope),
+        (status = 429, description = "Rate limit or daily quota exceeded (API Gateway usage plan)"),
+        (status = 500, description = "Query or upstream failure (`db_error`)", body = ErrorEnvelope),
     )
 )]
 pub async fn get_asset(State(state): State<AppState>, Path(raw): Path<String>) -> Response {
@@ -132,11 +141,21 @@ pub struct ListParams {
          description = "price | volume_24h | change_24h | code (default volume_24h)"),
         ("order" = Option<String>, Query, description = "asc | desc (default desc)"),
         ("cursor" = Option<String>, Query, description = "opaque pagination cursor"),
-        ("limit" = Option<u32>, Query, description = "1..=200 (default 50)"),
+        // The bound is enforced (`limit == 0 || limit > MAX_LIMIT` → 400) but was
+        // invisible to clients until now: a caller sending limit=500 got a 400
+        // with nothing in the document explaining why. Task 0119 owns extending
+        // this treatment to the remaining params (enums, `search` length, date
+        // ranges); this one is declared here because it is already enforced.
+        ("limit" = Option<u32>, Query, description = "1..=200 (default 50)",
+         minimum = 1, maximum = 200),
     ),
     responses(
         (status = 200, description = "Asset list page", body = AssetListResponse),
-        (status = 400, description = "Invalid query parameter"),
+        (status = 400, description = "Invalid query parameter", body = ErrorEnvelope),
+        (status = 401, description = "Missing or invalid `x-api-key`", body = ErrorEnvelope),
+        (status = 403, description = "API key missing, invalid, or not authorized for this API"),
+        (status = 429, description = "Rate limit or daily quota exceeded (API Gateway usage plan)"),
+        (status = 500, description = "Query or upstream failure (`db_error`)", body = ErrorEnvelope),
     )
 )]
 pub async fn get_assets(State(state): State<AppState>, Query(p): Query<ListParams>) -> Response {
@@ -248,8 +267,14 @@ pub struct OhlcvParams {
     ),
     responses(
         (status = 200, description = "Candlestick series", body = OhlcvResponse),
-        (status = 400, description = "Invalid parameter"),
-        (status = 404, description = "Unknown asset"),
+        (status = 400, description = "Invalid parameter", body = ErrorEnvelope),
+        (status = 401, description = "Missing or invalid `x-api-key`", body = ErrorEnvelope),
+        (status = 403, description = "API key missing, invalid, or not authorized for this API"),
+        (status = 404, description = "Unknown asset", body = ErrorEnvelope),
+        (status = 429, description = "Rate limit or daily quota exceeded (API Gateway usage plan)"),
+        (status = 500, description = "Query or upstream failure (`db_error`)", body = ErrorEnvelope),
+        (status = 503, description = "The requested `base_currency` quote asset is not \
+                                      tracked (`quote_unavailable`)", body = ErrorEnvelope),
     )
 )]
 pub async fn get_ohlcv(

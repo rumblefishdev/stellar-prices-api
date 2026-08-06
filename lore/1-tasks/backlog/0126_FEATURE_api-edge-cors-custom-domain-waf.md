@@ -84,6 +84,14 @@ here is what would change our mind" is a complete outcome.
   `/production` from public URLs, which is nicer — and changes every documented
   URL. Update §4, [[0124]]'s `servers`, and the [[0128]] evidence together, and
   keep the execute-api URL working during the transition.
+  - [[0124]] landed, so `servers` is now **one config value**: `apiBaseUrl` in
+    `infra/envs/production.json`. Change it and the handler's `API_BASE_URL`
+    and the published document follow automatically — no code edit. Two things
+    to know: `validateConfig` in `infra/src/lib/types.ts` only enforces the
+    `/production` stage suffix for `.execute-api.` hosts, so a custom domain
+    with the base path mapped to the stage passes without changes; and the base
+    URL is repeated as prose in `docs/scf/api-endpoints.md`, which must be
+    updated in the same commit.
 - Note for anyone touching the handler: the stage-prefix behaviour is already
   subtle here (`AWS_LAMBDA_HTTP_IGNORE_STAGE_IN_PATH=true` is required for `/v1`
   routing). Re-verify routing after the base-path mapping change.

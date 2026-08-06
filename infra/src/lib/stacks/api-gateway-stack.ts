@@ -25,7 +25,9 @@ export interface ApiGatewayStackProps extends cdk.StackProps {
  * `packages/prices-api/src/common/cache_control.rs` (the gateway stage cache and
  * the client/CDN max-age must agree, or one serves staler data than the other).
  * Mapping: SHORT=10s → price; MEDIUM=60s → assetsList / assetDetail / ohlcv /
- * oracles / backfill.
+ * oracles / backfill. `apiDocs` is the one deliberate mismatch: 3600s here,
+ * `DEPLOY_STATIC`=300s on the handler — see the comment on that constant and on
+ * `apiDocs` below.
  */
 const CACHE_TTL = {
   assetsList: cdk.Duration.seconds(60), // MEDIUM
@@ -34,10 +36,41 @@ const CACHE_TTL = {
   ohlcv: cdk.Duration.seconds(60), // MEDIUM
   oracles: cdk.Duration.seconds(60), // MEDIUM
   backfill: cdk.Duration.seconds(60), // MEDIUM
+  // The spec is byte-identical for the life of a deployment, so the longest TTL
+  // API Gateway allows keeps the document off the Lambda entirely (task 0124).
+  //
+  // It is only free because this entry is flushed when a deployment ships —
+  // `make -C infra deploy-production` runs `flush-production-cache` after the
+  // deploy. Without that the cache outlives the build that filled it and the
+  // gateway serves the previous deployment's document for up to an hour. The
+  // handler's own `Cache-Control` is 300s, not 3600s, for the same reason
+  // applied to caches we do NOT control (see cache_control.rs).
+  apiDocs: cdk.Duration.seconds(3600), // DEPLOY_STATIC (client side: 300s)
 } as const;
 
 /** 0.5 GB stage cache (overview §2.1). */
 const CACHE_CLUSTER_SIZE = '0.5';
+
+/**
+ * Method-level throttle for `GET /api-docs-json`.
+ *
+ * Every other Lambda-backed route is `apiKeyRequired: true` and therefore
+ * carries two limits from the usage plan: the per-key rate and the daily quota.
+ * This one is anonymous by design, so it has neither — its only limiter would
+ * otherwise be the stage-wide bucket it SHARES with paying partners. Throttling
+ * is evaluated before the cache, so an anonymous loop on the documentation route
+ * draws that bucket down and a partner inside their contracted rate starts
+ * seeing 429s from a route they never called.
+ *
+ * Sized for what the route is: a static ~40 KB document that a reader fetches
+ * occasionally and that is cached for an hour at the edge. 10 req/s aggregate is
+ * far above any legitimate use and 5% of the stage ceiling.
+ *
+ * A local constant rather than a config key because it is a property of this
+ * route's shape (anonymous, cached, static), not of an environment — unlike
+ * `apiGatewayThrottleRate`, which encodes a per-deployment capacity decision.
+ */
+const API_DOCS_THROTTLE = { rate: 10, burst: 20 } as const;
 
 /**
  * Public REST API Gateway for prices-api.
@@ -50,7 +83,9 @@ const CACHE_CLUSTER_SIZE = '0.5';
  *
  * - **Auth / rate limit**: data routes set `apiKeyRequired: true`; the UsagePlan
  *   enforces the §2.1/§7 per-key 100 req/s (`apiKeyRateLimit`) + a daily quota.
- *   `GET /health` stays a keyless mock (cheapest liveness probe).
+ *   `GET /health` stays a keyless mock (cheapest liveness probe), and
+ *   `GET /api-docs-json` is a keyless proxy to the handler (task 0124 — public
+ *   documentation).
  * - **Response cache**: 0.5 GB stage cache with per-endpoint TTLs (`CACHE_TTL`);
  *   each cached method declares its query params as cache keys.
  *
@@ -131,6 +166,35 @@ export class ApiGatewayStack extends cdk.Stack {
         requestParameters: declare(cacheKeys),
       });
 
+    // ---------------------------------------------------------------
+    // GET /api-docs-json — the OpenAPI spec, anonymous (task 0124).
+    // ---------------------------------------------------------------
+    // Proxies to the same axum handler as the data routes (one integration
+    // mechanism, one source of truth) rather than serving a second, separately
+    // maintained copy of the document.
+    //
+    // Keyless on purpose: an API description is public documentation, and
+    // gating it behind a key the reader does not have yet is a self-service
+    // dead end. `/health` already establishes the anonymous-route precedent.
+    // The in-app gate exempts this path too (`auth::is_exempt`), so the posture
+    // holds even when `API_KEYS` is armed. Safe to cache for everyone because
+    // the document contains nothing key-specific.
+    //
+    // The `/health` precedent covers the *posture*, not the cost profile:
+    // `/health` is a MockIntegration and can never invoke anything, whereas a
+    // cache miss here reaches the Lambda, and an anonymous route sits outside
+    // the usage plan, so the only limiter it has is the stage-wide throttle it
+    // shares with paying traffic. Two things keep the residual small: the
+    // 3600s TTL below with **no** cache-key parameters, so all callers collapse
+    // onto one entry, and API Gateway's default
+    // `requireAuthorizationForCacheControl: true`, which stops an anonymous
+    // caller busting that entry with `Cache-Control: max-age=0`. If this ever
+    // needs a harder bound, the lever is a method-level throttle here, not a
+    // key requirement.
+    this.api.root.addResource('api-docs-json').addMethod('GET', proxy([]), {
+      apiKeyRequired: false,
+    });
+
     const PATH_ID = 'method.request.path.asset_identifier';
     const qs = (name: string) => `method.request.querystring.${name}`;
 
@@ -173,26 +237,50 @@ export class ApiGatewayStack extends cdk.Stack {
     });
 
     // ---------------------------------------------------------------
-    // Per-method cache TTLs (only meaningful when the stage cache is on).
+    // Per-method stage settings: throttles (always) + cache TTLs (when the
+    // stage cache is on).
     // ---------------------------------------------------------------
+    // Per-method settings expressed as CfnStage method settings (resourcePath +
+    // httpMethod). The high-level `deployOptions.methodOptions` is fixed at
+    // construction; setting the L1 `methodSettings` here keeps the per-route
+    // table colocated with the routes for readability.
+    const cfnStage = this.api.deploymentStage.node
+      .defaultChild as apigateway.CfnStage;
+
+    // Assigning `methodSettings` wholesale REPLACES the `/*/*` entry CDK
+    // renders from `deployOptions.throttlingRateLimit/Burst`, which would drop
+    // the stage-wide throttle (only the per-key usage-plan limit would remain).
+    // Re-declare it here so the §2.1 aggregate stage ceiling survives.
+    const stageWideThrottle = {
+      resourcePath: '/*',
+      httpMethod: '*',
+      throttlingRateLimit: config.apiGatewayThrottleRate,
+      throttlingBurstLimit: config.apiGatewayThrottleBurst,
+    };
+
+    // One entry, not two: method settings are keyed by resourcePath+httpMethod,
+    // so a separate throttle entry for this route would collide with its cache
+    // entry. The throttle is declared OUTSIDE the `cacheEnabled` branch on
+    // purpose — with the cache off, every anonymous request is a billed Lambda
+    // invocation, which is precisely when an unthrottled keyless route costs
+    // the most.
+    const apiDocsSettings = {
+      resourcePath: '/api-docs-json',
+      httpMethod: 'GET',
+      throttlingRateLimit: API_DOCS_THROTTLE.rate,
+      throttlingBurstLimit: API_DOCS_THROTTLE.burst,
+      ...(cacheEnabled
+        ? {
+            cachingEnabled: true,
+            cacheTtlInSeconds: CACHE_TTL.apiDocs.toSeconds(),
+          }
+        : {}),
+    };
+
     if (cacheEnabled) {
-      // Per-method caching expressed as CfnStage method settings (resourcePath +
-      // httpMethod). The high-level `deployOptions.methodOptions` is fixed at
-      // construction; setting the L1 `methodSettings` here keeps the per-route
-      // TTL table colocated with the routes for readability.
-      const cfnStage = this.api.deploymentStage.node
-        .defaultChild as apigateway.CfnStage;
-      // Assigning `methodSettings` wholesale REPLACES the `/*/*` entry CDK
-      // renders from `deployOptions.throttlingRateLimit/Burst`, which would drop
-      // the stage-wide throttle (only the per-key usage-plan limit would remain).
-      // Re-declare it here so the §2.1 aggregate stage ceiling survives.
       cfnStage.methodSettings = [
-        {
-          resourcePath: '/*',
-          httpMethod: '*',
-          throttlingRateLimit: config.apiGatewayThrottleRate,
-          throttlingBurstLimit: config.apiGatewayThrottleBurst,
-        },
+        stageWideThrottle,
+        apiDocsSettings,
         {
           resourcePath: '/v1/assets',
           httpMethod: 'GET',
@@ -237,6 +325,11 @@ export class ApiGatewayStack extends cdk.Stack {
         },
         { resourcePath: '/health', httpMethod: 'GET', cachingEnabled: false },
       ];
+    } else {
+      // No cache cluster, so no TTLs to declare — but the throttles still
+      // apply, and this is the configuration in which the anonymous route is
+      // most expensive to leave unbounded.
+      cfnStage.methodSettings = [stageWideThrottle, apiDocsSettings];
     }
 
     // ---------------------------------------------------------------

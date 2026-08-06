@@ -24,6 +24,7 @@ use std::sync::Arc;
 
 use axum::Router;
 use axum::http::header::CONTENT_TYPE;
+use axum::response::IntoResponse;
 use axum::routing::get;
 
 pub use config::AppConfig;
@@ -46,17 +47,34 @@ pub fn app(config: &AppConfig, state: AppState) -> Router {
         .with_state(state)
         .split_for_parts();
 
-    if let Some(base) = &config.base_url {
-        spec.servers = Some(vec![utoipa::openapi::Server::new(base)]);
-    }
+    openapi::stamp_servers(&mut spec, config);
 
     // Serialize once at startup; serve the cached string (no per-request work).
-    let spec_json = Arc::new(spec.to_json().unwrap_or_else(|_| "{}".to_string()));
+    // `DEPLOY_STATIC` is the client-facing tier for this route — the document
+    // only changes when a new build ships (task 0124).
+    //
+    // Panics rather than falling back to `{}`. The fallback was silent in the
+    // worst possible way: a syntactically valid, empty document served as
+    // `200 OK`, with no log and no metric, then cached for 300s by the client
+    // and 3600s by the gateway. Every partner running a generator against it in
+    // that window would get a client with zero endpoints and no indication
+    // anything was wrong. Failing to start is louder and shorter: the deploy
+    // fails and the alarm fires. Matches `extract_openapi`, which already
+    // `.expect`s the same serialization.
+    let spec_json = Arc::new(
+        spec.to_json()
+            .expect("the OpenAPI document must serialize; it is built at startup"),
+    );
     let router = router.route(
         "/api-docs-json",
         get(move || {
             let spec_json = spec_json.clone();
-            async move { ([(CONTENT_TYPE, "application/json")], (*spec_json).clone()) }
+            async move {
+                let mut resp =
+                    ([(CONTENT_TYPE, "application/json")], (*spec_json).clone()).into_response();
+                common::cache_control::attach(&mut resp, common::cache_control::DEPLOY_STATIC);
+                resp
+            }
         }),
     );
 

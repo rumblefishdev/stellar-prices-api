@@ -12,10 +12,13 @@ use serde::Serialize;
 
 use crate::common::cache_control;
 
-/// The wire shape for every error response.
-#[derive(Debug, Serialize)]
+/// The wire shape for every error response. Published in the OpenAPI document
+/// as the `body` of every 4xx/5xx response (task 0124), so a client can code
+/// against `code` rather than parsing `message`.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct ErrorEnvelope {
     /// Stable machine-readable code (see the `*` constants below).
+    #[schema(example = "invalid_id")]
     pub code: &'static str,
     /// Human-readable explanation.
     pub message: String,
