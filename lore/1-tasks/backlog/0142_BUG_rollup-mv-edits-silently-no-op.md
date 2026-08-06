@@ -4,8 +4,8 @@ title: "rollups.sql edits silently don't land either — the refreshable MVs car
 type: BUG
 status: backlog
 related_adr: []
-related_tasks: ["0134", "0136", "0095", "0090", "0104", "0143"]
-tags: ["priority-medium", "effort-medium", "clickhouse", "schema-drift", "footgun"]
+related_tasks: ["0134", "0136", "0095", "0090", "0104", "0143", "0144", "0146"]
+tags: ["priority-high", "effort-medium", "clickhouse", "schema-drift", "footgun"]
 links: []
 history:
   - date: 2026-08-03

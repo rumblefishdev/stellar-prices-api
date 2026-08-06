@@ -25,7 +25,41 @@ history:
       Promoted to active. Time-boxed: the ACs require re-measuring under the
       active backfill write load from 0088, which ends when its pass 2 finishes
       (~2026-07-31). Measure before choosing among the four options.
+  - date: 2026-08-05
+    status: active
+    who: okarcz
+    note: >
+      **This task now blocks the largest win in the [[0144]] plan.** 0144's
+      phase 0 measured that ~68% of every OHLCV tier has no USD price — 100.0%
+      of exotic-quote rows, 71.9% of `_1d`, stable for 24 months — and the cause
+      is the enrichment resolver's reach, not any read-surface bug. The fix is
+      [[0154]] (a second pivot hop), which adds a join to this pass. Decided
+      2026-08-05: **0111 ships before 0154.** So the existing framing —
+      "not acutely urgent, cost scales with table size not era" — remains
+      accurate about the *risk* and is now wrong about the *priority*: it is on
+      the critical path of the biggest coverage improvement available to BE.
+      Note also that the 0144 measurements re-confirmed the hourly cadence
+      (`rate(1 hour)`, deployed rule matches `production.json`, no drift), so
+      this task's schedule assumptions are unchanged.
+  - date: 2026-08-06
+    status: active
+    who: okarcz
+    note: >
+      **The consumer has now sized what sits behind this task.** BE measured all
+      52,369 classic pools: only **44.4% have both legs priceable** on the 48h
+      window their headline TVL uses. They falsified the recency explanation
+      themselves (worst-leg staleness ≤2d 44.7% → ≤7d 46.3%, i.e. **+1.6pp**
+      from a 3.5× looser rule) and concluded the limit is the quote-asset
+      restriction — which is [[0154]], which is gated on this. BE rank the pivot
+      step above the materialised table they originally requested (now
+      [[0150]], dropped to priority-low). See
+      `0144/notes/S-be-0199-response-received.md`.
 ---
+
+> **Why this is queued ahead of its own cost case:** the perf argument for 0111
+> has always been "cost scales with table size, not era" — real but not urgent.
+> The reason to do it now is [[0154]] behind it, and the reason 0154 matters is
+> that **more than half of BE's pools have no headline TVL without it**.
 
 # Enrichment re-scans the whole table every batch
 
