@@ -60,14 +60,29 @@ impl Modify for SecurityAddon {
     tag = "ops",
     summary = "`GET /api-docs-json` — this OpenAPI document.",
     description = "Returns the machine-readable description of this API. \
-                   Served anonymously and cached for one hour; the document is \
-                   identical for the life of a deployment.",
+                   Served anonymously. The document is identical for the life \
+                   of a deployment; revalidate every 5 minutes to pick up the \
+                   next one.",
     security(()),
-    responses((
-        status = 200,
-        description = "This OpenAPI document",
-        content_type = "application/json"
-    ))
+    responses(
+        (
+            status = 200,
+            description = "This OpenAPI document",
+            content_type = "application/json"
+        ),
+        // Anonymous and input-free is not the same as error-free. This route
+        // sits OUTSIDE the usage plan, so its only limiter is the stage-wide
+        // throttle it shares with paying traffic — API Gateway can 429 it. And
+        // unlike `/health` (a MockIntegration) a cache miss here reaches the
+        // Lambda, so a cold-start or panic surfaces as a gateway 5xx.
+        //
+        // Neither carries `ErrorEnvelope`: both are produced by API Gateway,
+        // whose body is `{"message": …}`. Documented so a client generated from
+        // this document has an error branch rather than trying to parse that as
+        // the OpenAPI document itself.
+        (status = 429, description = "Rate limit exceeded (API Gateway stage throttle)"),
+        (status = 500, description = "The API description could not be served"),
+    )
 )]
 #[allow(dead_code, reason = "documentation-only; the route is wired in lib.rs")]
 fn api_docs_json() {}

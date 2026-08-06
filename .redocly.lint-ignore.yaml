@@ -1,16 +1,18 @@
 # Per-location lint exceptions for the published OpenAPI document (task 0124).
 # See https://redocly.com/docs/cli/ — regenerate with `--generate-ignore-file`.
 #
-# `operation-4xx-response` stays ON globally (see redocly.yaml): it is what
-# caught the seven key-gated operations that documented no 401/403 at all.
-# These two routes are excepted because they genuinely have no 4xx to document:
+# EMPTY ON PURPOSE. `operation-4xx-response` stays ON globally (see
+# redocly.yaml) and now passes unaided: it is what caught the seven key-gated
+# operations that documented no 401/403 at all.
 #
-#   /health         a keyless API Gateway mock — it answers 200 or nothing.
-#   /api-docs-json  anonymous and takes no input, so there is nothing to reject.
+# `/health` and `/api-docs-json` were excepted here on the premise that they
+# "genuinely have no 4xx to document". That premise was wrong, and the same
+# branch's own stack comment said so: neither route is in the usage plan, but
+# both are covered by the stage-wide `/*` `*` throttle, so API Gateway can 429
+# either one. `/api-docs-json` can also 5xx, because a cache miss reaches the
+# Lambda. Both now document those responses instead of suppressing the rule
+# that asked for them, so the exceptions are gone rather than re-justified.
 #
-# If either route ever gains an error path, delete its entry rather than
-# updating the description — the rule should start failing again.
-target/openapi.json:
-  operation-4xx-response:
-    - '#/paths/~1api-docs-json/get/responses'
-    - '#/paths/~1health/get/responses'
+# Prefer documenting the response to adding an entry here. If one is genuinely
+# unavoidable, say which response is missing and why it cannot exist.
+target/openapi.json: {}
