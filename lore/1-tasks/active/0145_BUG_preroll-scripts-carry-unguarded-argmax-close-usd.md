@@ -2,7 +2,7 @@
 id: "0145"
 title: "All four pre-roll scripts carry the unguarded argMax(close_usd) — 121 sites that will bake zeros into the 0088 and 0136 pre-rolls"
 type: BUG
-status: backlog
+status: active
 related_adr: []
 related_tasks: ["0144", "0146", "0088", "0136", "0114", "0131"]
 tags:
@@ -22,6 +22,21 @@ history:
       0199 report located in the six rollup MVs is also in every pre-roll
       script — 121 further sites. Time-critical: [[0088]] pass 2 and [[0136]]'s
       gap pre-roll both run this logic at span scale.
+  - date: 2026-08-06
+    status: active
+    who: okarcz
+    note: >
+      Promoted on [[0144]]'s completion — it is phase 1 of that chain and the
+      only item with an external deadline. Pre-flight confirms the task's three
+      premises: **all 121 sites are the byte-identical string
+      `argMax(close_usd, t.timestamp)`** (6 / 14 / 6 / 95 across the four
+      scripts, matching C1 exactly), `argMaxIf` appears nowhere in the schema,
+      and **`preroll-amm-reprice.sql` has no generator** — no build step emits
+      it and it carries no generated-file marker — so the 95 blocks are edited
+      directly. Deadline pressure eased slightly: the 2026-08-06 [[0088]] check
+      measured pass 2 at 20.22% and ~138k ledgers/hr, moving its ETA from
+      08-09/10 to **~08-12**, and that is a floor because the run is currently
+      in empty pre-2016 partitions.
 ---
 
 # Pre-roll scripts carry the same unguarded `argMax(close_usd, …)`
