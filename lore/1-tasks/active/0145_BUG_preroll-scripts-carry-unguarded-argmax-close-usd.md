@@ -37,6 +37,23 @@ history:
       measured pass 2 at 20.22% and ~138k ledgers/hr, moving its ETA from
       08-09/10 to **~08-12**, and that is a floor because the run is currently
       in empty pre-2016 partitions.
+  - date: 2026-08-06
+    status: active
+    who: okarcz
+    note: >
+      Implementation complete; open only on the "merged before the pre-rolls
+      run" criterion. All **121** sites guarded across the four scripts, header
+      disclosure in each, two guard tests (pattern + exact 6/14/6/95 counts) and
+      two integration cases on CH **26.3.10.60**. The regression test is
+      **verified to fail without the fix** — reverting `preroll.sql`'s six sites
+      turns `price_ohlcv_15m` back to `close_usd = 0`. 11 unit + 14 integration
+      tests green. Two things worth carrying to [[0146]]: the guard tests must
+      assert over comment-stripped statements (the header block quotes the guard
+      expression verbatim and inflated the first count 6→7), and the fixture
+      must prove it reproduces the defect before asserting the fix, or the test
+      is vacuous. Also pinned as a test: when *every* sub-bucket is un-enriched
+      the guard correctly still yields 0 — it does not make 0 readable as "worth
+      nothing", which stays [[0151]]'s problem.
 ---
 
 # Pre-roll scripts carry the same unguarded `argMax(close_usd, …)`
@@ -94,10 +111,101 @@ trap, no DROP window and no freshness exposure**. It merges and it is live.
 
 ## Acceptance Criteria
 
-- [ ] No `argMax(close_usd` remains in any `preroll*.sql`; a guard test asserts
-      this so the pattern cannot be reintroduced.
-- [ ] If `preroll-amm-reprice.sql` is generated, the generator is fixed too.
-- [ ] Regression test on 26.3.10.60 reproducing the zero-inheritance, green.
+- [x] No `argMax(close_usd` remains in any `preroll*.sql` — all **121** sites are
+      now `argMaxIf(close_usd, t.timestamp, close_usd > 0)`. Two guard tests in
+      `src/lib.rs`: `no_preroll_script_uses_an_unguarded_argmax_on_close_usd`
+      (the pattern cannot be reintroduced) and
+      `preroll_guarded_close_usd_site_counts_match_the_0144_audit` (6/14/6/95 —
+      catches a projection added without the guard, or one silently dropped).
+- [x] `preroll-amm-reprice.sql` is **not** generated — no build step emits it, no
+      generated-file marker, no reference to it outside the schema dir and the
+      0097 runbook. The 95 blocks were edited directly. Criterion resolved as
+      not-applicable rather than skipped.
+- [x] Regression test on 26.3.10.60, green —
+      `tests/preroll_close_usd_guard_it.rs`, two cases through the real shipped
+      `preroll.sql` chain. **Verified to fail without the fix** (reverting the
+      six `preroll.sql` sites turns `price_ohlcv_15m` back to `close_usd = 0`).
 - [ ] Merged **before** the [[0088]] pass-2 pre-roll and the [[0136]] gap
-      pre-roll are run.
-- [ ] Header disclosure of the `close` / `close_usd` decoupling in each file.
+      pre-roll are run. → PR open; 0088 pass 2 now ETAs ~08-12.
+- [x] Header disclosure of the `close` / `close_usd` decoupling in each of the
+      four files.
+
+## Implementation Notes
+
+Four schema files, one Rust file, one new test file.
+
+| File | Change |
+|---|---|
+| `preroll.sql` | 6 sites + header block |
+| `preroll-incremental.sql` | 14 sites + header block |
+| `preroll-live-gap.sql` | 6 sites + header block |
+| `preroll-amm-reprice.sql` | 95 sites + header block |
+| `src/lib.rs` | 3 new `include_str!` consts + `ALL_PREROLL_SQL`; 2 guard tests |
+| `tests/preroll_close_usd_guard_it.rs` | new — 2 integration cases |
+
+All 121 sites were the **byte-identical** string `argMax(close_usd, t.timestamp)`,
+so the replacement was mechanical and total. The 121 `argMax(close, t.timestamp)`
+sites were deliberately left alone: `close` is a real traded price with no
+sentinel, so guarding it would be meaningless.
+
+Only `preroll.sql` was reachable from Rust before this task. The other three are
+operator-run scripts; they are now embedded via `include_str!` **solely so the
+test suite can see them** — `apply_sql` is never pointed at the incremental
+three, and the doc comment on `ALL_PREROLL_SQL` says so, because an embedded
+const looks like an appliable one.
+
+Tests: 11 unit + 14 integration green on CH **26.3.10.60** (confirmed
+`SELECT version()`, not just the compose pin).
+
+## Design Decisions
+
+### From Plan
+
+1. **`argMaxIf(close_usd, t.timestamp, close_usd > 0)`** — the expression 0144
+   settled and measured; adopted unchanged so the pre-rolls, `current.sql`
+   ([[0135]]) and the rollup MVs ([[0146]]) all read identically.
+
+### Emerged
+
+2. **Guard tests assert over `split_statements`, not raw file text.** The first
+   version counted raw text and failed at 7-not-6: each header disclosure block
+   quotes the guard expression verbatim, so comments inflated every count by
+   one. Stripping comments makes the guard immune to its own documentation.
+   Worth knowing before writing the equivalent guard in [[0146]].
+
+3. **A second guard test pinning the exact per-file counts (6/14/6/95).** The
+   "no unguarded argMax" test alone passes trivially if someone deletes a
+   `close_usd` projection outright. The count test is what makes silence
+   meaningful, and it re-asserts 0144's C1 audit as executable rather than prose.
+
+4. **The regression test proves the fixture reproduces the defect first.** Before
+   asserting the fix, it runs the OLD unguarded expression over the same input
+   and asserts it returns 0. Without that, a fixture that would have produced
+   7.0 anyway would make the whole test vacuous — and this is precisely the
+   class of test that quietly stops testing anything.
+
+5. **A second integration case pins what the guard does NOT fix.** When every
+   sub-bucket is un-enriched, `argMaxIf` matches no rows and the `Decimal`
+   default puts 0 back. That is correct, but it means a 0 in these tables still
+   cannot be read as "worth nothing". Pinned as a test and stated in each file
+   header so the guard is not mistaken for a stronger promise. → [[0151]]
+
+6. **Header disclosure states the decoupling as a cost, not a footnote.**
+   `close` and `close_usd` may now come from different sub-buckets. An
+   approximately-right USD close beats a fabricated zero, but the two columns
+   silently ceasing to be same-row is exactly the kind of thing a future reader
+   assumes rather than checks.
+
+## Issues Encountered
+
+- **`cargo clippy -p prices-clickhouse --all-targets` fails on
+  `tests/rollup_append_it.rs:10-11`** (`doc_lazy_continuation`, two errors).
+  **Pre-existing** — reproduced on a clean stash of develop, in a file this task
+  does not touch. Not fixed here: CI's clippy step lints only
+  `extractors-core`, the three extractor crates and `ledger-processor`, so this
+  package is unlinted and the failure is invisible to CI. Left alone rather than
+  folded into an unrelated data-correctness PR. Worth its own chore task if the
+  clippy step is ever widened.
+- **`preroll.sql` alone used column-aligned `AS close_usd`;** the guarded
+  expression is longer than the alignment column, so those six lines were
+  normalised to single-space. The other three files already used single-space.
