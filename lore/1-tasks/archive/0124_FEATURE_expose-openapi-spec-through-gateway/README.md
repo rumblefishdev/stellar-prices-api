@@ -2,7 +2,7 @@
 id: "0124"
 title: "Expose the OpenAPI spec through API Gateway — /api-docs-json is unroutable in production"
 type: FEATURE
-status: active
+status: completed
 related_adr: ["0008"]
 related_tasks: ["0119", "0120", "0128"]
 tags: [layer-infra, layer-backend, priority-medium, effort-small, milestone-M2, api-gateway, openapi, documentation]
@@ -12,7 +12,7 @@ links:
   - "../../../infra/src/lib/stacks/api-gateway-stack.ts"
   - "../../../docs/scf/milestone-1-evidence.md"
 history:
-  - date: 2026-07-23
+  - date: "2026-07-23"
     status: backlog
     who: okarcz
     note: >
@@ -21,7 +21,7 @@ history:
       defines `/api-docs-json` but the API Gateway does not map it. Scoped to
       the **spec**; the Swagger **UI** and the onboarding portal stay
       Tranche 3 per overview §9.
-  - date: 2026-08-04
+  - date: "2026-08-04"
     status: active
     who: akot
     note: >
@@ -31,7 +31,7 @@ history:
       match `/health` (the keyless-mock block in `api-gateway-stack.ts`);
       the decision needs
       recording either way before implementation.
-  - date: 2026-08-06
+  - date: "2026-08-06"
     status: active
     who: akot
     note: >
@@ -42,7 +42,7 @@ history:
       it could not previously see. The tautological `LEDGER_SEQ_MAX` assert
       replaced with a document-derived test. Full accounting in the
       "PR #169 review" section.
-  - date: 2026-08-06
+  - date: "2026-08-06"
     status: active
     who: akot
     note: >
@@ -56,6 +56,23 @@ history:
       throttle goes beyond what #169 accepted, so it is isolated in 479548c
       and awaits okarcz's call. Full accounting in the "Self-review round"
       section.
+  - date: "2026-08-06"
+    status: completed
+    who: akot
+    note: >
+      PR #169 merged to develop (squash `dabdd15`) after okarcz's approval;
+      three CI jobs green. Shipped: `GET /api-docs-json` mapped as a keyless
+      cached proxy route, `servers` stamped from `apiBaseUrl`, `ErrorEnvelope`
+      published, a Redocly `recommended-strict` gate, and three artifact-derived
+      guards (routes both directions, `servers` vs the synthesized handler
+      config, ledger ceilings read back out of the document). 225 workspace
+      tests, openapi suite 7 → 9 across two review rounds; lint 0 errors /
+      0 warnings / 0 ignored. Converted to a directory at archive time as
+      planned, with the three heavy sections split into `notes/S-*`.
+      **Two ACs stay deployment-verified rather than verified** — the live
+      `/api-docs-json` fetch and the `servers` URL serving a route both need
+      `make -C infra deploy-production`; `docs/scf/api-endpoints.md` carries
+      the curl.
 ---
 
 # Expose the OpenAPI spec through API Gateway
@@ -268,88 +285,8 @@ recording because both were guards that looked like they worked.
 
 ## The `openapi-validator` result
 
-`npx ibm-openapi-validator target/openapi.json --errors-only` — **13 errors,
-now 5**. Kept here rather than in a spawned task: the fixable half was fixed,
-and the rest are decisions with reasons, not open work.
-
-### Fixed (8)
-
-| Error | Count | Why it was real |
-| ----- | ----- | --------------- |
-| `ibm-integer-attributes` on 5 ledger fields | 5 | A Stellar ledger sequence is `uint32` in the protocol's `LedgerHeader`. The DTOs carry `u64` because ClickHouse returns `UInt64`, so the document promised a range 4 billion times wider than reality. `maximum: 4294967295` is a domain fact, not a limit we impose. |
-| `ibm-integer-attributes` on the `limit` param | 1 | The 1..=200 bound was **already enforced** (`limit == 0 \|\| limit > MAX_LIMIT` → 400) and entirely invisible to clients — a caller sending `limit=500` got a 400 the document did not explain. Now `minimum: 1, maximum: 200`. [[0119]] owns extending this to the remaining params. |
-| `ibm-operation-summary-length` on `/health` | 1 | utoipa publishes the whole rustdoc as `summary` — 223 characters of maintainer-facing prose where a one-line label belongs. Split into `summary` + `description`. |
-| `ibm-integer-attributes` on `Candle.trade_count` | 1 | Reversed on review — see below. `maximum: 9007199254740991` (`2^53 - 1`). |
-
-### Left, deliberately (5)
-
-| Error | Count | Why not |
-| ----- | ----- | ------- |
-| `ibm-schema-type-format` — "invalid type" | 2 | `Option<T>` renders as `oneOf: [{type: null}, …]`. `"type": "null"` is valid OpenAPI 3.1 / JSON Schema 2020-12; the validator is applying 3.0's type list. |
-| `$ref` must not sit beside other properties | 2 | Same construct: `{$ref, description}`. Legal in 3.1, illegal in 3.0. Removing it would mean dropping the field descriptions. |
-| `ibm-path-segment-casing-convention` | 1 | `/api-docs-json` is not snake_case. Kept — see below. |
-
-### The `trade_count` reversal
-
-This was originally left as "no truthful maximum exists", reasoning that a trade
-count has no protocol bound, `u64::MAX` exceeds JSON's safe-integer range, and
-anything smaller would be invented. The first two halves of that are right and
-the conclusion still didn't follow: **the ceiling is the safe-integer range
-itself.**
-
-`2^53 - 1` is the largest integer an IEEE 754 double represents exactly, and
-JSON has no integer type — so above it a client's parser silently rounds
-(`JSON.parse("9007199254740993")` yields `…992`). Publishing `maximum:
-9007199254740991` therefore states a fact about the wire format, not a limit we
-impose: values above it cannot be delivered correctly whatever the database
-holds. That is the same *kind* of claim as the ledger bound, sourced one layer
-down — the ledger ceiling is a protocol fact, this one is a transport fact.
-
-Stellar's real volumes sit ~10 orders of magnitude below it, so it never binds
-in practice and cannot make a future response contradict the document — which
-was the actual worry behind the original decision. Same caveat as the ledger
-fields, noted in review: it is a published ceiling, not a runtime clamp.
-
-The four 3.1 entries are the same root cause and the concrete form of design
-decision #4: they are not quality signals, they are a tool that predates 3.1.
-If the project ever concludes it must satisfy a 3.0-era validator, that is a
-dependency decision (downgrade utoipa) with a cost far beyond this task.
-
-**Decided: stay at 5.** Reaching 0 is available and was measured, not assumed —
-`ibm-openapi-validator -r <ruleset>` accepts a Spectral ruleset, and switching
-off `ibm-schema-type-format`, `no-$ref-siblings` and
-`ibm-path-segment-casing-convention` produces "passed the validator". It is not
-taken, for two reasons.
-
-The document is already right: `type: "null"` and `{$ref, description}` are
-valid 3.1, so removing the findings would mean either disabling rules globally
-(broader than the two narrow path entries in `.redocly.lint-ignore.yaml`) or
-down-converting to 3.0 before linting — and the latter breaks decision #9 by
-making the linted document stop being the served one.
-
-Second, and the part that was not known when the six were first accounted for:
-**errors are not where IBM's ruleset stops.** At warning level it also reports
-`ibm-error-response-schemas` against `ErrorEnvelope`, demanding a `trace` string
-and an `errors` array — IBM's error-container shape, not ours. No ruleset toggle
-removes that honestly, and satisfying it means redesigning the error body on
-every endpoint, breaking every client. So "adopt IBM's validator" is not a lint
-cleanup; it is an API redesign plus a utoipa downgrade. That materially raises
-the cost of a "yes, IBM's specifically" answer to the open question for Oskar,
-and should be said out loud when asking it.
-
-### The path question — decided: keep `/api-docs-json`
-
-The AC allowed "or the agreed public path", and this PR is the last cheap moment
-to rename, so it was weighed rather than defaulted:
-
-- It already exists in the axum router and predates this task.
-- `milestone-1-evidence.md` documents it as the path the router defines.
-- Hyphenated path segments are ordinary REST; snake_case is IBM house style, not
-  a spec requirement. `/openapi.json`, the industry convention, fails the same
-  rule.
-
-Renaming buys one lint error against churn in a submitted document and a broken
-path for anyone already reading it.
+Moved to [`notes/S-openapi-validator-result.md`](notes/S-openapi-validator-result.md) — 13 errors down to 5, which five remain and why reaching 0 was
+measured and rejected.
 
 ## Verification
 
@@ -396,191 +333,22 @@ After the self-review round (`e18b936`, `79bd33a`, `07cbc39`, `479548c`):
   10/20 throttle — method settings are keyed by `resourcePath`+`httpMethod`, so
   two entries would have collided — and the stage-wide `/*` `*` entry survives.
 
-Mutation checks, each confirming a guard now fails where it previously passed:
-
-| Mutation | Before | After |
-| --- | --- | --- |
-| `API_BASE_URL` → `API_BASE_URI` in the template | not checked at all | exit 1, points at `compute-stack.ts` |
-| `servers` drifts from the handler's config | not checked at all | exit 1, prints both sides |
-| documented `head /v1/assets/{id}` | green | exit 1, unroutable |
-| documented `options` | green | exit 1, own message |
-| `ParentId: {Fn::ImportValue}` | `/assets`, phantom drift | exit 1, names the resource |
-| gateway-side `OPTIONS` method | passes | passes ([[0126]] unblocked) |
-| `tip_seq: u64` with no `maximum` | green, count still 5 | fails, names the field |
-| one ledger literal → `4_294_967_296` | green (the assert was a tautology) | fails, names the field |
+The mutation checks — each confirming a guard now fails where it previously
+passed — are in [`notes/S-self-review-round.md`](notes/S-self-review-round.md).
 
 **Not verified — needs a deploy.** Two ACs are about the *deployed* API: the
 live `GET …/production/api-docs-json` fetch and confirming the advertised
 `servers` URL serves a route. Both are one `make -C infra deploy-production`
 away, and `docs/scf/api-endpoints.md` carries the curl to confirm.
 
-## PR #169 review (okarcz, 2026-08-05)
+## Review rounds
 
-All seven points taken; nothing declined. Two of them were about guards that
-looked like guards, which is the same failure this task exists to fix.
+Two rounds, both recorded in full:
 
-1. **`0144` collided (blocking).** PR #168 had already claimed it for the
-   BE-0199 USD read-surface defects, unmerged when this branch was cut, so the
-   ID never showed in the tree. That side is cited by 0145–0151 and 0154 plus
-   the phase plan; this side moved. Renumbered to **0155** — 0152 (#172), 0153
-   and 0154 are all taken, and 0153's own renumber note reserving 0152 for this
-   task has been overtaken. Five sites, not four: the reviewer's list plus
-   `redocly.yaml:26`, where the `info-license-strict: off` comment points here.
-
-2. **The route-drift gate never ran on the PRs most likely to trip it.**
-   `openapi:verify-routes` lives in the `rust` job and `infra/**` was not in its
-   paths filter, so an infra-only PR adding a gateway route skipped the only
-   check that sees the gateway→spec direction — and adding a gateway route *is*
-   a pure-infra edit, while adding an axum route touches `packages/**`. So the
-   uncovered direction was the more likely one. Fixed by listing
-   `infra/src/lib/stacks/api-gateway-stack.ts` specifically, not `infra/**`, so
-   unrelated CDK edits do not pay for an ARM Rust build. Same hole class this PR
-   already closed twice (`package.json`, `tools/scripts/**`); the general form
-   is [[0153]].
-
-3. **`LEDGER_SEQ_MAX` asserted a tautology.**
-   `assert!(LEDGER_SEQ_MAX == 4_294_967_295)` only restated
-   `u32::MAX as u64 == 4_294_967_295`; it tied the five `#[schema(maximum = …)]`
-   literals to nothing. Const and assert deleted, replaced with
-   `every_ledger_field_publishes_the_uint32_ceiling` in `tests/openapi.rs`,
-   which reads the bounds back out of the served document — the artifact-derived
-   form the rest of this PR argues for. Its field set is derived from the
-   document (any `*_ledger` / `ledgers_remaining` property) rather than listed,
-   so a ledger field added later without the attribute fails as a missing
-   `maximum` instead of passing unnoticed; a count assertion stops a rename from
-   emptying the filter and passing vacuously. Mutation-checked: setting one
-   literal to `4_294_967_296` leaves the old assert green and fails the new test
-   with the field named.
-
-4. **`/health` is the precedent for the posture, not the cost profile.**
-   Correct — `/health` is a `MockIntegration` and can never invoke anything;
-   `/api-docs-json` is `proxy([])`, so a cache miss reaches the Lambda, and it
-   sits outside the usage plan with only the stage-wide throttle. The
-   mitigations the reviewer names are real and already in place (3600s TTL with
-   no cache-key parameters, so all callers collapse onto one entry; API
-   Gateway's default `requireAuthorizationForCacheControl: true` blocks
-   anonymous cache-busting), so the residual stays small and the posture stands.
-   Written into the stack comment so it stops reading as "same cost profile",
-   with the lever named for anyone who needs a harder bound: a method-level
-   throttle, not a key requirement.
-
-5. **Method sets disagreed between the two guards.** `spec_routes()` matched
-   `head`/`options`; `verify-openapi-routes.mjs` drops both from both sides so
-   0126's `addCorsPreflight` does not read as drift. Rust filter aligned to
-   `HTTP_METHODS`, with the reason stated in both files.
-
-6. **`fullPath()` truncated silently.** Both exits returned a *partial* path
-   despite the comment promising to fail loudly — which surfaces as drift on a
-   path that looks almost right, not as the parse failure it is. Both now throw,
-   caught at the call site and printed as `error:`. Verified against a mutated
-   template in each direction: an unresolved parent and a resource cycle both
-   exit 1 with the resource named (the unresolved-parent case previously
-   reported `/assets` as undocumented drift). The root-method check moved above
-   the `ANY` check so the `ANY` message always has a path to name.
-
-7. **`extract-openapi.sh` used `node -p "require('…json')"`.** Switched to
-   `JSON.parse(readFileSync(…))`. Worth noting the stated hazard does not
-   reproduce: `node -p` is still evaluated as CommonJS under
-   `"type": "module"` (measured on v26), and the root `package.json` has no
-   `type` anyway. The change stands because the old form depended on both of
-   those staying true and the new one depends on neither.
-
-**Double extraction** (`openapi:lint` and `openapi:verify-routes` each chaining
-`openapi:extract`) left as-is, per the reviewer — the chaining is what makes
-each script correct standalone, and the second `cargo run` is a no-op rebuild.
-
-## Self-review round (post-#169)
-
-A multi-agent review over the branch after the #169 fixes landed: four finder
-angles, an independent verifier per finding, 33 candidates → 10 reported, 2
-refuted. Adam asked for all of it to be applied.
-
-### The finding that matters most
-
-**Three of the four fixes made for okarcz's review were incomplete in the same
-way the originals were** — a check that reads as covering something it does not.
-The review caught a class of defect; the fixes reproduced the class one layer
-down. That is the lesson of this task, not the individual bugs:
-
-1. **The CI paths-filter entry was necessary but not sufficient.** Adding
-   `api-gateway-stack.ts` makes the `rust` job *run* on infra-only PRs. Nothing
-   in it would have *failed* for the `servers` half: `extract-openapi.sh` reads
-   `apiBaseUrl` from `infra/envs/production.json` and exports `API_BASE_URL`
-   itself, so it never observes `ComputeStack` putting that variable on the
-   Lambda. Rename it to `API_BASE_URI` in an unrelated refactor and synth, lint
-   and the route gate all pass while production serves a document with **no
-   `servers` block at all** — the CI copy still has one, fabricated from the JSON
-   file. Closed by `verify-openapi-servers.mjs`, which compares the synthesized
-   Compute template against the extracted document and re-asserts the
-   stage-prefix invariant against the deployed `StageName`, so deleting the
-   `types.ts` validation cannot silently remove that guarantee either.
-
-2. **Aligning the two guards' method sets removed coverage instead of adding
-   it.** Dropping `head`/`options` from both sides made them agree at the cost of
-   leaving a documented HEAD checked by *neither* guard in *either* direction —
-   reopening, for two verbs, the exact defect this task exists to close. The
-   exclusion is now one-sided: OPTIONS skipped on the gateway side only, HEAD
-   compared normally, a documented OPTIONS refused outright. okarcz's nit is
-   still satisfied — the guards agree — but by raising the weaker side.
-
-3. **`fullPath()` still truncated silently.** The rewrite threw at two exits, but
-   truncation happened earlier: any `ParentId` that was not `{Ref}` became
-   `null`, and `null` is the walk's "reached the root" signal. Today only
-   `Fn::GetAtt … RootResourceId` lands there, so it works — but an imported
-   `RestApi` or a cross-stack split ([[0126]]) emits `Fn::ImportValue`, and the
-   check would report `/status` for `/v1/backfill/status`.
-
-4. (Not a repeat, but the same shape.) The ledger test matched a `_ledger` name
-   **suffix**, so its own promise held only for that name shape. Replaced with a
-   type-derived rule over the schemas reachable from the response `$ref`, plus a
-   `contains`-based name rule over the whole document.
-
-### Product-level findings
-
-5. **The "no 4xx to document" premise was contradicted by this branch's own
-   stack comment.** Both anonymous routes sit under the stage-wide `/*` `*`
-   throttle, so API Gateway can 429 either; `/api-docs-json` can also 5xx,
-   being a Lambda proxy. Both are now documented, without a body (API Gateway
-   produces them and its shape is not `ErrorEnvelope`). The lint-ignore file is
-   empty and stays in the tree carrying the reason.
-
-6. **A 3600 s cache with no invalidation.** "Byte-identical for the life of a
-   deployment" is true and beside the point — the caches outlive the deployment.
-   See the superseded Design Decision #3.
-
-7. **`{}` served as `200 OK`.** `to_json().unwrap_or_else(|_| "{}")` turned a
-   serialization failure into a syntactically valid empty document, with no log
-   and no metric, then cached it. Before this branch the route was unroutable, so
-   nobody would have seen it; now it is the public partner contract. Now
-   `.expect`s, matching `extract_openapi`.
-
-8. **`/api-docs-json` had no limits of its own.** Every other Lambda-backed
-   route is key-gated and therefore carries the usage plan's per-key rate and
-   daily quota; this one carried neither, and throttling is evaluated *before*
-   the cache, so an anonymous loop draws down the bucket shared with paying
-   partners. Also: the whole `methodSettings` block sat inside
-   `if (cacheEnabled)`, so with the cache off the route lost its TTL entry too —
-   the configuration where an unbounded keyless route costs the most.
-
-   **This one goes beyond what #169 accepted** ("the residual is small"; okarcz
-   asked only that the cost profile be written down), so it is isolated in
-   `479548c` and the PR comment says to `git revert` that single commit if he
-   would rather keep the reviewed posture. **Open — awaiting his call.**
-
-9. README named the wrong Redocly ruleset — the same `recommended` /
-   `recommended-strict` slip the lint gate exists to prevent.
-
-### Partially addressed
-
-10. **`apiBaseUrl` hardcodes the current execute-api REST API id.** The new
-    `servers` guard binds the advertised URL to the synthesized deployment and
-    to the deployed `StageName`, so it is no longer unguarded — but it cannot
-    detect a REST API *id* change, because both sides derive from the same config
-    value. Catching that needs a post-deploy check against the live gateway,
-    which is out of scope here.
-
-Refuted during verification, recorded so they are not re-raised: the duplicated
-`resourcePath` literal beside the TTL, and the `API_KEY_HEADER` const.
+- [`notes/S-pr-169-review-response.md`](notes/S-pr-169-review-response.md) — okarcz's seven points (2026-08-05), all taken.
+- [`notes/S-self-review-round.md`](notes/S-self-review-round.md) — the multi-agent round that followed, whose central finding is that three of
+  the four fixes made for #169 were incomplete in the same way the
+  originals were.
 
 ## Design Decisions
 
