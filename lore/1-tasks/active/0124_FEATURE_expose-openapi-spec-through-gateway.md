@@ -657,6 +657,24 @@ Refuted during verification, recorded so they are not re-raised: the duplicated
 
 ## Future Work
 
+**At archive time — convert this task to a directory.** It is ~680 lines against
+the ~150-line threshold in `lore/1-tasks/CLAUDE.md`, and larger than any existing
+task README in the repo. Deferred deliberately (Adam, 2026-08-06), not
+overlooked: the archive move is a `git mv` anyway, so doing it then is one
+operation instead of two, and restructuring mid-review would have handed the PR
+reviewer a large rename on the file he was reading. Proposed split — all three
+are `S-` (conclusions and decisions, not research):
+
+| Note | Content to move |
+| --- | --- |
+| `notes/S-openapi-validator-result.md` | "The `openapi-validator` result" (13 → 5, and why 5 stays) |
+| `notes/S-pr-169-review-response.md` | "PR #169 review (okarcz, 2026-08-05)" |
+| `notes/S-self-review-round.md` | "Self-review round (post-#169)" + the mutation table |
+
+Leaves a README of ~420 lines, in line with 0088 and 0044. Also repoint
+`lore/0-session/current-task.{md,json}` and check the inbound links from [[0128]]
+and [[0155]].
+
 - [[0155]] — decide and declare the API license (spawned; renumbered from 0144,
   which PR #168 had already claimed).
 - Ask Oskar whether Tranche 3 AC 2's `openapi-validator` names a specific tool.
