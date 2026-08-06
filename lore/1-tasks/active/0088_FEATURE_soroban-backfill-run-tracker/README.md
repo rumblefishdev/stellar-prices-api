@@ -321,9 +321,47 @@ in CH. Three gotchas that each produced a wrong reading before:
 
 **The run ends when** the frontier reaches 23,423,999 *and* the candle count
 below `201812` accounts for the 3,738,473 expected. Then the §7.1 pre-roll gate
-applies — and note that the gap pre-roll it feeds is now ⛔ **gated on [[0145]]**
-(the pre-roll scripts carry [[0144]]'s unguarded `argMax(close_usd, …)`), so
-finishing pass 2 does not clear the way to pre-roll on its own.
+applies.
+
+### ⚠️ Verify the pre-roll guard before running it — there is no deploy to check
+
+✅ The [[0145]] gate on this pre-roll **cleared 2026-08-06** (PR #176,
+`4e35dc6`): all 121 unguarded `argMax(close_usd, …)` sites across the four
+pre-roll scripts are now `argMaxIf(close_usd, t.timestamp, close_usd > 0)`.
+Without it, every coarse row whose newest sub-bucket was not yet enriched would
+land with `close_usd = 0` — a fresh zeroed estate at *backfill* scale, over a
+span where enrichment is incomplete by definition, and those rows then age out
+of the MV re-aggregation windows where only the [[0114]] sweep can reach them.
+
+⚠️ **0145 shipped no deployable artifact.** The pre-roll scripts are operator-run
+plain SQL — nothing embeds them (`prices-clickhouse-init` applies
+`INIT`/`VIEWS`/`ROLLUPS`/`SEED`, never `PREROLL`), so there was nothing to deploy
+and there is no build or release to confirm against. **The fix applies only to
+whoever runs the script from an up-to-date checkout.** Run it from a stale one
+and it silently executes the pre-0145 SQL while every signal reports success.
+
+**This is a live risk here specifically**, because fishuser-hero carries its own
+`~/stellar-prices-api` checkout at whatever commit it was left on — and the
+env-loss-on-every-reboot problem means that box gets touched by hand a lot.
+
+Immediately before the pass-2 pre-roll, **from the checkout the SQL is actually
+being pasted from** (`git pull` first if that is fishuser-hero):
+
+```bash
+# must print 0 — any non-zero means this is the pre-0145 script
+grep -c 'argMax(close_usd, t.timestamp)' \
+  packages/prices-clickhouse/schema/preroll-incremental.sql
+```
+
+`preroll-incremental.sql` is the pre-Soroban script and the right one for pass 2
+— **never `preroll.sql`**, which is a full rebuild expecting TRUNCATE-d coarse
+tables and would re-run the [[0090]] history loss.
+
+Do **not** invert the check by counting `argMaxIf` instead: each file's header
+disclosure block quotes the guard expression verbatim, so that count is one
+higher than the number of real sites. (That exact trap broke 0145's own guard
+test on first write — it failed 7-not-6 — which is why the shipped test asserts
+over comment-stripped statements.)
 
 ## Recovery plan (pre-Soroban gap, from the 2026-07-20 cleanup incident)
 
