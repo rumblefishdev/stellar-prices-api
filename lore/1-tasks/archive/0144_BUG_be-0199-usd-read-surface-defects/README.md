@@ -2,7 +2,7 @@
 id: "0144"
 title: "BE 0199 report: close_usd read surfaces publish a wrong answer while enrichment is in flight, and price_usd_series won't scale"
 type: BUG
-status: active
+status: completed
 related_adr: []
 related_tasks:
   ["0135", "0139", "0116", "0114", "0061", "0072", "0118", "0131", "0138", "0142", "0143",
@@ -80,6 +80,43 @@ history:
       falsified: finding 2a's "~2× read amplification" is **+4.7%** on prod, so
       [[0139]] keeps only its correctness justification and BE must not be
       promised a speed-up.
+  - date: 2026-08-06
+    status: active
+    who: okarcz
+    note: >
+      BE answered (`notes/S-be-0199-response-received.md`). Every contract
+      decision confirmed, all three of their own disputed claims withdrawn, and
+      pool-level coverage supplied: **only 44.4% of their 52,369 pools are
+      priceable today**, which promotes [[0111]] → [[0154]] to the top of the
+      queue and drops [[0150]] on their own advice. Reviewing the sent reply
+      surfaced a third target shape — normalise the USD *rate* out of
+      `close_usd` (`notes/I-usd-rate-table.md`) — **decided narrow and scoped
+      inside [[0154]], keyed on natural identity** rather than `asset_id`,
+      because [[0139]]'s collisions would otherwise be baked into the new table.
+  - date: 2026-08-06
+    status: completed
+    who: okarcz
+    note: >
+      **Phase 0 closed; the BE loop is closed with it.** 9 of 9 phase-0 criteria
+      met; the 9 implementation criteria remain open by design, each annotated
+      with the child that owns it — this task closes when the measurements are
+      recorded and BE has its answer, not when the fixes ship. Final deliverable
+      was the `volume_base` answer (`notes/G-be-0199-reply-2.md`, handed over for
+      sending): no inflation in the `price_usd_series*` views BE reads, because
+      the group-by separates the duplicates — the fan-out is misattribution, not
+      inflation, so their weighted-average reasoning holds. It *does* inflate
+      their own cross-identity sums and `prices.current_price_usd`, which joins
+      on `asset_id` with no group-by at all. Outcome: **10 tasks spawned**
+      ([[0145]]–[[0151]], [[0154]], plus scope added to [[0135]] and [[0139]]),
+      the defect resized from 6 unguarded `argMax` sites to **130 across 6
+      files**, and the largest finding — **~68% of every tier has never had a
+      USD price**, which is resolver reach, not damage — was not in BE's report
+      at all. Three open questions outlive the task and are homed: **O1** →
+      [[0154]], **O2** → [[0139]] (one query: are the XLM-native or USDC
+      `asset_id`s among the 3,279 duplicates — if so `usd_reference` admits
+      foreign candles as XLM/USDC, silently), **O3** asked of BE in the reply
+      above. Next: [[0145]], which is deadline-gated on the [[0088]] pass-2
+      pre-roll.
 ---
 
 # BE 0199 report — three defects in the USD read surfaces
@@ -781,9 +818,17 @@ the fixes ship.
       **answered by BE 2026-08-06** —
       [`notes/S-be-0199-response-received.md`](notes/S-be-0199-response-received.md).
       Every contract decision confirmed (§1 "a clear yes"); all three of their
-      own disputed claims withdrawn; pool-level coverage supplied. **One
-      question owed back** (does the fan-out inflate `volume_base`) — answered
-      from the SQL in that note, not yet sent.
+      own disputed claims withdrawn; pool-level coverage supplied.
+- [x] The one question owed back — does the fan-out inflate `volume_base` —
+      answered and handed over 2026-08-06
+      ([`notes/G-be-0199-reply-2.md`](notes/G-be-0199-reply-2.md)). **Three
+      answers for three surfaces:** no inflation in the `price_usd_series*`
+      views they actually read (the group-by separates the duplicates, so their
+      weights are real and the fan-out is misattribution only); yes if they sum
+      across identities themselves; yes on `prices.current_price_usd`, which
+      joins on `asset_id` with no group-by at all. Also carries the correction
+      of our own ambiguous fan-out wording, the [[0111]] → [[0154]] re-rank, and
+      asks O3.
 - [ ] No pre-roll can write a coarse row whose `close_usd` is 0 while a priced
       sub-bucket exists underneath it — **before** the [[0088]] / [[0136]]
       pre-rolls run. → [[0145]]

@@ -206,5 +206,11 @@ stopgap. Spawn accordingly.
       superseded natural-identity rows, with the measurement recorded.
 - [ ] `current_price_usd` returns exactly one row per `current_prices` row.
 - [ ] Every other view in `views.sql` audited for the same join defect.
+- [ ] **O2 — the XLM-native and USDC `asset_id`s checked against the 3,279
+      duplicates** (one query; see the open section above). If either collides,
+      `usd_reference` / `_1h` admit foreign candles as XLM/USDC and contaminate
+      the pivot tier's `xlm_usd` — invisibly, because uniform duplication leaves
+      the weighted value unchanged. Low prior, but it must not be assumed.
+      Raised by [[0144]] while answering BE's `volume_base` question.
 - [ ] A test fails if the fan-out reappears.
 - [ ] BE informed of the resolution.
