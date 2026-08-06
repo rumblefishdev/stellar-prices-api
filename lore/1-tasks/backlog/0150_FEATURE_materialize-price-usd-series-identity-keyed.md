@@ -6,7 +6,7 @@ status: backlog
 related_adr: []
 related_tasks: ["0144", "0139", "0147", "0142", "0095", "0090", "0143", "0061"]
 tags:
-  ["priority-medium", "effort-large", "clickhouse", "performance", "be-interop", "milestone-M2"]
+  ["priority-low", "effort-large", "clickhouse", "performance", "be-interop", "milestone-M2"]
 milestone: 2
 links:
   - "../../../packages/prices-clickhouse/schema/views.sql"
@@ -19,7 +19,24 @@ history:
       request that our own schema header pre-authorized, deliberately ordered
       last because materializing before [[0139]] and [[0147]] bakes two defects
       into a physical table.
+  - date: 2026-08-06
+    status: backlog
+    who: okarcz
+    note: >
+      **Dropped priority-medium → priority-low by the requester.** BE, replying
+      to 0144's answer: the pivot step ([[0154]]) is worth more to them "than
+      the materialised table, which only makes a query we can already cache
+      faster". Their own coverage measurement is why — 44.4% of their 52,369
+      pools have both legs priceable on the window their headline TVL uses, so
+      *coverage*, not latency, is what limits them. Still worth building; no
+      longer worth building soon. Ordering unchanged (still last).
 ---
+
+> ⚠️ **The requester deprioritised this on 2026-08-06.** BE can cache the slow
+> query; what they cannot do is price the 55.6% of their pools we have no USD
+> value for. Build [[0154]] first — see
+> `0144/notes/S-be-0199-response-received.md`. This remains a real request with
+> a real measurement behind it, just not a contended one.
 
 # Materialize `price_usd_series*` — identity-keyed
 

@@ -566,6 +566,46 @@ original sketch are kept further down for their per-step reasoning. Split into
 [[0145]]–[[0151]] plus **[[0154]]**; this task retains Phase 0 and stays the
 BE-facing contract.
 
+### What BE's response changed (2026-08-06)
+
+Full analysis:
+[`notes/S-be-0199-response-received.md`](notes/S-be-0199-response-received.md).
+**The plan holds** — nothing was contradicted, every contract call confirmed.
+Four adjustments, all sharpening the direction phase 0 already set:
+
+1. **[[0154]] confirmed as the biggest win, by the consumer, with numbers.** BE
+   measured all **52,369 classic pools**: both legs priceable is **44.4%** on
+   the 48h `_1h` window their headline TVL uses, 68.1% on the 90d daily chart,
+   96.0% on daily-ever. They falsified the recency explanation themselves —
+   worst-leg staleness ≤2d 44.7% → ≤7d 46.3% (**+1.6pp**), never priced 4.0% —
+   and concluded "the gap isn't recency, it's the quote-asset restriction". They
+   rank the pivot step **above the materialised table they filed the request
+   for**. ⚠️ Do **not** quote 44.4% → 96% as 0154's headroom until **O1** is
+   answered (are those pools still trading?).
+2. **[[0111]] hardens as the gate.** Decision 4 already put it in front of 0154;
+   BE has now sized what sits behind it — more than half their pools carry no
+   headline TVL, and 0154 is the only item that moves that.
+3. **[[0150]] drops to `priority-low`** on the requester's own advice: "only
+   makes a query we can already cache faster". Ordering unchanged (still last).
+4. **[[0146]]'s consumer-visible urgency drops again.** BE shipped their own
+   mitigation — both read paths now **stop one bucket short of the in-progress
+   bucket**. Since phase 0 showed the defect reaches *only* the in-flight
+   bucket, the sole consumer now structurally avoids the rows 0146 fixes. It
+   still ships (we should not publish a wrong number because the one consumer
+   learned to dodge it, and `/ohlcv` still reads it) but it must not outrank
+   [[0111]]/[[0154]].
+
+**⚠️ New constraint on [[0151]]:** BE state that *"a NULL renders as a dash and
+removes the pool from every USD view we have."* Whatever the ADR decides about
+`Nullable(Decimal)` in **storage**, the **published** surface must not begin
+emitting NULL where it emits a number today. Nullable-plus-fallback, not
+Nullable-and-propagate.
+
+**[[0139]] sized for the first time:** 3,128 BE pools touch a tainted identity,
+**1,286 tainted *and* priced = 5.5% of every pool they display a TVL for.** They
+independently derived the mechanism (204,381 identities from 201,146 asset_ids;
+3,279 duplicated ids) and will **not** work around it, correctly.
+
 ### What phase 0 changed
 
 Everything here is measured — details and queries in
@@ -736,10 +776,14 @@ the fixes ship.
       the window before the gate lands.
 - [x] Contract call settled (latest *priced* close; C2 guarded the same way) —
       see Decisions below. The reply now states it rather than asking.
-- [~] BE reply **handed over 2026-08-05** for the operator to send —
-      [`notes/G-be-0199-reply-short.md`](notes/G-be-0199-reply-short.md), the
-      plain-language version. **Closes when the operator confirms it is sent**;
-      that is the last act of this task.
+- [x] BE reply sent 2026-08-05
+      ([`notes/G-be-0199-reply-short.md`](notes/G-be-0199-reply-short.md)) and
+      **answered by BE 2026-08-06** —
+      [`notes/S-be-0199-response-received.md`](notes/S-be-0199-response-received.md).
+      Every contract decision confirmed (§1 "a clear yes"); all three of their
+      own disputed claims withdrawn; pool-level coverage supplied. **One
+      question owed back** (does the fan-out inflate `volume_base`) — answered
+      from the SQL in that note, not yet sent.
 - [ ] No pre-roll can write a coarse row whose `close_usd` is 0 while a priced
       sub-bucket exists underneath it — **before** the [[0088]] / [[0136]]
       pre-rolls run. → [[0145]]
@@ -818,3 +862,15 @@ under identities that never traded them.
   surface is built on the same footing. Note `views.sql` already promises
   consumers value-or-absent semantics, which is the contract the storage does
   not actually implement.
+- **A third target shape emerged 2026-08-06 while reviewing the sent BE reply:
+  normalise the USD *rate* out of `close_usd`** —
+  [`notes/I-usd-rate-table.md`](notes/I-usd-rate-table.md). All three enrichment
+  tiers compute `close × <rate of the QUOTE asset at that time>`
+  (`ch_enrich.rs:9-11,22-30`), and that rate depends on
+  `(quote_asset_id, timestamp)` only — so `close_usd` is a cached product we
+  multiply into hundreds of millions of rows while discarding the rate itself.
+  Storing the rate and demoting `close_usd` to a derived cache would **dissolve**
+  this defect class rather than guard it, turn [[0154]] into a self-join on a
+  small table, and remove [[0111]]'s cause. Two unknowns gate it and neither is
+  measured — see the note. Input to [[0151]], whose scope it widens from "how do
+  we mark a missing value" to "what is the source of truth for a USD price".

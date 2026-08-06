@@ -41,7 +41,25 @@ history:
       Note also that the 0144 measurements re-confirmed the hourly cadence
       (`rate(1 hour)`, deployed rule matches `production.json`, no drift), so
       this task's schedule assumptions are unchanged.
+  - date: 2026-08-06
+    status: active
+    who: okarcz
+    note: >
+      **The consumer has now sized what sits behind this task.** BE measured all
+      52,369 classic pools: only **44.4% have both legs priceable** on the 48h
+      window their headline TVL uses. They falsified the recency explanation
+      themselves (worst-leg staleness ≤2d 44.7% → ≤7d 46.3%, i.e. **+1.6pp**
+      from a 3.5× looser rule) and concluded the limit is the quote-asset
+      restriction — which is [[0154]], which is gated on this. BE rank the pivot
+      step above the materialised table they originally requested (now
+      [[0150]], dropped to priority-low). See
+      `0144/notes/S-be-0199-response-received.md`.
 ---
+
+> **Why this is queued ahead of its own cost case:** the perf argument for 0111
+> has always been "cost scales with table size, not era" — real but not urgent.
+> The reason to do it now is [[0154]] behind it, and the reason 0154 matters is
+> that **more than half of BE's pools have no headline TVL without it**.
 
 # Enrichment re-scans the whole table every batch
 

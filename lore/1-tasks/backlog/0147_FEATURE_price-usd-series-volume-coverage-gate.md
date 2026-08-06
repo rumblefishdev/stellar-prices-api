@@ -101,6 +101,9 @@ where the **base table's own rows** are unpriced, which no rollup fix can reach.
       distinguishable from a *priced* one — not conflated.
 - [ ] X justified against query C's measured distribution, recorded in the
       header.
-- [ ] `priced_volume_share` exposed to consumers.
+- [ ] `priced_volume_share` exposed to consumers. **Confirmed as wanted by the
+      only consumer** — BE, 2026-08-06: *"please do expose the coverage share,
+      we'll set our own bar on it."* Not optional; ship it with the gate.
+      → `0144/notes/S-be-0199-response-received.md`
 - [ ] Threshold definition reconciled with [[0118]] and [[0131]].
 - [ ] BE told the gate has shipped and what X is.
