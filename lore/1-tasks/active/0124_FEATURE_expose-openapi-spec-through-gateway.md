@@ -42,6 +42,20 @@ history:
       it could not previously see. The tautological `LEDGER_SEQ_MAX` assert
       replaced with a document-derived test. Full accounting in the
       "PR #169 review" section.
+  - date: 2026-08-06
+    status: active
+    who: akot
+    note: >
+      Self-review round applied (e18b936, 79bd33a, 07cbc39, 479548c). Its
+      central finding: three of the four fixes made for the #169 review were
+      incomplete in the same way the originals were — a check that reads as
+      covering something it does not. Also documents the 429 both anonymous
+      routes can return (lint-ignore now empty), splits the spec cache by who
+      can invalidate it (3600 s gateway + flush on deploy, 300 s client),
+      stops serving `{}` as 200, and throttles the anonymous route. The
+      throttle goes beyond what #169 accepted, so it is isolated in 479548c
+      and awaits okarcz's call. Full accounting in the "Self-review round"
+      section.
 ---
 
 # Expose the OpenAPI spec through API Gateway
@@ -104,7 +118,9 @@ unauthenticated route exists. Record the choice either way.
       the live fetch needs a deploy** (see Verification below)
 - [x] Auth posture decided, applied, and recorded — anonymous
 - [x] Document is valid OpenAPI (3.1.0, not 3.0 — see Design Decisions) and
-      passes Redocly's recommended ruleset with 0 errors / 0 warnings
+      passes Redocly's `recommended-strict` ruleset with 0 errors / 0 warnings /
+      **0 ignored** — the two `operation-4xx-response` exceptions were deleted
+      rather than kept, see the self-review round
 - [x] `servers` resolves to a URL that actually serves the API, stage path
       included — stamped from config, invariant enforced at synth; the fetch
       needs a deploy
@@ -113,7 +129,9 @@ unauthenticated route exists. Record the choice either way.
       from the synthesized template and the extracted document
 - [x] Security scheme (`x-api-key`) declared for the key-gated routes
 - [x] Response cached with a TTL appropriate to a per-deployment-static document
-      — 3600 s, gateway + handler agreeing
+      — 3600 s at the gateway (flushed on deploy), 300 s at the client. The two
+      deliberately disagree; the self-review round explains why "static for the
+      life of a deployment" does not justify a cache that outlives it
 - [x] Path recorded in `docs/scf/` so [[0128]] can cite it —
       `docs/scf/api-endpoints.md`
 
@@ -136,27 +154,40 @@ unauthenticated route exists. Record the choice either way.
   already existed in the code but not in the document: `maximum` on the five
   ledger-sequence fields, `minimum`/`maximum` on the `limit` param, and a
   one-line `summary` for `/health`. See "The `openapi-validator` result".
-- `lib.rs` — the spec response carries `Cache-Control: public, max-age=3600`
-  (new `cache_control::DEPLOY_STATIC` tier).
+- `lib.rs` — the spec response carries `Cache-Control: public, max-age=300`
+  (new `cache_control::DEPLOY_STATIC` tier; started at 3600 s, shortened in the
+  self-review round). The document is serialized once at startup and `.expect`ed
+  — an earlier revision fell back to `{}`.
 - `bin/extract_openapi.rs` — reads `AppConfig::from_env()` and stamps `servers`,
   so the linted document is the served document rather than a variant of it.
-- `tests/openapi.rs` — 7 new tests (route coverage both ways, security scheme,
+- `tests/openapi.rs` — 9 tests (route coverage both ways, security scheme,
   per-route auth posture, `servers` stamp incl. stage path, reachable with the
-  gate armed, cache header, OpenAPI 3.x).
+  gate armed, cache header, OpenAPI 3.x, the ledger-ceiling rules, and the
+  no-documented-OPTIONS guard — the last two added in the review rounds).
 
 **Infra**
 
 - `api-gateway-stack.ts` — `GET /api-docs-json` as a keyless Lambda proxy
-  (`apiKeyRequired: false`), 3600 s stage-cache TTL via `CACHE_TTL.apiDocs`.
+  (`apiKeyRequired: false`), 3600 s stage-cache TTL via `CACHE_TTL.apiDocs`, and
+  a method-level 10 req/s throttle (self-review round; isolated in `479548c`).
 - `types.ts` / `envs/production.json` / `compute-stack.ts` — new `apiBaseUrl`
   config → `API_BASE_URL` on the api-handler, validated at synth (https, no
   trailing slash, stage path present for execute-api hosts).
+- `infra/Makefile` — `flush-production-cache`, run after `deploy-production` and
+  `deploy-production-compute`. The 3600 s TTL is only defensible with it.
 
 **Lint gate**
 
 - `redocly.yaml`, `.redocly.lint-ignore.yaml`, `tools/scripts/extract-openapi.sh`,
   `npm run openapi:{extract,lint}`, and a CI step in the `rust` job (the only
-  job with both cargo and node).
+  job with both cargo and node). The lint-ignore file is **empty** — it stays in
+  the tree carrying the reason the two exceptions were deleted.
+
+**Artifact-derived guards** (both in the `rust` job, after synth)
+
+- `tools/scripts/verify-openapi-routes.mjs` — routes, both directions.
+- `tools/scripts/verify-openapi-servers.mjs` — the advertised `servers` URL
+  against the api-handler's synthesized `API_BASE_URL` (self-review round).
 
 ## Issues Encountered
 
@@ -322,7 +353,7 @@ path for anyone already reading it.
 
 ## Verification
 
-- `cargo test --workspace` — 223 passed, 0 failed
+- `cargo test --workspace` — 223 passed, 0 failed (225 after the review rounds)
 - `cargo fmt --check`, `cargo clippy -p prices-api --all-targets` — clean
 - `npm run openapi:lint` — "Your API description is valid", 0 errors, 0 warnings
   (`recommended-strict`; regression case confirmed to exit 1)
@@ -334,7 +365,7 @@ path for anyone already reading it.
   the 9 documented paths exactly
 - `cdk synth Prices-production-Compute` — `API_BASE_URL` on the api-handler
 
-After the PR #169 review fixes:
+After the PR #169 review fixes (`e40da29`, `cb646e0`, `d809a46`):
 
 - `cargo test -p prices-api --test openapi` — 8 passed (was 7), including the
   new ledger-ceiling test; mutation-checked as described above
@@ -342,9 +373,41 @@ After the PR #169 review fixes:
 - `npm run openapi:lint` — still valid, 0 errors / 0 warnings, 2 ignored
 - `npm run openapi:verify-routes` — still 9/9; the rewritten `fullPath()`
   confirmed to exit 1 on both an unresolved parent and a resource cycle
-- `cdk synth` **not** re-run for the review fixes: the only infra edit is a
-  comment, so the synthesized template is unchanged (verify-routes ran against
-  it and still agrees on all 9 routes)
+- `cdk synth` **not** re-run at this point: the only infra edit was a comment
+
+After the self-review round (`e18b936`, `79bd33a`, `07cbc39`, `479548c`):
+
+- `cargo test --workspace` — 225 passed, 0 failed; the openapi suite is 9 (7 → 8
+  → 9 across the two rounds)
+- `cargo fmt --check`, `cargo clippy -p prices-api --all-targets`, `eslint`,
+  `tsc`, `prettier` — clean
+- `npm run openapi:lint` — valid, 0 errors / 0 warnings / **0 ignored**. The
+  count dropped from "2 explicitly ignored" because the exceptions were deleted,
+  not because the rule was weakened
+- `npm run openapi:verify-routes` — 9/9
+- `npm run openapi:verify-servers` — advertised URL matches the synthesized
+  api-handler config
+- `cdk synth` — ran this time, and it needed a workaround worth recording: the
+  Lambda bootstrap assets are not built in a plain dev checkout, so synth fails
+  with `CannotFindAsset` before rendering anything. Placeholder directories
+  under `target/lambda/` let it through (they only need to exist), and were
+  moved to `.trash/` afterwards. The rendered template carries **one**
+  `/api-docs-json` `GET` method setting holding both the 3600 s TTL and the
+  10/20 throttle — method settings are keyed by `resourcePath`+`httpMethod`, so
+  two entries would have collided — and the stage-wide `/*` `*` entry survives.
+
+Mutation checks, each confirming a guard now fails where it previously passed:
+
+| Mutation | Before | After |
+| --- | --- | --- |
+| `API_BASE_URL` → `API_BASE_URI` in the template | not checked at all | exit 1, points at `compute-stack.ts` |
+| `servers` drifts from the handler's config | not checked at all | exit 1, prints both sides |
+| documented `head /v1/assets/{id}` | green | exit 1, unroutable |
+| documented `options` | green | exit 1, own message |
+| `ParentId: {Fn::ImportValue}` | `/assets`, phantom drift | exit 1, names the resource |
+| gateway-side `OPTIONS` method | passes | passes ([[0126]] unblocked) |
+| `tip_seq: u64` with no `maximum` | green, count still 5 | fails, names the field |
+| one ledger literal → `4_294_967_296` | green (the assert was a tautology) | fails, names the field |
 
 **Not verified — needs a deploy.** Two ACs are about the *deployed* API: the
 live `GET …/production/api-docs-json` fetch and confirming the advertised
@@ -426,6 +489,99 @@ looked like guards, which is the same failure this task exists to fix.
 `openapi:extract`) left as-is, per the reviewer — the chaining is what makes
 each script correct standalone, and the second `cargo run` is a no-op rebuild.
 
+## Self-review round (post-#169)
+
+A multi-agent review over the branch after the #169 fixes landed: four finder
+angles, an independent verifier per finding, 33 candidates → 10 reported, 2
+refuted. Adam asked for all of it to be applied.
+
+### The finding that matters most
+
+**Three of the four fixes made for okarcz's review were incomplete in the same
+way the originals were** — a check that reads as covering something it does not.
+The review caught a class of defect; the fixes reproduced the class one layer
+down. That is the lesson of this task, not the individual bugs:
+
+1. **The CI paths-filter entry was necessary but not sufficient.** Adding
+   `api-gateway-stack.ts` makes the `rust` job *run* on infra-only PRs. Nothing
+   in it would have *failed* for the `servers` half: `extract-openapi.sh` reads
+   `apiBaseUrl` from `infra/envs/production.json` and exports `API_BASE_URL`
+   itself, so it never observes `ComputeStack` putting that variable on the
+   Lambda. Rename it to `API_BASE_URI` in an unrelated refactor and synth, lint
+   and the route gate all pass while production serves a document with **no
+   `servers` block at all** — the CI copy still has one, fabricated from the JSON
+   file. Closed by `verify-openapi-servers.mjs`, which compares the synthesized
+   Compute template against the extracted document and re-asserts the
+   stage-prefix invariant against the deployed `StageName`, so deleting the
+   `types.ts` validation cannot silently remove that guarantee either.
+
+2. **Aligning the two guards' method sets removed coverage instead of adding
+   it.** Dropping `head`/`options` from both sides made them agree at the cost of
+   leaving a documented HEAD checked by *neither* guard in *either* direction —
+   reopening, for two verbs, the exact defect this task exists to close. The
+   exclusion is now one-sided: OPTIONS skipped on the gateway side only, HEAD
+   compared normally, a documented OPTIONS refused outright. okarcz's nit is
+   still satisfied — the guards agree — but by raising the weaker side.
+
+3. **`fullPath()` still truncated silently.** The rewrite threw at two exits, but
+   truncation happened earlier: any `ParentId` that was not `{Ref}` became
+   `null`, and `null` is the walk's "reached the root" signal. Today only
+   `Fn::GetAtt … RootResourceId` lands there, so it works — but an imported
+   `RestApi` or a cross-stack split ([[0126]]) emits `Fn::ImportValue`, and the
+   check would report `/status` for `/v1/backfill/status`.
+
+4. (Not a repeat, but the same shape.) The ledger test matched a `_ledger` name
+   **suffix**, so its own promise held only for that name shape. Replaced with a
+   type-derived rule over the schemas reachable from the response `$ref`, plus a
+   `contains`-based name rule over the whole document.
+
+### Product-level findings
+
+5. **The "no 4xx to document" premise was contradicted by this branch's own
+   stack comment.** Both anonymous routes sit under the stage-wide `/*` `*`
+   throttle, so API Gateway can 429 either; `/api-docs-json` can also 5xx,
+   being a Lambda proxy. Both are now documented, without a body (API Gateway
+   produces them and its shape is not `ErrorEnvelope`). The lint-ignore file is
+   empty and stays in the tree carrying the reason.
+
+6. **A 3600 s cache with no invalidation.** "Byte-identical for the life of a
+   deployment" is true and beside the point — the caches outlive the deployment.
+   See the superseded Design Decision #3.
+
+7. **`{}` served as `200 OK`.** `to_json().unwrap_or_else(|_| "{}")` turned a
+   serialization failure into a syntactically valid empty document, with no log
+   and no metric, then cached it. Before this branch the route was unroutable, so
+   nobody would have seen it; now it is the public partner contract. Now
+   `.expect`s, matching `extract_openapi`.
+
+8. **`/api-docs-json` had no limits of its own.** Every other Lambda-backed
+   route is key-gated and therefore carries the usage plan's per-key rate and
+   daily quota; this one carried neither, and throttling is evaluated *before*
+   the cache, so an anonymous loop draws down the bucket shared with paying
+   partners. Also: the whole `methodSettings` block sat inside
+   `if (cacheEnabled)`, so with the cache off the route lost its TTL entry too —
+   the configuration where an unbounded keyless route costs the most.
+
+   **This one goes beyond what #169 accepted** ("the residual is small"; okarcz
+   asked only that the cost profile be written down), so it is isolated in
+   `479548c` and the PR comment says to `git revert` that single commit if he
+   would rather keep the reviewed posture. **Open — awaiting his call.**
+
+9. README named the wrong Redocly ruleset — the same `recommended` /
+   `recommended-strict` slip the lint gate exists to prevent.
+
+### Partially addressed
+
+10. **`apiBaseUrl` hardcodes the current execute-api REST API id.** The new
+    `servers` guard binds the advertised URL to the synthesized deployment and
+    to the deployed `StageName`, so it is no longer unguarded — but it cannot
+    detect a REST API *id* change, because both sides derive from the same config
+    value. Catching that needs a post-deploy check against the live gateway,
+    which is out of scope here.
+
+Refuted during verification, recorded so they are not re-raised: the duplicated
+`resourcePath` literal beside the TTL, and the `API_KEY_HEADER` const.
+
 ## Design Decisions
 
 ### From Plan
@@ -442,8 +598,14 @@ each script correct standalone, and the second `cargo run` is a no-op rebuild.
    the same axum handler as the data routes, so there is one place the document
    comes from.
 
-3. **3600 s TTL**, gateway and handler agreeing, per the `CACHE_TTL` /
-   `cache_control.rs` single-source-of-truth rule.
+3. ~~**3600 s TTL**, gateway and handler agreeing, per the `CACHE_TTL` /
+   `cache_control.rs` single-source-of-truth rule.~~ **Superseded** by the
+   self-review round: 3600 s at the gateway (flushed on deploy), 300 s at the
+   client. The single-source-of-truth rule still holds for every other route;
+   this one is the documented exception, because the two caches differ in who
+   can invalidate them. Kept struck through rather than rewritten — the original
+   decision was made, shipped, and then found wrong, and that is the part worth
+   remembering.
 
 ### Emerged
 
