@@ -55,11 +55,12 @@ cargo lambda build -p prices-api --release --arm64 --features lambda
 The spec is generated from the axum routes by `utoipa`, so it cannot drift from
 the implementation. It is served at `GET /api-docs-json` — **anonymous**, both
 at the API Gateway (`apiKeyRequired: false`) and in the in-app key gate
-(`auth::is_exempt`) — and cached for an hour.
+(`auth::is_exempt`) — and cached for an hour at the gateway, 5 minutes at the
+client (the gateway entry is flushed on deploy; a partner's cache is not).
 
 ```bash
 npm run openapi:extract   # → target/openapi.json (servers stamped from config)
-npm run openapi:lint      # extract + Redocly recommended ruleset; runs in CI
+npm run openapi:lint      # extract + Redocly recommended-strict; runs in CI
 ```
 
 `tests/openapi.rs` asserts the document's contract: route coverage against the

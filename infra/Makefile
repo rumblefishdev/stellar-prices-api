@@ -36,8 +36,27 @@ synth-production: build
 diff-production: build
 	npx cdk --app "$(PRODUCTION_APP)" diff
 
+# The /api-docs-json stage-cache entry has a 3600s TTL, which is only safe
+# because the cache is dropped when a new build ships (task 0124). Without this
+# the gateway keeps serving the PREVIOUS deployment's OpenAPI document for up to
+# an hour after the deploy, to every partner generating a client from it.
+#
+# Flushes the whole stage cache, not one route — API Gateway has no per-route
+# flush. Harmless: every other TTL here is 10-60s on data that self-corrects.
+#
+# Run after any deploy that can change the served document, i.e. anything that
+# ships a new api-handler.
+flush-production-cache:
+	aws apigateway flush-stage-cache \
+		--rest-api-id "$$(aws ssm get-parameter \
+			--name /prices/production/api-gateway-id \
+			--query Parameter.Value --output text)" \
+		--stage-name production
+	@echo "production stage cache flushed"
+
 deploy-production: build
 	npx cdk --app "$(PRODUCTION_APP)" deploy --all --require-approval broadening
+	$(MAKE) flush-production-cache
 
 destroy-production: build
 	npx cdk --app "$(PRODUCTION_APP)" destroy --all --force
@@ -48,8 +67,10 @@ deploy-production-secrets: build
 destroy-production-secrets: build
 	npx cdk --app "$(PRODUCTION_APP)" destroy Prices-production-Secrets --force
 
+# Ships a new api-handler, so it ships a new OpenAPI document — flush too.
 deploy-production-compute: build
 	npx cdk --app "$(PRODUCTION_APP)" deploy Prices-production-Compute --require-approval broadening
+	$(MAKE) flush-production-cache
 
 destroy-production-compute: build
 	npx cdk --app "$(PRODUCTION_APP)" destroy Prices-production-Compute --force

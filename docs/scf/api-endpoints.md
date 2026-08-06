@@ -19,7 +19,7 @@ without it serves nothing.
 | Route                                     | Auth          | Gateway cache TTL |
 | ----------------------------------------- | ------------- | ----------------- |
 | `GET /health`                             | Anonymous     | uncached          |
-| `GET /api-docs-json`                      | **Anonymous** | 3600 s            |
+| `GET /api-docs-json`                      | **Anonymous** | 3600 s¹           |
 | `GET /v1/assets`                          | `x-api-key`   | 60 s              |
 | `GET /v1/assets/{asset_identifier}`       | `x-api-key`   | 60 s              |
 | `GET /v1/assets/{asset_identifier}/price` | `x-api-key`   | 10 s              |
@@ -27,6 +27,9 @@ without it serves nothing.
 | `GET /v1/oracles/{asset_identifier}`      | `x-api-key`   | 60 s              |
 | `GET /v1/backfill/status`                 | `x-api-key`   | 60 s              |
 | `POST /v1/prices/batch`                   | `x-api-key`   | uncached          |
+
+¹ Gateway TTL. The handler sends `max-age=300` — see **Cache** below for why the
+two differ.
 
 Source of truth: `infra/src/lib/stacks/api-gateway-stack.ts`. This table is
 documentation and is not itself asserted — what CI enforces is that the
@@ -59,9 +62,14 @@ curl -sS https://02mabge71l.execute-api.eu-central-1.amazonaws.com/production/ap
 - **`x-api-key` scheme:** declared in `components.securitySchemes` and required
   document-wide, with `/health` and `/api-docs-json` opting out explicitly. A
   reader can therefore see exactly which routes need a key without being told.
-- **Cache:** 3600 s at the gateway stage cache, matching the handler's
-  `Cache-Control: public, max-age=3600`. The document is byte-identical for the
-  life of a deployment.
+- **Cache:** 3600 s at the gateway stage cache; the handler sends
+  `Cache-Control: public, max-age=300`. The document is byte-identical for the
+  life of a deployment, but the caches are not — they outlive the build that
+  filled them. The gateway entry is flushed on deploy
+  (`make -C infra flush-production-cache`, wired into `deploy-production`); a
+  partner's HTTP cache cannot be, so the client-facing window is short enough
+  that a reader picks up a new release within 5 minutes rather than an hour.
+  Revalidation costs nothing — those requests land on the gateway cache.
 - **Lint:** `npm run openapi:lint` extracts the served document and runs
   Redocly's `recommended-strict` ruleset over it; wired into the `rust` CI job.
   Strict, not `recommended`, because plain `redocly lint` exits 0 on warnings —

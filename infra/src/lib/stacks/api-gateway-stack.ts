@@ -25,7 +25,9 @@ export interface ApiGatewayStackProps extends cdk.StackProps {
  * `packages/prices-api/src/common/cache_control.rs` (the gateway stage cache and
  * the client/CDN max-age must agree, or one serves staler data than the other).
  * Mapping: SHORT=10s → price; MEDIUM=60s → assetsList / assetDetail / ohlcv /
- * oracles / backfill; DEPLOY_STATIC=3600s → apiDocs.
+ * oracles / backfill. `apiDocs` is the one deliberate mismatch: 3600s here,
+ * `DEPLOY_STATIC`=300s on the handler — see the comment on that constant and on
+ * `apiDocs` below.
  */
 const CACHE_TTL = {
   assetsList: cdk.Duration.seconds(60), // MEDIUM
@@ -34,10 +36,16 @@ const CACHE_TTL = {
   ohlcv: cdk.Duration.seconds(60), // MEDIUM
   oracles: cdk.Duration.seconds(60), // MEDIUM
   backfill: cdk.Duration.seconds(60), // MEDIUM
-  // The spec is byte-identical for the life of a deployment, so the longest
-  // TTL API Gateway allows is free and keeps the document off the Lambda
-  // entirely (task 0124).
-  apiDocs: cdk.Duration.seconds(3600), // DEPLOY_STATIC
+  // The spec is byte-identical for the life of a deployment, so the longest TTL
+  // API Gateway allows keeps the document off the Lambda entirely (task 0124).
+  //
+  // It is only free because this entry is flushed when a deployment ships —
+  // `make -C infra deploy-production` runs `flush-production-cache` after the
+  // deploy. Without that the cache outlives the build that filled it and the
+  // gateway serves the previous deployment's document for up to an hour. The
+  // handler's own `Cache-Control` is 300s, not 3600s, for the same reason
+  // applied to caches we do NOT control (see cache_control.rs).
+  apiDocs: cdk.Duration.seconds(3600), // DEPLOY_STATIC (client side: 300s)
 } as const;
 
 /** 0.5 GB stage cache (overview §2.1). */

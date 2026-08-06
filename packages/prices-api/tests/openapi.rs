@@ -404,9 +404,14 @@ async fn spec_is_reachable_without_a_key_when_the_gate_is_armed() {
 }
 
 #[tokio::test]
-async fn spec_response_is_cacheable_for_the_life_of_a_deployment() {
+async fn spec_response_is_cacheable_but_revalidates_within_the_gateway_ttl() {
     let (_, cache_control, _) = fetch_spec(&config_with(None, vec![])).await;
 
-    // Mirrors the 3600s gateway TTL on /api-docs-json (api-gateway-stack.ts).
-    assert_eq!(cache_control.as_deref(), Some("public, max-age=3600"));
+    // Deliberately SHORTER than the 3600s gateway TTL on this route
+    // (api-gateway-stack.ts). The gateway entry is dropped when a deployment
+    // ships (`make -C infra flush-production-cache`); a partner's HTTP cache is
+    // not, so the client-facing window is the one that has to be short or a
+    // reader keeps generating clients from the previous build's document. See
+    // cache_control::DEPLOY_STATIC.
+    assert_eq!(cache_control.as_deref(), Some("public, max-age=300"));
 }

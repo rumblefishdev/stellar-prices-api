@@ -50,9 +50,21 @@ pub fn app(config: &AppConfig, state: AppState) -> Router {
     openapi::stamp_servers(&mut spec, config);
 
     // Serialize once at startup; serve the cached string (no per-request work).
-    // `DEPLOY_STATIC` (1h) mirrors the gateway stage-cache TTL for this route —
-    // the document only changes when a new build ships (task 0124).
-    let spec_json = Arc::new(spec.to_json().unwrap_or_else(|_| "{}".to_string()));
+    // `DEPLOY_STATIC` is the client-facing tier for this route — the document
+    // only changes when a new build ships (task 0124).
+    //
+    // Panics rather than falling back to `{}`. The fallback was silent in the
+    // worst possible way: a syntactically valid, empty document served as
+    // `200 OK`, with no log and no metric, then cached for 300s by the client
+    // and 3600s by the gateway. Every partner running a generator against it in
+    // that window would get a client with zero endpoints and no indication
+    // anything was wrong. Failing to start is louder and shorter: the deploy
+    // fails and the alarm fires. Matches `extract_openapi`, which already
+    // `.expect`s the same serialization.
+    let spec_json = Arc::new(
+        spec.to_json()
+            .expect("the OpenAPI document must serialize; it is built at startup"),
+    );
     let router = router.route(
         "/api-docs-json",
         get(move || {
