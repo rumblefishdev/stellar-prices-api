@@ -82,14 +82,28 @@ function fullPath(id) {
   const segments = [];
   let cursor = id;
   // The template is a DAG rooted at the RestApi; bound the walk anyway so a
-  // malformed template fails loudly instead of hanging CI.
-  for (let hops = 0; cursor && hops <= nodes.size; hops++) {
+  // malformed template fails loudly instead of hanging CI. Both exits below
+  // throw rather than returning what was resolved so far: a truncated path
+  // still *looks* like a route, so it would surface as drift on a path that is
+  // almost right, which is harder to read than the parse failure it actually
+  // is. Same stance as the ANY and root-method cases below.
+  for (let hops = 0; hops <= nodes.size; hops++) {
     const node = nodes.get(cursor);
-    if (!node) break;
+    if (!node) {
+      throw new Error(
+        `resource ${id}: parent ${cursor} is not an ` +
+          `AWS::ApiGateway::Resource in this template — cannot resolve its path`,
+      );
+    }
     segments.unshift(node.pathPart);
     cursor = node.parent;
+    // `parent: null` is the API root: the path is complete.
+    if (cursor === null) return '/' + segments.join('/');
   }
-  return '/' + segments.join('/');
+  throw new Error(
+    `resource ${id}: ParentId walk exceeded ${nodes.size} hops without ` +
+      `reaching the API root — the template has a resource cycle`,
+  );
 }
 
 // CORS preflight and HEAD are not conventionally described in an OpenAPI
@@ -106,22 +120,10 @@ for (const [, res] of resources) {
   if (res.Type !== 'AWS::ApiGateway::Method') continue;
   const method = String(res.Properties?.HttpMethod ?? '').toLowerCase();
   if (UNCOMPARED_METHODS.has(method)) continue;
-  // `ANY` maps every verb at once and can never equal an OpenAPI operation
-  // key, so it would report as undocumented forever. Skipping it silently
-  // would instead hide a mapped route from the check — fail loudly and make
-  // the next person decide, which is the same stance as the root-method case
-  // below.
-  if (method === 'any') {
-    console.error(
-      `error: method ANY on ${fullPath(res.Properties?.ResourceId?.Ref)} has ` +
-        `no OpenAPI equivalent. Expand it into explicit verbs, or teach this ` +
-        `check how to compare it.`,
-    );
-    process.exit(1);
-  }
   const resourceId = res.Properties?.ResourceId?.Ref;
   // A method on the API root itself has no Ref'd resource; none exist today,
-  // and silently skipping one would be a hole in the check.
+  // and silently skipping one would be a hole in the check. Checked before the
+  // ANY case so the message below always has a path to name.
   if (!resourceId) {
     console.error(
       `error: method ${method} is attached to the API root, which this check ` +
@@ -129,7 +131,26 @@ for (const [, res] of resources) {
     );
     process.exit(1);
   }
-  gatewayRoutes.add(`${method} ${fullPath(resourceId)}`);
+  let path;
+  try {
+    path = fullPath(resourceId);
+  } catch (err) {
+    console.error(`error: ${err.message}`);
+    process.exit(1);
+  }
+  // `ANY` maps every verb at once and can never equal an OpenAPI operation
+  // key, so it would report as undocumented forever. Skipping it silently
+  // would instead hide a mapped route from the check — fail loudly and make
+  // the next person decide, which is the same stance as the root-method case
+  // above.
+  if (method === 'any') {
+    console.error(
+      `error: method ANY on ${path} has no OpenAPI equivalent. Expand it into ` +
+        `explicit verbs, or teach this check how to compare it.`,
+    );
+    process.exit(1);
+  }
+  gatewayRoutes.add(`${method} ${path}`);
 }
 
 // ---------------------------------------------------------------------------

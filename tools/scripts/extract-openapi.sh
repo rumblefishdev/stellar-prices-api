@@ -34,7 +34,13 @@ if [[ -z "${API_BASE_URL:-}" ]]; then
     echo "error: $env_file not found and API_BASE_URL is unset" >&2
     exit 1
   }
-  API_BASE_URL="$(node -p "require('${env_file}').apiBaseUrl ?? ''")"
+  # Read as a file rather than `require()`d as a JSON module. `node -p` is
+  # still evaluated as CommonJS even under `"type": "module"` (measured on
+  # v26; the root package.json has no `type` today either way), so the
+  # `require('…json')` form works — but it depends on both of those staying
+  # true, and reading bytes depends on neither.
+  API_BASE_URL="$(node -p \
+    "JSON.parse(require('fs').readFileSync('${env_file}', 'utf8')).apiBaseUrl ?? ''")"
   # An empty value would silently produce a serverless document that fails the
   # lint several steps later with a much less obvious message.
   [[ -n "$API_BASE_URL" ]] || {

@@ -94,10 +94,17 @@ fn spec_routes(spec: &Value) -> Vec<(String, String)> {
                 .expect("path item is an object")
                 .keys()
                 // Path items may carry non-operation keys (parameters, summary).
+                // `head`/`options` are excluded to match `HTTP_METHODS` in
+                // `tools/scripts/verify-openapi-routes.mjs`: that script drops
+                // them from BOTH sides so task 0126's `addCorsPreflight` does
+                // not read as undocumented drift. Including them here would put
+                // the two guards on different method sets, and the day an
+                // OPTIONS operation appears this test would flag what the
+                // authoritative check deliberately ignores.
                 .filter(|k| {
                     matches!(
                         k.as_str(),
-                        "get" | "put" | "post" | "delete" | "patch" | "head" | "options" | "trace"
+                        "get" | "put" | "post" | "delete" | "patch" | "trace"
                     )
                 })
                 .map(|method| (method.clone(), path.clone()))
@@ -152,6 +159,59 @@ async fn spec_route_coverage_matches_the_deployed_gateway_both_ways() {
         "spec documents routes the gateway does not map (they would 403/404 for \
          every reader): {undeployed:?} — add them to api-gateway-stack.ts or \
          stop documenting them"
+    );
+}
+
+#[tokio::test]
+async fn every_ledger_field_publishes_the_uint32_ceiling() {
+    let (_, _, spec) = fetch_spec(&config_with(None, vec![])).await;
+
+    // A Stellar ledger sequence is `uint32` in the protocol's `LedgerHeader`,
+    // so every ledger-valued field carries `maximum = 4_294_967_295` as a
+    // literal (`backfill/dto.rs` — attribute macros cannot read a const). This
+    // reads those literals back out of the served document, which is the only
+    // place they are observable: a const in the DTO module can assert things
+    // about itself but nothing about what the attributes emitted.
+    //
+    // The field set is derived from the document rather than listed here, so a
+    // ledger field added later without the attribute fails as a missing
+    // `maximum` instead of passing unnoticed.
+    let schemas = spec["components"]["schemas"]
+        .as_object()
+        .expect("spec has component schemas");
+
+    let mut checked = 0;
+    for (schema_name, schema) in schemas {
+        let Some(properties) = schema["properties"].as_object() else {
+            continue;
+        };
+        for (field, definition) in properties {
+            if !(field.ends_with("_ledger") || field == "ledgers_remaining") {
+                continue;
+            }
+            let maximum = definition["maximum"].as_u64().unwrap_or_else(|| {
+                panic!(
+                    "{schema_name}.{field} is a ledger sequence but publishes no \
+                     `maximum` — add #[schema(maximum = 4_294_967_295u64)]"
+                )
+            });
+            assert_eq!(
+                maximum,
+                u64::from(u32::MAX),
+                "{schema_name}.{field} publishes maximum {maximum}, but a ledger \
+                 sequence is uint32 (max {})",
+                u32::MAX
+            );
+            checked += 1;
+        }
+    }
+
+    // realtime_tip_ledger + SdexStream's four. A rename that empties the filter
+    // would otherwise pass vacuously.
+    assert_eq!(
+        checked, 5,
+        "expected 5 ledger-valued fields in the document, found {checked} — \
+         update this count if the DTOs genuinely changed"
     );
 }
 

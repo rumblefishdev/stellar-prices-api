@@ -18,15 +18,20 @@
 use serde::Serialize;
 use utoipa::ToSchema;
 
-/// Upper bound published for every ledger-sequence field.
-///
-/// These are `u64` in Rust (ClickHouse hands back `UInt64`), but a Stellar
-/// ledger sequence is `uint32` in the protocol's `LedgerHeader`, so `u32::MAX`
-/// is the real ceiling — a domain fact, not a limit we impose. Stated so a
-/// client knows the value always fits in 32 bits. Repeated as a literal on each
-/// field because `#[schema(...)]` is an attribute macro and cannot read a const.
-const LEDGER_SEQ_MAX: u64 = u32::MAX as u64;
-const _: () = assert!(LEDGER_SEQ_MAX == 4_294_967_295);
+// Every ledger-sequence field below publishes `maximum = 4_294_967_295`.
+//
+// These are `u64` in Rust (ClickHouse hands back `UInt64`), but a Stellar ledger
+// sequence is `uint32` in the protocol's `LedgerHeader`, so `u32::MAX` is the
+// real ceiling — a domain fact, not a limit we impose. Stated so a client knows
+// the value always fits in 32 bits. It has to be a literal on each field because
+// `#[schema(...)]` is an attribute macro and cannot read a const.
+//
+// A const here could only assert things about itself, not about those literals
+// (an earlier revision had `assert!(LEDGER_SEQ_MAX == 4_294_967_295)`, which is
+// a tautology that stays green while a mistyped attribute publishes a wrong
+// bound). The literals are checked where they become observable instead:
+// `every_ledger_field_publishes_the_uint32_ceiling` in `tests/openapi.rs` reads
+// them back out of the served document and compares against `u32::MAX`.
 
 /// `GET /backfill/status` response.
 #[derive(Debug, Serialize, ToSchema)]

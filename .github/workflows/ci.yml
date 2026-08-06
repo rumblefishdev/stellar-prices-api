@@ -34,6 +34,14 @@ jobs:
               - '.redocly.lint-ignore.yaml'
               # The `servers` URL the linted document is stamped with.
               - 'infra/envs/production.json'
+              # `openapi:verify-routes` compares this file's synthesized output
+              # against the extracted document, and it is the only check that
+              # sees the gateway→spec direction. `infra/**` is otherwise absent
+              # here, so an infra-only PR adding a gateway route would skip the
+              # rust job entirely and map a route no document describes. Listed
+              # as the single file rather than `infra/**` so unrelated CDK edits
+              # do not pay for an ARM Rust build.
+              - 'infra/src/lib/stacks/api-gateway-stack.ts'
               # `redocly` is a devDependency and this is the only job that runs
               # it. Without these, a PR that drops or bumps it merges green and
               # the failure lands on the next author to touch packages/**.
