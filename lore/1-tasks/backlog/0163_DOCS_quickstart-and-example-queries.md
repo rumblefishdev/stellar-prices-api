@@ -62,6 +62,18 @@ through all that — not a second copy of it.
 
 - **Lead with a single copy-pasteable `curl`** that includes the base URL and
   the `x-api-key` header and returns real data. Everything else is second.
+- **There are now two working base URLs — document exactly one.** [[0161]] puts
+  CloudFront in front of the API, so `/v1/*` answers both on the distribution's
+  domain and on the raw API Gateway invoke URL. The documented one is the
+  **CloudFront domain**: it is the address in the Tranche 3 submission, it shares
+  a hostname with the portal and the docs, and it keeps the `/production` stage
+  segment — an implementation detail — out of partners' code.
+
+  This has to reach the spec, not just this page. [[0124]] stamps `API_BASE_URL`
+  into the OpenAPI `servers` block, which is the URL Swagger UI's "Try it out"
+  calls. If that still points at the invoke URL while the quickstart teaches the
+  CloudFront domain, our own documentation demonstrates a different origin from
+  the one we publish — and it fails silently, because both work.
 - **State the auth rule and its failure explicitly**: data routes need a key; a
   missing key is `403`. It is the first error anyone hits.
   **Name the exceptions, because the epic does not.** The epic says "every API
@@ -100,6 +112,8 @@ through all that — not a second copy of it.
       one of them was run against production before publishing
 - [ ] Guidance not to embed the key in a browser bundle
 - [ ] Links to Swagger UI and `/api-docs-json` rather than restating the spec
+- [ ] One documented base URL, and the OpenAPI `servers` block agrees with it —
+      Swagger UI's "Try it out" hits the same origin the quickstart teaches
 - [ ] Reachable from the portal dashboard and from the documented URL
 - [ ] Single source of truth for the text — no second copy to drift
 - [ ] Epic AC 3 satisfied

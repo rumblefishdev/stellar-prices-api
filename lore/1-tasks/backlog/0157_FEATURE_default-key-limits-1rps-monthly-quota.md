@@ -28,6 +28,14 @@ history:
       period-boundary question), and corrected the [[0121]] sequencing note —
       the partner key's daily quota kills a sustained 100 rps run after ~100
       seconds, which the original note did not catch.
+  - date: 2026-08-07
+    status: backlog
+    who: akot
+    note: >
+      Config naming settled: `<plan>Plan*` for usage-plan settings, `apiGateway*`
+      for gateway/stage settings. Three renames alongside the three new fields,
+      done here because this is the task that introduces the second tier and
+      makes `apiKeyRateLimit` actively misleading.
 ---
 
 # Default key limits: 1 req/s + monthly quota
@@ -99,19 +107,51 @@ conclusion stands on the remaining arguments.
   Token-bucket refill keeps the sustained rate at exactly 1 req/s; burst only
   allows the allowance to be spent unevenly. 1:5 is the same shape as the
   existing 100:200 partner plan and 200:400 stage throttle.
-- New config in `infra/src/lib/types.ts` + `envs/production.json`:
-  `selfServiceRateLimit` (1), `selfServiceBurstLimit` (5),
-  `selfServiceMonthlyQuota` (100000), validated like the existing key fields
-  (positive integers, burst ≥ rate) plus
-  `selfServiceRateLimit <= apiKeyRateLimit` — cheap, and it catches the "100
-  instead of 1" typo this whole task exists to prevent. Note that this last
-  check also encodes "self-service is never faster than the manual tier", which
-  is intended but will fail synth if the partner tier is ever lowered.
-- **Settle the config naming scheme while adding the second tier.** The existing
-  fields are already inconsistent (`apiGatewayPartnerDailyQuota` versus
-  `apiKeyRateLimit` / `apiKeyBurstLimit`), and from now on every field has to say
-  which plan it belongs to. Pick one shape here rather than after a third tier
-  makes it expensive.
+- **Config naming — settled 2026-08-07. Scope first, then property:**
+  `apiGateway*` for anything belonging to the gateway or the stage,
+  `<plan>Plan*` for anything belonging to a specific usage plan.
+
+  | Today | After |
+  | --- | --- |
+  | `apiGatewayThrottleRate` / `apiGatewayThrottleBurst` | unchanged — stage-level, not a plan |
+  | `apiGatewayCacheEnabled`, `apiBaseUrl` | unchanged |
+  | `apiKeyRateLimit` | `partnerPlanRateLimit` |
+  | `apiKeyBurstLimit` | `partnerPlanBurstLimit` |
+  | `apiGatewayPartnerDailyQuota` | `partnerPlanDailyQuota` |
+  | — | `selfServicePlanRateLimit` (1) |
+  | — | `selfServicePlanBurstLimit` (5) |
+  | — | `selfServicePlanMonthlyQuota` (100000) |
+
+  Three renames, three additions. The reason to do it here rather than later:
+  `apiKeyRateLimit` reads as a global property of API keys, and the moment a
+  second plan exists that is simply false — it is one plan's rate. Two fields of
+  the same kind should look like a pair, and the rule for a third tier should
+  need no discussion.
+
+  The quota period stays in the name (`DailyQuota` vs `MonthlyQuota`) on
+  purpose: a usage plan carries exactly one quota and these two plans use
+  different periods, so encoding it makes the two impossible to misread.
+
+- **Renaming a config key is not renaming a resource.** CloudFormation sees only
+  the *values*; the key exists solely for our own typed config, so `tsc` flags
+  every missed usage and no resource is touched. This is the opposite of the
+  usage plan's `name` property, which must **not** change — that one risks a
+  replacement that would invalidate the working partner key. Keep the two
+  straight.
+
+  Blast radius, counted: `types.ts` (14 occurrences, declarations plus
+  validations), `api-gateway-stack.ts` (4), `envs/production.json` (3). `cicd.json`
+  does not carry these fields and there are no consumers outside the repo.
+  [[0121]] mentions the old names in prose and should be updated with them;
+  archived tasks keep the old names as historical record.
+
+- Validation follows the existing pattern (positive integers, burst ≥ rate), with
+  the cross-checks moved onto the new names:
+  `apiGatewayThrottleRate >= partnerPlanRateLimit`, and a new
+  `selfServicePlanRateLimit <= partnerPlanRateLimit` — cheap, and it catches the
+  "100 instead of 1" typo this whole task exists to prevent. That last check also
+  encodes "self-service is never faster than the manual tier", which is intended
+  but will fail synth if the partner tier is ever lowered.
 - Quota period `apigateway.Period.MONTH`. Note that **a usage plan carries
   exactly one quota** — no daily sub-cap alongside the monthly one — so a key at
   full rate spends the month's allowance in ~28 hours and then waits for the
@@ -147,6 +187,9 @@ conclusion stands on the remaining arguments.
 - [ ] Self-service usage plan id readable by [[0160]] without closing the
       Compute → ApiGateway cycle
 - [ ] New config validated at synth like the existing key fields
+- [ ] Config fields renamed to the `<plan>Plan*` scheme, `apiGateway*` reserved
+      for gateway- and stage-level settings; synth produces the same template it
+      did before the rename, proving no resource depends on a key name
 - [ ] Manual higher-tier runbook written
 - [ ] Epic AC 5 satisfied: default limits are 1 req/s + monthly quota, not the
       design doc's 100 req/s

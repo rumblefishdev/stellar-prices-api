@@ -97,12 +97,18 @@ it decides whether this flow requests the `guilds` scope or only `identify`.
   so these cannot sit behind `apiKeyRequired`. That means they need their own
   method-level throttle, the same reasoning [[0124]] applied to
   `/api-docs-json`.
-- **Route placement — settled 2026-08-07:** same API Gateway, same Lambda, under
-  a distinct path prefix, and fronted by the same CloudFront distribution as the
-  portal bundle ([[0161]]). The browser therefore makes same-origin requests:
-  CORS ([[0126]]) never enters the picture for portal traffic and the session
-  cookie is not cross-site. Record the chosen prefix next to [[0161]]'s path
-  layout so the two cannot drift.
+- **Route placement — settled 2026-08-07:** same API Gateway, same Lambda,
+  mounted under **`/api-tokens/api/`**, and fronted by the same CloudFront
+  distribution as the portal bundle ([[0161]]). The browser therefore makes
+  same-origin requests: CORS ([[0126]]) never enters the picture for portal
+  traffic and the session cookie is not cross-site.
+
+  The prefix follows [[0161]]'s convention — `<app>/*` is an app's bundle,
+  `<app>/api/*` is its backend — so a second frontend adds two rows and invents
+  nothing. Both halves of the string are load-bearing: the OAuth redirect URI
+  registered with Discord must match it exactly, and [[0161]]'s distribution
+  must order this behaviour before `/api-tokens/*` or every call here is served
+  the SPA bundle instead.
 - **The Discord application is a manual prerequisite.** Someone registers it in
   the Discord Developer Portal and configures the redirect URI, which must match
   exactly and therefore changes when the custom domain lands ([[0126]]). Record

@@ -70,27 +70,35 @@ failure [[0124]] spent a task preventing.
 - **Path layout — settled 2026-08-07.** Several frontends will share this
   domain, so this is a convention the next app joins, not a one-off:
 
+  The rule, settled 2026-08-07: **`<app>/*` is that app's bundle, `<app>/api/*`
+  is that app's backend.** Behaviours are evaluated in order and the first match
+  wins, so each `/api/*` entry must be listed **before** the bundle entry it
+  sits inside.
+
   ```
-  <domain>/api-tokens/*   → S3            (this portal — first frontend)
-  <domain>/docs/*         → S3            (Swagger UI bundle)
-  <domain>/portal/*       → API Gateway   (OAuth callback + the four 0160 endpoints)
-  <domain>/v1/*           → API Gateway   (partner data routes)
-  <domain>/api-docs-json  → API Gateway   (root-level — the spec Swagger UI fetches)
-  <domain>/health         → API Gateway   (root-level)
-  <domain>/<next-app>/*   → S3            (later frontends, same shape)
+  <domain>/api-tokens/api/*  → API Gateway   (this portal's backend — MUST precede the next line)
+  <domain>/api-tokens/*      → S3            (this portal's bundle)
+  <domain>/docs/*            → S3            (Swagger UI bundle)
+  <domain>/v1/*              → API Gateway   (partner data routes)
+  <domain>/api-docs-json     → API Gateway   (root-level — the spec Swagger UI fetches)
+  <domain>/health            → API Gateway   (root-level)
+  <domain>/<next-app>/api/*  → API Gateway   (later frontends, same shape)
+  <domain>/<next-app>/*      → S3
   ```
 
-  One distribution, one certificate, one DNS record, one invalidation step.
-  Write the rule down so the second frontend does not invent a second scheme.
+  One distribution, one certificate, one DNS record, one invalidation step. The
+  convention scales: a new frontend adds two rows and invents nothing.
 
-  Two rows here are easy to omit and both break something silently:
+  Three ways this table goes wrong, all silent:
 
-  - **The portal's own API prefix.** [[0159]] places the sign-in and endpoint
-    routes under a distinct prefix; without a behaviour for it they fall through
-    to the S3 default, and the same-origin property that [[0159]]'s
-    `SameSite=Lax` and the "no CORS" claim below both rest on never holds.
-    `/portal/*` is the proposal — confirm it, and record the same string in
-    [[0159]] so the two cannot drift.
+  - **Ordering.** `/api-tokens/api/*` after `/api-tokens/*` means every portal
+    endpoint is served the SPA bundle instead of reaching the API. The response
+    is a `200` full of HTML, which reads as a JSON parse error rather than a
+    routing bug.
+  - **Omitting the backend row entirely.** The endpoints fall through to S3, and
+    the same-origin property that [[0159]]'s `SameSite=Lax` and the "no CORS"
+    claim below both rest on never holds. The chosen prefix is recorded in
+    [[0159]] as well — keep the two in step.
   - **The root-level API routes.** `/api-docs-json` and `/health` are mounted on
     the API root, not under `/v1`
     (`api-gateway-stack.ts` — `this.api.root.addResource('api-docs-json')`), so
@@ -107,7 +115,9 @@ failure [[0124]] spent a task preventing.
   the distribution and apply to every behaviour, so there is no per-prefix error
   mapping to reach for. The options are a CloudFront Function on viewer request
   rewriting the path, or handling it at the origin. Real work; it was not here
-  before.
+  before. **The function must skip `<app>/api/*`** — rewriting those to
+  `index.html` would swallow every backend call the moment the API returned a
+  404, turning a clean error into an HTML body.
 - **Certificate in `us-east-1`** for CloudFront regardless of where the rest of
   the stack lives, and coordinated with [[0126]], which owns the domain
   decision for the API. Same zone, same ownership conversation — do not open a
@@ -128,15 +138,20 @@ failure [[0124]] spent a task preventing.
 - [ ] Portal served from `/api-tokens/`; path layout recorded as a convention
       the next frontend can follow without inventing a second scheme
 - [ ] API reachable through the same distribution, so portal requests are
-      same-origin and no CORS is involved — including the portal's own route
-      prefix and the root-level `/api-docs-json`, not just `/v1/*`
+      same-origin and no CORS is involved — including `/api-tokens/api/*` and
+      the root-level `/api-docs-json`, not just `/v1/*`
+- [ ] `/api-tokens/api/*` is ordered **before** `/api-tokens/*`; a call to an
+      endpoint returns the API's response, never the SPA bundle
 - [ ] The portal prefix's behaviour disables caching and forwards the session
       cookie; a signed-in request reaches the origin still signed in ([[0160]])
 - [ ] A refresh on a sub-page of `/api-tokens/` returns that app's
       `index.html`, not the root document
 - [ ] CI deploys the bundle and invalidates the cache; no manual step
 - [ ] Certificate valid and auto-renewing; domain coordinated with [[0126]]
-- [ ] URL recorded in `docs/scf/api-endpoints.md`
+- [ ] URL recorded in `docs/scf/api-endpoints.md` as **the** base URL, and
+      `API_BASE_URL` updated to match so [[0124]]'s OpenAPI `servers` block and
+      the quickstart ([[0163]]) name the same origin. The raw invoke URL keeps
+      working; only one of the two is documented and supported
 - [ ] Everything expressed in CDK (Tranche 3 AC 7)
 
 ## Notes

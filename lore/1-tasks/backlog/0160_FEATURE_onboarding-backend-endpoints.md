@@ -31,7 +31,7 @@ history:
       large to medium.
 ---
 
-# Onboarding backend — issue, reveal, usage, rotate
+# Onboarding backend — issue, reveal, usage, rework
 
 ## Summary
 
@@ -66,11 +66,21 @@ allowance and mint their way out of it. Capping rework to the quota's own period
 makes AWS's native accounting sufficient and avoids building cumulative
 cross-key aggregation.
 
-**The boundary is settled (2026-08-07): the first day of the month following the
-last rework, 00:00 UTC** — the same instant the AWS quota period rolls over.
-Worked example from the meeting: reworked on 3 August → next rework available
-1 September. One date for the dashboard to render, because the quota counter and
-the rework right reset together.
+**The boundary is settled (2026-08-07): a rework is allowed only when
+`coalesce(last_rotated_at, created_at)` falls before the current quota period
+start** — the 1st of the month, 00:00 UTC, the same instant the AWS quota period
+rolls over. Worked example from the meeting: reworked on 3 August → next rework
+available 1 September. One date for the dashboard to render, because the quota
+counter and the rework right reset together.
+
+The `created_at` fallback is load-bearing, not defensive. Issuance never writes
+`last_rotated_at`, so gating on that column alone leaves it null for every fresh
+key — a user could take a key on 1 August, spend the whole 100 000, and rework on
+2 August into a clean counter, since quota is scoped to `(usagePlanId,
+apiKeyId)`. Any key acquired inside the current period has
+`created_at >= periodStart`, so with the fallback it can never be reworked inside
+that period, whether it came from issuance or from an earlier rework. One key per
+period, one quota.
 
 ## Implementation
 
@@ -127,8 +137,9 @@ the rework right reset together.
 - **Issue and rework must be safe under double-submit, and the store no longer
   helps.** ClickHouse has no conditional insert ([[0158]] "Accepted
   consequences"), so the guard is deterministic key naming plus the reconciler:
-  look up `discord-<userId>` in API Gateway before creating, and converge on the
-  earliest-created key if two appear. Rework records the new key id and
+  look up `discord-<userId>-key` in API Gateway before creating — **exact-match
+  the name in the client, because `nameQuery` is a prefix match** — and converge
+  on the earliest-created key if two appear. Rework records the new key id and
   `last_rotated_at` in one insert, and deletes the old key only afterwards.
 
 ## Settled 2026-08-07
@@ -141,8 +152,9 @@ The four items parked on 2026-08-06 resolve as follows.
    Confirmation UX is [[0162]]'s: a modal stating that the old key stops working
    immediately, with the confirm button disabled until the user types
    `delete-key`.
-2. **Period boundary** — first of the month following `last_rotated_at`,
-   00:00 UTC. See Context.
+2. **Period boundary** — `coalesce(last_rotated_at, created_at)` must fall before
+   the current quota period start (1st of the month, 00:00 UTC). See Context for
+   why the fallback is not optional.
 3. **Refused rework returns `409`**, not `429`: `429` implies "retry shortly"
    when the wait can be weeks. Body is the existing `ErrorEnvelope`
    (`packages/prices-api/src/common/errors.rs`) with a new canonical code and
@@ -179,7 +191,7 @@ in the epic as a known gap — revisit if it bites in practice.
       `next_eligible_at`
 - [ ] Reworking on 3 August refuses until 1 September, and succeeds on 1
       September — the meeting's worked example, tested
-- [ ] Reconciler adopts an existing `discord-<userId>` key instead of creating a
+- [ ] Reconciler adopts an existing `discord-<userId>-key` instead of creating a
       duplicate, and converges two concurrent first sign-ins onto one key
 - [ ] No portal response is cached at **either** layer, verified against the
       synthesized template rather than assumed: `cachingEnabled: false` on every

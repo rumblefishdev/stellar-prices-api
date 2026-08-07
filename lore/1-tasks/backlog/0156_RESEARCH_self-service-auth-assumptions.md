@@ -51,7 +51,7 @@ whole abuse model on its own.
 The second item is smaller but structural. "One active key per Discord account"
 is written as a **recommendation** to confirm, not a decision — and it is the
 difference between a registry keyed by Discord ID ([[0158]]) and one that has to
-model a key collection per user, plus a rotation rule ([[0160]]) that means
+model a key collection per user, plus a rework rule ([[0160]]) that means
 something different in each case.
 
 ## Implementation
@@ -124,7 +124,7 @@ something different in each case.
       Discord application ([[0159]] currently says "someone")
 - [ ] If the barrier is weaker than assumed — mitigation options costed and a
       decision taken, not just noted
-- [ ] One-active-key-per-account confirmed or replaced, with the rotation-cap
+- [ ] One-active-key-per-account confirmed or replaced, with the rework-cap
       dependency stated
 - [ ] ADR written and cross-linked; [[0158]] and [[0160]] updated if the answers
       change their shape

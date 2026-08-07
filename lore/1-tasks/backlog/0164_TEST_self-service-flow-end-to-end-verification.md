@@ -77,6 +77,26 @@ fails quietly:
   created". Check the surviving key works and the deleted one returns `403`.
 - The standing "users holding more than one key" query returns empty after the
   run.
+- **A user id that is a prefix of another user's id does not touch that other
+  user's key.** `nameQuery` is a prefix match and Discord snowflakes are 17–19
+  digits, so this is the failure mode [[0158]]'s exact-match filter exists to
+  stop, and it is silent and unrecoverable when it fires. Set up two keys whose
+  names stand in a prefix relationship, run issue and rework for the shorter id,
+  and confirm the longer id's key is neither adopted nor deleted. Without this
+  check a regression to a bare `nameQuery` ships unnoticed.
+- **A key issued inside the current quota period cannot be reworked.** Distinct
+  from the check below: that one covers `last_rotated_at`, this one covers the
+  `created_at` fallback, which is the case the original gate let through. Issue a
+  fresh key, attempt a rework the same period, expect `409`.
+- **A hand-deleted key recovers on the reveal path.** Delete a key in the console
+  without touching the registry, then load the dashboard: the user gets a working
+  key back, not a dead id. Verifies the recovery sits on reveal rather than on
+  issuance, where the populated `api_key_id` short-circuits it ([[0160]] Settled
+  #4).
+- **The session cookie survives CloudFront.** A signed-in request reaches the
+  origin still signed in. CloudFront's managed cache policy strips cookies by
+  default, so getting this wrong presents as "every user is permanently signed
+  out" with nothing wrong at the gateway ([[0160]], [[0161]]).
 - No API key value appears in CloudWatch logs or X-Ray traces from any portal
   route.
 - Portal responses are not served from the gateway cache — repeat a key-reveal

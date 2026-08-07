@@ -182,13 +182,23 @@ maps role `api` → CH user `prices_reader` and role `ingestion` →
 order of preference:
 
 1. **New role `portal` → CH user `prices_portal`**, granted on this table only.
-   One line in the `MtlsRole` union, plus a user and a certificate created by
-   whoever owns the shared instance — that handshake is external and needs
-   scheduling, so raise it early.
-2. Grant `prices_reader` `INSERT` on this table — weakens the reader role for
-   every route, not just the portal ones.
+   One line in the `MtlsRole` union, plus a CN in BE's CA namespace, an entry in
+   Caddy's `CLICKHOUSE_CN_USER_MAP`, a CH user and grant, and a secret bundle
+   uploaded by hand per the 0063 issuance runbook — CDK does not manage that
+   material. Four steps across two teams, so raise it early.
+2. Grant `prices_reader` `INSERT ON prices.api_key_registry` — one table, not the
+   estate. **Viable fallback**, and worth being honest about the gap between it
+   and option 1: both identities would live in the same Lambda process, so a
+   compromised `prices-api` reaches either client regardless. What option 1
+   actually buys is attribution in the ClickHouse query log, and keeping the
+   write grant off a credential that BE may reuse elsewhere — not isolation from
+   a compromised handler.
 3. Hand `prices-api` the `ingestion` bundle — gives the partner-facing Lambda
    write access to the whole ingestion estate. Do not.
+
+**Ask for option 1, ship on option 2 if the handshake drags.** Migrating later
+is one grant and one secret; nothing in the schema or the write path changes.
+That keeps this task off the critical path of another team's queue.
 
 ## Acceptance Criteria
 

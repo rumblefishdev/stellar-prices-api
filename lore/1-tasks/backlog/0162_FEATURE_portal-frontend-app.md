@@ -44,7 +44,9 @@ a developer who has never heard of us should get from the landing page to a
 working `curl` in under a minute, which is the whole point of self-service.
 
 The bundle is static and ships to a CDN, so it can hold no secret and make no
-AWS call. It talks only to the backend endpoints, carrying the session cookie.
+AWS call. It talks only to the backend endpoints — mounted at
+**`/api-tokens/api/`** ([[0159]], [[0161]]), same origin as the bundle itself —
+carrying the session cookie.
 
 ## Implementation
 
@@ -60,16 +62,53 @@ AWS call. It talks only to the backend endpoints, carrying the session cookie.
 
 **Follows from the epic, but not stated in it**
 
-- **Framework decision, recorded.** This is the first frontend in the repo —
-  every existing package is Rust and the only TypeScript is CDK in `infra/`. The
-  choice therefore sets a precedent: pick with the workspace's Nx conventions
-  rather than in isolation, and prefer the smallest thing that builds to static
-  files. Two screens do not need a router-heavy SPA.
-- **The build must know it is served from `/api-tokens/`.** Base path in the
-  build config and basename in the router, from the first commit. Without it
+- **Framework — settled 2026-08-07: mirror `soroban-block-explorer`.** That is
+  the sibling repo in the same org (we already consume its `xdr-parser` crate),
+  so the stack is proven, reviewed and familiar to the team rather than newly
+  chosen here:
+
+  | Concern | Choice |
+  | --- | --- |
+  | Framework | React 19 |
+  | Build | Vite 7 + `@vitejs/plugin-react` |
+  | Language | TypeScript 5.9 |
+  | Routing | `react-router-dom` 7 |
+  | UI / styling | MUI 7 + Emotion |
+  | Server state | TanStack Query 5 |
+  | Tests | Vitest 4 + Testing Library |
+  | Orchestration | Nx — `@nx/react`, `@nx/vite`, `@nx/vitest` |
+
+  **This validates [[0161]]'s hosting rather than straining it.** The explorer's
+  `web/` is a plain Vite SPA — `index.html` plus `vite.config.ts`, no Next.js and
+  no SSR — so it builds to static files, which is exactly what S3 + CloudFront
+  serves. Had the reference been an SSR framework, 0161 would have needed
+  reopening.
+
+  Structural precedent worth copying: the explorer splits `web/` (the app) from
+  `libs/ui` (shared components) and `libs/api-types` (shared types). Two screens
+  do not justify all three here — start with the app alone and extract only if a
+  second frontend arrives.
+
+  One deliberate divergence: the explorer hand-maintains `libs/api-types`, but
+  our API publishes its own OpenAPI document at `/api-docs-json` ([[0124]]), so
+  generate the types from the spec instead. Hand-written copies of a published
+  contract are the drift [[0124]] spent a task preventing.
+
+  Note Nx is 22.7.0 here against 22.6.1 there — close enough to share config
+  shapes, worth a glance if a generator behaves unexpectedly.
+
+- **Copy the explorer's dev-proxy pattern.** Its `vite.config.ts` proxies the
+  API paths through the Vite dev server so the browser only ever talks to
+  `localhost` — same-origin locally, no CORS — and injects the dev `x-api-key`
+  **server-side in the Node config**, never into the client bundle. That is the
+  same-origin model [[0161]] gives us in production and the same discipline
+  [[0163]] teaches partners, so local dev and production agree by construction.
+- **The build must know it is served from `/api-tokens/`.** Concretely, with the
+  stack above: `base: '/api-tokens/'` in `vite.config.ts` and
+  `basename="/api-tokens"` on the router. From the first commit — without it
   every asset and route URL points at the domain root and the app breaks the
   moment it is not served from `/`. This is a build setting, not a CloudFront
-  setting — [[0161]] cannot fix it after the fact.
+  setting; [[0161]] cannot fix it after the fact.
 - **Mask the key by default with a reveal toggle and a copy button.** The epic's
   point is that the key is *retrievable*, not that it should sit on screen
   during a screen-share. Copy-to-clipboard is what people actually use.
