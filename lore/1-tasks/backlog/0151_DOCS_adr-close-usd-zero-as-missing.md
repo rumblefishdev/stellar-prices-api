@@ -49,6 +49,20 @@ history:
       `quote_asset_id` would have inherited. Revisit trigger recorded: if 0139's
       repair needs a fact-table migration anyway, doing both at once gets
       cheaper. This ADR now has one real decision in it already.
+  - date: 2026-08-07
+    status: backlog
+    who: okarcz
+    note: >
+      **Table ownership moved out of [[0154]] to [[0167]].** Shape and
+      constraints are unchanged — this is an extraction, not a re-decision. The
+      trigger was [[0165]]: publishing a real peg rate needs the table, 0154 is
+      hard blocked behind [[0111]], and the peg rates live in `oracle_prices`
+      under a 13-month expiry. Checked against the rejection below and it does
+      not re-open it (`close_usd` untouched, nothing NULL published, natural
+      identity key retained) — full check in 0167 §Relationship to 0151. Of the
+      two gating unknowns this decision shrank, 0167 hits **time-resolution**
+      only (settled there, on peg assets where the choice is numerically cheap
+      and the vocabulary carries to 0154) and does **not** hit projection cost.
 ---
 
 # ADR — `close_usd` zero-as-missing
@@ -143,6 +157,26 @@ masquerades as a good value.
 > anyway — two assets are interleaved in one key space, so it might. Doing both
 > in one pass would then be cheaper than doing them separately. Re-ask once 0139
 > has a repair strategy, **not before**.
+>
+> ### 📌 Amendment 2026-08-07 — the table moved to [[0167]]; the decision did not change
+>
+> "Adopt it narrowly inside 0154" is still the decision; only the **task that
+> builds it** moved. 0154's blocker is [[0111]], and that blocker is about the
+> *second pivot tier* adding a join over a 490–545M-row candidate set — it says
+> nothing about the table, nor about a small aggregation of the narrow
+> `oracle_prices` into rate rows. Keeping the two coupled would have cost the
+> depeg-aware peg history, which expires from `oracle_prices` on a 13-month
+> retention (`cleanup-worker/src/lib.rs:24`) starting ~2026-10.
+>
+> **Nothing above is re-opened:** `close_usd` stays non-nullable and written in
+> place, no `NULL` reaches a consumer, the key stays natural identity, and the
+> [[0139]] revisit trigger is untouched (0167 needs no fact-table migration).
+> 0154 keeps the tier and now consumes a table validated before it arrives.
+>
+> Of the two gating unknowns this scoping shrank, 0167 pulls **one** forward —
+> time-resolution — and settles it as *observations + `ASOF` at-or-before +
+> staleness bound*, matching `ch_enrich.rs:434-440`. Projection cost stays with
+> 0154, untouched.
 
 **Full write-up of the idea: [[I-usd-rate-table]]**
 (`0144/notes/I-usd-rate-table.md`).

@@ -117,6 +117,29 @@ Sketch only; measure before committing to a shape.
 
 ### Build it on a rate table — decided 2026-08-06 in [[0151]]
 
+> 📌 **2026-08-07 — the table itself moved to [[0167]]. This task no longer
+> builds it; it consumes it.** The shape and the five constraints below are
+> unchanged and remain authoritative — 0167 implements them verbatim.
+>
+> **Why:** this task is hard blocked behind [[0111]] (constraint 4 below), but
+> that blocker is about *this tier* adding a join over a 490–545M-row candidate
+> set. It does not apply to the table, nor to populating **peg-asset** rates,
+> which come from a small aggregation of the narrow `oracle_prices` and touch no
+> hot path. Meanwhile those peg rates expire: `oracle_prices` retention is 13
+> months (`cleanup-worker/src/lib.rs:24`), so coverage from ~2025-09 starts
+> ageing out around 2026-10. [[0165]]/[[0168]] need them published before then.
+>
+> **What this buys 0154:** the riskiest piece — new authoritative infrastructure
+> — lands early, separately, and pre-validated against today's `close_usd`
+> (constraint 5) instead of shipping alongside a new hot-path join in one blocked
+> change. 0167 also settles the **time-resolution** unknown on peg assets, where
+> a ~0.1% band makes the choice numerically cheap; this tier inherits the rule
+> rather than deciding it under pressure on volatile assets. **Projection cost
+> stays here, unresolved and unchanged.**
+>
+> 0167 populates `method='oracle'`/`hops=0` for peg assets only. **`pivot` and
+> `pivot2` remain this task's to write.**
+
 **Do not implement this as another pass over the fact table.** Introduce a
 narrow **USD rate table** and make this tier a lookup against it. Full reasoning
 and the rejected wider refactor: [[0151]]; origin note:
