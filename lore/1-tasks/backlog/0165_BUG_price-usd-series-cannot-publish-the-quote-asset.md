@@ -25,6 +25,18 @@ history:
       cross-checked against their 52,373-pool CSV: **0 of 1,433 USDC-legged
       pools are priceable in any window**, which is 67.8% of every never-priced
       pool they have.
+  - date: 2026-08-07
+    status: backlog
+    who: okarcz
+    note: >
+      **Fully verified.** All three prod claims re-run: `price_usd_series` USDC
+      = 0 rows (20.77M rows scanned, so the view was really evaluated),
+      `price_ohlcv_1d` USDC-as-base = 0 candles, and the [[0139]] collision guard
+      passes — USDC is `asset_id = 3`, uniquely USDC. Every CSV figure
+      re-derived independently and reproduces exactly. A **second control**
+      emerged from that re-derivation and is now the strongest evidence here:
+      USDC at the canonical issuer is 0/1,433 priceable, USDC at 56 other
+      issuers is 228/233 (97.9%) — same asset code, preference the sole variable.
 ---
 
 # `price_usd_series` can never publish USDC
@@ -47,24 +59,42 @@ exactly `$1`.
 
 The asset we price everything else *against* is the one asset we cannot publish.
 
-## Evidence (prod, 2026-08-06)
+## Evidence (prod, 2026-08-06 — re-verified 2026-08-07)
 
 ```
 price_usd_series WHERE asset_code='USDC' AND issuer='GA5ZSEJY…KZVN'   -> 0 rows
 price_ohlcv_1d   WHERE asset_id = <USDC>                              -> 0 candles
+prices.assets    WHERE asset_id = <USDC>                              -> n=1, ['USDC']
 ```
 
 Zero candles with USDC as base, at any time, so this is structural rather than a
-gap in a window.
+gap in a window. The first query scanned 20.77M rows, so the view was genuinely
+evaluated rather than short-circuited on an empty predicate.
+
+✅ **The `asset_id` collision guard passes.** USDC resolves to **`asset_id = 3`**,
+which is uniquely USDC — so the zero-candle count above is trustworthy. This
+check is mandatory, not decorative: per Trap 1 below, while [[0139]] is open no
+count keyed on a resolved `asset_id` means anything without it. (A low id is
+expected here — USDC is among the first assets ever registered — unlike the `TF →
+19` case that triggered the collision hypothesis.)
 
 **Cross-checked against BE's per-pool CSV** (52,373 pools,
 `pool-price-coverage-2026-08-06.csv`):
 
 | Pool set | count | `priceable_48h` | `priceable_90d` | `priceable_ever` |
 |---|---|---|---|---|
-| has a **USDC** leg | 1,433 | **0** | **0** | **0** |
-| has an **XLM** leg | 11,686 | 3,111 | 7,390 | 11,505 |
+| has a **USDC** leg (canonical issuer) | 1,433 | **0** | **0** | **0** |
+| has a **native XLM** leg | 11,686 | 3,111 | 7,390 | 11,505 |
 | neither | 39,255 | 19,864 | — | 38,755 |
+
+> ✅ **Every figure in this section re-derived from the CSV on 2026-08-07** and
+> reproduces exactly, including the blast radius and top-three below.
+>
+> ⚠️ **The XLM row means *native* XLM** — `kind = 'native'`, equivalently
+> `code = 'XLM' AND issuer = ''`. Counting *any* leg coded `XLM` instead gives
+> 12,129 / 3,306 / 7,674 / 11,928 and silently disagrees with this table. The
+> looser predicate was tried first during re-derivation and produced exactly that
+> mismatch, so state the definition when quoting these numbers.
 
 **Zero out of 1,433 in every window** is a categorical signature, not a
 distribution. Nothing that depends on trading activity, enrichment lag or
@@ -81,6 +111,26 @@ USDT is *also* a peg asset handled by the *same* enrichment tier — but it is n
 the top-preference quote, so it still appears as a **base** in USDT/USDC and
 USDT/XLM pairs, gets rows, and prices fine. The defect tracks **quote
 preference**, not peg status, not asset class.
+
+### A second control isolates the variable completely (added 2026-08-07)
+
+Split the USDC-legged pools by **issuer**, holding the asset code fixed:
+
+| USDC leg | pools | `priceable_ever` | |
+|---|---|---|---|
+| at the **canonical** issuer | 1,433 | **0** | **0.0%** |
+| at **56 other** issuers | 233 | 228 | **97.9%** |
+
+Same asset code, same peg semantics, same enrichment path, same view. The *only*
+difference is that the canonical issuer is our top-preference quote and the
+others are not — so the others still appear as a base, get rows, and price
+normally.
+
+This is stronger than the USDT control, which varies asset *and* preference
+together. Here the asset code is held constant and preference is the sole
+variable, across 1,666 pools: **0.0% vs 97.9%**. If the cause were anything about
+stablecoins, peg handling, LP fills or resolver reach, both halves would behave
+the same way.
 
 ### Blast radius
 
