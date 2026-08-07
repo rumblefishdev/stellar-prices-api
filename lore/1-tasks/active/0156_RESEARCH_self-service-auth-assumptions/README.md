@@ -2,7 +2,7 @@
 id: "0156"
 title: "Confirm the two flagged self-service auth assumptions — Discord account verification and one-key-per-account"
 type: RESEARCH
-status: backlog
+status: active
 related_adr: []
 related_tasks: ["0157", "0158", "0159", "0160"]
 tags: [layer-docs, priority-high, effort-small, milestone-M3, epic-self-service-onboarding, discord, auth, abuse-prevention, blocks-build]
@@ -18,6 +18,13 @@ history:
       First task of the Self-Service Onboarding epic. Owns the two items the
       epic marks "confirm before build" — the only unresolved points in an
       otherwise settled scope.
+  - date: 2026-08-07
+    status: active
+    who: akot
+    note: >
+      Promoted as a directory per the task's own note (RESEARCH collects
+      Q-/R-/S- notes). Starts the Self-Service Onboarding epic — 0157-0164
+      all wait on the account model this task settles.
 ---
 
 # Confirm the self-service auth assumptions
