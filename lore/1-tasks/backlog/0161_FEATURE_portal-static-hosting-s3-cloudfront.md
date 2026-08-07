@@ -19,6 +19,15 @@ history:
       deployed" half, folded in here because both are static assets behind the
       same distribution. Independent of the backend — can land early and serve
       a placeholder.
+  - date: 2026-08-07
+    status: backlog
+    who: akot
+    note: >
+      Scope widened at the 2026-08-07 meeting: several frontends will share this
+      domain, so the path layout becomes a convention rather than a one-off.
+      First prefix is `/api-tokens/`. The API shares the distribution as a second
+      origin, which settles [[0159]]'s route placement and removes CORS from
+      portal traffic.
 ---
 
 # Portal hosting — S3 + CloudFront
@@ -58,17 +67,27 @@ failure [[0124]] spent a task preventing.
 - **Private bucket, no public objects**, access via Origin Access Control only.
   A public bucket is the default way this ships wrong and it is audited by
   Tranche 3 AC 6.
-- **Path layout is the decision to record**: portal at `/`, Swagger UI at
-  `/docs`, or two subdomains. Recommendation is one distribution and two paths —
-  one certificate, one DNS record, one invalidation step.
-- **Consider routing the portal's backend through the same distribution**
-  (`/api/*` → API Gateway as a second origin). If the portal and its endpoints
-  share an origin, the browser makes same-origin requests and CORS ([[0126]])
-  never enters the picture for portal traffic, and session cookies stop being
-  cross-site. This is the counterpart to [[0159]]'s route-placement decision —
-  take both together, once.
-- **SPA fallback** if [[0162]] uses client-side routing: 403/404 from S3 must
-  return `index.html`, or a refresh on any sub-page 404s.
+- **Path layout — settled 2026-08-07.** Several frontends will share this
+  domain, so this is a convention the next app joins, not a one-off:
+
+  ```
+  <domain>/api-tokens/*  → S3   (this portal — first tenant)
+  <domain>/docs/*        → S3   (Swagger UI)
+  <domain>/v1/*          → API Gateway (data routes)
+  <domain>/<next-app>/*  → S3   (later frontends, same shape)
+  ```
+
+  One distribution, one certificate, one DNS record, one invalidation step.
+  Write the rule down so the second frontend does not invent a second scheme.
+- **The API shares the distribution as a second origin** — this is what makes
+  the portal's requests same-origin, so CORS ([[0126]]) never enters the picture
+  for portal traffic and the session cookie can be `SameSite=Lax` ([[0159]]).
+  Settled together with [[0159]]'s route placement, as one decision.
+- **SPA fallback is per prefix, not global.** With one app it was enough to map
+  403/404 to `/index.html`. With several, a refresh on `/api-tokens/dashboard`
+  has to land on `/api-tokens/index.html` — the root document would boot the
+  wrong app. That needs either a behaviour per prefix or a CloudFront Function
+  rewriting the path. Real work; it was not here before.
 - **Certificate in `us-east-1`** for CloudFront regardless of where the rest of
   the stack lives, and coordinated with [[0126]], which owns the domain
   decision for the API. Same zone, same ownership conversation — do not open a
@@ -86,8 +105,12 @@ failure [[0124]] spent a task preventing.
       public access
 - [ ] Swagger UI served from the same distribution, rendering the live spec from
       `/api-docs-json` rather than a checked-in copy
-- [ ] Path layout (and whether the backend shares the origin) decided and
-      recorded
+- [ ] Portal served from `/api-tokens/`; path layout recorded as a convention
+      the next frontend can follow without inventing a second scheme
+- [ ] API reachable through the same distribution, so portal requests are
+      same-origin and no CORS is involved
+- [ ] A refresh on a sub-page of `/api-tokens/` returns that app's
+      `index.html`, not the root document
 - [ ] CI deploys the bundle and invalidates the cache; no manual step
 - [ ] Certificate valid and auto-renewing; domain coordinated with [[0126]]
 - [ ] URL recorded in `docs/scf/api-endpoints.md`

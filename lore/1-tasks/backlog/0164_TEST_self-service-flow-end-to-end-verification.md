@@ -18,6 +18,13 @@ history:
       Closes the epic. Verifies all five of its acceptance criteria against the
       deployed system and produces the artefacts a Tranche 3 submission cites.
       Last task in the 0156–0164 set.
+  - date: 2026-08-07
+    status: backlog
+    who: akot
+    note: >
+      Updated after the 2026-08-07 meeting: rework is in scope so its checks are
+      unconditional, and the concurrency check now verifies the reconciler
+      rather than a store-level guarantee, which ClickHouse cannot give.
 ---
 
 # Self-service flow — end-to-end verification
@@ -63,13 +70,22 @@ is the moment we see it directly.
 **Checks that are ours rather than the epic's**, because they are the ways this
 fails quietly:
 
-- Two parallel first sign-ins produce **one** key, not two.
+- Two parallel first sign-ins converge on **one** key. Note that this verifies
+  the reconciler, not a store guarantee: ClickHouse has no conditional insert
+  ([[0158]] "Accepted consequences"), so the correct outcome is "two keys may be
+  created, one survives and the loser is deleted", not "only one is ever
+  created". Check the surviving key works and the deleted one returns `403`.
+- The standing "users holding more than one key" query returns empty after the
+  run.
 - No API key value appears in CloudWatch logs or X-Ray traces from any portal
   route.
 - Portal responses are not served from the gateway cache — repeat a key-reveal
   call from two sessions and confirm each gets its own.
-- Rotation refused a second time within the period, with the next eligible date
-  *(depends on [[0160]] Open #1 — skip with a note if rotation is deferred)*.
+- Rework refused a second time within the period, returning `409` with the next
+  eligible date. Verify the meeting's worked example: reworked on 3 August →
+  refused until 1 September.
+- The rework modal will not confirm until `delete-key` is typed, and the old key
+  returns `403` immediately after.
 
 **Evidence to keep:** the curl transcripts, the dashboard screenshots, the
 documented URL, and the date each was taken. Store under `docs/scf/`, and
@@ -80,7 +96,8 @@ omitted is a finding waiting for the reviewer.
 
 - [ ] All eight epic-mapped checks executed against production and recorded
       with dates
-- [ ] The four quiet-failure checks executed and recorded
+- [ ] The quiet-failure checks executed and recorded, including the reconciler
+      convergence and the `delete-key` rework path
 - [ ] Run performed with a fresh Discord account, and the friction it met
       written down for [[0156]]
 - [ ] Evidence file in `docs/scf/`, with the portal URL and every command a

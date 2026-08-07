@@ -75,6 +75,22 @@ appears as an acceptance criterion in every iteration of our design response
     quota). Capping rotation frequency to once/month sidesteps that: AWS's native per-key
     monthly quota is enough on its own once rotation can't happen more often than the quota
     resets anyway.
+  - **When the next rework becomes available (settled 2026-08-07):** the boundary is the
+    **first day of the month following the last rework, 00:00 UTC** — the same instant the
+    AWS quota period rolls over. Worked example: a key reworked on **3 August** cannot be
+    reworked again until **1 September**. One date to render, not two: on 1 September the
+    user regains both a clean quota counter and the right to rework.
+  - **Rework flow on the dashboard (settled 2026-08-07):** the action opens a modal that
+    states plainly that the current key is deleted and **stops working immediately** —
+    anything using it breaks the moment the user confirms. The confirm button stays disabled
+    until the user types the phrase **`delete-key`**. A refused rework (one already performed
+    in the current quota period) renders the next eligible date, not a generic error.
+  - **Revocation is not covered.** This heading says "Rotation/revocation", but only rotation
+    is specified above and rotation does not appear in the acceptance criteria below. A user
+    whose key leaks mid-period cannot invalidate it and must wait for the period boundary.
+    API Gateway exposes `UpdateApiKey(enabled=false)`, which invalidates a key in one call
+    without touching the quota counter, so this is cheap to add and does not need to share
+    the rework cap. Recorded here as a known gap, deliberately deferred.
 
 ## Rate limiting — override the design doc's default
 

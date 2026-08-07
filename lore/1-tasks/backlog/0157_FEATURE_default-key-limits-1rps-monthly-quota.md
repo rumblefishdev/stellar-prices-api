@@ -20,6 +20,14 @@ history:
       the portal — the limits must exist before any key can be self-issued
       against them. Quota fixed at 100 000/month (top of the epic's range) and
       burst at 5; both confirmed by Adam on 2026-08-06.
+  - date: 2026-08-07
+    status: backlog
+    who: akot
+    note: >
+      Added the calendar-alignment of the monthly quota (it settles [[0160]]'s
+      period-boundary question), and corrected the [[0121]] sequencing note —
+      the partner key's daily quota kills a sustained 100 rps run after ~100
+      seconds, which the original note did not catch.
 ---
 
 # Default key limits: 1 req/s + monthly quota
@@ -96,13 +104,29 @@ conclusion stands on the remaining arguments.
   `selfServiceMonthlyQuota` (100000), validated like the existing key fields
   (positive integers, burst ≥ rate) plus
   `selfServiceRateLimit <= apiKeyRateLimit` — cheap, and it catches the "100
-  instead of 1" typo this whole task exists to prevent.
+  instead of 1" typo this whole task exists to prevent. Note that this last
+  check also encodes "self-service is never faster than the manual tier", which
+  is intended but will fail synth if the partner tier is ever lowered.
+- **Settle the config naming scheme while adding the second tier.** The existing
+  fields are already inconsistent (`apiGatewayPartnerDailyQuota` versus
+  `apiKeyRateLimit` / `apiKeyBurstLimit`), and from now on every field has to say
+  which plan it belongs to. Pick one shape here rather than after a third tier
+  makes it expensive.
 - Quota period `apigateway.Period.MONTH`. Note that **a usage plan carries
   exactly one quota** — no daily sub-cap alongside the monthly one — so a key at
   full rate spends the month's allowance in ~28 hours and then waits for the
-  reset. That is only acceptable because [[0160]] caps rotation at once per
-  calendar month; otherwise a user would simply mint a fresh key, which is
-  exactly the loophole the epic's rotation rule closes.
+  reset. That is only acceptable because [[0160]] caps rework at once per quota
+  period; otherwise a user would simply mint a fresh key, which is exactly the
+  loophole the epic's rework rule closes.
+- **The monthly quota is calendar-aligned: it resets on the 1st at 00:00 UTC**,
+  not on a rolling window from key creation. That is what makes [[0160]]'s
+  boundary ("first of the month following the last rework") and the epic's
+  "calendar month" the same date, so there is one date to render, not two.
+  Cheap to confirm on the first deploy — do it rather than assume it.
+- **The quota binds far harder than the rate.** At 1 req/s a key could produce
+  ~2.6M requests/month; the quota stops it at 100 000. So the operative limit a
+  user meets is the quota, and the per-second throttle is what stops them
+  reaching it in an afternoon. Say it that way round in [[0163]].
 - Publish the new plan's id as an SSM parameter alongside `ApiGatewayIdParam`.
   The backend that issues keys ([[0160]]) lives in `ComputeStack`, which is a
   *dependency* of `ApiGatewayStack`, so it cannot read the plan object directly
@@ -129,9 +153,15 @@ conclusion stands on the remaining arguments.
 
 ## Notes
 
-- **Sequencing with [[0121]].** The 100 req/s load test must run against a
-  **manual-tier** key. Pointed at a self-service key it measures our own
-  throttle and reports a failure that is a configuration artefact.
+- **Sequencing with [[0121]] — and the partner key does not solve it either.**
+  The 100 req/s load test must not run against a self-service key, or it just
+  measures our own throttle. But the manual-tier key carries a **10 000/day
+  quota**, which at 100 req/s is exhausted in **100 seconds** — so a sustained
+  test hits `429` from the quota rather than the throttle, and reports the same
+  configuration artefact by a different route. Either give the load test its own
+  quota-free plan, raise the partner quota for the duration, or cap the run
+  below 100 seconds and say so in the report. Belongs in [[0121]]; recorded here
+  because it surfaced while sizing this task.
 - Throttle and quota are evaluated *before* the response cache, so a cached
   response still counts against the caller's quota. Worth stating in the
   quickstart ([[0163]]) — it is the first thing a partner asks.
