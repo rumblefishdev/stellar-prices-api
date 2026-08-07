@@ -4,25 +4,56 @@ on:
   push:
     branches:
       - develop
+    paths:
+      - 'lore/**'
+      - 'tools/scripts/generate-lore-board.mjs'
+      - '.github/workflows/deploy-board.yml'
+  # Self-heal: a run that fails (or never acquires a runner) discards whatever
+  # was queued behind it and nothing retries, so the board would sit stale until
+  # the next merge. Hourly republish bounds that to an hour. GitHub delays or
+  # drops scheduled runs under load — this is a safety net, not the fast path.
+  schedule:
+    - cron: '17 * * * *'
+  # Manual republish without an empty commit.
+  workflow_dispatch:
 
 permissions:
   contents: read
   pages: write
   id-token: write
 
+# cancel-in-progress MUST stay false (task 0166). Cancelling a run that is mid
+# `actions/deploy-pages` leaves the Pages deployment wedged in
+# `deployment_in_progress`; the next run then polls it for the full 600s default
+# timeout, dies with "Timeout reached, aborting!", and the site keeps serving the
+# last deployment that completed. Measured in this repo (runs #259/#260 built 151
+# and 160 tasks, both logged "Reported success!", neither went live) and in the BE
+# repo, whose #1067 deploy was cancelled mid-flight and whose #1068 then timed out.
+# One run executes and one pends; a new arrival cancels the older PENDING run, never
+# the running one. Discarding a pending run is safe — each run checks out its own
+# trigger commit, and a later develop commit is a strict superset of an earlier one.
 concurrency:
   group: pages
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Load-bearing: this repo's DEFAULT branch is master, and schedule /
+          # workflow_dispatch runs check out the default branch — not the branch in
+          # the push filter above. Without this pin those runs would publish
+          # master's lore over develop's and report success while doing it.
+          ref: develop
 
       - uses: actions/setup-node@v4
         with:
           node-version-file: .nvmrc
+          cache: npm
+
+      - run: npm ci
 
       - name: Generate board data
         run: npm run board
