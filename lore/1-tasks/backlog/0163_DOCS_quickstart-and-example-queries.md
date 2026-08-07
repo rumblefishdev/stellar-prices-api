@@ -18,6 +18,14 @@ history:
       Epic AC 3. Two named deliverables from the agreed scope (quickstart,
       example queries) that carry the last step of self-service: turning an
       issued key into a working request.
+  - date: 2026-08-07
+    status: backlog
+    who: akot
+    note: >
+      Corrected the auth rule: the epic's blanket "every request requires a key"
+      is already untrue of the deployed API, and this task both stated the rule
+      and used a keyless route as an example. Also pinned to [[0161]]'s
+      `/api-tokens/` prefix.
 ---
 
 # Quickstart and example queries
@@ -54,9 +62,26 @@ through all that — not a second copy of it.
 
 - **Lead with a single copy-pasteable `curl`** that includes the base URL and
   the `x-api-key` header and returns real data. Everything else is second.
-- **State the auth rule and its failure explicitly**: every request needs a key;
-  a missing key is `403`. That is the epic's own line, and it is the first
-  error anyone hits.
+- **There are now two working base URLs — document exactly one.** [[0161]] puts
+  CloudFront in front of the API, so `/v1/*` answers both on the distribution's
+  domain and on the raw API Gateway invoke URL. The documented one is the
+  **CloudFront domain**: it is the address in the Tranche 3 submission, it shares
+  a hostname with the portal and the docs, and it keeps the `/production` stage
+  segment — an implementation detail — out of partners' code.
+
+  This has to reach the spec, not just this page. [[0124]] stamps `API_BASE_URL`
+  into the OpenAPI `servers` block, which is the URL Swagger UI's "Try it out"
+  calls. If that still points at the invoke URL while the quickstart teaches the
+  CloudFront domain, our own documentation demonstrates a different origin from
+  the one we publish — and it fails silently, because both work.
+- **State the auth rule and its failure explicitly**: data routes need a key; a
+  missing key is `403`. It is the first error anyone hits.
+  **Name the exceptions, because the epic does not.** The epic says "every API
+  request requires a key", which is already untrue of the deployed API:
+  `/health` is a keyless mock and `/api-docs-json` is deliberately anonymous
+  ([[0124]]). Both appear in the examples below, so a quickstart that repeats
+  the epic verbatim would contradict its own commands — exactly the kind of
+  inaccuracy AC 3 exists to prevent.
 - **Explain the limits in the same place**: 1 req/s sustained (burst 5),
   the monthly quota, what `429` means, and the reset. Add the non-obvious one —
   **a cached response still counts against the quota**, because throttling and
@@ -81,11 +106,14 @@ through all that — not a second copy of it.
 - [ ] Quickstart takes a reader from a fresh key to a successful response with
       one copy-paste
 - [ ] Auth (`x-api-key`, `403` without it) and limits (1 req/s, monthly quota,
-      `429`, cached responses still counted) all stated
+      `429`, cached responses still counted) all stated, **with `/health` and
+      `/api-docs-json` named as the keyless exceptions**
 - [ ] Example queries cover current price, OHLCV, batch and health, and every
       one of them was run against production before publishing
 - [ ] Guidance not to embed the key in a browser bundle
 - [ ] Links to Swagger UI and `/api-docs-json` rather than restating the spec
+- [ ] One documented base URL, and the OpenAPI `servers` block agrees with it —
+      Swagger UI's "Try it out" hits the same origin the quickstart teaches
 - [ ] Reachable from the portal dashboard and from the documented URL
 - [ ] Single source of truth for the text — no second copy to drift
 - [ ] Epic AC 3 satisfied

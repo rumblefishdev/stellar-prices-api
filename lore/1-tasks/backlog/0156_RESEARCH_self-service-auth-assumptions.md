@@ -51,7 +51,7 @@ whole abuse model on its own.
 The second item is smaller but structural. "One active key per Discord account"
 is written as a **recommendation** to confirm, not a decision — and it is the
 difference between a registry keyed by Discord ID ([[0158]]) and one that has to
-model a key collection per user, plus a rotation rule ([[0160]]) that means
+model a key collection per user, plus a rework rule ([[0160]]) that means
 something different in each case.
 
 ## Implementation
@@ -64,21 +64,46 @@ something different in each case.
   cannot clear.
 - Note that our OAuth flow may not even see it: Discord OAuth authenticates a
   *Discord account*, not membership of a *server*. If the barrier we are relying
-  on is a Stellar-server-level gate, then unless we check guild membership via
-  the `guilds` scope we are not benefiting from it at all. **Answer this
-  explicitly** — it may be the real finding.
+  on is a Stellar-server-level gate, then unless we check guild membership we
+  are not benefiting from it at all. **Answer this explicitly** — it may be the
+  real finding.
+- **Establish the server's posture first, then pick the scope.** Doing it the
+  other way round produces a consent screen that buys nothing: if the server is
+  open and joining is one click, a membership check costs friction and proves
+  nothing.
+- **If a membership check is warranted, use `guilds.members.read`, not
+  `guilds`.** `guilds` returns the full list of servers the user belongs to —
+  data we have no reason to see. `guilds.members.read` asks about one named
+  guild and returns its member object, with three fields worth more than a
+  yes/no:
+  - `pending` — `true` while the user has not cleared Membership Screening. If
+    Stellar's server has screening on, this *is* the barrier the epic assumes,
+    observable directly. If it is always `false`, there is no screening.
+  - `joined_at` — how long they have been on the server.
+  - `roles` — whatever the server gates behind roles.
+
+  The guild ID becomes configuration (SSM, like the rest), not a constant.
+- **Account age is free.** A Discord snowflake encodes its creation timestamp,
+  so a minimum-account-age rule needs no extra scope and no extra consent screen
+  beyond the `identify` we already request. This makes one mitigation option
+  much cheaper than it looks.
 - If the barrier turns out to be weak or invisible to us, do not silently absorb
-  the risk: write down the options (require `guilds` membership check, account
-  age minimum, lower the free quota further, re-introduce a manual approval for
-  the first key) with cost, and let the epic owner pick.
+  the risk: write down the options (membership check, account age minimum, lower
+  the free quota further, re-introduce a manual approval for the first key) with
+  cost, and let the epic owner pick.
 
 **Question 2 — one active key per account**
 
-- Confirm with the epic owner. Take note that the once-per-calendar-month
-  rotation cap ([[0160]]) is only coherent under a one-key model: with multiple
-  concurrent keys, AWS's native per-key monthly quota stops bounding a user's
-  total consumption, which is precisely the aggregation work the epic's rotation
-  rule exists to avoid.
+- **This is lighter than it looks: the epic contradicts itself.** Under "Auth &
+  key handling" it is a "**Recommendation** … confirm before build", but under
+  **Out of scope** it is stated as settled fact — "Org/team accounts — one key
+  per Discord account only". The second reading is also the only one under which
+  the rework cap makes sense. Treat this as a one-sentence confirmation with the
+  epic owner, not as an open design question.
+- Take note that the once-per-quota-period rework cap ([[0160]]) is only
+  coherent under a one-key model: with multiple concurrent keys, AWS's native
+  per-key monthly quota stops bounding a user's total consumption, which is
+  precisely the aggregation work the epic's rework rule exists to avoid.
 
 **Output**
 
@@ -93,9 +118,13 @@ something different in each case.
       and written down, with the date it was checked
 - [ ] Explicitly answered: does our OAuth flow observe that barrier, or only
       Discord account existence?
+- [ ] Scope decision recorded as `identify` alone, or `identify` +
+      `guilds.members.read` — never `guilds`
+- [ ] Owner named for the Stellar Discord relationship and for registering the
+      Discord application ([[0159]] currently says "someone")
 - [ ] If the barrier is weaker than assumed — mitigation options costed and a
       decision taken, not just noted
-- [ ] One-active-key-per-account confirmed or replaced, with the rotation-cap
+- [ ] One-active-key-per-account confirmed or replaced, with the rework-cap
       dependency stated
 - [ ] ADR written and cross-linked; [[0158]] and [[0160]] updated if the answers
       change their shape

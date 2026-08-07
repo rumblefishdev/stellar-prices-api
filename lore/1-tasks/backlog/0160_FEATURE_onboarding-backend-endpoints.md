@@ -1,14 +1,15 @@
 ---
 id: "0160"
-title: "Onboarding backend — issue key, reveal it, report usage, rotate once a month"
+title: "Onboarding backend — issue key, reveal it, report usage, rework once a quota period"
 type: FEATURE
 status: backlog
-related_adr: ["0007"]
+related_adr: ["0007", "0008"]
 related_tasks: ["0156", "0157", "0158", "0159", "0162"]
-tags: [layer-backend, priority-high, effort-large, milestone-M3, epic-self-service-onboarding, api-gateway, usage-plan, iam, dashboard]
+tags: [layer-backend, priority-high, effort-medium, milestone-M3, epic-self-service-onboarding, api-gateway, usage-plan, iam, dashboard]
 milestone: 3
 links:
   - "../../../docs/epics/self-service-onboarding.md"
+  - "../../../packages/prices-api"
   - "../../../infra/src/lib/stacks/api-gateway-stack.ts"
 history:
   - date: 2026-08-06
@@ -20,9 +21,17 @@ history:
       registry record. Depends on [[0157]] (the plan to issue into),
       [[0158]] (the registry) and [[0159]] (who is calling). The rotation
       scope question is parked for the team — see "Open".
+  - date: 2026-08-07
+    status: backlog
+    who: akot
+    note: >
+      Meeting outcome: handlers go into the existing `prices-api` axum router,
+      rework ships in Tranche 3, and the period boundary is settled. Opens #2,
+      #3 and #4 are closed; #1 narrows to revocation only. Estimate drops from
+      large to medium.
 ---
 
-# Onboarding backend — issue, reveal, usage, rotate
+# Onboarding backend — issue, reveal, usage, rework
 
 ## Summary
 
@@ -31,26 +40,47 @@ operations, one Lambda, one IAM policy:
 
 | Operation | Epic reference | AWS call |
 | --- | --- | --- |
-| Issue a key on first sign-in, no approval | line 22 | `CreateApiKey` + `CreateUsagePlanKey` |
-| Show the key, now and later | lines 46–52 | `GetApiKey(includeValue=true)` |
-| Usage against quota | lines 53–59 | `GetUsage` |
-| Rotate, once per calendar month | lines 63–74 | `DeleteApiKey` + issue again |
+| Issue a key on first sign-in, no approval | "Agreed scope", key issued automatically | `CreateApiKey` + `CreateUsagePlanKey` |
+| Show the key, now and later | "Key delivery" | `GetApiKey(includeValue=true)` |
+| Usage against quota | "Usage dashboard" | `GetUsage` |
+| Rework, once per quota period | "Rotation/revocation" | `DeleteApiKey` + issue again |
 
-None of these can happen in the browser: they need IAM credentials, which is
-the reason the epic introduces a backend Lambda that the component list did not
-previously contain.
+Epic references are by heading, not line number: the in-repo copy is
+prettier-formatted and its line numbers drift from any other copy of the same
+document.
+
+None of these can happen in the browser: they need IAM credentials. **The
+handlers live in the existing `prices-api` axum router** (2026-08-07 meeting) —
+same Lambda, same crate, same build as the data routes, so `ErrorEnvelope` and
+the `utoipa` spec generation come for free.
 
 ## Context
 
 The epic settles two things that would otherwise be design work here. Key
 delivery is **not** a one-time reveal — AWS stores key values retrievably, so
 the dashboard can show the key whenever the user asks, and we never keep a copy
-ourselves. And rotation is **capped at once per calendar month**, because a
-fresh key gets a clean quota counter: `GetUsage` and quota are scoped to
+ourselves. And rework is **capped at once per quota period**, because a fresh
+key gets a clean quota counter: `GetUsage` and quota are scoped to
 `(usagePlanId, apiKeyId)`, so without the cap a user could burn the monthly
-allowance and mint their way out of it. Capping rotation to the quota's own
-period makes AWS's native accounting sufficient and avoids building cumulative
+allowance and mint their way out of it. Capping rework to the quota's own period
+makes AWS's native accounting sufficient and avoids building cumulative
 cross-key aggregation.
+
+**The boundary is settled (2026-08-07): a rework is allowed only when
+`coalesce(last_rotated_at, created_at)` falls before the current quota period
+start** — the 1st of the month, 00:00 UTC, the same instant the AWS quota period
+rolls over. Worked example from the meeting: reworked on 3 August → next rework
+available 1 September. One date for the dashboard to render, because the quota
+counter and the rework right reset together.
+
+The `created_at` fallback is load-bearing, not defensive. Issuance never writes
+`last_rotated_at`, so gating on that column alone leaves it null for every fresh
+key — a user could take a key on 1 August, spend the whole 100 000, and rework on
+2 August into a clean counter, since quota is scoped to `(usagePlanId,
+apiKeyId)`. Any key acquired inside the current period has
+`created_at >= periodStart`, so with the fallback it can never be reworked inside
+that period, whether it came from issuance or from an earlier rework. One key per
+period, one quota.
 
 ## Implementation
 
@@ -72,16 +102,31 @@ cross-key aggregation.
   parameters, so all callers collapse onto one entry: a cached key-reveal
   response would hand one user another user's key. Set `cachingEnabled: false`
   on every portal method and `Cache-Control: no-store` on every response.
-- **IAM scoped to the two resources it needs**: `apigateway:POST` on `/apikeys`
-  and on `/usageplans/{selfServicePlanId}/keys`, `GET` on `/apikeys/{id}` and on
+- **IAM scoped to the resources it needs**: `apigateway:POST` on `/apikeys`
+  and on `/usageplans/{selfServicePlanId}/keys`, `GET` on **`/apikeys`** (the
+  collection — the reconciler lists it), on `/apikeys/{id}` and on
   `/usageplans/{selfServicePlanId}/usage`, `DELETE` on `/apikeys/{id}`. Nothing
   wildcard — Tranche 3 AC 6 audits exactly this.
+  The collection-level `GET` is not optional: without it every issue path and
+  the reveal-path recovery below fail at runtime with `AccessDenied`, because
+  both begin by listing keys by name.
+- **Write down the limit of that scoping.** `POST /apikeys` cannot be narrowed:
+  there is no resource ARN for "only keys this function created", and `DELETE`
+  narrows no further than `/apikeys/*`. The policy will be as tight as the
+  service allows and no tighter. Mitigation is tagging every created key and
+  attaching it only to the self-service plan. Record this as a consciously
+  accepted limit — an auditor who finds it unexplained will read it as an
+  oversight.
+- **These handlers now sit in the partner-facing Lambda.** Keep the portal
+  routes in their own module and their own path prefix so the blast radius of a
+  change is legible, and so the IAM additions above are obviously attributable
+  to them rather than to the data routes.
 - **Name the created key after the Discord user id** (and tag it). If the
   registry table is ever lost, the keys remain attributable; without it they are
   anonymous strings in an AWS account.
-- **The rotation refusal needs a real response**, not a generic error: which
-  date the next rotation becomes available, so the portal can render it. Decide
-  the status code and keep it consistent with the API's `ErrorEnvelope` shape.
+- **The rework refusal needs a real response**, not a generic error: `409` plus
+  `next_eligible_at` in the `ErrorEnvelope` `details` field, so [[0162]] can
+  render the date. See "Settled 2026-08-07" #3.
 - **`GetUsage` lags.** It is not a real-time counter; the dashboard should say
   so rather than have a user conclude the numbers are wrong. Decide the wording
   once, here, and let [[0162]] render it.
@@ -89,29 +134,50 @@ cross-key aggregation.
   cross-stack reference — `ComputeStack` is a dependency of `ApiGatewayStack`
   and cannot import from it.
 - **Never log a key value**, including in error paths and X-Ray annotations.
-- Issue and rotate must be safe under double-submit: the conditional write from
-  [[0158]] is the guard, and rotation updates `lastRotatedAt` in the same
-  operation that records the new key id.
+- **Issue and rework must be safe under double-submit, and the store no longer
+  helps.** ClickHouse has no conditional insert ([[0158]] "Accepted
+  consequences"), so the guard is deterministic key naming plus the reconciler:
+  look up `discord-<userId>-key` in API Gateway before creating — **exact-match
+  the name in the client, because `nameQuery` is a prefix match** — and converge
+  on the earliest-created key if two appear. Rework records the new key id and
+  `last_rotated_at` in one insert, and deletes the old key only afterwards.
 
-## Open — to settle before/while building
+## Settled 2026-08-07
 
-Parked deliberately (Adam, 2026-08-06) rather than assumed:
+The four items parked on 2026-08-06 resolve as follows.
 
-1. **Rotation vs revocation, and whether rotation is Tranche 3 scope at all.**
-   The epic's heading says "Rotation/revocation" but only rotation is described,
-   and rotation does not appear in the epic's acceptance criteria (lines
-   126–135). The gap that matters: a developer whose key leaks mid-month is
-   blocked by the once-a-month cap. **To settle with the team.**
-2. **Where "once a month" is measured from** — calendar month, 30 days since
-   `lastRotatedAt`, or the AWS quota period boundary. Recommendation: the quota
-   period boundary, since that is the counter the rule exists to protect.
-3. **Status code for a refused rotation** — `409` with the next eligible date
-   reads better than `429`, which implies "retry shortly" when the wait is
-   weeks.
-4. **Registry pointing at a key that no longer exists in AWS** (deleted by hand
-   in the console). Re-issue silently and log, or fail to support?
-   Recommendation: re-issue, so our own operation does not leave a user with a
-   dead portal.
+1. **Rework ships in Tranche 3.** It is an atomic swap: the old key is deleted
+   and a new one issued in the same operation, so the user is never without a
+   working key. The cap blocks the *next* rework, not the replacement.
+   Confirmation UX is [[0162]]'s: a modal stating that the old key stops working
+   immediately, with the confirm button disabled until the user types
+   `delete-key`.
+2. **Period boundary** — `coalesce(last_rotated_at, created_at)` must fall before
+   the current quota period start (1st of the month, 00:00 UTC). See Context for
+   why the fallback is not optional.
+3. **Refused rework returns `409`**, not `429`: `429` implies "retry shortly"
+   when the wait can be weeks. Body is the existing `ErrorEnvelope`
+   (`packages/prices-api/src/common/errors.rs`) with a new canonical code and
+   `next_eligible_at` in `details` — the envelope already has the slot, so
+   nothing new is invented.
+4. **Registry pointing at a key that no longer exists in AWS** — do not re-issue
+   blindly. Look the key up by its exact name (`discord-<userId>-key`) first,
+   adopt it if present, create only if genuinely absent.
+
+   **Hang this off the reveal path, not the issue path.** A hand-deleted key
+   presents as a registry row with a populated `api_key_id`, so [[0158]]'s issue
+   flow short-circuits at step 1 and its reconciler never runs — the user would
+   keep receiving a dead key id indefinitely. The trigger is `GetApiKey`
+   returning 404 on reveal: re-enter the issue flow from its lookup step, then
+   write the adopted or newly created id back to the registry.
+
+## Open
+
+**Revocation.** Rework is capped, so a developer whose key leaks on the 3rd
+cannot invalidate it until the 1st. `UpdateApiKey(enabled=false)` invalidates a
+key in one call without touching the quota counter, so it need not share the
+rework cap and is cheap to add. Deferred at the 2026-08-07 meeting and recorded
+in the epic as a known gap — revisit if it bites in practice.
 
 ## Acceptance Criteria
 
@@ -120,22 +186,40 @@ Parked deliberately (Adam, 2026-08-06) rather than assumed:
 - [ ] Key value retrievable repeatedly by its owner and by nobody else
 - [ ] Usage endpoint returns requests used and remaining for the current quota
       period, sourced from `GetUsage`
-- [ ] Rotation issues a new key and deletes the old one; a second attempt in the
-      same quota period is refused with the next eligible date *(subject to
-      Open #1)*
-- [ ] No portal response is cached at the gateway; verified against the
-      synthesized template, not assumed
-- [ ] IAM policy names specific resources; no wildcard on `apigateway:*`
+- [ ] Rework issues a new key and deletes the old one in one operation; a second
+      attempt in the same quota period is refused with `409` and
+      `next_eligible_at`
+- [ ] Reworking on 3 August refuses until 1 September, and succeeds on 1
+      September — the meeting's worked example, tested
+- [ ] Reconciler adopts an existing `discord-<userId>-key` instead of creating a
+      duplicate, and converges two concurrent first sign-ins onto one key
+- [ ] No portal response is cached at **either** layer, verified against the
+      synthesized template rather than assumed: `cachingEnabled: false` on every
+      portal method at the gateway, **and** a CloudFront behaviour for the portal
+      prefix that disables caching and forwards the session cookie ([[0161]]).
+      CloudFront is now the outer layer and its default cache policy strips
+      cookies — with the managed default the session never reaches the origin
+      and every request reads as signed-out, while an un-`no-store`d key-reveal
+      response would be served from the CDN to the next caller
+- [ ] IAM policy names specific resources; no wildcard on `apigateway:*`, and
+      the un-narrowable `POST /apikeys` is documented as an accepted limit
 - [ ] Key values never appear in logs or traces
 - [ ] Epic AC 2 and AC 4 satisfied end to end
 
 ## Notes
 
-- The old key is **deleted** on rotation, per the epic's reasoning. Anything
-  using it stops working immediately — the portal must say so before the user
-  confirms.
-- A user who rotates on the last day of a quota period gets a fresh counter and
+- The old key is **deleted** on rework, per the epic's reasoning. Anything using
+  it stops working immediately — the modal in [[0162]] must say so before the
+  user confirms, which is what the `delete-key` phrase is there to enforce.
+- A user who reworks on the last day of a quota period gets a fresh counter and
   a period reset a day later. Not an exploit (the reset was coming anyway), but
   write it down so it is not re-raised as one.
+- **These endpoints run on API Gateway's control plane**, which is throttled far
+  more aggressively than the data plane and limited per *account* — the same
+  budget our own CDK deploys draw on. A dashboard load already costs
+  `GetApiKey` + `GetUsage`. Gateway-side caching is forbidden here for security
+  reasons, so the mitigation is a short in-process cache for `GetUsage` plus
+  backoff on throttling. Nobody has costed this yet; do it before the portal
+  sees real traffic.
 - [[0162]] consumes all four endpoints; keep the response shapes stable once it
   starts.

@@ -17,6 +17,14 @@ history:
       The visible half of the epic — the "small portal" of its summary line.
       Consumes [[0159]] for sign-in and all four [[0160]] endpoints; deploys
       into [[0161]]'s distribution.
+  - date: 2026-08-07
+    status: backlog
+    who: akot
+    note: >
+      Meeting outcome: served from the `/api-tokens/` prefix, so the build needs
+      a base path from day one. Rework confirmation is a modal gated on typing
+      `delete-key`. Rework is in Tranche 3 scope — the conditional wording is
+      removed.
 ---
 
 # Portal frontend
@@ -36,7 +44,9 @@ a developer who has never heard of us should get from the landing page to a
 working `curl` in under a minute, which is the whole point of self-service.
 
 The bundle is static and ships to a CDN, so it can hold no secret and make no
-AWS call. It talks only to the backend endpoints, carrying the session cookie.
+AWS call. It talks only to the backend endpoints — mounted at
+**`/api-tokens/api/`** ([[0159]], [[0161]]), same origin as the bundle itself —
+carrying the session cookie.
 
 ## Implementation
 
@@ -47,16 +57,58 @@ AWS call. It talks only to the backend endpoints, carrying the session cookie.
   the dashboard — this is not a one-time reveal.
 - Dashboard shows usage against the rate limit and quota, sourced from
   `GetUsage` via the backend.
-- A "generate new key" action, with the once-a-month rule surfaced *(subject to
-  [[0160]] Open #1 — the team has not settled whether rotation ships in
-  Tranche 3)*.
+- A rework action ("generate new key"), with the once-a-quota-period rule
+  surfaced. In Tranche 3 scope as of 2026-08-07.
 
 **Follows from the epic, but not stated in it**
 
-- **Framework decision, recorded.** This is the first frontend in the repo, so
-  the choice sets a precedent — pick with the workspace's Nx conventions rather
-  than in isolation, and prefer the smallest thing that builds to static files.
-  Two screens do not need a router-heavy SPA.
+- **Framework — settled 2026-08-07: mirror `soroban-block-explorer`.** That is
+  the sibling repo in the same org (we already consume its `xdr-parser` crate),
+  so the stack is proven, reviewed and familiar to the team rather than newly
+  chosen here:
+
+  | Concern | Choice |
+  | --- | --- |
+  | Framework | React 19 |
+  | Build | Vite 7 + `@vitejs/plugin-react` |
+  | Language | TypeScript 5.9 |
+  | Routing | `react-router-dom` 7 |
+  | UI / styling | MUI 7 + Emotion |
+  | Server state | TanStack Query 5 |
+  | Tests | Vitest 4 + Testing Library |
+  | Orchestration | Nx — `@nx/react`, `@nx/vite`, `@nx/vitest` |
+
+  **This validates [[0161]]'s hosting rather than straining it.** The explorer's
+  `web/` is a plain Vite SPA — `index.html` plus `vite.config.ts`, no Next.js and
+  no SSR — so it builds to static files, which is exactly what S3 + CloudFront
+  serves. Had the reference been an SSR framework, 0161 would have needed
+  reopening.
+
+  Structural precedent worth copying: the explorer splits `web/` (the app) from
+  `libs/ui` (shared components) and `libs/api-types` (shared types). Two screens
+  do not justify all three here — start with the app alone and extract only if a
+  second frontend arrives.
+
+  One deliberate divergence: the explorer hand-maintains `libs/api-types`, but
+  our API publishes its own OpenAPI document at `/api-docs-json` ([[0124]]), so
+  generate the types from the spec instead. Hand-written copies of a published
+  contract are the drift [[0124]] spent a task preventing.
+
+  Note Nx is 22.7.0 here against 22.6.1 there — close enough to share config
+  shapes, worth a glance if a generator behaves unexpectedly.
+
+- **Copy the explorer's dev-proxy pattern.** Its `vite.config.ts` proxies the
+  API paths through the Vite dev server so the browser only ever talks to
+  `localhost` — same-origin locally, no CORS — and injects the dev `x-api-key`
+  **server-side in the Node config**, never into the client bundle. That is the
+  same-origin model [[0161]] gives us in production and the same discipline
+  [[0163]] teaches partners, so local dev and production agree by construction.
+- **The build must know it is served from `/api-tokens/`.** Concretely, with the
+  stack above: `base: '/api-tokens/'` in `vite.config.ts` and
+  `basename="/api-tokens"` on the router. From the first commit — without it
+  every asset and route URL points at the domain root and the app breaks the
+  moment it is not served from `/`. This is a build setting, not a CloudFront
+  setting; [[0161]] cannot fix it after the fact.
 - **Mask the key by default with a reveal toggle and a copy button.** The epic's
   point is that the key is *retrievable*, not that it should sit on screen
   during a screen-share. Copy-to-clipboard is what people actually use.
@@ -68,9 +120,13 @@ AWS call. It talks only to the backend endpoints, carrying the session cookie.
 - **Render the `GetUsage` lag honestly** — a "last updated" line, using the
   wording [[0160]] settles, so the dashboard does not look broken when it
   trails a live test by a few minutes.
-- **Rotation needs a confirmation step** that says plainly that the old key
-  stops working immediately, and the refusal path needs to render the next
-  eligible date rather than a generic error.
+- **Rework confirmation — specified 2026-08-07.** The action opens a modal that
+  states plainly that the current key is deleted and stops working immediately,
+  so anything using it breaks the moment the user confirms. The confirm button
+  stays **disabled until the user types `delete-key`**. Disable it again on
+  submit so a double-click cannot fire two reworks. The refusal path renders
+  `next_eligible_at` from [[0160]]'s `409`, not a generic error — for a key
+  reworked on 3 August that reads "1 September".
 - **Link out to the quickstart ([[0163]]) and Swagger UI ([[0161]])** from the
   dashboard — the key is only useful next to the thing that shows what to call.
 - **Signed-out and error states**: session expired, backend unavailable, Discord
@@ -83,8 +139,11 @@ AWS call. It talks only to the backend endpoints, carrying the session cookie.
 - [ ] Returning sign-in shows the same key again
 - [ ] Dashboard shows requests used against quota for the current period, the
       reset date, and the 1 req/s rate limit
-- [ ] Rotation flow warns before acting and renders the refusal with a date
-      *(pending [[0160]] Open #1)*
+- [ ] App works when served from `/api-tokens/` — assets and routes resolve,
+      and a refresh on a sub-page returns to the same screen
+- [ ] Rework modal states that the old key dies immediately, and confirm is
+      disabled until `delete-key` is typed
+- [ ] Refused rework renders the next eligible date, not a generic error
 - [ ] No secrets, no AWS calls and no third-party scripts in the bundle
 - [ ] Session expiry and backend-error states handled, not blank screens
 - [ ] Works on a phone — a reviewer will open it on one
