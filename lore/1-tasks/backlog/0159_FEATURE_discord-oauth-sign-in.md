@@ -123,6 +123,14 @@ it decides whether this flow requests the `guilds` scope or only `identify`.
       throttle here and `cachingEnabled: false` from [[0160]] declared together
       per route, since the array is keyed by `resourcePath + httpMethod` and
       assigned wholesale (`api-gateway-stack.ts`)
+- [ ] Those entries are declared **outside** the `cacheEnabled` branch, the way
+      `apiDocsSettings` already is. The stack builds the full array only inside
+      `if (cacheEnabled)` and its `else` emits just
+      `[stageWideThrottle, apiDocsSettings]`, so entries added to the `if` arm
+      alone vanish wherever `apiGatewayCacheEnabled` is false — leaving the
+      anonymous, keyless sign-in routes unthrottled in exactly the configuration
+      where every request is a billed Lambda invocation. The existing code
+      comments this trap; inherit the requirement rather than rediscover it
 - [ ] Discord app registration and redirect-URI ownership documented, including
       what changes when the custom domain lands
 - [ ] Scope set matches [[0156]]'s conclusion

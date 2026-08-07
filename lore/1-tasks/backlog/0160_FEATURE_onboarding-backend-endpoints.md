@@ -93,9 +93,13 @@ the rework right reset together.
   response would hand one user another user's key. Set `cachingEnabled: false`
   on every portal method and `Cache-Control: no-store` on every response.
 - **IAM scoped to the resources it needs**: `apigateway:POST` on `/apikeys`
-  and on `/usageplans/{selfServicePlanId}/keys`, `GET` on `/apikeys/{id}` and on
+  and on `/usageplans/{selfServicePlanId}/keys`, `GET` on **`/apikeys`** (the
+  collection — the reconciler lists it), on `/apikeys/{id}` and on
   `/usageplans/{selfServicePlanId}/usage`, `DELETE` on `/apikeys/{id}`. Nothing
   wildcard — Tranche 3 AC 6 audits exactly this.
+  The collection-level `GET` is not optional: without it every issue path and
+  the reveal-path recovery below fail at runtime with `AccessDenied`, because
+  both begin by listing keys by name.
 - **Write down the limit of that scoping.** `POST /apikeys` cannot be narrowed:
   there is no resource ARN for "only keys this function created", and `DELETE`
   narrows no further than `/apikeys/*`. The policy will be as tight as the
@@ -145,10 +149,15 @@ The four items parked on 2026-08-06 resolve as follows.
    `next_eligible_at` in `details` — the envelope already has the slot, so
    nothing new is invented.
 4. **Registry pointing at a key that no longer exists in AWS** — do not re-issue
-   blindly. Run [[0158]]'s reconciler: look the key up by its name
-   (`discord-<userId>`) first, adopt it if present, create only if genuinely
-   absent. The same routine covers a half-finished issuance and a hand-deleted
-   key, so it is written once.
+   blindly. Look the key up by its exact name (`discord-<userId>-key`) first,
+   adopt it if present, create only if genuinely absent.
+
+   **Hang this off the reveal path, not the issue path.** A hand-deleted key
+   presents as a registry row with a populated `api_key_id`, so [[0158]]'s issue
+   flow short-circuits at step 1 and its reconciler never runs — the user would
+   keep receiving a dead key id indefinitely. The trigger is `GetApiKey`
+   returning 404 on reveal: re-enter the issue flow from its lookup step, then
+   write the adopted or newly created id back to the registry.
 
 ## Open
 
@@ -172,8 +181,14 @@ in the epic as a known gap — revisit if it bites in practice.
       September — the meeting's worked example, tested
 - [ ] Reconciler adopts an existing `discord-<userId>` key instead of creating a
       duplicate, and converges two concurrent first sign-ins onto one key
-- [ ] No portal response is cached at the gateway; verified against the
-      synthesized template, not assumed
+- [ ] No portal response is cached at **either** layer, verified against the
+      synthesized template rather than assumed: `cachingEnabled: false` on every
+      portal method at the gateway, **and** a CloudFront behaviour for the portal
+      prefix that disables caching and forwards the session cookie ([[0161]]).
+      CloudFront is now the outer layer and its default cache policy strips
+      cookies — with the managed default the session never reaches the origin
+      and every request reads as signed-out, while an un-`no-store`d key-reveal
+      response would be served from the CDN to the next caller
 - [ ] IAM policy names specific resources; no wildcard on `apigateway:*`, and
       the un-narrowable `POST /apikeys` is documented as an accepted limit
 - [ ] Key values never appear in logs or traces

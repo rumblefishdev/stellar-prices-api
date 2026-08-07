@@ -80,6 +80,13 @@ appears as an acceptance criterion in every iteration of our design response
     AWS quota period rolls over. Worked example: a key reworked on **3 August** cannot be
     reworked again until **1 September**. One date to render, not two: on 1 September the
     user regains both a clean quota counter and the right to rework.
+  - **Rework is a swap, not a delete-and-wait (settled 2026-08-07):** the old key is
+    deleted and a new one issued in the same operation, so a user is never left without
+    a working key. The cap blocks the _next_ rework, not the replacement. Eligibility is
+    measured from `coalesce(last_rotated_at, created_at)`, so a key issued inside the
+    current period cannot be reworked either — without that fallback a user could take a
+    key, exhaust the quota and rework into a clean counter within the same period, which
+    is the loophole this cap exists to close.
   - **Rework flow on the dashboard (settled 2026-08-07):** the action opens a modal that
     states plainly that the current key is deleted and **stops working immediately** —
     anything using it breaks the moment the user confirms. The confirm button stays disabled

@@ -71,14 +71,31 @@ failure [[0124]] spent a task preventing.
   domain, so this is a convention the next app joins, not a one-off:
 
   ```
-  <domain>/api-tokens/*  → S3   (this portal — first tenant)
-  <domain>/docs/*        → S3   (Swagger UI)
-  <domain>/v1/*          → API Gateway (data routes)
-  <domain>/<next-app>/*  → S3   (later frontends, same shape)
+  <domain>/api-tokens/*   → S3            (this portal — first frontend)
+  <domain>/docs/*         → S3            (Swagger UI bundle)
+  <domain>/portal/*       → API Gateway   (OAuth callback + the four 0160 endpoints)
+  <domain>/v1/*           → API Gateway   (partner data routes)
+  <domain>/api-docs-json  → API Gateway   (root-level — the spec Swagger UI fetches)
+  <domain>/health         → API Gateway   (root-level)
+  <domain>/<next-app>/*   → S3            (later frontends, same shape)
   ```
 
   One distribution, one certificate, one DNS record, one invalidation step.
   Write the rule down so the second frontend does not invent a second scheme.
+
+  Two rows here are easy to omit and both break something silently:
+
+  - **The portal's own API prefix.** [[0159]] places the sign-in and endpoint
+    routes under a distinct prefix; without a behaviour for it they fall through
+    to the S3 default, and the same-origin property that [[0159]]'s
+    `SameSite=Lax` and the "no CORS" claim below both rest on never holds.
+    `/portal/*` is the proposal — confirm it, and record the same string in
+    [[0159]] so the two cannot drift.
+  - **The root-level API routes.** `/api-docs-json` and `/health` are mounted on
+    the API root, not under `/v1`
+    (`api-gateway-stack.ts` — `this.api.root.addResource('api-docs-json')`), so
+    a table that only routes `/v1/*` sends them to S3. The Swagger UI AC below
+    then fails: the page loads and its spec fetch 404s.
 - **The API shares the distribution as a second origin** — this is what makes
   the portal's requests same-origin, so CORS ([[0126]]) never enters the picture
   for portal traffic and the session cookie can be `SameSite=Lax` ([[0159]]).
@@ -86,8 +103,11 @@ failure [[0124]] spent a task preventing.
 - **SPA fallback is per prefix, not global.** With one app it was enough to map
   403/404 to `/index.html`. With several, a refresh on `/api-tokens/dashboard`
   has to land on `/api-tokens/index.html` — the root document would boot the
-  wrong app. That needs either a behaviour per prefix or a CloudFront Function
-  rewriting the path. Real work; it was not here before.
+  wrong app. **`customErrorResponses` cannot do this**: they are configured on
+  the distribution and apply to every behaviour, so there is no per-prefix error
+  mapping to reach for. The options are a CloudFront Function on viewer request
+  rewriting the path, or handling it at the origin. Real work; it was not here
+  before.
 - **Certificate in `us-east-1`** for CloudFront regardless of where the rest of
   the stack lives, and coordinated with [[0126]], which owns the domain
   decision for the API. Same zone, same ownership conversation — do not open a
@@ -108,7 +128,10 @@ failure [[0124]] spent a task preventing.
 - [ ] Portal served from `/api-tokens/`; path layout recorded as a convention
       the next frontend can follow without inventing a second scheme
 - [ ] API reachable through the same distribution, so portal requests are
-      same-origin and no CORS is involved
+      same-origin and no CORS is involved — including the portal's own route
+      prefix and the root-level `/api-docs-json`, not just `/v1/*`
+- [ ] The portal prefix's behaviour disables caching and forwards the session
+      cookie; a signed-in request reaches the origin still signed in ([[0160]])
 - [ ] A refresh on a sub-page of `/api-tokens/` returns that app's
       `index.html`, not the root document
 - [ ] CI deploys the bundle and invalidates the cache; no manual step
