@@ -66,10 +66,23 @@ request for** ([[0150]], consequently dropped to priority-low).
 > ⚠️ **Do not quote 44.4% → 96.0% as this task's headroom.** The spread between
 > "48h" and "ever" is largely pools whose legs *stopped* being priced — quite
 > possibly dead long-tail pools that stopped trading at all, in which case
-> pricing them helps nobody. **Answer O1 first:** of the pools priceable "ever"
-> but not within 48h, how many still trade? BE appear to hold the per-pool list;
-> ask before measuring it ourselves. Until then the honest claim is "moves the
-> 44.4%", magnitude unknown.
+> pricing them helps nobody. ~~**Answer O1 first**~~ — **O1 ANSWERED by BE
+> 2026-08-06**, and the answer splits by denominator: of the 27,287 pools
+> priceable-ever-but-not-in-48h, **7,004 (25.7%) still traded within 30 days**.
+> 25,890 pools are active in 30d, 69.3% of those price today, and if this task
+> flips the 7,004 then coverage reaches **~96% of active pools / ~57% of all
+> pools**. So "toward 96% or toward ~50%" resolves as *both*, depending which
+> denominator you quote. BE's caveat: their activity flag is pool-level LP state
+> change, so it is a **lower bound** on asset-level activity.
+>
+> ⚠️ **Second correction, 2026-08-06 — subtract [[0165]] before claiming any of
+> this.** BE's per-pool CSV shows **0 of 1,433 USDC-legged pools priceable in
+> any window** — 67.8% of every never-priced pool they hold. Those are **not
+> resolver-limited**: their candles are already priced, and the unpriceable leg
+> is **USDC itself**, which `price_usd_series` structurally cannot publish
+> because the view emits base assets only. **This task fixes none of them.**
+> Any headroom figure quoted here must exclude the 0165 population, or it
+> credits the pivot hop with a win that belongs to a one-line view fix.
 
 ## Context
 
