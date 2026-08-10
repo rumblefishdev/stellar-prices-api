@@ -910,7 +910,8 @@ composes across all six granularities for free — a daily close is the ASOF at
 day-end, which _is_ the last hourly close. Averages do not compose. vwap is
 impossible regardless: oracle observations carry no volume.
 
-⚠️ **Absence is the signal.** Pre-oracle history (before ~2025-09) gets **no
+⚠️ **Absence is the signal.** Pre-oracle history (before **2026-03-11**, the
+measured first reading) gets **no
 row**, and the consumer's own peg fallback applies. Synthetic `method = 'peg'`
 rows at `$1` are deliberately **not** written — that would make a fallback
 indistinguishable from a measurement, which is the `close_usd = 0` mistake in a

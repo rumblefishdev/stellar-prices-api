@@ -33,7 +33,7 @@ The last open acceptance criterion of [[0114]], deferred here so 0114 could clos
 (its core defect is fixed, deployed, and verified). 0114's own analysis downgraded
 this from a blocker to *"a cheap regression guard… not a blocker, does not gate the
 recovery"* — the pre-Soroban tail is legitimately USD-less (2018–2019 has almost no
-USDC and `oracle_prices` starts 2025-09), so the gate should **warn, not hard-fail**
+USDC and `oracle_prices` starts **2026-03-11**, measured), so the gate should **warn, not hard-fail**
 by default. It belongs in 0088's flow, which runs ~2026-08-01, and can only be
 exercised once that pre-roll runs — which is why it doesn't fit as a 0114 blocker.
 

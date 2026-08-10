@@ -181,7 +181,8 @@ So a real USDC/USD rate — 0.999x, not a hardcoded `1` — is written to
    Publishing `USDC = 1.0000` beside those candles is internally inconsistent.
 2. ⏳ **`oracle_prices` expires.** Retention is **13 months**
    (`cleanup-worker/src/lib.rs:24`), by monthly partition drop. Coverage starts
-   ~2025-09, so `202509` ages out around **2026-10/11**. Every month this waits,
+   **2026-03-11** (measured on prod 2026-08-10 — see the correction below), so
+   the earliest partition `202603` ages out around **2027-04**. Every month this waits,
    a month of depeg-aware history is lost for good — the same
    "we had the data and let it expire" shape as the 2026-07-20 cleanup incident.
 
@@ -274,7 +275,7 @@ either. Record it rather than mitigate it.
    assets with `method = 'oracle'`, `hops = 0`, `reference_asset = ''`.
    `oracle_worker` is the natural home: it already owns this asset list and this
    concept. Must run well inside the 13-month window; incremental by watermark.
-3. **Deep-history rows** — pre-oracle buckets (before ~2025-09) get **no row**.
+3. **Deep-history rows** — pre-oracle buckets (before **2026-03-11**) get **no row**.
    Absence is the signal; the consumer's peg fallback covers it. Do *not* write
    synthetic `method = 'peg'` rows at `$1` — that would make a fallback
    indistinguishable from a measurement, which is the [[0165]] / `close_usd = 0`
@@ -307,7 +308,9 @@ either. Record it rather than mitigate it.
       construction**: the population only ever copies rows that exist in
       `oracle_prices`, so a bucket with no oracle reading gets no row, and there
       is no synthetic-`peg`-row path to write one. Not yet asserted against real
-      pre-2025-09 data — that check belongs with the prod backfill below.
+      pre-2026-03-11 data — DISCHARGED on prod 2026-08-10: `min(timestamp)` in
+      `usd_rate` is `2026-03-11 14:00:00`, matching `oracle_prices` exactly, and
+      `count() WHERE timestamp < '2020-01-01'` is 0.
 - [ ] Reproduces today's `close_usd` for the oracle and peg tiers on a sample
       window (0154 constraint 5), on CH **26.3.10.60**. **Requires prod data —
       operator-run, see §Prod backfill.** This is the gate before anything
@@ -323,7 +326,8 @@ prod it copies the whole surviving `oracle_prices` window in one pass — which 
 the point, given the 13-month clock. Nothing is deployed by merging this; the
 population runs when `oracle-worker` next executes against prod, or on demand.
 
-⏳ **Do this before ~2026-10**, or `202509` is gone.
+⏳ ~~Do this before ~2026-10, or `202509` is gone.~~ **CORRECTED — the real
+deadline is ~2027-04.** See §Coverage correction. Done anyway on 2026-08-10.
 
 **Gate before any consumer trusts it** (0154 constraint 5 — reproduce today's
 `close_usd` from the stored rate):

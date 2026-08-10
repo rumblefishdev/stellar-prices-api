@@ -139,7 +139,7 @@ Sketch only; measure before committing to a shape.
 > set. It does not apply to the table, nor to populating **peg-asset** rates,
 > which come from a small aggregation of the narrow `oracle_prices` and touch no
 > hot path. Meanwhile those peg rates expire: `oracle_prices` retention is 13
-> months (`cleanup-worker/src/lib.rs:24`), so coverage from ~2025-09 starts
+> months (`cleanup-worker/src/lib.rs:24`), so coverage from **2026-03-11** starts
 > ageing out around 2026-10. [[0165]]/[[0168]] need them published before then.
 >
 > **What this buys 0154:** the riskiest piece — new authoritative infrastructure
