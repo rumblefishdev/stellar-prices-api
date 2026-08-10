@@ -275,9 +275,18 @@ SETTINGS index_granularity = 8192;
 --   makes a fallback indistinguishable from a measurement, which is precisely
 --   the close_usd = 0 mistake (one value meaning several things) in a new place.
 --
---   version — the write time, so a later correction of the same
---   (identity, timestamp) wins. Re-running the population is therefore
---   idempotent: identical content, and RMT collapses on the ORDER BY key.
+--   ⚠️ `method` IS PART OF THE SORTING KEY, deliberately. RMT dedups on the
+--   sorting key, so without it a 'pivot' row written by 0154 at the same
+--   (identity, timestamp) as a measured 'oracle' reading would silently REPLACE
+--   it — and the winner would be whichever was written later, not whichever is
+--   better evidence. With `method` in the key the two coexist and the consumer
+--   chooses. Fixed while the table was still empty; changing a sorting key
+--   afterwards means a rebuild.
+--
+--   version — the write time. A re-run writes nothing (the copy skips
+--   observations already stored with the same value), and a genuine upstream
+--   CORRECTION at an already-stored timestamp differs in value, so it is
+--   re-copied and its higher version wins.
 ----------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS prices.usd_rate (
@@ -294,7 +303,7 @@ CREATE TABLE IF NOT EXISTS prices.usd_rate (
 )
 ENGINE = ReplacingMergeTree(version)
 PARTITION BY toYYYYMM(timestamp)
-ORDER BY (asset_kind, asset_code, issuer_address, contract_address, timestamp)
+ORDER BY (asset_kind, asset_code, issuer_address, contract_address, timestamp, method)
 SETTINGS index_granularity = 8192;
 
 ----------------------------------------------------------------------

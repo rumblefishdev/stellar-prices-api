@@ -71,7 +71,7 @@ async fn rate_rows(client: &Client) -> Vec<(u32, f64, String, u8)> {
 
 #[tokio::test]
 #[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
-async fn copies_oracle_readings_then_resumes_from_the_watermark() {
+async fn copies_oracle_readings_and_re_runs_without_duplicating() {
     let _guard = DB_LOCK.lock().await;
     let client = fresh_prices_schema().await;
     seed_usdc(&client, 3).await;
@@ -89,12 +89,12 @@ async fn copies_oracle_readings_then_resumes_from_the_watermark() {
         .unwrap();
 
     let first = writer
-        .populate_usd_rate_from_oracle(&[usdc()])
+        .populate_usd_rate_from_oracle(&[usdc()], "reflector")
         .await
         .unwrap();
     assert_eq!(first.identities, 1);
-    assert_eq!(first.watermark_before, Some(0), "nothing stored yet");
-    assert_eq!(first.watermark_after, 1750003600);
+    assert_eq!(first.rows_inserted, 2, "both readings copied");
+    assert_eq!(first.newest, vec![("USDC".to_string(), 1750003600)]);
 
     let rows = rate_rows(&client).await;
     assert_eq!(rows.len(), 2, "both readings copied");
@@ -104,10 +104,10 @@ async fn copies_oracle_readings_then_resumes_from_the_watermark() {
 
     // Re-run with no new readings: idempotent, no duplicates.
     let second = writer
-        .populate_usd_rate_from_oracle(&[usdc()])
+        .populate_usd_rate_from_oracle(&[usdc()], "reflector")
         .await
         .unwrap();
-    assert_eq!(second.watermark_before, Some(1750003600), "watermark held");
+    assert_eq!(second.rows_inserted, 0, "a no-op re-run writes nothing");
     assert_eq!(
         rate_rows(&client).await.len(),
         2,
@@ -124,10 +124,11 @@ async fn copies_oracle_readings_then_resumes_from_the_watermark() {
         .await
         .unwrap();
     let third = writer
-        .populate_usd_rate_from_oracle(&[usdc()])
+        .populate_usd_rate_from_oracle(&[usdc()], "reflector")
         .await
         .unwrap();
-    assert_eq!(third.watermark_after, 1750007200);
+    assert_eq!(third.rows_inserted, 1, "only the new reading");
+    assert_eq!(third.newest, vec![("USDC".to_string(), 1750007200)]);
     assert_eq!(rate_rows(&client).await.len(), 3, "incremental append");
 }
 
@@ -163,7 +164,7 @@ async fn refuses_to_write_when_the_peg_asset_id_is_shared() {
 
     let writer = OhlcvWriter::new(client.clone());
     let err = writer
-        .populate_usd_rate_from_oracle(&[usdc()])
+        .populate_usd_rate_from_oracle(&[usdc()], "reflector")
         .await
         .expect_err("a shared asset_id must refuse the write");
     let msg = err.to_string();
@@ -174,5 +175,123 @@ async fn refuses_to_write_when_the_peg_asset_id_is_shared() {
         0,
         "refusing means writing NOTHING — a partial write is the failure mode \
          this guard exists to prevent"
+    );
+}
+
+fn usdt() -> AssetIdentity {
+    AssetIdentity::Credit {
+        code: "USDT".to_string(),
+        issuer: prices_clickhouse::USDT_ISSUER.to_string(),
+    }
+}
+
+/// Review finding 2. `write_oracle` is also called by `sdex-backfill` and the
+/// ledger processor's reconcile path, which decode oracle readings from
+/// **historical** ledgers — i.e. with timestamps BELOW the current frontier.
+/// A `max(timestamp)` watermark would skip those forever, and they would then
+/// age out of `oracle_prices` at 13 months: the exact permanent loss this table
+/// exists to prevent. The copy must fill gaps wherever they sit.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn snapshots_a_backdated_reading_that_lands_below_the_frontier() {
+    let _guard = DB_LOCK.lock().await;
+    let client = fresh_prices_schema().await;
+    seed_usdc(&client, 3).await;
+    let writer = OhlcvWriter::new(client.clone());
+
+    client
+        .query(
+            "INSERT INTO prices.oracle_prices (timestamp, asset_id, oracle_name, price_usd, raw_data) \
+             VALUES (1750003600, 3, 'reflector', 1.0004, '')",
+        )
+        .execute()
+        .await
+        .unwrap();
+    writer
+        .populate_usd_rate_from_oracle(&[usdc()], "reflector")
+        .await
+        .unwrap();
+
+    // A backfill now writes an OLDER reading — below the frontier just set.
+    client
+        .query(
+            "INSERT INTO prices.oracle_prices (timestamp, asset_id, oracle_name, price_usd, raw_data) \
+             VALUES (1740000000, 3, 'reflector', 0.9981, '')",
+        )
+        .execute()
+        .await
+        .unwrap();
+
+    let stats = writer
+        .populate_usd_rate_from_oracle(&[usdc()], "reflector")
+        .await
+        .unwrap();
+    assert_eq!(
+        stats.rows_inserted, 1,
+        "a backdated reading must still be snapshotted — a max() watermark \
+         would skip it, and it then expires from oracle_prices for good"
+    );
+    let rows = rate_rows(&client).await;
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].0, 1740000000, "the older row is present");
+}
+
+/// Review finding 1. Guarding per-identity *inside* the write loop meant a
+/// failure on a later identity left earlier identities already written — a
+/// partial write, which is the failure mode the guard exists to prevent. The
+/// original test only used one identity, so it could not catch this.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn a_collision_on_one_peg_writes_nothing_for_any_peg() {
+    let _guard = DB_LOCK.lock().await;
+    let client = fresh_prices_schema().await;
+    seed_usdc(&client, 3).await;
+    // USDT is clean...
+    client
+        .query(&format!(
+            "INSERT INTO prices.assets \
+             (asset_id, asset_code, asset_type, issuer_address, contract_address, sac_address) \
+             VALUES (111,'USDT','classic','{}','','')",
+            prices_clickhouse::USDT_ISSUER
+        ))
+        .execute()
+        .await
+        .unwrap();
+    // ...but USDC's surrogate id is shared, and USDC is processed FIRST.
+    client
+        .query(
+            "INSERT INTO prices.assets \
+             (asset_id, asset_code, asset_type, issuer_address, contract_address, sac_address) \
+             VALUES (3,'ARBRIDGE','classic','GARB','','')",
+        )
+        .execute()
+        .await
+        .unwrap();
+    client
+        .query(
+            "INSERT INTO prices.oracle_prices (timestamp, asset_id, oracle_name, price_usd, raw_data) \
+             VALUES (1750000000, 3, 'reflector', 0.9993, ''), \
+                    (1750000000, 111, 'reflector', 0.9997, '')",
+        )
+        .execute()
+        .await
+        .unwrap();
+
+    let writer = OhlcvWriter::new(client.clone());
+    let err = writer
+        .populate_usd_rate_from_oracle(&[usdc(), usdt()], "reflector")
+        .await
+        .expect_err("one bad peg must fail the whole pass");
+    assert!(err.to_string().contains("0139"), "{err}");
+
+    let total: u64 = client
+        .query("SELECT count() FROM prices.usd_rate")
+        .fetch_one::<u64>()
+        .await
+        .unwrap();
+    assert_eq!(
+        total, 0,
+        "USDT is clean but must NOT be written — a guard that fails after a \
+         partial write is worse than no guard"
     );
 }

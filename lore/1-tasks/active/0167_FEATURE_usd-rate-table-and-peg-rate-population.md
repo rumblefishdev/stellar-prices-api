@@ -84,6 +84,45 @@ history:
       shared the real `prices` database and truncated each other's fixtures
       under cargo's parallel runner - both failed in ways that looked like
       product bugs until serialised.
+  - date: 2026-08-10
+    status: active
+    who: okarcz
+    note: >
+      REVIEW FIXES (PR #191). Eight findings, all accepted after verifying each
+      against the code rather than on assertion. Two were serious.
+      HIGH 1 - the 0139 guard ran INSIDE the write loop, so a failure on a later
+      identity left earlier ones already written. That is a partial write, the
+      exact failure mode the guard exists to prevent, and my test could not
+      catch it because it used a single identity. Guards now run as a pre-pass
+      over every identity before any write, and the error names every offender.
+      New test asserts a collision on USDC writes nothing for the clean USDT.
+      HIGH 2 - the resume watermark was max(timestamp) with a strict > filter,
+      which silently skips any reading that lands BELOW the frontier. Not
+      hypothetical: write_oracle is also called from sdex-backfill/ingest.rs and
+      prices-ledger-processor/reconcile.rs, which decode oracle readings from
+      HISTORICAL ledgers. Once the 5-minute worker advanced the watermark, any
+      backdated reading would never be snapshotted and would then expire from
+      oracle_prices at 13 months - precisely the permanent loss this table
+      exists to prevent. Replaced with a gap-filling LEFT ANTI JOIN on
+      (timestamp, value); both tables are small so the cost is nil. Anti-joining
+      on the value also makes an upstream correction re-copy and win on version,
+      which the strict > had made unreachable despite the doc claiming it.
+      MEDIUM - `method` added to the sorting key. Without it a 'pivot' row from
+      0154 at the same (identity, timestamp) as a measured 'oracle' reading
+      would silently REPLACE it under RMT, with the later write winning rather
+      than the better evidence. Fixed while the table is still empty; changing a
+      sorting key later means a rebuild.
+      MEDIUM - OracleStats.rates_snapshotted was computed and then dropped by
+      the Lambda entrypoint. Combined with the deliberate non-fatal error path,
+      a permanently broken snapshot would report success on ~288 invocations a
+      day with no counter moving. Now logged and returned, per-identity.
+      LOW - stats counted identities ATTEMPTED not rows written (now
+      rows_inserted); watermark_after was a max() across identities that would
+      hide one stalled peg (now per-identity newest); and oracle_name is a
+      PARAMETER rather than a hardcoded 'reflector', because the enrichment tier
+      reads it from config and the rate we snapshot must be the rate that priced
+      the candles or 0154 constraint 5 compares two different things.
+      Full workspace lib suite + all CH ITs green on the 26.3.10.60 pin.
 ---
 
 # `prices.usd_rate` + peg-asset rate population

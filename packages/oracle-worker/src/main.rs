@@ -45,12 +45,14 @@ async fn main() -> Result<(), lambda_runtime::Error> {
                 queried = stats.queried,
                 written = stats.written,
                 skipped = stats.skipped,
+                rates_snapshotted = stats.rates_snapshotted,
                 "oracle-worker run complete"
             );
             Ok::<serde_json::Value, lambda_runtime::Error>(serde_json::json!({
                 "queried": stats.queried,
                 "written": stats.written,
                 "skipped": stats.skipped,
+                "rates_snapshotted": stats.rates_snapshotted,
             }))
         }
     }))

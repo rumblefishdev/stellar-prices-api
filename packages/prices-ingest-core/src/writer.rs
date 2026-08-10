@@ -357,42 +357,51 @@ impl OhlcvWriter {
     /// Snapshot peg-asset USD rates from `oracle_prices` into `prices.usd_rate`
     /// (task 0167).
     ///
-    /// **Why this copy exists at all.** `oracle_prices` is pruned at
-    /// `INTERVAL 13 MONTH`, so the earliest depeg-aware readings age out
-    /// permanently. A consumer cannot simply join `oracle_prices` instead: the
-    /// published series would *mutate* as rows age out — a bucket reading
-    /// `0.9993` silently reverting to a `$1` fallback later — which is why
-    /// `views.sql` forbids that join. So the rate is snapshotted into a
-    /// forever-retained table, the same way every other USD number is baked
-    /// rather than joined.
+    /// **Why the copy exists.** `oracle_prices` is pruned at `INTERVAL 13
+    /// MONTH`, so the earliest depeg-aware readings age out permanently. A
+    /// consumer cannot join `oracle_prices` instead: the published series would
+    /// *mutate* as rows age out — a bucket reading `0.9993` silently reverting
+    /// to a `$1` fallback — which is why `views.sql` forbids that join.
     ///
-    /// **Incremental by watermark, per identity.** Only observations newer than
-    /// the newest already stored for that identity are copied, so a re-run is
-    /// cheap. It is also idempotent: `usd_rate` is a `ReplacingMergeTree` keyed
-    /// on `(natural identity, timestamp)`, and `version` is the write time, so a
-    /// repeat writes identical content and a genuine later correction of the
-    /// same timestamp wins.
+    /// **Gap-filling, not watermarked.** An earlier version resumed from
+    /// `max(timestamp)` and copied only rows newer than that. That was wrong:
+    /// `write_oracle` is *also* called by `sdex-backfill` and the ledger
+    /// processor's reconcile path, which write readings decoded from
+    /// **historical** ledgers — i.e. BELOW the frontier. Once the scheduled
+    /// worker had advanced the watermark to now, any backdated reading would
+    /// never be snapshotted, and would then age out of `oracle_prices` at 13
+    /// months: precisely the permanent loss this table exists to prevent. The
+    /// copy therefore anti-joins on `(timestamp, value)` and fills any gap
+    /// wherever it sits. Both tables are small (a few assets), so this is cheap.
     ///
-    /// ⚠️ **The 0139 guard is load-bearing, not defensive decoration.**
-    /// `oracle_prices` is keyed on `asset_id`, `usd_rate` is keyed on natural
-    /// identity, so this is the one place the two key spaces meet — and task
-    /// 0139 is confirmed as genuine `asset_id` collisions between unrelated
-    /// assets (measured 2026-08-10: 3,281 ids serving 6,568 identities;
-    /// `asset_id 4194` is both `STW` and `ARBRIDGE`). Translating without
-    /// checking would file one asset's oracle readings under another asset's
-    /// identity — silently, and in a table built to be trusted forever. If the
-    /// mapping is not 1:1 in **both** directions we refuse the write and say so.
+    /// Anti-joining on the **value** as well as the timestamp also means a
+    /// genuine upstream correction at an already-stored timestamp differs, gets
+    /// re-copied, and wins on the higher `version` — while an unchanged reading
+    /// matches and is skipped, keeping re-runs free.
+    ///
+    /// ⚠️ **The 0139 guard runs as a PRE-PASS over every identity before any
+    /// write.** `oracle_prices` is keyed on `asset_id` and `usd_rate` on natural
+    /// identity, so this is the one place the two key spaces meet, and 0139 is
+    /// confirmed as genuine collisions (3,281 ids serving 6,568 identities;
+    /// `asset_id 4194` is both `STW` and `ARBRIDGE`). Translating unchecked
+    /// would file one asset's readings under another's identity, permanently.
+    /// Guarding per-identity *inside* the write loop was the first shape and it
+    /// was wrong twice over: a failure on the first identity silently skipped
+    /// every later one, and a failure on a later identity left the earlier ones
+    /// already written — a partial write, which is the exact failure mode the
+    /// guard exists to prevent. All identities are checked first; if any fails,
+    /// nothing is written and the error names every offender.
     pub async fn populate_usd_rate_from_oracle(
         &self,
         pegs: &[AssetIdentity],
+        oracle_name: &str,
     ) -> Result<UsdRateStats, IngestError> {
-        let mut stats = UsdRateStats::default();
+        // ---- pre-pass: resolve + guard EVERY identity before writing ----
+        let mut resolved: Vec<(&AssetIdentity, u32)> = Vec::with_capacity(pegs.len());
+        let mut problems: Vec<String> = Vec::new();
 
         for identity in pegs {
-            let (kind, code, issuer, contract) = identity_columns(identity);
-
-            // --- 0139 guard, both directions -----------------------------
-            // Forward: this identity must resolve to exactly one asset_id.
+            let (_, code, issuer, contract) = identity_columns(identity);
             let ids: Vec<u32> = self
                 .client
                 .query(
@@ -405,14 +414,12 @@ impl OhlcvWriter {
                 .fetch_all::<u32>()
                 .await?;
             let [asset_id] = ids[..] else {
-                return Err(IngestError::Precondition(format!(
-                    "peg identity {code} resolves to {} asset_ids (expected exactly 1); \
-                     refusing to write usd_rate — see task 0139",
+                problems.push(format!(
+                    "{code} resolves to {} asset_ids (expected 1)",
                     ids.len()
-                )));
+                ));
+                continue;
             };
-            // Reverse: that asset_id must not be shared with another identity,
-            // or its oracle rows are not unambiguously this asset's.
             let sharers: u64 = self
                 .client
                 .query("SELECT count() FROM prices.assets FINAL WHERE asset_id = ?")
@@ -420,32 +427,38 @@ impl OhlcvWriter {
                 .fetch_one::<u64>()
                 .await?;
             if sharers != 1 {
-                return Err(IngestError::Precondition(format!(
-                    "peg identity {code} maps to asset_id {asset_id}, which serves {sharers} \
-                     identities; refusing to write usd_rate — see task 0139"
-                )));
+                problems.push(format!(
+                    "{code} maps to asset_id {asset_id}, shared by {sharers} identities"
+                ));
+                continue;
             }
+            resolved.push((identity, asset_id));
+        }
 
-            // --- watermark ------------------------------------------------
-            let before: u32 = self
-                .client
-                .query(
-                    "SELECT toUInt32(ifNull(max(timestamp), toDateTime(0))) \
-                     FROM prices.usd_rate \
-                     WHERE asset_kind = ? AND asset_code = ? AND issuer_address = ? \
-                       AND contract_address = ? AND method = 'oracle'",
-                )
-                .bind(kind)
-                .bind(code)
-                .bind(issuer)
-                .bind(contract)
-                .fetch_one::<u32>()
-                .await?;
+        if !problems.is_empty() {
+            return Err(IngestError::Precondition(format!(
+                "refusing to write usd_rate — ambiguous asset_id mapping (task 0139): {}",
+                problems.join("; ")
+            )));
+        }
 
-            // --- copy forward ---------------------------------------------
-            // `price_usd > 0` drops unusable readings rather than storing a
-            // zero that a consumer cannot distinguish from a real rate — the
-            // close_usd = 0 mistake, which this table exists partly to avoid.
+        // ---- write: every identity is known-safe by here ----------------
+        let mut stats = UsdRateStats::default();
+        for (identity, asset_id) in resolved {
+            let (kind, code, issuer, contract) = identity_columns(identity);
+
+            let before: u64 = self.count_rates(kind, code, issuer, contract).await?;
+
+            // `price_usd > 0` drops unusable readings rather than storing a zero
+            // a consumer cannot tell from a real rate — the close_usd = 0
+            // mistake, which this table partly exists to avoid.
+            //
+            // `oracle_name` is a parameter, not the literal 'reflector': the
+            // enrichment tier reads it from config (ORACLE_NAME), and the rate
+            // we snapshot must be the rate that priced the candles, or the
+            // 0154-constraint-5 reconciliation compares two different things.
+            // It also keeps the RMT winner deterministic if a second oracle is
+            // ever added, instead of leaving it to insert order.
             self.client
                 .query(
                     "INSERT INTO prices.usd_rate \
@@ -454,18 +467,29 @@ impl OhlcvWriter {
                      SELECT ?, ?, ?, ?, o.timestamp, o.price_usd, 'oracle', '', 0, \
                             toUInt64(now()) \
                      FROM prices.oracle_prices AS o FINAL \
-                     WHERE o.asset_id = ? AND o.price_usd > 0 AND o.timestamp > toDateTime(?)",
+                     LEFT ANTI JOIN \
+                     ( \
+                         SELECT timestamp, usd_rate FROM prices.usd_rate FINAL \
+                         WHERE asset_kind = ? AND asset_code = ? AND issuer_address = ? \
+                           AND contract_address = ? AND method = 'oracle' \
+                     ) AS r ON o.timestamp = r.timestamp AND o.price_usd = r.usd_rate \
+                     WHERE o.asset_id = ? AND o.price_usd > 0 AND o.oracle_name = ?",
                 )
                 .bind(kind)
                 .bind(code)
                 .bind(issuer)
                 .bind(contract)
+                .bind(kind)
+                .bind(code)
+                .bind(issuer)
+                .bind(contract)
                 .bind(asset_id)
-                .bind(before)
+                .bind(oracle_name)
                 .execute()
                 .await?;
 
-            let after: u32 = self
+            let after_rows: u64 = self.count_rates(kind, code, issuer, contract).await?;
+            let newest: u32 = self
                 .client
                 .query(
                     "SELECT toUInt32(ifNull(max(timestamp), toDateTime(0))) \
@@ -481,15 +505,32 @@ impl OhlcvWriter {
                 .await?;
 
             stats.identities += 1;
-            // `min` over a Default-initialised 0 would pin this at 0 forever,
-            // so track the first value explicitly.
-            stats.watermark_before = Some(match stats.watermark_before {
-                Some(w) => w.min(before),
-                None => before,
-            });
-            stats.watermark_after = stats.watermark_after.max(after);
+            stats.rows_inserted += after_rows.saturating_sub(before);
+            stats.newest.push((code.to_string(), newest));
         }
         Ok(stats)
+    }
+
+    async fn count_rates(
+        &self,
+        kind: &str,
+        code: &str,
+        issuer: &str,
+        contract: &str,
+    ) -> Result<u64, IngestError> {
+        Ok(self
+            .client
+            .query(
+                "SELECT count() FROM prices.usd_rate FINAL \
+                 WHERE asset_kind = ? AND asset_code = ? AND issuer_address = ? \
+                   AND contract_address = ? AND method = 'oracle'",
+            )
+            .bind(kind)
+            .bind(code)
+            .bind(issuer)
+            .bind(contract)
+            .fetch_one::<u64>()
+            .await?)
     }
 }
 
@@ -508,14 +549,17 @@ fn identity_columns(id: &AssetIdentity) -> (&str, &str, &str, &str) {
 /// Outcome of a [`OhlcvWriter::populate_usd_rate_from_oracle`] pass.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct UsdRateStats {
-    /// Peg identities processed (each one guarded and copied independently).
+    /// Identities processed. All guards passed, or the call would have errored
+    /// without writing anything.
     pub identities: usize,
-    /// Oldest per-identity watermark before the pass. `None` when no identity
-    /// was processed — distinct from `Some(0)`, which means "processed, and
-    /// nothing had been stored yet".
-    pub watermark_before: Option<u32>,
-    /// Newest per-identity watermark after it.
-    pub watermark_after: u32,
+    /// Rows actually written. This is the number that says whether the pass did
+    /// anything — `identities` counts what was *attempted* and reads the same on
+    /// a run that copied thousands of rows and one that copied none.
+    pub rows_inserted: u64,
+    /// Newest snapshotted observation PER IDENTITY, `(asset_code, timestamp)`.
+    /// Deliberately not a `max()` across identities: that would report a healthy
+    /// frontier while one peg was silently stalled at zero.
+    pub newest: Vec<(String, u32)>,
 }
 
 #[derive(Debug, Serialize, clickhouse::Row)]

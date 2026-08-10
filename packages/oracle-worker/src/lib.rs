@@ -34,6 +34,12 @@ pub const DEFAULT_SOROBAN_RPC: &str = "https://mainnet.sorobanrpc.com";
 /// can grow independently of the mapping.
 pub const TRACKED_SYMBOLS: &[&str] = &["XLM", "USDC", "USDT"];
 
+/// The `oracle_prices.oracle_name` this worker writes, and the one the task-0167
+/// snapshot copies. Must match the enrichment tier's `ORACLE_NAME` (default
+/// `reflector`) — the rate we snapshot has to be the rate that priced the
+/// candles, or 0154's constraint-5 reconciliation compares two different things.
+pub const ORACLE_NAME: &str = "reflector";
+
 /// The identities whose oracle readings are snapshotted into `prices.usd_rate`
 /// (task 0167). Deliberately a **subset** of [`TRACKED_SYMBOLS`].
 ///
@@ -235,9 +241,11 @@ pub struct OracleStats {
     pub queried: usize,
     pub written: usize,
     pub skipped: usize,
-    /// Peg identities whose rates were snapshotted into `prices.usd_rate`
-    /// (task 0167). Zero is not an error — see [`run_oracle`].
-    pub rates_snapshotted: usize,
+    /// Rows written into `prices.usd_rate` by this pass (task 0167). Zero is
+    /// normal on a steady-state run — the snapshot only copies observations it
+    /// does not already hold. It is NOT normal for it to be zero forever while
+    /// `written` keeps climbing; see [`run_oracle`] on why that needs a signal.
+    pub rates_snapshotted: u64,
 }
 
 /// Poll Reflector for each tracked symbol and write the prices to
@@ -271,7 +279,7 @@ pub async fn run_oracle(
                     // a backstop for the 2106 u32 ceiling, not the unit conversion.
                     timestamp: (pd.timestamp / 1000).min(u32::MAX as u64) as u32,
                     asset_id,
-                    oracle_name: "reflector".to_string(),
+                    oracle_name: ORACLE_NAME.to_string(),
                     price_usd: pd.price,
                     raw_data: format!("{{\"symbol\":\"{symbol}\"}}"),
                 });
@@ -311,10 +319,20 @@ pub async fn run_oracle(
     // here, and it is a data condition an operator must resolve, not something
     // a retry fixes.
     let rates_snapshotted = match writer
-        .populate_usd_rate_from_oracle(&peg_identities())
+        .populate_usd_rate_from_oracle(&peg_identities(), ORACLE_NAME)
         .await
     {
-        Ok(stats) => stats.identities,
+        Ok(stats) => {
+            // Logged per-identity: a `max()` across identities would report a
+            // healthy frontier while one peg sat stalled at zero.
+            tracing::info!(
+                identities = stats.identities,
+                rows = stats.rows_inserted,
+                newest = ?stats.newest,
+                "usd_rate snapshot"
+            );
+            stats.rows_inserted
+        }
         Err(err) => {
             tracing::error!(error = %err, "usd_rate snapshot failed; oracle_prices is unaffected");
             0
