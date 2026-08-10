@@ -146,6 +146,28 @@ history:
       by the event-decoded path, which carries the whole Reflector symbol set
       (BTC/ETH/XRP/...), not just the three we poll. 90,722 is what the first
       snapshot will copy, minus the 0086 rows.
+  - date: 2026-08-10
+    status: active
+    who: okarcz
+    note: >
+      DEPLOYED + populated on prod, and a load-bearing number in this task's own
+      argument turned out to be wrong.
+      Deploy: table applied to ch-prod-01 (sorting key verified CURRENT, method
+      included), oracle-worker Lambda rebuilt and shipped. ⚠️ The 0141
+      stale-asset trap was LIVE - target/lambda/oracle-worker/bootstrap was 17
+      days old and contained zero usd_rate references. Caught only because the
+      artifact was checked before deploying. After rebuild, Lambda LastModified
+      15:41:02Z sat 3 minutes after the local build, confirming the new binary
+      shipped.
+      First population: 43,514 rows each for USDC and USDT, method='oracle',
+      zero pre-2020 rows (the 0086 filter worked), avg rates 1.000271 / 0.99959
+      - NOT 1.0, which is the entire point of the task.
+      CORRECTION: coverage starts 2026-03-11, not ~2025-09. That figure appeared
+      in six files and was the headline reason this task jumped the queue ahead
+      of 0172. Real expiry is ~2027-04, about six months later than argued, so on
+      the corrected numbers 0172 should have gone first. Nothing is wasted - the
+      work is correct and unblocks 0168 - but the sequencing rested on an
+      unverified number. See the Coverage correction section.
 ---
 
 # `prices.usd_rate` + peg-asset rate population
@@ -191,6 +213,39 @@ the published series **mutate** as rows age out (a bucket reading `0.9993` today
 silently reverts to `1.0000` later), which is exactly why `views.sql:47` forbids
 it. The rate must be **snapshotted into a forever-retained table**, the same way
 every other USD number is baked rather than joined.
+
+## ⚠️ Coverage correction — the urgency argument was overstated
+
+**Measured on prod 2026-08-10, immediately after the first snapshot ran:**
+
+```
+prices.oracle_prices, peg assets, oracle_name='reflector', post-2020:
+  rows 87,030   oldest 2026-03-11 14:00:00   newest 2026-08-10 15:45:00
+```
+
+Coverage starts **2026-03-11**, not `~2025-09` as this task, [[0168]], [[0154]],
+[[0131]], [[0088]] and the schema doc all stated. 43,514 rows per asset over 152
+days is 99.4% of a continuous 5-minute cadence, so the worker evidently began in
+March 2026 — the earlier figure was never verified.
+
+**Consequences, stated plainly:**
+
+- The real expiry is the `202603` partition ageing out at 13 months, i.e.
+  **~2027-04, not ~2026-10/11**. About **six months later** than argued.
+- That was the headline reason this task was pulled ahead of everything else,
+  including [[0172]] — which is live, wrong data feeding TVL on 102 pools.
+  **On the corrected numbers 0172 should have gone first.** The work here is
+  done, correct, and unblocks [[0168]], so nothing is wasted — but the
+  sequencing call rested on a number nobody had checked.
+- ✅ **The copy itself has no gap.** `oracle_name` was the one plausible way
+  older readings could have been missed — the event-decoded path also writes
+  oracle rows. Measured, `reflector` is the *only* name present for peg assets,
+  so the 87,028 copied rows are everything that exists.
+
+**Lesson worth carrying:** the `~2025-09` figure propagated into six files and
+became the justification for a scheduling decision without anyone running
+`SELECT min(timestamp)`. It cost one query, and it was only caught because the
+populated table's `oldest` column disagreed with the task text.
 
 ## Relationship to 0151 — why this is not the rejected refactor
 
