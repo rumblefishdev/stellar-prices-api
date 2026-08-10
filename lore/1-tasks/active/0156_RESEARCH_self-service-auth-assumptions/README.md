@@ -3,8 +3,8 @@ id: "0156"
 title: "Confirm the two flagged self-service auth assumptions — Discord account verification and one-key-per-account"
 type: RESEARCH
 status: active
-related_adr: []
-related_tasks: ["0157", "0158", "0159", "0160"]
+related_adr: ["0010"]
+related_tasks: ["0157", "0158", "0159", "0160", "0169", "0170"]
 tags: [layer-docs, priority-high, effort-small, milestone-M3, epic-self-service-onboarding, discord, auth, abuse-prevention, blocks-build]
 milestone: 3
 links:
@@ -25,6 +25,17 @@ history:
       Promoted as a directory per the task's own note (RESEARCH collects
       Q-/R-/S- notes). Starts the Self-Service Onboarding epic — 0157-0164
       all wait on the account model this task settles.
+  - date: 2026-08-10
+    status: active
+    who: claude
+    note: >
+      Research complete. Five R- notes (Discord platform mechanics, OAuth
+      observable signals, Stellar guild posture, AWS quota mechanics,
+      mitigation costs) + Q- and S-. 17 sources archived. Every cited URL
+      re-fetched and its quotes checked against the original before the
+      synthesis was written. Both questions answered; ADR 0010 written.
+      Two claims in 0157/0158/0160 found to be unsourced — spawned 0170.
+      Spawned 0169 for the SDF conversation.
 ---
 
 # Confirm the self-service auth assumptions
@@ -121,20 +132,73 @@ something different in each case.
 
 ## Acceptance Criteria
 
-- [ ] Stellar Discord's new-account/new-member verification posture established
+- [x] Stellar Discord's new-account/new-member verification posture established
       and written down, with the date it was checked
-- [ ] Explicitly answered: does our OAuth flow observe that barrier, or only
+      → [R-stellar-discord-server-posture](notes/R-stellar-discord-server-posture.md).
+      Guild `897514728459468821`, checked **2026-08-10**: open one-click public
+      invite, `verification_level: 2` (5-minute account age),
+      `MEMBER_VERIFICATION_GATE_ENABLED` **present** so screening is on.
+- [x] Explicitly answered: does our OAuth flow observe that barrier, or only
       Discord account existence?
-- [ ] Scope decision recorded as `identify` alone, or `identify` +
+      → **Only account existence, under `identify`.** `verified` requires the
+      `email` scope; there is no phone field on the OAuth user object at all;
+      membership sits behind a separate scope and call.
+      [R-discord-oauth-observable-signals](notes/R-discord-oauth-observable-signals.md) §3.
+- [x] Scope decision recorded as `identify` alone, or `identify` +
       `guilds.members.read` — never `guilds`
-- [ ] Owner named for the Stellar Discord relationship and for registering the
+      → **`identify` + `guilds.members.read`** (ADR 0010 §3), decided by Adam.
+      `guilds` rejected: returns every server the user is in and its partial
+      guild objects carry neither `pending` nor `joined_at`.
+- [x] Owner named for the Stellar Discord relationship and for registering the
       Discord application ([[0159]] currently says "someone")
-- [ ] If the barrier is weaker than assumed — mitigation options costed and a
+      → **Adam Kot** owns the `stellar_test` guild and the Discord app
+      registration. The SDF relationship is [[0169]]; no named SDF counterpart
+      is public as of 2026-08-10.
+- [x] If the barrier is weaker than assumed — mitigation options costed and a
       decision taken, not just noted
-- [ ] One-active-key-per-account confirmed or replaced, with the rework-cap
+      → Six options costed against fetched pricing in
+      [R-abuse-mitigation-options-costed](notes/R-abuse-mitigation-options-costed.md).
+      **Decision: account-age minimum on top of membership**; captcha, email
+      confirmation and manual approval rejected with reasons (ADR 0010).
+- [x] One-active-key-per-account confirmed or replaced, with the rework-cap
       dependency stated
-- [ ] ADR written and cross-linked; [[0158]] and [[0160]] updated if the answers
+      → **Confirmed.** AWS charges quota per `(usage plan, API key)` and has no
+      principal that sums keys, so multi-key would force our own aggregation —
+      exactly what the rework cap exists to avoid.
+      [R-apigw-usage-plan-quota-mechanics](notes/R-apigw-usage-plan-quota-mechanics.md) §1, §4.
+- [x] ADR written and cross-linked; [[0158]] and [[0160]] updated if the answers
       change their shape
+      → [ADR 0010](../../../2-adrs/0010_discord-account-model-and-abuse-barrier.md).
+      0158/0159/0160 updated. Their *shape* is unchanged — one-key was
+      confirmed — but two unsourced claims were corrected and [[0170]] spawned
+      to measure them.
+
+## Findings
+
+**Question 1 — the barrier.** It exists (screening is on) but is thin (one-click
+join, five-minute account age), and **as the epic specified the flow, we would
+never have observed it.** SDF's own SCF Dashboard does not treat a Discord
+account as sufficient for anything with a cost. Decision: require guild
+membership *and* a minimum account age, both gated on config in SSM.
+
+**Question 2 — one key.** Confirmed, and structurally required by AWS quota
+accounting rather than merely convenient.
+
+**Two corrections to already-written tasks** (both checked against AWS docs):
+
+1. `nameQuery` is **not documented** as a prefix match — AWS states no matching
+   semantics at all. The client-side exact-match filter in [[0158]]/[[0160]] is
+   load-bearing, not defence in depth.
+2. The quota reset instant is **undocumented**. "1st of the month, 00:00 UTC"
+   appears in [[0157]]/[[0158]]/[[0160]] as if inherited from AWS; it must be
+   restated as our own product rule or measured.
+
+**Verification.** Every URL cited across the five research notes was re-fetched
+and its quoted text compared against the source. Live endpoints (the Discord
+invite API, the SCF OAuth redirect chain) were re-run independently and matched
+byte for byte. One genuine contradiction *within Discord's own documentation* is
+recorded rather than resolved: the API reference and the support article
+disagree on what the MEDIUM five-minute clock measures.
 
 ## Notes
 
