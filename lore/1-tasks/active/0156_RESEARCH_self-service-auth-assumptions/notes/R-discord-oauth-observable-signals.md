@@ -1,7 +1,7 @@
 ---
 title: "What Discord OAuth lets us observe, per scope"
 type: research
-status: developing
+status: mature
 spawned_from: notes/Q-do-the-two-flagged-auth-assumptions-hold.md
 spawns:
   - notes/S-account-model-and-abuse-barrier.md
@@ -12,6 +12,10 @@ history:
     status: developing
     who: claude
     note: "Researched Discord OAuth2 scopes, user/member objects and snowflake timestamps"
+  - date: 2026-08-10
+    status: mature
+    who: claude
+    note: "Research complete; sources re-verified and citation slips corrected after audit"
 ---
 
 # What Discord OAuth lets us observe, per scope

@@ -1,7 +1,7 @@
 ---
 title: "Stellar Discord server posture, as observable on 2026-08-10"
 type: research
-status: developing
+status: mature
 spawned_from: notes/Q-do-the-two-flagged-auth-assumptions-hold.md
 spawns:
   - notes/S-account-model-and-abuse-barrier.md
@@ -12,6 +12,10 @@ history:
     status: developing
     who: claude
     note: "Established what is publicly observable about the Stellar Discord server"
+  - date: 2026-08-10
+    status: mature
+    who: claude
+    note: "Research complete; sources re-verified and citation slips corrected after audit"
 ---
 
 # Stellar Discord server posture, as observable on 2026-08-10
@@ -34,8 +38,11 @@ operated by SDF. It requests `identify email connections guilds`.
 
 ## 1. What is the official Stellar Discord, and where is the invite published
 
-Four distinct invite URLs are published across SDF properties. **All four resolve
-to the same guild, `897514728459468821` ("Stellar Developers").**
+Five distinct invite URLs are published across SDF properties. **All five resolve
+to the same guild, `897514728459468821` ("Stellar Developers").** The fifth,
+`https://discord.com/invite/zVYdY3ktTn`, also appears on `stellar.org/community`
+and `stellar.org/connect` alongside `st7Mxd58BV` — added on re-verification
+2026-08-10; it does not change the conclusion.
 
 | Published at | Invite URL | Resolves to |
 |---|---|---|
@@ -56,7 +63,7 @@ ask questions, and post some memes."**
 > Source: [Stellar | Connect](https://stellar.org/connect?locale=en) — fetched 2026-08-10
 
 The SCF handbook publishes **"Join the [Stellar Developers Discord Server](https://discord.gg/stellardev)
-to connect with other folks in the Stellar ecosystem"** and directs support to
+to connect with other folks in the Stellar community"** and directs support to
 **"ask it in the `#scf-general` channel"**.
 
 > Source: [scf-handbook/additional-support/faq.md at main · stellar/scf-handbook](https://github.com/stellar/scf-handbook/blob/main/additional-support/faq.md) — fetched 2026-08-10
@@ -109,7 +116,7 @@ directory") and `CONSIDERED_EXTERNALLY_DISCOVERABLE`.
 
 The Discovery listing gives the server creation date as **October 12th, 2021**,
 activity "Like a busy coffee shop", categories Programming / Cryptocurrency /
-Science & Tech, language English.
+Science & Tech / Social, language English.
 
 > Source: [Stellar Developers - Discord Servers](https://discord.com/servers/stellar-developers-897514728459468821) — fetched 2026-08-10
 
@@ -208,7 +215,7 @@ guild_id                        897514728459468821
 channel                         { id: 900373252420030465, type: 0, name: "rules" }
 expires_at                      null
 approximate_member_count        32419
-approximate_presence_count      1362
+approximate_presence_count      1386
 profile.tag                     "XLM"
 ```
 
@@ -242,7 +249,7 @@ AUDIO_BITRATE_256_KBPS, DISCOVERABLE, BANNER, COMMUNITY
 > Source: [Discord invite API — code `stellardev`](https://discord.com/api/v10/invites/stellardev?with_counts=true&with_expiration=true) — fetched 2026-08-10
 
 The response also carries a `liveliness.msg_activity_bins` array with
-`last_updated_ts: "2026-08-09T00:22:27+00:00"` — ~32.4k members, ~1.36k online,
+`last_updated_ts: "2026-08-09T00:22:27+00:00"` — ~32.4k members, ~1.39k online,
 and low double-digit messages per bin. A real but not enormous community.
 
 **Practical note for [[0158]]/[[0160]]:** the ID is a stable snowflake and does

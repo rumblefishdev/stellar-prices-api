@@ -103,6 +103,18 @@ period, one quota.
 
 ## Implementation
 
+> **BLOCKED pending ADR 0010 "Open" (2026-08-10 audit).** Two items: (1) **issue
+> is one of the four operations below**, so "these handlers make no Discord calls"
+> leaves the eligibility gate unenforced on the only path that mints a key —
+> something must carry the verdict from [[0159]]; (2) the wildcard-free IAM policy
+> this task mandates **cannot be written where the role is created** — the role is
+> in `ComputeStack`, the usage plan in `ApiGatewayStack`, and `app.ts` builds
+> Compute first, so the plan ARN is not available at synth. Pick one: attach the
+> policy from `ApiGatewayStack`, resolve the plan id at deploy time in
+> `ComputeStack` (fails on a clean-account first deploy), or widen to
+> `/usageplans/*` (which this task forbids). No task currently owns that choice.
+
+
 **From the epic**
 
 - Key issued automatically the first time a user completes sign-in.

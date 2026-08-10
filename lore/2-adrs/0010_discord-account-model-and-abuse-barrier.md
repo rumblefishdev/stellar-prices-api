@@ -46,8 +46,12 @@ Task 0156 investigated both. The findings that changed the decision:
 
 - **Stellar Developers (`897514728459468821`) does have Membership Screening
   enabled** — so the epic's assumption was not baseless. But joining is a public
-  one-click invite, and `verification_level` is `2` = *"must be registered on
-  Discord for longer than 5 minutes"*.
+  one-click invite, and `verification_level` is `2` — which Discord's API
+  reference glosses as *"must be registered on Discord for longer than 5
+  minutes"*, while its own support article describes Medium as requiring a
+  **verified email** held *"for longer than five minutes"*. **The two sources
+  contradict each other**; the research recorded this rather than resolving it,
+  and it must be tested, not cited ([[0171]]).
 - **Under the `identify` scope our flow observes none of it.** `verified` (email
   verified) requires the **`email`** scope; there is **no phone field on the
   OAuth2 User object at all**; guild membership sits behind a separate scope and
@@ -96,11 +100,18 @@ owns in application code.
 on.
 
 **Be honest about what that buys.** Five minutes is Discord's raid speed-bump,
-not an identity barrier — the research found no precedent above ten minutes
-anywhere, including Discord's own product. At this value the age gate stops
-scripted signup that mints an account and claims a key in the same breath, and
-essentially nothing else. **Membership therefore carries the abuse story
-alone**, and membership costs one public click plus a rules checkbox.
+not an identity barrier. At this value the age gate stops scripted signup that
+mints an account and claims a key in the same breath, and essentially nothing
+else. **Membership is therefore the only remaining gate — and it is a thin one.**
+Joining Stellar's guild is a public one-click invite; Rules Screening, in the
+research's own words, *"is a click-through rules agreement… a friction gate, not
+an identity gate. It costs an attacker one extra click, not an extra identity."*
+
+So state the barrier plainly: **two clicks and a five-minute wait.** Nobody
+reading this later should mistake "two gates" for "two barriers" — we have one
+thin gate and one speed-bump. What makes that acceptable is not the gate's
+strength but the size of the prize behind it (see Proportionality below), and
+the fact that a cheaper lever — lowering the quota — is held in reserve.
 
 That is a deliberate trade, not an oversight:
 
@@ -152,7 +163,7 @@ declined. See [Alternatives Considered](#alternatives-considered).
 |---|---|
 | `stellar_test` guild — creation and configuration | Adam Kot (`akot`) |
 | Discord application registration + redirect-URI lifecycle | Adam Kot (`akot`) |
-| Stellar Discord (SDF) relationship | Tracked as [[0170]]; no named SDF counterpart is public as of 2026-08-10 |
+| Stellar Discord (SDF) relationship | **Adam Kot (`akot`)** on our side, executing [[0170]]. No named SDF counterpart is public as of 2026-08-10; the published routes are `communityfund@stellar.org` and `#scf-general` |
 
 This replaces the "someone" placeholder in [[0159]]. The published SDF contact
 routes are `communityfund@stellar.org` and `#scf-general` (the handbook says the
@@ -178,8 +189,10 @@ whatever gate the server operates.
 **Why `guilds.members.read` and never `guilds`.** Settled by the docs' own scope
 definitions without further argument: `guilds` is *"all of a user's guilds"*,
 `guilds.members.read` is one named guild. And the partial guild objects returned
-by `guilds` **carry neither `pending` nor `joined_at`** — so `guilds` is
-strictly more privacy cost for strictly less signal. Note this means we
+by `guilds` carry neither `pending` nor `joined_at` — so `guilds` is strictly
+more privacy cost for strictly less signal. (Discord publishes no field table for
+the partial guild object, only an example; that field set is read off the example,
+not off a specification.) Note this means we
 **deliberately diverge from SDF's own SCF Dashboard**, which requests
 `identify email connections guilds`.
 
@@ -190,23 +203,59 @@ new external dependency. It also covers the case membership does not: an account
 minted specifically to join and claim a key.
 
 **Why the threshold is configuration, and why it starts at 5 minutes.** Discord's
-own account-age thresholds are **5 minutes** (MEDIUM) and **10 minutes** (HIGH),
-and no third-party API provider publishes account-age gating for free-tier
-issuance at all. Rather than invent a number with no precedent, we mirror the
-value Stellar's own server uses. The parameter exists so the number can move
-when evidence arrives, not so it can be guessed higher now.
+only *account-age* verification level is **MEDIUM = 5 minutes**; HIGH's 10 minutes
+is **time as a member of the server, not account age** (*"must be a member of the
+server for longer than 10 minutes"*) — a distinction an earlier draft of this ADR
+got wrong, and one that matters, because it means Discord publishes **no**
+account-age threshold above five minutes. Nor did the research find a third-party
+API provider publishing account-age gating for free-tier issuance — across four
+comparators, **two of which (Etherscan, Discord's own help centre) returned HTTP
+403 and could not be read**, so read that as "not found", not as "does not exist".
+Rather than invent a number with no precedent, we mirror the value Stellar's own
+server uses. The parameter exists so the number can move when evidence arrives,
+not so it can be guessed higher now.
+
+**A caveat that undercuts this rationale, and must not be lost.** Discord's own
+documentation states that *"Having a verified phone number supersedes all other
+requirements"* — so for a phone-verified account, the server's five-minute clock
+does not apply at all. The research note headed this *"a real hole in the
+argument"*. Mirroring Stellar's setting therefore mirrors a setting that is itself
+bypassable; our snowflake check is **not** bypassable, which is the one respect in
+which our gate is stronger than the one it copies.
 
 **Why one key is not merely convenient but required.** Quota is charged per
 `(usage plan, API key)` — *"Throttling and quota limits apply to requests for
 individual API keys that are aggregated across all API stages within a usage
-plan."* The nearest thing to a user-shaped field, `customerId`, is documented
-purely as *"An AWS Marketplace customer identifier"*. With concurrent keys,
-AWS's native per-key monthly quota stops bounding a user's total consumption and
-we would have to fan out `GetUsage` per key and sum it ourselves.
+plan."* The nearest thing to a user-shaped field is `customerId`, and AWS gives
+it two definitions — *"An AWS Marketplace customer identifier"* (`CreateApiKey`)
+and *"The identifier of a customer in AWS Marketplace **or an external system,
+such as a developer portal**"* (`GetApiKeys`). The second describes our case
+exactly, so `customerId` could plausibly carry a Discord user ID. What decides
+the matter is narrower: **no AWS page states that quota or throttling is summed
+over `customerId`** — it is documented as a filter for *listing* keys, and §1
+says quota applies to "requests for individual API keys". With concurrent keys,
+AWS's native per-key monthly quota therefore stops bounding a user's total
+consumption and we would have to fan out `GetUsage` per key and sum it ourselves.
+
+**Why the rework cap is what makes one key sufficient — the derivation, not an
+assertion.** AWS nowhere documents that a replacement key starts with a clean
+quota counter; `DeleteApiKey` says nothing about usage at all. It follows by
+construction: quota is counted against an API key, usage is stored **indexed by
+API key ID** (`GetUsage.values` maps `{api_key}` → daily `[used, remaining]`),
+`CreateApiKey` mints a **new** `id`, and nothing on the `ApiKey` model links a new
+key to a deleted one — there is no predecessor, lineage or carry-over field among
+`createdDate`, `customerId`, `description`, `enabled`, `id`, `lastUpdatedDate`,
+`name`, `stageKeys`, `tags`, `value`. So delete-then-create almost certainly
+yields a key ID with no prior usage. **That is the loophole the once-per-quota-
+period cap exists to close**, and it is why the cap is load-bearing rather than
+tidy. It is a derivation from documented behaviour, not a documented guarantee —
+[[0171]] #6 measures it.
 
 **Proportionality — what the abuse is worth.** A fully-drained key (100k quota,
-3 KB responses, us-east-1) costs **$0.38/month**; 286 drained keys reach
-~$100/month. Optional API Gateway caching alone is $27.36/month = 72 abusive
+3 KB responses, us-east-1) costs **$0.38/month** — **gateway charges only; the
+backend cost per call is unpriced and probably dominant** ([[0171]] #9). On
+request charges alone, ~286 drained keys reach $100/month (267 on the all-in
+basis). Optional API Gateway caching alone is $27.36/month = 72 abusive
 keys. This is why no paid mitigation is justified, and why the quota — which
 cuts worst-case per-key exposure **26×** versus the throttle alone — remains the
 most effective control in the design.
@@ -275,7 +324,29 @@ after.
 
 **Decision:** REJECTED.
 
-### Alternative 6: Multiple concurrent keys per account
+### Alternative 6: Lower the free monthly quota
+
+**Description:** Leave the gates alone and shrink the prize instead — 100k/month
+down to 50k or 25k.
+
+**Pros:** Free, and it *saves* money: per-key exposure drops from **$0.38** to
+**$0.19** at 50k and to **~$0.09** at 25k. It is one number in the usage plan,
+enforced natively by AWS with no code of ours in the path, and it bounds every
+key — abusive or not. There is real headroom: our 50k–100k is **5–10×
+CoinGecko's** free tier ("10k call credits/mo") and **3.3–6.7×** CoinMarketCap's
+("15,000"), so 25k would still be 2.5× CoinGecko.
+
+**Cons:** It says nothing about *who* gets a key, so it is a damage cap rather
+than a barrier — orthogonal to the question this ADR is settling. It also
+degrades the product for legitimate users, and [[0157]] already fixed 100k with
+Adam's sign-off on 2026-08-06.
+
+**Decision:** NOT ADOPTED NOW, and deliberately kept as the **first lever to
+pull** if churn is ever observed — cheaper and faster than any gate. Recorded
+here because it is the one costed mitigation that is cheaper than the two
+adopted, and an ADR that omitted it would misrepresent the analysis.
+
+### Alternative 7: Multiple concurrent keys per account
 
 **Cons:** AWS quota is per `(usage plan, API key)` with no aggregating
 principal, so a per-user cap becomes our own fan-out and summation. Also breaks
@@ -292,8 +363,11 @@ the rework cap, which is coherent only under one key.
 - The abuse barrier is now something the software actually observes, rather than
   an assumption about a server we never contact.
 - Two independent gates with $0 recurring cost and no new vendor.
-- `pending`, `joined_at`, `roles` and `flags` become available for finer rules
-  later without another consent change.
+- `pending`, `joined_at` and `roles` become available for finer rules later
+  without another consent change. Two caveats: whether `pending` and `flags` are
+  actually present on the `guilds.members.read` REST response is **undocumented**
+  ([[0171]] #2, #3), and `pending === false` can also mean an admin waved the
+  member through (`BYPASSES_VERIFICATION`).
 - One-key is confirmed, so [[0158]]'s schema and [[0160]]'s rework cap are
   correct as designed and need no reshaping.
 - The guild ID being configuration lets `stellar_test` and production differ
@@ -322,22 +396,79 @@ the rework cap, which is coherent only under one key.
 ### What would reverse this decision
 
 - **SDF disabling Membership Screening on the production guild, or declining the
-  integration in [[0170]].** This is now the load-bearing risk, not one of
-  several: with the age threshold at 5 minutes, screening is the only part of
-  the barrier that costs an abuser anything beyond a click. If it goes away,
-  the barrier is "joined a public server" and we have **nothing else** — at
-  which point the age threshold must be raised, or a captcha added, or the free
-  quota lowered. Whoever picks up [[0170]] should treat "will you keep screening
-  on, and would you tell us if it changed" as the question that matters most.
+  integration in [[0170]].** With the age threshold at 5 minutes, screening is
+  the second of the barrier's two clicks; losing it takes the gate from "joined
+  and accepted the rules" to "joined". That is a small absolute change — which is
+  exactly why it matters that the gate was already thin. If it goes, the first
+  lever is the free quota (Alternative 6), then the age threshold, then a
+  captcha. Whoever picks up [[0170]] should still treat "will you keep screening
+  on, and would you tell us if it changed" as a question worth asking, because we
+  would not learn the answer from any API response.
+
+  **This reversal trigger is only real if we actually read `pending`** — see
+  "Open: does issuance require `pending === false`?" below. If we do not, losing
+  screening changes nothing about our behaviour, because we were never observing
+  it in the first place.
 - **Observed churn.** Raise the SSM threshold first — it is a config change and
   costs nothing. Only if churn continues does captcha (Turnstile) become
   justified.
 - Observed *scripted* signup specifically — that is the threat captcha
   addresses, and a 5-minute age gate barely touches it.
-- The all-in per-call backend cost ([[0171]] #7) turning out to dominate the
+- The all-in per-call backend cost ([[0171]] #9) turning out to dominate the
   gateway figure by an order of magnitude — every exposure number in the
   rationale scales with it, and a $0.38/key threat model becoming a $4/key one
   changes what mitigation is proportionate.
+
+---
+
+## Open — three questions this ADR does not yet answer
+
+Surfaced by an adversarial audit of this PR on 2026-08-10, after the decision was
+recorded. All three block [[0159]]/[[0160]]/[[0162]] and none can be settled
+without the epic owner.
+
+### 1. Does issuance require `pending === false`?
+
+**This ADR gates on membership, not on screening.** Decision 3 specifies one rule:
+call `GET /users/@me/guilds/{guild.id}/member`. A member who joined and never
+accepted the rules is still returned by that endpoint, with `pending: true`.
+
+So as written, screening buys us nothing — yet the reversal section above, the
+epic's resolution text ("joined a public Discord server **and accepted its
+rules**") and [[0170]]'s central question all assume we read it. [[0159]] already
+carries an acceptance criterion (*"`pending === undefined` is handled explicitly
+and does not silently pass"*) for a gate this ADR never authorised.
+
+Either add the rule — issuance requires `pending === false`, with `undefined` as
+a documented third state ([[0171]] #2 measures which) — or drop the screening
+argument from the abuse story and accept that the gate is "joined a public
+server". **The two must agree.**
+
+### 2. How does the eligibility verdict travel from sign-in to issuance?
+
+[[0159]] performs the check in the OAuth callback and issues nothing. [[0160]]
+issues the key and, per this ADR's "checked once, at issuance" rule, makes no
+Discord calls. The session cookie carries only the Discord user ID and an expiry.
+
+**Nothing carries the verdict between them**, so a non-member who completes OAuth
+holds a valid session and can call the issue endpoint unchallenged. Options: put
+a signed eligibility claim in the session cookie; record "eligible at" in the
+registry at callback time; or have [[0160]] perform the check after all — which
+contradicts the wording in this ADR and in [[0160]], and reintroduces a Discord
+dependency on the issue path.
+
+**"Checked once, at issuance" was written meaning "once, at sign-in".** Those are
+different moments and the tasks split across exactly that seam.
+
+### 3. What happens when a departed member's session expires?
+
+The epic's non-goal says a key keeps working regardless of later Discord state,
+and [[0162]] has an acceptance criterion to match. But the gate lives in the
+sign-in callback and sessions expire — so once the cookie lapses, a user who has
+left the guild cannot sign in again and **loses access to the key they still
+own**. Either the gate is skipped when the registry already holds a row for that
+Discord ID (issuance-only in the strict sense), or the non-goal is narrower than
+the epic claims.
 
 ---
 

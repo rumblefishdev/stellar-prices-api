@@ -59,6 +59,14 @@ carrying the session cookie.
 
 ## Implementation
 
+> **BLOCKED pending ADR 0010 "Open" (2026-08-10 audit).** Two acceptance criteria
+> here are unbuildable as written. "Retry without re-authenticating" needs the
+> Discord token that [[0159]] deliberately discards. And "no eligibility check
+> after issuance" cannot hold across a session boundary: the gate lives in the
+> sign-in callback and sessions expire, so a departed member loses access to a key
+> they still own — contradicting the epic's own non-goal. See ADR 0010 → "Open".
+
+
 **From the epic**
 
 - Sign in with Discord.

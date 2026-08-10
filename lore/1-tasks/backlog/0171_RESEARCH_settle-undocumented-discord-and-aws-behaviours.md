@@ -1,6 +1,6 @@
 ---
 id: "0171"
-title: "Settle the seven undocumented Discord/AWS behaviours the onboarding design depends on"
+title: "Settle the nine undocumented Discord/AWS behaviours the onboarding design depends on"
 type: RESEARCH
 status: backlog
 related_adr: ["0010"]
@@ -15,7 +15,7 @@ history:
     status: backlog
     who: akot
     note: >
-      Spawned from 0156. Seven behaviours that 0157-0160 currently assume are
+      Spawned from 0156. Nine behaviours that 0157-0160 currently assume are
       documented, and are not. Two of them are stated in those tasks as if they
       were vendor guarantees. All are minutes-cheap to measure once the Discord
       app and `stellar_test` guild exist.

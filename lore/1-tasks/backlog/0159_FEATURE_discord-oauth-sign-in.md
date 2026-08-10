@@ -72,6 +72,15 @@ it decides whether this flow requests the `guilds` scope or only `identify`.
 
 ## Implementation
 
+> **BLOCKED pending ADR 0010 "Open" (2026-08-10 audit).** Two questions must be
+> answered before code: does issuance require `pending === false`, and **how does
+> the eligibility verdict reach [[0160]]'s issue endpoint** — the session cookie
+> carries only the Discord user ID, this task issues nothing, and [[0160]] makes
+> no Discord calls, so as written a non-member with a valid session can mint a
+> key. A third question decides the session-expiry behaviour for a user who has
+> left the guild. See ADR 0010 → "Open".
+
+
 **From the epic**
 
 - Discord OAuth as the only sign-in mechanism. No email, no captcha, no
@@ -115,25 +124,41 @@ it decides whether this flow requests the `guilds` scope or only `identify`.
   ever observed, and that must not need a deploy. Store it as a duration
   (minutes), not a day count: the initial value is minutes and a
   `minAccountAgeDays` parameter would make 5 minutes unrepresentable.
-- **This task owns creating the two new SSM parameters, not just reading
-  them.** ADR 0010 says the guild ID and the age threshold are configuration;
-  nobody else in the epic declares where they come from, and left unassigned
-  they will be hard-coded — the one thing the ADR forbids. Follow the existing
-  key contract (`/prices/{env}/*`, alongside `api-gateway-id` and the
+- **This task owns the two new SSM parameters** — their names, their read path
+  and their seeding step. ADR 0010 says the guild ID and the age threshold are
+  configuration; nobody else in the epic declares where they come from, and left
+  unassigned they will be hard-coded — the one thing the ADR forbids. Follow the
+  existing key contract (`/prices/{env}/*`, alongside `api-gateway-id` and the
   `mtls-*-secret-name` entries):
 
   | Parameter | Value |
   | --- | --- |
-  | `/prices/{env}/discord-guild-id` | `stellar_test` in dev, `897514728459468821` in production ([[0170]]) |
+  | `/prices/{env}/discord-guild-id` | `stellar_test` while building, `897514728459468821` after [[0170]]'s flip |
   | `/prices/{env}/min-account-age-minutes` | `5` |
 
-  Two decisions to make explicitly rather than by accident: **which stack
-  declares them** (`ApiGatewayStack` publishes `ApiGatewayIdParam`, but these
-  are consumed by the Lambda in `ComputeStack` — the same direction-of-
-  dependency problem [[0157]] hit with the plan id), and **whether the Lambda
-  reads them at cold start or per request**. Read-per-request is what makes the
-  threshold tunable without a deploy, which is the whole reason it is a
-  parameter; a cold-start read gives that up quietly.
+  **Operator-seeded, not CDK-created — corrected 2026-08-10 after audit.** Do
+  **not** write `new ssm.StringParameter` for these. The repo's precedent for
+  operator-owned values is explicit: `SecretsStack` *"deliberately does NOT
+  create the secrets"* and publishes names only, and `compute-stack.ts` **reads**
+  `/prices/{env}/ledger-processor/initial-cursor` because the operator seeds it
+  "at deploy prep, like the mTLS secrets… rather than committed config, so it is
+  never a stale magic number".
+
+  This is not style. A CloudFormation-managed parameter is CDK-owned, so **the
+  next `cdk deploy` would silently restore the committed value** — un-flipping
+  production back to the test guild after launch ([[0170]] step 4) and reverting
+  any temporary threshold change ([[0164]] check 10). Note also that `envName` is
+  typed `'production'` and `infra/envs/` holds only `production.json`: there is
+  one parameter whose value is flipped in place, not a per-environment matrix.
+
+  **Read them at runtime via the SSM SDK, not `valueForStringParameter`** — the
+  latter resolves through a CFN parameter at deploy, which would make the
+  threshold un-tunable without a redeploy and defeat the point of it being a
+  parameter. No IAM work is required: `lambda-baseline.ts` already grants
+  `ssm:GetParameter*` on `arn:…:parameter/prices/{env}/*` to every prices Lambda.
+
+  What this task owns is therefore the **read path, the documented parameter
+  names, and the seeding step in the deploy-prep runbook** — not a CDK resource.
 - **Membership and age are checked once, at issuance only** (ADR 0010). Do not
   re-check on session refresh, on the dashboard, or on rework. A key, once
   issued, keeps working regardless of later Discord state — the epic's existing
@@ -220,9 +245,11 @@ it decides whether this flow requests the `guilds` scope or only `identify`.
 - [ ] Scope set is exactly `identify` + `guilds.members.read` (ADR 0010); no
       `guilds`, no `email`
 - [ ] `/prices/{env}/discord-guild-id` and
-      `/prices/{env}/min-account-age-minutes` are **declared in CDK** by this
-      task, follow the `/prices/{env}/*` key contract, and differ per
-      environment
+      `/prices/{env}/min-account-age-minutes` are **operator-seeded and read at
+      runtime**, never `new ssm.StringParameter` — so [[0170]]'s guild flip
+      survives the next `cdk deploy`
+- [ ] The parameter names and the seeding step are written into the deploy-prep
+      runbook, alongside the mTLS material
 - [ ] Changing `min-account-age-minutes` in SSM takes effect **without a
       redeploy** — otherwise it is a constant with extra steps
 - [ ] Guild ID is read from SSM per environment, never a constant

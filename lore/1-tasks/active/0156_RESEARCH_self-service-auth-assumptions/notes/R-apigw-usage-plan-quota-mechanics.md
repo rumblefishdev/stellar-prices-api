@@ -1,7 +1,7 @@
 ---
 title: "API Gateway usage plan and key mechanics behind the one-key model"
 type: research
-status: developing
+status: mature
 spawned_from: notes/Q-do-the-two-flagged-auth-assumptions-hold.md
 spawns:
   - notes/S-account-model-and-abuse-barrier.md
@@ -12,6 +12,10 @@ history:
     status: developing
     who: claude
     note: "Researched AWS quota scoping, period reset and key management semantics"
+  - date: 2026-08-10
+    status: mature
+    who: claude
+    note: "Research complete; sources re-verified and citation slips corrected after audit"
 ---
 
 # API Gateway usage plan and key mechanics behind the one-key model

@@ -1,7 +1,7 @@
 ---
 title: "Discord platform verification and gating mechanics"
 type: research
-status: developing
+status: mature
 spawned_from: notes/Q-do-the-two-flagged-auth-assumptions-hold.md
 spawns:
   - notes/S-account-model-and-abuse-barrier.md
@@ -12,6 +12,10 @@ history:
     status: developing
     who: claude
     note: "Researched Discord account-level and server-level verification mechanics"
+  - date: 2026-08-10
+    status: mature
+    who: claude
+    note: "Research complete; sources re-verified and citation slips corrected after audit"
 ---
 
 # Discord platform verification and gating mechanics
@@ -544,7 +548,8 @@ AutoMod is described as message-content filtering, not identity filtering:
 > and less work for moderators."
 
 > "AutoMod prevents unwanted messages from being posted in your Community across all of your
-> #text-channels."
+> #text-channels, along with other messaging surfaces like threads and text chat in voice
+> channels."
 
 The one identity-adjacent capability is username blocking:
 
@@ -559,7 +564,7 @@ API-side, AutoMod actions are:
 
 | Action | Value | Description (verbatim) |
 |--------|-------|------------------------|
-| `BLOCK_MESSAGE` | 1 | blocks a member's message before it is posted |
+| `BLOCK_MESSAGE` | 1 | "blocks a member's message and prevents it from being posted. A custom explanation can be specified and shown to members whenever their message is blocked." |
 | `SEND_ALERT_MESSAGE` | 2 | logs user content to a specified channel |
 | `TIMEOUT` | 3 | timeout user for a specified duration |
 | `BLOCK_MEMBER_INTERACTION` | 4 | prevents a member from using text, voice, or other interactions |
@@ -619,8 +624,10 @@ at signup. There is no published alt-linking or device-fingerprint claim in any 
 fetched here. Do not assume one exists.
 
 Transparency-report figures on accounts disabled for spam were **not verifiable**: the
-Transparency Hub landing page serves the data as downloadable PDFs, and no figures were
-extractable from the fetched HTML.
+Transparency Hub landing page returns a JavaScript shell from which no figures were
+extractable. (An earlier draft said the data is served as downloadable PDFs; re-verification
+on 2026-08-10 found no evidence for that, so the characterisation is withdrawn — the
+operative claim, that nothing is extractable from the fetched HTML, reproduces exactly.)
 
 > Source: [Transparency Hub | Discord Safety](https://discord.com/safety-transparency) — fetched 2026-08-10
 
@@ -639,7 +646,7 @@ Discord Epoch: `1420070400000` (ms), "the first second of 2015".
 | Timestamp | 63 to 22 | 42 | "Milliseconds since Discord Epoch" | `(snowflake >> 22) + 1420070400000` |
 | Internal worker ID | 21 to 17 | 5 | | `(snowflake & 0x3E0000) >> 17` |
 | Internal process ID | 16 to 12 | 5 | | `(snowflake & 0x1F000) >> 12` |
-| Increment | 11 to 0 | 12 | "For every ID generated on that process, this number is incremented" | `snowflake & 0xFFF` |
+| Increment | 11 to 0 | 12 | "For every ID that is generated on that process, this number is incremented" | `snowflake & 0xFFF` |
 
 > Source: [API Reference — Snowflakes](https://docs.discord.com/developers/reference) — fetched 2026-08-10
 

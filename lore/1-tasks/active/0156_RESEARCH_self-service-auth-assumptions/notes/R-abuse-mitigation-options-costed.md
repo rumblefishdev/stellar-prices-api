@@ -1,7 +1,7 @@
 ---
 title: "Abuse-mitigation options for self-issued keys, costed"
 type: research
-status: developing
+status: mature
 spawned_from: notes/Q-do-the-two-flagged-auth-assumptions-hold.md
 spawns:
   - notes/S-account-model-and-abuse-barrier.md
@@ -12,6 +12,10 @@ history:
     status: developing
     who: claude
     note: "Costed captcha, email, quota and approval mitigations against sourced pricing"
+  - date: 2026-08-10
+    status: mature
+    who: claude
+    note: "Research complete; sources re-verified and citation slips corrected after audit"
 ---
 
 # Abuse-mitigation options for self-issued keys, costed
@@ -52,7 +56,10 @@ REST API requests, first tier:
 
 > "Amazon API Gateway API call charges = 5 million * $3.50/million = $17.50"
 
-Tier thresholds (only relevant far above our volumes):
+Tier breakdown, quoted from AWS's own worked example for a 15-billion-call month
+(333 M + 667 M + 14 B); AWS's standalone tier table is behind a JS region selector and
+could not be fetched, so treat the thresholds below as read off that example, not as a
+quoted rate card:
 
 > "Amazon API Gateway API call charges = 333 million * $3.50/million = $1,165.50 / 667 million * $2.80/million = $1,867.60 / 14 billion * $2.38/million = $33,320.00"
 
@@ -112,12 +119,21 @@ Arithmetic: `n × 100,000 / 1,000,000 × $3.50` for requests;
 inside the first pricing tier (333 million requests), so the rate stays flat at
 $3.50/million throughout.
 
+**Two denominators are in play below — do not mix them.** The per-key figures in
+§1.2 are **all-in** ($0.376 = requests + transfer). The "$100/month" and
+"$1,000/month" reference points immediately below are computed against **request
+charges only** ($0.35/key), because that is the line AWS bills per call. On the
+all-in basis $100/month is reached at **267** keys rather than 286. Every
+"X keys' worth" comparison later in this note (72 / 366 / 276 / 5.3) uses the
+all-in $0.38. State the basis wherever these are quoted onward.
+
 **Reference points for the epic owner:**
 
 - To reach **$100/month** of gateway request charges, an abuser needs
   `$100 / $3.50 × 1,000,000 = 28.6 million` calls — **286 fully-drained keys**,
   i.e. 286 distinct Discord accounts, each consuming its entire monthly quota.
-- To reach **$1,000/month**: 285.7 million calls, **2,857 fully-drained keys**.
+- To reach **$1,000/month**: 285.7 million calls, **2,858 fully-drained keys**
+  (2,857 keys yield $999.95 — rounded up, consistently with the $100 case above).
 
 ### 1.4 The comparison that settles it
 
@@ -186,7 +202,7 @@ retrospectively investigate an abuse wave older than a week.
 ### 2.2 hCaptcha
 
 > Basic (Free): "$0"
-> Pro: "$139/month" monthly billing, "$99/month" billed annually — "100K monthly evals included, then $0.99/1K"
+> Pro: "$139/month" monthly billing, "$99/month" "Billed yearly" — "100K monthly evals included, then $0.99/1K"
 > Enterprise: "Talk to Sales" — custom pricing
 > Pro trial: "14-Day Trial with hCaptcha Pro!" … "you'll be automatically switched to the Free plan after 14 days if you decide not to keep Pro."
 
@@ -218,8 +234,9 @@ Verbatim from Google's billing documentation:
 > "0–10,000 assessments per calendar month: Free per organization"
 > "10,001–100,000 assessments per month: $8 flat fee"
 > "Over 100,000 assessments per month: $0.001 per assessment ($1.00 per 1,000 assessments)"
-> "Up to 10,000 assessments per calendar month per organization"
-> "Requests return a `Resource Exhausted (429)` quota error after your organization exceeds 10,000 cumulative assessments"
+> "The free 10,000 assessments are per organization per calendar month. The limit
+> aggregates use across all accounts and all sites."
+> "requests return a `Resource Exhausted (429)` quota error"
 
 > Source: [Billing information | Google Cloud Fraud Defense](https://docs.cloud.google.com/recaptcha/docs/billing-information) — fetched 2026-08-10
 
@@ -323,15 +340,16 @@ identity provider already does.
 
 Paid-tier anchors, for context on what the free tier is protecting:
 CoinGecko Basic "$35/mo" for "100k call credits/mo"; CoinMarketCap Builder
-"$29/mo" for "150,000" credits.
+"$29/mo" for "150K call credits/mo".
 
 ### 4.1 What could not be established
 
 **No first-party documentation states that any of these four requires captcha, a
 credit card, or a completed email-verification click for the free tier.** The
-CoinMarketCap quick-start describes only "Sign up for an account at
-pro.coinmarketcap.com/signup" and retrieving the key from the dashboard; it does
-not mention email confirmation.
+CoinMarketCap quick-start describes only creating an account ("Create an account at
+pro.coinmarketcap.com/signup or sign in to your existing account in the Developer
+Portal") and retrieving the key from the dashboard; it does not mention email
+confirmation.
 
 > Source: [CoinMarketCap API Documentation — Quick Start Guide](https://coinmarketcap.com/api/documentation/guides/quick-start) — fetched 2026-08-10
 

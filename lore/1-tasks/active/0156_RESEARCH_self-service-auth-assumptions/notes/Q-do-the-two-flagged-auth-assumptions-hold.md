@@ -1,7 +1,7 @@
 ---
 title: "Do the two flagged self-service auth assumptions hold?"
 type: question
-status: developing
+status: mature
 spawns:
   - notes/R-discord-platform-verification-mechanics.md
   - notes/R-discord-oauth-observable-signals.md
@@ -21,6 +21,10 @@ history:
     status: developing
     who: claude
     note: "Research lines dispatched"
+  - date: 2026-08-10
+    status: mature
+    who: claude
+    note: "Research complete; sources re-verified and citation slips corrected after audit"
 ---
 
 # Do the two flagged self-service auth assumptions hold?
