@@ -3,7 +3,7 @@ title: "Idea — split the USD rate out of close_usd into a per-quote-asset rate
 type: idea
 status: mature
 spawned_from: notes/G-be-0199-reply-short.md
-spawns: []
+spawns: ["0167", "0168"]
 tags: [schema, clickhouse, enrichment, zero-as-missing, adr-input]
 links:
   - "../../../../../packages/enrichment-worker/src/ch_enrich.rs"
@@ -19,6 +19,23 @@ history:
       price table. Captured here as input to [[0151]], which this widens
       materially. Nothing measured yet — the two load-bearing numbers are
       flagged as open below.
+  - date: 2026-08-10
+    status: mature
+    who: okarcz
+    note: >
+      LINEAGE RECORDED. This note's narrow form is live as tasks 0167 (build
+      prices.usd_rate + populate the peg rates) and 0168 (publish the real rate
+      in price_usd_series in place of the hardcoded $1). The schema-wide
+      refactor below stays REJECTED per the decision block at the top - see
+      0151. Linked because the note was reachable only by knowing it existed in
+      an archived task's notes directory, which is how a settled decision gets
+      accidentally relitigated.
+      Context that post-dates the note: 0165 shipped the $1 placeholder to prod
+      on 2026-08-10 with the `method` provenance column, deliberately shaped so
+      0168 is a one-expression change. And the clock in this note is now the
+      binding constraint - oracle_prices is pruned at INTERVAL 13 MONTH, so
+      202509 ages out ~2026-10/11 and that depeg-aware history is unrecoverable
+      once dropped.
 ---
 
 # Split the USD rate out of `close_usd`
