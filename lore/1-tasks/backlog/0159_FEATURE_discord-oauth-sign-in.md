@@ -115,6 +115,25 @@ it decides whether this flow requests the `guilds` scope or only `identify`.
   ever observed, and that must not need a deploy. Store it as a duration
   (minutes), not a day count: the initial value is minutes and a
   `minAccountAgeDays` parameter would make 5 minutes unrepresentable.
+- **This task owns creating the two new SSM parameters, not just reading
+  them.** ADR 0010 says the guild ID and the age threshold are configuration;
+  nobody else in the epic declares where they come from, and left unassigned
+  they will be hard-coded — the one thing the ADR forbids. Follow the existing
+  key contract (`/prices/{env}/*`, alongside `api-gateway-id` and the
+  `mtls-*-secret-name` entries):
+
+  | Parameter | Value |
+  | --- | --- |
+  | `/prices/{env}/discord-guild-id` | `stellar_test` in dev, `897514728459468821` in production ([[0170]]) |
+  | `/prices/{env}/min-account-age-minutes` | `5` |
+
+  Two decisions to make explicitly rather than by accident: **which stack
+  declares them** (`ApiGatewayStack` publishes `ApiGatewayIdParam`, but these
+  are consumed by the Lambda in `ComputeStack` — the same direction-of-
+  dependency problem [[0157]] hit with the plan id), and **whether the Lambda
+  reads them at cold start or per request**. Read-per-request is what makes the
+  threshold tunable without a deploy, which is the whole reason it is a
+  parameter; a cold-start read gives that up quietly.
 - **Membership and age are checked once, at issuance only** (ADR 0010). Do not
   re-check on session refresh, on the dashboard, or on rework. A key, once
   issued, keeps working regardless of later Discord state — the epic's existing
@@ -200,6 +219,12 @@ it decides whether this flow requests the `guilds` scope or only `identify`.
       what changes when the custom domain lands
 - [ ] Scope set is exactly `identify` + `guilds.members.read` (ADR 0010); no
       `guilds`, no `email`
+- [ ] `/prices/{env}/discord-guild-id` and
+      `/prices/{env}/min-account-age-minutes` are **declared in CDK** by this
+      task, follow the `/prices/{env}/*` key contract, and differ per
+      environment
+- [ ] Changing `min-account-age-minutes` in SSM takes effect **without a
+      redeploy** — otherwise it is a constant with extra steps
 - [ ] Guild ID is read from SSM per environment, never a constant
 - [ ] A non-member is refused, and the refusal distinguishes "not a member" from
       "Discord unavailable" — a 429 or 5xx must not read as "not a member"

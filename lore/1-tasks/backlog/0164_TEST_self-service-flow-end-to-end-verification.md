@@ -140,8 +140,8 @@ record that you did.
 | 8 | Quota shown on the dashboard equals the plan's configured monthly quota | 5 |
 | 9 | **Non-member (B) is refused with a message naming the Discord server and how to join** — not a generic error, and no key is issued | ADR 0010 |
 | 10 | **Below-threshold account is refused with the time remaining** (not a date), can retry once it passes, and no key is issued meanwhile | ADR 0010 |
-| 12 | **A user who leaves the guild after issuance keeps working** — dashboard, key reveal and rework all still succeed. This is the epic's non-goal, and issuance-only checking is what implements it | ADR 0010 |
 | 11 | **Discord unavailable ≠ not a member.** Force a non-404 failure from the member lookup (bad token, throttle) and confirm the user is *not* told they are not a member, and that no key is issued | ADR 0010 |
+| 12 | **A user who leaves the guild after issuance keeps working** — dashboard, key reveal and rework all still succeed. This is the epic's non-goal, and issuance-only checking is what implements it | ADR 0010 |
 
 Check 11 is the one most likely to be skipped and the most damaging to get
 wrong: the membership test is a *negative* inferred from an undocumented error
