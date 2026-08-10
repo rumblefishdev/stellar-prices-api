@@ -3,7 +3,7 @@ id: "0010"
 title: "Discord identity is the account: one active key, gated on guild membership and account age"
 status: accepted
 deciders: [akot]
-related_tasks: ["0156", "0157", "0158", "0159", "0160", "0169", "0170"]
+related_tasks: ["0156", "0157", "0158", "0159", "0160", "0170", "0171"]
 related_adrs: ["0007", "0008"]
 tags: [discord, oauth, auth, abuse-prevention, account-model, api-keys, usage-plan, epic-self-service-onboarding]
 links:
@@ -130,7 +130,7 @@ keeps working regardless of later Discord state. Two consequences worth stating:
 
 Adam creates a **`stellar_test`** guild for building and testing the epic.
 Integration against the production Stellar guild is a separate conversation with
-SDF, tracked as [[0169]].
+SDF, tracked as [[0170]].
 
 `stellar_test` must mirror the production posture or the tests prove nothing.
 Membership Screening requires Community to be enabled first (*"In order to see
@@ -152,7 +152,7 @@ declined. See [Alternatives Considered](#alternatives-considered).
 |---|---|
 | `stellar_test` guild — creation and configuration | Adam Kot (`akot`) |
 | Discord application registration + redirect-URI lifecycle | Adam Kot (`akot`) |
-| Stellar Discord (SDF) relationship | Tracked as [[0169]]; no named SDF counterpart is public as of 2026-08-10 |
+| Stellar Discord (SDF) relationship | Tracked as [[0170]]; no named SDF counterpart is public as of 2026-08-10 |
 
 This replaces the "someone" placeholder in [[0159]]. The published SDF contact
 routes are `communityfund@stellar.org` and `#scf-general` (the handbook says the
@@ -314,7 +314,7 @@ the rework cap, which is coherent only under one key.
 - **The age gate is close to symbolic at this value.** Anyone reading this ADR
   later should not mistake "we have two gates" for "we have two barriers" — we
   have one barrier (membership) and one speed-bump.
-- The not-a-member path depends on an **undocumented** error shape ([[0170]] #1).
+- The not-a-member path depends on an **undocumented** error shape ([[0171]] #1).
 - `pending === false` is not proof of having passed anything —
   `BYPASSES_VERIFICATION` (*"Member is exempt from guild verification
   requirements"*) means an admin can wave a member through.
@@ -322,19 +322,19 @@ the rework cap, which is coherent only under one key.
 ### What would reverse this decision
 
 - **SDF disabling Membership Screening on the production guild, or declining the
-  integration in [[0169]].** This is now the load-bearing risk, not one of
+  integration in [[0170]].** This is now the load-bearing risk, not one of
   several: with the age threshold at 5 minutes, screening is the only part of
   the barrier that costs an abuser anything beyond a click. If it goes away,
   the barrier is "joined a public server" and we have **nothing else** — at
   which point the age threshold must be raised, or a captcha added, or the free
-  quota lowered. Whoever picks up [[0169]] should treat "will you keep screening
+  quota lowered. Whoever picks up [[0170]] should treat "will you keep screening
   on, and would you tell us if it changed" as the question that matters most.
 - **Observed churn.** Raise the SSM threshold first — it is a config change and
   costs nothing. Only if churn continues does captcha (Turnstile) become
   justified.
 - Observed *scripted* signup specifically — that is the threat captcha
   addresses, and a 5-minute age gate barely touches it.
-- The all-in per-call backend cost ([[0170]] #7) turning out to dominate the
+- The all-in per-call backend cost ([[0171]] #7) turning out to dominate the
   gateway figure by an order of magnitude — every exposure number in the
   rationale scales with it, and a $0.38/key threat model becoming a $4/key one
   changes what mitigation is proportionate.
@@ -344,7 +344,7 @@ the rework cap, which is coherent only under one key.
 ## Corrections this ADR makes to already-written tasks
 
 Both were checked directly against AWS documentation. Neither is fatal; both
-must be corrected before build ([[0170]]).
+must be corrected before build ([[0171]]).
 
 1. **`nameQuery` is not documented as a prefix match.** [[0158]] and [[0160]]
    build a reconciler and a "prefix hazard" guard on that premise. AWS documents

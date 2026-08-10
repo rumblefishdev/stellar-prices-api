@@ -1,10 +1,10 @@
 ---
-id: "0170"
+id: "0171"
 title: "Settle the seven undocumented Discord/AWS behaviours the onboarding design depends on"
 type: RESEARCH
 status: backlog
 related_adr: ["0010"]
-related_tasks: ["0156", "0157", "0158", "0159", "0160", "0169"]
+related_tasks: ["0156", "0157", "0158", "0159", "0160", "0170"]
 tags: [layer-backend, priority-high, effort-small, milestone-M3, epic-self-service-onboarding, discord, aws, api-gateway, spike, blocks-build]
 milestone: 3
 links:

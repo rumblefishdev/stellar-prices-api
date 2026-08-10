@@ -58,7 +58,7 @@ appears as an acceptance criterion in every iteration of our design response
     **Read the residual risk above as unchanged in size, not eliminated:** at a 5-minute
     threshold the age check is a speed-bump, so the barrier is effectively "joined a public
     Discord server and accepted its rules". That is proportionate to the exposure, but it
-    rests on SDF keeping Membership Screening enabled — tracked as task 0169.
+    rests on SDF keeping Membership Screening enabled — tracked as task 0170.
   - **Account leaving the Discord server after key issuance:** not actively handled — a key,
     once issued, keeps working on its own schedule regardless of the user's later Discord
     membership status. This is a conscious "not solving this now" rather than an oversight;
@@ -110,7 +110,7 @@ appears as an acceptance criterion in every iteration of our design response
       plan that resets at the beginning of the month", with no timezone and no instant; and
       `offset` is a _request count_, not a way to shift the reset day. The boundary above
       stands as **our own product rule** — it is sound and gives one date to render — but
-      the claim that our date and AWS's coincide is unverified until measured (task 0170).
+      the claim that our date and AWS's coincide is unverified until measured (task 0171).
       If they turn out to differ, we render our date and the quota counter does its own
       thing; that is a UX wrinkle, not a correctness bug, because the cap is ours to define.
   - **Rework is a swap, not a delete-and-wait (settled 2026-08-07):** the old key is

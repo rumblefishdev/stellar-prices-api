@@ -1,10 +1,10 @@
 ---
-id: "0169"
+id: "0170"
 title: "Contact the Stellar Discord owner (SDF) to agree production guild integration and test it end to end"
 type: FEATURE
 status: backlog
 related_adr: ["0010"]
-related_tasks: ["0156", "0159", "0160", "0162", "0163", "0164", "0170"]
+related_tasks: ["0156", "0159", "0160", "0162", "0163", "0164", "0171"]
 tags: [layer-docs, priority-high, effort-small, milestone-M3, epic-self-service-onboarding, discord, external-dependency, pre-launch]
 milestone: 3
 links:
@@ -28,7 +28,7 @@ history:
       `blocks-launch` → `pre-launch`: the membership check uses the user's own
       OAuth token against a public guild ID, so nothing here is a technical
       blocker on shipping. Added a sequencing section — step 3 (verify against
-      the real guild) is under our control and should run early with [[0170]],
+      the real guild) is under our control and should run early with [[0171]],
       not wait on SDF's reply.
 ---
 
@@ -115,7 +115,7 @@ case, not a tail risk.
 
 - Run the full issuance flow against `897514728459468821` with a real account:
   member and non-member, `pending` true and false.
-- Confirm the empirical unknowns from [[0170]] behave on the production guild as
+- Confirm the empirical unknowns from [[0171]] behave on the production guild as
   they did on `stellar_test` — particularly the not-a-member status code, and
   whether `pending`/`flags` are present on the REST response.
 
@@ -138,7 +138,7 @@ hearing about it.
 
 | Step | Under our control? | When |
 |---|---|---|
-| 3 — verify against the real guild | **Yes, entirely** | **Do this early**, alongside [[0170]]. Needs one real account that is already a member |
+| 3 — verify against the real guild | **Yes, entirely** | **Do this early**, alongside [[0171]]. Needs one real account that is already a member |
 | 1–2 — contact SDF, establish their posture | No — their response time | Start early because it is slow, not because it blocks |
 | 4 — flip the SSM guild ID | Yes | **Blocks [[0164]] and blocks launch** — see below |
 
@@ -149,7 +149,7 @@ functional for anyone outside this team, because nobody else can join that
 guild. So the order at the end of the epic is fixed:
 
 ```
-… 0163 → 0169 (step 4: FLIP SSM) → 0164 (evidence, real guild)
+… 0163 → 0170 (step 4: FLIP SSM) → 0164 (evidence, real guild)
 ```
 
 The same fact bounds the launch: **until the flip, no external developer can

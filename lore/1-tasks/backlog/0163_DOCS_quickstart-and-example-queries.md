@@ -4,7 +4,7 @@ title: "Quickstart guide and example queries, accurate against the live API"
 type: DOCS
 status: backlog
 related_adr: ["0010"]
-related_tasks: ["0124", "0156", "0157", "0161", "0162", "0164", "0169"]
+related_tasks: ["0124", "0156", "0157", "0161", "0162", "0164", "0170"]
 tags: [layer-docs, priority-high, effort-medium, milestone-M3, epic-self-service-onboarding, documentation, developer-experience]
 milestone: 3
 links:
@@ -86,7 +86,7 @@ through all that — not a second copy of it.
   it so a later change to the SSM value does not make this page false.
   **The invite link in this document is always `discord.gg/stellardev` — the
   real Stellar Developers server — never the `stellar_test` guild**, even while
-  development runs against the test guild ([[0169]]). This page is read by
+  development runs against the test guild ([[0170]]). This page is read by
   outside developers, so a test-guild link here would send them somewhere they
   cannot join and would ship a private artefact into public documentation. This
   page can therefore be written before the SSM flip, but it describes the world

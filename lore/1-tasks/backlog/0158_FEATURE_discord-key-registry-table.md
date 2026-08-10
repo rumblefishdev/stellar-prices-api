@@ -4,7 +4,7 @@ title: "Key registry — ClickHouse table mapping Discord user ID to API Gateway
 type: FEATURE
 status: backlog
 related_adr: ["0007", "0008", "0010"]
-related_tasks: ["0156", "0157", "0159", "0160", "0170"]
+related_tasks: ["0156", "0157", "0159", "0160", "0171"]
 tags: [layer-infra, priority-high, effort-medium, milestone-M3, epic-self-service-onboarding, storage, clickhouse, discord, api-keys, mtls]
 milestone: 3
 links:
@@ -36,7 +36,7 @@ history:
       unchanged. Two corrections though: `nameQuery`'s matching semantics are
       undocumented (not "a prefix match"), which makes the exact-match filter
       load-bearing; and the quota-period boundary is our rule, not AWS
-      behaviour. Both measured by [[0170]].
+      behaviour. Both measured by [[0171]].
 ---
 
 # Key registry — Discord user ID → API Gateway key
@@ -161,7 +161,7 @@ Two consequences, and the second is the important one:
   Do not let a later reader "simplify" it away on the grounds that the `-key`
   suffix already handles it. It is the only guard that does not depend on
   undocumented behaviour.
-- **If matching *is* prefix-based** — the behaviour to assume until [[0170]]
+- **If matching *is* prefix-based** — the behaviour to assume until [[0171]]
   measures it — then because Discord snowflakes are 17–19 digits, a shorter user
   id is a prefix of a longer one: a lookup for `discord-1234567890123456` would
   return the key belonging to `discord-12345678901234567`, and step 5 would
@@ -194,7 +194,7 @@ forever. Recovery has to hang off the **reveal path** instead: when
    **request count** (*"The number of requests subtracted from the given limit
    in the initial time period"*), not a time shift. Keep the rule — it is a
    sound product decision and gives one date to render — but state it as ours.
-   [[0170]] measures the actual rollover so the two can be reconciled.
+   [[0171]] measures the actual rollover so the two can be reconciled.
 
    **Gating on `last_rotated_at` alone reopens the loophole the cap exists to
    close.** Issuance never sets that column, so it is null for every fresh key —

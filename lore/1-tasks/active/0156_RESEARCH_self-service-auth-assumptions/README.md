@@ -4,7 +4,7 @@ title: "Confirm the two flagged self-service auth assumptions — Discord accoun
 type: RESEARCH
 status: active
 related_adr: ["0010"]
-related_tasks: ["0157", "0158", "0159", "0160", "0169", "0170"]
+related_tasks: ["0157", "0158", "0159", "0160", "0170", "0171"]
 tags: [layer-docs, priority-high, effort-small, milestone-M3, epic-self-service-onboarding, discord, auth, abuse-prevention, blocks-build]
 milestone: 3
 links:
@@ -34,8 +34,8 @@ history:
       mitigation costs) + Q- and S-. 17 sources archived. Every cited URL
       re-fetched and its quotes checked against the original before the
       synthesis was written. Both questions answered; ADR 0010 written.
-      Two claims in 0157/0158/0160 found to be unsourced — spawned 0170.
-      Spawned 0169 for the SDF conversation.
+      Two claims in 0157/0158/0160 found to be unsourced — spawned 0171.
+      Spawned 0170 for the SDF conversation.
 ---
 
 # Confirm the self-service auth assumptions
@@ -152,7 +152,7 @@ something different in each case.
 - [x] Owner named for the Stellar Discord relationship and for registering the
       Discord application ([[0159]] currently says "someone")
       → **Adam Kot** owns the `stellar_test` guild and the Discord app
-      registration. The SDF relationship is [[0169]]; no named SDF counterpart
+      registration. The SDF relationship is [[0170]]; no named SDF counterpart
       is public as of 2026-08-10.
 - [x] If the barrier is weaker than assumed — mitigation options costed and a
       decision taken, not just noted
@@ -170,7 +170,7 @@ something different in each case.
       change their shape
       → [ADR 0010](../../../2-adrs/0010_discord-account-model-and-abuse-barrier.md).
       0158/0159/0160 updated. Their *shape* is unchanged — one-key was
-      confirmed — but two unsourced claims were corrected and [[0170]] spawned
+      confirmed — but two unsourced claims were corrected and [[0171]] spawned
       to measure them.
 
 ## Findings

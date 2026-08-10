@@ -4,7 +4,7 @@ title: "Discord OAuth sign-in for the onboarding portal"
 type: FEATURE
 status: backlog
 related_adr: ["0007", "0010"]
-related_tasks: ["0156", "0158", "0160", "0161", "0162", "0169", "0170"]
+related_tasks: ["0156", "0158", "0160", "0161", "0162", "0170", "0171"]
 tags: [layer-backend, priority-high, effort-medium, milestone-M3, epic-self-service-onboarding, discord, oauth, auth, secrets]
 milestone: 3
 links:
@@ -37,7 +37,7 @@ history:
       account-age minimum. Adam owns app registration and the `stellar_test`
       guild — the "someone" placeholder is gone. Guild ID becomes
       per-environment SSM config. Adds a membership check whose error shape is
-      undocumented ([[0170]]).
+      undocumented ([[0171]]).
 ---
 
 # Discord OAuth sign-in
@@ -97,15 +97,15 @@ it decides whether this flow requests the `guilds` scope or only `identify`.
   the server's behaviour.
 - **Membership check.** `GET /users/@me/guilds/{guild.id}/member`, guild ID from
   SSM — **per-environment, not a constant**: `stellar_test` in dev,
-  `897514728459468821` in production once [[0169]] lands. The not-a-member
+  `897514728459468821` in production once [[0170]] lands. The not-a-member
   response shape is **undocumented** (only a generic `404` plus error codes
   `10004`/`10007` exist), so treat only an explicit `10007`/`10004`-style 404 as
   "not a member" and treat 401/403/429/5xx as "unknown, do not deny". Measure it
-  first — [[0170]] #1.
+  first — [[0171]] #1.
 - **`pending` is optional (`pending?`).** The docs' presence guarantee is written
   about gateway events, not this route. Handle `undefined` as a third state;
   never read absent as "cleared". Also note `BYPASSES_VERIFICATION` means
-  `pending === false` can mean "an admin waved them through" — [[0170]] #2.
+  `pending === false` can mean "an admin waved them through" — [[0171]] #2.
 - **Minimum account age from the snowflake**, per ADR 0010:
   `(BigInt(id) >> 22n) + 1420070400000n`. Costs no extra scope and no extra
   consent line — the `id` is already in the `identify` response. Use `BigInt`;
@@ -120,7 +120,7 @@ it decides whether this flow requests the `guilds` scope or only `identify`.
   issued, keeps working regardless of later Discord state — the epic's existing
   non-goal, extended consistently.
 - **Distinguish "not a member" from "could not tell".** The not-a-member result
-  is inferred from an undocumented error shape ([[0170]] #1), so the handler
+  is inferred from an undocumented error shape ([[0171]] #1), so the handler
   must return three outcomes, not two: eligible, ineligible, and unknown. Only
   an explicit `10007`/`10004`-style 404 is ineligible; 401/403/429/5xx is
   unknown and must not issue a key **and** must not tell the user they are not a
@@ -171,7 +171,7 @@ it decides whether this flow requests the `guilds` scope or only `identify`.
 - **Adam also owns the `stellar_test` guild** used for development and testing.
   It must have Community enabled and Rules Screening on, and
   `verification_level: 2`, or `pending` will not exercise the real code path.
-  Production integration with the Stellar guild is [[0169]].
+  Production integration with the Stellar guild is [[0170]].
 
 ## Acceptance Criteria
 

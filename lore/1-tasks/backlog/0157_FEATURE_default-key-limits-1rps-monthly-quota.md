@@ -4,7 +4,7 @@ title: "Default key limits: 1 req/s + monthly quota, not the design doc's 100 re
 type: FEATURE
 status: backlog
 related_adr: ["0008", "0010"]
-related_tasks: ["0121", "0156", "0158", "0160", "0163", "0170"]
+related_tasks: ["0121", "0156", "0158", "0160", "0163", "0171"]
 tags: [layer-infra, priority-high, effort-medium, milestone-M3, epic-self-service-onboarding, api-gateway, usage-plan, throttling, cost]
 milestone: 3
 links:
@@ -171,7 +171,7 @@ conclusion stands on the remaining arguments.
   of requests subtracted from the given limit in the initial time period"*), not
   a way to shift the reset day, so it cannot be used to force alignment.
   The instinct already recorded here — "confirm on the first deploy rather than
-  assume it" — was the right one and is now tracked as [[0170]] #7. Until it is
+  assume it" — was the right one and is now tracked as [[0171]] #7. Until it is
   measured, treat the single-date property as a **design intent**, and make sure
   the wording in [[0160]] and [[0163]] presents the rework boundary as our rule
   rather than as AWS behaviour.

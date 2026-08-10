@@ -4,7 +4,7 @@ title: "Portal frontend — sign-in, key on screen, usage-against-quota dashboar
 type: FEATURE
 status: backlog
 related_adr: ["0010"]
-related_tasks: ["0156", "0159", "0160", "0161", "0163", "0164", "0169", "0170"]
+related_tasks: ["0156", "0159", "0160", "0161", "0163", "0164", "0170", "0171"]
 tags: [layer-frontend, priority-high, effort-large, milestone-M3, epic-self-service-onboarding, ui, dashboard, discord]
 milestone: 3
 links:
@@ -149,7 +149,7 @@ carrying the session cookie.
     signing in again — they were authenticated, just not eligible.
     **Use `discord.gg/stellardev`**, the registered vanity code; the other
     invites SDF publishes are personal invites belonging to individual accounts
-    and one of them is already dead ([[0169]]).
+    and one of them is already dead ([[0170]]).
   - **Discord account below the minimum age.** The threshold is **5 minutes**
     (ADR 0010), so this is a *wait*, not a rejection — render the time
     remaining and let them retry, e.g. "your Discord account is very new; try
@@ -159,7 +159,7 @@ carrying the session cookie.
     Do not hard-code "5 minutes" in the copy — the threshold is an SSM value
     expected to be raised, so drive the wording from what the backend returns.
 - **A Discord outage must not render as "you are not a member."** The membership
-  check infers non-membership from an undocumented error shape ([[0170]] #1), so
+  check infers non-membership from an undocumented error shape ([[0171]] #1), so
   the backend distinguishes "not a member" from "could not tell" and this app
   must render them differently — the second is "try again shortly", not an
   accusation the user cannot act on.

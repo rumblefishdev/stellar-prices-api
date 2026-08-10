@@ -4,7 +4,7 @@ title: "Onboarding backend — issue key, reveal it, report usage, rework once a
 type: FEATURE
 status: backlog
 related_adr: ["0007", "0008", "0010"]
-related_tasks: ["0156", "0157", "0158", "0159", "0162", "0170"]
+related_tasks: ["0156", "0157", "0158", "0159", "0162", "0171"]
 tags: [layer-backend, priority-high, effort-medium, milestone-M3, epic-self-service-onboarding, api-gateway, usage-plan, iam, dashboard]
 milestone: 3
 links:
@@ -37,7 +37,7 @@ history:
       so the endpoint shapes stand. Three corrections: `nameQuery` matching is
       undocumented, the quota-period boundary is our rule rather than inherited
       AWS behaviour, and `enabled=false`'s effect on usage counters is unknown —
-      which blocks costing revocation. All measured by [[0170]].
+      which blocks costing revocation. All measured by [[0171]].
 ---
 
 # Onboarding backend — issue, reveal, usage, rework
@@ -87,7 +87,7 @@ nor its timezone; the only statement anywhere is an example caption, *"creates a
 usage plan that resets at the beginning of the month"*. `offset` is a **request
 count**, not a time shift. The rule stands as **our** product decision — keep
 it — but do not justify it as inherited AWS semantics, and do not assume the two
-boundaries coincide until [[0170]] has measured the rollover. If they turn out
+boundaries coincide until [[0171]] has measured the rollover. If they turn out
 to differ, the dashboard renders our date and the quota counter does its own
 thing; that is a UX wrinkle, not a correctness bug, because the cap is ours to
 define.
@@ -173,7 +173,7 @@ period, one quota.
   match.** AWS's whole description of it is *"The name of queried API keys."* —
   no matching semantics at all. The client-side exact match is therefore the
   only guard that does not rest on undocumented behaviour; comment it as such so
-  it is not later removed as redundant. [[0170]] measures the real behaviour.
+  it is not later removed as redundant. [[0171]] measures the real behaviour.
 
 ## Settled 2026-08-07
 
@@ -217,7 +217,7 @@ does to accumulated usage. Note the delete-then-create reasoning does **not**
 transfer here — that argument works only because `CreateApiKey` mints a *new*
 `id`, and `enabled=false` keeps the `id` and `value` in place. If disabling
 turned out to reset the counter, revocation would become a free quota reset and
-would have to share the rework cap after all. [[0170]] #8 measures it; do not
+would have to share the rework cap after all. [[0171]] #8 measures it; do not
 ship revocation before it does.
 
 Worth knowing while this is open: **`UpdateUsage`** (`PATCH
