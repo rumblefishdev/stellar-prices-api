@@ -123,6 +123,29 @@ history:
       reads it from config and the rate we snapshot must be the rate that priced
       the candles or 0154 constraint 5 compares two different things.
       Full workspace lib suite + all CH ITs green on the 26.3.10.60 pin.
+  - date: 2026-08-10
+    status: active
+    who: okarcz
+    note: >
+      0086 GUARD ADDED, found by measuring prod rather than by review. Sizing the
+      table meant querying oracle_prices, and min(timestamp) came back
+      1970-01-21 - which is [[0086]], an open confirmed bug where the oracle
+      worker intermittently writes the real epoch divided by ~1000, with a
+      CORRECT price and a junk timestamp.
+      My population copied o.timestamp verbatim, filtered only on price_usd > 0,
+      so those rows would have been snapshotted. That is strictly worse here
+      than upstream: oracle_prices sheds them at 13 months, usd_rate is retained
+      FOREVER, so a known defect would have become permanent history in a table
+      whose entire selling point is that it is trustworthy.
+      Added ORACLE_EPOCH_FLOOR (2020-01-01) to the copy predicate, with a test.
+      The floor cannot exclude real data - no oracle we poll existed before
+      Soroban - and it does NOT fix 0086, which still pollutes oracle_prices and
+      every other reader.
+      Prod shape while measuring: oracle_prices holds 452,596 rows of which
+      90,722 are peg-asset rows. The gap is expected - write_oracle is also fed
+      by the event-decoded path, which carries the whole Reflector symbol set
+      (BTC/ETH/XRP/...), not just the three we poll. 90,722 is what the first
+      snapshot will copy, minus the 0086 rows.
 ---
 
 # `prices.usd_rate` + peg-asset rate population

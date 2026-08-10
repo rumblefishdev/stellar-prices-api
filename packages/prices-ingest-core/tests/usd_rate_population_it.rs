@@ -295,3 +295,54 @@ async fn a_collision_on_one_peg_writes_nothing_for_any_peg() {
          partial write is worse than no guard"
     );
 }
+
+/// Task 0086 is an open bug: the oracle worker intermittently writes
+/// `oracle_prices` rows whose timestamp is the real epoch divided by ~1000,
+/// landing in 1970-01 with a *correct* price. Found in prod while sizing 0167 —
+/// `min(timestamp)` on `oracle_prices` reads `1970-01-21`.
+///
+/// Copying those into `usd_rate` would be worse than leaving them upstream:
+/// `oracle_prices` sheds them at 13 months, `usd_rate` is retained forever, so
+/// a known upstream defect would become permanent history.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn does_not_snapshot_the_0086_junk_1970_timestamps() {
+    let _guard = DB_LOCK.lock().await;
+    let client = fresh_prices_schema().await;
+    seed_usdc(&client, 3).await;
+    let writer = OhlcvWriter::new(client.clone());
+
+    // One good reading and one 0086-shaped row: correct price, epoch/1000.
+    client
+        .query(
+            "INSERT INTO prices.oracle_prices (timestamp, asset_id, oracle_name, price_usd, raw_data) \
+             VALUES (1750000000, 3, 'reflector', 0.9993, ''), \
+                    (   1750000, 3, 'reflector', 0.9991, '')",
+        )
+        .execute()
+        .await
+        .unwrap();
+
+    let stats = writer
+        .populate_usd_rate_from_oracle(&[usdc()], "reflector")
+        .await
+        .unwrap();
+    assert_eq!(stats.rows_inserted, 1, "only the good reading is copied");
+
+    let rows = rate_rows(&client).await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].0, 1750000000,
+        "the 1970 row must not be snapshotted"
+    );
+
+    let junk: u64 = client
+        .query("SELECT count() FROM prices.usd_rate WHERE timestamp < toDateTime('2020-01-01')")
+        .fetch_one::<u64>()
+        .await
+        .unwrap();
+    assert_eq!(
+        junk, 0,
+        "no pre-2020 rows may reach the forever-retained table"
+    );
+}

@@ -22,6 +22,12 @@ use crate::error::IngestError;
 use crate::registry_io::PoolRegistryRow;
 use crate::soroban::Registries;
 
+/// Earliest plausible oracle observation, as an epoch second. Anything at or
+/// below this is a task-0086 unit bug (real epoch divided by ~1000, landing in
+/// 1970-01), not a real reading — no oracle we poll existed before Soroban.
+/// Used to keep that junk out of the forever-retained `prices.usd_rate`.
+pub const ORACLE_EPOCH_FLOOR: u32 = 1_577_836_800; // 2020-01-01T00:00:00Z
+
 /// Convert a `Decimal` to the `i128` mantissa ClickHouse expects for a
 /// `Decimal(38, 14)` column. Saturates rather than panicking: AMM
 /// amounts/prices are i128-derived and can exceed the 38-digit budget, and an
@@ -379,6 +385,17 @@ impl OhlcvWriter {
     /// re-copied, and wins on the higher `version` — while an unchanged reading
     /// matches and is skipped, keeping re-runs free.
     ///
+    /// ⚠️ **Junk timestamps are filtered out, and this is not defensive
+    /// decoration either.** Task 0086 is an open, confirmed bug: the oracle
+    /// worker intermittently writes `oracle_prices` rows whose `timestamp` is
+    /// the real epoch divided by ~1000, landing them in `1970-01` with a
+    /// *correct* `price_usd`. Copying those verbatim would be worse here than
+    /// upstream — `oracle_prices` sheds them after 13 months, whereas
+    /// `usd_rate` is retained FOREVER, so a known upstream defect would become
+    /// permanent. [`ORACLE_EPOCH_FLOOR`] drops them. It does not fix 0086, and
+    /// is not a reason to leave 0086 open: the same junk still pollutes
+    /// `oracle_prices` and anything else reading it.
+    ///
     /// ⚠️ **The 0139 guard runs as a PRE-PASS over every identity before any
     /// write.** `oracle_prices` is keyed on `asset_id` and `usd_rate` on natural
     /// identity, so this is the one place the two key spaces meet, and 0139 is
@@ -473,7 +490,8 @@ impl OhlcvWriter {
                          WHERE asset_kind = ? AND asset_code = ? AND issuer_address = ? \
                            AND contract_address = ? AND method = 'oracle' \
                      ) AS r ON o.timestamp = r.timestamp AND o.price_usd = r.usd_rate \
-                     WHERE o.asset_id = ? AND o.price_usd > 0 AND o.oracle_name = ?",
+                     WHERE o.asset_id = ? AND o.price_usd > 0 AND o.oracle_name = ? \
+                       AND o.timestamp > toDateTime(?)",
                 )
                 .bind(kind)
                 .bind(code)
@@ -485,6 +503,7 @@ impl OhlcvWriter {
                 .bind(contract)
                 .bind(asset_id)
                 .bind(oracle_name)
+                .bind(ORACLE_EPOCH_FLOOR)
                 .execute()
                 .await?;
 
