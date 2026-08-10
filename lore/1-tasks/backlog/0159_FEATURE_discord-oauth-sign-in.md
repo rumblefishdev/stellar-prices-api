@@ -171,10 +171,11 @@ it decides whether this flow requests the `guilds` scope or only `identify`.
 
   What this task owns is therefore the **read path, the documented parameter
   names, and the seeding step in the deploy-prep runbook** — not a CDK resource.
-- **Membership and age are checked once, at issuance only** (ADR 0010). Do not
-  re-check on session refresh, on the dashboard, or on rework. A key, once
-  issued, keeps working regardless of later Discord state — the epic's existing
-  non-goal, extended consistently.
+- **Never re-check on session refresh or on the dashboard** (ADR 0010 §8). Reveal
+  and usage are session-only and must keep working indefinitely, including for a
+  user who has left the guild — a key, once issued, never expires. The two
+  exceptions are issue and rework, which carry their own round-trip per the table
+  above; rework re-checks membership only, never age.
 - **Distinguish "not a member" from "could not tell".** The not-a-member result
   is inferred from an undocumented error shape ([[0171]] #1), so the handler
   must return three outcomes, not two: eligible, ineligible, and unknown. Only
