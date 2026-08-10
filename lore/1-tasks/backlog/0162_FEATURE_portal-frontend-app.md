@@ -59,13 +59,6 @@ carrying the session cookie.
 
 ## Implementation
 
-> **BLOCKED pending ADR 0010 "Open" (2026-08-10 audit).** Two acceptance criteria
-> here are unbuildable as written. "Retry without re-authenticating" needs the
-> Discord token that [[0159]] deliberately discards. And "no eligibility check
-> after issuance" cannot hold across a session boundary: the gate lives in the
-> sign-in callback and sessions expire, so a departed member loses access to a key
-> they still own — contradicting the epic's own non-goal. See ADR 0010 → "Open".
-
 
 **From the epic**
 
@@ -153,8 +146,11 @@ carrying the session cookie.
   not previously have. Both must be specific and actionable, not a generic
   error, because the user *can* fix both and will abandon otherwise:
   - **Not a member of the Stellar Discord.** Say which server, and link the
-    invite so joining is one click from here. Then let them retry without
-    signing in again — they were authenticated, just not eligible.
+    invite so joining is one click from here. **Retry re-runs the OAuth
+    round-trip** (ADR 0010 §8) — that is what makes the recheck possible at all,
+    since we hold no Discord token between requests. For a user who has already
+    authorized the app, Discord does not show a consent screen again, so this
+    reads as a brief redirect rather than a second login.
     **Use `discord.gg/stellardev`**, the registered vanity code; the other
     invites SDF publishes are personal invites belonging to individual accounts
     and one of them is already dead ([[0170]]).
@@ -182,11 +178,14 @@ carrying the session cookie.
       two prerequisites (Stellar Discord membership, minimum account age)
       **before** the user authenticates
 - [ ] A non-member is told which server to join, with a working invite link, and
-      can retry without re-authenticating
+      retrying takes them through the OAuth round-trip without a visible second
+      consent screen
 - [ ] A below-threshold account is shown how long to wait and can retry in
       place — not a calendar date, and not a generic refusal
-- [ ] Neither eligibility check runs after issuance: the dashboard, key reveal
-      and rework work for a user who has since left the Discord server
+- [ ] The dashboard and key reveal work indefinitely for a user who has since
+      left the Discord server — the key never expires
+- [ ] Rework is refused for that same user, with a message that says why and
+      names the server, not a generic error
 - [ ] "Could not verify membership" renders differently from "not a member"
 - [ ] First sign-in lands on the dashboard with the key visible and copyable
 - [ ] Returning sign-in shows the same key again

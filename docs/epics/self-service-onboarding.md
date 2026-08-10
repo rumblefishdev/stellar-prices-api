@@ -63,6 +63,13 @@ appears as an acceptance criterion in every iteration of our design response
     once issued, keeps working on its own schedule regardless of the user's later Discord
     membership status. This is a conscious "not solving this now" rather than an oversight;
     revisit only if it turns out to be exploited in practice.
+    - **Sharpened 2026-08-10 (ADR 0010 §8):** the key never expires and is never
+      deactivated, and the dashboard keeps working for a departed member — reveal and usage
+      require no Discord check at all. What such a user loses is the **right to rework**,
+      which re-checks membership at the moment it is requested. Eligibility is proved per
+      action by re-authentication rather than carried in the session, because sign-in and
+      issuance are separate requests and a session cookie proves only that a Discord account
+      exists.
 - **Account model:** the Discord identity _is_ the account. A signed-in user lands on a
   dashboard tied to their Discord ID. ~~**Recommendation:**~~ **Confirmed 2026-08-10 (ADR
   0010): one active key per Discord account.** This also resolves the contradiction between

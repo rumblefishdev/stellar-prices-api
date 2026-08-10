@@ -141,7 +141,9 @@ record that you did.
 | 9 | **Non-member (B) is refused with a message naming the Discord server and how to join** — not a generic error, and no key is issued | ADR 0010 |
 | 10 | **Below-threshold account is refused with the time remaining** (not a date), can retry once it passes, and no key is issued meanwhile | ADR 0010 |
 | 11 | **Discord unavailable ≠ not a member.** Force a non-404 failure from the member lookup (bad token, throttle) and confirm the user is *not* told they are not a member, and that no key is issued | ADR 0010 |
-| 12 | **A user who leaves the guild after issuance keeps working** — dashboard, key reveal and rework all still succeed. This is the epic's non-goal, and issuance-only checking is what implements it | ADR 0010 |
+| 12 | **A user who leaves the guild keeps their key and their dashboard** — the key still returns `200`, reveal and usage still work. Indefinitely; the key never expires | ADR 0010 §8 |
+| 13 | **That same user is refused on rework**, with a message naming the server — membership is required at rework time, and only there | ADR 0010 §8 |
+| 14 | **A valid session alone cannot mint or rework a key.** Call the issue and rework endpoints directly with only a session cookie; both must refuse. This is the check that proves the gate is actually enforced rather than assumed | ADR 0010 §8 |
 
 Check 11 is the one most likely to be skipped and the most damaging to get
 wrong: the membership test is a *negative* inferred from an undocumented error
@@ -201,7 +203,7 @@ omitted is a finding waiting for the reviewer.
 
 ## Acceptance Criteria
 
-- [ ] All twelve mapped checks executed against production and recorded
+- [ ] All fourteen mapped checks executed against production and recorded
       with dates
 - [ ] The evidence run was performed **after** [[0170]]'s SSM flip, against
       guild `897514728459468821` — and the evidence file states which guild it

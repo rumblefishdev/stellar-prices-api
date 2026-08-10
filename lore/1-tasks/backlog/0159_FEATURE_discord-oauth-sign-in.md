@@ -72,14 +72,6 @@ it decides whether this flow requests the `guilds` scope or only `identify`.
 
 ## Implementation
 
-> **BLOCKED pending ADR 0010 "Open" (2026-08-10 audit).** Two questions must be
-> answered before code: does issuance require `pending === false`, and **how does
-> the eligibility verdict reach [[0160]]'s issue endpoint** — the session cookie
-> carries only the Discord user ID, this task issues nothing, and [[0160]] makes
-> no Discord calls, so as written a non-member with a valid session can mint a
-> key. A third question decides the session-expiry behaviour for a user who has
-> left the guild. See ADR 0010 → "Open".
-
 
 **From the epic**
 
@@ -104,6 +96,26 @@ it decides whether this flow requests the `guilds` scope or only `identify`.
   confidential server-side client with an HTTPS redirect it is **not documented
   as required** — implement it anyway, but do not expect the docs to describe
   the server's behaviour.
+- **Eligibility is proved per action, not carried in the session (ADR 0010 §8).**
+  This task owns the OAuth round-trip; it does **not** own issuance. Concretely:
+  `state` carries the intended action, signed, alongside its CSRF role. The
+  callback exchanges the code for a **fresh** token, performs the checks below,
+  and only then hands off to [[0160]]'s issue or rework logic. Nothing about
+  eligibility is stored in the session cookie — a signed "eligible" claim would
+  date the verdict to sign-in time and would not survive to a rework weeks later.
+  Discord does not re-prompt for consent on repeat authorization of the same
+  scopes, so the second and later round-trips are a redirect, not a consent
+  screen.
+
+  | Path | Re-auth | Checks |
+  | --- | --- | --- |
+  | Sign in | — | identity only |
+  | Issue a key | **yes** | membership (`pending === false`) + account age |
+  | Reveal / usage | no | session only |
+  | Rework | **yes** | membership only — age is not re-checked |
+
+  Account age is deliberately **not** re-checked on rework: an account old enough
+  once is old enough forever.
 - **Membership check.** `GET /users/@me/guilds/{guild.id}/member`, guild ID from
   SSM — **per-environment, not a constant**: `stellar_test` in dev,
   `897514728459468821` in production once [[0170]] lands. The not-a-member
@@ -259,8 +271,12 @@ it decides whether this flow requests the `guilds` scope or only `identify`.
 - [ ] Account age is derived with `BigInt` and compared against an SSM
       threshold expressed in **minutes**, defaulting to 5; a below-threshold
       account is refused with the time remaining, and no key is issued
-- [ ] Membership and age are evaluated at issuance only — no later call
-      re-checks either
+- [ ] Issue and rework each carry their own OAuth round-trip; neither trusts the
+      session cookie for eligibility
+- [ ] Reveal and usage require **no** re-auth and keep working indefinitely for a
+      user who has left the guild
+- [ ] `state` binds the intended action as well as the CSRF nonce, and a callback
+      cannot be replayed to perform a different action than the one confirmed
 
 ## Notes
 

@@ -125,17 +125,17 @@ That is a deliberate trade, not an oversight:
 - The threshold is an SSM parameter precisely so this can be raised without a
   deploy the moment churn is actually observed.
 
-**Membership is checked once, at issuance. Decided by Adam, 2026-08-10.**
-Neither the dashboard, the reveal path, nor rework re-checks it. This is the
-consistent extension of the epic's existing non-goal (§7): a key, once issued,
-keeps working regardless of later Discord state. Two consequences worth stating:
+**When membership is checked: see §8.** An earlier draft of this ADR said
+"checked once, at issuance" and meant "once, at sign-in" — those are different
+moments, and the tasks split on exactly that seam, which left the gate
+unenforceable. §8 replaces that rule: eligibility is proved per action, by
+re-authentication, and rework re-checks membership too.
 
-- **The registry stores no membership data** — no `pending`, no `joined_at`.
-  Nothing re-reads them, so storing them would be holding data we never use,
-  against a document that deliberately declines to hold an email address.
-  [[0158]]'s schema needs no membership columns.
-- Every portal call after sign-in is cheaper and cannot fail on a Discord
-  outage. Only issuance depends on Discord being up.
+One consequence of §3 survives unchanged: **the registry stores no membership
+data** — no `pending`, no `joined_at`. Every check reads Discord live at the
+moment it matters, so storing them would be holding data we never re-read,
+against a document that deliberately declines to hold an email address.
+[[0158]]'s schema needs no membership columns.
 
 ### 4. Staging: `stellar_test` first, Stellar Developers later
 
@@ -174,6 +174,89 @@ channel is faster).
 **A user who leaves the Discord server after issuance keeps their key.** The
 member object is read once during the OAuth callback and nothing pushes us an
 update afterwards. This is a decision, not an open question.
+
+---
+
+### 8. Eligibility is proved per action, by re-authentication
+
+Settled by Adam, 2026-08-10, after an adversarial audit found the original
+"checked once, at issuance" rule unenforceable. It replaces that rule.
+
+**The three answers.**
+
+1. **A key is issued only if the caller is a member of the guild at the moment of
+   issuance** — not at the moment of sign-in.
+2. **The verdict travels by re-authentication**, not by trusting a session.
+3. **An issued key never expires and is never deactivated.** Membership is
+   re-checked only when the user asks to **rework** it.
+
+### Why re-authentication rather than a session claim
+
+Sign-in and issuance are two separate HTTP requests handled by two different
+tasks. The session cookie carries only the Discord user ID, so an ineligible user
+who completes OAuth — which they can, because OAuth only proves a Discord account
+exists — holds a valid session and could call the issue endpoint directly. A
+signed "eligible" claim in the cookie would fix that, but it would date the
+verdict to sign-in time, and it does nothing for rework, which happens days or
+weeks later when the user's Discord token is long gone and which we deliberately
+do not persist.
+
+So: **the action itself carries the OAuth round-trip.** Clicking "get my key" or
+confirming a rework redirects through Discord, and the callback that returns holds
+a fresh token with which to ask, right then, whether this person is a member.
+
+This is cheap. Discord does not re-prompt for consent when the user has already
+authorized the same scopes, so the second and later round-trips are a redirect,
+not a consent screen. And it needs no bot in Stellar's guild — which would have
+required SDF's permission and made [[0170]] a hard blocker.
+
+### The shape
+
+`state` is already required for CSRF; it also carries the **intended action**,
+signed. The callback completes that action and nothing else.
+
+| Path | Re-auth? | Checks |
+| --- | --- | --- |
+| Sign in | — | identity only; issues a session |
+| **Issue a key** | **yes** | membership + account age, then `CreateApiKey` |
+| Reveal the key | no | session only — works forever |
+| Usage / dashboard | no | session only — works forever |
+| **Rework** | **yes** | membership, then the quota-period cap, then the swap |
+
+For rework the user confirms first (the `delete-key` modal in [[0162]]), and the
+re-auth is the gate between confirming and executing.
+
+**Account age is only checked on issuance**, not on rework: an account old enough
+once is old enough forever, so re-checking it is noise.
+
+### Consequences
+
+- A user who leaves the guild **keeps their key, indefinitely, and keeps the
+  dashboard**. This sharpens the epic's non-goal rather than contradicting it:
+  the key does keep working on its own schedule. What they lose is the *right to
+  rework*, which is a privilege, not the thing they were issued.
+- [[0160]]'s issue and rework endpoints are no longer pure AWS calls; they
+  complete an OAuth round-trip. Reveal and usage remain pure. The earlier
+  statement that these handlers make no Discord calls at all was wrong and is
+  withdrawn.
+- Nothing needs to be stored: no Discord tokens, no membership columns in the
+  registry. That part of §3 stands.
+
+### Does `pending: true` count as a member?
+
+**No — issuance and rework require `pending === false`.** Recorded as my reading
+of "must be a member", flagged here so it can be reversed cheaply if Adam meant
+otherwise. Discord itself treats a `pending` member as not yet participating:
+they "will initially be restricted from doing any actions in the guild". It is
+also the only reading under which this ADR's screening argument, and [[0170]]'s
+central question to SDF, mean anything — under the other reading the gate is one
+click and screening is decorative.
+
+**This rule must not ship before [[0171]] #2 is measured.** `pending` is an
+optional field and its presence on the `guilds.members.read` REST response is
+undocumented. If it turns out to be absent in practice, a naive
+`pending === false` test would refuse **every** user and take issuance down
+completely. Measure first, then choose the behaviour for `undefined` deliberately.
 
 ---
 
@@ -418,57 +501,6 @@ the rework cap, which is coherent only under one key.
   gateway figure by an order of magnitude — every exposure number in the
   rationale scales with it, and a $0.38/key threat model becoming a $4/key one
   changes what mitigation is proportionate.
-
----
-
-## Open — three questions this ADR does not yet answer
-
-Surfaced by an adversarial audit of this PR on 2026-08-10, after the decision was
-recorded. All three block [[0159]]/[[0160]]/[[0162]] and none can be settled
-without the epic owner.
-
-### 1. Does issuance require `pending === false`?
-
-**This ADR gates on membership, not on screening.** Decision 3 specifies one rule:
-call `GET /users/@me/guilds/{guild.id}/member`. A member who joined and never
-accepted the rules is still returned by that endpoint, with `pending: true`.
-
-So as written, screening buys us nothing — yet the reversal section above, the
-epic's resolution text ("joined a public Discord server **and accepted its
-rules**") and [[0170]]'s central question all assume we read it. [[0159]] already
-carries an acceptance criterion (*"`pending === undefined` is handled explicitly
-and does not silently pass"*) for a gate this ADR never authorised.
-
-Either add the rule — issuance requires `pending === false`, with `undefined` as
-a documented third state ([[0171]] #2 measures which) — or drop the screening
-argument from the abuse story and accept that the gate is "joined a public
-server". **The two must agree.**
-
-### 2. How does the eligibility verdict travel from sign-in to issuance?
-
-[[0159]] performs the check in the OAuth callback and issues nothing. [[0160]]
-issues the key and, per this ADR's "checked once, at issuance" rule, makes no
-Discord calls. The session cookie carries only the Discord user ID and an expiry.
-
-**Nothing carries the verdict between them**, so a non-member who completes OAuth
-holds a valid session and can call the issue endpoint unchallenged. Options: put
-a signed eligibility claim in the session cookie; record "eligible at" in the
-registry at callback time; or have [[0160]] perform the check after all — which
-contradicts the wording in this ADR and in [[0160]], and reintroduces a Discord
-dependency on the issue path.
-
-**"Checked once, at issuance" was written meaning "once, at sign-in".** Those are
-different moments and the tasks split across exactly that seam.
-
-### 3. What happens when a departed member's session expires?
-
-The epic's non-goal says a key keeps working regardless of later Discord state,
-and [[0162]] has an acceptance criterion to match. But the gate lives in the
-sign-in callback and sessions expire — so once the cookie lapses, a user who has
-left the guild cannot sign in again and **loses access to the key they still
-own**. Either the gate is skipped when the registry already holds a row for that
-Discord ID (issuance-only in the strict sense), or the non-goal is narrower than
-the epic claims.
 
 ---
 

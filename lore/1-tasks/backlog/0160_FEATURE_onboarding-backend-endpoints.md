@@ -103,17 +103,6 @@ period, one quota.
 
 ## Implementation
 
-> **BLOCKED pending ADR 0010 "Open" (2026-08-10 audit).** Two items: (1) **issue
-> is one of the four operations below**, so "these handlers make no Discord calls"
-> leaves the eligibility gate unenforced on the only path that mints a key —
-> something must carry the verdict from [[0159]]; (2) the wildcard-free IAM policy
-> this task mandates **cannot be written where the role is created** — the role is
-> in `ComputeStack`, the usage plan in `ApiGatewayStack`, and `app.ts` builds
-> Compute first, so the plan ARN is not available at synth. Pick one: attach the
-> policy from `ApiGatewayStack`, resolve the plan id at deploy time in
-> `ComputeStack` (fails on a clean-account first deploy), or widen to
-> `/usageplans/*` (which this task forbids). No task currently owns that choice.
-
 
 **From the epic**
 
@@ -165,15 +154,22 @@ period, one quota.
   cross-stack reference — `ComputeStack` is a dependency of `ApiGatewayStack`
   and cannot import from it.
 - **Never log a key value**, including in error paths and X-Ray annotations.
-- **None of these four operations re-checks Discord eligibility** (ADR 0010,
-  2026-08-10). Membership and account age are evaluated once, at issuance, by
-  [[0159]]. Reveal, usage and rework act on a valid session and nothing else.
-  Two reasons this is the right split, worth stating so nobody "hardens" it
-  later: it is what implements the epic's non-goal that a key keeps working
-  after a user leaves the server, and it keeps a Discord outage from breaking
-  the dashboard for everyone who already has a key.
-  Practical consequence: these handlers make **no** Discord calls at all, so
-  the only Discord dependency in the portal backend is the sign-in path.
+- **Two of these four operations require a fresh eligibility proof; two do not
+  (ADR 0010 §8).** Corrected 2026-08-10 — an earlier version of this bullet said
+  none of them re-checks eligibility, which was wrong: **issue is one of the four**,
+  so that rule left the gate unenforced on the only path that mints a key.
+
+  | Operation | Eligibility proof | Why |
+  | --- | --- | --- |
+  | Issue | **required** | membership must hold *at the moment of issuance* |
+  | Reveal | none | the key is already theirs; works forever |
+  | Usage | none | same |
+  | Rework | **required** | membership only; the age check is not repeated |
+
+  The proof comes from [[0159]]'s re-authentication callback, which holds a fresh
+  Discord token. **This task performs no Discord calls itself** — it consumes the
+  verdict from the callback that invoked it. Reveal and usage stay pure AWS, so a
+  Discord outage never breaks the dashboard for someone who already has a key.
 - **Issue and rework must be safe under double-submit, and the store no longer
   helps.** ClickHouse has no conditional insert ([[0158]] "Accepted
   consequences"), so the guard is deterministic key naming plus the reconciler:
@@ -249,6 +245,11 @@ rework, which the dashboard currently conflates.
 - [ ] Rework issues a new key and deletes the old one in one operation; a second
       attempt in the same quota period is refused with `409` and
       `next_eligible_at`
+- [ ] Issue and rework are unreachable without a fresh eligibility proof — a
+      valid session alone does not suffice, verified by calling both endpoints
+      directly with a session cookie and nothing else
+- [ ] A user who has left the guild can still reveal their key and read usage,
+      but is refused on rework
 - [ ] Reworking on 3 August refuses until 1 September, and succeeds on 1
       September — the meeting's worked example, tested
 - [ ] Reconciler adopts an existing `discord-<userId>-key` instead of creating a
