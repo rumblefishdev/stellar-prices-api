@@ -8,7 +8,7 @@
 //! onto the scratch name) and drops it at the end.
 
 use clickhouse::Client;
-use prices_clickhouse::USDC_ISSUER;
+use prices_clickhouse::{USDC_ISSUER, USDT_ISSUER};
 
 fn ch_url() -> String {
     std::env::var("CLICKHOUSE_URL").unwrap_or_else(|_| "http://localhost:8123".to_string())
@@ -151,13 +151,56 @@ async fn views_expose_usd_series_and_reference() {
         "contract kind must blank asset_code/issuer_address"
     );
 
-    // EXO only appears as an unpriced quote leg → not a priced row.
+    // EXO only appears as an unpriced quote leg → not a priced row. It is NOT a
+    // peg asset, so the 0165 arm does not rescue it: the peg-fill arm is keyed
+    // to the two canonical peg identities, not to "any quote leg".
+    let non_peg_quote: u64 = client
+        .query(&format!(
+            "SELECT count() FROM {db}.price_usd_series WHERE asset_code = 'EXO'"
+        ))
+        .fetch_one::<u64>()
+        .await
+        .unwrap();
+    assert_eq!(non_peg_quote, 0, "a non-peg quote leg gets no row");
+
+    // ⚠️ Was `== 3` before task 0165. USDC (asset 2) is the quote on three of
+    // these candles and the base of none, so it previously had NO row at all —
+    // that is the whole defect. It now gets a 'peg' row, hence 4. The change is
+    // intentional; a regression to 3 means the peg-fill arm stopped firing.
     let priced_assets: u64 = client
         .query(&format!("SELECT count() FROM {db}.price_usd_series"))
         .fetch_one::<u64>()
         .await
         .unwrap();
-    assert_eq!(priced_assets, 3, "only XLM, FOO, CTOKEN are priced");
+    assert_eq!(
+        priced_assets, 4,
+        "XLM, FOO, CTOKEN traded + USDC via the peg arm"
+    );
+
+    // The peg row is keyed on the canonical USDC identity and flagged 'peg'.
+    let (usdc_close, usdc_method): (f64, String) = client
+        .query(&format!(
+            "SELECT toFloat64(close_usd), method FROM {db}.price_usd_series \
+             WHERE asset_kind = 'credit' AND asset_code = 'USDC' AND issuer_address = ?"
+        ))
+        .bind(USDC_ISSUER)
+        .fetch_one::<(f64, String)>()
+        .await
+        .unwrap();
+    assert!(approx(usdc_close, 1.0), "USDC falls back to the peg value");
+    assert_eq!(usdc_method, "peg", "USDC row is flagged as a fallback");
+
+    // Every genuinely traded row keeps method='traded' — the provenance column
+    // must not relabel existing rows.
+    let mislabelled: u64 = client
+        .query(&format!(
+            "SELECT count() FROM {db}.price_usd_series \
+             WHERE asset_code != 'USDC' AND method != 'traded'"
+        ))
+        .fetch_one::<u64>()
+        .await
+        .unwrap();
+    assert_eq!(mislabelled, 0, "traded rows must be labelled 'traded'");
 
     // usd_reference: one bucket, xlm_usd = 0.30 (XLM/USDC volume-weighted close).
     let xlm_usd: f64 = client
@@ -594,6 +637,161 @@ async fn views_sql_replaces_every_existing_view() {
             "{v} must expose `{real_col}` after the apply, got {cols:?}"
         );
     }
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// Task 0165 — the peg-fill arm of `price_usd_series*`.
+///
+/// Three cases, each of which a plausible-but-wrong implementation fails:
+///
+///   1. A peg asset seeded **quote-only** returns the fallback. Fails before
+///      0165 — the asset has no row at all, which is the reported defect.
+///   2. A peg asset seeded as **both** base and quote returns its MARKET value,
+///      not the fallback. This is the USDT-flattening regression: an
+///      implementation that lets the peg arm own the peg identities would report
+///      $1 here and silently destroy 102 genuinely priceable pools on prod.
+///   3. A non-peg asset is **unchanged** — same close_usd, and `method` does not
+///      relabel it.
+///
+/// ⚠️ The assertions are written against FALLBACK SEMANTICS, not the literal 1.
+/// `PEG_FALLBACK` is the value the view currently substitutes when no measured
+/// rate exists; task 0168 replaces the constant with a real depeg-aware rate
+/// from `prices.usd_rate`. When it does, only this constant and the
+/// rate-available case move — the shape of the test survives. A test asserting
+/// "peg asset → exactly 1.0" would have to be rewritten instead.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn price_usd_series_fills_peg_assets_without_overriding_market_data() {
+    let db = "it_views_peg_fill";
+    let client = setup_scratch(db).await;
+
+    /// The value the view substitutes when NO measured rate is available.
+    /// Task 0168 sources this from `prices.usd_rate` instead of a constant.
+    const PEG_FALLBACK: f64 = 1.0;
+
+    // 2 = USDC (top-preference quote → never a base, the defect).
+    // 3 = USDT at its canonical issuer (a peg asset that DOES trade as a base —
+    //     the control that catches the flattening regression).
+    // 10 = FOO, an ordinary credit asset; 1 = native XLM.
+    client
+        .query(&format!(
+            "INSERT INTO {db}.assets \
+             (asset_id, asset_code, asset_type, issuer_address, contract_address, sac_address) VALUES \
+             (1,'XLM','classic','','',''), \
+             (2,'USDC','classic','{USDC_ISSUER}','',''), \
+             (3,'USDT','classic','{USDT_ISSUER}','',''), \
+             (10,'FOO','classic','GFOO','','')"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    // One bucket. FOO/USDC and XLM/USDC price normally (USDC is quote-only).
+    // USDT trades as a BASE against USDC at 0.97 — a deliberate de-peg, so a
+    // fallback leaking into case 2 is unmistakable — and also appears as a quote
+    // leg (FOO/USDT), which is what makes case 2 non-trivial: USDT gets BOTH a
+    // real arm-A row and a zero-weight arm-B placeholder in the same bucket.
+    client
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1d \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
+             (1620000000,10, 2,'sdex', 5,5,5,5,             10, 50, 50, 5,    5,    1,1), \
+             (1620000000, 1, 2,'sdex', 0.30,0.30,0.30,0.30, 1000,300,300,0.30,0.30, 1,1), \
+             (1620000000, 3, 2,'sdex', 0.97,0.97,0.97,0.97, 100, 97, 97, 0.97, 0.97, 1,1), \
+             (1620000000,10, 3,'sdex', 5.15,5.15,5.15,5.15, 4,  20.6,20.6,5,  5.15, 1,1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    let approx = |a: f64, b: f64| (a - b).abs() < 1e-4;
+    let row = |view: &'static str, code: &'static str, issuer: String| {
+        let client = client.clone();
+        let db = db.to_string();
+        async move {
+            client
+                .query(&format!(
+                    "SELECT toFloat64(close_usd), method FROM {db}.{view} \
+                     WHERE asset_code = ? AND issuer_address = ?"
+                ))
+                .bind(code)
+                .bind(issuer)
+                .fetch_one::<(f64, String)>()
+                .await
+                .unwrap()
+        }
+    };
+
+    for view in ["price_usd_series", "price_usd_series_1h"] {
+        // The 1h view reads price_ohlcv_1h; seed the same bucket there once.
+        if view == "price_usd_series_1h" {
+            client
+                // Column-list-free so it cannot drift if the table gains a
+                // column; price_ohlcv_1h is `AS price_ohlcv_1m`, same shape.
+                .query(&format!(
+                    "INSERT INTO {db}.price_ohlcv_1h SELECT * FROM {db}.price_ohlcv_1d"
+                ))
+                .execute()
+                .await
+                .unwrap();
+        }
+
+        // CASE 1 — quote-only peg asset gets the fallback. Fails before 0165.
+        let (usdc, usdc_method) = row(view, "USDC", USDC_ISSUER.to_string()).await;
+        assert!(
+            approx(usdc, PEG_FALLBACK),
+            "{view}: quote-only USDC must fall back, got {usdc}"
+        );
+        assert_eq!(usdc_method, "peg", "{view}: USDC provenance");
+
+        // CASE 2 — peg asset that also trades keeps its MARKET value. A
+        // fallback here would read 1.0 and flatten a real de-peg to par.
+        let (usdt, usdt_method) = row(view, "USDT", USDT_ISSUER.to_string()).await;
+        assert!(
+            approx(usdt, 0.97),
+            "{view}: traded USDT must keep its market value (0.97), got {usdt} \
+             — the zero-weight placeholder must not perturb the average"
+        );
+        assert_eq!(usdt_method, "traded", "{view}: USDT provenance");
+
+        // CASE 3 — ordinary asset unchanged. FOO trades against both USDC (5.0,
+        // vol 10) and USDT (5.0, vol 4); the volume-weighted collapse is 5.0 and
+        // the arm-B rows for USDC/USDT contribute nothing to it.
+        let (foo, foo_method) = row(view, "FOO", "GFOO".to_string()).await;
+        assert!(
+            approx(foo, 5.0),
+            "{view}: non-peg asset must be unchanged, got {foo}"
+        );
+        assert_eq!(foo_method, "traded", "{view}: FOO provenance");
+    }
+
+    // The peg arm must not invent identities: only assets that actually appear
+    // as a peg quote leg get a placeholder. Nothing is keyed on a non-peg quote.
+    let rows: u64 = client
+        .query(&format!(
+            "SELECT count() FROM {db}.price_usd_series WHERE method = 'peg'"
+        ))
+        .fetch_one::<u64>()
+        .await
+        .unwrap();
+    assert_eq!(rows, 1, "exactly one peg-filled row (USDC); USDT traded");
+
+    // No NULL introduced. The pre-existing nullIf → NULL edge at zero volume is
+    // preserved by the countIf guard, but nothing here should trip it.
+    let nulls: u64 = client
+        .query(&format!(
+            "SELECT countIf(close_usd IS NULL) FROM {db}.price_usd_series"
+        ))
+        .fetch_one::<u64>()
+        .await
+        .unwrap();
+    assert_eq!(nulls, 0, "peg fill must not introduce NULLs");
 
     client
         .query(&format!("DROP DATABASE {db}"))
