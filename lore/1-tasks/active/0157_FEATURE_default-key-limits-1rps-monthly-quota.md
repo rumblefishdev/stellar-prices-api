@@ -2,7 +2,7 @@
 id: "0157"
 title: "Default key limits: 1 req/s + monthly quota, not the design doc's 100 req/s"
 type: FEATURE
-status: backlog
+status: active
 related_adr: ["0008", "0010"]
 related_tasks: ["0121", "0156", "0158", "0160", "0163", "0171"]
 tags: [layer-infra, priority-high, effort-medium, milestone-M3, epic-self-service-onboarding, api-gateway, usage-plan, throttling, cost]
@@ -36,6 +36,17 @@ history:
       for gateway/stage settings. Three renames alongside the three new fields,
       done here because this is the task that introduces the second tier and
       makes `apiKeyRateLimit` actively misleading.
+  - date: 2026-08-10
+    status: active
+    who: akot
+    note: >
+      Activated. Branched from `docs/0156_self-service-auth-assumptions` rather
+      than `develop` because [[0156]] (PR #187, in review) rewrites this task's
+      quota-reset section: the calendar alignment is unverified, so the
+      single-date property is design intent until [[0171]] #7 measures it.
+      Building from `develop` would implement the superseded spec. The status
+      move is committed on the feature branch, not pushed to `develop`, to
+      avoid a modify/delete conflict against PR #187 which edits this file.
 ---
 
 # Default key limits: 1 req/s + monthly quota
