@@ -35,6 +35,41 @@ history:
 
 # Dust-trade candles produce absurd `close_usd` values
 
+## ⚠️ The mirror image — precision COLLAPSE at the small end (found 2026-08-10)
+
+This task is about absurdly **large** `close_usd`. Verifying [[0167]] on prod
+surfaced the opposite failure at the same root: assets whose unit price sits at
+the bottom of `Decimal(38,14)`.
+
+Measured over 103,016 USDC-quoted daily candles, 145 (0.14%) carry a `close_usd`
+that no rate can reproduce. Their `close` is a single-digit multiple of `1e-14`
+and **every one loses exactly one ulp**:
+
+| asset | close | close_usd | mantissas |
+|---|---|---|---|
+| KINGSTON | `0.00000000000008` | `0.00000000000007` | 8 → 7 |
+| MetaVerse | `0.0000000000001` | `0.00000000000009` | 10 → 9 |
+| MetaVerse | `0.00000000000011` | `0.0000000000001` | 11 → 10 |
+| MetaVerse | `0.00000000000015` | `0.00000000000014` | 15 → 14 |
+
+Consistently **one unit down**, which rules out round-to-nearest (`10 × 1.0001`
+would stay `10`). It is a float round-trip: `1e-13` has no exact binary form,
+becomes `0.99999…e-13`, and truncates. Relative error reaches **14.25%**;
+absolute error is `1e-14` per unit — nil, even at the millions of `volume_base`
+these candles carry.
+
+**Same family as this task** — an asset priced outside the range
+`Decimal(38,14)` handles usefully — opposite end. Recorded here rather than
+filed separately because a fix for one should consider the other: dust trades
+produce garbage at the top, precision collapse produces it at the bottom, and
+both are "the price is outside our representable working range".
+
+⚠️ **Not a pricing-tier defect.** The same error appears against any rate,
+including the one enrichment itself used, so it must not be mistaken for an
+oracle or peg problem. It also means a *relative*-error check over these assets
+will always look alarming while the absolute error is negligible — any
+tolerance test needs an absolute floor as well as a percentage.
+
 ## Summary
 
 Single-trade SDEX candles with negligible volume carry nonsense unit prices,

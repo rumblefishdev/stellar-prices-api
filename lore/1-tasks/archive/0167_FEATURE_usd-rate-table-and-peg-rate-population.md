@@ -2,7 +2,7 @@
 id: "0167"
 title: "Create prices.usd_rate and populate the peg-asset rates from oracle_prices — extracted from 0154 so it is not blocked behind 0111"
 type: FEATURE
-status: active
+status: completed
 related_adr: []
 related_tasks: ["0154", "0151", "0165", "0168", "0139", "0111"]
 tags:
@@ -168,6 +168,29 @@ history:
       the corrected numbers 0172 should have gone first. Nothing is wasted - the
       work is correct and unblocks 0168 - but the sequencing rested on an
       unverified number. See the Coverage correction section.
+  - date: 2026-08-10
+    status: completed
+    who: okarcz
+    note: >
+      COMPLETED. 0154 constraint 5 - the gate before anything prices off this
+      table - PASSED on prod over 103,016 USDC-quoted daily candles. 9,022
+      oracle-tier candles reproduce exactly from the stored rate, which is the
+      question the check actually asks. 93,849 sit in the expected flat-$1 peg
+      band, which incidentally quantifies what 0168 is worth.
+      The 145 outliers (0.14%) were chased down rather than waved through, and
+      are a Decimal(38,14) representable-floor artifact: close sits at
+      single-digit multiples of 1e-14 and every candle loses exactly one ulp
+      (8->7, 10->9, 11->10, 15->14) via a float round-trip, not a rounding rule.
+      Relative error up to 14.25%, absolute error 1e-14 per unit. The same error
+      appears against any rate including enrichment's own, so it is not a rate
+      defect. Noted on 0116 as the mirror of that task's absurdly-large values.
+      Two ACs remain [~] deliberately and are not defects: the ASOF rule is
+      documented at the table but implemented by its first consumer (0168), and
+      pre-oracle absence is now verified on real data (min(timestamp) =
+      2026-03-11, zero pre-2020 rows).
+      Shipped: prices.usd_rate live on ch-prod-01, oracle-worker deployed and
+      populating, 87,028 rows at method='oracle' with average rates 1.000271 /
+      0.99959. 0168 is now a one-expression change.
 ---
 
 # `prices.usd_rate` + peg-asset rate population
@@ -366,10 +389,32 @@ either. Record it rather than mitigate it.
       pre-2026-03-11 data — DISCHARGED on prod 2026-08-10: `min(timestamp)` in
       `usd_rate` is `2026-03-11 14:00:00`, matching `oracle_prices` exactly, and
       `count() WHERE timestamp < '2020-01-01'` is 0.
-- [ ] Reproduces today's `close_usd` for the oracle and peg tiers on a sample
-      window (0154 constraint 5), on CH **26.3.10.60**. **Requires prod data —
-      operator-run, see §Prod backfill.** This is the gate before anything
-      *reads* the table for pricing.
+- [x] Reproduces today's `close_usd` for the oracle and peg tiers on a sample
+      window (0154 constraint 5), on CH **26.3.10.60**. **PASSED on prod
+      2026-08-10** over 103,016 USDC-quoted daily candles:
+
+      | bucket | candles | reading |
+      |---|---|---|
+      | < 0.001% diff | **9,022** | oracle-tier candles reproduce **exactly** — the rate table's arithmetic is correct |
+      | 0.001–0.2% | **93,849** | the flat-`$1` peg tier where the oracle did not reach. Expected, and this is the size of what [[0168]] fixes |
+      | ≥ 0.2% | 145 (0.14%) | **not a rate defect** — see below |
+
+      Median difference **0.011%**. ⚠️ Note this is ~6× smaller than the 0.067%
+      measured on a single afternoon and quoted in [[0168]]; today's readings sit
+      further from par than the historical average.
+
+      **The 145 outliers are a `Decimal(38,14)` representable-floor artifact.**
+      Their `close` sits at single-digit multiples of `1e-14`
+      (`0.00000000000008`, `0.0000000000001`), and every one loses **exactly one
+      ulp**: mantissa 8→7, 10→9, 11→10, 15→14. That is a float round-trip, not
+      rounding-to-nearest — `1e-13` has no exact binary form, becomes
+      `0.99999…e-13`, and truncates down. Relative error up to 14.25%, absolute
+      error `1e-14` per unit, i.e. nil even at the millions of `volume_base`
+      these carry. The same error would appear against **any** rate, including
+      the one enrichment itself used, so it says nothing about `usd_rate`.
+      Assets seen: `KINGSTON`, `MetaVerse`, `QSHIB`, `XRPNvidia`, `usa` — huge
+      supply, microscopic unit price, `trades = 1`. Recorded on [[0116]] as the
+      mirror image of that task's absurdly-*large* `close_usd`.
 - [x] `0154` and `0151` updated to record that the table moved here. **Already
       done in PR #182** when 0167 was authored — re-checked 2026-08-10, both
       reference 0167; no further edit needed.
