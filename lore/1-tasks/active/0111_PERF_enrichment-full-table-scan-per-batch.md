@@ -54,6 +54,28 @@ history:
       step above the materialised table they originally requested (now
       [[0150]], dropped to priority-low). See
       `0144/notes/S-be-0199-response-received.md`.
+  - date: 2026-08-10
+    status: active
+    who: okarcz
+    note: >
+      Added option 5 to the implementation list - rate-driven discovery. Raised
+      while explaining 0167: if usd_rate holds rates as first-class rows,
+      enrichment can ask "which rates are new since I last ran?" instead of
+      "which candles are missing a price?", and only the second requires reading
+      every candle. That is option 3's insight using a queue we are already
+      building, rather than a new pending-work table.
+      Recorded WITH its three limits so it is not mistaken for a shortcut: a new
+      rate does not name the candles needing it (and quote_asset_id is only the
+      2nd sort-key column, so that lookup has no clean index path); it does
+      nothing for the existing backlog of zeros; and it CANNOT be used to skip
+      this task, because full rate coverage needs 0154's pivot tiers and 0154 is
+      hard-blocked behind 0111. 0167 landed only the peg subset.
+      Also flagged the misreading to avoid: this is NOT "compute close_usd from
+      usd_rate at read time" - that is the refactor 0151 rejected, and it would
+      not even be cheap, since the pivot rate is itself derived from candles so
+      the scan moves rather than disappears.
+      The options list predates usd_rate existing at all, which is why it needed
+      amending rather than just re-reading.
 ---
 
 > **Why this is queued ahead of its own cost case:** the perf argument for 0111
@@ -179,8 +201,49 @@ re-litigate them without new evidence.
    asymptotics, and it also removes `count_candidates` entirely (subsumes 0062).
 4. **Drop `FINAL` from the hot loop** where dedup is not load-bearing — the
    `version` column already orders writes.
+5. **Rate-driven discovery — a variant of 3 that did not exist when this list was
+   written.** Added 2026-08-10, after [[0167]] built `prices.usd_rate`.
 
-Options 1 and 3 are complementary; 2 may be a fast stopgap.
+   The defect is not that the arithmetic is expensive — it is that *discovering
+   what to work on* costs a full scan. Enrichment asks **"which candles are
+   missing a price?"**, which is only answerable by reading every candle
+   (`FINAL WHERE volume_quote_usd = 0`). With rates stored as first-class rows it
+   can instead ask **"which rates are new since I last ran?"** — a small query
+   against a small table — and then resolve the bounded set of candles quoted in
+   those assets over that window.
+
+   This is option 3's insight with a queue we are already building for other
+   reasons, rather than a new pending-work table written at ingest. The two are
+   not exclusive: a rate watermark covers *"a new/corrected rate arrived"*, an
+   ingest queue covers *"a new candle arrived"*, and enrichment needs both edges.
+
+   ⚠️ **Three things that stop this being a free win — check them before costing
+   it:**
+
+   - **A new rate does not name the candles that need it.** You still resolve
+     "candles quoted in asset X within window W". Bounded and cheap versus a full
+     scan, but not free, and `quote_asset_id` is only the **second** sort-key
+     column on `price_ohlcv_1m`, so that lookup has no clean index path — the
+     same projection-cost unknown [[0151]] flagged and [[0167]] deliberately did
+     not pull forward.
+   - **It does nothing for the existing backlog.** A queue helps from the moment
+     you start queueing; the accumulated zeros still need one bounded sweep,
+     which is option 1.
+   - ⚠️ **Sequencing trap — this cannot be used to skip this task.** Driving
+     enrichment entirely from `usd_rate` needs rates for *all* quote assets, which
+     is [[0154]]'s pivot tiers, and **0154 is hard-blocked behind THIS task** on
+     cost. [[0167]] has landed only the peg subset (USDC/USDT, `method='oracle'`).
+     So this is a fix to sequence *with* 0111, not an alternative to it.
+
+   ⚠️ **Do NOT read this as "compute `close_usd` from the rate table at read
+   time".** That is the schema-wide refactor [[0151]] rejected, and it would not
+   even be cheap: the pivot rate is itself derived from candles (the XLM/USDC
+   vwap), so the scan moves rather than disappears, and the cost lands on every
+   read of a surface BE already calls slow. `close_usd` stays stored,
+   non-nullable, written in place.
+
+Options 1 and 3 are complementary; 2 may be a fast stopgap; 5 is 3's cheaper
+half if [[0167]]'s table proves out.
 
 ## Acceptance Criteria
 
