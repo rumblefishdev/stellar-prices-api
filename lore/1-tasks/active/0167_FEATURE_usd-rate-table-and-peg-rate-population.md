@@ -2,7 +2,7 @@
 id: "0167"
 title: "Create prices.usd_rate and populate the peg-asset rates from oracle_prices — extracted from 0154 so it is not blocked behind 0111"
 type: FEATURE
-status: backlog
+status: active
 related_adr: []
 related_tasks: ["0154", "0151", "0165", "0168", "0139", "0111"]
 tags:
@@ -11,6 +11,7 @@ links:
   - "../../../packages/prices-clickhouse/schema/init.sql"
   - "../../../packages/oracle-worker/src/lib.rs"
   - "../../../packages/cleanup-worker/src/lib.rs"
+  - "../../../lore/1-tasks/archive/0144_BUG_be-0199-usd-read-surface-defects/notes/I-usd-rate-table.md"
 history:
   - date: 2026-08-07
     status: backlog
@@ -25,6 +26,30 @@ history:
       riskiest piece early and separately. Confirmed against 0151 that this does
       not re-open the schema-wide refactor it rejected — see §Relationship to
       0151.
+  - date: 2026-08-10
+    status: active
+    who: okarcz
+    note: >
+      ACTIVATED, and pulled ahead of the rest of the queue on ONE argument: it
+      is the only open task whose INPUT DATA EXPIRES. oracle_prices is pruned by
+      monthly partition drop at INTERVAL 13 MONTH (cleanup-worker/src/lib.rs:24)
+      and coverage starts ~2025-09, so 202509 ages out ~2026-10/11. Every month
+      this waits, a month of depeg-aware history is lost permanently. Everything
+      else on the board (0170, 0171, 0172, 0142) is static - the defects will be
+      just as fixable next month.
+      Now unblocked downstream as well: 0165 shipped to prod 2026-08-10 and is
+      publishing 891 daily USDC buckets at a hardcoded $1 with method='peg'. Its
+      three forward-compat requirements all landed, so 0168 is a one-expression
+      change against this table rather than a rewrite.
+      Originating reasoning is the I-usd-rate-table note under archived task
+      0144 - now linked from `links` and from that note's `spawns`, because it
+      was previously reachable only by knowing it existed in an archived task's
+      notes directory.
+      ⚠️ Scope guard restated: the SCHEMA-WIDE refactor in that note stays
+      REJECTED (0151). close_usd is not touched, nothing published becomes NULL,
+      and the key is NATURAL IDENTITY not quote_asset_id - 0139 is confirmed
+      genuine collisions, measured 2026-08-10 at 3,281 asset_ids across 6,568
+      identities, which a quote_asset_id-keyed table would have inherited.
 ---
 
 # `prices.usd_rate` + peg-asset rate population
