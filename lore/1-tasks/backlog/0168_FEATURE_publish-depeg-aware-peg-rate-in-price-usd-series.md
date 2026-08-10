@@ -94,7 +94,7 @@ Fold these into 0165 **before it merges**, or this task turns into a rewrite:
 - [ ] `price_usd_series` and `price_usd_series_1h` publish the measured peg rate
       where an observation exists within the staleness window.
 - [ ] `$1` remains the fallback where no observation exists (deep history,
-      pre-~2025-09), and is **distinguishable** from a measured `1.0000`.
+      pre-**2026-03-11**), and is **distinguishable** from a measured `1.0000`.
 - [ ] No `NULL` introduced — BE: *"a NULL renders as a dash and removes the pool
       from every USD view we have."*
 - [ ] The published value agrees with what the oracle tier baked into candles in
@@ -135,7 +135,7 @@ tier** bakes the same flat `$1` into `close_usd` itself —
 
 — so every USDC-quoted candle's `close_usd` is ~0.067% **low** and every
 USDT-quoted one ~0.070% **high**, wherever the oracle tier did not win. That is
-all deep history before the oracle window (~2025-09) plus anything outside the
+all deep history before the oracle window (**2026-03-11**, measured) plus anything outside the
 staleness bound. **Shipping this task leaves that untouched**, and a reader
 comparing the view against the candles will find them disagreeing by that margin.
 
@@ -161,6 +161,8 @@ a ~7× error on 102 live pools. Fix the order-of-magnitude problem first.
 
 ## Notes
 
-- Deep history stays flat `$1` permanently — there is no oracle before ~2025-09.
+- Deep history stays flat `$1` permanently — there is no oracle reading before
+  **2026-03-11** (measured on prod 2026-08-10; earlier task text said ~2025-09,
+  which was never verified and is wrong).
   That is a data-availability fact, not a gap to close, and the same shape as the
   pre-Soroban tail having no USD reference at all.

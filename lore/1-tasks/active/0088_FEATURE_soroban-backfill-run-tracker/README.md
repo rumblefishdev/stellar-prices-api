@@ -538,7 +538,9 @@ aws events describe-rule --name prices-production-cleanup --region eu-central-1 
 > exotic quotes with no USD reference, and the pre-Soroban era has no reference at
 > all — 2018-2019 carries 100k–200k XLM-quoted rows/month at 100% zero because
 > USDC barely existed then (6–45 rows/month) and `prices.oracle_prices` only
-> starts 2025-09. **Enriching before pre-rolling would change nothing.** The
+> starts **2026-03-11** (measured 2026-08-10; this line previously said
+> 2025-09, which was unverified). **Enriching before pre-rolling would change
+> nothing.** The
 > pre-Soroban tail is USD-less as a data-availability fact.
 >
 > Run this as a cheap regression guard, not a gate — expect a high number and
