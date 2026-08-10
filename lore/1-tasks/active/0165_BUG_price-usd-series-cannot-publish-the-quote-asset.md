@@ -2,7 +2,7 @@
 id: "0165"
 title: "price_usd_series can never publish USDC — the view only emits base assets, so the canonical quote asset is structurally unpriceable"
 type: BUG
-status: backlog
+status: active
 related_adr: []
 related_tasks: ["0144", "0154", "0147", "0150", "0151", "0061", "0139", "0136", "0167", "0168"]
 tags:
@@ -37,6 +37,21 @@ history:
       emerged from that re-derivation and is now the strongest evidence here:
       USDC at the canonical issuer is 0/1,433 priceable, USDC at 56 other
       issuers is 228/233 (97.9%) — same asset code, preference the sole variable.
+  - date: 2026-08-10
+    status: active
+    who: okarcz
+    note: >
+      Activated for implementation. Nothing left to investigate — the defect is
+      verified on prod, the fix is designed (zero-weight peg-fill arm unioned
+      before the GROUP BY, so precedence falls out of the weighted average with
+      no anti-join), and 0168's three prerequisites are folded into the ACs.
+      Sequencing note: this edits views.sql, which 0134 made all CREATE OR
+      REPLACE, so the change will actually land — unlike rollups.sql, which
+      still carries the no-op footgun 0142 must fix first.
+      Scope guard restated: current_prices / current_price_usd is SUSPECTED to
+      carry the same base-only defect but that stays OUT of this task. It is a
+      refreshable-MV drop + recreate, the operation that wiped the coarse tables
+      in 0095. Audit query only here; any fix is its own task.
 ---
 
 # `price_usd_series` can never publish USDC
