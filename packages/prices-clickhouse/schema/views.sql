@@ -215,8 +215,18 @@ GROUP BY p.timestamp;
 -- prices.price_usd_series — one USD close per (natural identity, day bucket).
 -- The cross-source/cross-quote collapse: volume-weighted close_usd over every
 -- candle of the asset in the bucket (ADR 0004 per-source rows merge at read
--- time). Only priced rows (close_usd > 0) — status 'ok'; misses are absent and
--- classified by the reader against usd_reference (see header).
+-- time). Arm A emits only priced rows (close_usd > 0) — status 'ok'; misses are
+-- absent and classified by the reader against usd_reference (see header).
+--
+-- ⚠️ ARM B IS NOT SUBJECT TO THAT PREDICATE, which changes the read-time status
+-- contract for peg identities. A peg asset gets its fallback row in any bucket
+-- where it was merely a QUOTE leg — including buckets where nothing was priced
+-- at all. So a peg identity can read `status = ok` in a bucket where
+-- usd_reference is EMPTY, which §12.3 otherwise calls `no_reference`. That is
+-- intended: a peg asset's USD value does not depend on the XLM/USDC reference
+-- being up, so suppressing it during a blackout would withhold the one price we
+-- still know. But §12.3 is therefore not universal — for peg identities read
+-- `method`, do not infer provenance from usd_reference.
 --
 -- ## Two arms, unioned before the GROUP BY (task 0165)
 -- Arm A is the historical definition: one row per priced candle, contributing
@@ -245,14 +255,28 @@ GROUP BY p.timestamp;
 --     traded)`) costs TWO full price_ohlcv_1d FINAL scans, because ClickHouse
 --     substitutes CTEs textually rather than materialising them.
 --
--- The guard is `countIf(is_peg = 0) = 0` — "no traded rows at all" — and NOT
--- `sum(w) = 0`. They differ in one case that matters: a peg asset whose only
--- candles carry volume_base = 0 has traded rows summing to zero weight, where
--- the historical expression yields NULL via nullIf. `sum(w) = 0` would convert
--- that NULL into a fabricated $1; countIf preserves it. The pre-existing NULL
--- edge is deliberately left EXACTLY as it was — this task must not move it in
--- either direction (and BE treats NULL as "absent", which is the honest answer
--- for a candle with no volume behind it).
+-- ⚠️ The guard is `sum(w) = 0` — total weight. A `countIf(is_peg = 0) = 0`
+-- form ("no traded rows at all") was written first and was WRONG; review caught
+-- it. Its premise — that the historical expression yields NULL at zero volume,
+-- which countIf would preserve — is FALSE on 26.3.10.60. `close_usd` is a
+-- NON-NULLABLE Decimal(38,14), so CAST strips the Nullable that `nullIf`
+-- introduces and a zero denominator never surfaces as NULL. It lands as
+-- Decimal128::MIN:
+--   toTypeName(CAST(sum(v)/nullIf(sum(w),0) AS Decimal(38,14))) -> Decimal(38,14)
+--   value -> -1701411834604692317316873.03715884105728
+-- countIf would publish that garbage for a peg asset whose only candles carry
+-- volume_base = 0, FLAGGED `method = 'traded'` — a catastrophic number labelled
+-- as measured, in the column BE multiplies into TVL. `sum(w) = 0` returns the
+-- fallback instead: correct, and the safer failure.
+--
+-- ⚠️ KNOWN RESIDUAL, deliberately NOT fixed here. The fallback can only fire
+-- where arm B emitted a placeholder, i.e. where the peg asset is a QUOTE leg in
+-- that bucket. A peg asset appearing ONLY as a zero-volume BASE has
+-- max(is_peg) = 0 and still publishes Decimal128::MIN. That is PRE-EXISTING
+-- (the historical view carried the identical expression) and NOT peg-specific:
+-- any asset whose only priced candles carry zero volume hits it. Fixing it
+-- means deciding whether such a row should be omitted entirely — a change to
+-- the "misses are absent" contract that needs BE input. Its own task.
 ----------------------------------------------------------------------
 
 CREATE OR REPLACE VIEW prices.price_usd_series AS
@@ -262,10 +286,10 @@ SELECT
     issuer_address,
     contract_address,
     bucket,
-    if(max(is_peg) = 1 AND countIf(is_peg = 0) = 0,
+    if(max(is_peg) = 1 AND sum(w) = 0,
        CAST(1 AS Decimal(38, 14)),
        CAST(sum(v) / nullIf(sum(w), 0) AS Decimal(38, 14))) AS close_usd,
-    CAST(if(max(is_peg) = 1 AND countIf(is_peg = 0) = 0, 'peg', 'traded') AS LowCardinality(String)) AS method
+    CAST(if(max(is_peg) = 1 AND sum(w) = 0, 'peg', 'traded') AS LowCardinality(String)) AS method
 FROM
 (
     -- Arm A — every priced candle, keyed on the BASE leg.
@@ -287,9 +311,16 @@ FROM
 
     UNION ALL
 
-    -- Arm B — zero-weight peg placeholder, keyed on the QUOTE leg. Reads only
-    -- (timestamp, quote_asset_id), so this second pass touches far fewer
-    -- columns than arm A rather than doubling its cost.
+    -- Arm B — zero-weight peg placeholder, keyed on the QUOTE leg.
+    -- ⚠️ COST: this IS a second full FINAL pass over the candle table. An
+    -- earlier comment claimed a cheap narrow projection; that was wrong and was
+    -- corrected in review. The peg predicate sits on the JOINED `assets` side,
+    -- so every candle row is read and hash-joined before it can be discarded.
+    -- It reads fewer COLUMNS than arm A, not fewer ROWS. If this measures badly
+    -- on prod, push the peg set onto the primary key instead
+    -- (`WHERE p.quote_asset_id IN (SELECT asset_id FROM prices.assets FINAL
+    -- WHERE …)` — quote_asset_id is the second ORDER BY column), or materialise
+    -- the series per task 0150. NOT MEASURED at prod scale.
     SELECT
         multiIf(
             q.contract_address != '', 'contract',
@@ -344,10 +375,10 @@ SELECT
     issuer_address,
     contract_address,
     bucket,
-    if(max(is_peg) = 1 AND countIf(is_peg = 0) = 0,
+    if(max(is_peg) = 1 AND sum(w) = 0,
        CAST(1 AS Decimal(38, 14)),
        CAST(sum(v) / nullIf(sum(w), 0) AS Decimal(38, 14))) AS close_usd,
-    CAST(if(max(is_peg) = 1 AND countIf(is_peg = 0) = 0, 'peg', 'traded') AS LowCardinality(String)) AS method
+    CAST(if(max(is_peg) = 1 AND sum(w) = 0, 'peg', 'traded') AS LowCardinality(String)) AS method
 FROM
 (
     SELECT
@@ -368,6 +399,16 @@ FROM
 
     UNION ALL
 
+    -- Arm B — zero-weight peg placeholder, keyed on the QUOTE leg.
+    -- ⚠️ COST: this IS a second full FINAL pass over the candle table. An
+    -- earlier comment claimed a cheap narrow projection; that was wrong and was
+    -- corrected in review. The peg predicate sits on the JOINED `assets` side,
+    -- so every candle row is read and hash-joined before it can be discarded.
+    -- It reads fewer COLUMNS than arm A, not fewer ROWS. If this measures badly
+    -- on prod, push the peg set onto the primary key instead
+    -- (`WHERE p.quote_asset_id IN (SELECT asset_id FROM prices.assets FINAL
+    -- WHERE …)` — quote_asset_id is the second ORDER BY column), or materialise
+    -- the series per task 0150. NOT MEASURED at prod scale.
     SELECT
         multiIf(
             q.contract_address != '', 'contract',

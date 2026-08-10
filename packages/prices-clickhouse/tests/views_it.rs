@@ -728,20 +728,21 @@ async fn price_usd_series_fills_peg_assets_without_overriding_market_data() {
         }
     };
 
-    for view in ["price_usd_series", "price_usd_series_1h"] {
-        // The 1h view reads price_ohlcv_1h; seed the same bucket there once.
-        if view == "price_usd_series_1h" {
-            client
-                // Column-list-free so it cannot drift if the table gains a
-                // column; price_ohlcv_1h is `AS price_ohlcv_1m`, same shape.
-                .query(&format!(
-                    "INSERT INTO {db}.price_ohlcv_1h SELECT * FROM {db}.price_ohlcv_1d"
-                ))
-                .execute()
-                .await
-                .unwrap();
-        }
+    // The 1h view reads price_ohlcv_1h. Seed it BEFORE the loop, not inside a
+    // `if view == …` guard: it is a precondition of the 1h iteration, not part
+    // of it, and an in-loop insert silently depends on the 1h grain being last
+    // — reorder the array and `fetch_one` panics on an empty result instead of
+    // failing an assertion. Column-list-free so it cannot drift if the table
+    // gains a column; price_ohlcv_1h is `AS price_ohlcv_1m`, same shape.
+    client
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1h SELECT * FROM {db}.price_ohlcv_1d"
+        ))
+        .execute()
+        .await
+        .unwrap();
 
+    for view in ["price_usd_series", "price_usd_series_1h"] {
         // CASE 1 — quote-only peg asset gets the fallback. Fails before 0165.
         let (usdc, usdc_method) = row(view, "USDC", USDC_ISSUER.to_string()).await;
         assert!(
@@ -782,16 +783,120 @@ async fn price_usd_series_fills_peg_assets_without_overriding_market_data() {
         .unwrap();
     assert_eq!(rows, 1, "exactly one peg-filled row (USDC); USDT traded");
 
-    // No NULL introduced. The pre-existing nullIf → NULL edge at zero volume is
-    // preserved by the countIf guard, but nothing here should trip it.
-    let nulls: u64 = client
+    // ⚠️ Assert on the VALUE, not on `close_usd IS NULL`. That check was written
+    // first and is VACUOUS: `close_usd` is a non-Nullable Decimal(38,14), so
+    // `CAST` strips the Nullable that `nullIf` introduces and the count is
+    // structurally always 0. A zero-denominator does not surface as NULL — it
+    // lands as Decimal128::MIN (≈ -1.7e24). Caught in review; see the guard
+    // note in views.sql.
+    let garbage: u64 = client
         .query(&format!(
-            "SELECT countIf(close_usd IS NULL) FROM {db}.price_usd_series"
+            "SELECT countIf(toFloat64(close_usd) <= 0) FROM {db}.price_usd_series"
         ))
         .fetch_one::<u64>()
         .await
         .unwrap();
-    assert_eq!(nulls, 0, "peg fill must not introduce NULLs");
+    assert_eq!(garbage, 0, "no row may publish a non-positive close_usd");
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// Task 0165 review finding 1 — the zero-volume peg case.
+///
+/// A peg asset whose ONLY priced candle carries `volume_base = 0` has a real
+/// arm-A row that contributes nothing to the weighted average. The first
+/// implementation guarded on `countIf(is_peg = 0) = 0` ("no traded rows at
+/// all"), which is FALSE here, so it fell through to
+/// `sum(v) / nullIf(sum(w), 0)`.
+///
+/// That does NOT yield NULL. `close_usd` is a non-Nullable `Decimal(38,14)`, so
+/// `CAST` strips the Nullable and the row publishes **Decimal128::MIN**
+/// (≈ -1.7e24) flagged `method = 'traded'` — a catastrophic value labelled as
+/// measured, in the column BE multiplies into TVL.
+///
+/// The shipped guard is `sum(w) = 0`, which returns the fallback instead. This
+/// test pins that: it fails with the `countIf` form and passes with `sum(w)`.
+///
+/// ⚠️ SCOPE — the guard only reaches this case because arm B emitted a
+/// placeholder for USDT (it is the quote leg of the FOO/USDT candle below).
+/// "Fixture A" — a peg asset appearing ONLY as a zero-volume base, with no
+/// placeholder — still publishes Decimal128::MIN under BOTH guards, because
+/// `max(is_peg)` is 0 and no fallback can fire. That is PRE-EXISTING: the
+/// historical view had the identical `sum(v) / nullIf(sum(w), 0)` expression,
+/// it is not peg-specific (any asset whose only priced candles carry zero
+/// volume hits it), and fixing it means deciding whether such a row should be
+/// omitted entirely — a change to the "misses are absent" contract that needs
+/// BE input. Tracked separately; deliberately NOT fixed here.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn peg_asset_with_only_zero_volume_candles_falls_back_instead_of_publishing_garbage() {
+    let db = "it_views_peg_zero_vol";
+    let client = setup_scratch(db).await;
+
+    client
+        .query(&format!(
+            "INSERT INTO {db}.assets \
+             (asset_id, asset_code, asset_type, issuer_address, contract_address, sac_address) VALUES \
+             (2,'USDC','classic','{USDC_ISSUER}','',''), \
+             (3,'USDT','classic','{USDT_ISSUER}','',''), \
+             (10,'FOO','classic','GFOO','','')"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    // USDT trades as a base against USDC at 0.97 with ZERO volume (so its only
+    // arm-A row contributes w = 0), AND is the quote leg of a FOO/USDT candle,
+    // which is what makes arm B emit a placeholder for it. Both are required:
+    // without the placeholder `max(is_peg)` is 0 for USDT's group and neither
+    // guard can fire — see the fixture-A note on this test.
+    client
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1d \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
+             (1620000000, 3, 2,'sdex', 0.97,0.97,0.97,0.97, 0,0,0,0.97,0.97,1,1), \
+             (1620000000,10, 3,'sdex', 5,5,5,5,                7,35,35,5,5,1,1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    let (close, method): (f64, String) = client
+        .query(&format!(
+            "SELECT toFloat64(close_usd), method FROM {db}.price_usd_series \
+             WHERE asset_code = 'USDT'"
+        ))
+        .fetch_one::<(f64, String)>()
+        .await
+        .unwrap();
+
+    assert!(
+        close > 0.0,
+        "zero-volume peg candle must not publish a negative/garbage close_usd, got {close}"
+    );
+    assert!(
+        (close - 1.0).abs() < 1e-4,
+        "expected the peg fallback, got {close}"
+    );
+    assert_eq!(
+        method, "peg",
+        "a row the weighted average could not compute must not claim 'traded'"
+    );
+
+    // Nothing anywhere in the view may publish a non-positive close_usd.
+    let garbage: u64 = client
+        .query(&format!(
+            "SELECT countIf(toFloat64(close_usd) <= 0) FROM {db}.price_usd_series"
+        ))
+        .fetch_one::<u64>()
+        .await
+        .unwrap();
+    assert_eq!(garbage, 0, "no row may publish a non-positive close_usd");
 
     client
         .query(&format!("DROP DATABASE {db}"))
