@@ -3,8 +3,8 @@ id: "0157"
 title: "Default key limits: 1 req/s + monthly quota, not the design doc's 100 req/s"
 type: FEATURE
 status: backlog
-related_adr: ["0008"]
-related_tasks: ["0121", "0156", "0158", "0160", "0163"]
+related_adr: ["0008", "0010"]
+related_tasks: ["0121", "0156", "0158", "0160", "0163", "0170"]
 tags: [layer-infra, priority-high, effort-medium, milestone-M3, epic-self-service-onboarding, api-gateway, usage-plan, throttling, cost]
 milestone: 3
 links:
@@ -158,11 +158,23 @@ conclusion stands on the remaining arguments.
   reset. That is only acceptable because [[0160]] caps rework at once per quota
   period; otherwise a user would simply mint a fresh key, which is exactly the
   loophole the epic's rework rule closes.
-- **The monthly quota is calendar-aligned: it resets on the 1st at 00:00 UTC**,
-  not on a rolling window from key creation. That is what makes [[0160]]'s
-  boundary ("first of the month following the last rework") and the epic's
-  "calendar month" the same date, so there is one date to render, not two.
-  Cheap to confirm on the first deploy — do it rather than assume it.
+- **The monthly quota is assumed calendar-aligned — resetting on the 1st at
+  00:00 UTC** rather than on a rolling window from key creation. That is what
+  makes [[0160]]'s boundary ("first of the month following the last rework") and
+  the epic's "calendar month" the same date, so there is one date to render, not
+  two.
+  **This is unverified, and [[0156]] established that AWS does not document it
+  at all** (2026-08-10). The only statement anywhere is an example caption,
+  *"creates a usage plan that resets at the beginning of the month"* — no
+  timezone, no instant, and nothing on whether `WEEK`/`MONTH` are calendar- or
+  creation-aligned. Note also that `offset` is a **request count** (*"The number
+  of requests subtracted from the given limit in the initial time period"*), not
+  a way to shift the reset day, so it cannot be used to force alignment.
+  The instinct already recorded here — "confirm on the first deploy rather than
+  assume it" — was the right one and is now tracked as [[0170]] #7. Until it is
+  measured, treat the single-date property as a **design intent**, and make sure
+  the wording in [[0160]] and [[0163]] presents the rework boundary as our rule
+  rather than as AWS behaviour.
 - **The quota binds far harder than the rate.** At 1 req/s a key could produce
   ~2.6M requests/month; the quota stops it at 100 000. So the operative limit a
   user meets is the quota, and the per-second throttle is what stops them

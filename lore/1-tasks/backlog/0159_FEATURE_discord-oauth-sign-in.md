@@ -3,8 +3,8 @@ id: "0159"
 title: "Discord OAuth sign-in for the onboarding portal"
 type: FEATURE
 status: backlog
-related_adr: ["0007"]
-related_tasks: ["0156", "0158", "0160", "0161", "0162"]
+related_adr: ["0007", "0010"]
+related_tasks: ["0156", "0158", "0160", "0161", "0162", "0169", "0170"]
 tags: [layer-backend, priority-high, effort-medium, milestone-M3, epic-self-service-onboarding, discord, oauth, auth, secrets]
 milestone: 3
 links:
@@ -28,6 +28,16 @@ history:
       **existing** `prices-api` axum Lambda, not a new one. That removes the
       runtime choice, the second gateway integration and the route-placement
       question, and drops the estimate from large to medium.
+  - date: 2026-08-10
+    status: backlog
+    who: akot
+    note: >
+      [[0156]] / ADR 0010 settles the two open items here. Scope is
+      `identify` + `guilds.members.read` (never `guilds`), plus a snowflake
+      account-age minimum. Adam owns app registration and the `stellar_test`
+      guild — the "someone" placeholder is gone. Guild ID becomes
+      per-environment SSM config. Adds a membership check whose error shape is
+      undocumented ([[0170]]).
 ---
 
 # Discord OAuth sign-in
@@ -71,10 +81,50 @@ it decides whether this flow requests the `guilds` scope or only `identify`.
 
 **Follows from the epic, but not stated in it**
 
-- **Authorization Code flow with PKCE**, `identify` scope only — request
-  `guilds` solely if [[0156]] concludes the membership check is what the abuse
-  story depends on. Ask for nothing else: `email` in particular buys us data we
-  have decided not to hold.
+- **Scope — settled by [[0156]] / ADR 0010: `identify` + `guilds.members.read`.
+  Never `guilds`.** The membership check *is* what the abuse story depends on,
+  because under `identify` alone the flow observes nothing but the existence of
+  a Discord account (`verified` requires the `email` scope; there is no phone
+  field on the OAuth user object at all). `guilds` is rejected on both privacy
+  and utility grounds: it returns every server the user belongs to, and its
+  partial guild objects carry neither `pending` nor `joined_at`. Ask for nothing
+  else — `email` in particular buys us data we have decided not to hold.
+- **Authorization Code flow with PKCE.** Caveat from [[0156]]: Discord's OAuth2
+  topic page does not mention PKCE at all. It is documented only in the Social
+  SDK mobile guide, where it is mandatory for deep-link redirects. For a
+  confidential server-side client with an HTTPS redirect it is **not documented
+  as required** — implement it anyway, but do not expect the docs to describe
+  the server's behaviour.
+- **Membership check.** `GET /users/@me/guilds/{guild.id}/member`, guild ID from
+  SSM — **per-environment, not a constant**: `stellar_test` in dev,
+  `897514728459468821` in production once [[0169]] lands. The not-a-member
+  response shape is **undocumented** (only a generic `404` plus error codes
+  `10004`/`10007` exist), so treat only an explicit `10007`/`10004`-style 404 as
+  "not a member" and treat 401/403/429/5xx as "unknown, do not deny". Measure it
+  first — [[0170]] #1.
+- **`pending` is optional (`pending?`).** The docs' presence guarantee is written
+  about gateway events, not this route. Handle `undefined` as a third state;
+  never read absent as "cleared". Also note `BYPASSES_VERIFICATION` means
+  `pending === false` can mean "an admin waved them through" — [[0170]] #2.
+- **Minimum account age from the snowflake**, per ADR 0010:
+  `(BigInt(id) >> 22n) + 1420070400000n`. Costs no extra scope and no extra
+  consent line — the `id` is already in the `identify` response. Use `BigInt`;
+  `Number` loses precision above 2^53.
+  **Threshold: 5 minutes**, matching Stellar's own `verification_level: 2`.
+  **In SSM, not a literal** — the value is expected to be raised if churn is
+  ever observed, and that must not need a deploy. Store it as a duration
+  (minutes), not a day count: the initial value is minutes and a
+  `minAccountAgeDays` parameter would make 5 minutes unrepresentable.
+- **Membership and age are checked once, at issuance only** (ADR 0010). Do not
+  re-check on session refresh, on the dashboard, or on rework. A key, once
+  issued, keeps working regardless of later Discord state — the epic's existing
+  non-goal, extended consistently.
+- **Distinguish "not a member" from "could not tell".** The not-a-member result
+  is inferred from an undocumented error shape ([[0170]] #1), so the handler
+  must return three outcomes, not two: eligible, ineligible, and unknown. Only
+  an explicit `10007`/`10004`-style 404 is ineligible; 401/403/429/5xx is
+  unknown and must not issue a key **and** must not tell the user they are not a
+  member. [[0162]] renders those differently.
 - **Client secret in Secrets Manager**, never an environment variable. ADR 0007
   set that precedent for the mTLS material and Tranche 3 AC 6 audits it
   explicitly ("no secrets in env vars"). Follow the shape already in
@@ -109,10 +159,19 @@ it decides whether this flow requests the `guilds` scope or only `identify`.
   registered with Discord must match it exactly, and [[0161]]'s distribution
   must order this behaviour before `/api-tokens/*` or every call here is served
   the SPA bundle instead.
-- **The Discord application is a manual prerequisite.** Someone registers it in
-  the Discord Developer Portal and configures the redirect URI, which must match
-  exactly and therefore changes when the custom domain lands ([[0126]]). Record
-  the ordering so sign-in does not break silently on the domain cutover.
+- **The Discord application is a manual prerequisite, owned by Adam Kot**
+  (settled by [[0156]] / ADR 0010 — this replaces the "someone" that stood
+  here). He registers it in the Discord Developer Portal, configures the
+  redirect URI, and owns re-pointing it when the custom domain lands ([[0126]]).
+  Record the ordering so sign-in does not break silently on the domain cutover.
+  Note the docs say registration is required but **do not state that matching is
+  character-exact** — assume it is, verify it once.
+  Scopes "must be declared in the Developer Portal", so the scope decision above
+  is part of registration, not just of the authorize URL.
+- **Adam also owns the `stellar_test` guild** used for development and testing.
+  It must have Community enabled and Rules Screening on, and
+  `verification_level: 2`, or `pending` will not exercise the real code path.
+  Production integration with the Stellar guild is [[0169]].
 
 ## Acceptance Criteria
 
@@ -139,7 +198,17 @@ it decides whether this flow requests the `guilds` scope or only `identify`.
       comments this trap; inherit the requirement rather than rediscover it
 - [ ] Discord app registration and redirect-URI ownership documented, including
       what changes when the custom domain lands
-- [ ] Scope set matches [[0156]]'s conclusion
+- [ ] Scope set is exactly `identify` + `guilds.members.read` (ADR 0010); no
+      `guilds`, no `email`
+- [ ] Guild ID is read from SSM per environment, never a constant
+- [ ] A non-member is refused, and the refusal distinguishes "not a member" from
+      "Discord unavailable" — a 429 or 5xx must not read as "not a member"
+- [ ] `pending === undefined` is handled explicitly and does not silently pass
+- [ ] Account age is derived with `BigInt` and compared against an SSM
+      threshold expressed in **minutes**, defaulting to 5; a below-threshold
+      account is refused with the time remaining, and no key is issued
+- [ ] Membership and age are evaluated at issuance only — no later call
+      re-checks either
 
 ## Notes
 

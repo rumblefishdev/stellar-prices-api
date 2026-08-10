@@ -33,19 +33,45 @@ appears as an acceptance criterion in every iteration of our design response
 
 - **Login:** Discord OAuth. A user must have a real Discord account to request a key — no
   email/captcha flow needed on top of this.
-  - Residual risk: someone can still spin up throwaway Discord accounts. **Unverified
-    assumption (confirm before build):** our understanding is Stellar's own Discord requires
+  - Residual risk: someone can still spin up throwaway Discord accounts. ~~**Unverified
+    assumption (confirm before build):**~~ our understanding is Stellar's own Discord requires
     some form of verification for new accounts/members, which makes churning through
     disposable accounts non-trivial — this is part of why we're not building anything extra
     (captcha, email, etc.) on top of Discord login. If that verification turns out not to be
     there, this residual risk is bigger than assumed and worth revisiting.
+  - **RESOLVED 2026-08-10 — see ADR 0010 (task 0156). The assumption was half right, and
+    the half that was wrong mattered more.** Stellar's Discord _does_ have Membership
+    Screening enabled, so the gate exists. But joining is a public one-click invite and the
+    server's verification level is "registered on Discord for longer than 5 minutes" — and,
+    decisively, **the flow described above would never have observed any of it**: Discord
+    OAuth under `identify` authenticates a Discord _account_, and exposes no email-verified
+    flag (that needs the `email` scope), no phone field at all, and no server membership.
+    SDF's own SCF Dashboard does not treat a Discord account as sufficient either.
+    **Scope therefore grows by two gates:** the flow now requests
+    `identify` + `guilds.members.read` and requires **membership of the Stellar Discord**,
+    plus a **minimum Discord account age of 5 minutes** derived from the user's snowflake
+    (free — no extra scope), matching Stellar's own server setting. Both are checked
+    **once, at issuance** — nothing re-checks them, which is the consistent extension of
+    the non-goal directly below. Captcha, email confirmation and manual approval were
+    costed and declined; a fully-drained key is worth ~$0.38/month, so no paid mitigation
+    pays for itself. Downstream effects are in tasks 0159, 0162, 0163 and 0164.
+    **Read the residual risk above as unchanged in size, not eliminated:** at a 5-minute
+    threshold the age check is a speed-bump, so the barrier is effectively "joined a public
+    Discord server and accepted its rules". That is proportionate to the exposure, but it
+    rests on SDF keeping Membership Screening enabled — tracked as task 0169.
   - **Account leaving the Discord server after key issuance:** not actively handled — a key,
     once issued, keeps working on its own schedule regardless of the user's later Discord
     membership status. This is a conscious "not solving this now" rather than an oversight;
     revisit only if it turns out to be exploited in practice.
 - **Account model:** the Discord identity _is_ the account. A signed-in user lands on a
-  dashboard tied to their Discord ID. **Recommendation: one active key per Discord account**
-  (keeps the abuse story simple — confirm before build).
+  dashboard tied to their Discord ID. ~~**Recommendation:**~~ **Confirmed 2026-08-10 (ADR
+  0010): one active key per Discord account.** This also resolves the contradiction between
+  this line and "Out of scope" below, which already stated it as settled — the "Out of
+  scope" reading was correct. The confirmation is stronger than "keeps the abuse story
+  simple": AWS charges quota per `(usage plan, API key)` and has **no principal that
+  aggregates keys**, so a multi-key model would force us to fan out `GetUsage` per key and
+  sum it ourselves — precisely the work the rotation cap below exists to avoid. Note AWS
+  will not enforce one-key-per-account for us; the registry owns that invariant.
 - **Key delivery:** shown on-screen immediately after the Discord sign-in completes the
   request, **and viewable again later on the dashboard** — not a one-time reveal. This is
   simpler than the "shown once" pattern common elsewhere, and it's workable here because AWS
@@ -76,10 +102,17 @@ appears as an acceptance criterion in every iteration of our design response
     monthly quota is enough on its own once rotation can't happen more often than the quota
     resets anyway.
   - **When the next rework becomes available (settled 2026-08-07):** the boundary is the
-    **first day of the month following the last rework, 00:00 UTC** — the same instant the
-    AWS quota period rolls over. Worked example: a key reworked on **3 August** cannot be
-    reworked again until **1 September**. One date to render, not two: on 1 September the
-    user regains both a clean quota counter and the right to rework.
+    **first day of the month following the last rework, 00:00 UTC**. Worked example: a key
+    reworked on **3 August** cannot be reworked again until **1 September**.
+    - **Correction 2026-08-10 (task 0156):** "the same instant the AWS quota period rolls
+      over" was asserted here and inherited by tasks 0157/0158/0160 — **AWS does not
+      document it.** Its only statement anywhere is an example caption, "creates a usage
+      plan that resets at the beginning of the month", with no timezone and no instant; and
+      `offset` is a _request count_, not a way to shift the reset day. The boundary above
+      stands as **our own product rule** — it is sound and gives one date to render — but
+      the claim that our date and AWS's coincide is unverified until measured (task 0170).
+      If they turn out to differ, we render our date and the quota counter does its own
+      thing; that is a UX wrinkle, not a correctness bug, because the cap is ours to define.
   - **Rework is a swap, not a delete-and-wait (settled 2026-08-07):** the old key is
     deleted and a new one issued in the same operation, so a user is never left without
     a working key. The cap blocks the _next_ rework, not the replacement. Eligibility is
