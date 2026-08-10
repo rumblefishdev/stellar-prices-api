@@ -50,6 +50,102 @@ history:
       and the key is NATURAL IDENTITY not quote_asset_id - 0139 is confirmed
       genuine collisions, measured 2026-08-10 at 3,281 asset_ids across 6,568
       identities, which a quote_asset_id-keyed table would have inherited.
+  - date: 2026-08-10
+    status: active
+    who: okarcz
+    note: >
+      IMPLEMENTED (schema + population). prices.usd_rate added to init.sql with
+      0154's exact shape; populate_usd_rate_from_oracle on OhlcvWriter copies
+      peg observations from oracle_prices, incremental by per-identity
+      watermark; oracle-worker calls it after write_oracle.
+      Design decision worth flagging - the snapshot is NON-FATAL in the worker.
+      oracle_prices is the source of truth and is already written by that point;
+      the copy is derived and watermarked, so a failed pass self-heals on the
+      next run. Failing the worker would stop oracle POLLING itself, trading a
+      durable gap for a live outage.
+      The 0139 guard is the load-bearing piece: oracle_prices is keyed on
+      asset_id and usd_rate on natural identity, so this copy is the ONE place
+      the two key spaces meet. With 3,281 ids serving 6,568 identities on prod,
+      an unchecked translation would file one asset's readings under another's
+      identity in a table meant to be trusted forever. The write is refused in
+      both directions (identity -> exactly one id; that id -> exactly one
+      identity) and the IT asserts the refusal writes NOTHING.
+      XLM is polled but deliberately NOT snapshotted - 0154 owns the pivot
+      methods. Recorded as an explicit scope boundary on peg_identities(),
+      WITH the counter-argument: the 13-month expiry applies to XLM's history
+      identically, so if 0154 has not started before 202509 ages out this should
+      be reconsidered rather than deferred by default.
+      Tests: 2 new CH ITs on the 26.3.10.60 pin (copy + watermark + no-duplicate
+      re-run; and the 0139 refusal), 1 shape IT, 1 retention tripwire in
+      cleanup-worker. Whole workspace lib suite green; no new clippy warnings.
+      Two self-inflicted bugs found and fixed while building, both recorded
+      because they were invisible in review: watermark_before was Default 0 with
+      a .min() that pinned it there forever (now Option<u32>), and the two ITs
+      shared the real `prices` database and truncated each other's fixtures
+      under cargo's parallel runner - both failed in ways that looked like
+      product bugs until serialised.
+  - date: 2026-08-10
+    status: active
+    who: okarcz
+    note: >
+      REVIEW FIXES (PR #191). Eight findings, all accepted after verifying each
+      against the code rather than on assertion. Two were serious.
+      HIGH 1 - the 0139 guard ran INSIDE the write loop, so a failure on a later
+      identity left earlier ones already written. That is a partial write, the
+      exact failure mode the guard exists to prevent, and my test could not
+      catch it because it used a single identity. Guards now run as a pre-pass
+      over every identity before any write, and the error names every offender.
+      New test asserts a collision on USDC writes nothing for the clean USDT.
+      HIGH 2 - the resume watermark was max(timestamp) with a strict > filter,
+      which silently skips any reading that lands BELOW the frontier. Not
+      hypothetical: write_oracle is also called from sdex-backfill/ingest.rs and
+      prices-ledger-processor/reconcile.rs, which decode oracle readings from
+      HISTORICAL ledgers. Once the 5-minute worker advanced the watermark, any
+      backdated reading would never be snapshotted and would then expire from
+      oracle_prices at 13 months - precisely the permanent loss this table
+      exists to prevent. Replaced with a gap-filling LEFT ANTI JOIN on
+      (timestamp, value); both tables are small so the cost is nil. Anti-joining
+      on the value also makes an upstream correction re-copy and win on version,
+      which the strict > had made unreachable despite the doc claiming it.
+      MEDIUM - `method` added to the sorting key. Without it a 'pivot' row from
+      0154 at the same (identity, timestamp) as a measured 'oracle' reading
+      would silently REPLACE it under RMT, with the later write winning rather
+      than the better evidence. Fixed while the table is still empty; changing a
+      sorting key later means a rebuild.
+      MEDIUM - OracleStats.rates_snapshotted was computed and then dropped by
+      the Lambda entrypoint. Combined with the deliberate non-fatal error path,
+      a permanently broken snapshot would report success on ~288 invocations a
+      day with no counter moving. Now logged and returned, per-identity.
+      LOW - stats counted identities ATTEMPTED not rows written (now
+      rows_inserted); watermark_after was a max() across identities that would
+      hide one stalled peg (now per-identity newest); and oracle_name is a
+      PARAMETER rather than a hardcoded 'reflector', because the enrichment tier
+      reads it from config and the rate we snapshot must be the rate that priced
+      the candles or 0154 constraint 5 compares two different things.
+      Full workspace lib suite + all CH ITs green on the 26.3.10.60 pin.
+  - date: 2026-08-10
+    status: active
+    who: okarcz
+    note: >
+      0086 GUARD ADDED, found by measuring prod rather than by review. Sizing the
+      table meant querying oracle_prices, and min(timestamp) came back
+      1970-01-21 - which is [[0086]], an open confirmed bug where the oracle
+      worker intermittently writes the real epoch divided by ~1000, with a
+      CORRECT price and a junk timestamp.
+      My population copied o.timestamp verbatim, filtered only on price_usd > 0,
+      so those rows would have been snapshotted. That is strictly worse here
+      than upstream: oracle_prices sheds them at 13 months, usd_rate is retained
+      FOREVER, so a known defect would have become permanent history in a table
+      whose entire selling point is that it is trustworthy.
+      Added ORACLE_EPOCH_FLOOR (2020-01-01) to the copy predicate, with a test.
+      The floor cannot exclude real data - no oracle we poll existed before
+      Soroban - and it does NOT fix 0086, which still pollutes oracle_prices and
+      every other reader.
+      Prod shape while measuring: oracle_prices holds 452,596 rows of which
+      90,722 are peg-asset rows. The gap is expected - write_oracle is also fed
+      by the event-decoded path, which carries the whole Reflector symbol set
+      (BTC/ETH/XRP/...), not just the three we poll. 90,722 is what the first
+      snapshot will copy, minus the 0086 rows.
 ---
 
 # `prices.usd_rate` + peg-asset rate population
@@ -189,17 +285,72 @@ either. Record it rather than mitigate it.
 
 ## Acceptance Criteria
 
-- [ ] `prices.usd_rate` exists with 0154's exact shape, keyed on natural identity.
-- [ ] Absent from `cleanup-worker`'s `RETENTION` list, with a comment stating that
-      the omission is deliberate.
-- [ ] Peg-asset observations populated from `oracle_prices`, incremental, with
+- [x] `prices.usd_rate` exists with 0154's exact shape, keyed on natural identity.
+      Asserted in `usd_rate_it.rs` on the exact column list **and order**, the
+      `ReplacingMergeTree(version)` engine, and — the load-bearing one — that the
+      sorting key does **not** contain `asset_id`.
+- [x] Absent from `cleanup-worker`'s `RETENTION` list, with a comment stating that
+      the omission is deliberate. Plus a **tripwire test** in `cleanup-worker`
+      itself: the protection is an *absence*, which is exactly the invariant a
+      later reader breaks with one tidy-looking line.
+- [x] Peg-asset observations populated from `oracle_prices`, incremental, with
       `method`/`hops` set; re-runnable without duplication (RMT `version`).
-- [ ] The ASOF + staleness resolution rule implemented and documented in the
-      table's schema comment, not only in this task.
-- [ ] Pre-oracle buckets have **no** row — verified, not assumed.
+      `populate_usd_rate_from_oracle`, watermarked per identity; the IT copies,
+      re-runs (no duplication), then appends only a newly-arrived reading.
+- [~] The ASOF + staleness resolution rule implemented and documented in the
+      table's schema comment, not only in this task. **Documented in full at the
+      table** (`init.sql`), including why it is not an average and the
+      composes-across-grains argument. *Implementation* is necessarily a
+      **consumer** concern — nothing reads `usd_rate` yet, and [[0168]] is its
+      first reader. Not claimed as done here.
+- [~] Pre-oracle buckets have **no** row — verified, not assumed. True **by
+      construction**: the population only ever copies rows that exist in
+      `oracle_prices`, so a bucket with no oracle reading gets no row, and there
+      is no synthetic-`peg`-row path to write one. Not yet asserted against real
+      pre-2025-09 data — that check belongs with the prod backfill below.
 - [ ] Reproduces today's `close_usd` for the oracle and peg tiers on a sample
-      window (0154 constraint 5), on CH **26.3.10.60**.
-- [ ] `0154` and `0151` updated to record that the table moved here.
+      window (0154 constraint 5), on CH **26.3.10.60**. **Requires prod data —
+      operator-run, see §Prod backfill.** This is the gate before anything
+      *reads* the table for pricing.
+- [x] `0154` and `0151` updated to record that the table moved here. **Already
+      done in PR #182** when 0167 was authored — re-checked 2026-08-10, both
+      reference 0167; no further edit needed.
+
+## Prod backfill — operator-run, not automatic
+
+The worker only snapshots **forward** from its watermark, so on first run against
+prod it copies the whole surviving `oracle_prices` window in one pass — which is
+the point, given the 13-month clock. Nothing is deployed by merging this; the
+population runs when `oracle-worker` next executes against prod, or on demand.
+
+⏳ **Do this before ~2026-10**, or `202509` is gone.
+
+**Gate before any consumer trusts it** (0154 constraint 5 — reproduce today's
+`close_usd` from the stored rate):
+
+```sql
+-- Every USDC-quoted candle should satisfy close_usd ~= close * rate-at-or-before.
+SELECT round(100 * countIf(abs(toFloat64(p.close_usd) - toFloat64(p.close) * toFloat64(r.usd_rate)) > 1e-6)
+             / count(), 4) AS pct_mismatch,
+       count() AS sampled
+FROM prices.price_ohlcv_1d AS p FINAL
+INNER JOIN prices.assets AS q FINAL ON q.asset_id = p.quote_asset_id
+ASOF LEFT JOIN prices.usd_rate AS r
+  ON r.asset_code = q.asset_code AND r.issuer_address = q.issuer_address
+  AND r.timestamp <= p.timestamp
+WHERE q.asset_code = 'USDC' AND p.close_usd > 0
+  AND p.timestamp >= now() - INTERVAL 30 DAY;
+```
+
+⚠️ Expect a **small non-zero** mismatch, not exactly 0: enrichment baked
+`close_usd` at the rate current *then*, and the peg tier used a flat `$1` where
+the oracle tier did not. A large mismatch means the rate table disagrees with
+the tier that produced the candle — a bug either way, which is the point of the
+check.
+
+⚠️ **Do not gate on USDT until [[0172]] is understood.** Its candles close at
+~0.14 against USDC on prod, so any reconciliation through USDT will fail for a
+reason that has nothing to do with this table.
 
 ## Out of scope
 

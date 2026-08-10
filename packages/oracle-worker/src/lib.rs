@@ -12,7 +12,9 @@
 //! `oracle_prices.price_usd Decimal(38,14)`.
 
 use base64::Engine;
-use prices_ingest_core::{AssetRegistry, OhlcvWriter, OracleSample, reflector_key_to_identity};
+use prices_ingest_core::{
+    AssetIdentity, AssetRegistry, OhlcvWriter, OracleSample, reflector_key_to_identity,
+};
 use stellar_xdr::{
     ContractId, Hash, HostFunction, Int128Parts, InvokeContractArgs, InvokeHostFunctionOp, Limits,
     Memo, MuxedAccount, Operation, OperationBody, Preconditions, ReadXdr, ScAddress, ScMap,
@@ -31,6 +33,43 @@ pub const DEFAULT_SOROBAN_RPC: &str = "https://mainnet.sorobanrpc.com";
 /// Stellar identity is fetched-then-skipped (the loop's filter), so this list
 /// can grow independently of the mapping.
 pub const TRACKED_SYMBOLS: &[&str] = &["XLM", "USDC", "USDT"];
+
+/// The `oracle_prices.oracle_name` this worker writes, and the one the task-0167
+/// snapshot copies. Must match the enrichment tier's `ORACLE_NAME` (default
+/// `reflector`) — the rate we snapshot has to be the rate that priced the
+/// candles, or 0154's constraint-5 reconciliation compares two different things.
+pub const ORACLE_NAME: &str = "reflector";
+
+/// The identities whose oracle readings are snapshotted into `prices.usd_rate`
+/// (task 0167). Deliberately a **subset** of [`TRACKED_SYMBOLS`].
+///
+/// ⚠️ **XLM is polled but NOT snapshotted here, and that is a scope boundary,
+/// not an oversight.** XLM is the reference asset the *pivot* tier prices
+/// everything else through, and task 0154 owns the `'pivot'` / `'pivot2'`
+/// methods and the transitivity rules that go with them. Writing XLM rows here
+/// would pre-empt those decisions in a table 0154 then has to live with.
+///
+/// ⏳ **But the 13-month expiry argument applies to XLM's history identically**,
+/// and that argument is the whole reason 0167 was pulled forward. If 0154 has
+/// not started before `202509` ages out (~2026-10/11), snapshotting XLM as
+/// `method = 'oracle'`, `hops = 0` — which is what it factually is, no pivot
+/// involved — should be reconsidered on its own merits rather than deferred by
+/// default. Raised explicitly so the omission is a decision, not an accident.
+pub fn peg_identities() -> Vec<AssetIdentity> {
+    // Built rather than declared const: AssetIdentity::Credit holds Strings.
+    // Sourced from the same consts the enrichment peg tier and views.sql use,
+    // so the three cannot drift apart.
+    vec![
+        AssetIdentity::Credit {
+            code: "USDC".to_string(),
+            issuer: prices_clickhouse::USDC_ISSUER.to_string(),
+        },
+        AssetIdentity::Credit {
+            code: "USDT".to_string(),
+            issuer: prices_clickhouse::USDT_ISSUER.to_string(),
+        },
+    ]
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum OracleError {
@@ -202,6 +241,11 @@ pub struct OracleStats {
     pub queried: usize,
     pub written: usize,
     pub skipped: usize,
+    /// Rows written into `prices.usd_rate` by this pass (task 0167). Zero is
+    /// normal on a steady-state run — the snapshot only copies observations it
+    /// does not already hold. It is NOT normal for it to be zero forever while
+    /// `written` keeps climbing; see [`run_oracle`] on why that needs a signal.
+    pub rates_snapshotted: u64,
 }
 
 /// Poll Reflector for each tracked symbol and write the prices to
@@ -235,7 +279,7 @@ pub async fn run_oracle(
                     // a backstop for the 2106 u32 ceiling, not the unit conversion.
                     timestamp: (pd.timestamp / 1000).min(u32::MAX as u64) as u32,
                     asset_id,
-                    oracle_name: "reflector".to_string(),
+                    oracle_name: ORACLE_NAME.to_string(),
                     price_usd: pd.price,
                     raw_data: format!("{{\"symbol\":\"{symbol}\"}}"),
                 });
@@ -261,10 +305,45 @@ pub async fn run_oracle(
 
     let written = samples.len();
     writer.write_oracle(&samples).await?;
+
+    // Snapshot the peg rates into the forever-retained prices.usd_rate
+    // (task 0167). This runs AFTER write_oracle so the rows just polled are
+    // included in the same pass rather than waiting for the next one.
+    //
+    // Deliberately NON-FATAL. oracle_prices is the source of truth and has
+    // already been written by this point; the snapshot is a derived copy that
+    // is incremental by watermark, so a failed pass costs nothing but is
+    // retried in full on the next run. Failing the whole worker here would stop
+    // oracle polling itself — trading a durable, self-healing gap for a live
+    // outage. The 0139 guard inside the copy is the most likely reason to land
+    // here, and it is a data condition an operator must resolve, not something
+    // a retry fixes.
+    let rates_snapshotted = match writer
+        .populate_usd_rate_from_oracle(&peg_identities(), ORACLE_NAME)
+        .await
+    {
+        Ok(stats) => {
+            // Logged per-identity: a `max()` across identities would report a
+            // healthy frontier while one peg sat stalled at zero.
+            tracing::info!(
+                identities = stats.identities,
+                rows = stats.rows_inserted,
+                newest = ?stats.newest,
+                "usd_rate snapshot"
+            );
+            stats.rows_inserted
+        }
+        Err(err) => {
+            tracing::error!(error = %err, "usd_rate snapshot failed; oracle_prices is unaffected");
+            0
+        }
+    };
+
     Ok(OracleStats {
         queried: TRACKED_SYMBOLS.len(),
         written,
         skipped,
+        rates_snapshotted,
     })
 }
 

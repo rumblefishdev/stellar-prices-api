@@ -103,9 +103,58 @@ Fold these into 0165 **before it merges**, or this task turns into a rewrite:
 - [ ] Visible in [[0150]] if that materialises the view, or the fix is lost at
       materialisation time.
 
+## ⚠️ Known adjacent gap this task does NOT close — the enrichment peg tier
+
+**Measured on prod 2026-08-10**, from live `oracle_prices` readings:
+
+| | rate | off par |
+|---|---|---|
+| USDC | 1.00066784838102 | **+0.067%** |
+| USDT | 0.99930223861292 | **−0.070%** |
+
+Three properties, each of which strengthens the case for this task:
+
+1. **The ~0.1% figure is real**, ~0.07% per asset. Not hypothetical, not a
+   depeg event — this is an ordinary Sunday afternoon.
+2. **The two deviate in OPPOSITE directions**, so the spread *between* them is
+   **~0.137%**. A flat `$1` is therefore not a small uniform offset that mostly
+   cancels; anything comparing a USDC-denominated value against a
+   USDT-denominated one carries the whole 0.14%.
+3. **It is a persistent bias, not noise.** Five consecutive 5-minute readings
+   held the same sign and magnitude to four decimal places. Jitter around par
+   would average out across many candles; a stable offset does not — it is
+   present on *every* row, always in the same direction. That is a stronger
+   argument than a depeg would be: a depeg is rare and visible, this is
+   permanent and invisible.
+
+**The gap:** this task fixes the *view's* peg fallback. The enrichment **peg
+tier** bakes the same flat `$1` into `close_usd` itself —
+
+> a USDC- or USDT-quoted candle gets `close_usd = close × $1`, exact and
+> oracle-free, back to SDEX genesis  (`ch_enrich.rs`)
+
+— so every USDC-quoted candle's `close_usd` is ~0.067% **low** and every
+USDT-quoted one ~0.070% **high**, wherever the oracle tier did not win. That is
+all deep history before the oracle window (~2025-09) plus anything outside the
+staleness bound. **Shipping this task leaves that untouched**, and a reader
+comparing the view against the candles will find them disagreeing by that margin.
+
+**Why it is not folded in here.** Pointing the peg tier at [[0167]]'s
+`prices.usd_rate` is the obvious fix and becomes possible once that table
+exists — but it is a *write-path* change to the enrichment hot loop, which
+[[0111]] is already the open performance task for, and correcting history means
+re-enrichment rather than a view swap. Different risk class, different task.
+
+⚠️ **Do not queue it ahead of [[0172]] on magnitude alone.** 0.07% on `close_usd`
+is plausibly acceptable for TVL; 0172 is USDT candles reading ~0.14 against USDC,
+a ~7× error on 102 live pools. Fix the order-of-magnitude problem first.
+
 ## Out of scope
 
 - Building the rate table or populating it — [[0167]].
+- **Correcting `close_usd` itself** (the enrichment peg tier above). Noted
+  deliberately rather than filed, 2026-08-10 — file it when 0111 makes the
+  enrichment write path safe to touch, or when someone needs better than 0.07%.
 - `current_price_usd` / `current_prices`, which is suspected to carry the same
   base-only assumption as 0165 but is a refreshable-MV rebuild and must not ride
   along on a view swap.

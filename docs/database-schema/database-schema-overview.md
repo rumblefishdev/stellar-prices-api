@@ -143,16 +143,16 @@ are pushed to the Hetzner cluster via separate post-backfill tools.
 
 ## 2. Database Tech Stack
 
-| Component              | Technology                                                                                                                                                                                                                                                                                                                                                                                                                   |
-| ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Database engine        | **ClickHouse** on BE's shared Hetzner cluster (separate `prices` database, ADR 0007)                                                                                                                                                                                                                                                                                                                                         |
-| Storage engines        | `ReplacingMergeTree(version)` for OHLCV and `unresolved_pools`; `ReplacingMergeTree(updated_at)` for `current_prices` / `assets` / `asset_metadata` / `backfill_progress` / `pool_registry` / `discovery_state`; `ReplacingMergeTree(fetched_at)` for `asset_supply`; `ReplacingMergeTree(ledger)` for `ingest_cursor` (highest-ledger-wins, §3.12); bare `ReplacingMergeTree` for `oracle_prices` / `backfill_sdex_ledgers` |
-| Rollups                | Chain of CH materialised views: `price_ohlcv_1m → _15m → _1h → _4h → _1d → _1w → _1M` (replaces the OHLCV Rollup Lambda)                                                                                                                                                                                                                                                                                                     |
-| Partitioning           | `PARTITION BY toYYYYMM(timestamp)` on every OHLCV/oracle table; cleanup via `ALTER TABLE … DROP PARTITION`                                                                                                                                                                                                                                                                                                                   |
-| Database client (Rust) | [`clickhouse`](https://crates.io/crates/clickhouse) — async, native protocol over HTTPS-mTLS                                                                                                                                                                                                                                                                                                                                 |
-| Schema tooling         | Plain SQL DDL applied by the prices-api schema applier on first deploy; prices-api owns `prices.*` migrations unilaterally (ADR 0007 §3.7)                                                                                                                                                                                                                                                                                   |
-| Hosting                | BE-managed Hetzner box behind Caddy:443; cross-cloud (AWS → Hetzner) hop, ~80–130 ms RTT mitigated by warm connection reuse and batched per-ledger writes                                                                                                                                                                                                                                                                    |
-| Credentials            | AWS Secrets Manager — per-env client `{cert,key,ca}` as a single JSON bundle secret per identity (one secret per identity per env, named by `MTLS_SECRET_NAME`; ADR 0007 / task 0063)                                                                                                                                                                                                                                        |
+| Component              | Technology                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Database engine        | **ClickHouse** on BE's shared Hetzner cluster (separate `prices` database, ADR 0007)                                                                                                                                                                                                                                                                                                                                                                                       |
+| Storage engines        | `ReplacingMergeTree(version)` for OHLCV and `unresolved_pools`; `ReplacingMergeTree(updated_at)` for `current_prices` / `assets` / `asset_metadata` / `backfill_progress` / `pool_registry` / `discovery_state`; `ReplacingMergeTree(fetched_at)` for `asset_supply`; `ReplacingMergeTree(ledger)` for `ingest_cursor` (highest-ledger-wins, §3.12); bare `ReplacingMergeTree` for `oracle_prices` / `backfill_sdex_ledgers`; `ReplacingMergeTree(version)` for `usd_rate` |
+| Rollups                | Chain of CH materialised views: `price_ohlcv_1m → _15m → _1h → _4h → _1d → _1w → _1M` (replaces the OHLCV Rollup Lambda)                                                                                                                                                                                                                                                                                                                                                   |
+| Partitioning           | `PARTITION BY toYYYYMM(timestamp)` on every OHLCV/oracle table; cleanup via `ALTER TABLE … DROP PARTITION`                                                                                                                                                                                                                                                                                                                                                                 |
+| Database client (Rust) | [`clickhouse`](https://crates.io/crates/clickhouse) — async, native protocol over HTTPS-mTLS                                                                                                                                                                                                                                                                                                                                                                               |
+| Schema tooling         | Plain SQL DDL applied by the prices-api schema applier on first deploy; prices-api owns `prices.*` migrations unilaterally (ADR 0007 §3.7)                                                                                                                                                                                                                                                                                                                                 |
+| Hosting                | BE-managed Hetzner box behind Caddy:443; cross-cloud (AWS → Hetzner) hop, ~80–130 ms RTT mitigated by warm connection reuse and batched per-ledger writes                                                                                                                                                                                                                                                                                                                  |
+| Credentials            | AWS Secrets Manager — per-env client `{cert,key,ca}` as a single JSON bundle secret per identity (one secret per identity per env, named by `MTLS_SECRET_NAME`; ADR 0007 / task 0063)                                                                                                                                                                                                                                                                                      |
 
 **Why ClickHouse on a BE-shared cluster (ADR 0007):**
 
@@ -200,6 +200,7 @@ erDiagram
     assets ||--o{ current_prices  : "asset_id (logical)"
     assets ||--o{ price_ohlcv_1m  : "asset_id (logical)"
     assets ||--o{ oracle_prices   : "asset_id (logical)"
+    oracle_prices ||--o{ usd_rate : "snapshot (asset_id resolved to natural identity)"
     price_ohlcv_1m ||--o{ price_ohlcv_15m : "MV: 1m → 15m"
     price_ohlcv_15m ||--o{ price_ohlcv_1h : "MV: 15m → 1h"
     price_ohlcv_1h  ||--o{ price_ohlcv_4h : "MV: 1h → 4h"
@@ -264,6 +265,22 @@ erDiagram
         ENGINE             engine "ReplacingMergeTree"
         PARTITION_BY       partition "toYYYYMM(timestamp)"
         ORDER_BY           sort_key "asset_id, oracle_name, timestamp"
+    }
+
+    usd_rate {
+        LowCardinality_S   asset_kind "native|credit|contract"
+        String             asset_code
+        String             issuer_address
+        String             contract_address
+        DateTime           timestamp "DoubleDelta codec"
+        Decimal_38_14      usd_rate
+        LowCardinality_S   method "oracle|peg|pivot|pivot2"
+        String             reference_asset "'' for oracle/peg"
+        UInt8              hops "0 oracle/peg, 1 XLM pivot, 2 second hop"
+        UInt64             version
+        ENGINE             engine "ReplacingMergeTree(version)"
+        PARTITION_BY       partition "toYYYYMM(timestamp)"
+        ORDER_BY           sort_key "asset_kind, asset_code, issuer_address, contract_address, timestamp, method"
     }
 
     backfill_progress {
@@ -829,6 +846,95 @@ SETTINGS index_granularity = 8192;
 `GET /oracles/{asset_identifier}` for cross-reference. It does **not** feed
 the `price_usd` field in any other endpoint.
 
+### 3.4a `prices.usd_rate` — USD rate per asset, as a first-class value (task 0167)
+
+`close_usd` is not a stored fact — it is a **cached product**. Every enrichment
+tier computes the same shape (`ch_enrich.rs`):
+
+```
+close_usd = close × <USD rate of the candle's QUOTE asset at that time>
+```
+
+The rate is a function of `(quote asset, timestamp)` **only**, never of the
+candle being priced. Today it is looked up, multiplied into hundreds of millions
+of rows, and then **discarded** — never written down anywhere. This table stores
+it: a handful of assets per bucket instead of one product per candle.
+
+⏳ **The urgency is retention.** `oracle_prices` is pruned at 13 months (§3.4),
+so the earliest depeg-aware readings age out permanently. A view cannot avoid
+this by joining `oracle_prices` directly — the published series would **mutate**
+as rows age out (a bucket reading `0.9993` silently reverting to a `$1` fallback
+later), which is why `views.sql` forbids that join. Hence a forever-retained
+snapshot.
+
+```sql
+CREATE TABLE prices.usd_rate (
+    asset_kind        LowCardinality(String),  -- natural identity, NOT asset_id
+    asset_code        String,
+    issuer_address    String,
+    contract_address  String,
+    timestamp         DateTime CODEC(DoubleDelta),
+    usd_rate          Decimal(38, 14),
+    method            LowCardinality(String),  -- 'oracle'|'peg'|'pivot'|'pivot2'
+    reference_asset   String   DEFAULT '',     -- what it pivoted through
+    hops              UInt8    DEFAULT 0,      -- 0 oracle/peg, 1 XLM pivot, 2 hop
+    version           UInt64
+)
+ENGINE = ReplacingMergeTree(version)
+PARTITION BY toYYYYMM(timestamp)
+ORDER BY (asset_kind, asset_code, issuer_address, contract_address, timestamp, method)
+SETTINGS index_granularity = 8192;
+```
+
+⚠️ **Keyed on natural identity, never `asset_id`.** Task 0139 is confirmed as
+genuine `asset_id` collisions between unrelated assets — measured 2026-08-10 at
+**3,281 ids serving 6,568 identities** (`asset_id 4194` is both `STW` and
+`ARBRIDGE`). An `asset_id` key would be non-unique by construction. It is also
+why the population step guards the `asset_id` → identity translation in **both**
+directions and refuses to write when ambiguous: `oracle_prices` is
+`asset_id`-keyed and this table is not, so the copy is the one place the two key
+spaces meet.
+
+⚠️ **`method` is part of the sorting key, deliberately.** `ReplacingMergeTree`
+dedups on the sorting key, so without it a `'pivot'` estimate written at the same
+`(identity, timestamp)` as a measured `'oracle'` reading would silently
+**replace** it — and the winner would be whichever was written later, not
+whichever is better evidence.
+
+**Resolution rule — ASOF at-or-before, bounded by staleness. Never averaged.**
+Rows are _observations_, not bucket aggregates. A consumer needing the rate at
+time `T` takes the newest row with `timestamp <= T`, refusing it past a staleness
+window. For a bucket-grained consumer such as `price_usd_series`, `T` is the
+**bucket's end**. This is the rule the enrichment path already uses, and it
+composes across all six granularities for free — a daily close is the ASOF at
+day-end, which _is_ the last hourly close. Averages do not compose. vwap is
+impossible regardless: oracle observations carry no volume.
+
+⚠️ **Absence is the signal.** Pre-oracle history (before ~2025-09) gets **no
+row**, and the consumer's own peg fallback applies. Synthetic `method = 'peg'`
+rows at `$1` are deliberately **not** written — that would make a fallback
+indistinguishable from a measurement, which is the `close_usd = 0` mistake in a
+new place.
+
+**Population.** Written by the **Oracle Fetcher** Lambda immediately after it
+writes `oracle_prices`, copying peg-asset observations (USDC/USDT) as
+`method = 'oracle'`, `hops = 0`. Gap-filling rather than watermarked — an
+anti-join on `(timestamp, value)` — because `write_oracle` is also called by the
+SDEX backfill and the ledger processor's reconcile path, which write readings
+decoded from **historical** ledgers, i.e. below any frontier. Task 0086's junk
+`1970-01` timestamps are filtered out: `oracle_prices` sheds them at 13 months,
+this table would keep them forever.
+
+**Size.** Measured on the 26.3.10.60 pin: ~11.5 bytes/row compressed at worst
+(high-entropy values), so two peg assets at a 5-minute cadence cost **~2.3 MiB
+per year** — roughly 0.01% of the estate's annual growth. Retaining it forever is
+effectively free. If task 0154 later writes pivot rates for thousands of assets,
+revisit at that granularity choice.
+
+**Consumers.** None yet — task 0168 is the first, replacing the hardcoded `$1`
+peg fallback in `price_usd_series` with the measured rate. Task 0154's second
+pivot tier is the next.
+
 ### 3.5 `prices.backfill_progress` — Backfill Progress Tracking
 
 One-row-per-stream tracking table powering `GET /backfill/status`. The backfill
@@ -1256,6 +1362,14 @@ Coarse-grained data (1h, 4h, 1d, 1w, 1M) → keep forever
 
 Oracle table:
   prices.oracle_prices    → DROP PARTITION for months > 13 months old
+
+⚠️ prices.usd_rate        → NEVER pruned. Retained forever, deliberately.
+  The retention list in cleanup-worker is OPT-IN: a table not named there is
+  kept indefinitely. usd_rate exists precisely BECAUSE oracle_prices expires
+  and takes the earliest depeg-aware history with it — unrecoverably, since
+  those readings cannot be re-derived after the fact. Adding usd_rate to the
+  pruning list would re-create the exact data loss it was built to escape.
+  Guarded by a test in cleanup-worker (task 0167).
 
 Implementation:
   ALTER TABLE prices.price_ohlcv_1m  DROP PARTITION '<YYYYMM>'
@@ -2083,6 +2197,7 @@ erDiagram
     assets ||--o{ current_prices  : "asset_id (logical)"
     assets ||--o{ price_ohlcv_1m  : "asset_id (logical)"
     assets ||--o{ oracle_prices   : "asset_id (logical)"
+    oracle_prices ||--o{ usd_rate : "snapshot (asset_id resolved to natural identity)"
     assets ||--o| asset_metadata  : "asset_id (logical, 1:1 enrichment)"
     assets ||--o| asset_supply    : "asset_id (logical, 1:1 supply)"
     price_ohlcv_1m ||--o{ price_ohlcv_15m : "MV: 1m → 15m"

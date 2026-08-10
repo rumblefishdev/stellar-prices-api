@@ -210,6 +210,103 @@ ORDER BY (asset_id, oracle_name, timestamp)
 SETTINGS index_granularity = 8192;
 
 ----------------------------------------------------------------------
+-- prices.usd_rate — the USD rate of an asset, as a first-class value.
+-- Task 0167; shape specified by 0154, scoped by the 0151 decision.
+--
+-- ## Why this table exists
+-- close_usd is not a stored fact, it is a CACHED PRODUCT. All three enrichment
+-- tiers compute the same shape (ch_enrich.rs):
+--     close_usd = close * <USD rate of the candle's QUOTE asset at that time>
+-- The rate is a function of (quote asset, timestamp) ONLY — never of the candle
+-- being priced. So today we look the rate up, multiply it into hundreds of
+-- millions of rows, and DISCARD it. This table writes it down instead: a handful
+-- of assets per bucket rather than one product per candle.
+--
+-- ⏳ The urgent reason is retention. oracle_prices is pruned at INTERVAL 13
+-- MONTH (cleanup-worker/src/lib.rs), so the earliest depeg-aware history ages
+-- out permanently. A view CANNOT solve this by joining oracle_prices directly:
+-- the published series would MUTATE as rows age out (a bucket reading 0.9993
+-- silently reverting to 1.0000), which is why views.sql forbids that join. The
+-- rate must be snapshotted into a forever-retained table.
+--
+-- ## ⚠️ Key is NATURAL IDENTITY, never asset_id
+-- Task 0139 is confirmed as genuine asset_id collisions between unrelated
+-- assets — measured 2026-08-10 at 3,281 asset_ids serving 6,568 identities
+-- (asset_id 4194 is both STW and ARBRIDGE). A rate keyed on asset_id would be
+-- ambiguous for exactly those ids and would bake a non-unique key into new
+-- infrastructure. Natural identity sidesteps 0139 whichever way its fix lands.
+--
+-- ## ⚠️ Deliberately ABSENT from cleanup-worker's RETENTION list
+-- That list is OPT-IN: a table not named there is retained forever, which is
+-- exactly what this table needs. Do NOT "helpfully" add it — adding it would
+-- re-create the very expiry problem the table exists to escape.
+--
+-- ## Resolution rule — ASOF at-or-before, bounded by staleness. NEVER averaged.
+-- Rows are OBSERVATIONS at the source's own cadence, not bucket aggregates. A
+-- consumer needing the rate at time T takes the newest row with timestamp <= T,
+-- and refuses it past a staleness window (unbounded forward-fill would present a
+-- three-day-old reading as current). For a bucket-grained consumer such as
+-- price_usd_series, T is the BUCKET'S END — i.e. the bucket's closing rate.
+--
+-- Three reasons this is not an average or a vwap:
+--   1. It is the rule the codebase already uses — the oracle tier is an
+--      ASOF LEFT JOIN ... ON o.timestamp <= p.timestamp with a staleness floor
+--      (ch_enrich.rs), and the XLM pivot forward-fills the same way.
+--   2. It COMPOSES ACROSS ALL SIX GRANULARITIES FOR FREE. A daily close is the
+--      ASOF at day-end, which IS the last hourly close. Averages do not compose
+--      (the mean of hourly means is not the daily mean unless counts match), so
+--      an averaging rule would need six definitions plus a consistency proof.
+--   3. price_usd_series means "one USD CLOSE per bucket" — a bucket average
+--      would be a different statistic wearing the same column name.
+-- vwap is impossible regardless: oracle observations carry no volume.
+--
+-- Accepted cost: a close is more exposed to a single outlier reading at a bucket
+-- boundary than an average is. Negligible for peg assets (~0.1% band), and task
+-- 0154 ASOFs at the CANDLE's timestamp so the boundary case does not arise there.
+--
+-- ## Columns
+--   method  'oracle' — a measured reading (hops = 0)
+--           'peg'    — the $1 assumption (hops = 0)
+--           'pivot'  — via XLM (hops = 1)          } owned by 0154,
+--           'pivot2' — via another rated asset (2) } not written here
+--   ⚠️ ABSENCE IS THE SIGNAL for pre-oracle history. Deep history (before the
+--   oracle window, ~2025-09) gets NO ROW, and the consumer's own peg fallback
+--   applies. Do NOT write synthetic method='peg' rows at $1 to "fill" it — that
+--   makes a fallback indistinguishable from a measurement, which is precisely
+--   the close_usd = 0 mistake (one value meaning several things) in a new place.
+--
+--   ⚠️ `method` IS PART OF THE SORTING KEY, deliberately. RMT dedups on the
+--   sorting key, so without it a 'pivot' row written by 0154 at the same
+--   (identity, timestamp) as a measured 'oracle' reading would silently REPLACE
+--   it — and the winner would be whichever was written later, not whichever is
+--   better evidence. With `method` in the key the two coexist and the consumer
+--   chooses. Fixed while the table was still empty; changing a sorting key
+--   afterwards means a rebuild.
+--
+--   version — the write time. A re-run writes nothing (the copy skips
+--   observations already stored with the same value), and a genuine upstream
+--   CORRECTION at an already-stored timestamp differs in value, so it is
+--   re-copied and its higher version wins.
+----------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS prices.usd_rate (
+    asset_kind        LowCardinality(String),
+    asset_code        String,
+    issuer_address    String,
+    contract_address  String,
+    timestamp         DateTime      CODEC(DoubleDelta),
+    usd_rate          Decimal(38, 14),
+    method            LowCardinality(String),
+    reference_asset   String        DEFAULT '',
+    hops              UInt8         DEFAULT 0,
+    version           UInt64
+)
+ENGINE = ReplacingMergeTree(version)
+PARTITION BY toYYYYMM(timestamp)
+ORDER BY (asset_kind, asset_code, issuer_address, contract_address, timestamp, method)
+SETTINGS index_granularity = 8192;
+
+----------------------------------------------------------------------
 -- Backfill bookkeeping.
 ----------------------------------------------------------------------
 

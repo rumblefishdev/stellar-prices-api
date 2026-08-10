@@ -22,6 +22,12 @@ use crate::error::IngestError;
 use crate::registry_io::PoolRegistryRow;
 use crate::soroban::Registries;
 
+/// Earliest plausible oracle observation, as an epoch second. Anything at or
+/// below this is a task-0086 unit bug (real epoch divided by ~1000, landing in
+/// 1970-01), not a real reading — no oracle we poll existed before Soroban.
+/// Used to keep that junk out of the forever-retained `prices.usd_rate`.
+pub const ORACLE_EPOCH_FLOOR: u32 = 1_577_836_800; // 2020-01-01T00:00:00Z
+
 /// Convert a `Decimal` to the `i128` mantissa ClickHouse expects for a
 /// `Decimal(38, 14)` column. Saturates rather than panicking: AMM
 /// amounts/prices are i128-derived and can exceed the 38-digit budget, and an
@@ -353,6 +359,226 @@ impl OhlcvWriter {
         insert.end().await?;
         Ok(())
     }
+
+    /// Snapshot peg-asset USD rates from `oracle_prices` into `prices.usd_rate`
+    /// (task 0167).
+    ///
+    /// **Why the copy exists.** `oracle_prices` is pruned at `INTERVAL 13
+    /// MONTH`, so the earliest depeg-aware readings age out permanently. A
+    /// consumer cannot join `oracle_prices` instead: the published series would
+    /// *mutate* as rows age out — a bucket reading `0.9993` silently reverting
+    /// to a `$1` fallback — which is why `views.sql` forbids that join.
+    ///
+    /// **Gap-filling, not watermarked.** An earlier version resumed from
+    /// `max(timestamp)` and copied only rows newer than that. That was wrong:
+    /// `write_oracle` is *also* called by `sdex-backfill` and the ledger
+    /// processor's reconcile path, which write readings decoded from
+    /// **historical** ledgers — i.e. BELOW the frontier. Once the scheduled
+    /// worker had advanced the watermark to now, any backdated reading would
+    /// never be snapshotted, and would then age out of `oracle_prices` at 13
+    /// months: precisely the permanent loss this table exists to prevent. The
+    /// copy therefore anti-joins on `(timestamp, value)` and fills any gap
+    /// wherever it sits. Both tables are small (a few assets), so this is cheap.
+    ///
+    /// Anti-joining on the **value** as well as the timestamp also means a
+    /// genuine upstream correction at an already-stored timestamp differs, gets
+    /// re-copied, and wins on the higher `version` — while an unchanged reading
+    /// matches and is skipped, keeping re-runs free.
+    ///
+    /// ⚠️ **Junk timestamps are filtered out, and this is not defensive
+    /// decoration either.** Task 0086 is an open, confirmed bug: the oracle
+    /// worker intermittently writes `oracle_prices` rows whose `timestamp` is
+    /// the real epoch divided by ~1000, landing them in `1970-01` with a
+    /// *correct* `price_usd`. Copying those verbatim would be worse here than
+    /// upstream — `oracle_prices` sheds them after 13 months, whereas
+    /// `usd_rate` is retained FOREVER, so a known upstream defect would become
+    /// permanent. [`ORACLE_EPOCH_FLOOR`] drops them. It does not fix 0086, and
+    /// is not a reason to leave 0086 open: the same junk still pollutes
+    /// `oracle_prices` and anything else reading it.
+    ///
+    /// ⚠️ **The 0139 guard runs as a PRE-PASS over every identity before any
+    /// write.** `oracle_prices` is keyed on `asset_id` and `usd_rate` on natural
+    /// identity, so this is the one place the two key spaces meet, and 0139 is
+    /// confirmed as genuine collisions (3,281 ids serving 6,568 identities;
+    /// `asset_id 4194` is both `STW` and `ARBRIDGE`). Translating unchecked
+    /// would file one asset's readings under another's identity, permanently.
+    /// Guarding per-identity *inside* the write loop was the first shape and it
+    /// was wrong twice over: a failure on the first identity silently skipped
+    /// every later one, and a failure on a later identity left the earlier ones
+    /// already written — a partial write, which is the exact failure mode the
+    /// guard exists to prevent. All identities are checked first; if any fails,
+    /// nothing is written and the error names every offender.
+    pub async fn populate_usd_rate_from_oracle(
+        &self,
+        pegs: &[AssetIdentity],
+        oracle_name: &str,
+    ) -> Result<UsdRateStats, IngestError> {
+        // ---- pre-pass: resolve + guard EVERY identity before writing ----
+        let mut resolved: Vec<(&AssetIdentity, u32)> = Vec::with_capacity(pegs.len());
+        let mut problems: Vec<String> = Vec::new();
+
+        for identity in pegs {
+            let (_, code, issuer, contract) = identity_columns(identity);
+            let ids: Vec<u32> = self
+                .client
+                .query(
+                    "SELECT asset_id FROM prices.assets FINAL \
+                     WHERE asset_code = ? AND issuer_address = ? AND contract_address = ?",
+                )
+                .bind(code)
+                .bind(issuer)
+                .bind(contract)
+                .fetch_all::<u32>()
+                .await?;
+            let [asset_id] = ids[..] else {
+                problems.push(format!(
+                    "{code} resolves to {} asset_ids (expected 1)",
+                    ids.len()
+                ));
+                continue;
+            };
+            let sharers: u64 = self
+                .client
+                .query("SELECT count() FROM prices.assets FINAL WHERE asset_id = ?")
+                .bind(asset_id)
+                .fetch_one::<u64>()
+                .await?;
+            if sharers != 1 {
+                problems.push(format!(
+                    "{code} maps to asset_id {asset_id}, shared by {sharers} identities"
+                ));
+                continue;
+            }
+            resolved.push((identity, asset_id));
+        }
+
+        if !problems.is_empty() {
+            return Err(IngestError::Precondition(format!(
+                "refusing to write usd_rate — ambiguous asset_id mapping (task 0139): {}",
+                problems.join("; ")
+            )));
+        }
+
+        // ---- write: every identity is known-safe by here ----------------
+        let mut stats = UsdRateStats::default();
+        for (identity, asset_id) in resolved {
+            let (kind, code, issuer, contract) = identity_columns(identity);
+
+            let before: u64 = self.count_rates(kind, code, issuer, contract).await?;
+
+            // `price_usd > 0` drops unusable readings rather than storing a zero
+            // a consumer cannot tell from a real rate — the close_usd = 0
+            // mistake, which this table partly exists to avoid.
+            //
+            // `oracle_name` is a parameter, not the literal 'reflector': the
+            // enrichment tier reads it from config (ORACLE_NAME), and the rate
+            // we snapshot must be the rate that priced the candles, or the
+            // 0154-constraint-5 reconciliation compares two different things.
+            // It also keeps the RMT winner deterministic if a second oracle is
+            // ever added, instead of leaving it to insert order.
+            self.client
+                .query(
+                    "INSERT INTO prices.usd_rate \
+                       (asset_kind, asset_code, issuer_address, contract_address, \
+                        timestamp, usd_rate, method, reference_asset, hops, version) \
+                     SELECT ?, ?, ?, ?, o.timestamp, o.price_usd, 'oracle', '', 0, \
+                            toUInt64(now()) \
+                     FROM prices.oracle_prices AS o FINAL \
+                     LEFT ANTI JOIN \
+                     ( \
+                         SELECT timestamp, usd_rate FROM prices.usd_rate FINAL \
+                         WHERE asset_kind = ? AND asset_code = ? AND issuer_address = ? \
+                           AND contract_address = ? AND method = 'oracle' \
+                     ) AS r ON o.timestamp = r.timestamp AND o.price_usd = r.usd_rate \
+                     WHERE o.asset_id = ? AND o.price_usd > 0 AND o.oracle_name = ? \
+                       AND o.timestamp > toDateTime(?)",
+                )
+                .bind(kind)
+                .bind(code)
+                .bind(issuer)
+                .bind(contract)
+                .bind(kind)
+                .bind(code)
+                .bind(issuer)
+                .bind(contract)
+                .bind(asset_id)
+                .bind(oracle_name)
+                .bind(ORACLE_EPOCH_FLOOR)
+                .execute()
+                .await?;
+
+            let after_rows: u64 = self.count_rates(kind, code, issuer, contract).await?;
+            let newest: u32 = self
+                .client
+                .query(
+                    "SELECT toUInt32(ifNull(max(timestamp), toDateTime(0))) \
+                     FROM prices.usd_rate \
+                     WHERE asset_kind = ? AND asset_code = ? AND issuer_address = ? \
+                       AND contract_address = ? AND method = 'oracle'",
+                )
+                .bind(kind)
+                .bind(code)
+                .bind(issuer)
+                .bind(contract)
+                .fetch_one::<u32>()
+                .await?;
+
+            stats.identities += 1;
+            stats.rows_inserted += after_rows.saturating_sub(before);
+            stats.newest.push((code.to_string(), newest));
+        }
+        Ok(stats)
+    }
+
+    async fn count_rates(
+        &self,
+        kind: &str,
+        code: &str,
+        issuer: &str,
+        contract: &str,
+    ) -> Result<u64, IngestError> {
+        Ok(self
+            .client
+            .query(
+                "SELECT count() FROM prices.usd_rate FINAL \
+                 WHERE asset_kind = ? AND asset_code = ? AND issuer_address = ? \
+                   AND contract_address = ? AND method = 'oracle'",
+            )
+            .bind(kind)
+            .bind(code)
+            .bind(issuer)
+            .bind(contract)
+            .fetch_one::<u64>()
+            .await?)
+    }
+}
+
+/// Split an [`AssetIdentity`] into the four natural-identity columns
+/// `usd_rate` (and the read-surface views) are keyed on. The `''` padding for
+/// the inapplicable columns is the same convention `views.sql` documents, so a
+/// rate row joins a series row without a translation step.
+fn identity_columns(id: &AssetIdentity) -> (&str, &str, &str, &str) {
+    match id {
+        AssetIdentity::Native => ("native", "XLM", "", ""),
+        AssetIdentity::Credit { code, issuer } => ("credit", code, issuer, ""),
+        AssetIdentity::Contract(addr) => ("contract", "", "", addr),
+    }
+}
+
+/// Outcome of a [`OhlcvWriter::populate_usd_rate_from_oracle`] pass.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct UsdRateStats {
+    /// Identities processed. All guards passed, or the call would have errored
+    /// without writing anything.
+    pub identities: usize,
+    /// Rows actually written. This is the number that says whether the pass did
+    /// anything — `identities` counts what was *attempted* and reads the same on
+    /// a run that copied thousands of rows and one that copied none.
+    pub rows_inserted: u64,
+    /// Newest snapshotted observation PER IDENTITY, `(asset_code, timestamp)`.
+    /// Deliberately not a `max()` across identities: that would report a healthy
+    /// frontier while one peg was silently stalled at zero.
+    pub newest: Vec<(String, u32)>,
 }
 
 #[derive(Debug, Serialize, clickhouse::Row)]
