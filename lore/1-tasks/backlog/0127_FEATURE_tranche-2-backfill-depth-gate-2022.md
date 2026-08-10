@@ -4,7 +4,7 @@ title: "Tranche 2 backfill-depth gate — earliest_data_available ≤ 2022-01-01
 type: FEATURE
 status: backlog
 related_adr: ["0005", "0009"]
-related_tasks: ["0088", "0106", "0114", "0116", "0101", "0128"]
+related_tasks: ["0088", "0106", "0114", "0116", "0101", "0128", "0170", "0165"]
 tags: [layer-indexing, priority-high, effort-medium, milestone-M2, backfill, sdex, verification, acceptance]
 milestone: 2
 links:
@@ -97,16 +97,38 @@ a tool that was retired.
 - Confirm `backfill_note` appears correctly while the backfill is still running
   (§4.2) — it is the honest signal that history is partial.
 
+## ⚠️ Two ACs are blocked by [[0170]] — no amount of backfill fixes them
+
+Established 2026-08-10, from code plus [[0165]]'s existing prod measurement:
+**`GET /assets/{USDC}/ohlcv` returns `200 OK` with `data: []` in every mode**, at
+every timeframe, at any backfill depth.
+
+`/ohlcv` resolves the path asset as the **base** leg and a separate **quote** leg
+from `base_currency`, then filters on both (`queries_ch.rs:545`). `base_currency`
+defaults to `USD` → USDC, so the default request asks for a **USDC/USDC
+self-pair**. `?base_currency=XLM` fails too: canonicalisation stores that pair as
+base=XLM / quote=USDC and never the inverse. 0165 measured `price_ohlcv_1d WHERE
+asset_id = <USDC>` → **0 candles**, unconditional on quote.
+
+**AC 3 and AC 4 below are unsatisfiable until [[0170]] ships**, and [[0165]] does
+**not** cover it — 0165 rewrites the `price_usd_series` view, which `/ohlcv` never
+reads. Do not schedule this task off the back of [[0088]] finishing; that
+unblocks AC 1–2 only.
+
 ## Acceptance Criteria
 
 - [ ] `GET /backfill/status` reports `sdex.earliest_data_available` ≤
       2022-01-01, and the stored value is reconciled against real candle rows
 - [ ] Month-by-month candle counts from 2022-01 to present recorded; every gap
       explained or filled
-- [ ] `GET /assets/{USDC}/ohlcv?timeframe=all` returns 1d candles from
-      2022-01 or earlier through the deployed API
-- [ ] Spot-check table published: ≥5 dates × ≥2 assets, our close vs an
-      independent public source, deltas explained
+- [ ] 🔴 **BLOCKED BY [[0170]]** — `GET /assets/{USDC}/ohlcv?timeframe=all`
+      returns 1d candles from 2022-01 or earlier through the deployed API
+- [ ] 🔴 **BLOCKED BY [[0170]]** (USDC is the reviewer's named example) —
+      spot-check table published: ≥5 dates × ≥2 assets, our close vs an
+      independent public source, deltas explained. *Mitigation if 0170 slips:
+      spot-check two non-peg assets and state explicitly why USDC is excluded —
+      but that is a weaker package, since USDC is the easiest close for a
+      reviewer to verify independently.*
 - [ ] USD-denominated fields are non-zero for the spot-checked span (depends on
       [[0114]]'s repair reaching it) — or the limitation is stated explicitly
 - [ ] `backfill_note` present and accurate while `sdex.status = "running"`

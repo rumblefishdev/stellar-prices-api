@@ -298,6 +298,14 @@ task ships the following**. Get them wrong and 0168 becomes a rewrite.
 
 ## Notes
 
+- ⚠️ **This task does NOT fix `GET /assets/{USDC}/ohlcv` — see [[0170]].** Same
+  root cause (USDC is always the quote), different code path: `/ohlcv` never
+  reads `price_usd_series`, it queries `price_ohlcv_1d` directly with its own
+  base+quote filter (`queries_ch.rs:545`), and `base_currency=USD` resolves the
+  quote to USDC, so the default request asks for a **USDC/USDC self-pair**.
+  Merging 0165 leaves that endpoint returning an empty `200` exactly as it does
+  today. Do not report "the USDC pricing bug is fixed" on this task alone —
+  0170 blocks two of [[0127]]'s M2 acceptance criteria.
 - **BE's proposed mechanism was wrong but their report was still the most
   valuable thing in the exchange.** They could see a pattern in their own data
   that we could not see in ours, and they said so with the caveat "happy to be
