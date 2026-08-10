@@ -53,6 +53,34 @@
 -- backfill + enrichment crates). SQL cannot reference a Rust const, so this
 -- literal is a hand-synced copy — if the canonical address ever changes, update
 -- it here AND in that const together, or the views and the writer diverge.
+-- The same applies to the USDT issuer (`prices_clickhouse::USDT_ISSUER`), used
+-- by the peg-fill arm of price_usd_series* (task 0165).
+--
+-- ## Peg assets cannot be priced as a base — the peg-fill arm (task 0165)
+-- USDC is our top-preference QUOTE, so canonicalisation makes it the quote on
+-- essentially every pair it appears in and it is the base of almost nothing.
+-- A view that emits one row per BASE asset therefore cannot publish USDC at all:
+-- measured on prod, `price_ohlcv_1d WHERE asset_id = <USDC>` returns 0 candles,
+-- and 0 of BE's 1,433 USDC-legged pools were priceable in any window (67.8% of
+-- every never-priced pool they hold). The control that proves the mechanism is
+-- the issuer split: USDC at the canonical issuer is 0/1,433 priceable, USDC at
+-- 56 OTHER issuers is 228/233 (97.9%) — same asset code, quote preference the
+-- sole variable. It tracks preference, not peg status or asset class.
+--
+-- price_usd_series* therefore UNION a zero-weight placeholder row per peg asset
+-- per bucket, keyed on the QUOTE leg, BEFORE the aggregation. Precedence then
+-- falls out of the arithmetic rather than being coded as a rule — see the block
+-- comment above price_usd_series for the case table and the three shapes that
+-- look simpler and are wrong.
+--
+-- ⚠️ The `1` is a PLACEHOLDER, not the answer — task 0168 replaces it.
+-- oracle_worker already polls Reflector for USDC and USDT, so a real
+-- depeg-aware rate exists; task 0167 snapshots it into prices.usd_rate and 0168
+-- swaps this constant for it. A flat $1 is a ~0.1% systematic error (small
+-- depegs are routine) and it CONTRADICTS OUR OWN CANDLES: the oracle enrichment
+-- tier already prices a TF/USDC candle at `close × 0.9993` (ch_enrich.rs:20).
+-- Read `method = 'peg'` as "no measured rate was available", never as "$1 is
+-- correct" — that is exactly what the `method` column exists to disambiguate.
 --
 -- ## Public key = natural Stellar identity, never asset_id (§12.2)
 -- asset_id is an internal UInt32 surrogate. These views resolve it to the
@@ -113,6 +141,24 @@
 -- native XLM key is ('native','XLM','',''). One canonical XLM row (the native
 -- identity); the writer's stored asset_type='classic' is mapped to 'native' here.
 --
+-- ### price_usd_series* only — `method` (task 0165, APPENDED LAST)
+--   method  LowCardinality(String). How this row's close_usd was arrived at:
+--             'traded' — a volume-weighted aggregate of candles that some
+--                        pricing tier already priced. The view cannot know
+--                        WHICH tier, which is why this is a distinct value and
+--                        not a reuse of task 0167's rate-provenance enum.
+--             'peg'    — no traded candle existed for this identity in this
+--                        bucket; the peg placeholder supplied the value. Read
+--                        it as "no measured rate available", NOT as "$1 is
+--                        correct".
+--             'oracle' — RESERVED for task 0168, once a measured depeg-aware
+--                        rate replaces the placeholder.
+--   Without this column a consumer cannot tell a real 1.0000 from a fallback
+--   1.0000 — the `close_usd = 0` mistake (one value meaning several things) in
+--   a new surface. ⚠️ This is an APPENDED column: arity changed, order did not.
+--   Anything decoding POSITIONALLY off `SELECT *` gets an extra column; pin an
+--   explicit column list.
+--
 -- ### current_price_usd only (task 0072)
 -- These carry SENTINELS, not NULLs — `current_prices`' columns are
 -- non-nullable, so "unavailable" and a real value share a type and can only be
@@ -169,24 +215,130 @@ GROUP BY p.timestamp;
 -- prices.price_usd_series — one USD close per (natural identity, day bucket).
 -- The cross-source/cross-quote collapse: volume-weighted close_usd over every
 -- candle of the asset in the bucket (ADR 0004 per-source rows merge at read
--- time). Only priced rows (close_usd > 0) — status 'ok'; misses are absent and
--- classified by the reader against usd_reference (see header).
+-- time). Arm A emits only priced rows (close_usd > 0) — status 'ok'; misses are
+-- absent and classified by the reader against usd_reference (see header).
+--
+-- ⚠️ ARM B IS NOT SUBJECT TO THAT PREDICATE, which changes the read-time status
+-- contract for peg identities. A peg asset gets its fallback row in any bucket
+-- where it was merely a QUOTE leg — including buckets where nothing was priced
+-- at all. So a peg identity can read `status = ok` in a bucket where
+-- usd_reference is EMPTY, which §12.3 otherwise calls `no_reference`. That is
+-- intended: a peg asset's USD value does not depend on the XLM/USDC reference
+-- being up, so suppressing it during a blackout would withhold the one price we
+-- still know. But §12.3 is therefore not universal — for peg identities read
+-- `method`, do not infer provenance from usd_reference.
+--
+-- ## Two arms, unioned before the GROUP BY (task 0165)
+-- Arm A is the historical definition: one row per priced candle, contributing
+-- v = close_usd × volume_base and w = volume_base.
+-- Arm B emits a ZERO-WEIGHT placeholder (v = 0, w = 0, is_peg = 1) keyed on the
+-- QUOTE leg wherever a peg asset is the quote — the only way a peg asset ever
+-- appears. Adding 0 to both numerator and denominator cannot perturb a weighted
+-- average, so the placeholder's only effects are to CREATE THE GROUP KEY and to
+-- FLAG it. Precedence is then arithmetic, not policy:
+--
+--   any non-peg asset ......... arm B contributes nothing → reduces to the
+--                               historical expression byte-identically
+--   peg, quote-only bucket .... no arm-A rows → the fallback → 1
+--   peg, also traded as base .. arm-A rows exist → market value wins; the
+--                               zero-weight row adds 0/0 and cannot shift it
+--
+-- ⚠️ Three shapes that look simpler and are WRONG:
+--   * Appending a $1 row AFTER the GROUP BY emits TWO rows for the same key
+--     wherever a peg asset also trades as a base. BE joins on (identity,
+--     bucket), so duplicate keys silently DOUBLE every downstream aggregate.
+--   * Letting the peg arm OWN the peg identities flattens USDT's 102 genuinely
+--     priceable pools from their market rate to $1 — a regression dressed as a
+--     fix. USDT is the control here precisely because it is a peg asset that is
+--     NOT the preferred quote, so it does trade as a base.
+--   * Expressing precedence as an anti-join (`WHERE key NOT IN (SELECT … FROM
+--     traded)`) costs TWO full price_ohlcv_1d FINAL scans, because ClickHouse
+--     substitutes CTEs textually rather than materialising them.
+--
+-- ⚠️ The guard is `sum(w) = 0` — total weight. A `countIf(is_peg = 0) = 0`
+-- form ("no traded rows at all") was written first and was WRONG; review caught
+-- it. Its premise — that the historical expression yields NULL at zero volume,
+-- which countIf would preserve — is FALSE on 26.3.10.60. `close_usd` is a
+-- NON-NULLABLE Decimal(38,14), so CAST strips the Nullable that `nullIf`
+-- introduces and a zero denominator never surfaces as NULL. It lands as
+-- Decimal128::MIN:
+--   toTypeName(CAST(sum(v)/nullIf(sum(w),0) AS Decimal(38,14))) -> Decimal(38,14)
+--   value -> -1701411834604692317316873.03715884105728
+-- countIf would publish that garbage for a peg asset whose only candles carry
+-- volume_base = 0, FLAGGED `method = 'traded'` — a catastrophic number labelled
+-- as measured, in the column BE multiplies into TVL. `sum(w) = 0` returns the
+-- fallback instead: correct, and the safer failure.
+--
+-- ⚠️ KNOWN RESIDUAL, deliberately NOT fixed here. The fallback can only fire
+-- where arm B emitted a placeholder, i.e. where the peg asset is a QUOTE leg in
+-- that bucket. A peg asset appearing ONLY as a zero-volume BASE has
+-- max(is_peg) = 0 and still publishes Decimal128::MIN. That is PRE-EXISTING
+-- (the historical view carried the identical expression) and NOT peg-specific:
+-- any asset whose only priced candles carry zero volume hits it. Fixing it
+-- means deciding whether such a row should be omitted entirely — a change to
+-- the "misses are absent" contract that needs BE input. Its own task.
 ----------------------------------------------------------------------
 
 CREATE OR REPLACE VIEW prices.price_usd_series AS
 SELECT
-    multiIf(
-        a.contract_address != '', 'contract',
-        a.asset_code = 'XLM' AND a.issuer_address = '', 'native',
-        'credit') AS asset_kind,
-    if(a.contract_address != '', '', a.asset_code)     AS asset_code,
-    if(a.contract_address != '', '', a.issuer_address) AS issuer_address,
-    a.contract_address AS contract_address,
-    p.timestamp        AS bucket,
-    CAST(sum(toFloat64(p.close_usd) * toFloat64(p.volume_base)) / nullIf(sum(toFloat64(p.volume_base)), 0) AS Decimal(38, 14)) AS close_usd
-FROM prices.price_ohlcv_1d AS p FINAL
-INNER JOIN prices.assets AS a FINAL ON a.asset_id = p.asset_id
-WHERE p.close_usd > 0
+    asset_kind,
+    asset_code,
+    issuer_address,
+    contract_address,
+    bucket,
+    if(max(is_peg) = 1 AND sum(w) = 0,
+       CAST(1 AS Decimal(38, 14)),
+       CAST(sum(v) / nullIf(sum(w), 0) AS Decimal(38, 14))) AS close_usd,
+    CAST(if(max(is_peg) = 1 AND sum(w) = 0, 'peg', 'traded') AS LowCardinality(String)) AS method
+FROM
+(
+    -- Arm A — every priced candle, keyed on the BASE leg.
+    SELECT
+        multiIf(
+            a.contract_address != '', 'contract',
+            a.asset_code = 'XLM' AND a.issuer_address = '', 'native',
+            'credit') AS asset_kind,
+        if(a.contract_address != '', '', a.asset_code)     AS asset_code,
+        if(a.contract_address != '', '', a.issuer_address) AS issuer_address,
+        a.contract_address AS contract_address,
+        p.timestamp        AS bucket,
+        toFloat64(p.close_usd) * toFloat64(p.volume_base) AS v,
+        toFloat64(p.volume_base)                          AS w,
+        toUInt8(0)                                        AS is_peg
+    FROM prices.price_ohlcv_1d AS p FINAL
+    INNER JOIN prices.assets AS a FINAL ON a.asset_id = p.asset_id
+    WHERE p.close_usd > 0
+
+    UNION ALL
+
+    -- Arm B — zero-weight peg placeholder, keyed on the QUOTE leg.
+    -- ⚠️ COST: this IS a second full FINAL pass over the candle table. An
+    -- earlier comment claimed a cheap narrow projection; that was wrong and was
+    -- corrected in review. The peg predicate sits on the JOINED `assets` side,
+    -- so every candle row is read and hash-joined before it can be discarded.
+    -- It reads fewer COLUMNS than arm A, not fewer ROWS. If this measures badly
+    -- on prod, push the peg set onto the primary key instead
+    -- (`WHERE p.quote_asset_id IN (SELECT asset_id FROM prices.assets FINAL
+    -- WHERE …)` — quote_asset_id is the second ORDER BY column), or materialise
+    -- the series per task 0150. NOT MEASURED at prod scale.
+    SELECT
+        multiIf(
+            q.contract_address != '', 'contract',
+            q.asset_code = 'XLM' AND q.issuer_address = '', 'native',
+            'credit') AS asset_kind,
+        if(q.contract_address != '', '', q.asset_code)     AS asset_code,
+        if(q.contract_address != '', '', q.issuer_address) AS issuer_address,
+        q.contract_address AS contract_address,
+        p.timestamp        AS bucket,
+        toFloat64(0)       AS v,
+        toFloat64(0)       AS w,
+        toUInt8(1)         AS is_peg
+    FROM prices.price_ohlcv_1d AS p FINAL
+    INNER JOIN prices.assets AS q FINAL ON q.asset_id = p.quote_asset_id
+    WHERE q.contract_address = ''
+      AND ((q.asset_code = 'USDC' AND q.issuer_address = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN')
+        OR (q.asset_code = 'USDT' AND q.issuer_address = 'GCQTGZQQ5G4PTM2GL7CDIFKUBIPEC52BROAQIAPW53XBRJVN6ZJVTG6V'))
+)
 GROUP BY asset_kind, asset_code, issuer_address, contract_address, bucket;
 
 ----------------------------------------------------------------------
@@ -211,20 +363,70 @@ WHERE base.asset_code = 'XLM' AND base.issuer_address = '' AND base.contract_add
   AND p.close > 0
 GROUP BY p.timestamp;
 
+-- Peg-fill arm mirrors price_usd_series exactly (task 0165) — same two arms,
+-- same countIf guard, same method values. See that view's block comment for the
+-- case table and the three wrong-looking-simpler shapes. Keep the two bodies in
+-- step: a fix applied to only one grain is the defect the hourly variant had
+-- before 0165 found it in both.
 CREATE OR REPLACE VIEW prices.price_usd_series_1h AS
 SELECT
-    multiIf(
-        a.contract_address != '', 'contract',
-        a.asset_code = 'XLM' AND a.issuer_address = '', 'native',
-        'credit') AS asset_kind,
-    if(a.contract_address != '', '', a.asset_code)     AS asset_code,
-    if(a.contract_address != '', '', a.issuer_address) AS issuer_address,
-    a.contract_address AS contract_address,
-    p.timestamp        AS bucket,
-    CAST(sum(toFloat64(p.close_usd) * toFloat64(p.volume_base)) / nullIf(sum(toFloat64(p.volume_base)), 0) AS Decimal(38, 14)) AS close_usd
-FROM prices.price_ohlcv_1h AS p FINAL
-INNER JOIN prices.assets AS a FINAL ON a.asset_id = p.asset_id
-WHERE p.close_usd > 0
+    asset_kind,
+    asset_code,
+    issuer_address,
+    contract_address,
+    bucket,
+    if(max(is_peg) = 1 AND sum(w) = 0,
+       CAST(1 AS Decimal(38, 14)),
+       CAST(sum(v) / nullIf(sum(w), 0) AS Decimal(38, 14))) AS close_usd,
+    CAST(if(max(is_peg) = 1 AND sum(w) = 0, 'peg', 'traded') AS LowCardinality(String)) AS method
+FROM
+(
+    SELECT
+        multiIf(
+            a.contract_address != '', 'contract',
+            a.asset_code = 'XLM' AND a.issuer_address = '', 'native',
+            'credit') AS asset_kind,
+        if(a.contract_address != '', '', a.asset_code)     AS asset_code,
+        if(a.contract_address != '', '', a.issuer_address) AS issuer_address,
+        a.contract_address AS contract_address,
+        p.timestamp        AS bucket,
+        toFloat64(p.close_usd) * toFloat64(p.volume_base) AS v,
+        toFloat64(p.volume_base)                          AS w,
+        toUInt8(0)                                        AS is_peg
+    FROM prices.price_ohlcv_1h AS p FINAL
+    INNER JOIN prices.assets AS a FINAL ON a.asset_id = p.asset_id
+    WHERE p.close_usd > 0
+
+    UNION ALL
+
+    -- Arm B — zero-weight peg placeholder, keyed on the QUOTE leg.
+    -- ⚠️ COST: this IS a second full FINAL pass over the candle table. An
+    -- earlier comment claimed a cheap narrow projection; that was wrong and was
+    -- corrected in review. The peg predicate sits on the JOINED `assets` side,
+    -- so every candle row is read and hash-joined before it can be discarded.
+    -- It reads fewer COLUMNS than arm A, not fewer ROWS. If this measures badly
+    -- on prod, push the peg set onto the primary key instead
+    -- (`WHERE p.quote_asset_id IN (SELECT asset_id FROM prices.assets FINAL
+    -- WHERE …)` — quote_asset_id is the second ORDER BY column), or materialise
+    -- the series per task 0150. NOT MEASURED at prod scale.
+    SELECT
+        multiIf(
+            q.contract_address != '', 'contract',
+            q.asset_code = 'XLM' AND q.issuer_address = '', 'native',
+            'credit') AS asset_kind,
+        if(q.contract_address != '', '', q.asset_code)     AS asset_code,
+        if(q.contract_address != '', '', q.issuer_address) AS issuer_address,
+        q.contract_address AS contract_address,
+        p.timestamp        AS bucket,
+        toFloat64(0)       AS v,
+        toFloat64(0)       AS w,
+        toUInt8(1)         AS is_peg
+    FROM prices.price_ohlcv_1h AS p FINAL
+    INNER JOIN prices.assets AS q FINAL ON q.asset_id = p.quote_asset_id
+    WHERE q.contract_address = ''
+      AND ((q.asset_code = 'USDC' AND q.issuer_address = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN')
+        OR (q.asset_code = 'USDT' AND q.issuer_address = 'GCQTGZQQ5G4PTM2GL7CDIFKUBIPEC52BROAQIAPW53XBRJVN6ZJVTG6V'))
+)
 GROUP BY asset_kind, asset_code, issuer_address, contract_address, bucket;
 
 ----------------------------------------------------------------------

@@ -52,6 +52,69 @@ history:
       carry the same base-only defect but that stays OUT of this task. It is a
       refreshable-MV drop + recreate, the operation that wiped the coarse tables
       in 0095. Audit query only here; any fix is its own task.
+  - date: 2026-08-10
+    status: active
+    who: okarcz
+    note: >
+      IMPLEMENTED. Both grains of price_usd_series rewritten as a two-arm
+      UNION ALL with a zero-weight peg placeholder keyed on the quote leg, plus
+      the appended `method` provenance column. 11 unit + 15 Docker-gated CH
+      integration tests green on the 26.3.10.60 prod pin; fmt clean; the 2
+      clippy warnings are pre-existing on develop (verified by stashing).
+      The new three-case test was confirmed to FAIL without the fix, two ways:
+      on the missing `method` column, and - the behavioural proof - on the
+      pre-existing count assertion going 3 -> 4, which is USDC appearing in the
+      view for the first time.
+      One deviation from the settled design, recorded as Emerged decision 2:
+      the guard is countIf(is_peg = 0) = 0, not sum(w) = 0. The specified form
+      would have converted a genuine NULL (peg asset whose only candles carry
+      volume_base = 0) into a fabricated $1, which the "no NULL introduced in
+      either direction" AC forbids.
+      Audit AC discharged at code level: usd_reference/_1h are clean (they join
+      both legs), identity_by_contract is N/A, and current_price_usd is
+      CONFIRMED to share the base-only defect - current.sql groups by asset_id
+      and quote_asset_id appears nowhere in the MV. Scoped out as agreed; it is
+      a refreshable-MV rebuild. Prod measurement handed over rather than run.
+      NOT DEPLOYED: views.sql needs a privileged applier on ch-prod-01 (DROP
+      VIEW grant, which no scoped runtime user has), so this merges as a repo
+      change and takes effect on an operator apply. Verification queries -
+      including the USDT non-regression check and its rollback trigger - are in
+      the new Deploy section.
+  - date: 2026-08-10
+    status: active
+    who: okarcz
+    note: >
+      REVIEW FIXES (PR #188, second pass). Code review found the one deliberate
+      deviation was wrong and it is RETRACTED - the guard is now the originally
+      specified sum(w) = 0.
+      Root cause of my error: I asserted the historical expression "yields NULL
+      via nullIf" without testing it. It does not. close_usd is a NON-NULLABLE
+      Decimal(38,14), so CAST strips the Nullable and a zero denominator lands
+      as Decimal128::MIN (-1.7e24), not NULL. The countIf guard therefore
+      published that garbage - flagged method='traded' - for a peg asset whose
+      only candles carry zero volume, in the column BE multiplies into TVL.
+      Two further review findings fixed: the "no NULL introduced" test assertion
+      was VACUOUS (IS NULL on a non-Nullable column is structurally always 0) and
+      now asserts on the value; and the 1h fixture was hoisted out of the loop
+      where it had been a precondition disguised as an iteration step.
+      Two review claims were corrected rather than accepted. (a) The finding's
+      reproduction fixture - a single USDT/USDC candle - fails under BOTH guards,
+      because USDT is a base only there so arm B emits no placeholder and
+      max(is_peg)=0. sum(w)=0 only wins where the peg asset is ALSO a quote leg.
+      Measured both fixtures before changing anything; the shipped test uses the
+      one that actually discriminates. (b) The residual - any asset whose only
+      priced candles carry zero volume still publishes Decimal128::MIN - is
+      PRE-EXISTING, not peg-specific, and is spawned as 0171 rather than widened
+      into this task, because the fix requires a contract decision with BE
+      (omit the row vs substitute an unweighted statistic).
+      Also corrected two overstated comments the review flagged: arm B is a full
+      second FINAL pass, not a cheap narrow projection; and arm B is not subject
+      to the close_usd > 0 predicate, so a peg identity can read status='ok' in a
+      bucket where usd_reference is empty - intended, but it means the 12.3
+      discriminator is not universal and that is now documented at the view.
+      11 unit + 16 CH integration tests green on the 26.3.10.60 pin; the new
+      zero-volume test was confirmed to fail with the countIf guard (got
+      -1701411834604692300000000) and pass with sum(w) = 0.
 ---
 
 # `price_usd_series` can never publish USDC
@@ -266,35 +329,206 @@ task ships the following**. Get them wrong and 0168 becomes a rewrite.
 
 ## Acceptance Criteria
 
-- [ ] `price_usd_series` and `price_usd_series_1h` return rows for USDC at the
+- [x] `price_usd_series` and `price_usd_series_1h` return rows for USDC at the
       canonical issuer, for every bucket where any USDC-quoted trade occurred.
-- [ ] USDT and any other peg asset handled by the same rule — not a USDC
-      special case.
-- [ ] A regression test on CH **26.3.10.60** (`views_it.rs`) covering three
+      **Verified locally on the 26.3.10.60 pin**; prod is an operator apply
+      (see §Deploy below).
+- [x] USDT and any other peg asset handled by the same rule — not a USDC
+      special case. The arm is keyed on the peg **identity set**, and USDT is
+      exercised as the both-legs control.
+- [x] A regression test on CH **26.3.10.60** (`views_it.rs`) covering three
       cases: a peg asset seeded **quote-only** returns the fallback (fails
       today); a peg asset seeded as **both** returns the market value, **not**
       the fallback (catches the USDT-flattening regression); a non-peg asset is
       **bit-identical** before and after.
-- [ ] That test asserts **fallback semantics**, not the literal `1` — see
-      §Implementation requirement 1, or [[0168]] rewrites it.
-- [ ] `method` column shipped and appended last, with `'traded'`/`'peg'`
+      `price_usd_series_fills_peg_assets_without_overriding_market_data`, run
+      over **both grains**. **Confirmed to fail without the fix** — see
+      §Issues Encountered for the two distinct pre-fix failures.
+- [x] That test asserts **fallback semantics**, not the literal `1` — see
+      §Implementation requirement 1, or [[0168]] rewrites it. Via a
+      `PEG_FALLBACK` const documented as 0168's swap point.
+- [x] `method` column shipped and appended last, with `'traded'`/`'peg'`
       distinguishable, so a measured `1.0000` and a fallback `1.0000` are never
-      confusable — requirement 2.
-- [ ] The view header names [[0168]] by ID and states the ~0.1% error and the
+      confusable — requirement 2. `'oracle'` documented as reserved for 0168.
+- [x] The view header names [[0168]] by ID and states the ~0.1% error and the
       inconsistency with the oracle-tier candles — requirement 3.
-- [ ] The other `views.sql` surfaces audited for the same base-only assumption,
-      with the result recorded either way. (Suspected: `current_prices` groups
-      on the **base** `asset_id` at `current.sql:125,142,192,208`, so
-      `current_price_usd` likely cannot return USDC either — **measure before
-      believing it**, and scope any fix separately: that is a refreshable-MV
-      DROP + recreate, the operation that wiped the coarse tables in 0095.)
-- [ ] No `NULL` introduced into either view's `close_usd`. (The existing
-      `nullIf` → NULL edge at zero volume is **preserved**, not added — the fix
-      must not change it in either direction.)
+- [~] The other `views.sql` surfaces audited for the same base-only assumption,
+      with the result recorded either way. **Audit done at code level; one prod
+      measurement outstanding.** Results:
+      - `usd_reference` / `usd_reference_1h` — **clean.** Both join base *and*
+        quote (`views.sql:207,328`) because they are a fixed XLM/USDC pair, not
+        a per-asset series.
+      - `identity_by_contract` — **N/A**, resolves contract→identity from
+        `assets` and reads no candles.
+      - `current_price_usd` — 🔴 **the suspicion is CONFIRMED in code.**
+        `current.sql` aggregates `price_ohlcv_1m` with `GROUP BY asset_id,
+        source` then `GROUP BY asset_id` (`current.sql:125,142`) and
+        `quote_asset_id` appears **nowhere** in the MV. So `current_prices` has
+        the identical base-only assumption and `/price` cannot return USDC.
+        **Still needs the prod count before acting** (§Deploy), and the fix is
+        scoped out: it is a refreshable-MV DROP + recreate, the operation that
+        wiped the coarse tables in 0095.
+- [x] No `NULL` introduced into either view's `close_usd`. ⚠️ **This AC's
+      premise was FALSE and is corrected on the record: there is no NULL edge.**
+      `close_usd` is non-Nullable `Decimal(38,14)`, so `CAST` strips the Nullable
+      `nullIf` produces and a zero denominator publishes `Decimal128::MIN`, not
+      NULL. The AC is met in the only sense that has meaning — no row publishes a
+      non-positive `close_usd` for the cases this task covers — and the test now
+      asserts on the **value** (`countIf(toFloat64(close_usd) <= 0) = 0`) rather
+      than the vacuous `IS NULL`, which is structurally always 0. The uncovered
+      cases are [[0171]].
 - [ ] **BE re-measures**: the 1,433 USDC-legged pools become priceable, and they
-      confirm the count against their own CSV.
-- [ ] [[0154]]'s headroom framing corrected — these pools were never resolver-
+      confirm the count against their own CSV. *Blocked on the prod apply.*
+- [x] [[0154]]'s headroom framing corrected — these pools were never resolver-
       limited and must not be counted as part of the pivot step's win.
+      **Already done when 0165 was filed** (`0154:79-84` carves the population
+      out explicitly); re-checked 2026-08-10, no further edit needed.
+
+## Deploy — operator action, nothing auto-applies
+
+`views.sql` is **not** applied by any deploy. `prices-clickhouse-init` applies
+`INIT`/`VIEWS`/`ROLLUPS`/`SEED`, but on ch-prod-01 this file needs a
+**privileged applier**: `CREATE OR REPLACE VIEW` requires a `DROP VIEW` grant
+unconditionally on 26.3.10.60, and neither `prices_writer` nor `prices_reader`
+has it (`views.sql:25-42`). So this merges as a repo change and takes effect
+only when an operator applies it as the container's `default` user:
+
+```bash
+docker exec -i app-clickhouse-1 clickhouse-client   # no --user
+```
+
+Plain views replace **atomically** — no DROP window, no read-side exposure.
+That is the reason this task is small and `current_price_usd` is not.
+
+**Two prod queries to run at apply time** (hand-over, not run from here):
+
+```sql
+-- 1. The fix, on real data: USDC must now return rows, flagged 'peg'.
+SELECT count() AS buckets, min(bucket), max(bucket), any(method)
+FROM prices.price_usd_series
+WHERE asset_code = 'USDC'
+  AND issuer_address = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN';
+
+-- 2. The USDT non-regression: these must stay at their MARKET value, and
+--    method must be 'traded' wherever USDT actually traded as a base.
+SELECT method, count() AS rows, round(avg(toFloat64(close_usd)), 4) AS avg_close
+FROM prices.price_usd_series
+WHERE asset_code = 'USDT'
+  AND issuer_address = 'GCQTGZQQ5G4PTM2GL7CDIFKUBIPEC52BROAQIAPW53XBRJVN6ZJVTG6V'
+GROUP BY method;
+```
+
+⚠️ If query 2 returns **only** `method = 'peg'`, the peg arm has swallowed
+USDT's real market data — that is the flattening regression, and the view should
+be rolled back to the previous definition immediately.
+
+**And the audit measurement for `current_price_usd`** (drives a separate task,
+do not fix here):
+
+```sql
+SELECT count() FROM prices.current_price_usd
+WHERE asset_code = 'USDC'
+  AND issuer_address = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN';
+-- expect 0, confirming the code-level finding above
+```
+
+## Implementation Notes
+
+- `packages/prices-clickhouse/schema/views.sql` — both `price_usd_series` and
+  `price_usd_series_1h` rewritten as a two-arm `UNION ALL` sub-select with the
+  aggregate applied over the union; `method` appended last on both. Header gains
+  a peg-fill section (naming [[0168]], the ~0.1% error, the `ch_enrich.rs:20`
+  contradiction), a `method` entry in the JOIN interop contract, and the USDT
+  issuer added to the hand-synced-literal rule.
+- `packages/prices-clickhouse/tests/views_it.rs` — new three-case test across
+  both grains, plus assertions folded into the existing test.
+- **Test results:** 11 unit + 15 Docker-gated CH integration tests green on the
+  26.3.10.60 pin (the whole `prices-clickhouse` IT suite, not just `views_it`).
+  `cargo fmt --check` clean; the 2 clippy warnings in `rollup_append_it` are
+  **pre-existing on `develop`**, verified by stashing.
+- No Rust consumer decodes these views, so the appended column breaks no
+  in-repo positional decode (`grep` found only doc comments and the stub-name
+  list at `lib.rs:288-290`).
+
+## Issues Encountered
+
+- **The `sum(w) = 0` guard from the settled design would have moved the NULL
+  edge.** Writing it exactly as specified converts a peg asset whose only
+  candles carry `volume_base = 0` from `NULL` (today's `nullIf` result) into a
+  fabricated `$1` — which the "no NULL introduced … in either direction" AC
+  forbids. Replaced with `countIf(is_peg = 0) = 0`. See §Design Decisions 1.
+- **A pre-existing assertion had to change.** `views_expose_usd_series_and_reference`
+  asserted `count() == 3` on `price_usd_series`. USDC is a quote on three of its
+  seeded candles and a base on none, so it now gets a peg row → **4**.
+  **Intentional, and it is the defect made visible**: with the fix reverted the
+  assertion fails `left: 3, right: 4`. Not a regression.
+- **Two distinct pre-fix failures were needed to prove the test bites.** Run
+  against the pre-fix schema the new test fails on `Unknown expression
+  identifier 'method'` — which proves the column is new but says nothing about
+  behaviour. The behavioural proof is the `3 vs 4` count above. Recorded because
+  a column-missing error is a weak pass/fail signal and could mask a peg arm
+  that ships the column but never fires.
+
+## Design Decisions
+
+### From Plan
+
+1. Zero-weight arm unioned **before** the `GROUP BY`, so precedence is
+   arithmetic rather than policy. Rejected: appending `$1` after the group
+   (duplicate keys → BE's join silently doubles aggregates), letting the peg arm
+   own peg identities (flattens USDT), and the anti-join (two `FINAL` scans).
+
+### Emerged
+
+2. ~~**`countIf(is_peg = 0) = 0` instead of the specified `sum(w) = 0`.**~~
+   🔴 **RETRACTED — this was wrong, and code review caught it. The shipped guard
+   is the originally specified `sum(w) = 0`.**
+
+   The reasoning above rested on "a genuine `NULL`", and **there is no NULL**.
+   `close_usd` is a non-Nullable `Decimal(38,14)`, so `CAST` strips the Nullable
+   that `nullIf` introduces; a zero denominator lands as **`Decimal128::MIN`
+   (≈ -1.7e24)**, not NULL. Verified on the 26.3.10.60 pin:
+   `toTypeName(CAST(sum(v)/nullIf(sum(w),0) AS Decimal(38,14)))` → `Decimal(38,14)`.
+
+   So `countIf` did not "preserve an edge" — it **published a catastrophic
+   negative number flagged `method = 'traded'`** for a peg asset whose only
+   candles carry zero volume, in the column BE multiplies into TVL. `sum(w) = 0`
+   returns the fallback there. The AC that drove the deviation ("preserve the
+   `nullIf` → NULL edge") was itself premised on a NULL that does not exist —
+   see §Acceptance Criteria.
+
+   ⚠️ **The review's reproduction was directionally right but its fixture was
+   not.** It cited a *single* `USDT/USDC` candle; in that fixture USDT is a base
+   only, so arm B emits no placeholder, `max(is_peg) = 0`, and **both** guards
+   publish the garbage. `sum(w) = 0` only wins where the peg asset is *also* a
+   quote leg in the bucket. Measured both fixtures explicitly before changing
+   the guard rather than taking the reproduction at face value; the shipped
+   test uses the fixture that actually discriminates.
+3. **The residual is split out as [[0171]], not widened into this task.** A peg
+   asset appearing only as a zero-volume base — and every non-peg asset in that
+   state — still publishes `Decimal128::MIN`. That is pre-existing (the historical
+   view carried the identical expression) and fixing it means deciding whether
+   such a row should be omitted, a change to the "misses are absent" contract
+   that needs BE input.
+4. **Arm B re-derives `asset_kind`/`asset_code` with the same `multiIf`/`if`
+   normalisation as arm A** rather than hardcoding `'credit'`. The peg filter
+   guarantees `'credit'` today, so this is redundant — but it keeps the two arms
+   textually identical in their key construction, so the union cannot drift into
+   emitting a differently-shaped key if the peg set ever widens.
+5. **Explicit `toFloat64(0)` / `toUInt8(…)` in arm B** rather than bare literals,
+   so the `UNION ALL` supertype is pinned instead of inferred.
+6. **`method` values `'traded'`/`'peg'` with `'oracle'` reserved and documented
+   but not emitted.** `'traded'` is deliberately an *addition* to [[0167]]'s enum,
+   not a reuse: 0167's `method` describes how a **rate** was derived, whereas an
+   arm-A row is a volume-weighted aggregate of candles some tier already priced
+   — the view cannot know which, so claiming one of 0167's values would be a
+   category error.
+7. **Arm B costs a second pass over the candle table, accepted knowingly.** It
+   projects only `(timestamp, quote_asset_id)`, so on a column store it reads far
+   fewer columns than arm A rather than doubling cost — and it is strictly
+   cheaper than the anti-join the design rejected. **Not measured on
+   prod-scale data**; if the read latency regresses, [[0150]] (materialise the
+   series as a table) is the escape hatch.
 
 ## Notes
 
