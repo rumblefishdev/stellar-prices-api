@@ -19,4 +19,11 @@ pub enum IngestError {
     // consumer of the writer (live Lambda + SDEX backfill) is leak-safe.
     #[error("clickhouse: {}", crate::safe_log::redact_clickhouse(.0))]
     Clickhouse(#[from] clickhouse::error::Error),
+
+    /// A data precondition made a write unsafe, so it was refused rather than
+    /// performed. Distinct from a ClickHouse failure: nothing went wrong at the
+    /// transport level, we declined to write. Carries only identifiers and
+    /// counts, never row values, so it stays leak-safe like the variant above.
+    #[error("precondition failed: {0}")]
+    Precondition(String),
 }
