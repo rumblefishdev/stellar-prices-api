@@ -2,9 +2,9 @@
 id: "0166"
 title: "deploy-board cancels Pages deployments mid-flight — the board silently serves stale data for days"
 type: BUG
-status: active
+status: completed
 related_adr: []
-related_tasks: ["0141"]
+related_tasks: ["0141", "0169"]
 tags: ["priority-medium", "effort-small", "ci", "github-actions", "tooling", "silent-failure"]
 links:
   - "../../../.github/workflows/deploy-board.yml"
@@ -21,6 +21,29 @@ history:
       against the BE repo, which carries a byte-identical workflow and whose
       logs show the full chain explicitly. Fix is our repo only — BE is out of
       scope by explicit instruction.
+  - date: 2026-08-10
+    status: completed
+    who: okarcz
+    note: >
+      COMPLETED. The headline defect is fixed and proven on real traffic:
+      cancel-in-progress: false shipped in eda7df5 (PR #181), and every
+      deploy-board run since has succeeded - eda7df5, d37e2ff, bee237c,
+      f1504fa, 696f58a, db73107 - against three cancellations and one failure
+      in the ~100 minutes before it. d37e2ff and bee237c merged 102 SECONDS
+      apart and both deployed, which exceeds the "two rapid merges" AC. Live
+      board verified from published bytes: 164 tasks, max id 0168, matching a
+      local generator run exactly, with 0156 showing active (it only became
+      active at 696f58a).
+      ONE AC DEFERRED, NOT MET: the schedule + workflow_dispatch recovery path
+      is INERT. GitHub resolves both triggers from the DEFAULT branch (master),
+      which still carries the pre-0166 workflow including cancel-in-progress:
+      true. Zero event=schedule runs in three days where ~72 were due. The
+      irony is that this task flagged "the default branch is master" as
+      load-bearing but applied it only to the checkout ref pin. Spawned as
+      0169, whose acceptance test counts actual runs rather than asserting the
+      YAML - which is exactly what let this slip through here.
+      Push-triggered deploys are unaffected (push uses the pushed ref's own
+      workflow file), so this is a missing safety net, not an active outage.
 ---
 
 # `deploy-board` cancels Pages deployments mid-flight
@@ -194,17 +217,31 @@ deps). The first dependency it gains breaks our board build and not BE's.
 
 ## Acceptance Criteria
 
-- [ ] `cancel-in-progress: false` on the `pages` group.
-- [ ] `workflow_dispatch` and `schedule` triggers present; `paths` filter scoped
-      to lore + the generator + the workflow itself.
-- [ ] `actions/checkout@v4` pins `ref: develop` so scheduled/dispatched runs do
+- [x] `cancel-in-progress: false` on the `pages` group. **Shipped `eda7df5`
+      (PR #181).**
+- [~] `workflow_dispatch` and `schedule` triggers present; `paths` filter scoped
+      to lore + the generator + the workflow itself. **Present in develop's file,
+      but `schedule` and `workflow_dispatch` are INERT — GitHub resolves both
+      from the DEFAULT branch (`master`), which still carries the pre-fix
+      workflow. Zero scheduled runs in three days where ~72 were due. Deferred to
+      [[0169]].** The `paths` filter works (it is a `push` trigger, resolved from
+      the pushed ref).
+- [x] `actions/checkout@v4` pins `ref: develop` so scheduled/dispatched runs do
       not publish `master`.
-- [ ] `npm ci` + `cache: npm` restored.
-- [ ] The live board serves the current `develop` tip — verified by fetching
-      `board.json` and confirming the task count matches a local
-      `npm run board`, **not** by reading a green check.
-- [ ] Two rapid merges to `develop` (or a merge plus a manual dispatch) both
-      complete, with the later content live afterwards.
+- [x] `npm ci` + `cache: npm` restored.
+- [x] The live board serves the current `develop` tip — verified 2026-08-10:
+      `curl …/board.json` returns **164 tasks, max id 0168**, matching a local
+      `node tools/scripts/generate-lore-board.mjs` exactly (`board.json generated
+      (164 tasks)`). Corroborated by `0156` appearing **active**, which it only
+      became at `696f58a`. Verified from the published bytes, not a green check.
+- [x] Two rapid merges to `develop` both complete, with the later content live.
+      **Verified stronger than specified:** `d37e2ff` (12:23:53Z) and `bee237c`
+      (12:25:35Z) merged **102 seconds apart** and both deployed successfully.
+      Six consecutive successes since the fix (`eda7df5`, `d37e2ff`, `bee237c`,
+      `f1504fa`, `696f58a`, `db73107`) against three cancellations and one
+      failure in the ~100 minutes before it.
+- [ ] ~~Manual dispatch as an alternative to the second rapid merge~~ — not
+      exercisable; see the deferred AC above. Covered by [[0169]].
 
 ## Verification
 
@@ -217,6 +254,42 @@ curl -s https://rumblefishdev.github.io/stellar-prices-api/board.json \
 ```
 
 The two counts must match (allowing for commits landed since).
+
+## Issues Encountered
+
+- **The `schedule` / `workflow_dispatch` half of the fix never took effect.**
+  Found on 2026-08-10 while verifying ACs for archive. GitHub resolves both
+  triggers from the **default branch** (`master`), not from the branch the
+  workflow lives on; `master` still carries the pre-0166 file, including
+  `cancel-in-progress: true`. Zero `event: schedule` runs in three days against
+  ~72 due. Spawned as [[0169]].
+
+  The task file itself flagged "this repo's DEFAULT branch is master" as
+  load-bearing — but applied it only to the `checkout` ref pin, never following
+  the implication through to the triggers that same fact governs. **A fix
+  written on `develop` and verified by reading the YAML looked complete; only
+  counting actual runs exposed it.** That is the same silent-failure shape this
+  task exists to document.
+
+- **`push` masks the drift.** Push events use the workflow file from the pushed
+  commit, so `develop` merges correctly run the fixed copy. The primary defect
+  is genuinely fixed and the board is genuinely live — only the safety net is
+  missing, which is precisely the part that produces no signal until it is
+  needed.
+
+## Design Decisions
+
+### Emerged
+
+1. **Archived with the recovery path deferred rather than held open.** The
+   headline defect — deploys cancelled mid-flight, board silently stale — is
+   fixed and proven over six consecutive runs including a 102-second merge pair.
+   Holding 0166 open for a distinct root cause (branch drift on the default
+   branch) would conflate two bugs; [[0169]] carries the remainder with its own
+   acceptance test.
+2. **0169's acceptance test counts runs, not YAML.** Written explicitly as
+   "a run with `event: schedule` appears within ~2 h", because asserting the
+   trigger's presence in the file is exactly what let this slip through here.
 
 ## Out of scope
 
