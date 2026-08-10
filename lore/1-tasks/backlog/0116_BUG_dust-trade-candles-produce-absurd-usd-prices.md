@@ -4,8 +4,9 @@ title: "Dust-trade candles produce absurd close_usd values (up to $29.6M) in eve
 type: BUG
 status: backlog
 related_adr: []
-related_tasks: ["0114", "0115", "0026", "0144", "0147"]
-tags: [clickhouse, data-quality, sdex, enrichment, priority-medium, effort-small]
+related_tasks: ["0114", "0115", "0026", "0144", "0147", "0117"]
+tags: [clickhouse, data-quality, sdex, enrichment, priority-medium, effort-small, milestone-M2]
+milestone: 2
 links:
   - "../../../packages/enrichment-worker/src/ch_enrich.rs"
 history:
@@ -17,6 +18,19 @@ history:
       40 rows > $1M in 202502 alone; investigation showed the references are
       correct and the *input candles* are junk. Confirmed pre-existing — the
       live-enriched path shows the same tail — so this is not a repair defect.
+  - date: 2026-08-10
+    status: backlog
+    who: okarcz
+    note: >
+      Tagged milestone-M2 (+ milestone: 2), closing the last open AC of [[0117]].
+      0117 deferred this tagging because 0116 existed only on the unmerged
+      fix/0114_repair-preflight-and-runbook-gaps branch; 0114 is now completed
+      and 0116 is on develop, so the precondition is met. No shape change - this
+      is scope tagging only. It matters because untagged, 0116 is invisible to
+      any "what is left for M2?" query, and it feeds Tranche 2 AC 4 (VWAP
+      reconciliation against raw price_ohlcv rows) and AC 6 (the USDC 1d
+      spot-check) - absurd close_usd values would surface in exactly those two
+      checks.
 ---
 
 # Dust-trade candles produce absurd `close_usd` values

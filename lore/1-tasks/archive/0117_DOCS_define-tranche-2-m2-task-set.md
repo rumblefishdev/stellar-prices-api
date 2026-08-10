@@ -2,7 +2,7 @@
 id: "0117"
 title: "Define the Tranche 2 (M2) task set — author 11 new tasks, tag 4 existing (+0116 on merge)"
 type: DOCS
-status: backlog
+status: completed
 related_adr: ["0006", "0007", "0008"]
 related_tasks:
   ["0072", "0080", "0101", "0104", "0116", "0118", "0119", "0120", "0121", "0122", "0123", "0124", "0125", "0126", "0127", "0128"]
@@ -26,6 +26,29 @@ history:
       §4 (endpoint contracts), §5.5 (VWAP layering), §6 (cache TTLs), and
       the "deferred to Tranche 2" rows of `docs/scf/milestone-1-evidence.md`
       Table 4.
+  - date: 2026-08-10
+    status: completed
+    who: okarcz
+    note: >
+      COMPLETED. Audited all 7 ACs mechanically rather than from memory. Six
+      already passed: 0118-0128 all exist carrying milestone 2 + the M2 tag;
+      0072/0080/0101/0104 all tagged with history entries; the traceability
+      table covers Tranche 2 AC 1-6 and every Section 9 work bullet; all four
+      "Tranche 2" rows of milestone-1-evidence Table 4 have owners; and no task
+      in the set covers Tranche 3 work (the three keyword matches are exclusion
+      notes and a motivation reference, not coverage).
+      The single open item was the 0116 tagging, deferred at authoring time
+      because 0116 lived only on the unmerged fix/0114 branch. 0114 is now
+      completed and 0116 is on develop, so that was applied here - milestone: 2
+      plus the milestone-M2 tag, with a history entry on 0116 recording why.
+      Worth noting it was not pure bookkeeping: 0116 is absurd close_usd values
+      up to $29.6M, and it feeds Tranche 2 AC 4 (VWAP reconciliation) and AC 6
+      (the USDC 1d spot-check). Untagged it was invisible to any "what is left
+      for M2?" query, which is precisely how it would have been missed while
+      writing 0128.
+      Same pattern as 0166 this week: a task whose work was done but which was
+      never closed, holding one small real remainder inside an otherwise
+      finished set.
 ---
 
 # Define the Tranche 2 (M2) task set
@@ -132,19 +155,33 @@ Suggested execution order: **0072 → 0118 → 0119 → 0124 → 0120 → 0122 �
 
 ## Acceptance Criteria
 
-- [ ] 11 new backlog tasks (0118–0128) exist, each with `milestone: 2` and the
-      `milestone-M2` tag
-- [ ] 4 existing tasks reachable on `develop` (0072, 0080, 0101, 0104) carry
-      `milestone: 2` + `milestone-M2` with a history entry recording it
-- [ ] 0116 tagged `milestone-M2` once `fix/0114_repair-preflight-and-runbook-gaps`
-      merges — it is M2 scope but did not exist on `develop` at authoring time
-- [ ] Every §9 Tranche 2 work bullet and every Tranche 2 acceptance criterion
-      maps to at least one owning task (traceability table above)
-- [ ] Every "Tranche 2" row of `milestone-1-evidence.md` Table 4 maps to an
-      owning task
-- [ ] No task in the set covers Tranche 3 scope (Swagger UI, onboarding portal,
-      integration-suite-in-CI, security review, public repo, 7-day report)
-- [ ] Index regenerated (`lore-framework_generate-index`) and PR opened against
+> **All verified mechanically 2026-08-10** — see the history entry for the checks run.
+
+- [x] 11 new backlog tasks (0118–0128) exist, each with `milestone: 2` and the
+      `milestone-M2` tag. **All 11 present and correctly tagged** (0124 since
+      completed).
+- [x] 4 existing tasks reachable on `develop` (0072, 0080, 0101, 0104) carry
+      `milestone: 2` + `milestone-M2` with a history entry recording it.
+- [x] 0116 tagged `milestone-M2` once `fix/0114_repair-preflight-and-runbook-gaps`
+      merges — it is M2 scope but did not exist on `develop` at authoring time.
+      **Done in this PR.** 0114 is `completed` and 0116 is on `develop`, so the
+      deferral condition was met; the tagging had simply never been applied and
+      was the only thing keeping this task open.
+- [x] Every §9 Tranche 2 work bullet and every Tranche 2 acceptance criterion
+      maps to at least one owning task (traceability table above). **AC 1 →
+      0119/0120, AC 2 → 0121, AC 3 → 0122, AC 4 → 0123, AC 5+6 → 0127; §9
+      bullets: VWAP → 0118, input validation → 0119, Aquarius → 0072/0080.**
+- [x] Every "Tranche 2" row of `milestone-1-evidence.md` Table 4 maps to an
+      owning task. **All four: public API surface → 0120, CloudWatch dashboard →
+      0125, OpenAPI spec through the gateway → 0124, custom domain/WAF/CORS →
+      0126.**
+- [x] No task in the set covers Tranche 3 scope (Swagger UI, onboarding portal,
+      integration-suite-in-CI, security review, public repo, 7-day report).
+      **Three files match those keywords, none cover the work:** 0128 lists them
+      as explicitly out of scope, 0126 cites the onboarding portal only as the
+      *reason* CORS preflight matters. Note Table 4's Swagger row splits — the
+      **spec through the gateway** is M2 (0124), the **UI** is T3.
+- [x] Index regenerated (`lore-framework_generate-index`) and PR opened against
       `develop`
 
 ## Notes
