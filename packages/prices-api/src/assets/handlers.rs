@@ -43,7 +43,7 @@ const MAX_LIMIT: u32 = 200;
         (status = 401, description = "Missing or invalid `x-api-key`", body = ErrorEnvelope),
         (status = 403, description = "API key missing, invalid, or not authorized for this API"),
         (status = 404, description = "No current price for the asset", body = ErrorEnvelope),
-        (status = 429, description = "Rate limit or daily quota exceeded (API Gateway usage plan)"),
+        (status = 429, description = "Per-key rate limit or monthly quota exceeded (API Gateway usage plan)"),
         (status = 500, description = "Query or upstream failure (`db_error`)", body = ErrorEnvelope),
     )
 )]
@@ -80,7 +80,7 @@ pub async fn get_price(State(state): State<AppState>, Path(raw): Path<String>) -
         (status = 401, description = "Missing or invalid `x-api-key`", body = ErrorEnvelope),
         (status = 403, description = "API key missing, invalid, or not authorized for this API"),
         (status = 404, description = "Unknown asset", body = ErrorEnvelope),
-        (status = 429, description = "Rate limit or daily quota exceeded (API Gateway usage plan)"),
+        (status = 429, description = "Per-key rate limit or monthly quota exceeded (API Gateway usage plan)"),
         (status = 500, description = "Query or upstream failure (`db_error`)", body = ErrorEnvelope),
     )
 )]
@@ -154,7 +154,7 @@ pub struct ListParams {
         (status = 400, description = "Invalid query parameter", body = ErrorEnvelope),
         (status = 401, description = "Missing or invalid `x-api-key`", body = ErrorEnvelope),
         (status = 403, description = "API key missing, invalid, or not authorized for this API"),
-        (status = 429, description = "Rate limit or daily quota exceeded (API Gateway usage plan)"),
+        (status = 429, description = "Per-key rate limit or monthly quota exceeded (API Gateway usage plan)"),
         (status = 500, description = "Query or upstream failure (`db_error`)", body = ErrorEnvelope),
     )
 )]
@@ -271,7 +271,7 @@ pub struct OhlcvParams {
         (status = 401, description = "Missing or invalid `x-api-key`", body = ErrorEnvelope),
         (status = 403, description = "API key missing, invalid, or not authorized for this API"),
         (status = 404, description = "Unknown asset", body = ErrorEnvelope),
-        (status = 429, description = "Rate limit or daily quota exceeded (API Gateway usage plan)"),
+        (status = 429, description = "Per-key rate limit or monthly quota exceeded (API Gateway usage plan)"),
         (status = 500, description = "Query or upstream failure (`db_error`)", body = ErrorEnvelope),
         (status = 503, description = "The requested `base_currency` quote asset is not \
                                       tracked (`quote_unavailable`)", body = ErrorEnvelope),

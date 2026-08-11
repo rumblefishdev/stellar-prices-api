@@ -1811,13 +1811,13 @@ instance on a single Hetzner box behind Caddy:443). Prices-api joins as a
 second tenant via its own `prices` database, isolated by ClickHouse's native
 multi-tenant primitives (database, user, quota, profile).
 
-| Metric                       | Value                                                                       | Source                     |
-| ---------------------------- | --------------------------------------------------------------------------- | -------------------------- |
-| Prices-api storage footprint | **~3.5-6 GB/year** (realistic, retention-amortised)                         | Tasks 0060 + 0063 measured |
-| Average per-ledger storage   | **~1.9-3.7 KB/ledger** (activity-dependent, ~2× spread)                     | Tasks 0060 + 0063 measured |
-| Strongest size lever         | Retention-cap `_1h`/`_4h` → bounds DB at ~9 GB @ 10yr (vs ~43 GB unbounded) | Task 0060 measured         |
-| Write rate                   | ~1 INSERT per ledger (~12k/day per env at mainnet cadence)                  | §6.1                       |
-| Read rate                    | API-Gateway-throttled ≤100 req/s per key, cached at gateway                 | §8.2                       |
+| Metric                       | Value                                                                             | Source                     |
+| ---------------------------- | --------------------------------------------------------------------------------- | -------------------------- |
+| Prices-api storage footprint | **~3.5-6 GB/year** (realistic, retention-amortised)                               | Tasks 0060 + 0063 measured |
+| Average per-ledger storage   | **~1.9-3.7 KB/ledger** (activity-dependent, ~2× spread)                           | Tasks 0060 + 0063 measured |
+| Strongest size lever         | Retention-cap `_1h`/`_4h` → bounds DB at ~9 GB @ 10yr (vs ~43 GB unbounded)       | Task 0060 measured         |
+| Write rate                   | ~1 INSERT per ledger (~12k/day per env at mainnet cadence)                        | §6.1                       |
+| Read rate                    | ≤1 req/s per key (task 0157); ≤200 req/s per method stage-wide, cached at gateway | §8.2                       |
 
 > **Sizing superseded (2026-06-19).** The original ~74 B/ledger / ~0.45 GB/yr
 > figure was the task-0046 _per-event estimate_. Three ground-truth backfill
