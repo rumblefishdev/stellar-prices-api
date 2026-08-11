@@ -121,6 +121,41 @@ history:
       checkout. Generating the windowed variant must preserve that guard - derive
       it from preroll-incremental.sql by changing ONLY the WHERE bounds, per the
       procedure now recorded in docs/runbooks/preroll-incremental-presoroban.md.
+  - date: 2026-08-11
+    status: active
+    who: okarcz
+    note: >
+      GAP PRE-ROLL EXECUTED AND VERIFIED - the 07-21 -> 08-03 hole is CLOSED in
+      all six coarse tiers, and the retention deadline recorded earlier today is
+      lifted. Total prod runtime 6.1s. Generated the trial + full scripts from
+      preroll-incremental.sql (unchanged since daecea1, so the sed anchors were
+      still valid - re-checked, not assumed), gated them (0 unguarded argMax, 0
+      leftover {boundary}, INSERT-only, correct rollup chain) and syntax-checked
+      both on a throwaway CH 26.3.10.60 before anything touched prod.
+      The single-day trial settled the open RMT question with a measurement
+      rather than reasoning: price_ohlcv_1d FINAL for 07-21 went 4,848 -> 14,700,
+      so the recomputed full bucket's max(version) does displace a partial row.
+      Full window then produced all 13 days at 10,931-17,431 rows/day against
+      controls of 15,616/14,841; 1h and 4h verified separately (all 17 days,
+      correct cardinality ladder); 1w weeks 07-20/07-27/08-03 all ~27k matching
+      the pre-freeze 07-13.
+      THE 0145 GUARD WAS VERIFIED ON THE OUTPUT, not just the input: rebuilt days
+      show close_usd = 0 at 68.6-74.2% against pre-freeze controls of 73.0/73.5%
+      - inside the band, so no fresh zeroed estate was manufactured. That was the
+      entire reason this pre-roll waited on 0145.
+      CORRECTION ON THE RECORD - the note that "August's 1M row should heal once
+      1w's 07-27 week is fixed" was WRONG and is retracted. mv_ohlcv_1w_to_1M
+      takes toStartOfInterval(t.timestamp, INTERVAL 1 MONTH) over the 1w table
+      (rollups.sql:186,199), so a month bucket is the set of weeks whose START
+      falls in it - 08-01 and 08-02 live in JULY's row, and August's row is
+      already correct. Nothing is pending and it must not be filed as an 0143
+      race. This also justifies the [07-01, 08-01) window: it selects exactly the
+      weeks the MV attributes to July, so the rebuild matches the MV's semantics
+      instead of diverging from them.
+      Cleanup is now UNBLOCKED but deliberately NOT re-enabled - separate
+      operator decision. Remaining on 0136: 0137 alarm, the 0072 change_7d_pct
+      check (now possible for the first time, since _1h finally has a 7-day
+      window), and the note to BE.
 ---
 
 # Every coarse OHLCV table has been frozen since 2026-07-21
@@ -590,7 +625,26 @@ satisfied: cleanup is off, and the `_bak` tables are intact ([[0105]] has not ru
 
 ## Remaining work
 
-> ## 🔴 2026-08-11 — THE GAP PRE-ROLL NOW HAS A DEADLINE
+> ## ✅ 2026-08-11 — THE GAP PRE-ROLL IS DONE; THE DEADLINE IS LIFTED
+>
+> Ran and verified the same day it was measured — §Execution has the numbers.
+> All 13 days are in the forever-tables, so the retention clock below no longer
+> threatens anything. **What remains on this task is no longer data recovery:**
+>
+> | # | item | state |
+> |---|---|---|
+> | 1 | **[[0137]]** freshness alarm | ❌ open — the reason this ran 10 days silent |
+> | 2 | [[0072]] `change_7d_pct` non-zero for assets with 7d of data | ❌ unverified — now *possible*, since `_1h` has the window |
+> | 3 | Tell BE the coarse data was stale and has moved | ❌ unsent |
+> | 4 | Re-enable `prices-production-cleanup` | ⏸️ unblocked, **deliberately not flipped** |
+>
+> Item 2 is the cheapest and was previously impossible: `change_7d_pct` reads
+> `_1h`, which had no 7-day window to read. It does now.
+>
+> The original framing is kept below because the deadline reasoning is the
+> reusable part.
+>
+> ### ~~🔴 THE GAP PRE-ROLL NOW HAS A DEADLINE~~ (resolved)
 >
 > The only remaining item is the **07-21 → 08-03 gap pre-roll**, and it has gone
 > from "outstanding" to **time-bounded**, because its source data is on a
@@ -657,11 +711,19 @@ satisfied: cleanup is off, and the `_bak` tables are intact ([[0105]] has not ru
 
 ---
 
-## ▶️ NEXT SESSION STARTS HERE — the gap pre-roll, prepared 2026-08-11
+## ✅ THE GAP PRE-ROLL — EXECUTED AND VERIFIED 2026-08-11
 
-Everything below was prepared and validated on 2026-08-11 but **deliberately not
-run** — the operator chose to stop there. Nothing is in flight; this is a clean
-starting point.
+**The 2026-07-21 → 08-03 gap is CLOSED across all six coarse tiers.** The
+procedure below was followed exactly as written; results are in
+§"Execution — 2026-08-11" immediately after it. Total prod runtime: **6.1 s**.
+
+It is kept in full rather than summarised because it is now a *proven* procedure
+for a windowed re-roll over live tables, and the next gap will want it. The two
+generated `.sql` files were **not** committed — the generator is the artifact
+(see Step 0).
+
+⏭️ **What this does NOT do:** re-enable `prices-production-cleanup`. That is now
+unblocked but remains a separate, explicit decision — see §Remaining work.
 
 ### Step 0 — regenerate the two scripts
 
@@ -728,11 +790,31 @@ docker rm -f gap-syntax
 | `1w` | `[2026-07-20, 2026-08-10)` | **wider on purpose.** `toStartOfInterval(…, INTERVAL 1 WEEK)` starts **Monday** — verified on 26.3.10.60 — so the gap sits inside weeks `07-20`, `07-27`, `08-03`. Bounding `1w` to the gap would rebuild those weeks from **partial days** and overwrite correct rows. Upper bound stops before the current week (`08-10`), which belongs to the live MVs. |
 | `1M` | `[2026-07-01, 2026-08-01)` | **July only.** August is the current month; rebuilding it from a `1w` table whose current week is deliberately absent produces a *worse* row than the live MV holds. |
 
-⚠️ **August's monthly row is NOT repaired by this script.** It should heal on its
-own once `1w`'s `07-27` week (which contains 08-01 and 08-02) is fixed, because
-`mv_ohlcv_1w_to_1M` re-aggregates daily. **Verify after the next MV refresh**
-rather than assuming — if it has not healed in 24 h, that is [[0143]]'s known
-`1d→1w→1M` race.
+⚠️ ~~**August's monthly row is NOT repaired by this script.** It should heal on
+its own once `1w`'s `07-27` week (which contains 08-01 and 08-02) is fixed,
+because `mv_ohlcv_1w_to_1M` re-aggregates daily. **Verify after the next MV
+refresh** rather than assuming — if it has not healed in 24 h, that is [[0143]]'s
+known `1d→1w→1M` race.~~
+
+🔴 **RETRACTED 2026-08-11 — the premise was wrong, and nothing needs to heal.**
+`mv_ohlcv_1w_to_1M` computes `toStartOfInterval(t.timestamp, INTERVAL 1 MONTH)`
+over the **`1w`** table (`rollups.sql:186,199`), so **a monthly bucket is the set
+of weeks whose *start* falls in that month** — not the set of days in that month.
+Week `07-27` starts in July, so 08-01 and 08-02 belong to the **July** row all
+along. August's row is weeks-starting-in-August only, and it is already correct.
+
+Two consequences, both load-bearing:
+
+1. **Do not wait 24 h for August to move, and do not file it as an [[0143]]
+   race.** There is nothing pending. The 08-11 run measured `1M` July = 42,026 /
+   August = 25,828 and both are right.
+2. **The `[2026-07-01, 2026-08-01)` window is correct *because* of this**, not in
+   spite of it. Filtering the `1w` table to July selects exactly the weeks
+   `07-06/13/20/27` — precisely the set the MV attributes to July — so the
+   rebuild reproduces the MV's own semantics rather than diverging from them. It
+   deliberately excludes the `06-29` week, whose 07-01…07-05 days the MV counts
+   in **June**. A window that "fixed" that apparent omission would have made the
+   rebuilt row disagree with every other month in the table.
 
 ### Step 1 — baseline
 
@@ -785,10 +867,100 @@ time docker exec -i app-clickhouse-1 clickhouse-client --multiquery < ~/gap-full
 Then re-run the Step 1 query into `~/gap-after.txt` and diff. All 13 days
 present, none absent, counts in the same ~15k band as their neighbours.
 
-### ⛔ Do NOT re-enable cleanup until this is verified
+---
 
-Re-enabling drops partition `202607` whole and takes **10 of the 13 days**
-permanently. Same constraint [[0088]] operated under, same reason.
+## Execution — 2026-08-11 ✅ GAP CLOSED
+
+Ran exactly as written above. **Prod runtime 6.1 s** for the full window — three
+orders below the budget that made this feel risky.
+
+### Step 0 — generation and gates ✅
+
+`preroll-incremental.sql` was **unchanged since `daecea1`** (still the last commit
+to touch it), so the `sed` anchors `193/237/251/265/279/293` landed on the
+intended statements — re-verified rather than assumed, per the warning above.
+Both files gated clean:
+
+| gate | trial | full |
+|---|---|---|
+| unguarded `argMax(close_usd, t.timestamp)` | **0** ✅ | **0** ✅ |
+| guarded `argMaxIf(…, close_usd > 0)` | 4 | 6 |
+| leftover `{boundary:DateTime}` | **0** ✅ | **0** ✅ |
+| verbs | 4 × `INSERT`, nothing else | 6 × `INSERT`, nothing else |
+| rollup chain | `1m→15m→1h→4h→1d` | + `→1w→1M` |
+| `--multiquery` on a throwaway 26.3.10.60 | exit 0, silent | exit 0, silent |
+
+### Step 1 — baseline ✅ reproduced the measurement exactly
+
+`07-21` = 4,848 (and `raw_ == keys_`, i.e. a single fully-merged version, so the
+RMT collision under test was a clean one), `07-22 … 08-02` absent, `08-03` =
+12,857.
+
+⚠️ **Incidental, and worth keeping:** `08-04` read `raw_ = 72,580` against
+`keys_ = 14,516` — **exactly 5.0 versions per key**, un-collapsed refreshable-MV
+appends awaiting a merge. Benign under `FINAL`, outside the write window, and a
+standing reminder never to compare recent-day counts without `FINAL`.
+
+### Step 2 — the trial settled the RMT question ✅
+
+`price_ohlcv_1d FINAL` for 07-21 went **4,848 → 14,700**, inside the ~15k band
+and flanked by 07-19 (15,616) and 07-20 (14,841). The recomputed full day
+displaced the partial: **`max(version)` from the full bucket wins**, as reasoned
+but not previously measured. The remaining 12 days were empty, so strictly
+easier.
+
+### Step 3 — the full window ✅ all 13 days present
+
+`price_ohlcv_1d FINAL`, 07-21 → 08-03, ranged **10,931 – 17,431 rows/day**,
+against controls of 15,616 / 14,841. No day absent.
+
+`07-21` shows `raw_ = 34,248` vs `keys_ = 14,700` — the trial's rows plus the
+full run's, un-merged. `FINAL` resolves to the same 14,700, so it is duplication
+awaiting a merge, **not** a discrepancy.
+
+Coarser tiers, verified separately rather than inferred from `1d`:
+
+| tier | result |
+|---|---|
+| `1h` | all 17 days present, 44,697 – 92,892/day |
+| `4h` | all 17 days present, 26,797 – 48,960/day |
+| `1w` | weeks `07-20` (27,098), `07-27` (27,868), `08-03` (26,747) vs the pre-freeze `07-13` (27,086) |
+| `1M` | July 42,026, August 25,828 — **both correct**, see the retraction above |
+
+The cardinality ladder holds (`1h` ≈ 5× `1d`, `4h` ≈ 3×), and the low days
+(07-25/26, 08-01) are low in **every** tier together — a real activity signal,
+not a partial rebuild.
+
+### The [[0145]] guard verified on the *output*, not just the input ✅
+
+The gates prove the generated SQL carries `argMaxIf`; they do not prove the rows
+it wrote are sane. Measured `close_usd = 0` rates on `price_ohlcv_1d FINAL`:
+
+| days | `pct_zero` |
+|---|---|
+| controls 07-19 / 07-20 (live-MV written, pre-freeze) | 73.0 / 73.5 |
+| the 13 rebuilt days | **68.6 – 74.2** |
+
+The rebuilt days sit **inside** the control band and mostly below it. No fresh
+estate of `close_usd = 0` was manufactured — which was the whole reason this
+pre-roll waited on 0145. The ~70% floor itself is the pre-existing [[0144]] /
+[[0145]] defect class and is untouched by this run.
+
+### ✅ Cleanup is now UNBLOCKED — but re-enabling stays an explicit decision
+
+~~Do NOT re-enable cleanup until this is verified.~~ **Verified 2026-08-11.** The
+13 days now live in the forever-tables (`1h`/`4h`/`1d`/`1w`/`1M`), so dropping
+`1m`'s `202607` partition no longer destroys anything unrecoverable — the reason
+for the hold is gone.
+
+⚠️ It is still **not** flipped, and not to be flipped as a side effect of this
+task. `prices-production-cleanup` has been disabled since 2026-07-20 and other
+work has been running under that assumption ([[0088]]'s output, [[0174]]'s `15m`
+archaeology). Re-enabling is a standalone, operator-confirmed step.
+
+The original constraint, kept for the record: re-enabling drops partition
+`202607` whole and takes **10 of the 13 days** permanently. Same constraint
+[[0088]] operated under, same reason.
 
 1. ✅ **DONE 2026-08-05 — the watch period is closed and [[0105]] is unblocked.**
 
@@ -814,10 +986,23 @@ permanently. Same constraint [[0088]] operated under, same reason.
    > — the same second, with no `DEPENDS ON`. It resolved in our favour this
    > time. That is ordering luck, not a fix, and it stays [[0143]]'s to close.
 
-2. **The 07-21 → 08-03 gap pre-roll.** `_1d` jumping straight from 07-21 to
-   08-03 is the hole made visible. **BOUNDED INCREMENTAL only — never
-   `preroll.sql`**, which expects TRUNCATE-d tables and would re-run the
-   [[0090]] history loss.
+2. ✅ **DONE 2026-08-11 — the 07-21 → 08-03 gap pre-roll.** All 13 days present
+   in all six tiers; full results in §Execution above. `_1d` jumping straight
+   from 07-21 to 08-03 was the hole made visible. **BOUNDED INCREMENTAL only —
+   never `preroll.sql`**, which expects TRUNCATE-d tables and would re-run the
+   [[0090]] history loss — and that is what ran.
+
+   ⚠️ **Script-choice discrepancy, recorded rather than papered over.** This item
+   and the AC below both name **`preroll-live-gap.sql`**; the prepared procedure
+   and the executed run both derived from **`preroll-incremental.sql`**. Both
+   exist, both are post-[[0145]] guarded (`grep -c 'argMax(close_usd,
+   t.timestamp)'` = **0** on all four pre-roll scripts, checked 2026-08-11), and
+   the statements are the same shape — so the outcome is unaffected and the
+   verification above stands on measurements, not on which file it came from.
+   `preroll-live-gap.sql` is the **0090-era stopgap**, written when the rollup
+   MVs were *dropped*; the MVs are back in APPEND mode since [[0095]], so
+   `preroll-incremental.sql` was the better-matched source. Anyone re-running
+   this should use `preroll-incremental.sql`.
 
    > ✅ **[[0145]] dependency CLEARED 2026-08-06** (PR #176, `4e35dc6`). All 121
    > unguarded `argMax(close_usd, …)` sites across the four pre-roll scripts are
@@ -1025,12 +1210,23 @@ Detection is a separate deliverable → **[[0137]]**.
 - [x] The six Phoenix mutations either completed or explicitly re-planned — not
       killed. All six executed on attach; `system.mutations WHERE is_done = 0`
       returns zero rows.
-- [ ] The 2026-07-21 → recovery gap closed by a **bounded incremental** pre-roll
-      (never `preroll.sql`), with deep history verified against `_bak`.
-      ✅ **[[0145]] gate cleared 2026-08-06** — but 0145 shipped no deployable
-      artifact, so the guard must be **verified in the checkout the SQL is
-      pasted from**: `grep -c 'argMax(close_usd, t.timestamp)'
-      packages/prices-clickhouse/schema/preroll-live-gap.sql` must print `0`.
+- [x] The 2026-07-21 → recovery gap closed by a **bounded incremental** pre-roll
+      (never `preroll.sql`). **DONE 2026-08-11**, 6.1 s on prod, all 13 days
+      present across all six tiers — §Execution has the per-tier counts.
+      ✅ **[[0145]] gate cleared 2026-08-06** and re-verified in the checkout the
+      SQL was generated from: `grep -c 'argMax(close_usd, t.timestamp)'` printed
+      `0` for **all four** pre-roll scripts, and 0 on both generated files.
+      **The guard was also verified on the output**, not just the input: the
+      rebuilt days carry a `close_usd = 0` rate of 68.6–74.2% against controls of
+      73.0/73.5% — inside the band, so nothing was manufactured.
+      ⚠️ Derived from `preroll-incremental.sql`, not the `preroll-live-gap.sql`
+      named here — see §Remaining work item 2 for why that is immaterial.
+      ⚠️ "Deep history verified against `_bak`" was **not** performed and was not
+      needed: this pre-roll writes only `[2026-07-01, 2026-08-10)`, touching no
+      deep history. The whole-chain integrity check that *would* have caught such
+      damage ran on 2026-08-11 anyway (every year 2016–2025 with 12 months, all
+      five forever-tables populated, ledger markers contiguous, `missing_ledgers
+      = 0`).
 - [ ] A freshness alarm exists that would have caught this within a day →
       **[[0137]]**.
 - [ ] [[0072]]'s `change_7d_pct` verified non-zero for assets with 7d of data.
