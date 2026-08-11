@@ -153,9 +153,18 @@ history:
       weeks the MV attributes to July, so the rebuild matches the MV's semantics
       instead of diverging from them.
       Cleanup is now UNBLOCKED but deliberately NOT re-enabled - separate
-      operator decision. Remaining on 0136: 0137 alarm, the 0072 change_7d_pct
-      check (now possible for the first time, since _1h finally has a 7-day
-      window), and the note to BE.
+      operator decision.
+      ALSO CLOSED THE SAME DAY - 0072's change_7d_pct AC. 1,680 of 3,295 assets
+      (51.0%) now publish a non-zero value, against 0 for every asset while _1h
+      was frozen, off a live mv_current_prices refresh. 0138 re-confirmed in
+      passing: change_7d_pct = -100 on ZERO assets, against 396 on 2026-08-03.
+      CORRECTION: the pre-roll did NOT unblock that column. ref_7d reads
+      price_ohlcv_1h over now() - INTERVAL 7 DAY, which today starts 2026-08-04
+      and so lies entirely AFTER the gap - the 13 rebuilt days are outside the
+      window it reads. It became verifiable through elapsed time (a week past the
+      08-03 recovery), which was always the other branch of the recorded "a week
+      post-recovery OR the pre-roll". Do not credit the pre-roll.
+      Remaining on 0136: 0137 alarm, the note to BE, and the cleanup re-enable.
 ---
 
 # Every coarse OHLCV table has been frozen since 2026-07-21
@@ -634,12 +643,13 @@ satisfied: cleanup is off, and the `_bak` tables are intact ([[0105]] has not ru
 > | # | item | state |
 > |---|---|---|
 > | 1 | **[[0137]]** freshness alarm | ❌ open — the reason this ran 10 days silent |
-> | 2 | [[0072]] `change_7d_pct` non-zero for assets with 7d of data | ❌ unverified — now *possible*, since `_1h` has the window |
+> | 2 | [[0072]] `change_7d_pct` non-zero for assets with 7d of data | ✅ **verified 2026-08-11** — 1,680/3,295 (51.0%), and `-100` on zero assets |
 > | 3 | Tell BE the coarse data was stale and has moved | ❌ unsent |
 > | 4 | Re-enable `prices-production-cleanup` | ⏸️ unblocked, **deliberately not flipped** |
 >
-> Item 2 is the cheapest and was previously impossible: `change_7d_pct` reads
-> `_1h`, which had no 7-day window to read. It does now.
+> ✅ **Item 2 closed the same day** — see its AC for the numbers and for the
+> correction that the *pre-roll* did not unblock it (elapsed time did; the
+> column's 7-day window no longer overlaps the gap at all).
 >
 > The original framing is kept below because the deadline reasoning is the
 > reusable part.
@@ -1229,7 +1239,27 @@ Detection is a separate deliverable → **[[0137]]**.
       = 0`).
 - [ ] A freshness alarm exists that would have caught this within a day →
       **[[0137]]**.
-- [ ] [[0072]]'s `change_7d_pct` verified non-zero for assets with 7d of data.
+- [x] [[0072]]'s `change_7d_pct` verified non-zero for assets with 7d of data —
+      **2026-08-11: 1,680 of 3,295 assets (51.0%) non-zero**, against 0 for every
+      asset while `_1h` was frozen. `mv_current_prices` was `Scheduled` with an
+      empty exception and a `last_success_time` 30 s old, so that is a live
+      refresh rather than a stale write. The `ref_7d` window resolved to
+      `2026-08-04 19:00 → 2026-08-11 18:00` over 8,884 assets.
+      ✅ **[[0138]] also re-confirmed in passing: `change_7d_pct = -100` for
+      ZERO assets**, against 396 on 2026-08-03 before the numerator guard.
+      ⚠️ **This was NOT unblocked by the gap pre-roll, and the earlier note
+      saying it would be is half right.** `ref_7d` reads
+      `price_ohlcv_1h WHERE timestamp >= now() - INTERVAL 7 DAY`
+      (`current.sql:185-192`) — today that is `2026-08-04 →` now, entirely
+      *after* the gap. The 13 rebuilt days sit outside the window this column
+      reads. It became verifiable through elapsed time (a week past the 08-03
+      recovery), which was always the other branch of "a week post-recovery **or**
+      the pre-roll". Do not cite the pre-roll as the cause.
+      Two readings that look wrong and are not: `nonzero_7d` (1,680) exceeding
+      `nonzero_24h` (1,122) is just the 7× longer window catching more assets;
+      and 3,295 is not the asset universe — the row set is driven by `unfiltered`
+      (`current.sql:287-290`), i.e. assets with a `_1m` row in the last 24 h, so
+      `current_prices` holds currently-active assets only.
 - [ ] BE told that coarse `prices` data was stale and has moved — their 0199
       LP-analytics contract reads the 1h/1d views. **Not** framed as their
       operation: the 07-17 window was ours (see Provenance).
