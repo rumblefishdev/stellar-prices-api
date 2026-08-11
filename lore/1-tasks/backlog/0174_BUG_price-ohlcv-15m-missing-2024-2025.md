@@ -5,7 +5,7 @@ type: BUG
 status: backlog
 related_adr: []
 related_tasks: ["0088", "0095", "0136"]
-tags: [layer-data, priority-high, effort-medium, clickhouse, coarse-rollups, data-loss]
+tags: [layer-data, priority-high, effort-small, clickhouse, coarse-rollups, data-loss, recoverable]
 links: []
 history:
   - date: 2026-08-11
@@ -23,6 +23,89 @@ history:
 ---
 
 # `price_ohlcv_15m` is missing 2024 and 2025 entirely
+
+> ## 🟢 UPDATE 2026-08-11 — THE DATA EXISTS. This is a RESTORE, not a loss.
+>
+> A `prices.price_ohlcv_15m_bak` table was found while measuring the backfill's
+> disk footprint. It holds **120,095,237 rows in exactly the missing window**
+> (`202403 → 202512`), and spans `202402 → 202607` overall — the whole Soroban
+> era. Five sibling `_bak` tables exist too (`1h`, `4h`, `1d`, `1w`, `1M`); those
+> five were recovered in the live tables and only `15m` was not.
+>
+> **The §Implementation "repair path is constrained" analysis below is therefore
+> SUPERSEDED.** It concluded the only in-cluster source was a down-conversion
+> from `1h` that would fabricate intra-hour detail. That is no longer the
+> situation — a real 15-minute copy survives.
+>
+> **Two consistency checks that make the backup credible:**
+> - `15m_bak / 1h_bak` across the gap = **120.1M / 63.5M = 1.89×**. The
+>   pre-Soroban ratio we just built is `159.22M / 68.59M = 2.32×`. Same order;
+>   the difference is what denser Soroban-era trading would produce. A truncated
+>   backup would sit well below 1.
+> - `1h_bak`'s gap count (63.47M) sits just under the live `1h` deduplicated
+>   count for a slightly wider window (64.58M) — backup and live agree wherever
+>   both exist.
+>
+> ### Verification results, measured 2026-08-11
+>
+> | check | result |
+> |---|---|
+> | Schema identical to `price_ohlcv_15m` | ✅ no column drift |
+> | Continuous across the gap | ✅ **all 22 months** present, 3.7M–7.4M each |
+> | No `Decimal128::MIN` artifact | ✅ zero negatives |
+> | **Real `close_usd`** | 🔴 **NO — 93.8% zero in 2024, 99.94% in 2025** |
+>
+> **Provenance is now known.** All six `_bak` tables were created
+> **2026-07-17 between 15:28 and 15:35** — one deliberate seven-minute operation,
+> the day before the [[0095]] work (the refreshable-MV `ATOMIC REPLACE` that wiped
+> coarse). **They are a pre-0095 safety snapshot.**
+>
+> 🔴 **That reframes this task's cause.** The 0095 recovery restored five coarse
+> tables and **missed `15m`**. This is not a mysterious loss — it is an
+> incomplete recovery, with its own backup sitting untouched beside it for three
+> weeks. It also explains the zeros: a July 17 snapshot predates any enrichment
+> that has run since.
+>
+> ### 🔴 The blocker: restoring would import a wall of zeros
+>
+> `close_usd` is the column BE multiplies into TVL, and "not yet enriched" and
+> "no USD price exists" are **the same value** — zero. See
+> [[close-usd-zero-as-missing-defect-class]].
+>
+> ⚠️ **Re-enrichment is NOT available for this span.** `prices.usd_rate` coverage
+> starts **2026-03-11** ([[0167]], corrected), so there is no oracle history to
+> recompute 2024–2025 `close_usd` from. Whatever the backup carries is the
+> ceiling on what is recoverable.
+>
+> **The open question that decides the approach** — is the live `1h` table any
+> better enriched over the same window?
+> - Live `1h` **also ~94% zeros** → the backup is consistent with the rest of the
+>   estate; restoring introduces no new inconsistency and `15m` simply rejoins
+>   its siblings in a known, pre-existing gap. **Restore.**
+> - Live `1h` **is enriched** → restoring the July snapshot creates a *cross-grain
+>   contradiction*: `15m` reporting `close_usd = 0` where `1h` reports a real
+>   price for the same hour. That is **worse** than the present state, where
+>   `15m` is merely absent. **Restore OHLC/volumes but treat `close_usd`
+>   separately, or do not restore.**
+>
+> **Restore shape, once verified — bounded strictly to the gap:**
+> ```sql
+> INSERT INTO prices.price_ohlcv_15m
+> SELECT * FROM prices.price_ohlcv_15m_bak
+> WHERE timestamp >= '2024-03-01' AND timestamp < '2026-01-01';
+> ```
+> The live table holds **nothing** there, so there are no primary-key collisions
+> and no RMT tie to resolve.
+>
+> ⚠️ **Do NOT restore the backup's 2026 portion** (~30.6M rows). The live table
+> already holds 10.5M rows there from the rollup MVs; mixing a stale snapshot
+> into live data is a distinct and worse problem than the gap.
+>
+> **Still unanswered, and it should not be skipped just because a fix is
+> available:** *why* only `15m` lost its data when five sibling tables kept
+> theirs, and what created these `_bak` tables. Restoring without knowing the
+> cause invites a repeat. The `_bak` tables' own retention is a second open
+> question — 259 MiB, undocumented, and nobody in this session knew they existed.
 
 ## Summary
 
@@ -107,18 +190,33 @@ read `1h`+ — including, as far as is known, BE's LP analytics.
 
 ## Acceptance Criteria
 
+Reordered 2026-08-11 around the restore path.
+
+- [ ] `price_ohlcv_15m_bak` verified fit to restore: **schema identical**
+      (including column *order* — `INSERT SELECT` maps by position), **continuous
+      across all 22 months** of the gap, and carrying **real `close_usd`** rather
+      than a wall of zeros or `Decimal128::MIN`.
+- [ ] Gap restored from the backup, bounded to
+      `[2024-03-01, 2026-01-01)` — **the 2026 portion deliberately excluded**, as
+      the live table already holds MV-written rows there.
+- [ ] Post-restore, `15m` shows all months 2024–2025 with counts consistent with
+      the `1h` table at roughly the expected 2× ratio.
 - [ ] Per-month row counts for **all six** coarse tables, activation → now,
       recorded — so the extent is measured rather than assumed from `15m` alone.
 - [ ] `4h` and `1w` explicitly cleared or implicated; the audit does not stop at
       the table that happened to be probed first.
-- [ ] Cause identified, or explicitly recorded as undetermined with the evidence
-      that was checked.
-- [ ] A decision on repair vs accept, with the reasoning written down —
-      including the constraint that `1m` no longer exists for the missing span.
-- [ ] If anything is reconstructed rather than recovered, it is
+- [ ] **Cause identified** — why only `15m` lost data when five siblings kept
+      theirs — or explicitly recorded as undetermined with the evidence checked.
+      ⚠️ Do not let the availability of a restore excuse skipping this; an
+      unexplained cause invites a repeat.
+- [ ] The `_bak` tables' own fate decided: what created them, whether they are
+      still needed after the restore, and whether anything should depend on them.
+      They are 259 MiB and were undocumented until 2026-08-11.
+- [ ] If anything ends up **reconstructed** rather than restored, it is
       **distinguishable** from measured data (the [[0165]] `method`-column
       lesson: a reconstructed value and a measured one must never be
-      confusable).
+      confusable). A straight restore from `15m_bak` does not raise this — a
+      down-conversion from `1h` would.
 - [ ] No TTL is introduced as a "fix" — the absence of a TTL is correct here;
       these are forever-tables.
 
