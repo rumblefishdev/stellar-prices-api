@@ -718,18 +718,27 @@ per-chunk pre-roll variant. Give the cluster owner a heads-up for the window.
 - [~] `GET /backfill/status` monotonic; `soroban_amm`→`completed` (reached the floor
       63352611), `sdex_archive` tail run killed (not needed). Re-confirm the status
       endpoint reflects the final state (`status='paused'`); minor remaining check.
-- [ ] **OHLCV for Soroswap pairs verifiable** — **re-run owned HERE** (root cause
-      confirmed in 0096). Cause = **registry seed-timing**, not a missing preload:
-      the backfill already preloads `prices.pool_registry` (since 0053), but the 221
-      soroswap rows were seeded `2026-07-14`, AFTER the Soroban run, so `reg.soroswap`
-      was empty at run time → 0 soroswap candles. 0096 shipped the code fix (closed a
-      dispatch silent-drop; unresolvable pools now land in `unresolved_pools`). The
-      registry is now seeded, so satisfying this AC = a **bounded combined-mode re-run
-      over the Soroswap-affected range** (0090 runbook: disable cleanup → backfill →
-      pre-roll → re-enable), then verify non-zero `soroswap` candles per-source.
-- [ ] Docker-gated CH integration tests greened once locally against prod-pinned
-      ClickHouse (`candles_it`, `pool_registry_it`, `progress_it`). *(0053 left
-      these to run once against a local CH.)*
+- [→] **OHLCV for Soroswap pairs verifiable** — ~~re-run owned HERE~~
+      **SPLIT OUT to [[0175]] on 2026-08-11.** Root cause is settled (0096:
+      registry seed-timing — the 221 soroswap rows were seeded `2026-07-14`,
+      *after* the Soroban run, so `reg.soroswap` was empty and produced 0
+      candles; the code fix shipped). What remains is a **bounded combined-mode
+      re-run over the Soroswap-affected range** — a different range, a different
+      root cause, and a fresh multi-day operational campaign that shares no
+      subject matter with this tracker's pre-Soroban recovery. Carrying it here
+      kept 0088 open indefinitely and buried the recovery record inside an active
+      file. Not descoped — **owned by 0175**.
+- [x] Docker-gated CH integration tests greened once locally against prod-pinned
+      ClickHouse (`candles_it`, `pool_registry_it`, `progress_it`) — **DONE
+      2026-08-11**, all three pass on **26.3.10.60**, the exact prod engine:
+      - `per_source_candles_coexist_and_rewrites_are_idempotent` ✅
+      - `pool_registry_round_trips_through_clickhouse` ✅
+      - `combined_then_sdex_progress_end_to_end` ✅
+
+      Ran the wider `prices-api` suite at the same time since local CH was up —
+      **32 tests green** (19 unit + 13 CH-gated), including
+      `backfill_status_maps_both_streams`, which is the endpoint behind the
+      `/backfill/status` AC below. No failures anywhere.
 
 ## Issues Encountered — the 2026-08-11 pre-roll
 
