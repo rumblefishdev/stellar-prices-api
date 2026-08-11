@@ -655,6 +655,141 @@ satisfied: cleanup is off, and the `_bak` tables are intact ([[0105]] has not ru
 > its `max(version)` is ≥ a partial row's — but that is reasoning, not a
 > measurement, and it should be verified on a single day before the full window.
 
+---
+
+## ▶️ NEXT SESSION STARTS HERE — the gap pre-roll, prepared 2026-08-11
+
+Everything below was prepared and validated on 2026-08-11 but **deliberately not
+run** — the operator chose to stop there. Nothing is in flight; this is a clean
+starting point.
+
+### Step 0 — regenerate the two scripts
+
+⚠️ **The generated files are NOT in the repo and NOT on the server.** They were
+built in a session scratchpad which no longer exists. That is deliberate:
+committing derived SQL means two copies of the aggregation expression, which is
+exactly how the unguarded `argMax(close_usd, …)` survived into [[0145]]. **The
+generator is the artifact.** Re-run it from the repo root:
+
+```bash
+SRC=packages/prices-clickhouse/schema/preroll-incremental.sql
+emit () { sed -n "$1,$(($1+12))p" "$SRC" | sed "s|$2|$3|"; }
+
+W1="WHERE t.timestamp >= '2023-01-01' AND t.timestamp < '2024-01-01'"
+W2="WHERE t.timestamp < {boundary:DateTime}"
+GAP="WHERE t.timestamp >= '2026-07-21' AND t.timestamp < '2026-08-04'"
+DAY="WHERE t.timestamp >= '2026-07-21' AND t.timestamp < '2026-07-22'"
+
+# --- single-day trial: 15m -> 1h -> 4h -> 1d, 2026-07-21 only ---
+{ emit 193 "$W1" "$DAY"; echo; emit 237 "$W2" "$DAY"; echo
+  emit 251 "$W2" "$DAY"; echo; emit 265 "$W2" "$DAY"; } > /tmp/gap-trial-0721.sql
+
+# --- full window ---
+{ emit 193 "$W1" "$GAP"; echo; emit 237 "$W2" "$GAP"; echo
+  emit 251 "$W2" "$GAP"; echo; emit 265 "$W2" "$GAP"; echo
+  emit 279 "$W2" "WHERE t.timestamp >= '2026-07-20' AND t.timestamp < '2026-08-10'"; echo
+  emit 293 "$W2" "WHERE t.timestamp >= '2026-07-01' AND t.timestamp < '2026-08-01'"
+} > /tmp/gap-full.sql
+```
+
+⚠️ **The line numbers `193/237/251/265/279/293` are positions inside
+`preroll-incremental.sql` as of commit `daecea1`.** If that file has changed,
+re-locate the statements first (`grep -n 'INSERT INTO prices.price_ohlcv'`) — a
+silently shifted `sed` range would emit a truncated statement.
+
+**Gate the generated files before they go anywhere near prod:**
+
+```bash
+for f in /tmp/gap-trial-0721.sql /tmp/gap-full.sql; do
+  echo "== $f"
+  echo -n "  unguarded argMax (MUST be 0): "; grep -c 'argMax(close_usd, t.timestamp)' $f
+  echo -n "  guarded argMaxIf            : "; grep -v '^\s*--' $f | grep -c 'argMaxIf(close_usd, t.timestamp, close_usd > 0)'
+  echo -n "  leftover {boundary}  (MUST be 0): "; grep -c '{boundary:DateTime}' $f
+  echo    "  verbs:"; grep -v '^\s*--' $f | grep -oiE '^\s*(INSERT|DELETE|TRUNCATE|DROP|ALTER)\b' | sort | uniq -c
+done
+# expect: trial = 4 INSERT / 4 guarded; full = 6 INSERT / 6 guarded; 0 everywhere else
+```
+
+Then syntax-check on the pinned engine (catches a `sed` slip in seconds):
+
+```bash
+docker run -d --name gap-syntax -e CLICKHOUSE_DB=prices clickhouse/clickhouse-server:26.3.10.60
+sleep 8
+docker exec -i gap-syntax clickhouse-client --multiquery < packages/prices-clickhouse/schema/init.sql
+docker exec -i gap-syntax clickhouse-client --multiquery < /tmp/gap-full.sql   # expect exit 0, silent
+docker rm -f gap-syntax
+```
+
+### The windows, and why they differ per level
+
+| level | window | why |
+|---|---|---|
+| `15m`/`1h`/`4h`/`1d` | `[2026-07-21, 2026-08-04)` | the gap; all four bucket sizes align on those instants |
+| `1w` | `[2026-07-20, 2026-08-10)` | **wider on purpose.** `toStartOfInterval(…, INTERVAL 1 WEEK)` starts **Monday** — verified on 26.3.10.60 — so the gap sits inside weeks `07-20`, `07-27`, `08-03`. Bounding `1w` to the gap would rebuild those weeks from **partial days** and overwrite correct rows. Upper bound stops before the current week (`08-10`), which belongs to the live MVs. |
+| `1M` | `[2026-07-01, 2026-08-01)` | **July only.** August is the current month; rebuilding it from a `1w` table whose current week is deliberately absent produces a *worse* row than the live MV holds. |
+
+⚠️ **August's monthly row is NOT repaired by this script.** It should heal on its
+own once `1w`'s `07-27` week (which contains 08-01 and 08-02) is fixed, because
+`mv_ohlcv_1w_to_1M` re-aggregates daily. **Verify after the next MV refresh**
+rather than assuming — if it has not healed in 24 h, that is [[0143]]'s known
+`1d→1w→1M` race.
+
+### Step 1 — baseline
+
+```bash
+CHQ <<'SQL' | tee ~/gap-before.txt
+SELECT toDate(timestamp) AS d, count() AS raw_,
+       uniqExact(asset_id, quote_asset_id, source) AS keys_
+FROM prices.price_ohlcv_1d
+WHERE timestamp >= '2026-07-19' AND timestamp < '2026-08-05'
+GROUP BY d ORDER BY d;
+SQL
+```
+
+Expect `2026-07-21` = **4,848** and `07-22 … 08-02` **absent**.
+
+### Step 2 — the trial, and the decision it settles
+
+Run the single-day script first. **07-21 is the only day in the window that
+already holds partial coarse rows**, so it is the only one that exercises the
+RMT collision; every other gap day is empty and would prove nothing.
+
+```bash
+scp -i ~/.ssh/sorban-prod_ed25519 /tmp/gap-trial-0721.sql /tmp/gap-full.sql \
+  deploy@168.119.73.161:~/
+ssh -i ~/.ssh/sorban-prod_ed25519 deploy@168.119.73.161
+time docker exec -i app-clickhouse-1 clickhouse-client --multiquery < ~/gap-trial-0721.sql
+```
+
+No `--param_boundary` — every bound is a literal. ~340k source rows, so seconds;
+the spill flag should not be needed.
+
+```bash
+CHQ <<'SQL'
+SELECT count() AS final_rows FROM prices.price_ohlcv_1d FINAL
+WHERE timestamp >= '2026-07-21' AND timestamp < '2026-07-22';
+SQL
+```
+
+- **~15k** → the recomputed full day displaced the 4,848-row partial. The RMT
+  collision resolves as predicted; **proceed**.
+- **still ~4,848** → the existing partial is winning on version. **STOP** and
+  rethink before touching the other 12 days.
+
+### Step 3 — the full window, only if the trial passed
+
+```bash
+time docker exec -i app-clickhouse-1 clickhouse-client --multiquery < ~/gap-full.sql
+```
+
+Then re-run the Step 1 query into `~/gap-after.txt` and diff. All 13 days
+present, none absent, counts in the same ~15k band as their neighbours.
+
+### ⛔ Do NOT re-enable cleanup until this is verified
+
+Re-enabling drops partition `202607` whole and takes **10 of the 13 days**
+permanently. Same constraint [[0088]] operated under, same reason.
+
 1. ✅ **DONE 2026-08-05 — the watch period is closed and [[0105]] is unblocked.**
 
    > **2026-08-04 — half done.** `_1w` reached `2026-08-03` ✅. `_1M` stayed at
