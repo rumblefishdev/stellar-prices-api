@@ -715,9 +715,23 @@ per-chunk pre-roll variant. Give the cluster owner a heads-up for the window.
       resident *in addition to* the new coarse rows, so disk climbs rather than falls.
       450 GB free on `/var/lib/docker` (74% used) as of 2026-08-11 — ample, but this
       is now a standing cost, not a transient one.
-- [~] `GET /backfill/status` monotonic; `soroban_amm`→`completed` (reached the floor
-      63352611), `sdex_archive` tail run killed (not needed). Re-confirm the status
-      endpoint reflects the final state (`status='paused'`); minor remaining check.
+- [→] `GET /backfill/status` monotonic; `soroban_amm`→`completed`, `sdex_archive`
+      final state — **CHECKED ON PROD 2026-08-11 AND IT FAILS. Split to [[0176]].**
+      Not the "minor remaining check" this AC assumed. Measured:
+      ```
+      sdex_archive  completed  current=1          target=63795749  last_push=2026-08-11  completed_at=2026-07-27
+      soroban_amm   running    current=63352611   target=63475475  last_push=2026-07-14  completed_at=NULL
+      ```
+      **Two independent defects, one surface.** (1) `current_ledger = 1` is
+      *correct* — `resolve_current` keeps `min` for a **backward** stream
+      (`sink.rs:365-373`) and pass 2 reached genesis — but `progress_pct` and
+      `ledgers_remaining` (`handlers.rs:41,68-75`) assume a *forward* position, so
+      the endpoint publishes `completed` **and** `0.0%` **and** `63,795,748
+      remaining`. ⚠️ **The data is right and the reader is wrong — do NOT "fix" it
+      with an `UPDATE`.** (2) `soroban_amm` has read `running` since 2026-07-14
+      with `completed_at NULL`: precisely the *"nothing writes a terminal state on
+      crash"* signal this task's own §Progress log predicted.
+      Also: `completed_at` (pass 1) predates `last_push_at` (pass 2).
 - [→] **OHLCV for Soroswap pairs verifiable** — ~~re-run owned HERE~~
       **SPLIT OUT to [[0175]] on 2026-08-11.** Root cause is settled (0096:
       registry seed-timing — the 221 soroswap rows were seeded `2026-07-14`,
