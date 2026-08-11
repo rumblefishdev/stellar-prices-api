@@ -3,9 +3,9 @@
   "awsRegion": "eu-central-1",
   "apiGatewayThrottleRate": 200,
   "apiGatewayThrottleBurst": 400,
-  "apiGatewayPartnerDailyQuota": 10000,
-  "apiKeyRateLimit": 100,
-  "apiKeyBurstLimit": 200,
+  "selfServicePlanRateLimit": 1,
+  "selfServicePlanBurstLimit": 5,
+  "selfServicePlanMonthlyQuota": 100000,
   "apiGatewayCacheEnabled": true,
   "apiBaseUrl": "https://02mabge71l.execute-api.eu-central-1.amazonaws.com/production",
   "apiHandler": {

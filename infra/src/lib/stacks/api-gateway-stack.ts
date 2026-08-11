@@ -55,16 +55,23 @@ const CACHE_CLUSTER_SIZE = '0.5';
  * Method-level throttle for `GET /api-docs-json`.
  *
  * Every other Lambda-backed route is `apiKeyRequired: true` and therefore
- * carries two limits from the usage plan: the per-key rate and the daily quota.
- * This one is anonymous by design, so it has neither — its only limiter would
- * otherwise be the stage-wide bucket it SHARES with paying partners. Throttling
- * is evaluated before the cache, so an anonymous loop on the documentation route
- * draws that bucket down and a partner inside their contracted rate starts
- * seeing 429s from a route they never called.
+ * carries two limits from the usage plan: the per-key rate and the monthly quota.
+ * This one is anonymous by design, so it has neither — without an entry here it
+ * would fall back to the default method entry (`resourcePath: '/*'`), which is
+ * `apiGatewayThrottleRate` (200 req/s). That is a lot of unauthenticated traffic
+ * to leave available on a route nobody has to hold a key to call.
+ *
+ * What this buys is COST CONTROL ON THIS ROUTE, not protection of the others.
+ * Per-API per-stage limits are applied per method — each method gets its own
+ * bucket from that default — so an anonymous loop here cannot draw down
+ * `/v1/...` and cannot make a key holder see 429s on a route they never called.
+ * It can only exhaust its own bucket. The exposure is the bill: API Gateway
+ * charges per request, and with the cache off every one is also a billed Lambda
+ * invocation.
  *
  * Sized for what the route is: a static ~40 KB document that a reader fetches
- * occasionally and that is cached for an hour at the edge. 10 req/s aggregate is
- * far above any legitimate use and 5% of the stage ceiling.
+ * occasionally and that is cached for an hour at the edge. 10 req/s is far above
+ * any legitimate use and a twentieth of what the route would otherwise get.
  *
  * A local constant rather than a config key because it is a property of this
  * route's shape (anonymous, cached, static), not of an environment — unlike
@@ -82,7 +89,8 @@ const API_DOCS_THROTTLE = { rate: 10, burst: 20 } as const;
  * prefix of its own, so there is no `/v1/v1` double-prefix.
  *
  * - **Auth / rate limit**: data routes set `apiKeyRequired: true`; the UsagePlan
- *   enforces the §2.1/§7 per-key 100 req/s (`apiKeyRateLimit`) + a daily quota.
+ *   enforces the self-service per-key rate (`selfServicePlanRateLimit`) + a
+ *   monthly quota (task 0157, overriding the design doc's §2.1/§7 100 req/s).
  *   `GET /health` stays a keyless mock (cheapest liveness probe), and
  *   `GET /api-docs-json` is a keyless proxy to the handler (task 0124 — public
  *   documentation).
@@ -247,11 +255,18 @@ export class ApiGatewayStack extends cdk.Stack {
     const cfnStage = this.api.deploymentStage.node
       .defaultChild as apigateway.CfnStage;
 
-    // Assigning `methodSettings` wholesale REPLACES the `/*/*` entry CDK
+    // Assigning `methodSettings` wholesale REPLACES the default entry CDK
     // renders from `deployOptions.throttlingRateLimit/Burst`, which would drop
-    // the stage-wide throttle (only the per-key usage-plan limit would remain).
-    // Re-declare it here so the §2.1 aggregate stage ceiling survives.
-    const stageWideThrottle = {
+    // it entirely (only the per-key usage-plan limit would remain). Re-declare
+    // it here so the §2.1 figure survives.
+    //
+    // Despite the name, this is NOT an aggregate ceiling across the stage: a
+    // per-API per-stage limit is applied per method, so this grants every method
+    // its OWN bucket of `apiGatewayThrottleRate`. It bounds what any one route
+    // can draw, not what the stage can draw in total. The only genuinely shared
+    // pool above the usage plan is the account-level limit (10 000 RPS / 5 000
+    // burst in eu-central-1).
+    const defaultMethodThrottle = {
       resourcePath: '/*',
       httpMethod: '*',
       throttlingRateLimit: config.apiGatewayThrottleRate,
@@ -279,7 +294,7 @@ export class ApiGatewayStack extends cdk.Stack {
 
     if (cacheEnabled) {
       cfnStage.methodSettings = [
-        stageWideThrottle,
+        defaultMethodThrottle,
         apiDocsSettings,
         {
           resourcePath: '/v1/assets',
@@ -329,27 +344,53 @@ export class ApiGatewayStack extends cdk.Stack {
       // No cache cluster, so no TTLs to declare — but the throttles still
       // apply, and this is the configuration in which the anonymous route is
       // most expensive to leave unbounded.
-      cfnStage.methodSettings = [stageWideThrottle, apiDocsSettings];
+      cfnStage.methodSettings = [defaultMethodThrottle, apiDocsSettings];
     }
 
     // ---------------------------------------------------------------
-    // UsagePlan + API key — per-key 100 req/s (§2.1/§7) + daily quota.
+    // UsagePlan + API key — self-service tier (task 0157).
+    //
+    // One plan, because a key belongs to exactly one plan per stage and
+    // self-service is the default (and currently only) way to hold a key.
+    // Higher limits are a manual, out-of-band arrangement made by hand in the
+    // console — see docs/runbooks/manual-api-key-tier.md.
+    //
+    // The construct id stays `UsagePlan` so this updates the deployed plan in
+    // place rather than creating a second one: every property of
+    // AWS::ApiGateway::UsagePlan, including UsagePlanName, is "no interruption".
     // ---------------------------------------------------------------
     const usagePlan = this.api.addUsagePlan('UsagePlan', {
-      name: `prices-${config.envName}-partner-plan`,
+      name: `pricing-api-free-${config.envName}`,
       throttle: {
-        rateLimit: config.apiKeyRateLimit,
-        burstLimit: config.apiKeyBurstLimit,
+        rateLimit: config.selfServicePlanRateLimit,
+        burstLimit: config.selfServicePlanBurstLimit,
       },
       quota: {
-        limit: config.apiGatewayPartnerDailyQuota,
-        period: apigateway.Period.DAY,
+        limit: config.selfServicePlanMonthlyQuota,
+        period: apigateway.Period.MONTH,
       },
     });
     usagePlan.addApiStage({ stage: this.api.deploymentStage });
 
-    const apiKey = this.api.addApiKey('PartnerApiKey', {
-      apiKeyName: `prices-${config.envName}-partner-key`,
+    // Two separate lines here can rotate this key, by two different mechanisms:
+    //
+    // 1. Changing the CONSTRUCT ID changes the logical id, so CloudFormation sees
+    //    a removal and an unrelated addition. That is what task 0157 did
+    //    (`PartnerApiKey` -> `SelfServiceApiKey`).
+    // 2. Changing `apiKeyName` alone is a Replacement — AWS::ApiGateway::ApiKey
+    //    .Name is "update requires replacement".
+    //
+    // The distinction is bookkeeping, not safety: CloudFormation "usually creates
+    // the replacement resource first, changes references ... and then deletes the
+    // old resource", so under BOTH paths the old key stays valid for the whole
+    // update, dies only in the post-success cleanup phase, and survives a
+    // mid-update rollback untouched.
+    //
+    // What matters is the part that is the same either way: the key gets a new
+    // value and every holder is cut off. Deliberate here; touch neither line
+    // casually.
+    const apiKey = this.api.addApiKey('SelfServiceApiKey', {
+      apiKeyName: `prices-${config.envName}-selfservice-key`,
     });
     usagePlan.addApiKey(apiKey);
 
@@ -357,6 +398,16 @@ export class ApiGatewayStack extends cdk.Stack {
       parameterName: `/prices/${config.envName}/api-gateway-id`,
       stringValue: this.api.restApiId,
       description: `REST API ID for prices-${config.envName}-api`,
+    });
+
+    // The onboarding backend (task 0160) issues keys and reads per-key usage,
+    // both of which need the plan id. It lives in ComputeStack, which this stack
+    // depends on, so it cannot read the plan object without closing the cycle —
+    // same shape as the apiBaseUrl problem in task 0124. Publish via SSM instead.
+    new ssm.StringParameter(this, 'PricingApiFreePlanIdParam', {
+      parameterName: `/prices/${config.envName}/pricing-api-free-plan-id`,
+      stringValue: usagePlan.usagePlanId,
+      description: `Usage plan ID for pricing-api-free-${config.envName} (key issuance + GetUsage)`,
     });
 
     new cdk.CfnOutput(this, 'ApiUrl', {

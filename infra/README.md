@@ -147,6 +147,7 @@ namespace:
 | `/prices/{env}/mtls-key-secret-arn`         | Secrets Manager ARN holding mTLS client key PEM  | task 0052 Lambdas        |
 | `/prices/{env}/ledger-processor-lambda-arn` | Live ingest Lambda ARN (for BE SNS subscription) | BE task 0050 / task 0038 |
 | `/prices/{env}/api-gateway-id`              | REST API ID (for downstream domain wiring)       | task 0040                |
+| `/prices/{env}/pricing-api-free-plan-id`    | Usage plan ID for key issuance + `GetUsage`      | task 0160                |
 
 **Boundary rule:** the deploy role's IAM scope enforces this — it
 can `Get` both namespaces but `Put`/`Delete` only under `/prices/*`.
