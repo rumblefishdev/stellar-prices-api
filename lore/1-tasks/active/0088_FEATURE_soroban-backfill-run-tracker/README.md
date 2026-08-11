@@ -324,6 +324,58 @@ history:
       write-amplified - 67k merges in 6 h repeatedly rewriting one growing
       accumulator to absorb ~10 rows at a time. Correctness-neutral, but it
       costs IO on the shared cluster.
+  - date: 2026-08-10
+    status: active
+    who: okarcz
+    note: >
+      PASS 2 DAILY CHECK 15:50Z - HEALTHY, 91.8%. Frontier 21,503,999, markers
+      contiguous, remaining 1,920,000 = 30 partitions. 169.8k/hr over a clean
+      8h40m window. ETA ~2026-08-11 03:00Z. Recorded late: this reading was
+      taken on 08-10 but never committed that session, the same gap that lost
+      the 08-07 reading. POSITIVE CONTROL FIRED - 201810 and 201811 APPEARED
+      (274,549 / 362,696 rows) exactly as predicted once the walk crossed
+      Oct/Nov 2018. That is the sweep-check's positive control: absence AHEAD of
+      the frontier is expected, disappearance BEHIND it is the alarm. 201812 now
+      390,667 rows, past the 207,021 pass-1 residual, so that reading trap is
+      retired. pass2check's cleanup block was REPLACED with the surviving-
+      active-parts query and no longer false-alarms.
+  - date: 2026-08-11
+    status: active
+    who: okarcz
+    note: >
+      PASS 2 COMPLETE + PRE-ROLL DONE. The pre-Soroban recovery that began with
+      the 2026-07-20 cleanup incident is finished.
+      PASS 2: frontier 23,423,999 = the --end exactly; markers 23,423,997 =
+      23,423,999 - 3 + 1, i.e. CONTIGUOUS from ledger 3 with zero gaps, so no
+      partition hit S3Incomplete and was skipped without a marker. Run exited
+      normally (elapsed 398,814 s = 4.62 d from the 08-06 11:56Z restart).
+      Recovered 3,738,476 candles vs a 3,738,473 target, spanning
+      2015-11-18 03:47 -> 2019-04-15 05:35 (the frontier ledger's own minute).
+      The +3 is expected, not drift - pass 1 never walked ledgers 64,000-
+      2,815,999 (~2015-10 -> 2016-03) and the target was derived from pass 1's
+      own log, so pass 2 legitimately produces a few more.
+      GATE CORRECTION: pass2check's CANDLES LANDING block is hardcoded
+      `timestamp < 2019-01-01`, but the 3,738,473 target is defined in
+      S-presoroban-loss-chain-confirmed.md:72 as candles below LEDGER
+      23,424,000 - a range running to ~2019-04. Comparing them reads as a 27%
+      shortfall that does not exist. The real gate is
+      `intDiv(toUInt64(version),1000) < 23424000` with FINAL (version =
+      ledger*1000 + op, bucket.rs:48); FINAL is mandatory because pass 2 rewrote
+      the 2018-12-13 -> 2019-04 span pass 1's output survived in (127,914
+      duplicate rows in 2018 alone).
+      PRE-ROLL: 718,619,989 pre-Soroban 1m candles rolled into all six coarse
+      tables, boundary 2024-02-20 17:01:00. Coverage now 2015-2024 at every
+      granularity where the tables previously held NOTHING before 2024, counts
+      strictly decreasing down the 15m->1h->4h->1d->1w->1M chain in every year.
+      NOTHING DELETED, proven arithmetically: for each table final = written +
+      pre-existing exactly (1h 5,665,906+4,734; 4h 2,705,307+7,075; 1d
+      846,159+10,558; 1w 2,836,622+27,359; 1M 1,087,577+34,601). Content
+      checksums above the boundary unchanged on 1d/1w/1M.
+      CLEANUP DELIBERATELY LEFT DISABLED by operator decision - confirmed
+      "DISABLED" 2026-08-11. The 1m data therefore stays resident alongside the
+      new coarse rows and disk keeps climbing; reversible at any time.
+      Spawned 0174 (price_ohlcv_15m missing 2024-2025 entirely - no TTL exists,
+      so it is data loss, not retention).
 ---
 
 # Execute + track the historical backfill run (SDEX + Soroban AMM)
@@ -613,14 +665,26 @@ per-chunk pre-roll variant. Give the cluster owner a heads-up for the window.
       2026-07-15** (via the full-backfill that ran 07-08→07-14, Phase 1 complete;
       verified in 0090: `price_ohlcv_1m` contiguous `2024-02-20 → 2026-07-08`, 532M
       rows, gap `62,642,957→63,352,611` filled). Pre-rolled to the coarse tables in 0090.
-- [ ] Pre-Soroban SDEX tail `[1, activation−1]` — ~~WAIVED 2026-07-15~~ **UN-WAIVED
-      (waiver stale).** The 2026-07-15 waiver assumed the deep tail had been killed;
-      it is in fact live and 46.4% done (fishuser-hero, since 2026-07-15). Closing
-      this AC now needs **both** passes: pass 1 → activation (~6.3 days) **and**
-      pass 2 re-walking `[1, 23423999]` (~5 days), which the enabled cleanup rule
-      destroyed. Verify with the year-histogram in §Recovery plan — a smooth ramp
-      from 2015, no absent years. (Historical note: 0092 resolved "BE needs
-      Soroban-era only", so this is coverage-completeness, not a BE blocker.)
+- [x] Pre-Soroban SDEX tail `[1, activation−1]` — ~~WAIVED 2026-07-15~~ UN-WAIVED
+      (waiver stale) — **DONE 2026-08-11.** Both passes complete. Pass 1 reached
+      activation−1; pass 2 re-walked `[1, 23423999]` and finished at frontier
+      `23,423,999` with markers **contiguous from ledger 3** (23,423,997 = exactly
+      the gap-free count), recovering **3,738,476** candles against a 3,738,473
+      target. Continuity across the whole range verified: every year 2019–2023 has
+      all 12 months present, `1m` runs `2015-11-18 03:47 → 2024-02-20 17:00`.
+      ⚠️ **The year-histogram in §Recovery plan is NOT a sufficient gate** — see
+      the 2026-08-11 history entry. It is bounded by *timestamp*, but the recovery
+      target is defined by *ledger*, and pass 2's range runs to ~2019-04. Use
+      `intDiv(toUInt64(version),1000) < 23424000` with `FINAL`, or it reads as a
+      27% shortfall that does not exist.
+- [x] **Pre-Soroban `1m` rolled up** — `preroll-incremental.sql` (NOT `preroll.sql`)
+      run 2026-08-11 with `--param_boundary='2024-02-20 17:01:00'`. **718,619,989**
+      candles rolled into all six coarse tables; coverage 2015–2024 at every
+      granularity where they previously held nothing before 2024. No data deleted —
+      proven arithmetically (final = written + pre-existing, exactly, per table).
+      ⚠️ Required **two** deviations from the runbook, both recorded in
+      §Issues Encountered: the boundary could not be derived by its documented
+      query, and the quota guidance does not hold at this data scale.
 - [ ] 🔴 **`prices-production-cleanup` stays DISABLED for the entire recovery** — from
       2026-07-20 until **after** `preroll-incremental.sql` has landed the pre-Soroban
       `1m` in the coarse forever-tables (~12 days: pass 1 ~6.3d + pass 2 ~5d + pre-roll).
@@ -638,25 +702,176 @@ per-chunk pre-roll variant. Give the cluster owner a heads-up for the window.
       cluster owner** rather than flipping the rule. Close this AC only once cleanup has
       been deliberately re-enabled as the final recovery step, with coarse coverage back
       to genesis verified first. Memory: [[cleanup-rule-shreds-backfill-output]].
-- [ ] **Pre-Soroban `1m` rolled up before cleanup returns** — `preroll-incremental.sql`
-      (NOT `preroll.sql`) run per `docs/runbooks/preroll-incremental-presoroban.md`,
-      coarse tables verified to cover genesis → activation, and only then
-      `aws events enable-rule`. This is recovery step 3→4 in §Recovery plan.
-- [~] `GET /backfill/status` monotonic; `soroban_amm`→`completed` (reached the floor
-      63352611), `sdex_archive` tail run killed (not needed). Re-confirm the status
-      endpoint reflects the final state (`status='paused'`); minor remaining check.
-- [ ] **OHLCV for Soroswap pairs verifiable** — **re-run owned HERE** (root cause
-      confirmed in 0096). Cause = **registry seed-timing**, not a missing preload:
-      the backfill already preloads `prices.pool_registry` (since 0053), but the 221
-      soroswap rows were seeded `2026-07-14`, AFTER the Soroban run, so `reg.soroswap`
-      was empty at run time → 0 soroswap candles. 0096 shipped the code fix (closed a
-      dispatch silent-drop; unresolvable pools now land in `unresolved_pools`). The
-      registry is now seeded, so satisfying this AC = a **bounded combined-mode re-run
-      over the Soroswap-affected range** (0090 runbook: disable cleanup → backfill →
-      pre-roll → re-enable), then verify non-zero `soroswap` candles per-source.
-- [ ] Docker-gated CH integration tests greened once locally against prod-pinned
-      ClickHouse (`candles_it`, `pool_registry_it`, `progress_it`). *(0053 left
-      these to run once against a local CH.)*
+
+      **STATUS 2026-08-11: the protective half is satisfied — cleanup stayed DISABLED
+      for the entire recovery and is confirmed `"DISABLED"` after the pre-roll.** The
+      AC stays open only because its closing condition is *deliberate re-enablement*,
+      and the **operator explicitly chose not to re-enable it** at pre-roll time:
+      > *"do not delete any data from the database in this pre-roll … do not delete or
+      > cleanup anything yet."*
+      The pre-roll's own precondition is met, so re-enabling is now safe whenever
+      wanted — the coarse tables hold genesis → activation independently of `1m`.
+      **Consequence while it stays off:** the 718.6M pre-Soroban `1m` candles remain
+      resident *in addition to* the new coarse rows, so disk climbs rather than falls.
+      450 GB free on `/var/lib/docker` (74% used) as of 2026-08-11 — ample, but this
+      is now a standing cost, not a transient one.
+- [→] `GET /backfill/status` monotonic; `soroban_amm`→`completed`, `sdex_archive`
+      final state — **CHECKED ON PROD 2026-08-11 AND IT FAILS. Split to [[0176]].**
+      Not the "minor remaining check" this AC assumed. Measured:
+      ```
+      sdex_archive  completed  current=1          target=63795749  last_push=2026-08-11  completed_at=2026-07-27
+      soroban_amm   running    current=63352611   target=63475475  last_push=2026-07-14  completed_at=NULL
+      ```
+      **Two independent defects, one surface.** (1) `current_ledger = 1` is
+      *correct* — `resolve_current` keeps `min` for a **backward** stream
+      (`sink.rs:365-373`) and pass 2 reached genesis — but `progress_pct` and
+      `ledgers_remaining` (`handlers.rs:41,68-75`) assume a *forward* position, so
+      the endpoint publishes `completed` **and** `0.0%` **and** `63,795,748
+      remaining`. ⚠️ **The data is right and the reader is wrong — do NOT "fix" it
+      with an `UPDATE`.** (2) `soroban_amm` has read `running` since 2026-07-14
+      with `completed_at NULL`: precisely the *"nothing writes a terminal state on
+      crash"* signal this task's own §Progress log predicted.
+      Also: `completed_at` (pass 1) predates `last_push_at` (pass 2).
+- [→] **OHLCV for Soroswap pairs verifiable** — ~~re-run owned HERE~~
+      **SPLIT OUT to [[0175]] on 2026-08-11.** Root cause is settled (0096:
+      registry seed-timing — the 221 soroswap rows were seeded `2026-07-14`,
+      *after* the Soroban run, so `reg.soroswap` was empty and produced 0
+      candles; the code fix shipped). What remains is a **bounded combined-mode
+      re-run over the Soroswap-affected range** — a different range, a different
+      root cause, and a fresh multi-day operational campaign that shares no
+      subject matter with this tracker's pre-Soroban recovery. Carrying it here
+      kept 0088 open indefinitely and buried the recovery record inside an active
+      file. Not descoped — **owned by 0175**.
+- [x] Docker-gated CH integration tests greened once locally against prod-pinned
+      ClickHouse (`candles_it`, `pool_registry_it`, `progress_it`) — **DONE
+      2026-08-11**, all three pass on **26.3.10.60**, the exact prod engine:
+      - `per_source_candles_coexist_and_rewrites_are_idempotent` ✅
+      - `pool_registry_round_trips_through_clickhouse` ✅
+      - `combined_then_sdex_progress_end_to_end` ✅
+
+      Ran the wider `prices-api` suite at the same time since local CH was up —
+      **32 tests green** (19 unit + 13 CH-gated), including
+      `backfill_status_maps_both_streams`, which is the endpoint behind the
+      `/backfill/status` AC below. No failures anywhere.
+
+## Issues Encountered — the 2026-08-11 pre-roll
+
+Four of these are defects in the *runbook*, not the script. `preroll-incremental.sql`
+itself needed **no edits** and behaved exactly as documented.
+
+### 1. 🔴 The runbook's boundary query returns a retention horizon, not activation
+
+Pre-flight step 2 says to find the `{boundary}` with
+`SELECT min(timestamp) FROM price_ohlcv_1m WHERE source IN ('aquarius','phoenix','soroswap')`.
+**It returned `2026-07-01`.** That is where `1m` retention currently begins — after
+0090 the Soroban-era `1m` partitions were dropped, which the same runbook states two
+paragraphs earlier. The query is invalidated by the partition drop it describes.
+
+Running with that value would have made STAGE 2 re-aggregate **~2.3 years of already
+pre-rolled coarse**. STAGE 2 is bounded *only* by `t.timestamp < {boundary}` (no lower
+bound, `:248,262,276,290,304`) and reads the coarse tables, which **do** retain the
+Soroban era. The script's whole safety proof — *every inserted row has a version
+strictly lower than any Soroban-era row, so RMT keeps the Soroban row* — holds only
+**below** activation. Past it, re-derived rows carry essentially the same versions, i.e.
+an **RMT tie**, the case 0097 found needs DELETE-first to resolve predictably. And
+`close_usd` would not re-derive identically anyway, since `argMaxIf(…, close_usd > 0)`
+reads enrichment state that has moved on since 0090.
+
+⚠️ **A second attempt failed the same way.** Deriving it from `price_ohlcv_15m`
+returned `2026-06-01` — that table's own horizon (see [[0174]]). **No edge-probe on
+any table can find activation.** Anchor on the known activation **ledger**
+`50,457,424` instead: the last pre-activation `1m` candle is `2024-02-20 17:00`, so
+the boundary is `2024-02-20 17:01:00`. Verified correct — `1m` holds nothing between
+that and 2026-07.
+
+### 2. The ~5.59 GiB quota guidance does not hold at 718M rows
+
+The runbook's "split that year into halves" assumed a much smaller dataset. Actual
+failures, in order:
+
+| statement | rows | outcome |
+|---|---|---|
+| STAGE 1 · 2022 | 211M | OOM at 5.59 GiB (`AggregatingTransform`) |
+| STAGE 1 · 2023 | 435M | OOM **even with spilling** (`SourceFromNativeStream`) |
+| STAGE 2 · `1h ← 15m` | 159M | OOM — unchunked, no lower bound |
+
+**`--max_bytes_before_external_group_by=2000000000` fixed 2022 but not 2023.** Note
+the second failure is in the *readback* of spilled data, not the aggregation — so
+*lowering* the threshold makes it worse (more spill files, more concurrent streams).
+
+⚠️ `max_bytes_ratio_before_external_group_by = 0.5` is set but **never fires**: it is
+computed against available *server* memory, which far exceeds the 5.59 GiB per-query
+cap. Only the absolute setting takes effect.
+
+Working procedure — both generated by transforming the original text, changing **only**
+the `WHERE` bounds so the 0145 `argMaxIf` guard is preserved verbatim:
+
+- **2023 month-chunked** (12 statements, ~36M rows each, 10–15 s each). The 12 chunks
+  sum to exactly 82,640,286 = the observed `15m` 2023 total — no gap, no overlap.
+- **STAGE 2 year-chunked** for `1h`/`4h`/`1d` only. ⚠️ **`1w` and `1M` MUST stay single
+  full-range statements** — their buckets straddle calendar years, so chunking them
+  would split a week/month across statements and RMT would keep whichever landed with
+  the higher version. Silent corruption, unlike a memory error which merely stops.
+
+### 3. The candle gate compared two different populations
+
+`pass2check`'s CANDLES LANDING block is hardcoded `timestamp < '2019-01-01'`, but the
+3,738,473 target is defined by **ledger** (`< 23,424,000`), a range running to
+~2019-04. The two differ by ~1.02M candles and read as a 27% shortfall that does not
+exist. **`~/.bashrc` still has the narrow query** — it should be re-scoped by ledger.
+Same failure mode as the retired `RemovePart` predicate: a check that structurally
+cannot see part of what it checks.
+
+### 4. Two verification methods of my own were flawed
+
+Recorded because both produced false alarms that cost time:
+
+- **Raw row counts as a "nothing deleted" guard.** They drift under background merges
+  on a live cluster: `1h` 2024 fell 576 rows between snapshots purely from RMT
+  collapsing duplicates (that slice holds **26.1M** un-merged duplicates). Content
+  **checksums** were the right instrument and came back identical. Better still is the
+  arithmetic that finally settled it: *final = written + pre-existing*, per table.
+- **`query_log` filtered with an anchored prefix** (`query LIKE 'INSERT INTO …%'`)
+  showed only 5 of 32 statements and suggested the run was incomplete. The logged
+  query text **begins with the leading `--` comment**, so the anchor excluded every
+  commented statement. Use a leading wildcard. `log_queries_probability` is `1`;
+  sampling was never involved.
+
+### 5. Follow-on observation
+
+Years 2015–2021 currently read **doubled** in `15m` because STAGE 1 ran twice (initial
+attempt, then the spill re-run) — identical row counts both times. 2015–2017 have
+already merged back to exactly half; 2018+ will follow. `FINAL` reads are already
+correct. Not a defect, and a useful confirmation that RMT dedup works here.
+
+## Future Work
+
+- ~~**[[0174]]** — `price_ohlcv_15m` holds no 2024/2025 rows, so this is data
+  loss.~~ 🔴 **WRONG, and closed the same day. `price_ohlcv_15m` has a 30-day
+  retention BY DESIGN** — applied by the cleanup worker's `DROP PARTITION`, not
+  by a ClickHouse TTL (`cleanup-worker/src/lib.rs:31-32`). The forever-tables are
+  `1h`/`4h`/`1d`/`1w`/`1M`, exactly the set that has 2024–2025 data.
+  **The filing error was concluding "no `TTL` in `init.sql`" ⇒ "no retention by
+  design"** — when retention here is an external job, the same one this task
+  spent three weeks working around. Residual split to [[0177]].
+
+  ⚠️ **Consequence for this task, recorded so nobody re-files it:** the pre-roll
+  wrote **159.22M rows / 6.97 GiB** into `15m`, and **all of it will be dropped
+  when cleanup is re-enabled.** That is correct — `15m` is scaffolding for
+  building `1h`; the durable record is `1h` and coarser, which is what §Issues
+  Encountered and the ACs above verify.
+- **[[0177]]** — six undocumented `price_ohlcv_*_bak` tables (259 MiB, created
+  2026-07-17, a pre-[[0095]] snapshot). `15m_bak` holds 120M rows of 2024–2025
+  15-minute data that exists nowhere else, since the live table is designed to
+  drop it and `1m` for that span is gone. Keep-or-drop decision needed.
+- **Re-enable `prices-production-cleanup`** when the operator chooses — deliberately
+  deferred, see the AC above. Safe now that the coarse tables are durable.
+- **Re-scope `pass2check`'s candle query by ledger** (issue 3). Operator dotfile.
+- **Fix `docs/runbooks/preroll-incremental-presoroban.md`** — issues 1 and 2, plus its
+  "optional boundary repair" is already impossible: it requires the boundary month's
+  Soroban-side `1m`, and `202402` holds nothing after `2024-02-20 17:00`. The
+  activation month/week residual is now **permanent** and the runbook should say so
+  instead of offering a repair that cannot be performed.
 
 ## Out of scope
 
