@@ -91,6 +91,36 @@ history:
       [[0144]] C1 found the same unguarded argMax(close_usd, ...) in all four
       pre-roll scripts, so running the gap pre-roll before [[0145]] lands would
       manufacture a fresh estate of coarse rows with close_usd = 0.
+  - date: 2026-08-11
+    status: active
+    who: okarcz
+    note: >
+      GAP MEASURED AND ITS SOURCE CONFIRMED INTACT - and it has acquired a HARD
+      DEADLINE. Measured on prod while verifying whole-chain coverage after
+      0088's pre-roll: price_ohlcv_1d holds 2026-07-21 (4,848 rows, partial)
+      then NOTHING until 2026-08-03 (12,857). So 2026-07-22 -> 2026-08-02, 12
+      FULL DAYS, are absent from the coarse forever-tables. Everything else from
+      genesis to today is complete: every year 2016-2025 has 12 months, all five
+      forever-tables populated in every year, ledger markers contiguous 3 ->
+      63,352,611 with missing_ledgers = 0, and live ingestion is current
+      (newest 1m candle 0 minutes behind now()).
+      THE SOURCE SURVIVES. price_ohlcv_1m holds every one of the 12 missing days
+      at 149k-413k rows/day, because prices-production-cleanup has been DISABLED
+      since 2026-07-20 - one day before the freeze began. The gap is therefore
+      repairable by a bounded incremental pre-roll over 2026-07-21 -> 2026-08-04.
+      DEADLINE: cleanup drops WHOLE MONTHLY PARTITIONS older than
+      now() - retention (cleanup-worker/src/lib.rs), and 1m retention is 7 DAYS.
+      Re-enabling cleanup today drops partition 202607 entirely, taking 10 of
+      the 12 recoverable days with it and making that part of the gap PERMANENT;
+      202608 (08-01, 08-02) would survive until ~2026-09. So the ordering is
+      now: run the gap pre-roll FIRST, re-enable cleanup AFTER - the same
+      constraint 0088 operated under, for the same reason.
+      The [[0145]] dependency noted in the 2026-08-05 entry is SATISFIED: the
+      guard shipped, and 0088's pre-roll ran the guarded script on 2026-08-11
+      with 0 unguarded argMax(close_usd, t.timestamp) sites verified in the
+      checkout. Generating the windowed variant must preserve that guard - derive
+      it from preroll-incremental.sql by changing ONLY the WHERE bounds, per the
+      procedure now recorded in docs/runbooks/preroll-incremental-presoroban.md.
 ---
 
 # Every coarse OHLCV table has been frozen since 2026-07-21
@@ -559,6 +589,71 @@ Every runbook here still carries the `--profile` form.
 satisfied: cleanup is off, and the `_bak` tables are intact ([[0105]] has not run).
 
 ## Remaining work
+
+> ## 🔴 2026-08-11 — THE GAP PRE-ROLL NOW HAS A DEADLINE
+>
+> The only remaining item is the **07-21 → 08-03 gap pre-roll**, and it has gone
+> from "outstanding" to **time-bounded**, because its source data is on a
+> retention clock that is currently paused by an unrelated decision.
+>
+> **The gap, measured on prod 2026-08-11** (`price_ohlcv_1d`, daily counts):
+>
+> ```
+> 2026-07-21 →  4,848 rows   (partial — the freeze began mid-day)
+> 2026-07-22 ┐
+>     …      │  ABSENT — 12 full days
+> 2026-08-02 ┘
+> 2026-08-03 → 12,857 rows   (recovery)
+> ```
+>
+> **Everything else is complete.** Same check across all of history: every year
+> 2016–2025 has 12 months, all five forever-tables populated in every year,
+> ledger markers contiguous `3 → 63,352,611` with `missing_ledgers = 0`, and
+> live ingestion current (newest `1m` candle **0 minutes** behind `now()`). This
+> 12-day window is the single hole in the entire chain.
+>
+> **✅ The source survives — the gap IS repairable.** `price_ohlcv_1m` holds
+> every one of the 12 missing days at **149k–413k rows/day**, because
+> `prices-production-cleanup` has been DISABLED since **2026-07-20** — one day
+> before the freeze started. A bounded pre-roll over
+> `[2026-07-21, 2026-08-04)` closes it.
+>
+> ### ⏳ Why it is now time-bounded
+>
+> Cleanup drops **whole monthly partitions** older than `now() - retention`
+> (`cleanup-worker/src/lib.rs`), and `1m` retention is **7 days**. Re-enabling it
+> today drops partition `202607` in full:
+>
+> | gap days | partition | fate on cleanup re-enable |
+> |---|---|---|
+> | 07-22 → 07-31 (**10 days**) | `202607` | **dropped — permanently unrecoverable** |
+> | 08-01 → 08-02 (2 days) | `202608` | survives until ~2026-09 |
+>
+> 🔴 **Ordering, and it is the same constraint [[0088]] operated under:**
+> **run the gap pre-roll FIRST, re-enable cleanup AFTER.** Re-enabling first
+> destroys 10 of the 12 recoverable days silently.
+>
+> ### ✅ The [[0145]] dependency is satisfied
+>
+> The 2026-08-05 entry noted this pre-roll was blocked behind 0145, because
+> [[0144]] C1 found unguarded `argMax(close_usd, …)` in all four pre-roll
+> scripts. **That shipped.** 0088's pre-roll ran the guarded
+> `preroll-incremental.sql` on 2026-08-11 with **0 unguarded sites** verified in
+> the checkout it was run from.
+>
+> ⚠️ **Generating the windowed variant must preserve that guard.** Derive it from
+> `preroll-incremental.sql` by changing **only** the `WHERE` bounds — never
+> hand-write the aggregation — and re-verify with
+> `grep -c 'argMax(close_usd, t.timestamp)'` on the generated file. The full
+> procedure, including the syntax-check against a throwaway CH on the pinned
+> version, is now recorded in
+> [`docs/runbooks/preroll-incremental-presoroban.md`](../../../docs/runbooks/preroll-incremental-presoroban.md).
+>
+> ⚠️ Unlike 0088's pre-roll, this window **already holds partial coarse rows**
+> (07-21 has 4,848; 08-03 has 12,857) and the rollup MVs are live-writing there.
+> RMT should resolve in the pre-roll's favour — it aggregates the full bucket, so
+> its `max(version)` is ≥ a partial row's — but that is reasoning, not a
+> measurement, and it should be verified on a single day before the full window.
 
 1. ✅ **DONE 2026-08-05 — the watch period is closed and [[0105]] is unblocked.**
 
