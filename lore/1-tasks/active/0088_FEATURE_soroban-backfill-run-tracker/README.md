@@ -846,9 +846,24 @@ correct. Not a defect, and a useful confirmation that RMT dedup works here.
 
 ## Future Work
 
-- **[[0174]]** — `price_ohlcv_15m` holds **no 2024 or 2025 rows** while `1h`/`1d`/`1M`
-  hold all three years. No TTL exists in `init.sql`, so this is data loss. `4h`/`1w`
-  were never checked, so the extent is unknown. Spawned 2026-08-11.
+- ~~**[[0174]]** — `price_ohlcv_15m` holds no 2024/2025 rows, so this is data
+  loss.~~ 🔴 **WRONG, and closed the same day. `price_ohlcv_15m` has a 30-day
+  retention BY DESIGN** — applied by the cleanup worker's `DROP PARTITION`, not
+  by a ClickHouse TTL (`cleanup-worker/src/lib.rs:31-32`). The forever-tables are
+  `1h`/`4h`/`1d`/`1w`/`1M`, exactly the set that has 2024–2025 data.
+  **The filing error was concluding "no `TTL` in `init.sql`" ⇒ "no retention by
+  design"** — when retention here is an external job, the same one this task
+  spent three weeks working around. Residual split to [[0177]].
+
+  ⚠️ **Consequence for this task, recorded so nobody re-files it:** the pre-roll
+  wrote **159.22M rows / 6.97 GiB** into `15m`, and **all of it will be dropped
+  when cleanup is re-enabled.** That is correct — `15m` is scaffolding for
+  building `1h`; the durable record is `1h` and coarser, which is what §Issues
+  Encountered and the ACs above verify.
+- **[[0177]]** — six undocumented `price_ohlcv_*_bak` tables (259 MiB, created
+  2026-07-17, a pre-[[0095]] snapshot). `15m_bak` holds 120M rows of 2024–2025
+  15-minute data that exists nowhere else, since the live table is designed to
+  drop it and `1m` for that span is gone. Keep-or-drop decision needed.
 - **Re-enable `prices-production-cleanup`** when the operator chooses — deliberately
   deferred, see the AC above. Safe now that the coarse tables are durable.
 - **Re-scope `pass2check`'s candle query by ledger** (issue 3). Operator dotfile.
