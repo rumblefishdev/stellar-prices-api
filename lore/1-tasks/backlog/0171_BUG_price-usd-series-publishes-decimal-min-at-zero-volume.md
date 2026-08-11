@@ -21,6 +21,20 @@ history:
       PRE-EXISTING defect sits underneath and is not peg-specific. Splitting it
       out rather than widening 0165, because the fix requires a contract
       decision with BE, not a guard swap.
+  - date: 2026-08-11
+    status: backlog
+    who: okarcz
+    note: >
+      UNBLOCKED - BE gave the contract decision this task was split out of 0165
+      to obtain: OMIT THE ROW (option 1). Their reasoning: "misses are absent" is
+      what their entire read path assumes (argMax over present rows, NULL when
+      nothing matches), and a published sentinel forces every consumer to know a
+      magic constant forever. That reasoning rejects option 2 as well as option
+      3 - a silently substituted different statistic is the same class of
+      problem. They are adding a close_usd > 0 guard on their side regardless,
+      with ZERO occurrences in their read windows today, so this is insurance on
+      both sides rather than a live incident. Implement HAVING sum(w) > 0 on both
+      grains; the row-count change is now the riskiest part, not the omission.
 ---
 
 # `price_usd_series*` publish `Decimal128::MIN` at zero volume
@@ -88,9 +102,37 @@ records this residual explicitly.
 - Same family as [[0144]]/[[0151]]: a sentinel that is indistinguishable from a
   real reading, in a surface BE consumes directly.
 
-## The decision this needs (do not just patch the symptom)
+## ✅ DECIDED 2026-08-11 — BE chose **option 1, omit the row**
 
-Three candidate behaviours; **the choice is a contract change and needs BE**:
+> *"Omit the row. **'Misses are absent' is the contract our whole read path
+> assumes** — argMax over present rows, NULL when nothing matches. A published
+> sentinel forces every consumer to know a magic constant forever, and this
+> thread is the proof nobody reads release notes in time."*
+> — BE, answering on the [[0165]] re-measurement thread
+
+**This task is no longer blocked**; the contract decision it was split out of
+[[0165]] to obtain has been given. Implement `HAVING sum(w) > 0` (or the
+equivalent) on both grains.
+
+Two things they added that shape the work:
+
+- **They are adding a `close_usd > 0` guard on their side regardless**, and
+  measured **zero occurrences in their read windows today**. So this is
+  insurance on both sides rather than a live incident — which sets the urgency,
+  not the correctness bar. The row count change (⚠️ below) is therefore the
+  riskiest part of the change, not the omission itself.
+- Their reasoning explicitly rejects option 2 as well as option 3: a *silently
+  substituted different statistic* is the same class of problem as a sentinel —
+  a consumer has to know something extra, forever, that no release note reaches
+  them in time to learn.
+
+The original analysis is kept below, since the options and their trade-offs are
+still what the implementation has to honour.
+
+## The decision this needed (do not just patch the symptom)
+
+Three candidate behaviours; **the choice was a contract change and needed BE**
+— ✅ now answered above, **option 1**:
 
 1. **Omit the row.** Most consistent with the documented contract — *"a miss is
    a missing row … never an error and never a dropped row"* — and with §12.3,
@@ -118,7 +160,9 @@ number than a gap.
 
 ## Acceptance Criteria
 
-- [ ] Decision recorded (omit / unweighted / other) with BE's input, and why.
+- [x] Decision recorded (omit / unweighted / other) with BE's input, and why.
+      ✅ **2026-08-11 — OMIT THE ROW**, quoted verbatim above with their
+      reasoning ("misses are absent" is what their whole read path assumes).
 - [ ] Neither grain of `price_usd_series*` can publish a non-positive
       `close_usd`; asserted by **value**, never by `IS NULL`.
 - [ ] `usd_reference*` audited for the same shape and fixed or cleared on

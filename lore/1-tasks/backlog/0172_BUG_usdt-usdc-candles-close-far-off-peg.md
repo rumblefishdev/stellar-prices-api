@@ -21,6 +21,27 @@ history:
       it: arm B contributes 0/0 wherever sum(w) > 0, so every one of these
       values is arithmetically identical to what the old view published. This is
       pre-existing and was simply never looked at.
+  - date: 2026-08-11
+    status: backlog
+    who: okarcz
+    note: >
+      CONFIRMED BY BE INDEPENDENTLY, and WIDER than this task was filed on. They
+      hit it while re-measuring 0165: canonical USDT (GCQTGZQQ...TG6V) publishes
+      method='traded' daily closes of 0.129-0.143 for 08-04 -> 08-10 in
+      price_usd_series. So the defect is in USDT's OWN published identity series,
+      not just the USDT/USDC pair - the 106-pool blast radius understates it, and
+      any consumer reading USDT's USD price reads a wrong number.
+      Their consumer-visible symptom is USDT FLAPPING between $0.14 and $1.00:
+      traded buckets carry this defect while the newest bucket, where USDT does
+      not trade as a base, takes 0165's peg fallback of $1. 0165 does NOT cause
+      this and does not worsen it (arm B contributes 0/0 wherever sum(w) > 0, so
+      every traded value is arithmetically identical to the old view) - it made a
+      uniformly wrong column visibly discontinuous, which is a diagnostic
+      improvement. Describe the symptom as flapping, but do not imply 0165
+      introduced it.
+      BE asked to bump priority; the tag is already priority-high and 0172 is
+      already first in the queue, so what changed is the justification, not the
+      rank.
 ---
 
 # USDT/USDC closes at ~0.14, not ~1.00
@@ -88,6 +109,36 @@ candles producing absurd prices) does not explain it either.
   for id 111. If USDT trades against XLM anywhere, its implied USD price via
   that leg is an independent cross-check.
 
+## 🔴 CONFIRMED BY BE 2026-08-11 — and it is WIDER than this task was filed on
+
+BE hit this independently while re-measuring [[0165]], and their reading
+**escalates the defect on two axes**:
+
+1. **It is not the `USDT/USDC` pair — it is USDT's own published identity
+   series.** They observe canonical USDT (`GCQTGZQQ…TG6V`) publishing
+   `method = 'traded'` daily closes of **0.129–0.143 for 08-04 → 08-10** in
+   `price_usd_series` — the surface they consume directly. This task was filed
+   from the pair; the blast radius is the **asset**. In their words: *"0172 is
+   not 'distortion on those pairs' but a wrong published price for USDT itself;
+   you may want to bump its priority accordingly."*
+2. **A consumer now sees USDT flapping between $0.14 and $1.00.** The traded
+   buckets carry this defect's value while the newest bucket — where USDT does
+   not trade as a base — takes [[0165]]'s peg fallback of `$1`.
+
+⚠️ **0165 does not cause the flapping and does not make the data worse.** Arm B
+contributes `0/0` wherever `sum(w) > 0`, so every traded value is arithmetically
+identical to what the old view published. What 0165 changed is **visibility**: a
+correct `$1` now sits next to a wrong `$0.14` in one series, so a uniformly
+wrong column became a visibly discontinuous one. Describe the symptom as
+*flapping* rather than as a quiet 7× understatement — that is what a consumer
+now reports — but do not let the framing imply 0165 introduced it.
+
+**On BE's "bump its priority":** the tag is *already* `priority-high` and 0172 is
+*already* first in the recorded queue (`0172 → 0170 → 0168 → 0127 → 0128`), so
+there is no re-tagging to do — what their message changes is the **justification
+and the framing**, not the rank. Worth saying plainly when replying, so they
+know it is next rather than merely re-labelled.
+
 ## Blast radius
 
 `close_usd` is what BE multiplies into TVL. If USDT positions are valued at
@@ -95,6 +146,11 @@ candles producing absurd prices) does not explain it either.
 CSV counts **106 pools with a USDT leg, 102 of them priceable** — so these are
 pools that look healthy and are silently wrong, which is worse than the
 never-priced pools [[0165]] fixed.
+
+⚠️ **Update 2026-08-11:** the 106-pool figure now *understates* it, because the
+defect is in the asset's own series (above), not only in pools whose two legs
+are the affected pair. Any consumer reading USDT's USD price — pool-valuing or
+not — reads a wrong number.
 
 ⚠️ It also means **USDT is not a trustworthy control** for peg-related work until
 this is resolved — 0165 used it as one.
