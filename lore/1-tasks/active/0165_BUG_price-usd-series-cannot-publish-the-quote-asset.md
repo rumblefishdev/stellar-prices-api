@@ -115,6 +115,37 @@ history:
       11 unit + 16 CH integration tests green on the 26.3.10.60 pin; the new
       zero-volume test was confirmed to fail with the countIf guard (got
       -1701411834604692300000000) and pass with sum(w) = 0.
+  - date: 2026-08-11
+    status: active
+    who: okarcz
+    note: >
+      BE RE-MEASURED AND CONFIRMED - the last open acceptance criterion is met.
+      Same methodology, same population, 52,494 pools (+125 since the CSV). The
+      canonical-USDC cohort is 1,436 today: priceable_ever 0 -> 1,430 (99.6%),
+      priceable_90d -> 1,089, priceable_48h -> 873, and 745 of the 956 currently
+      active now price. TF/USDC, 224/USDC and the active GOLD/USDC all price. The
+      6 stragglers at ever=0 are blocked by their OTHER leg, so they are genuine
+      0154 territory, not residue of this defect. Overall never-priced pools went
+      2,113 -> 682 (-67.7%), landing on the 67.8% predicted in Blast radius to
+      the decimal.
+      They also settled three other open items. 0171: OMIT THE ROW - "misses are
+      absent" is what their whole read path assumes; carried into 0171, which is
+      no longer blocked. The method column: no impact, every read pins an
+      explicit column list. The $1 placeholder: inside their documented 1%
+      tolerance, 0168 tightens it for free.
+      THE USDT NON-REGRESSION FAILS ON THEIR SIDE - and it is 0172, not this
+      change. Canonical USDT publishes traded closes of 0.129-0.143 for 08-04 ->
+      08-10 with the newest bucket at the peg $1, so a consumer sees Tether
+      flapping between $0.14 and $1.00. That escalates 0172 from "distortion on
+      the USDT/USDC pair" to "a wrong published price for USDT's own identity
+      series"; carried there. Note this does NOT trip the Deploy rollback
+      trigger, which fires only if query 2 returns method='peg' ONLY - it returns
+      both, so the peg arm did not swallow USDT's market data. Do not roll back.
+      Methodology lesson recorded from their decomposition: the 48h coverage
+      figure breathes +-2-3pp week to week (21,313 today vs 22,975 on 08-06 is
+      mostly staleness drift, with this fix contributing +873), so single
+      snapshots must not be compared without pinning the date - which applies to
+      our own 0154 headroom quotes too.
 ---
 
 # `price_usd_series` can never publish USDC
@@ -377,12 +408,96 @@ task ships the following**. Get them wrong and 0168 becomes a rewrite.
       asserts on the **value** (`countIf(toFloat64(close_usd) <= 0) = 0`) rather
       than the vacuous `IS NULL`, which is structurally always 0. The uncovered
       cases are [[0171]].
-- [ ] **BE re-measures**: the 1,433 USDC-legged pools become priceable, and they
-      confirm the count against their own CSV. *Blocked on the prod apply.*
+- [x] **BE re-measures**: the 1,433 USDC-legged pools become priceable, and they
+      confirm the count against their own CSV. ✅ **CONFIRMED 2026-08-11 ~09:00Z**,
+      same methodology and population definition, on 52,494 pools (+125 since the
+      CSV). **This closes the task's last open criterion.**
+
+      | metric | before | after |
+      |---|---|---|
+      | canonical-USDC cohort | 1,433 | 1,436 |
+      | `priceable_ever` | **0** | **1,430 (99.6%)** |
+      | `priceable_90d` | 0 | 1,089 |
+      | `priceable_48h` | 0 | 873 |
+      | of the 956 currently active | 0 | 745 |
+      | **overall never-priced pools** | **2,113** | **682 (−67.7%)** |
+
+      The three named heavy pools all price (`TF/USDC`, `224/USDC`, active
+      `GOLD/USDC`). The **6** stragglers at `ever = 0` are blocked by their
+      *other* leg, not by USDC — i.e. genuine [[0154]] territory, not residue of
+      this defect. The −67.7% lands on the **67.8%** predicted in §Blast radius,
+      to the decimal.
 - [x] [[0154]]'s headroom framing corrected — these pools were never resolver-
       limited and must not be counted as part of the pivot step's win.
       **Already done when 0165 was filed** (`0154:79-84` carves the population
       out explicitly); re-checked 2026-08-10, no further edit needed.
+
+## BE's re-measurement response — 2026-08-11, everything else they said
+
+The confirmation above came with four answers that settle open questions on
+*other* tasks. Recorded here because this is where they were asked.
+
+### 🔴 The USDT non-regression FAILS — and it is [[0172]], not this change
+
+This is the one item that needs action, and it **escalates 0172**. BE observe
+canonical USDT (`GCQTGZQQ…TG6V`) publishing **`method = 'traded'` daily closes of
+0.129–0.143 for 08-04 → 08-10**, with the **newest bucket at the peg `$1`**.
+
+Two things follow that were not previously on the record:
+
+1. **0172 is not "distortion on the USDT/USDC pair".** It is a **wrong published
+   price for USDT's own identity series** in `price_usd_series` — the surface BE
+   consume. 0172 was filed off the pair; its blast radius is the asset.
+2. **0165 and 0172 interact badly, and only in the direction of visibility.**
+   A last-close consumer now sees Tether **flapping between $0.14 and $1.00**,
+   because the traded buckets carry 0172's bad value while the newest
+   (untraded-as-base) bucket takes this task's peg fallback. ⚠️ The peg arm does
+   **not** cause this and does not make the data worse — arm B contributes 0/0
+   wherever `sum(w) > 0`, so every traded value is arithmetically identical to
+   what the old view published. What it does is put a *correct* $1 next to a
+   *wrong* $0.14 in the same series, turning a uniformly-wrong column into a
+   visibly discontinuous one. **That is a diagnostic improvement, not a
+   regression** — but it means 0172 now presents as flapping rather than as a
+   quiet 7× understatement, and it should be described that way.
+
+**BE's ask: bump 0172's priority.** Carried into 0172 with their evidence.
+
+⚠️ Note this against §Deploy's rollback trigger: that trigger fires only if
+query 2 returns **`method = 'peg'` only**. It returns both, so the peg arm did
+not swallow USDT's market data — **do not roll back**. The failure BE report is
+a different one, on a different task, and the deploy check behaved correctly.
+
+### ✅ `method` column — no consumer impact
+
+Every BE read pins an explicit column list ("your own §2 rule, adopted on day
+one"), so appending `method` broke nothing. The `views.sql:273` append-only rule
+plus the pinned-column-list requirement did the job they were written for.
+
+### ✅ The `$1` placeholder is inside their tolerance
+
+~0.1% is well inside BE's documented **1%** tolerance; they take rows as-is and
+[[0168]] tightens it for free. So the placeholder is not accruing consumer debt
+while 0168 waits.
+
+### ✅ [[0171]] — BE gave the contract decision: **omit the row**
+
+Quoted, because it is the whole basis for 0171's fix: *"'Misses are absent' is
+the contract our whole read path assumes — argMax over present rows, NULL when
+nothing matches. A published sentinel forces every consumer to know a magic
+constant forever, and this thread is the proof nobody reads release notes in
+time."* They are adding a `close_usd > 0` guard on their side regardless — zero
+occurrences in their read windows today, so insurance rather than a fix.
+**0171 is no longer blocked on a contract decision.** Carried into 0171.
+
+### ⚠️ Methodology lesson — the 48h coverage number breathes
+
+Their overall 48h coverage read **21,313** today against **22,975** on 08-06,
+which looks like a regression and is not. Decomposed: excluding `method = 'peg'`
+it is **20,440** today vs **23,294** reconstructed as-of 08-06 — so this fix
+contributes **+873** and the remainder is ordinary staleness drift over five
+days. **The 48h figure moves ±2–3pp week to week, so single snapshots must not
+be compared without pinning the date.** Applies to our own coverage reporting as
+much as theirs — [[0154]]'s headroom numbers are quoted from 48h windows.
 
 ## Deploy — operator action, nothing auto-applies
 
