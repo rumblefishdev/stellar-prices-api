@@ -146,6 +146,31 @@ history:
       mostly staleness drift, with this fix contributing +873), so single
       snapshots must not be compared without pinning the date - which applies to
       our own 0154 headroom quotes too.
+  - date: 2026-08-11
+    status: completed
+    who: okarcz
+    note: >
+      COMPLETE - every acceptance criterion met. The last one was the read-surface
+      audit's outstanding prod measurement, taken today: current_price_usd returns
+      0 rows for USDC at the canonical issuer and 10 at other issuers, with USDT
+      and native XLM as positive controls proving the predicate and the literals
+      are sound. That is the issuer-split control from the original diagnosis
+      reproducing on a second, independent surface - asset code fixed,
+      quote-preference the sole variable.
+      Shipped: a zero-weight peg-fill arm unioned BEFORE the aggregation on both
+      grains of price_usd_series, plus an appended `method` provenance column.
+      Live on prod. BE re-measured and confirmed the population: 0 -> 1,430 of
+      1,436 canonical-USDC pools priceable, overall never-priced 2,113 -> 682
+      (-67.7% against the 67.8% predicted).
+      Spawned 0178 for the same defect in current_prices / current_price_usd,
+      deliberately NOT fixed here: that is a refreshable-MV DROP + recreate, the
+      operation that wiped the coarse tables in 0095, so it needs its own
+      rollback plan. 0171 (Decimal128::MIN at zero volume) was spawned earlier
+      from the code review and now has BE's contract decision.
+      NOT fixed by this task and must not be reported as such: 0170
+      (/assets/{USDC}/ohlcv still returns an empty 200 - different code path,
+      a USDC/USDC self-pair) and 0178. Three surfaces carried the USDC hole; this
+      task closed one of them.
 ---
 
 # `price_usd_series` can never publish USDC
@@ -383,9 +408,10 @@ task ships the following**. Get them wrong and 0168 becomes a rewrite.
       confusable — requirement 2. `'oracle'` documented as reserved for 0168.
 - [x] The view header names [[0168]] by ID and states the ~0.1% error and the
       inconsistency with the oracle-tier candles — requirement 3.
-- [~] The other `views.sql` surfaces audited for the same base-only assumption,
-      with the result recorded either way. **Audit done at code level; one prod
-      measurement outstanding.** Results:
+- [x] The other `views.sql` surfaces audited for the same base-only assumption,
+      with the result recorded either way. ✅ **COMPLETE — the outstanding prod
+      measurement was taken 2026-08-11 and confirms the code-level finding.**
+      Results:
       - `usd_reference` / `usd_reference_1h` — **clean.** Both join base *and*
         quote (`views.sql:207,328`) because they are a fixed XLM/USDC pair, not
         a per-asset series.
@@ -396,9 +422,28 @@ task ships the following**. Get them wrong and 0168 becomes a rewrite.
         source` then `GROUP BY asset_id` (`current.sql:125,142`) and
         `quote_asset_id` appears **nowhere** in the MV. So `current_prices` has
         the identical base-only assumption and `/price` cannot return USDC.
-        **Still needs the prod count before acting** (§Deploy), and the fix is
-        scoped out: it is a refreshable-MV DROP + recreate, the operation that
-        wiped the coarse tables in 0095.
+        ✅ **MEASURED ON PROD 2026-08-11 — confirmed, and the issuer-split
+        control reproduces on this surface:**
+
+        | | count |
+        |---|---|
+        | USDC @ canonical issuer | **0** |
+        | USDC @ **any other** issuer | **10** |
+        | USDT @ canonical issuer (control) | 1 |
+        | native XLM (control) | 1 |
+        | total rows | 3,428 |
+
+        The two controls prove the predicate and the hand-copied literals are
+        sound, so the zero is a real absence and not a broken filter. The
+        10-vs-0 issuer split is the same evidence that made the original
+        diagnosis conclusive — asset code held fixed, quote-preference the sole
+        variable — now reproduced on a **second, independent surface**.
+        ⚠️ The usual "absent = didn't trade in 24 h" escape hatch does **not**
+        apply: USDC has zero candles as a base at *any* time (§Evidence), so
+        this absence is structural.
+        **The fix stays scoped out and is filed as [[0178]]** — it is a
+        refreshable-MV DROP + recreate, the operation that wiped the coarse
+        tables in 0095, so it needs its own rollback plan.
 - [x] No `NULL` introduced into either view's `close_usd`. ⚠️ **This AC's
       premise was FALSE and is corrected on the record: there is no NULL edge.**
       `close_usd` is non-Nullable `Decimal(38,14)`, so `CAST` strips the Nullable
