@@ -52,9 +52,12 @@ Per request, from CloudWatch over a representative window (state the window):
 | CloudWatch logs | ingest per invocation | $0.50 / GB |
 
 **ClickHouse is not usage-priced.** It is a fixed monthly box (ADR 0007), so
-per-call cost there is an *allocation*, not a bill. Divide monthly cost by
-monthly request volume and say plainly that is what was done — a marginal-cost
-reading would put it at zero, which is misleading in the other direction.
+per-call cost there is an *allocation*, not a bill. A marginal-cost reading puts
+it at zero, which is misleading in one direction; dividing the whole box cost by
+our request volume is misleading in the other, because **`ch-prod-01` is shared
+with the BE team** — see `docs/runbooks/0136-coarse-rollup-merge-recovery.md:33`.
+Allocate our share (query time is the honest divisor, ingestion and backfill
+dominate the box) and state the basis explicitly next to the number.
 
 Use the **monthly quota** as the multiplier for a fully-drained key, so the
 result is directly comparable to ADR 0010's $0.38.
