@@ -35,19 +35,41 @@ export interface EnvironmentConfig {
 
   // API Gateway (consumed by ApiGatewayStack)
 
-  /** Stage-wide sustained requests per second before API Gateway returns 429. */
-  readonly apiGatewayThrottleRate: number;
-  /** Stage-wide maximum concurrent requests in a short burst above the rate. */
-  readonly apiGatewayThrottleBurst: number;
-  /** Daily request quota for API-key holders (UsagePlan quota.limit). */
-  readonly apiGatewayPartnerDailyQuota: number;
   /**
-   * Per-API-key sustained requests/second (UsagePlan throttle). The §2.1 / §7
-   * contract is 100 req/s per key; this is the value enforced per key holder.
+   * Default per-method sustained requests/second on the stage before API Gateway
+   * returns 429.
+   *
+   * NOT an aggregate across the stage: a per-API per-stage limit is applied per
+   * method, so this value is granted to each method separately. Ten methods at
+   * 200 is ten independent buckets of 200, not 200 shared ten ways.
    */
-  readonly apiKeyRateLimit: number;
-  /** Per-API-key burst limit (UsagePlan throttle). */
-  readonly apiKeyBurstLimit: number;
+  readonly apiGatewayThrottleRate: number;
+  /** Default per-method token-bucket capacity above the rate (same scope). */
+  readonly apiGatewayThrottleBurst: number;
+  /**
+   * Per-key sustained requests/second on the `pricing-api-free` usage plan.
+   *
+   * The design doc's §2.1 / §7 figure was 100 req/s, sized for a key we hand
+   * out deliberately. Task 0157 overrides it: a key anybody can mint by signing
+   * in must not be able to consume the sustained load the whole system is
+   * load-tested against.
+   */
+  readonly pricingApiFreePlanRateLimit: number;
+  /**
+   * Token-bucket capacity for the `pricing-api-free` plan. Refill keeps the sustained
+   * rate at `pricingApiFreePlanRateLimit`; burst only lets the allowance be spent
+   * unevenly — enough that the quickstart's parallel example queries don't 429.
+   */
+  readonly pricingApiFreePlanBurstLimit: number;
+  /**
+   * Monthly request quota for the `pricing-api-free` plan (UsagePlan quota.limit).
+   *
+   * The operative limit a caller actually meets: at the per-second rate a key
+   * could produce ~2.6M requests/month, so the quota binds ~26x harder than the
+   * throttle. The period is in the name because a usage plan carries exactly one
+   * quota — encoding it makes the unit impossible to misread.
+   */
+  readonly pricingApiFreePlanMonthlyQuota: number;
   /**
    * Whether the API Gateway stage response cache (0.5 GB) is enabled. Per-route
    * TTLs are fixed in `ApiGatewayStack` per §2.1.
@@ -264,8 +286,12 @@ export function validateConfig(config: EnvironmentConfig): void {
       `apiGatewayThrottleRate must be a positive integer, got: ${config.apiGatewayThrottleRate}`,
     );
   }
+  // `< 1` for the same reason as the self-service burst check below: errors are
+  // accumulated, so without it an invalid rate of -5 lets a burst of -3 through
+  // unreported (-3 >= -5).
   if (
     !Number.isInteger(config.apiGatewayThrottleBurst) ||
+    config.apiGatewayThrottleBurst < 1 ||
     config.apiGatewayThrottleBurst < config.apiGatewayThrottleRate
   ) {
     errors.push(
@@ -273,24 +299,31 @@ export function validateConfig(config: EnvironmentConfig): void {
     );
   }
   if (
-    !Number.isInteger(config.apiGatewayPartnerDailyQuota) ||
-    config.apiGatewayPartnerDailyQuota < 1
+    !Number.isInteger(config.pricingApiFreePlanRateLimit) ||
+    config.pricingApiFreePlanRateLimit < 1
   ) {
     errors.push(
-      `apiGatewayPartnerDailyQuota must be a positive integer, got: ${config.apiGatewayPartnerDailyQuota}`,
+      `pricingApiFreePlanRateLimit must be a positive integer, got: ${config.pricingApiFreePlanRateLimit}`,
     );
   }
-  if (!Number.isInteger(config.apiKeyRateLimit) || config.apiKeyRateLimit < 1) {
+  // The `< 1` test is not redundant with the rate check below it. Errors are
+  // accumulated, not short-circuited, so with an invalid rate of -10 a burst of
+  // -5 would pass `burst < rate` and go unreported until the rate was fixed.
+  if (
+    !Number.isInteger(config.pricingApiFreePlanBurstLimit) ||
+    config.pricingApiFreePlanBurstLimit < 1 ||
+    config.pricingApiFreePlanBurstLimit < config.pricingApiFreePlanRateLimit
+  ) {
     errors.push(
-      `apiKeyRateLimit must be a positive integer, got: ${config.apiKeyRateLimit}`,
+      `pricingApiFreePlanBurstLimit must be a positive integer >= pricingApiFreePlanRateLimit (${config.pricingApiFreePlanRateLimit}), got: ${config.pricingApiFreePlanBurstLimit}`,
     );
   }
   if (
-    !Number.isInteger(config.apiKeyBurstLimit) ||
-    config.apiKeyBurstLimit < config.apiKeyRateLimit
+    !Number.isInteger(config.pricingApiFreePlanMonthlyQuota) ||
+    config.pricingApiFreePlanMonthlyQuota < 1
   ) {
     errors.push(
-      `apiKeyBurstLimit must be a positive integer >= apiKeyRateLimit (${config.apiKeyRateLimit}), got: ${config.apiKeyBurstLimit}`,
+      `pricingApiFreePlanMonthlyQuota must be a positive integer, got: ${config.pricingApiFreePlanMonthlyQuota}`,
     );
   }
   if (typeof config.apiGatewayCacheEnabled !== 'boolean') {
@@ -329,17 +362,83 @@ export function validateConfig(config: EnvironmentConfig): void {
     }
   }
 
-  // The stage-wide throttle is a hard ceiling across ALL keys, so it must be at
-  // least the advertised per-key rate — otherwise a single key can never reach
-  // its SLA and compliant traffic gets spurious 429s.
-  if (
-    Number.isInteger(config.apiGatewayThrottleRate) &&
-    Number.isInteger(config.apiKeyRateLimit) &&
-    config.apiGatewayThrottleRate < config.apiKeyRateLimit
-  ) {
-    errors.push(
-      `apiGatewayThrottleRate (${config.apiGatewayThrottleRate}) must be >= apiKeyRateLimit (${config.apiKeyRateLimit}) so a single key can reach its per-key SLA`,
-    );
+  // A self-issued key must not be sized anywhere near what the stage hands a
+  // single method — that is the entire reason task 0157 exists. Cap the plan at
+  // one tenth of the stage default, for both rate and burst.
+  //
+  // Read the ratio for what it is: a proportionality guard, NOT a capacity
+  // calculation. A per-method default is not a shared pool that ten keys "fit
+  // under" — every method gets its own bucket, so the plan limit and the method
+  // default never compete for the same tokens. The number 10 is a judgement
+  // call, and its real job is to stop the design doc's 100 req/s being
+  // reinstated by typo: at a default of 200, a rate of 1 passes and 100 does
+  // not. A bare `<=` against the default would not catch it (200 >= 100).
+  //
+  // The only genuinely shared ceiling above the usage plan is the account limit
+  // (10 000 RPS / 5 000 burst in eu-central-1), which nothing here approaches.
+  const MAX_PLAN_SHARE_OF_STAGE_DEFAULT = 10;
+
+  // The floor the ratio implies, stated as its own rule rather than left to be
+  // discovered through an instruction that cannot be followed. A plan limit must
+  // be >= 1, so a stage default below MAX_PLAN_SHARE_OF_STAGE_DEFAULT admits no
+  // legal plan limit at all: the ratio check would report "the maximum is 0"
+  // while the checks above reject anything under 1. Fail here instead, naming
+  // the field that is actually wrong. At 200 this is nowhere near binding, but
+  // an operator clamping the stage throttle to shed load has to stay at or
+  // above 10 — and lower the plan limits with it, not instead of it.
+  const stageFloors: ReadonlyArray<readonly [string, number]> = [
+    ['apiGatewayThrottleRate', config.apiGatewayThrottleRate],
+    ['apiGatewayThrottleBurst', config.apiGatewayThrottleBurst],
+  ];
+  for (const [stageField, stageValue] of stageFloors) {
+    if (
+      Number.isInteger(stageValue) &&
+      stageValue >= 1 &&
+      stageValue < MAX_PLAN_SHARE_OF_STAGE_DEFAULT
+    ) {
+      errors.push(
+        `${stageField} (${stageValue}) must be at least ${MAX_PLAN_SHARE_OF_STAGE_DEFAULT}: ` +
+          `a usage-plan limit may be at most one ${MAX_PLAN_SHARE_OF_STAGE_DEFAULT}th of it and must itself be >= 1, ` +
+          `so a lower stage default leaves no satisfiable plan limit`,
+      );
+    }
+  }
+
+  const planVsStage: ReadonlyArray<readonly [string, number, string, number]> =
+    [
+      [
+        'pricingApiFreePlanRateLimit',
+        config.pricingApiFreePlanRateLimit,
+        'apiGatewayThrottleRate',
+        config.apiGatewayThrottleRate,
+      ],
+      [
+        'pricingApiFreePlanBurstLimit',
+        config.pricingApiFreePlanBurstLimit,
+        'apiGatewayThrottleBurst',
+        config.apiGatewayThrottleBurst,
+      ],
+    ];
+  // Both guards keep this from piling a derived error on top of a primary one:
+  // with a stage rate of -200 the checks above already report it, and "the
+  // maximum is -20" would add noise, not information. The stage-side guard is
+  // the floor check rather than `>= 1` for the same reason — below 10 the floor
+  // check above has already named the problem, and reporting "the maximum is 0"
+  // alongside it would only tell the operator to do something impossible.
+  for (const [planField, planValue, stageField, stageValue] of planVsStage) {
+    if (
+      Number.isInteger(stageValue) &&
+      stageValue >= MAX_PLAN_SHARE_OF_STAGE_DEFAULT &&
+      Number.isInteger(planValue) &&
+      planValue >= 1 &&
+      planValue * MAX_PLAN_SHARE_OF_STAGE_DEFAULT > stageValue
+    ) {
+      errors.push(
+        `${planField} (${planValue}) exceeds one ${MAX_PLAN_SHARE_OF_STAGE_DEFAULT}th of ${stageField} (${stageValue}): ` +
+          `a self-service key must not be sized within an order of magnitude of the stage's default per-method limit, ` +
+          `so the maximum is ${Math.floor(stageValue / MAX_PLAN_SHARE_OF_STAGE_DEFAULT)}`,
+      );
+    }
   }
 
   const api = config.apiHandler;

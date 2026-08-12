@@ -30,7 +30,7 @@ use crate::state::AppState;
          body = ErrorEnvelope),
         (status = 401, description = "Missing or invalid `x-api-key`", body = ErrorEnvelope),
         (status = 403, description = "API key missing, invalid, or not authorized for this API"),
-        (status = 429, description = "Rate limit or daily quota exceeded (API Gateway usage plan)"),
+        (status = 429, description = "Per-key rate limit or monthly quota exceeded (API Gateway usage plan)"),
         (status = 500, description = "Query or upstream failure (`db_error`)", body = ErrorEnvelope),
     )
 )]

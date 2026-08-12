@@ -76,18 +76,22 @@ was opened to answer.
      the test measures latency, not 429s.
 - Instrument: p50/p90/p95/p99, error rate by status class, `X-Cache` hit ratio,
   Lambda duration + cold starts, ClickHouse query time, and API Gateway 4xx/5xx.
-- Use a dedicated API key with its own usage plan so the test cannot exhaust the
-  partner key's daily quota (`apiGatewayPartnerDailyQuota: 10000` — note that
-  100 req/s × 5 min = **30,000 requests**, which *exceeds* that quota; a
-  separate key or a raised quota is mandatory, not optional).
+- Use a dedicated API key with its own usage plan. **Updated by [[0157]]:** there
+  is now exactly one CDK-managed plan, `pricing-api-free-production`, at **1 req/s
+  with a 100 000/month quota**. Both limits make it unusable here — the rate alone
+  means the run measures our own throttle rather than the system, and
+  100 req/s × 5 min = **30,000 requests** would spend nearly a third of the
+  month's allowance per run. A separate plan sized for the run is mandatory, not
+  optional; `docs/runbooks/manual-api-key-tier.md` is the procedure.
 - Publish a report: test plan, environment, raw numbers, graphs, and an explicit
   statement of whether the AC passed.
 
 ## Acceptance Criteria
 
 - [ ] k6 (or Locust) script committed to the repo and runnable from the README
-- [ ] Dedicated load-test API key / usage plan provisioned — the partner key's
-      10,000/day quota is **not** used and is not exhausted by the run
+- [ ] Dedicated load-test API key / usage plan provisioned, sized above 100 req/s
+      — the run does **not** use a key on `pricing-api-free-production` (1 req/s,
+      100 000/month), which would measure our own throttle rather than the system
 - [ ] 100 req/s sustained for 5 minutes on `GET /assets/{id}/price` completes
 - [ ] p95 < 200ms and error rate < 0.1% on the 20-asset spread scenario
 - [ ] Percentiles reported separately for cache hits and cache misses

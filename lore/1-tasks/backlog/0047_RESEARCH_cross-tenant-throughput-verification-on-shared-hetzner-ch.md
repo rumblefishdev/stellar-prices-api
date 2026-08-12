@@ -103,9 +103,12 @@ the architecture". Specifically:
   - **Writes:** ~6 Lambdas × 3 envs, batched HTTP `INSERT` into
     `prices.*` tables, peak ~10-15 req/s per env (per the brief
     §3.2 ask 5).
-  - **Reads:** API gateway → handler Lambdas → CH at ~100 req/s
-    per key (per overview §2.1), aggregating to roughly comparable
-    peak per env.
+  - **Reads:** API gateway → handler Lambdas → CH. [[0157]] caps a
+    self-service key at **1 req/s** (overview §2.1's 100 req/s per key
+    is superseded), so the per-key figure no longer sizes anything —
+    what reaches ClickHouse is bounded by the stage's 200 req/s
+    per-method default across all callers, less whatever the gateway
+    response cache absorbs.
 - CH is a single instance on a single physical host with bounded
   CPU / RAM / IOPS / `max_concurrent_queries`. Caddy is a single
   process with bounded `max_keepalive_conns`.
@@ -144,7 +147,7 @@ Build a write-load and read-load model:
 | Oracle Fetcher (0039) | EventBridge 5min | 1 INSERT per 5min | INSERT into `oracle_prices` (also driven by REFLECTOR events via Ledger Processor) |
 | Asset Discovery (0039) | EventBridge 1hr | 1 small INSERT per hour | UPSERT into `assets` |
 | Cleanup Worker (0039) | EventBridge daily | 1 ALTER TABLE per day | DROP PARTITION (cheap) |
-| API read handlers (0040) | API Gateway | up to ~100 req/s per key | SELECT from `price_ohlcv_*` / `current_prices` / `oracle_prices` |
+| API read handlers (0040) | API Gateway | ≤1 req/s per self-service key ([[0157]]); population bound is the stage's 200 req/s per-method default, minus gateway cache hits | SELECT from `price_ohlcv_*` / `current_prices` / `oracle_prices` |
 
 Aggregate per env, then × 3 envs (dev/staging/prod) where prod
 dominates.

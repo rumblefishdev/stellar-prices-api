@@ -2,9 +2,10 @@
 //!
 //! Ported from BE's `api/src/auth`, trimmed to the API-key path (no JWT /
 //! Turnstile — those are BE's free-tier concern). Keys are compared in constant
-//! time. The per-key 100 req/s throttle lives at the API Gateway usage-plan;
-//! this gate only enforces *presence of a valid key*, as defense-in-depth and
-//! for local/non-gateway runs.
+//! time. The per-key rate limit and monthly quota live at the API Gateway
+//! usage-plan (sized by task 0157, not the design doc's 100 req/s); this gate
+//! only enforces *presence of a valid key*, as defense-in-depth and for
+//! local/non-gateway runs.
 //!
 //! The gate is **armed only when keys are configured** (`API_KEYS` non-empty),
 //! so unconfigured local/dev and the early load test run open. `/health` and

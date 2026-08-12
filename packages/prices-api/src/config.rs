@@ -16,8 +16,9 @@ pub struct AppConfig {
     /// Accepted `X-API-Key` values, parsed from comma-separated `API_KEYS`.
     /// When empty the in-app auth gate is **disarmed** (open) — so local/dev and
     /// the early Phase 2 load test work before keys are provisioned. The
-    /// per-key 100 req/s throttle is enforced at the API Gateway usage-plan
-    /// regardless (ADR 0008). Mirrors BE's deploy-dark gating.
+    /// per-key rate limit and monthly quota are enforced at the API Gateway
+    /// usage-plan regardless (ADR 0008; sized by task 0157 — not the design
+    /// doc's 100 req/s). Mirrors BE's deploy-dark gating.
     pub api_keys: Vec<String>,
 }
 
