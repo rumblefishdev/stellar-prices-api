@@ -4,7 +4,7 @@ title: "Self-service flow — end-to-end verification against production and Tra
 type: TEST
 status: backlog
 related_adr: ["0010"]
-related_tasks: ["0156", "0157", "0158", "0159", "0160", "0161", "0162", "0163", "0170", "0171"]
+related_tasks: ["0156", "0157", "0158", "0159", "0160", "0161", "0162", "0163", "0179", "0180"]
 tags: [layer-test, priority-high, effort-medium, milestone-M3, epic-self-service-onboarding, verification, scf-evidence]
 milestone: 3
 links:
@@ -38,7 +38,7 @@ history:
     status: backlog
     who: akot
     note: >
-      Sequencing recorded: this now runs after [[0170]], not simply "last in
+      Sequencing recorded: this now runs after [[0179]], not simply "last in
       the 0156–0164 set". The evidence must be gathered against the real guild
       — a flow gated on our private `stellar_test` guild is not functional for
       any outside developer, which is what the Tranche 3 criterion asks about.
@@ -53,11 +53,11 @@ Walk the whole path as an outsider would, against production, and write down
 what happened. The epic's five acceptance criteria are all statements about the
 deployed system, not about code — none of them can be closed by a unit test.
 
-## Sequencing — this runs LAST, after [[0170]]
+## Sequencing — this runs LAST, after [[0179]]
 
-**This task must not run until [[0170]] has flipped the production SSM guild ID
+**This task must not run until [[0179]] has flipped the production SSM guild ID
 from `stellar_test` to `897514728459468821`.** Recorded 2026-08-10; the original
-"last task in the 0156–0164 set" framing predates [[0170]] existing.
+"last task in the 0156–0164 set" framing predates [[0179]] existing.
 
 The reason is not tidiness. This task produces the **Tranche 3 evidence** that
 the submission cites, against a reviewer criterion that reads *"self-service API
@@ -147,7 +147,7 @@ record that you did.
 
 Check 11 is the one most likely to be skipped and the most damaging to get
 wrong: the membership test is a *negative* inferred from an undocumented error
-shape ([[0171]] #1), so "Discord returned 429" must never read as "you are not a
+shape ([[0180]] #1), so "Discord returned 429" must never read as "you are not a
 member".
 
 **Checks that are ours rather than the epic's**, because they are the ways this
@@ -172,7 +172,7 @@ fails quietly:
   match** — AWS states no matching semantics for it at all. That makes this
   check *more* important, not less: we are relying on undocumented behaviour
   staying whatever it currently is, so this is the test that would catch AWS
-  changing it under us. [[0171]] measures the actual behaviour.
+  changing it under us. [[0180]] measures the actual behaviour.
 - **A key issued inside the current quota period cannot be reworked.** Distinct
   from the check below: that one covers `last_rotated_at`, this one covers the
   `created_at` fallback, which is the case the original gate let through. Issue a
@@ -205,7 +205,7 @@ omitted is a finding waiting for the reviewer.
 
 - [ ] All fourteen mapped checks executed against production and recorded
       with dates
-- [ ] The evidence run was performed **after** [[0170]]'s SSM flip, against
+- [ ] The evidence run was performed **after** [[0179]]'s SSM flip, against
       guild `897514728459468821` — and the evidence file states which guild it
       ran against, so a reader can tell
 - [ ] If the SSM age threshold was temporarily raised to observe check 10, the

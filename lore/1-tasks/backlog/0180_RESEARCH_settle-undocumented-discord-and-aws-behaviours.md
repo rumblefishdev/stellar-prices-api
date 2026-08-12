@@ -1,10 +1,10 @@
 ---
-id: "0171"
+id: "0180"
 title: "Settle the nine undocumented Discord/AWS behaviours the onboarding design depends on"
 type: RESEARCH
 status: backlog
 related_adr: ["0010"]
-related_tasks: ["0156", "0157", "0158", "0159", "0160", "0170"]
+related_tasks: ["0156", "0157", "0158", "0159", "0160", "0179"]
 tags: [layer-backend, priority-high, effort-small, milestone-M3, epic-self-service-onboarding, discord, aws, api-gateway, spike, blocks-build]
 milestone: 3
 links:
@@ -19,6 +19,16 @@ history:
       documented, and are not. Two of them are stated in those tasks as if they
       were vendor guarantees. All are minutes-cheap to measure once the Discord
       app and `stellar_test` guild exist.
+  - date: 2026-08-12
+    status: backlog
+    who: akot
+    note: >
+      Renumbered 0171 → 0180, alongside 0170 → 0179. PRs #196 and #197 landed a
+      different 0171 (the `Decimal128::MIN` bug) on develop before PR #187
+      merged this one, so both numbers were taken. The rename matters more here
+      than for 0179: `[[0171]]` is cited by id in 0158, 0160, ADR 0010 and the
+      archived 0157, always meaning "the spike measures this" — and the bug it
+      collided with measures nothing.
 ---
 
 # Settle the undocumented behaviours before building on them

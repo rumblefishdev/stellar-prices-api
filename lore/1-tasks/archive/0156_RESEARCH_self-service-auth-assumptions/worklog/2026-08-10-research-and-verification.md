@@ -51,7 +51,7 @@ Nothing was found to be fabricated. Two things were corrected or added:
   `identify` + `guilds.members.read`, never `guilds`.
 - **Account-age minimum on top** (Adam), threshold in SSM.
 - **`stellar_test` guild for build and test** (Adam), production guild
-  integration split out as [[0170]].
+  integration split out as [[0179]].
 - **One active key per account confirmed** — and AWS quota accounting makes it
   structurally required, not just tidy.
 
@@ -76,6 +76,6 @@ Nothing was found to be fabricated. Two things were corrected or added:
 
 ## Follow-ups spawned
 
-- [[0170]] — contact SDF, agree production guild integration, prove it end to end
-- [[0171]] — measure the seven undocumented Discord/AWS behaviours the design
+- [[0179]] — contact SDF, agree production guild integration, prove it end to end
+- [[0180]] — measure the seven undocumented Discord/AWS behaviours the design
   depends on, and correct the two unsourced claims in 0157/0158/0160
