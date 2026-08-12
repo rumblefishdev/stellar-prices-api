@@ -257,8 +257,9 @@ export class ApiGatewayStack extends cdk.Stack {
 
     // Assigning `methodSettings` wholesale REPLACES the default entry CDK
     // renders from `deployOptions.throttlingRateLimit/Burst`, which would drop
-    // it entirely (only the per-key usage-plan limit would remain). Re-declare
-    // it here so the §2.1 figure survives.
+    // it entirely — leaving the per-key usage-plan limit, and above it the
+    // account-level limit, as the only throttles on every method. Re-declare it
+    // here so the §2.1 figure survives.
     //
     // Despite the name, this is NOT an aggregate ceiling across the stage: a
     // per-API per-stage limit is applied per method, so this grants every method
