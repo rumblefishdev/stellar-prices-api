@@ -1,5 +1,5 @@
 ---
-id: "0179"
+id: "0181"
 title: "Rollup leading indicators — pending-mutation age, part counts and view_refreshes exceptions"
 type: FEATURE
 status: backlog
@@ -14,6 +14,11 @@ history:
     status: backlog
     who: okarcz
     note: >
+      Renumbered 0179 → 0181 on 2026-08-12: task 0156's PR #187 merged
+      concurrently and spawned its own 0179 (Stellar Discord / SDF integration).
+      This side renumbered because it was the least-referenced of the two — one
+      inbound link, against ~8 for the Discord task (ADR 0010, 0159, 0162, 0163,
+      0164, 0156's notes).
       Spawned from [[0137]]. The primary freshness signal (per-tier
       `now() - max(timestamp)`) shipped without these three leading indicators
       because they need `system.mutations` and `system.view_refreshes`, whose
