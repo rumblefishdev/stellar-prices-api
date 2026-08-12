@@ -2,7 +2,7 @@
 id: "0157"
 title: "Default key limits: 1 req/s + monthly quota, not the design doc's 100 req/s"
 type: FEATURE
-status: active
+status: completed
 related_adr: ["0008", "0010"]
 related_tasks: ["0121", "0156", "0158", "0160", "0163", "0171"]
 tags: [layer-infra, priority-high, effort-medium, milestone-M3, epic-self-service-onboarding, api-gateway, usage-plan, throttling, cost]
@@ -68,6 +68,31 @@ history:
       updates in place under logical id `ApiUsagePlanDBBE8AB1`, key removed and
       re-added under a new logical id, SSM parameter added. Not yet deployed —
       four ACs stay open until then.
+  - date: 2026-08-12
+    status: completed
+    who: akot
+    note: >
+      Review round on PR #195, eight findings fixed: plan family renamed to
+      `pricing-api-free`; the runbook's `items[0]` key lookup replaced with a
+      printed candidate table (key names are not unique, and `nameQuery` has no
+      documented matching semantics); profile re-export plus a guard on the
+      literal string `None`; two stale §6 throttling tables; the load-test
+      criteria; the grant-facing milestone evidence; the Makefile rotation
+      warning; and a self-contradictory comment. Merged to develop as 2de35d8
+      via PR #187 — PR #195 was merged into that branch rather than into develop,
+      so 0156 and 0157 landed as one squash commit.
+  - date: 2026-08-12
+    status: completed
+    who: akot
+    note: >
+      Completed with three acceptance criteria open, noted here so the archive is
+      not read as full verification. All three assert behaviour of the deployed
+      system and none has been observed: a key throttled at 1 req/s with a
+      decrementing monthly quota, the quickstart's parallel queries clearing the
+      burst limit (0163 unwritten), and epic AC 5. The code is merged, not
+      deployed — nothing has changed in AWS, and the production key rotates on
+      the first deploy that carries this. Calendar alignment of the quota reset
+      also stays unmeasured; it is design intent here and 0171 #7 owns it.
 ---
 
 # Default key limits: 1 req/s + monthly quota
