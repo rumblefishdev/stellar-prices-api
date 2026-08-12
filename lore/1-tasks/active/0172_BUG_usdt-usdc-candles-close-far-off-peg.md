@@ -2,7 +2,7 @@
 id: "0172"
 title: "USDT/USDC candles close at ~0.14 instead of ~1.00 — 891 days of real, high-volume trades at an impossible stablecoin price"
 type: BUG
-status: backlog
+status: active
 related_adr: []
 related_tasks: ["0165", "0139", "0116", "0144", "0026"]
 tags:
@@ -42,6 +42,15 @@ history:
       BE asked to bump priority; the tag is already priority-high and 0172 is
       already first in the queue, so what changed is the justification, not the
       rank.
+  - date: 2026-08-12
+    status: active
+    who: okarcz
+    note: >
+      Activated. Picked up straight after 0137/0136 closed. Starting from the
+      two open leads recorded below - writer-side asset_id assignment/
+      renumbering, and whether the raw trades agree with the candle
+      (volume_quote / volume_base vs close). The two falsified hypotheses
+      (reader-side asset_id collision; XLM misattribution) are NOT to be re-run.
 ---
 
 # USDT/USDC closes at ~0.14, not ~1.00
