@@ -89,7 +89,7 @@ const API_DOCS_THROTTLE = { rate: 10, burst: 20 } as const;
  * prefix of its own, so there is no `/v1/v1` double-prefix.
  *
  * - **Auth / rate limit**: data routes set `apiKeyRequired: true`; the UsagePlan
- *   enforces the self-service per-key rate (`selfServicePlanRateLimit`) + a
+ *   enforces the self-service per-key rate (`pricingApiFreePlanRateLimit`) + a
  *   monthly quota (task 0157, overriding the design doc's §2.1/§7 100 req/s).
  *   `GET /health` stays a keyless mock (cheapest liveness probe), and
  *   `GET /api-docs-json` is a keyless proxy to the handler (task 0124 — public
@@ -348,7 +348,7 @@ export class ApiGatewayStack extends cdk.Stack {
     }
 
     // ---------------------------------------------------------------
-    // UsagePlan + API key — self-service tier (task 0157).
+    // UsagePlan + API key — the `pricing-api-free` tier (task 0157).
     //
     // One plan, because a key belongs to exactly one plan per stage and
     // self-service is the default (and currently only) way to hold a key.
@@ -362,11 +362,11 @@ export class ApiGatewayStack extends cdk.Stack {
     const usagePlan = this.api.addUsagePlan('UsagePlan', {
       name: `pricing-api-free-${config.envName}`,
       throttle: {
-        rateLimit: config.selfServicePlanRateLimit,
-        burstLimit: config.selfServicePlanBurstLimit,
+        rateLimit: config.pricingApiFreePlanRateLimit,
+        burstLimit: config.pricingApiFreePlanBurstLimit,
       },
       quota: {
-        limit: config.selfServicePlanMonthlyQuota,
+        limit: config.pricingApiFreePlanMonthlyQuota,
         period: apigateway.Period.MONTH,
       },
     });
@@ -376,7 +376,7 @@ export class ApiGatewayStack extends cdk.Stack {
     //
     // 1. Changing the CONSTRUCT ID changes the logical id, so CloudFormation sees
     //    a removal and an unrelated addition. That is what task 0157 did
-    //    (`PartnerApiKey` -> `SelfServiceApiKey`).
+    //    (`PartnerApiKey` -> `PricingApiFreeApiKey`).
     // 2. Changing `apiKeyName` alone is a Replacement — AWS::ApiGateway::ApiKey
     //    .Name is "update requires replacement".
     //
@@ -389,8 +389,15 @@ export class ApiGatewayStack extends cdk.Stack {
     // What matters is the part that is the same either way: the key gets a new
     // value and every holder is cut off. Deliberate here; touch neither line
     // casually.
-    const apiKey = this.api.addApiKey('SelfServiceApiKey', {
-      apiKeyName: `prices-${config.envName}-selfservice-key`,
+    //
+    // This is the ONLY key on the plan that CloudFormation manages, and it is
+    // ours — the one verification curls authenticate with. Task 0160 mints a key
+    // per Discord user onto the same plan via the SDK at runtime; those never
+    // appear in this template and no deploy can touch them. So "a key on
+    // pricing-api-free" is not the same thing as "this key", and only this one
+    // has no owning row in 0158's registry.
+    const apiKey = this.api.addApiKey('PricingApiFreeApiKey', {
+      apiKeyName: `pricing-api-free-${config.envName}-key`,
     });
     usagePlan.addApiKey(apiKey);
 

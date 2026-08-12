@@ -445,7 +445,7 @@ export class ComputeStack extends cdk.Stack {
     // the ledger processor. No `API_KEYS` env → the in-app key gate stays
     // DISARMED; the per-key rate and monthly quota are enforced at the API
     // Gateway usage plan (ADR 0008; limits set by task 0157 —
-    // `selfServicePlanRateLimit` / `selfServicePlanMonthlyQuota`, not the design
+    // `pricingApiFreePlanRateLimit` / `pricingApiFreePlanMonthlyQuota`, not the design
     // doc's 100 req/s). `reservedConcurrentExecutions` is the optional SLO escape
     // hatch (only set when configured). API Gateway grants invoke via the
     // integration's resource policy (no role-cycle, unlike the SQS ESM above).
