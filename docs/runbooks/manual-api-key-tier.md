@@ -80,8 +80,10 @@ terminal — but it did cross the wire and it lands in CLI debug output if you e
 rerun this with `--debug`. Do not.
 
 ```bash
+KEY_NAME="prices-production-${CUSTOMER}-key-$(date -u +%Y%m%dT%H%M%SZ)"
+
 KEY_ID=$(aws apigateway create-api-key \
-  --name "prices-production-${CUSTOMER}-key" \
+  --name "${KEY_NAME}" \
   --description "Manual tier for ${CUSTOMER}" \
   --enabled \
   --tags "Project=stellar-prices-api,ManagedBy=manual,Customer=${CUSTOMER}" \
@@ -91,7 +93,29 @@ aws apigateway create-usage-plan-key \
   --usage-plan-id "${PLAN_ID}" \
   --key-id "${KEY_ID}" \
   --key-type API_KEY
+
+echo "key name: ${KEY_NAME}"
+echo "key id:   ${KEY_ID}"
 ```
+
+**The timestamp in the name is load-bearing, not decoration.** Rotation (step 7)
+runs step 2 again while the old key is still alive, and AWS does not enforce unique
+key names — so without it the customer would briefly hold two keys called the same
+thing, and every later lookup by name would have two right answers. With it, each
+key names the instant it was issued and stays distinguishable for the rest of its
+life. Record the full name in the registry table, not just the id.
+
+It is to the second (`20260812T142317Z`), not to the day, and that is deliberate.
+The likeliest rotation is not a scheduled one — it is a leak, rotated the same
+hour, and rotated again an hour later because the first replacement went to the
+wrong inbox. A day-granular suffix collides in exactly that case, which is the one
+the suffix exists for.
+
+The prefix `prices-production-${CUSTOMER}-` is also what keeps hand-made keys out
+of the way of the self-service ones: task 0160 issues those as
+`discord-<userId>-key` and looks them up by exact name. **Never give a manual key
+a `discord-` name**, and never give a self-service user a customer slug that
+collides with one here.
 
 **3. Check the stage ceiling still holds.**
 
@@ -137,15 +161,67 @@ table at the bottom of this file — that is what it is for. If the row is missi
 or stale, recover them by name:
 
 ```bash
+export AWS_PROFILE=<shared-account-profile>
+export AWS_REGION=eu-central-1
 export CUSTOMER=acme
+
 PLAN_ID=$(aws apigateway get-usage-plans \
   --query "items[?name=='prices-production-${CUSTOMER}-plan'].id | [0]" --output text)
-KEY_ID=$(aws apigateway get-api-keys --name-query "prices-production-${CUSTOMER}-key" \
-  --query 'items[0].id' --output text)
+
+# `--output text` prints the literal string "None" for an empty result, not an
+# empty string — so `[ -z "$PLAN_ID" ]` does NOT catch it, and an unguarded
+# "None" flows into `update-usage-plan --usage-plan-id None` below. Unset it so
+# the failure lands on the command that needs it, not three snippets later.
+[ "${PLAN_ID}" = "None" ] && {
+  echo "no plan for ${CUSTOMER} — wrong AWS_PROFILE/AWS_REGION, or the plan is gone"
+  unset PLAN_ID
+}
+
+# Keys: list every candidate and choose by hand. Do NOT collapse this to
+# `items[0].id` — see below for why there can legitimately be more than one.
+aws apigateway get-api-keys \
+  --query "items[?starts_with(name, 'prices-production-${CUSTOMER}-key')].[id,name,createdDate]" \
+  --output table
+
+export KEY_ID=<the id from the row you want>
 ```
 
 `get-api-keys` without `--include-values` does not return the secret. Then fix
 the registry row.
+
+The two `export`s at the top are not ceremony: this section runs in a fresh
+shell, and against a different default profile every lookup here quietly targets
+the wrong account. Both failures then say the same thing in different ways — the
+plan resolves to `None`, and the key table comes back empty — which is why the
+guard names the profile rather than the plan. Nothing mutates in the wrong
+account either way (`--usage-plan-id None` is rejected), but the error you get
+from AWS points nowhere near the actual cause.
+
+The guard warns and unsets rather than exiting, because these snippets are pasted
+into an interactive shell where `exit` would close your terminal. Unsetting is the
+part that matters: a warning scrolls past — the table below it draws the eye — and
+`PLAN_ID` would otherwise still hold `"None"` for every snippet after this one.
+Unset, the next command that needs it fails on an empty argument, at the point of
+use, saying so.
+
+Two reasons this lists rather than picks, both of which have bitten elsewhere in
+this project:
+
+- **A key name is not unique.** AWS enforces uniqueness only on key _values_;
+  `name` is optional and duplicable. During a rotation (step 7) the customer
+  deliberately holds two keys at once, so a lookup by name has two right answers
+  and no way to rank them. Taking the first would suspend or delete whichever one
+  the API happened to list first — including, in the worst case, disabling the
+  _new_ key while the old one keeps serving.
+- **`--name-query` has no documented matching semantics**, which is why it does
+  not appear above at all. AWS's entire description of it is _"The name of queried
+  API keys."_ — not documented as exact, as a prefix, or as anything else (task
+  0156, 2026-08-10; measured by task 0171). `starts_with` is JMESPath, evaluated
+  client-side, and does exactly what it says. Task 0160 reaches the same
+  conclusion for the automated issuance path and comments it so nobody deletes it
+  as redundant; the same applies here. If you re-add `--name-query` as a
+  server-side prefilter, keep the client-side filter — it is the only part that
+  decides.
 
 **Adjust limits** — safe, no key rotation:
 
@@ -168,17 +244,25 @@ quota is preserved across a disable/enable cycle.
 
 **7. Rotate** — create a new key (step 2), attach it, confirm the customer is
 using it, then delete the old one. Capture the outgoing key's id **before** you
-create the replacement, or you will be picking it out of a list by name:
+create the replacement: once both exist, a lookup by name has two answers.
 
 ```bash
-OLD_KEY_ID=$(aws apigateway get-api-keys \
-  --name-query "prices-production-${CUSTOMER}-key" \
-  --query 'items[0].id' --output text)
+# From the registry row. If it is missing or stale, list candidates with the
+# snippet above and choose the older one by createdDate — never items[0].
+OLD_KEY_ID=<id of the key being replaced>
 
-# ... run step 2 to create the new key, hand it over, confirm it is in use ...
+# ... run step 2 to create the new key; it carries the issuing instant, so the
+#     two never share a name — even rotating twice within the hour. Hand it
+#     over, confirm it is in use ...
 
 aws apigateway delete-api-key --api-key "${OLD_KEY_ID}"
 ```
+
+Update the registry row in the same sitting as step 2, not after the customer
+confirms. The window in which two keys exist is exactly the window in which
+somebody might have to suspend one of them in a hurry — a leak, a missed payment
+— and a registry that still names only the old key is worse than useless then,
+because it looks authoritative.
 
 `get-api-keys` without `--include-values` is the safe way to look a key up: the
 plural form defaults to omitting the secret. Do **not** reach for
@@ -223,6 +307,12 @@ Then delete the row from the table below.
   one usage plan **per stage** — so on this API there is no "also attach it to
   the bigger plan". (A key may sit in up to 10 plans overall, across different
   stages; that does not help here.)
+- **Nothing stops you creating two keys with the same name.** Only key _values_
+  are unique in API Gateway; `name` is optional and duplicable, and there is no
+  documented way to ask "which of these is the current one". That is why step 2
+  timestamps the name, why the registry carries the name as well as the id, and
+  why every lookup in this file lists candidates instead of taking the first. If
+  you find yourself typing `items[0]`, stop.
 - **Quotas are best-effort.** AWS: _"Usage plan throttling and quotas are not hard
   limits… Don't rely on usage plan quotas or throttling to control costs."_ For a
   tier large enough to matter financially, back it with AWS Budgets.
@@ -245,8 +335,13 @@ Then delete the row from the table below.
 
 ## Issued manual keys
 
-Keep this current. One row per plan; delete the row when the plan is deleted.
+Keep this current. One row per **key**, so a customer mid-rotation has two;
+delete a row when its key is deleted, and the last one when the plan goes.
 
-| Customer     | Plan name | Plan ID | Key ID | Limits | Issued | Issued by |
-| ------------ | --------- | ------- | ------ | ------ | ------ | --------- |
-| _(none yet)_ |           |         |        |        |        |           |
+| Customer     | Plan name | Plan ID | Key name | Key ID | Limits | Issued | Issued by |
+| ------------ | --------- | ------- | -------- | ------ | ------ | ------ | --------- |
+| _(none yet)_ |           |         |          |        |        |        |           |
+
+**Key name** is a column because key names are not unique and now carry the issuing
+instant — during a rotation two rows may share a customer, and the name is what
+tells them apart. Keep both rows until the old key is deleted.

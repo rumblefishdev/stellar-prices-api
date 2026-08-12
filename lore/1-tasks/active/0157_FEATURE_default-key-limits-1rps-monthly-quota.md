@@ -60,7 +60,7 @@ history:
       Changed: `types.ts`, `api-gateway-stack.ts`, `envs/production.json`,
       `infra/README.md` SSM contract, plus a new
       `docs/runbooks/manual-api-key-tier.md`. Three config fields renamed to
-      `selfServicePlan*`; six were planned, the one-plan outcome halved it.
+      `pricingApiFreePlan*`; six were planned, the one-plan outcome halved it.
       Key rotated in the same change (construct-id change → remove + add, not
       `ApiKey.Name` replacement) after its value was exposed by
       `get-usage-plan-keys` during the usage check.
@@ -171,14 +171,49 @@ conclusion stands on the remaining arguments.
   | --- | --- |
   | `apiGatewayThrottleRate` / `apiGatewayThrottleBurst` | unchanged — stage-level, not a plan |
   | `apiGatewayCacheEnabled`, `apiBaseUrl` | unchanged |
-  | `apiKeyRateLimit` | `selfServicePlanRateLimit` (1) |
-  | `apiKeyBurstLimit` | `selfServicePlanBurstLimit` (5) |
-  | `apiGatewayPartnerDailyQuota` | `selfServicePlanMonthlyQuota` (100000) |
+  | `apiKeyRateLimit` | `pricingApiFreePlanRateLimit` (1) |
+  | `apiKeyBurstLimit` | `pricingApiFreePlanBurstLimit` (5) |
+  | `apiGatewayPartnerDailyQuota` | `pricingApiFreePlanMonthlyQuota` (100000) |
 
   Three renames, no additions — the one-plan outcome collapsed the six fields
   this table originally listed into three. The reason to rename here rather than
   later: `apiKeyRateLimit` reads as a global property of API keys, when it is one
   plan's rate.
+
+  **Corrected 2026-08-12, from review of [[PR 195]].** The right-hand column read
+  `selfServicePlan*` until Adam noticed it did not match the plan. The rule says
+  `<plan>Plan*`, and `<plan>` has to be the plan's **actual name** or the rule
+  buys nothing — the fields were named after "self-service", which is how you
+  *obtain* a key, while the plan they configure is called `pricing-api-free`. One
+  plan therefore carried two names, split down the middle: `pricing-api-free` on
+  everything AWS sees (`UsagePlanName`, the SSM parameter and its construct id),
+  `selfService*` on everything the repo sees (config fields, key construct, key
+  name).
+
+  Worth recording that the rename that *was* reasoned about got a table, a date
+  and a rationale, while `pricing-api-free` itself arrived with none of the three
+  — no epic mention, no Design Decision, no row here. It is now the settled
+  family name by Adam's decision (2026-08-12); "self-service" stays in prose for
+  the concept — a key anybody can mint by signing in — and never as a resource or
+  field name. Everything the plan owns now reads the same way:
+
+  | | |
+  | --- | --- |
+  | Usage plan | `pricing-api-free-<env>` (construct `UsagePlan`, logical id unchanged) |
+  | SSM parameter | `/prices/<env>/pricing-api-free-plan-id` (construct `PricingApiFreePlanIdParam`) |
+  | Config fields | `pricingApiFreePlanRateLimit` / `…BurstLimit` / `…MonthlyQuota` |
+  | API key | `pricing-api-free-<env>-key` (construct `PricingApiFreeApiKey`) |
+
+  The key was the one real decision in that list rather than a mechanical
+  follow-through, because it is the only entry whose name could reasonably have
+  come from its *function* instead of its plan — it is ours, the one verification
+  curls use, and after [[0160]] it will be one of many keys on this plan and the
+  only one CloudFormation manages or that has no owning row in [[0158]]'s
+  registry. Adam chose the family name; that distinction is therefore carried by
+  a comment at the construct instead, so nobody later goes looking for its
+  registry row. Free to do here either way: this task already destroys and
+  recreates that key, so the second rename rides along on a rotation that was
+  already paid for.
 
   The quota period stays in the name (`MonthlyQuota`) on purpose: a usage plan
   carries exactly one quota, so encoding the unit makes it impossible to misread.
@@ -193,10 +228,13 @@ conclusion stands on the remaining arguments.
   `AWS::ApiGateway::ApiKey.Name` *is* replacement, but **that is not the
   mechanism that rotated the key here** *(corrected 2026-08-11 from the synthesized
   template)*. The construct id changed too (`PartnerApiKey` →
-  `SelfServiceApiKey`), which changes the logical id — so CloudFormation sees
-  `ApiPartnerApiKey8034B29D` removed and `ApiSelfServiceApiKey90815276` added,
+  `PricingApiFreeApiKey`), which changes the logical id — so CloudFormation sees
+  `ApiPartnerApiKey8034B29D` removed and `ApiPricingApiFreeApiKey04E49C4B` added,
   two unrelated resources, and `Name`'s replacement semantics never come into
-  play. The outcome is identical (new value, old key destroyed); the CFN verb is
+  play. *(The construct id was `SelfServiceApiKey` until 2026-08-12; the naming
+  correction below changed which logical id appears on the right-hand side, not
+  what CloudFormation does — it is one remove + one add either way, so the
+  deploy impact is unchanged.)* The outcome is identical (new value, old key destroyed); the CFN verb is
   remove+add, not Replacement. Both paths delete the old resource only in the
   post-success cleanup phase, so neither opens a window where a valid key is
   rejected.
@@ -289,8 +327,27 @@ conclusion stands on the remaining arguments.
 - [x] Manual higher-tier runbook written — `docs/runbooks/manual-api-key-tier.md`
 - [ ] Epic AC 5 satisfied: default limits are 1 req/s + monthly quota, not the
       design doc's 100 req/s *(code done; closes on deploy)*
-- [ ] `docs/scf/milestone-1-evidence.md:795` states 100 req/s as a delivered
-      property — must be reconciled with the new limit before this task closes
+- [x] `docs/scf/milestone-1-evidence.md:795` states 100 req/s as a delivered
+      property — reconciled 2026-08-12 with a dated *Superseded* note rather than
+      a rewrite. The paragraph records the configuration the milestone was
+      evidenced against; editing the number in place would turn a grant-facing
+      record of what was true into a statement of what is true now. What the
+      paragraph is offered as evidence of — gateway-enforced key auth — is
+      untouched by this task.
+- [x] The §6 performance tables state the new per-key limit. **Found in review,
+      2026-08-12** ([[PR 195]]): the 429 sweep was described as complete, but the
+      row `Request throttling (100/s per API key, 1000/s global burst)` survived
+      in *two* places — `docs/prices-api-general-overview.md:1096` and
+      `docs/database-schema/database-schema-overview.md:1800`. The second is the
+      worse of the two: this task had already rewritten that file's "Read rate"
+      row to `≤1 req/s per key`, and that row cites **§8.2 as its source** — the
+      very table still saying 100/s. The doc contradicted itself in a file the
+      task had edited. Both rows now also drop the "1000/s global burst" figure,
+      which Design Decision 5b retired.
+      The pointer at `prices-api-general-overview.md:164` is removed rather than
+      redirected: it named §2.1/§7, but line 164 *is* in §2.1 (so it pointed at
+      itself) and §7 states no numeric limit. With §6 corrected there is no
+      longer a section for it to point at.
 
 ## Design Decisions
 
@@ -384,10 +441,119 @@ conclusion stands on the remaining arguments.
    the coupling gives `apiGatewayThrottleRate` an implied floor of 10 — not
    binding at 200, but a constraint on anyone dialling the stage throttle down.
 
+   **That third consequence is now a check of its own** *(2026-08-12, from review
+   of [[PR 195]])*. Leaving the floor implicit meant it surfaced as an
+   instruction nobody could follow: an operator clamping `apiGatewayThrottleRate`
+   to 5 to shed load during an incident got `pricingApiFreePlanRateLimit (1) …
+   so the maximum is 0`, while the positive-integer check rejects anything below
+   1 — synth failing with two rules that contradict each other and no way out.
+   The ratio was never the thing that was wrong there; the stage value was. So
+   the floor is asserted directly (`apiGatewayThrottleRate`/`Burst` ≥ 10, naming
+   why), and the ratio loop's stage-side guard is raised from `>= 1` to the same
+   floor. Below 10 exactly one error now fires, against the field that actually
+   has to change. The noise-avoidance rationale is unchanged — this is the same
+   principle the `>= 1` guards already encoded, applied to a case that had been
+   documented in a comment instead of enforced.
+
 7. **`docs/runbooks/manual-api-key-tier.md` states the drift trade-off
    explicitly.** A hand-made plan does not appear in `cdk diff` and nobody reviews
    it, so the runbook carries a registry table and makes recording the resource a
    required step rather than an afterthought.
+
+8. **Nothing in the runbook may resolve a key by taking the first match**
+   *(2026-08-12, from review of [[PR 195]])*. The recovery snippet read
+   `get-api-keys --name-query … --query 'items[0].id'`, and rotation re-ran the
+   issue step under the *same* key name — so during the overlap the customer holds
+   two keys called the same thing and `items[0]` picks one of them for reasons
+   nobody can state. The failure that matters is not cosmetic: a customer stops
+   paying mid-rotation, the operator recovers `KEY_ID` by name and runs "Suspend
+   without destroying", and disables the **new** key while the old one keeps
+   serving.
+
+   Two facts the repo had already established, in tasks nobody thought to
+   re-read while writing this runbook:
+
+   - **[[0158]]: an API key name is not unique.** AWS enforces uniqueness on key
+     *values* only; `name` is optional and duplicable, and AWS will not maintain
+     the invariant for us.
+   - **[[0156]]: `--name-query` has no documented matching semantics.** The whole
+     of AWS's description is *"The name of queried API keys."* — not exact, not a
+     prefix, nothing. The review that found this finding called it "a prefix
+     match, which widens it further"; that is the claim 0156 retired on
+     2026-08-10, and its correction makes the finding *stronger* rather than
+     weaker — the set `items[0]` indexes into is not merely wider than expected,
+     it is undefined.
+
+   The fix is not new invention: [[0160]] hit the identical problem on the
+   automated path and settled on client-side exact matching, commented so it is
+   not later deleted as redundant. The runbook was already doing that for the
+   *plan* (`items[?name=='…']`) two lines above the key lookup that wasn't — so
+   the change extends an idiom already in the file. Three parts: lookups list
+   candidates with `starts_with` + `createdDate` and make the operator choose;
+   step 2 timestamps the key name so two keys never collide in the first place;
+   the registry gains a **Key name** column and becomes one row per key rather
+   than per plan.
+
+   The suffix was rejected earlier in the review discussion on the grounds
+   that it "widens the prefix match" — wrong order of operations, and worth
+   recording because the reasoning rested on the same undocumented behaviour it
+   was trying to avoid. Once lookups match client-side, the suffix is safe:
+   `name=='…-key'` does not match `…-key-20260812T142317Z`, and the explicit
+   `starts_with` shows both with their timestamps.
+
+   **The suffix is to the second, not to the day** *(corrected 2026-08-12, later
+   the same review)*. It was written `date -u +%Y%m%d` first, and both this entry
+   and the runbook then claimed two keys "never" collide — which day-granularity
+   does not deliver. The case it fails is not a corner: the likeliest rotation is
+   not a scheduled one but a leak, rotated within the hour, and rotated again
+   when the first replacement goes to the wrong inbox. That is the same day, so a
+   day suffix reproduces exactly the duplicate-name state the suffix exists to
+   prevent — and it would do so at the moment the operator is least able to
+   reason carefully. `%Y%m%dT%H%M%SZ` costs one format string and makes the
+   absolute claim true.
+
+   Also written down while here, as cheap insurance rather than a finding: the
+   `discord-` prefix is reserved for [[0160]]'s keys and manual keys must never
+   use it. [[0164]] already tests prefix collisions *within* the self-service
+   namespace (snowflakes are 17–19 digits, so one user id can prefix another);
+   nothing tested across the two namespaces because nobody had declared them
+   disjoint.
+
+9. **The runbook's second half re-exports the AWS profile, and guards the one
+   remaining `None`** *(2026-08-12, same review)*. "Change or revoke" states in its
+   own first sentence that it runs in a shell with none of step 1's variables, then
+   re-exported only `CUSTOMER` — so against a different default profile every
+   lookup in it quietly targets the wrong account.
+
+   Worth recording *why this was fixed second*. Taken on its own the finding is
+   low: nothing mutates in the wrong account, because `--usage-plan-id None` is
+   rejected. It was deferred once on that basis. What changed is Design Decision
+   8: replacing the key lookup with a printed table removed one of the two silent
+   paths outright — a wrong profile now shows up as an empty table, which an
+   operator sees. That left `PLAN_ID` as the only place a failure could still pass
+   itself off as a value, so the guard stopped being a patch over a snippet that
+   hid failures and became the smaller job of bringing one path up to the standard
+   the other already met.
+
+   The AWS CLI detail is the reusable part, and it is verified rather than
+   asserted: `--output text` prints the literal four-character string `None` for an
+   empty result, so `[ -z "$VAR" ]` does **not** catch it. Expect it again in
+   [[0160]]'s operational procedures. The guard warns rather than exits — the
+   snippets are pasted into an interactive shell, where `return` is invalid and
+   `exit` would close the operator's terminal.
+
+   **It also unsets the variable** *(added 2026-08-12, later the same review)*.
+   Warning alone left `PLAN_ID="None"` live in the shell, and a warning is exactly
+   what gets scrolled past — the printed key table immediately below it is what
+   the operator is looking at. Unsetting keeps the interactive-shell constraint
+   above intact while moving the failure to the point of use: the next command
+   that needs a plan id fails on an empty argument instead of asking AWS about a
+   plan named `None` several snippets later. This is the same principle as
+   Design Decision 8 — a failure must not be able to present itself as a value.
+
+   Also corrected here: the note explaining the new lookup still described
+   `--name-query` as "a cheap server-side prefilter", which the rewritten snippet
+   no longer uses at all.
 
 ## Notes
 

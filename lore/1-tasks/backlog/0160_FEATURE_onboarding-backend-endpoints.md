@@ -123,9 +123,9 @@ period, one quota.
   response would hand one user another user's key. Set `cachingEnabled: false`
   on every portal method and `Cache-Control: no-store` on every response.
 - **IAM scoped to the resources it needs**: `apigateway:POST` on `/apikeys`
-  and on `/usageplans/{selfServicePlanId}/keys`, `GET` on **`/apikeys`** (the
+  and on `/usageplans/{pricingApiFreePlanId}/keys`, `GET` on **`/apikeys`** (the
   collection — the reconciler lists it), on `/apikeys/{id}` and on
-  `/usageplans/{selfServicePlanId}/usage`, `DELETE` on `/apikeys/{id}`. Nothing
+  `/usageplans/{pricingApiFreePlanId}/usage`, `DELETE` on `/apikeys/{id}`. Nothing
   wildcard — Tranche 3 AC 6 audits exactly this.
   The collection-level `GET` is not optional: without it every issue path and
   the reveal-path recovery below fail at runtime with `AccessDenied`, because

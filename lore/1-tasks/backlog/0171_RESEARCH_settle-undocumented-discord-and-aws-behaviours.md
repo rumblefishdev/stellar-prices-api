@@ -89,6 +89,10 @@ nobody has written yet — the cheapest possible moment to check them.
    **Action:** measure it, and either way keep the client-side exact-match
    filter — it is load-bearing, not defence in depth. Update the reasoning in
    both tasks so nobody later "simplifies" the filter away.
+   `docs/runbooks/manual-api-key-tier.md` reasons about this too ([[0157]]): it
+   dropped `--name-query` for client-side `starts_with` on the same grounds, and
+   explicitly invites re-adding it as a server-side prefilter. Whatever is
+   measured here decides whether that invitation stands.
 
 7. **The monthly quota reset instant and timezone.**
    **This is a correction.** [[0157]]/[[0158]]/[[0160]] state "1st of the month,
@@ -120,8 +124,9 @@ nobody has written yet — the cheapest possible moment to check them.
 - [ ] Items 1-4 measured against `stellar_test` and a screening-off scratch
       guild, results written down with the date
 - [ ] Consent screen captured with and without `guilds.members.read`
-- [ ] `nameQuery` semantics measured; [[0158]] and [[0160]] updated so the
-      exact-match filter is documented as load-bearing rather than redundant
+- [ ] `nameQuery` semantics measured; [[0158]], [[0160]] and
+      `docs/runbooks/manual-api-key-tier.md` updated so the client-side filter is
+      documented as load-bearing rather than redundant
 - [ ] Quota rollover instant measured; [[0157]]/[[0158]]/[[0160]] corrected to
       stop presenting "00:00 UTC on the 1st" as AWS-documented behaviour
 - [ ] `enabled=false` effect on usage counters measured and recorded against
