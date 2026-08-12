@@ -510,7 +510,20 @@ export class ObservabilityStack extends cdk.Stack {
                 period: cdk.Duration.minutes(15),
               }),
               threshold,
-              evaluationPeriods: 1,
+              // M-of-N (1 of 2) rather than 1-of-1, so a single missed publish
+              // cannot flip the alarm back to OK.
+              //
+              // The period equals the probe cadence, so with 1-of-1 any probe
+              // outage — bad grant, CH unreachable, sustained throttle — makes
+              // every datum go missing, NOT_BREACHING scores that healthy, and
+              // ALL SEVEN tier alarms send an OK action. That is seven
+              // "recovered" messages into Slack for tiers that are still frozen,
+              // arriving before the probe's own `-errors` alarm fires. Requiring
+              // only 1 breaching datapoint out of 2 keeps a real breach latched
+              // across one missed cycle while still alarming on the first bad
+              // reading. (`sdexPushFreshnessAlarm` has the same 1-of-1 shape;
+              // the difference here is that the blast radius is 7×.)
+              evaluationPeriods: 2,
               datapointsToAlarm: 1,
               comparisonOperator:
                 cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,

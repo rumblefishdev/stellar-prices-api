@@ -71,6 +71,17 @@ and can ship alone.
   Settle ownership before building — the 0137 acceptance criterion was written
   as "here or in 0109, without duplicating each other".
 
+## Also carried here: the coarsest-tier empty hole
+
+[[0137]] synthesises a breaching sentinel for a tier that is empty **while a
+coarser tier is populated** — which is what stops a tier emptied by retention
+mid-freeze from reading as recovered. `price_ohlcv_1M` has no coarser tier, so
+an empty `1M` cannot be caught that way and its alarm can never fire.
+
+Low severity (`1M` is the least load-bearing tier and any real freeze shows up in
+the finer tiers first), but it needs a different signal — a row-count metric, or
+comparing `1M`'s newest bucket against `1w`'s.
+
 ## Acceptance Criteria
 
 - [ ] Readability of `system.mutations` and `system.view_refreshes` by the scoped

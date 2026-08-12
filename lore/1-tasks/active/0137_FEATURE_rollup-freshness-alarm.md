@@ -205,6 +205,50 @@ before trusting the synth, per the [[0141]] stale-asset trap.
    `ROLLUP_TIERS`, and a synth-time validator that rejects the config outright.
    ⚠️ `1M` buckets are weeks-attributed-by-start, so the width is ~31 d, not 30.
 
+### Emerged (from code review, PR #199)
+
+9. 🔴 **The empty-tier gate created a false-RECOVERY, and that is worse than the
+   false-fire it prevented.** Review finding 1, confirmed. `price_ohlcv_15m` is
+   retained 30 days and `_1m` 7 days by `cleanup-worker` dropping partitions
+   (`cleanup-worker/src/lib.rs:31-32`). A 0136-style freeze alarms correctly at
+   first — then cleanup drops the last partition, the table goes **empty**, the
+   gate emits no datum, `NOT_BREACHING` scores that healthy, and the alarm
+   transitions to **OK, announcing a recovery into Slack while the tier is still
+   frozen.** A tier emptied by a `DETACH`/`ATTACH` could likewise never alarm.
+   That is the 0137 blind spot rebuilt one layer up.
+   **Fix — but not the one the review proposed.** "Publish a breaching sentinel
+   for empty tiers" would page on all seven alarms during bootstrap, and keep
+   `1M` firing for up to a month, since a new environment legitimately has empty
+   coarse tiers. Data flows fine → coarse, so a coarser tier can only hold data
+   if every finer tier did first, which gives a rule with no such false positive:
+   > **an empty tier is anomalous iff some COARSER tier is populated.**
+   Fresh env → nothing published → OK. Bootstrap (`1m` filling, coarse tiers not
+   yet rolled) → no coarser tier populated → nothing synthesised. `15m` emptied
+   by retention mid-freeze while the forever-tables hold history → sentinel →
+   **alarm stays firing.** ⚠️ Known limit: `1M` has no coarser tier, so an empty
+   `1M` cannot be caught this way — carried to [[0179]].
+10. **Alarm floors were bucket width; the real healthy peak is bucket +
+    feeding-MV refresh.** Review finding 2, confirmed against `rollups.sql`
+    (`1d→1w` and `1w→1M` are both `REFRESH EVERY 1 DAY`). A bucket cannot appear
+    until its feeding MV next runs, so `1w = 8 d` cleared the old floor while
+    false-firing weekly. Floor is now `bucket + mv_refresh`, and the documented
+    headroom is corrected — it had **overstated** the true margin.
+    ⚠️ **The review's `1M` example was slightly off and the correction matters.**
+    It called `1M = 40 d` a false-firing config; measured, `1M`'s real peak is
+    **38 d** — 31 d month + **6 d** until a week actually *starts* in the month
+    (buckets are weeks-attributed-by-start) + 1 d MV refresh — so 40 d is
+    genuinely, if thinly, safe. The floor encodes 38 d and the validator boundary
+    was verified: 38 d rejected, 39 d accepted. `1M` is the tightest tier at 7 d
+    of headroom.
+11. **Per-tier alarms are now 1-of-2, not 1-of-1.** Review finding 3, confirmed.
+    With the period equal to the probe cadence, a single probe outage makes every
+    datum go missing and `NOT_BREACHING` flips **all seven** alarms to OK — seven
+    "recovered" messages for tiers that are still frozen, arriving *before* the
+    probe's own `-errors` alarm fires. `evaluationPeriods: 2` /
+    `datapointsToAlarm: 1` latches a real breach across one missed cycle while
+    still alarming on the first bad reading. Pre-existing shape shared with
+    `sdexPushFreshnessAlarm`; not changed there, since the blast radius is 1×.
+
 ### Emerged
 
 2. **A dedicated probe Lambda, reversing the task's stated preference.** Decided

@@ -137,11 +137,31 @@ async fn freshness_query_executes_deserializes_and_gates_empty_tiers() {
         bound("price_ohlcv_1h")
     );
 
-    // The shaped metrics the probe publishes.
+    // The shaped metrics the probe publishes. `1m` and `1h` are measured; `15m`
+    // sits BETWEEN them and is empty while a coarser tier (`1h`) holds data, so
+    // it is synthesised as breaching rather than silently skipped — otherwise a
+    // tier emptied by retention mid-freeze would read as recovered. `4h`/`1d`/
+    // `1w`/`1M` are coarser than everything populated, so they stay absent.
     let metrics = lag_metrics(&rows);
-    assert_eq!(metrics.len(), 2);
-    assert_eq!(metrics[0].table, "price_ohlcv_1h");
-    assert_eq!(metrics[0].value, stalled as f64);
+    let published: Vec<&str> = metrics.iter().map(|m| m.table.as_str()).collect();
+    assert_eq!(
+        published,
+        vec!["price_ohlcv_15m", "price_ohlcv_1h", "price_ohlcv_1m"],
+        "expected the two measured tiers plus a synthesised 15m"
+    );
+    let by = |t: &str| {
+        metrics
+            .iter()
+            .find(|m| m.table == t)
+            .unwrap_or_else(|| panic!("{t} published"))
+            .value
+    };
+    assert_eq!(by("price_ohlcv_1h"), stalled as f64);
+    assert_eq!(by("price_ohlcv_1m"), fresh as f64);
+    assert_eq!(
+        by("price_ohlcv_15m"),
+        rollup_freshness_probe::EMPTY_TIER_SENTINEL_SECONDS as f64
+    );
 
     // --- Fresh-environment end state: every tier empty → zero rows -----------
     // No datum at all, so the NOT_BREACHING alarms stay OK rather than all seven
@@ -156,7 +176,12 @@ async fn freshness_query_executes_deserializes_and_gates_empty_tiers() {
         .expect("freshness query must still execute with zero matching rows");
     assert!(
         rows.is_empty(),
-        "all tiers empty ⇒ no metric published (fresh env stays OK), got {rows:?}"
+        "all tiers empty ⇒ no rows from the query, got {rows:?}"
+    );
+    assert!(
+        lag_metrics(&rows).is_empty(),
+        "all tiers empty ⇒ nothing published at all, not even sentinels — a fresh \
+         environment must not page on seven alarms at once"
     );
 }
 

@@ -45,6 +45,15 @@ pub const METRIC_NAMESPACE: &str = "Prices/Rollup";
 /// the CloudWatch side.
 pub const METRIC_NAME: &str = "RollupLagSeconds";
 
+/// Lag published for a tier that is **empty when it should not be**.
+///
+/// Chosen to exceed every bound in [`ROLLUP_TIERS`] by an order of magnitude, so
+/// it unambiguously breaches whatever threshold the operator has tuned, and is
+/// obviously synthetic in a CloudWatch graph rather than looking like a real
+/// measurement. See [`lag_metrics`] for when it is emitted — an empty tier is
+/// *not* automatically anomalous.
+pub const EMPTY_TIER_SENTINEL_SECONDS: i64 = 10 * 365 * 86_400;
+
 /// One OHLCV granularity and the age bound beyond which its data is considered
 /// stale.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,12 +61,31 @@ pub struct RollupTier {
     /// Unqualified table name. The probe binds its client to the `prices`
     /// database, so the query references these unqualified (see [`freshness_query`]).
     pub table: &'static str,
-    /// Width of one bucket in this tier, in seconds. Not a threshold — it is the
-    /// floor the threshold must clear, and the reason the coarse bounds look so
-    /// generous. See the module note on [`ROLLUP_TIERS`].
+    /// Width of one bucket in this tier, in seconds. Not a threshold — it is
+    /// part of the floor the threshold must clear. See the note on
+    /// [`ROLLUP_TIERS`].
     pub bucket_seconds: i64,
+    /// Refresh interval of the materialized view that *feeds* this tier
+    /// (`schema/rollups.sql`), in seconds. The other half of the floor: a bucket
+    /// is not merely `bucket_seconds` late in the worst case, it is that plus
+    /// however long the feeding MV waits before it runs. `price_ohlcv_1m` is
+    /// written by ingestion rather than by an MV, so its value is 0.
+    pub mv_refresh_seconds: i64,
+    /// Extra delay before this tier's newest bucket can exist at all, beyond
+    /// bucket width and MV refresh. Zero for every tier except `price_ohlcv_1M`
+    /// — see [`ROLLUP_TIERS`] for why that one needs six days.
+    pub alignment_slack_seconds: i64,
     /// Alarm threshold: publish-to-breach age in seconds.
     pub lag_bound_seconds: i64,
+}
+
+impl RollupTier {
+    /// Worst-case lag a **healthy** tier reaches: one full bucket width, plus one
+    /// refresh interval of the MV feeding it, plus any bucket-alignment slack.
+    /// Any bound at or below this false-fires on ordinary cadence, forever.
+    pub const fn healthy_peak_seconds(&self) -> i64 {
+        self.bucket_seconds + self.mv_refresh_seconds + self.alignment_slack_seconds
+    }
 }
 
 /// The seven granularities, with their lag bounds and the rationale AC #5
@@ -72,61 +100,93 @@ pub struct RollupTier {
 /// Any bound at or below the bucket width therefore false-fires once per bucket,
 /// every bucket, forever.
 ///
-/// Each bound is `bucket_seconds` plus headroom for rollup latency:
+/// The healthy peak is **not** just the bucket width — it is the bucket width
+/// plus the refresh interval of the MV feeding the tier (`schema/rollups.sql`),
+/// because the bucket cannot appear until that MV next runs:
 ///
-/// | tier | bucket | bound | headroom |
-/// |---|---|---|---|
-/// | `price_ohlcv_1m` | 1 min | 15 min | 14 min |
-/// | `price_ohlcv_15m` | 15 min | 1 h | 45 min |
-/// | `price_ohlcv_1h` | 1 h | 3 h | 2 h |
-/// | `price_ohlcv_4h` | 4 h | 12 h | 8 h |
-/// | `price_ohlcv_1d` | 1 d | 48 h | 24 h |
-/// | `price_ohlcv_1w` | 7 d | 10 d | 3 d |
-/// | `price_ohlcv_1M` | ~31 d | 45 d | 14 d |
+/// | tier | bucket | feeding MV | healthy peak | bound | true headroom |
+/// |---|---|---|---|---|---|
+/// | `price_ohlcv_1m` | 1 min | *(ingestion)* | 1 min | 15 min | 14 min |
+/// | `price_ohlcv_15m` | 15 min | 1 min | 16 min | 1 h | 44 min |
+/// | `price_ohlcv_1h` | 1 h | 15 min | 1 h 15 min | 3 h | 1 h 45 min |
+/// | `price_ohlcv_4h` | 4 h | 1 h | 5 h | 12 h | 7 h |
+/// | `price_ohlcv_1d` | 1 d | 4 h | 28 h | 48 h | 20 h |
+/// | `price_ohlcv_1w` | 7 d | 1 d | 8 d | 10 d | 2 d |
+/// | `price_ohlcv_1M` | ~31 d | 1 d | **38 d** | 45 d | 7 d |
 ///
-/// ⚠️ **`1M` buckets are weeks-attributed-by-start, not calendar months**, so a
-/// `1M` bucket can span up to ~31 days. The 45-day bound is sized off that, not
-/// off a 30-day month.
+/// ⚠️ **`1M` carries six extra days of alignment slack**, which is why its peak
+/// is 38 d and not 32 d. Buckets are weeks-attributed-by-start, not calendar
+/// months: a month's bucket does not exist until a week actually *starts* inside
+/// that month, and since weeks start every 7 days that can be up to 6 days into
+/// the month. Until then the newest bucket is still the previous month's, so the
+/// lag is `6 d + previous month length + MV refresh`. It is the tightest tier
+/// here — 7 d of headroom against a 45 d bound — so treat any proposal to lower
+/// it with suspicion.
 ///
 /// The bounds are deliberately loose. This alarm exists to catch *a number that
 /// stopped moving* — 0136 ran for nine days — not to measure rollup latency. A
 /// tight bound that pages on ordinary cadence jitter would be turned off, and an
 /// alarm that is off is the state 0137 was filed to fix. Task 0104 owns the
 /// cadence-vs-window question; these bounds are set not to contradict it.
+/// ⚠️ **Order is load-bearing: fine → coarse.** [`lag_metrics`] relies on it to
+/// decide whether an empty tier is anomalous.
 pub const ROLLUP_TIERS: &[RollupTier] = &[
     RollupTier {
         table: "price_ohlcv_1m",
         bucket_seconds: 60,
+        // Written directly by ingestion, not by a rollup MV.
+        mv_refresh_seconds: 0,
+        alignment_slack_seconds: 0,
         lag_bound_seconds: 15 * 60,
     },
     RollupTier {
         table: "price_ohlcv_15m",
         bucket_seconds: 15 * 60,
+        // mv_ohlcv_1m_to_15m REFRESH EVERY 1 MINUTE
+        mv_refresh_seconds: 60,
+        alignment_slack_seconds: 0,
         lag_bound_seconds: 60 * 60,
     },
     RollupTier {
         table: "price_ohlcv_1h",
         bucket_seconds: 60 * 60,
+        // mv_ohlcv_15m_to_1h REFRESH EVERY 15 MINUTE
+        mv_refresh_seconds: 15 * 60,
+        alignment_slack_seconds: 0,
         lag_bound_seconds: 3 * 60 * 60,
     },
     RollupTier {
         table: "price_ohlcv_4h",
         bucket_seconds: 4 * 60 * 60,
+        // mv_ohlcv_1h_to_4h REFRESH EVERY 1 HOUR
+        mv_refresh_seconds: 60 * 60,
+        alignment_slack_seconds: 0,
         lag_bound_seconds: 12 * 60 * 60,
     },
     RollupTier {
         table: "price_ohlcv_1d",
         bucket_seconds: 86_400,
+        // mv_ohlcv_4h_to_1d REFRESH EVERY 4 HOUR
+        mv_refresh_seconds: 4 * 60 * 60,
+        alignment_slack_seconds: 0,
         lag_bound_seconds: 48 * 60 * 60,
     },
     RollupTier {
         table: "price_ohlcv_1w",
         bucket_seconds: 7 * 86_400,
+        // mv_ohlcv_1d_to_1w REFRESH EVERY 1 DAY
+        mv_refresh_seconds: 86_400,
+        alignment_slack_seconds: 0,
         lag_bound_seconds: 10 * 86_400,
     },
     RollupTier {
         table: "price_ohlcv_1M",
         bucket_seconds: 31 * 86_400,
+        // mv_ohlcv_1w_to_1M REFRESH EVERY 1 DAY
+        mv_refresh_seconds: 86_400,
+        // A month's 1M bucket does not exist until a week actually STARTS inside
+        // that month, which can be up to 6 days in.
+        alignment_slack_seconds: 6 * 86_400,
         lag_bound_seconds: 45 * 86_400,
     },
 ];
@@ -147,15 +207,80 @@ pub struct Metric {
     pub value: f64,
 }
 
-/// Map the queried per-tier lags to CloudWatch data — the lag in seconds,
-/// verbatim.
+/// Map the queried per-tier lags to CloudWatch data, and synthesise a breaching
+/// datum for any tier that is **empty when it should not be**.
+///
+/// ## Why an empty tier cannot simply be skipped
+///
+/// [`freshness_query`] emits no row for a tier with zero rows, and the alarms are
+/// `treatMissingData: NOT_BREACHING`. Publishing nothing for an empty tier
+/// therefore scores it **healthy** — which re-opens a version of the very blind
+/// spot task 0137 exists to close:
+///
+/// - `price_ohlcv_15m` is retained for **30 days** and `price_ohlcv_1m` for
+///   **7 days**, by `cleanup-worker` dropping whole monthly partitions. A
+///   0136-style freeze alarms correctly at first, but once cleanup has dropped
+///   the last remaining partition the table is *empty*, the datum disappears,
+///   and the alarm transitions back to **OK — firing a false "recovered" into
+///   Slack while the tier is still frozen.**
+/// - A coarse tier left empty by a `DETACH`/`ATTACH` recovery, or an MV that was
+///   never created, would likewise never be able to alarm.
+///
+/// ## But an empty tier is not automatically broken either
+///
+/// A freshly-provisioned environment has every tier empty, and stays that way
+/// for the coarse tiers for a long time — `price_ohlcv_1M` cannot have a bucket
+/// until a week *starts* inside the current month. Treating "empty" as
+/// "breaching" would page on all seven alarms during bootstrap and keep `1M`
+/// firing for up to a month.
+///
+/// ## The rule
+///
+/// Data flows fine → coarse, so a coarser tier can only hold data if every finer
+/// tier held data first. Therefore:
+///
+/// > **An empty tier is anomalous if and only if some COARSER tier is populated.**
+///
+/// - fresh environment, everything empty → nothing published → all OK ✅
+/// - bootstrap: `1m` filling, coarse tiers not yet rolled → no coarser tier is
+///   populated → nothing synthesised → no false page ✅
+/// - `15m` frozen past its 30-day retention until empty, while `1h`/`1d`/`1w`
+///   still hold history → a coarser tier IS populated → sentinel → **the alarm
+///   stays firing instead of falsely recovering** ✅
+/// - `1d` emptied by a botched `DETACH`/`ATTACH` while `1w`/`1M` are intact →
+///   sentinel ✅
+///
+/// ⚠️ **Known limit: the coarsest tier (`price_ohlcv_1M`) has no coarser tier**,
+/// so an empty `1M` can never be flagged this way. Catching that needs a
+/// different signal — see task 0179.
 pub fn lag_metrics(rows: &[TableLag]) -> Vec<Metric> {
-    rows.iter()
+    let populated = |table: &str| rows.iter().any(|r| r.table_name == table);
+
+    let mut metrics: Vec<Metric> = rows
+        .iter()
         .map(|row| Metric {
             table: row.table_name.clone(),
             value: row.lag_seconds as f64,
         })
-        .collect()
+        .collect();
+
+    for (i, tier) in ROLLUP_TIERS.iter().enumerate() {
+        if populated(tier.table) {
+            continue;
+        }
+        // ROLLUP_TIERS is ordered fine → coarse, so everything after `i` is
+        // coarser than this tier.
+        let coarser_is_populated = ROLLUP_TIERS[i + 1..].iter().any(|t| populated(t.table));
+        if coarser_is_populated {
+            metrics.push(Metric {
+                table: tier.table.to_string(),
+                value: EMPTY_TIER_SENTINEL_SECONDS as f64,
+            });
+        }
+    }
+
+    metrics.sort_by(|a, b| a.table.cmp(&b.table));
+    metrics
 }
 
 /// Build the SQL that reads every tier's rollup lag in one round-trip.
@@ -272,30 +397,122 @@ mod tests {
 
     #[test]
     fn lag_maps_verbatim() {
-        let rows = vec![TableLag {
-            table_name: "price_ohlcv_1h".to_string(),
-            lag_seconds: 1_728_000,
-        }];
+        // Every tier populated, so no sentinel is synthesised and each measured
+        // lag passes through unchanged.
+        let rows: Vec<TableLag> = ROLLUP_TIERS
+            .iter()
+            .enumerate()
+            .map(|(i, tier)| TableLag {
+                table_name: tier.table.to_string(),
+                lag_seconds: 100 + i as i64,
+            })
+            .collect();
         let m = lag_metrics(&rows);
-        assert_eq!(m.len(), 1);
-        assert_eq!(m[0].table, "price_ohlcv_1h");
-        assert_eq!(m[0].value, 1_728_000.0);
+        assert_eq!(m.len(), ROLLUP_TIERS.len());
+        for (i, tier) in ROLLUP_TIERS.iter().enumerate() {
+            let got = m
+                .iter()
+                .find(|x| x.table == tier.table)
+                .expect("tier present");
+            assert_eq!(got.value, (100 + i as i64) as f64);
+        }
     }
 
     #[test]
-    fn every_bound_exceeds_its_bucket_width() {
+    fn every_bound_exceeds_its_healthy_peak() {
         // The sawtooth invariant. `timestamp` is the bucket START, so a healthy
-        // tier's lag climbs to one full bucket width before the next bucket
-        // opens. A bound at or below the width false-fires once per bucket,
+        // tier's lag climbs to one full bucket width — PLUS the refresh interval
+        // of the MV feeding it, since the bucket cannot appear until that MV
+        // next runs. A bound at or below that false-fires once per bucket,
         // forever — which is how an alarm gets muted, and a muted alarm is the
         // state 0137 exists to fix.
         for tier in ROLLUP_TIERS {
             assert!(
-                tier.lag_bound_seconds > tier.bucket_seconds,
-                "{}: bound {}s must exceed bucket width {}s",
+                tier.lag_bound_seconds > tier.healthy_peak_seconds(),
+                "{}: bound {}s must exceed healthy peak {}s (bucket {}s + MV refresh {}s)",
                 tier.table,
                 tier.lag_bound_seconds,
-                tier.bucket_seconds
+                tier.healthy_peak_seconds(),
+                tier.bucket_seconds,
+                tier.mv_refresh_seconds
+            );
+        }
+    }
+
+    #[test]
+    fn sentinel_breaches_every_bound() {
+        // The synthesised empty-tier value has to breach whatever threshold the
+        // operator tuned, or the sentinel is decorative.
+        for tier in ROLLUP_TIERS {
+            assert!(
+                EMPTY_TIER_SENTINEL_SECONDS > tier.lag_bound_seconds,
+                "sentinel must breach {}'s bound",
+                tier.table
+            );
+        }
+    }
+
+    #[test]
+    fn fresh_environment_publishes_nothing() {
+        // Every tier empty: a newly provisioned environment. Publishing a
+        // breaching sentinel here would page on all seven alarms at once.
+        assert!(lag_metrics(&[]).is_empty());
+    }
+
+    #[test]
+    fn bootstrap_does_not_synthesise_for_unrolled_coarse_tiers() {
+        // `1m` is filling but nothing has rolled up yet. Every empty tier is
+        // COARSER than the only populated one, so none is anomalous.
+        let rows = vec![TableLag {
+            table_name: "price_ohlcv_1m".to_string(),
+            lag_seconds: 120,
+        }];
+        let m = lag_metrics(&rows);
+        assert_eq!(m.len(), 1, "bootstrap must not synthesise sentinels: {m:?}");
+        assert_eq!(m[0].table, "price_ohlcv_1m");
+    }
+
+    #[test]
+    fn emptied_fine_tier_still_breaches_when_coarser_tiers_hold_data() {
+        // The false-recovery this rule exists to prevent: `15m` froze, cleanup
+        // dropped its last partition (30-day retention), so the query returns no
+        // row for it — while the forever-tables still hold history. Without the
+        // sentinel the alarm would flip to OK and announce a recovery that did
+        // not happen.
+        let rows = vec![
+            TableLag {
+                table_name: "price_ohlcv_1h".to_string(),
+                lag_seconds: 40 * 86_400,
+            },
+            TableLag {
+                table_name: "price_ohlcv_1d".to_string(),
+                lag_seconds: 40 * 86_400,
+            },
+        ];
+        let m = lag_metrics(&rows);
+        let fifteen = m
+            .iter()
+            .find(|x| x.table == "price_ohlcv_15m")
+            .expect("emptied 15m must still publish a datum");
+        assert_eq!(fifteen.value, EMPTY_TIER_SENTINEL_SECONDS as f64);
+        // `1m` is finer than the populated `1h`, so it is flagged too.
+        assert!(m.iter().any(|x| x.table == "price_ohlcv_1m"));
+        // `1w`/`1M` are COARSER than everything populated — they may simply not
+        // have rolled yet, so they must NOT be synthesised.
+        assert!(!m.iter().any(|x| x.table == "price_ohlcv_1w"));
+        assert!(!m.iter().any(|x| x.table == "price_ohlcv_1M"));
+    }
+
+    #[test]
+    fn tiers_are_ordered_fine_to_coarse() {
+        // lag_metrics' "is any COARSER tier populated" test is positional, so a
+        // reordering of ROLLUP_TIERS would silently invert the rule.
+        for pair in ROLLUP_TIERS.windows(2) {
+            assert!(
+                pair[1].bucket_seconds > pair[0].bucket_seconds,
+                "{} must be coarser than {}",
+                pair[1].table,
+                pair[0].table
             );
         }
     }
