@@ -291,9 +291,28 @@ before trusting the synth, per the [[0141]] stale-asset trap.
 Both are genuinely blocked on things this task cannot do, not descoped:
 
 - **Fire-test after deploy** (AC 4). Deliberately not run — infra work here is
-  prepare-only. Cheapest fire-test without waiting for a real freeze: set one
-  tier's threshold to a value below its current lag, deploy, confirm Slack, then
-  restore. Do it on `1M`, whose 45-day bound makes an accidental page harmless.
+  prepare-only.
+  ⚠️ **Do NOT fire-test by lowering a threshold.** That was the original plan and
+  it does not work: the synth validator (§Design Decisions 1/10) rejects any
+  threshold at or below the tier's healthy peak, so `1M` cannot be set below
+  38 d and no value that would force a breach will pass validation. It also
+  needs a deploy to set and a second to restore.
+  **Fire-test by publishing a synthetic datum instead** — no config change, no
+  deploy, and it exercises the real namespace/metric/dimension triple, so it
+  catches a dimension mismatch that forcing the alarm state with
+  `set-alarm-state` would not:
+
+  ```bash
+  aws cloudwatch put-metric-data \
+    --namespace Prices/Rollup --metric-name RollupLagSeconds \
+    --dimensions Environment=production,Table=price_ohlcv_1M \
+    --value 9999999 --unit Seconds
+  ```
+
+  `1M` is the right tier to use: its 45-day bound means a real breach is not
+  imminent, so a synthetic one is unambiguous. Expect ALARM within ~15 min
+  (1-of-2 datapoints), then automatic recovery ~30 min after the next real probe
+  run publishes the true lag.
 - **Leading indicators** (AC 3) — pending-mutation age, part counts,
   `view_refreshes` exceptions. Blocked on measuring whether the scoped mTLS user
   can read `system.mutations` and `system.view_refreshes`; spawned as **0179**.
