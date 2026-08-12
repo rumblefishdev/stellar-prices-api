@@ -24,6 +24,16 @@ on the local soroban-block-explorer ClickHouse.
 > a small single-digit-% share even at the measured rate. Keep this document for
 > its method and row-level breakdown; trust **0060** for the absolute
 > bytes/ledger and annual figures.
+>
+> ✅ **0060 is now confirmed against production.** A direct measurement of
+> `ch-prod-01` on 2026-08-12 derives **~2.4 KB/ledger for `price_ohlcv_1m`
+> alone (~3 KB/ledger with the coarse tiers)** from live-written data — landing
+> on 0060's 3.7 KB/ledger and ~50× the 77.7 bytes/ledger below. Whole-database
+> footprint is **59.19 GiB across 23 tables**. See
+> [`backfill-and-database-usage-summary.md`](./backfill-and-database-usage-summary.md)
+> for the measured figures, the era split, and the retention semantics that
+> govern what `prices.*` actually retains. **The tier recommendation in §5.2 is
+> unaffected** — prices-api is still trivial against BE's footprint.
 
 **TL;DR (numbers BE cares about):**
 
