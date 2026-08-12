@@ -3,8 +3,8 @@ id: "0159"
 title: "Discord OAuth sign-in for the onboarding portal"
 type: FEATURE
 status: backlog
-related_adr: ["0007"]
-related_tasks: ["0156", "0158", "0160", "0161", "0162"]
+related_adr: ["0007", "0010"]
+related_tasks: ["0156", "0158", "0160", "0161", "0162", "0170", "0171"]
 tags: [layer-backend, priority-high, effort-medium, milestone-M3, epic-self-service-onboarding, discord, oauth, auth, secrets]
 milestone: 3
 links:
@@ -28,6 +28,16 @@ history:
       **existing** `prices-api` axum Lambda, not a new one. That removes the
       runtime choice, the second gateway integration and the route-placement
       question, and drops the estimate from large to medium.
+  - date: 2026-08-10
+    status: backlog
+    who: akot
+    note: >
+      [[0156]] / ADR 0010 settles the two open items here. Scope is
+      `identify` + `guilds.members.read` (never `guilds`), plus a snowflake
+      account-age minimum. Adam owns app registration and the `stellar_test`
+      guild — the "someone" placeholder is gone. Guild ID becomes
+      per-environment SSM config. Adds a membership check whose error shape is
+      undocumented ([[0171]]).
 ---
 
 # Discord OAuth sign-in
@@ -62,6 +72,7 @@ it decides whether this flow requests the `guilds` scope or only `identify`.
 
 ## Implementation
 
+
 **From the epic**
 
 - Discord OAuth as the only sign-in mechanism. No email, no captcha, no
@@ -71,10 +82,106 @@ it decides whether this flow requests the `guilds` scope or only `identify`.
 
 **Follows from the epic, but not stated in it**
 
-- **Authorization Code flow with PKCE**, `identify` scope only — request
-  `guilds` solely if [[0156]] concludes the membership check is what the abuse
-  story depends on. Ask for nothing else: `email` in particular buys us data we
-  have decided not to hold.
+- **Scope — settled by [[0156]] / ADR 0010: `identify` + `guilds.members.read`.
+  Never `guilds`.** The membership check *is* what the abuse story depends on,
+  because under `identify` alone the flow observes nothing but the existence of
+  a Discord account (`verified` requires the `email` scope; there is no phone
+  field on the OAuth user object at all). `guilds` is rejected on both privacy
+  and utility grounds: it returns every server the user belongs to, and its
+  partial guild objects carry neither `pending` nor `joined_at`. Ask for nothing
+  else — `email` in particular buys us data we have decided not to hold.
+- **Authorization Code flow with PKCE.** Caveat from [[0156]]: Discord's OAuth2
+  topic page does not mention PKCE at all. It is documented only in the Social
+  SDK mobile guide, where it is mandatory for deep-link redirects. For a
+  confidential server-side client with an HTTPS redirect it is **not documented
+  as required** — implement it anyway, but do not expect the docs to describe
+  the server's behaviour.
+- **Eligibility is proved per action, not carried in the session (ADR 0010 §8).**
+  This task owns the OAuth round-trip; it does **not** own issuance. Concretely:
+  `state` carries the intended action, signed, alongside its CSRF role. The
+  callback exchanges the code for a **fresh** token, performs the checks below,
+  and only then hands off to [[0160]]'s issue or rework logic. Nothing about
+  eligibility is stored in the session cookie — a signed "eligible" claim would
+  date the verdict to sign-in time and would not survive to a rework weeks later.
+  Discord does not re-prompt for consent on repeat authorization of the same
+  scopes, so the second and later round-trips are a redirect, not a consent
+  screen.
+
+  | Path | Re-auth | Checks |
+  | --- | --- | --- |
+  | Sign in | — | identity only |
+  | Issue a key | **yes** | membership (`pending === false`) + account age |
+  | Reveal / usage | no | session only |
+  | Rework | **yes** | membership only — age is not re-checked |
+
+  Account age is deliberately **not** re-checked on rework: an account old enough
+  once is old enough forever.
+- **Membership check.** `GET /users/@me/guilds/{guild.id}/member`, guild ID from
+  SSM — **per-environment, not a constant**: `stellar_test` in dev,
+  `897514728459468821` in production once [[0170]] lands. The not-a-member
+  response shape is **undocumented** (only a generic `404` plus error codes
+  `10004`/`10007` exist), so treat only an explicit `10007`/`10004`-style 404 as
+  "not a member" and treat 401/403/429/5xx as "unknown, do not deny". Measure it
+  first — [[0171]] #1.
+- **`pending` is optional (`pending?`).** The docs' presence guarantee is written
+  about gateway events, not this route. Handle `undefined` as a third state;
+  never read absent as "cleared". Also note `BYPASSES_VERIFICATION` means
+  `pending === false` can mean "an admin waved them through" — [[0171]] #2.
+- **Minimum account age from the snowflake**, per ADR 0010:
+  `(BigInt(id) >> 22n) + 1420070400000n`. Costs no extra scope and no extra
+  consent line — the `id` is already in the `identify` response. Use `BigInt`;
+  `Number` loses precision above 2^53.
+  **Threshold: 5 minutes**, matching Stellar's own `verification_level: 2`.
+  **In SSM, not a literal** — the value is expected to be raised if churn is
+  ever observed, and that must not need a deploy. Store it as a duration
+  (minutes), not a day count: the initial value is minutes and a
+  `minAccountAgeDays` parameter would make 5 minutes unrepresentable.
+- **This task owns the two new SSM parameters** — their names, their read path
+  and their seeding step. ADR 0010 says the guild ID and the age threshold are
+  configuration; nobody else in the epic declares where they come from, and left
+  unassigned they will be hard-coded — the one thing the ADR forbids. Follow the
+  existing key contract (`/prices/{env}/*`, alongside `api-gateway-id` and the
+  `mtls-*-secret-name` entries):
+
+  | Parameter | Value |
+  | --- | --- |
+  | `/prices/{env}/discord-guild-id` | `stellar_test` while building, `897514728459468821` after [[0170]]'s flip |
+  | `/prices/{env}/min-account-age-minutes` | `5` |
+
+  **Operator-seeded, not CDK-created — corrected 2026-08-10 after audit.** Do
+  **not** write `new ssm.StringParameter` for these. The repo's precedent for
+  operator-owned values is explicit: `SecretsStack` *"deliberately does NOT
+  create the secrets"* and publishes names only, and `compute-stack.ts` **reads**
+  `/prices/{env}/ledger-processor/initial-cursor` because the operator seeds it
+  "at deploy prep, like the mTLS secrets… rather than committed config, so it is
+  never a stale magic number".
+
+  This is not style. A CloudFormation-managed parameter is CDK-owned, so **the
+  next `cdk deploy` would silently restore the committed value** — un-flipping
+  production back to the test guild after launch ([[0170]] step 4) and reverting
+  any temporary threshold change ([[0164]] check 10). Note also that `envName` is
+  typed `'production'` and `infra/envs/` holds only `production.json`: there is
+  one parameter whose value is flipped in place, not a per-environment matrix.
+
+  **Read them at runtime via the SSM SDK, not `valueForStringParameter`** — the
+  latter resolves through a CFN parameter at deploy, which would make the
+  threshold un-tunable without a redeploy and defeat the point of it being a
+  parameter. No IAM work is required: `lambda-baseline.ts` already grants
+  `ssm:GetParameter*` on `arn:…:parameter/prices/{env}/*` to every prices Lambda.
+
+  What this task owns is therefore the **read path, the documented parameter
+  names, and the seeding step in the deploy-prep runbook** — not a CDK resource.
+- **Never re-check on session refresh or on the dashboard** (ADR 0010 §8). Reveal
+  and usage are session-only and must keep working indefinitely, including for a
+  user who has left the guild — a key, once issued, never expires. The two
+  exceptions are issue and rework, which carry their own round-trip per the table
+  above; rework re-checks membership only, never age.
+- **Distinguish "not a member" from "could not tell".** The not-a-member result
+  is inferred from an undocumented error shape ([[0171]] #1), so the handler
+  must return three outcomes, not two: eligible, ineligible, and unknown. Only
+  an explicit `10007`/`10004`-style 404 is ineligible; 401/403/429/5xx is
+  unknown and must not issue a key **and** must not tell the user they are not a
+  member. [[0162]] renders those differently.
 - **Client secret in Secrets Manager**, never an environment variable. ADR 0007
   set that precedent for the mTLS material and Tranche 3 AC 6 audits it
   explicitly ("no secrets in env vars"). Follow the shape already in
@@ -109,10 +216,19 @@ it decides whether this flow requests the `guilds` scope or only `identify`.
   registered with Discord must match it exactly, and [[0161]]'s distribution
   must order this behaviour before `/api-tokens/*` or every call here is served
   the SPA bundle instead.
-- **The Discord application is a manual prerequisite.** Someone registers it in
-  the Discord Developer Portal and configures the redirect URI, which must match
-  exactly and therefore changes when the custom domain lands ([[0126]]). Record
-  the ordering so sign-in does not break silently on the domain cutover.
+- **The Discord application is a manual prerequisite, owned by Adam Kot**
+  (settled by [[0156]] / ADR 0010 — this replaces the "someone" that stood
+  here). He registers it in the Discord Developer Portal, configures the
+  redirect URI, and owns re-pointing it when the custom domain lands ([[0126]]).
+  Record the ordering so sign-in does not break silently on the domain cutover.
+  Note the docs say registration is required but **do not state that matching is
+  character-exact** — assume it is, verify it once.
+  Scopes "must be declared in the Developer Portal", so the scope decision above
+  is part of registration, not just of the authorize URL.
+- **Adam also owns the `stellar_test` guild** used for development and testing.
+  It must have Community enabled and Rules Screening on, and
+  `verification_level: 2`, or `pending` will not exercise the real code path.
+  Production integration with the Stellar guild is [[0170]].
 
 ## Acceptance Criteria
 
@@ -139,7 +255,29 @@ it decides whether this flow requests the `guilds` scope or only `identify`.
       comments this trap; inherit the requirement rather than rediscover it
 - [ ] Discord app registration and redirect-URI ownership documented, including
       what changes when the custom domain lands
-- [ ] Scope set matches [[0156]]'s conclusion
+- [ ] Scope set is exactly `identify` + `guilds.members.read` (ADR 0010); no
+      `guilds`, no `email`
+- [ ] `/prices/{env}/discord-guild-id` and
+      `/prices/{env}/min-account-age-minutes` are **operator-seeded and read at
+      runtime**, never `new ssm.StringParameter` — so [[0170]]'s guild flip
+      survives the next `cdk deploy`
+- [ ] The parameter names and the seeding step are written into the deploy-prep
+      runbook, alongside the mTLS material
+- [ ] Changing `min-account-age-minutes` in SSM takes effect **without a
+      redeploy** — otherwise it is a constant with extra steps
+- [ ] Guild ID is read from SSM per environment, never a constant
+- [ ] A non-member is refused, and the refusal distinguishes "not a member" from
+      "Discord unavailable" — a 429 or 5xx must not read as "not a member"
+- [ ] `pending === undefined` is handled explicitly and does not silently pass
+- [ ] Account age is derived with `BigInt` and compared against an SSM
+      threshold expressed in **minutes**, defaulting to 5; a below-threshold
+      account is refused with the time remaining, and no key is issued
+- [ ] Issue and rework each carry their own OAuth round-trip; neither trusts the
+      session cookie for eligibility
+- [ ] Reveal and usage require **no** re-auth and keep working indefinitely for a
+      user who has left the guild
+- [ ] `state` binds the intended action as well as the CSRF nonce, and a callback
+      cannot be replayed to perform a different action than the one confirmed
 
 ## Notes
 

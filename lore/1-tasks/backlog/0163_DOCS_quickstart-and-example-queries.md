@@ -3,8 +3,8 @@ id: "0163"
 title: "Quickstart guide and example queries, accurate against the live API"
 type: DOCS
 status: backlog
-related_adr: []
-related_tasks: ["0124", "0157", "0161", "0162", "0164"]
+related_adr: ["0010"]
+related_tasks: ["0124", "0156", "0157", "0161", "0162", "0164", "0170"]
 tags: [layer-docs, priority-high, effort-medium, milestone-M3, epic-self-service-onboarding, documentation, developer-experience]
 milestone: 3
 links:
@@ -26,6 +26,15 @@ history:
       is already untrue of the deployed API, and this task both stated the rule
       and used a keyless route as an example. Also pinned to [[0161]]'s
       `/api-tokens/` prefix.
+  - date: 2026-08-10
+    status: backlog
+    who: akot
+    note: >
+      ADR 0010 changes step one: getting a key now requires Stellar Discord
+      membership and a minimum account age. The quickstart must say so before
+      the first `curl`, without hard-coding the threshold, which is an SSM
+      value expected to be tuned. The invite it prints is always the real
+      server, never the `stellar_test` guild used during development.
 ---
 
 # Quickstart and example queries
@@ -62,6 +71,26 @@ through all that — not a second copy of it.
 
 - **Lead with a single copy-pasteable `curl`** that includes the base URL and
   the `x-api-key` header and returns real data. Everything else is second.
+- **State how to get a key, including its two prerequisites — added 2026-08-10
+  by ADR 0010.** Getting a key is no longer "sign in with Discord": the account
+  must also be a **member of the Stellar Developers Discord**
+  (`discord.gg/stellardev`) and **older than a minimum age**. A quickstart whose
+  very first step silently fails for a reader is the exact inaccuracy AC 3
+  exists to prevent, and this is the most likely way it now happens.
+  Keep it to two lines above the `curl` — the reader wants data, not policy —
+  and link the portal rather than restating the rules.
+  **The age requirement is currently 5 minutes** (ADR 0010, matching Stellar's
+  own server setting) — small enough that it deserves at most a half-sentence,
+  or nothing at all. Do not write "at least N days old": that is wrong, and it
+  would make the API sound far more gated than it is. If it is mentioned, word
+  it so a later change to the SSM value does not make this page false.
+  **The invite link in this document is always `discord.gg/stellardev` — the
+  real Stellar Developers server — never the `stellar_test` guild**, even while
+  development runs against the test guild ([[0170]]). This page is read by
+  outside developers, so a test-guild link here would send them somewhere they
+  cannot join and would ship a private artefact into public documentation. This
+  page can therefore be written before the SSM flip, but it describes the world
+  after it.
 - **There are now two working base URLs — document exactly one.** [[0161]] puts
   CloudFront in front of the API, so `/v1/*` answers both on the distribution's
   domain and on the raw API Gateway invoke URL. The documented one is the
@@ -105,6 +134,9 @@ through all that — not a second copy of it.
 
 - [ ] Quickstart takes a reader from a fresh key to a successful response with
       one copy-paste
+- [ ] How to get a key is stated before the first `curl`, including Stellar
+      Discord membership, with the invite pointing at **`discord.gg/stellardev`**
+      and not the `stellar_test` guild
 - [ ] Auth (`x-api-key`, `403` without it) and limits (1 req/s, monthly quota,
       `429`, cached responses still counted) all stated, **with `/health` and
       `/api-docs-json` named as the keyless exceptions**

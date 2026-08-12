@@ -3,8 +3,8 @@ id: "0158"
 title: "Key registry — ClickHouse table mapping Discord user ID to API Gateway key ID and usage plan"
 type: FEATURE
 status: backlog
-related_adr: ["0007", "0008"]
-related_tasks: ["0156", "0157", "0159", "0160"]
+related_adr: ["0007", "0008", "0010"]
+related_tasks: ["0156", "0157", "0159", "0160", "0171"]
 tags: [layer-infra, priority-high, effort-medium, milestone-M3, epic-self-service-onboarding, storage, clickhouse, discord, api-keys, mtls]
 milestone: 3
 links:
@@ -28,6 +28,15 @@ history:
       not DynamoDB, and the endpoints live in the existing `prices-api` Lambda
       rather than a new one. Two consequences of that are now accepted risks
       rather than solved problems — see "Accepted consequences".
+  - date: 2026-08-10
+    status: backlog
+    who: akot
+    note: >
+      [[0156]] / ADR 0010 confirms one active key per account, so the schema is
+      unchanged. Two corrections though: `nameQuery`'s matching semantics are
+      undocumented (not "a prefix match"), which makes the exact-match filter
+      load-bearing; and the quota-period boundary is our rule, not AWS
+      behaviour. Both measured by [[0171]].
 ---
 
 # Key registry — Discord user ID → API Gateway key
@@ -65,8 +74,19 @@ than left to be discovered later.
 
 - One record per Discord user: Discord user ID → API Gateway key id + usage
   plan id.
-- Sized for one active key per account, per the epic's account model — confirm
-  through [[0156]] before building, since a different answer changes the shape.
+- Sized for one active key per account. **Confirmed by [[0156]] / ADR 0010 on
+  2026-08-10 — the shape below stands unchanged**, and the confirmation is
+  stronger than the epic's own argument: AWS charges quota per
+  `(usage plan, API key)` and has **no principal that aggregates keys**
+  (`customerId` is documented as *"An AWS Marketplace customer identifier"* and
+  is only a listing filter). Multi-key would force our own fan-out over N
+  `GetUsage` calls plus summation — precisely the work [[0160]]'s rework cap
+  exists to avoid.
+- **AWS will not enforce one-key-per-account for us.** A key may sit in up to 10
+  usage plans, a plan holds arbitrarily many keys, and `name` is optional and
+  **not** unique — only key *values* are unique and enforced. The invariant
+  lives here, in application code, which is what "Accepted consequences" below
+  is about.
 
 **Table**
 
@@ -105,6 +125,12 @@ ORDER BY discord_user_id;
 - No `discord_username` column. It is the one field with no basis in the epic,
   in a document that deliberately declines to hold an email address, and there
   is no deletion path for it — see "Open".
+- **No membership columns either — settled 2026-08-10 by ADR 0010.** The
+  membership and account-age checks run **once, at issuance** ([[0159]]) and
+  nothing re-reads them, so `pending`, `joined_at` and `roles` are deliberately
+  **not** stored. Storing them would mean holding Discord profile data we never
+  use, in the same table that declines to hold a username. The schema above is
+  therefore unchanged by the membership decision.
 
 **Issue flow — API Gateway is the arbiter, not the table**
 
@@ -123,14 +149,25 @@ prefix hazard below.
    the one with the earliest `createdDate`, `DeleteApiKey` the rest, `INSERT` a
    corrective row.
 
-**`nameQuery` is a prefix match, not an exact match, and Discord snowflakes are
-17–19 digits.** So a shorter user id is a prefix of a longer one: a lookup for
-`discord-1234567890123456` returns the key belonging to
-`discord-12345678901234567`, and step 5 would delete it — silently, permanently,
-on an account that was never part of the race. Two independent guards, because
-either alone is thin: the `-key` suffix means no bare id can prefix another
-complete name, and the client-side exact-match filter means the design does not
-depend on that suffix being remembered.
+**`nameQuery`'s matching semantics are undocumented — corrected 2026-08-10 by
+[[0156]].** AWS's entire documentation of the parameter is one sentence, *"The
+name of queried API keys."*, on both `GetApiKeys` and the CLI reference. It
+states **no** matching rule. Prefix matching is widely-reported community
+knowledge, not an AWS contract, and AWS has committed to nothing.
+
+Two consequences, and the second is the important one:
+
+- **The client-side exact-match filter is load-bearing, not defence in depth.**
+  Do not let a later reader "simplify" it away on the grounds that the `-key`
+  suffix already handles it. It is the only guard that does not depend on
+  undocumented behaviour.
+- **If matching *is* prefix-based** — the behaviour to assume until [[0171]]
+  measures it — then because Discord snowflakes are 17–19 digits, a shorter user
+  id is a prefix of a longer one: a lookup for `discord-1234567890123456` would
+  return the key belonging to `discord-12345678901234567`, and step 5 would
+  delete it — silently, permanently, on an account that was never part of the
+  race. The `-key` suffix means no bare id can prefix another complete name,
+  which is why the naming keeps it.
 
 Step 5 is the reconciler and it is deterministic: both sides of a race read the
 same API Gateway list and compute the same winner. **Deterministic key naming is
@@ -149,6 +186,15 @@ forever. Recovery has to hang off the **reveal path** instead: when
 1. Read `FINAL`; refuse with `409` + `next_eligible_at` unless
    **`coalesce(last_rotated_at, created_at)`** falls before the current quota
    period start (1st of the month, 00:00 UTC).
+
+   **That boundary is *our* rule, not AWS behaviour we inherit — corrected
+   2026-08-10 by [[0156]].** AWS never documents the reset instant or its
+   timezone. Its only statement anywhere is an example caption, *"creates a
+   usage plan that resets at the beginning of the month"*, and `offset` is a
+   **request count** (*"The number of requests subtracted from the given limit
+   in the initial time period"*), not a time shift. Keep the rule — it is a
+   sound product decision and gives one date to render — but state it as ours.
+   [[0171]] measures the actual rollover so the two can be reconciled.
 
    **Gating on `last_rotated_at` alone reopens the loophole the cap exists to
    close.** Issuance never sets that column, so it is null for every fresh key —
@@ -222,7 +268,11 @@ That keeps this task off the critical path of another team's queue.
       `prices_writer`
 - [ ] Rework updates `last_rotated_at` in the same insert that records the new
       key id, and the old key is deleted only afterwards
-- [ ] One-key-per-account assumption from [[0156]] reflected in the schema
+- [x] One-key-per-account assumption from [[0156]] reflected in the schema —
+      confirmed 2026-08-10 by ADR 0010; `ORDER BY discord_user_id` is correct
+- [ ] The client-side exact-match filter is present **and** commented as
+      load-bearing, so it survives a later cleanup — `nameQuery` matching is
+      undocumented, not merely quirky
 
 ## Open
 
@@ -239,9 +289,11 @@ That keeps this task off the critical path of another team's queue.
   `api_key_id` changes over time while the Discord ID does not. Rows are
   superseded via the version column, not appended as history — the epic does not
   ask for one.
-- If [[0156]] comes back with "more than one active key", this becomes a
-  collection per user and the rework cap needs rethinking; that is the one
-  answer that reshapes this task.
+- [[0156]] came back with **one active key, confirmed** (ADR 0010), so the
+  collection-per-user variant that would have reshaped this task is off the
+  table. Recorded rather than deleted: the reason multi-key was rejected is that
+  AWS quota accounting has no user-shaped principal, and that reason will still
+  be true if anyone reopens it.
 - A DynamoDB variant was designed and rejected at the 2026-08-07 meeting in
   favour of not adding a datastore. Its one material advantage was the atomic
   conditional write — which is precisely what "Accepted consequences" gives up.

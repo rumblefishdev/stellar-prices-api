@@ -1912,7 +1912,7 @@ asset's inception date, `GET /assets/{asset_identifier}/ohlcv` includes a
 | Layer                                      | Strategy                                                                                                                                                                                                                                                                                                              |
 | ------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **API Gateway caching**                    | Built-in response cache (0.5 GB). Per-endpoint TTLs: `/assets` list 60s, `/ohlcv` 60s, `/price` 15s, `/backfill/status` 30s. Cache key includes query params. `POST /prices/batch` uncached                                                                                                                           |
-| **API Gateway throttling**                 | Request throttling (100/s per API key, 1000/s global burst)                                                                                                                                                                                                                                                           |
+| **API Gateway throttling**                 | Request throttling (1 req/s sustained, burst 5, 100 000 req/month per self-service key — task 0157; 200 req/s per method stage-wide)                                                                                                                                                                                  |
 | **Lambda**                                 | Rust binary with `lambda_runtime`. Sub-millisecond cold starts. Stateless, auto-scales to concurrency limit. No VPC, so no ENI provisioning latency on cold start                                                                                                                                                     |
 | **ClickHouse client (`clickhouse` crate)** | Warm connection pool reused across Lambda invocations to amortise mTLS handshake (~80-130 ms cross-cloud RTT to Caddy). Per-request payloads batched per-ledger so a typical invocation issues 1–2 INSERTs, not one per trade                                                                                         |
 | **Sort key + partitioning**                | Per-granularity tables sorted by `(asset_id, quote_asset_id, source, timestamp)`; monthly partitions on `timestamp`. Partition pruning + sort-key skip eliminate irrelevant months and assets on hot reads                                                                                                            |
@@ -1926,13 +1926,13 @@ instance on a single Hetzner box behind Caddy:443). Prices-api joins as a
 second tenant via its own `prices` database, isolated by ClickHouse's native
 multi-tenant primitives (database, user, quota, profile).
 
-| Metric                       | Value                                                                       | Source                     |
-| ---------------------------- | --------------------------------------------------------------------------- | -------------------------- |
-| Prices-api storage footprint | **~3.5-6 GB/year** (realistic, retention-amortised)                         | Tasks 0060 + 0063 measured |
-| Average per-ledger storage   | **~1.9-3.7 KB/ledger** (activity-dependent, ~2× spread)                     | Tasks 0060 + 0063 measured |
-| Strongest size lever         | Retention-cap `_1h`/`_4h` → bounds DB at ~9 GB @ 10yr (vs ~43 GB unbounded) | Task 0060 measured         |
-| Write rate                   | ~1 INSERT per ledger (~12k/day per env at mainnet cadence)                  | §6.1                       |
-| Read rate                    | API-Gateway-throttled ≤100 req/s per key, cached at gateway                 | §8.2                       |
+| Metric                       | Value                                                                             | Source                     |
+| ---------------------------- | --------------------------------------------------------------------------------- | -------------------------- |
+| Prices-api storage footprint | **~3.5-6 GB/year** (realistic, retention-amortised)                               | Tasks 0060 + 0063 measured |
+| Average per-ledger storage   | **~1.9-3.7 KB/ledger** (activity-dependent, ~2× spread)                           | Tasks 0060 + 0063 measured |
+| Strongest size lever         | Retention-cap `_1h`/`_4h` → bounds DB at ~9 GB @ 10yr (vs ~43 GB unbounded)       | Task 0060 measured         |
+| Write rate                   | ~1 INSERT per ledger (~12k/day per env at mainnet cadence)                        | §6.1                       |
+| Read rate                    | ≤1 req/s per key (task 0157); ≤200 req/s per method stage-wide, cached at gateway | §8.2                       |
 
 > **Sizing superseded (2026-06-19).** The original ~74 B/ledger / ~0.45 GB/yr
 > figure was the task-0046 _per-event estimate_. Three ground-truth backfill

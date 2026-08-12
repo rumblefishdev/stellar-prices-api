@@ -54,6 +54,15 @@ flush-production-cache:
 		--stage-name production
 	@echo "production stage cache flushed"
 
+# `--require-approval broadening` prompts on IAM/security-group widening ONLY. It
+# does not prompt on resource deletion or replacement, so a deploy can destroy a
+# live resource without asking — and an API key destroyed this way takes its value
+# with it, cutting off every holder the moment the deploy succeeds. Task 0157
+# rotated `prices-production-partner-key` exactly this way, deliberately.
+#
+# So `make diff-production` before any production deploy, and read it for removals
+# rather than skimming it for additions. This applies to every deploy target below
+# too; it lives here because this is the one that deploys all stacks at once.
 deploy-production: build
 	npx cdk --app "$(PRODUCTION_APP)" deploy --all --require-approval broadening
 	$(MAKE) flush-production-cache

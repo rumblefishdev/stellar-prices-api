@@ -796,6 +796,14 @@ The usage plan `prices-production-partner-plan` throttles each key at 100
 req/s (200 burst) with a 10,000/day quota; the stage caches this route for
 60 s.
 
+> **Superseded by task 0157 (2026-08-12).** That plan is renamed
+> `pricing-api-free-production` and re-limited to 1 req/s sustained, burst 5 and
+> 100 000 requests/month; the change is in CDK and takes effect on the next
+> production deploy. The paragraph above is left as written because it records
+> the configuration this milestone was actually evidenced against. What it is
+> offered as evidence of — that the gateway, not the application, enforces the
+> key requirement — is unchanged by the new limits.
+
 _A precise statement about auth, because overclaiming here would be easy:_
 the API Gateway key requirement is the live enforcement layer. The
 application also contains a constant-time `X-API-Key` gate, but it is

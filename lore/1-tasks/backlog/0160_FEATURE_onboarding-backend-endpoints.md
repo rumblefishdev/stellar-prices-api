@@ -3,8 +3,8 @@ id: "0160"
 title: "Onboarding backend — issue key, reveal it, report usage, rework once a quota period"
 type: FEATURE
 status: backlog
-related_adr: ["0007", "0008"]
-related_tasks: ["0156", "0157", "0158", "0159", "0162"]
+related_adr: ["0007", "0008", "0010"]
+related_tasks: ["0156", "0157", "0158", "0159", "0162", "0171"]
 tags: [layer-backend, priority-high, effort-medium, milestone-M3, epic-self-service-onboarding, api-gateway, usage-plan, iam, dashboard]
 milestone: 3
 links:
@@ -29,6 +29,15 @@ history:
       rework ships in Tranche 3, and the period boundary is settled. Opens #2,
       #3 and #4 are closed; #1 narrows to revocation only. Estimate drops from
       large to medium.
+  - date: 2026-08-10
+    status: backlog
+    who: akot
+    note: >
+      [[0156]] / ADR 0010 confirms the one-key model the rework cap depends on,
+      so the endpoint shapes stand. Three corrections: `nameQuery` matching is
+      undocumented, the quota-period boundary is our rule rather than inherited
+      AWS behaviour, and `enabled=false`'s effect on usage counters is unknown —
+      which blocks costing revocation. All measured by [[0171]].
 ---
 
 # Onboarding backend — issue, reveal, usage, rework
@@ -68,10 +77,20 @@ cross-key aggregation.
 
 **The boundary is settled (2026-08-07): a rework is allowed only when
 `coalesce(last_rotated_at, created_at)` falls before the current quota period
-start** — the 1st of the month, 00:00 UTC, the same instant the AWS quota period
-rolls over. Worked example from the meeting: reworked on 3 August → next rework
-available 1 September. One date for the dashboard to render, because the quota
-counter and the rework right reset together.
+start** — the 1st of the month, 00:00 UTC. Worked example from the meeting:
+reworked on 3 August → next rework available 1 September. One date for the
+dashboard to render.
+
+**Correction (2026-08-10, [[0156]]): "the same instant the AWS quota period
+rolls over" is not a sourced claim.** AWS documents neither the reset instant
+nor its timezone; the only statement anywhere is an example caption, *"creates a
+usage plan that resets at the beginning of the month"*. `offset` is a **request
+count**, not a time shift. The rule stands as **our** product decision — keep
+it — but do not justify it as inherited AWS semantics, and do not assume the two
+boundaries coincide until [[0171]] has measured the rollover. If they turn out
+to differ, the dashboard renders our date and the quota counter does its own
+thing; that is a UX wrinkle, not a correctness bug, because the cap is ours to
+define.
 
 The `created_at` fallback is load-bearing, not defensive. Issuance never writes
 `last_rotated_at`, so gating on that column alone leaves it null for every fresh
@@ -83,6 +102,7 @@ that period, whether it came from issuance or from an earlier rework. One key pe
 period, one quota.
 
 ## Implementation
+
 
 **From the epic**
 
@@ -103,9 +123,9 @@ period, one quota.
   response would hand one user another user's key. Set `cachingEnabled: false`
   on every portal method and `Cache-Control: no-store` on every response.
 - **IAM scoped to the resources it needs**: `apigateway:POST` on `/apikeys`
-  and on `/usageplans/{selfServicePlanId}/keys`, `GET` on **`/apikeys`** (the
+  and on `/usageplans/{pricingApiFreePlanId}/keys`, `GET` on **`/apikeys`** (the
   collection — the reconciler lists it), on `/apikeys/{id}` and on
-  `/usageplans/{selfServicePlanId}/usage`, `DELETE` on `/apikeys/{id}`. Nothing
+  `/usageplans/{pricingApiFreePlanId}/usage`, `DELETE` on `/apikeys/{id}`. Nothing
   wildcard — Tranche 3 AC 6 audits exactly this.
   The collection-level `GET` is not optional: without it every issue path and
   the reveal-path recovery below fail at runtime with `AccessDenied`, because
@@ -134,13 +154,34 @@ period, one quota.
   cross-stack reference — `ComputeStack` is a dependency of `ApiGatewayStack`
   and cannot import from it.
 - **Never log a key value**, including in error paths and X-Ray annotations.
+- **Two of these four operations require a fresh eligibility proof; two do not
+  (ADR 0010 §8).** Corrected 2026-08-10 — an earlier version of this bullet said
+  none of them re-checks eligibility, which was wrong: **issue is one of the four**,
+  so that rule left the gate unenforced on the only path that mints a key.
+
+  | Operation | Eligibility proof | Why |
+  | --- | --- | --- |
+  | Issue | **required** | membership must hold *at the moment of issuance* |
+  | Reveal | none | the key is already theirs; works forever |
+  | Usage | none | same |
+  | Rework | **required** | membership only; the age check is not repeated |
+
+  The proof comes from [[0159]]'s re-authentication callback, which holds a fresh
+  Discord token. **This task performs no Discord calls itself** — it consumes the
+  verdict from the callback that invoked it. Reveal and usage stay pure AWS, so a
+  Discord outage never breaks the dashboard for someone who already has a key.
 - **Issue and rework must be safe under double-submit, and the store no longer
   helps.** ClickHouse has no conditional insert ([[0158]] "Accepted
   consequences"), so the guard is deterministic key naming plus the reconciler:
   look up `discord-<userId>-key` in API Gateway before creating — **exact-match
-  the name in the client, because `nameQuery` is a prefix match** — and converge
-  on the earliest-created key if two appear. Rework records the new key id and
-  `last_rotated_at` in one insert, and deletes the old key only afterwards.
+  the name in the client** — and converge on the earliest-created key if two
+  appear. Rework records the new key id and `last_rotated_at` in one insert, and
+  deletes the old key only afterwards.
+  **Corrected 2026-08-10 ([[0156]]): `nameQuery` is not documented as a prefix
+  match.** AWS's whole description of it is *"The name of queried API keys."* —
+  no matching semantics at all. The client-side exact match is therefore the
+  only guard that does not rest on undocumented behaviour; comment it as such so
+  it is not later removed as redundant. [[0171]] measures the real behaviour.
 
 ## Settled 2026-08-07
 
@@ -175,9 +216,24 @@ The four items parked on 2026-08-06 resolve as follows.
 
 **Revocation.** Rework is capped, so a developer whose key leaks on the 3rd
 cannot invalidate it until the 1st. `UpdateApiKey(enabled=false)` invalidates a
-key in one call without touching the quota counter, so it need not share the
-rework cap and is cheap to add. Deferred at the 2026-08-07 meeting and recorded
-in the epic as a known gap — revisit if it bites in practice.
+key in one call and is cheap to add. Deferred at the 2026-08-07 meeting and
+recorded in the epic as a known gap — revisit if it bites in practice.
+
+**Correction (2026-08-10, [[0156]]): "without touching the quota counter" is an
+assumption, not a documented fact.** AWS says nothing about what disabling a key
+does to accumulated usage. Note the delete-then-create reasoning does **not**
+transfer here — that argument works only because `CreateApiKey` mints a *new*
+`id`, and `enabled=false` keeps the `id` and `value` in place. If disabling
+turned out to reset the counter, revocation would become a free quota reset and
+would have to share the rework cap after all. [[0171]] #8 measures it; do not
+ship revocation before it does.
+
+Worth knowing while this is open: **`UpdateUsage`** (`PATCH
+/usageplans/{id}/keys/{keyId}/usage`, `op:replace` on `/remaining`) moves the
+quota counter directly without touching the key at all. That is the sharper tool
+for "this user needs more quota this month" — one control-plane call, no new
+secret for the user to re-integrate — and it is a different operation from
+rework, which the dashboard currently conflates.
 
 ## Acceptance Criteria
 
@@ -189,6 +245,11 @@ in the epic as a known gap — revisit if it bites in practice.
 - [ ] Rework issues a new key and deletes the old one in one operation; a second
       attempt in the same quota period is refused with `409` and
       `next_eligible_at`
+- [ ] Issue and rework are unreachable without a fresh eligibility proof — a
+      valid session alone does not suffice, verified by calling both endpoints
+      directly with a session cookie and nothing else
+- [ ] A user who has left the guild can still reveal their key and read usage,
+      but is refused on rework
 - [ ] Reworking on 3 August refuses until 1 September, and succeeds on 1
       September — the meeting's worked example, tested
 - [ ] Reconciler adopts an existing `discord-<userId>-key` instead of creating a

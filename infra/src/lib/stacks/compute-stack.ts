@@ -443,8 +443,10 @@ export class ComputeStack extends cdk.Stack {
     // The single axum api-handler (ADR 0008). Reads as `prices_reader` over
     // mTLS; reuses the same `chDomain` SSM value + secrets extension layer as
     // the ledger processor. No `API_KEYS` env → the in-app key gate stays
-    // DISARMED; per-key 100 req/s is enforced at the API Gateway usage plan
-    // (ADR 0008). `reservedConcurrentExecutions` is the optional SLO escape
+    // DISARMED; the per-key rate and monthly quota are enforced at the API
+    // Gateway usage plan (ADR 0008; limits set by task 0157 —
+    // `pricingApiFreePlanRateLimit` / `pricingApiFreePlanMonthlyQuota`, not the design
+    // doc's 100 req/s). `reservedConcurrentExecutions` is the optional SLO escape
     // hatch (only set when configured). API Gateway grants invoke via the
     // integration's resource policy (no role-cycle, unlike the SQS ESM above).
     const apiHandler = config.apiHandler;

@@ -14,12 +14,24 @@ real Lambda concurrency + cross-cloud mTLS to ClickHouse all in play):
 ```sh
 k6 run packages/prices-api/loadtest/price_load.js \
   -e BASE_URL=https://<api-id>.execute-api.<region>.amazonaws.com/production \
-  -e API_KEY=<partner-key> \
+  -e API_KEY=<key on a plan that permits 100 req/s — see below> \
   -e ASSET=native
 ```
 
 Deploy-gated — requires the stack deployed (Phase 4 CDK) and a price row written
 by the ingest/current-prices path.
+
+> **The key matters, and no key that exists today will do.** Task 0157 caps the
+> CDK-managed plan (`pricing-api-free-production`) at **1 req/s with a 100 000/month
+> quota**. Running this script against a key on that plan does not measure the
+> system — it measures our own throttle, and reports a configuration artefact as
+> an SLO result.
+>
+> A 100 req/s run for 5 minutes is 30 000 requests, so even a generous monthly
+> quota is a real constraint if the test is repeated. Provision a dedicated
+> throttle-and-quota-headroom plan for the run (see
+> `docs/runbooks/manual-api-key-tier.md`), and state in the report which plan the
+> key was on. Tracked in task 0121.
 
 ## Approximate run — local server
 
