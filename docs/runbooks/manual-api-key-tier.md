@@ -216,11 +216,16 @@ this project:
 - **`--name-query` has no documented matching semantics**, which is why it does
   not appear above at all. AWS's entire description of it is _"The name of queried
   API keys."_ — not documented as exact, as a prefix, or as anything else (task
-  0156, 2026-08-10; measured by task 0171). `starts_with` is JMESPath, evaluated
-  client-side, and does exactly what it says. Task 0160 reaches the same
-  conclusion for the automated issuance path and comments it so nobody deletes it
-  as redundant; the same applies here. If you re-add `--name-query` as a
-  server-side prefilter, keep the client-side filter — it is the only part that
+  0156, 2026-08-10). **Measured 2026-08-12 (task 0180): it is a case-sensitive
+  prefix match** — a query for a key's own full name also returns any longer key
+  that extends it, which is precisely the rotation state step 7 creates. So the
+  parameter cannot decide which key you are looking at, whatever its
+  documentation had said. `starts_with` is JMESPath, evaluated client-side, and
+  does exactly what it says. Task 0160 reaches the same conclusion for the
+  automated issuance path and comments it so nobody deletes it as redundant; the
+  same applies here. If you re-add `--name-query` as a server-side prefilter it is
+  safe to do so — prefix matching can only ever return a superset of what
+  `starts_with` keeps — but keep the client-side filter: it is the only part that
   decides.
 
 **Adjust limits** — safe, no key rotation:
@@ -239,8 +244,22 @@ aws apigateway update-api-key --api-key "${KEY_ID}" --patch-operations \
 ```
 
 Whether disabling preserves, freezes or zeroes the usage counters is
-**not documented by AWS** and is tracked as task 0171 #8. Do not assume the
-quota is preserved across a disable/enable cycle.
+**not documented by AWS**. **Measured 2026-08-12 (task 0180): the counters are
+preserved.** A key drained to its quota and then disabled is still at its quota
+when re-enabled — the first request after re-enabling was rejected, not served.
+Suspension is therefore not a way to give a customer a fresh allowance, and not a
+way for one to take it.
+
+Two operational consequences from the same measurement:
+
+- **A disabled key returns `403 Forbidden`, identical to sending no key at all.**
+  Expect the customer to report it as "my key stopped working" with no hint that
+  it was suspended rather than deleted. Tell them which it was; the gateway will
+  not.
+- **Suspension is not immediate — allow tens of seconds.** Disable took ~25 s to
+  reach the data plane, re-enable the same. If you are suspending a leaked key,
+  the leak is still live for that window; if the situation cannot tolerate it,
+  delete the key instead of disabling it.
 
 **7. Rotate** — create a new key (step 2), attach it, confirm the customer is
 using it, then delete the old one. Capture the outgoing key's id **before** you
@@ -321,14 +340,14 @@ Then delete the row from the table below.
   the hour and nowhere described as reducing call charges. Whether the _quota_ is
   also decremented before the cache lookup is our inference, not documented; AWS's
   throttling order lists usage plan, stage, account and Regional limits and never
-  mentions the cache. See task 0171.
+  mentions the cache. See task 0180.
 - **The monthly reset schedule is all but undocumented.** The only statement in
   AWS's docs is an example caption — _"creates a usage plan that resets at the
   beginning of the month"_ — with no timezone, no instant, and nothing on whether
   `MONTH` is calendar-aligned or runs from plan creation. Note also that
   `QuotaSettings.offset` is _"the number of requests subtracted from the given
   limit in the initial time period"_ — a request count, not a way to shift the
-  reset day, so it cannot be used to force alignment. Unverified; task 0171 #7.
+  reset day, so it cannot be used to force alignment. Unverified; task 0180 #7.
   Do not promise a customer a specific reset date until it is measured.
 
 ---

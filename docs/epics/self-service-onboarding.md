@@ -117,7 +117,7 @@ appears as an acceptance criterion in every iteration of our design response
       plan that resets at the beginning of the month", with no timezone and no instant; and
       `offset` is a _request count_, not a way to shift the reset day. The boundary above
       stands as **our own product rule** — it is sound and gives one date to render — but
-      the claim that our date and AWS's coincide is unverified until measured (task 0171).
+      the claim that our date and AWS's coincide is unverified until measured (task 0180).
       If they turn out to differ, we render our date and the quota counter does its own
       thing; that is a UX wrinkle, not a correctness bug, because the cap is ours to define.
   - **Rework is a swap, not a delete-and-wait (settled 2026-08-07):** the old key is

@@ -53,17 +53,44 @@ disc-1111
 Then `GetApiKeys(nameQuery=...)` with the full name, a strict prefix, a
 substring, and a differing-case variant.
 
-**Result (date: ______):**
+**Result — measured 2026-08-12**, three scratch keys in `eu-central-1`
+(`lore0180-1111`, `lore0180-111111111111111111`,
+`lore0180-111111111111111111-old`), created disabled and destroyed after:
 
 | Query | Keys returned | Interpretation |
 |---|---|---|
-| exact full name | | |
-| strict prefix | | |
-| substring (not a prefix) | | |
-| case-differing | | |
+| `lore0180-111111111111111111` — an **exact key name** | that key **and** `…-old` | **not exact matching** |
+| `lore0180-1111` — exact name *and* a prefix of the other two | all three | prefix |
+| `lore0180-11111` — a prefix that is **nobody's name** | the two long ones | prefix, decisively |
+| `lore0180` | all three | prefix |
+| `0180-1111` — substring, not a prefix | none | **not** substring matching |
+| `LORE0180-1111` — case-differing exact name | none | **case-sensitive** |
+| `…-old-extra` — longer than any name | none | sanity check |
+
+**Verdict: `nameQuery` is a case-sensitive prefix match on `name`.** The
+community knowledge was right — but it is now measured rather than assumed, which
+is the whole point of the item.
 
 **Action either way:** keep the client-side exact-match filter and document it
 as **load-bearing, not defence in depth**, so nobody later "simplifies" it away.
+The measurement makes that concrete rather than precautionary: the very first row
+is the failure. A query for a key's *own full name* returns a **different key**,
+because [[0157]]'s rotation suffix makes `…-key-20260812T142317Z` a strict
+extension of `…-key`. `--name-query` narrows; it never identifies.
+
+**Two consequences the note did not anticipate.**
+
+- **The server-side prefilter invitation stands.** `docs/runbooks/manual-api-key-tier.md`
+  dropped `--name-query` for a client-side `starts_with` and invited re-adding it
+  as a prefilter. Safe: server-side matching is prefix and client-side
+  `starts_with` is prefix, both case-sensitive, so the prefilter can never drop a
+  key the client-side filter would have kept. The two compose exactly. Whether it
+  is *worth* re-adding is a separate question — at our key counts, no.
+- **A prefilter does not exempt a reconciler from paging** ([[0158]]).
+  `get-api-keys --name-query lore0180 --limit 1` returned one name **and** a
+  `position` token, so `nameQuery` filters the paginated set rather than replacing
+  pagination. A reconciler that reads one page and treats it as the whole
+  namespace is wrong regardless of how narrow its query is.
 
 ---
 
@@ -112,15 +139,65 @@ drain a quota, get disabled, get re-enabled and start from zero.
 **How to measure.** On the scratch plan: consume known quota → `GetUsage` →
 `UpdateApiKey(enabled=false)` → `GetUsage` → re-enable → `GetUsage`.
 
-**Result (date: ______):**
+**Measured 2026-08-12.** Scratch REST API `lore0180-scratch` (`jfsxfpw280`) with a
+MOCK integration on `GET /`, stage `test`, plan `lore0180-scratch-plan`
+(`j11m0r`). Production was never involved — the note's warning is satisfied by
+construction rather than by care.
 
-| Step | `used` | `remaining` |
+**Verdict: preserved.** Disabling neither zeroes nor rolls back the counter, and
+re-enabling resumes exactly where the key left off.
+
+Proved twice, because the reported counters turned out to lag (below) and a
+`GetUsage`-only method could not have carried the verdict on its own:
+
+*Behavioural — immune to any reporting lag.* Quota `5/DAY`, drained to
+exhaustion:
+
+| Step | request | reported `[used, remaining]` |
 |---|---|---|
-| after consuming N | | |
-| while disabled | | |
-| after re-enable | | |
+| 5 requests | 5 × `200` | `[5, 0]` |
+| 3 more | 3 × `429` `Limit Exceeded` | `[5, 0]` |
+| disable → request | `429` | `[5, 0]` |
+| re-enable → request | **`429`** | `[5, 0]` |
 
-**Verdict:** preserved / frozen / zeroed →
+The last row is the finding: the first request after re-enabling is still
+rejected. A zeroed counter would have returned `200`. A user cannot launder a
+drained quota through a disable/enable cycle.
+
+*Counter-level, with quota raised to `1000/DAY` so the flag is the only variable:*
+
+| Step | reported `[used, remaining]` |
+|---|---|
+| at the instant disabling took effect | `[7, 993]` |
+| after re-enabling, one further `200` | `[8, 992]` |
+
+**Three things measured on the way that the item did not ask for, and that matter
+more operationally than the verdict itself.**
+
+1. **A disabled key gets `403 {"message":"Forbidden"}` — byte-identical to
+   sending no key at all.** So a revoked user cannot be told apart from a user who
+   never had a key, by the gateway alone. [[0162]] already needs "could not
+   verify" to render differently from "not a member"; this is the same problem one
+   layer down, and the portal is the only place it can be fixed.
+
+2. **Enable and disable take ~25 s to reach the data plane** — measured by polling
+   every 5 s: `200` at 20 s, `403` at 25 s on disable; `403` at 20 s, `200` at 25 s
+   on re-enable. Symmetric, `n = 1` each way, so treat it as "tens of seconds", not
+   as 25. **Revocation is not immediate.** Anything in [[0160]] that reports a key
+   as revoked the moment the API call returns is reporting the control plane, not
+   reality.
+
+3. **Quota-rejected requests do not increment `used`.** It stayed at 5 across
+   three `429`s. The quota counts what it lets through, so a client hammering an
+   exhausted key cannot push itself further into debt.
+
+**On `UpdateUsage` as a test-state shortcut** — the task's Notes recommend it, and
+it does work (`op:replace` on `/remaining` moved the enforcement counter and
+requests started succeeding). But it left the *reported* pair inconsistent with
+`limit` — `used = 5`, `remaining = 1000`, `limit = 1000` — and frozen there for
+over a minute of successful traffic before reconciling to a coherent `[7, 993]`.
+Fine for constructing states; do not read `GetUsage` as ground truth in the same
+period you patched it.
 
 ---
 

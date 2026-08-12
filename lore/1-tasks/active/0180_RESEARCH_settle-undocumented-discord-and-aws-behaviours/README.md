@@ -49,6 +49,21 @@ history:
       neither was stated. And item 7 cannot be fully measured before
       1 September; the runbook proxies it with a `DAY`-period plan, which
       settles the wording without proving AWS's `MONTH` implementation.
+  - date: 2026-08-12
+    status: active
+    who: akot
+    note: >
+      Items 6 and 8 measured against a scratch REST API with a MOCK integration —
+      production was never involved, by construction rather than by care. Both
+      settled: `nameQuery` is a case-sensitive prefix match, and disabling a key
+      preserves its usage counters, which lifts 0160's block on shipping
+      revocation. The measurements that were not asked for are the ones worth
+      reading: a disabled key is indistinguishable from no key at all (`403`),
+      enable/disable take ~25s to reach the data plane, and `GetUsage` lags by
+      minutes. Findings written back into 0158, 0160 and the manual-tier runbook.
+      Also fixed five `task 0171` references the 0179/0180 renumber left behind in
+      `docs/` — pointing at the `Decimal128::MIN` bug, which is exactly the
+      confusion the renumber history entry predicted.
 ---
 
 # Settle the undocumented behaviours before building on them
@@ -99,17 +114,23 @@ items 1–5 can be touched:
 
 Detail, reasoning and result tables live in the `R-` notes above. In short:
 
-| # | Behaviour | Correction? |
-| --- | --- | --- |
-| 1 | Status code + JSON error code when the user is **not** a member | new branch |
-| 2 | Is `pending` present on the REST member response? | new branch |
-| 3 | Is `flags` populated on that response? | new branch |
-| 4 | What `pending` means with screening **off** | new branch |
-| 5 | Consent-screen copy with/without `guilds.members.read` | friction unknown |
-| 6 | `nameQuery` matching — prefix or exact? | **yes — 0158, 0160, runbook** |
-| 7 | Monthly quota reset instant and timezone | **yes — 0157, 0158, 0160** |
-| 8 | `UpdateApiKey(enabled=false)` effect on usage counters | unblocks costing revocation |
-| 9 | All-in per-call backend cost | **yes — ADR 0010's $0.38 argument** |
+| # | Behaviour | Correction? | Status |
+| --- | --- | --- | --- |
+| 1 | Status code + JSON error code when the user is **not** a member | new branch | blocked on Step 0 |
+| 2 | Is `pending` present on the REST member response? | new branch | blocked on Step 0 |
+| 3 | Is `flags` populated on that response? | new branch | blocked on Step 0 |
+| 4 | What `pending` means with screening **off** | new branch | blocked on Step 0 |
+| 5 | Consent-screen copy with/without `guilds.members.read` | friction unknown | blocked on Step 0 |
+| 6 | `nameQuery` matching — prefix or exact? | **yes — 0158, 0160, runbook** | **measured 2026-08-12: case-sensitive prefix** |
+| 7 | Monthly quota reset instant and timezone | **yes — 0157, 0158, 0160** | open; scratch `DAY` plan stands ready, next UTC boundary |
+| 8 | `UpdateApiKey(enabled=false)` effect on usage counters | unblocks costing revocation | **measured 2026-08-12: preserved** |
+| 9 | All-in per-call backend cost | **yes — ADR 0010's $0.38 argument** | **done 2026-08-12: $0.55–0.89, argument survives** |
+
+Items 1–5 are the whole of the remaining work and none of it is startable: the
+Discord application does not exist. Verified 2026-08-12 rather than assumed —
+there is no SSM parameter, no Secrets Manager entry, no env file, and the only
+occurrence of the word in the repo outside `lore/` is a comment at
+`api-gateway-stack.ts:396`.
 
 Items **6 and 7** are corrections to text already written into 0157/0158/0160 as
 though AWS guaranteed it; item **9** re-checks ADR 0010's proportionality
@@ -135,13 +156,22 @@ rule as AWS-documented, not to prove AWS's implementation.
 - [ ] Items 1-4 measured against `stellar_test` and a screening-off scratch
       guild, results written down with the date
 - [ ] Consent screen captured with and without `guilds.members.read`
-- [ ] `nameQuery` semantics measured; [[0158]], [[0160]] and
+- [x] `nameQuery` semantics measured; [[0158]], [[0160]] and
       `docs/runbooks/manual-api-key-tier.md` updated so the client-side filter is
-      documented as load-bearing rather than redundant
+      documented as load-bearing rather than redundant — **done 2026-08-12**,
+      case-sensitive **prefix** match. The community answer was right, and the
+      prefix hazard 0158 wrote as a conditional is therefore real. One thing
+      nobody had asked: a `nameQuery` result still paginates, so the reconciler
+      must page before ranking
 - [ ] Quota rollover instant measured; [[0157]]/[[0158]]/[[0160]] corrected to
       stop presenting "00:00 UTC on the 1st" as AWS-documented behaviour
-- [ ] `enabled=false` effect on usage counters measured and recorded against
-      [[0160]] "Open"
+- [x] `enabled=false` effect on usage counters measured and recorded against
+      [[0160]] "Open" — **done 2026-08-12**, counters are **preserved**, so
+      revocation does not become a free quota reset and 0160's "do not ship
+      revocation before this is measured" blocker lifts. Three unasked-for
+      findings came with it and matter more than the verdict: a disabled key is
+      `403 Forbidden`, indistinguishable from no key; enable/disable take ~25 s to
+      reach the data plane; and `GetUsage` is not read-after-write
 - [x] All-in per-call cost established and ADR 0010's proportionality argument
       re-checked against it — **done 2026-08-12**, $0.55–$0.89 per fully-drained
       key (1.4–2.3× the $0.38), argument survives. See

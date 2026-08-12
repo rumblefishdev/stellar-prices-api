@@ -150,24 +150,40 @@ prefix hazard below.
    corrective row.
 
 **`nameQuery`'s matching semantics are undocumented — corrected 2026-08-10 by
-[[0156]].** AWS's entire documentation of the parameter is one sentence, *"The
-name of queried API keys."*, on both `GetApiKeys` and the CLI reference. It
-states **no** matching rule. Prefix matching is widely-reported community
-knowledge, not an AWS contract, and AWS has committed to nothing.
+[[0156]], and measured 2026-08-12 by [[0180]].** AWS's entire documentation of
+the parameter is one sentence, *"The name of queried API keys."*, on both
+`GetApiKeys` and the CLI reference. It states **no** matching rule. Prefix
+matching was widely-reported community knowledge, not an AWS contract.
 
-Two consequences, and the second is the important one:
+**Measured: it is a case-sensitive prefix match.** Against three scratch keys in
+`eu-central-1`, a query for a key's own *full name* returned that key **and** a
+longer key extending it; a prefix belonging to no key returned both keys it
+prefixes; a substring that was not a prefix returned nothing; a case-differing
+exact name returned nothing. So the community answer was right — but it is now an
+observation, and AWS still commits to nothing, which is why the guard below does
+not move.
+
+Three consequences, and the second is the important one:
 
 - **The client-side exact-match filter is load-bearing, not defence in depth.**
   Do not let a later reader "simplify" it away on the grounds that the `-key`
   suffix already handles it. It is the only guard that does not depend on
-  undocumented behaviour.
-- **If matching *is* prefix-based** — the behaviour to assume until [[0180]]
-  measures it — then because Discord snowflakes are 17–19 digits, a shorter user
-  id is a prefix of a longer one: a lookup for `discord-1234567890123456` would
-  return the key belonging to `discord-12345678901234567`, and step 5 would
-  delete it — silently, permanently, on an account that was never part of the
-  race. The `-key` suffix means no bare id can prefix another complete name,
-  which is why the naming keeps it.
+  behaviour AWS never promised — and prefix matching is now known to be exactly
+  the behaviour that would break the lookup.
+- **The prefix hazard is real, not hypothetical.** Because Discord snowflakes are
+  17–19 digits, a shorter user id is a prefix of a longer one: a lookup for
+  `discord-1234567890123456` returns the key belonging to
+  `discord-12345678901234567`, and step 5 would delete it — silently,
+  permanently, on an account that was never part of the race. The `-key` suffix
+  means no bare id can prefix another complete name, which is why the naming
+  keeps it. This was written as a conditional (*"if matching is prefix-based"*);
+  the condition holds.
+- **A `nameQuery` does not exempt the reconciler from paging** *(new, 2026-08-12)*.
+  `GetApiKeys` returned a `position` token alongside a `nameQuery`-filtered
+  result, so the parameter filters the paginated set rather than replacing
+  pagination. Step 5 re-lists to decide a winner by earliest `createdDate`; if it
+  reads one page and stops, it can pick a winner from a partial list and delete a
+  key that was never shown to it. Page to exhaustion before ranking.
 
 Step 5 is the reconciler and it is deterministic: both sides of a race read the
 same API Gateway list and compute the same winner. **Deterministic key naming is
