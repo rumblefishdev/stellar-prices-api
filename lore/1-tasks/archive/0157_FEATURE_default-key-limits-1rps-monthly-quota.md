@@ -4,7 +4,7 @@ title: "Default key limits: 1 req/s + monthly quota, not the design doc's 100 re
 type: FEATURE
 status: completed
 related_adr: ["0008", "0010"]
-related_tasks: ["0121", "0156", "0158", "0160", "0163", "0171"]
+related_tasks: ["0121", "0156", "0158", "0160", "0163", "0180"]
 tags: [layer-infra, priority-high, effort-medium, milestone-M3, epic-self-service-onboarding, api-gateway, usage-plan, throttling, cost]
 milestone: 3
 links:
@@ -44,7 +44,7 @@ history:
       Activated. Branched from `docs/0156_self-service-auth-assumptions` rather
       than `develop` because [[0156]] (PR #187, in review) rewrites this task's
       quota-reset section: the calendar alignment is unverified, so the
-      single-date property is design intent until [[0171]] #7 measures it.
+      single-date property is design intent until [[0180]] #7 measures it.
       Building from `develop` would implement the superseded spec. The status
       move is committed on the feature branch, not pushed to `develop`, to
       avoid a modify/delete conflict against PR #187 which edits this file.
@@ -320,7 +320,7 @@ conclusion stands on the remaining arguments.
   of requests subtracted from the given limit in the initial time period"*), not
   a way to shift the reset day, so it cannot be used to force alignment.
   The instinct already recorded here — "confirm on the first deploy rather than
-  assume it" — was the right one and is now tracked as [[0171]] #7. Until it is
+  assume it" — was the right one and is now tracked as [[0180]] #7. Until it is
   measured, treat the single-date property as a **design intent**, and make sure
   the wording in [[0160]] and [[0163]] presents the rework boundary as our rule
   rather than as AWS behaviour.

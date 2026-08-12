@@ -3,7 +3,7 @@ id: "0010"
 title: "Discord identity is the account: one active key, gated on guild membership and account age"
 status: accepted
 deciders: [akot]
-related_tasks: ["0156", "0157", "0158", "0159", "0160", "0170", "0171"]
+related_tasks: ["0156", "0157", "0158", "0159", "0160", "0179", "0180"]
 related_adrs: ["0007", "0008"]
 tags: [discord, oauth, auth, abuse-prevention, account-model, api-keys, usage-plan, epic-self-service-onboarding]
 links:
@@ -51,7 +51,7 @@ Task 0156 investigated both. The findings that changed the decision:
   minutes"*, while its own support article describes Medium as requiring a
   **verified email** held *"for longer than five minutes"*. **The two sources
   contradict each other**; the research recorded this rather than resolving it,
-  and it must be tested, not cited ([[0171]]).
+  and it must be tested, not cited ([[0180]]).
 - **Under the `identify` scope our flow observes none of it.** `verified` (email
   verified) requires the **`email`** scope; there is **no phone field on the
   OAuth2 User object at all**; guild membership sits behind a separate scope and
@@ -141,7 +141,7 @@ against a document that deliberately declines to hold an email address.
 
 Adam creates a **`stellar_test`** guild for building and testing the epic.
 Integration against the production Stellar guild is a separate conversation with
-SDF, tracked as [[0170]].
+SDF, tracked as [[0179]].
 
 `stellar_test` must mirror the production posture or the tests prove nothing.
 Membership Screening requires Community to be enabled first (*"In order to see
@@ -163,7 +163,7 @@ declined. See [Alternatives Considered](#alternatives-considered).
 |---|---|
 | `stellar_test` guild — creation and configuration | Adam Kot (`akot`) |
 | Discord application registration + redirect-URI lifecycle | Adam Kot (`akot`) |
-| Stellar Discord (SDF) relationship | **Adam Kot (`akot`)** on our side, executing [[0170]]. No named SDF counterpart is public as of 2026-08-10; the published routes are `communityfund@stellar.org` and `#scf-general` |
+| Stellar Discord (SDF) relationship | **Adam Kot (`akot`)** on our side, executing [[0179]]. No named SDF counterpart is public as of 2026-08-10; the published routes are `communityfund@stellar.org` and `#scf-general` |
 
 This replaces the "someone" placeholder in [[0159]]. The published SDF contact
 routes are `communityfund@stellar.org` and `#scf-general` (the handbook says the
@@ -208,7 +208,7 @@ a fresh token with which to ask, right then, whether this person is a member.
 This is cheap. Discord does not re-prompt for consent when the user has already
 authorized the same scopes, so the second and later round-trips are a redirect,
 not a consent screen. And it needs no bot in Stellar's guild — which would have
-required SDF's permission and made [[0170]] a hard blocker.
+required SDF's permission and made [[0179]] a hard blocker.
 
 ### The shape
 
@@ -248,11 +248,11 @@ once is old enough forever, so re-checking it is noise.
 of "must be a member", flagged here so it can be reversed cheaply if Adam meant
 otherwise. Discord itself treats a `pending` member as not yet participating:
 they "will initially be restricted from doing any actions in the guild". It is
-also the only reading under which this ADR's screening argument, and [[0170]]'s
+also the only reading under which this ADR's screening argument, and [[0179]]'s
 central question to SDF, mean anything — under the other reading the gate is one
 click and screening is decorative.
 
-**This rule must not ship before [[0171]] #2 is measured.** `pending` is an
+**This rule must not ship before [[0180]] #2 is measured.** `pending` is an
 optional field and its presence on the `guilds.members.read` REST response is
 undocumented. If it turns out to be absent in practice, a naive
 `pending === false` test would refuse **every** user and take issuance down
@@ -332,11 +332,11 @@ key to a deleted one — there is no predecessor, lineage or carry-over field am
 yields a key ID with no prior usage. **That is the loophole the once-per-quota-
 period cap exists to close**, and it is why the cap is load-bearing rather than
 tidy. It is a derivation from documented behaviour, not a documented guarantee —
-[[0171]] #6 measures it.
+[[0180]] #6 measures it.
 
 **Proportionality — what the abuse is worth.** A fully-drained key (100k quota,
 3 KB responses, us-east-1) costs **$0.38/month** — **gateway charges only; the
-backend cost per call is unpriced and probably dominant** ([[0171]] #9). On
+backend cost per call is unpriced and probably dominant** ([[0180]] #9). On
 request charges alone, ~286 drained keys reach $100/month (267 on the all-in
 basis). Optional API Gateway caching alone is $27.36/month = 72 abusive
 keys. This is why no paid mitigation is justified, and why the quota — which
@@ -449,7 +449,7 @@ the rework cap, which is coherent only under one key.
 - `pending`, `joined_at` and `roles` become available for finer rules later
   without another consent change. Two caveats: whether `pending` and `flags` are
   actually present on the `guilds.members.read` REST response is **undocumented**
-  ([[0171]] #2, #3), and `pending === false` can also mean an admin waved the
+  ([[0180]] #2, #3), and `pending === false` can also mean an admin waved the
   member through (`BYPASSES_VERIFICATION`).
 - One-key is confirmed, so [[0158]]'s schema and [[0160]]'s rework cap are
   correct as designed and need no reshaping.
@@ -471,7 +471,7 @@ the rework cap, which is coherent only under one key.
 - **The age gate is close to symbolic at this value.** Anyone reading this ADR
   later should not mistake "we have two gates" for "we have two barriers" — we
   have one barrier (membership) and one speed-bump.
-- The not-a-member path depends on an **undocumented** error shape ([[0171]] #1).
+- The not-a-member path depends on an **undocumented** error shape ([[0180]] #1).
 - `pending === false` is not proof of having passed anything —
   `BYPASSES_VERIFICATION` (*"Member is exempt from guild verification
   requirements"*) means an admin can wave a member through.
@@ -479,12 +479,12 @@ the rework cap, which is coherent only under one key.
 ### What would reverse this decision
 
 - **SDF disabling Membership Screening on the production guild, or declining the
-  integration in [[0170]].** With the age threshold at 5 minutes, screening is
+  integration in [[0179]].** With the age threshold at 5 minutes, screening is
   the second of the barrier's two clicks; losing it takes the gate from "joined
   and accepted the rules" to "joined". That is a small absolute change — which is
   exactly why it matters that the gate was already thin. If it goes, the first
   lever is the free quota (Alternative 6), then the age threshold, then a
-  captcha. Whoever picks up [[0170]] should still treat "will you keep screening
+  captcha. Whoever picks up [[0179]] should still treat "will you keep screening
   on, and would you tell us if it changed" as a question worth asking, because we
   would not learn the answer from any API response.
 
@@ -497,7 +497,7 @@ the rework cap, which is coherent only under one key.
   justified.
 - Observed *scripted* signup specifically — that is the threat captcha
   addresses, and a 5-minute age gate barely touches it.
-- The all-in per-call backend cost ([[0171]] #9) turning out to dominate the
+- The all-in per-call backend cost ([[0180]] #9) turning out to dominate the
   gateway figure by an order of magnitude — every exposure number in the
   rationale scales with it, and a $0.38/key threat model becoming a $4/key one
   changes what mitigation is proportionate.
@@ -507,7 +507,7 @@ the rework cap, which is coherent only under one key.
 ## Corrections this ADR makes to already-written tasks
 
 Both were checked directly against AWS documentation. Neither is fatal; both
-must be corrected before build ([[0171]]).
+must be corrected before build ([[0180]]).
 
 1. **`nameQuery` is not documented as a prefix match.** [[0158]] and [[0160]]
    build a reconciler and a "prefix hazard" guard on that premise. AWS documents

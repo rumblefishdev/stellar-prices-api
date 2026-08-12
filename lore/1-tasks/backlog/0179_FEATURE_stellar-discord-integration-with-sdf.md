@@ -1,10 +1,10 @@
 ---
-id: "0170"
+id: "0179"
 title: "Contact the Stellar Discord owner (SDF) to agree production guild integration and test it end to end"
 type: FEATURE
 status: backlog
 related_adr: ["0010"]
-related_tasks: ["0156", "0159", "0160", "0162", "0163", "0164", "0171"]
+related_tasks: ["0156", "0159", "0160", "0162", "0163", "0164", "0180"]
 tags: [layer-docs, priority-high, effort-small, milestone-M3, epic-self-service-onboarding, discord, external-dependency, pre-launch]
 milestone: 3
 links:
@@ -28,8 +28,20 @@ history:
       `blocks-launch` → `pre-launch`: the membership check uses the user's own
       OAuth token against a public guild ID, so nothing here is a technical
       blocker on shipping. Added a sequencing section — step 3 (verify against
-      the real guild) is under our control and should run early with [[0171]],
+      the real guild) is under our control and should run early with [[0180]],
       not wait on SDF's reply.
+  - date: 2026-08-12
+    status: backlog
+    who: akot
+    note: >
+      Renumbered 0170 → 0179. This is the second collision on the same task:
+      0169 → 0170 was already done once when PR #184 took 0169 mid-flight, and
+      the replacement number collided too, because the renumber was computed
+      against a `develop` that then moved again — PRs #196 and #197 landed
+      0170_BUG and 0171_BUG before PR #187 merged. Picking the next free id at
+      renumber time is not enough when the branch is long-lived; check again at
+      merge. Bug-side `[[0170]]` references in 0127, 0165 and 0178 point at the
+      OHLCV bug and were deliberately left alone.
 ---
 
 # Stellar Discord integration with SDF
@@ -115,7 +127,7 @@ case, not a tail risk.
 
 - Run the full issuance flow against `897514728459468821` with a real account:
   member and non-member, `pending` true and false.
-- Confirm the empirical unknowns from [[0171]] behave on the production guild as
+- Confirm the empirical unknowns from [[0180]] behave on the production guild as
   they did on `stellar_test` — particularly the not-a-member status code, and
   whether `pending`/`flags` are present on the REST response.
 
@@ -138,7 +150,7 @@ hearing about it.
 
 | Step | Under our control? | When |
 |---|---|---|
-| 3 — verify against the real guild | **Yes, entirely** | **Do this early**, alongside [[0171]]. Needs one real account that is already a member |
+| 3 — verify against the real guild | **Yes, entirely** | **Do this early**, alongside [[0180]]. Needs one real account that is already a member |
 | 1–2 — contact SDF, establish their posture | No — their response time | Start early because it is slow, not because it blocks |
 | 4 — flip the SSM guild ID | Yes | **Blocks [[0164]] and blocks launch** — see below |
 

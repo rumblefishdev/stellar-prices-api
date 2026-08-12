@@ -140,7 +140,7 @@ capped at 100k = $0.38).
     third-party provider publishes age gating at all, so there is no precedent
     to appeal to for anything higher. **Membership carries the abuse story
     alone** — and membership is one public click plus a rules checkbox. That is
-    proportionate to a $0.38/key exposure, but it means [[0170]]'s question
+    proportionate to a $0.38/key exposure, but it means [[0179]]'s question
     "will SDF keep screening on" is the one that actually matters.
 - **Membership is checked once, at issuance** (Adam, 2026-08-10). Nothing
   re-checks it. This extends the epic's existing non-goal consistently, keeps a
