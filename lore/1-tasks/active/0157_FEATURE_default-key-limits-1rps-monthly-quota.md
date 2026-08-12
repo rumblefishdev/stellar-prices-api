@@ -567,6 +567,24 @@ conclusion stands on the remaining arguments.
    `--name-query` as "a cheap server-side prefilter", which the rewritten snippet
    no longer uses at all.
 
+10. **The rotation hazard is written into `infra/Makefile`, because that is the
+    only place that outlives this task** *(2026-08-12, from review of [[PR 195]])*.
+    `make deploy-production` runs `cdk deploy --all --require-approval broadening`,
+    which prompts on IAM and security-group widening and **not** on deletion or
+    replacement — so the deploy that rotates this key destroys it without asking.
+
+    The hazard itself was well documented, in the PR description and in this file.
+    Neither survives: one disappears on merge, the other is archived. The comment
+    at the `PricingApiFreeApiKey` construct warns whoever edits *those two lines*,
+    which is not the person this catches — that person is running a routine deploy
+    of an unrelated stack and never opens `api-gateway-stack.ts`.
+
+    So the note sits above `deploy-production` and asks for `make diff-production`
+    read for removals rather than skimmed for additions. Deliberately not phrased
+    around this key: after deploy the rotation is done, and what remains true is
+    the general one — an approval mode that is silent on deletion means the diff
+    is the only place a destroyed resource ever announces itself.
+
 ## Notes
 
 - **Sequencing with [[0121]] — the one-plan outcome makes this sharper, not
