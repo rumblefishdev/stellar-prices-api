@@ -2,7 +2,7 @@
 id: "0136"
 title: "Every coarse OHLCV table frozen since 2026-07-21 — merges and mutations inert on six tables"
 type: BUG
-status: active
+status: completed
 related_adr: []
 related_tasks: ["0072", "0097", "0104", "0109", "0114", "0127"]
 tags:
@@ -165,6 +165,33 @@ history:
       08-03 recovery), which was always the other branch of the recorded "a week
       post-recovery OR the pre-roll". Do not credit the pre-roll.
       Remaining on 0136: 0137 alarm, the note to BE, and the cleanup re-enable.
+  - date: 2026-08-12
+    status: completed
+    who: okarcz
+    note: >
+      COMPLETE — the last two acceptance criteria closed today, six weeks after
+      the freeze began.
+      The freshness alarm shipped as [[0137]] and is LIVE on production: seven
+      per-tier alarms measuring `now() - max(timestamp)` rather than MV exit
+      status, fire-tested end to end (breach → ALARM in ≤60 s, recovery in
+      exactly 30 min, Slack on both transitions). This freeze would now page
+      within one 15-minute cycle instead of running 13 days unnoticed.
+      BE were told today that the coarse tables were stale 07-21 → 08-03 and have
+      since been backfilled. The material point for them: their 0199
+      re-measurement at 2026-08-11 ~09:00Z predates the 08-11 backfill, so their
+      coverage figures were read against a table still missing 13 days.
+      What this incident cost, recorded because the shape recurs: the failure was
+      invisible for 13 days precisely because every component reported success —
+      the MVs were `Scheduled` with empty exceptions, and health was measured on
+      the MV rather than on the data. It surfaced only by accident, via [[0072]]'s
+      rollout check noticing `change_7d_pct` was 0 for every asset. The same
+      "absence read as health" shape appeared twice more during 0137's build: in
+      the empty-tier gate that would have read a retention-emptied table as
+      recovered, and in the 1-of-1 alarm evaluation that would have flipped all
+      seven alarms to OK on a single probe outage. Both were caught in review.
+      Spawned earlier and still open: [[0181]] (leading indicators — pending
+      mutations sat undone 13 days here and would have flagged it days sooner;
+      the grant request for that went to BE with today's note).
 ---
 
 # Every coarse OHLCV table has been frozen since 2026-07-21
@@ -1237,8 +1264,16 @@ Detection is a separate deliverable → **[[0137]]**.
       damage ran on 2026-08-11 anyway (every year 2016–2025 with 12 months, all
       five forever-tables populated, ledger markers contiguous, `missing_ledgers
       = 0`).
-- [ ] A freshness alarm exists that would have caught this within a day →
-      **[[0137]]**.
+- [x] A freshness alarm exists that would have caught this within a day →
+      **[[0137]] — DEPLOYED AND FIRE-TESTED ON PRODUCTION 2026-08-12.** Seven
+      per-tier alarms on `Prices/Rollup RollupLagSeconds`, published every 15 min
+      by `rollup-freshness-probe`. It measures the **data** (`now() -
+      max(timestamp)` per tier), not MV exit status — which is the only signal
+      that could have caught this freeze, since all six MVs reported
+      `status = Scheduled` with an empty exception throughout.
+      Detection latency measured on prod: breach → ALARM in **≤60 s**, recovery
+      in exactly 30 min, Slack on both transitions. `_1h` frozen for 13 days
+      would have paged against its 3 h bound within one 15-minute cycle.
 - [x] [[0072]]'s `change_7d_pct` verified non-zero for assets with 7d of data —
       **2026-08-11: 1,680 of 3,295 assets (51.0%) non-zero**, against 0 for every
       asset while `_1h` was frozen. `mv_current_prices` was `Scheduled` with an
@@ -1260,9 +1295,19 @@ Detection is a separate deliverable → **[[0137]]**.
       and 3,295 is not the asset universe — the row set is driven by `unfiltered`
       (`current.sql:287-290`), i.e. assets with a `_1m` row in the last 24 h, so
       `current_prices` holds currently-active assets only.
-- [ ] BE told that coarse `prices` data was stale and has moved — their 0199
+- [x] BE told that coarse `prices` data was stale and has moved — their 0199
       LP-analytics contract reads the 1h/1d views. **Not** framed as their
       operation: the 07-17 window was ours (see Provenance).
+      ✅ **SENT 2026-08-12.** Covered: the freeze window (07-21 02:44 → 08-03),
+      that `price_ohlcv_1m` was never affected, the 08-11 backfill with its
+      per-tier verification, and — the part they most needed — that **their own
+      0199 re-measurement at 2026-08-11 ~09:00Z PREDATES the backfill**, so their
+      `priceable_90d` / `priceable_48h` figures were taken against a table still
+      missing 13 days and should now read better. Flagged that the `0 → 1,430 of
+      1,436` USDC result is unaffected (a structural fix, not a coverage one),
+      and that any re-run should pin its date given the ±2–3pp weekly drift.
+      The [[0181]] grant request was batched into the same message rather than
+      raised separately.
 - [x] [[0105]] unblocked only after the above holds for a watch period —
       **unblocked 2026-08-05**, two days of healthy autonomous rollups with
       every tier current. The `_bak` tables are no longer the rollback path for
