@@ -22,10 +22,23 @@ history:
       Spawned from [[0137]]. The primary freshness signal (per-tier
       `now() - max(timestamp)`) shipped without these three leading indicators
       because they need `system.mutations` and `system.view_refreshes`, whose
-      readability by the scoped mTLS user is unmeasured — and the runtime users
+      readability by the scoped mTLS user was unmeasured — and the runtime users
       are XML-managed by BE, so we cannot `GRANT` them ourselves ([[0134]]).
       0137 was deliberately designed to need no `system.*` access at all so it
       could ship first.
+  - date: 2026-08-12
+    status: backlog
+    who: okarcz
+    note: >
+      ACCESS MEASURED on prod, so the scope is now precise rather than an open
+      question. `prices_writer` holds `SELECT ON system.parts` and nothing else
+      under `system.*`, so the **part-count indicator is unblocked and should be
+      built first**; mutation-age and view_refreshes need a two-line BE grant.
+      The cluster uses explicit grants, NOT ClickHouse's usual
+      open-with-row-filtering — and the `system.parts` grant is itself the proof,
+      since it would be redundant under the permissive model. `storage =
+      users_xml` on both runtime users confirms [[0134]]: we cannot GRANT them.
+      Batch the grant request with the 0136 note already owed to BE.
 ---
 
 # Rollup leading indicators
@@ -45,24 +58,46 @@ earlier:
   before the 5,000 throw limit;
 - a non-empty `exception` on any row of `system.view_refreshes`.
 
-## Context
+## Context — access MEASURED on prod 2026-08-12
 
-The blocker is access, not design. Measure first:
+The blocker is access, not design. **It is now measured, not assumed**
+(`SHOW GRANTS FOR prices_writer` on ch-prod-01):
 
-```sql
--- Run as the scoped mTLS user (prices_writer), NOT as `default`.
-SELECT count() FROM system.mutations;
-SELECT count() FROM system.view_refreshes;
+```
+GRANT SELECT, INSERT, ALTER DELETE, OPTIMIZE ON prices.* TO prices_writer
+GRANT SELECT ON system.parts                            TO prices_writer
 ```
 
-If either is unreadable, that half is blocked on a BE request to widen the
-XML-managed grants — worth batching with any other grant need rather than
-raising alone.
+| table | granted | indicator | status |
+|---|---|---|---|
+| `system.parts` | ✅ explicitly | part counts | **unblocked — build first** |
+| `system.mutations` | ❌ | pending-mutation age | blocked on BE grant |
+| `system.view_refreshes` | ❌ | refresh exceptions | blocked on BE grant |
 
-⚠️ **`system.parts` is already readable** (0137 measured against it locally and
-the task-0137 §Access note records the grant), so the **part-count** indicator is
-unblocked today even if the other two are not. It is the cheapest of the three
-and can ship alone.
+⚠️ **This cluster uses explicit grants, not open-with-row-filtering.** ClickHouse
+often exposes `system.*` to every user with rows filtered to what that user can
+see, which would have made these readable for free. It does **not** here — and
+the proof is the `system.parts` grant itself: if system tables were open, that
+line would be redundant, and somebody added it deliberately because it was not.
+Do not assume a `system.*` table is readable because ClickHouse usually allows
+it; check `SHOW GRANTS` first.
+
+`SELECT name, storage FROM system.users` returns `users_xml` for both
+`prices_reader` and `prices_writer`, confirming [[0134]] empirically: these are
+XML-managed and **we cannot `GRANT` them ourselves.**
+
+### The BE ask — small and concrete
+
+Two lines in BE's ClickHouse users XML:
+
+```
+GRANT SELECT ON system.mutations      TO prices_writer
+GRANT SELECT ON system.view_refreshes TO prices_writer
+```
+
+📌 **Batch this with the [[0136]] note already owed to BE** (coarse `prices` data
+was stale 2026-07-21 → 08-03 and has since moved) rather than pinging them
+twice.
 
 ## Implementation
 
@@ -89,11 +124,12 @@ comparing `1M`'s newest bucket against `1w`'s.
 
 ## Acceptance Criteria
 
-- [ ] Readability of `system.mutations` and `system.view_refreshes` by the scoped
-      mTLS user is **measured** and recorded either way.
-- [ ] Part-count indicator ships (unblocked regardless of the above).
-- [ ] Mutation-age and `view_refreshes` indicators ship, or are recorded as
-      blocked on a named BE grant request.
+- [x] Readability of `system.mutations` and `system.view_refreshes` by the scoped
+      mTLS user is **measured** and recorded either way. ✅ **Done 2026-08-12** —
+      neither is granted; only `system.parts` is. See §Context.
+- [ ] Part-count indicator ships (unblocked — build this first).
+- [ ] Mutation-age and `view_refreshes` indicators ship, **or** the two-line BE
+      grant request in §Context is raised and its outcome recorded here.
 - [ ] No duplication with [[0109]] — ownership of the `system.mutations` watch is
       settled and written down in both tasks.
 - [ ] Thresholds recorded with rationale, consistent with [[0137]]'s bounds.

@@ -2,9 +2,9 @@
 id: "0137"
 title: "Rollup freshness alarm — a starved rollup MV reports success and nothing notices"
 type: FEATURE
-status: active
+status: completed
 related_adr: []
-related_tasks: ["0136", "0104", "0109", "0056", "0143"]
+related_tasks: ["0136", "0104", "0109", "0056", "0143", "0112", "0181"]
 tags:
   [
     "priority-high",
@@ -52,6 +52,31 @@ history:
       be `GRANT`ed by us ([[0134]]). The primary `max(timestamp)` freshness
       signal needs no system-table access at all, so it ships first and the
       leading indicators are gated on that measurement.
+  - date: 2026-08-12
+    status: completed
+    who: okarcz
+    note: >
+      COMPLETE and LIVE on production. Four of five acceptance criteria met; the
+      fifth (leading indicators) is owned by [[0181]].
+      Shipped `rollup-freshness-probe` — a rate(15 minutes) Lambda publishing each
+      OHLCV tier's `now() - max(timestamp)` as `Prices/Rollup RollupLagSeconds`,
+      with seven per-tier alarms plus dead-probe cover from [[0112]]'s
+      `workerHealth` array. It measures the DATA, not the MV, which is the only
+      signal that could have caught [[0136]]'s nine-day freeze.
+      Fire-tested on prod: `OK → ALARM` in under a minute, recovery in exactly
+      30 min, Slack on both transitions; all 10 alarms independently demonstrated
+      their SNS route. Probe runs in 90 ms / 48 MB against 735M-row tables,
+      confirming on real data that `max(timestamp)` is answered from per-part
+      metadata rather than a column scan.
+      Code review (PR #199) caught three issues, all fixed before merge — the
+      most important being that the empty-tier gate created a false RECOVERY
+      (a tier emptied by retention mid-freeze read as healthy), rebuilding the
+      0136 blind spot one layer up. Fixed with a fine→coarse rule rather than the
+      reviewer's proposal, which would have paged on bootstrap.
+      11 unit + 2 CH integration tests on the 26.3.10.60 pin; fmt and clippy
+      clean. Spawned [[0181]] (leading indicators + the coarsest-tier empty hole).
+      ⚠️ Left undone deliberately: the [[0136]] note to BE, which should carry
+      0181's two-line grant request with it.
 ---
 
 # A starved rollup reports success — measure freshness, not exit status
@@ -124,20 +149,29 @@ whether the data at rest is advancing.
       alarm within a day. Covered by
       `freshness_query_executes_deserializes_and_gates_empty_tiers`, which seeds
       a 20-day-stale `1h` alongside a fresh `1m` and asserts the stale tier
-      exceeds its bound while the fresh one does not. Detection latency is
-      **15–30 min** (15-min cadence × 1 evaluation period), far inside "a day".
+      exceeds its bound while the fresh one does not.
+      ✅ **Measured on production 2026-08-12:** breach → ALARM in **≤60 s**
+      (`11:57:52`), recovery in **exactly 30 min** (`12:27:52`) — the 1-of-2
+      evaluation over 15-min `Maximum` periods behaving as designed. Far inside
+      "within a day".
 - [ ] Pending-mutation age and part-count checks are covered, here or in
-      [[0109]], without duplicating each other. **DEFERRED** — these need
-      `system.mutations` / `system.view_refreshes`, whose readability by the
-      scoped mTLS user is unmeasured, and the runtime users are XML-managed by BE
-      so we cannot `GRANT` them ([[0134]]). The primary signal deliberately needs
-      no `system.*` access at all, so it ships without them. See §Remaining Work.
-- [ ] Alarm routes somewhere a human reads, and a fire-test has passed.
-      **HALF DONE.** Routing is wired — every alarm gets both an ALARM and an OK
-      action on the `prices-{env}-ops-alarms` SNS topic that [[0056]] points at
-      the Slack channel, confirmed in the template (`act=1/1` on all nine). The
-      **fire-test has NOT been run**: it needs a deploy, and this task is
-      prepare-only. See §Remaining Work.
+      [[0109]], without duplicating each other. **DEFERRED to [[0181]]**, and the
+      access question is now **measured rather than assumed** (2026-08-12):
+      `prices_writer` holds `SELECT ON system.parts` and nothing else under
+      `system.*`, so part counts are unblocked while mutation-age and
+      `view_refreshes` need a two-line BE grant. ⚠️ The deferral also has a
+      non-access half that survives regardless: this AC says "here **or in
+      0109**", and 0109's guard already watches `system.mutations` — ownership
+      must be settled before either builds it, or both page for the same event.
+- [x] Alarm routes somewhere a human reads, and a fire-test has passed.
+      ✅ **DONE 2026-08-12, and proven more broadly than planned.** The fire-test
+      (`put-metric-data`, synthetic 9,999,999 s on `price_ohlcv_1M`) drove
+      `OK → ALARM → OK` with Slack messages on **both** transitions. Separately,
+      all **10** alarms delivered to `#stellar-prices-api-bot` on first
+      resolution, so the SNS → Slack route is demonstrated per-alarm rather than
+      for one sample. The OK direction is the half that matters most: it is what
+      proves a real freeze *ending* would be reported as ended rather than
+      falling silent — review finding 1's whole concern.
 - [x] Lag bounds are recorded with their rationale, and do not contradict
       [[0104]]. Rationale is the bucket-width sawtooth (§Design Decisions 1),
       documented on `ROLLUP_TIERS` and on `opsAlarms.rollupLagSeconds`, and
@@ -286,41 +320,48 @@ before trusting the synth, per the [[0141]] stale-asset trap.
    same spirit as `observability-stack.ts`'s existing note on duplicated
    timeouts/cadences. ⚠️ A drift mis-tunes the alarm without failing any test.
 
+## Deployment — 2026-08-12, production
+
+Deployed by the operator from `develop`, EventBridge first so the probe was
+publishing before the alarms began evaluating. Both stacks have **no CDK
+dependency edges**, verified from the synth manifest before deploying — which
+mattered, because `ApiGateway` was concurrently carrying [[0157]]'s undeployed
+key-destroying diff and `make deploy-production` would have shipped it.
+
+| step | result |
+|---|---|
+| `verify-lambda-assets.sh` | 10/10 crates |
+| `strings … bootstrap \| grep RollupLagSeconds` | present ([[0141]] stale-asset check) |
+| `make deploy-production-eventbridge` | ✅ 120 s |
+| manual `lambda invoke` | 7 tiers, values matching the pre-flight |
+| `make deploy-production-observability` | ✅ 12 s |
+| all 10 alarms | `OK` |
+| fire-test | `OK → ALARM` 11:57:52 → `OK` 12:27:52 |
+
+**Probe performance — the design decision, confirmed on production data.**
+Warm invocation **90 ms**, cold 484 ms, **48 MB of 256 MB**. That is seven
+`max(timestamp)` reads across tables up to 735M rows, over mTLS to Hetzner, in
+under a tenth of a second — proving on real data what §Design Decisions 5 only
+measured locally on 2M rows: ClickHouse answers these from per-part min/max
+metadata, not a column scan. It also sits at **0.19%** of the duration alarm's
+48,000 ms threshold.
+
+**Pre-flight lags** (all seven present, so no sentinel; tightest `4h` at 28% of
+bound). Re-reading them 30 min later gave a clean confirmation of the
+bucket-start model: every coarse tier had aged by *exactly* the elapsed 1,782 s,
+while `1m` and `15m` had dropped, having rolled into new buckets. The sawtooth
+that §Design Decisions 1 is built on, observed directly.
+
+⚠️ **Deploying alarms emits one Slack message per alarm.** All 10 fired their OK
+action on first resolution from `INSUFFICIENT_DATA`, so a 10-message burst
+arrived within ~8 minutes of the deploy for something that was never broken.
+Expected, one-time (alarms only sit in `INSUFFICIENT_DATA` when freshly created),
+and **not worth suppressing** — dropping `addOkAction` would cost the recovery
+signal, which is the half that proves a freeze has ended. Warn the channel before
+deploying a batch of alarms.
+
 ## Remaining Work
 
-Both are genuinely blocked on things this task cannot do, not descoped:
-
-- **Fire-test after deploy** (AC 4). Deliberately not run — infra work here is
-  prepare-only.
-  ⚠️ **Do NOT fire-test by lowering a threshold.** That was the original plan and
-  it does not work: the synth validator (§Design Decisions 1/10) rejects any
-  threshold at or below the tier's healthy peak, so `1M` cannot be set below
-  38 d and no value that would force a breach will pass validation. It also
-  needs a deploy to set and a second to restore.
-  **Fire-test by publishing a synthetic datum instead** — no config change, no
-  deploy, and it exercises the real namespace/metric/dimension triple, so it
-  catches a dimension mismatch that forcing the alarm state with
-  `set-alarm-state` would not:
-
-  ```bash
-  aws cloudwatch put-metric-data \
-    --namespace Prices/Rollup --metric-name RollupLagSeconds \
-    --dimensions Environment=production,Table=price_ohlcv_1M \
-    --value 9999999 --unit Seconds
-  ```
-
-  `1M` is the right tier to use: its 45-day bound means a real breach is not
-  imminent, so a synthetic one is unambiguous. Expect ALARM within ~15 min
-  (1-of-2 datapoints), then automatic recovery ~30 min after the next real probe
-  run publishes the true lag.
-- **Leading indicators** (AC 3) — pending-mutation age, part counts,
-  `view_refreshes` exceptions. Blocked on measuring whether the scoped mTLS user
-  can read `system.mutations` and `system.view_refreshes`; spawned as **0181**.
-
-## Notes
-
-- Keep it boring. The failure this catches is "a number stopped moving"; it does
-  not need to be clever, it needs to exist.
-- The alarm has standalone value regardless of [[0136]]'s outcome — the same
-  blind spot covers any future rollup stall, cadence regression, or upstream
-  ingestion halt.
+None blocking. The one open acceptance criterion (leading indicators) is owned by
+[[0181]], which now carries the measured grants and the two-line BE ask. Batch
+that ask with the [[0136]] note already owed to BE rather than pinging twice.
