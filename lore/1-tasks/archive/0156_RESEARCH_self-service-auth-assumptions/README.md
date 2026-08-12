@@ -2,7 +2,7 @@
 id: "0156"
 title: "Confirm the two flagged self-service auth assumptions — Discord account verification and one-key-per-account"
 type: RESEARCH
-status: active
+status: completed
 related_adr: ["0010"]
 related_tasks: ["0157", "0158", "0159", "0160", "0170", "0171"]
 tags: [layer-docs, priority-high, effort-small, milestone-M3, epic-self-service-onboarding, discord, auth, abuse-prevention, blocks-build]
@@ -36,6 +36,15 @@ history:
       synthesis was written. Both questions answered; ADR 0010 written.
       Two claims in 0157/0158/0160 found to be unsourced — spawned 0171.
       Spawned 0170 for the SDF conversation.
+  - date: 2026-08-12
+    status: completed
+    who: akot
+    note: >
+      Complete + archived. All 7 acceptance criteria met. Merged to develop as
+      2de35d8 via PR #187, which carried task 0157 as well — PR #195 was merged
+      into this branch rather than into develop, so the two landed as one squash
+      commit. 5 R- notes, 1 Q-, 1 S-, 17 sources archived, ADR 0010 written.
+      Downstream edits applied to 0157-0164 and the epic; 0170 and 0171 spawned.
 ---
 
 # Confirm the self-service auth assumptions
