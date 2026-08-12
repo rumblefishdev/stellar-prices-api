@@ -55,20 +55,27 @@ pub const ORACLE_NAME: &str = "reflector";
 /// `method = 'oracle'`, `hops = 0` — which is what it factually is, no pivot
 /// involved — should be reconsidered on its own merits rather than deferred by
 /// default. Raised explicitly so the omission is a decision, not an accident.
+/// ⚠️ **USDT was removed from this list by task 0172, and must not be restored
+/// without fixing the symbol→issuer mapping first (task 0173).** Reflector
+/// publishes a feed named for the TICKER "USDT" — Tether's own token, which is
+/// genuinely at par. We were storing that reading against
+/// `USDT_ISSUER`'s address, i.e. asserting ~$1.00 for a Stellar IOU that has
+/// traded at ~$0.13 since it depegged in June 2022 (confirmed by two independent
+/// markets; see `ReferenceIds::pivot_ids`). The oracle was not wrong about
+/// Tether — the identity we filed it under was wrong. An asset code is not an
+/// identity on Stellar: `prices.assets` holds ~220 distinct issuers using the
+/// code "USDT" and ~220 using "USDC".
+///
+/// Rows already written under that identity are still in `prices.usd_rate` and
+/// are still wrong; cleaning them is tracked separately.
 pub fn peg_identities() -> Vec<AssetIdentity> {
     // Built rather than declared const: AssetIdentity::Credit holds Strings.
-    // Sourced from the same consts the enrichment peg tier and views.sql use,
+    // Sourced from the same const the enrichment peg tier and views.sql use,
     // so the three cannot drift apart.
-    vec![
-        AssetIdentity::Credit {
-            code: "USDC".to_string(),
-            issuer: prices_clickhouse::USDC_ISSUER.to_string(),
-        },
-        AssetIdentity::Credit {
-            code: "USDT".to_string(),
-            issuer: prices_clickhouse::USDT_ISSUER.to_string(),
-        },
-    ]
+    vec![AssetIdentity::Credit {
+        code: "USDC".to_string(),
+        issuer: prices_clickhouse::USDC_ISSUER.to_string(),
+    }]
 }
 
 #[derive(Debug, thiserror::Error)]

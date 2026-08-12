@@ -22,13 +22,21 @@
 //!    This is the depeg-aware tier and it wins where it applies.
 //! 2. **Peg-pivot tier** ([`ChEnrichmentPass::enrich_peg_pivot_step`]) — the
 //!    deep-history backbone for candles the oracle tier left at `close_usd = 0`:
-//!    - **peg:** a USDC- or USDT-quoted candle gets `close_usd = close × $1`
-//!      (USDC≡USDT≡$1), exact and oracle-free, back to SDEX genesis;
-//!    - **pivot:** an XLM-quoted candle gets `close_usd = close × xlm_usd`, where
-//!      `xlm_usd` is the volume-weighted XLM/USDC candle close (× $1) at or before
-//!      the bucket, forward-filled by an `ASOF LEFT JOIN`.
+//!    - **peg:** a USDC-quoted candle gets `close_usd = close × $1`, exact and
+//!      oracle-free, back to SDEX genesis;
+//!    - **pivot:** a candle quoted in a *measured* reference asset gets
+//!      `close_usd = close × ref_usd`, where `ref_usd` is that asset's
+//!      volume-weighted close against USDC at or before the bucket,
+//!      forward-filled by an `ASOF LEFT JOIN`. The reference assets are XLM and
+//!      USDT — see [`ReferenceIds::pivot_ids`].
 //!
-//! Candles whose quote is none of USDC/USDT/XLM (and had no oracle) keep
+//! ⚠️ **USDT is NOT a $1 peg (task 0172).** It sat in the peg tier until
+//! 2026-08-12, which valued every USDT-quoted candle at par; the canonical
+//! Stellar USDT depegged in June 2022 and trades at ~$0.13, so that overstated
+//! `close_usd` by ~7.4x on 44,657 candles across 495 base assets. It is now
+//! priced by measurement through the pivot, exactly like XLM.
+//!
+//! Candles whose quote is none of USDC/XLM/USDT (and had no oracle) keep
 //! `close_usd = 0` — never a wrong non-NULL value (the view's `no_reference`).
 //! The peg-pivot tier preserves any `volume_quote_usd` the oracle tier already
 //! set (`if(volume_quote_usd > 0, …)`), so the depeg-aware value is never
@@ -59,8 +67,9 @@ use clickhouse::Client;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
-/// Canonical Stellar issuers for the pegged USD stablecoins, used by the
-/// peg-pivot tier to recognise USDC/USDT quote assets in `prices.assets`.
+/// Canonical Stellar issuers for the USD reference assets, used by the
+/// peg-pivot tier to recognise USDC (the $1 peg) and USDT (a *measured*
+/// reference, task 0172) quote assets in `prices.assets`.
 /// Re-exported from `prices-clickhouse` (the single source of truth, also used by
 /// `sdex-backfill`) so the `asset_id` the backfill interns under these issuers
 /// matches the `quote_asset_id` enriched here — no hand-synced literal to drift.
@@ -172,14 +181,43 @@ struct ReferenceIds {
 }
 
 impl ReferenceIds {
-    /// Quote `asset_id`s that peg to exactly $1 (USDC, USDT).
+    /// Quote `asset_id`s that peg to exactly $1. **USDC only** — USDT is
+    /// deliberately absent; see [`ReferenceIds::pivot_ids`] (task 0172).
     fn stable_ids(&self) -> Vec<u32> {
-        [self.usdc, self.usdt].into_iter().flatten().collect()
+        [self.usdc].into_iter().flatten().collect()
     }
 
-    /// The XLM→USD pivot needs both the XLM asset and the XLM/USDC market.
+    /// Reference assets whose USD price is **measured** against USDC rather than
+    /// assumed, in pivot order: XLM, then USDT. Each is used as the `ref_id` of a
+    /// [`pivot_sql`] pass, so candles quoted in it get `close_usd = close × ref_usd`.
+    ///
+    /// ## Why USDT pivots instead of pegging (task 0172)
+    ///
+    /// The canonical Stellar USDT (`USDT_ISSUER`) **depegged in June 2022** and
+    /// has traded at a deep discount ever since — ~$0.13 through 2026-08. This is
+    /// not a data defect; it is confirmed by two markets that share no legs and no
+    /// code path (its own USDC pair, and `XLM/USDC ÷ XLM/USDT`, which agree to
+    /// within a cent), by four sibling stablecoins that held par through the same
+    /// window in the same pipeline, and by `trade_count` collapsing 140,945 →
+    /// 805/month as liquidity fled.
+    ///
+    /// Pegging it to $1 overstated `close_usd` by **~7.4×** on 44,657 candles
+    /// across 495 base assets. Removing it from the peg set without adding it here
+    /// would be worse than the bug: those candles would fall to `close_usd = 0`,
+    /// which in this schema is ambiguous (missing / genuinely zero / not-yet-
+    /// enriched) and is read unguarded by ~130 `argMax(close_usd, …)` sites.
+    ///
+    /// ⚠️ Do **not** "fix" this by sourcing USDT from the oracle. Reflector prices
+    /// the *ticker* USDT — Tether's own token, genuinely at par — and we file that
+    /// rate under this issuer's address, so `prices.usd_rate` asserts ~$1.00 for an
+    /// asset worth $0.13. That mis-attribution is its own defect (task 0173).
+    fn pivot_ids(&self) -> Vec<u32> {
+        [self.xlm, self.usdt].into_iter().flatten().collect()
+    }
+
+    /// A pivot needs a reference asset and the USDC market to measure it against.
     fn can_pivot(&self) -> bool {
-        self.xlm.is_some() && self.usdc.is_some()
+        self.usdc.is_some() && !self.pivot_ids().is_empty()
     }
 
     /// Whether the peg-pivot tier can do anything at all.
@@ -513,22 +551,28 @@ impl ChEnrichmentPass {
                 .execute()
                 .await?;
         }
-        if let (Some(xlm_id), Some(usdc_id)) = (refs.xlm, refs.usdc) {
-            let sql = pivot_sql(
-                &self.cfg.database,
-                &self.cfg.table,
-                xlm_id,
-                usdc_id,
-                &window,
-            );
-            self.client
-                .query(&sql)
-                .bind(watermark)
-                .bind(self.cfg.pivot_window_s)
-                .bind(watermark)
-                .bind(self.cfg.batch_size)
-                .execute()
-                .await?;
+        // One pivot pass per measured reference asset (XLM, then USDT — task
+        // 0172). Order matters only for cost, not correctness: each pass fills
+        // rows the previous ones left at `close_usd = 0`, and the two reference
+        // assets match disjoint sets of candles (`r.ref_asset_id = p.quote_asset_id`).
+        if let Some(usdc_id) = refs.usdc {
+            for ref_id in refs.pivot_ids() {
+                let sql = pivot_sql(
+                    &self.cfg.database,
+                    &self.cfg.table,
+                    ref_id,
+                    usdc_id,
+                    &window,
+                );
+                self.client
+                    .query(&sql)
+                    .bind(watermark)
+                    .bind(self.cfg.pivot_window_s)
+                    .bind(watermark)
+                    .bind(self.cfg.batch_size)
+                    .execute()
+                    .await?;
+            }
         }
         Ok(())
     }
@@ -769,19 +813,22 @@ fn peg_sql(db: &str, tbl: &str, stable_ids: &[u32], window: &str) -> Option<Stri
     ))
 }
 
-/// Pivot statement: XLM-quoted candles get `close_usd = close × xlm_usd`, where
-/// `xlm_usd` is forward-filled by an `ASOF LEFT JOIN` against the volume-weighted
-/// XLM/USDC reference series — computed **inline as a subquery** (no DDL, so the
+/// Pivot statement: candles quoted in `ref_id` get `close_usd = close × ref_usd`,
+/// where `ref_usd` is forward-filled by an `ASOF LEFT JOIN` against the
+/// volume-weighted `ref_id`/USDC series. `ref_id` is XLM, or — since task 0172 —
+/// the depegged USDT, which is priced by measurement rather than assumed to be $1
+/// (see [`ReferenceIds::pivot_ids`]). Computed **inline as a subquery** (no DDL, so the
 /// writer needs no `CREATE TABLE` grant on the shared tenant; task 0083). The
-/// subquery's `WHERE asset_id = xlm AND quote_asset_id = usdc` is a sort-key prefix
+/// subquery's `WHERE asset_id = ref AND quote_asset_id = usdc` is a sort-key prefix
 /// on `price_ohlcv_1m`, so each batch re-aggregates only that single pair's slice,
-/// not the whole table. `ref_asset_id` is the constant XLM id so the ASOF join
+/// not the whole table. `ref_asset_id` is the constant reference id so the ASOF join
 /// keeps its required equality predicate (`r.ref_asset_id = p.quote_asset_id`) and
-/// matches only XLM-quoted candles. Bound parameters, in SQL order: the snapshot
+/// matches only candles quoted in that reference asset — which is what makes the
+/// XLM and USDT passes disjoint and safe to run in sequence. Bound parameters, in SQL order: the snapshot
 /// watermark (ref subquery), the pivot staleness window (seconds), the snapshot
 /// watermark again (outer, shared with the rest of the pass — see
 /// [`ChEnrichmentPass::watermark`]), and the `LIMIT`.
-fn pivot_sql(db: &str, tbl: &str, xlm_id: u32, usdc_id: u32, window: &str) -> String {
+fn pivot_sql(db: &str, tbl: &str, ref_id: u32, usdc_id: u32, window: &str) -> String {
     format!(
         "INSERT INTO {db}.{tbl} ({INSERT_COLUMNS}) \
          SELECT \
@@ -795,11 +842,11 @@ fn pivot_sql(db: &str, tbl: &str, xlm_id: u32, usdc_id: u32, window: &str) -> St
          FROM {db}.{tbl} AS p FINAL \
          ASOF LEFT JOIN ( \
              SELECT \
-                 CAST({xlm_id} AS UInt32) AS ref_asset_id, \
+                 CAST({ref_id} AS UInt32) AS ref_asset_id, \
                  timestamp, \
                  sum(toFloat64(close) * toFloat64(volume_base)) / nullIf(sum(toFloat64(volume_base)), 0) AS usd \
              FROM {db}.{tbl} FINAL \
-             WHERE asset_id = {xlm_id} AND quote_asset_id = {usdc_id} \
+             WHERE asset_id = {ref_id} AND quote_asset_id = {usdc_id} \
                AND timestamp <= toDateTime(?) \
              GROUP BY timestamp \
              ORDER BY timestamp \
@@ -920,20 +967,61 @@ mod tests {
             usdc: Some(3),
             usdt: Some(7),
         };
-        assert_eq!(full.stable_ids(), vec![3, 7]);
+        // Task 0172: USDC is the ONLY $1 peg. USDT is measured, not assumed.
+        assert_eq!(full.stable_ids(), vec![3]);
+        assert_eq!(full.pivot_ids(), vec![5, 7]);
         assert!(full.can_pivot());
         assert!(full.has_any());
 
-        // XLM present but no USDC market → cannot pivot, but can still peg USDT.
+        // No USDC market → nothing to measure against, so no pivot at all, and
+        // USDT is NOT silently promoted back into the peg set as a fallback.
         let no_usdc = ReferenceIds {
             xlm: Some(5),
             usdc: None,
             usdt: Some(7),
         };
         assert!(!no_usdc.can_pivot());
-        assert_eq!(no_usdc.stable_ids(), vec![7]);
-        assert!(no_usdc.has_any());
+        assert!(no_usdc.stable_ids().is_empty());
+        assert!(!no_usdc.has_any());
+
+        // USDT alone, with a USDC market, still pivots — it does not need XLM.
+        let usdt_only = ReferenceIds {
+            xlm: None,
+            usdc: Some(3),
+            usdt: Some(7),
+        };
+        assert_eq!(usdt_only.pivot_ids(), vec![7]);
+        assert!(usdt_only.can_pivot());
 
         assert!(!ReferenceIds::default().has_any());
+    }
+
+    /// Task 0172 regression: the peg statement must never target USDT's
+    /// `asset_id`. If this fails, USDT-quoted candles are being valued at $1
+    /// again and every one of them is ~7.4x overstated.
+    #[test]
+    fn peg_sql_never_pegs_usdt() {
+        let refs = ReferenceIds {
+            xlm: Some(5),
+            usdc: Some(3),
+            usdt: Some(7),
+        };
+        let sql = peg_sql("prices", "price_ohlcv_1m", &refs.stable_ids(), "").unwrap();
+        assert!(
+            sql.contains("quote_asset_id IN (3)"),
+            "peg set must be USDC alone, got: {sql}"
+        );
+    }
+
+    /// Task 0172: USDT-quoted candles must be priced by the pivot, against the
+    /// measured USDT/USDC market — not left at `close_usd = 0`, which this
+    /// schema cannot distinguish from "genuinely zero" or "not yet enriched".
+    #[test]
+    fn pivot_sql_prices_usdt_quoted_candles_from_its_usdc_market() {
+        let sql = pivot_sql("prices", "price_ohlcv_1m", 7, 3, "");
+        assert!(sql.contains("CAST(7 AS UInt32) AS ref_asset_id"));
+        assert!(sql.contains("WHERE asset_id = 7 AND quote_asset_id = 3"));
+        assert!(sql.contains("r.ref_asset_id = p.quote_asset_id"));
+        assert!(sql.contains("CAST(r.usd * toFloat64(p.close) AS Decimal(38, 14)) AS close_usd"));
     }
 }
