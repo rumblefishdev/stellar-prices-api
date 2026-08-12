@@ -95,6 +95,18 @@ deploy, every holder of `prices-production-partner-key` is cut off. Usage over
 the preceding 30 days was 14 requests across 4 days, all our own verification
 curls, which is why that is acceptable rather than a blocker.
 
+**One holder that argument cannot see, checked separately** *(2026-08-12, from
+review of [[PR 195]])*. `GetUsage` proves nothing about a holder who has not
+called in 30 days, and this repo has two documents — `docs/scf/milestone-1-evidence.md`
+and `docs/scf/milestone-1-video-scenario.md` — that hand an SCF reviewer a curl
+with `x-api-key` and tell them to run it. If the key's value had ever gone out
+with them, the reviewer would be exactly such a holder and the rotation would
+break a grant deliverable on deploy. **It never did** — confirmed by Adam
+2026-08-12; the evidence docs carry `$KEY` as a placeholder the reader exports
+themselves, never a value. So the blast radius is what the usage figure says it
+is. Worth writing down because the question is re-askable from the docs alone,
+and the answer is not derivable from them.
+
 ## Context
 
 `api-gateway-stack.ts` creates one `UsagePlan` (`prices-<env>-partner-plan`)
