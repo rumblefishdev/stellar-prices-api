@@ -2,7 +2,7 @@
 id: "0137"
 title: "Rollup freshness alarm — a starved rollup MV reports success and nothing notices"
 type: FEATURE
-status: backlog
+status: active
 related_adr: []
 related_tasks: ["0136", "0104", "0109", "0056", "0143"]
 tags:
@@ -25,6 +25,33 @@ history:
       and nothing alarmed, because a rollup MV that reads stale input still
       reports `status = Scheduled` with an empty exception. Health was measured
       on the wrong thing — the MV, not the data.
+  - date: 2026-08-12
+    status: active
+    who: okarcz
+    note: >
+      Activated for implementation, as the first of the two acceptance criteria
+      still holding [[0136]] open.
+      **The §Implementation "prefer folding into an existing scheduled worker
+      over a new Lambda" preference is REVERSED**, decided with the operator
+      before any code was written. That preference was written 2026-07-30; the
+      codebase has since established the opposite pattern for exactly this
+      failure mode. [[0112]] found that three scheduled workers each had a single
+      alarm reading a custom metric the worker publishes *only if it survives to
+      the end of a pass*, so none of them could detect the worker dying — and
+      added `addWorkerHealthAlarms` to cover it. Folding the rollup freshness
+      signal into `enrichment-worker` would rebuild that exact blind spot one
+      layer up: an enrichment stall (the component behind [[0111]]'s four-day
+      outage) would publish no metric, the `NOT_BREACHING` alarm would sit
+      silently OK, and a frozen rollup would again go unreported. A dedicated
+      `rollup-freshness-probe` mirrors the tested `backfill-freshness-probe`
+      ([[0056]]) 1:1 and earns dead-probe cover by adding one entry to the
+      existing `workerHealth` array.
+      Sequencing note: the leading-indicator criteria (`system.mutations` age,
+      part counts, `system.view_refreshes` exceptions) depend on system-table
+      readability by the scoped mTLS user, which is XML-managed by BE and cannot
+      be `GRANT`ed by us ([[0134]]). The primary `max(timestamp)` freshness
+      signal needs no system-table access at all, so it ships first and the
+      leading indicators are gated on that measurement.
 ---
 
 # A starved rollup reports success — measure freshness, not exit status
