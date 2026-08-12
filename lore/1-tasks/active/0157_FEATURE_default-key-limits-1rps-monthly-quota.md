@@ -2,7 +2,7 @@
 id: "0157"
 title: "Default key limits: 1 req/s + monthly quota, not the design doc's 100 req/s"
 type: FEATURE
-status: completed
+status: active
 related_adr: ["0008", "0010"]
 related_tasks: ["0121", "0156", "0158", "0160", "0163", "0180"]
 tags: [layer-infra, priority-high, effort-medium, milestone-M3, epic-self-service-onboarding, api-gateway, usage-plan, throttling, cost]
@@ -93,6 +93,33 @@ history:
       deployed — nothing has changed in AWS, and the production key rotates on
       the first deploy that carries this. Calendar alignment of the quota reset
       also stays unmeasured; it is design intent here and 0180 #7 owns it.
+  - date: 2026-08-12
+    status: active
+    who: akot
+    note: >
+      Reopened out of the archive to run the deploy, at Adam's request. The
+      entry above archived this with acceptance criteria that close only
+      against a deployed system, so the archive was recording merged code as a
+      finished task — reopening is the honest place for the deploy and its
+      verification to live rather than a follow-up carrying no context of its
+      own. Scope of the reopen is the deploy of `Prices-production-ApiGateway`
+      and the observation of the open ACs; the key rotation was acknowledged
+      and accepted by Adam in advance.
+  - date: 2026-08-12
+    status: active
+    who: akot
+    note: >
+      Deployed to production, ApiGateway stack only, with an explicit
+      `--exclusively` — the Makefile target lacks it and would have pulled
+      ComputeStack in behind eleven 10-byte placeholder bootstraps. Epic AC 5
+      closes: the plan reads 1 req/s, burst 5, 100 000/month in AWS.
+      Throttling and the unchanged `403` are measured; the quota half of its
+      AC is not, so that box stays open on the quota alone. The measurements
+      also put the stage cache in front of the throttle, contradicting the
+      ordering this task had recorded as an inference. Full write-up under
+      Deploy. Stays active: the quota reading is still open, and the seven
+      `utoipa` 429 descriptions remain undeployed pending a ComputeStack
+      deploy with real binaries.
 ---
 
 # Default key limits: 1 req/s + monthly quota
@@ -341,9 +368,17 @@ conclusion stands on the remaining arguments.
 - [x] Self-service usage plan in CDK: 1 req/s sustained, burst 5, 100 000
       requests/month
 - [ ] A key on that plan is throttled at 1 req/s and its monthly quota
-      decrements; `403`-without-key behaviour unchanged *(needs deploy)*
+      decrements; `403`-without-key behaviour unchanged. **Two of three parts
+      met on deploy 2026-08-12** — throttling and `403` are measured (see
+      Deploy below); the quota half is not, and `[ ]` stays for it alone.
+      `GetUsage` still reported `[0, 100000]` after 80 `200`s, which is most
+      likely reporting lag rather than a broken counter, but "most likely" is
+      not an observation. Re-read it once the reporting window has passed.
 - [ ] The quickstart's example queries run without hitting the burst limit
-      *(needs deploy; [[0163]] not written yet)*
+      *(needs [[0163]], not written yet)*. The deploy measurement supports it
+      without closing it: two example queries hit two different routes, so both
+      are cache misses, and burst 5 covers them with room. What the measurement
+      cannot cover is a quickstart nobody has written.
 - [ ] ~~Partner plan and key unchanged~~ — **superseded, not met.** This AC
       assumed the two-plan design. As built the plan is renamed and re-limited in
       place and the key rotates; both deliberate, both verified against the live
@@ -362,8 +397,10 @@ conclusion stands on the remaining arguments.
       unchanged, so CloudFormation updates the deployed plan in place rather than
       creating a second one.
 - [x] Manual higher-tier runbook written — `docs/runbooks/manual-api-key-tier.md`
-- [ ] Epic AC 5 satisfied: default limits are 1 req/s + monthly quota, not the
-      design doc's 100 req/s *(code done; closes on deploy)*
+- [x] Epic AC 5 satisfied: default limits are 1 req/s + monthly quota, not the
+      design doc's 100 req/s — **deployed 2026-08-12**; `get-usage-plans`
+      reports `pricing-api-free-production` at `rate 1.0 / burst 5 /
+      100000 MONTH`
 - [x] `docs/scf/milestone-1-evidence.md:795` states 100 req/s as a delivered
       property — reconciled 2026-08-12 with a dated *Superseded* note rather than
       a rewrite. The paragraph records the configuration the milestone was
@@ -385,6 +422,76 @@ conclusion stands on the remaining arguments.
       redirected: it named §2.1/§7, but line 164 *is* in §2.1 (so it pointed at
       itself) and §7 states no numeric limit. With §6 corrected there is no
       longer a section for it to point at.
+
+## Deploy — 2026-08-12
+
+Deployed by Adam from `develop`, `Prices-production-ApiGateway` only. CI never
+deploys in this repo, so this was a manual `cdk deploy` from a workstation.
+
+**Three things the deploy path itself taught us, none of them about limits.**
+
+1. **The Makefile target for this stack would have taken production down.**
+   `make deploy-production-apigateway` runs `cdk deploy Prices-production-ApiGateway`
+   with no `--exclusively`, and CDK deploys dependency stacks — it announced
+   `Including dependency stacks: Prices-production-Compute`. Every one of the
+   eleven bootstraps under `target/lambda/` was the same 10-byte file,
+   `#!/bin/sh\n`, so that deploy would have replaced the ledger processor, the
+   api handler and every worker with a shell stub. Deployed with an explicit
+   `--exclusively` instead. Written up on [[0141]], which owns the footgun but
+   was scoped to `deploy-production-compute` and did not cover a *scoped deploy
+   of an unrelated stack* as the delivery vector.
+
+2. **[[0124]] rode along, unnoticed until the diff.** The stack also carried the
+   `/api-docs-json` route, its two Lambda permissions and a 3600s stage-cache
+   entry — merged long ago, never deployed. It is live now and returns `200`.
+   The document it serves comes from the *currently deployed* handler, so it has
+   no `servers` block (`API_BASE_URL` is in the undeployed ComputeStack) and
+   **no `429` responses at all** — the deployed binary predates the sweep
+   entirely. Worth stating precisely, because the pre-deploy worry was that it
+   would publish `100 req/s` and contradict the new plan. It does not: it omits
+   the limit rather than misstating it.
+
+3. The key rotation went as the diff said: old key destroyed, new key created,
+   usage plan updated in place under its original logical id. Nothing was
+   removed that the diff had not named.
+
+**Measurements.** All against `/v1/assets` on the production stage.
+
+| What | Result |
+| --- | --- |
+| `403` without a key | `403` — unchanged |
+| 60 requests, same path, 0.6s | 60 × `200` (~100 req/s) |
+| 30 requests, unique query string each | 30 × `429` |
+| 8 requests, unique, spaced 3s | 8 × `200` |
+| `GetUsage` after 80 × `200` | `[0, 100000]` |
+
+**The throttle is enforced, and the stage cache is in front of it.** A cache
+miss meets the 1 req/s bucket immediately; a cache hit does not get rejected at
+all, at any rate we could produce. This is the ordering question the Notes
+section flagged as *our inference* — "that the quota decrements before the cache
+lookup is our inference … AWS's documented throttling order names the usage
+plan, stage, account and Regional limits and never mentions the cache". The
+inference was wrong in its practical consequence, and the caution about not
+presenting it as AWS behaviour was right.
+
+**What these numbers do not settle**, and should not be written up as if they
+did:
+
+- **Whether a cache hit consumes a bucket token.** The 30 × `429` came straight
+  after 60 cache hits, and a full bucket should have let ~5 through — which
+  points at cache hits draining tokens while never being rejected themselves.
+  But those 30 were fired in one parallel burst against a throttle AWS documents
+  as best-effort, so the shortfall has a second candidate explanation and the
+  test cannot separate them.
+- **Whether the quota decrements at all.** `GetUsage` reported zero use after 80
+  `200`s. Reporting lag is the ordinary explanation and almost certainly the
+  right one; it is still unobserved either way.
+
+Both belong with [[0180]], which owns the undocumented-behaviour measurements —
+recorded here rather than there because 0180's file is mid-conversion to a
+directory on its own branch, and editing it from here would land the same
+modify/delete conflict this task took a branch off `develop` to avoid on
+2026-08-10.
 
 ## Design Decisions
 
