@@ -142,8 +142,10 @@ rule as AWS-documented, not to prove AWS's implementation.
       stop presenting "00:00 UTC on the 1st" as AWS-documented behaviour
 - [ ] `enabled=false` effect on usage counters measured and recorded against
       [[0160]] "Open"
-- [ ] All-in per-call cost established and ADR 0010's proportionality argument
-      re-checked against it
+- [x] All-in per-call cost established and ADR 0010's proportionality argument
+      re-checked against it — **done 2026-08-12**, $0.55–$0.89 per fully-drained
+      key (1.4–2.3× the $0.38), argument survives. See
+      [R-all-in-per-call-cost](notes/R-all-in-per-call-cost.md)
 - [ ] Any finding that changes ADR 0010's shape reflected in the ADR
 
 ## Notes
