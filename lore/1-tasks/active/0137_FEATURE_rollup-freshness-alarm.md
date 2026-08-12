@@ -226,7 +226,7 @@ before trusting the synth, per the [[0141]] stale-asset trap.
    yet rolled) → no coarser tier populated → nothing synthesised. `15m` emptied
    by retention mid-freeze while the forever-tables hold history → sentinel →
    **alarm stays firing.** ⚠️ Known limit: `1M` has no coarser tier, so an empty
-   `1M` cannot be caught this way — carried to [[0179]].
+   `1M` cannot be caught this way — carried to [[0181]].
 10. **Alarm floors were bucket width; the real healthy peak is bucket +
     feeding-MV refresh.** Review finding 2, confirmed against `rollups.sql`
     (`1d→1w` and `1w→1M` are both `REFRESH EVERY 1 DAY`). A bucket cannot appear
@@ -315,7 +315,7 @@ Both are genuinely blocked on things this task cannot do, not descoped:
   run publishes the true lag.
 - **Leading indicators** (AC 3) — pending-mutation age, part counts,
   `view_refreshes` exceptions. Blocked on measuring whether the scoped mTLS user
-  can read `system.mutations` and `system.view_refreshes`; spawned as **0179**.
+  can read `system.mutations` and `system.view_refreshes`; spawned as **0181**.
 
 ## Notes
 
