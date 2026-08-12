@@ -445,6 +445,18 @@ not — reads a wrong number.
 ⚠️ It also means **USDT is not a trustworthy control** for peg-related work until
 this is resolved — 0165 used it as one.
 
+## Spawned tasks
+
+- **[[0182]]** — re-enrich the 44,657 stored `close_usd` values (the writer is
+  fixed; history is not)
+- **[[0183]]** — `prices.usd_rate` rows that file Tether's price under this
+  issuer's identity
+- **[[0184]]** — should a depegged asset still be quote-preference rank 1?
+  (`canonical.rs`, deliberately untouched here)
+- **[[0185]]** — `price_usd_series` *raises* on a zero-weight group; the existing
+  code comment describing that case is wrong about the failure mode
+- **[[0168]]** — hold note added: it must not be recorded as resolving this task
+
 ## Acceptance Criteria
 
 - [ ] Root cause identified and stated (writer-side id, ingestion scaling, leg
