@@ -3229,6 +3229,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "rollup-freshness-probe"
+version = "0.1.0"
+dependencies = [
+ "aws-config",
+ "aws-sdk-cloudwatch",
+ "clickhouse",
+ "lambda_runtime 0.13.0",
+ "prices-clickhouse",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "rust_decimal"
 version = "1.42.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

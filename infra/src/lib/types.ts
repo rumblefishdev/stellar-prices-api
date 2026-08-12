@@ -147,6 +147,14 @@ export interface EnvironmentConfig {
      */
     readonly backfillFreshnessProbe: string;
     /**
+     * Rollup freshness probe (task 0137). Reads `now() - max(timestamp)` for
+     * every OHLCV granularity and republishes it as the `Prices/Rollup`
+     * `RollupLagSeconds` metric the per-tier rollup alarms watch. Every 15
+     * minutes: the finest bound is 15 min, and a cadence coarser than the
+     * tightest bound would let that tier breach and recover unobserved.
+     */
+    readonly rollupFreshnessProbe: string;
+    /**
      * mTLS client-cert NotAfter probe (task 0056). Reads the per-role cert
      * bundles from Secrets Manager and publishes days-to-expiry as the
      * `Prices/Mtls` `MinDaysToNotAfter` metric the cert-expiry alarm watches.
@@ -177,6 +185,28 @@ export interface EnvironmentConfig {
     readonly sdexPushFreshnessSeconds: number;
     /** Days-to-NotAfter below which the mTLS cert-expiry alarm fires (30). */
     readonly mtlsNotAfterDaysThreshold: number;
+    /**
+     * Per-tier rollup staleness thresholds in seconds, keyed by OHLCV table
+     * name (task 0137). The rollup-freshness-probe publishes each tier's
+     * `now() - max(timestamp)` as `Prices/Rollup` `RollupLagSeconds`; one alarm
+     * per key fires when that tier's lag exceeds its threshold.
+     *
+     * ⚠️ **Every threshold must exceed its own bucket width.** `timestamp` is
+     * the bucket *start*, so a healthy tier's lag sawtooths from 0 up to one
+     * full bucket width before the next bucket opens — a `1w` tier reports a
+     * six-day lag the day before rollover while perfectly healthy. Any
+     * threshold at or below the bucket width false-fires once per bucket
+     * forever, and a permanently-firing alarm gets muted, which is the exact
+     * state task 0137 was filed to end.
+     *
+     * These values are duplicated from `ROLLUP_TIERS` in
+     * `packages/rollup-freshness-probe/src/lib.rs`, which documents the full
+     * rationale and unit-tests the bucket-width invariant. **This config is
+     * authoritative for what the alarm actually does** — the Rust copy is
+     * documentation and a test fixture, and a drift between them mis-tunes the
+     * alarm without any test failing. Change both, or neither.
+     */
+    readonly rollupLagSeconds: Readonly<Record<string, number>>;
     /**
      * Ingestion-lag threshold (seconds) for the live ledger-processor alarm
      * (task 0056 finding B). Watches the `prices-ingest-{env}` SQS queue's
@@ -259,6 +289,39 @@ export interface EnvironmentConfig {
     readonly bucketKmsKeyArn?: string;
   };
 }
+
+/**
+ * Worst-case lag a **healthy** tier reaches, per OHLCV granularity (task 0137).
+ *
+ * This is **not** a set of thresholds — it is the floor every
+ * `opsAlarms.rollupLagSeconds` threshold must clear, and the list of tiers the
+ * rollup alarms are expected to cover. Mirrors `ROLLUP_TIERS` in
+ * `packages/rollup-freshness-probe/src/lib.rs`.
+ *
+ * A tier's healthy peak is its **bucket width plus the refresh interval of the
+ * materialized view that feeds it** — the bucket cannot appear until that MV
+ * next runs, so bucket width alone understates the peak and would let a
+ * false-firing threshold pass validation. (`price_ohlcv_1w` at 8 d, for
+ * instance, clears the 7 d bucket but not the real 8 d peak.)
+ *
+ * ⚠️ `price_ohlcv_1M` is the tightest tier and this floor still understates it:
+ * buckets are weeks-attributed-by-start, so besides spanning ~31 days, a month's
+ * first bucket does not appear until a week actually *starts* inside that month
+ * — up to 6 further days. Its real worst case is nearer ~38 d against a 45 d
+ * bound. Treat any proposal to lower it with suspicion.
+ */
+export const ROLLUP_HEALTHY_PEAK_SECONDS: Readonly<Record<string, number>> = {
+  // bucket + refresh interval of the MV that feeds the tier (schema/rollups.sql)
+  price_ohlcv_1m: 60, // 1 min, written by ingestion (no MV)
+  price_ohlcv_15m: 15 * 60 + 60, // + mv_ohlcv_1m_to_15m  EVERY 1 MINUTE
+  price_ohlcv_1h: 60 * 60 + 15 * 60, // + mv_ohlcv_15m_to_1h EVERY 15 MINUTE
+  price_ohlcv_4h: 4 * 60 * 60 + 60 * 60, // + mv_ohlcv_1h_to_4h  EVERY 1 HOUR
+  price_ohlcv_1d: 86_400 + 4 * 60 * 60, // + mv_ohlcv_4h_to_1d  EVERY 4 HOUR
+  price_ohlcv_1w: 7 * 86_400 + 86_400, // + mv_ohlcv_1d_to_1w  EVERY 1 DAY
+  // + mv_ohlcv_1w_to_1M EVERY 1 DAY, + 6 d alignment slack: a month's bucket
+  // does not exist until a week actually STARTS inside that month.
+  price_ohlcv_1M: 31 * 86_400 + 86_400 + 6 * 86_400,
+};
 
 /**
  * Validates an EnvironmentConfig at synth time. Throws on missing
@@ -477,6 +540,7 @@ export function validateConfig(config: EnvironmentConfig): void {
       'cleanup',
       'enrichment',
       'backfillFreshnessProbe',
+      'rollupFreshnessProbe',
       'mtlsNotafterProbe',
     ] as const;
     for (const key of expectedKeys) {
@@ -510,6 +574,37 @@ export function validateConfig(config: EnvironmentConfig): void {
       errors.push(
         `opsAlarms.mtlsNotAfterDaysThreshold must be a positive integer (days), got: ${ops.mtlsNotAfterDaysThreshold}`,
       );
+    }
+    if (!ops.rollupLagSeconds || typeof ops.rollupLagSeconds !== 'object') {
+      errors.push('opsAlarms.rollupLagSeconds missing or not an object');
+    } else {
+      const configured = Object.keys(ops.rollupLagSeconds).sort();
+      const expected = Object.keys(ROLLUP_HEALTHY_PEAK_SECONDS).sort();
+      if (configured.join(',') !== expected.join(',')) {
+        errors.push(
+          `opsAlarms.rollupLagSeconds must cover exactly [${expected.join(', ')}], got: [${configured.join(', ')}]`,
+        );
+      }
+      for (const [table, peak] of Object.entries(ROLLUP_HEALTHY_PEAK_SECONDS)) {
+        const threshold = ops.rollupLagSeconds[table];
+        if (threshold === undefined) continue;
+        if (!Number.isInteger(threshold) || threshold < 1) {
+          errors.push(
+            `opsAlarms.rollupLagSeconds.${table} must be a positive integer (seconds), got: ${threshold}`,
+          );
+        } else if (threshold <= peak) {
+          // The sawtooth trap. `timestamp` is the bucket START, so a healthy
+          // tier's lag climbs to a full bucket width — plus the refresh interval
+          // of the MV feeding it — before the next bucket opens. A threshold at
+          // or below that fires every bucket, forever, and an alarm that always
+          // fires gets muted, which is precisely the blind spot task 0137 exists
+          // to close. Reject at synth rather than ship an alarm guaranteed to
+          // cry wolf.
+          errors.push(
+            `opsAlarms.rollupLagSeconds.${table} (${threshold}s) must exceed the tier's healthy peak of ${peak}s (bucket width + feeding MV refresh interval), or the alarm false-fires once per bucket forever`,
+          );
+        }
+      }
     }
     if (
       !Number.isInteger(ops.ledgerProcessorLagSeconds) ||

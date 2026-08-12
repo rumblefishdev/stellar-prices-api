@@ -231,6 +231,12 @@ export class ObservabilityStack extends cdk.Stack {
   public readonly sdexPushFreshnessAlarm: cloudwatch.Alarm;
   /** mTLS client-cert expiry alarm (§7 / §11.4). */
   public readonly mtlsNotAfterAlarm: cloudwatch.Alarm;
+  /**
+   * One rollup-staleness alarm per OHLCV granularity, keyed by table name
+   * (task 0137). Keyed rather than a flat list so a caller can assert on a
+   * specific tier without depending on declaration order.
+   */
+  public readonly rollupFreshnessAlarms: Record<string, cloudwatch.Alarm>;
   /** Live ledger-processor ingestion-lag alarm (task 0056 finding B). */
   public readonly ledgerProcessorLagAlarm: cloudwatch.Alarm;
   /** Live ledger-processor invocation-error alarm (task 0056 finding B). */
@@ -458,6 +464,79 @@ export class ObservabilityStack extends cdk.Stack {
     this.sdexPushFreshnessAlarm.addAlarmAction(snsAction);
     this.sdexPushFreshnessAlarm.addOkAction(snsAction);
 
+    // Rollup freshness, one alarm per OHLCV granularity (task 0137).
+    //
+    // Task 0136 froze `price_ohlcv_15m` through `_1M` for NINE DAYS and nothing
+    // alarmed: eight of the nine refreshable MVs reported `status = Scheduled`
+    // with an empty `exception` every cycle, because rolling up nothing is not
+    // a failure. The freeze surfaced only by accident, when task 0072's rollout
+    // check noticed `change_7d_pct` was 0 for every asset. These alarms watch
+    // the DATA — how old each tier's newest bucket is — rather than the MV's
+    // exit status, which is the only signal that could have caught it.
+    //
+    // One alarm per tier rather than one aggregate, because WHICH tier is stale
+    // is the diagnosis: in 0136 the break was at `mv_ohlcv_1m_to_15m` and every
+    // coarser tier merely inherited it. A single alarm over all seven would say
+    // "rollups are stale" and lose the fact that `1m` was healthy — which is
+    // exactly what localises the fault.
+    //
+    // Missing data is NOT_BREACHING: the probe publishes no datum for a tier
+    // with zero rows (a freshly-provisioned environment), and probe-down is
+    // covered by the probe's own `-errors` alarm plus its worker-health pair
+    // below. A stalled tier keeps publishing a RISING lag, so a stale metric is
+    // itself the signal.
+    this.rollupFreshnessAlarms = Object.fromEntries(
+      Object.entries(config.opsAlarms.rollupLagSeconds).map(
+        ([table, threshold]) => {
+          // `price_ohlcv_15m` → `PriceOhlcv15m`, a stable CFN logical id.
+          const idSuffix = table
+            .split('_')
+            .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+            .join('');
+          const alarm = new cloudwatch.Alarm(
+            this,
+            `RollupFreshness${idSuffix}Alarm`,
+            {
+              alarmName: `prices-${config.envName}-rollup-freshness-${table.replace('price_ohlcv_', '')}`,
+              alarmDescription: `${table} has not received a new bucket within its staleness bound (${threshold}s): the rollup chain feeding it is stalled, or upstream ingestion has halted. A rollup MV that reads stale input still reports success, so this measures the data, not the MV (task 0136/0137). Threshold is operator-tunable via config.opsAlarms.rollupLagSeconds.${table}. Check the finer tiers first — the finest stale tier is the fault, the coarser ones inherit it.`,
+              metric: new cloudwatch.Metric({
+                namespace: 'Prices/Rollup',
+                metricName: 'RollupLagSeconds',
+                dimensionsMap: {
+                  Environment: config.envName,
+                  Table: table,
+                },
+                statistic: 'Maximum',
+                period: cdk.Duration.minutes(15),
+              }),
+              threshold,
+              // M-of-N (1 of 2) rather than 1-of-1, so a single missed publish
+              // cannot flip the alarm back to OK.
+              //
+              // The period equals the probe cadence, so with 1-of-1 any probe
+              // outage — bad grant, CH unreachable, sustained throttle — makes
+              // every datum go missing, NOT_BREACHING scores that healthy, and
+              // ALL SEVEN tier alarms send an OK action. That is seven
+              // "recovered" messages into Slack for tiers that are still frozen,
+              // arriving before the probe's own `-errors` alarm fires. Requiring
+              // only 1 breaching datapoint out of 2 keeps a real breach latched
+              // across one missed cycle while still alarming on the first bad
+              // reading. (`sdexPushFreshnessAlarm` has the same 1-of-1 shape;
+              // the difference here is that the blast radius is 7×.)
+              evaluationPeriods: 2,
+              datapointsToAlarm: 1,
+              comparisonOperator:
+                cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+              treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+            },
+          );
+          alarm.addAlarmAction(snsAction);
+          alarm.addOkAction(snsAction);
+          return [table, alarm];
+        },
+      ),
+    );
+
     // mTLS cert expiry (§7 / §11.4). The mtls-notafter-probe publishes the
     // minimum days-to-NotAfter across the ingestion + api client certs; alarm
     // when it drops below the threshold (30 days default). Fires on an expired
@@ -675,6 +754,18 @@ export class ObservabilityStack extends cdk.Stack {
         cadence: cdk.Duration.minutes(15),
         impact:
           'The sdex-push-freshness alarm goes dark: it reads Prices/Backfill PushAgeSeconds, which only this probe publishes, so a stalled backfill would stop being reported rather than reported as stalled.',
+      },
+      {
+        name: 'rollup-freshness-probe',
+        idPrefix: 'RollupFreshness',
+        functionName: workerFunctionName(
+          config.envName,
+          'rollup-freshness-probe',
+        ),
+        timeout: cdk.Duration.minutes(1),
+        cadence: cdk.Duration.minutes(15),
+        impact:
+          'Every rollup-freshness alarm goes dark: they read Prices/Rollup RollupLagSeconds, which only this probe publishes, so a frozen rollup chain would stop being reported rather than reported as frozen — the exact nine-day blind spot of task 0136.',
       },
       {
         name: 'mtls-notafter-probe',

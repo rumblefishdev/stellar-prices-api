@@ -19,11 +19,21 @@
     "cleanup": "cron(0 3 * * ? *)",
     "enrichment": "rate(1 hour)",
     "backfillFreshnessProbe": "rate(15 minutes)",
+    "rollupFreshnessProbe": "rate(15 minutes)",
     "mtlsNotafterProbe": "rate(1 day)"
   },
   "opsAlarms": {
     "sdexPushFreshnessSeconds": 604800,
     "mtlsNotAfterDaysThreshold": 30,
+    "rollupLagSeconds": {
+      "price_ohlcv_1m": 900,
+      "price_ohlcv_15m": 3600,
+      "price_ohlcv_1h": 10800,
+      "price_ohlcv_4h": 43200,
+      "price_ohlcv_1d": 172800,
+      "price_ohlcv_1w": 864000,
+      "price_ohlcv_1M": 3888000
+    },
     "ledgerProcessorLagSeconds": 120,
     "slack": {
       "workspaceIdSsmParam": "/prices/production/slack-workspace-id",

@@ -18,6 +18,7 @@ members = [
     "packages/enrichment-worker",
     "packages/prices-api",
     "packages/backfill-freshness-probe",
+    "packages/rollup-freshness-probe",
     "packages/mtls-notafter-probe",
     "packages/pool-registry-seed",
 ]
