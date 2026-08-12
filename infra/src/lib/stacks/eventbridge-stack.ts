@@ -52,6 +52,11 @@ const BACKFILL_FRESHNESS_PROBE_ASSET_DIR =
   process.env['BACKFILL_FRESHNESS_PROBE_ASSET_DIR'] ??
   '../target/lambda/backfill-freshness-probe';
 
+/** Cargo-lambda build output for the `rollup-freshness-probe` (task 0137). */
+const ROLLUP_FRESHNESS_PROBE_ASSET_DIR =
+  process.env['ROLLUP_FRESHNESS_PROBE_ASSET_DIR'] ??
+  '../target/lambda/rollup-freshness-probe';
+
 /** Cargo-lambda build output for the `mtls-notafter-probe` (task 0056). */
 const MTLS_NOTAFTER_PROBE_ASSET_DIR =
   process.env['MTLS_NOTAFTER_PROBE_ASSET_DIR'] ??
@@ -83,6 +88,7 @@ export class EventBridgeStack extends cdk.Stack {
   public readonly cleanupRule: events.Rule;
   public readonly enrichmentRule: events.Rule;
   public readonly backfillFreshnessProbeRule: events.Rule;
+  public readonly rollupFreshnessProbeRule: events.Rule;
   public readonly mtlsNotafterProbeRule: events.Rule;
   public readonly assetDiscoveryFunction: lambda.Function;
   public readonly cleanupFunction: lambda.Function;
@@ -90,6 +96,7 @@ export class EventBridgeStack extends cdk.Stack {
   public readonly oracleFunction: lambda.Function;
   public readonly enrichmentFunction: lambda.Function;
   public readonly backfillFreshnessProbeFunction: lambda.Function;
+  public readonly rollupFreshnessProbeFunction: lambda.Function;
   public readonly mtlsNotafterProbeFunction: lambda.Function;
 
   constructor(scope: Construct, id: string, props: EventBridgeStackProps) {
@@ -156,6 +163,16 @@ export class EventBridgeStack extends cdk.Stack {
         ruleName: `prices-${env}-backfill-freshness-probe`,
         description: `Publishes backfill_progress push age → Prices/Backfill PushAgeSeconds (${env})`,
         schedule: events.Schedule.expression(schedules.backfillFreshnessProbe),
+      },
+    );
+
+    this.rollupFreshnessProbeRule = new events.Rule(
+      this,
+      'RollupFreshnessProbeRule',
+      {
+        ruleName: `prices-${env}-rollup-freshness-probe`,
+        description: `Publishes per-tier OHLCV rollup lag → Prices/Rollup RollupLagSeconds (${env})`,
+        schedule: events.Schedule.expression(schedules.rollupFreshnessProbe),
       },
     );
 
@@ -509,6 +526,56 @@ export class EventBridgeStack extends cdk.Stack {
     );
 
     // -----------------------------------------------------------------
+    // Rollup freshness probe (task 0137) + its rate(15m) target. CH-only
+    // (no S3, no VPC): reads `now() - max(timestamp)` for each OHLCV
+    // granularity over the ingestion mTLS identity and republishes it as the
+    // Prices/Rollup RollupLagSeconds metric the per-tier rollup alarms watch.
+    //
+    // Task 0136 froze every coarse table for nine days while the MVs kept
+    // reporting success, because rolling up nothing is not an error. This probe
+    // measures the data instead of the MV, which is the only signal that could
+    // have caught it.
+    //
+    // Reads the OHLCV tables directly and touches no `system.*` table, so it
+    // needs nothing beyond the SELECT the ingestion identity already has —
+    // deliberate, since the runtime users are XML-managed by BE and cannot be
+    // SQL-GRANTed by us (task 0134).
+    // -----------------------------------------------------------------
+    const rollupFreshness = createWorkerLambda(this, {
+      config,
+      accountId,
+      mtlsSecretName: discoveryMtlsSecretName,
+      idPrefix: 'RollupFreshnessProbe',
+      name: 'rollup-freshness-probe',
+      assetDir: ROLLUP_FRESHNESS_PROBE_ASSET_DIR,
+      memorySize: 256,
+      // Seven metadata-only max() reads + one PutMetricData. Each max() is
+      // answered from per-part min/max indexes rather than a column scan —
+      // measured at 47 rows / 1.10 KiB / 1 ms on CH 26.3.10.60 — so this stays
+      // trivially fast even against the 735M-row `price_ohlcv_1m`.
+      timeout: cdk.Duration.minutes(1),
+      secretsExtensionLayer,
+      chDomain,
+      rule: this.rollupFreshnessProbeRule,
+      alarmDescription:
+        'Rollup freshness probe invocation errors — the per-tier rollup lag metric may be stale, blinding every rollup freshness alarm (the task 0136 blind spot).',
+      alarmPeriod: cdk.Duration.minutes(15),
+      errorAlarmActions: [opsAlarmAction],
+    });
+    this.rollupFreshnessProbeFunction = rollupFreshness.function;
+
+    rollupFreshness.role.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'PublishRollupMetrics',
+        actions: ['cloudwatch:PutMetricData'],
+        resources: ['*'],
+        conditions: {
+          StringEquals: { 'cloudwatch:namespace': 'Prices/Rollup' },
+        },
+      }),
+    );
+
+    // -----------------------------------------------------------------
     // mTLS NotAfter probe (task 0056) + its rate(1d) target. Reads BOTH the
     // ingestion and api cert bundles from Secrets Manager (via the extension)
     // and publishes days-to-NotAfter → Prices/Mtls. It builds no CH client, so
@@ -562,6 +629,9 @@ export class EventBridgeStack extends cdk.Stack {
 
     new cdk.CfnOutput(this, 'BackfillFreshnessProbeFunctionName', {
       value: this.backfillFreshnessProbeFunction.functionName,
+    });
+    new cdk.CfnOutput(this, 'RollupFreshnessProbeFunctionName', {
+      value: this.rollupFreshnessProbeFunction.functionName,
     });
     new cdk.CfnOutput(this, 'MtlsNotafterProbeFunctionName', {
       value: this.mtlsNotafterProbeFunction.functionName,
