@@ -3,6 +3,7 @@ id: "0201"
 title: "32M pre-Soroban coarse candles carry close_usd = 0 — the 0088 backfill wrote them, the 0114 repair started three years too late"
 type: BUG
 status: backlog
+assignee: okarcz
 related_adr: []
 related_tasks: ["0088", "0114", "0182", "0145", "0111"]
 tags:
@@ -22,9 +23,27 @@ history:
       has ever covered — 0114's repair span began at 2024-02. Filed separately
       because it is a campaign the size of 0114 itself, and absorbing it into a
       567k-row USDT correction would have been an unrecorded 10-15 h prod run.
+  - date: 2026-08-13
+    status: backlog
+    who: okarcz
+    note: >
+      Assigned to okarcz, who is solving it personally. Stays in backlog until
+      they promote it themselves — it is not to be started, drafted or folded
+      into a 0182 run by anyone else.
 ---
 
 # 32M pre-Soroban coarse candles were never enriched
+
+## 🙋 Owner: okarcz — hands off
+
+Assigned 2026-08-13. **The operator is solving this one personally.** Stays in
+`backlog` until they promote it themselves.
+
+Do not start it, do not draft the run, do not open a branch or PR for it, and do
+not fold it into a [[0182]] run — not even the parts that look mechanical. Answer
+questions about it and surface anything that changes its shape (a new
+measurement, a conflicting task), but the work itself is not to be picked up
+unless the operator asks in that message.
 
 ## Summary
 
