@@ -90,6 +90,18 @@ deploy-production-apigateway: build
 destroy-production-apigateway: build
 	npx cdk --app "$(PRODUCTION_APP)" destroy Prices-production-ApiGateway --force
 
+# Uploads the portal bundle and invalidates the CloudFront cache as part of the
+# deploy (BucketDeployment), so there is no separate `aws s3 sync` step to
+# forget. A stale bundle behind a CDN is indistinguishable from a broken deploy.
+#
+# First deploy of this stack creates a distribution, which CloudFront takes
+# ~5-10 minutes to propagate; subsequent ones are quick.
+deploy-production-portal: build
+	npx cdk --app "$(PRODUCTION_APP)" deploy Prices-production-PortalHosting --require-approval broadening
+
+destroy-production-portal: build
+	npx cdk --app "$(PRODUCTION_APP)" destroy Prices-production-PortalHosting --force
+
 deploy-production-eventbridge: build
 	npx cdk --app "$(PRODUCTION_APP)" deploy Prices-production-EventBridge --require-approval broadening
 

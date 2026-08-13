@@ -6,6 +6,7 @@ import { ComputeStack } from './stacks/compute-stack.js';
 import { ApiGatewayStack } from './stacks/api-gateway-stack.js';
 import { EventBridgeStack } from './stacks/eventbridge-stack.js';
 import { ObservabilityStack } from './stacks/observability-stack.js';
+import { PortalHostingStack } from './stacks/portal-hosting-stack.js';
 
 export interface CreateAppOptions {
   readonly config: EnvironmentConfig;
@@ -35,10 +36,24 @@ export function createApp({ config }: CreateAppOptions): void {
   // api-handler Lambda (ADR 0008). Passing the Function in creates the
   // cross-stack dependency (CFN export/import); CDK orders Compute before
   // ApiGateway automatically.
-  new ApiGatewayStack(app, `${prefix}-ApiGateway`, {
+  const apiGateway = new ApiGatewayStack(app, `${prefix}-ApiGateway`, {
     env,
     config,
     apiHandlerFunction: compute.apiHandlerFunction,
+  });
+
+  // PortalHostingStack fronts both the bundle bucket and the API on one
+  // CloudFront distribution, so it needs the REST API id to build the
+  // execute-api origin hostname. Passing it in creates the cross-stack
+  // dependency, which orders ApiGateway before PortalHosting.
+  //
+  // The distribution lives in this stack's region like everything else: it
+  // needs no us-east-1 certificate, because it has no custom domain until task
+  // 0195 adds one (and that certificate is that task's problem).
+  new PortalHostingStack(app, `${prefix}-PortalHosting`, {
+    env,
+    config,
+    restApiId: apiGateway.api.restApiId,
   });
 
   // EventBridgeStack is independent of ComputeStack in the skeleton

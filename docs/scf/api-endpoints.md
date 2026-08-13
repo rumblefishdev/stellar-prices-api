@@ -27,9 +27,20 @@ without it serves nothing.
 | `GET /v1/oracles/{asset_identifier}`      | `x-api-key`   | 60 s              |
 | `GET /v1/backfill/status`                 | `x-api-key`   | 60 s              |
 | `POST /v1/prices/batch`                   | `x-api-key`   | uncached          |
+| `ANY /api-tokens/api/{proxy+}`            | Anonymous²    | uncached          |
 
 ¹ Gateway TTL. The handler sends `max-age=300` — see **Cache** below for why the
 two differ.
+
+² The onboarding portal's backend (task 0184). Keyless at the gateway because a
+visitor signing in to obtain a key does not have one — the same argument that
+makes `/api-docs-json` anonymous. It is **not** open: while `PORTAL_ENABLED` is
+`false`, every path under it returns an empty `404`, byte-identical to a path
+that was never deployed (task 0183). `GET /api-tokens/api/config` is the one
+exception and answers `{"enabled": false}` in both states. Mapped as one greedy
+`ANY` so later slices add routes without a CDK change, and deliberately absent
+from the OpenAPI document — the portal describes itself to its own bundle, not
+to integrators.
 
 Source of truth: `infra/src/lib/stacks/api-gateway-stack.ts`. This table is
 documentation and is not itself asserted — what CI enforces is that the
@@ -38,6 +49,53 @@ documentation and is not itself asserted — what CI enforces is that the
 and the extracted spec) plus the faster in-process check in
 `packages/prices-api/tests/openapi.rs`. If this table drifts from either, fix
 the table.
+
+## Portal distribution — CloudFront (task 0184)
+
+**Portal:** `https://<distribution>.cloudfront.net/api-tokens/`
+
+<!-- Filled in from the PortalUrl output of `make -C infra deploy-production-portal`. -->
+
+A second, equivalent way to reach the API. One CloudFront distribution fronts
+two origins: a private S3 bucket holding the portal bundle, and the API Gateway
+stage above. That is not a convenience — it is what makes every portal request
+**same-origin**, which is what lets the session cookie (task 0186) be
+`SameSite=Lax` and keeps CORS out of portal traffic entirely.
+
+Behaviours, in precedence order. CloudFront takes the **first** match, so the
+order is part of the configuration, not a presentation choice:
+
+| Path pattern        | Origin      | Notes                                   |
+| ------------------- | ----------- | --------------------------------------- |
+| `/api-tokens/api/*` | API Gateway | must precede the row below              |
+| `/api-tokens/*`     | S3          | the portal bundle                       |
+| `/v1/*`             | API Gateway | data routes                             |
+| `/api-docs-json`    | API Gateway | root-level, **not** under `/v1`         |
+| `/health`           | API Gateway | root-level                              |
+| _(default)_         | S3          | `/` redirects to `/api-tokens/` for now |
+
+The convention, settled 2026-08-07 and meant for the frontends that follow:
+**`<app>/*` is that app's bundle, `<app>/api/*` is that app's backend.** A new
+frontend adds two rows and invents nothing.
+
+Three properties worth knowing before changing anything here:
+
+- **The bucket is private.** No public objects, no ACLs; the distribution reads
+  it through Origin Access Control and nothing else can.
+- **API behaviours are uncached at the edge and forward everything except
+  `Host`.** Forwarding the viewer's `Host` to an execute-api origin 403s every
+  request; the obvious `CACHING_OPTIMIZED` policy would strip `x-api-key` and
+  403 every keyed route. The gateway's own stage cache (table above) is
+  unaffected.
+- **The execute-api base keeps working.** Only one of the two is documented and
+  supported as _the_ base URL, and until the custom domain lands (task 0195)
+  that is still the execute-api URL at the top of this file — `apiBaseUrl` and
+  the OpenAPI `servers` block are unchanged by this task, so a reader is not
+  handed a base that changes twice in a month.
+
+Deploy and cache invalidation are one operation
+(`make -C infra deploy-production-portal`); there is no separate upload step to
+forget.
 
 ## OpenAPI specification (task 0124)
 
@@ -89,6 +147,11 @@ npm run openapi:extract   # → target/openapi.json, servers stamped from config
 - **Custom domain** (task 0126) — when it lands, `apiBaseUrl` in
   `infra/envs/production.json` changes and `servers` follows automatically. This
   file's base URL must be updated in the same change.
-- **Swagger UI + onboarding portal** — Tranche 3, out of scope for M2.
+- **Swagger UI** (task 0195) — served from the portal distribution at `/docs/*`,
+  rendering the live `/api-docs-json` rather than a checked-in copy. Lands with
+  the custom domain and the per-prefix SPA fallback.
+- **Onboarding portal** — the distribution and its routing table are live (task
+  0184); the portal itself ships closed behind `PORTAL_ENABLED` and is opened by
+  task 0194's audit.
 - **`info.license`** (task 0155) — currently emitted empty; the licensing
   decision is open.

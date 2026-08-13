@@ -160,6 +160,27 @@ function fullPath(id) {
 // the spec side below rather than passing unnoticed.
 const GATEWAY_SKIPPED_METHODS = new Set(['options']);
 
+/**
+ * The onboarding portal's backend prefix (task 0184), which this check skips on
+ * BOTH sides.
+ *
+ * These routes are deliberately absent from the OpenAPI document. The document
+ * describes the public data API to integrators; the portal's endpoints belong
+ * to the portal's own bundle and publishing them would advertise a half-built
+ * portal to every reader of the spec — see the module docs on
+ * `packages/prices-api/src/portal/mod.rs`. They are also mapped as a single
+ * greedy `ANY /api-tokens/api/{proxy+}`, which has no OpenAPI equivalent to
+ * compare against even if we wanted one.
+ *
+ * Mirrors `PORTAL_API_PREFIX` in that module and `PORTAL_BACKEND` in
+ * `infra/src/lib/stacks/portal-hosting-stack.ts`.
+ *
+ * The skip is symmetric, unlike the OPTIONS one above: a portal path appearing
+ * in the document would be checked by neither direction, so the spec side
+ * rejects it outright a few dozen lines down rather than passing over it.
+ */
+const PORTAL_API_PREFIX = '/api-tokens/api/';
+
 const gatewayRoutes = new Set();
 for (const [, res] of resources) {
   if (res.Type !== 'AWS::ApiGateway::Method') continue;
@@ -195,6 +216,9 @@ for (const [, res] of resources) {
     console.error(`error: ${err.message}`);
     process.exit(1);
   }
+  // Checked BEFORE the ANY case: the portal is mapped as `ANY {proxy+}`, so
+  // the order decides whether this is a skip or a hard failure.
+  if (path.startsWith(PORTAL_API_PREFIX)) continue;
   // `ANY` maps every verb at once and can never equal an OpenAPI operation
   // key, so it would report as undocumented forever. Skipping it silently
   // would instead hide a mapped route from the check — fail loudly and make
@@ -247,6 +271,28 @@ if (documentedOptions.length) {
   console.error(
     '  → stop documenting them, or teach this check how to tell a mapped ' +
       'OPTIONS from a generated preflight',
+  );
+  process.exit(1);
+}
+
+// The gateway side skips the portal prefix (see PORTAL_API_PREFIX), so a
+// documented portal path would be compared against nothing and read as a pass.
+// Documenting one is also a decision, not a slip — it puts the portal's
+// endpoints in front of every integrator reading the spec — so say so rather
+// than ignoring it.
+const documentedPortalPaths = [...specRoutes].filter((r) =>
+  r.slice(r.indexOf(' ') + 1).startsWith(PORTAL_API_PREFIX),
+);
+if (documentedPortalPaths.length) {
+  console.error(
+    `error: the OpenAPI document describes routes under ${PORTAL_API_PREFIX}, ` +
+      'which this check skips on the gateway side and therefore cannot compare:',
+  );
+  for (const r of documentedPortalPaths.sort()) console.error(`  ${r}`);
+  console.error(
+    '  → the portal describes itself to its own bundle, not to integrators ' +
+      '(packages/prices-api/src/portal/mod.rs). Drop the #[utoipa::path], or ' +
+      'map the routes explicitly and teach this check to compare them.',
   );
   process.exit(1);
 }

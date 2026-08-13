@@ -203,6 +203,38 @@ export class ApiGatewayStack extends cdk.Stack {
       apiKeyRequired: false,
     });
 
+    // ---------------------------------------------------------------
+    // ANY /api-tokens/api/{proxy+} — the onboarding portal's backend (0184).
+    // ---------------------------------------------------------------
+    // Without this resource the portal's routes are unreachable in production
+    // no matter what the handler does: CloudFront forwards the request, the
+    // gateway maps nothing, and the caller gets the gateway's own
+    // `403 Missing Authentication Token` instead of the empty `404` task 0183's
+    // gate is careful to produce. This is the "door" that task's note says
+    // arrives here.
+    //
+    // **Greedy, and ANY.** The point of task 0183's prefix gate is that a later
+    // slice adds a route without editing the gate; the same has to hold at the
+    // gateway, or every slice pays for a CDK change and a deploy. `{proxy+}`
+    // plus `ANY` covers task 0186's `GET /auth/*`, task 0187's `POST /key` and
+    // task 0192's `DELETE /key` with no further work here. The axum router
+    // decides what actually exists — and while `PORTAL_ENABLED` is false, that
+    // answer is "nothing", byte-identical to a path that was never deployed.
+    //
+    // **Keyless**, matching `auth::is_exempt`: a visitor signing in to get a
+    // key does not have one yet, so requiring one is a self-service dead end —
+    // the same argument that makes `/api-docs-json` anonymous. This is not a
+    // hole: the flag decides whether these routes answer at all, and once they
+    // do, task 0186's session is what authenticates them. The route stays
+    // outside the usage plan, so its only limiter is the default per-method
+    // stage throttle.
+    const portalApi = this.api.root
+      .addResource('api-tokens')
+      .addResource('api');
+    portalApi.addResource('{proxy+}').addMethod('ANY', proxy([]), {
+      apiKeyRequired: false,
+    });
+
     const PATH_ID = 'method.request.path.asset_identifier';
     const qs = (name: string) => `method.request.querystring.${name}`;
 
@@ -340,6 +372,16 @@ export class ApiGatewayStack extends cdk.Stack {
           cachingEnabled: false,
         },
         { resourcePath: '/health', httpMethod: 'GET', cachingEnabled: false },
+        // The portal's backend must never touch the stage cache. Task 0186 puts
+        // a session cookie through here, and a cached response on a shared,
+        // key-less prefix is one viewer being served another's. The stage cache
+        // is on by default for every method, so this is an opt-OUT and its
+        // absence would be silent.
+        {
+          resourcePath: '/api-tokens/api/{proxy+}',
+          httpMethod: 'ANY',
+          cachingEnabled: false,
+        },
       ];
     } else {
       // No cache cluster, so no TTLs to declare — but the throttles still
