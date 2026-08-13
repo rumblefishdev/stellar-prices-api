@@ -4,7 +4,7 @@ title: "Publish the real peg rate in price_usd_series instead of a hardcoded $1"
 type: FEATURE
 status: backlog
 related_adr: []
-related_tasks: ["0165", "0167", "0154", "0151", "0150"]
+related_tasks: ["0165", "0167", "0154", "0151", "0150", "0172", "0183", "0173"]
 tags:
   ["priority-medium", "effort-small", "clickhouse", "read-surface", "be-interop", "data-correctness", "milestone-M2"]
 links:
@@ -21,7 +21,36 @@ history:
       which the oracle tier already prices depeg-aware. Needs [[0167]]'s
       `prices.usd_rate`. Scoped as its own task rather than a caveat in 0165's
       view header, so the header can point at an ID instead of a regret.
+  - date: 2026-08-12
+    status: backlog
+    who: okarcz
+    note: >
+      SCOPE REDUCED by 0172 and put on hold for one identity. The peg set is now
+      USDC ONLY — USDT was removed because it genuinely depegged in June 2022 and
+      trades at ~$0.13. Do not restore USDT here. See the hold note below.
 ---
+
+# ⚠️ HOLD — do not close 0172 with this task (added 2026-08-12)
+
+This task's design is "swap the hardcoded `1` for the measured rate in
+`prices.usd_rate`". For **USDC that is still exactly right** and this task should
+proceed on that basis.
+
+For **USDT it is actively harmful**, and would look like a fix:
+
+- `prices.usd_rate` stores **Reflector's ticker feed** for "USDT" — Tether's own
+  token, genuinely at par (`0.999232` in 2026-08) — keyed under the Stellar
+  issuer `GCQTGZQQ…TG6V`, whose IOU is worth **~$0.13** ([[0172]]).
+- Sourcing from `usd_rate` would therefore publish ~$1.00 for that identity
+  again, with `method = 'oracle'` — which reads as *more* authoritative than the
+  `peg` placeholder it replaced. Same 7.4× error, better disguise.
+
+[[0172]] already removed USDT from the peg arm, so there is nothing here to
+"restore". The mis-attributed rows are [[0183]]; the general symbol→issuer
+mapping problem is [[0173]].
+
+**Before implementing: confirm the peg set is still USDC-only, and do not add an
+identity to it because `usd_rate` happens to have rows for it.**
 
 # Publish the real peg rate, not `$1`
 

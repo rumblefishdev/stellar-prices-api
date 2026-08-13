@@ -751,8 +751,17 @@ async fn price_usd_series_fills_peg_assets_without_overriding_market_data() {
         );
         assert_eq!(usdc_method, "peg", "{view}: USDC provenance");
 
-        // CASE 2 — peg asset that also trades keeps its MARKET value. A
-        // fallback here would read 1.0 and flatten a real de-peg to par.
+        // CASE 2 — an asset that is BOTH a quote leg and a traded base keeps its
+        // MARKET value. A fallback here would read 1.0 and flatten a real de-peg.
+        //
+        // ⚠️ WEAKENED by task 0172, deliberately. USDT used to be a peg member,
+        // so this case pinned "arm B must not override arm A for a PEG asset".
+        // USDT is no longer in the peg set, so what remains is only "a non-peg
+        // asset is priced from its trades" — which CASE 3 already covers. The
+        // peg-specific half moved to
+        // `peg_member_that_also_trades_as_a_base_keeps_its_market_value`, which
+        // uses USDC because it is now the sole peg member. Keep both: this one
+        // still pins that a *former* peg member is not silently re-pegged.
         let (usdt, usdt_method) = row(view, "USDT", USDT_ISSUER.to_string()).await;
         assert!(
             approx(usdt, 0.97),
@@ -805,6 +814,92 @@ async fn price_usd_series_fills_peg_assets_without_overriding_market_data() {
         .unwrap();
 }
 
+/// Task 0172 review finding 6 — restores the guard CASE 2 above used to carry.
+///
+/// `views.sql` warns that letting the peg arm OWN the peg identities flattens a
+/// genuinely priceable asset to $1 — "a regression dressed as a fix". USDT was
+/// the control for that, and task 0172 removed it from the peg set, so the suite
+/// was left with **no** peg member that also trades as a base and nothing would
+/// have caught a reimplementation where arm B wins over arm A.
+///
+/// USDC is the sole remaining peg member, and on prod it never trades as a base
+/// (task 0165: it is the top-preference quote, 0 candles). So this fixture is
+/// deliberately synthetic — USDC quoted in XLM. That is the point: the guard has
+/// to survive someone *adding* a peg member that does trade, which is live in
+/// tasks 0173/0183, not hypothetical.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn peg_member_that_also_trades_as_a_base_keeps_its_market_value() {
+    let db = "it_views_peg_member_trades";
+    let client = setup_scratch(db).await;
+
+    client
+        .query(&format!(
+            "INSERT INTO {db}.assets \
+             (asset_id, asset_code, asset_type, issuer_address, contract_address, sac_address) VALUES \
+             (1,'XLM','classic','','',''), \
+             (2,'USDC','classic','{USDC_ISSUER}','',''), \
+             (10,'FOO','classic','GFOO','','')"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    // FOO/USDC makes USDC a peg QUOTE leg, so arm B emits its zero-weight
+    // placeholder. USDC/XLM then makes USDC a traded BASE at 1.04 — off par by
+    // enough that a fallback leaking through is unmistakable. Both in one bucket,
+    // so the two arms collide on the same (identity, bucket) key.
+    client
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1d \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
+             (1620000000,10, 2,'sdex', 5,5,5,5,             10, 50,  50,  5,    5,    1,1), \
+             (1620000000, 2, 1,'sdex', 3.2,3.2,3.2,3.2,     50, 160, 52,  1.04, 3.2,  1,1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    client
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1h SELECT * FROM {db}.price_ohlcv_1d"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    for view in ["price_usd_series", "price_usd_series_1h"] {
+        let (usdc, method) = client
+            .query(&format!(
+                "SELECT toFloat64(close_usd), method FROM {db}.{view} \
+                 WHERE asset_code = ? AND issuer_address = ?"
+            ))
+            .bind("USDC")
+            .bind(USDC_ISSUER)
+            .fetch_one::<(f64, String)>()
+            .await
+            .unwrap();
+
+        assert!(
+            (usdc - 1.04).abs() < 1e-4,
+            "{view}: a peg member that trades as a base must publish its MARKET \
+             value 1.04, got {usdc}. 1.0 means the peg arm overrode arm A and \
+             every genuinely priceable pool on that identity is flattened to par."
+        );
+        assert_eq!(
+            method, "traded",
+            "{view}: measured data must be labelled traded, not peg"
+        );
+    }
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
 /// Task 0165 review finding 1 — the zero-volume peg case.
 ///
 /// A peg asset whose ONLY priced candle carries `volume_base = 0` has a real
@@ -822,15 +917,27 @@ async fn price_usd_series_fills_peg_assets_without_overriding_market_data() {
 /// test pins that: it fails with the `countIf` form and passes with `sum(w)`.
 ///
 /// ⚠️ SCOPE — the guard only reaches this case because arm B emitted a
-/// placeholder for USDT (it is the quote leg of the FOO/USDT candle below).
-/// "Fixture A" — a peg asset appearing ONLY as a zero-volume base, with no
-/// placeholder — still publishes Decimal128::MIN under BOTH guards, because
-/// `max(is_peg)` is 0 and no fallback can fire. That is PRE-EXISTING: the
-/// historical view had the identical `sum(v) / nullIf(sum(w), 0)` expression,
-/// it is not peg-specific (any asset whose only priced candles carry zero
-/// volume hits it), and fixing it means deciding whether such a row should be
-/// omitted entirely — a change to the "misses are absent" contract that needs
-/// BE input. Tracked separately; deliberately NOT fixed here.
+/// placeholder for USDC (it is the quote leg of the FOO/USDC candle below).
+/// "Fixture A" — an asset appearing ONLY as a zero-volume base, with no
+/// placeholder — cannot reach the fallback at all, because `max(is_peg)` is 0.
+///
+/// ⚠️ **CORRECTION (task 0172): fixture A does NOT "publish Decimal128::MIN".**
+/// This comment claimed it did. Measured on the prod pin (26.3.10.60), the
+/// `nullIf(sum(w), 0)` NULL fails the `CAST` to non-Nullable `Decimal(38,14)`
+/// and the query RAISES `CANNOT_INSERT_NULL_IN_ORDINARY_COLUMN` (code 349) —
+/// so it does not corrupt one row, it takes down `price_usd_series` for every
+/// row in the result. Arm A filters only on `p.close_usd > 0`, never on
+/// `volume_base > 0`, so any priced-but-zero-volume bucket can trigger it.
+/// That is PRE-EXISTING and not peg-specific; fixing it means deciding whether
+/// such a row should be omitted entirely — a change to the "misses are absent"
+/// contract that needs BE input. Tracked separately; deliberately NOT fixed here.
+///
+/// ⚠️ This fixture used USDT until task 0172 removed USDT from the peg set
+/// (it depegged in June 2022 and is now priced by measurement, not assumed to
+/// be $1). USDT can no longer stand in for a peg asset here — with no
+/// placeholder it lands in fixture A and this test fails with code 349 rather
+/// than exercising the guard. USDC is now the only peg asset and the only
+/// valid subject for this test.
 #[tokio::test]
 #[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
 async fn peg_asset_with_only_zero_volume_candles_falls_back_instead_of_publishing_garbage() {
@@ -842,25 +949,24 @@ async fn peg_asset_with_only_zero_volume_candles_falls_back_instead_of_publishin
             "INSERT INTO {db}.assets \
              (asset_id, asset_code, asset_type, issuer_address, contract_address, sac_address) VALUES \
              (2,'USDC','classic','{USDC_ISSUER}','',''), \
-             (3,'USDT','classic','{USDT_ISSUER}','',''), \
              (10,'FOO','classic','GFOO','','')"
         ))
         .execute()
         .await
         .unwrap();
 
-    // USDT trades as a base against USDC at 0.97 with ZERO volume (so its only
-    // arm-A row contributes w = 0), AND is the quote leg of a FOO/USDT candle,
+    // USDC trades as a base against FOO at 0.97 with ZERO volume (so its only
+    // arm-A row contributes w = 0), AND is the quote leg of a FOO/USDC candle,
     // which is what makes arm B emit a placeholder for it. Both are required:
-    // without the placeholder `max(is_peg)` is 0 for USDT's group and neither
+    // without the placeholder `max(is_peg)` is 0 for USDC's group and neither
     // guard can fire — see the fixture-A note on this test.
     client
         .query(&format!(
             "INSERT INTO {db}.price_ohlcv_1d \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             (1620000000, 3, 2,'sdex', 0.97,0.97,0.97,0.97, 0,0,0,0.97,0.97,1,1), \
-             (1620000000,10, 3,'sdex', 5,5,5,5,                7,35,35,5,5,1,1)"
+             (1620000000, 2,10,'sdex', 0.97,0.97,0.97,0.97, 0,0,0,0.97,0.97,1,1), \
+             (1620000000,10, 2,'sdex', 5,5,5,5,                7,35,35,5,5,1,1)"
         ))
         .execute()
         .await
@@ -869,7 +975,7 @@ async fn peg_asset_with_only_zero_volume_candles_falls_back_instead_of_publishin
     let (close, method): (f64, String) = client
         .query(&format!(
             "SELECT toFloat64(close_usd), method FROM {db}.price_usd_series \
-             WHERE asset_code = 'USDT'"
+             WHERE asset_code = 'USDC'"
         ))
         .fetch_one::<(f64, String)>()
         .await
@@ -897,6 +1003,129 @@ async fn peg_asset_with_only_zero_volume_candles_falls_back_instead_of_publishin
         .await
         .unwrap();
     assert_eq!(garbage, 0, "no row may publish a non-positive close_usd");
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// Task 0172 regression — USDT is NOT a peg asset and must never receive the
+/// `$1` fallback.
+///
+/// The canonical Stellar USDT (`USDT_ISSUER`) depegged in June 2022 and has
+/// traded at ~$0.13 ever since. Two markets sharing no legs and no code path
+/// agree (its own USDC pair, and `XLM/USDC ÷ XLM/USDT`); four sibling
+/// stablecoins held par through the same window in the same pipeline.
+///
+/// Before this fix, arm B emitted a zero-weight placeholder keyed on USDT as a
+/// QUOTE leg, so in any bucket where USDT did not also trade as a base the view
+/// published `close_usd = 1.0, method = 'peg'` — a ~7.4x overstatement, and the
+/// source of the $0.14 ↔ $1.00 flapping BE reported.
+///
+/// This test pins BOTH halves of the change: USDT gets nothing, and USDC — the
+/// only remaining peg asset, which genuinely cannot be priced as a base — still
+/// gets its fallback. Asserting only the first half would pass just as well if
+/// someone deleted arm B entirely, which would re-break task 0165.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn usdt_quote_only_gets_no_peg_fallback_but_usdc_still_does() {
+    let db = "it_views_0172_usdt_not_pegged";
+    let client = setup_scratch(db).await;
+
+    client
+        .query(&format!(
+            "INSERT INTO {db}.assets \
+             (asset_id, asset_code, asset_type, issuer_address, contract_address, sac_address) VALUES \
+             (2,'USDC','classic','{USDC_ISSUER}','',''), \
+             (3,'USDT','classic','{USDT_ISSUER}','',''), \
+             (10,'FOO','classic','GFOO','','')"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    // FOO trades against BOTH stablecoins. Neither USDC nor USDT trades as a
+    // base, so each appears ONLY as a quote leg — the exact shape that used to
+    // hand USDT a $1 row.
+    client
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1d \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
+             (1620000000,10, 2,'sdex', 5,5,5,5,             10,50,  50,  5,5,   1,1), \
+             (1620000000,10, 3,'sdex', 5.15,5.15,5.15,5.15,  4,20.6,20.6,5,5.15,1,1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    client
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1h SELECT * FROM {db}.price_ohlcv_1d"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    for view in ["price_usd_series", "price_usd_series_1h"] {
+        let usdt_rows: u64 = client
+            .query(&format!(
+                "SELECT count() FROM {db}.{view} \
+                 WHERE asset_code = 'USDT' AND issuer_address = ?"
+            ))
+            .bind(USDT_ISSUER)
+            .fetch_one::<u64>()
+            .await
+            .unwrap();
+        assert_eq!(
+            usdt_rows, 0,
+            "{view}: quote-only USDT must publish NOTHING. A row here means the \
+             peg placeholder is back and every USDT-quoted candle is ~7.4x high."
+        );
+
+        // Control: the mechanism itself must still work for the real peg asset.
+        let (usdc, usdc_method): (f64, String) = client
+            .query(&format!(
+                "SELECT toFloat64(close_usd), method FROM {db}.{view} \
+                 WHERE asset_code = 'USDC' AND issuer_address = ?"
+            ))
+            .bind(USDC_ISSUER)
+            .fetch_one::<(f64, String)>()
+            .await
+            .unwrap();
+        assert!(
+            (usdc - 1.0).abs() < 1e-4,
+            "{view}: USDC must still fall back to $1, got {usdc} — removing arm B \
+             entirely would re-break task 0165"
+        );
+        assert_eq!(usdc_method, "peg", "{view}: USDC provenance");
+
+        // FOO is priced from its own trades, across both quote legs, unaffected.
+        let (foo, foo_method): (f64, String) = client
+            .query(&format!(
+                "SELECT toFloat64(close_usd), method FROM {db}.{view} \
+                 WHERE asset_code = 'FOO'"
+            ))
+            .fetch_one::<(f64, String)>()
+            .await
+            .unwrap();
+        assert!((foo - 5.0).abs() < 1e-4, "{view}: FOO unchanged, got {foo}");
+        assert_eq!(foo_method, "traded", "{view}: FOO provenance");
+    }
+
+    let peg_rows: u64 = client
+        .query(&format!(
+            "SELECT count() FROM {db}.price_usd_series WHERE method = 'peg'"
+        ))
+        .fetch_one::<u64>()
+        .await
+        .unwrap();
+    assert_eq!(
+        peg_rows, 1,
+        "exactly one peg-filled row, and it must be USDC"
+    );
 
     client
         .query(&format!("DROP DATABASE {db}"))

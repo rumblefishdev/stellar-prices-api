@@ -53,8 +53,9 @@
 -- backfill + enrichment crates). SQL cannot reference a Rust const, so this
 -- literal is a hand-synced copy — if the canonical address ever changes, update
 -- it here AND in that const together, or the views and the writer diverge.
--- The same applies to the USDT issuer (`prices_clickhouse::USDT_ISSUER`), used
--- by the peg-fill arm of price_usd_series* (task 0165).
+-- `prices_clickhouse::USDT_ISSUER` is NO LONGER referenced by these views —
+-- task 0172 removed USDT from the peg-fill arm (see below). The const still
+-- exists for the writer paths; do not re-add it here.
 --
 -- ## Peg assets cannot be priced as a base — the peg-fill arm (task 0165)
 -- USDC is our top-preference QUOTE, so canonicalisation makes it the quote on
@@ -74,13 +75,37 @@
 -- look simpler and are wrong.
 --
 -- ⚠️ The `1` is a PLACEHOLDER, not the answer — task 0168 replaces it.
--- oracle_worker already polls Reflector for USDC and USDT, so a real
--- depeg-aware rate exists; task 0167 snapshots it into prices.usd_rate and 0168
--- swaps this constant for it. A flat $1 is a ~0.1% systematic error (small
--- depegs are routine) and it CONTRADICTS OUR OWN CANDLES: the oracle enrichment
--- tier already prices a TF/USDC candle at `close × 0.9993` (ch_enrich.rs:20).
+-- oracle_worker already polls Reflector for USDC, so a real depeg-aware rate
+-- exists; task 0167 snapshots it into prices.usd_rate and 0168 swaps this
+-- constant for it. A flat $1 is a ~0.1% systematic error (small depegs are
+-- routine) and it CONTRADICTS OUR OWN CANDLES: the oracle enrichment tier
+-- already prices a TF/USDC candle at `close × 0.9993` (ch_enrich.rs:20).
 -- Read `method = 'peg'` as "no measured rate was available", never as "$1 is
 -- correct" — that is exactly what the `method` column exists to disambiguate.
+--
+-- ## Why USDC is the ONLY member of the peg set (task 0172)
+-- USDT was here until 2026-08-12. The canonical Stellar USDT
+-- (GCQTGZQQ…TG6V) DEPEGGED IN JUNE 2022 and has traded at a deep discount ever
+-- since — ~$0.13 through 2026-08. That is not a data defect: two markets sharing
+-- no legs and no code path agree to within a cent (its own USDC pair, and
+-- XLM/USDC ÷ XLM/USDT), four sibling stablecoins held par through the same
+-- window in the same pipeline, and trade_count collapsed 140,945 → 805/month as
+-- liquidity fled. Pegging it to $1 overstated close_usd by ~7.4x on 44,657
+-- candles across 495 base assets.
+--
+-- The two members were never the same kind of thing, which is why only one was
+-- removed: USDC NEVER trades as a base (0 candles, by construction — see above),
+-- so the placeholder is the only way it is priced at all. USDT has 2,011
+-- effectively gapless daily candles since 2021-02-07, so it needs no placeholder
+-- — it is priced by measurement, via the enrichment pivot tier that already
+-- prices XLM-quoted candles (ch_enrich.rs, ReferenceIds::pivot_ids).
+--
+-- ⚠️ Do NOT restore USDT here by pointing 0168 at the oracle. Reflector prices
+-- the TICKER "USDT" — Tether's own token, genuinely at par — and we file that
+-- rate under this issuer's address, so prices.usd_rate asserts ~$1.00 for an
+-- asset worth $0.13. Shipping 0168 for this identity would relabel the same 7.4x
+-- error as `method = 'oracle'`, which reads as MORE authoritative. The
+-- symbol→issuer mapping is task 0173.
 --
 -- ## Public key = natural Stellar identity, never asset_id (§12.2)
 -- asset_id is an internal UInt32 surrogate. These views resolve it to the
@@ -247,10 +272,16 @@ GROUP BY p.timestamp;
 --   * Appending a $1 row AFTER the GROUP BY emits TWO rows for the same key
 --     wherever a peg asset also trades as a base. BE joins on (identity,
 --     bucket), so duplicate keys silently DOUBLE every downstream aggregate.
---   * Letting the peg arm OWN the peg identities flattens USDT's 102 genuinely
---     priceable pools from their market rate to $1 — a regression dressed as a
---     fix. USDT is the control here precisely because it is a peg asset that is
---     NOT the preferred quote, so it does trade as a base.
+--   * Letting the peg arm OWN the peg identities flattens a genuinely priceable
+--     asset from its market rate to $1 — a regression dressed as a fix.
+--     ⚠️ The original control for this was USDT (102 priceable pools, a peg
+--     member that is not the preferred quote, so it does trade as a base). Task
+--     0172 REMOVED USDT from the peg set — it depegged in June 2022 and trades at
+--     ~$0.13 — so the peg set is now USDC alone, and USDC never trades as a base.
+--     The shape is therefore currently unreachable on prod, which is exactly why
+--     it is pinned synthetically in
+--     `peg_member_that_also_trades_as_a_base_keeps_its_market_value`: the guard
+--     has to survive the next peg member being added (tasks 0173/0183).
 --   * Expressing precedence as an anti-join (`WHERE key NOT IN (SELECT … FROM
 --     traded)`) costs TWO full price_ohlcv_1d FINAL scans, because ClickHouse
 --     substitutes CTEs textually rather than materialising them.
@@ -336,8 +367,10 @@ FROM
     FROM prices.price_ohlcv_1d AS p FINAL
     INNER JOIN prices.assets AS q FINAL ON q.asset_id = p.quote_asset_id
     WHERE q.contract_address = ''
-      AND ((q.asset_code = 'USDC' AND q.issuer_address = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN')
-        OR (q.asset_code = 'USDT' AND q.issuer_address = 'GCQTGZQQ5G4PTM2GL7CDIFKUBIPEC52BROAQIAPW53XBRJVN6ZJVTG6V'))
+      -- USDC only. USDT was removed here by task 0172: the canonical Stellar
+      -- USDT depegged in June 2022 and trades at ~$0.13, so the $1 placeholder
+      -- published a 7.4x overstatement. It is priced by measurement instead.
+      AND (q.asset_code = 'USDC' AND q.issuer_address = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN')
 )
 GROUP BY asset_kind, asset_code, issuer_address, contract_address, bucket;
 
@@ -424,8 +457,10 @@ FROM
     FROM prices.price_ohlcv_1h AS p FINAL
     INNER JOIN prices.assets AS q FINAL ON q.asset_id = p.quote_asset_id
     WHERE q.contract_address = ''
-      AND ((q.asset_code = 'USDC' AND q.issuer_address = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN')
-        OR (q.asset_code = 'USDT' AND q.issuer_address = 'GCQTGZQQ5G4PTM2GL7CDIFKUBIPEC52BROAQIAPW53XBRJVN6ZJVTG6V'))
+      -- USDC only. USDT was removed here by task 0172: the canonical Stellar
+      -- USDT depegged in June 2022 and trades at ~$0.13, so the $1 placeholder
+      -- published a 7.4x overstatement. It is priced by measurement instead.
+      AND (q.asset_code = 'USDC' AND q.issuer_address = 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN')
 )
 GROUP BY asset_kind, asset_code, issuer_address, contract_address, bucket;
 

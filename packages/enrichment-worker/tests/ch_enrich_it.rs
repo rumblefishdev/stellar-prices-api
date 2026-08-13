@@ -13,7 +13,7 @@ use enrichment_worker::ch_enrich::{ChEnrichConfig, ChEnrichmentPass};
 use enrichment_worker::repair::{
     CoarseRepairConfig, CoarseRepairDriver, CoarseSweepConfig, run_coarse_sweep,
 };
-use prices_clickhouse::USDC_ISSUER;
+use prices_clickhouse::{USDC_ISSUER, USDT_ISSUER};
 
 fn ch_url() -> String {
     std::env::var("CLICKHOUSE_URL").unwrap_or_else(|_| "http://localhost:8123".to_string())
@@ -1089,6 +1089,98 @@ async fn coarse_repair_bounded_mode_defers_overflow_across_runs() {
     assert_eq!(
         feb2.zeros_after, 0,
         "backlog converged to the floor after run 2"
+    );
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// Task 0172 regression — a USDT-quoted candle must be priced at the MEASURED
+/// USDT rate, not at $1.
+///
+/// The canonical Stellar USDT (`USDT_ISSUER`) depegged in June 2022 and trades
+/// at ~$0.13. It used to sit in the peg tier alongside USDC, so every
+/// USDT-quoted candle got `close_usd = close × $1` — a ~7.4x overstatement
+/// across 44,657 candles and 495 base assets on prod. It now takes the pivot
+/// tier instead, exactly like XLM: its USD value is read from its own USDC
+/// market rather than assumed.
+///
+/// The fixture makes the two outcomes numerically unmistakable: FOO trades at
+/// 10.0 against USDT, so the correct answer is 10 × 0.13 = **1.3** and the old
+/// buggy answer is **10.0**.
+///
+/// ⚠️ This also guards the failure mode that would look like a fix: simply
+/// deleting USDT from the peg set, with no pivot, leaves these candles at
+/// `close_usd = 0`. That is NOT acceptable — zero is indistinguishable from
+/// "genuinely zero" and "not yet enriched" in this schema, and ~130
+/// `argMax(close_usd, …)` sites read it unguarded. Hence the explicit `> 0`
+/// assertion below.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn usdt_quoted_candles_pivot_on_the_measured_rate_not_a_dollar_peg() {
+    let db = "it_enrich_0172_usdt_pivot";
+    let client = setup_scratch(db).await;
+
+    client
+        .query(&format!(
+            "INSERT INTO {db}.assets \
+             (asset_id, asset_code, asset_type, issuer_address, contract_address) VALUES \
+             (1,'XLM','classic','',''), (2,'USDC','classic','{USDC_ISSUER}',''), \
+             (3,'USDT','classic','{USDT_ISSUER}',''), (10,'FOO','classic','GFOO','')"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    // USDT/USDC at 0.13 is the pivot SOURCE — it is USDC-quoted, so the peg tier
+    // prices it first (0.13 × $1). FOO/USDT at 10.0 is the SUBJECT: the pivot
+    // must then value it at 10 × 0.13 = 1.3, not at the old 10 × $1 = 10.0.
+    let deep = 1_600_000_000u32;
+    client
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1m \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
+             ({deep}, 3, 2,'sdex', 0.13,0.13,0.13,0.13, 1000,130,0,0,0.13, 1,1), \
+             ({deep},10, 3,'sdex', 10,10,10,10,          5,  50, 0,0,10,    1,1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    ChEnrichmentPass::new(cfg(db)).run().await.unwrap();
+
+    let approx = |a: f64, b: f64| (a - b).abs() < 1e-4;
+
+    // The pivot source itself: USDC-quoted, so the peg tier gives it 0.13.
+    let usdt_usd = close_usd(&client, db, 3, 2, deep).await;
+    assert!(
+        approx(usdt_usd, 0.13),
+        "USDT/USDC must price at its market value 0.13, got {usdt_usd}"
+    );
+
+    let foo_via_usdt = close_usd(&client, db, 10, 3, deep).await;
+    assert!(
+        foo_via_usdt > 0.0,
+        "USDT-quoted candle must not be left unpriced at 0 — that trades a wrong \
+         number for a silent one (see the ~130 unguarded argMax(close_usd) sites)"
+    );
+    assert!(
+        approx(foo_via_usdt, 1.3),
+        "USDT-quoted candle must use the MEASURED rate: 10 x 0.13 = 1.3, got \
+         {foo_via_usdt}. A value of 10.0 means USDT is being pegged to $1 again \
+         and every USDT-quoted candle is ~7.4x overstated."
+    );
+
+    // Idempotent, like the other tiers: a second pass must not re-multiply.
+    ChEnrichmentPass::new(cfg(db)).run().await.unwrap();
+    let after = close_usd(&client, db, 10, 3, deep).await;
+    assert!(
+        approx(after, 1.3),
+        "second pass must leave the pivot value unchanged, got {after}"
     );
 
     client

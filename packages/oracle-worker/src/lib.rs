@@ -29,10 +29,21 @@ pub const REFLECTOR_DECIMALS: u32 = 14;
 /// Default public Soroban RPC endpoint (overridable via `SOROBAN_RPC_URL`).
 pub const DEFAULT_SOROBAN_RPC: &str = "https://mainnet.sorobanrpc.com";
 /// Reflector symbols the worker polls. Each is mapped to a canonical Stellar
-/// identity by the shared [`reflector_key_to_identity`]; a symbol that has no
-/// Stellar identity is fetched-then-skipped (the loop's filter), so this list
-/// can grow independently of the mapping.
-pub const TRACKED_SYMBOLS: &[&str] = &["XLM", "USDC", "USDT"];
+/// identity by the shared [`reflector_key_to_identity`], which is the single
+/// authority on what may reach `prices.oracle_prices`; a symbol it drops is
+/// skipped *before* the RPC fetch. `every_tracked_symbol_resolves_to_an_identity`
+/// pins the two together, so this list holds no dead entries.
+///
+/// ⚠️ **`USDT` was removed here by task 0172, together with its arm in the
+/// mapping.** The feed named "USDT" prices Tether's own token, which is at par;
+/// we were filing that reading under the Stellar IOU issued by `USDT_ISSUER`,
+/// which depegged in June 2022 and trades at ~$0.13. Because the oracle tier runs
+/// *before* the peg-pivot tier and wins where it applies, an oracle row on that
+/// identity re-pegs every USDT-quoted candle to $1.00 — the exact error 0172
+/// removed from the peg tier. USDT is now priced by measurement through the pivot
+/// (its own USDC market) and needs no oracle arm. Restoring it requires fixing
+/// the symbol→issuer mapping first (task 0173).
+pub const TRACKED_SYMBOLS: &[&str] = &["XLM", "USDC"];
 
 /// The `oracle_prices.oracle_name` this worker writes, and the one the task-0167
 /// snapshot copies. Must match the enrichment tier's `ORACLE_NAME` (default
@@ -55,20 +66,27 @@ pub const ORACLE_NAME: &str = "reflector";
 /// `method = 'oracle'`, `hops = 0` — which is what it factually is, no pivot
 /// involved — should be reconsidered on its own merits rather than deferred by
 /// default. Raised explicitly so the omission is a decision, not an accident.
+/// ⚠️ **USDT was removed from this list by task 0172, and must not be restored
+/// without fixing the symbol→issuer mapping first (task 0173).** Reflector
+/// publishes a feed named for the TICKER "USDT" — Tether's own token, which is
+/// genuinely at par. We were storing that reading against
+/// `USDT_ISSUER`'s address, i.e. asserting ~$1.00 for a Stellar IOU that has
+/// traded at ~$0.13 since it depegged in June 2022 (confirmed by two independent
+/// markets; see `ReferenceIds::pivot_ids`). The oracle was not wrong about
+/// Tether — the identity we filed it under was wrong. An asset code is not an
+/// identity on Stellar: `prices.assets` holds ~220 distinct issuers using the
+/// code "USDT" and ~220 using "USDC".
+///
+/// Rows already written under that identity are still in `prices.usd_rate` and
+/// are still wrong; cleaning them is tracked separately.
 pub fn peg_identities() -> Vec<AssetIdentity> {
     // Built rather than declared const: AssetIdentity::Credit holds Strings.
-    // Sourced from the same consts the enrichment peg tier and views.sql use,
+    // Sourced from the same const the enrichment peg tier and views.sql use,
     // so the three cannot drift apart.
-    vec![
-        AssetIdentity::Credit {
-            code: "USDC".to_string(),
-            issuer: prices_clickhouse::USDC_ISSUER.to_string(),
-        },
-        AssetIdentity::Credit {
-            code: "USDT".to_string(),
-            issuer: prices_clickhouse::USDT_ISSUER.to_string(),
-        },
-    ]
+    vec![AssetIdentity::Credit {
+        code: "USDC".to_string(),
+        issuer: prices_clickhouse::USDC_ISSUER.to_string(),
+    }]
 }
 
 #[derive(Debug, thiserror::Error)]
