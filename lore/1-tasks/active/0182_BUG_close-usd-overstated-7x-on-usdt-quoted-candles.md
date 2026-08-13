@@ -358,7 +358,21 @@ progress defers it. Unreachable from the CLI (`one_shot: true` is hard-coded) bu
 
 **6. `--skip-snapshot` was accepted with `--reset-*`** — while the tool's own
 warning said "keep the FREEZE snapshot". Rollback for a bad reset *is* `ATTACH
-PARTITION` from that snapshot. Now refused.
+PARTITION` from that snapshot.
+
+⚠️ **My first fix for this was wrong and is worth recording.** I refused the
+combination outright — which would have made reset mode **unusable on prod**.
+`prices_writer` cannot `FREEZE` and cannot be granted it, so the established
+procedure ([[0114]], Step 3b) is precisely *admin snapshots out of band, tool runs
+with `--skip-snapshot`*. Refusing it would have sent the driver into a
+`FreezeDenied` on the only cluster the mode exists for. Caught by running the
+command rather than by re-reading the diff.
+
+The actual fix is a `--snapshots-verified` acknowledgement, required only when
+`--skip-snapshot` meets `--reset-*`. The prod path still works; what changed is
+that "the admin froze it" and "nobody froze it" no longer look identical on the
+command line. The tool cannot check this itself — it has no filesystem access to
+the CH host — so it is explicitly an operator assertion.
 
 **7. `--pivot-window-s` was unvalidated against bucket width.** The 1-day default
 drops a `_1w`/`_1M` reference sitting in the previous bucket. Before a reset that

@@ -132,6 +132,22 @@ struct Args {
     /// already on disk for that window is *correct* and this flag protects it.
     #[arg(long, requires = "reset_quote_asset_id")]
     reset_not_before: Option<u32>,
+
+    /// Assert that the FREEZE snapshots for this span already exist.
+    ///
+    /// Required to combine `--skip-snapshot` with `--reset-*`. On prod that
+    /// combination is not a shortcut, it is **the only workable path**:
+    /// `prices_writer` cannot `FREEZE` and cannot be granted it, so the CH admin
+    /// takes the snapshots out of band (runbook Step 3b) and the tool is told not
+    /// to try. But a reset discards data whose only rollback is `ATTACH
+    /// PARTITION` from those snapshots, so "I skipped it because the admin did
+    /// it" and "I skipped it" must not look identical on the command line.
+    ///
+    /// Verify before passing this — `ls /var/lib/clickhouse/shadow/ | grep repair_`
+    /// plus a non-trivial `du`. It is an assertion by the operator, not a check
+    /// the tool can make: it has no filesystem access to the CH host.
+    #[arg(long)]
+    snapshots_verified: bool,
 }
 
 fn validate_month(label: &str, m: u32) -> Result<(), String> {
@@ -176,18 +192,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Reset mode is the only path here that discards data, so its two footguns
     // are refused rather than warned about.
     if args.reset_quote_asset_id.is_some() && !args.dry_run {
-        // 1. Rollback for a bad reset IS `ATTACH PARTITION` from the shadow copy.
-        //    Without a snapshot there is nothing to attach, so the tool's own
-        //    "keep the FREEZE snapshot" advice would be unfollowable.
-        if args.skip_snapshot {
-            return Err(
-                "--skip-snapshot cannot be combined with --reset-quote-asset-id: \
-                 the reset discards stored values and its only rollback is ATTACH \
-                 PARTITION from the frozen copy. Take the snapshots as CH admin \
-                 (runbook Step 3b), verify them under shadow/, and re-run without \
-                 --skip-snapshot."
-                    .into(),
-            );
+        // 1. Rollback for a bad reset IS `ATTACH PARTITION` from the shadow copy,
+        //    so the snapshots must exist. They usually will not have been taken by
+        //    this tool: `prices_writer` cannot FREEZE and cannot be granted it, so
+        //    on prod the admin takes them out of band and `--skip-snapshot` is the
+        //    *correct* flag rather than a shortcut. Refusing that combination
+        //    outright would make reset mode unusable on the only cluster it exists
+        //    for. So require the operator to say which case they are in.
+        if args.skip_snapshot && !args.snapshots_verified {
+            return Err("--skip-snapshot with --reset-quote-asset-id requires \
+                 --snapshots-verified: a reset discards stored values, and its only \
+                 rollback is ATTACH PARTITION from the frozen copy.\n\
+                 If the CH admin already froze this span (runbook Step 3b — the \
+                 normal prod path, since prices_writer cannot FREEZE), confirm with \
+                 `ls /var/lib/clickhouse/shadow/ | grep repair_` plus a non-trivial \
+                 `du`, then pass --snapshots-verified.\n\
+                 If nobody has, stop: there is no rollback point."
+                .into());
         }
         // 2. A staleness window shorter than the table's own bucket width drops
         //    the reference for buckets whose anchor is the previous bucket —
