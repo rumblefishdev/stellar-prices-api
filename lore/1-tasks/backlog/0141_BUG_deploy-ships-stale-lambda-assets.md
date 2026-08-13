@@ -18,6 +18,24 @@ history:
       the CDK diff looked healthy (a clean S3Key change), and the endpoint served
       stubs. Only step 7's response-content check caught it. Rebuilding with
       `cargo lambda build` and redeploying fixed it.
+  - date: 2026-08-12
+    status: backlog
+    who: akot
+    note: >
+      Two findings from [[0157]]'s production deploy that widen this beyond
+      what the original report covers, both caught by reading `cdk diff`
+      rather than by any guard. First, the delivery vector is not only
+      `deploy-production-compute`: no per-stack target carries
+      `--exclusively`, so `make deploy-production-apigateway` announced
+      `Including dependency stacks: Prices-production-Compute` and would have
+      deployed Compute as a side effect of a deploy that has nothing to do
+      with it. Second, "stale" understates what sits on a developer machine —
+      all eleven bootstraps under `target/lambda/` were byte-identical 10-byte
+      files containing `#!/bin/sh`, so the ledger processor and the api
+      handler resolved to a single asset hash. That deploy would have replaced
+      every Lambda in production with a shell stub, not with an old binary.
+      Worked around by hand with `--exclusively`; nothing in the repo stops
+      the next person from missing it.
 ---
 
 # The deploy path ships stale Lambda binaries and reports success
