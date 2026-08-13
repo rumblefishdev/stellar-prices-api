@@ -56,6 +56,13 @@ async fn main() -> Result<(), lambda_runtime::Error> {
         // price_ohlcv_1m; the partition-bounded window is only set by the 0114
         // coarse-repair driver (operator-run), never here.
         time_window: None,
+        // Never on a scheduled path (task 0182). The reset DISCARDS already-
+        // written USD values so a corrected tier can recompute them; it is a
+        // deliberate one-off operator action via the coarse-repair CLI, and it
+        // is not a fixed point across runs, so an hourly Lambda carrying one
+        // would re-zero and recompute the same rows forever. Deliberately not
+        // env-driven — there is no ENRICHMENT_USD_RESET.
+        usd_reset: None,
     };
 
     tracing::info!(

@@ -32,7 +32,7 @@ use clickhouse::{Client, Row};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
-use crate::ch_enrich::{ChEnrichConfig, ChEnrichError, ChEnrichmentPass};
+use crate::ch_enrich::{ChEnrichConfig, ChEnrichError, ChEnrichmentPass, repair_target_pred};
 
 /// One coarse-repair run over `[start_month, end_month]` (inclusive `YYYYMM`).
 #[derive(Debug, Clone)]
@@ -94,6 +94,15 @@ pub struct MonthRepair {
     pub zeros_before: u64,
     pub zeros_after: u64,
     pub rows_enriched: u64,
+    /// Rows a [`ChEnrichConfig::usd_reset`] re-opened this month (task 0182); 0
+    /// on every ordinary repair.
+    ///
+    /// Carried up here, not just logged, because it is half of the check the
+    /// runbook tells the operator to perform: `rows_reset` ≫ `rows_enriched`
+    /// means the reset discarded values it could not recompute, and the remedy
+    /// is `ATTACH PARTITION` from the snapshot. A number the operator is told to
+    /// compare has to appear in the thing they are told to read.
+    pub rows_reset: u64,
     /// The `FREEZE … WITH NAME` label, when `snapshot` was set.
     pub snapshot_name: Option<String>,
 }
@@ -111,6 +120,12 @@ impl RepairSummary {
     /// months. Not an error; recorded so the caller can log the residual.
     pub fn total_remaining(&self) -> u64 {
         self.months.iter().map(|m| m.zeros_after).sum()
+    }
+    /// Rows re-opened by a USD reset across all months (task 0182). Compare
+    /// against [`Self::total_enriched`]: a large gap means values were discarded
+    /// and not recomputed.
+    pub fn total_reset(&self) -> u64 {
+        self.months.iter().map(|m| m.rows_reset).sum()
     }
 }
 
@@ -190,11 +205,12 @@ impl CoarseRepairDriver {
                     toUInt32(toUnixTimestamp(toDateTime(addMonths(min(toStartOfMonth(timestamp)), 1)))) AS end_ts, \
                     count() AS zeros \
              FROM {db}.{tbl} FINAL \
-             WHERE (volume_quote_usd = 0 OR close_usd = 0) AND volume_quote > 0 \
+             WHERE ({pred}) \
                AND toYYYYMM(timestamp) BETWEEN {start} AND {end} \
              GROUP BY month ORDER BY month",
             db = self.cfg.enrich.database,
             tbl = self.cfg.enrich.table,
+            pred = repair_target_pred(self.cfg.enrich.usd_reset.as_ref()),
             start = self.cfg.start_month,
             end = self.cfg.end_month,
         );
@@ -272,6 +288,7 @@ impl CoarseRepairDriver {
                     zeros_before: mw.zeros,
                     zeros_after: mw.zeros,
                     rows_enriched: 0,
+                    rows_reset: 0,
                     snapshot_name: None,
                 });
                 continue;
@@ -308,6 +325,7 @@ impl CoarseRepairDriver {
                 before = stats.candidates_before,
                 after = stats.candidates_after,
                 enriched = stats.rows_enriched,
+                reset = stats.rows_reset,
                 "coarse repair: month done"
             );
             summary.months.push(MonthRepair {
@@ -315,6 +333,7 @@ impl CoarseRepairDriver {
                 zeros_before: stats.candidates_before,
                 zeros_after: stats.candidates_after,
                 rows_enriched: stats.rows_enriched,
+                rows_reset: stats.rows_reset,
                 snapshot_name,
             });
             // Defensive cross-check: the enumeration count and the pass's own
@@ -505,6 +524,12 @@ pub async fn run_coarse_sweep(
         let mut enrich = cfg.base.clone();
         enrich.table = table.clone();
         enrich.max_batches = cfg.max_batches;
+        // Task 0182: the reset discards computed values and is not a fixed point
+        // across runs (see `repair_target_pred`), so an hourly sweep carrying one
+        // would re-zero and recompute the same rows every hour, forever. Pinned
+        // here rather than merely left unset, so a reset can never reach this
+        // path by inheriting from `cfg.base`.
+        enrich.usd_reset = None;
         let repair_cfg = CoarseRepairConfig {
             enrich,
             start_month,
