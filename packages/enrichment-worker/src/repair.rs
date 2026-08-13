@@ -94,6 +94,15 @@ pub struct MonthRepair {
     pub zeros_before: u64,
     pub zeros_after: u64,
     pub rows_enriched: u64,
+    /// Rows a [`ChEnrichConfig::usd_reset`] re-opened this month (task 0182); 0
+    /// on every ordinary repair.
+    ///
+    /// Carried up here, not just logged, because it is half of the check the
+    /// runbook tells the operator to perform: `rows_reset` ≫ `rows_enriched`
+    /// means the reset discarded values it could not recompute, and the remedy
+    /// is `ATTACH PARTITION` from the snapshot. A number the operator is told to
+    /// compare has to appear in the thing they are told to read.
+    pub rows_reset: u64,
     /// The `FREEZE … WITH NAME` label, when `snapshot` was set.
     pub snapshot_name: Option<String>,
 }
@@ -111,6 +120,12 @@ impl RepairSummary {
     /// months. Not an error; recorded so the caller can log the residual.
     pub fn total_remaining(&self) -> u64 {
         self.months.iter().map(|m| m.zeros_after).sum()
+    }
+    /// Rows re-opened by a USD reset across all months (task 0182). Compare
+    /// against [`Self::total_enriched`]: a large gap means values were discarded
+    /// and not recomputed.
+    pub fn total_reset(&self) -> u64 {
+        self.months.iter().map(|m| m.rows_reset).sum()
     }
 }
 
@@ -273,6 +288,7 @@ impl CoarseRepairDriver {
                     zeros_before: mw.zeros,
                     zeros_after: mw.zeros,
                     rows_enriched: 0,
+                    rows_reset: 0,
                     snapshot_name: None,
                 });
                 continue;
@@ -309,6 +325,7 @@ impl CoarseRepairDriver {
                 before = stats.candidates_before,
                 after = stats.candidates_after,
                 enriched = stats.rows_enriched,
+                reset = stats.rows_reset,
                 "coarse repair: month done"
             );
             summary.months.push(MonthRepair {
@@ -316,6 +333,7 @@ impl CoarseRepairDriver {
                 zeros_before: stats.candidates_before,
                 zeros_after: stats.candidates_after,
                 rows_enriched: stats.rows_enriched,
+                rows_reset: stats.rows_reset,
                 snapshot_name,
             });
             // Defensive cross-check: the enumeration count and the pass's own

@@ -1277,6 +1277,9 @@ async fn the_usd_reset_recomputes_written_values_but_respects_the_epoch() {
     let client = setup_0182(db, t_old, t_new).await;
 
     let mut c = cfg(db);
+    // A reset requires a draining pass — see `the_usd_reset_refuses_a_bounded_pass`.
+    // The operator CLI hard-codes this; the IT helper defaults to bounded.
+    c.one_shot = true;
     c.usd_reset = Some(UsdResetSpec {
         quote_asset_id: 3,
         not_before: t_new,
@@ -1329,6 +1332,86 @@ async fn the_usd_reset_recomputes_written_values_but_respects_the_epoch() {
         .unwrap();
 }
 
+/// A mistyped `--reset-quote-asset-id` must not be able to zero rows nothing can
+/// re-price.
+///
+/// This is the one way the repair ends up strictly worse than the defect: a
+/// wrong-but-visible number becomes the ambiguous zero that ~130 unguarded
+/// `argMax(close_usd, …)` sites read as a real price. And the oracle gate does
+/// not catch it — an unknown asset has no Reflector rows either, which is
+/// exactly what that gate is looking for.
+#[tokio::test]
+#[ignore]
+async fn the_usd_reset_refuses_a_quote_leg_that_no_tier_can_reprice() {
+    let db = "it_enrich_0182_unpriceable";
+    let (t_old, t_new) = (1_500_000_000u32, 1_600_000_000u32);
+    let client = setup_0182(db, t_old, t_new).await;
+
+    let mut c = cfg(db);
+    c.one_shot = true;
+    // 10 is FOO — a real asset in the fixture, but not a peg or pivot reference.
+    // Stands in for the realistic slip of typing 11 for 111.
+    c.usd_reset = Some(UsdResetSpec {
+        quote_asset_id: 10,
+        not_before: t_new,
+    });
+    let err = ChEnrichmentPass::new(c).run().await.unwrap_err();
+
+    assert!(
+        matches!(err, ChEnrichError::ResetTargetHasNoPricingPath { quote_asset_id, .. }
+                 if quote_asset_id == 10),
+        "expected the reset to refuse an unpriceable quote leg, got {err:?}"
+    );
+
+    let v = close_usd(&client, db, 10, 3, t_new).await;
+    assert!(
+        (v - 10.0).abs() < 1e-4,
+        "a refused reset must not have written anything, got {v}"
+    );
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// A bounded pass can defer the peg-pivot tier (it is gated on the oracle tier
+/// draining), which would leave the reset's zeroes published until some later
+/// run. The combination is refused rather than risked.
+#[tokio::test]
+#[ignore]
+async fn the_usd_reset_refuses_a_bounded_pass() {
+    let db = "it_enrich_0182_bounded";
+    let (t_old, t_new) = (1_500_000_000u32, 1_600_000_000u32);
+    let client = setup_0182(db, t_old, t_new).await;
+
+    let mut c = cfg(db);
+    c.one_shot = false;
+    c.usd_reset = Some(UsdResetSpec {
+        quote_asset_id: 3,
+        not_before: t_new,
+    });
+    let err = ChEnrichmentPass::new(c).run().await.unwrap_err();
+
+    assert!(
+        matches!(err, ChEnrichError::ResetRequiresOneShot { quote_asset_id } if quote_asset_id == 3),
+        "expected a bounded pass to refuse the reset, got {err:?}"
+    );
+
+    let v = close_usd(&client, db, 10, 3, t_new).await;
+    assert!(
+        (v - 10.0).abs() < 1e-4,
+        "a refused reset must not have written anything, got {v}"
+    );
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
 /// Task 0182's first ordering constraint, enforced rather than documented.
 ///
 /// The oracle tier runs before the peg-pivot tier and wins where it applies, so
@@ -1356,6 +1439,7 @@ async fn the_usd_reset_refuses_to_run_while_the_oracle_still_shadows_the_quote_l
         .unwrap();
 
     let mut c = cfg(db);
+    c.one_shot = true;
     c.usd_reset = Some(UsdResetSpec {
         quote_asset_id: 3,
         not_before: t_new,

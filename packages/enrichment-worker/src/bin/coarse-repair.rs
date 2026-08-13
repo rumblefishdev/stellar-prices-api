@@ -173,6 +173,45 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .into());
     }
 
+    // Reset mode is the only path here that discards data, so its two footguns
+    // are refused rather than warned about.
+    if args.reset_quote_asset_id.is_some() && !args.dry_run {
+        // 1. Rollback for a bad reset IS `ATTACH PARTITION` from the shadow copy.
+        //    Without a snapshot there is nothing to attach, so the tool's own
+        //    "keep the FREEZE snapshot" advice would be unfollowable.
+        if args.skip_snapshot {
+            return Err(
+                "--skip-snapshot cannot be combined with --reset-quote-asset-id: \
+                 the reset discards stored values and its only rollback is ATTACH \
+                 PARTITION from the frozen copy. Take the snapshots as CH admin \
+                 (runbook Step 3b), verify them under shadow/, and re-run without \
+                 --skip-snapshot."
+                    .into(),
+            );
+        }
+        // 2. A staleness window shorter than the table's own bucket width drops
+        //    the reference for buckets whose anchor is the previous bucket —
+        //    which, before a reset, only left a row unenriched, but now discards
+        //    its value first and then fails to refill it.
+        let min_window = match args.table.as_str() {
+            "price_ohlcv_1w" => 7 * 86_400,
+            "price_ohlcv_1M" => 31 * 86_400,
+            "price_ohlcv_1d" => 86_400,
+            _ => 0,
+        };
+        if args.pivot_window_s < min_window {
+            return Err(format!(
+                "--pivot-window-s {} is shorter than {}'s bucket width ({} s). \
+                 With a reset that is destructive, not merely conservative: a bucket \
+                 whose reference is the previous one falls outside the window, so its \
+                 stored value is discarded and then not recomputed. Pass at least \
+                 --pivot-window-s {}.",
+                args.pivot_window_s, args.table, min_window, min_window
+            )
+            .into());
+        }
+    }
+
     let enrich = ChEnrichConfig {
         url: args.clickhouse_url.clone(),
         database: args.database.clone(),
@@ -284,16 +323,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Human-readable roll-up; the structured per-month lines are already logged.
     println!("\n=== coarse-repair summary ({}) ===", args.table);
     println!(
-        "{:>8}  {:>12}  {:>12}  {:>12}  snapshot",
-        "month", "zeros_before", "enriched", "zeros_after"
+        "{:>8}  {:>12}  {:>12}  {:>12}  {:>12}  snapshot",
+        "month", "zeros_before", "enriched", "zeros_after", "reset"
     );
     for m in &summary.months {
         println!(
-            "{:>8}  {:>12}  {:>12}  {:>12}  {}",
+            "{:>8}  {:>12}  {:>12}  {:>12}  {:>12}  {}",
             m.month,
             m.zeros_before,
             m.rows_enriched,
             m.zeros_after,
+            m.rows_reset,
             m.snapshot_name.as_deref().unwrap_or("-")
         );
     }
@@ -308,6 +348,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             ""
         }
     );
+
+    // The reset's own safety check, computed rather than left to the operator's
+    // arithmetic. `rows_reset` > `rows_enriched` means values were discarded and
+    // not recomputed — the one outcome worse than the defect being repaired.
+    let (reset, enriched) = (summary.total_reset(), summary.total_enriched());
+    if reset > 0 {
+        println!("{reset} row(s) re-opened by the USD reset, {enriched} recomputed");
+        if reset > enriched {
+            eprintln!(
+                "\n!! {} row(s) were re-opened but NOT recomputed. They now hold \
+                 close_usd = 0, which reads as a real price at ~130 unguarded \
+                 argMax(close_usd, …) sites.\n\
+                 !! Do NOT continue to the next table. Roll this one back from its \
+                 FREEZE snapshot (see the runbook's Rollback section), then check \
+                 --pivot-window-s against this table's bucket width.",
+                reset - enriched
+            );
+        }
+    }
 
     Ok(())
 }

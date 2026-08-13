@@ -122,6 +122,42 @@ pub enum ChEnrichError {
         oracle_name: String,
         rows: u64,
     },
+
+    /// A [`UsdResetSpec`] named a quote leg that **no tier can price**, so every
+    /// row it zeroed would stay at `close_usd = 0` permanently.
+    ///
+    /// This is the one way the repair can end up strictly worse than the defect
+    /// it corrects: a wrong-but-visible number becomes the ambiguous zero that
+    /// ~130 unguarded `argMax(close_usd, …)` sites read as a real price. A
+    /// mistyped id is enough — `11` for `111` passes the oracle gate, because an
+    /// asset with no Reflector rows is exactly what that gate is looking for.
+    #[error(
+        "USD reset refused: quote asset_id {quote_asset_id} is not a peg or pivot \
+         reference (peg: {stable:?}, pivot: {pivot:?}), so no tier can recompute \
+         the rows this reset would zero — they would stay at close_usd = 0 \
+         permanently, which is worse than the wrong value they hold now.\n\
+         Check the id against prices.assets; a mistyped id passes the oracle \
+         check because an unknown asset has no oracle rows either."
+    )]
+    ResetTargetHasNoPricingPath {
+        quote_asset_id: u32,
+        stable: Vec<u32>,
+        pivot: Vec<u32>,
+    },
+
+    /// A [`UsdResetSpec`] was combined with a bounded (`one_shot = false`) pass.
+    ///
+    /// The peg-pivot tier — the only one that can refill a pivoted quote leg — is
+    /// gated on the oracle tier draining. A bounded pass that exhausts its batch
+    /// budget while still making progress defers that tier to the next run, so
+    /// the reset's zeroes would be left published until then.
+    #[error(
+        "USD reset refused: a reset requires one_shot = true. In a bounded pass the \
+         peg-pivot tier can be deferred (it is gated on the oracle tier draining), \
+         which would leave the rows this reset zeroes published at close_usd = 0 \
+         until a later run."
+    )]
+    ResetRequiresOneShot { quote_asset_id: u32 },
 }
 
 /// Opt-in reset of **already-written** USD columns, so a corrected pricing tier
@@ -585,6 +621,35 @@ impl ChEnrichmentPass {
             .await?)
     }
 
+    /// Refuse the reset unless a tier in this pass can actually re-price the
+    /// quote leg — i.e. it is the USDC peg or one of the pivot references.
+    ///
+    /// The reset is the only operation here that discards a value, so "can I put
+    /// it back?" has to be answered *before* the write, not discovered after.
+    /// `resolve_reference_ids()` otherwise runs inside the tier section, well
+    /// after the rows are already zeroed, and a leg with no reference merely logs
+    /// `warn!("no USDC/USDT/XLM reference assets …")` and skips — leaving the
+    /// zeroes published.
+    ///
+    /// The realistic trigger is a typo, not an exotic asset: `--reset-quote-asset-id
+    /// 11` for `111` sails through the oracle gate, because "no oracle rows" is
+    /// precisely what that gate wants to see.
+    async fn assert_reset_target_is_priceable(
+        &self,
+        spec: &UsdResetSpec,
+    ) -> Result<(), ChEnrichError> {
+        let refs = self.resolve_reference_ids().await?;
+        let (stable, pivot) = (refs.stable_ids(), refs.pivot_ids());
+        if stable.contains(&spec.quote_asset_id) || pivot.contains(&spec.quote_asset_id) {
+            return Ok(());
+        }
+        Err(ChEnrichError::ResetTargetHasNoPricingPath {
+            quote_asset_id: spec.quote_asset_id,
+            stable,
+            pivot,
+        })
+    }
+
     /// Refuse the reset while `oracle_prices` still holds rows for the quote leg
     /// being reset — task 0182's first ordering constraint, as a gate rather than
     /// a warning.
@@ -628,6 +693,15 @@ impl ChEnrichmentPass {
     /// accounting (`rows_enriched`, `candidates_after`) describes the repair
     /// rather than the pre-repair table.
     async fn reset_step(&self, spec: &UsdResetSpec, watermark: u32) -> Result<u64, ChEnrichError> {
+        // Three refusals, in increasing cost order. Every one of them protects
+        // the same property: nothing is zeroed unless a tier in THIS pass can
+        // put a value back.
+        if !self.cfg.one_shot {
+            return Err(ChEnrichError::ResetRequiresOneShot {
+                quote_asset_id: spec.quote_asset_id,
+            });
+        }
+        self.assert_reset_target_is_priceable(spec).await?;
         self.assert_reset_not_shadowed_by_oracle(spec).await?;
 
         let pending_before = self.count_reset_pending(spec, watermark).await?;
@@ -1085,21 +1159,6 @@ fn peg_sql(db: &str, tbl: &str, stable_ids: &[u32], window: &str) -> Option<Stri
     ))
 }
 
-/// Pivot statement: candles quoted in `ref_id` get `close_usd = close × ref_usd`,
-/// where `ref_usd` is forward-filled by an `ASOF LEFT JOIN` against the
-/// volume-weighted `ref_id`/USDC series. `ref_id` is XLM, or — since task 0172 —
-/// the depegged USDT, which is priced by measurement rather than assumed to be $1
-/// (see [`ReferenceIds::pivot_ids`]). Computed **inline as a subquery** (no DDL, so the
-/// writer needs no `CREATE TABLE` grant on the shared tenant; task 0083). The
-/// subquery's `WHERE asset_id = ref AND quote_asset_id = usdc` is a sort-key prefix
-/// on `price_ohlcv_1m`, so each batch re-aggregates only that single pair's slice,
-/// not the whole table. `ref_asset_id` is the constant reference id so the ASOF join
-/// keeps its required equality predicate (`r.ref_asset_id = p.quote_asset_id`) and
-/// matches only candles quoted in that reference asset — which is what makes the
-/// XLM and USDT passes disjoint and safe to run in sequence. Bound parameters, in SQL order: the snapshot
-/// watermark (ref subquery), the pivot staleness window (seconds), the snapshot
-/// watermark again (outer, shared with the rest of the pass — see
-/// [`ChEnrichmentPass::watermark`]), and the `LIMIT`.
 /// Re-open already-written USD columns for the quote leg a [`UsdResetSpec`]
 /// names, by re-inserting the row with both USD columns at 0 and `version + 1`
 /// (task 0182).
@@ -1149,6 +1208,21 @@ fn reset_sql(db: &str, tbl: &str, spec: &UsdResetSpec, window: &str) -> String {
     )
 }
 
+/// Pivot statement: candles quoted in `ref_id` get `close_usd = close × ref_usd`,
+/// where `ref_usd` is forward-filled by an `ASOF LEFT JOIN` against the
+/// volume-weighted `ref_id`/USDC series. `ref_id` is XLM, or — since task 0172 —
+/// the depegged USDT, which is priced by measurement rather than assumed to be $1
+/// (see [`ReferenceIds::pivot_ids`]). Computed **inline as a subquery** (no DDL, so the
+/// writer needs no `CREATE TABLE` grant on the shared tenant; task 0083). The
+/// subquery's `WHERE asset_id = ref AND quote_asset_id = usdc` is a sort-key prefix
+/// on `price_ohlcv_1m`, so each batch re-aggregates only that single pair's slice,
+/// not the whole table. `ref_asset_id` is the constant reference id so the ASOF join
+/// keeps its required equality predicate (`r.ref_asset_id = p.quote_asset_id`) and
+/// matches only candles quoted in that reference asset — which is what makes the
+/// XLM and USDT passes disjoint and safe to run in sequence. Bound parameters, in SQL order: the snapshot
+/// watermark (ref subquery), the pivot staleness window (seconds), the snapshot
+/// watermark again (outer, shared with the rest of the pass — see
+/// [`ChEnrichmentPass::watermark`]), and the `LIMIT`.
 fn pivot_sql(db: &str, tbl: &str, ref_id: u32, usdc_id: u32, window: &str) -> String {
     format!(
         "INSERT INTO {db}.{tbl} ({INSERT_COLUMNS}) \

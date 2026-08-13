@@ -228,6 +228,7 @@ mod tests {
                     zeros_before: enriched + remaining,
                     zeros_after: remaining,
                     rows_enriched: enriched,
+                    rows_reset: 0,
                     snapshot_name: None,
                 }],
             },

@@ -309,6 +309,71 @@ implementation of the pivot, nothing bespoke.
    re-open a row the pivot is structurally unable to refill. Unit-tested against
    `pivot_sql` directly, so the two cannot drift.
 
+### Review of PR #212 — seven findings, all fixed
+
+Two were correctness-blocking and both were mine.
+
+**1. The branch did not build the production Lambda.** `usd_reset` is a
+non-optional field and every construction site was updated *except* `main.rs`,
+which sits behind `#[cfg(feature = "lambda")]` — invisible to the
+`cargo clippy --workspace --all-targets` I validated with. CI's "Build Lambda
+bootstraps" step would have caught it; my local sweep could not.
+
+⚠️ **Lesson worth keeping: `--all-targets` is not `--all-features`.** This crate
+has three feature-gated entrypoints. The check that would have caught it, now
+run before every push here:
+
+```bash
+for F in "" "--features lambda" "--features aws-mtls" "--all-features"; do
+  cargo check -p enrichment-worker $F --all-targets || echo "FAIL: $F"
+done
+```
+
+**2. Nothing verified the reset target was refillable.** The oracle gate answers
+"will something overwrite this?" but not "can anything restore this?".
+`resolve_reference_ids()` ran *after* the reset, inside the tier section, and a
+leg with no reference merely `warn!`s and skips — leaving the zeroes published.
+A typo was enough: `--reset-quote-asset-id 11` for `111` **passes the oracle
+gate**, because "no oracle rows" is exactly what that gate wants to see. Now
+`ResetTargetHasNoPricingPath`, checked before any write.
+
+**3. The safety check the runbook prescribes did not exist.** The warning and the
+appendix both said "compare `rows_reset` against `rows_enriched` in the summary"
+— but `rows_reset` was dropped at the driver boundary and never reached
+`MonthRepair`, `RepairSummary`, or the printed table. It surfaced only in a
+`tracing::info!`. Now carried through, printed as a per-month column and a
+closing line, and the tool computes the comparison itself rather than leaving it
+to the operator's arithmetic.
+
+**4. `reset_sql`'s doc comment was inserted *inside* `pivot_sql`'s.** So
+`reset_sql`'s rustdoc opened by describing the pivot and stated a four-parameter
+bind order where `reset_sql` binds two — the precise setup for a positional-bind
+bug on the next edit — and `pivot_sql` was left undocumented. Restored.
+
+**5. A bounded pass could zero rows and skip the refill tier.** Tier 2 is gated on
+`oracle_drained`; a bounded pass that exhausts its budget while still making
+progress defers it. Unreachable from the CLI (`one_shot: true` is hard-coded) but
+`usd_reset` is a public field on a public `run_through`. Now
+`ResetRequiresOneShot`.
+
+**6. `--skip-snapshot` was accepted with `--reset-*`** — while the tool's own
+warning said "keep the FREEZE snapshot". Rollback for a bad reset *is* `ATTACH
+PARTITION` from that snapshot. Now refused.
+
+**7. `--pivot-window-s` was unvalidated against bucket width.** The 1-day default
+drops a `_1w`/`_1M` reference sitting in the previous bucket. Before a reset that
+left a row unenriched; with one it discards the value first. Now refused below
+7d/31d/1d for `_1w`/`_1M`/`_1d`.
+
+Findings 5-7 share a shape worth naming: **every way this tool can discard a
+value now refuses rather than warns.** A warning is the wrong instrument when the
+failure is silent and looks like success.
+
+New tests, both verified non-vacuous by removing the guards:
+`the_usd_reset_refuses_a_quote_leg_that_no_tier_can_reprice`,
+`the_usd_reset_refuses_a_bounded_pass`. 16 ITs, 39 unit tests, clippy clean on
+all four feature combinations.
+
 ### ⚠️ Known limitation — reset mode is not a fixed point across runs
 
 Within a run it converges (a reset row zeroes both columns and stops matching).

@@ -444,6 +444,19 @@ They require each other. Together they re-insert the matching rows with **both**
 USD columns at 0 and `version + 1`, ahead of the normal tiers, which then
 recompute them.
 
+### What reset mode refuses outright
+
+All five are hard errors, not warnings, because each one ends with rows zeroed
+that nothing can refill:
+
+| Refusal                                           | Why                                                                                                                                                                            |
+| ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `--skip-snapshot` together with `--reset-*`       | Rollback for a bad reset **is** `ATTACH PARTITION` from the frozen copy. Step 3b's operator-taken snapshots are still the path — just drop `--skip-snapshot` from the command. |
+| `--pivot-window-s` below the table's bucket width | On `_1w`/`_1M`/`_1d` a bucket whose reference is the previous bucket falls outside a short window. Before a reset that left a row unenriched; now it discards the value first. |
+| A quote leg that is not a peg or pivot reference  | A mistyped id (`11` for `111`) passes the oracle check, because an unknown asset has no oracle rows either.                                                                    |
+| A bounded pass (`one_shot = false`)               | The peg-pivot tier is gated on the oracle tier draining, so a bounded pass can defer the only tier that refills.                                                               |
+| `oracle_prices` rows for the quote leg            | See below.                                                                                                                                                                     |
+
 ### The epoch is not optional tuning
 
 Below the date the pivot's reference market begins there is nothing to recompute
@@ -475,10 +488,17 @@ verify 0 before re-running — do not work around it.
 
 ### Extra verification, beyond Step 5
 
-Compare `rows_reset` against `rows_enriched` in the summary. They should be
-close. A run where `rows_reset` **far exceeds** `rows_enriched` zeroed values it
-could not recompute — stop and roll back from the snapshot rather than continuing
-to the next table.
+The summary gains a `reset` column per month and a closing line:
+
+```
+NNN row(s) re-opened by the USD reset, NNN recomputed
+```
+
+They should match. If `rows_reset` exceeds `rows_enriched` the tool prints a loud
+block on stderr naming the shortfall — that run zeroed values it could not
+recompute. **Stop; do not continue to the next table.** Roll that table back from
+its snapshot (Rollback section below), then check `--pivot-window-s` against the
+table's bucket width.
 
 Then assert the defect cannot still be present. For the USDT case the fingerprint
 is an implied rate of ~1.0:
