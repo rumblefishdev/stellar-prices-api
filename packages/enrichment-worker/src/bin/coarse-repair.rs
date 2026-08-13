@@ -27,7 +27,7 @@
 use std::path::PathBuf;
 
 use clap::{Parser, ValueEnum};
-use enrichment_worker::ch_enrich::ChEnrichConfig;
+use enrichment_worker::ch_enrich::{ChEnrichConfig, UsdResetSpec};
 use enrichment_worker::repair::{CoarseRepairConfig, CoarseRepairDriver};
 use tracing::{info, warn};
 
@@ -103,8 +103,35 @@ struct Args {
     window_s: u32,
 
     /// XLM/USDC pivot staleness window (seconds).
+    ///
+    /// ⚠️ Raise this for the coarse tiers. The default is one day, but a `_1w`
+    /// or `_1M` candle whose reference bucket is the previous week/month sits
+    /// further back than that, and the pivot's `ASOF` drops anything staler —
+    /// silently, as `zeros_after`.
     #[arg(long, env = "PIVOT_WINDOW_S", default_value_t = 86_400)]
     pivot_window_s: u32,
+
+    /// Re-open already-written USD values for this quote `asset_id` so the
+    /// corrected tiers recompute them (task 0182). Requires
+    /// `--reset-not-before`.
+    ///
+    /// ⚠️ This is the only flag here that DISCARDS a computed value. Everything
+    /// else in this tool is purely additive — it fills zeros. Use it only to
+    /// correct a *pricing* defect, where the stored number is wrong rather than
+    /// missing, and only against a FREEZE-snapshotted partition.
+    #[arg(long, requires = "reset_not_before")]
+    reset_quote_asset_id: Option<u32>,
+
+    /// Epoch (unix seconds) below which stored USD values are left alone.
+    ///
+    /// This is a correctness bound, not a convenience: below the date the pivot's
+    /// reference market begins, there is nothing to recompute from, so a reset
+    /// row stays at `close_usd = 0` permanently. For canonical USDT that date is
+    /// **2021-02-07** (`1612656000`) — the start of its USDC market. Task 0172
+    /// also measured it at genuine par before the June 2022 depeg, so the value
+    /// already on disk for that window is *correct* and this flag protects it.
+    #[arg(long, requires = "reset_quote_asset_id")]
+    reset_not_before: Option<u32>,
 }
 
 fn validate_month(label: &str, m: u32) -> Result<(), String> {
@@ -160,6 +187,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         max_batches: 20,
         one_shot: true,
         time_window: None,
+        usd_reset: match (args.reset_quote_asset_id, args.reset_not_before) {
+            (Some(quote_asset_id), Some(not_before)) => Some(UsdResetSpec {
+                quote_asset_id,
+                not_before,
+            }),
+            // clap's `requires` makes the mixed cases unreachable.
+            _ => None,
+        },
     };
 
     let repair_cfg = CoarseRepairConfig {
@@ -217,6 +252,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         warn!(
             "snapshot DISABLED (--skip-snapshot): partitions will be repaired with no FREEZE \
              backup — only safe when the 1m source can rebuild this coarse table"
+        );
+    }
+
+    if let Some(quote_asset_id) = args.reset_quote_asset_id
+        && !args.dry_run
+    {
+        warn!(
+            quote_asset_id,
+            not_before = args.reset_not_before,
+            "USD RESET ENABLED: stored close_usd/volume_quote_usd for this quote leg will be \
+             DISCARDED and recomputed. Rows the pivot cannot reach stay at 0 — compare \
+             rows_reset against rows_enriched in the summary, and keep the FREEZE snapshot \
+             until they agree"
         );
     }
 

@@ -32,7 +32,7 @@ use clickhouse::{Client, Row};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
-use crate::ch_enrich::{ChEnrichConfig, ChEnrichError, ChEnrichmentPass};
+use crate::ch_enrich::{ChEnrichConfig, ChEnrichError, ChEnrichmentPass, repair_target_pred};
 
 /// One coarse-repair run over `[start_month, end_month]` (inclusive `YYYYMM`).
 #[derive(Debug, Clone)]
@@ -190,11 +190,12 @@ impl CoarseRepairDriver {
                     toUInt32(toUnixTimestamp(toDateTime(addMonths(min(toStartOfMonth(timestamp)), 1)))) AS end_ts, \
                     count() AS zeros \
              FROM {db}.{tbl} FINAL \
-             WHERE (volume_quote_usd = 0 OR close_usd = 0) AND volume_quote > 0 \
+             WHERE ({pred}) \
                AND toYYYYMM(timestamp) BETWEEN {start} AND {end} \
              GROUP BY month ORDER BY month",
             db = self.cfg.enrich.database,
             tbl = self.cfg.enrich.table,
+            pred = repair_target_pred(self.cfg.enrich.usd_reset.as_ref()),
             start = self.cfg.start_month,
             end = self.cfg.end_month,
         );
@@ -505,6 +506,12 @@ pub async fn run_coarse_sweep(
         let mut enrich = cfg.base.clone();
         enrich.table = table.clone();
         enrich.max_batches = cfg.max_batches;
+        // Task 0182: the reset discards computed values and is not a fixed point
+        // across runs (see `repair_target_pred`), so an hourly sweep carrying one
+        // would re-zero and recompute the same rows every hour, forever. Pinned
+        // here rather than merely left unset, so a reset can never reach this
+        // path by inheriting from `cfg.base`.
+        enrich.usd_reset = None;
         let repair_cfg = CoarseRepairConfig {
             enrich,
             start_month,

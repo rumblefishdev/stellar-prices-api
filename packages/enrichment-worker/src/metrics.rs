@@ -188,6 +188,7 @@ mod tests {
             candidates_before: 100,
             candidates_after: 7,
             rows_enriched: 93,
+            rows_reset: 0,
             oracle_misses: 12,
             rows_remaining_at_volume_zero: 4,
             rows_remaining_recent: 1,

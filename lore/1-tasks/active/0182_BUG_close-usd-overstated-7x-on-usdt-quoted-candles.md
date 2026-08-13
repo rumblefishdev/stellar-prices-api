@@ -246,6 +246,125 @@ asset that barely trades. 0172's opening recorded **106 pools with a USDT leg,
 102 priceable** — every one of those positions is valued ~7.4× high regardless of
 how thin the trading is. Prioritise on that, not on the volume table above.
 
+## Implementation (2026-08-13) — the tool, not yet the run
+
+Branch `fix/0182_close-usd-overstated-7x-on-usdt-quoted-candles`. The repair is
+an **opt-in reset step** ahead of the existing tiers, so the corrected pricing
+logic 0172 already shipped is what recomputes the values — no second
+implementation of the pivot, nothing bespoke.
+
+1. **`ch_enrich.rs::UsdResetSpec`** — `{ quote_asset_id, not_before }`. Both
+   fields are bounds, not options: one quote leg per run (the blast radius must
+   be nameable before the statement runs) and an epoch below which stored values
+   are untouchable.
+2. **`ch_enrich.rs::reset_sql`** — re-inserts matching rows with **both** USD
+   columns at 0 and `version + 1`. An insert, not `ALTER … UPDATE`, so it
+   composes with the `FREEZE` snapshot: the pre-reset row survives under its old
+   version and `ATTACH PARTITION` restores it.
+3. **`ChEnrichConfig.usd_reset: Option<UsdResetSpec>`**, default `None` — a pass
+   is byte-identical to its pre-0182 behaviour unless an operator names the leg
+   and the epoch. `run_coarse_sweep` **pins it to `None`** rather than merely
+   leaving it unset, so the hourly Lambda cannot inherit one.
+4. **`repair.rs::months_with_zeros`** now enumerates via the shared
+   `repair_target_pred`, so a reset run can actually find the months.
+5. **`coarse-repair.rs`** — `--reset-quote-asset-id` / `--reset-not-before`,
+   mutually `requires`d, plus a loud pre-run warning.
+6. **Runbook** `docs/runbooks/repair-coarse-usd-values.md` — new appendix for
+   reset mode. Also corrects a line that still described USDT as a $1 peg.
+
+### Design decisions
+
+**From plan**
+
+1. **Reuse the [[0114]] driver rather than write a repair.** Partition bounding,
+   `FREEZE`, dry-run, per-month reporting and the deadline all already exist and
+   are proven on prod. The gap was only that its enumeration could not see these
+   rows.
+2. **Epoch bound rather than a dated peg epoch.** Per BE answer 4 — nothing reads
+   deep enough for the pre-2021 window to matter.
+
+**Emerged**
+
+3. **The reset zeroes `volume_quote_usd` too, resolving the open scope question
+   without waiting for BE.** The tiers preserve `volume_quote_usd` write-once, so
+   zeroing `close_usd` alone would leave the row carrying two USD figures derived
+   from *different* rates — disagreeing by ~7.4× on exactly these rows. Both
+   columns describe one candle at one instant; fixing one and pinning the other
+   produces a row that is incoherent whichever figure a consumer reads. Zeroing
+   both costs nothing (same statement) and lets the pivot recompute both from one
+   reference. **This supersedes the "widen scope or document the mismatch"
+   question** — there is no mismatch left to document. BE's answer is still worth
+   having, but it is no longer a blocker.
+4. **The oracle ordering constraint is a runtime gate, not a doc note.**
+   `ChEnrichError::ResetBlockedByOracleRows` refuses the run while
+   `oracle_prices` holds rows for the leg. A warning would not do: the failure is
+   silent *and looks like success* — the oracle tier re-fills what the reset
+   zeroed, and the run reports a healthy repair over unchanged values, relabelled
+   `method = 'oracle'`. This is the [[0168]] trap arriving through a new door.
+5. **`rows_reset` is reported alongside `rows_enriched`, never instead of it.**
+   `rows_reset` ≫ `rows_enriched` is the signature of the one outcome worse than
+   the defect: values discarded and not recomputed, turning a wrong-but-visible
+   number into an ambiguous zero.
+6. **The reset predicate mirrors the pivot's `volume_quote > 0`**, so it cannot
+   re-open a row the pivot is structurally unable to refill. Unit-tested against
+   `pivot_sql` directly, so the two cannot drift.
+
+### ⚠️ Known limitation — reset mode is not a fixed point across runs
+
+Within a run it converges (a reset row zeroes both columns and stops matching).
+A *second* invocation sees the refilled rows and re-opens them, recomputing
+values that are already correct — value-idempotent, but not free, and it bumps
+`version` each time. Making it converge would need a "this row was already
+repaired" marker the schema does not have. Deliberate: reset mode is a one-off
+operator action, documented as such, and structurally excluded from the sweep.
+
+### Tests
+
+- `ch_enrich.rs` unit ×8: `reset_sql_targets_written_values_not_zeros`,
+  `..._zeroes_both_usd_columns`, `..._honours_the_epoch_and_the_quote_leg`,
+  `..._will_not_reopen_a_row_the_pivot_cannot_refill` (asserts against
+  `pivot_sql` itself), `..._is_a_versioned_insert_not_a_mutation`,
+  `..._threads_the_partition_window`,
+  `reset_pending_pred_stops_matching_once_a_row_is_zeroed`,
+  `repair_target_pred_{is_unchanged_without_a_reset,sees_months_that_hold_only_written_values}`.
+- `ch_enrich_it.rs` ×3 on the 26.3.10.60 pin:
+  - `an_ordinary_pass_cannot_see_a_wrong_but_written_close_usd` — the control,
+    and a standing regression for the trap itself.
+  - `the_usd_reset_recomputes_written_values_but_respects_the_epoch` — asserts
+    the corrected 1.3 **and** that the pre-epoch row keeps its 10.0. Asserting
+    only the first would also pass for a reset with no epoch bound at all.
+  - `the_usd_reset_refuses_to_run_while_the_oracle_still_shadows_the_quote_leg`
+    — plus that nothing was written before the refusal.
+
+**Verified non-vacuous** — each defect restored, each caught:
+
+| Defect restored | Test that failed |
+|---|---|
+| reset step never runs (0172 writer fix alone) | `..._recomputes_written_values_...` (`rows_reset` 0, not 1) |
+| epoch bound dropped from `reset_sql` | same test, on the pre-epoch assertion |
+| oracle gate removed | `..._refuses_to_run_while_the_oracle_...` (pass succeeded) |
+
+All green: 39 workspace unit tests, 14 enrichment ITs, clippy clean on the crate.
+
+## 🚧 What is NOT done — this is a tool, not a correction
+
+**Not one published price has changed.** Same trap already recorded for [[0168]]
+and for [[0172]] itself: a green PR that stops the bleeding is not the fix.
+
+Remaining, in order:
+
+1. **Size the run.** Hand the operator a query for affected rows/months per
+   forever table; the ~2-4 h estimate is extrapolated from 0114's row shape, not
+   measured on this one.
+2. **Dry run per table** — and confirm it is **non-vacuous** (reports months, not
+   the all-clear). That is an acceptance criterion, not a formality.
+3. **Snapshots** — CH admin must `FREEZE` every partition in span; `prices_writer`
+   cannot and cannot be granted it.
+4. **The run**, `_1h` first (the table BE consumes), reviewed before the next.
+   ⚠️ Raise `--pivot-window-s` for `_1w`/`_1M` — the 1-day default silently drops
+   references older than a day, which every weekly bucket's anchor may be.
+5. **Verify** the implied-rate probe moves off 1.0, then tell BE the window.
+
 ## Acceptance Criteria
 
 - [x] Decision recorded: **correct history from 2021-02-07 on**, leave the

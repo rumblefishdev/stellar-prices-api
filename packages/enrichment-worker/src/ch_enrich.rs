@@ -100,6 +100,116 @@ pub enum ChEnrichError {
         #[source]
         source: clickhouse::error::Error,
     },
+
+    /// A [`UsdResetSpec`] run was refused because `oracle_prices` still holds
+    /// rows for the quote asset being reset. Encodes task 0182's first ordering
+    /// constraint as a runtime gate rather than a paragraph in a task file: the
+    /// oracle tier runs *before* the peg-pivot tier and wins where it applies, so
+    /// resetting while those rows exist re-applies the very value the reset is
+    /// meant to remove — and re-labels it `method = 'oracle'`, which a consumer
+    /// reads as *more* authoritative than the placeholder it replaced.
+    #[error(
+        "USD reset refused: prices.oracle_prices still holds {rows} row(s) for \
+         quote asset_id {quote_asset_id} under oracle '{oracle_name}'.\n\
+         The oracle tier runs before the peg-pivot tier and wins where it applies, \
+         so resetting now would re-apply the oracle's rate to every row this reset \
+         zeroes — and label it method='oracle'.\n\
+         Purge those rows first (task 0196), verify the count is 0, then re-run.\n\
+         See lore/1-tasks/active/0182_BUG_close-usd-overstated-7x-on-usdt-quoted-candles.md."
+    )]
+    ResetBlockedByOracleRows {
+        quote_asset_id: u32,
+        oracle_name: String,
+        rows: u64,
+    },
+}
+
+/// Opt-in reset of **already-written** USD columns, so a corrected pricing tier
+/// can recompute them (task 0182).
+///
+/// ## Why this exists
+///
+/// Enrichment is idempotent because every tier filters on `close_usd = 0` —
+/// an already-enriched row is never revisited. That is exactly right in steady
+/// state and exactly wrong after a *pricing* defect: [`ReferenceIds::pivot_ids`]
+/// documents how USDT-quoted candles were valued at par until 2026-08-12, and
+/// those 44,657 rows are inert. Nothing will ever look at them again, because
+/// they are non-zero.
+///
+/// So a repair needs one thing the steady-state pass deliberately lacks: a way to
+/// put a row *back* into the candidate set. That is all this does.
+///
+/// ## Why it is deliberately narrow
+///
+/// This is the only mechanism in the worker that discards a computed value, so
+/// every field here is a bound rather than an option:
+///
+/// * `quote_asset_id` — one quote leg per run. Never "all rows with a suspect
+///   price": the blast radius must be nameable before the statement runs.
+/// * `not_before` — the epoch below which the *old* value is correct and must
+///   survive. For USDT that is 2021-02-07, when the USDT/USDC market the pivot
+///   measures against begins; before it the pivot has no reference, and the `$1`
+///   already on disk is right because the asset was genuinely at par (task 0172).
+///   Reset those and they stay at `close_usd = 0` forever.
+///
+/// The statement additionally mirrors the pivot's own `volume_quote > 0` filter,
+/// so it will not zero a row the pivot is structurally unable to refill.
+///
+/// ⚠️ Rows whose reference is missing or stale beyond `pivot_window_s` are still
+/// reset and *not* refilled — that residue cannot be predicted from the candidate
+/// side alone. Run against a `FREEZE`d partition and check `zeros_after`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UsdResetSpec {
+    /// The quote `asset_id` whose candles get their USD columns zeroed.
+    pub quote_asset_id: u32,
+    /// Earliest candle `timestamp` (unix seconds) eligible for reset. Rows older
+    /// than this keep whatever they hold — see the epoch note above.
+    pub not_before: u32,
+}
+
+/// The steady-state candidate shape: a row missing either USD column, with
+/// volume to price. Shared by [`ChEnrichmentPass::count_candidates`] and the task
+/// 0114 repair driver's month enumeration.
+pub const CANDIDATE_PRED: &str = "(volume_quote_usd = 0 OR close_usd = 0) AND volume_quote > 0";
+
+/// Rows a [`UsdResetSpec`] still has work to do on: the named quote leg, at or
+/// after the epoch, **still holding a written USD value**.
+///
+/// The `(close_usd > 0 OR volume_quote_usd > 0)` term is what makes the reset
+/// loop terminate — a reset row zeroes both columns and immediately stops
+/// matching. It also mirrors the pivot's `volume_quote > 0` so the reset cannot
+/// zero a row the pivot is structurally unable to refill.
+pub fn reset_pending_pred(spec: &UsdResetSpec) -> String {
+    format!(
+        "quote_asset_id = {q} AND timestamp >= toDateTime({nb}) \
+         AND (close_usd > 0 OR volume_quote_usd > 0) AND volume_quote > 0",
+        q = spec.quote_asset_id,
+        nb = spec.not_before,
+    )
+}
+
+/// What makes a month *worth visiting* for the task 0114 repair driver: it holds
+/// steady-state zeros, **or** it holds rows a reset is going to re-open.
+///
+/// This exists because the two halves disagreed before task 0182, and that
+/// disagreement is what made the defect invisible. The driver enumerates
+/// [`CANDIDATE_PRED`]; every row 0182 targets has `close_usd > 0`; so a
+/// `--dry-run` reported *"no months with enrichable zeros"* — a green all-clear
+/// over 44,657 wrong values, indistinguishable from a genuinely clean table.
+///
+/// ⚠️ **Not a fixed point across runs.** Within a run it converges: the reset
+/// zeroes the rows, the pivot refills them, and the reset arm stops matching
+/// mid-run. But a *second* invocation sees the refilled rows and matches them
+/// again, resetting and recomputing values that are already correct. That is
+/// value-idempotent (same reference, same result) but it is not free, and it
+/// bumps `version` each time. The reset is therefore a deliberate one-off
+/// operator action — never wired into the recurring sweep, which pins
+/// `usd_reset: None` for exactly this reason.
+pub fn repair_target_pred(reset: Option<&UsdResetSpec>) -> String {
+    match reset {
+        None => CANDIDATE_PRED.to_string(),
+        Some(spec) => format!("({CANDIDATE_PRED}) OR ({})", reset_pending_pred(spec)),
+    }
 }
 
 /// Config for one production enrichment run. Mirrors the prototype's
@@ -150,6 +260,13 @@ pub struct ChEnrichConfig {
     /// still forward-fills from earlier months (a cheap sort-key-prefix scan), so
     /// a month's first buckets keep a valid pivot anchor.
     pub time_window: Option<(u32, u32)>,
+    /// Opt-in USD-column reset run **before** the tiers, so already-written
+    /// values re-enter the candidate set (task 0182). `None` — the default, and
+    /// the only value the scheduled Lambda ever uses — makes a pass
+    /// byte-identical to its pre-0182 behaviour; a pass can only discard a
+    /// computed value if an operator explicitly names the quote leg and epoch.
+    /// See [`UsdResetSpec`].
+    pub usd_reset: Option<UsdResetSpec>,
 }
 
 impl Default for ChEnrichConfig {
@@ -166,6 +283,7 @@ impl Default for ChEnrichConfig {
             max_batches: 20,
             one_shot: false,
             time_window: None,
+            usd_reset: None,
         }
     }
 }
@@ -247,6 +365,14 @@ pub struct ChPassStats {
     pub candidates_before: u64,
     pub candidates_after: u64,
     pub rows_enriched: u64,
+    /// Rows a [`UsdResetSpec`] re-opened this pass (task 0182); 0 whenever
+    /// `usd_reset` is `None`, which is every scheduled path.
+    ///
+    /// Report it alongside `rows_enriched`, never instead of it: a run where
+    /// `rows_reset` far exceeds `rows_enriched` means the repair zeroed values it
+    /// could not recompute — the one outcome worse than the defect, since a
+    /// wrong-but-visible number became an ambiguous zero.
+    pub rows_reset: u64,
     /// Candidates the recent-window oracle tier left unenriched this pass — the
     /// count handed down to (or deferred from) the peg-pivot tier. Maps to the
     /// `EnrichmentOracleMiss` CloudWatch metric (spec §5).
@@ -382,10 +508,11 @@ impl ChEnrichmentPass {
     async fn count_candidates(&self, watermark: u32) -> Result<u64, ChEnrichError> {
         let sql = format!(
             "SELECT count() FROM {db}.{tbl} FINAL \
-             WHERE (volume_quote_usd = 0 OR close_usd = 0) AND volume_quote > 0 \
+             WHERE {pred} \
                AND timestamp <= toDateTime(?){win}",
             db = self.cfg.database,
             tbl = self.cfg.table,
+            pred = CANDIDATE_PRED,
             win = self.window_pred("timestamp"),
         );
         Ok(self
@@ -434,6 +561,127 @@ impl ChEnrichmentPass {
             .bind(watermark)
             .fetch_one::<RemainingCounts>()
             .await?)
+    }
+
+    /// Count rows the configured [`UsdResetSpec`] still has to re-open.
+    async fn count_reset_pending(
+        &self,
+        spec: &UsdResetSpec,
+        watermark: u32,
+    ) -> Result<u64, ChEnrichError> {
+        let sql = format!(
+            "SELECT count() FROM {db}.{tbl} FINAL \
+             WHERE {pred} AND timestamp <= toDateTime(?){win}",
+            db = self.cfg.database,
+            tbl = self.cfg.table,
+            pred = reset_pending_pred(spec),
+            win = self.window_pred("timestamp"),
+        );
+        Ok(self
+            .client
+            .query(&sql)
+            .bind(watermark)
+            .fetch_one::<u64>()
+            .await?)
+    }
+
+    /// Refuse the reset while `oracle_prices` still holds rows for the quote leg
+    /// being reset — task 0182's first ordering constraint, as a gate rather than
+    /// a warning.
+    ///
+    /// A warning would not do. The failure is silent and it *looks like success*:
+    /// the reset zeroes the rows, the oracle tier (which runs first, and wins
+    /// where it applies) immediately re-fills them from the very rate the reset
+    /// existed to remove, and the run reports a healthy `rows_enriched` with
+    /// `zeros_after = 0`. The operator sees a clean repair over unchanged values,
+    /// now labelled `method = 'oracle'`.
+    async fn assert_reset_not_shadowed_by_oracle(
+        &self,
+        spec: &UsdResetSpec,
+    ) -> Result<(), ChEnrichError> {
+        let sql = format!(
+            "SELECT count() FROM {db}.oracle_prices \
+             WHERE asset_id = {q} AND oracle_name = ?",
+            db = self.cfg.database,
+            q = spec.quote_asset_id,
+        );
+        let rows = self
+            .client
+            .query(&sql)
+            .bind(&self.cfg.oracle_name)
+            .fetch_one::<u64>()
+            .await?;
+        if rows > 0 {
+            return Err(ChEnrichError::ResetBlockedByOracleRows {
+                quote_asset_id: spec.quote_asset_id,
+                oracle_name: self.cfg.oracle_name.clone(),
+                rows,
+            });
+        }
+        Ok(())
+    }
+
+    /// Zero the USD columns on rows the spec names, in `batch_size` chunks, so
+    /// the tiers below can recompute them. Returns the number of rows re-opened.
+    ///
+    /// Runs *before* `candidates_before` is measured, so the pass's own
+    /// accounting (`rows_enriched`, `candidates_after`) describes the repair
+    /// rather than the pre-repair table.
+    async fn reset_step(&self, spec: &UsdResetSpec, watermark: u32) -> Result<u64, ChEnrichError> {
+        self.assert_reset_not_shadowed_by_oracle(spec).await?;
+
+        let pending_before = self.count_reset_pending(spec, watermark).await?;
+        if pending_before == 0 {
+            return Ok(0);
+        }
+        info!(
+            quote_asset_id = spec.quote_asset_id,
+            not_before = spec.not_before,
+            pending = pending_before,
+            table = %self.cfg.table,
+            "USD reset: re-opening already-written rows for re-enrichment"
+        );
+
+        let sql = reset_sql(
+            &self.cfg.database,
+            &self.cfg.table,
+            spec,
+            &self.window_pred("p.timestamp"),
+        );
+
+        let mut pending = pending_before;
+        for _ in 0..self.effective_max_batches() {
+            if pending == 0 {
+                break;
+            }
+            self.client
+                .query(&sql)
+                .bind(watermark)
+                .bind(self.cfg.batch_size)
+                .execute()
+                .await?;
+            let after = self.count_reset_pending(spec, watermark).await?;
+            if after >= pending {
+                // No row left the pending set. Every remaining match is one the
+                // statement cannot act on; looping again would only re-scan.
+                warn!(
+                    remaining = after,
+                    "USD reset made no progress — stopping (rows may be unreachable)"
+                );
+                pending = after;
+                break;
+            }
+            pending = after;
+        }
+
+        let reopened = pending_before.saturating_sub(pending);
+        info!(
+            reopened,
+            remaining = pending,
+            table = %self.cfg.table,
+            "USD reset done"
+        );
+        Ok(reopened)
     }
 
     /// Enrich up to `batch_size` candidates in one server-side statement.
@@ -660,6 +908,17 @@ impl ChEnrichmentPass {
     /// deferred, not enriched, in the current pass.
     pub async fn run_through(&self, watermark: u32) -> Result<ChPassStats, ChEnrichError> {
         let start = std::time::Instant::now();
+
+        // Task 0182 — re-open already-written USD values so the tiers below can
+        // recompute them. Must precede `candidates_before`: the reset is what
+        // *creates* those candidates, so measuring first would report the
+        // pre-repair table and score the whole repair as `rows_enriched = 0`.
+        // `None` on every scheduled path, so this is a no-op in steady state.
+        let rows_reset = match self.cfg.usd_reset.as_ref() {
+            Some(spec) => self.reset_step(spec, watermark).await?,
+            None => 0,
+        };
+
         let candidates_before = self.count_candidates(watermark).await?;
         info!(
             candidates = candidates_before,
@@ -768,6 +1027,7 @@ impl ChEnrichmentPass {
             candidates_before,
             candidates_after: remaining,
             rows_enriched,
+            rows_reset,
             oracle_misses,
             rows_remaining_at_volume_zero: remaining_counts.total,
             rows_remaining_recent: remaining_counts.recent,
@@ -840,6 +1100,55 @@ fn peg_sql(db: &str, tbl: &str, stable_ids: &[u32], window: &str) -> Option<Stri
 /// watermark (ref subquery), the pivot staleness window (seconds), the snapshot
 /// watermark again (outer, shared with the rest of the pass — see
 /// [`ChEnrichmentPass::watermark`]), and the `LIMIT`.
+/// Re-open already-written USD columns for the quote leg a [`UsdResetSpec`]
+/// names, by re-inserting the row with both USD columns at 0 and `version + 1`
+/// (task 0182).
+///
+/// ## Why an insert and not `ALTER TABLE … UPDATE`
+///
+/// A mutation rewrites whole parts and is neither transactional nor cheaply
+/// revertible. The `version + 1` re-insert is the same additive move every other
+/// statement here makes, so it composes with the `FREEZE` snapshot the repair
+/// driver takes: the pre-reset row is still on disk under its old version, and
+/// `ATTACH PARTITION` restores it.
+///
+/// ## Why both USD columns
+///
+/// `volume_quote_usd` is preserved write-once by the tiers
+/// (`if(volume_quote_usd > 0, …)`), so zeroing `close_usd` alone would leave the
+/// row carrying two USD figures derived from *different* rates — a `close_usd`
+/// at the corrected market rate beside a `volume_quote_usd` still at the old peg,
+/// disagreeing by ~7.4× on the USDT rows this was written for. Both columns
+/// describe the same candle at the same instant; a repair that fixes one and
+/// pins the other produces a row that is internally incoherent no matter which
+/// figure a consumer reads. Zeroing both lets the pivot recompute both from one
+/// reference.
+///
+/// Bound parameters, in SQL order: the snapshot watermark, then the `LIMIT`.
+fn reset_sql(db: &str, tbl: &str, spec: &UsdResetSpec, window: &str) -> String {
+    format!(
+        "INSERT INTO {db}.{tbl} ({INSERT_COLUMNS}) \
+         SELECT \
+             p.timestamp, p.asset_id, p.quote_asset_id, p.source, \
+             p.open, p.high, p.low, p.close, \
+             p.volume_base, p.volume_quote, \
+             CAST(0 AS Decimal(38, 14)) AS volume_quote_usd, \
+             CAST(0 AS Decimal(38, 14)) AS close_usd, \
+             p.vwap, p.trade_count, \
+             p.version + 1 AS version \
+         FROM {db}.{tbl} AS p FINAL \
+         WHERE p.quote_asset_id = {q} \
+           AND p.timestamp >= toDateTime({nb}) \
+           AND (p.close_usd > 0 OR p.volume_quote_usd > 0) \
+           AND p.volume_quote > 0 \
+           AND p.timestamp <= toDateTime(?){window} \
+         ORDER BY p.timestamp \
+         LIMIT ?",
+        q = spec.quote_asset_id,
+        nb = spec.not_before,
+    )
+}
+
 fn pivot_sql(db: &str, tbl: &str, ref_id: u32, usdc_id: u32, window: &str) -> String {
     format!(
         "INSERT INTO {db}.{tbl} ({INSERT_COLUMNS}) \
@@ -882,6 +1191,108 @@ mod tests {
     #[test]
     fn peg_sql_is_none_without_stablecoins() {
         assert!(peg_sql("prices", "price_ohlcv_1m", &[], "").is_none());
+    }
+
+    // -- task 0182: the USD reset ------------------------------------------
+
+    fn usdt_reset() -> UsdResetSpec {
+        // 2021-02-07, the start of USDT's USDC market.
+        UsdResetSpec {
+            quote_asset_id: 111,
+            not_before: 1_612_656_000,
+        }
+    }
+
+    /// The whole point of the reset: it must select rows the steady-state pass
+    /// filters *out*. A reset that only matched `close_usd = 0` would be a no-op
+    /// over the exact population task 0182 exists to correct.
+    #[test]
+    fn reset_sql_targets_written_values_not_zeros() {
+        let sql = reset_sql("prices", "price_ohlcv_1d", &usdt_reset(), "");
+        assert!(sql.contains("(p.close_usd > 0 OR p.volume_quote_usd > 0)"));
+        assert!(!sql.contains("p.close_usd = 0"));
+    }
+
+    /// Both USD columns go to zero. Zeroing `close_usd` alone would leave
+    /// `volume_quote_usd` pinned by the tiers' write-once guard, so the repaired
+    /// row would carry two figures derived from different rates.
+    #[test]
+    fn reset_sql_zeroes_both_usd_columns() {
+        let sql = reset_sql("prices", "price_ohlcv_1d", &usdt_reset(), "");
+        assert!(sql.contains("CAST(0 AS Decimal(38, 14)) AS volume_quote_usd"));
+        assert!(sql.contains("CAST(0 AS Decimal(38, 14)) AS close_usd"));
+    }
+
+    /// The epoch bound is load-bearing, not cosmetic: below it the pivot has no
+    /// reference, so a reset row can never be refilled and stays at 0 forever.
+    #[test]
+    fn reset_sql_honours_the_epoch_and_the_quote_leg() {
+        let sql = reset_sql("prices", "price_ohlcv_1d", &usdt_reset(), "");
+        assert!(sql.contains("p.quote_asset_id = 111"));
+        assert!(sql.contains("p.timestamp >= toDateTime(1612656000)"));
+    }
+
+    /// Mirrors the pivot's own filter, so the reset cannot zero a row the pivot
+    /// is structurally unable to refill.
+    #[test]
+    fn reset_sql_will_not_reopen_a_row_the_pivot_cannot_refill() {
+        let sql = reset_sql("prices", "price_ohlcv_1d", &usdt_reset(), "");
+        assert!(sql.contains("p.volume_quote > 0"));
+        assert!(pivot_sql("prices", "price_ohlcv_1d", 111, 3, "").contains("p.volume_quote > 0"));
+    }
+
+    /// Additive, like every other statement here — so the FREEZE snapshot the
+    /// repair driver takes is a real rollback point.
+    #[test]
+    fn reset_sql_is_a_versioned_insert_not_a_mutation() {
+        let sql = reset_sql("prices", "price_ohlcv_1d", &usdt_reset(), "");
+        assert!(sql.starts_with("INSERT INTO prices.price_ohlcv_1d"));
+        assert!(sql.contains("p.version + 1 AS version"));
+        assert!(!sql.contains("ALTER"));
+    }
+
+    #[test]
+    fn reset_sql_threads_the_partition_window() {
+        let sql = reset_sql(
+            "prices",
+            "price_ohlcv_1d",
+            &usdt_reset(),
+            " AND p.timestamp >= toDateTime(100) AND p.timestamp < toDateTime(200)",
+        );
+        assert!(sql.contains("AND p.timestamp >= toDateTime(100)"));
+        assert!(sql.contains("AND p.timestamp < toDateTime(200)"));
+    }
+
+    /// The reset loop terminates because a reset row stops matching. Without the
+    /// `(close_usd > 0 OR volume_quote_usd > 0)` term the count would never fall
+    /// and the pass would spin to its batch ceiling on every run.
+    #[test]
+    fn reset_pending_pred_stops_matching_once_a_row_is_zeroed() {
+        let pred = reset_pending_pred(&usdt_reset());
+        assert!(pred.contains("(close_usd > 0 OR volume_quote_usd > 0)"));
+        assert!(pred.contains("quote_asset_id = 111"));
+        assert!(pred.contains("volume_quote > 0"));
+    }
+
+    /// Without a spec the repair driver enumerates exactly what it always did —
+    /// so the 0114 historical repair and the hourly sweep are unchanged.
+    #[test]
+    fn repair_target_pred_is_unchanged_without_a_reset() {
+        assert_eq!(repair_target_pred(None), CANDIDATE_PRED);
+    }
+
+    /// The regression that made 0182 invisible: the driver enumerated
+    /// `close_usd = 0`, every affected row had `close_usd > 0`, so a dry run
+    /// reported "no months with enrichable zeros" over 44,657 wrong values.
+    /// With a spec the enumeration must admit the written-value rows too.
+    #[test]
+    fn repair_target_pred_sees_months_that_hold_only_written_values() {
+        let pred = repair_target_pred(Some(&usdt_reset()));
+        assert!(pred.contains(CANDIDATE_PRED));
+        assert!(pred.contains("(close_usd > 0 OR volume_quote_usd > 0)"));
+        // Still an OR, not a replacement — a reset run must not stop finding
+        // ordinary zeros in the same months.
+        assert!(pred.contains(") OR ("));
     }
 
     #[test]
