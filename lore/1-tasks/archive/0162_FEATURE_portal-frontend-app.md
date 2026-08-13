@@ -2,7 +2,7 @@
 id: "0162"
 title: "Portal frontend — sign-in, key on screen, usage-against-quota dashboard"
 type: FEATURE
-status: backlog
+status: superseded
 related_adr: ["0010"]
 related_tasks: ["0156", "0159", "0160", "0161", "0163", "0164", "0179", "0180"]
 tags: [layer-frontend, priority-high, effort-large, milestone-M3, epic-self-service-onboarding, ui, dashboard, discord]
@@ -34,7 +34,30 @@ history:
       below the minimum age). Both need actionable screens, the landing page
       must state the prerequisites before authenticating, and "could not
       verify" must render differently from "not a member".
+  - date: 2026-08-13
+    status: superseded
+    who: akot
+    by: ["0185", "0193"]
+    note: >
+      Superseded by the epic's re-slice into vertical increments. Kept whole,
+      this was an effort-large task that could not start until [[0159]] and
+      [[0160]] were both finished, and it bundled the framework decision, the
+      base-path plumbing, every screen, every refusal state, the rework modal
+      and the mobile pass. Re-cut: [[0185]] stands up an ugly but real app —
+      the stack from the 2026-08-07 meeting, `base: '/api-tokens/'`,
+      `basename`, a CI build, one page, no styling and no backend — and each
+      backend slice then adds its own plain screen ([[0186]], [[0187]],
+      [[0188]], [[0189]], [[0191]]). [[0193]] is the pass that makes it
+      presentable: MUI, the landing copy, the refusal screens, error and empty
+      states, mobile. The base path stays in the first frontend commit, as this
+      task insisted, because [[0184]] cannot fix it after the fact.
 ---
+
+> **Superseded 2026-08-13 by [[0185]] (ugly, working app) and [[0193]] (make it
+> presentable),** with the individual screens attached to the backend slices
+> that make them meaningful. The copy decisions below — the two refusals, the
+> `delete-key` modal, "could not verify" vs "not a member" — carry into
+> [[0189]], [[0191]] and [[0193]] unchanged.
 
 # Portal frontend
 

@@ -1,0 +1,8 @@
+# task 0180 item 7 -- quota rollover
+# api=9utcrbmoc6 plan=ox7pv0 key=2ke0ixjy7h quota=3/DAY region=eu-central-1
+# setup_utc=2026-08-13T08:10:17Z key_created=2026-08-13T10:10:16+02:00
+# poll_interval=60s -- reset instant is resolved to +/- this
+utc	http	used	remaining
+2026-08-13T08:12:37Z	429	3	0
+2026-08-13T08:13:37Z	429	-	-
+2026-08-13T08:14:37Z	429	-	-

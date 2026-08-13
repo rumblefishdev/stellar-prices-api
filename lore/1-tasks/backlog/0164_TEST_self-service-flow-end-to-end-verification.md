@@ -4,7 +4,7 @@ title: "Self-service flow — end-to-end verification against production and Tra
 type: TEST
 status: backlog
 related_adr: ["0010"]
-related_tasks: ["0156", "0157", "0158", "0159", "0160", "0161", "0162", "0163", "0179", "0180"]
+related_tasks: ["0156", "0157", "0163", "0179", "0180", "0184", "0185", "0186", "0187", "0188", "0189", "0191", "0192", "0193", "0194", "0195"]
 tags: [layer-test, priority-high, effort-medium, milestone-M3, epic-self-service-onboarding, verification, scf-evidence]
 milestone: 3
 links:
@@ -43,6 +43,19 @@ history:
       — a flow gated on our private `stellar_test` guild is not functional for
       any outside developer, which is what the Tranche 3 criterion asks about.
       Added a rehearsal pass on `stellar_test` before the evidence pass.
+  - date: 2026-08-13
+    status: backlog
+    who: akot
+    note: >
+      Re-pointed after the epic was re-sliced into vertical increments. Same
+      job, different upstreams: the checks below now map onto [[0184]]–[[0195]]
+      rather than 0158–0162. Two structural changes. The configuration checks
+      (caching at both layers, IAM, throttles, secrets, no key values in logs)
+      move to [[0194]], which audits the assembled stack — this task cites its
+      output instead of repeating it and verifies the user-visible flow. And the
+      run order is now [[0194]] → [[0179]] → here, because evidence gathered
+      against `stellar_test` is not evidence of a flow an outside developer can
+      complete.
 ---
 
 # Self-service flow — end-to-end verification
@@ -79,7 +92,7 @@ Order for the whole epic, for whoever picks this up cold:
 
 ```
 0156 ✅ → 0157 · 0158 · 0161  (no Discord at all)
-       → Discord app + stellar_test → 0171 → 0159
+       → Discord app + stellar_test → 0180 → 0159
        → 0160 → 0162 → 0163
        → 0170  (SDF contact, verify real guild, FLIP SSM)
        → 0164  (evidence, against the real guild)

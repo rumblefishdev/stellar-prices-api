@@ -4,7 +4,7 @@ title: "Quickstart guide and example queries, accurate against the live API"
 type: DOCS
 status: backlog
 related_adr: ["0010"]
-related_tasks: ["0124", "0156", "0157", "0161", "0162", "0164", "0179"]
+related_tasks: ["0124", "0156", "0157", "0161", "0162", "0164", "0179", "0184", "0187", "0189", "0192", "0193", "0195"]
 tags: [layer-docs, priority-high, effort-medium, milestone-M3, epic-self-service-onboarding, documentation, developer-experience]
 milestone: 3
 links:
@@ -35,6 +35,17 @@ history:
       the first `curl`, without hard-coding the threshold, which is an SSM
       value expected to be tuned. The invite it prints is always the real
       server, never the `stellar_test` guild used during development.
+  - date: 2026-08-13
+    status: backlog
+    who: akot
+    note: >
+      Re-pointed after the epic was re-sliced into vertical increments. The
+      hand-over this document waits on is now [[0187]] (a key on screen), not
+      [[0162]]; its hosting is [[0184]] and its Swagger UI [[0195]]. Two
+      additions to step one: the prerequisites are [[0189]]'s membership and
+      account-age rules, and — until [[0192]] ships — the honest answer to "my
+      key leaked" is "stop using it and wait for the period to roll over", which
+      belongs in the document rather than in a support conversation.
 ---
 
 # Quickstart and example queries

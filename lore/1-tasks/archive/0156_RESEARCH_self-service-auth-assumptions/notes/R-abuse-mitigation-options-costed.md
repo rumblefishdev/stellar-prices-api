@@ -28,9 +28,36 @@ elsewhere in this task and are taken as given here.
 Every price below was fetched on **2026-08-10**. Prices change; re-check before
 quoting these in the ADR if more than a quarter has passed.
 
+> ### ⚠️ Superseded figures — current measured data is in [[0180]] #9
+>
+> **This note's cost arithmetic is preserved as the record of what was computed
+> on 2026-08-10, and is no longer the number to quote.** Task 0180 measured the
+> all-in cost on **2026-08-12**; three of this note's inputs were wrong, and the
+> note itself predicted two of them.
+>
+> | This note (2026-08-10) | Measured (2026-08-12) | Why it moved |
+> |---|---|---|
+> | $0.38 / drained key | **$0.55–$0.89** | gateway-only → all-in |
+> | $3.50 / million requests | **$3.70** | this is `us-east-1`; we run in `eu-central-1` |
+> | $0.038/hr cache = $27.36/mo | **$0.020/hr = $14.60/mo** | same region error |
+> | 286 keys ≈ $100/mo | **~112–182 keys** | follows from the above |
+> | backend cost "probably dominant" | **it is not** — 1.4–2.3×, not 10× | §1.5 asked; 0180 answered |
+>
+> **The conclusions of this note all survive.** Every mitigation rejected here is
+> still rejected: the gap between a free control and a paid one was never close
+> enough for a 2× move to change it. What did change is the *reason to trust
+> them* — see [R-all-in-per-call-cost](../../../active/0180_RESEARCH_settle-undocumented-discord-and-aws-behaviours/notes/R-all-in-per-call-cost.md)
+> and ADR 0010's Proportionality section, both updated.
+>
+> One thing measured that this note could not have known: the API Gateway cache
+> is **not** optional — it is enabled in production today. It is a fixed cost we
+> already pay, not a hypothetical one to weigh.
+
 ## Headline
 
-The thing we are defending is worth **$0.38/month per fully-drained key**. Four of
+The thing we are defending is worth **$0.38/month per fully-drained key**
+(measured 2026-08-12 as **$0.55–$0.89** all-in — see the banner above; the
+argument here is unaffected). Four of
 the five candidate mitigations cost more than that — two of them cost more per
 *legitimate* signup than a maximally abusive key costs us per month. The only
 mitigations that survive the arithmetic are the two that are free: account-age
@@ -145,7 +172,33 @@ That single fixed line item equals **72 fully-drained abusive keys**
 $25/month is, by construction, more expensive than the abuse it prevents at any
 plausible abuse volume.
 
+> **Corrected 2026-08-12 ([[0180]] #9).** Two errors, and they partly cancel.
+> The cache is **$0.020/hr = $14.60/month** in `eu-central-1` (`$0.038/hr` is
+> us-east-1), and a drained key is **$0.55–$0.89** rather than $0.38 — so the
+> ratio is **~19 keys**, not 72. It is also **not optional**:
+> `apiGatewayCacheEnabled: true` in `infra/envs/production.json`, so this is a
+> line we already pay. The "~$25/month" rule of thumb still holds; it is now
+> anchored to a real invoice rather than a hypothetical one.
+
 ### 1.5 What this number does *not* include
+
+> **✅ Answered 2026-08-12 by [[0180]] #9 — this section's open question is
+> closed, and its hypothesis was wrong.** All-in is **$0.55–$0.89** per drained
+> key, i.e. **1.4–2.3×** the gateway-only figure — not the 10× feared below.
+> 100 churned keys are a **~$55–89/month** problem, not the ~$400/month this
+> section warned they might be. The largest marginal component turned out to be
+> **Lambda duration**, at near parity with the gateway charge ($3.30e-6 against
+> $3.70e-6); ClickHouse costs ~€1.10/month in total because it is a fixed-price
+> box, not usage-billed. The instruction in the last sentence was followed: ADR
+> 0010 now states the measured all-in cost instead of inheriting this one.
+>
+> **The real correction is not the number.** Because `ch-prod-01` is fixed-price
+> *and shared with the BE team*, abusive query load costs us almost nothing in
+> dollars while still consuming capacity someone else is relying on. A
+> dollar-denominated exposure figure — this whole section's framing — is right
+> about the money and silent about contention.
+
+The text below is the 2026-08-10 record, kept as written.
 
 $3.50/million is the **gateway charge only**. The backend cost per call —
 compute, ClickHouse query time, storage reads — is not priced here and is very

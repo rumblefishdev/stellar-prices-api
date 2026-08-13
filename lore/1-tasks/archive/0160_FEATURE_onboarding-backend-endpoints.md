@@ -2,7 +2,7 @@
 id: "0160"
 title: "Onboarding backend — issue key, reveal it, report usage, rework once a quota period"
 type: FEATURE
-status: backlog
+status: superseded
 related_adr: ["0007", "0008", "0010"]
 related_tasks: ["0156", "0157", "0158", "0159", "0162", "0180"]
 tags: [layer-backend, priority-high, effort-medium, milestone-M3, epic-self-service-onboarding, api-gateway, usage-plan, iam, dashboard]
@@ -38,7 +38,28 @@ history:
       undocumented, the quota-period boundary is our rule rather than inherited
       AWS behaviour, and `enabled=false`'s effect on usage counters is unknown —
       which blocks costing revocation. All measured by [[0180]].
+  - date: 2026-08-13
+    status: superseded
+    who: akot
+    by: ["0187", "0188", "0191", "0192"]
+    note: >
+      Superseded by the epic's re-slice into vertical increments. The four
+      operations kept together here "because they share a Lambda, an IAM policy
+      and the registry record" are exactly what made the epic undemonstrable
+      until all four were done — and they do not share a user story. Split one
+      per story: [[0187]] issue and reveal, [[0188]] usage against quota,
+      [[0191]] rework under the once-a-period cap, [[0192]] revocation
+      (unblocked now that disabling a key is measured to preserve its
+      counters). The shared IAM policy grows a statement per slice instead of
+      landing whole; the audit of it is [[0194]]. The `nameQuery` and
+      `enabled=false` measurements written back here on 2026-08-12 travel with
+      the slices that use them.
 ---
+
+> **Superseded 2026-08-13 by [[0187]], [[0188]], [[0191]] and [[0192]]** — one
+> operation per user story. This file stays the reference for the details
+> (reconciler, `409` + `next_eligible_at`, control-plane throttling, IAM
+> limits); the slices cite it rather than restate it.
 
 # Onboarding backend — issue, reveal, usage, rework
 
@@ -181,7 +202,18 @@ period, one quota.
   match.** AWS's whole description of it is *"The name of queried API keys."* —
   no matching semantics at all. The client-side exact match is therefore the
   only guard that does not rest on undocumented behaviour; comment it as such so
-  it is not later removed as redundant. [[0180]] measures the real behaviour.
+  it is not later removed as redundant.
+  **Measured 2026-08-12 ([[0180]]): it behaves as a case-sensitive prefix
+  match.** A query for a key's own full name returns longer keys that extend it.
+  That settles what the parameter does without changing what this task should do:
+  the exact match stays, and its comment should now cite the measurement rather
+  than the absence of documentation — "AWS returns prefixes and never promised
+  not to" is a stronger reason to keep it than "AWS says nothing". Two knock-ons:
+  a server-side `nameQuery` prefilter is safe to keep in front of the client-side
+  filter (prefix ⊇ exact, both case-sensitive), and the reconciler must **page**
+  a `nameQuery` result — it comes back with a `position` token like any other
+  list, so ranking by earliest `createdDate` off page one can pick a winner from a
+  partial list.
 
 ## Settled 2026-08-07
 
@@ -225,8 +257,29 @@ does to accumulated usage. Note the delete-then-create reasoning does **not**
 transfer here — that argument works only because `CreateApiKey` mints a *new*
 `id`, and `enabled=false` keeps the `id` and `value` in place. If disabling
 turned out to reset the counter, revocation would become a free quota reset and
-would have to share the rework cap after all. [[0180]] #8 measures it; do not
-ship revocation before it does.
+would have to share the rework cap after all.
+
+**Measured 2026-08-12 ([[0180]] #8): counters are preserved, so this blocker
+lifts.** A key drained to its quota, disabled and re-enabled was still at its
+quota — the next request came back `429`, not `200`. Revocation does **not** need
+to share the rework cap, and can be offered freely without opening a
+quota-laundering loophole. That was the whole reason to hold it back; the
+deferral is now a scheduling choice rather than a correctness one.
+
+Three properties of `enabled=false` that the measurement turned up, and that this
+task has to design around rather than merely note:
+
+- **A disabled key is indistinguishable from no key: `403 Forbidden`, same body.**
+  So the portal cannot rely on the gateway to explain a revocation to its owner —
+  whatever [[0162]] renders has to come from our own record of the revocation.
+  This is the same shape as the "could not verify" vs "not a member" distinction
+  already open there.
+- **Revocation takes ~25 s to reach the data plane** (measured by polling at 5 s
+  intervals; re-enable took the same). An endpoint that returns `204` the moment
+  `UpdateApiKey` succeeds is reporting the control plane. For a leak, that window
+  is the point — either say so in the response, or delete rather than disable.
+- **`GetUsage` is not a read-after-write surface** — see the freshness note below;
+  a dashboard that reads usage straight after a write will show a stale figure.
 
 Worth knowing while this is open: **`UpdateUsage`** (`PATCH
 /usageplans/{id}/keys/{keyId}/usage`, `op:replace` on `/remaining`) moves the

@@ -99,7 +99,7 @@ Three follow-up backlog tasks spawned (0002 / 0003 / 0004).
    dependency on the soroban-block-explorer's `xdr-parser` crate.
 
 2. **Diagnostic events filtered by `EventSource`, not inner type.**
-   CAP-67 / soroban-block-explorer task 0182: the diagnostic container
+   CAP-67 / soroban-block-explorer task 0184: the diagnostic container
    holds byte-identical Contract-typed mirrors of per-op consensus events
    when diagnostic mode is enabled, so filtering by `event.type_` is
    unsafe. The tool tags each event with `TxLevel | PerOp | Diagnostic`

@@ -92,7 +92,7 @@ history:
       burst limit (0163 unwritten), and epic AC 5. The code is merged, not
       deployed — nothing has changed in AWS, and the production key rotates on
       the first deploy that carries this. Calendar alignment of the quota reset
-      also stays unmeasured; it is design intent here and 0171 #7 owns it.
+      also stays unmeasured; it is design intent here and 0180 #7 owns it.
 ---
 
 # Default key limits: 1 req/s + monthly quota

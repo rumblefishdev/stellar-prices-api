@@ -94,6 +94,14 @@ against the epic's single-barrier model.
 
 ### 1d. What the abuse is actually worth
 
+> **⚠️ Superseded 2026-08-12 — current measured data is in [[0180]] #9.** The
+> table below is gateway-only and priced in the wrong region. Measured all-in:
+> **$0.55–$0.89** per drained key (1.4–2.3× these figures), **$3.70/million** in
+> `eu-central-1`, and **~112–182** keys to reach $100/month rather than 286. The
+> caveat this section flags below was the right worry and the wrong magnitude —
+> backend cost does not dominate. **Every conclusion drawn from this table
+> stands**; ADR 0010 now carries the measured numbers.
+
 Costed against current AWS pricing (us-east-1, REST, `$3.50/million` +
 `$0.09/GB`, 3 KB responses):
 
@@ -111,6 +119,10 @@ costs more than the abuse it prevents.
 **Caveat that must not be lost:** these are *gateway-only* figures. Backend cost
 per call is unpriced and probably dominant. See
 [Open items](#open-items-carried-into-the-adr).
+**→ Resolved 2026-08-12: it is not dominant** — all-in is 1.4–2.3× these
+figures, and the cache is $14.60/mo ≈ 19 keys, not $27.36/mo ≈ 72. The exposure
+worth watching is not the money at all: `ch-prod-01` is fixed-price and shared
+with BE, so abusive load shows up as their latency, never as our invoice.
 
 The most effective control is already in the epic and is not a new idea: the
 **monthly quota**, which cuts worst-case per-key exposure 26× versus the
