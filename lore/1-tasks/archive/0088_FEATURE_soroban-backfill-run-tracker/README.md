@@ -2,9 +2,9 @@
 id: "0088"
 title: "Execute + track the historical backfill run (SDEX + Soroban AMM) to completion"
 type: FEATURE
-status: active
+status: completed
 related_adr: ["0005", "0009"]
-related_tasks: ["0053", "0028", "0082", "0090", "0096"]
+related_tasks: ["0053", "0028", "0082", "0090", "0096", "0175", "0176", "0200"]
 tags: [layer-infra, priority-medium, effort-large, milestone-M1, backfill, soroban, sdex, operational, tracker]
 milestone: 1
 links:
@@ -376,6 +376,32 @@ history:
       new coarse rows and disk keeps climbing; reversible at any time.
       Spawned 0174 (price_ohlcv_15m missing 2024-2025 entirely - no TTL exists,
       so it is data loss, not retention).
+  - date: 2026-08-13
+    status: completed
+    who: okarcz
+    note: >
+      CLOSED. The pre-Soroban SDEX recovery is complete and durable: pass 2
+      finished 2026-08-11 at the exact end ledger with markers contiguous from
+      ledger 3, recovering 3,738,476 candles (2015-11-18 -> 2019-04-15), and the
+      incremental pre-roll landed 718.6M `1m` rows into all six coarse tables at
+      boundary 2024-02-20 17:01:00. Combined range [activation, 63352611] was
+      already complete (534M candles). Total campaign: 2026-07-08 -> 2026-08-11,
+      including a 4.5-day loss to the 2026-07-20 cleanup incident and a 20h56m
+      host outage, both recovered in full.
+      THREE ACs left this task rather than closing with it, each because it turned
+      out to be a different subject than the tracker: 0176 (`/backfill/status`
+      reports `sdex_archive completed current=1 target=63795749` - measured on
+      prod and it FAILS, not the minor check the AC assumed), 0175 (the Soroswap
+      re-run - root cause settled in 0096, but what remains is a fresh multi-day
+      campaign over a different range), and now 0200 (whether the cleanup worker
+      should exist at all, prompted by measured 1m disk usage coming in far under
+      the estimate retention was designed against).
+      CLEANUP REMAINS DISABLED, deliberately, pending 0200. Do not re-enable it
+      while 0182's repair run is outstanding - that run writes into historical
+      partitions, which is precisely the shape the 2026-07-20 sweep destroyed.
+      Forensics worth keeping: notes/S-presoroban-loss-chain-confirmed.md, and the
+      merge-vs-sweep discriminator (a sweep leaves ZERO active parts, a merge
+      always leaves >= 1) which retired two false "SWEEP DETECTED" alarms.
 ---
 
 # Execute + track the historical backfill run (SDEX + Soroban AMM)
@@ -685,7 +711,7 @@ per-chunk pre-roll variant. Give the cluster owner a heads-up for the window.
       ⚠️ Required **two** deviations from the runbook, both recorded in
       §Issues Encountered: the boundary could not be derived by its documented
       query, and the quota guidance does not hold at this data scale.
-- [ ] 🔴 **`prices-production-cleanup` stays DISABLED for the entire recovery** — from
+- [x] 🔴 **`prices-production-cleanup` stays DISABLED for the entire recovery** — from
       2026-07-20 until **after** `preroll-incremental.sql` has landed the pre-Soroban
       `1m` in the coarse forever-tables (~12 days: pass 1 ~6.3d + pass 2 ~5d + pre-roll).
       **Enabling it early is destructive, not merely a paused retention policy:** it
@@ -715,6 +741,23 @@ per-chunk pre-roll variant. Give the cluster owner a heads-up for the window.
       resident *in addition to* the new coarse rows, so disk climbs rather than falls.
       450 GB free on `/var/lib/docker` (74% used) as of 2026-08-11 — ample, but this
       is now a standing cost, not a transient one.
+
+      **✅ CLOSED 2026-08-13 — the protective condition is met and the re-enablement
+      decision is NOT this task's to make.** Everything this AC existed to protect is
+      durable: the coarse forever-tables hold genesis → activation independently of
+      `1m`, and cleanup never fired during the recovery.
+
+      What remained was never a recovery step — it is *"should this worker exist at
+      all?"*, and the operator's reason for asking is new information this task never
+      had: **measured `1m` disk usage came in far below the estimate the retention
+      policy was designed against**, so the premise for having a cleanup worker is
+      itself in question. That is a research question with its own evidence and its own
+      blast radius, and holding a finished multi-week backfill tracker open for it
+      buries the recovery record in an active file.
+
+      **Spawned as [[0200]]**, whose acceptance criterion *is* the decision (ENABLED or
+      DISABLED). **Cleanup stays DISABLED until 0200 answers** — deliberately, not by
+      oversight.
 - [→] `GET /backfill/status` monotonic; `soroban_amm`→`completed`, `sdex_archive`
       final state — **CHECKED ON PROD 2026-08-11 AND IT FAILS. Split to [[0176]].**
       Not the "minor remaining check" this AC assumed. Measured:
