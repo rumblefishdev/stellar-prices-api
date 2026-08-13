@@ -346,6 +346,52 @@ operator action, documented as such, and structurally excluded from the sweep.
 
 All green: 39 workspace unit tests, 14 enrichment ITs, clippy clean on the crate.
 
+## ✅ SIZED ON PROD 2026-08-13 — 567,232 rows, and the estimate holds
+
+Measured across the five forever tables. `affected` = quote leg 111, at or after
+the 2021-02-07 epoch, still holding a written USD value, with volume to price.
+
+| table | affected rows | pre-epoch left alone | first | last |
+|---|---|---|---|---|
+| `_1h` | **357,002** | 33,131 | 2018-05-15 | 2026-08-13 |
+| `_4h` | 157,683 | 13,176 | 2018-05-15 | 2026-08-13 |
+| `_1d` | 41,505 | 3,168 | 2018-05-15 | 2026-08-13 |
+| `_1w` | 8,253 | 641 | 2018-05-14 | 2026-08-10 |
+| `_1M` | 2,789 | 225 | 2018-05-01 | 2026-08-01 |
+| **total** | **567,232** | **50,341** | | |
+
+**Cross-check:** `_1d` gives 41,505 + 3,168 = 44,673 against the 44,657 this task
+was filed on — a day of new candles. The predicate is selecting the intended
+population, not a neighbouring one.
+
+⚠️ **The `months` column in that query was not usable and is omitted here.** It
+reported 91-92 for every table, but the inner `GROUP BY` emits a row per month
+whether or not that month holds an affected row, so `uniqExact` counted *every*
+month with a USDT-quoted candle (2018-05 → 2026-08 ≈ 100). Affected months are
+2021-02 → 2026-08 ≈ **67**. The dry run will report the real figure per table —
+do not re-derive it from that query.
+
+**Estimate revised, in the same range but tighter: ~1.5-3 h.** `_1h` carries 63%
+of the work at ~5,300 affected rows/month, so ~1 batch per month per tier at the
+default 10k batch — the run is **scan-bound, not row-bound**, exactly as [[0114]]
+found. Per month-table that is a handful of partition `FINAL` scans at 0114's
+measured ~4 s each. Expect ~45-60 min for `_1h`, ~20-30 for `_4h`, ~10-15 for
+`_1d`, single-digit minutes for `_1w`/`_1M`.
+
+### ⚠️ The 50,341 pre-epoch rows carry an assumption we cannot verify
+
+They keep `close × $1`. For **2021-02 → 2022-04** that is a *measured* par
+([[0172]]). For **2018-05 → 2021-02** it is an extrapolation: this IOU's USDC
+market does not begin until 2021-02-07, so there is no in-house observation of
+its value at all before then, at any granularity. Real Tether was at par in that
+window and the IOU was at par the moment it became visible, so the extrapolation
+is reasonable — but it is an inference, not a measurement, and it should not be
+described as verified.
+
+Out of scope here per BE answer 4 (nothing reads a 1Y chart back to 2021), and
+correcting it is impossible rather than merely deferred — there is no reference
+to correct it *to*. Worth its own note if a consumer ever reads that deep.
+
 ## 🚧 What is NOT done — this is a tool, not a correction
 
 **Not one published price has changed.** Same trap already recorded for [[0168]]
@@ -353,9 +399,7 @@ and for [[0172]] itself: a green PR that stops the bleeding is not the fix.
 
 Remaining, in order:
 
-1. **Size the run.** Hand the operator a query for affected rows/months per
-   forever table; the ~2-4 h estimate is extrapolated from 0114's row shape, not
-   measured on this one.
+1. ~~**Size the run.**~~ ✅ done 2026-08-13 — 567,232 rows, see above.
 2. **Dry run per table** — and confirm it is **non-vacuous** (reports months, not
    the all-clear). That is an acceptance criterion, not a formality.
 3. **Snapshots** — CH admin must `FREEZE` every partition in span; `prices_writer`
