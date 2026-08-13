@@ -2,7 +2,7 @@
 id: "0196"
 title: "usd_rate AND oracle_prices assert ~$1.00 for a Stellar IOU worth $0.13 — Reflector's ticker feed was filed under an issuer identity"
 type: BUG
-status: backlog
+status: active
 related_adr: []
 related_tasks: ["0172", "0173", "0167", "0168"]
 tags:
@@ -42,6 +42,17 @@ history:
       the other 0183 was already active and its thirteen slices are a contiguous
       block; these three were backlog with no work in flight. Referring sites
       updated: views.sql, views_it.rs, 0172, 0182, 0168.
+  - date: 2026-08-13
+    status: active
+    who: okarcz
+    note: >
+      Activated. Both writers are now fixed AND deployed to prod: the
+      oracle-worker poll loop (Prices-production-EventBridge, 10:55 UTC) and the
+      ledger-processor event-decode path (Prices-production-Compute, 11:50 UTC).
+      Confirmed on prod at 11:52 - USDT's oracle_prices last_seen frozen at
+      11:00 (52 min stale across ~10 poll cycles) while USDC keeps ticking at 2
+      min. The rows can now be purged without regrowing, which was the whole
+      precondition. This unblocks 0172 and 0182.
 ---
 
 # `usd_rate` files Tether's price under a different token's identity
