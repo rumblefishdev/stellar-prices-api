@@ -2,7 +2,7 @@
 id: "0159"
 title: "Discord OAuth sign-in for the onboarding portal"
 type: FEATURE
-status: backlog
+status: superseded
 related_adr: ["0007", "0010"]
 related_tasks: ["0156", "0158", "0160", "0161", "0162", "0179", "0180"]
 tags: [layer-backend, priority-high, effort-medium, milestone-M3, epic-self-service-onboarding, discord, oauth, auth, secrets]
@@ -38,7 +38,27 @@ history:
       guild — the "someone" placeholder is gone. Guild ID becomes
       per-environment SSM config. Adds a membership check whose error shape is
       undocumented ([[0180]]).
+  - date: 2026-08-13
+    status: superseded
+    who: akot
+    by: ["0186", "0189"]
+    note: >
+      Superseded by the epic's re-slice into vertical increments, and split in
+      two along the line the task itself already draws: "this task establishes
+      who the caller is". [[0186]] takes the OAuth round-trip, the session
+      cookie, the client secret and the anonymous-route throttle, on scope
+      `identify` alone — deliverable as soon as the Discord application exists,
+      with no guild and no second account. [[0189]] takes everything that turns
+      an identity into an entitlement: `guilds.members.read`, the member call,
+      `pending`, the snowflake age check, the two SSM parameters and the
+      per-action re-authentication. Splitting there is the point of the
+      re-slice: the whole of sign-in was blocked behind prerequisites that only
+      the second half needs.
 ---
+
+> **Superseded 2026-08-13 by [[0186]] (identity) and [[0189]] (eligibility).**
+> Everything below is still the specification — read it as the union of those
+> two, not as one deliverable.
 
 # Discord OAuth sign-in
 

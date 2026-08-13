@@ -3,7 +3,7 @@ id: "0010"
 title: "Discord identity is the account: one active key, gated on guild membership and account age"
 status: accepted
 deciders: [akot]
-related_tasks: ["0156", "0157", "0158", "0159", "0160", "0179", "0180"]
+related_tasks: ["0156", "0157", "0158", "0159", "0160", "0179", "0180", "0186", "0187", "0188", "0189", "0191", "0192"]
 related_adrs: ["0007", "0008"]
 tags: [discord, oauth, auth, abuse-prevention, account-model, api-keys, usage-plan, epic-self-service-onboarding]
 links:
@@ -37,6 +37,23 @@ history:
       cost note raised and nothing had absorbed: the real exposure from a
       drained key is contention on the BE-shared ch-prod-01, which no dollar
       figure will surface.
+  - date: 2026-08-13
+    status: accepted
+    who: akot
+    note: >
+      Consumers re-pointed after the epic was re-sliced into vertical
+      increments. **No decision in this ADR changes** — only which task
+      implements it. `[[0158]]` → [[0190]] (and it now has to justify being
+      built at all); `[[0159]]` → [[0186]] for the OAuth round-trip and
+      [[0189]] for the eligibility gate this ADR is mostly about; `[[0160]]` →
+      [[0187]] / [[0188]] / [[0191]] / [[0192]]; `[[0162]]` → [[0193]].
+      `[[0180]]` is canceled, not reverted: its four landed measurements are
+      what this ADR now cites, and its five open items became step 0 of
+      [[0189]] and [[0191]]. Correction 2 (the quota rollover instant) is still
+      open and is now owned by [[0191]]. One decision this ADR did not
+      previously state, settled at the re-slice: **revocation does not earn a
+      replacement key** — the once-per-period cap governs re-issuance
+      regardless of how the previous key ended ([[0192]]).
 ---
 
 # ADR 0010: Discord identity is the account

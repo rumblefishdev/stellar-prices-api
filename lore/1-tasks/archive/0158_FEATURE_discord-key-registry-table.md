@@ -2,7 +2,7 @@
 id: "0158"
 title: "Key registry — ClickHouse table mapping Discord user ID to API Gateway key ID and usage plan"
 type: FEATURE
-status: backlog
+status: superseded
 related_adr: ["0007", "0008", "0010"]
 related_tasks: ["0156", "0157", "0159", "0160", "0180"]
 tags: [layer-infra, priority-high, effort-medium, milestone-M3, epic-self-service-onboarding, storage, clickhouse, discord, api-keys, mtls]
@@ -37,7 +37,27 @@ history:
       undocumented (not "a prefix match"), which makes the exact-match filter
       load-bearing; and the quota-period boundary is our rule, not AWS
       behaviour. Both measured by [[0180]].
+  - date: 2026-08-13
+    status: superseded
+    who: akot
+    by: ["0190"]
+    note: >
+      Superseded by the epic's re-slice into vertical increments. The content
+      here is not wrong, it is mistimed. This task's own "Issue flow" section
+      argues that **API Gateway is the arbiter, not the table** — and once that
+      is true, the table is not on the critical path of any user story:
+      deterministic naming answers "does this user already have a key", and the
+      surviving key's `createdDate` answers `coalesce(last_rotated_at,
+      created_at)` for free, because a rework deletes and re-creates. [[0190]]
+      therefore carries this schema forward as a **deferred, justify-before-you-
+      build** task rather than as the epic's first brick. Everything measured
+      about `nameQuery` (case-sensitive prefix, and it still paginates) moves
+      with it.
 ---
+
+> **Superseded 2026-08-13 by [[0190]]** — same schema, later in the plan, and
+> now carrying the burden of proving it is needed at all. Delivery order:
+> `docs/epics/self-service-onboarding.md` section "Delivery plan".
 
 # Key registry — Discord user ID → API Gateway key
 

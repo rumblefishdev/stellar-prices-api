@@ -2,7 +2,7 @@
 id: "0160"
 title: "Onboarding backend — issue key, reveal it, report usage, rework once a quota period"
 type: FEATURE
-status: backlog
+status: superseded
 related_adr: ["0007", "0008", "0010"]
 related_tasks: ["0156", "0157", "0158", "0159", "0162", "0180"]
 tags: [layer-backend, priority-high, effort-medium, milestone-M3, epic-self-service-onboarding, api-gateway, usage-plan, iam, dashboard]
@@ -38,7 +38,28 @@ history:
       undocumented, the quota-period boundary is our rule rather than inherited
       AWS behaviour, and `enabled=false`'s effect on usage counters is unknown —
       which blocks costing revocation. All measured by [[0180]].
+  - date: 2026-08-13
+    status: superseded
+    who: akot
+    by: ["0187", "0188", "0191", "0192"]
+    note: >
+      Superseded by the epic's re-slice into vertical increments. The four
+      operations kept together here "because they share a Lambda, an IAM policy
+      and the registry record" are exactly what made the epic undemonstrable
+      until all four were done — and they do not share a user story. Split one
+      per story: [[0187]] issue and reveal, [[0188]] usage against quota,
+      [[0191]] rework under the once-a-period cap, [[0192]] revocation
+      (unblocked now that disabling a key is measured to preserve its
+      counters). The shared IAM policy grows a statement per slice instead of
+      landing whole; the audit of it is [[0194]]. The `nameQuery` and
+      `enabled=false` measurements written back here on 2026-08-12 travel with
+      the slices that use them.
 ---
+
+> **Superseded 2026-08-13 by [[0187]], [[0188]], [[0191]] and [[0192]]** — one
+> operation per user story. This file stays the reference for the details
+> (reconciler, `409` + `next_eligible_at`, control-plane throttling, IAM
+> limits); the slices cite it rather than restate it.
 
 # Onboarding backend — issue, reveal, usage, rework
 

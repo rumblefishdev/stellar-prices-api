@@ -2,7 +2,7 @@
 id: "0161"
 title: "Portal hosting — S3 + CloudFront for the onboarding site and the Swagger UI docs"
 type: FEATURE
-status: backlog
+status: superseded
 related_adr: []
 related_tasks: ["0124", "0126", "0159", "0162", "0164"]
 tags: [layer-infra, priority-high, effort-medium, milestone-M3, epic-self-service-onboarding, s3, cloudfront, swagger-ui, dns]
@@ -28,7 +28,26 @@ history:
       First prefix is `/api-tokens/`. The API shares the distribution as a second
       origin, which settles [[0159]]'s route placement and removes CORS from
       portal traffic.
+  - date: 2026-08-13
+    status: superseded
+    who: akot
+    by: ["0184", "0195"]
+    note: >
+      Superseded by the epic's re-slice into vertical increments, split into
+      the part that unblocks everything else and the part that does not.
+      [[0184]] is the walking skeleton: private bucket, OAC, distribution, the
+      behaviour table including `/api-tokens/api/*` **before** `/api-tokens/*`,
+      and a placeholder page. That ordering and the API-as-second-origin stay in
+      the first slice on purpose — they are what makes every later request
+      same-origin, they cost a few lines, and retrofitting them would invalidate
+      the session-cookie design. [[0195]] takes Swagger UI, the per-prefix SPA
+      fallback (a CloudFront Function, real work, and needed only once the app
+      has more than one route) and the custom domain and certificate.
 ---
+
+> **Superseded 2026-08-13 by [[0184]] (skeleton + routing) and [[0195]] (Swagger
+> UI, SPA fallback, domain).** The three silent failure modes documented below
+> are inherited by [[0184]] verbatim.
 
 # Portal hosting — S3 + CloudFront
 

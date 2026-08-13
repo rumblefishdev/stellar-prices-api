@@ -2,9 +2,9 @@
 id: "0180"
 title: "Settle the nine undocumented Discord/AWS behaviours the onboarding design depends on"
 type: RESEARCH
-status: active
+status: canceled
 related_adr: ["0010"]
-related_tasks: ["0156", "0157", "0158", "0159", "0160", "0179"]
+related_tasks: ["0156", "0157", "0158", "0159", "0160", "0179", "0189", "0191"]
 tags: [layer-backend, priority-high, effort-small, milestone-M3, epic-self-service-onboarding, discord, aws, api-gateway, spike, blocks-build]
 milestone: 3
 links:
@@ -88,7 +88,32 @@ history:
       Also picked up two more stale `0171` references the 08-12 sweep missed
       (`0164`, archived `0157`) - it caught five in `docs/`, none in `lore/`.
       Item 7 remains blocked on an expired AWS SSO token; items 1-5 on Step 0.
+  - date: 2026-08-13
+    status: canceled
+    who: akot
+    reason: pivot
+    note: >
+      Canceled when the epic was re-sliced into vertical MVP increments
+      ([[0184]]–[[0195]]). Items 6, 8 and 9 are measured and their findings are
+      already written into ADR 0010, 0158, 0160,
+      `docs/epics/self-service-onboarding.md` and
+      `docs/runbooks/manual-api-key-tier.md` — those stand and are **not**
+      reverted. The five that remain stop being a task-shaped blocker in front
+      of the whole epic and become the first step of the slice that consumes
+      them: items 1–5 open [[0189]] (the eligibility gate), item 7 opens
+      [[0191]] (the rework cap). This is the point of the re-slice — the
+      measurements were gating work that does not depend on them, which is why
+      nothing shipped in three days of a spike that is honestly minutes of work
+      per item. The `item7` poller was stopped mid-run; its scratch REST API
+      (`9utcrbmoc6`), usage plan (`ox7pv0`) and key (`2ke0ixjy7h`) are left
+      standing on purpose for [[0191]] to reuse. Archived rather than trashed
+      because the raw evidence tables in `notes/` are what ADR 0010 now cites.
 ---
+
+> **Canceled 2026-08-13 — pivot.** Do not restart this as a task. Findings 6, 8
+> and 9 are landed and load-bearing elsewhere; items 1–5 moved into [[0189]],
+> item 7 into [[0191]]. The `notes/` here stay the evidence of record for what
+> was measured on 2026-08-12.
 
 # Settle the undocumented behaviours before building on them
 

@@ -4,7 +4,7 @@ title: "Contact the Stellar Discord owner (SDF) to agree production guild integr
 type: FEATURE
 status: backlog
 related_adr: ["0010"]
-related_tasks: ["0156", "0159", "0160", "0162", "0163", "0164", "0180"]
+related_tasks: ["0156", "0163", "0164", "0180", "0186", "0189", "0193"]
 tags: [layer-docs, priority-high, effort-small, milestone-M3, epic-self-service-onboarding, discord, external-dependency, pre-launch]
 milestone: 3
 links:
@@ -42,6 +42,17 @@ history:
       renumber time is not enough when the branch is long-lived; check again at
       merge. Bug-side `[[0170]]` references in 0127, 0165 and 0178 point at the
       OHLCV bug and were deliberately left alone.
+  - date: 2026-08-13
+    status: backlog
+    who: akot
+    note: >
+      Re-pointed after the epic was re-sliced into vertical increments. The
+      guild flip this task performs is consumed by [[0189]] (the eligibility
+      gate reads `/prices/{env}/discord-guild-id`), not by 0159/0160, and the
+      invite copy is [[0193]]'s. The dependency that matters is unchanged and
+      worth restating: [[0189]] must have seeded that parameter as
+      **operator-owned**, never `new ssm.StringParameter`, or step 4's flip is
+      silently undone by the next `cdk deploy`.
 ---
 
 # Stellar Discord integration with SDF

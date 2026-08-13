@@ -203,6 +203,73 @@ handling" and "Rate limiting" above.
 5. Default key limits confirmed as 1 req/s + monthly quota, not the design doc's 100 req/s
    (new — from this epic's scope)
 
+## Delivery plan (re-sliced 2026-08-13)
+
+The epic was first cut into seven tasks by layer — a registry, an OAuth task, a
+four-operation backend, hosting, a frontend, docs, a verification pass. Each was
+a complete, hardened subsystem, which meant none of them was demonstrable alone
+and the first user-visible result sat behind all of them. It was re-cut into
+thirteen vertical increments, each one a user story that can be deployed and shown.
+
+| #   | Task   | Story                                                                              |
+| --- | ------ | ---------------------------------------------------------------------------------- |
+| 0   | `0183` | Nothing half-built is publicly reachable — the flag, because a deploy is a release |
+| 1   | `0184` | Portal reachable at a URL — private S3, CloudFront, routing, placeholder           |
+| 2   | `0185` | An ugly but real Vite/React app served from `/api-tokens/`, built by CI            |
+| 3   | `0186` | Sign in with Discord — identity only, scope `identify`                             |
+| 4   | `0187` | Press a button, get a working key; come back and it is still there                 |
+| 5   | `0188` | See usage against quota and the reset date                                         |
+| 6   | `0189` | Only Stellar Discord members with a non-new account can get a key                  |
+| 7   | `0190` | The key registry table — deferred, and has to justify itself                       |
+| 8   | `0191` | Replace a key, capped at once per quota period                                     |
+| 9   | `0192` | Revoke a leaked key — no replacement until the cap allows                          |
+| 10  | `0193` | Make it presentable                                                                |
+| 11  | `0194` | Audit the assembled configuration (Tranche 3 AC 6)                                 |
+| 12  | `0195` | Swagger UI, per-prefix SPA fallback, custom domain                                 |
+
+Unchanged and still in the epic: `0163` (quickstart), `0179` (production guild
+with SDF), `0164` (end-to-end evidence, last).
+
+Order: 0 → 1 → 2 → 3 → 4 → 5, then 6 / 10 / 12 in parallel, then 8 → 9 → 11 →
+`0163` → `0179` → `0164`.
+
+### There is one environment, and it is production
+
+`envName` is typed `'production'` and `infra/envs/` holds only
+`production.json`. **A `cdk deploy` is a release.** There is no staging
+distribution, no test API Gateway and no scratch usage plan in the deploy path —
+so a portal slice that is merged is a portal slice that strangers can reach.
+
+That is what `0183` is for, and it is the reason it comes before hosting rather
+than after the audit. Two operator-seeded SSM parameters:
+`/prices/{env}/portal-enabled` (default `false`, every `/api-tokens/api/*` route
+returns `404`) and `/prices/{env}/portal-allowlist-discord-ids` (the IDs that
+bypass it, so the flow stays walkable end to end while it is closed). The switch
+is flipped in `0194` and nowhere else, gated on `0189` having passed.
+
+The sharpest case is `0187`: it issues a real key on the real usage plan, and the
+eligibility gate is three slices later. For that window the flag is the only
+thing between a stranger and a production key. Keys minted while it was off are
+real and are cleaned up as part of `0194` — there is deliberately no separate
+"incubation" usage plan.
+
+Three decisions the re-slice made, recorded so they are not re-litigated:
+
+- **The registry table is not the first brick.** API Gateway is the source of
+  truth for whether a user has a key (deterministic naming, `discord-<id>-key`),
+  and the surviving key's `createdDate` is the rework cap's timestamp, because a
+  rework deletes and re-creates. `0190` therefore has to prove it is needed.
+- **Measurement moved inside the slice that consumes it.** The nine undocumented
+  behaviours were a research task in front of the whole epic; four are measured
+  and landed, and the remainder are step 0 of `0189` (Discord response shapes)
+  and `0191` (quota rollover). Nothing before those slices depends on them.
+- **Revoking does not earn a replacement.** Rework on the 3rd, revoke on the 4th,
+  and the next key is still only issuable on the 1st. Otherwise "revoke" becomes
+  the button people press to escape a burnt quota.
+
+Superseded task files stay in `lore/1-tasks/archive/` (`0158`–`0162`, and the
+canceled `0180`) and remain the reference for the details the slices cite.
+
 ## Source docs
 
 - `RFP/01-prices-api.md` — original deliverable line item
