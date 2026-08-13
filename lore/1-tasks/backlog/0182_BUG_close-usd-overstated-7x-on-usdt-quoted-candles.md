@@ -4,7 +4,7 @@ title: "44,657 stored candles across 495 assets carry a close_usd ~7.4x too high
 type: BUG
 status: backlog
 related_adr: []
-related_tasks: ["0172", "0165", "0145", "0111", "0114"]
+related_tasks: ["0172", "0183", "0165", "0145", "0111", "0114"]
 tags:
   ["priority-high", "effort-medium", "clickhouse", "data-correctness", "enrichment", "milestone-M2"]
 milestone: 2
@@ -48,6 +48,50 @@ measured USDT/USDC market. But enrichment only writes rows where
 `close_usd = 0` — already-enriched rows are deliberately skipped (that filter is
 what makes the pass idempotent and restartable). So the 44,657 wrong values are
 inert: nothing will revisit them.
+
+## 🛑 TWO ORDERING CONSTRAINTS — violating either makes this task destructive
+
+Both surfaced in the 2026-08-13 review of 0172's PR #205. Neither is optional,
+and neither is visible from inside this task's own plan.
+
+### 1. `oracle_prices` must be purged FIRST ([[0183]])
+
+The enrichment **oracle tier runs before the peg-pivot tier and wins where it
+applies** (`ch_enrich.rs:19-22`). [[0183]] measured **46,378 mis-attributed
+Reflector rows** on the USDT identity in `prices.oracle_prices`, covering
+2026-03 → present and current to the hour.
+
+So zeroing the rows and re-enriching *while those exist* re-applies
+`close_usd = close × ~$1.00` to every 2026-03 → 2026-08 USDT-quoted candle and
+labels it `method = 'oracle'` — a consumer reads that as **more** authoritative
+than the peg placeholder it replaced. Same failure mode already recorded for
+[[0168]].
+
+### 2. Pre-2021 candles have NO pivot reference — do not zero them
+
+The USDT/USDC market begins **2021-02-07** (2,011 daily candles). USDT-quoted
+candles begin **2018-05-15**. The pivot's `ASOF LEFT JOIN` + `AND r.usd IS NOT
+NULL` drops any candle with no reference at or before its bucket, so
+**2018-05-15 → 2021-02-07 has nothing to pivot on**.
+
+Those rows currently hold `close × $1` from the old peg path. Zero them and they
+stay at `close_usd = 0` permanently — the ambiguous zero read unguarded by ~130
+`argMax(close_usd, …)` sites ([[0145]]), which 0172's own rationale argues is
+*worse* than a wrong-but-visible number.
+
+⚠️ **And the old `$1` is CORRECT for that window.** 0172 measured USDT at par
+from 2021-02 until the June 2022 break, and the depeg is what makes the peg
+wrong *after* it — not before. So this is not "wrong data we cannot fix", it is
+**right data this task would destroy**.
+
+Options: bound the re-enrichment to ≥ 2021-02-07; or give the pivot a dated peg
+epoch (par before the break, measured after). Decide before writing the driver.
+
+⚠️ Also unresolved: `volume_quote_usd` is preserved write-once
+(`if(p.volume_quote_usd > 0, …)`), so a row whose `close_usd` this task corrects
+keeps a `volume_quote_usd` computed at $1 — the same row then carries two USD
+columns that disagree by 7.4×. This task's scope is `close_usd` only; either
+widen it or spawn a follow-up.
 
 ## What needs deciding
 

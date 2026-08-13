@@ -751,8 +751,17 @@ async fn price_usd_series_fills_peg_assets_without_overriding_market_data() {
         );
         assert_eq!(usdc_method, "peg", "{view}: USDC provenance");
 
-        // CASE 2 — peg asset that also trades keeps its MARKET value. A
-        // fallback here would read 1.0 and flatten a real de-peg to par.
+        // CASE 2 — an asset that is BOTH a quote leg and a traded base keeps its
+        // MARKET value. A fallback here would read 1.0 and flatten a real de-peg.
+        //
+        // ⚠️ WEAKENED by task 0172, deliberately. USDT used to be a peg member,
+        // so this case pinned "arm B must not override arm A for a PEG asset".
+        // USDT is no longer in the peg set, so what remains is only "a non-peg
+        // asset is priced from its trades" — which CASE 3 already covers. The
+        // peg-specific half moved to
+        // `peg_member_that_also_trades_as_a_base_keeps_its_market_value`, which
+        // uses USDC because it is now the sole peg member. Keep both: this one
+        // still pins that a *former* peg member is not silently re-pegged.
         let (usdt, usdt_method) = row(view, "USDT", USDT_ISSUER.to_string()).await;
         assert!(
             approx(usdt, 0.97),
@@ -797,6 +806,92 @@ async fn price_usd_series_fills_peg_assets_without_overriding_market_data() {
         .await
         .unwrap();
     assert_eq!(garbage, 0, "no row may publish a non-positive close_usd");
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// Task 0172 review finding 6 — restores the guard CASE 2 above used to carry.
+///
+/// `views.sql` warns that letting the peg arm OWN the peg identities flattens a
+/// genuinely priceable asset to $1 — "a regression dressed as a fix". USDT was
+/// the control for that, and task 0172 removed it from the peg set, so the suite
+/// was left with **no** peg member that also trades as a base and nothing would
+/// have caught a reimplementation where arm B wins over arm A.
+///
+/// USDC is the sole remaining peg member, and on prod it never trades as a base
+/// (task 0165: it is the top-preference quote, 0 candles). So this fixture is
+/// deliberately synthetic — USDC quoted in XLM. That is the point: the guard has
+/// to survive someone *adding* a peg member that does trade, which is live in
+/// tasks 0173/0183, not hypothetical.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn peg_member_that_also_trades_as_a_base_keeps_its_market_value() {
+    let db = "it_views_peg_member_trades";
+    let client = setup_scratch(db).await;
+
+    client
+        .query(&format!(
+            "INSERT INTO {db}.assets \
+             (asset_id, asset_code, asset_type, issuer_address, contract_address, sac_address) VALUES \
+             (1,'XLM','classic','','',''), \
+             (2,'USDC','classic','{USDC_ISSUER}','',''), \
+             (10,'FOO','classic','GFOO','','')"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    // FOO/USDC makes USDC a peg QUOTE leg, so arm B emits its zero-weight
+    // placeholder. USDC/XLM then makes USDC a traded BASE at 1.04 — off par by
+    // enough that a fallback leaking through is unmistakable. Both in one bucket,
+    // so the two arms collide on the same (identity, bucket) key.
+    client
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1d \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
+             (1620000000,10, 2,'sdex', 5,5,5,5,             10, 50,  50,  5,    5,    1,1), \
+             (1620000000, 2, 1,'sdex', 3.2,3.2,3.2,3.2,     50, 160, 52,  1.04, 3.2,  1,1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    client
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1h SELECT * FROM {db}.price_ohlcv_1d"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    for view in ["price_usd_series", "price_usd_series_1h"] {
+        let (usdc, method) = client
+            .query(&format!(
+                "SELECT toFloat64(close_usd), method FROM {db}.{view} \
+                 WHERE asset_code = ? AND issuer_address = ?"
+            ))
+            .bind("USDC")
+            .bind(USDC_ISSUER)
+            .fetch_one::<(f64, String)>()
+            .await
+            .unwrap();
+
+        assert!(
+            (usdc - 1.04).abs() < 1e-4,
+            "{view}: a peg member that trades as a base must publish its MARKET \
+             value 1.04, got {usdc}. 1.0 means the peg arm overrode arm A and \
+             every genuinely priceable pool on that identity is flattened to par."
+        );
+        assert_eq!(
+            method, "traded",
+            "{view}: measured data must be labelled traded, not peg"
+        );
+    }
 
     client
         .query(&format!("DROP DATABASE {db}"))

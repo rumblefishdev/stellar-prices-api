@@ -272,10 +272,16 @@ GROUP BY p.timestamp;
 --   * Appending a $1 row AFTER the GROUP BY emits TWO rows for the same key
 --     wherever a peg asset also trades as a base. BE joins on (identity,
 --     bucket), so duplicate keys silently DOUBLE every downstream aggregate.
---   * Letting the peg arm OWN the peg identities flattens USDT's 102 genuinely
---     priceable pools from their market rate to $1 — a regression dressed as a
---     fix. USDT is the control here precisely because it is a peg asset that is
---     NOT the preferred quote, so it does trade as a base.
+--   * Letting the peg arm OWN the peg identities flattens a genuinely priceable
+--     asset from its market rate to $1 — a regression dressed as a fix.
+--     ⚠️ The original control for this was USDT (102 priceable pools, a peg
+--     member that is not the preferred quote, so it does trade as a base). Task
+--     0172 REMOVED USDT from the peg set — it depegged in June 2022 and trades at
+--     ~$0.13 — so the peg set is now USDC alone, and USDC never trades as a base.
+--     The shape is therefore currently unreachable on prod, which is exactly why
+--     it is pinned synthetically in
+--     `peg_member_that_also_trades_as_a_base_keeps_its_market_value`: the guard
+--     has to survive the next peg member being added (tasks 0173/0183).
 --   * Expressing precedence as an anti-join (`WHERE key NOT IN (SELECT … FROM
 --     traded)`) costs TWO full price_ohlcv_1d FINAL scans, because ClickHouse
 --     substitutes CTEs textually rather than materialising them.

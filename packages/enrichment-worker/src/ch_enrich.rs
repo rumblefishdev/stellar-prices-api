@@ -525,13 +525,17 @@ impl ChEnrichmentPass {
         Ok(refs)
     }
 
-    /// One peg-pivot step: the peg statement (USDC/USDT quotes → ×$1) followed by
-    /// the pivot statement (XLM quotes → ×XLM/USDC close). Both target only rows
-    /// the oracle tier left at `close_usd = 0`, so the oracle value always wins
-    /// where it exists. The peg runs whenever a stablecoin is in the registry; the
-    /// pivot runs only when both the XLM asset and the XLM/USDC market are known
-    /// ([`ReferenceIds::can_pivot`]) — it computes the XLM/USDC reference inline
-    /// (no pre-materialized table; see [`pivot_sql`]).
+    /// One peg-pivot step: the peg statement (USDC quotes → ×$1) followed by one
+    /// pivot statement per reference asset ([`ReferenceIds::pivot_ids`] — XLM and
+    /// USDT), each valuing its quote leg at that asset's measured close against
+    /// USDC. All target only rows the oracle tier left at `close_usd = 0`, so the
+    /// oracle value always wins where it exists. The peg runs whenever USDC is in
+    /// the registry; each pivot runs only when both its reference asset and that
+    /// asset's USDC market are known — the reference is computed inline, with no
+    /// pre-materialized table (see [`pivot_sql`]).
+    ///
+    /// ⚠️ USDT is a *pivot* reference, not a peg member (task 0172) — it depegged
+    /// in June 2022 and trades at ~$0.13.
     async fn enrich_peg_pivot_step(
         &self,
         refs: &ReferenceIds,
@@ -578,18 +582,25 @@ impl ChEnrichmentPass {
     }
 
     /// Tier 2 — the peg-pivot deep-history backbone, over the fixed `watermark`
-    /// snapshot. Each per-batch pivot computes the volume-weighted XLM/USDC
-    /// reference **inline** ([`pivot_sql`]) rather than from a pre-materialized
-    /// table, so it needs no `CREATE TABLE` grant on the shared tenant (task 0083).
+    /// snapshot. Each per-batch pivot computes its volume-weighted reference/USDC
+    /// rate **inline** ([`pivot_sql`]) rather than from a pre-materialized table,
+    /// so it needs no `CREATE TABLE` grant on the shared tenant (task 0083).
     ///
-    /// TRADE-OFF (reverses review #10's materialize-once): the ref is now
+    /// TRADE-OFF (reverses review #10's materialize-once): each ref is now
     /// re-aggregated per batch, so total ref work is O(slice × batches) instead of
-    /// O(slice). The slice is a single-pair sort-key prefix, so it's cheap **while
-    /// XLM/USDC history is small** — but it grows with backfill depth × the batch
-    /// count (up to `max_batches`, unbounded in `one_shot`) and could risk the
-    /// 300s Lambda timeout post-backfill. Restore materialize-once (in-memory ref
-    /// or a session-scoped `CREATE TEMPORARY TABLE`) before the 0053 backfill runs
-    /// — tracked in **0085**. Returns the updated `(remaining, batches)`.
+    /// O(slice). Each slice is a single-pair sort-key prefix, so it's cheap **while
+    /// the reference markets' history is small** — but it grows with backfill depth
+    /// × the batch count (up to `max_batches`, unbounded in `one_shot`) and could
+    /// risk the 300s Lambda timeout post-backfill. Restore materialize-once
+    /// (in-memory ref or a session-scoped `CREATE TEMPORARY TABLE`) before the 0053
+    /// backfill runs — tracked in **0085**.
+    ///
+    /// ⚠️ Task 0172 added a second pivot (USDT), so this tier now issues **three**
+    /// statements per batch rather than two — ~50% more scan work in the pass task
+    /// **0111** is open on for full-table scans. `pivot_sql` pins `quote_asset_id`
+    /// to the reference id so each pivot prunes on the sort key's 2nd column.
+    ///
+    /// Returns the updated `(remaining, batches)`.
     async fn run_peg_pivot_tier(
         &self,
         refs: &ReferenceIds,
@@ -706,7 +717,8 @@ impl ChEnrichmentPass {
         // magnitude on any large-backlog catch-up).
         let oracle_misses = if oracle_drained { remaining } else { 0 };
 
-        // Tier 2 — peg-pivot deep-history backbone (USDC/USDT≡$1; XLM via XLM/USDC).
+        // Tier 2 — peg-pivot deep-history backbone (USDC≡$1; XLM and USDT each
+        // via their own measured market against USDC).
         // Gated on `oracle_drained`: an oracle tier that exhausted its batch
         // budget while still making progress may have left rows with an unapplied
         // in-window oracle price, which must not be pegged to $1 (they roll over
@@ -852,7 +864,8 @@ fn pivot_sql(db: &str, tbl: &str, ref_id: u32, usdc_id: u32, window: &str) -> St
              ORDER BY timestamp \
          ) AS r \
              ON r.ref_asset_id = p.quote_asset_id AND r.timestamp <= p.timestamp \
-         WHERE p.close_usd = 0 \
+         WHERE p.quote_asset_id = {ref_id} \
+           AND p.close_usd = 0 \
            AND p.volume_quote > 0 \
            AND r.usd IS NOT NULL \
            AND (p.timestamp - r.timestamp) <= ? \
@@ -903,6 +916,13 @@ mod tests {
         assert!(sql.contains("GROUP BY timestamp"));
         // ASOF equality predicate + forward-fill inequality.
         assert!(sql.contains("r.ref_asset_id = p.quote_asset_id AND r.timestamp <= p.timestamp"));
+        // Redundant-but-load-bearing: the ASOF `ON` already constrains
+        // p.quote_asset_id to ref_id, but only as a join condition, so the outer
+        // scan had no literal on the sort key's 2nd column
+        // (asset_id, quote_asset_id, source, timestamp) and read the whole table
+        // FINAL. Task 0172 added a second pivot pass, making this a 3-statement
+        // tier in the pass task 0111 is open on. Keep the literal.
+        assert!(sql.contains("WHERE p.quote_asset_id = 5"));
         assert!(sql.contains("CAST(r.usd * toFloat64(p.close) AS Decimal(38, 14)) AS close_usd"));
         // Bind order: subquery watermark, staleness window, outer watermark, LIMIT.
         let sub_wm = sql.find("toDateTime(?)").unwrap();
