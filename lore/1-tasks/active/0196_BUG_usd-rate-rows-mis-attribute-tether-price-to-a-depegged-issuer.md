@@ -150,6 +150,94 @@ whole design is "replace the hardcoded `1` with the measured rate from
 *more* authoritative than the `peg` placeholder it replaced. It would relabel the
 same 7.4× error as measured truth. A hold note is on 0168's task file.
 
+## ✅ PURGE EXECUTED ON PROD 2026-08-13
+
+### Preconditions, in the order they had to happen
+
+1. **Both writers fixed** — `reflector_key_to_identity` (the single seam the
+   oracle-worker poll loop and the ledger-processor event-decode path share).
+2. **Both writers deployed.** This is the step that nearly went wrong: the two
+   paths ship in **different stacks**. `Prices-production-EventBridge` at 10:55
+   UTC covers oracle-worker; the ledger-processor is in
+   `Prices-production-Compute`, deployed 11:50 UTC. Deploying only the first
+   would have left a live writer and the purge would have regrown.
+3. **Writer death confirmed by measurement**, not by deploy success — USDT's
+   `oracle_prices` `last_seen` frozen at 11:00 while USDC kept ticking at 2 min
+   staleness. ~10 poll cycles.
+
+### Measured immediately before deletion (`FINAL`)
+
+| table | rows | oracles/methods | first | last | avg |
+|---|---|---|---|---|---|
+| `oracle_prices` | **46,423** | 1 | 1970-01-21 15:41:56 | 2026-08-13 11:00 | 0.999565 |
+| `usd_rate` | **44,318** | 1 | 2026-03-11 14:00 | 2026-08-13 10:50 | 0.999582 |
+
+⚠️ **The 46,378 figure recorded earlier in this file was measured without
+`FINAL`** and undercounted. `count()` on a `ReplacingMergeTree` moves with
+background merges — it drifted 46,378 → 46,425 → 46,423 across three readings
+of unchanged data. Use `FINAL` or don't quote the number.
+
+### Decision: DELETE, not re-key
+
+Recorded per this task's own open question. There is no correct identity to
+re-key **to** — no asset in `prices.assets` *is* real Tether — so a re-keyed row
+would be data preserved for a consumer that does not exist, next to a footgun
+that does.
+
+⚠️ **Correction to an earlier argument in this task:** "Reflector still
+publishes the feed so nothing is lost" is true only going *forward*. The SEP-40
+contract serves current prices, not a five-month backfill, so **the deleted
+series is not re-derivable.** Both sets were dumped to TSV before deletion
+(46,424 and 44,319 lines incl. header) on the operator's local machine.
+
+### Execution
+
+Async `ALTER … DELETE` mutations, not `DROP PARTITION` — both tables partition
+by month and those partitions hold every other asset's rows.
+
+```sql
+ALTER TABLE prices.oracle_prices DELETE WHERE asset_id = 111;
+ALTER TABLE prices.usd_rate      DELETE WHERE asset_code = 'USDT'
+                                   AND issuer_address = 'GCQTGZQQ…TG6V';
+```
+
+Both `is_done = 1`, `parts_to_do = 0`, no `latest_fail_reason`. Post-delete count
+**0** on both. `asset_id` is `oracle_prices`'s leading sort-key column, so the
+mutation pruned cleanly.
+
+### The 1970 timestamp went with them — deliberately, and a twin survives
+
+`oracle_prices` held a USDT row at `1970-01-21 15:41:56` ≈ 1,784,516 epoch
+seconds — consistent with a millisecond timestamp divided by 10⁶ instead of 10³,
+i.e. a mid-2026 reading landing in 1970. **Canonical USDC showed the identical
+`first_seen`**, so the defect is systematic and its USDC instance is untouched
+and still investigable. Not filed as a task yet; needs one.
+
+## ✅ Mapping audit — the two survivors, with evidence
+
+The general question is [[0173]]. This is the narrow version: for each identity
+still on the oracle surface, is there a reason to believe the feed's **ticker**
+names that **issuer**?
+
+| symbol | identity | basis | verdict |
+|---|---|---|---|
+| `XLM` / `native` | `AssetIdentity::Native` | Not an issued asset. There is exactly one native asset on the network, so the ticker cannot be filed against the wrong issuer — the failure mode requires an `issuer_address` to get wrong, and there isn't one. | ✅ structurally safe |
+| `USDC` | Circle `GA5ZSEJY…KZVN` | `usd_rate` for this identity measured **1.000086 – 1.000639** monthly over 2026-03 → 2026-08, never outside ±0.0015. That is what real Circle USDC does. Had the feed been naming a different `USDC` issuer (there are ~220), a copycat would have to hold par to 15 bp for six months to fake this. | ✅ measured |
+
+⚠️ **This is weaker evidence than it looks for USDC, and worth saying plainly.**
+Agreement at par is consistent with the feed naming Circle's USDC — but it is
+*also* consistent with any issuer that happens to hold par. What makes USDT's
+case decisive is the **disagreement**: a 7.4× gap cannot be explained away. So
+this audit can falsify a mapping but cannot fully confirm one. Treat USDC as
+"no evidence of mis-attribution" rather than "confirmed correct", and leave the
+positive proof to [[0173]].
+
+⚠️ It also only covers what we poll **today**. The real protection is that the
+sets are now pinned by test, so a future addition cannot be silent:
+`peg_identities_is_exactly_canonical_usdc` (`oracle-worker`) and
+`reflector_resolves_exactly_xlm_and_usdc_and_nothing_else`
+(`prices-ingest-core`).
+
 ## What needs deciding
 
 - **Delete, or keep and re-key?** The rows are factually a record of Tether's
@@ -165,15 +253,30 @@ same 7.4× error as measured truth. A hold note is on 0168's task file.
 
 ## Acceptance Criteria
 
-- [ ] **`prices.oracle_prices`** rows for asset_id 111 removed — the blocking one,
-      because 0172's fix does not take effect until they are gone
-- [ ] `prices.usd_rate` rows removed or re-keyed, decision recorded
-- [ ] Both purges run only after the fixed oracle worker is deployed, confirmed
-      by a re-count showing no regrowth on the next run
-- [ ] Every other `TRACKED_SYMBOLS` → identity mapping audited the same way
-- [ ] 0168's hold note cleared or made permanent, explicitly
-- [ ] A test that fails if a peg/oracle identity is added without a documented
-      basis for the symbol→issuer mapping
+- [x] **`prices.oracle_prices`** rows for asset_id 111 removed — 46,423 deleted
+      2026-08-13, post-count 0. This was the blocking one: 0172's fix did not
+      take effect until they were gone.
+- [x] `prices.usd_rate` rows removed or re-keyed, decision recorded — 44,318
+      deleted; **decision = delete**, reasoning above. Dumped to TSV first,
+      because the series is NOT re-derivable from Reflector.
+- [x] Both purges run only after the fixed worker is deployed — confirmed on
+      *both* stacks (EventBridge 10:55, Compute 11:50) and by measured writer
+      death, not by deploy exit status.
+- [x] **Regrowth re-check** — re-run after the purge with both writers live:
+      `oracle_prices` for asset 111 still **0**. Nothing is rewriting the
+      identity, so the deletion is durable rather than a momentary state.
+- [x] Every other `TRACKED_SYMBOLS` → identity mapping audited the same way —
+      only XLM and USDC survive; evidence and its limits recorded above. XLM is
+      structurally safe; USDC is "no evidence of mis-attribution" rather than
+      positively confirmed, which is left to [[0173]].
+- [x] 0168's hold note cleared — **lifted 2026-08-13**, and converted into a
+      standing condition on ADDING peg members rather than a blanket block.
+- [x] A test that fails if a peg/oracle identity is added without a documented
+      basis — `peg_identities_is_exactly_canonical_usdc` (`oracle-worker`) and
+      `reflector_resolves_exactly_xlm_and_usdc_and_nothing_else`
+      (`prices-ingest-core`). Neither can prove a justification was written, but
+      both make the addition impossible to make silently.
+- [ ] **Spawned:** [[0199]] — the 1970 timestamps found while measuring the purge
 - [x] Writer stopped — `reflector_key_to_identity` no longer resolves `USDT`
       (done on 0172's branch, PR #205; guarded by
       `reflector_drops_usdt_because_the_ticker_is_not_this_issuer`)
