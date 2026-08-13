@@ -489,8 +489,12 @@ this is resolved — 0165 used it as one.
 
 - **[[0182]]** — re-enrich the 44,657 stored `close_usd` values (the writer is
   fixed; history is not)
-- **[[0183]]** — `prices.usd_rate` rows that file Tether's price under this
-  issuer's identity
+- **[[0183]]** — 🚧 **BLOCKS CLOSURE.** `prices.oracle_prices` *and*
+  `prices.usd_rate` rows that file Tether's price under this issuer's identity.
+  The `oracle_prices` half is not a tidy-up: enrichment reads those 46,378 rows
+  in the tier that runs *first*, so until they are purged this task's fix is
+  bypassed on every new USDT-quoted candle. Widened from `usd_rate`-only on
+  2026-08-13.
 - **[[0184]]** — should a depegged asset still be quote-preference rank 1?
   (`canonical.rs`, deliberately untouched here)
 - **[[0185]]** — `price_usd_series` *raises* on a zero-weight group; the existing
@@ -508,3 +512,13 @@ this is resolved — 0165 used it as one.
       counterparts), or an explicit decision to leave history as-is.
 - [ ] Regression test on the 26.3.10.60 pin.
 - [ ] BE notified if any published TVL was affected.
+- [ ] **The fix is actually in effect on prod, not merely merged.** Both writer
+      paths are stopped in code, but two row sets still assert the old $1:
+      - [ ] [[0183]] — `prices.oracle_prices` rows for asset_id 111 purged.
+            Until then the oracle tier keeps re-pegging **new** candles, so this
+            gates closure, not just cleanup.
+      - [ ] [[0182]] — the 44,657 stored `close_usd` values re-enriched (history).
+
+      ⚠️ **Do not archive this task on a green PR alone.** Merging #205 stops new
+      mis-attributed rows; it does not correct a single published price. Same
+      trap already recorded for [[0168]] — a change that *looks* like the fix.
