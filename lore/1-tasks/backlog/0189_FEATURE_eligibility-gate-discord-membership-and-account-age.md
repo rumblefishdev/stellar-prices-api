@@ -130,7 +130,7 @@ Detail and reasoning: archived
 ## Acceptance Criteria
 
 - [ ] **Ships closed**, and this is the slice [[0194]] is waiting on before
-      `portal-enabled` may be flipped to `true` — the gate must pass first
+      `PORTAL_ENABLED` may be flipped to `'true'` — the gate must pass first
 - [ ] Items 1–5 measured against `stellar_test` and a screening-off scratch
       guild, results written down with the date
 - [ ] Consent screen captured with and without `guilds.members.read`

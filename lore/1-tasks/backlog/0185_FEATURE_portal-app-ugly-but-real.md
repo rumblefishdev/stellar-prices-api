@@ -70,8 +70,8 @@ something presentable, it has taken work from [[0193]] and delayed [[0186]].
 ## Acceptance Criteria
 
 - [ ] **Ships closed.** The app reads `GET /api-tokens/api/config` ([[0183]])
-      and renders "not yet available" with no sign-in button while the portal is
-      closed — it is publicly reachable from the first deploy
+      and renders "not yet available" with no sign-in button while `enabled` is
+      false — the bundle is publicly reachable from the first deploy
 - [ ] `nx build` produces a static bundle; `nx test` runs and passes
 - [ ] The app is served at `/api-tokens/`, assets resolve, and a hard refresh on
       `/api-tokens/` returns the app

@@ -85,8 +85,8 @@ is its backend, `/api/*` rows always before the bundle row they sit inside.
 
 ## Acceptance Criteria
 
-- [ ] **Ships closed.** Sign-in is confirmed on the new hostname with an
-      allowlisted account ([[0183]]) before the domain is advertised anywhere
+- [ ] **Ships closed.** Sign-in is confirmed on the new hostname ([[0183]])
+      before the domain is advertised anywhere
 - [ ] Swagger UI is served from the same distribution and renders the **live**
       spec from `/api-docs-json`, not a checked-in copy
 - [ ] A refresh on `/api-tokens/<sub-route>` returns that app's `index.html`, not

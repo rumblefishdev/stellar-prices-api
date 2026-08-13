@@ -18,6 +18,7 @@ pub mod identity;
 pub mod openapi;
 pub mod ops;
 pub mod oracles;
+pub mod portal;
 pub mod state;
 
 use std::sync::Arc;
@@ -77,6 +78,11 @@ pub fn app(config: &AppConfig, state: AppState) -> Router {
             }
         }),
     );
+
+    // Portal routes before the key gate, and exempt from it: a visitor signing
+    // in has no API key by definition (task 0183). The gate inside `portal`
+    // decides whether they are served at all.
+    let router = portal::apply(router, config);
 
     auth::apply(router, config)
 }

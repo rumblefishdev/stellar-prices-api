@@ -20,6 +20,19 @@ pub struct AppConfig {
     /// usage-plan regardless (ADR 0008; sized by task 0157 — not the design
     /// doc's 100 req/s). Mirrors BE's deploy-dark gating.
     pub api_keys: Vec<String>,
+    /// Whether the onboarding portal's backend routes are served
+    /// (`crate::portal`). **Defaults to `false`** — there is one environment and
+    /// it is production, so an unfinished portal slice is publicly reachable the
+    /// moment it deploys unless something says otherwise. Set `PORTAL_ENABLED=1`
+    /// (or `true`) to work on it locally. Flipped in production by task 0194,
+    /// after 0189's eligibility gate passes.
+    ///
+    /// Note the polarity is the opposite of `ch_enabled` above, and that is on
+    /// purpose: a missing `CH_ENABLED` should still give the live Lambda its
+    /// connection pool, while a missing `PORTAL_ENABLED` must never open a
+    /// half-built portal to the internet. Defaults are chosen per flag by what
+    /// goes wrong when the variable is forgotten.
+    pub portal_enabled: bool,
 }
 
 impl AppConfig {
@@ -39,6 +52,9 @@ impl AppConfig {
                         .collect()
                 })
                 .unwrap_or_default(),
+            portal_enabled: std::env::var("PORTAL_ENABLED")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false),
         }
     }
 }

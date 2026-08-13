@@ -90,7 +90,7 @@ stack**, not against the source, and not by assumption:
 
 ## Opening the portal
 
-**This task owns the flip.** `portal-enabled` goes to `true` here and nowhere
+**This task owns the flip.** `PORTAL_ENABLED` goes to `'true'` in `compute-stack.ts` here and nowhere
 else — not as a side effect of anyone finishing their own slice. Preconditions,
 all of them:
 
@@ -100,8 +100,8 @@ all of them:
 - [ ] Keys created while the flag was off are enumerated and deleted. There is no
       separate incubation plan (decided 2026-08-13), so those keys are real keys
       on the real free-tier plan and would otherwise survive into its accounting
-      as anonymous strings
-- [ ] The allowlist is emptied, or is deliberately kept and its contents recorded
+      as anonymous strings. They come from local runs against production
+      credentials, not from the closed portal — the flag lives in the Lambda
 
 Note what the flip is **not** gated on: [[0193]] (looks presentable) and
 [[0195]] (custom domain) can both land after it. Opening a plain-looking portal
@@ -111,8 +111,9 @@ that works is a smaller risk than leaving a finished one closed.
 
 - [ ] Every check above passes against the deployed production stack, with the
       evidence captured in a form [[0164]] can cite
-- [ ] `portal-enabled` is flipped to `true` here, with every precondition above
-      met and recorded — and the flip is reversible in one SSM edit
+- [ ] `PORTAL_ENABLED` is flipped to `'true'` here, with every precondition
+      above met and recorded — and the flip is reversible by the same one-word
+      diff plus a deploy
 - [ ] Any failure is fixed in the slice that owns it, and the fix is re-verified
       here rather than patched locally
 - [ ] Tranche 3 AC 6 ("no secrets in env vars", least-privilege IAM) is

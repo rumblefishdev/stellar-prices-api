@@ -93,9 +93,9 @@ loop here slows CI for everyone.
 
 ## Acceptance Criteria
 
-- [ ] **Ships closed.** With `portal-enabled=false` ([[0183]]) this slice's
-      routes return `404` to a non-allowlisted caller, and behave normally for an
-      allowlisted one — every deploy goes straight to production
+- [ ] **Ships closed.** With `PORTAL_ENABLED=false` ([[0183]]) this slice's
+      routes return an empty `404`; with it on, they behave normally — every
+      deploy goes straight to production
 - [ ] Item 7 measured on the `DAY`-period proxy and written up with the date;
       [[0157]] and this task stop presenting the boundary as AWS-documented
 - [ ] Rework issues a new key and deletes the old one in one operation; the user

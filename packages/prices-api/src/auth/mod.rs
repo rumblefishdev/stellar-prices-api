@@ -39,8 +39,16 @@ pub fn apply(router: axum::Router, config: &AppConfig) -> axum::Router {
 }
 
 /// Paths that never require a key.
+///
+/// The portal's own backend (`crate::portal`) is exempt as a prefix, not as a
+/// list: a visitor signing in has no API key by definition, so gating those
+/// routes behind one would make self-service onboarding impossible to enter.
+/// Whether they are served at all is `portal`'s gate, not this one — and every
+/// route a later slice adds under the prefix inherits both decisions without
+/// editing this function.
 fn is_exempt(path: &str) -> bool {
     matches!(path, "/health" | "/api-docs-json")
+        || path.starts_with(crate::portal::PORTAL_API_PREFIX)
 }
 
 /// Reject any request that lacks a valid `X-API-Key` (except exempt paths).

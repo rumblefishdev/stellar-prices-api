@@ -111,19 +111,23 @@ this code issues a real key on the real usage plan to anyone who can sign in —
 and **this deploy goes to production**, because `envName` is typed `'production'`
 and `infra/envs/` holds only `production.json`. There is no dev distribution to
 be relaxed on. The only thing standing between a stranger and a production key
-for the three slices between here and the gate is `portal-enabled=false`, so
+for the three slices between here and the gate is `PORTAL_ENABLED=false`, so
 treat that flag as part of this slice's correctness, not as ops hygiene.
 
 The same applies to the reconciler above: it calls `DeleteApiKey` against
-production keys, with the snowflake prefix hazard live. Exercise it from an
-allowlisted account against keys this task created, and nothing else.
+production keys, with the snowflake prefix hazard live. Exercise it from a local
+run against keys this task created, and nothing else — and remember the flag
+lives in the Lambda, so it does not protect a laptop holding production
+credentials.
 
 ## Acceptance Criteria
 
 - [ ] **Ships closed — this is the slice the flag exists for.** With
-      `portal-enabled=false` ([[0183]]) no non-allowlisted caller can reach the
-      issue route, because until [[0189]] lands the only thing between a stranger
-      and a real production key is that flag
+      `PORTAL_ENABLED=false` ([[0183]]) the issue route is unreachable in
+      production, because until [[0189]] lands that flag is the only thing
+      between a stranger and a real key. Note the flag does **not** protect a
+      local run holding production credentials: those keys are real, and
+      [[0194]] cleans them up
 - [ ] First press issues a key attached to the free plan; the value is shown
 - [ ] That key returns `200` from a `/v1/` route on the first try
 - [ ] A second press returns the **same** key, not a new one

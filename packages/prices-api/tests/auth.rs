@@ -14,6 +14,7 @@ fn armed_config() -> AppConfig {
         ch_enabled: false,
         base_url: None,
         api_keys: vec![KEY.to_string()],
+        portal_enabled: false,
     }
 }
 
