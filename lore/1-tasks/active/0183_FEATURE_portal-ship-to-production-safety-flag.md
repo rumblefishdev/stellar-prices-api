@@ -34,6 +34,25 @@ history:
     status: active
     who: akot
     note: >
+      Self-audit after the review fixes, prompted by Adam asking whether they
+      were actually complete. They were not. The conditional exemption written
+      for review finding #2 caught `/config` in the same net, so with `API_KEYS`
+      armed and the portal closed — the configuration production sits in for the
+      whole build — the endpoint answered `401` instead of `{"enabled": false}`,
+      and [[0185]]'s page would have had no way to learn it was closed. Missed
+      because `gate_portal` exempts `CONFIG_PATH` in both directions and
+      `is_exempt` was not made to mirror it, and because the new tests covered
+      three of the four (portal open/closed) × (keys armed/disarmed) cells.
+      `/config` is now unconditionally exempt from the key gate, matching the
+      portal gate, and `config_answers_in_all_four_gate_combinations` pins every
+      cell. The residual — `/config` is distinguishable on an armed service — is
+      accepted and written down: the bundle it serves is public on the CDN from
+      [[0184]] onwards, so the portal's existence is not the secret; which
+      unbuilt routes sit behind it still is.
+  - date: 2026-08-13
+    status: active
+    who: akot
+    note: >
       Code review on PR #207 (karczuRF) found seven issues and all seven were
       real. Two mattered. **The test suite was vacuous** — it stayed green with
       `gate_portal` replaced by `next.run(req).await`, because the only route

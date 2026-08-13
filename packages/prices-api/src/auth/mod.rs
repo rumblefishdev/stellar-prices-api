@@ -59,8 +59,23 @@ pub fn apply(router: axum::Router, config: &AppConfig) -> axum::Router {
 /// checks below and looks like everything else: `401` when keys are armed,
 /// empty `404` when they are not. Open, it is public by design and being
 /// distinguishable costs nothing.
+///
+/// **[`CONFIG_PATH`](crate::portal::CONFIG_PATH) is the exception, and is exempt
+/// unconditionally** — mirroring `portal::gate_portal`, which waves it through
+/// in both directions for the same reason. It answers the question "is the
+/// portal open?", so it has to answer while the portal is closed, or [0185]'s
+/// bundle cannot render its "not yet available" page. Making it conditional was
+/// a real regression: with `API_KEYS` armed and the portal closed — the exact
+/// configuration production reaches during the build — the page got `401`
+/// instead of `{"enabled": false}`.
+///
+/// It does mean this one path is distinguishable on an armed service. That is
+/// not a leak: the bundle it serves is public on the CDN from [0184] onwards, so
+/// the portal's *existence* is not the secret. What must stay invisible is which
+/// unbuilt routes are behind it, and those are still covered by the rule above.
 fn is_exempt(path: &str, portal_open: bool) -> bool {
     matches!(path, "/health" | "/api-docs-json")
+        || path == crate::portal::CONFIG_PATH
         || (portal_open && path.starts_with(crate::portal::PORTAL_API_PREFIX))
 }
 

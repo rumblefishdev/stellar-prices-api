@@ -135,6 +135,38 @@ async fn an_open_portal_is_anonymous_even_with_api_keys_armed() {
     );
 }
 
+/// `/config` has to survive **both** gates in **all four** combinations of
+/// (portal open/closed) × (keys armed/disarmed), and the closed+armed cell is
+/// the one that matters: it is where production sits for the whole build.
+///
+/// Regression guard. Making the auth exemption conditional on the portal being
+/// open — the fix for the fingerprinting issue — initially caught `/config` in
+/// the same net, so an armed, closed service answered the bundle `401` instead
+/// of `{"enabled": false}` and [[0185]]'s page could not tell it was closed.
+#[tokio::test]
+async fn config_answers_in_all_four_gate_combinations() {
+    for portal_enabled in [false, true] {
+        for keys in [vec![], vec!["a-key".to_string()]] {
+            let armed = !keys.is_empty();
+            let (status, body) = drive(
+                app(
+                    &config_with_keys(portal_enabled, keys),
+                    AppState::without_ch(),
+                ),
+                CONFIG_PATH,
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "portal_enabled={portal_enabled}, api_keys_armed={armed}"
+            );
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(json["enabled"], serde_json::Value::Bool(portal_enabled));
+        }
+    }
+}
+
 /// `/config` answers in both states: it *is* the question "is the portal open?",
 /// so refusing to answer it while closed would be circular, and [[0185]]'s
 /// bundle would have nothing to render its "not yet available" page from.
