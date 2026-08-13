@@ -1,5 +1,5 @@
 ---
-id: "0184"
+id: "0197"
 title: "We still steer pairs into a depegged quote leg — is USDT's rank-1 quote preference still justified?"
 type: RESEARCH
 status: backlog
@@ -18,6 +18,16 @@ history:
       Spawned from 0172, which deliberately left this alone. Changing quote
       preference re-orients pairs and is not a bug fix — it needs its own
       analysis of what it does to historical comparability.
+  - date: 2026-08-13
+    status: backlog
+    who: okarcz
+    note: >
+      Renumbered 0184 -> 0197. The onboarding epic was re-cut into 0183-0195
+      four minutes after PR #205 merged these spawned tasks, so both sides
+      claimed the same ids with no chance to see the other. Ours moved because
+      the other 0183 was already active and its thirteen slices are a contiguous
+      block; these three were backlog with no work in flight. Referring sites
+      updated: views.sql, views_it.rs, 0172, 0182, 0168.
 ---
 
 # Should a depegged asset still be a preferred quote?

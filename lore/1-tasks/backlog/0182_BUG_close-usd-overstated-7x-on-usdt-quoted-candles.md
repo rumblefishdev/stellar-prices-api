@@ -4,7 +4,7 @@ title: "44,657 stored candles across 495 assets carry a close_usd ~7.4x too high
 type: BUG
 status: backlog
 related_adr: []
-related_tasks: ["0172", "0183", "0165", "0145", "0111", "0114"]
+related_tasks: ["0172", "0196", "0165", "0145", "0111", "0114"]
 tags:
   ["priority-high", "effort-medium", "clickhouse", "data-correctness", "enrichment", "milestone-M2"]
 milestone: 2
@@ -54,10 +54,10 @@ inert: nothing will revisit them.
 Both surfaced in the 2026-08-13 review of 0172's PR #205. Neither is optional,
 and neither is visible from inside this task's own plan.
 
-### 1. `oracle_prices` must be purged FIRST ([[0183]])
+### 1. `oracle_prices` must be purged FIRST ([[0196]])
 
 The enrichment **oracle tier runs before the peg-pivot tier and wins where it
-applies** (`ch_enrich.rs:19-22`). [[0183]] measured **46,378 mis-attributed
+applies** (`ch_enrich.rs:19-22`). [[0196]] measured **46,378 mis-attributed
 Reflector rows** on the USDT identity in `prices.oracle_prices`, covering
 2026-03 → present and current to the hour.
 
