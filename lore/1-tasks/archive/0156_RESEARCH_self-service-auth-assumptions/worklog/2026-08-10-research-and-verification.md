@@ -73,6 +73,10 @@ Nothing was found to be fabricated. Two things were corrected or added:
 5. **The abuse is worth $0.38/key/month.** Costing the threat before costing the
    defences reframed the whole mitigation discussion — several options cost more
    than the damage they prevent.
+   *(Measured 2026-08-12 by [[0180]] #9: **$0.55–$0.89** all-in. The $0.38 was
+   gateway-only and priced in us-east-1. The reframing this entry describes is
+   what mattered and it survives — the conclusion never depended on the second
+   decimal place.)*
 
 ## Follow-ups spawned
 

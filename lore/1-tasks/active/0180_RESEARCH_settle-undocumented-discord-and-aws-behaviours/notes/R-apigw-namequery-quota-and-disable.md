@@ -55,7 +55,17 @@ substring, and a differing-case variant.
 
 **Result — measured 2026-08-12**, three scratch keys in `eu-central-1`
 (`lore0180-1111`, `lore0180-111111111111111111`,
-`lore0180-111111111111111111-old`), created disabled and destroyed after:
+`lore0180-111111111111111111-old`), created disabled.
+
+> **Correction 2026-08-13: they were not destroyed after.** This line originally
+> read "created disabled and destroyed after". Checked while setting up item 7:
+> all three still exist (`g52xixd157`, `g8gha706d1`, `j3pn2oudp3`), disabled,
+> along with the scratch REST API `jfsxfpw280`, the plan `j11m0r` and two probe
+> keys (`lore0180-freshness-probe`, `lore0180-usage-probe`). Runbook **step 2d**
+> was never executed. Nothing is at risk — the keys are disabled, the API is a
+> MOCK with no traffic, and idle API Gateway resources are not billed — but the
+> note claimed a teardown that had not happened, which is the one kind of error
+> a measurement record cannot afford. See "Outstanding" at the foot of this note.
 
 | Query | Keys returned | Interpretation |
 |---|---|---|
@@ -116,9 +126,37 @@ acceptable here: the AC is to stop presenting the rule as AWS-documented, not
 to prove AWS's implementation. If `DAY` resets at 00:00 UTC, restate the monthly
 rule as **our product decision, consistent with observed daily behaviour**.
 
+**Measurement running since 2026-08-13 08:10Z.** Harness:
+[`measurement/item7-quota-rollover.sh`](../measurement/item7-quota-rollover.sh),
+log at `measurement/data/item7-poll.tsv`.
+
+Scratch stack: REST API `9utcrbmoc6` (`lore0180-scratch-item7`, MOCK on `GET /`,
+stage `test`), plan `ox7pv0` at **3/DAY**, key `2ke0ixjy7h`. Drained to `429` at
+08:12Z; polling one request per minute for 26 h.
+
+**Two design choices worth stating, both forced by what item 8 found.**
+
+1. **The verdict comes from the data plane, not from `GetUsage`.** Item 8 showed
+   the reported pair can disagree with `limit` for over a minute, so reading the
+   reset instant off the counter would measure the *reporting* lag rather than
+   the moment enforcement changes. The first request that is **served** after a
+   run of rejections is the reset instant, ±60 s, and no counter lag can move it.
+   `GetUsage` is sampled alongside every 5 minutes anyway — if the two disagree,
+   that disagreement is a finding in its own right.
+2. **The window discriminates the two hypotheses, not just the timezone.** The
+   runbook asks for the instant and the zone; `manual-api-key-tier.md` asks the
+   sharper question — is the period **calendar-aligned** or does it run **from
+   plan creation**? Setup at 08:10Z is far enough from midnight that the two
+   predict clearly different instants (00:00Z tonight vs ~08:10Z tomorrow), and
+   the 26 h window contains both. This matters more than the zone: if periods are
+   creation-anchored then **every key has its own reset date**, and [[0160]]'s
+   and [[0162]]'s promise of one date to render does not survive.
+
 **Result (date: ______):**
 
 - `DAY` period reset observed at → (instant, timezone)
+- Calendar-aligned or creation-anchored? →
+- Did `GetUsage` agree with enforcement at the boundary? →
 - Inference for `MONTH` →
 - Text restated in 0157 / 0158 / 0160 as our rule? →
 
@@ -200,6 +238,24 @@ Fine for constructing states; do not read `GetUsage` as ground truth in the same
 period you patched it.
 
 ---
+
+## Outstanding — scratch resources still live in `eu-central-1`
+
+Runbook step 2d has not been run. Verified 2026-08-13:
+
+| Resource | Id | From |
+|---|---|---|
+| REST API `lore0180-scratch` | `jfsxfpw280` | item 8 |
+| Usage plan `lore0180-scratch-plan` | `j11m0r` | item 8 |
+| Keys `lore0180-1111`, `…-111111111111111111`, `…-old` (disabled) | `g52xixd157`, `g8gha706d1`, `j3pn2oudp3` | item 6 |
+| Keys `lore0180-freshness-probe`, `lore0180-usage-probe` | `1ojzmaya8a`, `zua7bn5m39` | item 8 |
+| REST API `lore0180-scratch-item7` + plan + key | `9utcrbmoc6`, `ox7pv0`, `2ke0ixjy7h` | item 7 — **in use, do not delete** |
+
+The item-6 and item-8 resources are finished with and can go now;
+`item7-quota-rollover.sh teardown` handles only the item-7 stack and must wait
+for the poll window to close. Nothing here is billed while idle, so this is
+hygiene rather than cost — but a scratch plan left attached to a live key is
+exactly the sort of thing that is later mistaken for something load-bearing.
 
 ## Consequences for other tasks
 
