@@ -281,7 +281,7 @@ GROUP BY p.timestamp;
 --     The shape is therefore currently unreachable on prod, which is exactly why
 --     it is pinned synthetically in
 --     `peg_member_that_also_trades_as_a_base_keeps_its_market_value`: the guard
---     has to survive the next peg member being added (tasks 0173/0183).
+--     has to survive the next peg member being added (tasks 0173/0196).
 --   * Expressing precedence as an anti-join (`WHERE key NOT IN (SELECT … FROM
 --     traded)`) costs TWO full price_ohlcv_1d FINAL scans, because ClickHouse
 --     substitutes CTEs textually rather than materialising them.

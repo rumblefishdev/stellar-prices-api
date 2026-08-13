@@ -1,5 +1,5 @@
 ---
-id: "0183"
+id: "0196"
 title: "usd_rate AND oracle_prices assert ~$1.00 for a Stellar IOU worth $0.13 — Reflector's ticker feed was filed under an issuer identity"
 type: BUG
 status: backlog
@@ -32,6 +32,16 @@ history:
       USDT-quoted candle. The writer half is fixed on 0172's branch (the USDT
       arm is gone from reflector_key_to_identity, the single seam both oracle
       writers share); the row purge for BOTH tables stays here.
+  - date: 2026-08-13
+    status: backlog
+    who: okarcz
+    note: >
+      Renumbered 0183 -> 0196. The onboarding epic was re-cut into 0183-0195
+      four minutes after PR #205 merged these spawned tasks, so both sides
+      claimed the same ids with no chance to see the other. Ours moved because
+      the other 0183 was already active and its thirteen slices are a contiguous
+      block; these three were backlog with no work in flight. Referring sites
+      updated: views.sql, views_it.rs, 0172, 0182, 0168.
 ---
 
 # `usd_rate` files Tether's price under a different token's identity

@@ -4,7 +4,7 @@ title: "Publish the real peg rate in price_usd_series instead of a hardcoded $1"
 type: FEATURE
 status: backlog
 related_adr: []
-related_tasks: ["0165", "0167", "0154", "0151", "0150", "0172", "0183", "0173"]
+related_tasks: ["0165", "0167", "0154", "0151", "0150", "0172", "0196", "0173"]
 tags:
   ["priority-medium", "effort-small", "clickhouse", "read-surface", "be-interop", "data-correctness", "milestone-M2"]
 links:
@@ -46,7 +46,7 @@ For **USDT it is actively harmful**, and would look like a fix:
   `peg` placeholder it replaced. Same 7.4× error, better disguise.
 
 [[0172]] already removed USDT from the peg arm, so there is nothing here to
-"restore". The mis-attributed rows are [[0183]]; the general symbol→issuer
+"restore". The mis-attributed rows are [[0196]]; the general symbol→issuer
 mapping problem is [[0173]].
 
 **Before implementing: confirm the peg set is still USDC-only, and do not add an

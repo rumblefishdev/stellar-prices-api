@@ -1,5 +1,5 @@
 ---
-id: "0185"
+id: "0198"
 title: "A single zero-volume asset can take down price_usd_series entirely — the view RAISES, it does not degrade"
 type: BUG
 status: backlog
@@ -20,6 +20,16 @@ history:
       note describes the WRONG failure mode — measured on the prod pin it raises
       an exception rather than publishing a garbage value, which makes it a
       whole-query availability problem, not a one-row correctness problem.
+  - date: 2026-08-13
+    status: backlog
+    who: okarcz
+    note: >
+      Renumbered 0185 -> 0198. The onboarding epic was re-cut into 0183-0195
+      four minutes after PR #205 merged these spawned tasks, so both sides
+      claimed the same ids with no chance to see the other. Ours moved because
+      the other 0183 was already active and its thirteen slices are a contiguous
+      block; these three were backlog with no work in flight. Referring sites
+      updated: views.sql, views_it.rs, 0172, 0182, 0168.
 ---
 
 # `price_usd_series` raises `CANNOT_INSERT_NULL_IN_ORDINARY_COLUMN` on a zero-weight group
