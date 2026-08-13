@@ -382,6 +382,37 @@ mod tests {
         }
     }
 
+    /// Task 0196. The peg set is an **allowlist**, and every member needs a
+    /// documented reason the feed's ticker actually names *that issuer* — not
+    /// merely an asset code that matches. This test pins the set to an exact
+    /// literal so adding a member cannot happen silently: it forces a test edit,
+    /// which forces someone to write the justification down.
+    ///
+    /// The failure this guards against is not hypothetical. `USDT` sat here on
+    /// the strength of its code alone; Reflector's "USDT" feed prices Tether's
+    /// own token, while `USDT_ISSUER` is a Stellar IOU that depegged in June
+    /// 2022 and trades at ~$0.13. That mis-attribution reached `usd_rate` and
+    /// `oracle_prices` and took 90,741 deleted rows to undo (task 0196).
+    ///
+    /// **Basis for the one current member:** Reflector's `USDC` feed and
+    /// canonical Circle USDC agree — the snapshotted rate measured 1.000086 to
+    /// 1.000639 over 2026-03 → 2026-08, i.e. par, which is what real Circle USDC
+    /// does. Before adding anything here, establish the same for it (task 0173).
+    #[test]
+    fn peg_identities_is_exactly_canonical_usdc() {
+        let ids = peg_identities();
+        assert_eq!(
+            ids,
+            vec![AssetIdentity::Credit {
+                code: "USDC".to_string(),
+                issuer: prices_clickhouse::USDC_ISSUER.to_string(),
+            }],
+            "the peg set must be exactly canonical USDC. Adding a member is a \
+             claim that its oracle feed names that ISSUER, not just that code — \
+             write the evidence in the doc comment above before changing this."
+        );
+    }
+
     #[test]
     fn asset_other_scval_is_two_element_vec() {
         let sc = asset_other_scval("BTC").unwrap();

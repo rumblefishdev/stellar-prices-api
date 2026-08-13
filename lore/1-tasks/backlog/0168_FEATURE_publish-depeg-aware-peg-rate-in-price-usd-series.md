@@ -28,6 +28,39 @@ history:
       SCOPE REDUCED by 0172 and put on hold for one identity. The peg set is now
       USDC ONLY — USDT was removed because it genuinely depegged in June 2022 and
       trades at ~$0.13. Do not restore USDT here. See the hold note below.
+  - date: 2026-08-13
+    status: backlog
+    who: okarcz
+    note: >
+      HOLD LIFTED. 0196 deleted the mis-attributed usd_rate rows (44,318) and
+      oracle_prices rows (46,423) on prod, verified 0 with no regrowth. usd_rate
+      now holds canonical USDC only, measured at par, so "swap the constant 1
+      for the measured rate" is safe as designed. The restriction survives as a
+      standing condition on ADDING peg members, now guarded by two pinning
+      tests rather than by prose.
+---
+
+# ✅ HOLD LIFTED 2026-08-13 — this task is unblocked
+
+The hold below was specific to one identity and that identity is gone from both
+sources. [[0196]] deleted **44,318 mis-attributed `usd_rate` rows** (and 46,423
+from `oracle_prices`) on 2026-08-13, verified at 0 with no regrowth after both
+writers were fixed and deployed. `usd_rate` now contains **canonical USDC only**,
+measured at 1.000086–1.000639 over 2026-03 → 2026-08 — genuinely par.
+
+So the design "swap the hardcoded `1` for the measured rate" is now safe as
+written: arm B is USDC-only, `usd_rate` is USDC-only, and the two agree.
+
+⚠️ **The hold becomes a standing condition, not a lifted restriction.** Adding
+any identity to the peg set is a claim that the oracle feed prices *that issuer*,
+not merely an asset whose code matches. Two tests now fail if the sets change
+without a deliberate edit — `peg_identities_is_exactly_canonical_usdc`
+(`oracle-worker`) and `reflector_resolves_exactly_xlm_and_usdc_and_nothing_else`
+(`prices-ingest-core`). The general mapping question stays [[0173]].
+
+The original hold note is kept below unedited, because it is the reasoning that
+made the trap visible and it should not have to be rediscovered.
+
 ---
 
 # ⚠️ HOLD — do not close 0172 with this task (added 2026-08-12)

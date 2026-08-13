@@ -213,6 +213,31 @@ i.e. a mid-2026 reading landing in 1970. **Canonical USDC showed the identical
 `first_seen`**, so the defect is systematic and its USDC instance is untouched
 and still investigable. Not filed as a task yet; needs one.
 
+## ✅ Mapping audit — the two survivors, with evidence
+
+The general question is [[0173]]. This is the narrow version: for each identity
+still on the oracle surface, is there a reason to believe the feed's **ticker**
+names that **issuer**?
+
+| symbol | identity | basis | verdict |
+|---|---|---|---|
+| `XLM` / `native` | `AssetIdentity::Native` | Not an issued asset. There is exactly one native asset on the network, so the ticker cannot be filed against the wrong issuer — the failure mode requires an `issuer_address` to get wrong, and there isn't one. | ✅ structurally safe |
+| `USDC` | Circle `GA5ZSEJY…KZVN` | `usd_rate` for this identity measured **1.000086 – 1.000639** monthly over 2026-03 → 2026-08, never outside ±0.0015. That is what real Circle USDC does. Had the feed been naming a different `USDC` issuer (there are ~220), a copycat would have to hold par to 15 bp for six months to fake this. | ✅ measured |
+
+⚠️ **This is weaker evidence than it looks for USDC, and worth saying plainly.**
+Agreement at par is consistent with the feed naming Circle's USDC — but it is
+*also* consistent with any issuer that happens to hold par. What makes USDT's
+case decisive is the **disagreement**: a 7.4× gap cannot be explained away. So
+this audit can falsify a mapping but cannot fully confirm one. Treat USDC as
+"no evidence of mis-attribution" rather than "confirmed correct", and leave the
+positive proof to [[0173]].
+
+⚠️ It also only covers what we poll **today**. The real protection is that the
+sets are now pinned by test, so a future addition cannot be silent:
+`peg_identities_is_exactly_canonical_usdc` (`oracle-worker`) and
+`reflector_resolves_exactly_xlm_and_usdc_and_nothing_else`
+(`prices-ingest-core`).
+
 ## What needs deciding
 
 - **Delete, or keep and re-key?** The rows are factually a record of Tether's
@@ -237,12 +262,21 @@ and still investigable. Not filed as a task yet; needs one.
 - [x] Both purges run only after the fixed worker is deployed — confirmed on
       *both* stacks (EventBridge 10:55, Compute 11:50) and by measured writer
       death, not by deploy exit status.
-- [ ] **Regrowth re-check** ~10 min after the purge (the separate half of the
-      criterion above): `oracle_prices` for asset 111 still 0.
-- [ ] Every other `TRACKED_SYMBOLS` → identity mapping audited the same way
-- [ ] 0168's hold note cleared or made permanent, explicitly
-- [ ] A test that fails if a peg/oracle identity is added without a documented
-      basis for the symbol→issuer mapping
+- [x] **Regrowth re-check** — re-run after the purge with both writers live:
+      `oracle_prices` for asset 111 still **0**. Nothing is rewriting the
+      identity, so the deletion is durable rather than a momentary state.
+- [x] Every other `TRACKED_SYMBOLS` → identity mapping audited the same way —
+      only XLM and USDC survive; evidence and its limits recorded above. XLM is
+      structurally safe; USDC is "no evidence of mis-attribution" rather than
+      positively confirmed, which is left to [[0173]].
+- [x] 0168's hold note cleared — **lifted 2026-08-13**, and converted into a
+      standing condition on ADDING peg members rather than a blanket block.
+- [x] A test that fails if a peg/oracle identity is added without a documented
+      basis — `peg_identities_is_exactly_canonical_usdc` (`oracle-worker`) and
+      `reflector_resolves_exactly_xlm_and_usdc_and_nothing_else`
+      (`prices-ingest-core`). Neither can prove a justification was written, but
+      both make the addition impossible to make silently.
+- [ ] **Spawned:** [[0199]] — the 1970 timestamps found while measuring the purge
 - [x] Writer stopped — `reflector_key_to_identity` no longer resolves `USDT`
       (done on 0172's branch, PR #205; guarded by
       `reflector_drops_usdt_because_the_ticker_is_not_this_issuer`)
