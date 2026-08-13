@@ -58,7 +58,9 @@ use crate::config::AppConfig;
 /// Both halves are load-bearing and are fixed by [0184]'s CloudFront behaviour
 /// table: `<app>/*` is an app's bundle and `<app>/api/*` is its backend, with
 /// the `/api/*` behaviour ordered **first**. The OAuth redirect URI registered
-/// with Discord ([0186]) must match this string exactly.
+/// with Discord ([0186]) must live **under** this prefix — it is a concrete
+/// callback path such as `/api-tokens/api/auth/callback`, and Discord matches
+/// the whole URI, so registering the bare prefix would fail at callback time.
 pub const PORTAL_API_PREFIX: &str = "/api-tokens/api/";
 
 /// The one portal route that answers while the portal is closed.
@@ -81,6 +83,20 @@ pub struct PortalConfig {
 #[derive(Clone)]
 pub struct PortalGate {
     enabled: bool,
+}
+
+impl PortalGate {
+    /// Build a gate directly, so a test can drive [`gate_portal`] against a
+    /// route of its own under [`PORTAL_API_PREFIX`].
+    ///
+    /// Not a convenience. Exporting the middleware while withholding its state
+    /// is how the first version of `tests/portal.rs` came to assert nothing:
+    /// the only route under the prefix was [`CONFIG_PATH`], which the gate
+    /// skips, so every "closed" assertion was really watching an unrouted path
+    /// 404 — and the whole suite stayed green with the gate deleted.
+    pub fn new(enabled: bool) -> Self {
+        Self { enabled }
+    }
 }
 
 /// Mount the portal's always-available routes and layer the gate.

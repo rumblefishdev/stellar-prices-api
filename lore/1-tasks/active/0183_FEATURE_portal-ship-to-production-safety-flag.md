@@ -34,6 +34,29 @@ history:
     status: active
     who: akot
     note: >
+      Code review on PR #207 (karczuRF) found seven issues and all seven were
+      real. Two mattered. **The test suite was vacuous** — it stayed green with
+      `gate_portal` replaced by `next.run(req).await`, because the only route
+      registered under the prefix was `/config`, which the gate skips by
+      design, so every "closed" assertion was watching an unrouted 404 rather
+      than a refusal. The `[x] asserted, not assumed` above was therefore not
+      earned when it was written. Fixed with `PortalGate::new` plus a test that
+      layers the gate over a route of its own, and the fix is confirmed the way
+      the reviewer found the hole: both mutations now fail the suite.
+      **Second**, exempting the portal prefix from `auth::is_exempt`
+      unconditionally destroyed the indistinguishability property the moment
+      `API_KEYS` is armed — portal paths would answer an empty 404 while every
+      other unknown path answered 401, making the prefix uniquely
+      fingerprintable. The exemption is now conditional on the portal being
+      open, which is stricter than either option the review proposed and keeps
+      an open portal anonymous. The remaining five (a test whose name overstated
+      it, a missing `is_exempt` test, an unconstructable `pub` state, a wrong
+      doc line about the Discord redirect URI, and a forward-looking throttle
+      note) are fixed here or, for the last, written into [[0184]].
+  - date: 2026-08-13
+    status: active
+    who: akot
+    note: >
       Mechanism changed on Adam's call before any code was written: a plain
       `PORTAL_ENABLED` environment variable, not two operator-seeded SSM
       parameters read at runtime. The point is a boolean that can be flipped and
@@ -168,7 +191,15 @@ finishing their own slice.
 - [x] With the flag off, every `/api-tokens/api/*` path returns `404` with an
       empty body, `GET .../config` excepted
 - [x] That `404` is **byte-identical** to a path that was never deployed —
-      asserted, not assumed (`tests/portal.rs`)
+      asserted, not assumed, and the assertion is itself verified by deleting
+      the gate and watching it fail (`tests/portal.rs`)
+- [x] The same holds with `API_KEYS` **armed**, which is the configuration
+      `config.rs` documents as the end state: a closed portal path answers `401`
+      like every other unknown path rather than an empty `404`. An unconditional
+      exemption in `auth::is_exempt` made the prefix the only unauthenticated
+      surface on the service, and so uniquely fingerprintable
+- [x] At least one test drives the gate over a route that **really exists**
+      under the prefix, so the suite cannot pass with the gate removed
 - [x] The gate matches by prefix, so routes added by later slices are covered
       without touching this module
 - [x] The gate does not reach `/api-tokens/*`, which S3 serves

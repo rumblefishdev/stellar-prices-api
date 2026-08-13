@@ -79,6 +79,29 @@ cookie-forwarding policy for the portal prefix. The last one is only correct to
 write once there is a session to forward — it lands with [[0186]] and is audited
 by [[0194]].
 
+**`/api-tokens/api/config` needs a method-level throttle when you add its
+gateway resource.** Raised in PR #207's review and worth acting on here rather
+than discovering later. `api-gateway-stack.ts:203` reasons carefully about the
+one other anonymous Lambda-backed route, `/api-docs-json`, and concludes it is
+safe only because a 3600 s stage-cache TTL with no cache-key parameters collapses
+every caller onto a single entry. `config` has the opposite profile **by
+design** — `no-store`, and its entire value is freshness — so every anonymous
+request reaches the Lambda with nothing but the stage-wide throttle, shared with
+paying traffic, in front of it. Same reasoning [[0124]] applied to
+`/api-docs-json`'s own throttle.
+
+Note also that routes here are declared one resource at a time — there is no
+`{proxy+}` catch-all in this stack — so the config route needs the explicit
+chain `api-tokens` → `api` → `config` with `apiKeyRequired: false`.
+
+And it will trip `tests/openapi.rs`'s
+`spec_route_coverage_matches_the_deployed_gateway_both_ways`, which compares a
+hardcoded `EXPECTED_ROUTES` list against the published document in both
+directions. Portal routes are deliberately **not** in the OpenAPI spec: they are
+the portal's own endpoints, and publishing them would advertise a half-built
+portal to every integrator reading it. The fix is to exempt the portal prefix
+from that invariant — **not** to document portal routes for partners.
+
 ## Acceptance Criteria
 
 - [ ] **Ships closed.** The placeholder states the portal is not yet available;
@@ -92,6 +115,10 @@ by [[0194]].
 - [ ] `/api-docs-json` reaches the API (it is mounted at the API root, so a
       table routing only `/v1/*` sends it to S3)
 - [ ] Distribution and bucket expressed in CDK; CI deploys and invalidates
+- [ ] `/api-tokens/api/config` is reachable through the gateway, anonymous, and
+      carries its own method-level throttle
+- [ ] `spec_route_coverage_matches_the_deployed_gateway_both_ways` passes by
+      exempting the portal prefix, not by publishing portal routes to the spec
 - [ ] URL recorded in `docs/scf/api-endpoints.md`
 
 ## Notes
