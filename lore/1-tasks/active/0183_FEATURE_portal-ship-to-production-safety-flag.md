@@ -2,7 +2,7 @@
 id: "0183"
 title: "Ship-to-production safety — portal feature flag and allowlist, because there is no test environment"
 type: FEATURE
-status: backlog
+status: active
 related_adr: ["0007", "0010"]
 related_tasks: ["0157", "0184", "0185", "0186", "0187", "0188", "0189", "0191", "0192", "0194"]
 tags: [layer-infra, priority-high, effort-small, milestone-M3, epic-self-service-onboarding, feature-flag, ssm, safety, slice-0]
@@ -22,6 +22,15 @@ history:
       half-built therefore need a way to be invisible until they are finished,
       and a way to be exercised by us in the meantime. First in the order,
       before hosting.
+  - date: 2026-08-13
+    status: active
+    who: akot
+    note: >
+      Activated as the first slice of the reorganized epic. Nothing blocks it:
+      no Discord application, no measurement, no AWS finding — two SSM
+      parameters, one middleware and a runbook entry. It is activated *before*
+      hosting on purpose, because [[0184]] is the first thing that puts a page
+      on the production distribution and there is no other distribution.
 ---
 
 # Ship-to-production safety — flag and allowlist
