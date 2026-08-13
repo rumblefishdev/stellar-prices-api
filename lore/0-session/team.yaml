@@ -7,3 +7,8 @@ akot:
   name: 'Adam Kot'
   role: 'Developer'
   focus: 'Stellar prices API'
+
+stkrolikiewicz:
+  name: 'Stanisław Królikiewicz'
+  role: 'Developer'
+  focus: 'Stellar prices API'
