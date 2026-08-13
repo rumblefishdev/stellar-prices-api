@@ -79,7 +79,7 @@ Order for the whole epic, for whoever picks this up cold:
 
 ```
 0156 ✅ → 0157 · 0158 · 0161  (no Discord at all)
-       → Discord app + stellar_test → 0171 → 0159
+       → Discord app + stellar_test → 0180 → 0159
        → 0160 → 0162 → 0163
        → 0170  (SDF contact, verify real guild, FLIP SSM)
        → 0164  (evidence, against the real guild)

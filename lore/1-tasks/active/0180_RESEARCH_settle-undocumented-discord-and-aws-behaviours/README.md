@@ -64,6 +64,30 @@ history:
       Also fixed five `task 0171` references the 0179/0180 renumber left behind in
       `docs/` — pointing at the `Decimal128::MIN` bug, which is exactly the
       confusion the renumber history entry predicted.
+  - date: 2026-08-13
+    status: active
+    who: akot
+    note: >
+      ADR 0010 write-back — the one consumer the 08-12 pass left untouched.
+      Items 6 and 9 were measured but the ADR still carried both as work to be
+      done, so it read as unsettled while 0158/0160/the runbook read as settled.
+      Corrections listed as "must be corrected before build" now split: #1
+      (nameQuery) closed as measured, #2 (quota rollover) explicitly left open
+      with the 1 September constraint stated. The cost trigger for reopening
+      the abuse-barrier decision is retired — measured 1.4-2.3x, not the 10x it
+      was watching for. Four errors found while writing it back, none of them
+      the thing being written back. (i) The ADR cited "0180 #6" for the
+      delete-then-create derivation; #6 is nameQuery and nothing in this task
+      measures that derivation, which is now labelled as still a derivation
+      rather than silently repointed. (ii) $3.50/M and $0.038/hr are us-east-1
+      rates; we are eu-central-1. (iii) The API Gateway cache is called
+      "optional" and is enabled in production - $14.60/mo, about 19 drained
+      keys, our largest onboarding-adjacent cost and a fixed one. (iv)
+      Alternatives 5 and 6 derived their own figures from the old $0.38 and
+      would have contradicted the corrected Proportionality section; rescaled.
+      Also picked up two more stale `0171` references the 08-12 sweep missed
+      (`0164`, archived `0157`) - it caught five in `docs/`, none in `lore/`.
+      Item 7 remains blocked on an expired AWS SSO token; items 1-5 on Step 0.
 ---
 
 # Settle the undocumented behaviours before building on them
@@ -176,7 +200,19 @@ rule as AWS-documented, not to prove AWS's implementation.
       re-checked against it — **done 2026-08-12**, $0.55–$0.89 per fully-drained
       key (1.4–2.3× the $0.38), argument survives. See
       [R-all-in-per-call-cost](notes/R-all-in-per-call-cost.md)
-- [ ] Any finding that changes ADR 0010's shape reflected in the ADR
+- [ ] Any finding that changes ADR 0010's shape reflected in the ADR —
+      **items 6 and 9 written back 2026-08-13**; open only for item 7. The cost
+      figure is measured throughout (Proportionality, the abuse-barrier trade,
+      Alternatives 5 and 6), the "backend cost might dominate 10×" reversal
+      trigger is retired, and correction #1 is closed while #2 stays open. Four
+      defects surfaced while writing it back, none of them the finding being
+      written: the ADR cited `#6` for the delete-then-create derivation (that is
+      `nameQuery`, and **nothing in this task measures that derivation** — it is
+      now labelled as still a derivation, with the five-minute check that would
+      settle it); the pricing was us-east-1's; the API Gateway cache was called
+      "optional" while enabled in production at **$14.60/mo ≈ 19 drained keys**,
+      making our largest onboarding-adjacent cost a fixed one; and two
+      Alternatives recomputed their own numbers from the old $0.38
 
 ## Notes
 

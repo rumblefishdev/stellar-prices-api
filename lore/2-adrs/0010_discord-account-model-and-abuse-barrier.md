@@ -18,6 +18,25 @@ history:
       before build". Scope and mitigation decided by Adam: guild membership
       required plus an account-age minimum. Written from 0156's five research
       notes, every source of which was re-verified against the original.
+  - date: 2026-08-13
+    status: accepted
+    who: akot
+    note: >
+      Measurements from 0180 written back. Status unchanged — the decision
+      stands and no alternative is reopened. Proportionality now carries
+      measured numbers instead of an estimate: $0.55-0.89 per fully-drained key
+      all-in, against the $0.38 gateway-only figure this ADR was written on, so
+      the "backend cost might dominate by 10x" reversal trigger is retired.
+      Three errors corrected on the way: $3.50/million and $0.038/hr are
+      us-east-1 rates and we are in eu-central-1 ($3.70 and $0.020); the API
+      Gateway cache was called "optional" when it is enabled in production; and
+      the pointer to "0180 #6" on the delete-then-create derivation was wrong
+      (#6 is nameQuery) — nothing in 0180 measured that derivation, and it is
+      now labelled as still a derivation. Correction 1 (nameQuery) closed as
+      measured; correction 2 (quota rollover) left open. Added the point 0180's
+      cost note raised and nothing had absorbed: the real exposure from a
+      drained key is contention on the BE-shared ch-prod-01, which no dollar
+      figure will surface.
 ---
 
 # ADR 0010: Discord identity is the account
@@ -119,9 +138,11 @@ That is a deliberate trade, not an oversight:
   account specifically to use this API waits minutes, not days — the failure
   mode of a 7- or 30-day threshold, which would have been invisible to us and
   infuriating to them.
-- The exposure it is defending is **$0.38 per fully-drained key per month**;
-  286 drained keys reach ~$100/month. A stricter gate would cost more in
-  refused real users than in prevented abuse.
+- The exposure it is defending is **$0.55–$0.89 per fully-drained key per
+  month** — measured 2026-08-12 ([[0180]] #9); the $0.38 this ADR was written on
+  was gateway-only and priced in us-east-1. ~112–182 drained keys reach
+  ~$100/month. A stricter gate would still cost more in refused real users than
+  in prevented abuse.
 - The threshold is an SSM parameter precisely so this can be raised without a
   deploy the moment churn is actually observed.
 
@@ -332,16 +353,54 @@ key to a deleted one — there is no predecessor, lineage or carry-over field am
 yields a key ID with no prior usage. **That is the loophole the once-per-quota-
 period cap exists to close**, and it is why the cap is load-bearing rather than
 tidy. It is a derivation from documented behaviour, not a documented guarantee —
-[[0180]] #6 measures it.
+and after [[0180]] it **still is one**. None of that task's nine items measured
+delete-then-create directly. (An earlier draft of this line pointed at #6, which
+is `nameQuery` matching and has nothing to do with usage counters.)
 
-**Proportionality — what the abuse is worth.** A fully-drained key (100k quota,
-3 KB responses, us-east-1) costs **$0.38/month** — **gateway charges only; the
-backend cost per call is unpriced and probably dominant** ([[0180]] #9). On
-request charges alone, ~286 drained keys reach $100/month (267 on the all-in
-basis). Optional API Gateway caching alone is $27.36/month = 72 abusive
-keys. This is why no paid mitigation is justified, and why the quota — which
-cuts worst-case per-key exposure **26×** versus the throttle alone — remains the
-most effective control in the design.
+What #8 measured corroborates the derivation from the adjacent direction:
+disabling a key **preserves** its counter, so usage travels with the key `id`
+and not with the name or the plan attachment. That is consistent with a fresh
+`id` starting clean — it does not prove it. If anyone wants the guarantee rather
+than the inference, it is five minutes on a scratch plan: drain a key, delete
+it, recreate it under the same name, read `GetUsage`.
+
+**Proportionality — what the abuse is worth. Measured 2026-08-12 ([[0180]] #9);
+this paragraph previously carried an estimate.** A fully-drained key (100k
+quota, 3 KB responses) costs **$0.55–$0.89/month all-in** in `eu-central-1` —
+gateway requests, gateway transfer, Lambda requests and Lambda duration. The
+**$0.38** it replaces was gateway-only *and priced in the wrong region*: the
+correct request rate here is **$3.70/million, not $3.50**. So ~112–182 drained
+keys reach $100/month, where this ADR said 286.
+
+**The suspicion that backend cost dominates was wrong, and the argument
+survives.** All-in is **1.4–2.3×** the old figure, not the 10× that would have
+made this reasoning worth reopening. But the reason it moved at all is worth
+recording: the largest marginal component at the measured p50 is **Lambda
+duration, not gateway** ($3.30e-6 against $3.70e-6). "Gateway-only" was not a
+conservative simplification — it happened to omit a term of similar size, and
+was wrong by roughly the amount that term is worth.
+
+**The API Gateway cache is not optional and we are already paying for it.**
+`apiGatewayCacheEnabled: true` at 0.5 GB (`infra/envs/production.json`), which
+the AWS Pricing API puts at **$14.60/month** for this region — this ADR
+previously called it "optional" at "$27.36/month", and both were wrong; that is
+the us-east-1 rate for a cache that is already on. It equals **~19 fully-drained
+keys per month, charged whether anyone signs up or not.** The largest
+onboarding-adjacent cost in this design is a fixed one, and no abuse gate moves
+it.
+
+**One thing the dollar figure does not measure.** ClickHouse is a fixed-price
+box (ADR 0007) and our allocation is ~**€1.10/month**, so a drained key costs
+almost nothing there *in money* — but `ch-prod-01` is **shared with the BE
+team**, and query load is real whether or not anyone bills us for it. A
+dollar-denominated proportionality argument is right about the money and silent
+about contention. If abuse ever becomes visible, the first symptom will be BE's
+queries slowing down, not a line on an invoice — so do not treat "the money is
+small" as "the exposure is small".
+
+This is why no paid mitigation is justified, and why the quota — which cuts
+worst-case per-key exposure **26×** versus the throttle alone — remains the most
+effective control in the design.
 
 ---
 
@@ -400,10 +459,12 @@ is literally *"must have verified email on account"*.
 
 ### Alternative 5: Manual approval for the first key
 
-**Cons:** At an assumed $60/h fully loaded, a 2-minute review costs $2.00 ≈ 5.3
-fully-drained keys. Cost scales with *legitimate* signups while the abuse it
-prevents does not, and it deletes the "self-service" property the epic is named
-after.
+**Cons:** At an assumed $60/h fully loaded, a 2-minute review costs $2.00 ≈
+**2.2–3.6 fully-drained keys** on the measured all-in cost (this read "5.3" on
+the old gateway-only $0.38). The rejection gets *weaker* as the true cost rises
+— but not nearly enough to matter, and the decisive objection was never the
+arithmetic: cost scales with *legitimate* signups while the abuse it prevents
+does not, and it deletes the "self-service" property the epic is named after.
 
 **Decision:** REJECTED.
 
@@ -412,8 +473,12 @@ after.
 **Description:** Leave the gates alone and shrink the prize instead — 100k/month
 down to 50k or 25k.
 
-**Pros:** Free, and it *saves* money: per-key exposure drops from **$0.38** to
-**$0.19** at 50k and to **~$0.09** at 25k. It is one number in the usage plan,
+**Pros:** Free, and it *saves* money: per-key exposure drops from
+**$0.55–$0.89** to **$0.28–$0.45** at 50k and to **$0.14–$0.22** at 25k — every
+marginal component scales per call, so the quota scales the exposure linearly
+(figures restated 2026-08-12 from the measured all-in cost; they read
+$0.38/$0.19/$0.09 when this ADR assumed gateway charges only). It is one number
+in the usage plan,
 enforced natively by AWS with no code of ours in the path, and it bounds every
 key — abusive or not. There is real headroom: our 50k–100k is **5–10×
 CoinGecko's** free tier ("10k call credits/mo") and **3.3–6.7×** CoinMarketCap's
@@ -497,29 +562,50 @@ the rework cap, which is coherent only under one key.
   justified.
 - Observed *scripted* signup specifically — that is the threat captcha
   addresses, and a 5-minute age gate barely touches it.
-- The all-in per-call backend cost ([[0180]] #9) turning out to dominate the
-  gateway figure by an order of magnitude — every exposure number in the
-  rationale scales with it, and a $0.38/key threat model becoming a $4/key one
-  changes what mitigation is proportionate.
+- ~~The all-in per-call backend cost turning out to dominate the gateway figure
+  by an order of magnitude.~~ **Retired 2026-08-12 — measured, and it does not**
+  ([[0180]] #9). All-in is $0.55–$0.89/key against the $0.38 assumed here:
+  1.4–2.3×, nowhere near the 10× that would have moved the decision. The figures
+  in Proportionality are now measured rather than estimated, so this trigger has
+  nothing left to fire on.
+- **Replacing it: contention on the shared ClickHouse box.** The measurement
+  that retired the trigger above also showed why a dollar figure was the wrong
+  instrument — `ch-prod-01` is fixed-price and shared with BE, so abusive query
+  load is close to free *to us* and not free *to them*. Watch BE's query
+  latency, not our bill.
 
 ---
 
 ## Corrections this ADR makes to already-written tasks
 
-Both were checked directly against AWS documentation. Neither is fatal; both
-must be corrected before build ([[0180]]).
+Both were checked directly against AWS documentation. Neither is fatal. **The
+first is now measured and corrected; the second is still open** ([[0180]]).
 
-1. **`nameQuery` is not documented as a prefix match.** [[0158]] and [[0160]]
-   build a reconciler and a "prefix hazard" guard on that premise. AWS documents
-   one sentence — *"The name of queried API keys."* — and states no matching
-   semantics. The client-side exact-match filter is therefore **load-bearing,
-   not defence in depth**.
-2. **The monthly quota reset instant is undocumented.** "1st of the month,
-   00:00 UTC" appears in [[0157]]/[[0158]]/[[0160]] as if it were AWS behaviour.
-   AWS's only statement is an example caption — *"creates a usage plan that
-   resets at the beginning of the month"* — with no timezone and no instant.
-   `offset` is a **request count**, not a time shift. Keep the rule as **our**
-   product decision; do not present it as inherited AWS semantics.
+1. ✅ **`nameQuery` is not documented as a prefix match — and measured
+   2026-08-12, it is one.** [[0158]] and [[0160]] build a reconciler and a
+   "prefix hazard" guard on that premise. AWS documents one sentence — *"The
+   name of queried API keys."* — and states no matching semantics; measurement
+   on a scratch plan showed **case-sensitive prefix** matching. So the community
+   answer was right, the prefix hazard 0158 wrote as a conditional is **real**,
+   and the client-side exact-match filter is **load-bearing, not defence in
+   depth** — for the stronger reason that AWS *does* return prefixes, rather
+   than the weaker one that AWS says nothing. 0158, 0160 and
+   `docs/runbooks/manual-api-key-tier.md` are updated.
+
+   One thing nobody had asked, and it changes code: **a `nameQuery` result still
+   paginates.** It comes back with a `position` token like any other list, so a
+   reconciler that ranks by earliest `createdDate` off page one can pick a winner
+   from a partial list. Page to exhaustion before ranking.
+2. ⏳ **The monthly quota reset instant is undocumented — still unmeasured.**
+   "1st of the month, 00:00 UTC" appears in [[0157]]/[[0158]]/[[0160]] as if it
+   were AWS behaviour. AWS's only statement is an example caption — *"creates a
+   usage plan that resets at the beginning of the month"* — with no timezone and
+   no instant. `offset` is a **request count**, not a time shift. Keep the rule
+   as **our** product decision; do not present it as inherited AWS semantics.
+   A real `MONTH` rollover cannot be observed before **1 September 2026**;
+   [[0180]] #7 measures a `DAY`-period plan as a proxy for the instant and the
+   timezone, which is evidence and not proof — and is enough, because the point
+   is to stop citing AWS for a rule AWS never stated.
 
 ---
 
@@ -532,7 +618,7 @@ against the original.
 - [GetApiKeys](https://docs.aws.amazon.com/apigateway/latest/api/API_GetApiKeys.html) — `nameQuery`, `customerId`
 - [QuotaSettings](https://docs.aws.amazon.com/apigateway/latest/api/API_QuotaSettings.html) — `offset` is a request count
 - [Amazon API Gateway quotas](https://docs.aws.amazon.com/apigateway/latest/developerguide/limits.html) — control-plane rates
-- [Amazon API Gateway Pricing](https://aws.amazon.com/api-gateway/pricing/) — $3.50/million, $0.09/GB, $0.038/hr cache
+- [Amazon API Gateway Pricing](https://aws.amazon.com/api-gateway/pricing/) — $3.50/million, $0.09/GB, $0.038/hr cache. **These are us-east-1 rates.** Our region is `eu-central-1`: **$3.70/million** requests and **$0.020/hr** for a 0.5 GB cache, read from the AWS Pricing API on 2026-08-12 (`EUC1-ApiGatewayRequest`, `EUC1-ApiGatewayCacheUsage:0.5GB`) — see [[0180]] #9
 - [Discord — OAuth2](https://docs.discord.com/developers/topics/oauth2) — scope definitions
 - [Discord — User Resource](https://docs.discord.com/developers/resources/user) — `verified` requires `email`; no phone field
 - [Discord — Guild Resource](https://docs.discord.com/developers/resources/guild) — verification levels, `pending`, member flags
