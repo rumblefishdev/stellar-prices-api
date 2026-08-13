@@ -47,6 +47,12 @@ export function createApp({ config }: CreateAppOptions): void {
   // execute-api origin hostname. Passing it in creates the cross-stack
   // dependency, which orders ApiGateway before PortalHosting.
   //
+  // That ordering runs BOTH ways and the reverse one is easy to miss:
+  // CloudFormation will not delete a stack whose exports are in use, so
+  // ApiGateway can no longer be destroyed — or have its RestApi replaced —
+  // while PortalHosting exists. Tear the portal down first; the Makefile's
+  // `destroy-production-apigateway` target carries the same note.
+  //
   // The distribution lives in this stack's region like everything else: it
   // needs no us-east-1 certificate, because it has no custom domain until task
   // 0195 adds one (and that certificate is that task's problem).

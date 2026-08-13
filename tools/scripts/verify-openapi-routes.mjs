@@ -173,7 +173,9 @@ const GATEWAY_SKIPPED_METHODS = new Set(['options']);
  * compare against even if we wanted one.
  *
  * Mirrors `PORTAL_API_PREFIX` in that module and `PORTAL_BACKEND` in
- * `infra/src/lib/stacks/portal-hosting-stack.ts`.
+ * `infra/src/lib/stacks/portal-hosting-stack.ts` — and, unlike when this skip
+ * was written, that agreement is now asserted rather than asked for in a
+ * comment. See the three-way check below the gateway walk.
  *
  * The skip is symmetric, unlike the OPTIONS one above: a portal path appearing
  * in the document would be checked by neither direction, so the spec side
@@ -182,6 +184,8 @@ const GATEWAY_SKIPPED_METHODS = new Set(['options']);
 const PORTAL_API_PREFIX = '/api-tokens/api/';
 
 const gatewayRoutes = new Set();
+/** Routes the prefix skip above swallowed — asserted non-empty further down. */
+const portalGatewayRoutes = [];
 for (const [, res] of resources) {
   if (res.Type !== 'AWS::ApiGateway::Method') continue;
   // Every method CDK emits declares HttpMethod as a literal. A non-string would
@@ -218,7 +222,10 @@ for (const [, res] of resources) {
   }
   // Checked BEFORE the ANY case: the portal is mapped as `ANY {proxy+}`, so
   // the order decides whether this is a skip or a hard failure.
-  if (path.startsWith(PORTAL_API_PREFIX)) continue;
+  if (path.startsWith(PORTAL_API_PREFIX)) {
+    portalGatewayRoutes.push(`${method} ${path}`);
+    continue;
+  }
   // `ANY` maps every verb at once and can never equal an OpenAPI operation
   // key, so it would report as undocumented forever. Skipping it silently
   // would instead hide a mapped route from the check — fail loudly and make
@@ -232,6 +239,157 @@ for (const [, res] of resources) {
     process.exit(1);
   }
   gatewayRoutes.add(`${method} ${path}`);
+}
+
+// ---------------------------------------------------------------------------
+// The portal prefix agrees across all three places that declare it.
+// ---------------------------------------------------------------------------
+// The skip above is the reason this section has to exist. Until now the prefix
+// was three independent literals — Rust `PORTAL_API_PREFIX`, CDK
+// `PORTAL_BACKEND`, and the one in this file — tied together by comments saying
+// "the three must agree", which is not a check.
+//
+// The failure that buys: task 0186 moves the Rust prefix, the CloudFront table
+// still routes the NEW prefix to S3, and the OAuth callback is answered with
+// the SPA bundle as `200 text/html` — the exact "reads as a JSON parse error,
+// not as a routing bug" outcome the portal stack's own docblock warns about.
+// CI stays green throughout, because this script skips the OLD prefix and the
+// portal is absent from the document either way.
+//
+// This script already derives both of its sides from synthesized artifacts, so
+// it is the natural place: same technique, one more artifact.
+const portalTemplate = readJson(
+  join(
+    repoRoot,
+    'infra',
+    'cdk.out',
+    'Prices-production-PortalHosting.template.json',
+  ),
+  'run `npm run infra:synth:production` first',
+);
+const portalModPath = join(
+  repoRoot,
+  'packages',
+  'prices-api',
+  'src',
+  'portal',
+  'mod.rs',
+);
+
+function fail(...lines) {
+  for (const line of lines) console.error(line);
+  process.exit(1);
+}
+
+// --- 1. The handler's literal. ---
+let portalMod;
+try {
+  portalMod = readFileSync(portalModPath, 'utf8');
+} catch (err) {
+  fail(`error: cannot read ${portalModPath}\n  ${err.message}`);
+}
+const rustPrefix = /pub const PORTAL_API_PREFIX: &str = "([^"]*)";/.exec(
+  portalMod,
+)?.[1];
+if (rustPrefix === undefined) {
+  fail(
+    `error: could not find \`pub const PORTAL_API_PREFIX\` in ${portalModPath}.`,
+    '  → this check reads it to prove the handler, the CDK routing table and ' +
+      'this script still mean the same prefix. Restore the constant, or ' +
+      'update the pattern here.',
+  );
+}
+if (rustPrefix !== PORTAL_API_PREFIX) {
+  fail(
+    `error: the portal prefix disagrees between the handler and this check:`,
+    `  ${portalModPath}: ${rustPrefix}`,
+    `  ${fileURLToPath(import.meta.url)}: ${PORTAL_API_PREFIX}`,
+    '  → the routing table in infra/src/lib/stacks/portal-hosting-stack.ts ' +
+      'almost certainly needs the same edit; all three must agree.',
+  );
+}
+
+// --- 2. The CloudFront behaviour that must win for a portal backend path. ---
+const distributions = Object.values(portalTemplate.Resources ?? {}).filter(
+  (r) => r.Type === 'AWS::CloudFront::Distribution',
+);
+if (distributions.length !== 1) {
+  fail(
+    `error: expected exactly 1 AWS::CloudFront::Distribution in the ` +
+      `PortalHosting template, found ${distributions.length}. This check ` +
+      `assumes one distribution owns the portal's routing table.`,
+  );
+}
+const distConfig = distributions[0].Properties?.DistributionConfig ?? {};
+const behaviours = distConfig.CacheBehaviors ?? [];
+const originsById = new Map((distConfig.Origins ?? []).map((o) => [o.Id, o]));
+
+/**
+ * CloudFront matches a path pattern with `*` (any run of characters) and `?`
+ * (exactly one), first behaviour wins. Everything else is a literal — escape it
+ * so a `.` or `+` in a pattern cannot widen the match.
+ */
+const patternToRegExp = (pattern) =>
+  new RegExp(
+    `^${pattern.replace(/[.*+?^${}()|[\]\\]/g, (c) =>
+      c === '*' ? '.*' : c === '?' ? '.' : `\\${c}`,
+    )}$`,
+  );
+
+// Ordering is the property under test, so probe it the way CloudFront does:
+// take the FIRST pattern that matches a representative backend path.
+const probe = `${PORTAL_API_PREFIX}probe`;
+const winner = behaviours.find((b) =>
+  patternToRegExp(String(b.PathPattern)).test(probe),
+);
+const expectedPattern = `${PORTAL_API_PREFIX}*`;
+
+if (!winner) {
+  fail(
+    `error: no cache behaviour matches ${probe}, so it falls to the ` +
+      `distribution's DefaultCacheBehavior — the bundle bucket.`,
+    `  → add \`${expectedPattern}\` to the routing table in ` +
+      'infra/src/lib/stacks/portal-hosting-stack.ts.',
+  );
+}
+if (winner.PathPattern !== expectedPattern) {
+  fail(
+    `error: ${probe} is matched first by \`${winner.PathPattern}\`, not by ` +
+      `\`${expectedPattern}\`.`,
+    '  → CloudFront takes the first match, so a broader pattern listed above ' +
+      'the portal backend swallows every portal API call and answers it with ' +
+      'whatever that behaviour serves. If that is the bundle, the caller gets ' +
+      'a 200 full of HTML, which surfaces as a JSON parse error rather than ' +
+      'as a routing bug. Reorder `additionalBehaviors` in ' +
+      'infra/src/lib/stacks/portal-hosting-stack.ts.',
+  );
+}
+// Matching first is not enough — it has to point at the API. An S3 target here
+// is the same 200-full-of-HTML failure arriving by a different route.
+const winnerOrigin = originsById.get(winner.TargetOriginId);
+if (!winnerOrigin?.CustomOriginConfig) {
+  fail(
+    `error: behaviour \`${winner.PathPattern}\` targets origin ` +
+      `\`${winner.TargetOriginId}\`, which is not an HTTP (execute-api) ` +
+      `origin — the portal's backend calls would be served from the bundle ` +
+      `bucket.`,
+  );
+}
+
+// --- 3. The skip is not covering an empty set. ---
+// If the gateway ever stops mapping anything under the prefix, the two checks
+// above still pass — they only prove the CDN would route it — while every
+// portal call 403s at the gateway. Non-vacuous, same stance as the
+// `gatewayRoutes.size === 0` guard further down.
+if (portalGatewayRoutes.length === 0) {
+  fail(
+    `error: API Gateway maps no route under ${PORTAL_API_PREFIX}, so this ` +
+      `check's portal skip covers nothing.`,
+    '  → the portal backend is unreachable in production: CloudFront forwards ' +
+      'the request and the gateway answers 403 Missing Authentication Token. ' +
+      'Restore `ANY /api-tokens/api/{proxy+}` in ' +
+      'infra/src/lib/stacks/api-gateway-stack.ts.',
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -338,3 +496,9 @@ console.log(
   `OpenAPI document and API Gateway agree on ${gatewayRoutes.size} route(s):`,
 );
 for (const r of [...gatewayRoutes].sort()) console.log(`  ${r}`);
+console.log(
+  `\nPortal prefix ${PORTAL_API_PREFIX} agrees across the handler, the ` +
+    `CloudFront routing table and this check; ` +
+    `${portalGatewayRoutes.length} gateway route(s) skipped as portal:`,
+);
+for (const r of portalGatewayRoutes.sort()) console.log(`  ${r}`);

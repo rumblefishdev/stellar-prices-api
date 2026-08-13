@@ -105,6 +105,33 @@ export class PortalHostingStack extends cdk.Stack {
     });
 
     // ---------------------------------------------------------------
+    // Access logs.
+    // ---------------------------------------------------------------
+    // On, because CloudFront cannot backfill: a distribution that was not
+    // logging at the time of an incident has nothing to reconstruct it from,
+    // and the two things most likely to need reconstructing both arrive here.
+    // `/api-tokens/api/*` is an anonymous entry point whose only limiter today
+    // is the stage's default throttle, and task 0186 puts Discord OAuth
+    // callbacks and session cookies through these same behaviours.
+    //
+    // `logIncludesCookies` stays FALSE for that second reason: from task 0186
+    // the portal's cookie IS the session, so including cookies would write a
+    // usable credential into an S3 bucket in plaintext, for 90 days, to answer
+    // a question the request line already answers.
+    //
+    // `BUCKET_OWNER_PREFERRED` is required, not stylistic — CloudFront standard
+    // logging delivers via ACL grants, and S3's current default of
+    // `BucketOwnerEnforced` disables ACLs, which makes delivery fail silently.
+    const logBucket = new s3.Bucket(this, 'PortalLogBucket', {
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      encryption: s3.BucketEncryption.S3_MANAGED,
+      enforceSSL: true,
+      objectOwnership: s3.ObjectOwnership.BUCKET_OWNER_PREFERRED,
+      lifecycleRules: [{ expiration: cdk.Duration.days(90) }],
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+
+    // ---------------------------------------------------------------
     // Origin 2 — the API, as a second origin on the same distribution.
     // ---------------------------------------------------------------
     // `originPath` is load-bearing. API Gateway serves a REST API only under
@@ -134,7 +161,25 @@ export class PortalHostingStack extends cdk.Stack {
     //
     // This is NOT task 0195's SPA fallback, which rewrites *unknown sub-paths*
     // to the owning app's `index.html` and has to be written per prefix. This
-    // only appends `index.html` to a path that already ends in a slash.
+    // only appends `index.html` to a path that already ends in a slash, and
+    // sends a path that is missing that slash to its canonical form.
+    //
+    // That last branch is not cosmetic. `/api-tokens/*` does NOT match
+    // `/api-tokens`, so the bare prefix falls through to `defaultBehavior` (S3)
+    // and — because the OAC policy grants `s3:GetObject` and not
+    // `s3:ListBucket` — S3 masks the missing key as `403 AccessDenied` XML
+    // rather than a 404. That is the same bare AccessDenied page the `/`
+    // redirect below exists to prevent, at a URL a reviewer reaches by trimming
+    // one character off the documented one. It catches `/api-tokens/api` too,
+    // which lands on S3 via the bundle behaviour for the same reason; the
+    // redirect puts it back on the API behaviour, where the gateway answers for
+    // its own namespace instead of S3 answering for it.
+    //
+    // The redirect drops any query string. Safe here, and only here: this
+    // function is attached to the S3 behaviours alone, so the one portal URL
+    // that carries query parameters — task 0186's OAuth callback, under
+    // `/api-tokens/api/` — is matched by an API behaviour this function never
+    // sees.
     //
     // Associated with the S3 behaviours only. Attaching it to an API behaviour
     // would rewrite backend calls the moment one ended in a slash — which is
@@ -144,20 +189,31 @@ export class PortalHostingStack extends cdk.Stack {
       comment: 'Append index.html to directory paths; redirect / to the portal',
       runtime: cloudfront.FunctionRuntime.JS_2_0,
       code: cloudfront.FunctionCode.fromInline(`
+function redirect(location) {
+  return {
+    statusCode: 302,
+    statusDescription: 'Found',
+    headers: { location: { value: location } },
+  };
+}
+
 function handler(event) {
   var request = event.request;
   var uri = request.uri;
   // The distribution root has no app of its own yet. Task 0195 gives it one
   // when a second frontend joins; until then the only page here is the portal.
   if (uri === '/') {
-    return {
-      statusCode: 302,
-      statusDescription: 'Found',
-      headers: { location: { value: '/api-tokens/' } },
-    };
+    return redirect('/api-tokens/');
   }
   if (uri.slice(-1) === '/') {
     request.uri = uri + 'index.html';
+    return request;
+  }
+  // No dot in the last segment: this addresses a directory, not an object.
+  // Send it to the trailing-slash form rather than letting S3 answer for a key
+  // that was never going to exist.
+  if (uri.slice(uri.lastIndexOf('/') + 1).indexOf('.') === -1) {
+    return redirect(uri + '/');
   }
   return request;
 }
@@ -220,7 +276,9 @@ function handler(event) {
         '/api-docs-json': apiBehaviour,
         '/health': apiBehaviour,
       },
-      enableLogging: false,
+      enableLogging: true,
+      logBucket,
+      logIncludesCookies: false,
     });
 
     // ---------------------------------------------------------------
@@ -231,6 +289,20 @@ function handler(event) {
     // step an operator has to remember. `distributionPaths` is scoped to the
     // portal prefix — the API behaviours are uncached and there is nothing else
     // in the bucket.
+    //
+    // `cacheControl` is the half `distributionPaths` cannot do. An invalidation
+    // clears the EDGE; it cannot reach a viewer's browser. Without a header the
+    // objects carry none, the S3 behaviours fall to CDK's default
+    // `CACHING_OPTIMIZED` (24 h) and browsers apply heuristic caching on top —
+    // so a visitor who opens today's placeholder keeps being told the portal is
+    // not available for a day after task 0185 ships the real app, with nothing
+    // on screen to explain why. That is the hazard the portal's own `/config`
+    // route sets `no-store` to avoid, arriving through the front door instead.
+    //
+    // `max-age=0, must-revalidate` is right for what is in the bucket TODAY:
+    // one unhashed `index.html`, where a revalidation round trip is cheap and
+    // being wrong is not. When task 0185 brings a real bundle it should split
+    // this — content-hashed assets get a year, the entry document keeps this.
     new s3deploy.BucketDeployment(this, 'PortalBundle', {
       sources: [s3deploy.Source.asset(PORTAL_ASSET_DIR)],
       destinationBucket: this.bucket,
@@ -238,6 +310,11 @@ function handler(event) {
       distribution: this.distribution,
       distributionPaths: ['/api-tokens/*'],
       prune: true,
+      cacheControl: [
+        s3deploy.CacheControl.setPublic(),
+        s3deploy.CacheControl.maxAge(cdk.Duration.seconds(0)),
+        s3deploy.CacheControl.mustRevalidate(),
+      ],
     });
 
     // Task 0186 registers the OAuth redirect URI against this hostname and task

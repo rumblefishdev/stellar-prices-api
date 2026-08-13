@@ -81,6 +81,38 @@ The convention, settled 2026-08-07 and meant for the frontends that follow:
 **`<app>/*` is that app's bundle, `<app>/api/*` is that app's backend.** A new
 frontend adds two rows and invents nothing.
 
+That ordering is no longer a hand-checked property: `openapi:verify-routes`
+takes the first pattern that matches a portal backend path out of the
+synthesized distribution and fails CI unless it is `/api-tokens/api/*` pointing
+at the execute-api origin. The same check asserts the prefix is identical in the
+handler (`PORTAL_API_PREFIX`), in the CDK routing table (`PORTAL_BACKEND`) and
+in the script itself, so moving it in one place cannot leave the other two
+behind.
+
+**Paths without a trailing slash redirect.** A pattern like `/api-tokens/*` does
+not match `/api-tokens`, so the bare prefix would fall to the default behaviour
+and S3 would answer `403 AccessDenied` XML — it grants `s3:GetObject` and not
+`s3:ListBucket`, so a missing key reads as forbidden rather than absent. A
+viewer-request function sends any path whose last segment has no file extension
+to its trailing-slash form (`302`), which is what a reviewer trimming the
+documented URL should get:
+
+| Request           | Result                                               |
+| ----------------- | ---------------------------------------------------- |
+| `/api-tokens`     | `302` → `/api-tokens/` → the portal page             |
+| `/api-tokens/api` | `302` → `/api-tokens/api/` → the gateway, **not** S3 |
+
+`/api-tokens/api/` reaches API Gateway but matches no method on the resource, so
+it answers `403 {"message":"Missing Authentication Token"}` — the gateway's
+standard response for an unmapped path, the same as `/v1`. It is deliberately
+**not** the empty `404` described below: that applies to paths _under_ the
+prefix, which the greedy `{proxy+}` maps and the handler then gates.
+
+**Access logs are on**, to a private bucket with a 90-day expiry. Cookies are
+excluded: from task 0186 the portal's cookie is the session itself, and logging
+it would write a usable credential to S3 in plaintext. CloudFront cannot
+backfill logs, so this has to be on before the incident, not after.
+
 Three properties worth knowing before changing anything here:
 
 - **The bucket is private.** No public objects, no ACLs; the distribution reads

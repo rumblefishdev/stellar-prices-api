@@ -114,6 +114,23 @@ bundle will read; `/v1/assets` without a key returns the gateway's `403`, provin
 portal traffic reaches API Gateway rather than S3 and that the viewer `Host`
 header is not being forwarded.
 
+> **The `/config` line describes the state after [[0183]] is deployed, not
+> production as it stands.** Branches stack `develop → 0183 → 0184`, and 0183 is
+> not merged, so the api-handler live today predates it: `PORTAL_ENABLED` is
+> absent from the deployed Lambda's environment entirely and `/config` answers an
+> empty `404` — via CloudFront and via execute-api alike. Nothing on this branch
+> causes that and nothing here fixes it; `enabled: bool`, `config_handler` and
+> the gate's `CONFIG_PATH` exemption are all 0183's code. It resolves when 0183
+> merges and Compute is deployed.
+>
+> Worth knowing because the two states are otherwise indistinguishable: 0183
+> makes a gated path and a nonexistent one byte-identical on purpose, so an empty
+> `404` under the prefix proves nothing either way. `/config` is the single path
+> where they differ — it is exempt from the gate and answers `200` in **both**
+> flag states — which is what makes it the probe worth running after the next
+> Compute deploy. Task 0185's bundle reads it and would today receive a `404`
+> rather than `{"enabled":false}`.
+
 ## Implementation Notes
 
 Five files, no Rust changes — [[0183]] already ships the behaviour behind the
