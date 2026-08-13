@@ -415,6 +415,31 @@ priced-but-zero-volume bucket can reach it. Pre-existing and not caused by this
 change — but removing USDT from the peg set removes USDT's accidental protection,
 so it is worth confirming on prod that USDT has no zero-volume-only buckets.
 
+### ✅ CONFIRMED CLEAR ON PROD 2026-08-13 — the shape is not reachable for USDT
+
+Raised again as finding 5 of PR #205's review, which argued the confirmation is a
+**prerequisite** for the arm-B hunk rather than a follow-up — correct, because
+the failure is `CANNOT_INSERT_NULL_IN_ORDINARY_COLUMN` (code 349), which fails
+`price_usd_series` for *every* row in the result, not just USDT's.
+
+```sql
+SELECT toDate(timestamp) AS d,
+       countIf(close_usd > 0)            AS priced,
+       sumIf(volume_base, close_usd > 0) AS weight
+FROM prices.price_ohlcv_1d FINAL
+WHERE asset_id = 111
+GROUP BY d HAVING priced > 0 AND weight = 0
+```
+
+**Empty result.** Every USDT bucket with a priced candle carries non-zero total
+`volume_base`, so `sum(w)` is never 0 and the `CAST` never sees a NULL. Removing
+USDT's placeholder is safe.
+
+⚠️ This clears **USDT**, not the defect. [[0185]] stays open: arm A still filters
+only on `close_usd > 0`, so any other asset that lands priced-but-zero-volume
+takes down the whole view. USDT simply is not such an asset today — which is a
+measurement, not a guarantee.
+
 ## Where to look next
 
 - **Is `asset_id 111` really the asset the writer meant?** The reader-side
