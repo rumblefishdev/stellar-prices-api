@@ -23,7 +23,10 @@ use soroswap_extractor::SoroswapPoolRegistry;
 use xdr_parser::extract_events;
 use xdr_parser::types::EventSource;
 
-use crate::canonical::{AssetIdentity, AssetRegistry, USDC_ISSUER, USDT_ISSUER, canonicalise};
+// USDT_ISSUER is deliberately NOT imported here: task 0172 removed the `USDT`
+// arm from `reflector_key_to_identity`, so this module must not resolve that
+// identity in non-test code. The tests import it directly to assert the drop.
+use crate::canonical::{AssetIdentity, AssetRegistry, USDC_ISSUER, canonicalise};
 use crate::tick::TradeTick;
 use crate::writer::OracleSample;
 
@@ -70,11 +73,14 @@ impl Registries {
 /// Reflector keys are **ticker symbols**, not contract addresses — confirmed
 /// against captured samples (`lore/4-notes/samples/soroban-events/REFLECTOR.jsonl`:
 /// `XLM`, `USDC`, `USDT`, `EURC`, `BTC`, `EUR`, …). We resolve only the assets we
-/// price *through*: the USD-pegged stables (`USDC`, `USDT`) and `XLM`. Everything
-/// else returns `None` and the sample is dropped rather than minted into
-/// `prices.assets`.
+/// price *through* with an oracle rate: `USDC` and `XLM`. Everything else returns
+/// `None` and the sample is dropped rather than minted into `prices.assets`.
 ///
-/// Two reasons a symbol is dropped, and they are not the same:
+/// This is the single seam both oracle writers share — the poll loop in
+/// `oracle-worker` and the `update`-event decode path below — so a symbol
+/// dropped here is dropped from `prices.oracle_prices` entirely.
+///
+/// Three reasons a symbol is dropped, and they are not the same:
 ///   - **No Stellar identity** (`EUR`, `BTC`, `ETH`, `XAU`, …): pure FX/crypto
 ///     reference rates that aren't tradeable Stellar assets, so they could never
 ///     be a candle's quote and could never match the USD-close ASOF join.
@@ -85,16 +91,27 @@ impl Registries {
 ///     EURC-quoted candle is an unsupported quote (→ no `close_usd`), by design —
 ///     not a coverage gap. Pricing through EURC would require its own Reflector
 ///     reference arm here plus a EURC/USDC pivot in the peg-pivot tier.
+///   - **The symbol does not identify the issuer** (`USDT`, task 0172): the feed
+///     named "USDT" prices *Tether's own token*, which is genuinely at par. The
+///     Stellar IOU issued by `USDT_ISSUER` is a different asset that depegged in
+///     June 2022 and has traded at ~$0.13 since. Filing the ticker's reading under
+///     that issuer asserted ~$1.00 for it — a ~7.4x overstatement on every
+///     USDT-quoted candle the oracle tier reached. An asset code is not an
+///     identity on Stellar: `prices.assets` holds ~220 distinct issuers using the
+///     code `USDT` and ~220 using `USDC`. USDT is now priced by *measurement*
+///     through the peg-pivot tier (its own USDC market), so it needs no oracle
+///     arm here at all.
+///
+/// ⚠️ **Do not restore the `USDT` arm to fix an apparent coverage gap.** The
+/// oracle tier runs *before* the pivot and wins where it applies, so an oracle row
+/// for this identity silently re-introduces the $1 peg that task 0172 removed.
+/// Restoring it requires fixing the symbol→issuer mapping first (task 0173).
 pub fn reflector_key_to_identity(key: &str) -> Option<AssetIdentity> {
     match key {
         "XLM" | "native" => Some(AssetIdentity::Native),
         "USDC" => Some(AssetIdentity::Credit {
             code: "USDC".to_string(),
             issuer: USDC_ISSUER.to_string(),
-        }),
-        "USDT" => Some(AssetIdentity::Credit {
-            code: "USDT".to_string(),
-            issuer: USDT_ISSUER.to_string(),
         }),
         _ => None,
     }
@@ -726,6 +743,7 @@ fn decode_redstone(ev: &xdr_parser::types::ExtractedEvent, out: &mut LedgerSorob
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::canonical::USDT_ISSUER;
     use serde_json::json;
 
     #[test]
@@ -777,12 +795,26 @@ mod tests {
                 issuer: USDC_ISSUER.to_string(),
             })
         );
+    }
+
+    /// Task 0172. Separate from the FX/crypto drop test below because the reason
+    /// is different: USDT *is* a tradeable Stellar asset with a candle history —
+    /// it is dropped because the Reflector feed named "USDT" prices Tether's own
+    /// token (at par), not the Stellar IOU from `USDT_ISSUER` (~$0.13 since it
+    /// depegged in June 2022).
+    ///
+    /// This test is the guard on the whole fix. The oracle tier runs before the
+    /// peg-pivot tier and wins where it applies, so a `Some(...)` here puts an
+    /// oracle row on this identity and re-pegs every USDT-quoted candle to $1.00 —
+    /// silently, and in the tier that 0172 did not touch.
+    #[test]
+    fn reflector_drops_usdt_because_the_ticker_is_not_this_issuer() {
         assert_eq!(
             reflector_key_to_identity("USDT"),
-            Some(AssetIdentity::Credit {
-                code: "USDT".to_string(),
-                issuer: USDT_ISSUER.to_string(),
-            })
+            None,
+            "USDT must not resolve to an oracle identity: the ticker feed is \
+             Tether's token at par, but {USDT_ISSUER} is a depegged Stellar IOU \
+             trading at ~$0.13. It is priced by measurement through the pivot."
         );
     }
 

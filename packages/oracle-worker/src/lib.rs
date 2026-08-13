@@ -29,10 +29,21 @@ pub const REFLECTOR_DECIMALS: u32 = 14;
 /// Default public Soroban RPC endpoint (overridable via `SOROBAN_RPC_URL`).
 pub const DEFAULT_SOROBAN_RPC: &str = "https://mainnet.sorobanrpc.com";
 /// Reflector symbols the worker polls. Each is mapped to a canonical Stellar
-/// identity by the shared [`reflector_key_to_identity`]; a symbol that has no
-/// Stellar identity is fetched-then-skipped (the loop's filter), so this list
-/// can grow independently of the mapping.
-pub const TRACKED_SYMBOLS: &[&str] = &["XLM", "USDC", "USDT"];
+/// identity by the shared [`reflector_key_to_identity`], which is the single
+/// authority on what may reach `prices.oracle_prices`; a symbol it drops is
+/// skipped *before* the RPC fetch. `every_tracked_symbol_resolves_to_an_identity`
+/// pins the two together, so this list holds no dead entries.
+///
+/// ⚠️ **`USDT` was removed here by task 0172, together with its arm in the
+/// mapping.** The feed named "USDT" prices Tether's own token, which is at par;
+/// we were filing that reading under the Stellar IOU issued by `USDT_ISSUER`,
+/// which depegged in June 2022 and trades at ~$0.13. Because the oracle tier runs
+/// *before* the peg-pivot tier and wins where it applies, an oracle row on that
+/// identity re-pegs every USDT-quoted candle to $1.00 — the exact error 0172
+/// removed from the peg tier. USDT is now priced by measurement through the pivot
+/// (its own USDC market) and needs no oracle arm. Restoring it requires fixing
+/// the symbol→issuer mapping first (task 0173).
+pub const TRACKED_SYMBOLS: &[&str] = &["XLM", "USDC"];
 
 /// The `oracle_prices.oracle_name` this worker writes, and the one the task-0167
 /// snapshot copies. Must match the enrichment tier's `ORACLE_NAME` (default

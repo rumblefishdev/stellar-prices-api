@@ -335,6 +335,46 @@ assumption, not one:
 4. **`canonical.rs::is_preferred_quote`** — **deliberately NOT changed.** USDT is
    still quote-preference rank 1, so pairs keep being canonicalised into it.
    Changing that alters orientation for every historical pair; its own decision.
+5. **`soroban.rs::reflector_key_to_identity`** — the `USDT` arm removed (added
+   2026-08-13, see below). `TRACKED_SYMBOLS` drops to `["XLM", "USDC"]`.
+
+### ⚠️ Site 5 added 2026-08-13 — the peg fix was being bypassed by the ORACLE tier
+
+Four sites were not enough. Sites 1–3 removed the **$1 peg**; nothing removed the
+**$1 oracle rate**, and the oracle tier runs *first*.
+
+`ch_enrich.rs:19-22` states the oracle tier "is the depeg-aware tier and it wins
+where it applies" — the peg-pivot tier only fills what it leaves at
+`close_usd = 0`. It joins `o.asset_id = p.quote_asset_id` (`ch_enrich.rs:472`).
+Measured on prod 2026-08-13: `prices.oracle_prices` holds **46,378 Reflector rows
+for asset_id 111 at avg 0.99957, current to the hour**. So every new USDT-quoted
+candle inside the staleness window was still taking `close × ~$1.00` — the same
+~7.4× overstatement, through the one tier this task had not touched.
+
+**Why the new IT did not catch it:** its fixture inserts no `oracle_prices` rows
+(`ch_enrich_it.rs:1127-1152`), so the oracle tier is a no-op there and the pivot
+handles everything. The test was green and the path was open. Worth remembering
+as a pattern — a tier that is absent from a fixture is not a tier that is proven.
+
+**Why the fix is in `reflector_key_to_identity` and not `TRACKED_SYMBOLS`:** two
+writers feed `oracle_prices` — the `oracle-worker` poll loop and the Soroban
+`update`-event decode path (`soroban.rs:672`) — and they share that one function
+(`oracle-worker/src/lib.rs:10` says so explicitly). Editing the poll list would
+have fixed one writer and left the other. `TRACKED_SYMBOLS` still drops to
+`["XLM", "USDC"]`, but only to keep the pre-existing
+`every_tracked_symbol_resolves_to_an_identity` invariant true — the mapping
+remains the single authority.
+
+USDT needs no oracle arm now: the pivot prices it from its own USDC market.
+
+Test: `reflector_drops_usdt_because_the_ticker_is_not_this_issuer`. Kept separate
+from `reflector_drops_non_stellar_reference_symbols` because the reason differs —
+USDT *is* a tradeable Stellar asset with 2,011 candles; it is dropped because the
+ticker does not identify the issuer, not because it lacks an identity.
+
+⚠️ **This stops new rows only.** Enrichment keeps reading the 46,378 already
+stored, so USDT-quoted candles stay mis-priced until those are purged — that is
+[[0183]], and it is on this task's critical path rather than a follow-up tidy-up.
 
 ### Why pivot instead of simply deleting USDT from the peg set
 
