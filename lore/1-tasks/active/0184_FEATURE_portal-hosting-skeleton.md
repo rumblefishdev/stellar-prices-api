@@ -92,21 +92,27 @@ by [[0194]].
 - [x] **Ships closed.** The placeholder states the portal is not yet available;
       the `/api-tokens/api/*` behaviour is in place but every route behind it is
       governed by [[0183]]'s flag — this distribution *is* production
-- [ ] `https://<distribution>/api-tokens/` returns our placeholder over TLS
-      — built; **awaiting first deploy**
-- [x] Bucket has no public access; objects reachable only through OAC
-      — asserted against the synthesized template
-- [ ] `https://<distribution>/health` reaches the API, not S3
-      — behaviour in the table; **awaiting first deploy**
-- [ ] `https://<distribution>/api-tokens/api/anything` reaches the API and
-      returns the API's 404, never the placeholder HTML — **awaiting first
-      deploy**; both halves exist (gateway `{proxy+}`, behaviour ordered first)
-- [x] `/api-docs-json` reaches the API (it is mounted at the API root, so a
-      table routing only `/v1/*` sends it to S3) — own behaviour, as is `/health`
+- [x] `https://dojr4epgxo2qp.cloudfront.net/api-tokens/` returns our placeholder
+      over TLS — `200 text/html`, 1727 bytes
+- [x] Bucket has no public access; objects reachable only through OAC — all four
+      block flags true on the live bucket, and a direct S3 URL returns `403`
+- [x] `.../health` reaches the API, not S3 —
+      `{"status":"ok","stack":"prices-production"}`
+- [x] `.../api-tokens/api/anything` reaches the API and returns the API's 404,
+      never the placeholder HTML — `404`, `0` bytes. This one line proves both
+      halves: the portal is closed, **and** `/api-tokens/api/*` outranks
+      `/api-tokens/*` (reversed, it would be a `200` full of HTML)
+- [x] `/api-docs-json` reaches the API — returns the live OpenAPI 3.1.0 document
 - [x] Distribution and bucket expressed in CDK; deploy invalidates
       — see the note below on what "from CI" turned out to mean here
-- [ ] URL recorded in `docs/scf/api-endpoints.md` — section written, the
-      hostname itself is filled in from the deploy output
+- [x] URL recorded in `docs/scf/api-endpoints.md`
+
+Also verified, beyond the written criteria: `/` redirects `302` to
+`/api-tokens/`; `GET /api-tokens/api/config` answers `200 {"enabled":false}` with
+`Cache-Control: no-store` while the portal is closed, which is what task 0185's
+bundle will read; `/v1/assets` without a key returns the gateway's `403`, proving
+portal traffic reaches API Gateway rather than S3 and that the viewer `Host`
+header is not being forwarded.
 
 ## Implementation Notes
 
@@ -119,8 +125,10 @@ gate; this slice only makes it reachable.
   distribution domain published to
   `/prices/production/portal-distribution-domain` for [[0186]] and [[0195]].
 - `infra/src/lib/stacks/api-gateway-stack.ts` — `ANY /api-tokens/api/{proxy+}`,
-  keyless, with a stage method setting turning the response cache **off** for
-  it. This is the "door" [[0183]]'s note said would arrive here.
+  keyless. This is the "door" [[0183]]'s note said would arrive here. The stage
+  cache is kept off it by the `/*` `*` default entry, which now declares
+  `cachingEnabled: false` — the per-route form is impossible, see the issue
+  below.
 - `tools/scripts/verify-openapi-routes.mjs` — see the issue below.
 - `infra/assets/portal-placeholder/index.html`, `infra/src/lib/app.ts`,
   `infra/Makefile` (`deploy-production-portal`), `docs/scf/api-endpoints.md`.
@@ -131,6 +139,12 @@ true, bucket policy grants only `cloudfront.amazonaws.com` `s3:GetObject`, API
 origin carries `originPath: /production`, API behaviours resolve to
 `CACHING_DISABLED` + `ALL_VIEWER_EXCEPT_HOST_HEADER`. `lint`, `typecheck`,
 `format:check` and `openapi:verify-routes` all pass.
+
+Verified against the deployed distribution — every response code in the
+acceptance criteria above was measured, not assumed. Production was also checked
+directly through execute-api after the failed first attempt (see below):
+`/health` `200`, `/api-docs-json` `200`, `/v1/assets` `403`, and
+`Prices-production-{ApiGateway,Compute}` both `UPDATE_COMPLETE`.
 
 ## Issues Encountered
 
@@ -143,6 +157,26 @@ origin carries `originPath: /production`, API behaviours resolve to
   the gateway side — and, symmetrically, **rejects** a portal path appearing in
   the document, so the skip cannot become a hole. Same stance the script already
   takes on documented `OPTIONS`.
+- **A greedy `{proxy+}` cannot carry a stage method setting — first deploy
+  failed on it.** The entry `{ resourcePath: '/api-tokens/api/{proxy+}',
+  httpMethod: 'ANY', cachingEnabled: false }` synthesized fine and a read-only
+  change set *accepted* it; the apply rejected it with `Invalid method setting
+  path: /api-tokens/api/{proxy+}/ANY/caching/enabled`. API Gateway assembles the
+  setting path as `/{resourcePath}/{httpMethod}/caching/enabled` and the `+` in
+  a greedy segment makes it unparseable. Multi-segment paths are otherwise fine
+  — `/v1/assets/{asset_identifier}/price` is deployed and works — so the `+` is
+  the whole problem. The stack rolled back cleanly and production was never
+  affected.
+
+  Resolved by making the invariant explicit instead of per-route: the default
+  `/*` `*` entry now declares `cachingEnabled: false`. That was **already** the
+  effective behaviour, because the hand-written default entry never declared
+  caching and API Gateway treats an undeclared method as uncached — but it was
+  an accident of an omission rather than a stated rule, and one day someone
+  would have written `true` there and silently switched on the cache for the
+  portal's session traffic. The six routes that opt in are unaffected: a more
+  specific entry wins. Zero behaviour change on what is deployed today, and the
+  guarantee now survives an edit to the default.
 - **`defaultRootObject` cannot serve `/api-tokens/index.html`.** It is a
   distribution-level property and applies to `/` only; per-directory index
   documents otherwise need an S3 *website* endpoint, which requires a public
@@ -189,8 +223,12 @@ origin carries `originPath: /production`, API behaviours resolve to
 
 ## Notes
 
-- Sequencing: this is the first task of the epic and blocks nothing on Discord,
-  AWS measurements or the backend. It can start today.
+- **Deployed 2026-08-13.** Distribution `EU8O3ADXFZP5U` at
+  `dojr4epgxo2qp.cloudfront.net`; portal at
+  `https://dojr4epgxo2qp.cloudfront.net/api-tokens/`. Bucket
+  `prices-production-portalhosti-portalbucketf34416c0-ma76zxfgmn0x`. Stack
+  creation took ~4.5 minutes including CloudFront propagation, not the 5–10 the
+  plan budgeted.
 - Cost: CloudFront free tier covers this; the meaningful line is the Route 53
   zone, and only once [[0195]] takes the domain.
 - **"CI deploys and invalidates" had nothing to stand on.** There is no workflow
@@ -201,11 +239,10 @@ origin carries `originPath: /production`, API behaviours resolve to
   that: upload and invalidation happen inside `cdk deploy`, or neither does.
   Building a deploy pipeline is a separate, much larger task and is not smuggled
   in here.
-- **Deploy-time risk, single line.** The stage method setting for the portal
-  route uses `httpMethod: 'ANY'`. Every other entry in that table names a
-  concrete verb, and this is the first `ANY` method in the API. If CloudFormation
-  rejects it, the fix is `'*'` on that one entry — the route itself is unaffected
-  either way, only whether the response cache is explicitly disabled on it, which
-  matters from [[0186]] onwards.
-- First deploy of a distribution takes ~5–10 minutes to propagate; later ones
-  are quick.
+- **A change set is not a validator.** The deploy-time risk flagged before
+  shipping did fire, and `cdk diff` gave no warning of it: `diff` builds a real
+  read-only change set, and that change set *accepted* the method setting the
+  apply then rejected. Worth remembering the next time a clean change set reads
+  as reassurance about anything other than resource-level replacement.
+- Sequencing: this was the first task of the epic and blocked nothing on
+  Discord, AWS measurements or the backend.

@@ -52,9 +52,12 @@ the table.
 
 ## Portal distribution — CloudFront (task 0184)
 
-**Portal:** `https://<distribution>.cloudfront.net/api-tokens/`
+**Portal:** `https://dojr4epgxo2qp.cloudfront.net/api-tokens/`
 
-<!-- Filled in from the PortalUrl output of `make -C infra deploy-production-portal`. -->
+Distribution `EU8O3ADXFZP5U`, deployed 2026-08-13. The domain is also published
+to SSM at `/prices/production/portal-distribution-domain`, which is where task
+0186 (Discord redirect URI) and task 0195 (custom domain) should read it from
+rather than copying it.
 
 A second, equivalent way to reach the API. One CloudFront distribution fronts
 two origins: a private S3 bucket holding the portal bundle, and the API Gateway

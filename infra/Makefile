@@ -94,8 +94,8 @@ destroy-production-apigateway: build
 # deploy (BucketDeployment), so there is no separate `aws s3 sync` step to
 # forget. A stale bundle behind a CDN is indistinguishable from a broken deploy.
 #
-# First deploy of this stack creates a distribution, which CloudFront takes
-# ~5-10 minutes to propagate; subsequent ones are quick.
+# First deploy of this stack creates a distribution; that took ~4.5 minutes end
+# to end, most of it CloudFront propagating. Subsequent deploys are quick.
 deploy-production-portal: build
 	npx cdk --app "$(PRODUCTION_APP)" deploy Prices-production-PortalHosting --require-approval broadening
 

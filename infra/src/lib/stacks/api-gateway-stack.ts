@@ -18,8 +18,10 @@ export interface ApiGatewayStackProps extends cdk.StackProps {
 /**
  * Per-endpoint response-cache TTLs (overview §2.1). The cache key includes the
  * path params (automatic) plus the query params declared per method below, so
- * paginated / parameterized reads cache correctly. `POST /prices/batch` and
- * `GET /health` are uncached.
+ * paginated / parameterized reads cache correctly. Caching is opt-IN: anything
+ * without an entry in `methodSettings` below is uncached by the `/*` `*`
+ * default, which covers `POST /prices/batch`, `GET /health` and the portal's
+ * `ANY /api-tokens/api/{proxy+}`.
  *
  * SINGLE SOURCE OF TRUTH: these MUST mirror the handler `Cache-Control` tiers in
  * `packages/prices-api/src/common/cache_control.rs` (the gateway stage cache and
@@ -93,9 +95,12 @@ const API_DOCS_THROTTLE = { rate: 10, burst: 20 } as const;
  *   monthly quota (task 0157, overriding the design doc's §2.1/§7 100 req/s).
  *   `GET /health` stays a keyless mock (cheapest liveness probe), and
  *   `GET /api-docs-json` is a keyless proxy to the handler (task 0124 — public
- *   documentation).
- * - **Response cache**: 0.5 GB stage cache with per-endpoint TTLs (`CACHE_TTL`);
- *   each cached method declares its query params as cache keys.
+ *   documentation). `ANY /api-tokens/api/{proxy+}` is the onboarding portal's
+ *   backend (task 0184), keyless for the same reason and gated in the handler
+ *   by `PORTAL_ENABLED` (task 0183).
+ * - **Response cache**: 0.5 GB stage cache with per-endpoint TTLs (`CACHE_TTL`),
+ *   opt-in per method; each cached method declares its query params as cache
+ *   keys.
  *
  * Still deferred (task 0056 / later): custom domain + ACM, WAF WebACL, CORS
  * preflight. The REST API ID is published to SSM at
@@ -228,6 +233,10 @@ export class ApiGatewayStack extends cdk.Stack {
     // do, task 0186's session is what authenticates them. The route stays
     // outside the usage plan, so its only limiter is the default per-method
     // stage throttle.
+    //
+    // **Uncached**, but not by an entry of its own — a greedy `{proxy+}` cannot
+    // carry one. See `defaultCachingOff` below, which is what actually holds
+    // that guarantee.
     const portalApi = this.api.root
       .addResource('api-tokens')
       .addResource('api');
@@ -291,7 +300,9 @@ export class ApiGatewayStack extends cdk.Stack {
     // renders from `deployOptions.throttlingRateLimit/Burst`, which would drop
     // it entirely — leaving the per-key usage-plan limit, and above it the
     // account-level limit, as the only throttles on every method. Re-declare it
-    // here so the §2.1 figure survives.
+    // here so the §2.1 figure survives. It drops `deployOptions.cachingEnabled`
+    // from that default entry too, which is why `defaultCachingOff` below
+    // restates the caching half rather than leaving it to be inferred.
     //
     // Despite the name, this is NOT an aggregate ceiling across the stage: a
     // per-API per-stage limit is applied per method, so this grants every method
@@ -304,6 +315,30 @@ export class ApiGatewayStack extends cdk.Stack {
       httpMethod: '*',
       throttlingRateLimit: config.apiGatewayThrottleRate,
       throttlingBurstLimit: config.apiGatewayThrottleBurst,
+    };
+
+    // Caching OFF for every method that does not opt in below (task 0184).
+    //
+    // This was already the effective behaviour — the default entry above never
+    // declared `cachingEnabled`, and API Gateway treats an undeclared method as
+    // uncached — but it was an accident of what the entry happened to omit, not
+    // a stated rule. Adding `CachingEnabled: true` here would have silently
+    // switched on the cache for every route without one, including the portal's
+    // session traffic (task 0186). More specific entries still win, so the six
+    // routes that enable it below are unaffected.
+    //
+    // It is a wildcard rather than one entry per uncached route because the
+    // portal's route CANNOT have one: API Gateway assembles the setting path as
+    // `/{resourcePath}/{httpMethod}/caching/enabled`, and the `+` in a greedy
+    // `{proxy+}` segment makes that unparseable — `/api-tokens/api/{proxy+}/ANY/
+    // caching/enabled` is rejected with `Invalid method setting path` at deploy
+    // time, though a change set accepts it. (Multi-segment paths are otherwise
+    // fine; `/v1/assets/{asset_identifier}/price` below is deployed and works.)
+    // So the guarantee has to be expressed by the wildcard, which is the form
+    // AWS documents as `/*/*/caching/enabled`.
+    const defaultCachingOff = {
+      ...defaultMethodThrottle,
+      cachingEnabled: false,
     };
 
     // One entry, not two: method settings are keyed by resourcePath+httpMethod,
@@ -327,7 +362,7 @@ export class ApiGatewayStack extends cdk.Stack {
 
     if (cacheEnabled) {
       cfnStage.methodSettings = [
-        defaultMethodThrottle,
+        defaultCachingOff,
         apiDocsSettings,
         {
           resourcePath: '/v1/assets',
@@ -365,23 +400,16 @@ export class ApiGatewayStack extends cdk.Stack {
           cachingEnabled: true,
           cacheTtlInSeconds: CACHE_TTL.backfill.toSeconds(),
         },
-        // Explicitly uncached:
+        // Redundant against `defaultCachingOff`, kept as documentation: these
+        // two are uncached by intent, not merely by omission.
         {
           resourcePath: '/v1/prices/batch',
           httpMethod: 'POST',
           cachingEnabled: false,
         },
         { resourcePath: '/health', httpMethod: 'GET', cachingEnabled: false },
-        // The portal's backend must never touch the stage cache. Task 0186 puts
-        // a session cookie through here, and a cached response on a shared,
-        // key-less prefix is one viewer being served another's. The stage cache
-        // is on by default for every method, so this is an opt-OUT and its
-        // absence would be silent.
-        {
-          resourcePath: '/api-tokens/api/{proxy+}',
-          httpMethod: 'ANY',
-          cachingEnabled: false,
-        },
+        // `/api-tokens/api/{proxy+}` is covered by `defaultCachingOff` above,
+        // and cannot be listed here — see the comment on that constant.
       ];
     } else {
       // No cache cluster, so no TTLs to declare — but the throttles still
