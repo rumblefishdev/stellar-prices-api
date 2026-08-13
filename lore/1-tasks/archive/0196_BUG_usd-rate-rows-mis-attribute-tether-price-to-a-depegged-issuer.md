@@ -2,7 +2,7 @@
 id: "0196"
 title: "usd_rate AND oracle_prices assert ~$1.00 for a Stellar IOU worth $0.13 — Reflector's ticker feed was filed under an issuer identity"
 type: BUG
-status: active
+status: completed
 related_adr: []
 related_tasks: ["0172", "0173", "0167", "0168"]
 tags:
@@ -53,6 +53,17 @@ history:
       11:00 (52 min stale across ~10 poll cycles) while USDC keeps ticking at 2
       min. The rows can now be purged without regrowing, which was the whole
       precondition. This unblocks 0172 and 0182.
+  - date: 2026-08-13
+    status: completed
+    who: okarcz
+    note: >
+      COMPLETED. 90,741 mis-attributed rows deleted from prod (46,423
+      oracle_prices + 44,318 usd_rate), both verified 0 with no regrowth after
+      both writers were fixed and deployed across TWO stacks. Two pinning tests
+      added, mapping audit recorded with its limits stated, 0168's hold lifted
+      and converted to a standing condition. Spawned 0199. PRs #205 (writer),
+      #210 (purge record + guards). Unblocks 0182 and one of 0172's two closure
+      gates.
 ---
 
 # `usd_rate` files Tether's price under a different token's identity
@@ -251,6 +262,73 @@ sets are now pinned by test, so a future addition cannot be silent:
   several feeds to identities; each mapping needs the same "is this feed actually
   about this issuer?" check.
 
+## Design Decisions
+
+### From Plan
+
+1. **Delete rather than re-key.** The rows are a true record of Tether's price,
+   wrong only in what they are keyed to. Re-keying was the alternative and was
+   rejected: there is no correct identity to re-key *to*, because no asset in
+   `prices.assets` **is** real Tether. A re-keyed row would be data preserved for
+   a consumer that does not exist, sitting next to a footgun that does.
+
+2. **`ALTER … DELETE`, not `DROP PARTITION`.** Both tables partition by month and
+   those partitions hold every other asset's rows. Partition drop would have been
+   faster and catastrophically wrong.
+
+### Emerged
+
+3. **The task's own framing was too narrow, and the inert table was the one it
+   was named after.** Filed against `usd_rate`, which nothing reads until 0168.
+   The live mis-attribution was in `oracle_prices`, which feeds the enrichment
+   oracle tier — the tier that runs *first* and wins where it applies. Chasing
+   the named table first would have produced a closed task and an unfixed defect.
+
+4. **Fixed at `reflector_key_to_identity`, not `TRACKED_SYMBOLS`.** That function
+   is the single seam both oracle writers share. The poll list would have fixed
+   one writer and left the other. `TRACKED_SYMBOLS` still dropped to
+   `["XLM","USDC"]`, but only to keep a pre-existing invariant true.
+
+5. **Dumped to TSV before deleting**, reversing this task's own earlier claim
+   that deletion was lossless. Reflector serves current prices, not a five-month
+   backfill; the series is not re-derivable. Cheap insurance against a wrong call.
+
+6. **The audit's limits recorded alongside its result.** Par agreement between
+   USDC's feed and its identity is consistent with the feed naming Circle — and
+   with any issuer that holds par. USDT was decisive only because it *disagreed*.
+   Written up as "no evidence of mis-attribution", not "confirmed correct", so
+   nobody later cites it as proof. Positive proof is [[0173]].
+
+7. **0168's hold converted rather than removed.** Lifting it outright would have
+   discarded the reasoning that made the trap visible. It survives as a standing
+   condition on *adding* peg members, now enforced by tests instead of prose.
+
+## Issues Encountered
+
+- **The two oracle writers ship in different stacks.** `oracle-worker` is in
+  `Prices-production-EventBridge`; the ledger-processor event-decode path is in
+  `Prices-production-Compute`. The first deploy covered only one, and the purge
+  would have regrown. Caught because writer death was checked by **measurement**
+  rather than by deploy exit status. ⚠️ Any future change to the shared oracle
+  mapping needs **both** stacks deployed.
+
+- **A diagnosis was asserted on one row and was probably wrong.** A USDT write at
+  11:00 — after the EventBridge deploy — was read as proof the ledger-processor
+  was writing. The timing does not support it: USDT froze at 11:00, ~45 min
+  *before* Compute deployed, so it was more likely a brief propagation window on
+  the oracle-worker. Deploying Compute was still correct on its own merits, but
+  the evidence cited for it was not.
+
+- **`count()` on a `ReplacingMergeTree` is not a measurement.** It drifted
+  46,378 → 46,425 → 46,423 across three readings of unchanged data as background
+  merges collapsed duplicates — once *downward*, which briefly looked like rows
+  disappearing. Every count in this task is now `FINAL`.
+
+- **The 1970 timestamps** surfaced only because the purge forced a `min()` over
+  the set. Spawned as [[0199]].
+
+**Broken/modified tests:** none. Two tests added, no existing test changed.
+
 ## Acceptance Criteria
 
 - [x] **`prices.oracle_prices`** rows for asset_id 111 removed — 46,423 deleted
@@ -276,7 +354,7 @@ sets are now pinned by test, so a future addition cannot be silent:
       `reflector_resolves_exactly_xlm_and_usdc_and_nothing_else`
       (`prices-ingest-core`). Neither can prove a justification was written, but
       both make the addition impossible to make silently.
-- [ ] **Spawned:** [[0199]] — the 1970 timestamps found while measuring the purge
+- [x] **Spawned:** [[0199]] — the 1970 timestamps found while measuring the purge
 - [x] Writer stopped — `reflector_key_to_identity` no longer resolves `USDT`
       (done on 0172's branch, PR #205; guarded by
       `reflector_drops_usdt_because_the_ticker_is_not_this_issuer`)

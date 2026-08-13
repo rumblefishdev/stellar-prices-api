@@ -514,7 +514,7 @@ this is resolved — 0165 used it as one.
 
 - **[[0182]]** — re-enrich the 44,657 stored `close_usd` values (the writer is
   fixed; history is not)
-- **[[0196]]** — 🚧 **BLOCKS CLOSURE.** `prices.oracle_prices` *and*
+- **[[0196]]** — ✅ **DONE + ARCHIVED 2026-08-13** (was: blocks closure). `prices.oracle_prices` *and*
   `prices.usd_rate` rows that file Tether's price under this issuer's identity.
   The `oracle_prices` half is not a tidy-up: enrichment reads those 46,378 rows
   in the tier that runs *first*, so until they are purged this task's fix is
@@ -539,9 +539,11 @@ this is resolved — 0165 used it as one.
 - [ ] BE notified if any published TVL was affected.
 - [ ] **The fix is actually in effect on prod, not merely merged.** Both writer
       paths are stopped in code, but two row sets still assert the old $1:
-      - [ ] [[0196]] — `prices.oracle_prices` rows for asset_id 111 purged.
-            Until then the oracle tier keeps re-pegging **new** candles, so this
-            gates closure, not just cleanup.
+      - [x] [[0196]] — **DONE 2026-08-13.** 46,423 `oracle_prices` rows and
+            44,318 `usd_rate` rows deleted on prod, verified 0, no regrowth.
+            Both writers deployed first — across **two stacks**, which is the
+            part that nearly went wrong. New candles are now priced by the
+            pivot, not the oracle's $1.
       - [ ] [[0182]] — the 44,657 stored `close_usd` values re-enriched (history).
 
       ⚠️ **Do not archive this task on a green PR alone.** Merging #205 stops new
