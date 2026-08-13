@@ -2,7 +2,7 @@
 id: "0157"
 title: "Default key limits: 1 req/s + monthly quota, not the design doc's 100 req/s"
 type: FEATURE
-status: active
+status: completed
 related_adr: ["0008", "0010"]
 related_tasks: ["0121", "0156", "0158", "0160", "0163", "0180"]
 tags: [layer-infra, priority-high, effort-medium, milestone-M3, epic-self-service-onboarding, api-gateway, usage-plan, throttling, cost]
@@ -120,6 +120,20 @@ history:
       Deploy. Stays active: the quota reading is still open, and the seven
       `utoipa` 429 descriptions remain undeployed pending a ComputeStack
       deploy with real binaries.
+  - date: 2026-08-13
+    status: completed
+    who: akot
+    note: >
+      Closed. Both things the reopen stayed open on resolved without further
+      work here, and both were measured rather than assumed. The quota does
+      decrement — `GetUsage` now reads `[121, 99879]` for 2026-08-12 against
+      the same key that read `[0, 100000]` on the day, so the zero was
+      reporting lag exactly as suspected, and the AC closes on an observation
+      instead of a likelihood. The seven `utoipa` 429 descriptions went live
+      as a side effect of [[0183]]/[[0184]]'s ComputeStack deploy, not by any
+      action of this task. One AC stays `[ ]` and moves rather than closing:
+      the quickstart's example queries need [[0163]], which is still unwritten
+      — recorded there so it is not lost with this file.
 ---
 
 # Default key limits: 1 req/s + monthly quota
@@ -367,18 +381,21 @@ conclusion stands on the remaining arguments.
 
 - [x] Self-service usage plan in CDK: 1 req/s sustained, burst 5, 100 000
       requests/month
-- [ ] A key on that plan is throttled at 1 req/s and its monthly quota
-      decrements; `403`-without-key behaviour unchanged. **Two of three parts
-      met on deploy 2026-08-12** — throttling and `403` are measured (see
-      Deploy below); the quota half is not, and `[ ]` stays for it alone.
-      `GetUsage` still reported `[0, 100000]` after 80 `200`s, which is most
-      likely reporting lag rather than a broken counter, but "most likely" is
-      not an observation. Re-read it once the reporting window has passed.
+- [x] A key on that plan is throttled at 1 req/s and its monthly quota
+      decrements; `403`-without-key behaviour unchanged. Throttling and `403`
+      measured on deploy 2026-08-12 (see Deploy); the quota **re-read
+      2026-08-13** and it decrements — see Close below. The `[0, 100000]`
+      reading on the day was reporting lag, which the entry then called the
+      likely explanation and declined to record as an observation. It now is
+      one.
 - [ ] The quickstart's example queries run without hitting the burst limit
-      *(needs [[0163]], not written yet)*. The deploy measurement supports it
-      without closing it: two example queries hit two different routes, so both
-      are cache misses, and burst 5 covers them with room. What the measurement
-      cannot cover is a quickstart nobody has written.
+      *(deferred to [[0163]], not written yet)*. The deploy measurement supports
+      it without closing it: two example queries hit two different routes, so
+      both are cache misses, and burst 5 covers them with room. What the
+      measurement cannot cover is a quickstart nobody has written. Carried to
+      [[0163]] rather than held open here — this task cannot close it at any
+      point in its own life, and it is the only thing that was keeping the file
+      out of the archive.
 - [ ] ~~Partner plan and key unchanged~~ — **superseded, not met.** This AC
       assumed the two-plan design. As built the plan is renamed and re-limited in
       place and the key rotates; both deliberate, both verified against the live
@@ -485,13 +502,68 @@ did:
   test cannot separate them.
 - **Whether the quota decrements at all.** `GetUsage` reported zero use after 80
   `200`s. Reporting lag is the ordinary explanation and almost certainly the
-  right one; it is still unobserved either way.
+  right one; it is still unobserved either way. — **Answered 2026-08-13, it was
+  the lag. See Close.**
 
-Both belong with [[0180]], which owns the undocumented-behaviour measurements —
-recorded here rather than there because 0180's file is mid-conversion to a
-directory on its own branch, and editing it from here would land the same
-modify/delete conflict this task took a branch off `develop` to avoid on
-2026-08-10.
+Both were sent to [[0180]] here, which owns the undocumented-behaviour
+measurements — recorded in this file rather than there because 0180's file was
+mid-conversion to a directory on its own branch, and editing it from here would
+have landed the same modify/delete conflict this task took a branch off
+`develop` to avoid on 2026-08-10. **That routing is stale:** the epic
+reorganization canceled 0180 and folded its open items into 0189 and 0191. The
+quota question is answered below and needs no owner. The cache-token question
+belongs with the stage-cache-versus-throttle work on
+`fix/0182_stage-cache-bypasses-every-gateway-throttle` — named by branch, not by
+id, because 0182 in the backlog is an unrelated `close_usd` bug and the
+collision is not this task's to settle.
+
+## Close — 2026-08-13
+
+The reopen stayed open on two things. Neither needed work here; both needed a
+second look a day later, which is the whole reason the task was reopened rather
+than closed on merged code.
+
+**The quota decrements.** `get-usage` on plan `71t9im`
+(`pricing-api-free-production`), key `t61phbbhhj`
+(`pricing-api-free-production-key`):
+
+| Date | Used | Remaining |
+| --- | --- | --- |
+| 2026-08-12 | 121 | 99 879 |
+| 2026-08-13 | 0 | 99 879 |
+
+Same key, same window that read `[0, 100000]` on the day of the deploy. So the
+counter was never broken and the reading was lag — the ordinary explanation,
+now observed rather than assumed. `remaining = limit − used` holds, and the
+count carries across the day boundary rather than resetting, which is what a
+`MONTH` period should do. The 121 is not reconstructible into individual test
+calls and does not need to be: the AC asked whether the quota decrements, and
+it does.
+
+Worth keeping the shape of this: the 2026-08-12 entry could have written "almost
+certainly reporting lag" into the AC and closed it. It declined, and a one-day
+wait turned a likelihood into a measurement at no cost. The reading it refused
+to make was the correct one — that is luck, not vindication, and the point is
+that the task did not have to be right about it.
+
+**The seven `utoipa` 429 descriptions are live**, and this task did not deploy
+them. [[0183]]/[[0184]]'s ComputeStack deploy carried them as a side effect.
+The live document at `/api-docs-json` now declares `429` on nine operations:
+the seven keyed routes carrying "Per-key rate limit or monthly quota exceeded
+(API Gateway usage plan)", plus `/health` and `/api-docs-json` themselves
+carrying the stage-throttle wording. That matches the nine declarations in
+`packages/prices-api/src` exactly, so nothing from the sweep is missing.
+
+This also retires the [[0124]] caveat recorded under Deploy: the deployed
+document no longer predates the 429 sweep, and it is no longer serving a
+`servers`-less spec — `servers` reads
+`https://02mabge71l.execute-api.eu-central-1.amazonaws.com/production`. The
+pre-deploy worry, that the published document would contradict the new plan by
+advertising 100 req/s, never materialized in either direction.
+
+**Not closed, moved.** The quickstart AC needs [[0163]] to exist. It is carried
+there rather than held here, because no amount of further work on *this* task
+can close it.
 
 ## Design Decisions
 

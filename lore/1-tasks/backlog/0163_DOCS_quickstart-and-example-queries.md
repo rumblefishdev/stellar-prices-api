@@ -160,6 +160,15 @@ through all that — not a second copy of it.
 - [ ] Reachable from the portal dashboard and from the documented URL
 - [ ] Single source of truth for the text — no second copy to drift
 - [ ] Epic AC 3 satisfied
+- [ ] **The example queries run without hitting the burst limit** — inherited
+      from [[0157]] on 2026-08-13, when that task archived. It was 0157's last
+      open criterion and 0157 could never close it: the limits were deployed and
+      measured, but there was no quickstart to run. Measured groundwork it hands
+      over: burst is 5, and two examples on two different routes are both cache
+      misses, so the headroom is real. What is untested is a page that fires
+      more than a couple in parallel, or several against the *same* route — a
+      cache hit there is not rejected at any rate we could produce, so the
+      sequence matters more than the count
 
 ## Notes
 
