@@ -20,8 +20,8 @@ export interface ApiGatewayStackProps extends cdk.StackProps {
  * path params (automatic) plus the query params declared per method below, so
  * paginated / parameterized reads cache correctly. Caching is opt-IN: anything
  * without an entry in `methodSettings` below is uncached by the `/*` `*`
- * default, which covers `POST /prices/batch`, `GET /health` and the portal's
- * `ANY /api-tokens/api/{proxy+}`.
+ * default, which covers `POST /prices/batch` and `GET /health`. The portal's
+ * routes state it themselves — see `portalSettings`.
  *
  * SINGLE SOURCE OF TRUTH: these MUST mirror the handler `Cache-Control` tiers in
  * `packages/prices-api/src/common/cache_control.rs` (the gateway stage cache and
@@ -82,6 +82,88 @@ const CACHE_CLUSTER_SIZE = '0.5';
 const API_DOCS_THROTTLE = { rate: 10, burst: 20 } as const;
 
 /**
+ * The portal backend's gateway resource paths, in the form API Gateway uses for
+ * a method setting.
+ *
+ * TWO non-greedy levels rather than one greedy `{proxy+}` (task 0184, after
+ * review). Every portal route in the epic sits at depth 1 or 2 — `/config`,
+ * `/health`, `/key`, `/usage` at one; `/auth/*`, `/key/rework`, `/key/revoke` at
+ * two — so this covers the whole epic while keeping the property `{proxy+}` was
+ * chosen for: a later slice adds a route without touching this file.
+ *
+ * The reason it is not greedy is narrow and worth stating exactly, because the
+ * obvious reading is wrong. API Gateway addresses a stage method setting by the
+ * string path `/{resourcePath}/{httpMethod}/{setting}`, and a `+` makes that
+ * unparseable — `/api-tokens/api/{proxy+}/ANY/caching/enabled` is rejected on
+ * apply (though a change set accepts it, which is how it reached production the
+ * first time). Braces are fine, depth is fine, `ANY` is fine:
+ * `/v1/assets/{asset_identifier}/price/GET/caching/enabled` is deployed and
+ * works. Only the `+` breaks. Dropping it is what makes a per-route throttle,
+ * cache setting and metric possible at all.
+ *
+ * ⚠️ A route at depth 3 would NOT match either entry and would get the gateway's
+ * `403 Missing Authentication Token` instead of task 0183's empty `404`. Nothing
+ * in the epic needs one; if a slice ever does, add a third level here rather
+ * than reaching back for `{proxy+}`, which would silently drop the throttle
+ * below and the acceptance criterion in task 0186 with it.
+ */
+const PORTAL_API_RESOURCE_PATHS = [
+  '/api-tokens/api/{proxy}',
+  '/api-tokens/api/{proxy}/{sub}',
+] as const;
+
+/**
+ * Method-level throttle for the portal's backend (`/api-tokens/api/...`).
+ *
+ * Same argument as `API_DOCS_THROTTLE` above, and the same reason it cannot be
+ * left to the default. These routes are anonymous by design — a visitor signing
+ * in to get a key does not have one yet (task 0186) — so they sit outside the
+ * usage plan and get neither of the two limits that protect every `/v1` route:
+ * the per-key rate (`pricingApiFreePlanRateLimit`, 1 req/s) and the monthly
+ * quota (100 000). Without an entry here they inherit the `/*` `*` default of
+ * `apiGatewayThrottleRate` — 200 req/s, i.e. 200x the free tier, with no key
+ * required to draw it. Task 0186 makes this a written acceptance criterion and
+ * task 0194 audits the assembled array for it.
+ *
+ * They are also uncached at BOTH layers by requirement rather than by omission
+ * (task 0187 forbids caching a key reveal; task 0186 needs the session cookie at
+ * the origin), so every request is a billed gateway request AND a billed Lambda
+ * invocation. At the old ceiling that is ~518M requests/month — on the epic's
+ * own ~$3.50/million, four figures a month from an unauthenticated loop, against
+ * an epic that cut the *keyed* limit from 100 req/s to 1 req/s because 100 was
+ * ~$900/month.
+ *
+ * Note the exposure does not wait for `PORTAL_ENABLED`: task 0183's gate is axum
+ * middleware INSIDE the handler, so a request to a closed portal still costs a
+ * full invocation to be told `404`.
+ *
+ * Sized at the same rate as `API_DOCS_THROTTLE` so the two anonymous routes are
+ * consistent, with a wider burst because the unit differs: one portal page load
+ * is several calls (`/config`, `/auth/me`, `/key`, `/usage`), so 40 absorbs ~10
+ * simultaneous loads while 10/s sustained is several times any realistic peak
+ * for a portal gated behind Stellar Discord membership.
+ *
+ * What this buys is COST CONTROL, not availability: a method throttle is a
+ * global cap, not per-caller, so under a flood legitimate users see `429` too.
+ * Two limits it does NOT provide, worth knowing before treating this as the end
+ * of the subject:
+ *
+ * - It bounds the RATE, not the VOLUME — the same gap `types.ts` records for the
+ *   free plan, where the monthly quota "binds ~26x harder" than the rate. A
+ *   keyless route has no quota to reach for, so a caller sitting at this ceiling
+ *   still accumulates. This bounds the blast radius by ~20x; it does not make it
+ *   zero, and nothing here notices if it happens.
+ * - It is not per-caller, so it does not distinguish one loop from a crowd.
+ *
+ * Both are answerable — a volume alarm for the first, a WAF rate-based rule for
+ * the second — and both are deliberately NOT built here: a standing cost and a
+ * new dependency for a threat nobody has seen yet. Task 0194 costs the portal's
+ * traffic before the flag is flipped, which is the right moment to decide
+ * whether either is worth buying.
+ */
+const PORTAL_THROTTLE = { rate: 10, burst: 40 } as const;
+
+/**
  * Public REST API Gateway for prices-api.
  *
  * Fronts the single axum api-handler Lambda (ADR 0008): every `/v1` route is a
@@ -95,9 +177,10 @@ const API_DOCS_THROTTLE = { rate: 10, burst: 20 } as const;
  *   monthly quota (task 0157, overriding the design doc's §2.1/§7 100 req/s).
  *   `GET /health` stays a keyless mock (cheapest liveness probe), and
  *   `GET /api-docs-json` is a keyless proxy to the handler (task 0124 — public
- *   documentation). `ANY /api-tokens/api/{proxy+}` is the onboarding portal's
- *   backend (task 0184), keyless for the same reason and gated in the handler
- *   by `PORTAL_ENABLED` (task 0183).
+ *   documentation). `ANY /api-tokens/api/{proxy}` and `.../{proxy}/{sub}` are
+ *   the onboarding portal's backend (task 0184), keyless for the same reason,
+ *   gated in the handler by `PORTAL_ENABLED` (task 0183) and carrying their own
+ *   method-level throttle since they sit outside the usage plan.
  * - **Response cache**: 0.5 GB stage cache with per-endpoint TTLs (`CACHE_TTL`),
  *   opt-in per method; each cached method declares its query params as cache
  *   keys.
@@ -209,40 +292,46 @@ export class ApiGatewayStack extends cdk.Stack {
     });
 
     // ---------------------------------------------------------------
-    // ANY /api-tokens/api/{proxy+} — the onboarding portal's backend (0184).
+    // ANY /api-tokens/api/... — the onboarding portal's backend (0184).
     // ---------------------------------------------------------------
-    // Without this resource the portal's routes are unreachable in production
+    // Without these resources the portal's routes are unreachable in production
     // no matter what the handler does: CloudFront forwards the request, the
     // gateway maps nothing, and the caller gets the gateway's own
     // `403 Missing Authentication Token` instead of the empty `404` task 0183's
     // gate is careful to produce. This is the "door" that task's note says
     // arrives here.
     //
-    // **Greedy, and ANY.** The point of task 0183's prefix gate is that a later
-    // slice adds a route without editing the gate; the same has to hold at the
-    // gateway, or every slice pays for a CDK change and a deploy. `{proxy+}`
-    // plus `ANY` covers task 0186's `GET /auth/*`, task 0187's `POST /key` and
-    // task 0192's `DELETE /key` with no further work here. The axum router
-    // decides what actually exists — and while `PORTAL_ENABLED` is false, that
-    // answer is "nothing", byte-identical to a path that was never deployed.
+    // **Two non-greedy levels, and ANY.** The point of task 0183's prefix gate
+    // is that a later slice adds a route without editing the gate; the same has
+    // to hold at the gateway, or every slice pays for a CDK change and a deploy.
+    // `{proxy}` + `{proxy}/{sub}` with `ANY` covers task 0186's `/auth/*`, task
+    // 0187's `/key`, task 0188's `/usage` and task 0192's `/key/revoke` with no
+    // further work here. The axum router decides what actually exists — and
+    // while `PORTAL_ENABLED` is false, that answer is "nothing", byte-identical
+    // to a path that was never deployed.
+    //
+    // Why not `{proxy+}`, and the depth-3 caveat: see
+    // `PORTAL_API_RESOURCE_PATHS` at the top of this file. In short, a greedy
+    // segment cannot carry the throttle three lines below, and that throttle is
+    // task 0186's acceptance criterion.
     //
     // **Keyless**, matching `auth::is_exempt`: a visitor signing in to get a
     // key does not have one yet, so requiring one is a self-service dead end —
     // the same argument that makes `/api-docs-json` anonymous. This is not a
     // hole: the flag decides whether these routes answer at all, and once they
-    // do, task 0186's session is what authenticates them. The route stays
-    // outside the usage plan, so its only limiter is the default per-method
-    // stage throttle.
+    // do, task 0186's session is what authenticates them.
     //
-    // **Uncached**, but not by an entry of its own — a greedy `{proxy+}` cannot
-    // carry one. See `defaultCachingOff` below, which is what actually holds
-    // that guarantee.
+    // **Throttled and uncached by entries of their own**, in `portalSettings`
+    // below — declared outside the `cacheEnabled` branch, because with the stage
+    // cache off is exactly when an unbounded anonymous route costs the most.
     const portalApi = this.api.root
       .addResource('api-tokens')
       .addResource('api');
-    portalApi.addResource('{proxy+}').addMethod('ANY', proxy([]), {
-      apiKeyRequired: false,
-    });
+    const portalDepth1 = portalApi.addResource('{proxy}');
+    portalDepth1.addMethod('ANY', proxy([]), { apiKeyRequired: false });
+    portalDepth1
+      .addResource('{sub}')
+      .addMethod('ANY', proxy([]), { apiKeyRequired: false });
 
     const PATH_ID = 'method.request.path.asset_identifier';
     const qs = (name: string) => `method.request.querystring.${name}`;
@@ -327,19 +416,32 @@ export class ApiGatewayStack extends cdk.Stack {
     // session traffic (task 0186). More specific entries still win, so the six
     // routes that enable it below are unaffected.
     //
-    // It is a wildcard rather than one entry per uncached route because the
-    // portal's route CANNOT have one: API Gateway assembles the setting path as
-    // `/{resourcePath}/{httpMethod}/caching/enabled`, and the `+` in a greedy
-    // `{proxy+}` segment makes that unparseable — `/api-tokens/api/{proxy+}/ANY/
-    // caching/enabled` is rejected with `Invalid method setting path` at deploy
-    // time, though a change set accepts it. (Multi-segment paths are otherwise
-    // fine; `/v1/assets/{asset_identifier}/price` below is deployed and works.)
-    // So the guarantee has to be expressed by the wildcard, which is the form
-    // AWS documents as `/*/*/caching/enabled`.
+    // A wildcard rather than one entry per uncached route so the rule holds for
+    // routes that do not exist yet, in the form AWS documents as
+    // `/*/*/caching/enabled`. It originally had a second reason — the portal's
+    // greedy `{proxy+}` could not carry an entry of its own — which no longer
+    // applies now that the portal is mapped at two non-greedy levels and states
+    // its own caching in `portalSettings` below. The wildcard stays because the
+    // stated default is worth having on its own.
     const defaultCachingOff = {
       ...defaultMethodThrottle,
       cachingEnabled: false,
     };
+
+    // The portal backend: its own throttle, and caching explicitly off. Both are
+    // declared OUTSIDE the `cacheEnabled` branch and spread into BOTH arms below
+    // — the trap task 0186 warns about and task 0194 audits is that the full
+    // array is assembled only inside `if (cacheEnabled)`, so an entry added to
+    // that arm alone silently vanishes wherever the stage cache is off, which is
+    // precisely the configuration where every anonymous request is a billed
+    // Lambda invocation.
+    const portalSettings = PORTAL_API_RESOURCE_PATHS.map((resourcePath) => ({
+      resourcePath,
+      httpMethod: 'ANY',
+      throttlingRateLimit: PORTAL_THROTTLE.rate,
+      throttlingBurstLimit: PORTAL_THROTTLE.burst,
+      cachingEnabled: false,
+    }));
 
     // One entry, not two: method settings are keyed by resourcePath+httpMethod,
     // so a separate throttle entry for this route would collide with its cache
@@ -364,6 +466,7 @@ export class ApiGatewayStack extends cdk.Stack {
       cfnStage.methodSettings = [
         defaultCachingOff,
         apiDocsSettings,
+        ...portalSettings,
         {
           resourcePath: '/v1/assets',
           httpMethod: 'GET',
@@ -408,14 +511,19 @@ export class ApiGatewayStack extends cdk.Stack {
           cachingEnabled: false,
         },
         { resourcePath: '/health', httpMethod: 'GET', cachingEnabled: false },
-        // `/api-tokens/api/{proxy+}` is covered by `defaultCachingOff` above,
-        // and cannot be listed here — see the comment on that constant.
       ];
     } else {
       // No cache cluster, so no TTLs to declare — but the throttles still
-      // apply, and this is the configuration in which the anonymous route is
-      // most expensive to leave unbounded.
-      cfnStage.methodSettings = [defaultMethodThrottle, apiDocsSettings];
+      // apply, and this is the configuration in which the anonymous routes are
+      // most expensive to leave unbounded. `portalSettings` MUST appear here as
+      // well as in the arm above; that symmetry is the whole point of declaring
+      // it outside the branch, and task 0194 verifies it by flipping
+      // `apiGatewayCacheEnabled` off in a synth and diffing.
+      cfnStage.methodSettings = [
+        defaultMethodThrottle,
+        apiDocsSettings,
+        ...portalSettings,
+      ];
     }
 
     // ---------------------------------------------------------------

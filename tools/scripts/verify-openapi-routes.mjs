@@ -387,7 +387,7 @@ if (portalGatewayRoutes.length === 0) {
       `check's portal skip covers nothing.`,
     '  → the portal backend is unreachable in production: CloudFront forwards ' +
       'the request and the gateway answers 403 Missing Authentication Token. ' +
-      'Restore `ANY /api-tokens/api/{proxy+}` in ' +
+      'Restore the `ANY /api-tokens/api/{proxy}` resources in ' +
       'infra/src/lib/stacks/api-gateway-stack.ts.',
   );
 }
