@@ -60,12 +60,19 @@ pub struct AssetListRow {
     pub sort_key: String,
 }
 
-/// Sortable columns for the listing (validated from the `?sort` param).
-#[derive(Debug, Clone, Copy)]
+/// Sortable columns for the listing (the `?sort` param). Deserializes straight
+/// from the documented tokens (case-sensitive) — an unknown value fails serde
+/// with a message enumerating the valid ones, surfaced as a 400 by
+/// `ValidatedQuery`. `ToSchema` publishes the same enum in the OpenAPI doc.
+#[derive(Debug, Clone, Copy, serde::Deserialize, utoipa::ToSchema)]
 pub enum SortCol {
+    #[serde(rename = "price")]
     Price,
+    #[serde(rename = "volume_24h")]
     Volume24h,
+    #[serde(rename = "change_24h")]
     Change24h,
+    #[serde(rename = "code")]
     Code,
 }
 
@@ -80,21 +87,18 @@ impl SortCol {
         }
     }
 
-    pub fn parse(s: Option<&str>) -> Option<Self> {
-        match s.unwrap_or("volume_24h") {
-            "price" => Some(SortCol::Price),
-            "volume_24h" => Some(SortCol::Volume24h),
-            "change_24h" => Some(SortCol::Change24h),
-            "code" => Some(SortCol::Code),
-            _ => None,
-        }
+    /// True for sorts whose cursor payload must be numeric (`toFloat64` bind).
+    pub fn is_numeric(self) -> bool {
+        self.sql().1
     }
 }
 
 /// Sort direction.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Deserialize, utoipa::ToSchema)]
 pub enum Order {
+    #[serde(rename = "asc")]
     Asc,
+    #[serde(rename = "desc")]
     Desc,
 }
 
@@ -106,33 +110,17 @@ impl Order {
             Order::Desc => ("DESC", "<"),
         }
     }
-
-    pub fn parse(s: Option<&str>) -> Option<Self> {
-        match s.unwrap_or("desc") {
-            "asc" => Some(Order::Asc),
-            "desc" => Some(Order::Desc),
-            _ => None,
-        }
-    }
 }
 
 /// `?type` filter.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Deserialize, utoipa::ToSchema)]
 pub enum TypeFilter {
+    #[serde(rename = "classic")]
     Classic,
+    #[serde(rename = "soroban")]
     Soroban,
+    #[serde(rename = "all")]
     All,
-}
-
-impl TypeFilter {
-    pub fn parse(s: Option<&str>) -> Option<Self> {
-        match s.unwrap_or("all") {
-            "classic" => Some(TypeFilter::Classic),
-            "soroban" => Some(TypeFilter::Soroban),
-            "all" => Some(TypeFilter::All),
-            _ => None,
-        }
-    }
 }
 
 /// Validated inputs for [`list_assets`].
@@ -401,21 +389,18 @@ pub async fn resolve_asset_id(
 // ----------------------------------------------------------------------------
 
 /// The quote leg the candles are denominated in (the `?base_currency` param).
-#[derive(Debug, Clone, Copy)]
+/// The documented tokens are uppercase; the all-lowercase aliases preserve the
+/// historically case-insensitive behavior of this one param (mixed case like
+/// `uSd` is a 400 — task 0119's exact-token policy).
+#[derive(Debug, Clone, Copy, serde::Deserialize, utoipa::ToSchema)]
 pub enum BaseCurrency {
+    #[serde(rename = "USD", alias = "usd")]
     Usd,
+    #[serde(rename = "XLM", alias = "xlm")]
     Xlm,
 }
 
 impl BaseCurrency {
-    pub fn parse(s: Option<&str>) -> Option<Self> {
-        match s.unwrap_or("USD").to_ascii_uppercase().as_str() {
-            "USD" => Some(BaseCurrency::Usd),
-            "XLM" => Some(BaseCurrency::Xlm),
-            _ => None,
-        }
-    }
-
     pub fn as_str(self) -> &'static str {
         match self {
             BaseCurrency::Usd => "USD",
@@ -424,15 +409,23 @@ impl BaseCurrency {
     }
 }
 
-/// OHLCV granularity → per-grain table suffix.
-#[derive(Debug, Clone, Copy)]
+/// OHLCV granularity → per-grain table suffix. Tokens are case-sensitive by
+/// necessity: `1m` (minute) and `1M` (month) differ only by case.
+#[derive(Debug, Clone, Copy, serde::Deserialize, utoipa::ToSchema)]
 pub enum Granularity {
+    #[serde(rename = "1m")]
     M1,
+    #[serde(rename = "15m")]
     M15,
+    #[serde(rename = "1h")]
     H1,
+    #[serde(rename = "4h")]
     H4,
+    #[serde(rename = "1d")]
     D1,
+    #[serde(rename = "1w")]
     W1,
+    #[serde(rename = "1M")]
     Mo1,
 }
 
@@ -448,45 +441,26 @@ impl Granularity {
             Granularity::Mo1 => "1M",
         }
     }
-
-    pub fn parse(s: &str) -> Option<Self> {
-        match s {
-            "1m" => Some(Granularity::M1),
-            "15m" => Some(Granularity::M15),
-            "1h" => Some(Granularity::H1),
-            "4h" => Some(Granularity::H4),
-            "1d" => Some(Granularity::D1),
-            "1w" => Some(Granularity::W1),
-            "1M" => Some(Granularity::Mo1),
-            _ => None,
-        }
-    }
 }
 
 /// Requested time window (overview §4.2 auto-granularity table).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Deserialize, utoipa::ToSchema)]
 pub enum Timeframe {
+    #[serde(rename = "1h")]
     H1,
+    #[serde(rename = "24h")]
     H24,
+    #[serde(rename = "7d")]
     D7,
+    #[serde(rename = "30d")]
     D30,
+    #[serde(rename = "1y")]
     Y1,
+    #[serde(rename = "all")]
     All,
 }
 
 impl Timeframe {
-    pub fn parse(s: Option<&str>) -> Option<Self> {
-        match s.unwrap_or("24h") {
-            "1h" => Some(Timeframe::H1),
-            "24h" => Some(Timeframe::H24),
-            "7d" => Some(Timeframe::D7),
-            "30d" => Some(Timeframe::D30),
-            "1y" => Some(Timeframe::Y1),
-            "all" => Some(Timeframe::All),
-            _ => None,
-        }
-    }
-
     /// Auto-selected granularity when `?granularity` is omitted.
     pub fn default_granularity(self) -> Granularity {
         match self {
@@ -623,5 +597,64 @@ mod tests {
         let (sql, binds) = identity_where(&AssetIdentifier::Contract("CTOKEN".into()));
         assert_eq!(binds, vec!["CTOKEN".to_string()]);
         assert!(sql.contains("a.contract_address = ?"));
+    }
+
+    // The param enums deserialize from their documented tokens (task 0119).
+    // `serde_json::from_str` on a quoted token exercises the same `Deserialize`
+    // impl the axum `Query` extractor drives via serde_urlencoded.
+
+    fn tok<T: serde::de::DeserializeOwned>(s: &str) -> Result<T, serde_json::Error> {
+        serde_json::from_str(&format!("\"{s}\""))
+    }
+
+    #[test]
+    fn enum_params_accept_their_documented_tokens() {
+        assert!(matches!(tok::<SortCol>("price"), Ok(SortCol::Price)));
+        assert!(matches!(tok::<SortCol>("volume_24h"), Ok(SortCol::Volume24h)));
+        assert!(matches!(tok::<SortCol>("change_24h"), Ok(SortCol::Change24h)));
+        assert!(matches!(tok::<SortCol>("code"), Ok(SortCol::Code)));
+        assert!(matches!(tok::<Order>("asc"), Ok(Order::Asc)));
+        assert!(matches!(tok::<Order>("desc"), Ok(Order::Desc)));
+        assert!(matches!(tok::<TypeFilter>("classic"), Ok(TypeFilter::Classic)));
+        assert!(matches!(tok::<TypeFilter>("soroban"), Ok(TypeFilter::Soroban)));
+        assert!(matches!(tok::<TypeFilter>("all"), Ok(TypeFilter::All)));
+        for t in ["1h", "24h", "7d", "30d", "1y", "all"] {
+            assert!(tok::<Timeframe>(t).is_ok(), "timeframe {t}");
+        }
+        for g in ["1m", "15m", "1h", "4h", "1d", "1w", "1M"] {
+            assert!(tok::<Granularity>(g).is_ok(), "granularity {g}");
+        }
+    }
+
+    #[test]
+    fn enum_params_are_case_sensitive() {
+        assert!(tok::<SortCol>("PRICE").is_err());
+        assert!(tok::<Order>("DESC").is_err());
+        assert!(tok::<TypeFilter>("Classic").is_err());
+        assert!(tok::<Timeframe>("ALL").is_err());
+    }
+
+    #[test]
+    fn granularity_case_distinguishes_minute_from_month() {
+        assert!(matches!(tok::<Granularity>("1m"), Ok(Granularity::M1)));
+        assert!(matches!(tok::<Granularity>("1M"), Ok(Granularity::Mo1)));
+        assert!(tok::<Granularity>("1H").is_err());
+    }
+
+    #[test]
+    fn base_currency_accepts_lowercase_alias_only() {
+        assert!(matches!(tok::<BaseCurrency>("USD"), Ok(BaseCurrency::Usd)));
+        assert!(matches!(tok::<BaseCurrency>("usd"), Ok(BaseCurrency::Usd)));
+        assert!(matches!(tok::<BaseCurrency>("xlm"), Ok(BaseCurrency::Xlm)));
+        assert!(tok::<BaseCurrency>("uSd").is_err());
+        assert!(tok::<BaseCurrency>("EUR").is_err());
+    }
+
+    #[test]
+    fn sort_col_numeric_flag_matches_sql() {
+        assert!(SortCol::Price.is_numeric());
+        assert!(SortCol::Volume24h.is_numeric());
+        assert!(SortCol::Change24h.is_numeric());
+        assert!(!SortCol::Code.is_numeric());
     }
 }

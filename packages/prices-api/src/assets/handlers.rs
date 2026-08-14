@@ -124,14 +124,21 @@ pub async fn get_asset(
     }
 }
 
-/// Query parameters for `GET /assets`.
+/// Cap on the `?search` prefix: SEP-11 `alphanum12` — an asset-code prefix
+/// longer than 12 chars can never match anything.
+const MAX_SEARCH_LEN: usize = 12;
+
+/// Query parameters for `GET /assets`. Enum params deserialize straight into
+/// their typed forms — an unknown token fails serde and surfaces as a 400
+/// through `ValidatedQuery`; unknown query *keys* are deliberately ignored
+/// (forward-compatible, matches API Gateway cache-key behavior).
 #[derive(Debug, Deserialize)]
 pub struct ListParams {
     #[serde(rename = "type")]
-    pub asset_type: Option<String>,
+    pub asset_type: Option<TypeFilter>,
     pub search: Option<String>,
-    pub sort: Option<String>,
-    pub order: Option<String>,
+    pub sort: Option<SortCol>,
+    pub order: Option<Order>,
     pub cursor: Option<String>,
     pub limit: Option<u32>,
 }
@@ -142,17 +149,14 @@ pub struct ListParams {
     path = "/assets",
     tag = "assets",
     params(
-        ("type" = Option<String>, Query, description = "classic | soroban | all (default all)"),
-        ("search" = Option<String>, Query, description = "asset code prefix match"),
-        ("sort" = Option<String>, Query,
+        ("type" = Option<TypeFilter>, Query, description = "classic | soroban | all (default all)"),
+        ("search" = Option<String>, Query,
+         description = "asset code prefix match (1-12 ASCII alphanumeric)",
+         min_length = 1, max_length = 12),
+        ("sort" = Option<SortCol>, Query,
          description = "price | volume_24h | change_24h | code (default volume_24h)"),
-        ("order" = Option<String>, Query, description = "asc | desc (default desc)"),
+        ("order" = Option<Order>, Query, description = "asc | desc (default desc)"),
         ("cursor" = Option<String>, Query, description = "opaque pagination cursor"),
-        // The bound is enforced (`limit == 0 || limit > MAX_LIMIT` → 400) but was
-        // invisible to clients until now: a caller sending limit=500 got a 400
-        // with nothing in the document explaining why. Task 0119 owns extending
-        // this treatment to the remaining params (enums, `search` length, date
-        // ranges); this one is declared here because it is already enforced.
         ("limit" = Option<u32>, Query, description = "1..=200 (default 50)",
          minimum = 1, maximum = 200),
     ),
@@ -169,15 +173,9 @@ pub async fn get_assets(
     State(state): State<AppState>,
     ValidatedQuery(p): ValidatedQuery<ListParams>,
 ) -> Response {
-    let Some(sort) = SortCol::parse(p.sort.as_deref()) else {
-        return errors::bad_request(errors::INVALID_QUERY, "invalid sort");
-    };
-    let Some(order) = Order::parse(p.order.as_deref()) else {
-        return errors::bad_request(errors::INVALID_QUERY, "invalid order");
-    };
-    let Some(type_filter) = TypeFilter::parse(p.asset_type.as_deref()) else {
-        return errors::bad_request(errors::INVALID_QUERY, "invalid type");
-    };
+    let sort = p.sort.unwrap_or(SortCol::Volume24h);
+    let order = p.order.unwrap_or(Order::Desc);
+    let type_filter = p.asset_type.unwrap_or(TypeFilter::All);
     let limit = p.limit.unwrap_or(DEFAULT_LIMIT);
     if limit == 0 || limit > MAX_LIMIT {
         return errors::bad_request(errors::INVALID_QUERY, "limit must be 1..=200");
@@ -189,7 +187,18 @@ pub async fn get_assets(
         },
         None => None,
     };
+    // Empty search is treated as absent; a non-empty one must be a plausible
+    // asset-code prefix — anything longer or outside SEP-11's alphanumeric set
+    // can never match and only costs a ClickHouse scan.
     let search = p.search.filter(|s| !s.is_empty());
+    if let Some(s) = &search
+        && (s.len() > MAX_SEARCH_LEN || !s.bytes().all(|b| b.is_ascii_alphanumeric()))
+    {
+        return errors::bad_request(
+            errors::INVALID_QUERY,
+            format!("search must be 1-{MAX_SEARCH_LEN} ASCII alphanumeric characters"),
+        );
+    }
 
     let args = ListArgs {
         sort,
@@ -246,14 +255,15 @@ pub async fn get_assets(
     resp
 }
 
-/// Query parameters for `GET /assets/{id}/ohlcv`.
+/// Query parameters for `GET /assets/{id}/ohlcv`. Enum params deserialize
+/// straight into their typed forms (see [`ListParams`] for the policy).
 #[derive(Debug, Deserialize)]
 pub struct OhlcvParams {
-    pub timeframe: Option<String>,
-    pub granularity: Option<String>,
+    pub timeframe: Option<Timeframe>,
+    pub granularity: Option<Granularity>,
     pub start: Option<String>,
     pub end: Option<String>,
-    pub base_currency: Option<String>,
+    pub base_currency: Option<BaseCurrency>,
 }
 
 /// `GET /assets/{asset_identifier}/ohlcv` — candlestick history.
@@ -268,12 +278,13 @@ pub struct OhlcvParams {
     tag = "prices",
     params(
         ("asset_identifier" = String, Path, description = "native, CODE:ISSUER, or a C… contract"),
-        ("timeframe" = Option<String>, Query, description = "1h | 24h | 7d | 30d | 1y | all (default 24h)"),
-        ("granularity" = Option<String>, Query,
+        ("timeframe" = Option<Timeframe>, Query,
+         description = "1h | 24h | 7d | 30d | 1y | all (default 24h)"),
+        ("granularity" = Option<Granularity>, Query,
          description = "1m | 15m | 1h | 4h | 1d | 1w | 1M (auto from timeframe if omitted)"),
         ("start" = Option<String>, Query, description = "ISO-8601 range start (overrides timeframe)"),
         ("end" = Option<String>, Query, description = "ISO-8601 range end"),
-        ("base_currency" = Option<String>, Query, description = "USD (default) | XLM"),
+        ("base_currency" = Option<BaseCurrency>, Query, description = "USD (default) | XLM"),
     ),
     responses(
         (status = 200, description = "Candlestick series", body = OhlcvResponse),
@@ -296,19 +307,11 @@ pub async fn get_ohlcv(
         Ok(id) => id,
         Err(e) => return errors::bad_request(errors::INVALID_ID, e.to_string()),
     };
-    let Some(timeframe) = Timeframe::parse(p.timeframe.as_deref()) else {
-        return errors::bad_request(errors::INVALID_QUERY, "invalid timeframe");
-    };
-    let Some(base_currency) = BaseCurrency::parse(p.base_currency.as_deref()) else {
-        return errors::bad_request(errors::INVALID_QUERY, "invalid base_currency");
-    };
-    let granularity = match p.granularity.as_deref() {
-        None => timeframe.default_granularity(),
-        Some(s) => match Granularity::parse(s) {
-            Some(g) => g,
-            None => return errors::bad_request(errors::INVALID_QUERY, "invalid granularity"),
-        },
-    };
+    let timeframe = p.timeframe.unwrap_or(Timeframe::H24);
+    let base_currency = p.base_currency.unwrap_or(BaseCurrency::Usd);
+    let granularity = p
+        .granularity
+        .unwrap_or_else(|| timeframe.default_granularity());
     // Validate ?start / ?end up front — otherwise a malformed value is bound into
     // ClickHouse `parseDateTimeBestEffort(?)`, which throws → a 500 for what is a
     // client input error (should be 400).
