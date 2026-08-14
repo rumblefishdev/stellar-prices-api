@@ -87,8 +87,26 @@ destroy-production-compute: build
 deploy-production-apigateway: build
 	npx cdk --app "$(PRODUCTION_APP)" deploy Prices-production-ApiGateway --require-approval broadening
 
+# ORDERING (task 0184): PortalHosting imports this stack's RestApi id to build
+# its execute-api origin, and CloudFormation refuses to delete a stack whose
+# exports are in use. So this target now fails with `Export ... cannot be
+# deleted as it is in use` until `destroy-production-portal` has run first.
+# The same import blocks any change that REPLACES the RestApi, for the same
+# reason and with the same remedy.
 destroy-production-apigateway: build
 	npx cdk --app "$(PRODUCTION_APP)" destroy Prices-production-ApiGateway --force
+
+# Uploads the portal bundle and invalidates the CloudFront cache as part of the
+# deploy (BucketDeployment), so there is no separate `aws s3 sync` step to
+# forget. A stale bundle behind a CDN is indistinguishable from a broken deploy.
+#
+# First deploy of this stack creates a distribution; that took ~4.5 minutes end
+# to end, most of it CloudFront propagating. Subsequent deploys are quick.
+deploy-production-portal: build
+	npx cdk --app "$(PRODUCTION_APP)" deploy Prices-production-PortalHosting --require-approval broadening
+
+destroy-production-portal: build
+	npx cdk --app "$(PRODUCTION_APP)" destroy Prices-production-PortalHosting --force
 
 deploy-production-eventbridge: build
 	npx cdk --app "$(PRODUCTION_APP)" deploy Prices-production-EventBridge --require-approval broadening
