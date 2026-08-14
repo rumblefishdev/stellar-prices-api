@@ -21,6 +21,11 @@ coverage
 .env
 .env.local
 .env.*.local
+# Vite loads `.env.development` by mode, so it is a real config file rather than
+# a local override — and the portal's holds DEV_API_PROXY_TARGET and, once a
+# keyed route is rendered, DEV_API_KEY. Neither belongs in the repo.
+.env.development
+.env.production
 
 # editors
 /.idea
