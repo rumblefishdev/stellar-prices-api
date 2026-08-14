@@ -157,6 +157,16 @@ Every rule rejects **before** any ClickHouse round-trip; every rejection is a
 
 ## Notes
 
+- **Consumer-visible change:** `timeframe=all` with a fine granularity
+  (`1m`–`4h`) is now a 400 (genesis → now exceeds 5000 buckets); it used to
+  silently return the newest 5000. `all` remains legal with `1d`/`1w`/`1M` or
+  with explicit `start`/`end`. The pre-existing `ohlcv_it` merge test leaned on
+  the old semantics and was narrowed with explicit bounds — intentional, not a
+  regression.
+- **Time bomb, on purpose:** genesis → now at `1d` crosses 5000 buckets around
+  **2029-06**, at which point bare `timeframe=all` (default granularity `1d`)
+  starts 400ing. Whoever hits it decides: raise `OHLCV_MAX_POINTS`, or default
+  `all` to `1w`. Recorded here so it is a known cliff, not a mystery.
 - `?min_volume_usd=` from [[0118]] lands in this validation table too;
   whichever task ships second adds the row.
 - API Gateway request validation (§2.1) can reject some malformed input at the
