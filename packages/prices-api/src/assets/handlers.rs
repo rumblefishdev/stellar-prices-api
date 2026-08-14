@@ -1,7 +1,7 @@
 //! Axum handlers for the `/v1/assets` resource.
 
 use axum::Json;
-use axum::extract::{Path, Query, State};
+use axum::extract::State;
 use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 
@@ -12,6 +12,7 @@ use crate::assets::queries_ch::{
     self, BaseCurrency, Granularity, ListArgs, OhlcvArgs, Order, SortCol, Timeframe, TypeFilter,
 };
 use crate::common::errors::ErrorEnvelope;
+use crate::common::extract::{ValidatedPath, ValidatedQuery};
 use crate::common::{cache_control, cursor, errors};
 use crate::identity::AssetIdentifier;
 use crate::state::AppState;
@@ -47,7 +48,10 @@ const MAX_LIMIT: u32 = 200;
         (status = 500, description = "Query or upstream failure (`db_error`)", body = ErrorEnvelope),
     )
 )]
-pub async fn get_price(State(state): State<AppState>, Path(raw): Path<String>) -> Response {
+pub async fn get_price(
+    State(state): State<AppState>,
+    ValidatedPath(raw): ValidatedPath<String>,
+) -> Response {
     let id = match AssetIdentifier::parse(&raw) {
         Ok(id) => id,
         Err(e) => return errors::bad_request(errors::INVALID_ID, e.to_string()),
@@ -84,7 +88,10 @@ pub async fn get_price(State(state): State<AppState>, Path(raw): Path<String>) -
         (status = 500, description = "Query or upstream failure (`db_error`)", body = ErrorEnvelope),
     )
 )]
-pub async fn get_asset(State(state): State<AppState>, Path(raw): Path<String>) -> Response {
+pub async fn get_asset(
+    State(state): State<AppState>,
+    ValidatedPath(raw): ValidatedPath<String>,
+) -> Response {
     let id = match AssetIdentifier::parse(&raw) {
         Ok(id) => id,
         Err(e) => return errors::bad_request(errors::INVALID_ID, e.to_string()),
@@ -158,7 +165,10 @@ pub struct ListParams {
         (status = 500, description = "Query or upstream failure (`db_error`)", body = ErrorEnvelope),
     )
 )]
-pub async fn get_assets(State(state): State<AppState>, Query(p): Query<ListParams>) -> Response {
+pub async fn get_assets(
+    State(state): State<AppState>,
+    ValidatedQuery(p): ValidatedQuery<ListParams>,
+) -> Response {
     let Some(sort) = SortCol::parse(p.sort.as_deref()) else {
         return errors::bad_request(errors::INVALID_QUERY, "invalid sort");
     };
@@ -279,8 +289,8 @@ pub struct OhlcvParams {
 )]
 pub async fn get_ohlcv(
     State(state): State<AppState>,
-    Path(raw): Path<String>,
-    Query(p): Query<OhlcvParams>,
+    ValidatedPath(raw): ValidatedPath<String>,
+    ValidatedQuery(p): ValidatedQuery<OhlcvParams>,
 ) -> Response {
     let id = match AssetIdentifier::parse(&raw) {
         Ok(id) => id,

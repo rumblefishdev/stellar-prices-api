@@ -8,6 +8,13 @@ use crate::assets::dto::PriceResponse;
 /// Maximum identifiers per batch request.
 pub const MAX_BATCH: usize = 100;
 
+/// Request-body size limit for `/prices/batch`, enforced by a
+/// `DefaultBodyLimit` layer on the resource router. Sized from the payload it
+/// bounds: `MAX_BATCH` identifiers × ~70 chars (`CODE:ISSUER`) ≈ 7.5 KB, so
+/// 16 KB is generous while stopping a multi-megabyte body from being parsed
+/// just to fail the `MAX_BATCH` check.
+pub const MAX_BATCH_BODY_BYTES: usize = 16 * 1024;
+
 /// `POST /prices/batch` request body.
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct BatchRequest {
