@@ -70,9 +70,9 @@ accounting of our own.
 
 ## Acceptance Criteria
 
-- [ ] **Ships closed.** With `portal-enabled=false` ([[0183]]) this slice's
-      routes return `404` to a non-allowlisted caller, and behave normally for an
-      allowlisted one — every deploy goes straight to production
+- [ ] **Ships closed.** With `PORTAL_ENABLED=false` ([[0183]]) this slice's
+      routes return an empty `404`; with it on, they behave normally — every
+      deploy goes straight to production
 - [ ] The endpoint returns used, remaining and limit for the current period from
       `GetUsage`, plus the period boundaries
 - [ ] Making N requests with the key moves the number (allowing for the lag)

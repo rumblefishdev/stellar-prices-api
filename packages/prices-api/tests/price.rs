@@ -15,6 +15,7 @@ fn test_config() -> AppConfig {
         ch_enabled: false,
         base_url: None,
         api_keys: vec![],
+        portal_enabled: false,
     }
 }
 

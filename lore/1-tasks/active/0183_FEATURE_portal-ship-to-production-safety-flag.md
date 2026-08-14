@@ -1,6 +1,6 @@
 ---
 id: "0183"
-title: "Ship-to-production safety — portal feature flag and allowlist, because there is no test environment"
+title: "Ship-to-production safety — a PORTAL_ENABLED flag, because there is no test environment"
 type: FEATURE
 status: active
 related_adr: ["0007", "0010"]
@@ -27,13 +27,67 @@ history:
     who: akot
     note: >
       Activated as the first slice of the reorganized epic. Nothing blocks it:
-      no Discord application, no measurement, no AWS finding — two SSM
-      parameters, one middleware and a runbook entry. It is activated *before*
+      no Discord application, no measurement, no AWS finding. It is activated *before*
       hosting on purpose, because [[0184]] is the first thing that puts a page
       on the production distribution and there is no other distribution.
+  - date: 2026-08-13
+    status: active
+    who: akot
+    note: >
+      Self-audit after the review fixes, prompted by Adam asking whether they
+      were actually complete. They were not. The conditional exemption written
+      for review finding #2 caught `/config` in the same net, so with `API_KEYS`
+      armed and the portal closed — the configuration production sits in for the
+      whole build — the endpoint answered `401` instead of `{"enabled": false}`,
+      and [[0185]]'s page would have had no way to learn it was closed. Missed
+      because `gate_portal` exempts `CONFIG_PATH` in both directions and
+      `is_exempt` was not made to mirror it, and because the new tests covered
+      three of the four (portal open/closed) × (keys armed/disarmed) cells.
+      `/config` is now unconditionally exempt from the key gate, matching the
+      portal gate, and `config_answers_in_all_four_gate_combinations` pins every
+      cell. The residual — `/config` is distinguishable on an armed service — is
+      accepted and written down: the bundle it serves is public on the CDN from
+      [[0184]] onwards, so the portal's existence is not the secret; which
+      unbuilt routes sit behind it still is.
+  - date: 2026-08-13
+    status: active
+    who: akot
+    note: >
+      Code review on PR #207 (karczuRF) found seven issues and all seven were
+      real. Two mattered. **The test suite was vacuous** — it stayed green with
+      `gate_portal` replaced by `next.run(req).await`, because the only route
+      registered under the prefix was `/config`, which the gate skips by
+      design, so every "closed" assertion was watching an unrouted 404 rather
+      than a refusal. The `[x] asserted, not assumed` above was therefore not
+      earned when it was written. Fixed with `PortalGate::new` plus a test that
+      layers the gate over a route of its own, and the fix is confirmed the way
+      the reviewer found the hole: both mutations now fail the suite.
+      **Second**, exempting the portal prefix from `auth::is_exempt`
+      unconditionally destroyed the indistinguishability property the moment
+      `API_KEYS` is armed — portal paths would answer an empty 404 while every
+      other unknown path answered 401, making the prefix uniquely
+      fingerprintable. The exemption is now conditional on the portal being
+      open, which is stricter than either option the review proposed and keeps
+      an open portal anonymous. The remaining five (a test whose name overstated
+      it, a missing `is_exempt` test, an unconstructable `pub` state, a wrong
+      doc line about the Discord redirect URI, and a forward-looking throttle
+      note) are fixed here or, for the last, written into [[0184]].
+  - date: 2026-08-13
+    status: active
+    who: akot
+    note: >
+      Mechanism changed on Adam's call before any code was written: a plain
+      `PORTAL_ENABLED` environment variable, not two operator-seeded SSM
+      parameters read at runtime. The point is a boolean that can be flipped and
+      exercised on a laptop, and the SSM design bought a fast production flip we
+      do not need for a switch thrown once. Three problems dissolved with it —
+      no `reqwest` in `prices-api`, no second copy of the extension constants
+      `mtls.rs` warns about, and no allowlist keyed on a Discord session that
+      [[0186]] has not built yet. The cost is stated rather than buried: flipping
+      it in production is a redeploy.
 ---
 
-# Ship-to-production safety — flag and allowlist
+# Ship-to-production safety — the PORTAL_ENABLED flag
 
 ## Summary
 
@@ -41,8 +95,8 @@ history:
 without a stranger being able to reach it — and still walk the whole flow myself
 against the real stack.*
 
-Two SSM parameters and a middleware. Everything else in the epic depends on it
-existing first.
+One environment variable and a middleware. Everything else in the epic depends
+on it existing first.
 
 ## The problem it solves
 
@@ -67,88 +121,130 @@ sentence is corrected in that task.
 
 ## Implementation
 
-**Two parameters, operator-seeded, read at runtime.** Same contract as
-`min-account-age-minutes` in [[0189]] and the mTLS material: never
-`new ssm.StringParameter`, read through the SSM SDK and not
-`valueForStringParameter`. `lambda-baseline.ts` already grants
-`ssm:GetParameter*` on `arn:…:parameter/prices/{env}/*`, so there is no IAM work.
+**One environment variable, `PORTAL_ENABLED`, read at cold start.** Same shape
+as `CH_ENABLED`, `API_KEYS` and `API_BASE_URL` already in
+`packages/prices-api/src/config.rs` — no new mechanism, no new dependency, and
+it is togglable on a laptop, which is what makes the slices testable at all.
 
-| Parameter | Default | Meaning |
-| --- | --- | --- |
-| `/prices/{env}/portal-enabled` | `false` | Master switch for every `/api-tokens/api/*` route |
-| `/prices/{env}/portal-allowlist-discord-ids` | *(empty)* | Comma-separated Discord user IDs that bypass the switch |
+```bash
+PORTAL_ENABLED=true cargo run -p prices-api --features local-server --bin serve
+```
 
-**Why SSM and not a CDK context flag.** A context flag can only be flipped by a
-deploy, and a deploy is exactly what we are trying to make safe. The kill switch
-has to be faster than a rollback. It also has to survive the next `cdk deploy`,
-which a CloudFormation-managed parameter would not — the same trap [[0189]]
-documents for the guild id.
+**Default `false`.** Note the polarity is the opposite of `ch_enabled`, and that
+is deliberate: a missing `CH_ENABLED` should still give the live Lambda its
+connection pool, while a missing `PORTAL_ENABLED` must never open a half-built
+portal to the internet. Defaults are chosen per flag by what goes wrong when the
+variable is forgotten.
 
-**Behaviour when off:**
+In `compute-stack.ts` it is set **explicitly** to `'false'` rather than omitted.
+The Rust default covers it either way; spelling it out makes opening the portal
+a one-word diff that shows up in a deploy review.
 
-- Every `/api-tokens/api/*` route returns **`404`**, not `403` and not `503`. A
-  `503` advertises that something is there and invites someone to come back; a
-  `404` is indistinguishable from a route that does not exist. The one exception
-  is `GET /api-tokens/api/config` below.
-- **Except for an allowlisted Discord ID**, for whom every route behaves
-  normally. This is what replaces the missing test environment: the flow is
-  walkable end-to-end on the real stack by us, and invisible to everyone else.
-  Without it the flag would only mean "nothing is testable until everything is
-  finished", which is the failure the re-slice exists to avoid.
-- The allowlist is checked against the **session** ([[0186]]), so sign-in itself
-  has to work while the flag is off. Sign-in therefore checks the allowlist
-  *after* resolving the identity, and refuses at that point.
-- **The static bundle stays public.** It holds no secret and makes no privileged
-  call, so the exposure is reputational, not a security matter, and gating it
-  would need a CloudFront Function for no benefit. Instead the app drives itself
-  from **`GET /api-tokens/api/config`** — the one route that answers while the
-  flag is off — which reports whether the portal is open. Closed → the page says
-  so and renders no sign-in button.
+**Behaviour when off:** every `/api-tokens/api/*` path returns a bare `404` with
+**no body** — byte-identical to what the router returns for a path that was
+never deployed. Not `403`, which confirms the route exists and merely refused;
+not `503`, which promises it is coming; and not the `ErrorEnvelope`, which is
+what a *real* portal `404` will look like once these routes exist and would
+therefore give the gate away. The router has no `fallback`, so axum's own miss
+is an empty `404` and the gate matches it exactly.
 
-**Consequence of issuing into the real usage plan** (decided 2026-08-13 — no
-separate "incubation" plan): keys minted while the flag was off are real keys on
-the real free-tier plan, counted in its accounting. They have to be cleaned up
-rather than left to be discovered. That is an acceptance criterion here and a
-check in [[0194]].
+**Gated by prefix, not by enumeration.** `/api-tokens/api/` covers routes that do
+not exist yet — [[0186]]'s `/auth/*`, [[0187]]'s `/key`, [[0188]]'s `/usage` — so
+a later slice inherits the gate without editing this module. The bundle at
+`/api-tokens/*` is **not** ours: S3 serves it and it never reaches the Lambda.
 
-**Who turns it on.** Flipping `portal-enabled` to `true` is an explicit
-acceptance criterion of [[0194]] (the audit), and is gated on [[0189]] (the
-eligibility gate) having passed. Nobody flips it as a side effect of finishing
-their own slice.
+**One route answers in both states: `GET /api-tokens/api/config`.** It is the
+question "is the portal open?", so refusing to answer it while closed would be
+circular, and [[0185]]'s bundle would have nothing to render its "not yet
+available" page from. Returns `{"enabled": bool}` with `Cache-Control:
+no-store` — a stale `enabled: false` at a CDN would keep the portal dark for
+that viewer long after it opened, with nothing on screen to explain why.
+
+**Portal routes are exempt from the in-app API-key gate.** A visitor signing in
+has no key by definition, so `auth::is_exempt` gains the prefix. Whether they are
+served at all is this gate's decision, not that one's.
+
+### What this is not
+
+**It is not an incident kill switch.** An environment variable is set at deploy
+time, so flipping it in production takes a redeploy. An earlier draft of this
+task specified two operator-seeded SSM parameters read at runtime, on the
+argument that "the kill switch has to be faster than a rollback". That argument
+was dropped on purpose (2026-08-13): the flag's job is to keep half-built slices
+invisible during the build, and it is flipped **once**, by [[0194]]. Paying for a
+runtime-config read, an HTTP client and a cache-TTL decision to make a one-time
+flip fast is the wrong trade.
+
+If we ever do need a switch that beats a rollback on time, the machinery is
+already there — the Parameters and Secrets extension the Lambda loads for mTLS
+serves SSM too (`packages/prices-clickhouse/src/mtls.rs` has the client) — and
+it is a different task. Do not reach for it inside this one.
+
+**There is no allowlist.** The earlier draft had one so we could walk the flow on
+production while it was closed for everyone else. With a local toggle that is
+unnecessary, and dropping it removes the awkward part: the allowlist was keyed on
+Discord ID, which only exists once [[0186]] ships a session, so it would have
+needed a seam through a slice that had not been written.
+
+**Consequence of using the real usage plan** (decided 2026-08-13 — no separate
+"incubation" plan): a local run with production AWS credentials creates **real**
+keys on the real free-tier plan from [[0187]] onwards. The gate does not stop
+that, because the gate is in the Lambda and the laptop is not. Those keys have to
+be cleaned up rather than left to be discovered.
+
+**Who turns it on.** Flipping `PORTAL_ENABLED` to `'true'` in `compute-stack.ts`
+is an explicit acceptance criterion of [[0194]] (the audit), gated on [[0189]]
+(the eligibility gate) having passed. Nobody flips it as a side effect of
+finishing their own slice.
 
 **Every slice that deploys inherits one line of acceptance criteria:**
 
-> - [ ] With `portal-enabled=false`, this slice's routes return `404` to a
->       non-allowlisted caller, and behave normally for an allowlisted one
+> - [ ] With `PORTAL_ENABLED=false`, this slice's routes return an empty `404`;
+>       with it on, they behave normally
 
 ## Acceptance Criteria
 
-- [ ] Both parameters are operator-seeded and read at runtime; flipping either
-      takes effect **without a redeploy**
-- [ ] Neither is created by CDK — a `cdk deploy` does not reset the switch
-- [ ] With the flag off, every `/api-tokens/api/*` route returns `404` to a
-      non-allowlisted caller, `GET .../config` excepted
-- [ ] With the flag off, an allowlisted Discord ID completes every flow normally
-- [ ] `GET /api-tokens/api/config` answers in both states and never leaks the
-      allowlist
+- [x] `PORTAL_ENABLED` read at cold start, defaulting to `false`
+      (`config.rs`), and set explicitly to `'false'` on the Lambda
+      (`compute-stack.ts`)
+- [x] With the flag off, every `/api-tokens/api/*` path returns `404` with an
+      empty body, `GET .../config` excepted
+- [x] That `404` is **byte-identical** to a path that was never deployed —
+      asserted, not assumed, and the assertion is itself verified by deleting
+      the gate and watching it fail (`tests/portal.rs`)
+- [x] The same holds with `API_KEYS` **armed**, which is the configuration
+      `config.rs` documents as the end state: a closed portal path answers `401`
+      like every other unknown path rather than an empty `404`. An unconditional
+      exemption in `auth::is_exempt` made the prefix the only unauthenticated
+      surface on the service, and so uniquely fingerprintable
+- [x] At least one test drives the gate over a route that **really exists**
+      under the prefix, so the suite cannot pass with the gate removed
+- [x] The gate matches by prefix, so routes added by later slices are covered
+      without touching this module
+- [x] The gate does not reach `/api-tokens/*`, which S3 serves
+- [x] `GET /api-tokens/api/config` answers in both states, reports `enabled`,
+      and is never cached
+- [x] Portal routes are exempt from the in-app `X-API-Key` gate
+- [x] Data routes are unaffected in both states
+- [x] Turning the flag on locally serves the portal routes — the whole point of
+      the flag being an env var
 - [ ] The static page renders "not yet available" and no sign-in button while
-      the portal is closed
-- [ ] A procedure exists — and is tested once — for enumerating and deleting
-      keys created while the flag was off, so build-period keys do not survive
-      into the real plan's accounting
-- [ ] Both parameter names and the seeding step are in the deploy-prep runbook,
-      alongside the mTLS material and [[0189]]'s two parameters
-- [ ] The single-environment fact is written into the epic doc, so the next
+      the portal is closed — **[[0185]]**, which is the first slice with a page
+      to render it on; this task ships the `config` endpoint it reads
+- [ ] A procedure exists, and is run once, for enumerating and deleting keys
+      created against the real plan during the build — **[[0194]]**, which is
+      when there is something to clean up
+- [x] The single-environment fact is written into the epic doc, so the next
       person does not assume a staging deploy exists
 
 ## Notes
 
-- This is the cheapest task in the epic and the one whose absence is most
-  expensive. Roughly two parameters, one middleware and a runbook entry.
-- It also gives the rollback story for everything after it: if a slice
-  misbehaves in production, the first move is flipping one SSM value, not
-  reverting a stack.
-- Worth revisiting once, later: if the flag is still off by [[0195]]'s custom
-  domain, the Discord redirect URI has been pointed at a closed portal for
-  weeks. Harmless, but confirm sign-in on the new hostname with an allowlisted
-  account before advertising it.
+- API Gateway has no resource for `/api-tokens/api/*` yet, so in production the
+  `config` route is unreachable regardless of the flag until [[0184]] adds the
+  proxy. That is the correct order — the gate exists before the door.
+- The rollback story for every later slice: if a portal slice misbehaves in
+  production, set `PORTAL_ENABLED: 'false'` and deploy, rather than reverting a
+  stack. Slower than an SSM flip and still much faster than untangling a revert.
+- Worth revisiting once, later: if the flag is still off when [[0195]] lands the
+  custom domain, the Discord redirect URI has been pointed at a closed portal for
+  weeks. Harmless, but confirm sign-in on the new hostname before advertising it.

@@ -98,9 +98,9 @@ sign-in does not break silently on the cutover.
 
 ## Acceptance Criteria
 
-- [ ] **Ships closed.** With `portal-enabled=false` ([[0183]]) sign-in resolves
-      the identity and *then* refuses a non-allowlisted user; an allowlisted
-      Discord ID completes the round-trip normally
+- [ ] **Ships closed.** With `PORTAL_ENABLED=false` ([[0183]]) the sign-in
+      routes return an empty `404`; the round-trip is exercised locally with the
+      flag on, against a Discord redirect URI pointed at `localhost`
 - [ ] A visitor completes the round-trip and the page shows their Discord
       username and ID
 - [ ] Client secret is in Secrets Manager; no secret in any env var or in the

@@ -472,6 +472,16 @@ export class ComputeStack extends cdk.Stack {
         MTLS_SECRET_NAME: this.apiHandlerMtlsSecretName,
         // Build the mTLS CH client eagerly at cold start (primes the pool).
         CH_ENABLED: 'true',
+        // Onboarding portal kept dark (task 0183). There is one environment and
+        // it is production — `envName` is typed 'production' and `infra/envs/`
+        // holds only production.json — so every portal slice (0184-0195) is
+        // publicly reachable the moment it deploys unless this says otherwise.
+        // Set explicitly rather than omitted: the Rust side defaults to false
+        // either way, but spelling it here makes opening the portal a one-word
+        // diff that shows up in a deploy review. Flipped by task 0194, after
+        // 0189's eligibility gate passes — never as a side effect of finishing
+        // some other slice.
+        PORTAL_ENABLED: 'false',
         PARAMETERS_SECRETS_EXTENSION_CACHE_ENABLED: 'true',
         // Strip the `/{stage}` prefix (`/production`) that API Gateway REST
         // proxy puts in the path, so lambda_http hands axum `/v1/...` (not

@@ -52,6 +52,7 @@ fn config_with(base_url: Option<&str>, api_keys: Vec<String>) -> AppConfig {
         ch_enabled: false,
         base_url: base_url.map(str::to_string),
         api_keys,
+        portal_enabled: false,
     }
 }
 
