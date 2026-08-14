@@ -304,14 +304,14 @@ export class ApiGatewayStack extends cdk.Stack {
     // The `/health` precedent covers the *posture*, not the cost profile:
     // `/health` is a MockIntegration and can never invoke anything, whereas a
     // cache miss here reaches the Lambda, and an anonymous route sits outside
-    // the usage plan, so the only limiter it has is the stage-wide throttle it
-    // shares with paying traffic. Two things keep the residual small: the
-    // 3600s TTL below with **no** cache-key parameters, so all callers collapse
-    // onto one entry, and API Gateway's default
-    // `requireAuthorizationForCacheControl: true`, which stops an anonymous
-    // caller busting that entry with `Cache-Control: max-age=0`. If this ever
-    // needs a harder bound, the lever is a method-level throttle here, not a
-    // key requirement.
+    // the usage plan, so it has neither of the two limits a keyed route carries.
+    // The lever that replaces them is a method-level throttle, not a key
+    // requirement — `API_DOCS_THROTTLE` above, which is what keeps this off the
+    // stage-wide default it would otherwise share with paying traffic. Two more
+    // things keep the residual small: the 3600s TTL below with **no** cache-key
+    // parameters, so all callers collapse onto one entry, and API Gateway's
+    // default `requireAuthorizationForCacheControl: true`, which stops an
+    // anonymous caller busting that entry with `Cache-Control: max-age=0`.
     this.api.root.addResource('api-docs-json').addMethod('GET', proxy([]), {
       apiKeyRequired: false,
     });
@@ -438,8 +438,9 @@ export class ApiGatewayStack extends cdk.Stack {
     // uncached — but it was an accident of what the entry happened to omit, not
     // a stated rule. Adding `CachingEnabled: true` here would have silently
     // switched on the cache for every route without one, including the portal's
-    // session traffic (task 0186). More specific entries still win, so the six
-    // routes that enable it below are unaffected.
+    // session traffic (task 0186). More specific entries still win, so the
+    // seven routes that enable it below — `/api-docs-json` and the six `/v1`
+    // reads — are unaffected.
     //
     // A wildcard rather than one entry per uncached route so the rule holds for
     // routes that do not exist yet, in the form AWS documents as

@@ -126,32 +126,35 @@ bundle will read; `/v1/assets` without a key returns the gateway's `403`, provin
 portal traffic reaches API Gateway rather than S3 and that the viewer `Host`
 header is not being forwarded.
 
-> **The `/config` line describes the state after [[0183]] is deployed, not
-> production as it stands.** Branches stack `develop → 0183 → 0184`, and 0183 is
-> not merged, so the api-handler live today predates it: `PORTAL_ENABLED` is
-> absent from the deployed Lambda's environment entirely and `/config` answers an
-> empty `404` — via CloudFront and via execute-api alike. Nothing on this branch
-> causes that and nothing here fixes it; `enabled: bool`, `config_handler` and
-> the gate's `CONFIG_PATH` exemption are all 0183's code. It resolves when 0183
-> merges and Compute is deployed.
+> **The `/config` line was false when it was written and became true by
+> accident.** Branches stack `develop → 0183 → 0184`, so for most of this task
+> the api-handler live in production predated 0183: `PORTAL_ENABLED` was absent
+> from the deployed Lambda's environment entirely and `/config` answered an empty
+> `404`, via CloudFront and via execute-api alike. What changed it is not a merge
+> — it is that the 2026-08-14 gateway deploy pulled `Prices-production-Compute`
+> in as a dependency stack, because the Makefile targets do not pass
+> `--exclusively`. `enabled: bool`, `config_handler` and the gate's `CONFIG_PATH`
+> exemption are all 0183's code, now live ahead of 0183's own merge. See the note
+> under Implementation Notes.
 >
 > Worth knowing because the two states are otherwise indistinguishable: 0183
 > makes a gated path and a nonexistent one byte-identical on purpose, so an empty
 > `404` under the prefix proves nothing either way. `/config` is the single path
 > where they differ — it is exempt from the gate and answers `200` in **both**
-> flag states — which is what makes it the probe worth running after the next
-> Compute deploy. Task 0185's bundle reads it and would today receive a `404`
-> rather than `{"enabled":false}`.
+> flag states — which is what makes it the probe worth running after any Compute
+> deploy. It is also the one task 0185's bundle reads, so it is the difference
+> between that slice booting and that slice seeing a `404`.
 
 ## Implementation Notes
 
-Seven files, no Rust changes — [[0183]] already ships the behaviour behind the
+Eight files, no Rust changes — [[0183]] already ships the behaviour behind the
 gate; this slice only makes it reachable.
 
 - `infra/src/lib/stacks/portal-hosting-stack.ts` — new stack. Private bucket
   (`BLOCK_ALL`, OAC, `RETAIN`), distribution with two origins, the behaviour
   table, a `BucketDeployment` that uploads and invalidates in one step and
-  stamps `Cache-Control: max-age=0, must-revalidate` on what it uploads, a
+  stamps `Cache-Control: public, max-age=0, must-revalidate` on what it
+  uploads, a
   private access-log bucket with a 90-day expiry, and the distribution domain
   published to `/prices/production/portal-distribution-domain` for [[0186]] and
   [[0195]].
@@ -179,8 +182,8 @@ Verified at synth: behaviour order (`/api-tokens/api/*` at index 0,
 true, bucket policy grants only `cloudfront.amazonaws.com` `s3:GetObject`, API
 origin carries `originPath: /production`, API behaviours resolve to
 `CACHING_DISABLED` + `ALL_VIEWER_EXCEPT_HOST_HEADER`, and the assembled
-`methodSettings` array carrying both portal entries with their throttle in
-**both** arms of the `cacheEnabled` branch. `lint`, `typecheck`, `format:check`
+`methodSettings` array carrying all three portal entries (one per verb) with
+their throttle in **both** arms of the `cacheEnabled` branch. `lint`, `typecheck`, `format:check`
 and `openapi:verify-routes` all pass.
 
 Verified against the deployed distribution — every response code in the
@@ -205,11 +208,28 @@ directly through execute-api after the failed first attempt (see below):
 >   are live ahead of that task's merge, and `/config` now answers
 >   `200 {"enabled":false}` with `no-store`.
 >
-> Getting to decision 12's shape needs **two** gateway deploys (see the issue
-> below), then `deploy-production-portal`. Probes worth re-running afterwards:
-> `/api-tokens` → `302`, a `Cache-Control` header on the placeholder,
-> `/api-tokens/api/a/b/c` → empty `404` (greedy matches any depth again), and a
-> throttle entry per verb in the deployed stage.
+> Getting to decision 12's shape needs **two** gateway deploys and then the
+> portal, because `{proxy}` and `{proxy+}` cannot both be children of
+> `/api-tokens/api` mid-update (see the issue below). Concretely:
+>
+> 1. `deploy-production-apigateway` from a working tree with the `portalProxy`
+>    block and `portalSettings` commented out — this deletes the live `{proxy}`
+>    and `{proxy}/{sub}` resources. **The portal prefix answers `403` for the
+>    length of the gap**, which is why it happens before 0185 has a bundle that
+>    calls it and not after.
+> 2. `deploy-production-apigateway` from the branch as committed — creates
+>    `{proxy+}`, its three verbs and the per-verb throttle.
+> 3. `deploy-production-portal` — access logs, upload `Cache-Control`, the
+>    redirect function.
+>
+> Step 1 is a *local* edit that must not be committed; the alternative
+> (deleting the two resources with `aws apigateway delete-resource`) leaves the
+> stack drifted against a template that still declares them, which is worse.
+>
+> Probes worth re-running afterwards: `/api-tokens` → `302`, a `Cache-Control`
+> header on the placeholder, `/api-tokens/api/a/b/c` → empty `404` (greedy
+> matches any depth again), and a throttle entry per verb in the deployed stage.
+> Then delete this note, and the matching one in `docs/scf/api-endpoints.md`.
 
 ## Issues Encountered
 
@@ -255,29 +275,34 @@ directly through execute-api after the failed first attempt (see below):
   route in the epic. The residual cost moves from paths to verbs: an unlisted
   verb gets the gateway's `403` rather than the gated `404`.
 
-  Resolved in two steps, and both survive in the code because they answer
-  different questions.
+  It took three commits to get there, and two of the three artefacts survive in
+  the code because they answer different questions.
 
-  *First*, the invariant was made explicit instead of per-route: the default
-  `/*` `*` entry now declares `cachingEnabled: false`. That was **already** the
-  effective behaviour, because the hand-written default entry never declared
-  caching and API Gateway treats an undeclared method as uncached — but it was
-  an accident of an omission rather than a stated rule, and one day someone
-  would have written `true` there and silently switched on the cache for the
-  portal's session traffic. The six routes that opt in are unaffected: a more
-  specific entry wins. Zero behaviour change on what is deployed today, and the
-  guarantee now survives an edit to the default.
+  *First*, on the wrong diagnosis, the invariant was moved off the route and
+  onto the default: the `/*` `*` entry now declares `cachingEnabled: false`.
+  That was **already** the effective behaviour, because the hand-written default
+  entry never declared caching and API Gateway treats an undeclared method as
+  uncached — but it was an accident of an omission rather than a stated rule,
+  and one day someone would have written `true` there and silently switched on
+  the cache for the portal's session traffic. The seven routes that opt in
+  (`/api-docs-json` and the six `/v1` reads) are unaffected: a more specific
+  entry wins. Zero behaviour change on what is deployed, and the guarantee now
+  survives an edit to the default.
 
-  *Then* review reopened it: the wildcard covers caching, but a throttle cannot
-  be expressed that way — a stage-wide default is exactly what the portal needed
-  to escape. So the mapping dropped the `+` entirely (decision 8) and the routes
-  now carry per-route entries after all. The wildcard stays: it states the
-  caching default for routes that do not exist yet, which is worth having on its
-  own.
+  *Then* review reopened it: the wildcard states a caching default but cannot
+  express a throttle, and a stage-wide default throttle is exactly what the
+  portal needed to escape. Still believing the `+` was the obstacle, the mapping
+  dropped it for two non-greedy levels (decision 8) — which is what broke
+  production, below.
 
-  The narrow lesson is worth keeping: braces are fine, depth is fine, `ANY` is
-  fine. Only the `+` breaks, and it breaks *every* per-route stage setting, not
-  just caching.
+  *Finally*, with the table above measured rather than inferred, the greedy
+  segment came back and `ANY` went (decision 12). The wildcard stays: it states
+  the caching default for routes that do not exist yet, which is worth having on
+  its own.
+
+  The narrow lesson is the one the table states and the one both wrong turns
+  cost: braces are fine, depth is fine, a greedy `+` is fine. `ANY` is what
+  breaks, and it breaks *every* per-route stage setting, not just caching.
 - **The migration off `{proxy+}` broke the portal prefix in production for ~20
   minutes (2026-08-14).** Worth recording in full, because two separate AWS
   behaviours combined and neither is obvious.
@@ -382,7 +407,8 @@ directly through execute-api after the failed first attempt (see below):
    request line already answers. `BUCKET_OWNER_PREFERRED` is required, not
    stylistic — standard logging delivers via ACL grants and S3's current default
    disables ACLs, which makes delivery fail silently.
-10. **`Cache-Control: max-age=0, must-revalidate` on the uploaded objects.** An
+10. **`Cache-Control: public, max-age=0, must-revalidate` on the uploaded
+    objects.** An
     invalidation clears the edge; it cannot reach a browser. Without a header the
     objects carry none, the S3 behaviours fall to CDK's default 24-hour
     `CACHING_OPTIMIZED` and browsers apply heuristic caching on top — so someone

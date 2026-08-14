@@ -110,9 +110,12 @@ export class PortalHostingStack extends cdk.Stack {
     // On, because CloudFront cannot backfill: a distribution that was not
     // logging at the time of an incident has nothing to reconstruct it from,
     // and the two things most likely to need reconstructing both arrive here.
-    // `/api-tokens/api/*` is an anonymous entry point whose only limiter today
-    // is the stage's default throttle, and task 0186 puts Discord OAuth
-    // callbacks and session cookies through these same behaviours.
+    // `/api-tokens/api/*` is an anonymous entry point, and its throttle
+    // (`PORTAL_THROTTLE`, 10 req/s) is a global rate cap rather than a
+    // per-caller one — it bounds the bill, not the behaviour, so what a flood
+    // looked like is a question only the logs can answer. Task 0186 then puts
+    // Discord OAuth callbacks and session cookies through these same
+    // behaviours.
     //
     // `logIncludesCookies` stays FALSE for that second reason: from task 0186
     // the portal's cookie IS the session, so including cookies would write a
@@ -318,7 +321,8 @@ function handler(event) {
     // on screen to explain why. That is the hazard the portal's own `/config`
     // route sets `no-store` to avoid, arriving through the front door instead.
     //
-    // `max-age=0, must-revalidate` is right for what is in the bucket TODAY:
+    // `public, max-age=0, must-revalidate` is right for what is in the bucket
+    // TODAY:
     // one unhashed `index.html`, where a revalidation round trip is cheap and
     // being wrong is not. When task 0185 brings a real bundle it should split
     // this — content-hashed assets get a year, the entry document keeps this.
