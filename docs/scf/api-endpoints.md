@@ -27,7 +27,8 @@ without it serves nothing.
 | `GET /v1/oracles/{asset_identifier}`      | `x-api-key`   | 60 s              |
 | `GET /v1/backfill/status`                 | `x-api-key`   | 60 s              |
 | `POST /v1/prices/batch`                   | `x-api-key`   | uncached          |
-| `ANY /api-tokens/api/{proxy+}`            | Anonymous²    | uncached          |
+| `ANY /api-tokens/api/{proxy}`             | Anonymous²    | uncached          |
+| `ANY /api-tokens/api/{proxy}/{sub}`       | Anonymous²    | uncached          |
 
 ¹ Gateway TTL. The handler sends `max-age=300` — see **Cache** below for why the
 two differ.
@@ -37,10 +38,30 @@ visitor signing in to obtain a key does not have one — the same argument that
 makes `/api-docs-json` anonymous. It is **not** open: while `PORTAL_ENABLED` is
 `false`, every path under it returns an empty `404`, byte-identical to a path
 that was never deployed (task 0183). `GET /api-tokens/api/config` is the one
-exception and answers `{"enabled": false}` in both states. Mapped as one greedy
-`ANY` so later slices add routes without a CDK change, and deliberately absent
+exception and answers `{"enabled": false}` in both states. Deliberately absent
 from the OpenAPI document — the portal describes itself to its own bundle, not
 to integrators.
+
+Two `ANY` levels of path parameter rather than one greedy `{proxy+}`, so later
+slices add routes without a CDK change while the routes stay addressable
+individually. That last part is the reason for the shape: API Gateway names a
+stage method setting `/{resourcePath}/{httpMethod}/{setting}`, and a `+` makes
+that string unparseable — so a greedy mapping can carry neither a cache setting
+nor a throttle, and these routes need both. **A path at depth 3 matches neither
+level** and gets the gateway's `403 Missing Authentication Token` instead of the
+gated `404`; every route in the epic sits at depth 1 or 2, and a slice that ever
+needs a third should add a third level here rather than reach back for
+`{proxy+}`.
+
+They also carry their own method-level throttle — **10 req/s, burst 40** — which
+is not decoration. Being keyless puts them outside the usage plan, so they
+inherit neither the per-key rate (1 req/s) nor the monthly quota, and without an
+entry of their own they would fall to the stage default of 200 req/s drawable
+with no key at all. Uncached at both layers by requirement, so every request is
+a billed gateway request **and** a billed Lambda invocation — task 0183's gate is
+middleware inside the handler, so even a closed portal pays full price to answer
+`404`. This bounds rate, not volume, and it is a global cap rather than
+per-caller; task 0194 costs the traffic before the flag is flipped.
 
 Source of truth: `infra/src/lib/stacks/api-gateway-stack.ts`. This table is
 documentation and is not itself asserted — what CI enforces is that the
@@ -58,6 +79,16 @@ Distribution `EU8O3ADXFZP5U`, deployed 2026-08-13. The domain is also published
 to SSM at `/prices/production/portal-distribution-domain`, which is where task
 0186 (Discord redirect URI) and task 0195 (custom domain) should read it from
 rather than copying it.
+
+> **Ahead of the deploy.** This section describes what task 0184's branch
+> synthesizes. Four of its properties are not on the live distribution yet — the
+> two-level gateway mapping and its throttle, the trailing-slash redirect,
+> CloudFront access logs, and `Cache-Control` on the uploaded objects — because
+> they landed after the 2026-08-13 deploy. Until
+> `make -C infra deploy-production-apigateway` and `deploy-production-portal`
+> run, `/api-tokens` answers `403 AccessDenied` rather than redirecting, and the
+> gateway still carries the greedy `ANY /api-tokens/api/{proxy+}` with no
+> throttle of its own. Delete this note once both stacks are deployed.
 
 A second, equivalent way to reach the API. One CloudFront distribution fronts
 two origins: a private S3 bucket holding the portal bundle, and the API Gateway
@@ -106,7 +137,7 @@ documented URL should get:
 it answers `403 {"message":"Missing Authentication Token"}` — the gateway's
 standard response for an unmapped path, the same as `/v1`. It is deliberately
 **not** the empty `404` described below: that applies to paths _under_ the
-prefix, which the greedy `{proxy+}` maps and the handler then gates.
+prefix, which the two `{proxy}` levels map and the handler then gates.
 
 **Access logs are on**, to a private bucket with a 90-day expiry. Cookies are
 excluded: from task 0186 the portal's cookie is the session itself, and logging

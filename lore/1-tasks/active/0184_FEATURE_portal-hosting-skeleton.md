@@ -26,6 +26,18 @@ history:
       [[0183]]'s branch rather than `develop` — the `/api-tokens/api/*`
       gateway proxy this slice adds is what makes 0183's `config` route
       reachable in production, so the two are reviewed as a stack.
+  - date: 2026-08-14
+    status: active
+    who: akot
+    note: >
+      Record reconciled with the code after review. The last two commits had
+      replaced the greedy `{proxy+}` with two non-greedy levels plus a
+      method-level throttle, and added access logs, upload `Cache-Control` and
+      the trailing-slash redirect, none of which were written down: decision 2
+      is marked superseded and decisions 8–11 record what replaced it.
+      `docs/scf/api-endpoints.md` and the docblock in `verify-openapi-routes.mjs`
+      described the old mapping and were corrected. Still open, and the reason
+      this is not `done`: the branch is ahead of the deployed distribution.
 ---
 
 # Portal hosting — skeleton
@@ -133,19 +145,22 @@ header is not being forwarded.
 
 ## Implementation Notes
 
-Five files, no Rust changes — [[0183]] already ships the behaviour behind the
+Seven files, no Rust changes — [[0183]] already ships the behaviour behind the
 gate; this slice only makes it reachable.
 
 - `infra/src/lib/stacks/portal-hosting-stack.ts` — new stack. Private bucket
   (`BLOCK_ALL`, OAC, `RETAIN`), distribution with two origins, the behaviour
-  table, a `BucketDeployment` that uploads and invalidates in one step, and the
-  distribution domain published to
-  `/prices/production/portal-distribution-domain` for [[0186]] and [[0195]].
-- `infra/src/lib/stacks/api-gateway-stack.ts` — `ANY /api-tokens/api/{proxy+}`,
-  keyless. This is the "door" [[0183]]'s note said would arrive here. The stage
-  cache is kept off it by the `/*` `*` default entry, which now declares
-  `cachingEnabled: false` — the per-route form is impossible, see the issue
-  below.
+  table, a `BucketDeployment` that uploads and invalidates in one step and
+  stamps `Cache-Control: max-age=0, must-revalidate` on what it uploads, a
+  private access-log bucket with a 90-day expiry, and the distribution domain
+  published to `/prices/production/portal-distribution-domain` for [[0186]] and
+  [[0195]].
+- `infra/src/lib/stacks/api-gateway-stack.ts` — `ANY /api-tokens/api/{proxy}`
+  and `.../{proxy}/{sub}`, keyless, with a method-level throttle of their own
+  (10 req/s, burst 40) and `cachingEnabled: false`. This is the "door"
+  [[0183]]'s note said would arrive here. The stage cache is *also* off by
+  default for anything that does not opt in, via the `/*` `*` entry — see the
+  issue below for why both statements exist.
 - `tools/scripts/verify-openapi-routes.mjs` — see the issue below.
 - `infra/assets/portal-placeholder/index.html`, `infra/src/lib/app.ts`,
   `infra/Makefile` (`deploy-production-portal`), `docs/scf/api-endpoints.md`.
@@ -154,14 +169,27 @@ Verified at synth: behaviour order (`/api-tokens/api/*` at index 0,
 `/api-tokens/*` at index 1), all four `PublicAccessBlockConfiguration` flags
 true, bucket policy grants only `cloudfront.amazonaws.com` `s3:GetObject`, API
 origin carries `originPath: /production`, API behaviours resolve to
-`CACHING_DISABLED` + `ALL_VIEWER_EXCEPT_HOST_HEADER`. `lint`, `typecheck`,
-`format:check` and `openapi:verify-routes` all pass.
+`CACHING_DISABLED` + `ALL_VIEWER_EXCEPT_HOST_HEADER`, and the assembled
+`methodSettings` array carrying both portal entries with their throttle in
+**both** arms of the `cacheEnabled` branch. `lint`, `typecheck`, `format:check`
+and `openapi:verify-routes` all pass.
 
 Verified against the deployed distribution — every response code in the
 acceptance criteria above was measured, not assumed. Production was also checked
 directly through execute-api after the failed first attempt (see below):
 `/health` `200`, `/api-docs-json` `200`, `/v1/assets` `403`, and
 `Prices-production-{ApiGateway,Compute}` both `UPDATE_COMPLETE`.
+
+> **What was measured is the 2026-08-13 deploy, which is no longer this
+> branch.** Every acceptance criterion above still holds against the live
+> distribution, but four things landed after it and are code-only until both
+> stacks are redeployed: the two-level gateway mapping and its throttle, the
+> access-log bucket, `Cache-Control` on the uploaded objects, and the
+> trailing-slash redirect (`/api-tokens` answers `403 AccessDenied` today rather
+> than `302`). Deploy order is `deploy-production-apigateway` then
+> `deploy-production-portal`; the probes worth re-running afterwards are
+> `/api-tokens` → `302`, a `Cache-Control` header on the placeholder, and
+> `/api-tokens/api/a/b/c` → `403` (depth 3 no longer matches — see decision 8).
 
 ## Issues Encountered
 
@@ -185,7 +213,10 @@ directly through execute-api after the failed first attempt (see below):
   the whole problem. The stack rolled back cleanly and production was never
   affected.
 
-  Resolved by making the invariant explicit instead of per-route: the default
+  Resolved in two steps, and both survive in the code because they answer
+  different questions.
+
+  *First*, the invariant was made explicit instead of per-route: the default
   `/*` `*` entry now declares `cachingEnabled: false`. That was **already** the
   effective behaviour, because the hand-written default entry never declared
   caching and API Gateway treats an undeclared method as uncached — but it was
@@ -194,6 +225,17 @@ directly through execute-api after the failed first attempt (see below):
   portal's session traffic. The six routes that opt in are unaffected: a more
   specific entry wins. Zero behaviour change on what is deployed today, and the
   guarantee now survives an edit to the default.
+
+  *Then* review reopened it: the wildcard covers caching, but a throttle cannot
+  be expressed that way — a stage-wide default is exactly what the portal needed
+  to escape. So the mapping dropped the `+` entirely (decision 8) and the routes
+  now carry per-route entries after all. The wildcard stays: it states the
+  caching default for routes that do not exist yet, which is worth having on its
+  own.
+
+  The narrow lesson is worth keeping: braces are fine, depth is fine, `ANY` is
+  fine. Only the `+` breaks, and it breaks *every* per-route stage setting, not
+  just caching.
 - **`defaultRootObject` cannot serve `/api-tokens/index.html`.** It is a
   distribution-level property and applies to `/` only; per-directory index
   documents otherwise need an S3 *website* endpoint, which requires a public
@@ -211,11 +253,14 @@ directly through execute-api after the failed first attempt (see below):
 2. **`ANY {proxy+}` rather than enumerated routes.** [[0183]] gates by prefix
    precisely so a later slice adds a route without editing the gate; enumerating
    at the gateway would reintroduce the per-slice CDK change it avoided.
+   **Superseded by decision 8** — the *property* survives, the greedy segment
+   does not.
 
 ### Emerged
 
-3. **A directory-index CloudFront Function** (chosen with Adam, 2026-08-13).
-   Six lines on viewer request: append `index.html` to a path ending in `/`.
+3. **A directory-index CloudFront Function** (chosen with Adam, 2026-08-13). A
+   handful of lines on viewer request: append `index.html` to a path ending in
+   `/` — later joined by decisions 4 and 11 in the same function.
    This is **not** [[0195]]'s SPA fallback, which rewrites unknown *sub-paths*
    per prefix and is real work. Associated with the S3 behaviours only —
    attaching it to an API behaviour would rewrite backend calls, which is the
@@ -237,6 +282,57 @@ directly through execute-api after the failed first attempt (see below):
 7. **`RETAIN` on the bucket.** The content is disposable, but it is the live
    origin of a live distribution; a stack delete that also empties it turns a
    rollback into an outage.
+8. **Two non-greedy levels — `{proxy}` and `{proxy}/{sub}` — and a throttle of
+   their own** (from review, 2026-08-14; supersedes decision 2). The routes are
+   keyless by design, so they sit outside the usage plan and inherit neither the
+   per-key 1 req/s nor the monthly quota; without an entry of their own they draw
+   the stage default of 200 req/s with no key at all, at a full Lambda invocation
+   each — [[0183]]'s gate is middleware *inside* the handler, so even a closed
+   portal pays to answer `404`. A per-route entry is the only way to bound that,
+   and a `+` makes one impossible (see the issue above), so the greedy segment
+   had to go. Sized at 10 req/s to match `API_DOCS_THROTTLE`, burst 40 because
+   one portal page load is several calls. Every route in the epic sits at depth 1
+   or 2, so decision 2's property is intact: a later slice still adds a route
+   without touching CDK. **The cost is a depth limit** — a depth-3 path matches
+   neither level and gets the gateway's `403` instead of the gated `404`. Written
+   into the code as a warning, with the instruction to add a third level rather
+   than reach back for `{proxy+}`. What this buys is cost control, not
+   availability: the cap is global rather than per-caller and bounds rate rather
+   than volume. A volume alarm and a WAF rule would close those two gaps and are
+   deliberately not built here — [[0194]] costs the traffic before the flag is
+   flipped.
+9. **CloudFront access logs on from day one**, to a private bucket with a 90-day
+   expiry, cookies **excluded**. CloudFront cannot backfill, so a distribution
+   that was not logging during an incident has nothing to reconstruct it from —
+   and the two things most likely to need reconstructing both arrive here
+   (`/api-tokens/api/*` is anonymous; [[0186]] puts OAuth callbacks through the
+   same behaviours). Cookies stay out for the same reason they arrive: from
+   [[0186]] the portal's cookie *is* the session, and logging it would write a
+   usable credential to S3 in plaintext for 90 days to answer a question the
+   request line already answers. `BUCKET_OWNER_PREFERRED` is required, not
+   stylistic — standard logging delivers via ACL grants and S3's current default
+   disables ACLs, which makes delivery fail silently.
+10. **`Cache-Control: max-age=0, must-revalidate` on the uploaded objects.** An
+    invalidation clears the edge; it cannot reach a browser. Without a header the
+    objects carry none, the S3 behaviours fall to CDK's default 24-hour
+    `CACHING_OPTIMIZED` and browsers apply heuristic caching on top — so someone
+    who opens today's placeholder keeps being told the portal is unavailable for
+    a day after [[0185]] ships the real app, with nothing on screen to explain
+    why. Right for one unhashed `index.html`; [[0185]] should split it, a year
+    for content-hashed assets and this for the entry document.
+11. **Paths whose last segment has no file extension redirect to their
+    trailing-slash form**, one branch in the same function as decision 3.
+    `/api-tokens/*` does not match `/api-tokens`, so the bare prefix fell to the
+    default behaviour and S3 answered `403 AccessDenied` XML — it grants
+    `s3:GetObject` and not `s3:ListBucket`, so a missing key reads as forbidden
+    rather than absent. That is the same bare XML decision 4 exists to prevent,
+    at the URL a reviewer reaches by trimming one character off the documented
+    one. It catches `/api-tokens/api` too, putting it back on the API behaviour
+    where the gateway answers for its own namespace. The redirect drops the query
+    string, which is safe **only** because the function is attached to the S3
+    behaviours alone: the one portal URL that carries query parameters —
+    [[0186]]'s OAuth callback, under `/api-tokens/api/` — is matched by an API
+    behaviour this function never sees.
 
 ## Notes
 
@@ -245,7 +341,9 @@ directly through execute-api after the failed first attempt (see below):
   `https://dojr4epgxo2qp.cloudfront.net/api-tokens/`. Bucket
   `prices-production-portalhosti-portalbucketf34416c0-ma76zxfgmn0x`. Stack
   creation took ~4.5 minutes including CloudFront propagation, not the 5–10 the
-  plan budgeted.
+  plan budgeted. **That deploy is not this branch** — decisions 8–11 landed after
+  it; see the note under Implementation Notes for what is code-only and in which
+  order to redeploy.
 - Cost: CloudFront free tier covers this; the meaningful line is the Route 53
   zone, and only once [[0195]] takes the domain.
 - **"CI deploys and invalidates" had nothing to stand on.** There is no workflow

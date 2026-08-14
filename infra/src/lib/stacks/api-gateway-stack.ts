@@ -519,8 +519,13 @@ export class ApiGatewayStack extends cdk.Stack {
       // well as in the arm above; that symmetry is the whole point of declaring
       // it outside the branch, and task 0194 verifies it by flipping
       // `apiGatewayCacheEnabled` off in a synth and diffing.
+      //
+      // `defaultCachingOff` rather than the bare throttle for the same reason it
+      // is used above: without a cache cluster the caching half is a no-op, but
+      // the two arms should state the same rule, or the arm that omits it is
+      // once again relying on an omission to mean something.
       cfnStage.methodSettings = [
-        defaultMethodThrottle,
+        defaultCachingOff,
         apiDocsSettings,
         ...portalSettings,
       ];

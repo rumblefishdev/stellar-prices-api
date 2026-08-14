@@ -168,9 +168,12 @@ const GATEWAY_SKIPPED_METHODS = new Set(['options']);
  * describes the public data API to integrators; the portal's endpoints belong
  * to the portal's own bundle and publishing them would advertise a half-built
  * portal to every reader of the spec — see the module docs on
- * `packages/prices-api/src/portal/mod.rs`. They are also mapped as a single
- * greedy `ANY /api-tokens/api/{proxy+}`, which has no OpenAPI equivalent to
- * compare against even if we wanted one.
+ * `packages/prices-api/src/portal/mod.rs`. They are also mapped as `ANY` on
+ * path-parameter resources (`{proxy}` and `{proxy}/{sub}` — see
+ * `PORTAL_API_RESOURCE_PATHS` in `infra/src/lib/stacks/api-gateway-stack.ts`),
+ * which have no OpenAPI equivalent to compare against even if we wanted one:
+ * `ANY` is every verb at once and the segments are placeholders for routes the
+ * axum router owns.
  *
  * Mirrors `PORTAL_API_PREFIX` in that module and `PORTAL_BACKEND` in
  * `infra/src/lib/stacks/portal-hosting-stack.ts` — and, unlike when this skip
@@ -220,8 +223,8 @@ for (const [, res] of resources) {
     console.error(`error: ${err.message}`);
     process.exit(1);
   }
-  // Checked BEFORE the ANY case: the portal is mapped as `ANY {proxy+}`, so
-  // the order decides whether this is a skip or a hard failure.
+  // Checked BEFORE the ANY case: the portal's resources are mapped with `ANY`,
+  // so the order decides whether this is a skip or a hard failure.
   if (path.startsWith(PORTAL_API_PREFIX)) {
     portalGatewayRoutes.push(`${method} ${path}`);
     continue;
