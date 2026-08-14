@@ -153,7 +153,8 @@ damage.
       (2,058,453,284,485.340191), so anything short of exact means incomplete —
       and the repaired window matched exactly too
 - [x] `_1d`/`_1w`/`_1M` verified by whole-bucket comparison, not a window subset
-- [ ] 91 DLQ messages purged (not redriven — data already present)
+- [x] 91 DLQ messages purged (not redriven — data already present), verified
+      `ApproximateNumberOfMessages = 0` 2026-08-14
 - [ ] BE told the window, since their 30D/1Y charts read it
 
 ## Future Work
