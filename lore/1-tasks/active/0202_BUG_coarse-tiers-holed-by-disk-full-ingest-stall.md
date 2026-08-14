@@ -119,14 +119,40 @@ still-broken input — and that partial-but-higher-version row would WIN.
 ⚠️ `_1M` buckets are **weeks-attributed-by-START** ([[0136]]) — verify the
 August bucket after the run rather than assuming the alignment covered it.
 
+## ✅ REPAIRED 2026-08-14 — exact to the last decimal
+
+`preroll-live-gap.sql`, window `2026-08-13 20:00` → `2026-08-14 08:00`, six
+stages bottom-up, single pass, no errors, single-digit seconds.
+
+| tier | before | after | buckets | expected |
+|---|---|---|---|---|
+| `_1m` (truth) | 1,986,859,212,523.7518365 | unchanged | 720 | 720 ✅ |
+| `_15m` | 845.2 B (42.5%) | **identical to truth** | 48 | 48 ✅ |
+| `_1h` | 304.2 B (15.3%) | **identical to truth** | 12 | 12 ✅ |
+| `_4h` | 67.0 B (3.4%) | **identical to truth** | 3 | 3 ✅ |
+
+Whole-bucket checks, which a window subset cannot verify:
+
+- `_1d` 08-13 = **4,086,616,150,096.873451**, matching `_1m` for that day exactly.
+- `_1w` week 08-10 = 19.15 T against 17.97 T for the four complete days it
+  contains — correctly greater, the excess being 08-14's partial day.
+- `_1M` August = 40.78 T, matching **the sum of weeks STARTING in August**
+  exactly. ⚠️ Compared against weeks, not the calendar month: the week of 07-27
+  is attributed to July though it spills into August, so a calendar comparison
+  would read as broken while the data is correct.
+
+`_1w`/`_1M` trail today's live data until their daily refresh — by design, not
+damage.
+
 ## Acceptance Criteria
 
-- [ ] Re-roll run for `2026-08-13 20:00` → `2026-08-14 08:00`, all six tiers,
+- [x] Re-roll run for `2026-08-13 20:00` → `2026-08-14 08:00`, all six tiers,
       bottom-up
-- [ ] Every tier's `sum(volume_base)` over the window matches `_1m FINAL`.
+- [x] Every tier's `sum(volume_base)` over the window matches `_1m FINAL`.
       ⚠️ The control night matched **exactly to the last decimal**
-      (2,058,453,284,485.340191), so anything short of exact means incomplete
-- [ ] `_1d`/`_1w`/`_1M` verified by whole-bucket comparison, not a window subset
+      (2,058,453,284,485.340191), so anything short of exact means incomplete —
+      and the repaired window matched exactly too
+- [x] `_1d`/`_1w`/`_1M` verified by whole-bucket comparison, not a window subset
 - [ ] 91 DLQ messages purged (not redriven — data already present)
 - [ ] BE told the window, since their 30D/1Y charts read it
 
