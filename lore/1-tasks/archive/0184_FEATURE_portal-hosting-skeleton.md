@@ -2,9 +2,9 @@
 id: "0184"
 title: "Portal reachable at a URL — private S3, CloudFront, routing table, placeholder page"
 type: FEATURE
-status: active
+status: completed
 related_adr: []
-related_tasks: ["0183", "0124", "0126", "0161", "0185", "0194", "0195"]
+related_tasks: ["0183", "0124", "0126", "0161", "0185", "0194", "0195", "0205"]
 tags: [layer-infra, priority-high, effort-small, milestone-M3, epic-self-service-onboarding, s3, cloudfront, slice-1]
 milestone: 3
 links:
@@ -38,6 +38,17 @@ history:
       `docs/scf/api-endpoints.md` and the docblock in `verify-openapi-routes.mjs`
       described the old mapping and were corrected. Still open, and the reason
       this is not `done`: the branch is ahead of the deployed distribution.
+  - date: 2026-08-14
+    status: completed
+    who: akot
+    note: >
+      Merged to `develop` as #209, after a second review round. Every written
+      acceptance criterion holds against the live distribution. Closed with the
+      deploy outstanding rather than done: four properties that landed after the
+      2026-08-13 deploy are code-only, and reaching them needs three deploys
+      rather than one, so that work is [[0205]] instead of a line in an archived
+      record. Nothing here is blocked on it — the portal is closed either way,
+      and [[0185]] can land on the distribution as it stands.
 ---
 
 # Portal hosting — skeleton
@@ -192,12 +203,13 @@ directly through execute-api after the failed first attempt (see below):
 `/health` `200`, `/api-docs-json` `200`, `/v1/assets` `403`, and
 `Prices-production-{ApiGateway,Compute}` both `UPDATE_COMPLETE`.
 
-> **Production does not match this branch, and the gateway is in an
-> intermediate state.** Every acceptance criterion above still holds live, but:
+> **Production does not match this record, and the deploy is [[0205]].** Every
+> acceptance criterion above holds live, but four properties that landed after
+> the 2026-08-13 deploy exist only in code:
 >
 > - the gateway maps `ANY {proxy}` + `{proxy}/{sub}` with **no throttle** —
 >   neither the original `{proxy+}` nor decision 12's shape, left there by the
->   2026-08-14 deploy attempt. Behaviour is correct at depth 1–2 and `403` at
+>   2026-08-14 deploy attempt. Behaviour is correct at depth 1-2 and `403` at
 >   depth 3.
 > - the access-log bucket, `Cache-Control` on the uploaded objects and the
 >   trailing-slash redirect are code-only; `/api-tokens` answers `403
@@ -208,28 +220,9 @@ directly through execute-api after the failed first attempt (see below):
 >   are live ahead of that task's merge, and `/config` now answers
 >   `200 {"enabled":false}` with `no-store`.
 >
-> Getting to decision 12's shape needs **two** gateway deploys and then the
-> portal, because `{proxy}` and `{proxy+}` cannot both be children of
-> `/api-tokens/api` mid-update (see the issue below). Concretely:
->
-> 1. `deploy-production-apigateway` from a working tree with the `portalProxy`
->    block and `portalSettings` commented out — this deletes the live `{proxy}`
->    and `{proxy}/{sub}` resources. **The portal prefix answers `403` for the
->    length of the gap**, which is why it happens before 0185 has a bundle that
->    calls it and not after.
-> 2. `deploy-production-apigateway` from the branch as committed — creates
->    `{proxy+}`, its three verbs and the per-verb throttle.
-> 3. `deploy-production-portal` — access logs, upload `Cache-Control`, the
->    redirect function.
->
-> Step 1 is a *local* edit that must not be committed; the alternative
-> (deleting the two resources with `aws apigateway delete-resource`) leaves the
-> stack drifted against a template that still declares them, which is worse.
->
-> Probes worth re-running afterwards: `/api-tokens` → `302`, a `Cache-Control`
-> header on the placeholder, `/api-tokens/api/a/b/c` → empty `404` (greedy
-> matches any depth again), and a throttle entry per verb in the deployed stage.
-> Then delete this note, and the matching one in `docs/scf/api-endpoints.md`.
+> [[0205]] carries the three deploys, the reason there are three rather than
+> one, and the probes to re-run. It also owns deleting this note and its twin in
+> `docs/scf/api-endpoints.md`.
 
 ## Issues Encountered
 

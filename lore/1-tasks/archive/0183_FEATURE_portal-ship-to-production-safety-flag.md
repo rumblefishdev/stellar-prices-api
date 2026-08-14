@@ -2,7 +2,7 @@
 id: "0183"
 title: "Ship-to-production safety — a PORTAL_ENABLED flag, because there is no test environment"
 type: FEATURE
-status: active
+status: completed
 related_adr: ["0007", "0010"]
 related_tasks: ["0157", "0184", "0185", "0186", "0187", "0188", "0189", "0191", "0192", "0194"]
 tags: [layer-infra, priority-high, effort-small, milestone-M3, epic-self-service-onboarding, feature-flag, ssm, safety, slice-0]
@@ -85,6 +85,19 @@ history:
       `mtls.rs` warns about, and no allowlist keyed on a Discord session that
       [[0186]] has not built yet. The cost is stated rather than buried: flipping
       it in production is a redeploy.
+  - date: 2026-08-14
+    status: completed
+    who: akot
+    note: >
+      Merged to `develop` as #207 and live: `Prices-production-Compute` carries
+      `PORTAL_ENABLED=false`, and `/api-tokens/api/config` answers
+      `200 {"enabled":false}` with `no-store` through both CloudFront and
+      execute-api. Two criteria stay unticked and are owned elsewhere by
+      design — the closed-portal page is [[0185]]'s and the key cleanup is
+      [[0194]]'s; this task shipped the `config` endpoint the first reads and
+      the flag the second flips. Reached production ahead of its own merge,
+      because a `cdk deploy` of the gateway pulls dependency stacks in without
+      `--exclusively`.
 ---
 
 # Ship-to-production safety — the PORTAL_ENABLED flag
@@ -239,9 +252,11 @@ finishing their own slice.
 
 ## Notes
 
-- API Gateway has no resource for `/api-tokens/api/*` yet, so in production the
-  `config` route is unreachable regardless of the flag until [[0184]] adds the
-  proxy. That is the correct order — the gate exists before the door.
+- API Gateway had no resource for `/api-tokens/api/*` when this task shipped, so
+  the `config` route was unreachable in production regardless of the flag. That
+  was the correct order — the gate exists before the door — and [[0184]] added
+  the proxy behind it. **Resolved 2026-08-14:** the route answers, and the flag
+  is what decides it.
 - The rollback story for every later slice: if a portal slice misbehaves in
   production, set `PORTAL_ENABLED: 'false'` and deploy, rather than reverting a
   stack. Slower than an SSM flip and still much faster than untangling a revert.

@@ -92,8 +92,8 @@ rather than copying it.
 > intermediate state left by the 2026-08-14 deploy attempt (see task 0184).
 > Moving it to the `{proxy+}` above means replacing a path-parameter resource,
 > which API Gateway will not do in one update — deploy once with the portal
-> resources removed, then again with them. Delete this note once both stacks
-> match this page.
+> resources removed, then again with them. **Task 0205 owns those deploys and
+> deleting this note.**
 
 A second, equivalent way to reach the API. One CloudFront distribution fronts
 two origins: a private S3 bucket holding the portal bundle, and the API Gateway
