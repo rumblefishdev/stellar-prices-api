@@ -180,10 +180,13 @@ pub async fn get_assets(
     if limit == 0 || limit > MAX_LIMIT {
         return errors::bad_request(errors::INVALID_QUERY, "limit must be 1..=200");
     }
+    // `valid_for` type-checks the payload against the active sort — a numeric
+    // sort binds `v` into `toFloat64(?)`, where a corrupt value would make
+    // ClickHouse throw (500) instead of this 400.
     let cursor = match p.cursor.as_deref() {
         Some(tok) => match cursor::decode(tok) {
-            Some(c) => Some(c),
-            None => return errors::bad_request(errors::INVALID_QUERY, "invalid cursor"),
+            Some(c) if c.valid_for(sort.is_numeric()) => Some(c),
+            _ => return errors::bad_request(errors::INVALID_QUERY, "invalid cursor"),
         },
         None => None,
     };
@@ -312,18 +315,58 @@ pub async fn get_ohlcv(
     let granularity = p
         .granularity
         .unwrap_or_else(|| timeframe.default_granularity());
-    // Validate ?start / ?end up front — otherwise a malformed value is bound into
-    // ClickHouse `parseDateTimeBestEffort(?)`, which throws → a 500 for what is a
-    // client input error (should be 400).
-    if let Some(s) = p.start.as_deref()
-        && !valid_iso8601(s)
-    {
-        return errors::bad_request(errors::INVALID_QUERY, "invalid start (expected ISO-8601)");
+
+    // Window rule (task 0119): parse ?start/?end to epochs, then bound-check the
+    // whole window BEFORE the DB is touched. Explicit rejection replaces the old
+    // silent truncation at OHLCV_MAX_POINTS, which looked like missing data.
+    let start = match p.start.as_deref() {
+        Some(s) => match parse_time(s) {
+            Some(t) => Some(t),
+            None => {
+                return errors::bad_request(
+                    errors::INVALID_QUERY,
+                    "invalid start (expected ISO-8601 or epoch)",
+                );
+            }
+        },
+        None => None,
+    };
+    let end = match p.end.as_deref() {
+        Some(e) => match parse_time(e) {
+            Some(t) => Some(t),
+            None => {
+                return errors::bad_request(
+                    errors::INVALID_QUERY,
+                    "invalid end (expected ISO-8601 or epoch)",
+                );
+            }
+        },
+        None => None,
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or_default();
+    let eff_end = end.unwrap_or(now);
+    // The timeframe window anchors to eff_end (not now), so `?end=…&timeframe=7d`
+    // means "the 7d window ending there". `all` starts at Stellar genesis.
+    let eff_start = start.unwrap_or_else(|| match timeframe.seconds() {
+        Some(tf) => eff_end - tf as i64,
+        None => queries_ch::STELLAR_GENESIS_EPOCH,
+    });
+    if eff_start >= eff_end {
+        return errors::bad_request(errors::INVALID_QUERY, "start must be before end");
     }
-    if let Some(e) = p.end.as_deref()
-        && !valid_iso8601(e)
-    {
-        return errors::bad_request(errors::INVALID_QUERY, "invalid end (expected ISO-8601)");
+    let points = ((eff_end - eff_start) as u64).div_ceil(granularity.seconds());
+    if points > OHLCV_MAX_POINTS {
+        return errors::bad_request(
+            errors::INVALID_QUERY,
+            format!(
+                "window yields ~{points} candles at granularity {g} (max {OHLCV_MAX_POINTS}); \
+                 use a coarser granularity or a narrower start/end",
+                g = granularity.as_str()
+            ),
+        );
     }
 
     // Resolve the base asset.
@@ -360,17 +403,20 @@ pub async fn get_ohlcv(
         Err(e) => return errors::db_error(&e, "quote lookup"),
     };
 
-    let since_interval = if p.start.is_some() {
-        None
-    } else {
-        timeframe.interval()
+    // When either bound is user-supplied, bind explicit epochs — end-only
+    // anchors the lower bound at eff_start, matching the window rule above.
+    // With neither, ClickHouse's own now() - INTERVAL stays authoritative.
+    let (sql_start, sql_end, since_interval) = match (start, end) {
+        (None, None) => (None, None, timeframe.interval()),
+        (s, Some(e)) => (Some(s.unwrap_or(eff_start)), Some(e), None),
+        (Some(s), None) => (Some(s), None, None),
     };
     let args = OhlcvArgs {
         asset_id,
         quote_asset_id,
         granularity,
-        start: p.start.clone(),
-        end: p.end.clone(),
+        start: sql_start,
+        end: sql_end,
         since_interval,
         limit: OHLCV_MAX_POINTS,
     };
@@ -436,78 +482,83 @@ async fn sdex_backfill_running(ch: &clickhouse::Client) -> bool {
     }
 }
 
-/// Lightweight ISO-8601 / epoch validation for `?start` / `?end`. Accepts what
-/// our clients send (and what ClickHouse `parseDateTimeBestEffort` consumes)
-/// without pulling in a datetime crate: a bare epoch (all digits), or a
-/// `YYYY-MM-DD` date optionally followed by `T`/space and an `HH:MM[:SS][.fff]`
-/// time with an optional `Z` / `±HH:MM` offset. Anything else (e.g. `notadate`)
-/// is rejected so the handler returns 400 instead of letting CH error → 500.
-fn valid_iso8601(s: &str) -> bool {
+/// Latest epoch we accept for `?start` / `?end`: 2100-01-01. Bounds what gets
+/// bound into ClickHouse `toDateTime` (DateTime tops out in 2106) and rejects
+/// nonsense like a 12-digit "epoch" that is really a typo.
+const MAX_EPOCH: i64 = 4_102_444_800;
+
+/// Parse a `?start` / `?end` value to epoch seconds (UTC). Accepts a bare
+/// epoch (seconds, or milliseconds when ≥ 13 digits), `YYYY-MM-DD` (midnight
+/// UTC), and `YYYY-MM-DD[T ]HH:MM[:SS[.fff]]` with an optional `Z` / `±HH:MM`
+/// offset (naive times are UTC). Unlike its shape-only predecessor, this
+/// rejects semantically impossible dates (`2026-02-30`, `T99:99:99`) — and the
+/// parsed epoch (not the raw string) is what reaches SQL, so there is exactly
+/// one interpretation of the window.
+fn parse_time(s: &str) -> Option<i64> {
     let s = s.trim();
     if s.is_empty() {
-        return false;
+        return None;
     }
-    // Bare unix epoch (seconds / millis).
-    if s.bytes().all(|b| b.is_ascii_digit()) {
-        return true;
-    }
-    let bytes = s.as_bytes();
-    // Date prefix: exactly `YYYY-MM-DD`.
-    if bytes.len() < 10 {
-        return false;
-    }
-    let digit = |i: usize| bytes[i].is_ascii_digit();
-    if !(digit(0)
-        && digit(1)
-        && digit(2)
-        && digit(3)
-        && bytes[4] == b'-'
-        && digit(5)
-        && digit(6)
-        && bytes[7] == b'-'
-        && digit(8)
-        && digit(9))
-    {
-        return false;
-    }
-    let month = (bytes[5] - b'0') * 10 + (bytes[6] - b'0');
-    let day = (bytes[8] - b'0') * 10 + (bytes[9] - b'0');
-    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
-        return false;
-    }
-    if s.len() == 10 {
-        return true;
-    }
-    // Optional time component: separator (`T` or space) then time-ish chars only.
-    if bytes[10] != b'T' && bytes[10] != b' ' {
-        return false;
-    }
-    let time = &s[11..];
-    time.len() >= 5 // at least HH:MM
-        && time
-            .bytes()
-            .all(|b| b.is_ascii_digit() || matches!(b, b':' | b'.' | b'Z' | b'+' | b'-'))
+    let epoch = if s.bytes().all(|b| b.is_ascii_digit()) {
+        let n: i64 = s.parse().ok()?;
+        // 13+ digits is an epoch in milliseconds.
+        if n >= 100_000_000_000 { n / 1000 } else { n }
+    } else if let Ok(d) = chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d") {
+        d.and_hms_opt(0, 0, 0)?.and_utc().timestamp()
+    } else {
+        // Datetime forms: normalize the documented space separator to `T`.
+        let norm = if s.len() > 10 && s.as_bytes()[10] == b' ' {
+            format!("{}T{}", &s[..10], &s[11..])
+        } else {
+            s.to_string()
+        };
+        if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&norm) {
+            dt.timestamp()
+        } else {
+            ["%Y-%m-%dT%H:%M:%S%.f", "%Y-%m-%dT%H:%M"]
+                .iter()
+                .find_map(|fmt| chrono::NaiveDateTime::parse_from_str(&norm, fmt).ok())?
+                .and_utc()
+                .timestamp()
+        }
+    };
+    (0..=MAX_EPOCH).contains(&epoch).then_some(epoch)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::valid_iso8601;
+    use super::parse_time;
 
     #[test]
-    fn iso8601_accepts_common_forms() {
+    fn parse_time_accepts_common_forms() {
         for s in [
             "2026-06-15",
             "2026-06-15T11:30:00Z",
             "2026-06-15 11:30:00",
+            "2026-06-15T11:30",
             "2026-06-15T11:30:00.123+02:00",
             "1718450000",
         ] {
-            assert!(valid_iso8601(s), "{s} should be valid");
+            assert!(parse_time(s).is_some(), "{s} should be valid");
         }
     }
 
     #[test]
-    fn iso8601_rejects_garbage() {
+    fn parse_time_agrees_on_equivalent_forms() {
+        // The same instant in four spellings — all must produce one epoch,
+        // since the parsed value (not the raw string) is what reaches SQL.
+        let epoch = parse_time("2026-06-15T11:13:20Z").unwrap();
+        assert_eq!(parse_time("2026-06-15 11:13:20"), Some(epoch));
+        assert_eq!(parse_time(&epoch.to_string()), Some(epoch));
+        assert_eq!(parse_time(&format!("{}000", epoch)), Some(epoch)); // millis
+        // Offsets shift correctly.
+        assert_eq!(parse_time("2026-06-15T13:13:20+02:00"), Some(epoch));
+        // Date-only is midnight UTC.
+        assert_eq!(parse_time("1970-01-02"), Some(86_400));
+    }
+
+    #[test]
+    fn parse_time_rejects_garbage_and_impossible_dates() {
         for s in [
             "notadate",
             "",
@@ -516,8 +567,11 @@ mod tests {
             "2026-06-32",
             "06-15-2026",
             "T12:00:00",
+            "2026-02-30",          // impossible calendar date
+            "2026-06-15T99:99:99", // impossible time
+            "99999999999999999",   // over MAX_EPOCH even as millis
         ] {
-            assert!(!valid_iso8601(s), "{s} should be invalid");
+            assert!(parse_time(s).is_none(), "{s} should be invalid");
         }
     }
 }

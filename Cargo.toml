@@ -47,6 +47,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rust_decimal = { version = "1", features = ["serde-with-str"] }
 thiserror = "2"
+# Already in the build graph transitively (xdr-parser → domain), so this direct
+# dep compiles nothing new. Used by prices-api to parse ?start/?end (task 0119).
+chrono = { version = "0.4", default-features = false, features = ["std"] }
 
 # AWS / Lambda — used only by the live Prices Ledger Processor (task 0038),
 # behind its `lambda` / `aws-mtls` cargo features so default builds stay lean.

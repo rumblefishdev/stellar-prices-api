@@ -441,6 +441,21 @@ impl Granularity {
             Granularity::Mo1 => "1M",
         }
     }
+
+    /// Bucket width in seconds, for the window-vs-granularity point count
+    /// (task 0119). `1M` uses 30 days — under-counting a month's seconds
+    /// over-counts buckets, which only makes the check stricter.
+    pub fn seconds(self) -> u64 {
+        match self {
+            Granularity::M1 => 60,
+            Granularity::M15 => 15 * 60,
+            Granularity::H1 => 3600,
+            Granularity::H4 => 4 * 3600,
+            Granularity::D1 => 86_400,
+            Granularity::W1 => 7 * 86_400,
+            Granularity::Mo1 => 30 * 86_400,
+        }
+    }
 }
 
 /// Requested time window (overview §4.2 auto-granularity table).
@@ -486,20 +501,40 @@ impl Timeframe {
         }
     }
 
+    /// Window width in seconds, or `None` for `all` (whose start is
+    /// [`STELLAR_GENESIS_EPOCH`], not a width).
+    pub fn seconds(self) -> Option<u64> {
+        match self {
+            Timeframe::H1 => Some(3600),
+            Timeframe::H24 => Some(86_400),
+            Timeframe::D7 => Some(7 * 86_400),
+            Timeframe::D30 => Some(30 * 86_400),
+            Timeframe::Y1 => Some(365 * 86_400),
+            Timeframe::All => None,
+        }
+    }
+
     pub fn is_all(self) -> bool {
         matches!(self, Timeframe::All)
     }
 }
 
-/// Validated OHLCV query inputs.
+/// Earliest possible candle: Stellar genesis (2015-09-30 UTC). Lower bound for
+/// `timeframe=all` window math — makes `all` computable without touching CH.
+pub const STELLAR_GENESIS_EPOCH: i64 = 1_443_571_200;
+
+/// Validated OHLCV query inputs. `start`/`end` are **validated epochs**
+/// (task 0119): binding the handler's parse result instead of the raw string
+/// leaves exactly one interpretation of the window — no divergence between our
+/// point-count check and what ClickHouse would have made of the raw value.
 pub struct OhlcvArgs {
     pub asset_id: u32,
     pub quote_asset_id: u32,
     pub granularity: Granularity,
-    /// `?start` override (ISO-8601); takes precedence over `since_interval`.
-    pub start: Option<String>,
-    /// `?end` override (ISO-8601).
-    pub end: Option<String>,
+    /// `?start` override (epoch seconds); takes precedence over `since_interval`.
+    pub start: Option<i64>,
+    /// `?end` override (epoch seconds).
+    pub end: Option<i64>,
     /// `now() - <interval>` lower bound from the timeframe (ignored if `start`
     /// is set or for `all`).
     pub since_interval: Option<&'static str>,
@@ -518,12 +553,12 @@ pub async fn ohlcv(ch: &Client, args: OhlcvArgs) -> Result<Vec<Candle>, clickhou
 
     let mut conds = vec!["asset_id = ?".to_string(), "quote_asset_id = ?".to_string()];
     if args.start.is_some() {
-        conds.push("timestamp >= parseDateTimeBestEffort(?)".to_string());
+        conds.push("timestamp >= toDateTime(?)".to_string());
     } else if let Some(iv) = args.since_interval {
         conds.push(format!("timestamp >= now() - {iv}"));
     }
     if args.end.is_some() {
-        conds.push("timestamp <= parseDateTimeBestEffort(?)".to_string());
+        conds.push("timestamp <= toDateTime(?)".to_string());
     }
 
     // NB: output aliases must NOT collide with column names referenced inside
