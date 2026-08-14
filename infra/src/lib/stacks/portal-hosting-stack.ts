@@ -9,14 +9,27 @@ import type { Construct } from 'constructs';
 import type { EnvironmentConfig } from '../types.js';
 
 /**
- * Directory holding the placeholder bundle, relative to `infra/` (cdk's CWD —
- * same convention as `API_HANDLER_ASSET_DIR` in `compute-stack.ts`).
+ * Vite build output for the portal app (`web/portal`), relative to `infra/`
+ * (cdk's CWD — same convention as `API_HANDLER_ASSET_DIR` in
+ * `compute-stack.ts`).
  *
- * One `index.html`, thrown away by task 0185 when the real app lands. Do not
- * invest in it.
+ * ⚠️ **Build the app before synthesizing.** `Code.fromAsset`'s S3 equivalent
+ * packages whatever is on disk with no freshness check against the source, so
+ * an unbuilt tree fails synth outright and a STALE one deploys silently and
+ * reports success — the failure task 0141 records for the Lambda bootstraps,
+ * arriving here for the frontend. `make -C infra deploy-production-portal`
+ * builds it first for exactly this reason; if you are running `cdk` by hand,
+ * run `npx nx build portal` first.
+ *
+ *     npx nx build portal        # → web/portal/dist
+ *
+ * This replaced task 0184's throwaway `assets/portal-placeholder/index.html`,
+ * which said the portal was not yet available. The app now says that itself,
+ * and says it on the authority of `GET /api-tokens/api/config` rather than of a
+ * hardcoded sentence that nobody would remember to delete.
  */
 const PORTAL_ASSET_DIR =
-  process.env['PORTAL_ASSET_DIR'] ?? 'assets/portal-placeholder';
+  process.env['PORTAL_ASSET_DIR'] ?? '../web/portal/dist';
 
 /**
  * The portal's path prefixes, and the rule that produced them.
@@ -321,15 +334,60 @@ function handler(event) {
     // on screen to explain why. That is the hazard the portal's own `/config`
     // route sets `no-store` to avoid, arriving through the front door instead.
     //
-    // `public, max-age=0, must-revalidate` is right for what is in the bucket
-    // TODAY:
-    // one unhashed `index.html`, where a revalidation round trip is cheap and
-    // being wrong is not. When task 0185 brings a real bundle it should split
-    // this — content-hashed assets get a year, the entry document keeps this.
+    // **Two deployments, because one `cacheControl` cannot describe both halves
+    // of a real bundle** (task 0185 split what task 0184 shipped as one).
+    //
+    // Vite emits content-hashed assets under `assets/` — `index-DgY606Y7.js` —
+    // whose name changes whenever the bytes do. A new build is a new URL, so
+    // those can be cached for a year and never revalidated; the entry document
+    // is the opposite, an unhashed `index.html` that must be re-fetched or the
+    // browser keeps booting last week's app from a URL that still resolves.
+    //
+    // The `exclude`/`include` pair is what keeps `prune` safe here. Pruning runs
+    // as `aws s3 sync --delete` under the same filters, so the entry-document
+    // deployment cannot delete the hashed assets it excludes. The asset
+    // deployment sets `prune: false` deliberately: a viewer already holding an
+    // `index.html` from the previous deploy still requests the old chunk names,
+    // and deleting them the moment a new build lands turns an open tab into a
+    // blank page. They accumulate; if that ever matters, an S3 lifecycle rule on
+    // `api-tokens/assets/` is the answer, not pruning.
+    //
+    // Only the entry-document deployment invalidates. New hashed assets are new
+    // URLs and were never in the cache, so invalidating them costs money to
+    // clear entries that do not exist.
+    const HASHED_ASSETS = 'assets/*';
+
+    new s3deploy.BucketDeployment(this, 'PortalBundleAssets', {
+      sources: [s3deploy.Source.asset(PORTAL_ASSET_DIR)],
+      destinationBucket: this.bucket,
+      destinationKeyPrefix: 'api-tokens',
+      exclude: ['*'],
+      include: [HASHED_ASSETS],
+      prune: false,
+      cacheControl: [
+        s3deploy.CacheControl.setPublic(),
+        s3deploy.CacheControl.maxAge(cdk.Duration.days(365)),
+        s3deploy.CacheControl.immutable(),
+      ],
+    });
+
+    // A stale bundle behind a CDN is indistinguishable from a broken deploy, so
+    // the invalidation is part of the same operation that uploads rather than a
+    // step an operator has to remember.
+    //
+    // `cacheControl` is the half `distributionPaths` cannot do. An invalidation
+    // clears the EDGE; it cannot reach a viewer's browser. Without a header the
+    // objects carry none, the S3 behaviours fall to CDK's default
+    // `CACHING_OPTIMIZED` (24 h) and browsers apply heuristic caching on top —
+    // so a visitor who opened the portal keeps being told it is unavailable for
+    // a day after the flag is flipped, with nothing on screen to explain why.
+    // That is the hazard the portal's own `/config` route sets `no-store` to
+    // avoid, arriving through the front door instead.
     new s3deploy.BucketDeployment(this, 'PortalBundle', {
       sources: [s3deploy.Source.asset(PORTAL_ASSET_DIR)],
       destinationBucket: this.bucket,
       destinationKeyPrefix: 'api-tokens',
+      exclude: [HASHED_ASSETS],
       distribution: this.distribution,
       distributionPaths: ['/api-tokens/*'],
       prune: true,

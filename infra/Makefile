@@ -30,10 +30,18 @@ destroy-cicd: build
 # test-sized parameters; production sizing is swapped in via
 # envs/production.json once the service is exercised in anger.
 
-synth-production: build
+# EVERY target that synthesizes the production app needs the portal bundle on
+# disk, not just the portal's own (task 0185). PortalHostingStack packages
+# `web/portal/dist`, and cdk synthesizes the whole app whichever stack you name
+# — so an unbuilt frontend fails `synth-production`, `diff-production` and every
+# per-stack deploy alike. The cicd app does not include it and keeps using
+# `build`.
+build-production: build build-portal
+
+synth-production: build-production
 	npx cdk --app "$(PRODUCTION_APP)" synth
 
-diff-production: build
+diff-production: build-production
 	npx cdk --app "$(PRODUCTION_APP)" diff
 
 # The /api-docs-json stage-cache entry has a 3600s TTL, which is only safe
@@ -63,28 +71,28 @@ flush-production-cache:
 # So `make diff-production` before any production deploy, and read it for removals
 # rather than skimming it for additions. This applies to every deploy target below
 # too; it lives here because this is the one that deploys all stacks at once.
-deploy-production: build
+deploy-production: build-production
 	npx cdk --app "$(PRODUCTION_APP)" deploy --all --require-approval broadening
 	$(MAKE) flush-production-cache
 
-destroy-production: build
+destroy-production: build-production
 	npx cdk --app "$(PRODUCTION_APP)" destroy --all --force
 
-deploy-production-secrets: build
+deploy-production-secrets: build-production
 	npx cdk --app "$(PRODUCTION_APP)" deploy Prices-production-Secrets --require-approval broadening
 
-destroy-production-secrets: build
+destroy-production-secrets: build-production
 	npx cdk --app "$(PRODUCTION_APP)" destroy Prices-production-Secrets --force
 
 # Ships a new api-handler, so it ships a new OpenAPI document — flush too.
-deploy-production-compute: build
+deploy-production-compute: build-production
 	npx cdk --app "$(PRODUCTION_APP)" deploy Prices-production-Compute --require-approval broadening
 	$(MAKE) flush-production-cache
 
-destroy-production-compute: build
+destroy-production-compute: build-production
 	npx cdk --app "$(PRODUCTION_APP)" destroy Prices-production-Compute --force
 
-deploy-production-apigateway: build
+deploy-production-apigateway: build-production
 	npx cdk --app "$(PRODUCTION_APP)" deploy Prices-production-ApiGateway --require-approval broadening
 
 # ORDERING (task 0184): PortalHosting imports this stack's RestApi id to build
@@ -93,29 +101,37 @@ deploy-production-apigateway: build
 # deleted as it is in use` until `destroy-production-portal` has run first.
 # The same import blocks any change that REPLACES the RestApi, for the same
 # reason and with the same remedy.
-destroy-production-apigateway: build
+destroy-production-apigateway: build-production
 	npx cdk --app "$(PRODUCTION_APP)" destroy Prices-production-ApiGateway --force
 
 # Uploads the portal bundle and invalidates the CloudFront cache as part of the
 # deploy (BucketDeployment), so there is no separate `aws s3 sync` step to
 # forget. A stale bundle behind a CDN is indistinguishable from a broken deploy.
 #
+# `build-portal` first, and it is not a convenience (task 0185): this stack
+# packages `web/portal/dist` off the disk with no freshness check, so without it
+# an unbuilt tree fails synth and — worse — a stale one deploys quietly and
+# reports success. That is task 0141's footgun arriving for the frontend.
+#
 # First deploy of this stack creates a distribution; that took ~4.5 minutes end
 # to end, most of it CloudFront propagating. Subsequent deploys are quick.
-deploy-production-portal: build
+build-portal:
+	cd .. && npx nx build portal
+
+deploy-production-portal: build-production
 	npx cdk --app "$(PRODUCTION_APP)" deploy Prices-production-PortalHosting --require-approval broadening
 
-destroy-production-portal: build
+destroy-production-portal: build-production
 	npx cdk --app "$(PRODUCTION_APP)" destroy Prices-production-PortalHosting --force
 
-deploy-production-eventbridge: build
+deploy-production-eventbridge: build-production
 	npx cdk --app "$(PRODUCTION_APP)" deploy Prices-production-EventBridge --require-approval broadening
 
-destroy-production-eventbridge: build
+destroy-production-eventbridge: build-production
 	npx cdk --app "$(PRODUCTION_APP)" destroy Prices-production-EventBridge --force
 
-deploy-production-observability: build
+deploy-production-observability: build-production
 	npx cdk --app "$(PRODUCTION_APP)" deploy Prices-production-Observability --require-approval broadening
 
-destroy-production-observability: build
+destroy-production-observability: build-production
 	npx cdk --app "$(PRODUCTION_APP)" destroy Prices-production-Observability --force

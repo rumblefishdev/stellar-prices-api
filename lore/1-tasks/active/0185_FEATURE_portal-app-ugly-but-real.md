@@ -82,17 +82,22 @@ something presentable, it has taken work from [[0193]] and delayed [[0186]].
 
 ## Acceptance Criteria
 
-- [ ] **Ships closed.** The app reads `GET /api-tokens/api/config` ([[0183]])
+- [x] **Ships closed.** The app reads `GET /api-tokens/api/config` ([[0183]])
       and renders "not yet available" with no sign-in button while `enabled` is
       false — the bundle is publicly reachable from the first deploy
-- [ ] `nx build` produces a static bundle; `nx test` runs and passes
-- [ ] The app is served at `/api-tokens/`, assets resolve, and a hard refresh on
-      `/api-tokens/` returns the app
-- [ ] The page shows the result of a live call to `/api-tokens/api/health`,
-      proving the same-origin path end to end
-- [ ] No API key, no secret and no third-party script in the bundle
-- [ ] CI deploys on merge; no manual upload step
-- [ ] It looks bad and nobody has spent time on that
+- [x] `nx build` produces a static bundle; `nx test` runs and passes — 4 tests
+- [x] The app is served at `/api-tokens/`, assets resolve, and a hard refresh on
+      `/api-tokens/` returns the app — verified at build: the emitted
+      `index.html` references `/api-tokens/assets/…`. **Not yet verified live**,
+      which needs [[0205]]'s deploys
+- [x] ~~The page shows the result of a live call to
+      `/api-tokens/api/health`~~ — **amended to `/api-tokens/api/config`**; that
+      route does not exist and could not be made to answer. See decision 4
+- [x] No API key, no secret and no third-party script in the bundle — asserted
+      in a test for the key, and by inspection of `dist/` for all three
+- [ ] ~~CI deploys on merge; no manual upload step~~ — **withdrawn, with Adam,
+      2026-08-14.** See decision 9
+- [x] It looks bad and nobody has spent time on that
 
 ## Notes
 
@@ -101,3 +106,105 @@ something presentable, it has taken work from [[0193]] and delayed [[0186]].
   nothing to break yet; do not add routes that depend on it before then.
 - Nx here is 22.7.0 against the explorer's 22.6.1 — close enough to share config
   shapes, worth a glance if a generator misbehaves.
+
+## Implementation Notes
+
+The app is `web/portal`, an `@nx/react` project: React 19, Vite, TypeScript 5.9,
+Vitest 4, `react-router-dom` 7. One route, plain elements, no MUI.
+
+- `web/portal/vite.config.mts` — `base: '/api-tokens/'` and the dev proxy.
+- `web/portal/src/main.tsx` — `basename` on the router, the other half of `base`.
+- `web/portal/src/api/portal.ts` — the one backend call, relative by
+  construction.
+- `web/portal/src/app/app.tsx` + `app.spec.tsx` — the page and four tests.
+- `infra/src/lib/stacks/portal-hosting-stack.ts` — `PORTAL_ASSET_DIR` repointed
+  from [[0184]]'s placeholder to `../web/portal/dist`, and the single
+  `BucketDeployment` split in two.
+- `infra/Makefile` — `build-portal`, and a `build-production` every production
+  target now hangs off.
+- `.github/workflows/ci.yml` — `web/**` in the `typescript` paths filter.
+
+Verified: `build`, `lint`, `typecheck` and `test` pass for `portal` and for the
+CDK app; `make -C infra synth-production` succeeds **from a tree with no
+`web/portal/dist`**, which is the property the Makefile change exists to
+guarantee; the synthesized template carries both deployments with the intended
+filters, cache headers and invalidation.
+
+## Design Decisions
+
+### From Plan
+
+1. **`base` + `basename` in the first commit.** Both, not either: `base` covers
+   assets and `basename` covers routes. They differ by a trailing slash on
+   purpose — Vite concatenates without one and emits `/api-tokensassets/…`,
+   react-router warns if given one.
+2. **Dev proxy with the key injected server-side**, ported from
+   `soroban-block-explorer`. `loadEnv(mode, root, '')` reads it in the Node
+   config; only `VITE_`-prefixed vars reach the bundle.
+3. **No third-party scripts.** The reference app carries Google Tag Manager in
+   its `index.html`; that is the one thing deliberately not copied from it.
+
+### Emerged
+
+4. **The same-origin probe is `/config`, not `/api-tokens/api/health`.** The
+   criterion named a route that does not exist: the portal backend maps exactly
+   one path (`portal/mod.rs`), and [[0183]]'s gate answers an empty `404` on
+   every other path under the prefix — so a `/health` probe would render a
+   failure whether or not anyone implemented it, and implementing it would mean
+   adding a route whose only job is to be gated. `/config` is exempt from the
+   gate and answers `200` in **both** flag states, which is exactly what a
+   liveness probe from the bundle needs, and it is the route [[0183]] built for
+   this bundle to read.
+5. **`web/portal`, not `web/`.** [[0184]]'s routing convention has several
+   frontends sharing one distribution; the next one should not have to move this
+   one first. `web/*` joins the npm workspaces.
+6. **`react-router-dom` bumped 6 → 7, Vite left at 8.** The task pins the stack
+   to the explorer's. The router is a real choice — [[0195]]'s SPA fallback will
+   be written against v7, and v6 warns about the exact APIs this app uses — so
+   it was bumped. Vite came out of the generator at 8 against the explorer's 7
+   and was left alone: the task itself anticipates drift, and what "mirror the
+   explorer" buys is config shape, not version lockstep.
+7. **Two `BucketDeployment`s, splitting [[0184]]'s decision 10 as it asked to be
+   split.** Content-hashed assets get a year and `immutable`; the unhashed entry
+   document keeps `max-age=0, must-revalidate`. The asset deployment sets
+   `prune: false` deliberately — a viewer holding the previous `index.html` still
+   requests the old chunk names, and deleting them the moment a new build lands
+   turns an open tab into a blank page. Only the entry-document deployment
+   invalidates: new hashed assets are new URLs and were never cached.
+8. **Every production Makefile target builds the portal, not just the portal's.**
+   `cdk` synthesizes the whole app whichever stack is named, so an unbuilt
+   frontend fails `synth-production` and every per-stack deploy alike. This is
+   [[0141]]'s footgun arriving for the frontend: the bundle is packaged off disk
+   with no freshness check, so a stale one deploys quietly and reports success.
+9. **"CI deploys on merge" withdrawn rather than built** (with Adam,
+   2026-08-14). [[0184]] established there is no infrastructure deploy workflow
+   in this repo at all — `ci.yml` synthesizes only, and every deploy is
+   `make -C infra` run by an operator. What the criterion actually protects
+   against is a hand-run `aws s3 sync` that nobody follows with an invalidation,
+   and `BucketDeployment` already closes that inside `cdk deploy`. Building a
+   deploy pipeline is a separate, much larger task and is not smuggled in here.
+10. **`tsconfig.app.json` emits to `out-tsc/app`, not `dist`.** Vite owns `dist`
+    and empties it on every build, which deleted the declarations
+    `tsconfig.spec.json` references and broke `typecheck` after any `build`.
+
+## Issues Encountered
+
+- **The generated-types instruction rests on a premise that does not hold.** The
+  task says to generate API types from `/api-docs-json` rather than
+  hand-maintain them. Every portal endpoint is **deliberately absent** from that
+  document — [[0184]]'s `verify-openapi-routes.mjs` fails CI if one appears in
+  it, because the document describes the public data API to integrators and the
+  portal describes itself to its own bundle. So there is nothing there to
+  generate this app's own calls from, in this slice or in [[0186]]-[[0192]].
+  Kept the mechanism (`npm run portal:api-types`, `openapi-typescript`) because
+  the `/v1` types will be worth having when a page renders them; dropped the
+  973-line emitted file, which nothing imported and would only drift. The one
+  type the app needs, `PortalConfig`, is hand-written against `portal/mod.rs`
+  and flagged as such.
+- **`npm install` failed inside the generator.** `@nx/react`, `@nx/vite` and
+  `@nx/web` installed with `^22.7.0` resolve to 22.7.8, which peer-conflicts
+  with `@nx/eslint@22.7.0` on `@nx/jest` and aborts mid-generate, leaving a
+  half-written project tree. All three are pinned exactly.
+- **`typecheck` and `build` fought over `dist/`** — see decision 10. It passes
+  the first time and fails the second, which is the worst version of this bug:
+  it looks like a flake.

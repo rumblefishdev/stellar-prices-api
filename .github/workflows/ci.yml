@@ -72,6 +72,12 @@ jobs:
             typescript:
               - 'libs/**'
               - 'infra/**'
+              # The portal app (task 0185). Without this line its lint, build,
+              # typecheck and tests never run: no other pattern here matches
+              # `web/`, so a frontend-only PR would run no job at all and merge
+              # green having been checked by nothing. Same shape as the gap the
+              # `rust` filter above closes for `portal-hosting-stack.ts`.
+              - 'web/**'
               - 'package.json'
               - 'package-lock.json'
               - 'tsconfig*.json'
