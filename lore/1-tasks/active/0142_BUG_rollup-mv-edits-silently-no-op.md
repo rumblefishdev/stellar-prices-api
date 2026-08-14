@@ -2,7 +2,7 @@
 id: "0142"
 title: "rollups.sql edits silently don't land either — the refreshable MVs carry 0134's footgun with no OR REPLACE escape"
 type: BUG
-status: backlog
+status: active
 related_adr: []
 related_tasks: ["0134", "0136", "0095", "0090", "0104", "0143", "0144", "0146"]
 tags: ["priority-high", "effort-medium", "clickhouse", "schema-drift", "footgun"]
@@ -18,6 +18,19 @@ history:
       six MVs `CREATE MATERIALIZED VIEW IF NOT EXISTS` with **no** preceding
       `DROP` — so the identical silent no-op applies there, and unlike a plain
       view a refreshable MV cannot use `OR REPLACE` as the escape.
+  - date: 2026-08-14
+    status: active
+    who: okarcz
+    note: >
+      Promoted to active. Selected specifically because it needs **no Hetzner
+      access** — the BE team are working on the shared volume after the
+      2026-08-13 disk-full incident ([[0202]]), which rules out the two tasks
+      that were otherwise next ([[0182]]'s repair run and [[0201]]), and
+      [[0111]] cannot choose among its four fixes without prod `query_log`
+      measurements. This task's cheapest win — comparing `create_table_query`
+      in `system.tables` against `rollups.sql` — is written and tested entirely
+      against a local ClickHouse pinned to the prod version 26.3.10.60.
+      It also unblocks [[0146]] and [[0203]].
 ---
 
 # `rollups.sql` edits silently no-op on a provisioned target

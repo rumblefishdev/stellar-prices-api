@@ -826,7 +826,7 @@ async fn price_usd_series_fills_peg_assets_without_overriding_market_data() {
 /// (task 0165: it is the top-preference quote, 0 candles). So this fixture is
 /// deliberately synthetic — USDC quoted in XLM. That is the point: the guard has
 /// to survive someone *adding* a peg member that does trade, which is live in
-/// tasks 0173/0183, not hypothetical.
+/// tasks 0173/0196, not hypothetical.
 #[tokio::test]
 #[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
 async fn peg_member_that_also_trades_as_a_base_keeps_its_market_value() {

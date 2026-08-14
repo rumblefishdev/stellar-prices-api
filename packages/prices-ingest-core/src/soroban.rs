@@ -818,6 +818,36 @@ mod tests {
         );
     }
 
+    /// Task 0196 — the companion to `peg_identities_is_exactly_canonical_usdc`
+    /// in `oracle-worker`, for the other half of the oracle surface.
+    ///
+    /// The per-symbol tests above each check one key. This checks the **set**:
+    /// across every key the captured Reflector samples contain, exactly three
+    /// resolve, and they are all the same two assets. A new `Some` arm changes
+    /// this list and fails here, which is the point — an identity must not join
+    /// the oracle surface without someone writing down why the feed's ticker
+    /// names that issuer.
+    #[test]
+    fn reflector_resolves_exactly_xlm_and_usdc_and_nothing_else() {
+        // Every key observed in lore/4-notes/samples/soroban-events/REFLECTOR.jsonl.
+        const OBSERVED_KEYS: &[&str] = &[
+            "XLM", "native", "USDC", "USDT", "EURC", "BTC", "ETH", "EUR", "GBP", "XAU",
+        ];
+        let resolved: Vec<&str> = OBSERVED_KEYS
+            .iter()
+            .copied()
+            .filter(|k| reflector_key_to_identity(k).is_some())
+            .collect();
+        assert_eq!(
+            resolved,
+            vec!["XLM", "native", "USDC"],
+            "exactly XLM (two spellings) and USDC may resolve. Anything else \
+             reaches prices.oracle_prices keyed to a Stellar issuer, which is a \
+             claim that the feed prices THAT issuer — see task 0196 for what \
+             that cost when it was wrong for USDT."
+        );
+    }
+
     #[test]
     fn reflector_drops_non_stellar_reference_symbols() {
         // FX/crypto references (real keys in the captured samples) have no

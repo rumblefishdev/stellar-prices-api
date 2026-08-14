@@ -2,7 +2,7 @@
 id: "0119"
 title: "Input-validation hardening — every path, query and body param rejected with 400 on invalid input"
 type: FEATURE
-status: backlog
+status: active
 related_adr: ["0006", "0008"]
 related_tasks: ["0040", "0118", "0120"]
 tags: [layer-backend, priority-high, effort-medium, milestone-M2, api, validation, security]
@@ -20,6 +20,12 @@ history:
       work bullet "Input validation: asset identifier format enforced, param
       ranges validated, 400 on invalid input" and overview §7's
       input-validation security bullet.
+  - date: 2026-08-13
+    status: active
+    who: stkrolikiewicz
+    note: >
+      Activated. First of the M2 verification sequence agreed with okarcz:
+      stkrolikiewicz takes [[0119]] -> [[0120]] -> [[0121]] in that order.
 ---
 
 # Input-validation hardening

@@ -374,7 +374,7 @@ ticker does not identify the issuer, not because it lacks an identity.
 
 ⚠️ **This stops new rows only.** Enrichment keeps reading the 46,378 already
 stored, so USDT-quoted candles stay mis-priced until those are purged — that is
-[[0183]], and it is on this task's critical path rather than a follow-up tidy-up.
+[[0196]], and it is on this task's critical path rather than a follow-up tidy-up.
 
 ### Why pivot instead of simply deleting USDT from the peg set
 
@@ -435,7 +435,7 @@ GROUP BY d HAVING priced > 0 AND weight = 0
 `volume_base`, so `sum(w)` is never 0 and the `CAST` never sees a NULL. Removing
 USDT's placeholder is safe.
 
-⚠️ This clears **USDT**, not the defect. [[0185]] stays open: arm A still filters
+⚠️ This clears **USDT**, not the defect. [[0198]] stays open: arm A still filters
 only on `close_usd > 0`, so any other asset that lands priced-but-zero-volume
 takes down the whole view. USDT simply is not such an asset today — which is a
 measurement, not a guarantee.
@@ -514,15 +514,15 @@ this is resolved — 0165 used it as one.
 
 - **[[0182]]** — re-enrich the 44,657 stored `close_usd` values (the writer is
   fixed; history is not)
-- **[[0183]]** — 🚧 **BLOCKS CLOSURE.** `prices.oracle_prices` *and*
+- **[[0196]]** — ✅ **DONE + ARCHIVED 2026-08-13** (was: blocks closure). `prices.oracle_prices` *and*
   `prices.usd_rate` rows that file Tether's price under this issuer's identity.
   The `oracle_prices` half is not a tidy-up: enrichment reads those 46,378 rows
   in the tier that runs *first*, so until they are purged this task's fix is
   bypassed on every new USDT-quoted candle. Widened from `usd_rate`-only on
   2026-08-13.
-- **[[0184]]** — should a depegged asset still be quote-preference rank 1?
+- **[[0197]]** — should a depegged asset still be quote-preference rank 1?
   (`canonical.rs`, deliberately untouched here)
-- **[[0185]]** — `price_usd_series` *raises* on a zero-weight group; the existing
+- **[[0198]]** — `price_usd_series` *raises* on a zero-weight group; the existing
   code comment describing that case is wrong about the failure mode
 - **[[0168]]** — hold note added: it must not be recorded as resolving this task
 
@@ -539,9 +539,11 @@ this is resolved — 0165 used it as one.
 - [ ] BE notified if any published TVL was affected.
 - [ ] **The fix is actually in effect on prod, not merely merged.** Both writer
       paths are stopped in code, but two row sets still assert the old $1:
-      - [ ] [[0183]] — `prices.oracle_prices` rows for asset_id 111 purged.
-            Until then the oracle tier keeps re-pegging **new** candles, so this
-            gates closure, not just cleanup.
+      - [x] [[0196]] — **DONE 2026-08-13.** 46,423 `oracle_prices` rows and
+            44,318 `usd_rate` rows deleted on prod, verified 0, no regrowth.
+            Both writers deployed first — across **two stacks**, which is the
+            part that nearly went wrong. New candles are now priced by the
+            pivot, not the oracle's $1.
       - [ ] [[0182]] — the 44,657 stored `close_usd` values re-enriched (history).
 
       ⚠️ **Do not archive this task on a green PR alone.** Merging #205 stops new

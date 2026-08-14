@@ -29,6 +29,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         max_batches: env_parse_or("MAX_BATCHES", 20),
         one_shot: env_parse_or("ENRICHMENT_ONE_SHOT", false),
         time_window: None,
+        usd_reset: None,
     };
 
     let pass = ChEnrichmentPass::new(cfg);

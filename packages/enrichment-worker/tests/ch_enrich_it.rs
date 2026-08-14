@@ -9,7 +9,7 @@
 //! at the end, so they never touch `prices` and can run in parallel.
 
 use clickhouse::Client;
-use enrichment_worker::ch_enrich::{ChEnrichConfig, ChEnrichmentPass};
+use enrichment_worker::ch_enrich::{ChEnrichConfig, ChEnrichError, ChEnrichmentPass, UsdResetSpec};
 use enrichment_worker::repair::{
     CoarseRepairConfig, CoarseRepairDriver, CoarseSweepConfig, run_coarse_sweep,
 };
@@ -118,6 +118,7 @@ fn cfg(db: &str) -> ChEnrichConfig {
         max_batches: 10,
         one_shot: false,
         time_window: None,
+        usd_reset: None,
     }
 }
 
@@ -1181,6 +1182,282 @@ async fn usdt_quoted_candles_pivot_on_the_measured_rate_not_a_dollar_peg() {
     assert!(
         approx(after, 1.3),
         "second pass must leave the pivot value unchanged, got {after}"
+    );
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// Fixture for the task 0182 reset tests: a USDT/USDC pivot reference at two
+/// instants, and a FOO/USDT candle at each **already carrying the wrong `$1`
+/// peg values** — `close_usd = 10.0` where the measured rate says 1.3.
+///
+/// That "already written" part is the whole point. Every tier filters on
+/// `close_usd = 0`, so these rows are inert: the 0172 writer fix does not reach
+/// them and never will.
+async fn setup_0182(db: &str, t_old: u32, t_new: u32) -> Client {
+    let client = setup_scratch(db).await;
+    client
+        .query(&format!(
+            "INSERT INTO {db}.assets \
+             (asset_id, asset_code, asset_type, issuer_address, contract_address) VALUES \
+             (1,'XLM','classic','',''), (2,'USDC','classic','{USDC_ISSUER}',''), \
+             (3,'USDT','classic','{USDT_ISSUER}',''), (10,'FOO','classic','GFOO','')"
+        ))
+        .execute()
+        .await
+        .unwrap();
+    client
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1m \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
+             ({t_old}, 3, 2,'sdex', 0.13,0.13,0.13,0.13, 1000,130, 0, 0, 0.13, 1,1), \
+             ({t_new}, 3, 2,'sdex', 0.13,0.13,0.13,0.13, 1000,130, 0, 0, 0.13, 1,1), \
+             ({t_old},10, 3,'sdex', 10,10,10,10,            5, 50,50,10, 10,   1,1), \
+             ({t_new},10, 3,'sdex', 10,10,10,10,            5, 50,50,10, 10,   1,1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+    client
+}
+
+/// Control for the reset tests below, and a standing regression for the trap
+/// that hid task 0182 for a month: an ordinary pass over rows whose `close_usd`
+/// is **wrong but non-zero** does nothing at all, and reports success doing it.
+///
+/// If this test ever starts failing because the values moved, the tiers have
+/// stopped being idempotent — which is a much bigger problem than 0182.
+#[tokio::test]
+#[ignore]
+async fn an_ordinary_pass_cannot_see_a_wrong_but_written_close_usd() {
+    let db = "it_enrich_0182_control";
+    let (t_old, t_new) = (1_500_000_000u32, 1_600_000_000u32);
+    let client = setup_0182(db, t_old, t_new).await;
+
+    let stats = ChEnrichmentPass::new(cfg(db)).run().await.unwrap();
+
+    assert_eq!(
+        stats.rows_reset, 0,
+        "no reset was configured, so the pass must not discard anything"
+    );
+    for ts in [t_old, t_new] {
+        let v = close_usd(&client, db, 10, 3, ts).await;
+        assert!(
+            (v - 10.0).abs() < 1e-4,
+            "an ordinary pass must leave a written close_usd alone (that is what \
+             makes it idempotent); at {ts} got {v}, expected the untouched 10.0"
+        );
+    }
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// The task 0182 repair, end to end: re-open the written values, let the pivot
+/// recompute them from the measured USDT/USDC market, and leave the pre-epoch
+/// window untouched.
+///
+/// Both halves are asserted deliberately. A test that checked only "the new row
+/// got fixed" would also pass for a reset with no epoch bound at all — which
+/// would zero the pre-2021 rows that have no pivot reference and strand them at
+/// `close_usd = 0` permanently.
+#[tokio::test]
+#[ignore]
+async fn the_usd_reset_recomputes_written_values_but_respects_the_epoch() {
+    let db = "it_enrich_0182_reset";
+    let (t_old, t_new) = (1_500_000_000u32, 1_600_000_000u32);
+    let client = setup_0182(db, t_old, t_new).await;
+
+    let mut c = cfg(db);
+    // A reset requires a draining pass — see `the_usd_reset_refuses_a_bounded_pass`.
+    // The operator CLI hard-codes this; the IT helper defaults to bounded.
+    c.one_shot = true;
+    c.usd_reset = Some(UsdResetSpec {
+        quote_asset_id: 3,
+        not_before: t_new,
+    });
+    let stats = ChEnrichmentPass::new(c).run().await.unwrap();
+
+    assert_eq!(
+        stats.rows_reset, 1,
+        "exactly the one post-epoch FOO/USDT row should have been re-opened"
+    );
+
+    let fixed = close_usd(&client, db, 10, 3, t_new).await;
+    assert!(
+        (fixed - 1.3).abs() < 1e-4,
+        "the re-opened candle must be recomputed at the MEASURED rate \
+         (10 x 0.13 = 1.3), got {fixed}. 10.0 means the reset never happened; \
+         0.0 means it was re-opened and then not refilled, which is worse than \
+         the defect."
+    );
+
+    let protected = close_usd(&client, db, 10, 3, t_old).await;
+    assert!(
+        (protected - 10.0).abs() < 1e-4,
+        "the pre-epoch candle must keep its stored value, got {protected}. \
+         Below the epoch the pivot has no reference, so zeroing it here would \
+         strand it at 0 forever."
+    );
+
+    // Both USD columns come from one reference, or the row is incoherent.
+    let vq: f64 = client
+        .query(&format!(
+            "SELECT toFloat64(volume_quote_usd) FROM {db}.price_ohlcv_1m FINAL \
+             WHERE asset_id = 10 AND quote_asset_id = 3 AND timestamp = ?"
+        ))
+        .bind(t_new)
+        .fetch_one::<f64>()
+        .await
+        .unwrap();
+    assert!(
+        (vq - 6.5).abs() < 1e-4,
+        "volume_quote_usd must be recomputed from the same 0.13 rate \
+         (50 x 0.13 = 6.5), got {vq}. 50.0 means it kept the old peg while \
+         close_usd moved, leaving two USD columns that disagree by ~7.4x."
+    );
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// A mistyped `--reset-quote-asset-id` must not be able to zero rows nothing can
+/// re-price.
+///
+/// This is the one way the repair ends up strictly worse than the defect: a
+/// wrong-but-visible number becomes the ambiguous zero that ~130 unguarded
+/// `argMax(close_usd, …)` sites read as a real price. And the oracle gate does
+/// not catch it — an unknown asset has no Reflector rows either, which is
+/// exactly what that gate is looking for.
+#[tokio::test]
+#[ignore]
+async fn the_usd_reset_refuses_a_quote_leg_that_no_tier_can_reprice() {
+    let db = "it_enrich_0182_unpriceable";
+    let (t_old, t_new) = (1_500_000_000u32, 1_600_000_000u32);
+    let client = setup_0182(db, t_old, t_new).await;
+
+    let mut c = cfg(db);
+    c.one_shot = true;
+    // 10 is FOO — a real asset in the fixture, but not a peg or pivot reference.
+    // Stands in for the realistic slip of typing 11 for 111.
+    c.usd_reset = Some(UsdResetSpec {
+        quote_asset_id: 10,
+        not_before: t_new,
+    });
+    let err = ChEnrichmentPass::new(c).run().await.unwrap_err();
+
+    assert!(
+        matches!(err, ChEnrichError::ResetTargetHasNoPricingPath { quote_asset_id, .. }
+                 if quote_asset_id == 10),
+        "expected the reset to refuse an unpriceable quote leg, got {err:?}"
+    );
+
+    let v = close_usd(&client, db, 10, 3, t_new).await;
+    assert!(
+        (v - 10.0).abs() < 1e-4,
+        "a refused reset must not have written anything, got {v}"
+    );
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// A bounded pass can defer the peg-pivot tier (it is gated on the oracle tier
+/// draining), which would leave the reset's zeroes published until some later
+/// run. The combination is refused rather than risked.
+#[tokio::test]
+#[ignore]
+async fn the_usd_reset_refuses_a_bounded_pass() {
+    let db = "it_enrich_0182_bounded";
+    let (t_old, t_new) = (1_500_000_000u32, 1_600_000_000u32);
+    let client = setup_0182(db, t_old, t_new).await;
+
+    let mut c = cfg(db);
+    c.one_shot = false;
+    c.usd_reset = Some(UsdResetSpec {
+        quote_asset_id: 3,
+        not_before: t_new,
+    });
+    let err = ChEnrichmentPass::new(c).run().await.unwrap_err();
+
+    assert!(
+        matches!(err, ChEnrichError::ResetRequiresOneShot { quote_asset_id } if quote_asset_id == 3),
+        "expected a bounded pass to refuse the reset, got {err:?}"
+    );
+
+    let v = close_usd(&client, db, 10, 3, t_new).await;
+    assert!(
+        (v - 10.0).abs() < 1e-4,
+        "a refused reset must not have written anything, got {v}"
+    );
+
+    client
+        .query(&format!("DROP DATABASE {db}"))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// Task 0182's first ordering constraint, enforced rather than documented.
+///
+/// The oracle tier runs before the peg-pivot tier and wins where it applies, so
+/// a reset performed while `oracle_prices` still holds rows for the quote leg
+/// would be undone by the very next statement in the same pass — and the run
+/// would report a healthy repair over unchanged values, now labelled
+/// `method = 'oracle'`. The pass must refuse instead.
+#[tokio::test]
+#[ignore]
+async fn the_usd_reset_refuses_to_run_while_the_oracle_still_shadows_the_quote_leg() {
+    let db = "it_enrich_0182_oracle_gate";
+    let (t_old, t_new) = (1_500_000_000u32, 1_600_000_000u32);
+    let client = setup_0182(db, t_old, t_new).await;
+
+    // A Reflector row for USDT at par — exactly the mis-attribution task 0196
+    // purged from prod.
+    client
+        .query(&format!(
+            "INSERT INTO {db}.oracle_prices \
+             (asset_id, oracle_name, timestamp, price_usd) VALUES \
+             (3, 'reflector', {t_new}, 1.0)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    let mut c = cfg(db);
+    c.one_shot = true;
+    c.usd_reset = Some(UsdResetSpec {
+        quote_asset_id: 3,
+        not_before: t_new,
+    });
+    let err = ChEnrichmentPass::new(c).run().await.unwrap_err();
+
+    assert!(
+        matches!(err, ChEnrichError::ResetBlockedByOracleRows { quote_asset_id, rows, .. }
+                 if quote_asset_id == 3 && rows == 1),
+        "expected the reset to be refused while oracle rows shadow the quote leg, got {err:?}"
+    );
+
+    // And it refused *before* writing: the stored value is untouched, so the
+    // operator can purge and re-run without a half-applied repair in the way.
+    let v = close_usd(&client, db, 10, 3, t_new).await;
+    assert!(
+        (v - 10.0).abs() < 1e-4,
+        "a refused reset must not have written anything, got {v}"
     );
 
     client

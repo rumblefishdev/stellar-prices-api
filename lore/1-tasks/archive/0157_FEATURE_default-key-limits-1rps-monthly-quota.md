@@ -93,6 +93,47 @@ history:
       deployed — nothing has changed in AWS, and the production key rotates on
       the first deploy that carries this. Calendar alignment of the quota reset
       also stays unmeasured; it is design intent here and 0180 #7 owns it.
+  - date: 2026-08-12
+    status: active
+    who: akot
+    note: >
+      Reopened out of the archive to run the deploy, at Adam's request. The
+      entry above archived this with acceptance criteria that close only
+      against a deployed system, so the archive was recording merged code as a
+      finished task — reopening is the honest place for the deploy and its
+      verification to live rather than a follow-up carrying no context of its
+      own. Scope of the reopen is the deploy of `Prices-production-ApiGateway`
+      and the observation of the open ACs; the key rotation was acknowledged
+      and accepted by Adam in advance.
+  - date: 2026-08-12
+    status: active
+    who: akot
+    note: >
+      Deployed to production, ApiGateway stack only, with an explicit
+      `--exclusively` — the Makefile target lacks it and would have pulled
+      ComputeStack in behind eleven 10-byte placeholder bootstraps. Epic AC 5
+      closes: the plan reads 1 req/s, burst 5, 100 000/month in AWS.
+      Throttling and the unchanged `403` are measured; the quota half of its
+      AC is not, so that box stays open on the quota alone. The measurements
+      also put the stage cache in front of the throttle, contradicting the
+      ordering this task had recorded as an inference. Full write-up under
+      Deploy. Stays active: the quota reading is still open, and the seven
+      `utoipa` 429 descriptions remain undeployed pending a ComputeStack
+      deploy with real binaries.
+  - date: 2026-08-13
+    status: completed
+    who: akot
+    note: >
+      Closed. Both things the reopen stayed open on resolved without further
+      work here, and both were measured rather than assumed. The quota does
+      decrement — `GetUsage` now reads `[121, 99879]` for 2026-08-12 against
+      the same key that read `[0, 100000]` on the day, so the zero was
+      reporting lag exactly as suspected, and the AC closes on an observation
+      instead of a likelihood. The seven `utoipa` 429 descriptions went live
+      as a side effect of [[0183]]/[[0184]]'s ComputeStack deploy, not by any
+      action of this task. One AC stays `[ ]` and moves rather than closing:
+      the quickstart's example queries need [[0163]], which is still unwritten
+      — recorded there so it is not lost with this file.
 ---
 
 # Default key limits: 1 req/s + monthly quota
@@ -340,10 +381,21 @@ conclusion stands on the remaining arguments.
 
 - [x] Self-service usage plan in CDK: 1 req/s sustained, burst 5, 100 000
       requests/month
-- [ ] A key on that plan is throttled at 1 req/s and its monthly quota
-      decrements; `403`-without-key behaviour unchanged *(needs deploy)*
+- [x] A key on that plan is throttled at 1 req/s and its monthly quota
+      decrements; `403`-without-key behaviour unchanged. Throttling and `403`
+      measured on deploy 2026-08-12 (see Deploy); the quota **re-read
+      2026-08-13** and it decrements — see Close below. The `[0, 100000]`
+      reading on the day was reporting lag, which the entry then called the
+      likely explanation and declined to record as an observation. It now is
+      one.
 - [ ] The quickstart's example queries run without hitting the burst limit
-      *(needs deploy; [[0163]] not written yet)*
+      *(deferred to [[0163]], not written yet)*. The deploy measurement supports
+      it without closing it: two example queries hit two different routes, so
+      both are cache misses, and burst 5 covers them with room. What the
+      measurement cannot cover is a quickstart nobody has written. Carried to
+      [[0163]] rather than held open here — this task cannot close it at any
+      point in its own life, and it is the only thing that was keeping the file
+      out of the archive.
 - [ ] ~~Partner plan and key unchanged~~ — **superseded, not met.** This AC
       assumed the two-plan design. As built the plan is renamed and re-limited in
       place and the key rotates; both deliberate, both verified against the live
@@ -362,8 +414,10 @@ conclusion stands on the remaining arguments.
       unchanged, so CloudFormation updates the deployed plan in place rather than
       creating a second one.
 - [x] Manual higher-tier runbook written — `docs/runbooks/manual-api-key-tier.md`
-- [ ] Epic AC 5 satisfied: default limits are 1 req/s + monthly quota, not the
-      design doc's 100 req/s *(code done; closes on deploy)*
+- [x] Epic AC 5 satisfied: default limits are 1 req/s + monthly quota, not the
+      design doc's 100 req/s — **deployed 2026-08-12**; `get-usage-plans`
+      reports `pricing-api-free-production` at `rate 1.0 / burst 5 /
+      100000 MONTH`
 - [x] `docs/scf/milestone-1-evidence.md:795` states 100 req/s as a delivered
       property — reconciled 2026-08-12 with a dated *Superseded* note rather than
       a rewrite. The paragraph records the configuration the milestone was
@@ -385,6 +439,131 @@ conclusion stands on the remaining arguments.
       redirected: it named §2.1/§7, but line 164 *is* in §2.1 (so it pointed at
       itself) and §7 states no numeric limit. With §6 corrected there is no
       longer a section for it to point at.
+
+## Deploy — 2026-08-12
+
+Deployed by Adam from `develop`, `Prices-production-ApiGateway` only. CI never
+deploys in this repo, so this was a manual `cdk deploy` from a workstation.
+
+**Three things the deploy path itself taught us, none of them about limits.**
+
+1. **The Makefile target for this stack would have taken production down.**
+   `make deploy-production-apigateway` runs `cdk deploy Prices-production-ApiGateway`
+   with no `--exclusively`, and CDK deploys dependency stacks — it announced
+   `Including dependency stacks: Prices-production-Compute`. Every one of the
+   eleven bootstraps under `target/lambda/` was the same 10-byte file,
+   `#!/bin/sh\n`, so that deploy would have replaced the ledger processor, the
+   api handler and every worker with a shell stub. Deployed with an explicit
+   `--exclusively` instead. Written up on [[0141]], which owns the footgun but
+   was scoped to `deploy-production-compute` and did not cover a *scoped deploy
+   of an unrelated stack* as the delivery vector.
+
+2. **[[0124]] rode along, unnoticed until the diff.** The stack also carried the
+   `/api-docs-json` route, its two Lambda permissions and a 3600s stage-cache
+   entry — merged long ago, never deployed. It is live now and returns `200`.
+   The document it serves comes from the *currently deployed* handler, so it has
+   no `servers` block (`API_BASE_URL` is in the undeployed ComputeStack) and
+   **no `429` responses at all** — the deployed binary predates the sweep
+   entirely. Worth stating precisely, because the pre-deploy worry was that it
+   would publish `100 req/s` and contradict the new plan. It does not: it omits
+   the limit rather than misstating it.
+
+3. The key rotation went as the diff said: old key destroyed, new key created,
+   usage plan updated in place under its original logical id. Nothing was
+   removed that the diff had not named.
+
+**Measurements.** All against `/v1/assets` on the production stage.
+
+| What | Result |
+| --- | --- |
+| `403` without a key | `403` — unchanged |
+| 60 requests, same path, 0.6s | 60 × `200` (~100 req/s) |
+| 30 requests, unique query string each | 30 × `429` |
+| 8 requests, unique, spaced 3s | 8 × `200` |
+| `GetUsage` after 80 × `200` | `[0, 100000]` |
+
+**The throttle is enforced, and the stage cache is in front of it.** A cache
+miss meets the 1 req/s bucket immediately; a cache hit does not get rejected at
+all, at any rate we could produce. This is the ordering question the Notes
+section flagged as *our inference* — "that the quota decrements before the cache
+lookup is our inference … AWS's documented throttling order names the usage
+plan, stage, account and Regional limits and never mentions the cache". The
+inference was wrong in its practical consequence, and the caution about not
+presenting it as AWS behaviour was right.
+
+**What these numbers do not settle**, and should not be written up as if they
+did:
+
+- **Whether a cache hit consumes a bucket token.** The 30 × `429` came straight
+  after 60 cache hits, and a full bucket should have let ~5 through — which
+  points at cache hits draining tokens while never being rejected themselves.
+  But those 30 were fired in one parallel burst against a throttle AWS documents
+  as best-effort, so the shortfall has a second candidate explanation and the
+  test cannot separate them.
+- **Whether the quota decrements at all.** `GetUsage` reported zero use after 80
+  `200`s. Reporting lag is the ordinary explanation and almost certainly the
+  right one; it is still unobserved either way. — **Answered 2026-08-13, it was
+  the lag. See Close.**
+
+Both were sent to [[0180]] here, which owns the undocumented-behaviour
+measurements — recorded in this file rather than there because 0180's file was
+mid-conversion to a directory on its own branch, and editing it from here would
+have landed the same modify/delete conflict this task took a branch off
+`develop` to avoid on 2026-08-10. **That routing is stale:** the epic
+reorganization canceled 0180 and folded its open items into 0189 and 0191. The
+quota question is answered below and needs no owner. The cache-token question
+belongs with the stage-cache-versus-throttle work on
+`fix/0182_stage-cache-bypasses-every-gateway-throttle` — named by branch, not by
+id, because 0182 in the backlog is an unrelated `close_usd` bug and the
+collision is not this task's to settle.
+
+## Close — 2026-08-13
+
+The reopen stayed open on two things. Neither needed work here; both needed a
+second look a day later, which is the whole reason the task was reopened rather
+than closed on merged code.
+
+**The quota decrements.** `get-usage` on plan `71t9im`
+(`pricing-api-free-production`), key `t61phbbhhj`
+(`pricing-api-free-production-key`):
+
+| Date | Used | Remaining |
+| --- | --- | --- |
+| 2026-08-12 | 121 | 99 879 |
+| 2026-08-13 | 0 | 99 879 |
+
+Same key, same window that read `[0, 100000]` on the day of the deploy. So the
+counter was never broken and the reading was lag — the ordinary explanation,
+now observed rather than assumed. `remaining = limit − used` holds, and the
+count carries across the day boundary rather than resetting, which is what a
+`MONTH` period should do. The 121 is not reconstructible into individual test
+calls and does not need to be: the AC asked whether the quota decrements, and
+it does.
+
+Worth keeping the shape of this: the 2026-08-12 entry could have written "almost
+certainly reporting lag" into the AC and closed it. It declined, and a one-day
+wait turned a likelihood into a measurement at no cost. The reading it refused
+to make was the correct one — that is luck, not vindication, and the point is
+that the task did not have to be right about it.
+
+**The seven `utoipa` 429 descriptions are live**, and this task did not deploy
+them. [[0183]]/[[0184]]'s ComputeStack deploy carried them as a side effect.
+The live document at `/api-docs-json` now declares `429` on nine operations:
+the seven keyed routes carrying "Per-key rate limit or monthly quota exceeded
+(API Gateway usage plan)", plus `/health` and `/api-docs-json` themselves
+carrying the stage-throttle wording. That matches the nine declarations in
+`packages/prices-api/src` exactly, so nothing from the sweep is missing.
+
+This also retires the [[0124]] caveat recorded under Deploy: the deployed
+document no longer predates the 429 sweep, and it is no longer serving a
+`servers`-less spec — `servers` reads
+`https://02mabge71l.execute-api.eu-central-1.amazonaws.com/production`. The
+pre-deploy worry, that the published document would contradict the new plan by
+advertising 100 req/s, never materialized in either direction.
+
+**Not closed, moved.** The quickstart AC needs [[0163]] to exist. It is carried
+there rather than held here, because no amount of further work on *this* task
+can close it.
 
 ## Design Decisions
 

@@ -416,10 +416,121 @@ ALTER TABLE prices.<table> ATTACH PARTITION <month>
 > always available until you unfreeze. Automating this as a `--revert` flag is a
 > tracked follow-up.
 
+## Appendix — reset mode, for a _wrong_ value rather than a missing one (task 0182)
+
+Everything above fills zeros and is purely additive. This appendix covers the one
+mode that **discards a stored value**. Read it in full before using the flags.
+
+### When this applies
+
+The repair above cannot see a row whose `close_usd` is wrong but non-zero —
+every tier filters on `close_usd = 0`, which is exactly what makes them
+idempotent. After a _pricing_ defect that is a problem: task 0172 found that
+USDT-quoted candles had been valued at par by a peg tier, and those 44,657 rows
+are inert. The writer is fixed; nothing will ever revisit what it already wrote.
+
+⚠️ **A plain dry run over this shape reports "no months with enrichable zeros".**
+Before task 0182 that all-clear was indistinguishable from a genuinely clean
+table. The `--reset-*` flags widen the month enumeration so those rows count.
+
+### The flags
+
+```bash
+--reset-quote-asset-id <ID>   # the quote leg to re-open
+--reset-not-before <UNIX_TS>  # epoch below which stored values are left alone
+```
+
+They require each other. Together they re-insert the matching rows with **both**
+USD columns at 0 and `version + 1`, ahead of the normal tiers, which then
+recompute them.
+
+### What reset mode refuses outright
+
+All five are hard errors, not warnings, because each one ends with rows zeroed
+that nothing can refill:
+
+| Refusal                                                        | Why                                                                                                                                                                                                                                                                                                                                |
+| -------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--skip-snapshot` + `--reset-*` without `--snapshots-verified` | Rollback for a bad reset **is** `ATTACH PARTITION` from the frozen copy. On prod `--skip-snapshot` is the _correct_ flag (Step 3b: the admin freezes, `prices_writer` cannot), so it is not refused — but "the admin did it" and "nobody did it" must not look identical. Verify under `shadow/`, then add `--snapshots-verified`. |
+| `--pivot-window-s` below the table's bucket width              | On `_1w`/`_1M`/`_1d` a bucket whose reference is the previous bucket falls outside a short window. Before a reset that left a row unenriched; now it discards the value first.                                                                                                                                                     |
+| A quote leg that is not a peg or pivot reference               | A mistyped id (`11` for `111`) passes the oracle check, because an unknown asset has no oracle rows either.                                                                                                                                                                                                                        |
+| A bounded pass (`one_shot = false`)                            | The peg-pivot tier is gated on the oracle tier draining, so a bounded pass can defer the only tier that refills.                                                                                                                                                                                                                   |
+| `oracle_prices` rows for the quote leg                         | See below.                                                                                                                                                                                                                                                                                                                         |
+
+### The epoch is not optional tuning
+
+Below the date the pivot's reference market begins there is nothing to recompute
+from, so a reset row stays at `close_usd = 0` **permanently** — an ambiguous zero
+read unguarded by ~130 `argMax(close_usd, …)` sites, which is worse than the
+wrong number it replaced.
+
+For canonical USDT (`asset_id = 111` on prod) the epoch is **2021-02-07 =
+`1612656000`**, the start of its USDC market. Task 0172 separately measured it at
+genuine par until June 2022, so the `$1` already stored below that date is
+_correct_ — this flag protects real data, it does not merely skip work.
+
+### Prerequisite: purge the oracle rows FIRST
+
+The oracle tier runs **before** the peg-pivot tier and wins where it applies. If
+`prices.oracle_prices` still holds rows for the quote leg, the reset is undone by
+the next statement in the same pass, and the run reports a healthy repair over
+unchanged values — now labelled `method = 'oracle'`, which reads as _more_
+authoritative than what it replaced.
+
+The tool refuses rather than letting that happen:
+
+```
+USD reset refused: prices.oracle_prices still holds N row(s) for quote asset_id …
+```
+
+That is task 0196 (done for USDT on 2026-08-13). If you see this error, purge and
+verify 0 before re-running — do not work around it.
+
+### Extra verification, beyond Step 5
+
+The summary gains a `reset` column per month and a closing line:
+
+```
+NNN row(s) re-opened by the USD reset, NNN recomputed
+```
+
+They should match. If `rows_reset` exceeds `rows_enriched` the tool prints a loud
+block on stderr naming the shortfall — that run zeroed values it could not
+recompute. **Stop; do not continue to the next table.** Roll that table back from
+its snapshot (Rollback section below), then check `--pivot-window-s` against the
+table's bucket width.
+
+Then assert the defect cannot still be present. For the USDT case the fingerprint
+is an implied rate of ~1.0:
+
+```sql
+SELECT toYYYYMM(timestamp) AS m,
+       count()                              AS candles,
+       round(avg(close_usd / close), 6)     AS implied_rate
+FROM prices.price_ohlcv_1d FINAL
+WHERE quote_asset_id = 111
+  AND timestamp >= toDateTime(1612656000)
+  AND close > 0 AND close_usd > 0
+GROUP BY m ORDER BY m
+```
+
+`implied_rate` must track USDT's measured market value (~1.00 until 2022-04, then
+falling to ~0.13), **not** sit at 1.0 throughout.
+
+### Run it once
+
+Reset mode is **not a fixed point across invocations**: a second run sees the
+refilled rows and re-opens them again, recomputing values that are already
+correct. It is value-idempotent but it is not free and it bumps `version` each
+time. Run it once per table, verify, and move on. The recurring hourly sweep pins
+the reset off and can never inherit it.
+
 ## Notes
 
-- The repair reuses the exact enrichment tiers (`ch_enrich.rs`): USDC/USDT → ×$1,
-  XLM → ×(XLM/USDC), exotic → left zero by design.
+- The repair reuses the exact enrichment tiers (`ch_enrich.rs`): USDC → ×$1,
+  XLM and USDT → ×(that asset's own USDC market), exotic → left zero by design.
+  ⚠️ USDT moved from the peg tier to the pivot tier in task 0172; older revisions
+  of this runbook said "USDC/USDT → ×$1", which is the defect, not the design.
 - The pivot tier computes its XLM/USDC reference from the **same coarse table**,
   forward-filling from earlier months, so a month's first buckets keep a valid
   anchor even when bounded to one partition.
