@@ -2,7 +2,7 @@
 id: "0202"
 title: "A 11.5 h disk-full ingest stall holed every coarse tier — _1m self-healed, the rollups did not, and the surviving buckets read as real low-volume hours"
 type: BUG
-status: active
+status: completed
 related_adr: []
 related_tasks: ["0136", "0137", "0095", "0088", "0111", "0200", "0182"]
 tags:
@@ -21,6 +21,22 @@ history:
       20:15 UTC to 07:56 UTC. price_ohlcv_1m self-healed via the durable-cursor
       reconcile, but every coarse tier is holed because the 1m->15m MV looks
       back only 2 HOURS. Repair tool already exists (preroll-live-gap.sql).
+  - date: 2026-08-14
+    status: completed
+    who: okarcz
+    note: >
+      Repaired and verified the same day. preroll-live-gap.sql over
+      2026-08-13 20:00 -> 2026-08-14 08:00, six stages bottom-up, single pass,
+      no errors. All four measurable tiers converged on
+      1,986,859,212,523.7518365 with bucket counts 720 / 48 / 12 / 3; _1h went
+      from 4 partial buckets at 15.3% of volume to 12 complete ones. _1d for
+      08-13 matched _1m exactly, _1w exceeded its four complete days as
+      expected, _1M matched the sum of weeks STARTING in August exactly.
+      91 redundant DLQ doorbells purged (verified 0) after confirming _1m held
+      60/60 minutes in every hour. BE notified. Root cause was BE maintenance on
+      the SHARED Hetzner volume — prices is 3.3% of it, so no cleanup of ours
+      could have prevented or fixed it. Spawned 0203 (self-healing rollups,
+      blocked by 0142) and 0204 (the alarm gaps).
 ---
 
 # Coarse tiers holed by the 2026-08-13 disk-full ingest stall
@@ -155,7 +171,58 @@ damage.
 - [x] `_1d`/`_1w`/`_1M` verified by whole-bucket comparison, not a window subset
 - [x] 91 DLQ messages purged (not redriven — data already present), verified
       `ApproximateNumberOfMessages = 0` 2026-08-14
-- [ ] BE told the window, since their 30D/1Y charts read it
+- [x] BE told the window, since their 30D/1Y charts read it — sent 2026-08-14,
+      including the ask for a heads-up before future maintenance that could fill
+      the shared volume
+
+## Design Decisions
+
+### From Plan
+
+1. **Reuse `preroll-live-gap.sql` rather than write a repair.** Bucket
+   alignment per level, `FINAL`, `sum(version)` and idempotency are already
+   solved and proven ([[0136]] closed a 13-day gap in six tiers in 6.1 s). The
+   window was the only input needed.
+2. **Bound the run at `2026-08-13 20:00` → `2026-08-14 08:00`.** 20:00 is the
+   last aligned bucket before the stall; 08:00 sits behind the live frontier so
+   the run cannot fight concurrent ingestion.
+
+### Emerged
+
+3. **No DELETE stage — and the instinct to add one was wrong.** I first
+   proposed DELETE-first by analogy with [[0097]]'s RMT-tie rule. `rollups.sql`
+   already solves it: `sum(version)` means a complete bucket sums more source
+   versions than a partial one and therefore **outranks it automatically**.
+   Deleting first would have added risk for nothing. Caught by reading the
+   schema rather than reasoning from a remembered rule.
+4. **Diagnosed from WHICH buckets survived, not how many.** The filled buckets
+   were the **newest** (05:00-07:00), not the oldest. A draining backlog fills
+   oldest-first; a moving lookback window fills newest-only. That asymmetry is
+   what identified the mechanism before any schema was read, and it is the
+   cheapest signal to reach for next time.
+5. **Verified against a CONTROL window, not just the damaged one.** The first
+   comparison showed `_1h` at 21% of `_1m` and looked like a rollup defect. The
+   previous night matched **exactly to the last decimal**, proving `FINAL` was
+   the right operator and the mechanism sound — the tiers were absent, not
+   miscomputing. Without the control this would have been misfiled as a
+   correctness bug in the MVs.
+6. **Purged the DLQ rather than redriving it.** The 91 doorbells pointed at
+   ledgers the reconcile had already written (`_1m` verified 60/60 minutes per
+   hour). A redrive would have rewritten existing data onto a volume at 91.4%.
+   ⚠️ This is only safe **because** `_1m` was verified complete first — the
+   check is the licence for the purge, not an optional extra.
+
+## Future Work
+
+- **[[0203]]** — rollups self-heal by event-time completeness instead of a clock
+  window, so the next stall needs no operator. Blocked by [[0142]].
+- **[[0204]]** — the alarm gaps: no free-space alarm on the shared CH volume,
+  and a DLQ alarm that cannot distinguish 1 from 91.
+- ⏳ **Audit older stalls while it is still possible.** [[0111]]'s four-day
+  outage would have holed the tiers far worse. `_1m` is the only source of truth
+  for a re-roll and it is 7-day retention — **the audit exists only while
+  cleanup stays disabled, which is [[0200]]'s decision.** Raise before that
+  decision is taken.
 
 ## Future Work
 
