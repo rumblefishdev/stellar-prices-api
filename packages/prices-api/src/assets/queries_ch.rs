@@ -645,13 +645,25 @@ mod tests {
     #[test]
     fn enum_params_accept_their_documented_tokens() {
         assert!(matches!(tok::<SortCol>("price"), Ok(SortCol::Price)));
-        assert!(matches!(tok::<SortCol>("volume_24h"), Ok(SortCol::Volume24h)));
-        assert!(matches!(tok::<SortCol>("change_24h"), Ok(SortCol::Change24h)));
+        assert!(matches!(
+            tok::<SortCol>("volume_24h"),
+            Ok(SortCol::Volume24h)
+        ));
+        assert!(matches!(
+            tok::<SortCol>("change_24h"),
+            Ok(SortCol::Change24h)
+        ));
         assert!(matches!(tok::<SortCol>("code"), Ok(SortCol::Code)));
         assert!(matches!(tok::<Order>("asc"), Ok(Order::Asc)));
         assert!(matches!(tok::<Order>("desc"), Ok(Order::Desc)));
-        assert!(matches!(tok::<TypeFilter>("classic"), Ok(TypeFilter::Classic)));
-        assert!(matches!(tok::<TypeFilter>("soroban"), Ok(TypeFilter::Soroban)));
+        assert!(matches!(
+            tok::<TypeFilter>("classic"),
+            Ok(TypeFilter::Classic)
+        ));
+        assert!(matches!(
+            tok::<TypeFilter>("soroban"),
+            Ok(TypeFilter::Soroban)
+        ));
         assert!(matches!(tok::<TypeFilter>("all"), Ok(TypeFilter::All)));
         for t in ["1h", "24h", "7d", "30d", "1y", "all"] {
             assert!(tok::<Timeframe>(t).is_ok(), "timeframe {t}");

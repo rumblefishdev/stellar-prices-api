@@ -108,6 +108,53 @@ range/limit params the handler accepts.
 - [ ] No validation path issues a ClickHouse query before rejecting
 - [ ] OpenAPI spec reflects the enumerations and ranges (feeds [[0124]])
 
+## Validation table (AC 1)
+
+Every rule rejects **before** any ClickHouse round-trip; every rejection is a
+`400` with the standard `ErrorEnvelope` and `Cache-Control: no-store`.
+
+| Param | Rule | Error code |
+|---|---|---|
+| `{asset_identifier}` (path ×4 routes) | `native` \| `CODE:ISSUER` (code 1–12, issuer G-strkey) \| C-strkey; path-layer failures (bad %-encoding, invalid UTF-8) same code | `invalid_id` |
+| `type` | `classic` \| `soroban` \| `all` (default `all`) | `invalid_query` |
+| `sort` | `price` \| `volume_24h` \| `change_24h` \| `code` (default `volume_24h`) | `invalid_query` |
+| `order` | `asc` \| `desc` (default `desc`) | `invalid_query` |
+| `limit` | integer 1–200 (default 50); non-numeric/overflow rejected in extractor | `invalid_query` |
+| `search` | 1–12 ASCII alphanumeric (SEP-11 alphanum12 prefix); empty = absent | `invalid_query` |
+| `cursor` | ≤256 chars, Base64 of exactly `{v,id}` (`deny_unknown_fields`); `v` type-checked against active sort (finite number for numeric sorts, asset-code shape for `code`) | `invalid_query` |
+| `timeframe` | `1h` \| `24h` \| `7d` \| `30d` \| `1y` \| `all` (default `24h`) | `invalid_query` |
+| `granularity` | `1m` \| `15m` \| `1h` \| `4h` \| `1d` \| `1w` \| `1M` (default from timeframe) | `invalid_query` |
+| `base_currency` | `USD` \| `XLM` (+ all-lowercase aliases; default `USD`) | `invalid_query` |
+| `start` / `end` | epoch (s/ms) \| `YYYY-MM-DD` \| ISO-8601 datetime (`T`/space, optional offset); real calendar instant; ≤ 2100; `start < end`; `ceil(span/granularity) ≤ 5000` | `invalid_query` |
+| batch body | valid JSON object with `assets`, ≤16 KB (`DefaultBodyLimit`) | `invalid_body` |
+| batch `assets` | non-empty, ≤100 (`MAX_BATCH`), every element a valid identifier (error names the element) | `invalid_query` / `invalid_id` |
+
+**Recorded policies**
+
+- **Unknown query params: ignored** (forward-compatible; strict rejection would
+  fight API Gateway cache-key declarations). Duplicate *known* keys are a 400
+  (serde_urlencoded).
+- **Case: exact documented tokens.** Sole exception: `base_currency` keeps
+  all-lowercase `usd`/`xlm` aliases (historically case-insensitive); mixed case
+  is now a 400. `granularity` is case-sensitive by necessity (`1m` ≠ `1M`).
+- **Window semantics:** the timeframe window anchors to `end` when only `end`
+  is given (`?end=…&timeframe=7d` = the 7d window ending there);
+  `timeframe=all` starts at Stellar genesis (2015-09-30). The **validated
+  epoch** is what binds into SQL (`toDateTime(?)`), so exactly one
+  interpretation of the window exists.
+- **Known limitation:** the cursor does not record which `sort`/`order`
+  produced it — switching between two same-typed sorts mid-walk yields a wrong
+  page (not a 500, not a wrong-type bind). Upgrade path: carry `{sort, order}`
+  in the token.
+- **CI:** negative tests are CH-less (`AppState::without_ch` panics on any CH
+  access, so each clean 400 also proves the no-query-before-reject property)
+  and run in the plain `cargo test --workspace` CI step. A ClickHouse service
+  container in CI was deliberately not added — that is [[0120]]/[[0122]]
+  territory. `prices-api` added to the CI clippy gate.
+- `Cache-Control: no-store` on 400s protects client/CDN caching only; the API
+  Gateway cache is config-side — gateway-layer verification belongs to
+  [[0122]].
+
 ## Notes
 
 - `?min_volume_usd=` from [[0118]] lands in this validation table too;

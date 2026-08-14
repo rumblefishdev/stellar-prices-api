@@ -131,8 +131,7 @@ async fn assets_cursor_with_unknown_field_is_400() {
 #[tokio::test]
 async fn assets_cursor_non_numeric_v_on_numeric_sort_is_400() {
     let tok = cursor_token(r#"{"v":"notanumber","id":1}"#);
-    let (status, _, json) =
-        common::get(&format!("/v1/assets?sort=volume_24h&cursor={tok}")).await;
+    let (status, _, json) = common::get(&format!("/v1/assets?sort=volume_24h&cursor={tok}")).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(json["code"], "invalid_query");
 }

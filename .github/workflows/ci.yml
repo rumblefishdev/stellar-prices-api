@@ -136,7 +136,7 @@ jobs:
 
       - run: cargo fmt --all -- --check
       - run: cargo check --workspace
-      - run: cargo clippy -p extractors-core -p phoenix-extractor -p soroswap-extractor -p aquarius-extractor -p ledger-processor -- -D warnings
+      - run: cargo clippy -p extractors-core -p phoenix-extractor -p soroswap-extractor -p aquarius-extractor -p ledger-processor -p prices-api -- -D warnings
       - run: cargo test --workspace
 
       # The set of Lambda assets is DERIVED from the CDK source rather than

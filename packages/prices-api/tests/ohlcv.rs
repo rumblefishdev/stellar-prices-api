@@ -57,8 +57,7 @@ async fn ohlcv_impossible_calendar_date_is_400() {
 
 #[tokio::test]
 async fn ohlcv_impossible_time_is_400() {
-    let (status, _, json) =
-        common::get("/v1/assets/native/ohlcv?end=2026-06-15T99:99:99").await;
+    let (status, _, json) = common::get("/v1/assets/native/ohlcv?end=2026-06-15T99:99:99").await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(json["code"], "invalid_query");
 }
@@ -72,10 +71,8 @@ async fn ohlcv_garbage_start_is_400() {
 
 #[tokio::test]
 async fn ohlcv_end_not_after_start_is_400() {
-    let (status, _, json) = common::get(
-        "/v1/assets/native/ohlcv?start=2026-06-15&end=2026-06-15",
-    )
-    .await;
+    let (status, _, json) =
+        common::get("/v1/assets/native/ohlcv?start=2026-06-15&end=2026-06-15").await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(json["code"], "invalid_query");
     assert!(
@@ -96,10 +93,8 @@ async fn ohlcv_future_start_without_end_is_400() {
 /// not a silent newest-5000 page.
 #[tokio::test]
 async fn ohlcv_explicit_range_over_max_points_is_400() {
-    let (status, _, json) = common::get(
-        "/v1/assets/native/ohlcv?start=2020-01-01&end=2026-01-01&granularity=1m",
-    )
-    .await;
+    let (status, _, json) =
+        common::get("/v1/assets/native/ohlcv?start=2020-01-01&end=2026-01-01&granularity=1m").await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(json["code"], "invalid_query");
     let msg = json["message"].as_str().unwrap();

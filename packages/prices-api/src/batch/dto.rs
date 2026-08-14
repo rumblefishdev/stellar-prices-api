@@ -19,6 +19,10 @@ pub const MAX_BATCH_BODY_BYTES: usize = 16 * 1024;
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct BatchRequest {
     /// Asset identifiers (`native`, `CODE:ISSUER`, or a C… contract).
+    /// Bounds mirror the handler's checks (`MAX_BATCH`); attribute macros
+    /// cannot read the const, so the literals are asserted back out of the
+    /// served document by `tests/openapi.rs`.
+    #[schema(min_items = 1, max_items = 100)]
     pub assets: Vec<String>,
 }
 
