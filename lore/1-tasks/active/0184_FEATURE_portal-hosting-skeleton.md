@@ -155,13 +155,22 @@ gate; this slice only makes it reachable.
   private access-log bucket with a 90-day expiry, and the distribution domain
   published to `/prices/production/portal-distribution-domain` for [[0186]] and
   [[0195]].
-- `infra/src/lib/stacks/api-gateway-stack.ts` — `ANY /api-tokens/api/{proxy}`
-  and `.../{proxy}/{sub}`, keyless, with a method-level throttle of their own
-  (10 req/s, burst 40) and `cachingEnabled: false`. This is the "door"
+- `infra/src/lib/stacks/api-gateway-stack.ts` — `GET`, `POST` and `DELETE` on
+  `/api-tokens/api/{proxy+}`, keyless, each with a method-level throttle of its
+  own (10 req/s, burst 40) and `cachingEnabled: false`. This is the "door"
   [[0183]]'s note said would arrive here. The stage cache is *also* off by
   default for anything that does not opt in, via the `/*` `*` entry — see the
   issue below for why both statements exist.
-- `tools/scripts/verify-openapi-routes.mjs` — see the issue below.
+- `tools/scripts/verify-openapi-routes.mjs` — see the issue below. Beyond the
+  route comparison it now guards the CloudFront routing table: the first
+  behaviour matching a portal backend path must be `/api-tokens/api/*`, must
+  target the execute-api origin, must allow the write verbs, and that origin
+  must carry a single-segment `originPath`. All four fail silently in
+  production and are free to assert at synth.
+- `.github/workflows/ci.yml` — `portal-hosting-stack.ts` added to the `rust`
+  paths filter, which is the only job that runs those guards. Without it,
+  reordering the behaviour table is a pure `infra/**` change and the guard
+  never executes.
 - `infra/assets/portal-placeholder/index.html`, `infra/src/lib/app.ts`,
   `infra/Makefile` (`deploy-production-portal`), `docs/scf/api-endpoints.md`.
 
@@ -180,16 +189,27 @@ directly through execute-api after the failed first attempt (see below):
 `/health` `200`, `/api-docs-json` `200`, `/v1/assets` `403`, and
 `Prices-production-{ApiGateway,Compute}` both `UPDATE_COMPLETE`.
 
-> **What was measured is the 2026-08-13 deploy, which is no longer this
-> branch.** Every acceptance criterion above still holds against the live
-> distribution, but four things landed after it and are code-only until both
-> stacks are redeployed: the two-level gateway mapping and its throttle, the
-> access-log bucket, `Cache-Control` on the uploaded objects, and the
-> trailing-slash redirect (`/api-tokens` answers `403 AccessDenied` today rather
-> than `302`). Deploy order is `deploy-production-apigateway` then
-> `deploy-production-portal`; the probes worth re-running afterwards are
-> `/api-tokens` → `302`, a `Cache-Control` header on the placeholder, and
-> `/api-tokens/api/a/b/c` → `403` (depth 3 no longer matches — see decision 8).
+> **Production does not match this branch, and the gateway is in an
+> intermediate state.** Every acceptance criterion above still holds live, but:
+>
+> - the gateway maps `ANY {proxy}` + `{proxy}/{sub}` with **no throttle** —
+>   neither the original `{proxy+}` nor decision 12's shape, left there by the
+>   2026-08-14 deploy attempt. Behaviour is correct at depth 1–2 and `403` at
+>   depth 3.
+> - the access-log bucket, `Cache-Control` on the uploaded objects and the
+>   trailing-slash redirect are code-only; `/api-tokens` answers `403
+>   AccessDenied` rather than `302`.
+> - `Prices-production-Compute` **was** deployed (2026-08-14 09:42) as a side
+>   effect of `cdk deploy` pulling in dependency stacks — the Makefile targets
+>   do not pass `--exclusively`. So [[0183]]'s handler and `PORTAL_ENABLED=false`
+>   are live ahead of that task's merge, and `/config` now answers
+>   `200 {"enabled":false}` with `no-store`.
+>
+> Getting to decision 12's shape needs **two** gateway deploys (see the issue
+> below), then `deploy-production-portal`. Probes worth re-running afterwards:
+> `/api-tokens` → `302`, a `Cache-Control` header on the placeholder,
+> `/api-tokens/api/a/b/c` → empty `404` (greedy matches any depth again), and a
+> throttle entry per verb in the deployed stage.
 
 ## Issues Encountered
 
@@ -202,16 +222,38 @@ directly through execute-api after the failed first attempt (see below):
   the gateway side — and, symmetrically, **rejects** a portal path appearing in
   the document, so the skip cannot become a hole. Same stance the script already
   takes on documented `OPTIONS`.
-- **A greedy `{proxy+}` cannot carry a stage method setting — first deploy
-  failed on it.** The entry `{ resourcePath: '/api-tokens/api/{proxy+}',
-  httpMethod: 'ANY', cachingEnabled: false }` synthesized fine and a read-only
-  change set *accepted* it; the apply rejected it with `Invalid method setting
-  path: /api-tokens/api/{proxy+}/ANY/caching/enabled`. API Gateway assembles the
-  setting path as `/{resourcePath}/{httpMethod}/caching/enabled` and the `+` in
-  a greedy segment makes it unparseable. Multi-segment paths are otherwise fine
-  — `/v1/assets/{asset_identifier}/price` is deployed and works — so the `+` is
-  the whole problem. The stack rolled back cleanly and production was never
-  affected.
+- **`ANY` cannot carry a stage method setting. The `+` was never the problem —
+  and believing it was cost an outage.** The entry
+  `{ resourcePath: '/api-tokens/api/{proxy+}', httpMethod: 'ANY',
+  cachingEnabled: false }` synthesized fine and a read-only change set
+  *accepted* it; the apply rejected it with `Invalid method setting path:
+  /api-tokens/api/{proxy+}/ANY/caching/enabled`. The obvious reading — API
+  Gateway assembles the path as `/{resourcePath}/{httpMethod}/{setting}`, a `+`
+  makes it unparseable — is **wrong**, and it survived two commits because
+  `/v1/assets/{asset_identifier}/price/GET/...` works and appeared to confirm
+  it.
+
+  Measured on 2026-08-14 against three throwaway REST APIs, one variable at a
+  time:
+
+  | setting path                            | verdict  |
+  | --------------------------------------- | -------- |
+  | `/lit/GET/caching/enabled`              | accepted |
+  | `/pg/{p}/GET/caching/enabled`           | accepted |
+  | `/g/{proxy+}/GET/caching/enabled`       | accepted |
+  | `/g/{proxy+}/GET/throttling/rateLimit`  | accepted |
+  | `/p/{proxy+}/POST/throttling/rateLimit` | accepted |
+  | `/lit/ANY/caching/enabled`              | REJECTED |
+  | `/pa/{p}/ANY/caching/enabled`           | REJECTED |
+  | `/deep/{p}/{s}/ANY/caching/enabled`     | REJECTED |
+  | wildcard on the verb alone              | REJECTED |
+
+  A greedy segment is fine, braces are fine, depth is fine, and the only
+  wildcard the service accepts is the both-segment `/*` `*`. `ANY` is the whole
+  problem. The fix is to enumerate verbs on a single `{proxy+}` —
+  `PORTAL_API_METHODS`, currently `GET`/`POST`/`DELETE`, which covers every
+  route in the epic. The residual cost moves from paths to verbs: an unlisted
+  verb gets the gateway's `403` rather than the gated `404`.
 
   Resolved in two steps, and both survive in the code because they answer
   different questions.
@@ -236,6 +278,32 @@ directly through execute-api after the failed first attempt (see below):
   The narrow lesson is worth keeping: braces are fine, depth is fine, `ANY` is
   fine. Only the `+` breaks, and it breaks *every* per-route stage setting, not
   just caching.
+- **The migration off `{proxy+}` broke the portal prefix in production for ~20
+  minutes (2026-08-14).** Worth recording in full, because two separate AWS
+  behaviours combined and neither is obvious.
+
+  *First*, `A sibling ({proxy+}) of this resource already has a variable path
+  part -- only one is allowed`. A resource may have at most one variable child,
+  and CloudFormation creates before it deletes, so `{proxy}` and `{proxy+}`
+  would have coexisted mid-update. Any change **replacing** a path-parameter
+  resource therefore needs two deploys: one that removes it, one that adds the
+  replacement. `cdk diff` shows this as an unremarkable create + delete.
+
+  *Second*, the two-phase deploy was run on the wrong diagnosis (above), so
+  phase 1 removed `{proxy+}` and phase 2 was rejected for the same `ANY` reason
+  as the original attempt. That left the gateway with **no** portal resources,
+  and — surprisingly — `/api-tokens/api/*` answered `500 {"message": "Internal
+  server error"}` rather than the `403` an unmapped path normally gets. The
+  stage's method settings were clean, so this looks like a stale deployment left
+  by the rollback; a subsequent deploy that recreated the resources cleared it.
+
+  Resolved by redeploying the resources without the rejected method settings.
+  Data routes (`/v1/*`, `/health`, `/api-docs-json`) and the portal page were
+  unaffected throughout, and nothing consumes the portal prefix yet.
+
+  Two things to carry forward: **budget two deploys whenever a path-parameter
+  resource changes shape**, and do not treat "the rollback completed" as "the
+  stage is serving what it served before".
 - **`defaultRootObject` cannot serve `/api-tokens/index.html`.** It is a
   distribution-level property and applies to `/` only; per-directory index
   documents otherwise need an S3 *website* endpoint, which requires a public
@@ -283,7 +351,9 @@ directly through execute-api after the failed first attempt (see below):
    origin of a live distribution; a stack delete that also empties it turns a
    rollback into an outage.
 8. **Two non-greedy levels — `{proxy}` and `{proxy}/{sub}` — and a throttle of
-   their own** (from review, 2026-08-14; supersedes decision 2). The routes are
+   their own** (from review, 2026-08-14; **superseded the same day by decision
+   12**, because the reason for dropping the greedy segment turned out to be
+   false and the throttle it was supposed to enable never applied). The routes are
    keyless by design, so they sit outside the usage plan and inherit neither the
    per-key 1 req/s nor the monthly quota; without an entry of their own they draw
    the stage default of 200 req/s with no key at all, at a full Lambda invocation
@@ -320,19 +390,44 @@ directly through execute-api after the failed first attempt (see below):
     a day after [[0185]] ships the real app, with nothing on screen to explain
     why. Right for one unhashed `index.html`; [[0185]] should split it, a year
     for content-hashed assets and this for the entry document.
-11. **Paths whose last segment has no file extension redirect to their
-    trailing-slash form**, one branch in the same function as decision 3.
-    `/api-tokens/*` does not match `/api-tokens`, so the bare prefix fell to the
-    default behaviour and S3 answered `403 AccessDenied` XML — it grants
-    `s3:GetObject` and not `s3:ListBucket`, so a missing key reads as forbidden
-    rather than absent. That is the same bare XML decision 4 exists to prevent,
-    at the URL a reviewer reaches by trimming one character off the documented
-    one. It catches `/api-tokens/api` too, putting it back on the API behaviour
-    where the gateway answers for its own namespace. The redirect drops the query
-    string, which is safe **only** because the function is attached to the S3
-    behaviours alone: the one portal URL that carries query parameters —
-    [[0186]]'s OAuth callback, under `/api-tokens/api/` — is matched by an API
-    behaviour this function never sees.
+11. **Three named paths redirect to their trailing-slash form** — `/`,
+    `/api-tokens`, `/api-tokens/api` — as a lookup table in the same function as
+    decision 3. `/api-tokens/*` does not match `/api-tokens`, so the bare prefix
+    fell to the default behaviour and S3 answered `403 AccessDenied` XML: it
+    grants `s3:GetObject` and not `s3:ListBucket`, so a missing key reads as
+    forbidden rather than absent. That is the same bare XML decision 4 exists to
+    prevent, at the URL a reviewer reaches by trimming one character off the
+    documented one. `/api-tokens/api` is in the list for the mirror reason —
+    it lands on S3 via the bundle behaviour, and the redirect puts it back on
+    the API behaviour.
+
+    **A fixed list rather than a rule**, after review (2026-08-14). The first
+    version redirected any path whose last segment had no file extension, which
+    was wrong twice: it interpolated `request.uri` into `Location`, and since
+    CloudFront does not collapse a leading `//`, `//evil.com/x` would have
+    produced a protocol-relative redirect to another origin — an open redirect
+    on the host that will serve [[0186]]'s OAuth callback, which is the standard
+    first link in a code-interception chain. It also broke [[0185]]: a real SPA
+    route like `/api-tokens/keys` would have been rewritten in the address bar
+    to a trailing-slash form that [[0195]]'s fallback would then have to undo.
+    Interpolating nothing makes the first structurally impossible instead of
+    validated, and the second disappears with it. Verified by running the
+    emitted function code over `//evil.com/path`, `/\evil.com/path`,
+    `/constructor` and `/api-tokens/keys`: all pass through untouched.
+12. **Back to one greedy `{proxy+}`, with the verbs enumerated instead of `ANY`**
+    (2026-08-14, after the failed deploy; supersedes decisions 2 and 8). The
+    throttle needs a per-route method setting, a method setting cannot name
+    `ANY`, and — measured, not assumed this time — it *can* name a greedy
+    resource. So the greedy segment comes back and `ANY` goes, which is the
+    combination that actually satisfies [[0186]]'s acceptance criterion.
+    `PORTAL_API_METHODS` is `GET`/`POST`/`DELETE`: `GET` for `/config`,
+    [[0186]]'s OAuth redirect and callback and [[0188]]'s `/usage`; `POST` for
+    [[0187]]'s issue, [[0191]]'s rework and sign-out; `DELETE` for [[0192]] if it
+    prefers that to a `POST`. Decision 8's depth-3 caveat disappears entirely —
+    a greedy segment matches any depth — and is replaced by a narrower one: an
+    unlisted **verb** gets the gateway's `403` instead of the gated `404`. That
+    is a better trade, because a new path is what a slice adds routinely and a
+    new verb is what it notices at design time.
 
 ## Notes
 

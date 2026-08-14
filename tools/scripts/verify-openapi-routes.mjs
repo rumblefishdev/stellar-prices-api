@@ -168,12 +168,12 @@ const GATEWAY_SKIPPED_METHODS = new Set(['options']);
  * describes the public data API to integrators; the portal's endpoints belong
  * to the portal's own bundle and publishing them would advertise a half-built
  * portal to every reader of the spec — see the module docs on
- * `packages/prices-api/src/portal/mod.rs`. They are also mapped as `ANY` on
- * path-parameter resources (`{proxy}` and `{proxy}/{sub}` — see
- * `PORTAL_API_RESOURCE_PATHS` in `infra/src/lib/stacks/api-gateway-stack.ts`),
- * which have no OpenAPI equivalent to compare against even if we wanted one:
- * `ANY` is every verb at once and the segments are placeholders for routes the
- * axum router owns.
+ * `packages/prices-api/src/portal/mod.rs`. They are also mapped as a greedy
+ * `{proxy+}` carrying one method per verb (see `PORTAL_API_RESOURCE_PATH` and
+ * `PORTAL_API_METHODS` in `infra/src/lib/stacks/api-gateway-stack.ts`), so
+ * there is no OpenAPI equivalent to compare against even if we wanted one: the
+ * segment is a placeholder for whatever routes the axum router owns, and the
+ * verbs say nothing about which paths answer on them.
  *
  * Mirrors `PORTAL_API_PREFIX` in that module and `PORTAL_BACKEND` in
  * `infra/src/lib/stacks/portal-hosting-stack.ts` — and, unlike when this skip
@@ -223,8 +223,10 @@ for (const [, res] of resources) {
     console.error(`error: ${err.message}`);
     process.exit(1);
   }
-  // Checked BEFORE the ANY case: the portal's resources are mapped with `ANY`,
-  // so the order decides whether this is a skip or a hard failure.
+  // Checked BEFORE the ANY case. The portal's verbs are enumerated today, so
+  // the order does not currently decide anything — but it did when they were
+  // `ANY`, and it would again if a slice ever collapsed them back, so the skip
+  // stays first rather than depending on that.
   if (path.startsWith(PORTAL_API_PREFIX)) {
     portalGatewayRoutes.push(`${method} ${path}`);
     continue;
@@ -378,6 +380,40 @@ if (!winnerOrigin?.CustomOriginConfig) {
       `bucket.`,
   );
 }
+// Two more settings on the same objects, each load-bearing and each failing
+// silently. Cheap to assert now that `winner` and `winnerOrigin` are in hand.
+//
+// The methods: CloudFront's default allowance is GET/HEAD, and it answers
+// anything else with a 403 of its own that never reaches the API — which would
+// take out task 0186's token exchange and task 0187's key issue, both POSTs,
+// while every GET kept working.
+const WRITE_METHODS = ['POST', 'PUT', 'PATCH', 'DELETE'];
+const allowed = new Set(winner.AllowedMethods ?? []);
+const missingMethods = WRITE_METHODS.filter((m) => !allowed.has(m));
+if (missingMethods.length > 0) {
+  fail(
+    `error: behaviour \`${winner.PathPattern}\` does not allow ` +
+      `${missingMethods.join(', ')}.`,
+    '  → CloudFront rejects a disallowed method with its own 403 before the ' +
+      "origin is reached, so the portal's writes would fail while its reads " +
+      'kept working. Set `allowedMethods: ALLOW_ALL` on the API behaviour in ' +
+      'infra/src/lib/stacks/portal-hosting-stack.ts.',
+  );
+}
+// The origin path: API Gateway serves a REST API only under `/{stage}`, so
+// without it every proxied request arrives one segment short and 403s.
+if (!/^\/[^/]+$/.test(String(winnerOrigin.OriginPath ?? ''))) {
+  fail(
+    `error: the API origin behind \`${winner.PathPattern}\` has OriginPath ` +
+      `${JSON.stringify(winnerOrigin.OriginPath ?? null)}, which is not a ` +
+      `single stage segment.`,
+    '  → an execute-api origin serves the REST API under `/{stage}` only. ' +
+      'Without it CloudFront forwards `/api-tokens/api/x` as `/api-tokens/' +
+      'api/x`, the gateway maps nothing, and every portal call 403s. Set ' +
+      '`originPath` on the HttpOrigin in ' +
+      'infra/src/lib/stacks/portal-hosting-stack.ts.',
+  );
+}
 
 // --- 3. The skip is not covering an empty set. ---
 // If the gateway ever stops mapping anything under the prefix, the two checks
@@ -390,7 +426,7 @@ if (portalGatewayRoutes.length === 0) {
       `check's portal skip covers nothing.`,
     '  → the portal backend is unreachable in production: CloudFront forwards ' +
       'the request and the gateway answers 403 Missing Authentication Token. ' +
-      'Restore the `ANY /api-tokens/api/{proxy}` resources in ' +
+      'Restore the `/api-tokens/api/{proxy+}` methods in ' +
       'infra/src/lib/stacks/api-gateway-stack.ts.',
   );
 }

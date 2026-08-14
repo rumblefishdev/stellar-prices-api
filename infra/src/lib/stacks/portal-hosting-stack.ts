@@ -164,22 +164,37 @@ export class PortalHostingStack extends cdk.Stack {
     // only appends `index.html` to a path that already ends in a slash, and
     // sends a path that is missing that slash to its canonical form.
     //
-    // That last branch is not cosmetic. `/api-tokens/*` does NOT match
-    // `/api-tokens`, so the bare prefix falls through to `defaultBehavior` (S3)
-    // and — because the OAC policy grants `s3:GetObject` and not
+    // The trailing-slash redirects are not cosmetic. `/api-tokens/*` does NOT
+    // match `/api-tokens`, so the bare prefix falls through to `defaultBehavior`
+    // (S3) and — because the OAC policy grants `s3:GetObject` and not
     // `s3:ListBucket` — S3 masks the missing key as `403 AccessDenied` XML
     // rather than a 404. That is the same bare AccessDenied page the `/`
-    // redirect below exists to prevent, at a URL a reviewer reaches by trimming
-    // one character off the documented one. It catches `/api-tokens/api` too,
-    // which lands on S3 via the bundle behaviour for the same reason; the
+    // redirect exists to prevent, at a URL a reviewer reaches by trimming one
+    // character off the documented one. `/api-tokens/api` needs it too: it
+    // lands on S3 via the bundle behaviour for the same reason, and the
     // redirect puts it back on the API behaviour, where the gateway answers for
     // its own namespace instead of S3 answering for it.
     //
-    // The redirect drops any query string. Safe here, and only here: this
-    // function is attached to the S3 behaviours alone, so the one portal URL
-    // that carries query parameters — task 0186's OAuth callback, under
-    // `/api-tokens/api/` — is matched by an API behaviour this function never
-    // sees.
+    // ⚠️ **The redirect targets are a fixed list, and must stay one.** The
+    // obvious generalisation — redirect any path whose last segment has no file
+    // extension — was written first and rejected on review, twice over:
+    //
+    // - It is an **open redirect**. `request.uri` is attacker-controlled and
+    //   CloudFront does not collapse a leading `//`, so `//evil.com/x` would
+    //   have produced `Location: //evil.com/x/` — protocol-relative, i.e. a
+    //   different origin. A backslash form (`/\evil.com/x`) reaches the same
+    //   place through browser normalisation. On the origin that will host task
+    //   0186's OAuth callback, that is the standard first link in a
+    //   code-interception chain.
+    // - It would **fight task 0185's router**. Once the SPA has real routes,
+    //   `/api-tokens/keys` would 302 to `/api-tokens/keys/`, resolve to a key
+    //   that does not exist, and leave the address bar permanently rewritten —
+    //   so task 0195's per-prefix SPA fallback would have to undo this branch
+    //   instead of sitting alongside it.
+    //
+    // Interpolating nothing into `Location` makes the first impossible by
+    // construction rather than by validation, and keeps the function to the job
+    // its name claims. A new frontend adds its prefix to the list.
     //
     // Associated with the S3 behaviours only. Attaching it to an API behaviour
     // would rewrite backend calls the moment one ended in a slash — which is
@@ -197,23 +212,27 @@ function redirect(location) {
   };
 }
 
+// Every value here is a literal. Nothing from the request is ever interpolated
+// into a Location — see the note in the stack above.
+var REDIRECTS = {
+  // The distribution root has no app of its own yet. Task 0195 gives it one
+  // when a second frontend joins; until then the only page here is the portal.
+  '/': '/api-tokens/',
+  '/api-tokens': '/api-tokens/',
+  '/api-tokens/api': '/api-tokens/api/'
+};
+
 function handler(event) {
   var request = event.request;
   var uri = request.uri;
-  // The distribution root has no app of its own yet. Task 0195 gives it one
-  // when a second frontend joins; until then the only page here is the portal.
-  if (uri === '/') {
-    return redirect('/api-tokens/');
+  // typeof, not truthiness: a bare lookup would also find inherited members,
+  // and 'constructor' is truthy.
+  if (typeof REDIRECTS[uri] === 'string') {
+    return redirect(REDIRECTS[uri]);
   }
   if (uri.slice(-1) === '/') {
     request.uri = uri + 'index.html';
     return request;
-  }
-  // No dot in the last segment: this addresses a directory, not an object.
-  // Send it to the trailing-slash form rather than letting S3 answer for a key
-  // that was never going to exist.
-  if (uri.slice(uri.lastIndexOf('/') + 1).indexOf('.') === -1) {
-    return redirect(uri + '/');
   }
   return request;
 }

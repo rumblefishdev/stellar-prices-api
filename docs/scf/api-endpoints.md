@@ -27,8 +27,9 @@ without it serves nothing.
 | `GET /v1/oracles/{asset_identifier}`      | `x-api-key`   | 60 s              |
 | `GET /v1/backfill/status`                 | `x-api-key`   | 60 s              |
 | `POST /v1/prices/batch`                   | `x-api-key`   | uncached          |
-| `ANY /api-tokens/api/{proxy}`             | Anonymous²    | uncached          |
-| `ANY /api-tokens/api/{proxy}/{sub}`       | Anonymous²    | uncached          |
+| `GET /api-tokens/api/{proxy+}`            | Anonymous²    | uncached          |
+| `POST /api-tokens/api/{proxy+}`           | Anonymous²    | uncached          |
+| `DELETE /api-tokens/api/{proxy+}`         | Anonymous²    | uncached          |
 
 ¹ Gateway TTL. The handler sends `max-age=300` — see **Cache** below for why the
 two differ.
@@ -42,16 +43,18 @@ exception and answers `{"enabled": false}` in both states. Deliberately absent
 from the OpenAPI document — the portal describes itself to its own bundle, not
 to integrators.
 
-Two `ANY` levels of path parameter rather than one greedy `{proxy+}`, so later
-slices add routes without a CDK change while the routes stay addressable
-individually. That last part is the reason for the shape: API Gateway names a
-stage method setting `/{resourcePath}/{httpMethod}/{setting}`, and a `+` makes
-that string unparseable — so a greedy mapping can carry neither a cache setting
-nor a throttle, and these routes need both. **A path at depth 3 matches neither
-level** and gets the gateway's `403 Missing Authentication Token` instead of the
-gated `404`; every route in the epic sits at depth 1 or 2, and a slice that ever
-needs a third should add a third level here rather than reach back for
-`{proxy+}`.
+One greedy `{proxy+}` resource, so later slices add routes at any depth without
+a CDK change, with the **verbs enumerated** rather than collapsed into `ANY`.
+The verbs are the part that looks arbitrary and is not: API Gateway names a
+stage method setting `/{resourcePath}/{httpMethod}/{setting}` and rejects the
+whole stage update if it cannot resolve one — and `ANY` is never a resolvable
+`{httpMethod}` there, whatever the path looks like. A greedy segment is fine, a
+path parameter is fine, depth is fine; `ANY` is not. So a route mapped as `ANY`
+can carry neither a cache setting nor a throttle, and these routes need both.
+
+The cost is that **a verb not in the list** — `PATCH`, say — gets the gateway's
+`403 Missing Authentication Token` instead of the gated `404`. Paths stay free;
+verbs do not. Adding one is a line in `PORTAL_API_METHODS` and a deploy.
 
 They also carry their own method-level throttle — **10 req/s, burst 40** — which
 is not decoration. Being keyless puts them outside the usage plan, so they
@@ -81,14 +84,16 @@ to SSM at `/prices/production/portal-distribution-domain`, which is where task
 rather than copying it.
 
 > **Ahead of the deploy.** This section describes what task 0184's branch
-> synthesizes. Four of its properties are not on the live distribution yet — the
-> two-level gateway mapping and its throttle, the trailing-slash redirect,
-> CloudFront access logs, and `Cache-Control` on the uploaded objects — because
-> they landed after the 2026-08-13 deploy. Until
-> `make -C infra deploy-production-apigateway` and `deploy-production-portal`
-> run, `/api-tokens` answers `403 AccessDenied` rather than redirecting, and the
-> gateway still carries the greedy `ANY /api-tokens/api/{proxy+}` with no
-> throttle of its own. Delete this note once both stacks are deployed.
+> synthesizes. Three of its properties are not live yet — the trailing-slash
+> redirect, CloudFront access logs, and `Cache-Control` on the uploaded objects
+> — so `/api-tokens` answers `403 AccessDenied` today rather than redirecting.
+> The gateway is a fourth case: it currently maps the portal as
+> `ANY /api-tokens/api/{proxy}` and `.../{proxy}/{sub}` with **no throttle**, an
+> intermediate state left by the 2026-08-14 deploy attempt (see task 0184).
+> Moving it to the `{proxy+}` above means replacing a path-parameter resource,
+> which API Gateway will not do in one update — deploy once with the portal
+> resources removed, then again with them. Delete this note once both stacks
+> match this page.
 
 A second, equivalent way to reach the API. One CloudFront distribution fronts
 two origins: a private S3 bucket holding the portal bundle, and the API Gateway
@@ -120,24 +125,33 @@ handler (`PORTAL_API_PREFIX`), in the CDK routing table (`PORTAL_BACKEND`) and
 in the script itself, so moving it in one place cannot leave the other two
 behind.
 
-**Paths without a trailing slash redirect.** A pattern like `/api-tokens/*` does
+**Three paths redirect, and only three.** A pattern like `/api-tokens/*` does
 not match `/api-tokens`, so the bare prefix would fall to the default behaviour
 and S3 would answer `403 AccessDenied` XML — it grants `s3:GetObject` and not
 `s3:ListBucket`, so a missing key reads as forbidden rather than absent. A
-viewer-request function sends any path whose last segment has no file extension
-to its trailing-slash form (`302`), which is what a reviewer trimming the
-documented URL should get:
+viewer-request function redirects the bare prefixes to their trailing-slash
+form, which is what a reviewer trimming the documented URL should get:
 
 | Request           | Result                                               |
 | ----------------- | ---------------------------------------------------- |
+| `/`               | `302` → `/api-tokens/` → the portal page             |
 | `/api-tokens`     | `302` → `/api-tokens/` → the portal page             |
 | `/api-tokens/api` | `302` → `/api-tokens/api/` → the gateway, **not** S3 |
+
+The targets are a fixed list rather than a rule like "any path with no file
+extension". That generalisation was written first and rejected twice over: it
+interpolates `request.uri` into `Location`, and CloudFront does not collapse a
+leading `//`, so `//evil.com/x` would have redirected to a **different origin**
+— an open redirect on the origin that will host task 0186's OAuth callback. It
+would also fight task 0185's router, rewriting `/api-tokens/keys` to a
+trailing-slash form in the address bar that task 0195's SPA fallback would then
+have to undo. A new frontend adds its prefix to the list.
 
 `/api-tokens/api/` reaches API Gateway but matches no method on the resource, so
 it answers `403 {"message":"Missing Authentication Token"}` — the gateway's
 standard response for an unmapped path, the same as `/v1`. It is deliberately
 **not** the empty `404` described below: that applies to paths _under_ the
-prefix, which the two `{proxy}` levels map and the handler then gates.
+prefix, which `{proxy+}` maps and the handler then gates.
 
 **Access logs are on**, to a private bucket with a 90-day expiry. Cookies are
 excluded: from task 0186 the portal's cookie is the session itself, and logging

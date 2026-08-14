@@ -82,35 +82,60 @@ const CACHE_CLUSTER_SIZE = '0.5';
 const API_DOCS_THROTTLE = { rate: 10, burst: 20 } as const;
 
 /**
- * The portal backend's gateway resource paths, in the form API Gateway uses for
+ * The portal backend's gateway resource path, in the form API Gateway uses for
  * a method setting.
  *
- * TWO non-greedy levels rather than one greedy `{proxy+}` (task 0184, after
- * review). Every portal route in the epic sits at depth 1 or 2 — `/config`,
- * `/health`, `/key`, `/usage` at one; `/auth/*`, `/key/rework`, `/key/revoke` at
- * two — so this covers the whole epic while keeping the property `{proxy+}` was
- * chosen for: a later slice adds a route without touching this file.
+ * One greedy `{proxy+}`, so a later slice adds a route at any depth without
+ * touching this file — the same property task 0183's prefix gate is built on.
  *
- * The reason it is not greedy is narrow and worth stating exactly, because the
- * obvious reading is wrong. API Gateway addresses a stage method setting by the
- * string path `/{resourcePath}/{httpMethod}/{setting}`, and a `+` makes that
- * unparseable — `/api-tokens/api/{proxy+}/ANY/caching/enabled` is rejected on
- * apply (though a change set accepts it, which is how it reached production the
- * first time). Braces are fine, depth is fine, `ANY` is fine:
- * `/v1/assets/{asset_identifier}/price/GET/caching/enabled` is deployed and
- * works. Only the `+` breaks. Dropping it is what makes a per-route throttle,
- * cache setting and metric possible at all.
+ * **`ANY` is what cannot carry a stage method setting — not `{proxy+}`.** This
+ * is worth stating exactly, because the first two attempts at this got the
+ * diagnosis wrong and the second one broke production for twenty minutes. API
+ * Gateway addresses a stage method setting by the string path
+ * `/{resourcePath}/{httpMethod}/{setting}` and rejects the whole update if it
+ * cannot resolve one — and `ANY` is never a resolvable `{httpMethod}` there,
+ * whatever the resource path looks like. Measured against a throwaway REST API
+ * on 2026-08-14, one variable at a time:
  *
- * ⚠️ A route at depth 3 would NOT match either entry and would get the gateway's
- * `403 Missing Authentication Token` instead of task 0183's empty `404`. Nothing
- * in the epic needs one; if a slice ever does, add a third level here rather
- * than reaching back for `{proxy+}`, which would silently drop the throttle
- * below and the acceptance criterion in task 0186 with it.
+ * | setting path                              | verdict  |
+ * | ----------------------------------------- | -------- |
+ * | `/lit/GET/caching/enabled`                | accepted |
+ * | `/pg/{p}/GET/caching/enabled`             | accepted |
+ * | `/g/{proxy+}/GET/caching/enabled`         | accepted |
+ * | `/g/{proxy+}/GET/throttling/rateLimit`    | accepted |
+ * | `/p/{proxy+}/POST/throttling/rateLimit`   | accepted |
+ * | `/lit/ANY/caching/enabled`                | REJECTED |
+ * | `/pa/{p}/ANY/caching/enabled`             | REJECTED |
+ * | `/deep/{p}/{s}/ANY/caching/enabled`       | REJECTED |
+ * | wildcard on the verb alone, `/lit/[*]/…`  | REJECTED |
+ *
+ * So the `+` is fine, braces are fine, depth is fine, and the only wildcard
+ * form the service accepts is the both-segment one used by the default entry
+ * below. What has to go is `ANY`, which is why the verbs are enumerated in
+ * `PORTAL_API_METHODS`.
+ *
+ * A change set accepts every one of the rejected forms, so this fails on apply
+ * and only on apply. Do not read a clean `cdk diff` as evidence here.
  */
-const PORTAL_API_RESOURCE_PATHS = [
-  '/api-tokens/api/{proxy}',
-  '/api-tokens/api/{proxy}/{sub}',
-] as const;
+const PORTAL_API_RESOURCE_PATH = '/api-tokens/api/{proxy+}';
+
+/**
+ * The verbs mapped under the portal prefix, enumerated because `ANY` cannot
+ * carry the throttle above — see `PORTAL_API_RESOURCE_PATH`.
+ *
+ * Covers the epic as sliced: `GET` for `/config` (task 0183), task 0186's OAuth
+ * redirect and callback and task 0188's `/usage`; `POST` for task 0187's key
+ * issue, task 0191's rework and task 0186's sign-out; `DELETE` for task 0192's
+ * revoke if it prefers that shape to a `POST`.
+ *
+ * ⚠️ A verb that is NOT listed here gets the gateway's `403 Missing
+ * Authentication Token` rather than task 0183's empty `404`, which is a smaller
+ * version of the hole `ANY` was chosen to avoid: paths stay free, verbs do not.
+ * Adding one is a line here and a deploy — cheap, but it is a CDK change, so a
+ * slice that needs `PATCH` should notice at design time rather than in a
+ * browser.
+ */
+const PORTAL_API_METHODS = ['GET', 'POST', 'DELETE'] as const;
 
 /**
  * Method-level throttle for the portal's backend (`/api-tokens/api/...`).
@@ -177,9 +202,9 @@ const PORTAL_THROTTLE = { rate: 10, burst: 40 } as const;
  *   monthly quota (task 0157, overriding the design doc's §2.1/§7 100 req/s).
  *   `GET /health` stays a keyless mock (cheapest liveness probe), and
  *   `GET /api-docs-json` is a keyless proxy to the handler (task 0124 — public
- *   documentation). `ANY /api-tokens/api/{proxy}` and `.../{proxy}/{sub}` are
- *   the onboarding portal's backend (task 0184), keyless for the same reason,
- *   gated in the handler by `PORTAL_ENABLED` (task 0183) and carrying their own
+ *   documentation). `GET`/`POST`/`DELETE` on `/api-tokens/api/{proxy+}` are the
+ *   onboarding portal's backend (task 0184), keyless for the same reason, gated
+ *   in the handler by `PORTAL_ENABLED` (task 0183) and carrying their own
  *   method-level throttle since they sit outside the usage plan.
  * - **Response cache**: 0.5 GB stage cache with per-endpoint TTLs (`CACHE_TTL`),
  *   opt-in per method; each cached method declares its query params as cache
@@ -292,7 +317,7 @@ export class ApiGatewayStack extends cdk.Stack {
     });
 
     // ---------------------------------------------------------------
-    // ANY /api-tokens/api/... — the onboarding portal's backend (0184).
+    // /api-tokens/api/{proxy+} — the onboarding portal's backend (0184).
     // ---------------------------------------------------------------
     // Without these resources the portal's routes are unreachable in production
     // no matter what the handler does: CloudFront forwards the request, the
@@ -301,19 +326,20 @@ export class ApiGatewayStack extends cdk.Stack {
     // gate is careful to produce. This is the "door" that task's note says
     // arrives here.
     //
-    // **Two non-greedy levels, and ANY.** The point of task 0183's prefix gate
-    // is that a later slice adds a route without editing the gate; the same has
-    // to hold at the gateway, or every slice pays for a CDK change and a deploy.
-    // `{proxy}` + `{proxy}/{sub}` with `ANY` covers task 0186's `/auth/*`, task
-    // 0187's `/key`, task 0188's `/usage` and task 0192's `/key/revoke` with no
-    // further work here. The axum router decides what actually exists — and
-    // while `PORTAL_ENABLED` is false, that answer is "nothing", byte-identical
-    // to a path that was never deployed.
+    // **One greedy resource, enumerated verbs.** The point of task 0183's prefix
+    // gate is that a later slice adds a route without editing the gate; the same
+    // has to hold at the gateway, or every slice pays for a CDK change and a
+    // deploy. `{proxy+}` covers task 0186's `/auth/*`, task 0187's `/key`, task
+    // 0188's `/usage` and task 0192's `/key/revoke` at any depth with no further
+    // work here. The axum router decides what actually exists — and while
+    // `PORTAL_ENABLED` is false, that answer is "nothing", byte-identical to a
+    // path that was never deployed.
     //
-    // Why not `{proxy+}`, and the depth-3 caveat: see
-    // `PORTAL_API_RESOURCE_PATHS` at the top of this file. In short, a greedy
-    // segment cannot carry the throttle three lines below, and that throttle is
-    // task 0186's acceptance criterion.
+    // The verbs are listed rather than collapsed into `ANY` because `ANY` cannot
+    // carry the throttle below, and that throttle is task 0186's acceptance
+    // criterion. It is `ANY` that is the obstacle and not the `+` — the evidence
+    // is tabulated on `PORTAL_API_RESOURCE_PATH` at the top of this file, and
+    // the cost of believing otherwise is recorded in task 0184.
     //
     // **Keyless**, matching `auth::is_exempt`: a visitor signing in to get a
     // key does not have one yet, so requiring one is a self-service dead end —
@@ -324,14 +350,13 @@ export class ApiGatewayStack extends cdk.Stack {
     // **Throttled and uncached by entries of their own**, in `portalSettings`
     // below — declared outside the `cacheEnabled` branch, because with the stage
     // cache off is exactly when an unbounded anonymous route costs the most.
-    const portalApi = this.api.root
+    const portalProxy = this.api.root
       .addResource('api-tokens')
-      .addResource('api');
-    const portalDepth1 = portalApi.addResource('{proxy}');
-    portalDepth1.addMethod('ANY', proxy([]), { apiKeyRequired: false });
-    portalDepth1
-      .addResource('{sub}')
-      .addMethod('ANY', proxy([]), { apiKeyRequired: false });
+      .addResource('api')
+      .addResource('{proxy+}');
+    for (const httpMethod of PORTAL_API_METHODS) {
+      portalProxy.addMethod(httpMethod, proxy([]), { apiKeyRequired: false });
+    }
 
     const PATH_ID = 'method.request.path.asset_identifier';
     const qs = (name: string) => `method.request.querystring.${name}`;
@@ -418,11 +443,12 @@ export class ApiGatewayStack extends cdk.Stack {
     //
     // A wildcard rather than one entry per uncached route so the rule holds for
     // routes that do not exist yet, in the form AWS documents as
-    // `/*/*/caching/enabled`. It originally had a second reason — the portal's
-    // greedy `{proxy+}` could not carry an entry of its own — which no longer
-    // applies now that the portal is mapped at two non-greedy levels and states
-    // its own caching in `portalSettings` below. The wildcard stays because the
-    // stated default is worth having on its own.
+    // `/*/*/caching/enabled`. Both segments must be wildcards: the service
+    // rejects a wildcard on the verb alone. It originally had a second reason —
+    // the portal's greedy `{proxy+}` could not carry an entry of its own —
+    // which turned out to be false (it can; `ANY` is what cannot), and the
+    // portal now states its own caching in `portalSettings` below. The wildcard
+    // stays because the stated default is worth having on its own.
     const defaultCachingOff = {
       ...defaultMethodThrottle,
       cachingEnabled: false,
@@ -435,9 +461,9 @@ export class ApiGatewayStack extends cdk.Stack {
     // that arm alone silently vanishes wherever the stage cache is off, which is
     // precisely the configuration where every anonymous request is a billed
     // Lambda invocation.
-    const portalSettings = PORTAL_API_RESOURCE_PATHS.map((resourcePath) => ({
-      resourcePath,
-      httpMethod: 'ANY',
+    const portalSettings = PORTAL_API_METHODS.map((httpMethod) => ({
+      resourcePath: PORTAL_API_RESOURCE_PATH,
+      httpMethod,
       throttlingRateLimit: PORTAL_THROTTLE.rate,
       throttlingBurstLimit: PORTAL_THROTTLE.burst,
       cachingEnabled: false,
