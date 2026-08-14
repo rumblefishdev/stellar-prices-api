@@ -128,6 +128,25 @@ pub enum MvStatus {
     /// the MV this is what re-applying `rollups.sql` will NOT fix: the apply
     /// will report success and change nothing.
     Drifted(Vec<Difference>),
+    /// The object exists under a declared name but its live definition is not a
+    /// shape this module can fingerprint — e.g. re-created without `REFRESH`,
+    /// which turns a refreshable MV into an insert-trigger MV with entirely
+    /// different semantics.
+    ///
+    /// Reported per-MV rather than raised, so one unrecognisable object degrades
+    /// one row instead of the whole report. Aborting here would hide every MV
+    /// after it, including any that had lost `APPEND` — a strictly worse outcome
+    /// than the condition being reported.
+    Unparseable(String),
+    /// An MV that is NOT declared in the file but writes into one of the target
+    /// tables the declared MVs own.
+    ///
+    /// Nothing in `rollups.sql` will ever mention it, so a check that only walks
+    /// the file cannot see it — yet it is inserting into a coarse
+    /// `ReplacingMergeTree` alongside the MV that is supposed to own that table.
+    /// Given how often these objects have been dropped and re-created by hand
+    /// (tasks 0090, 0095, 0136), a leftover is a plausible state.
+    Undeclared,
 }
 
 /// Per-MV drift report.
@@ -175,10 +194,20 @@ pub async fn check_mv_drift(
     sql: &str,
 ) -> Result<Vec<MvReport>, SchemaError> {
     let mut reports = Vec::new();
+    let mut declared_names = Vec::new();
+    let mut targets = Vec::new();
 
     for statement in split_statements(&rewrite_database(sql, database)) {
         let declared = fingerprint_via_server(client, &statement).await?;
         let short = short_name(&declared.name).to_string();
+
+        // Recorded from the DECLARED side and before any early exit below: the
+        // sweep for undeclared writers needs the target of an MV that is missing
+        // from the target entirely, and needs the name of one whose live
+        // definition could not be read — otherwise that object is reported twice,
+        // once as unparseable and again as undeclared.
+        declared_names.push(short.clone());
+        targets.push(declared.target.clone());
 
         let Some(live_ddl) = fetch_live_ddl(client, database, &short).await? else {
             reports.push(MvReport {
@@ -189,7 +218,22 @@ pub async fn check_mv_drift(
             continue;
         };
 
-        let live = fingerprint_via_server(client, &live_ddl).await?;
+        // A live definition this module cannot read degrades THIS row only. The
+        // declared side still raises (it is our own file, and the unit guards
+        // pin its form), but an object someone re-created by hand must not be
+        // able to blank out the rest of the report.
+        let live = match fingerprint_via_server(client, &live_ddl).await {
+            Ok(f) => f,
+            Err(SchemaError::UnparsableDdl { rendering }) => {
+                reports.push(MvReport {
+                    name: short,
+                    status: MvStatus::Unparseable(rendering),
+                    live: None,
+                });
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
 
         let mut differences = Vec::new();
         for (field, d, l) in [
@@ -217,7 +261,59 @@ pub async fn check_mv_drift(
         });
     }
 
+    reports.extend(undeclared_writers(client, database, &declared_names, &targets).await?);
+
     Ok(reports)
+}
+
+/// MVs on the target that write into one of `targets` but are not in
+/// `declared_names`.
+///
+/// Walking only the file cannot find these, and the distinction matters for how
+/// the summary reads: "six MVs in sync" is a statement about the six that were
+/// looked for, not about what is writing into the coarse tables. A leftover MV
+/// double-writing into a `ReplacingMergeTree` is a plausible state given how
+/// often these have been dropped and re-created by hand.
+async fn undeclared_writers(
+    client: &Client,
+    database: &str,
+    declared_names: &[String],
+    targets: &[String],
+) -> Result<Vec<MvReport>, SchemaError> {
+    let live: Vec<(String, String)> = client
+        .query(
+            "SELECT name, create_table_query FROM system.tables \
+             WHERE database = ? AND engine = 'MaterializedView'",
+        )
+        .bind(database)
+        .fetch_all::<(String, String)>()
+        .await?;
+
+    Ok(live
+        .into_iter()
+        .filter(|(name, _)| !declared_names.contains(name))
+        .filter(|(_, ddl)| targets.iter().any(|t| writes_into(ddl, t)))
+        .map(|(name, _)| MvReport {
+            name,
+            status: MvStatus::Undeclared,
+            live: None,
+        })
+        .collect())
+}
+
+/// Whether `ddl` declares `TO <qualified_target>`.
+///
+/// The trailing-character check is load-bearing: the cluster carries `_bak`
+/// copies of the coarse tables (task 0177), and a plain `contains` would read an
+/// MV writing into `price_ohlcv_1d_bak` as one writing into `price_ohlcv_1d`.
+fn writes_into(ddl: &str, qualified_target: &str) -> bool {
+    let needle = format!(" TO {qualified_target}");
+    ddl.match_indices(&needle).any(|(at, _)| {
+        ddl[at + needle.len()..]
+            .chars()
+            .next()
+            .is_none_or(|c| !c.is_alphanumeric() && c != '_')
+    })
 }
 
 /// Render `statement` through ClickHouse's AST serialiser and parse the result.
@@ -480,6 +576,57 @@ mod tests {
         assert_eq!(moved.matches("scratch_42.").count(), 3);
 
         assert_eq!(rewrite_database(sql, crate::PROD_DATABASE), sql);
+    }
+
+    /// The trailing-character guard, which is not decoration: the cluster
+    /// carries `_bak` copies of the coarse tables (task 0177), so a plain
+    /// `contains` would read a backup-writing MV as a second writer into the
+    /// live table and report a false `Undeclared`.
+    #[test]
+    fn writes_into_does_not_match_a_bak_table_of_the_same_stem() {
+        let live =
+            "CREATE MATERIALIZED VIEW prices.mv_x TO prices.price_ohlcv_1d (`a` Int64) AS SELECT 1";
+        let bak = "CREATE MATERIALIZED VIEW prices.mv_x TO prices.price_ohlcv_1d_bak (`a` Int64) AS SELECT 1";
+
+        assert!(writes_into(live, "prices.price_ohlcv_1d"));
+        assert!(
+            !writes_into(bak, "prices.price_ohlcv_1d"),
+            "price_ohlcv_1d_bak must not match price_ohlcv_1d"
+        );
+        assert!(writes_into(bak, "prices.price_ohlcv_1d_bak"));
+    }
+
+    #[test]
+    fn writes_into_ignores_an_unrelated_target() {
+        let ddl = "CREATE MATERIALIZED VIEW prices.mv_current_prices REFRESH EVERY 1 MINUTE TO prices.current_prices (`a` Int64) AS SELECT 1";
+        assert!(!writes_into(ddl, "prices.price_ohlcv_15m"));
+        assert!(writes_into(ddl, "prices.current_prices"));
+    }
+
+    /// Both new statuses must count as needing attention. `Unparseable` in
+    /// particular: it is the one status where the tool is admitting it does not
+    /// know, and silence there would be indistinguishable from health.
+    #[test]
+    fn an_unparseable_or_undeclared_mv_needs_attention() {
+        for status in [
+            MvStatus::Unparseable("CREATE MATERIALIZED VIEW …".to_string()),
+            MvStatus::Undeclared,
+        ] {
+            let report = MvReport {
+                name: "mv_ohlcv_1m_to_15m".to_string(),
+                status,
+                live: None,
+            };
+            assert!(report.needs_attention(), "{:?}", report.status);
+        }
+    }
+
+    /// A refreshable MV re-created WITHOUT `REFRESH` is an insert-trigger MV —
+    /// different semantics entirely — and must not parse as one of ours.
+    #[test]
+    fn a_materialized_view_with_no_refresh_clause_does_not_parse() {
+        let insert_trigger = "CREATE MATERIALIZED VIEW prices.mv_ohlcv_1m_to_15m TO prices.price_ohlcv_15m (`timestamp` DateTime) AS SELECT 1";
+        assert!(parse_fingerprint(insert_trigger).is_none());
     }
 
     #[test]

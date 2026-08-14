@@ -63,6 +63,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                  this tier is not rolling up",
                 report.name
             ),
+            MvStatus::Unparseable(rendering) => {
+                println!(
+                    "UNKNOWN  {} — exists, but its definition is not a shape this \
+                     check can read (re-created without REFRESH?)",
+                    report.name
+                );
+                println!("             live: {rendering}");
+            }
+            MvStatus::Undeclared => println!(
+                "EXTRA    {} — not declared in rollups.sql, but writes into a table \
+                 the declared MVs own; two writers into one ReplacingMergeTree",
+                report.name
+            ),
             MvStatus::Drifted(differences) => {
                 println!(
                     "DRIFT    {} — differs: {}; re-applying rollups.sql will NOT fix this",
@@ -113,7 +126,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if attention == 0 {
-        println!("\n{} rollup MVs in sync with rollups.sql", reports.len());
+        // The second clause is the part the file alone cannot support: walking
+        // rollups.sql finds only what it declares, so without the sweep this
+        // line would read as a whole-chain all-clear while claiming only that
+        // the six named objects are fine.
+        println!(
+            "\n{} rollup MVs in sync with rollups.sql, and nothing undeclared \
+             writes into their targets",
+            reports.len()
+        );
         return Ok(());
     }
 

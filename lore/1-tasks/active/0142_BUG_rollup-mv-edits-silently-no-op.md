@@ -218,6 +218,55 @@ clean cases passing — i.e. each test fails for its own reason, not a shared on
 future ClickHouse ever makes the rollup MVs re-appliable, that IT fails loudly
 and this task's premise has changed.
 
+### Review of PR #216 — four findings, all fixed
+
+Two changed behaviour, two corrected the runbook. The order finding is the one
+worth remembering.
+
+**1. An unreadable *live* definition aborted the whole check.** The live-side
+`fingerprint_via_server(…)?` propagated out of `check_mv_drift`, so the loop
+stopped and every MV after it went unreported. Reachable: an MV re-created
+without `REFRESH` renders as an insert-trigger MV and does not parse. With
+`mv_ohlcv_1m_to_15m` — the *first* statement in the file — that meant one opaque
+error and **no report at all on the other five**, including any that had lost
+`APPEND`. Directly contradicted this task's own decision 5. Now
+`MvStatus::Unparseable`, reported per-MV. The declared side still raises — it is
+our own file and the unit guards pin its form.
+
+**2. The check was one-directional.** It walked only what `rollups.sql`
+declares, so an MV that exists on the target but is *not* in the file was
+invisible — while inserting into the same coarse `ReplacingMergeTree`. Given
+0090/0095/0136 all re-created these by hand, a leftover is plausible. Now swept
+via `system.tables` for MVs writing into a declared target
+(`MvStatus::Undeclared`), and the clean summary says so explicitly instead of
+implying a whole-chain all-clear. ⚠️ The match guards the trailing character —
+the cluster carries `_bak` copies of the coarse tables ([[0177]]), and a plain
+`contains` reads `price_ohlcv_1d_bak` as `price_ohlcv_1d`.
+
+**3. ⚠️ The runbook's re-create order was backwards, and my stated rationale
+contradicted the order I gave.** I wrote "coarse-to-fine (`_1w_to_1M` first) so
+that a tier is never fed by a source that is itself mid-change" — but
+`_1w_to_1M` reads `price_ohlcv_1w`, which `_1d_to_1w` produces, so that order
+re-creates every consumer *before* its source. Combined with this task's own
+measured finding that a fresh MV refreshes immediately, `_1w_to_1M`'s one and
+only refresh for the next 24 h would re-aggregate uncorrected rows — propagating
+**none** of the fix upward. Corrected to **fine-to-coarse**, with the trap
+spelled out, because the intuitive reading is the wrong one.
+
+**4. The runbook's `prices-clickhouse-init --rollups` aside understated its
+blast radius.** That binary applies `init.sql`, seeds `backfill_progress` and
+re-lands all six `CREATE OR REPLACE VIEW` from the working tree *before* it
+reaches `ROLLUPS_SQL`. Described as "re-creates every missing MV and leaves every
+existing one untouched", an operator following it to restore one tier would also
+re-apply every read-surface view over whatever prod holds. Now stated, with the
+explicit single `CREATE` preferred for one missing tier.
+
+New tests, both verified non-vacuous by restoring the old behaviour:
+`an_unreadable_definition_degrades_one_row_not_the_whole_report` (asserts the
+other five are still compared),
+`an_undeclared_writer_into_a_rollup_target_is_reported` (asserts the `_bak`
+writer is *not* flagged). Totals now 27 unit + 3 binary unit, 26 crate ITs.
+
 ## What is NOT done
 
 **No MV body has been changed, and nothing has been run against ch-prod-01.**

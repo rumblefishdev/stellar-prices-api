@@ -312,6 +312,140 @@ async fn a_replace_mode_mv_is_reported_as_drift_and_as_not_append() {
     drop_scratch(&client, db).await;
 }
 
+/// An MV re-created by hand WITHOUT `REFRESH` is an insert-trigger MV, not a
+/// refreshable one, and the check cannot fingerprint it. It must degrade that
+/// one row — not the report.
+///
+/// This is the review finding on PR #216: the live-side parse failure used to
+/// propagate out of `check_mv_drift`, so an unreadable definition on the FIRST
+/// statement in the file hid the other five entirely, including any that had
+/// lost `APPEND`. The tool's whole purpose is defeated by a report that goes
+/// quiet at the first surprise.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn an_unreadable_definition_degrades_one_row_not_the_whole_report() {
+    let db = "it_drift_unreadable";
+    let client = setup_scratch(db).await;
+
+    // Re-create the FIRST declared MV as an insert-trigger MV. First on purpose:
+    // under the old behaviour this is the one that hid all the others.
+    client
+        .query(&format!("DROP VIEW {db}.mv_ohlcv_1m_to_15m"))
+        .execute()
+        .await
+        .unwrap();
+    client
+        .query(&format!(
+            "CREATE MATERIALIZED VIEW {db}.mv_ohlcv_1m_to_15m \
+             TO {db}.price_ohlcv_15m AS SELECT * FROM {db}.price_ohlcv_1m"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    let reports = check_mv_drift(&client, db, prices_clickhouse::ROLLUPS_SQL)
+        .await
+        .expect("an unreadable live definition must not abort the check");
+
+    assert_eq!(reports.len(), 6, "every declared MV must still be reported");
+
+    let broken = reports
+        .iter()
+        .find(|r| r.name == "mv_ohlcv_1m_to_15m")
+        .expect("reported");
+    let MvStatus::Unparseable(rendering) = &broken.status else {
+        panic!("expected Unparseable, got {:?}", broken.status);
+    };
+    assert!(
+        rendering.contains("mv_ohlcv_1m_to_15m"),
+        "the report must carry the live rendering so the operator can see what it is"
+    );
+    assert!(broken.needs_attention());
+
+    // The point of the finding: the other five are still compared.
+    assert_eq!(
+        reports
+            .iter()
+            .filter(|r| r.status == MvStatus::InSync)
+            .count(),
+        5,
+        "the remaining MVs must still be checked, got {:?}",
+        reports
+            .iter()
+            .map(|r| (&r.name, &r.status))
+            .collect::<Vec<_>>()
+    );
+
+    drop_scratch(&client, db).await;
+}
+
+/// An MV that is not in the file but writes into a table the declared MVs own.
+/// Walking `rollups.sql` alone cannot find it, so without the sweep the tool
+/// would print an all-clear while two MVs insert into one ReplacingMergeTree.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn an_undeclared_writer_into_a_rollup_target_is_reported() {
+    let db = "it_drift_undeclared";
+    let client = setup_scratch(db).await;
+
+    client
+        .query(&format!(
+            "CREATE MATERIALIZED VIEW {db}.mv_ohlcv_leftover \
+             REFRESH EVERY 1 DAY APPEND TO {db}.price_ohlcv_1d AS \
+             SELECT * FROM {db}.price_ohlcv_4h"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    // A second MV writing into a _bak table must NOT be flagged: the cluster
+    // carries those (task 0177) and they are not the live targets.
+    client
+        .query(&format!(
+            "CREATE TABLE {db}.price_ohlcv_1d_bak AS {db}.price_ohlcv_1d"
+        ))
+        .execute()
+        .await
+        .unwrap();
+    client
+        .query(&format!(
+            "CREATE MATERIALIZED VIEW {db}.mv_ohlcv_to_bak \
+             REFRESH EVERY 1 DAY APPEND TO {db}.price_ohlcv_1d_bak AS \
+             SELECT * FROM {db}.price_ohlcv_4h"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    let reports = check_mv_drift(&client, db, prices_clickhouse::ROLLUPS_SQL)
+        .await
+        .unwrap();
+
+    let extra = reports
+        .iter()
+        .find(|r| r.name == "mv_ohlcv_leftover")
+        .expect("the undeclared writer must be reported");
+    assert_eq!(extra.status, MvStatus::Undeclared);
+    assert!(extra.needs_attention());
+
+    assert!(
+        !reports.iter().any(|r| r.name == "mv_ohlcv_to_bak"),
+        "an MV writing into price_ohlcv_1d_bak must not be read as a writer into \
+         price_ohlcv_1d — the trailing-character guard is what stops that"
+    );
+
+    // The six declared MVs are untouched and still compare clean.
+    assert_eq!(
+        reports
+            .iter()
+            .filter(|r| r.status == MvStatus::InSync)
+            .count(),
+        6
+    );
+
+    drop_scratch(&client, db).await;
+}
+
 /// The check must not depend on the chain having been applied by this crate: a
 /// hand-edited MV on a provisioned cluster is the realistic drift, and it is
 /// what an `IF NOT EXISTS` apply can never correct.

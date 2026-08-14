@@ -45,13 +45,15 @@ Run this **before** you edit anything. A target that has already drifted is a
 different job from landing a new edit, and doing both in one pass makes the
 verification in step 5 unreadable.
 
-Three findings it reports, in descending severity:
+Five findings it reports, in descending severity:
 
 | Report                          | Meaning                                                                                                                                                                                             |
 | ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `CRITICAL … NOT in APPEND mode` | Replace mode. Every refresh is atomically replacing the whole target table with just its bounded window — the task 0090 data loss, **happening now**. Fix this first and independently of any edit. |
 | `MISSING`                       | Declared in the file, absent on the target. That tier is not rolling up (the task 0136 shape). A plain re-apply fixes it — `IF NOT EXISTS` creates what is not there.                               |
 | `DRIFT`                         | Live definition and file disagree. Re-applying will NOT fix it; that is what the rest of this runbook is for.                                                                                       |
+| `EXTRA`                         | An MV not in the file writes into a table the declared MVs own — two writers into one `ReplacingMergeTree`. Find out what created it before changing anything else.                                 |
+| `UNKNOWN`                       | The object exists but its definition is not a shape the check can read — most likely re-created without `REFRESH`, which makes it an insert-trigger MV with entirely different semantics.           |
 
 ## Step 2 — pre-flight the new definition
 
@@ -73,7 +75,7 @@ of the four have already caused production incidents.
       in the window is rebuilt from only its in-window slice and a **partial**
       bucket gets appended over complete pre-rolled history (task 0095).
 - [ ] **`t.`-qualified source columns** — the bucket key must be aliased `AS
-    timestamp` for the `TO`-table insert routing to work, and that alias
+  timestamp` for the `TO`-table insert routing to work, and that alias
       shadows the source column inside the SELECT. A bare `timestamp` in
       `argMin`/`argMax`/`WHERE` resolves to the constant bucket start, not the
       per-row time (task 0071). Renaming the bucket is not an option — see the
@@ -132,19 +134,26 @@ it works, and confirm it returns to OK in step 5.
 
 ## Step 4 — drop and re-create, one MV at a time
 
-For each MV, in **coarse-to-fine** order (`_1w_to_1M` first, `_1m_to_15m` last)
-so that a tier is never fed by a source that is itself mid-change:
+For each MV, **fine-to-coarse** — `_1m_to_15m` first, `_1w_to_1M` last — so that
+each MV is re-created only once its own source has already been corrected.
+
+⚠️ **The order is load-bearing, and the intuitive one is backwards.** Every MV
+reads the tier below it, and (per step 3) a freshly created MV refreshes
+_immediately_. Re-create `_1w_to_1M` first and its one and only refresh for the
+next 24 hours re-aggregates `price_ohlcv_1w` rows that the old `_1d_to_1w` wrote
+— so a correction propagates upward not at all. Going fine-to-coarse, each
+re-created MV reads a source its predecessor has already fixed.
 
 ```sql
 -- 1. drop
-DROP VIEW prices.mv_ohlcv_1w_to_1M;
+DROP VIEW prices.mv_ohlcv_1m_to_15m;
 
 -- 2. re-create — paste the edited statement from schema/rollups.sql verbatim,
 --    including `IF NOT EXISTS` (harmless: you just dropped it, and keeping the
 --    file and the executed statement identical is what makes step 5 clean).
-CREATE MATERIALIZED VIEW IF NOT EXISTS prices.mv_ohlcv_1w_to_1M
-REFRESH EVERY 1 DAY APPEND
-TO prices.price_ohlcv_1M AS
+CREATE MATERIALIZED VIEW IF NOT EXISTS prices.mv_ohlcv_1m_to_15m
+REFRESH EVERY 1 MINUTE APPEND
+TO prices.price_ohlcv_15m AS
 SELECT …;
 ```
 
@@ -153,19 +162,28 @@ Then confirm this one before touching the next:
 ```sql
 SELECT view, status, last_success_time, next_refresh_time, exception
 FROM system.view_refreshes
-WHERE database = 'prices' AND view = 'mv_ohlcv_1w_to_1M';
+WHERE database = 'prices' AND view = 'mv_ohlcv_1m_to_15m';
 ```
 
 `status = Scheduled`, a `last_success_time` at or after your `CREATE`, and an
 empty `exception`. A non-empty `exception` means the MV exists but is failing on
 every tick — visible here and nowhere else.
 
-> **Applying the whole file is a valid way to re-create**, once the MV is
-> dropped: `IF NOT EXISTS` creates what is absent. `cargo run -p
-prices-clickhouse --bin prices-clickhouse-init -- --rollups` re-creates every
-> _missing_ MV and leaves every existing one untouched. Convenient when several
-> tiers are `MISSING`; it is **not** a way to land an edit on an MV that still
-> exists.
+> **Re-creating by re-applying the file — know what else that touches.** Once an
+> MV is dropped, `IF NOT EXISTS` will create it, so applying `rollups.sql`
+> re-creates every _missing_ MV and leaves every existing one untouched. It is
+> **not** a way to land an edit on an MV that still exists.
+>
+> ⚠️ But `prices-clickhouse-init --rollups` does **not** apply only that file.
+> Before it reaches `ROLLUPS_SQL` it unconditionally applies `init.sql`, seeds
+> `backfill_progress`, and applies all six `CREATE OR REPLACE VIEW` statements in
+> `views.sql` — **from your working tree**, over whatever ch-prod-01 currently
+> holds. That is a much larger blast radius than "re-create one missing MV", and
+> it needs the `DROP VIEW` grant those replaces require.
+>
+> For a single missing tier, prefer the explicit `CREATE` above. Reach for the
+> binary only when you intend to re-land the whole schema, and only from a
+> checkout you have verified against the cluster.
 
 ## Step 5 — verify
 
