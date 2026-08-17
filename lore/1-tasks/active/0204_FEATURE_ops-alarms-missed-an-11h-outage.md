@@ -56,6 +56,23 @@ history:
       two links in one chain, so closing only one was the weaker call.
       Delivered as a threshold ladder ([10, 50] above the existing >= 1 alarm)
       plus the AC-3 runbook note. Gap 3 remains, so this task stays active.
+  - date: 2026-08-17
+    status: active
+    who: okarcz
+    note: >
+      Gap 3 scoped but deliberately NOT built. It has no bearing on the
+      0182/0201 campaign — 0142's prod drift run came back clean the same day,
+      and the campaign writes data, not MV definitions, so it cannot introduce
+      drift. Two findings recorded against gap 3 that invert its cost estimate:
+      the mTLS/Lambda objection is already paid for by gap 1, and `system.tables`
+      is grant-FILTERED rather than denied (verified: 32 tables and 7
+      `create_table_query` values readable by a prices-only user), so no new
+      grant and no BE dependency. ⚠️ The "Hetzner cron is cheapest" paragraph in
+      the gap 3 section is now marked stale.
+      Left open on purpose: re-notification for a standing condition has no
+      cheap answer — drift is binary, so gap 2's ladder trick does not transfer,
+      and the alternatives all cost something. That decision should be taken
+      before any code, not during it.
 ---
 
 # Ops alarms missed an 11.5 h outage
@@ -119,6 +136,65 @@ sidesteps the connection problem entirely: prod's HTTP endpoint is mTLS-only
 behind Caddy and `prices_clickhouse::client()` builds a plaintext client, so
 anything running from AWS needs the crate's `aws-mtls` feature wiring first.
 Folding it into 0137's Lambda is the tidier end state and the more expensive one.
+
+### ⚠️ The paragraph above is STALE as of 2026-08-17 — the Lambda route now wins
+
+Two findings from the gap 1 / gap 2 work invert that cost comparison. Neither is
+re-derivable by reading the task, so do not act on the "Hetzner cron is cheapest"
+line without reading these first.
+
+**1. The mTLS objection is already paid for.** Gap 1 put a ClickHouse-reading,
+CloudWatch-publishing path into `rollup-freshness-probe`, which runs
+`client_from_lambda_env("prices")` on a 15-minute EventBridge schedule. The
+`aws-mtls` wiring the paragraph above treats as unbuilt work now exists and is in
+production use. `drift.rs` is already a library module in `prices-clickhouse`
+(the CLI in `bin/` is a thin wrapper), so the probe can call it directly.
+
+**2. Folding it in needs NO new EventBridge rule, and that is a safety property,
+not just convenience.** A new rule means deploying `eventbridge-stack.ts`, which
+is where `CleanupRule` lives — synth confirms that template still emits
+`State: ENABLED` while the live rule is DISABLED, so any deploy of it can
+silently re-enable cleanup ([[0200]]). Reusing the probe's existing schedule
+keeps gap 3 inside `observability-stack.ts`, exactly as gaps 1 and 2 were kept.
+⚠️ A Hetzner cron avoids that hazard too, but trades it for touching the prod
+host directly and for a check that lives outside CDK, invisible to every alarm
+and review path we have.
+
+**3. The privilege question is answered, and it is NOT the `system.disks`
+situation.** Measured on 26.3.10.60 (2026-08-17) against a user holding exactly
+`GRANT SELECT ON prices.*` — the probe's identity:
+
+| read | prices-only user | note |
+|---|---|---|
+| `system.disks` | ⛔ `ACCESS_DENIED` | and cannot be granted — see gap 1 |
+| `count() FROM system.tables WHERE database='prices'` | ✅ `32` | same as `default` |
+| `create_table_query` for the 7 MVs | ✅ `7` | the column drift actually compares |
+
+`system.tables` is **grant-filtered, not denied**, and our grant covers the whole
+`prices` database — so the filtering removes nothing we need. Gap 3 requires **no
+new grant and no BE dependency**. (This is also why the `MISSING` note below
+matters: filtering is real, it just does not bite *this* identity.)
+
+### The one genuinely open design question — re-notification
+
+⚠️ **This is the reason gap 3 was not built alongside gaps 1 and 2**, and it does
+not have a cheap answer. Drift is a standing condition, so it hits the same
+CloudWatch wall gap 2 hit: an alarm notifies on a **state transition**, latches,
+and then says nothing while the condition persists.
+
+Gap 2 escaped that with a threshold ladder because a DLQ has **depth** to climb.
+Drift has no depth — it is binary. To make it re-notify you would need to publish
+something that keeps rising, e.g. *hours since drift was first detected*, and
+that requires **state the probe does not keep** (each invocation is
+independent). Options, none obviously right:
+
+- persist "first seen" in a ClickHouse table and derive the age from it — real
+  state, but it makes a read-only check a writer;
+- accept one latched alarm plus a separate daily digest;
+- alarm on the transition only, and rely on drift being rare and on the runbook.
+
+**Decide this before writing code.** Picking it implicitly while implementing is
+how gap 2's defect got shipped in the first place.
 
 Three things this task's own findings say to design in:
 
