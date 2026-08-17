@@ -21,7 +21,7 @@ links:
   - '../active/0184_FEATURE_portal-hosting-skeleton.md'
   - '../../../docs/scf/api-endpoints.md'
 history:
-  - date: 2026-08-14
+  - date: "2026-08-14"
     status: backlog
     who: akot
     note: >
@@ -29,7 +29,7 @@ history:
       of its properties are code-only, and reaching the committed shape needs
       three deploys rather than one — so it is real outstanding work rather than
       a checkbox, and it would have been lost in the archive.
-  - date: 2026-08-17
+  - date: "2026-08-17"
     status: backlog
     who: akot
     note: >
@@ -44,6 +44,19 @@ history:
       whose two halves take different headers, so the single criterion could no
       longer be checked as written. +1 code change, +3 acceptance criteria
       (2 new, 1 split in two).
+  - date: "2026-08-17"
+    status: backlog
+    who: akot
+    note: >
+      Gave the `DependsOn` fix back to [[0185]] the same day, on a second review
+      pass: that task introduces both `BucketDeployment`s, the fix is one line in
+      a file it already edits, and this task sits in `backlog/` — so any deploy
+      between the two would have worn the race the reassignment was meant to
+      manage. Verified present on [[0185]]'s branch. This is a pure
+      re-measurement task again; what is left of the item is a **precondition**
+      (deploy a tree that includes [[0185]]) plus one thing to check live —
+      [[0185]]'s decision 13, on whether `/api-tokens/` can hold a cache entry at
+      all. −1 code change.
 ---
 
 # Deploy the portal gateway mapping and verify it live
@@ -55,10 +68,10 @@ history:
 serves an intermediate state that matches neither the branch nor the original
 deploy. This task ships it and re-measures.
 
-Nothing here is a code change **except one**, added 2026-08-17: a missing
-`DependsOn` between the two `BucketDeployment`s that [[0185]] introduced. That
-exception is scoped and justified below; anything beyond it means something is
-wrong with [[0184]] rather than with the deploy.
+Nothing here is a code change. The one exception this task briefly carried — a
+missing `DependsOn` between the two `BucketDeployment`s — went back to [[0185]]
+the same day and is already on that branch; anything beyond re-measurement means
+something is wrong with [[0184]] rather than with the deploy.
 
 ## Context
 
@@ -101,39 +114,40 @@ make -C infra diff-production   # read it for REMOVALS, not additions
    has a bundle that calls it. The edit is local and must not be committed.
 2. Restore the file, `make -C infra deploy-production-apigateway`. Creates
    `{proxy+}`, its three verbs and the per-verb throttle.
-3. Apply the `DependsOn` fix below, then `make -C infra deploy-production-portal`.
-   Access logs, upload `Cache-Control`, the redirect function. Upload and
-   invalidation happen inside the same `cdk deploy`.
+3. `make -C infra deploy-production-portal`. Access logs, upload
+   `Cache-Control`, the redirect function. Upload and invalidation happen inside
+   the same `cdk deploy`. **Deploy [[0185]]'s branch, not an older one** — see
+   the note below.
 
-### The one code change: order the two bucket deployments
+### Deploy the bucket-deployment ordering fix with the bundle
 
-[[0185]] split [[0184]]'s single `BucketDeployment` in two — content-hashed
-`assets/*` at a year and `immutable`, the unhashed `index.html` at
-`max-age=0, must-revalidate` — and neither carries a `DependsOn`. Verified
-against the synthesized template on 2026-08-17: both custom resources have
-`DependsOn: null`, so CloudFormation may run them in either order.
+This task briefly owned a one-line fix and gave it back. [[0185]] split
+[[0184]]'s single `BucketDeployment` in two — content-hashed `assets/*` at a
+year and `immutable`, the unhashed `index.html` at `max-age=0, must-revalidate`
+— and on 2026-08-17 neither carried a `DependsOn`: both custom resources read
+`DependsOn: null` in the synthesized template, so CloudFormation ran them
+concurrently. If the entry document landed first, CloudFront served a fresh
+`index.html` referencing chunk names not yet in the bucket, and the bucket
+grants `s3:GetObject` without `s3:ListBucket`, so the miss came back as
+`403 AccessDenied` — the app failing on its own JavaScript, with the
+invalidation firing inside the same window.
 
-If the entry document lands first there is a window where a fresh `index.html`
-references chunk names that are not in the bucket yet. The bucket grants
-`s3:GetObject` and not `s3:ListBucket`, so a missing key reads as
-`403 AccessDenied` — the app 403s on its own JavaScript and renders a blank
-page. Worse, the invalidation hangs off the entry-document deployment, so that
-`index.html` is the one CloudFront starts serving.
+**[[0185]] took it back** and now carries
+`portalBundle.node.addDependency(portalBundleAssets)` (its decision 14): that
+task introduces both deployments, the fix is one line in a file it already
+edits, and this task sitting in `backlog/` meant any deploy in between would
+have worn the race. Verified on that branch —
+`DependsOn: [PortalBundleAssetsAwsCliLayer…, PortalBundleAssetsCustomResource…]`.
 
-```ts
-// in portal-hosting-stack.ts — assets must be in place before the document
-// that points at them, and before the invalidation that publishes it.
-entryDocumentDeployment.node.addDependency(assetsDeployment);
-```
+Nothing to apply here. What remains is a **precondition**: the first real-bundle
+deploy must run from a tree that includes [[0185]], or it reintroduces the race
+it was written to avoid.
 
-**Why here and not in [[0185]]:** the race needs two deployments to exist, which
-is [[0185]]'s change, but it can only *bite* on a deploy — and this task performs
-the first deploy of a real bundle. Fixing it in [[0185]] would have been fine
-too; it is here because that is where it was caught, and shipping it separately
-would mean deploying the known-racy shape once on purpose.
-
-This is a one-line ordering change with no effect on the synthesized resources
-themselves, so it does not reopen [[0185]]'s acceptance criteria.
+One thing to check while measuring: [[0185]]'s decision 13 keeps `/api-tokens/`
+in `distributionPaths` on the belief that `DirectoryIndexFn`'s VIEWER_REQUEST
+rewrite happens ahead of the cache lookup, which would mean that path never
+holds an entry. If the live deploy confirms it, drop the path; it is free either
+way, so this is tidiness, not a fix.
 
 Then delete the two "ahead of the deploy" notes — one in
 `docs/scf/api-endpoints.md`, one in [[0184]]'s record — and mark [[0184]]'s

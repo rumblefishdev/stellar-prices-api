@@ -11,7 +11,7 @@ links:
   - "../../../docs/epics/self-service-onboarding.md"
   - "../archive/0162_FEATURE_portal-frontend-app.md"
 history:
-  - date: 2026-08-13
+  - date: "2026-08-13"
     status: backlog
     who: akot
     note: >
@@ -19,7 +19,7 @@ history:
       frontend" step: the app exists, deploys and routes, and looks like
       nothing. Styling is [[0193]]; every screen with content attaches to the
       backend slice that gives it something to show.
-  - date: 2026-08-14
+  - date: "2026-08-14"
     status: active
     who: akot
     note: >
@@ -32,6 +32,17 @@ history:
       three deploys run. This slice's `/api-tokens/api/health` probe sits at
       depth 1, so it works either way — but do not read a depth-3 `403` as a
       bug in this task.
+  - date: "2026-08-17"
+    status: active
+    who: akot
+    note: >
+      Two review rounds on #218, both closed. Round 2 reported five findings, all
+      accurate, but against a remote head three commits stale — three were
+      already fixed. Live: the two `BucketDeployment`s had no `DependsOn` (taken
+      back from [[0205]], decision 14) and `generated.ts` was `.prettierignore`d
+      but not `.gitignore`d. Also fixed two things review missed: `index.html`
+      shipped its comments to a public page (decision 15) and the config probe
+      had no timeout (decision 16). 18 tests across 5 files, up from 4.
 ---
 
 # Portal app — ugly but real
@@ -85,7 +96,8 @@ something presentable, it has taken work from [[0193]] and delayed [[0186]].
 - [x] **Ships closed.** The app reads `GET /api-tokens/api/config` ([[0183]])
       and renders "not yet available" with no sign-in button while `enabled` is
       false — the bundle is publicly reachable from the first deploy
-- [x] `nx build` produces a static bundle; `nx test` runs and passes — 4 tests
+- [x] `nx build` produces a static bundle; `nx test` runs and passes — 18 tests
+      across 5 files, and **CI runs them** (see decision 11; it did not at first)
 - [x] The app is served at `/api-tokens/`, assets resolve, and a hard refresh on
       `/api-tokens/` returns the app — verified at build: the emitted
       `index.html` references `/api-tokens/assets/…`. **Not yet verified live**,
@@ -112,23 +124,36 @@ something presentable, it has taken work from [[0193]] and delayed [[0186]].
 The app is `web/portal`, an `@nx/react` project: React 19, Vite, TypeScript 5.9,
 Vitest 4, `react-router-dom` 7. One route, plain elements, no MUI.
 
-- `web/portal/vite.config.mts` — `base: '/api-tokens/'` and the dev proxy.
+- `web/portal/src/base-path.ts` — `BASE_PATH` and `ROUTER_BASENAME` **derived**
+  from it, so the pair cannot drift apart by hand.
+- `web/portal/vite.config.mts` — `base`, the dev proxy (`server` **and**
+  `preview`), and the `stripHtmlComments` build plugin.
 - `web/portal/src/main.tsx` — `basename` on the router, the other half of `base`.
 - `web/portal/src/api/portal.ts` — the one backend call, relative by
-  construction.
-- `web/portal/src/app/app.tsx` + `app.spec.tsx` — the page and four tests.
+  construction, with a 10s probe timeout.
+- `web/portal/src/app/app.tsx` — the page: three probe states, no button.
+- Tests, 18 across 5 files: `app/app.spec.tsx` (9), `base-path.spec.ts` (3),
+  `strip-html-comments.spec.ts` (3), `dev-proxy.spec.ts` (2), `main.spec.tsx`
+  (1). The last one mounts the real entry point at the real URL, which is the
+  only test that fails if `basename` is dropped.
 - `infra/src/lib/stacks/portal-hosting-stack.ts` — `PORTAL_ASSET_DIR` repointed
-  from [[0184]]'s placeholder to `../web/portal/dist`, and the single
-  `BucketDeployment` split in two.
+  from [[0184]]'s placeholder to `../web/portal/dist`, the single
+  `BucketDeployment` split in two, and a `DependsOn` between them.
 - `infra/Makefile` — `build-portal`, and a `build-production` every production
   target now hangs off.
-- `.github/workflows/ci.yml` — `web/**` in the `typescript` paths filter.
+- `.github/workflows/ci.yml` — `web/**` in the `typescript` paths filter, and
+  `test` in the target list that filter feeds.
 
-Verified: `build`, `lint`, `typecheck` and `test` pass for `portal` and for the
-CDK app; `make -C infra synth-production` succeeds **from a tree with no
-`web/portal/dist`**, which is the property the Makefile change exists to
-guarantee; the synthesized template carries both deployments with the intended
-filters, cache headers and invalidation.
+Verified: `build`, `lint`, `typecheck`, `test` and `nx format:check --all` pass
+for `portal` and for the CDK app; `make -C infra synth-production` succeeds
+**from a tree with no `web/portal/dist`**, which is the property the Makefile
+change exists to guarantee. Read off the synthesized template rather than the
+source: both deployments carry the intended filters, cache headers and
+invalidation paths, and `PortalBundle` now carries
+`DependsOn: [PortalBundleAssetsAwsCliLayer…, PortalBundleAssetsCustomResource…]`.
+Read off `dist/` rather than the config: `index.html` references
+`/api-tokens/assets/…` and `/api-tokens/favicon.ico`, carries no comments, and
+the bundle greps clean for `x-api-key`, `secret` and any external host.
 
 ## Design Decisions
 
@@ -170,7 +195,9 @@ filters, cache headers and invalidation.
    `prune: false` deliberately — a viewer holding the previous `index.html` still
    requests the old chunk names, and deleting them the moment a new build lands
    turns an open tab into a blank page. Only the entry-document deployment
-   invalidates: new hashed assets are new URLs and were never cached.
+   invalidates: new hashed assets are new URLs and were never cached. **Splitting
+   them introduced an ordering hazard this decision did not see** — see 13 and
+   14.
 8. **Every production Makefile target builds the portal, not just the portal's.**
    `cdk` synthesizes the whole app whichever stack is named, so an unbuilt
    frontend fails `synth-production` and every per-stack deploy alike. This is
@@ -186,6 +213,64 @@ filters, cache headers and invalidation.
 10. **`tsconfig.app.json` emits to `out-tsc/app`, not `dist`.** Vite owns `dist`
     and empties it on every build, which deleted the declarations
     `tsconfig.spec.json` references and broke `typecheck` after any `build`.
+
+### Emerged from review
+
+Two review rounds on PR #218. Everything below was found by review, not by the
+tests — worth noting, because the suite was green throughout.
+
+11. **CI runs `test`, and the suite now covers `base`/`basename`.** The
+    `typescript` job ran `lint build typecheck` with no `test`, so the moment the
+    PR was open the portal's suite guarded nothing: `portal` is the only project
+    with a `test` target, and the pre-push hook that does run it is skippable.
+    Worse, what the suite covered was not what this slice is *for* — `app.spec`
+    mounted a `MemoryRouter` with no basename and `main.tsx` had no coverage at
+    all, so dropping either half of the base path left every test green and the
+    deployed app blank. `ROUTER_BASENAME` is now derived from `BASE_PATH`,
+    `main.spec.tsx` mounts the real entry point at the real URL, and
+    `base-path.spec.ts` loads the actual Vite config so the config's duplicate
+    copy of `BASE_PATH` cannot drift. Both guards were mutation-tested.
+12. **The dev proxy is on `preview` too.** `vite preview` is the only local way
+    to run the built bundle, so it is the closest thing to a production
+    rehearsal — and without a proxy it could only ever render "could not reach
+    the portal backend", which is the one branch a rehearsal must not be stuck
+    in.
+13. **`distributionPaths` enumerates the unhashed objects instead of
+    `/api-tokens/*`.** The wildcard purged the year-cached hashed assets on every
+    deploy — the exact cost decision 7's comment claimed to avoid, avoided in the
+    upload only. The list is `/api-tokens/`, `/api-tokens/index.html`,
+    `/api-tokens/favicon.ico`, which is exactly the unhashed half of `dist/`.
+    `/api-tokens/` is belt and braces: `DirectoryIndexFn` rewrites it on
+    VIEWER_REQUEST, *ahead* of the cache lookup, so on the documented behaviour
+    it never holds an entry — kept because an extra path is free and its absence
+    would be invisible. [[0205]] can drop it once a live deploy confirms this.
+14. **`portalBundle.node.addDependency(portalBundleAssets)` — kept here, not
+    deferred to [[0205]].** `BucketDeployment` creates no implicit ordering
+    between siblings (verified: `DependsOn` was `null` in the synthesized
+    template), so CloudFormation ran the two concurrently. If the entry document
+    won, CloudFront served a `max-age=0` `index.html` — which every viewer
+    refetches at once — pointing at hashed assets not yet in the bucket, and the
+    bucket grants `s3:GetObject` without `s3:ListBucket`, so the miss is a `403`
+    and the app fails on its own JavaScript. The invalidation fires inside that
+    window. It was briefly assigned to [[0205]] on the argument that the race can
+    only bite on a deploy; taken back because **this task introduces the two
+    deployments**, the fix is one line in a file this task already edits, and
+    [[0205]] sits in `backlog/` — anyone deploying in between would have worn it.
+15. **HTML comments are stripped from `index.html` at build.** Vite ships them
+    verbatim, and this entry document was mostly commentary: which task puts a
+    credential on the page, which sub-routes break before [[0195]], how S3
+    answers a missing key. None of it is secret and all of it is free
+    reconnaissance on a **public** page. Build-only, so the source keeps every
+    word and `nx dev` still shows it; `vite preview` sees the stripped document
+    like production does. 1.78 kB → 0.55 kB.
+16. **A 10s timeout on the config probe, matched by `name` rather than
+    `instanceof`.** `fetch` has no default timeout and nothing else bounds a
+    connection that never reaches an origin, so a stalled handshake left the page
+    on "Checking whether the portal is open…" forever — the spinner the failure
+    branch exists to avoid. `AbortSignal.timeout` rejects with a platform
+    `DOMException`, and an `instanceof` against it is a same-realm test: false
+    across an iframe, and false under jsdom. Matched on `name === 'TimeoutError'`
+    instead.
 
 ## Issues Encountered
 
@@ -208,3 +293,13 @@ filters, cache headers and invalidation.
 - **`typecheck` and `build` fought over `dist/`** — see decision 10. It passes
   the first time and fails the second, which is the worst version of this bug:
   it looks like a flake.
+- **`instanceof Error` is false across realms.** The first cut of decision 16
+  guarded the timeout branch with `error instanceof Error && error.name === …`.
+  Under jsdom the `DOMException` the environment provides does not descend from
+  the test realm's `Error`, so every timeout fell through to the generic
+  "could not be reached". The test caught it, which is the point — the same
+  fragility is real in a browser iframe, it is just not visible there.
+- **A review can be correct and still be stale.** The round-2 review of PR #218
+  reported five findings, all accurate — against `origin/…`, which was three
+  commits behind the local branch, so three of them had already been closed by
+  round 1. Nothing was wrong with the review. **Push before asking for one.**

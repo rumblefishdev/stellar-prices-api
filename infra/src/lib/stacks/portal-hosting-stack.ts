@@ -357,19 +357,23 @@ function handler(event) {
     // clear entries that do not exist.
     const HASHED_ASSETS = 'assets/*';
 
-    new s3deploy.BucketDeployment(this, 'PortalBundleAssets', {
-      sources: [s3deploy.Source.asset(PORTAL_ASSET_DIR)],
-      destinationBucket: this.bucket,
-      destinationKeyPrefix: 'api-tokens',
-      exclude: ['*'],
-      include: [HASHED_ASSETS],
-      prune: false,
-      cacheControl: [
-        s3deploy.CacheControl.setPublic(),
-        s3deploy.CacheControl.maxAge(cdk.Duration.days(365)),
-        s3deploy.CacheControl.immutable(),
-      ],
-    });
+    const portalBundleAssets = new s3deploy.BucketDeployment(
+      this,
+      'PortalBundleAssets',
+      {
+        sources: [s3deploy.Source.asset(PORTAL_ASSET_DIR)],
+        destinationBucket: this.bucket,
+        destinationKeyPrefix: 'api-tokens',
+        exclude: ['*'],
+        include: [HASHED_ASSETS],
+        prune: false,
+        cacheControl: [
+          s3deploy.CacheControl.setPublic(),
+          s3deploy.CacheControl.maxAge(cdk.Duration.days(365)),
+          s3deploy.CacheControl.immutable(),
+        ],
+      },
+    );
 
     // A stale bundle behind a CDN is indistinguishable from a broken deploy, so
     // the invalidation is part of the same operation that uploads rather than a
@@ -383,7 +387,7 @@ function handler(event) {
     // a day after the flag is flipped, with nothing on screen to explain why.
     // That is the hazard the portal's own `/config` route sets `no-store` to
     // avoid, arriving through the front door instead.
-    new s3deploy.BucketDeployment(this, 'PortalBundle', {
+    const portalBundle = new s3deploy.BucketDeployment(this, 'PortalBundle', {
       sources: [s3deploy.Source.asset(PORTAL_ASSET_DIR)],
       destinationBucket: this.bucket,
       destinationKeyPrefix: 'api-tokens',
@@ -395,9 +399,15 @@ function handler(event) {
       // on every deploy — the exact cost the comment above says this design
       // avoids, and it would have been avoided in the upload only.
       //
-      // `/api-tokens/` needs its own entry even though `DirectoryIndexFn`
-      // rewrites it: that function runs on VIEWER_REQUEST, before the cache
-      // lookup, so both URIs can hold entries and both must be cleared.
+      // `/api-tokens/` is listed for belt and braces, not because it is known
+      // to hold an entry. `DirectoryIndexFn` rewrites it to
+      // `/api-tokens/index.html` on VIEWER_REQUEST, which is BEFORE the cache
+      // lookup, so on the documented behaviour the cache key is only ever the
+      // rewritten URI and this path clears nothing. It costs nothing to keep —
+      // invalidation is billed per path and the first 1,000 a month are free —
+      // and it is the one entry whose absence would be invisible until a
+      // viewer was served a stale document. Drop it if task 0205's live deploy
+      // confirms the rewrite behaves as documented.
       //
       // Only unhashed objects belong on this list, because only they change
       // bytes while keeping a URL. If a future build emits another one into
@@ -418,6 +428,23 @@ function handler(event) {
         s3deploy.CacheControl.mustRevalidate(),
       ],
     });
+
+    // ORDERING, not tidiness. `BucketDeployment` creates no implicit dependency
+    // between siblings, so without this CloudFormation runs the two custom
+    // resources CONCURRENTLY and the entry document can land first.
+    //
+    // That ordering is a broken deploy, not a slow one: the new `index.html`
+    // carries `max-age=0, must-revalidate`, so every viewer refetches it at
+    // once, and it references `assets/index-<newhash>.js` which is not in the
+    // bucket yet. The bucket policy grants `s3:GetObject` and NOT
+    // `s3:ListBucket`, so the miss comes back as `403 AccessDenied` rather than
+    // a 404 — the app fails on its own JavaScript and renders nothing. The
+    // invalidation fires inside the same window, so the edge is guaranteed to
+    // go and fetch the document that cannot work.
+    //
+    // The reverse order has no such window: the hashed assets are new URLs
+    // nobody is asking for yet, so publishing them early is invisible.
+    portalBundle.node.addDependency(portalBundleAssets);
 
     // Task 0186 registers the OAuth redirect URI against this hostname and task
     // 0195 replaces it with the custom domain. Published so neither has to read

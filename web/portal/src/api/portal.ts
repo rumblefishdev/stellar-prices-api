@@ -41,11 +41,53 @@ export class PortalApiError extends Error {
   }
 }
 
+/**
+ * How long the page waits before calling the backend unreachable.
+ *
+ * `fetch` has no default timeout, and neither the gateway's 29s cap nor the
+ * Lambda's own limit bounds a connection that never reaches an origin — a
+ * stalled TCP handshake or a proxy that accepts and then says nothing leaves the
+ * promise pending forever. Without this the page sits on "Checking whether the
+ * portal is open…" with no end, which is exactly the spinner that never resolves
+ * the failure branch exists to avoid.
+ *
+ * Ten seconds is well past a cold Lambda behind this route (the handler reads a
+ * cached SSM parameter and returns a single boolean) and well short of a
+ * visitor's patience.
+ */
+const PROBE_TIMEOUT_MS = 10_000;
+
+/** Whether a rejection from `fetch` is this timeout firing. See the call site. */
+const isTimeout = (error: unknown): boolean =>
+  typeof error === 'object' &&
+  error !== null &&
+  (error as { name?: unknown }).name === 'TimeoutError';
+
 async function getJson<T>(url: string): Promise<T> {
   let response: Response;
   try {
-    response = await fetch(url, { headers: { accept: 'application/json' } });
-  } catch {
+    response = await fetch(url, {
+      headers: { accept: 'application/json' },
+      signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
+    });
+  } catch (error) {
+    // Distinguished from the generic failure below because the two point at
+    // different causes: a timeout means something accepted the connection and
+    // then said nothing, which is a gateway or origin problem, whereas the
+    // generic branch is usually the viewer's own network.
+    //
+    // Matched on `name` alone, NOT `instanceof DOMException` or
+    // `instanceof Error`. What `AbortSignal.timeout` rejects with comes from the
+    // platform, and an `instanceof` against it is a same-realm test: it is false
+    // across an iframe, and it is false under jsdom, where the DOMException the
+    // environment provides does not descend from the test realm's `Error`. That
+    // is not a test artefact to work around — it is the same fragility in a
+    // place where it can be seen.
+    if (isTimeout(error)) {
+      throw new PortalApiError(
+        `${url} did not answer within ${PROBE_TIMEOUT_MS / 1000}s`,
+      );
+    }
     // A network-level failure, not an HTTP status — offline, DNS, TLS. The
     // browser's own message is deliberately vague for privacy reasons, so
     // there is nothing worth forwarding from it.

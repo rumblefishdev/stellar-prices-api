@@ -110,6 +110,44 @@ describe('portal home', () => {
     ).toBeTruthy();
   });
 
+  // `fetch` has no default timeout, and nothing else bounds a connection that
+  // never reaches an origin — the gateway's 29s cap only applies once a request
+  // gets there. Without a signal a stalled handshake leaves the page on
+  // "Checking whether the portal is open…" forever, which is the spinner the
+  // failure branch exists to avoid.
+  it('gives the probe a timeout rather than waiting on the network forever', async () => {
+    const fetchMock = stubFetch({});
+    renderApp();
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(init?.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it('reports a hung backend as a timeout, naming the URL', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockRejectedValue(
+          new DOMException('The operation was aborted.', 'TimeoutError'),
+        ),
+    );
+    renderApp();
+
+    expect(
+      await screen.findByText(/could not reach the portal backend/i),
+    ).toBeTruthy();
+    // Distinct from "could not be reached": a timeout means something accepted
+    // the connection and then said nothing, which points at the gateway or the
+    // origin rather than at the viewer's own network.
+    expect(
+      await screen.findByText(
+        /\/api-tokens\/api\/config did not answer within 10s/i,
+      ),
+    ).toBeTruthy();
+  });
+
   it('says nothing about the outcome while the probe is still in flight', async () => {
     stubFetch({});
     renderApp();

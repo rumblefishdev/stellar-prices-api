@@ -1,5 +1,5 @@
 import react from '@vitejs/plugin-react';
-import { defineConfig, loadEnv } from 'vite';
+import { defineConfig, loadEnv, type Plugin } from 'vite';
 
 /**
  * `base` is what makes Vite emit asset URLs under `/api-tokens/`; without it
@@ -50,6 +50,32 @@ const PROXIED_PATHS = [
 
 /** Only `/v1` requires a key — see the note on `devApiKey` below. */
 const KEYED_PATHS: readonly string[] = ['/v1'];
+
+/**
+ * Keep `index.html`'s comments out of the shipped document.
+ *
+ * Vite does not strip them, and this app's entry document is mostly commentary:
+ * why there is no `<base href>`, why the favicon is root-relative, which task
+ * puts a credential on this page, and how S3 answers a missing key. That is
+ * useful to the next person editing the file and it is a free read for anyone
+ * who opens view-source on a PUBLIC page whose whole job, from task 0187 on, is
+ * to render an API key. None of it is a secret; all of it is unnecessary
+ * disclosure of the roadmap and of how the bucket behaves on a miss.
+ *
+ * Build only, so the source stays readable in `nx dev`. `vite preview` serves
+ * the built output, so it sees the stripped document like production does.
+ */
+export const stripHtmlComments = (): Plugin => ({
+  name: 'portal-strip-html-comments',
+  apply: 'build',
+  transformIndexHtml: {
+    // `post`, so this also covers anything Vite or a plugin injected.
+    order: 'post',
+    // The leading `\n[ \t]*` goes with the comment, or every stripped block
+    // leaves a blank indented line behind.
+    handler: (html: string) => html.replace(/\n?[ \t]*<!--[\s\S]*?-->/g, ''),
+  },
+});
 
 export default defineConfig(({ mode }) => {
   // The `''` prefix loads ALL env vars, not just `VITE_`-prefixed ones. That is
@@ -110,7 +136,7 @@ export default defineConfig(({ mode }) => {
       // same-origin call that is this slice's whole point.
       proxy,
     },
-    plugins: [react()],
+    plugins: [react(), stripHtmlComments()],
     build: {
       emptyOutDir: true,
       outDir: './dist',
