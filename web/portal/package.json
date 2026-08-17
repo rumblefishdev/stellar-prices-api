@@ -1,0 +1,12 @@
+{
+  "name": "@rumblefish/portal",
+  "version": "0.0.1",
+  "private": true,
+  "nx": {
+    "name": "portal",
+    "tags": [
+      "type:app",
+      "scope:web"
+    ]
+  }
+}

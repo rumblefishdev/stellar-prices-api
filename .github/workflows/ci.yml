@@ -72,6 +72,12 @@ jobs:
             typescript:
               - 'libs/**'
               - 'infra/**'
+              # The portal app (task 0185). Without this line its lint, build,
+              # typecheck and tests never run: no other pattern here matches
+              # `web/`, so a frontend-only PR would run no job at all and merge
+              # green having been checked by nothing. Same shape as the gap the
+              # `rust` filter above closes for `portal-hosting-stack.ts`.
+              - 'web/**'
               - 'package.json'
               - 'package-lock.json'
               - 'tsconfig*.json'
@@ -80,7 +86,7 @@ jobs:
               - 'tools/scripts/**'
 
   typescript:
-    name: TypeScript (lint, build, typecheck)
+    name: TypeScript (lint, build, typecheck, test)
     needs: changes
     if: |
       needs.changes.outputs.typescript == 'true' ||
@@ -98,7 +104,13 @@ jobs:
 
       - run: npm ci
       - run: npx nx format:check --all
-      - run: npx nx run-many -t lint build typecheck
+      # `test` is in this list on purpose (task 0185). It was absent while the
+      # only TypeScript project was the CDK app, whose behaviour CI asserts
+      # through `synth-production` in the rust job instead — so nothing was
+      # obviously missing. The portal changed that: its Vitest suite is the only
+      # thing standing between a regression and `/api-tokens/`, and a suite that
+      # runs solely on the author's machine guards nothing after the PR is open.
+      - run: npx nx run-many -t lint build typecheck test
 
       # Cheap counterpart to the rust job's build+verify+synth guard.
       #

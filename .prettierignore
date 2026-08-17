@@ -15,3 +15,7 @@ lore/2-adrs/
 
 # JSONL evidence files (multi-object, not valid JSON)
 lore/**/evidence/*.json
+
+# Emitted by `npm run portal:api-types` from the published OpenAPI document.
+# Reformatting it would diff on every regeneration.
+web/portal/src/api/generated.ts

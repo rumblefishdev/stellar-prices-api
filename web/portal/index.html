@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!-- Not a page anyone should reach from a search result: it renders an API
+         key once task 0187 lands, and until then it says the portal is shut. -->
+    <meta name="robots" content="noindex" />
+    <title>Stellar Prices API — API keys</title>
+    <!-- No `<base href>`: Vite's `base` option (vite.config.mts) already
+         rewrites asset URLs to `/api-tokens/`, and a `<base>` tag on top of it
+         would resolve them twice. The router's `basename` handles routes.
+
+         Root-relative `/favicon.ico`, NOT `./favicon.ico`. Vite prefixes
+         absolute public-dir URLs with `base` and leaves relative ones untouched,
+         so the relative form shipped verbatim and resolved against whatever path
+         the browser was on. That happens to work at `/api-tokens/` and breaks on
+         every sub-route task 0195 adds — `/api-tokens/keys/new` would ask for
+         `/api-tokens/keys/favicon.ico` and get a 403 from S3. -->
+    <link rel="icon" type="image/x-icon" href="/favicon.ico" />
+    <link rel="stylesheet" href="/src/styles.css" />
+  </head>
+  <body>
+    <!-- No third-party scripts, ever — no analytics, no CDN fonts. This page
+         renders a credential from task 0187 on, and the CSP stays trivial only
+         while nothing external is loaded. The reference app this one mirrors
+         (soroban-block-explorer) carries Google Tag Manager here; that is the
+         one thing deliberately not copied from it. -->
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

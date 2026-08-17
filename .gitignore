@@ -21,6 +21,20 @@ coverage
 .env
 .env.local
 .env.*.local
+# Vite loads `.env.development` by mode, so it is a real config file rather than
+# a local override — and the portal's holds DEV_API_PROXY_TARGET and, once a
+# keyed route is rendered, DEV_API_KEY. Neither belongs in the repo.
+.env.development
+.env.production
+
+# Emitted by `npm run portal:api-types` from the published OpenAPI document, and
+# deliberately not carried (task 0185). That document covers only the `/v1` data
+# API — every portal route is absent from it by design, and
+# `tools/scripts/verify-openapi-routes.mjs` fails CI if one appears — so nothing
+# in `web/portal` imports this file. It sits inside `tsconfig.app.json`'s
+# `include` and eslint's scope, so an untracked copy would otherwise start being
+# typechecked and linted on the machine of anyone who ran the script once.
+web/portal/src/api/generated.ts
 
 # editors
 /.idea
