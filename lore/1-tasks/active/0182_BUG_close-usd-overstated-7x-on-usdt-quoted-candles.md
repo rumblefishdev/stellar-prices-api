@@ -45,6 +45,25 @@ history:
       blocking item: the tiers take no per-quote-leg filter, so 0182 cannot
       currently run without 0201 — routes a/b/c recorded in the task. No FREEZE
       taken, no partition written.
+  - date: 2026-08-17
+    status: active
+    who: okarcz
+    note: >
+      MECHANISM DECIDED — route (c), sequenced: 0201's pass first (no
+      `--reset-*`), then 0182's reset pass over a table already at its floor.
+      Taken together with the completion order for the whole chain (0201 -> 0182
+      -> 0172 as one campaign). Route (a) was rejected because a combined run
+      swamps the `rows_reset ~= rows_enriched` check ~32M against ~357k, and that
+      check is the only signal that catches values zeroed and never recomputed;
+      route (b) is the better tool but costs a PR before any prod run and would
+      leave 0201 outstanding anyway.
+      ⛔ THE RUN IS NO LONGER BLOCKED ON THE MECHANISM. What remains before it
+      can start: a CH admin must take the FREEZE (67 months x 5 tables;
+      `prices_writer` cannot and cannot be granted it), and the operator must
+      settle one snapshot before pass 1 vs a second between the passes — one is
+      cheaper, two make the passes independently revertible. Execution host is
+      fishuser-hero, planned for the morning of 2026-08-18. Still no FREEZE
+      taken and no partition written.
 ---
 
 # `close_usd` is ~7.4× too high on every USDT-quoted candle ever written
@@ -221,8 +240,11 @@ scheduled death.
   deepest consumer surface is a 1Y chart. Leave the pre-2021 window at its
   existing `close × $1` (which 0172 argues is *correct* for that era) and
   document the epoch boundary. Dated-peg-epoch option dropped as unnecessary.
-- [ ] **Mechanism.** The [[0114]] `CoarseRepairDriver` is the right shape and
-  should be reused, but see the gap below — it cannot see these rows as-is.
+- [x] **Mechanism — DECIDED 2026-08-17: route (c), sequenced.** The [[0114]]
+  `CoarseRepairDriver` is the right shape and is reused (the gap below is closed
+  by the reset step). [[0201]]'s pass runs first without `--reset-*`, then
+  0182's reset pass over a table at its floor. Full reasoning in the decision
+  section after the dry run.
 - [ ] **Zeroing first.** Enrichment skips `close_usd > 0`, so the rows must be
   reset to 0 (or written with a higher `version`) before the corrected pivot can
   fill them. On a `ReplacingMergeTree(version)` the version route is safer than a
@@ -565,9 +587,9 @@ the dry run is read-only by construction (`preflight` is `SELECT 1`, the
 grant-probe is gated on `snapshot && !dry_run`, and `run()` hits the `dry_run`
 guard before `freeze_partition` and `run_through`).
 
-**Still open — the mechanism question this created.** The tiers fill any zero in
-the partition they visit; they take no per-quote-leg filter. So there is no way
-today to run 0182 without also running [[0201]]. Three routes, undecided:
+**The mechanism question this created.** The tiers fill any zero in the partition
+they visit; they take no per-quote-leg filter. So there is no way today to run
+0182 without also running [[0201]]. Three routes were open:
 
 - **a.** Take both at once — one FREEZE, one campaign, 10-15 h, and 0182's
   verification leans entirely on the implied-rate probe.
@@ -581,6 +603,46 @@ today to run 0182 without also running [[0201]]. Three routes, undecided:
 route **a** cheaply, but note it re-opens that month a second time in the full
 run — value-idempotent, one extra `version` bump.
 
+### ✅ MECHANISM DECIDED 2026-08-17: **route (c)**
+
+The operator's call, taken with the completion order for the whole repair chain:
+**0201 → 0182 → 0172 close as one campaign, sequenced.** Recorded here because
+this file — not the session note — is what a fresh session reads, and until now
+it still said the mechanism blocked the run.
+
+**Why (c) over (a):** (a) destroys the `rows_reset ≈ rows_enriched` safety check.
+In a combined run `rows_enriched` is ~32M against ~357k reset, so the shortfall
+signal — the one that detects *values zeroed and never recomputed*, the worst
+outcome this task can produce — is swamped by two orders of magnitude and
+verification falls back to the implied-rate probe alone. Sequencing restores it.
+
+**Why (c) over (b):** (b) is the better tool and buys a fast, surgical 0182, but
+it costs a PR with tests before any prod run, and the 32M pre-Soroban rows are
+real missing data we want recovered anyway. (b) would leave [[0201]] still to do.
+
+**What route (c) means operationally — two passes of the same binary:**
+
+1. **Pass 1 = [[0201]]** — run `coarse-repair` **without** `--reset-*`. Fills the
+   ~32M fillable pre-Soroban zeros. The table ends at its floor: only the
+   genuinely unfillable exotic-quote rows are left at zero.
+   ⚠️ **0201 is the operator's own task** — see the ownership note; this entry
+   records the sequencing, it does not claim the work.
+2. **Pass 2 = 0182** — run **with** `--reset-quote-asset-id 111
+   --reset-not-before 1612656000`. With no other fillable zeros left,
+   `rows_enriched` is dominated by the reset rows and `rows_reset ≈
+   rows_enriched` is meaningful again.
+
+This also keeps the "**run reset mode once per table**" rule intact: pass 1 is
+not a reset invocation, so pass 2 is still the single reset run per table.
+
+**FREEZE span under (c): the same 67 months × 5 tables**, since both passes visit
+the same partitions. ⛔ **One operational detail still needs the operator's
+call:** whether the admin takes *one* snapshot before pass 1 or *two* (a second
+between the passes). One snapshot is cheaper, but rolling pass 2 back then
+discards pass 1's ~32M recovered rows as well; a second snapshot after pass 1
+makes the two independently revertible. Settle this **with the admin when the
+FREEZE is arranged**, not during the run.
+
 ## 🚧 What is NOT done — this is a tool, not a correction
 
 **Not one published price has changed.** Same trap already recorded for [[0168]]
@@ -591,12 +653,14 @@ Remaining, in order:
 1. ~~**Size the run.**~~ ✅ done 2026-08-13 — 567,232 rows, see above.
 2. ~~**Dry run per table**, non-vacuous.~~ ✅ done 2026-08-13 — 67 months on all
    five, and it surfaced [[0201]]. See the dry-run section above.
-3. **Decide the mechanism** — routes a/b/c above. ⛔ **This now blocks the run**,
-   and it did not exist before the dry run. Nothing below can be scheduled until
-   it is settled, because every route implies a different FREEZE span and a
-   different verification story.
-4. **Snapshots** — CH admin must `FREEZE` every partition in span; `prices_writer`
-   cannot and cannot be granted it.
+3. ~~**Decide the mechanism** — routes a/b/c above.~~ ✅ **DECIDED 2026-08-17:
+   route (c)**, sequenced — 0201's pass first, then 0182's reset over a table at
+   its floor. See the decision section above for why, and for what each pass
+   runs. **The run is no longer blocked on this.**
+4. **Snapshots** — CH admin must `FREEZE` every partition in span (**67 months ×
+   5 tables** under route (c)); `prices_writer` cannot and cannot be granted it.
+   ⛔ Still to settle with the admin: one snapshot before pass 1, or a second
+   between the passes so the two are independently revertible.
 5. **The run**, `_1h` first (the table BE consumes), reviewed before the next.
    ⚠️ Raise `--pivot-window-s` for `_1w`/`_1M` — the 1-day default silently drops
    references older than a day, which every weekly bucket's anchor may be.
@@ -618,9 +682,11 @@ Remaining, in order:
       unmodified 0114 driver returns for these rows (see the driver gap above).
       The tool can see the defect. ⚠️ Its `zeros_before` counts are **not** the
       567,232 — see the dry-run section for why, and for [[0201]].
-- [ ] **Mechanism decided** (routes a/b/c in the dry-run section) — new, and it
-      blocks the run. There is no way today to run 0182 without also running
-      [[0201]]: the tiers take no per-quote-leg filter.
+- [x] **Mechanism decided** — ✅ 2026-08-17, **route (c)**: sequence [[0201]]'s
+      pass first, then 0182's reset over a table already at its floor. Chosen
+      because a combined run (route a) swamps the `rows_reset ≈ rows_enriched`
+      check ~32M against ~357k, and that check is the only thing that detects
+      values zeroed and never recomputed. **No longer blocks the run.**
 - [ ] Guard against re-introduction: the [[0172]] regression tests already pin
       the writer; add a data-level check that no USDT-quoted candle carries
       `close_usd / close ≈ 1.0`
