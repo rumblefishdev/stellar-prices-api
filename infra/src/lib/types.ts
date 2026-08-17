@@ -221,6 +221,32 @@ export interface EnvironmentConfig {
      */
     readonly ledgerProcessorLagSeconds: number;
     /**
+     * Free-space floor (percent) on the ClickHouse host's filesystem, below
+     * which `prices-{env}-ch-disk-free` fires (task 0204, gap 1).
+     *
+     * The 2026-08-13 disk-full stall ran **11.5 h** and was discovered by
+     * reading Lambda panic logs — nothing watched the condition. ⚠️ The volume
+     * is **shared with the block-explorer team and we are 3.3% of it**, so we
+     * can neither prevent it filling nor free a meaningful amount ourselves:
+     * the only thing this alarm buys is **warning time**, and the threshold has
+     * to be generous enough to deliver some.
+     *
+     * 20% of the 1.72 TiB volume is ~352 GiB. The incident consumed ~150 GiB,
+     * so this fires with roughly twice that still free — hours of warning at the
+     * rate that event moved — while sitting below the 2026-08-17 measurement of
+     * 430.6 GiB free (25.0%), so it does not fire on the current steady state.
+     * ⚠️ A bound at 25 would have been in ALARM the day it shipped.
+     *
+     * Mirrored as `DISK_FREE_PERCENT_BOUND` in
+     * `packages/rollup-freshness-probe/src/disk.rs`, which documents the
+     * reasoning and unit-tests it against both the measured steady state and a
+     * replay of the incident. **This config is authoritative for what the alarm
+     * does**; the Rust copy is documentation and a test fixture, and drift
+     * between them mis-tunes the alarm without any test failing. Change both,
+     * or neither.
+     */
+    readonly chDiskFreePercent: number;
+    /**
      * Optional AWS Chatbot → Slack routing for the ops-alarms topic (task 0056).
      * When set, `ObservabilityStack` subscribes `prices-{env}-ops-alarms` to a
      * Slack channel via a `SlackChannelConfiguration`, so alarms land in Slack —
@@ -573,6 +599,19 @@ export function validateConfig(config: EnvironmentConfig): void {
     ) {
       errors.push(
         `opsAlarms.mtlsNotAfterDaysThreshold must be a positive integer (days), got: ${ops.mtlsNotAfterDaysThreshold}`,
+      );
+    }
+    // Percent, so bounded 0–100 exclusive at both ends: 0 can never fire and
+    // 100 is always firing. Non-integers are allowed (a 12.5% floor is a
+    // reasonable thing to want); NaN is not.
+    if (
+      typeof ops.chDiskFreePercent !== 'number' ||
+      !Number.isFinite(ops.chDiskFreePercent) ||
+      ops.chDiskFreePercent <= 0 ||
+      ops.chDiskFreePercent >= 100
+    ) {
+      errors.push(
+        `opsAlarms.chDiskFreePercent must be a number in (0, 100) exclusive, got: ${ops.chDiskFreePercent}`,
       );
     }
     if (!ops.rollupLagSeconds || typeof ops.rollupLagSeconds !== 'object') {

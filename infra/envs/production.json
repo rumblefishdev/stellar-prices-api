@@ -35,6 +35,7 @@
       "price_ohlcv_1M": 3888000
     },
     "ledgerProcessorLagSeconds": 120,
+    "chDiskFreePercent": 20,
     "slack": {
       "workspaceIdSsmParam": "/prices/production/slack-workspace-id",
       "channelIdSsmParam": "/prices/production/slack-channel-id"

@@ -235,3 +235,107 @@ async fn ungated_max_over_empty_tier_yields_the_epoch_not_null() {
         );
     }
 }
+
+/// The disk-headroom query executes and deserializes (task 0204, gap 1).
+///
+/// Same regression class as the freshness IT above: the unit tests pin the
+/// query *string*, which cannot catch a query that fails to execute or whose
+/// columns will not deserialize into `DiskUsage` — the bug that shipped a
+/// broken `backfill-freshness-probe` in PR #97.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+async fn disk_query_executes_and_deserializes() {
+    use rollup_freshness_probe::disk::{
+        DISK_FREE_PERCENT_METRIC, DiskUsage, disk_metrics, disk_query, free_percent,
+    };
+
+    let c = client();
+    let usage =
+        c.query(disk_query()).fetch_one::<DiskUsage>().await.expect(
+            "disk query must execute and deserialize into DiskUsage (two non-nullable u64)",
+        );
+
+    assert!(
+        usage.capacity_bytes > 0,
+        "filesystemCapacity() must report a real filesystem, got {usage:?}"
+    );
+    assert!(
+        usage.available_bytes <= usage.capacity_bytes,
+        "available must not exceed capacity: {usage:?}"
+    );
+
+    let pct = free_percent(&usage).expect("a real filesystem has non-zero capacity");
+    assert!(
+        (0.0..=100.0).contains(&pct),
+        "free percent {pct} out of range for {usage:?}"
+    );
+
+    let metrics = disk_metrics(&usage).expect("readable capacity publishes metrics");
+    assert_eq!(metrics.len(), 2);
+    assert_eq!(metrics[0].name, DISK_FREE_PERCENT_METRIC);
+    assert_eq!(metrics[0].value, pct);
+}
+
+/// ⚠️ The privilege finding the whole design rests on — pinned so a future
+/// "simplification" back to `system.disks` fails here instead of on prod.
+///
+/// The probe connects as the `ingestion` mTLS identity (`prices_writer`), which
+/// holds `GRANT SELECT ON prices.*` and nothing more. Against a user of that
+/// exact shape:
+///
+/// - `system.disks` is **ACCESS_DENIED**, and the grant cannot be added —
+///   `prices_writer` is XML-defined and that access storage is read-only
+///   (`ACCESS_STORAGE_READONLY`, the same wall task 0182 hit on `ALTER FREEZE`);
+/// - `filesystemAvailable()` / `filesystemCapacity()` are functions, carry no
+///   table grant, and answer fine.
+///
+/// Creates and drops its own least-privileged user, so it asserts the real
+/// privilege behaviour rather than a mock of it.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+async fn restricted_user_can_read_disk_headroom_but_not_system_disks() {
+    use rollup_freshness_probe::disk::{DiskUsage, disk_query};
+
+    let admin = client();
+    exec(&admin, "DROP USER IF EXISTS rollup_probe_it").await;
+    exec(
+        &admin,
+        "CREATE USER rollup_probe_it IDENTIFIED WITH no_password",
+    )
+    .await;
+    exec(&admin, "GRANT SELECT ON prices.* TO rollup_probe_it").await;
+
+    let restricted = Client::default()
+        .with_url(ch_url())
+        .with_database("prices")
+        .with_user("rollup_probe_it");
+
+    // The probe's own query: must work with no system grant whatsoever.
+    let usage = restricted
+        .query(disk_query())
+        .fetch_one::<DiskUsage>()
+        .await
+        .expect(
+            "disk_query() must run for a user holding only SELECT ON prices.* — if this fails, \
+             the probe cannot read disk headroom on prod at all",
+        );
+    assert!(usage.capacity_bytes > 0);
+
+    // The obvious alternative: must NOT work. If this ever starts succeeding,
+    // the constraint has changed and the module docs need revisiting — but
+    // until then, switching to system.disks would deploy green and then fail on
+    // every invocation against prod.
+    let denied = restricted
+        .query("SELECT free_space, total_space FROM system.disks")
+        .fetch_all::<DiskUsage>()
+        .await;
+    let err = denied
+        .expect_err("system.disks must be denied to a prices-only user")
+        .to_string();
+    assert!(
+        err.contains("ACCESS_DENIED") || err.contains("Not enough privileges"),
+        "expected an access-denied error from system.disks, got: {err}"
+    );
+
+    exec(&admin, "DROP USER IF EXISTS rollup_probe_it").await;
+}

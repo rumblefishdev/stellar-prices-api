@@ -237,6 +237,8 @@ export class ObservabilityStack extends cdk.Stack {
    * specific tier without depending on declaration order.
    */
   public readonly rollupFreshnessAlarms: Record<string, cloudwatch.Alarm>;
+  /** ClickHouse host free-space alarm (task 0204, gap 1). */
+  public readonly chDiskFreeAlarm: cloudwatch.Alarm;
   /** Live ledger-processor ingestion-lag alarm (task 0056 finding B). */
   public readonly ledgerProcessorLagAlarm: cloudwatch.Alarm;
   /** Live ledger-processor invocation-error alarm (task 0056 finding B). */
@@ -537,6 +539,51 @@ export class ObservabilityStack extends cdk.Stack {
       ),
     );
 
+    // ClickHouse host free space (task 0204, gap 1). The 2026-08-13 stall ran
+    // 11.5 h and was found by reading Lambda panic logs — `asset-discovery`,
+    // `supply` and `ledger-processor` all failing with CH `Code: 243` — because
+    // nothing watched the disk itself.
+    //
+    // ⚠️ The volume is SHARED with the block-explorer team and we are 3.3% of
+    // it, so this alarm cannot prevent the condition and we cannot free
+    // meaningful space when it fires. Its entire value is warning time, which
+    // is why the threshold is a generous percentage rather than a last-ditch
+    // one; see config.opsAlarms.chDiskFreePercent for the arithmetic.
+    //
+    // Published by the rollup-freshness-probe (every 15 min) rather than a
+    // probe of its own, and into the existing Prices/Rollup namespace, so this
+    // change stays inside THIS stack. A new namespace would need the probe
+    // role's PutMetricData condition widened in eventbridge-stack.ts, which is
+    // where `CleanupRule` lives — and every deploy of that stack can silently
+    // re-enable `prices-{env}-cleanup`, which CDK asserts is ENABLED while the
+    // live rule is DISABLED. Cleanup running during the 0182/0201 repair
+    // campaign shreds that campaign's output. Not a hazard worth taking on for
+    // a namespace label.
+    //
+    // Missing data is NOT_BREACHING for the same reason as the rollup alarms:
+    // probe-down is covered by the probe's own `-errors` alarm and its
+    // worker-health pair, and an unreadable capacity fails the invocation
+    // rather than publishing a misleading zero. M-of-N (1 of 2) so a single
+    // missed publish cannot flip a real breach back to OK.
+    this.chDiskFreeAlarm = new cloudwatch.Alarm(this, 'ChDiskFreeAlarm', {
+      alarmName: `prices-${config.envName}-ch-disk-free`,
+      alarmDescription: `Free space on the ClickHouse host's filesystem has dropped below ${config.opsAlarms.chDiskFreePercent}% (task 0204). ⚠️ The volume is SHARED with the block-explorer team and we are ~3.3% of it — deleting prices data will NOT recover a meaningful amount, so escalate to BE rather than starting a cleanup. On 2026-08-13 this condition stalled ingestion for 11.5 h and surfaced only as ClickHouse Code: 243 panics in asset-discovery, supply and ledger-processor. ⛔ Do NOT enable the cleanup worker as a remedy while a repair/backfill campaign is running (task 0200). Threshold is operator-tunable via config.opsAlarms.chDiskFreePercent.`,
+      metric: new cloudwatch.Metric({
+        namespace: 'Prices/Rollup',
+        metricName: 'ClickHouseDiskFreePercent',
+        dimensionsMap: { Environment: config.envName },
+        statistic: 'Minimum',
+        period: cdk.Duration.minutes(15),
+      }),
+      threshold: config.opsAlarms.chDiskFreePercent,
+      evaluationPeriods: 2,
+      datapointsToAlarm: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.LESS_THAN_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+    this.chDiskFreeAlarm.addAlarmAction(snsAction);
+    this.chDiskFreeAlarm.addOkAction(snsAction);
+
     // mTLS cert expiry (§7 / §11.4). The mtls-notafter-probe publishes the
     // minimum days-to-NotAfter across the ingestion + api client certs; alarm
     // when it drops below the threshold (30 days default). Fires on an expired
@@ -765,7 +812,7 @@ export class ObservabilityStack extends cdk.Stack {
         timeout: cdk.Duration.minutes(1),
         cadence: cdk.Duration.minutes(15),
         impact:
-          'Every rollup-freshness alarm goes dark: they read Prices/Rollup RollupLagSeconds, which only this probe publishes, so a frozen rollup chain would stop being reported rather than reported as frozen — the exact nine-day blind spot of task 0136.',
+          'Every rollup-freshness alarm goes dark: they read Prices/Rollup RollupLagSeconds, which only this probe publishes, so a frozen rollup chain would stop being reported rather than reported as frozen — the exact nine-day blind spot of task 0136. Since task 0204 the ClickHouse free-space alarm rides on the same probe, so it goes dark too: a filling shared volume would also stop being reported.',
       },
       {
         name: 'mtls-notafter-probe',

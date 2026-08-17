@@ -15,6 +15,7 @@
 #[tokio::main]
 async fn main() -> Result<(), lambda_runtime::Error> {
     use lambda_runtime::{LambdaEvent, run, service_fn};
+    use rollup_freshness_probe::disk::{DiskUsage, disk_metrics, disk_query, publish_disk};
     use rollup_freshness_probe::{TableLag, freshness_query, lag_metrics, publish};
     use std::sync::Arc;
 
@@ -59,9 +60,45 @@ async fn main() -> Result<(), lambda_runtime::Error> {
                 .iter()
                 .map(|m| serde_json::json!({ "table": m.table, "lag_seconds": m.value }))
                 .collect();
-            tracing::info!(tiers = metrics.len(), "rollup-freshness-probe run complete");
+
+            // ⚠️ ORDER IS LOAD-BEARING: the disk read runs AFTER the rollup
+            // metrics are already published, and must never move above it.
+            // Both halves propagate their errors, so whichever runs second can
+            // only ever cost itself. Reading the disk first would mean a disk
+            // failure (a revoked grant, a CH hiccup) aborts the invocation
+            // before any RollupLagSeconds datum lands — the alarms are
+            // treatMissingData: NOT_BREACHING, so all seven would score healthy
+            // while a rollup sat frozen. That is the exact 0136 blind spot task
+            // 0137 was filed to close, and it would have been reintroduced by an
+            // unrelated feature.
+            let usage = ch.query(disk_query()).fetch_one::<DiskUsage>().await?;
+            // `None` means capacity read as zero — a broken reading, not a full
+            // disk. Fail the invocation so the probe's own `-errors` alarm
+            // carries it; publishing nothing would let NOT_BREACHING score an
+            // unreadable disk as healthy.
+            let disk = disk_metrics(&usage).ok_or_else(|| {
+                lambda_runtime::Error::from(format!(
+                    "ClickHouse reported filesystemCapacity() = 0 (available {} B) — disk \
+                     headroom is unreadable, not zero",
+                    usage.available_bytes
+                ))
+            })?;
+            publish_disk(&cw, &environment, &disk).await?;
+
+            let free_percent = disk.first().map(|m| m.value).unwrap_or_default();
+            tracing::info!(
+                tiers = metrics.len(),
+                disk_free_percent = free_percent,
+                disk_available_bytes = usage.available_bytes,
+                "rollup-freshness-probe run complete"
+            );
             Ok::<serde_json::Value, lambda_runtime::Error>(serde_json::json!({
                 "published": published,
+                "disk": {
+                    "free_percent": free_percent,
+                    "available_bytes": usage.available_bytes,
+                    "capacity_bytes": usage.capacity_bytes,
+                },
             }))
         }
     }))

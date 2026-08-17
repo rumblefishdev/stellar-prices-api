@@ -126,14 +126,151 @@ Three things this task's own findings say to design in:
 
 ## Acceptance Criteria
 
-- [ ] Free-space alarm on the CH host, threshold chosen to give hours of
-      warning, routed to the same Slack channel as the existing ops alarms
+- [x] Free-space alarm on the CH host, threshold chosen to give hours of
+      warning, routed to the same Slack channel as the existing ops alarms —
+      **built, not deployed**. `prices-{env}-ch-disk-free` at 20% free, on the
+      existing `snsAction` (so the same `#stellar-prices-api-bot` channel as
+      every other ops alarm). See "Implementation — gap 1" below
 - [ ] DLQ alarm distinguishes 1 from 91 — re-notifies on growth or uses a
-      threshold ladder
+      threshold ladder *(gap 2 — not in this activation)*
 - [ ] Runbook note: an ingest stall is verified recovered on the DATA, never on
-      alarm state, and freshness alone does not prove completeness
-- [ ] Alarms verified by inducing the condition, not by reading the CDK — the
-      0137 lesson that an alarm must be tested against the failure it exists for
+      alarm state, and freshness alone does not prove completeness *(not in this
+      activation)*
+- [ ] ⚠️ Alarms verified by inducing the condition, not by reading the CDK — the
+      0137 lesson that an alarm must be tested against the failure it exists for.
+      **NOT met for gap 1 and cannot be met before the deploy.** What *is*
+      verified by inducing the condition is the **privilege** constraint (a
+      least-privileged user really is denied `system.disks` and really can call
+      the filesystem functions — an IT that creates the user and asserts both).
+      The disk condition itself is only exercised in unit tests against measured
+      numbers. Filling a shared 1.72 TiB volume to prove an alarm is not
+      something to do to BE; the honest test is to raise the threshold above
+      current free space after deploy, confirm it fires into Slack, and put it
+      back
 - [ ] `prices-clickhouse-drift` runs on a schedule and reports somewhere a person
       reads, re-notifying while drift persists, with `CRITICAL` separated from
-      `DRIFT` rather than collapsed into "exit 1"
+      `DRIFT` rather than collapsed into "exit 1" *(gap 3 — not in this
+      activation)*
+
+## Implementation — gap 1 (2026-08-17)
+
+Branch `feat/0204_ch-disk-freespace-alarm`. Named for the gap rather than the
+task slug, so gaps 2 and 3 can each take their own branch without reuse.
+
+1. **`packages/rollup-freshness-probe/src/disk.rs`** — new module.
+   `disk_query()`, `DiskUsage`, `free_percent()`, `disk_metrics()`, and a
+   feature-gated `publish_disk()`. Same split as the rollup half: pure shaping
+   and query construction compile in every build and are unit-tested; the AWS
+   SDK stays behind `--features lambda`.
+2. **`src/main.rs`** — reads the disk **after** the rollup metrics are already
+   published. See design decision 3; the ordering is load-bearing.
+3. **`infra/src/lib/stacks/observability-stack.ts`** — `ChDiskFreeAlarm`
+   (`prices-{env}-ch-disk-free`), `Minimum` over 15 min, 1-of-2, LESS_THAN,
+   `NOT_BREACHING`, alarm + OK actions on the existing ops SNS topic.
+4. **`infra/src/lib/types.ts`** — `opsAlarms.chDiskFreePercent` with validation
+   (a number in `(0, 100)` exclusive) and the threshold rationale.
+   **`infra/envs/production.json`** — set to `20`.
+5. The `rollup-freshness-probe` dead-probe `impact` string now says the disk
+   alarm goes dark with it too, because it does.
+
+**Tests:** 18 unit (7 new) + 4 integration (2 new), all green. `cargo clippy
+--all-targets -D warnings` clean on both the default and `lambda` feature sets;
+the `lambda` bin was force-rebuilt to confirm, since `main.rs` is entirely behind
+that feature and the default build never compiles it.
+
+⚠️ **The integration tests do not run in CI** — there is no ClickHouse service in
+`.github/workflows/ci.yml` and nothing passes `--ignored`. This is pre-existing
+(the 0137 IT has always been in the same position), not introduced here, but it
+means "CI green" says nothing about the two ITs. They were run locally against
+26.3.10.60. Worth its own task.
+
+### Design decisions
+
+**From plan**
+
+1. **Ride on `rollup-freshness-probe` instead of a new probe.** It already holds
+   the mTLS ClickHouse client, a CloudWatch publish path, a 15-minute schedule
+   and dead-probe alarm cover. A new probe means a new EventBridge rule, and
+   `CleanupRule` lives in that stack — see decision 2.
+
+**Emerged**
+
+2. **Publish into the existing `Prices/Rollup` namespace, though these are not
+   rollup metrics.** The probe role's `PutMetricData` grant is conditioned on
+   `cloudwatch:namespace == Prices/Rollup` in `eventbridge-stack.ts`, so a
+   `Prices/ClickHouse` namespace would have required editing that stack — and
+   ⚠️ **that is the stack that owns `CleanupRule`**. Confirmed by synth that the
+   template still carries `State: ENABLED` while the live rule is DISABLED, so
+   any deploy of it can silently re-enable cleanup, and cleanup during the
+   0182/0201 campaign shreds the campaign's output. Reusing the namespace keeps
+   the whole change inside `observability-stack.ts`. Revisit after the campaign.
+3. **The disk read runs AFTER the rollup publish, and must not be moved.** Both
+   halves propagate errors, so whichever runs second can only cost itself.
+   Reading the disk first would mean a disk-side failure aborts the invocation
+   before any `RollupLagSeconds` datum lands — and those alarms are
+   `NOT_BREACHING`, so all seven would score healthy while a rollup sat frozen.
+   That is the 0136 blind spot, reintroduced by an unrelated feature. Commented
+   as load-bearing at the call site.
+4. **`filesystemAvailable()`, not `filesystemUnreserved()`.** Available is what
+   an unprivileged writer can still consume (root-reserved blocks already
+   excluded), which is the question the alarm asks. Unreserved additionally
+   subtracts ClickHouse's in-flight merge reservations, so it moves with merge
+   activity and would make the alarm jitter for reasons unrelated to the volume
+   filling up.
+5. **Capacity reading as zero fails the invocation rather than publishing.**
+   Zero capacity is a broken reading, not a full disk. Publishing `0.0` would
+   page falsely; publishing nothing would let `NOT_BREACHING` score it healthy.
+   Neither is acceptable in a task about false-OK, so it errors and the probe's
+   own `-errors` alarm carries it.
+6. **Bound at 20%, not 15% and not 25%.** 20% of 1.72 TiB is ~352 GiB against an
+   incident that consumed ~150 GiB, so it fires with roughly twice the incident
+   still free. ⚠️ The 2026-08-17 measurement is 430.6 GiB free = **25.0%**, so a
+   25% bound would have been in ALARM from the moment it shipped. Unit-tested
+   against both the measured steady state and a replay of the incident.
+
+## Issues Encountered
+
+- 🔴 **`system.disks` is unusable from this probe, and it would have deployed
+  green and failed on every prod invocation.** The obvious query is `SELECT
+  free_space, total_space FROM system.disks`. Measured on 26.3.10.60 against a
+  user holding exactly `GRANT SELECT ON prices.*` — the shape of the `ingestion`
+  identity (`prices_writer`) the probe connects as:
+
+  ```text
+  Code: 497. DB::Exception: Not enough privileges. To execute this query,
+  it's necessary to have the grant SELECT ON system.disks. (ACCESS_DENIED)
+  ```
+
+  And the grant cannot be added: `prices_writer` is XML-defined and that access
+  storage is read-only (`ACCESS_STORAGE_READONLY`) — the same wall [[0182]] hit
+  trying to get it `ALTER FREEZE PARTITION`. Fixing it that way means an edit to
+  BE's `users.xml` plus a reload, i.e. a cross-team dependency.
+
+  `filesystemAvailable()` / `filesystemCapacity()` are **functions**, carry no
+  table grant, and return the same numbers for the default disk (256 786 214 912
+  vs 256 786 149 376 — the drift is concurrent writes between the two reads).
+  This also preserves the property `main.rs` already documented: the probe
+  touches no `system.*` table. Pinned by an IT that creates a least-privileged
+  user and asserts **both** halves, so a future "simplification" back to
+  `system.disks` fails locally instead of on prod.
+
+- **`filesystemFree()` does not exist** on 26.3.10.60 (`UNKNOWN_FUNCTION`). The
+  three that do are `filesystemAvailable`, `filesystemUnreserved`,
+  `filesystemCapacity`. Recorded so the next reader does not try it.
+
+- **`cdk synth` fails on a clean checkout** with `«CannotFindAsset» Cannot find
+  asset at web/portal/dist` — `PortalHostingStack` ([[0185]], merged as #218)
+  needs the portal bundle on disk. `npx nx build portal` first. Unrelated to this
+  task, but it blocks any synth and will catch the next person out.
+
+- **The pre-commit hook fails on a tree that has not been re-installed since
+  #218.** `@nx/vite`, `@nx/react` and `@nx/web` entered `package.json` with that
+  merge; without `npm ci` the hook dies on `Unable to resolve local plugin with
+  import path @nx/vite/plugin` and the commit is refused.
+
+## Future Work
+
+- The two integration tests never run in CI (no ClickHouse service, no
+  `--ignored`). Pre-existing and wider than this task.
+- Move the disk metrics to their own `Prices/ClickHouse` namespace once the
+  0182/0201 campaign has landed and `eventbridge-stack.ts` is safe to deploy.

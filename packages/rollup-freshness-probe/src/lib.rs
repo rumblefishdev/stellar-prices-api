@@ -35,9 +35,18 @@
 //! without the AWS SDK; the actual CloudWatch publish ([`publish`]) is gated
 //! behind the `lambda` feature.
 
+/// ClickHouse host disk headroom (task 0204, gap 1). Published by the same
+/// invocation as the rollup lag — see [`disk`] for why it rides along here
+/// rather than in a probe of its own.
+pub mod disk;
+
 /// CloudWatch namespace for the rollup freshness metric. Must match the
 /// `cloudwatch:namespace` condition on the Lambda role's `PutMetricData` grant
 /// and the alarm wiring in `infra/`.
+///
+/// ⚠️ Also carries the task 0204 disk metrics, which are not rollup metrics.
+/// That is deliberate — see [`disk::publish_disk`] for the reason (it keeps the
+/// change off the stack that owns `CleanupRule`).
 pub const METRIC_NAMESPACE: &str = "Prices/Rollup";
 
 /// Custom metric name published per tier. One metric, disambiguated by the
