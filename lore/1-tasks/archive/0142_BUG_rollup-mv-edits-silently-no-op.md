@@ -2,9 +2,9 @@
 id: "0142"
 title: "rollups.sql edits silently don't land either — the refreshable MVs carry 0134's footgun with no OR REPLACE escape"
 type: BUG
-status: active
+status: completed
 related_adr: []
-related_tasks: ["0134", "0136", "0095", "0090", "0104", "0143", "0144", "0146"]
+related_tasks: ["0134", "0136", "0095", "0090", "0104", "0143", "0144", "0146", "0203", "0204"]
 tags: ["priority-high", "effort-medium", "clickhouse", "schema-drift", "footgun"]
 links: []
 history:
@@ -45,6 +45,22 @@ history:
       has never been run against ch-prod-01** — deferred while BE work the
       shared volume ([[0202]]); it is read-only but its result would want
       acting on. Stays active for that run.
+  - date: 2026-08-17
+    status: completed
+    who: okarcz
+    note: >
+      Closed. PR #216 merged as `64fe9e3`; the drift check then ran against
+      ch-prod-01 (12:38 UTC) and came back CLEAN — all six MVs fingerprint
+      identically to `rollups.sql`, all six are APPEND, nothing undeclared in
+      `prices` writes into their targets. That FALSIFIED this task's own
+      expectation that prod had probably already drifted from the 0136/0090/0095
+      hand re-creations; do not carry that assumption forward. Two review rounds
+      produced ten findings, all fixed, two of them half-fixes of earlier fixes.
+      Shipped: `src/drift.rs`, the read-only `prices-clickhouse-drift` binary,
+      `docs/runbooks/0142-rollup-mv-reapply.md`, a guard test asserting the
+      file's intended form. 27 unit + 3 binary unit tests, 28 crate ITs. No MV
+      body was changed and none is currently owed. Unblocks 0146 and 0203;
+      scheduling the check is recorded as gap 3 on 0204.
 ---
 
 # `rollups.sql` edits silently no-op on a provisioned target
@@ -337,20 +353,58 @@ behaviour the degradation now rests on, with a `SELECT 1` control so it cannot
 pass for a function that returns NULL unconditionally. Totals now 27 unit + 3
 binary unit, 28 crate ITs.
 
+## The prod run — 2026-08-17 12:38 UTC, clean
+
+Run on ch-prod-01 as `default` over the loopback HTTP port. Output verbatim:
+
+```
+INFO checking rollup MV drift (read-only) url=http://localhost:8123 user=default database=prices
+ok       mv_ohlcv_1m_to_15m
+ok       mv_ohlcv_15m_to_1h
+ok       mv_ohlcv_1h_to_4h
+ok       mv_ohlcv_4h_to_1d
+ok       mv_ohlcv_1d_to_1w
+ok       mv_ohlcv_1w_to_1M
+
+6 rollup MVs in sync with rollups.sql, and nothing else in prices writes into
+their targets
+```
+
+Three separate statements, since the tool reports them independently:
+
+1. All six live definitions **fingerprint identically** to `rollups.sql` — no
+   drift, so no DROP+CREATE is owed anywhere.
+2. All six are in **APPEND** mode. This is asserted independently of drift, so a
+   view that had lost `APPEND` would have printed `CRITICAL` even with the file
+   agreeing — nothing did.
+3. **Nothing undeclared in `prices`** writes into the coarse targets.
+
+⚠️ **This falsified the task's own expectation, which is worth recording.** Both
+the task file and the resume notes predicted prod had probably already drifted,
+because [[0136]]'s recovery re-created these MVs by hand and [[0090]]/[[0095]]
+re-created them again. It had not. Those hand re-creations reproduced the file
+faithfully. Do not carry the "prod has probably drifted" assumption forward —
+it was reasonable and it was wrong.
+
+⚠️ **Scope limit of the all-clear, stated exactly:** the undeclared-writer sweep
+filters `system.tables` by `database`, so an MV in *another* database writing
+into `prices.price_ohlcv_*` is invisible to it. That is why the summary says
+"nothing else in `prices`" and not "nothing".
+
+**Operational note for the next run.** Prod's HTTP endpoint is mTLS-only behind
+Caddy and `client()` builds a plaintext client, so there is no path from a local
+machine. The binary was cross-built static (`--target x86_64-unknown-linux-musl`
+→ `static-pie linked`) and `scp`ed to the host; a default `gnu` build will not
+run there — the local toolchain is on glibc 2.42, far newer than the host's. The
+`default` user **does** require a password over HTTP even though `docker exec …
+clickhouse-client` does not, so the runbook's `read -rs` step is load-bearing
+rather than ceremonial.
+
 ## What is NOT done
 
-**No MV body has been changed, and nothing has been run against ch-prod-01.**
-This task makes the drift *visible* and the change *safe to perform*; it does
-not perform one. The live chain on prod has never been checked with this tool —
-the first run is an operator action and it is read-only.
-
-⚠️ The drift check has only ever run against a scratch/local target. It is
-plausible ch-prod-01's live definitions already differ from `rollups.sql` (the
-[[0136]] recovery re-created MVs by hand, and [[0090]]/[[0095]] re-created them
-again). **Running it on prod is the obvious next step and may itself be a
-finding.** Deliberately not done here: BE are working on the shared Hetzner
-volume ([[0202]]), and while the check is read-only, the result would want
-acting on.
+**No MV body has been changed.** This task makes the drift *visible* and the
+change *safe to perform*; it does not perform one, and on the evidence above
+none is currently owed. The first real DROP+CREATE will be [[0146]].
 
 ## Acceptance Criteria
 
@@ -377,4 +431,6 @@ acting on.
       `IF NOT EXISTS`, no view or table creation of any kind. They are
       `INSERT`/`ALTER … DELETE` only, so there is no object for `IF NOT EXISTS`
       to decline to redefine. Nothing to change.
-- [ ] Run the check against ch-prod-01 — deferred, see "What is NOT done".
+- [x] Run the check against ch-prod-01 — **done 2026-08-17 12:38 UTC, and it
+      came back clean.** All six `ok`, no `CRITICAL`, no undeclared writer in
+      `prices`. See "The prod run" below.
