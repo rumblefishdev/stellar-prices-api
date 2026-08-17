@@ -241,17 +241,24 @@ distribution, no test API Gateway and no scratch usage plan in the deploy path �
 so a portal slice that is merged is a portal slice that strangers can reach.
 
 That is what `0183` is for, and it is the reason it comes before hosting rather
-than after the audit. Two operator-seeded SSM parameters:
-`/prices/{env}/portal-enabled` (default `false`, every `/api-tokens/api/*` route
-returns `404`) and `/prices/{env}/portal-allowlist-discord-ids` (the IDs that
-bypass it, so the flow stays walkable end to end while it is closed). The switch
-is flipped in `0194` and nowhere else, gated on `0189` having passed.
+than after the audit. One environment variable, `PORTAL_ENABLED`, read at cold
+start next to `CH_ENABLED` and `API_KEYS`: off by default, and every
+`/api-tokens/api/*` path returns an empty `404` — byte-identical to a route that
+was never deployed, so a closed portal is not merely refused but invisible. One
+route answers in both states, `GET /api-tokens/api/config`, which is what the
+bundle reads to decide between the real UI and a "not yet available" page.
+
+It is a plain boolean rather than runtime config on purpose: it has to be
+flippable on a laptop, which is what makes each slice testable without a staging
+environment. The cost is that opening the portal in production is a redeploy —
+acceptable for a switch thrown once, in `0194`, after `0189` passes.
 
 The sharpest case is `0187`: it issues a real key on the real usage plan, and the
 eligibility gate is three slices later. For that window the flag is the only
-thing between a stranger and a production key. Keys minted while it was off are
-real and are cleaned up as part of `0194` — there is deliberately no separate
-"incubation" usage plan.
+thing between a stranger and a production key. Note what it does **not** cover —
+the flag is in the Lambda, so a local run holding production credentials still
+creates real keys. Those are cleaned up in `0194`; there is deliberately no
+separate "incubation" usage plan.
 
 Three decisions the re-slice made, recorded so they are not re-litigated:
 

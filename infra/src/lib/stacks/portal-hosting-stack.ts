@@ -1,0 +1,369 @@
+import * as cdk from 'aws-cdk-lib';
+import * as cloudfront from 'aws-cdk-lib/aws-cloudfront';
+import * as origins from 'aws-cdk-lib/aws-cloudfront-origins';
+import * as s3 from 'aws-cdk-lib/aws-s3';
+import * as s3deploy from 'aws-cdk-lib/aws-s3-deployment';
+import * as ssm from 'aws-cdk-lib/aws-ssm';
+import type { Construct } from 'constructs';
+
+import type { EnvironmentConfig } from '../types.js';
+
+/**
+ * Directory holding the placeholder bundle, relative to `infra/` (cdk's CWD —
+ * same convention as `API_HANDLER_ASSET_DIR` in `compute-stack.ts`).
+ *
+ * One `index.html`, thrown away by task 0185 when the real app lands. Do not
+ * invest in it.
+ */
+const PORTAL_ASSET_DIR =
+  process.env['PORTAL_ASSET_DIR'] ?? 'assets/portal-placeholder';
+
+/**
+ * The portal's path prefixes, and the rule that produced them.
+ *
+ * Settled 2026-08-07 (task 0161), and a **convention** rather than a one-off,
+ * because several frontends will share this distribution: `<app>/*` is that
+ * app's bundle and `<app>/api/*` is that app's backend. A new frontend adds two
+ * rows and invents nothing.
+ *
+ * ⚠️ CloudFront evaluates cache behaviours **in order** and the first match
+ * wins, so the `/api/*` row must precede the bundle row it sits inside. Get it
+ * backwards and every portal backend call is answered with the SPA bundle: a
+ * `200` full of HTML, which surfaces as a JSON parse error in the browser
+ * rather than as a routing bug. `PORTAL_BACKEND` mirrors `PORTAL_API_PREFIX` in
+ * `packages/prices-api/src/portal/mod.rs`, and is also the prefix the Discord
+ * redirect URI (task 0186) is registered under — the three must agree.
+ */
+const PORTAL_BACKEND = '/api-tokens/api/*';
+const PORTAL_BUNDLE = '/api-tokens/*';
+
+export interface PortalHostingStackProps extends cdk.StackProps {
+  readonly config: EnvironmentConfig;
+  /**
+   * REST API id of `ApiGatewayStack`, used to build the execute-api origin
+   * hostname. Passed as the id rather than the `RestApi` object because that is
+   * all this stack needs and it keeps the cross-stack export to one string.
+   */
+  readonly restApiId: string;
+}
+
+/**
+ * Portal hosting — private S3 bucket, CloudFront distribution, routing table
+ * (task 0184).
+ *
+ * The walking skeleton for the self-service onboarding portal: a URL that
+ * serves a page we own over TLS, plus the behaviour table every later slice
+ * depends on. No app, no auth, no API calls from the page.
+ *
+ * **This distribution is production.** There is no staging environment — see
+ * `packages/prices-api/src/portal/mod.rs` — so the portal's backend routes ship
+ * behind task 0183's `PORTAL_ENABLED` flag and answer with an empty `404` until
+ * task 0194 opens them. The gate exists before the door.
+ *
+ * Two things live here even though nothing yet uses them, because retrofitting
+ * either would invalidate a decision made downstream:
+ *
+ * - **The API is a second origin on this distribution.** That is what makes
+ *   every later portal request same-origin, which is what lets task 0186's
+ *   session cookie be `SameSite=Lax` and keeps CORS out of portal traffic
+ *   entirely. Both properties fail in a browser rather than in `curl`, so they
+ *   are cheap now and expensive to discover later.
+ * - **`/api-tokens/api/*` ordered before `/api-tokens/*`** — see the constants
+ *   above.
+ *
+ * Deferred to task 0195 on purpose: Swagger UI at `/docs/*`, the per-prefix SPA
+ * fallback (a real CloudFront Function, and pointless while the app has one
+ * route), the custom domain and its `us-east-1` certificate. Deferred to task
+ * 0186: the cookie-forwarding policy for the portal prefix, which is only
+ * correct to write once there is a session to forward.
+ */
+export class PortalHostingStack extends cdk.Stack {
+  public readonly bucket: s3.Bucket;
+  public readonly distribution: cloudfront.Distribution;
+
+  constructor(scope: Construct, id: string, props: PortalHostingStackProps) {
+    super(scope, id, props);
+
+    const { config, restApiId } = props;
+
+    // ---------------------------------------------------------------
+    // Origin 1 — the bundle bucket. Private, reachable only through OAC.
+    // ---------------------------------------------------------------
+    // A public bucket is the default way static hosting ships wrong, and
+    // Tranche 3 AC 6 audits exactly this. `BLOCK_ALL` plus origin access
+    // control means the only principal that can read an object is this
+    // distribution, and only for the objects it is asked for.
+    //
+    // RETAIN, not DESTROY: the content is disposable but the bucket is
+    // referenced by a live distribution, and a stack delete that also empties
+    // the origin turns a rollback into an outage.
+    this.bucket = new s3.Bucket(this, 'PortalBucket', {
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      encryption: s3.BucketEncryption.S3_MANAGED,
+      enforceSSL: true,
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+
+    // ---------------------------------------------------------------
+    // Access logs.
+    // ---------------------------------------------------------------
+    // On, because CloudFront cannot backfill: a distribution that was not
+    // logging at the time of an incident has nothing to reconstruct it from,
+    // and the two things most likely to need reconstructing both arrive here.
+    // `/api-tokens/api/*` is an anonymous entry point, and its throttle
+    // (`PORTAL_THROTTLE`, 10 req/s) is a global rate cap rather than a
+    // per-caller one — it bounds the bill, not the behaviour, so what a flood
+    // looked like is a question only the logs can answer. Task 0186 then puts
+    // Discord OAuth callbacks and session cookies through these same
+    // behaviours.
+    //
+    // `logIncludesCookies` stays FALSE for that second reason: from task 0186
+    // the portal's cookie IS the session, so including cookies would write a
+    // usable credential into an S3 bucket in plaintext, for 90 days, to answer
+    // a question the request line already answers.
+    //
+    // `BUCKET_OWNER_PREFERRED` is required, not stylistic — CloudFront standard
+    // logging delivers via ACL grants, and S3's current default of
+    // `BucketOwnerEnforced` disables ACLs, which makes delivery fail silently.
+    const logBucket = new s3.Bucket(this, 'PortalLogBucket', {
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      encryption: s3.BucketEncryption.S3_MANAGED,
+      enforceSSL: true,
+      objectOwnership: s3.ObjectOwnership.BUCKET_OWNER_PREFERRED,
+      lifecycleRules: [{ expiration: cdk.Duration.days(90) }],
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+
+    // ---------------------------------------------------------------
+    // Origin 2 — the API, as a second origin on the same distribution.
+    // ---------------------------------------------------------------
+    // `originPath` is load-bearing. API Gateway serves a REST API only under
+    // `/{stage}`, so without it every proxied request arrives at the gateway
+    // one path segment short and 403s — the same stage-prefix trap documented
+    // on `apiBaseUrl` in `types.ts`.
+    const apiOrigin = new origins.HttpOrigin(
+      `${restApiId}.execute-api.${config.awsRegion}.amazonaws.com`,
+      {
+        originPath: `/${config.envName}`,
+        protocolPolicy: cloudfront.OriginProtocolPolicy.HTTPS_ONLY,
+      },
+    );
+
+    const s3Origin = origins.S3BucketOrigin.withOriginAccessControl(
+      this.bucket,
+    );
+
+    // ---------------------------------------------------------------
+    // Directory index rewrite (viewer request, S3 behaviours only).
+    // ---------------------------------------------------------------
+    // `defaultRootObject` applies to `/` alone — it is a property of the
+    // distribution, not of a behaviour — so it cannot make `/api-tokens/`
+    // resolve to `/api-tokens/index.html`. The other way to get per-directory
+    // index documents is an S3 *website* endpoint, which requires a public
+    // bucket and would trade away the AC above. Hence six lines of function.
+    //
+    // This is NOT task 0195's SPA fallback, which rewrites *unknown sub-paths*
+    // to the owning app's `index.html` and has to be written per prefix. This
+    // only appends `index.html` to a path that already ends in a slash, and
+    // sends a path that is missing that slash to its canonical form.
+    //
+    // The trailing-slash redirects are not cosmetic. `/api-tokens/*` does NOT
+    // match `/api-tokens`, so the bare prefix falls through to `defaultBehavior`
+    // (S3) and — because the OAC policy grants `s3:GetObject` and not
+    // `s3:ListBucket` — S3 masks the missing key as `403 AccessDenied` XML
+    // rather than a 404. That is the same bare AccessDenied page the `/`
+    // redirect exists to prevent, at a URL a reviewer reaches by trimming one
+    // character off the documented one. `/api-tokens/api` needs it too: it
+    // lands on S3 via the bundle behaviour for the same reason, and the
+    // redirect puts it back on the API behaviour, where the gateway answers for
+    // its own namespace instead of S3 answering for it.
+    //
+    // ⚠️ **The redirect targets are a fixed list, and must stay one.** The
+    // obvious generalisation — redirect any path whose last segment has no file
+    // extension — was written first and rejected on review, twice over:
+    //
+    // - It is an **open redirect**. `request.uri` is attacker-controlled and
+    //   CloudFront does not collapse a leading `//`, so `//evil.com/x` would
+    //   have produced `Location: //evil.com/x/` — protocol-relative, i.e. a
+    //   different origin. A backslash form (`/\evil.com/x`) reaches the same
+    //   place through browser normalisation. On the origin that will host task
+    //   0186's OAuth callback, that is the standard first link in a
+    //   code-interception chain.
+    // - It would **fight task 0185's router**. Once the SPA has real routes,
+    //   `/api-tokens/keys` would 302 to `/api-tokens/keys/`, resolve to a key
+    //   that does not exist, and leave the address bar permanently rewritten —
+    //   so task 0195's per-prefix SPA fallback would have to undo this branch
+    //   instead of sitting alongside it.
+    //
+    // Interpolating nothing into `Location` makes the first impossible by
+    // construction rather than by validation, and keeps the function to the job
+    // its name claims. A new frontend adds its prefix to the list.
+    //
+    // Associated with the S3 behaviours only. Attaching it to an API behaviour
+    // would rewrite backend calls the moment one ended in a slash — which is
+    // the failure mode 0161 flagged, arriving early.
+    const directoryIndex = new cloudfront.Function(this, 'DirectoryIndexFn', {
+      functionName: `prices-${config.envName}-portal-directory-index`,
+      comment: 'Append index.html to directory paths; redirect / to the portal',
+      runtime: cloudfront.FunctionRuntime.JS_2_0,
+      code: cloudfront.FunctionCode.fromInline(`
+function redirect(location) {
+  return {
+    statusCode: 302,
+    statusDescription: 'Found',
+    headers: { location: { value: location } },
+  };
+}
+
+// Every value here is a literal. Nothing from the request is ever interpolated
+// into a Location — see the note in the stack above.
+var REDIRECTS = {
+  // The distribution root has no app of its own yet. Task 0195 gives it one
+  // when a second frontend joins; until then the only page here is the portal.
+  '/': '/api-tokens/',
+  '/api-tokens': '/api-tokens/',
+  '/api-tokens/api': '/api-tokens/api/'
+};
+
+function handler(event) {
+  var request = event.request;
+  var uri = request.uri;
+  // typeof, not truthiness: a bare lookup would also find inherited members,
+  // and 'constructor' is truthy.
+  if (typeof REDIRECTS[uri] === 'string') {
+    return redirect(REDIRECTS[uri]);
+  }
+  if (uri.slice(-1) === '/') {
+    request.uri = uri + 'index.html';
+    return request;
+  }
+  return request;
+}
+`),
+    });
+
+    const staticBehaviour = {
+      origin: s3Origin,
+      viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+      functionAssociations: [
+        {
+          function: directoryIndex,
+          eventType: cloudfront.FunctionEventType.VIEWER_REQUEST,
+        },
+      ],
+    };
+
+    // ---------------------------------------------------------------
+    // Shared shape for every behaviour that proxies to the API.
+    // ---------------------------------------------------------------
+    // Three settings here are each load-bearing and each fail silently:
+    //
+    // - `ALL_VIEWER_EXCEPT_HOST_HEADER`. An execute-api endpoint authenticates
+    //   the request against its own hostname, so forwarding the viewer's `Host`
+    //   (which `ALL_VIEWER` does) turns every API call into a 403. This is the
+    //   single most common way an API-behind-CloudFront setup is broken.
+    // - `CACHING_DISABLED`. The obvious-looking `CACHING_OPTIMIZED` forwards no
+    //   request headers, so `x-api-key` would be stripped — every keyed route
+    //   403s — and every caller would collapse onto one cache entry. Edge
+    //   caching for the data routes is a separate decision with its own
+    //   correctness argument; the gateway already has a stage cache and the
+    //   handler already sends `Cache-Control`. For the portal prefix it must
+    //   stay off regardless: task 0186 puts a session cookie through here.
+    // - `ALLOW_ALL` methods. The default (`GET`/`HEAD`) makes CloudFront answer
+    //   `POST /v1/prices/batch` with a 403 of its own, never reaching the API.
+    const apiBehaviour = {
+      origin: apiOrigin,
+      viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+      allowedMethods: cloudfront.AllowedMethods.ALLOW_ALL,
+      cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
+      originRequestPolicy:
+        cloudfront.OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
+    };
+
+    // ---------------------------------------------------------------
+    // The routing table.
+    // ---------------------------------------------------------------
+    // Insertion order IS precedence — see the constants at the top of this
+    // file. `/api-docs-json` and `/health` are listed individually because both
+    // are mounted on the API *root*, not under `/v1`: a table that routes only
+    // `/v1/*` sends them to S3, and the Swagger UI that task 0195 adds then
+    // loads with a 404 on its spec fetch.
+    this.distribution = new cloudfront.Distribution(this, 'Distribution', {
+      comment: `prices-${config.envName} portal + API`,
+      defaultBehavior: staticBehaviour,
+      additionalBehaviors: {
+        [PORTAL_BACKEND]: apiBehaviour,
+        [PORTAL_BUNDLE]: staticBehaviour,
+        '/v1/*': apiBehaviour,
+        '/api-docs-json': apiBehaviour,
+        '/health': apiBehaviour,
+      },
+      enableLogging: true,
+      logBucket,
+      logIncludesCookies: false,
+    });
+
+    // ---------------------------------------------------------------
+    // Upload + invalidate, inside `cdk deploy`.
+    // ---------------------------------------------------------------
+    // A stale bundle behind a CDN is indistinguishable from a broken deploy, so
+    // the invalidation is part of the same operation that uploads rather than a
+    // step an operator has to remember. `distributionPaths` is scoped to the
+    // portal prefix — the API behaviours are uncached and there is nothing else
+    // in the bucket.
+    //
+    // `cacheControl` is the half `distributionPaths` cannot do. An invalidation
+    // clears the EDGE; it cannot reach a viewer's browser. Without a header the
+    // objects carry none, the S3 behaviours fall to CDK's default
+    // `CACHING_OPTIMIZED` (24 h) and browsers apply heuristic caching on top —
+    // so a visitor who opens today's placeholder keeps being told the portal is
+    // not available for a day after task 0185 ships the real app, with nothing
+    // on screen to explain why. That is the hazard the portal's own `/config`
+    // route sets `no-store` to avoid, arriving through the front door instead.
+    //
+    // `public, max-age=0, must-revalidate` is right for what is in the bucket
+    // TODAY:
+    // one unhashed `index.html`, where a revalidation round trip is cheap and
+    // being wrong is not. When task 0185 brings a real bundle it should split
+    // this — content-hashed assets get a year, the entry document keeps this.
+    new s3deploy.BucketDeployment(this, 'PortalBundle', {
+      sources: [s3deploy.Source.asset(PORTAL_ASSET_DIR)],
+      destinationBucket: this.bucket,
+      destinationKeyPrefix: 'api-tokens',
+      distribution: this.distribution,
+      distributionPaths: ['/api-tokens/*'],
+      prune: true,
+      cacheControl: [
+        s3deploy.CacheControl.setPublic(),
+        s3deploy.CacheControl.maxAge(cdk.Duration.seconds(0)),
+        s3deploy.CacheControl.mustRevalidate(),
+      ],
+    });
+
+    // Task 0186 registers the OAuth redirect URI against this hostname and task
+    // 0195 replaces it with the custom domain. Published so neither has to read
+    // it out of a CfnOutput by hand.
+    new ssm.StringParameter(this, 'PortalDistributionDomainParam', {
+      parameterName: `/prices/${config.envName}/portal-distribution-domain`,
+      stringValue: this.distribution.distributionDomainName,
+      description: `CloudFront domain serving the onboarding portal (${config.envName})`,
+    });
+
+    new cdk.CfnOutput(this, 'PortalUrl', {
+      value: `https://${this.distribution.distributionDomainName}/api-tokens/`,
+      description: 'Onboarding portal URL',
+    });
+    new cdk.CfnOutput(this, 'DistributionDomainName', {
+      value: this.distribution.distributionDomainName,
+      description: 'CloudFront distribution domain (portal + API)',
+    });
+    new cdk.CfnOutput(this, 'DistributionId', {
+      value: this.distribution.distributionId,
+      description: 'CloudFront distribution ID',
+    });
+
+    cdk.Tags.of(this).add('Project', 'stellar-prices-api');
+    cdk.Tags.of(this).add('ManagedBy', 'cdk');
+    cdk.Tags.of(this).add('Environment', config.envName);
+  }
+}

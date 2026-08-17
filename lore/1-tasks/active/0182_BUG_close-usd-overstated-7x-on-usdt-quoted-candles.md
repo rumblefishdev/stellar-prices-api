@@ -4,7 +4,7 @@ title: "44,657 stored candles across 495 assets carry a close_usd ~7.4x too high
 type: BUG
 status: active
 related_adr: []
-related_tasks: ["0172", "0196", "0165", "0145", "0111", "0114"]
+related_tasks: ["0172", "0196", "0165", "0145", "0111", "0114", "0201"]
 tags:
   ["priority-high", "effort-medium", "clickhouse", "data-correctness", "enrichment", "milestone-M2"]
 milestone: 2
@@ -30,6 +30,21 @@ history:
       DOES matter to them, for the 30D/1Y pool charts. They have not deployed
       yet, so no consumer has seen the inflated TVL. Advised them not to hold the
       deployment — the two are independent.
+  - date: 2026-08-13
+    status: active
+    who: okarcz
+    note: >
+      Dry run executed on all five forever-tables and it is NON-VACUOUS — 67
+      months each, so the AC is met and the 0114 driver gap is closed. Oracle
+      gate re-verified green (0 rows for asset_id 111) and the flat implied_rate
+      = 1.0 baseline recorded. But the enumeration is an OR, so the same command
+      would ALSO drain ~32M fillable XLM-quoted rows that the 0088 pre-Soroban
+      backfill left unenriched below 2024-02 — a second campaign roughly the size
+      of all of 0114, and 300x this task's own 567,232 rows. Decision: keep 0182
+      scoped to the USDT correction, spawn 0201 for the 32M, RUN NOTHING YET. New
+      blocking item: the tiers take no per-quote-leg filter, so 0182 cannot
+      currently run without 0201 — routes a/b/c recorded in the task. No FREEZE
+      taken, no partition written.
 ---
 
 # `close_usd` is ~7.4× too high on every USDT-quoted candle ever written
@@ -471,6 +486,101 @@ Out of scope here per BE answer 4 (nothing reads a 1Y chart back to 2021), and
 correcting it is impossible rather than merely deferred — there is no reference
 to correct it *to*. Worth its own note if a consumer ever reads that deep.
 
+## ✅ DRY RUN 2026-08-13 — non-vacuous, and it exposed a second campaign
+
+Ran all five tables, `202102`–`202608`, `--reset-quote-asset-id 111
+--reset-not-before 1612656000 --pivot-window-s 2678400 --dry-run`. Log:
+`/tmp/0182_dryrun.log`.
+
+**The AC is met: 67 months on every table, no "no enrichable zeros" all-clear.**
+The 0114 driver gap is closed — the tool can see the defect it could not see
+before. Preconditions checked first and all green: `oracle_prices` 0 rows for
+asset 111 under any `oracle_name`, `usd_rate` 0 rows for the USDT identity
+(0196's purge has not regrown), and the identity still resolves to `asset_id =
+111`.
+
+Baseline probe recorded before any write — `implied_rate` **flat 1.000000 for
+202102 → 202602**, then 0.9989–1.0002 for 202603 → 202608. That tail is the
+*oracle*-written value (Reflector ~0.9996), not the peg path; same defect, two
+labels.
+
+### ⚠️ But `zeros_before` is NOT the 567,232 — the enumeration is an OR
+
+`repair_target_pred(Some(spec))` is `(CANDIDATE_PRED) OR (reset_pending_pred)`.
+So the dry run counts **every pre-existing enrichable zero in the span as well
+as** the reset targets:
+
+| table | dry run reports | USDT reset targets | ratio |
+|---|---|---|---|
+| `_1h` | 107,516,845 | 357,002 | 0.33% |
+| `_4h` | 53,506,597 | 157,683 | 0.29% |
+| `_1d` | 17,907,401 | 41,505 | 0.23% |
+| `_1w` | 4,391,892 | 8,253 | 0.19% |
+| `_1M` | 1,463,985 | 2,789 | 0.19% |
+
+This is **not** a defect in the tool — the OR is exactly what makes the reset
+rows visible, and it is unit-pinned
+(`repair_target_pred_sees_months_that_hold_only_written_values`). But it means
+the command in the run memo does **two** jobs, and the second one is ~300× the
+size of the first.
+
+### What the other 99.7% is — measured on `_1h`, 2021-02 → 2026-08
+
+| class | 2021-02..2024-01 (0114 never ran) | 2024-02.. (0114 ran) |
+|---|---|---|
+| **XLM pivot → fillable** | **31,982,165** | 1,100,131 |
+| exotic → stays 0 | 24,056,634 | 50,020,562 |
+| USDC peg → fillable | 196 | 403 |
+| USDT → fillable | 8 | 31 |
+
+The 74M exotic rows are nearly free — no USD reference, so each tier early-exits
+after a couple of no-progress batches (the `no_reference` floor 0114 documented).
+
+**The 31,982,165 fillable XLM-quoted rows are the [[0088]] pre-Soroban backfill's
+output**: candles rolled into the coarse tables and never enriched, because
+0114's repair span started at 2024-02. That is real missing data and it is worth
+recovering — but it is a second campaign comparable in size to the whole of 0114
+(~30M rows, 4-5 h on one table), and across five tables plausibly **10-15 h**.
+
+**→ Spawned as [[0201]]. 0182's scope is unchanged: the USDT correction only.**
+Neither [[0175]] nor [[0176]] covered it, so it was unclaimed until now.
+
+### Two consequences for this task's own run
+
+1. **The ~1.5-3 h estimate above is wrong for the command as written.** It
+   assumed the run visits only the reset rows (~5,300/month on `_1h`). It would
+   in fact drain the 32M as well. The estimate stands only for a run bounded to
+   the reset leg.
+2. **The `rows_reset ≈ rows_enriched` safety check stops working.** In a combined
+   run `rows_enriched` is ~32M against ~357k reset, so the shortfall signal the
+   runbook prescribes is swamped and cannot detect the failure it exists for
+   (values zeroed and not recomputed). Verification would have to fall back to
+   the implied-rate probe alone.
+
+### ⛔ Decision taken 2026-08-13: document, do not run
+
+The operator's call: record the finding, keep 0182's scope, spawn [[0201]] for
+the 32M, **run nothing yet**. No FREEZE was taken and no partition was written —
+the dry run is read-only by construction (`preflight` is `SELECT 1`, the
+grant-probe is gated on `snapshot && !dry_run`, and `run()` hits the `dry_run`
+guard before `freeze_partition` and `run_through`).
+
+**Still open — the mechanism question this created.** The tiers fill any zero in
+the partition they visit; they take no per-quote-leg filter. So there is no way
+today to run 0182 without also running [[0201]]. Three routes, undecided:
+
+- **a.** Take both at once — one FREEZE, one campaign, 10-15 h, and 0182's
+  verification leans entirely on the implied-rate probe.
+- **b.** Add a scope flag threading the reset leg into the tier SQL, so 0182 is
+  surgical and fast. Costs a PR with tests before any prod run.
+- **c.** Sequence them: [[0201]] first as the bigger job, then 0182's reset over
+  a table that is already at its floor — at which point the combined run *is*
+  the bounded run, and `rows_reset ≈ rows_enriched` works again.
+
+⚠️ A single-month pilot (`--start-month 202606 --end-month 202606`) would price
+route **a** cheaply, but note it re-opens that month a second time in the full
+run — value-idempotent, one extra `version` bump.
+
 ## 🚧 What is NOT done — this is a tool, not a correction
 
 **Not one published price has changed.** Same trap already recorded for [[0168]]
@@ -479,14 +589,18 @@ and for [[0172]] itself: a green PR that stops the bleeding is not the fix.
 Remaining, in order:
 
 1. ~~**Size the run.**~~ ✅ done 2026-08-13 — 567,232 rows, see above.
-2. **Dry run per table** — and confirm it is **non-vacuous** (reports months, not
-   the all-clear). That is an acceptance criterion, not a formality.
-3. **Snapshots** — CH admin must `FREEZE` every partition in span; `prices_writer`
+2. ~~**Dry run per table**, non-vacuous.~~ ✅ done 2026-08-13 — 67 months on all
+   five, and it surfaced [[0201]]. See the dry-run section above.
+3. **Decide the mechanism** — routes a/b/c above. ⛔ **This now blocks the run**,
+   and it did not exist before the dry run. Nothing below can be scheduled until
+   it is settled, because every route implies a different FREEZE span and a
+   different verification story.
+4. **Snapshots** — CH admin must `FREEZE` every partition in span; `prices_writer`
    cannot and cannot be granted it.
-4. **The run**, `_1h` first (the table BE consumes), reviewed before the next.
+5. **The run**, `_1h` first (the table BE consumes), reviewed before the next.
    ⚠️ Raise `--pivot-window-s` for `_1w`/`_1M` — the 1-day default silently drops
    references older than a day, which every weekly bucket's anchor may be.
-5. **Verify** the implied-rate probe moves off 1.0, then tell BE the window.
+6. **Verify** the implied-rate probe moves off 1.0, then tell BE the window.
 
 ## Acceptance Criteria
 
@@ -499,10 +613,14 @@ Remaining, in order:
       (should move from ~1.0 to the measured per-bucket USDT rate).
       ⚠️ Not "all six" — `_1m`/`_15m` are retention-bounded and deliberately
       excluded.
-- [ ] The `--dry-run` preview is **non-vacuous** — i.e. it reports months, not
-      the "no enrichable zeros" all-clear the unmodified 0114 driver returns for
-      these rows (see the driver gap above). Prove the tool can see the defect
-      before trusting that it fixed it.
+- [x] The `--dry-run` preview is **non-vacuous** — ✅ 2026-08-13, 67 months on
+      every one of the five tables, not the "no enrichable zeros" all-clear the
+      unmodified 0114 driver returns for these rows (see the driver gap above).
+      The tool can see the defect. ⚠️ Its `zeros_before` counts are **not** the
+      567,232 — see the dry-run section for why, and for [[0201]].
+- [ ] **Mechanism decided** (routes a/b/c in the dry-run section) — new, and it
+      blocks the run. There is no way today to run 0182 without also running
+      [[0201]]: the tiers take no per-quote-leg filter.
 - [ ] Guard against re-introduction: the [[0172]] regression tests already pin
       the writer; add a data-level check that no USDT-quoted candle carries
       `close_usd / close ≈ 1.0`

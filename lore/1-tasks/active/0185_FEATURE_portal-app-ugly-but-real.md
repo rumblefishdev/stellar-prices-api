@@ -2,7 +2,7 @@
 id: "0185"
 title: "Portal app — ugly but real: Vite/React skeleton served from /api-tokens/, built by CI"
 type: FEATURE
-status: backlog
+status: active
 related_adr: []
 related_tasks: ["0183", "0162", "0184", "0186", "0193"]
 tags: [layer-frontend, priority-high, effort-small, milestone-M3, epic-self-service-onboarding, ui, vite, react, slice-2]
@@ -19,6 +19,19 @@ history:
       frontend" step: the app exists, deploys and routes, and looks like
       nothing. Styling is [[0193]]; every screen with content attaches to the
       backend slice that gives it something to show.
+  - date: 2026-08-14
+    status: active
+    who: akot
+    note: >
+      Activated once [[0183]] and [[0184]] landed on `develop` (#207, #209).
+      **Read [[0184]]'s open note before assuming what is live:** it is merged
+      but not fully deployed — the gateway still maps the intermediate
+      `{proxy}` + `{proxy}/{sub}` pair rather than `{proxy+}`, and the access
+      logs, upload `Cache-Control` and trailing-slash redirect are code-only.
+      So `/api-tokens/api/*` answers at depth 1-2 and `403`s at depth 3 until
+      three deploys run. This slice's `/api-tokens/api/health` probe sits at
+      depth 1, so it works either way — but do not read a depth-3 `403` as a
+      bug in this task.
 ---
 
 # Portal app — ugly but real
@@ -70,8 +83,8 @@ something presentable, it has taken work from [[0193]] and delayed [[0186]].
 ## Acceptance Criteria
 
 - [ ] **Ships closed.** The app reads `GET /api-tokens/api/config` ([[0183]])
-      and renders "not yet available" with no sign-in button while the portal is
-      closed — it is publicly reachable from the first deploy
+      and renders "not yet available" with no sign-in button while `enabled` is
+      false — the bundle is publicly reachable from the first deploy
 - [ ] `nx build` produces a static bundle; `nx test` runs and passes
 - [ ] The app is served at `/api-tokens/`, assets resolve, and a hard refresh on
       `/api-tokens/` returns the app

@@ -160,7 +160,35 @@ function fullPath(id) {
 // the spec side below rather than passing unnoticed.
 const GATEWAY_SKIPPED_METHODS = new Set(['options']);
 
+/**
+ * The onboarding portal's backend prefix (task 0184), which this check skips on
+ * BOTH sides.
+ *
+ * These routes are deliberately absent from the OpenAPI document. The document
+ * describes the public data API to integrators; the portal's endpoints belong
+ * to the portal's own bundle and publishing them would advertise a half-built
+ * portal to every reader of the spec — see the module docs on
+ * `packages/prices-api/src/portal/mod.rs`. They are also mapped as a greedy
+ * `{proxy+}` carrying one method per verb (see `PORTAL_API_RESOURCE_PATH` and
+ * `PORTAL_API_METHODS` in `infra/src/lib/stacks/api-gateway-stack.ts`), so
+ * there is no OpenAPI equivalent to compare against even if we wanted one: the
+ * segment is a placeholder for whatever routes the axum router owns, and the
+ * verbs say nothing about which paths answer on them.
+ *
+ * Mirrors `PORTAL_API_PREFIX` in that module and `PORTAL_BACKEND` in
+ * `infra/src/lib/stacks/portal-hosting-stack.ts` — and, unlike when this skip
+ * was written, that agreement is now asserted rather than asked for in a
+ * comment. See the three-way check below the gateway walk.
+ *
+ * The skip is symmetric, unlike the OPTIONS one above: a portal path appearing
+ * in the document would be checked by neither direction, so the spec side
+ * rejects it outright a few dozen lines down rather than passing over it.
+ */
+const PORTAL_API_PREFIX = '/api-tokens/api/';
+
 const gatewayRoutes = new Set();
+/** Routes the prefix skip above swallowed — asserted non-empty further down. */
+const portalGatewayRoutes = [];
 for (const [, res] of resources) {
   if (res.Type !== 'AWS::ApiGateway::Method') continue;
   // Every method CDK emits declares HttpMethod as a literal. A non-string would
@@ -195,6 +223,14 @@ for (const [, res] of resources) {
     console.error(`error: ${err.message}`);
     process.exit(1);
   }
+  // Checked BEFORE the ANY case. The portal's verbs are enumerated today, so
+  // the order does not currently decide anything — but it did when they were
+  // `ANY`, and it would again if a slice ever collapsed them back, so the skip
+  // stays first rather than depending on that.
+  if (path.startsWith(PORTAL_API_PREFIX)) {
+    portalGatewayRoutes.push(`${method} ${path}`);
+    continue;
+  }
   // `ANY` maps every verb at once and can never equal an OpenAPI operation
   // key, so it would report as undocumented forever. Skipping it silently
   // would instead hide a mapped route from the check — fail loudly and make
@@ -208,6 +244,191 @@ for (const [, res] of resources) {
     process.exit(1);
   }
   gatewayRoutes.add(`${method} ${path}`);
+}
+
+// ---------------------------------------------------------------------------
+// The portal prefix agrees across all three places that declare it.
+// ---------------------------------------------------------------------------
+// The skip above is the reason this section has to exist. Until now the prefix
+// was three independent literals — Rust `PORTAL_API_PREFIX`, CDK
+// `PORTAL_BACKEND`, and the one in this file — tied together by comments saying
+// "the three must agree", which is not a check.
+//
+// The failure that buys: task 0186 moves the Rust prefix, the CloudFront table
+// still routes the NEW prefix to S3, and the OAuth callback is answered with
+// the SPA bundle as `200 text/html` — the exact "reads as a JSON parse error,
+// not as a routing bug" outcome the portal stack's own docblock warns about.
+// CI stays green throughout, because this script skips the OLD prefix and the
+// portal is absent from the document either way.
+//
+// This script already derives both of its sides from synthesized artifacts, so
+// it is the natural place: same technique, one more artifact.
+const portalTemplate = readJson(
+  join(
+    repoRoot,
+    'infra',
+    'cdk.out',
+    'Prices-production-PortalHosting.template.json',
+  ),
+  'run `npm run infra:synth:production` first',
+);
+const portalModPath = join(
+  repoRoot,
+  'packages',
+  'prices-api',
+  'src',
+  'portal',
+  'mod.rs',
+);
+
+function fail(...lines) {
+  for (const line of lines) console.error(line);
+  process.exit(1);
+}
+
+// --- 1. The handler's literal. ---
+let portalMod;
+try {
+  portalMod = readFileSync(portalModPath, 'utf8');
+} catch (err) {
+  fail(`error: cannot read ${portalModPath}\n  ${err.message}`);
+}
+const rustPrefix = /pub const PORTAL_API_PREFIX: &str = "([^"]*)";/.exec(
+  portalMod,
+)?.[1];
+if (rustPrefix === undefined) {
+  fail(
+    `error: could not find \`pub const PORTAL_API_PREFIX\` in ${portalModPath}.`,
+    '  → this check reads it to prove the handler, the CDK routing table and ' +
+      'this script still mean the same prefix. Restore the constant, or ' +
+      'update the pattern here.',
+  );
+}
+if (rustPrefix !== PORTAL_API_PREFIX) {
+  fail(
+    `error: the portal prefix disagrees between the handler and this check:`,
+    `  ${portalModPath}: ${rustPrefix}`,
+    `  ${fileURLToPath(import.meta.url)}: ${PORTAL_API_PREFIX}`,
+    '  → the routing table in infra/src/lib/stacks/portal-hosting-stack.ts ' +
+      'almost certainly needs the same edit; all three must agree.',
+  );
+}
+
+// --- 2. The CloudFront behaviour that must win for a portal backend path. ---
+const distributions = Object.values(portalTemplate.Resources ?? {}).filter(
+  (r) => r.Type === 'AWS::CloudFront::Distribution',
+);
+if (distributions.length !== 1) {
+  fail(
+    `error: expected exactly 1 AWS::CloudFront::Distribution in the ` +
+      `PortalHosting template, found ${distributions.length}. This check ` +
+      `assumes one distribution owns the portal's routing table.`,
+  );
+}
+const distConfig = distributions[0].Properties?.DistributionConfig ?? {};
+const behaviours = distConfig.CacheBehaviors ?? [];
+const originsById = new Map((distConfig.Origins ?? []).map((o) => [o.Id, o]));
+
+/**
+ * CloudFront matches a path pattern with `*` (any run of characters) and `?`
+ * (exactly one), first behaviour wins. Everything else is a literal — escape it
+ * so a `.` or `+` in a pattern cannot widen the match.
+ */
+const patternToRegExp = (pattern) =>
+  new RegExp(
+    `^${pattern.replace(/[.*+?^${}()|[\]\\]/g, (c) =>
+      c === '*' ? '.*' : c === '?' ? '.' : `\\${c}`,
+    )}$`,
+  );
+
+// Ordering is the property under test, so probe it the way CloudFront does:
+// take the FIRST pattern that matches a representative backend path.
+const probe = `${PORTAL_API_PREFIX}probe`;
+const winner = behaviours.find((b) =>
+  patternToRegExp(String(b.PathPattern)).test(probe),
+);
+const expectedPattern = `${PORTAL_API_PREFIX}*`;
+
+if (!winner) {
+  fail(
+    `error: no cache behaviour matches ${probe}, so it falls to the ` +
+      `distribution's DefaultCacheBehavior — the bundle bucket.`,
+    `  → add \`${expectedPattern}\` to the routing table in ` +
+      'infra/src/lib/stacks/portal-hosting-stack.ts.',
+  );
+}
+if (winner.PathPattern !== expectedPattern) {
+  fail(
+    `error: ${probe} is matched first by \`${winner.PathPattern}\`, not by ` +
+      `\`${expectedPattern}\`.`,
+    '  → CloudFront takes the first match, so a broader pattern listed above ' +
+      'the portal backend swallows every portal API call and answers it with ' +
+      'whatever that behaviour serves. If that is the bundle, the caller gets ' +
+      'a 200 full of HTML, which surfaces as a JSON parse error rather than ' +
+      'as a routing bug. Reorder `additionalBehaviors` in ' +
+      'infra/src/lib/stacks/portal-hosting-stack.ts.',
+  );
+}
+// Matching first is not enough — it has to point at the API. An S3 target here
+// is the same 200-full-of-HTML failure arriving by a different route.
+const winnerOrigin = originsById.get(winner.TargetOriginId);
+if (!winnerOrigin?.CustomOriginConfig) {
+  fail(
+    `error: behaviour \`${winner.PathPattern}\` targets origin ` +
+      `\`${winner.TargetOriginId}\`, which is not an HTTP (execute-api) ` +
+      `origin — the portal's backend calls would be served from the bundle ` +
+      `bucket.`,
+  );
+}
+// Two more settings on the same objects, each load-bearing and each failing
+// silently. Cheap to assert now that `winner` and `winnerOrigin` are in hand.
+//
+// The methods: CloudFront's default allowance is GET/HEAD, and it answers
+// anything else with a 403 of its own that never reaches the API — which would
+// take out task 0186's token exchange and task 0187's key issue, both POSTs,
+// while every GET kept working.
+const WRITE_METHODS = ['POST', 'PUT', 'PATCH', 'DELETE'];
+const allowed = new Set(winner.AllowedMethods ?? []);
+const missingMethods = WRITE_METHODS.filter((m) => !allowed.has(m));
+if (missingMethods.length > 0) {
+  fail(
+    `error: behaviour \`${winner.PathPattern}\` does not allow ` +
+      `${missingMethods.join(', ')}.`,
+    '  → CloudFront rejects a disallowed method with its own 403 before the ' +
+      "origin is reached, so the portal's writes would fail while its reads " +
+      'kept working. Set `allowedMethods: ALLOW_ALL` on the API behaviour in ' +
+      'infra/src/lib/stacks/portal-hosting-stack.ts.',
+  );
+}
+// The origin path: API Gateway serves a REST API only under `/{stage}`, so
+// without it every proxied request arrives one segment short and 403s.
+if (!/^\/[^/]+$/.test(String(winnerOrigin.OriginPath ?? ''))) {
+  fail(
+    `error: the API origin behind \`${winner.PathPattern}\` has OriginPath ` +
+      `${JSON.stringify(winnerOrigin.OriginPath ?? null)}, which is not a ` +
+      `single stage segment.`,
+    '  → an execute-api origin serves the REST API under `/{stage}` only. ' +
+      'Without it CloudFront forwards `/api-tokens/api/x` as `/api-tokens/' +
+      'api/x`, the gateway maps nothing, and every portal call 403s. Set ' +
+      '`originPath` on the HttpOrigin in ' +
+      'infra/src/lib/stacks/portal-hosting-stack.ts.',
+  );
+}
+
+// --- 3. The skip is not covering an empty set. ---
+// If the gateway ever stops mapping anything under the prefix, the two checks
+// above still pass — they only prove the CDN would route it — while every
+// portal call 403s at the gateway. Non-vacuous, same stance as the
+// `gatewayRoutes.size === 0` guard further down.
+if (portalGatewayRoutes.length === 0) {
+  fail(
+    `error: API Gateway maps no route under ${PORTAL_API_PREFIX}, so this ` +
+      `check's portal skip covers nothing.`,
+    '  → the portal backend is unreachable in production: CloudFront forwards ' +
+      'the request and the gateway answers 403 Missing Authentication Token. ' +
+      'Restore the `/api-tokens/api/{proxy+}` methods in ' +
+      'infra/src/lib/stacks/api-gateway-stack.ts.',
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -247,6 +468,28 @@ if (documentedOptions.length) {
   console.error(
     '  → stop documenting them, or teach this check how to tell a mapped ' +
       'OPTIONS from a generated preflight',
+  );
+  process.exit(1);
+}
+
+// The gateway side skips the portal prefix (see PORTAL_API_PREFIX), so a
+// documented portal path would be compared against nothing and read as a pass.
+// Documenting one is also a decision, not a slip — it puts the portal's
+// endpoints in front of every integrator reading the spec — so say so rather
+// than ignoring it.
+const documentedPortalPaths = [...specRoutes].filter((r) =>
+  r.slice(r.indexOf(' ') + 1).startsWith(PORTAL_API_PREFIX),
+);
+if (documentedPortalPaths.length) {
+  console.error(
+    `error: the OpenAPI document describes routes under ${PORTAL_API_PREFIX}, ` +
+      'which this check skips on the gateway side and therefore cannot compare:',
+  );
+  for (const r of documentedPortalPaths.sort()) console.error(`  ${r}`);
+  console.error(
+    '  → the portal describes itself to its own bundle, not to integrators ' +
+      '(packages/prices-api/src/portal/mod.rs). Drop the #[utoipa::path], or ' +
+      'map the routes explicitly and teach this check to compare them.',
   );
   process.exit(1);
 }
@@ -292,3 +535,9 @@ console.log(
   `OpenAPI document and API Gateway agree on ${gatewayRoutes.size} route(s):`,
 );
 for (const r of [...gatewayRoutes].sort()) console.log(`  ${r}`);
+console.log(
+  `\nPortal prefix ${PORTAL_API_PREFIX} agrees across the handler, the ` +
+    `CloudFront routing table and this check; ` +
+    `${portalGatewayRoutes.length} gateway route(s) skipped as portal:`,
+);
+for (const r of portalGatewayRoutes.sort()) console.log(`  ${r}`);
