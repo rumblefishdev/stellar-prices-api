@@ -271,19 +271,34 @@ function handler(event) {
     // ---------------------------------------------------------------
     // Three settings here are each load-bearing and each fail silently:
     //
-    // - `ALL_VIEWER_EXCEPT_HOST_HEADER`. An execute-api endpoint authenticates
-    //   the request against its own hostname, so forwarding the viewer's `Host`
-    //   (which `ALL_VIEWER` does) turns every API call into a 403. This is the
-    //   single most common way an API-behind-CloudFront setup is broken.
+    // - `ALL_VIEWER_EXCEPT_HOST_HEADER`. Two jobs, and task 0186 added the
+    //   second. (a) An execute-api endpoint authenticates the request against
+    //   its own hostname, so forwarding the viewer's `Host` (which `ALL_VIEWER`
+    //   does) turns every API call into a 403 — the single most common way an
+    //   API-behind-CloudFront setup is broken. (b) **It forwards cookies**, and
+    //   from task 0186 the portal's session IS a cookie. The managed default
+    //   (`CachePolicy`'s cookie behaviour, and every origin-request policy other
+    //   than the two `ALL_VIEWER*` ones) strips them, so the session would never
+    //   reach the origin and `/auth/me` would answer "signed out" to a visitor
+    //   who had just signed in — a failure that appears only in a browser, never
+    //   in `curl -H`. Task 0184 left this policy alone deliberately, noting it
+    //   was only correct to write once there was a session to forward; this is
+    //   that moment, and the answer turned out to be that the policy already
+    //   chosen for `Host` does the job. `tools/scripts/verify-openapi-routes.mjs`
+    //   asserts it against the synthesized template so a "tidy-up" to
+    //   `CORS_S3_ORIGIN` or `ALL_VIEWER` cannot pass CI.
     // - `CACHING_DISABLED`. The obvious-looking `CACHING_OPTIMIZED` forwards no
     //   request headers, so `x-api-key` would be stripped — every keyed route
     //   403s — and every caller would collapse onto one cache entry. Edge
     //   caching for the data routes is a separate decision with its own
     //   correctness argument; the gateway already has a stage cache and the
     //   handler already sends `Cache-Control`. For the portal prefix it must
-    //   stay off regardless: task 0186 puts a session cookie through here.
+    //   stay off **as a requirement, not as a default**: task 0186 puts a
+    //   session cookie through here, and a cached `/auth/me` is one visitor's
+    //   identity served to the next. Also asserted in CI.
     // - `ALLOW_ALL` methods. The default (`GET`/`HEAD`) makes CloudFront answer
     //   `POST /v1/prices/batch` with a 403 of its own, never reaching the API.
+    //   Task 0186's `POST /auth/logout` needs it too.
     const apiBehaviour = {
       origin: apiOrigin,
       viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,

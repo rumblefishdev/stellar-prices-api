@@ -42,6 +42,8 @@
 //! runtime-config change (SSM read through the Parameters and Secrets extension
 //! the Lambda already loads) and a different task — do not reach for it here.
 
+pub mod auth;
+
 use axum::extract::{Request, State};
 use axum::http::StatusCode;
 use axum::middleware::Next;
@@ -117,8 +119,22 @@ pub fn apply(router: Router, config: &AppConfig) -> Router {
     let routes = Router::new()
         .route(CONFIG_PATH, get(config_handler))
         .with_state(gate.clone());
+
+    // Sign-in (task 0186), merged the same way and for the same reason. Mounted
+    // UNCONDITIONALLY, including when no OAuth credentials were loaded: the
+    // handlers answer `503` in that case rather than the routes silently not
+    // existing, so a deployment that opens the portal without provisioning the
+    // secret says so instead of looking like a portal with no sign-in. While the
+    // portal is closed the gate below makes the distinction moot — every path
+    // here is the same empty `404` as an unrouted one.
+    let sign_in = auth::routes(auth::AuthState::new(
+        config.portal_oauth.clone(),
+        auth::discord::Endpoints::from_env(),
+    ));
+
     router
         .merge(routes)
+        .merge(sign_in)
         .layer(axum::middleware::from_fn_with_state(gate, gate_portal))
 }
 

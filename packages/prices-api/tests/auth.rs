@@ -19,6 +19,10 @@ fn armed_config_with_portal(portal_enabled: bool) -> AppConfig {
         base_url: None,
         api_keys: vec![KEY.to_string()],
         portal_enabled,
+        // Sign-in credentials are loaded asynchronously from Secrets Manager
+        // (task 0186) and are never part of the environment; `None` is the shape
+        // every non-portal test wants.
+        portal_oauth: None,
     }
 }
 

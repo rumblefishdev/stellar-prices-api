@@ -123,10 +123,20 @@ const PORTAL_API_RESOURCE_PATH = '/api-tokens/api/{proxy+}';
  * The verbs mapped under the portal prefix, enumerated because `ANY` cannot
  * carry the throttle above — see `PORTAL_API_RESOURCE_PATH`.
  *
- * Covers the epic as sliced: `GET` for `/config` (task 0183), task 0186's OAuth
- * redirect and callback and task 0188's `/usage`; `POST` for task 0187's key
- * issue, task 0191's rework and task 0186's sign-out; `DELETE` for task 0192's
- * revoke if it prefers that shape to a `POST`.
+ * Covers the epic as sliced: `GET` for `/config` (task 0183), task 0186's
+ * `/auth/login`, `/auth/callback` and `/auth/me`, and task 0188's `/usage`;
+ * `POST` for task 0187's key issue, task 0191's rework and task 0186's
+ * `/auth/logout`; `DELETE` for task 0192's revoke if it prefers that shape to a
+ * `POST`.
+ *
+ * ⚠️ Task 0186's four routes sit at **depth 3** (`auth/login`, not `login`),
+ * which the greedy `{proxy+}` above covers and the intermediate
+ * `{proxy}` + `{proxy}/{sub}` pair that is CURRENTLY DEPLOYED does not — see
+ * task 0205, which ships this file's committed shape. Until that deploy runs,
+ * `/api-tokens/api/auth/login` answers the gateway's own
+ * `403 Missing Authentication Token` rather than reaching the handler. That is a
+ * deployment gap, not a defect in either task: the flag keeps the handler dark
+ * regardless, and `/config` at depth 1 is unaffected.
  *
  * ⚠️ A verb that is NOT listed here gets the gateway's `403 Missing
  * Authentication Token` rather than task 0183's empty `404`, which is a smaller

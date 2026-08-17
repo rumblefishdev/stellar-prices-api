@@ -53,6 +53,10 @@ fn config_with(base_url: Option<&str>, api_keys: Vec<String>) -> AppConfig {
         base_url: base_url.map(str::to_string),
         api_keys,
         portal_enabled: false,
+        // Sign-in credentials are loaded asynchronously from Secrets Manager
+        // (task 0186) and are never part of the environment; `None` is the shape
+        // every non-portal test wants.
+        portal_oauth: None,
     }
 }
 

@@ -28,7 +28,23 @@ async fn main() {
     // defaulting to http://localhost:8123 and database `prices`).
     let ch = prices_clickhouse::client(&prices_clickhouse::Config::from_env());
     let state = AppState::new(ch);
-    let config = AppConfig::from_env();
+    let mut config = AppConfig::from_env();
+
+    // Portal sign-in (task 0186). This build has no Secrets Manager client, so
+    // the only source available here is `PORTAL_OAUTH_SECRET_FILE` — a local
+    // JSON file holding a Discord application whose redirect URI points at
+    // localhost. That is the configuration the acceptance criteria's local
+    // round-trip runs in:
+    //
+    //     PORTAL_ENABLED=true PORTAL_OAUTH_SECRET_FILE=.portal-oauth.json \
+    //       cargo run -p prices-api --features local-server --bin serve
+    //
+    // Only attempted when the portal is on, so the ordinary local run of the
+    // data API needs none of it.
+    config
+        .load_portal_oauth()
+        .await
+        .expect("failed to load portal OAuth credentials");
 
     let port: u16 = std::env::var("PORT")
         .ok()

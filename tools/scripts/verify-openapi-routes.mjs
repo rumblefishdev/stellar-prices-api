@@ -415,6 +415,137 @@ if (!/^\/[^/]+$/.test(String(winnerOrigin.OriginPath ?? ''))) {
   );
 }
 
+// The session cookie has to reach the origin, and the responses that carry it
+// must not be cached at the edge (task 0186). Both are properties of the two
+// managed policies attached to this behaviour, both fail ONLY in a browser —
+// `curl` sends whatever headers you tell it to and reads whatever comes back —
+// and both are the kind of setting a later "tidy-up" reaches for.
+//
+// Asserted by managed-policy ID rather than by name, because the ID is what the
+// template actually contains. AWS documents these as fixed and global:
+//   Managed-AllViewerExceptHostHeader  b689b0a8-53d0-40ab-baf2-68738e2966ac
+//   Managed-CachingDisabled            4135ea2d-6df8-44a3-9df3-4b5a84be39ad
+//
+// The narrow reading of the first is "forward every header except Host", which
+// is how `portal-hosting-stack.ts` originally justified it. The load-bearing
+// half for this task is that it also forwards **all cookies** — which
+// `Managed-CORS-S3Origin`, `Managed-UserAgentRefererHeaders` and every other
+// managed origin-request policy except `Managed-AllViewer` do not. Swapping to
+// one of those would leave `Host` correct, every `curl` passing, and every
+// signed-in visitor reading as signed out.
+const ALL_VIEWER_EXCEPT_HOST_HEADER = 'b689b0a8-53d0-40ab-baf2-68738e2966ac';
+const CACHING_DISABLED = '4135ea2d-6df8-44a3-9df3-4b5a84be39ad';
+
+if (String(winner.OriginRequestPolicyId) !== ALL_VIEWER_EXCEPT_HOST_HEADER) {
+  fail(
+    `error: behaviour \`${winner.PathPattern}\` has OriginRequestPolicyId ` +
+      `${JSON.stringify(winner.OriginRequestPolicyId ?? null)}, not ` +
+      `Managed-AllViewerExceptHostHeader (${ALL_VIEWER_EXCEPT_HOST_HEADER}).`,
+    '  → that policy is what forwards the portal session cookie to the origin ' +
+      "and what withholds the viewer's Host from execute-api. Under any other " +
+      'managed policy the cookie is stripped, `/api-tokens/api/auth/me` reads ' +
+      'as signed-out for a visitor who just signed in, and nothing fails ' +
+      'outside a browser. Set `originRequestPolicy: ' +
+      'ALL_VIEWER_EXCEPT_HOST_HEADER` on the API behaviour in ' +
+      'infra/src/lib/stacks/portal-hosting-stack.ts.',
+  );
+}
+if (String(winner.CachePolicyId) !== CACHING_DISABLED) {
+  fail(
+    `error: behaviour \`${winner.PathPattern}\` has CachePolicyId ` +
+      `${JSON.stringify(winner.CachePolicyId ?? null)}, not ` +
+      `Managed-CachingDisabled (${CACHING_DISABLED}).`,
+    '  → the portal backend carries a session cookie and, from task 0187, an ' +
+      'API key. A cached response on this prefix is one visitor served ' +
+      "another visitor's identity or credential. Set `cachePolicy: " +
+      'CACHING_DISABLED` on the API behaviour in ' +
+      'infra/src/lib/stacks/portal-hosting-stack.ts.',
+  );
+}
+
+// Cookies must reach the origin; they must NOT be written to the access-log
+// bucket. From task 0186 the portal's cookie IS the session, so logging it
+// would put a usable credential in S3 in plaintext for the log bucket's whole
+// 90-day retention, to answer a question the request line already answers.
+if (distConfig.Logging && distConfig.Logging.IncludeCookies !== false) {
+  fail(
+    `error: the distribution's access logging has IncludeCookies=` +
+      `${JSON.stringify(distConfig.Logging.IncludeCookies ?? null)}.`,
+    '  → from task 0186 the portal session is a cookie, so this writes a live ' +
+      'credential into the log bucket in plaintext. Set ' +
+      '`logIncludesCookies: false` in ' +
+      'infra/src/lib/stacks/portal-hosting-stack.ts.',
+  );
+}
+
+// The anonymous routes keep their throttle in BOTH arms of `if (cacheEnabled)`.
+//
+// This is the trap task 0186 states as an acceptance criterion and task 0194
+// audits, and until now nothing checked it. It cannot be checked from the
+// synthesized template: `infra/envs/production.json` has
+// `apiGatewayCacheEnabled: true`, so a synth only ever exercises ONE arm, and
+// moving `...portalSettings` into that arm alone produces a template that is
+// byte-identical to a correct one. The regression would be invisible until
+// somebody turned the stage cache off — which is precisely the configuration
+// where an unthrottled anonymous route costs the most, because every request is
+// then also a billed Lambda invocation.
+//
+// So this reads the SOURCE. A source scan is a blunter instrument than the
+// template checks above and it is the right one here: the property is about
+// where a line sits in a conditional, which is a fact about the source and is
+// erased by synthesis.
+const gatewayStackPath = join(
+  repoRoot,
+  'infra',
+  'src',
+  'lib',
+  'stacks',
+  'api-gateway-stack.ts',
+);
+let gatewaySource;
+try {
+  gatewaySource = readFileSync(gatewayStackPath, 'utf8');
+} catch (err) {
+  fail(`error: cannot read ${gatewayStackPath}\n  ${err.message}`);
+}
+
+const methodSettingsArms = [
+  ...gatewaySource.matchAll(
+    /cfnStage\.methodSettings\s*=\s*\[([\s\S]*?)\n\s*\];/g,
+  ),
+].map((m) => m[1]);
+
+// Two: the `if (cacheEnabled)` arm and its `else`. If this stops being two, the
+// checks below would silently cover fewer arms than exist — so the count is
+// asserted rather than assumed.
+if (methodSettingsArms.length !== 2) {
+  fail(
+    `error: expected exactly 2 \`cfnStage.methodSettings = [...]\` assignments ` +
+      `in ${gatewayStackPath}, found ${methodSettingsArms.length}.`,
+    '  → this check proves the anonymous-route throttles appear in every arm ' +
+      'of the cache conditional. If the assignment was restructured, teach ' +
+      'this check the new shape rather than deleting it — the property it ' +
+      'guards is a written acceptance criterion of task 0186.',
+  );
+}
+
+for (const entry of ['...portalSettings', 'apiDocsSettings']) {
+  const missing = methodSettingsArms.filter(
+    (arm) => !arm.includes(entry),
+  ).length;
+  if (missing > 0) {
+    fail(
+      `error: \`${entry}\` is missing from ${missing} of the ` +
+        `${methodSettingsArms.length} \`cfnStage.methodSettings\` assignments ` +
+        `in ${gatewayStackPath}.`,
+      '  → these are keyless, anonymous routes that sit outside the usage ' +
+        'plan, so a method-level throttle is the only limit they carry. ' +
+        'Declared in one arm only, it vanishes wherever ' +
+        '`apiGatewayCacheEnabled` is false. Spread the entry into BOTH arms.',
+    );
+  }
+}
+
 // --- 3. The skip is not covering an empty set. ---
 // If the gateway ever stops mapping anything under the prefix, the two checks
 // above still pass — they only prove the CDN would route it — while every

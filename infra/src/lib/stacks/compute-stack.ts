@@ -18,7 +18,12 @@ import {
   lambdaLogGroupName,
   pricesLambdaDefaults,
 } from '../lambda-baseline.js';
-import { mtlsSecretName, secretsManagerLayerArn } from '../mtls.js';
+import {
+  mtlsSecretArnFromParts,
+  mtlsSecretName,
+  portalOauthSecretName,
+  secretsManagerLayerArn,
+} from '../mtls.js';
 
 const DLQ_RETENTION_DAYS = 14;
 
@@ -178,6 +183,14 @@ export class ComputeStack extends cdk.Stack {
    * task 0040; the role is already granted read on exactly this secret.
    */
   public readonly apiHandlerMtlsSecretName: string;
+  /**
+   * `PORTAL_OAUTH_SECRET_NAME` the api-handler reads for portal sign-in
+   * (task 0186) — the Discord client id/secret, the registered redirect URI and
+   * the session signing key, as one JSON bundle. Set on the Function env below;
+   * the role is granted read on exactly this secret and nothing else. The
+   * secret's VALUE never appears in this template, in an env var, or in a log.
+   */
+  public readonly portalOauthSecretName: string;
 
   constructor(scope: Construct, id: string, props: ComputeStackProps) {
     super(scope, id, props);
@@ -195,6 +208,10 @@ export class ComputeStack extends cdk.Stack {
     // the operator (see SecretsStack); CDK only names + grants + sets the env.
     this.ledgerProcessorMtlsSecretName = mtlsSecretName(envName, 'ingestion');
     this.apiHandlerMtlsSecretName = mtlsSecretName(envName, 'api');
+    // Same pattern, third secret: the name is computed by the shared helper, the
+    // grant is on that name's wildcard ARN, and the operator owns the value
+    // (task 0186). Only the api-handler reads it — no worker signs a cookie.
+    this.portalOauthSecretName = portalOauthSecretName(envName);
 
     // ---------------------------------------------------------------
     // Ledger Processor: baseline role + log group
@@ -440,6 +457,30 @@ export class ComputeStack extends cdk.Stack {
       removalPolicy: PRICES_LAMBDA_LOG_REMOVAL_POLICY,
     });
 
+    // Read on the portal's Discord OAuth bundle (task 0186). Added here rather
+    // than in `createPricesLambdaRole`'s baseline: every prices Lambda needs its
+    // own mTLS material, but exactly one of them terminates an OAuth flow, and a
+    // client secret readable by the cleanup worker is a client secret with a
+    // wider blast radius than it needs.
+    //
+    // The grant is on the by-name wildcard ARN, so it does not require the
+    // secret to exist at synth time — the operator creates it, and until they
+    // do, the Lambda simply never asks (`PORTAL_ENABLED=false` short-circuits
+    // the read; see `AppConfig::load_portal_oauth`).
+    this.apiHandlerRole.addToPrincipalPolicy(
+      new iam.PolicyStatement({
+        sid: 'ReadPortalOauthSecret',
+        actions: ['secretsmanager:GetSecretValue'],
+        resources: [
+          mtlsSecretArnFromParts(
+            awsRegion,
+            accountId,
+            this.portalOauthSecretName,
+          ),
+        ],
+      }),
+    );
+
     // The single axum api-handler (ADR 0008). Reads as `prices_reader` over
     // mTLS; reuses the same `chDomain` SSM value + secrets extension layer as
     // the ledger processor. No `API_KEYS` env → the in-app key gate stays
@@ -482,6 +523,17 @@ export class ComputeStack extends cdk.Stack {
         // 0189's eligibility gate passes — never as a side effect of finishing
         // some other slice.
         PORTAL_ENABLED: 'false',
+        // The NAME of the portal's Discord OAuth bundle, never its value
+        // (task 0186; ADR 0007's precedent, audited by Tranche 3 AC 6). The
+        // handler reads the value through the Parameters & Secrets extension
+        // layer already attached above — the same mechanism, the same cache, the
+        // same "no secret in an env var" rule as `MTLS_SECRET_NAME`.
+        //
+        // Set unconditionally even though `PORTAL_ENABLED` is false, because the
+        // Rust side only performs the read when the portal is open. Wiring the
+        // name now means opening the portal stays the one-word diff the flag was
+        // designed to be, rather than a two-line change made under time pressure.
+        PORTAL_OAUTH_SECRET_NAME: this.portalOauthSecretName,
         PARAMETERS_SECRETS_EXTENSION_CACHE_ENABLED: 'true',
         // Strip the `/{stage}` prefix (`/production`) that API Gateway REST
         // proxy puts in the path, so lambda_http hands axum `/v1/...` (not

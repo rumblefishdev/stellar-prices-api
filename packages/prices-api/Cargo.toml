@@ -48,6 +48,33 @@ stellar-strkey = { workspace = true }
 base64 = "0.22"
 prices-clickhouse = { path = "../prices-clickhouse" }
 
+# ---------------------------------------------------------------------------
+# Portal sign-in (task 0186) — Discord OAuth2 + the signed cookies around it.
+# ---------------------------------------------------------------------------
+# All four are UNCONDITIONAL, not behind the `lambda` feature, because the whole
+# of the flow except the Secrets Manager read is exercised by `tests/portal_auth.rs`
+# in the default build — including the real token exchange, against an axum mock
+# of Discord bound to loopback. Gating them would make the one part worth testing
+# the one part CI never compiles.
+#
+# `getrandom` rather than `rand`: the `state` nonce, the PKCE verifier and the
+# session are security tokens, so they want OS entropy directly rather than a
+# userspace PRNG that happens to be seeded from it.
+#
+# `reqwest` mirrors `prices-clickhouse`'s (0.12, no default features) with TLS
+# added — that crate only ever talks to `localhost:2773`, this one talks to
+# discord.com. `rustls-tls-webpki-roots` pins the roots into the binary instead
+# of trusting the Lambda image's store, which `provided.al2023` does ship but
+# which nothing in this repo asserts the contents of.
+hmac = "0.12"
+sha2 = { workspace = true }
+getrandom = "0.3"
+form_urlencoded = "1"
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "rustls-tls-webpki-roots",
+] }
+
 lambda_http = { workspace = true, optional = true }
 
 [dev-dependencies]
