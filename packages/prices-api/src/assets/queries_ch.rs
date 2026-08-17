@@ -488,21 +488,10 @@ impl Timeframe {
         }
     }
 
-    /// `now() - <interval>` lower-bound SQL, or `None` for `all`. Static strings
-    /// (never user input) — safe to inline.
-    pub fn interval(self) -> Option<&'static str> {
-        match self {
-            Timeframe::H1 => Some("INTERVAL 1 HOUR"),
-            Timeframe::H24 => Some("INTERVAL 24 HOUR"),
-            Timeframe::D7 => Some("INTERVAL 7 DAY"),
-            Timeframe::D30 => Some("INTERVAL 30 DAY"),
-            Timeframe::Y1 => Some("INTERVAL 1 YEAR"),
-            Timeframe::All => None,
-        }
-    }
-
     /// Window width in seconds, or `None` for `all` (whose start is
-    /// [`STELLAR_GENESIS_EPOCH`], not a width).
+    /// [`STELLAR_GENESIS_EPOCH`], not a width). The single width table: the
+    /// handler derives the SQL-bound epochs from it, so the validated window
+    /// and the executed window cannot disagree.
     pub fn seconds(self) -> Option<u64> {
         match self {
             Timeframe::H1 => Some(3600),
@@ -531,13 +520,11 @@ pub struct OhlcvArgs {
     pub asset_id: u32,
     pub quote_asset_id: u32,
     pub granularity: Granularity,
-    /// `?start` override (epoch seconds); takes precedence over `since_interval`.
+    /// Window lower bound (epoch seconds) — always set by the handler.
     pub start: Option<i64>,
-    /// `?end` override (epoch seconds).
+    /// Window upper bound (epoch seconds) — only when the client supplied one;
+    /// an open top costs nothing (future buckets don't exist).
     pub end: Option<i64>,
-    /// `now() - <interval>` lower bound from the timeframe (ignored if `start`
-    /// is set or for `all`).
-    pub since_interval: Option<&'static str>,
     pub limit: u64,
 }
 
@@ -554,8 +541,6 @@ pub async fn ohlcv(ch: &Client, args: OhlcvArgs) -> Result<Vec<Candle>, clickhou
     let mut conds = vec!["asset_id = ?".to_string(), "quote_asset_id = ?".to_string()];
     if args.start.is_some() {
         conds.push("timestamp >= toDateTime(?)".to_string());
-    } else if let Some(iv) = args.since_interval {
-        conds.push(format!("timestamp >= now() - {iv}"));
     }
     if args.end.is_some() {
         conds.push("timestamp <= toDateTime(?)".to_string());

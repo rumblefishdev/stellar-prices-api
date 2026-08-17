@@ -89,6 +89,19 @@ async fn ohlcv_future_start_without_end_is_400() {
     assert_eq!(json["code"], "invalid_query");
 }
 
+/// Fencepost: the SQL bounds are inclusive, so a span of exactly 5000×1m
+/// holds 5001 bucket starts — must be an explicit 400, not a silent LIMIT
+/// trim of the oldest candle.
+#[tokio::test]
+async fn ohlcv_exact_5000_bucket_span_is_400() {
+    let (status, _, json) = common::get(
+        "/v1/assets/native/ohlcv?start=2026-01-01T00:00:00Z&end=2026-01-04T11:20:00Z&granularity=1m",
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(json["code"], "invalid_query");
+}
+
 /// 6 years at 1m ≈ 3.1M candles — must be an explicit 400 naming the count,
 /// not a silent newest-5000 page.
 #[tokio::test]

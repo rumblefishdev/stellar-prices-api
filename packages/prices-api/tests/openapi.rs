@@ -418,8 +418,16 @@ async fn spec_response_is_cacheable_but_revalidates_within_the_gateway_ttl() {
 }
 
 /// Resolve a possibly-`$ref`/`allOf`-wrapped parameter schema to its target.
+/// Strict prefix (matching `referenced_schemas`), not `rsplit('/')` — a ref
+/// into another components family must fail loudly, not silently look up
+/// `schemas.<name>` and return null.
 fn resolve_schema<'a>(spec: &'a Value, schema: &'a Value) -> &'a Value {
-    let by_ref = |r: &str| &spec["components"]["schemas"][r.rsplit('/').next().unwrap()];
+    let by_ref = |r: &str| {
+        let name = r
+            .strip_prefix("#/components/schemas/")
+            .unwrap_or_else(|| panic!("non-schema $ref in a parameter: {r}"));
+        &spec["components"]["schemas"][name]
+    };
     if let Some(r) = schema["$ref"].as_str() {
         return by_ref(r);
     }
@@ -481,8 +489,14 @@ async fn batch_and_search_publish_their_bounds() {
         assets.is_object(),
         "BatchRequest.assets missing from schemas"
     );
+    // Against the const, not a literal — so bumping MAX_BATCH without touching
+    // the #[schema] attribute fails here instead of shipping a lying document.
     assert_eq!(assets["minItems"], 1, "assets minItems");
-    assert_eq!(assets["maxItems"], 100, "assets maxItems");
+    assert_eq!(
+        assets["maxItems"],
+        prices_api::batch::dto::MAX_BATCH as u64,
+        "assets maxItems must track MAX_BATCH"
+    );
 
     let params = spec["paths"]["/v1/assets"]["get"]["parameters"]
         .as_array()

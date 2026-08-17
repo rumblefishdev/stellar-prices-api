@@ -14,8 +14,10 @@
 use stellar_strkey::Contract;
 use stellar_strkey::ed25519::PublicKey;
 
-/// Maximum length of a classic asset code (SEP-11 `alphanum12`).
-const MAX_CODE_LEN: usize = 12;
+/// Maximum length of a classic asset code (SEP-11 `alphanum12`). Public: the
+/// `?search` prefix cap in `assets::handlers` derives from it, so the rule has
+/// one home.
+pub const MAX_CODE_LEN: usize = 12;
 
 /// A parsed, shape-validated asset identifier.
 #[derive(Debug, Clone, PartialEq, Eq)]

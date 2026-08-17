@@ -136,10 +136,13 @@ async fn assets_cursor_non_numeric_v_on_numeric_sort_is_400() {
     assert_eq!(json["code"], "invalid_query");
 }
 
-/// A numeric cursor replayed onto `sort=code` fails the asset-code shape.
+/// On `sort=code` the payload binds into a plain string comparison (no 500
+/// risk), so only a length cap applies — the DB legitimately holds empty and
+/// non-alphanumeric codes, and the API must accept back any cursor it issues.
 #[tokio::test]
-async fn assets_cursor_numeric_v_on_code_sort_is_400() {
-    let tok = cursor_token(r#"{"v":"1523400.50","id":1}"#);
+async fn assets_cursor_over_long_v_on_code_sort_is_400() {
+    let long_v = "x".repeat(65);
+    let tok = cursor_token(&format!(r#"{{"v":"{long_v}","id":1}}"#));
     let (status, _, json) = common::get(&format!("/v1/assets?sort=code&cursor={tok}")).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(json["code"], "invalid_query");

@@ -124,9 +124,9 @@ pub async fn get_asset(
     }
 }
 
-/// Cap on the `?search` prefix: SEP-11 `alphanum12` — an asset-code prefix
-/// longer than 12 chars can never match anything.
-const MAX_SEARCH_LEN: usize = 12;
+/// Cap on the `?search` prefix: an asset-code prefix longer than a code can
+/// never match anything.
+const MAX_SEARCH_LEN: usize = crate::identity::MAX_CODE_LEN;
 
 /// Query parameters for `GET /assets`. Enum params deserialize straight into
 /// their typed forms — an unknown token fails serde and surfaces as a 400
@@ -151,7 +151,8 @@ pub struct ListParams {
     params(
         ("type" = Option<TypeFilter>, Query, description = "classic | soroban | all (default all)"),
         ("search" = Option<String>, Query,
-         description = "asset code prefix match (1-12 ASCII alphanumeric)",
+         description = "asset code prefix match (1-12 ASCII alphanumeric; \
+                        an empty value is treated as absent)",
          min_length = 1, max_length = 12),
         ("sort" = Option<SortCol>, Query,
          description = "price | volume_24h | change_24h | code (default volume_24h)"),
@@ -285,9 +286,15 @@ pub struct OhlcvParams {
          description = "1h | 24h | 7d | 30d | 1y | all (default 24h)"),
         ("granularity" = Option<Granularity>, Query,
          description = "1m | 15m | 1h | 4h | 1d | 1w | 1M (auto from timeframe if omitted)"),
-        ("start" = Option<String>, Query, description = "ISO-8601 range start (overrides timeframe)"),
-        ("end" = Option<String>, Query, description = "ISO-8601 range end"),
-        ("base_currency" = Option<BaseCurrency>, Query, description = "USD (default) | XLM"),
+        ("start" = Option<String>, Query,
+         description = "range start: ISO-8601 or unix epoch (seconds; ms if 13+ digits); \
+                        overrides timeframe"),
+        ("end" = Option<String>, Query,
+         description = "range end, same forms; with only `end`, the timeframe window \
+                        ends there"),
+        ("base_currency" = Option<BaseCurrency>, Query,
+         description = "USD (default) | XLM; all-lowercase usd/xlm accepted as \
+                        legacy aliases"),
     ),
     responses(
         (status = 200, description = "Candlestick series", body = OhlcvResponse),
@@ -343,21 +350,28 @@ pub async fn get_ohlcv(
         },
         None => None,
     };
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or_default();
+    let now = chrono::Utc::now().timestamp();
     let eff_end = end.unwrap_or(now);
     // The timeframe window anchors to eff_end (not now), so `?end=…&timeframe=7d`
-    // means "the 7d window ending there". `all` starts at Stellar genesis.
-    let eff_start = start.unwrap_or_else(|| match timeframe.seconds() {
-        Some(tf) => eff_end - tf as i64,
-        None => queries_ch::STELLAR_GENESIS_EPOCH,
+    // means "the 7d window ending there". `all` starts at Stellar genesis. The
+    // derived branch is clamped to epoch 0: it is the one bound `parse_time`'s
+    // range check never saw, and a negative value would reach `toDateTime(?)`
+    // (ClickHouse DateTime is unsigned — throw or wraparound, both wrong).
+    let eff_start = start.unwrap_or_else(|| {
+        match timeframe.seconds() {
+            Some(tf) => eff_end - tf as i64,
+            None => queries_ch::STELLAR_GENESIS_EPOCH,
+        }
+        .max(0)
     });
     if eff_start >= eff_end {
         return errors::bad_request(errors::INVALID_QUERY, "start must be before end");
     }
-    let points = ((eff_end - eff_start) as u64).div_ceil(granularity.seconds());
+    // `+ 1`: the SQL bounds are inclusive on both ends, so an aligned window
+    // spanning exactly N buckets contains N + 1 bucket-start timestamps —
+    // counting span/granularity alone would let a 5001-bucket request through
+    // to be silently truncated by the LIMIT.
+    let points = ((eff_end - eff_start) as u64).div_ceil(granularity.seconds()) + 1;
     if points > OHLCV_MAX_POINTS {
         return errors::bad_request(
             errors::INVALID_QUERY,
@@ -403,21 +417,19 @@ pub async fn get_ohlcv(
         Err(e) => return errors::db_error(&e, "quote lookup"),
     };
 
-    // When either bound is user-supplied, bind explicit epochs — end-only
-    // anchors the lower bound at eff_start, matching the window rule above.
-    // With neither, ClickHouse's own now() - INTERVAL stays authoritative.
-    let (sql_start, sql_end, since_interval) = match (start, end) {
-        (None, None) => (None, None, timeframe.interval()),
-        (s, Some(e)) => (Some(s.unwrap_or(eff_start)), Some(e), None),
-        (Some(s), None) => (Some(s), None, None),
-    };
+    // The validated window is exactly what binds into SQL — the same eff_start
+    // the point-count check measured, so there is one interpretation of the
+    // window, not a parallel now() - INTERVAL path that could drift from it
+    // (INTERVAL 1 YEAR is calendar-aware; seconds() isn't). The upper bound
+    // binds only when the client supplied one: a derived `end = now` from this
+    // process's clock could, under skew, cut a bucket ClickHouse already has —
+    // an open top costs nothing (future buckets don't exist).
     let args = OhlcvArgs {
         asset_id,
         quote_asset_id,
         granularity,
-        start: sql_start,
-        end: sql_end,
-        since_interval,
+        start: Some(eff_start),
+        end,
         limit: OHLCV_MAX_POINTS,
     };
     let data = match queries_ch::ohlcv(state.ch(), args).await {
@@ -488,38 +500,58 @@ async fn sdex_backfill_running(ch: &clickhouse::Client) -> bool {
 const MAX_EPOCH: i64 = 4_102_444_800;
 
 /// Parse a `?start` / `?end` value to epoch seconds (UTC). Accepts a bare
-/// epoch (seconds, or milliseconds when ≥ 13 digits), `YYYY-MM-DD` (midnight
+/// epoch (seconds; milliseconds when 13+ digits), `YYYY-MM-DD` (midnight
 /// UTC), and `YYYY-MM-DD[T ]HH:MM[:SS[.fff]]` with an optional `Z` / `±HH:MM`
-/// offset (naive times are UTC). Unlike its shape-only predecessor, this
-/// rejects semantically impossible dates (`2026-02-30`, `T99:99:99`) — and the
-/// parsed epoch (not the raw string) is what reaches SQL, so there is exactly
-/// one interpretation of the window.
+/// / `±HHMM` offset (naive times are UTC). Unlike its shape-only predecessor,
+/// this rejects semantically impossible dates (`2026-02-30`, `T99:99:99`) —
+/// and the parsed epoch (not the raw string) is what reaches SQL, so there is
+/// exactly one interpretation of the window.
 fn parse_time(s: &str) -> Option<i64> {
+    use std::borrow::Cow;
+
     let s = s.trim();
     if s.is_empty() {
         return None;
     }
     let epoch = if s.bytes().all(|b| b.is_ascii_digit()) {
+        // Digit count, not magnitude, decides seconds vs milliseconds — the
+        // documented rule. (10-digit millis, i.e. instants in 1970, are
+        // indistinguishable from valid seconds and read as seconds.)
+        let millis = s.len() >= 13;
         let n: i64 = s.parse().ok()?;
-        // 13+ digits is an epoch in milliseconds.
-        if n >= 100_000_000_000 { n / 1000 } else { n }
+        if millis { n / 1000 } else { n }
     } else if let Ok(d) = chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d") {
         d.and_hms_opt(0, 0, 0)?.and_utc().timestamp()
     } else {
-        // Datetime forms: normalize the documented space separator to `T`.
-        let norm = if s.len() > 10 && s.as_bytes()[10] == b' ' {
-            format!("{}T{}", &s[..10], &s[11..])
+        // Datetime forms: normalize the documented space separator to `T`
+        // (a space anywhere else fails every parser below anyway).
+        let norm: Cow<str> = if s.contains(' ') {
+            Cow::Owned(s.replacen(' ', "T", 1))
         } else {
-            s.to_string()
+            Cow::Borrowed(s)
         };
-        if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&norm) {
-            dt.timestamp()
-        } else {
-            ["%Y-%m-%dT%H:%M:%S%.f", "%Y-%m-%dT%H:%M"]
-                .iter()
-                .find_map(|fmt| chrono::NaiveDateTime::parse_from_str(&norm, fmt).ok())?
-                .and_utc()
-                .timestamp()
+        // Offset-carrying forms: RFC 3339 (`T`, seconds, `Z`/`±HH:MM`), then
+        // the shapes it rejects — minute precision with an offset, and `±HHMM`
+        // without the colon (`%#z` takes both colon styles).
+        let with_offset = chrono::DateTime::parse_from_rfc3339(&norm)
+            .ok()
+            .or_else(|| {
+                ["%Y-%m-%dT%H:%M:%S%.f%#z", "%Y-%m-%dT%H:%M%#z"]
+                    .iter()
+                    .find_map(|fmt| chrono::DateTime::parse_from_str(&norm, fmt).ok())
+            });
+        match with_offset {
+            Some(dt) => dt.timestamp(),
+            None => {
+                // Naive forms (UTC), seconds optional; a trailing `Z` marks
+                // the same UTC instant, so accept it on minute precision too.
+                let naive = norm.strip_suffix('Z').unwrap_or(&norm);
+                ["%Y-%m-%dT%H:%M:%S%.f", "%Y-%m-%dT%H:%M"]
+                    .iter()
+                    .find_map(|fmt| chrono::NaiveDateTime::parse_from_str(naive, fmt).ok())?
+                    .and_utc()
+                    .timestamp()
+            }
         }
     };
     (0..=MAX_EPOCH).contains(&epoch).then_some(epoch)
@@ -538,6 +570,11 @@ mod tests {
             "2026-06-15T11:30",
             "2026-06-15T11:30:00.123+02:00",
             "1718450000",
+            // Offset shapes RFC 3339 alone rejects — accepted by the old
+            // parseDateTimeBestEffort pipeline, so still part of the contract.
+            "2026-06-15T11:30Z",
+            "2026-06-15T11:30+02:00",
+            "2026-06-15T11:30:00+0200",
         ] {
             assert!(parse_time(s).is_some(), "{s} should be valid");
         }
@@ -570,6 +607,7 @@ mod tests {
             "2026-02-30",          // impossible calendar date
             "2026-06-15T99:99:99", // impossible time
             "99999999999999999",   // over MAX_EPOCH even as millis
+            "999999999999",        // 12 digits = seconds by the rule → > 2100
         ] {
             assert!(parse_time(s).is_none(), "{s} should be invalid");
         }

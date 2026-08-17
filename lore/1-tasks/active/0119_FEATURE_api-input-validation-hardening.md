@@ -157,12 +157,20 @@ Every rule rejects **before** any ClickHouse round-trip; every rejection is a
 
 ## Notes
 
-- **Consumer-visible change:** `timeframe=all` with a fine granularity
-  (`1m`–`4h`) is now a 400 (genesis → now exceeds 5000 buckets); it used to
-  silently return the newest 5000. `all` remains legal with `1d`/`1w`/`1M` or
-  with explicit `start`/`end`. The pre-existing `ohlcv_it` merge test leaned on
-  the old semantics and was narrowed with explicit bounds — intentional, not a
-  regression.
+- **Consumer-visible change:** ANY window × granularity over 5000 buckets is
+  now a 400 where it used to silently return the newest 5000. That is not just
+  `timeframe=all` with `1m`–`4h`: it also flips `7d×1m` (10,080), `30d×1m`
+  (43,200), `1y×1m`, `1y×15m`, and `1y×1h` (8,760). `all` remains legal with
+  `1d`/`1w`/`1M` or with explicit `start`/`end`. The pre-existing `ohlcv_it`
+  merge test leaned on the old semantics and was narrowed with explicit
+  bounds — intentional, not a regression.
+- **Two more recorded semantic shifts** (review findings, accepted): (i) naive
+  `start`/`end` values are now pinned to **UTC** in-handler instead of being
+  interpreted in the ClickHouse server timezone by `parseDateTimeBestEffort` —
+  deterministic, and a no-op while CH runs UTC; (ii) a far-future `?end` used
+  to behave like "no upper bound" (window `[now-tf, end]`) and now anchors the
+  window to `end`, so it returns an empty 200 — consistent with the anchoring
+  policy above, recorded here because it flips an observable behavior.
 - **Time bomb, on purpose:** genesis → now at `1d` crosses 5000 buckets around
   **2029-06**, at which point bare `timeframe=all` (default granularity `1d`)
   starts 400ing. Whoever hits it decides: raise `OHLCV_MAX_POINTS`, or default

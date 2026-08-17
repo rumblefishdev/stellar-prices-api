@@ -24,12 +24,19 @@ pub struct Cursor {
     pub id: u32,
 }
 
+/// Longest `v` payload accepted for a string-compared (non-numeric) sort.
+/// Real `asset_code` values are ≤12 bytes, but the DB legitimately holds
+/// empty codes (Soroban rows) and lossy-decoded on-chain garbage, so the only
+/// safe rule here is a length cap — any charset restriction would 400 a
+/// cursor the API itself just issued.
+const MAX_STRING_PAYLOAD_LEN: usize = 64;
+
 impl Cursor {
     /// Whether `v` is a plausible payload for the active sort. Numeric sorts
     /// bind `v` into `toFloat64(?)` — a non-numeric value would make ClickHouse
-    /// throw, turning a corrupt token into a 500. `code` sorts compare against
-    /// `asset_code`, so `v` must look like one (1–12 ASCII alphanumerics; a
-    /// numeric-cursor replay fails this via `.`/sign chars).
+    /// throw, turning a corrupt token into a 500, so `v` must parse to a finite
+    /// f64. String sorts bind `v` into a plain string comparison (no 500 risk),
+    /// so only a length cap applies.
     ///
     /// Known limitation (recorded in task 0119): the token does not carry which
     /// sort/order produced it, so switching between two same-typed sorts
@@ -38,9 +45,7 @@ impl Cursor {
         if numeric_sort {
             self.v.parse::<f64>().is_ok_and(f64::is_finite)
         } else {
-            !self.v.is_empty()
-                && self.v.len() <= 12
-                && self.v.bytes().all(|b| b.is_ascii_alphanumeric())
+            self.v.len() <= MAX_STRING_PAYLOAD_LEN
         }
     }
 }
@@ -103,12 +108,14 @@ mod tests {
     }
 
     #[test]
-    fn valid_for_checks_code_payloads() {
-        let ok = decode(&encode("USDC", 42)).unwrap();
-        assert!(ok.valid_for(false));
-        let numeric_replayed = decode(&encode("1523400.50", 42)).unwrap();
-        assert!(!numeric_replayed.valid_for(false)); // '.' fails the charset
-        let empty = decode(&encode("", 42)).unwrap();
-        assert!(!empty.valid_for(false));
+    fn valid_for_accepts_any_short_string_payload_on_string_sorts() {
+        // The DB holds empty codes (Soroban rows) and lossy-decoded garbage —
+        // the API must accept back any cursor it can itself issue.
+        for v in ["USDC", "", "USD ", "\u{fffd}\u{fffd}", "1523400.50"] {
+            let c = decode(&encode(v, 42)).unwrap();
+            assert!(c.valid_for(false), "{v:?} should be a valid code payload");
+        }
+        let long = decode(&encode(&"x".repeat(65), 42)).unwrap();
+        assert!(!long.valid_for(false));
     }
 }
