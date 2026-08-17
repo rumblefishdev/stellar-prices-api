@@ -13,7 +13,16 @@
     ],
     "jsx": "react-jsx",
     "module": "esnext",
-    "moduleResolution": "bundler"
+    "moduleResolution": "bundler",
+    // `base-path.spec.ts` imports `../vite.config.mts` to assert the build's
+    // real `base` value. Bundler resolution will not find that file from an
+    // extensionless path, and this target only ever emits declarations, which is
+    // the condition TypeScript attaches to this option.
+    "allowImportingTsExtensions": true,
+    // Vitest globals need `dom` for the rendered tree; without it `lib` falls
+    // back to the target's default and `Element.textContent` and friends are
+    // missing in spec files only.
+    "lib": ["dom", "esnext"]
   },
   "include": [
     "vite.config.ts",

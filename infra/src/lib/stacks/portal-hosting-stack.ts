@@ -389,7 +389,28 @@ function handler(event) {
       destinationKeyPrefix: 'api-tokens',
       exclude: [HASHED_ASSETS],
       distribution: this.distribution,
-      distributionPaths: ['/api-tokens/*'],
+      // Enumerated, NOT `/api-tokens/*`. An invalidation path list is matched
+      // against the cache key and knows nothing about this deployment's
+      // `exclude`, so a wildcard here would purge the year-cached hashed assets
+      // on every deploy — the exact cost the comment above says this design
+      // avoids, and it would have been avoided in the upload only.
+      //
+      // `/api-tokens/` needs its own entry even though `DirectoryIndexFn`
+      // rewrites it: that function runs on VIEWER_REQUEST, before the cache
+      // lookup, so both URIs can hold entries and both must be cleared.
+      //
+      // Only unhashed objects belong on this list, because only they change
+      // bytes while keeping a URL. If a future build emits another one into
+      // `web/portal/public/`, add it here — the miss is self-correcting rather
+      // than silent (everything this deployment uploads carries
+      // `max-age=0, must-revalidate`, so the edge revalidates anyway; the
+      // invalidation is what makes the switch immediate instead of merely
+      // prompt).
+      distributionPaths: [
+        '/api-tokens/',
+        '/api-tokens/index.html',
+        '/api-tokens/favicon.ico',
+      ],
       prune: true,
       cacheControl: [
         s3deploy.CacheControl.setPublic(),

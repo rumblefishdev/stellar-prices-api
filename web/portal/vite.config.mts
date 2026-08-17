@@ -2,16 +2,18 @@ import react from '@vitejs/plugin-react';
 import { defineConfig, loadEnv } from 'vite';
 
 /**
- * The prefix this app is served from, and the single reason it is here rather
- * than defaulting to `/`.
+ * `base` is what makes Vite emit asset URLs under `/api-tokens/`; without it
+ * every `<script src>` and `<link href>` points at the domain root and the app
+ * 403s on its own JavaScript the moment it is not served from `/`. The router's
+ * `basename` is the other half — this one covers assets, that one covers routes,
+ * and both are needed.
  *
- * Task 0184's CloudFront table routes `<app>/*` to that app's bundle and
- * `<app>/api/*` to its backend, so this bundle only ever answers under
- * `/api-tokens/`. `base` is what makes Vite emit asset URLs relative to that
- * prefix; without it every `<script src>` and `<link href>` points at the domain
- * root, and the app 403s on its own JavaScript the moment it is not served from
- * `/`. The router's `basename` in `src/main.tsx` is the other half — this one
- * covers assets, that one covers routes, and both are needed.
+ * Declared here rather than imported from `src/base-path.ts`, deliberately: a
+ * config that imports application source trips Vite's `configLoader: 'native'`
+ * warning on every build, and silencing that would hide a real future breakage.
+ * So the value is duplicated and the DUPLICATION IS TESTED instead —
+ * `src/base-path.spec.ts` loads this config and asserts `base` still equals
+ * `BASE_PATH`. Change one and that test tells you about the other.
  *
  * It is a BUILD setting: CloudFront cannot fix it after the fact, which is why
  * task 0185 puts it in the first commit rather than discovering it on the first
@@ -21,7 +23,7 @@ import { defineConfig, loadEnv } from 'vite';
  * prefix to concatenate rather than a directory, which produces
  * `/api-tokensassets/…`.
  */
-const BASE = '/api-tokens/';
+const BASE_PATH = '/api-tokens/';
 
 /**
  * Dev-server proxy targets, mirroring `soroban-block-explorer`'s pattern.
@@ -89,7 +91,7 @@ export default defineConfig(({ mode }) => {
 
   return {
     root: import.meta.dirname,
-    base: BASE,
+    base: BASE_PATH,
     cacheDir: '../../node_modules/.vite/web/portal',
     server: {
       port: 4200,

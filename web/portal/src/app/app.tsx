@@ -93,11 +93,24 @@ function PortalHome() {
           other path under the prefix — so a `/health` probe would render a
           failure whether or not anyone implemented it. `/config` answers 200 in
           BOTH flag states, which is what makes it the honest probe. */}
-      <p>
-        Reached <code>/api-tokens/api/config</code>{' '}
-        {probe.state === 'ok' ? 'successfully' : 'unsuccessfully'} —
-        same-origin, no API key, no CORS.
-      </p>
+      {/* Three branches, not a two-way ternary on `=== 'ok'`. While the probe
+          is in flight the answer is not yet known, and a ternary claimed
+          "unsuccessfully" on first paint — so the page said it had failed to
+          reach the backend at the same time as saying it was still asking. This
+          paragraph is the acceptance criterion's evidence of a live call; it has
+          to be silent about the outcome until there is one. */}
+      {probe.state === 'loading' ? (
+        <p>
+          Calling <code>/api-tokens/api/config</code> — same-origin, no API key,
+          no CORS.
+        </p>
+      ) : (
+        <p>
+          Reached <code>/api-tokens/api/config</code>{' '}
+          {probe.state === 'ok' ? 'successfully' : 'unsuccessfully'} —
+          same-origin, no API key, no CORS.
+        </p>
+      )}
     </main>
   );
 }

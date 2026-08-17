@@ -19,8 +19,10 @@ const PORTAL_API = '/api-tokens/api';
  * OpenAPI document (`tools/scripts/verify-openapi-routes.mjs` fails CI if one
  * appears in it), because the document describes the public data API to
  * integrators and the portal describes itself to its own bundle. There is
- * therefore nothing to generate this from. See `src/api/generated.ts` for the
- * types that ARE generated.
+ * therefore nothing to generate this from, and no generated file in this
+ * directory to defer to — `npm run portal:api-types` exists and emits
+ * `src/api/generated.ts` from the published document, but that document covers
+ * only the `/v1` data API, so nothing here imports it and it is not checked in.
  *
  * Keep it in step with `PortalConfig` in `portal/mod.rs`.
  */
@@ -55,7 +57,21 @@ async function getJson<T>(url: string): Promise<T> {
       response.status,
     );
   }
-  return (await response.json()) as T;
+  try {
+    return (await response.json()) as T;
+  } catch {
+    // A `200` that is not JSON is the signature of the most likely routing
+    // regression there is here: if the `/api-tokens/api/*` behaviour ever stops
+    // winning over `/api-tokens/*` (see `portal-hosting-stack.ts`, which fails
+    // CI on that ordering), CloudFront answers this call with the SPA bundle as
+    // `200 text/html`. Left unwrapped, that surfaces as a bare `SyntaxError`
+    // about an unexpected `<` — no status, no URL, and no hint that the cause is
+    // a routing table. Carry the status so the page can say which URL lied.
+    throw new PortalApiError(
+      `${url} answered ${response.status}, not JSON`,
+      response.status,
+    );
+  }
 }
 
 /**

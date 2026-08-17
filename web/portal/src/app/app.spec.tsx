@@ -2,6 +2,7 @@ import { render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { ROUTER_BASENAME } from '../base-path';
 import App from './app';
 
 /**
@@ -82,5 +83,63 @@ describe('portal home', () => {
       await screen.findByText(/could not reach the portal backend/i),
     ).toBeTruthy();
     expect(screen.queryByText(/Checking whether/i)).toBeNull();
+  });
+
+  // A `200` carrying HTML is what CloudFront returns if the `/api-tokens/api/*`
+  // behaviour ever stops winning over `/api-tokens/*` — the regression
+  // `portal-hosting-stack.ts` fails CI to prevent. Unwrapped, `response.json()`
+  // throws a bare SyntaxError about an unexpected `<`, which names neither the
+  // URL nor the status and reads like a bug in this app.
+  it('reports a 200 that is not JSON as a backend failure, with the status', async () => {
+    stubFetch({
+      json: async () => {
+        throw new SyntaxError("Unexpected token '<'");
+      },
+    });
+    renderApp();
+
+    expect(
+      await screen.findByText(/could not reach the portal backend/i),
+    ).toBeTruthy();
+    // The reason must name the URL and carry the status, which a bare
+    // SyntaxError does neither of.
+    expect(
+      await screen.findByText(
+        /\/api-tokens\/api\/config answered 200, not JSON/i,
+      ),
+    ).toBeTruthy();
+  });
+
+  it('says nothing about the outcome while the probe is still in flight', async () => {
+    stubFetch({});
+    renderApp();
+
+    // The evidence paragraph must not claim failure before there is an answer.
+    expect(
+      screen.getByText(/Checking whether the portal is open/i),
+    ).toBeTruthy();
+    expect(screen.queryByText(/unsuccessfully/i)).toBeNull();
+
+    // …and it must still report the outcome once one arrives.
+    expect(await screen.findByText(/successfully/i)).toBeTruthy();
+  });
+
+  // `renderApp` above mounts at `/` with no basename, so it cannot notice
+  // `ROUTER_BASENAME` being dropped from `main.tsx` — and that would render an
+  // empty page on the one URL this app is served from. Mount it the way
+  // production does instead.
+  it('renders its route when mounted under the production basename', async () => {
+    stubFetch({});
+    render(
+      <MemoryRouter
+        basename={ROUTER_BASENAME}
+        initialEntries={[`${ROUTER_BASENAME}/`]}
+      >
+        <App />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText(/not yet available/i)).toBeTruthy();
+    expect(screen.getByRole('heading', { level: 1 })).toBeTruthy();
   });
 });
