@@ -19,6 +19,7 @@ pub fn app_without_ch() -> Router {
         ch_enabled: false,
         base_url: None,
         api_keys: vec![],
+        portal_enabled: false,
     };
     app(&config, AppState::without_ch())
 }
