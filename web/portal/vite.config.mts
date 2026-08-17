@@ -101,6 +101,14 @@ export default defineConfig(({ mode }) => {
     preview: {
       port: 4200,
       host: 'localhost',
+      // The SAME proxy as `server`, not an oversight corrected: `vite preview`
+      // is the only local way to run the actual built bundle — base-prefixed
+      // asset URLs, minified chunks, no dev transforms — and it is therefore the
+      // one local check that resembles what CloudFront serves. Without a proxy
+      // here it always rendered the "could not reach the portal backend" branch,
+      // so the closest thing to a production rehearsal could not exercise the
+      // same-origin call that is this slice's whole point.
+      proxy,
     },
     plugins: [react()],
     build: {
