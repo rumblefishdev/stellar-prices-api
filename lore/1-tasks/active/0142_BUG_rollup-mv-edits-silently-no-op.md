@@ -267,6 +267,76 @@ other five are still compared),
 `an_undeclared_writer_into_a_rollup_target_is_reported` (asserts the `_bak`
 writer is *not* flagged). Totals now 27 unit + 3 binary unit, 26 crate ITs.
 
+### Second review of PR #216 — six findings, all fixed
+
+Two of the first round's four fixes turned out to be **half-fixes**, which is the
+pattern worth carrying: both were correct about the failure mode and wrong about
+how far down it reached.
+
+**1. ⚠️ The abort-the-whole-report defect was still live one layer down.**
+Round-one finding 1 degraded the live side to `Unparseable` only when
+*`parse_fingerprint`* returned `None`. But `formatQuerySingleLine` **raises**
+`SYNTAX_ERROR` (Code 62, confirmed on the 26.3.10.60 pin) on input it cannot
+parse, and that `Err` still propagated out of the loop — so the original defect
+survived inside its own fix. Reachable two ways: an MV re-created without
+`REFRESH`, and an empty `create_table_query`, which `system.tables` returns for a
+user lacking `SHOW COLUMNS` on the object. On `mv_ohlcv_1m_to_15m` — the first
+statement in the file — that is again one opaque error and **no report on the
+other five**. Now `ifNull(formatQuerySingleLineOrNull(?), '')`: a parse failure
+becomes an empty rendering and therefore `UnparsableDdl`, which the declared side
+still raises on and the live side degrades on, while a genuine transport error
+still propagates as itself. Folding the NULL to `''` keeps the row type `String`
+rather than pulling in `Nullable` deserialisation.
+
+**2. The undeclared-writer sweep named its finds without fingerprinting them.**
+Round-one finding 2 added the sweep but mapped `(name, _)`, discarding the
+`create_table_query` it had already fetched — so `live` stayed `None` and
+`is_append` was never checked on exactly the objects most likely to be wrong.
+0090/0095/0136 all re-created these by hand, and a hand-created MV over a `TO`
+table is precisely where the missing `APPEND` came from. A leftover replace-mode
+MV over `price_ohlcv_1d` was reported as a mild `EXTRA` line while it wiped the
+coarse table on every refresh. It now fingerprints what it finds; an unreadable
+one degrades to no fingerprint rather than dropping the row.
+
+**3. ⚠️ The runbook's drift command had no host, and there is no path from a
+local machine to prod.** Steps 1 and 5 gave a bare `cargo run`, and
+`Config::from_env()` defaults to `http://localhost:8123` — so an operator
+following the runbook verbatim checks their **local dev ClickHouse and reads the
+result as a statement about ch-prod-01**. Worse, prod's HTTP endpoint is
+mTLS-only behind Caddy while `client()` builds a plaintext client, so the
+documented command could not reach prod at all. Given this task's one remaining
+AC is "run the check against ch-prod-01", that was the gap most likely to be hit
+first. Now a "Where these commands run" section: on the Hetzner host against the
+loopback port, password via env not `argv`, and an explicit instruction to read
+the tool's startup `url` line **before** reading its result. Same pattern as
+`events-sourced-amm-reprice.md`.
+
+**4. `system.tables` is grant-filtered, so "no grant" reads as `MISSING`.** The
+module recommends running as an unprivileged reader; such an account without
+rights on the MV objects reports all six as missing — "this tier is not rolling
+up" — against a healthy cluster, which would send an operator to DROP+CREATE for
+no reason. Documented, and the binary now flags the all-missing shape explicitly:
+every-single-one is the discriminator, because a real outage takes tiers out from
+the bottom of the chain rather than all six at once.
+
+**5. The all-clear over-claimed.** It said "nothing undeclared writes into their
+targets" while the sweep filters `system.tables` by `database` — an MV in another
+database writing into `prices.price_ohlcv_*` is invisible to it. Reworded to
+"nothing else in `<database>`", i.e. exactly what the query supports. Same class
+of over-claim the sweep was added to remove.
+
+**6. This file still asserted "coarse-to-fine order"** at the AC, contradicting
+its own correction above and the runbook. Fixed — and it is the exact trap the
+correction existed to close.
+
+New ITs, both run on the 26.3.10.60 pin:
+`an_undeclared_writer_in_replace_mode_is_reported_as_not_append` (verified
+non-vacuous by restoring `live: None` — it failed alone, the other eight passed)
+and `the_or_null_render_returns_empty_instead_of_raising`, which pins the server
+behaviour the degradation now rests on, with a `SELECT 1` control so it cannot
+pass for a function that returns NULL unconditionally. Totals now 27 unit + 3
+binary unit, 28 crate ITs.
+
 ## What is NOT done
 
 **No MV body has been changed, and nothing has been run against ch-prod-01.**
@@ -290,8 +360,8 @@ acting on.
 - [x] A documented, tested procedure exists for changing a rollup MV body on a
       provisioned target, preserving the [[0095]] APPEND invariants —
       `docs/runbooks/0142-rollup-mv-reapply.md`, four invariants as a pre-flight
-      checklist, coarse-to-fine order, verification on the data as well as the
-      DDL.
+      checklist, **fine-to-coarse** order, verification on the data as well as
+      the DDL.
 - [x] The procedure states its freshness-gap exposure and pairs with [[0137]].
       **Measured 2026-08-14 rather than reasoned:** a re-created refreshable MV
       runs its initial refresh **immediately at `CREATE`**, not at the next

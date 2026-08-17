@@ -289,16 +289,38 @@ async fn undeclared_writers(
         .fetch_all::<(String, String)>()
         .await?;
 
-    Ok(live
-        .into_iter()
-        .filter(|(name, _)| !declared_names.contains(name))
-        .filter(|(_, ddl)| targets.iter().any(|t| writes_into(ddl, t)))
-        .map(|(name, _)| MvReport {
+    let mut reports = Vec::new();
+    for (name, ddl) in live {
+        if declared_names.contains(&name) || !targets.iter().any(|t| writes_into(&ddl, t)) {
+            continue;
+        }
+
+        // Fingerprinted, not merely named. The DDL is already in hand, and an
+        // undeclared writer is the object MOST likely to be in replace mode:
+        // tasks 0090/0095/0136 all re-created these by hand, and a hand-created
+        // MV over a `TO` table is exactly where the missing `APPEND` of task
+        // 0095 came from. Reporting it as "EXTRA" alone would name the one
+        // object that might be wiping the coarse table on every refresh without
+        // saying so, while `MvReport::live` — the field whose whole purpose is
+        // to carry `is_append` regardless of drift — sat empty.
+        //
+        // An unreadable definition degrades to no fingerprint rather than
+        // dropping the row: that this object writes into a declared target is
+        // already worth reporting, and is what the sweep is for.
+        let fingerprint = match fingerprint_via_server(client, &ddl).await {
+            Ok(f) => Some(f),
+            Err(SchemaError::UnparsableDdl { .. }) => None,
+            Err(e) => return Err(e),
+        };
+
+        reports.push(MvReport {
             name,
             status: MvStatus::Undeclared,
-            live: None,
-        })
-        .collect())
+            live: fingerprint,
+        });
+    }
+
+    Ok(reports)
 }
 
 /// Whether `ddl` declares `TO <qualified_target>`.
@@ -322,12 +344,27 @@ fn writes_into(ddl: &str, qualified_target: &str) -> bool {
 /// the whole trick: the server normalises syntax that differs only in spelling
 /// (`INTERVAL 15 MINUTE` vs `toIntervalMinute(15)`) so the comparison is
 /// semantic without this crate having to implement a SQL parser.
+/// `…OrNull` and not the raising form, which is the difference between one bad
+/// object degrading its own row and blanking the rest of the report.
+/// `formatQuerySingleLine` *raises* `SYNTAX_ERROR` on input it cannot parse, and
+/// that error is transport-indistinguishable from a real one, so it propagated
+/// out of the loop and every MV after it went unreported — the exact defect this
+/// module's per-row degradation was added to close, surviving one layer down.
+/// Reachable on an MV re-created without `REFRESH`, and on an empty
+/// `create_table_query` (which `system.tables` returns for a user lacking
+/// `SHOW COLUMNS` on the object).
+///
+/// The null is folded to an empty string rather than deserialised as
+/// `Nullable(String)`: it keeps the row type `String`, and an empty rendering is
+/// already unparseable by definition. A genuine transport error still
+/// propagates — it is not a statement about this MV and must not be reported as
+/// one.
 async fn fingerprint_via_server(
     client: &Client,
     statement: &str,
 ) -> Result<MvFingerprint, SchemaError> {
     let rendered: String = client
-        .query("SELECT formatQuerySingleLine(?)")
+        .query("SELECT ifNull(formatQuerySingleLineOrNull(?), '')")
         .bind(statement)
         .fetch_all::<String>()
         .await?
@@ -337,12 +374,26 @@ async fn fingerprint_via_server(
             rendering: statement.chars().take(200).collect(),
         })?;
 
+    if rendered.is_empty() {
+        return Err(SchemaError::UnparsableDdl {
+            rendering: statement.chars().take(200).collect(),
+        });
+    }
+
     parse_fingerprint(&rendered).ok_or(SchemaError::UnparsableDdl {
         rendering: rendered,
     })
 }
 
 /// `None` when the object does not exist on the target.
+///
+/// ⚠️ **`system.tables` is grant-filtered**, so "no row" and "no grant" are the
+/// same answer here and both surface as [`MvStatus::Missing`]. Since this check
+/// is documented as runnable by an unprivileged reader, an account without
+/// grants on the MV objects reports all six as missing — "this tier is not
+/// rolling up" — against a perfectly healthy cluster. The binary calls that
+/// pattern out when *every* declared MV comes back missing, which is the shape
+/// a grant problem takes and one a real outage almost never does.
 async fn fetch_live_ddl(
     client: &Client,
     database: &str,

@@ -29,11 +29,47 @@ this is an operator procedure rather than something the apply path does.
 > The drift check in step 1 is the exception: it is read-only and runs as any
 > account that can read `system.tables`.
 
+## Where these commands run
+
+⚠️ **Read this before step 1.** `Config::from_env()` defaults `CLICKHOUSE_URL` to
+`http://localhost:8123`, so a bare `cargo run` on a local machine checks the
+**local dev ClickHouse** and exits 0 — a clean result that says nothing whatever
+about ch-prod-01. Every command below is written for the Hetzner host.
+
+Prod's HTTP endpoint (`ch.sorobanscan.rumblefish.dev`) is mTLS-only behind Caddy
+and `prices_clickhouse::client()` builds a plaintext client, so there is no path
+from a local machine to prod for this binary. Run it **on the host, against the
+loopback port** — the same pattern as
+[`events-sourced-amm-reprice.md`](events-sourced-amm-reprice.md):
+
+```bash
+# On the Hetzner host (connection details: the prod SSH access note).
+# Build locally for the host target and copy the binary up, or build on the host.
+read -rs CH_PW
+CLICKHOUSE_URL=http://localhost:8123 \
+CLICKHOUSE_USER=default \
+CLICKHOUSE_PASSWORD="$CH_PW" \
+CLICKHOUSE_DATABASE=prices \
+  ./prices-clickhouse-drift
+```
+
+The password goes in the environment, never in `argv` — `/proc/<pid>/cmdline` is
+world-readable, so a flag would expose it to any `ps` on the box.
+
+The tool logs `url`, `user` and `database` at startup. **Read that line before
+you read the result**; it is the only thing standing between a local all-clear
+and a statement about production.
+
+Any account that can read `system.tables` will do — but note that view is
+grant-filtered, so an account without rights on the MV objects reports all six
+as `MISSING` rather than erroring. The tool flags that shape explicitly when
+every declared MV comes back missing.
+
 ## Step 1 — see what the target actually holds
 
 ```bash
-cargo run -p prices-clickhouse --bin prices-clickhouse-drift
-cargo run -p prices-clickhouse --bin prices-clickhouse-drift -- --verbose
+prices-clickhouse-drift
+prices-clickhouse-drift --verbose
 ```
 
 Read-only: it issues `SELECT`s against `system.tables` and
@@ -75,7 +111,7 @@ of the four have already caused production incidents.
       in the window is rebuilt from only its in-window slice and a **partial**
       bucket gets appended over complete pre-rolled history (task 0095).
 - [ ] **`t.`-qualified source columns** — the bucket key must be aliased `AS
-  timestamp` for the `TO`-table insert routing to work, and that alias
+timestamp` for the `TO`-table insert routing to work, and that alias
       shadows the source column inside the SELECT. A bare `timestamp` in
       `argMin`/`argMax`/`WHERE` resolves to the constant bucket start, not the
       per-row time (task 0071). Renaming the bucket is not an option — see the
@@ -187,8 +223,11 @@ every tick — visible here and nowhere else.
 
 ## Step 5 — verify
 
+On the host, same environment as step 1 (see "Where these commands run" — a
+local run here verifies your dev machine, not the cluster you just changed):
+
 ```bash
-cargo run -p prices-clickhouse --bin prices-clickhouse-drift
+prices-clickhouse-drift
 ```
 
 Exit 0, and every line `ok`. That is the only check that confirms the edit

@@ -130,10 +130,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // rollups.sql finds only what it declares, so without the sweep this
         // line would read as a whole-chain all-clear while claiming only that
         // the six named objects are fine.
+        //
+        // It is scoped to the database on purpose, and says so: the sweep filters
+        // `system.tables` by `database`, so an MV in ANOTHER database writing into
+        // `prices.price_ohlcv_*` is invisible to it. Claiming "nothing undeclared
+        // writes into their targets" would over-state the query by exactly the
+        // margin the sweep exists to remove.
         println!(
-            "\n{} rollup MVs in sync with rollups.sql, and nothing undeclared \
+            "\n{} rollup MVs in sync with rollups.sql, and nothing else in {} \
              writes into their targets",
-            reports.len()
+            reports.len(),
+            cfg.database
         );
         return Ok(());
     }
@@ -143,6 +150,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
          docs/runbooks/0142-rollup-mv-reapply.md",
         reports.len()
     );
+
+    // `system.tables` is grant-filtered, so "no row" and "no grant" arrive
+    // identically and both read as MISSING. This check is documented as runnable
+    // by an unprivileged reader, which makes a grant gap the likelier cause of
+    // the all-missing shape than six tiers failing at once — and reading it as
+    // the latter would send an operator to DROP+CREATE against a healthy chain.
+    // Every-single-one is the discriminator: a real outage takes tiers out from
+    // the bottom of the chain, not all six together.
+    if reports
+        .iter()
+        .all(|r| matches!(r.status, MvStatus::Missing))
+    {
+        println!(
+            "\nNOTE  every declared MV came back missing, which is the shape a \
+             GRANT gap takes: system.tables is filtered by grant, so an account \
+             without rights on these objects sees an empty result, not an error. \
+             Confirm with `SELECT count() FROM system.tables WHERE database = \
+             '{}'` before treating this as an outage.",
+            cfg.database
+        );
+    }
     if !verbose {
         // The excerpts centre on the FIRST divergence only; a definition can
         // differ in more than one place.

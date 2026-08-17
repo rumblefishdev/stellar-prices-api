@@ -446,6 +446,102 @@ async fn an_undeclared_writer_into_a_rollup_target_is_reported() {
     drop_scratch(&client, db).await;
 }
 
+/// The undeclared writer is the object MOST likely to be in replace mode —
+/// tasks 0090/0095/0136 all re-created these MVs by hand, and a hand-created MV
+/// over a `TO` table is where the missing `APPEND` of task 0095 came from.
+///
+/// Reporting it as `Undeclared` alone would name the one object that may be
+/// wiping the coarse table on every refresh without saying so. This asserts the
+/// sweep fingerprints what it finds rather than only naming it.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn an_undeclared_writer_in_replace_mode_is_reported_as_not_append() {
+    let db = "it_drift_undeclared_replace";
+    let client = setup_scratch(db).await;
+
+    // No APPEND: this MV atomically replaces the whole of price_ohlcv_1d on
+    // every refresh — the task 0090 data loss, arriving from an object that
+    // rollups.sql does not declare and so cannot warn about.
+    client
+        .query(&format!(
+            "CREATE MATERIALIZED VIEW {db}.mv_ohlcv_leftover_replace \
+             REFRESH EVERY 1 DAY TO {db}.price_ohlcv_1d AS \
+             SELECT * FROM {db}.price_ohlcv_4h"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    let reports = check_mv_drift(&client, db, prices_clickhouse::ROLLUPS_SQL)
+        .await
+        .unwrap();
+
+    let extra = reports
+        .iter()
+        .find(|r| r.name == "mv_ohlcv_leftover_replace")
+        .expect("the undeclared writer must be reported");
+
+    assert_eq!(extra.status, MvStatus::Undeclared);
+
+    let live = extra
+        .live
+        .as_ref()
+        .expect("an undeclared writer must be fingerprinted, not merely named");
+    assert!(
+        !live.is_append(),
+        "a replace-mode undeclared writer must report as NOT append — that is \
+         the line that tells the operator it is destroying history, and the \
+         Undeclared status alone does not say it"
+    );
+    assert!(extra.needs_attention());
+
+    drop_scratch(&client, db).await;
+}
+
+/// Pins the server-side behaviour the per-row degradation now rests on.
+///
+/// `formatQuerySingleLine` RAISES on input it cannot parse, and that error is
+/// indistinguishable from a transport failure, so it propagated out of the loop
+/// and blanked every MV after the bad one. The `…OrNull` form returns NULL
+/// instead. If a future ClickHouse drops that function or changes it back to
+/// raising, this fails loudly rather than silently restoring the defect.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn the_or_null_render_returns_empty_instead_of_raising() {
+    let db = "it_drift_ornull";
+    let client = setup_scratch(db).await;
+
+    let rendered: Vec<String> = client
+        .query("SELECT ifNull(formatQuerySingleLineOrNull(?), '')")
+        .bind("this is not SQL at all }{")
+        .fetch_all::<String>()
+        .await
+        .expect("the OrNull form must not raise on unparseable input");
+    assert_eq!(rendered.first().map(String::as_str), Some(""));
+
+    // The empty create_table_query case, which is what a user without
+    // SHOW COLUMNS on the object gets back from system.tables.
+    let empty: Vec<String> = client
+        .query("SELECT ifNull(formatQuerySingleLineOrNull(?), '')")
+        .bind("")
+        .fetch_all::<String>()
+        .await
+        .expect("an empty definition must not raise either");
+    assert_eq!(empty.first().map(String::as_str), Some(""));
+
+    // Control: a statement it CAN parse still renders, so the assertions above
+    // are not passing because the function returns NULL unconditionally.
+    let ok: Vec<String> = client
+        .query("SELECT ifNull(formatQuerySingleLineOrNull(?), '')")
+        .bind("SELECT 1")
+        .fetch_all::<String>()
+        .await
+        .unwrap();
+    assert!(ok.first().is_some_and(|s| s.contains("SELECT 1")));
+
+    drop_scratch(&client, db).await;
+}
+
 /// The check must not depend on the chain having been applied by this crate: a
 /// hand-edited MV on a provisioned cluster is the realistic drift, and it is
 /// what an `IF NOT EXISTS` apply can never correct.
