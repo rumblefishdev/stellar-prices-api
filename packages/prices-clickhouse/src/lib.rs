@@ -15,6 +15,12 @@ pub mod env;
 /// Shared observability setup for the worker Lambdas (`init_tracing`).
 pub mod observability;
 
+/// Read-only drift detection between `schema/rollups.sql` and the live
+/// refreshable-MV definitions on a target (task 0142). The rollup MVs are
+/// `IF NOT EXISTS`, so an edit to one silently no-ops against a provisioned
+/// cluster; this makes that divergence visible without touching any object.
+pub mod drift;
+
 /// mTLS transport for the remote Hetzner CH endpoint (Caddy:443). Gated behind
 /// the `aws-mtls` feature so the plaintext local-dev / init-CLI path does not
 /// pull the rustls / hyper-util / reqwest stack. Ported from BE (task 0052).
@@ -147,6 +153,13 @@ pub fn client(cfg: &Config) -> Client {
 pub enum SchemaError {
     #[error("clickhouse query failed: {0}")]
     Query(#[from] clickhouse::error::Error),
+
+    /// A `CREATE MATERIALIZED VIEW` rendering could not be fingerprinted (task
+    /// 0142). Raised rather than skipped: a statement the drift check cannot
+    /// parse must not drop silently out of the report, because a shorter report
+    /// reads exactly like a clean one.
+    #[error("could not parse a materialized-view definition: {rendering}")]
+    UnparsableDdl { rendering: String },
 }
 
 /// Apply [`INIT_SQL`] to the given client. Idempotent — every statement is a
@@ -176,7 +189,7 @@ pub async fn apply_sql(client: &Client, sql: &str) -> Result<(), SchemaError> {
 /// Split a multi-statement SQL string into individual statements. Strips `-- …`
 /// line comments and empty statements. Does not handle quoted `;` or block
 /// comments — keep the schema files free of both.
-fn split_statements(sql: &str) -> Vec<String> {
+pub(crate) fn split_statements(sql: &str) -> Vec<String> {
     let stripped: String = sql
         .lines()
         .map(|line| match line.find("--") {
@@ -324,6 +337,57 @@ mod tests {
                  view — the edit would never land on ch-prod-01; got: {head}"
             );
         }
+    }
+
+    /// Task 0142 — the rollup MVs must stay `IF NOT EXISTS`, and the file must
+    /// keep pointing at the procedure for changing one.
+    ///
+    /// This asserts the OPPOSITE of the 0134 guard above, and deliberately so. A
+    /// refreshable `TO`-table MV has no `CREATE OR REPLACE` form, so the escape
+    /// 0134 used on the plain views is unavailable; the only route is `DROP` +
+    /// re-`CREATE`, and that is not free. While an MV is dropped its tier stops
+    /// rolling up (task 0136 is the precedent — nine days unnoticed), and a
+    /// re-`CREATE` that loses `APPEND`, `sum(version)` or the aligned window
+    /// silently reintroduces the task 0090/0095 production data loss. So the
+    /// `DROP` stays an operator action under a runbook rather than something an
+    /// apply does implicitly, and this file must never acquire one.
+    ///
+    /// The consequence — that editing a body here does NOT land on a target that
+    /// already holds the MV — is what `drift::check_rollup_drift` exists to make
+    /// visible.
+    #[test]
+    fn rollups_sql_keeps_if_not_exists_and_references_the_reapply_runbook() {
+        let stmts = split_statements(ROLLUPS_SQL);
+        assert_eq!(stmts.len(), 6, "guard is vacuous if the file is empty");
+
+        for stmt in &stmts {
+            let head: String = stmt.chars().take(80).collect();
+            assert!(
+                stmt.contains("CREATE MATERIALIZED VIEW IF NOT EXISTS"),
+                "every rollup MV must stay IF NOT EXISTS (task 0142); got: {head}"
+            );
+            assert!(
+                !stmt.contains("OR REPLACE"),
+                "a refreshable TO-table MV has no OR REPLACE form — ClickHouse \
+                 rejects it; changing one is DROP + re-CREATE under the runbook; \
+                 got: {head}"
+            );
+            assert!(
+                !stmt.contains("DROP"),
+                "the DROP belongs in the re-apply runbook, not in the apply path: \
+                 applying this file must never take a rollup tier offline; got: {head}"
+            );
+        }
+
+        // Asserted on the raw text, not on `split_statements`, because the
+        // pointer lives in the header comment block — which is exactly where an
+        // operator about to edit a body will be looking.
+        assert!(
+            ROLLUPS_SQL.contains("docs/runbooks/0142-rollup-mv-reapply.md"),
+            "rollups.sql must point at the re-apply procedure: an edit to a body \
+             here does not land on a provisioned target, and the file is the only \
+             place that warning is guaranteed to be read"
+        );
     }
 
     /// `close_usd` is baked by a separate, lagging enrichment pass onto a

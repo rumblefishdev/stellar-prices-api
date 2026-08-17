@@ -8,6 +8,13 @@ description = "prices ClickHouse schema + connection layer (mirrors BE crates/db
 name = "prices-clickhouse-init"
 path = "src/bin/prices-clickhouse-init.rs"
 
+# Read-only rollup-MV drift check (task 0142). Separate binary rather than a
+# flag on the init CLI: it must be runnable against a provisioned cluster by an
+# account with no DDL grants, and it must be impossible for it to apply anything.
+[[bin]]
+name = "prices-clickhouse-drift"
+path = "src/bin/prices-clickhouse-drift.rs"
+
 [features]
 default = []
 # Exposes the `mtls` module — builds a `clickhouse::Client` that authenticates
