@@ -44,8 +44,18 @@ history:
       unwatched". Still worth having before the morning, because the failure
       mode is BE filling the volume independently — which is exactly what
       happened on 2026-08-13 and is not something we control.
-      Gaps 2 (DLQ re-notify) and 3 (scheduled drift check) are NOT in this
-      activation; they have no bearing on the campaign.
+      Gap 3 (scheduled drift check) is NOT in this activation.
+  - date: 2026-08-17
+    status: active
+    who: okarcz
+    note: >
+      Gap 2 pulled into the same activation on the operator's call. Its link to
+      the campaign is real but indirect: if the shared volume fills during the
+      10-15 h run, ingest Lambdas fail and the DLQ fills — and the gap-2 defect
+      is precisely that Slack cannot distinguish 1 from 91. Gap 1 and gap 2 are
+      two links in one chain, so closing only one was the weaker call.
+      Delivered as a threshold ladder ([10, 50] above the existing >= 1 alarm)
+      plus the AC-3 runbook note. Gap 3 remains, so this task stays active.
 ---
 
 # Ops alarms missed an 11.5 h outage
@@ -131,22 +141,28 @@ Three things this task's own findings say to design in:
       **built, not deployed**. `prices-{env}-ch-disk-free` at 20% free, on the
       existing `snsAction` (so the same `#stellar-prices-api-bot` channel as
       every other ops alarm). See "Implementation — gap 1" below
-- [ ] DLQ alarm distinguishes 1 from 91 — re-notifies on growth or uses a
-      threshold ladder *(gap 2 — not in this activation)*
-- [ ] Runbook note: an ingest stall is verified recovered on the DATA, never on
-      alarm state, and freshness alone does not prove completeness *(not in this
-      activation)*
+- [x] DLQ alarm distinguishes 1 from 91 — re-notifies on growth or uses a
+      threshold ladder — **built, not deployed**. Threshold ladder: rungs at 10
+      and 50 above the existing `>= 1` alarm. See "Implementation — gap 2"
+- [x] Runbook note: an ingest stall is verified recovered on the DATA, never on
+      alarm state, and freshness alone does not prove completeness — added to
+      `docs/runbooks/running-ingestion-components.md` as
+      "Verifying recovery after an ingest stall", with both queries and the
+      redrive/cleanup traps
 - [ ] ⚠️ Alarms verified by inducing the condition, not by reading the CDK — the
       0137 lesson that an alarm must be tested against the failure it exists for.
-      **NOT met for gap 1 and cannot be met before the deploy.** What *is*
-      verified by inducing the condition is the **privilege** constraint (a
-      least-privileged user really is denied `system.disks` and really can call
-      the filesystem functions — an IT that creates the user and asserts both).
-      The disk condition itself is only exercised in unit tests against measured
-      numbers. Filling a shared 1.72 TiB volume to prove an alarm is not
-      something to do to BE; the honest test is to raise the threshold above
-      current free space after deploy, confirm it fires into Slack, and put it
-      back
+      **NOT met for either gap, and for gap 1 it cannot be before the deploy.**
+      - *Gap 1:* what **is** verified by inducing the condition is the
+        **privilege** constraint — an IT creates a least-privileged user and
+        asserts it really is denied `system.disks` and really can call the
+        filesystem functions. The disk condition itself is only exercised in unit
+        tests against measured numbers. Filling a shared 1.72 TiB volume to prove
+        an alarm is not something to do to BE; the honest test is to raise the
+        threshold above current free space after deploy, confirm it fires into
+        Slack, and put it back.
+      - *Gap 2:* the ladder **is** inducible cheaply and without touching prod
+        data — send N dummy messages to the DLQ, watch the rungs fire in order,
+        then purge. Worth doing on the first deploy. Not done yet.
 - [ ] `prices-clickhouse-drift` runs on a schedule and reports somewhere a person
       reads, re-notifying while drift persists, with `CRITICAL` separated from
       `DRIFT` rather than collapsed into "exit 1" *(gap 3 — not in this
@@ -227,6 +243,47 @@ means "CI green" says nothing about the two ITs. They were run locally against
    still free. ⚠️ The 2026-08-17 measurement is 430.6 GiB free = **25.0%**, so a
    25% bound would have been in ALARM from the moment it shipped. Unit-tested
    against both the measured steady state and a replay of the incident.
+
+## Implementation — gap 2 (2026-08-17)
+
+Same branch. A **threshold ladder**, not a re-notification mechanism.
+
+1. **`observability-stack.ts`** — `ledgerProcessorDlqEscalationAlarms`, one
+   `prices-{env}-ledger-processor-dlq-{depth}` alarm per configured depth on the
+   same `AWS/SQS ApproximateNumberOfMessagesVisible` metric.
+2. **`types.ts`** — `opsAlarms.dlqEscalationDepths`, validated as strictly
+   increasing integers above 1. **`production.json`** — `[10, 50]`.
+3. **`running-ingestion-components.md`** — the recovery-verification section
+   (AC 3), covering the misleading OK and the freshness-≠-completeness trap.
+
+Verified by synth: both rungs present, `GreaterThanOrEqualToThreshold`,
+`notBreaching`, alarm **and** OK actions on the ops topic, and rung 1 keeps its
+logical id `LedgerProcessorDlqAlarmD32FFD0F` — the change is purely additive.
+
+### Design decisions — gap 2
+
+**Emerged**
+
+7. **A ladder, not a smarter single alarm.** ⚠️ The defect is structural: a
+   CloudWatch alarm notifies on a **state transition**, so once the `>= 1` alarm
+   is latched in ALARM it is silent however far the queue climbs. No threshold on
+   one alarm fixes that. Separate alarms have separate transitions, so growth
+   produces new messages.
+8. **Every rung keeps its OK action, and this is not optional.** A rung with no
+   route back to OK latches on first breach and is then permanently silent — it
+   would reproduce this exact defect one level up. The price is one OK per rung
+   on a redrive to empty; that noise is deliberate.
+9. **Rung 1 is untouched — same logical id, same alarm name.** Only its
+   description changed (an in-place update). Renaming it would force a
+   replace/recreate and discard its alarm history, which is not something to do
+   to a live alarm the day before a repair campaign.
+10. **Depths 10 and 50.** 1 = a ledger was dropped, always worth a look; 10 = not
+    a lone poison pill, something systemic; 50 = an outage in progress. The
+    2026-08-13 event reached **91**, so it would have lit every rung — which is
+    the readable signal that was missing.
+11. **Rung 1 stayed out of the config array.** `dlqEscalationDepths` lists only
+    the rungs *above* it, so the existing alarm cannot be accidentally retuned or
+    removed by a config edit.
 
 ## Issues Encountered
 

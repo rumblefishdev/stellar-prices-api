@@ -247,6 +247,29 @@ export interface EnvironmentConfig {
      */
     readonly chDiskFreePercent: number;
     /**
+     * Extra depths at which the ingest-DLQ alarm escalates (task 0204, gap 2).
+     *
+     * On 2026-08-13 Slack showed one message: `ApproximateNumberOfMessagesVisible
+     * >= 1`. By morning the DLQ held **91**, and nobody reading the channel could
+     * tell 1 from 91. That is not a tuning miss — a CloudWatch alarm notifies on
+     * a **state transition**, so an alarm already latched in ALARM says nothing
+     * further no matter how far the queue climbs.
+     *
+     * Each depth here becomes an additional alarm on the same metric, so a
+     * growing DLQ crosses a new threshold and produces a new Slack message.
+     * The `>= 1` rung is the pre-existing `prices-{env}-ledger-processor-dlq`
+     * alarm and is NOT listed here — these are the rungs above it.
+     *
+     * Defaults to `[10, 50]`: 1 means a ledger was dropped and always warrants a
+     * look; 10 means it is not a lone poison pill but something systemic; 50
+     * means an outage is in progress (the 2026-08-13 event reached 91, so it
+     * would have lit every rung).
+     *
+     * Must be strictly increasing integers above 1 — equal or descending rungs
+     * would fire out of order and make the ladder unreadable.
+     */
+    readonly dlqEscalationDepths: readonly number[];
+    /**
      * Optional AWS Chatbot → Slack routing for the ops-alarms topic (task 0056).
      * When set, `ObservabilityStack` subscribes `prices-{env}-ops-alarms` to a
      * Slack channel via a `SlackChannelConfiguration`, so alarms land in Slack —
@@ -613,6 +636,23 @@ export function validateConfig(config: EnvironmentConfig): void {
       errors.push(
         `opsAlarms.chDiskFreePercent must be a number in (0, 100) exclusive, got: ${ops.chDiskFreePercent}`,
       );
+    }
+    if (!Array.isArray(ops.dlqEscalationDepths)) {
+      errors.push('opsAlarms.dlqEscalationDepths missing or not an array');
+    } else {
+      // Rung 1 is the pre-existing `>= 1` alarm, so every configured rung must
+      // sit above it, and they must ascend — a ladder that repeats or descends
+      // fires out of order and tells the reader nothing about severity.
+      let previous = 1;
+      for (const depth of ops.dlqEscalationDepths) {
+        if (!Number.isInteger(depth) || depth <= previous) {
+          errors.push(
+            `opsAlarms.dlqEscalationDepths must be strictly increasing integers above 1, got: [${ops.dlqEscalationDepths.join(', ')}]`,
+          );
+          break;
+        }
+        previous = depth;
+      }
     }
     if (!ops.rollupLagSeconds || typeof ops.rollupLagSeconds !== 'object') {
       errors.push('opsAlarms.rollupLagSeconds missing or not an object');

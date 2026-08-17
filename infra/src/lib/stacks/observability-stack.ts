@@ -243,8 +243,17 @@ export class ObservabilityStack extends cdk.Stack {
   public readonly ledgerProcessorLagAlarm: cloudwatch.Alarm;
   /** Live ledger-processor invocation-error alarm (task 0056 finding B). */
   public readonly ledgerProcessorErrorAlarm: cloudwatch.Alarm;
-  /** Live ledger-processor DLQ-depth alarm (task 0056 finding B). */
+  /** Live ledger-processor DLQ-depth alarm (task 0056 finding B). Rung 1. */
   public readonly ledgerProcessorDlqAlarm: cloudwatch.Alarm;
+  /**
+   * Escalation rungs above {@link ledgerProcessorDlqAlarm}, keyed by depth as a
+   * string (task 0204, gap 2). Each depth is a separate alarm so a growing DLQ
+   * keeps producing Slack messages instead of latching silently at `>= 1`.
+   */
+  public readonly ledgerProcessorDlqEscalationAlarms: Record<
+    string,
+    cloudwatch.Alarm
+  >;
   /** Live ledger-processor total-halt alarm — zero invocations (finding B / halt gap). */
   public readonly ledgerProcessorNoInvocationsAlarm: cloudwatch.Alarm;
   /**
@@ -703,7 +712,7 @@ export class ObservabilityStack extends cdk.Stack {
       {
         alarmName: `prices-${config.envName}-ledger-processor-dlq`,
         alarmDescription:
-          'A ledger doorbell exhausted its SQS retries and landed in the prices-ingest DLQ (ApproximateNumberOfMessagesVisible ≥ 1): a ledger the live processor could not process = a candle gap. Inspect the DLQ message, fix the cause, and redrive.',
+          'A ledger doorbell exhausted its SQS retries and landed in the prices-ingest DLQ (ApproximateNumberOfMessagesVisible ≥ 1): a ledger the live processor could not process = a candle gap. Inspect the DLQ message, fix the cause, and redrive. This is rung 1 of an escalating ladder (task 0204) — if the DLQ keeps filling, the -dlq-N alarms fire in turn, so ONE message here means one message, not necessarily one message for long.',
         metric: new cloudwatch.Metric({
           namespace: 'AWS/SQS',
           metricName: 'ApproximateNumberOfMessagesVisible',
@@ -721,6 +730,56 @@ export class ObservabilityStack extends cdk.Stack {
     );
     this.ledgerProcessorDlqAlarm.addAlarmAction(snsAction);
     this.ledgerProcessorDlqAlarm.addOkAction(snsAction);
+
+    // DLQ escalation ladder (task 0204, gap 2). On 2026-08-13 Slack carried
+    // exactly one line — `ApproximateNumberOfMessagesVisible >= 1` — while the
+    // DLQ grew to 91 overnight. Nobody reading the channel could tell 1 from 91.
+    //
+    // ⚠️ The cause is structural, not a bad threshold: CloudWatch notifies on a
+    // state TRANSITION. Once the rung-1 alarm above is latched in ALARM it says
+    // nothing further, however far the queue climbs. No threshold on a single
+    // alarm fixes that. Additional rungs do: each is its own alarm with its own
+    // transition, so a growing DLQ crosses a new one and sends a new message.
+    //
+    // ⚠️ Every rung MUST keep its OK action. A rung with no way back to OK
+    // latches permanently on first breach and is then silent for every
+    // subsequent incident — it would reproduce the very defect this closes, one
+    // level up. The cost is that a redrive to empty sends one OK per rung; that
+    // noise is deliberate and much cheaper than a silent ladder.
+    //
+    // Rung 1 stays exactly as declared above — same logical id, same alarm name
+    // — so this change is purely additive and cannot replace the alarm the team
+    // already watches.
+    this.ledgerProcessorDlqEscalationAlarms = Object.fromEntries(
+      config.opsAlarms.dlqEscalationDepths.map((depth) => {
+        const alarm = new cloudwatch.Alarm(
+          this,
+          `LedgerProcessorDlqAlarmDepth${depth}`,
+          {
+            alarmName: `prices-${config.envName}-ledger-processor-dlq-${depth}`,
+            alarmDescription: `The prices-ingest DLQ has reached ${depth} messages — ${depth} ledgers the live processor could not handle, i.e. ${depth} candle gaps. Escalation rung above prices-${config.envName}-ledger-processor-dlq (task 0204): a lone poison pill does not reach this depth, so treat it as systemic — check the ledger-processor logs, ClickHouse reachability and disk headroom (a full shared volume put 91 messages here on 2026-08-13) before redriving. Rungs are operator-tunable via config.opsAlarms.dlqEscalationDepths.`,
+            metric: new cloudwatch.Metric({
+              namespace: 'AWS/SQS',
+              metricName: 'ApproximateNumberOfMessagesVisible',
+              dimensionsMap: { QueueName: ingestDlq },
+              statistic: 'Maximum',
+              period: cdk.Duration.minutes(5),
+            }),
+            threshold: depth,
+            evaluationPeriods: 1,
+            datapointsToAlarm: 1,
+            comparisonOperator:
+              cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+            // Same reasoning as rung 1: SQS publishes no datapoint for an empty
+            // DLQ, so BREACHING would false-fire on a healthy queue.
+            treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+          },
+        );
+        alarm.addAlarmAction(snsAction);
+        alarm.addOkAction(snsAction);
+        return [String(depth), alarm];
+      }),
+    );
 
     // Total ingestion halt: the lag / errors / DLQ alarms above all key on the
     // *presence* of enqueued or failed messages, so a producer-side stop (BE's
