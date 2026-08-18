@@ -46,6 +46,7 @@ utoipa = { workspace = true }
 utoipa-axum = { workspace = true }
 stellar-strkey = { workspace = true }
 base64 = "0.22"
+chrono = { workspace = true }
 prices-clickhouse = { path = "../prices-clickhouse" }
 
 # ---------------------------------------------------------------------------

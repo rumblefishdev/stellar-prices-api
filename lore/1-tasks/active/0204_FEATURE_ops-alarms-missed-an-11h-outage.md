@@ -2,7 +2,7 @@
 id: "0204"
 title: "Ops alarms missed an 11.5 h outage — no free-space alarm on the shared CH volume, and the DLQ alarm fires once then goes quiet"
 type: FEATURE
-status: backlog
+status: active
 related_adr: []
 related_tasks: ["0202", "0203", "0137", "0142", "0056", "0201"]
 tags:
@@ -29,6 +29,23 @@ history:
       constraint that decides where it can run, and the three design traps:
       drift is a standing condition not an event, exit 1 carries two different
       severities, and all-six-MISSING is a grant gap rather than an outage.
+  - date: 2026-08-17
+    status: active
+    who: okarcz
+    note: >
+      Activated for **gap 1 only** — the free-space alarm — ahead of the
+      0201/0182 repair campaign scheduled for the morning of 2026-08-18. This
+      task's own gap-1 note makes it a precondition for that run ("it should not
+      start without this alarm in place and a word with BE").
+      ⚠️ The premise of that warning has moved and the task text is now stale:
+      it was written at ~91% used, and the volume measured **430.6 GiB free /
+      75.5% used** on 2026-08-17. So the campaign has headroom it did not have,
+      and the alarm is no longer "the run cannot start" but "the run is
+      unwatched". Still worth having before the morning, because the failure
+      mode is BE filling the volume independently — which is exactly what
+      happened on 2026-08-13 and is not something we control.
+      Gaps 2 (DLQ re-notify) and 3 (scheduled drift check) are NOT in this
+      activation; they have no bearing on the campaign.
 ---
 
 # Ops alarms missed an 11.5 h outage

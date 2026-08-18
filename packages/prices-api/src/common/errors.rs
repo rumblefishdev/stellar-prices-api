@@ -39,6 +39,9 @@ impl ErrorEnvelope {
 pub const INVALID_ID: &str = "invalid_id";
 /// Query parameters failed validation.
 pub const INVALID_QUERY: &str = "invalid_query";
+/// The request body failed extraction: malformed JSON, wrong shape, missing
+/// `Content-Type`, or over the body-size limit.
+pub const INVALID_BODY: &str = "invalid_body";
 /// The requested resource does not exist.
 pub const NOT_FOUND: &str = "not_found";
 /// Missing or invalid `X-API-Key`.
@@ -49,14 +52,20 @@ pub const DB_ERROR: &str = "db_error";
 /// requested `base_currency` cannot be served.
 pub const QUOTE_UNAVAILABLE: &str = "quote_unavailable";
 
-/// 400 Bad Request with a machine-readable `code`.
+/// 400 Bad Request with a machine-readable `code`. Carries
+/// `Cache-Control: no-store` so a client/CDN never caches a rejection (`limit`
+/// is a gateway cache-key param; the gateway's own cache is config-side and
+/// verified under task 0122).
 pub fn bad_request(code: &'static str, message: impl Into<String>) -> Response {
-    ErrorEnvelope {
+    let mut resp = ErrorEnvelope {
         code,
         message: message.into(),
         details: None,
     }
-    .into_response_with(StatusCode::BAD_REQUEST)
+    .into_response_with(StatusCode::BAD_REQUEST);
+    resp.headers_mut()
+        .insert(CACHE_CONTROL, cache_control::NO_STORE);
+    resp
 }
 
 /// 404 Not Found.

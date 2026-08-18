@@ -131,8 +131,14 @@ async fn ohlcv_merges_sources_and_notes_backfill() {
     let db = "it_ohlcv_merge_0040";
     let client = setup(db).await;
 
+    // Explicit start/end around the seeded candles: since task 0119 the window
+    // rule rejects `timeframe=all&granularity=1h` up front (genesis → now is
+    // ~95k hourly buckets against the 5000 cap — the old silent-truncation
+    // semantics this test used to lean on). `timeframe=all` stays, narrowed by
+    // the explicit bounds, so the backfill_note path is still exercised.
     let uri = format!(
-        "/v1/assets/FOO:{}/ohlcv?timeframe=all&granularity=1h&base_currency=USD",
+        "/v1/assets/FOO:{}/ohlcv?timeframe=all&granularity=1h\
+         &start=2026-02-01&end=2026-02-15&base_currency=USD",
         iss()
     );
     let (status, json) = get(client, &uri).await;

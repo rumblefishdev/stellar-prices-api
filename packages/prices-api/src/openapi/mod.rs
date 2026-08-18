@@ -119,6 +119,15 @@ fn api_docs_json() {}
         crate::backfill::dto::AmmStream,
         crate::batch::dto::BatchRequest,
         crate::batch::dto::BatchResponse,
+        // Query-param enums (task 0119). utoipa-axum collects body schemas
+        // from the routes, but a params-tuple `$ref` is NOT auto-registered —
+        // without these entries the served document carries dangling refs.
+        crate::assets::queries_ch::TypeFilter,
+        crate::assets::queries_ch::SortCol,
+        crate::assets::queries_ch::Order,
+        crate::assets::queries_ch::Timeframe,
+        crate::assets::queries_ch::Granularity,
+        crate::assets::queries_ch::BaseCurrency,
     )),
     tags(
         (name = "ops", description = "Operational endpoints (health)"),
