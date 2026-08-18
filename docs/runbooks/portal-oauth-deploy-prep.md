@@ -156,25 +156,29 @@ fails the _next_ cold start rather than silently serving a broken sign-in.
 
 ## 4. Verify locally before opening production
 
-Register a **second** redirect URI on the same application pointing at
-`http://localhost:4200/api-tokens/api/auth/callback` (Discord accepts several),
-write the same JSON to a gitignored local file, and run:
+Do the round-trip on a laptop before the flag ever moves in production. The full
+procedure — the file, the two commands, what to expect and what each failure
+means — is in
+[`packages/prices-api/README.md`](../../packages/prices-api/README.md#running-portal-sign-in-locally-task-0186),
+which is the one place it is maintained.
 
-```bash
-PORTAL_ENABLED=true \
-PORTAL_OAUTH_SECRET_FILE=.portal-oauth.json \
-  cargo run -p prices-api --features local-server --bin serve
-```
+Two things that are **this runbook's**, because they are changes to the
+registration rather than to a developer's machine:
 
-`.portal-oauth.json` must carry the **localhost** `redirect_uri`; the loader
-accepts it and Discord matches it against the second registration. This is a file
+1. **Add a second redirect URI** to the same Discord application, pointing at
+   `http://localhost:4200/api-tokens/api/auth/callback`. Discord accepts several
+   redirects per application, so this sits alongside the production one and
+   neither disturbs the other.
+2. **Decide what happens to it afterwards.** Remove it once the flow is
+   verified, or leave it and accept that anyone holding that `client_secret` can
+   complete a real sign-in from their own machine, against the production
+   application.
+
+The local secret file carries the **localhost** `redirect_uri`; the loader
+accepts it and Discord matches it against the second registration. It is a file
 rather than an environment variable on purpose — there is no code path anywhere
 that reads a client secret out of the environment, and adding one "just for
 local" is a path production can be misconfigured onto.
-
-Remove the localhost redirect from the registration once the flow is verified, or
-leave it and accept that a developer's machine can complete a real sign-in
-against the production application.
 
 ## 5. Opening the portal
 
