@@ -64,6 +64,23 @@ history:
       cheaper, two make the passes independently revertible. Execution host is
       fishuser-hero, planned for the morning of 2026-08-18. Still no FREEZE
       taken and no partition written.
+  - date: 2026-08-18
+    status: active
+    who: okarcz
+    note: >
+      SNAPSHOT COUNT SETTLED — TWO. One FREEZE before pass 1, a second between
+      the passes, so pass 2 is revertible without discarding pass 1's ~32M
+      recovered rows. Two consequences, both recorded below. The second
+      snapshot has to sit BETWEEN the passes, which rules out interleaving them
+      per table unless the admin is called back five times — so the ordering is
+      now the hybrid: `_1h` alone first as the review gate, then the remaining
+      four batched, three admin windows total. And the two snapshots need
+      DISTINCT names, because the freeze script deliberately keeps a
+      pre-existing snapshot rather than overwriting it, making a re-freeze under
+      the same name a silent no-op. In-span footprint measured on prod: 16.82
+      GiB across the five tables (799 active parts), so both snapshots peak at
+      ~33.6 GiB plus ~4-6 GiB of new parts, ~9% of the 430.6 GiB free. BE
+      messaged about the volume. Still no FREEZE taken and no partition written.
 ---
 
 # `close_usd` is ~7.4× too high on every USDT-quoted candle ever written
@@ -636,12 +653,65 @@ This also keeps the "**run reset mode once per table**" rule intact: pass 1 is
 not a reset invocation, so pass 2 is still the single reset run per table.
 
 **FREEZE span under (c): the same 67 months × 5 tables**, since both passes visit
-the same partitions. ⛔ **One operational detail still needs the operator's
-call:** whether the admin takes *one* snapshot before pass 1 or *two* (a second
-between the passes). One snapshot is cheaper, but rolling pass 2 back then
-discards pass 1's ~32M recovered rows as well; a second snapshot after pass 1
-makes the two independently revertible. Settle this **with the admin when the
-FREEZE is arranged**, not during the run.
+the same partitions.
+
+### ✅ SETTLED 2026-08-18: **two snapshots** — and the three things that forces
+
+One `FREEZE` before pass 1, a second between the passes. One snapshot is
+cheaper, but rolling pass 2 back under it would discard pass 1's ~32M recovered
+rows as well; two make the passes independently revertible. What follows is not
+obvious from the decision itself.
+
+**1. The two snapshots must have DIFFERENT names.** The freeze script's
+`already-frozen` branch deliberately *keeps* a pre-existing snapshot rather than
+overwriting it — otherwise a re-freeze would replace a pre-repair rollback point
+with a post-repair one. That same protection makes a second freeze under the
+same name a **silent no-op**: it prints `already-frozen`, and you believe you
+hold two rollback points while holding one. Use `repair_0182_pre_…` for the
+first and `repair_0182_mid_…` for the second.
+
+**2. It rules out interleaving the passes per table.** The second snapshot has
+to sit between pass 1 and pass 2, so a per-table interleave (`_1h` pass 1, `_1h`
+pass 2, `_4h` pass 1, …) needs the admin back **five times** across 10-15 h —
+and `prices_writer` cannot `FREEZE`, so every one of those is a second person.
+Ordering adopted instead, three admin windows at predictable points:
+
+| # | Step | Who |
+|---|---|---|
+| 1 | `FREEZE` #1 `repair_0182_pre_…`, all five tables | admin |
+| 2 | Pass 1 ([[0201]], no `--reset-*`) on `_1h` | operator |
+| 3 | `FREEZE` #2 `repair_0182_mid_…`, **`_1h` only** | admin |
+| 4 | Pass 2 (0182, with `--reset-*`) on `_1h`, then **review** | operator |
+| 5 | Pass 1 on `_4h`, `_1d`, `_1w`, `_1M` | operator |
+| 6 | `FREEZE` #2 `repair_0182_mid_…`, those four | admin |
+| 7 | Pass 2 on those four | operator |
+
+`_1h` — the table BE consumes — is proven end to end before the remaining ~10 h
+is committed, and no table's post-pass-1 state is pinned before its pass 1 runs.
+
+**3. Disk — measured on prod 2026-08-18, not estimated.**
+
+| table | active parts | on disk, 202102-202608 |
+|---|---|---|
+| `price_ohlcv_1h` | 204 | **9.56 GiB** |
+| `price_ohlcv_4h` | 212 | 4.92 GiB |
+| `price_ohlcv_1d` | 154 | 1.71 GiB |
+| `price_ohlcv_1w` | 106 | 481.71 MiB |
+| `price_ohlcv_1M` | 123 | 164.42 MiB |
+| **total** | **799** | **16.82 GiB** |
+
+⚠️ **A `FREEZE` costs nothing when it is taken and accrues its cost afterwards.**
+It hardlinks the partition's parts under `shadow/` — the bytes exist once, the
+operation is instant and blocks nothing. But parts are immutable, so as this
+run's `version + 1` inserts merge and supersede them, the originals cannot be
+reclaimed while the hardlink holds the inode. The cost builds over the 10-15 h,
+and its ceiling is the size of what was frozen.
+
+Freeze #1 ≤ 16.82 GiB, freeze #2a (`_1h`) ≤ 9.56 GiB, freeze #2b (the other
+four) ≤ 7.26 GiB — **≤ 33.6 GiB of snapshot**, plus ~4-6 GiB of new parts before
+merges reclaim. ~40 GiB peak against 430.6 GiB free, about **9%**. Comfortable
+against the volume — but note it is a **~68% increase on our own 58.93 GiB
+footprint**, which is the shape BE would see if they went looking.
 
 ## 🚧 What is NOT done — this is a tool, not a correction
 
@@ -659,12 +729,46 @@ Remaining, in order:
    runs. **The run is no longer blocked on this.**
 4. **Snapshots** — CH admin must `FREEZE` every partition in span (**67 months ×
    5 tables** under route (c)); `prices_writer` cannot and cannot be granted it.
-   ⛔ Still to settle with the admin: one snapshot before pass 1, or a second
-   between the passes so the two are independently revertible.
+   ✅ Count settled 2026-08-18: **two**, `repair_0182_pre_…` then
+   `repair_0182_mid_…`, across the three admin windows tabled above.
+   ⛔ **Not taken.** This is the one thing still standing between here and the
+   run.
 5. **The run**, `_1h` first (the table BE consumes), reviewed before the next.
    ⚠️ Raise `--pivot-window-s` for `_1w`/`_1M` — the 1-day default silently drops
    references older than a day, which every weekly bucket's anchor may be.
 6. **Verify** the implied-rate probe moves off 1.0, then tell BE the window.
+7. **UNFREEZE and reclaim** — see below. Nothing expires a snapshot; ~33.6 GiB
+   stays pinned until an admin removes it.
+
+## 🧹 Cleanup — the snapshots do not expire and nothing reclaims them
+
+⚠️ A `FREEZE` left behind is the 2026-08-13 incident ([[0202]]) with our name on
+it instead of BE's: dead bytes pinned on a shared volume, invisible to
+`system.parts`, visible only to `df`. ~33.6 GiB of it here. Neither ClickHouse
+nor this tool ever removes a snapshot — an **admin** must, and `prices_writer`
+cannot.
+
+Per table, in this order:
+
+1. Once that table's pass 2 is verified (implied-rate probe off 1.0), drop its
+   **pre** snapshot — it protects a rollback you have just decided not to take.
+   `_1h` alone returns 9.56 GiB.
+2. Keep its **mid** snapshot until the whole campaign is verified *and* BE have
+   been told the corrected window.
+3. Then drop the mid snapshots too.
+
+```sql
+ALTER TABLE prices.price_ohlcv_1h
+  UNFREEZE WITH NAME 'repair_0182_pre_prices_price_ohlcv_1h_202403'
+```
+
+— per partition, or by removing the `shadow/<NAME>/` directories on the host.
+Verify with `du -sh /var/lib/clickhouse/shadow/` returning to its **pre-campaign
+size**, not merely shrinking.
+
+⚠️ **Put this on the admin's list when the FREEZEs are arranged**, not after.
+It is the half of the procedure with no deadline attached, which is why it is
+the half that gets forgotten.
 
 ## Acceptance Criteria
 
@@ -691,5 +795,9 @@ Remaining, in order:
       the writer; add a data-level check that no USDT-quoted candle carries
       `close_usd / close ≈ 1.0`
 - [ ] BE notified of the corrected values and the window affected
+- [ ] **Snapshots removed** — both `repair_0182_pre_…` and `repair_0182_mid_…`
+      unfrozen after verification, with `du` on `shadow/` back to its
+      pre-campaign size rather than merely smaller. ⚠️ ~33.6 GiB on a volume BE
+      own 96% of, and nothing expires it. Admin-only, like the FREEZE itself.
 - [ ] `volume_quote_usd` resolved — widen scope, or document the two-column
       mismatch. Blocked on BE's answer to the question sent 2026-08-13.
