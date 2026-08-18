@@ -2,7 +2,7 @@
 id: "0186"
 title: "Sign in with Discord — identity only, scope identify, session cookie"
 type: FEATURE
-status: active
+status: completed
 related_adr: ["0007", "0008", "0010"]
 related_tasks: ["0183", "0159", "0184", "0185", "0187", "0189", "0194"]
 tags: [layer-backend, priority-high, effort-medium, milestone-M3, epic-self-service-onboarding, discord, oauth, auth, secrets, slice-3]
@@ -101,6 +101,22 @@ history:
       branch — failed on a test helper this branch had never seen. Merged and
       fixed, and the portal handlers adopted [[0119]]'s `ValidatedQuery` so a
       malformed query stops reading to the bundle as a backend outage.
+  - date: "2026-08-18"
+    status: completed
+    who: akot
+    note: >
+      COMPLETED via PR #220 (merged to `develop`). Nine of the ten acceptance
+      criteria met, including the live round-trip Adam ran himself against his
+      own Discord application. The tenth — a signed-in request reaching the
+      origin still signed in through CloudFront — is archived OPEN on [[0205]]'s
+      deploy: both settings it depends on are correct in the committed template
+      and now guarded in CI (decision 13), but the property is only observable in
+      a browser against a deployed distribution (O1). 87 tests cover the task, 64
+      new on the Rust side; three review passes (adversarial, mutation,
+      `/code-review`) with nine findings fixed and eleven recorded open with
+      reasons, plus three mutation sweeps — 25 defects introduced, 24 detected, 1
+      undetectable (O3). No follow-up spawned: every one already has a task
+      ([[0187]], [[0189]], [[0190]], [[0193]], [[0194]], [[0205]]).
 ---
 
 # Discord sign-in — identity only

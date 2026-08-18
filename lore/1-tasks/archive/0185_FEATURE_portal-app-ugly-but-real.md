@@ -2,7 +2,7 @@
 id: "0185"
 title: "Portal app — ugly but real: Vite/React skeleton served from /api-tokens/, built by CI"
 type: FEATURE
-status: active
+status: completed
 related_adr: []
 related_tasks: ["0183", "0162", "0184", "0186", "0193"]
 tags: [layer-frontend, priority-high, effort-small, milestone-M3, epic-self-service-onboarding, ui, vite, react, slice-2]
@@ -43,6 +43,17 @@ history:
       but not `.gitignore`d. Also fixed two things review missed: `index.html`
       shipped its comments to a public page (decision 15) and the config probe
       had no timeout (decision 16). 18 tests across 5 files, up from 4.
+  - date: "2026-08-18"
+    status: completed
+    who: akot
+    note: >
+      COMPLETED via PR #218 (merged to `develop`). Six of the seven acceptance
+      criteria met; the seventh — CI deploys on merge — was withdrawn with Adam
+      on 2026-08-14 (decision 9), so the upload stays manual until [[0205]]. 18
+      tests across 5 files, and CI runs them (decision 11). Live verification of
+      the served bundle waits on [[0205]]'s deploys; styling is [[0193]], the
+      sub-route refresh [[0195]]. [[0186]] landed on top of this slice and is
+      archived alongside it.
 ---
 
 # Portal app — ugly but real
@@ -303,3 +314,15 @@ tests — worth noting, because the suite was green throughout.
   reported five findings, all accurate — against `origin/…`, which was three
   commits behind the local branch, so three of them had already been closed by
   round 1. Nothing was wrong with the review. **Push before asking for one.**
+
+## Future Work
+
+Nothing new spawned — every follow-up this slice leaves behind already has a
+task:
+
+- The withdrawn deploy criterion, and live verification that `/api-tokens/`
+  serves the bundle from CloudFront → [[0205]].
+- A hard refresh on a sub-route (`/api-tokens/dashboard`), which needs the
+  per-prefix SPA fallback → [[0195]].
+- Styling. The page is deliberately unstyled → [[0193]].
+- Somewhere for the app to render content → [[0186]] (landed), then [[0187]].
