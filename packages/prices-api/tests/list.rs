@@ -70,16 +70,13 @@ async fn assets_limit_negative_is_400_envelope() {
     assert_eq!(json["code"], "invalid_query");
 }
 
+/// Length-only rule (PR #217 review): stored codes include lossy-decoded
+/// bytes, so a charset check would make listed assets unsearchable. Only an
+/// over-cap prefix (which can never match a ≤12-raw-byte code) is rejected.
 #[tokio::test]
-async fn assets_search_too_long_is_400() {
-    let (status, _, json) = common::get("/v1/assets?search=THIRTEENCHARS").await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(json["code"], "invalid_query");
-}
-
-#[tokio::test]
-async fn assets_search_bad_charset_is_400() {
-    let (status, _, json) = common::get("/v1/assets?search=US%21").await; // "US!"
+async fn assets_search_over_length_cap_is_400() {
+    let long = "A".repeat(65);
+    let (status, _, json) = common::get(&format!("/v1/assets?search={long}")).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(json["code"], "invalid_query");
 }

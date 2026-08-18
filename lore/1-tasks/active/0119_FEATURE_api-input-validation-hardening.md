@@ -120,12 +120,12 @@ Every rule rejects **before** any ClickHouse round-trip; every rejection is a
 | `sort` | `price` \| `volume_24h` \| `change_24h` \| `code` (default `volume_24h`) | `invalid_query` |
 | `order` | `asc` \| `desc` (default `desc`) | `invalid_query` |
 | `limit` | integer 1–200 (default 50); non-numeric/overflow rejected in extractor | `invalid_query` |
-| `search` | 1–12 ASCII alphanumeric (SEP-11 alphanum12 prefix); empty = absent | `invalid_query` |
-| `cursor` | ≤256 chars, Base64 of exactly `{v,id}` (`deny_unknown_fields`); `v` type-checked against active sort (finite number for numeric sorts, asset-code shape for `code`) | `invalid_query` |
+| `search` | ≤64 bytes, length-only (stored codes include lossy-decoded on-chain bytes — a charset rule would make listed assets unsearchable; PR #217); empty = absent | `invalid_query` |
+| `cursor` | ≤256 chars, Base64 (issued URL-safe/no-pad; STANDARD still decoded for in-flight tokens) of exactly `{v,id}` (`deny_unknown_fields`); `v` type-checked against active sort (finite number for numeric sorts, ≤64 bytes for `code` — same length-only rule as `search`) | `invalid_query` |
 | `timeframe` | `1h` \| `24h` \| `7d` \| `30d` \| `1y` \| `all` (default `24h`) | `invalid_query` |
-| `granularity` | `1m` \| `15m` \| `1h` \| `4h` \| `1d` \| `1w` \| `1M` (default from timeframe) | `invalid_query` |
+| `granularity` | `1m` \| `15m` \| `1h` \| `4h` \| `1d` \| `1w` \| `1M`; omitted ⇒ per-timeframe default, except explicit `start`/`end` windows and `timeframe=all` ⇒ finest granularity fitting the 5000-point cap (PR #217) | `invalid_query` |
 | `base_currency` | `USD` \| `XLM` (+ all-lowercase aliases; default `USD`) | `invalid_query` |
-| `start` / `end` | epoch (s/ms) \| `YYYY-MM-DD` \| ISO-8601 datetime (`T`/space, optional offset); real calendar instant; ≤ 2100; `start < end`; `ceil(span/granularity) ≤ 5000` | `invalid_query` |
+| `start` / `end` | epoch (s/ms) \| `YYYY-MM-DD` \| ISO-8601 datetime (`T`/space, optional offset; a `+` offset percent-decoded to a space in transit is recovered); real calendar instant; ≤ 2100; `start ≤ end` (equal = one inclusive bucket); `ceil(span/granularity)+1 ≤ 5000` | `invalid_query` |
 | batch body | valid JSON object with `assets`, ≤16 KB (`DefaultBodyLimit`) | `invalid_body` |
 | batch `assets` | non-empty, ≤100 (`MAX_BATCH`), every element a valid identifier (error names the element) | `invalid_query` / `invalid_id` |
 
@@ -171,10 +171,13 @@ Every rule rejects **before** any ClickHouse round-trip; every rejection is a
   to behave like "no upper bound" (window `[now-tf, end]`) and now anchors the
   window to `end`, so it returns an empty 200 — consistent with the anchoring
   policy above, recorded here because it flips an observable behavior.
-- **Time bomb, on purpose:** genesis → now at `1d` crosses 5000 buckets around
-  **2029-06**, at which point bare `timeframe=all` (default granularity `1d`)
-  starts 400ing. Whoever hits it decides: raise `OHLCV_MAX_POINTS`, or default
-  `all` to `1w`. Recorded here so it is a known cliff, not a mystery.
+- **Time bomb defused (PR #217 review):** bare `timeframe=all` previously
+  defaulted to `1d` and would have started 400ing around **2029-06** (genesis →
+  now crossing 5000 daily buckets). The default for `all` — and for any
+  explicit `start`/`end` window with no `granularity` — is now the finest
+  granularity that fits the cap, so the response self-coarsens (today: `1d`,
+  post-2029: `1w`) instead of hard-failing. An explicitly requested granularity
+  still rejects explicitly.
 - `?min_volume_usd=` from [[0118]] lands in this validation table too;
   whichever task ships second adds the row.
 - API Gateway request validation (§2.1) can reject some malformed input at the

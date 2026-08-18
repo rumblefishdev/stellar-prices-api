@@ -456,6 +456,25 @@ impl Granularity {
             Granularity::Mo1 => 30 * 86_400,
         }
     }
+
+    /// Finest granularity whose inclusive point count for `span` seconds stays
+    /// within `max_points` — the auto-granularity for explicit windows and for
+    /// `timeframe=all` (PR #217 review): maximum resolution the cap allows,
+    /// coarsening by itself as the window grows. Falls back to `1M` (a span
+    /// would need >400 years to overflow even that).
+    pub fn finest_for_span(span: u64, max_points: u64) -> Self {
+        [
+            Granularity::M1,
+            Granularity::M15,
+            Granularity::H1,
+            Granularity::H4,
+            Granularity::D1,
+            Granularity::W1,
+        ]
+        .into_iter()
+        .find(|g| span.div_ceil(g.seconds()) < max_points)
+        .unwrap_or(Granularity::Mo1)
+    }
 }
 
 /// Requested time window (overview §4.2 auto-granularity table).
@@ -680,6 +699,28 @@ mod tests {
         assert!(matches!(tok::<BaseCurrency>("xlm"), Ok(BaseCurrency::Xlm)));
         assert!(tok::<BaseCurrency>("uSd").is_err());
         assert!(tok::<BaseCurrency>("EUR").is_err());
+    }
+
+    #[test]
+    fn finest_for_span_picks_max_resolution_within_cap() {
+        // 24h fits minute candles; 30d needs 15m; ~11y (genesis → 2026) needs
+        // daily; the fallback for absurd spans is monthly.
+        assert!(matches!(
+            Granularity::finest_for_span(86_400, 5000),
+            Granularity::M1
+        ));
+        assert!(matches!(
+            Granularity::finest_for_span(30 * 86_400, 5000),
+            Granularity::M15
+        ));
+        assert!(matches!(
+            Granularity::finest_for_span(11 * 365 * 86_400, 5000),
+            Granularity::D1
+        ));
+        assert!(matches!(
+            Granularity::finest_for_span(500 * 365 * 86_400, 5000),
+            Granularity::Mo1
+        ));
     }
 
     #[test]

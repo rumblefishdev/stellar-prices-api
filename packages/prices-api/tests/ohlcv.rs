@@ -69,10 +69,12 @@ async fn ohlcv_garbage_start_is_400() {
     assert_eq!(json["code"], "invalid_query");
 }
 
+/// Strictly inverted only — `start == end` is a legitimate one-bucket window
+/// (inclusive SQL bounds; PR #217 review).
 #[tokio::test]
-async fn ohlcv_end_not_after_start_is_400() {
+async fn ohlcv_end_before_start_is_400() {
     let (status, _, json) =
-        common::get("/v1/assets/native/ohlcv?start=2026-06-15&end=2026-06-15").await;
+        common::get("/v1/assets/native/ohlcv?start=2026-06-16&end=2026-06-15").await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(json["code"], "invalid_query");
     assert!(
@@ -82,11 +84,16 @@ async fn ohlcv_end_not_after_start_is_400() {
 }
 
 #[tokio::test]
-async fn ohlcv_future_start_without_end_is_400() {
-    // eff_end = now, so a future-only start inverts the window.
+async fn ohlcv_future_start_without_end_is_400_and_says_so() {
     let (status, _, json) = common::get("/v1/assets/native/ohlcv?start=2099-01-01").await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(json["code"], "invalid_query");
+    // The client sent no `end` — the message must name the real problem
+    // (PR #217 review), not a parameter they never supplied.
+    assert!(
+        json["message"].as_str().unwrap().contains("future"),
+        "message should say start is in the future: {json}"
+    );
 }
 
 /// Fencepost: the SQL bounds are inclusive, so a span of exactly 5000×1m

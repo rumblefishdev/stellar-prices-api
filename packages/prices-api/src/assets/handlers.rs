@@ -124,9 +124,9 @@ pub async fn get_asset(
     }
 }
 
-/// Cap on the `?search` prefix: an asset-code prefix longer than a code can
-/// never match anything.
-const MAX_SEARCH_LEN: usize = crate::identity::MAX_CODE_LEN;
+/// Cap on the `?search` prefix — the shared "compared against `asset_code`"
+/// rule (see its definition for why length-only).
+const MAX_SEARCH_LEN: usize = cursor::MAX_STRING_PAYLOAD_LEN;
 
 /// Query parameters for `GET /assets`. Enum params deserialize straight into
 /// their typed forms — an unknown token fails serde and surfaces as a 400
@@ -151,9 +151,9 @@ pub struct ListParams {
     params(
         ("type" = Option<TypeFilter>, Query, description = "classic | soroban | all (default all)"),
         ("search" = Option<String>, Query,
-         description = "asset code prefix match (1-12 ASCII alphanumeric; \
-                        an empty value is treated as absent)",
-         min_length = 1, max_length = 12),
+         description = "asset code prefix match (max 64 bytes; an empty value \
+                        is treated as absent)",
+         min_length = 1, max_length = 64),
         ("sort" = Option<SortCol>, Query,
          description = "price | volume_24h | change_24h | code (default volume_24h)"),
         ("order" = Option<Order>, Query, description = "asc | desc (default desc)"),
@@ -191,16 +191,16 @@ pub async fn get_assets(
         },
         None => None,
     };
-    // Empty search is treated as absent; a non-empty one must be a plausible
-    // asset-code prefix — anything longer or outside SEP-11's alphanumeric set
-    // can never match and only costs a ClickHouse scan.
+    // Empty search is treated as absent. Length-only cap, no charset: stored
+    // codes include lossy-decoded on-chain bytes, so a charset rule would make
+    // listed assets unsearchable (PR #217 review; same rule as the cursor).
     let search = p.search.filter(|s| !s.is_empty());
     if let Some(s) = &search
-        && (s.len() > MAX_SEARCH_LEN || !s.bytes().all(|b| b.is_ascii_alphanumeric()))
+        && s.len() > MAX_SEARCH_LEN
     {
         return errors::bad_request(
             errors::INVALID_QUERY,
-            format!("search must be 1-{MAX_SEARCH_LEN} ASCII alphanumeric characters"),
+            format!("search must be at most {MAX_SEARCH_LEN} bytes"),
         );
     }
 
@@ -285,7 +285,8 @@ pub struct OhlcvParams {
         ("timeframe" = Option<Timeframe>, Query,
          description = "1h | 24h | 7d | 30d | 1y | all (default 24h)"),
         ("granularity" = Option<Granularity>, Query,
-         description = "1m | 15m | 1h | 4h | 1d | 1w | 1M (auto from timeframe if omitted)"),
+         description = "1m | 15m | 1h | 4h | 1d | 1w | 1M; omitted = timeframe default, or \
+                        the finest fitting 5000 points for explicit windows and `all`"),
         ("start" = Option<String>, Query,
          description = "range start: ISO-8601 or unix epoch (seconds; ms if 13+ digits); \
                         overrides timeframe"),
@@ -319,13 +320,12 @@ pub async fn get_ohlcv(
     };
     let timeframe = p.timeframe.unwrap_or(Timeframe::H24);
     let base_currency = p.base_currency.unwrap_or(BaseCurrency::Usd);
-    let granularity = p
-        .granularity
-        .unwrap_or_else(|| timeframe.default_granularity());
 
     // Window rule (task 0119): parse ?start/?end to epochs, then bound-check the
     // whole window BEFORE the DB is touched. Explicit rejection replaces the old
     // silent truncation at OHLCV_MAX_POINTS, which looked like missing data.
+    // Granularity is resolved AFTER the window (see below): when omitted, it
+    // derives from what the caller actually asked for.
     let start = match p.start.as_deref() {
         Some(s) => match parse_time(s) {
             Some(t) => Some(t),
@@ -364,14 +364,36 @@ pub async fn get_ohlcv(
         }
         .max(0)
     });
-    if eff_start >= eff_end {
-        return errors::bad_request(errors::INVALID_QUERY, "start must be before end");
+    // Strictly greater: `start == end` is a legitimate one-bucket window, since
+    // the SQL bounds are inclusive on both ends.
+    if eff_start > eff_end {
+        // A future-only `start` trips this with an `end` the client never sent —
+        // name the actual problem instead (review finding, PR #217).
+        let message = if end.is_none() && start.is_some_and(|s| s > now) {
+            "start is in the future"
+        } else {
+            "start must be before end"
+        };
+        return errors::bad_request(errors::INVALID_QUERY, message);
     }
+    let span = (eff_end - eff_start) as u64;
+    // Granularity, when omitted, follows what the caller asked for: a plain
+    // timeframe keeps its documented default; an explicit window (and
+    // `timeframe=all`, whose span grows with time) gets the finest granularity
+    // that fits the point cap — so `?start=2020-01-01` alone is answerable
+    // instead of 400ing at a granularity the caller never chose, and bare
+    // `timeframe=all` self-coarsens instead of hitting a cliff around 2029.
+    let explicit_window = start.is_some() || end.is_some();
+    let granularity = match p.granularity {
+        Some(g) => g,
+        None if !explicit_window && !timeframe.is_all() => timeframe.default_granularity(),
+        None => Granularity::finest_for_span(span, OHLCV_MAX_POINTS),
+    };
     // `+ 1`: the SQL bounds are inclusive on both ends, so an aligned window
     // spanning exactly N buckets contains N + 1 bucket-start timestamps —
     // counting span/granularity alone would let a 5001-bucket request through
     // to be silently truncated by the LIMIT.
-    let points = ((eff_end - eff_start) as u64).div_ceil(granularity.seconds()) + 1;
+    let points = span.div_ceil(granularity.seconds()) + 1;
     if points > OHLCV_MAX_POINTS {
         return errors::bad_request(
             errors::INVALID_QUERY,
@@ -523,13 +545,24 @@ fn parse_time(s: &str) -> Option<i64> {
     } else if let Ok(d) = chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d") {
         d.and_hms_opt(0, 0, 0)?.and_utc().timestamp()
     } else {
-        // Datetime forms: normalize the documented space separator to `T`
-        // (a space anywhere else fails every parser below anyway).
-        let norm: Cow<str> = if s.contains(' ') {
-            Cow::Owned(s.replacen(' ', "T", 1))
+        // Datetime forms. Two query-string realities to undo before parsing
+        // (PR #217 review): the documented space separator sits exactly at
+        // byte 10 (fix it positionally — replacing the FIRST space would
+        // corrupt the next case), and a literal `+` percent-decodes to a
+        // space, so a trailing " HH:MM" / " HHMM" after the time is a
+        // `+HH:MM` offset that lost its sign in transit.
+        let mut norm: Cow<str> = if s.len() > 10 && s.as_bytes()[10] == b' ' {
+            Cow::Owned(format!("{}T{}", &s[..10], &s[11..]))
         } else {
             Cow::Borrowed(s)
         };
+        if let Some(i) = norm.rfind(' ')
+            && looks_like_utc_offset(&norm[i + 1..])
+        {
+            let mut owned = norm.into_owned();
+            owned.replace_range(i..=i, "+");
+            norm = Cow::Owned(owned);
+        }
         // Offset-carrying forms: RFC 3339 (`T`, seconds, `Z`/`±HH:MM`), then
         // the shapes it rejects — minute precision with an offset, and `±HHMM`
         // without the colon (`%#z` takes both colon styles).
@@ -557,6 +590,21 @@ fn parse_time(s: &str) -> Option<i64> {
     (0..=MAX_EPOCH).contains(&epoch).then_some(epoch)
 }
 
+/// `HH:MM` or `HHMM` — the tail of a `+HH:MM` offset whose `+` was
+/// percent-decoded to a space in the query string.
+fn looks_like_utc_offset(t: &str) -> bool {
+    match t.len() {
+        4 => t.bytes().all(|b| b.is_ascii_digit()),
+        5 => {
+            t.as_bytes()[2] == b':'
+                && t.bytes()
+                    .enumerate()
+                    .all(|(i, b)| i == 2 || b.is_ascii_digit())
+        }
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::parse_time;
@@ -575,6 +623,12 @@ mod tests {
             "2026-06-15T11:30Z",
             "2026-06-15T11:30+02:00",
             "2026-06-15T11:30:00+0200",
+            // What the handler actually receives when a client sends `+HH:MM`
+            // raw in a query string: `+` percent-decodes to a space
+            // (PR #217 review).
+            "2026-06-15T11:30:00 02:00",
+            "2026-06-15T11:30 0200",
+            "2026-06-15 11:30:00 02:00",
         ] {
             assert!(parse_time(s).is_some(), "{s} should be valid");
         }
@@ -588,8 +642,9 @@ mod tests {
         assert_eq!(parse_time("2026-06-15 11:13:20"), Some(epoch));
         assert_eq!(parse_time(&epoch.to_string()), Some(epoch));
         assert_eq!(parse_time(&format!("{}000", epoch)), Some(epoch)); // millis
-        // Offsets shift correctly.
+        // Offsets shift correctly — including with the `+` lost in transit.
         assert_eq!(parse_time("2026-06-15T13:13:20+02:00"), Some(epoch));
+        assert_eq!(parse_time("2026-06-15T13:13:20 02:00"), Some(epoch));
         // Date-only is midnight UTC.
         assert_eq!(parse_time("1970-01-02"), Some(86_400));
     }

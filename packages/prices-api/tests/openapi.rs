@@ -507,5 +507,5 @@ async fn batch_and_search_publish_their_bounds() {
         .expect("?search is documented");
     let schema = resolve_schema(&spec, &search["schema"]);
     assert_eq!(schema["minLength"], 1, "search minLength: {schema}");
-    assert_eq!(schema["maxLength"], 12, "search maxLength: {schema}");
+    assert_eq!(schema["maxLength"], 64, "search maxLength: {schema}");
 }
