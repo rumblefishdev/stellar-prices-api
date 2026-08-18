@@ -84,6 +84,23 @@ history:
       last of which removed `unsafe` from the test suite entirely. Two Low
       frontend fixes alongside. The findings ledger below is now the accurate
       one; the earlier claim of "no Medium defect" was wrong.
+  - date: "2026-08-18"
+    status: active
+    who: claude
+    note: >
+      External review on #220 by karczuRF raised three findings; all three were
+      confirmed by execution and fixed (F6–F8 below). The strongest was that
+      `Endpoints::from_env` was live in the deployed Lambda, so a
+      `lambda:UpdateFunctionConfiguration` holder could redirect the token
+      exchange and exfiltrate the client secret without a `GetSecretValue` of
+      their own — and the comment above it asserted the opposite. **None of the
+      three would have been caught by a mutation sweep**, because each concerned
+      behaviour never declared as a property; they are the argument for an
+      independent reader over more of the same method. Separately, `develop`
+      moved twelve commits ([[0119]]) and CI — which builds the MERGE, not the
+      branch — failed on a test helper this branch had never seen. Merged and
+      fixed, and the portal handlers adopted [[0119]]'s `ValidatedQuery` so a
+      malformed query stops reading to the bundle as a backend outage.
 ---
 
 # Discord sign-in — identity only
@@ -341,6 +358,10 @@ fixed in code**, the rest are recorded open with a reason.
 | F3 | Medium | **A data race in the integration suite.** `Endpoints::from_env` ran inside `app()`, so `env::var` executed on all 28 router constructions while 13 of them called `set_var` — on parallel libtest threads. That is the UB `set_var` is `unsafe` for, and it surfaces as an intermittent segfault rather than a red test. Fixed by carrying the endpoints on `AppConfig`, which removes the race by construction and takes `unsafe` out of the tests entirely. | `config.rs`, `portal/mod.rs`, `tests/portal_auth.rs` | `8b30664` |
 | F4 | Low | **No way out of a failed session check.** When `/auth/me` answered anything but a session, the page reported the error and removed the sign-in control. | `web/portal/src/app/app.tsx` | `6d8e804` |
 | F5 | Low | **The sign-out re-read dropped its canceller.** `load()` returns one and the mount effect used it, but `onSignOut` discarded it, so that request's `live` flag could never be flipped — defeating the guard the file documents. | `web/portal/src/app/app.tsx` | `8b30664` |
+| F6 | Medium | **Every Discord OAuth error was reported as "cancelled", and none was logged.** `if query.error.is_some()` did not look at the value. `invalid_scope` — what Discord returns when the Developer Portal registration has drifted from `discord::SCOPE`, the same drift the token-response check exists to catch — landed every visitor on "Sign-in cancelled." with nothing in CloudWatch. It presents as every visitor changing their mind, forever. Now `access_denied` alone is a cancellation; everything else is a logged failure on `?signin=failed`, with the attacker-controlled value truncated, stripped and kept out of the URL. | `auth/mod.rs`, `callback` | `74cc547` |
+| F7 | Medium | **`Endpoints::from_env()` was live in the deployed Lambda.** Proved by running a `--features lambda` build: `DISCORD_API_BASE` moved the endpoint. `exchange_code` then posts `client_secret` and the authorization `code` to a host of the setter's choosing — exfiltrating the secret with no `GetSecretValue` of their own in CloudTrail, since the Lambda does its usual read and posts the result out. `lambda:UpdateFunctionConfiguration` suffices, and that is distinct from `UpdateFunctionCode`. The overrides are now compiled out under the `lambda` feature; `PORTAL_OAUTH_SECRET_FILE` too, because the same permission attaches **layers**, whose contents unpack to `/opt` — one permission places a chosen file and points this at it, handing over `session_signing_key` and with it a session for any Discord ID. `redirect` also stopped `expect`ing its `Location`: a newline in the authorize URL panicked the task, so the caller got a dropped connection rather than a status. | `auth/discord.rs`, `auth/secret.rs`, `auth/mod.rs` | `74cc547` |
+| F8 | Low | **A malformed callback answered `502 discord_unavailable`.** Keyless and throttled at 10 req/s, so anyone could call `/auth/login`, take the `state` and replay it with no `code` to manufacture 5xx on demand — polluting the alarms [[0204]] is building and making a real Discord outage indistinguishable from a script. Now `400 invalid_query`; the pending cookie still goes, because `state` has verified by then. | `auth/mod.rs`, `callback` | `74cc547` |
+| F9 | — | **Portal query params were extracted with axum's `Query`, not [[0119]]'s `ValidatedQuery`.** Drift the merge created rather than a defect either side shipped: this branch was cut before those wrappers landed. It mattered more than "consistency" — a `text/plain` rejection is read by [[0185]]'s `getJson` as "could not reach the portal backend", so a caller's own duplicated query key presented to them as an outage and to anyone reading the page as a routing regression. | `auth/mod.rs` | `225b28f` |
 
 ### Open, with reasons
 
@@ -383,10 +404,25 @@ hypothesis that would have been serious if it had held.
 
 ### Mutation coverage
 
-15 defects introduced one at a time, each targeting a declared security
-property: **14 detected, 1 undetectable** (O3). The one that was missed and is
-now covered is F1. This is the evidence that the suite detects defects rather
-than merely passing — the numbers, not the count of tests.
+Three sweeps, 25 defects introduced one at a time, each targeting a declared
+property: **24 detected, 1 undetectable** (O3). Two were missed on first run and
+both are now covered — F1's action comparison, and the absence of a log line on
+a Discord failure, which needed the decision extracted into `refuse_oauth_error`
+so a test could drive it with a capturing subscriber. "There is a `warn!` here"
+is exactly the claim that survives its own deletion.
+
+This is the evidence that the suite detects defects rather than merely passing —
+the numbers, not the count of tests.
+
+### What the sweeps did NOT find
+
+Worth stating plainly, because it bounds the method. **None of the three
+findings in the external review (F6–F8) would have been caught by any mutation
+sweep**, because each concerned behaviour that was never declared as a property:
+"only a cancellation is silent", "the Lambda ignores the overrides", "a client
+error is not a 5xx". A mutation sweep proves the properties you wrote are
+enforced. It says nothing about the ones you did not think to write, and that is
+where an independent reader earns their place.
 
 ## Design Decisions
 
