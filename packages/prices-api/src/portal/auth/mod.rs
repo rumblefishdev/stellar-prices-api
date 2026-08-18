@@ -259,6 +259,13 @@ async fn callback(
     // restructuring of this handler.
     match accepted.action {
         Action::SignIn => {}
+        // Compiled only into the test build, and unreachable even there:
+        // `Action::parse` never yields `TestOther`, so `/auth/login` cannot mint
+        // a round-trip for it. Refused rather than `unreachable!()` — a panic in
+        // a public handler is a worse answer than a `400`, whatever the
+        // reasoning says about how it got here.
+        #[cfg(test)]
+        Action::TestOther => return refuse_state(StateError::ActionMismatch, drop_pending),
     }
 
     let token = match discord::exchange_code(

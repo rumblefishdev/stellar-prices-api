@@ -88,6 +88,23 @@ pub enum Action {
     /// Establish who the visitor is. The only action in this slice.
     #[serde(rename = "signin")]
     SignIn,
+    /// A second action that exists **only under `cfg(test)`**.
+    ///
+    /// Not [0189]'s `issue` arriving early — it is never parsed from a query
+    /// string, never minted by [`start`] outside a test, and is compiled out of
+    /// every shipped binary. It exists because with a single variant the
+    /// [`StateError::ActionMismatch`] arm in [`accept`] is **unreachable**, and
+    /// an unreachable branch is an untested one: deleting the comparison
+    /// entirely left the whole suite green, which is exactly the regression the
+    /// action slot is supposed to be protected against when [0189] adds a real
+    /// second action.
+    ///
+    /// The alternative — asserting the mismatch through a hand-signed payload
+    /// carrying an unknown action string — does not test this branch at all. It
+    /// fails earlier, at deserialization, and reports [`StateError::BadSignature`].
+    #[cfg(test)]
+    #[serde(rename = "test-only-other")]
+    TestOther,
 }
 
 impl Action {
@@ -101,6 +118,8 @@ impl Action {
     pub fn parse(raw: &str) -> Option<Self> {
         match raw {
             "signin" => Some(Self::SignIn),
+            // `TestOther` is deliberately absent: it must not be reachable from
+            // a query string even in a test build.
             _ => None,
         }
     }
@@ -439,6 +458,51 @@ mod tests {
             // the same outcome as a bad signature and is the correct one: an
             // older deployment must not complete an action it cannot check.
             StateError::BadSignature
+        );
+    }
+
+    /// The branch the crossed-payload test above cannot reach.
+    ///
+    /// Both halves are genuine, correctly signed, share a nonce and are in
+    /// date — they disagree about the ACTION and nothing else. Removing the
+    /// comparison in `accept` makes this the only failing test in the suite,
+    /// which is the property the slot is carried for: when [0189] adds a real
+    /// second action, the check is already there and already exercised.
+    #[test]
+    fn two_genuine_halves_that_disagree_about_the_action_are_refused() {
+        let signin = start(KEY, Action::SignIn, NOW);
+        // A pending cookie for a DIFFERENT action, sharing the sign-in's nonce
+        // so that the nonce check passes and the action check is what decides.
+        let state: StateClaims = verify_claims(KEY, CTX_STATE, &signin.state_param).unwrap();
+        let crossed_pending = sign_claims(
+            KEY,
+            CTX_PENDING,
+            &PendingClaims {
+                action: Action::TestOther,
+                nonce: state.nonce.clone(),
+                verifier: "a-verifier".into(),
+                exp: state.exp,
+            },
+        );
+
+        assert_eq!(
+            accept(KEY, &signin.state_param, Some(&crossed_pending), NOW).unwrap_err(),
+            StateError::ActionMismatch
+        );
+
+        // …and the same pair, agreeing, is accepted — so the test above is
+        // failing on the action and not on something incidental.
+        let agreeing = start(KEY, Action::TestOther, NOW);
+        assert_eq!(
+            accept(
+                KEY,
+                &agreeing.state_param,
+                Some(&agreeing.pending_cookie),
+                NOW
+            )
+            .unwrap()
+            .action,
+            Action::TestOther
         );
     }
 
