@@ -81,6 +81,25 @@ history:
       GiB across the five tables (799 active parts), so both snapshots peak at
       ~33.6 GiB plus ~4-6 GiB of new parts, ~9% of the 430.6 GiB free. BE
       messaged about the volume. Still no FREEZE taken and no partition written.
+  - date: 2026-08-18
+    status: active
+    who: okarcz
+    note: >
+      RUN EXECUTED AND VERIFIED — all five forever-tables corrected, from
+      fishuser-hero, in roughly four hours rather than the 10-15 h budgeted.
+      567,760 rows re-opened and recomputed against the 567,232 sized on
+      2026-08-13. The implied rate now tracks USDT's measured value on every
+      tier (2026 cluster 0.1494-0.1529, was a flat 1.000000), and on `_1h` the
+      monthly series shows par for exactly 15 months then the June 2022 break to
+      ~0.13 — matching 0172's independent measurement, and confirming the epoch
+      left the pre-depeg par window untouched. Route (c) held: pass 1 drained
+      each table to its floor first, so `rows_reset ~= rows_enriched` stayed
+      meaningful and every table was checked on it. 18 rows across `_1d`/`_1w`/
+      `_1M` came out at close_usd = 0 and tripped the shortfall guard; all 18 are
+      dust (close of 0 or below ~4e-14, underflowing at Decimal(38,14)) and none
+      had a representable price to lose. That false positive is now documented in
+      the runbook. Remaining: BE notification, snapshot cleanup, the guard test,
+      and volume_quote_usd.
 ---
 
 # `close_usd` is ~7.4× too high on every USDT-quoted candle ever written
@@ -721,10 +740,63 @@ merges reclaim. ~40 GiB peak against 430.6 GiB free, about **9%**. Comfortable
 against the volume — but note it is a **~68% increase on our own 58.93 GiB
 footprint**, which is the shape BE would see if they went looking.
 
-## 🚧 What is NOT done — this is a tool, not a correction
+## ✅ THE RUN — executed and verified 2026-08-18
 
-**Not one published price has changed.** Same trap already recorded for [[0168]]
-and for [[0172]] itself: a green PR that stops the bleeding is not the fix.
+Executed from fishuser-hero as `prices_writer` over mTLS, route (c), two
+snapshots. **~4 hours end to end**, against a 10-15 h budget — the estimate
+assumed 32M rows spread over 36 months and they were concentrated in about 20.
+
+### Pass 2 — the correction this task exists for
+
+| table | reset | recomputed | at zero (dust) |
+|---|---|---|---|
+| `_1h` | 357,274 | 358,315 | — |
+| `_4h` | 157,858 | 158,319 | — |
+| `_1d` | 41,573 | 41,565 | 8 |
+| `_1w` | 8,266 | 8,261 | 5 |
+| `_1M` | 2,789 | 2,784 | 5 |
+| **total** | **567,760** | | **18** |
+
+**567,760 against the 567,232 sized on 2026-08-13** — 528 apart after five days
+of live writes, and `_1M` landed on 2,789 exactly. `rows_reset <= rows_enriched`
+on every table.
+
+### Verification — the acceptance criterion
+
+Implied rate for 2026, all five tiers, where the pre-run baseline was a flat
+`1.000000` on every one:
+
+| tier | rate | candles |
+|---|---|---|
+| `1h` | 0.1529 | 27,335 |
+| `4h` | 0.1520 | 14,609 |
+| `1d` | 0.1506 | 4,507 |
+| `1w` | 0.1494 | 791 |
+| `1M` | 0.1525 | 205 |
+
+A 2.3% spread, which is bucket-weighted averaging differing between
+granularities. On `_1h` the full monthly series reads **par for exactly 15
+months** (202102-202204), then 0.973 → 0.734 → 0.294 across the June 2022 break,
+settling at 0.134 by 202608. That is [[0172]]'s measured series arrived at from a
+completely different direction — and it confirms the epoch: the par window below
+the break kept its correct `$1` rather than being zeroed.
+
+### The 18 rows that tripped the shortfall guard
+
+`_1d`, `_1w` and `_1M` each warned that rows were re-opened but not recomputed.
+All 18 are **dust** — `close` of exactly 0, or below ~4e-14 where `rate × close`
+underflows at `Decimal(38, 14)` — across four asset ids (1552, 55249, 15952,
+43381). Five of `_1d`'s eight were already at `close_usd = 0` before the reset
+touched them. `stranded_with_real_close` returned **0** on all three tables:
+nothing with a usable price ended at zero.
+
+⚠️ **The guard cannot distinguish "recomputed to zero" from "value destroyed"**,
+because `rows_enriched` is a population difference and a row written with a zero
+value never leaves the zero population. It also advises checking
+`--pivot-window-s`, which was never involved. Triage procedure and worked example
+are now in `docs/runbooks/repair-coarse-usd-values.md`.
+
+## 🚧 What is NOT done
 
 Remaining, in order:
 
@@ -735,18 +807,21 @@ Remaining, in order:
    route (c)**, sequenced — 0201's pass first, then 0182's reset over a table at
    its floor. See the decision section above for why, and for what each pass
    runs. **The run is no longer blocked on this.**
-4. **Snapshots** — CH admin must `FREEZE` every partition in span (**67 months ×
-   5 tables** under route (c)); `prices_writer` cannot and cannot be granted it.
-   ✅ Count settled 2026-08-18: **two**, `repair_0182_pre_…` then
-   `repair_0182_mid_…`, across the three admin windows tabled above.
-   ⛔ **Not taken.** This is the one thing still standing between here and the
-   run.
-5. **The run**, `_1h` first (the table BE consumes), reviewed before the next.
-   ⚠️ Raise `--pivot-window-s` for `_1w`/`_1M` — the 1-day default silently drops
-   references older than a day, which every weekly bucket's anchor may be.
-6. **Verify** the implied-rate probe moves off 1.0, then tell BE the window.
-7. **UNFREEZE and reclaim** — see below. Nothing expires a snapshot; ~33.6 GiB
-   stays pinned until an admin removes it.
+4. ~~**Snapshots**~~ ✅ **taken 2026-08-18** — `repair_0182_pre_` across all five
+   (335 = 67 × 5, 17G, matching the 16.82 GiB measured), then `repair_0182_mid_`
+   after each table's pass 1. Operator holds CH admin, so the three windows were
+   self-served rather than a second person.
+5. ~~**The run**~~ ✅ **done 2026-08-18** — `_1h` first and reviewed before the
+   rest, `--pivot-window-s 2678400` throughout. See the results section above.
+6. ~~**Verify** the implied-rate probe moves off 1.0~~ ✅ **done** — all five
+   tiers at ~0.15 for 2026. ⛔ **BE not yet told**, and the same message should
+   chase the `volume_quote_usd` question open since 2026-08-13.
+7. **UNFREEZE and reclaim** — ⛔ outstanding. `repair_0182_pre_*` is dead once the
+   verification above passed; `repair_0182_mid_*` is live rollback and worth
+   holding overnight. ⚠️ **Also 150 stale `repair_0114_*` snapshots (~12G)** found
+   in `shadow/` during this run — 0114 is `completed` and archived, so they are
+   dead rollback points. Clean them up in the same pass; they are this task's
+   own cleanup lesson already having happened once.
 
 ## 🧹 Cleanup — the snapshots do not expire and nothing reclaims them
 
@@ -784,11 +859,11 @@ the half that gets forgotten.
       pre-2021 window at `close × $1` and document the epoch boundary. BE
       confirmed 2026-08-13 that history matters (30D/1Y charts) and that their
       deepest surface is 1Y, which never reaches the boundary.
-- [ ] If correcting: the **five forever granularities** (`1h/4h/1d/1w/1M`)
-      consistent afterwards, verified by re-running the `implied rate` probe
-      (should move from ~1.0 to the measured per-bucket USDT rate).
-      ⚠️ Not "all six" — `_1m`/`_15m` are retention-bounded and deliberately
-      excluded.
+- [x] The **five forever granularities** (`1h/4h/1d/1w/1M`) consistent
+      afterwards — ✅ 2026-08-18, all five at 0.1494-0.1529 for 2026 where the
+      baseline was a flat `1.000000`, and `_1h`'s monthly series reproduces
+      [[0172]]'s par-then-depeg shape. ⚠️ Not "all six" — `_1m`/`_15m` are
+      retention-bounded and deliberately excluded.
 - [x] The `--dry-run` preview is **non-vacuous** — ✅ 2026-08-13, 67 months on
       every one of the five tables, not the "no enrichable zeros" all-clear the
       unmodified 0114 driver returns for these rows (see the driver gap above).

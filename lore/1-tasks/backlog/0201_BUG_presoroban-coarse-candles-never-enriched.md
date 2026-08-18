@@ -27,6 +27,20 @@ history:
     status: backlog
     who: okarcz
     note: >
+      THE WORK IS DONE — as pass 1 of 0182's route (c) campaign, on all five
+      forever-tables. 53,965,024 rows recovered: _1h 33,073,568, _4h 13,868,017,
+      _1d 4,930,151, _1w 1,521,267, _1M 572,021. Each table's total reconciles
+      with that morning's dry-run figure to within its own reset population,
+      which is four independent confirmations. ⚠️ THE TITLE UNDERSTATES IT — "32M"
+      was _1h alone; the campaign was two-thirds larger. Status left at backlog
+      deliberately: the data outcome is complete but this file still describes
+      the work as pending, and closing it is the assignee's call. What a closure
+      needs to state: the recoverable window is 2022-04 -> 2024-01, not
+      2021-02 -> 2024-01, and everything below 2022-04 is exotic-quoted floor.
+  - date: 2026-08-18
+    status: backlog
+    who: okarcz
+    note: >
       RE-MEASURED during 0182's pass 1 — the classification below is wrong about
       the SPAN. It attributes ~32M fillable XLM-quoted rows to 2021-02..2024-01;
       almost none are below 2022-04. Every month from 202110 to 202203 ran with
@@ -95,6 +109,32 @@ the run, not after.** 0114 reported those months drained. Candidates: 202608
 post-dates its end month; the 0088 pre-roll wrote coarse rows after it ran; or
 its `one_shot` drain left more behind than the summary implied. Whichever it is,
 it changes what "done" looks like here.
+
+## ✅ RECOVERED 2026-08-18 — 53,965,024 rows, as pass 1 of 0182's campaign
+
+| table | enriched | left at the no_reference floor |
+|---|---|---|
+| `price_ohlcv_1h` | 33,073,568 | 74,282,984 |
+| `price_ohlcv_4h` | 13,868,017 | 39,595,149 |
+| `price_ohlcv_1d` | 4,930,151 | 12,981,344 |
+| `price_ohlcv_1w` | 1,521,267 | 2,873,278 |
+| `price_ohlcv_1M` | 572,021 | 890,603 |
+| **total** | **53,965,024** | |
+
+Every table's `enriched + floor` falls short of that morning's dry-run total by
+almost exactly its own USDT reset population (`_1h` 354,803 vs 357,002 expected ·
+`_4h` 154,685 vs 157,683 · `_1d` 39,882 vs 41,505 · `_1w` 8,233 vs 8,253 · `_1M`
+2,767 vs 2,789). Four independent confirmations that the two passes saw the
+populations they were supposed to, from a direction neither pass measures
+directly.
+
+⚠️ **The title understates this task.** "32M" was `price_ohlcv_1h` alone — the
+only table the 2026-08-13 classification broke down by class. The real campaign
+was two-thirds larger.
+
+Run cost ~4 h across both passes and all five tables, against a 10-15 h estimate
+that assumed the rows were spread over 36 months. They were concentrated in about
+20 — see below.
 
 ## ⚠️ Re-measured 2026-08-18 during 0182's pass 1 — the SPAN above is wrong
 
