@@ -98,7 +98,12 @@ pub async fn require_api_key(State(auth): State<AuthConfig>, req: Request, next:
 /// not secret); equal-length inputs are compared with a branch-free XOR
 /// accumulation so timing does not reveal how many bytes matched. Mirrors BE's
 /// `ct_eq`.
-fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+///
+/// `pub(crate)` for the portal's sign-in (task 0186), which compares an HMAC tag
+/// and a CSRF nonce and needs exactly this property. Reused rather than
+/// re-derived: one implementation of "compare two secrets" is one place to get
+/// it right, and a second copy is a second place for `==` to creep back in.
+pub(crate) fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }

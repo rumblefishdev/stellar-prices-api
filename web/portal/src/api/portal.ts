@@ -31,6 +31,25 @@ export interface PortalConfig {
   enabled: boolean;
 }
 
+/**
+ * What `GET /api-tokens/api/auth/me` answers (task 0186).
+ *
+ * Mirrors `MeResponse` in `packages/prices-api/src/portal/auth/mod.rs`. Same
+ * reason it is hand-written as `PortalConfig` above: the portal's routes are
+ * deliberately absent from the published OpenAPI document, so there is nothing
+ * to generate it from.
+ *
+ * `authenticated: false` is a `200`, not a `401` — being signed out is an
+ * answer, not a refusal, and this page renders plain text for it.
+ */
+export interface PortalSession {
+  authenticated: boolean;
+  /** The Discord user ID (a snowflake). Present only when authenticated. */
+  user_id?: string;
+  /** The Discord username, for display. Present only when authenticated. */
+  username?: string;
+}
+
 export class PortalApiError extends Error {
   constructor(
     message: string,
@@ -129,3 +148,56 @@ async function getJson<T>(url: string): Promise<T> {
  */
 export const fetchPortalConfig = (): Promise<PortalConfig> =>
   getJson<PortalConfig>(`${PORTAL_API}/config`);
+
+/**
+ * `GET /api-tokens/api/auth/me` — who the browser is talking as (task 0186).
+ *
+ * No credential is passed here and none could be: the session is an `HttpOnly`
+ * cookie, so this code cannot read it and does not need to. The browser attaches
+ * it because the request is **same-origin** — the property task 0184 bought and
+ * that `PORTAL_API` being a relative path preserves. An absolute URL here would
+ * make it cross-site, at which point `SameSite=Lax` withholds the cookie and
+ * every visitor reads as signed out.
+ */
+export const fetchSession = (): Promise<PortalSession> =>
+  getJson<PortalSession>(`${PORTAL_API}/auth/me`);
+
+/**
+ * Where the "Sign in with Discord" control points.
+ *
+ * A **plain link**, not a `fetch`. The flow is three top-level navigations —
+ * here, to Discord, back to the callback — and `fetch` cannot perform any of
+ * them: it would follow the redirect to discord.com as a cross-origin request,
+ * with no consent screen the visitor can see and no way to come back. This is
+ * also why the session cookie is `SameSite=Lax` rather than `Strict`: `Lax`
+ * sends cookies on exactly this kind of navigation.
+ */
+export const signInUrl = (): string => `${PORTAL_API}/auth/login`;
+
+/**
+ * `POST /api-tokens/api/auth/logout` — clear the session.
+ *
+ * `POST`, because the backend only accepts that: a `GET` sign-out is triggerable
+ * by any third-party page that can make the browser issue a request, which
+ * `SameSite=Lax` permits for top-level navigations.
+ *
+ * Answers `204` with no body, so this does not go through `getJson`.
+ */
+export async function signOut(): Promise<void> {
+  const url = `${PORTAL_API}/auth/logout`;
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: 'POST',
+      signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
+    });
+  } catch {
+    throw new PortalApiError(`${url} could not be reached`);
+  }
+  if (!response.ok) {
+    throw new PortalApiError(
+      `${url} answered ${response.status}`,
+      response.status,
+    );
+  }
+}

@@ -20,6 +20,14 @@ pub fn app_without_ch() -> Router {
         base_url: None,
         api_keys: vec![],
         portal_enabled: false,
+        // Sign-in credentials are loaded asynchronously from Secrets Manager
+        // (task 0186) and are never part of the environment; `None` is the
+        // shape every non-portal test wants. With `portal_enabled: false` the
+        // routes answer an empty 404 regardless.
+        portal_oauth: None,
+        // Discord endpoints travel on the config rather than being read from
+        // the process environment per router — see `AppConfig::portal_endpoints`.
+        portal_endpoints: Default::default(),
     };
     app(&config, AppState::without_ch())
 }

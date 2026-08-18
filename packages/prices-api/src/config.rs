@@ -33,6 +33,32 @@ pub struct AppConfig {
     /// half-built portal to the internet. Defaults are chosen per flag by what
     /// goes wrong when the variable is forgotten.
     pub portal_enabled: bool,
+    /// Credentials for portal sign-in (task 0186): the Discord client id and
+    /// secret, the registered redirect URI, and the key the session and `state`
+    /// cookies are signed with.
+    ///
+    /// **Not read from the environment**, which is the point — ADR 0007 and
+    /// Tranche 3 AC 6 forbid a secret value in an env var. [`Self::from_env`]
+    /// leaves this `None` and [`Self::load_portal_oauth`] fills it from Secrets
+    /// Manager, asynchronously, because the read is an HTTP call.
+    ///
+    /// `None` means sign-in is not configured on this deployment, which is the
+    /// normal state while `portal_enabled` is false.
+    pub portal_oauth: Option<crate::portal::auth::secret::OauthSecret>,
+    /// Which Discord to talk to (task 0186). Production always takes the
+    /// defaults; the overrides exist for the local round-trip and for the tests.
+    ///
+    /// Carried on the config rather than read inside [`crate::app`], and that is
+    /// not a style choice. Reading it per-router meant `std::env::var` ran on
+    /// every `app()` call while the integration suite was calling
+    /// `std::env::set_var` to point routers at a mock — on parallel test
+    /// threads. Concurrent `getenv`/`setenv` is undefined behaviour (glibc can
+    /// realloc `environ` under a reader), which is why `set_var` is `unsafe` in
+    /// edition 2024, and in practice it is an intermittent segfault that takes
+    /// the whole test binary down. Threading the value through the config
+    /// removes the race by construction instead of serialising around it, and
+    /// leaves no `unsafe` in the tests at all.
+    pub portal_endpoints: crate::portal::auth::discord::Endpoints,
 }
 
 impl AppConfig {
@@ -55,6 +81,42 @@ impl AppConfig {
             portal_enabled: std::env::var("PORTAL_ENABLED")
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                 .unwrap_or(false),
+            portal_oauth: None,
+            portal_endpoints: crate::portal::auth::discord::Endpoints::from_env(),
+        }
+    }
+
+    /// Fill [`Self::portal_oauth`] from Secrets Manager, or from the local file
+    /// named by `PORTAL_OAUTH_SECRET_FILE`.
+    ///
+    /// Called by both entrypoints after [`Self::from_env`]. It is a separate,
+    /// async step because it performs I/O, and it is *conditional* on
+    /// [`Self::portal_enabled`], which is the load-bearing part:
+    ///
+    /// Production runs with `PORTAL_ENABLED=false` for the whole of the portal's
+    /// build (`compute-stack.ts`, flipped by task 0194). If a cold start read
+    /// this secret unconditionally it would fail on a deployment where nobody
+    /// has created it yet — and that failure is not confined to the portal.
+    /// `main.rs` builds one router for every route group (ADR 0008), so a panic
+    /// in init takes out `/v1` as well, to protect four routes that answer an
+    /// empty `404` either way.
+    ///
+    /// With the portal **open**, the opposite stance: a missing or malformed
+    /// secret is fatal, because the alternative is a portal that renders a
+    /// sign-in button which answers `503`. Fail at deploy, in the Lambda's `Init
+    /// Errors` metric, not at a visitor's click.
+    pub async fn load_portal_oauth(
+        &mut self,
+    ) -> Result<(), crate::portal::auth::secret::SecretError> {
+        if !self.portal_enabled {
+            return Ok(());
+        }
+        match crate::portal::auth::secret::OauthSecret::load().await? {
+            Some(secret) => {
+                self.portal_oauth = Some(secret);
+                Ok(())
+            }
+            None => Err(crate::portal::auth::secret::SecretError::NoSource),
         }
     }
 }

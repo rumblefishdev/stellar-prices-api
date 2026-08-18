@@ -86,6 +86,41 @@ export function mtlsSecretName(envName: string, role: MtlsRole): string {
 }
 
 /**
+ * Secrets Manager secret name holding the onboarding portal's Discord OAuth
+ * bundle — the value `PORTAL_OAUTH_SECRET_NAME` resolves to at Lambda runtime
+ * (see `packages/prices-api/src/portal/auth/secret.rs`, task 0186).
+ *
+ * A JSON object with four fields:
+ *
+ * ```json
+ * {
+ *   "client_id":           "...",
+ *   "client_secret":       "...",
+ *   "redirect_uri":        "https://<host>/api-tokens/api/auth/callback",
+ *   "session_signing_key": "<openssl rand -hex 32>"
+ * }
+ * ```
+ *
+ * Deliberately alongside {@link mtlsSecretName} rather than in a stack: this is
+ * the third place the same rule applies, and putting the helper here is what
+ * stops the name drifting between the IAM grant, the env var and the runbook the
+ * operator types `create-secret` from. Same shape, same reasoning, one file.
+ *
+ * **Created out-of-band by the operator, never by CDK** — the same rule
+ * `SecretsStack` states for the mTLS material, and here it is load-bearing for a
+ * second reason: `redirect_uri` changes at the custom-domain cutover ([0195]),
+ * and a CloudFormation-managed value would be silently restored to the committed
+ * one by the next `cdk deploy`, un-pointing sign-in hours or weeks after the
+ * cutover appeared to succeed.
+ *
+ *   portalOauthSecretName('production')
+ *     === 'prices/production/portal-discord-oauth'
+ */
+export function portalOauthSecretName(envName: string): string {
+  return `prices/${envName}/portal-discord-oauth`;
+}
+
+/**
  * Build the wildcard-suffixed Secrets Manager ARN for a secret name.
  *
  * AWS Secrets Manager appends a random 6-char suffix to every secret
