@@ -2,7 +2,7 @@
 id: "0120"
 title: "Endpoint conformance — all 7 route groups return correct, schema-valid responses for 20 major assets"
 type: TEST
-status: backlog
+status: active
 related_adr: ["0008"]
 related_tasks: ["0072", "0118", "0119", "0124", "0128"]
 tags: [layer-backend, priority-high, effort-medium, milestone-M2, api, testing, verification, acceptance]
@@ -19,6 +19,11 @@ history:
       acceptance criterion 1 — the only AC that covers the full public API
       surface, which M1 deployed but never verified beyond
       `GET /backfill/status`.
+  - date: 2026-08-18
+    status: active
+    who: stkrolikiewicz
+    note: >
+      Promoted to active — starting the endpoint conformance pass.
 ---
 
 # Endpoint conformance for 20 major assets
