@@ -877,7 +877,13 @@ the half that gets forgotten.
 - [ ] Guard against re-introduction: the [[0172]] regression tests already pin
       the writer; add a data-level check that no USDT-quoted candle carries
       `close_usd / close ≈ 1.0`
-- [ ] BE notified of the corrected values and the window affected
+- [x] **BE notified** — ✅ 2026-08-18. Told them: corrected from 2021-02-07 on,
+      all five granularities, 567,760 candles; values below that boundary
+      unchanged and already correct; nothing they deployed ever served the
+      inflated numbers. Also warned them that ~54M previously-unpriced candles
+      now carry values, which is directly visible to them since they render
+      `--` on a `close_usd = 0` miss. The `volume_quote_usd` question was sent
+      again in the same message.
 - [ ] **Snapshots removed** — both `repair_0182_pre_…` and `repair_0182_mid_…`
       unfrozen after verification, with `du` on `shadow/` back to its
       pre-campaign size rather than merely smaller. ⚠️ ~33.6 GiB on a volume BE
