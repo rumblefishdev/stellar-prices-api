@@ -2,9 +2,9 @@
 id: "0119"
 title: "Input-validation hardening — every path, query and body param rejected with 400 on invalid input"
 type: FEATURE
-status: active
+status: completed
 related_adr: ["0006", "0008"]
-related_tasks: ["0040", "0118", "0120"]
+related_tasks: ["0040", "0118", "0120", "0206"]
 tags: [layer-backend, priority-high, effort-medium, milestone-M2, api, validation, security]
 milestone: 2
 links:
@@ -26,6 +26,20 @@ history:
     note: >
       Activated. First of the M2 verification sequence agreed with okarcz:
       stkrolikiewicz takes [[0119]] -> [[0120]] -> [[0121]] in that order.
+  - date: 2026-08-18
+    status: completed
+    who: stkrolikiewicz
+    note: >
+      COMPLETED via PR #217 (squash-merged to develop, approved by okarcz).
+      All 8 ACs met. Four implementation phases + two hardening rounds: an
+      8-angle /code-review (10 verified findings, 9 fixed — incl. a
+      client-reachable 500 via the cursor and a fencepost in the window cap)
+      and okarcz's 7-point review (all applied — length-only search/cursor
+      rules matching the real data model, URL-safe cursors, '+'-decoding
+      recovery in dates, span-derived auto-granularity that also defuses the
+      2029 timeframe=all cliff). ~50 CH-less negative tests in CI + 21
+      live-CH integration tests; prices-api added to the clippy gate.
+      Spawned [[0206]] for the deferred follow-ups.
 ---
 
 # Input-validation hardening
@@ -95,18 +109,112 @@ range/limit params the handler accepts.
 
 ## Acceptance Criteria
 
-- [ ] Every param documented in §4.1–§4.5 has an enumerated or range-checked
+- [x] Every param documented in §4.1–§4.5 has an enumerated or range-checked
       validator, with a table in the task mapping param → rule → error code
-- [ ] Invalid input on every endpoint returns `400` with the standard error
+- [x] Invalid input on every endpoint returns `400` with the standard error
       body; none returns 500 or a silently clamped result
-- [ ] Malformed/truncated/foreign `cursor` values return `400`, not a silent
+- [x] Malformed/truncated/foreign `cursor` values return `400`, not a silent
       first page
-- [ ] `POST /prices/batch` enforces a documented maximum batch size
-- [ ] An over-wide `start`/`end` range is rejected explicitly rather than
+- [x] `POST /prices/batch` enforces a documented maximum batch size (100
+      elements + 16 KB `DefaultBodyLimit`)
+- [x] An over-wide `start`/`end` range is rejected explicitly rather than
       truncated to `OHLCV_MAX_POINTS`
-- [ ] Negative tests cover each rule and run in CI
-- [ ] No validation path issues a ClickHouse query before rejecting
-- [ ] OpenAPI spec reflects the enumerations and ranges (feeds [[0124]])
+- [x] Negative tests cover each rule and run in CI (CH-less, plain
+      `cargo test --workspace`)
+- [x] No validation path issues a ClickHouse query before rejecting (proved
+      structurally: the test state panics on CH access)
+- [x] OpenAPI spec reflects the enumerations and ranges (feeds [[0124]];
+      contract-tested in `tests/openapi.rs`)
+
+## Implementation Notes
+
+Shipped as PR #217 (8 commits, squash-merged 2026-08-18). Layout:
+
+- `src/common/extract.rs` (new) — `ValidatedQuery`/`ValidatedJson`/
+  `ValidatedPath` wrappers routing every axum extractor rejection into the
+  `ErrorEnvelope` (new `invalid_body` code; `Cache-Control: no-store` on 400s).
+- `src/assets/queries_ch.rs` — the six param enums derive
+  `Deserialize + ToSchema` with explicit renames; the six stringly `parse_*`
+  fns and the `now() - INTERVAL` SQL path are deleted.
+  `Granularity::finest_for_span` picks the auto-granularity for explicit
+  windows and `timeframe=all`.
+- `src/assets/handlers.rs` — window rule (`start ≤ end`,
+  `ceil(span/granularity)+1 ≤ 5000`, clamped derived start, future-start
+  message), `parse_time` (chrono; epoch/date/datetime incl. recovered
+  `+`-offsets), length-only `search` cap.
+- `src/common/cursor.rs` — `deny_unknown_fields`, 256-char token cap,
+  URL-safe encoding (STANDARD still decoded), `valid_for` type-check against
+  the active sort.
+- `src/batch/` — 16 KB `DefaultBodyLimit`; schema bounds asserted against
+  `MAX_BATCH`.
+- Tests: `tests/{common/,batch,list,ohlcv}.rs` (~50 CH-less negative tests) +
+  OpenAPI contract tests; `.github/workflows/ci.yml` clippy line gains
+  `prices-api`.
+
+## Design Decisions
+
+### From Plan
+
+1. **Wrapper extractors over axum-extra/WithRejection** — zero new deps; the
+   old 415/422 plain-text rejections had no machine-readable contract worth
+   preserving, so uniform 400 + envelope.
+2. **Typed serde enums as the single source** for validation and the OpenAPI
+   document (AC 1 + AC 8 from one mechanism).
+3. **CH-less negative tests as structural proof of AC 7** —
+   `AppState::without_ch` panics on any CH access, so every clean 400 also
+   proves no query preceded the rejection.
+4. **Validated epoch binds into SQL** (`toDateTime(?)`), not the raw string —
+   exactly one interpretation of the window.
+
+### Emerged
+
+5. **Length-only rules wherever a value is compared against `asset_code`**
+   (search, code-sort cursor payloads; shared `MAX_STRING_PAYLOAD_LEN = 64`):
+   the DB legitimately holds empty and lossy-decoded codes, so any charset
+   rule 400s values the API itself serves. Surfaced by okarcz's review after
+   the initial charset approach shipped for `search`.
+6. **URL-safe cursors with STANDARD-decode fallback** — `next_cursor` echoed
+   verbatim into a query string must survive percent-decoding; in-flight
+   STANDARD tokens keep working across the deploy.
+7. **Query-string `+` recovery in `parse_time`** — a literal `+` offset
+   percent-decodes to a space; a trailing ` HH:MM`/` HHMM` after a time is
+   reinterpreted as the lost `+`. The space *separator* is fixed positionally
+   (byte 10), not first-match.
+8. **Span-derived auto-granularity** for explicit windows and `timeframe=all`
+   (finest fitting 5000 points) — answers `?start=`-only requests at a
+   granularity the caller can use, and self-coarsens `all` (1d today, 1w
+   post-2029) instead of the recorded cliff.
+9. **Anchor-to-end window semantics** and **UTC pinning of naive datetimes** —
+   consumer-visible flips, recorded in Notes.
+10. **Batch body cap 16 KB** — sized from `MAX_BATCH` × identifier length;
+    stops multi-MB bodies from being parsed just to fail the element cap.
+
+## Issues Encountered
+
+- **utoipa-axum does not auto-register params-tuple `$ref` schemas** — the
+  served document carried dangling refs until the six enums were listed in
+  `ApiDoc::components`; caught by the new enum-publication contract test.
+- **`+` percent-decoding** made offset-carrying dates and STANDARD-base64
+  cursors unreachable over real HTTP while unit tests passed — both found in
+  review, both now covered by tests written against the post-decode forms.
+- **serde_urlencoded duplicate known keys** error out (→ 400 envelope), which
+  became the recorded duplicate-param policy for free.
+- Local `docker compose` ClickHouse (prod-pinned 26.3.10.60) smoke caught the
+  one positive-path regression (see modified tests below).
+
+**Broken/modified tests:** `tests/ohlcv_it.rs::ohlcv_merges_sources_and_notes_backfill`
+leaned on the old silent-truncation semantics (`timeframe=all&granularity=1h`);
+narrowed with explicit `start`/`end` around the seeded candles — intentional,
+not a regression. `tests/list.rs` search/cursor negative tests were rewritten
+twice as the rules evolved (charset → length-only; STANDARD → URL-safe).
+
+## Future Work
+
+Spawned [[0206]]: cursor `{sort, order}` binding (closes the recorded
+same-typed-sort-swap limitation), `ValidatedPath<AssetIdentifier>` (deletes
+four identical parse blocks; makes `invalid_id` correct by construction),
+shared negative-test assert helper, `parse_time` rejection-block dedup
+(natural fold-in when [[0118]] adds `min_volume_usd`).
 
 ## Validation table (AC 1)
 
