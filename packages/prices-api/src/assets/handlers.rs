@@ -1,7 +1,7 @@
 //! Axum handlers for the `/v1/assets` resource.
 
 use axum::Json;
-use axum::extract::{Path, Query, State};
+use axum::extract::State;
 use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 
@@ -12,6 +12,7 @@ use crate::assets::queries_ch::{
     self, BaseCurrency, Granularity, ListArgs, OhlcvArgs, Order, SortCol, Timeframe, TypeFilter,
 };
 use crate::common::errors::ErrorEnvelope;
+use crate::common::extract::{ValidatedPath, ValidatedQuery};
 use crate::common::{cache_control, cursor, errors};
 use crate::identity::AssetIdentifier;
 use crate::state::AppState;
@@ -47,7 +48,10 @@ const MAX_LIMIT: u32 = 200;
         (status = 500, description = "Query or upstream failure (`db_error`)", body = ErrorEnvelope),
     )
 )]
-pub async fn get_price(State(state): State<AppState>, Path(raw): Path<String>) -> Response {
+pub async fn get_price(
+    State(state): State<AppState>,
+    ValidatedPath(raw): ValidatedPath<String>,
+) -> Response {
     let id = match AssetIdentifier::parse(&raw) {
         Ok(id) => id,
         Err(e) => return errors::bad_request(errors::INVALID_ID, e.to_string()),
@@ -84,7 +88,10 @@ pub async fn get_price(State(state): State<AppState>, Path(raw): Path<String>) -
         (status = 500, description = "Query or upstream failure (`db_error`)", body = ErrorEnvelope),
     )
 )]
-pub async fn get_asset(State(state): State<AppState>, Path(raw): Path<String>) -> Response {
+pub async fn get_asset(
+    State(state): State<AppState>,
+    ValidatedPath(raw): ValidatedPath<String>,
+) -> Response {
     let id = match AssetIdentifier::parse(&raw) {
         Ok(id) => id,
         Err(e) => return errors::bad_request(errors::INVALID_ID, e.to_string()),
@@ -117,14 +124,21 @@ pub async fn get_asset(State(state): State<AppState>, Path(raw): Path<String>) -
     }
 }
 
-/// Query parameters for `GET /assets`.
+/// Cap on the `?search` prefix — the shared "compared against `asset_code`"
+/// rule (see its definition for why length-only).
+const MAX_SEARCH_LEN: usize = cursor::MAX_STRING_PAYLOAD_LEN;
+
+/// Query parameters for `GET /assets`. Enum params deserialize straight into
+/// their typed forms — an unknown token fails serde and surfaces as a 400
+/// through `ValidatedQuery`; unknown query *keys* are deliberately ignored
+/// (forward-compatible, matches API Gateway cache-key behavior).
 #[derive(Debug, Deserialize)]
 pub struct ListParams {
     #[serde(rename = "type")]
-    pub asset_type: Option<String>,
+    pub asset_type: Option<TypeFilter>,
     pub search: Option<String>,
-    pub sort: Option<String>,
-    pub order: Option<String>,
+    pub sort: Option<SortCol>,
+    pub order: Option<Order>,
     pub cursor: Option<String>,
     pub limit: Option<u32>,
 }
@@ -135,17 +149,15 @@ pub struct ListParams {
     path = "/assets",
     tag = "assets",
     params(
-        ("type" = Option<String>, Query, description = "classic | soroban | all (default all)"),
-        ("search" = Option<String>, Query, description = "asset code prefix match"),
-        ("sort" = Option<String>, Query,
+        ("type" = Option<TypeFilter>, Query, description = "classic | soroban | all (default all)"),
+        ("search" = Option<String>, Query,
+         description = "asset code prefix match (max 64 bytes; an empty value \
+                        is treated as absent)",
+         min_length = 1, max_length = 64),
+        ("sort" = Option<SortCol>, Query,
          description = "price | volume_24h | change_24h | code (default volume_24h)"),
-        ("order" = Option<String>, Query, description = "asc | desc (default desc)"),
+        ("order" = Option<Order>, Query, description = "asc | desc (default desc)"),
         ("cursor" = Option<String>, Query, description = "opaque pagination cursor"),
-        // The bound is enforced (`limit == 0 || limit > MAX_LIMIT` → 400) but was
-        // invisible to clients until now: a caller sending limit=500 got a 400
-        // with nothing in the document explaining why. Task 0119 owns extending
-        // this treatment to the remaining params (enums, `search` length, date
-        // ranges); this one is declared here because it is already enforced.
         ("limit" = Option<u32>, Query, description = "1..=200 (default 50)",
          minimum = 1, maximum = 200),
     ),
@@ -158,28 +170,39 @@ pub struct ListParams {
         (status = 500, description = "Query or upstream failure (`db_error`)", body = ErrorEnvelope),
     )
 )]
-pub async fn get_assets(State(state): State<AppState>, Query(p): Query<ListParams>) -> Response {
-    let Some(sort) = SortCol::parse(p.sort.as_deref()) else {
-        return errors::bad_request(errors::INVALID_QUERY, "invalid sort");
-    };
-    let Some(order) = Order::parse(p.order.as_deref()) else {
-        return errors::bad_request(errors::INVALID_QUERY, "invalid order");
-    };
-    let Some(type_filter) = TypeFilter::parse(p.asset_type.as_deref()) else {
-        return errors::bad_request(errors::INVALID_QUERY, "invalid type");
-    };
+pub async fn get_assets(
+    State(state): State<AppState>,
+    ValidatedQuery(p): ValidatedQuery<ListParams>,
+) -> Response {
+    let sort = p.sort.unwrap_or(SortCol::Volume24h);
+    let order = p.order.unwrap_or(Order::Desc);
+    let type_filter = p.asset_type.unwrap_or(TypeFilter::All);
     let limit = p.limit.unwrap_or(DEFAULT_LIMIT);
     if limit == 0 || limit > MAX_LIMIT {
         return errors::bad_request(errors::INVALID_QUERY, "limit must be 1..=200");
     }
+    // `valid_for` type-checks the payload against the active sort — a numeric
+    // sort binds `v` into `toFloat64(?)`, where a corrupt value would make
+    // ClickHouse throw (500) instead of this 400.
     let cursor = match p.cursor.as_deref() {
         Some(tok) => match cursor::decode(tok) {
-            Some(c) => Some(c),
-            None => return errors::bad_request(errors::INVALID_QUERY, "invalid cursor"),
+            Some(c) if c.valid_for(sort.is_numeric()) => Some(c),
+            _ => return errors::bad_request(errors::INVALID_QUERY, "invalid cursor"),
         },
         None => None,
     };
+    // Empty search is treated as absent. Length-only cap, no charset: stored
+    // codes include lossy-decoded on-chain bytes, so a charset rule would make
+    // listed assets unsearchable (PR #217 review; same rule as the cursor).
     let search = p.search.filter(|s| !s.is_empty());
+    if let Some(s) = &search
+        && s.len() > MAX_SEARCH_LEN
+    {
+        return errors::bad_request(
+            errors::INVALID_QUERY,
+            format!("search must be at most {MAX_SEARCH_LEN} bytes"),
+        );
+    }
 
     let args = ListArgs {
         sort,
@@ -236,14 +259,15 @@ pub async fn get_assets(State(state): State<AppState>, Query(p): Query<ListParam
     resp
 }
 
-/// Query parameters for `GET /assets/{id}/ohlcv`.
+/// Query parameters for `GET /assets/{id}/ohlcv`. Enum params deserialize
+/// straight into their typed forms (see [`ListParams`] for the policy).
 #[derive(Debug, Deserialize)]
 pub struct OhlcvParams {
-    pub timeframe: Option<String>,
-    pub granularity: Option<String>,
+    pub timeframe: Option<Timeframe>,
+    pub granularity: Option<Granularity>,
     pub start: Option<String>,
     pub end: Option<String>,
-    pub base_currency: Option<String>,
+    pub base_currency: Option<BaseCurrency>,
 }
 
 /// `GET /assets/{asset_identifier}/ohlcv` — candlestick history.
@@ -258,12 +282,20 @@ pub struct OhlcvParams {
     tag = "prices",
     params(
         ("asset_identifier" = String, Path, description = "native, CODE:ISSUER, or a C… contract"),
-        ("timeframe" = Option<String>, Query, description = "1h | 24h | 7d | 30d | 1y | all (default 24h)"),
-        ("granularity" = Option<String>, Query,
-         description = "1m | 15m | 1h | 4h | 1d | 1w | 1M (auto from timeframe if omitted)"),
-        ("start" = Option<String>, Query, description = "ISO-8601 range start (overrides timeframe)"),
-        ("end" = Option<String>, Query, description = "ISO-8601 range end"),
-        ("base_currency" = Option<String>, Query, description = "USD (default) | XLM"),
+        ("timeframe" = Option<Timeframe>, Query,
+         description = "1h | 24h | 7d | 30d | 1y | all (default 24h)"),
+        ("granularity" = Option<Granularity>, Query,
+         description = "1m | 15m | 1h | 4h | 1d | 1w | 1M; omitted = timeframe default, or \
+                        the finest fitting 5000 points for explicit windows and `all`"),
+        ("start" = Option<String>, Query,
+         description = "range start: ISO-8601 or unix epoch (seconds; ms if 13+ digits); \
+                        overrides timeframe"),
+        ("end" = Option<String>, Query,
+         description = "range end, same forms; with only `end`, the timeframe window \
+                        ends there"),
+        ("base_currency" = Option<BaseCurrency>, Query,
+         description = "USD (default) | XLM; all-lowercase usd/xlm accepted as \
+                        legacy aliases"),
     ),
     responses(
         (status = 200, description = "Candlestick series", body = OhlcvResponse),
@@ -279,38 +311,98 @@ pub struct OhlcvParams {
 )]
 pub async fn get_ohlcv(
     State(state): State<AppState>,
-    Path(raw): Path<String>,
-    Query(p): Query<OhlcvParams>,
+    ValidatedPath(raw): ValidatedPath<String>,
+    ValidatedQuery(p): ValidatedQuery<OhlcvParams>,
 ) -> Response {
     let id = match AssetIdentifier::parse(&raw) {
         Ok(id) => id,
         Err(e) => return errors::bad_request(errors::INVALID_ID, e.to_string()),
     };
-    let Some(timeframe) = Timeframe::parse(p.timeframe.as_deref()) else {
-        return errors::bad_request(errors::INVALID_QUERY, "invalid timeframe");
-    };
-    let Some(base_currency) = BaseCurrency::parse(p.base_currency.as_deref()) else {
-        return errors::bad_request(errors::INVALID_QUERY, "invalid base_currency");
-    };
-    let granularity = match p.granularity.as_deref() {
-        None => timeframe.default_granularity(),
-        Some(s) => match Granularity::parse(s) {
-            Some(g) => g,
-            None => return errors::bad_request(errors::INVALID_QUERY, "invalid granularity"),
+    let timeframe = p.timeframe.unwrap_or(Timeframe::H24);
+    let base_currency = p.base_currency.unwrap_or(BaseCurrency::Usd);
+
+    // Window rule (task 0119): parse ?start/?end to epochs, then bound-check the
+    // whole window BEFORE the DB is touched. Explicit rejection replaces the old
+    // silent truncation at OHLCV_MAX_POINTS, which looked like missing data.
+    // Granularity is resolved AFTER the window (see below): when omitted, it
+    // derives from what the caller actually asked for.
+    let start = match p.start.as_deref() {
+        Some(s) => match parse_time(s) {
+            Some(t) => Some(t),
+            None => {
+                return errors::bad_request(
+                    errors::INVALID_QUERY,
+                    "invalid start (expected ISO-8601 or epoch)",
+                );
+            }
         },
+        None => None,
     };
-    // Validate ?start / ?end up front — otherwise a malformed value is bound into
-    // ClickHouse `parseDateTimeBestEffort(?)`, which throws → a 500 for what is a
-    // client input error (should be 400).
-    if let Some(s) = p.start.as_deref()
-        && !valid_iso8601(s)
-    {
-        return errors::bad_request(errors::INVALID_QUERY, "invalid start (expected ISO-8601)");
+    let end = match p.end.as_deref() {
+        Some(e) => match parse_time(e) {
+            Some(t) => Some(t),
+            None => {
+                return errors::bad_request(
+                    errors::INVALID_QUERY,
+                    "invalid end (expected ISO-8601 or epoch)",
+                );
+            }
+        },
+        None => None,
+    };
+    let now = chrono::Utc::now().timestamp();
+    let eff_end = end.unwrap_or(now);
+    // The timeframe window anchors to eff_end (not now), so `?end=…&timeframe=7d`
+    // means "the 7d window ending there". `all` starts at Stellar genesis. The
+    // derived branch is clamped to epoch 0: it is the one bound `parse_time`'s
+    // range check never saw, and a negative value would reach `toDateTime(?)`
+    // (ClickHouse DateTime is unsigned — throw or wraparound, both wrong).
+    let eff_start = start.unwrap_or_else(|| {
+        match timeframe.seconds() {
+            Some(tf) => eff_end - tf as i64,
+            None => queries_ch::STELLAR_GENESIS_EPOCH,
+        }
+        .max(0)
+    });
+    // Strictly greater: `start == end` is a legitimate one-bucket window, since
+    // the SQL bounds are inclusive on both ends.
+    if eff_start > eff_end {
+        // A future-only `start` trips this with an `end` the client never sent —
+        // name the actual problem instead (review finding, PR #217).
+        let message = if end.is_none() && start.is_some_and(|s| s > now) {
+            "start is in the future"
+        } else {
+            "start must be before end"
+        };
+        return errors::bad_request(errors::INVALID_QUERY, message);
     }
-    if let Some(e) = p.end.as_deref()
-        && !valid_iso8601(e)
-    {
-        return errors::bad_request(errors::INVALID_QUERY, "invalid end (expected ISO-8601)");
+    let span = (eff_end - eff_start) as u64;
+    // Granularity, when omitted, follows what the caller asked for: a plain
+    // timeframe keeps its documented default; an explicit window (and
+    // `timeframe=all`, whose span grows with time) gets the finest granularity
+    // that fits the point cap — so `?start=2020-01-01` alone is answerable
+    // instead of 400ing at a granularity the caller never chose, and bare
+    // `timeframe=all` self-coarsens instead of hitting a cliff around 2029.
+    let explicit_window = start.is_some() || end.is_some();
+    let granularity = match p.granularity {
+        Some(g) => g,
+        None if !explicit_window && !timeframe.is_all() => timeframe.default_granularity(),
+        None => Granularity::finest_for_span(span, OHLCV_MAX_POINTS),
+    };
+    // `+ 1`: the SQL bounds are inclusive on both ends, so an aligned window
+    // spanning exactly N buckets contains N + 1 bucket-start timestamps —
+    // counting span/granularity alone would let a 5001-bucket request through
+    // to be silently truncated by the LIMIT.
+    let points = span.div_ceil(granularity.seconds()) + 1;
+    if points > OHLCV_MAX_POINTS {
+        return errors::bad_request(
+            errors::INVALID_QUERY,
+            format!(
+                "window yields ~{points} candles at granularity {g} (max {OHLCV_MAX_POINTS}); \
+                 use a coarser granularity or a narrower start/end",
+                g = granularity.as_str()
+            ),
+        );
     }
 
     // Resolve the base asset.
@@ -347,18 +439,19 @@ pub async fn get_ohlcv(
         Err(e) => return errors::db_error(&e, "quote lookup"),
     };
 
-    let since_interval = if p.start.is_some() {
-        None
-    } else {
-        timeframe.interval()
-    };
+    // The validated window is exactly what binds into SQL — the same eff_start
+    // the point-count check measured, so there is one interpretation of the
+    // window, not a parallel now() - INTERVAL path that could drift from it
+    // (INTERVAL 1 YEAR is calendar-aware; seconds() isn't). The upper bound
+    // binds only when the client supplied one: a derived `end = now` from this
+    // process's clock could, under skew, cut a bucket ClickHouse already has —
+    // an open top costs nothing (future buckets don't exist).
     let args = OhlcvArgs {
         asset_id,
         quote_asset_id,
         granularity,
-        start: p.start.clone(),
-        end: p.end.clone(),
-        since_interval,
+        start: Some(eff_start),
+        end,
         limit: OHLCV_MAX_POINTS,
     };
     let data = match queries_ch::ohlcv(state.ch(), args).await {
@@ -423,78 +516,141 @@ async fn sdex_backfill_running(ch: &clickhouse::Client) -> bool {
     }
 }
 
-/// Lightweight ISO-8601 / epoch validation for `?start` / `?end`. Accepts what
-/// our clients send (and what ClickHouse `parseDateTimeBestEffort` consumes)
-/// without pulling in a datetime crate: a bare epoch (all digits), or a
-/// `YYYY-MM-DD` date optionally followed by `T`/space and an `HH:MM[:SS][.fff]`
-/// time with an optional `Z` / `±HH:MM` offset. Anything else (e.g. `notadate`)
-/// is rejected so the handler returns 400 instead of letting CH error → 500.
-fn valid_iso8601(s: &str) -> bool {
+/// Latest epoch we accept for `?start` / `?end`: 2100-01-01. Bounds what gets
+/// bound into ClickHouse `toDateTime` (DateTime tops out in 2106) and rejects
+/// nonsense like a 12-digit "epoch" that is really a typo.
+const MAX_EPOCH: i64 = 4_102_444_800;
+
+/// Parse a `?start` / `?end` value to epoch seconds (UTC). Accepts a bare
+/// epoch (seconds; milliseconds when 13+ digits), `YYYY-MM-DD` (midnight
+/// UTC), and `YYYY-MM-DD[T ]HH:MM[:SS[.fff]]` with an optional `Z` / `±HH:MM`
+/// / `±HHMM` offset (naive times are UTC). Unlike its shape-only predecessor,
+/// this rejects semantically impossible dates (`2026-02-30`, `T99:99:99`) —
+/// and the parsed epoch (not the raw string) is what reaches SQL, so there is
+/// exactly one interpretation of the window.
+fn parse_time(s: &str) -> Option<i64> {
+    use std::borrow::Cow;
+
     let s = s.trim();
     if s.is_empty() {
-        return false;
+        return None;
     }
-    // Bare unix epoch (seconds / millis).
-    if s.bytes().all(|b| b.is_ascii_digit()) {
-        return true;
+    let epoch = if s.bytes().all(|b| b.is_ascii_digit()) {
+        // Digit count, not magnitude, decides seconds vs milliseconds — the
+        // documented rule. (10-digit millis, i.e. instants in 1970, are
+        // indistinguishable from valid seconds and read as seconds.)
+        let millis = s.len() >= 13;
+        let n: i64 = s.parse().ok()?;
+        if millis { n / 1000 } else { n }
+    } else if let Ok(d) = chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d") {
+        d.and_hms_opt(0, 0, 0)?.and_utc().timestamp()
+    } else {
+        // Datetime forms. Two query-string realities to undo before parsing
+        // (PR #217 review): the documented space separator sits exactly at
+        // byte 10 (fix it positionally — replacing the FIRST space would
+        // corrupt the next case), and a literal `+` percent-decodes to a
+        // space, so a trailing " HH:MM" / " HHMM" after the time is a
+        // `+HH:MM` offset that lost its sign in transit.
+        let mut norm: Cow<str> = if s.len() > 10 && s.as_bytes()[10] == b' ' {
+            Cow::Owned(format!("{}T{}", &s[..10], &s[11..]))
+        } else {
+            Cow::Borrowed(s)
+        };
+        if let Some(i) = norm.rfind(' ')
+            && looks_like_utc_offset(&norm[i + 1..])
+        {
+            let mut owned = norm.into_owned();
+            owned.replace_range(i..=i, "+");
+            norm = Cow::Owned(owned);
+        }
+        // Offset-carrying forms: RFC 3339 (`T`, seconds, `Z`/`±HH:MM`), then
+        // the shapes it rejects — minute precision with an offset, and `±HHMM`
+        // without the colon (`%#z` takes both colon styles).
+        let with_offset = chrono::DateTime::parse_from_rfc3339(&norm)
+            .ok()
+            .or_else(|| {
+                ["%Y-%m-%dT%H:%M:%S%.f%#z", "%Y-%m-%dT%H:%M%#z"]
+                    .iter()
+                    .find_map(|fmt| chrono::DateTime::parse_from_str(&norm, fmt).ok())
+            });
+        match with_offset {
+            Some(dt) => dt.timestamp(),
+            None => {
+                // Naive forms (UTC), seconds optional; a trailing `Z` marks
+                // the same UTC instant, so accept it on minute precision too.
+                let naive = norm.strip_suffix('Z').unwrap_or(&norm);
+                ["%Y-%m-%dT%H:%M:%S%.f", "%Y-%m-%dT%H:%M"]
+                    .iter()
+                    .find_map(|fmt| chrono::NaiveDateTime::parse_from_str(naive, fmt).ok())?
+                    .and_utc()
+                    .timestamp()
+            }
+        }
+    };
+    (0..=MAX_EPOCH).contains(&epoch).then_some(epoch)
+}
+
+/// `HH:MM` or `HHMM` — the tail of a `+HH:MM` offset whose `+` was
+/// percent-decoded to a space in the query string.
+fn looks_like_utc_offset(t: &str) -> bool {
+    match t.len() {
+        4 => t.bytes().all(|b| b.is_ascii_digit()),
+        5 => {
+            t.as_bytes()[2] == b':'
+                && t.bytes()
+                    .enumerate()
+                    .all(|(i, b)| i == 2 || b.is_ascii_digit())
+        }
+        _ => false,
     }
-    let bytes = s.as_bytes();
-    // Date prefix: exactly `YYYY-MM-DD`.
-    if bytes.len() < 10 {
-        return false;
-    }
-    let digit = |i: usize| bytes[i].is_ascii_digit();
-    if !(digit(0)
-        && digit(1)
-        && digit(2)
-        && digit(3)
-        && bytes[4] == b'-'
-        && digit(5)
-        && digit(6)
-        && bytes[7] == b'-'
-        && digit(8)
-        && digit(9))
-    {
-        return false;
-    }
-    let month = (bytes[5] - b'0') * 10 + (bytes[6] - b'0');
-    let day = (bytes[8] - b'0') * 10 + (bytes[9] - b'0');
-    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
-        return false;
-    }
-    if s.len() == 10 {
-        return true;
-    }
-    // Optional time component: separator (`T` or space) then time-ish chars only.
-    if bytes[10] != b'T' && bytes[10] != b' ' {
-        return false;
-    }
-    let time = &s[11..];
-    time.len() >= 5 // at least HH:MM
-        && time
-            .bytes()
-            .all(|b| b.is_ascii_digit() || matches!(b, b':' | b'.' | b'Z' | b'+' | b'-'))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::valid_iso8601;
+    use super::parse_time;
 
     #[test]
-    fn iso8601_accepts_common_forms() {
+    fn parse_time_accepts_common_forms() {
         for s in [
             "2026-06-15",
             "2026-06-15T11:30:00Z",
             "2026-06-15 11:30:00",
+            "2026-06-15T11:30",
             "2026-06-15T11:30:00.123+02:00",
             "1718450000",
+            // Offset shapes RFC 3339 alone rejects — accepted by the old
+            // parseDateTimeBestEffort pipeline, so still part of the contract.
+            "2026-06-15T11:30Z",
+            "2026-06-15T11:30+02:00",
+            "2026-06-15T11:30:00+0200",
+            // What the handler actually receives when a client sends `+HH:MM`
+            // raw in a query string: `+` percent-decodes to a space
+            // (PR #217 review).
+            "2026-06-15T11:30:00 02:00",
+            "2026-06-15T11:30 0200",
+            "2026-06-15 11:30:00 02:00",
         ] {
-            assert!(valid_iso8601(s), "{s} should be valid");
+            assert!(parse_time(s).is_some(), "{s} should be valid");
         }
     }
 
     #[test]
-    fn iso8601_rejects_garbage() {
+    fn parse_time_agrees_on_equivalent_forms() {
+        // The same instant in four spellings — all must produce one epoch,
+        // since the parsed value (not the raw string) is what reaches SQL.
+        let epoch = parse_time("2026-06-15T11:13:20Z").unwrap();
+        assert_eq!(parse_time("2026-06-15 11:13:20"), Some(epoch));
+        assert_eq!(parse_time(&epoch.to_string()), Some(epoch));
+        assert_eq!(parse_time(&format!("{}000", epoch)), Some(epoch)); // millis
+        // Offsets shift correctly — including with the `+` lost in transit.
+        assert_eq!(parse_time("2026-06-15T13:13:20+02:00"), Some(epoch));
+        assert_eq!(parse_time("2026-06-15T13:13:20 02:00"), Some(epoch));
+        // Date-only is midnight UTC.
+        assert_eq!(parse_time("1970-01-02"), Some(86_400));
+    }
+
+    #[test]
+    fn parse_time_rejects_garbage_and_impossible_dates() {
         for s in [
             "notadate",
             "",
@@ -503,8 +659,12 @@ mod tests {
             "2026-06-32",
             "06-15-2026",
             "T12:00:00",
+            "2026-02-30",          // impossible calendar date
+            "2026-06-15T99:99:99", // impossible time
+            "99999999999999999",   // over MAX_EPOCH even as millis
+            "999999999999",        // 12 digits = seconds by the rule → > 2100
         ] {
-            assert!(!valid_iso8601(s), "{s} should be invalid");
+            assert!(parse_time(s).is_none(), "{s} should be invalid");
         }
     }
 }

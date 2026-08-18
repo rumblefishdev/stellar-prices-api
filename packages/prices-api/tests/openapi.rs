@@ -416,3 +416,96 @@ async fn spec_response_is_cacheable_but_revalidates_within_the_gateway_ttl() {
     // cache_control::DEPLOY_STATIC.
     assert_eq!(cache_control.as_deref(), Some("public, max-age=300"));
 }
+
+/// Resolve a possibly-`$ref`/`allOf`-wrapped parameter schema to its target.
+/// Strict prefix (matching `referenced_schemas`), not `rsplit('/')` — a ref
+/// into another components family must fail loudly, not silently look up
+/// `schemas.<name>` and return null.
+fn resolve_schema<'a>(spec: &'a Value, schema: &'a Value) -> &'a Value {
+    let by_ref = |r: &str| {
+        let name = r
+            .strip_prefix("#/components/schemas/")
+            .unwrap_or_else(|| panic!("non-schema $ref in a parameter: {r}"));
+        &spec["components"]["schemas"][name]
+    };
+    if let Some(r) = schema["$ref"].as_str() {
+        return by_ref(r);
+    }
+    if let Some(r) = schema["allOf"][0]["$ref"].as_str() {
+        return by_ref(r);
+    }
+    schema
+}
+
+/// Task 0119 AC 8: every enum param publishes its exact value set, so a client
+/// generated from the document knows the tokens without reading prose.
+#[tokio::test]
+async fn enum_params_publish_their_values() {
+    let (_, _, spec) = fetch_spec(&config_with(None, vec![])).await;
+    const OHLCV: &str = "/v1/assets/{asset_identifier}/ohlcv";
+    let expected: &[(&str, &str, &[&str])] = &[
+        ("/v1/assets", "type", &["classic", "soroban", "all"]),
+        (
+            "/v1/assets",
+            "sort",
+            &["price", "volume_24h", "change_24h", "code"],
+        ),
+        ("/v1/assets", "order", &["asc", "desc"]),
+        (OHLCV, "timeframe", &["1h", "24h", "7d", "30d", "1y", "all"]),
+        (
+            OHLCV,
+            "granularity",
+            &["1m", "15m", "1h", "4h", "1d", "1w", "1M"],
+        ),
+        (OHLCV, "base_currency", &["USD", "XLM"]),
+    ];
+    for (path, param, values) in expected {
+        let params = spec["paths"][path]["get"]["parameters"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{path} documents no parameters"));
+        let p = params
+            .iter()
+            .find(|p| p["name"] == *param)
+            .unwrap_or_else(|| panic!("{path} does not document ?{param}"));
+        let schema = resolve_schema(&spec, &p["schema"]);
+        let published: Vec<&str> = schema["enum"]
+            .as_array()
+            .unwrap_or_else(|| panic!("?{param} on {path} publishes no enum: {schema}"))
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(&published, values, "?{param} on {path}");
+    }
+}
+
+/// Task 0119 AC 8: the non-enum constraints land in the document too — the
+/// batch array bounds (mirroring `MAX_BATCH`) and the `search` length cap.
+#[tokio::test]
+async fn batch_and_search_publish_their_bounds() {
+    let (_, _, spec) = fetch_spec(&config_with(None, vec![])).await;
+
+    let assets = &spec["components"]["schemas"]["BatchRequest"]["properties"]["assets"];
+    assert!(
+        assets.is_object(),
+        "BatchRequest.assets missing from schemas"
+    );
+    // Against the const, not a literal — so bumping MAX_BATCH without touching
+    // the #[schema] attribute fails here instead of shipping a lying document.
+    assert_eq!(assets["minItems"], 1, "assets minItems");
+    assert_eq!(
+        assets["maxItems"],
+        prices_api::batch::dto::MAX_BATCH as u64,
+        "assets maxItems must track MAX_BATCH"
+    );
+
+    let params = spec["paths"]["/v1/assets"]["get"]["parameters"]
+        .as_array()
+        .expect("GET /v1/assets documents parameters");
+    let search = params
+        .iter()
+        .find(|p| p["name"] == "search")
+        .expect("?search is documented");
+    let schema = resolve_schema(&spec, &search["schema"]);
+    assert_eq!(schema["minLength"], 1, "search minLength: {schema}");
+    assert_eq!(schema["maxLength"], 64, "search maxLength: {schema}");
+}

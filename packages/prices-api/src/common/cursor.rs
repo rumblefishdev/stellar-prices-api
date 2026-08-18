@@ -6,11 +6,17 @@
 //! strings/floats in SQL); callers treat the whole token as opaque.
 
 use base64::Engine;
-use base64::engine::general_purpose::STANDARD;
+use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 
-/// Decoded cursor payload.
+/// Longest token we bother decoding. Our own tokens are well under 100 chars
+/// (a decimal string + a u32); anything longer is foreign.
+const MAX_TOKEN_LEN: usize = 256;
+
+/// Decoded cursor payload. `deny_unknown_fields` so a foreign token with extra
+/// keys is a 400, not a silently accepted lookalike.
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Cursor {
     /// Sort-column value of the last row.
     pub v: String,
@@ -18,19 +24,57 @@ pub struct Cursor {
     pub id: u32,
 }
 
-/// Encode a cursor to an opaque Base64 token.
+/// Longest value accepted where an `asset_code` is compared as a string: the
+/// `v` payload of a `sort=code` cursor, and the `?search` prefix. Real codes
+/// are ≤12 raw bytes, but the DB legitimately holds empty codes (Soroban rows)
+/// and lossy-decoded on-chain garbage (up to 3 bytes per replacement char), so
+/// the only safe rule is a byte-length cap — any charset restriction would 400
+/// a value the API itself serves (PR #217 review).
+pub const MAX_STRING_PAYLOAD_LEN: usize = 64;
+
+impl Cursor {
+    /// Whether `v` is a plausible payload for the active sort. Numeric sorts
+    /// bind `v` into `toFloat64(?)` — a non-numeric value would make ClickHouse
+    /// throw, turning a corrupt token into a 500, so `v` must parse to a finite
+    /// f64. String sorts bind `v` into a plain string comparison (no 500 risk),
+    /// so only a length cap applies.
+    ///
+    /// Known limitation (recorded in task 0119): the token does not carry which
+    /// sort/order produced it, so switching between two same-typed sorts
+    /// mid-walk yields a wrong page, not an error.
+    pub fn valid_for(&self, numeric_sort: bool) -> bool {
+        if numeric_sort {
+            self.v.parse::<f64>().is_ok_and(f64::is_finite)
+        } else {
+            self.v.len() <= MAX_STRING_PAYLOAD_LEN
+        }
+    }
+}
+
+/// Encode a cursor to an opaque Base64 token. URL-safe alphabet, no padding
+/// (PR #217 review): the STANDARD alphabet emits `+`/`=`, and a client echoing
+/// `next_cursor` into `?cursor=` without percent-encoding turns `+` into a
+/// space — killing pagination on a token the API itself issued.
 pub fn encode(v: &str, id: u32) -> String {
     let json = serde_json::to_vec(&Cursor {
         v: v.to_string(),
         id,
     })
     .unwrap_or_default();
-    STANDARD.encode(json)
+    URL_SAFE_NO_PAD.encode(json)
 }
 
 /// Decode an opaque token; `None` if malformed (caller maps to a 400).
+/// Accepts the STANDARD alphabet too, for tokens issued before the URL-safe
+/// switch that are still mid-walk.
 pub fn decode(token: &str) -> Option<Cursor> {
-    let bytes = STANDARD.decode(token).ok()?;
+    if token.len() > MAX_TOKEN_LEN {
+        return None;
+    }
+    let bytes = URL_SAFE_NO_PAD
+        .decode(token)
+        .or_else(|_| STANDARD.decode(token))
+        .ok()?;
     serde_json::from_slice(&bytes).ok()
 }
 
@@ -50,5 +94,54 @@ mod tests {
     fn rejects_garbage() {
         assert!(decode("!!!not-base64!!!").is_none());
         assert!(decode("YWJj").is_none()); // "abc" — valid base64, not our JSON
+    }
+
+    #[test]
+    fn issued_tokens_are_url_safe_and_old_standard_tokens_still_decode() {
+        // New tokens must survive a query string verbatim: no `+`, `/` or `=`.
+        let token = encode("1523400.50", 42);
+        assert!(
+            token
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'),
+            "token not URL-safe: {token}"
+        );
+        // Tokens minted before the URL-safe switch (STANDARD alphabet) must
+        // keep working mid-walk.
+        let old = STANDARD.encode(r#"{"v":"1523400.50","id":42}"#);
+        let c = decode(&old).expect("standard-alphabet token decodes");
+        assert_eq!(c.id, 42);
+    }
+
+    #[test]
+    fn rejects_foreign_and_oversized_tokens() {
+        // Extra keys → deny_unknown_fields.
+        let foreign = STANDARD.encode(r#"{"v":"1.0","id":1,"extra":true}"#);
+        assert!(decode(&foreign).is_none());
+        // Over the length cap.
+        let long = "A".repeat(MAX_TOKEN_LEN + 1);
+        assert!(decode(&long).is_none());
+    }
+
+    #[test]
+    fn valid_for_checks_numeric_payloads() {
+        let ok = decode(&encode("1523400.50", 42)).unwrap();
+        assert!(ok.valid_for(true));
+        let bad = decode(&encode("notanumber", 42)).unwrap();
+        assert!(!bad.valid_for(true));
+        let inf = decode(&encode("1e999", 42)).unwrap();
+        assert!(!inf.valid_for(true)); // parses to +inf — toFloat64 territory
+    }
+
+    #[test]
+    fn valid_for_accepts_any_short_string_payload_on_string_sorts() {
+        // The DB holds empty codes (Soroban rows) and lossy-decoded garbage —
+        // the API must accept back any cursor it can itself issue.
+        for v in ["USDC", "", "USD ", "\u{fffd}\u{fffd}", "1523400.50"] {
+            let c = decode(&encode(v, 42)).unwrap();
+            assert!(c.valid_for(false), "{v:?} should be a valid code payload");
+        }
+        let long = decode(&encode(&"x".repeat(65), 42)).unwrap();
+        assert!(!long.valid_for(false));
     }
 }

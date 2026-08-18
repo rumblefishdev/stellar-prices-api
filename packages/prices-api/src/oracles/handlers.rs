@@ -1,11 +1,12 @@
 //! Axum handlers for `/v1/oracles`.
 
 use axum::Json;
-use axum::extract::{Path, State};
+use axum::extract::State;
 use axum::response::{IntoResponse, Response};
 
 use crate::assets::queries_ch as assets_q;
 use crate::common::errors::ErrorEnvelope;
+use crate::common::extract::ValidatedPath;
 use crate::common::{cache_control, errors};
 use crate::identity::AssetIdentifier;
 use crate::oracles::dto::OraclesResponse;
@@ -34,7 +35,10 @@ use crate::state::AppState;
         (status = 500, description = "Query or upstream failure (`db_error`)", body = ErrorEnvelope),
     )
 )]
-pub async fn get_oracles(State(state): State<AppState>, Path(raw): Path<String>) -> Response {
+pub async fn get_oracles(
+    State(state): State<AppState>,
+    ValidatedPath(raw): ValidatedPath<String>,
+) -> Response {
     let id = match AssetIdentifier::parse(&raw) {
         Ok(id) => id,
         Err(e) => return errors::bad_request(errors::INVALID_ID, e.to_string()),
