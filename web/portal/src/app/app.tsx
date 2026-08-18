@@ -100,9 +100,19 @@ function SignIn() {
 
   if (session.state === 'failed') {
     return (
-      <p>
-        Could not check your sign-in status: <code>{session.reason}</code>
-      </p>
+      <>
+        <p>
+          Could not check your sign-in status: <code>{session.reason}</code>
+        </p>
+        {/* The control stays. A failed `/auth/me` usually means the backend is
+            unreachable, in which case signing in will fail too — but it can
+            also be one bad response, and a page that reports an error while
+            removing the only thing the visitor could do about it is a dead end
+            they can leave only by guessing at a reload. Signing in is a fresh
+            top-level navigation, so it does not depend on the request that just
+            failed. */}
+        <a href={signInUrl()}>Sign in with Discord</a>
+      </>
     );
   }
 

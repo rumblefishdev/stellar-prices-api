@@ -396,6 +396,24 @@ describe('sign in with Discord', () => {
   });
 
   /**
+   * A page that reports an error and removes the only control on it is a dead
+   * end the visitor can leave only by guessing at a reload. Signing in is a
+   * fresh top-level navigation, so it does not depend on the request that just
+   * failed — the button should still be there.
+   */
+  it('still offers sign-in when the session check fails', async () => {
+    stubRoutes({
+      [CONFIG_URL]: () => ({ json: async () => ({ enabled: true }) }),
+      [ME_URL]: () => ({ ok: false, status: 502 }),
+    });
+    renderAt('/');
+
+    await screen.findByText(/could not check your sign-in status/i);
+    const link = screen.getByRole('link', { name: /sign in with discord/i });
+    expect(link.getAttribute('href')).toBe('/api-tokens/api/auth/login');
+  });
+
+  /**
    * The closed portal must ask nothing about sessions. The gate answers
    * `/auth/me` with an empty 404 while the flag is off, so a call here would
    * render a failure on the page every visitor currently sees.

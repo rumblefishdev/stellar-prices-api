@@ -645,6 +645,9 @@ async fn a_mismatched_state_is_rejected_and_issues_no_session() {
     assert_eq!(reply.status, StatusCode::BAD_REQUEST);
     assert_eq!(reply.json()["code"], "invalid_state");
     assert!(reply.cookie(cookies::SESSION_COOKIE).is_none());
+    // And it leaves the browser's pending login alone — see
+    // `an_unverifiable_callback_cannot_cancel_someone_elses_sign_in`.
+    assert!(!reply.clears(cookies::PENDING_COOKIE));
     assert_eq!(
         mock.exchanges(),
         0,
@@ -740,15 +743,23 @@ async fn a_self_signed_pair_is_rejected() {
 /// The visitor pressed "Cancel". Not an error — plain text on the page, per the
 /// task, and the pending cookie is dropped so the abandoned flow cannot be
 /// resumed.
+///
+/// The `state` is required here as it is everywhere else. RFC 6749 §4.1.2.1
+/// makes the authorization server echo it on the error response too, so a
+/// cancellation that carries none did not come from Discord finishing our
+/// round-trip — see `an_unverifiable_callback_cannot_cancel_someone_elses_sign_in`.
 #[tokio::test]
 async fn a_cancelled_sign_in_returns_to_the_portal_saying_so() {
     let open = signed_in_app(true);
-    let pending = start_login(&open).await.pending;
+    let started = start_login(&open).await;
 
     let reply = fetch(
         &open,
-        &format!("{CALLBACK_PATH}?error=access_denied&error_description=nope"),
-        &[(cookies::PENDING_COOKIE, &pending)],
+        &format!(
+            "{CALLBACK_PATH}?error=access_denied&error_description=nope&state={}",
+            started.state
+        ),
+        &[(cookies::PENDING_COOKIE, &started.pending)],
     )
     .await;
 
@@ -756,6 +767,110 @@ async fn a_cancelled_sign_in_returns_to_the_portal_saying_so() {
     assert_eq!(reply.location(), "/api-tokens/?signin=cancelled");
     assert!(reply.clears(cookies::PENDING_COOKIE));
     assert!(reply.cookie(cookies::SESSION_COOKIE).is_none());
+}
+
+/// **A stranger must not be able to cancel a sign-in they cannot prove is
+/// theirs.**
+///
+/// `SameSite=Lax` sends the pending cookie on a top-level GET navigation, which
+/// is exactly what any third-party page can cause. While the handler cleared
+/// that cookie before verifying `state`, every shape below knocked a victim
+/// part-way through signing in back to `invalid_state` — for free, and
+/// invisibly: they would see only that signing in "did not work". No session
+/// could be issued and nothing was disclosed, so this was a denial of login
+/// rather than a break, but it needed no more than a link.
+///
+/// The fix is an ordering one: nothing touches the cookie until the callback
+/// has been shown to belong to the browser that sent it.
+#[tokio::test]
+async fn an_unverifiable_callback_cannot_cancel_someone_elses_sign_in() {
+    // Needs a working Discord: the point is that the victim's own callback
+    // still completes, which means it has to reach the token exchange.
+    let mock = MockDiscord::start("identify", None).await;
+    let open = app_against(&mock);
+
+    for attack in [
+        "error=access_denied",
+        "error=access_denied&state=not-a-real-state",
+        "code=x&state=not-a-real-state",
+        "code=x",
+        "state=not-a-real-state",
+        "",
+    ] {
+        let victim = start_login(&open).await;
+
+        // The victim's browser is navigated to the callback by a third party.
+        let attacked = fetch(
+            &open,
+            &format!("{CALLBACK_PATH}?{attack}"),
+            &[(cookies::PENDING_COOKIE, &victim.pending)],
+        )
+        .await;
+        assert!(
+            !attacked.clears(cookies::PENDING_COOKIE),
+            "`?{attack}` cleared a pending login it could not verify"
+        );
+        assert!(attacked.cookie(cookies::SESSION_COOKIE).is_none());
+
+        // …and the victim's own callback still completes.
+        let genuine = fetch(
+            &open,
+            &format!("{CALLBACK_PATH}?code=c&state={}", victim.state),
+            &[(cookies::PENDING_COOKIE, &victim.pending)],
+        )
+        .await;
+        assert_eq!(
+            genuine.status,
+            StatusCode::SEE_OTHER,
+            "`?{attack}` broke the victim's genuine callback"
+        );
+        assert!(genuine.cookie(cookies::SESSION_COOKIE).is_some());
+    }
+}
+
+/// The other half of the same rule: once `state` HAS verified, the cookie is
+/// spent and goes, whatever the outcome. Without this the replay defence would
+/// be gone.
+#[tokio::test]
+async fn a_verified_callback_always_drops_the_pending_cookie() {
+    let mock = MockDiscord::start("identify", None).await;
+    let open = app_against(&mock);
+
+    // Success.
+    let ok = start_login(&open).await;
+    let success = fetch(
+        &open,
+        &format!("{CALLBACK_PATH}?code=c&state={}", ok.state),
+        &[(cookies::PENDING_COOKIE, &ok.pending)],
+    )
+    .await;
+    assert!(success.clears(cookies::PENDING_COOKIE));
+
+    // Verified cancel.
+    let cancelled = start_login(&open).await;
+    let cancel = fetch(
+        &open,
+        &format!(
+            "{CALLBACK_PATH}?error=access_denied&state={}",
+            cancelled.state
+        ),
+        &[(cookies::PENDING_COOKIE, &cancelled.pending)],
+    )
+    .await;
+    assert!(cancel.clears(cookies::PENDING_COOKIE));
+
+    // Verified, but Discord did not complete.
+    let broken = MockDiscord::start("identify", Some(StatusCode::UNAUTHORIZED)).await;
+    let broken_app = app_against(&broken);
+    let failed = start_login(&broken_app).await;
+    let upstream = fetch(
+        &broken_app,
+        &format!("{CALLBACK_PATH}?code=c&state={}", failed.state),
+        &[(cookies::PENDING_COOKIE, &failed.pending)],
+    )
+    .await;
+    assert_eq!(upstream.status, StatusCode::BAD_GATEWAY);
+    assert!(upstream.clears(cookies::PENDING_COOKIE));
 }
 
 /// The Developer Portal registration and this code can disagree about scope,

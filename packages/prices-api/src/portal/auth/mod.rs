@@ -223,11 +223,46 @@ async fn callback(
         return unconfigured();
     };
 
-    // Cleared on EVERY path out of this handler, before the outcome is known.
-    // That is what makes a callback single-use: a second presentation of the
-    // same `code`+`state` arrives with no cookie and is refused by the first
-    // check in `state_token::accept`. Discord's codes are single-use too, but
-    // that is Discord's guarantee to keep, not ours to rely on.
+    // `state` FIRST, before the outcome is even read.
+    //
+    // Every branch below — including the "user pressed Cancel" one — runs only
+    // once this callback has been shown to belong to the browser that started
+    // the flow. RFC 6749 §4.1.2.1 requires the authorization server to echo
+    // `state` on the error response too, so an error callback that carries none
+    // did not come from Discord finishing our round-trip.
+    let Some(state_param) = query.state.as_deref() else {
+        return refuse_state(StateError::BadSignature);
+    };
+    let pending = cookies::read(&headers, cookies::PENDING_COOKIE);
+    let accepted = match state_token::accept(
+        &oauth.signing_key,
+        state_param,
+        pending.as_deref(),
+        state_token::now_secs(),
+    ) {
+        Ok(accepted) => accepted,
+        Err(error) => return refuse_state(error),
+    };
+
+    // Only NOW is the pending cookie dropped, and that ordering is the whole
+    // point of this arrangement.
+    //
+    // It still makes a callback single-use — every path from here on carries
+    // this header, so a second presentation of the same `code`+`state` finds no
+    // cookie and is refused by the first check in `state_token::accept`.
+    //
+    // What it no longer does is let a stranger cancel someone else's sign-in.
+    // Clearing before verification meant ANY unverifiable callback wiped an
+    // in-flight login: `?error=x`, `?state=<garbage>`, or no parameters at all.
+    // `SameSite=Lax` sends this cookie on a top-level GET navigation, which is
+    // exactly what a third-party page can cause, so a victim part-way through
+    // signing in could be knocked back to `invalid_state` by any page they
+    // visited. Nothing was disclosed and no session could be issued — it was a
+    // denial of login rather than a break — but it was free to perform and
+    // invisible to the victim, who would see only that signing in "did not
+    // work". A refusal now leaves the cookie alone: it is short-lived, it is
+    // useless without the matching `state`, and the legitimate flow it belongs
+    // to can still complete.
     let drop_pending = cookies::clear(cookies::PENDING_COOKIE, cookies::PENDING_PATH);
 
     // The visitor said no at the consent screen. Not an error — the page says
@@ -239,19 +274,17 @@ async fn callback(
         );
     }
 
-    let (Some(code), Some(state_param)) = (query.code.as_deref(), query.state.as_deref()) else {
-        return refuse_state(StateError::BadSignature, drop_pending);
-    };
-
-    let pending = cookies::read(&headers, cookies::PENDING_COOKIE);
-    let accepted = match state_token::accept(
-        &oauth.signing_key,
-        state_param,
-        pending.as_deref(),
-        state_token::now_secs(),
-    ) {
-        Ok(accepted) => accepted,
-        Err(error) => return refuse_state(error, drop_pending),
+    let Some(code) = query.code.as_deref() else {
+        // Verified state, but neither `code` nor `error`. Not something Discord
+        // produces; the cookie is spent either way, so it goes with the refusal.
+        return refuse_discord(
+            "callback shape",
+            discord::DiscordError::Decode {
+                url: CALLBACK_PATH.to_string(),
+                message: "callback carried neither `code` nor `error`".into(),
+            },
+            drop_pending,
+        );
     };
 
     // One action exists, and it is still matched rather than assumed. When
@@ -264,8 +297,20 @@ async fn callback(
         // a round-trip for it. Refused rather than `unreachable!()` — a panic in
         // a public handler is a worse answer than a `400`, whatever the
         // reasoning says about how it got here.
+        // `state` has already verified by this point, so the pending cookie is
+        // spent and goes with the refusal — the same rule every branch below
+        // follows.
         #[cfg(test)]
-        Action::TestOther => return refuse_state(StateError::ActionMismatch, drop_pending),
+        Action::TestOther => {
+            return refuse_discord(
+                "action",
+                discord::DiscordError::Decode {
+                    url: CALLBACK_PATH.to_string(),
+                    message: "action not implemented by this build".into(),
+                },
+                drop_pending,
+            );
+        }
     }
 
     let token = match discord::exchange_code(
@@ -431,19 +476,17 @@ fn unconfigured() -> Response {
 /// `400` with one message for all five reasons. `tracing` records which check
 /// fired, at `warn`, because a rise in one of them is the signal that someone is
 /// probing — but the caller is told only that it was rejected.
-fn refuse_state(error: StateError, drop_pending: String) -> Response {
+///
+/// **Deliberately does not touch the pending-login cookie.** A refusal here
+/// means this callback could not be shown to belong to the browser that sent
+/// it, so acting on that browser's state is precisely what must not happen —
+/// see the ordering note in `callback`.
+fn refuse_state(error: StateError) -> Response {
     tracing::warn!(reason = ?error, "portal sign-in callback rejected");
-    let mut response = errors::bad_request(
+    no_store(errors::bad_request(
         INVALID_STATE,
         "this sign-in could not be verified; start again from the portal",
-    );
-    response.headers_mut().append(
-        SET_COOKIE,
-        drop_pending
-            .parse()
-            .expect("a cleared cookie is a valid header value"),
-    );
-    no_store(response)
+    ))
 }
 
 /// Refuse a callback that Discord did not complete.
