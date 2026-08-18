@@ -83,6 +83,31 @@ const PORTAL_HOME: &str = "/api-tokens/";
 /// looking signed out.
 const CANCELLED_QUERY: &str = "?signin=cancelled";
 
+/// Appended to [`PORTAL_HOME`] when Discord refused the request for a reason
+/// that is **not** the visitor declining.
+///
+/// A separate landing state, and a literal like its sibling: the `error` value
+/// itself never reaches the URL. Telling the two apart matters because they
+/// point at different people — `access_denied` is the visitor's own choice and
+/// needs no action from us, while `invalid_scope` or `server_error` is ours or
+/// Discord's, and a page that calls it "cancelled" hides it from everyone.
+const FAILED_QUERY: &str = "?signin=failed";
+
+/// The one OAuth error code that means the visitor said no (RFC 6749 §4.1.2.1).
+///
+/// Every other value in that section — `invalid_request`,
+/// `unauthorized_client`, `unsupported_response_type`, `invalid_scope`,
+/// `server_error`, `temporarily_unavailable` — is a failure somebody has to
+/// know about.
+const ERROR_ACCESS_DENIED: &str = "access_denied";
+
+/// How much of Discord's `error` value reaches a log line.
+///
+/// It arrives in a query string on a public, keyless route, so it is
+/// attacker-controlled: bounded here rather than trusted to be one of the seven
+/// documented codes. Sanitised as well as truncated — see `sanitise_error`.
+const ERROR_LOG_MAX: usize = 64;
+
 /// Error code for every `state` rejection.
 ///
 /// One code for all five [`StateError`] variants, on purpose — see the type's
@@ -93,6 +118,9 @@ const INVALID_STATE: &str = "invalid_state";
 const DISCORD_UNAVAILABLE: &str = "discord_unavailable";
 /// Error code for reaching these routes on a deployment that has no credentials.
 const SIGN_IN_UNCONFIGURED: &str = "sign_in_unconfigured";
+/// Error code for a deployment whose sign-in configuration cannot produce a
+/// valid response — today, only a `Location` that is not a header value.
+const SIGN_IN_MISCONFIGURED: &str = "sign_in_misconfigured";
 
 /// Everything the four handlers share, cloned per request.
 ///
@@ -265,26 +293,41 @@ async fn callback(
     // to can still complete.
     let drop_pending = cookies::clear(cookies::PENDING_COOKIE, cookies::PENDING_PATH);
 
-    // The visitor said no at the consent screen. Not an error — the page says
-    // so in plain text and offers the button again.
-    if query.error.is_some() {
-        return redirect(
-            &format!("{PORTAL_HOME}{CANCELLED_QUERY}"),
-            vec![drop_pending],
-        );
+    // Discord refused. WHICH refusal decides both what the visitor is told and
+    // whether anyone is told at all.
+    if let Some(error) = query.error.as_deref() {
+        if error == ERROR_ACCESS_DENIED {
+            // The visitor said no at the consent screen. Their choice, not a
+            // fault: plain text on the page, the button still there, nothing
+            // logged. A `warn` per cancellation would be noise proportional to
+            // how many people change their mind.
+            return redirect(
+                &format!("{PORTAL_HOME}{CANCELLED_QUERY}"),
+                vec![drop_pending],
+            );
+        }
+
+        // Everything else is a failure somebody has to know about, and the one
+        // that matters most is `invalid_scope`: it is what Discord returns when
+        // the Developer Portal registration has drifted from `discord::SCOPE` —
+        // the very drift the token-response scope check exists to catch, taking
+        // a door that check never sees. Reported as "cancelled" and unlogged,
+        // it presents as every visitor changing their mind forever, with
+        // nothing in CloudWatch to contradict that reading.
+        return refuse_oauth_error(error, drop_pending);
     }
 
     let Some(code) = query.code.as_deref() else {
-        // Verified state, but neither `code` nor `error`. Not something Discord
-        // produces; the cookie is spent either way, so it goes with the refusal.
-        return refuse_discord(
-            "callback shape",
-            discord::DiscordError::Decode {
-                url: CALLBACK_PATH.to_string(),
-                message: "callback carried neither `code` nor `error`".into(),
-            },
-            drop_pending,
-        );
+        // Verified state, but neither `code` nor `error`.
+        //
+        // A `400`, not the `502` this used to answer. The distinction is not
+        // pedantry about status codes: these routes are keyless and throttled
+        // at 10 req/s, so anyone can call `/auth/login`, take the `state` it
+        // hands them, and replay it here to manufacture 5xx at will. That
+        // pollutes the alarm surface [0204] is building and makes a real
+        // Discord outage indistinguishable from a script. Discord is not
+        // unavailable here; the caller sent a malformed request.
+        return refuse_query("callback carried neither `code` nor `error`", drop_pending);
     };
 
     // One action exists, and it is still matched rather than assumed. When
@@ -299,17 +342,11 @@ async fn callback(
         // reasoning says about how it got here.
         // `state` has already verified by this point, so the pending cookie is
         // spent and goes with the refusal — the same rule every branch below
-        // follows.
+        // follows. A `400` for the same reason the missing-`code` branch is
+        // one: nothing upstream failed.
         #[cfg(test)]
         Action::TestOther => {
-            return refuse_discord(
-                "action",
-                discord::DiscordError::Decode {
-                    url: CALLBACK_PATH.to_string(),
-                    message: "action not implemented by this build".into(),
-                },
-                drop_pending,
-            );
+            return refuse_query("action not implemented by this build", drop_pending);
         }
     }
 
@@ -427,14 +464,25 @@ async fn logout() -> Response {
 
 /// A `303 See Other` to `location`, carrying `cookies` and never cached.
 fn redirect(location: &str, set_cookies: Vec<String>) -> Response {
+    // `parse` rather than `expect`. Every `Location` this module builds *should*
+    // be header-safe — literals, or `form_urlencoded` output — but one of them
+    // is not built from literals alone: the authorize URL starts with
+    // `Endpoints::authorize_url`. A value carrying a newline or a control byte
+    // made this panic, and a panic here is worse than a 500: the task dies, no
+    // response is written, and the caller sees a dropped connection (`curl`
+    // reports `000`). On Lambda that is an invocation error and a `Errors`
+    // metric data point, for what is a configuration fault.
+    let Ok(location) = location.parse() else {
+        tracing::error!("portal sign-in redirect target is not a valid header value");
+        return no_store(errors::internal_error(
+            SIGN_IN_MISCONFIGURED,
+            "sign-in is misconfigured on this deployment",
+        ));
+    };
+
     let mut response = StatusCode::SEE_OTHER.into_response();
     let headers = response.headers_mut();
-    headers.insert(
-        LOCATION,
-        location
-            .parse()
-            .expect("every Location here is built from literals and encoded parameters"),
-    );
+    headers.insert(LOCATION, location);
     for cookie in set_cookies {
         headers.append(
             SET_COOKIE,
@@ -489,6 +537,74 @@ fn refuse_state(error: StateError) -> Response {
     ))
 }
 
+/// Land a Discord OAuth error that is **not** the visitor declining.
+///
+/// Split out of `callback` so the logging is reachable synchronously from a
+/// test. That is not incidental: the first version of this fix logged from
+/// inside the handler, and deleting the `tracing::warn!` left the whole suite
+/// green — the same shape of gap that let "every error is a cancellation" ship
+/// in the first place. A behaviour nothing can observe is a behaviour nothing
+/// protects.
+fn refuse_oauth_error(error: &str, drop_pending: String) -> Response {
+    tracing::warn!(
+        error = %sanitise_error(error),
+        "portal sign-in refused by Discord"
+    );
+    redirect(&format!("{PORTAL_HOME}{FAILED_QUERY}"), vec![drop_pending])
+}
+
+/// Refuse a callback that is malformed on the caller's side.
+///
+/// `400` with `INVALID_QUERY`, and the pending cookie still goes — `state` has
+/// verified by every call site, so the cookie is spent whatever happens next.
+/// Kept distinct from [`refuse_discord`] so that a 5xx on these routes means
+/// what it says: something upstream failed. See the missing-`code` branch in
+/// `callback`.
+fn refuse_query(reason: &str, drop_pending: String) -> Response {
+    tracing::warn!(reason, "portal sign-in callback was malformed");
+    let mut response = errors::bad_request(
+        errors::INVALID_QUERY,
+        "this sign-in could not be completed; start again from the portal",
+    );
+    response.headers_mut().append(
+        SET_COOKIE,
+        drop_pending
+            .parse()
+            .expect("a cleared cookie is a valid header value"),
+    );
+    no_store(response)
+}
+
+/// Make Discord's `error` value safe to put in a log line.
+///
+/// Two hazards, both because the value arrives in a query string on a public,
+/// keyless route rather than from the seven codes RFC 6749 documents:
+///
+/// - **Length.** Truncated to [`ERROR_LOG_MAX`]. API Gateway caps a query
+///   string long before this matters, but the bound belongs next to the value
+///   it bounds rather than in a service quota somebody has to remember.
+/// - **Control characters.** `tracing`'s JSON layer escapes them, so this is
+///   defence in depth rather than the only guard — but the plain-text layer
+///   `serve` uses does not, and a newline in a log line is how one event
+///   becomes two.
+///
+/// Anything outside printable ASCII becomes `.`, which keeps the result
+/// recognisable when it *is* one of the documented codes and obviously
+/// mangled when it is not.
+fn sanitise_error(error: &str) -> String {
+    error
+        .chars()
+        .take(ERROR_LOG_MAX)
+        .map(|c| {
+            if c.is_ascii_graphic() || c == ' ' {
+                c
+            } else {
+                '.'
+            }
+        })
+        .collect()
+}
+
 /// Refuse a callback that Discord did not complete.
 ///
 /// `502`, not `500`: the failure is upstream, and saying so is what stops an
@@ -517,6 +633,35 @@ fn refuse_discord(stage: &str, error: discord::DiscordError, drop_pending: Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
+
+    /// A `tracing` writer that keeps what was written, so a test can assert on
+    /// log output instead of on the presence of a macro call.
+    #[derive(Clone, Default)]
+    struct CapturedLogs(Arc<Mutex<Vec<u8>>>);
+
+    impl CapturedLogs {
+        fn text(&self) -> String {
+            String::from_utf8_lossy(&self.0.lock().unwrap()).to_string()
+        }
+    }
+
+    impl std::io::Write for CapturedLogs {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLogs {
+        type Writer = Self;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
 
     fn oauth() -> OauthSecret {
         OauthSecret::parse(
@@ -622,6 +767,92 @@ mod tests {
         assert_eq!(response.headers().get(LOCATION).unwrap(), "/api-tokens/");
         assert_eq!(response.headers().get_all(SET_COOKIE).iter().count(), 2);
         assert_eq!(response.headers().get("cache-control").unwrap(), "no-store");
+    }
+
+    /// `redirect` must not panic on a `Location` it cannot use.
+    ///
+    /// The authorize URL is the one target not built from literals alone — it
+    /// starts with `Endpoints::authorize_url` — and a value carrying a newline
+    /// used to panic the task, so the caller got a dropped connection rather
+    /// than any status at all.
+    #[test]
+    fn an_unusable_redirect_target_is_an_error_not_a_panic() {
+        let response = redirect("https://example.test/ok\r\nX-Injected: yes", vec![]);
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(response.headers().get(LOCATION).is_none());
+        assert!(response.headers().get("x-injected").is_none());
+        assert_eq!(response.headers().get("cache-control").unwrap(), "no-store");
+    }
+
+    /// A Discord failure **is logged**, and a cancellation is **not**.
+    ///
+    /// Asserted against captured output rather than by reading the source,
+    /// because "there is a `warn!` here" is exactly the kind of claim that
+    /// survives its own deletion. The silence half matters too: a `warn` per
+    /// cancellation would be noise proportional to how many people change their
+    /// mind, and would bury the failures this exists to surface.
+    #[test]
+    fn a_discord_failure_is_logged_and_a_cancellation_is_not() {
+        let logs = CapturedLogs::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(logs.clone())
+            .with_ansi(false)
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || {
+            refuse_oauth_error("invalid_scope", String::new());
+        });
+
+        let text = logs.text();
+        assert!(
+            text.contains("refused by Discord"),
+            "a non-cancellation OAuth error must reach the log: {text:?}"
+        );
+        assert!(
+            text.contains("invalid_scope"),
+            "the log must name which error it was: {text:?}"
+        );
+
+        // And the cancellation path, which goes nowhere near this function,
+        // writes nothing at all.
+        let quiet = CapturedLogs::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(quiet.clone())
+            .with_ansi(false)
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            redirect(&format!("{PORTAL_HOME}{CANCELLED_QUERY}"), vec![]);
+        });
+        assert!(quiet.text().is_empty(), "a cancellation must be silent");
+    }
+
+    /// Discord's `error` reaches a log line, and it arrives in a query string
+    /// on a public keyless route — so it is bounded and stripped, not trusted
+    /// to be one of RFC 6749's seven codes.
+    #[test]
+    fn the_logged_error_value_is_truncated_and_stripped() {
+        assert_eq!(sanitise_error("invalid_scope"), "invalid_scope");
+
+        // A newline in a plain-text log line turns one event into two.
+        assert_eq!(sanitise_error("evil\r\nWARN faked"), "evil..WARN faked");
+        assert!(!sanitise_error("a\nb").contains('\n'));
+        assert!(!sanitise_error("a\u{0}b").contains('\u{0}'));
+
+        let long = "x".repeat(10_000);
+        assert_eq!(sanitise_error(&long).len(), ERROR_LOG_MAX);
+    }
+
+    /// The two landing states are literals and they are different. Collapsing
+    /// them is the defect this pair exists to prevent.
+    #[test]
+    fn the_two_landing_states_are_distinct_literals() {
+        assert_eq!(CANCELLED_QUERY, "?signin=cancelled");
+        assert_eq!(FAILED_QUERY, "?signin=failed");
+        assert_ne!(CANCELLED_QUERY, FAILED_QUERY);
+        assert_eq!(ERROR_ACCESS_DENIED, "access_denied");
+        for query in [CANCELLED_QUERY, FAILED_QUERY] {
+            assert!(format!("{PORTAL_HOME}{query}").starts_with("/api-tokens/?"));
+        }
     }
 
     /// The redirect target is a literal in every branch. An `assert` rather than

@@ -54,7 +54,15 @@ type SessionState =
 function SignIn() {
   const [session, setSession] = useState<SessionState>({ state: 'loading' });
   const [searchParams] = useSearchParams();
-  const cancelled = searchParams.get('signin') === 'cancelled';
+  // Two landing states, from two literals the backend appends. `cancelled` is
+  // the visitor's own choice at Discord's consent screen; `failed` is any other
+  // OAuth error — a drifted scope registration, a Discord outage — which the
+  // backend also logs. Telling them apart on the page is the visible half of
+  // that split: calling a misconfiguration "cancelled" is what made it look
+  // like every visitor was changing their mind.
+  const signin = searchParams.get('signin');
+  const cancelled = signin === 'cancelled';
+  const failed = signin === 'failed';
 
   // Cancels whichever `/auth/me` is currently in flight, whoever started it.
   //
@@ -155,6 +163,12 @@ function SignIn() {
   return (
     <>
       {cancelled && <p>Sign-in cancelled.</p>}
+      {failed && (
+        <p>
+          Sign-in could not be completed. This is not something you did — try
+          again, and tell us if it keeps happening.
+        </p>
+      )}
       <p>You are not signed in.</p>
       {/* A link, not a button with an onClick. The OAuth flow is a top-level
           navigation to discord.com and back; `fetch` cannot perform one, and

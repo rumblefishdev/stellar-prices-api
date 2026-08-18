@@ -47,7 +47,7 @@
 //! | source | selected by | available |
 //! | --- | --- | --- |
 //! | Secrets Manager, via the extension | `PORTAL_OAUTH_SECRET_NAME` | `aws-mtls` builds (i.e. the Lambda) |
-//! | a local JSON file | `PORTAL_OAUTH_SECRET_FILE` | always |
+//! | a local JSON file | `PORTAL_OAUTH_SECRET_FILE` | **non-`lambda` builds only** |
 //!
 //! The file is for the local round-trip the acceptance criteria require, against
 //! a Discord redirect URI pointed at `localhost`. It is a **file** and not an
@@ -143,7 +143,19 @@ impl OauthSecret {
     /// is open; see [`crate::AppConfig::load_portal_oauth`].
     pub async fn load() -> Result<Option<Self>, SecretError> {
         // The file is checked FIRST, so a developer with both set gets the local
-        // one. On the Lambda only the name is ever set, and nothing sets both.
+        // one.
+        //
+        // **Compiled out of the Lambda**, for the same reason and by the same
+        // permission as the endpoint overrides in `discord.rs`. The path is not
+        // obviously dangerous — a Lambda's only writable directory is `/tmp`,
+        // which the function alone can write — but `lambda:UpdateFunctionConfiguration`
+        // also attaches LAYERS, and a layer's contents are unpacked to `/opt`.
+        // So one permission is enough to place a chosen file and then point
+        // this at it, which hands the attacker the `session_signing_key` and
+        // therefore the ability to mint a session for any Discord ID. That is a
+        // worse outcome than the endpoint override, not a milder one, and it
+        // needs no `UpdateFunctionCode`.
+        #[cfg(not(feature = "lambda"))]
         if let Ok(path) = std::env::var("PORTAL_OAUTH_SECRET_FILE")
             && !path.is_empty()
         {

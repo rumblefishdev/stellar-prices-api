@@ -88,11 +88,32 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 /// Endpoints, separated from the credentials so tests can point them at a
 /// loopback mock while using the same code path production does.
 ///
-/// Overridable from the environment (`DISCORD_AUTHORIZE_URL`, `DISCORD_API_BASE`)
-/// for the local round-trip. Not set by `compute-stack.ts` — production always
-/// takes the defaults above, which is the property that makes the override safe
-/// to have: there is no deployed configuration in which these are attacker- or
-/// operator-reachable.
+/// # The overrides are compiled out of the Lambda
+///
+/// `DISCORD_AUTHORIZE_URL` and `DISCORD_API_BASE` are read by
+/// [`Endpoints::from_env`] **only in builds without the `lambda` feature** —
+/// the default build, the test build, and `local-server`. A Lambda build has no
+/// code path that reads them at all.
+///
+/// This used to be a comment claiming "there is no deployed configuration in
+/// which these are attacker- or operator-reachable", and that claim was simply
+/// false: `AppConfig::from_env` called this unconditionally, so a Lambda
+/// environment variable changed where the OAuth flow pointed. Anyone holding
+/// `lambda:UpdateFunctionConfiguration` — a permission distinct from
+/// `UpdateFunctionCode`, and one an ops role plausibly has on its own — could
+/// aim [`exchange_code`] at a host of their choosing. That request carries
+/// `client_secret` and the authorization `code` in its form body, so it
+/// exfiltrates the client secret **without a single `GetSecretValue` of the
+/// attacker's own appearing in CloudTrail**: the Lambda performs its usual,
+/// legitimate read and then posts the result out.
+///
+/// Malice is not required either. A typo in a future `compute-stack.ts` edit,
+/// or a debugging override nobody removed, redirects sign-in just as
+/// effectively and far more quietly.
+///
+/// So the boundary is now enforced by the compiler rather than asserted by a
+/// comment. `compute-stack.ts` still sets neither variable; that is now a
+/// second line of defence instead of the only one.
 #[derive(Debug, Clone)]
 pub struct Endpoints {
     pub authorize_url: String,
@@ -110,6 +131,9 @@ impl Default for Endpoints {
 
 impl Endpoints {
     /// Read the two overrides, falling back to Discord's real endpoints.
+    ///
+    /// Non-`lambda` builds only — see the type's documentation for why.
+    #[cfg(not(feature = "lambda"))]
     pub fn from_env() -> Self {
         let read = |key: &str, default: &str| {
             std::env::var(key)
@@ -121,6 +145,17 @@ impl Endpoints {
             authorize_url: read("DISCORD_AUTHORIZE_URL", DEFAULT_AUTHORIZE_URL),
             api_base: read("DISCORD_API_BASE", DEFAULT_API_BASE),
         }
+    }
+
+    /// Discord's real endpoints, unconditionally.
+    ///
+    /// The `lambda` build reads no environment variable here, so there is
+    /// nothing for a `lambda:UpdateFunctionConfiguration` holder — or a
+    /// mistaken CDK edit — to point elsewhere. Same signature as the build
+    /// above so `AppConfig::from_env` needs no `cfg` of its own.
+    #[cfg(feature = "lambda")]
+    pub fn from_env() -> Self {
+        Self::default()
     }
 
     fn token_url(&self) -> String {
@@ -272,6 +307,51 @@ mod tests {
         // one has to delete an assertion rather than change a string.
         assert!(!SCOPE.contains("guilds"));
         assert!(!SCOPE.contains("email"));
+    }
+
+    /// **The `lambda` build has no code path that reads the overrides.**
+    ///
+    /// A compile-time assertion rather than a runtime one, and deliberately so:
+    /// under `--features lambda` the reading version of `from_env` does not
+    /// exist, so there is nothing to set an environment variable against. The
+    /// test that *would* prove it at runtime cannot be written, because the
+    /// behaviour it would probe has been compiled away — which is the whole
+    /// point.
+    ///
+    /// What this pins is the pair: exactly one `from_env` is compiled in each
+    /// configuration, and under `lambda` it is the one that ignores the
+    /// environment entirely.
+    #[cfg(feature = "lambda")]
+    #[test]
+    fn the_lambda_build_ignores_the_endpoint_overrides() {
+        // SAFETY: single-threaded assertion on a variable no other test in this
+        // configuration reads — the reading `from_env` is not compiled here.
+        unsafe {
+            std::env::set_var("DISCORD_API_BASE", "https://attacker.example/api");
+            std::env::set_var("DISCORD_AUTHORIZE_URL", "https://attacker.example/auth");
+        }
+        let endpoints = Endpoints::from_env();
+        assert_eq!(endpoints.api_base, DEFAULT_API_BASE);
+        assert_eq!(endpoints.authorize_url, DEFAULT_AUTHORIZE_URL);
+        assert!(!endpoints.api_base.contains("attacker"));
+        unsafe {
+            std::env::remove_var("DISCORD_API_BASE");
+            std::env::remove_var("DISCORD_AUTHORIZE_URL");
+        }
+    }
+
+    /// The mirror of the above: in a build that is NOT the Lambda, the seam
+    /// still works, or the local round-trip and the integration suite lose
+    /// their mock.
+    #[cfg(not(feature = "lambda"))]
+    #[test]
+    fn a_non_lambda_build_still_honours_the_overrides() {
+        // SAFETY: no other test in this file reads these variables, and this
+        // one restores them.
+        unsafe { std::env::set_var("DISCORD_API_BASE", "http://127.0.0.1:9/api") };
+        assert_eq!(Endpoints::from_env().api_base, "http://127.0.0.1:9/api");
+        unsafe { std::env::remove_var("DISCORD_API_BASE") };
+        assert_eq!(Endpoints::from_env().api_base, DEFAULT_API_BASE);
     }
 
     #[test]

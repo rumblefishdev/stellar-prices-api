@@ -336,6 +336,30 @@ describe('sign in with Discord', () => {
     expect(screen.queryByText(/could not/i)).toBeNull();
   });
 
+  /**
+   * `?signin=failed` is the other landing state: any OAuth error that is not
+   * the visitor declining. Rendering it as "cancelled" is what let a drifted
+   * scope registration look like every visitor changing their mind.
+   */
+  it('distinguishes a failed sign-in from a cancelled one', async () => {
+    openAndSignedOut();
+    renderAt('/?signin=failed');
+
+    expect(await screen.findByText(/could not be completed/i)).toBeTruthy();
+    expect(screen.queryByText(/sign-in cancelled/i)).toBeNull();
+    // Still a plain-text state with the button, not an error screen.
+    expect(
+      screen.getByRole('link', { name: /sign in with discord/i }),
+    ).toBeTruthy();
+  });
+
+  it('does not claim a failure that did not happen', async () => {
+    openAndSignedOut();
+    renderAt('/?signin=cancelled');
+    expect(await screen.findByText(/sign-in cancelled/i)).toBeTruthy();
+    expect(screen.queryByText(/could not be completed/i)).toBeNull();
+  });
+
   it('does not claim a cancellation that did not happen', async () => {
     openAndSignedOut();
     renderAt('/');

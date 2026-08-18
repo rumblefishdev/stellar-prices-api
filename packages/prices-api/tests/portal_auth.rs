@@ -883,6 +883,110 @@ async fn a_verified_callback_always_drops_the_pending_cookie() {
     assert!(upstream.clears(cookies::PENDING_COOKIE));
 }
 
+/// **Only `access_denied` is a cancellation.** Every other OAuth error code is a
+/// failure, and reporting them all as "the visitor changed their mind" is what
+/// hid a drifted scope registration behind a page that looked normal.
+///
+/// `invalid_scope` is the one that matters: it is Discord's answer when the
+/// Developer Portal registration no longer matches `discord::SCOPE`, which is
+/// the same drift the token-response check catches — arriving by the one door
+/// that check never sees.
+#[tokio::test]
+async fn only_access_denied_is_reported_as_a_cancellation() {
+    let open = signed_in_app(true);
+
+    for (error, expected) in [
+        ("access_denied", "/api-tokens/?signin=cancelled"),
+        ("invalid_scope", "/api-tokens/?signin=failed"),
+        ("server_error", "/api-tokens/?signin=failed"),
+        ("temporarily_unavailable", "/api-tokens/?signin=failed"),
+        ("invalid_request", "/api-tokens/?signin=failed"),
+        ("unauthorized_client", "/api-tokens/?signin=failed"),
+        // Not in RFC 6749 §4.1.2.1 at all. Anything unrecognised is a failure,
+        // not a cancellation — defaulting the other way is how a new Discord
+        // error code would silently become "cancelled".
+        (
+            "something_discord_invented_later",
+            "/api-tokens/?signin=failed",
+        ),
+    ] {
+        let started = start_login(&open).await;
+        let reply = fetch(
+            &open,
+            &format!("{CALLBACK_PATH}?error={error}&state={}", started.state),
+            &[(cookies::PENDING_COOKIE, &started.pending)],
+        )
+        .await;
+
+        assert_eq!(reply.status, StatusCode::SEE_OTHER, "error={error}");
+        assert_eq!(reply.location(), expected, "error={error}");
+        // Either way it is a landing state, not a session, and the spent
+        // cookie goes.
+        assert!(
+            reply.cookie(cookies::SESSION_COOKIE).is_none(),
+            "error={error}"
+        );
+        assert!(reply.clears(cookies::PENDING_COOKIE), "error={error}");
+    }
+}
+
+/// The `error` value is attacker-controlled — it arrives in a query string on a
+/// public, keyless route — and it must never reach the `Location` header.
+/// Both landing states are literals; only the choice between them depends on
+/// the input.
+#[tokio::test]
+async fn the_error_value_never_reaches_the_redirect_target() {
+    let open = signed_in_app(true);
+    let started = start_login(&open).await;
+
+    let reply = fetch(
+        &open,
+        &format!(
+            "{CALLBACK_PATH}?error=evil%0d%0aX-Injected:%20yes&state={}",
+            started.state
+        ),
+        &[(cookies::PENDING_COOKIE, &started.pending)],
+    )
+    .await;
+
+    assert_eq!(reply.status, StatusCode::SEE_OTHER);
+    assert_eq!(reply.location(), "/api-tokens/?signin=failed");
+    assert!(!reply.location().contains("evil"));
+    assert!(reply.headers.get("x-injected").is_none());
+}
+
+/// **A malformed callback is a `400`, not a `502`.**
+///
+/// These routes are keyless and throttled at 10 req/s, so anyone can call
+/// `/auth/login`, take the `state` it hands them and replay it here. Answering
+/// `502 discord_unavailable` let that manufacture 5xx on demand — polluting the
+/// alarms [0204] is building and making a real Discord outage indistinguishable
+/// from a script. Nothing upstream failed, so nothing upstream is blamed.
+#[tokio::test]
+async fn a_callback_with_no_code_and_no_error_is_a_client_error() {
+    let open = signed_in_app(true);
+    let started = start_login(&open).await;
+
+    let reply = fetch(
+        &open,
+        &format!("{CALLBACK_PATH}?state={}", started.state),
+        &[(cookies::PENDING_COOKIE, &started.pending)],
+    )
+    .await;
+
+    assert_eq!(reply.status, StatusCode::BAD_REQUEST);
+    assert!(
+        !reply.status.is_server_error(),
+        "an anonymous caller must not be able to manufacture a 5xx"
+    );
+    assert_eq!(reply.json()["code"], "invalid_query");
+    // Not Discord's fault, so not Discord's error code.
+    assert_ne!(reply.json()["code"], "discord_unavailable");
+    // The cookie is still spent — `state` verified, so this callback is used up.
+    assert!(reply.clears(cookies::PENDING_COOKIE));
+    assert!(reply.cookie(cookies::SESSION_COOKIE).is_none());
+}
+
 /// The Developer Portal registration and this code can disagree about scope,
 /// and the token response is the only place the real grant is visible. A
 /// broader grant than `identify` is refused rather than quietly accepted.
