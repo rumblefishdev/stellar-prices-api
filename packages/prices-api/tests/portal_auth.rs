@@ -28,8 +28,8 @@ use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use prices_api::portal::auth::{
-    CALLBACK_PATH, LOGIN_PATH, LOGOUT_PATH, ME_PATH, cookies, crypto, secret::OauthSecret,
-    session::Session, state_token,
+    CALLBACK_PATH, LOGIN_PATH, LOGOUT_PATH, ME_PATH, cookies, crypto, discord::Endpoints,
+    secret::OauthSecret, session::Session, state_token,
 };
 use prices_api::{AppConfig, AppState, app};
 use serde_json::{Value, json};
@@ -164,40 +164,50 @@ fn oauth_secret() -> OauthSecret {
     .expect("the test bundle must be valid")
 }
 
-/// A router with the portal open and sign-in configured.
+/// A router with the portal open and sign-in configured, pointed at Discord's
+/// real endpoints.
 ///
-/// `DISCORD_API_BASE` is set for the process, which is why every test that needs
-/// a mock takes [`ENV_LOCK`] — `std::env::set_var` is process-global and the
-/// suite runs its tests on one runtime.
+/// Only for tests that never reach the token exchange — anything that completes
+/// a round-trip wants [`app_against`].
 fn signed_in_app(portal_enabled: bool) -> Router {
+    build_app(portal_enabled, Endpoints::default())
+}
+
+/// A router pointed at `mock`.
+///
+/// **No environment mutation, and no lock.** An earlier version set
+/// `DISCORD_API_BASE` under a `Mutex` and relied on `Endpoints::from_env`
+/// running once per router — but that read happened inside `app()`, on every
+/// construction, including the fifteen in this file that never took the lock.
+/// libtest runs these on parallel threads, so a reader could be walking
+/// `environ` while `setenv` reallocated it: the undefined behaviour that makes
+/// `set_var` `unsafe` in edition 2024, and in practice an intermittent segfault
+/// that takes the whole binary down rather than failing one test.
+///
+/// The endpoints now travel on `AppConfig`, so each router is handed its own
+/// and nothing is shared. That also closes the quieter half of the same
+/// problem: a router built by `signed_in_app` used to capture whatever base URL
+/// another test had last written.
+fn app_against(mock: &MockDiscord) -> Router {
+    build_app(
+        true,
+        Endpoints {
+            api_base: mock.base.clone(),
+            ..Endpoints::default()
+        },
+    )
+}
+
+fn build_app(portal_enabled: bool, endpoints: Endpoints) -> Router {
     let config = AppConfig {
         ch_enabled: false,
         base_url: None,
         api_keys: vec![],
         portal_enabled,
         portal_oauth: portal_enabled.then(oauth_secret),
+        portal_endpoints: endpoints,
     };
     app(&config, AppState::without_ch())
-}
-
-/// `Endpoints::from_env` is read when the router is built, and the environment
-/// is process-wide. Serialize the tests that depend on it.
-static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-/// Build a router pointed at `mock`, holding the lock only while the router is
-/// being constructed.
-///
-/// The guard is deliberately NOT returned to the caller. `Endpoints::from_env`
-/// runs once, at construction, so the returned router has already captured
-/// `mock.base` and a later test swapping the variable cannot reach it — and
-/// holding a `std::sync::Mutex` guard across the `.await`s of a test body is a
-/// deadlock waiting for a multi-threaded runtime.
-fn app_against(mock: &MockDiscord) -> Router {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    // SAFETY: the lock makes this the only thread touching the variable, and
-    // every router that reads it is built before the lock is released.
-    unsafe { std::env::set_var("DISCORD_API_BASE", &mock.base) };
-    signed_in_app(true)
 }
 
 // ---------------------------------------------------------------------------
@@ -1035,6 +1045,7 @@ async fn an_open_portal_with_no_credentials_answers_503_on_login() {
         api_keys: vec![],
         portal_enabled: true,
         portal_oauth: None,
+        portal_endpoints: Endpoints::default(),
     };
     let router = app(&config, AppState::without_ch());
 
@@ -1062,6 +1073,7 @@ async fn sign_in_needs_no_api_key_even_when_the_key_gate_is_armed() {
         api_keys: vec!["a-partner-key".to_string()],
         portal_enabled: true,
         portal_oauth: Some(oauth_secret()),
+        portal_endpoints: Endpoints::default(),
     };
     let router = app(&config, AppState::without_ch());
 

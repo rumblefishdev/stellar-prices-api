@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Route, Routes, useSearchParams } from 'react-router-dom';
 
 import {
@@ -56,8 +56,24 @@ function SignIn() {
   const [searchParams] = useSearchParams();
   const cancelled = searchParams.get('signin') === 'cancelled';
 
+  // Cancels whichever `/auth/me` is currently in flight, whoever started it.
+  //
+  // `load` is called from two places — the mount effect and the sign-out
+  // handler — and the second used to drop the canceller it was handed, so that
+  // request had a `live` flag nothing could ever flip. Keeping the latest one
+  // here means both the supersede case (a second call while the first is
+  // pending) and the unmount case are covered by one mechanism, rather than by
+  // whichever caller happened to remember.
+  const cancelInFlight = useRef<(() => void) | null>(null);
+
   const load = useCallback(() => {
+    cancelInFlight.current?.();
     let live = true;
+    const cancel = () => {
+      live = false;
+    };
+    cancelInFlight.current = cancel;
+
     fetchSession()
       .then((result) => {
         if (live) setSession({ state: 'ok', session: result });
@@ -69,15 +85,18 @@ function SignIn() {
             reason: error instanceof Error ? error.message : String(error),
           });
       });
-    return () => {
-      live = false;
-    };
+    return cancel;
   }, []);
 
   // Same StrictMode guard as the config probe below: React mounts twice in
   // development, and without it the second mount's response can land after the
-  // first and overwrite it.
-  useEffect(load, [load]);
+  // first and overwrite it. The cleanup reads the ref rather than closing over
+  // this call's canceller, so it also cancels a request the sign-out handler
+  // started.
+  useEffect(() => {
+    load();
+    return () => cancelInFlight.current?.();
+  }, [load]);
 
   const onSignOut = () => {
     setSession({ state: 'loading' });

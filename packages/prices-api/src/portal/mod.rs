@@ -129,7 +129,7 @@ pub fn apply(router: Router, config: &AppConfig) -> Router {
     // here is the same empty `404` as an unrouted one.
     let sign_in = auth::routes(auth::AuthState::new(
         config.portal_oauth.clone(),
-        auth::discord::Endpoints::from_env(),
+        config.portal_endpoints.clone(),
     ));
 
     router

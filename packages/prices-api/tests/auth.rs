@@ -23,6 +23,9 @@ fn armed_config_with_portal(portal_enabled: bool) -> AppConfig {
         // (task 0186) and are never part of the environment; `None` is the shape
         // every non-portal test wants.
         portal_oauth: None,
+        // Discord endpoints are part of the config now, not read from the
+        // process environment per router — see `AppConfig::portal_endpoints`.
+        portal_endpoints: Default::default(),
     }
 }
 

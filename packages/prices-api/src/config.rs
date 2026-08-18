@@ -45,6 +45,20 @@ pub struct AppConfig {
     /// `None` means sign-in is not configured on this deployment, which is the
     /// normal state while `portal_enabled` is false.
     pub portal_oauth: Option<crate::portal::auth::secret::OauthSecret>,
+    /// Which Discord to talk to (task 0186). Production always takes the
+    /// defaults; the overrides exist for the local round-trip and for the tests.
+    ///
+    /// Carried on the config rather than read inside [`crate::app`], and that is
+    /// not a style choice. Reading it per-router meant `std::env::var` ran on
+    /// every `app()` call while the integration suite was calling
+    /// `std::env::set_var` to point routers at a mock — on parallel test
+    /// threads. Concurrent `getenv`/`setenv` is undefined behaviour (glibc can
+    /// realloc `environ` under a reader), which is why `set_var` is `unsafe` in
+    /// edition 2024, and in practice it is an intermittent segfault that takes
+    /// the whole test binary down. Threading the value through the config
+    /// removes the race by construction instead of serialising around it, and
+    /// leaves no `unsafe` in the tests at all.
+    pub portal_endpoints: crate::portal::auth::discord::Endpoints,
 }
 
 impl AppConfig {
@@ -68,6 +82,7 @@ impl AppConfig {
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                 .unwrap_or(false),
             portal_oauth: None,
+            portal_endpoints: crate::portal::auth::discord::Endpoints::from_env(),
         }
     }
 
