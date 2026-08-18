@@ -816,9 +816,9 @@ Remaining, in order:
 6. ~~**Verify** the implied-rate probe moves off 1.0~~ ✅ **done** — all five
    tiers at ~0.15 for 2026. ⛔ **BE not yet told**, and the same message should
    chase the `volume_quote_usd` question open since 2026-08-13.
-7. **UNFREEZE and reclaim** — ⛔ outstanding. `repair_0182_pre_*` is dead once the
-   verification above passed; `repair_0182_mid_*` is live rollback and worth
-   holding overnight. ⚠️ **Also 150 stale `repair_0114_*` snapshots (~12G)** found
+7. **UNFREEZE and reclaim** — ⛔ partly done. ✅ `repair_0182_pre_*` removed
+   2026-08-18 once the cross-tier verification passed; `repair_0182_mid_*` held
+   overnight as live rollback and still to drop. ⚠️ **Also 150 stale `repair_0114_*` snapshots (~12G)** found
    in `shadow/` during this run — 0114 is `completed` and archived, so they are
    dead rollback points. Clean them up in the same pass; they are this task's
    own cleanup lesson already having happened once.
