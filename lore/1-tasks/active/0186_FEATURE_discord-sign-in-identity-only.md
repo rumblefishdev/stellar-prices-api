@@ -66,6 +66,24 @@ history:
       criteria, which had **no** automated guard at all — a synth cannot see it,
       because production runs `cacheEnabled: true` and only ever exercises one
       arm. +1 unit test, +3 CI assertions. Eight Low findings recorded below.
+  - date: "2026-08-18"
+    status: active
+    who: claude
+    note: >
+      Second and third review passes: a mutation sweep over the fifteen declared
+      security properties, then `/code-review`. **Five findings fixed**, three of
+      them Medium and none of them visible to a passing test suite. The action
+      slot's comparison was dead code — deleting it left the suite green, which
+      defeats the whole reason for carrying the field before [[0189]] needs it.
+      The callback cleared the pending-login cookie before verifying anything,
+      so any third-party page could cancel a victim's in-flight sign-in with one
+      link. And `Endpoints::from_env` inside `app()` raced `set_var` in the
+      tests, which is UB that surfaces as a segfault rather than a red test.
+      Fixed respectively by a `cfg(test)` action variant, by verifying `state`
+      first on every path, and by carrying the endpoints on `AppConfig` — the
+      last of which removed `unsafe` from the test suite entirely. Two Low
+      frontend fixes alongside. The findings ledger below is now the accurate
+      one; the earlier claim of "no Medium defect" was wrong.
 ---
 
 # Discord sign-in — identity only
@@ -308,42 +326,48 @@ test`, `nx format:check --all`, `make -C infra synth-production`,
   the router is built, which is sound because `Endpoints::from_env` runs once at
   construction.
 
-## Review Findings (adversarial pass, 2026-08-17)
+## Review Findings
 
-No High or Medium defect in the code. The findings below are Low and are
-recorded rather than fixed, because each is a judgement call rather than a bug
-and fixing them blind would widen this slice.
+Three review passes: an adversarial read, a mutation sweep, and `/code-review`.
+The ledger below is the state after all fixes landed — **five findings were
+fixed in code**, the rest are recorded open with a reason.
 
-1. **`/auth/me` does not clear an invalid or expired session cookie.** The
-   browser keeps re-sending it until it expires on its own. Cosmetic; the
-   request is cheap and the answer is correct.
-2. **`secret.rs` validates the `redirect_uri` suffix but not its scheme or
-   host.** A relative or otherwise malformed URI ending in `CALLBACK_PATH`
-   passes the load-time check and fails at Discord instead — which is the
-   failure mode the check exists to avoid, for a narrower class of typo.
-3. **Two tabs signing in at once**: the second `/auth/login` overwrites the
-   pending cookie, so the first tab's callback fails `invalid_state`. Standard
-   for a single-cookie design, but user-visible.
-4. **Timeout budget is tight.** The api-handler's Lambda timeout is 15s and the
-   callback makes two Discord calls at 5s each. A slow Discord plus a cold start
-   could reach it.
-5. **`mtlsSecretArnFromParts` now builds an ARN for a secret that has nothing to
-   do with mTLS.** The helper is correct; its name is not.
-6. **Signing-key strength cannot be validated beyond length** — 32 identical
-   characters pass. The runbook prescribes `openssl rand -hex 32`.
-7. **The frontend offers no sign-in control when `/auth/me` fails.** The visitor
-   sees an error and cannot act on it; arguably the button should still render.
-8. **`signing_key` is not zeroized on drop.** It lives for the process lifetime
-   regardless.
+### Fixed
 
-**Checked and found sound**, recorded because none of it was previously
-written down:
+| # | severity | what | where | fixed in |
+| --- | --- | --- | --- | --- |
+| F1 | Medium | **The action-slot comparison was dead code.** Deleting `pending.action != state.action` left the whole suite green: with one `Action` variant the mismatch arm was unreachable, and the test that looked like it covered it failed earlier, at deserialization. That defeats the reason the slot is carried now rather than at [[0189]] — the check was supposed to be already tested when the second action arrives. | `state_token.rs`, `accept` | `a994c5f` |
+| F2 | Medium | **A stranger could cancel someone else's sign-in.** The callback cleared the pending-login cookie *before* verifying anything, so `?error=x`, `?state=<garbage>`, `?code=x` and a bare callback all took an in-flight login down. `SameSite=Lax` sends that cookie on a top-level GET navigation, which any third-party page can cause. No session could be issued and nothing leaked — denial of login, not a break — but it cost one link. Fixed by ordering: `state` verifies first on every path including cancellation, and only then is the cookie dropped. | `auth/mod.rs`, `callback` + `refuse_state` | `6d8e804` |
+| F3 | Medium | **A data race in the integration suite.** `Endpoints::from_env` ran inside `app()`, so `env::var` executed on all 28 router constructions while 13 of them called `set_var` — on parallel libtest threads. That is the UB `set_var` is `unsafe` for, and it surfaces as an intermittent segfault rather than a red test. Fixed by carrying the endpoints on `AppConfig`, which removes the race by construction and takes `unsafe` out of the tests entirely. | `config.rs`, `portal/mod.rs`, `tests/portal_auth.rs` | `8b30664` |
+| F4 | Low | **No way out of a failed session check.** When `/auth/me` answered anything but a session, the page reported the error and removed the sign-in control. | `web/portal/src/app/app.tsx` | `6d8e804` |
+| F5 | Low | **The sign-out re-read dropped its canceller.** `load()` returns one and the mount effect used it, but `onSignOut` discarded it, so that request's `live` flag could never be flipped — defeating the guard the file documents. | `web/portal/src/app/app.tsx` | `8b30664` |
+
+### Open, with reasons
+
+| # | severity | what | why not fixed |
+| --- | --- | --- | --- |
+| O1 | Medium | **The `Set-Cookie` *response* direction through CloudFront is unasserted.** The CI guard covers the request direction (`AllViewerExceptHostHeader` forwards the cookie to the origin). Whether `Set-Cookie` reaches the browser is a separate property. AWS documents `Set-Cookie` stripping only for **legacy** cache settings; the cache-policy model is not documented for it. Our origin request policy forwards all cookies, which per the documented logic is the condition for it being returned. | Not verifiable without a deploy. This is AC 8, and it is why AC 8 is the one criterion still open. If it is wrong, sign-in fails **only in production**, silently. |
+| O2 | Medium | Deployed gateway maps depth 1–2; the four auth routes sit at depth 3. | Belongs to [[0205]]. Release-ordering, not a code defect. The branch carries the correct `{proxy+}`. |
+| O3 | — | **`ct_eq` → `==` on the MAC comparison is not detectable by any test.** Both are functionally identical; only timing separates them. | A statistical timing assertion is too flaky to be worth its false failures. Code review is the control. Recorded so nobody assumes the mutation sweep covered it. |
+| O4 | Low | `/auth/me` does not clear an invalid or expired session cookie. | Cosmetic; the request is cheap and the answer is correct. |
+| O5 | Low | `secret.rs` validates the `redirect_uri` suffix but not its scheme or host. | A relative URI passes here and fails at Discord — a narrower class of the same typo the check exists for. |
+| O6 | Low | Two tabs signing in at once: the second overwrites the pending cookie, so the first tab's callback fails. | Standard for a single-cookie design. Fixing it means per-tab state, which this slice does not want. |
+| O7 | Low | Lambda timeout is 15s; the callback makes two Discord calls at 5s each. | Tight, not broken. Raising it is a config change with its own cost argument. |
+| O8 | Low | `mtlsSecretArnFromParts` builds an ARN for a secret unrelated to mTLS. | Naming only; the helper is correct. Renaming touches four call sites for no behaviour change. |
+| O9 | Low | Signing-key strength cannot be validated beyond length. | 32 identical characters pass. No entropy test is possible; the runbook prescribes `openssl rand -hex 32`. |
+| O10 | Low | `?signin=cancelled` never leaves the URL, so a sign-out after a cancelled attempt can show a stale "Sign-in cancelled." | Unreachable within this slice — it needs the re-auth flow [[0189]] adds. Worth fixing *there*. |
+| O11 | Low | `signing_key` is not zeroized on drop. | It lives for the process lifetime regardless. |
+
+### Checked and found sound
+
+Recorded because none of it was previously written down, and each was a
+hypothesis that would have been serious if it had held.
 
 - **The callback's two `Set-Cookie` headers survive API Gateway REST v1.**
   `lambda_http` 1.2.1 sends everything through `multiValueHeaders` and leaves
   `headers` deliberately empty (`response.rs:85`). Had it used `headers`, the
   session cookie would have been dropped and sign-in would have failed only in
-  production. This was the review's top hypothesis.
+  production. This was the first review's top hypothesis.
 - **Path traversal cannot bypass the API-key gate.** `auth::is_exempt` and the
   axum router read the same `req.uri().path()`, so they cannot disagree about
   whether a request is under the portal prefix.
@@ -352,6 +376,17 @@ written down:
 - **No secret reaches the logs at any level.** Probed with canary values at
   `RUST_LOG=info`, `debug` and `trace` — including `reqwest`/`hyper` internals
   at trace, which is the level that would log a request body if anything did.
+- **CloudFront cannot cache a `Set-Cookie`.** The docs warn that it does exactly
+  that when cookies are forwarded. Two independent layers prevent it here:
+  `CachingDisabled` (TTL 0) and the handler's own `Cache-Control: no-store`,
+  both asserted in tests.
+
+### Mutation coverage
+
+15 defects introduced one at a time, each targeting a declared security
+property: **14 detected, 1 undetectable** (O3). The one that was missed and is
+now covered is F1. This is the evidence that the suite detects defects rather
+than merely passing — the numbers, not the count of tests.
 
 ## Design Decisions
 
