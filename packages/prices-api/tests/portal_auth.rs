@@ -364,6 +364,35 @@ async fn every_sign_in_route_is_an_empty_404_while_the_portal_is_closed() {
     }
 }
 
+/// **A rejection that happens before the handler must not outrank the gate.**
+///
+/// `ValidatedQuery` refuses a query string axum cannot deserialize, and it does
+/// so in an extractor — which runs after routing. Task 0183's gate is a layer,
+/// so it runs first, and that ordering is the only reason a malformed query on
+/// a closed portal still answers an empty `404` rather than a `400` naming
+/// `invalid_query`. The latter would say "this route exists and parses input",
+/// which is exactly the disclosure the gate is built to prevent.
+///
+/// Nothing asserted this until the extractor was adopted, and nothing about
+/// `ValidatedQuery`'s own contract guarantees it — it is a property of how the
+/// two are composed in `portal::apply`.
+#[tokio::test]
+async fn a_malformed_query_does_not_out_rank_the_closed_portal_gate() {
+    let closed = signed_in_app(false);
+    let absent = fetch(&closed, "/no-such-route-anywhere", &[]).await;
+
+    for uri in [
+        format!("{CALLBACK_PATH}?code=a&code=b"),
+        format!("{LOGIN_PATH}?action=a&action=b"),
+        format!("{CALLBACK_PATH}?state=a&state=b"),
+    ] {
+        let reply = fetch(&closed, &uri, &[]).await;
+        assert_eq!(reply.status, absent.status, "{uri}");
+        assert_eq!(reply.body, absent.body, "{uri}");
+        assert!(reply.body.is_empty(), "{uri} carried a body");
+    }
+}
+
 /// A closed portal must not even hint at the flow by answering a callback
 /// differently depending on its query string.
 #[tokio::test]

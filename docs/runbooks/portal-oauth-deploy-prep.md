@@ -93,6 +93,16 @@ In the [Discord Developer Portal](https://discord.com/developers/applications):
    > Task 0189 adds `guilds.members.read` here **and** in `discord::SCOPE`. Both,
    > or the flow refuses its own grant.
 
+   **Drift is caught in two places, and they fire at different moments.** If the
+   registration asks for LESS than the code requests, Discord refuses at the
+   authorize step and never returns a code: the visitor lands on
+   `/api-tokens/?signin=failed` and the handler logs
+   `portal sign-in refused by Discord error=invalid_scope`. If the registration
+   grants MORE, the flow completes as far as the token exchange and the
+   granted-scope check refuses it there, logging the scopes. Either way it fails
+   closed and says so — but only the first is visible before a code is ever
+   issued, so `invalid_scope` in the logs points at this step and nothing else.
+
 4. Copy the **Client ID** and reset/copy the **Client Secret**.
 
 ## 2. Create the secret

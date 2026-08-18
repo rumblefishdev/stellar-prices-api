@@ -152,6 +152,11 @@ curl -s -b jar.txt http://localhost:4200/api-tokens/api/auth/me
 |---------|-------|
 | Discord's own page: **"Invalid OAuth2 redirect_uri"** | `redirect_uri` ≠ the registration. You never reached this service, so nothing is in its log |
 | `400 invalid_state`, log says `portal sign-in callback rejected` | the `portal_oauth_pending` cookie did not come back. Almost always: started on one port, returned on another |
+| the page says **"Sign-in could not be completed"** and the log says `portal sign-in refused by Discord error=invalid_scope` | the Developer Portal registration no longer matches `discord::SCOPE`. This is the SECOND place scope drift is caught, and the earlier one: Discord refuses at the authorize step, so the token-response check never runs. Fix the registration |
+| the same page text with `error=server_error` or `temporarily_unavailable` | Discord's own problem. Nothing to do but retry |
+| the page says **"Sign-in cancelled"** | only `access_denied` produces this — the visitor pressed Cancel. If you see it for anything else, the split in `callback` has regressed |
+| `400 invalid_query`, log says `portal sign-in callback was malformed` | the callback carried neither `code` nor `error`, or the query string could not be deserialized. A client-side fault; deliberately **not** a 5xx, so it cannot be used to manufacture alarm noise |
+| `500 sign_in_misconfigured` | the authorize URL is not a valid header value — almost always a stray character in `DISCORD_AUTHORIZE_URL` |
 | `502 discord_unavailable`, log says `stage="token exchange"` | wrong `client_secret`, or no outbound route to `discord.com` |
 | `502 discord_unavailable`, log says `stage="identity read"` | the exchange worked, `GET /users/@me` did not |
 | `502` and the log names the granted scopes | Discord granted more than `identify`. Deliberate refusal — see ADR 0010 |
