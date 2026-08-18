@@ -575,6 +575,14 @@ size of the first.
 The 74M exotic rows are nearly free — no USD reference, so each tier early-exits
 after a couple of no-progress batches (the `no_reference` floor 0114 documented).
 
+⚠️ **The span in this table was FALSIFIED 2026-08-18** during pass 1: almost none
+of the 31,982,165 are below **2022-04** — months 202110-202203 hold 0-13
+XLM-quoted candidates each and enriched nothing, while 202204 enriched 761,735.
+The rows exist, but the window is ~2022-04 → 2024-01, not 2021-02 → 2024-01. Full
+measurement and the two falsified explanations are in [[0201]]. ✅ It also
+confirmed this task's own epoch: the USDT/USDC reference is dense and non-NULL
+from 202102, first candle `2021-02-07 19:00`, so `1612656000` cannot strand rows.
+
 **The 31,982,165 fillable XLM-quoted rows are the [[0088]] pre-Soroban backfill's
 output**: candles rolled into the coarse tables and never enriched, because
 0114's repair span started at 2024-02. That is real missing data and it is worth
