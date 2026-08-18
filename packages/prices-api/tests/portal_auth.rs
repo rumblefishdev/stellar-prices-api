@@ -883,6 +883,42 @@ async fn a_verified_callback_always_drops_the_pending_cookie() {
     assert!(upstream.clears(cookies::PENDING_COOKIE));
 }
 
+/// A query string the extractor cannot deserialize is answered in the same
+/// `ErrorEnvelope` voice as everything else (task 0119).
+///
+/// Axum's own `Query` rejection is a `text/plain` body, and on these routes
+/// that is answered by [0185]'s bundle — whose `getJson` reports a non-JSON
+/// body as "the portal backend is unreachable". A caller's own malformed
+/// request would present as an outage, which is the reading task 0119's
+/// wrappers exist to prevent.
+#[tokio::test]
+async fn a_malformed_query_is_rejected_in_the_error_envelope_voice() {
+    let open = signed_in_app(true);
+
+    for uri in [
+        // Duplicate key: `Option<String>` cannot take two values.
+        format!("{CALLBACK_PATH}?code=a&code=b"),
+        format!("{CALLBACK_PATH}?state=a&state=b"),
+        format!("{LOGIN_PATH}?action=a&action=b"),
+    ] {
+        let reply = fetch(&open, &uri, &[]).await;
+
+        assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{uri}");
+        assert_eq!(
+            reply
+                .headers
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .map(|v| v.starts_with("application/json")),
+            Some(true),
+            "{uri} answered a non-JSON body, which the bundle reads as an outage"
+        );
+        assert_eq!(reply.json()["code"], "invalid_query", "{uri}");
+        // A rejection before the handler must not touch either cookie.
+        assert!(reply.set_cookies().is_empty(), "{uri}");
+    }
+}
+
 /// **Only `access_denied` is a cancellation.** Every other OAuth error code is a
 /// failure, and reporting them all as "the visitor changed their mind" is what
 /// hid a drifted scope registration behind a page that looked normal.

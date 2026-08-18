@@ -43,13 +43,14 @@ pub mod state_token;
 
 use axum::Json;
 use axum::Router;
-use axum::extract::{Query, State};
+use axum::extract::State;
 use axum::http::header::{LOCATION, SET_COOKIE};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use serde::{Deserialize, Serialize};
 
+use crate::common::extract::ValidatedQuery;
 use crate::common::{cache_control, errors};
 
 use secret::OauthSecret;
@@ -163,6 +164,16 @@ pub fn routes(state: AuthState) -> Router {
 }
 
 /// `GET /auth/login` query.
+///
+/// Extracted with [`ValidatedQuery`], not axum's `Query`. A query string axum
+/// cannot deserialize — a duplicated key, invalid percent-encoding — is
+/// rejected before the handler runs, and axum's own rejection is a `text/plain`
+/// body. On these routes that is answered by [0185]'s bundle, whose `getJson`
+/// reports a non-JSON body as "the portal backend is unreachable": a caller's
+/// own malformed request presenting as an outage. Task 0119 built these
+/// wrappers so every rejection speaks in the `ErrorEnvelope` voice; the portal
+/// prefix is outside the OpenAPI document but its callers are not exempt from
+/// needing a parseable answer.
 #[derive(Debug, Deserialize)]
 struct LoginQuery {
     /// Which action the round-trip authorizes. Absent means sign-in; [0189]
@@ -172,7 +183,10 @@ struct LoginQuery {
 }
 
 /// Start a sign-in: mint the pair, set the cookie, redirect to Discord.
-async fn login(State(state): State<AuthState>, Query(query): Query<LoginQuery>) -> Response {
+async fn login(
+    State(state): State<AuthState>,
+    ValidatedQuery(query): ValidatedQuery<LoginQuery>,
+) -> Response {
     let Some(oauth) = state.oauth.as_ref() else {
         return unconfigured();
     };
@@ -233,6 +247,11 @@ fn authorize_url(
 }
 
 /// `GET /auth/callback` query — everything Discord may send back.
+///
+/// [`ValidatedQuery`] for the same reason as [`LoginQuery`]. Every field is
+/// `Option`, so an unknown key is ignored rather than rejected — Discord may
+/// add parameters, and a callback that failed because of one would be a
+/// self-inflicted outage.
 #[derive(Debug, Deserialize)]
 struct CallbackQuery {
     code: Option<String>,
@@ -245,7 +264,7 @@ struct CallbackQuery {
 async fn callback(
     State(state): State<AuthState>,
     headers: HeaderMap,
-    Query(query): Query<CallbackQuery>,
+    ValidatedQuery(query): ValidatedQuery<CallbackQuery>,
 ) -> Response {
     let Some(oauth) = state.oauth.as_ref() else {
         return unconfigured();
