@@ -4,7 +4,7 @@ title: "USDT/USDC candles close at ~0.14 instead of ~1.00 — 891 days of real, 
 type: BUG
 status: completed
 related_adr: []
-related_tasks: ["0165", "0139", "0116", "0144", "0026", "0182", "0196", "0201", "0206"]
+related_tasks: ["0165", "0139", "0116", "0144", "0026", "0182", "0196", "0201", "0207"]
 tags:
   ["priority-high", "effort-medium", "clickhouse", "data-correctness", "enrichment", "sdex", "milestone-M2"]
 milestone: 2
@@ -23,7 +23,7 @@ history:
       direction. The sweep criterion was then answered on prod: only three assets
       are ever a reference leg, and only USDC is pinned at 1.0 — legitimately, it
       is the peg. The defect was ONE IDENTITY, not a class. BE told; nothing they
-      deployed ever served a wrong value. Spawned [[0206]] — the same sweep found
+      deployed ever served a wrong value. Spawned [[0207]] — the same sweep found
       218 XLM-quoted rows whose close_usd contradicts the candle by up to 5.1M x,
       a different defect and not the peg class this task covers.
   - date: 2026-08-10
@@ -563,7 +563,7 @@ nowhere near pegged.
 **Nothing else is carrying a peg it should not.** The class question is answered:
 one identity, as [[0196]]'s blast-radius measurement already suggested.
 
-### ⚠️ But the sweep found something else — spawned as [[0206]]
+### ⚠️ But the sweep found something else — spawned as [[0207]]
 
 XLM's stddev of 1551 against a p999 of 0.548 is a tail, not a shift: **218 rows
 of 11,012,703 have `close_usd / close > 1`, worst 5,149,014**. XLM never traded
@@ -577,7 +577,7 @@ deriving it from the candle. Same shape as [[0168]], same weak point [[0173]]
 records.
 
 **Out of scope here** — this task is the peg class, and that is closed. Filed as
-[[0206]] rather than widening the scope of a task that is otherwise complete.
+[[0207]] rather than widening the scope of a task that is otherwise complete.
 
 ## Acceptance Criteria
 
@@ -588,7 +588,7 @@ records.
 - [x] **USDT-specific or a class** — ✅ 2026-08-18, see the sweep section above.
       Only three assets are ever a reference leg; only USDC is pinned at 1.0 and
       it legitimately is $1. One identity, not a class. ⚠️ The sweep did surface a
-      different defect on 218 XLM-quoted rows — spawned as [[0206]].
+      different defect on 218 XLM-quoted rows — spawned as [[0207]].
 - [x] **Correction plan for the existing candles** — ✅ that was [[0182]], and it
       **ran 2026-08-18**: 567,760 rows re-opened and recomputed across all five
       forever granularities, verified at 0.1494-0.1529 on every tier where the

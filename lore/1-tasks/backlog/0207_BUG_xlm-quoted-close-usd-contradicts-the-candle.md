@@ -1,5 +1,5 @@
 ---
-id: "0206"
+id: "0207"
 title: "218 XLM-quoted candles carry a close_usd the candle itself cannot justify — one is 5.1M× its quote-leg price"
 type: BUG
 status: backlog
