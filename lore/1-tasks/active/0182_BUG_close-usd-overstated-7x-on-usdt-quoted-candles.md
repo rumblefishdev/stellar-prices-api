@@ -45,6 +45,61 @@ history:
       blocking item: the tiers take no per-quote-leg filter, so 0182 cannot
       currently run without 0201 — routes a/b/c recorded in the task. No FREEZE
       taken, no partition written.
+  - date: 2026-08-17
+    status: active
+    who: okarcz
+    note: >
+      MECHANISM DECIDED — route (c), sequenced: 0201's pass first (no
+      `--reset-*`), then 0182's reset pass over a table already at its floor.
+      Taken together with the completion order for the whole chain (0201 -> 0182
+      -> 0172 as one campaign). Route (a) was rejected because a combined run
+      swamps the `rows_reset ~= rows_enriched` check ~32M against ~357k, and that
+      check is the only signal that catches values zeroed and never recomputed;
+      route (b) is the better tool but costs a PR before any prod run and would
+      leave 0201 outstanding anyway.
+      ⛔ THE RUN IS NO LONGER BLOCKED ON THE MECHANISM. What remains before it
+      can start: a CH admin must take the FREEZE (67 months x 5 tables;
+      `prices_writer` cannot and cannot be granted it), and the operator must
+      settle one snapshot before pass 1 vs a second between the passes — one is
+      cheaper, two make the passes independently revertible. Execution host is
+      fishuser-hero, planned for the morning of 2026-08-18. Still no FREEZE
+      taken and no partition written.
+  - date: 2026-08-18
+    status: active
+    who: okarcz
+    note: >
+      SNAPSHOT COUNT SETTLED — TWO. One FREEZE before pass 1, a second between
+      the passes, so pass 2 is revertible without discarding pass 1's ~32M
+      recovered rows. Two consequences, both recorded below. The second
+      snapshot has to sit BETWEEN the passes, which rules out interleaving them
+      per table unless the admin is called back five times — so the ordering is
+      now the hybrid: `_1h` alone first as the review gate, then the remaining
+      four batched, three admin windows total. And the two snapshots need
+      DISTINCT names, because the freeze script deliberately keeps a
+      pre-existing snapshot rather than overwriting it, making a re-freeze under
+      the same name a silent no-op. In-span footprint measured on prod: 16.82
+      GiB across the five tables (799 active parts), so both snapshots peak at
+      ~33.6 GiB plus ~4-6 GiB of new parts, ~9% of the 430.6 GiB free. BE
+      messaged about the volume. Still no FREEZE taken and no partition written.
+  - date: 2026-08-18
+    status: active
+    who: okarcz
+    note: >
+      RUN EXECUTED AND VERIFIED — all five forever-tables corrected, from
+      fishuser-hero, in roughly four hours rather than the 10-15 h budgeted.
+      567,760 rows re-opened and recomputed against the 567,232 sized on
+      2026-08-13. The implied rate now tracks USDT's measured value on every
+      tier (2026 cluster 0.1494-0.1529, was a flat 1.000000), and on `_1h` the
+      monthly series shows par for exactly 15 months then the June 2022 break to
+      ~0.13 — matching 0172's independent measurement, and confirming the epoch
+      left the pre-depeg par window untouched. Route (c) held: pass 1 drained
+      each table to its floor first, so `rows_reset ~= rows_enriched` stayed
+      meaningful and every table was checked on it. 18 rows across `_1d`/`_1w`/
+      `_1M` came out at close_usd = 0 and tripped the shortfall guard; all 18 are
+      dust (close of 0 or below ~4e-14, underflowing at Decimal(38,14)) and none
+      had a representable price to lose. That false positive is now documented in
+      the runbook. Remaining: BE notification, snapshot cleanup, the guard test,
+      and volume_quote_usd.
 ---
 
 # `close_usd` is ~7.4× too high on every USDT-quoted candle ever written
@@ -221,8 +276,11 @@ scheduled death.
   deepest consumer surface is a 1Y chart. Leave the pre-2021 window at its
   existing `close × $1` (which 0172 argues is *correct* for that era) and
   document the epoch boundary. Dated-peg-epoch option dropped as unnecessary.
-- [ ] **Mechanism.** The [[0114]] `CoarseRepairDriver` is the right shape and
-  should be reused, but see the gap below — it cannot see these rows as-is.
+- [x] **Mechanism — DECIDED 2026-08-17: route (c), sequenced.** The [[0114]]
+  `CoarseRepairDriver` is the right shape and is reused (the gap below is closed
+  by the reset step). [[0201]]'s pass runs first without `--reset-*`, then
+  0182's reset pass over a table at its floor. Full reasoning in the decision
+  section after the dry run.
 - [ ] **Zeroing first.** Enrichment skips `close_usd > 0`, so the rows must be
   reset to 0 (or written with a higher `version`) before the corrected pivot can
   fill them. On a `ReplacingMergeTree(version)` the version route is safer than a
@@ -536,6 +594,14 @@ size of the first.
 The 74M exotic rows are nearly free — no USD reference, so each tier early-exits
 after a couple of no-progress batches (the `no_reference` floor 0114 documented).
 
+⚠️ **The span in this table was FALSIFIED 2026-08-18** during pass 1: almost none
+of the 31,982,165 are below **2022-04** — months 202110-202203 hold 0-13
+XLM-quoted candidates each and enriched nothing, while 202204 enriched 761,735.
+The rows exist, but the window is ~2022-04 → 2024-01, not 2021-02 → 2024-01. Full
+measurement and the two falsified explanations are in [[0201]]. ✅ It also
+confirmed this task's own epoch: the USDT/USDC reference is dense and non-NULL
+from 202102, first candle `2021-02-07 19:00`, so `1612656000` cannot strand rows.
+
 **The 31,982,165 fillable XLM-quoted rows are the [[0088]] pre-Soroban backfill's
 output**: candles rolled into the coarse tables and never enriched, because
 0114's repair span started at 2024-02. That is real missing data and it is worth
@@ -565,9 +631,9 @@ the dry run is read-only by construction (`preflight` is `SELECT 1`, the
 grant-probe is gated on `snapshot && !dry_run`, and `run()` hits the `dry_run`
 guard before `freeze_partition` and `run_through`).
 
-**Still open — the mechanism question this created.** The tiers fill any zero in
-the partition they visit; they take no per-quote-leg filter. So there is no way
-today to run 0182 without also running [[0201]]. Three routes, undecided:
+**The mechanism question this created.** The tiers fill any zero in the partition
+they visit; they take no per-quote-leg filter. So there is no way today to run
+0182 without also running [[0201]]. Three routes were open:
 
 - **a.** Take both at once — one FREEZE, one campaign, 10-15 h, and 0182's
   verification leans entirely on the implied-rate probe.
@@ -581,26 +647,211 @@ today to run 0182 without also running [[0201]]. Three routes, undecided:
 route **a** cheaply, but note it re-opens that month a second time in the full
 run — value-idempotent, one extra `version` bump.
 
-## 🚧 What is NOT done — this is a tool, not a correction
+### ✅ MECHANISM DECIDED 2026-08-17: **route (c)**
 
-**Not one published price has changed.** Same trap already recorded for [[0168]]
-and for [[0172]] itself: a green PR that stops the bleeding is not the fix.
+The operator's call, taken with the completion order for the whole repair chain:
+**0201 → 0182 → 0172 close as one campaign, sequenced.** Recorded here because
+this file — not the session note — is what a fresh session reads, and until now
+it still said the mechanism blocked the run.
+
+**Why (c) over (a):** (a) destroys the `rows_reset ≈ rows_enriched` safety check.
+In a combined run `rows_enriched` is ~32M against ~357k reset, so the shortfall
+signal — the one that detects *values zeroed and never recomputed*, the worst
+outcome this task can produce — is swamped by two orders of magnitude and
+verification falls back to the implied-rate probe alone. Sequencing restores it.
+
+**Why (c) over (b):** (b) is the better tool and buys a fast, surgical 0182, but
+it costs a PR with tests before any prod run, and the 32M pre-Soroban rows are
+real missing data we want recovered anyway. (b) would leave [[0201]] still to do.
+
+**What route (c) means operationally — two passes of the same binary:**
+
+1. **Pass 1 = [[0201]]** — run `coarse-repair` **without** `--reset-*`. Fills the
+   ~32M fillable pre-Soroban zeros. The table ends at its floor: only the
+   genuinely unfillable exotic-quote rows are left at zero.
+   ⚠️ **0201 is the operator's own task** — see the ownership note; this entry
+   records the sequencing, it does not claim the work.
+2. **Pass 2 = 0182** — run **with** `--reset-quote-asset-id 111
+   --reset-not-before 1612656000`. With no other fillable zeros left,
+   `rows_enriched` is dominated by the reset rows and `rows_reset ≈
+   rows_enriched` is meaningful again.
+
+This also keeps the "**run reset mode once per table**" rule intact: pass 1 is
+not a reset invocation, so pass 2 is still the single reset run per table.
+
+**FREEZE span under (c): the same 67 months × 5 tables**, since both passes visit
+the same partitions.
+
+### ✅ SETTLED 2026-08-18: **two snapshots** — and the three things that forces
+
+One `FREEZE` before pass 1, a second between the passes. One snapshot is
+cheaper, but rolling pass 2 back under it would discard pass 1's ~32M recovered
+rows as well; two make the passes independently revertible. What follows is not
+obvious from the decision itself.
+
+**1. The two snapshots must have DIFFERENT names.** The freeze script's
+`already-frozen` branch deliberately *keeps* a pre-existing snapshot rather than
+overwriting it — otherwise a re-freeze would replace a pre-repair rollback point
+with a post-repair one. That same protection makes a second freeze under the
+same name a **silent no-op**: it prints `already-frozen`, and you believe you
+hold two rollback points while holding one. Use `repair_0182_pre_…` for the
+first and `repair_0182_mid_…` for the second.
+
+**2. It rules out interleaving the passes per table.** The second snapshot has
+to sit between pass 1 and pass 2, so a per-table interleave (`_1h` pass 1, `_1h`
+pass 2, `_4h` pass 1, …) needs the admin back **five times** across 10-15 h —
+and `prices_writer` cannot `FREEZE`, so every one of those is a second person.
+Ordering adopted instead, three admin windows at predictable points:
+
+| # | Step | Who |
+|---|---|---|
+| 1 | `FREEZE` #1 `repair_0182_pre_…`, all five tables | admin |
+| 2 | Pass 1 ([[0201]], no `--reset-*`) on `_1h` | operator |
+| 3 | `FREEZE` #2 `repair_0182_mid_…`, **`_1h` only** | admin |
+| 4 | Pass 2 (0182, with `--reset-*`) on `_1h`, then **review** | operator |
+| 5 | Pass 1 on `_4h`, `_1d`, `_1w`, `_1M` | operator |
+| 6 | `FREEZE` #2 `repair_0182_mid_…`, those four | admin |
+| 7 | Pass 2 on those four | operator |
+
+`_1h` — the table BE consumes — is proven end to end before the remaining ~10 h
+is committed, and no table's post-pass-1 state is pinned before its pass 1 runs.
+
+**3. Disk — measured on prod 2026-08-18, not estimated.**
+
+| table | active parts | on disk, 202102-202608 |
+|---|---|---|
+| `price_ohlcv_1h` | 204 | **9.56 GiB** |
+| `price_ohlcv_4h` | 212 | 4.92 GiB |
+| `price_ohlcv_1d` | 154 | 1.71 GiB |
+| `price_ohlcv_1w` | 106 | 481.71 MiB |
+| `price_ohlcv_1M` | 123 | 164.42 MiB |
+| **total** | **799** | **16.82 GiB** |
+
+⚠️ **A `FREEZE` costs nothing when it is taken and accrues its cost afterwards.**
+It hardlinks the partition's parts under `shadow/` — the bytes exist once, the
+operation is instant and blocks nothing. But parts are immutable, so as this
+run's `version + 1` inserts merge and supersede them, the originals cannot be
+reclaimed while the hardlink holds the inode. The cost builds over the 10-15 h,
+and its ceiling is the size of what was frozen.
+
+Freeze #1 ≤ 16.82 GiB, freeze #2a (`_1h`) ≤ 9.56 GiB, freeze #2b (the other
+four) ≤ 7.26 GiB — **≤ 33.6 GiB of snapshot**, plus ~4-6 GiB of new parts before
+merges reclaim. ~40 GiB peak against 430.6 GiB free, about **9%**. Comfortable
+against the volume — but note it is a **~68% increase on our own 58.93 GiB
+footprint**, which is the shape BE would see if they went looking.
+
+## ✅ THE RUN — executed and verified 2026-08-18
+
+Executed from fishuser-hero as `prices_writer` over mTLS, route (c), two
+snapshots. **~4 hours end to end**, against a 10-15 h budget — the estimate
+assumed 32M rows spread over 36 months and they were concentrated in about 20.
+
+### Pass 2 — the correction this task exists for
+
+| table | reset | recomputed | at zero (dust) |
+|---|---|---|---|
+| `_1h` | 357,274 | 358,315 | — |
+| `_4h` | 157,858 | 158,319 | — |
+| `_1d` | 41,573 | 41,565 | 8 |
+| `_1w` | 8,266 | 8,261 | 5 |
+| `_1M` | 2,789 | 2,784 | 5 |
+| **total** | **567,760** | | **18** |
+
+**567,760 against the 567,232 sized on 2026-08-13** — 528 apart after five days
+of live writes, and `_1M` landed on 2,789 exactly. `rows_reset <= rows_enriched`
+on every table.
+
+### Verification — the acceptance criterion
+
+Implied rate for 2026, all five tiers, where the pre-run baseline was a flat
+`1.000000` on every one:
+
+| tier | rate | candles |
+|---|---|---|
+| `1h` | 0.1529 | 27,335 |
+| `4h` | 0.1520 | 14,609 |
+| `1d` | 0.1506 | 4,507 |
+| `1w` | 0.1494 | 791 |
+| `1M` | 0.1525 | 205 |
+
+A 2.3% spread, which is bucket-weighted averaging differing between
+granularities. On `_1h` the full monthly series reads **par for exactly 15
+months** (202102-202204), then 0.973 → 0.734 → 0.294 across the June 2022 break,
+settling at 0.134 by 202608. That is [[0172]]'s measured series arrived at from a
+completely different direction — and it confirms the epoch: the par window below
+the break kept its correct `$1` rather than being zeroed.
+
+### The 18 rows that tripped the shortfall guard
+
+`_1d`, `_1w` and `_1M` each warned that rows were re-opened but not recomputed.
+All 18 are **dust** — `close` of exactly 0, or below ~4e-14 where `rate × close`
+underflows at `Decimal(38, 14)` — across four asset ids (1552, 55249, 15952,
+43381). Five of `_1d`'s eight were already at `close_usd = 0` before the reset
+touched them. `stranded_with_real_close` returned **0** on all three tables:
+nothing with a usable price ended at zero.
+
+⚠️ **The guard cannot distinguish "recomputed to zero" from "value destroyed"**,
+because `rows_enriched` is a population difference and a row written with a zero
+value never leaves the zero population. It also advises checking
+`--pivot-window-s`, which was never involved. Triage procedure and worked example
+are now in `docs/runbooks/repair-coarse-usd-values.md`.
+
+## 🚧 What is NOT done
 
 Remaining, in order:
 
 1. ~~**Size the run.**~~ ✅ done 2026-08-13 — 567,232 rows, see above.
 2. ~~**Dry run per table**, non-vacuous.~~ ✅ done 2026-08-13 — 67 months on all
    five, and it surfaced [[0201]]. See the dry-run section above.
-3. **Decide the mechanism** — routes a/b/c above. ⛔ **This now blocks the run**,
-   and it did not exist before the dry run. Nothing below can be scheduled until
-   it is settled, because every route implies a different FREEZE span and a
-   different verification story.
-4. **Snapshots** — CH admin must `FREEZE` every partition in span; `prices_writer`
-   cannot and cannot be granted it.
-5. **The run**, `_1h` first (the table BE consumes), reviewed before the next.
-   ⚠️ Raise `--pivot-window-s` for `_1w`/`_1M` — the 1-day default silently drops
-   references older than a day, which every weekly bucket's anchor may be.
-6. **Verify** the implied-rate probe moves off 1.0, then tell BE the window.
+3. ~~**Decide the mechanism** — routes a/b/c above.~~ ✅ **DECIDED 2026-08-17:
+   route (c)**, sequenced — 0201's pass first, then 0182's reset over a table at
+   its floor. See the decision section above for why, and for what each pass
+   runs. **The run is no longer blocked on this.**
+4. ~~**Snapshots**~~ ✅ **taken 2026-08-18** — `repair_0182_pre_` across all five
+   (335 = 67 × 5, 17G, matching the 16.82 GiB measured), then `repair_0182_mid_`
+   after each table's pass 1. Operator holds CH admin, so the three windows were
+   self-served rather than a second person.
+5. ~~**The run**~~ ✅ **done 2026-08-18** — `_1h` first and reviewed before the
+   rest, `--pivot-window-s 2678400` throughout. See the results section above.
+6. ~~**Verify** the implied-rate probe moves off 1.0~~ ✅ **done** — all five
+   tiers at ~0.15 for 2026. ⛔ **BE not yet told**, and the same message should
+   chase the `volume_quote_usd` question open since 2026-08-13.
+7. **UNFREEZE and reclaim** — ⛔ partly done. ✅ `repair_0182_pre_*` removed
+   2026-08-18 once the cross-tier verification passed; `repair_0182_mid_*` held
+   overnight as live rollback and still to drop. ⚠️ **Also 150 stale `repair_0114_*` snapshots (~12G)** found
+   in `shadow/` during this run — 0114 is `completed` and archived, so they are
+   dead rollback points. Clean them up in the same pass; they are this task's
+   own cleanup lesson already having happened once.
+
+## 🧹 Cleanup — the snapshots do not expire and nothing reclaims them
+
+⚠️ A `FREEZE` left behind is the 2026-08-13 incident ([[0202]]) with our name on
+it instead of BE's: dead bytes pinned on a shared volume, invisible to
+`system.parts`, visible only to `df`. ~33.6 GiB of it here. Neither ClickHouse
+nor this tool ever removes a snapshot — an **admin** must, and `prices_writer`
+cannot.
+
+Per table, in this order:
+
+1. Once that table's pass 2 is verified (implied-rate probe off 1.0), drop its
+   **pre** snapshot — it protects a rollback you have just decided not to take.
+   `_1h` alone returns 9.56 GiB.
+2. Keep its **mid** snapshot until the whole campaign is verified *and* BE have
+   been told the corrected window.
+3. Then drop the mid snapshots too.
+
+```sql
+ALTER TABLE prices.price_ohlcv_1h
+  UNFREEZE WITH NAME 'repair_0182_pre_prices_price_ohlcv_1h_202403'
+```
+
+— per partition, or by removing the `shadow/<NAME>/` directories on the host.
+Verify with `du -sh /var/lib/clickhouse/shadow/` returning to its **pre-campaign
+size**, not merely shrinking.
+
+⚠️ **Put this on the admin's list when the FREEZEs are arranged**, not after.
+It is the half of the procedure with no deadline attached, which is why it is
+the half that gets forgotten.
 
 ## Acceptance Criteria
 
@@ -608,22 +859,34 @@ Remaining, in order:
       pre-2021 window at `close × $1` and document the epoch boundary. BE
       confirmed 2026-08-13 that history matters (30D/1Y charts) and that their
       deepest surface is 1Y, which never reaches the boundary.
-- [ ] If correcting: the **five forever granularities** (`1h/4h/1d/1w/1M`)
-      consistent afterwards, verified by re-running the `implied rate` probe
-      (should move from ~1.0 to the measured per-bucket USDT rate).
-      ⚠️ Not "all six" — `_1m`/`_15m` are retention-bounded and deliberately
-      excluded.
+- [x] The **five forever granularities** (`1h/4h/1d/1w/1M`) consistent
+      afterwards — ✅ 2026-08-18, all five at 0.1494-0.1529 for 2026 where the
+      baseline was a flat `1.000000`, and `_1h`'s monthly series reproduces
+      [[0172]]'s par-then-depeg shape. ⚠️ Not "all six" — `_1m`/`_15m` are
+      retention-bounded and deliberately excluded.
 - [x] The `--dry-run` preview is **non-vacuous** — ✅ 2026-08-13, 67 months on
       every one of the five tables, not the "no enrichable zeros" all-clear the
       unmodified 0114 driver returns for these rows (see the driver gap above).
       The tool can see the defect. ⚠️ Its `zeros_before` counts are **not** the
       567,232 — see the dry-run section for why, and for [[0201]].
-- [ ] **Mechanism decided** (routes a/b/c in the dry-run section) — new, and it
-      blocks the run. There is no way today to run 0182 without also running
-      [[0201]]: the tiers take no per-quote-leg filter.
+- [x] **Mechanism decided** — ✅ 2026-08-17, **route (c)**: sequence [[0201]]'s
+      pass first, then 0182's reset over a table already at its floor. Chosen
+      because a combined run (route a) swamps the `rows_reset ≈ rows_enriched`
+      check ~32M against ~357k, and that check is the only thing that detects
+      values zeroed and never recomputed. **No longer blocks the run.**
 - [ ] Guard against re-introduction: the [[0172]] regression tests already pin
       the writer; add a data-level check that no USDT-quoted candle carries
       `close_usd / close ≈ 1.0`
-- [ ] BE notified of the corrected values and the window affected
+- [x] **BE notified** — ✅ 2026-08-18. Told them: corrected from 2021-02-07 on,
+      all five granularities, 567,760 candles; values below that boundary
+      unchanged and already correct; nothing they deployed ever served the
+      inflated numbers. Also warned them that ~54M previously-unpriced candles
+      now carry values, which is directly visible to them since they render
+      `--` on a `close_usd = 0` miss. The `volume_quote_usd` question was sent
+      again in the same message.
+- [ ] **Snapshots removed** — both `repair_0182_pre_…` and `repair_0182_mid_…`
+      unfrozen after verification, with `du` on `shadow/` back to its
+      pre-campaign size rather than merely smaller. ⚠️ ~33.6 GiB on a volume BE
+      own 96% of, and nothing expires it. Admin-only, like the FREEZE itself.
 - [ ] `volume_quote_usd` resolved — widen scope, or document the two-column
       mismatch. Blocked on BE's answer to the question sent 2026-08-13.
