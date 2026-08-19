@@ -87,6 +87,18 @@ const PROBE_TIMEOUT_MS = 10_000;
  */
 const KEY_TIMEOUT_MS = 20_000;
 
+/**
+ * How long the page waits on the usage read.
+ *
+ * Between the other two, because the call is: the backend's own wall-clock
+ * deadline on the lookup is 10s (`USAGE_DEADLINE` in `portal/usage/mod.rs`),
+ * after which it answers a `503` that names the condition. Waiting only
+ * {@link PROBE_TIMEOUT_MS} would tie with that deadline and the page would
+ * report its own timeout instead of the backend's more useful answer; 15s
+ * leaves the answer time to arrive while staying inside the gateway's 29s cap.
+ */
+const USAGE_TIMEOUT_MS = 15_000;
+
 /** Whether a rejection from `fetch` is this timeout firing. See the call site. */
 const isTimeout = (error: unknown): boolean =>
   typeof error === 'object' &&
@@ -277,18 +289,33 @@ export async function fetchUsage(): Promise<PortalUsage | null> {
   try {
     response = await fetch(url, {
       headers: { accept: 'application/json' },
-      signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
+      signal: AbortSignal.timeout(USAGE_TIMEOUT_MS),
     });
   } catch (error) {
     if (isTimeout(error)) {
       throw new PortalApiError(
-        `${url} did not answer within ${PROBE_TIMEOUT_MS / 1000}s`,
+        `${url} did not answer within ${USAGE_TIMEOUT_MS / 1000}s`,
       );
     }
     throw new PortalApiError(`${url} could not be reached`);
   }
   if (response.status === 404) {
-    return null;
+    // Only the backend's own `no_key` envelope means "no key". The other 404
+    // on this path is task 0183's gate — an EMPTY body, deliberately
+    // byte-identical to an unrouted route — which the backend goes out of its
+    // way to keep distinguishable, and which can appear here if the portal is
+    // closed while a signed-in tab presses Refresh. Reading that as "you have
+    // no API key" would be a false statement on the slice whose theme is
+    // rendering honestly.
+    try {
+      const body = (await response.json()) as { code?: string };
+      if (body.code === 'no_key') {
+        return null;
+      }
+    } catch {
+      // Not JSON — the gate's empty 404, or something else entirely.
+    }
+    throw new PortalApiError(`${url} answered 404`, 404);
   }
   if (!response.ok) {
     throw new PortalApiError(

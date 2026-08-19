@@ -411,11 +411,11 @@ function Usage({ keyOnScreen }: { keyOnScreen: boolean }) {
         setView(usage ? { state: 'ok', usage } : { state: 'no-key' });
       })
       .catch((error: unknown) => {
-        if (live)
-          setView({
-            state: 'failed',
-            reason: error instanceof Error ? error.message : String(error),
-          });
+        // Through `describeFailure`, like the key section beside this one: an
+        // expired session must read "sign out and sign in again" in BOTH
+        // places, not as that sentence in one and a raw "answered 401" in the
+        // other — two wordings for one cause on one screen reads as two bugs.
+        if (live) setView({ state: 'failed', reason: describeFailure(error) });
       });
   }, []);
 
@@ -433,8 +433,12 @@ function Usage({ keyOnScreen }: { keyOnScreen: boolean }) {
    */
   const lastUpdated = (asOf: string) => (
     <p>
-      Last updated {new Date(asOf).toUTCString()} — AWS reports usage with a
-      delay, so requests made in the last few minutes may not be counted yet.
+      {/* `toUTCString` spells the zone "GMT"; the decided wording says UTC,
+          and since 0193 must not re-decide this line, the suffix is corrected
+          here rather than frozen. Same instant either way. */}
+      Last updated {new Date(asOf).toUTCString().replace(/GMT$/, 'UTC')} — AWS
+      reports usage with a delay, so requests made in the last few minutes may
+      not be counted yet.
     </p>
   );
 
@@ -463,18 +467,27 @@ function Usage({ keyOnScreen }: { keyOnScreen: boolean }) {
 
       {view.state === 'loading' && <p>Loading your usage…</p>}
 
-      {view.state === 'no-key' &&
-        (keyOnScreen ? (
-          // The endpoint said "no key" while a key is on this very screen: the
-          // backend's short cache has not caught up with the issue yet. "You
-          // have no key" would be false, so say what is actually happening.
-          <p>
-            Your key is new — usage figures appear here with a delay after your
-            first requests.
-          </p>
-        ) : (
-          <p>You have no API key yet — issue one above to see your usage.</p>
-        ))}
+      {view.state === 'no-key' && (
+        <>
+          {keyOnScreen ? (
+            // The endpoint said "no key" while a key is on this very screen:
+            // the backend's short cache has not caught up with the issue yet.
+            // "You have no key" would be false, so say what is actually
+            // happening.
+            <p>
+              Your key is new — usage figures appear here with a delay after
+              your first requests.
+            </p>
+          ) : (
+            <p>You have no API key yet — issue one above to see your usage.</p>
+          )}
+          {/* The limits still render: they are properties of the plan every
+              key joins, not of a particular key, and the visitor deciding
+              whether to issue one is exactly who they inform. No next-reset
+              date — that comes with a usage answer. */}
+          {limits()}
+        </>
+      )}
 
       {view.state === 'ok' &&
         (view.usage.used === null ? (

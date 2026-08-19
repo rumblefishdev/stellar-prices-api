@@ -140,6 +140,30 @@ pub struct UsageState {
     deadline: Duration,
 }
 
+/// A handle to the usage cache for the one writer outside this module: the
+/// key routes.
+///
+/// A successful issue makes a cached "no key" answer false — and without this,
+/// provably wrong for a whole [`CACHE_TTL`]: the page's own refetch after the
+/// press, and any reload inside the window, would be served the stale `NoKey`
+/// and tell a key-holder they have no key. The handle can evict **only** that
+/// answer, nothing else: real usage entries stay cached (a reveal changes no
+/// counter), and nothing outside this module can read or write anything.
+#[derive(Clone)]
+pub struct UsageCache(Arc<Mutex<HashMap<String, CacheEntry>>>);
+
+impl UsageCache {
+    /// Drop a cached "no key" answer for `sub`, if that is what is cached.
+    pub fn invalidate_no_key(&self, sub: &str) {
+        let mut cache = self.0.lock().expect("the usage cache lock is not poisoned");
+        if let Some(entry) = cache.get(sub)
+            && matches!(entry.answer, CachedAnswer::NoKey)
+        {
+            cache.remove(sub);
+        }
+    }
+}
+
 impl UsageState {
     pub fn new(oauth: Option<OauthSecret>, gateway: Option<Gateway>) -> Self {
         Self {
@@ -169,6 +193,11 @@ impl UsageState {
     pub fn with_deadline(mut self, deadline: Duration) -> Self {
         self.deadline = deadline;
         self
+    }
+
+    /// The handle the key routes hold — see [`UsageCache`].
+    pub fn cache_handle(&self) -> UsageCache {
+        UsageCache(self.cache.clone())
     }
 }
 
@@ -256,10 +285,17 @@ async fn usage(State(state): State<UsageState>, headers: HeaderMap) -> Response 
         ));
     };
 
+    // Computed once per request and used to validate cache entries as well as
+    // to build the query: an entry answering for a different period_start is
+    // last month's answer wearing this month's label, and the minute after a
+    // month boundary is exactly when a viewer checks whether the reset
+    // happened.
+    let period_now = current_period(Utc::now().date_naive());
+
     // Fresh cache hit: no control-plane call of any kind. This is the
     // "repeated dashboard loads do not produce one GetUsage call each"
     // acceptance criterion, in one branch.
-    if let Some(entry) = cached(&state, &session.sub, state.ttl) {
+    if let Some(entry) = cached(&state, &session.sub, state.ttl, &period_now.start) {
         return answer(entry.answer);
     }
 
@@ -289,11 +325,22 @@ async fn usage(State(state): State<UsageState>, headers: HeaderMap) -> Response 
         // happening and invite a retry; the entry the next success writes ends
         // the condition.
         Err(GatewayError::Throttled { operation }) => {
-            if let Some(entry) = cached(&state, &session.sub, STALE_KEEP) {
+            if let Some(entry) = cached(&state, &session.sub, STALE_KEEP, &period_now.start) {
                 tracing::warn!(
                     operation,
                     "control plane is throttling; serving the cached usage answer"
                 );
+                // Re-stamped, so the NEXT load inside the TTL is a cache hit
+                // that never reaches AWS — without this, every viewer refresh
+                // during a throttle event still fired both control-plane calls
+                // (SDK retries included) just to be told to slow down again,
+                // which is the opposite of backing off. The answer keeps its
+                // original `as_of`, so the page keeps dating it honestly; the
+                // cost is that a throttle outlasting `STALE_KEEP` can keep
+                // re-serving an older answer — accepted, because the honest
+                // age is on screen and the alternative is the error page this
+                // criterion exists to prevent.
+                remember(&state, &session.sub, entry.answer.clone());
                 return answer(entry.answer);
             }
             tracing::warn!(
@@ -332,9 +379,17 @@ async fn fetch(gateway: &Gateway, name: &str) -> Result<CachedAnswer, GatewayErr
         return Ok(CachedAnswer::NoKey);
     };
 
-    let period = current_period(Utc::now().date_naive());
+    let today = Utc::now().date_naive();
+    let period = current_period(today);
+    // The QUERY ends today, not at the month's last day. The rendered
+    // period_end stays the month boundary — that is our rule — but whether
+    // the live control plane accepts a future `endDate` has never been
+    // verified (the mock accepts any string), days after today can carry no
+    // data anyway, and a rejected query here would turn every dashboard load
+    // into a 502 on the first deployed run.
+    let query_end = today.format("%Y-%m-%d").to_string();
     let usage = gateway
-        .usage_of(&winner.id, &period.start, &period.end)
+        .usage_of(&winner.id, &period.start, &query_end)
         .await?;
 
     // Stamped when the call was actually made, not when the answer is served —
@@ -388,8 +443,14 @@ fn current_period(today: NaiveDate) -> Period {
     }
 }
 
-/// The cached entry for `sub`, if it is younger than `max_age`.
-fn cached(state: &UsageState, sub: &str, max_age: Duration) -> Option<CacheEntry> {
+/// The cached entry for `sub`, if it is younger than `max_age` **and answers
+/// for the current period**.
+fn cached(
+    state: &UsageState,
+    sub: &str,
+    max_age: Duration,
+    current_period_start: &str,
+) -> Option<CacheEntry> {
     let cache = state
         .cache
         .lock()
@@ -397,7 +458,23 @@ fn cached(state: &UsageState, sub: &str, max_age: Duration) -> Option<CacheEntry
     cache
         .get(sub)
         .filter(|entry| entry.fetched_at.elapsed() < max_age)
+        .filter(|entry| answers_for_period(&entry.answer, current_period_start))
         .cloned()
+}
+
+/// Whether a cached answer still describes the current period.
+///
+/// An entry cached before midnight on the last of the month and served after
+/// it would render last month's `period_start`/`period_end` and a `resets_at`
+/// already in the past, labelled "this period" — a minute a month under the
+/// TTL, up to [`STALE_KEEP`] under the throttle fallback, and precisely when a
+/// viewer looks to see whether the reset happened. "No key" carries no period
+/// and stays valid across the boundary.
+fn answers_for_period(answer: &CachedAnswer, current_period_start: &str) -> bool {
+    match answer {
+        CachedAnswer::Usage(body) => body.period_start == current_period_start,
+        CachedAnswer::NoKey => true,
+    }
 }
 
 /// Store an answer, pruning entries too old even for the throttle fallback.
@@ -522,5 +599,39 @@ mod tests {
         let p = period(2028, 2, 15);
         assert_eq!(p.end, "2028-02-29");
         assert_eq!(p.resets_at, "2028-03-01T00:00:00Z");
+    }
+
+    fn usage_answer(period_start: &str) -> CachedAnswer {
+        CachedAnswer::Usage(UsageResponse {
+            used: Some(1),
+            remaining: Some(2),
+            limit: Some(3),
+            period_start: period_start.to_string(),
+            period_end: "2026-08-31".to_string(),
+            resets_at: "2026-09-01T00:00:00Z".to_string(),
+            as_of: "2026-08-19T10:00:00Z".to_string(),
+        })
+    }
+
+    /// A cached answer survives the cache only inside its own period: last
+    /// month's numbers must not be served labelled "this period" the minute
+    /// after the boundary.
+    #[test]
+    fn a_cached_answer_dies_at_the_month_boundary() {
+        assert!(answers_for_period(
+            &usage_answer("2026-08-01"),
+            "2026-08-01"
+        ));
+        assert!(!answers_for_period(
+            &usage_answer("2026-08-01"),
+            "2026-09-01"
+        ));
+    }
+
+    /// "No key" carries no period and stays valid across the boundary — a
+    /// month rolling over does not conjure a key into existence.
+    #[test]
+    fn no_key_is_period_independent() {
+        assert!(answers_for_period(&CachedAnswer::NoKey, "2026-09-01"));
     }
 }

@@ -684,6 +684,12 @@ export class ApiGatewayStack extends cdk.Stack {
     // disambiguates a dead plan id into `PlanNotFound` loudly), and `GetUsage`
     // against a wrong plan id fails visibly on the first dashboard load. An
     // extra standing grant to move one failure earlier is not worth it.
+    // The construct id and policyName predate the second statement (task 0187
+    // named them for the attach, then task 0188 added the usage read) and are
+    // KEPT: renaming an AWS::IAM::Policy is a resource replacement bought for
+    // a cosmetic gain, on the policy whose absence breaks key issuance. Task
+    // 0194's audit should read this policy as "the portal grants that need
+    // the plan id", whatever the name says.
     new iam.Policy(this, 'PortalAttachKeyToFreePlan', {
       policyName: `prices-${config.envName}-portal-attach-key`,
       roles: [apiHandlerRole],

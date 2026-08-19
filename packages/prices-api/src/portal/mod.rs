@@ -134,26 +134,30 @@ pub fn apply(router: Router, config: &AppConfig) -> Router {
         config.portal_endpoints.clone(),
     ));
 
+    // Usage against quota (task 0188), merged the same way and mounted under
+    // the same conditions as sign-in: unconditionally, answering `503` when
+    // nothing is provisioned rather than not existing. It shares the key
+    // routes' control-plane client — usage is scoped to
+    // `(usagePlanId, apiKeyId)` and the key id comes from the same lookup —
+    // but carries a state of its own, because it also owns the in-process
+    // cache that keeps dashboard refreshes off the account-wide control-plane
+    // budget. Built before the key routes so they can hold the cache handle
+    // below.
+    let usage_state =
+        usage::UsageState::new(config.portal_oauth.clone(), config.portal_keys.clone());
+    let usage_cache = usage_state.cache_handle();
+    let usage = usage::routes(usage_state);
+
     // Self-service API keys (task 0187), merged the same way and mounted under
     // the same conditions: unconditionally, answering `503` when nothing is
     // provisioned rather than not existing. The state carries the OAuth secret
     // because the session cookie is what authorizes a key — there is no API key
-    // to present on the route whose job is to hand one out.
-    let api_keys = keys::routes(keys::KeysState::new(
-        config.portal_oauth.clone(),
-        config.portal_keys.clone(),
-    ));
-
-    // Usage against quota (task 0188), merged the same way and mounted under
-    // the same conditions. It shares the key routes' control-plane client —
-    // usage is scoped to `(usagePlanId, apiKeyId)` and the key id comes from
-    // the same lookup — but carries a state of its own, because it also owns
-    // the in-process cache that keeps dashboard refreshes off the
-    // account-wide control-plane budget.
-    let usage = usage::routes(usage::UsageState::new(
-        config.portal_oauth.clone(),
-        config.portal_keys.clone(),
-    ));
+    // to present on the route whose job is to hand one out. The usage-cache
+    // handle lets a successful issue evict a cached "no key" (task 0188).
+    let api_keys = keys::routes(
+        keys::KeysState::new(config.portal_oauth.clone(), config.portal_keys.clone())
+            .with_usage_cache(usage_cache),
+    );
 
     router
         .merge(routes)

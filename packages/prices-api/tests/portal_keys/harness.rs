@@ -159,6 +159,12 @@ pub struct Store {
     /// doubly so here: the SDK's own backoff retries a 429, so only a throttle
     /// that persists across those retries reaches the handler at all.
     pub throttle_usage: bool,
+    /// The same throttle on `GetApiKeys`. The account-wide budget does not
+    /// care which operation is asked, so the usage flow's key LOOKUP can be
+    /// the throttled call just as well as the usage read — and the two must
+    /// land in the same stale-serve branch (`GatewayError::Throttled` from
+    /// `list_named`), which this knob is what makes assertable.
+    pub throttle_list: bool,
     /// How many daily pairs one `GetUsage` page holds. `0` means everything in
     /// one page; a small number forces the pagination path the summing must
     /// walk to exhaustion.
@@ -263,6 +269,9 @@ pub async fn list_keys(
         .include_values_seen
         .push(query.include_values.clone().unwrap_or_default());
 
+    if store.throttle_list {
+        return throttled();
+    }
     if store.fail_list {
         return (StatusCode::INTERNAL_SERVER_ERROR, "control plane is unwell").into_response();
     }

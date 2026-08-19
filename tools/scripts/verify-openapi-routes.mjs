@@ -721,6 +721,37 @@ if (usageGrants.length !== 1) {
         'counter) is a different feature and a different decision.',
     );
   }
+  // The narrow form has two more properties the count and action cannot see:
+  // the resource names THIS plan (a wildcard `/usageplans/*/usage` would read
+  // every plan's usage and still count as one statement), and the statement
+  // lives in the GATEWAY template — only that stack knows the plan id, so a
+  // copy in ComputeStack would necessarily be hard-coded or wildcarded.
+  const serialized = JSON.stringify([usageGrants[0].Resource ?? []].flat());
+  if (serialized.includes('*')) {
+    fail(
+      `error: the /usage grant's resource contains a wildcard: ${serialized}.`,
+      '  → the grant is meant to name the one pricing-api-free plan by ' +
+        'reference (api-gateway-stack.ts). A wildcard reads usage for every ' +
+        'plan in the account.',
+    );
+  }
+  const inCompute = resourcesOfType(computeTemplate, 'AWS::IAM::Policy').some(
+    ([, policy]) =>
+      (policy.Properties?.PolicyDocument?.Statement ?? []).some((st) =>
+        [st.Resource ?? []]
+          .flat()
+          .some((r) => JSON.stringify(r).includes('/usage"')),
+      ),
+  );
+  if (inCompute) {
+    fail(
+      'error: a /usage grant appears in the Compute template.',
+      '  → the GetUsage statement belongs in ApiGatewayStack’s standalone ' +
+        'portal policy, where the plan id is a reference rather than a ' +
+        'hand-typed string. See the cycle argument on `apiHandlerRole` in ' +
+        'api-gateway-stack.ts.',
+    );
+  }
 }
 
 // --- 6. The portal's methods are uncached AT THE GATEWAY. ---

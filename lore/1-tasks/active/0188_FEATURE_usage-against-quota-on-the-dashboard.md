@@ -308,6 +308,40 @@ format:check --all`, `make -C infra synth-production`, `npm run openapi:lint`,
     a throttled `GetUsage` — the caller cannot tell which of the two calls
     AWS refused, and should not have to.
 
+## Review Findings
+
+Two independent post-implementation reviews: a spec-conformance pass against
+the task, the epic, ADR 0010 and tasks 0183–0187/0193/0194, and an adversarial
+correctness review. **Nine fixed, one refuted-as-designed, four noted for the
+owning tasks.** No scope violation found by either.
+
+| # | severity | what | resolution |
+| --- | --- | --- | --- |
+| S1 | Medium | The frontend usage timeout (10s) tied with the backend's own 10s deadline, so the page would report a generic timeout instead of the backend's `503` | `USAGE_TIMEOUT_MS = 15s`, between the probe's 10 and the key's 20 |
+| S2 | Low | `fetchUsage` read **any** 404 as "no key" — including [[0183]]'s empty gate 404, reachable when the portal closes under an open tab — rendering "you have no API key" about a key that may exist | 404 is "no key" only with the `no_key` envelope code; anything else is a stated failure. Tested |
+| S3 | Low | CI check 5b matched `/usage` as a substring (its first run matched `/usageplans/` and failed on "found 2" — its own non-vacuity evidence) and pinned neither the wildcard-free resource nor the declaring stack | Suffix match, wildcard refusal, and a compute-template refusal added |
+| S4 | Nit | The standalone policy is still named `…-portal-attach-key` while carrying the usage grant | Kept — renaming an `AWS::IAM::Policy` is a resource replacement bought for cosmetics; a comment at the construct says so for [[0194]] |
+| S5 | Nit | The 1 req/s / reset-rule lines rendered only alongside a usage figure, so a keyless visitor — who they inform most — never saw them | Rendered in the no-key state too (without a next-reset date, which comes with an answer) |
+| S6 | Nit | The decided wording says "UTC"; `toUTCString()` spells it "GMT", and [[0193]] may not re-decide the line | Suffix corrected at render; test pins "UTC" |
+| R1 | Confirmed | The usage section's catch bypassed `describeFailure`, so an expired session read "answered 401" here next to "sign out and sign in again" in the key section | Routed through the shared helper; tested |
+| R2 | Confirmed | A cached "no key" survived the issue that falsified it — the page's own refetch and any reload inside the TTL told a key-holder they had no key | `UsageCache::invalidate_no_key`, held by the key routes via `KeysState::with_usage_cache`, evicts exactly that answer on every successful issue/reveal. Integration-tested inside the TTL |
+| R3 | Plausible | The negative-value clamp plus `limit = used + remaining` can render an invented limit on a nonsense row; the clamp comment claimed to prevent what it produces | Comment rewritten to state the degradation honestly; behaviour kept — the response carries no true limit to fall back on and no such row has been observed |
+| R4 | Plausible | Serving a stale answer during a throttle did not re-stamp it, so every load during a throttle event still fired both control-plane calls — the opposite of backing off | The served entry is re-stamped (original `as_of` kept), making the next TTL of loads cache hits; tested, including that AWS is then left alone |
+| R5 | Plausible | Cached entries carried period fields never re-checked against the calendar, serving last month's period (and a past `resets_at`) for up to a minute after the boundary — 15 under the throttle fallback | Entries answering for a different `period_start` are treated as expired; "no key" is period-independent. Unit-tested |
+| R6 | Confirmed | Decision #12 (a throttled key **lookup** lands in the stale-serve branch) was asserted nowhere — reverting `list_named`'s `Throttled` arm kept the suite green | `throttle_list` knob on the mock + a test that answers `502` if the arm is reverted |
+| R7 | Plausible | `usage_of` always queried a future `endDate` (month end), which only the mock — accepting any string — had ever validated | The query now ends **today** (future days carry no data anyway); the rendered `period_end` stays the month boundary. Test updated to pin the split |
+| — | Refuted | "Stale-serve should cover every failure, not just throttling" | As designed (decision #7): a throttle has an honest fallback, an outage should be visible |
+
+Noted for owning tasks, deliberately not fixed here: the `1 req/s` page literal
+duplicates `pricingApiFreePlanRateLimit` with no drift check ([[0193]]/[[0194]]
+— the response or `/config` is where the number would belong); the throttle
+classification idiom exists at two of six SDK call sites and [[0192]]'s
+revocation should extract a shared classifier rather than copy it; `no_store`
+is a per-branch discipline across three portal modules and could become a
+response layer on the gated prefix; a throttle with **nothing** cached still
+lets a refresh loop reach AWS (bounded by SDK backoff and human rates —
+[[0194]] costs it).
+
 ## Future Work
 
 Nothing new spawned — every follow-up already has a task:

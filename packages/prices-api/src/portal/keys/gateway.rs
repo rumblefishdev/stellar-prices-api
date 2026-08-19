@@ -603,9 +603,16 @@ impl Gateway {
                     let Some(&(_, last_remaining)) = days.last() else {
                         return Ok(None);
                     };
-                    // Negative values have no defined meaning here; clamped to
-                    // zero rather than propagated, so a malformed row cannot
-                    // render a nonsense quota.
+                    // Negative values have no defined meaning here and are
+                    // clamped to zero — which keeps the arithmetic total
+                    // rather than making it right: if AWS ever reported, say,
+                    // `[100500, -500]`, the reconstructed limit degrades to
+                    // `used + 0` and the dashboard would read "used 100500 of
+                    // 100500" against a 100 000 plan. Accepted: nothing in the
+                    // response carries the true limit to fall back on, no such
+                    // row has been observed, and the page's lag wording
+                    // already frames every figure as AWS's report rather than
+                    // ground truth.
                     let used = days
                         .iter()
                         .map(|&(used, _)| u64::try_from(used).unwrap_or(0))

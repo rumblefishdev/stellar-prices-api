@@ -135,13 +135,16 @@ async fn usage_answers_the_numbers_and_the_period() {
     );
     assert!(body["as_of"].as_str().unwrap().ends_with('Z'), "{body}");
 
-    // The GetUsage was for the caller's key over exactly that period.
+    // The GetUsage was for the caller's key, from the period start — but only
+    // UP TO TODAY: whether the live control plane accepts a future `endDate`
+    // has never been verified, and days after today carry no data anyway. The
+    // rendered period_end stays the month boundary; the query does not.
     mock.with(|s| {
         assert_eq!(s.usage_queries.len(), 1);
         let (asked_key, asked_start, asked_end) = s.usage_queries[0].clone();
         assert_eq!(asked_key, key_id);
         assert_eq!(asked_start, body["period_start"].as_str().unwrap());
-        assert_eq!(asked_end, body["period_end"].as_str().unwrap());
+        assert_eq!(asked_end, today.format("%Y-%m-%d").to_string());
     });
 }
 
@@ -422,6 +425,117 @@ async fn a_throttled_control_plane_gets_the_last_good_answer() {
 
     assert_eq!(second.status, StatusCode::OK, "stale beats an error page");
     assert_eq!(first.json(), second.json(), "same answer, same as_of");
+}
+
+/// The throttle can land on the key LOOKUP just as well as on the usage read —
+/// the account-wide budget does not care which operation is asked — and both
+/// must reach the same stale-serve branch. This is the assertion behind
+/// `list_named` raising `GatewayError::Throttled`: revert that arm to a plain
+/// error mapping and this test answers `502` instead of the stale `200`.
+#[tokio::test]
+async fn a_throttled_key_lookup_also_gets_the_last_good_answer() {
+    let mock = MockGateway::start().await;
+    seed_key_with_usage(&mock);
+    let router = usage_router_with(&mock, Duration::ZERO, Duration::from_secs(10));
+
+    let first = call_path(
+        router.clone(),
+        "GET",
+        USAGE_PATH,
+        Some(&session_cookie(USER_ID)),
+    )
+    .await;
+    assert_eq!(first.status, StatusCode::OK);
+
+    mock.with(|s| s.throttle_list = true);
+    let second = call_path(router, "GET", USAGE_PATH, Some(&session_cookie(USER_ID))).await;
+
+    assert_eq!(second.status, StatusCode::OK, "stale beats an error page");
+    assert_eq!(first.json(), second.json());
+}
+
+/// Serving a stale answer during a throttle **re-stamps** it, so the next
+/// load inside the TTL is a cache hit that never reaches AWS. Without the
+/// re-stamp, every viewer refresh during a throttle event fired both
+/// control-plane calls just to be told to slow down again — the opposite of
+/// backing off.
+#[tokio::test]
+async fn a_served_stale_answer_backs_off_the_next_load() {
+    let mock = MockGateway::start().await;
+    seed_key_with_usage(&mock);
+    let router = usage_router_with(&mock, Duration::from_millis(50), Duration::from_secs(10));
+
+    let first = call_path(
+        router.clone(),
+        "GET",
+        USAGE_PATH,
+        Some(&session_cookie(USER_ID)),
+    )
+    .await;
+    assert_eq!(first.status, StatusCode::OK);
+
+    // Age the entry past the TTL, then throttle: the next load attempts AWS,
+    // gets refused, and serves (and re-stamps) the stale answer.
+    tokio::time::sleep(Duration::from_millis(60)).await;
+    mock.with(|s| s.throttle_usage = true);
+    let calls_before_stale = mock.with(|s| s.usage_calls);
+    let stale = call_path(
+        router.clone(),
+        "GET",
+        USAGE_PATH,
+        Some(&session_cookie(USER_ID)),
+    )
+    .await;
+    assert_eq!(stale.status, StatusCode::OK);
+    let calls_after_stale = mock.with(|s| s.usage_calls);
+    assert!(
+        calls_after_stale > calls_before_stale,
+        "the stale serve tried AWS first"
+    );
+
+    // Immediately again: the re-stamped entry is fresh, so nothing reaches
+    // the (still throttling) control plane at all.
+    let backed_off = call_path(router, "GET", USAGE_PATH, Some(&session_cookie(USER_ID))).await;
+    assert_eq!(backed_off.status, StatusCode::OK);
+    assert_eq!(backed_off.json(), first.json(), "same answer, same as_of");
+    assert_eq!(
+        mock.with(|s| s.usage_calls),
+        calls_after_stale,
+        "a re-stamped stale answer is a cache hit; AWS is left alone"
+    );
+}
+
+/// Issuing a key evicts a cached "no key": without this, the page's own
+/// refetch after the press — and any reload for the next minute — would be
+/// served the stale `NoKey` and tell a key-holder they have no key.
+#[tokio::test]
+async fn issuing_a_key_evicts_a_cached_no_key() {
+    let mock = MockGateway::start().await;
+    let router = app_against(&mock);
+
+    let before = call_path(
+        router.clone(),
+        "GET",
+        USAGE_PATH,
+        Some(&session_cookie(USER_ID)),
+    )
+    .await;
+    assert_eq!(before.status, StatusCode::NOT_FOUND);
+    assert_eq!(before.json()["code"], "no_key");
+
+    let issued = call(router.clone(), "POST", Some(&session_cookie(USER_ID))).await;
+    assert_eq!(issued.status, StatusCode::OK);
+
+    // Inside the 60s TTL — only the eviction can explain a non-stale answer.
+    let after = call_path(router, "GET", USAGE_PATH, Some(&session_cookie(USER_ID))).await;
+    assert_eq!(
+        after.status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&after.body)
+    );
+    // A fresh key has no usage rows yet, and that is the honest shape.
+    assert_eq!(after.json()["used"], serde_json::Value::Null);
 }
 
 /// Throttled with nothing cached: there is no honest number to show, so the

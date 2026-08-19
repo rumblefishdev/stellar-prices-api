@@ -811,10 +811,12 @@ describe('usage against quota', () => {
       /AWS reports usage with a delay/i,
     );
     // The timestamp is the backend's `as_of` — the moment of the GetUsage —
-    // rendered in UTC, not the moment of the page load.
+    // rendered in UTC (the decided wording says UTC, not toUTCString's
+    // "GMT"), not the moment of the page load.
     expect(screen.getByText(/last updated/i).textContent).toContain(
-      new Date(USAGE.as_of).toUTCString(),
+      new Date(USAGE.as_of).toUTCString().replace(/GMT$/, 'UTC'),
     );
+    expect(screen.getByText(/last updated/i).textContent).not.toContain('GMT');
   });
 
   /** Usage is read-only, so — unlike the key — it may and does load on mount. */
@@ -836,6 +838,30 @@ describe('usage against quota', () => {
 
     expect(await screen.findByText(/no API key yet/i)).toBeTruthy();
     expect(document.body.textContent).not.toContain('Could not load');
+    // The limits still render — they belong to the plan, not to a key, and a
+    // visitor deciding whether to issue one is exactly who they inform.
+    expect(screen.getByText(/request per second/i)).toBeTruthy();
+    expect(screen.getByText(/1st of each month, 00:00 UTC/i)).toBeTruthy();
+  });
+
+  /**
+   * Only the backend's own `no_key` envelope means "no key". A 404 with no
+   * such code — task 0183's empty gate answer, reachable when the portal is
+   * closed under a still-open tab — must NOT render "you have no API key",
+   * which would be a false statement about a key that may well exist.
+   */
+  it('does not read the gate’s empty 404 as "no key"', async () => {
+    signedInWithUsage(() => ({
+      ok: false,
+      status: 404,
+      json: async () => {
+        throw new SyntaxError('Unexpected end of JSON input');
+      },
+    }));
+    renderApp();
+
+    expect(await screen.findByText(/could not load your usage/i)).toBeTruthy();
+    expect(screen.queryByText(/no API key yet/i)).toBeNull();
   });
 
   /**
@@ -925,5 +951,19 @@ describe('usage against quota', () => {
 
     expect(await screen.findByText(/could not load your usage/i)).toBeTruthy();
     expect(screen.getByRole('button', { name: /refresh/i })).toBeTruthy();
+  });
+
+  /**
+   * An expired session reads the same here as in the key section: "sign out
+   * and sign in again", through the shared `describeFailure`. Without it the
+   * two sections describe one cause in two vocabularies — the key section in
+   * words, this one as a raw "answered 401" — and that reads as two bugs.
+   */
+  it('tells the visitor to sign in again when the session has expired', async () => {
+    signedInWithUsage(() => ({ ok: false, status: 401 }));
+    renderApp();
+
+    expect(await screen.findByText(/session has expired/i)).toBeTruthy();
+    expect(document.body.textContent).not.toContain('answered 401');
   });
 });
