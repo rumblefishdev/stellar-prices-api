@@ -2,7 +2,8 @@
 id: "0120"
 title: "Endpoint conformance — all 7 route groups return correct, schema-valid responses for 20 major assets"
 type: TEST
-status: active
+status: blocked
+by: ["0135", "0170", "0178"]
 related_adr: ["0008"]
 related_tasks: ["0072", "0118", "0119", "0124", "0128"]
 tags: [layer-backend, priority-high, effort-medium, milestone-M2, api, testing, verification, acceptance]
@@ -24,6 +25,15 @@ history:
     who: stkrolikiewicz
     note: >
       Promoted to active — starting the endpoint conformance pass.
+  - date: 2026-08-19
+    status: blocked
+    who: stkrolikiewicz
+    note: >
+      Suite built, run on production (752 pass / 55 fail, 0 schema
+      failures) and merged into PR #226. Every failure class is owned by
+      [[0135]], [[0170]] or [[0178]]; this task blocks on them for the
+      final stub/sentinel AC — re-run the suite green after they land and
+      cite the report in [[0128]].
 ---
 
 # Endpoint conformance for 20 major assets
