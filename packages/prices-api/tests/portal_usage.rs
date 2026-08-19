@@ -45,7 +45,8 @@ async fn usage(mock: &MockGateway, sub: &str) -> Reply {
 fn seed_key_with_usage(mock: &MockGateway) -> String {
     mock.with(|s| {
         let id = s.seed(&format!("discord-{USER_ID}-key"), 100);
-        s.usage.insert(id.clone(), vec![(121, 99_879), (0, 99_879)]);
+        s.usage
+            .insert(id.clone(), vec![vec![121, 99_879], vec![0, 99_879]]);
         id
     })
 }
@@ -231,11 +232,11 @@ async fn usage_pages_are_summed_to_exhaustion() {
         s.usage.insert(
             id,
             vec![
-                (1, 99_999),
-                (2, 99_997),
-                (3, 99_994),
-                (4, 99_990),
-                (5, 99_985),
+                vec![1, 99_999],
+                vec![2, 99_997],
+                vec![3, 99_994],
+                vec![4, 99_990],
+                vec![5, 99_985],
             ],
         );
         s.usage_page_size = 2;
@@ -269,8 +270,8 @@ async fn a_prefix_neighbour_is_not_the_callers_key() {
         let own = s.seed(&format!("discord-{USER_ID}-key"), 200);
         // An exact-name EXTENSION — what a console-created copy looks like.
         let imposter = s.seed(&format!("discord-{USER_ID}-key-old"), 100);
-        s.usage.insert(own.clone(), vec![(7, 99_993)]);
-        s.usage.insert(imposter.clone(), vec![(555, 0)]);
+        s.usage.insert(own.clone(), vec![vec![7, 99_993]]);
+        s.usage.insert(imposter.clone(), vec![vec![555, 0]]);
         (own, imposter)
     });
 
@@ -296,8 +297,8 @@ async fn duplicates_resolve_to_the_reveals_winner_without_deleting_the_loser() {
     let (earliest, later) = mock.with(|s| {
         let later = s.seed(&format!("discord-{USER_ID}-key"), 500);
         let earliest = s.seed(&format!("discord-{USER_ID}-key"), 100);
-        s.usage.insert(earliest.clone(), vec![(11, 99_989)]);
-        s.usage.insert(later.clone(), vec![(999, 0)]);
+        s.usage.insert(earliest.clone(), vec![vec![11, 99_989]]);
+        s.usage.insert(later.clone(), vec![vec![999, 0]]);
         (earliest, later)
     });
 
@@ -355,7 +356,7 @@ async fn the_cache_is_per_caller() {
     let other = "999999999999999999";
     mock.with(|s| {
         let id = s.seed(&format!("discord-{other}-key"), 100);
-        s.usage.insert(id, vec![(3, 99_997)]);
+        s.usage.insert(id, vec![vec![3, 99_997]]);
     });
     let router = app_against(&mock);
 
@@ -572,7 +573,8 @@ async fn a_control_plane_failure_is_a_502() {
 }
 
 /// The wall-clock deadline turns a stalled control plane into a `503` answer
-/// rather than a killed invocation with no response at all.
+/// rather than a killed invocation with no response at all — when there is
+/// nothing cached to fall back on.
 #[tokio::test]
 async fn a_stalled_lookup_elapses_into_a_503() {
     let mock = MockGateway::start().await;
@@ -583,6 +585,71 @@ async fn a_stalled_lookup_elapses_into_a_503() {
     let reply = call_path(router, "GET", USAGE_PATH, Some(&session_cookie(USER_ID))).await;
     assert_eq!(reply.status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(reply.json()["code"], "usage_unavailable");
+}
+
+/// A throttled control plane often shows up as LATENCY, not as a 429: the
+/// SDK's retries can spend the whole deadline before any error surfaces, and
+/// the timeout cancels the future first. Same condition, different timing —
+/// so the deadline arm must serve the last good answer exactly as the
+/// throttle arm does, or AC 6 holds only for the fast kind of throttle.
+#[tokio::test]
+async fn a_stalled_lookup_serves_the_last_good_answer() {
+    let mock = MockGateway::start().await;
+    seed_key_with_usage(&mock);
+    // TTL zero so the entry is expired immediately: serving it can only be
+    // the deadline fallback. The deadline is generous for the fast first load
+    // and far below the delay injected for the second.
+    let router = usage_router_with(&mock, Duration::ZERO, Duration::from_millis(150));
+
+    let first = call_path(
+        router.clone(),
+        "GET",
+        USAGE_PATH,
+        Some(&session_cookie(USER_ID)),
+    )
+    .await;
+    assert_eq!(first.status, StatusCode::OK);
+
+    mock.with(|s| s.list_delay_ms = 400);
+    let second = call_path(router, "GET", USAGE_PATH, Some(&session_cookie(USER_ID))).await;
+
+    assert_eq!(second.status, StatusCode::OK, "stale beats an error page");
+    assert_eq!(first.json(), second.json(), "same answer, same as_of");
+}
+
+/// A malformed daily row (`[121]`, `[]`) is skipped, not defaulted: a missing
+/// `remaining` defaulting to 0 on the LAST row would reconstruct
+/// `limit = used` and render a barely-used key as quota-exhausted.
+#[tokio::test]
+async fn a_malformed_daily_row_is_skipped_not_defaulted() {
+    let mock = MockGateway::start().await;
+    mock.with(|s| {
+        let id = s.seed(&format!("discord-{USER_ID}-key"), 100);
+        s.usage.insert(id, vec![vec![5, 99_995], vec![121]]);
+    });
+
+    let reply = usage(&mock, USER_ID).await;
+    assert_eq!(reply.status, StatusCode::OK);
+    let body = reply.json();
+    assert_eq!(body["used"], 5, "{body}");
+    assert_eq!(body["remaining"], 99_995, "{body}");
+    assert_eq!(body["limit"], 100_000, "{body}");
+}
+
+/// Every row malformed degrades to "nothing recorded" — the same honest shape
+/// as no rows at all — never to invented zeros or an invented limit.
+#[tokio::test]
+async fn all_rows_malformed_degrades_to_nothing_recorded() {
+    let mock = MockGateway::start().await;
+    mock.with(|s| {
+        let id = s.seed(&format!("discord-{USER_ID}-key"), 100);
+        s.usage.insert(id, vec![vec![]]);
+    });
+
+    let reply = usage(&mock, USER_ID).await;
+    assert_eq!(reply.status, StatusCode::OK);
+    assert_eq!(reply.json()["used"], Value::Null);
+    assert_eq!(reply.json()["limit"], Value::Null);
 }
 
 /// The portal open with no control-plane client wired answers `503` and says

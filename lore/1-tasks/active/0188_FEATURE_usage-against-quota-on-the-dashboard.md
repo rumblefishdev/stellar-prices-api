@@ -332,6 +332,19 @@ owning tasks.** No scope violation found by either.
 | R7 | Plausible | `usage_of` always queried a future `endDate` (month end), which only the mock — accepting any string — had ever validated | The query now ends **today** (future days carry no data anyway); the rendered `period_end` stays the month boundary. Test updated to pin the split |
 | — | Refuted | "Stale-serve should cover every failure, not just throttling" | As designed (decision #7): a throttle has an honest fallback, an outage should be visible |
 
+**A third pass** (Adam-run `/code-review` against the finished branch)
+produced 10 verified findings; the four correctness ones are fixed, the rest
+dispositioned:
+
+| # | severity | what | resolution |
+| --- | --- | --- | --- |
+| C1 | Confirmed | The deadline's `503` arm never consulted the stale cache — a throttle manifesting as SDK-retry LATENCY (each per-call budget spent before any 429 surfaces) was cancelled by the timeout and answered with the exact error page the throttle arm exists to prevent | The elapsed arm now serves (and re-stamps) the last good answer, `503` only with nothing cached; tested with an injected delay |
+| C2 | Confirmed | Write-after-eviction race: an in-flight lookup that snapshotted a keyless listing could `remember()` its `NoKey` **after** the concurrent issue's `invalidate_no_key` ran as a no-op — resurrecting the fixed R2 for a full TTL | Per-caller eviction epochs: `invalidate_no_key` bumps unconditionally, and a `NoKey` computed under an older epoch is discarded instead of stored (real answers exempt — a listing that saw the key cannot be falsified). Unit-tested step by step |
+| C3 | Confirmed | `Instant`-based TTLs stretch across a frozen Lambda container (CLOCK_MONOTONIC does not reliably advance while frozen) | **Not fixed here, accepted** — `as_of` keeps the rendered age honest, the failure direction is serving-older not calling-more, and a `SystemTime` stamp brings its own non-monotonicity; noted for [[0194]]'s costing pass |
+| C4 | Confirmed | The `keyOnScreen` effect refetched on every flip, blanking already-rendered numbers into a loading flicker for a body the backend cache answers unchanged | Refetch guarded to the no-key state (latest view read through a ref, so the effect fires on the transition alone and cannot loop); tested |
+| C5 | Confirmed | A short daily pair (`[121]`, `[]`) defaulted `remaining` to 0, collapsing the reconstructed limit to `used` — a barely-used key rendered as quota-exhausted | Malformed rows are warn-and-skipped like the id-less key in `list_named`; all-malformed degrades to "nothing recorded". The mock now serves raw rows so both are tested |
+| C6–C10 | Plausible | `Throttled` drops the SDK message; check 5b will false-fail on a future `UpdateUsage` grant; `fetchUsage` re-implements `getJson`; the auth preamble is duplicated from the key routes; the 502 envelope is hand-assembled (no `errors::bad_gateway`) | Dispositioned below with the earlier deferrals — C9/C10 join the 0192 extraction note, C6 its observability half, C7/C8 recorded here for whoever touches those files next |
+
 Noted for owning tasks, deliberately not fixed here: the `1 req/s` page literal
 duplicates `pricingApiFreePlanRateLimit` with no drift check ([[0193]]/[[0194]]
 — the response or `/config` is where the number would belong); the throttle

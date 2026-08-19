@@ -132,12 +132,41 @@ pub struct UsageState {
     /// The control-plane client, carrying the free plan id. `None` while the
     /// portal is closed, exactly as `KeysState` holds it.
     gateway: Option<Arc<Gateway>>,
-    /// The last good answer per caller (session `sub`). See the module docs.
-    cache: Arc<Mutex<HashMap<String, CacheEntry>>>,
+    /// The last good answer per caller (session `sub`), plus the per-caller
+    /// eviction epochs. See the module docs and [`CacheInner`].
+    cache: Arc<Mutex<CacheInner>>,
     /// [`CACHE_TTL`], overridable only outside the Lambda build.
     ttl: Duration,
     /// [`USAGE_DEADLINE`], overridable only outside the Lambda build.
     deadline: Duration,
+}
+
+/// The cache map and the guard that keeps eviction effective under
+/// concurrency.
+///
+/// `epochs` exists for one race: a `GET /usage` snapshots a keyless listing,
+/// the same user's `POST /key` completes and calls
+/// [`UsageCache::invalidate_no_key`] — a no-op, nothing is cached yet — and
+/// the usage request then finishes and would write its now-false `NoKey` with
+/// a fresh timestamp, resurrecting for a full TTL exactly the stale answer the
+/// eviction was for. So an eviction also bumps the caller's epoch, and a
+/// `NoKey` computed under an older epoch is **discarded instead of stored**
+/// ([`remember`]). Real usage answers are exempt: a listing that saw the key
+/// cannot be falsified by the key coming into existence.
+#[derive(Default)]
+struct CacheInner {
+    entries: HashMap<String, CacheEntry>,
+    epochs: HashMap<String, EpochMark>,
+}
+
+/// One caller's eviction epoch. `bumped_at` exists only so stale marks can be
+/// pruned with the entries — a mark must outlive the in-flight lookup it
+/// guards against (bounded by [`USAGE_DEADLINE`]), and [`STALE_KEEP`] is
+/// comfortably past that.
+#[derive(Clone, Copy)]
+struct EpochMark {
+    value: u64,
+    bumped_at: Instant,
 }
 
 /// A handle to the usage cache for the one writer outside this module: the
@@ -150,17 +179,27 @@ pub struct UsageState {
 /// answer, nothing else: real usage entries stay cached (a reveal changes no
 /// counter), and nothing outside this module can read or write anything.
 #[derive(Clone)]
-pub struct UsageCache(Arc<Mutex<HashMap<String, CacheEntry>>>);
+pub struct UsageCache(Arc<Mutex<CacheInner>>);
 
 impl UsageCache {
-    /// Drop a cached "no key" answer for `sub`, if that is what is cached.
+    /// Drop a cached "no key" answer for `sub`, if that is what is cached —
+    /// and bump the caller's epoch either way, so an in-flight lookup that
+    /// snapshotted the keyless state cannot write it back afterwards (see
+    /// [`CacheInner`]). The unconditional bump is the point: at the moment the
+    /// race matters there is nothing cached to remove.
     pub fn invalidate_no_key(&self, sub: &str) {
         let mut cache = self.0.lock().expect("the usage cache lock is not poisoned");
-        if let Some(entry) = cache.get(sub)
+        if let Some(entry) = cache.entries.get(sub)
             && matches!(entry.answer, CachedAnswer::NoKey)
         {
-            cache.remove(sub);
+            cache.entries.remove(sub);
         }
+        let mark = cache.epochs.entry(sub.to_string()).or_insert(EpochMark {
+            value: 0,
+            bumped_at: Instant::now(),
+        });
+        mark.value = mark.value.wrapping_add(1);
+        mark.bumped_at = Instant::now();
     }
 }
 
@@ -169,7 +208,7 @@ impl UsageState {
         Self {
             oauth: oauth.map(Arc::new),
             gateway: gateway.map(Arc::new),
-            cache: Arc::new(Mutex::new(HashMap::new())),
+            cache: Arc::new(Mutex::new(CacheInner::default())),
             ttl: CACHE_TTL,
             deadline: USAGE_DEADLINE,
         }
@@ -299,12 +338,32 @@ async fn usage(State(state): State<UsageState>, headers: HeaderMap) -> Response 
         return answer(entry.answer);
     }
 
+    // Read BEFORE the lookup starts: if a concurrent key issue bumps it while
+    // the fetch is in flight, the fetch's "no key" snapshot is stale and must
+    // not be stored. See `CacheInner`.
+    let epoch = epoch_of(&state, &session.sub);
+
     let fetched = match tokio::time::timeout(state.deadline, fetch(gateway, &name)).await {
         Ok(fetched) => fetched,
         Err(_elapsed) => {
+            // A throttled control plane often shows up HERE, not as
+            // `Throttled`: the SDK's retries inside each per-call budget can
+            // spend the whole deadline before any error surfaces, and the
+            // timeout cancels the future first. Same condition, different
+            // timing — so it gets the same answer as the throttle arm below:
+            // the last good answer (re-stamped, so the next TTL of loads
+            // leaves the struggling control plane alone) beats the error page.
+            if let Some(entry) = cached(&state, &session.sub, STALE_KEEP, &period_now.start) {
+                tracing::warn!(
+                    deadline_secs = state.deadline.as_secs_f32(),
+                    "portal usage lookup ran out of time; serving the cached answer"
+                );
+                remember(&state, &session.sub, entry.answer.clone(), epoch);
+                return answer(entry.answer);
+            }
             tracing::error!(
                 deadline_secs = state.deadline.as_secs_f32(),
-                "portal usage lookup ran out of time"
+                "portal usage lookup ran out of time and nothing is cached"
             );
             return no_store(errors::service_unavailable(
                 USAGE_UNAVAILABLE,
@@ -315,7 +374,7 @@ async fn usage(State(state): State<UsageState>, headers: HeaderMap) -> Response 
 
     match fetched {
         Ok(answer_now) => {
-            remember(&state, &session.sub, answer_now.clone());
+            remember(&state, &session.sub, answer_now.clone(), epoch);
             answer(answer_now)
         }
         // Backing off (the SDK's own retries) was not enough: AWS is
@@ -340,7 +399,7 @@ async fn usage(State(state): State<UsageState>, headers: HeaderMap) -> Response 
                 // re-serving an older answer — accepted, because the honest
                 // age is on screen and the alternative is the error page this
                 // criterion exists to prevent.
-                remember(&state, &session.sub, entry.answer.clone());
+                remember(&state, &session.sub, entry.answer.clone(), epoch);
                 return answer(entry.answer);
             }
             tracing::warn!(
@@ -456,10 +515,21 @@ fn cached(
         .lock()
         .expect("the usage cache lock is not poisoned");
     cache
+        .entries
         .get(sub)
         .filter(|entry| entry.fetched_at.elapsed() < max_age)
         .filter(|entry| answers_for_period(&entry.answer, current_period_start))
         .cloned()
+}
+
+/// The caller's current eviction epoch — read before a lookup starts, and
+/// compared by [`remember`] before a "no key" is stored. See [`CacheInner`].
+fn epoch_of(state: &UsageState, sub: &str) -> u64 {
+    let cache = state
+        .cache
+        .lock()
+        .expect("the usage cache lock is not poisoned");
+    cache.epochs.get(sub).map(|mark| mark.value).unwrap_or(0)
 }
 
 /// Whether a cached answer still describes the current period.
@@ -477,19 +547,40 @@ fn answers_for_period(answer: &CachedAnswer, current_period_start: &str) -> bool
     }
 }
 
-/// Store an answer, pruning entries too old even for the throttle fallback.
+/// Store an answer, pruning entries (and epoch marks) too old even for the
+/// throttle fallback.
 ///
-/// Pruning on insert bounds the map by activity: it holds at most the callers
-/// seen in the last [`STALE_KEEP`], which for this portal is a small number —
-/// and a warm Lambda container is the only place the map lives long enough to
-/// matter.
-fn remember(state: &UsageState, sub: &str, answer: CachedAnswer) {
+/// `epoch` is the caller's epoch **as read before the lookup started**. A
+/// "no key" computed under an epoch that has since moved is discarded rather
+/// than stored: the move means a key issue completed while the lookup was in
+/// flight, so the snapshot is stale and storing it would resurrect the exact
+/// answer the eviction removed — for a full TTL, across reloads. The response
+/// already in flight still says "no key" once; the point is that nothing
+/// remembers it. Real usage answers are stored regardless — see
+/// [`CacheInner`].
+///
+/// Pruning on insert bounds both maps by activity: they hold at most the
+/// callers seen in the last [`STALE_KEEP`], which for this portal is a small
+/// number — and a warm Lambda container is the only place they live long
+/// enough to matter.
+fn remember(state: &UsageState, sub: &str, answer: CachedAnswer, epoch: u64) {
     let mut cache = state
         .cache
         .lock()
         .expect("the usage cache lock is not poisoned");
-    cache.retain(|_, entry| entry.fetched_at.elapsed() < STALE_KEEP);
-    cache.insert(
+    if matches!(answer, CachedAnswer::NoKey)
+        && cache.epochs.get(sub).map(|mark| mark.value).unwrap_or(0) != epoch
+    {
+        tracing::debug!("a key was issued while this lookup ran; not caching its 'no key'");
+        return;
+    }
+    cache
+        .entries
+        .retain(|_, entry| entry.fetched_at.elapsed() < STALE_KEEP);
+    cache
+        .epochs
+        .retain(|_, mark| mark.bumped_at.elapsed() < STALE_KEEP);
+    cache.entries.insert(
         sub.to_string(),
         CacheEntry {
             answer,
@@ -633,5 +724,52 @@ mod tests {
     #[test]
     fn no_key_is_period_independent() {
         assert!(answers_for_period(&CachedAnswer::NoKey, "2026-09-01"));
+    }
+
+    const ANY_PERIOD: &str = "2026-08-01";
+
+    /// The write-after-eviction race, replayed step by step: a "no key"
+    /// snapshotted before a concurrent issue bumped the epoch must be
+    /// discarded, not stored — storing it would resurrect, for a full TTL,
+    /// exactly the answer the eviction removed.
+    #[test]
+    fn a_no_key_from_before_an_eviction_is_not_stored() {
+        let state = UsageState::new(None, None);
+        let sub = "308994132968210433";
+
+        // The lookup starts: it reads the epoch, then (concurrently) the
+        // user's key issue completes and invalidates.
+        let epoch_at_lookup_start = epoch_of(&state, sub);
+        state.cache_handle().invalidate_no_key(sub);
+
+        // The lookup finishes with its stale keyless snapshot.
+        remember(&state, sub, CachedAnswer::NoKey, epoch_at_lookup_start);
+        assert!(
+            cached(&state, sub, CACHE_TTL, ANY_PERIOD).is_none(),
+            "a pre-eviction 'no key' must not be cached"
+        );
+
+        // Whereas a lookup that STARTED after the eviction stores normally.
+        remember(&state, sub, CachedAnswer::NoKey, epoch_of(&state, sub));
+        assert!(cached(&state, sub, CACHE_TTL, ANY_PERIOD).is_some());
+    }
+
+    /// The guard is for "no key" only: a real usage answer cannot be
+    /// falsified by a key coming into existence, so it stores regardless of
+    /// the epoch — and the eviction itself leaves real answers alone.
+    #[test]
+    fn a_real_answer_stores_regardless_of_the_epoch() {
+        let state = UsageState::new(None, None);
+        let sub = "308994132968210433";
+
+        let stale_epoch = epoch_of(&state, sub);
+        state.cache_handle().invalidate_no_key(sub);
+        remember(&state, sub, usage_answer(ANY_PERIOD), stale_epoch);
+        assert!(cached(&state, sub, CACHE_TTL, ANY_PERIOD).is_some());
+
+        // And invalidating again does not evict it — only "no key" is the
+        // handle's to remove.
+        state.cache_handle().invalidate_no_key(sub);
+        assert!(cached(&state, sub, CACHE_TTL, ANY_PERIOD).is_some());
     }
 }

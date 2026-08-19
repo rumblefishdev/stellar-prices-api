@@ -143,8 +143,10 @@ pub struct Store {
     /// Daily `[used, remaining]` pairs per key id, in day order — what
     /// `GetUsage` reports under `items`. A key with no entry here has no row,
     /// which is exactly what a freshly attached key looks like while the
-    /// reporting lags.
-    pub usage: HashMap<String, Vec<(i64, i64)>>,
+    /// reporting lags. Raw `Vec<Vec<i64>>` rather than tuples, so a test can
+    /// also serve a MALFORMED row (`[121]`, `[]`) and prove the handler skips
+    /// it instead of defaulting the missing element.
+    pub usage: HashMap<String, Vec<Vec<i64>>>,
     /// How many `GetUsage` HTTP calls arrived — what the cache assertions
     /// count.
     pub usage_calls: usize,
@@ -491,10 +493,7 @@ pub async fn read_usage(
     // looks like while the reporting lags.
     if !days.is_empty() {
         body["values"] = json!({
-            key_id: days[start..end]
-                .iter()
-                .map(|&(used, remaining)| json!([used, remaining]))
-                .collect::<Vec<_>>(),
+            key_id: days[start..end].iter().map(|day| json!(day)).collect::<Vec<_>>(),
         });
     }
     if end < days.len() {

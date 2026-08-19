@@ -419,12 +419,30 @@ function Usage({ keyOnScreen }: { keyOnScreen: boolean }) {
       });
   }, []);
 
-  // On mount, and again when a key appears on screen: straight after an issue
-  // the "no key" answer this section may be showing is already false.
+  // On mount only.
   useEffect(() => {
     load();
     return () => cancelInFlight.current?.();
-  }, [load, keyOnScreen]);
+  }, [load]);
+
+  // The latest view state, for the effect below — a ref rather than a dep,
+  // because the refetch must fire on the keyOnScreen TRANSITION alone. With
+  // `view.state` as a dependency the effect re-runs on every state change,
+  // and "no-key → load → no-key" (the backend can keep answering no_key while
+  // its cache catches up) becomes a fetch loop.
+  const viewState = useRef<UsageView['state']>('loading');
+  useEffect(() => {
+    viewState.current = view.state;
+  }, [view.state]);
+
+  // When a key appears on screen, refetch — but only OUT OF the no-key state:
+  // that is the one answer the issue just falsified. A section already
+  // showing numbers is showing an answer a reveal does not change, and
+  // blanking it into a loading flicker for an identical body would make the
+  // press look like it broke something.
+  useEffect(() => {
+    if (keyOnScreen && viewState.current === 'no-key') load();
+  }, [keyOnScreen, load]);
 
   /**
    * THE lag line — the wording this task decides once. Rendered under every

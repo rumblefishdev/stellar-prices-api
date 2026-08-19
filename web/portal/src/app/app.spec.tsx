@@ -925,6 +925,52 @@ describe('usage against quota', () => {
     expect(screen.queryByText(/no API key yet/i)).toBeNull();
   });
 
+  /**
+   * Revealing an EXISTING key must not touch a usage section that is already
+   * showing numbers: a reveal changes no counter, the backend's cache would
+   * answer an identical body, and blanking rendered figures into a loading
+   * flicker makes the press look like it broke something. The refetch is for
+   * the no-key state alone — the one answer the issue falsifies.
+   */
+  it('does not refetch or blank rendered numbers when an existing key is revealed', async () => {
+    const fetchMock = stubRoutes({
+      [CONFIG_URL]: () => ({ json: async () => ({ enabled: true }) }),
+      [ME_URL]: () => ({
+        json: async () => ({
+          authenticated: true,
+          user_id: '308994132968210433',
+          username: 'adam',
+        }),
+      }),
+      [KEY_URL]: () => ({
+        json: async () => ({
+          key_id: 'abc123',
+          name: 'discord-308994132968210433-key',
+          value: 'aBcDeF0123456789aBcDeF0123456789aBcDeF01',
+          created: false,
+        }),
+      }),
+      [USAGE_URL]: () => ({ json: async () => USAGE }),
+    });
+    renderApp();
+
+    await screen.findByTestId('usage-used');
+    const usageCalls = fetchMock.mock.calls.filter(
+      ([url]) => url === USAGE_URL,
+    ).length;
+
+    fireEvent.click(
+      await screen.findByRole('button', { name: /get my api key/i }),
+    );
+    await screen.findByTestId('api-key');
+
+    // The numbers never left the screen, and no second usage request fired.
+    expect(screen.getByTestId('usage-used').textContent).toBe('121');
+    expect(
+      fetchMock.mock.calls.filter(([url]) => url === USAGE_URL).length,
+    ).toBe(usageCalls);
+  });
+
   /** The refresh control re-asks; the backend's cache bounds what that costs. */
   it('refreshes on the button', async () => {
     const fetchMock = signedInWithUsage();

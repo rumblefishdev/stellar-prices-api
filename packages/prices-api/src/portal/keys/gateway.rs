@@ -591,8 +591,20 @@ impl Gateway {
                 && let Some(values) = items.get(key_id)
             {
                 for pair in values {
-                    let used = pair.first().copied().unwrap_or(0);
-                    let remaining = pair.get(1).copied().unwrap_or(0);
+                    // A day is `[used, remaining]`. A shorter row is skipped
+                    // with a warning, like the id-less key in `list_named` —
+                    // NOT defaulted: `remaining` defaulting to 0 on a
+                    // truncated LAST row would reconstruct `limit = used` and
+                    // render a barely-used key as "quota exhausted", which is
+                    // a worse lie than a slightly staler `remaining` from the
+                    // previous day.
+                    let (Some(&used), Some(&remaining)) = (pair.first(), pair.get(1)) else {
+                        tracing::warn!(
+                            elements = pair.len(),
+                            "GetUsage returned a malformed daily pair; skipped"
+                        );
+                        continue;
+                    };
                     days.push((used, remaining));
                 }
             }
