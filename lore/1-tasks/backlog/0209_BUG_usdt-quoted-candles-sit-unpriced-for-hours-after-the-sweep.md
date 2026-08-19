@@ -19,6 +19,19 @@ history:
       and none are damage from it, but the oldest is 17 h+ old, which is longer
       than an hourly sweep should leave a candle unpriced. Never investigated —
       0182 closed on the repair being verified, not on this.
+  - date: 2026-08-19
+    status: backlog
+    who: okarcz
+    note: >
+      MEASURED while validating 0204's gap-4 alarm thresholds against prod. The
+      first acceptance criterion is met: the cause is USDT-SPECIFIC, not the
+      sweep. On 2026-08-18 the USDC leg ran 759 priced / 8 unpriced and the XLM
+      leg 3,446 / 49 — both healthy — while the USDT leg ran 8 / 12. Enrichment
+      is alive. Candidate 2 is the direction, refined by two further findings:
+      prices.usd_rate holds ONLY USDC, so USDT has no direct rate and must be
+      derived, and the USDT/USDC reference market carries exactly ONE candle per
+      day. Still backlog — the lever is chosen but not built, and this now also
+      blocks a threshold decision on 0204.
 ---
 
 # USDT-quoted candles stay unpriced far longer than the sweep interval
@@ -44,7 +57,7 @@ with ordinary `volume_quote`.
 The problem is only the age. An in-flight bucket at zero is expected; a bucket
 from **17 hours ago** is not, if an hourly sweep is running.
 
-## Two candidate causes, neither measured
+## Two candidate causes — ✅ RESOLVED 2026-08-19, it is candidate 2
 
 1. **The sweep is not keeping up, or is not running.** Would show as a lag
    affecting all quote legs, not just USDT.
@@ -59,6 +72,89 @@ from **17 hours ago** is not, if an hourly sweep is running.
 unpriced-row age distribution for `quote_asset_id = 111` against XLM-quoted and
 USDC-quoted legs over the same window. If only USDT lags, it is the reference
 window; if everything lags, it is the sweep.
+
+## Measured 2026-08-19 — USDT-specific, and the mechanism is a two-hop chain
+
+Run against prod while validating [[0204]] gap 4's alarm thresholds, which is why
+these numbers exist at all: that alarm's rung 1 turned out to be untunable
+without answering this task first, so the two are now coupled.
+
+⚠️ **Two wrong conclusions preceded the right one and are recorded so they are
+not re-derived.** From the roster alone it looked *asset-specific* (a near-identical
+set of 8 assets failing two days running); from a single asset's history it looked
+like *enrichment had stopped* (four assets priced cleanly 08-06 → 08-17 then went
+to zero together on 08-18, the day [[0182]]'s repair ran). Both readings survive
+their own evidence and are false. **Only the by-leg split settles it.**
+
+### The discriminating query and its answer
+
+```sql
+SELECT toDate(c.timestamp) AS day, q.asset_code AS quote,
+       countIf(c.close_usd > 0) AS priced, countIf(c.close_usd = 0) AS unpriced
+FROM (SELECT timestamp, quote_asset_id, close_usd FROM prices.price_ohlcv_1d FINAL
+      WHERE timestamp >= now() - INTERVAL 5 DAY AND close > 0) AS c
+INNER JOIN (SELECT asset_id, asset_code FROM prices.assets FINAL) AS q
+        ON q.asset_id = c.quote_asset_id
+WHERE q.asset_code IN ('USDT', 'USDC', 'XLM')
+GROUP BY day, quote ORDER BY quote, day;
+```
+
+| 2026-08-18 | priced | unpriced |
+|---|---|---|
+| USDC leg | 759 | 8 |
+| XLM leg | 3,446 | 49 |
+| **USDT leg** | **8** | **12** |
+
+**Enrichment is alive.** Two legs healthy on the same day in the same table rules
+out candidate 1 completely. (Today's elevated unpriced counts on every leg are
+just the current day still being worked, and are not evidence of anything.)
+
+⚠️ This query matches USDT by **code only**, so it sweeps in other issuers' USDT
+tokens — which is why it shows 6 unpriced on 08-15 where the issuer-pinned query
+shows 0. Those extras are genuinely unpriceable and unrelated. Pin the issuer
+(`GCQTGZQQ…`) when the canonical leg is what you mean.
+
+### Two further readings that refine candidate 2
+
+- **`prices.usd_rate` holds ONLY USDC** — 1,440 rows in 5 days, fresh to
+  `2026-08-19 16:30`. USDT has **no direct rate at all**, so its value is always
+  derived. ⚠️ A query looking for a USDT row in `usd_rate` returns empty and that
+  is **normal**, not a finding — an empty result there proves nothing.
+- **The USDT/USDC reference market carries exactly ONE candle per day** on `_1d`,
+  present every day, priced through 08-18 and not yet for 08-19. That is the
+  thinness candidate 2 predicts, now measured rather than assumed.
+
+### The mechanism
+
+`usd_rate(USDC)` → the USDT/USDC reference candle's `close_usd` → every
+USDT-quoted candle.
+
+A USDT-quoted candle cannot be priced until its own day's reference has been
+priced first, so **the USDT leg is structurally one hop behind every other leg**.
+USDC and XLM are one hop shorter, which is exactly why they do not show this.
+
+⚠️ **This is a steady state, not a degradation.** At any moment the most recent
+day-and-a-bit of USDT-quoted candles is unpriced and everything older is filled —
+the same query on 08-17 would have shown 08-16 and 08-17 dark. The "17 h+" in this
+task's title is not an incident; it is the leg's normal latency.
+
+⚠️ **The residual, left open honestly:** on 08-18 the reference *was* priced, yet
+only half that day's dependants filled. The chain explains 08-19 completely and
+08-18 only partially. Do not treat it as fully proven — the cheap confirmation is
+to re-read the per-day counts after **2026-08-20 00:00**: if 08-18's eight have
+filled, the chain holds; if they are still zero past 48 h, something is stuck and
+this is a different problem.
+
+### ⚠️ This now blocks a decision on [[0204]]
+
+Gap 4's stranded alarm has a **48 h grace**, chosen because it is the window BE
+actually read. This task's finding is that the USDT leg's *normal* latency sits in
+the same 24-48 h range — **so the grace is sized about the same as the latency it
+exists to clear**, and rung 1 at a threshold of 1 fires on ordinary operation. A
+permanently-firing alarm gets muted, which is the failure [[0204]] exists to end.
+Fixing this task removes the collision; until then 0204 must either widen the
+grace (decoupling the alarm from BE's real loss window) or lift rung 1 above the
+normal unpriced population (~8-16/day, giving up the small-count guard).
 
 ## Why it matters despite being small
 
@@ -85,8 +181,10 @@ staying bounded, which is the shape that eventually crosses 48 h.
 
 ## Acceptance Criteria
 
-- [ ] The cause is **measured**, not inferred — USDT-specific or leg-agnostic,
-      with the comparison query recorded.
+- [x] The cause is **measured**, not inferred — USDT-specific or leg-agnostic,
+      with the comparison query recorded. ✅ **2026-08-19 — USDT-SPECIFIC.**
+      Query and results in "Measured 2026-08-19" below. Candidate 2 (the
+      reference path), not candidate 1 (the sweep).
 - [ ] Whichever it is, the fix is verified by the age distribution moving, not by
       the row count on one day.
 - [ ] If the pivot window is widened, a note records why a stale measured

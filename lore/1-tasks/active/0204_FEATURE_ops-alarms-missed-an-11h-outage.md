@@ -836,24 +836,27 @@ user is dropped **before** the assertions run.
 
 ### Not fixed — two open, one rejected
 
-- ⏳ **The `usd-stranded` rung at 1 may be in ALARM from the moment it deploys.**
-  The query counts every USDT-quoted daily candle over 48 h old at
-  `close_usd = 0`, and does not distinguish damage from a bucket with no
-  resolvable USD reference — the `no_reference` floor the enrichment repair
-  deliberately leaves. One permanently unpriceable bucket inside the rolling
-  7-day window latches the rung forever, which is the muted-alarm outcome this
-  task exists to end. ⚠️ **Same argument that rejected a 25% disk bound.**
-  [[0209]] is open so the baseline is unmeasured: **measure `stranded` against
-  prod before deploying**, and consider excluding rows with no resolvable
-  reference.
-- ⏳ **The probe's 1-minute / 256 MB Lambda config was never revisited** and its
-  justifying comment ("seven metadata-only `max()` reads … trivially fast") is
-  stale — the invocation now also runs a `FINAL` scan and ~20 sequential mTLS
-  round trips for the drift check. A hard Lambda timeout is not a Rust `Err`, so
-  it publishes nothing. ⚠️ **Fixing it means deploying `eventbridge-stack.ts`,
-  the stack that owns `CleanupRule`** — the hazard this entire design contorted
-  itself to avoid. Measure the real invocation duration first; do not pre-emptively
-  touch that file.
+- 🔴 **The `usd-stranded` rung at 1 WILL fire on normal operation. MEASURED
+  2026-08-19 — see "Prod baseline" below. This is the one open decision left on
+  this task.** The review's mechanism was wrong (it is not a `no_reference`
+  floor) but its conclusion was right, and the real cause is worse because it is
+  structural rather than incidental.
+- ⏳ **The probe's 1-minute / 256 MB Lambda config was never revisited.** Its
+  stale justifying comment ("seven metadata-only `max()` reads … trivially
+  fast") **is now corrected** in `eventbridge-stack.ts`, which enumerates what
+  each added read costs and names the drift check's ~20 sequential round trips
+  as the only one that scales with latency rather than data volume. ⚠️ The
+  comment change is **comments only** — `cdk synth Prices-production-EventBridge`
+  is byte-identical before and after, verified twice (once after the pre-commit
+  hook reformatted the file), so nothing about `CleanupRule` moved.
+  The **config itself is deliberately untouched**: changing it means deploying
+  that stack, which is the [[0200]] hazard. Today's measurement defuses most of
+  the concern — the USD scan matches **91 rows** over 7 days, i.e. negligible.
+  ⚠️ A hard Lambda timeout is not a Rust `Err`, so it publishes nothing while
+  every alarm the probe feeds except the MV-drift ones scores missing data as
+  healthy. **Confirm headroom by reading the function's `Duration` metric after
+  the observability deploy** — that needs no change to `eventbridge-stack.ts` at
+  all, which is the point.
 - ⛔ **Rejected: tightening the grant discriminator to "no MVs visible".** The
   review is right that `visible_objects == 0` only catches a *total* loss of
   visibility, so a grant narrowed to one table still pages with the wrong
@@ -861,6 +864,102 @@ user is dropped **before** the assertions run.
   visible — reads identically when the MVs really have all been dropped, which is
   the catastrophe design decision 5 explicitly requires the discriminator **not**
   to swallow. The partial-grant case stays uncovered on purpose.
+
+### Prod baseline, measured 2026-08-19 before deploy
+
+Run because the review said rung 1 might be in ALARM on day one. It is the same
+test that set gap 1's disk bound, and it was right to run: **one of the two
+thresholds is fine and the other is not.**
+
+**Disk — deploy as configured.** `filesystemAvailable()` reads **431.60 GiB of
+1.72 TiB = 24.55% free**, above the 20% bound, and essentially flat against the
+~430 GiB measured on 2026-08-17, so BE is not currently filling the volume.
+⚠️ It also **re-confirms decision 6 two days on**: at 24.55%, a 25% bound would
+be in ALARM *right now*. That choice was made from a single Sunday reading; it
+holds.
+
+**USD peg-applied — clean.** `peg_applied = 0`, `resolved_legs = 1`,
+`scanned = 91`. Three things at once: [[0182]]'s repair is holding with no
+re-introduction, the identity resolves on prod (the field the
+`Nullable(UInt64)` corruption would have read as 256), and the new `EmptyScan`
+guard will not false-fire.
+
+**USD stranded — 0 today, but that is a snapshot, not a verdict.**
+
+| day | priced | unpriced |
+|---|---|---|
+| 08-13 → 08-17 | all | 0 |
+| 08-18 | 8 | 8 |
+| 08-19 | 0 | 8 |
+
+`stranded` reads 0 only because both dark days sit inside the 48 h grace. The
+08-18 rows cross it at **2026-08-20 00:00**.
+
+#### What the investigation actually found — and it is NOT the reviewer's mechanism
+
+Four measurements, in the order that narrowed it. ⚠️ **The first two conclusions
+were wrong and are recorded because the wrong turns are instructive**, not to be
+repeated:
+
+1. The 16 unpriced rows are a near-identical roster two days running (CNY, GYEN,
+   LINK, PL, XLM, yUSDC, yXLM), all `sdex`. ❌ Read as *asset-specific*. Wrong.
+2. Four sampled assets priced cleanly every day 08-06 → 08-17, then zero on
+   08-18 and 08-19 — a clean cut-off on the day [[0182]]'s repair ran.
+   ❌ Read as *enrichment stopped*. Wrong.
+3. **Split by quote leg, which is what settled it.** On 08-18 the USDC leg ran
+   759 priced / 8 unpriced and the XLM leg 3,446 / 49 — both healthy. Only the
+   USDT leg is dark. **Enrichment is alive; the failure is leg-specific.**
+   ⚠️ This is exactly [[0209]]'s first acceptance criterion, and it is now met.
+4. `prices.usd_rate` holds **only USDC** — 1,440 rows in 5 days, fresh to
+   `2026-08-19 16:30`. USDT has no direct rate at all, so it must be derived.
+   The USDT/USDC reference market carries **exactly one candle per day**, present
+   every day, priced through 08-18 and not yet for 08-19.
+
+**The mechanism that fits: a two-hop chain.**
+`usd_rate(USDC)` → the USDT/USDC reference candle's `close_usd` → every
+USDT-quoted candle. A USDT-quoted candle cannot be priced until its own day's
+reference has been priced first, so the USDT leg is structurally one hop behind
+every other leg. That is why 08-19 is uniformly dark and why USDC and XLM, which
+are one hop shorter, are not.
+
+⚠️ **This is a steady state, not a degradation.** At any moment the most recent
+day-and-a-bit of USDT-quoted candles is unpriced and everything older is filled;
+the same query on 08-17 would have shown 08-16 and 08-17 dark. [[0209]] was filed
+yesterday for the same observation seen a day earlier.
+
+⚠️ **The residual the chain does NOT explain, left open honestly:** on 08-18 the
+reference *was* priced, yet only half that day's dependants filled. The chain
+accounts for 08-19 completely and 08-18 only partially. Do not treat the
+mechanism as fully proven.
+
+#### The consequence for the alarm
+
+**The 48 h grace is sized about the same as the latency it exists to clear.** The
+USDT leg's normal latency is one reference cycle plus a sweep pass, landing
+somewhere near 24-48 h. So rung 1 at a threshold of 1 fires whenever the sweep
+runs slightly long — on ordinary operation, not on damage. A permanently-firing
+alarm gets muted, which is the outcome this whole task exists to end.
+
+⚠️ **This is a genuine trade, not a retune.** Design decision 4 chose 48 h
+*because* it is the window BE actually read, so the alarm fires exactly when a
+consumer begins losing a value. On the USDT leg that now happens routinely, so
+widening the grace past the real latency means the alarm no longer means what
+decision 4 says it means. Two options, both costing something:
+
+- **Widen `STRANDED_GRACE_SECONDS`** past the leg's measured latency — honest
+  about the chain, but decouples the alarm from BE's actual loss window;
+- **Lift rung 1** above the normal unpriced population (~8-16/day) — keeps the
+  48 h meaning, but stops it being a small-count re-introduction guard.
+
+⛔ **Not decided. Do not pick it while implementing** — that is exactly how gap
+2's defect shipped, and the same trap design decision 1 of gap 3 was written to
+avoid. Everything else on the branch (disk, DLQ, drift, peg-applied) is
+unaffected and clear to deploy.
+
+⚠️ The cheap confirmation, worth running before deciding: re-read the per-day
+priced/unpriced counts after **2026-08-20 00:00**. If 08-18's eight have filled,
+the chain explanation holds and this is latency. If they are still zero past the
+48 h line, something is genuinely stuck and it is a different problem.
 
 ### Verification
 
