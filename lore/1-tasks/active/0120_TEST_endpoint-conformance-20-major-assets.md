@@ -91,7 +91,7 @@ after 0072 and [[0119]].
 - [x] All 7 route groups exercised for every asset; every response validates
       against the OpenAPI spec (0 schema failures in the 2026-08-19 run)
 - [ ] No documented response field is a stub/sentinel for a liquid asset
-      (**failing on production** — deferred to [[0207]], [[0209]], [[0170]], [[0178]];
+      (**failing on production** — deferred to [[0135]], [[0170]], [[0178]];
       re-run must go green after those land)
 - [x] OHLCV invariants asserted (OHLC ordering, bucket alignment, no dupes —
       all pass wherever data exists)
@@ -102,8 +102,10 @@ after 0072 and [[0119]].
 - [x] Suite is re-runnable (`npm run conformance:0120`) and its JSON report is
       citable evidence for [[0128]]
 - [x] Any defect found is fixed or spawned as its own task — spawned
-      [[0207]], [[0209]]–[[0211]] (a 0208 was retired as a duplicate of
-      okarcz's [[0170]]/[[0178]])
+      [[0210]] and [[0211]]; three more spawns (0207–0209) were retired the
+      same day after a cross-check showed okarcz's [[0135]], [[0170]] and
+      [[0178]] already own those defects — the run's fresh evidence is
+      folded into them instead
 
 ## Fixed asset list (AC 1)
 
@@ -154,16 +156,24 @@ failure maps to a spawned defect task:
 
 | Failing check | Count | Task |
 |---|---|---|
-| `price_usd` zero sentinel | 18 | [[0207]] |
-| `vwap_24h` zero + `sources` empty (fresh tips, volume > 0) | 24 | [[0209]] |
-| OHLCV windows empty (USDC → [[0170]]; CBIJ, AUD, RON, BOL, EQL → [[0209]]) | 12 | [[0170]] / [[0209]] |
+| `price_usd` zero sentinel | 18 | [[0135]] (2nd failure mode; contract decided 08-05) |
+| `vwap_24h` zero + `sources` empty (fresh tips, volume > 0) | 24 | [[0135]] (C2 limit case — every source un-enriched at once) |
+| OHLCV windows empty (USDC; CBIJ, AUD, RON, BOL, EQL) | 12 | [[0170]] (default USD mode pins quote=USDC) |
 | Canonical USDC `/price` → 404 | 1 | [[0178]] |
 
-The USDC failures confirm on the API surface what okarcz already diagnosed at
-the store level: [[0178]] (current_prices groups on the base leg only,
-measured 2026-08-11) and [[0170]] (`/ohlcv` builds a USDC/USDC self-pair). A
-0208 spawned here initially duplicated that pair and was retired the same
-day — the conformance run is independent confirming evidence for both.
+Every failure class turned out to be **already owned by an okarcz task** with
+a deeper diagnosis; the run is independent confirming evidence, folded into
+each task's history. Three spawns made here (0207–0209) were retired the same
+day after the cross-check. Two findings sharpened during dedup:
+
+- The "price>0 ⟺ sdex" split is not source selection — `current.sql` has no
+  source filter. It is [[0154]]'s enrichment quote-restriction seen from the
+  read side, hitting [[0135]]'s unguarded `argMax(close_usd)`.
+- The empty OHLCV windows are **not missing data**: probed 2026-08-19, all
+  five assets return 2–31 real 1d buckets with `base_currency=XLM` over the
+  same 30-day window. The default USD mode pins the quote leg to canonical
+  USDC ([[0170]]), which these assets never traded against — 0170's blast
+  radius is every XLM-only-quoted asset, not just USDC's self-pair.
 
 Findings confirmed by the run, beyond the failures: soroban rows carry empty
 `asset_code` ([[0210]]); OHLCV `start`/`end` are both **inclusive** but
@@ -173,10 +183,9 @@ identity triples and accurate `has_more`; batch equal to singles at matching
 timestamps for all 19 priced assets; `Decimal(38,14)` strings parse
 everywhere; all OHLCV invariants hold wherever data exists.
 
-The stub/sentinel AC stays open until [[0207]], [[0209]] and okarcz's
-[[0170]]/[[0178]] land; the suite is
-the acceptance gate — re-run it after each fix and cite the green report in
-[[0128]].
+The stub/sentinel AC stays open until [[0135]], [[0170]] and [[0178]] land;
+the suite is the acceptance gate — re-run it after each fix and cite the
+green report in [[0128]].
 
 ## Notes
 

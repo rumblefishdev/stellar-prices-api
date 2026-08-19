@@ -56,6 +56,23 @@ history:
       carries its latest priced close and stays in `sources` and in the
       `vwap_24h` weighting, instead of silently vanishing. Both are one-line
       changes in `current.sql`, which self-DROPs, so delivery is unblocked.
+  - date: 2026-08-19
+    status: backlog
+    who: stkrolikiewicz
+    note: >
+      Fresh production evidence from the [[0120]] conformance run, which
+      independently rediscovered both failure modes before dedup: 17 of the
+      20 fixed major assets publish `price_usd = 0` (88 of the top-200
+      volume rows — well past 07-30's 21-of-3,022), and 12 of the 20 hit
+      the C2 limit case — every source un-enriched at once, so
+      `sources: {}` and `vwap_24h = 0` beside an unfiltered
+      `volume_24h_usd > 0` (AQUA and BTC among them). The observed
+      "price>0 ⟺ sdex present" split is [[0154]]'s quote-restriction seen
+      from the read side: sdex candles are stable-quoted and always enrich,
+      AMM candles often never do. Spawned-then-retired duplicates
+      0207/0209 fold into this task; the 0120 suite
+      (`npm run conformance:0120`) is the regression gate — its
+      price-sentinel checks must go green when the decided contract ships.
 ---
 
 # price_usd is not outlier-protected
