@@ -4,7 +4,7 @@ title: "44,657 stored candles across 495 assets carry a close_usd ~7.4x too high
 type: BUG
 status: active
 related_adr: []
-related_tasks: ["0172", "0196", "0165", "0145", "0111", "0114", "0201"]
+related_tasks: ["0172", "0196", "0165", "0145", "0111", "0114", "0201", "0208"]
 tags:
   ["priority-high", "effort-medium", "clickhouse", "data-correctness", "enrichment", "milestone-M2"]
 milestone: 2
@@ -100,6 +100,31 @@ history:
       had a representable price to lose. That false positive is now documented in
       the runbook. Remaining: BE notification, snapshot cleanup, the guard test,
       and volume_quote_usd.
+  - date: 2026-08-19
+    status: active
+    who: okarcz
+    note: >
+      RE-VERIFICATION BEFORE RELEASING THE SNAPSHOTS FOUND 157 DESTROYED
+      CANDLES, and they were repaired the same day. The epoch 1612656000 is
+      2021-02-07 00:00, nineteen hours before the USDT/USDC reference market's
+      first candle at 19:00; the pivot joins at-or-before, so every bucket in
+      that gap was zeroed by the reset and had nothing to refill from. 121 rows
+      on `_1h` and 36 on `_4h`. The three coarser tiers were untouched because
+      their reference candle falls in the same bucket as the row being priced,
+      and `_1M`'s February bucket is stamped below the epoch entirely — that
+      distribution is what confirmed the mechanism. Restored to par by versioned
+      insert (par is the measured value for this window per 0172, and what the
+      rows held before this task ran); snapshot rollback was rejected because on
+      a ReplacingMergeTree it would mean DROP PARTITION across four tables for
+      157 rows. at_boundary is now 0 on every tier. The reason 2026-08-18 missed
+      it: stranded_with_real_close was run only on the three tables that tripped
+      the shortfall guard, which are precisely the three structurally incapable
+      of showing this defect. Corrected epoch is 1612724400 and the file's line
+      claiming 1612656000 "cannot strand rows" is now marked wrong. Snapshot
+      cleanup also completed — all 485 released, shadow/ 31G to increment.txt
+      alone, with two procedure corrections recorded (SYSTEM UNFREEZE is
+      disabled server-side; the success signal is du, not the entry count).
+      Spawned 0208. Remaining: the guard test and volume_quote_usd.
 ---
 
 # `close_usd` is ~7.4× too high on every USDT-quoted candle ever written
@@ -598,9 +623,15 @@ after a couple of no-progress batches (the `no_reference` floor 0114 documented)
 of the 31,982,165 are below **2022-04** — months 202110-202203 hold 0-13
 XLM-quoted candidates each and enriched nothing, while 202204 enriched 761,735.
 The rows exist, but the window is ~2022-04 → 2024-01, not 2021-02 → 2024-01. Full
-measurement and the two falsified explanations are in [[0201]]. ✅ It also
-confirmed this task's own epoch: the USDT/USDC reference is dense and non-NULL
-from 202102, first candle `2021-02-07 19:00`, so `1612656000` cannot strand rows.
+measurement and the two falsified explanations are in [[0201]].
+
+⛔ **The epoch claim that used to sit here was WRONG and it cost 157 candles.**
+It read: *"the USDT/USDC reference is dense and non-NULL from 202102, first
+candle `2021-02-07 19:00`, so `1612656000` cannot strand rows."* Both halves of
+the premise are true; the conclusion does not follow. `1612656000` is
+**2021-02-07 00:00**, nineteen hours *before* that first candle, and the pivot
+joins its reference at-or-before. See the boundary-repair section dated
+2026-08-19 — **the correct epoch is `1612724400`.**
 
 **The 31,982,165 fillable XLM-quoted rows are the [[0088]] pre-Soroban backfill's
 output**: candles rolled into the coarse tables and never enriched, because
@@ -796,6 +827,100 @@ value never leaves the zero population. It also advises checking
 `--pivot-window-s`, which was never involved. Triage procedure and worked example
 are now in `docs/runbooks/repair-coarse-usd-values.md`.
 
+## ⛔ 2026-08-19 — the run DESTROYED 157 candles, and the re-check is what found it
+
+The run was declared verified on 2026-08-18. A re-verification the next morning,
+run before releasing the snapshots, found **157 candles this task had zeroed and
+never refilled**. Repaired the same day. Recorded here in full because the way it
+was missed is more reusable than the defect.
+
+### The defect — the epoch is 19 hours too early
+
+`--reset-not-before 1612656000` is **2021-02-07 00:00** UTC. The USDT/USDC
+reference market's first candle is **2021-02-07 19:00**. The pivot's `ASOF LEFT
+JOIN` matches its reference *at or before* each bucket, so every bucket stamped
+inside that nineteen-hour gap was zeroed by the reset and had nothing to price
+against. `AND r.usd IS NOT NULL` then dropped it.
+
+This is exactly the mechanism constraint 2 pre-registered at the top of this file
+— *rows with no pivot reference must not be zeroed* — arriving through the one
+door nobody was watching, because the epoch was believed to close it.
+
+| tier | destroyed | why |
+|---|---|---|
+| `_1h` | **121** | the 19 hourly buckets 00:00-18:00 × 15 assets |
+| `_4h` | **36** | buckets 00:00/04:00/08:00/12:00 × 9 assets; the 16:00 bucket **contains** the 19:00 reference trade, so it priced |
+| `_1d` | 0 | — |
+| `_1w` | 0 | — |
+| `_1M` | 0 | — |
+
+⚠️ **The tier pattern is what confirms the mechanism rather than merely fitting
+it.** `_1d`/`_1w` are clean because their reference candle falls in the *same
+bucket* as the row being priced, and at-or-before is inclusive. `_1M`'s February
+bucket is stamped `2021-02-01`, *below* the epoch, so it was never touched at
+all. **Only tiers finer than the gap can be stranded, and exactly those two
+were.** Any other cause would not produce that distribution.
+
+These were not dust. Asset 953 on `_1h` held `close` ≈ 39,521 with real
+`volume_quote`, and 2021-02-06 — every hour of it — was fully priced on both
+sides of the boundary.
+
+### 🔴 Why the run's own verification passed over it
+
+`stranded_with_real_close` was run on 2026-08-18 against `_1d`, `_1w` and `_1M`
+**and returned 0 on all three** — correctly. Those were the three tables that had
+tripped the shortfall guard, so those were the three that got checked.
+
+They are also **precisely the three tiers structurally incapable of showing this
+defect.** The two tiers that could show it were never checked, because they had
+not warned. The guard selected the sample, and the guard is blind to this failure
+mode: `_1h` and `_4h` produced **no shortfall at all** — 357,274 reset against
+358,315 enriched — because the 121 and 36 are swamped by rows the pass
+legitimately enriched in the same run.
+
+**Rule: run the damage check on every table, never only on the ones that
+complained.** A guard that fires tells you where to look; a guard that stays
+quiet tells you nothing.
+
+### The repair — restore par, additively
+
+Par is the *measured* value for this window ([[0172]]: USDT at par from 2021-02
+until the June 2022 break), it is what these rows held before this task touched
+them, and it is what their neighbours on both sides still hold. So the fix is a
+versioned insert in the same shape as `reset_sql`, not a rollback:
+
+```sql
+INSERT INTO prices.price_ohlcv_1h (…)
+SELECT p.timestamp, …, p.volume_quote AS volume_quote_usd, p.close AS close_usd,
+       p.vwap, p.trade_count, p.version + 1 AS version
+FROM prices.price_ohlcv_1h AS p FINAL
+WHERE p.quote_asset_id = 111 AND p.close_usd = 0 AND p.volume_quote > 0
+  AND p.timestamp >= toDateTime(1612656000)
+  AND p.timestamp <  toDateTime('2021-02-07 19:00:00')
+```
+
+Ran against `_1h` (121 rows) and `_4h` (36). A count-only dry run with the
+identical `WHERE` was gated on returning exactly 121 and 36 first.
+
+⚠️ **The snapshot rollback was considered and rejected.** On a
+`ReplacingMergeTree` an `ATTACH` alone loses to the higher `version` already
+written, so rolling back means `DROP PARTITION` then `ATTACH` — a drop on prod
+partition `202102` across four tables to repair 157 rows. Wrong risk for the
+size of the problem, and the forward write reaches the same state.
+
+### Verified
+
+`close_usd = 0 AND close > 5e-14` bucketed by age, all five tables:
+`at_boundary` **0** everywhere. The 82 rows still at zero are all in-flight
+buckets — `_1h` 38, `_4h` 22, `_1d` 14 in the last 48 h, and `_1w` 8 in the
+current week bucket (stamped `2026-08-17 00:00`, ~55 h old, which is why it falls
+outside a 48-hour window and briefly looked unexplained).
+
+⚠️ **Left open, not investigated:** some of those `_1h` rows are 17 h+ old, which
+is longer than an hourly sweep should leave a candle unpriced. Either enrichment
+lag or the pivot finding no USDT/USDC reference inside its default 1-day window.
+Not damage from this task, and it postdates the run entirely.
+
 ## 🚧 What is NOT done
 
 Remaining, in order:
@@ -816,12 +941,18 @@ Remaining, in order:
 6. ~~**Verify** the implied-rate probe moves off 1.0~~ ✅ **done** — all five
    tiers at ~0.15 for 2026. ⛔ **BE not yet told**, and the same message should
    chase the `volume_quote_usd` question open since 2026-08-13.
-7. **UNFREEZE and reclaim** — ⛔ partly done. ✅ `repair_0182_pre_*` removed
-   2026-08-18 once the cross-tier verification passed; `repair_0182_mid_*` held
-   overnight as live rollback and still to drop. ⚠️ **Also 150 stale `repair_0114_*` snapshots (~12G)** found
-   in `shadow/` during this run — 0114 is `completed` and archived, so they are
-   dead rollback points. Clean them up in the same pass; they are this task's
-   own cleanup lesson already having happened once.
+7. ~~**UNFREEZE and reclaim**~~ ✅ **done 2026-08-19** — all 485 released
+   (335 `repair_0182_mid_*` + 150 stale `repair_0114_*`), `shadow/` 31G → 7.7M
+   of empty husks → swept to `increment.txt` alone. See the cleanup section for
+   the two things that were wrong in the procedure as written.
+8. **The 82 in-flight zeros** — never investigated. Some `_1h` rows sit unpriced
+   for 17 h+, longer than an hourly sweep should leave them. Enrichment lag, or
+   the pivot finding no USDT/USDC reference inside its default 1-day window.
+   Postdates the run; not damage from this task.
+9. **Guard against re-introduction** — still the one open acceptance criterion.
+   Now wants a second check alongside it: no USDT-quoted candle at
+   `close_usd = 0` with a representable `close`, which is the defect [[0208]]
+   exists to make impossible.
 
 ## 🧹 Cleanup — the snapshots do not expire and nothing reclaims them
 
@@ -853,6 +984,39 @@ size**, not merely shrinking.
 It is the half of the procedure with no deadline attached, which is why it is
 the half that gets forgotten.
 
+### ✅ DONE 2026-08-19 — and two corrections to the procedure above
+
+485 snapshots released in one pass, `shadow/` 31G → 7.7M → `increment.txt` alone.
+
+**1. `SYSTEM UNFREEZE WITH NAME` does not work on this server.**
+`Code: 344 … Support for SYSTEM UNFREEZE query is disabled. You can enable it
+via 'enable_system_unfreeze' server setting.` That is a **server** setting on a
+ClickHouse BE own 96% of — not something to change for a one-off cleanup. The
+`ALTER TABLE … UNFREEZE WITH NAME` form written above is **not** gated by it and
+is the one to use. Generate the statements from the host listing rather than
+typing them; the table is encoded in the snapshot name
+(`repair_0182_mid_prices_price_ohlcv_4h_202606` → `price_ohlcv_4h`), so
+`awk -F'_' '{print … $(NF-1) …}'` recovers it for either prefix and preserves
+`1M`'s case.
+
+**2. 🔴 The success signal is `du`, NOT the entry count.** `UNFREEZE` releases
+the hardlinks but leaves an **empty directory husk** (~16K), so
+`ls shadow/ | wc -l` is *unchanged* after a successful release — which reads
+exactly like a no-op. Compare a released entry against an untouched sibling
+instead: **16K against 36M** is the proof. Sweep the husks afterwards with
+`find /var/lib/clickhouse/shadow -mindepth 1 -depth -type d -empty -delete`
+(`-type d -empty` cannot touch a snapshot that still holds data).
+
+⚠️ **`df` moves far less than the `du` figure suggests, and that is correct.** A
+frozen part only costs *extra* disk once the live table has superseded it; most
+of the 31G was still the active data, counted once either way. What the pin
+actually did was block reclaim **going forward** as merges superseded more parts.
+So "`df` barely moved" is not evidence the unfreeze failed.
+
+⚠️ **`prices_writer` cannot FREEZE, but the UNFREEZE ran fine over `CHQ`**,
+which connects as the container's `default` user. The admin constraint applies to
+taking a snapshot, not to releasing one — provided you have a `default` path.
+
 ## Acceptance Criteria
 
 - [x] Decision recorded: **correct history from 2021-02-07 on**, leave the
@@ -876,7 +1040,15 @@ the half that gets forgotten.
       values zeroed and never recomputed. **No longer blocks the run.**
 - [ ] Guard against re-introduction: the [[0172]] regression tests already pin
       the writer; add a data-level check that no USDT-quoted candle carries
-      `close_usd / close ≈ 1.0`
+      `close_usd / close ≈ 1.0`. ⚠️ **Widen it** — 2026-08-19 showed the
+      opposite failure is just as real, so also assert no USDT-quoted candle
+      sits at `close_usd = 0` with a representable `close`.
+- [x] **The epoch boundary is sound** — ✅ 2026-08-19, *after* a repair. The
+      original epoch `1612656000` stranded **157 candles** (121 `_1h`, 36 `_4h`)
+      in the 19 hours before the reference market's first trade; restored to par
+      by versioned insert, `at_boundary` now 0 on every tier. **The correct
+      epoch is `1612724400`.** Spawned [[0208]] so the tool refuses an epoch
+      below its reference's first candle rather than trusting the operator.
 - [x] **BE notified** — ✅ 2026-08-18. Told them: corrected from 2021-02-07 on,
       all five granularities, 567,760 candles; values below that boundary
       unchanged and already correct; nothing they deployed ever served the
@@ -884,9 +1056,10 @@ the half that gets forgotten.
       now carry values, which is directly visible to them since they render
       `--` on a `close_usd = 0` miss. The `volume_quote_usd` question was sent
       again in the same message.
-- [ ] **Snapshots removed** — both `repair_0182_pre_…` and `repair_0182_mid_…`
-      unfrozen after verification, with `du` on `shadow/` back to its
-      pre-campaign size rather than merely smaller. ⚠️ ~33.6 GiB on a volume BE
-      own 96% of, and nothing expires it. Admin-only, like the FREEZE itself.
+- [x] **Snapshots removed** — ✅ 2026-08-19. All 485 released
+      (`repair_0182_pre_` 2026-08-18, then `repair_0182_mid_` + 150 stale
+      `repair_0114_`), `shadow/` 31G → `increment.txt` alone. ⚠️ Two procedure
+      corrections recorded in the cleanup section: `SYSTEM UNFREEZE` is disabled
+      server-side, and the success signal is `du`, not the entry count.
 - [ ] `volume_quote_usd` resolved — widen scope, or document the two-column
       mismatch. Blocked on BE's answer to the question sent 2026-08-13.
