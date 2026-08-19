@@ -86,7 +86,7 @@ after 0072 and [[0119]].
 
 ## Acceptance Criteria
 
-- [ ] The 20-asset list is fixed, documented in-task, and covers all three
+- [x] The 20-asset list is fixed, documented in-task, and covers all three
       identifier forms
 - [ ] All 7 route groups exercised for every asset; every response validates
       against the OpenAPI spec
@@ -97,6 +97,57 @@ after 0072 and [[0119]].
 - [ ] Suite is re-runnable and its output is citable evidence for [[0128]]
 - [ ] Any defect found is fixed or spawned as its own task — a documented
       failure list is not a pass
+
+## Fixed asset list (AC 1)
+
+Machine-readable copy: `tools/scripts/conformance-assets.json` (shared with
+[[0121]], [[0123]], [[0127]], [[0128]]). Derived 2026-08-19 from production:
+`GET /v1/assets?limit=200` (default sort `volume_24h desc`) + `search=` probes
+for the §9 majors, over the real gateway with the team API key.
+
+| # | Asset | Identifier (form) |
+|---|-------|-------------------|
+| 1 | XLM | `native` (native) |
+| 2 | USDC | `USDC:GA5ZSEJY…K4KZVN` (code-issuer, canonical Circle) |
+| 3 | EURC | `EURC:GDHU6WRG…ITNPP2` (code-issuer, canonical Circle) |
+| 4 | AQUA | `AQUA:GBNZILST…M67AQUA` (code-issuer) |
+| 5 | BTC | `BTC:GDPJALI4…5O2MZM` (code-issuer, top-volume BTC) |
+| 6 | ETH | `ETH:GBFXOHVA…CMGSOCC` (code-issuer, top-volume ETH) |
+| 7 | (soroban) | `CBIJBDNZ…5FM6VN` (contract; top-volume soroban asset) |
+| 8–20 | USDCAllow, AUD, sUSD, yUSDC, XRP, SHX, SCOP, RON, BOL, EQL, yXLM, PYUSD, VELO | code-issuer, filled by store volume rank |
+
+Full 56-char identifiers live in the JSON; the table above is for humans.
+Selection rules applied:
+
+- §9 six seeded first; BTC/ETH pinned to the highest-volume issuer the store
+  holds (ticker codes are not unique — the M1 evidence doc's canonical-pinning
+  caveat applies).
+- Fill by store volume rank, skipping the `*BANK*` spam family, secondary
+  wrappers of an already-listed code, and obscure USD clones.
+- **USDT excluded deliberately** — known bug [[0172]]; including it fails the
+  suite on an already-tracked defect.
+- All three identifier forms covered: `native` (#1), `CODE:ISSUER` (#2–6,
+  8–20), contract `C…` (#7). A classic asset **cannot** be addressed by its SAC
+  contract address (probed: AQUA via SAC → 404 `unknown asset`; the store only
+  carries `contract_address` for soroban rows), so the contract slot must be a
+  soroban-native asset.
+
+### Preliminary findings from list derivation (to verify in the suite run)
+
+1. **Canonical USDC is absent from `GET /v1/assets`** (search returns 14
+   impostors, not Circle's issuer) and `GET …/price` → 404 `no current price`,
+   while `GET /v1/assets/{id}` resolves it fine. Likely cause: volume/current
+   price attribute to the *base* asset of a pair only, and USDC is almost
+   always the quote.
+2. **`price_usd` is `"0"` for every asset without an SDEX (or sometimes
+   Aquarius) source** — 88/200 top-volume rows, including XLM and EURC, carry
+   `price_usd: "0"` with populated `vwap_24h` and `sources`. The 0072 runbook
+   gate (`sources` non-empty) passes while the headline price is still a stub.
+3. **Top-volume soroban assets have empty `asset_code`** and one (`CBIJ…`,
+   ~$29.5k/24h) reports `volume_24h_usd > 0` with `sources: {}`.
+4. `GET …/ohlcv?granularity=1d&limit=3` returned a single bucket — default
+   window may be narrower than `limit` implies; suite must pass explicit
+   `start`/`end`.
 
 ## Notes
 
