@@ -94,6 +94,33 @@ history:
       be scoped to the quote leg because exotic-quoted zeros are by design
       (~74M on _1h alone); and the pre-epoch par window is legitimately ~1.0 so
       the ratio check must be bounded to the post-break era.
+  - date: 2026-08-19
+    status: active
+    who: okarcz
+    note: >
+      Gap 4 BUILT, not deployed. New usd_sanity.rs module on
+      rollup-freshness-probe publishing two counts over a rolling 7-day window
+      (UsdtPegAppliedCandles, UsdtStrandedCandles), plus two alarm ladders at
+      [1, 100, 10000] with alarm AND OK actions on every rung. The ladder is
+      what unblocked gap 4 ahead of gap 3: gap 3's own analysis says drift is
+      binary so gap 2's trick cannot transfer, but a COUNT of wrong candles has
+      depth — a regressed writer keeps adding to it — so it transfers unchanged
+      and gap 4 never needed the re-notification decision gap 3 is still waiting
+      on. Three design choices worth knowing: the USD read runs LAST in the
+      invocation so a correctness check can never blind the liveness checks
+      beside it; the USDT leg is resolved by code+issuer rather than a
+      hard-coded asset_id, with resolved_legs carried in the same row so an
+      unresolvable identity is refused rather than reported healthy; and the
+      stranded direction has a 48 h grace matching BE's own TVL window, because
+      enrichment fills close_usd asynchronously and an ungraced metric would
+      never read zero. 🔴 Running the IT against a real ClickHouse found a
+      silent deserialization corruption that every unit test and all four clippy
+      feature combinations missed: a scalar subquery types as Nullable(UInt64),
+      RowBinary prefixes a null flag byte, and reading it into u64 returned 256
+      for a true count of 1 with no error — the probe would have refused every
+      healthy run. Fixed with toUInt64(ifNull(...)) and pinned. 31 unit tests,
+      11 ITs, clippy clean on all four feature combinations. Gap 3 remains, so
+      this task stays active.
 ---
 
 # Ops alarms missed an 11.5 h outage
@@ -336,11 +363,129 @@ touching it can silently re-enable cleanup ([[0200]]).
       `close_usd / close ≈ 1.0` in the post-break era, and none at
       `close_usd = 0` with a `close` above the `Decimal(38, 14)` underflow
       bound. Scoped to the quote leg, so exotic-quoted zeros do not breach it.
-      *(gap 4 — not in this activation)*
-- [ ] **Gap 4 verified by inducing it** — write a par-valued USDT candle and a
-      zeroed one with a representable `close` into a test fixture and confirm
-      each breaches; the [[0137]] lesson applied to this alarm too. Closes
-      [[0182]]'s last acceptance criterion.
+      — ✅ **built 2026-08-19, not deployed.** `usd_sanity.rs` + two alarm
+      ladders at `[1, 100, 10000]`. See "Implementation — gap 4"
+- [x] **Gap 4 verified by inducing it** — ✅ 2026-08-19.
+      `usd_sanity_counts_both_induced_defects` writes a par-valued candle and an
+      aged zero into a real ClickHouse and asserts each is counted; six further
+      ITs induce the grace boundary, dust, an exotic leg, a `version + 1` repair
+      and an unresolvable identity. ⚠️ Doing this **found a silent
+      deserialization corruption** no unit test could reach — see "Issues
+      encountered" under gap 4. Closes [[0182]]'s last acceptance criterion.
+
+## Implementation — gap 4 (2026-08-19)
+
+Same branch as gaps 1 and 2. Rides the existing probe, so no new Lambda, no new
+EventBridge rule, and nothing outside `observability-stack.ts`.
+
+1. **`packages/rollup-freshness-probe/src/usd_sanity.rs`** — new module.
+   `sanity_query()`, `SanityCounts`, `sanity_metrics()`, feature-gated
+   `publish_sanity()`. Same split as `disk.rs`: query construction and metric
+   shaping compile in every build and are unit-tested; the AWS SDK stays behind
+   `--features lambda`.
+2. **`src/main.rs`** — reads the USD counts **last**, after both existing
+   publishes. See design decision 2.
+3. **`infra/src/lib/stacks/observability-stack.ts`** — two ladders,
+   `prices-{env}-usd-peg-applied-{n}` and `prices-{env}-usd-stranded-{n}`,
+   `Maximum` over 15 min, 1-of-2, GREATER_THAN_OR_EQUAL, `NOT_BREACHING`, alarm
+   **and** OK actions on every rung.
+4. **`infra/src/lib/types.ts`** — `opsAlarms.usdSanityEscalationCounts` with
+   validation (strictly increasing positive integers, **non-empty**).
+   **`infra/envs/production.json`** — `[1, 100, 10000]`.
+
+### Design decisions
+
+**From plan**
+
+1. **A ladder, because the count has depth.** Gap 3's analysis says drift is
+   binary and therefore cannot use gap 2's trick. A count of wrong candles is
+   not binary — a regressed writer keeps adding to it — so the ladder transfers
+   unchanged, and gap 4 is not blocked on the re-notification question gap 3 is
+   still waiting on. ⚠️ Rungs re-notify on **growth**; a frozen historical
+   population would still latch. Accepted: this is a re-introduction guard, and
+   a re-introduction grows.
+
+**Emerged**
+
+2. **The USD read runs last in the invocation, and the ordering is
+   load-bearing** — the same rule `main.rs` already documents for the disk read,
+   extended one step. This is the newest and least proven of the three reads, it
+   scans OHLCV data rather than calling a function, and it has the most ways to
+   fail (unresolvable identity, registry change, slow `FINAL`). Any of those
+   running *first* would abort the invocation before the rollup and disk data
+   landed, and those alarms are `NOT_BREACHING` — so a correctness check could
+   blind the seven liveness checks beside it. It must not be able to.
+3. **The leg is resolved by code + issuer at query time, not by a hard-coded
+   `asset_id`.** The numeric id is not a stable contract while [[0139]] is open,
+   and a probe silently watching the *wrong* leg is worse than one that fails.
+   `resolved_legs` travels in the same row and `sanity_metrics` refuses anything
+   but exactly 1 — otherwise an unresolvable identity matches no candles, both
+   counts read 0, and `NOT_BREACHING` scores a check that never ran as healthy.
+4. **A 48-hour grace on the stranded direction, matching BE's own window.**
+   Enrichment fills `close_usd` asynchronously, so recent candles are
+   legitimately zero and an ungraced metric would never read zero. 48 h is not a
+   round number picked for comfort: it is the window BE actually read (last
+   `close_usd > 0` within 48 h, else `--`), so the alarm fires exactly when a
+   consumer has begun losing a value. ⚠️ It must also clear real enrichment lag,
+   measured at 17 h+ on 2026-08-19 — if [[0209]] turns out to be a widening gap
+   rather than ordinary lag, re-check this bound rather than raising it.
+5. **The scan is bounded to 7 days.** An unbounded OHLCV scan every 15 minutes
+   is [[0111]]'s outage re-introduced as a health check.
+6. **`price_ohlcv_1d`, not `_1h`.** The defect appeared on all five tiers, so
+   any one is diagnostic; `_1d` is ~24× cheaper and still reacts within one probe
+   interval because a day's bucket exists from its first trade.
+
+### Issues encountered
+
+- 🔴 **A scalar subquery returns `Nullable(UInt64)`, and deserializing that into
+  `u64` corrupts silently rather than failing.** `(SELECT count() FROM usdt)`
+  typed as nullable; RowBinary prefixes a nullable column with a one-byte null
+  flag, so the field read **256** for a true count of 1 — no error, no warning.
+  The probe would then have refused every healthy run as "ambiguous identity"
+  and the gap-4 alarms would never have published a datum.
+
+  ⚠️ This is worse than the PR #97 regression the IT file was written for, which
+  at least failed loudly. Fixed with `toUInt64(ifNull(…, 0))` and pinned by
+  `the_resolved_leg_count_is_forced_non_nullable`.
+
+  **It was caught only by running the integration test against a real
+  ClickHouse.** Every unit test passed, clippy was clean on all four feature
+  combinations, and the query string was correct SQL. Nothing short of executing
+  it would have found this — which is the AC-4 lesson ("verified by inducing the
+  condition, not by reading the CDK") arriving before the alarm was even
+  deployed.
+- The `prices.assets` fixture in the IT was written with a `version` column,
+  which that table does not have (it is `ReplacingMergeTree(updated_at)`). Also
+  caught by running it.
+
+### Tests
+
+**Unit ×13** in `usd_sanity.rs`: quote-leg scoping, issuer-based resolution,
+both failure directions, the grace period, the bounded window, `FINAL` on both
+tables, the underflow floor being the arithmetic bound rather than a round
+number, the non-nullable `resolved_legs` pin, zero/ambiguous leg refusal, and
+that the peg tolerance cannot reach a real USDT price.
+
+**IT ×7** in `rollup_freshness_it.rs`, all against the 26.3.10.60 pin —
+including **AC "verified by inducing it"**:
+
+| test | what it induces |
+|---|---|
+| `usd_sanity_query_executes_and_reads_a_healthy_leg_as_zero` | the control — a correctly priced leg reads 0/0 |
+| `usd_sanity_counts_both_induced_defects` | writes a par-valued candle **and** an aged zero; both counted |
+| `a_freshly_written_zero_is_not_yet_stranded` | the same row inside and outside the grace |
+| `dust_below_the_underflow_bound_is_not_counted_as_stranded` | a `1e-14` close |
+| `an_exotic_quoted_zero_is_ignored_because_it_is_by_design` | a non-USDT leg at zero |
+| `a_repaired_candle_stops_counting_once_a_higher_version_supersedes_it` | a `version + 1` repair, so `FINAL` is proven |
+| `an_unresolvable_usdt_leg_reads_as_zero_and_is_therefore_refused` | the silent all-clear |
+
+31 unit tests and 11 ITs green; clippy clean on all four feature combinations
+(`""`, `aws-mtls`, `lambda`, `--all-features` — `--all-targets` is not
+`--all-features`, and this crate has feature-gated entrypoints).
+
+⚠️ **Built, NOT deployed** — same status as gaps 1 and 2, and the same
+constraint: deploy `Prices-production-Observability` **only**. `cdk synth`
+confirms 6 new alarms, each with one alarm action and one OK action.
 
 ## Implementation — gap 1 (2026-08-17)
 

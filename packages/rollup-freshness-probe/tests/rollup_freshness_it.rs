@@ -24,6 +24,7 @@
 //! never run against a shared/prod cluster.
 
 use clickhouse::Client;
+use rollup_freshness_probe::usd_sanity::{SanityCounts, sanity_metrics, sanity_query};
 use rollup_freshness_probe::{ROLLUP_TIERS, TableLag, freshness_query, lag_metrics};
 
 fn ch_url() -> String {
@@ -338,4 +339,234 @@ async fn restricted_user_can_read_disk_headroom_but_not_system_disks() {
     );
 
     exec(&admin, "DROP USER IF EXISTS rollup_probe_it").await;
+}
+
+// ---------------------------------------------------------------------------
+// Task 0204, gap 4 — USD-value correctness on the USDT quote leg.
+// ---------------------------------------------------------------------------
+
+/// Seed the canonical USDT identity into `prices.assets` and return its
+/// `asset_id`. The probe resolves the leg by code + issuer rather than a
+/// hard-coded id (task 0139), so the IT has to make that resolution succeed.
+async fn seed_usdt_identity(c: &Client, asset_id: u32) {
+    exec(
+        c,
+        &format!(
+            "INSERT INTO prices.assets \
+               (asset_id, asset_code, asset_type, issuer_address, contract_address) \
+             SELECT {asset_id}, 'USDT', 'credit_alphanum4', '{issuer}', ''",
+            issuer = prices_clickhouse::USDT_ISSUER,
+        ),
+    )
+    .await;
+}
+
+/// Insert one USDT-quoted daily candle with an explicit `close` / `close_usd`.
+/// `ts_sql` is a server-side expression so `now()` arithmetic matches the
+/// probe's own window and grace bounds exactly.
+async fn insert_usdt_candle(
+    c: &Client,
+    usdt_id: u32,
+    asset_id: u32,
+    ts_sql: &str,
+    close: &str,
+    close_usd: &str,
+) {
+    exec(
+        c,
+        &format!(
+            "INSERT INTO prices.price_ohlcv_1d \
+               (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+                volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) \
+             SELECT {ts_sql}, {asset_id}, {usdt_id}, 'sdex', {close}, {close}, {close}, {close}, \
+                    1, 1, 0, {close_usd}, {close}, 1, 1"
+        ),
+    )
+    .await;
+}
+
+async fn read_counts(c: &Client) -> SanityCounts {
+    c.query(&sanity_query())
+        .fetch_one::<SanityCounts>()
+        .await
+        .expect("sanity query executes and deserializes")
+}
+
+/// The query must **execute and deserialize** against a real ClickHouse — the
+/// class of regression the unit tests structurally cannot catch, and the one
+/// that shipped a broken `backfill-freshness-probe` in PR #97. It also pins the
+/// arithmetic: a healthy leg reads zero on both directions rather than being
+/// unable to tell.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+async fn usd_sanity_query_executes_and_reads_a_healthy_leg_as_zero() {
+    let c = client();
+    exec(&c, "TRUNCATE TABLE prices.price_ohlcv_1d").await;
+    exec(&c, "TRUNCATE TABLE prices.assets").await;
+    seed_usdt_identity(&c, 111).await;
+
+    // A correctly-priced USDT-quoted candle: USDT at its measured ~0.15, so
+    // close_usd is nowhere near close.
+    insert_usdt_candle(&c, 111, 5, "now() - INTERVAL 3 DAY", "100", "15").await;
+
+    let counts = read_counts(&c).await;
+    assert_eq!(counts.resolved_legs, 1, "the USDT identity must resolve");
+    assert_eq!(counts.peg_applied, 0, "a 0.15 rate is not the peg");
+    assert_eq!(counts.stranded, 0, "a priced candle is not stranded");
+    assert_eq!(counts.scanned, 1);
+}
+
+/// ⚠️ **Induce the condition, do not read the CDK.** This is task 0137's lesson
+/// applied to gap 4: write the exact two defects into the table and assert each
+/// one is counted. Without this the alarm is only proven to *exist*.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+async fn usd_sanity_counts_both_induced_defects() {
+    let c = client();
+    exec(&c, "TRUNCATE TABLE prices.price_ohlcv_1d").await;
+    exec(&c, "TRUNCATE TABLE prices.assets").await;
+    seed_usdt_identity(&c, 111).await;
+
+    // Defect 1 — the peg re-applied: close_usd == close (task 0172 / 0182).
+    insert_usdt_candle(&c, 111, 5, "now() - INTERVAL 3 DAY", "100", "100").await;
+    // Defect 2 — stranded past the grace period: zero on a representable close
+    // (what task 0182's own reset produced on 2026-08-19).
+    insert_usdt_candle(&c, 111, 6, "now() - INTERVAL 3 DAY", "100", "0").await;
+
+    let counts = read_counts(&c).await;
+    assert_eq!(counts.peg_applied, 1, "close_usd == close must be counted");
+    assert_eq!(counts.stranded, 1, "an aged zero must be counted");
+}
+
+/// The grace period is what makes the stranded metric usable at all: enrichment
+/// fills `close_usd` asynchronously, so the newest candles are *legitimately*
+/// zero on every single run. Without this the alarm would breach permanently
+/// and get muted — the state task 0204 exists to end.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+async fn a_freshly_written_zero_is_not_yet_stranded() {
+    let c = client();
+    exec(&c, "TRUNCATE TABLE prices.price_ohlcv_1d").await;
+    exec(&c, "TRUNCATE TABLE prices.assets").await;
+    seed_usdt_identity(&c, 111).await;
+
+    // Inside the 48 h grace — awaiting enrichment, not damaged.
+    insert_usdt_candle(&c, 111, 5, "now() - INTERVAL 1 HOUR", "100", "0").await;
+    assert_eq!(read_counts(&c).await.stranded, 0, "still within grace");
+
+    // The same row, aged past the grace, is the defect.
+    exec(&c, "TRUNCATE TABLE prices.price_ohlcv_1d").await;
+    insert_usdt_candle(&c, 111, 5, "now() - INTERVAL 3 DAY", "100", "0").await;
+    assert_eq!(read_counts(&c).await.stranded, 1, "past grace = stranded");
+}
+
+/// Dust is not damage. A `close` below the `Decimal(38, 14)` underflow bound
+/// cannot produce a non-zero `close_usd` at any plausible rate, so counting it
+/// would put the alarm permanently in ALARM over rows with nothing to lose.
+/// Task 0182 hit exactly this and its first bound (`1e-11`) was three orders of
+/// magnitude too generous.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+async fn dust_below_the_underflow_bound_is_not_counted_as_stranded() {
+    let c = client();
+    exec(&c, "TRUNCATE TABLE prices.price_ohlcv_1d").await;
+    exec(&c, "TRUNCATE TABLE prices.assets").await;
+    seed_usdt_identity(&c, 111).await;
+
+    insert_usdt_candle(
+        &c,
+        111,
+        5,
+        "now() - INTERVAL 3 DAY",
+        "0.00000000000001",
+        "0",
+    )
+    .await;
+    assert_eq!(read_counts(&c).await.stranded, 0, "1e-14 close is dust");
+}
+
+/// ⚠️ The trap that makes this check scoped rather than global: exotic-quoted
+/// candles sit at `close_usd = 0` **by design** — no USD reference exists and no
+/// enrichment tier can price them (~74M rows on `_1h` alone, task 0182). If the
+/// quote-leg filter were dropped, the alarm would breach forever on healthy
+/// data.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+async fn an_exotic_quoted_zero_is_ignored_because_it_is_by_design() {
+    let c = client();
+    exec(&c, "TRUNCATE TABLE prices.price_ohlcv_1d").await;
+    exec(&c, "TRUNCATE TABLE prices.assets").await;
+    seed_usdt_identity(&c, 111).await;
+
+    // quote_asset_id 999 is not the USDT leg — an unpriceable exotic pair.
+    insert_usdt_candle(&c, 999, 5, "now() - INTERVAL 3 DAY", "100", "0").await;
+
+    let counts = read_counts(&c).await;
+    assert_eq!(counts.scanned, 0, "the exotic leg is out of scope entirely");
+    assert_eq!(counts.stranded, 0);
+}
+
+/// `ReplacingMergeTree` + a repair that re-inserts at a higher `version`.
+/// Without `FINAL` the query reads the superseded row and alarms on a defect
+/// that has already been corrected — an alarm firing on history rather than on
+/// state.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+async fn a_repaired_candle_stops_counting_once_a_higher_version_supersedes_it() {
+    let c = client();
+    exec(&c, "TRUNCATE TABLE prices.price_ohlcv_1d").await;
+    exec(&c, "TRUNCATE TABLE prices.assets").await;
+    seed_usdt_identity(&c, 111).await;
+
+    insert_usdt_candle(&c, 111, 5, "now() - INTERVAL 3 DAY", "100", "100").await;
+    assert_eq!(
+        read_counts(&c).await.peg_applied,
+        1,
+        "the defect is present"
+    );
+
+    // The repair: same primary key, corrected value, version + 1.
+    exec(
+        &c,
+        "INSERT INTO prices.price_ohlcv_1d \
+           (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+            volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) \
+         SELECT timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+                volume_base, volume_quote, volume_quote, 15, vwap, trade_count, version + 1 \
+         FROM prices.price_ohlcv_1d FINAL \
+         WHERE quote_asset_id = 111 AND close_usd = close",
+    )
+    .await;
+
+    assert_eq!(
+        read_counts(&c).await.peg_applied,
+        0,
+        "FINAL must collapse to the repaired row"
+    );
+}
+
+/// The silent all-clear. With no USDT identity in the registry the quote-leg
+/// filter matches nothing, both counts read zero, and a `NOT_BREACHING` alarm
+/// would score a check that never ran as perfectly healthy. `resolved_legs`
+/// exists so `sanity_metrics` can refuse it, and `main.rs` fails the invocation.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+async fn an_unresolvable_usdt_leg_reads_as_zero_and_is_therefore_refused() {
+    let c = client();
+    exec(&c, "TRUNCATE TABLE prices.price_ohlcv_1d").await;
+    exec(&c, "TRUNCATE TABLE prices.assets").await;
+    // Deliberately no USDT identity seeded.
+    insert_usdt_candle(&c, 111, 5, "now() - INTERVAL 3 DAY", "100", "100").await;
+
+    let counts = read_counts(&c).await;
+    assert_eq!(counts.resolved_legs, 0);
+    assert_eq!(
+        counts.peg_applied, 0,
+        "a real defect is invisible without the identity — hence the refusal"
+    );
+    assert_eq!(
+        sanity_metrics(&counts),
+        None,
+        "this reading must never be published as healthy"
+    );
 }

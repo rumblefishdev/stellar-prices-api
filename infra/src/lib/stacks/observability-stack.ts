@@ -254,6 +254,18 @@ export class ObservabilityStack extends cdk.Stack {
     string,
     cloudwatch.Alarm
   >;
+  /**
+   * USDT-quoted candles valued as if the $1 peg still held (task 0204, gap 4),
+   * keyed by the count that rung fires at. Correctness, not liveness — every
+   * other alarm in this stack scores this data perfectly healthy.
+   */
+  public readonly usdPegAppliedAlarms: Record<string, cloudwatch.Alarm>;
+  /**
+   * USDT-quoted candles left at `close_usd = 0` past the enrichment grace
+   * period (task 0204, gap 4), keyed by count. The inverse direction, added
+   * because task 0182's own repair produced it.
+   */
+  public readonly usdStrandedAlarms: Record<string, cloudwatch.Alarm>;
   /** Live ledger-processor total-halt alarm — zero invocations (finding B / halt gap). */
   public readonly ledgerProcessorNoInvocationsAlarm: cloudwatch.Alarm;
   /**
@@ -779,6 +791,83 @@ export class ObservabilityStack extends cdk.Stack {
         alarm.addOkAction(snsAction);
         return [String(depth), alarm];
       }),
+    );
+
+    // USD-value correctness on the USDT quote leg (task 0204, gap 4).
+    //
+    // ⚠️ This is the only alarm in this stack that watches whether the data is
+    // RIGHT rather than whether it is ARRIVING. A close_usd that is fresh,
+    // present and wrong is invisible to all seven rollup alarms, to the disk
+    // alarm and to the DLQ ladder — every one of them reads healthy while the
+    // numbers are ~7.4x too high, which is the state prod sat in from the June
+    // 2022 depeg until 2026-08-18 (tasks 0172, 0182).
+    //
+    // ⚠️ Two directions, and the second is not symmetry for its own sake.
+    // peg-applied is the original defect; stranded (close_usd = 0 on a candle
+    // with a representable close) is what task 0182's REPAIR produced on
+    // 2026-08-19 — 157 candles zeroed with nothing to refill them. A check for
+    // only the first direction would have passed while that damage stood.
+    //
+    // ⚠️ A ladder rather than one alarm, for the gap 2 reason: a wrong
+    // close_usd is a STANDING condition, and CloudWatch notifies on a state
+    // TRANSITION, so a single alarm latches and goes quiet however far the
+    // population climbs. Unlike MV drift (gap 3), which is binary and has no
+    // way out of this, a count of wrong candles has DEPTH — a regressed writer
+    // keeps adding to it — so gap 2's ladder transfers directly. Every rung
+    // keeps its OK action for the same reason gap 2's rungs do: a rung with no
+    // path back to OK latches permanently on first breach and is then silent
+    // for every later incident.
+    //
+    // The probe scopes both counts to the USDT quote leg and bounds them to a
+    // rolling 7-day window. Both are load-bearing — exotic-quoted zeros are by
+    // design (~74M rows), and an unbounded scan every 15 min is task 0111's
+    // outage wearing a health check's clothes. See
+    // packages/rollup-freshness-probe/src/usd_sanity.rs.
+    const usdSanityRungs = (
+      metricName: string,
+      idPrefix: string,
+      alarmSuffix: string,
+      describe: (count: number) => string,
+    ): Record<string, cloudwatch.Alarm> =>
+      Object.fromEntries(
+        config.opsAlarms.usdSanityEscalationCounts.map((count) => {
+          const alarm = new cloudwatch.Alarm(this, `${idPrefix}${count}`, {
+            alarmName: `prices-${config.envName}-${alarmSuffix}-${count}`,
+            alarmDescription: describe(count),
+            metric: new cloudwatch.Metric({
+              namespace: 'Prices/Rollup',
+              metricName,
+              dimensionsMap: { Environment: config.envName },
+              statistic: 'Maximum',
+              period: cdk.Duration.minutes(15),
+            }),
+            threshold: count,
+            evaluationPeriods: 2,
+            datapointsToAlarm: 1,
+            comparisonOperator:
+              cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+            treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+          });
+          alarm.addAlarmAction(snsAction);
+          alarm.addOkAction(snsAction);
+          return [String(count), alarm];
+        }),
+      );
+
+    this.usdPegAppliedAlarms = usdSanityRungs(
+      'UsdtPegAppliedCandles',
+      'UsdPegAppliedAlarmCount',
+      'usd-peg-applied',
+      (count) =>
+        `${count} or more USDT-quoted candles written in the last 7 days carry a close_usd within 2% of their close — valued as if USDT were still pegged at $1. USDT depegged in June 2022 and trades at ~0.13-0.15 (task 0172), so these values are roughly 7.4x too high. Something is applying the peg path to the USDT leg again: check the enrichment tiers (USDT must be a PIVOT reference, never a peg member) and prices.oracle_prices for rows mis-attributed to the USDT identity — that is how tasks 0196 and 0168 reintroduced this WITHOUT touching the writer, so a green writer test proves nothing here. Task 0182 corrected 567,760 such candles; find what is writing them before re-running any repair. Rungs are operator-tunable via config.opsAlarms.usdSanityEscalationCounts.`,
+    );
+
+    this.usdStrandedAlarms = usdSanityRungs(
+      'UsdtStrandedCandles',
+      'UsdStrandedAlarmCount',
+      'usd-stranded',
+      (count) =>
+        `${count} or more USDT-quoted candles are still at close_usd = 0 more than 48 h after being written, despite a close large enough to price. A zero is indistinguishable from "no data" at ~130 unguarded argMax(close_usd, ...) sites (task 0145), and BE render an empty "--" TVL when nothing priced within 48 h — so this is a value the consumer has already lost, not one that is merely late. Likely causes: the enrichment sweep is behind (task 0209), or the pivot cannot find a USDT/USDC reference inside its window. ⚠️ Do NOT respond by re-running a reset repair — task 0182's own reset CREATED 157 stranded candles by zeroing rows that sat below its pivot reference. Rungs are operator-tunable via config.opsAlarms.usdSanityEscalationCounts.`,
     );
 
     // Total ingestion halt: the lag / errors / DLQ alarms above all key on the

@@ -16,6 +16,9 @@
 async fn main() -> Result<(), lambda_runtime::Error> {
     use lambda_runtime::{LambdaEvent, run, service_fn};
     use rollup_freshness_probe::disk::{DiskUsage, disk_metrics, disk_query, publish_disk};
+    use rollup_freshness_probe::usd_sanity::{
+        SanityCounts, publish_sanity, sanity_metrics, sanity_query,
+    };
     use rollup_freshness_probe::{TableLag, freshness_query, lag_metrics, publish};
     use std::sync::Arc;
 
@@ -29,6 +32,7 @@ async fn main() -> Result<(), lambda_runtime::Error> {
     // directly and touches no `system.*` table.
     let ch = Arc::new(prices_clickhouse::mtls::client_from_lambda_env("prices").await?);
     let query = Arc::new(freshness_query());
+    let sanity_query = Arc::new(sanity_query());
 
     let aws_cfg = aws_config::defaults(aws_config::BehaviorVersion::latest())
         .load()
@@ -41,6 +45,7 @@ async fn main() -> Result<(), lambda_runtime::Error> {
         let ch = ch.clone();
         let cw = cw.clone();
         let query = query.clone();
+        let sanity_query = sanity_query.clone();
         let environment = environment.clone();
         async move {
             let rows = ch.query(&query).fetch_all::<TableLag>().await?;
@@ -85,11 +90,38 @@ async fn main() -> Result<(), lambda_runtime::Error> {
             })?;
             publish_disk(&cw, &environment, &disk).await?;
 
+            // ⚠️ SAME ORDERING RULE AS THE DISK READ, one step further down:
+            // the USD-sanity read runs LAST and must never move above either of
+            // the publishes above it. It is the newest and least proven of the
+            // three, it scans OHLCV data rather than reading a function, and it
+            // has the most ways to fail (an unresolvable asset identity, a
+            // registry change, a slow FINAL scan). Every one of those would
+            // otherwise abort the invocation before the rollup and disk data
+            // landed — and those alarms are treatMissingData: NOT_BREACHING, so
+            // they would all score healthy. A correctness check must not be able
+            // to blind the liveness checks it sits beside.
+            let counts = ch.query(&sanity_query).fetch_one::<SanityCounts>().await?;
+            // `None` means the USDT identity did not resolve to exactly one
+            // asset — the check did not run. Fail the invocation rather than
+            // publishing two zeros, which NOT_BREACHING would score as a clean
+            // bill of health for a query that matched nothing.
+            let sanity = sanity_metrics(&counts).ok_or_else(|| {
+                lambda_runtime::Error::from(format!(
+                    "the canonical USDT identity resolved to {} assets, expected exactly 1 — \
+                     the USD-sanity check did not run and its counts are meaningless",
+                    counts.resolved_legs
+                ))
+            })?;
+            publish_sanity(&cw, &environment, &sanity).await?;
+
             let free_percent = disk.first().map(|m| m.value).unwrap_or_default();
             tracing::info!(
                 tiers = metrics.len(),
                 disk_free_percent = free_percent,
                 disk_available_bytes = usage.available_bytes,
+                usd_peg_applied = counts.peg_applied,
+                usd_stranded = counts.stranded,
+                usd_scanned = counts.scanned,
                 "rollup-freshness-probe run complete"
             );
             Ok::<serde_json::Value, lambda_runtime::Error>(serde_json::json!({
@@ -98,6 +130,11 @@ async fn main() -> Result<(), lambda_runtime::Error> {
                     "free_percent": free_percent,
                     "available_bytes": usage.available_bytes,
                     "capacity_bytes": usage.capacity_bytes,
+                },
+                "usd_sanity": {
+                    "peg_applied": counts.peg_applied,
+                    "stranded": counts.stranded,
+                    "scanned": counts.scanned,
                 },
             }))
         }

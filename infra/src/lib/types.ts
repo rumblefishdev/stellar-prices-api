@@ -270,6 +270,38 @@ export interface EnvironmentConfig {
      */
     readonly dlqEscalationDepths: readonly number[];
     /**
+     * Counts at which the USD-correctness alarms escalate (task 0204, gap 4).
+     *
+     * The `rollup-freshness-probe` publishes two counts of USDT-quoted candles
+     * over a rolling 7-day window: `UsdtPegAppliedCandles` (valued as if USDT
+     * were still pegged at $1) and `UsdtStrandedCandles` (left at
+     * `close_usd = 0` past a 48 h grace despite a representable `close`). Each
+     * threshold here becomes one alarm on each metric.
+     *
+     * ⚠️ **Why a ladder and not a single `>= 1`.** A wrong `close_usd` is a
+     * **standing condition** — it stays wrong until a person repairs it — so it
+     * hits the same CloudWatch wall gap 2 hit: an alarm notifies on a state
+     * transition, latches, and then says nothing while the population grows.
+     * Unlike materialized-view drift (gap 3), which is binary and has no way out
+     * of this, a *count of wrong candles* has **depth**: a regressed writer adds
+     * to it on every run. So gap 2's ladder transfers here directly.
+     *
+     * Defaults to `[1, 100, 10000]`. 1 because a single candle valued at the peg
+     * is already a defect and there is no benign floor; 100 because past that it
+     * is a writer regression rather than an edge case; 10000 because task 0182's
+     * historical population was 567,760 across five tiers, so a rung at that
+     * order of magnitude distinguishes "a bug shipped" from "a bug has been
+     * shipped for a while".
+     *
+     * ⚠️ A frozen historical population would latch even with the ladder — the
+     * rungs re-notify on *growth*. That is accepted: this is a re-introduction
+     * guard, and a re-introduction grows. Every rung keeps its OK action for the
+     * same reason gap 2's do.
+     *
+     * Must be strictly increasing positive integers.
+     */
+    readonly usdSanityEscalationCounts: readonly number[];
+    /**
      * Optional AWS Chatbot → Slack routing for the ops-alarms topic (task 0056).
      * When set, `ObservabilityStack` subscribes `prices-{env}-ops-alarms` to a
      * Slack channel via a `SlackChannelConfiguration`, so alarms land in Slack —
@@ -652,6 +684,29 @@ export function validateConfig(config: EnvironmentConfig): void {
           break;
         }
         previous = depth;
+      }
+    }
+    if (!Array.isArray(ops.usdSanityEscalationCounts)) {
+      errors.push(
+        'opsAlarms.usdSanityEscalationCounts missing or not an array',
+      );
+    } else if (ops.usdSanityEscalationCounts.length === 0) {
+      // An empty ladder silently disables the gap-4 alarms while the probe
+      // keeps publishing the metrics — the check would look wired up and watch
+      // nothing, which is the exact shape of failure task 0204 exists to end.
+      errors.push(
+        'opsAlarms.usdSanityEscalationCounts must not be empty — an empty ladder publishes the metrics but alarms on nothing',
+      );
+    } else {
+      let previousCount = 0;
+      for (const count of ops.usdSanityEscalationCounts) {
+        if (!Number.isInteger(count) || count <= previousCount) {
+          errors.push(
+            `opsAlarms.usdSanityEscalationCounts must be strictly increasing positive integers, got: [${ops.usdSanityEscalationCounts.join(', ')}]`,
+          );
+          break;
+        }
+        previousCount = count;
       }
     }
     if (!ops.rollupLagSeconds || typeof ops.rollupLagSeconds !== 'object') {
