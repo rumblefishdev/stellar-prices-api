@@ -20,15 +20,22 @@
 //! cargo test -p rollup-freshness-probe --test rollup_freshness_it -- --ignored --nocapture
 //! ```
 //!
-//! Destructive to the local `prices.price_ohlcv_*` tables (truncates them);
-//! never run against a shared/prod cluster.
+//! ⚠️ **Destructive, and to more than the candles.** These tests `TRUNCATE`
+//! `prices.price_ohlcv_*` **and `prices.assets`** (the asset registry), and the
+//! gap-3 drift tests `CREATE`/`DROP` a real materialized view, its target table
+//! and a throwaway database inside the server they connect to. `ch_url()` honours
+//! `CLICKHOUSE_URL`, so a mis-set environment variable points all of that at
+//! whatever cluster it names. **Never run against a shared or production
+//! cluster.**
 
 use clickhouse::Client;
 use rollup_freshness_probe::mv_drift::{
     DriftMetric, MV_DRIFT_CRITICAL_METRIC, MV_DRIFT_METRIC, MV_DRIFT_UNREADABLE_METRIC, describe,
     drift_metrics, visible_objects_query,
 };
-use rollup_freshness_probe::usd_sanity::{SanityCounts, sanity_metrics, sanity_query};
+use rollup_freshness_probe::usd_sanity::{
+    SanityCounts, SanityRefusal, sanity_metrics, sanity_query,
+};
 use rollup_freshness_probe::{ROLLUP_TIERS, TableLag, freshness_query, lag_metrics};
 
 fn ch_url() -> String {
@@ -315,16 +322,16 @@ async fn restricted_user_can_read_disk_headroom_but_not_system_disks() {
         .with_database("prices")
         .with_user("rollup_probe_it");
 
+    // ⚠️ BOTH reads are collected BEFORE anything can panic, and the user is
+    // dropped BEFORE the assertions run. A failing `.expect()` mid-test would
+    // otherwise unwind past the cleanup and leave a passwordless account holding
+    // SELECT on the whole `prices` database behind on the server — on a
+    // developer machine that is untidy, and `ch_url()` honours `CLICKHOUSE_URL`.
     // The probe's own query: must work with no system grant whatsoever.
     let usage = restricted
         .query(disk_query())
         .fetch_one::<DiskUsage>()
-        .await
-        .expect(
-            "disk_query() must run for a user holding only SELECT ON prices.* — if this fails, \
-             the probe cannot read disk headroom on prod at all",
-        );
-    assert!(usage.capacity_bytes > 0);
+        .await;
 
     // The obvious alternative: must NOT work. If this ever starts succeeding,
     // the constraint has changed and the module docs need revisiting — but
@@ -334,6 +341,15 @@ async fn restricted_user_can_read_disk_headroom_but_not_system_disks() {
         .query("SELECT free_space, total_space FROM system.disks")
         .fetch_all::<DiskUsage>()
         .await;
+
+    exec(&admin, "DROP USER IF EXISTS rollup_probe_it").await;
+
+    let usage = usage.expect(
+        "disk_query() must run for a user holding only SELECT ON prices.* — if this fails, \
+         the probe cannot read disk headroom on prod at all",
+    );
+    assert!(usage.capacity_bytes > 0);
+
     let err = denied
         .expect_err("system.disks must be denied to a prices-only user")
         .to_string();
@@ -341,8 +357,6 @@ async fn restricted_user_can_read_disk_headroom_but_not_system_disks() {
         err.contains("ACCESS_DENIED") || err.contains("Not enough privileges"),
         "expected an access-denied error from system.disks, got: {err}"
     );
-
-    exec(&admin, "DROP USER IF EXISTS rollup_probe_it").await;
 }
 
 // ---------------------------------------------------------------------------
@@ -570,7 +584,7 @@ async fn an_unresolvable_usdt_leg_reads_as_zero_and_is_therefore_refused() {
     );
     assert_eq!(
         sanity_metrics(&counts),
-        None,
+        Err(SanityRefusal::UnresolvableLeg { resolved_legs: 0 }),
         "this reading must never be published as healthy"
     );
 }

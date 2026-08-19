@@ -759,6 +759,116 @@ logical id `LedgerProcessorDlqAlarmD32FFD0F` — the change is purely additive.
     the rungs *above* it, so the existing alarm cannot be accidentally retuned or
     removed by a config edit.
 
+## Code review — four defects found and fixed (2026-08-19)
+
+A review of PR #221 after all four gaps were built. Seven findings; four were
+real defects in code written for this task and are fixed below. Two are recorded
+as open questions and one was rejected — see "Not fixed" at the end.
+
+⚠️ **Three of the four are the same failure in different clothes: a check that
+does not run, scoring healthy.** Every alarm in this crate treats missing data
+as OK, so *any* path that stops a datum being published is indistinguishable
+from "nothing is wrong". That is the exact defect this task exists to close, and
+it was reintroduced three separate times while closing it.
+
+### 1. 🔴 Gap 4 could silently disable gap 3
+
+The four checks ran with `?`, so each aborted every check below it, and gap 4's
+comment claimed to run **last** while gap 3 had been inserted after it — both
+comments said "LAST", which cannot be true of two things.
+
+The consequence was not theoretical. `sanity_metrics()` refuses an unresolvable
+USDT identity (a documented, plausible state), which failed the invocation
+**before** the MV-drift read ran at all. With `MvDriftCritical` publishing no
+datum and `NOT_BREACHING` in force, **an MV that had lost `APPEND` and was
+destroying history every 15 minutes would have shown OK in Slack** for as long as
+the USDT lookup stayed broken. Gap 4's design decision 2 asserts the opposite
+property in writing.
+
+**Fixed by inverting the design rather than reordering it.** Careful ordering was
+the wrong tool: it makes correctness depend on a comment nobody re-reads when
+adding a fifth check. Each check now records its own failure into a `failures`
+vec and the next one still runs; the invocation fails at the **end** if any did,
+so the probe's `-errors` alarm still carries it — but only after everything that
+*could* publish has published.
+
+### 2. A resolved leg that matches nothing read as healthy
+
+`resolved_legs` guards an identity that cannot be found. It does not guard an
+identity that resolves to an `asset_id` the candles no longer carry — precisely
+the [[0139]] renumber risk that made us resolve by issuer in the first place.
+That passes the guard, matches zero rows, publishes two zeros, and every gap-4
+alarm reads healthy forever.
+
+**Fixed** with a second guard on `scanned`. `sanity_metrics` now returns
+`Result<_, SanityRefusal>` with two variants rather than a bare `Option`, because
+the two refusals send the operator to different places — one to `prices.assets`,
+one to the candles — and an alarm naming the wrong one costs an hour.
+
+### 3. The drift alarms could announce a repair that never happened
+
+All three carry an OK action with `treatMissingData: NOT_BREACHING` and
+`evaluationPeriods: 2`. Two consecutive missed publishes transition a latched
+ALARM back to OK and post an explicit **"resolved"** message to Slack — while the
+MV is still drifted and nobody has touched it.
+
+⚠️ That is a stronger form of the 2026-08-13 false-recovery signal this task was
+filed over, and it made the descriptions' own "silence means still wrong"
+guidance wrong in the one case it is written for.
+
+**Fixed** with `treatMissingData: MISSING` on the three drift alarms only, which
+retains the last state across a gap. Nothing is lost: a probe that stops
+publishing is already covered by its own `-errors` alarm. The liveness alarms
+keep `NOT_BREACHING` deliberately — for those, "no data" genuinely is the absence
+of a breach.
+
+### 4. The IT file understated what it destroys, and leaked a user
+
+The header said "truncates `prices.price_ohlcv_*`". The tests also truncate
+**`prices.assets`** and create/drop a real MV, a target table and a database.
+`ch_url()` honours `CLICKHOUSE_URL`. Header corrected to say all of it.
+
+Separately, `restricted_user_can_read_disk_headroom_but_not_system_disks` created
+a passwordless user with `SELECT ON prices.*` and dropped it at the end — so any
+failing `.expect()` before that line unwound past the cleanup and left the
+account behind. Both reads are now collected before anything can panic and the
+user is dropped **before** the assertions run.
+
+### Not fixed — two open, one rejected
+
+- ⏳ **The `usd-stranded` rung at 1 may be in ALARM from the moment it deploys.**
+  The query counts every USDT-quoted daily candle over 48 h old at
+  `close_usd = 0`, and does not distinguish damage from a bucket with no
+  resolvable USD reference — the `no_reference` floor the enrichment repair
+  deliberately leaves. One permanently unpriceable bucket inside the rolling
+  7-day window latches the rung forever, which is the muted-alarm outcome this
+  task exists to end. ⚠️ **Same argument that rejected a 25% disk bound.**
+  [[0209]] is open so the baseline is unmeasured: **measure `stranded` against
+  prod before deploying**, and consider excluding rows with no resolvable
+  reference.
+- ⏳ **The probe's 1-minute / 256 MB Lambda config was never revisited** and its
+  justifying comment ("seven metadata-only `max()` reads … trivially fast") is
+  stale — the invocation now also runs a `FINAL` scan and ~20 sequential mTLS
+  round trips for the drift check. A hard Lambda timeout is not a Rust `Err`, so
+  it publishes nothing. ⚠️ **Fixing it means deploying `eventbridge-stack.ts`,
+  the stack that owns `CleanupRule`** — the hazard this entire design contorted
+  itself to avoid. Measure the real invocation duration first; do not pre-emptively
+  touch that file.
+- ⛔ **Rejected: tightening the grant discriminator to "no MVs visible".** The
+  review is right that `visible_objects == 0` only catches a *total* loss of
+  visibility, so a grant narrowed to one table still pages with the wrong
+  diagnosis. But the proposed fix — suppress when no `MaterializedView` rows are
+  visible — reads identically when the MVs really have all been dropped, which is
+  the catastrophe design decision 5 explicitly requires the discriminator **not**
+  to swallow. The partial-grant case stays uncovered on purpose.
+
+### Verification
+
+42 unit tests (was 40) and **15 ITs green against the 26.3.10.60 pin**; clippy
+clean on all four feature combinations. `cdk synth` still emits 34 alarms, the
+three drift alarms now `TreatMissingData: missing`, each retaining one alarm and
+one OK action; the other 26 `notBreaching` alarms are untouched.
+
 ## Issues Encountered
 
 - 🔴 **`system.disks` is unusable from this probe, and it would have deployed

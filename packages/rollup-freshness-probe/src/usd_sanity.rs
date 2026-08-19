@@ -130,12 +130,14 @@ pub const SANITY_TABLE: &str = "price_ohlcv_1d";
 
 /// One reading of the USDT quote leg's USD-value health.
 ///
-/// `resolved_legs` is the guard against the silent all-clear. If the USDT
-/// identity cannot be resolved — the registry moved, an issuer changed, task
-/// 0139 renumbered something — the quote-leg filter matches nothing, both counts
-/// come back `0`, and the alarm scores a **healthy** result for a check that did
-/// not run. Carrying the resolved count in the same row makes that state
-/// detectable; [`sanity_metrics`] refuses it.
+/// `resolved_legs` and `scanned` are the two guards against the silent
+/// all-clear. If the USDT identity cannot be resolved — the registry moved, an
+/// issuer changed, task 0139 renumbered something — the quote-leg filter matches
+/// nothing, both counts come back `0`, and the alarm scores a **healthy** result
+/// for a check that did not run. `resolved_legs` catches the identity being
+/// missing; `scanned` catches it resolving to an id the candles no longer carry,
+/// which the first guard cannot see. Carrying both in the same row makes each
+/// state detectable; [`sanity_metrics`] refuses them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clickhouse::Row, serde::Deserialize)]
 pub struct SanityCounts {
     /// Number of `assets` rows matching the canonical USDT identity. Must be 1.
@@ -146,7 +148,11 @@ pub struct SanityCounts {
     /// USDT-quoted candles older than [`STRANDED_GRACE_SECONDS`] still at
     /// `close_usd = 0` with a `close` above [`REPRESENTABLE_CLOSE_FLOOR`].
     pub stranded: u64,
-    /// USDT-quoted candles examined. Context for the log line; not alarmed on.
+    /// USDT-quoted candles examined.
+    ///
+    /// Not alarmed on, but **guarded on**: zero means the query matched nothing,
+    /// so the two counts above are zero for want of data rather than for want of
+    /// defects. See [`SanityRefusal::EmptyScan`].
     pub scanned: u64,
 }
 
@@ -212,20 +218,69 @@ pub fn sanity_query() -> String {
     )
 }
 
+/// Why a reading was refused instead of published.
+///
+/// Both variants describe the **same hazard from different distances**: a query
+/// that matched nothing still returns two perfectly publishable zeros, and the
+/// gap-4 alarms are `treatMissingData: NOT_BREACHING`, so those zeros are scored
+/// as a clean bill of health forever. The variants are separate because the
+/// operator's first move differs — one points at the asset registry, the other
+/// at the candles — and an alarm that names the wrong one costs an hour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SanityRefusal {
+    /// The canonical USDT identity did not resolve to exactly one `assets` row.
+    UnresolvableLeg { resolved_legs: u64 },
+    /// The leg resolved, but matched **no candles at all** in the window.
+    EmptyScan,
+}
+
+impl std::fmt::Display for SanityRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnresolvableLeg { resolved_legs } => write!(
+                f,
+                "the canonical USDT identity resolved to {resolved_legs} assets, expected \
+                 exactly 1 — check prices.assets for the USDT code/issuer pair"
+            ),
+            Self::EmptyScan => write!(
+                f,
+                "the USDT identity resolved, but no USDT-quoted candles were found in the \
+                 last {days} days of {table} — the asset_id in the registry no longer matches \
+                 the quote_asset_id stored in the candles (task 0139), or the leg has stopped \
+                 trading entirely",
+                days = LOOKBACK_SECONDS / 86_400,
+                table = SANITY_TABLE,
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SanityRefusal {}
+
 /// Shape one [`SanityCounts`] reading into the CloudWatch data to publish.
 ///
-/// `None` when the USDT identity did not resolve to exactly one asset. That is a
-/// **check that did not run**, not a clean bill of health, and the two must not
-/// be conflated: the alarms are `treatMissingData: NOT_BREACHING`, so publishing
-/// two zeros for an unresolvable leg would score it healthy forever. The caller
-/// turns `None` into a failed invocation so the probe's own `-errors` alarm
-/// carries it — the same contract [`crate::disk::disk_metrics`] uses for an
-/// unreadable capacity.
-pub fn sanity_metrics(counts: &SanityCounts) -> Option<Vec<SanityMetric>> {
+/// `Err` when the check **did not actually run**, which is not a clean bill of
+/// health and must never be published as one. The caller turns an `Err` into a
+/// failed invocation so the probe's own `-errors` alarm carries it — the same
+/// contract [`crate::disk::disk_metrics`] uses for an unreadable capacity.
+///
+/// ⚠️ **Two guards, not one, and the second is the subtler.** `resolved_legs`
+/// catches an identity that cannot be found at all. But an identity that
+/// resolves to an `asset_id` no longer present in the candles — precisely the
+/// renumber risk task 0139 is open for, and the reason the leg is resolved by
+/// issuer rather than by id — passes that guard and then matches zero rows.
+/// Both counts publish `0` and every gap-4 alarm reads healthy forever. A scan
+/// that examined nothing has measured nothing.
+pub fn sanity_metrics(counts: &SanityCounts) -> Result<Vec<SanityMetric>, SanityRefusal> {
     if counts.resolved_legs != 1 {
-        return None;
+        return Err(SanityRefusal::UnresolvableLeg {
+            resolved_legs: counts.resolved_legs,
+        });
     }
-    Some(vec![
+    if counts.scanned == 0 {
+        return Err(SanityRefusal::EmptyScan);
+    }
+    Ok(vec![
         SanityMetric {
             name: PEG_APPLIED_METRIC,
             value: counts.peg_applied as f64,
@@ -418,7 +473,7 @@ mod tests {
                 resolved_legs: 0,
                 ..healthy()
             }),
-            None
+            Err(SanityRefusal::UnresolvableLeg { resolved_legs: 0 })
         );
     }
 
@@ -432,8 +487,36 @@ mod tests {
                 resolved_legs: 2,
                 ..healthy()
             }),
-            None
+            Err(SanityRefusal::UnresolvableLeg { resolved_legs: 2 })
         );
+    }
+
+    /// The guard `resolved_legs` cannot provide. The identity resolves cleanly,
+    /// so the first guard passes — but the `asset_id` it resolves to is not the
+    /// `quote_asset_id` the candles carry (task 0139 renumbering, a registry
+    /// rewrite), so the scan matches nothing. Both counts are zero because
+    /// nothing was examined, and `NOT_BREACHING` would score that healthy for as
+    /// long as it lasted.
+    #[test]
+    fn a_resolved_leg_that_matches_no_candles_is_refused() {
+        assert_eq!(
+            sanity_metrics(&SanityCounts {
+                scanned: 0,
+                ..healthy()
+            }),
+            Err(SanityRefusal::EmptyScan)
+        );
+    }
+
+    /// The two refusals must not read alike: one sends the operator to the asset
+    /// registry, the other to the candles.
+    #[test]
+    fn the_two_refusals_name_different_first_moves() {
+        let unresolvable = SanityRefusal::UnresolvableLeg { resolved_legs: 0 }.to_string();
+        let empty = SanityRefusal::EmptyScan.to_string();
+        assert!(unresolvable.contains("prices.assets"));
+        assert!(empty.contains("quote_asset_id"));
+        assert_ne!(unresolvable, empty);
     }
 
     /// The peg tolerance is a rounding allowance, not a judgement call. USDT

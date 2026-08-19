@@ -899,6 +899,21 @@ export class ObservabilityStack extends cdk.Stack {
     // "we are blind to an escalation". The exception is the critical severity,
     // which does compound — which is exactly why it has its own alarm and its
     // own urgency rather than being buried in the ordinary count.
+    //
+    // ⚠️ treatMissingData: MISSING, NOT the NOT_BREACHING used everywhere else
+    // in this stack, and the difference is load-bearing. Every alarm here has an
+    // OK action, so under NOT_BREACHING two consecutive missing datapoints would
+    // transition a latched ALARM back to OK and post an explicit "resolved"
+    // message to Slack — while the MV was still drifted and nobody had touched
+    // it. That is a stronger version of the 2026-08-13 false-recovery signal
+    // this whole task was filed over: the lag alarm returned to OK truthfully
+    // but for the wrong reason, and the operator read it as fixed. MISSING
+    // retains the last state across a gap instead, so a dead probe cannot
+    // announce a repair that did not happen. Nothing is lost by it — a probe
+    // that stops publishing is already covered by its own `-errors` alarm
+    // (addWorkerHealthAlarms), which is the correct signal for that condition.
+    // The liveness alarms above keep NOT_BREACHING deliberately: for those,
+    // "no data" genuinely is the absence of a breach.
     this.mvDriftCriticalAlarm = new cloudwatch.Alarm(
       this,
       'MvDriftCriticalAlarm',
@@ -917,7 +932,7 @@ export class ObservabilityStack extends cdk.Stack {
         datapointsToAlarm: 1,
         comparisonOperator:
           cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
-        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+        treatMissingData: cloudwatch.TreatMissingData.MISSING,
       },
     );
     this.mvDriftCriticalAlarm.addAlarmAction(snsAction);
@@ -938,7 +953,7 @@ export class ObservabilityStack extends cdk.Stack {
       datapointsToAlarm: 1,
       comparisonOperator:
         cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
-      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      treatMissingData: cloudwatch.TreatMissingData.MISSING,
     });
     this.mvDriftAlarm.addAlarmAction(snsAction);
     this.mvDriftAlarm.addOkAction(snsAction);
@@ -967,7 +982,7 @@ export class ObservabilityStack extends cdk.Stack {
         datapointsToAlarm: 1,
         comparisonOperator:
           cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
-        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+        treatMissingData: cloudwatch.TreatMissingData.MISSING,
       },
     );
     this.mvDriftUnreadableAlarm.addAlarmAction(snsAction);

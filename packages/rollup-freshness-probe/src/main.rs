@@ -57,127 +57,183 @@ async fn main() -> Result<(), lambda_runtime::Error> {
         let sanity_query = sanity_query.clone();
         let environment = environment.clone();
         async move {
-            let rows = ch.query(&query).fetch_all::<TableLag>().await?;
-            let metrics = lag_metrics(&rows);
+            // ⚠️ EVERY CHECK RUNS, AND A FAILURE IN ONE MUST NOT SUPPRESS
+            // ANOTHER. This is the invariant the whole invocation is built
+            // around, and it is NOT the same as ordering the checks carefully —
+            // that was the earlier design and it was wrong.
+            //
+            // The four checks used to `?` on failure, so each aborted every
+            // check below it. Their comments each claimed to run "last", which
+            // could not be true of more than one of them, and the consequence
+            // was concrete: an unresolvable USDT identity (a documented,
+            // plausible state — see `SanityRefusal`) failed the invocation
+            // before the MV-drift read ran at all. Every alarm in this crate is
+            // `treatMissingData: NOT_BREACHING`, so a missing datum reads as
+            // healthy — meaning a materialized view that had lost APPEND and
+            // was destroying history on every refresh would have shown OK in
+            // Slack for as long as the USDT lookup stayed broken. One
+            // correctness check silently disabling another is precisely the
+            // false-OK failure task 0204 exists to end.
+            //
+            // So: each check records its own failure and the next one still
+            // runs. The invocation fails at the END if any of them did, which
+            // still trips the probe's own `-errors` alarm — the intended
+            // dead-probe signal — but only after everything that COULD publish
+            // has published.
+            let mut failures: Vec<String> = Vec::new();
 
-            // Propagate a publish failure so the invocation errors (mirrors the
-            // backfill-freshness-probe). The rollup alarms are treatMissingData:
-            // NOT_BREACHING, so if PutMetricData fails, no RollupLagSeconds datum
-            // lands and the alarms silently stay OK — a frozen rollup would go
-            // undetected, which is precisely the 0136 failure this task exists to
-            // end. Failing the invocation instead trips the probe's own `-errors`
-            // alarm, which is the intended dead-probe signal. A transient blip
-            // self-heals on the next 15-min run.
-            publish(&cw, &environment, &metrics).await?;
+            // ---- 1. Rollup freshness (task 0137) --------------------------
+            let mut published: Vec<serde_json::Value> = Vec::new();
+            let mut tiers = 0usize;
+            match ch.query(&query).fetch_all::<TableLag>().await {
+                Ok(rows) => {
+                    let metrics = lag_metrics(&rows);
+                    tiers = metrics.len();
+                    published = metrics
+                        .iter()
+                        .map(|m| serde_json::json!({ "table": m.table, "lag_seconds": m.value }))
+                        .collect();
+                    if let Err(e) = publish(&cw, &environment, &metrics).await {
+                        failures.push(format!("rollup publish: {e}"));
+                    }
+                }
+                Err(e) => failures.push(format!("rollup read: {e}")),
+            }
 
-            let published: Vec<_> = metrics
-                .iter()
-                .map(|m| serde_json::json!({ "table": m.table, "lag_seconds": m.value }))
-                .collect();
+            // ---- 2. ClickHouse disk headroom (task 0204, gap 1) -----------
+            let mut disk_reading: Option<DiskUsage> = None;
+            let mut free_percent: Option<f64> = None;
+            match ch.query(disk_query()).fetch_one::<DiskUsage>().await {
+                Ok(usage) => {
+                    disk_reading = Some(usage);
+                    // `None` means capacity read as zero — a broken reading, not
+                    // a full disk. Publishing 0.0 would page falsely; publishing
+                    // nothing would let NOT_BREACHING score an unreadable disk as
+                    // healthy. Record it as a failure instead.
+                    match disk_metrics(&usage) {
+                        Some(disk) => {
+                            free_percent = disk.first().map(|m| m.value);
+                            if let Err(e) = publish_disk(&cw, &environment, &disk).await {
+                                failures.push(format!("disk publish: {e}"));
+                            }
+                        }
+                        None => failures.push(format!(
+                            "disk: ClickHouse reported filesystemCapacity() = 0 (available {} B) \
+                             — disk headroom is unreadable, not zero",
+                            usage.available_bytes
+                        )),
+                    }
+                }
+                Err(e) => failures.push(format!("disk read: {e}")),
+            }
 
-            // ⚠️ ORDER IS LOAD-BEARING: the disk read runs AFTER the rollup
-            // metrics are already published, and must never move above it.
-            // Both halves propagate their errors, so whichever runs second can
-            // only ever cost itself. Reading the disk first would mean a disk
-            // failure (a revoked grant, a CH hiccup) aborts the invocation
-            // before any RollupLagSeconds datum lands — the alarms are
-            // treatMissingData: NOT_BREACHING, so all seven would score healthy
-            // while a rollup sat frozen. That is the exact 0136 blind spot task
-            // 0137 was filed to close, and it would have been reintroduced by an
-            // unrelated feature.
-            let usage = ch.query(disk_query()).fetch_one::<DiskUsage>().await?;
-            // `None` means capacity read as zero — a broken reading, not a full
-            // disk. Fail the invocation so the probe's own `-errors` alarm
-            // carries it; publishing nothing would let NOT_BREACHING score an
-            // unreadable disk as healthy.
-            let disk = disk_metrics(&usage).ok_or_else(|| {
-                lambda_runtime::Error::from(format!(
-                    "ClickHouse reported filesystemCapacity() = 0 (available {} B) — disk \
-                     headroom is unreadable, not zero",
-                    usage.available_bytes
-                ))
-            })?;
-            publish_disk(&cw, &environment, &disk).await?;
+            // ---- 3. USD-value correctness (task 0204, gap 4) --------------
+            let mut sanity_counts: Option<SanityCounts> = None;
+            match ch.query(&sanity_query).fetch_one::<SanityCounts>().await {
+                Ok(counts) => {
+                    sanity_counts = Some(counts);
+                    // An `Err` here is a check that did NOT RUN — an
+                    // unresolvable USDT identity, or one that resolved to an id
+                    // the candles no longer carry. Either way its two zeros must
+                    // not be published, because NOT_BREACHING would score them
+                    // as a clean bill of health.
+                    match sanity_metrics(&counts) {
+                        Ok(sanity) => {
+                            if let Err(e) = publish_sanity(&cw, &environment, &sanity).await {
+                                failures.push(format!("usd-sanity publish: {e}"));
+                            }
+                        }
+                        Err(refusal) => failures.push(format!("usd-sanity: {refusal}")),
+                    }
+                }
+                Err(e) => failures.push(format!("usd-sanity read: {e}")),
+            }
 
-            // ⚠️ SAME ORDERING RULE AS THE DISK READ, one step further down:
-            // the USD-sanity read runs LAST and must never move above either of
-            // the publishes above it. It is the newest and least proven of the
-            // three, it scans OHLCV data rather than reading a function, and it
-            // has the most ways to fail (an unresolvable asset identity, a
-            // registry change, a slow FINAL scan). Every one of those would
-            // otherwise abort the invocation before the rollup and disk data
-            // landed — and those alarms are treatMissingData: NOT_BREACHING, so
-            // they would all score healthy. A correctness check must not be able
-            // to blind the liveness checks it sits beside.
-            let counts = ch.query(&sanity_query).fetch_one::<SanityCounts>().await?;
-            // `None` means the USDT identity did not resolve to exactly one
-            // asset — the check did not run. Fail the invocation rather than
-            // publishing two zeros, which NOT_BREACHING would score as a clean
-            // bill of health for a query that matched nothing.
-            let sanity = sanity_metrics(&counts).ok_or_else(|| {
-                lambda_runtime::Error::from(format!(
-                    "the canonical USDT identity resolved to {} assets, expected exactly 1 — \
-                     the USD-sanity check did not run and its counts are meaningless",
-                    counts.resolved_legs
-                ))
-            })?;
-            publish_sanity(&cw, &environment, &sanity).await?;
-
-            // ⚠️ LAST, by the same rule as the two reads above: every check runs
-            // after the previous one has already published, so a failure can
-            // only ever cost itself. This one goes last because it is the only
-            // read in the invocation that touches `system.*` — a narrowed grant
-            // or a metadata hiccup here must not be able to abort the rollup,
-            // disk and USD publishes, all of which sit behind NOT_BREACHING
-            // alarms that would score healthy on missing data.
-            let visible: u64 = ch
+            // ---- 4. Materialized-view drift (task 0204, gap 3) ------------
+            //
+            // This is the only read in the invocation that touches `system.*`.
+            // `system.tables` is grant-FILTERED rather than denied, so it needs
+            // no grant the probe does not already hold — but a narrowed grant or
+            // a metadata hiccup here still must not cost the three checks above,
+            // which is what the failure collection above guarantees.
+            let mut drift_critical = 0.0_f64;
+            let mut drift_count = 0.0_f64;
+            let mut visible_objects: Option<u64> = None;
+            let mut drift_detail = String::new();
+            match ch
                 .query(&visible_objects_query("prices"))
                 .fetch_one::<u64>()
-                .await?;
-            let reports = prices_clickhouse::drift::check_rollup_drift(&ch, "prices").await?;
-            let drift = drift_metrics(&reports, visible);
-            publish_drift(&cw, &environment, &drift).await?;
+                .await
+            {
+                Ok(visible) => {
+                    visible_objects = Some(visible);
+                    match prices_clickhouse::drift::check_rollup_drift(&ch, "prices").await {
+                        Ok(reports) => {
+                            let drift = drift_metrics(&reports, visible);
+                            let value_of = |name: &str| {
+                                drift
+                                    .iter()
+                                    .find(|m| m.name == name)
+                                    .map(|m| m.value)
+                                    .unwrap_or_default()
+                            };
+                            drift_critical = value_of(MV_DRIFT_CRITICAL_METRIC);
+                            drift_count = value_of(MV_DRIFT_METRIC);
+                            // Named per-MV, so an alarm can be diagnosed from the
+                            // log line without re-running the drift CLI by hand.
+                            drift_detail = describe(&reports);
+                            if let Err(e) = publish_drift(&cw, &environment, &drift).await {
+                                failures.push(format!("mv-drift publish: {e}"));
+                            }
+                        }
+                        Err(e) => failures.push(format!("mv-drift check: {e}")),
+                    }
+                }
+                Err(e) => failures.push(format!("mv-drift visibility read: {e}")),
+            }
 
-            let value_of = |name: &str| {
-                drift
-                    .iter()
-                    .find(|m| m.name == name)
-                    .map(|m| m.value)
-                    .unwrap_or_default()
-            };
-            let free_percent = disk.first().map(|m| m.value).unwrap_or_default();
+            // Log before deciding the invocation's fate: on a partial failure
+            // this line is the only record of what the healthy checks measured.
             tracing::info!(
-                tiers = metrics.len(),
-                disk_free_percent = free_percent,
-                disk_available_bytes = usage.available_bytes,
-                usd_peg_applied = counts.peg_applied,
-                usd_stranded = counts.stranded,
-                usd_scanned = counts.scanned,
-                mv_drift_critical = value_of(MV_DRIFT_CRITICAL_METRIC),
-                mv_drift = value_of(MV_DRIFT_METRIC),
-                mv_visible_objects = visible,
-                // Named per-MV, so an alarm can be diagnosed from the log line
-                // without re-running the drift CLI by hand.
-                mv_detail = %describe(&reports),
+                tiers,
+                checks_failed = failures.len(),
+                disk_free_percent = free_percent.unwrap_or_default(),
+                disk_available_bytes = disk_reading.map(|u| u.available_bytes).unwrap_or_default(),
+                usd_peg_applied = sanity_counts.map(|c| c.peg_applied).unwrap_or_default(),
+                usd_stranded = sanity_counts.map(|c| c.stranded).unwrap_or_default(),
+                usd_scanned = sanity_counts.map(|c| c.scanned).unwrap_or_default(),
+                mv_drift_critical = drift_critical,
+                mv_drift = drift_count,
+                mv_visible_objects = visible_objects.unwrap_or_default(),
+                mv_detail = %drift_detail,
                 "rollup-freshness-probe run complete"
             );
+
+            if !failures.is_empty() {
+                return Err(lambda_runtime::Error::from(format!(
+                    "{} of 4 probe checks failed (the rest published normally): {}",
+                    failures.len(),
+                    failures.join("; ")
+                )));
+            }
+
             Ok::<serde_json::Value, lambda_runtime::Error>(serde_json::json!({
                 "published": published,
                 "disk": {
                     "free_percent": free_percent,
-                    "available_bytes": usage.available_bytes,
-                    "capacity_bytes": usage.capacity_bytes,
+                    "available_bytes": disk_reading.map(|u| u.available_bytes),
+                    "capacity_bytes": disk_reading.map(|u| u.capacity_bytes),
                 },
                 "usd_sanity": {
-                    "peg_applied": counts.peg_applied,
-                    "stranded": counts.stranded,
-                    "scanned": counts.scanned,
+                    "peg_applied": sanity_counts.map(|c| c.peg_applied),
+                    "stranded": sanity_counts.map(|c| c.stranded),
+                    "scanned": sanity_counts.map(|c| c.scanned),
                 },
                 "mv_drift": {
-                    "critical": value_of(MV_DRIFT_CRITICAL_METRIC),
-                    "drifted": value_of(MV_DRIFT_METRIC),
-                    "visible_objects": visible,
-                    "detail": describe(&reports),
+                    "critical": drift_critical,
+                    "drifted": drift_count,
+                    "visible_objects": visible_objects,
+                    "detail": drift_detail,
                 },
             }))
         }
