@@ -40,6 +40,11 @@
 /// rather than in a probe of its own.
 pub mod disk;
 
+/// Materialized-view drift, on a schedule (task 0204, gap 3). Task 0142 built
+/// the comparison; nothing ran it. See [`mv_drift`] for the two severities and
+/// for why one alarm transition is accepted here.
+pub mod mv_drift;
+
 /// USD-value correctness on the USDT quote leg (task 0204, gap 4). Rides in the
 /// same invocation as the rollup lag and the disk read, for the same namespace
 /// reason — see [`usd_sanity`].
@@ -53,8 +58,8 @@ pub mod usd_sanity;
 /// `cloudwatch:namespace` condition on the Lambda role's `PutMetricData` grant
 /// and the alarm wiring in `infra/`.
 ///
-/// ⚠️ Also carries the task 0204 disk metrics (gap 1) and USD-sanity counts
-/// (gap 4), which are not rollup metrics. That is deliberate — see
+/// ⚠️ Also carries the task 0204 disk metrics (gap 1), MV-drift counts (gap 3) and
+/// USD-sanity counts (gap 4), which are not rollup metrics. That is deliberate — see
 /// [`disk::publish_disk`] for the reason (it keeps the change off the stack
 /// that owns `CleanupRule`).
 pub const METRIC_NAMESPACE: &str = "Prices/Rollup";

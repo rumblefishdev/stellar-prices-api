@@ -40,8 +40,13 @@
 //! restricted user reads both, and that they return the same numbers as
 //! `system.disks` for the default disk (256 786 214 912 vs 256 786 149 376 — the
 //! drift is concurrent write activity between the two reads, not a different
-//! measurement). This preserves the property `main.rs` already documents for the
-//! rollup query: **the probe touches no `system.*` table.**
+//! measurement).
+//!
+//! ⚠️ This used to say the probe touches no `system.*` table at all. Task 0204
+//! gap 3 reads `system.tables`, which is fine and does not weaken the argument
+//! above: `system.tables` is grant-**filtered** (a prices-only user simply sees
+//! fewer rows), while `system.disks` is grant-**denied** and cannot be granted.
+//! The distinction is the whole reason this module reads functions.
 //!
 //! ⚠️ `filesystemFree()` does **not exist** on 26.3.10.60 (`UNKNOWN_FUNCTION`) —
 //! the three that do are `filesystemAvailable`, `filesystemUnreserved` and

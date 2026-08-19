@@ -24,6 +24,10 @@
 //! never run against a shared/prod cluster.
 
 use clickhouse::Client;
+use rollup_freshness_probe::mv_drift::{
+    DriftMetric, MV_DRIFT_CRITICAL_METRIC, MV_DRIFT_METRIC, MV_DRIFT_UNREADABLE_METRIC, describe,
+    drift_metrics, visible_objects_query,
+};
 use rollup_freshness_probe::usd_sanity::{SanityCounts, sanity_metrics, sanity_query};
 use rollup_freshness_probe::{ROLLUP_TIERS, TableLag, freshness_query, lag_metrics};
 
@@ -568,5 +572,191 @@ async fn an_unresolvable_usdt_leg_reads_as_zero_and_is_therefore_refused() {
         sanity_metrics(&counts),
         None,
         "this reading must never be published as healthy"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Task 0204, gap 3 — materialized-view drift on a schedule.
+// ---------------------------------------------------------------------------
+
+fn drift_value(metrics: &[DriftMetric], name: &str) -> f64 {
+    metrics
+        .iter()
+        .find(|m| m.name == name)
+        .unwrap_or_else(|| panic!("{name} published"))
+        .value
+}
+
+/// The control, and the one that matters most in practice: a schema that really
+/// is in sync must read as clean. An alarm that fires on a healthy chain gets
+/// muted, and a muted alarm is the state task 0204 exists to end.
+///
+/// This also exercises `check_rollup_drift` against a live server — the unit
+/// tests shape a report that is handed to them, and cannot catch a query that
+/// fails to execute or a fingerprint parser that no longer matches what
+/// ClickHouse renders.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+async fn a_freshly_applied_schema_reports_no_drift() {
+    let c = client();
+    let visible: u64 = c
+        .query(&visible_objects_query("prices"))
+        .fetch_one()
+        .await
+        .expect("system.tables is grant-filtered, not denied");
+    assert!(visible > 0, "the probe must be able to see its own schema");
+
+    let reports = prices_clickhouse::drift::check_rollup_drift(&c, "prices")
+        .await
+        .expect("drift check executes");
+    let m = drift_metrics(&reports, visible);
+
+    assert_eq!(
+        drift_value(&m, MV_DRIFT_CRITICAL_METRIC),
+        0.0,
+        "in-sync schema: {}",
+        describe(&reports)
+    );
+    assert_eq!(
+        drift_value(&m, MV_DRIFT_METRIC),
+        0.0,
+        "in-sync schema: {}",
+        describe(&reports)
+    );
+    assert_eq!(drift_value(&m, MV_DRIFT_UNREADABLE_METRIC), 0.0);
+}
+
+/// ⚠️ **Induce the condition.** Feed the checker a *modified* copy of
+/// `rollups.sql` so the live definitions genuinely disagree with the declared
+/// ones, and assert the ordinary-drift count moves. Non-destructive: the live
+/// MVs are untouched, only the file side is edited in memory.
+///
+/// Without this the alarm is proven to exist but not to detect anything —
+/// exactly the "verified by reading the CDK" failure AC 4 names.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+async fn an_edited_declaration_is_detected_as_drift() {
+    let c = client();
+    let visible: u64 = c
+        .query(&visible_objects_query("prices"))
+        .fetch_one()
+        .await
+        .expect("visible");
+
+    // Change the declared SELECT body of one MV. The live object is unchanged,
+    // so the check must report exactly this one as drifted.
+    let edited = prices_clickhouse::ROLLUPS_SQL.replace(
+        "toStartOfInterval(t.timestamp, INTERVAL 15 MINUTE) AS timestamp",
+        "toStartOfInterval(t.timestamp, INTERVAL 16 MINUTE) AS timestamp",
+    );
+    assert_ne!(
+        edited,
+        prices_clickhouse::ROLLUPS_SQL,
+        "the edit must actually apply, or this test proves nothing"
+    );
+
+    let reports = prices_clickhouse::drift::check_mv_drift(&c, "prices", &edited)
+        .await
+        .expect("drift check executes");
+    let m = drift_metrics(&reports, visible);
+
+    assert!(
+        drift_value(&m, MV_DRIFT_METRIC) >= 1.0,
+        "an edited declaration must surface as drift, got: {}",
+        describe(&reports)
+    );
+    assert_eq!(
+        drift_value(&m, MV_DRIFT_CRITICAL_METRIC),
+        0.0,
+        "a body edit is not history destruction — it must not page as critical"
+    );
+}
+
+/// ⚠️ **Induce the critical condition**: an MV that is live *without* `APPEND`.
+/// This is the task 0090/0095 data loss — replace mode overwrites the whole
+/// target table on every refresh — and it must land on its own metric rather
+/// than being counted as ordinary drift.
+///
+/// Creates a throwaway MV and target rather than touching the real rollup chain,
+/// and drops both afterwards.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+async fn a_live_mv_without_append_is_detected_as_critical() {
+    let c = client();
+    exec(&c, "DROP VIEW IF EXISTS prices.mv_gap3_probe").await;
+    exec(&c, "DROP TABLE IF EXISTS prices.gap3_probe_target").await;
+    exec(
+        &c,
+        "CREATE TABLE prices.gap3_probe_target (timestamp DateTime, n UInt64) \
+         ENGINE = MergeTree ORDER BY timestamp",
+    )
+    .await;
+    // Deliberately NO `APPEND` — replace mode, the destructive shape.
+    exec(
+        &c,
+        "CREATE MATERIALIZED VIEW prices.mv_gap3_probe \
+         REFRESH EVERY 1 HOUR \
+         TO prices.gap3_probe_target AS \
+         SELECT timestamp, count() AS n FROM prices.price_ohlcv_1d GROUP BY timestamp",
+    )
+    .await;
+
+    // Declare it WITH append, so file and live disagree on exactly that.
+    let declared = "CREATE MATERIALIZED VIEW IF NOT EXISTS prices.mv_gap3_probe \
+                    REFRESH EVERY 1 HOUR APPEND \
+                    TO prices.gap3_probe_target AS \
+                    SELECT timestamp, count() AS n FROM prices.price_ohlcv_1d GROUP BY timestamp;";
+
+    let reports = prices_clickhouse::drift::check_mv_drift(&c, "prices", declared)
+        .await
+        .expect("drift check executes");
+    let m = drift_metrics(&reports, 32);
+
+    exec(&c, "DROP VIEW IF EXISTS prices.mv_gap3_probe").await;
+    exec(&c, "DROP TABLE IF EXISTS prices.gap3_probe_target").await;
+
+    assert_eq!(
+        drift_value(&m, MV_DRIFT_CRITICAL_METRIC),
+        1.0,
+        "a live MV without APPEND must be critical, got: {}",
+        describe(&reports)
+    );
+    assert_eq!(
+        drift_value(&m, MV_DRIFT_METRIC),
+        0.0,
+        "and must NOT also inflate the ordinary count — one object, one alarm"
+    );
+}
+
+/// The grant-gap discriminator, end to end. A database the probe cannot see
+/// yields no visible objects, and the counts must be suppressed rather than
+/// published as "every MV is missing" — which would page as if the whole rollup
+/// chain had been deleted.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+async fn an_invisible_database_suppresses_the_counts_instead_of_paging() {
+    let c = client();
+    let visible: u64 = c
+        .query(&visible_objects_query("no_such_database"))
+        .fetch_one()
+        .await
+        .expect("counting an absent database is not an error");
+    assert_eq!(visible, 0);
+
+    // Every MV reports Missing against a database that holds none of them.
+    let reports = prices_clickhouse::drift::check_rollup_drift(&c, "no_such_database")
+        .await
+        .expect("drift check executes");
+    assert!(
+        reports.iter().all(|r| r.needs_attention()),
+        "all MVs should look missing here — that is the ambiguity being handled"
+    );
+
+    let m = drift_metrics(&reports, visible);
+    assert_eq!(drift_value(&m, MV_DRIFT_UNREADABLE_METRIC), 1.0);
+    assert_eq!(
+        drift_value(&m, MV_DRIFT_METRIC),
+        0.0,
+        "must not page as if the rollup chain were deleted"
     );
 }

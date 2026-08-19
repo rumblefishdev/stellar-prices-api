@@ -16,6 +16,10 @@
 async fn main() -> Result<(), lambda_runtime::Error> {
     use lambda_runtime::{LambdaEvent, run, service_fn};
     use rollup_freshness_probe::disk::{DiskUsage, disk_metrics, disk_query, publish_disk};
+    use rollup_freshness_probe::mv_drift::{
+        MV_DRIFT_CRITICAL_METRIC, MV_DRIFT_METRIC, describe, drift_metrics, publish_drift,
+        visible_objects_query,
+    };
     use rollup_freshness_probe::usd_sanity::{
         SanityCounts, publish_sanity, sanity_metrics, sanity_query,
     };
@@ -28,8 +32,13 @@ async fn main() -> Result<(), lambda_runtime::Error> {
     // secret/endpoint surfaces on the first query (the invocation fails and the
     // probe's error alarm fires) — no separate `SELECT 1` liveness probe is
     // needed. The `ingestion` mTLS identity (prices_writer) has SELECT on
-    // prices.*, which is all this probe needs: it reads the OHLCV tables
-    // directly and touches no `system.*` table.
+    // prices.*, which is all this probe needs.
+    //
+    // ⚠️ This comment used to claim the probe touches no `system.*` table. Since
+    // task 0204 gap 3 it reads `system.tables`, and that is fine — `system.tables`
+    // is grant-FILTERED (a prices-only user sees the prices objects, measured at
+    // 32 on 26.3.10.60), not DENIED like `system.disks`, which is why gap 1 reads
+    // filesystem *functions* instead. No new grant is required for either.
     let ch = Arc::new(prices_clickhouse::mtls::client_from_lambda_env("prices").await?);
     let query = Arc::new(freshness_query());
     let sanity_query = Arc::new(sanity_query());
@@ -114,6 +123,28 @@ async fn main() -> Result<(), lambda_runtime::Error> {
             })?;
             publish_sanity(&cw, &environment, &sanity).await?;
 
+            // ⚠️ LAST, by the same rule as the two reads above: every check runs
+            // after the previous one has already published, so a failure can
+            // only ever cost itself. This one goes last because it is the only
+            // read in the invocation that touches `system.*` — a narrowed grant
+            // or a metadata hiccup here must not be able to abort the rollup,
+            // disk and USD publishes, all of which sit behind NOT_BREACHING
+            // alarms that would score healthy on missing data.
+            let visible: u64 = ch
+                .query(&visible_objects_query("prices"))
+                .fetch_one::<u64>()
+                .await?;
+            let reports = prices_clickhouse::drift::check_rollup_drift(&ch, "prices").await?;
+            let drift = drift_metrics(&reports, visible);
+            publish_drift(&cw, &environment, &drift).await?;
+
+            let value_of = |name: &str| {
+                drift
+                    .iter()
+                    .find(|m| m.name == name)
+                    .map(|m| m.value)
+                    .unwrap_or_default()
+            };
             let free_percent = disk.first().map(|m| m.value).unwrap_or_default();
             tracing::info!(
                 tiers = metrics.len(),
@@ -122,6 +153,12 @@ async fn main() -> Result<(), lambda_runtime::Error> {
                 usd_peg_applied = counts.peg_applied,
                 usd_stranded = counts.stranded,
                 usd_scanned = counts.scanned,
+                mv_drift_critical = value_of(MV_DRIFT_CRITICAL_METRIC),
+                mv_drift = value_of(MV_DRIFT_METRIC),
+                mv_visible_objects = visible,
+                // Named per-MV, so an alarm can be diagnosed from the log line
+                // without re-running the drift CLI by hand.
+                mv_detail = %describe(&reports),
                 "rollup-freshness-probe run complete"
             );
             Ok::<serde_json::Value, lambda_runtime::Error>(serde_json::json!({
@@ -135,6 +172,12 @@ async fn main() -> Result<(), lambda_runtime::Error> {
                     "peg_applied": counts.peg_applied,
                     "stranded": counts.stranded,
                     "scanned": counts.scanned,
+                },
+                "mv_drift": {
+                    "critical": value_of(MV_DRIFT_CRITICAL_METRIC),
+                    "drifted": value_of(MV_DRIFT_METRIC),
+                    "visible_objects": visible,
+                    "detail": describe(&reports),
                 },
             }))
         }

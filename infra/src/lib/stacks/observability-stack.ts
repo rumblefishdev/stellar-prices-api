@@ -266,6 +266,16 @@ export class ObservabilityStack extends cdk.Stack {
    * because task 0182's own repair produced it.
    */
   public readonly usdStrandedAlarms: Record<string, cloudwatch.Alarm>;
+  /**
+   * A rollup MV that has lost `APPEND` (task 0204, gap 3) — history destroyed
+   * on every refresh. Separate from {@link mvDriftAlarm} because this is the
+   * only drift severity that compounds while nobody looks.
+   */
+  public readonly mvDriftCriticalAlarm: cloudwatch.Alarm;
+  /** A rollup MV whose definition no longer matches `rollups.sql` (gap 3). */
+  public readonly mvDriftAlarm: cloudwatch.Alarm;
+  /** The drift check could not see the schema at all (gap 3) — likely a grant. */
+  public readonly mvDriftUnreadableAlarm: cloudwatch.Alarm;
   /** Live ledger-processor total-halt alarm — zero invocations (finding B / halt gap). */
   public readonly ledgerProcessorNoInvocationsAlarm: cloudwatch.Alarm;
   /**
@@ -869,6 +879,99 @@ export class ObservabilityStack extends cdk.Stack {
       (count) =>
         `${count} or more USDT-quoted candles are still at close_usd = 0 more than 48 h after being written, despite a close large enough to price. A zero is indistinguishable from "no data" at ~130 unguarded argMax(close_usd, ...) sites (task 0145), and BE render an empty "--" TVL when nothing priced within 48 h — so this is a value the consumer has already lost, not one that is merely late. Likely causes: the enrichment sweep is behind (task 0209), or the pivot cannot find a USDT/USDC reference inside its window. ⚠️ Do NOT respond by re-running a reset repair — task 0182's own reset CREATED 157 stranded candles by zeroing rows that sat below its pivot reference. Rungs are operator-tunable via config.opsAlarms.usdSanityEscalationCounts.`,
     );
+
+    // Materialized-view drift, on a schedule (task 0204, gap 3). Task 0142 built
+    // `prices-clickhouse-drift` and NOTHING RAN IT — a check nobody runs is a
+    // check that does not exist. It covers a condition no other alarm here can
+    // see: task 0137 watches whether the rollups PRODUCE data, and a drifted MV
+    // does that perfectly well while producing the wrong numbers.
+    //
+    // ⚠️ Two severities, deliberately not one alarm. The CLI collapses
+    // everything to `exit 1`, which throws away the distinction that decides who
+    // gets woken — an MV that lost APPEND is destroying history on every refresh
+    // (the task 0095 data loss), while a definition mismatch is wrong but static.
+    //
+    // ⚠️ These fire ONCE and latch, unlike the DLQ ladder above, and that is a
+    // decision rather than an oversight (operator, 2026-08-19). Gap 2 needed a
+    // ladder because a DLQ GROWS while the alarm is quiet — 1 became 91
+    // overnight. Drift does not grow: one drifted MV stays one drifted MV until
+    // a person fixes it, so a latched alarm costs "somebody may forget", not
+    // "we are blind to an escalation". The exception is the critical severity,
+    // which does compound — which is exactly why it has its own alarm and its
+    // own urgency rather than being buried in the ordinary count.
+    this.mvDriftCriticalAlarm = new cloudwatch.Alarm(
+      this,
+      'MvDriftCriticalAlarm',
+      {
+        alarmName: `prices-${config.envName}-mv-drift-critical`,
+        alarmDescription: `A rollup materialized view is live WITHOUT the APPEND refresh mode. It atomically REPLACES its whole target table on every refresh, and because these MVs carry a bounded "WHERE timestamp >= now() - <window>", each tick overwrites the coarse table with only the recent window — deleting pre-rolled history permanently. This is the task 0090/0095 data loss, and every refresh makes it worse, so treat it as an emergency: check schema/rollups.sql against the live definition (packages/prices-clickhouse bin prices-clickhouse-drift prints the diff), re-create the MV WITH APPEND, then assess what history was lost. ⚠️ This alarm fires once and stays latched — it will NOT re-notify while the condition persists, so do not treat silence as resolution.`,
+        metric: new cloudwatch.Metric({
+          namespace: 'Prices/Rollup',
+          metricName: 'MvDriftCritical',
+          dimensionsMap: { Environment: config.envName },
+          statistic: 'Maximum',
+          period: cdk.Duration.minutes(15),
+        }),
+        threshold: 1,
+        evaluationPeriods: 2,
+        datapointsToAlarm: 1,
+        comparisonOperator:
+          cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      },
+    );
+    this.mvDriftCriticalAlarm.addAlarmAction(snsAction);
+    this.mvDriftCriticalAlarm.addOkAction(snsAction);
+
+    this.mvDriftAlarm = new cloudwatch.Alarm(this, 'MvDriftAlarm', {
+      alarmName: `prices-${config.envName}-mv-drift`,
+      alarmDescription: `A rollup materialized view no longer matches schema/rollups.sql — its definition drifted, it is missing, it could not be fingerprinted, or an undeclared MV is writing into a table it does not own. Data keeps flowing and looks healthy; it is simply being built from the wrong definition, which no other alarm can see. NOT an emergency (nothing is being destroyed) but it does not fix itself: run the prices-clickhouse-drift binary for the field-level diff, and note that re-applying rollups.sql will report success and change nothing on an MV that already exists. ⚠️ Fires once and stays latched by design (task 0204 gap 3) — drift does not grow, so silence here means "still wrong", never "resolved".`,
+      metric: new cloudwatch.Metric({
+        namespace: 'Prices/Rollup',
+        metricName: 'MvDriftCount',
+        dimensionsMap: { Environment: config.envName },
+        statistic: 'Maximum',
+        period: cdk.Duration.minutes(15),
+      }),
+      threshold: 1,
+      evaluationPeriods: 2,
+      datapointsToAlarm: 1,
+      comparisonOperator:
+        cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+    this.mvDriftAlarm.addAlarmAction(snsAction);
+    this.mvDriftAlarm.addOkAction(snsAction);
+
+    // ⚠️ The false page this exists to prevent. `system.tables` is filtered by
+    // grant, not denied, so a narrowed grant makes every MV report "missing" —
+    // identical in shape to the entire rollup chain having been dropped.
+    // Publishing MvDriftCount = 6 in that state would page at maximum urgency
+    // with the wrong diagnosis. The probe suppresses the counts when it can see
+    // NO prices objects at all and raises this instead.
+    this.mvDriftUnreadableAlarm = new cloudwatch.Alarm(
+      this,
+      'MvDriftUnreadableAlarm',
+      {
+        alarmName: `prices-${config.envName}-mv-drift-unreadable`,
+        alarmDescription: `The MV drift check ran but could see NO objects in the prices database, so its drift counts are meaningless and have been suppressed. This is far more likely a narrowed ClickHouse grant than the rollup chain having been deleted — system.tables is filtered by grant rather than denied, so a permissions change makes every MV look missing. Check the probe's mTLS identity and its SELECT grant on prices.* FIRST. ⚠️ If the grant is intact, then the objects really are gone and this is a catastrophe: escalate immediately and do NOT re-apply rollups.sql before understanding what happened.`,
+        metric: new cloudwatch.Metric({
+          namespace: 'Prices/Rollup',
+          metricName: 'MvDriftUnreadable',
+          dimensionsMap: { Environment: config.envName },
+          statistic: 'Maximum',
+          period: cdk.Duration.minutes(15),
+        }),
+        threshold: 1,
+        evaluationPeriods: 2,
+        datapointsToAlarm: 1,
+        comparisonOperator:
+          cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      },
+    );
+    this.mvDriftUnreadableAlarm.addAlarmAction(snsAction);
+    this.mvDriftUnreadableAlarm.addOkAction(snsAction);
 
     // Total ingestion halt: the lag / errors / DLQ alarms above all key on the
     // *presence* of enqueued or failed messages, so a producer-side stop (BE's

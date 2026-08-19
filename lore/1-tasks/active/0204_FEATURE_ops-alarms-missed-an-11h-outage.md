@@ -119,8 +119,36 @@ history:
       RowBinary prefixes a null flag byte, and reading it into u64 returned 256
       for a true count of 1 with no error — the probe would have refused every
       healthy run. Fixed with toUInt64(ifNull(...)) and pinned. 31 unit tests,
-      11 ITs, clippy clean on all four feature combinations. Gap 3 remains, so
-      this task stays active.
+      11 ITs, clippy clean on all four feature combinations.
+  - date: 2026-08-19
+    status: active
+    who: okarcz
+    note: >
+      Gap 3 BUILT, not deployed — the last gap. 0142's drift.rs is called as a
+      library from the same probe, so no new Lambda, no new EventBridge rule, no
+      new grant, nothing outside observability-stack. Three alarms:
+      mv-drift-critical, mv-drift, mv-drift-unreadable. The re-notification
+      question that had blocked gap 3 since 2026-08-17 was DECIDED by the
+      operator: one Slack message is enough. What made that reasonable rather
+      than a corner cut is that the gap 2 analogy does not transfer — the DLQ was
+      DETERIORATING while its alarm was quiet (1 became 91), whereas one drifted
+      MV stays one drifted MV until a person fixes it, so latching costs
+      "somebody may forget" rather than "we are blind to an escalation". Both
+      alarm descriptions say explicitly that they latch. The one severity that
+      DOES compound — an MV that lost APPEND, which deletes pre-rolled history on
+      every refresh (the 0090/0095 loss) — is split onto its own metric and its
+      own alarm for exactly that reason. Also added MvDriftUnreadable: this
+      task's own findings noted that all-six-MISSING is a grant gap rather than
+      six dead tiers but left it as a warning, and a warning is not enough when
+      the alarm would page at maximum urgency with the wrong diagnosis;
+      system.tables is grant-FILTERED, so the probe counts visible prices
+      objects and suppresses the drift counts when it can see none. Two comments
+      in main.rs and disk.rs claiming "the probe touches no system.* table" were
+      made false by this and are corrected. 40 unit tests, 15 ITs including a
+      negative control against the 7 real MVs and an induced non-APPEND MV,
+      clippy clean on all four feature combinations. ⚠️ All four gaps are now
+      BUILT and NONE are deployed; deploy Prices-production-Observability only.
+      Task stays active until the deploy and the gap 1/2 induction.
 ---
 
 # Ops alarms missed an 11.5 h outage
@@ -342,7 +370,12 @@ touching it can silently re-enable cleanup ([[0200]]).
       redrive/cleanup traps
 - [ ] ⚠️ Alarms verified by inducing the condition, not by reading the CDK — the
       0137 lesson that an alarm must be tested against the failure it exists for.
-      **NOT met for either gap, and for gap 1 it cannot be before the deploy.**
+      ✅ **Met for gaps 3 and 4** — both induce their real defect against a live
+      ClickHouse (a par-valued candle, an aged zero, an edited MV declaration, a
+      live MV without `APPEND`), and doing so for gap 4 found a silent
+      deserialization corruption no unit test could reach.
+      ⛔ **Still NOT met for gaps 1 and 2**, and for gap 1 it cannot be before
+      the deploy.
       - *Gap 1:* what **is** verified by inducing the condition is the
         **privilege** constraint — an IT creates a least-privileged user and
         asserts it really is denied `system.disks` and really can call the
@@ -354,11 +387,19 @@ touching it can silently re-enable cleanup ([[0200]]).
       - *Gap 2:* the ladder **is** inducible cheaply and without touching prod
         data — send N dummy messages to the DLQ, watch the rungs fire in order,
         then purge. Worth doing on the first deploy. Not done yet.
-- [ ] `prices-clickhouse-drift` runs on a schedule and reports somewhere a person
-      reads, re-notifying while drift persists, with `CRITICAL` separated from
-      `DRIFT` rather than collapsed into "exit 1" *(gap 3 — not in this
-      activation)*
-- [ ] **Gap 4** — a data-level USD-correctness check runs on a schedule and
+- [x] **Gap 3** — `prices-clickhouse-drift` runs on a schedule and reports
+      somewhere a person reads, with `CRITICAL` separated from `DRIFT` rather
+      than collapsed into "exit 1" — ✅ **built 2026-08-19, not deployed.**
+      Three alarms: `-mv-drift-critical`, `-mv-drift`, `-mv-drift-unreadable`.
+      ⚠️ **AMENDED, not met as originally written.** The criterion said
+      *"re-notifying while drift persists"*; the operator decided on 2026-08-19
+      that one Slack message is enough, on the argument that drift does not
+      deteriorate the way the DLQ did — so a latched alarm costs "somebody may
+      forget", not "we are blind to an escalation". Both alarm descriptions
+      state that they latch. The one severity that *does* compound, a lost
+      `APPEND`, is split onto its own alarm precisely because that argument does
+      not cover it. See "Implementation — gap 3", design decisions 1 and 2.
+- [x] **Gap 4** — a data-level USD-correctness check runs on a schedule and
       alarms on **both** directions: no USDT-quoted candle at
       `close_usd / close ≈ 1.0` in the post-break era, and none at
       `close_usd = 0` with a `close` above the `Decimal(38, 14)` underflow
@@ -372,6 +413,120 @@ touching it can silently re-enable cleanup ([[0200]]).
       and an unresolvable identity. ⚠️ Doing this **found a silent
       deserialization corruption** no unit test could reach — see "Issues
       encountered" under gap 4. Closes [[0182]]'s last acceptance criterion.
+
+## Implementation — gap 3 (2026-08-19)
+
+Same branch. Rides the existing probe: no new Lambda, no new EventBridge rule,
+no new grant, and nothing outside `observability-stack.ts`.
+
+**The re-notification question was DECIDED by the operator: one Slack message is
+enough.** See design decision 1 for the argument that made that reasonable
+rather than a compromise.
+
+1. **`packages/rollup-freshness-probe/src/mv_drift.rs`** — new module.
+   `drift_metrics()`, `visible_objects_query()`, `describe()`, feature-gated
+   `publish_drift()`. All the comparison work is [[0142]]'s `drift.rs`, called
+   as a library; this module only splits the report into severities.
+2. **`src/main.rs`** — runs **last** in the invocation. See design decision 3.
+3. **`infra/src/lib/stacks/observability-stack.ts`** — three alarms:
+   `prices-{env}-mv-drift-critical`, `-mv-drift`, `-mv-drift-unreadable`.
+   `Maximum` over 15 min, 1-of-2, `>= 1`, `NOT_BREACHING`, alarm **and** OK
+   actions. No new config: `>= 1` is the only sensible threshold for "an MV is
+   wrong", so there is nothing to tune and nothing to drift out of sync.
+
+### Design decisions
+
+**From plan**
+
+1. **One alarm transition, accepted deliberately — and the gap 2 analogy is
+   what does NOT transfer.** This task exists partly because the DLQ alarm
+   notified once and went quiet while the queue climbed to 91. The instinct is
+   that drift has the same defect. It does not, quite: **the DLQ was
+   deteriorating** and the silence hid an escalation, whereas one drifted MV
+   stays one drifted MV until a person fixes it. So a latched alarm here costs
+   *"somebody may forget"*, not *"we are blind while it gets worse"* — a much
+   cheaper failure, and one a ticket closes.
+
+   That is what makes option 1 defensible rather than a corner cut, and it is
+   why the stored `first_seen` state (a new table, an admin step, and a
+   read-only check turned into a writer) was not worth buying.
+
+   ⚠️ **Both alarm descriptions say so explicitly** — *"fires once and stays
+   latched; silence means still wrong, never resolved"* — because an operator
+   who does not know that will read quiet as fixed.
+
+**Emerged**
+
+2. **The critical severity is split out precisely because it IS the exception to
+   decision 1.** An MV that has lost `APPEND` replaces its whole target table on
+   every refresh, so with these MVs' bounded `WHERE timestamp >= now() - window`
+   it deletes pre-rolled history every tick — the [[0090]]/[[0095]] data loss.
+   **That one does compound while nobody looks.** Giving it its own metric and
+   its own alarm means the one case where latching is genuinely costly is never
+   buried inside the count of cases where it is not, and it can carry emergency
+   wording without making routine drift shout.
+3. **The drift read runs last in the invocation.** Same rule `main.rs` already
+   documents for the disk and USD reads, and here it has a specific reason: this
+   is the **only** read in the probe that touches `system.*`. A narrowed grant
+   or a metadata hiccup must not abort the rollup, disk and USD publishes, all
+   of which sit behind `NOT_BREACHING` alarms that score healthy on missing data.
+4. **An MV that is both drifted and non-`APPEND` counts once, as critical.**
+   Double-counting would let one object inflate a number the operator reads as
+   "how many MVs are affected".
+5. **`MvDriftUnreadable` and the visible-object discriminator.** This task's own
+   findings say all-six-`MISSING` is a grant gap rather than six dead tiers, but
+   left it as a warning. A warning is not enough when the alarm would page at
+   maximum urgency with the wrong diagnosis. `system.tables` is grant-**filtered**
+   (not denied), so a narrowed grant silently makes every MV look missing. The
+   probe counts visible `prices` objects: **none visible** means it cannot see
+   the schema, so the counts are suppressed and a separate alarm fires that names
+   the grant as the first thing to check. ⚠️ If objects *are* visible and the MVs
+   are still gone, they really are gone and the ordinary alarm is correct — the
+   discriminator does not swallow a real catastrophe.
+6. **No new config value.** `>= 1` is the only meaningful threshold for "an MV
+   is wrong", unlike the disk percentage and the DLQ/USD ladders. Adding a knob
+   would create a second place for the truth to live, which is the drift hazard
+   `DISK_FREE_PERCENT_BOUND` already carries.
+
+### Issues encountered
+
+- Two comments in `main.rs` and `disk.rs` asserted **"the probe touches no
+  `system.*` table"**. Gap 3 makes that false. Both corrected rather than left,
+  with the distinction that matters spelled out: `system.disks` is grant-**denied**
+  and cannot be granted (which is why gap 1 reads filesystem *functions*), while
+  `system.tables` is grant-**filtered** and needs nothing new. A stale invariant
+  comment is how the next person concludes gap 3 needs a grant it does not.
+- The first unit-test fixtures were written against guessed field names
+  (`MvFingerprint { append, select }`, `Difference { expected, actual }`); the
+  real shapes are `refresh: String` / `body` and `declared` / `live`. Compile
+  error, caught immediately — noted only because it is the same class of
+  mistake as the `assets` fixture in gap 4.
+
+### Tests
+
+**Unit ×9** in `mv_drift.rs`: clean chain, lost-`APPEND` → critical, both-at-once
+counted once, every non-destructive status counted as ordinary drift, the
+invisible-schema suppression, missing-MVs-in-a-visible-schema really missing, the
+scoped visible-objects query, and `describe()`.
+
+**IT ×4** on the 26.3.10.60 pin, all inducing the real condition:
+
+| test | what it induces |
+|---|---|
+| `a_freshly_applied_schema_reports_no_drift` | the **negative control** — 7 real MVs, all in sync, must read 0/0/0 |
+| `an_edited_declaration_is_detected_as_drift` | a modified `rollups.sql` fed to `check_mv_drift`, live untouched |
+| `a_live_mv_without_append_is_detected_as_critical` | a throwaway MV created **without** `APPEND`, dropped after |
+| `an_invisible_database_suppresses_the_counts_instead_of_paging` | a database with nothing visible |
+
+⚠️ The negative control is what makes the critical test meaningful: `is_append`
+reads the *live* fingerprint, so without a case proving healthy MVs read 0 the
+critical metric could have been always-on.
+
+40 unit tests and 15 ITs green; clippy clean on all four feature combinations.
+
+⚠️ **Built, NOT deployed** — `Prices-production-Observability` only. `cdk synth`
+confirms 34 alarms total, 3 of them gap 3's, each with one alarm and one OK
+action.
 
 ## Implementation — gap 4 (2026-08-19)
 
