@@ -2,9 +2,9 @@
 id: "0182"
 title: "44,657 stored candles across 495 assets carry a close_usd ~7.4x too high — the USDT peg fix stops new ones but does not correct history"
 type: BUG
-status: active
+status: completed
 related_adr: []
-related_tasks: ["0172", "0196", "0165", "0145", "0111", "0114", "0201", "0208", "0204"]
+related_tasks: ["0172", "0196", "0165", "0145", "0111", "0114", "0201", "0208", "0204", "0209"]
 tags:
   ["priority-high", "effort-medium", "clickhouse", "data-correctness", "enrichment", "milestone-M2"]
 milestone: 2
@@ -148,6 +148,32 @@ history:
       priceable-90d 71.0%, 48h flat as expected — external corroboration for
       0201's closure call. USDT exclusion lifted from their Horizon
       cross-validation. Only the re-introduction guard test now remains.
+  - date: 2026-08-19
+    status: completed
+    who: okarcz
+    note: >
+      COMPLETED. The defect is corrected on prod and verified from two
+      directions. 567,760 USDT-quoted candles re-opened and recomputed across
+      the five forever-tables from the 2021-02-07 epoch on, with the implied
+      rate now tracking USDT's measured value on every tier (2026 at
+      0.1494-0.1529 where the baseline was a flat 1.000000) and _1h's monthly
+      series reproducing 0172's par-then-depeg shape from a completely different
+      direction. 53,965,024 previously-unpriced rows were recovered as pass 1,
+      corroborated independently by BE from the consumer side (priceable-ever
+      51,935 to 52,112 of 52,580 pools). Snapshots released, shadow/ back to
+      increment.txt alone. Two things this task got wrong and then fixed are the
+      part worth carrying: the epoch was 19 h below its pivot reference and
+      destroyed 157 candles, found only because the snapshots were re-verified
+      before release rather than on the run's own say-so; and the run's damage
+      check sampled the three tables that had warned, which were precisely the
+      three structurally unable to show that defect. Both are now written into
+      the runbook, and the tooling gap is 0208. Closing with three items
+      deferred rather than dropped: 0208 (the tool must validate a reset epoch
+      against its reference's first candle), 0204 gap 4 (a data-level guard
+      that close_usd is right, not merely present — it belongs with the other
+      correctness probes, not with USDT), and 0209 (USDT-quoted candles sitting
+      unpriced for 17 h+, which postdates this run). volume_quote_usd closed as
+      documented-not-widened on BE's answer.
 ---
 
 # `close_usd` is ~7.4× too high on every USDT-quoted candle ever written
@@ -1029,10 +1055,12 @@ Remaining, in order:
    (335 `repair_0182_mid_*` + 150 stale `repair_0114_*`), `shadow/` 31G → 7.7M
    of empty husks → swept to `increment.txt` alone. See the cleanup section for
    the two things that were wrong in the procedure as written.
-8. **The 82 in-flight zeros** — never investigated. Some `_1h` rows sit unpriced
-   for 17 h+, longer than an hourly sweep should leave them. Enrichment lag, or
-   the pivot finding no USDT/USDC reference inside its default 1-day window.
-   Postdates the run; not damage from this task.
+8. ~~**The 82 in-flight zeros**~~ → **spawned as [[0209]], 2026-08-19.** Some
+   `_1h` rows sit unpriced for 17 h+, longer than an hourly sweep should leave
+   them — either the sweep not keeping up, or the pivot finding no USDT/USDC
+   reference inside its default 1-day window. Postdates the run and is not
+   damage from it, but it consumes a third of BE's 48-hour TVL margin and the
+   two causes are distinguishable with one query.
 9. ~~**Guard against re-introduction**~~ → **moved to [[0204]] as gap 4,
    2026-08-19.** Nothing left for this task to build.
 
