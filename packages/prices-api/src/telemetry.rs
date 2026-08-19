@@ -27,19 +27,41 @@
 //! person the key belongs to. The same applies to a local `serve` run, which
 //! holds production credentials and prints to a terminal with scrollback.
 //!
-//! # What the guard does
+//! # What the guard does, and why it is an allowlist
 //!
-//! [`filter_from`] takes what the operator asked for, **drops any directive
-//! aimed at a credential-bearing crate**, and then pins those crates at
-//! [`GUARD_LEVEL`]. Dropping first is what makes it a guard rather than a
-//! default: `EnvFilter` resolves the most specific target match, so a pin of
-//! `aws_smithy_runtime=info` alone would still lose to a hand-written
-//! `RUST_LOG=aws_smithy_runtime::client::orchestrator=trace`. After the drop
-//! there is nothing more specific left for it to lose to.
+//! [`filter_from`] keeps only the directives it **recognises as safe** — a bare
+//! level, or a target inside [`OUR_TARGETS`] — drops everything else, and then
+//! pins the credential-bearing crates at [`GUARD_LEVEL`] so a bare level cannot
+//! reach them either.
 //!
-//! `info` rather than `off`, because the SDK's warnings and errors are worth
-//! having and neither carries a body: everything measured above is `debug` or
-//! `trace`.
+//! It was a blocklist first, and it was walked past twice:
+//!
+//! - `RUST_LOG='[try_op]=trace'` — a directive with no target at all. `EnvFilter`
+//!   gives dynamic span scopes precedence over static target directives, so the
+//!   pin never got to refuse the event.
+//! - `RUST_LOG='aws_smithy_runtime:=trace'` — **one trailing colon**. Targets
+//!   match by `starts_with`, the directive parser accepts any character in a
+//!   target, and `StaticDirective` orders by target length, so a 19-character
+//!   target outranked the 18-character pin for
+//!   `aws_smithy_runtime::client::orchestrator`.
+//!
+//! Both were closed by naming one more shape. The third time, the shape changes
+//! instead: a blocklist has to anticipate every way of writing a target that
+//! prefix-matches something dangerous, and this parser accepts more shapes than
+//! anyone reviewing it will enumerate. An allowlist inverts the failure mode —
+//! a form nobody thought about is **refused** rather than admitted — and it is
+//! the difference between a property that must be re-measured after every
+//! `tracing-subscriber` bump and one that can simply be stated.
+//!
+//! The cost is real and accepted: raising the log level for a third-party crate
+//! — `hyper`, `rustls`, `reqwest` — now needs a code change rather than an
+//! environment variable. For a function that holds production credentials, that
+//! is the right side of the trade, and `prices_api` itself (which is where our
+//! own diagnostics live) stays freely adjustable.
+//!
+//! `info` rather than `off` for the pins, because the SDK's warnings and errors
+//! are worth having and neither carries a body: everything measured above is
+//! `debug` or `trace`.
 //!
 //! [`KeyValue`]: crate::portal::keys::gateway::KeyValue
 
@@ -62,6 +84,24 @@ pub const CREDENTIAL_BEARING_TARGETS: &[&str] = &[
 /// The ceiling those crates are held to, whatever `RUST_LOG` says.
 const GUARD_LEVEL: &str = "info";
 
+/// The only crates a `RUST_LOG` directive may name.
+///
+/// Ours, and nothing else. A directive for anything outside this list is dropped
+/// rather than examined for danger — see the module docs for why the guard is an
+/// allowlist and not a longer blocklist.
+pub const OUR_TARGETS: &[&str] = &["prices_api", "prices_clickhouse"];
+
+/// Levels `EnvFilter` accepts as a whole directive, i.e. with no target.
+///
+/// A bare level is the one targetless form that is kept, because it is not a
+/// target directive at all: it sets a global default that the pins then outrank
+/// for the crates that matter. `EnvFilter` also accepts `0`-`5`; those are here
+/// so that `RUST_LOG=5` keeps meaning what the operator intended rather than
+/// being silently dropped to `info`.
+const BARE_LEVELS: &[&str] = &[
+    "off", "error", "warn", "info", "debug", "trace", "0", "1", "2", "3", "4", "5",
+];
+
 /// What both binaries log at: `RUST_LOG` if set, `info` if not, guarded.
 pub fn env_filter() -> EnvFilter {
     filter_from(&std::env::var("RUST_LOG").unwrap_or_default())
@@ -76,7 +116,7 @@ pub fn filter_from(requested: &str) -> EnvFilter {
     let kept: Vec<&str> = requested
         .split(',')
         .map(str::trim)
-        .filter(|directive| !directive.is_empty() && !must_be_dropped(directive))
+        .filter(|directive| !directive.is_empty() && is_permitted(directive))
         .collect();
 
     // An empty result is not "log nothing": it is either an unset `RUST_LOG` or
@@ -99,49 +139,61 @@ pub fn filter_from(requested: &str) -> EnvFilter {
     filter
 }
 
-/// Whether one `RUST_LOG` directive has to be dropped for the pins to hold.
+/// Whether one `RUST_LOG` directive is one this deployment will honour.
 ///
-/// Two reasons, and the second one is not obvious:
+/// Three shapes survive, and nothing else:
 ///
-/// 1. **It names a guarded crate** — `aws_sdk_apigateway`,
-///    `aws_smithy_runtime::client::orchestrator=trace`,
-///    `aws_smithy_runtime[try_op]=trace`. Anything more specific than the pin
-///    would win over it, so it goes.
-/// 2. **It names no target at all** — `[try_op]=trace`, `[{field=x}]=trace`.
-///    This is a *dynamic span directive*, and `EnvFilter` gives those precedence
-///    over static target directives for events inside a matching span: the event
-///    is enabled by scope, and the `aws_smithy_runtime=info` pin never gets to
-///    refuse it. Since the SDK wraps every control-plane call in spans of its
-///    own (`try_op`, `try_attempt`, `deserialization`), a targetless directive is
-///    a full bypass — and `try_op` is precisely what somebody debugging one call
-///    would reach for. Measured, not reasoned about: with `[try_op]=trace` a
-///    `trace!` on `aws_smithy_runtime::client::orchestrator` inside that span was
-///    emitted in full, pin and all. `tests/telemetry_filter.rs` is that
-///    measurement, kept.
+/// 1. **A bare level** — `trace`, `off`, `3`. Sets a global default; the pins
+///    added afterwards outrank it for the credential-bearing crates, which is
+///    the whole reason they are pinned by target rather than by level.
+/// 2. **A target inside [`OUR_TARGETS`]**, with or without a level —
+///    `prices_api=trace`, `prices_api::portal::keys=debug`. Matching is
+///    `starts_with`, exactly as `EnvFilter` matches, so anything a kept
+///    directive can enable is a target of ours.
+/// 3. Nothing else. Not `hyper=debug`, not `aws_smithy_runtime=info` (the pins
+///    supply that themselves), not a span or field directive of any kind —
+///    `prices_api[req]=trace` goes too, because a dynamic scope is the one form
+///    that can outrank a static pin and no deployment here needs one.
 ///
-/// A bare *level* (`trace`, `off`) is neither: it names no target because it is
-/// not a target directive at all, and a global level is exactly what the pins are
-/// designed to survive. It is kept, and the pins beat it by being more specific.
-fn must_be_dropped(directive: &str) -> bool {
-    let before_eq = directive.split('=').next().unwrap_or_default();
+/// Written as "what is allowed" rather than "what is dangerous" deliberately: a
+/// shape nobody anticipated lands in case 3 and is dropped, instead of landing
+/// outside a blocklist and being honoured. Two bypasses got in through the
+/// blocklist version — see the module docs.
+fn is_permitted(directive: &str) -> bool {
+    // A dynamic scope directive can enable events by span or field regardless of
+    // target, so it is refused before anything else is considered.
+    if directive.contains('[') || directive.contains(']') {
+        return false;
+    }
 
-    // Any span/field directive at all, whatever target it carries. The narrow
-    // rule — "drop it only when it names no target" — leaves
-    // `aws_smithy[try_op]=trace` standing, which is a prefix match on the same
-    // events by a target this guard would not recognise. Dynamic directives can
-    // only ever ADD events beyond the static pins, and no deployment here needs
-    // one, so the blunt rule is the statable one.
-    if before_eq.contains('[') {
+    let (target, level) = match directive.split_once('=') {
+        Some((target, level)) => (target.trim(), Some(level.trim())),
+        None => (directive.trim(), None),
+    };
+
+    // Case 1: a bare level, written on its own.
+    if level.is_none() && is_bare_level(target) {
         return true;
     }
-    let target = before_eq.trim();
 
-    CREDENTIAL_BEARING_TARGETS.iter().any(|guarded| {
-        target == *guarded
-            || target
-                .strip_prefix(guarded)
-                .is_some_and(|r| r.starts_with("::"))
-    })
+    // A `target=` with nothing after it, or a level `EnvFilter` will not parse,
+    // is not a directive this deployment has any reason to honour.
+    if let Some(level) = level
+        && !is_bare_level(level)
+    {
+        return false;
+    }
+
+    // Case 2: one of ours. `starts_with`, matching how `EnvFilter` resolves a
+    // target, so a kept directive cannot reach past our own crates.
+    OUR_TARGETS.iter().any(|ours| target.starts_with(ours))
+}
+
+/// Whether `s` is a level `EnvFilter` would parse, case-insensitively.
+fn is_bare_level(s: &str) -> bool {
+    BARE_LEVELS
+        .iter()
+        .any(|level| s.eq_ignore_ascii_case(level))
 }
 
 #[cfg(test)]
@@ -151,7 +203,8 @@ mod tests {
     /// `EnvFilter`'s `Display` is its directive list, which is what these tests
     /// assert on — the filter has no API for asking "what would you do with a
     /// `trace` event from this target" without constructing `Metadata`, which
-    /// only a macro can do.
+    /// only a macro can do. `tests/telemetry_filter.rs` asks that question the
+    /// only way it can be asked: by emitting the events.
     fn directives(filter: &EnvFilter) -> String {
         filter.to_string()
     }
@@ -170,9 +223,9 @@ mod tests {
     }
 
     /// The realistic case: somebody raises the whole thing to debug the control
-    /// plane. Everything else gets louder; these three do not.
+    /// plane. Everything of ours gets louder; the pinned crates do not.
     #[test]
-    fn a_global_trace_does_not_reach_the_sdk() {
+    fn a_global_trace_survives_and_the_pins_outrank_it() {
         let printed = directives(&filter_from("trace"));
         assert!(printed.contains("trace"), "{printed}");
         for target in CREDENTIAL_BEARING_TARGETS {
@@ -181,59 +234,77 @@ mod tests {
         }
     }
 
-    /// The case a bare pin would have lost: a directive more specific than the
-    /// pin. Dropped before the pin is added, so there is nothing left to lose to
-    /// — this is the assertion that fails if `filter_from` is ever simplified
-    /// into "parse `RUST_LOG`, then `add_directive`".
+    /// Our own crates stay adjustable, which is the point of an allowlist rather
+    /// than a blanket refusal: the guard is about somebody else's log lines.
     #[test]
-    fn a_directive_aimed_straight_at_the_leak_site_is_dropped() {
-        let printed = directives(&filter_from(
-            "info,aws_smithy_runtime::client::orchestrator=trace",
-        ));
-        assert!(!printed.contains("orchestrator"), "{printed}");
-        assert!(printed.contains("aws_smithy_runtime=info"), "{printed}");
-    }
-
-    /// A directive that names no target is a dynamic span filter, which outranks
-    /// the pins inside a matching span — so it is dropped whatever it says.
-    /// `tests/telemetry_filter.rs` shows the leak this prevents; this is the
-    /// unit-level statement of the same rule.
-    #[test]
-    fn a_targetless_span_directive_is_dropped() {
-        for hostile in ["[try_op]=trace", "[{code.namespace}]=trace", " [try_op] "] {
-            let printed = directives(&filter_from(hostile));
+    fn our_own_targets_survive() {
+        for ours in [
+            "prices_api=trace",
+            "prices_api::portal::keys=debug",
+            "prices_clickhouse=warn",
+        ] {
+            let printed = directives(&filter_from(ours));
             assert!(
-                !printed.contains("try_op") && !printed.contains("code.namespace"),
-                "`{hostile}` survived the guard: {printed}"
+                printed.contains("prices_"),
+                "`{ours}` was dropped: {printed}"
             );
         }
+
+        // Case-sensitively, because that is how `EnvFilter` matches targets and
+        // how Rust module paths are spelled: `PRICES_API` would enable nothing
+        // even if it were kept, so it is refused like any other unrecognised
+        // target rather than quietly honoured.
+        let shouting = directives(&filter_from("PRICES_API=TRACE"));
+        assert!(!shouting.contains("PRICES_API"), "{shouting}");
     }
 
-    /// Every shape `EnvFilter` accepts for naming a target, since a guard that
-    /// covers three of the four is a guard with a documented way around it.
+    /// Everything that is not ours and not a bare level, including both shapes
+    /// that walked past the blocklist this replaced.
+    ///
+    /// The single trailing colon is the one that matters most: `EnvFilter`
+    /// matches targets by `starts_with` and orders directives by target length,
+    /// so `aws_smithy_runtime:` is longer than the `aws_smithy_runtime` pin and
+    /// beat it for `aws_smithy_runtime::client::orchestrator`.
     #[test]
-    fn every_way_of_naming_a_guarded_target_is_dropped() {
+    fn nothing_else_survives() {
         for hostile in [
+            "aws_smithy_runtime=trace",
+            "aws_smithy_runtime:=trace",
+            "aws_smithy_runtime::=trace",
+            "aws_smithy_runtime::client::orchestrator=trace",
+            "aws_smithy=trace",
+            "aws=trace",
             "aws_sdk_apigateway",
-            "aws_sdk_apigateway=trace",
-            "aws_sdk_apigateway::operation::get_api_key=trace",
-            "aws_smithy_runtime[try_op]=trace",
-            " aws_smithy_runtime = trace ",
+            "hyper=debug",
+            "[try_op]=trace",
+            "aws_smithy[try_op]=trace",
+            "prices_api[req]=trace",
+            "[{code.namespace}]=trace",
         ] {
             let printed = directives(&filter_from(hostile));
             assert!(
-                !printed.contains("trace"),
+                !printed.contains("trace") && !printed.contains("debug"),
                 "`{hostile}` survived the guard: {printed}"
             );
         }
     }
 
-    /// And the guard is narrow: a directive for anything else is untouched, so
-    /// raising the log level still works for the reason people do it.
+    /// A dropped directive must not take the rest of the line with it, and must
+    /// not leave a filter that logs nothing.
     #[test]
-    fn directives_for_other_crates_survive() {
-        let printed = directives(&filter_from("prices_api=trace,hyper=debug"));
+    fn a_mixed_line_keeps_the_half_that_is_allowed() {
+        let printed = directives(&filter_from("hyper=debug,prices_api=trace,[try_op]=trace"));
         assert!(printed.contains("prices_api=trace"), "{printed}");
-        assert!(printed.contains("hyper=debug"), "{printed}");
+        assert!(!printed.contains("hyper"), "{printed}");
+        assert!(!printed.contains("try_op"), "{printed}");
+    }
+
+    /// A line consisting entirely of refused directives falls back to `info`
+    /// rather than to silence — an operator who typed something we would not
+    /// honour still gets the logs the deployment normally produces.
+    #[test]
+    fn a_wholly_refused_line_still_logs_at_info() {
+        let printed = directives(&filter_from("hyper=debug,[try_op]=trace"));
+        assert!(printed.contains("info"), "{printed}");
     }
 }

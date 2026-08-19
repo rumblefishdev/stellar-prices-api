@@ -106,6 +106,20 @@ pub struct Store {
     /// [`Store::vanish_on_next_read`], but in the window the attach opened by
     /// running before the read. One-shot, so the retry that follows can succeed.
     pub vanish_on_next_attach: bool,
+    /// Answer every `CreateUsagePlanKey` with `404` **without** removing
+    /// anything — what a stale or mistyped usage-plan id looks like, since API
+    /// Gateway reports a missing plan and a missing key with the same error.
+    pub attach_always_404: bool,
+    /// Answer the next `GetApiKeys` with no items at all, whatever the store
+    /// holds. An eventually-consistent listing that has not caught up.
+    pub next_list_is_empty: bool,
+    /// Omit the most recently created key from the next `GetApiKeys`. The other
+    /// half of the same lag: the listing is not empty, it just does not have
+    /// OUR key in it yet.
+    pub next_list_omits_newest: bool,
+    /// Hold every `GetApiKeys` for this long before answering, so a test can
+    /// drive the reconciler's wall-clock deadline without waiting for it.
+    pub list_delay_ms: u64,
     /// Answer every `DeleteApiKey` with a 500.
     ///
     /// Sticky, for the reason `fail_list` is: the SDK retries a 500, so a
@@ -207,6 +221,14 @@ pub async fn list_keys(
     State(store): State<Arc<Mutex<Store>>>,
     Query(query): Query<ListQuery>,
 ) -> Response {
+    // Read the delay and DROP the lock before sleeping: holding a `std::sync`
+    // guard across an await would block every other request to this mock, which
+    // is the opposite of what a slow control plane does.
+    let delay = store.lock().unwrap().list_delay_ms;
+    if delay > 0 {
+        tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+    }
+
     let mut store = store.lock().unwrap();
     store.list_calls += 1;
     store
@@ -217,8 +239,22 @@ pub async fn list_keys(
         return (StatusCode::INTERNAL_SERVER_ERROR, "control plane is unwell").into_response();
     }
 
+    if std::mem::take(&mut store.next_list_is_empty) {
+        return Json(json!({ "item": [] })).into_response();
+    }
+
     let prefix = query.name.unwrap_or_default();
-    let matched: Vec<StoredKey> = store.list(&prefix).into_iter().cloned().collect();
+    let newest = if std::mem::take(&mut store.next_list_omits_newest) {
+        store.keys.last().map(|k| k.id.clone())
+    } else {
+        None
+    };
+    let matched: Vec<StoredKey> = store
+        .list(&prefix)
+        .into_iter()
+        .filter(|k| Some(&k.id) != newest.as_ref())
+        .cloned()
+        .collect();
     let start: usize = query
         .position
         .as_deref()
@@ -324,6 +360,9 @@ pub async fn attach_key(
     let mut store = store.lock().unwrap();
     store.attach_calls += 1;
     let key_id = body["keyId"].as_str().unwrap_or_default().to_string();
+    if store.attach_always_404 {
+        return not_found();
+    }
     if std::mem::take(&mut store.vanish_on_next_attach) {
         store.keys.retain(|k| k.id != key_id);
         return not_found();
@@ -434,6 +473,23 @@ pub fn app_against(mock: &MockGateway) -> Router {
     build_app(
         true,
         Some(Gateway::against(&mock.base, PLAN_ID.to_string())),
+    )
+}
+
+/// The key routes alone, with a shortened reconciliation deadline.
+///
+/// Bypasses [`build_app`] on purpose: the deadline lives on `KeysState`, which
+/// `AppConfig` does not carry, and threading it through the whole config for one
+/// test would put a production knob somewhere a deploy could reach. What this
+/// skips — task 0183's prefix gate — is covered by its own tests; what it keeps
+/// is the handler, the real SDK and the mock behind it.
+pub fn keys_router_with_deadline(mock: &MockGateway, deadline: std::time::Duration) -> Router {
+    prices_api::portal::keys::routes(
+        prices_api::portal::keys::KeysState::new(
+            Some(oauth_secret()),
+            Some(Gateway::against(&mock.base, PLAN_ID.to_string())),
+        )
+        .with_deadline(deadline),
     )
 }
 

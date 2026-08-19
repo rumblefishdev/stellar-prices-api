@@ -68,6 +68,7 @@ pub mod gateway;
 pub mod naming;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::Json;
 use axum::Router;
@@ -104,6 +105,25 @@ const KEYS_UNCONFIGURED: &str = "keys_unconfigured";
 /// a timeout instead of an answer.
 const MAX_ATTEMPTS: usize = 2;
 
+/// Wall-clock ceiling on the whole reconciliation, deletions and retries
+/// included.
+///
+/// **A deadline, because the per-call timeouts do not compose into one.**
+/// `gateway::OPERATION_TIMEOUT` bounds a single control-plane call; one attempt
+/// makes up to six of them plus one delete per duplicate, `list_named` alone can
+/// walk `gateway::MAX_PAGES` pages each with its own budget, and this runs
+/// [`MAX_ATTEMPTS`] times. The arithmetic reaches minutes against an
+/// `apiHandler.timeoutSeconds` of 15 — at which point Lambda kills the
+/// invocation and the caller gets no response at all: no body, no `no-store`, an
+/// entry on the `Errors` metric, and possibly a key created but never attached.
+/// That is the failure mode task 0186's F7 and this task's R1 both went out of
+/// their way to remove; a slow control plane must not reintroduce it.
+///
+/// 10s leaves the handler ~5s of the function's budget to serialize an answer
+/// and for the runtime to send it, and sits far inside API Gateway's own 29s
+/// cap.
+const RECONCILE_DEADLINE: Duration = Duration::from_secs(10);
+
 /// What both handlers need, cloned per request.
 ///
 /// Both fields are `Option` for the same reason `AuthState::oauth` is: the
@@ -118,6 +138,8 @@ pub struct KeysState {
     /// is what keeps its three token kinds apart.
     oauth: Option<Arc<OauthSecret>>,
     gateway: Option<Arc<Gateway>>,
+    /// [`RECONCILE_DEADLINE`], overridable only outside the Lambda build.
+    deadline: Duration,
 }
 
 impl KeysState {
@@ -125,7 +147,21 @@ impl KeysState {
         Self {
             oauth: oauth.map(Arc::new),
             gateway: gateway.map(Arc::new),
+            deadline: RECONCILE_DEADLINE,
         }
+    }
+
+    /// Shorten the deadline, so a test can drive the timeout in milliseconds
+    /// instead of waiting ten seconds for it.
+    ///
+    /// **Compiled out of the Lambda**, exactly as `Gateway::against` and the
+    /// endpoint overrides are, and for a reason of its own: the deadline is what
+    /// keeps a slow control plane from turning into a dropped invocation, and a
+    /// deployed build must contain no way to set it to something that does not.
+    #[cfg(not(feature = "lambda"))]
+    pub fn with_deadline(mut self, deadline: Duration) -> Self {
+        self.deadline = deadline;
+        self
     }
 }
 
@@ -218,7 +254,27 @@ async fn ensure_key(state: &KeysState, headers: &HeaderMap) -> Response {
         ));
     };
 
-    match reconcile(gateway, &name).await {
+    // The deadline wraps the whole reconciliation, not each call inside it —
+    // see `RECONCILE_DEADLINE`. Elapsing is a `503`: the work may well have been
+    // half-done (a key created, a duplicate deleted), the flow is idempotent, and
+    // the next request reconciles whatever this one left. Saying so is the whole
+    // point — the alternative is Lambda killing the invocation with no answer at
+    // all.
+    let reconciled = match tokio::time::timeout(state.deadline, reconcile(gateway, &name)).await {
+        Ok(reconciled) => reconciled,
+        Err(_elapsed) => {
+            tracing::error!(
+                deadline_secs = state.deadline.as_secs_f32(),
+                "portal key reconciliation ran out of time"
+            );
+            return no_store(errors::service_unavailable(
+                KEY_UNAVAILABLE,
+                "the API key service is taking too long to answer; try again",
+            ));
+        }
+    };
+
+    match reconciled {
         Ok(Some(outcome)) => {
             tracing::info!(
                 key_id = %outcome.record.id,
@@ -328,6 +384,23 @@ async fn attempt(gateway: &Gateway, name: &str) -> Result<Option<Outcome>, Gatew
                 value,
                 created: true,
             }));
+        }
+        // `GetApiKeys` is eventually consistent, so the listing can come back
+        // NON-empty and still not contain the key just created — another
+        // invocation's key is visible, ours is not yet. Without this union the
+        // record is neither ranked (it is not in `candidates`) nor deleted (it
+        // is not in `losers`), and what is left behind is a live, enabled
+        // production key carrying this user's exact name, attached to no plan,
+        // until that user happens to come back — indefinitely if they do not.
+        //
+        // The branch above states its own case explicitly; this one used to fall
+        // through in silence. Unioned rather than special-cased, so the key we
+        // made competes under the same rule as every other candidate: it wins
+        // and is handed out, or it loses and is deleted like any duplicate.
+        // `DeleteApiKey` addresses by id, so a key the listing has not caught up
+        // with can still be removed.
+        if !candidates.iter().any(|c| c.id == record.id) {
+            candidates.push(record.clone());
         }
         created = Some((record, value));
     }

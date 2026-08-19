@@ -23,13 +23,30 @@
 //!   is not needed — the listing sets `include_values(false)`, so a reconciler
 //!   sweep never pulls one key value into memory, let alone every user's.
 //!
-//! # Timeouts
+//! # Timeouts, and what they are NOT
 //!
-//! The api-handler's Lambda timeout is 15s and a single issue can make five
-//! calls, so each one is bounded rather than left to the SDK's defaults. A
-//! control plane that is slow enough to matter here is a control plane that is
-//! down, and the caller is better told so than left waiting for the gateway's
-//! own 29s cap to cut them off with no response at all.
+//! Each call is bounded rather than left to the SDK's defaults, because a
+//! control plane slow enough to matter here is one that is down and the caller
+//! is better told so.
+//!
+//! **These constants do not add up to a request-level bound, and an earlier
+//! version of this paragraph claimed they did.** The claim was "the Lambda
+//! timeout is 15s and one issue makes five calls, so each one is bounded" — but
+//! [`OPERATION_TIMEOUT`] is per operation, one attempt makes up to six of them
+//! plus a delete per duplicate, [`Gateway::list_named`] alone can walk
+//! [`MAX_PAGES`] pages each with its own budget, and the reconciler runs twice.
+//! The worst case is minutes, not seconds.
+//!
+//! The bound lives one level up, as a wall-clock deadline across the whole
+//! reconciliation (`super::RECONCILE_DEADLINE`). That is the only place it can
+//! live: no per-call ceiling composes into a request-level one when the number
+//! of calls is a function of how many pages and duplicates the account holds.
+//!
+//! The per-call values are deliberately NOT tightened to fit inside the deadline
+//! by arithmetic. A shorter attempt timeout would start cutting off cold TLS
+//! handshakes and turn a healthy first invocation into a retry; the deadline
+//! already guarantees an answer, so these two only decide how many slow calls
+//! fit inside it before that answer becomes a `503`.
 
 use std::time::Duration;
 
@@ -122,6 +139,13 @@ pub enum GatewayError {
          a partial list"
     )]
     TooManyPages,
+    #[error(
+        "API Gateway says usage plan `{plan_id}` does not exist; the key was created but could \
+         not be attached to a plan, so it will not work against /v1/. Check the SSM parameter \
+         named by PORTAL_FREE_PLAN_PARAM (or PORTAL_FREE_PLAN_ID on a local run) against the \
+         plan ApiGatewayStack publishes"
+    )]
+    PlanNotFound { plan_id: String },
     #[error("API Gateway `{operation}` answered without the `{field}` field")]
     Incomplete {
         operation: &'static str,
@@ -328,14 +352,15 @@ impl Gateway {
     /// asking `GetUsagePlanKeys` would be an extra call and an extra IAM grant
     /// to learn what this call can simply assert.
     ///
-    /// A `404` is [`Attachment::KeyGone`] rather than an error, for the same
-    /// reason [`Self::value_of`] answers `None`: the key was listed a moment ago
-    /// and is not there now, which is a state this slice has a defined answer
-    /// for (re-enter the flow and adopt or re-create) rather than a failure to
-    /// report. Since this call runs *before* the read, it is now the first place
-    /// that race can be observed — and reporting it as `502` would have made a
-    /// hand-deleted key a dead end again, on the narrow path rather than the
-    /// wide one.
+    /// A `404` is **ambiguous** and is resolved before it is acted on. API
+    /// Gateway answers `NotFoundException` both when the key is gone and when
+    /// the usage plan is, and the two want opposite handling: the first is the
+    /// deletion race, answered by re-entering the flow (which is why this call
+    /// returns [`Attachment::KeyGone`] rather than erroring — it runs before the
+    /// read, so it is the first place that race surfaces, and a `502` here would
+    /// make a hand-deleted key a dead end again); the second is a deployment
+    /// that will never work, and reporting it as a transient race hides it
+    /// forever. [`Self::exists`] separates them.
     pub async fn attach_to_free_plan(&self, key_id: &str) -> Result<Attachment, GatewayError> {
         match self
             .client
@@ -353,10 +378,52 @@ impl Gateway {
                 if service_error.is_conflict_exception() {
                     Ok(Attachment::OnPlan)
                 } else if service_error.is_not_found_exception() {
-                    Ok(Attachment::KeyGone)
+                    // `NotFoundException` here means EITHER "that key is gone"
+                    // OR "that usage plan does not exist", and the error carries
+                    // nothing that separates them. Reading it as the first
+                    // unconditionally turns a permanent misconfiguration — a
+                    // stale or mistyped plan id — into `Ok(None)`, which the
+                    // caller retries, exhausts, and reports to the user as "your
+                    // key is being changed by something else right now; try
+                    // again". Forever, for everybody, while every request leaves
+                    // an enabled key attached to nothing.
+                    //
+                    // So ask. One extra call, only on this path, on a grant we
+                    // already hold, and it names the real cause in the error
+                    // rather than in a support conversation three days later.
+                    if self.exists(key_id).await? {
+                        Err(GatewayError::PlanNotFound {
+                            plan_id: self.free_plan_id.clone(),
+                        })
+                    } else {
+                        Ok(Attachment::KeyGone)
+                    }
                 } else {
                     Err(GatewayError::Call {
                         operation: "CreateUsagePlanKey",
+                        message,
+                    })
+                }
+            }
+        }
+    }
+
+    /// Whether a key still exists, without asking for its value.
+    ///
+    /// Deliberately not [`Self::value_of`]: this is a liveness question asked on
+    /// an error path, and pulling a credential into memory to answer it would
+    /// put a key value where nothing needs one. `include_value` is left unset,
+    /// so the response carries no value to leak.
+    pub async fn exists(&self, key_id: &str) -> Result<bool, GatewayError> {
+        match self.client.get_api_key().api_key(key_id).send().await {
+            Ok(_) => Ok(true),
+            Err(e) => {
+                let message = sdk_message(&e);
+                if e.into_service_error().is_not_found_exception() {
+                    Ok(false)
+                } else {
+                    Err(GatewayError::Call {
+                        operation: "GetApiKey",
                         message,
                     })
                 }

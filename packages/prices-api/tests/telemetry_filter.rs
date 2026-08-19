@@ -83,6 +83,14 @@ fn no_rust_log_value_lets_an_sdk_credential_through() {
         // Aimed at the crate, and at the exact module that prints the value.
         "aws_smithy_runtime=trace",
         "aws_smithy_runtime::client::orchestrator=trace",
+        // ONE TRAILING COLON. This is what walked past the blocklist: targets
+        // match by `starts_with`, so `aws_smithy_runtime:` matches
+        // `aws_smithy_runtime::client::orchestrator`, and directives sort by
+        // target length, so 19 characters outranked the 18-character pin. Every
+        // other case in this list passed while this one leaked.
+        "aws_smithy_runtime:=trace",
+        "aws_smithy_runtime::=trace",
+        "aws_smithy_runtime:::=trace",
         // Aimed at the SPAN rather than the target. This is the one that got
         // through: a dynamic scope directive outranks a static target pin for
         // events inside a matching span.
@@ -91,9 +99,12 @@ fn no_rust_log_value_lets_an_sdk_credential_through() {
         // match, since `EnvFilter` matches targets by prefix.
         "aws_smithy[try_op]=trace",
         "aws[try_op]=trace",
-        // A static prefix of a guarded crate: kept, because the pin is a longer
-        // target and a longer target wins.
+        // A static prefix of a guarded crate. Under the blocklist this was kept
+        // and survived only because the pin is longer; under the allowlist it is
+        // refused outright, and the test no longer depends on which of the two
+        // reasons is doing the work.
         "aws_smithy=trace",
+        "aws=trace",
         // Belt and braces.
         "trace,[try_op]=trace,aws_smithy_runtime=trace",
     ] {

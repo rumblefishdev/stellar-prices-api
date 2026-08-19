@@ -665,3 +665,107 @@ async fn a_duplicate_that_will_not_delete_does_not_withhold_the_key() {
         "and nothing was re-created to work around it"
     );
 }
+
+/// **A usage plan that does not exist is a `502`, not "try again".**
+///
+/// API Gateway reports a missing key and a missing usage plan with the same
+/// `NotFoundException`. Reading it as "the key is gone" turns a stale or
+/// mistyped plan id — a typo in `PORTAL_FREE_PLAN_ID` on a local run, an SSM
+/// parameter that drifted, a plan replaced under a warm container — into
+/// `Ok(None)`, which the caller retries, exhausts, and reports as *"your key is
+/// being changed by something else right now; try again"*. Forever, for every
+/// user, while each request leaves an enabled key attached to nothing.
+#[tokio::test]
+async fn a_usage_plan_that_does_not_exist_is_a_502_not_a_transient_503() {
+    let mock = MockGateway::start().await;
+    mock.with(|s| s.attach_always_404 = true);
+
+    let reply = issue(&mock, USER_ID).await;
+
+    assert_eq!(
+        reply.status,
+        StatusCode::BAD_GATEWAY,
+        "a broken deployment must not read as a transient race"
+    );
+    assert_eq!(reply.json()["code"], "key_unavailable");
+    assert_eq!(
+        mock.with(|s| s.create_calls),
+        1,
+        "and it must not keep minting keys while it is broken"
+    );
+}
+
+/// **A listing that has not caught up must not orphan the key we just made.**
+///
+/// `GetApiKeys` is eventually consistent. When the re-list comes back non-empty
+/// but without our key, the record was neither ranked nor deleted — a live,
+/// enabled production key with this user's exact name, on no plan, left until
+/// the user happens to return. The union puts it back in the running, so it is
+/// either handed out or reconciled away like any other duplicate.
+#[tokio::test]
+async fn a_key_the_listing_has_not_caught_up_with_is_not_orphaned() {
+    let mock = MockGateway::start().await;
+    let name = format!("discord-{USER_ID}-key");
+    let older = mock.with(|s| {
+        let older = s.seed(&name, 1_000);
+        // The first listing does not show the seeded key, so the handler creates
+        // one; the second shows the seeded key but not the one just created.
+        s.next_list_is_empty = true;
+        s.next_list_omits_newest = true;
+        older
+    });
+
+    let reply = issue(&mock, USER_ID).await;
+
+    assert_eq!(reply.status, StatusCode::OK);
+    assert_eq!(
+        reply.json()["key_id"],
+        older,
+        "the earlier key still wins the rank"
+    );
+    assert_eq!(
+        mock.with(|s| s.keys.len()),
+        1,
+        "the key created during this request was reconciled away, not orphaned"
+    );
+    assert_eq!(
+        mock.with(|s| s.plan_keys.clone()),
+        vec![(PLAN_ID.to_string(), older)],
+        "and the survivor is on the plan"
+    );
+}
+
+/// **A slow control plane gets an answer, not a dead invocation.**
+///
+/// The per-call timeouts do not compose into a request-level bound: one attempt
+/// makes up to six calls plus a delete per duplicate, a listing can walk 50
+/// pages each with its own budget, and the reconciler runs twice. Against a 15s
+/// Lambda that is a killed invocation — no body, no `no-store`, an entry on the
+/// `Errors` metric. The wall-clock deadline is what turns that into a `503`.
+#[tokio::test]
+async fn a_control_plane_slower_than_the_deadline_answers_503() {
+    let mock = MockGateway::start().await;
+    mock.with(|s| s.list_delay_ms = 400);
+
+    let started = std::time::Instant::now();
+    let reply = call(
+        keys_router_with_deadline(&mock, std::time::Duration::from_millis(50)),
+        "POST",
+        Some(&session_cookie(USER_ID)),
+    )
+    .await;
+    let elapsed = started.elapsed();
+
+    assert_eq!(reply.status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(reply.json()["code"], "key_unavailable");
+    assert_eq!(reply.cache_control(), "no-store");
+    assert!(
+        elapsed < std::time::Duration::from_millis(350),
+        "the deadline did not cut the work off: {elapsed:?}"
+    );
+    assert_eq!(
+        mock.with(|s| s.create_calls),
+        0,
+        "nothing was created on the way out"
+    );
+}
