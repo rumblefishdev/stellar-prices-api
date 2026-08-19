@@ -4,7 +4,7 @@ title: "Fresh current-price rows report volume_24h_usd > 0 with vwap_24h = 0, em
 type: BUG
 status: backlog
 related_adr: []
-related_tasks: ["0120", "0207", "0182"]
+related_tasks: ["0120", "0207", "0182", "0107", "0146"]
 tags: [layer-backend, priority-high, effort-medium, milestone-M2, api, pricing, defect]
 milestone: 2
 links:

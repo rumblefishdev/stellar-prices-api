@@ -4,7 +4,7 @@ title: "price_usd is \"0\" for every asset priced only by AMM sources — 17 of 
 type: BUG
 status: backlog
 related_adr: []
-related_tasks: ["0120", "0072", "0208", "0209"]
+related_tasks: ["0120", "0072", "0209", "0146", "0154", "0111"]
 tags: [layer-backend, priority-high, effort-medium, milestone-M2, api, pricing, defect]
 milestone: 2
 links:
@@ -41,7 +41,11 @@ zero rows lack sdex.
 ## Implementation
 
 - Locate where `price_usd` is materialized (0072's current-prices MV) and why
-  AMM (phoenix/soroswap, mostly aquarius) trades do not feed it.
+  AMM (phoenix/soroswap, mostly aquarius) trades do not feed it. Start from the
+  enrichment-lag family — [[0146]] (rollups zero `close_usd` when the newest
+  sub-bucket is un-enriched), [[0154]] (enrichment only resolves
+  USDC/USDT/XLM quotes) and [[0111]] — the root may already be described
+  there.
 - Decide the fix: feed AMM closes into the same column, or fall back to
   `vwap_24h` when the last-trade price is absent. Document the chosen
   semantics in §4.
