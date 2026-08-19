@@ -110,6 +110,25 @@ pub fn service_unavailable(code: &'static str, message: impl Into<String>) -> Re
     .into_response_with(StatusCode::SERVICE_UNAVAILABLE)
 }
 
+/// 401 Unauthorized with a caller-chosen `code`.
+///
+/// The portal's key routes (task 0187) refuse an unauthenticated caller with
+/// `not_signed_in` rather than the partner API's `unauthorized`: the two mean
+/// different things to the two audiences — one says "present an API key", the
+/// other says "sign in with Discord", and the portal's bundle branches on the
+/// code to decide which control to show.
+pub fn unauthorized_with(code: &'static str, message: impl Into<String>) -> Response {
+    let mut resp = ErrorEnvelope {
+        code,
+        message: message.into(),
+        details: None,
+    }
+    .into_response_with(StatusCode::UNAUTHORIZED);
+    resp.headers_mut()
+        .insert(CACHE_CONTROL, cache_control::NO_STORE);
+    resp
+}
+
 /// 401 Unauthorized. Carries `Cache-Control: no-store` so a rejection is never
 /// cached by the client or the gateway.
 pub fn unauthorized(message: impl Into<String>) -> Response {

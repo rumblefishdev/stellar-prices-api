@@ -76,6 +76,17 @@ export class PortalApiError extends Error {
  */
 const PROBE_TIMEOUT_MS = 10_000;
 
+/**
+ * How long the page waits on key issuance.
+ *
+ * Longer than {@link PROBE_TIMEOUT_MS}, because this call is not a probe: a cold
+ * Lambda resolves credentials, reads an SSM parameter and then makes up to five
+ * control-plane calls. The api-handler's own Lambda timeout is 15s and API
+ * Gateway cuts everything off at 29s, so 20s is inside the window where an
+ * answer — including a `502` — is still possible.
+ */
+const KEY_TIMEOUT_MS = 20_000;
+
 /** Whether a rejection from `fetch` is this timeout firing. See the call site. */
 const isTimeout = (error: unknown): boolean =>
   typeof error === 'object' &&
@@ -197,6 +208,73 @@ export async function signOut(): Promise<void> {
   if (!response.ok) {
     throw new PortalApiError(
       `${url} answered ${response.status}`,
+      response.status,
+    );
+  }
+}
+
+/**
+ * What `POST` and `GET /api-tokens/api/key` answer (task 0187).
+ *
+ * Mirrors `KeyResponse` in `packages/prices-api/src/portal/keys/mod.rs`, and
+ * hand-written for the same reason the two types above are: the portal's routes
+ * are deliberately absent from the published OpenAPI document.
+ */
+export interface PortalKey {
+  /** The API Gateway key id. Not a secret. */
+  key_id: string;
+  /** `discord-<userId>-key`. */
+  name: string;
+  /** The credential itself — what goes in `X-API-Key`. */
+  value: string;
+  /** Whether this request created the key, as opposed to finding it. */
+  created: boolean;
+}
+
+/**
+ * Issue a key, or return the one this account already has.
+ *
+ * `POST`, and deliberately not a `GET` the page fires on load. The backend
+ * treats both verbs identically (it must — without a registry, "deleted by
+ * hand" and "never issued" are the same observation), so keeping the page's
+ * only call behind a press is what makes the visitor's intent explicit rather
+ * than implied by having opened a URL.
+ *
+ * Idempotent: a second press returns the same key, not a second one. That is a
+ * property of the backend's reconciler, not of this function, and it is why
+ * there is no client-side guard against double-clicking.
+ */
+export async function issueKey(): Promise<PortalKey> {
+  const url = `${PORTAL_API}/key`;
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: 'POST',
+      headers: { accept: 'application/json' },
+      signal: AbortSignal.timeout(KEY_TIMEOUT_MS),
+    });
+  } catch (error) {
+    if (isTimeout(error)) {
+      throw new PortalApiError(
+        `${url} did not answer within ${KEY_TIMEOUT_MS / 1000}s`,
+      );
+    }
+    throw new PortalApiError(`${url} could not be reached`);
+  }
+  if (!response.ok) {
+    // `401` is the one status this page can act on: it means the session
+    // expired while the tab was open, and the answer is to sign in again rather
+    // than to retry. Carried through as the status so the caller can say so.
+    throw new PortalApiError(
+      `${url} answered ${response.status}`,
+      response.status,
+    );
+  }
+  try {
+    return (await response.json()) as PortalKey;
+  } catch {
+    throw new PortalApiError(
+      `${url} answered ${response.status}, not JSON`,
       response.status,
     );
   }
