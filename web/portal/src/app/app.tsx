@@ -4,6 +4,7 @@ import { Route, Routes, useSearchParams } from 'react-router-dom';
 import {
   fetchPortalConfig,
   fetchSession,
+  fetchUsage,
   issueKey,
   signInUrl,
   signOut,
@@ -11,6 +12,7 @@ import {
   type PortalConfig,
   type PortalKey,
   type PortalSession,
+  type PortalUsage,
 } from '../api/portal';
 
 /**
@@ -147,25 +149,7 @@ function SignIn() {
   }
 
   if (session.session.authenticated) {
-    return (
-      <>
-        {/* The acceptance criterion, rendered: username and ID. The ID is the
-            account key (ADR 0010) and the username is display only — it comes
-            from the signed session cookie and is refreshed at each sign-in. */}
-        <p>
-          Signed in as <strong>{session.session.username}</strong> (ID{' '}
-          <code>{session.session.user_id}</code>)
-        </p>
-        <button type="button" onClick={onSignOut}>
-          Sign out
-        </button>
-        {/* Task 0187. Inside the authenticated branch, so signing out removes
-            it along with the key it was showing — the component unmounts and
-            its state goes with it, rather than leaving a stale credential on
-            screen for the next person at the keyboard. */}
-        <ApiKey />
-      </>
-    );
+    return <Dashboard onSignOut={onSignOut} session={session.session} />;
   }
 
   return (
@@ -188,6 +172,53 @@ function SignIn() {
 }
 
 /**
+ * The signed-in half of the page: identity, the key (task 0187), and usage
+ * against quota (task 0188). Still one flat, unstyled column — task 0193 is
+ * what turns this into something that looks like a dashboard.
+ *
+ * The one piece of state lifted here is whether THIS page load issued or
+ * revealed a key. `Usage` needs it for honesty's sake: the backend caches its
+ * answers briefly and `GetUsage` itself lags, so straight after a press the
+ * usage endpoint can still say "no key" or "nothing recorded" about a key the
+ * page is literally displaying — and "you have no key" would be false. Knowing
+ * a key exists turns both of those answers into "your key is new; figures
+ * appear with a delay", which is the same lag message the whole slice is built
+ * around.
+ */
+function Dashboard({
+  onSignOut,
+  session,
+}: {
+  onSignOut: () => void;
+  session: PortalSession;
+}) {
+  const [keyOnScreen, setKeyOnScreen] = useState(false);
+
+  return (
+    <>
+      {/* The acceptance criterion, rendered: username and ID. The ID is the
+          account key (ADR 0010) and the username is display only — it comes
+          from the signed session cookie and is refreshed at each sign-in. */}
+      <p>
+        Signed in as <strong>{session.username}</strong> (ID{' '}
+        <code>{session.user_id}</code>)
+      </p>
+      <button type="button" onClick={onSignOut}>
+        Sign out
+      </button>
+      {/* Task 0187. Inside the authenticated branch, so signing out removes
+          it along with the key it was showing — the component unmounts and
+          its state goes with it, rather than leaving a stale credential on
+          screen for the next person at the keyboard. */}
+      <ApiKey onKey={() => setKeyOnScreen(true)} />
+      {/* Task 0188. Keyed refetch: a successful issue re-asks for usage, so
+          the section leaves "no key yet" without a manual refresh. */}
+      <Usage keyOnScreen={keyOnScreen} />
+    </>
+  );
+}
+
+/**
  * The API key, masked (task 0187).
  *
  * Rendered only for a signed-in visitor, because that is the only state in which
@@ -202,7 +233,7 @@ function SignIn() {
  * retypes — without a button, the first thing every visitor does is select it by
  * hand, which defeats the masking they just toggled.
  */
-function ApiKey() {
+function ApiKey({ onKey }: { onKey?: () => void }) {
   const [key, setKey] = useState<PortalKey | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -242,6 +273,11 @@ function ApiKey() {
         // the button and can press reveal; what they did not ask for is the
         // credential appearing on screen while they were looking at the button.
         setRevealed(false);
+        // Tell the dashboard a key is now on screen (task 0188's usage section
+        // reads it) — the FACT only, never the value or the id: nothing
+        // outside this component needs the credential, so nothing outside it
+        // gets to hold one.
+        onKey?.();
       })
       .catch((cause: unknown) => {
         if (!live.current) return;
@@ -322,6 +358,167 @@ function ApiKey() {
         <p>
           Could not get your API key: <code>{error}</code>
         </p>
+      )}
+    </section>
+  );
+}
+
+/**
+ * Usage against quota, rendered honestly (task 0188).
+ *
+ * Three numbers and a date, unstyled — task 0193 makes it a dashboard. What is
+ * decided HERE, once, and what 0193 restyles without re-deciding:
+ *
+ * - **The lag wording.** `GetUsage` is not a read-after-write surface
+ *   (measured, task 0180), so the figures can trail reality by minutes. Every
+ *   render of the numbers carries the "last updated" line below, verbatim; a
+ *   dashboard that admits a lag beats one that looks broken.
+ * - **The reset rule.** "The 1st of each month, 00:00 UTC" is OUR stated rule,
+ *   not an AWS guarantee — AWS documents neither the instant nor the timezone
+ *   (ADR 0010, correction #2) — and it is worded as ours.
+ * - **The limits as numbers**: 1 request per second (task 0157) and
+ *   used-of-quota, not prose.
+ *
+ * Fetches on mount, unlike `ApiKey` beside it, and the difference is the whole
+ * point of the backend's design: `GET /usage` is read-only by construction —
+ * it can never create, attach or delete a key — so opening the page costs
+ * nothing and mints nothing. The refresh button re-asks; the backend's
+ * in-process cache is what keeps that from turning into control-plane traffic.
+ */
+function Usage({ keyOnScreen }: { keyOnScreen: boolean }) {
+  type UsageView =
+    | { state: 'loading' }
+    | { state: 'ok'; usage: PortalUsage }
+    | { state: 'no-key' }
+    | { state: 'failed'; reason: string };
+
+  const [view, setView] = useState<UsageView>({ state: 'loading' });
+
+  // The same in-flight guard `SignIn` keeps, for the same two reasons: the
+  // refresh button can supersede a pending load, and signing out unmounts this
+  // component mid-flight.
+  const cancelInFlight = useRef<(() => void) | null>(null);
+  const load = useCallback(() => {
+    cancelInFlight.current?.();
+    let live = true;
+    cancelInFlight.current = () => {
+      live = false;
+    };
+    setView({ state: 'loading' });
+    fetchUsage()
+      .then((usage) => {
+        if (!live) return;
+        setView(usage ? { state: 'ok', usage } : { state: 'no-key' });
+      })
+      .catch((error: unknown) => {
+        if (live)
+          setView({
+            state: 'failed',
+            reason: error instanceof Error ? error.message : String(error),
+          });
+      });
+  }, []);
+
+  // On mount, and again when a key appears on screen: straight after an issue
+  // the "no key" answer this section may be showing is already false.
+  useEffect(() => {
+    load();
+    return () => cancelInFlight.current?.();
+  }, [load, keyOnScreen]);
+
+  /**
+   * THE lag line — the wording this task decides once. Rendered under every
+   * state that shows (or withholds) a figure, so the page never presents an
+   * AWS-lagged number as live.
+   */
+  const lastUpdated = (asOf: string) => (
+    <p>
+      Last updated {new Date(asOf).toUTCString()} — AWS reports usage with a
+      delay, so requests made in the last few minutes may not be counted yet.
+    </p>
+  );
+
+  /** The reset rule (ours) and the rate limit (0157), as numbers. */
+  const limits = (resetsAt?: string) => (
+    <>
+      <p>
+        Rate limit: <strong>1</strong> request per second.
+      </p>
+      <p>
+        Quota resets on the 1st of each month, 00:00 UTC
+        {resetsAt ? (
+          <>
+            {' '}
+            — next reset <strong>{resetsAt.slice(0, 10)}</strong>
+          </>
+        ) : null}
+        .
+      </p>
+    </>
+  );
+
+  return (
+    <section>
+      <h2>Usage this period</h2>
+
+      {view.state === 'loading' && <p>Loading your usage…</p>}
+
+      {view.state === 'no-key' &&
+        (keyOnScreen ? (
+          // The endpoint said "no key" while a key is on this very screen: the
+          // backend's short cache has not caught up with the issue yet. "You
+          // have no key" would be false, so say what is actually happening.
+          <p>
+            Your key is new — usage figures appear here with a delay after your
+            first requests.
+          </p>
+        ) : (
+          <p>You have no API key yet — issue one above to see your usage.</p>
+        ))}
+
+      {view.state === 'ok' &&
+        (view.usage.used === null ? (
+          <>
+            {/* AWS has no rows for the key yet. Not zeros: inventing
+                `remaining` and `limit` would be guessing, and the honest state
+                is "nothing recorded", which for a fresh key is expected. */}
+            <p>
+              AWS has not recorded any usage for your key this period yet —
+              figures appear with a delay after your first requests.
+            </p>
+            {limits(view.usage.resets_at)}
+            {lastUpdated(view.usage.as_of)}
+          </>
+        ) : (
+          <>
+            <p>
+              Used: <strong data-testid="usage-used">{view.usage.used}</strong>
+            </p>
+            <p>
+              Remaining:{' '}
+              <strong data-testid="usage-remaining">
+                {view.usage.remaining}
+              </strong>
+            </p>
+            <p>
+              Monthly limit:{' '}
+              <strong data-testid="usage-limit">{view.usage.limit}</strong>
+            </p>
+            {limits(view.usage.resets_at)}
+            {lastUpdated(view.usage.as_of)}
+          </>
+        ))}
+
+      {view.state === 'failed' && (
+        <p>
+          Could not load your usage: <code>{view.reason}</code>
+        </p>
+      )}
+
+      {view.state !== 'loading' && (
+        <button type="button" onClick={load}>
+          Refresh
+        </button>
       )}
     </section>
   );

@@ -316,13 +316,14 @@ any behaviour until the flag moves.
 
 ### The IAM, and the three limits that come with it
 
-CDK grants the api-handler role five control-plane actions and nothing else:
-`GET`/`POST` on `/apikeys`, `GET`/`DELETE` on `/apikeys/*`, and `POST` on
-`/usageplans/{the free plan}/keys`. The last is declared in
-`api-gateway-stack.ts` rather than `compute-stack.ts`, because that is the only
-stack that knows the plan id.
+CDK grants the api-handler role six control-plane actions and nothing else:
+`GET`/`POST` on `/apikeys`, `GET`/`DELETE` on `/apikeys/*`, `POST` on
+`/usageplans/{the free plan}/keys`, and — task 0188 — `GET` on
+`/usageplans/{the free plan}/usage` (`GetUsage`, the dashboard's usage read).
+The last two are declared in `api-gateway-stack.ts` rather than
+`compute-stack.ts`, because that is the only stack that knows the plan id.
 
-Two of the five cannot be scoped any further, and one can but is not yet. All
+Two of the six cannot be scoped any further, and one can but is not yet. All
 three are written out in full in `compute-stack.ts`; the short version:
 
 - **`POST /apikeys` cannot be narrowed.** There is no ARN for "keys this

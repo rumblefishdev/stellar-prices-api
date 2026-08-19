@@ -683,6 +683,46 @@ for (const st of apigatewayStatements) {
   }
 }
 
+// --- 5b. Task 0188: the GetUsage grant exists, and is the narrow form. ---
+// The dashboard's `GetUsage` needs `apigateway:GET` on the free plan's
+// `/usage` sub-resource — a statement in ApiGatewayStack's standalone policy,
+// because only that stack knows the plan id. A missing statement fails at
+// runtime with AccessDenied, only once the portal opens, and reads as a
+// backend bug; a broadened one (`/usageplans/*`, or the plan root) hands the
+// api-handler reads this feature never makes. The `apigateway:*` and
+// `Resource: "*"` refusals above already bound the worst case; this pins the
+// intended shape.
+const usageGrants = apigatewayStatements.filter((st) => {
+  const resources = [st.Resource ?? []].flat();
+  // The resource is an Fn::Join carrying the plan id ref, so it is matched as
+  // serialized JSON rather than as a string. `/usage"` — with the closing
+  // quote — is the sub-resource as a path SUFFIX; a bare `/usage` would also
+  // match every `/usageplans/…` ARN, 0187's `/keys` attach included.
+  return resources.some((r) => JSON.stringify(r).includes('/usage"'));
+});
+if (usageGrants.length !== 1) {
+  fail(
+    `error: expected exactly one IAM statement on the usage plan's /usage ` +
+      `sub-resource, found ${usageGrants.length}.`,
+    '  → task 0188 reads per-key usage with GetUsage, granted as ' +
+      '`apigateway:GET` on `/usageplans/{planId}/usage` in ' +
+      'api-gateway-stack.ts (the standalone portal policy — the plan id ' +
+      'lives in that stack). Without it every dashboard load fails with ' +
+      'AccessDenied once the portal opens.',
+  );
+}
+{
+  const actions = [usageGrants[0].Action ?? []].flat().map(String);
+  if (actions.length !== 1 || actions[0] !== 'apigateway:GET') {
+    fail(
+      `error: the /usage grant carries actions ${JSON.stringify(actions)}.`,
+      '  → GetUsage needs `apigateway:GET` and nothing else on this ' +
+        'resource. Anything more (PATCH is UpdateUsage — moving the quota ' +
+        'counter) is a different feature and a different decision.',
+    );
+  }
+}
+
 // --- 6. The portal's methods are uncached AT THE GATEWAY. ---
 // Not deferrable to task 0194, and not the same check as the CloudFront one
 // above. `deployOptions.cachingEnabled` is ON in this stack and the gateway

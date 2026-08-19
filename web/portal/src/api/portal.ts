@@ -232,6 +232,81 @@ export interface PortalKey {
 }
 
 /**
+ * What `GET /api-tokens/api/usage` answers (task 0188).
+ *
+ * Mirrors `UsageResponse` in `packages/prices-api/src/portal/usage/mod.rs`, and
+ * hand-written for the same reason every type above is: the portal's routes are
+ * deliberately absent from the published OpenAPI document.
+ *
+ * The three counters are `null` **together** when AWS has recorded nothing for
+ * the key yet — the ordinary state minutes after issuance, because `GetUsage`
+ * lags. The page renders that as "nothing recorded yet" rather than inventing
+ * zeros; the period and `as_of` are always present.
+ */
+export interface PortalUsage {
+  /** Requests counted against the quota this period, per AWS. */
+  used: number | null;
+  /** Requests left, as of the latest day AWS has data for. */
+  remaining: number | null;
+  /** The monthly quota, reconstructed as `used + remaining`. */
+  limit: number | null;
+  /** First day of the current period, `YYYY-MM-DD` (our rule: calendar month, UTC). */
+  period_start: string;
+  /** Last day of the current period, inclusive. */
+  period_end: string;
+  /** When the quota resets under our stated rule, RFC 3339. */
+  resets_at: string;
+  /** When the `GetUsage` behind this answer was made, RFC 3339. */
+  as_of: string;
+}
+
+/**
+ * `GET /api-tokens/api/usage` — the signed-in caller's usage against quota.
+ *
+ * Read-only by construction on the backend (it can never create, attach or
+ * delete a key), which is why — unlike `issueKey` below — the page may call it
+ * on load: opening the dashboard cannot mint anything.
+ *
+ * Resolves to `null` when the caller has no key yet (the backend's
+ * `404 no_key`), because for this page that is a renderable state, not a
+ * failure.
+ */
+export async function fetchUsage(): Promise<PortalUsage | null> {
+  const url = `${PORTAL_API}/usage`;
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      headers: { accept: 'application/json' },
+      signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
+    });
+  } catch (error) {
+    if (isTimeout(error)) {
+      throw new PortalApiError(
+        `${url} did not answer within ${PROBE_TIMEOUT_MS / 1000}s`,
+      );
+    }
+    throw new PortalApiError(`${url} could not be reached`);
+  }
+  if (response.status === 404) {
+    return null;
+  }
+  if (!response.ok) {
+    throw new PortalApiError(
+      `${url} answered ${response.status}`,
+      response.status,
+    );
+  }
+  try {
+    return (await response.json()) as PortalUsage;
+  } catch {
+    throw new PortalApiError(
+      `${url} answered ${response.status}, not JSON`,
+      response.status,
+    );
+  }
+}
+
+/**
  * Issue a key, or return the one this account already has.
  *
  * `POST`, and deliberately not a `GET` the page fires on load. The backend

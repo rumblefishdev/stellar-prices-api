@@ -1,11 +1,15 @@
-//! The API Gateway **control plane**, wrapped down to five calls (task 0187).
+//! The API Gateway **control plane**, wrapped down to six calls (task 0187,
+//! plus task 0188's `GetUsage`).
 //!
 //! Not the data plane. These are `GetApiKeys`, `CreateApiKey`,
-//! `CreateUsagePlanKey`, `GetApiKey` and `DeleteApiKey` — the API the console
-//! drives — and they are the reason this slice needs no database: **API Gateway
-//! is the source of truth for whether a key exists** (task 0158's own argument,
-//! restated in 0187's context). A registry would buy a hot-path read and a
-//! history; neither is required to answer "where is my key".
+//! `CreateUsagePlanKey`, `GetApiKey`, `DeleteApiKey` and `GetUsage` — the API
+//! the console drives — and they are the reason this slice needs no database:
+//! **API Gateway is the source of truth for whether a key exists** (task 0158's
+//! own argument, restated in 0187's context), and for how much it has been
+//! used — quota is scoped to `(usagePlanId, apiKeyId)` and counted by AWS, so
+//! there is no accounting of our own to store. A registry would buy a hot-path
+//! read and a history; neither is required to answer "where is my key" or "how
+//! much of my quota is left".
 //!
 //! # What this module is for
 //!
@@ -127,6 +131,32 @@ pub enum Attachment {
     KeyGone,
 }
 
+/// One key's consumption over a queried period, as AWS reports it.
+///
+/// Derived from `GetUsage`'s daily `[used, remaining]` pairs rather than read
+/// off a single field: the response carries no `limit` of its own, so the limit
+/// is reconstructed as `used + remaining` — the same arithmetic task 0157's
+/// close verified against the live plan (`[121, 99879]` against a 100 000
+/// quota). Kept here instead of in the handler so the shape of the AWS response
+/// stays a concern of this module.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeyUsage {
+    /// Requests counted against the quota so far this period — the sum of the
+    /// daily `used` values.
+    pub used: u64,
+    /// Requests left, as of the **latest day AWS has data for** — the last
+    /// daily pair's `remaining`. Not "limit − used": the two can disagree while
+    /// AWS's own reporting lags, and the last-reported value is the honest one.
+    pub remaining: u64,
+}
+
+impl KeyUsage {
+    /// The plan's quota, reconstructed. See the type docs.
+    pub fn limit(&self) -> u64 {
+        self.used.saturating_add(self.remaining)
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum GatewayError {
     #[error("API Gateway `{operation}` failed: {message}")]
@@ -134,6 +164,15 @@ pub enum GatewayError {
         operation: &'static str,
         message: String,
     },
+    /// The control plane is rate-limiting us — distinct from [`Self::Call`]
+    /// because task 0188 answers it differently: these are control-plane calls
+    /// sharing an account-wide budget with our own deploys, so a throttle wants
+    /// a stale-but-honest answer (the dashboard already renders "last updated")
+    /// rather than an error page. The SDK has already retried with backoff by
+    /// the time this surfaces; this variant is what is left when backing off
+    /// was not enough.
+    #[error("API Gateway is rate-limiting `{operation}`; backing off")]
+    Throttled { operation: &'static str },
     #[error(
         "API Gateway returned more than {MAX_PAGES} pages for one key name; refusing to rank \
          a partial list"
@@ -256,10 +295,25 @@ impl Gateway {
                 request = request.position(position);
             }
 
-            let page = request.send().await.map_err(|e| GatewayError::Call {
-                operation: "GetApiKeys",
-                message: sdk_message(&e),
-            })?;
+            let page = match request.send().await {
+                Ok(page) => page,
+                Err(e) => {
+                    // Throttling is separated from every other failure because a
+                    // caller can answer it (serve the last good answer, back
+                    // off) while a plain failure has nothing to fall back on.
+                    let message = sdk_message(&e);
+                    return Err(if e.into_service_error().is_too_many_requests_exception() {
+                        GatewayError::Throttled {
+                            operation: "GetApiKeys",
+                        }
+                    } else {
+                        GatewayError::Call {
+                            operation: "GetApiKeys",
+                            message,
+                        }
+                    });
+                }
+            };
 
             for item in page.items() {
                 // A key with no id cannot be fetched, attached or deleted, so it
@@ -466,6 +520,103 @@ impl Gateway {
                 }
             }
         }
+    }
+
+    /// One key's usage against the free plan's quota between `start_date` and
+    /// `end_date` (inclusive, `YYYY-MM-DD`), or `None` if AWS has recorded
+    /// nothing for it in that window (task 0188).
+    ///
+    /// `None` is a real and **common** state, not an edge case: `GetUsage` is
+    /// not a read-after-write surface (measured 2026-08-12, archived
+    /// `0180/notes/R-apigw-namequery-quota-and-disable.md`), so a key issued
+    /// minutes ago — the first thing every new user looks at — may have no row
+    /// yet. The caller renders that as "nothing recorded yet" rather than
+    /// inventing zeros for `remaining` and a limit it does not know.
+    ///
+    /// **Paginated like the listing is**, and for the same reason: the response
+    /// carries a `position` token, and summing off page one would report a
+    /// smaller `used` than AWS is counting. With the `keyId` filter the items
+    /// map holds one key, so extra pages extend that key's daily series;
+    /// `MAX_PAGES` turns a cursor the service never clears into an error
+    /// instead of an infinite loop.
+    ///
+    /// Daily pairs are `[used, remaining]`. `used` sums across days;
+    /// `remaining` is the **last** day's value, because it is a running balance
+    /// rather than a per-day allowance (task 0157's close observed exactly
+    /// this: `[121, 99879]` one day, `[0, 99879]` the next).
+    pub async fn usage_of(
+        &self,
+        key_id: &str,
+        start_date: &str,
+        end_date: &str,
+    ) -> Result<Option<KeyUsage>, GatewayError> {
+        let mut days: Vec<(i64, i64)> = Vec::new();
+        let mut position: Option<String> = None;
+
+        for _ in 0..MAX_PAGES {
+            let mut request = self
+                .client
+                .get_usage()
+                .usage_plan_id(&self.free_plan_id)
+                .key_id(key_id)
+                .start_date(start_date)
+                .end_date(end_date)
+                .limit(PAGE_LIMIT);
+            if let Some(position) = position.as_ref() {
+                request = request.position(position);
+            }
+
+            let page = match request.send().await {
+                Ok(page) => page,
+                Err(e) => {
+                    let message = sdk_message(&e);
+                    return Err(if e.into_service_error().is_too_many_requests_exception() {
+                        GatewayError::Throttled {
+                            operation: "GetUsage",
+                        }
+                    } else {
+                        GatewayError::Call {
+                            operation: "GetUsage",
+                            message,
+                        }
+                    });
+                }
+            };
+
+            // The map is keyed by key id. The `keyId` filter should leave only
+            // ours, but that is the service's narrowing, not this module's —
+            // read the one entry we asked about and ignore anything else, the
+            // same stance `exact_matches` takes on `nameQuery`.
+            if let Some(items) = page.items()
+                && let Some(values) = items.get(key_id)
+            {
+                for pair in values {
+                    let used = pair.first().copied().unwrap_or(0);
+                    let remaining = pair.get(1).copied().unwrap_or(0);
+                    days.push((used, remaining));
+                }
+            }
+
+            match page.position() {
+                Some(next) if !next.is_empty() => position = Some(next.to_string()),
+                _ => {
+                    let Some(&(_, last_remaining)) = days.last() else {
+                        return Ok(None);
+                    };
+                    // Negative values have no defined meaning here; clamped to
+                    // zero rather than propagated, so a malformed row cannot
+                    // render a nonsense quota.
+                    let used = days
+                        .iter()
+                        .map(|&(used, _)| u64::try_from(used).unwrap_or(0))
+                        .fold(0u64, u64::saturating_add);
+                    let remaining = u64::try_from(last_remaining).unwrap_or(0);
+                    return Ok(Some(KeyUsage { used, remaining }));
+                }
+            }
+        }
+
+        Err(GatewayError::TooManyPages)
     }
 
     /// Delete a key. A key that is already gone is a success — the caller wanted

@@ -503,12 +503,13 @@ export class ComputeStack extends cdk.Stack {
     // Self-service API keys (task 0187) — API Gateway CONTROL plane.
     // ---------------------------------------------------------------
     //
-    // Four of the five calls the portal makes. The fifth,
-    // `POST /usageplans/{id}/keys`, is granted in `ApiGatewayStack` instead,
-    // because the plan id lives there and importing it here would close the
-    // Compute -> Gateway -> Compute cycle described on
+    // Four of the six calls the portal makes. The other two —
+    // `POST /usageplans/{id}/keys` (task 0187's attach) and
+    // `GET /usageplans/{id}/usage` (task 0188's `GetUsage`) — are granted in
+    // `ApiGatewayStack` instead, because the plan id lives there and importing
+    // it here would close the Compute -> Gateway -> Compute cycle described on
     // `portalFreePlanParameterName` above. Each grant is declared where its
-    // resource is known; task 0194 audits the pair as one policy.
+    // resource is known; task 0194 audits the set as one policy.
     //
     // Control-plane ARNs carry no account id — `arn:aws:apigateway:<region>::`
     // with a doubled colon — and the resource is the API's own path.
@@ -565,9 +566,10 @@ export class ComputeStack extends cdk.Stack {
     //    account-wide in IAM.
     //
     // What is deliberately NOT here: `PATCH` (nothing in this slice updates a
-    // key), `apigateway:*`, and any grant on `/usageplans` beyond the one key
-    // attachment — `GetUsage` is task 0188's and will need a statement of its
-    // own.
+    // key), `apigateway:*`, and any grant on `/usageplans` beyond the key
+    // attachment and the usage read — both of those need the plan id, so both
+    // live in `ApiGatewayStack`'s standalone policy (`POST …/keys` for 0187's
+    // attach, `GET …/usage` for 0188's `GetUsage`).
     //
     // `DELETE` **is** here, and it is this slice's: the reconciler removes
     // duplicate keys after a double-submit ("keep the earliest createdDate,

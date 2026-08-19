@@ -44,6 +44,7 @@
 
 pub mod auth;
 pub mod keys;
+pub mod usage;
 
 use axum::extract::{Request, State};
 use axum::http::StatusCode;
@@ -143,10 +144,22 @@ pub fn apply(router: Router, config: &AppConfig) -> Router {
         config.portal_keys.clone(),
     ));
 
+    // Usage against quota (task 0188), merged the same way and mounted under
+    // the same conditions. It shares the key routes' control-plane client —
+    // usage is scoped to `(usagePlanId, apiKeyId)` and the key id comes from
+    // the same lookup — but carries a state of its own, because it also owns
+    // the in-process cache that keeps dashboard refreshes off the
+    // account-wide control-plane budget.
+    let usage = usage::routes(usage::UsageState::new(
+        config.portal_oauth.clone(),
+        config.portal_keys.clone(),
+    ));
+
     router
         .merge(routes)
         .merge(sign_in)
         .merge(api_keys)
+        .merge(usage)
         .layer(axum::middleware::from_fn_with_state(gate, gate_portal))
 }
 
@@ -168,10 +181,10 @@ async fn config_handler(State(gate): State<PortalGate>) -> Response {
 /// True for any path the portal owns.
 ///
 /// Prefix match, not equality: it has to cover routes that do not exist yet
-/// ([0188]'s `/usage`, [0192]'s revocation), which is the point of gating by
-/// prefix rather than enumerating. [0186]'s `/auth/*` and [0187]'s `/key` have
-/// since landed and neither touched this function — which is the property
-/// working, not an argument for replacing it with a list.
+/// ([0191]'s rework, [0192]'s revocation), which is the point of gating by
+/// prefix rather than enumerating. [0186]'s `/auth/*`, [0187]'s `/key` and
+/// [0188]'s `/usage` have since landed and none of them touched this function —
+/// which is the property working, not an argument for replacing it with a list.
 fn is_portal_path(path: &str) -> bool {
     path.starts_with(PORTAL_API_PREFIX)
 }
@@ -197,6 +210,7 @@ mod tests {
         assert!(is_portal_path(CONFIG_PATH));
         assert!(is_portal_path("/api-tokens/api/auth/login"));
         assert!(is_portal_path("/api-tokens/api/key"));
+        assert!(is_portal_path("/api-tokens/api/usage"));
         // Routes that do not exist yet still match — that is the point.
         assert!(is_portal_path("/api-tokens/api/nothing-here"));
     }

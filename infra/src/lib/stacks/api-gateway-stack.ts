@@ -654,10 +654,10 @@ export class ApiGatewayStack extends cdk.Stack {
       description: `Usage plan ID for pricing-api-free-${config.envName} (key issuance + GetUsage)`,
     });
 
-    // The one control-plane grant that needs the plan id (task 0187): attach a
-    // self-service key to THIS plan and no other. Declared here rather than in
-    // `ComputeStack` for the cycle reason on `apiHandlerRole` in the props
-    // above; its four siblings are declared there.
+    // The control-plane grants that need the plan id (tasks 0187 and 0188).
+    // Declared here rather than in `ComputeStack` for the cycle reason on
+    // `apiHandlerRole` in the props above; their four siblings are declared
+    // there.
     //
     // `iam.Policy` rather than `apiHandlerRole.addToPrincipalPolicy`, and the
     // distinction is the whole point: `addToPrincipalPolicy` would append to
@@ -667,9 +667,23 @@ export class ApiGatewayStack extends cdk.Stack {
     // resource of this stack that names the role, so the reference runs
     // ApiGateway -> Compute like every other one here.
     //
-    // Scoped to `/keys` on this plan alone: it permits attaching a key, not
-    // reading the plan, not changing its limits, and not `GetUsage` (that is
-    // task 0188's, and it will need its own statement).
+    // Two statements, one sub-resource each, on THIS plan alone:
+    //
+    // - `POST …/keys` (task 0187) attaches a self-service key to the plan.
+    // - `GET …/usage` (task 0188) is `GetUsage` — reading per-key consumption
+    //   for the dashboard. `GET` on the usage sub-resource does NOT permit
+    //   reading the plan itself (`GET /usageplans/{id}`), listing its keys
+    //   (`GET …/keys`), or changing its limits — the resource path is the
+    //   scope, and `/usage` is the narrowest form this call has.
+    //
+    // Deliberately NOT granted, though task 0187's review suggested deciding it
+    // here: `GET /usageplans/{id}` to validate the plan at cold start. It would
+    // turn a stale plan id into an init failure instead of a runtime one — but
+    // 0187's decision 22 already rejected cold-start validation (a warm
+    // container still misses a plan that changes under it, and the attach path
+    // disambiguates a dead plan id into `PlanNotFound` loudly), and `GetUsage`
+    // against a wrong plan id fails visibly on the first dashboard load. An
+    // extra standing grant to move one failure earlier is not worth it.
     new iam.Policy(this, 'PortalAttachKeyToFreePlan', {
       policyName: `prices-${config.envName}-portal-attach-key`,
       roles: [apiHandlerRole],
@@ -679,6 +693,13 @@ export class ApiGatewayStack extends cdk.Stack {
           actions: ['apigateway:POST'],
           resources: [
             `arn:aws:apigateway:${config.awsRegion}::/usageplans/${usagePlan.usagePlanId}/keys`,
+          ],
+        }),
+        new iam.PolicyStatement({
+          sid: 'PortalReadFreePlanUsage',
+          actions: ['apigateway:GET'],
+          resources: [
+            `arn:aws:apigateway:${config.awsRegion}::/usageplans/${usagePlan.usagePlanId}/usage`,
           ],
         }),
       ],
