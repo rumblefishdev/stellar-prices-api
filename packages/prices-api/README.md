@@ -42,6 +42,143 @@ cargo test -p prices-api
 cargo lambda build -p prices-api --release --arm64 --features lambda
 ```
 
+## Running portal sign-in locally (task 0186)
+
+The whole round-trip — `/auth/login` → Discord → `/auth/callback` → session →
+`/auth/me` → `/auth/logout` — runs on a laptop. Two processes and one file.
+
+**No ClickHouse required.** `serve` builds a lazy plaintext CH client that never
+connects unless a `/v1` route is hit, and the portal routes touch none. It also
+ignores `CH_ENABLED`, which is a Lambda-only knob.
+
+### 1. The Discord application
+
+In the [Discord Developer Portal](https://discord.com/developers/applications),
+**OAuth2 → Redirects → Add Redirect**, exactly:
+
+```
+http://localhost:4200/api-tokens/api/auth/callback
+```
+
+Port `4200`, not `8080`: the redirect URI must be the origin the **browser**
+sees, which is the Vite dev server. Discord accepts `http://` for `localhost`,
+and accepts several redirects on one application, so a production one can sit
+alongside this. Matching is character-exact — scheme, port, path, and no
+trailing slash.
+
+Scope needs no configuration here: the handler requests exactly `identify` and
+verifies the grant on the token response, refusing anything wider.
+
+### 2. `.portal-oauth.json`
+
+Gitignored (`.portal-oauth.json` and `**/.portal-oauth.json`), and it holds a
+real client secret — check `git status` before committing anything.
+
+```json
+{
+  "client_id": "000000000000000000",
+  "client_secret": "REPLACE_ME_from_the_Developer_Portal",
+  "redirect_uri": "http://localhost:4200/api-tokens/api/auth/callback",
+  "session_signing_key": "REPLACE_ME_openssl_rand_hex_32"
+}
+```
+
+| field | notes |
+|-------|-------|
+| `client_id` | from the Developer Portal. Not secret |
+| `client_secret` | **Reset Secret** in the Developer Portal. Never an env var, never committed |
+| `redirect_uri` | must equal the registration **character for character** |
+| `session_signing_key` | ≥32 bytes. `openssl rand -hex 32` |
+
+A **file** rather than an env var on purpose: there is no code path anywhere
+that reads a client secret out of the environment, and adding one "just for
+local" is a path production can be misconfigured onto. In production this same
+JSON lives in Secrets Manager and is read through the Parameters & Secrets
+extension — see
+[`docs/runbooks/portal-oauth-deploy-prep.md`](../../docs/runbooks/portal-oauth-deploy-prep.md).
+
+### 3. Run it
+
+```bash
+# terminal 1 — the API on :8080
+PORTAL_ENABLED=true \
+PORTAL_OAUTH_SECRET_FILE=.portal-oauth.json \
+PORT=8080 RUST_LOG=info \
+  cargo run -p prices-api --features local-server --bin serve
+```
+
+```bash
+# terminal 2 — the portal on :4200, proxying /api-tokens/api/* to :8080
+echo "DEV_API_PROXY_TARGET=http://localhost:8080" > web/portal/.env.development
+npx nx dev portal
+```
+
+Open **`http://localhost:4200/api-tokens/`** — not `:8080`, which serves no
+pages and answers `/api-tokens/` with the same empty `404` as any unrouted path.
+
+Both ports move if they have to (`PORT=` on the API, `--port` on Vite), but the
+Vite one is part of the redirect URI, so changing it means changing
+`redirect_uri` **and** the Discord registration to match.
+
+The proxy is what makes the browser see **one origin**, exactly as CloudFront
+does in production. That is the property the `SameSite=Lax` session cookie
+depends on; a separate backend port would break it in a way no test in this repo
+can see.
+
+`PORTAL_ENABLED` is the whole gate. Omit it and all four routes answer an empty
+`404` — which is what production does today.
+
+### 4. What you should see
+
+Click **Sign in with Discord** → Discord's consent screen (first time only;
+afterwards it is a bare redirect) → back at `/api-tokens/` showing your username
+and Discord ID. **Sign out** clears the session.
+
+Without the UI, the same thing over HTTP:
+
+```bash
+curl -sL -c jar.txt -b jar.txt -o /dev/null \
+     -w '%{url_effective} %{http_code}\n' \
+     http://localhost:4200/api-tokens/api/auth/login
+curl -s -b jar.txt http://localhost:4200/api-tokens/api/auth/me
+# → {"authenticated":true,"user_id":"...","username":"..."}
+```
+
+### 5. When it does not work
+
+`RUST_LOG=info` above is there so there is something to read.
+
+| symptom | cause |
+|---------|-------|
+| Discord's own page: **"Invalid OAuth2 redirect_uri"** | `redirect_uri` ≠ the registration. You never reached this service, so nothing is in its log |
+| `400 invalid_state`, log says `portal sign-in callback rejected` | the `portal_oauth_pending` cookie did not come back. Almost always: started on one port, returned on another |
+| the page says **"Sign-in could not be completed"** and the log says `portal sign-in refused by Discord error=invalid_scope` | the Developer Portal registration no longer matches `discord::SCOPE`. This is the SECOND place scope drift is caught, and the earlier one: Discord refuses at the authorize step, so the token-response check never runs. Fix the registration |
+| the same page text with `error=server_error` or `temporarily_unavailable` | Discord's own problem. Nothing to do but retry |
+| the page says **"Sign-in cancelled"** | only `access_denied` produces this — the visitor pressed Cancel. If you see it for anything else, the split in `callback` has regressed |
+| `400 invalid_query`, log says `portal sign-in callback was malformed` | the callback carried neither `code` nor `error`, or the query string could not be deserialized. A client-side fault; deliberately **not** a 5xx, so it cannot be used to manufacture alarm noise |
+| `500 sign_in_misconfigured` | the authorize URL is not a valid header value — almost always a stray character in `DISCORD_AUTHORIZE_URL` |
+| `502 discord_unavailable`, log says `stage="token exchange"` | wrong `client_secret`, or no outbound route to `discord.com` |
+| `502 discord_unavailable`, log says `stage="identity read"` | the exchange worked, `GET /users/@me` did not |
+| `502` and the log names the granted scopes | Discord granted more than `identify`. Deliberate refusal — see ADR 0010 |
+| `serve` exits at startup with `NoSource` | `PORTAL_ENABLED=true` with no secret source. Fatal on purpose: better than a sign-in button that answers `503` |
+| `404` on `http://localhost:8080/api-tokens/` | expected — `:8080` is the API, the pages are on `:4200` |
+| `serve` exits with `failed to bind: AddrInUse` | something already holds the port, often a `serve` from an earlier session. `PORT=8081 … serve` plus `npx nx dev portal --port 4201`, and change `redirect_uri` **and the Discord registration** to match — the browser-facing port is part of the URI |
+
+### 6. Without a Discord account
+
+`DISCORD_AUTHORIZE_URL` and `DISCORD_API_BASE` override the two endpoints, so the
+flow can be pointed at a stand-in serving `/oauth2/authorize`, `/oauth2/token`
+and `/users/@me`. This is a **test seam only**: `compute-stack.ts` sets neither,
+so the deployed handler always takes Discord's real endpoints. The integration
+suite (`tests/portal_auth.rs`) uses the same seam against a mock bound to
+loopback.
+
+### 7. Afterwards
+
+Remove the `localhost` redirect from the Discord application once you are done —
+or leave it and accept that any holder of that `client_secret` can complete a
+sign-in from their own machine.
+
 ## Env (Lambda)
 
 | Var | Purpose |
@@ -49,6 +186,10 @@ cargo lambda build -p prices-api --release --arm64 --features lambda
 | `CH_ENABLED` | build the mTLS CH client at cold start (default true; `0`/`false` to skip) |
 | `MTLS_SECRET_NAME`, `CH_DOMAIN` | mTLS bundle + endpoint (read by `prices-clickhouse::mtls`) |
 | `API_BASE_URL` | OpenAPI `servers` URL. Set by `ComputeStack` from `apiBaseUrl` in `infra/envs/production.json`; MUST include the stage path (`…/production`) |
+| `PORTAL_ENABLED` | serve the portal's backend routes (task 0183). **Defaults to false**; anything else is an empty `404` |
+| `PORTAL_OAUTH_SECRET_NAME` | Secrets Manager **name** of the Discord OAuth bundle (task 0186). Never the value — read through the Parameters & Secrets extension, and only when the portal is open |
+| `PORTAL_OAUTH_SECRET_FILE` | local-only alternative to the above: a path to the same JSON. Not set by CDK |
+| `DISCORD_AUTHORIZE_URL`, `DISCORD_API_BASE` | endpoint overrides, test/local seam only. Not set by CDK, so production always takes Discord's real endpoints |
 
 ## OpenAPI
 

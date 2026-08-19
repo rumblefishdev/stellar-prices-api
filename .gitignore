@@ -27,6 +27,15 @@ coverage
 .env.development
 .env.production
 
+# The portal's Discord OAuth bundle when it is being run locally (task 0186).
+# In production this lives in Secrets Manager and reaches the Lambda through the
+# Parameters & Secrets extension; `PORTAL_OAUTH_SECRET_FILE` is the local-only
+# alternative, and it holds a real client secret. Matched anywhere in the tree,
+# not just at the root, because the file goes wherever the developer runs from.
+.portal-oauth.json
+**/.portal-oauth.json
+portal-oauth*.local.json
+
 # Emitted by `npm run portal:api-types` from the published OpenAPI document, and
 # deliberately not carried (task 0185). That document covers only the `/v1` data
 # API — every portal route is absent from it by design, and

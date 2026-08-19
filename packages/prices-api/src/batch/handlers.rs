@@ -10,6 +10,7 @@ use crate::assets::dto::PriceResponse;
 use crate::assets::queries_ch;
 use crate::batch::dto::{BatchRequest, BatchResponse, MAX_BATCH};
 use crate::common::errors::ErrorEnvelope;
+use crate::common::extract::ValidatedJson;
 use crate::common::{cache_control, errors};
 use crate::identity::AssetIdentifier;
 use crate::state::AppState;
@@ -26,7 +27,9 @@ use crate::state::AppState;
     request_body = BatchRequest,
     responses(
         (status = 200, description = "Current prices + not-found list", body = BatchResponse),
-        (status = 400, description = "Empty/oversized batch or invalid identifier",
+        (status = 400, description = "Malformed/oversized body (`invalid_body`), empty or \
+                                      over-cap batch (`invalid_query`), or invalid identifier \
+                                      (`invalid_id`)",
          body = ErrorEnvelope),
         (status = 401, description = "Missing or invalid `x-api-key`", body = ErrorEnvelope),
         (status = 403, description = "API key missing, invalid, or not authorized for this API"),
@@ -34,7 +37,10 @@ use crate::state::AppState;
         (status = 500, description = "Query or upstream failure (`db_error`)", body = ErrorEnvelope),
     )
 )]
-pub async fn post_batch(State(state): State<AppState>, Json(req): Json<BatchRequest>) -> Response {
+pub async fn post_batch(
+    State(state): State<AppState>,
+    ValidatedJson(req): ValidatedJson<BatchRequest>,
+) -> Response {
     if req.assets.is_empty() {
         return errors::bad_request(errors::INVALID_QUERY, "assets must not be empty");
     }

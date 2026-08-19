@@ -1,30 +1,183 @@
-import { useEffect, useState } from 'react';
-import { Route, Routes } from 'react-router-dom';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { Route, Routes, useSearchParams } from 'react-router-dom';
 
-import { fetchPortalConfig, type PortalConfig } from '../api/portal';
+import {
+  fetchPortalConfig,
+  fetchSession,
+  signInUrl,
+  signOut,
+  type PortalConfig,
+  type PortalSession,
+} from '../api/portal';
 
 /**
- * The portal, slice 2 (task 0185).
+ * The portal, slices 2 and 3 (tasks 0185 and 0186).
  *
  * One route, plain HTML elements, and no styling worth the name. **Ugly is a
  * requirement here, not a concession**: anything presentable in this slice has
- * been taken from task 0193 and has delayed task 0186. MUI arrives with 0193.
+ * been taken from task 0193, where MUI arrives.
  *
- * What this page is actually for is the pipeline behind it — a change to this
- * file reaches `/api-tokens/` — and one property that is expensive to prove any
- * later: that a relative `fetch` from this bundle reaches the API **same-origin**
- * through task 0184's distribution.
+ * What this page is for is the pipeline behind it — a change to this file
+ * reaches `/api-tokens/` — plus two properties that are expensive to prove any
+ * later: that a relative `fetch` from this bundle reaches the API
+ * **same-origin** through task 0184's distribution, and now that the session
+ * cookie survives that round-trip in a real browser.
  *
  * Do not add a second route before task 0195 lands the per-prefix SPA fallback.
  * A hard refresh on a sub-path resolves against S3, which grants `s3:GetObject`
  * and not `s3:ListBucket`, so a missing key reads as `403 AccessDenied` rather
- * than a 404. With one route there is nothing to break yet.
+ * than a 404. Sign-in does not need one: every redirect in the flow lands back
+ * on `/api-tokens/`, which is a real object.
  */
 
 type Probe =
   | { state: 'loading' }
   | { state: 'ok'; config: PortalConfig }
   | { state: 'failed'; reason: string };
+
+type SessionState =
+  | { state: 'loading' }
+  | { state: 'ok'; session: PortalSession }
+  | { state: 'failed'; reason: string };
+
+/**
+ * Sign-in, as plain text and one control (task 0186).
+ *
+ * Rendered only when the portal is open — while the flag is off there is nothing
+ * behind the button, and the closed page must still offer nothing to click.
+ *
+ * Both the signed-out and cancelled states are **plain text, not screens**, per
+ * the task. "Cancelled" is not an error: the visitor pressed Cancel at Discord's
+ * consent screen, the callback redirected here with `?signin=cancelled`, and the
+ * only reasonable response is to say so and leave the button where it was.
+ */
+function SignIn() {
+  const [session, setSession] = useState<SessionState>({ state: 'loading' });
+  const [searchParams] = useSearchParams();
+  // Two landing states, from two literals the backend appends. `cancelled` is
+  // the visitor's own choice at Discord's consent screen; `failed` is any other
+  // OAuth error — a drifted scope registration, a Discord outage — which the
+  // backend also logs. Telling them apart on the page is the visible half of
+  // that split: calling a misconfiguration "cancelled" is what made it look
+  // like every visitor was changing their mind.
+  const signin = searchParams.get('signin');
+  const cancelled = signin === 'cancelled';
+  const failed = signin === 'failed';
+
+  // Cancels whichever `/auth/me` is currently in flight, whoever started it.
+  //
+  // `load` is called from two places — the mount effect and the sign-out
+  // handler — and the second used to drop the canceller it was handed, so that
+  // request had a `live` flag nothing could ever flip. Keeping the latest one
+  // here means both the supersede case (a second call while the first is
+  // pending) and the unmount case are covered by one mechanism, rather than by
+  // whichever caller happened to remember.
+  const cancelInFlight = useRef<(() => void) | null>(null);
+
+  const load = useCallback(() => {
+    cancelInFlight.current?.();
+    let live = true;
+    const cancel = () => {
+      live = false;
+    };
+    cancelInFlight.current = cancel;
+
+    fetchSession()
+      .then((result) => {
+        if (live) setSession({ state: 'ok', session: result });
+      })
+      .catch((error: unknown) => {
+        if (live)
+          setSession({
+            state: 'failed',
+            reason: error instanceof Error ? error.message : String(error),
+          });
+      });
+    return cancel;
+  }, []);
+
+  // Same StrictMode guard as the config probe below: React mounts twice in
+  // development, and without it the second mount's response can land after the
+  // first and overwrite it. The cleanup reads the ref rather than closing over
+  // this call's canceller, so it also cancels a request the sign-out handler
+  // started.
+  useEffect(() => {
+    load();
+    return () => cancelInFlight.current?.();
+  }, [load]);
+
+  const onSignOut = () => {
+    setSession({ state: 'loading' });
+    signOut()
+      // Re-ask rather than assuming. The server is what decides whether the
+      // cookie is gone, and asking it costs one request on an action nobody
+      // performs in a loop.
+      .then(() => load())
+      .catch((error: unknown) =>
+        setSession({
+          state: 'failed',
+          reason: error instanceof Error ? error.message : String(error),
+        }),
+      );
+  };
+
+  if (session.state === 'loading') {
+    return <p>Checking whether you are signed in…</p>;
+  }
+
+  if (session.state === 'failed') {
+    return (
+      <>
+        <p>
+          Could not check your sign-in status: <code>{session.reason}</code>
+        </p>
+        {/* The control stays. A failed `/auth/me` usually means the backend is
+            unreachable, in which case signing in will fail too — but it can
+            also be one bad response, and a page that reports an error while
+            removing the only thing the visitor could do about it is a dead end
+            they can leave only by guessing at a reload. Signing in is a fresh
+            top-level navigation, so it does not depend on the request that just
+            failed. */}
+        <a href={signInUrl()}>Sign in with Discord</a>
+      </>
+    );
+  }
+
+  if (session.session.authenticated) {
+    return (
+      <>
+        {/* The acceptance criterion, rendered: username and ID. The ID is the
+            account key (ADR 0010) and the username is display only — it comes
+            from the signed session cookie and is refreshed at each sign-in. */}
+        <p>
+          Signed in as <strong>{session.session.username}</strong> (ID{' '}
+          <code>{session.session.user_id}</code>)
+        </p>
+        <button type="button" onClick={onSignOut}>
+          Sign out
+        </button>
+      </>
+    );
+  }
+
+  return (
+    <>
+      {cancelled && <p>Sign-in cancelled.</p>}
+      {failed && (
+        <p>
+          Sign-in could not be completed. This is not something you did — try
+          again, and tell us if it keeps happening.
+        </p>
+      )}
+      <p>You are not signed in.</p>
+      {/* A link, not a button with an onClick. The OAuth flow is a top-level
+          navigation to discord.com and back; `fetch` cannot perform one, and
+          the session cookie is `SameSite=Lax` precisely so that this navigation
+          carries it. `href` is relative, so it stays same-origin. */}
+      <a href={signInUrl()}>Sign in with Discord</a>
+    </>
+  );
+}
 
 function PortalHome() {
   const [probe, setProbe] = useState<Probe>({ state: 'loading' });
@@ -58,8 +211,9 @@ function PortalHome() {
       {/* The closed state is the one that ships. Task 0194 flips the flag,
           after task 0189's eligibility gate passes — so for now this is what
           every visitor sees, and it must say so plainly and offer nothing to
-          click. No sign-in button: there is nothing behind it, and task 0186 is
-          what puts one here. */}
+          click. No sign-in control: the backend answers those routes with an
+          empty 404 while the flag is off, so a button here would be a button
+          that cannot work. */}
       {probe.state === 'ok' && !probe.config.enabled && (
         <p>
           This is where you will sign in and issue an API key. It is not yet
@@ -67,12 +221,9 @@ function PortalHome() {
         </p>
       )}
 
-      {/* Reachable only once PORTAL_ENABLED is true. Deliberately empty of
-          function: sign-in is task 0186's, key issue is task 0187's. It exists
-          so that flipping the flag is visibly not a no-op. */}
-      {probe.state === 'ok' && probe.config.enabled && (
-        <p>The portal is open. Sign-in arrives with the next slice.</p>
-      )}
+      {/* Reachable only once PORTAL_ENABLED is true. Task 0186 put sign-in
+          here; issuing a key is task 0187's. */}
+      {probe.state === 'ok' && probe.config.enabled && <SignIn />}
 
       {/* A failure here is not cosmetic: it means the bundle could not reach
           its own backend, which is either the behaviour ordering in task 0184's
@@ -88,11 +239,11 @@ function PortalHome() {
 
       {/* The same-origin proof, and the reason it is this route rather than the
           `/api-tokens/api/health` named in task 0185's criteria: that route does
-          not exist. The portal backend maps exactly one path, `/config`
-          (`portal/mod.rs`), and task 0183's gate answers an empty 404 on every
-          other path under the prefix — so a `/health` probe would render a
-          failure whether or not anyone implemented it. `/config` answers 200 in
-          BOTH flag states, which is what makes it the honest probe. */}
+          not exist. The portal backend maps `/config` and, from task 0186,
+          `/auth/*`; task 0183's gate answers an empty 404 on every other path
+          under the prefix — so a `/health` probe would render a failure whether
+          or not anyone implemented it. `/config` answers 200 in BOTH flag
+          states, which is what makes it the honest probe. */}
       {/* Three branches, not a two-way ternary on `=== 'ok'`. While the probe
           is in flight the answer is not yet known, and a ternary claimed
           "unsuccessfully" on first paint — so the page said it had failed to

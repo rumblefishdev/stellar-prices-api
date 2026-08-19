@@ -40,7 +40,18 @@ const BASE_PATH = '/api-tokens/';
  * `/{stage}` and would need a rewrite here that production does not perform.
  */
 const PROXIED_PATHS = [
-  // The portal's own backend (task 0183's gate, keyless by design).
+  // The portal's own backend (task 0183's gate, keyless by design). Covers
+  // task 0186's `/auth/*` by prefix, which matters for more than reachability:
+  // the sign-in round-trip only works locally if the browser sees ONE origin, so
+  // that the `SameSite=Lax` session cookie set by the callback is sent back on
+  // the next request. A separate backend port would break that in a way no test
+  // in this repo can see.
+  //
+  // ⚠️ For the sign-in round-trip, `DEV_API_PROXY_TARGET` must point at a LOCAL
+  // `cargo run --bin serve` (with `PORTAL_ENABLED=true` and a
+  // `PORTAL_OAUTH_SECRET_FILE`), not at the CloudFront distribution — production
+  // runs with the portal closed, so proxying there gets an empty 404 from the
+  // gate. See docs/runbooks/portal-oauth-deploy-prep.md § 4.
   '/api-tokens/api',
   // The data routes, for when a portal page needs to show a real API response.
   '/v1',

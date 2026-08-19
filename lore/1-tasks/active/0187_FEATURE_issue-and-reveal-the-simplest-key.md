@@ -2,7 +2,7 @@
 id: "0187"
 title: "Issue the simplest possible key and show it — AWS is the source of truth, no database"
 type: FEATURE
-status: backlog
+status: active
 related_adr: ["0008", "0010"]
 related_tasks: ["0183", "0157", "0158", "0160", "0186", "0188", "0190", "0194"]
 tags: [layer-backend, priority-high, effort-medium, milestone-M3, epic-self-service-onboarding, api-gateway, usage-plan, iam, slice-4]
@@ -21,6 +21,17 @@ history:
       lookup as issue. Deliberately built with **no registry table** — [[0158]]'s
       own argument is that API Gateway is the arbiter, and nothing in this slice
       needs a row.
+  - date: "2026-08-18"
+    status: active
+    who: akot
+    note: >
+      Activated on top of [[0185]] (#218) and [[0186]] (#220), both merged to
+      `develop`. The signed session cookie [[0186]] issues is exactly what this
+      slice reads to know whose key to issue, so the prerequisite is in place and
+      the round-trip is verified locally. Carry [[0186]]'s one open criterion
+      forward: the session **through CloudFront** is unverified until [[0205]]'s
+      deploy, and these routes sit under the same depth-3 prefix — so a depth-3
+      `403` against the deployed gateway belongs to [[0205]], not here.
 ---
 
 # Issue a key, and show it

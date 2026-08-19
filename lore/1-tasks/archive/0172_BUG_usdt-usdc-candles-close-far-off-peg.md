@@ -2,15 +2,30 @@
 id: "0172"
 title: "USDT/USDC candles close at ~0.14 instead of ~1.00 — 891 days of real, high-volume trades at an impossible stablecoin price"
 type: BUG
-status: active
+status: completed
 related_adr: []
-related_tasks: ["0165", "0139", "0116", "0144", "0026"]
+related_tasks: ["0165", "0139", "0116", "0144", "0026", "0182", "0196", "0201", "0207"]
 tags:
   ["priority-high", "effort-medium", "clickhouse", "data-correctness", "enrichment", "sdex", "milestone-M2"]
 milestone: 2
 links:
   - "../../../packages/prices-clickhouse/schema/views.sql"
 history:
+  - date: 2026-08-18
+    status: completed
+    who: okarcz
+    note: >
+      CLOSED. The last two criteria closed today. [[0182]] ran and is verified —
+      567,760 candles corrected across all five forever granularities, implied
+      rate 0.1494-0.1529 on every tier against a flat 1.000000 baseline, and the
+      _1h monthly series shows par for exactly 15 months then the June 2022 break
+      to 0.134, reproducing this task's own measurement from the opposite
+      direction. The sweep criterion was then answered on prod: only three assets
+      are ever a reference leg, and only USDC is pinned at 1.0 — legitimately, it
+      is the peg. The defect was ONE IDENTITY, not a class. BE told; nothing they
+      deployed ever served a wrong value. Spawned [[0207]] — the same sweep found
+      218 XLM-quoted rows whose close_usd contradicts the candle by up to 5.1M x,
+      a different defect and not the peg class this task covers.
   - date: 2026-08-10
     status: backlog
     who: okarcz
@@ -526,17 +541,68 @@ this is resolved — 0165 used it as one.
   code comment describing that case is wrong about the failure mode
 - **[[0168]]** — hold note added: it must not be recorded as resolving this task
 
+## ✅ THE SWEEP — 2026-08-18, and the defect is USDT-SPECIFIC
+
+The open question this task carried since it was filed: is the wrong `close_usd`
+a USDT quirk or a class? Measured on prod once [[0182]] had corrected history,
+across every asset ever used as a pricing reference:
+
+| quote asset | candles | implied rate | stddev |
+|---|---|---|---|
+| USDC (3) | 771,946 | 1.000039 | 0.00042181 |
+| USDT (111) | 44,733 | 0.522080 | 0.39470220 |
+| XLM (4) | 11,012,703 | 0.656471 | 1551.63440841 |
+
+**Only three assets are ever a reference leg**, and the defect's fingerprint is a
+rate **pinned at 1.0 with near-zero variance** — a peg applied rather than
+measured. Only USDC shows it, and USDC legitimately *is* $1 (verified at par
+against `usd_rate` to ±0.0015, recorded above). USDT now varies, which is this
+task's fix working; the 0.52 mean spans the par years and the depeg. XLM is
+nowhere near pegged.
+
+**Nothing else is carrying a peg it should not.** The class question is answered:
+one identity, as [[0196]]'s blast-radius measurement already suggested.
+
+### ⚠️ But the sweep found something else — spawned as [[0207]]
+
+XLM's stddev of 1551 against a p999 of 0.548 is a tail, not a shift: **218 rows
+of 11,012,703 have `close_usd / close > 1`, worst 5,149,014**. XLM never traded
+above ~$0.9, so those claim more USD than the candle's own quote leg supports.
+
+Dust rounding cannot do this — it produces zeros, never magnitude. A ratio that
+large needs a real `close_usd` against a near-zero `close`, i.e. a USD value that
+did not come from `rate × close`. Prime suspect is the **oracle tier**, which
+runs first, wins where it applies, and writes `close_usd` directly rather than
+deriving it from the candle. Same shape as [[0168]], same weak point [[0173]]
+records.
+
+**Out of scope here** — this task is the peg class, and that is closed. Filed as
+[[0207]] rather than widening the scope of a task that is otherwise complete.
+
 ## Acceptance Criteria
 
-- [ ] Root cause identified and stated (writer-side id, ingestion scaling, leg
-      swap, or something else), with the falsified hypotheses above left on the
-      record so they are not re-run.
-- [ ] Whether the defect is USDT-specific or a class affecting other assets —
-      a sweep for assets whose `close_usd` is implausible for their type.
-- [ ] Correction plan for the 891 existing daily candles (and their 1h/coarse
-      counterparts), or an explicit decision to leave history as-is.
-- [ ] Regression test on the 26.3.10.60 pin.
-- [ ] BE notified if any published TVL was affected.
+- [x] **Root cause identified and stated** — ✅ 2026-08-12. USDT @ `GCQTGZQQ…TG6V`
+      genuinely depegged in June 2022; the candles were right and the `$1` peg was
+      the bug. Four falsified hypotheses left on the record above, plus the
+      corrected "it IS thin" premise and three independent controls.
+- [x] **USDT-specific or a class** — ✅ 2026-08-18, see the sweep section above.
+      Only three assets are ever a reference leg; only USDC is pinned at 1.0 and
+      it legitimately is $1. One identity, not a class. ⚠️ The sweep did surface a
+      different defect on 218 XLM-quoted rows — spawned as [[0207]].
+- [x] **Correction plan for the existing candles** — ✅ that was [[0182]], and it
+      **ran 2026-08-18**: 567,760 rows re-opened and recomputed across all five
+      forever granularities, verified at 0.1494-0.1529 on every tier where the
+      baseline was a flat `1.000000`. History below 2021-02-07 deliberately left
+      at `close × $1`, which is correct there.
+- [x] **Regression test on the 26.3.10.60 pin** — ✅
+      `usdt_quoted_candles_pivot_on_the_measured_rate_not_a_dollar_peg`
+      (`packages/enrichment-worker/tests/ch_enrich_it.rs:1124`), asserting USDT
+      prices at its market value and that an asset quoted in USDT pivots through
+      it rather than through a dollar.
+- [x] **BE notified** — ✅ 2026-08-18. No published TVL was ever affected: BE had
+      not deployed the consuming changes, confirmed 2026-08-13. Told them the
+      corrected window anyway, and separately that ~54M newly-priced candles will
+      make history appear in their charts.
 - [ ] **The fix is actually in effect on prod, not merely merged.** Both writer
       paths are stopped in code, but two row sets still assert the old $1:
       - [x] [[0196]] — **DONE 2026-08-13.** 46,423 `oracle_prices` rows and

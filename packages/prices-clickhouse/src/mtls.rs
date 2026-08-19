@@ -107,6 +107,34 @@ const EXTENSION_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 /// Lambda always sets that variable; a missing value points at a non-Lambda
 /// runtime and is surfaced as [`MtlsError::MissingEnv`].
 pub async fn fetch_bundle_from_extension(secret_name: &str) -> Result<MtlsBundle, MtlsError> {
+    let secret_string = fetch_secret_string(secret_name).await?;
+    let parsed: BundleJson =
+        serde_json::from_str(&secret_string).map_err(|e| MtlsError::BundleDecode(e.to_string()))?;
+    Ok(MtlsBundle {
+        cert_pem: parsed.cert,
+        key_pem: parsed.key,
+        ca_pem: parsed.ca,
+    })
+}
+
+/// Fetch **any** secret's `SecretString` through the Parameters and Secrets
+/// Lambda Extension, with no assumption about what is inside it.
+///
+/// Extracted from [`fetch_bundle_from_extension`], which is now one caller of
+/// it. The second is `prices-api`'s portal sign-in (task 0186), whose Discord
+/// client secret lives in Secrets Manager for the same ADR 0007 reason the mTLS
+/// material does and must reach the Lambda by the same route: the extension's
+/// in-process cache, so a warm container never calls Secrets Manager on the hot
+/// path, and no secret VALUE is ever an environment variable.
+///
+/// Kept here rather than re-implemented there deliberately. The endpoint URL,
+/// the token header, the two timeouts and the "extension unreachable" diagnosis
+/// are one mechanism with one set of operational lessons; a second copy in
+/// another crate is a second thing to fix when AWS moves the path.
+///
+/// The returned `String` is secret material — do not log it, and prefer parsing
+/// it into a type with a redacting `Debug` (as both callers do).
+pub async fn fetch_secret_string(secret_name: &str) -> Result<String, MtlsError> {
     let token = require_env("AWS_SESSION_TOKEN")?;
     let client = reqwest::Client::builder()
         .connect_timeout(EXTENSION_CONNECT_TIMEOUT)
@@ -135,17 +163,10 @@ pub async fn fetch_bundle_from_extension(secret_name: &str) -> Result<MtlsBundle
         .json()
         .await
         .map_err(|e| MtlsError::Fetch(format!("response body parse failed: {e}")))?;
-    let secret_string = body
-        .get("SecretString")
+    body.get("SecretString")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| MtlsError::Fetch("response missing `SecretString` field".into()))?;
-    let parsed: BundleJson =
-        serde_json::from_str(secret_string).map_err(|e| MtlsError::BundleDecode(e.to_string()))?;
-    Ok(MtlsBundle {
-        cert_pem: parsed.cert,
-        key_pem: parsed.key,
-        ca_pem: parsed.ca,
-    })
+        .map(str::to_string)
+        .ok_or_else(|| MtlsError::Fetch("response missing `SecretString` field".into()))
 }
 
 /// Assemble a [`clickhouse::Client`] that talks HTTPS + mTLS to

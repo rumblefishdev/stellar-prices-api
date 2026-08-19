@@ -19,7 +19,22 @@ async fn main() {
         .with_target(false)
         .init();
 
-    let config = AppConfig::from_env();
+    let mut config = AppConfig::from_env();
+
+    // Portal sign-in credentials (task 0186), read through the same Parameters &
+    // Secrets extension as the mTLS bundle below — so no secret VALUE is ever an
+    // environment variable (ADR 0007, Tranche 3 AC 6).
+    //
+    // A no-op while `PORTAL_ENABLED` is false, which is production for the whole
+    // of the portal's build: see `AppConfig::load_portal_oauth` for why loading
+    // it unconditionally would let a missing portal secret take out `/v1`. With
+    // the portal open, a missing or malformed secret fails init on purpose —
+    // that surfaces as `Init Errors` at deploy rather than as a `503` under a
+    // sign-in button.
+    config
+        .load_portal_oauth()
+        .await
+        .expect("failed to load portal OAuth credentials at cold start");
 
     // Build the CH client eagerly at cold start; it is Arc-backed and shared via
     // AppState across warm invocations. `client_from_lambda_env` reads

@@ -496,9 +496,88 @@ NNN row(s) re-opened by the USD reset, NNN recomputed
 
 They should match. If `rows_reset` exceeds `rows_enriched` the tool prints a loud
 block on stderr naming the shortfall — that run zeroed values it could not
-recompute. **Stop; do not continue to the next table.** Roll that table back from
-its snapshot (Rollback section below), then check `--pivot-window-s` against the
-table's bucket width.
+recompute. **Stop; do not continue to the next table.**
+
+> ⚠️ **Triage before you roll back.** The shortfall has a known false positive —
+> see the next section. On the 2026-08-18 `_1d` run it fired for 8 rows and the
+> correct action was to continue, not to roll back.
+
+### The shortfall has a known false positive: a correct value of zero
+
+`rows_enriched` is a **population difference, not a count of rows written**. The
+pass measures `candidates_before` _after_ the reset has re-opened its rows
+(`ch_enrich.rs:986-996` — deliberately, or the repair would score itself zero),
+then accumulates the drop in the number of rows still at `close_usd = 0`. So a
+row the pivot writes with a computed value of **zero** never leaves the candidate
+population and is never counted as enriched — even though it was recomputed
+exactly as designed. The tier then re-selects it, makes no progress, and stops.
+
+`close_usd = r.usd × close`, stored as `Decimal(38, 14)`. Two shapes produce a
+legitimate zero:
+
+| shape                  | before the reset | after                                                        |
+| ---------------------- | ---------------- | ------------------------------------------------------------ |
+| `close = 0`            | `0 × $1` = 0     | `0 × rate` = 0 — the reset re-opened a row it did not change |
+| `close` below ~`4e-14` | ~`1e-14`         | underflows to 0 at 14 decimal places                         |
+
+Both are dust — tokens at a price the stored scale cannot represent once
+multiplied by a sub-$1 rate.
+
+**Triage query.** Swap in the table you just ran. It asks the question that
+matters, which is not _how many rows are at zero_ but _did anything with a usable
+price end up at zero_:
+
+```sql
+SELECT count() AS stranded_with_real_close
+FROM prices.price_ohlcv_1d FINAL
+WHERE quote_asset_id = 111
+  AND timestamp >= toDateTime(1612656000)
+  AND close_usd = 0
+  AND close > 0.00000000000005
+```
+
+- **0** — every stranded row is dust. The shortfall is the false positive. **Do
+  not roll back:** those rows had no representable value to lose, and a re-run
+  reproduces the result identically, because the cause is the data and not the
+  flags.
+- **above 0** — the genuine failure this check exists for. Roll that table back
+  from its snapshot and stop.
+
+⚠️ **Do not reach for `--pivot-window-s` first.** The stderr block suggests it,
+and it is the right suspect when a whole span fails, but it is unrelated to this
+case — the window is never what strands a dust row. Run the triage query before
+changing any flag.
+
+⚠️ **List the rows before deciding**, so "dust" is something you saw rather than
+something you assumed:
+
+```sql
+SELECT timestamp, asset_id, source, close, volume_base, volume_quote, close_usd
+FROM prices.price_ohlcv_1d FINAL
+WHERE quote_asset_id = 111
+  AND timestamp >= toDateTime(1612656000)
+  AND close_usd = 0
+ORDER BY timestamp
+```
+
+⚠️ A threshold picked by eye will mislead you here. A first pass at the triage
+used `close < 1e-11` and returned 59 — three orders of magnitude above where the
+multiplication actually underflows, so it counted dust rows that had priced
+perfectly well. Anchor the bound on the arithmetic (`rate × close` rounding to
+zero at 14 dp), not on what looks small.
+
+**Worked example — 0182, `price_ohlcv_1d`, 2026-08-18.** 41,573 re-opened, 41,565
+recomputed, shortfall 8. All eight had `close` of 0, 1e-14, 2e-14 or 3e-14. Five
+were already at `close_usd = 0` before the reset touched them — re-opened without
+being changed — and three fell from ~1e-14 to 0. `stranded_with_real_close`
+returned 0, the run was correct, and the campaign continued. `_1h` (357,274
+reset) and `_4h` (157,858) produced no shortfall at all.
+
+> The check fires on _any_ excess, while the rationale it is built on
+> (`ch_enrich.rs:407`) describes `rows_reset` **far exceeding** `rows_enriched`.
+> Strictness is the right default for a guard against data destruction, but it
+> means 8 rows in 41,573 — 0.02% — produce a stop-everything message. Read the
+> shortfall as _"look at these rows"_, not as _"the run failed"_.
 
 Then assert the defect cannot still be present. For the USDT case the fingerprint
 is an implied rate of ~1.0:
