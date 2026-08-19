@@ -125,6 +125,29 @@ history:
       alone, with two procedure corrections recorded (SYSTEM UNFREEZE is
       disabled server-side; the success signal is du, not the entry count).
       Spawned 0208. Remaining: the guard test and volume_quote_usd.
+  - date: 2026-08-19
+    status: active
+    who: okarcz
+    note: >
+      BE closed the last open question and corrected one of our claims. They do
+      NOT read volume_quote_usd — verified against their merged code, the only
+      prices surfaces they consume are price_usd_series and price_usd_series_1h
+      and the only columns are the identity triple, bucket and close_usd. So the
+      scope stays close_usd and the criterion closes as "documented, not
+      widened"; since the reset zeroed both USD columns together there is no
+      mismatch left in the repaired span, and the pre-epoch window's $1
+      volume_quote_usd is correct for that era. Correction to our own record:
+      "nothing they deployed ever served the inflated numbers" was wrong. Their
+      release shipped before the 2026-08-18 history repair — the list and detail
+      pages were never affected because the writer fix preceded their deploy,
+      but the 30D/1Y charts on USDT-legged pools did serve the inflated history
+      in the interim. Compute-at-read with no caching, so they corrected
+      themselves when the repair landed and nothing follows. They also measured
+      the 0201 fill from the consumer side (52,580 pools pinned 2026-08-19):
+      priceable-ever 51,935 to 52,112 (99.1%), never-priced down to 468,
+      priceable-90d 71.0%, 48h flat as expected — external corroboration for
+      0201's closure call. USDT exclusion lifted from their Horizon
+      cross-validation. Only the re-introduction guard test now remains.
 ---
 
 # `close_usd` is ~7.4× too high on every USDT-quoted candle ever written
@@ -241,11 +264,9 @@ read history, and that history is equally wrong whether they ship now or later.
 The repair is additive and non-destructive, so it lands underneath a deployed
 consumer with no coordination.
 
-⚠️ **Open question sent back to BE, not yet answered:** do they read
-`volume_quote_usd`? It is preserved write-once, so a row this task corrects keeps
-a `volume_quote_usd` computed at $1 and the row then carries two USD columns
-disagreeing by 7.4×. Their answer decides whether scope widens or the mismatch is
-documented.
+~~⚠️ **Open question sent back to BE, not yet answered:** do they read
+`volume_quote_usd`?~~ ✅ **ANSWERED 2026-08-19 — no. Document and leave it.**
+See the BE answers dated 2026-08-19 below.
 
 ## Estimate given to BE 2026-08-13 — ~2-4 h of run, 2-4 working days end to end
 
@@ -306,11 +327,14 @@ scheduled death.
   by the reset step). [[0201]]'s pass runs first without `--reset-*`, then
   0182's reset pass over a table at its floor. Full reasoning in the decision
   section after the dry run.
-- [ ] **Zeroing first.** Enrichment skips `close_usd > 0`, so the rows must be
-  reset to 0 (or written with a higher `version`) before the corrected pivot can
-  fill them. On a `ReplacingMergeTree(version)` the version route is safer than a
-  mutation; confirm against the [[0097]] pre-roll notes (RMT ties need
-  DELETE-first).
+- [x] **Zeroing first — DECIDED and shipped 2026-08-13: the version route.**
+  Enrichment skips `close_usd > 0`, so rows must be re-opened before the
+  corrected pivot can fill them. `reset_sql` re-inserts them at `version + 1`
+  with both USD columns at 0 — an insert, not `ALTER … UPDATE`, so it composes
+  with the `FREEZE` snapshot (the pre-reset row survives under its old version
+  and `ATTACH PARTITION` restores it). Avoids the RMT-tie problem the [[0097]]
+  pre-roll notes flag for the DELETE route. Ran on prod 2026-08-18: 567,760
+  rows re-opened, `rows_reset <= rows_enriched` on every table.
 
 ### ⚠️ The 0114 driver gap — it reports these rows as CLEAN
 
@@ -921,6 +945,64 @@ is longer than an hourly sweep should leave a candle unpriced. Either enrichment
 lag or the pivot finding no USDT/USDC reference inside its default 1-day window.
 Not damage from this task, and it postdates the run entirely.
 
+## ✅ BE answers 2026-08-19 — the last question closed, and one of our claims corrected
+
+Their 2026-08-13 reply on `volume_quote_usd` never arrived; this is the restated
+version, plus a correction and an independent measurement of the fill.
+
+**1. `volume_quote_usd` — no, they do not read it. Document the inconsistency
+and leave it.** Verified against their merged code: the only prices surfaces
+they read are `price_usd_series` and `price_usd_series_1h`, and the only columns
+are the identity triple, the bucket, and `close_usd`. They never touch
+`price_ohlcv_*` or any volume column. They have recorded the same trap in their
+own notes so future work there does not reach for it either.
+
+→ **This closes the question, and it closes it as "no widening".** The reset
+already zeroed both columns together (design decision 3 above), so within the
+repaired span the two figures are coherent anyway. What remains documented rather
+than fixed is the **pre-epoch window**: rows below 2021-02-07 keep a
+`volume_quote_usd` computed at $1, which for that era is correct, so there is no
+live inconsistency there either. The mismatch this question was filed about does
+not exist in the data as it now stands.
+
+**2. ⚠️ CORRECTION TO OUR OWN RECORD — "nothing they deployed ever served the
+inflated numbers" is WRONG.** BE's release shipped **before** the 2026-08-18
+history repair, not after. The distinction they drew:
+
+- **List and detail pages: never affected.** Our writer fix (2026-08-13)
+  preceded their deploy, so the 48-hour `close_usd > 0` path always served
+  correct USDT values.
+- **30D/1Y charts on USDT-legged pools: DID serve the inflated history**, for
+  the interim between their deploy and 2026-08-18.
+
+No action follows — their charts are compute-at-read with no caching, so they
+corrected themselves the moment the repair landed, and nothing on their side
+cached or derived from `close_usd`. But the acceptance-criterion line below
+claimed a clean record that we did not have, and the framing in the BE-answers
+section of 2026-08-13 ("not an incident with live blast radius") was true when
+written and stopped being true when they deployed. **A statement about a
+consumer's exposure has a shelf life; this one outlived its premise.**
+
+**3. Independent confirmation of the [[0201]] fill, measured on their side**
+(pinned 2026-08-19, 52,580 pools):
+
+| metric | before | after |
+|---|---|---|
+| priceable-ever | 51,935 | **52,112** (99.1%) |
+| never-priced | — | **468** |
+| priceable-90d | — | 71.0% |
+| priceable-48h | — | flat, as expected — it never read history |
+
+The 48h figure staying flat while the deeper windows move is exactly the
+signature the repair should produce, arrived at from the consumer side without
+reference to our numbers. ⚠️ Worth carrying into **[[0201]]'s closure call**,
+which is the operator's own — this is external corroboration of the 53,965,024
+figure that does not depend on our own enumeration.
+
+**4. They have lifted the USDT exclusion from their Horizon cross-validation**,
+and report the correction signature on USDT-legged pools matches expectations.
+From their side the USDT thread is closed.
+
 ## 🚧 What is NOT done
 
 Remaining, in order:
@@ -939,8 +1021,10 @@ Remaining, in order:
 5. ~~**The run**~~ ✅ **done 2026-08-18** — `_1h` first and reviewed before the
    rest, `--pivot-window-s 2678400` throughout. See the results section above.
 6. ~~**Verify** the implied-rate probe moves off 1.0~~ ✅ **done** — all five
-   tiers at ~0.15 for 2026. ⛔ **BE not yet told**, and the same message should
-   chase the `volume_quote_usd` question open since 2026-08-13.
+   tiers at ~0.15 for 2026. ✅ **BE told 2026-08-18** and they replied
+   2026-08-19: `volume_quote_usd` closed (they read `close_usd` only), the fill
+   independently confirmed on their side, and one of our claims corrected. See
+   the BE-answers section dated 2026-08-19.
 7. ~~**UNFREEZE and reclaim**~~ ✅ **done 2026-08-19** — all 485 released
    (335 `repair_0182_mid_*` + 150 stale `repair_0114_*`), `shadow/` 31G → 7.7M
    of empty husks → swept to `increment.txt` alone. See the cleanup section for
@@ -1051,15 +1135,24 @@ taking a snapshot, not to releasing one — provided you have a `default` path.
       below its reference's first candle rather than trusting the operator.
 - [x] **BE notified** — ✅ 2026-08-18. Told them: corrected from 2021-02-07 on,
       all five granularities, 567,760 candles; values below that boundary
-      unchanged and already correct; nothing they deployed ever served the
-      inflated numbers. Also warned them that ~54M previously-unpriced candles
-      now carry values, which is directly visible to them since they render
-      `--` on a `close_usd = 0` miss. The `volume_quote_usd` question was sent
-      again in the same message.
+      unchanged and already correct. Also warned them that ~54M previously-
+      unpriced candles now carry values, which is directly visible to them since
+      they render `--` on a `close_usd = 0` miss.
+      ⚠️ **One thing we told them was wrong.** We said *"nothing they deployed
+      ever served the inflated numbers"*; BE corrected it 2026-08-19 — their
+      release shipped before the history repair, so the **30D/1Y charts on
+      USDT-legged pools did serve the inflated history** in the interim. The
+      list and detail pages never did. Self-corrected on their side
+      (compute-at-read, no caching), so no action follows.
 - [x] **Snapshots removed** — ✅ 2026-08-19. All 485 released
       (`repair_0182_pre_` 2026-08-18, then `repair_0182_mid_` + 150 stale
       `repair_0114_`), `shadow/` 31G → `increment.txt` alone. ⚠️ Two procedure
       corrections recorded in the cleanup section: `SYSTEM UNFREEZE` is disabled
       server-side, and the success signal is `du`, not the entry count.
-- [ ] `volume_quote_usd` resolved — widen scope, or document the two-column
-      mismatch. Blocked on BE's answer to the question sent 2026-08-13.
+- [x] `volume_quote_usd` resolved — ✅ **2026-08-19, documented, not widened.**
+      BE confirmed against their merged code that they read `close_usd` only,
+      from `price_usd_series`/`price_usd_series_1h`, and never touch
+      `price_ohlcv_*` or any volume column. The reset zeroed both USD columns
+      together, so within the repaired span they are coherent; the pre-epoch
+      window keeps a `volume_quote_usd` at $1, which is correct for that era.
+      No mismatch remains in the data to document.
