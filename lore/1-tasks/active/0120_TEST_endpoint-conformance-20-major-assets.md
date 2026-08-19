@@ -88,15 +88,21 @@ after 0072 and [[0119]].
 
 - [x] The 20-asset list is fixed, documented in-task, and covers all three
       identifier forms
-- [ ] All 7 route groups exercised for every asset; every response validates
-      against the OpenAPI spec
+- [x] All 7 route groups exercised for every asset; every response validates
+      against the OpenAPI spec (0 schema failures in the 2026-08-19 run)
 - [ ] No documented response field is a stub/sentinel for a liquid asset
-- [ ] OHLCV invariants asserted (OHLC ordering, bucket alignment, no dupes)
-- [ ] Cursor pagination on `GET /assets` proven exhaustive and duplicate-free
-- [ ] `POST /prices/batch` agrees with per-asset `/price` for the same assets
-- [ ] Suite is re-runnable and its output is citable evidence for [[0128]]
-- [ ] Any defect found is fixed or spawned as its own task — a documented
-      failure list is not a pass
+      (**failing on production** — deferred to [[0207]], [[0208]], [[0209]];
+      re-run must go green after those land)
+- [x] OHLCV invariants asserted (OHLC ordering, bucket alignment, no dupes —
+      all pass wherever data exists)
+- [x] Cursor pagination on `GET /assets` proven exhaustive and duplicate-free
+      (20 pages, 3880 distinct assets, no dup identity triples)
+- [x] `POST /prices/batch` agrees with per-asset `/price` for the same assets
+      (all 19 priced assets equal at matching timestamps)
+- [x] Suite is re-runnable (`npm run conformance:0120`) and its JSON report is
+      citable evidence for [[0128]]
+- [x] Any defect found is fixed or spawned as its own task — spawned
+      [[0207]]–[[0211]]
 
 ## Fixed asset list (AC 1)
 
@@ -132,22 +138,37 @@ Selection rules applied:
   carries `contract_address` for soroban rows), so the contract slot must be a
   soroban-native asset.
 
-### Preliminary findings from list derivation (to verify in the suite run)
+## Suite and run results
 
-1. **Canonical USDC is absent from `GET /v1/assets`** (search returns 14
-   impostors, not Circle's issuer) and `GET …/price` → 404 `no current price`,
-   while `GET /v1/assets/{id}` resolves it fine. Likely cause: volume/current
-   price attribute to the *base* asset of a pair only, and USDC is almost
-   always the quote.
-2. **`price_usd` is `"0"` for every asset without an SDEX (or sometimes
-   Aquarius) source** — 88/200 top-volume rows, including XLM and EURC, carry
-   `price_usd: "0"` with populated `vwap_24h` and `sources`. The 0072 runbook
-   gate (`sources` non-empty) passes while the headline price is still a stub.
-3. **Top-volume soroban assets have empty `asset_code`** and one (`CBIJ…`,
-   ~$29.5k/24h) reports `volume_24h_usd > 0` with `sources: {}`.
-4. `GET …/ohlcv?granularity=1d&limit=3` returned a single bucket — default
-   window may be narrower than `limit` implies; suite must pass explicit
-   `start`/`end`.
+Suite: `tools/scripts/conformance-0120.mjs` (`npm run conformance:0120`;
+needs `API_KEY`/`BASE_URL`, repo-convention `.env.local`). Validates every
+response — errors included — against the **live** spec from `/api-docs-json`
+(ajv, JSON Schema 2020-12), then layers the sanity assertions. Paced ≤1 rps
+for the free usage plan; ~2.5 min per run; report written as
+`conformance-0120-report-<ts>.json` (gitignored, regenerable).
+
+**Run 2026-08-19 08:16 UTC: 752 pass, 55 fail, 0 skip.** Zero schema
+failures — the entire failure surface is the correctness layer, and every
+failure maps to a spawned defect task:
+
+| Failing check | Count | Task |
+|---|---|---|
+| `price_usd` zero sentinel | 18 | [[0207]] |
+| `vwap_24h` zero + `sources` empty (fresh tips, volume > 0) | 24 | [[0209]] |
+| OHLCV windows empty (USDC; CBIJ, AUD, RON, BOL, EQL) | 12 | [[0208]] / [[0209]] |
+| Canonical USDC `/price` → 404 | 1 | [[0208]] |
+
+Findings confirmed by the run, beyond the failures: soroban rows carry empty
+`asset_code` ([[0210]]); OHLCV `start`/`end` are both **inclusive** but
+undocumented ([[0211]] — the suite encodes the measured behavior). Passing
+highlights: pagination walk over 20 pages / 3880 assets with zero duplicate
+identity triples and accurate `has_more`; batch equal to singles at matching
+timestamps for all 19 priced assets; `Decimal(38,14)` strings parse
+everywhere; all OHLCV invariants hold wherever data exists.
+
+The stub/sentinel AC stays open until [[0207]]–[[0209]] land; the suite is
+the acceptance gate — re-run it after each fix and cite the green report in
+[[0128]].
 
 ## Notes
 
