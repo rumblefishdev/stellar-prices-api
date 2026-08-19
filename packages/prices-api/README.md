@@ -179,6 +179,79 @@ Remove the `localhost` redirect from the Discord application once you are done �
 or leave it and accept that any holder of that `client_secret` can complete a
 sign-in from their own machine.
 
+## Running self-service key issuance locally (task 0187)
+
+`POST` and `GET /api-tokens/api/key` issue and reveal a real API Gateway key.
+They run on top of the sign-in above — the session cookie is what says whose key
+it is — and they need two more things.
+
+> **Every key this creates and deletes is a PRODUCTION key.**
+>
+> There is one environment and it is production (`infra/envs/` holds only
+> `production.json`). `PORTAL_ENABLED=false` protects the deployed Lambda; it
+> protects nothing on a laptop holding production credentials. The reconciler
+> calls `DeleteApiKey`, so exercise it against keys this task created and
+> nothing else, and delete them afterwards — task 0194 audits what is left.
+
+### 1. AWS credentials and the usage plan id
+
+```bash
+# The plan the portal attaches keys to, published by ApiGatewayStack.
+aws ssm get-parameter \
+    --name /prices/production/pricing-api-free-plan-id \
+    --query Parameter.Value --output text
+```
+
+The principal you run as needs `apigateway:GET/POST/DELETE` on `/apikeys`,
+`/apikeys/*` and `POST` on `/usageplans/{id}/keys` — the same five the Lambda's
+role has (`compute-stack.ts`, `api-gateway-stack.ts`).
+
+### 2. Run it
+
+```bash
+PORTAL_ENABLED=true \
+PORTAL_OAUTH_SECRET_FILE=.portal-oauth.json \
+PORTAL_FREE_PLAN_ID=<the plan id from above> \
+AWS_PROFILE=<a profile with the five grants> \
+  cargo run -p prices-api --features local-server --bin serve
+```
+
+`PORTAL_FREE_PLAN_ID` is a **local-only** variable and is compiled out of the
+Lambda build, exactly like `PORTAL_OAUTH_SECRET_FILE` and the Discord endpoint
+overrides. In the Lambda the id is read from SSM by name
+(`PORTAL_FREE_PLAN_PARAM`), because `lambda:UpdateFunctionConfiguration` — a
+permission distinct from `UpdateFunctionCode` — would otherwise be enough to
+move every newly issued key onto a usage plan of somebody else's choosing.
+
+### 3. What you should see
+
+Sign in at <http://localhost:4200/api-tokens/>, press **Get my API key**, and:
+
+```bash
+# The key exists, is enabled, and is named for your Discord id.
+aws apigateway get-api-keys --name-query "discord-<your id>-key" \
+    --query 'items[].{id:id,name:name,enabled:enabled}'
+
+# It is on the free plan.
+aws apigateway get-usage-plan-keys --usage-plan-id <plan id> \
+    --query 'items[].name'
+
+# And it works. This is the acceptance criterion that cannot be tested in CI.
+curl -sS -o /dev/null -w '%{http_code}\n' \
+    -H "X-API-Key: <the value the page showed>" \
+    https://<api host>/production/v1/assets
+# → 200
+```
+
+Press the button a second time: the same key, no new one. That is the
+reconciler, not a cache.
+
+### 4. Afterwards
+
+```bash
+aws apigateway delete-api-key --api-key <id>
+```
+
 ## Env (Lambda)
 
 | Var | Purpose |
@@ -190,6 +263,8 @@ sign-in from their own machine.
 | `PORTAL_OAUTH_SECRET_NAME` | Secrets Manager **name** of the Discord OAuth bundle (task 0186). Never the value — read through the Parameters & Secrets extension, and only when the portal is open |
 | `PORTAL_OAUTH_SECRET_FILE` | local-only alternative to the above: a path to the same JSON. Not set by CDK |
 | `DISCORD_AUTHORIZE_URL`, `DISCORD_API_BASE` | endpoint overrides, test/local seam only. Not set by CDK, so production always takes Discord's real endpoints |
+| `PORTAL_FREE_PLAN_PARAM` | SSM parameter **name** holding the `pricing-api-free` usage-plan id (task 0187). A name, not the id: the plan is created by `ApiGatewayStack`, which depends on `ComputeStack`, so a cross-stack reference would be a cycle |
+| `PORTAL_FREE_PLAN_ID` | local-only alternative to the above. Compiled out of the Lambda build, and not set by CDK |
 
 ## OpenAPI
 

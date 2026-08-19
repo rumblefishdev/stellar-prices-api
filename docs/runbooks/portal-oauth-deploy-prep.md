@@ -10,7 +10,9 @@ in one person's Discord Developer Portal account and re-pointing it is a manual
 act nobody else can perform.
 
 Introduced by task 0186 (sign-in, identity only). Task 0189 amends **step 2**
-when it adds the `guilds.members.read` scope.
+when it adds the `guilds.members.read` scope. Task 0187 added **§7**, which is
+about key issuance rather than sign-in and needs no manual provisioning — but it
+does add a deploy-ordering precondition to §5.
 
 ## What this covers
 
@@ -204,7 +206,10 @@ finishing a slice. Before it happens, both must be true:
   routes are at **depth 3** (`auth/login`), and the deployed mapping at the time
   of writing is the intermediate `{proxy}` + `{proxy}/{sub}` pair, which answers
   `403 Missing Authentication Token` at that depth. Task 0205 ships the committed
-  shape.
+  shape. (Task 0187's `/key` is at depth 3 as well, so it is the same deploy.)
+- **`ApiGatewayStack` has deployed at least once since task 0187 merged**, so
+  that `/prices/production/pricing-api-free-plan-id` exists. See §7 — if it does
+  not, opening the portal fails Lambda init and takes `/v1` down with it.
 
 ---
 
@@ -268,6 +273,86 @@ granted — and it is preferable to a `Domain`-scoped cookie shared with every
 other host under the registrable domain.
 
 ---
+
+## 7. Self-service key issuance (task 0187) — nothing to provision, one ordering
+
+Issuing keys needs **no manual step**: there is no secret, no registration, and
+no console work. Everything it depends on is created by CDK. What it does have
+is an ordering constraint and two operational facts worth knowing before the
+flag moves.
+
+### The ordering
+
+`ApiGatewayStack` creates the `pricing-api-free` usage plan and publishes its id
+to SSM. `ComputeStack` tells the api-handler to read that parameter by name. The
+two stacks cannot reference each other — Compute is a dependency of Gateway, so
+importing the plan would close a cycle — so the handshake is a parameter, and
+the parameter has to exist before the handler asks for it:
+
+```bash
+aws ssm get-parameter \
+    --name /prices/production/pricing-api-free-plan-id \
+    --query Parameter.Value --output text
+
+aws lambda get-function-configuration \
+    --function-name prices-production-api-handler \
+    --query 'Environment.Variables.PORTAL_FREE_PLAN_PARAM' --output text
+```
+
+The second must print the name the first was queried with. `npm run
+openapi:verify-routes` asserts exactly this against the synthesized templates,
+so a drift fails CI rather than a deploy — but the _existence_ of the deployed
+parameter is not something CI can see.
+
+**If the parameter is missing when `PORTAL_ENABLED` becomes `true`, the
+api-handler fails cold start**, and that is not confined to the portal: one
+router serves every route group (ADR 0008), so it takes `/v1` down. This is the
+same "fatal only at the moment of opening" shape as the OAuth secret in §3, and
+it is deliberate — the alternative is a portal with a key button that answers
+`503`.
+
+While the portal is closed the handler reads neither, so nothing here changes
+any behaviour until the flag moves.
+
+### The IAM, and the three limits that come with it
+
+CDK grants the api-handler role five control-plane actions and nothing else:
+`GET`/`POST` on `/apikeys`, `GET`/`DELETE` on `/apikeys/*`, and `POST` on
+`/usageplans/{the free plan}/keys`. The last is declared in
+`api-gateway-stack.ts` rather than `compute-stack.ts`, because that is the only
+stack that knows the plan id.
+
+Two of the five cannot be scoped any further, and one can but is not yet. All
+three are written out in full in `compute-stack.ts`; the short version:
+
+- **`POST /apikeys` cannot be narrowed.** There is no ARN for "keys this
+  function created", so permission to create a key is permission to create any
+  key. Mitigated by the `ManagedBy=prices-portal` tag every created key carries.
+- **`GET /apikeys` cannot be narrowed either**, and it is the one to know about:
+  a collection has a single ARN, and `GetApiKeys` accepts `includeValues=true`,
+  so the grant permits reading the value of **every API key in the account**,
+  partner keys included. The handler always asks for `includeValues=false`, so
+  this is what code execution in the Lambda would buy an attacker, not what the
+  feature does.
+- **`DELETE /apikeys/*` CAN be narrowed** with an `aws:ResourceTag/ManagedBy`
+  condition — API Gateway supports tag conditions on control-plane actions, and
+  the keys are already tagged. It is not written yet: task 0194 owns it, because
+  it should be verified against the deployed stack and it changes behaviour for
+  a console-created duplicate (untagged → `AccessDenied` → `502` instead of
+  reconciling). Until then the reconciler's blast radius is bounded by code, not
+  by IAM.
+
+Task 0194 audits all three.
+
+### Verifying it, and the warning that comes with that
+
+The round-trip is in
+[`packages/prices-api/README.md`](../../packages/prices-api/README.md#running-self-service-key-issuance-locally-task-0187).
+
+> **Every key a local run creates and deletes is a production key.** The flag
+> lives in the Lambda; it protects nothing on a laptop holding production
+> credentials, and the reconciler calls `DeleteApiKey`. Exercise it against keys
+> you created and delete them afterwards.
 
 ## Related
 

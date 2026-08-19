@@ -56,6 +56,10 @@ chrono = { version = "0.4", default-features = false, features = ["std", "clock"
 lambda_runtime = "0.13"
 aws-config = "1"
 aws-sdk-s3 = "1"
+# API Gateway CONTROL plane (task 0187 — self-service key issuance). Not the
+# data plane: this is `CreateApiKey`/`GetApiKeys`/`CreateUsagePlanKey`, the same
+# API the console drives. Used by prices-api's portal only.
+aws-sdk-apigateway = "1"
 aws-sdk-cloudwatch = "1"
 aws_lambda_events = { version = "0.16", default-features = false, features = ["sqs"] }
 tempfile = "3"
