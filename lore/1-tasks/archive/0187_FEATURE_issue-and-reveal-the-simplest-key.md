@@ -2,7 +2,7 @@
 id: "0187"
 title: "Issue the simplest possible key and show it — AWS is the source of truth, no database"
 type: FEATURE
-status: active
+status: completed
 related_adr: ["0008", "0010"]
 related_tasks: ["0183", "0157", "0158", "0160", "0186", "0188", "0190", "0194"]
 tags: [layer-backend, priority-high, effort-medium, milestone-M3, epic-self-service-onboarding, api-gateway, usage-plan, iam, slice-4]
@@ -32,6 +32,34 @@ history:
       forward: the session **through CloudFront** is unverified until [[0205]]'s
       deploy, and these routes sit under the same depth-3 prefix — so a depth-3
       `403` against the deployed gateway belongs to [[0205]], not here.
+  - date: "2026-08-19"
+    status: completed
+    who: akot
+    note: >
+      Shipped in PR #224 (branch `feat/0187_...`, two commits). 46 Rust tests
+      for this slice (27 over HTTP against a mock control plane that paginates
+      and matches `nameQuery` by prefix, 17 unit, 2 alone in binaries of their
+      own), 9 frontend tests, 3 CI assertions. Ten of twelve acceptance criteria
+      closed; the live `curl` waits on [[0205]]'s deploy and is [[0164]]'s to
+      record.
+
+      Three defects were found AFTER the implementation looked finished, and all
+      three had a test or a comment asserting the property they broke. A key
+      value reached the logs through the AWS SDK at `trace` while the test
+      meant to prove otherwise passed vacuously; the usage-plan attach ran only
+      on the create path, so a create whose attach failed left a key that every
+      later request handed out and `/v1/` refused, permanently; and the IAM
+      comment claimed `DELETE /apikeys/*` was already the narrowest form the
+      service offers, which [[0194]] would have read as settled. A review from
+      karczuRF then found four more, two of them in the fixes themselves —
+      including a guard that a single trailing colon walked past. The log filter
+      is an allowlist now, the reconciliation has a wall-clock deadline, and
+      `NotFoundException` from the attach is disambiguated rather than assumed.
+
+      Carried out: an adopted key is never checked for `enabled` ([[0192]]
+      decides what "revoked" means), a key created just before a failed attach
+      is left in the account (inert, self-healing, swept by [[0194]]), and
+      [[0194]]'s cleanup check should be re-scoped from a date to a property.
 ---
 
 # Issue a key, and show it
@@ -146,8 +174,8 @@ credentials.
 - [x] First press issues a key attached to the free plan; the value is shown —
       one key, enabled, tagged `ManagedBy=prices-portal`, attached to the plan
       id read from SSM, and its value in the response body
-- [ ] That key returns `200` from a `/v1/` route on the first try — **cannot be
-      closed from a keyboard.** Nothing in CI can mint a real key or call the
+- [ ] **(deferred to [[0205]] + [[0164]])** That key returns `200` from a `/v1/`
+      route on the first try — **cannot be closed from a keyboard.** Nothing in CI can mint a real key or call the
       real gateway. What is asserted is the two properties that make it true
       (the key is `enabled`, and it is attached to the free usage plan); the
       `curl` itself is step 3 of the README's local procedure and is Adam's,
@@ -178,9 +206,24 @@ credentials.
       the portal `GET`/`POST` entries and CloudFront's `CachingDisabled` are
       both asserted by `verify-openapi-routes.mjs`, each proven non-vacuous by
       flipping it and watching CI fail
-- [ ] IAM policy names specific resources; the un-narrowable `POST /apikeys` is
-      documented as an accepted limit
-- [ ] No key value appears in any log or trace
+- [x] IAM policy names specific resources; the un-narrowable `POST /apikeys` is
+      documented as an accepted limit — and so are the two the first pass got
+      wrong. `GET /apikeys` is equally un-narrowable and worse (a collection has
+      one ARN, and `includeValues=true` reads every key value in the account),
+      while `DELETE /apikeys/*` **can** be scoped with an
+      `aws:ResourceTag/ManagedBy` condition and deliberately is not yet — the
+      original comment claimed it was already the narrowest form the service
+      offers, which was false and would have been read as settled by [[0194]]'s
+      audit. All three are now written out in `compute-stack.ts`, the runbook
+      and `infra/README.md`
+- [x] No key value appears in any log or trace — and this one was **false when
+      first ticked as covered**. `KeyValue` stops our own code, not the SDK's:
+      `aws-sdk-apigateway` marks nothing `@sensitive`, so at `trace` the
+      orchestrator prints the whole `GetApiKeyOutput`, value included. The log
+      filter (`src/telemetry.rs`) is what closes it, `tests/telemetry_filter.rs`
+      and `tests/portal_keys_logs.rs` are what prove it, and the latter runs
+      alone in its own binary because the first version of it passed **vacuously**
+      — thread-local subscriber against a global callsite cache
 
 ## Notes
 
@@ -260,6 +303,31 @@ prices-api --all-targets -D warnings`, `cargo test --workspace` (0 failures),
 typecheck build test`, `nx format:check --all`, `make -C infra synth-production`,
 `npm run openapi:lint`, `openapi:verify-routes`, `openapi:verify-servers`.
 
+### Added after the first pass (log filter + two review rounds)
+
+**New — `packages/prices-api/src/telemetry.rs`.** The log filter both binaries
+build their subscriber from. An **allowlist**: a bare level, or a target inside
+`OUR_TARGETS` (`prices_api`, `prices_clickhouse`), survives; everything else is
+dropped, and the credential-bearing SDK crates are then pinned at `info`.
+
+**Changed:** `src/main.rs` and `src/bin/serve.rs` use it instead of
+`EnvFilter::try_from_default_env`. `keys/gateway.rs` gained `Attachment`,
+`exists`, `GatewayError::PlanNotFound` and an idempotent
+`attach_to_free_plan`; `keys/mod.rs` gained `RECONCILE_DEADLINE`, the
+`KeysState::with_deadline` test seam (compiled out of the Lambda), the union of
+a just-created key into the candidate list, and non-fatal loser deletion.
+`KeyResponse` lost its `Debug`.
+
+**Tests restructured:** the mock control plane moved to
+`tests/portal_keys/harness.rs`, shared by three binaries — `portal_keys.rs`
+(27), `portal_keys_logs.rs` (1) and `telemetry_filter.rs` (1). The two
+single-test binaries are single on purpose; see Issues Encountered.
+
+**Totals for the task: 46 Rust tests** — 27 over HTTP against the mock, 17 unit
+(`naming` 9, `telemetry` 6, `gateway` 3, `keys/mod` 2 — 20, of which the unit
+count includes the two route-shape tests), 2 in binaries of their own — plus 9
+frontend tests and 3 CI assertions.
+
 ## Issues Encountered
 
 - **The SDK retries a 500, so a one-shot failure is not observable.** The first
@@ -289,6 +357,61 @@ typecheck build test`, `nx format:check --all`, `make -C infra synth-production`
   and `reveal` started as separate functions with identical bodies. Collapsed
   into one: without a registry they *are* one operation, and two functions would
   have invited someone to invent a difference between them.
+
+- **The "never log a key value" type stops our code, not the SDK's.** `KeyValue`
+  has no `Display` and no `Serialize`, which is airtight for every format string
+  in this workspace and irrelevant to `aws_smithy_runtime`, which prints
+  `GetApiKeyOutput { value: Some(…) }` at `trace` and the raw response body next
+  to it. Smithy has a redaction branch; it is conditional on the operation being
+  `@sensitive` in the model, and `aws-sdk-apigateway` marks nothing sensitive.
+  `RUST_LOG` is one `UpdateFunctionConfiguration` away from `trace`, and the
+  local procedure in the README runs against production credentials.
+
+- **The test that was supposed to catch that passed vacuously.**
+  `tracing::subscriber::set_default` is thread-local; the callsite `Interest`
+  cache is global. In a binary running tests in parallel, another thread reached
+  the SDK's `trace!` callsites with no subscriber installed, they were cached as
+  `Interest::never`, and the one test driving a `TRACE` subscriber then captured
+  nothing and asserted nothing. Run alone it failed and printed a live key value.
+  Hence one test per binary for that assertion, and a `trace!` probe of its own
+  inside it so "captured nothing" can never again read as "leaked nothing".
+
+- **The guard was a blocklist and was walked past twice.** First by
+  `RUST_LOG='[try_op]=trace'` — a directive with no target, which `EnvFilter`
+  scopes by span and therefore ranks above a target pin. Then, after that was
+  closed, by `RUST_LOG='aws_smithy_runtime:=trace'` — **one trailing colon**:
+  targets match by `starts_with`, the parser accepts any character in a target,
+  and `StaticDirective` orders by target length, so 19 characters outranked the
+  18-character pin. Both were closed by naming one more shape. The third
+  version inverts the rule instead, because a blocklist here has to anticipate
+  every way of spelling a target that prefix-matches something dangerous.
+
+- **Attaching to the usage plan only on the create path left a permanent dead
+  end.** A `CreateApiKey` that succeeded followed by a `CreateUsagePlanKey` that
+  failed — a throttle, a timeout — left a key that every later request adopted
+  and handed out with `200`, while it answered `403` from `/v1/`. No retry could
+  fix it: every retry took the same branch. The attach now runs on whatever key
+  is about to be handed out, idempotently (`409 ConflictException` is the
+  desired state).
+
+- **`NotFoundException` from `CreateUsagePlanKey` means two things.** "The key is
+  gone" and "the usage plan is gone" are the same error. Reading it as the first
+  turned a stale or mistyped plan id into `Ok(None)`, retried, exhausted, and
+  reported to every user as *"try again"* — forever. Resolved by asking whether
+  the key still exists before deciding which happened.
+
+- **The per-call timeouts never composed into a request-level bound**, and the
+  module docs claimed they did. One attempt makes up to six calls plus a delete
+  per duplicate, `list_named` alone can walk `MAX_PAGES` pages each with its own
+  budget, and the reconciler runs twice — minutes, against a 15s function. A
+  wall-clock deadline is the only shape that bounds work whose call count
+  depends on how many pages and duplicates the account holds.
+
+- **`GetApiKeys` is eventually consistent in both directions.** The empty
+  re-list was handled from the start; the non-empty-but-missing-our-key case
+  fell through silently and orphaned a live, enabled key carrying the user's
+  exact name. The created record is now unioned into the candidates so it is
+  ranked and, if it loses, deleted like any duplicate.
 
 ## Review Findings
 
@@ -436,6 +559,46 @@ Two tests were added for gaps the pass exposed:
     one part CI never compiles. The cost is binary size, not cold start: the
     client is only ever constructed when the portal is open.
 
+20. **The log filter is an allowlist, not a longer blocklist.** Two bypasses got
+    in through the blocklist version (Issues Encountered), each closed by naming
+    one more shape. The third version changes the failure mode instead: only a
+    bare level or one of our own crates survives, so a form nobody anticipated is
+    **refused** rather than honoured. The cost is accepted and written down —
+    raising a third-party crate's log level now needs a code change. Matching is
+    case-sensitive, like `EnvFilter`'s own.
+
+21. **The attach runs on every key handed out, not only on created ones**, and is
+    idempotent through `409 ConflictException`. Verifying membership instead
+    would cost a call and an IAM grant to learn what this call can simply
+    assert. The page fetches nothing on mount (decision 14), so the extra call
+    per press is a human pressing a button.
+
+22. **A `404` from the attach is disambiguated with `GetApiKey`, not assumed.**
+    One extra call, only on that error path, on a grant already held. The
+    alternative considered and rejected was validating the plan at cold start:
+    it needs a new grant and would still miss a warm container holding a plan id
+    that was correct when it booted. Recorded for [[0188]], which opens that
+    policy anyway.
+
+23. **A wall-clock deadline bounds the reconciliation; the per-call timeouts are
+    deliberately not tightened to match.** A shorter attempt timeout would start
+    cutting off cold TLS handshakes and turn a healthy first invocation into a
+    retry. The deadline guarantees an answer; the per-call values only decide how
+    many slow calls fit inside it before that answer becomes a `503`.
+
+24. **A failed `DeleteApiKey` on a loser is logged and stepped over.** By then the
+    winner is created, attached and ready; propagating would answer `502` and
+    withhold a key that demonstrably works. It is also not hypothetical: if
+    [[0194]] puts an `aws:ResourceTag` condition on `DELETE`, an exact-name
+    duplicate created by hand in the console carries no tag and would fail on
+    every request.
+
+25. **One test per binary where the assertion depends on a global cache.**
+    `portal_keys_logs.rs` and `telemetry_filter.rs` each hold exactly one test,
+    because `tracing`'s callsite interest is process-global while the subscriber
+    is thread-local — the property that made the first version of the log test
+    pass while the leak was live.
+
 ## Future Work
 
 Nothing new spawned — every follow-up already has a task:
@@ -450,5 +613,27 @@ Nothing new spawned — every follow-up already has a task:
 - Rework and the once-per-period cap → [[0191]]. Revocation → [[0192]].
 - Whether a registry row is needed at all → [[0190]].
 - Cleanup of keys created during local verification, and the IAM audit →
-  [[0194]].
+  [[0194]]. **Two things to carry into it, found here:** (a) its cleanup check is
+  scoped by date ("keys created while the flag was off"), which stops meaning
+  anything the day the flag goes to `true` — the better check is a property,
+  "every key tagged `ManagedBy=prices-portal` that belongs to no usage plan",
+  and it also catches the orphan below; (b) `DELETE /apikeys/*` can be scoped
+  with an `aws:ResourceTag/ManagedBy` condition, which the code comment used to
+  deny.
+- **A key created immediately before a failed attach is left in the account.**
+  Inert — a key on no usage plan cannot be used against `/v1/` — and
+  self-healing, because once the plan id is right the next request from that
+  user adopts and attaches it. Deliberately not rolled back: adding a
+  destructive call to an error path to tidy something that costs nothing is the
+  wrong trade in the one module whose most guarded operation is `DeleteApiKey`.
+  Swept by [[0194]]'s property check above.
+- **An adopted key is never checked for `enabled`.** A key disabled by hand is
+  attached, returned with `200` and answers `403`. Not fixed here on purpose:
+  `PATCH` is deliberately ungranted, and re-enabling a disabled key would undo a
+  revocation — so what "disabled" should mean to this flow is [[0192]]'s to
+  decide.
+- **No global deadline existed until review; the per-call timeouts still do not
+  compose.** The deadline is in place, but the cost side — control-plane call
+  volume per press and per dashboard load, and backoff under throttling — is
+  [[0194]]'s, which already owns costing it.
 - Styling → [[0193]]. The page is deliberately unstyled.
