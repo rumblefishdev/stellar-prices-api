@@ -4,7 +4,7 @@ title: "44,657 stored candles across 495 assets carry a close_usd ~7.4x too high
 type: BUG
 status: active
 related_adr: []
-related_tasks: ["0172", "0196", "0165", "0145", "0111", "0114", "0201", "0208"]
+related_tasks: ["0172", "0196", "0165", "0145", "0111", "0114", "0201", "0208", "0204"]
 tags:
   ["priority-high", "effort-medium", "clickhouse", "data-correctness", "enrichment", "milestone-M2"]
 milestone: 2
@@ -1033,10 +1033,18 @@ Remaining, in order:
    for 17 h+, longer than an hourly sweep should leave them. Enrichment lag, or
    the pivot finding no USDT/USDC reference inside its default 1-day window.
    Postdates the run; not damage from this task.
-9. **Guard against re-introduction** — still the one open acceptance criterion.
-   Now wants a second check alongside it: no USDT-quoted candle at
-   `close_usd = 0` with a representable `close`, which is the defect [[0208]]
-   exists to make impossible.
+9. ~~**Guard against re-introduction**~~ → **moved to [[0204]] as gap 4,
+   2026-08-19.** Nothing left for this task to build.
+
+   The reasoning, since it is not obvious from either file alone: `close_usd`
+   has been wrong on prod through **three doors** — [[0172]]'s peg,
+   [[0196]]/[[0168]]'s oracle mis-attribution, and this task's own epoch
+   boundary — and **two of the three never touch the writer**. So [[0172]]'s
+   writer tests cannot be the guard; the condition lives in the data and the
+   check has to as well. That makes it the same category as 0204 gap 3
+   (correctness, not liveness) rather than a USDT change, and it lands on the
+   same probe for the same reasons. [[0208]] closes the specific door this task
+   opened; gap 4 watches all three.
 
 ## 🧹 Cleanup — the snapshots do not expire and nothing reclaims them
 
@@ -1122,11 +1130,15 @@ taking a snapshot, not to releasing one — provided you have a `default` path.
       because a combined run (route a) swamps the `rows_reset ≈ rows_enriched`
       check ~32M against ~357k, and that check is the only thing that detects
       values zeroed and never recomputed. **No longer blocks the run.**
-- [ ] Guard against re-introduction: the [[0172]] regression tests already pin
-      the writer; add a data-level check that no USDT-quoted candle carries
-      `close_usd / close ≈ 1.0`. ⚠️ **Widen it** — 2026-08-19 showed the
-      opposite failure is just as real, so also assert no USDT-quoted candle
-      sits at `close_usd = 0` with a representable `close`.
+- [ ] Guard against re-introduction — **(deferred to [[0204]] gap 4,
+      2026-08-19)**. Asserts both directions: no USDT-quoted candle at
+      `close_usd / close ≈ 1.0` in the post-break era, and none at
+      `close_usd = 0` with a representable `close`. Deferred rather than built
+      here because it is a scheduled prod probe, not a USDT change — it shares
+      0204 gap 3's design (correctness rather than liveness), its host
+      (`rollup-freshness-probe`, which already holds the `aws-mtls` wiring), and
+      its deploy constraint (`Prices-production-Observability` only, never
+      `eventbridge-stack` and its `CleanupRule`). See the note below.
 - [x] **The epoch boundary is sound** — ✅ 2026-08-19, *after* a repair. The
       original epoch `1612656000` stranded **157 candles** (121 `_1h`, 36 `_4h`)
       in the 19 hours before the reference market's first trade; restored to par
