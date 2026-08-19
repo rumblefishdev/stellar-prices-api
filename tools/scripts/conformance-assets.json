@@ -3,27 +3,126 @@
   "derived_at": "2026-08-19",
   "assets": [
     { "id": "native", "code": "XLM", "form": "native", "why": "s9-tranche1" },
-    { "id": "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN", "code": "USDC", "form": "code-issuer", "why": "s9-tranche1, canonical Circle issuer" },
-    { "id": "EURC:GDHU6WRG4IEQXM5NZ4BMPKOXHW76MZM4Y2IEMFDVXBSDP6SJY4ITNPP2", "code": "EURC", "form": "code-issuer", "why": "s9-tranche1, canonical Circle issuer" },
-    { "id": "AQUA:GBNZILSTVQZ4R7IKQDGHYGY2QXL5QOFJYQMXPKWRRM5PAV7Y4M67AQUA", "code": "AQUA", "form": "code-issuer", "why": "s9-tranche1" },
-    { "id": "BTC:GDPJALI4AZKUU2W426U5WKMAT6CN3AJRPIIRYR2YM54TL2GDWO5O2MZM", "code": "BTC", "form": "code-issuer", "why": "s9-tranche1, top-volume BTC in store" },
-    { "id": "ETH:GBFXOHVAS43OIWNIO7XLRJAHT3BICFEIKOJLZVXNT572MISM4CMGSOCC", "code": "ETH", "form": "code-issuer", "why": "s9-tranche1, top-volume ETH in store" },
-    { "id": "CBIJBDNZNF4X35BJ4FFZWCDBSCKOP5NB4PLG4SNENRMLAPYG4P5FM6VN", "code": "", "form": "contract", "why": "top-volume soroban-native asset; only asset kind addressable by contract form" },
-    { "id": "USDCAllow:GDIEKKIQWMIZ4LD3RP3ABPN7X5KEAEWYMR634BRHB7EULIMEVREWLF3G", "code": "USDCAllow", "form": "code-issuer", "why": "store rank 1 by volume_24h" },
-    { "id": "AUD:GAIF52QZUPYCADXF7I7RNPMED7DT2B5JGPR7DEHCC5TPDPUJTMLGGAUD", "code": "AUD", "form": "code-issuer", "why": "top-volume" },
-    { "id": "sUSD:GCHW7CWI7GMIYQYFXMFJNJX5645XGWIINIAEQK3SABQO6CAYL5T7JYIH", "code": "sUSD", "form": "code-issuer", "why": "top-volume" },
-    { "id": "yUSDC:GDGTVWSM4MGS4T7Z6W4RPWOCHE2I6RDFCIFZGS3DOA63LWQTRNZNTTFF", "code": "yUSDC", "form": "code-issuer", "why": "top-volume, Ultra wrapped USDC" },
-    { "id": "XRP:GBXRPL45NPHCVMFFAYZVUVFFVKSIZ362ZXFP7I2ETNQ3QKZMFLPRDTD5", "code": "XRP", "form": "code-issuer", "why": "top-volume XRP wrapper" },
-    { "id": "SHX:GDSTRSHXHGJ7ZIVRBXEYE5Q74XUVCUSEKEBR7UCHEUUEK72N7I7KJ6JH", "code": "SHX", "form": "code-issuer", "why": "top-volume, Stronghold" },
-    { "id": "SCOP:GC6OYQJIZF3HFXCYPFCBXYXNGIBQ4TNSFUBUXQJOZWIP6F3YZK4QH3VQ", "code": "SCOP", "form": "code-issuer", "why": "top-volume, Scopuly" },
-    { "id": "RON:GDE6EMCCVPHENJX6EPE6N4AUXFV3I65GWG2AG3LNXQUIRG6TUWVFQQ3N", "code": "RON", "form": "code-issuer", "why": "top-volume" },
-    { "id": "BOL:GDOV2XVGNQDGYCKLTDJUFBBF3PU5J6ERE2UOFOOIO777GELHCCAHLBOL", "code": "BOL", "form": "code-issuer", "why": "top-volume" },
-    { "id": "EQL:GBKIUHEKECKB3FNZTPNNWOLV73RA3HC34RIZ4RIKXA2HCZRJTQEBRKUM", "code": "EQL", "form": "code-issuer", "why": "top-volume" },
-    { "id": "yXLM:GARDNV3Q7YGT4AKSDF25LT32YSCCW4EV22Y2TV3I2PU2MMXJTEDL5T55", "code": "yXLM", "form": "code-issuer", "why": "top-volume, Ultra wrapped XLM" },
-    { "id": "PYUSD:GDQE7IXJ4HUHV6RQHIUPRJSEZE4DRS5WY577O2FY6YQ5LVWZ7JZTU2V5", "code": "PYUSD", "form": "code-issuer", "why": "top-volume PYUSD" },
-    { "id": "VELO:GDM4RQUQQUVSKQA7S6EM7XBZP3FCGH4Q7CL6TABQ7B2BEJ5ERARM2M5M", "code": "VELO", "form": "code-issuer", "why": "top-volume" }
+    {
+      "id": "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+      "code": "USDC",
+      "form": "code-issuer",
+      "why": "s9-tranche1, canonical Circle issuer"
+    },
+    {
+      "id": "EURC:GDHU6WRG4IEQXM5NZ4BMPKOXHW76MZM4Y2IEMFDVXBSDP6SJY4ITNPP2",
+      "code": "EURC",
+      "form": "code-issuer",
+      "why": "s9-tranche1, canonical Circle issuer"
+    },
+    {
+      "id": "AQUA:GBNZILSTVQZ4R7IKQDGHYGY2QXL5QOFJYQMXPKWRRM5PAV7Y4M67AQUA",
+      "code": "AQUA",
+      "form": "code-issuer",
+      "why": "s9-tranche1"
+    },
+    {
+      "id": "BTC:GDPJALI4AZKUU2W426U5WKMAT6CN3AJRPIIRYR2YM54TL2GDWO5O2MZM",
+      "code": "BTC",
+      "form": "code-issuer",
+      "why": "s9-tranche1, top-volume BTC in store"
+    },
+    {
+      "id": "ETH:GBFXOHVAS43OIWNIO7XLRJAHT3BICFEIKOJLZVXNT572MISM4CMGSOCC",
+      "code": "ETH",
+      "form": "code-issuer",
+      "why": "s9-tranche1, top-volume ETH in store"
+    },
+    {
+      "id": "CBIJBDNZNF4X35BJ4FFZWCDBSCKOP5NB4PLG4SNENRMLAPYG4P5FM6VN",
+      "code": "",
+      "form": "contract",
+      "why": "top-volume soroban-native asset; only asset kind addressable by contract form"
+    },
+    {
+      "id": "USDCAllow:GDIEKKIQWMIZ4LD3RP3ABPN7X5KEAEWYMR634BRHB7EULIMEVREWLF3G",
+      "code": "USDCAllow",
+      "form": "code-issuer",
+      "why": "store rank 1 by volume_24h"
+    },
+    {
+      "id": "AUD:GAIF52QZUPYCADXF7I7RNPMED7DT2B5JGPR7DEHCC5TPDPUJTMLGGAUD",
+      "code": "AUD",
+      "form": "code-issuer",
+      "why": "top-volume"
+    },
+    {
+      "id": "sUSD:GCHW7CWI7GMIYQYFXMFJNJX5645XGWIINIAEQK3SABQO6CAYL5T7JYIH",
+      "code": "sUSD",
+      "form": "code-issuer",
+      "why": "top-volume"
+    },
+    {
+      "id": "yUSDC:GDGTVWSM4MGS4T7Z6W4RPWOCHE2I6RDFCIFZGS3DOA63LWQTRNZNTTFF",
+      "code": "yUSDC",
+      "form": "code-issuer",
+      "why": "top-volume, Ultra wrapped USDC"
+    },
+    {
+      "id": "XRP:GBXRPL45NPHCVMFFAYZVUVFFVKSIZ362ZXFP7I2ETNQ3QKZMFLPRDTD5",
+      "code": "XRP",
+      "form": "code-issuer",
+      "why": "top-volume XRP wrapper"
+    },
+    {
+      "id": "SHX:GDSTRSHXHGJ7ZIVRBXEYE5Q74XUVCUSEKEBR7UCHEUUEK72N7I7KJ6JH",
+      "code": "SHX",
+      "form": "code-issuer",
+      "why": "top-volume, Stronghold"
+    },
+    {
+      "id": "SCOP:GC6OYQJIZF3HFXCYPFCBXYXNGIBQ4TNSFUBUXQJOZWIP6F3YZK4QH3VQ",
+      "code": "SCOP",
+      "form": "code-issuer",
+      "why": "top-volume, Scopuly"
+    },
+    {
+      "id": "RON:GDE6EMCCVPHENJX6EPE6N4AUXFV3I65GWG2AG3LNXQUIRG6TUWVFQQ3N",
+      "code": "RON",
+      "form": "code-issuer",
+      "why": "top-volume"
+    },
+    {
+      "id": "BOL:GDOV2XVGNQDGYCKLTDJUFBBF3PU5J6ERE2UOFOOIO777GELHCCAHLBOL",
+      "code": "BOL",
+      "form": "code-issuer",
+      "why": "top-volume"
+    },
+    {
+      "id": "EQL:GBKIUHEKECKB3FNZTPNNWOLV73RA3HC34RIZ4RIKXA2HCZRJTQEBRKUM",
+      "code": "EQL",
+      "form": "code-issuer",
+      "why": "top-volume"
+    },
+    {
+      "id": "yXLM:GARDNV3Q7YGT4AKSDF25LT32YSCCW4EV22Y2TV3I2PU2MMXJTEDL5T55",
+      "code": "yXLM",
+      "form": "code-issuer",
+      "why": "top-volume, Ultra wrapped XLM"
+    },
+    {
+      "id": "PYUSD:GDQE7IXJ4HUHV6RQHIUPRJSEZE4DRS5WY577O2FY6YQ5LVWZ7JZTU2V5",
+      "code": "PYUSD",
+      "form": "code-issuer",
+      "why": "top-volume PYUSD"
+    },
+    {
+      "id": "VELO:GDM4RQUQQUVSKQA7S6EM7XBZP3FCGH4Q7CL6TABQ7B2BEJ5ERARM2M5M",
+      "code": "VELO",
+      "form": "code-issuer",
+      "why": "top-volume"
+    }
   ],
   "excluded": [
-    { "code": "USDT", "issuer": "GCQTGZQQ5G4PTM2GL7CDIFKUBIPEC52BROAQIAPW53XBRJVN6ZJVTG6V", "why": "known bug 0172 (candles far off peg) — including it would fail the suite on an already-tracked defect" }
+    {
+      "code": "USDT",
+      "issuer": "GCQTGZQQ5G4PTM2GL7CDIFKUBIPEC52BROAQIAPW53XBRJVN6ZJVTG6V",
+      "why": "known bug 0172 (candles far off peg) — including it would fail the suite on an already-tracked defect"
+    }
   ]
 }
