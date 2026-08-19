@@ -572,9 +572,13 @@ export class EventBridgeStack extends cdk.Stack {
       // CH 26.3.10.60), so they stay trivially fast even against the 735M-row
       // `price_ohlcv_1m`. Added since:
       //   - disk: two filesystem function calls, no table read;
-      //   - USD sanity: a FINAL scan of `price_ohlcv_1d` bounded to 7 days and
-      //     scoped to one quote leg — measured at 91 matching rows on prod
-      //     (2026-08-19), i.e. negligible;
+      //   - USD sanity: a FINAL scan of `price_ohlcv_1h` bounded to 7 days and
+      //     scoped to one quote leg. ⚠️ Measure it by what it READS, not what it
+      //     returns — prod 2026-08-19 returns 423 rows but reads ~1.37M rows /
+      //     ~70 MiB in 41-50 ms, because the cost is the FINAL merge and the
+      //     `assets` lookup rather than the result size. (`_1d` was 984,706 rows
+      //     / 50.5 MiB / 44-62 ms — only 1.4x cheaper, which is why the tier
+      //     choice was decided on grace arithmetic instead. See SANITY_TABLE.)
       //   - MV drift: ~20 SEQUENTIAL round trips (a declared-side format, a
       //     live DDL fetch and a fingerprint per MV, plus the undeclared-writer
       //     sweep). This is the only one whose cost scales with round-trip

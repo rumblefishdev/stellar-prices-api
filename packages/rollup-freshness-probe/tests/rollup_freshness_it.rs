@@ -34,7 +34,7 @@ use rollup_freshness_probe::mv_drift::{
     drift_metrics, visible_objects_query,
 };
 use rollup_freshness_probe::usd_sanity::{
-    SanityCounts, SanityRefusal, sanity_metrics, sanity_query,
+    SANITY_TABLE, SanityCounts, SanityRefusal, sanity_metrics, sanity_query,
 };
 use rollup_freshness_probe::{ROLLUP_TIERS, TableLag, freshness_query, lag_metrics};
 
@@ -393,7 +393,7 @@ async fn insert_usdt_candle(
     exec(
         c,
         &format!(
-            "INSERT INTO prices.price_ohlcv_1d \
+            "INSERT INTO prices.{SANITY_TABLE} \
                (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
                 volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) \
              SELECT {ts_sql}, {asset_id}, {usdt_id}, 'sdex', {close}, {close}, {close}, {close}, \
@@ -419,7 +419,7 @@ async fn read_counts(c: &Client) -> SanityCounts {
 #[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
 async fn usd_sanity_query_executes_and_reads_a_healthy_leg_as_zero() {
     let c = client();
-    exec(&c, "TRUNCATE TABLE prices.price_ohlcv_1d").await;
+    exec(&c, &format!("TRUNCATE TABLE prices.{SANITY_TABLE}")).await;
     exec(&c, "TRUNCATE TABLE prices.assets").await;
     seed_usdt_identity(&c, 111).await;
 
@@ -441,7 +441,7 @@ async fn usd_sanity_query_executes_and_reads_a_healthy_leg_as_zero() {
 #[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
 async fn usd_sanity_counts_both_induced_defects() {
     let c = client();
-    exec(&c, "TRUNCATE TABLE prices.price_ohlcv_1d").await;
+    exec(&c, &format!("TRUNCATE TABLE prices.{SANITY_TABLE}")).await;
     exec(&c, "TRUNCATE TABLE prices.assets").await;
     seed_usdt_identity(&c, 111).await;
 
@@ -464,7 +464,7 @@ async fn usd_sanity_counts_both_induced_defects() {
 #[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
 async fn a_freshly_written_zero_is_not_yet_stranded() {
     let c = client();
-    exec(&c, "TRUNCATE TABLE prices.price_ohlcv_1d").await;
+    exec(&c, &format!("TRUNCATE TABLE prices.{SANITY_TABLE}")).await;
     exec(&c, "TRUNCATE TABLE prices.assets").await;
     seed_usdt_identity(&c, 111).await;
 
@@ -473,7 +473,7 @@ async fn a_freshly_written_zero_is_not_yet_stranded() {
     assert_eq!(read_counts(&c).await.stranded, 0, "still within grace");
 
     // The same row, aged past the grace, is the defect.
-    exec(&c, "TRUNCATE TABLE prices.price_ohlcv_1d").await;
+    exec(&c, &format!("TRUNCATE TABLE prices.{SANITY_TABLE}")).await;
     insert_usdt_candle(&c, 111, 5, "now() - INTERVAL 3 DAY", "100", "0").await;
     assert_eq!(read_counts(&c).await.stranded, 1, "past grace = stranded");
 }
@@ -487,7 +487,7 @@ async fn a_freshly_written_zero_is_not_yet_stranded() {
 #[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
 async fn dust_below_the_underflow_bound_is_not_counted_as_stranded() {
     let c = client();
-    exec(&c, "TRUNCATE TABLE prices.price_ohlcv_1d").await;
+    exec(&c, &format!("TRUNCATE TABLE prices.{SANITY_TABLE}")).await;
     exec(&c, "TRUNCATE TABLE prices.assets").await;
     seed_usdt_identity(&c, 111).await;
 
@@ -512,7 +512,7 @@ async fn dust_below_the_underflow_bound_is_not_counted_as_stranded() {
 #[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
 async fn an_exotic_quoted_zero_is_ignored_because_it_is_by_design() {
     let c = client();
-    exec(&c, "TRUNCATE TABLE prices.price_ohlcv_1d").await;
+    exec(&c, &format!("TRUNCATE TABLE prices.{SANITY_TABLE}")).await;
     exec(&c, "TRUNCATE TABLE prices.assets").await;
     seed_usdt_identity(&c, 111).await;
 
@@ -532,7 +532,7 @@ async fn an_exotic_quoted_zero_is_ignored_because_it_is_by_design() {
 #[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
 async fn a_repaired_candle_stops_counting_once_a_higher_version_supersedes_it() {
     let c = client();
-    exec(&c, "TRUNCATE TABLE prices.price_ohlcv_1d").await;
+    exec(&c, &format!("TRUNCATE TABLE prices.{SANITY_TABLE}")).await;
     exec(&c, "TRUNCATE TABLE prices.assets").await;
     seed_usdt_identity(&c, 111).await;
 
@@ -546,13 +546,15 @@ async fn a_repaired_candle_stops_counting_once_a_higher_version_supersedes_it() 
     // The repair: same primary key, corrected value, version + 1.
     exec(
         &c,
-        "INSERT INTO prices.price_ohlcv_1d \
-           (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
-            volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) \
-         SELECT timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
-                volume_base, volume_quote, volume_quote, 15, vwap, trade_count, version + 1 \
-         FROM prices.price_ohlcv_1d FINAL \
-         WHERE quote_asset_id = 111 AND close_usd = close",
+        &format!(
+            "INSERT INTO prices.{SANITY_TABLE} \
+               (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+                volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) \
+             SELECT timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+                    volume_base, volume_quote, volume_quote, 15, vwap, trade_count, version + 1 \
+             FROM prices.{SANITY_TABLE} FINAL \
+             WHERE quote_asset_id = 111 AND close_usd = close"
+        ),
     )
     .await;
 
@@ -571,7 +573,7 @@ async fn a_repaired_candle_stops_counting_once_a_higher_version_supersedes_it() 
 #[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
 async fn an_unresolvable_usdt_leg_reads_as_zero_and_is_therefore_refused() {
     let c = client();
-    exec(&c, "TRUNCATE TABLE prices.price_ohlcv_1d").await;
+    exec(&c, &format!("TRUNCATE TABLE prices.{SANITY_TABLE}")).await;
     exec(&c, "TRUNCATE TABLE prices.assets").await;
     // Deliberately no USDT identity seeded.
     insert_usdt_candle(&c, 111, 5, "now() - INTERVAL 3 DAY", "100", "100").await;

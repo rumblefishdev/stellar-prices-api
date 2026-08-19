@@ -145,16 +145,49 @@ to re-read the per-day counts after **2026-08-20 00:00**: if 08-18's eight have
 filled, the chain holds; if they are still zero past 48 h, something is stuck and
 this is a different problem.
 
-### ⚠️ This now blocks a decision on [[0204]]
+### The latency is ~30 hours, measured — and that supersedes this task's title
 
-Gap 4's stranded alarm has a **48 h grace**, chosen because it is the window BE
-actually read. This task's finding is that the USDT leg's *normal* latency sits in
-the same 24-48 h range — **so the grace is sized about the same as the latency it
-exists to clear**, and rung 1 at a threshold of 1 fires on ordinary operation. A
-permanently-firing alarm gets muted, which is the failure [[0204]] exists to end.
-Fixing this task removes the collision; until then 0204 must either widen the
-grace (decoupling the alarm from BE's real loss window) or lift rung 1 above the
-normal unpriced population (~8-16/day, giving up the small-count guard).
+Bucketing every USDT-quoted `_1h` candle by age (prod, 2026-08-19):
+
+| age band | priced | unpriced |
+|---|---|---|
+| 0-24 h | 0 | 74 |
+| 24-30 h | 9 | 12 |
+| **30 h → 162 h** | **all** | **0** |
+
+**Every band from 30 h out to 162 h is 100% priced.** So the ceiling is ~30 h and
+it is *stable*, not widening — which answers the question this task's "17 h+"
+title left open. That 17 h was a single observation from [[0182]]'s damage check;
+the distribution supersedes it, and the honest reading is that ~30 h is this
+leg's **normal** latency rather than evidence of a fault.
+
+⚠️ **This does not make the task go away, it re-scopes it.** The USDT leg is
+structurally ~30 h behind every other leg because of the two-hop chain, on a
+market thin enough to produce 9-18 hourly reference buckets a day. That is worth
+shortening — BE's window is 48 h, so we run at ~60% of a consumer's tolerance
+with no margin for a bad day — but it is a *latency* problem, not a *correctness*
+one, and nothing is currently being lost.
+
+⚠️ Also measured while resolving this: the USDT/USDC reference **does** exist
+hourly (9-18 buckets/day, essentially all priced). Candidate 2's "the pivot
+cannot find a reference inside its window" is therefore NOT the mechanism as
+stated — the reference is there. What costs the time is the ordering: the
+reference must be *enriched* before its dependants can be.
+
+### ✅ It no longer blocks [[0204]] — resolved 2026-08-19 by moving the tier
+
+Gap 4's stranded alarm has a 48 h grace, chosen because it is the window BE
+actually read. The collision it appeared to have with this task's latency was
+**real on `price_ohlcv_1d` and absent on `price_ohlcv_1h`**, because a bucket's
+`timestamp` is its START — a daily candle burns 24 of the 48 grace hours before
+its data even exists, an hourly one burns one. 0204's check moved to `_1h`; the
+grace and the rung are unchanged.
+
+⚠️ **The link is not severed, it is slack.** 0204's alarm now sits ~18 h above
+this task's measured ceiling. If that ceiling widens past ~36 h the alarm starts
+firing on ordinary operation again, so **this task's fix is what protects that
+margin** — and any future reading here should be a fresh age distribution, not a
+single old row's age.
 
 ## Why it matters despite being small
 

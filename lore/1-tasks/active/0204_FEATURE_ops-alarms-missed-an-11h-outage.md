@@ -836,11 +836,12 @@ user is dropped **before** the assertions run.
 
 ### Not fixed — two open, one rejected
 
-- 🔴 **The `usd-stranded` rung at 1 WILL fire on normal operation. MEASURED
-  2026-08-19 — see "Prod baseline" below. This is the one open decision left on
-  this task.** The review's mechanism was wrong (it is not a `no_reference`
-  floor) but its conclusion was right, and the real cause is worse because it is
-  structural rather than incidental.
+- ✅ **RESOLVED 2026-08-19 by changing the TIER, not the threshold.** The review
+  said rung 1 would latch on healthy data. Its mechanism was wrong (not a
+  `no_reference` floor) and — once measured properly — so was the conclusion, but
+  only because the fix turned out to be somewhere neither of us was looking. The
+  check moved from `price_ohlcv_1d` to `price_ohlcv_1h`; the grace stays 48 h and
+  rung 1 stays 1. See "Prod baseline" below.
 - ⏳ **The probe's 1-minute / 256 MB Lambda config was never revisited.** Its
   stale justifying comment ("seven metadata-only `max()` reads … trivially
   fast") **is now corrected** in `eventbridge-stack.ts`, which enumerates what
@@ -932,7 +933,59 @@ reference *was* priced, yet only half that day's dependants filled. The chain
 accounts for 08-19 completely and 08-18 only partially. Do not treat the
 mechanism as fully proven.
 
-#### The consequence for the alarm
+#### ✅ RESOLVED — the tier was the problem, not the threshold
+
+⚠️ **Everything from here to the end of this subsection was the state on the
+evening of 2026-08-19 BEFORE the age distribution was measured. It is kept
+because the reasoning was sound and the conclusion was still wrong**, which is
+the point: the collision is real on `_1d` and does not exist on `_1h`, and
+nothing short of bucketing by age could tell those apart.
+
+**The measurement that resolved it.** Bucketing every USDT-quoted `_1h` candle by
+age: unpriced rows appear only in the 0-30 h bands, and **every band from 30 h out
+to 162 h is 100% priced**. The real enrichment ceiling is ~30 h, so a 48 h grace
+carries ~18 h of headroom. There is no collision on the hourly tier.
+
+The `_1d` tier is a different story on the same day: its 08-18 bucket was still
+**half unpriced at ~41 h**. Two reasons, and the second is the one that was
+invisible until now:
+
+1. A bucket's `timestamp` is its **START**, so a `_1d` candle stamped `00:00` is
+   not complete until 24 h later — **half of a 48 h grace is gone before there is
+   anything to enrich**. On `_1h` that cost is one hour.
+2. `_1d` is downstream of `_1h` in the rollup chain, so it is additionally behind
+   in wall-clock terms.
+
+⚠️ **We had picked the tier that sits closest to the line it is measured
+against**, and picked it for a cost reason that also turned out to be false:
+
+| tier | rows read | bytes | duration | returned |
+|---|---|---|---|---|
+| `_1d` | 984,706 | 50.5 MiB | 44-62 ms | 91 |
+| `_1h` | ~1.37 M | ~70 MiB | 41-50 ms | 423 |
+
+**1.4×, not the "~24×" the original decision 6 asserted** — that figure was about
+how many rows the *tables hold*, not what a query scoped to one quote leg and 7
+days actually touches. Most of the work is the `FINAL` merge and the `assets`
+lookup, which both tiers pay identically. ⚠️ Note also that the check is not as
+cheap as "91 rows" suggested; **measure it by what it reads, not what it
+returns**.
+
+The last objection died too: the USDT/USDC reference **does** exist hourly —
+9-18 buckets/day over the week, essentially all priced — so hourly dependants
+have something to price against. `_1h` is also a forever-table, so the 7-day
+window can never outrun retention.
+
+**Result: `SANITY_TABLE` is now `price_ohlcv_1h`. Grace unchanged at 48 h, so it
+keeps meaning what design decision 4 says it means (BE's real loss window). Rung
+1 unchanged at 1, so it stays a small-count re-introduction guard.** Both
+alternatives below were rejected because each gave up one of those properties.
+
+Pinned by two unit tests — `the_check_reads_the_hourly_tier_so_the_grace_is_not_eaten_by_bucket_width`
+and `the_grace_clears_the_measured_enrichment_latency` — so a future "use the
+cheaper coarse table" optimisation fails locally instead of on prod.
+
+#### The superseded analysis, and the consequence it predicted
 
 **The 48 h grace is sized about the same as the latency it exists to clear.** The
 USDT leg's normal latency is one reference cycle plus a sweep pass, landing
@@ -951,10 +1004,10 @@ decision 4 says it means. Two options, both costing something:
 - **Lift rung 1** above the normal unpriced population (~8-16/day) — keeps the
   48 h meaning, but stops it being a small-count re-introduction guard.
 
-⛔ **Not decided. Do not pick it while implementing** — that is exactly how gap
-2's defect shipped, and the same trap design decision 1 of gap 3 was written to
-avoid. Everything else on the branch (disk, DLQ, drift, peg-applied) is
-unaffected and clear to deploy.
+✅ **Neither was taken.** Changing the tier removed the collision without giving
+up either property. ⚠️ Both remain the right answers *if* the ~30 h ceiling ever
+widens — re-measure the age distribution first, and do not simply raise the grace
+to silence the alarm.
 
 ⚠️ The cheap confirmation, worth running before deciding: re-read the per-day
 priced/unpriced counts after **2026-08-20 00:00**. If 08-18's eight have filled,

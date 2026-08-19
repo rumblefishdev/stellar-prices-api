@@ -93,10 +93,18 @@ pub const LOOKBACK_SECONDS: i64 = 7 * 86_400;
 /// waking someone for, and not before.
 ///
 /// ⚠️ It must also comfortably exceed real enrichment lag or the metric never
-/// reads zero. Measured 2026-08-19: USDT-quoted candles were sitting unpriced
-/// for **17 h+** (task 0209, still open). 48 h clears that with room, but if
-/// 0209 turns out to be a widening gap rather than ordinary lag, this bound
-/// needs re-checking against it — do not simply raise it to silence the alarm.
+/// reads zero, and that lag is now **measured rather than estimated**. On prod
+/// 2026-08-19, bucketing every USDT-quoted `_1h` candle by age: unpriced rows
+/// appear only in the 0-30 h bands, and **every band from 30 h out to 162 h is
+/// 100% priced**. So the real ceiling is ~30 h and this grace carries ~18 h of
+/// headroom. (An earlier note here said "17 h+", taken from a single
+/// observation in task 0209; the distribution supersedes it.)
+///
+/// ⚠️ That headroom is comfortable, not vast, and it holds **only on the hourly
+/// tier** — see [`SANITY_TABLE`] for why a coarser tier spends its own bucket
+/// width out of this grace before enrichment can even begin. If 0209 turns out
+/// to be a widening gap rather than a stable ~30 h, re-check this bound against
+/// a fresh distribution — do not simply raise it to silence the alarm.
 pub const STRANDED_GRACE_SECONDS: i64 = 2 * 86_400;
 
 /// How close `close_usd / close` must sit to 1.0 to count as "the peg was
@@ -121,12 +129,33 @@ pub const REPRESENTABLE_CLOSE_FLOOR: &str = "0.00000000000005";
 
 /// Which OHLCV granularity the check reads.
 ///
-/// `price_ohlcv_1d`. The defect appears on every tier — 0182 corrected all five
-/// — so any one of them is diagnostic, and this is the cheapest that still
-/// reacts promptly: a day's bucket exists from its first trade, so a regression
-/// surfaces within one probe interval rather than a day later. `_1h` would scan
-/// ~24× the rows for the same answer.
-pub const SANITY_TABLE: &str = "price_ohlcv_1d";
+/// `price_ohlcv_1h`. The defect appears on every tier — 0182 corrected all five
+/// — so any one of them is diagnostic, and the choice is therefore about how the
+/// tier interacts with [`STRANDED_GRACE_SECONDS`], not about coverage.
+///
+/// ⚠️ **This was `price_ohlcv_1d` and was changed on measurement (2026-08-19).**
+/// The original reasoning — `_1d` is cheapest, `_1h` would scan "~24× the rows"
+/// — was wrong on both halves, and the way it was wrong is worth keeping:
+///
+/// - **The 24× was about how many rows the TABLES HOLD, not what this query
+///   touches.** Scoped to one quote leg and 7 days, prod measures `_1d` at
+///   984,706 rows / 50.5 MiB / 44-62 ms and `_1h` at ~1.37M / ~70 MiB /
+///   41-50 ms — **1.4×, and the same wall time**. Most of the work is the
+///   `FINAL` merge and the `assets` lookup, which both tiers pay identically.
+/// - **A bucket's `timestamp` is its START, so a coarse tier burns its own
+///   width out of the grace before its data even exists.** A `_1d` candle
+///   stamped `00:00` is not complete until 24 h later, so half of a 48 h grace
+///   is gone before there is anything to enrich. On `_1h` that cost is one hour.
+///
+/// Measured on prod, the difference is not theoretical: every USDT-quoted `_1h`
+/// candle is priced by **30 hours** of age (zero unpriced in every band from 30 h
+/// out to 162 h), leaving 18 h of headroom under the grace — while the `_1d`
+/// bucket for the same day was still **half unpriced at ~41 h**. We had picked
+/// the tier that sits closest to the line it is measured against.
+///
+/// ⚠️ `_1h` is a forever-table (no retention job, unlike `_1m`/`_15m`), so the
+/// 7-day [`LOOKBACK_SECONDS`] window can never outrun what is kept.
+pub const SANITY_TABLE: &str = "price_ohlcv_1h";
 
 /// One reading of the USDT quote leg's USD-value health.
 ///
@@ -517,6 +546,48 @@ mod tests {
         assert!(unresolvable.contains("prices.assets"));
         assert!(empty.contains("quote_asset_id"));
         assert_ne!(unresolvable, empty);
+    }
+
+    /// ⚠️ Pins the tier against a "cheaper coarser table" optimisation, which is
+    /// exactly the change that was measured and REVERSED on 2026-08-19.
+    ///
+    /// The grace is measured from a bucket's `timestamp`, which is its START, so
+    /// a coarse tier spends its own width out of the grace before its data even
+    /// exists — 24 of a 48 h grace on `_1d`, one hour on `_1h`. Prod measurement:
+    /// every USDT-quoted `_1h` candle is priced by 30 h of age, while the `_1d`
+    /// bucket for the same day was still half unpriced at ~41 h. The cost saving
+    /// that motivated `_1d` was not real either (1.4×, same wall time), because
+    /// the scan is dominated by the `FINAL` merge and the `assets` lookup.
+    #[test]
+    fn the_check_reads_the_hourly_tier_so_the_grace_is_not_eaten_by_bucket_width() {
+        assert_eq!(SANITY_TABLE, "price_ohlcv_1h");
+
+        // The bucket width must stay small relative to the grace. At `_1d` this
+        // ratio is 1/2 — half the grace gone before enrichment can start.
+        let bucket_width_seconds = 3_600_i64;
+        assert!(
+            bucket_width_seconds * 8 <= STRANDED_GRACE_SECONDS,
+            "a bucket wide enough to consume a meaningful share of the grace makes \
+             the stranded metric measure the tier rather than the defect"
+        );
+    }
+
+    /// The measured enrichment ceiling must stay comfortably under the grace, or
+    /// the alarm fires on ordinary operation and gets muted — the failure task
+    /// 0204 exists to end. 30 h measured against a 48 h grace on 2026-08-19.
+    #[test]
+    fn the_grace_clears_the_measured_enrichment_latency() {
+        let measured_ceiling_seconds = 30 * 3_600_i64;
+        assert!(
+            measured_ceiling_seconds < STRANDED_GRACE_SECONDS,
+            "the grace must exceed real enrichment latency or the metric never reads zero"
+        );
+        let headroom = STRANDED_GRACE_SECONDS - measured_ceiling_seconds;
+        assert!(
+            headroom >= 12 * 3_600,
+            "under 12 h of headroom means an ordinary slow sweep breaches; re-measure \
+             the age distribution rather than raising the grace to silence it"
+        );
     }
 
     /// The peg tolerance is a rounding allowance, not a judgement call. USDT
