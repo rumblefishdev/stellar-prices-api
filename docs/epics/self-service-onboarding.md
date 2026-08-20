@@ -382,6 +382,30 @@ invariant"; and no `FINAL`-on-every-read discipline to maintain.
 
 Absent one of those, with new data, the registry is not to be re-proposed.
 
+**Where storage does land, when the epic finally needs it.** Cancelling the
+registry is not a ruling that this epic never stores anything — `0192` will,
+and `0190` did that slice's groundwork rather than leaving it to be rediscovered:
+
+- **Substrate: ClickHouse, per ADR 0007** ("the prices-api live data sink is
+  BE's Hetzner-hosted ClickHouse cluster, not a Prices-owned RDS Postgres").
+  This project has no other store in the AWS account, and adding one for a
+  single small table would break that ADR for the smallest possible reason.
+- **Shape: append-only, and explicitly _not_ `0158`'s.** One row per event, not
+  `ReplacingMergeTree ORDER BY discord_user_id`, for the overwrite reason above.
+- **Write access does not exist and is not ours to grant — this is the item
+  with cross-team lead time.** The api-handler reads as `prices_reader`
+  (SELECT only, measured on `ch-prod-01` 2026-07-30); those grants are
+  XML-managed in BE's `services.xml` and cannot be SQL-GRANTed by us; and DDL on
+  that host is an operator action as the container's `default` user over the
+  loopback port, not a `cdk deploy`. A broad DDL grant for the ingestion writer
+  was already considered and rejected under task `0134`. So "ClickHouse is
+  already standing" is true of the _cluster_ and false of the _capability_ —
+  budget for a grant negotiation, a runbook DDL step, and a writer mTLS bundle
+  reaching a Lambda that today can only read.
+
+All three are written up in `0192`'s own _Storage_ section, which is where the
+decisions get made.
+
 Superseded task files stay in `lore/1-tasks/archive/` (`0158`–`0162`, and the
 canceled `0180`) and remain the reference for the details the slices cite.
 

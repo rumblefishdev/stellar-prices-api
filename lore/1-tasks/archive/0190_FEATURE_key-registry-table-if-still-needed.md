@@ -247,12 +247,36 @@ a terminal, and the two differ by nothing that matters here.
 
 ## Future Work
 
-No backlog task spawned — the two follow-ups both already have owners, and
-inventing tasks for them would duplicate existing scope:
+No backlog task spawned — every follow-up has an owner, and this task's second
+job was to leave that owner ready to start rather than to start over. Cancelling
+the registry is not a ruling that the epic never stores anything, so the
+groundwork was written into the slice that will need it.
 
-- **De-duplicate the shared `GetApiKeys` and cache the reveal** → [[0194]]'s
-  costing criterion, now corrected to name both remedies. They are performance
-  work with no measured problem yet, so they are deliberately *not* a task of
-  their own.
-- **A durable revocation record** → [[0192]], with the overwrite trap written
-  into its notes.
+- **Storage, when the epic finally needs it → [[0192]]**, which now carries a
+  *Storage* section this task wrote. Substrate is settled and shape is not:
+  - **ClickHouse, per ADR 0007** — the standing decision is BE's Hetzner
+    cluster over a store of our own, and this project has no other store in
+    the AWS account. One small table is the worst possible reason to break
+    that;
+  - **append-only, explicitly not [[0158]]'s shape** — `ReplacingMergeTree
+    ORDER BY discord_user_id` keeps one row per user, so an issue would
+    overwrite a revoke and reset the cap;
+  - **write access does not exist and is not ours to grant** — the item with
+    real cross-team lead time, so it is named early: the api-handler reads as
+    `prices_reader` (SELECT only, measured on `ch-prod-01` 2026-07-30), those
+    grants are XML-managed in BE's `services.xml` and cannot be SQL-GRANTed by
+    us, DDL is an operator action as `default` over the loopback port, and a
+    broad DDL grant for the ingestion writer was already considered and
+    rejected under task 0134. "ClickHouse already stands" is true of the
+    cluster and false of the capability;
+  - **and whether the record is worth its cost at all** — [[0192]] is optional
+    for Tranche 3 and has a documented cheaper fallback ([[0163]]'s quickstart
+    saying a leaked key waits for the 1st). A real trade, to be made with
+    numbers.
+- **De-duplicate the shared `GetApiKeys` and cache the reveal → [[0194]]'s**
+  costing criterion, corrected here to name both remedies and the true call
+  count. Performance work with no measured problem yet, so deliberately *not* a
+  task of its own.
+- **Nothing for [[0191]].** Its cap reads the surviving key's `createdDate` and
+  needs no storage; that only changes if [[0192]] ships first, which the epic's
+  order does not do.
