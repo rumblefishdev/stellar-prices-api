@@ -2,7 +2,7 @@
 id: "0213"
 title: "The USD peg check reads _1h — the tier 0182 repaired — so it publishes 0 over 1.5M wrong _1m rows"
 type: BUG
-status: blocked
+status: active
 related_adr: []
 related_tasks: ["0204", "0212", "0209", "0182", "0172"]
 tags: ["priority-medium", "effort-small", "observability", "clickhouse", "data-correctness", "milestone-M2"]
@@ -48,6 +48,19 @@ history:
       closed: longest silent gap in 30 days is 6.5 h against a 48 h window.
       NOW BLOCKED ON ONE THING ONLY: the peg scan's read cost on prod, which
       decides whether the probe's 1-minute timeout still holds.
+  - date: 2026-08-20
+    status: active
+    who: okarcz
+    note: >
+      UNBLOCKED. The last open measurement came back clean: EXPLAIN ESTIMATE
+      puts the peg scan at 1,250,223 rows / 6 parts / 156 marks against
+      997,376 / 5 / 125 for the _1h scan that runs in 41-50 ms — 1.25x, so the
+      probe's 1-minute timeout needs no change. Every acceptance criterion the
+      code can meet is now met and measured. Remaining work is the deploy, and
+      it needs BOTH stacks: the probe binary ships from eventbridge-stack and
+      the alarm text from observability-stack, so an Observability-only deploy
+      leaves the ladder blind (0204's own mistake). Rebuild and `strings` the
+      lambda assets first (0141).
 ---
 
 # The peg check reads the repaired tier, not the source
@@ -117,7 +130,16 @@ able to show the defect.
       `close_usd = 0`** (0 peg-valued, 0 correctly priced): the leg is dark, so
       the direction has nothing to judge. A green ladder is NOT evidence of
       correct USD valuation — recorded at `PEG_TABLE` and in the alarm text.
-- [ ] ⛔ **PRE-DEPLOY MEASUREMENT: the peg scan's read cost on prod.** The
+- [x] ✅ **MEASURED 2026-08-20 — the read cost is a non-issue.** `EXPLAIN
+      ESTIMATE` on prod: the peg scan reads **1,250,223 rows / 6 parts / 156
+      marks**, against **997,376 / 5 / 125** for the `_1h` stranded scan that
+      measures 41-50 ms. **1.25x the known-good baseline**, so the probe's
+      1-minute timeout holds with large margin and needs no change. ⚠️ The
+      window *does* prune despite `timestamp` not being a primary-key prefix —
+      `toYYYYMM` partition pruning plus per-part min/max does the work, and 156
+      marks x 8192 ≈ 1.28 M corroborates the row estimate. ⛔ Re-take this if
+      the window is ever widened. Original concern: **the peg scan's read cost
+      on prod.** The
       probe's 1-minute timeout was sized on the `_1h` scan alone (~1.37M rows /
       ~70 MiB / 41-50 ms) and was not revisited for this second `FINAL` scan
       against the **735M-row** `_1m`. ⚠️ **The 48 h window does not bound the
@@ -254,7 +276,12 @@ measured on prod, and one of them overturned this task's central claim:**
   claim was carried from the *unbounded repoint* argument and never re-checked
   against the query that actually ships — the same class of error as the
   original defect: reasoning about a surface other than the one in use.
-- ⏳ **Read cost still unmeasured** — the one thing this task now waits on.
+- ✅ **Read cost measured and fine** — 1.25x the known-good `_1h` scan. The
+  concern was well-founded (a window on a non-prefix column need not prune) but
+  the measurement clears it.
+
+**All acceptance criteria that code can meet are met.** What remains is the
+deploy itself, which is the operator's action, not a code gate.
 
 ## Future Work
 

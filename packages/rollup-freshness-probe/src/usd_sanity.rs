@@ -53,11 +53,15 @@
 //!    ⚠️ **A window bound is not a read bound.** Both tables are
 //!    `PARTITION BY toYYYYMM(timestamp)` with `ORDER BY (asset_id,
 //!    quote_asset_id, source, timestamp)`, so `timestamp` is not a primary-key
-//!    prefix: a window prunes to whole *monthly partitions*, and a 48 h window
-//!    spanning a month boundary reads two of them. Shortening a window
-//!    therefore does **not** proportionally shorten the scan. ⛔ Size these on
-//!    what the query READS (`EXPLAIN` / `read_rows`), never on the span it
+//!    prefix and a window cannot be assumed to prune. ⛔ Size these on what the
+//!    query READS (`EXPLAIN ESTIMATE` / `read_rows`), never on the span it
 //!    names — the same rule the tier choice was decided by.
+//!
+//!    Measured on prod 2026-08-20: the 48 h `_1m` peg scan estimates
+//!    **1,250,223 rows / 6 parts / 156 marks**, against **997,376 / 5 / 125**
+//!    for the 7-day `_1h` stranded scan that runs in 41-50 ms — **1.25x**, so
+//!    the probe's 1-minute timeout holds. `toYYYYMM` pruning plus per-part
+//!    min/max does the work the key order does not.
 //!
 //! ⚠️ **This is a re-introduction guard, not a historical audit.** It watches
 //! recent writes, because that is where a regression shows up. A frozen
