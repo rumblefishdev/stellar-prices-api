@@ -2,7 +2,7 @@
 id: "0213"
 title: "The USD peg check reads _1h — the tier 0182 repaired — so it publishes 0 over 1.5M wrong _1m rows"
 type: BUG
-status: active
+status: completed
 related_adr: []
 related_tasks: ["0204", "0212", "0209", "0182", "0172"]
 tags: ["priority-medium", "effort-small", "observability", "clickhouse", "data-correctness", "milestone-M2"]
@@ -61,6 +61,21 @@ history:
       the alarm text from observability-stack, so an Observability-only deploy
       leaves the ladder blind (0204's own mistake). Rebuild and `strings` the
       lambda assets first (0141).
+  - date: 2026-08-20
+    status: completed
+    who: okarcz
+    note: >
+      DEPLOYED AND VERIFIED BY MEASUREMENT on prod. Both stacks: EventBridge
+      (probe binary) then Observability (alarm text), in that order, so the
+      metric was correct before the text described it. A forced invocation
+      returned peg_scanned 692 / peg_applied 0 and stranded_scanned 512 /
+      stranded 9 — the ~700 peg figure is the proof the direction reads _1m
+      over 48 h, since the old build would have returned the _1h population.
+      CleanupRule DISABLED before and after. ⚠️ The stale-asset trap (0141) was
+      LIVE: the binary in target/ was 3 h older than the source, and
+      `strings | grep -c usd-peg-applied` (0 old, 3 new) is the discriminator
+      that caught it. stranded = 9 and will climb until 0209 — correct, do not
+      widen the grace.
 ---
 
 # The peg check reads the repaired tier, not the source
@@ -283,8 +298,47 @@ measured on prod, and one of them overturned this task's central claim:**
 **All acceptance criteria that code can meet are met.** What remains is the
 deploy itself, which is the operator's action, not a code gate.
 
+## Deploy — done 2026-08-20, verified by measurement
+
+Both stacks, in this order. **Observability alone would have left the ladder
+blind**, because the probe that publishes the metric ships from EventBridge —
+[[0204]]'s own mistake. Doing EventBridge first also means the metric was
+correct before the alarm text started describing it.
+
+⚠️ **The [[0141]] stale-asset trap was LIVE.** The binary sitting in
+`target/lambda/rollup-freshness-probe/` was three hours older than the source,
+so deploying without rebuilding would have shipped the pre-0213 probe — the one
+that reads `_1h` — and every signal would have said success. The discriminator:
+
+```
+strings target/lambda/rollup-freshness-probe/bootstrap | grep -c usd-peg-applied
+#   old build -> 0   (it says "usd-sanity")
+#   new build -> 3
+```
+
+Post-deploy invocation of `prices-production-rollup-freshness-probe`:
+
+| field | value | reading |
+|---|---:|---|
+| `peg_scanned` | **692** | ✅ the direction really reads `_1m` over 48 h — the whole fix |
+| `peg_applied` | 0 | matches the pre-deploy prod measurement |
+| `stranded_scanned` | 512 | `_1h` untouched, 7-day window |
+| `stranded` | 9 | expected; see below |
+
+⚠️ **`scanned` is rows MATCHED, not rows READ.** A pre-deploy expectation put
+`stranded_scanned` at ~1,000,000 by quoting the `EXPLAIN ESTIMATE` read figure
+as if it were the match count. The two differ by three orders of magnitude here
+and the existing `_1h` note already recorded it ("returns 423 rows but reads
+~1.37M"). Do not compare them again.
+
+⛔ **`stranded` climbs from here and that is correct.** [[0182]]'s repair wrote
+the coarse tiers to a high-water mark of 2026-08-18 12:00; as the 48 h grace
+boundary moves past it, more `_1h` candles fall into the unpriced-past-grace
+window. It stays latched until [[0209]]. **Do not widen the grace to quiet it.**
+
 ## Future Work
 
-None spawned. The remaining work is the deploy, which is gated by [[0212]] and
-[[0209]] — both already exist and both already carry this ordering. ⛔ Do not
-close this task on the code being green.
+None spawned. [[0212]] and [[0209]] already exist and already carry the ordering
+this task depends on; [[0111]] is the root. ⚠️ This direction stays **vacuous**
+— reading 0 for want of input rather than want of defects — until enrichment
+drains far enough forward to reach a 48 h window, which is gated on 0111.
