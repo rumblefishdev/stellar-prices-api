@@ -21,7 +21,8 @@ async fn main() -> Result<(), lambda_runtime::Error> {
         visible_objects_query,
     };
     use rollup_freshness_probe::usd_sanity::{
-        SanityCounts, publish_sanity, sanity_metrics, sanity_query,
+        PegCounts, StrandedCounts, peg_metric, peg_query, publish_sanity, stranded_metric,
+        stranded_query,
     };
     use rollup_freshness_probe::{TableLag, freshness_query, lag_metrics, publish};
     use std::sync::Arc;
@@ -41,7 +42,12 @@ async fn main() -> Result<(), lambda_runtime::Error> {
     // filesystem *functions* instead. No new grant is required for either.
     let ch = Arc::new(prices_clickhouse::mtls::client_from_lambda_env("prices").await?);
     let query = Arc::new(freshness_query());
-    let sanity_query = Arc::new(sanity_query());
+    // ⚠️ Two queries since task 0213, not one. The peg direction reads
+    // `price_ohlcv_1m` — the tier enrichment writes — while the stranded
+    // direction stays on `price_ohlcv_1h`. See `usd_sanity::PEG_TABLE` for why
+    // a single shared tier made the peg direction structurally blind.
+    let stranded_query = Arc::new(stranded_query());
+    let peg_query = Arc::new(peg_query());
 
     let aws_cfg = aws_config::defaults(aws_config::BehaviorVersion::latest())
         .load()
@@ -54,7 +60,8 @@ async fn main() -> Result<(), lambda_runtime::Error> {
         let ch = ch.clone();
         let cw = cw.clone();
         let query = query.clone();
-        let sanity_query = sanity_query.clone();
+        let stranded_query = stranded_query.clone();
+        let peg_query = peg_query.clone();
         let environment = environment.clone();
         async move {
             // ⚠️ EVERY CHECK RUNS, AND A FAILURE IN ONE MUST NOT SUPPRESS
@@ -128,25 +135,59 @@ async fn main() -> Result<(), lambda_runtime::Error> {
             }
 
             // ---- 3. USD-value correctness (task 0204, gap 4) --------------
-            let mut sanity_counts: Option<SanityCounts> = None;
-            match ch.query(&sanity_query).fetch_one::<SanityCounts>().await {
+            //
+            // ⚠️ TWO INDEPENDENT READS, and the independence is the fix task
+            // 0213 shipped. They read different tiers, so a `_1m` scan that
+            // matched nothing says nothing whatever about `_1h`. Letting one
+            // refusal suppress the other's metric would re-create the
+            // suppressed-signal failure at the invocation level, having just
+            // removed it at the query level — and it is the same invariant the
+            // block comment at the top of this function is about.
+            let mut stranded_counts: Option<StrandedCounts> = None;
+            match ch
+                .query(&stranded_query)
+                .fetch_one::<StrandedCounts>()
+                .await
+            {
                 Ok(counts) => {
-                    sanity_counts = Some(counts);
+                    stranded_counts = Some(counts);
                     // An `Err` here is a check that did NOT RUN — an
                     // unresolvable USDT identity, or one that resolved to an id
-                    // the candles no longer carry. Either way its two zeros must
-                    // not be published, because NOT_BREACHING would score them
-                    // as a clean bill of health.
-                    match sanity_metrics(&counts) {
-                        Ok(sanity) => {
-                            if let Err(e) = publish_sanity(&cw, &environment, &sanity).await {
-                                failures.push(format!("usd-sanity publish: {e}"));
+                    // the candles no longer carry. Either way its zero must not
+                    // be published, because NOT_BREACHING would score it as a
+                    // clean bill of health.
+                    match stranded_metric(&counts) {
+                        Ok(metric) => {
+                            if let Err(e) =
+                                publish_sanity(&cw, &environment, std::slice::from_ref(&metric))
+                                    .await
+                            {
+                                failures.push(format!("usd-stranded publish: {e}"));
                             }
                         }
-                        Err(refusal) => failures.push(format!("usd-sanity: {refusal}")),
+                        Err(refusal) => failures.push(format!("usd-stranded: {refusal}")),
                     }
                 }
-                Err(e) => failures.push(format!("usd-sanity read: {e}")),
+                Err(e) => failures.push(format!("usd-stranded read: {e}")),
+            }
+
+            let mut peg_counts: Option<PegCounts> = None;
+            match ch.query(&peg_query).fetch_one::<PegCounts>().await {
+                Ok(counts) => {
+                    peg_counts = Some(counts);
+                    match peg_metric(&counts) {
+                        Ok(metric) => {
+                            if let Err(e) =
+                                publish_sanity(&cw, &environment, std::slice::from_ref(&metric))
+                                    .await
+                            {
+                                failures.push(format!("usd-peg-applied publish: {e}"));
+                            }
+                        }
+                        Err(refusal) => failures.push(format!("usd-peg-applied: {refusal}")),
+                    }
+                }
+                Err(e) => failures.push(format!("usd-peg-applied read: {e}")),
             }
 
             // ---- 4. Materialized-view drift (task 0204, gap 3) ------------
@@ -199,9 +240,10 @@ async fn main() -> Result<(), lambda_runtime::Error> {
                 checks_failed = failures.len(),
                 disk_free_percent = free_percent.unwrap_or_default(),
                 disk_available_bytes = disk_reading.map(|u| u.available_bytes).unwrap_or_default(),
-                usd_peg_applied = sanity_counts.map(|c| c.peg_applied).unwrap_or_default(),
-                usd_stranded = sanity_counts.map(|c| c.stranded).unwrap_or_default(),
-                usd_scanned = sanity_counts.map(|c| c.scanned).unwrap_or_default(),
+                usd_peg_applied = peg_counts.map(|c| c.peg_applied).unwrap_or_default(),
+                usd_peg_scanned = peg_counts.map(|c| c.scanned).unwrap_or_default(),
+                usd_stranded = stranded_counts.map(|c| c.stranded).unwrap_or_default(),
+                usd_stranded_scanned = stranded_counts.map(|c| c.scanned).unwrap_or_default(),
                 mv_drift_critical = drift_critical,
                 mv_drift = drift_count,
                 mv_visible_objects = visible_objects.unwrap_or_default(),
@@ -211,7 +253,7 @@ async fn main() -> Result<(), lambda_runtime::Error> {
 
             if !failures.is_empty() {
                 return Err(lambda_runtime::Error::from(format!(
-                    "{} of 4 probe checks failed (the rest published normally): {}",
+                    "{} probe check(s) failed (the rest published normally): {}",
                     failures.len(),
                     failures.join("; ")
                 )));
@@ -225,9 +267,10 @@ async fn main() -> Result<(), lambda_runtime::Error> {
                     "capacity_bytes": disk_reading.map(|u| u.capacity_bytes),
                 },
                 "usd_sanity": {
-                    "peg_applied": sanity_counts.map(|c| c.peg_applied),
-                    "stranded": sanity_counts.map(|c| c.stranded),
-                    "scanned": sanity_counts.map(|c| c.scanned),
+                    "peg_applied": peg_counts.map(|c| c.peg_applied),
+                    "peg_scanned": peg_counts.map(|c| c.scanned),
+                    "stranded": stranded_counts.map(|c| c.stranded),
+                    "stranded_scanned": stranded_counts.map(|c| c.scanned),
                 },
                 "mv_drift": {
                     "critical": drift_critical,

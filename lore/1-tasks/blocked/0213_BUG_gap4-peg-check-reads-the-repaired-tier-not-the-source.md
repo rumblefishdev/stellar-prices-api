@@ -1,0 +1,173 @@
+---
+id: "0213"
+title: "The USD peg check reads _1h — the tier 0182 repaired — so it publishes 0 over 1.5M wrong _1m rows"
+type: BUG
+status: blocked
+related_adr: []
+related_tasks: ["0204", "0212", "0209", "0182", "0172"]
+tags: ["priority-medium", "effort-small", "observability", "clickhouse", "data-correctness", "milestone-M2"]
+milestone: 2
+links:
+  - "../../../packages/rollup-freshness-probe/src/usd_sanity.rs"
+  - "../../../infra/src/lib/stacks/observability-stack.ts"
+history:
+  - date: 2026-08-20
+    status: backlog
+    who: okarcz
+    note: >
+      Spawned from 0204 gap 4 during the pre-deploy prod baseline. The
+      peg-applied ladder reads price_ohlcv_1h, which 0182's repair wrote, while
+      the peg values live in price_ohlcv_1m, which that repair never touched —
+      1,564,045 of them. The check would publish a confident 0. The stranded
+      direction is unaffected and is what found 0209.
+  - date: 2026-08-20
+    status: blocked
+    who: okarcz
+    note: >
+      Code complete and green; BLOCKED on 0212 (and 0209 behind it) for deploy
+      only. The peg direction now reads price_ohlcv_1m over a 48 h window with
+      its own guards and refusal, the stranded direction is untouched on
+      price_ohlcv_1h over 7 days, and the two publish independently. 51 unit
+      tests (+14) and 19 integration tests (+4) against CH 26.3.10.60. Verified
+      NON-VACUOUS by reverting PEG_TABLE to price_ohlcv_1h: 6 ITs and 2 unit
+      tests fail. Acceptance criterion 3 cannot be met until 0212 repairs the
+      1.5 M rows — deploying before that ships a permanently-breached ladder.
+---
+
+# The peg check reads the repaired tier, not the source
+
+## Summary
+
+[[0204]] gap 4 alarms on two directions. The **stranded** one works: a zero in
+`_1m` rolls up as a zero in `_1h`, so reading the coarse tier detects it — that
+is how [[0209]] was found. The **peg-applied** one does not, because a *repaired*
+value in `_1h` says nothing about the row it was rolled from.
+
+Measured on prod 2026-08-20:
+
+| table | USDT-quoted rows at `close_usd / close ≈ 1.0` |
+|---|---|
+| `price_ohlcv_1h` — what the check reads | **0** |
+| `price_ohlcv_1m` — where enrichment writes | **1,564,045** |
+
+[[0182]]'s repair wrote the five coarse tiers directly and never touched `_1m`
+([[0212]]). So the alarm reads clean over 1.5 M wrong values and would have gone
+on doing so indefinitely.
+
+⚠️ **This is the task's own founding failure, reproduced inside the guard built
+against it** — a check scoring healthy because it looked at the surface least
+able to show the defect.
+
+## Why the obvious fix is wrong
+
+⛔ **Do not simply repoint `SANITY_TABLE` at `price_ohlcv_1m`.**
+
+1. It would read 1,564,045 immediately — above every rung of
+   `usdSanityEscalationCounts` (`[1, 100, 10000]`) — and sit permanently in
+   ALARM. A permanently-firing alarm gets muted, which is the exact end-state
+   [[0204]] exists to prevent.
+2. `_1m` is **retention-managed at 7 days** while `_1h` is a forever-table. The
+   check's 7-day `LOOKBACK_SECONDS` sits exactly on that boundary, so the window
+   reasoning has to be redone rather than inherited.
+3. The stranded direction is *correct* on `_1h` and would be made worse by moving
+   — the 48 h grace is calibrated to BE's loss window on the hourly tier.
+
+## Implementation
+
+- Split the two directions: keep `stranded` on `_1h` unchanged; give
+  `peg_applied` its own `_1m`-scoped query, window and ladder.
+- ⚠️ Sequence it **after [[0212]]** has repaired the 1.5 M rows, or the new
+  ladder ships permanently breached — which is the muting failure above.
+- Re-verify the scan cost by what it **reads**, not what it returns; `_1m` at
+  7 days on one quote leg is a different shape from `_1h`.
+- The IT already writes a par-valued candle into a real ClickHouse
+  (`usd_sanity_counts_both_induced_defects`); extend it to `_1m` so the tier
+  distinction is induced rather than reasoned about.
+
+## Acceptance Criteria
+
+- [x] The peg-applied metric is computed from **`price_ohlcv_1m`**, and an IT
+      proves it counts a par-valued `_1m` row that no coarse tier carries —
+      `a_peg_row_only_in_1m_is_counted_although_every_coarse_tier_reads_clean`.
+- [x] The stranded metric still reads `_1h` and its 48 h grace still means
+      BE's loss window. `STRANDED_TABLE`, `STRANDED_LOOKBACK_SECONDS` and
+      `STRANDED_GRACE_SECONDS` are unchanged in value; only the names moved.
+- [ ] The ladder reads **0** on prod at deploy time — i.e. [[0212]] landed
+      first. **(blocked — this is the whole reason the task is not closed)**
+- [x] A note records why `_1m`'s 7-day retention does not undermine the
+      lookback — `PEG_LOOKBACK_SECONDS`, plus the
+      `the_peg_window_stays_clear_of_the_1m_retention_frontier` unit test and
+      the `the_peg_window_excludes_rows_a_cleanup_run_could_delete` IT.
+
+## Implementation Notes
+
+Four files. The shape is a **split, not a repoint** — everything that made the
+stranded direction correct on `_1h` is preserved verbatim.
+
+| file | change |
+|---|---|
+| `usd_sanity.rs` | `SANITY_TABLE` → `STRANDED_TABLE` + `PEG_TABLE`; `LOOKBACK_SECONDS` → `STRANDED_LOOKBACK_SECONDS` (7 d) + `PEG_LOOKBACK_SECONDS` (48 h); `sanity_query` → `stranded_query` + `peg_query`; `SanityCounts` → `StrandedCounts` + `PegCounts` behind a `ScanGuards` trait; `sanity_metrics` → `stranded_metric` + `peg_metric` |
+| `main.rs` | two reads and two publishes instead of one, each failing independently |
+| `rollup_freshness_it.rs` | fixtures parameterised by tier; 4 new ITs |
+| `observability-stack.ts` | peg alarm description names `_1m` and 48 h; ladder comment carries the deploy ordering |
+
+**Verified:** `cargo fmt --all --check` · `cargo clippy -p rollup-freshness-probe
+--all-targets --features lambda` (0 warnings) · `cargo test --workspace` (92
+suites, 0 failures) · 19 ITs against a local CH pinned to **26.3.10.60** ·
+`nx run-many -t lint typecheck` · `nx build infra` · `make -C infra
+synth-production` · all six USD alarms render 856–937 chars against the 1024 cap.
+
+## Issues Encountered
+
+- 🔴 **The first version of the new tests was VACUOUS, and the fixtures were
+  why.** `insert_usdt_minute_candle` was written as
+  `insert_candle_into(c, PEG_TABLE, …)`. A fixture expressed in terms of the
+  constant under test follows it wherever it points, so reverting `PEG_TABLE`
+  to `price_ohlcv_1h` moved the *writes* too and the tier assertions kept
+  passing. Found only by doing the revert. Fixed by spelling both tables
+  literally in the fixtures. ⚠️ **This is the task's own founding failure a
+  third time** — after the check that read the repaired tier, and 0182 verified
+  against its own output: a test that cannot distinguish the thing it asserts.
+  The non-vacuity check is now the acceptance evidence, not a nicety.
+- `main.rs` claimed `"{} of 4 probe checks failed"`. Check 3 can now contribute
+  two failures, so the denominator became false; it now reads
+  `"{} probe check(s) failed"`.
+
+## Design Decisions
+
+### From Plan
+
+1. **Split the directions rather than repoint one table.** The three costs of a
+   bare repoint are recorded verbatim on `PEG_TABLE`, so the next person to have
+   the same idea meets the reasoning before the change.
+2. **Stranded stays on `_1h`, untouched.** A zero rolls up as a zero, and the
+   48 h grace is calibrated to BE's loss window on the hourly tier.
+
+### Emerged
+
+3. **The peg window is 48 h, not 7 days.** The plan said the window "has to be
+   redone rather than inherited" but not to what. 48 h keeps five days of margin
+   below `_1m`'s 7-day retention, so a cleanup run can never truncate the scan.
+   It costs nothing because this is a re-introduction guard, not a historical
+   audit — a regressed writer writes continuously and shows up in the newest
+   rows. Frozen history is 0212's population.
+4. **No grace on the peg direction.** A stranded row is one enrichment has not
+   reached *yet*; a peg-valued row is one enrichment has already written
+   *wrongly*. Waiting cannot improve the second, so a grace would only delay
+   saying so.
+5. **The two directions publish and refuse INDEPENDENTLY.** Previously one
+   refusal suppressed both metrics — harmless while they came from one query,
+   and the muting failure from the other side once they read different tables.
+   A `_1m` scan that matched nothing says nothing about `_1h`.
+6. **Guards duplicated per direction, via a `ScanGuards` trait.** Sharing one
+   `resolved_legs`/`scanned` pair across two tiers would score the tier that was
+   never examined as healthy — this task's own defect, one level up.
+7. **`SanityRefusal` now carries the table and the lookback.** With two tiers,
+   "the scan matched nothing" is no longer a fact about one place, and a refusal
+   that did not say which would send the operator to a table that was fine.
+
+## Future Work
+
+None spawned. The remaining work is the deploy, which is gated by [[0212]] and
+[[0209]] — both already exist and both already carry this ordering. ⛔ Do not
+close this task on the code being green.

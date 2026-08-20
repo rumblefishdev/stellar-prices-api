@@ -828,11 +828,23 @@ export class ObservabilityStack extends cdk.Stack {
     // path back to OK latches permanently on first breach and is then silent
     // for every later incident.
     //
-    // The probe scopes both counts to the USDT quote leg and bounds them to a
-    // rolling 7-day window. Both are load-bearing — exotic-quoted zeros are by
+    // The probe scopes both counts to the USDT quote leg and bounds each to a
+    // rolling window. Both are load-bearing — exotic-quoted zeros are by
     // design (~74M rows), and an unbounded scan every 15 min is task 0111's
     // outage wearing a health check's clothes. See
     // packages/rollup-freshness-probe/src/usd_sanity.rs.
+    //
+    // ⚠️ THE TWO DIRECTIONS READ DIFFERENT TIERS AND DIFFERENT WINDOWS (task
+    // 0213). `peg_applied` reads `price_ohlcv_1m` over 48 h — the tier
+    // enrichment WRITES; `stranded` reads `price_ohlcv_1h` over 7 days, where a
+    // zero rolls up faithfully and the 48 h grace matches BE's loss window.
+    // Reading one tier for both is what made the peg direction publish a
+    // confident 0 over 1,564,045 wrong rows.
+    //
+    // ⛔ THE PEG LADDER MUST NOT BE DEPLOYED BEFORE TASKS 0212 AND 0209. It
+    // reads that 1.5 M population immediately, which is above every rung, so it
+    // ships permanently breached and gets muted — the exact end-state task 0204
+    // exists to prevent. Chain: 0111 -> 0209 -> 0212 -> this.
     const usdSanityRungs = (
       metricName: string,
       idPrefix: string,
@@ -869,7 +881,7 @@ export class ObservabilityStack extends cdk.Stack {
       'UsdPegAppliedAlarmCount',
       'usd-peg-applied',
       (count) =>
-        `${count} or more USDT-quoted candles written in the last 7 days carry a close_usd within 2% of their close — valued as if USDT were still pegged at $1. USDT depegged in June 2022 and trades at ~0.13-0.15 (task 0172), so these values are roughly 7.4x too high. Something is applying the peg path to the USDT leg again: check the enrichment tiers (USDT must be a PIVOT reference, never a peg member) and prices.oracle_prices for rows mis-attributed to the USDT identity — that is how tasks 0196 and 0168 reintroduced this WITHOUT touching the writer, so a green writer test proves nothing here. Task 0182 corrected 567,760 such candles; find what is writing them before re-running any repair. Rungs are operator-tunable via config.opsAlarms.usdSanityEscalationCounts.`,
+        `${count} or more USDT-quoted price_ohlcv_1m candles written in the last 48 h carry a close_usd within 2% of their close — valued as if USDT were still pegged at $1. USDT depegged in June 2022 and trades at ~0.13-0.15 (task 0172), so these values are roughly 7.4x too high. Something is applying the peg path to the USDT leg again: check the enrichment tiers (USDT must be a PIVOT reference, never a peg member) and prices.oracle_prices for rows mis-attributed to the USDT identity — that is how tasks 0196 and 0168 reintroduced this WITHOUT touching the writer, so a green writer test proves nothing here. VERIFY ON _1m, NEVER a coarse tier: task 0182 repaired the coarse tables directly, so _1h reads clean over a broken _1m (tasks 0212, 0213). Find what is writing them before re-running any repair. Rungs tunable via config.opsAlarms.usdSanityEscalationCounts.`,
     );
 
     this.usdStrandedAlarms = usdSanityRungs(

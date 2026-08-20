@@ -34,7 +34,8 @@ use rollup_freshness_probe::mv_drift::{
     drift_metrics, visible_objects_query,
 };
 use rollup_freshness_probe::usd_sanity::{
-    SANITY_TABLE, SanityCounts, SanityRefusal, sanity_metrics, sanity_query,
+    PEG_TABLE, PegCounts, STRANDED_TABLE, SanityRefusal, StrandedCounts, peg_metric, peg_query,
+    stranded_metric, stranded_query,
 };
 use rollup_freshness_probe::{ROLLUP_TIERS, TableLag, freshness_query, lag_metrics};
 
@@ -379,11 +380,19 @@ async fn seed_usdt_identity(c: &Client, asset_id: u32) {
     .await;
 }
 
-/// Insert one USDT-quoted daily candle with an explicit `close` / `close_usd`.
+/// Insert one USDT-quoted candle with an explicit `close` / `close_usd` into a
+/// named tier.
+///
+/// ⚠️ **The table is a parameter since task 0213.** The two directions read
+/// different tiers, and the defect that task exists to close was invisible
+/// precisely because a test could not tell them apart. `_1h` is created as
+/// `AS price_ohlcv_1m`, so one statement shape serves both.
+///
 /// `ts_sql` is a server-side expression so `now()` arithmetic matches the
 /// probe's own window and grace bounds exactly.
-async fn insert_usdt_candle(
+async fn insert_candle_into(
     c: &Client,
+    table: &str,
     usdt_id: u32,
     asset_id: u32,
     ts_sql: &str,
@@ -393,7 +402,7 @@ async fn insert_usdt_candle(
     exec(
         c,
         &format!(
-            "INSERT INTO prices.{SANITY_TABLE} \
+            "INSERT INTO prices.{table} \
                (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
                 volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) \
              SELECT {ts_sql}, {asset_id}, {usdt_id}, 'sdex', {close}, {close}, {close}, {close}, \
@@ -403,11 +412,75 @@ async fn insert_usdt_candle(
     .await;
 }
 
-async fn read_counts(c: &Client) -> SanityCounts {
-    c.query(&sanity_query())
-        .fetch_one::<SanityCounts>()
+/// Insert into the **stranded** tier (`price_ohlcv_1h`).
+async fn insert_usdt_candle(
+    c: &Client,
+    usdt_id: u32,
+    asset_id: u32,
+    ts_sql: &str,
+    close: &str,
+    close_usd: &str,
+) {
+    insert_candle_into(
+        c,
+        STRANDED_TABLE,
+        usdt_id,
+        asset_id,
+        ts_sql,
+        close,
+        close_usd,
+    )
+    .await;
+}
+
+/// Insert into the **peg** tier — the tier enrichment writes.
+///
+/// ⚠️ **The table is spelled literally, not as `PEG_TABLE`.** A fixture written
+/// in terms of the constant under test follows it wherever it points, so the
+/// tier assertions below would hold for `_1h` just as happily and would prove
+/// nothing. Found by reverting `PEG_TABLE` to `price_ohlcv_1h` and watching
+/// tests that should have failed keep passing.
+async fn insert_usdt_minute_candle(
+    c: &Client,
+    usdt_id: u32,
+    asset_id: u32,
+    ts_sql: &str,
+    close: &str,
+    close_usd: &str,
+) {
+    insert_candle_into(
+        c,
+        "price_ohlcv_1m",
+        usdt_id,
+        asset_id,
+        ts_sql,
+        close,
+        close_usd,
+    )
+    .await;
+}
+
+/// Clear both tiers and the registry. Both, always — a test that truncated only
+/// the tier it was about would inherit the other's rows and read a count nobody
+/// wrote.
+async fn reset_sanity_tables(c: &Client) {
+    exec(c, "TRUNCATE TABLE prices.price_ohlcv_1h").await;
+    exec(c, "TRUNCATE TABLE prices.price_ohlcv_1m").await;
+    exec(c, "TRUNCATE TABLE prices.assets").await;
+}
+
+async fn read_stranded(c: &Client) -> StrandedCounts {
+    c.query(&stranded_query())
+        .fetch_one::<StrandedCounts>()
         .await
-        .expect("sanity query executes and deserializes")
+        .expect("stranded query executes and deserializes")
+}
+
+async fn read_peg(c: &Client) -> PegCounts {
+    c.query(&peg_query())
+        .fetch_one::<PegCounts>()
+        .await
+        .expect("peg query executes and deserializes")
 }
 
 /// The query must **execute and deserialize** against a real ClickHouse — the
@@ -419,19 +492,23 @@ async fn read_counts(c: &Client) -> SanityCounts {
 #[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
 async fn usd_sanity_query_executes_and_reads_a_healthy_leg_as_zero() {
     let c = client();
-    exec(&c, &format!("TRUNCATE TABLE prices.{SANITY_TABLE}")).await;
-    exec(&c, "TRUNCATE TABLE prices.assets").await;
+    reset_sanity_tables(&c).await;
     seed_usdt_identity(&c, 111).await;
 
-    // A correctly-priced USDT-quoted candle: USDT at its measured ~0.15, so
-    // close_usd is nowhere near close.
+    // A correctly-priced USDT-quoted candle on each tier: USDT at its measured
+    // ~0.15, so close_usd is nowhere near close.
     insert_usdt_candle(&c, 111, 5, "now() - INTERVAL 3 DAY", "100", "15").await;
+    insert_usdt_minute_candle(&c, 111, 5, "now() - INTERVAL 3 HOUR", "100", "15").await;
 
-    let counts = read_counts(&c).await;
-    assert_eq!(counts.resolved_legs, 1, "the USDT identity must resolve");
-    assert_eq!(counts.peg_applied, 0, "a 0.15 rate is not the peg");
-    assert_eq!(counts.stranded, 0, "a priced candle is not stranded");
-    assert_eq!(counts.scanned, 1);
+    let stranded = read_stranded(&c).await;
+    assert_eq!(stranded.resolved_legs, 1, "the USDT identity must resolve");
+    assert_eq!(stranded.stranded, 0, "a priced candle is not stranded");
+    assert_eq!(stranded.scanned, 1);
+
+    let peg = read_peg(&c).await;
+    assert_eq!(peg.resolved_legs, 1, "the USDT identity must resolve");
+    assert_eq!(peg.peg_applied, 0, "a 0.15 rate is not the peg");
+    assert_eq!(peg.scanned, 1);
 }
 
 /// ⚠️ **Induce the condition, do not read the CDK.** This is task 0137's lesson
@@ -441,19 +518,27 @@ async fn usd_sanity_query_executes_and_reads_a_healthy_leg_as_zero() {
 #[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
 async fn usd_sanity_counts_both_induced_defects() {
     let c = client();
-    exec(&c, &format!("TRUNCATE TABLE prices.{SANITY_TABLE}")).await;
-    exec(&c, "TRUNCATE TABLE prices.assets").await;
+    reset_sanity_tables(&c).await;
     seed_usdt_identity(&c, 111).await;
 
-    // Defect 1 — the peg re-applied: close_usd == close (task 0172 / 0182).
-    insert_usdt_candle(&c, 111, 5, "now() - INTERVAL 3 DAY", "100", "100").await;
-    // Defect 2 — stranded past the grace period: zero on a representable close
-    // (what task 0182's own reset produced on 2026-08-19).
+    // Defect 1 — the peg re-applied, on the tier enrichment WRITES: close_usd
+    // == close (task 0172 / 0212).
+    insert_usdt_minute_candle(&c, 111, 5, "now() - INTERVAL 3 HOUR", "100", "100").await;
+    // Defect 2 — stranded past the grace period, on the tier the consumer
+    // reads: zero on a representable close (what task 0182's own reset produced
+    // on 2026-08-19).
     insert_usdt_candle(&c, 111, 6, "now() - INTERVAL 3 DAY", "100", "0").await;
 
-    let counts = read_counts(&c).await;
-    assert_eq!(counts.peg_applied, 1, "close_usd == close must be counted");
-    assert_eq!(counts.stranded, 1, "an aged zero must be counted");
+    assert_eq!(
+        read_peg(&c).await.peg_applied,
+        1,
+        "close_usd == close must be counted"
+    );
+    assert_eq!(
+        read_stranded(&c).await.stranded,
+        1,
+        "an aged zero must be counted"
+    );
 }
 
 /// The grace period is what makes the stranded metric usable at all: enrichment
@@ -464,18 +549,17 @@ async fn usd_sanity_counts_both_induced_defects() {
 #[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
 async fn a_freshly_written_zero_is_not_yet_stranded() {
     let c = client();
-    exec(&c, &format!("TRUNCATE TABLE prices.{SANITY_TABLE}")).await;
-    exec(&c, "TRUNCATE TABLE prices.assets").await;
+    reset_sanity_tables(&c).await;
     seed_usdt_identity(&c, 111).await;
 
     // Inside the 48 h grace — awaiting enrichment, not damaged.
     insert_usdt_candle(&c, 111, 5, "now() - INTERVAL 1 HOUR", "100", "0").await;
-    assert_eq!(read_counts(&c).await.stranded, 0, "still within grace");
+    assert_eq!(read_stranded(&c).await.stranded, 0, "still within grace");
 
     // The same row, aged past the grace, is the defect.
-    exec(&c, &format!("TRUNCATE TABLE prices.{SANITY_TABLE}")).await;
+    exec(&c, "TRUNCATE TABLE prices.price_ohlcv_1h").await;
     insert_usdt_candle(&c, 111, 5, "now() - INTERVAL 3 DAY", "100", "0").await;
-    assert_eq!(read_counts(&c).await.stranded, 1, "past grace = stranded");
+    assert_eq!(read_stranded(&c).await.stranded, 1, "past grace = stranded");
 }
 
 /// Dust is not damage. A `close` below the `Decimal(38, 14)` underflow bound
@@ -487,8 +571,7 @@ async fn a_freshly_written_zero_is_not_yet_stranded() {
 #[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
 async fn dust_below_the_underflow_bound_is_not_counted_as_stranded() {
     let c = client();
-    exec(&c, &format!("TRUNCATE TABLE prices.{SANITY_TABLE}")).await;
-    exec(&c, "TRUNCATE TABLE prices.assets").await;
+    reset_sanity_tables(&c).await;
     seed_usdt_identity(&c, 111).await;
 
     insert_usdt_candle(
@@ -500,7 +583,7 @@ async fn dust_below_the_underflow_bound_is_not_counted_as_stranded() {
         "0",
     )
     .await;
-    assert_eq!(read_counts(&c).await.stranded, 0, "1e-14 close is dust");
+    assert_eq!(read_stranded(&c).await.stranded, 0, "1e-14 close is dust");
 }
 
 /// ⚠️ The trap that makes this check scoped rather than global: exotic-quoted
@@ -512,14 +595,13 @@ async fn dust_below_the_underflow_bound_is_not_counted_as_stranded() {
 #[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
 async fn an_exotic_quoted_zero_is_ignored_because_it_is_by_design() {
     let c = client();
-    exec(&c, &format!("TRUNCATE TABLE prices.{SANITY_TABLE}")).await;
-    exec(&c, "TRUNCATE TABLE prices.assets").await;
+    reset_sanity_tables(&c).await;
     seed_usdt_identity(&c, 111).await;
 
     // quote_asset_id 999 is not the USDT leg — an unpriceable exotic pair.
     insert_usdt_candle(&c, 999, 5, "now() - INTERVAL 3 DAY", "100", "0").await;
 
-    let counts = read_counts(&c).await;
+    let counts = read_stranded(&c).await;
     assert_eq!(counts.scanned, 0, "the exotic leg is out of scope entirely");
     assert_eq!(counts.stranded, 0);
 }
@@ -532,34 +614,27 @@ async fn an_exotic_quoted_zero_is_ignored_because_it_is_by_design() {
 #[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
 async fn a_repaired_candle_stops_counting_once_a_higher_version_supersedes_it() {
     let c = client();
-    exec(&c, &format!("TRUNCATE TABLE prices.{SANITY_TABLE}")).await;
-    exec(&c, "TRUNCATE TABLE prices.assets").await;
+    reset_sanity_tables(&c).await;
     seed_usdt_identity(&c, 111).await;
 
-    insert_usdt_candle(&c, 111, 5, "now() - INTERVAL 3 DAY", "100", "100").await;
-    assert_eq!(
-        read_counts(&c).await.peg_applied,
-        1,
-        "the defect is present"
-    );
+    insert_usdt_minute_candle(&c, 111, 5, "now() - INTERVAL 3 HOUR", "100", "100").await;
+    assert_eq!(read_peg(&c).await.peg_applied, 1, "the defect is present");
 
     // The repair: same primary key, corrected value, version + 1.
     exec(
         &c,
-        &format!(
-            "INSERT INTO prices.{SANITY_TABLE} \
-               (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
-                volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) \
-             SELECT timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
-                    volume_base, volume_quote, volume_quote, 15, vwap, trade_count, version + 1 \
-             FROM prices.{SANITY_TABLE} FINAL \
-             WHERE quote_asset_id = 111 AND close_usd = close"
-        ),
+        "INSERT INTO prices.price_ohlcv_1m \
+           (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+            volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) \
+         SELECT timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+                volume_base, volume_quote, volume_quote, 15, vwap, trade_count, version + 1 \
+         FROM prices.price_ohlcv_1m FINAL \
+         WHERE quote_asset_id = 111 AND close_usd = close",
     )
     .await;
 
     assert_eq!(
-        read_counts(&c).await.peg_applied,
+        read_peg(&c).await.peg_applied,
         0,
         "FINAL must collapse to the repaired row"
     );
@@ -568,26 +643,166 @@ async fn a_repaired_candle_stops_counting_once_a_higher_version_supersedes_it() 
 /// The silent all-clear. With no USDT identity in the registry the quote-leg
 /// filter matches nothing, both counts read zero, and a `NOT_BREACHING` alarm
 /// would score a check that never ran as perfectly healthy. `resolved_legs`
-/// exists so `sanity_metrics` can refuse it, and `main.rs` fails the invocation.
+/// exists so `peg_metric` can refuse it, and `main.rs` fails the invocation.
 #[tokio::test]
 #[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
 async fn an_unresolvable_usdt_leg_reads_as_zero_and_is_therefore_refused() {
     let c = client();
-    exec(&c, &format!("TRUNCATE TABLE prices.{SANITY_TABLE}")).await;
-    exec(&c, "TRUNCATE TABLE prices.assets").await;
+    reset_sanity_tables(&c).await;
     // Deliberately no USDT identity seeded.
-    insert_usdt_candle(&c, 111, 5, "now() - INTERVAL 3 DAY", "100", "100").await;
+    insert_usdt_minute_candle(&c, 111, 5, "now() - INTERVAL 3 HOUR", "100", "100").await;
 
-    let counts = read_counts(&c).await;
+    let counts = read_peg(&c).await;
     assert_eq!(counts.resolved_legs, 0);
     assert_eq!(
         counts.peg_applied, 0,
         "a real defect is invisible without the identity — hence the refusal"
     );
     assert_eq!(
-        sanity_metrics(&counts),
-        Err(SanityRefusal::UnresolvableLeg { resolved_legs: 0 }),
+        peg_metric(&counts),
+        Err(SanityRefusal::UnresolvableLeg {
+            resolved_legs: 0,
+            table: PEG_TABLE
+        }),
         "this reading must never be published as healthy"
+    );
+}
+
+/// 🔴 **The defect task 0213 exists to close, induced rather than reasoned
+/// about.**
+///
+/// Reproduces the exact production state measured on 2026-08-20: `price_ohlcv_1m`
+/// carries peg-valued rows (1,564,045 of them) while every coarse tier reads
+/// clean, because task 0182's repair wrote the coarse tables **directly** and
+/// never touched the tier they roll from (task 0212).
+///
+/// Before this task the peg direction read `_1h` and would have published a
+/// confident **0** over that population. The assertion that matters is the
+/// second one: the tier the check used to read shows nothing wrong.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+async fn a_peg_row_only_in_1m_is_counted_although_every_coarse_tier_reads_clean() {
+    let c = client();
+    reset_sanity_tables(&c).await;
+    seed_usdt_identity(&c, 111).await;
+
+    // The tier enrichment writes: the peg re-applied.
+    insert_usdt_minute_candle(&c, 111, 5, "now() - INTERVAL 3 HOUR", "100", "100").await;
+    // The repaired coarse tier: the SAME candle, correctly valued at ~0.15 —
+    // which is precisely what 0182's repair left behind.
+    insert_usdt_candle(&c, 111, 5, "now() - INTERVAL 3 HOUR", "100", "15").await;
+
+    assert_eq!(
+        read_peg(&c).await.peg_applied,
+        1,
+        "the peg direction must see the tier enrichment writes"
+    );
+
+    // ⚠️ The regression this pins. A check reading the repaired tier sees a
+    // healthy leg and publishes zero — the silent all-clear, from a scan that
+    // really did run and really did examine rows.
+    let stranded = read_stranded(&c).await;
+    assert_eq!(
+        stranded.scanned, 1,
+        "the coarse tier was genuinely examined — this is not an empty scan"
+    );
+    assert_eq!(
+        stranded.stranded, 0,
+        "and it reads perfectly healthy, which is exactly why the peg direction \
+         cannot live here"
+    );
+}
+
+/// The two directions must not be able to see each other's rows. Pinned because
+/// the tempting simplification — one query over one tier — is what made the peg
+/// direction blind, and a future "let's just union them" would restore it.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+async fn each_direction_only_scans_its_own_tier() {
+    let c = client();
+    reset_sanity_tables(&c).await;
+    seed_usdt_identity(&c, 111).await;
+
+    // Rows in `_1m` only.
+    insert_usdt_minute_candle(&c, 111, 5, "now() - INTERVAL 3 HOUR", "100", "100").await;
+    assert_eq!(read_peg(&c).await.scanned, 1);
+    assert_eq!(
+        read_stranded(&c).await.scanned,
+        0,
+        "the stranded direction must not see _1m rows"
+    );
+
+    // Rows in `_1h` only.
+    reset_sanity_tables(&c).await;
+    seed_usdt_identity(&c, 111).await;
+    insert_usdt_candle(&c, 111, 5, "now() - INTERVAL 3 DAY", "100", "0").await;
+    assert_eq!(read_stranded(&c).await.scanned, 1);
+    assert_eq!(
+        read_peg(&c).await.scanned,
+        0,
+        "the peg direction must not see _1h rows"
+    );
+}
+
+/// ⚠️ **The window bound the peg direction does not inherit.** `_1m` is
+/// retention-managed at 7 days, so the peg scan keeps a wide margin below that
+/// frontier (48 h) rather than reusing the stranded direction's 7 days. A row
+/// older than the peg window is out of scope even though it is still in the
+/// table — which is the property that makes a cleanup run unable to move the
+/// count.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+async fn the_peg_window_excludes_rows_a_cleanup_run_could_delete() {
+    let c = client();
+    reset_sanity_tables(&c).await;
+    seed_usdt_identity(&c, 111).await;
+
+    // Inside the 48 h peg window — counted.
+    insert_usdt_minute_candle(&c, 111, 5, "now() - INTERVAL 3 HOUR", "100", "100").await;
+    // Older than the peg window but still well inside `_1m`'s 7-day retention,
+    // i.e. exactly the band a widened window would have picked up and a cleanup
+    // run could then remove underneath it.
+    insert_usdt_minute_candle(&c, 111, 6, "now() - INTERVAL 5 DAY", "100", "100").await;
+
+    let peg = read_peg(&c).await;
+    assert_eq!(peg.scanned, 1, "only the in-window row is examined");
+    assert_eq!(
+        peg.peg_applied, 1,
+        "a defect outside the window is task 0212's population, not this alarm's"
+    );
+}
+
+/// ⚠️ A `_1m` scan that matched nothing must not suppress a working `_1h`
+/// reading. Before task 0213 one refusal killed both metrics — harmless while
+/// they came from one query, and the muting failure from the other side once
+/// they read different tiers.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
+async fn an_empty_peg_scan_does_not_suppress_the_stranded_metric() {
+    let c = client();
+    reset_sanity_tables(&c).await;
+    seed_usdt_identity(&c, 111).await;
+
+    // `_1m` is empty; `_1h` carries a real stranded candle.
+    insert_usdt_candle(&c, 111, 5, "now() - INTERVAL 3 DAY", "100", "0").await;
+
+    let peg = read_peg(&c).await;
+    assert_eq!(
+        peg_metric(&peg),
+        Err(SanityRefusal::EmptyScan {
+            table: PEG_TABLE,
+            lookback_seconds: rollup_freshness_probe::usd_sanity::PEG_LOOKBACK_SECONDS,
+        }),
+        "an unexamined tier must be refused, not published as zero"
+    );
+
+    let stranded = read_stranded(&c).await;
+    assert_eq!(
+        stranded_metric(&stranded)
+            .expect("published on its own evidence")
+            .value,
+        1.0,
+        "the working direction must still publish"
     );
 }
 
