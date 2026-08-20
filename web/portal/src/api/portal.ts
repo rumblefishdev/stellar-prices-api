@@ -75,6 +75,65 @@ export class PortalApiError extends Error {
 }
 
 /**
+ * The backend's error envelope — `{code, message}`, from `common/errors.rs`.
+ *
+ * Both fields are optional HERE and not in the backend, deliberately: this
+ * describes what arrived over the wire, and what arrived may be a proxy's error
+ * page, task 0183's empty gate 404, or nothing at all.
+ */
+interface ErrorEnvelope {
+  code?: string;
+  message?: string;
+}
+
+/**
+ * Read a failed response's envelope, or `null` if it does not have one.
+ *
+ * Consumes the body, so a caller gets ONE of these per response and passes the
+ * result around rather than reading again — a `Response` body is a stream and
+ * the second read throws.
+ */
+async function readEnvelope(response: Response): Promise<ErrorEnvelope | null> {
+  try {
+    const body: unknown = await response.json();
+    return typeof body === 'object' && body !== null
+      ? (body as ErrorEnvelope)
+      : null;
+  } catch {
+    // Not JSON: the gate's empty 404, an HTML error page from something in
+    // front of the backend, or a truncated response.
+    return null;
+  }
+}
+
+/**
+ * What to tell the visitor about a response that failed.
+ *
+ * **Prefers the backend's own message.** Every failure the backend authors
+ * carries one written for that exact condition — "AWS is rate-limiting the
+ * usage lookup right now; try again in a moment" is something a visitor can act
+ * on, where `answered 503` is a number they cannot. Throwing the envelope away
+ * also made the longer {@link USAGE_TIMEOUT_MS} pointless: those extra seconds
+ * exist to let the backend's answer arrive.
+ *
+ * Falls back to the URL and status when there is no envelope — the gate's empty
+ * 404 and anything answered on the backend's behalf have no message to forward,
+ * and naming the URL that failed is then the most specific true thing there is
+ * to say. The status is carried separately on {@link PortalApiError} either way,
+ * because the page branches on `401` regardless of wording.
+ */
+function failureMessage(
+  url: string,
+  status: number,
+  envelope: ErrorEnvelope | null,
+): string {
+  const message = envelope?.message;
+  return typeof message === 'string' && message.trim() !== ''
+    ? message
+    : `${url} answered ${status}`;
+}
+
+/**
  * How long the page waits before calling the backend unreachable.
  *
  * `fetch` has no default timeout, and neither the gateway's 29s cap nor the
@@ -151,7 +210,7 @@ async function getJson<T>(url: string): Promise<T> {
   }
   if (!response.ok) {
     throw new PortalApiError(
-      `${url} answered ${response.status}`,
+      failureMessage(url, response.status, await readEnvelope(response)),
       response.status,
     );
   }
@@ -313,7 +372,12 @@ export async function fetchUsage(): Promise<PortalUsage | null> {
     }
     throw new PortalApiError(`${url} could not be reached`);
   }
-  if (response.status === 404) {
+  if (!response.ok) {
+    // Read once, then used twice: to recognise `no_key`, and to word whatever
+    // else went wrong. A `Response` body is a stream, so this cannot be two
+    // separate reads.
+    const envelope = await readEnvelope(response);
+
     // Only the backend's own `no_key` envelope means "no key". The other 404
     // on this path is task 0183's gate — an EMPTY body, deliberately
     // byte-identical to an unrouted route — which the backend goes out of its
@@ -321,19 +385,12 @@ export async function fetchUsage(): Promise<PortalUsage | null> {
     // closed while a signed-in tab presses Refresh. Reading that as "you have
     // no API key" would be a false statement on the slice whose theme is
     // rendering honestly.
-    try {
-      const body = (await response.json()) as { code?: string };
-      if (body.code === 'no_key') {
-        return null;
-      }
-    } catch {
-      // Not JSON — the gate's empty 404, or something else entirely.
+    if (response.status === 404 && envelope?.code === 'no_key') {
+      return null;
     }
-    throw new PortalApiError(`${url} answered 404`, 404);
-  }
-  if (!response.ok) {
+
     throw new PortalApiError(
-      `${url} answered ${response.status}`,
+      failureMessage(url, response.status, envelope),
       response.status,
     );
   }
@@ -380,9 +437,11 @@ export async function issueKey(): Promise<PortalKey> {
   if (!response.ok) {
     // `401` is the one status this page can act on: it means the session
     // expired while the tab was open, and the answer is to sign in again rather
-    // than to retry. Carried through as the status so the caller can say so.
+    // than to retry. Carried through as the status so the caller can say so —
+    // and `describeFailure` words that case itself, so the envelope's message
+    // is what the OTHER statuses get to say for themselves.
     throw new PortalApiError(
-      `${url} answered ${response.status}`,
+      failureMessage(url, response.status, await readEnvelope(response)),
       response.status,
     );
   }

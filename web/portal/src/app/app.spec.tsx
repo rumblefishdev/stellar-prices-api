@@ -1046,6 +1046,54 @@ describe('usage against quota', () => {
     expect(screen.getByText(/quota resets on the 1st/i)).toBeTruthy();
   });
 
+  /**
+   * The backend writes a message for each failure it authors; the page shows
+   * it (task 0188).
+   *
+   * A throttle with nothing cached is the case the backend has a distinct 503
+   * for, and it is the one where a bare status code helps least: "try again in
+   * a moment" is actionable, `answered 503` is a number. Discarding the
+   * envelope also made the longer usage timeout pointless — the extra seconds
+   * exist to let this answer arrive.
+   */
+  it("shows the backend's reason for a failed usage read", async () => {
+    signedInWithUsage(() => ({
+      ok: false,
+      status: 503,
+      json: async () => ({
+        code: 'usage_unavailable',
+        message:
+          'AWS is rate-limiting the usage lookup right now; try again in a moment',
+      }),
+    }));
+    renderApp();
+
+    expect(
+      await screen.findByText(/rate-limiting the usage lookup/i),
+    ).toBeTruthy();
+    expect(screen.queryByText(/answered 503/i)).toBeNull();
+  });
+
+  /**
+   * With no envelope to read there is nothing to forward, and the URL and
+   * status are then the most specific true thing there is to say. Task 0183's
+   * gate answers exactly this: an EMPTY 404, byte-identical to an unrouted
+   * path — which must never be read as "you have no API key".
+   */
+  it('falls back to the status when a failure carries no message', async () => {
+    signedInWithUsage(() => ({
+      ok: false,
+      status: 404,
+      json: async () => {
+        throw new SyntaxError('Unexpected end of JSON input');
+      },
+    }));
+    renderApp();
+
+    expect(await screen.findByText(/answered 404/i)).toBeTruthy();
+    expect(screen.queryByText(/no API key yet/i)).toBeNull();
+  });
+
   /** The refresh control re-asks; the backend's cache bounds what that costs. */
   it('refreshes on the button', async () => {
     const fetchMock = signedInWithUsage();
