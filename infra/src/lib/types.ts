@@ -221,6 +221,93 @@ export interface EnvironmentConfig {
      */
     readonly ledgerProcessorLagSeconds: number;
     /**
+     * Free-space floor (percent) on the ClickHouse host's filesystem, below
+     * which `prices-{env}-ch-disk-free` fires (task 0204, gap 1).
+     *
+     * The 2026-08-13 disk-full stall ran **11.5 h** and was discovered by
+     * reading Lambda panic logs — nothing watched the condition. ⚠️ The volume
+     * is **shared with the block-explorer team and we are 3.3% of it**, so we
+     * can neither prevent it filling nor free a meaningful amount ourselves:
+     * the only thing this alarm buys is **warning time**, and the threshold has
+     * to be generous enough to deliver some.
+     *
+     * 20% of the 1.72 TiB volume is ~352 GiB. The incident consumed ~150 GiB,
+     * so this fires with roughly twice that still free — hours of warning at the
+     * rate that event moved — while sitting below the 2026-08-17 measurement of
+     * 430.6 GiB free (25.0%), so it does not fire on the current steady state.
+     * ⚠️ A bound at 25 would have been in ALARM the day it shipped.
+     *
+     * ⚠️ **15 was proposed and reversed on 2026-08-20.** Reaching 15% takes 166
+     * GiB consumed; the 2026-08-13 event consumed ~150 GiB and would have landed
+     * at 15.93% free, missing the alarm entirely. This value fires at 78 GiB.
+     * Five percentage points is the whole margin between catching that incident
+     * and missing it — re-measure before changing this, do not eyeball it.
+     *
+     * Mirrored as `DISK_FREE_PERCENT_BOUND` in
+     * `packages/rollup-freshness-probe/src/disk.rs`, which documents the
+     * reasoning and unit-tests it against both the measured steady state and a
+     * replay of the incident. **This config is authoritative for what the alarm
+     * does**; the Rust copy is documentation and a test fixture, and drift
+     * between them mis-tunes the alarm without any test failing. Change both,
+     * or neither.
+     */
+    readonly chDiskFreePercent: number;
+    /**
+     * Extra depths at which the ingest-DLQ alarm escalates (task 0204, gap 2).
+     *
+     * On 2026-08-13 Slack showed one message: `ApproximateNumberOfMessagesVisible
+     * >= 1`. By morning the DLQ held **91**, and nobody reading the channel could
+     * tell 1 from 91. That is not a tuning miss — a CloudWatch alarm notifies on
+     * a **state transition**, so an alarm already latched in ALARM says nothing
+     * further no matter how far the queue climbs.
+     *
+     * Each depth here becomes an additional alarm on the same metric, so a
+     * growing DLQ crosses a new threshold and produces a new Slack message.
+     * The `>= 1` rung is the pre-existing `prices-{env}-ledger-processor-dlq`
+     * alarm and is NOT listed here — these are the rungs above it.
+     *
+     * Defaults to `[10, 50]`: 1 means a ledger was dropped and always warrants a
+     * look; 10 means it is not a lone poison pill but something systemic; 50
+     * means an outage is in progress (the 2026-08-13 event reached 91, so it
+     * would have lit every rung).
+     *
+     * Must be strictly increasing integers above 1 — equal or descending rungs
+     * would fire out of order and make the ladder unreadable.
+     */
+    readonly dlqEscalationDepths: readonly number[];
+    /**
+     * Counts at which the USD-correctness alarms escalate (task 0204, gap 4).
+     *
+     * The `rollup-freshness-probe` publishes two counts of USDT-quoted candles
+     * over a rolling 7-day window: `UsdtPegAppliedCandles` (valued as if USDT
+     * were still pegged at $1) and `UsdtStrandedCandles` (left at
+     * `close_usd = 0` past a 48 h grace despite a representable `close`). Each
+     * threshold here becomes one alarm on each metric.
+     *
+     * ⚠️ **Why a ladder and not a single `>= 1`.** A wrong `close_usd` is a
+     * **standing condition** — it stays wrong until a person repairs it — so it
+     * hits the same CloudWatch wall gap 2 hit: an alarm notifies on a state
+     * transition, latches, and then says nothing while the population grows.
+     * Unlike materialized-view drift (gap 3), which is binary and has no way out
+     * of this, a *count of wrong candles* has **depth**: a regressed writer adds
+     * to it on every run. So gap 2's ladder transfers here directly.
+     *
+     * Defaults to `[1, 100, 10000]`. 1 because a single candle valued at the peg
+     * is already a defect and there is no benign floor; 100 because past that it
+     * is a writer regression rather than an edge case; 10000 because task 0182's
+     * historical population was 567,760 across five tiers, so a rung at that
+     * order of magnitude distinguishes "a bug shipped" from "a bug has been
+     * shipped for a while".
+     *
+     * ⚠️ A frozen historical population would latch even with the ladder — the
+     * rungs re-notify on *growth*. That is accepted: this is a re-introduction
+     * guard, and a re-introduction grows. Every rung keeps its OK action for the
+     * same reason gap 2's do.
+     *
+     * Must be strictly increasing positive integers.
+     */
+    readonly usdSanityEscalationCounts: readonly number[];
+    /**
      * Optional AWS Chatbot → Slack routing for the ops-alarms topic (task 0056).
      * When set, `ObservabilityStack` subscribes `prices-{env}-ops-alarms` to a
      * Slack channel via a `SlackChannelConfiguration`, so alarms land in Slack —
@@ -574,6 +661,59 @@ export function validateConfig(config: EnvironmentConfig): void {
       errors.push(
         `opsAlarms.mtlsNotAfterDaysThreshold must be a positive integer (days), got: ${ops.mtlsNotAfterDaysThreshold}`,
       );
+    }
+    // Percent, so bounded 0–100 exclusive at both ends: 0 can never fire and
+    // 100 is always firing. Non-integers are allowed (a 12.5% floor is a
+    // reasonable thing to want); NaN is not.
+    if (
+      typeof ops.chDiskFreePercent !== 'number' ||
+      !Number.isFinite(ops.chDiskFreePercent) ||
+      ops.chDiskFreePercent <= 0 ||
+      ops.chDiskFreePercent >= 100
+    ) {
+      errors.push(
+        `opsAlarms.chDiskFreePercent must be a number in (0, 100) exclusive, got: ${ops.chDiskFreePercent}`,
+      );
+    }
+    if (!Array.isArray(ops.dlqEscalationDepths)) {
+      errors.push('opsAlarms.dlqEscalationDepths missing or not an array');
+    } else {
+      // Rung 1 is the pre-existing `>= 1` alarm, so every configured rung must
+      // sit above it, and they must ascend — a ladder that repeats or descends
+      // fires out of order and tells the reader nothing about severity.
+      let previous = 1;
+      for (const depth of ops.dlqEscalationDepths) {
+        if (!Number.isInteger(depth) || depth <= previous) {
+          errors.push(
+            `opsAlarms.dlqEscalationDepths must be strictly increasing integers above 1, got: [${ops.dlqEscalationDepths.join(', ')}]`,
+          );
+          break;
+        }
+        previous = depth;
+      }
+    }
+    if (!Array.isArray(ops.usdSanityEscalationCounts)) {
+      errors.push(
+        'opsAlarms.usdSanityEscalationCounts missing or not an array',
+      );
+    } else if (ops.usdSanityEscalationCounts.length === 0) {
+      // An empty ladder silently disables the gap-4 alarms while the probe
+      // keeps publishing the metrics — the check would look wired up and watch
+      // nothing, which is the exact shape of failure task 0204 exists to end.
+      errors.push(
+        'opsAlarms.usdSanityEscalationCounts must not be empty — an empty ladder publishes the metrics but alarms on nothing',
+      );
+    } else {
+      let previousCount = 0;
+      for (const count of ops.usdSanityEscalationCounts) {
+        if (!Number.isInteger(count) || count <= previousCount) {
+          errors.push(
+            `opsAlarms.usdSanityEscalationCounts must be strictly increasing positive integers, got: [${ops.usdSanityEscalationCounts.join(', ')}]`,
+          );
+          break;
+        }
+        previousCount = count;
+      }
     }
     if (!ops.rollupLagSeconds || typeof ops.rollupLagSeconds !== 'object') {
       errors.push('opsAlarms.rollupLagSeconds missing or not an object');

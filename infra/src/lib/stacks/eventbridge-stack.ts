@@ -536,10 +536,24 @@ export class EventBridgeStack extends cdk.Stack {
     // measures the data instead of the MV, which is the only signal that could
     // have caught it.
     //
-    // Reads the OHLCV tables directly and touches no `system.*` table, so it
-    // needs nothing beyond the SELECT the ingestion identity already has —
-    // deliberate, since the runtime users are XML-managed by BE and cannot be
-    // SQL-GRANTed by us (task 0134).
+    // ⚠️ The probe is NO LONGER rollup-only. Task 0204 added three more reads
+    // to the same invocation, deliberately reusing this schedule and this
+    // Prices/Rollup grant so the work stayed out of THIS stack — see the
+    // namespace note on the PublishRollupMetrics policy below, and task 0200.
+    // Each invocation now does, in this order and each after the previous has
+    // published: rollup lag (0137), ClickHouse disk headroom (gap 1), USD-value
+    // correctness on the USDT quote leg (gap 4), materialized-view drift
+    // (gap 3). A failure in any one is recorded and the rest still run.
+    //
+    // Still needs nothing beyond the SELECT the ingestion identity already has,
+    // which remains deliberate — the runtime users are XML-managed by BE and
+    // cannot be SQL-GRANTed by us (task 0134). ⚠️ But the old claim that it
+    // "touches no `system.*` table" is now FALSE: the drift read queries
+    // `system.tables`. That is fine and needs no grant, because `system.tables`
+    // is grant-FILTERED (a prices-only user sees the prices objects, measured at
+    // 32 on 26.3.10.60). Contrast `system.disks`, which is grant-DENIED and
+    // cannot be granted — which is exactly why the disk read calls filesystem
+    // *functions* instead.
     // -----------------------------------------------------------------
     const rollupFreshness = createWorkerLambda(this, {
       config,
@@ -549,10 +563,34 @@ export class EventBridgeStack extends cdk.Stack {
       name: 'rollup-freshness-probe',
       assetDir: ROLLUP_FRESHNESS_PROBE_ASSET_DIR,
       memorySize: 256,
-      // Seven metadata-only max() reads + one PutMetricData. Each max() is
-      // answered from per-part min/max indexes rather than a column scan —
-      // measured at 47 rows / 1.10 KiB / 1 ms on CH 26.3.10.60 — so this stays
-      // trivially fast even against the 735M-row `price_ohlcv_1m`.
+      // ⚠️ NOT REVISITED for the three task-0204 reads, and the reasoning
+      // below covers only the original seven. Left at 1 minute on measurement,
+      // not on assumption — but verify it rather than trusting this comment.
+      //
+      // The original seven metadata-only max() reads are answered from per-part
+      // min/max indexes rather than a column scan (47 rows / 1.10 KiB / 1 ms on
+      // CH 26.3.10.60), so they stay trivially fast even against the 735M-row
+      // `price_ohlcv_1m`. Added since:
+      //   - disk: two filesystem function calls, no table read;
+      //   - USD sanity: a FINAL scan of `price_ohlcv_1h` bounded to 7 days and
+      //     scoped to one quote leg. ⚠️ Measure it by what it READS, not what it
+      //     returns — prod 2026-08-19 returns 423 rows but reads ~1.37M rows /
+      //     ~70 MiB in 41-50 ms, because the cost is the FINAL merge and the
+      //     `assets` lookup rather than the result size. (`_1d` was 984,706 rows
+      //     / 50.5 MiB / 44-62 ms — only 1.4x cheaper, which is why the tier
+      //     choice was decided on grace arithmetic instead. See SANITY_TABLE.)
+      //   - MV drift: ~20 SEQUENTIAL round trips (a declared-side format, a
+      //     live DDL fetch and a fingerprint per MV, plus the undeclared-writer
+      //     sweep). This is the only one whose cost scales with round-trip
+      //     latency rather than data volume, and it is the one to watch.
+      //
+      // ⚠️ A hard Lambda timeout is NOT a Rust Err, so it kills the invocation
+      // with nothing published — and every alarm the probe feeds except the MV
+      // drift ones is treatMissingData: NOT_BREACHING, i.e. scores missing data
+      // as healthy. Confirm headroom by reading the function's Duration metric
+      // in CloudWatch after the observability stack deploys; that needs NO
+      // change to this stack, which matters because deploying this stack is the
+      // CleanupRule hazard (task 0200).
       timeout: cdk.Duration.minutes(1),
       secretsExtensionLayer,
       chDomain,
