@@ -697,5 +697,50 @@ export class EventBridgeStack extends cdk.Stack {
     cdk.Tags.of(this).add('Project', 'stellar-prices-api');
     cdk.Tags.of(this).add('ManagedBy', 'cdk');
     cdk.Tags.of(this).add('Environment', env);
+
+    assertCleanupRuleStaysDisabled(this.cleanupRule);
+  }
+}
+
+/**
+ * Refuse to synthesize a template that would re-enable the cleanup worker.
+ *
+ * 🔴 **This is a data-loss guard, not a style rule.** `prices-production-cleanup`
+ * drops old partitions from `prices.*`. It has been DISABLED by operator action
+ * since task 0200, and for most of that time this template asserted
+ * `State: ENABLED` — so every deploy of this stack silently re-enabled it and
+ * the only thing standing in the way was somebody remembering to run
+ * `describe-rule` afterwards. Task 0204 (2026-08-20) corrected the template;
+ * this guard is what stops the correction being undone by accident.
+ *
+ * ⚠️ The blast radius is far larger than "some old data". `price_ohlcv_1m`
+ * carries a 7-day retention in the cleanup worker, and with cleanup stopped the
+ * table now holds **years** of history — including the 1.56M peg-valued rows
+ * task 0212 must repair. A single sweep drops all of it, irreversibly. Enabling
+ * cleanup during the 0088 backfill already cost five days once.
+ *
+ * It reads the **resolved CloudFormation property**, not the constructor
+ * argument, because those are not the same thing — the alarm-description limit
+ * in `observability-stack.ts` taught that lesson by failing a production deploy
+ * that synth had waved through.
+ *
+ * ⛔ **To re-enable cleanup you must delete this function**, not flip a boolean.
+ * That is deliberate: whether cleanup should ever run again is task 0200's
+ * decision, and it deserves a reviewed diff that says so out loud rather than a
+ * one-character change nobody notices.
+ */
+function assertCleanupRuleStaysDisabled(rule: events.Rule): void {
+  const cfn = rule.node.defaultChild as events.CfnRule;
+  const state = cdk.Stack.of(rule).resolve(cfn.state) as unknown;
+
+  if (state !== 'DISABLED') {
+    throw new Error(
+      `CleanupRule must synthesize as DISABLED, got ${JSON.stringify(state)}. ` +
+        'This rule drops old partitions from prices.* and is deliberately off ' +
+        '(task 0200); price_ohlcv_1m now holds years of history against a 7-day ' +
+        'retention, including the rows task 0212 must repair. If you genuinely ' +
+        'intend to re-enable cleanup, delete assertCleanupRuleStaysDisabled() ' +
+        'in the same commit and say why in the message.',
+    );
   }
 }

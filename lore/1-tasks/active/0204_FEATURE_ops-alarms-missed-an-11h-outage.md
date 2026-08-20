@@ -1209,6 +1209,17 @@ of it.
 it makes CDK state what production already is, so a deploy can no longer
 contradict reality and re-enabling becomes a reviewed edit.
 
+⛔ **Backed by `assertCleanupRuleStaysDisabled()`, a synth-time throw** — the
+operator asked for the guarantee to be structural rather than a boolean somebody
+could flip back. It reads the **resolved** CloudFormation property (the
+alarm-description failure earlier the same day proved source and template are
+not the same thing) and refuses to synthesize any template where the rule is
+`ENABLED`. Re-enabling now requires **deleting the guard**, in a reviewed diff,
+with a stated reason — which is the shape a [[0200]] decision should take
+anyway. Verified by inducing it: flipping `enabled: true` fails synth with the
+rule name and the reason; restoring produces a template identical to the
+pre-guard one.
+
 ### ⚠️ A second, larger stale-asset hazard surfaced on the way
 
 The EventBridge stack ships **eight** Lambda functions, and a deploy pushes all
