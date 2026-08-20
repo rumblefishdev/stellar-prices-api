@@ -105,7 +105,7 @@ Detail and reasoning: archived
 
   | Parameter | Value |
   | --- | --- |
-  | `/prices/{env}/discord-guild-id` | `stellar_test` while building, `897514728459468821` after [[0179]] |
+  | `/prices/{env}/discord-guild-id` | the **snowflake** of the `stellar_test` guild while building, `897514728459468821` after [[0179]] — never the guild's *name*, which the cold-start probe refuses |
   | `/prices/{env}/min-account-age-minutes` | `5` |
 
   **Do not write `new ssm.StringParameter`.** A CloudFormation-managed parameter
@@ -240,8 +240,11 @@ shape of the earlier slices.
   settings, wired by `portal::apply`, refused at `/auth/login?action=issue`
   when absent) and `complete_issue`: params → membership (token **borrowed**)
   → identity (token consumed) → session on every outcome → verdict → the key
-  reconciler → one of five literal redirects
-  (`?issue=ok|not_member|too_young&wait_secs=N|unknown|failed`).
+  reconciler → one of five **verdict** redirects
+  (`?issue=ok|not_member|too_young&wait_secs=N|unknown|failed`). The module
+  also declares the two **pre-check** landings the callback reaches when the
+  round-trip ends at Discord before any check runs — `?issue=cancelled` and
+  `?issue=denied` — so every `?issue=` literal is named in one place.
 
 **Changed backend:** `state_token.rs` (`Action::Issue`), `discord.rs`
 (`SCOPE` pair, set-equality grant check, `guild_member` + the pure
@@ -253,7 +256,7 @@ callback; `Outcome` no longer carries the key value), `config.rs` +
 `main.rs`/`serve.rs` (`load_portal_eligibility` with the cold-start probe),
 `portal/mod.rs` (wiring).
 
-**Tests: 74 covering this task** (workspace 497 → 551, frontend 39 → 52).
+**Tests: 78 covering this task** (workspace 497 → 553, frontend 39 → 56).
 
 | where | count | covers |
 | --- | --- | --- |
@@ -311,6 +314,20 @@ is asserted in the issue suite's happy path); `state_token`'s "issue is
 unknown" assertions now assert the opposite (with `rework` as the
 still-unknown action); the frontend's press-to-issue tests became mount-fetch
 and landing-state tests.
+
+- **A code review found seven findings; all seven were real.** Verified each
+  against the code at HEAD before acting — the standing rule on this repo
+  after [[0185]] — and none was a false positive. Five were fixed on the spot,
+  two after checking that no future task owned them (see Design Decisions
+  #18–#22). The one that mattered most is the reason this entry exists: three
+  separate comments asserted that Discord does not re-prompt for consent, and
+  **the authorize URL never sent `prompt=none`**, so the assertion was false
+  everywhere it appeared. A comment can be load-bearing documentation and
+  still describe code that was never written.
+- **The wildcard `apigateway:DELETE` on `/apikeys/*` was deliberately left
+  alone.** It is a real weakness — "own" is enforced only in code — but
+  [[0194]]'s checklist already names it verbatim, mitigation included. Fixing
+  it here would have removed the audit's subject.
 
 ## Design Decisions
 
@@ -392,6 +409,46 @@ and landing-state tests.
 17. **`KeyResponse` dropped `created`** — a read-only reveal never creates,
     so the field could only ever be `false`; one less lie to maintain, and
     the frontend type followed.
+
+18. **The reconcile deadline is derived, not constant.** `RECONCILE_DEADLINE`
+    was sized for [[0187]], where the reconciliation *was* the request. The
+    issue path puts four network calls in front of it, so the worst case
+    reached ~29 s against a 15 s Lambda — an API Gateway `502` instead of
+    `?issue=failed`, plus a possible unattached orphan. `ISSUE_BUDGET` is
+    measured from **request entry** (the exchange spends the same budget) and
+    `RECONCILE_FLOOR` refuses to start work that cannot finish.
+19. **`prompt=none` on the authorize URL**, asserted in both places that test
+    that URL's shape. Without it every issue, every retry after a refusal and
+    every future rework was a full consent screen — which would have made the
+    per-action model expensive in exactly the way its own justification
+    denied. The one assumption (Discord still shows the screen for a
+    first-time authorisation) is written at the call site and is free to
+    confirm during Step 0 item 5's capture.
+20. **`?issue=cancelled` and `?issue=denied` — and they are not a sixth and
+    seventh verdict.** "Five states" was about the outcomes of a *completed*
+    check; these happen before one starts, and sign-in has had exactly this
+    pair since [[0186]]. Issue had neither, so its callback borrowed
+    sign-in's — whose banners render only in the signed-out branch an issue
+    round-trip has by definition left, meaning a cancelled press landed on an
+    unchanged dashboard in silence. Two, not one, for decision #7's reason:
+    "you changed your mind" and "our registration is wrong" belong to
+    different people.
+21. **One `is_snowflake`, shared by `guild_id()` and `member_url`.** The seed
+    was validated in one place and consumed in another, and only the consumer
+    checked the shape — so `stellar_test`, the value this task's own parameter
+    table named, passed the cold-start probe and then refused **every**
+    visitor as `unknown`, indefinitely. Deliberately shape-only: no length
+    floor, because a well-formed id for the wrong guild is already caught at
+    runtime by `10004` and its warn, and an invented floor could refuse a
+    legitimate id. The parameter table above is corrected too — it was the
+    trap.
+22. **The key fetch happens once per load.** `load` depended on the `onKey`
+    prop, which the dashboard passes as an inline arrow, so reporting the key
+    re-fired the mount effect: two `GET /key` per load, three off `?issue=ok`.
+    Held in a ref, and the count is now the assertion. Separately, `?issue=ok`
+    no longer renders beside "you have no API key yet" — `GetApiKeys` is
+    eventually consistent, and that window offered to issue a *second* key to
+    somebody who had just been given their first.
 
 ## Future Work
 
