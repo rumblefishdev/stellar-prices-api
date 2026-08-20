@@ -441,10 +441,7 @@ async fn me(State(state): State<AuthState>, headers: HeaderMap) -> Response {
         return no_store(Json(signed_out).into_response());
     };
 
-    let session = cookies::read(&headers, cookies::SESSION_COOKIE)
-        .and_then(|cookie| Session::decode(&oauth.signing_key, &cookie, state_token::now_secs()));
-
-    let body = match session {
+    let body = match current_session(oauth, &headers) {
         Some(session) => MeResponse {
             authenticated: true,
             user_id: Some(session.sub),
@@ -453,6 +450,18 @@ async fn me(State(state): State<AuthState>, headers: HeaderMap) -> Response {
         None => signed_out,
     };
     no_store(Json(body).into_response())
+}
+
+/// Read and verify the caller's session cookie, if they have one.
+///
+/// The one place that knows how a session is presented — which cookie carries
+/// it, which key verifies it, and that expiry is enforced here rather than left
+/// to the browser's `Max-Age`. Exported because [0187]'s key routes need exactly
+/// this and must not re-derive it: a second copy is a second place for the
+/// expiry check, or the domain separation in [`crypto`], to be dropped.
+pub fn current_session(oauth: &OauthSecret, headers: &HeaderMap) -> Option<Session> {
+    let cookie = cookies::read(headers, cookies::SESSION_COOKIE)?;
+    Session::decode(&oauth.signing_key, &cookie, state_token::now_secs())
 }
 
 /// Clear the session.

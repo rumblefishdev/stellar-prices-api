@@ -206,6 +206,10 @@ fn build_app(portal_enabled: bool, endpoints: Endpoints) -> Router {
         portal_enabled,
         portal_oauth: portal_enabled.then(oauth_secret),
         portal_endpoints: endpoints,
+        // Task 0187: the control-plane client for self-service keys. `None`
+        // is what every non-portal test wants — with no client in the
+        // config there is no code path here that can reach API Gateway.
+        portal_keys: None,
     };
     app(&config, AppState::without_ch())
 }
@@ -1215,6 +1219,10 @@ async fn an_open_portal_with_no_credentials_answers_503_on_login() {
         portal_enabled: true,
         portal_oauth: None,
         portal_endpoints: Endpoints::default(),
+        // Task 0187: the control-plane client for self-service keys. `None`
+        // is what every non-portal test wants — with no client in the
+        // config there is no code path here that can reach API Gateway.
+        portal_keys: None,
     };
     let router = app(&config, AppState::without_ch());
 
@@ -1243,6 +1251,10 @@ async fn sign_in_needs_no_api_key_even_when_the_key_gate_is_armed() {
         portal_enabled: true,
         portal_oauth: Some(oauth_secret()),
         portal_endpoints: Endpoints::default(),
+        // Task 0187: the control-plane client for self-service keys. `None`
+        // is what every non-portal test wants — with no client in the
+        // config there is no code path here that can reach API Gateway.
+        portal_keys: None,
     };
     let router = app(&config, AppState::without_ch());
 

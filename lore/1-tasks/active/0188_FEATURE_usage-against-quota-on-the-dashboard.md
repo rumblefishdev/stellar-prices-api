@@ -2,7 +2,7 @@
 id: "0188"
 title: "Usage against quota on the dashboard — GetUsage, rendered honestly"
 type: FEATURE
-status: backlog
+status: active
 related_adr: ["0010"]
 related_tasks: ["0183", "0157", "0160", "0187", "0193", "0194"]
 tags: [layer-backend, priority-high, effort-small, milestone-M3, epic-self-service-onboarding, api-gateway, dashboard, slice-5]
@@ -19,6 +19,29 @@ history:
       because it is a different AWS call with its own freshness problem, its own
       period arithmetic and its own caching answer — and because the key is
       useful without it.
+  - date: "2026-08-19"
+    status: active
+    who: akot
+    note: >
+      Activated on top of [[0187]] (#224, merged to `develop`), which this slice
+      extends rather than sits beside: the usage figure is scoped to
+      `(usagePlanId, apiKeyId)`, and the key id comes from [[0187]]'s reconciler.
+
+      Three things settled there shape this one. **The gateway needs no change**
+      — `{proxy+}` already covers `/usage`, `GET` is already a mapped verb, and
+      `portalSettings` already sets `cachingEnabled: false` on it, with CI
+      asserting all three. **The `GetUsage` grant belongs in ApiGatewayStack**,
+      not ComputeStack: it needs the plan id, which only that stack knows, so it
+      joins the standalone `iam.Policy` [[0187]] created for exactly that reason.
+      And **the key lookup here must not create** — [[0187]] decision 14 keeps
+      issuance behind an explicit press, so a dashboard that ran the full
+      reconciliation on load would mint a production key for anyone who opened
+      the page.
+
+      Carried in from [[0187]]'s review, to be decided here rather than
+      rediscovered: validating the usage plan at cold start (one `GetUsagePlan`,
+      one grant in the same policy this slice opens) would turn a stale plan id
+      from a runtime failure into an init failure.
 ---
 
 # Usage against quota

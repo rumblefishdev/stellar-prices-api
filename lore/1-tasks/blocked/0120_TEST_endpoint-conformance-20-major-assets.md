@@ -112,7 +112,7 @@ after 0072 and [[0119]].
 - [x] Suite is re-runnable (`npm run conformance:0120`) and its JSON report is
       citable evidence for [[0128]]
 - [x] Any defect found is fixed or spawned as its own task — spawned
-      [[0210]] and [[0211]]; three more spawns (0207–0209) were retired the
+      [[0210]] and [[0211]]; three interim spawns were retired the
       same day after a cross-check showed okarcz's [[0135]], [[0170]] and
       [[0178]] already own those defects — the run's fresh evidence is
       folded into them instead
@@ -203,8 +203,9 @@ though "exhaustive" is necessarily modulo rows inserted mid-walk.
 
 Every failure class turned out to be **already owned by an okarcz task** with
 a deeper diagnosis; the run is independent confirming evidence, folded into
-each task's history. Three spawns made here (0207–0209) were retired the same
-day after the cross-check. Two findings sharpened during dedup:
+each task's history. Three interim spawns made here were retired the same
+day after the cross-check (their ids, 0207–0209, were since reused by
+unrelated tasks spawned on develop — do not cross-reference). Two findings sharpened during dedup:
 
 - The "price>0 ⟺ sdex" split is not source selection — `current.sql` has no
   source filter. It is [[0154]]'s enrichment quote-restriction seen from the

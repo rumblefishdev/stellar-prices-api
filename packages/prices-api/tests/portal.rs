@@ -31,6 +31,10 @@ fn config_with_keys(portal_enabled: bool, api_keys: Vec<String>) -> AppConfig {
         // Discord endpoints are part of the config now, not read from the
         // process environment per router — see `AppConfig::portal_endpoints`.
         portal_endpoints: Default::default(),
+        // Task 0187: the control-plane client for self-service keys. `None`
+        // is what every non-portal test wants — with no client in the
+        // config there is no code path here that can reach API Gateway.
+        portal_keys: None,
     }
 }
 

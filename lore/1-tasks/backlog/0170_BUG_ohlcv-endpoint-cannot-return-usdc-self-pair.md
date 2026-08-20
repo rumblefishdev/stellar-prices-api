@@ -36,7 +36,8 @@ history:
       1d buckets with `base_currency=XLM` over the same window. The
       "empty 200 is the wrong answer" argument below therefore applies to
       every XLM-only-quoted asset in the store; a spawned-then-retired
-      duplicate (0209, second half) folds into this task, and the 0120
+      duplicate spawn from that run (retired the same day; its id was since
+      reused by an unrelated task) folds into this task, and the 0120
       suite's empty-window checks are its regression gate.
 ---
 

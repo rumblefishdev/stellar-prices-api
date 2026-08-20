@@ -2,7 +2,7 @@
 id: "0135"
 title: "Decide whether the headline price_usd should be outlier-protected like vwap_24h"
 type: FEATURE
-status: backlog
+status: active
 related_adr: []
 related_tasks: ["0072", "0118", "0123", "0144", "0145", "0146", "0147"]
 tags: ["phase-future", "effort-large", "priority-high", "milestone-M2", "vwap", "clickhouse"]
@@ -70,7 +70,7 @@ history:
       "price>0 ⟺ sdex present" split is [[0154]]'s quote-restriction seen
       from the read side: sdex candles are stable-quoted and always enrich,
       AMM candles often never do. Spawned-then-retired duplicates
-      0207/0209 fold into this task; the 0120 suite
+      from that run fold into this task; the 0120 suite
       (`npm run conformance:0120`) is the regression gate — its
       price-sentinel checks must go green when the decided contract ships.
   - date: 2026-08-20

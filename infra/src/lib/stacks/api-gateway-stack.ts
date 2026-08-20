@@ -1,6 +1,7 @@
 import * as cdk from 'aws-cdk-lib';
 import * as apigateway from 'aws-cdk-lib/aws-apigateway';
 import type * as lambda from 'aws-cdk-lib/aws-lambda';
+import * as iam from 'aws-cdk-lib/aws-iam';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import type { Construct } from 'constructs';
 
@@ -13,6 +14,21 @@ export interface ApiGatewayStackProps extends cdk.StackProps {
    * Passed in from `ComputeStack` (cross-stack reference).
    */
   readonly apiHandlerFunction: lambda.IFunction;
+  /**
+   * The api-handler's execution role, so the one control-plane grant that needs
+   * the usage-plan id can be declared here (task 0187).
+   *
+   * The other four `apigateway:` grants live in `ComputeStack`, on resources
+   * that need no id from this stack. This one cannot: `usagePlan.usagePlanId`
+   * is created below, and a policy in `ComputeStack` referencing it would make
+   * ComputeStack import an export of ApiGatewayStack — while ApiGatewayStack
+   * already imports the Lambda from ComputeStack. That is a cycle, and
+   * CloudFormation refuses it.
+   *
+   * Declaring the policy HERE and attaching it to the passed-in role keeps the
+   * reference pointing the one way that works: ApiGateway -> Compute.
+   */
+  readonly apiHandlerRole: iam.IRole;
 }
 
 /**
@@ -230,7 +246,7 @@ export class ApiGatewayStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props: ApiGatewayStackProps) {
     super(scope, id, props);
 
-    const { config, apiHandlerFunction } = props;
+    const { config, apiHandlerFunction, apiHandlerRole } = props;
     const cacheEnabled = config.apiGatewayCacheEnabled;
 
     this.api = new apigateway.RestApi(this, 'Api', {
@@ -636,6 +652,36 @@ export class ApiGatewayStack extends cdk.Stack {
       parameterName: `/prices/${config.envName}/pricing-api-free-plan-id`,
       stringValue: usagePlan.usagePlanId,
       description: `Usage plan ID for pricing-api-free-${config.envName} (key issuance + GetUsage)`,
+    });
+
+    // The one control-plane grant that needs the plan id (task 0187): attach a
+    // self-service key to THIS plan and no other. Declared here rather than in
+    // `ComputeStack` for the cycle reason on `apiHandlerRole` in the props
+    // above; its four siblings are declared there.
+    //
+    // `iam.Policy` rather than `apiHandlerRole.addToPrincipalPolicy`, and the
+    // distinction is the whole point: `addToPrincipalPolicy` would append to
+    // the role's default policy, which is a resource of ComputeStack, so the
+    // plan id would travel as an export of THIS stack imported by that one —
+    // the cycle again, just written differently. A standalone `Policy` is a
+    // resource of this stack that names the role, so the reference runs
+    // ApiGateway -> Compute like every other one here.
+    //
+    // Scoped to `/keys` on this plan alone: it permits attaching a key, not
+    // reading the plan, not changing its limits, and not `GetUsage` (that is
+    // task 0188's, and it will need its own statement).
+    new iam.Policy(this, 'PortalAttachKeyToFreePlan', {
+      policyName: `prices-${config.envName}-portal-attach-key`,
+      roles: [apiHandlerRole],
+      statements: [
+        new iam.PolicyStatement({
+          sid: 'PortalAttachKeyToFreePlan',
+          actions: ['apigateway:POST'],
+          resources: [
+            `arn:aws:apigateway:${config.awsRegion}::/usageplans/${usagePlan.usagePlanId}/keys`,
+          ],
+        }),
+      ],
     });
 
     new cdk.CfnOutput(this, 'ApiUrl', {

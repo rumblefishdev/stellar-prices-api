@@ -76,6 +76,23 @@ reqwest = { version = "0.12", default-features = false, features = [
     "rustls-tls-webpki-roots",
 ] }
 
+# ---------------------------------------------------------------------------
+# Self-service API keys (task 0187) — the API Gateway CONTROL plane.
+# ---------------------------------------------------------------------------
+# UNCONDITIONAL, for the same reason the sign-in crates above are: the whole of
+# the issue/reveal flow except credential resolution is exercised by
+# `tests/portal_keys.rs` against an axum mock of the control plane bound to
+# loopback, driven through this very SDK. Gating it behind `lambda` would mean
+# the reconciler — pagination, the exact-name filter, the winner rule, the
+# deletes — is the one part CI never compiles.
+#
+# The client is nonetheless only ever CONSTRUCTED when the portal is open
+# (`AppConfig::load_portal_keys`), so a production cold start with
+# `PORTAL_ENABLED=false` pays no credential resolution and no connection setup
+# for it — only the binary size.
+aws-config = { workspace = true }
+aws-sdk-apigateway = { workspace = true }
+
 lambda_http = { workspace = true, optional = true }
 
 [dev-dependencies]

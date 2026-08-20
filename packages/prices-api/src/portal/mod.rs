@@ -43,6 +43,7 @@
 //! the Lambda already loads) and a different task — do not reach for it here.
 
 pub mod auth;
+pub mod keys;
 
 use axum::extract::{Request, State};
 use axum::http::StatusCode;
@@ -132,9 +133,20 @@ pub fn apply(router: Router, config: &AppConfig) -> Router {
         config.portal_endpoints.clone(),
     ));
 
+    // Self-service API keys (task 0187), merged the same way and mounted under
+    // the same conditions: unconditionally, answering `503` when nothing is
+    // provisioned rather than not existing. The state carries the OAuth secret
+    // because the session cookie is what authorizes a key — there is no API key
+    // to present on the route whose job is to hand one out.
+    let api_keys = keys::routes(keys::KeysState::new(
+        config.portal_oauth.clone(),
+        config.portal_keys.clone(),
+    ));
+
     router
         .merge(routes)
         .merge(sign_in)
+        .merge(api_keys)
         .layer(axum::middleware::from_fn_with_state(gate, gate_portal))
 }
 
@@ -155,10 +167,11 @@ async fn config_handler(State(gate): State<PortalGate>) -> Response {
 
 /// True for any path the portal owns.
 ///
-/// Prefix match, not equality: this has to cover routes that do not exist yet
-/// ([0186]'s `/auth/*`, [0187]'s `/key`, [0188]'s `/usage`), which is the point
-/// of gating by prefix rather than enumerating. A slice that adds a route under
-/// this prefix inherits the gate without touching this file.
+/// Prefix match, not equality: it has to cover routes that do not exist yet
+/// ([0188]'s `/usage`, [0192]'s revocation), which is the point of gating by
+/// prefix rather than enumerating. [0186]'s `/auth/*` and [0187]'s `/key` have
+/// since landed and neither touched this function — which is the property
+/// working, not an argument for replacing it with a list.
 fn is_portal_path(path: &str) -> bool {
     path.starts_with(PORTAL_API_PREFIX)
 }

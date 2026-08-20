@@ -2,7 +2,7 @@
 id: "0121"
 title: "Load test — 100 req/s sustained for 5 min on GET /assets/{id}/price, p95 <200ms, error rate <0.1%"
 type: TEST
-status: backlog
+status: active
 related_adr: ["0007", "0008"]
 related_tasks: ["0047", "0120", "0122", "0128"]
 tags: [layer-backend, layer-infra, priority-high, effort-medium, milestone-M2, api, performance, load-test, acceptance]
@@ -19,6 +19,12 @@ history:
       acceptance criterion 2. Note the two different latency bars in the
       design doc — §6 targets p95 <100ms, but the T2 AC says <200ms; T3 AC 5
       tightens back to <100ms.
+  - date: 2026-08-19
+    status: active
+    who: stkrolikiewicz
+    note: >
+      Promoted to active — starting the load-test pass. Uses the 20-asset
+      list fixed by [[0120]] (PR #226) for the spread scenario.
 ---
 
 # Load test — 100 req/s on `GET /assets/{id}/price`
