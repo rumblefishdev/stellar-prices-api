@@ -86,6 +86,15 @@ pub const DISK_FREE_BYTES_METRIC: &str = "ClickHouseDiskFreeBytes";
 /// at the rate that event moved. It also sits below the 2026-08-17 measurement
 /// of 430.6 GiB free (25.0%), so it does **not** fire on the current steady
 /// state; a bound at 25% would have been alarming from the day it shipped.
+///
+/// ⚠️ **15% was proposed and reversed on 2026-08-20, and the arithmetic that
+/// reversed it is worth keeping**: reaching 15% takes **166 GiB** consumed,
+/// while the 2026-08-13 event consumed ~150 GiB and would have landed at
+/// **15.93% free — 16 GiB short of firing at all**. This bound fires at **78
+/// GiB** consumed, i.e. about half-way through such an event. The window
+/// between "catches the incident we have actually seen" and "misses it
+/// entirely" is roughly 5 percentage points, so this constant is far more
+/// sensitive than it looks — re-measure before moving it, do not eyeball it.
 pub const DISK_FREE_PERCENT_BOUND: f64 = 20.0;
 
 /// One reading of the filesystem backing ClickHouse's data path.

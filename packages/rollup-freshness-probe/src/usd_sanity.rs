@@ -173,7 +173,7 @@ pub const REPRESENTABLE_CLOSE_FLOOR: &str = "0.00000000000005";
 /// | 2026-08-17, USDT leg | 13 priced / 0 | 0 priced / 16 |
 ///
 /// The coarse tiers read clean because task 0182's repair wrote them directly.
-/// `_1m` was outside that repair and still carries the peg — task 0210 — so
+/// `_1m` was outside that repair and still carries the peg — task 0212 — so
 /// **`peg_applied` would have published a confident 0 over 1.5 M wrong values.**
 ///
 /// ⚠️ The *stranded* direction is unaffected: a zero rolls up as a zero, so
@@ -184,7 +184,7 @@ pub const REPRESENTABLE_CLOSE_FLOOR: &str = "0.00000000000005";
 /// trades a blind spot for a permanently-breaching alarm (1.5 M rows is above
 /// every rung) and re-introduces a retention interaction the forever-table note
 /// above exists to avoid. The peg-applied direction needs its own scoped `_1m`
-/// query with its own ladder, decided deliberately — see task 0204.
+/// query with its own ladder, decided deliberately — see task 0204 and task 0213.
 pub const SANITY_TABLE: &str = "price_ohlcv_1h";
 
 /// One reading of the USDT quote leg's USD-value health.

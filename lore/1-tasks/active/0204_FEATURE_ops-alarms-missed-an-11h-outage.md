@@ -659,7 +659,7 @@ task slug, so gaps 2 and 3 can each take their own branch without reuse.
    `NOT_BREACHING`, alarm + OK actions on the existing ops SNS topic.
 4. **`infra/src/lib/types.ts`** — `opsAlarms.chDiskFreePercent` with validation
    (a number in `(0, 100)` exclusive) and the threshold rationale.
-   **`infra/envs/production.json`** — set to `20`.
+   **`infra/envs/production.json`** — set to `20`. ⚠️ 15 was proposed and reversed on 2026-08-20 — see design decision 6.
 5. The `rollup-freshness-probe` dead-probe `impact` string now says the disk
    alarm goes dark with it too, because it does.
 
@@ -714,9 +714,24 @@ means "CI green" says nothing about the two ITs. They were run locally against
    own `-errors` alarm carries it.
 6. **Bound at 20%, not 15% and not 25%.** 20% of 1.72 TiB is ~352 GiB against an
    incident that consumed ~150 GiB, so it fires with roughly twice the incident
-   still free. ⚠️ The 2026-08-17 measurement is 430.6 GiB free = **25.0%**, so a
+   still free. ⚠️ The 2026-08-17 measurement is 430.6 GiB free = **24.45%**, so a
    25% bound would have been in ALARM from the moment it shipped. Unit-tested
    against both the measured steady state and a replay of the incident.
+
+   ⚠️ **15 was proposed by the operator on 2026-08-20 and reversed the same day
+   once the cost was measured. The measurement is the durable part:**
+
+   | bound | fires after N GiB consumed | catches a repeat of 2026-08-13? |
+   |---|---|---|
+   | 25% | ~0 (already breached) | — in ALARM on day one |
+   | **20%** | **78 GiB** | **yes**, about half-way through |
+   | 15% | 166 GiB | **no** — 150 GiB lands at 15.93%, 16 GiB short |
+
+   The event this alarm exists for consumed ~150 GiB, which sits *between* the
+   two thresholds. So the choice is not a sensitivity dial: **five percentage
+   points is the entire margin between catching that incident and missing it
+   entirely.** ⛔ Re-measure before moving this value; it is far more sensitive
+   than a percentage looks.
 
 ## Implementation — gap 2 (2026-08-17)
 
@@ -1066,7 +1081,7 @@ one OK action; the other 26 `notBreaching` alarms are untouched.
 The cheap confirmation the baseline section asks for ("re-read the per-day
 counts after 2026-08-20 00:00") was run. **The 08-18 rows had not filled**, and
 following that thread turned a threshold question into a root-cause
-investigation. Spawned [[0209]]'s root cause and [[0210]].
+investigation. Spawned [[0209]]'s root cause and [[0212]].
 
 ### What was measured
 
@@ -1096,7 +1111,7 @@ behind a 657 M-row backlog draining ~9,800/step and *rising*.
    1,564,045 wrong rows**. This is the *same* failure the task is named for —
    a check scoring healthy because it looked at the surface least able to show
    the defect — reintroduced a fourth time, and this time inside the guard built
-   against it. ⚠️ Recorded in `SANITY_TABLE`'s doc comment; **not fixed here**,
+   against it. ⚠️ Recorded in `SANITY_TABLE`'s doc comment and spawned as [[0213]]; **not fixed here**,
    because pointing `SANITY_TABLE` at `_1m` trades a blind spot for a
    permanently-breaching alarm (1.5 M is above every rung) and re-introduces the
    retention interaction the forever-table choice avoids. It needs its own scoped
@@ -1117,7 +1132,8 @@ argument, not for the latency figures.
 ## Future Work
 
 - **Point the peg-applied check at `_1m`** with its own ladder and scan bound —
-  see item 2 above. The only gap-4 direction still blind on prod.
+  spawned as [[0213]]. The only gap-4 direction still blind on prod, and it must
+  land after [[0212]] or it ships permanently breached.
 - The two integration tests never run in CI (no ClickHouse service, no
   `--ignored`). Pre-existing and wider than this task.
 - Move the disk metrics to their own `Prices/ClickHouse` namespace once the

@@ -237,6 +237,12 @@ export interface EnvironmentConfig {
      * 430.6 GiB free (25.0%), so it does not fire on the current steady state.
      * ⚠️ A bound at 25 would have been in ALARM the day it shipped.
      *
+     * ⚠️ **15 was proposed and reversed on 2026-08-20.** Reaching 15% takes 166
+     * GiB consumed; the 2026-08-13 event consumed ~150 GiB and would have landed
+     * at 15.93% free, missing the alarm entirely. This value fires at 78 GiB.
+     * Five percentage points is the whole margin between catching that incident
+     * and missing it — re-measure before changing this, do not eyeball it.
+     *
      * Mirrored as `DISK_FREE_PERCENT_BOUND` in
      * `packages/rollup-freshness-probe/src/disk.rs`, which documents the
      * reasoning and unit-tests it against both the measured steady state and a

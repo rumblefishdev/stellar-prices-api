@@ -4,7 +4,7 @@ title: "The USDT pivot has NEVER priced a _1m row — the leg went dark on 2026-
 type: BUG
 status: backlog
 related_adr: []
-related_tasks: ["0182", "0172", "0165", "0145", "0111", "0173", "0204", "0210"]
+related_tasks: ["0182", "0172", "0165", "0145", "0111", "0173", "0204", "0212"]
 tags: ["priority-high", "effort-medium", "clickhouse", "enrichment", "data-correctness", "milestone-M2"]
 milestone: 2
 links:
@@ -43,7 +43,7 @@ history:
       and USDT has no oracle fallback, so the leg falls through to the one tier
       that cannot reach recent data. 0172 removed the peg on 08-13 and its
       replacement never functioned. 0111 is the blocking dependency. Spawned
-      0210 for the 1.56M peg-valued _1m rows still on prod.
+      0212 for the 1.56M peg-valued _1m rows still on prod.
 ---
 
 # USDT-quoted candles stay unpriced far longer than the sweep interval
@@ -298,7 +298,7 @@ pivot_written │ peg_written │ oldest_priced       │ newest_priced
             0 │   1,564,045 │ 2018-05-15 13:43:00 │ 2026-08-13 10:01:00
 ```
 
-**Zero pivot-written rows across the entire table, ever.** See [[0210]] for the
+**Zero pivot-written rows across the entire table, ever.** See [[0212]] for the
 1.56 M peg-valued rows this leaves standing on prod.
 
 ### Why nothing caught it, and why the repair looked green

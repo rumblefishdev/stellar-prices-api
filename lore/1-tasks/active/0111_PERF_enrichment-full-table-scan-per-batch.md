@@ -4,7 +4,7 @@ title: "Enrichment re-scans the whole table every batch — 545M rows/batch, cau
 type: PERF
 status: active
 related_adr: ["0007"]
-related_tasks: ["0026", "0062", "0085", "0112", "0088", "0209", "0210"]
+related_tasks: ["0026", "0062", "0085", "0112", "0088", "0209", "0212"]
 tags: [layer-indexing, clickhouse, enrichment, perf, priority-high, effort-medium, incident]
 links:
   - "../../../packages/enrichment-worker/src/ch_enrich.rs"
@@ -86,7 +86,7 @@ history:
       2,682 in under an hour. Because pivot_sql is ORDER BY timestamp ASC, the
       backlog means recent candles are never reached — and USDT has no oracle
       fallback, so its entire quote leg has been unpriced since 2026-08-13. See
-      0209 and 0210.
+      0209 and 0212.
 ---
 
 > **Why this is queued ahead of its own cost case:** the perf argument for 0111
