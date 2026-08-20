@@ -38,10 +38,13 @@
 
 #[path = "portal_keys/harness.rs"]
 mod harness;
+#[path = "common/mock_discord.rs"]
+mod mock_discord;
 
 use std::sync::{Arc, Mutex};
 
 use harness::*;
+use mock_discord::{GRANTED_SCOPE, MockDiscord};
 
 /// A `MakeWriter` that keeps every byte the subscriber emits.
 #[derive(Clone, Default)]
@@ -96,8 +99,27 @@ async fn no_key_value_ever_reaches_the_logs() {
         s.seed(&name, 2_000);
     });
 
-    let body = issue(&mock, USER_ID).await.json();
-    reveal(&mock, USER_ID).await;
+    // The full issue round-trip (task 0189): the create and delete paths run
+    // through the callback now, and the delete path is the one that
+    // legitimately names key IDS in its logs — the assertion has to be about
+    // the credential, not about log lines being sparse. Then the reveal, which
+    // is the path the VALUE flows through.
+    let discord = MockDiscord::start(GRANTED_SCOPE, None).await;
+    let app = build_app_with(
+        true,
+        Some(prices_api::portal::keys::gateway::Gateway::against(
+            &mock.base,
+            PLAN_ID.to_string(),
+        )),
+        prices_api::portal::auth::discord::Endpoints {
+            api_base: discord.base.clone(),
+            ..Default::default()
+        },
+        Some(eligibility(GUILD_ID, "5")),
+    );
+    let issued = issue_round_trip(&app).await;
+    assert_eq!(issued.location(), "/api-tokens/?issue=ok");
+    let body = reveal(&mock, USER_ID).await.json();
 
     let text = String::from_utf8_lossy(&logs.0.lock().unwrap()).to_string();
 
@@ -108,8 +130,12 @@ async fn no_key_value_ever_reaches_the_logs() {
         "the subscriber captured no TRACE events, so this test proves nothing: {text:?}"
     );
     assert!(
-        text.contains("portal issued or revealed an API key"),
-        "the routes did not run under this subscriber, so this test proves nothing: {text:?}"
+        text.contains("portal issued an API key"),
+        "the issue flow did not run under this subscriber, so this test proves nothing: {text:?}"
+    );
+    assert!(
+        text.contains("portal revealed an API key"),
+        "the reveal did not run under this subscriber, so this test proves nothing: {text:?}"
     );
 
     let value = body["value"].as_str().unwrap();

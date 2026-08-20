@@ -54,6 +54,16 @@ async fn main() {
         .await
         .expect("failed to configure portal key issuance at cold start");
 
+    // The eligibility gate (task 0189). Stores the SSM parameter names for the
+    // guild id and the minimum account age — resolved per issuance so operator
+    // changes need no redeploy — and probes both once, so a mis-seeded
+    // parameter fails here in `Init Errors` rather than at a visitor's click.
+    // A no-op while `PORTAL_ENABLED` is false, like the two loads above.
+    config
+        .load_portal_eligibility()
+        .await
+        .expect("failed to configure the portal eligibility gate at cold start");
+
     // Build the CH client eagerly at cold start; it is Arc-backed and shared via
     // AppState across warm invocations. `client_from_lambda_env` reads
     // MTLS_SECRET_NAME + CH_DOMAIN (set by CDK) and fetches the cert bundle from

@@ -581,17 +581,47 @@ pub fn oauth_secret() -> OauthSecret {
 }
 
 pub fn build_app(portal_enabled: bool, gateway: Option<Gateway>) -> Router {
+    build_app_with(portal_enabled, gateway, Default::default(), None)
+}
+
+/// [`build_app`], plus where Discord is and where the eligibility knobs come
+/// from — what the issue round-trip suite (`tests/portal_issue.rs`) needs:
+/// the `action=issue` callback talks to a mock Discord AND the mock control
+/// plane in one request.
+pub fn build_app_with(
+    portal_enabled: bool,
+    gateway: Option<Gateway>,
+    endpoints: prices_api::portal::auth::discord::Endpoints,
+    eligibility: Option<prices_api::portal::eligibility::EligibilitySettings>,
+) -> Router {
     let config = AppConfig {
         ch_enabled: false,
         base_url: None,
         api_keys: vec![],
         portal_enabled,
         portal_oauth: portal_enabled.then(oauth_secret),
-        portal_endpoints: Default::default(),
+        portal_endpoints: endpoints,
         portal_keys: gateway,
+        portal_eligibility: eligibility,
     };
     app(&config, AppState::without_ch())
 }
+
+/// Eligibility knobs for tests: direct values, no SSM. The guild id is a
+/// snowflake because the code validates that before building the member URL.
+pub fn eligibility(
+    guild_id: &str,
+    min_age_minutes: &str,
+) -> prices_api::portal::eligibility::EligibilitySettings {
+    use prices_api::portal::eligibility::{EligibilitySettings, ParamSource};
+    EligibilitySettings {
+        guild_id: ParamSource::Direct(guild_id.to_string()),
+        min_account_age: ParamSource::Direct(min_age_minutes.to_string()),
+    }
+}
+
+/// The guild the issue suite gates on — any syntactically valid snowflake.
+pub const GUILD_ID: &str = "897514728459468821";
 
 /// A router with the portal open, sign-in configured, and the control plane
 /// pointed at `mock`.
@@ -659,6 +689,34 @@ impl Reply {
             .map(|v| v.to_str().unwrap().to_string())
             .unwrap_or_default()
     }
+
+    pub fn location(&self) -> String {
+        self.headers
+            .get(header::LOCATION)
+            .map(|v| v.to_str().unwrap().to_string())
+            .unwrap_or_default()
+    }
+
+    /// The value a browser would store for cookie `name`, or `None` if this
+    /// response clears it or never set it.
+    pub fn cookie(&self, name: &str) -> Option<String> {
+        self.headers
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .map(|v| v.to_str().unwrap().to_string())
+            .filter(|c| c.starts_with(&format!("{name}=")))
+            .filter(|c| !c.contains("Max-Age=0"))
+            .map(|c| {
+                c.split_once('=')
+                    .unwrap()
+                    .1
+                    .split(';')
+                    .next()
+                    .unwrap()
+                    .to_string()
+            })
+            .next()
+    }
 }
 
 /// The usage route alone (task 0188), with the cache TTL and the deadline both
@@ -711,10 +769,55 @@ pub async fn call_path(router: Router, method: &str, path: &str, cookie: Option<
     }
 }
 
-pub async fn issue(mock: &MockGateway, sub: &str) -> Reply {
+/// `GET /key` — the reveal. Since task 0189 the `POST` verb answers
+/// identically (read-only); [`post_key`] exists so tests can pin exactly that.
+pub async fn reveal(mock: &MockGateway, sub: &str) -> Reply {
+    call(app_against(mock), "GET", Some(&session_cookie(sub))).await
+}
+
+/// `POST /key` — 0187's issue verb, which task 0189 made a second reveal.
+pub async fn post_key(mock: &MockGateway, sub: &str) -> Reply {
     call(app_against(mock), "POST", Some(&session_cookie(sub))).await
 }
 
-pub async fn reveal(mock: &MockGateway, sub: &str) -> Reply {
-    call(app_against(mock), "GET", Some(&session_cookie(sub))).await
+/// Drive a full `action=issue` OAuth round-trip against `router` (which must
+/// be built with `build_app_with`, pointed at a mock Discord): `/auth/login`
+/// mints the state pair, the callback completes the action. Returns the
+/// callback's reply — a `303` whose `Location` is one of the five
+/// `?issue=…` landing states.
+pub async fn issue_round_trip(router: &Router) -> Reply {
+    let login = call_path(
+        router.clone(),
+        "GET",
+        "/api-tokens/api/auth/login?action=issue",
+        None,
+    )
+    .await;
+    assert_eq!(
+        login.status,
+        StatusCode::SEE_OTHER,
+        "login must redirect to Discord: {}",
+        String::from_utf8_lossy(&login.body)
+    );
+    let pending = login
+        .cookie(cookies::PENDING_COOKIE)
+        .expect("login must set the pending-login cookie");
+    let location = login.location();
+    let query = location
+        .split_once('?')
+        .expect("the authorize URL carries a query")
+        .1;
+    let state = form_urlencoded::parse(query.as_bytes())
+        .find(|(k, _)| k == "state")
+        .expect("the authorize URL must carry `state`")
+        .1
+        .to_string();
+
+    call_path(
+        router.clone(),
+        "GET",
+        &format!("/api-tokens/api/auth/callback?code=an-auth-code&state={state}"),
+        Some(&format!("{}={pending}", cookies::PENDING_COOKIE)),
+    )
+    .await
 }

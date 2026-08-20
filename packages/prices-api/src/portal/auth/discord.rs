@@ -1,19 +1,27 @@
-//! The two calls this service makes to Discord, and nothing else (task 0186).
+//! The three calls this service makes to Discord, and nothing else
+//! (tasks 0186 + 0189).
 //!
-//! `POST /oauth2/token` to turn an authorization code into an access token, then
-//! `GET /users/@me` to read who it belongs to. The token is dropped at the end of
-//! the callback — see [`AccessToken`].
+//! `POST /oauth2/token` to turn an authorization code into an access token,
+//! `GET /users/@me/guilds/{guild}/member` on an issue round-trip to ask whether
+//! that user is a member of the Stellar guild, then `GET /users/@me` to read
+//! who the token belongs to. The token is dropped at the end of the callback —
+//! see [`AccessToken`].
 //!
-//! # Scope is exactly `identify`
+//! # Scope is exactly `identify` + `guilds.members.read`
 //!
 //! Requested in [`super::authorize_url`] and **verified in the token response**
 //! by [`TokenResponse::granted_scopes`]. Verifying is not paranoia about
 //! Discord: the requested scope set is also declared in the Developer Portal, so
 //! the authorize URL and the registration can disagree, and the response is the
-//! only place the actual grant is observable. `guilds.members.read` is [0189]'s
-//! to add — in both places — and `guilds` and `email` are refused outright by
-//! ADR 0010, the first for returning every server a user belongs to and the
-//! second for collecting data we have decided not to hold.
+//! only place the actual grant is observable. The comparison is **set
+//! equality** over whitespace-separated tokens — RFC 6749 §3.3 makes scope an
+//! unordered set, so `guilds.members.read identify` is the same grant — and a
+//! set compare still refuses anything wider *or* narrower. `guilds` and
+//! `email` are refused outright by ADR 0010, the first for returning every
+//! server a user belongs to and the second for collecting data we have decided
+//! not to hold; `guilds.members.read` returns one membership in one guild the
+//! user consented to reveal, which is the narrowest surface that can answer
+//! the question at all.
 
 use std::time::Duration;
 
@@ -66,9 +74,13 @@ pub enum DiscordError {
     UnexpectedScope { granted: String },
 }
 
-/// The one scope requested, sent to the authorize endpoint and checked on the
-/// way back. ADR 0010: never `guilds`, never `email`.
-pub const SCOPE: &str = "identify";
+/// The scopes requested, sent to the authorize endpoint and checked on the way
+/// back — as a set, see [`scopes_match`]. ADR 0010: never `guilds`, never
+/// `email`. The same pair must be declared in the Developer Portal
+/// registration (deploy-prep runbook §1 step 3); a registration that drifts
+/// narrower is refused by Discord at the authorize step, one that drifts wider
+/// is refused here on the token response.
+pub const SCOPE: &str = "identify guilds.members.read";
 
 /// Discord's OAuth2 authorize page — where the visitor is sent, not an API call.
 pub const DEFAULT_AUTHORIZE_URL: &str = "https://discord.com/oauth2/authorize";
@@ -165,6 +177,37 @@ impl Endpoints {
     fn current_user_url(&self) -> String {
         format!("{}/users/@me", self.api_base.trim_end_matches('/'))
     }
+
+    /// The membership route for one guild (task 0189).
+    ///
+    /// The guild id is operator-seeded configuration (SSM), not code — it is
+    /// validated to be a bare snowflake before it becomes a path segment, so a
+    /// mis-seeded value cannot smuggle `../` or a query string into the URL.
+    /// Validation failure is the caller's `Unknown` outcome, not a panic.
+    fn member_url(&self, guild_id: &str) -> Option<String> {
+        if guild_id.is_empty() || !guild_id.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        Some(format!(
+            "{}/users/@me/guilds/{guild_id}/member",
+            self.api_base.trim_end_matches('/')
+        ))
+    }
+}
+
+/// Compare a granted scope string against [`SCOPE`] as a **set**.
+///
+/// RFC 6749 §3.3: scope is a space-delimited, unordered set. String equality
+/// would refuse `guilds.members.read identify` — the exact grant we asked for,
+/// echoed in an order we do not control. A set compare is order-independent
+/// and still refuses a grant that is wider (registration drifted to include
+/// `guilds` or `email`) or narrower (the member scope missing, which would
+/// turn every membership check into a `401`-shaped `Unknown`).
+fn scopes_match(granted: &str) -> bool {
+    use std::collections::BTreeSet;
+    let granted: BTreeSet<&str> = granted.split_whitespace().collect();
+    let requested: BTreeSet<&str> = SCOPE.split_whitespace().collect();
+    granted == requested
 }
 
 /// Build the HTTP client used for both calls.
@@ -251,17 +294,143 @@ pub async fn exchange_code(
         message: e.to_string(),
     })?;
 
-    // Compared as a whole string, not as "contains identify". A grant of
-    // `identify guilds` contains it and is exactly what must be refused: it
-    // would mean the Developer Portal registration had drifted from this code,
-    // and ADR 0010 rejects `guilds` on privacy grounds.
-    if token.granted_scopes().trim() != SCOPE {
+    // Compared as a set, not as "contains identify". A grant of
+    // `identify guilds guilds.members.read` contains both requested scopes and
+    // is exactly what must be refused: it would mean the Developer Portal
+    // registration had drifted from this code, and ADR 0010 rejects `guilds`
+    // on privacy grounds. See `scopes_match` for why not string equality.
+    if !scopes_match(token.granted_scopes()) {
         return Err(DiscordError::UnexpectedScope {
             granted: token.granted_scopes().to_string(),
         });
     }
 
     Ok(AccessToken(token.access_token))
+}
+
+/// The fields of `GET /users/@me/guilds/{guild}/member` this service reads.
+///
+/// One, out of the dozen the endpoint returns. `flags` and `joined_at` are
+/// deliberately not deserialized: nothing here stores membership data (ADR
+/// 0010 — "the registry stores no membership data"), and what is not named
+/// cannot leak into a log.
+#[derive(Debug, Deserialize)]
+pub struct GuildMember {
+    /// Membership Screening: `Some(true)` means the user joined but has not
+    /// cleared the screening gate. **Optional on purpose** — the docs'
+    /// presence guarantee is written about gateway events, not this REST
+    /// route, and 0180 item 2 (which would have settled it) is still
+    /// unmeasured. Absent is a third state the caller must handle, never
+    /// "cleared".
+    pub pending: Option<bool>,
+}
+
+/// What the membership route answered. Three outcomes, not two, and
+/// deliberately infallible: a Discord that is down is an ordinary answer here,
+/// not an error for the callback to 502 on, because "could not verify" must
+/// never be rendered as "not a member" (task 0189).
+#[derive(Debug)]
+pub enum MemberLookup {
+    /// A member object came back. Whether it *counts* is eligibility's call.
+    Member(GuildMember),
+    /// A `404` whose JSON `code` is 10007 (Unknown Member) or 10004 (Unknown
+    /// Guild) — the only shapes read as "not a member". 10004 usually means
+    /// the *guild id* is wrong, which is our configuration and not the user;
+    /// the caller logs it loudly for exactly that reason.
+    NotMember { code: u64 },
+    /// Anything else: `401`/`403`/`429`/`5xx`, a `404` whose body does not
+    /// carry a recognised code, a transport fault, an unparseable body. Do not
+    /// issue, and do not accuse.
+    Unknown {
+        status: Option<reqwest::StatusCode>,
+        detail: String,
+    },
+}
+
+/// JSON error codes on a `404` that mean "no such membership".
+///
+/// 10007 "Unknown Member", 10004 "Unknown Guild" — the only two documented
+/// shapes. The exact live behaviour is 0180 item 1, still unmeasured; until it
+/// is, an unlisted code on a 404 lands in `Unknown`, which fails safe in both
+/// directions (no key issued, no accusation rendered).
+const NOT_MEMBER_CODES: [u64; 2] = [10_007, 10_004];
+
+/// Ask whether the token's owner is a member of `guild_id` (task 0189).
+///
+/// Called with the **user's own** consented token — no bot in the guild, no
+/// admin rights — and **by reference**: it runs before [`current_user`]
+/// consumes the token, so the consumed-at-end property of the callback is
+/// untouched.
+pub async fn guild_member(
+    client: &reqwest::Client,
+    endpoints: &Endpoints,
+    token: &AccessToken,
+    guild_id: &str,
+) -> MemberLookup {
+    let Some(url) = endpoints.member_url(guild_id) else {
+        return MemberLookup::Unknown {
+            status: None,
+            detail: "guild id is not a snowflake — check the SSM parameter".into(),
+        };
+    };
+
+    let response = match client.get(&url).bearer_auth(&token.0).send().await {
+        Ok(response) => response,
+        Err(e) => {
+            return MemberLookup::Unknown {
+                status: None,
+                detail: e.to_string(),
+            };
+        }
+    };
+
+    let status = response.status();
+    // The body is read for classification only (the JSON `code` on a 404) and
+    // is never echoed to the visitor or logged verbatim — same caution as the
+    // token exchange above.
+    let body = response.bytes().await.unwrap_or_default();
+    classify_member_response(status, &body)
+}
+
+/// Map one HTTP answer from the member route to a [`MemberLookup`].
+///
+/// Pure so the whole decision table is unit-testable without a socket. Only a
+/// `404` carrying a recognised JSON `code` is `NotMember`; a `2xx` must parse
+/// as a member object; everything else is `Unknown`.
+fn classify_member_response(status: reqwest::StatusCode, body: &[u8]) -> MemberLookup {
+    if status.is_success() {
+        return match serde_json::from_slice::<GuildMember>(body) {
+            Ok(member) => MemberLookup::Member(member),
+            Err(e) => MemberLookup::Unknown {
+                status: Some(status),
+                detail: format!("member object did not parse: {e}"),
+            },
+        };
+    }
+
+    if status == reqwest::StatusCode::NOT_FOUND {
+        #[derive(Deserialize)]
+        struct ErrorBody {
+            code: Option<u64>,
+        }
+        if let Ok(ErrorBody { code: Some(code) }) = serde_json::from_slice::<ErrorBody>(body)
+            && NOT_MEMBER_CODES.contains(&code)
+        {
+            return MemberLookup::NotMember { code };
+        }
+        // A 404 with no recognised code is NOT proof of non-membership — it
+        // could be a proxy, an outage page, or a shape 0180 item 1 has not
+        // measured yet. Fail safe: refuse without accusing.
+        return MemberLookup::Unknown {
+            status: Some(status),
+            detail: "404 without a recognised error code".into(),
+        };
+    }
+
+    MemberLookup::Unknown {
+        status: Some(status),
+        detail: "membership not verifiable".into(),
+    }
 }
 
 /// Read the identity the token belongs to.
@@ -301,12 +470,126 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_requested_scope_is_exactly_identify() {
-        assert_eq!(SCOPE, "identify");
+    fn the_requested_scopes_are_exactly_identify_and_members_read() {
+        assert_eq!(SCOPE, "identify guilds.members.read");
         // The two ADR 0010 forbids, stated as a test so a future edit that adds
-        // one has to delete an assertion rather than change a string.
-        assert!(!SCOPE.contains("guilds"));
-        assert!(!SCOPE.contains("email"));
+        // one has to delete an assertion rather than change a string. Compared
+        // per token — `guilds.members.read` legitimately *contains* "guilds".
+        for token in SCOPE.split_whitespace() {
+            assert_ne!(token, "guilds");
+            assert_ne!(token, "email");
+        }
+    }
+
+    /// RFC 6749 §3.3: scope is an unordered set. Discord echoing the pair in
+    /// the other order is the same grant; anything wider or narrower is not.
+    #[test]
+    fn the_granted_scope_is_compared_as_a_set_not_a_string() {
+        assert!(scopes_match("identify guilds.members.read"));
+        assert!(scopes_match("guilds.members.read identify"));
+        assert!(scopes_match("  guilds.members.read   identify "));
+
+        // Narrower: the member scope missing means every membership check
+        // would come back 401-shaped — refuse at the exchange instead.
+        assert!(!scopes_match("identify"));
+        assert!(!scopes_match("guilds.members.read"));
+        assert!(!scopes_match(""));
+        // Wider: the registration drifted. `guilds` and `email` are the ADR's
+        // named refusals.
+        assert!(!scopes_match("identify guilds.members.read guilds"));
+        assert!(!scopes_match("identify guilds.members.read email"));
+        assert!(!scopes_match("identify guilds"));
+    }
+
+    #[test]
+    fn the_member_url_is_built_only_from_a_bare_snowflake() {
+        let endpoints = Endpoints::default();
+        assert_eq!(
+            endpoints.member_url("897514728459468821").as_deref(),
+            Some("https://discord.com/api/users/@me/guilds/897514728459468821/member")
+        );
+        // Operator input never becomes a path segment un-validated.
+        for bad in ["", "stellar_test", "123/../admin", "123?x=1", "123 456"] {
+            assert_eq!(endpoints.member_url(bad), None, "accepted {bad:?}");
+        }
+    }
+
+    /// The whole decision table for one membership answer, pinned pure.
+    ///
+    /// Only a 404 carrying JSON code 10007/10004 is "not a member"; every
+    /// other refusal — including a 404 whose body is empty, non-JSON or
+    /// carries an unlisted code — is `Unknown`, because 0180 item 1 (the live
+    /// shape) is unmeasured and an accusation must not rest on a guess.
+    #[test]
+    fn only_a_recognised_404_code_reads_as_not_a_member() {
+        use reqwest::StatusCode;
+
+        let is_not_member = |status: StatusCode, body: &str| {
+            matches!(
+                classify_member_response(status, body.as_bytes()),
+                MemberLookup::NotMember { .. }
+            )
+        };
+        let is_unknown = |status: StatusCode, body: &str| {
+            matches!(
+                classify_member_response(status, body.as_bytes()),
+                MemberLookup::Unknown { .. }
+            )
+        };
+
+        assert!(is_not_member(
+            StatusCode::NOT_FOUND,
+            r#"{"message": "Unknown Member", "code": 10007}"#
+        ));
+        assert!(is_not_member(
+            StatusCode::NOT_FOUND,
+            r#"{"message": "Unknown Guild", "code": 10004}"#
+        ));
+
+        // A 404 that cannot prove what it is.
+        assert!(is_unknown(StatusCode::NOT_FOUND, ""));
+        assert!(is_unknown(StatusCode::NOT_FOUND, "<html>gateway</html>"));
+        assert!(is_unknown(StatusCode::NOT_FOUND, r#"{"code": 0}"#));
+        assert!(is_unknown(StatusCode::NOT_FOUND, r#"{"code": 10008}"#));
+        assert!(is_unknown(StatusCode::NOT_FOUND, r#"{"message": "hm"}"#));
+
+        // The statuses the task names, plus the ones it implies.
+        for status in [
+            StatusCode::UNAUTHORIZED,
+            StatusCode::FORBIDDEN,
+            StatusCode::TOO_MANY_REQUESTS,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::BAD_GATEWAY,
+            StatusCode::SERVICE_UNAVAILABLE,
+        ] {
+            // Even a body that LOOKS like a not-member error does not count
+            // outside a 404 — a throttled proxy echoing an error template
+            // must not read as an accusation.
+            assert!(is_unknown(status, r#"{"code": 10007}"#), "{status}");
+        }
+    }
+
+    /// A member object parses with `pending` present (either value) or absent,
+    /// and absence survives as `None` — the third state eligibility handles
+    /// explicitly rather than defaulting.
+    #[test]
+    fn a_member_response_keeps_pending_optional() {
+        let of =
+            |body: &str| match classify_member_response(reqwest::StatusCode::OK, body.as_bytes()) {
+                MemberLookup::Member(m) => m.pending,
+                other => panic!("expected a member, got {other:?}"),
+            };
+        assert_eq!(of(r#"{"pending": false, "flags": 0}"#), Some(false));
+        assert_eq!(of(r#"{"pending": true}"#), Some(true));
+        assert_eq!(of(r#"{"joined_at": "2020-01-01T00:00:00Z"}"#), None);
+
+        // A 200 whose body is not a member object at all is Unknown, not a
+        // pass — a mock or proxy answering `{}` IS a member object (all
+        // fields optional), but non-JSON is not.
+        assert!(matches!(
+            classify_member_response(reqwest::StatusCode::OK, b"not json"),
+            MemberLookup::Unknown { .. }
+        ));
     }
 
     /// **The `lambda` build has no code path that reads the overrides.**
@@ -384,6 +667,6 @@ mod tests {
     fn a_missing_scope_field_reads_as_no_scope_rather_than_a_decode_error() {
         let response: TokenResponse = serde_json::from_str(r#"{"access_token":"t"}"#).unwrap();
         assert_eq!(response.granted_scopes(), "");
-        assert_ne!(response.granted_scopes().trim(), SCOPE);
+        assert!(!scopes_match(response.granted_scopes()));
     }
 }

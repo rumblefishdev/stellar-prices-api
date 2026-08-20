@@ -1,13 +1,19 @@
-//! Issue a key, and show it (task 0187).
+//! Reveal a key — and issue one, but only for [0189]'s eligibility-checked
+//! callback (task 0187, re-shaped by task 0189).
 //!
-//! Two routes under [`PORTAL_API_PREFIX`](super::PORTAL_API_PREFIX), so they
-//! inherit [0183]'s gate exactly as sign-in does: with `PORTAL_ENABLED` false
-//! both are an empty `404`, byte-identical to a path that was never deployed.
+//! One route under [`PORTAL_API_PREFIX`](super::PORTAL_API_PREFIX), so it
+//! inherits [0183]'s gate exactly as sign-in does: with `PORTAL_ENABLED` false
+//! it is an empty `404`, byte-identical to a path that was never deployed.
 //!
 //! | route | does |
 //! | --- | --- |
-//! | `POST /api-tokens/api/key` | issue — or adopt the one that already exists |
-//! | `GET /api-tokens/api/key` | reveal — the same lookup, plus the value |
+//! | `GET`/`POST /api-tokens/api/key` | reveal — the lookup, plus the value. **Never creates.** |
+//!
+//! Issuance itself is [`issue_for`], reachable **only** from the OAuth
+//! callback completing an `action=issue` round-trip
+//! (`super::auth::issue`) — because issuing requires an eligibility proof
+//! (Stellar Discord membership + minimum account age, ADR 0010 §8) that only a
+//! fresh Discord token can provide, and a session cookie is not one.
 //!
 //! # There is no database, and that is the design
 //!
@@ -18,40 +24,41 @@
 //! history; neither is required to answer "where is my key", and whether it is
 //! ever needed is [0190]'s to justify.
 //!
-//! What follows from that is the shape of everything here: every request is a
-//! **reconciliation**, not a lookup of something we wrote down. The flow is
-//! list → filter → rank → converge, and it is the same flow for both routes,
-//! which is why the task groups them ("reveal is the same lookup as issue").
+//! # The route is read-only, and that is [0189]'s invariant
 //!
-//! # Why a `GET` may create
+//! Task 0187 shipped this route as one create-capable handler for both verbs
+//! ("reveal is the same lookup as issue"), with a documented argument for why
+//! a `GET` that creates was safe. [0189] re-derives the question and reverses
+//! the answer, because the premise changed: issuing now requires an
+//! eligibility proof, so a route reachable with a session cookie alone **must
+//! not create** — that is the acceptance criterion "issue is unreachable with
+//! a session cookie alone", made structural. The reveal is now a pure lookup:
+//! list → filter → rank → read. No create, no attach, no delete — a session
+//! cookie can cause **zero control-plane writes**, which also retires 0187's
+//! `SameSite=Lax` top-level-navigation concern outright rather than bounding
+//! it.
 //!
-//! Reveal re-enters the issue flow when there is nothing to reveal, per the
-//! task: *"a key deleted by hand in the console otherwise leaves the user with a
-//! dead id forever"*. Without a registry there is no way to tell "deleted by
-//! hand" from "never issued" — that distinction is precisely what the registry
-//! would have stored — so honouring that requirement means a `GET` that can
-//! create.
+//! What that costs, and why it is fine:
 //!
-//! That is worth stating plainly rather than burying, because `auth/mod.rs`
-//! warns against inheriting its CSRF reasoning here. The exposure is a
-//! third-party page causing a top-level navigation to this URL, which
-//! `SameSite=Lax` does send the session cookie on. What it buys an attacker is
-//! bounded to nothing:
+//! - **A key deleted by hand in the console is no longer resurrected by a
+//!   reveal.** The caller sees "no key" and the page offers the issue
+//!   round-trip; one press re-proves eligibility and recreates it. That is
+//!   strictly better than 0187's behaviour — the recreate now happens behind
+//!   the gate instead of around it.
+//! - **A winner that exists but was never attached** (a crash between create
+//!   and attach) reveals as a key that answers `403` on `/v1/`. The heal is
+//!   the same press: [`issue_for`] adopts and attaches it. The reveal must
+//!   not fix it in place, because attach is a write.
+//! - **Duplicates are no longer swept by reveal** — [`issue_for`] still
+//!   converges them. Until the owner next issues, the reveal answers with the
+//!   same deterministic winner the issue flow would pick
+//!   (`naming::choose_winner`), so nothing diverges by waiting.
 //!
-//! - The flow is **idempotent**. A visitor who has a key gets that same key; a
-//!   visitor who does not gets the one key they were entitled to press a button
-//!   for. No amount of forged navigation produces a second key, because the
-//!   reconciler deletes all but one.
-//! - The response is **not readable cross-origin**. A navigation renders JSON in
-//!   the victim's own tab; the attacker's page cannot read it, and no CORS
-//!   header here says otherwise.
-//! - `POST` is not reachable cross-site at all under `SameSite=Lax`, which only
-//!   releases the cookie for top-level `GET`.
-//!
-//! So the worst outcome is that a visitor ends up holding the key they could
-//! have issued themselves — the same reasoning `auth`'s sign-out uses, and it is
-//! restated rather than inherited because the conclusion had to be re-derived
-//! for a route that creates a production credential.
+//! **A user who has left the Stellar Discord keeps their key, and this route
+//! keeps working for them.** Reveal consults the session only — never
+//! Discord. That is the epic's stated non-goal, not an oversight: membership
+//! is proved at the moment of issuance and nothing afterwards (ADR 0010 §7);
+//! what a departed member loses is the right to rework ([0191]).
 //!
 //! # Never log a key value
 //!
@@ -84,7 +91,7 @@ use super::auth::secret::OauthSecret;
 use gateway::{Attachment, Gateway, GatewayError, KeyValue};
 use naming::{KeyRecord, choose_winner, exact_matches, key_name, losers};
 
-/// Issue (`POST`) and reveal (`GET`) share one path — they are one resource.
+/// The reveal, on both verbs — see [`key`] for why `POST` answers identically.
 pub const KEY_PATH: &str = "/api-tokens/api/key";
 
 /// Error code for a caller with no valid session.
@@ -93,6 +100,11 @@ const NOT_SIGNED_IN: &str = "not_signed_in";
 const KEY_UNAVAILABLE: &str = "key_unavailable";
 /// Error code for a deployment with the portal open and no usage plan wired.
 const KEYS_UNCONFIGURED: &str = "keys_unconfigured";
+/// Error code for a caller who has no key. The same code (and the same
+/// envelope-vs-empty-body distinction from [0183]'s gate) as the usage route's,
+/// because the frontend reads both: a `404` is "no key" only when this
+/// envelope says so.
+const NO_KEY: &str = "no_key";
 
 /// How many times the whole flow is re-run when the key it settled on turns out
 /// to have been deleted underneath it.
@@ -122,7 +134,7 @@ const MAX_ATTEMPTS: usize = 2;
 /// 10s leaves the handler ~5s of the function's budget to serialize an answer
 /// and for the runtime to send it, and sits far inside API Gateway's own 29s
 /// cap.
-const RECONCILE_DEADLINE: Duration = Duration::from_secs(10);
+pub(crate) const RECONCILE_DEADLINE: Duration = Duration::from_secs(10);
 
 /// What both handlers need, cloned per request.
 ///
@@ -179,11 +191,11 @@ impl KeysState {
     }
 }
 
-/// The two routes, as a `Router` carrying its own state.
+/// The route, as a `Router` carrying its own state.
 ///
 /// One `.route()` with both verbs, so the path is written once: a second
 /// `.route()` for the same path would panic at construction, and that is the
-/// only thing keeping issue and reveal from drifting apart in the router.
+/// only thing keeping the two verbs from drifting apart in the router.
 pub fn routes(state: KeysState) -> Router {
     Router::new()
         .route(KEY_PATH, get(key).post(key))
@@ -211,31 +223,23 @@ struct KeyResponse {
     name: String,
     /// The key itself — what goes in `X-API-Key`.
     value: String,
-    /// Whether this request created the key, as opposed to finding it.
-    ///
-    /// Display only, and honest about a race: two simultaneous first presses can
-    /// both report `true` while converging on one key, because each created one
-    /// and one of the two was then reconciled away.
-    created: bool,
 }
 
-/// Both verbs. `POST` issues, `GET` reveals, and they are **one handler**
-/// because they are one operation.
+/// Both verbs, one handler, and both are the **reveal**.
 ///
-/// That is not a shortcut: task 0187 says "reveal is the same lookup as issue",
-/// and without a registry it has to be. There is no stored key id to reveal, so
-/// a reveal lists, filters, ranks and converges exactly as an issue does, and
-/// the only thing left that could differ between them is whether they are
-/// allowed to create — which they cannot be, because "deleted by hand" and
-/// "never issued" are the same observation. Two functions with identical bodies
-/// would have claimed a distinction that does not exist and invited someone to
-/// invent one.
+/// `POST` used to be the issue; issuance now lives behind the eligibility
+/// round-trip (`super::auth::issue`), and this route must not create however
+/// it is called. Both verbs stay routed and answer identically so that "a
+/// `POST` with a session cookie creates nothing" is a *tested property* of a
+/// live route rather than a hole left by an unrouted one — and so the
+/// gateway's mapped verbs need no change.
 async fn key(State(state): State<KeysState>, headers: HeaderMap) -> Response {
-    ensure_key(&state, &headers).await
+    reveal(&state, &headers).await
 }
 
-/// The whole of both routes: authenticate, reconcile, answer.
-async fn ensure_key(state: &KeysState, headers: &HeaderMap) -> Response {
+/// The whole of the route: authenticate, look up, answer. Read-only — see the
+/// module docs for why that is [0189]'s invariant, not an optimisation.
+async fn reveal(state: &KeysState, headers: &HeaderMap) -> Response {
     let Some(oauth) = state.oauth.as_ref() else {
         return unconfigured();
     };
@@ -243,15 +247,14 @@ async fn ensure_key(state: &KeysState, headers: &HeaderMap) -> Response {
         return unconfigured();
     };
 
-    // The session is the authorization for this whole route. There is no API
-    // key to present — the caller is here to get one — so the signed cookie is
-    // the only thing standing between a stranger and a production credential,
-    // and `PORTAL_ENABLED` is the only thing standing in front of that until
-    // [0189]'s eligibility gate lands.
+    // The session is the authorization for this route — and for this route it
+    // is enough, because a reveal only shows the caller what already belongs
+    // to them. Creating is what needs more (an eligibility proof via the
+    // issue round-trip), which is why nothing below can create.
     let Some(session) = super::auth::current_session(oauth, headers) else {
         return no_store(errors::unauthorized_with(
             NOT_SIGNED_IN,
-            "sign in with Discord before issuing an API key",
+            "sign in with Discord before asking for your API key",
         ));
     };
 
@@ -259,27 +262,24 @@ async fn ensure_key(state: &KeysState, headers: &HeaderMap) -> Response {
     // while the signing key is intact — Discord ids are digits and the cookie is
     // signed — which is exactly why it is checked: this is the last line if that
     // stops being true, and the alternative is an attacker-chosen `nameQuery`
-    // aimed at the reconciler's `DeleteApiKey`.
+    // aimed at the control plane.
     let Some(name) = key_name(&session.sub) else {
-        tracing::warn!("a session carried a user id that is not a snowflake; refusing to issue");
+        tracing::warn!("a session carried a user id that is not a snowflake; refusing");
         return no_store(errors::unauthorized_with(
             NOT_SIGNED_IN,
-            "sign in with Discord before issuing an API key",
+            "sign in with Discord before asking for your API key",
         ));
     };
 
-    // The deadline wraps the whole reconciliation, not each call inside it —
-    // see `RECONCILE_DEADLINE`. Elapsing is a `503`: the work may well have been
-    // half-done (a key created, a duplicate deleted), the flow is idempotent, and
-    // the next request reconciles whatever this one left. Saying so is the whole
-    // point — the alternative is Lambda killing the invocation with no answer at
-    // all.
-    let reconciled = match tokio::time::timeout(state.deadline, reconcile(gateway, &name)).await {
-        Ok(reconciled) => reconciled,
+    // The deadline wraps the whole lookup — `list_named` alone can walk pages,
+    // each with its own per-call budget. Elapsing is a `503` rather than a
+    // Lambda-killed invocation with no response at all.
+    let looked_up = match tokio::time::timeout(state.deadline, lookup(gateway, &name)).await {
+        Ok(looked_up) => looked_up,
         Err(_elapsed) => {
             tracing::error!(
                 deadline_secs = state.deadline.as_secs_f32(),
-                "portal key reconciliation ran out of time"
+                "portal key lookup ran out of time"
             );
             return no_store(errors::service_unavailable(
                 KEY_UNAVAILABLE,
@@ -288,50 +288,46 @@ async fn ensure_key(state: &KeysState, headers: &HeaderMap) -> Response {
         }
     };
 
-    match reconciled {
-        Ok(Some(outcome)) => {
-            tracing::info!(
-                key_id = %outcome.record.id,
-                created = outcome.created,
-                "portal issued or revealed an API key"
-            );
+    match looked_up {
+        Ok(Some((record, value))) => {
+            tracing::info!(key_id = %record.id, "portal revealed an API key");
             // This response proves a key exists, so a cached "no key" on the
-            // usage route is now false — for the page's own refetch after the
-            // press, and for any reload inside that cache's TTL. Evicted on
-            // every success rather than only on `created`: an ADOPTED key
-            // (console-created, or a create another invocation raced in) also
-            // arrives with "no key" plausibly cached, and the eviction is
-            // narrow enough that firing it spuriously costs nothing.
+            // usage route is now false. An in-process eviction, not a
+            // control-plane write — the read-only invariant is about what a
+            // session cookie can make AWS do.
             if let Some(cache) = &state.usage_cache {
                 cache.invalidate_no_key(&session.sub);
             }
             no_store(
                 Json(KeyResponse {
-                    key_id: outcome.record.id,
-                    name: outcome.record.name,
+                    key_id: record.id,
+                    name: record.name,
                     // The one call site of `expose`, and the reason the type
                     // exists: everything else in this module can only hold the
                     // value, never read it.
-                    value: outcome.value.expose().to_string(),
-                    created: outcome.created,
+                    value: value.expose().to_string(),
                 })
                 .into_response(),
             )
         }
-        // Every attempt found a key and then lost it before reading its value.
-        Ok(None) => {
-            tracing::warn!(
-                attempts = MAX_ATTEMPTS,
-                "a key was deleted underneath every issue attempt"
-            );
-            no_store(errors::service_unavailable(
-                KEY_UNAVAILABLE,
-                "your key is being changed by something else right now; try again",
-            ))
-        }
+        // Nothing under this name — never issued, deleted by hand, or (rarely)
+        // deleted between the list and the read. All three answer the same
+        // envelope, because without a registry they are the same observation,
+        // and all three are fixed the same way: the issue round-trip.
+        Ok(None) => no_store(
+            (
+                StatusCode::NOT_FOUND,
+                Json(errors::ErrorEnvelope {
+                    code: NO_KEY,
+                    message: "you have no API key yet; issue one from the portal".into(),
+                    details: None,
+                }),
+            )
+                .into_response(),
+        ),
         Err(error) => {
             // `error` cannot carry a key value — see `gateway::sdk_message`.
-            tracing::error!(error = %error, "portal key issuance failed");
+            tracing::error!(error = %error, "portal key reveal failed");
             no_store(
                 (
                     StatusCode::BAD_GATEWAY,
@@ -347,10 +343,96 @@ async fn ensure_key(state: &KeysState, headers: &HeaderMap) -> Response {
     }
 }
 
+/// The read-only lookup: list, filter, rank, read. Nothing here mutates.
+///
+/// `Ok(None)` is "no key to reveal" — including the raced case where the
+/// winner was listed and deleted before its value could be read. The reveal
+/// answers `no_key` for it rather than retrying into a create, because
+/// retrying into a create is exactly what this route gave up.
+async fn lookup(
+    gateway: &Gateway,
+    name: &str,
+) -> Result<Option<(KeyRecord, KeyValue)>, GatewayError> {
+    let candidates = exact_matches(gateway.list_named(name).await?, name);
+    let Some(winner) = choose_winner(&candidates).cloned() else {
+        return Ok(None);
+    };
+    match gateway.value_of(&winner.id).await? {
+        Some(value) => Ok(Some((winner, value))),
+        None => Ok(None),
+    }
+}
+
+/// What the eligibility-checked issue round-trip needs to know.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum IssueOutcome {
+    /// A key exists, is on the free plan, and its value is readable — created
+    /// now or adopted. The value is deliberately not carried: the callback
+    /// that consumes this answers with a redirect, and a credential must
+    /// never ride in a `Location`.
+    Issued,
+    /// The control plane would not produce a usable key — an error, a
+    /// deadline, or a key deleted underneath every attempt. Logged inside
+    /// with the same distinctions 0187's handler drew; the visitor is told to
+    /// try again either way.
+    Failed,
+}
+
+/// Issue (or adopt) the key for `sub` — the create-capable flow, reachable
+/// only from `super::auth::issue` after an eligibility proof.
+///
+/// This is 0187's reconciler unchanged — list → filter → rank → create if
+/// missing → attach → sweep duplicates → read — behind the same deadline its
+/// handler used, so the callback cannot outlive the Lambda's budget either.
+pub(crate) async fn issue_for(gateway: &Gateway, sub: &str, deadline: Duration) -> IssueOutcome {
+    // Same guard as the reveal, for the same reason — and here it also stands
+    // in front of `DeleteApiKey`.
+    let Some(name) = key_name(sub) else {
+        tracing::warn!("an issue round-trip carried a user id that is not a snowflake; refusing");
+        return IssueOutcome::Failed;
+    };
+
+    match tokio::time::timeout(deadline, reconcile(gateway, &name)).await {
+        Ok(Ok(Some(outcome))) => {
+            tracing::info!(
+                key_id = %outcome.record.id,
+                created = outcome.created,
+                "portal issued an API key"
+            );
+            IssueOutcome::Issued
+        }
+        // Every attempt found a key and then lost it before reading its value.
+        Ok(Ok(None)) => {
+            tracing::warn!(
+                attempts = MAX_ATTEMPTS,
+                "a key was deleted underneath every issue attempt"
+            );
+            IssueOutcome::Failed
+        }
+        Ok(Err(error)) => {
+            // `error` cannot carry a key value — see `gateway::sdk_message`.
+            tracing::error!(error = %error, "portal key issuance failed");
+            IssueOutcome::Failed
+        }
+        Err(_elapsed) => {
+            tracing::error!(
+                deadline_secs = deadline.as_secs_f32(),
+                "portal key issuance ran out of time"
+            );
+            IssueOutcome::Failed
+        }
+    }
+}
+
 /// The result of a successful reconciliation.
+///
+/// Deliberately does **not** carry the key value. The issue flow's caller is a
+/// redirect (`auth::issue`), and a value it cannot receive is a value that
+/// cannot leak into a `Location` or a log by later mistake; the reveal reads
+/// the value through its own read-only [`lookup`]. The reconciler still calls
+/// `value_of` where readability is what is being verified.
 struct Outcome {
     record: KeyRecord,
-    value: KeyValue,
     created: bool,
 }
 
@@ -377,12 +459,14 @@ async fn attempt(gateway: &Gateway, name: &str) -> Result<Option<Outcome>, Gatew
     // are argued for in `naming`.
     let existing = exact_matches(gateway.list_named(name).await?, name);
 
-    let mut created: Option<(KeyRecord, KeyValue)> = None;
+    let mut created: Option<KeyRecord> = None;
     let mut candidates = existing;
 
-    // Step 2: nothing yet — create one.
+    // Step 2: nothing yet — create one. The value the create answers with is
+    // dropped on purpose — see `Outcome`; a successful create is itself the
+    // proof the key is readable.
     if candidates.is_empty() {
-        let (record, value) = gateway.create(name).await?;
+        let (record, _value) = gateway.create(name).await?;
 
         // Re-list rather than returning what we just made. Two simultaneous
         // first presses both find nothing and both create, so the list is the
@@ -405,7 +489,6 @@ async fn attempt(gateway: &Gateway, name: &str) -> Result<Option<Outcome>, Gatew
             }
             return Ok(Some(Outcome {
                 record,
-                value,
                 created: true,
             }));
         }
@@ -426,7 +509,7 @@ async fn attempt(gateway: &Gateway, name: &str) -> Result<Option<Outcome>, Gatew
         if !candidates.iter().any(|c| c.id == record.id) {
             candidates.push(record.clone());
         }
-        created = Some((record, value));
+        created = Some(record);
     }
 
     // Step 3: one survivor.
@@ -515,26 +598,25 @@ async fn attempt(gateway: &Gateway, name: &str) -> Result<Option<Outcome>, Gatew
         }
     }
 
-    // Step 6: the value. Free if we just created the winner; otherwise a read.
-    if let Some((record, value)) = created
+    // Step 6: readability. Free if we just created the winner; otherwise a
+    // read — not to hand the value out (see `Outcome`), but to prove the key
+    // the caller will be sent to reveal actually answers.
+    if let Some(record) = created
         && record.id == winner.id
     {
         return Ok(Some(Outcome {
             record: winner,
-            value,
             created: true,
         }));
     }
 
     // `None` here is the raced deletion: the winner existed when it was listed
     // and does not now. The caller re-runs the whole flow, which will adopt
-    // whatever survived or create a replacement — this is the "not returned as a
-    // dead id" property, and the reason a reveal is a reconciliation rather than
-    // a lookup.
+    // whatever survived or create a replacement — this is the "not handed out
+    // as a dead id" property.
     match gateway.value_of(&winner.id).await? {
-        Some(value) => Ok(Some(Outcome {
+        Some(_value) => Ok(Some(Outcome {
             record: winner,
-            value,
             created: false,
         })),
         None => Ok(None),

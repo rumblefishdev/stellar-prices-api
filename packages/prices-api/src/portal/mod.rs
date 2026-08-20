@@ -43,6 +43,7 @@
 //! the Lambda already loads) and a different task — do not reach for it here.
 
 pub mod auth;
+pub mod eligibility;
 pub mod keys;
 pub mod usage;
 
@@ -122,38 +123,49 @@ pub fn apply(router: Router, config: &AppConfig) -> Router {
         .route(CONFIG_PATH, get(config_handler))
         .with_state(gate.clone());
 
-    // Sign-in (task 0186), merged the same way and for the same reason. Mounted
+    // Usage against quota (task 0188), merged the same way and mounted under
+    // the same conditions as everything below: unconditionally, answering
+    // `503` when nothing is provisioned rather than not existing. It shares
+    // the key routes' control-plane client — usage is scoped to
+    // `(usagePlanId, apiKeyId)` and the key id comes from the same lookup —
+    // but carries a state of its own, because it also owns the in-process
+    // cache that keeps dashboard refreshes off the account-wide control-plane
+    // budget. Built first so sign-in and the key routes can hold the cache
+    // handle below.
+    let usage_state =
+        usage::UsageState::new(config.portal_oauth.clone(), config.portal_keys.clone());
+    let usage_cache = usage_state.cache_handle();
+    let usage = usage::routes(usage_state);
+
+    // Sign-in (task 0186) and the eligibility-checked issue round-trip
+    // (task 0189), merged the same way and for the same reason. Mounted
     // UNCONDITIONALLY, including when no OAuth credentials were loaded: the
     // handlers answer `503` in that case rather than the routes silently not
     // existing, so a deployment that opens the portal without provisioning the
     // secret says so instead of looking like a portal with no sign-in. While the
     // portal is closed the gate below makes the distinction moot — every path
     // here is the same empty `404` as an unrouted one.
-    let sign_in = auth::routes(auth::AuthState::new(
-        config.portal_oauth.clone(),
-        config.portal_endpoints.clone(),
-    ));
+    //
+    // The issue deps carry the control-plane client and the usage-cache handle
+    // because the `action=issue` callback is where a key is actually created
+    // (`keys::issue_for`) — the key ROUTE below is read-only, which is what
+    // makes "issue is unreachable with a session cookie alone" structural.
+    let sign_in = auth::routes(
+        auth::AuthState::new(config.portal_oauth.clone(), config.portal_endpoints.clone())
+            .with_issue(auth::issue::IssueDeps::new(
+                config.portal_keys.clone(),
+                Some(usage_cache.clone()),
+                config.portal_eligibility.clone(),
+            )),
+    );
 
-    // Usage against quota (task 0188), merged the same way and mounted under
-    // the same conditions as sign-in: unconditionally, answering `503` when
-    // nothing is provisioned rather than not existing. It shares the key
-    // routes' control-plane client — usage is scoped to
-    // `(usagePlanId, apiKeyId)` and the key id comes from the same lookup —
-    // but carries a state of its own, because it also owns the in-process
-    // cache that keeps dashboard refreshes off the account-wide control-plane
-    // budget. Built before the key routes so they can hold the cache handle
-    // below.
-    let usage_state =
-        usage::UsageState::new(config.portal_oauth.clone(), config.portal_keys.clone());
-    let usage_cache = usage_state.cache_handle();
-    let usage = usage::routes(usage_state);
-
-    // Self-service API keys (task 0187), merged the same way and mounted under
-    // the same conditions: unconditionally, answering `503` when nothing is
-    // provisioned rather than not existing. The state carries the OAuth secret
-    // because the session cookie is what authorizes a key — there is no API key
-    // to present on the route whose job is to hand one out. The usage-cache
-    // handle lets a successful issue evict a cached "no key" (task 0188).
+    // The key reveal (task 0187, read-only since task 0189), merged the same
+    // way and mounted under the same conditions: unconditionally, answering
+    // `503` when nothing is provisioned rather than not existing. The state
+    // carries the OAuth secret because the session cookie is what authorizes a
+    // reveal — showing the caller what already belongs to them, which is why a
+    // session suffices here and does not for the issue above. The usage-cache
+    // handle lets a successful reveal evict a cached "no key" (task 0188).
     let api_keys = keys::routes(
         keys::KeysState::new(config.portal_oauth.clone(), config.portal_keys.clone())
             .with_usage_cache(usage_cache),

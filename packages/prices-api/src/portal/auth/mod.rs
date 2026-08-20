@@ -8,7 +8,8 @@
 //! | route | does |
 //! | --- | --- |
 //! | `GET /auth/login` | mints `state` + PKCE, redirects to Discord |
-//! | `GET /auth/callback` | verifies `state`, exchanges the code, issues a session |
+//! | `GET /auth/login?action=issue` | the same, for the eligibility-checked issue round-trip ([0189]) |
+//! | `GET /auth/callback` | verifies `state`, exchanges the code, completes the action it names |
 //! | `GET /auth/me` | reports who the caller is, or that they are nobody |
 //! | `POST /auth/logout` | clears the session |
 //!
@@ -17,13 +18,16 @@
 //! these routes are exempt from that gate, because a visitor signing in to get
 //! a key does not have one yet (`crate::auth::is_exempt`).
 //!
-//! # What this slice deliberately does not do
+//! # What a callback completes depends on what its `state` names
 //!
-//! Everything that turns an identity into an entitlement is [0189]: the
-//! `guilds.members.read` scope, the guild membership call, `pending`, the
-//! snowflake account-age minimum. Issuing a key is [0187]. Nothing here reads or
-//! writes any store — there is no registry yet ([0190] decides whether there
-//! ever is one) and no Discord token is kept (see [`session`]).
+//! A `signin` callback issues a session and nothing else. An `issue` callback
+//! ([`issue`], task 0189) additionally checks guild membership and account age
+//! against the **fresh** token before handing off to the key path — that is
+//! ADR 0010 §8's "the callback completes that action and nothing else", and
+//! the action slot in [`state_token`] is what makes the two round-trips
+//! non-interchangeable. Nothing here reads or writes any store — there is no
+//! registry yet ([0190] decides whether there ever is one) and no Discord
+//! token is kept (see [`session`]).
 //!
 //! # Why the routes are keyless, and what stands in for a key
 //!
@@ -37,6 +41,7 @@
 pub mod cookies;
 pub mod crypto;
 pub mod discord;
+pub mod issue;
 pub mod secret;
 pub mod session;
 pub mod state_token;
@@ -136,6 +141,9 @@ pub struct AuthState {
     oauth: Option<std::sync::Arc<OauthSecret>>,
     endpoints: std::sync::Arc<discord::Endpoints>,
     http: reqwest::Client,
+    /// What the `action=issue` round-trip needs beyond sign-in (task 0189).
+    /// Defaults to unwired; [`super::apply`] wires it when the portal opens.
+    issue: issue::IssueDeps,
 }
 
 impl AuthState {
@@ -144,7 +152,16 @@ impl AuthState {
             oauth: oauth.map(std::sync::Arc::new),
             endpoints: std::sync::Arc::new(endpoints),
             http: discord::build_client(),
+            issue: issue::IssueDeps::default(),
         }
+    }
+
+    /// Wire the issue round-trip's dependencies in. A builder, like
+    /// `KeysState::with_usage_cache`, so every existing constructor and test
+    /// stays valid.
+    pub fn with_issue(mut self, deps: issue::IssueDeps) -> Self {
+        self.issue = deps;
+        self
     }
 }
 
@@ -203,6 +220,19 @@ async fn login(
         },
     };
 
+    // An issue round-trip on a deployment with no control plane or eligibility
+    // parameters wired cannot end in a key — refuse before sending the visitor
+    // to Discord, under the same code the key routes use for the same fault.
+    // Only reachable with the portal open and issuance unprovisioned, exactly
+    // like `unconfigured()` below; `load_portal_eligibility` fails the cold
+    // start on that combination, so this is the second line, not the first.
+    if action == Action::Issue && !state.issue.is_wired() {
+        return no_store(errors::service_unavailable(
+            issue::KEYS_UNCONFIGURED,
+            "API key issuance is not configured on this deployment",
+        ));
+    }
+
     let started = state_token::start(&oauth.signing_key, action, state_token::now_secs());
     let location = authorize_url(&state.endpoints, oauth, &started);
 
@@ -236,8 +266,9 @@ fn authorize_url(
         .append_pair("response_type", "code")
         .append_pair("client_id", &oauth.client_id)
         .append_pair("redirect_uri", &oauth.redirect_uri)
-        // Exactly `identify`. ADR 0010; also declared in the Developer Portal,
-        // and verified again on the token response (`discord::exchange_code`).
+        // Exactly `identify guilds.members.read`. ADR 0010; also declared in
+        // the Developer Portal, and verified again — as a set — on the token
+        // response (`discord::exchange_code`).
         .append_pair("scope", discord::SCOPE)
         .append_pair("state", &started.state_param)
         .append_pair("code_challenge", &started.code_challenge)
@@ -349,11 +380,10 @@ async fn callback(
         return refuse_query("callback carried neither `code` nor `error`", drop_pending);
     };
 
-    // One action exists, and it is still matched rather than assumed. When
-    // [0189] adds `issue`, the arm it needs is a new `match` line and not a
-    // restructuring of this handler.
+    // The action decides what this callback is allowed to complete — matched
+    // rather than assumed, which is what the slot was carried for.
     match accepted.action {
-        Action::SignIn => {}
+        Action::SignIn | Action::Issue => {}
         // Compiled only into the test build, and unreachable even there:
         // `Action::parse` never yields `TestOther`, so `/auth/login` cannot mint
         // a round-trip for it. Refused rather than `unreachable!()` — a panic in
@@ -381,6 +411,14 @@ async fn callback(
         Ok(token) => token,
         Err(error) => return refuse_discord("token exchange", error, drop_pending),
     };
+
+    // An issue round-trip diverges here, with the fresh, scope-verified token:
+    // membership and account age are checked against it before any key moves,
+    // and every outcome is a redirect (see `issue`). The sign-in tail below
+    // never sees an `Issue` action.
+    if accepted.action == Action::Issue {
+        return issue::complete_issue(&state, oauth, token, drop_pending).await;
+    }
 
     // `token` is moved here, so from this line on the handler cannot reach it.
     let user = match discord::current_user(&state.http, &state.endpoints, token).await {
@@ -709,7 +747,7 @@ mod tests {
     /// only place a mistake shows up on Discord's error page rather than in our
     /// logs.
     #[test]
-    fn the_authorize_url_asks_for_identify_with_s256_pkce() {
+    fn the_authorize_url_asks_for_the_two_scopes_with_s256_pkce() {
         let secret = oauth();
         let started = state_token::start(&secret.signing_key, Action::SignIn, 1_800_000_000);
         let url = authorize_url(&discord::Endpoints::default(), &secret, &started);
@@ -734,8 +772,8 @@ mod tests {
             get("redirect_uri"),
             "https://portal.example/api-tokens/api/auth/callback"
         );
-        // Exactly `identify` — not a superset, not a second scope.
-        assert_eq!(get("scope"), "identify");
+        // Exactly the pair — not a superset, and never `guilds` or `email`.
+        assert_eq!(get("scope"), "identify guilds.members.read");
         assert_eq!(get("code_challenge_method"), "S256");
         assert_eq!(get("code_challenge"), started.code_challenge);
         assert_eq!(get("state"), started.state_param);
@@ -883,7 +921,8 @@ mod tests {
         }
     }
 
-    /// The redirect target is a literal in every branch. An `assert` rather than
+    /// The redirect target is a literal in every branch — sign-in's two
+    /// landing states and the issue flow's five alike. An `assert` rather than
     /// a comment, so a later slice that adds a `redirect_to` parameter has to
     /// delete this to do it.
     #[test]
@@ -891,7 +930,17 @@ mod tests {
         assert_eq!(PORTAL_HOME, "/api-tokens/");
         assert!(PORTAL_HOME.starts_with('/'));
         assert!(!PORTAL_HOME.starts_with("//"));
-        assert!(format!("{PORTAL_HOME}{CANCELLED_QUERY}").starts_with("/api-tokens/?"));
+        for query in [
+            CANCELLED_QUERY,
+            FAILED_QUERY,
+            issue::ISSUE_OK_QUERY,
+            issue::ISSUE_NOT_MEMBER_QUERY,
+            issue::ISSUE_UNKNOWN_QUERY,
+            issue::ISSUE_FAILED_QUERY,
+            &issue::too_young_query(173),
+        ] {
+            assert!(format!("{PORTAL_HOME}{query}").starts_with("/api-tokens/?"));
+        }
     }
 
     /// The registered redirect URI and the route that serves it are one string,
