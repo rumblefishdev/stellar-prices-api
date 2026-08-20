@@ -345,15 +345,35 @@ dispositioned:
 | C5 | Confirmed | A short daily pair (`[121]`, `[]`) defaulted `remaining` to 0, collapsing the reconstructed limit to `used` — a barely-used key rendered as quota-exhausted | Malformed rows are warn-and-skipped like the id-less key in `list_named`; all-malformed degrades to "nothing recorded". The mock now serves raw rows so both are tested |
 | C6–C10 | Plausible | `Throttled` drops the SDK message; check 5b will false-fail on a future `UpdateUsage` grant; `fetchUsage` re-implements `getJson`; the auth preamble is duplicated from the key routes; the 502 envelope is hand-assembled (no `errors::bad_gateway`) | Dispositioned below with the earlier deferrals — C9/C10 join the 0192 extraction note, C6 its observability half, C7/C8 recorded here for whoever touches those files next |
 
-Noted for owning tasks, deliberately not fixed here: the `1 req/s` page literal
-duplicates `pricingApiFreePlanRateLimit` with no drift check ([[0193]]/[[0194]]
-— the response or `/config` is where the number would belong); the throttle
-classification idiom exists at two of six SDK call sites and [[0192]]'s
+Noted for owning tasks, deliberately not fixed here: ~~the `1 req/s` page
+literal duplicates `pricingApiFreePlanRateLimit` with no drift check
+([[0193]]/[[0194]] — the response or `/config` is where the number would
+belong)~~ **— fixed in the fourth pass below, and the guess was right: it went
+on `/config`**; the throttle classification idiom exists at two of six SDK call
+sites and [[0192]]'s
 revocation should extract a shared classifier rather than copy it; `no_store`
 is a per-branch discipline across three portal modules and could become a
 response layer on the gated prefix; a throttle with **nothing** cached still
 lets a refresh loop reach AWS (bounded by SDK backoff and human rates —
 [[0194]] costs it).
+
+**A fourth pass** (PR #227 review by Oskar Karcz, five findings, all low
+severity) — **all five fixed.** Two of them corrected earlier passes of this
+same task, which is the part worth recording: C4's ref-read and C2's epoch guard
+were each right about the race they were written for and wrong at one edge.
+
+| # | what | verdict | resolution |
+| --- | --- | --- | --- |
+| O1 | The `Rate limit: 1 request per second` literal can go stale against `pricingApiFreePlanRateLimit`, the per-env value `addUsagePlan` enforces — the one number on the panel not coming from the backend | Confirmed | `compute-stack.ts` passes it as `PORTAL_RATE_LIMIT` (same config key `api-gateway-stack.ts` feeds the plan), `AppConfig` reads it, `/config` serves it as `rate_limit_per_second`, and the page renders THAT. Absent → the line is omitted, never defaulted: a fallback figure is the same silent staleness one layer down. Synth-verified: the template carries `PORTAL_RATE_LIMIT = 1` beside the plan's `RateLimit: 1` |
+| O2 | `fetchUsage` discarded the backend's error envelope for every non-404, so `usage_unavailable`'s authored message never reached the page — and the extra 5s of `USAGE_TIMEOUT_MS` was spent waiting for an answer that was then thrown away | Confirmed | `readEnvelope` + `failureMessage` prefer the backend's `message`, falling back to `${url} answered ${status}` when there is no envelope (the gate's empty 404, a proxy's page). Applied to `getJson` and `issueKey` too — one wording per cause, which is R1's rule extended to the failures the backend writes itself. `describeFailure` still owns the 401 sentence |
+| O3 | The keyed refetch could never fire if the mount-time load was still in flight: the `keyOnScreen` transition happened while the view was `'loading'`, and the effect's deps never moved again. The section sat on "your key is new" until the visitor found Refresh | Confirmed | Supersedes **C4's** ref-read. The effect now watches `view.state` — the honest dependency — and a `refetchedForKey` ref makes it fire at most once per mount, which is what C4's ref was avoiding the loop with. Both properties tested: the deferred-response race recovers with no Refresh press, and a refetch answered `no_key` again does not re-trigger |
+| O4 | If AWS's MONTH quota rolls at any instant other than our calendar 1st 00:00 UTC (undocumented — ADR 0010 correction #2), the query spans two AWS periods: `used` sums both while `remaining` is the current one, so `limit = used + remaining` renders a quota no plan has | Confirmed, and understated — `used` is wrong too, `limit` is its consequence | Neither of the review's two suggestions taken. Bounding the query start at the key's first row does not touch the boundary, and a note would leave the wrong number on screen. Instead `summarize_days` uses the invariant AWS's own shape gives: `remaining` is a running balance, so a day whose `remaining` RISES is a reset — count from it. Both figures then come from one period whatever instant it began. It also `warn!`s the sighting, which is the only evidence this system can produce about the instant ADR 0010 is open on |
+| O5 | The epoch guard read `unwrap_or(0)`, so a mark pruned at `STALE_KEEP` mid-lookup compared as a moved epoch and discarded a legitimate `NoKey` — buying a `GetApiKeys` on every load after it. Plus: `invalidate_no_key` wrote to `epochs` without pruning, and `remember` (the only pruner) is not reached on the error paths | Confirmed | Corrects **C2**. `epoch_of` returns `Option<u64>` and no mark now matches any epoch — safe by construction, not by luck: `invalidate_no_key` stamps `bumped_at` as it bumps, so any eviction inside the window leaves a mark too fresh to prune, and absence therefore *proves* no eviction happened. `invalidate_no_key` prunes too, closing the leak |
+
+No infra test accompanies O1: this repo has no CDK assertion harness, and adding
+one for a single env var would be the larger change. The wiring is instead
+drift-free by construction — one config key, read once, passed unconditionally —
+and `cdk synth` was run to confirm the value reaches the template.
 
 ## Future Work
 
