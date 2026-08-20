@@ -36,9 +36,19 @@
 //! neither the reset instant nor its timezone (ADR 0010, correction #2, still
 //! open — the only statement anywhere is an example caption). "The 1st of the
 //! month, 00:00 UTC" is **our stated product rule**, the same one the rework
-//! cap in [0191] is defined by. If AWS's counter turns out to roll at a
-//! different instant, that is a UX wrinkle to word around, not a correctness
-//! bug in this module.
+//! cap in [0191] is defined by.
+//!
+//! If AWS's counter turns out to roll at a different instant, the LABEL is a UX
+//! wrinkle to word around — but the NUMBERS under it are not, and that is worth
+//! being precise about. The query runs from our calendar 1st while `remaining`
+//! is the last day's balance, so a range spanning two of AWS's periods would sum
+//! last period's traffic into `used` and reconstruct `limit = used + remaining`
+//! above the real quota: a 100 000 plan rendered as "150 000". `summarize_days`
+//! in `keys/gateway.rs` is what keeps that from reaching the page — it spots the
+//! reset (a `remaining` that rises can only be one) and counts from it, so both
+//! figures come out of a single AWS period whatever instant that period began.
+//! It also logs the sighting, which is the only evidence this system can produce
+//! about the instant ADR 0010 is still open on.
 //!
 //! # `GetUsage` lags, and the response says so
 //!

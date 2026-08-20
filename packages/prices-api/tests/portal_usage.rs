@@ -256,6 +256,60 @@ async fn usage_pages_are_summed_to_exhaustion() {
     });
 }
 
+/// AWS's own quota period rolled partway through the range our calendar rule
+/// asked for — the exposure ADR 0010's correction #2 leaves open, since AWS
+/// documents neither the reset instant nor its timezone.
+///
+/// Summing the range blindly would answer `used = 40` beside `remaining = 90`
+/// and reconstruct a **130** limit on a 100 plan: a quota no plan has, rendered
+/// as fact on the panel whose stated theme is honesty. Counting from the reset
+/// is what makes the two figures describe one period.
+#[tokio::test]
+async fn a_quota_reset_inside_the_queried_range_does_not_inflate_the_numbers() {
+    let mock = MockGateway::start().await;
+    mock.with(|s| {
+        let id = s.seed(&format!("discord-{USER_ID}-key"), 100);
+        s.usage.insert(
+            id,
+            vec![
+                // The tail of AWS's previous period...
+                vec![10, 90],
+                vec![20, 70],
+                // ...and the current one, which `remaining` rising announces.
+                vec![5, 95],
+                vec![5, 90],
+            ],
+        );
+    });
+
+    let reply = usage(&mock, USER_ID).await;
+    assert_eq!(reply.status, StatusCode::OK);
+    let body = reply.json();
+    assert_eq!(body["used"], 10, "{body}");
+    assert_eq!(body["remaining"], 90, "{body}");
+    assert_eq!(body["limit"], 100, "{body}");
+}
+
+/// The other half of that rule, and the one a naive "restart on any change"
+/// would break: within one period a day of no traffic leaves `remaining` flat,
+/// and flat is not a rise. Treating it as one would silently truncate the
+/// month's `used` to whatever followed the quietest day.
+#[tokio::test]
+async fn an_idle_day_mid_period_still_counts_the_days_before_it() {
+    let mock = MockGateway::start().await;
+    mock.with(|s| {
+        let id = s.seed(&format!("discord-{USER_ID}-key"), 100);
+        s.usage
+            .insert(id, vec![vec![10, 99_990], vec![0, 99_990], vec![5, 99_985]]);
+    });
+
+    let reply = usage(&mock, USER_ID).await;
+    assert_eq!(reply.status, StatusCode::OK);
+    let body = reply.json();
+    assert_eq!(body["used"], 15, "{body}");
+    assert_eq!(body["limit"], 100_000, "{body}");
+}
+
 // ---------------------------------------------------------------------------
 // The lookup shares the reveal's discipline
 // ---------------------------------------------------------------------------
