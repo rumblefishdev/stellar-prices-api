@@ -41,18 +41,30 @@
 //!    to end.
 //! 2. **Give the stranded direction a grace period.** Enrichment fills
 //!    `close_usd` asynchronously, so a freshly written candle is *legitimately*
-//!    zero until the sweep reaches it. Without [`STRANDED_GRACE_SECONDS`] this
+//!    zero until the sweep reaches it. Without
+//!    [`crate::usd_sanity::STRANDED_GRACE_SECONDS`] this
 //!    metric would never read zero. See that constant for why the grace is 48 h
 //!    specifically and not an arbitrary round number.
 //! 3. **Bound the window.** An unbounded scan of the OHLCV tables every 15
-//!    minutes is task 0111's outage, reintroduced as a health check. The window
-//!    is [`LOOKBACK_SECONDS`] and prunes by partition.
+//!    minutes is task 0111's outage, reintroduced as a health check. The
+//!    windows are [`crate::usd_sanity::STRANDED_LOOKBACK_SECONDS`] and
+//!    [`crate::usd_sanity::PEG_LOOKBACK_SECONDS`].
+//!
+//!    ⚠️ **A window bound is not a read bound.** Both tables are
+//!    `PARTITION BY toYYYYMM(timestamp)` with `ORDER BY (asset_id,
+//!    quote_asset_id, source, timestamp)`, so `timestamp` is not a primary-key
+//!    prefix: a window prunes to whole *monthly partitions*, and a 48 h window
+//!    spanning a month boundary reads two of them. Shortening a window
+//!    therefore does **not** proportionally shorten the scan. ⛔ Size these on
+//!    what the query READS (`EXPLAIN` / `read_rows`), never on the span it
+//!    names — the same rule the tier choice was decided by.
 //!
 //! ⚠️ **This is a re-introduction guard, not a historical audit.** It watches
 //! recent writes, because that is where a regression shows up. A frozen
 //! historical corruption inside the window would latch the alarm rather than
-//! re-notify — see [`SanityCounts`] on why the counts still climb in the case
-//! this actually guards against.
+//! re-notify — see [`crate::usd_sanity::ScanGuards`] on why a reading that
+//! examined nothing is
+//! refused rather than published as a zero.
 //!
 //! ⚠️ **If USDT ever returns to par, the peg-applied direction stops being
 //! diagnostic** and this check must be revisited. It reads a ratio near 1.0 as
@@ -121,7 +133,7 @@ pub const PEG_LOOKBACK_SECONDS: i64 = 2 * 86_400;
 /// waking someone for, and not before.
 ///
 /// ⚠️ It must also comfortably exceed real enrichment lag or the metric never
-/// reads zero, and it holds **only on the hourly tier** — see [`SANITY_TABLE`]
+/// reads zero, and it holds **only on the hourly tier** — see [`STRANDED_TABLE`]
 /// for why a coarser tier spends its own bucket width out of this grace before
 /// enrichment can even begin.
 ///
@@ -228,10 +240,17 @@ pub const STRANDED_TABLE: &str = "price_ohlcv_1h";
 /// Pointing one shared table name at `_1m` would have been the small change, and
 /// it is wrong three times over:
 ///
-/// 1. It reads 1,564,045 immediately — above every rung of
-///    `usdSanityEscalationCounts` (`[1, 100, 10000]`) — and sits permanently in
-///    ALARM. A permanently-firing alarm gets muted, which is the exact
-///    end-state task 0204 exists to prevent.
+/// 1. It sits permanently in ALARM, and a permanently-firing alarm gets muted —
+///    the exact end-state task 0204 exists to prevent.
+///
+///    ⚠️ **Do not restate this as "reads 1,564,045, above every rung".** That
+///    figure is the *all-history* peg population (task 0212) and an earlier
+///    draft of this comment used it here, which is wrong for the query that
+///    actually ships: bounded to [`PEG_LOOKBACK_SECONDS`], the reading is the
+///    recent arrival rate — measured at ~16 USDT-quoted `_1m` rows per day on
+///    2026-08-17, so tens of rows, not millions. That clears rung 1 and
+///    nothing above it. The deploy block stands on "breached at all, forever,
+///    until 0209 stops the writer" — not on the magnitude.
 /// 2. `_1m` is retention-managed while `_1h` is a forever-table, so the window
 ///    reasoning has to be redone rather than inherited — see
 ///    [`PEG_LOOKBACK_SECONDS`].
@@ -687,10 +706,13 @@ mod tests {
     /// it appears, and a grace period would only delay saying so.
     #[test]
     fn the_peg_count_has_no_grace_because_a_wrong_write_is_wrong_immediately() {
-        assert!(!peg_query().contains("STRANDED_GRACE"));
+        // The generated SQL never contains Rust identifier text, so asserting
+        // the absence of "STRANDED_GRACE" could not fail and proved nothing.
+        // Assert the absence of the rendered clause instead.
         assert!(!peg_query().contains(&format!(
             "timestamp < now() - INTERVAL {STRANDED_GRACE_SECONDS} SECOND"
         )));
+        assert!(!peg_query().contains("close_usd = 0"));
     }
 
     /// An unbounded scan every 15 minutes is task 0111's outage wearing a health
@@ -728,8 +750,14 @@ mod tests {
     /// breached over exactly the rows task 0212 just fixed.
     #[test]
     fn both_queries_read_final() {
+        // ⚠️ Assert the CANDLE table's FINAL by name. A bare `contains(" FINAL ")`
+        // is already satisfied by `FROM assets FINAL` in the shared CTE, so
+        // deleting FINAL from either candle table would leave it green — a test
+        // unable to distinguish the thing it asserts, in the module whose whole
+        // subject is that failure.
+        assert!(stranded_query().contains(&format!("FROM {STRANDED_TABLE} FINAL")));
+        assert!(peg_query().contains(&format!("FROM {PEG_TABLE} FINAL")));
         for sql in [stranded_query(), peg_query()] {
-            assert!(sql.contains(" FINAL "));
             assert!(sql.contains("FROM assets FINAL"));
         }
     }

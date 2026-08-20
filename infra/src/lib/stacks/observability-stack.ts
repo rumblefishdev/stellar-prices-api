@@ -841,10 +841,15 @@ export class ObservabilityStack extends cdk.Stack {
     // Reading one tier for both is what made the peg direction publish a
     // confident 0 over 1,564,045 wrong rows.
     //
-    // ⛔ THE PEG LADDER MUST NOT BE DEPLOYED BEFORE TASKS 0212 AND 0209. It
-    // reads that 1.5 M population immediately, which is above every rung, so it
-    // ships permanently breached and gets muted — the exact end-state task 0204
-    // exists to prevent. Chain: 0111 -> 0209 -> 0212 -> this.
+    // ⛔ THE PEG LADDER MUST NOT BE DEPLOYED BEFORE TASKS 0212 AND 0209. The
+    // writer is still applying the peg, so the ladder breaches and stays
+    // breached, and a permanently-firing alarm gets muted — the exact end-state
+    // task 0204 exists to prevent. Chain: 0111 -> 0209 -> 0212 -> this.
+    //
+    // ⚠️ The block is NOT "it reads 1.5 M, above every rung". That figure is
+    // the all-history population (0212); the shipped query is bounded to 48 h
+    // and reads the recent arrival rate — tens of rows, clearing rung 1 and
+    // nothing above it. Do not re-size these rungs against the 1.5 M number.
     const usdSanityRungs = (
       metricName: string,
       idPrefix: string,

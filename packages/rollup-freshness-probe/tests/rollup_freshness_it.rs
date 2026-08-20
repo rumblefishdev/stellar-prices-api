@@ -733,9 +733,15 @@ async fn each_direction_only_scans_its_own_tier() {
     );
 
     // Rows in `_1h` only.
+    //
+    // ⚠️ Seeded at 3 HOURS, not 3 days, and that is the whole point of the
+    // assertion. A 3-day-old row falls outside the 48 h peg window whichever
+    // table the peg direction reads, so it would pass with `PEG_TABLE` reverted
+    // to `price_ohlcv_1h` — testing the window instead of the tier. Inside the
+    // peg window, only the tier can explain a zero.
     reset_sanity_tables(&c).await;
     seed_usdt_identity(&c, 111).await;
-    insert_usdt_candle(&c, 111, 5, "now() - INTERVAL 3 DAY", "100", "0").await;
+    insert_usdt_candle(&c, 111, 5, "now() - INTERVAL 3 HOUR", "100", "0").await;
     assert_eq!(read_stranded(&c).await.scanned, 1);
     assert_eq!(
         read_peg(&c).await.scanned,

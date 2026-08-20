@@ -94,6 +94,29 @@ able to show the defect.
       `STRANDED_GRACE_SECONDS` are unchanged in value; only the names moved.
 - [ ] The ladder reads **0** on prod at deploy time — i.e. [[0212]] landed
       first. **(blocked — this is the whole reason the task is not closed)**
+- [ ] ⛔ **PRE-DEPLOY MEASUREMENT: the peg scan's read cost on prod.** The
+      probe's 1-minute timeout was sized on the `_1h` scan alone (~1.37M rows /
+      ~70 MiB / 41-50 ms) and was not revisited for this second `FINAL` scan
+      against the **735M-row** `_1m`. ⚠️ **The 48 h window does not bound the
+      read**: both tables are `PARTITION BY toYYYYMM(timestamp)` with
+      `ORDER BY (asset_id, quote_asset_id, source, timestamp)`, so `timestamp`
+      is not a primary-key prefix and the scan prunes to a whole **monthly
+      partition** (two across a month boundary). Measure by `EXPLAIN` /
+      `read_rows`, never by rows returned. A timeout here is not a Rust `Err` —
+      it kills the invocation with nothing published, and step 4 (MV drift)
+      never runs.
+- [ ] ⛔ **PRE-DEPLOY MEASUREMENT: can `scanned` legitimately reach 0 on the peg
+      tier?** `EmptyScan` was calibrated for a 7-day window on `_1h`; the peg
+      direction applies the same `scanned == 0` refusal to **48 h on a sparse
+      leg** — measured at ~16 USDT-quoted `_1m` rows for 2026-08-17, so ~32 in
+      a 48 h window. A quiet spell makes zero legitimate, and the refusal then
+      fails the invocation and pages ops via the probe's own `-errors` alarm
+      **every 15 minutes on a healthy system** — the muting failure again.
+      Measure the daily minimum over ≥30 days before deploying; if zero is
+      reachable, the guard needs a different discriminator (candidate: refuse
+      only when the *stranded* direction also scanned nothing, which
+      distinguishes a quiet window from a renumbered identity without inventing
+      a threshold).
 - [x] A note records why `_1m`'s 7-day retention does not undermine the
       lookback — `PEG_LOOKBACK_SECONDS`, plus the
       `the_peg_window_stays_clear_of_the_1m_retention_frontier` unit test and
@@ -165,6 +188,36 @@ synth-production` · all six USD alarms render 856–937 chars against the 1024 
 7. **`SanityRefusal` now carries the table and the lookback.** With two tiers,
    "the scan matched nothing" is no longer a fact about one place, and a refusal
    that did not say which would send the operator to a table that was fine.
+
+## Review Round
+
+A code review of PR #235 returned six findings; each was verified against the
+code before acting. Four were defects in this change and are fixed in the PR:
+
+- **`both_queries_read_final` could not fail.** It asserted
+  `sql.contains(" FINAL ")`, already satisfied by `FROM assets FINAL` in the
+  shared CTE, so deleting `FINAL` from either candle table would have left it
+  green. Now asserts each candle table by name. A sibling assertion,
+  `!peg_query().contains("STRANDED_GRACE")`, was checking for Rust identifier
+  text in generated SQL and could never fail either.
+- **One IT assertion tested the window, not the tier.** In
+  `each_direction_only_scans_its_own_tier`, the `_1h`-only half seeded at
+  `now() - INTERVAL 3 DAY`, which the 48 h peg window excludes whichever table
+  is read — so it passed with `PEG_TABLE` reverted. Seeded at `3 HOUR` now.
+  ⚠️ **Third instance of this task's founding failure in one change**, after
+  the fixture coupling above.
+- **The "reads 1,564,045 — above every rung" claim was wrong for the query that
+  ships.** That is the all-history population ([[0212]]); bounded to 48 h the
+  reading is the recent arrival rate, tens of rows, which clears rung 1 and
+  nothing above it. Corrected in `usd_sanity.rs` and `observability-stack.ts`,
+  because it is exactly the number someone would use to re-size the ladder.
+- **Broken intra-doc links** to the deleted `LOOKBACK_SECONDS`, `SanityCounts`
+  and `SANITY_TABLE`, plus a now-false "prunes by partition" claim. Fixed, and
+  the crate's unresolved-link count went **9 → 6** (the rest are in `mv_drift`
+  and `lib.rs`, out of scope here).
+
+The remaining two are the pre-deploy measurements added to the acceptance
+criteria above. Both are real and neither can be settled from a local machine.
 
 ## Future Work
 
