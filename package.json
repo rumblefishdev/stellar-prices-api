@@ -25,7 +25,8 @@
     "infra:deploy:cicd": "make -C infra deploy-cicd",
     "infra:synth:production": "make -C infra synth-production",
     "infra:diff:production": "make -C infra diff-production",
-    "infra:deploy:production": "make -C infra deploy-production"
+    "infra:deploy:production": "make -C infra deploy-production",
+    "conformance:0120": "node tools/scripts/conformance-0120.mjs"
   },
   "private": true,
   "devDependencies": {
@@ -50,6 +51,8 @@
     "@vitejs/plugin-react": "^6.0.0",
     "@vitest/coverage-v8": "^4.0.0",
     "@vitest/ui": "~4.1.0",
+    "ajv": "^8.17.1",
+    "ajv-formats": "^3.0.1",
     "eslint": "^9.8.0",
     "eslint-plugin-import": "2.31.0",
     "eslint-plugin-jsx-a11y": "6.10.1",
