@@ -1129,6 +1129,41 @@ supporting measurement — the ~30 h ceiling — was an artefact of 0182's repai
 coverage, not a property of enrichment. Read those sections for the bucket-width
 argument, not for the latency figures.
 
+## 🔴 Deploy attempt 1 FAILED — CloudWatch caps AlarmDescription at 1024 chars
+
+2026-08-20, first `deploy-production-observability`. Three `usd-stranded` rungs
+carried ~1250-character descriptions and CloudWatch rejected them **mid-deploy**,
+after other alarms in the stack had already been created.
+
+⚠️ **Nothing local catches this.** `cdk synth` renders an over-long description
+happily, the template is valid CloudFormation, `cdk diff` showed the expected 12
+additions and 0 deletions, CI was green, and the limit is enforced only by the
+CloudWatch API. **This is AC 4's lesson yet again — "verified by inducing the
+condition, not by reading the CDK" — and this time it bit the deploy itself.**
+
+Two fixes, and the second matters more than the first:
+
+1. **The three descriptions were shortened to ≤ 937 characters.** ⚠️ The text
+   that pushed them over was text **this same day had falsified**: the "MEASURED
+   BASELINE … priced by 30 h of age" claim and the "TWO-HOP chain … check that
+   chain in order rather than assuming the sweep" instruction. Both would have
+   sent a responder down a dead end — the hops were measured healthy while the
+   leg was dark. The rewrite names the real cause (the pivot has never priced a
+   `_1m` row), says the alarm stays latched until [[0209]] is fixed, and warns
+   to verify on `_1m` rather than a coarse tier. **The length limit forced a
+   correction that was owed anyway.**
+2. **`assertAlarmDescriptionsFitCloudWatch()` now runs at synth**, walking the
+   construct tree and throwing with the offending alarm names and lengths. It
+   reads the *resolved* CloudFormation property, so token- or `Fn::Join`-built
+   descriptions are measured as CloudWatch will see them. ⚠️ These alarms carry
+   deliberately long runbook-style descriptions because an operator reading
+   Slack at 03:00 has nothing else — that is worth keeping, which is exactly why
+   the ceiling needs a local guard rather than discipline.
+
+**Verified by inducing it**: padding one description to 2533 chars makes synth
+fail with all three names and lengths; restoring produces a template
+byte-identical to the verified-good one. 34 alarms, max description 937.
+
 ## Future Work
 
 - **Point the peg-applied check at `_1m`** with its own ladder and scan bound —

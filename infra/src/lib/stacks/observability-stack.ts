@@ -877,7 +877,7 @@ export class ObservabilityStack extends cdk.Stack {
       'UsdStrandedAlarmCount',
       'usd-stranded',
       (count) =>
-        `${count} or more USDT-quoted candles are still at close_usd = 0 more than 48 h after being written, despite a close large enough to price. A zero is indistinguishable from "no data" at ~130 unguarded argMax(close_usd, ...) sites (task 0145), and BE render an empty "--" TVL when nothing priced within 48 h — so this is a value the consumer has already lost, not one that is merely late. MEASURED BASELINE (prod, 2026-08-19): every USDT-quoted hourly candle is priced by 30 h of age — zero unpriced in every age band from 30 h out to 162 h — so this alarm firing past 48 h means real latency has roughly doubled, not that it is marginally slow. USDT is priced through a TWO-HOP chain (usd_rate(USDC) -> the USDT/USDC reference candle's close_usd -> every USDT-quoted candle), so it is structurally one hop behind every other leg; check that chain in order rather than assuming the sweep. A USDT/USDC hourly reference does exist (9-18 buckets/day measured), so its absence is a finding, not the norm. Task 0209 carries the analysis. ⚠️ Do NOT respond by re-running a reset repair — task 0182's own reset CREATED 157 stranded candles by zeroing rows that sat below its pivot reference. Rungs are operator-tunable via config.opsAlarms.usdSanityEscalationCounts.`,
+        `${count} or more USDT-quoted candles are still at close_usd = 0 more than 48 h after being written, despite a close large enough to price. A zero is indistinguishable from "no data" at ~130 unguarded argMax(close_usd, ...) sites (task 0145), and BE render an empty "--" TVL when nothing priced within 48 h, so this is a value the consumer has already LOST, not one that is merely late. KNOWN CAUSE as of 2026-08-20: the USDT pivot has NEVER priced a price_ohlcv_1m row (measured pivot_written = 0 against 1,564,045 peg-written), so this leg has been dark since 2026-08-13 and this alarm stays latched until that is fixed - tasks 0209 (root cause) and 0212 (the peg-valued rows). Verify on _1m, NEVER on a coarse tier: task 0182 repaired the coarse tables directly, so _1h reads clean over a broken _1m. Do NOT re-run a reset repair - 0182 own reset CREATED 157 stranded candles. Rungs tunable via config.opsAlarms.usdSanityEscalationCounts.`,
     );
 
     // Materialized-view drift, on a schedule (task 0204, gap 3). Task 0142 built
@@ -1106,5 +1106,51 @@ export class ObservabilityStack extends cdk.Stack {
     cdk.Tags.of(this).add('Project', 'stellar-prices-api');
     cdk.Tags.of(this).add('ManagedBy', 'cdk');
     cdk.Tags.of(this).add('Environment', config.envName);
+
+    assertAlarmDescriptionsFitCloudWatch(this);
+  }
+}
+
+/**
+ * CloudWatch caps `AlarmDescription` at 1024 characters, and **nothing local
+ * enforces it**: `cdk synth` renders an over-long description happily, the
+ * template is valid CloudFormation, and the request is only rejected by the
+ * CloudWatch API mid-deploy — after some alarms in the stack have already been
+ * created (task 0204, 2026-08-20; three `usd-stranded` rungs at ~1250 chars).
+ *
+ * ⚠️ The alarms in this stack carry deliberately long, runbook-style
+ * descriptions, because an operator reading Slack at 03:00 has nothing else.
+ * That is worth keeping — but it means this ceiling will be hit again, and a
+ * failure discovered at deploy time is the most expensive place to discover it.
+ *
+ * So the check runs at synth: a walk of the construct tree that throws with the
+ * offending alarm and its length. It reads the resolved CloudFormation property
+ * rather than the constructor argument, so descriptions built from tokens or
+ * `Fn::Join` are measured as CloudWatch will actually see them.
+ */
+function assertAlarmDescriptionsFitCloudWatch(scope: Construct): void {
+  const MAX = 1024;
+  const tooLong = scope.node
+    .findAll()
+    .filter((c): c is cloudwatch.Alarm => c instanceof cloudwatch.Alarm)
+    .map((alarm) => {
+      const cfn = alarm.node.defaultChild as cloudwatch.CfnAlarm;
+      const description = cdk.Stack.of(alarm).resolve(
+        cfn.alarmDescription,
+      ) as unknown;
+      const length = typeof description === 'string' ? description.length : 0;
+      return { name: cfn.alarmName, length };
+    })
+    .filter((a) => a.length > MAX);
+
+  if (tooLong.length > 0) {
+    const detail = tooLong
+      .map((a) => `  ${String(a.name)} — ${a.length} chars`)
+      .join('\n');
+    throw new Error(
+      `${tooLong.length} CloudWatch alarm description(s) exceed the ${MAX}-character ` +
+        `API limit and would fail mid-deploy:\n${detail}\n` +
+        'Shorten the description(s); the limit is enforced by CloudWatch, not by synth.',
+    );
   }
 }
