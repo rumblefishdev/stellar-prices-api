@@ -81,12 +81,30 @@ pub const CONFIG_PATH: &str = "/api-tokens/api/config";
 pub struct PortalConfig {
     /// Whether the portal is open for business.
     pub enabled: bool,
+    /// The free plan's per-key rate limit in requests per second, for the
+    /// dashboard to state (task 0188).
+    ///
+    /// Served from here rather than written into the bundle because it is a
+    /// per-env config value (`pricingApiFreePlanRateLimit`) that the gateway
+    /// enforces and the page merely reports: a literal in the frontend is the
+    /// one number on that panel that can drift from what is actually enforced.
+    /// It rides on `/config` rather than on `/usage` because the dashboard
+    /// states it in the no-key state too, and that state is a `404` with no
+    /// body to carry it — and because the limit is a property of the plan every
+    /// key joins, not of any one caller's key.
+    ///
+    /// Omitted from the JSON entirely when this deployment was not told what
+    /// the limit is; the page then omits the line rather than inventing a
+    /// figure. See `AppConfig::portal_rate_limit`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rate_limit_per_second: Option<u32>,
 }
 
 /// Cloneable gate state carried by the middleware.
 #[derive(Clone)]
 pub struct PortalGate {
     enabled: bool,
+    rate_limit: Option<u32>,
 }
 
 impl PortalGate {
@@ -98,8 +116,14 @@ impl PortalGate {
     /// the only route under the prefix was [`CONFIG_PATH`], which the gate
     /// skips, so every "closed" assertion was really watching an unrouted path
     /// 404 — and the whole suite stayed green with the gate deleted.
+    /// Only [`gate_portal`] reads this state, and the gate turns on `enabled`
+    /// alone — so the rate limit a test does not care about stays `None` here
+    /// rather than becoming a second argument at every call site.
     pub fn new(enabled: bool) -> Self {
-        Self { enabled }
+        Self {
+            enabled,
+            rate_limit: None,
+        }
     }
 }
 
@@ -113,6 +137,7 @@ impl PortalGate {
 pub fn apply(router: Router, config: &AppConfig) -> Router {
     let gate = PortalGate {
         enabled: config.portal_enabled,
+        rate_limit: config.portal_rate_limit,
     };
     // Merged as its own `Router` rather than `.route()`d onto the caller's:
     // by this point the data routes have had `AppState` applied and the router
@@ -173,6 +198,7 @@ pub fn apply(router: Router, config: &AppConfig) -> Router {
 async fn config_handler(State(gate): State<PortalGate>) -> Response {
     let mut resp = Json(PortalConfig {
         enabled: gate.enabled,
+        rate_limit_per_second: gate.rate_limit,
     })
     .into_response();
     // Never cached: the flag changes on deploy, and a CDN or browser holding a

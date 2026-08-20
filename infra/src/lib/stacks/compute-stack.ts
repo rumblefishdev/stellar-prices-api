@@ -674,6 +674,20 @@ export class ComputeStack extends cdk.Stack {
         // Set unconditionally alongside `PORTAL_OAUTH_SECRET_NAME`, and for the
         // same reason: opening the portal stays a one-word diff.
         PORTAL_FREE_PLAN_PARAM: this.portalFreePlanParameterName,
+        // The free plan's per-key rate limit, for the portal dashboard to STATE
+        // (task 0188) — the same `pricingApiFreePlanRateLimit` ApiGatewayStack
+        // hands to `addUsagePlan`, so the figure on the page and the figure the
+        // gateway enforces cannot disagree.
+        //
+        // It travels as an env var rather than being read back from
+        // `GetUsagePlan` because that would cost the portal a control-plane
+        // grant task 0188 deliberately does not take, and rather than being a
+        // literal in the bundle because that is the one number on that panel
+        // that could then go stale: raise the limit here, deploy, and a
+        // dashboard whose stated theme is honesty would keep stating the old
+        // one. Not a secret, and not conditional on `PORTAL_ENABLED` — same
+        // one-word-diff reasoning as the two names above.
+        PORTAL_RATE_LIMIT: String(config.pricingApiFreePlanRateLimit),
         PARAMETERS_SECRETS_EXTENSION_CACHE_ENABLED: 'true',
         // Strip the `/{stage}` prefix (`/production`) that API Gateway REST
         // proxy puts in the path, so lambda_http hands axum `/v1/...` (not

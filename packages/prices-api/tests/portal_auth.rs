@@ -210,6 +210,7 @@ fn build_app(portal_enabled: bool, endpoints: Endpoints) -> Router {
         // is what every non-portal test wants — with no client in the
         // config there is no code path here that can reach API Gateway.
         portal_keys: None,
+        portal_rate_limit: None,
     };
     app(&config, AppState::without_ch())
 }
@@ -1223,6 +1224,7 @@ async fn an_open_portal_with_no_credentials_answers_503_on_login() {
         // is what every non-portal test wants — with no client in the
         // config there is no code path here that can reach API Gateway.
         portal_keys: None,
+        portal_rate_limit: None,
     };
     let router = app(&config, AppState::without_ch());
 
@@ -1255,6 +1257,7 @@ async fn sign_in_needs_no_api_key_even_when_the_key_gate_is_armed() {
         // is what every non-portal test wants — with no client in the
         // config there is no code path here that can reach API Gateway.
         portal_keys: None,
+        portal_rate_limit: None,
     };
     let router = app(&config, AppState::without_ch());
 

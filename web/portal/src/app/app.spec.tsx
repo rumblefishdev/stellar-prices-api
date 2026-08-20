@@ -61,6 +61,21 @@ const LOGOUT_URL = '/api-tokens/api/auth/logout';
 const USAGE_URL = '/api-tokens/api/usage';
 
 /**
+ * `/config` for an open portal (task 0183) carrying the free plan's rate limit
+ * (task 0188).
+ *
+ * The limit is part of every open-portal stub because it is part of every real
+ * `/config`: `compute-stack.ts` sets `PORTAL_RATE_LIMIT` from
+ * `pricingApiFreePlanRateLimit` unconditionally. `1` is what
+ * `infra/envs/production.json` holds today — and the point of the field is that
+ * changing that file changes the page, so the tests below assert the rendered
+ * figure against THIS value rather than against a literal of their own.
+ */
+const openConfig = () => ({
+  json: async () => ({ enabled: true, rate_limit_per_second: 1 }),
+});
+
+/**
  * The usage endpoint's "no key yet" answer (task 0188) — the default for every
  * signed-in stub, because the dashboard now asks for usage on mount and a
  * stub that does not answer it would fail the request and render a failure
@@ -75,14 +90,14 @@ const usageNoKey = () => ({
 /** The portal open, and nobody signed in. */
 const openAndSignedOut = () =>
   stubRoutes({
-    [CONFIG_URL]: () => ({ json: async () => ({ enabled: true }) }),
+    [CONFIG_URL]: openConfig,
     [ME_URL]: () => ({ json: async () => ({ authenticated: false }) }),
   });
 
 /** The portal open, with a completed round-trip behind it. */
 const openAndSignedIn = () =>
   stubRoutes({
-    [CONFIG_URL]: () => ({ json: async () => ({ enabled: true }) }),
+    [CONFIG_URL]: openConfig,
     [ME_URL]: () => ({
       json: async () => ({
         authenticated: true,
@@ -385,7 +400,7 @@ describe('sign in with Discord', () => {
   it('signs out with a POST and re-reads the session', async () => {
     let authenticated = true;
     const fetchMock = stubRoutes({
-      [CONFIG_URL]: () => ({ json: async () => ({ enabled: true }) }),
+      [CONFIG_URL]: openConfig,
       [ME_URL]: () => ({
         json: async () =>
           authenticated
@@ -421,7 +436,7 @@ describe('sign in with Discord', () => {
    */
   it('surfaces a failed session check instead of spinning forever', async () => {
     stubRoutes({
-      [CONFIG_URL]: () => ({ json: async () => ({ enabled: true }) }),
+      [CONFIG_URL]: openConfig,
       [ME_URL]: () => ({ ok: false, status: 502 }),
     });
     renderAt('/');
@@ -442,7 +457,7 @@ describe('sign in with Discord', () => {
    */
   it('still offers sign-in when the session check fails', async () => {
     stubRoutes({
-      [CONFIG_URL]: () => ({ json: async () => ({ enabled: true }) }),
+      [CONFIG_URL]: openConfig,
       [ME_URL]: () => ({ ok: false, status: 502 }),
     });
     renderAt('/');
@@ -498,7 +513,7 @@ describe('the API key', () => {
     },
   ) =>
     stubRoutes({
-      [CONFIG_URL]: () => ({ json: async () => ({ enabled: true }) }),
+      [CONFIG_URL]: openConfig,
       [ME_URL]: () => ({
         json: async () => ({
           authenticated: true,
@@ -634,7 +649,7 @@ describe('the API key', () => {
 
   it('reports a failure and leaves the button pressable', async () => {
     stubRoutes({
-      [CONFIG_URL]: () => ({ json: async () => ({ enabled: true }) }),
+      [CONFIG_URL]: openConfig,
       [ME_URL]: () => ({
         json: async () => ({
           authenticated: true,
@@ -668,7 +683,7 @@ describe('the API key', () => {
    */
   it('tells the visitor to sign in again when the session has expired', async () => {
     stubRoutes({
-      [CONFIG_URL]: () => ({ json: async () => ({ enabled: true }) }),
+      [CONFIG_URL]: openConfig,
       [ME_URL]: () => ({
         json: async () => ({
           authenticated: true,
@@ -751,7 +766,7 @@ describe('usage against quota', () => {
     }),
   ) =>
     stubRoutes({
-      [CONFIG_URL]: () => ({ json: async () => ({ enabled: true }) }),
+      [CONFIG_URL]: openConfig,
       [ME_URL]: () => ({
         json: async () => ({
           authenticated: true,
@@ -895,7 +910,7 @@ describe('usage against quota', () => {
    */
   it('does not claim "no key" while a freshly issued key is on screen', async () => {
     stubRoutes({
-      [CONFIG_URL]: () => ({ json: async () => ({ enabled: true }) }),
+      [CONFIG_URL]: openConfig,
       [ME_URL]: () => ({
         json: async () => ({
           authenticated: true,
@@ -934,7 +949,7 @@ describe('usage against quota', () => {
    */
   it('does not refetch or blank rendered numbers when an existing key is revealed', async () => {
     const fetchMock = stubRoutes({
-      [CONFIG_URL]: () => ({ json: async () => ({ enabled: true }) }),
+      [CONFIG_URL]: openConfig,
       [ME_URL]: () => ({
         json: async () => ({
           authenticated: true,
@@ -969,6 +984,66 @@ describe('usage against quota', () => {
     expect(
       fetchMock.mock.calls.filter(([url]) => url === USAGE_URL).length,
     ).toBe(usageCalls);
+  });
+
+  /**
+   * The rate limit is the gateway's, not this bundle's (task 0188).
+   *
+   * `pricingApiFreePlanRateLimit` is a per-env config value that
+   * `api-gateway-stack.ts` hands to `addUsagePlan` and `compute-stack.ts` hands
+   * to the backend. Raising it and deploying has to change what this panel
+   * says — with a literal here it would not, and the one section whose stated
+   * theme is rendering honestly would be quietly stating a limit nobody
+   * enforces any more.
+   */
+  it('states the rate limit the backend reports, not a built-in figure', async () => {
+    stubRoutes({
+      [CONFIG_URL]: () => ({
+        json: async () => ({ enabled: true, rate_limit_per_second: 5 }),
+      }),
+      [ME_URL]: () => ({
+        json: async () => ({
+          authenticated: true,
+          user_id: '308994132968210433',
+          username: 'adam',
+        }),
+      }),
+      [USAGE_URL]: () => ({ json: async () => USAGE }),
+    });
+    renderApp();
+
+    await screen.findByTestId('usage-used');
+    expect(screen.getByTestId('rate-limit').textContent).toBe('5');
+    // Plural, because the figure is no longer the one the sentence was
+    // written around.
+    expect(screen.getByText(/requests per second/i)).toBeTruthy();
+  });
+
+  /**
+   * A deployment that did not say what the limit is says nothing about it. A
+   * fallback figure would be the same silent staleness one layer down — and
+   * unlike the missing line, it would look authoritative.
+   */
+  it('omits the rate limit when the backend does not report one', async () => {
+    stubRoutes({
+      [CONFIG_URL]: () => ({ json: async () => ({ enabled: true }) }),
+      [ME_URL]: () => ({
+        json: async () => ({
+          authenticated: true,
+          user_id: '308994132968210433',
+          username: 'adam',
+        }),
+      }),
+      [USAGE_URL]: () => ({ json: async () => USAGE }),
+    });
+    renderApp();
+
+    // The rest of the panel is unaffected — only the one line it cannot
+    // honestly render goes missing.
+    await screen.findByTestId('usage-used');
+    expect(screen.queryByTestId('rate-limit')).toBeNull();
+    expect(screen.queryByText(/per second/i)).toBeNull();
+    expect(screen.getByText(/quota resets on the 1st/i)).toBeTruthy();
   });
 
   /** The refresh control re-asks; the backend's cache bounds what that costs. */

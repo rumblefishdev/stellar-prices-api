@@ -29,6 +29,20 @@ const PORTAL_API = '/api-tokens/api';
 export interface PortalConfig {
   /** Whether the portal is open for business (task 0183's `PORTAL_ENABLED`). */
   enabled: boolean;
+  /**
+   * The free plan's per-key rate limit, requests per second (task 0188).
+   *
+   * From the backend rather than a literal in this bundle, because it is a
+   * per-env config value (`pricingApiFreePlanRateLimit`) that the gateway
+   * ENFORCES and the dashboard merely reports — raise it in
+   * `infra/envs/production.json`, deploy, and a hard-coded figure here would
+   * quietly keep stating the old one on the panel whose whole theme is
+   * rendering honestly.
+   *
+   * Absent when the deployment was not told the limit (`PORTAL_RATE_LIMIT`
+   * unset). The page omits the line in that case; it does not guess.
+   */
+  rate_limit_per_second?: number;
 }
 
 /**

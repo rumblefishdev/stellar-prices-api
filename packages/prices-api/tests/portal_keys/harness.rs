@@ -589,6 +589,7 @@ pub fn build_app(portal_enabled: bool, gateway: Option<Gateway>) -> Router {
         portal_oauth: portal_enabled.then(oauth_secret),
         portal_endpoints: Default::default(),
         portal_keys: gateway,
+        portal_rate_limit: None,
     };
     app(&config, AppState::without_ch())
 }

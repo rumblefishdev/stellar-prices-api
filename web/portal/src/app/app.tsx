@@ -55,8 +55,14 @@ type SessionState =
  * the task. "Cancelled" is not an error: the visitor pressed Cancel at Discord's
  * consent screen, the callback redirected here with `?signin=cancelled`, and the
  * only reasonable response is to say so and leave the button where it was.
+ *
+ * `rateLimit` is nothing to do with sign-in and is not read here: it comes off
+ * `/config`, which only this component's parent has, and is wanted three levels
+ * down by the usage panel (task 0188). Passed through rather than re-fetched or
+ * put in a context — one prop across two hops is less machinery than either,
+ * and it keeps the value's single source visible in the call chain.
  */
-function SignIn() {
+function SignIn({ rateLimit }: { rateLimit?: number }) {
   const [session, setSession] = useState<SessionState>({ state: 'loading' });
   const [searchParams] = useSearchParams();
   // Two landing states, from two literals the backend appends. `cancelled` is
@@ -149,7 +155,13 @@ function SignIn() {
   }
 
   if (session.session.authenticated) {
-    return <Dashboard onSignOut={onSignOut} session={session.session} />;
+    return (
+      <Dashboard
+        onSignOut={onSignOut}
+        session={session.session}
+        rateLimit={rateLimit}
+      />
+    );
   }
 
   return (
@@ -188,9 +200,12 @@ function SignIn() {
 function Dashboard({
   onSignOut,
   session,
+  rateLimit,
 }: {
   onSignOut: () => void;
   session: PortalSession;
+  /** The free plan's per-second rate limit, straight from `/config`. */
+  rateLimit?: number;
 }) {
   const [keyOnScreen, setKeyOnScreen] = useState(false);
 
@@ -213,7 +228,7 @@ function Dashboard({
       <ApiKey onKey={() => setKeyOnScreen(true)} />
       {/* Task 0188. Keyed refetch: a successful issue re-asks for usage, so
           the section leaves "no key yet" without a manual refresh. */}
-      <Usage keyOnScreen={keyOnScreen} />
+      <Usage keyOnScreen={keyOnScreen} rateLimit={rateLimit} />
     </>
   );
 }
@@ -376,8 +391,11 @@ function ApiKey({ onKey }: { onKey?: () => void }) {
  * - **The reset rule.** "The 1st of each month, 00:00 UTC" is OUR stated rule,
  *   not an AWS guarantee — AWS documents neither the instant nor the timezone
  *   (ADR 0010, correction #2) — and it is worded as ours.
- * - **The limits as numbers**: 1 request per second (task 0157) and
- *   used-of-quota, not prose.
+ * - **The limits as numbers**: requests per second (task 0157) and
+ *   used-of-quota, not prose. The rate figure comes from `/config`, not from a
+ *   literal here — it is the per-env value the gateway enforces
+ *   (`pricingApiFreePlanRateLimit`), and it was the one number on this panel
+ *   that could drift from what is actually in force.
  *
  * Fetches on mount, unlike `ApiKey` beside it, and the difference is the whole
  * point of the backend's design: `GET /usage` is read-only by construction —
@@ -385,7 +403,13 @@ function ApiKey({ onKey }: { onKey?: () => void }) {
  * nothing and mints nothing. The refresh button re-asks; the backend's
  * in-process cache is what keeps that from turning into control-plane traffic.
  */
-function Usage({ keyOnScreen }: { keyOnScreen: boolean }) {
+function Usage({
+  keyOnScreen,
+  rateLimit,
+}: {
+  keyOnScreen: boolean;
+  rateLimit?: number;
+}) {
   type UsageView =
     | { state: 'loading' }
     | { state: 'ok'; usage: PortalUsage }
@@ -463,9 +487,19 @@ function Usage({ keyOnScreen }: { keyOnScreen: boolean }) {
   /** The reset rule (ours) and the rate limit (0157), as numbers. */
   const limits = (resetsAt?: string) => (
     <>
-      <p>
-        Rate limit: <strong>1</strong> request per second.
-      </p>
+      {/* Omitted, not defaulted, when the deployment did not say what the
+          limit is: a fallback figure here would be exactly the silent
+          staleness reading it from `/config` removes. Every deployed
+          environment sets it — `compute-stack.ts` passes
+          `pricingApiFreePlanRateLimit` unconditionally — so the absent case is
+          a local run, where saying nothing is the honest answer. */}
+      {rateLimit !== undefined && (
+        <p>
+          Rate limit: <strong data-testid="rate-limit">{rateLimit}</strong>{' '}
+          request
+          {rateLimit === 1 ? '' : 's'} per second.
+        </p>
+      )}
       <p>
         Quota resets on the 1st of each month, 00:00 UTC
         {resetsAt ? (
@@ -614,7 +648,9 @@ function PortalHome() {
 
       {/* Reachable only once PORTAL_ENABLED is true. Task 0186 put sign-in
           here; issuing a key is task 0187's. */}
-      {probe.state === 'ok' && probe.config.enabled && <SignIn />}
+      {probe.state === 'ok' && probe.config.enabled && (
+        <SignIn rateLimit={probe.config.rate_limit_per_second} />
+      )}
 
       {/* A failure here is not cosmetic: it means the bundle could not reach
           its own backend, which is either the behaviour ordering in task 0184's

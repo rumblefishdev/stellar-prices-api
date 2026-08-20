@@ -32,6 +32,7 @@ pub fn app_without_ch() -> Router {
         // is what every non-portal test wants — with no client in the
         // config there is no code path here that can reach API Gateway.
         portal_keys: None,
+        portal_rate_limit: None,
     };
     app(&config, AppState::without_ch())
 }
