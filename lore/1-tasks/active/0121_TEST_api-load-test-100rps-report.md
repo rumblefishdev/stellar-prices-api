@@ -25,6 +25,35 @@ history:
     note: >
       Promoted to active — starting the load-test pass. Uses the 20-asset
       list fixed by [[0120]] (PR #226) for the spread scenario.
+  - date: 2026-08-20
+    status: active
+    who: stkrolikiewicz
+    note: >
+      Script and plan done; the run itself still needs a BE window. Plan
+      `prices-production-loadtest-plan` (`i12bsj`, 150 req/s / burst 300 /
+      1M mies.) + key issued and **registered** in
+      `docs/runbooks/manual-api-key-tier.md` — note it sits under the stage
+      ceiling (200/400), so unlike soroban-block-explorer's harness we need
+      no infra flag to lift a throttle. `price_load.js` extended rather than
+      rewritten: warmup phase excluded from thresholds (Lambda cold starts
+      would otherwise pollute p95 over 30k samples), asset pool from 0120's
+      list, `X-Request-Id` for a CH `log_comment` join, non-200 counted as
+      failure, and `dropped_iterations` as a threshold so a run that failed
+      to sustain the rate cannot be reported as one that did.
+      **Three measured findings shaping the method:** (1) there is NO
+      `X-Cache` header, so hit/miss percentiles cannot be tagged per
+      request — and the gateway cache key is the PATH ONLY, so pool size is
+      the only lever on hit rate; over 300 s an asset misses at most 30
+      times, making 1/20/1000+ assets the ~0 %/2 %/100 % miss regimes.
+      Report each number with its regime. (2) Canonical USDC answers 404
+      ([[0178]]), which puts a permanent 5 % floor under the error rate with
+      the 20-asset pool — the AC's 0.1 % would be unreachable for a reason
+      that has nothing to do with load. `setup()` now probes the pool, drops
+      unservable assets and names them, so the exclusion lands in the report
+      instead of vanishing. (3) Smoke run against prod (3 req/s, 19 assets,
+      mostly cache misses): p95 **83 ms**, zero failures — an early signal
+      that the 200 ms AC is comfortable, though not a substitute for the
+      5-minute run.
 ---
 
 # Load test — 100 req/s on `GET /assets/{id}/price`
