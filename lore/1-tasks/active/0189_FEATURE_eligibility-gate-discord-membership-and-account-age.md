@@ -2,7 +2,7 @@
 id: "0189"
 title: "Eligibility gate — Stellar Discord membership and minimum account age before a key is issued"
 type: FEATURE
-status: backlog
+status: active
 related_adr: ["0010"]
 related_tasks: ["0183", "0156", "0159", "0179", "0180", "0186", "0187", "0191", "0193"]
 tags: [layer-backend, priority-high, effort-medium, milestone-M3, epic-self-service-onboarding, discord, auth, abuse-prevention, spike, slice-6]
@@ -21,6 +21,14 @@ history:
       items 1–5. Those five measurements were a task-shaped blocker in front of
       the entire epic; they are actually the first hour of this one task, and
       nothing before this slice depends on them.
+  - date: 2026-08-20
+    status: active
+    who: akot
+    note: >
+      Activated. Branch cut from [[0188]]'s (not yet merged; this slice edits
+      the same portal files). Step 0's five measurements remain operator-owned
+      prerequisites — the code is written to the documented safe rules and the
+      result tables stay empty until they are run.
 ---
 
 # Eligibility gate — membership and account age
