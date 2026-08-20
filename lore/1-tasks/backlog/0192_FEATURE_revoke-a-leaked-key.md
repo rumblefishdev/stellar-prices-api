@@ -163,3 +163,13 @@ around rather than merely note:
 - This slice is where the epic stops being able to avoid durable state. Do not
   build [[0190]] *for* it reflexively — a single small record is not the same as
   the full registry — but do make that call here rather than by accident.
+- **[[0190]] was decided and CANCELLED on 2026-08-20, so that call is now this
+  slice's alone.** The measurement is in
+  `docs/epics/self-service-onboarding.md`; the part that binds this task is
+  structural, not budgetary: [[0158]]/[[0190]]'s schema is
+  `ReplacingMergeTree(updated_at) ORDER BY discord_user_id` — **one row per
+  user, replaced on every write** — so the next issue would overwrite the
+  revocation row and silently reset the cap, which is exactly the free quota
+  reset the rule above forbids. Whatever this slice persists must therefore be
+  **append-only, or keyed so an issue cannot overwrite a revoke**. Reaching for
+  the cancelled registry shape would lose this task's own data.
