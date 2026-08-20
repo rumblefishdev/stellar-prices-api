@@ -178,6 +178,9 @@ async fn current_prices_mv_computes_price_volume_and_market_cap() {
 ///           shape the XLM acceptance criterion names)
 ///  12 TRI — three sources, one carried past an un-enriched tip → the §5.5
 ///           mask arms over the carried population and keeps all three
+///  13 NRB — priced, but its only 1h reference sits at 4 d, INSIDE the [7d, 5d]
+///           band's recent cutoff → change_7d_pct must be the sentinel rather
+///           than a 4-day move published as a 7-day one
 #[tokio::test]
 #[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
 async fn current_prices_mv_writes_0072_columns_and_filters_outliers() {
@@ -194,7 +197,8 @@ async fn current_prices_mv_writes_0072_columns_and_filters_outliers() {
                     (4,'BAR','classic','GBAR','',1), (5,'DUO','classic','GDUO','',1), \
                     (6,'EXO','classic','GEXO','',1), (7,'ZER','classic','GZER','',1), \
                     (8,'DIP','classic','GDIP','',1), (10,'STA','classic','GSTA','',1), \
-                    (11,'LAG','classic','GLAG','',1), (12,'TRI','classic','GTRI','',1)"
+                    (11,'LAG','classic','GLAG','',1), (12,'TRI','classic','GTRI','',1), \
+                    (13,'NRB','classic','GNRB','',1)"
         ))
         .execute()
         .await
@@ -256,6 +260,9 @@ async fn current_prices_mv_writes_0072_columns_and_filters_outliers() {
         (12, 9, "1.02", "50000", "soroswap"),
         (12, 50, "1.01", "20000", "aquarius"),
         (12, 1, "0", "0", "aquarius"),
+        // 13 NRB — ordinary priced asset; the interesting part is its 1h
+        // reference below, which is too RECENT for the [7d, 5d] band.
+        (13, 5, "2.00", "1000", "sdex"),
     ];
     for (i, (asset, mins, cu, vol, src)) in rows.iter().enumerate() {
         admin
@@ -308,6 +315,24 @@ async fn current_prices_mv_writes_0072_columns_and_filters_outliers() {
             .expect("0138 7d ref row");
     }
 
+    // Asset 13's ONLY 1h reference sits at 4 days — newer than the band's
+    // `now() - 5 DAY` cutoff. Without that cutoff argMinIf would pick it and
+    // publish a 4-day move as `change_7d_pct`; with it, close_7d_ago stays 0
+    // and the denominator guard lands on the sentinel. This is the only
+    // fixture that exercises the recent edge of the band.
+    admin
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1h \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) \
+             VALUES (now() - INTERVAL {mins} MINUTE, 13, 2, 'sdex', \
+              1.00,1.00,1.00,1.00, 10, 5, 5, 1.00, 1.00, 1, 1)",
+            mins = 4 * 24 * 60_i64
+        ))
+        .execute()
+        .await
+        .expect("13 too-recent 7d ref row");
+
     admin
         .query(&format!("SYSTEM REFRESH VIEW {db}.mv_current_prices"))
         .execute()
@@ -320,7 +345,7 @@ async fn current_prices_mv_writes_0072_columns_and_filters_outliers() {
             .fetch_one()
             .await
             .expect("count");
-        if n >= 10 {
+        if n >= 11 {
             ready = true;
             break;
         }
@@ -605,6 +630,22 @@ async fn current_prices_mv_writes_0072_columns_and_filters_outliers() {
     assert!(
         (tri_p - 1.02).abs() < 1e-9,
         "price_usd is the newest priced close (soroswap 1.02), got {tri_p}"
+    );
+
+    // ── ref_7d band, recent edge: a too-new baseline is NOT a 7d baseline ──
+    // Asset 13 is priced (2.00) and has a 1h close of 1.00 four days ago. Before
+    // the band's upper cutoff that close was the baseline and the row published
+    // +100% as a SEVEN-day move. The cutoff makes it the sentinel instead.
+    let nrb_p = scalar_f64(&admin, &f("price_usd", 13)).await;
+    assert!(
+        (nrb_p - 2.0).abs() < 1e-9,
+        "precondition: asset 13 must be priced, else the 7d assert is vacuous, got {nrb_p}"
+    );
+    let nrb_7d = scalar_f64(&admin, &f("change_7d_pct", 13)).await;
+    assert!(
+        nrb_7d.abs() < 1e-9,
+        "a baseline newer than the [7d, 5d] band must yield the 0 sentinel, not \
+         a 4-day move labelled 7-day (+100 here), got {nrb_7d}"
     );
 
     // ── task 0138: the guard must NOT swallow a genuine crash ──────────────

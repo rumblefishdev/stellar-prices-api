@@ -256,15 +256,26 @@ XLM's own `price_xlm` should be `1`, and a small deviation is tolerable (a tie
 at the max timestamp can let the `price_usd` and `xlm_usd` aggregations pick
 different rows and land slightly off 1).
 
-> ⚠️ **Semantics changed with task 0135.** Historically `price_usd` was an
-> unfiltered `argMax(close_usd, timestamp)` and an un-enriched XLM tip zeroed
-> `price_xlm`, so this step used to say "0 diagnoses enrichment lag, not a
-> broken view". Since 0135 both aggregates skip un-enriched candles (bounded
-> 2h carry, `argMaxIf` in `current.sql`), so an un-enriched tip alone can no
-> longer produce 0 here. **Post-0135, `price_xlm = 0` on XLM means no priced
-> XLM candle within the carry bound — a genuinely abnormal state (dead
-> enrichment or a broken view) and worth aborting on.** Confirm the cause
-> first:
+> ⚠️ **Semantics changed with task 0135 — but this is still NOT an abort
+> gate.** Historically `price_usd` was an unfiltered `argMax(close_usd,
+timestamp)` and an un-enriched XLM tip zeroed `price_xlm`. Since 0135 both
+> aggregates skip un-enriched candles (bounded carry, `argMaxIf` in
+> `current.sql`), so a _momentarily_ un-enriched tip no longer produces 0.
+>
+> A zero here is therefore worth **investigating**, not aborting on, because
+> two benign causes remain and both are live today:
+>
+> - **Legs enrichment never reaches.** XLM trades continuously on
+>   exotic-quoted pairs that are not USD-priceable at all, so its newest
+>   _priced_ candle can be arbitrarily old while it looks actively traded.
+> - **Enrichment lag beyond the carry bound.** Task 0204 measured the ceiling
+>   at **~30 h** on the USDT leg (2026-08-19), and [[0212]] shows the USDT
+>   pivot has priced **zero** `price_ohlcv_1m` rows to date. On that leg the
+>   lag is currently unbounded, so a healthy deploy can still show 0.
+>
+> Diagnose before reacting — if the query below shows the newest candles are
+> un-enriched or exotic-quoted, the view is fine and the finding belongs to
+> the enrichment tasks, not to this rollout:
 
 ```sql
 -- Is XLM's own tip enriched? A zero close_usd at the newest timestamp is the cause.
@@ -322,12 +333,14 @@ handler is still the stubbed build — re-check step 6 shipped.
 > ⚠️ **Historical note, revised by task 0135.** Before 0135, `price_usd` was
 > an unfiltered `argMax`, an un-enriched tip legitimately zeroed
 > `price_xlm`/`change_24h_pct`, and gating on them was a false-abort trigger
-> (this bit three separate times — see PR #158). **Since 0135 the calculus is
-> reversed for `price_usd`/`price_xlm`:** the MV skips un-enriched candles
-> (bounded 2h carry), so on a liquid asset like `native` a `price_usd` of
-> `"0"` after a correct deploy is abnormal and IS a deploy-verification
-> failure. `change_24h_pct`/`change_7d_pct` remain "0 = no signal" sentinels
-> (a genuinely flat window also reads 0) — still do not gate on those.
+> (this bit three separate times — see PR #158). **0135 narrows when a zero is
+> expected, but does not turn it into an abort gate.** The MV now skips
+> un-enriched candles, so a zero on a liquid asset is worth a look — but the
+> two causes named in step 5 (never-priceable legs, and enrichment lag beyond
+> the carry bound, measured at ~30 h on the USDT leg in 0204) still produce it
+> with nothing broken. Investigate with the step-5 query; do not fail the
+> deploy on it. `change_24h_pct`/`change_7d_pct` remain "0 = no signal"
+> sentinels (a genuinely flat window also reads 0) — never gate on those.
 
 If you want a positive check on the numeric columns, pick an asset **known to
 have an enriched tip** rather than `native`, and read it from ClickHouse first

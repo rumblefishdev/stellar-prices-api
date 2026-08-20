@@ -207,9 +207,23 @@ WITH
     -- The window has BOTH ends: [now()-7d, now()-5d]. Without the upper cutoff
     -- argMin returns the oldest priced close AVAILABLE — for a freshly-listed
     -- asset (or one whose older 1h closes are still 0 from the pre-0114 gap)
-    -- that is hours old, and the column publishes e.g. a 2-hour move labelled
-    -- as 7-day. With the cutoff, no baseline in the band means close_7d_ago
-    -- stays 0 and the denominator guard lands change_7d_pct on the sentinel.
+    -- that can be hours old, and the column publishes e.g. a 2-hour move
+    -- labelled as 7-day. With the cutoff, no baseline in the band means
+    -- close_7d_ago stays 0 and the denominator guard lands change_7d_pct on
+    -- the sentinel.
+    --
+    -- ⚠️ The cutoff BOUNDS the error, it does not remove it: a baseline sitting
+    -- at the 5-day edge still measures a 5-day move published as 7-day, i.e.
+    -- up to ~28% short on span. Naming the baseline's own timestamp in the
+    -- response is the only real fix; that is a schema change and not this task.
+    --
+    -- ⚠️ SCOPE: this narrowing is a behaviour change beyond 0135's contract —
+    -- an illiquid asset that trades most days but has no priced 1h candle in
+    -- the [7d, 5d] band now publishes the sentinel where it previously
+    -- published a (wrong-span) number. Taken deliberately, because 0135's own
+    -- change removes the zero sentinel that was masking the defect for the 396
+    -- assets task 0138 measured. Raised in review; revisit if the sentinel
+    -- turns out to cost more than the mislabelled span did.
     ref_7d AS (
         SELECT
             asset_id                     AS asset_id,

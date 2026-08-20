@@ -10,11 +10,15 @@ pub struct PriceResponse {
     /// Echoed natural identity (`native`, `CODE:ISSUER`, or a C… contract).
     pub asset: String,
     /// Latest **priced** USD close (task 0135): a candle whose USD value is
-    /// not yet computed is skipped while the newest priced candle is within
-    /// ~2h of the newest candle overall, so the value can trail real time by
-    /// up to one enrichment cycle (~25 min typical). `"0"` means no
-    /// USD-priced trade inside that bound. `updated_at` is the snapshot
-    /// time, **not** the price's age.
+    /// not yet computed is skipped rather than reported as `"0"`.
+    ///
+    /// **This value can be older than it looks.** The carry bound limits how
+    /// far USD-valuation may lag behind the newest candle — it does not limit
+    /// the age of the published close, which for an asset that has stopped
+    /// trading is simply its last priced close, up to the 24 h aggregation
+    /// window old. `updated_at` is the snapshot time, **not** the price's
+    /// age, and no field currently carries that age. `"0"` means no priced
+    /// close qualified at all.
     pub price_usd: String,
     /// XLM-quoted price (task 0072); `price_usd / XLM-USD close`, so it
     /// shares `price_usd`'s semantics and `"0"` sentinel.

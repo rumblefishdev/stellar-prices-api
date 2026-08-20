@@ -513,7 +513,11 @@ WHERE sac_address != '';
 -- prices.current_price_usd — live spot (tip) per asset, natural-identity keyed.
 -- Same contract as price_usd_series (natural id, NULL-never-error via the
 -- consumer's LEFT JOIN) but for "now": one row per asset with the latest USD
--- price + `updated_at` for the consumer's own staleness policy. Reads
+-- price + `updated_at`. ⚠️ **`updated_at` is the MV's refresh time, not the
+-- price's age** — since task 0135 `price_usd` is the latest *priced* close and
+-- may be carried from an earlier candle, so a staleness policy keyed on
+-- `updated_at` cannot see that. See the sentinel table above for the rule; no
+-- column currently carries the price's own timestamp. Reads
 -- current_prices, which is written by the Current Price Updater (task 0039) —
 -- this view is the read surface; it is empty until that writer runs.
 --
