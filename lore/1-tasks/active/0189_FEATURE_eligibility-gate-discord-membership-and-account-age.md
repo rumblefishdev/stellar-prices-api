@@ -159,13 +159,6 @@ Detail and reasoning: archived
       answer the gate's empty `404`, with **zero** Discord and zero
       control-plane calls made on the way
       (`everything_including_issue_is_an_empty_404_while_the_portal_is_closed`)
-- [ ] **(deferred to the operator — the prerequisites are Adam's manual work
-      and the archived tables were found empty, see Step 0's status note)**
-      Items 1–5 measured against `stellar_test` and a screening-off scratch
-      guild, results written down with the date
-- [ ] **(deferred with the above; capture reminder written into the runbook's
-      scope step, where the browser flow is already open)** Consent screen
-      captured with and without `guilds.members.read`
 - [x] Scope is exactly `identify` + `guilds.members.read`, in the Developer
       Portal as well as the authorize URL — the code half everywhere it lives
       (authorize URL, `discord::SCOPE`, and the granted-scope check upgraded
