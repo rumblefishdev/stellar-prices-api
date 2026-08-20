@@ -642,6 +642,15 @@ date, the response includes a `backfill_note` field indicating how far back data
 
 Current real-time price (latest snapshot from `current_prices`).
 
+`price_usd` is the **latest priced close**: a candle whose USD value has not
+been computed yet is skipped rather than reported as `0`, so the figure can be
+up to one enrichment cycle stale (~25 min average) but is never a zero
+sentinel for an asset with any priced trade in the last 24 h. `0` therefore
+means exactly "no USD-priceable trade in the window". A source whose newest
+candle is un-enriched is likewise carried in `sources` and in the `vwap_24h`
+weighting at its latest priced close; a source with no priced candle in the
+window is excluded. (Task 0135.)
+
 **Response:**
 
 ```json

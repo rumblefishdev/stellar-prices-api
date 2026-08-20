@@ -204,18 +204,18 @@ async fn current_prices_mv_writes_0072_columns_and_filters_outliers() {
         (5, 7, "1.00", "1000", "sdex"),
         (5, 6, "3.00", "3000", "soroswap"),
         (6, 4, "0", "0", "sdex"), // exotic: never USD-priceable
-        // 0138: priced history + an UN-ENRICHED TIP. price_usd is an unfiltered
-        // argMax so it lands on the 0, while open_24h filters close_usd > 0 and
-        // lands on the real 2.00 — the exact prod shape that yielded -100%.
+        // 0135: priced history + an UN-ENRICHED TIP. Before the guard, the
+        // unfiltered argMax landed price_usd on the 0 (the prod shape that
+        // yielded 0138's -100%); with argMaxIf(close_usd > 0) the tip is
+        // SKIPPED and price_usd is the latest priced close — soroswap's 1.90.
         //
-        // TWO sources on purpose. per_source takes argMax(close_usd) per source
-        // and per_asset then drops `src_price > 0`, so a single-source asset
-        // whose tip is un-enriched loses its ONLY source and degrades to
-        // sources='{}' / vwap=0 — which is "no data at all", not the prod shape.
-        // Production XLM had price_usd = 0 *while* sources carried two live
-        // venues and vwap_24h read 0.17093839119102. soroswap's priced tip
-        // reproduces that, and pins the argMax-picks-the-un-enriched-source
-        // interaction the single-source fixture cannot distinguish.
+        // TWO sources on purpose, and the un-enriched tip sits on sdex, whose
+        // history IS priced (2.00). That pins the C2 half of the contract:
+        // per_source's argMaxIf keeps sdex at its latest priced close, so it
+        // stays in `sources` and the vwap weighting instead of vanishing with
+        // enrichment timing. Production XLM had price_usd = 0 *while* sources
+        // carried two live venues — this fixture reproduces the shape and must
+        // now publish real numbers on every column.
         (7, 30, "2.00", "500", "sdex"),
         (7, 2, "1.90", "400", "soroswap"),
         (7, 1, "0", "0", "sdex"),
@@ -406,14 +406,14 @@ async fn current_prices_mv_writes_0072_columns_and_filters_outliers() {
     );
     assert_eq!(exo_s, "{}", "exotic sources must be an empty object");
 
-    // ── task 0138: an un-enriched TIP must not fabricate -100% ─────────────
-    // Distinct from asset 6 above: there, EVERY close_usd is 0, so open_24h is
-    // 0 too and the denominator guard alone lands on the sentinel. Here the
-    // history IS priced, so the denominator is real and only the NUMERATOR
-    // guard can save it. That is the case prod hit on 889 assets.
+    // ── task 0135: an un-enriched TIP is skipped, not read as 0 ────────────
+    // Distinct from asset 6 above: there, EVERY close_usd is 0, so the row
+    // legitimately publishes the sentinels. Here the history IS priced, so the
+    // 0135 contract requires the latest PRICED close on every column — the
+    // case prod hit on 88 of the top-200 volume rows (XLM and EURC included).
     //
-    // Control first — prove the fixture genuinely reproduces the bug, so the
-    // assertions below cannot pass vacuously.
+    // Control first — prove the fixture genuinely reproduces the pre-guard
+    // bug, so the assertions below cannot pass vacuously.
     let unguarded = scalar_f64(
         &admin,
         &format!(
@@ -438,24 +438,25 @@ async fn current_prices_mv_writes_0072_columns_and_filters_outliers() {
 
     let zer_p = scalar_f64(&admin, &f("price_usd", 7)).await;
     assert!(
-        zer_p.abs() < 1e-9,
-        "fixture precondition: un-enriched tip means price_usd 0, got {zer_p}"
+        (zer_p - 1.90).abs() < 1e-9,
+        "price_usd must be the latest PRICED close (soroswap 1.90), not the \
+         un-enriched tip's 0 — the 0135 contract, got {zer_p}"
     );
     let zer_24 = scalar_f64(&admin, &f("change_24h_pct", 7)).await;
     assert!(
-        zer_24.abs() < 1e-9,
-        "an un-enriched tip must yield the 0 = 'no signal' sentinel, NOT -100 \
-         (task 0138: 889 prod assets published -100 this way), got {zer_24}"
+        (zer_24 + 5.0).abs() < 1e-2,
+        "change_24h_pct must be computed from the priced close: \
+         (1.90 - 2.00) / 2.00 = -5%, NOT the 0 sentinel and NOT -100, got {zer_24}"
     );
     let zer_7d = scalar_f64(&admin, &f("change_7d_pct", 7)).await;
     assert!(
-        zer_7d.abs() < 1e-9,
-        "change_7d_pct must be sentinel 0, not -100, got {zer_7d}"
+        (zer_7d - 90.0).abs() < 1e-2,
+        "change_7d_pct must be (1.90 - 1.00) / 1.00 = +90%, got {zer_7d}"
     );
 
-    // The fixture must be the PROD shape, not "no data at all": a zero
-    // price_usd sitting beside a populated sources object and a real vwap is
-    // exactly what made the -100 indefensible in production.
+    // The C2 half: sdex's tip is un-enriched but its HISTORY is priced, so it
+    // must be carried at its latest priced close (2.00) — present in `sources`
+    // and weighted into the vwap — instead of vanishing with enrichment timing.
     let zer_vwap = scalar_f64(&admin, &f("vwap_24h", 7)).await;
     let zer_srcs: String = admin
         .query(&s("sources", 7))
@@ -463,14 +464,23 @@ async fn current_prices_mv_writes_0072_columns_and_filters_outliers() {
         .await
         .expect("zer sources");
     assert!(
-        (zer_vwap - 1.9).abs() < 1e-6,
-        "soroswap's priced tip must still yield a real vwap (1.9) beside the \
-         zero price_usd, got {zer_vwap}"
+        (zer_vwap - 1.955_555_56).abs() < 1e-6,
+        "vwap must weight BOTH sources ((2.00*500 + 1.90*400) / 900 = \
+         1.95555556); 1.9 alone means sdex was dropped by enrichment timing, \
+         got {zer_vwap}"
     );
     assert!(
-        zer_srcs.contains("soroswap"),
-        "sources must be POPULATED while price_usd is 0 — that pairing is the \
-         prod shape this task exists for, got {zer_srcs}"
+        zer_srcs.contains("soroswap") && zer_srcs.contains("sdex"),
+        "both venues must be in sources — sdex carried at its latest priced \
+         close per C2, got {zer_srcs}"
+    );
+
+    // price_xlm follows the priced close too: 1.90 / 0.50 = 3.8. Before the
+    // guard this column collapsed to 0 with price_usd (the AC names it).
+    let zer_xlm = scalar_f64(&admin, &f("price_xlm", 7)).await;
+    assert!(
+        (zer_xlm - 3.8).abs() < 1e-6,
+        "price_xlm must be 1.90 / 0.50 = 3.8, got {zer_xlm}"
     );
 
     // ── task 0138: the guard must NOT swallow a genuine crash ──────────────
@@ -482,10 +492,10 @@ async fn current_prices_mv_writes_0072_columns_and_filters_outliers() {
         "a REAL ~-100% crash must survive the 0138 guard (expect -99.995), got {dip_24}"
     );
 
-    // NOTE: price_xlm for asset 7 is trivially 0 here (0 / anything), so it is
-    // NOT evidence that its nullIf guard works — that needs a missing DIVISOR
-    // with a non-zero price_usd, which is
-    // `price_xlm_lands_on_the_sentinel_when_the_xlm_divisor_is_missing` below.
+    // NOTE: asset 7's price_xlm above exercises the happy path only; the
+    // missing-DIVISOR guard needs an asset priced while no XLM market exists,
+    // which is `price_xlm_lands_on_the_sentinel_when_the_xlm_divisor_is_missing`
+    // below.
 
     teardown(db).await;
 }

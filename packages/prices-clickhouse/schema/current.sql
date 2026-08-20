@@ -114,11 +114,17 @@ WITH
     ) AS xlm_usd,
 
     -- Level 1 — one row per (asset, source) over the trailing 24h.
+    --
+    -- src_price is the latest PRICED close (task 0135, scope correction C2): a
+    -- source whose newest 1m candle is not yet enriched carries its latest
+    -- priced close and stays in `sources` and the vwap weighting, instead of
+    -- reading 0 here and being dropped by `src_price > 0` below as a side
+    -- effect of enrichment timing.
     per_source AS (
         SELECT
             asset_id                          AS asset_id,
             source                            AS source,
-            argMax(close_usd, timestamp)      AS src_price,
+            argMaxIf(close_usd, timestamp, close_usd > 0) AS src_price,
             sum(volume_quote_usd)             AS src_volume
         FROM prices.price_ohlcv_1m FINAL
         WHERE timestamp >= now() - INTERVAL 24 HOUR
@@ -137,8 +143,11 @@ WITH
             groupArray(toFloat64(src_price))      AS prices_f,
             groupArray(toFloat64(src_volume))     AS vols_f
         FROM per_source
-        WHERE src_price > 0            -- an unpriced source carries no signal and
-                                        -- would drag the median toward zero
+        WHERE src_price > 0            -- explicit rule (0135 C2): a source with
+                                        -- NO priced candle in the whole window
+                                        -- carries no signal; with the argMaxIf
+                                        -- above this can no longer drop a source
+                                        -- that merely has an un-enriched tip
         GROUP BY asset_id
     ),
 
@@ -197,10 +206,17 @@ WITH
     -- filtering either would misreport reality rather than de-noise it.
     -- open_24h is the oldest close inside the same window, which is what makes
     -- change_24h_pct a plain window read instead of a self-join.
+    --
+    -- price_usd is the latest PRICED close (task 0135 contract, decided
+    -- 2026-08-05): an un-enriched newest candle is skipped rather than read as
+    -- 0, trading up to one enrichment cycle of staleness (~25 min avg) for the
+    -- previous permanent zero — production had 88 of the top-200 volume rows,
+    -- XLM and EURC included, publishing the sentinel. An asset with NO priced
+    -- candle in the window still reads 0, the documented "unavailable" value.
     unfiltered AS (
         SELECT
             asset_id                          AS asset_id,
-            argMax(close_usd, timestamp)      AS price_usd,
+            argMaxIf(close_usd, timestamp, close_usd > 0) AS price_usd,
             argMinIf(close_usd, timestamp, close_usd > 0) AS open_24h,
             sum(volume_quote_usd)             AS volume_24h_usd
         FROM prices.price_ohlcv_1m FINAL
@@ -223,16 +239,18 @@ SELECT
     -- /greatest() rather than left to throw.
     --
     -- ⚠️ BOTH operands are nullIf-guarded, not just the denominator (task 0138).
-    -- `price_usd` above is an UNFILTERED argMax while `open_24h` filters
-    -- `close_usd > 0`, so an un-enriched newest candle yields a zero numerator
-    -- beside a real denominator — and `(0 - open) / open * 100` is exactly
-    -- **-100**, a fabricated total price collapse. Measured on ch-prod-01
-    -- 2026-08-03: 889 of 4,442 assets (20%) published -100 on change_24h_pct,
-    -- 396 on change_7d_pct, XLM among them, while their `vwap_24h` and `sources`
-    -- carried the real price. -100 is NOT a sentinel — it passes every
-    -- consumer-side "0 means unavailable" guard the views.sql interop contract
-    -- documents, because it looks like data. Guarding the numerator lands it on
-    -- the 0 = "no signal" sentinel instead.
+    -- Before the 0135 guard, `price_usd` was an UNFILTERED argMax while
+    -- `open_24h` filtered `close_usd > 0`, so an un-enriched newest candle
+    -- yielded a zero numerator beside a real denominator — and
+    -- `(0 - open) / open * 100` is exactly **-100**, a fabricated total price
+    -- collapse. Measured on ch-prod-01 2026-08-03: 889 of 4,442 assets (20%)
+    -- published -100 on change_24h_pct, 396 on change_7d_pct, XLM among them,
+    -- while their `vwap_24h` and `sources` carried the real price. -100 is NOT
+    -- a sentinel — it passes every consumer-side "0 means unavailable" guard
+    -- the views.sql interop contract documents, because it looks like data.
+    -- With 0135's argMaxIf the numerator can only be 0 when the whole window is
+    -- unpriced (then open_24h is 0 too); the numerator guard stays as the belt
+    -- for exactly that case, landing on the 0 = "no signal" sentinel.
     --
     -- A genuine -100% (a real price falling to a real near-zero) is unaffected:
     -- the guard keys on price_usd being exactly the 0 sentinel, not on the

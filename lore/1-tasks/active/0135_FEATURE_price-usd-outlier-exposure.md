@@ -56,6 +56,25 @@ history:
       carries its latest priced close and stays in `sources` and in the
       `vwap_24h` weighting, instead of silently vanishing. Both are one-line
       changes in `current.sql`, which self-DROPs, so delivery is unblocked.
+  - date: 2026-08-20
+    status: active
+    who: stkrolikiewicz
+    note: >
+      Promoted to active and the decided contract implemented:
+      `argMaxIf(close_usd, timestamp, close_usd > 0)` on both
+      `unfiltered.price_usd` and `per_source.src_price`; the
+      `src_price > 0` filter is now the explicit "no priced candle in the
+      whole window" rule rather than an enrichment-timing side effect. §4.2
+      documents the latest-priced-close semantics. `current_mv_it.rs`
+      fixture 7 rewritten from pinning the bug to asserting the contract
+      (price_usd 1.90, change -5%/+90%, vwap weights both venues,
+      price_xlm 3.8) — all 3 tests green on the 26.3.10.60 pin. The
+      [[0120]] conformance suite is the regression gate (42 of its 55
+      failures are this task's failure modes). STILL OPEN before
+      completion: the failure-mode-1 decision (outlier-filter `price_usd`
+      vs leave-and-document vs confidence signal) with its change_*_pct
+      propagation, and post-deploy verification (zero_but_vwap_ok = 0,
+      XLM publishes a real price, 0120 price checks green).
 ---
 
 # price_usd is not outlier-protected
@@ -221,16 +240,16 @@ base for whichever option is chosen.
       behaviour, and the change is called out as a published-value change.
 - [ ] If left as-is: the §4.2 `/price` docs state that `price_usd` is unfiltered
       and `vwap_24h` is the de-noised figure.
-- [ ] The un-enriched-tip zero is resolved: either `price_usd` skips unpriced
+- [x] The un-enriched-tip zero is resolved: either `price_usd` skips unpriced
       candles, or the 0-vs-genuine-price ambiguity is documented and given a
       staleness bound. `zero_but_vwap_ok` should be 0 afterwards.
-- [ ] `market_cap_usd` and `price_xlm` no longer collapse to 0 purely because the
-      newest candle is un-enriched.
+- [x] `market_cap_usd` and `price_xlm` no longer collapse to 0 purely because the
+      newest candle is un-enriched. (Asserted in `current_mv_it.rs` fixture 7.)
 - [ ] Native **XLM** specifically publishes a real `price_usd` — the case BE
       measured and the one [[0144]] shows is close to chronic, since XLM's
       newest candle is both usually newer than the last enrichment pass and
       often an exotic-quote pair that will never be enriched at all.
-- [ ] The C2 question answered: an unpriced source is either absent from
+- [x] The C2 question answered: an unpriced source is either absent from
       `sources`/`vwap_24h` *by an explicit rule*, or carried at its last known
       price — not dropped as a side effect of enrichment timing. Answer
       consistent with [[0147]]'s coverage gate.
