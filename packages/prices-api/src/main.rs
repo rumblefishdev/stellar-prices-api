@@ -10,12 +10,17 @@ use prices_api::{AppConfig, AppState, app};
 
 #[tokio::main]
 async fn main() {
+    // `telemetry::env_filter`, not `EnvFilter::from_default_env`: the AWS SDK
+    // prints a `GetApiKey` response — key value and all — at `trace`, and
+    // `RUST_LOG` is one `UpdateFunctionConfiguration` away from being `trace`.
+    // The filter drops every directive that could outrank the pins — the ones
+    // aimed at those crates, and every span/field directive, which would
+    // otherwise enable the same events by scope — then pins the crates at
+    // `info`. `tests/telemetry_filter.rs` is the measurement that this holds for
+    // the hostile `RUST_LOG` values, rather than the claim that it does.
     tracing_subscriber::fmt()
         .json()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
+        .with_env_filter(prices_api::telemetry::env_filter())
         .with_target(false)
         .init();
 
@@ -35,6 +40,19 @@ async fn main() {
         .load_portal_oauth()
         .await
         .expect("failed to load portal OAuth credentials at cold start");
+
+    // Self-service key issuance (task 0187). Reads the `pricing-api-free`
+    // usage-plan id from SSM through the same extension, and builds the API
+    // Gateway control-plane client from the execution role's credentials.
+    //
+    // A no-op while `PORTAL_ENABLED` is false, which does double duty: it keeps
+    // two operations off the cold-start path of `/v1`, and it means a closed
+    // portal has no control-plane client in the process at all — so no code path
+    // in this build can create or delete a production API key.
+    config
+        .load_portal_keys()
+        .await
+        .expect("failed to configure portal key issuance at cold start");
 
     // Build the CH client eagerly at cold start; it is Arc-backed and shared via
     // AppState across warm invocations. `client_from_lambda_env` reads

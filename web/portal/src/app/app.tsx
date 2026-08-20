@@ -4,14 +4,17 @@ import { Route, Routes, useSearchParams } from 'react-router-dom';
 import {
   fetchPortalConfig,
   fetchSession,
+  issueKey,
   signInUrl,
   signOut,
+  PortalApiError,
   type PortalConfig,
+  type PortalKey,
   type PortalSession,
 } from '../api/portal';
 
 /**
- * The portal, slices 2 and 3 (tasks 0185 and 0186).
+ * The portal, slices 2 to 4 (tasks 0185, 0186 and 0187).
  *
  * One route, plain HTML elements, and no styling worth the name. **Ugly is a
  * requirement here, not a concession**: anything presentable in this slice has
@@ -156,6 +159,11 @@ function SignIn() {
         <button type="button" onClick={onSignOut}>
           Sign out
         </button>
+        {/* Task 0187. Inside the authenticated branch, so signing out removes
+            it along with the key it was showing — the component unmounts and
+            its state goes with it, rather than leaving a stale credential on
+            screen for the next person at the keyboard. */}
+        <ApiKey />
       </>
     );
   }
@@ -177,6 +185,161 @@ function SignIn() {
       <a href={signInUrl()}>Sign in with Discord</a>
     </>
   );
+}
+
+/**
+ * The API key, masked (task 0187).
+ *
+ * Rendered only for a signed-in visitor, because that is the only state in which
+ * the backend will answer — and because a control that cannot work is worse than
+ * no control at all.
+ *
+ * **Two UI niceties, and only two.** Styling is task 0193's and this page is
+ * deliberately unstyled, so masking and copying had to earn their place ahead of
+ * it. Masking did because this renders during screen-shares and pairing
+ * sessions, and an API key on screen is a credential in somebody's recording.
+ * Copying did because a 40-character opaque string is not something anyone
+ * retypes — without a button, the first thing every visitor does is select it by
+ * hand, which defeats the masking they just toggled.
+ */
+function ApiKey() {
+  const [key, setKey] = useState<PortalKey | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [revealed, setRevealed] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  // The same guard `SignIn` above keeps, for a narrower reason. There is no
+  // supersede case here — the only caller is a button that disables itself
+  // while busy — but signing out unmounts this component, and a response that
+  // lands afterwards would be a credential written into the state of a
+  // component the visitor has just left. Cheap, and consistent with the
+  // component next to it, which is what stops the next reader wondering which
+  // of the two is wrong.
+  const live = useRef(true);
+  useEffect(() => {
+    live.current = true;
+    return () => {
+      live.current = false;
+    };
+  }, []);
+
+  // Nothing runs on mount. The backend treats `GET` and `POST` on `/key`
+  // identically — without a registry it cannot tell "deleted by hand" from
+  // "never issued", so a reveal has to be able to create — which means a page
+  // that fetched on load would issue a production API key to anyone who merely
+  // opened it. Keeping the only call behind a press is what makes the visitor's
+  // intent explicit rather than implied by having loaded a URL.
+  const onIssue = () => {
+    setBusy(true);
+    setError(null);
+    setCopied(false);
+    issueKey()
+      .then((issued) => {
+        if (!live.current) return;
+        setKey(issued);
+        // Masked on arrival, including the very first time. The visitor pressed
+        // the button and can press reveal; what they did not ask for is the
+        // credential appearing on screen while they were looking at the button.
+        setRevealed(false);
+      })
+      .catch((cause: unknown) => {
+        if (!live.current) return;
+        setError(describeFailure(cause));
+      })
+      .finally(() => {
+        if (live.current) setBusy(false);
+      });
+  };
+
+  const onCopy = () => {
+    if (!key) return;
+    // `navigator.clipboard` is absent on an insecure origin and in jsdom, and a
+    // missing API must not throw past this handler and blank the page. The
+    // fallback is honest text rather than a silent no-op: the visitor can still
+    // reveal the key and select it.
+    const clipboard = navigator.clipboard;
+    if (!clipboard) {
+      setError(
+        'Copying is not available here — reveal the key and copy it by hand.',
+      );
+      return;
+    }
+    clipboard
+      .writeText(key.value)
+      .then(() => {
+        setCopied(true);
+        setError(null);
+      })
+      .catch(() =>
+        setError('Could not copy — reveal the key and copy it by hand.'),
+      );
+  };
+
+  return (
+    <section>
+      <h2>Your API key</h2>
+
+      {!key && (
+        <>
+          <p>
+            One key, on the free plan. Pressing this again later shows the same
+            key rather than issuing another.
+          </p>
+          <button type="button" onClick={onIssue} disabled={busy}>
+            {busy ? 'Working…' : 'Get my API key'}
+          </button>
+        </>
+      )}
+
+      {key && (
+        <>
+          <p>
+            {/* Masked by default. The mask is a fixed run of dots, not a
+                prefix-and-suffix of the real value: showing the first and last
+                few characters of a credential is a habit borrowed from card
+                numbers, where the rest is high-entropy. Here it would leak part
+                of the secret for no benefit anyone asked for. */}
+            <code data-testid="api-key">
+              {revealed ? key.value : '••••••••••••••••••••••••••••••••'}
+            </code>
+          </p>
+          <button type="button" onClick={() => setRevealed((was) => !was)}>
+            {revealed ? 'Hide' : 'Reveal'}
+          </button>{' '}
+          <button type="button" onClick={onCopy}>
+            Copy
+          </button>
+          {copied && <p>Copied.</p>}
+          <p>
+            Send it as the <code>X-API-Key</code> header on <code>/v1/</code>{' '}
+            requests. Key <code>{key.name}</code>.
+          </p>
+        </>
+      )}
+
+      {error && (
+        <p>
+          Could not get your API key: <code>{error}</code>
+        </p>
+      )}
+    </section>
+  );
+}
+
+/**
+ * Turn a failed issue into something the visitor can act on.
+ *
+ * `401` is the one status that has an answer other than "try again": the
+ * session expired while the tab sat open, and no amount of retrying the button
+ * will help. `api/portal.ts` carries the status through for exactly this, and
+ * without this branch that would be a promise the page did not keep.
+ */
+function describeFailure(cause: unknown): string {
+  if (cause instanceof PortalApiError && cause.status === 401) {
+    return 'your session has expired — sign out and sign in again';
+  }
+  return cause instanceof Error ? cause.message : String(cause);
 }
 
 function PortalHome() {

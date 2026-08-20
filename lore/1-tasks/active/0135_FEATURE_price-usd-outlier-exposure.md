@@ -2,7 +2,7 @@
 id: "0135"
 title: "Decide whether the headline price_usd should be outlier-protected like vwap_24h"
 type: FEATURE
-status: backlog
+status: active
 related_adr: []
 related_tasks: ["0072", "0118", "0123", "0144", "0145", "0146", "0147"]
 tags: ["phase-future", "effort-large", "priority-high", "milestone-M2", "vwap", "clickhouse"]

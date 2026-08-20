@@ -17,11 +17,13 @@ use prices_api::{AppConfig, AppState, app};
 
 #[tokio::main]
 async fn main() {
+    // The same guard the Lambda uses, and it matters at least as much here: a
+    // local run holds production credentials, so a raised `RUST_LOG` would print
+    // real key values into a terminal with scrollback. See
+    // `prices_api::telemetry`, and `tests/telemetry_filter.rs` for what it was
+    // measured against.
     tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
+        .with_env_filter(prices_api::telemetry::env_filter())
         .init();
 
     // Plaintext local CH client (CLICKHOUSE_URL / _USER / _PASSWORD / _DATABASE,
@@ -45,6 +47,25 @@ async fn main() {
         .load_portal_oauth()
         .await
         .expect("failed to load portal OAuth credentials");
+
+    // Self-service key issuance (task 0187). This build has no Parameters and
+    // Secrets extension client, so the plan id comes from `PORTAL_FREE_PLAN_ID`
+    // — a local-only variable that is compiled out of the Lambda. The AWS
+    // credentials are whatever the ambient profile provides, and they are real:
+    //
+    //     PORTAL_ENABLED=true PORTAL_OAUTH_SECRET_FILE=.portal-oauth.json \
+    //       PORTAL_FREE_PLAN_ID=<plan id> AWS_PROFILE=<profile> \
+    //       cargo run -p prices-api --features local-server --bin serve
+    //
+    // **Every key this creates and deletes is a production key** — there is one
+    // environment (task 0183's module docs) and `PORTAL_ENABLED=false` protects
+    // the Lambda, not a laptop holding production credentials. Exercise the
+    // reconciler against keys this task created and nothing else; task 0194
+    // cleans up.
+    config
+        .load_portal_keys()
+        .await
+        .expect("failed to configure portal key issuance");
 
     let port: u16 = std::env::var("PORT")
         .ok()

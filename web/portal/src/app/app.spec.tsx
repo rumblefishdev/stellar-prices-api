@@ -454,3 +454,246 @@ describe('sign in with Discord', () => {
     );
   });
 });
+
+/**
+ * The API key (task 0187).
+ *
+ * Every test here starts signed in, because that is the only state the control
+ * exists in. `fetch` is stubbed rather than the module mocked, so these also
+ * cover `issueKey` in `src/api/portal.ts` — including that its URL is relative
+ * and its verb is `POST`.
+ */
+describe('the API key', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const KEY_URL = '/api-tokens/api/key';
+  const KEY_VALUE = 'aBcDeF0123456789aBcDeF0123456789aBcDeF01';
+
+  const signedInWithKey = (
+    key: Record<string, unknown> = {
+      key_id: 'abc123',
+      name: 'discord-308994132968210433-key',
+      value: KEY_VALUE,
+      created: true,
+    },
+  ) =>
+    stubRoutes({
+      [CONFIG_URL]: () => ({ json: async () => ({ enabled: true }) }),
+      [ME_URL]: () => ({
+        json: async () => ({
+          authenticated: true,
+          user_id: '308994132968210433',
+          username: 'adam',
+        }),
+      }),
+      [KEY_URL]: () => ({ json: async () => key }),
+    });
+
+  const renderApp = () =>
+    render(
+      <MemoryRouter initialEntries={['/']}>
+        <App />
+      </MemoryRouter>,
+    );
+
+  /**
+   * **Nothing is fetched until the visitor presses.** The backend's `GET` and
+   * `POST` on `/key` are the same operation — without a registry it cannot tell
+   * "deleted by hand" from "never issued", so a reveal has to be able to create
+   * — which means a page that asked on load would issue a real production API
+   * key to anyone who merely opened it.
+   */
+  it('issues nothing until the button is pressed', async () => {
+    const fetchMock = signedInWithKey();
+    renderApp();
+
+    await screen.findByRole('button', { name: /get my api key/i });
+    expect(fetchMock.mock.calls.some(([url]) => url === KEY_URL)).toBe(false);
+  });
+
+  it('issues the key on a relative POST and shows it masked', async () => {
+    const fetchMock = signedInWithKey();
+    renderApp();
+
+    fireEvent.click(
+      await screen.findByRole('button', { name: /get my api key/i }),
+    );
+
+    const shown = await screen.findByTestId('api-key');
+    // Masked on arrival — the visitor asked for a key, not for it to appear on
+    // screen while they were looking at the button. This renders during
+    // screen-shares.
+    expect(shown.textContent).not.toContain(KEY_VALUE);
+    expect(shown.textContent).toMatch(/^•+$/);
+
+    const call = fetchMock.mock.calls.find(([url]) => url === KEY_URL) as [
+      string,
+      RequestInit,
+    ];
+    expect(call[0].startsWith('http')).toBe(false);
+    expect(call[1].method).toBe('POST');
+  });
+
+  /**
+   * The mask must not be a prefix-and-suffix of the real value. That habit
+   * comes from card numbers, where the unmasked part is not the secret; here it
+   * would leak the beginning and end of a credential for no benefit.
+   */
+  it('leaks no part of the value while masked', async () => {
+    signedInWithKey();
+    renderApp();
+    fireEvent.click(
+      await screen.findByRole('button', { name: /get my api key/i }),
+    );
+    await screen.findByTestId('api-key');
+
+    for (const fragment of [
+      KEY_VALUE.slice(0, 4),
+      KEY_VALUE.slice(-4),
+      KEY_VALUE,
+    ]) {
+      expect(document.body.textContent).not.toContain(fragment);
+    }
+  });
+
+  it('reveals and re-hides the value on the toggle', async () => {
+    signedInWithKey();
+    renderApp();
+    fireEvent.click(
+      await screen.findByRole('button', { name: /get my api key/i }),
+    );
+    await screen.findByTestId('api-key');
+
+    fireEvent.click(screen.getByRole('button', { name: /^reveal$/i }));
+    expect(screen.getByTestId('api-key').textContent).toBe(KEY_VALUE);
+
+    fireEvent.click(screen.getByRole('button', { name: /^hide$/i }));
+    expect(screen.getByTestId('api-key').textContent).not.toContain(KEY_VALUE);
+  });
+
+  it('copies the real value even while it is masked', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal('navigator', { clipboard: { writeText } });
+    signedInWithKey();
+    renderApp();
+    fireEvent.click(
+      await screen.findByRole('button', { name: /get my api key/i }),
+    );
+    await screen.findByTestId('api-key');
+
+    fireEvent.click(screen.getByRole('button', { name: /^copy$/i }));
+
+    // The masked display must not become what gets copied — the reason the
+    // component keeps the value in state rather than reading it back out of the
+    // DOM.
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(KEY_VALUE));
+    expect(await screen.findByText(/^copied\.$/i)).toBeTruthy();
+  });
+
+  /**
+   * `navigator.clipboard` is absent on an insecure origin. A missing API must
+   * not throw past the handler and blank the page; it must say what to do
+   * instead.
+   */
+  it('says so when copying is unavailable, rather than throwing', async () => {
+    vi.stubGlobal('navigator', {});
+    signedInWithKey();
+    renderApp();
+    fireEvent.click(
+      await screen.findByRole('button', { name: /get my api key/i }),
+    );
+    await screen.findByTestId('api-key');
+
+    fireEvent.click(screen.getByRole('button', { name: /^copy$/i }));
+
+    expect(await screen.findByText(/copy it by hand/i)).toBeTruthy();
+    // And the key is still there to copy by hand.
+    expect(screen.getByTestId('api-key')).toBeTruthy();
+  });
+
+  it('reports a failure and leaves the button pressable', async () => {
+    stubRoutes({
+      [CONFIG_URL]: () => ({ json: async () => ({ enabled: true }) }),
+      [ME_URL]: () => ({
+        json: async () => ({
+          authenticated: true,
+          user_id: '308994132968210433',
+          username: 'adam',
+        }),
+      }),
+      [KEY_URL]: () => ({ ok: false, status: 502 }),
+    });
+    renderApp();
+
+    fireEvent.click(
+      await screen.findByRole('button', { name: /get my api key/i }),
+    );
+
+    expect(await screen.findByText(/could not get your api key/i)).toBeTruthy();
+    // A dead end is worse than a failure: a `502` here is usually transient, so
+    // the control the visitor would use to retry has to survive it.
+    expect(
+      screen.getByRole('button', { name: /get my api key/i }),
+    ).toBeTruthy();
+  });
+
+  /**
+   * `401` is the one failure with an answer other than "press it again": the
+   * session expired while the tab sat open. `api/portal.ts` carries the status
+   * through for exactly this, and without this branch that would be a promise
+   * the page did not keep — the visitor would be told "answered 401" and left
+   * to work out that they need to sign in again.
+   */
+  it('tells the visitor to sign in again when the session has expired', async () => {
+    stubRoutes({
+      [CONFIG_URL]: () => ({ json: async () => ({ enabled: true }) }),
+      [ME_URL]: () => ({
+        json: async () => ({
+          authenticated: true,
+          user_id: '308994132968210433',
+          username: 'adam',
+        }),
+      }),
+      [KEY_URL]: () => ({ ok: false, status: 401 }),
+    });
+    renderApp();
+
+    fireEvent.click(
+      await screen.findByRole('button', { name: /get my api key/i }),
+    );
+
+    expect(await screen.findByText(/session has expired/i)).toBeTruthy();
+    // And not the raw status, which says nothing a visitor can act on.
+    expect(document.body.textContent).not.toContain('answered 401');
+  });
+
+  /** The key belongs to the session, so signing out must take it off screen. */
+  it('is not rendered while signed out', async () => {
+    openAndSignedOut();
+    renderApp();
+
+    await screen.findByRole('link', { name: /sign in with discord/i });
+    expect(
+      screen.queryByRole('button', { name: /get my api key/i }),
+    ).toBeNull();
+    expect(screen.queryByTestId('api-key')).toBeNull();
+  });
+
+  /**
+   * The closed portal must offer no key control at all: the route answers an
+   * empty `404` while the flag is off, and until task 0189's eligibility gate
+   * lands that flag is the only thing between a stranger and a real key.
+   */
+  it('is not rendered while the portal is closed', async () => {
+    stubFetch({ json: async () => ({ enabled: false }) });
+    renderApp();
+
+    await screen.findByText(/not yet available/i);
+    expect(screen.queryAllByRole('button')).toHaveLength(0);
+  });
+});

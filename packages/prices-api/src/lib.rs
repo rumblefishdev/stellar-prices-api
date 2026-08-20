@@ -20,6 +20,7 @@ pub mod ops;
 pub mod oracles;
 pub mod portal;
 pub mod state;
+pub mod telemetry;
 
 use std::sync::Arc;
 

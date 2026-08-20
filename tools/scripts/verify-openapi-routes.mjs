@@ -563,6 +563,170 @@ if (portalGatewayRoutes.length === 0) {
 }
 
 // ---------------------------------------------------------------------------
+// Task 0187: self-service key issuance — the three settings it cannot see.
+// ---------------------------------------------------------------------------
+// Every property below is real only in a deployed account, invisible to the
+// Rust suite (which drives a mock control plane), and fails in a way that
+// reads as somebody else's bug.
+const computeTemplate = readJson(
+  join(repoRoot, 'infra', 'cdk.out', 'Prices-production-Compute.template.json'),
+  'run `npm run infra:synth:production` first',
+);
+
+/** Every resource of a type, across a template. */
+const resourcesOfType = (tpl, type) =>
+  Object.entries(tpl.Resources ?? {}).filter(([, r]) => r.Type === type);
+
+// --- 4. The two stacks agree on the SSM parameter name. ---
+// `ApiGatewayStack` WRITES the usage-plan id to a parameter; `ComputeStack`
+// tells the handler to READ that name. They cannot reference each other — the
+// dependency runs Compute -> Gateway, so importing the plan would be a cycle —
+// so the two strings are typed out twice, in two files, and nothing but this
+// keeps them equal.
+//
+// Drift is silent in the worst way: `PORTAL_FREE_PLAN_PARAM` names a parameter
+// that does not exist, the extension answers 404, and `load_portal_keys` fails
+// COLD START. One router serves every route group (ADR 0008), so that is `/v1`
+// down — but only on the deploy that first opens the portal, long after the
+// edit that broke it.
+const apiHandler = resourcesOfType(
+  computeTemplate,
+  'AWS::Lambda::Function',
+).find(([id]) => id.startsWith('ApiHandlerFunction'));
+if (!apiHandler) {
+  fail(
+    'error: no ApiHandlerFunction in the Compute template.',
+    '  → this check cannot verify the portal key wiring. If the construct id ' +
+      'changed, teach this check the new one rather than deleting it.',
+  );
+}
+const handlerEnv = apiHandler[1].Properties?.Environment?.Variables ?? {};
+const planParamRead = handlerEnv['PORTAL_FREE_PLAN_PARAM'];
+
+const planParamWritten = resourcesOfType(template, 'AWS::SSM::Parameter')
+  .map(([, r]) => r.Properties?.Name)
+  .filter(
+    (n) => typeof n === 'string' && n.endsWith('/pricing-api-free-plan-id'),
+  );
+
+if (planParamWritten.length !== 1) {
+  fail(
+    `error: expected exactly one SSM parameter ending in ` +
+      `\`/pricing-api-free-plan-id\` in the ApiGateway template, found ` +
+      `${planParamWritten.length}.`,
+    '  → task 0187 reads the usage-plan id from it at cold start. Without it ' +
+      'the portal cannot attach a key to a plan, and a key on no plan ' +
+      'authenticates and is then refused.',
+  );
+}
+if (planParamRead !== planParamWritten[0]) {
+  fail(
+    `error: the api-handler reads PORTAL_FREE_PLAN_PARAM=` +
+      `${JSON.stringify(planParamRead ?? null)} but ApiGatewayStack publishes ` +
+      `the plan id at ${JSON.stringify(planParamWritten[0])}.`,
+    '  → the two stacks cannot reference each other (Compute -> Gateway ' +
+      'would be a cycle), so this pair is two hand-typed strings. A mismatch ' +
+      'fails Lambda INIT on the deploy that opens the portal, which takes ' +
+      '/v1 down with it. Fix both in infra/src/lib/stacks/compute-stack.ts ' +
+      'and api-gateway-stack.ts.',
+  );
+}
+
+// --- 5. The control-plane grants are scoped. ---
+// `CreateApiKey` has no ARN for "keys this function created", so the create
+// grant is necessarily broad — that limit is accepted and documented in
+// compute-stack.ts. What must NOT happen is it getting broader by accident: an
+// `apigateway:*` action, or a `Resource: "*"`, hands the api-handler every API
+// Gateway operation in the account, including changing the usage plan's limits
+// and deleting the REST API.
+const apigatewayStatements = [];
+for (const tpl of [computeTemplate, template]) {
+  for (const [, policy] of resourcesOfType(tpl, 'AWS::IAM::Policy')) {
+    for (const st of policy.Properties?.PolicyDocument?.Statement ?? []) {
+      const actions = [st.Action ?? []].flat();
+      if (actions.some((a) => String(a).startsWith('apigateway:'))) {
+        apigatewayStatements.push(st);
+      }
+    }
+  }
+}
+if (apigatewayStatements.length === 0) {
+  fail(
+    'error: no IAM statement grants any `apigateway:` action.',
+    '  → task 0187 issues keys through the API Gateway control plane; without ' +
+      'these grants every issue and every reveal fails at runtime with ' +
+      'AccessDenied. Restore them in compute-stack.ts and api-gateway-stack.ts.',
+  );
+}
+for (const st of apigatewayStatements) {
+  const actions = [st.Action ?? []].flat().map(String);
+  const resources = [st.Resource ?? []].flat();
+  if (actions.includes('apigateway:*')) {
+    fail(
+      `error: an IAM statement grants \`apigateway:*\` (sid ` +
+        `${JSON.stringify(st.Sid ?? null)}).`,
+      '  → task 0187 grants four verbs on two resources and nothing else. ' +
+        '`apigateway:*` on the api-handler role includes deleting the REST ' +
+        'API and rewriting the usage plan the whole service is metered by.',
+    );
+  }
+  for (const resource of resources) {
+    if (resource === '*') {
+      fail(
+        `error: an \`apigateway:\` statement has Resource "*" (sid ` +
+          `${JSON.stringify(st.Sid ?? null)}).`,
+        '  → the grants are meant to name `/apikeys`, `/apikeys/*` and the ' +
+          'one usage plan. A bare "*" also covers every other REST API in ' +
+          'the account.',
+      );
+    }
+  }
+}
+
+// --- 6. The portal's methods are uncached AT THE GATEWAY. ---
+// Not deferrable to task 0194, and not the same check as the CloudFront one
+// above. `deployOptions.cachingEnabled` is ON in this stack and the gateway
+// cache has NO cache-key parameters on these methods, so every caller would
+// collapse onto ONE entry — and a cached reveal hands one visitor another
+// visitor's API key. The handler also sets `Cache-Control: no-store`, which the
+// gateway cache does not honour: it caches by configuration, not by response
+// header.
+const stages = resourcesOfType(template, 'AWS::ApiGateway::Stage');
+if (stages.length !== 1) {
+  fail(
+    `error: expected exactly one AWS::ApiGateway::Stage, found ${stages.length}.`,
+    '  → this check reads the portal method settings off it.',
+  );
+}
+const methodSettings = stages[0][1].Properties?.MethodSettings ?? [];
+for (const httpMethod of ['GET', 'POST']) {
+  const entry = methodSettings.find(
+    (m) =>
+      String(m.ResourcePath ?? '').startsWith(PORTAL_API_PREFIX) &&
+      m.HttpMethod === httpMethod,
+  );
+  if (!entry) {
+    fail(
+      `error: no method setting for ${httpMethod} under ${PORTAL_API_PREFIX} ` +
+        `in the synthesized stage.`,
+      '  → task 0187 requires the key routes to be uncached and throttled. ' +
+        'Without an entry they fall back to the `/*` default, which is not ' +
+        'the statement this task needs to be able to point at.',
+    );
+  }
+  if (entry.CachingEnabled !== false) {
+    fail(
+      `error: ${httpMethod} ${entry.ResourcePath} has CachingEnabled=` +
+        `${JSON.stringify(entry.CachingEnabled ?? null)}.`,
+      '  → the gateway cache has no cache-key parameters on this method, so ' +
+        'every caller shares one entry. A cached `GET /api-tokens/api/key` ' +
+        "serves one visitor another visitor's API key. Set " +
+        '`cachingEnabled: false` in `portalSettings` in api-gateway-stack.ts.',
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Spec side.
 // ---------------------------------------------------------------------------
 // `head` IS compared — see GATEWAY_SKIPPED_METHODS above. `options` is absent
