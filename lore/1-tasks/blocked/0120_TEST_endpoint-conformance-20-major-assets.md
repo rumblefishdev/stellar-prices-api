@@ -160,23 +160,46 @@ response — errors included — against the **live** spec from `/api-docs-json`
 for the free usage plan; ~2.5 min per run; report written as
 `conformance-0120-report-<ts>.json` (gitignored, regenerable).
 
-**Run 2026-08-20 07:05 UTC: 724 pass, 54 fail, 7 skip.** Zero schema
-failures — the entire failure surface is the correctness layer, and every
-failure maps to an existing defect task:
+**Reference run — 2026-08-20 07:21 UTC, from the committed suite via
+`npm run conformance:0120`: 762 pass, 42 fail, 5 skip.** Zero schema failures
+in every run to date: the entire failure surface is the correctness layer, and
+every failure maps to an existing defect task.
 
-| Failing check | Count | Task |
-|---|---|---|
-| `price_usd` zero sentinel | 17 | [[0135]] (2nd failure mode; contract decided 08-05) |
-| `vwap_24h` zero + `sources` empty (fresh tips, volume > 0) | 24 | [[0135]] (C2 limit case — every source un-enriched at once) |
-| OHLCV windows empty (USDC; CBIJ, AUD, RON, BOL, EQL) | 12 | [[0170]] (default USD mode pins quote=USDC) |
-| Canonical USDC `/price` → 404 | 1 | [[0178]] |
+⚠️ **Cite the classes, not the counts.** Three runs, the last two 16 minutes
+apart:
 
-The 7 skips are the designed batch-vs-single path: the tip moved between the
+| Failing check | 08-19 08:16 | 08-20 07:05 | 08-20 07:21 | Task |
+|---|---|---|---|---|
+| `price_usd` zero sentinel | 18 | 17 | **13** | [[0135]] (2nd failure mode; contract decided 08-05) |
+| `vwap_24h` zero sentinel | 12 | 12 | **8** | [[0135]] (C2 limit case) |
+| `sources` empty (volume > 0) | 12 | 12 | **8** | [[0135]] (C2 limit case) |
+| OHLCV window empty | 12 | 12 | **12** | [[0170]] (default USD mode pins quote=USDC) |
+| Canonical USDC `/price` → 404 | 1 | 1 | **1** | [[0178]] |
+
+**The split in that table is itself the finding, and it corroborates the
+root-cause attribution independently of any code reading.** The two
+[[0170]]/[[0178]] rows are *perfectly* stable across all three runs — they are
+structural, the same assets every time. The three [[0135]] rows move, and not
+monotonically: between 07:05 and 07:21 the `sources`-empty set lost BTC, CBIJ,
+USDCAllow, AUD and yUSDC but **gained XRP**. Membership churns in both
+directions on a ~15-minute timescale, which is exactly the
+enrichment-timing dependence 0135's third failure mode describes and which the
+0072 runbook had already observed on `native` alone (`sources` "flickers as
+un-enriched candles enter and leave the 24h window"). A per-asset data problem
+could not behave this way.
+
+Consequence for [[0128]]: quote this suite as "N failure classes, all owned by
+0135/0170/0178", never as "N failing checks" — the count is not reproducible
+15 minutes later, and a reviewer re-running it will get a different number.
+An earlier draft of this section claimed counts "drift by one or two"; the
+07:21 run disproves that and it has been corrected here.
+
+The 5 skips are the designed batch-vs-single path: the tip moved between the
 single and the batch call, so the values are not comparable at a common
-timestamp. Counts drift by one or two between runs as tips enrich — the first
-run (08-19, before the suite hardening below) read 752/55/0 with 18 rather
-than 17 `price_usd` zeroes. The failure *classes* have been stable across
-three runs.
+timestamp. Pagination grew from 3,880 assets over 20 pages to 4,081 over 21
+between 08-19 and 08-20 and stayed exhaustive and duplicate-free at both
+sizes — the cursor holds up while the underlying table is being written to,
+though "exhaustive" is necessarily modulo rows inserted mid-walk.
 
 Every failure class turned out to be **already owned by an okarcz task** with
 a deeper diagnosis; the run is independent confirming evidence, folded into

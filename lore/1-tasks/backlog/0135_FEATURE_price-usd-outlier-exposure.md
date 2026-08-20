@@ -73,6 +73,24 @@ history:
       0207/0209 fold into this task; the 0120 suite
       (`npm run conformance:0120`) is the regression gate — its
       price-sentinel checks must go green when the decided contract ships.
+  - date: 2026-08-20
+    status: backlog
+    who: stkrolikiewicz
+    note: >
+      Two [[0120]] runs 16 minutes apart turn the previous day's static
+      counts into a much stronger signal: this task's three failure classes
+      **churn in both directions** while the structural ones do not. Between
+      07:05 and 07:21 UTC the `sources`-empty set lost BTC, CBIJ, USDCAllow,
+      AUD and yUSDC but gained XRP (12 → 8); `price_usd = 0` went 18 → 17 →
+      13 across three runs. Over the same three runs [[0170]]'s empty-OHLCV
+      count held at exactly 12 and [[0178]]'s USDC 404 at exactly 1, same
+      assets every time. A per-asset data defect cannot move like that — the
+      churn is the enrichment-timing dependence of the third failure mode
+      (`current.sql:121` + `:140`), reproduced across many assets rather
+      than the single `native` flicker the 0072 runbook recorded. Practical
+      consequence for whoever ships the decided `argMaxIf` contract: a
+      before/after comparison must be taken from runs minutes apart, not
+      days, or normal churn will swamp the effect.
 ---
 
 # price_usd is not outlier-protected
