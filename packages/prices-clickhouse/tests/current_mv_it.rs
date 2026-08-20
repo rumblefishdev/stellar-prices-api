@@ -170,8 +170,14 @@ async fn current_prices_mv_computes_price_volume_and_market_cap() {
 ///   4 BAR — one source → the filter must be a NO-OP
 ///   5 DUO — exactly two far-apart sources → the >=3 guard must keep BOTH
 ///   6 EXO — every source unpriced → no divide-by-zero, `sources` = `{}`
-///   7 ZER — priced HISTORY, un-enriched TIP → the task-0138 -100% case
+///   7 ZER — priced HISTORY, un-enriched TIP → 0135: latest priced close wins
 ///   8 DIP — a genuine ~-100% crash → must NOT be swallowed by 0138's guard
+///  10 STA — priced history OLDER than the 2h carry bound → back to sentinels,
+///           and the change_* numerator guards proven load-bearing
+///  11 LAG — SINGLE source, priced history, un-enriched tip → carried (the
+///           shape the XLM acceptance criterion names)
+///  12 TRI — three sources, one carried past an un-enriched tip → the §5.5
+///           mask arms over the carried population and keeps all three
 #[tokio::test]
 #[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
 async fn current_prices_mv_writes_0072_columns_and_filters_outliers() {
@@ -187,11 +193,22 @@ async fn current_prices_mv_writes_0072_columns_and_filters_outliers() {
              VALUES (1,'XLM','classic','','',1), (3,'FOO','classic','GFOO','',1), \
                     (4,'BAR','classic','GBAR','',1), (5,'DUO','classic','GDUO','',1), \
                     (6,'EXO','classic','GEXO','',1), (7,'ZER','classic','GZER','',1), \
-                    (8,'DIP','classic','GDIP','',1)"
+                    (8,'DIP','classic','GDIP','',1), (10,'STA','classic','GSTA','',1), \
+                    (11,'LAG','classic','GLAG','',1), (12,'TRI','classic','GTRI','',1)"
         ))
         .execute()
         .await
         .expect("assets");
+
+    // Supply for asset 7 so market_cap_usd = price_usd x supply is assertable
+    // (without a row the LEFT JOIN misses and market_cap is 0 for any price).
+    admin
+        .query(&format!(
+            "INSERT INTO {db}.asset_supply (asset_id, token_supply) VALUES (7, 1000)"
+        ))
+        .execute()
+        .await
+        .expect("asset_supply");
 
     // ts_min_ago / close_usd / volume_quote_usd / source, per asset.
     let rows: &[(u32, i64, &str, &str, &str)] = &[
@@ -222,6 +239,23 @@ async fn current_prices_mv_writes_0072_columns_and_filters_outliers() {
         // 0138 control: a REAL near-total crash. The guard must leave this alone.
         (8, 30, "2.00", "500", "sdex"),
         (8, 1, "0.0001", "10", "sdex"),
+        // 10 STA — the carry BOUND: priced history 190 min behind the tip
+        // (> 2h), so the carry must NOT apply and every column returns to its
+        // sentinel. Its 1h ref row below gives change_7d a REAL denominator,
+        // which makes this the regression test for the 7d numerator guard.
+        (10, 190, "2.00", "500", "sdex"),
+        (10, 1, "0", "0", "sdex"),
+        // 11 LAG — single source, priced history INSIDE the bound: the carry
+        // must keep the venue alive on every column.
+        (11, 30, "2.00", "300", "sdex"),
+        (11, 1, "0", "0", "sdex"),
+        // 12 TRI — three sources, aquarius carried past an un-enriched tip:
+        // the >=3 mask ARMS over a population containing a carried price and
+        // must keep all three (all within 2% of the median).
+        (12, 10, "1.00", "100000", "sdex"),
+        (12, 9, "1.02", "50000", "soroswap"),
+        (12, 50, "1.01", "20000", "aquarius"),
+        (12, 1, "0", "0", "aquarius"),
     ];
     for (i, (asset, mins, cu, vol, src)) in rows.iter().enumerate() {
         admin
@@ -256,9 +290,10 @@ async fn current_prices_mv_writes_0072_columns_and_filters_outliers() {
             .expect("1h ref row");
     }
 
-    // 7d references for the 0138 pair, so change_7d_pct has a real denominator
-    // to divide the zero/near-zero tip by.
-    for asset in [7_u32, 8] {
+    // 7d references for assets whose change_7d needs a real denominator:
+    // 7/8 (the 0138 pair) and 10 (over-bound price_usd = 0 beside a REAL
+    // baseline — the exact shape only the numerator guard protects).
+    for asset in [7_u32, 8, 10] {
         admin
             .query(&format!(
                 "INSERT INTO {db}.price_ohlcv_1h \
@@ -285,7 +320,7 @@ async fn current_prices_mv_writes_0072_columns_and_filters_outliers() {
             .fetch_one()
             .await
             .expect("count");
-        if n >= 7 {
+        if n >= 10 {
             ready = true;
             break;
         }
@@ -481,6 +516,95 @@ async fn current_prices_mv_writes_0072_columns_and_filters_outliers() {
     assert!(
         (zer_xlm - 3.8).abs() < 1e-6,
         "price_xlm must be 1.90 / 0.50 = 3.8, got {zer_xlm}"
+    );
+
+    // ── market_cap follows the priced close too: 1.90 x supply 1000 ───────
+    let zer_mc = scalar_f64(&admin, &f("market_cap_usd", 7)).await;
+    assert!(
+        (zer_mc - 1900.0).abs() < 1e-6,
+        "market_cap_usd must be 1.90 * 1000 = 1900, got {zer_mc}"
+    );
+
+    // ── 0135 carry BOUND: history older than 2h must NOT be carried ────────
+    // Asset 10's only priced candle is 190 min behind its tip. Publishing it
+    // would certify a 3h-old close as current (updated_at carries no age), so
+    // every column returns to its sentinel instead.
+    let sta_p = scalar_f64(&admin, &f("price_usd", 10)).await;
+    assert!(
+        sta_p.abs() < 1e-9,
+        "price_usd beyond the 2h carry bound must be the 0 sentinel, got {sta_p}"
+    );
+    let sta_srcs: String = admin
+        .query(&s("sources", 10))
+        .fetch_one()
+        .await
+        .expect("sta sources");
+    assert_eq!(
+        sta_srcs, "{}",
+        "an over-bound source must drop out of sources"
+    );
+    // The numerator guards are LOAD-BEARING here, not belt-and-braces:
+    // open_24h is a real 2.00 and close_7d_ago a real 1.00, so without the
+    // nullIf on the numerator both columns would fabricate -100%.
+    let sta_24 = scalar_f64(&admin, &f("change_24h_pct", 10)).await;
+    assert!(
+        sta_24.abs() < 1e-9,
+        "change_24h_pct must be the 0 sentinel, NOT -100 (real open_24h=2.00 \
+         beside a zero price_usd), got {sta_24}"
+    );
+    let sta_7d = scalar_f64(&admin, &f("change_7d_pct", 10)).await;
+    assert!(
+        sta_7d.abs() < 1e-9,
+        "change_7d_pct must be the 0 sentinel, NOT -100 (real 1h baseline 1.00 \
+         beside a zero price_usd) — this is the only fixture exercising the 7d \
+         numerator guard, got {sta_7d}"
+    );
+
+    // ── 0135 single-source carry: the shape the XLM AC names ───────────────
+    let lag_p = scalar_f64(&admin, &f("price_usd", 11)).await;
+    let lag_vwap = scalar_f64(&admin, &f("vwap_24h", 11)).await;
+    let lag_srcs: String = admin
+        .query(&s("sources", 11))
+        .fetch_one()
+        .await
+        .expect("lag sources");
+    assert!(
+        (lag_p - 2.0).abs() < 1e-9,
+        "single-source asset with an in-bound un-enriched tip must publish its \
+         latest priced close, got {lag_p}"
+    );
+    assert!(
+        (lag_vwap - 2.0).abs() < 1e-6,
+        "single carried source must still yield a vwap, got {lag_vwap}"
+    );
+    assert!(
+        lag_srcs.contains("sdex") && lag_srcs.contains("\"2\""),
+        "the carried venue must appear in sources at its priced close, got {lag_srcs}"
+    );
+
+    // ── 0135 x §5.5: the mask arms over a population WITH a carried price ──
+    // Three sources, aquarius carried (1.01 from 50 min ago, tip un-enriched).
+    // All three sit within 2% of the median, so arming must keep all three —
+    // a carried-but-plausible price must not evict anyone.
+    let tri_vwap = scalar_f64(&admin, &f("vwap_24h", 12)).await;
+    let tri_srcs: String = admin
+        .query(&s("sources", 12))
+        .fetch_one()
+        .await
+        .expect("tri sources");
+    assert!(
+        (tri_vwap - 1.007_058_823_5).abs() < 1e-6,
+        "vwap must weight all three sources ((1.00*100000 + 1.02*50000 + \
+         1.01*20000) / 170000 = 1.00705882), got {tri_vwap}"
+    );
+    assert!(
+        tri_srcs.contains("sdex") && tri_srcs.contains("soroswap") && tri_srcs.contains("aquarius"),
+        "all three venues incl. the carried one must be in sources, got {tri_srcs}"
+    );
+    let tri_p = scalar_f64(&admin, &f("price_usd", 12)).await;
+    assert!(
+        (tri_p - 1.02).abs() < 1e-9,
+        "price_usd is the newest priced close (soroswap 1.02), got {tri_p}"
     );
 
     // ── task 0138: the guard must NOT swallow a genuine crash ──────────────

@@ -189,16 +189,31 @@
 -- non-nullable, so "unavailable" and a real value share a type and can only be
 -- told apart by value. That is a weaker contract than the value-or-absent one
 -- above, and consumers have to handle it explicitly:
---   price_xlm        Decimal(38,14). 0 = unavailable (no XLM market, or an
---                    un-enriched tip) — indistinguishable from a true 0.
+--   price_usd        Decimal(38,14). Since task 0135 this is the latest
+--                    PRICED close: an un-enriched tip is skipped while the
+--                    newest priced candle is within 2h of the newest candle
+--                    overall, so the value can be up to ~2h STALE while
+--                    updated_at (refresh time) reads fresh — updated_at is NOT
+--                    a price-age signal. 0 = no priced candle inside that
+--                    bound (an un-enriched tip alone no longer produces 0).
+--   price_xlm        Decimal(38,14). 0 = unavailable (no XLM market, or
+--                    price_usd on its 0 sentinel per the 0135 rule above) —
+--                    indistinguishable from a true 0. An un-enriched tip by
+--                    itself no longer zeroes it.
 --   change_24h_pct / change_7d_pct
 --                    Decimal(10,4) percent, clamped to ±999999.9999 (an
 --                    overflow would poison the whole MV refresh). 0 =
 --                    unavailable AND 0 = a genuinely flat 24h/7d; the two are
 --                    NOT distinguishable. Treat 0 as "no signal".
+--                    change_7d_pct's baseline is the oldest priced 1h close in
+--                    the [7d, 5d] band — no baseline there means the sentinel,
+--                    never a shorter-span move mislabelled as 7d.
 --   volume_24h_usd / market_cap_usd / vwap_24h
 --                    Decimal(38,14). 0 = unavailable. market_cap_usd is 0
---                    whenever circulating supply is absent (best-effort join).
+--                    whenever circulating supply is absent (best-effort join);
+--                    it multiplies price_usd, and vwap_24h weights per-source
+--                    latest priced closes, so both inherit the ≤2h staleness
+--                    bound described under price_usd.
 --   sources          String holding a JSON object — NOT a JSON-typed column.
 --                    THREE states, and '' is the trap:
 --                      ''   — the MV has never rewritten this row (table

@@ -252,17 +252,19 @@ WHERE asset_kind = 'native'
 FORMAT Vertical;
 ```
 
-XLM's own `price_xlm` should be `1` — but **do not treat anything else as an
-abort**. The MV divides `price_usd` by the `xlm_usd` scalar, and the two are not
-computed identically: `price_usd` is `argMax(close_usd, timestamp)` with **no**
-`close_usd > 0` filter (`current.sql:203`), while `xlm_usd` filters
-`close_usd > 0` (`current.sql:113`). So if XLM's newest `price_ohlcv_1m` candle
-is un-enriched — enrichment is a separate, lagging pass — `price_usd` reads 0
-and `price_xlm` is 0, not 1. A tie at the max timestamp can likewise let the two
-aggregations pick different rows and land slightly off 1.
+XLM's own `price_xlm` should be `1`, and a small deviation is tolerable (a tie
+at the max timestamp can let the `price_usd` and `xlm_usd` aggregations pick
+different rows and land slightly off 1).
 
-A `price_xlm` of 0 or ≈1-but-not-exactly-1 for XLM therefore diagnoses
-**enrichment lag, not a broken view**. Confirm before reacting:
+> ⚠️ **Semantics changed with task 0135.** Historically `price_usd` was an
+> unfiltered `argMax(close_usd, timestamp)` and an un-enriched XLM tip zeroed
+> `price_xlm`, so this step used to say "0 diagnoses enrichment lag, not a
+> broken view". Since 0135 both aggregates skip un-enriched candles (bounded
+> 2h carry, `argMaxIf` in `current.sql`), so an un-enriched tip alone can no
+> longer produce 0 here. **Post-0135, `price_xlm = 0` on XLM means no priced
+> XLM candle within the carry bound — a genuinely abnormal state (dead
+> enrichment or a broken view) and worth aborting on.** Confirm the cause
+> first:
 
 ```sql
 -- Is XLM's own tip enriched? A zero close_usd at the newest timestamp is the cause.
@@ -317,19 +319,15 @@ curl -sS -H "x-api-key: $PRICES_API_KEY" \
 **object** (not `{}`). A `{}` here while the CH columns are populated means the
 handler is still the stubbed build — re-check step 6 shipped.
 
-> ⚠️ **Do NOT gate on `price_xlm` / `change_24h_pct` being non-`"0"` — least of
-> all on `native`.** An earlier version of this step did, and it is a
-> **false-abort trigger** on exactly the asset it curls. XLM's own
-> `price_usd` is an unfiltered `argMax(close_usd, timestamp)`, so an un-enriched
-> tip zeroes it; `price_xlm` is then `0`, and since [[0138]] `change_24h_pct` is
-> `0` too (before 0138 it was **`-100`**, which passed this check while being
-> flatly wrong). A correct rollout therefore reads as "still stubbed" and the
-> operator redeploys or aborts for nothing.
->
-> This is the third place the same asymmetry has produced a bad assertion —
-> step 5's "XLM `price_xlm` must be exactly 1" was softened during the PR #158
-> review for the identical reason. Treat any "must be non-zero" check on a
-> price-derived column as suspect until [[0135]] closes.
+> ⚠️ **Historical note, revised by task 0135.** Before 0135, `price_usd` was
+> an unfiltered `argMax`, an un-enriched tip legitimately zeroed
+> `price_xlm`/`change_24h_pct`, and gating on them was a false-abort trigger
+> (this bit three separate times — see PR #158). **Since 0135 the calculus is
+> reversed for `price_usd`/`price_xlm`:** the MV skips un-enriched candles
+> (bounded 2h carry), so on a liquid asset like `native` a `price_usd` of
+> `"0"` after a correct deploy is abnormal and IS a deploy-verification
+> failure. `change_24h_pct`/`change_7d_pct` remain "0 = no signal" sentinels
+> (a genuinely flat window also reads 0) — still do not gate on those.
 
 If you want a positive check on the numeric columns, pick an asset **known to
 have an enriched tip** rather than `native`, and read it from ClickHouse first

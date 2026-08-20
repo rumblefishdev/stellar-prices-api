@@ -104,12 +104,38 @@ history:
       fixture 7 rewritten from pinning the bug to asserting the contract
       (price_usd 1.90, change -5%/+90%, vwap weights both venues,
       price_xlm 3.8) — all 3 tests green on the 26.3.10.60 pin. The
-      [[0120]] conformance suite is the regression gate (42 of its 55
-      failures are this task's failure modes). STILL OPEN before
+      [[0120]] conformance suite is the regression gate — its price-sentinel
+      and empty-`sources` classes are this task's failure modes (cite the
+      classes, not run counts: they churn between runs). STILL OPEN before
       completion: the failure-mode-1 decision (outlier-filter `price_usd`
       vs leave-and-document vs confidence signal) with its change_*_pct
       propagation, and post-deploy verification (zero_but_vwap_ok = 0,
       XLM publishes a real price, 0120 price checks green).
+  - date: 2026-08-20
+    status: active
+    who: stkrolikiewicz
+    note: >
+      Multi-agent review of PR #228 found the first cut of the contract was
+      unsafe as written; reworked. **The carry is now BOUNDED (2 h)** at both
+      sites: an unbounded carry let a chronically-unpriced venue keep voting
+      in the §5.5 median — the review demonstrated a 3-source case where the
+      only LIVE venue is evicted by two stale ones, turning a correct row
+      into a wrong one — and let `price_usd` certify a close up to 24 h old
+      while `updated_at` (refresh time, no age signal) read fresh. Also
+      fixed: `ref_7d` now reads the [7d, 5d] band with `argMinIf` (it was
+      taking the oldest close AVAILABLE, so a freshly-listed asset published
+      a 2-hour move labelled 7-day — a defect the old zero sentinel had been
+      masking for ~396 assets); `xlm_usd` converted to the same `argMaxIf`
+      idiom. Coverage added for the shapes that had none: over-bound asset
+      (proves the change_* numerator guards are load-bearing, incl. the only
+      test of the 7d one), single-source carry (the XLM AC shape), 3-source
+      mask arming over a carried price, and `market_cap_usd` against a
+      seeded supply. New static lint
+      `current_sql_uses_no_unguarded_argmax_on_close_usd` gives the contract
+      CI enforcement (the CH tests are `#[ignore]`d and never run there).
+      Contracts synced: `views.sql` sentinel table, the 0072 rollout runbook
+      (its post-deploy guidance was inverted by this change), `dto.rs`
+      doc-comments (the published OpenAPI descriptions) and §4.2.
 ---
 
 # price_usd is not outlier-protected
@@ -273,18 +299,26 @@ base for whichever option is chosen.
       `sources` field).
 - [ ] If filtered: `current.sql` updated, `current_mv_it.rs` asserts the new
       behaviour, and the change is called out as a published-value change.
-- [ ] If left as-is: the §4.2 `/price` docs state that `price_usd` is unfiltered
-      and `vwap_24h` is the de-noised figure.
-- [x] The un-enriched-tip zero is resolved: either `price_usd` skips unpriced
-      candles, or the 0-vs-genuine-price ambiguity is documented and given a
-      staleness bound. `zero_but_vwap_ok` should be 0 afterwards.
+- [x] If left as-is: the §4.2 `/price` docs state that `price_usd` is unfiltered
+      and `vwap_24h` is the de-noised figure. (Done — failure mode 1 itself is
+      still undecided; §4.2 now states the asymmetry rather than hiding it.)
+- [x] The un-enriched-tip zero is resolved: `price_usd` skips unpriced candles,
+      and the staleness is **bounded in the query** (2 h carry, not just
+      documented) so an hours-old close can never be certified as current.
+      `zero_but_vwap_ok` verification is post-deploy and still open.
 - [x] `market_cap_usd` and `price_xlm` no longer collapse to 0 purely because the
-      newest candle is un-enriched. (Asserted in `current_mv_it.rs` fixture 7.)
+      newest candle is un-enriched. (Both asserted on fixture 7 in
+      `current_mv_it.rs`: `price_xlm` 3.8 and `market_cap_usd` 1900 against a
+      seeded supply — the first version of this PR ticked the box citing a
+      `market_cap_usd` assertion that did not exist.)
 - [ ] Native **XLM** specifically publishes a real `price_usd` — the case BE
       measured and the one [[0144]] shows is close to chronic, since XLM's
       newest candle is both usually newer than the last enrichment pass and
       often an exotic-quote pair that will never be enriched at all.
-- [x] The C2 question answered: an unpriced source is either absent from
-      `sources`/`vwap_24h` *by an explicit rule*, or carried at its last known
-      price — not dropped as a side effect of enrichment timing. Answer
-      consistent with [[0147]]'s coverage gate.
+- [x] The C2 question answered by an **explicit, bounded rule**: a source is
+      carried at its latest priced close while that close is within 2 h of its
+      newest candle, and is absent from `sources`/`vwap_24h` beyond that or
+      with no priced candle at all. The membership rule is now a stated policy
+      rather than whatever enrichment happened to have reached, though a
+      chronically-unpriced venue still drops out — that population is
+      [[0154]]'s. Alignment with [[0147]]'s coverage gate: still open.

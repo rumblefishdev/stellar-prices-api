@@ -30,10 +30,12 @@
 -- matching order.
 --
 -- Columns (task 0072 completes the set; all ten are now written):
---   price_usd       — latest USD close (argMax over the 24h window)
+--   price_usd       — latest PRICED close in the 24h window (argMaxIf, 0135;
+--                     carry past an un-enriched tip bounded at 2h)
 --   price_xlm       — price_usd re-expressed in XLM (÷ the XLM/USD close)
 --   change_24h_pct  — vs the oldest close inside the 24h window
---   change_7d_pct   — vs the oldest close inside a 7d window of price_ohlcv_1h
+--   change_7d_pct   — vs the oldest priced close in the [7d, 5d] band of
+--                     price_ohlcv_1h (a real ~7-day baseline or the sentinel)
 --   volume_24h_usd  — trailing-24h USD volume, ALL sources (a total, never filtered)
 --   market_cap_usd  — price_usd × circulating supply from prices.asset_supply
 --   vwap_24h        — USD volume-weighted close across sources, with the §5.5
@@ -55,7 +57,7 @@
 --                    then accurateCastOrNull back to Decimal(38,14): out-of-range
 --                    → NULL → 0 (the column's "unavailable" sentinel) rather than
 --                    a refresh-killing exception.
--- price_usd (argMax, no arithmetic) and volume_24h_usd (a plain sum) stay native
+-- price_usd (argMaxIf, no arithmetic) and volume_24h_usd (a plain sum) stay native
 -- Decimal. The `sources` JSON serialises its numbers via toString() on the
 -- NATIVE Decimal — never through Float64 — so the JSON preserves full
 -- Decimal(38,14) precision, matching general-overview §3.3's "numeric values
@@ -100,7 +102,7 @@ WITH
     -- XLM is the row with no issuer AND no contract address. 0 when unknown,
     -- which the nullIf() below turns into a NULL price_xlm → 0.
     (
-        SELECT argMax(close_usd, timestamp)
+        SELECT argMaxIf(close_usd, timestamp, close_usd > 0)
         FROM prices.price_ohlcv_1m FINAL
         WHERE asset_id = (
                   SELECT asset_id FROM prices.assets FINAL
@@ -110,7 +112,6 @@ WITH
                   LIMIT 1
               )
           AND timestamp >= now() - INTERVAL 24 HOUR
-          AND close_usd > 0
     ) AS xlm_usd,
 
     -- Level 1 — one row per (asset, source) over the trailing 24h.
@@ -120,11 +121,22 @@ WITH
     -- priced close and stays in `sources` and the vwap weighting, instead of
     -- reading 0 here and being dropped by `src_price > 0` below as a side
     -- effect of enrichment timing.
+    --
+    -- The carry is BOUNDED: it only applies while the source's newest priced
+    -- candle is within CARRY_BOUND of its newest candle overall. The decided
+    -- contract priced its staleness cost at ~50 min worst case (one enrichment
+    -- cycle, measured in 0144); 2h is that with headroom. Beyond the bound the
+    -- source reads 0 again and drops out below — a chronically-unpriced venue
+    -- (an exotic-quote pair enrichment never reaches) must not feed a
+    -- hours-old close into the §5.5 median vote or the vwap weighting, where
+    -- it can outvote and evict a live venue.
     per_source AS (
         SELECT
             asset_id                          AS asset_id,
             source                            AS source,
-            argMaxIf(close_usd, timestamp, close_usd > 0) AS src_price,
+            if(maxIf(timestamp, close_usd > 0) >= max(timestamp) - INTERVAL 2 HOUR,
+               argMaxIf(close_usd, timestamp, close_usd > 0),
+               toDecimal128(0, 14))           AS src_price,
             sum(volume_quote_usd)             AS src_volume
         FROM prices.price_ohlcv_1m FINAL
         WHERE timestamp >= now() - INTERVAL 24 HOUR
@@ -191,32 +203,47 @@ WITH
     -- close_usd > 0 excludes un-enriched rows, which would otherwise read as a
     -- -100% change. See task 0114: coarse close_usd was zero across most of
     -- history until the repair, so this guard is what keeps the column honest.
+    --
+    -- The window has BOTH ends: [now()-7d, now()-5d]. Without the upper cutoff
+    -- argMin returns the oldest priced close AVAILABLE — for a freshly-listed
+    -- asset (or one whose older 1h closes are still 0 from the pre-0114 gap)
+    -- that is hours old, and the column publishes e.g. a 2-hour move labelled
+    -- as 7-day. With the cutoff, no baseline in the band means close_7d_ago
+    -- stays 0 and the denominator guard lands change_7d_pct on the sentinel.
     ref_7d AS (
         SELECT
             asset_id                     AS asset_id,
-            argMin(close_usd, timestamp) AS close_7d_ago
+            argMinIf(close_usd, timestamp, close_usd > 0) AS close_7d_ago
         FROM prices.price_ohlcv_1h FINAL
         WHERE timestamp >= now() - INTERVAL 7 DAY
-          AND close_usd > 0
+          AND timestamp <= now() - INTERVAL 5 DAY
         GROUP BY asset_id
     ),
 
-    -- Whole-asset figures that must NOT be outlier-filtered: price_usd is the
-    -- latest observed close and volume_24h_usd is an actual traded total —
-    -- filtering either would misreport reality rather than de-noise it.
-    -- open_24h is the oldest close inside the same window, which is what makes
-    -- change_24h_pct a plain window read instead of a self-join.
+    -- Whole-asset figures deliberately NOT run through the §5.5 outlier mask:
+    -- volume_24h_usd is an actual traded total, and price_usd is the newest
+    -- priced close regardless of venue — the mask protects vwap_24h only, and
+    -- whether price_usd should also be outlier-protected is task 0135's still
+    -- open failure-mode-1 decision. open_24h is the oldest priced close inside
+    -- the same window, which is what makes change_24h_pct a plain window read
+    -- instead of a self-join.
     --
     -- price_usd is the latest PRICED close (task 0135 contract, decided
-    -- 2026-08-05): an un-enriched newest candle is skipped rather than read as
-    -- 0, trading up to one enrichment cycle of staleness (~25 min avg) for the
-    -- previous permanent zero — production had 88 of the top-200 volume rows,
-    -- XLM and EURC included, publishing the sentinel. An asset with NO priced
-    -- candle in the window still reads 0, the documented "unavailable" value.
+    -- 2026-08-05), bounded: the un-enriched tip is skipped only while the
+    -- newest priced candle is within CARRY_BOUND (2h, see per_source) of the
+    -- newest candle overall. Inside the bound the cost is one enrichment cycle
+    -- of staleness (~25 min avg, ~50 min worst case measured); beyond it the
+    -- column returns to the 0 sentinel rather than certifying an hours-old
+    -- close as current — updated_at is the refresh time and carries no age
+    -- signal, so an unbounded carry would be undetectable downstream. An asset
+    -- with NO priced candle in the window reads 0, the documented
+    -- "unavailable" value.
     unfiltered AS (
         SELECT
             asset_id                          AS asset_id,
-            argMaxIf(close_usd, timestamp, close_usd > 0) AS price_usd,
+            if(maxIf(timestamp, close_usd > 0) >= max(timestamp) - INTERVAL 2 HOUR,
+               argMaxIf(close_usd, timestamp, close_usd > 0),
+               toDecimal128(0, 14))           AS price_usd,
             argMinIf(close_usd, timestamp, close_usd > 0) AS open_24h,
             sum(volume_quote_usd)             AS volume_24h_usd
         FROM prices.price_ohlcv_1m FINAL
@@ -248,9 +275,15 @@ SELECT
     -- while their `vwap_24h` and `sources` carried the real price. -100 is NOT
     -- a sentinel — it passes every consumer-side "0 means unavailable" guard
     -- the views.sql interop contract documents, because it looks like data.
-    -- With 0135's argMaxIf the numerator can only be 0 when the whole window is
-    -- unpriced (then open_24h is 0 too); the numerator guard stays as the belt
-    -- for exactly that case, landing on the 0 = "no signal" sentinel.
+    -- With 0135's bounded argMaxIf the numerator is 0 when the window is
+    -- unpriced OR the carry bound is exceeded. For change_24h_pct that case
+    -- usually zeroes open_24h too (same table, same window), but NOT always —
+    -- an over-bound asset has priced history and a real open_24h — and for
+    -- change_7d_pct the denominator comes from a DIFFERENT table
+    -- (price_ohlcv_1h), so a zero numerator beside a real 7d baseline is fully
+    -- reachable. The numerator guards are LOAD-BEARING, not belt-and-braces:
+    -- delete either and the fabricated -100% returns. Pinned by the
+    -- change_7d-sentinel fixture in current_mv_it.rs.
     --
     -- A genuine -100% (a real price falling to a real near-zero) is unaffected:
     -- the guard keys on price_usd being exactly the 0 sentinel, not on the

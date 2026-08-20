@@ -9,9 +9,15 @@ use utoipa::ToSchema;
 pub struct PriceResponse {
     /// Echoed natural identity (`native`, `CODE:ISSUER`, or a C… contract).
     pub asset: String,
-    /// Current USD price.
+    /// Latest **priced** USD close (task 0135): a candle whose USD value is
+    /// not yet computed is skipped while the newest priced candle is within
+    /// ~2h of the newest candle overall, so the value can trail real time by
+    /// up to one enrichment cycle (~25 min typical). `"0"` means no
+    /// USD-priced trade inside that bound. `updated_at` is the snapshot
+    /// time, **not** the price's age.
     pub price_usd: String,
-    /// XLM-quoted price (task 0072).
+    /// XLM-quoted price (task 0072); `price_usd / XLM-USD close`, so it
+    /// shares `price_usd`'s semantics and `"0"` sentinel.
     pub price_xlm: String,
     /// 24h USD volume-weighted average price. Weighted across sources with the
     /// general-overview §5.5 inter-source median-outlier filter applied.
@@ -21,10 +27,10 @@ pub struct PriceResponse {
     pub volume_24h_usd: String,
     /// 24h percentage change (task 0072).
     pub change_24h_pct: String,
-    /// Per-source (DEX) price/volume breakdown. Sources excluded by the §5.5
-    /// outlier filter are **absent** from the object (general-overview §3.3).
-    /// `{}` means no source carried a USD-priceable close in the window — the
-    /// exotic-quote case, not an error.
+    /// Per-source (DEX) price/volume breakdown. A source is **absent** when
+    /// the §5.5 outlier filter excluded it OR it has no USD-priced close
+    /// within the 0135 carry bound (general-overview §3.3 / §4.2). `{}` means
+    /// no source qualified — the exotic-quote case, not an error.
     #[schema(value_type = Object)]
     pub sources: serde_json::Value,
     /// Timestamp of the snapshot (ISO-8601 UTC).
@@ -101,6 +107,8 @@ pub struct AssetListItem {
     pub issuer_address: String,
     pub contract_address: String,
     pub home_domain: String,
+    /// Latest priced USD close — same 0135 semantics and `"0"` sentinel as
+    /// `PriceResponse.price_usd`.
     pub price_usd: String,
     pub change_24h_pct: String,
     pub change_7d_pct: String,

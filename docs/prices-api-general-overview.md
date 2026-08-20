@@ -643,13 +643,21 @@ date, the response includes a `backfill_note` field indicating how far back data
 Current real-time price (latest snapshot from `current_prices`).
 
 `price_usd` is the **latest priced close**: a candle whose USD value has not
-been computed yet is skipped rather than reported as `0`, so the figure can be
-up to one enrichment cycle stale (~25 min average) but is never a zero
-sentinel for an asset with any priced trade in the last 24 h. `0` therefore
-means exactly "no USD-priceable trade in the window". A source whose newest
-candle is un-enriched is likewise carried in `sources` and in the `vwap_24h`
-weighting at its latest priced close; a source with no priced candle in the
-window is excluded. (Task 0135.)
+been computed yet (enrichment is a separate, lagging pass) is skipped rather
+than reported as `0` — but only while the newest priced candle is within the
+**2 h carry bound** of the newest candle overall. Inside the bound the figure
+trails real time by up to one enrichment cycle (~25 min average, ~50 min
+worst case measured); beyond it the column returns `"0"` rather than
+certifying an hours-old close as current. `"0"` therefore means "no candle
+valued in USD within the bound" — either the asset genuinely did not trade,
+or USD-valuation has not reached any of its recent candles. `updated_at` is
+the snapshot time, **not** the price's age. `price_usd` is **not**
+outlier-filtered — it reports the newest priced close regardless of venue;
+`vwap_24h` is the de-noised figure. A source whose newest candle is
+un-enriched is likewise carried in `sources` and in the `vwap_24h` weighting
+at its latest priced close, under the same 2 h bound; a source is absent from
+`sources` when it has no priced candle inside the bound **or** the §5.5
+outlier filter excluded it. (Task 0135.)
 
 **Response:**
 
