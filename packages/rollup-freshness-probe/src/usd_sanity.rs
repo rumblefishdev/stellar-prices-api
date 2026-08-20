@@ -41,18 +41,34 @@
 //!    to end.
 //! 2. **Give the stranded direction a grace period.** Enrichment fills
 //!    `close_usd` asynchronously, so a freshly written candle is *legitimately*
-//!    zero until the sweep reaches it. Without [`STRANDED_GRACE_SECONDS`] this
+//!    zero until the sweep reaches it. Without
+//!    [`crate::usd_sanity::STRANDED_GRACE_SECONDS`] this
 //!    metric would never read zero. See that constant for why the grace is 48 h
 //!    specifically and not an arbitrary round number.
 //! 3. **Bound the window.** An unbounded scan of the OHLCV tables every 15
-//!    minutes is task 0111's outage, reintroduced as a health check. The window
-//!    is [`LOOKBACK_SECONDS`] and prunes by partition.
+//!    minutes is task 0111's outage, reintroduced as a health check. The
+//!    windows are [`crate::usd_sanity::STRANDED_LOOKBACK_SECONDS`] and
+//!    [`crate::usd_sanity::PEG_LOOKBACK_SECONDS`].
+//!
+//!    ⚠️ **A window bound is not a read bound.** Both tables are
+//!    `PARTITION BY toYYYYMM(timestamp)` with `ORDER BY (asset_id,
+//!    quote_asset_id, source, timestamp)`, so `timestamp` is not a primary-key
+//!    prefix and a window cannot be assumed to prune. ⛔ Size these on what the
+//!    query READS (`EXPLAIN ESTIMATE` / `read_rows`), never on the span it
+//!    names — the same rule the tier choice was decided by.
+//!
+//!    Measured on prod 2026-08-20: the 48 h `_1m` peg scan estimates
+//!    **1,250,223 rows / 6 parts / 156 marks**, against **997,376 / 5 / 125**
+//!    for the 7-day `_1h` stranded scan that runs in 41-50 ms — **1.25x**, so
+//!    the probe's 1-minute timeout holds. `toYYYYMM` pruning plus per-part
+//!    min/max does the work the key order does not.
 //!
 //! ⚠️ **This is a re-introduction guard, not a historical audit.** It watches
 //! recent writes, because that is where a regression shows up. A frozen
 //! historical corruption inside the window would latch the alarm rather than
-//! re-notify — see [`SanityCounts`] on why the counts still climb in the case
-//! this actually guards against.
+//! re-notify — see [`crate::usd_sanity::ScanGuards`] on why a reading that
+//! examined nothing is
+//! refused rather than published as a zero.
 //!
 //! ⚠️ **If USDT ever returns to par, the peg-applied direction stops being
 //! diagnostic** and this check must be revisited. It reads a ratio near 1.0 as
@@ -72,7 +88,7 @@ pub const PEG_APPLIED_METRIC: &str = "UsdtPegAppliedCandles";
 /// `prices-{env}-usd-stranded` alarm ladder.
 pub const STRANDED_METRIC: &str = "UsdtStrandedCandles";
 
-/// How far back the check looks, in seconds.
+/// How far back the **stranded** direction looks, in seconds.
 ///
 /// Seven days. Long enough that a regression cannot slip through between runs
 /// or hide behind a weekend, short enough that the scan prunes to one or two
@@ -80,7 +96,47 @@ pub const STRANDED_METRIC: &str = "UsdtStrandedCandles";
 /// full-table scan of task 0111, which caused a four-day production outage, and
 /// re-introducing it inside a 15-minute probe would be worse than the defect
 /// this alarm watches for.
-pub const LOOKBACK_SECONDS: i64 = 7 * 86_400;
+///
+/// ⚠️ This bound is safe at seven days **because [`STRANDED_TABLE`] is a
+/// forever-table**. The peg direction reads a retention-managed tier and cannot
+/// inherit it — see [`PEG_LOOKBACK_SECONDS`].
+pub const STRANDED_LOOKBACK_SECONDS: i64 = 7 * 86_400;
+
+/// How far back the **peg-applied** direction looks, in seconds.
+///
+/// **48 hours, and deliberately not the seven days the stranded direction
+/// uses.** [`PEG_TABLE`] is `price_ohlcv_1m`, which is retention-managed at
+/// seven days, so a seven-day window would sit exactly on the deletion
+/// frontier: the oldest hours of the window would be removed out from under the
+/// scan while it runs, and the count would move for a reason that is not a
+/// defect. 48 h leaves five days of margin, so no cleanup run can ever truncate
+/// this window.
+///
+/// ⚠️ **Retention here is a JOB, not a TTL** — the same trap that produced task
+/// 0174. `_1m` is pruned by the cleanup worker, which is currently DISABLED
+/// (task 0200), so today the tier holds far more than seven days. This bound is
+/// sized to be correct under **both** states rather than under whichever one
+/// happens to be live, because 0200 may re-enable it at any time and nothing
+/// would fail loudly if it did.
+///
+/// ⚠️ Shortening the window costs nothing here because this is a
+/// **re-introduction guard, not a historical audit** (see the module docs). A
+/// writer that has started applying the peg again writes it continuously, so it
+/// shows up in the newest rows; it does not need seven days of history to be
+/// seen. A frozen historical population is task 0212's job, not this alarm's.
+///
+/// ⚠️ **It must also stay wide enough that `scanned == 0` is anomalous**, or
+/// [`crate::usd_sanity::ScanGuards`]'s empty-scan refusal fails the invocation
+/// on a quiet leg and pages ops every 15 minutes on a healthy system. Measured
+/// on prod 2026-08-20: the longest stretch with no USDT-quoted `_1m` row in the
+/// preceding 30 days is **6.5 hours**, against this 48 h bound — 7.4x margin.
+/// ⛔ Do not shorten this below ~24 h without re-taking that measurement.
+///
+/// ⚠️ **Consequence to accept, not to fix by widening:** because the window is
+/// short and enrichment drains oldest-first behind task 0111, this direction
+/// reads 0 whenever the leg is unpriced — see [`PEG_TABLE`] on why a zero here
+/// is not a clean bill of health.
+pub const PEG_LOOKBACK_SECONDS: i64 = 2 * 86_400;
 
 /// How old a candle must be before a `close_usd` of zero counts as *stranded*
 /// rather than *not yet enriched*.
@@ -93,7 +149,7 @@ pub const LOOKBACK_SECONDS: i64 = 7 * 86_400;
 /// waking someone for, and not before.
 ///
 /// ⚠️ It must also comfortably exceed real enrichment lag or the metric never
-/// reads zero, and it holds **only on the hourly tier** — see [`SANITY_TABLE`]
+/// reads zero, and it holds **only on the hourly tier** — see [`STRANDED_TABLE`]
 /// for why a coarser tier spends its own bucket width out of this grace before
 /// enrichment can even begin.
 ///
@@ -133,11 +189,10 @@ pub const PEG_RATIO_TOLERANCE: f64 = 0.02;
 /// and is the value 0182's verification settled on.
 pub const REPRESENTABLE_CLOSE_FLOOR: &str = "0.00000000000005";
 
-/// Which OHLCV granularity the check reads.
+/// Which OHLCV granularity the **stranded** direction reads.
 ///
-/// `price_ohlcv_1h`. The defect appears on every tier — 0182 corrected all five
-/// — so any one of them is diagnostic, and the choice is therefore about how the
-/// tier interacts with [`STRANDED_GRACE_SECONDS`], not about coverage.
+/// `price_ohlcv_1h`, and the choice is about how the tier interacts with
+/// [`STRANDED_GRACE_SECONDS`], not about coverage.
 ///
 /// ⚠️ **This was `price_ohlcv_1d` and was changed on measurement (2026-08-19).**
 /// The original reasoning — `_1d` is cheapest, `_1h` would scan "~24× the rows"
@@ -158,61 +213,175 @@ pub const REPRESENTABLE_CLOSE_FLOOR: &str = "0.00000000000005";
 /// USDT-quoted `_1h` candle is priced by 30 hours of age" — was an artefact and
 /// is corrected in [`STRANDED_GRACE_SECONDS`].
 ///
-/// ⚠️ `_1h` is a forever-table (no retention job, unlike `_1m`/`_15m`), so the
-/// 7-day [`LOOKBACK_SECONDS`] window can never outrun what is kept.
+/// ⚠️ `_1h` is a forever-table (no retention job, unlike `_1m`/`_15m`), so
+/// [`STRANDED_LOOKBACK_SECONDS`] can never outrun what is kept.
 ///
-/// # 🔴 This check is one tier ABOVE the tier that carries the defect
+/// # Why the stranded direction is correct on a derived tier
 ///
-/// `close_usd` is written by the enrichment worker into **`price_ohlcv_1m`**;
-/// every coarse tier rolls from it. Reading `_1h` therefore measures a
-/// *derived* surface, and on 2026-08-20 that difference was not academic:
+/// A zero rolls up as a zero: `argMaxIf(close_usd, …, close_usd > 0)` has
+/// nothing to select, so an unpriced `_1m` row surfaces as an unpriced `_1h`
+/// row. Reading the coarse tier therefore detects the condition faithfully —
+/// which is how task 0209 was found at all. ⛔ **Do not move this direction to
+/// `_1m` alongside the peg direction.** The 48 h grace is calibrated to BE's
+/// loss window *on the hourly tier*, and the tier swap would silently change
+/// what the alarm asserts.
+pub const STRANDED_TABLE: &str = "price_ohlcv_1h";
+
+/// Which OHLCV granularity the **peg-applied** direction reads.
 ///
-/// | | `_1h` | `_1m` |
+/// `price_ohlcv_1m` — **the tier enrichment actually writes**, not one rolled
+/// from it. Task 0213; this was `price_ohlcv_1h` and was blind.
+///
+/// # 🔴 Why a derived tier cannot carry this direction
+///
+/// A *repaired* value in a coarse tier says nothing about the row it was rolled
+/// from. Task 0182's repair wrote the five coarse tables **directly** and never
+/// touched `_1m`, so on 2026-08-20 the two tiers disagreed completely:
+///
+/// | | `_1h` — what this check used to read | `_1m` |
 /// |---|---|---|
 /// | USDT-quoted rows at the $1 peg | 0 | **1,564,045** |
 /// | 2026-08-17, USDT leg | 13 priced / 0 | 0 priced / 16 |
 ///
-/// The coarse tiers read clean because task 0182's repair wrote them directly.
-/// `_1m` was outside that repair and still carries the peg — task 0212 — so
-/// **`peg_applied` would have published a confident 0 over 1.5 M wrong values.**
+/// The check would have published **a confident 0 over 1.5 M wrong values**, and
+/// gone on doing so indefinitely.
 ///
-/// ⚠️ The *stranded* direction is unaffected: a zero rolls up as a zero, so
-/// reading `_1h` detects it correctly, which is how 0209 was found at all.
-/// Only the **peg-applied** direction is blinded by reading a repaired tier.
+/// ⚠️ **This is task 0204's own founding failure, reproduced inside the guard
+/// built against it** — a check scoring healthy because it looked at the surface
+/// least able to show the defect. It is the same shape as 0182 being verified
+/// against the tiers its own repair had written.
 ///
-/// ⛔ **Do not "fix" this by simply pointing `SANITY_TABLE` at `_1m`.** That
-/// trades a blind spot for a permanently-breaching alarm (1.5 M rows is above
-/// every rung) and re-introduces a retention interaction the forever-table note
-/// above exists to avoid. The peg-applied direction needs its own scoped `_1m`
-/// query with its own ladder, decided deliberately — see task 0204 and task 0213.
-pub const SANITY_TABLE: &str = "price_ohlcv_1h";
+/// # Why this is a separate constant and not a repointed `SANITY_TABLE`
+///
+/// Pointing one shared table name at `_1m` would have been the small change, and
+/// it is wrong three times over:
+///
+/// 1. An unbounded `_1m` read finds the whole 1,564,045-row peg population
+///    (task 0212) — above every rung of `usdSanityEscalationCounts`
+///    (`[1, 100, 10000]`) — and sits permanently in ALARM. A permanently-firing
+///    alarm gets muted, the exact end-state task 0204 exists to prevent.
+///
+///    ⚠️ **That figure applies to the repoint, NOT to the query that ships.**
+///    Bounded to [`PEG_LOOKBACK_SECONDS`] the reading is the recent arrival
+///    rate, and the whole peg population sits at timestamps at or before
+///    2026-08-13, outside the window. Measured on prod 2026-08-20: `scanned`
+///    684, `peg_applied` **0**. Do not quote 1.5 M as what this alarm reads.
+/// 2. `_1m` is retention-managed while `_1h` is a forever-table, so the window
+///    reasoning has to be redone rather than inherited — see
+///    [`PEG_LOOKBACK_SECONDS`].
+/// 3. The stranded direction is *correct* on `_1h` and would be made worse by
+///    moving, because its grace is calibrated to that tier.
+///
+/// # 🔴 A zero here does NOT mean the USDT leg is healthy
+///
+/// Measured on prod 2026-08-20, inside this window: **684 rows scanned, 684 of
+/// them `close_usd = 0`, zero peg-valued and zero correctly priced.** The leg
+/// has not been priced at all since 2026-08-13 (task 0209), so the peg
+/// direction currently has *nothing to judge* and reads 0 for want of input
+/// rather than for want of defects.
+///
+/// ⚠️ That is correct behaviour for a re-introduction guard — it watches new
+/// writes, and there are none — but it means **`usd-peg-applied` reading green
+/// is not evidence of correct USD valuation while the leg is dark.** The
+/// `usd-stranded` ladder is what carries that condition, and it is latched.
+/// Never read this metric alone.
+///
+/// ⚠️ It stays vacuous longer than 0209 alone: enrichment drains oldest-first
+/// behind task 0111's backlog, so even once the pivot writes again it will
+/// price *history* first, and nothing enters this window until the backlog
+/// reaches the present. Widening the window to compensate walks straight back
+/// into point 1 above.
+///
+/// # Deploy ordering
+///
+/// ⚠️ **An earlier version of this comment said the alarm must not be deployed
+/// before 0212 and 0209, because it would ship permanently breached.** The
+/// prod measurement above falsifies that: bounded to 48 h it reads 0 today,
+/// with 0212 unlanded, because the peg population is entirely outside the
+/// window. The claim was inherited from the repoint argument in point 1 and
+/// never re-checked against the query that actually ships.
+///
+/// So this is deployable ahead of 0209/0212 — but deploy it for the right
+/// reason: it arms a guard for when the leg is priced again, and it proves
+/// nothing about the leg until then.
+pub const PEG_TABLE: &str = "price_ohlcv_1m";
 
-/// One reading of the USDT quote leg's USD-value health.
+/// Shared guards against the silent all-clear, carried by every reading.
 ///
-/// `resolved_legs` and `scanned` are the two guards against the silent
-/// all-clear. If the USDT identity cannot be resolved — the registry moved, an
-/// issuer changed, task 0139 renumbered something — the quote-leg filter matches
-/// nothing, both counts come back `0`, and the alarm scores a **healthy** result
+/// If the USDT identity cannot be resolved — the registry moved, an issuer
+/// changed, task 0139 renumbered something — the quote-leg filter matches
+/// nothing, the counts come back `0`, and the alarm scores a **healthy** result
 /// for a check that did not run. `resolved_legs` catches the identity being
 /// missing; `scanned` catches it resolving to an id the candles no longer carry,
 /// which the first guard cannot see. Carrying both in the same row makes each
-/// state detectable; [`sanity_metrics`] refuses them.
+/// state detectable; [`stranded_metric`] and [`peg_metric`] refuse them.
+///
+/// ⚠️ **Each direction carries its own pair, and they are not interchangeable.**
+/// The two now read different tables, so `_1m` can match nothing while `_1h`
+/// reads fine — a state a single shared guard would score as healthy on the
+/// tier that was never examined. That is precisely the defect task 0213 exists
+/// to close, so it must not be reintroduced one level up.
+pub trait ScanGuards {
+    fn resolved_legs(&self) -> u64;
+    fn scanned(&self) -> u64;
+    /// Which table this reading examined, for the refusal message.
+    fn table(&self) -> &'static str;
+    /// The window this reading covered, in seconds, for the refusal message.
+    fn lookback_seconds(&self) -> i64;
+}
+
+/// One reading of the **stranded** direction, from [`STRANDED_TABLE`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clickhouse::Row, serde::Deserialize)]
-pub struct SanityCounts {
+pub struct StrandedCounts {
+    /// Number of `assets` rows matching the canonical USDT identity. Must be 1.
+    pub resolved_legs: u64,
+    /// USDT-quoted candles older than [`STRANDED_GRACE_SECONDS`] still at
+    /// `close_usd = 0` with a `close` above [`REPRESENTABLE_CLOSE_FLOOR`].
+    pub stranded: u64,
+    /// USDT-quoted candles examined. See [`ScanGuards`].
+    pub scanned: u64,
+}
+
+impl ScanGuards for StrandedCounts {
+    fn resolved_legs(&self) -> u64 {
+        self.resolved_legs
+    }
+    fn scanned(&self) -> u64 {
+        self.scanned
+    }
+    fn table(&self) -> &'static str {
+        STRANDED_TABLE
+    }
+    fn lookback_seconds(&self) -> i64 {
+        STRANDED_LOOKBACK_SECONDS
+    }
+}
+
+/// One reading of the **peg-applied** direction, from [`PEG_TABLE`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clickhouse::Row, serde::Deserialize)]
+pub struct PegCounts {
     /// Number of `assets` rows matching the canonical USDT identity. Must be 1.
     pub resolved_legs: u64,
     /// USDT-quoted candles in the window whose `close_usd / close` sits within
     /// [`PEG_RATIO_TOLERANCE`] of 1.0.
     pub peg_applied: u64,
-    /// USDT-quoted candles older than [`STRANDED_GRACE_SECONDS`] still at
-    /// `close_usd = 0` with a `close` above [`REPRESENTABLE_CLOSE_FLOOR`].
-    pub stranded: u64,
-    /// USDT-quoted candles examined.
-    ///
-    /// Not alarmed on, but **guarded on**: zero means the query matched nothing,
-    /// so the two counts above are zero for want of data rather than for want of
-    /// defects. See [`SanityRefusal::EmptyScan`].
+    /// USDT-quoted candles examined. See [`ScanGuards`].
     pub scanned: u64,
+}
+
+impl ScanGuards for PegCounts {
+    fn resolved_legs(&self) -> u64 {
+        self.resolved_legs
+    }
+    fn scanned(&self) -> u64 {
+        self.scanned
+    }
+    fn table(&self) -> &'static str {
+        PEG_TABLE
+    }
+    fn lookback_seconds(&self) -> i64 {
+        PEG_LOOKBACK_SECONDS
+    }
 }
 
 /// One CloudWatch datum about USD-value correctness. Counts, so
@@ -224,23 +393,26 @@ pub struct SanityMetric {
     pub value: f64,
 }
 
-/// The one-row query behind [`SanityCounts`].
+/// The `WITH` clause both queries open with: the USDT identity, resolved
+/// **inline by code and issuer** rather than hard-coded as an `asset_id`.
 ///
-/// The USDT identity is resolved **inline by code and issuer** rather than
-/// hard-coded as an `asset_id`. The numeric id is not a stable contract while
-/// task 0139 is open, and a probe that silently watches the wrong leg is worse
-/// than one that fails — see [`SanityCounts::resolved_legs`].
+/// The numeric id is not a stable contract while task 0139 is open, and a probe
+/// that silently watches the wrong leg is worse than one that fails — see
+/// [`ScanGuards`].
+fn usdt_cte() -> String {
+    format!(
+        "WITH usdt AS ( \
+             SELECT asset_id FROM assets FINAL \
+             WHERE asset_code = 'USDT' AND issuer_address = '{usdt}' \
+         ) ",
+        usdt = USDT_ISSUER,
+    )
+}
+
+/// The `resolved_legs` projection, and the reason it looks the way it does.
 ///
-/// Tables are unqualified: the probe binds its client to the `prices` database,
-/// the same convention as [`crate::freshness_query`] and [`crate::disk::disk_query`].
-///
-/// ⚠️ `FINAL` is required. These are `ReplacingMergeTree` tables and a repair
-/// re-inserts corrected rows at a higher `version`; without `FINAL` this would
-/// read superseded rows and report a defect that has already been fixed —
-/// alarming on history rather than on state.
-///
-/// ⚠️ **`resolved_legs` is wrapped in `toUInt64(ifNull(…))` and must stay that
-/// way.** A bare scalar subquery — `(SELECT count() FROM usdt)` — comes back as
+/// ⚠️ **It is wrapped in `toUInt64(ifNull(…))` and must stay that way.** A bare
+/// scalar subquery — `(SELECT count() FROM usdt)` — comes back as
 /// **`Nullable(UInt64)`**, and in RowBinary a nullable column is a one-byte null
 /// flag followed by the value. Deserializing that into a plain `u64` does not
 /// error: it consumes the flag as the low byte and silently returns **256** for
@@ -249,15 +421,23 @@ pub struct SanityMetric {
 /// crate's IT file was written for (PR #97), which at least failed loudly — here
 /// the probe would refuse every healthy run as "ambiguous identity" and the
 /// gap-4 alarms would never publish.
-pub fn sanity_query() -> String {
+const RESOLVED_LEGS_PROJECTION: &str =
+    "toUInt64(ifNull((SELECT count() FROM usdt), 0)) AS resolved_legs";
+
+/// The one-row query behind [`StrandedCounts`], over [`STRANDED_TABLE`].
+///
+/// Tables are unqualified: the probe binds its client to the `prices` database,
+/// the same convention as [`crate::freshness_query`] and [`crate::disk::disk_query`].
+///
+/// ⚠️ `FINAL` is required. These are `ReplacingMergeTree` tables and a repair
+/// re-inserts corrected rows at a higher `version`; without `FINAL` this would
+/// read superseded rows and report a defect that has already been fixed —
+/// alarming on history rather than on state.
+pub fn stranded_query() -> String {
     format!(
-        "WITH usdt AS ( \
-             SELECT asset_id FROM assets FINAL \
-             WHERE asset_code = 'USDT' AND issuer_address = '{usdt}' \
-         ) \
+        "{cte}\
          SELECT \
-             toUInt64(ifNull((SELECT count() FROM usdt), 0)) AS resolved_legs, \
-             countIf(close_usd > 0 AND abs(close_usd / close - 1) < {tol}) AS peg_applied, \
+             {legs}, \
              countIf( \
                  close_usd = 0 \
                  AND close > {floor} \
@@ -268,47 +448,98 @@ pub fn sanity_query() -> String {
          WHERE quote_asset_id IN (SELECT asset_id FROM usdt) \
            AND close > 0 \
            AND timestamp >= now() - INTERVAL {lookback} SECOND",
-        usdt = USDT_ISSUER,
-        tol = PEG_RATIO_TOLERANCE,
+        cte = usdt_cte(),
+        legs = RESOLVED_LEGS_PROJECTION,
         floor = REPRESENTABLE_CLOSE_FLOOR,
         grace = STRANDED_GRACE_SECONDS,
-        table = SANITY_TABLE,
-        lookback = LOOKBACK_SECONDS,
+        table = STRANDED_TABLE,
+        lookback = STRANDED_LOOKBACK_SECONDS,
+    )
+}
+
+/// The one-row query behind [`PegCounts`], over [`PEG_TABLE`].
+///
+/// Structurally the sibling of [`stranded_query`], and deliberately a **separate
+/// query rather than a second column on one** — see [`PEG_TABLE`] for why the
+/// two directions cannot share a tier, and [`ScanGuards`] for why they cannot
+/// share a guard either.
+///
+/// ⚠️ No grace period, and that asymmetry is the point. A stranded row is a row
+/// enrichment has **not reached yet**, so it needs time before it means damage.
+/// A peg-valued row is a row enrichment has already **written wrongly** — it is
+/// wrong the instant it appears and waiting cannot improve it.
+///
+/// ⚠️ `FINAL` for the same `ReplacingMergeTree` reason as its sibling. It
+/// matters more here: task 0212's repair re-inserts corrected rows at a higher
+/// `version`, so without `FINAL` this alarm would keep reading the pre-repair
+/// rows and stay breached over data that had been fixed.
+pub fn peg_query() -> String {
+    format!(
+        "{cte}\
+         SELECT \
+             {legs}, \
+             countIf(close_usd > 0 AND abs(close_usd / close - 1) < {tol}) AS peg_applied, \
+             count() AS scanned \
+         FROM {table} FINAL \
+         WHERE quote_asset_id IN (SELECT asset_id FROM usdt) \
+           AND close > 0 \
+           AND timestamp >= now() - INTERVAL {lookback} SECOND",
+        cte = usdt_cte(),
+        legs = RESOLVED_LEGS_PROJECTION,
+        tol = PEG_RATIO_TOLERANCE,
+        table = PEG_TABLE,
+        lookback = PEG_LOOKBACK_SECONDS,
     )
 }
 
 /// Why a reading was refused instead of published.
 ///
 /// Both variants describe the **same hazard from different distances**: a query
-/// that matched nothing still returns two perfectly publishable zeros, and the
-/// gap-4 alarms are `treatMissingData: NOT_BREACHING`, so those zeros are scored
+/// that matched nothing still returns a perfectly publishable zero, and the
+/// gap-4 alarms are `treatMissingData: NOT_BREACHING`, so that zero is scored
 /// as a clean bill of health forever. The variants are separate because the
 /// operator's first move differs — one points at the asset registry, the other
 /// at the candles — and an alarm that names the wrong one costs an hour.
+///
+/// ⚠️ **Both carry the table.** Since task 0213 the two directions read
+/// different tiers, so "the scan matched nothing" is no longer a single fact
+/// about one place. A refusal that did not say which tier would send the
+/// operator to look at a table that was fine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SanityRefusal {
     /// The canonical USDT identity did not resolve to exactly one `assets` row.
-    UnresolvableLeg { resolved_legs: u64 },
+    UnresolvableLeg {
+        resolved_legs: u64,
+        table: &'static str,
+    },
     /// The leg resolved, but matched **no candles at all** in the window.
-    EmptyScan,
+    EmptyScan {
+        table: &'static str,
+        lookback_seconds: i64,
+    },
 }
 
 impl std::fmt::Display for SanityRefusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::UnresolvableLeg { resolved_legs } => write!(
+            Self::UnresolvableLeg {
+                resolved_legs,
+                table,
+            } => write!(
                 f,
                 "the canonical USDT identity resolved to {resolved_legs} assets, expected \
-                 exactly 1 — check prices.assets for the USDT code/issuer pair"
+                 exactly 1 — check prices.assets for the USDT code/issuer pair (reading {table})"
             ),
-            Self::EmptyScan => write!(
+            Self::EmptyScan {
+                table,
+                lookback_seconds,
+            } => write!(
                 f,
                 "the USDT identity resolved, but no USDT-quoted candles were found in the \
                  last {days} days of {table} — the asset_id in the registry no longer matches \
                  the quote_asset_id stored in the candles (task 0139), or the leg has stopped \
                  trading entirely",
-                days = LOOKBACK_SECONDS / 86_400,
-                table = SANITY_TABLE,
+                days = lookback_seconds / 86_400,
             ),
         }
     }
@@ -316,7 +547,7 @@ impl std::fmt::Display for SanityRefusal {
 
 impl std::error::Error for SanityRefusal {}
 
-/// Shape one [`SanityCounts`] reading into the CloudWatch data to publish.
+/// The two silent-all-clear guards, applied to either direction's reading.
 ///
 /// `Err` when the check **did not actually run**, which is not a clean bill of
 /// health and must never be published as one. The caller turns an `Err` into a
@@ -328,27 +559,47 @@ impl std::error::Error for SanityRefusal {}
 /// resolves to an `asset_id` no longer present in the candles — precisely the
 /// renumber risk task 0139 is open for, and the reason the leg is resolved by
 /// issuer rather than by id — passes that guard and then matches zero rows.
-/// Both counts publish `0` and every gap-4 alarm reads healthy forever. A scan
+/// The count publishes `0` and every gap-4 alarm reads healthy forever. A scan
 /// that examined nothing has measured nothing.
-pub fn sanity_metrics(counts: &SanityCounts) -> Result<Vec<SanityMetric>, SanityRefusal> {
-    if counts.resolved_legs != 1 {
+fn guard<G: ScanGuards>(counts: &G) -> Result<(), SanityRefusal> {
+    if counts.resolved_legs() != 1 {
         return Err(SanityRefusal::UnresolvableLeg {
-            resolved_legs: counts.resolved_legs,
+            resolved_legs: counts.resolved_legs(),
+            table: counts.table(),
         });
     }
-    if counts.scanned == 0 {
-        return Err(SanityRefusal::EmptyScan);
+    if counts.scanned() == 0 {
+        return Err(SanityRefusal::EmptyScan {
+            table: counts.table(),
+            lookback_seconds: counts.lookback_seconds(),
+        });
     }
-    Ok(vec![
-        SanityMetric {
-            name: PEG_APPLIED_METRIC,
-            value: counts.peg_applied as f64,
-        },
-        SanityMetric {
-            name: STRANDED_METRIC,
-            value: counts.stranded as f64,
-        },
-    ])
+    Ok(())
+}
+
+/// Shape one [`StrandedCounts`] reading into the CloudWatch datum to publish.
+pub fn stranded_metric(counts: &StrandedCounts) -> Result<SanityMetric, SanityRefusal> {
+    guard(counts)?;
+    Ok(SanityMetric {
+        name: STRANDED_METRIC,
+        value: counts.stranded as f64,
+    })
+}
+
+/// Shape one [`PegCounts`] reading into the CloudWatch datum to publish.
+///
+/// ⚠️ **Independent of [`stranded_metric`], deliberately.** Before task 0213 one
+/// refusal suppressed both metrics, which was harmless while they came from one
+/// query. Now they read different tables, and a `_1m` scan that matched nothing
+/// says nothing whatever about `_1h` — suppressing a working signal because an
+/// unrelated tier failed would be the muting failure again, arrived at from the
+/// other side. Each direction publishes or refuses on its own evidence.
+pub fn peg_metric(counts: &PegCounts) -> Result<SanityMetric, SanityRefusal> {
+    guard(counts)?;
+    Ok(SanityMetric {
+        name: PEG_APPLIED_METRIC,
+        value: counts.peg_applied as f64,
+    })
 }
 
 /// Publish USD-sanity counts to CloudWatch under [`crate::METRIC_NAMESPACE`],
@@ -401,11 +652,18 @@ pub async fn publish_sanity(
 mod tests {
     use super::*;
 
-    fn healthy() -> SanityCounts {
-        SanityCounts {
+    fn healthy_stranded() -> StrandedCounts {
+        StrandedCounts {
+            resolved_legs: 1,
+            stranded: 0,
+            scanned: 4_503,
+        }
+    }
+
+    fn healthy_peg() -> PegCounts {
+        PegCounts {
             resolved_legs: 1,
             peg_applied: 0,
-            stranded: 0,
             scanned: 4_503,
         }
     }
@@ -413,30 +671,65 @@ mod tests {
     /// The trap this whole module is scoped around. Exotic-quoted candles sit at
     /// `close_usd = 0` by design (~74M on `_1h` alone, task 0182), so a check
     /// that did not filter by quote leg would breach permanently on healthy
-    /// data.
+    /// data. Both directions need it.
     #[test]
-    fn the_query_is_scoped_to_the_usdt_quote_leg() {
-        let sql = sanity_query();
-        assert!(sql.contains("WHERE quote_asset_id IN (SELECT asset_id FROM usdt)"));
+    fn both_queries_are_scoped_to_the_usdt_quote_leg() {
+        for sql in [stranded_query(), peg_query()] {
+            assert!(sql.contains("WHERE quote_asset_id IN (SELECT asset_id FROM usdt)"));
+        }
     }
 
     /// The numeric `asset_id` is not a stable contract while task 0139 is open,
     /// so the leg is resolved by code and issuer at query time.
     #[test]
     fn the_usdt_leg_is_resolved_by_issuer_not_a_hardcoded_id() {
-        let sql = sanity_query();
-        assert!(sql.contains(USDT_ISSUER));
-        assert!(sql.contains("asset_code = 'USDT'"));
+        for sql in [stranded_query(), peg_query()] {
+            assert!(sql.contains(USDT_ISSUER));
+            assert!(sql.contains("asset_code = 'USDT'"));
+        }
     }
 
-    /// Both directions must be counted. 0182's repair caused the second one, so
-    /// a check for only the peg would have passed while 157 candles sat
+    /// Both directions must still be counted. 0182's repair caused the stranded
+    /// one, so a check for only the peg would have passed while 157 candles sat
     /// destroyed.
     #[test]
-    fn the_query_counts_both_failure_directions() {
-        let sql = sanity_query();
-        assert!(sql.contains("AS peg_applied"));
-        assert!(sql.contains("AS stranded"));
+    fn the_two_directions_are_still_both_counted() {
+        assert!(stranded_query().contains("AS stranded"));
+        assert!(peg_query().contains("AS peg_applied"));
+    }
+
+    /// 🔴 **The defect task 0213 exists to close.** `close_usd` is written by
+    /// enrichment into `_1m`; every coarse tier rolls from it. Reading `_1h`
+    /// measured a *derived* surface that task 0182's repair had written
+    /// directly, so the peg direction published a confident 0 over 1,564,045
+    /// wrong values (task 0212).
+    #[test]
+    fn the_peg_direction_reads_the_tier_enrichment_writes_not_a_rolled_one() {
+        assert_eq!(PEG_TABLE, "price_ohlcv_1m");
+        assert!(peg_query().contains(&format!("FROM {PEG_TABLE} FINAL")));
+        assert!(
+            !peg_query().contains("price_ohlcv_1h"),
+            "the peg direction must not read a tier 0182's repair wrote directly"
+        );
+    }
+
+    /// ⚠️ The stranded direction is **correct** on the coarse tier and must not
+    /// be moved along with the peg direction: a zero rolls up as a zero, and the
+    /// 48 h grace is calibrated to BE's loss window on the hourly tier.
+    #[test]
+    fn the_stranded_direction_stays_on_the_hourly_tier() {
+        assert_eq!(STRANDED_TABLE, "price_ohlcv_1h");
+        assert!(stranded_query().contains(&format!("FROM {STRANDED_TABLE} FINAL")));
+    }
+
+    /// The two directions must not be collapsed back into one scan. Pinned
+    /// because "one query, two columns" is the obvious tidy-up and it is exactly
+    /// what re-introduces the blind spot.
+    #[test]
+    fn the_two_directions_read_different_tables() {
+        assert_ne!(STRANDED_TABLE, PEG_TABLE);
+        assert!(!stranded_query().contains("peg_applied"));
+        assert!(!peg_query().contains("AS stranded"));
     }
 
     /// Without the grace period the stranded count can never read zero:
@@ -444,37 +737,78 @@ mod tests {
     /// legitimately at zero on every single run.
     #[test]
     fn the_stranded_count_excludes_candles_too_young_to_be_enriched() {
-        let sql = sanity_query();
-        assert!(sql.contains(&format!(
+        assert!(stranded_query().contains(&format!(
             "timestamp < now() - INTERVAL {STRANDED_GRACE_SECONDS} SECOND"
         )));
     }
 
-    /// An unbounded scan every 15 minutes is task 0111's outage wearing a health
-    /// check's clothes.
+    /// ⚠️ The asymmetry is deliberate. A stranded row is one enrichment has not
+    /// reached yet, so it needs time before it means damage. A peg-valued row is
+    /// one enrichment has already written **wrongly** — it is wrong the instant
+    /// it appears, and a grace period would only delay saying so.
     #[test]
-    fn the_scan_is_bounded_to_a_recent_window() {
-        let sql = sanity_query();
-        assert!(sql.contains(&format!(
-            "timestamp >= now() - INTERVAL {LOOKBACK_SECONDS} SECOND"
+    fn the_peg_count_has_no_grace_because_a_wrong_write_is_wrong_immediately() {
+        // The generated SQL never contains Rust identifier text, so asserting
+        // the absence of "STRANDED_GRACE" could not fail and proved nothing.
+        // Assert the absence of the rendered clause instead.
+        assert!(!peg_query().contains(&format!(
+            "timestamp < now() - INTERVAL {STRANDED_GRACE_SECONDS} SECOND"
         )));
+        assert!(!peg_query().contains("close_usd = 0"));
+    }
+
+    /// An unbounded scan every 15 minutes is task 0111's outage wearing a health
+    /// check's clothes. Both directions stay bounded.
+    #[test]
+    fn both_scans_are_bounded_to_a_recent_window() {
+        assert!(stranded_query().contains(&format!(
+            "timestamp >= now() - INTERVAL {STRANDED_LOOKBACK_SECONDS} SECOND"
+        )));
+        assert!(peg_query().contains(&format!(
+            "timestamp >= now() - INTERVAL {PEG_LOOKBACK_SECONDS} SECOND"
+        )));
+    }
+
+    /// ⚠️ **The retention interaction, pinned.** `_1m` is pruned by the cleanup
+    /// worker at 7 days — a JOB, not a TTL (task 0174's lesson, currently
+    /// DISABLED under task 0200). A 7-day peg window would sit exactly on the
+    /// deletion frontier and move for reasons that are not defects, so it keeps
+    /// a wide margin instead of inheriting the stranded direction's bound.
+    #[test]
+    fn the_peg_window_stays_clear_of_the_1m_retention_frontier() {
+        let retention_seconds = 7 * 86_400_i64;
+        assert!(
+            PEG_LOOKBACK_SECONDS * 3 <= retention_seconds,
+            "the peg window must keep real margin below _1m retention, or a cleanup \
+             run truncates the scan and the count moves without a defect"
+        );
+        // The stranded direction reads a forever-table and needs no such margin.
+        assert_eq!(STRANDED_LOOKBACK_SECONDS, retention_seconds);
     }
 
     /// `ReplacingMergeTree` + a repair that re-inserts at a higher `version`.
     /// Without `FINAL` this reads superseded rows and alarms on a defect that
-    /// has already been corrected.
+    /// has already been corrected — which for the peg direction means staying
+    /// breached over exactly the rows task 0212 just fixed.
     #[test]
-    fn the_query_reads_final() {
-        let sql = sanity_query();
-        assert!(sql.contains(&format!("FROM {SANITY_TABLE} FINAL")));
-        assert!(sql.contains("FROM assets FINAL"));
+    fn both_queries_read_final() {
+        // ⚠️ Assert the CANDLE table's FINAL by name. A bare `contains(" FINAL ")`
+        // is already satisfied by `FROM assets FINAL` in the shared CTE, so
+        // deleting FINAL from either candle table would leave it green — a test
+        // unable to distinguish the thing it asserts, in the module whose whole
+        // subject is that failure.
+        assert!(stranded_query().contains(&format!("FROM {STRANDED_TABLE} FINAL")));
+        assert!(peg_query().contains(&format!("FROM {PEG_TABLE} FINAL")));
+        for sql in [stranded_query(), peg_query()] {
+            assert!(sql.contains("FROM assets FINAL"));
+        }
     }
 
     /// The dust bound is the arithmetic one. 0182's first attempt used `1e-11`
     /// and counted rows that had priced perfectly well.
     #[test]
     fn the_representable_floor_is_the_underflow_bound_not_a_round_number() {
-        assert!(sanity_query().contains(REPRESENTABLE_CLOSE_FLOOR));
+        assert!(stranded_query().contains(REPRESENTABLE_CLOSE_FLOOR));
         let floor: f64 = REPRESENTABLE_CLOSE_FLOOR.parse().expect("parses");
         // Comfortably below 1e-11, and above where a ~0.15 rate underflows.
         assert!(floor < 1e-13);
@@ -487,52 +821,78 @@ mod tests {
     /// `u64` yields **256** for a count of 1 without any error. Measured on
     /// 26.3.10.60. The probe would then reject every healthy run.
     #[test]
-    fn the_resolved_leg_count_is_forced_non_nullable() {
-        let sql = sanity_query();
-        assert!(sql.contains("toUInt64(ifNull((SELECT count() FROM usdt), 0)) AS resolved_legs"));
+    fn the_resolved_leg_count_is_forced_non_nullable_in_both_queries() {
+        for sql in [stranded_query(), peg_query()] {
+            assert!(
+                sql.contains("toUInt64(ifNull((SELECT count() FROM usdt), 0)) AS resolved_legs")
+            );
+        }
     }
 
     #[test]
-    fn a_healthy_reading_publishes_two_zeroes() {
-        let m = sanity_metrics(&healthy()).expect("leg resolved");
+    fn healthy_readings_publish_zeroes() {
         assert_eq!(
-            m,
-            vec![
-                SanityMetric {
-                    name: PEG_APPLIED_METRIC,
-                    value: 0.0
-                },
-                SanityMetric {
-                    name: STRANDED_METRIC,
-                    value: 0.0
-                },
-            ]
+            stranded_metric(&healthy_stranded()).expect("leg resolved"),
+            SanityMetric {
+                name: STRANDED_METRIC,
+                value: 0.0
+            }
+        );
+        assert_eq!(
+            peg_metric(&healthy_peg()).expect("leg resolved"),
+            SanityMetric {
+                name: PEG_APPLIED_METRIC,
+                value: 0.0
+            }
         );
     }
 
     #[test]
     fn counts_are_published_as_they_are_read() {
-        let m = sanity_metrics(&SanityCounts {
-            peg_applied: 44_657,
-            stranded: 157,
-            ..healthy()
-        })
-        .expect("leg resolved");
-        assert_eq!(m[0].value, 44_657.0);
-        assert_eq!(m[1].value, 157.0);
+        assert_eq!(
+            peg_metric(&PegCounts {
+                peg_applied: 1_564_045,
+                ..healthy_peg()
+            })
+            .expect("leg resolved")
+            .value,
+            1_564_045.0
+        );
+        assert_eq!(
+            stranded_metric(&StrandedCounts {
+                stranded: 157,
+                ..healthy_stranded()
+            })
+            .expect("leg resolved")
+            .value,
+            157.0
+        );
     }
 
-    /// The silent all-clear this module's `resolved_legs` column exists to
-    /// prevent: an unresolvable leg matches no candles, both counts read zero,
-    /// and a `NOT_BREACHING` alarm scores it healthy forever.
+    /// The silent all-clear the `resolved_legs` column exists to prevent: an
+    /// unresolvable leg matches no candles, the count reads zero, and a
+    /// `NOT_BREACHING` alarm scores it healthy forever.
     #[test]
     fn an_unresolvable_usdt_leg_is_refused_rather_than_reported_healthy() {
         assert_eq!(
-            sanity_metrics(&SanityCounts {
+            stranded_metric(&StrandedCounts {
                 resolved_legs: 0,
-                ..healthy()
+                ..healthy_stranded()
             }),
-            Err(SanityRefusal::UnresolvableLeg { resolved_legs: 0 })
+            Err(SanityRefusal::UnresolvableLeg {
+                resolved_legs: 0,
+                table: STRANDED_TABLE
+            })
+        );
+        assert_eq!(
+            peg_metric(&PegCounts {
+                resolved_legs: 0,
+                ..healthy_peg()
+            }),
+            Err(SanityRefusal::UnresolvableLeg {
+                resolved_legs: 0,
+                table: PEG_TABLE
+            })
         );
     }
 
@@ -542,55 +902,104 @@ mod tests {
     #[test]
     fn an_ambiguous_usdt_identity_is_refused() {
         assert_eq!(
-            sanity_metrics(&SanityCounts {
+            peg_metric(&PegCounts {
                 resolved_legs: 2,
-                ..healthy()
+                ..healthy_peg()
             }),
-            Err(SanityRefusal::UnresolvableLeg { resolved_legs: 2 })
+            Err(SanityRefusal::UnresolvableLeg {
+                resolved_legs: 2,
+                table: PEG_TABLE
+            })
         );
     }
 
     /// The guard `resolved_legs` cannot provide. The identity resolves cleanly,
     /// so the first guard passes — but the `asset_id` it resolves to is not the
     /// `quote_asset_id` the candles carry (task 0139 renumbering, a registry
-    /// rewrite), so the scan matches nothing. Both counts are zero because
-    /// nothing was examined, and `NOT_BREACHING` would score that healthy for as
-    /// long as it lasted.
+    /// rewrite), so the scan matches nothing. The count is zero because nothing
+    /// was examined, and `NOT_BREACHING` would score that healthy.
     #[test]
     fn a_resolved_leg_that_matches_no_candles_is_refused() {
         assert_eq!(
-            sanity_metrics(&SanityCounts {
+            peg_metric(&PegCounts {
                 scanned: 0,
-                ..healthy()
+                ..healthy_peg()
             }),
-            Err(SanityRefusal::EmptyScan)
+            Err(SanityRefusal::EmptyScan {
+                table: PEG_TABLE,
+                lookback_seconds: PEG_LOOKBACK_SECONDS
+            })
         );
+    }
+
+    /// ⚠️ The whole point of splitting the guards. A `_1m` scan that matched
+    /// nothing says nothing about `_1h`; suppressing a working signal because an
+    /// unrelated tier failed would be the muting failure arrived at from the
+    /// other side.
+    #[test]
+    fn one_direction_refusing_does_not_suppress_the_other() {
+        let peg = peg_metric(&PegCounts {
+            scanned: 0,
+            ..healthy_peg()
+        });
+        let stranded = stranded_metric(&StrandedCounts {
+            stranded: 42,
+            ..healthy_stranded()
+        });
+        assert!(peg.is_err());
+        assert_eq!(stranded.expect("published on its own evidence").value, 42.0);
     }
 
     /// The two refusals must not read alike: one sends the operator to the asset
     /// registry, the other to the candles.
     #[test]
     fn the_two_refusals_name_different_first_moves() {
-        let unresolvable = SanityRefusal::UnresolvableLeg { resolved_legs: 0 }.to_string();
-        let empty = SanityRefusal::EmptyScan.to_string();
+        let unresolvable = SanityRefusal::UnresolvableLeg {
+            resolved_legs: 0,
+            table: PEG_TABLE,
+        }
+        .to_string();
+        let empty = SanityRefusal::EmptyScan {
+            table: PEG_TABLE,
+            lookback_seconds: PEG_LOOKBACK_SECONDS,
+        }
+        .to_string();
         assert!(unresolvable.contains("prices.assets"));
         assert!(empty.contains("quote_asset_id"));
         assert_ne!(unresolvable, empty);
     }
 
-    /// ⚠️ Pins the tier against a "cheaper coarser table" optimisation, which is
-    /// exactly the change that was measured and REVERSED on 2026-08-19.
+    /// ⚠️ Since the directions read different tiers, a refusal that did not name
+    /// the table would send the operator to look at a table that was fine.
+    #[test]
+    fn a_refusal_names_the_tier_it_examined() {
+        assert!(
+            SanityRefusal::EmptyScan {
+                table: PEG_TABLE,
+                lookback_seconds: PEG_LOOKBACK_SECONDS,
+            }
+            .to_string()
+            .contains(PEG_TABLE)
+        );
+        assert!(
+            SanityRefusal::UnresolvableLeg {
+                resolved_legs: 0,
+                table: STRANDED_TABLE,
+            }
+            .to_string()
+            .contains(STRANDED_TABLE)
+        );
+    }
+
+    /// ⚠️ Pins the stranded tier against a "cheaper coarser table" optimisation,
+    /// which is exactly the change that was measured and REVERSED on 2026-08-19.
     ///
     /// The grace is measured from a bucket's `timestamp`, which is its START, so
     /// a coarse tier spends its own width out of the grace before its data even
-    /// exists — 24 of a 48 h grace on `_1d`, one hour on `_1h`. Prod measurement:
-    /// every USDT-quoted `_1h` candle is priced by 30 h of age, while the `_1d`
-    /// bucket for the same day was still half unpriced at ~41 h. The cost saving
-    /// that motivated `_1d` was not real either (1.4×, same wall time), because
-    /// the scan is dominated by the `FINAL` merge and the `assets` lookup.
+    /// exists — 24 of a 48 h grace on `_1d`, one hour on `_1h`.
     #[test]
-    fn the_check_reads_the_hourly_tier_so_the_grace_is_not_eaten_by_bucket_width() {
-        assert_eq!(SANITY_TABLE, "price_ohlcv_1h");
+    fn the_stranded_tier_does_not_let_bucket_width_eat_the_grace() {
+        assert_eq!(STRANDED_TABLE, "price_ohlcv_1h");
 
         // The bucket width must stay small relative to the grace. At `_1d` this
         // ratio is 1/2 — half the grace gone before enrichment can start.
