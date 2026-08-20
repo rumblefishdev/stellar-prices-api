@@ -2,9 +2,9 @@
 id: "0204"
 title: "Ops alarms missed an 11.5 h outage — no free-space alarm on the shared CH volume, and the DLQ alarm fires once then goes quiet"
 type: FEATURE
-status: active
+status: completed
 related_adr: []
-related_tasks: ["0202", "0203", "0137", "0142", "0056", "0201", "0182", "0172", "0196"]
+related_tasks: ["0212", "0213", "0214", "0202", "0203", "0137", "0142", "0056", "0201", "0182", "0172", "0196"]
 tags:
   ["priority-high", "effort-small", "observability", "alarms", "resilience", "milestone-M2"]
 milestone: 2
@@ -149,6 +149,25 @@ history:
       clippy clean on all four feature combinations. ⚠️ All four gaps are now
       BUILT and NONE are deployed; deploy Prices-production-Observability only.
       Task stays active until the deploy and the gap 1/2 induction.
+  - date: 2026-08-20
+    status: completed
+    who: okarcz
+    note: >
+      DEPLOYED AND CLOSED. All four gaps live on prod; the last acceptance
+      criterion (verified by inducing, not by reading the CDK) is met for gaps 1
+      and 2 as well. Gap 1 induced by raising the bound to 30% against a measured
+      24.43% free — fired 13:10 with real values in its StateReason, restored,
+      OK at 13:18. Gap 2 induced with 1/10/50 dummy DLQ messages: rungs fired at
+      12:17, 12:27, 12:34 and rungs 1 and 2 never re-notified, reproducing the
+      2026-08-13 defect deliberately; all three cleared at 13:14 after a purge.
+      Two deploys FAILED first and both taught something: CloudWatch caps
+      AlarmDescription at 1024 chars (synth cannot catch it), and the probe that
+      publishes 10 of the 13 alarms' metrics ships from eventbridge-stack, so
+      "deploy Observability only" left them blind and reading OK on no data.
+      Fixing the second required disabling CleanupRule in code, now backed by a
+      synth-time guard. Also measured: the probe runs in 653 ms of a 60 s budget,
+      closing the open Lambda-config question. Spawned 0212, 0213, 0214.
+      33 unit tests + 15 ITs green; 34 alarms on prod.
 ---
 
 # Ops alarms missed an 11.5 h outage
@@ -357,39 +376,54 @@ touching it can silently re-enable cleanup ([[0200]]).
 
 - [x] Free-space alarm on the CH host, threshold chosen to give hours of
       warning, routed to the same Slack channel as the existing ops alarms —
-      **built, not deployed**. `prices-{env}-ch-disk-free` at 20% free, on the
+      ✅ **DEPLOYED AND VERIFIED 2026-08-20.** `prices-{env}-ch-disk-free` at 20% free, on the
       existing `snsAction` (so the same `#stellar-prices-api-bot` channel as
       every other ops alarm). See "Implementation — gap 1" below
 - [x] DLQ alarm distinguishes 1 from 91 — re-notifies on growth or uses a
-      threshold ladder — **built, not deployed**. Threshold ladder: rungs at 10
+      threshold ladder — ✅ **DEPLOYED AND VERIFIED 2026-08-20.** Rungs at 10
       and 50 above the existing `>= 1` alarm. See "Implementation — gap 2"
 - [x] Runbook note: an ingest stall is verified recovered on the DATA, never on
       alarm state, and freshness alone does not prove completeness — added to
       `docs/runbooks/running-ingestion-components.md` as
       "Verifying recovery after an ingest stall", with both queries and the
       redrive/cleanup traps
-- [ ] ⚠️ Alarms verified by inducing the condition, not by reading the CDK — the
+- [x] ⚠️ Alarms verified by inducing the condition, not by reading the CDK — the
       0137 lesson that an alarm must be tested against the failure it exists for.
-      ✅ **Met for gaps 3 and 4** — both induce their real defect against a live
-      ClickHouse (a par-valued candle, an aged zero, an edited MV declaration, a
-      live MV without `APPEND`), and doing so for gap 4 found a silent
-      deserialization corruption no unit test could reach.
-      ⛔ **Still NOT met for gaps 1 and 2**, and for gap 1 it cannot be before
-      the deploy.
-      - *Gap 1:* what **is** verified by inducing the condition is the
-        **privilege** constraint — an IT creates a least-privileged user and
-        asserts it really is denied `system.disks` and really can call the
-        filesystem functions. The disk condition itself is only exercised in unit
-        tests against measured numbers. Filling a shared 1.72 TiB volume to prove
-        an alarm is not something to do to BE; the honest test is to raise the
-        threshold above current free space after deploy, confirm it fires into
-        Slack, and put it back.
-      - *Gap 2:* the ladder **is** inducible cheaply and without touching prod
-        data — send N dummy messages to the DLQ, watch the rungs fire in order,
-        then purge. Worth doing on the first deploy. Not done yet.
+      ✅ **MET FOR ALL FOUR GAPS, 2026-08-20.**
+      - *Gaps 3 and 4* — induced against a live ClickHouse before deploy (a
+        par-valued candle, an aged zero, an edited MV declaration, a live MV
+        without `APPEND`); doing so for gap 4 found a silent deserialization
+        corruption no unit test could reach.
+      - *Gap 1* — ✅ **induced on prod.** The threshold was raised to 30 %
+        against a measured 24.43 % free, deployed, and the alarm fired into
+        Slack with real data in its `StateReason`:
+        `2 out of the last 2 datapoints [24.4373065292441 (12:55),
+        24.422102771169126 (12:40)] were less than the threshold (30.0)`.
+        Threshold restored to 20 and confirmed back to `OK`. ⚠️ This is the only
+        honest form of the test — filling a 1.72 TiB volume shared with BE to
+        prove an alarm is not something to do to them.
+      - *Gap 2* — ✅ **induced on prod**, and it reproduced the 2026-08-13
+        defect under controlled conditions. 1 → 10 → 50 dummy messages, then a
+        purge:
+
+        | rung | fired | timestamp after the queue reached 50 |
+        |---|---|---|
+        | `-dlq` (1) | 12:17:08 | **12:17:08 — never moved** |
+        | `-dlq-10` | 12:27:22 | **12:27:22 — never moved** |
+        | `-dlq-50` | 12:34:01 | 12:34:01 |
+
+        Rung 1 watched the queue go 1 → 10 → 50 and sent **nothing** after its
+        first message. That is exactly what it did on 2026-08-13 while the queue
+        climbed to 91, and it is why nobody reading Slack could tell one dropped
+        ledger from an outage. Three rungs produced three messages where one
+        alarm produces one.
+
 - [x] **Gap 3** — `prices-clickhouse-drift` runs on a schedule and reports
       somewhere a person reads, with `CRITICAL` separated from `DRIFT` rather
-      than collapsed into "exit 1" — ✅ **built 2026-08-19, not deployed.**
+      than collapsed into "exit 1" — ✅ **built 2026-08-19, DEPLOYED 2026-08-20**
+      and reading clean on prod (`mv_drift_critical: 0`, `mv_drift: 0`,
+      `mv_visible_objects: 38`, `"all in sync"`) — the first time [[0142]]'s
+      check has ever run on a schedule.
       Three alarms: `-mv-drift-critical`, `-mv-drift`, `-mv-drift-unreadable`.
       ⚠️ **AMENDED, not met as originally written.** The criterion said
       *"re-notifying while drift persists"*; the operator decided on 2026-08-19
@@ -404,7 +438,7 @@ touching it can silently re-enable cleanup ([[0200]]).
       `close_usd / close ≈ 1.0` in the post-break era, and none at
       `close_usd = 0` with a `close` above the `Decimal(38, 14)` underflow
       bound. Scoped to the quote leg, so exotic-quoted zeros do not breach it.
-      — ✅ **built 2026-08-19, not deployed.** `usd_sanity.rs` + two alarm
+      — ✅ **built 2026-08-19, DEPLOYED 2026-08-20.** `usd_sanity.rs` + two alarm
       ladders at `[1, 100, 10000]`. See "Implementation — gap 4"
 - [x] **Gap 4 verified by inducing it** — ✅ 2026-08-19.
       `usd_sanity_counts_both_induced_defects` writes a par-valued candle and an
@@ -524,7 +558,8 @@ critical metric could have been always-on.
 
 40 unit tests and 15 ITs green; clippy clean on all four feature combinations.
 
-⚠️ **Built, NOT deployed** — `Prices-production-Observability` only. `cdk synth`
+✅ **DEPLOYED 2026-08-20** — see "Deploy attempt 2" for why `Observability` alone
+was NOT sufficient. `cdk synth`
 confirms 34 alarms total, 3 of them gap 3's, each with one alarm and one OK
 action.
 
@@ -638,7 +673,7 @@ including **AC "verified by inducing it"**:
 (`""`, `aws-mtls`, `lambda`, `--all-features` — `--all-targets` is not
 `--all-features`, and this crate has feature-gated entrypoints).
 
-⚠️ **Built, NOT deployed** — same status as gaps 1 and 2, and the same
+✅ **DEPLOYED 2026-08-20** — same status as gaps 1 and 2, and the same
 constraint: deploy `Prices-production-Observability` **only**. `cdk synth`
 confirms 6 new alarms, each with one alarm action and one OK action.
 
@@ -1233,8 +1268,97 @@ names — the [[0141]] discipline, and it earned its keep twice today: the
 pre-existing local bootstrap contained `RollupLagSeconds` and **none** of the
 new metrics.
 
+## What production taught that no test could — 2026-08-20
+
+Three things only surfaced by deploying and inducing. Each is the task's own
+thesis arriving from a new direction.
+
+### 1. Seven alarms declared themselves healthy with no metric in existence
+
+The Observability deploy created 13 alarms at ~11:35. The probe that publishes
+their metrics did not run new code until **12:20:18**. In between:
+
+```text
+11:37:38  ch-disk-free            INSUFFICIENT_DATA -> OK
+11:37:57  usd-peg-applied-10000   INSUFFICIENT_DATA -> OK
+11:38:21  usd-stranded-100        INSUFFICIENT_DATA -> OK
+...seven in total, all NOT_BREACHING
+```
+
+⚠️ **They went `OK` on nothing at all** — no metric existed in `Prices/Rollup`
+beyond `RollupLagSeconds`. `treatMissingData: NOT_BREACHING` scores absence as
+health, so the console read "disk is watched" while nothing watched.
+
+**The three `MvDrift*` alarms did not.** They held at `INSUFFICIENT_DATA` for
+**43 minutes** and only moved at 12:21, after a real datum arrived — because
+code-review finding 3 had changed them to `treatMissingData: MISSING`. Same
+deploy, same window, same absent data; only the alarms carrying the fix refused
+to lie about it. An unplanned controlled experiment, in production, for a change
+argued for on paper a day earlier.
+
+⚠️ This is the strongest argument yet for revisiting `NOT_BREACHING` on the
+liveness alarms — recorded here, not acted on, because the reasoning for it
+("no data genuinely is the absence of a breach") still holds for metrics whose
+publisher is not itself part of the change.
+
+### 2. The probe's Lambda config was never the risk it looked like
+
+The open question — *"the 1-minute / 256 MB config was never revisited for the
+three added reads"* — is now answered by measurement rather than argument:
+
+```text
+Duration: 653.60 ms   Max Memory Used: 48 MB / 256 MB
+```
+
+**1.1 % of the time budget** with four checks running instead of one. The
+concern was that a hard timeout is not a Rust `Err`, so it would publish nothing
+while `NOT_BREACHING` alarms scored the silence as healthy. At this margin there
+is no such risk, and confirming it needed no `eventbridge-stack` change — exactly
+as the code-review note predicted.
+
+### 3. An emptied DLQ does not clear its alarms promptly
+
+`purge-queue` emptied the queue at ~12:45 and `get-queue-attributes` read **0**
+immediately. The CloudWatch metric kept publishing **50.0 until 13:05** and only
+read 0 at 13:10 — a **~25-minute lag** between the queue's real state and the
+data the alarms evaluate.
+
+All three rungs then cleared at **13:14**, about **4 minutes** after the metric
+corrected. So the alarms react promptly; the whole delay is SQS's metric lagging
+the queue.
+
+✅ Design decision 8 is confirmed — every rung has a working route back to `OK`,
+and the three OK notifications are the deliberate noise that buys it. ⚠️ But the
+route runs on **SQS's metric clock, not the queue's**: on a real redrive the
+ladder keeps firing for roughly 25 minutes after the operator has actually fixed
+things. Worth knowing before someone concludes the redrive failed and does
+something rash.
+
+### 4. An unrelated alarm has been latched for 24 days — spawned as [[0214]]
+
+Reading the *whole* alarm table during verification, rather than only 0204's own
+thirteen, turned up:
+
+```text
+prices-production-enrichment-errors    ALARM    2026-07-27T00:20:07+00:00
+```
+
+Not ours, not caused by anything here — but the same pathology this task is
+named for, with the alarm working perfectly. It fired, it reached Slack, and it
+was scrolled past for three and a half weeks.
+
+⚠️ **It also prices gap 3's design decision 1.** That decision accepted a single
+latched drift alarm on the argument that latching costs *"somebody may forget"*
+rather than *"we are blind to an escalation"* — cheap, and *"one a ticket
+closes"*. Here is what forgetting actually cost: **24 days, found by accident.**
+The decision may still be right — drift does not deteriorate the way a DLQ does
+— but the trade is now measured rather than assumed, and gap 3 ships **two**
+alarms deliberately designed to latch. Re-read it before designing a third.
+
 ## Future Work
 
+- **A latched alarm needs a way back into view** — spawned as [[0214]], which
+  carries both the specific 24-day case and the general mechanism.
 - **Point the peg-applied check at `_1m`** with its own ladder and scan bound —
   spawned as [[0213]]. The only gap-4 direction still blind on prod, and it must
   land after [[0212]] or it ships permanently breached.
