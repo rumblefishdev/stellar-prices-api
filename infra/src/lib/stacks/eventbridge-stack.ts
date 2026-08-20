@@ -144,10 +144,29 @@ export class EventBridgeStack extends cdk.Stack {
       schedule: events.Schedule.expression(schedules.assetDiscovery),
     });
 
+    // 🔴 DISABLED IN CODE, and this line is load-bearing (task 0204, 2026-08-20).
+    //
+    // The live rule has been DISABLED by operator action since task 0200, but
+    // this template asserted `State: ENABLED` — so **every deploy of this stack
+    // silently re-enabled cleanup**, and the only thing standing between a
+    // routine deploy and a destructive sweep was remembering to check
+    // `describe-rule` afterwards. That is not a safeguard, it is a habit.
+    //
+    // ⚠️ The blast radius has GROWN while the rule sat off. `price_ohlcv_1m`
+    // carries a 7-day retention in the cleanup worker, and with cleanup stopped
+    // the table now holds years of history — including the 1.56M rows task 0212
+    // must repair. One sweep would drop all of it, irreversibly.
+    //
+    // Whether cleanup should EVER run again is task 0200's decision and this
+    // does not pre-empt it: the change only makes CDK state what production
+    // already is, so the template can no longer contradict reality. Re-enabling
+    // is a deliberate edit here, reviewed, rather than a side effect of
+    // deploying something unrelated.
     this.cleanupRule = new events.Rule(this, 'CleanupRule', {
       ruleName: `prices-${env}-cleanup`,
       description: `Old-data partition drop on prices.* tables (${env})`,
       schedule: events.Schedule.expression(schedules.cleanup),
+      enabled: false,
     });
 
     this.enrichmentRule = new events.Rule(this, 'EnrichmentRule', {
