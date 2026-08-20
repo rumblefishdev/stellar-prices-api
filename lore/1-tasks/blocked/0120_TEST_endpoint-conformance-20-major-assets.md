@@ -160,16 +160,23 @@ response — errors included — against the **live** spec from `/api-docs-json`
 for the free usage plan; ~2.5 min per run; report written as
 `conformance-0120-report-<ts>.json` (gitignored, regenerable).
 
-**Run 2026-08-19 08:16 UTC: 752 pass, 55 fail, 0 skip.** Zero schema
+**Run 2026-08-20 07:05 UTC: 724 pass, 54 fail, 7 skip.** Zero schema
 failures — the entire failure surface is the correctness layer, and every
-failure maps to a spawned defect task:
+failure maps to an existing defect task:
 
 | Failing check | Count | Task |
 |---|---|---|
-| `price_usd` zero sentinel | 18 | [[0135]] (2nd failure mode; contract decided 08-05) |
+| `price_usd` zero sentinel | 17 | [[0135]] (2nd failure mode; contract decided 08-05) |
 | `vwap_24h` zero + `sources` empty (fresh tips, volume > 0) | 24 | [[0135]] (C2 limit case — every source un-enriched at once) |
 | OHLCV windows empty (USDC; CBIJ, AUD, RON, BOL, EQL) | 12 | [[0170]] (default USD mode pins quote=USDC) |
 | Canonical USDC `/price` → 404 | 1 | [[0178]] |
+
+The 7 skips are the designed batch-vs-single path: the tip moved between the
+single and the batch call, so the values are not comparable at a common
+timestamp. Counts drift by one or two between runs as tips enrich — the first
+run (08-19, before the suite hardening below) read 752/55/0 with 18 rather
+than 17 `price_usd` zeroes. The failure *classes* have been stable across
+three runs.
 
 Every failure class turned out to be **already owned by an okarcz task** with
 a deeper diagnosis; the run is independent confirming evidence, folded into
@@ -184,6 +191,34 @@ day after the cross-check. Two findings sharpened during dedup:
   same 30-day window. The default USD mode pins the quote leg to canonical
   USDC ([[0170]]), which these assets never traded against — 0170's blast
   radius is every XLM-only-quoted asset, not just USDC's self-pair.
+
+### Suite hardening (code review, 2026-08-20)
+
+A review of the suite itself found three crash paths and two assertions that
+would flake on a re-run — all fixed and verified, because 0128 re-runs this
+close to submission and a suite that dies mid-run leaves no evidence at all:
+
+- **A failed spec fetch killed the run** with an unhandled `TypeError` and
+  wrote no report. The spec body is now checked before ajv sees it, and every
+  early exit goes through the report writer. Verified against a fake gateway
+  returning an HTML 502: two clean failures, report written, exit 1.
+- **Two crash paths in the pagination walk** — a missing spec entry made
+  `ajv.validate({$ref: null})` throw, and `r.json.data` was iterated even when
+  validation had just rejected the page shape. Both now record a failure and
+  stop the walk. Verified against a doctored spec with the list schema removed
+  and a page carrying no `data` array.
+- **`volume_24h_usd` was asserted non-zero.** A tracked asset can genuinely go
+  a day without a trade; this is the same false-alarm shape the 0072 runbook
+  warns about for `price_xlm`/`change_24h_pct`. Now parse-only.
+- **`updated_at` freshness required `age >= 0`**, so any forward clock skew
+  between the producer and the runner failed all 20 assets at once. Now
+  tolerates 5 minutes of skew.
+
+Left deliberately: the suite still only exercises `base_currency=USD` on
+OHLCV (see the empty-window note above), `Candle`/`BatchResponse` field
+presence is unchecked, and ajv recompiles per validation. None of these
+affect the verdict; they are noted here so the next reader does not re-derive
+them.
 
 Findings confirmed by the run, beyond the failures: soroban rows carry empty
 `asset_code` ([[0210]]); OHLCV `start`/`end` are both **inclusive** but

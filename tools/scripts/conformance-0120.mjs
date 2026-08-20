@@ -176,6 +176,42 @@ function numericString(group, asset, field, value, { nonzero = false } = {}) {
   }
 }
 
+// ---------- report writer ----------
+// Also the bail-out path: every early exit has to leave a report behind, or a
+// failed run produces no evidence at all.
+function finish() {
+  const counts = { pass: 0, fail: 0, skip: 0 };
+  for (const c of checks) counts[c.status]++;
+  const report = {
+    task: '0120',
+    run_at: startedAt.toISOString(),
+    duration_s: Math.round((Date.now() - startedAt.getTime()) / 1000),
+    base_url: BASE_URL,
+    spec_version: spec?.info?.version,
+    asset_list: {
+      file: 'tools/scripts/conformance-assets.json',
+      derived_at: assetsFile.derived_at,
+      count: ASSETS.length,
+    },
+    summary: counts,
+    checks,
+  };
+  const out = `conformance-0120-report-${startedAt.toISOString().replace(/[:.]/g, '').slice(0, 15)}.json`;
+  writeFileSync(out, JSON.stringify(report, null, 2));
+
+  console.log(
+    `\n# Summary: ${counts.pass} pass, ${counts.fail} fail, ${counts.skip} skip`,
+  );
+  const failGroups = {};
+  for (const c of checks)
+    if (c.status === 'fail')
+      failGroups[c.group] = (failGroups[c.group] || 0) + 1;
+  for (const [g, n] of Object.entries(failGroups))
+    console.log(`  ${g}: ${n} failing`);
+  console.log(`report: ${out}`);
+  process.exit(counts.fail ? 1 : 0);
+}
+
 // ---------- suite ----------
 const GRANULARITY_MS = {
   '1m': 60e3,
@@ -184,6 +220,9 @@ const GRANULARITY_MS = {
   '4h': 14400e3,
   '1d': 86400e3,
 };
+// The tip is stamped by the producer's clock, not ours — a small negative age
+// is skew between the two hosts, not a stale-data defect.
+const CLOCK_SKEW_MS = 300e3;
 const startedAt = new Date();
 
 const assetsFile = JSON.parse(
@@ -204,6 +243,21 @@ console.log(`base: ${BASE_URL}, assets: ${ASSETS.length}\n`);
     r.status === 200,
     `status ${r.status}`,
   );
+  // Nothing downstream can run without a usable spec — bail before ajv sees it,
+  // and leave a report behind rather than dying on an unhandled TypeError.
+  const usable =
+    r.status === 200 && r.json && typeof r.json === 'object' && r.json.paths;
+  record(
+    'spec',
+    '-',
+    'spec body is a usable OpenAPI document',
+    !!usable,
+    usable ? '' : r.text.slice(0, 200),
+  );
+  if (!usable) {
+    console.error('\nNo usable spec — cannot validate anything. Stopping.');
+    finish();
+  }
   spec = r.json;
   ajv.addSchema(spec, 'spec');
   record(
@@ -293,11 +347,13 @@ for (const a of ASSETS) {
     ) {
       allPropsPresent('price', a.id, 'PriceResponse', r.json);
       singlePrices.set(a.id, r.json);
-      for (const f of ['price_usd', 'vwap_24h', 'volume_24h_usd'])
+      for (const f of ['price_usd', 'vwap_24h'])
         numericString('price', a.id, f, r.json[f], { nonzero: true });
-      // Runbook 0072: price_xlm / change_24h_pct may legitimately be zero on an
-      // un-enriched tip — assert parseability only, never non-zero.
-      for (const f of ['price_xlm', 'change_24h_pct'])
+      // Parse-only, never non-zero. Runbook 0072: price_xlm / change_24h_pct
+      // are legitimately zero on an un-enriched tip. volume_24h_usd is the same
+      // shape of false alarm — a tracked asset can genuinely go a day without a
+      // trade, and 0128 re-runs this suite on whatever the market did that day.
+      for (const f of ['price_xlm', 'change_24h_pct', 'volume_24h_usd'])
         numericString('price', a.id, f, r.json[f]);
       const srcs = Object.keys(r.json.sources || {});
       record('price', a.id, 'sources is a non-empty object', srcs.length > 0);
@@ -321,7 +377,7 @@ for (const a of ASSETS) {
         'price',
         a.id,
         'updated_at within 24h',
-        age >= 0 && age < 86400e3,
+        age > -CLOCK_SKEW_MS && age < 86400e3,
         r.json.updated_at,
       );
     } else if (r.json) {
@@ -454,6 +510,10 @@ for (const a of ASSETS) {
 {
   console.log(`## pagination walk`);
   const seen = new Map(); // identity key -> count
+  // Resolve once, with the same guard validateAgainstSpec applies: a bare
+  // {$ref: null} makes ajv throw and kills the walk.
+  const listRef = responseSchemaRef('/v1/assets', 'get', 200);
+  record('list', '-', 'spec has schema for GET /v1/assets 200', !!listRef);
   let cursor = null,
     pages = 0,
     lastHasMore = null,
@@ -473,13 +533,18 @@ for (const a of ASSETS) {
       );
       break;
     }
-    if (
-      !ajv.validate(
-        { $ref: responseSchemaRef('/v1/assets', 'get', 200) },
-        r.json,
-      )
-    )
-      schemaOk = false;
+    if (listRef && !ajv.validate({ $ref: listRef }, r.json)) schemaOk = false;
+    // Do not walk a shape validation just rejected.
+    if (!Array.isArray(r.json.data)) {
+      record(
+        'list',
+        '-',
+        `page ${pages + 1} carries a data array`,
+        false,
+        `got ${typeof r.json.data}`,
+      );
+      break;
+    }
     for (const item of r.json.data) {
       const key = `${item.asset_code}|${item.issuer_address}|${item.contract_address}`;
       seen.set(key, (seen.get(key) || 0) + 1);
@@ -495,7 +560,10 @@ for (const a of ASSETS) {
     lastHasMore = r.json.has_more;
     pages++;
   } while (cursor && pages < 100);
-  record('list', '-', 'every page validates against the schema', schemaOk);
+  // Only claim this when a schema was actually applied — otherwise the pass
+  // would mean "never checked".
+  if (listRef)
+    record('list', '-', 'every page validates against the schema', schemaOk);
   record(
     'list',
     '-',
@@ -624,32 +692,4 @@ for (const a of ASSETS) {
 }
 
 // ---------- summary ----------
-const counts = { pass: 0, fail: 0, skip: 0 };
-for (const c of checks) counts[c.status]++;
-const report = {
-  task: '0120',
-  run_at: startedAt.toISOString(),
-  duration_s: Math.round((Date.now() - startedAt.getTime()) / 1000),
-  base_url: BASE_URL,
-  spec_version: spec?.info?.version,
-  asset_list: {
-    file: 'tools/scripts/conformance-assets.json',
-    derived_at: assetsFile.derived_at,
-    count: ASSETS.length,
-  },
-  summary: counts,
-  checks,
-};
-const out = `conformance-0120-report-${startedAt.toISOString().replace(/[:.]/g, '').slice(0, 15)}.json`;
-writeFileSync(out, JSON.stringify(report, null, 2));
-
-console.log(
-  `\n# Summary: ${counts.pass} pass, ${counts.fail} fail, ${counts.skip} skip`,
-);
-const failGroups = {};
-for (const c of checks)
-  if (c.status === 'fail') failGroups[c.group] = (failGroups[c.group] || 0) + 1;
-for (const [g, n] of Object.entries(failGroups))
-  console.log(`  ${g}: ${n} failing`);
-console.log(`report: ${out}`);
-process.exit(counts.fail ? 1 : 0);
+finish();
