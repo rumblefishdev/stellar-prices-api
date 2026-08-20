@@ -120,6 +120,18 @@ pub const STRANDED_LOOKBACK_SECONDS: i64 = 7 * 86_400;
 /// writer that has started applying the peg again writes it continuously, so it
 /// shows up in the newest rows; it does not need seven days of history to be
 /// seen. A frozen historical population is task 0212's job, not this alarm's.
+///
+/// ⚠️ **It must also stay wide enough that `scanned == 0` is anomalous**, or
+/// [`crate::usd_sanity::ScanGuards`]'s empty-scan refusal fails the invocation
+/// on a quiet leg and pages ops every 15 minutes on a healthy system. Measured
+/// on prod 2026-08-20: the longest stretch with no USDT-quoted `_1m` row in the
+/// preceding 30 days is **6.5 hours**, against this 48 h bound — 7.4x margin.
+/// ⛔ Do not shorten this below ~24 h without re-taking that measurement.
+///
+/// ⚠️ **Consequence to accept, not to fix by widening:** because the window is
+/// short and enrichment drains oldest-first behind task 0111, this direction
+/// reads 0 whenever the leg is unpriced — see [`PEG_TABLE`] on why a zero here
+/// is not a clean bill of health.
 pub const PEG_LOOKBACK_SECONDS: i64 = 2 * 86_400;
 
 /// How old a candle must be before a `close_usd` of zero counts as *stranded*
@@ -240,28 +252,54 @@ pub const STRANDED_TABLE: &str = "price_ohlcv_1h";
 /// Pointing one shared table name at `_1m` would have been the small change, and
 /// it is wrong three times over:
 ///
-/// 1. It sits permanently in ALARM, and a permanently-firing alarm gets muted —
-///    the exact end-state task 0204 exists to prevent.
+/// 1. An unbounded `_1m` read finds the whole 1,564,045-row peg population
+///    (task 0212) — above every rung of `usdSanityEscalationCounts`
+///    (`[1, 100, 10000]`) — and sits permanently in ALARM. A permanently-firing
+///    alarm gets muted, the exact end-state task 0204 exists to prevent.
 ///
-///    ⚠️ **Do not restate this as "reads 1,564,045, above every rung".** That
-///    figure is the *all-history* peg population (task 0212) and an earlier
-///    draft of this comment used it here, which is wrong for the query that
-///    actually ships: bounded to [`PEG_LOOKBACK_SECONDS`], the reading is the
-///    recent arrival rate — measured at ~16 USDT-quoted `_1m` rows per day on
-///    2026-08-17, so tens of rows, not millions. That clears rung 1 and
-///    nothing above it. The deploy block stands on "breached at all, forever,
-///    until 0209 stops the writer" — not on the magnitude.
+///    ⚠️ **That figure applies to the repoint, NOT to the query that ships.**
+///    Bounded to [`PEG_LOOKBACK_SECONDS`] the reading is the recent arrival
+///    rate, and the whole peg population sits at timestamps at or before
+///    2026-08-13, outside the window. Measured on prod 2026-08-20: `scanned`
+///    684, `peg_applied` **0**. Do not quote 1.5 M as what this alarm reads.
 /// 2. `_1m` is retention-managed while `_1h` is a forever-table, so the window
 ///    reasoning has to be redone rather than inherited — see
 ///    [`PEG_LOOKBACK_SECONDS`].
 /// 3. The stranded direction is *correct* on `_1h` and would be made worse by
 ///    moving, because its grace is calibrated to that tier.
 ///
-/// ⛔ **This alarm must not be deployed until task 0212 has repaired the 1.5 M
-/// rows and task 0209 has fixed the writer that produces them.** Deployed
-/// before that, the ladder ships permanently breached and earns itself the
-/// muting in point 1. Task 0212 carries the same ordering in the other
-/// direction ("fix 0209 FIRST"), so the chain is 0111 → 0209 → 0212 → this.
+/// # 🔴 A zero here does NOT mean the USDT leg is healthy
+///
+/// Measured on prod 2026-08-20, inside this window: **684 rows scanned, 684 of
+/// them `close_usd = 0`, zero peg-valued and zero correctly priced.** The leg
+/// has not been priced at all since 2026-08-13 (task 0209), so the peg
+/// direction currently has *nothing to judge* and reads 0 for want of input
+/// rather than for want of defects.
+///
+/// ⚠️ That is correct behaviour for a re-introduction guard — it watches new
+/// writes, and there are none — but it means **`usd-peg-applied` reading green
+/// is not evidence of correct USD valuation while the leg is dark.** The
+/// `usd-stranded` ladder is what carries that condition, and it is latched.
+/// Never read this metric alone.
+///
+/// ⚠️ It stays vacuous longer than 0209 alone: enrichment drains oldest-first
+/// behind task 0111's backlog, so even once the pivot writes again it will
+/// price *history* first, and nothing enters this window until the backlog
+/// reaches the present. Widening the window to compensate walks straight back
+/// into point 1 above.
+///
+/// # Deploy ordering
+///
+/// ⚠️ **An earlier version of this comment said the alarm must not be deployed
+/// before 0212 and 0209, because it would ship permanently breached.** The
+/// prod measurement above falsifies that: bounded to 48 h it reads 0 today,
+/// with 0212 unlanded, because the peg population is entirely outside the
+/// window. The claim was inherited from the repoint argument in point 1 and
+/// never re-checked against the query that actually ships.
+///
+/// So this is deployable ahead of 0209/0212 — but deploy it for the right
+/// reason: it arms a guard for when the leg is priced again, and it proves
+/// nothing about the leg until then.
 pub const PEG_TABLE: &str = "price_ohlcv_1m";
 
 /// Shared guards against the silent all-clear, carried by every reading.

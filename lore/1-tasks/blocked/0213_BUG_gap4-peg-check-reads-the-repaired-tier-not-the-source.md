@@ -32,6 +32,22 @@ history:
       NON-VACUOUS by reverting PEG_TABLE to price_ohlcv_1h: 6 ITs and 2 unit
       tests fail. Acceptance criterion 3 cannot be met until 0212 repairs the
       1.5 M rows — deploying before that ships a permanently-breached ladder.
+  - date: 2026-08-20
+    status: blocked
+    who: okarcz
+    note: >
+      Prod measurements taken. 🔴 THE DEPLOY BLOCK WAS FALSIFIED — with 0212
+      unlanded the ladder reads scanned 684 / peg_applied 0, because the 1.5 M
+      peg rows all sit at timestamps <= 2026-08-13 and the 48 h window does not
+      reach them. The "ships permanently breached" claim was inherited from the
+      unbounded-repoint argument and never re-checked against the query that
+      ships; corrected in usd_sanity.rs, observability-stack.ts, the PR body and
+      the alarm text. All 684 rows are close_usd = 0, so the direction reads 0
+      for want of input, not want of defects — a green peg ladder is NOT
+      evidence of a healthy leg while 0209 stands. Empty-scan concern also
+      closed: longest silent gap in 30 days is 6.5 h against a 48 h window.
+      NOW BLOCKED ON ONE THING ONLY: the peg scan's read cost on prod, which
+      decides whether the probe's 1-minute timeout still holds.
 ---
 
 # The peg check reads the repaired tier, not the source
@@ -92,8 +108,15 @@ able to show the defect.
 - [x] The stranded metric still reads `_1h` and its 48 h grace still means
       BE's loss window. `STRANDED_TABLE`, `STRANDED_LOOKBACK_SECONDS` and
       `STRANDED_GRACE_SECONDS` are unchanged in value; only the names moved.
-- [ ] The ladder reads **0** on prod at deploy time — i.e. [[0212]] landed
-      first. **(blocked — this is the whole reason the task is not closed)**
+- [x] The ladder reads **0** on prod. ⚠️ **But the criterion's stated logic
+      ("i.e. [[0212]] landed first") was FALSIFIED.** Measured 2026-08-20 with
+      0212 unlanded: `scanned` 684, `peg_applied` **0**. The 1.5 M peg rows all
+      sit at timestamps ≤ 2026-08-13, entirely outside the 48 h window — the
+      window choice moved this task out from under its own blocker, and nobody
+      noticed until the measurement. 🔴 **It reads 0 because all 684 rows are
+      `close_usd = 0`** (0 peg-valued, 0 correctly priced): the leg is dark, so
+      the direction has nothing to judge. A green ladder is NOT evidence of
+      correct USD valuation — recorded at `PEG_TABLE` and in the alarm text.
 - [ ] ⛔ **PRE-DEPLOY MEASUREMENT: the peg scan's read cost on prod.** The
       probe's 1-minute timeout was sized on the `_1h` scan alone (~1.37M rows /
       ~70 MiB / 41-50 ms) and was not revisited for this second `FINAL` scan
@@ -105,8 +128,12 @@ able to show the defect.
       `read_rows`, never by rows returned. A timeout here is not a Rust `Err` —
       it kills the invocation with nothing published, and step 4 (MV drift)
       never runs.
-- [ ] ⛔ **PRE-DEPLOY MEASUREMENT: can `scanned` legitimately reach 0 on the peg
-      tier?** `EmptyScan` was calibrated for a 7-day window on `_1h`; the peg
+- [x] ✅ **MEASURED 2026-08-20 — `scanned == 0` is not reachable.** The longest
+      stretch with no USDT-quoted `_1m` row in the preceding 30 days is
+      **6.5 hours** against the 48 h window: 7.4x margin, so the empty-scan
+      refusal will not page on a healthy leg. No code change needed. ⛔ Do not
+      shorten the window below ~24 h without re-taking this. Original concern:
+      **can `scanned` legitimately reach 0 on the peg tier?** `EmptyScan` was calibrated for a 7-day window on `_1h`; the peg
       direction applies the same `scanned == 0` refusal to **48 h on a sparse
       leg** — measured at ~16 USDT-quoted `_1m` rows for 2026-08-17, so ~32 in
       a 48 h window. A quiet spell makes zero legitimate, and the refusal then
@@ -216,8 +243,18 @@ code before acting. Four were defects in this change and are fixed in the PR:
   the crate's unresolved-link count went **9 → 6** (the rest are in `mv_drift`
   and `lib.rs`, out of scope here).
 
-The remaining two are the pre-deploy measurements added to the acceptance
-criteria above. Both are real and neither can be settled from a local machine.
+The remaining two were promoted to acceptance criteria. **Both were then
+measured on prod, and one of them overturned this task's central claim:**
+
+- ✅ **Empty scan is not reachable.** Longest silent stretch on the USDT `_1m`
+  leg over 30 days is **6.5 h** against the 48 h window — 7.4x margin. No code
+  change needed.
+- 🔴 **The deploy block was wrong.** It read `peg_applied = 0` with 0212
+  unlanded, because the peg population is entirely outside the window. ⚠️ The
+  claim was carried from the *unbounded repoint* argument and never re-checked
+  against the query that actually ships — the same class of error as the
+  original defect: reasoning about a surface other than the one in use.
+- ⏳ **Read cost still unmeasured** — the one thing this task now waits on.
 
 ## Future Work
 
