@@ -270,6 +270,33 @@ fn authorize_url(
         // the Developer Portal, and verified again — as a set — on the token
         // response (`discord::exchange_code`).
         .append_pair("scope", discord::SCOPE)
+        // WITHOUT this, Discord's authorize endpoint defaults to
+        // `prompt=consent` and re-shows the approval screen on EVERY
+        // authorisation, including ones where the same account already granted
+        // the same scopes. Three places in this codebase state the opposite as
+        // a design property — `issue::complete_issue` ("Discord does not
+        // re-prompt for consent on repeat authorisation, so this whole detour
+        // cost the visitor a redirect, not a login"), `session`'s TTL
+        // reasoning, and the frontend's `issueUrl` doc — and the whole shape
+        // of the issue flow rests on it: eligibility is proved per action, so
+        // a visitor crosses this endpoint again for every issue, every retry
+        // after a refusal, and (task 0191) every rework. At one consent screen
+        // apiece that is not a redirect, it is a login, four times over.
+        //
+        // `prompt=none` skips the screen for an authorisation already granted.
+        // It is NOT the strict OIDC `prompt=none`: Discord still shows the
+        // screen when the application has not been authorised before, or when
+        // the scopes have changed — which is what keeps first-time sign-in and
+        // the epic's one-round-trip `?action=issue` working for a brand-new
+        // visitor.
+        //
+        // That last sentence is the one assumption here, and it is checkable
+        // at no extra cost: 0180 item 5 already has the operator capturing the
+        // consent screen with and without `guilds.members.read`. If Discord
+        // instead refuses an unauthorised `prompt=none`, it does so as an
+        // OAuth error on the callback — logged by `refuse_oauth_error` and
+        // rendered, not silent.
+        .append_pair("prompt", "none")
         .append_pair("state", &started.state_param)
         .append_pair("code_challenge", &started.code_challenge)
         .append_pair("code_challenge_method", "S256")
@@ -297,6 +324,12 @@ async fn callback(
     headers: HeaderMap,
     ValidatedQuery(query): ValidatedQuery<CallbackQuery>,
 ) -> Response {
+    // Stamped before anything else runs. An issue round-trip spends the same
+    // Lambda budget on the exchange below as it does on the reconciliation at
+    // the end, so the clock that bounds the reconciliation has to start here
+    // rather than where that work begins — see `issue::ISSUE_BUDGET`.
+    let started = std::time::Instant::now();
+
     let Some(oauth) = state.oauth.as_ref() else {
         return unconfigured();
     };
@@ -351,10 +384,16 @@ async fn callback(
             // fault: plain text on the page, the button still there, nothing
             // logged. A `warn` per cancellation would be noise proportional to
             // how many people change their mind.
-            return redirect(
-                &format!("{PORTAL_HOME}{CANCELLED_QUERY}"),
-                vec![drop_pending],
-            );
+            // Which flow was cancelled decides where the visitor lands: an
+            // issue round-trip starts from the dashboard, and `?signin=…`
+            // banners render only in the signed-out branch it has left.
+            let query = match accepted.action {
+                Action::Issue => issue::ISSUE_CANCELLED_QUERY,
+                #[cfg(test)]
+                Action::TestOther => CANCELLED_QUERY,
+                Action::SignIn => CANCELLED_QUERY,
+            };
+            return redirect(&format!("{PORTAL_HOME}{query}"), vec![drop_pending]);
         }
 
         // Everything else is a failure somebody has to know about, and the one
@@ -364,7 +403,7 @@ async fn callback(
         // a door that check never sees. Reported as "cancelled" and unlogged,
         // it presents as every visitor changing their mind forever, with
         // nothing in CloudWatch to contradict that reading.
-        return refuse_oauth_error(error, drop_pending);
+        return refuse_oauth_error(error, accepted.action, drop_pending);
     }
 
     let Some(code) = query.code.as_deref() else {
@@ -417,7 +456,7 @@ async fn callback(
     // and every outcome is a redirect (see `issue`). The sign-in tail below
     // never sees an `Issue` action.
     if accepted.action == Action::Issue {
-        return issue::complete_issue(&state, oauth, token, drop_pending).await;
+        return issue::complete_issue(&state, oauth, token, drop_pending, started).await;
     }
 
     // `token` is moved here, so from this line on the handler cannot reach it.
@@ -611,12 +650,21 @@ fn refuse_state(error: StateError) -> Response {
 /// green — the same shape of gap that let "every error is a cancellation" ship
 /// in the first place. A behaviour nothing can observe is a behaviour nothing
 /// protects.
-fn refuse_oauth_error(error: &str, drop_pending: String) -> Response {
+fn refuse_oauth_error(error: &str, action: Action, drop_pending: String) -> Response {
     tracing::warn!(
         error = %sanitise_error(error),
-        "portal sign-in refused by Discord"
+        ?action,
+        "portal round-trip refused by Discord"
     );
-    redirect(&format!("{PORTAL_HOME}{FAILED_QUERY}"), vec![drop_pending])
+    // The landing has to belong to the flow the visitor started, because that
+    // is what decides which half of the page is on screen when they get back.
+    let query = match action {
+        Action::Issue => issue::ISSUE_DENIED_QUERY,
+        #[cfg(test)]
+        Action::TestOther => FAILED_QUERY,
+        Action::SignIn => FAILED_QUERY,
+    };
+    redirect(&format!("{PORTAL_HOME}{query}"), vec![drop_pending])
 }
 
 /// Refuse a callback that is malformed on the caller's side.
@@ -777,6 +825,11 @@ mod tests {
         assert_eq!(get("code_challenge_method"), "S256");
         assert_eq!(get("code_challenge"), started.code_challenge);
         assert_eq!(get("state"), started.state_param);
+        // Without this the endpoint defaults to `prompt=consent` and every
+        // repeat authorisation is a fresh approval screen — which would make
+        // "the second round-trip is a redirect, not a login" false for the
+        // issue flow, every retry after a refusal, and 0191's rework.
+        assert_eq!(get("prompt"), "none");
 
         // The verifier is the half that must NOT travel. A URL containing it
         // makes PKCE decorative and is the single worst thing this function
@@ -866,7 +919,7 @@ mod tests {
             .finish();
 
         tracing::subscriber::with_default(subscriber, || {
-            refuse_oauth_error("invalid_scope", String::new());
+            refuse_oauth_error("invalid_scope", Action::SignIn, String::new());
         });
 
         let text = logs.text();

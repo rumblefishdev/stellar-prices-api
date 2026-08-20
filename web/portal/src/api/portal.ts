@@ -289,8 +289,9 @@ export interface PortalUsage {
  * `GET /api-tokens/api/usage` — the signed-in caller's usage against quota.
  *
  * Read-only by construction on the backend (it can never create, attach or
- * delete a key), which is why — unlike `issueKey` below — the page may call it
- * on load: opening the dashboard cannot mint anything.
+ * delete a key), which is why — like `fetchKey` above, and for the same reason
+ * — the page may call it on load: opening the dashboard cannot mint anything.
+ * Issuing is `issueUrl()`'s OAuth round-trip, behind an explicit press.
  *
  * Resolves to `null` when the caller has no key yet (the backend's
  * `404 no_key`), because for this page that is a renderable state, not a

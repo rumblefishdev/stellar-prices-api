@@ -376,6 +376,24 @@ function ApiKey({ onKey }: { onKey?: () => void }) {
     };
   }, []);
 
+  // `onKey` is held in a ref rather than closed over, so `load` has EMPTY
+  // dependencies and the mount effect below runs exactly once.
+  //
+  // It read `[onKey]` before, and the caller passes an inline arrow — a fresh
+  // identity on every render. Calling `onKey()` set state on the dashboard,
+  // which re-rendered, which made a new `onKey`, which made a new `load`,
+  // which re-fired the effect: **two `GET /key` calls per page load**, three
+  // when landing on `?issue=ok`. Each is a paginated `GetApiKeys` plus a
+  // `GetApiKey` against the account-wide control-plane budget, so the
+  // per-load cost 0187's decision 12 hands to 0194 was quietly doubled.
+  //
+  // The ref, not a `useCallback` at the call site: this component should not
+  // depend on every caller remembering to memoise a prop.
+  const onKeyRef = useRef(onKey);
+  useEffect(() => {
+    onKeyRef.current = onKey;
+  });
+
   const load = useCallback(() => {
     fetchKey()
       .then((key) => {
@@ -389,7 +407,7 @@ function ApiKey({ onKey }: { onKey?: () => void }) {
           // reads it) — the FACT only, never the value or the id: nothing
           // outside this component needs the credential, so nothing outside
           // it gets to hold one.
-          onKey?.();
+          onKeyRef.current?.();
         } else {
           setView({ state: 'none' });
         }
@@ -398,7 +416,7 @@ function ApiKey({ onKey }: { onKey?: () => void }) {
         if (!live.current) return;
         setView({ state: 'failed', reason: describeFailure(cause) });
       });
-  }, [onKey]);
+  }, []);
 
   useEffect(() => {
     load();
@@ -438,7 +456,16 @@ function ApiKey({ onKey }: { onKey?: () => void }) {
           explicitly NOT an accusation — a Discord outage says nothing about
           anyone's membership. Retry is the same round-trip link in every
           case, because eligibility is proved per attempt, never remembered. */}
-      {issue === 'ok' && <p data-testid="issue-ok">Your key is ready.</p>}
+      {/* Not while the lookup says `none`: `GetApiKeys` is eventually
+          consistent (see `keys/mod.rs` — "the listing can come back NON-empty
+          and still not contain the key just created"), and the reveal is a
+          single read with no retry. On a first issuance the redirect can beat
+          the listing, and "Your key is ready." sitting above "you have no API
+          key yet" is the page contradicting itself about the one fact the
+          visitor came for. The settling branch below says what is true. */}
+      {issue === 'ok' && view.state !== 'none' && (
+        <p data-testid="issue-ok">Your key is ready.</p>
+      )}
       {issue === 'not_member' && (
         <p data-testid="issue-not-member">
           You need to be a member of the{' '}
@@ -468,10 +495,45 @@ function ApiKey({ onKey }: { onKey?: () => void }) {
           your key. Please <a href={issueUrl()}>try again</a>.
         </p>
       )}
+      {/* The round-trip ended at Discord, before any check ran. Two states,
+          not one, for the same reason `failed` and `unknown` are two: the
+          visitor's own choice and our broken registration are different
+          events belonging to different people. Neither is a verdict — these
+          are the issue flow's half of the pair sign-in has carried since
+          0186, and without them a cancelled press landed on a `?signin=…`
+          banner that only renders while signed out, which an issue round-trip
+          has by definition left. */}
+      {issue === 'cancelled' && (
+        <p data-testid="issue-cancelled">
+          You stopped before Discord could check your membership — nothing was
+          created, and nothing is wrong. Pick it up again whenever you like:{' '}
+          <a href={issueUrl()}>get my API key</a>.
+        </p>
+      )}
+      {issue === 'denied' && (
+        <p data-testid="issue-denied">
+          Discord would not complete the check, and this is not something you
+          did. Please <a href={issueUrl()}>try again</a>, and tell us if it
+          keeps happening.
+        </p>
+      )}
 
       {view.state === 'loading' && <p>Checking for your API key…</p>}
 
-      {view.state === 'none' && (
+      {/* Issued a moment ago, not listed yet. A *wait*, like `too_young` —
+          so it renders as one, and specifically NOT as the "you have no key"
+          branch below, which would offer to issue a second key for a visitor
+          who has just been given their first. */}
+      {view.state === 'none' && issue === 'ok' && (
+        <p data-testid="issue-ok-settling">
+          Your key was created, and is taking a moment to appear.{' '}
+          <button type="button" onClick={load}>
+            Check again
+          </button>
+        </p>
+      )}
+
+      {view.state === 'none' && issue !== 'ok' && (
         <>
           <Prerequisites />
           <p>

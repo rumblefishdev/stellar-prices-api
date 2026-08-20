@@ -806,6 +806,86 @@ describe('the API key', () => {
   });
 
   /**
+   * One page load, one `GET /key`.
+   *
+   * The route is read-only, so a second call mints nothing — but it is a
+   * paginated `GetApiKeys` plus a `GetApiKey` against the account-wide
+   * control-plane budget, doubling the per-load cost 0187's decision 12 hands
+   * to 0194. It doubled because `load` depended on the `onKey` prop, which the
+   * dashboard passes as an inline arrow: calling it set state, which
+   * re-rendered, which made a new prop identity, which re-fired the mount
+   * effect. Held in a ref now, so the count is the assertion.
+   */
+  it('asks for the key exactly once per load, even after reporting it', async () => {
+    const fetchMock = signedInWithKey();
+    renderApp();
+
+    await screen.findByTestId('api-key');
+    // The usage section refetches when a key appears (task 0188), so waiting
+    // on its settled render also gives any second key call time to land.
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.filter(([url]) => url === USAGE_URL).length,
+      ).toBeGreaterThan(1),
+    );
+
+    const keyCalls = fetchMock.mock.calls.filter(([url]) => url === KEY_URL);
+    expect(keyCalls).toHaveLength(1);
+  });
+
+  /**
+   * A cancelled round-trip has to say so, in the section the visitor was
+   * looking at. It used to land on `?signin=cancelled`, whose banner renders
+   * only while signed out — so a visitor who pressed "Get my API key" and
+   * changed their mind at Discord came back to an unchanged dashboard.
+   *
+   * And it must not read as a refusal: nothing was checked, nothing was
+   * denied.
+   */
+  it('says a cancelled round-trip was cancelled, not refused', async () => {
+    signedInWithoutKey();
+    renderApp('/?issue=cancelled');
+
+    const said = await screen.findByTestId('issue-cancelled');
+    expect(said.textContent).toMatch(/nothing is wrong/i);
+    expect(screen.queryByTestId('issue-not-member')).toBeNull();
+    expect(screen.queryByTestId('issue-denied')).toBeNull();
+  });
+
+  /**
+   * `invalid_scope` is our Developer Portal registration drifting, not the
+   * visitor's doing and not a Discord outage — so it gets its own state
+   * rather than folding into `unknown`, which would render our misconfiguration
+   * as a doubt about their membership. Same rule as `failed` vs `unknown`.
+   */
+  it('separates a refused round-trip from a cancelled one and from unknown', async () => {
+    signedInWithoutKey();
+    renderApp('/?issue=denied');
+
+    const said = await screen.findByTestId('issue-denied');
+    expect(said.textContent).toMatch(/not something you did/i);
+    expect(screen.queryByTestId('issue-cancelled')).toBeNull();
+    expect(screen.queryByTestId('issue-unknown')).toBeNull();
+  });
+
+  /**
+   * `GetApiKeys` is eventually consistent, so a first issuance can redirect
+   * before the key is listable. The page must not then contradict itself —
+   * and above all must not offer to issue a key to somebody who has just been
+   * given one.
+   */
+  it('renders a settling wait, not "no key", when the redirect beats the listing', async () => {
+    signedInWithoutKey();
+    renderApp('/?issue=ok');
+
+    expect(await screen.findByTestId('issue-ok-settling')).toBeTruthy();
+    // Not the success line — the key is not on screen to be ready.
+    expect(screen.queryByTestId('issue-ok')).toBeNull();
+    // And not the "you have no key" branch, whose control issues another one.
+    expect(screen.queryByRole('link', { name: /get my api key/i })).toBeNull();
+  });
+
+  /**
    * Not a member: name the server, link the registered vanity invite, and
    * offer retry as the same round-trip — eligibility is proved per attempt,
    * never remembered, so joining and pressing again is all it takes.

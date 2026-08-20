@@ -7,10 +7,11 @@
 //! (`super::super::keys::issue_for`). Nothing is remembered: the next issue or
 //! rework proves itself again.
 //!
-//! # Every outcome is a redirect, and the outcomes are five literals
+//! # Every outcome is a redirect, and every redirect target is a literal
 //!
 //! The visitor is mid-navigation (Discord sent them here), so the answer is a
-//! `303` back to the portal with one of:
+//! `303` back to the portal. **Five of the seven are verdicts** — the outcomes
+//! of a completed eligibility check, and the only ones this module produces:
 //!
 //! | query | meaning |
 //! | --- | --- |
@@ -25,6 +26,12 @@
 //! was not". Collapsing them would render an AWS incident as a doubt about the
 //! visitor's membership.
 //!
+//! The other two — [`ISSUE_CANCELLED_QUERY`] and [`ISSUE_DENIED_QUERY`] — are
+//! **not** verdicts and are not produced here. They belong to the callback,
+//! which reaches them when the round-trip ends at Discord before any check
+//! runs; they live in this module so that every `?issue=` literal is declared
+//! in one place. See their own documentation for why they are two and not one.
+//!
 //! The **key value never rides in a `Location`** — after `?issue=ok` the page
 //! calls the reveal route, which is read-only and session-authorized.
 //!
@@ -38,7 +45,7 @@
 //! shown can never disagree about who the visitor is.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::response::Response;
 
@@ -60,6 +67,23 @@ pub(super) const ISSUE_NOT_MEMBER_QUERY: &str = "?issue=not_member";
 pub(super) const ISSUE_UNKNOWN_QUERY: &str = "?issue=unknown";
 pub(super) const ISSUE_FAILED_QUERY: &str = "?issue=failed";
 
+/// The round-trip ended at Discord, before any check could run.
+///
+/// These two are **not** a sixth and seventh verdict. The five above are the
+/// outcomes of a *completed* eligibility check; these are what happens when
+/// the visitor never reaches one, and sign-in has had exactly this pair since
+/// task 0186 (`?signin=cancelled` / `?signin=failed`). Issue had neither, so
+/// its callback borrowed sign-in's — and those banners render only in the
+/// signed-out branch, which an issue round-trip has by definition left. A
+/// visitor who pressed "Get my API key" and changed their mind at Discord
+/// came back to an unchanged dashboard with nothing said at all.
+///
+/// Kept apart from each other for the reason `failed` and `unknown` are kept
+/// apart: "you changed your mind" and "our registration is wrong" are not the
+/// same event and do not belong to the same person.
+pub(super) const ISSUE_CANCELLED_QUERY: &str = "?issue=cancelled";
+pub(super) const ISSUE_DENIED_QUERY: &str = "?issue=denied";
+
 /// The one parameterised landing state: how long until the account clears the
 /// threshold. Digits only, by type.
 pub(super) fn too_young_query(wait_secs: u64) -> String {
@@ -71,6 +95,36 @@ pub(super) fn too_young_query(wait_secs: u64) -> String {
 /// it is noticed at. `/auth/login?action=issue` refuses with this instead of
 /// starting a round-trip that cannot end in a key.
 pub(super) const KEYS_UNCONFIGURED: &str = "keys_unconfigured";
+
+/// The whole callback's I/O budget, measured from the moment the request
+/// arrived — **not** from the moment this module takes over.
+///
+/// `keys::RECONCILE_DEADLINE` is 10s and was sized for 0187, where the
+/// reconciliation was essentially the entire request: "10s leaves the handler
+/// ~5s of the function's budget". This path puts four more network calls in
+/// front of it — the token exchange (5s), two Parameters and Secrets reads
+/// (2s each) and two Discord reads (5s each) — so reusing that constant
+/// unchanged would let the worst case reach ~29s against
+/// `apiHandler.timeoutSeconds` of **15**. Lambda would kill the invocation
+/// with no response at all: the visitor gets API Gateway's bare `502` instead
+/// of the designed `?issue=failed` redirect, an `Errors` datapoint is
+/// recorded, and a key may exist that was never attached — precisely the
+/// failure mode 0186's F7 and 0187's R1 both removed.
+///
+/// 12s of a 15s function leaves ~3s to serialize a redirect and for the
+/// runtime to send it. The reconciler gets whatever survives; see
+/// [`RECONCILE_FLOOR`] for what happens when that is not enough.
+const ISSUE_BUDGET: Duration = Duration::from_secs(12);
+
+/// The least time worth starting a reconciliation with.
+///
+/// A reconciliation needs at least a list, a create and an attach. Beginning
+/// one with less than this cannot end in a key, and starting control-plane
+/// writes that the invocation will be killed part-way through is how an
+/// unattached orphan is made. Below this the path lands on `?issue=failed` —
+/// which is the honest answer: eligibility passed, our key service did not
+/// have time.
+const RECONCILE_FLOOR: Duration = Duration::from_secs(2);
 
 /// Everything the issue arm needs beyond what sign-in already carries.
 ///
@@ -135,11 +189,17 @@ impl IssueDeps {
 /// check — `token` is the fresh, scope-verified token those produced. The
 /// order below is load-bearing: the membership call borrows the token, the
 /// identity read consumes it, and everything after holds no token at all.
+///
+/// `started` is stamped when the **request** arrived, not when this function
+/// did: the exchange that ran before it spent from the same Lambda budget, so
+/// a clock started here would not see the largest single call on the path.
+/// See [`ISSUE_BUDGET`].
 pub(super) async fn complete_issue(
     state: &AuthState,
     oauth: &OauthSecret,
     token: AccessToken,
     drop_pending: String,
+    started: Instant,
 ) -> Response {
     // Resolve the two operator knobs first — per action, so an SSM change is
     // honoured without a redeploy. Failure is `unknown`, not a 5xx: the
@@ -250,7 +310,24 @@ pub(super) async fn complete_issue(
                 tracing::error!("an eligible issue callback arrived with no control plane wired");
                 return land(ISSUE_FAILED_QUERY);
             };
-            match keys::issue_for(gateway, &user.id, state.issue.deadline).await {
+
+            // What is left of the invocation, not a constant. Everything above
+            // — the exchange, both parameter reads, both Discord reads — has
+            // already been paid for out of the same budget.
+            let remaining = ISSUE_BUDGET.saturating_sub(started.elapsed());
+            if remaining < RECONCILE_FLOOR {
+                tracing::error!(
+                    remaining_ms = remaining.as_millis() as u64,
+                    "eligibility passed but the invocation's budget is spent; \
+                     refusing to start a reconciliation that cannot finish"
+                );
+                return land(ISSUE_FAILED_QUERY);
+            }
+            // `min`, so the configured deadline stays an upper bound and the
+            // `with_deadline` test seam keeps working.
+            let deadline = remaining.min(state.issue.deadline);
+
+            match keys::issue_for(gateway, &user.id, deadline).await {
                 IssueOutcome::Issued => {
                     // A key now exists, so a cached "no key" on the usage
                     // route is false — same eviction the reveal performs,
@@ -270,7 +347,7 @@ pub(super) async fn complete_issue(
 mod tests {
     use super::*;
 
-    /// The five landing states are distinct literals under the portal home,
+    /// Every landing state is a distinct literal under the portal home,
     /// like `?signin=…` — extending `the_only_redirect_targets_are_the_portal
     /// _itself` to the issue flow.
     #[test]
@@ -280,6 +357,10 @@ mod tests {
             ISSUE_NOT_MEMBER_QUERY,
             ISSUE_UNKNOWN_QUERY,
             ISSUE_FAILED_QUERY,
+            // Pre-check landings. Distinct from each other and from every
+            // verdict above — a cancelled press must never read as a refusal.
+            ISSUE_CANCELLED_QUERY,
+            ISSUE_DENIED_QUERY,
         ];
         for (i, a) in fixed.iter().enumerate() {
             assert!(a.starts_with("?issue="));

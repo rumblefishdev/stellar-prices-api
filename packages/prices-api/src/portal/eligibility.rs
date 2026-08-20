@@ -99,6 +99,22 @@ impl EligibilitySettings {
                 what: "discord-guild-id",
             });
         }
+        // The SHAPE, not merely the presence — and by the same predicate the
+        // caller uses to build the member URL, so the two cannot drift.
+        //
+        // Checking only for emptiness here is what let a guild *name* through:
+        // `stellar_test` passed the cold-start probe, so the deploy that
+        // opened the portal came up green, and the refusal happened once per
+        // visitor instead — as `Unknown`, which is the arm that deliberately
+        // says nothing about anybody's membership. Every member would have
+        // been told "we could not verify", indefinitely, with the actual fault
+        // one `put-parameter` away. This is the failure the probe exists to
+        // turn into an `Init Errors` event.
+        if !crate::portal::auth::discord::is_snowflake(&id) {
+            return Err(EligibilityError::NotSnowflake {
+                what: "discord-guild-id",
+            });
+        }
         Ok(id)
     }
 
@@ -122,6 +138,11 @@ pub enum EligibilityError {
     Fetch { name: String, message: String },
     #[error("the `{what}` parameter is empty")]
     Empty { what: &'static str },
+    #[error(
+        "the `{what}` parameter is not a Discord snowflake (all digits, e.g. \
+         897514728459468821) — a guild NAME will not work here"
+    )]
+    NotSnowflake { what: &'static str },
     #[error("the `{what}` parameter is not a whole number of minutes")]
     NotMinutes { what: &'static str },
 }
@@ -404,6 +425,35 @@ mod tests {
             decide(&unknown(), DOCUMENTED_SNOWFLAKE, 5, now),
             Eligibility::Unknown
         );
+    }
+
+    /// The cold-start probe must refuse a guild **name**.
+    ///
+    /// `stellar_test` is the value the task's own parameter table named for
+    /// the build period, and before this check it passed: the deploy came up
+    /// green and every visitor was told "we could not verify your Discord
+    /// membership" instead, because the shape was only checked where the URL
+    /// is built. Same predicate both sides now.
+    #[tokio::test]
+    async fn a_guild_name_is_refused_by_the_probe_rather_than_every_visitor() {
+        let settings = EligibilitySettings {
+            guild_id: ParamSource::Direct("stellar_test".into()),
+            min_account_age: ParamSource::Direct("5".into()),
+        };
+        assert!(matches!(
+            settings.guild_id().await,
+            Err(EligibilityError::NotSnowflake { .. })
+        ));
+    }
+
+    /// …and a real snowflake still resolves, trimmed.
+    #[tokio::test]
+    async fn a_snowflake_resolves() {
+        let settings = EligibilitySettings {
+            guild_id: ParamSource::Direct("  897514728459468821\n".into()),
+            min_account_age: ParamSource::Direct("5".into()),
+        };
+        assert_eq!(settings.guild_id().await.unwrap(), "897514728459468821");
     }
 
     #[test]

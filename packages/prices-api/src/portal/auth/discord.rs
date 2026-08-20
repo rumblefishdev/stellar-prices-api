@@ -185,7 +185,7 @@ impl Endpoints {
     /// mis-seeded value cannot smuggle `../` or a query string into the URL.
     /// Validation failure is the caller's `Unknown` outcome, not a panic.
     fn member_url(&self, guild_id: &str) -> Option<String> {
-        if guild_id.is_empty() || !guild_id.bytes().all(|b| b.is_ascii_digit()) {
+        if !is_snowflake(guild_id) {
             return None;
         }
         Some(format!(
@@ -354,6 +354,28 @@ pub enum MemberLookup {
 /// is, an unlisted code on a 404 lands in `Unknown`, which fails safe in both
 /// directions (no key issued, no accusation rendered).
 const NOT_MEMBER_CODES: [u64; 2] = [10_007, 10_004];
+
+/// Whether `value` has the shape of a Discord snowflake.
+///
+/// Shared by [`Endpoints::member_url`], which builds a **URL path segment**
+/// out of a guild id, and by `eligibility::EligibilitySettings::guild_id`,
+/// which is what validates the operator's seed. Those two were allowed to
+/// disagree, and the disagreement had a cost: `guild_id` checked only for
+/// emptiness, so `stellar_test` — the value the task's own parameter table
+/// named for the build period — passed the cold-start probe, deployed green,
+/// and then answered "we could not verify your Discord membership" to every
+/// visitor forever, because the check ran here instead and produced
+/// [`MemberLookup::Unknown`] once per request. One predicate, so the seed
+/// cannot be accepted in a shape the caller cannot use.
+///
+/// Deliberately **shape only**: digits, non-empty, and inside `u64`. There is
+/// no minimum length, because a well-formed id for the wrong guild is not this
+/// function's problem — Discord answers `10004` for it and `complete_issue`
+/// logs that loudly against the parameter name. Inventing a length floor here
+/// would risk refusing a legitimate id to catch a case that is already caught.
+pub(crate) fn is_snowflake(value: &str) -> bool {
+    !value.is_empty() && value.bytes().all(|b| b.is_ascii_digit()) && value.parse::<u64>().is_ok()
+}
 
 /// Ask whether the token's owner is a member of `guild_id` (task 0189).
 ///

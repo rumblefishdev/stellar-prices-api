@@ -332,6 +332,10 @@ async fn login_redirects_to_discord_asking_for_the_two_scopes_and_nothing_else()
     assert_eq!(field("scope"), "identify guilds.members.read");
     assert_eq!(field("response_type"), "code");
     assert_eq!(field("code_challenge_method"), "S256");
+    // Repeat authorisation must not re-prompt: eligibility is proved per
+    // action, so a visitor crosses this endpoint again for every issue and
+    // every retry (task 0189).
+    assert_eq!(field("prompt"), "none");
     assert_eq!(field("redirect_uri"), REDIRECT_URI);
     assert!(!field("state").is_empty());
     assert!(!field("code_challenge").is_empty());
