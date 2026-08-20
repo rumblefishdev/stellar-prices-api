@@ -2,7 +2,7 @@
 id: "0190"
 title: "Key registry table — deferred, and has to justify itself before it is built"
 type: FEATURE
-status: backlog
+status: active
 related_adr: ["0007", "0010"]
 related_tasks: ["0183", "0158", "0187", "0191", "0192"]
 tags: [layer-infra, priority-low, effort-small, milestone-M3, epic-self-service-onboarding, storage, clickhouse, slice-7]
@@ -19,6 +19,17 @@ history:
       built without it, using deterministic key naming and the surviving key's
       `createdDate`. If that holds through those two slices, this task is
       canceled rather than built.
+  - date: 2026-08-20
+    status: active
+    who: akot
+    note: >
+      Activated by Adam on a branch cut from [[0189]]'s. Sequencing caveat
+      recorded rather than resolved: the task's own note says the decision
+      cannot be made before [[0187]] and [[0191]] are both running, and
+      [[0191]] is still backlog. The build-vs-cancel evidence is therefore
+      incomplete on activation — [[0187]] is archived, [[0188]] (dashboard
+      load) is still active, and the per-load control-plane cost that feeds
+      the "hot path" criterion is owned by [[0194]].
 ---
 
 # Key registry — only if it earns its place
