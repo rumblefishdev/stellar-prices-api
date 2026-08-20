@@ -1164,6 +1164,75 @@ Two fixes, and the second matters more than the first:
 fail with all three names and lengths; restoring produces a template
 byte-identical to the verified-good one. 34 alarms, max description 937.
 
+## 🔴 Deploy attempt 2 — the alarms shipped BLIND, and the deploy plan was wrong
+
+2026-08-20. The Observability deploy succeeded and produced 13 alarms. Then:
+
+```text
+aws cloudwatch list-metrics --namespace Prices/Rollup  ->  RollupLagSeconds
+```
+
+**Ten of the thirteen alarms had no metric to read.** `ClickHouseDiskFreePercent`,
+`UsdtPegAppliedCandles`, `UsdtStrandedCandles` and the three `MvDrift*` metrics
+did not exist, because the probe running in production is still the [[0137]]
+build.
+
+⚠️ **The probe Lambda's code asset is defined in `eventbridge-stack.ts`**
+(`ROLLUP_FRESHNESS_PROBE_ASSET_DIR`, line 564), not in `observability-stack.ts`.
+So this task's standing instruction — *"deploy `Prices-production-Observability`
+only"* — ships the **alarms** but not the **publisher**. That instruction is
+repeated in four places in this file and in the memory notes, and it is wrong:
+it was reasoned from "reusing the probe avoids a NEW EventBridge rule", which is
+true, and then silently extended to "so we never deploy that stack", which does
+not follow.
+
+🔴 **The interim state was worse than having no alarms at all.** Disk and USD
+alarms are `NOT_BREACHING`, so with no data they settle to **OK** — the console
+reads "disk is watched" while nothing is watching. That is this task's founding
+failure, produced by this task's own deploy plan. (The three `MvDrift*` alarms
+sat at `INSUFFICIENT_DATA` instead, because code review finding 3 had already
+moved them to `treatMissingData: MISSING` — that change earned itself here.)
+
+### The fix, and why it needed a decision
+
+Shipping the probe means deploying `eventbridge-stack`, which owns `CleanupRule`.
+Synth confirmed the hazard is live, not folklore: the template emits
+`prices-production-cleanup State=ENABLED` while the live rule is `DISABLED`.
+
+⚠️ **And the blast radius had grown.** `price_ohlcv_1m` carries a 7-day retention
+in the cleanup worker; with cleanup off since [[0200]] the table now holds years
+of history — including the 1.56M rows [[0212]] must repair. One sweep drops all
+of it.
+
+**Operator chose to fix the template rather than race it**: `enabled: false` on
+`CleanupRule`. This does not pre-empt [[0200]] (*should cleanup ever run again*);
+it makes CDK state what production already is, so a deploy can no longer
+contradict reality and re-enabling becomes a reviewed edit.
+
+⛔ **Backed by `assertCleanupRuleStaysDisabled()`, a synth-time throw** — the
+operator asked for the guarantee to be structural rather than a boolean somebody
+could flip back. It reads the **resolved** CloudFormation property (the
+alarm-description failure earlier the same day proved source and template are
+not the same thing) and refuses to synthesize any template where the rule is
+`ENABLED`. Re-enabling now requires **deleting the guard**, in a reviewed diff,
+with a stated reason — which is the shape a [[0200]] decision should take
+anyway. Verified by inducing it: flipping `enabled: true` fails synth with the
+rule name and the reason; restoring produces a template identical to the
+pre-guard one.
+
+### ⚠️ A second, larger stale-asset hazard surfaced on the way
+
+The EventBridge stack ships **eight** Lambda functions, and a deploy pushes all
+eight assets from `target/lambda/`. Every one of them was a **2026-08-13 local
+build** — predating the [[0172]] oracle-writer deploy. Deploying with those in
+place could have **rolled back live fixes**, which is [[0141]] exactly.
+
+All ten workspace assets were rebuilt from develop HEAD before any deploy, and
+the probe bootstrap was verified by `strings` to contain all six new metric
+names — the [[0141]] discipline, and it earned its keep twice today: the
+pre-existing local bootstrap contained `RollupLagSeconds` and **none** of the
+new metrics.
+
 ## Future Work
 
 - **Point the peg-applied check at `_1m`** with its own ladder and scan bound —
