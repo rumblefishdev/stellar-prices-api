@@ -449,24 +449,36 @@ function Usage({
     return () => cancelInFlight.current?.();
   }, [load]);
 
-  // The latest view state, for the effect below — a ref rather than a dep,
-  // because the refetch must fire on the keyOnScreen TRANSITION alone. With
-  // `view.state` as a dependency the effect re-runs on every state change,
-  // and "no-key → load → no-key" (the backend can keep answering no_key while
-  // its cache catches up) becomes a fetch loop.
-  const viewState = useRef<UsageView['state']>('loading');
-  useEffect(() => {
-    viewState.current = view.state;
-  }, [view.state]);
+  // Fires the keyed refetch AT MOST ONCE per mount. This latch is what lets
+  // the effect below watch `view.state` — the obvious dependency — without
+  // becoming a fetch loop: the backend can legitimately keep answering
+  // `no_key` while its own cache catches up, so "no-key → load → no-key"
+  // would otherwise re-trigger itself forever.
+  //
+  // Watching the state (rather than the `keyOnScreen` transition alone, which
+  // is what a ref-read did) is the point. The press and the mount-time fetch
+  // race: press "Get my key" while that fetch is still in flight and the
+  // transition happens with the view still `'loading'`, so a transition-only
+  // effect saw nothing to do — and then never ran again, because its
+  // dependencies had already settled. The in-flight request, issued before the
+  // key existed, resolves `no_key`, and the section sat on "your key is new"
+  // until the visitor found the Refresh button. Pressing again could not help
+  // either: `setKeyOnScreen(true)` on an already-`true` state changes no
+  // dependency.
+  const refetchedForKey = useRef(false);
 
-  // When a key appears on screen, refetch — but only OUT OF the no-key state:
-  // that is the one answer the issue just falsified. A section already
-  // showing numbers is showing an answer a reveal does not change, and
-  // blanking it into a loading flicker for an identical body would make the
-  // press look like it broke something.
+  // When a key is on screen and the usage section says "no key", refetch —
+  // that is the one answer the issue just falsified, whenever it arrives. A
+  // section already showing numbers is showing an answer a reveal does not
+  // change, and blanking it into a loading flicker for an identical body would
+  // make the press look like it broke something, so `'ok'` is left alone.
   useEffect(() => {
-    if (keyOnScreen && viewState.current === 'no-key') load();
-  }, [keyOnScreen, load]);
+    if (!keyOnScreen || view.state !== 'no-key' || refetchedForKey.current) {
+      return;
+    }
+    refetchedForKey.current = true;
+    load();
+  }, [keyOnScreen, view.state, load]);
 
   /**
    * THE lag line — the wording this task decides once. Rendered under every

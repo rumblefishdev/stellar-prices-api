@@ -987,6 +987,123 @@ describe('usage against quota', () => {
   });
 
   /**
+   * The press and the mount-time usage fetch race, and the press can win.
+   *
+   * Watching the `keyOnScreen` transition alone was not enough: with the
+   * mount-time fetch still in flight the view is `'loading'` when the
+   * transition happens, so there was nothing to refetch out of — and the
+   * effect never ran again, because its dependencies had already settled. The
+   * in-flight request, issued before the key existed, then resolved `no_key`
+   * and the section sat on "your key is new" until the visitor found Refresh.
+   *
+   * The usage response is deferred through `json()` rather than through
+   * `fetch` itself, which is what puts the request in the state this covers:
+   * `fetch` has resolved, the page is still awaiting the body.
+   */
+  it('refetches usage when the key is issued before the first load answers', async () => {
+    let answerTheFirstLoad: () => void = () => undefined;
+    const firstLoad = new Promise<{ code: string; message: string }>(
+      (resolve) => {
+        answerTheFirstLoad = () =>
+          resolve({ code: 'no_key', message: 'you have no API key yet' });
+      },
+    );
+
+    let usageCalls = 0;
+    const fetchMock = stubRoutes({
+      [CONFIG_URL]: openConfig,
+      [ME_URL]: () => ({
+        json: async () => ({
+          authenticated: true,
+          user_id: '308994132968210433',
+          username: 'adam',
+        }),
+      }),
+      [KEY_URL]: () => ({
+        json: async () => ({
+          key_id: 'abc123',
+          name: 'discord-308994132968210433-key',
+          value: 'aBcDeF0123456789aBcDeF0123456789aBcDeF01',
+          created: true,
+        }),
+      }),
+      [USAGE_URL]: () => {
+        usageCalls += 1;
+        // The load that was in flight when the key was issued snapshotted a
+        // keyless account, so it answers `no_key`. Everything after it sees
+        // the key.
+        return usageCalls === 1
+          ? { ok: false, status: 404, json: () => firstLoad }
+          : { json: async () => USAGE };
+      },
+    });
+    renderApp();
+
+    // Press while the first usage load is still awaiting its body.
+    fireEvent.click(
+      await screen.findByRole('button', { name: /get my api key/i }),
+    );
+    await screen.findByTestId('api-key');
+    expect(usageCalls).toBe(1);
+
+    answerTheFirstLoad();
+
+    // No Refresh press anywhere in this test: the section recovers on its own.
+    expect((await screen.findByTestId('usage-used')).textContent).toBe('121');
+    expect(screen.queryByText(/your key is new/i)).toBeNull();
+    expect(
+      fetchMock.mock.calls.filter(([url]) => url === USAGE_URL).length,
+    ).toBe(2);
+  });
+
+  /**
+   * And it fires at most once, which is what lets the effect above watch the
+   * view state at all. The backend can legitimately keep answering `no_key`
+   * while its own short cache catches up, so a refetch that re-triggered on
+   * its own result would be a fetch loop against the control plane.
+   */
+  it('does not loop when the refetch is answered no_key again', async () => {
+    const fetchMock = stubRoutes({
+      [CONFIG_URL]: openConfig,
+      [ME_URL]: () => ({
+        json: async () => ({
+          authenticated: true,
+          user_id: '308994132968210433',
+          username: 'adam',
+        }),
+      }),
+      [KEY_URL]: () => ({
+        json: async () => ({
+          key_id: 'abc123',
+          name: 'discord-308994132968210433-key',
+          value: 'aBcDeF0123456789aBcDeF0123456789aBcDeF01',
+          created: true,
+        }),
+      }),
+      [USAGE_URL]: usageNoKey,
+    });
+    renderApp();
+
+    await screen.findByText(/no API key yet/i);
+    fireEvent.click(
+      await screen.findByRole('button', { name: /get my api key/i }),
+    );
+    await screen.findByTestId('api-key');
+    await screen.findByText(/your key is new/i);
+
+    // One load on mount, one refetch after the issue, and then it stops.
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.filter(([url]) => url === USAGE_URL).length,
+      ).toBe(2),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(
+      fetchMock.mock.calls.filter(([url]) => url === USAGE_URL).length,
+    ).toBe(2);
+  });
+
+  /**
    * The rate limit is the gateway's, not this bundle's (task 0188).
    *
    * `pricingApiFreePlanRateLimit` is a per-env config value that
