@@ -2,10 +2,11 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Route, Routes, useSearchParams } from 'react-router-dom';
 
 import {
+  fetchKey,
   fetchPortalConfig,
   fetchSession,
   fetchUsage,
-  issueKey,
+  issueUrl,
   signInUrl,
   signOut,
   PortalApiError,
@@ -45,6 +46,83 @@ type SessionState =
   | { state: 'ok'; session: PortalSession }
   | { state: 'failed'; reason: string };
 
+/** The landing params sign-in's callback appends. */
+const SIGNIN_PARAMS = ['signin'] as const;
+/** The landing params the issue callback appends (task 0189). */
+const ISSUE_PARAMS = ['issue', 'wait_secs'] as const;
+
+/**
+ * Read landing-state query params **once**, then strip them from the URL.
+ *
+ * The values survive in state for this mount; the URL does not — so a reload,
+ * a bookmark, or a sign-out-and-back-in shows no stale banner. This closes
+ * 0186's open item O10 (`?signin=cancelled` never left the URL, so a sign-out
+ * after a cancelled attempt could still say "Sign-in cancelled"), and the
+ * issue outcomes (task 0189) get the same lifecycle from day one: an
+ * eligibility refusal is about the round-trip that just ended, not about
+ * every future visit to the same URL.
+ *
+ * `replace`, not `push`: the stripped URL takes the history entry's place, so
+ * Back does not resurrect the banner either.
+ */
+function useOneShotParams(
+  names: readonly string[],
+): Record<string, string | null> {
+  const [searchParams, setSearchParams] = useSearchParams();
+  // Captured exactly once per mount. (React StrictMode's simulated
+  // remount preserves state, so the capture survives it; a REAL remount —
+  // sign-out and back in — reads the already-stripped URL, which is the
+  // one-shot behaviour wanted.)
+  const [taken] = useState<Record<string, string | null>>(() => {
+    const out: Record<string, string | null> = {};
+    for (const name of names) out[name] = searchParams.get(name);
+    return out;
+  });
+
+  // Strip at most once, and only when there is something to strip — a
+  // navigation for a URL that would not change is a render loop waiting for a
+  // `setSearchParams` whose identity is not stable.
+  const stripped = useRef(false);
+  const anythingToStrip = Object.values(taken).some((value) => value !== null);
+  useEffect(() => {
+    if (!anythingToStrip || stripped.current) return;
+    stripped.current = true;
+    setSearchParams(
+      (previous) => {
+        const next = new URLSearchParams(previous);
+        for (const name of names) next.delete(name);
+        return next;
+      },
+      { replace: true },
+    );
+  }, [anythingToStrip, names, setSearchParams]);
+
+  return taken;
+}
+
+/**
+ * The two prerequisites, stated **before** the visitor authenticates
+ * (task 0189): learning about the membership requirement after the consent
+ * screen means they authorised an app for nothing. The wording is this task's;
+ * 0193 restyles it without re-deciding it.
+ *
+ * `discord.gg/stellardev` is the registered vanity invite — the other invites
+ * SDF publishes are personal and at least one is already dead (task 0179).
+ * The account-age line deliberately names no number: the threshold is operator
+ * configuration the backend reports when it matters, and a hard-coded "5
+ * minutes" here would drift the moment the SSM parameter changes.
+ */
+function Prerequisites() {
+  return (
+    <p>
+      Getting an API key needs two things, both checked via Discord when you ask
+      for one: membership of the{' '}
+      <a href="https://discord.gg/stellardev">Stellar Developers Discord</a>,
+      and a Discord account that is not brand new.
+    </p>
+  );
+}
+
 /**
  * Sign-in, as plain text and one control (task 0186).
  *
@@ -58,14 +136,14 @@ type SessionState =
  */
 function SignIn() {
   const [session, setSession] = useState<SessionState>({ state: 'loading' });
-  const [searchParams] = useSearchParams();
   // Two landing states, from two literals the backend appends. `cancelled` is
   // the visitor's own choice at Discord's consent screen; `failed` is any other
   // OAuth error — a drifted scope registration, a Discord outage — which the
   // backend also logs. Telling them apart on the page is the visible half of
   // that split: calling a misconfiguration "cancelled" is what made it look
-  // like every visitor was changing their mind.
-  const signin = searchParams.get('signin');
+  // like every visitor was changing their mind. One-shot (task 0189, closing
+  // 0186's O10): shown for this landing, stripped from the URL.
+  const { signin } = useOneShotParams(SIGNIN_PARAMS);
   const cancelled = signin === 'cancelled';
   const failed = signin === 'failed';
 
@@ -162,6 +240,11 @@ function SignIn() {
         </p>
       )}
       <p>You are not signed in.</p>
+      {/* Both prerequisites, BEFORE the control that starts an OAuth flow —
+          the acceptance criterion. Signing in itself needs neither, but the
+          visitor deciding whether to authorise an app deserves to know what
+          the key they came for will require. */}
+      <Prerequisites />
       {/* A link, not a button with an onClick. The OAuth flow is a top-level
           navigation to discord.com and back; `fetch` cannot perform one, and
           the session cookie is `SameSite=Lax` precisely so that this navigation
@@ -206,12 +289,13 @@ function Dashboard({
       <button type="button" onClick={onSignOut}>
         Sign out
       </button>
-      {/* Task 0187. Inside the authenticated branch, so signing out removes
-          it along with the key it was showing — the component unmounts and
-          its state goes with it, rather than leaving a stale credential on
+      {/* Tasks 0187 + 0189. Inside the authenticated branch, so signing out
+          removes it along with the key it was showing — the component unmounts
+          and its state goes with it, rather than leaving a stale credential on
           screen for the next person at the keyboard. */}
       <ApiKey onKey={() => setKeyOnScreen(true)} />
-      {/* Task 0188. Keyed refetch: a successful issue re-asks for usage, so
+      {/* Task 0188. Keyed refetch: a key appearing on screen (revealed on
+          mount, or fresh off 0189's issue round-trip) re-asks for usage, so
           the section leaves "no key yet" without a manual refresh. */}
       <Usage keyOnScreen={keyOnScreen} />
     </>
@@ -219,11 +303,42 @@ function Dashboard({
 }
 
 /**
- * The API key, masked (task 0187).
+ * Render the too-young wait from the backend's `wait_secs`.
+ *
+ * The number comes from a URL parameter, so it is sanitised: digits only,
+ * clamped to a sane ceiling. **Never a calendar date** — that pattern is right
+ * for 0191's weeks-long rework cap and absurd for minutes — and never a
+ * hard-coded "5 minutes": the copy follows what the backend computed from the
+ * operator's threshold.
+ */
+function describeWait(waitSecs: string | null): string {
+  const parsed =
+    waitSecs && /^\d{1,7}$/.test(waitSecs) ? Number(waitSecs) : NaN;
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return 'a few minutes';
+  }
+  if (parsed < 60) {
+    return `about ${parsed} second${parsed === 1 ? '' : 's'}`;
+  }
+  const minutes = Math.ceil(parsed / 60);
+  return `about ${minutes} minute${minutes === 1 ? '' : 's'}`;
+}
+
+/**
+ * The API key, masked (task 0187; issuance re-shaped by task 0189).
  *
  * Rendered only for a signed-in visitor, because that is the only state in which
  * the backend will answer — and because a control that cannot work is worse than
  * no control at all.
+ *
+ * **Fetches on mount — the reversal of 0187's fetch-nothing rule, re-derived
+ * rather than ignored.** That rule existed because `GET /key` could create;
+ * since 0189 the route is read-only by construction and by test, so showing
+ * the visitor the key they already have costs nothing and mints nothing.
+ * Creating one is now `issueUrl()`'s OAuth round-trip: a top-level navigation
+ * (the eligibility proof needs a fresh Discord token, which only a navigation
+ * can fetch), which lands back here with `?issue=<outcome>` — rendered below,
+ * once, in the wording this task decides and 0193 restyles.
  *
  * **Two UI niceties, and only two.** Styling is task 0193's and this page is
  * deliberately unstyled, so masking and copying had to earn their place ahead of
@@ -234,19 +349,25 @@ function Dashboard({
  * hand, which defeats the masking they just toggled.
  */
 function ApiKey({ onKey }: { onKey?: () => void }) {
-  const [key, setKey] = useState<PortalKey | null>(null);
-  const [busy, setBusy] = useState(false);
+  type KeyView =
+    | { state: 'loading' }
+    | { state: 'ok'; key: PortalKey }
+    | { state: 'none' }
+    | { state: 'failed'; reason: string };
+
+  const [view, setView] = useState<KeyView>({ state: 'loading' });
   const [error, setError] = useState<string | null>(null);
   const [revealed, setRevealed] = useState(false);
   const [copied, setCopied] = useState(false);
 
-  // The same guard `SignIn` above keeps, for a narrower reason. There is no
-  // supersede case here — the only caller is a button that disables itself
-  // while busy — but signing out unmounts this component, and a response that
-  // lands afterwards would be a credential written into the state of a
-  // component the visitor has just left. Cheap, and consistent with the
-  // component next to it, which is what stops the next reader wondering which
-  // of the two is wrong.
+  // The issue round-trip's landing state, read once and stripped from the URL
+  // — see `useOneShotParams`. `wait_secs` only means anything alongside
+  // `issue=too_young`.
+  const { issue, wait_secs: waitSecs } = useOneShotParams(ISSUE_PARAMS);
+
+  // The same guard `SignIn` above keeps: signing out unmounts this component,
+  // and a response landing afterwards would be a credential written into the
+  // state of a component the visitor has just left.
   const live = useRef(true);
   useEffect(() => {
     live.current = true;
@@ -255,41 +376,36 @@ function ApiKey({ onKey }: { onKey?: () => void }) {
     };
   }, []);
 
-  // Nothing runs on mount. The backend treats `GET` and `POST` on `/key`
-  // identically — without a registry it cannot tell "deleted by hand" from
-  // "never issued", so a reveal has to be able to create — which means a page
-  // that fetched on load would issue a production API key to anyone who merely
-  // opened it. Keeping the only call behind a press is what makes the visitor's
-  // intent explicit rather than implied by having loaded a URL.
-  const onIssue = () => {
-    setBusy(true);
-    setError(null);
-    setCopied(false);
-    issueKey()
-      .then((issued) => {
+  const load = useCallback(() => {
+    fetchKey()
+      .then((key) => {
         if (!live.current) return;
-        setKey(issued);
-        // Masked on arrival, including the very first time. The visitor pressed
-        // the button and can press reveal; what they did not ask for is the
-        // credential appearing on screen while they were looking at the button.
-        setRevealed(false);
-        // Tell the dashboard a key is now on screen (task 0188's usage section
-        // reads it) — the FACT only, never the value or the id: nothing
-        // outside this component needs the credential, so nothing outside it
-        // gets to hold one.
-        onKey?.();
+        if (key) {
+          setView({ state: 'ok', key });
+          // Masked on arrival, always: what nobody asked for is the
+          // credential appearing on screen while they were looking elsewhere.
+          setRevealed(false);
+          // Tell the dashboard a key is on screen (task 0188's usage section
+          // reads it) — the FACT only, never the value or the id: nothing
+          // outside this component needs the credential, so nothing outside
+          // it gets to hold one.
+          onKey?.();
+        } else {
+          setView({ state: 'none' });
+        }
       })
       .catch((cause: unknown) => {
         if (!live.current) return;
-        setError(describeFailure(cause));
-      })
-      .finally(() => {
-        if (live.current) setBusy(false);
+        setView({ state: 'failed', reason: describeFailure(cause) });
       });
-  };
+  }, [onKey]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
 
   const onCopy = () => {
-    if (!key) return;
+    if (view.state !== 'ok') return;
     // `navigator.clipboard` is absent on an insecure origin and in jsdom, and a
     // missing API must not throw past this handler and blank the page. The
     // fallback is honest text rather than a silent no-op: the visitor can still
@@ -302,7 +418,7 @@ function ApiKey({ onKey }: { onKey?: () => void }) {
       return;
     }
     clipboard
-      .writeText(key.value)
+      .writeText(view.key.value)
       .then(() => {
         setCopied(true);
         setError(null);
@@ -316,19 +432,59 @@ function ApiKey({ onKey }: { onKey?: () => void }) {
     <section>
       <h2>Your API key</h2>
 
-      {!key && (
+      {/* The issue round-trip's outcome, in the wording this task decides.
+          The two refusals a visitor can fix render differently from the one
+          they cannot ("could not verify"), and "could not verify" is
+          explicitly NOT an accusation — a Discord outage says nothing about
+          anyone's membership. Retry is the same round-trip link in every
+          case, because eligibility is proved per attempt, never remembered. */}
+      {issue === 'ok' && <p data-testid="issue-ok">Your key is ready.</p>}
+      {issue === 'not_member' && (
+        <p data-testid="issue-not-member">
+          You need to be a member of the{' '}
+          <a href="https://discord.gg/stellardev">Stellar Developers Discord</a>{' '}
+          to get an API key — joining is an open invite, and new members may
+          need to complete the server&apos;s screening first. Once you are in,{' '}
+          <a href={issueUrl()}>try again</a>.
+        </p>
+      )}
+      {issue === 'too_young' && (
+        <p data-testid="issue-too-young">
+          Your Discord account is too new to get an API key — this is a short
+          wait, not a rejection. Try again in {describeWait(waitSecs)}:{' '}
+          <a href={issueUrl()}>get my API key</a>.
+        </p>
+      )}
+      {issue === 'unknown' && (
+        <p data-testid="issue-unknown">
+          We could not verify your Discord membership just now — that is a
+          problem talking to Discord, not a statement about your membership.
+          Please <a href={issueUrl()}>try again</a> shortly.
+        </p>
+      )}
+      {issue === 'failed' && (
+        <p data-testid="issue-failed">
+          Your eligibility checked out, but the key service could not create
+          your key. Please <a href={issueUrl()}>try again</a>.
+        </p>
+      )}
+
+      {view.state === 'loading' && <p>Checking for your API key…</p>}
+
+      {view.state === 'none' && (
         <>
+          <Prerequisites />
           <p>
-            One key, on the free plan. Pressing this again later shows the same
-            key rather than issuing another.
+            One key, on the free plan. Asking again later shows the same key
+            rather than issuing another.
           </p>
-          <button type="button" onClick={onIssue} disabled={busy}>
-            {busy ? 'Working…' : 'Get my API key'}
-          </button>
+          {/* A link, not a button: issuing is an OAuth round-trip (see
+              `issueUrl`), and only a top-level navigation can carry it. */}
+          <a href={issueUrl()}>Get my API key</a>
         </>
       )}
 
-      {key && (
+      {view.state === 'ok' && (
         <>
           <p>
             {/* Masked by default. The mask is a fixed run of dots, not a
@@ -337,7 +493,7 @@ function ApiKey({ onKey }: { onKey?: () => void }) {
                 numbers, where the rest is high-entropy. Here it would leak part
                 of the secret for no benefit anyone asked for. */}
             <code data-testid="api-key">
-              {revealed ? key.value : '••••••••••••••••••••••••••••••••'}
+              {revealed ? view.key.value : '••••••••••••••••••••••••••••••••'}
             </code>
           </p>
           <button type="button" onClick={() => setRevealed((was) => !was)}>
@@ -349,14 +505,20 @@ function ApiKey({ onKey }: { onKey?: () => void }) {
           {copied && <p>Copied.</p>}
           <p>
             Send it as the <code>X-API-Key</code> header on <code>/v1/</code>{' '}
-            requests. Key <code>{key.name}</code>.
+            requests. Key <code>{view.key.name}</code>.
           </p>
         </>
       )}
 
+      {view.state === 'failed' && (
+        <p>
+          Could not get your API key: <code>{view.reason}</code>
+        </p>
+      )}
+
       {error && (
         <p>
-          Could not get your API key: <code>{error}</code>
+          Could not copy your API key: <code>{error}</code>
         </p>
       )}
     </section>

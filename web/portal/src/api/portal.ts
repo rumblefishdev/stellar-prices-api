@@ -77,13 +77,13 @@ export class PortalApiError extends Error {
 const PROBE_TIMEOUT_MS = 10_000;
 
 /**
- * How long the page waits on key issuance.
+ * How long the page waits on the key reveal.
  *
  * Longer than {@link PROBE_TIMEOUT_MS}, because this call is not a probe: a cold
- * Lambda resolves credentials, reads an SSM parameter and then makes up to five
- * control-plane calls. The api-handler's own Lambda timeout is 15s and API
- * Gateway cuts everything off at 29s, so 20s is inside the window where an
- * answer — including a `502` — is still possible.
+ * Lambda resolves credentials, reads an SSM parameter and then walks a
+ * paginated listing plus a read. The api-handler's own Lambda timeout is 15s
+ * and API Gateway cuts everything off at 29s, so 20s is inside the window
+ * where an answer — including a `502` — is still possible.
  */
 const KEY_TIMEOUT_MS = 20_000;
 
@@ -198,6 +198,20 @@ export const fetchSession = (): Promise<PortalSession> =>
 export const signInUrl = (): string => `${PORTAL_API}/auth/login`;
 
 /**
+ * Where the "Get my API key" control points (task 0189).
+ *
+ * The same plain-link reasoning as {@link signInUrl}, because issuing a key IS
+ * an OAuth round-trip now: eligibility (Stellar Discord membership + minimum
+ * account age) is proved per action by re-authentication, never carried in the
+ * session — a fresh Discord token is what the backend checks membership with,
+ * and only a top-level navigation can fetch one. Discord does not re-prompt
+ * for consent on repeat authorisation of the same scopes, so for a signed-in
+ * visitor this is a redirect, not a login. The callback lands back on the
+ * portal with `?issue=<outcome>`, which `app.tsx` renders.
+ */
+export const issueUrl = (): string => `${PORTAL_API}/auth/login?action=issue`;
+
+/**
  * `POST /api-tokens/api/auth/logout` — clear the session.
  *
  * `POST`, because the backend only accepts that: a `GET` sign-out is triggerable
@@ -226,7 +240,8 @@ export async function signOut(): Promise<void> {
 }
 
 /**
- * What `POST` and `GET /api-tokens/api/key` answer (task 0187).
+ * What `GET` (and `POST`) `/api-tokens/api/key` answer (task 0187, read-only
+ * since task 0189 — the route reveals and never creates).
  *
  * Mirrors `KeyResponse` in `packages/prices-api/src/portal/keys/mod.rs`, and
  * hand-written for the same reason the two types above are: the portal's routes
@@ -239,8 +254,6 @@ export interface PortalKey {
   name: string;
   /** The credential itself — what goes in `X-API-Key`. */
   value: string;
-  /** Whether this request created the key, as opposed to finding it. */
-  created: boolean;
 }
 
 /**
@@ -334,24 +347,25 @@ export async function fetchUsage(): Promise<PortalUsage | null> {
 }
 
 /**
- * Issue a key, or return the one this account already has.
+ * Reveal the key this account already has, or learn there is none.
  *
- * `POST`, and deliberately not a `GET` the page fires on load. The backend
- * treats both verbs identically (it must — without a registry, "deleted by
- * hand" and "never issued" are the same observation), so keeping the page's
- * only call behind a press is what makes the visitor's intent explicit rather
- * than implied by having opened a URL.
+ * `GET`, and — since task 0189 — safe to fire on load: the backend's key route
+ * is **read-only by construction** (it can never create, attach or delete),
+ * tested as such, so opening the dashboard cannot mint anything. That reverses
+ * 0187's fetch-nothing-on-mount rule by re-deriving it rather than ignoring
+ * it: the rule existed because the route could create, and it no longer can.
+ * Creating is `issueUrl()`'s round-trip, behind an explicit press.
  *
- * Idempotent: a second press returns the same key, not a second one. That is a
- * property of the backend's reconciler, not of this function, and it is why
- * there is no client-side guard against double-clicking.
+ * Resolves to `null` when the caller has no key (the backend's `404 no_key`
+ * envelope) — a renderable state, not a failure — with the same gate-404
+ * caution `fetchUsage` takes: an EMPTY 404 is task 0183's closed portal, and
+ * reading it as "you have no key" would be a false statement.
  */
-export async function issueKey(): Promise<PortalKey> {
+export async function fetchKey(): Promise<PortalKey | null> {
   const url = `${PORTAL_API}/key`;
   let response: Response;
   try {
     response = await fetch(url, {
-      method: 'POST',
       headers: { accept: 'application/json' },
       signal: AbortSignal.timeout(KEY_TIMEOUT_MS),
     });
@@ -362,6 +376,17 @@ export async function issueKey(): Promise<PortalKey> {
       );
     }
     throw new PortalApiError(`${url} could not be reached`);
+  }
+  if (response.status === 404) {
+    try {
+      const body = (await response.json()) as { code?: string };
+      if (body.code === 'no_key') {
+        return null;
+      }
+    } catch {
+      // Not JSON — the gate's empty 404, or something else entirely.
+    }
+    throw new PortalApiError(`${url} answered 404`, 404);
   }
   if (!response.ok) {
     // `401` is the one status this page can act on: it means the session

@@ -1,9 +1,20 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, useLocation } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { ROUTER_BASENAME } from '../base-path';
 import App from './app';
+
+/**
+ * Records the router's current query string, so the one-shot landing-param
+ * tests (task 0189, closing 0186's O10) can assert the URL was cleaned while
+ * the banner stayed — `MemoryRouter` has no `window.location` to inspect.
+ */
+let lastSearch = '';
+function LocationSpy() {
+  lastSearch = useLocation().search;
+  return null;
+}
 
 /**
  * The gate is the only behaviour in this slice worth testing, and both of its
@@ -59,6 +70,9 @@ const CONFIG_URL = '/api-tokens/api/config';
 const ME_URL = '/api-tokens/api/auth/me';
 const LOGOUT_URL = '/api-tokens/api/auth/logout';
 const USAGE_URL = '/api-tokens/api/usage';
+const KEY_URL = '/api-tokens/api/key';
+/** Where both "get my API key" and every retry link point (task 0189). */
+const ISSUE_HREF = '/api-tokens/api/auth/login?action=issue';
 
 /**
  * The usage endpoint's "no key yet" answer (task 0188) — the default for every
@@ -67,6 +81,17 @@ const USAGE_URL = '/api-tokens/api/usage';
  * state under every other test's assertions.
  */
 const usageNoKey = () => ({
+  ok: false,
+  status: 404,
+  json: async () => ({ code: 'no_key', message: 'you have no API key yet' }),
+});
+
+/**
+ * The key route's "no key" answer — the same envelope discipline as
+ * `usageNoKey`, and the default for signed-in stubs since task 0189 made the
+ * route read-only and the page fetch it on mount.
+ */
+const keyNoKey = () => ({
   ok: false,
   status: 404,
   json: async () => ({ code: 'no_key', message: 'you have no API key yet' }),
@@ -90,6 +115,7 @@ const openAndSignedIn = () =>
         username: 'adam',
       }),
     }),
+    [KEY_URL]: keyNoKey,
     [USAGE_URL]: usageNoKey,
   });
 
@@ -334,6 +360,54 @@ describe('sign in with Discord', () => {
   });
 
   /**
+   * The acceptance criterion (task 0189): both prerequisites are stated
+   * **before** the visitor authenticates — learning about the membership
+   * requirement after the consent screen means they authorised an app for
+   * nothing. The invite is the registered vanity code; the account-age line
+   * names no number, because the threshold is operator configuration the
+   * backend reports when it matters.
+   */
+  it('states both prerequisites before the visitor authenticates', async () => {
+    openAndSignedOut();
+    renderAt('/');
+
+    await screen.findByRole('link', { name: /sign in with discord/i });
+    expect(
+      screen.getByRole('link', { name: /stellar developers discord/i }),
+    ).toBeTruthy();
+    expect(
+      screen
+        .getByRole('link', { name: /stellar developers discord/i })
+        .getAttribute('href'),
+    ).toBe('https://discord.gg/stellardev');
+    expect(screen.getByText(/not brand new/i)).toBeTruthy();
+    // Not a hard-coded threshold — that would drift the moment the SSM
+    // parameter changes.
+    expect(document.body.textContent).not.toMatch(/5 minutes/i);
+  });
+
+  /**
+   * The landing param is one-shot (task 0189, closing 0186's O10): the banner
+   * renders for the landing that carried it, and the URL is cleaned in place —
+   * so a sign-out after a cancelled attempt, or a reload, shows no stale
+   * "Sign-in cancelled".
+   */
+  it('clears the signin outcome from the URL so it cannot go stale', async () => {
+    openAndSignedOut();
+    render(
+      <MemoryRouter initialEntries={['/?signin=cancelled']}>
+        <App />
+        <LocationSpy />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText(/sign-in cancelled/i)).toBeTruthy();
+    await waitFor(() => expect(lastSearch).not.toContain('signin'));
+    // The banner survives the cleanup — it belongs to this landing.
+    expect(screen.getByText(/sign-in cancelled/i)).toBeTruthy();
+  });
+
+  /**
    * The visitor pressed Cancel at Discord's consent screen; the callback
    * redirected to `/api-tokens/?signin=cancelled`. Plain text, and the button
    * stays where it was — this is not an error state.
@@ -396,6 +470,7 @@ describe('sign in with Discord', () => {
         authenticated = false;
         return { status: 204, json: async () => ({}) };
       },
+      [KEY_URL]: keyNoKey,
       [USAGE_URL]: usageNoKey,
     });
 
@@ -471,12 +546,14 @@ describe('sign in with Discord', () => {
 });
 
 /**
- * The API key (task 0187).
+ * The API key (task 0187; issuance re-shaped by task 0189).
  *
  * Every test here starts signed in, because that is the only state the control
  * exists in. `fetch` is stubbed rather than the module mocked, so these also
- * cover `issueKey` in `src/api/portal.ts` — including that its URL is relative
- * and its verb is `POST`.
+ * cover `fetchKey` in `src/api/portal.ts` — including that its URL is relative
+ * and that nothing this page does POSTs to the key route: issuing is a
+ * top-level navigation through the eligibility round-trip, and the round-trip
+ * outcomes land back here as `?issue=<outcome>`.
  */
 describe('the API key', () => {
   beforeEach(() => {
@@ -486,7 +563,6 @@ describe('the API key', () => {
     vi.unstubAllGlobals();
   });
 
-  const KEY_URL = '/api-tokens/api/key';
   const KEY_VALUE = 'aBcDeF0123456789aBcDeF0123456789aBcDeF01';
 
   const signedInWithKey = (
@@ -494,7 +570,6 @@ describe('the API key', () => {
       key_id: 'abc123',
       name: 'discord-308994132968210433-key',
       value: KEY_VALUE,
-      created: true,
     },
   ) =>
     stubRoutes({
@@ -510,40 +585,42 @@ describe('the API key', () => {
       [USAGE_URL]: usageNoKey,
     });
 
-  const renderApp = () =>
+  const signedInWithoutKey = (
+    keyRoute: () => Partial<Response> & { json?: () => unknown } = keyNoKey,
+  ) =>
+    stubRoutes({
+      [CONFIG_URL]: () => ({ json: async () => ({ enabled: true }) }),
+      [ME_URL]: () => ({
+        json: async () => ({
+          authenticated: true,
+          user_id: '308994132968210433',
+          username: 'adam',
+        }),
+      }),
+      [KEY_URL]: keyRoute,
+      [USAGE_URL]: usageNoKey,
+    });
+
+  const renderApp = (entry = '/') =>
     render(
-      <MemoryRouter initialEntries={['/']}>
+      <MemoryRouter initialEntries={[entry]}>
         <App />
+        <LocationSpy />
       </MemoryRouter>,
     );
 
   /**
-   * **Nothing is fetched until the visitor presses.** The backend's `GET` and
-   * `POST` on `/key` are the same operation — without a registry it cannot tell
-   * "deleted by hand" from "never issued", so a reveal has to be able to create
-   * — which means a page that asked on load would issue a real production API
-   * key to anyone who merely opened it.
+   * **The reversal of 0187's fetch-nothing rule, re-derived.** The key route
+   * is read-only since task 0189 — it can never create — so the page shows
+   * the visitor the key they already have without a press. What it must never
+   * do is POST its way to one: issuing is the eligibility round-trip.
    */
-  it('issues nothing until the button is pressed', async () => {
+  it('fetches the existing key on mount and shows it masked', async () => {
     const fetchMock = signedInWithKey();
     renderApp();
-
-    await screen.findByRole('button', { name: /get my api key/i });
-    expect(fetchMock.mock.calls.some(([url]) => url === KEY_URL)).toBe(false);
-  });
-
-  it('issues the key on a relative POST and shows it masked', async () => {
-    const fetchMock = signedInWithKey();
-    renderApp();
-
-    fireEvent.click(
-      await screen.findByRole('button', { name: /get my api key/i }),
-    );
 
     const shown = await screen.findByTestId('api-key');
-    // Masked on arrival — the visitor asked for a key, not for it to appear on
-    // screen while they were looking at the button. This renders during
-    // screen-shares.
+    // Masked on arrival — this renders during screen-shares.
     expect(shown.textContent).not.toContain(KEY_VALUE);
     expect(shown.textContent).toMatch(/^•+$/);
 
@@ -552,7 +629,57 @@ describe('the API key', () => {
       RequestInit,
     ];
     expect(call[0].startsWith('http')).toBe(false);
-    expect(call[1].method).toBe('POST');
+    // A GET — and nothing on this page ever POSTs the key route.
+    expect(call[1]?.method).toBeUndefined();
+    expect(
+      fetchMock.mock.calls.some(
+        ([url, init]) =>
+          url === KEY_URL && (init as RequestInit | undefined)?.method,
+      ),
+    ).toBe(false);
+  });
+
+  /**
+   * No key: the control is a **link into the issue round-trip**, not a button
+   * with a fetch — the eligibility proof needs a fresh Discord token, which
+   * only a top-level navigation can carry — and the prerequisites are stated
+   * right where the decision is made.
+   */
+  it('offers get-my-api-key as a link into the issue round-trip, not a fetch', async () => {
+    const fetchMock = signedInWithoutKey();
+    renderApp();
+
+    const link = await screen.findByRole('link', { name: /get my api key/i });
+    expect(link.getAttribute('href')).toBe(ISSUE_HREF);
+    expect(link.getAttribute('href')?.startsWith('http')).toBe(false);
+    // The prerequisites, at the point of decision.
+    expect(screen.getAllByText(/not brand new/i).length).toBeGreaterThan(0);
+    // And no request was made that could have created anything.
+    expect(
+      fetchMock.mock.calls.every(
+        ([, init]) => !(init as RequestInit | undefined)?.method,
+      ),
+    ).toBe(true);
+  });
+
+  /**
+   * Only the backend's own `no_key` envelope means "no key". The gate's empty
+   * 404 (task 0183, reachable when the portal closes under an open tab) must
+   * render as a stated failure — offering "get my API key" against a closed
+   * portal would send the visitor into a round-trip that answers 404.
+   */
+  it("does not read the gate's empty 404 as no key", async () => {
+    signedInWithoutKey(() => ({
+      ok: false,
+      status: 404,
+      json: async () => {
+        throw new SyntaxError('Unexpected end of JSON input');
+      },
+    }));
+    renderApp();
+
+    expect(await screen.findByText(/could not get your api key/i)).toBeTruthy();
+    expect(screen.queryByRole('link', { name: /get my api key/i })).toBeNull();
   });
 
   /**
@@ -563,9 +690,6 @@ describe('the API key', () => {
   it('leaks no part of the value while masked', async () => {
     signedInWithKey();
     renderApp();
-    fireEvent.click(
-      await screen.findByRole('button', { name: /get my api key/i }),
-    );
     await screen.findByTestId('api-key');
 
     for (const fragment of [
@@ -580,9 +704,6 @@ describe('the API key', () => {
   it('reveals and re-hides the value on the toggle', async () => {
     signedInWithKey();
     renderApp();
-    fireEvent.click(
-      await screen.findByRole('button', { name: /get my api key/i }),
-    );
     await screen.findByTestId('api-key');
 
     fireEvent.click(screen.getByRole('button', { name: /^reveal$/i }));
@@ -597,9 +718,6 @@ describe('the API key', () => {
     vi.stubGlobal('navigator', { clipboard: { writeText } });
     signedInWithKey();
     renderApp();
-    fireEvent.click(
-      await screen.findByRole('button', { name: /get my api key/i }),
-    );
     await screen.findByTestId('api-key');
 
     fireEvent.click(screen.getByRole('button', { name: /^copy$/i }));
@@ -620,9 +738,6 @@ describe('the API key', () => {
     vi.stubGlobal('navigator', {});
     signedInWithKey();
     renderApp();
-    fireEvent.click(
-      await screen.findByRole('button', { name: /get my api key/i }),
-    );
     await screen.findByTestId('api-key');
 
     fireEvent.click(screen.getByRole('button', { name: /^copy$/i }));
@@ -632,58 +747,22 @@ describe('the API key', () => {
     expect(screen.getByTestId('api-key')).toBeTruthy();
   });
 
-  it('reports a failure and leaves the button pressable', async () => {
-    stubRoutes({
-      [CONFIG_URL]: () => ({ json: async () => ({ enabled: true }) }),
-      [ME_URL]: () => ({
-        json: async () => ({
-          authenticated: true,
-          user_id: '308994132968210433',
-          username: 'adam',
-        }),
-      }),
-      [KEY_URL]: () => ({ ok: false, status: 502 }),
-      [USAGE_URL]: usageNoKey,
-    });
+  it('reports a reveal failure as a stated failure', async () => {
+    signedInWithoutKey(() => ({ ok: false, status: 502 }));
     renderApp();
 
-    fireEvent.click(
-      await screen.findByRole('button', { name: /get my api key/i }),
-    );
-
     expect(await screen.findByText(/could not get your api key/i)).toBeTruthy();
-    // A dead end is worse than a failure: a `502` here is usually transient, so
-    // the control the visitor would use to retry has to survive it.
-    expect(
-      screen.getByRole('button', { name: /get my api key/i }),
-    ).toBeTruthy();
   });
 
   /**
-   * `401` is the one failure with an answer other than "press it again": the
+   * `401` is the one failure with an answer other than "try again": the
    * session expired while the tab sat open. `api/portal.ts` carries the status
    * through for exactly this, and without this branch that would be a promise
-   * the page did not keep — the visitor would be told "answered 401" and left
-   * to work out that they need to sign in again.
+   * the page did not keep.
    */
   it('tells the visitor to sign in again when the session has expired', async () => {
-    stubRoutes({
-      [CONFIG_URL]: () => ({ json: async () => ({ enabled: true }) }),
-      [ME_URL]: () => ({
-        json: async () => ({
-          authenticated: true,
-          user_id: '308994132968210433',
-          username: 'adam',
-        }),
-      }),
-      [KEY_URL]: () => ({ ok: false, status: 401 }),
-      [USAGE_URL]: usageNoKey,
-    });
+    signedInWithoutKey(() => ({ ok: false, status: 401 }));
     renderApp();
-
-    fireEvent.click(
-      await screen.findByRole('button', { name: /get my api key/i }),
-    );
 
     expect(await screen.findByText(/session has expired/i)).toBeTruthy();
     // And not the raw status, which says nothing a visitor can act on.
@@ -696,16 +775,13 @@ describe('the API key', () => {
     renderApp();
 
     await screen.findByRole('link', { name: /sign in with discord/i });
-    expect(
-      screen.queryByRole('button', { name: /get my api key/i }),
-    ).toBeNull();
+    expect(screen.queryByRole('link', { name: /get my api key/i })).toBeNull();
     expect(screen.queryByTestId('api-key')).toBeNull();
   });
 
   /**
-   * The closed portal must offer no key control at all: the route answers an
-   * empty `404` while the flag is off, and until task 0189's eligibility gate
-   * lands that flag is the only thing between a stranger and a real key.
+   * The closed portal must offer no key control at all: the whole flow —
+   * login, callback, reveal — answers an empty `404` while the flag is off.
    */
   it('is not rendered while the portal is closed', async () => {
     stubFetch({ json: async () => ({ enabled: false }) });
@@ -713,6 +789,118 @@ describe('the API key', () => {
 
     await screen.findByText(/not yet available/i);
     expect(screen.queryAllByRole('button')).toHaveLength(0);
+    expect(screen.queryAllByRole('link')).toHaveLength(0);
+  });
+
+  // -------------------------------------------------------------------------
+  // The issue round-trip's landing states (task 0189) — the wording this task
+  // decides, and 0193 restyles without re-deciding.
+  // -------------------------------------------------------------------------
+
+  it('welcomes a completed issue and shows the key', async () => {
+    signedInWithKey();
+    renderApp('/?issue=ok');
+
+    expect(await screen.findByTestId('issue-ok')).toBeTruthy();
+    expect(await screen.findByTestId('api-key')).toBeTruthy();
+  });
+
+  /**
+   * Not a member: name the server, link the registered vanity invite, and
+   * offer retry as the same round-trip — eligibility is proved per attempt,
+   * never remembered, so joining and pressing again is all it takes.
+   */
+  it('names the server and links the invite when the visitor is not a member', async () => {
+    signedInWithoutKey();
+    renderApp('/?issue=not_member');
+
+    const refusal = await screen.findByTestId('issue-not-member');
+    expect(refusal.textContent).toMatch(/stellar developers discord/i);
+    const invite = screen.getAllByRole('link', {
+      name: /stellar developers discord/i,
+    })[0];
+    expect(invite.getAttribute('href')).toBe('https://discord.gg/stellardev');
+    const retry = screen.getAllByRole('link', { name: /try again/i })[0];
+    expect(retry.getAttribute('href')).toBe(ISSUE_HREF);
+  });
+
+  /**
+   * Too young is a WAIT, not a rejection: the remaining time comes from the
+   * backend's `wait_secs` — never a calendar date (that pattern is 0191's,
+   * for a weeks-long cap), and never a hard-coded "5 minutes".
+   */
+  it("renders too-young as a wait with the backend's remaining time", async () => {
+    signedInWithoutKey();
+    renderApp('/?issue=too_young&wait_secs=173');
+
+    const refusal = await screen.findByTestId('issue-too-young');
+    expect(refusal.textContent).toMatch(/about 3 minutes/i);
+    expect(refusal.textContent).toMatch(/not a rejection/i);
+    // Not a calendar date, and not a number the backend did not send.
+    expect(refusal.textContent).not.toMatch(/\d{4}-\d{2}-\d{2}/);
+    expect(refusal.textContent).not.toMatch(/5 minutes/i);
+    const retry = screen.getAllByRole('link', { name: /get my api key/i })[0];
+    expect(retry.getAttribute('href')).toBe(ISSUE_HREF);
+  });
+
+  /** `wait_secs` arrives in a URL, so nonsense renders as generic wording. */
+  it('sanitises a nonsense wait_secs instead of rendering it', async () => {
+    signedInWithoutKey();
+    renderApp('/?issue=too_young&wait_secs=<script>9e99');
+
+    const refusal = await screen.findByTestId('issue-too-young');
+    expect(refusal.textContent).toMatch(/a few minutes/i);
+    expect(refusal.textContent).not.toContain('<script>');
+    expect(refusal.textContent).not.toContain('9e99');
+  });
+
+  /**
+   * "Could not verify" renders differently from "not a member" — a Discord
+   * outage is not an accusation the visitor can act on, and the copy says so
+   * in as many words.
+   */
+  it('renders could-not-verify differently from not-a-member', async () => {
+    signedInWithoutKey();
+    renderApp('/?issue=unknown');
+
+    const refusal = await screen.findByTestId('issue-unknown');
+    expect(refusal.textContent).toMatch(/could not verify/i);
+    expect(refusal.textContent).toMatch(
+      /not a statement about your membership/i,
+    );
+    expect(screen.queryByTestId('issue-not-member')).toBeNull();
+    // Retry, in place.
+    const retry = screen.getAllByRole('link', { name: /try again/i })[0];
+    expect(retry.getAttribute('href')).toBe(ISSUE_HREF);
+  });
+
+  /** A key-service fault is not a membership doubt — the two read differently. */
+  it('distinguishes a failed key creation from an unverifiable membership', async () => {
+    signedInWithoutKey();
+    renderApp('/?issue=failed');
+
+    const failure = await screen.findByTestId('issue-failed');
+    expect(failure.textContent).toMatch(/eligibility checked out/i);
+    expect(screen.queryByTestId('issue-unknown')).toBeNull();
+    expect(screen.queryByTestId('issue-not-member')).toBeNull();
+  });
+
+  /**
+   * The issue outcome is one-shot, like `?signin=…`: shown for this landing,
+   * stripped from the URL, so a reload does not repeat a refusal about a
+   * round-trip that is over.
+   */
+  it('clears the issue outcome from the URL so a reload does not repeat it', async () => {
+    signedInWithoutKey();
+    renderApp('/?issue=not_member&wait_secs=9');
+
+    expect(await screen.findByTestId('issue-not-member')).toBeTruthy();
+    await waitFor(() => {
+      expect(lastSearch).not.toContain('issue');
+      expect(lastSearch).not.toContain('wait_secs');
+    });
+    // The banner survives the cleanup — it belongs to this landing.
+    expect(screen.getByTestId('issue-not-member')).toBeTruthy();
   });
 });
 
@@ -732,8 +920,6 @@ describe('usage against quota', () => {
   afterEach(() => {
     vi.unstubAllGlobals();
   });
-
-  const KEY_URL = '/api-tokens/api/key';
 
   const USAGE = {
     used: 121,
@@ -759,6 +945,7 @@ describe('usage against quota', () => {
           username: 'adam',
         }),
       }),
+      [KEY_URL]: keyNoKey,
       [USAGE_URL]: usage,
     });
 
@@ -819,16 +1006,20 @@ describe('usage against quota', () => {
     expect(screen.getByText(/last updated/i).textContent).not.toContain('GMT');
   });
 
-  /** Usage is read-only, so — unlike the key — it may and does load on mount. */
+  /** Usage is read-only, so it may and does load on mount. */
   it('fetches usage on mount, without any button press', async () => {
     const fetchMock = signedInWithUsage();
     renderApp();
 
     await screen.findByTestId('usage-used');
     expect(fetchMock.mock.calls.some(([url]) => url === USAGE_URL)).toBe(true);
-    // And still nothing touched the key route — reading usage must never
-    // issue.
-    expect(fetchMock.mock.calls.some(([url]) => url === KEY_URL)).toBe(false);
+    // The key route is read on mount too (read-only since task 0189), but
+    // nothing this page loads may WRITE — no request anywhere carries a verb.
+    expect(
+      fetchMock.mock.calls.every(
+        ([, init]) => !(init as RequestInit | undefined)?.method,
+      ),
+    ).toBe(true);
   });
 
   /** A signed-in visitor with no key is told so, in words they can act on. */
@@ -888,12 +1079,13 @@ describe('usage against quota', () => {
   });
 
   /**
-   * Straight after an issue, the backend's short cache can still answer
-   * "no key" about a key the page is displaying. "You have no API key yet"
-   * would be false at that moment, so the page says what is actually
-   * happening instead.
+   * Straight after 0189's issue round-trip, the backend's short cache can
+   * still answer "no key" about a key the page is displaying. "You have no
+   * API key yet" would be false at that moment, so the page says what is
+   * actually happening instead. Driven entirely by the mount fetches: the
+   * key route knows the key, the usage route's cache does not yet.
    */
-  it('does not claim "no key" while a freshly issued key is on screen', async () => {
+  it('does not claim "no key" while a fresh key is on screen', async () => {
     stubRoutes({
       [CONFIG_URL]: () => ({ json: async () => ({ enabled: true }) }),
       [ME_URL]: () => ({
@@ -908,29 +1100,22 @@ describe('usage against quota', () => {
           key_id: 'abc123',
           name: 'discord-308994132968210433-key',
           value: 'aBcDeF0123456789aBcDeF0123456789aBcDeF01',
-          created: true,
         }),
       }),
       [USAGE_URL]: usageNoKey,
     });
     renderApp();
 
-    await screen.findByText(/no API key yet/i);
-    fireEvent.click(
-      await screen.findByRole('button', { name: /get my api key/i }),
-    );
     await screen.findByTestId('api-key');
-
     expect(await screen.findByText(/your key is new/i)).toBeTruthy();
     expect(screen.queryByText(/no API key yet/i)).toBeNull();
   });
 
   /**
-   * Revealing an EXISTING key must not touch a usage section that is already
-   * showing numbers: a reveal changes no counter, the backend's cache would
-   * answer an identical body, and blanking rendered figures into a loading
-   * flicker makes the press look like it broke something. The refetch is for
-   * the no-key state alone — the one answer the issue falsifies.
+   * A key revealed on mount must not blank a usage section that is showing
+   * numbers: a reveal changes no counter, the backend's cache would answer an
+   * identical body, and a loading flicker for an identical answer reads as
+   * breakage. The keyed refetch is for the no-key state alone.
    */
   it('does not refetch or blank rendered numbers when an existing key is revealed', async () => {
     const fetchMock = stubRoutes({
@@ -947,7 +1132,6 @@ describe('usage against quota', () => {
           key_id: 'abc123',
           name: 'discord-308994132968210433-key',
           value: 'aBcDeF0123456789aBcDeF0123456789aBcDeF01',
-          created: false,
         }),
       }),
       [USAGE_URL]: () => ({ json: async () => USAGE }),
@@ -955,20 +1139,13 @@ describe('usage against quota', () => {
     renderApp();
 
     await screen.findByTestId('usage-used');
-    const usageCalls = fetchMock.mock.calls.filter(
-      ([url]) => url === USAGE_URL,
-    ).length;
-
-    fireEvent.click(
-      await screen.findByRole('button', { name: /get my api key/i }),
-    );
     await screen.findByTestId('api-key');
 
-    // The numbers never left the screen, and no second usage request fired.
+    // The numbers are on screen, and one usage request explains everything.
     expect(screen.getByTestId('usage-used').textContent).toBe('121');
     expect(
       fetchMock.mock.calls.filter(([url]) => url === USAGE_URL).length,
-    ).toBe(usageCalls);
+    ).toBe(1);
   });
 
   /** The refresh control re-asks; the backend's cache bounds what that costs. */
