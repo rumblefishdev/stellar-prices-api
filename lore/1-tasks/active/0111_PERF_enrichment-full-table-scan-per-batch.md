@@ -4,7 +4,7 @@ title: "Enrichment re-scans the whole table every batch — 545M rows/batch, cau
 type: PERF
 status: active
 related_adr: ["0007"]
-related_tasks: ["0026", "0062", "0085", "0112", "0088"]
+related_tasks: ["0026", "0062", "0085", "0112", "0088", "0209", "0210"]
 tags: [layer-indexing, clickhouse, enrichment, perf, priority-high, effort-medium, incident]
 links:
   - "../../../packages/enrichment-worker/src/ch_enrich.rs"
@@ -76,6 +76,17 @@ history:
       the scan moves rather than disappears.
       The options list predates usd_rate existing at all, which is why it needed
       amending rather than just re-reading.
+  - date: 2026-08-20
+    status: active
+    who: okarcz
+    note: >
+      ⚠️ THIS TASK NOW BLOCKS SOMETHING. It has kept sliding on the argument that
+      it blocks nothing. Measured on prod while diagnosing 0209: the peg-pivot
+      tier hands off 657,234,896 candidates, drains ~9,800 per step and ROSE by
+      2,682 in under an hour. Because pivot_sql is ORDER BY timestamp ASC, the
+      backlog means recent candles are never reached — and USDT has no oracle
+      fallback, so its entire quote leg has been unpriced since 2026-08-13. See
+      0209 and 0210.
 ---
 
 > **Why this is queued ahead of its own cost case:** the perf argument for 0111

@@ -93,18 +93,24 @@ pub const LOOKBACK_SECONDS: i64 = 7 * 86_400;
 /// waking someone for, and not before.
 ///
 /// ⚠️ It must also comfortably exceed real enrichment lag or the metric never
-/// reads zero, and that lag is now **measured rather than estimated**. On prod
-/// 2026-08-19, bucketing every USDT-quoted `_1h` candle by age: unpriced rows
-/// appear only in the 0-30 h bands, and **every band from 30 h out to 162 h is
-/// 100% priced**. So the real ceiling is ~30 h and this grace carries ~18 h of
-/// headroom. (An earlier note here said "17 h+", taken from a single
-/// observation in task 0209; the distribution supersedes it.)
+/// reads zero, and it holds **only on the hourly tier** — see [`SANITY_TABLE`]
+/// for why a coarser tier spends its own bucket width out of this grace before
+/// enrichment can even begin.
 ///
-/// ⚠️ That headroom is comfortable, not vast, and it holds **only on the hourly
-/// tier** — see [`SANITY_TABLE`] for why a coarser tier spends its own bucket
-/// width out of this grace before enrichment can even begin. If 0209 turns out
-/// to be a widening gap rather than a stable ~30 h, re-check this bound against
-/// a fresh distribution — do not simply raise it to silence the alarm.
+/// 🔴 **THERE IS NO HEADROOM ON THE USDT LEG, AND THERE IS NO LAG TO CLEAR.**
+/// An earlier version of this comment claimed a measured ~30 h enrichment
+/// ceiling and ~18 h of headroom, from an age distribution taken on 2026-08-19.
+/// Re-measured on 2026-08-20 the unpriced frontier had reached **47 h** — about
+/// one hour inside this grace — and the cause is not lag at all: the USDT pivot
+/// has **never** priced a `price_ohlcv_1m` row (task 0209). Everything from
+/// 48 h out is 100% priced only because task 0182's repair wrote the coarse
+/// tiers directly, up to its high-water mark of 2026-08-18 12:00.
+///
+/// ⚠️ So do **not** read this constant as "sized against measured lag". It is
+/// sized against BE's 48 h loss window, which is the meaning that still holds.
+/// Until 0209 is fixed the stranded metric climbs forever, and that is correct
+/// behaviour — the alarm is right and the data is wrong. ⛔ **Do not widen this
+/// bound to quiet it.**
 pub const STRANDED_GRACE_SECONDS: i64 = 2 * 86_400;
 
 /// How close `close_usd / close` must sit to 1.0 to count as "the peg was
@@ -147,14 +153,38 @@ pub const REPRESENTABLE_CLOSE_FLOOR: &str = "0.00000000000005";
 ///   stamped `00:00` is not complete until 24 h later, so half of a 48 h grace
 ///   is gone before there is anything to enrich. On `_1h` that cost is one hour.
 ///
-/// Measured on prod, the difference is not theoretical: every USDT-quoted `_1h`
-/// candle is priced by **30 hours** of age (zero unpriced in every band from 30 h
-/// out to 162 h), leaving 18 h of headroom under the grace — while the `_1d`
-/// bucket for the same day was still **half unpriced at ~41 h**. We had picked
-/// the tier that sits closest to the line it is measured against.
+/// The bucket-width argument above is the durable half of that reasoning and it
+/// still stands. ⚠️ The *measurement* quoted alongside it on 2026-08-19 — "every
+/// USDT-quoted `_1h` candle is priced by 30 hours of age" — was an artefact and
+/// is corrected in [`STRANDED_GRACE_SECONDS`].
 ///
 /// ⚠️ `_1h` is a forever-table (no retention job, unlike `_1m`/`_15m`), so the
 /// 7-day [`LOOKBACK_SECONDS`] window can never outrun what is kept.
+///
+/// # 🔴 This check is one tier ABOVE the tier that carries the defect
+///
+/// `close_usd` is written by the enrichment worker into **`price_ohlcv_1m`**;
+/// every coarse tier rolls from it. Reading `_1h` therefore measures a
+/// *derived* surface, and on 2026-08-20 that difference was not academic:
+///
+/// | | `_1h` | `_1m` |
+/// |---|---|---|
+/// | USDT-quoted rows at the $1 peg | 0 | **1,564,045** |
+/// | 2026-08-17, USDT leg | 13 priced / 0 | 0 priced / 16 |
+///
+/// The coarse tiers read clean because task 0182's repair wrote them directly.
+/// `_1m` was outside that repair and still carries the peg — task 0210 — so
+/// **`peg_applied` would have published a confident 0 over 1.5 M wrong values.**
+///
+/// ⚠️ The *stranded* direction is unaffected: a zero rolls up as a zero, so
+/// reading `_1h` detects it correctly, which is how 0209 was found at all.
+/// Only the **peg-applied** direction is blinded by reading a repaired tier.
+///
+/// ⛔ **Do not "fix" this by simply pointing `SANITY_TABLE` at `_1m`.** That
+/// trades a blind spot for a permanently-breaching alarm (1.5 M rows is above
+/// every rung) and re-introduces a retention interaction the forever-table note
+/// above exists to avoid. The peg-applied direction needs its own scoped `_1m`
+/// query with its own ladder, decided deliberately — see task 0204.
 pub const SANITY_TABLE: &str = "price_ohlcv_1h";
 
 /// One reading of the USDT quote leg's USD-value health.
@@ -572,21 +602,24 @@ mod tests {
         );
     }
 
-    /// The measured enrichment ceiling must stay comfortably under the grace, or
-    /// the alarm fires on ordinary operation and gets muted — the failure task
-    /// 0204 exists to end. 30 h measured against a 48 h grace on 2026-08-19.
+    /// The grace is **BE's loss window**, not a lag measurement.
+    ///
+    /// ⚠️ This test previously asserted a 30 h "measured enrichment ceiling"
+    /// with 12 h of headroom, from an age distribution taken on 2026-08-19.
+    /// Re-measured a day later the frontier was at 47 h, and the cause turned
+    /// out not to be lag at all — the USDT pivot has never priced a `_1m` row
+    /// (task 0209). A headroom assertion over a broken pipeline measures
+    /// nothing, so it is replaced by the property that is actually invariant:
+    /// the grace is the window the downstream consumer reads.
+    ///
+    /// ⛔ If this alarm is noisy, fix 0209. Do not raise the grace.
     #[test]
-    fn the_grace_clears_the_measured_enrichment_latency() {
-        let measured_ceiling_seconds = 30 * 3_600_i64;
-        assert!(
-            measured_ceiling_seconds < STRANDED_GRACE_SECONDS,
-            "the grace must exceed real enrichment latency or the metric never reads zero"
-        );
-        let headroom = STRANDED_GRACE_SECONDS - measured_ceiling_seconds;
-        assert!(
-            headroom >= 12 * 3_600,
-            "under 12 h of headroom means an ordinary slow sweep breaches; re-measure \
-             the age distribution rather than raising the grace to silence it"
+    fn the_grace_is_bes_loss_window_not_a_lag_estimate() {
+        let bes_loss_window_seconds = 48 * 3_600_i64;
+        assert_eq!(
+            STRANDED_GRACE_SECONDS, bes_loss_window_seconds,
+            "the grace means 'a consumer has begun losing a value'; changing it \
+             silently changes what the alarm asserts"
         );
     }
 

@@ -1061,8 +1061,63 @@ one OK action; the other 26 `notBreaching` alarms are untouched.
   merge; without `npm ci` the hook dies on `Unable to resolve local plugin with
   import path @nx/vite/plugin` and the commit is refused.
 
+## ⚠️ Pre-deploy re-check, 2026-08-20 — gap 4 found a live outage before shipping
+
+The cheap confirmation the baseline section asks for ("re-read the per-day
+counts after 2026-08-20 00:00") was run. **The 08-18 rows had not filled**, and
+following that thread turned a threshold question into a root-cause
+investigation. Spawned [[0209]]'s root cause and [[0210]].
+
+### What was measured
+
+| finding | measurement |
+|---|---|
+| unpriced frontier | **47 h**, not the ~30 h recorded on 08-19 — ~1 h inside the grace |
+| every band 48 h → 162 h | 100% priced, 20 consecutive clean bands |
+| USDT leg, `_1m` | **0 priced since 2026-08-13**, both USD columns untouched |
+| USDC / XLM legs | current to 08-20 08:00 — the worker is alive |
+| USDT/USDC reference | priced 18/18 on 08-19, current to 07:00 — inputs are healthy |
+| `pivot_written` on `_1m`, all history | **0**, against `peg_written` = 1,564,045 |
+
+**The USDT pivot has never priced a `_1m` row.** [[0172]] removed the $1 peg on
+08-13 and its replacement never functioned; the leg has been dark since.
+[[0111]] is the blocking dependency — `pivot_sql` is `ORDER BY timestamp` ASC
+behind a 657 M-row backlog draining ~9,800/step and *rising*.
+
+### What this changes here
+
+1. ✅ **The stranded ladder is vindicated, not retuned.** Twenty clean bands ≥ 48 h
+   is a well-behaved baseline, so rung 1 at 1 is correct. It breached at ~14:00
+   on 2026-08-20 as a **true positive**. ⛔ The [[0209]] fix is to repair the
+   pipeline, never to widen `STRANDED_GRACE_SECONDS`.
+2. 🔴 **The peg-applied direction is pointed one tier above the defect.** It reads
+   `_1h`, which [[0182]]'s repair wrote; the peg values live in `_1m`, which the
+   repair never touched. On prod it would have published a confident **0 over
+   1,564,045 wrong rows**. This is the *same* failure the task is named for —
+   a check scoring healthy because it looked at the surface least able to show
+   the defect — reintroduced a fourth time, and this time inside the guard built
+   against it. ⚠️ Recorded in `SANITY_TABLE`'s doc comment; **not fixed here**,
+   because pointing `SANITY_TABLE` at `_1m` trades a blind spot for a
+   permanently-breaching alarm (1.5 M is above every rung) and re-introduces the
+   retention interaction the forever-table choice avoids. It needs its own scoped
+   `_1m` query and ladder.
+3. **Two false claims corrected in code**, both from the 08-19 baseline: the
+   `STRANDED_GRACE_SECONDS` "~30 h ceiling / ~18 h headroom" note, and the unit
+   test pinning it (`the_grace_clears_the_measured_enrichment_latency`, now
+   `the_grace_is_bes_loss_window_not_a_lag_estimate`). A headroom assertion over
+   a broken pipeline measures nothing. 44 unit tests green, clippy clean.
+
+⚠️ **The "superseded analysis" and "RESOLVED — the tier was the problem"
+subsections above are now themselves partly superseded.** The `_1d` → `_1h`
+change was still right, and for the right reason (bucket width). But its
+supporting measurement — the ~30 h ceiling — was an artefact of 0182's repair
+coverage, not a property of enrichment. Read those sections for the bucket-width
+argument, not for the latency figures.
+
 ## Future Work
 
+- **Point the peg-applied check at `_1m`** with its own ladder and scan bound —
+  see item 2 above. The only gap-4 direction still blind on prod.
 - The two integration tests never run in CI (no ClickHouse service, no
   `--ignored`). Pre-existing and wider than this task.
 - Move the disk metrics to their own `Prices/ClickHouse` namespace once the
