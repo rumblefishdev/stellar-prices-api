@@ -31,7 +31,7 @@
  * stale file from another branch reads as a pass, or as drift that cannot be
  * reproduced. The synthesized template is still the caller's responsibility.
  */
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -794,6 +794,73 @@ for (const httpMethod of ['GET', 'POST']) {
         "serves one visitor another visitor's API key. Set " +
         '`cachingEnabled: false` in `portalSettings` in api-gateway-stack.ts.',
     );
+  }
+}
+
+// --- 7. Task 0189: the eligibility parameters are named, and never CDK-owned. ---
+// The gate's two knobs — which guild membership is checked against, and the
+// minimum account age — are OPERATOR-seeded SSM parameters, read at runtime per
+// issuance. Two properties hold that design together, and neither is visible to
+// the Rust suite:
+//
+// (a) the handler carries the two parameter NAMES, exactly. A typo'd name means
+//     the cold-start probe fails on the deploy that opens the portal — `/v1`
+//     down — long after the edit that broke it (the check-4 failure mode).
+// (b) NO synthesized template creates a parameter with either name. A
+//     CloudFormation-managed parameter is CDK-owned, so the next `cdk deploy`
+//     silently restores the committed value — which, after task 0179 points
+//     production at the real Stellar guild, would un-flip it back to the test
+//     guild. That regression is invisible at runtime until a member is refused.
+const ELIGIBILITY_PARAMS = {
+  PORTAL_GUILD_ID_PARAM: '/prices/production/discord-guild-id',
+  PORTAL_MIN_ACCOUNT_AGE_PARAM: '/prices/production/min-account-age-minutes',
+};
+for (const [envVar, expected] of Object.entries(ELIGIBILITY_PARAMS)) {
+  if (handlerEnv[envVar] !== expected) {
+    fail(
+      `error: the api-handler carries ${envVar}=` +
+        `${JSON.stringify(handlerEnv[envVar] ?? null)}, expected ` +
+        `${JSON.stringify(expected)}.`,
+      '  → task 0189 resolves the eligibility knobs from these names per ' +
+        'issuance (compute-stack.ts). The operator seeds the VALUES at deploy ' +
+        'prep (runbook §2a); a drifted name fails the cold-start probe on the ' +
+        'deploy that opens the portal, taking /v1 down with it.',
+    );
+  }
+}
+{
+  const cdkOut = join(repoRoot, 'infra', 'cdk.out');
+  const templateFiles = readdirSync(cdkOut).filter((f) =>
+    f.endsWith('.template.json'),
+  );
+  if (templateFiles.length === 0) {
+    fail(
+      'error: no synthesized templates found in infra/cdk.out.',
+      '  → run `npm run infra:synth:production` first.',
+    );
+  }
+  const forbiddenSuffixes = Object.values(ELIGIBILITY_PARAMS).map(
+    (name) => name.slice(name.lastIndexOf('/')), // '/discord-guild-id', …
+  );
+  for (const file of templateFiles) {
+    const tpl = readJson(join(cdkOut, file), 'synthesized template');
+    for (const [id, resource] of resourcesOfType(tpl, 'AWS::SSM::Parameter')) {
+      const name = resource.Properties?.Name;
+      if (
+        typeof name === 'string' &&
+        forbiddenSuffixes.some((suffix) => name.endsWith(suffix))
+      ) {
+        fail(
+          `error: ${file} creates SSM parameter ${JSON.stringify(name)} ` +
+            `(resource ${id}).`,
+          '  → the eligibility parameters are operator-seeded, never ' +
+            'CloudFormation resources: a CDK-owned parameter is restored to ' +
+            'the committed value by the next deploy, un-flipping production ' +
+            'back to the test guild after task 0179. Delete the ' +
+            '`ssm.StringParameter` and seed the value by hand (runbook §2a).',
+        );
+      }
+    }
   }
 }
 

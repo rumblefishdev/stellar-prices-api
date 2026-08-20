@@ -611,6 +611,34 @@ export class ComputeStack extends cdk.Stack {
       }),
     );
 
+    // The eligibility gate's two knobs (task 0189), read at runtime — per
+    // issuance, not at cold start alone. The same currently-redundant-and-kept
+    // reasoning as `PortalReadFreePlanIdParameter` above: the baseline's
+    // `ReadSsmNamespaces` already covers `/prices/${envName}/*`, and this
+    // statement names the two parameters the gate depends on so a narrowed
+    // baseline cannot silently break issuance.
+    //
+    // **CDK must never CREATE these parameters** — no `ssm.StringParameter`,
+    // and no `valueForStringParameter` (which freezes the value into the
+    // template at deploy time, defeating "tunable without a redeploy"). A
+    // CloudFormation-managed parameter is CDK-owned, so the next `cdk deploy`
+    // silently restores the committed value — which, after task 0179 points
+    // production at the real Stellar guild, would un-flip it back to the test
+    // guild. The operator seeds both values at deploy prep (runbook §2a), the
+    // same ownership split as the OAuth secret. CI pins the rule:
+    // `verify-openapi-routes.mjs` check 7 refuses any `AWS::SSM::Parameter`
+    // with either name in any synthesized template.
+    this.apiHandlerRole.addToPrincipalPolicy(
+      new iam.PolicyStatement({
+        sid: 'PortalReadEligibilityParameters',
+        actions: ['ssm:GetParameter'],
+        resources: [
+          `arn:aws:ssm:${awsRegion}:${accountId}:parameter/prices/${envName}/discord-guild-id`,
+          `arn:aws:ssm:${awsRegion}:${accountId}:parameter/prices/${envName}/min-account-age-minutes`,
+        ],
+      }),
+    );
+
     // The single axum api-handler (ADR 0008). Reads as `prices_reader` over
     // mTLS; reuses the same `chDomain` SSM value + secrets extension layer as
     // the ledger processor. No `API_KEYS` env → the in-app key gate stays
@@ -674,6 +702,18 @@ export class ComputeStack extends cdk.Stack {
         // Set unconditionally alongside `PORTAL_OAUTH_SECRET_NAME`, and for the
         // same reason: opening the portal stays a one-word diff.
         PORTAL_FREE_PLAN_PARAM: this.portalFreePlanParameterName,
+        // The NAMES of the eligibility gate's two SSM parameters (task 0189):
+        // which Discord guild membership is checked against, and the minimum
+        // account age in minutes. Names, never values — the handler resolves
+        // them through the extension **per issuance**, so an operator's
+        // `aws ssm put-parameter` takes effect without a redeploy (bounded
+        // only by the extension's ~5 min cache). The values are
+        // operator-seeded and deliberately NOT CloudFormation resources — see
+        // the `PortalReadEligibilityParameters` statement above for the
+        // un-flip-after-0179 hazard that rule prevents. Set unconditionally,
+        // same one-word-diff reasoning as the two names above.
+        PORTAL_GUILD_ID_PARAM: `/prices/${envName}/discord-guild-id`,
+        PORTAL_MIN_ACCOUNT_AGE_PARAM: `/prices/${envName}/min-account-age-minutes`,
         PARAMETERS_SECRETS_EXTENSION_CACHE_ENABLED: 'true',
         // Strip the `/{stage}` prefix (`/production`) that API Gateway REST
         // proxy puts in the path, so lambda_http hands axum `/v1/...` (not

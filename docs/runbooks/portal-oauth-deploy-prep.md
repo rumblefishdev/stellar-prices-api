@@ -9,10 +9,12 @@ This is a decision recorded in the ADR, not a convention — the registration li
 in one person's Discord Developer Portal account and re-pointing it is a manual
 act nobody else can perform.
 
-Introduced by task 0186 (sign-in, identity only). Task 0189 amends **step 2**
-when it adds the `guilds.members.read` scope. Task 0187 added **§7**, which is
-about key issuance rather than sign-in and needs no manual provisioning — but it
-does add a deploy-ordering precondition to §5.
+Introduced by task 0186 (sign-in, identity only). Task 0189 amended **§1
+step 3** (the `guilds.members.read` scope — a Developer Portal change the
+operator must make, see there) and added **§2a** (the two operator-seeded
+eligibility parameters). Task 0187 added **§7**, which is about key issuance
+rather than sign-in and needs no manual provisioning — but it does add a
+deploy-ordering precondition to §5.
 
 ## What this covers
 
@@ -85,15 +87,17 @@ In the [Discord Developer Portal](https://discord.com/developers/applications):
    completing the flow.
 
 3. **Scopes are part of the registration, not just of the authorize URL.**
-   Task 0186 requests exactly **`identify`**. Do not add `guilds` or `email` —
-   ADR 0010 rejects both, the first for returning every server a user belongs to
-   and the second for collecting data we have decided not to hold. The handler
-   **verifies the granted scope on the token response** and refuses anything
-   wider, so a registration that drifts fails closed rather than quietly
-   collecting more.
-
-   > Task 0189 adds `guilds.members.read` here **and** in `discord::SCOPE`. Both,
-   > or the flow refuses its own grant.
+   The code requests exactly **`identify guilds.members.read`** (task 0189;
+   `discord::SCOPE`) — `identify` for who the visitor is, `guilds.members.read`
+   so the issue round-trip can ask whether they are a member of the Stellar
+   guild with their own consented token. **Declare exactly that pair in the
+   registration.** Do not add `guilds` or `email` — ADR 0010 rejects both, the
+   first for returning every server a user belongs to and the second for
+   collecting data we have decided not to hold. The handler **verifies the
+   granted scope on the token response** — as a set, order-independent — and
+   refuses anything wider _or narrower_, so a registration that drifts fails
+   closed rather than quietly collecting more (or quietly turning every
+   membership check into a refusal).
 
    **Drift is caught in two places, and they fire at different moments.** If the
    registration asks for LESS than the code requests, Discord refuses at the
@@ -104,6 +108,11 @@ In the [Discord Developer Portal](https://discord.com/developers/applications):
    granted-scope check refuses it there, logging the scopes. Either way it fails
    closed and says so — but only the first is visible before a code is ever
    issued, so `invalid_scope` in the logs points at this step and nothing else.
+
+   > **Consent-screen note (0180 item 5, still to capture):** while making this
+   > change, screenshot Discord's consent screen once with `identify` alone and
+   > once with the pair, into the 0189 task's `sources/` — it is free while the
+   > browser flow is open and awkward to reproduce later.
 
 4. Copy the **Client ID** and reset/copy the **Client Secret**.
 
@@ -143,6 +152,56 @@ breaks no session in progress beyond the ten-minute pending window.
 
 Note that `create-secret` fails if the name exists — that is deliberate, and it
 is why CDK does not create it.
+
+## 2a. Seed the eligibility parameters (task 0189)
+
+The eligibility gate reads two knobs from SSM **at runtime, per issuance** —
+which Discord guild membership is checked against, and the minimum account age.
+Seed both by hand, alongside the mTLS material and the secret above:
+
+```bash
+# The guild whose membership gates key issuance. The stellar_test guild while
+# building; task 0179 step 4 re-points it at the real Stellar Developers guild
+# (897514728459468821) — with `put-parameter --overwrite`, no deploy.
+aws ssm put-parameter \
+    --name /prices/production/discord-guild-id \
+    --type String \
+    --value "<guild snowflake>"
+
+# Minimum Discord account age, in whole minutes. 5 matches the Stellar guild's
+# own verification_level: 2 ("registered on Discord for longer than 5 minutes")
+# — ADR 0010 §3: we do not set a stricter bar than the server whose gate we
+# depend on.
+aws ssm put-parameter \
+    --name /prices/production/min-account-age-minutes \
+    --type String \
+    --value "5"
+```
+
+|                                                                                                 | owned by                                |
+| ----------------------------------------------------------------------------------------------- | --------------------------------------- |
+| The parameter **names** (`PORTAL_GUILD_ID_PARAM`, `PORTAL_MIN_ACCOUNT_AGE_PARAM` on the Lambda) | CDK — `compute-stack.ts`                |
+| The IAM grant to read them (api-handler role)                                                   | CDK — `PortalReadEligibilityParameters` |
+| The parameter **values**                                                                        | **you**, by hand, out of band           |
+
+The same ownership split as the secret, with the same reason sharpened: **CDK
+must never create these parameters.** A CloudFormation-managed parameter is
+restored to the committed value by the next `cdk deploy`, which after task 0179
+would silently un-flip production back to the test guild. CI enforces the rule
+(`verify-openapi-routes.mjs` check 7 refuses any `AWS::SSM::Parameter` with
+either name in any synthesized template).
+
+**Changing a value needs no redeploy.** The handler resolves both parameters
+per issuance through the Parameters and Secrets extension; the extension's
+in-process cache (~5 minutes) is the only delay between a `put-parameter
+--overwrite` and the running Lambda honouring it.
+
+**A bad seed fails loudly, at the right moment.** With the portal open, cold
+start probes both values once: a missing parameter, an empty guild id, or a
+threshold that is not a whole number of minutes fails Lambda init (`Init
+Errors`) with the parameter named — not a per-visitor refusal. A guild id that
+is not a bare snowflake (e.g. a guild _name_) additionally refuses at issuance
+as "could not verify", with a warning in CloudWatch naming the value.
 
 ## 3. Confirm the wiring
 
@@ -210,6 +269,10 @@ finishing a slice. Before it happens, both must be true:
 - **`ApiGatewayStack` has deployed at least once since task 0187 merged**, so
   that `/prices/production/pricing-api-free-plan-id` exists. See §7 — if it does
   not, opening the portal fails Lambda init and takes `/v1` down with it.
+- **Both eligibility parameters are seeded** (§2a) and the Developer Portal
+  registration carries the scope pair (§1 step 3). A missing parameter fails
+  Lambda init exactly like a missing plan id; a registration still on
+  `identify` alone refuses every issue round-trip at the authorize step.
 
 ---
 
