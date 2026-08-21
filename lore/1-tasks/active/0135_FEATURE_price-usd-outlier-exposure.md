@@ -184,6 +184,26 @@ history:
       `mv_current_prices` at 222 ms reading 2.7M rows and writing 4,444, and
       the live definition matches `current.sql` including TO-column order —
       so the DROP + re-CREATE apply is safe.
+  - date: 2026-08-20
+    status: active
+    who: stkrolikiewicz
+    note: >
+      PR #228 merged. Two acceptance criteria corrected — they still described
+      the bound as applying to `price_usd` and measured it against the asset's
+      newest candle, both of which the final revision changed.
+      **Failure mode 1 — the question in this task's own title — split out to
+      [[0217]].** It is the one thing here that cannot be settled by working
+      harder: this task's own sequencing note puts it after [[0118]] (which
+      changes which sources reach the median, and so what "outlier" means),
+      with [[0123]] as its evidence base, and both are still in backlog.
+      Carrying it would keep 0135 open indefinitely on a question it is not
+      allowed to answer yet, while the two failure modes that WERE fixed sit
+      shipped and unarchived. 0217 also inherits a consequence worth naming:
+      by skipping to the newest *priced* close, this task made the outlier
+      case more reachable, not less — the 0138 zero that used to mask it is
+      gone. Remaining before archive: prod apply per the 0072 runbook,
+      `zero_but_vwap_ok = 0`, XLM publishing a real price (may be blocked by
+      [[0215]], not by this change), and a green [[0120]] re-run.
 ---
 
 # price_usd is not outlier-protected
@@ -341,19 +361,23 @@ base for whichever option is chosen.
 
 ## Acceptance Criteria
 
-- [ ] Decision recorded (ADR or task note) with the reasoning, including the
-      `market_cap_usd` propagation **and the `change_24h_pct`/`change_7d_pct`
-      propagation** (see above — the latter yields rows that contradict their own
-      `sources` field).
-- [ ] If filtered: `current.sql` updated, `current_mv_it.rs` asserts the new
-      behaviour, and the change is called out as a published-value change.
+- [~] Decision recorded on failure mode 1 (should `price_usd` go through the
+      §5.5 keep-mask), with the `market_cap_usd` and `change_*_pct`
+      propagation — **moved to [[0217]]**. It cannot be settled here: this
+      task's own sequencing note puts it after [[0118]], which changes which
+      sources reach the median and therefore what "outlier" means, and
+      [[0123]] is its evidence base. Both are still in backlog.
+- [~] If filtered: `current.sql` + `current_mv_it.rs` + published-value
+      callout — **moved to [[0217]]** with the decision itself.
 - [x] If left as-is: the §4.2 `/price` docs state that `price_usd` is unfiltered
       and `vwap_24h` is the de-noised figure. (Done — failure mode 1 itself is
       still undecided; §4.2 now states the asymmetry rather than hiding it.)
-- [x] The un-enriched-tip zero is resolved: `price_usd` skips unpriced candles,
-      and the staleness is **bounded in the query** (2 h carry, not just
-      documented) so an hours-old close can never be certified as current.
-      `zero_but_vwap_ok` verification is post-deploy and still open.
+- [x] The un-enriched-tip zero is resolved: `price_usd` skips unpriced candles.
+      It is deliberately **not** age-bounded — bounding it would trade a known
+      price for the 0 sentinel, and 24.5% of prod assets already sit on that
+      sentinel. The age itself is published by [[0216]]; the per-venue
+      pipeline is where the bound lives. `zero_but_vwap_ok` verification is
+      post-deploy and still open.
 - [x] `market_cap_usd` and `price_xlm` no longer collapse to 0 purely because the
       newest candle is un-enriched. (Both asserted on fixture 7 in
       `current_mv_it.rs`: `price_xlm` 3.8 and `market_cap_usd` 1900 against a
@@ -364,9 +388,11 @@ base for whichever option is chosen.
       newest candle is both usually newer than the last enrichment pass and
       often an exotic-quote pair that will never be enriched at all.
 - [x] The C2 question answered by an **explicit, bounded rule**: a source is
-      carried at its latest priced close while that close is within 2 h of its
-      newest candle, and is absent from `sources`/`vwap_24h` beyond that or
-      with no priced candle at all. The membership rule is now a stated policy
+      carried at its latest priced close while that close is younger than 2 h
+      (measured against `now()`, not against the asset's own newest candle —
+      that reference spans legs enrichment can never price, so it never
+      resolves), and is absent from `sources`/`vwap_24h` beyond that or with
+      no priced candle at all. The membership rule is now a stated policy
       rather than whatever enrichment happened to have reached, though a
       chronically-unpriced venue still drops out — that population is
       [[0154]]'s. Alignment with [[0147]]'s coverage gate: still open.
