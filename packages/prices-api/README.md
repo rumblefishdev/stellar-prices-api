@@ -246,6 +246,27 @@ curl -sS -o /dev/null -w '%{http_code}\n' \
 Press the button a second time: the same key, no new one. That is the
 reconciler, not a cache.
 
+### 3b. Usage against quota (task 0188)
+
+The same local run also serves `GET /api-tokens/api/usage`, and the page renders
+it under the key. The principal needs one more grant than the five above:
+`apigateway:GET` on `/usageplans/{id}/usage` (in the Lambda's role it lives in
+`ApiGatewayStack`'s standalone portal policy, next to the `/keys` attach).
+
+Two things that look like bugs and are not:
+
+- **The figure lags.** `GetUsage` is not a read-after-write surface — curl the
+  API a few times and the dashboard can still say `0` (or "nothing recorded
+  yet") for minutes. The page's "last updated" line is the honest statement of
+  exactly this.
+- **A refresh does not re-ask AWS.** The handler caches per caller for 60s, so
+  hammering refresh proves the cache, not the counter. Wait out the TTL (or
+  restart `serve`) to force a fresh `GetUsage`.
+
+The endpoint is **read-only by construction**: it never creates, attaches or
+deletes a key, which is why the page may call it on load while `/key` stays
+behind a button.
+
 ### 4. Afterwards
 
 ```bash

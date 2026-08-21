@@ -140,6 +140,11 @@ pub struct KeysState {
     gateway: Option<Arc<Gateway>>,
     /// [`RECONCILE_DEADLINE`], overridable only outside the Lambda build.
     deadline: Duration,
+    /// Task 0188's usage cache, so a successful issue can evict a cached
+    /// "no key" answer that it has just made false. `None` costs nothing but
+    /// a stale dashboard section for up to that cache's TTL; see
+    /// [`super::usage::UsageCache`] for why the eviction is this narrow.
+    usage_cache: Option<super::usage::UsageCache>,
 }
 
 impl KeysState {
@@ -148,7 +153,16 @@ impl KeysState {
             oauth: oauth.map(Arc::new),
             gateway: gateway.map(Arc::new),
             deadline: RECONCILE_DEADLINE,
+            usage_cache: None,
         }
+    }
+
+    /// Wire task 0188's usage cache in, so issue and reveal can evict a
+    /// cached "no key". Called by [`super::apply`]; optional so every
+    /// existing constructor and test stays valid.
+    pub fn with_usage_cache(mut self, cache: super::usage::UsageCache) -> Self {
+        self.usage_cache = Some(cache);
+        self
     }
 
     /// Shorten the deadline, so a test can drive the timeout in milliseconds
@@ -281,6 +295,16 @@ async fn ensure_key(state: &KeysState, headers: &HeaderMap) -> Response {
                 created = outcome.created,
                 "portal issued or revealed an API key"
             );
+            // This response proves a key exists, so a cached "no key" on the
+            // usage route is now false — for the page's own refetch after the
+            // press, and for any reload inside that cache's TTL. Evicted on
+            // every success rather than only on `created`: an ADOPTED key
+            // (console-created, or a create another invocation raced in) also
+            // arrives with "no key" plausibly cached, and the eviction is
+            // narrow enough that firing it spuriously costs nothing.
+            if let Some(cache) = &state.usage_cache {
+                cache.invalidate_no_key(&session.sub);
+            }
             no_store(
                 Json(KeyResponse {
                     key_id: outcome.record.id,

@@ -1,11 +1,15 @@
-//! The API Gateway **control plane**, wrapped down to five calls (task 0187).
+//! The API Gateway **control plane**, wrapped down to six calls (task 0187,
+//! plus task 0188's `GetUsage`).
 //!
 //! Not the data plane. These are `GetApiKeys`, `CreateApiKey`,
-//! `CreateUsagePlanKey`, `GetApiKey` and `DeleteApiKey` — the API the console
-//! drives — and they are the reason this slice needs no database: **API Gateway
-//! is the source of truth for whether a key exists** (task 0158's own argument,
-//! restated in 0187's context). A registry would buy a hot-path read and a
-//! history; neither is required to answer "where is my key".
+//! `CreateUsagePlanKey`, `GetApiKey`, `DeleteApiKey` and `GetUsage` — the API
+//! the console drives — and they are the reason this slice needs no database:
+//! **API Gateway is the source of truth for whether a key exists** (task 0158's
+//! own argument, restated in 0187's context), and for how much it has been
+//! used — quota is scoped to `(usagePlanId, apiKeyId)` and counted by AWS, so
+//! there is no accounting of our own to store. A registry would buy a hot-path
+//! read and a history; neither is required to answer "where is my key" or "how
+//! much of my quota is left".
 //!
 //! # What this module is for
 //!
@@ -127,6 +131,39 @@ pub enum Attachment {
     KeyGone,
 }
 
+/// One key's consumption over a queried period, as AWS reports it.
+///
+/// Derived from `GetUsage`'s daily `[used, remaining]` pairs rather than read
+/// off a single field: the response carries no `limit` of its own, so the limit
+/// is reconstructed as `used + remaining` — the same arithmetic task 0157's
+/// close verified against the live plan (`[121, 99879]` against a 100 000
+/// quota). Kept here instead of in the handler so the shape of the AWS response
+/// stays a concern of this module.
+///
+/// That reconstruction is sound only while `used` and `remaining` describe the
+/// same AWS quota period — which the queried range does not guarantee, since
+/// the range's start is our calendar rule rather than AWS's. [`summarize_days`]
+/// is what makes it hold: it drops any day before a reset it can see in the
+/// range, so both fields come out of one period.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeyUsage {
+    /// Requests counted against the quota so far this period — the sum of the
+    /// daily `used` values since the last reset visible in the queried range
+    /// (ordinarily every day of it; see [`summarize_days`]).
+    pub used: u64,
+    /// Requests left, as of the **latest day AWS has data for** — the last
+    /// daily pair's `remaining`. Not "limit − used": the two can disagree while
+    /// AWS's own reporting lags, and the last-reported value is the honest one.
+    pub remaining: u64,
+}
+
+impl KeyUsage {
+    /// The plan's quota, reconstructed. See the type docs.
+    pub fn limit(&self) -> u64 {
+        self.used.saturating_add(self.remaining)
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum GatewayError {
     #[error("API Gateway `{operation}` failed: {message}")]
@@ -134,6 +171,15 @@ pub enum GatewayError {
         operation: &'static str,
         message: String,
     },
+    /// The control plane is rate-limiting us — distinct from [`Self::Call`]
+    /// because task 0188 answers it differently: these are control-plane calls
+    /// sharing an account-wide budget with our own deploys, so a throttle wants
+    /// a stale-but-honest answer (the dashboard already renders "last updated")
+    /// rather than an error page. The SDK has already retried with backoff by
+    /// the time this surfaces; this variant is what is left when backing off
+    /// was not enough.
+    #[error("API Gateway is rate-limiting `{operation}`; backing off")]
+    Throttled { operation: &'static str },
     #[error(
         "API Gateway returned more than {MAX_PAGES} pages for one key name; refusing to rank \
          a partial list"
@@ -256,10 +302,25 @@ impl Gateway {
                 request = request.position(position);
             }
 
-            let page = request.send().await.map_err(|e| GatewayError::Call {
-                operation: "GetApiKeys",
-                message: sdk_message(&e),
-            })?;
+            let page = match request.send().await {
+                Ok(page) => page,
+                Err(e) => {
+                    // Throttling is separated from every other failure because a
+                    // caller can answer it (serve the last good answer, back
+                    // off) while a plain failure has nothing to fall back on.
+                    let message = sdk_message(&e);
+                    return Err(if e.into_service_error().is_too_many_requests_exception() {
+                        GatewayError::Throttled {
+                            operation: "GetApiKeys",
+                        }
+                    } else {
+                        GatewayError::Call {
+                            operation: "GetApiKeys",
+                            message,
+                        }
+                    });
+                }
+            };
 
             for item in page.items() {
                 // A key with no id cannot be fetched, attached or deleted, so it
@@ -468,6 +529,104 @@ impl Gateway {
         }
     }
 
+    /// One key's usage against the free plan's quota between `start_date` and
+    /// `end_date` (inclusive, `YYYY-MM-DD`), or `None` if AWS has recorded
+    /// nothing for it in that window (task 0188).
+    ///
+    /// `None` is a real and **common** state, not an edge case: `GetUsage` is
+    /// not a read-after-write surface (measured 2026-08-12, archived
+    /// `0180/notes/R-apigw-namequery-quota-and-disable.md`), so a key issued
+    /// minutes ago — the first thing every new user looks at — may have no row
+    /// yet. The caller renders that as "nothing recorded yet" rather than
+    /// inventing zeros for `remaining` and a limit it does not know.
+    ///
+    /// **Paginated like the listing is**, and for the same reason: the response
+    /// carries a `position` token, and summing off page one would report a
+    /// smaller `used` than AWS is counting. With the `keyId` filter the items
+    /// map holds one key, so extra pages extend that key's daily series;
+    /// `MAX_PAGES` turns a cursor the service never clears into an error
+    /// instead of an infinite loop.
+    ///
+    /// Daily pairs are `[used, remaining]`. `used` sums across days;
+    /// `remaining` is the **last** day's value, because it is a running balance
+    /// rather than a per-day allowance (task 0157's close observed exactly
+    /// this: `[121, 99879]` one day, `[0, 99879]` the next). Reducing the
+    /// series to those two numbers is [`summarize_days`], which also handles
+    /// the case where AWS's own period rolls partway through the range.
+    pub async fn usage_of(
+        &self,
+        key_id: &str,
+        start_date: &str,
+        end_date: &str,
+    ) -> Result<Option<KeyUsage>, GatewayError> {
+        let mut days: Vec<(i64, i64)> = Vec::new();
+        let mut position: Option<String> = None;
+
+        for _ in 0..MAX_PAGES {
+            let mut request = self
+                .client
+                .get_usage()
+                .usage_plan_id(&self.free_plan_id)
+                .key_id(key_id)
+                .start_date(start_date)
+                .end_date(end_date)
+                .limit(PAGE_LIMIT);
+            if let Some(position) = position.as_ref() {
+                request = request.position(position);
+            }
+
+            let page = match request.send().await {
+                Ok(page) => page,
+                Err(e) => {
+                    let message = sdk_message(&e);
+                    return Err(if e.into_service_error().is_too_many_requests_exception() {
+                        GatewayError::Throttled {
+                            operation: "GetUsage",
+                        }
+                    } else {
+                        GatewayError::Call {
+                            operation: "GetUsage",
+                            message,
+                        }
+                    });
+                }
+            };
+
+            // The map is keyed by key id. The `keyId` filter should leave only
+            // ours, but that is the service's narrowing, not this module's —
+            // read the one entry we asked about and ignore anything else, the
+            // same stance `exact_matches` takes on `nameQuery`.
+            if let Some(items) = page.items()
+                && let Some(values) = items.get(key_id)
+            {
+                for pair in values {
+                    // A day is `[used, remaining]`. A shorter row is skipped
+                    // with a warning, like the id-less key in `list_named` —
+                    // NOT defaulted: `remaining` defaulting to 0 on a
+                    // truncated LAST row would reconstruct `limit = used` and
+                    // render a barely-used key as "quota exhausted", which is
+                    // a worse lie than a slightly staler `remaining` from the
+                    // previous day.
+                    let (Some(&used), Some(&remaining)) = (pair.first(), pair.get(1)) else {
+                        tracing::warn!(
+                            elements = pair.len(),
+                            "GetUsage returned a malformed daily pair; skipped"
+                        );
+                        continue;
+                    };
+                    days.push((used, remaining));
+                }
+            }
+
+            match page.position() {
+                Some(next) if !next.is_empty() => position = Some(next.to_string()),
+                _ => return Ok(summarize_days(&days)),
+            }
+        }
+
+        Err(GatewayError::TooManyPages)
+    }
+
     /// Delete a key. A key that is already gone is a success — the caller wanted
     /// it not to exist, and a concurrent invocation having removed it first is
     /// the reconciler working, not failing.
@@ -487,6 +646,77 @@ impl Gateway {
             }
         }
     }
+}
+
+/// Reduce a period's daily `[used, remaining]` pairs to one answer, ignoring
+/// anything before the last quota reset that falls inside the range.
+///
+/// # Why a reset can fall inside the range at all
+///
+/// The queried range starts on the 1st of the calendar month, UTC — **our**
+/// stated product rule (task 0188), not AWS's. AWS documents neither the
+/// instant its `MONTH` quota rolls nor the timezone it rolls in (ADR 0010,
+/// correction #2, still open), so the range can in principle span two of AWS's
+/// periods. Summing every day regardless would then report a `used` inflated by
+/// the previous period's traffic and — because `remaining` is the LAST day's
+/// balance, which belongs to the current one — a reconstructed
+/// `limit = used + remaining` above the real quota: a 100 000 plan rendered as
+/// "150 000". Both figures land on a dashboard whose whole stated theme is
+/// rendering honestly, so the mismatch is worth defending against here rather
+/// than wording around on the page.
+///
+/// # How the reset is found
+///
+/// `remaining` is a running balance ([`KeyUsage::remaining`]), so within one
+/// period it never rises. A day whose `remaining` exceeds the previous day's is
+/// therefore a reset, and the sum restarts from it. A mid-period quota
+/// *increase* reads the same way and is treated the same: the figures that come
+/// out are the ones that hold against the quota now in force, which is the
+/// honest answer under either cause.
+///
+/// The reset is logged when it happens, because this is the only evidence this
+/// system can produce about the reset instant ADR 0010 is still open on — a
+/// warning here turns an undocumented AWS behaviour into an observed fact.
+///
+/// Negative values have no defined meaning and are clamped to zero — which
+/// keeps the arithmetic total rather than making it right: if AWS ever reported
+/// `[100500, -500]`, the reconstructed limit degrades to `used + 0` and the
+/// dashboard would read "used 100500 of 100500" against a 100 000 plan.
+/// Accepted: nothing in the response carries the true limit to fall back on, no
+/// such row has been observed, and the page's lag wording already frames every
+/// figure as AWS's report rather than ground truth. The clamp is applied to the
+/// reset scan as well as to the sum, so the two read the same numbers: `-10`
+/// followed by `0` is two readings of one undefined state, not a rise, and must
+/// not fabricate a period boundary that would then truncate `used`.
+fn summarize_days(days: &[(i64, i64)]) -> Option<KeyUsage> {
+    let (_, last_remaining) = *days.last()?;
+    let clamped = |value: i64| u64::try_from(value).unwrap_or(0);
+
+    // The first day of the last period that begins inside this range; `0` when
+    // no reset is visible, which is the ordinary case.
+    let period_begins = days
+        .windows(2)
+        .rposition(|pair| clamped(pair[1].1) > clamped(pair[0].1))
+        .map(|index| index + 1)
+        .unwrap_or(0);
+    if period_begins > 0 {
+        tracing::warn!(
+            days_in_range = days.len(),
+            days_before_reset = period_begins,
+            "GetUsage reported a quota reset inside the queried period, so AWS does not roll \
+             on the 1st 00:00 UTC our period rule assumes; counting from the reset"
+        );
+    }
+
+    let used = days[period_begins..]
+        .iter()
+        .map(|&(used, _)| clamped(used))
+        .fold(0u64, u64::saturating_add);
+
+    Some(KeyUsage {
+        used,
+        remaining: clamped(last_remaining),
+    })
 }
 
 fn timeouts() -> TimeoutConfig {
@@ -528,6 +758,71 @@ mod tests {
     #[test]
     fn expose_is_the_only_way_out() {
         assert_eq!(KeyValue("v".into()).expose(), "v");
+    }
+
+    /// The ordinary series: one period, `remaining` running down. Every day
+    /// counts, and the limit reconstructs to the plan's real quota.
+    #[test]
+    fn a_single_period_sums_every_day() {
+        let usage = summarize_days(&[(10, 99_990), (20, 99_970), (5, 99_965)])
+            .expect("a non-empty series has an answer");
+        assert_eq!(usage.used, 35);
+        assert_eq!(usage.remaining, 99_965);
+        assert_eq!(usage.limit(), 100_000);
+    }
+
+    /// The finding this function exists for: AWS rolled its quota partway
+    /// through the range our calendar rule asked for. Summing blindly would
+    /// report `used = 40` against `remaining = 90` and reconstruct a 130 limit
+    /// on a 100 plan — a number no plan has. Counting from the reset gives the
+    /// current period's figures and a limit that is the real one.
+    #[test]
+    fn a_reset_inside_the_range_restarts_the_sum() {
+        let usage = summarize_days(&[(10, 90), (20, 70), (5, 95), (5, 90)])
+            .expect("a non-empty series has an answer");
+        assert_eq!(usage.used, 10);
+        assert_eq!(usage.remaining, 90);
+        assert_eq!(usage.limit(), 100);
+    }
+
+    /// Two resets in one range is not a case anyone expects, but the rule is
+    /// "the LAST period wins" and it has to be the last one, not the first.
+    #[test]
+    fn the_last_reset_is_the_one_that_counts() {
+        let usage = summarize_days(&[(10, 90), (5, 95), (30, 65), (1, 99)])
+            .expect("a non-empty series has an answer");
+        assert_eq!(usage.used, 1);
+        assert_eq!(usage.remaining, 99);
+        assert_eq!(usage.limit(), 100);
+    }
+
+    /// A day of zero traffic leaves `remaining` flat. Flat is not a rise, so it
+    /// must not read as a reset — otherwise any idle day would truncate the
+    /// month's `used` to whatever came after it.
+    #[test]
+    fn an_idle_day_is_not_a_reset() {
+        let usage = summarize_days(&[(10, 90), (0, 90), (5, 85)])
+            .expect("a non-empty series has an answer");
+        assert_eq!(usage.used, 15);
+        assert_eq!(usage.remaining, 85);
+    }
+
+    /// The clamp covers the reset scan as well as the sum, so a negative
+    /// `remaining` degrades the arithmetic (documented on `summarize_days`)
+    /// without also inventing a period boundary on the day that follows it:
+    /// `-10` then `0` is one undefined state read twice, not a fresh quota.
+    #[test]
+    fn a_negative_remaining_does_not_fabricate_a_reset() {
+        let usage = summarize_days(&[(60, -10), (5, 0)]).expect("a non-empty series has an answer");
+        assert_eq!(usage.used, 65);
+        assert_eq!(usage.remaining, 0);
+    }
+
+    /// No rows is "AWS has recorded nothing", which the caller renders as such
+    /// rather than as zeros.
+    #[test]
+    fn no_days_is_no_answer() {
+        assert_eq!(summarize_days(&[]), None);
     }
 
     /// A `Gateway` can end up in a diagnostic by way of `AppConfig`; nothing in

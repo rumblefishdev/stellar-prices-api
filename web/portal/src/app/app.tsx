@@ -4,6 +4,7 @@ import { Route, Routes, useSearchParams } from 'react-router-dom';
 import {
   fetchPortalConfig,
   fetchSession,
+  fetchUsage,
   issueKey,
   signInUrl,
   signOut,
@@ -11,6 +12,7 @@ import {
   type PortalConfig,
   type PortalKey,
   type PortalSession,
+  type PortalUsage,
 } from '../api/portal';
 
 /**
@@ -53,8 +55,14 @@ type SessionState =
  * the task. "Cancelled" is not an error: the visitor pressed Cancel at Discord's
  * consent screen, the callback redirected here with `?signin=cancelled`, and the
  * only reasonable response is to say so and leave the button where it was.
+ *
+ * `rateLimit` is nothing to do with sign-in and is not read here: it comes off
+ * `/config`, which only this component's parent has, and is wanted three levels
+ * down by the usage panel (task 0188). Passed through rather than re-fetched or
+ * put in a context — one prop across two hops is less machinery than either,
+ * and it keeps the value's single source visible in the call chain.
  */
-function SignIn() {
+function SignIn({ rateLimit }: { rateLimit?: number }) {
   const [session, setSession] = useState<SessionState>({ state: 'loading' });
   const [searchParams] = useSearchParams();
   // Two landing states, from two literals the backend appends. `cancelled` is
@@ -148,23 +156,11 @@ function SignIn() {
 
   if (session.session.authenticated) {
     return (
-      <>
-        {/* The acceptance criterion, rendered: username and ID. The ID is the
-            account key (ADR 0010) and the username is display only — it comes
-            from the signed session cookie and is refreshed at each sign-in. */}
-        <p>
-          Signed in as <strong>{session.session.username}</strong> (ID{' '}
-          <code>{session.session.user_id}</code>)
-        </p>
-        <button type="button" onClick={onSignOut}>
-          Sign out
-        </button>
-        {/* Task 0187. Inside the authenticated branch, so signing out removes
-            it along with the key it was showing — the component unmounts and
-            its state goes with it, rather than leaving a stale credential on
-            screen for the next person at the keyboard. */}
-        <ApiKey />
-      </>
+      <Dashboard
+        onSignOut={onSignOut}
+        session={session.session}
+        rateLimit={rateLimit}
+      />
     );
   }
 
@@ -188,6 +184,56 @@ function SignIn() {
 }
 
 /**
+ * The signed-in half of the page: identity, the key (task 0187), and usage
+ * against quota (task 0188). Still one flat, unstyled column — task 0193 is
+ * what turns this into something that looks like a dashboard.
+ *
+ * The one piece of state lifted here is whether THIS page load issued or
+ * revealed a key. `Usage` needs it for honesty's sake: the backend caches its
+ * answers briefly and `GetUsage` itself lags, so straight after a press the
+ * usage endpoint can still say "no key" or "nothing recorded" about a key the
+ * page is literally displaying — and "you have no key" would be false. Knowing
+ * a key exists turns both of those answers into "your key is new; figures
+ * appear with a delay", which is the same lag message the whole slice is built
+ * around.
+ */
+function Dashboard({
+  onSignOut,
+  session,
+  rateLimit,
+}: {
+  onSignOut: () => void;
+  session: PortalSession;
+  /** The free plan's per-second rate limit, straight from `/config`. */
+  rateLimit?: number;
+}) {
+  const [keyOnScreen, setKeyOnScreen] = useState(false);
+
+  return (
+    <>
+      {/* The acceptance criterion, rendered: username and ID. The ID is the
+          account key (ADR 0010) and the username is display only — it comes
+          from the signed session cookie and is refreshed at each sign-in. */}
+      <p>
+        Signed in as <strong>{session.username}</strong> (ID{' '}
+        <code>{session.user_id}</code>)
+      </p>
+      <button type="button" onClick={onSignOut}>
+        Sign out
+      </button>
+      {/* Task 0187. Inside the authenticated branch, so signing out removes
+          it along with the key it was showing — the component unmounts and
+          its state goes with it, rather than leaving a stale credential on
+          screen for the next person at the keyboard. */}
+      <ApiKey onKey={() => setKeyOnScreen(true)} />
+      {/* Task 0188. Keyed refetch: a successful issue re-asks for usage, so
+          the section leaves "no key yet" without a manual refresh. */}
+      <Usage keyOnScreen={keyOnScreen} rateLimit={rateLimit} />
+    </>
+  );
+}
+
+/**
  * The API key, masked (task 0187).
  *
  * Rendered only for a signed-in visitor, because that is the only state in which
@@ -202,7 +248,7 @@ function SignIn() {
  * retypes — without a button, the first thing every visitor does is select it by
  * hand, which defeats the masking they just toggled.
  */
-function ApiKey() {
+function ApiKey({ onKey }: { onKey?: () => void }) {
   const [key, setKey] = useState<PortalKey | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -242,6 +288,11 @@ function ApiKey() {
         // the button and can press reveal; what they did not ask for is the
         // credential appearing on screen while they were looking at the button.
         setRevealed(false);
+        // Tell the dashboard a key is now on screen (task 0188's usage section
+        // reads it) — the FACT only, never the value or the id: nothing
+        // outside this component needs the credential, so nothing outside it
+        // gets to hold one.
+        onKey?.();
       })
       .catch((cause: unknown) => {
         if (!live.current) return;
@@ -328,6 +379,229 @@ function ApiKey() {
 }
 
 /**
+ * Usage against quota, rendered honestly (task 0188).
+ *
+ * Three numbers and a date, unstyled — task 0193 makes it a dashboard. What is
+ * decided HERE, once, and what 0193 restyles without re-deciding:
+ *
+ * - **The lag wording.** `GetUsage` is not a read-after-write surface
+ *   (measured, task 0180), so the figures can trail reality by minutes. Every
+ *   render of the numbers carries the "last updated" line below, verbatim; a
+ *   dashboard that admits a lag beats one that looks broken.
+ * - **The reset rule.** "The 1st of each month, 00:00 UTC" is OUR stated rule,
+ *   not an AWS guarantee — AWS documents neither the instant nor the timezone
+ *   (ADR 0010, correction #2) — and it is worded as ours.
+ * - **The limits as numbers**: requests per second (task 0157) and
+ *   used-of-quota, not prose. The rate figure comes from `/config`, not from a
+ *   literal here — it is the per-env value the gateway enforces
+ *   (`pricingApiFreePlanRateLimit`), and it was the one number on this panel
+ *   that could drift from what is actually in force.
+ *
+ * Fetches on mount, unlike `ApiKey` beside it, and the difference is the whole
+ * point of the backend's design: `GET /usage` is read-only by construction —
+ * it can never create, attach or delete a key — so opening the page costs
+ * nothing and mints nothing. The refresh button re-asks; the backend's
+ * in-process cache is what keeps that from turning into control-plane traffic.
+ */
+function Usage({
+  keyOnScreen,
+  rateLimit,
+}: {
+  keyOnScreen: boolean;
+  rateLimit?: number;
+}) {
+  type UsageView =
+    | { state: 'loading' }
+    | { state: 'ok'; usage: PortalUsage }
+    | { state: 'no-key' }
+    | { state: 'failed'; reason: string };
+
+  const [view, setView] = useState<UsageView>({ state: 'loading' });
+
+  // The same in-flight guard `SignIn` keeps, for the same two reasons: the
+  // refresh button can supersede a pending load, and signing out unmounts this
+  // component mid-flight.
+  const cancelInFlight = useRef<(() => void) | null>(null);
+  const load = useCallback(() => {
+    cancelInFlight.current?.();
+    let live = true;
+    cancelInFlight.current = () => {
+      live = false;
+    };
+    setView({ state: 'loading' });
+    fetchUsage()
+      .then((usage) => {
+        if (!live) return;
+        setView(usage ? { state: 'ok', usage } : { state: 'no-key' });
+      })
+      .catch((error: unknown) => {
+        // Through `describeFailure`, like the key section beside this one: an
+        // expired session must read "sign out and sign in again" in BOTH
+        // places, not as that sentence in one and a raw "answered 401" in the
+        // other — two wordings for one cause on one screen reads as two bugs.
+        if (live) setView({ state: 'failed', reason: describeFailure(error) });
+      });
+  }, []);
+
+  // On mount only.
+  useEffect(() => {
+    load();
+    return () => cancelInFlight.current?.();
+  }, [load]);
+
+  // Fires the keyed refetch AT MOST ONCE per mount. This latch is what lets
+  // the effect below watch `view.state` — the obvious dependency — without
+  // becoming a fetch loop: the backend can legitimately keep answering
+  // `no_key` while its own cache catches up, so "no-key → load → no-key"
+  // would otherwise re-trigger itself forever.
+  //
+  // Watching the state (rather than the `keyOnScreen` transition alone, which
+  // is what a ref-read did) is the point. The press and the mount-time fetch
+  // race: press "Get my key" while that fetch is still in flight and the
+  // transition happens with the view still `'loading'`, so a transition-only
+  // effect saw nothing to do — and then never ran again, because its
+  // dependencies had already settled. The in-flight request, issued before the
+  // key existed, resolves `no_key`, and the section sat on "your key is new"
+  // until the visitor found the Refresh button. Pressing again could not help
+  // either: `setKeyOnScreen(true)` on an already-`true` state changes no
+  // dependency.
+  const refetchedForKey = useRef(false);
+
+  // When a key is on screen and the usage section says "no key", refetch —
+  // that is the one answer the issue just falsified, whenever it arrives. A
+  // section already showing numbers is showing an answer a reveal does not
+  // change, and blanking it into a loading flicker for an identical body would
+  // make the press look like it broke something, so `'ok'` is left alone.
+  useEffect(() => {
+    if (!keyOnScreen || view.state !== 'no-key' || refetchedForKey.current) {
+      return;
+    }
+    refetchedForKey.current = true;
+    load();
+  }, [keyOnScreen, view.state, load]);
+
+  /**
+   * THE lag line — the wording this task decides once. Rendered under every
+   * state that shows (or withholds) a figure, so the page never presents an
+   * AWS-lagged number as live.
+   */
+  const lastUpdated = (asOf: string) => (
+    <p>
+      {/* `toUTCString` spells the zone "GMT"; the decided wording says UTC,
+          and since 0193 must not re-decide this line, the suffix is corrected
+          here rather than frozen. Same instant either way. */}
+      Last updated {new Date(asOf).toUTCString().replace(/GMT$/, 'UTC')} — AWS
+      reports usage with a delay, so requests made in the last few minutes may
+      not be counted yet.
+    </p>
+  );
+
+  /** The reset rule (ours) and the rate limit (0157), as numbers. */
+  const limits = (resetsAt?: string) => (
+    <>
+      {/* Omitted, not defaulted, when the deployment did not say what the
+          limit is: a fallback figure here would be exactly the silent
+          staleness reading it from `/config` removes. Every deployed
+          environment sets it — `compute-stack.ts` passes
+          `pricingApiFreePlanRateLimit` unconditionally — so the absent case is
+          a local run, where saying nothing is the honest answer. */}
+      {rateLimit !== undefined && (
+        <p>
+          Rate limit: <strong data-testid="rate-limit">{rateLimit}</strong>{' '}
+          request
+          {rateLimit === 1 ? '' : 's'} per second.
+        </p>
+      )}
+      <p>
+        Quota resets on the 1st of each month, 00:00 UTC
+        {resetsAt ? (
+          <>
+            {' '}
+            — next reset <strong>{resetsAt.slice(0, 10)}</strong>
+          </>
+        ) : null}
+        .
+      </p>
+    </>
+  );
+
+  return (
+    <section>
+      <h2>Usage this period</h2>
+
+      {view.state === 'loading' && <p>Loading your usage…</p>}
+
+      {view.state === 'no-key' && (
+        <>
+          {keyOnScreen ? (
+            // The endpoint said "no key" while a key is on this very screen:
+            // the backend's short cache has not caught up with the issue yet.
+            // "You have no key" would be false, so say what is actually
+            // happening.
+            <p>
+              Your key is new — usage figures appear here with a delay after
+              your first requests.
+            </p>
+          ) : (
+            <p>You have no API key yet — issue one above to see your usage.</p>
+          )}
+          {/* The limits still render: they are properties of the plan every
+              key joins, not of a particular key, and the visitor deciding
+              whether to issue one is exactly who they inform. No next-reset
+              date — that comes with a usage answer. */}
+          {limits()}
+        </>
+      )}
+
+      {view.state === 'ok' &&
+        (view.usage.used === null ? (
+          <>
+            {/* AWS has no rows for the key yet. Not zeros: inventing
+                `remaining` and `limit` would be guessing, and the honest state
+                is "nothing recorded", which for a fresh key is expected. */}
+            <p>
+              AWS has not recorded any usage for your key this period yet —
+              figures appear with a delay after your first requests.
+            </p>
+            {limits(view.usage.resets_at)}
+            {lastUpdated(view.usage.as_of)}
+          </>
+        ) : (
+          <>
+            <p>
+              Used: <strong data-testid="usage-used">{view.usage.used}</strong>
+            </p>
+            <p>
+              Remaining:{' '}
+              <strong data-testid="usage-remaining">
+                {view.usage.remaining}
+              </strong>
+            </p>
+            <p>
+              Monthly limit:{' '}
+              <strong data-testid="usage-limit">{view.usage.limit}</strong>
+            </p>
+            {limits(view.usage.resets_at)}
+            {lastUpdated(view.usage.as_of)}
+          </>
+        ))}
+
+      {view.state === 'failed' && (
+        <p>
+          Could not load your usage: <code>{view.reason}</code>
+        </p>
+      )}
+
+      {view.state !== 'loading' && (
+        <button type="button" onClick={load}>
+          Refresh
+        </button>
+      )}
+    </section>
+  );
+}
+
+/**
  * Turn a failed issue into something the visitor can act on.
  *
  * `401` is the one status that has an answer other than "try again": the
@@ -386,7 +660,9 @@ function PortalHome() {
 
       {/* Reachable only once PORTAL_ENABLED is true. Task 0186 put sign-in
           here; issuing a key is task 0187's. */}
-      {probe.state === 'ok' && probe.config.enabled && <SignIn />}
+      {probe.state === 'ok' && probe.config.enabled && (
+        <SignIn rateLimit={probe.config.rate_limit_per_second} />
+      )}
 
       {/* A failure here is not cosmetic: it means the bundle could not reach
           its own backend, which is either the behaviour ordering in task 0184's

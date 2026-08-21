@@ -58,18 +58,46 @@ function stubRoutes(
 const CONFIG_URL = '/api-tokens/api/config';
 const ME_URL = '/api-tokens/api/auth/me';
 const LOGOUT_URL = '/api-tokens/api/auth/logout';
+const USAGE_URL = '/api-tokens/api/usage';
+
+/**
+ * `/config` for an open portal (task 0183) carrying the free plan's rate limit
+ * (task 0188).
+ *
+ * The limit is part of every open-portal stub because it is part of every real
+ * `/config`: `compute-stack.ts` sets `PORTAL_RATE_LIMIT` from
+ * `pricingApiFreePlanRateLimit` unconditionally. `1` is what
+ * `infra/envs/production.json` holds today — and the point of the field is that
+ * changing that file changes the page, so the tests below assert the rendered
+ * figure against THIS value rather than against a literal of their own.
+ */
+const openConfig = () => ({
+  json: async () => ({ enabled: true, rate_limit_per_second: 1 }),
+});
+
+/**
+ * The usage endpoint's "no key yet" answer (task 0188) — the default for every
+ * signed-in stub, because the dashboard now asks for usage on mount and a
+ * stub that does not answer it would fail the request and render a failure
+ * state under every other test's assertions.
+ */
+const usageNoKey = () => ({
+  ok: false,
+  status: 404,
+  json: async () => ({ code: 'no_key', message: 'you have no API key yet' }),
+});
 
 /** The portal open, and nobody signed in. */
 const openAndSignedOut = () =>
   stubRoutes({
-    [CONFIG_URL]: () => ({ json: async () => ({ enabled: true }) }),
+    [CONFIG_URL]: openConfig,
     [ME_URL]: () => ({ json: async () => ({ authenticated: false }) }),
   });
 
 /** The portal open, with a completed round-trip behind it. */
 const openAndSignedIn = () =>
   stubRoutes({
-    [CONFIG_URL]: () => ({ json: async () => ({ enabled: true }) }),
+    [CONFIG_URL]: openConfig,
     [ME_URL]: () => ({
       json: async () => ({
         authenticated: true,
@@ -77,6 +105,7 @@ const openAndSignedIn = () =>
         username: 'adam',
       }),
     }),
+    [USAGE_URL]: usageNoKey,
   });
 
 const renderApp = () =>
@@ -371,7 +400,7 @@ describe('sign in with Discord', () => {
   it('signs out with a POST and re-reads the session', async () => {
     let authenticated = true;
     const fetchMock = stubRoutes({
-      [CONFIG_URL]: () => ({ json: async () => ({ enabled: true }) }),
+      [CONFIG_URL]: openConfig,
       [ME_URL]: () => ({
         json: async () =>
           authenticated
@@ -382,6 +411,7 @@ describe('sign in with Discord', () => {
         authenticated = false;
         return { status: 204, json: async () => ({}) };
       },
+      [USAGE_URL]: usageNoKey,
     });
 
     renderAt('/');
@@ -406,7 +436,7 @@ describe('sign in with Discord', () => {
    */
   it('surfaces a failed session check instead of spinning forever', async () => {
     stubRoutes({
-      [CONFIG_URL]: () => ({ json: async () => ({ enabled: true }) }),
+      [CONFIG_URL]: openConfig,
       [ME_URL]: () => ({ ok: false, status: 502 }),
     });
     renderAt('/');
@@ -427,7 +457,7 @@ describe('sign in with Discord', () => {
    */
   it('still offers sign-in when the session check fails', async () => {
     stubRoutes({
-      [CONFIG_URL]: () => ({ json: async () => ({ enabled: true }) }),
+      [CONFIG_URL]: openConfig,
       [ME_URL]: () => ({ ok: false, status: 502 }),
     });
     renderAt('/');
@@ -483,7 +513,7 @@ describe('the API key', () => {
     },
   ) =>
     stubRoutes({
-      [CONFIG_URL]: () => ({ json: async () => ({ enabled: true }) }),
+      [CONFIG_URL]: openConfig,
       [ME_URL]: () => ({
         json: async () => ({
           authenticated: true,
@@ -492,6 +522,7 @@ describe('the API key', () => {
         }),
       }),
       [KEY_URL]: () => ({ json: async () => key }),
+      [USAGE_URL]: usageNoKey,
     });
 
   const renderApp = () =>
@@ -618,7 +649,7 @@ describe('the API key', () => {
 
   it('reports a failure and leaves the button pressable', async () => {
     stubRoutes({
-      [CONFIG_URL]: () => ({ json: async () => ({ enabled: true }) }),
+      [CONFIG_URL]: openConfig,
       [ME_URL]: () => ({
         json: async () => ({
           authenticated: true,
@@ -627,6 +658,7 @@ describe('the API key', () => {
         }),
       }),
       [KEY_URL]: () => ({ ok: false, status: 502 }),
+      [USAGE_URL]: usageNoKey,
     });
     renderApp();
 
@@ -651,7 +683,7 @@ describe('the API key', () => {
    */
   it('tells the visitor to sign in again when the session has expired', async () => {
     stubRoutes({
-      [CONFIG_URL]: () => ({ json: async () => ({ enabled: true }) }),
+      [CONFIG_URL]: openConfig,
       [ME_URL]: () => ({
         json: async () => ({
           authenticated: true,
@@ -660,6 +692,7 @@ describe('the API key', () => {
         }),
       }),
       [KEY_URL]: () => ({ ok: false, status: 401 }),
+      [USAGE_URL]: usageNoKey,
     });
     renderApp();
 
@@ -695,5 +728,528 @@ describe('the API key', () => {
 
     await screen.findByText(/not yet available/i);
     expect(screen.queryAllByRole('button')).toHaveLength(0);
+  });
+});
+
+/**
+ * Usage against quota (task 0188).
+ *
+ * Every test starts signed in — the section exists only there. `fetch` is
+ * stubbed rather than the module mocked, so these also cover `fetchUsage` in
+ * `src/api/portal.ts` — including that its URL is relative (the same-origin
+ * property task 0184 provides) and that a `404 no_key` is a renderable state,
+ * not a failure.
+ */
+describe('usage against quota', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const KEY_URL = '/api-tokens/api/key';
+
+  const USAGE = {
+    used: 121,
+    remaining: 99879,
+    limit: 100000,
+    period_start: '2026-08-01',
+    period_end: '2026-08-31',
+    resets_at: '2026-09-01T00:00:00Z',
+    as_of: '2026-08-19T10:15:00Z',
+  };
+
+  const signedInWithUsage = (
+    usage: () => Partial<Response> & { json?: () => unknown } = () => ({
+      json: async () => USAGE,
+    }),
+  ) =>
+    stubRoutes({
+      [CONFIG_URL]: openConfig,
+      [ME_URL]: () => ({
+        json: async () => ({
+          authenticated: true,
+          user_id: '308994132968210433',
+          username: 'adam',
+        }),
+      }),
+      [USAGE_URL]: usage,
+    });
+
+  const renderApp = () =>
+    render(
+      <MemoryRouter initialEntries={['/']}>
+        <App />
+      </MemoryRouter>,
+    );
+
+  /**
+   * The acceptance criterion, rendered: used, remaining and the limit as
+   * numbers, plus the 1 req/s rate limit and the reset date — all visible on
+   * one screen.
+   */
+  it('shows used, remaining, limit, the rate limit and the reset date', async () => {
+    const fetchMock = signedInWithUsage();
+    renderApp();
+
+    expect((await screen.findByTestId('usage-used')).textContent).toBe('121');
+    expect(screen.getByTestId('usage-remaining').textContent).toBe('99879');
+    expect(screen.getByTestId('usage-limit').textContent).toBe('100000');
+
+    // The limits as numbers, not prose (task 0157's figures).
+    expect(screen.getByText(/request per second/i)).toBeTruthy();
+    // The reset rule is OURS — the 1st of the month, 00:00 UTC — and the next
+    // date is rendered from the response, not computed in the page.
+    expect(screen.getByText(/1st of each month, 00:00 UTC/i)).toBeTruthy();
+    expect(screen.getByText(/2026-09-01/)).toBeTruthy();
+
+    // And the URL is relative: same-origin, cookie attached by the browser.
+    const call = fetchMock.mock.calls.find(([url]) => url === USAGE_URL) as [
+      string,
+    ];
+    expect(call[0].startsWith('http')).toBe(false);
+  });
+
+  /**
+   * **The wording this task decides once** (task 0193 restyles it without
+   * re-deciding): every rendered figure carries when it was last refreshed and
+   * that AWS reports with a delay. Without this line, a visitor who just made
+   * requests reads the dashboard as broken.
+   */
+  it('states when the figure was last refreshed, and that AWS lags', async () => {
+    signedInWithUsage();
+    renderApp();
+
+    await screen.findByTestId('usage-used');
+    expect(screen.getByText(/last updated/i).textContent).toMatch(
+      /AWS reports usage with a delay/i,
+    );
+    // The timestamp is the backend's `as_of` — the moment of the GetUsage —
+    // rendered in UTC (the decided wording says UTC, not toUTCString's
+    // "GMT"), not the moment of the page load.
+    expect(screen.getByText(/last updated/i).textContent).toContain(
+      new Date(USAGE.as_of).toUTCString().replace(/GMT$/, 'UTC'),
+    );
+    expect(screen.getByText(/last updated/i).textContent).not.toContain('GMT');
+  });
+
+  /** Usage is read-only, so — unlike the key — it may and does load on mount. */
+  it('fetches usage on mount, without any button press', async () => {
+    const fetchMock = signedInWithUsage();
+    renderApp();
+
+    await screen.findByTestId('usage-used');
+    expect(fetchMock.mock.calls.some(([url]) => url === USAGE_URL)).toBe(true);
+    // And still nothing touched the key route — reading usage must never
+    // issue.
+    expect(fetchMock.mock.calls.some(([url]) => url === KEY_URL)).toBe(false);
+  });
+
+  /** A signed-in visitor with no key is told so, in words they can act on. */
+  it('renders the no-key state rather than an error', async () => {
+    signedInWithUsage(usageNoKey);
+    renderApp();
+
+    expect(await screen.findByText(/no API key yet/i)).toBeTruthy();
+    expect(document.body.textContent).not.toContain('Could not load');
+    // The limits still render — they belong to the plan, not to a key, and a
+    // visitor deciding whether to issue one is exactly who they inform.
+    expect(screen.getByText(/request per second/i)).toBeTruthy();
+    expect(screen.getByText(/1st of each month, 00:00 UTC/i)).toBeTruthy();
+  });
+
+  /**
+   * Only the backend's own `no_key` envelope means "no key". A 404 with no
+   * such code — task 0183's empty gate answer, reachable when the portal is
+   * closed under a still-open tab — must NOT render "you have no API key",
+   * which would be a false statement about a key that may well exist.
+   */
+  it('does not read the gate’s empty 404 as "no key"', async () => {
+    signedInWithUsage(() => ({
+      ok: false,
+      status: 404,
+      json: async () => {
+        throw new SyntaxError('Unexpected end of JSON input');
+      },
+    }));
+    renderApp();
+
+    expect(await screen.findByText(/could not load your usage/i)).toBeTruthy();
+    expect(screen.queryByText(/no API key yet/i)).toBeNull();
+  });
+
+  /**
+   * AWS has no rows for the key yet — `used`/`remaining`/`limit` are `null`
+   * together. Not rendered as zeros: "0 used of 100000" would be an invented
+   * figure, and the honest state for a fresh key is "nothing recorded yet".
+   * The reset rule and rate limit still render — they are ours, not AWS's.
+   */
+  it('says nothing is recorded yet instead of inventing zeros', async () => {
+    signedInWithUsage(() => ({
+      json: async () => ({
+        ...USAGE,
+        used: null,
+        remaining: null,
+        limit: null,
+      }),
+    }));
+    renderApp();
+
+    expect(await screen.findByText(/not recorded any usage/i)).toBeTruthy();
+    expect(screen.queryByTestId('usage-used')).toBeNull();
+    expect(screen.getByText(/request per second/i)).toBeTruthy();
+    expect(screen.getByText(/last updated/i)).toBeTruthy();
+  });
+
+  /**
+   * Straight after an issue, the backend's short cache can still answer
+   * "no key" about a key the page is displaying. "You have no API key yet"
+   * would be false at that moment, so the page says what is actually
+   * happening instead.
+   */
+  it('does not claim "no key" while a freshly issued key is on screen', async () => {
+    stubRoutes({
+      [CONFIG_URL]: openConfig,
+      [ME_URL]: () => ({
+        json: async () => ({
+          authenticated: true,
+          user_id: '308994132968210433',
+          username: 'adam',
+        }),
+      }),
+      [KEY_URL]: () => ({
+        json: async () => ({
+          key_id: 'abc123',
+          name: 'discord-308994132968210433-key',
+          value: 'aBcDeF0123456789aBcDeF0123456789aBcDeF01',
+          created: true,
+        }),
+      }),
+      [USAGE_URL]: usageNoKey,
+    });
+    renderApp();
+
+    await screen.findByText(/no API key yet/i);
+    fireEvent.click(
+      await screen.findByRole('button', { name: /get my api key/i }),
+    );
+    await screen.findByTestId('api-key');
+
+    expect(await screen.findByText(/your key is new/i)).toBeTruthy();
+    expect(screen.queryByText(/no API key yet/i)).toBeNull();
+  });
+
+  /**
+   * Revealing an EXISTING key must not touch a usage section that is already
+   * showing numbers: a reveal changes no counter, the backend's cache would
+   * answer an identical body, and blanking rendered figures into a loading
+   * flicker makes the press look like it broke something. The refetch is for
+   * the no-key state alone — the one answer the issue falsifies.
+   */
+  it('does not refetch or blank rendered numbers when an existing key is revealed', async () => {
+    const fetchMock = stubRoutes({
+      [CONFIG_URL]: openConfig,
+      [ME_URL]: () => ({
+        json: async () => ({
+          authenticated: true,
+          user_id: '308994132968210433',
+          username: 'adam',
+        }),
+      }),
+      [KEY_URL]: () => ({
+        json: async () => ({
+          key_id: 'abc123',
+          name: 'discord-308994132968210433-key',
+          value: 'aBcDeF0123456789aBcDeF0123456789aBcDeF01',
+          created: false,
+        }),
+      }),
+      [USAGE_URL]: () => ({ json: async () => USAGE }),
+    });
+    renderApp();
+
+    await screen.findByTestId('usage-used');
+    const usageCalls = fetchMock.mock.calls.filter(
+      ([url]) => url === USAGE_URL,
+    ).length;
+
+    fireEvent.click(
+      await screen.findByRole('button', { name: /get my api key/i }),
+    );
+    await screen.findByTestId('api-key');
+
+    // The numbers never left the screen, and no second usage request fired.
+    expect(screen.getByTestId('usage-used').textContent).toBe('121');
+    expect(
+      fetchMock.mock.calls.filter(([url]) => url === USAGE_URL).length,
+    ).toBe(usageCalls);
+  });
+
+  /**
+   * The press and the mount-time usage fetch race, and the press can win.
+   *
+   * Watching the `keyOnScreen` transition alone was not enough: with the
+   * mount-time fetch still in flight the view is `'loading'` when the
+   * transition happens, so there was nothing to refetch out of — and the
+   * effect never ran again, because its dependencies had already settled. The
+   * in-flight request, issued before the key existed, then resolved `no_key`
+   * and the section sat on "your key is new" until the visitor found Refresh.
+   *
+   * The usage response is deferred through `json()` rather than through
+   * `fetch` itself, which is what puts the request in the state this covers:
+   * `fetch` has resolved, the page is still awaiting the body.
+   */
+  it('refetches usage when the key is issued before the first load answers', async () => {
+    let answerTheFirstLoad: () => void = () => undefined;
+    const firstLoad = new Promise<{ code: string; message: string }>(
+      (resolve) => {
+        answerTheFirstLoad = () =>
+          resolve({ code: 'no_key', message: 'you have no API key yet' });
+      },
+    );
+
+    let usageCalls = 0;
+    const fetchMock = stubRoutes({
+      [CONFIG_URL]: openConfig,
+      [ME_URL]: () => ({
+        json: async () => ({
+          authenticated: true,
+          user_id: '308994132968210433',
+          username: 'adam',
+        }),
+      }),
+      [KEY_URL]: () => ({
+        json: async () => ({
+          key_id: 'abc123',
+          name: 'discord-308994132968210433-key',
+          value: 'aBcDeF0123456789aBcDeF0123456789aBcDeF01',
+          created: true,
+        }),
+      }),
+      [USAGE_URL]: () => {
+        usageCalls += 1;
+        // The load that was in flight when the key was issued snapshotted a
+        // keyless account, so it answers `no_key`. Everything after it sees
+        // the key.
+        return usageCalls === 1
+          ? { ok: false, status: 404, json: () => firstLoad }
+          : { json: async () => USAGE };
+      },
+    });
+    renderApp();
+
+    // Press while the first usage load is still awaiting its body.
+    fireEvent.click(
+      await screen.findByRole('button', { name: /get my api key/i }),
+    );
+    await screen.findByTestId('api-key');
+    expect(usageCalls).toBe(1);
+
+    answerTheFirstLoad();
+
+    // No Refresh press anywhere in this test: the section recovers on its own.
+    expect((await screen.findByTestId('usage-used')).textContent).toBe('121');
+    expect(screen.queryByText(/your key is new/i)).toBeNull();
+    expect(
+      fetchMock.mock.calls.filter(([url]) => url === USAGE_URL).length,
+    ).toBe(2);
+  });
+
+  /**
+   * And it fires at most once, which is what lets the effect above watch the
+   * view state at all. The backend can legitimately keep answering `no_key`
+   * while its own short cache catches up, so a refetch that re-triggered on
+   * its own result would be a fetch loop against the control plane.
+   */
+  it('does not loop when the refetch is answered no_key again', async () => {
+    const fetchMock = stubRoutes({
+      [CONFIG_URL]: openConfig,
+      [ME_URL]: () => ({
+        json: async () => ({
+          authenticated: true,
+          user_id: '308994132968210433',
+          username: 'adam',
+        }),
+      }),
+      [KEY_URL]: () => ({
+        json: async () => ({
+          key_id: 'abc123',
+          name: 'discord-308994132968210433-key',
+          value: 'aBcDeF0123456789aBcDeF0123456789aBcDeF01',
+          created: true,
+        }),
+      }),
+      [USAGE_URL]: usageNoKey,
+    });
+    renderApp();
+
+    await screen.findByText(/no API key yet/i);
+    fireEvent.click(
+      await screen.findByRole('button', { name: /get my api key/i }),
+    );
+    await screen.findByTestId('api-key');
+    await screen.findByText(/your key is new/i);
+
+    // One load on mount, one refetch after the issue, and then it stops.
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.filter(([url]) => url === USAGE_URL).length,
+      ).toBe(2),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(
+      fetchMock.mock.calls.filter(([url]) => url === USAGE_URL).length,
+    ).toBe(2);
+  });
+
+  /**
+   * The rate limit is the gateway's, not this bundle's (task 0188).
+   *
+   * `pricingApiFreePlanRateLimit` is a per-env config value that
+   * `api-gateway-stack.ts` hands to `addUsagePlan` and `compute-stack.ts` hands
+   * to the backend. Raising it and deploying has to change what this panel
+   * says — with a literal here it would not, and the one section whose stated
+   * theme is rendering honestly would be quietly stating a limit nobody
+   * enforces any more.
+   */
+  it('states the rate limit the backend reports, not a built-in figure', async () => {
+    stubRoutes({
+      [CONFIG_URL]: () => ({
+        json: async () => ({ enabled: true, rate_limit_per_second: 5 }),
+      }),
+      [ME_URL]: () => ({
+        json: async () => ({
+          authenticated: true,
+          user_id: '308994132968210433',
+          username: 'adam',
+        }),
+      }),
+      [USAGE_URL]: () => ({ json: async () => USAGE }),
+    });
+    renderApp();
+
+    await screen.findByTestId('usage-used');
+    expect(screen.getByTestId('rate-limit').textContent).toBe('5');
+    // Plural, because the figure is no longer the one the sentence was
+    // written around.
+    expect(screen.getByText(/requests per second/i)).toBeTruthy();
+  });
+
+  /**
+   * A deployment that did not say what the limit is says nothing about it. A
+   * fallback figure would be the same silent staleness one layer down — and
+   * unlike the missing line, it would look authoritative.
+   */
+  it('omits the rate limit when the backend does not report one', async () => {
+    stubRoutes({
+      [CONFIG_URL]: () => ({ json: async () => ({ enabled: true }) }),
+      [ME_URL]: () => ({
+        json: async () => ({
+          authenticated: true,
+          user_id: '308994132968210433',
+          username: 'adam',
+        }),
+      }),
+      [USAGE_URL]: () => ({ json: async () => USAGE }),
+    });
+    renderApp();
+
+    // The rest of the panel is unaffected — only the one line it cannot
+    // honestly render goes missing.
+    await screen.findByTestId('usage-used');
+    expect(screen.queryByTestId('rate-limit')).toBeNull();
+    expect(screen.queryByText(/per second/i)).toBeNull();
+    expect(screen.getByText(/quota resets on the 1st/i)).toBeTruthy();
+  });
+
+  /**
+   * The backend writes a message for each failure it authors; the page shows
+   * it (task 0188).
+   *
+   * A throttle with nothing cached is the case the backend has a distinct 503
+   * for, and it is the one where a bare status code helps least: "try again in
+   * a moment" is actionable, `answered 503` is a number. Discarding the
+   * envelope also made the longer usage timeout pointless — the extra seconds
+   * exist to let this answer arrive.
+   */
+  it("shows the backend's reason for a failed usage read", async () => {
+    signedInWithUsage(() => ({
+      ok: false,
+      status: 503,
+      json: async () => ({
+        code: 'usage_unavailable',
+        message:
+          'AWS is rate-limiting the usage lookup right now; try again in a moment',
+      }),
+    }));
+    renderApp();
+
+    expect(
+      await screen.findByText(/rate-limiting the usage lookup/i),
+    ).toBeTruthy();
+    expect(screen.queryByText(/answered 503/i)).toBeNull();
+  });
+
+  /**
+   * With no envelope to read there is nothing to forward, and the URL and
+   * status are then the most specific true thing there is to say. Task 0183's
+   * gate answers exactly this: an EMPTY 404, byte-identical to an unrouted
+   * path — which must never be read as "you have no API key".
+   */
+  it('falls back to the status when a failure carries no message', async () => {
+    signedInWithUsage(() => ({
+      ok: false,
+      status: 404,
+      json: async () => {
+        throw new SyntaxError('Unexpected end of JSON input');
+      },
+    }));
+    renderApp();
+
+    expect(await screen.findByText(/answered 404/i)).toBeTruthy();
+    expect(screen.queryByText(/no API key yet/i)).toBeNull();
+  });
+
+  /** The refresh control re-asks; the backend's cache bounds what that costs. */
+  it('refreshes on the button', async () => {
+    const fetchMock = signedInWithUsage();
+    renderApp();
+    await screen.findByTestId('usage-used');
+    const before = fetchMock.mock.calls.filter(
+      ([url]) => url === USAGE_URL,
+    ).length;
+
+    fireEvent.click(screen.getByRole('button', { name: /refresh/i }));
+
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.filter(([url]) => url === USAGE_URL).length,
+      ).toBe(before + 1),
+    );
+    await screen.findByTestId('usage-used');
+  });
+
+  /** A backend failure is a stated failure, not a blank section. */
+  it('reports a failure and keeps the refresh control', async () => {
+    signedInWithUsage(() => ({ ok: false, status: 502 }));
+    renderApp();
+
+    expect(await screen.findByText(/could not load your usage/i)).toBeTruthy();
+    expect(screen.getByRole('button', { name: /refresh/i })).toBeTruthy();
+  });
+
+  /**
+   * An expired session reads the same here as in the key section: "sign out
+   * and sign in again", through the shared `describeFailure`. Without it the
+   * two sections describe one cause in two vocabularies — the key section in
+   * words, this one as a raw "answered 401" — and that reads as two bugs.
+   */
+  it('tells the visitor to sign in again when the session has expired', async () => {
+    signedInWithUsage(() => ({ ok: false, status: 401 }));
+    renderApp();
+
+    expect(await screen.findByText(/session has expired/i)).toBeTruthy();
+    expect(document.body.textContent).not.toContain('answered 401');
   });
 });
