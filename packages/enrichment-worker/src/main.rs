@@ -21,7 +21,10 @@
 #[tokio::main]
 async fn main() -> Result<(), lambda_runtime::Error> {
     use enrichment_worker::ch_enrich::{ChEnrichConfig, ChEnrichmentPass};
-    use enrichment_worker::live_window::{DEFAULT_LIVE_PARTITIONS, live_partition_window};
+    use enrichment_worker::frontier::{HistoricalSweepConfig, run_historical_sweep};
+    use enrichment_worker::live_window::{
+        DEFAULT_LIVE_PARTITIONS, live_partition_window, month_of,
+    };
     use enrichment_worker::repair::{CoarseSweepConfig, is_coarse_table};
     use lambda_runtime::{LambdaEvent, run, service_fn};
     use prices_clickhouse::env::{env_or, env_parse_or};
@@ -139,6 +142,23 @@ async fn main() -> Result<(), lambda_runtime::Error> {
     );
     let sweep = Arc::new(sweep_cfg);
 
+    /// Milliseconds of useful work left in this invocation: the Lambda deadline
+    /// minus a margin, so a sweep stops cleanly instead of being hard-killed by
+    /// the function timeout. A timeout is an invocation error, not a Rust `Err`,
+    /// so it would escape the best-effort handling around each sweep and fail
+    /// the whole invocation.
+    ///
+    /// Shared by both sweeps rather than inlined twice — two callers computing
+    /// the same deadline arithmetic slightly differently is how one of them ends
+    /// up without a margin.
+    fn remaining_budget_ms(deadline_ms: u64) -> u64 {
+        const MARGIN_MS: u64 = 60_000;
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as u64);
+        deadline_ms.saturating_sub(now_ms).saturating_sub(MARGIN_MS)
+    }
+
     // Task 0111 — bound the scheduled pass to the newest `ENRICH_LIVE_PARTITIONS`
     // monthly partitions. Unbounded, every batch re-scanned all 102 partitions
     // (736 M rows / 18.4 GiB) to serve a live window of 17 M, which is what
@@ -152,6 +172,27 @@ async fn main() -> Result<(), lambda_runtime::Error> {
         live_partitions,
         bounded = live_partitions > 0,
         "scheduled 1m pass partition bound"
+    );
+
+    // Task 0111 phase 2 — the frontier-driven historical drain. Ships INERT
+    // (opt-in via ENRICH_HISTORICAL_SWEEP), matching how the 0114 coarse sweep
+    // landed: the code deploys, the CDK env turns it on separately.
+    //
+    // Hard-gated on the live pass being bounded. With live_partitions = 0 the
+    // scheduled pass still covers the whole table, so a sweep would contend with
+    // it for the same partitions and duplicate its work for nothing.
+    let historical_enabled: bool =
+        env_parse_or("ENRICH_HISTORICAL_SWEEP", false) && live_partitions > 0;
+    // Monthly partitions worked per invocation. 1 by default: a month that still
+    // has a backlog stays `pending` and is resumed next run, so throughput comes
+    // from the hourly cadence rather than from doing many months at once.
+    let historical_max_months: u32 = env_parse_or("ENRICH_HISTORICAL_MAX_MONTHS", 1);
+    let historical_budget_secs: u64 = env_parse_or("ENRICH_HISTORICAL_TIME_BUDGET_SECS", 120);
+    tracing::info!(
+        enabled = historical_enabled,
+        max_months = historical_max_months,
+        time_budget_secs = historical_budget_secs,
+        "historical sweep config"
     );
 
     // Cold start: build the mTLS client (MTLS_SECRET_NAME + CH_DOMAIN) and probe
@@ -202,6 +243,7 @@ async fn main() -> Result<(), lambda_runtime::Error> {
                 partitions = live_partitions,
                 "1m pass window"
             );
+            let pass_window = pass_cfg.time_window;
             let pass = ChEnrichmentPass::with_client(pass_client, pass_cfg);
 
             let stats = pass.run().await?;
@@ -223,6 +265,53 @@ async fn main() -> Result<(), lambda_runtime::Error> {
                 tracing::warn!(error = %e, "cloudwatch metric publish failed (non-fatal)");
             }
 
+            // Task 0111 phase 2 — historical drain, AFTER the live pass and
+            // BEFORE the coarse sweep. Order is deliberate: with the live pass
+            // now bounded it costs ~1 min rather than the full 300 s, so both
+            // sweeps get real budget for the first time (that starvation is
+            // task 0218). The drain goes first because it is this task's
+            // deliverable and the coarse sweep is explicitly deferrable —
+            // its overflow rolls to the next run by design.
+            //
+            // Best-effort, exactly like the coarse sweep: a drain failure must
+            // never fail the invocation or regress the live pass.
+            if historical_enabled {
+                let budget_ms = remaining_budget_ms(lambda_deadline_ms)
+                    .min(historical_budget_secs.saturating_mul(1_000));
+                let hcfg = HistoricalSweepConfig {
+                    base: (*base_cfg).clone(),
+                    // Months at or above the live window belong to the live
+                    // pass; the sweep never touches them, so the two cannot
+                    // contend for a partition.
+                    live_start_month: pass_window
+                        .and_then(|(start, _)| month_of(start as i64))
+                        .unwrap_or(u32::MAX),
+                    max_months: historical_max_months,
+                    deadline: Some(Instant::now() + Duration::from_millis(budget_ms)),
+                };
+                match run_historical_sweep(&sweep_client, &hcfg).await {
+                    Ok(sum) => {
+                        tracing::info!(
+                            months_swept = sum.months.len(),
+                            months_pending = sum.months_pending,
+                            frontier_month = sum.frontier_month,
+                            rows_enriched = sum.total_enriched(),
+                            deadline_hit = sum.deadline_hit,
+                            "historical sweep complete"
+                        );
+                        let hm = enrichment_worker::metrics::historical_sweep_metrics(&sum);
+                        if let Err(e) =
+                            enrichment_worker::metrics::publish(&cw, &env_name, &hm).await
+                        {
+                            tracing::warn!(error = %e, "historical sweep metric publish failed (non-fatal)");
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "historical sweep failed (non-fatal — live pass unaffected)");
+                    }
+                }
+            }
+
             // Recurring coarse-table sweep (task 0114), AFTER the critical-path 1m
             // pass and strictly best-effort: any failure is logged and swallowed so
             // a coarse hiccup can never fail the invocation or regress 1m
@@ -233,14 +322,9 @@ async fn main() -> Result<(), lambda_runtime::Error> {
                 // consumed most of the budget, `remaining` is small and the sweep
                 // does little/nothing this run, deferring to the next — the point
                 // is that it never runs into the hard timeout.
-                const MARGIN_MS: u64 = 60_000;
-                let now_ms = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .map_or(0, |d| d.as_millis() as u64);
-                let remaining_ms = lambda_deadline_ms
-                    .saturating_sub(now_ms)
-                    .saturating_sub(MARGIN_MS);
-                let budget_ms = sweep_budget_secs.saturating_mul(1_000).min(remaining_ms);
+                let budget_ms = sweep_budget_secs
+                    .saturating_mul(1_000)
+                    .min(remaining_budget_ms(lambda_deadline_ms));
                 let sweep_deadline = Instant::now() + Duration::from_millis(budget_ms);
 
                 match enrichment_worker::repair::run_coarse_sweep(

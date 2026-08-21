@@ -53,6 +53,40 @@ pub fn live_partition_window(now_unix: i64, partitions: u32) -> Option<(u32, u32
     Some((start, end))
 }
 
+/// `[start, end)` unix-second bounds of the single monthly partition `yyyymm`
+/// (e.g. `202607`) — what the historical sweep hands to
+/// [`crate::ch_enrich::ChEnrichConfig::time_window`] for one month.
+pub fn month_bounds(yyyymm: u32) -> Option<(u32, u32)> {
+    let year = i32::try_from(yyyymm / 100).ok()?;
+    let month = yyyymm % 100;
+    if !(1..=12).contains(&month) {
+        return None;
+    }
+    let idx = year as i64 * 12 + (month as i64 - 1);
+    Some((month_start_unix(idx)?, month_start_unix(idx + 1)?))
+}
+
+/// The `YYYYMM` partition id containing `unix` — the same value
+/// `toYYYYMM(timestamp)` produces server-side, so Rust and ClickHouse agree on
+/// which partition a bound falls in.
+pub fn month_of(unix: i64) -> Option<u32> {
+    let dt = DateTime::from_timestamp(unix, 0)?;
+    Some(dt.year() as u32 * 100 + dt.month())
+}
+
+/// Step a `YYYYMM` by `n` months, forward or back.
+pub fn add_months(yyyymm: u32, n: i64) -> Option<u32> {
+    let year = i64::from(yyyymm / 100);
+    let month = i64::from(yyyymm % 100);
+    if !(1..=12).contains(&month) {
+        return None;
+    }
+    let idx = year * 12 + (month - 1) + n;
+    let y = u32::try_from(idx.div_euclid(12)).ok()?;
+    let m = u32::try_from(idx.rem_euclid(12)).ok()? + 1;
+    Some(y * 100 + m)
+}
+
 /// First instant (UTC) of the month at absolute index `idx` (`year * 12 +
 /// month0`), as a unix second. `None` outside the representable range — which
 /// keeps `live_partition_window` total rather than panicking on a nonsense
@@ -140,6 +174,40 @@ mod tests {
         let (start, end) = live_partition_window(dec, 2).unwrap();
         assert_eq!(start, ts(2026, 11));
         assert_eq!(end, ts(2027, 1));
+    }
+
+    #[test]
+    fn month_bounds_match_the_partition_the_live_window_starts_in() {
+        let (start, _) = live_partition_window(NOW, DEFAULT_LIVE_PARTITIONS).unwrap();
+        let m = month_of(start as i64).unwrap();
+        assert_eq!(m, 202607);
+        assert_eq!(month_bounds(m).unwrap(), (ts(2026, 7), ts(2026, 8)));
+    }
+
+    #[test]
+    fn month_bounds_are_exactly_one_partition_wide() {
+        for m in [201501u32, 202102, 202212, 202401, 202608] {
+            let (a, b) = month_bounds(m).unwrap();
+            assert_eq!(month_of(a as i64).unwrap(), m);
+            // One second before the exclusive end is still the same month.
+            assert_eq!(month_of(b as i64 - 1).unwrap(), m);
+            // The end itself is the next month.
+            assert_eq!(month_of(b as i64).unwrap(), add_months(m, 1).unwrap());
+        }
+    }
+
+    #[test]
+    fn add_months_walks_across_year_boundaries_both_ways() {
+        assert_eq!(add_months(202601, -1), Some(202512));
+        assert_eq!(add_months(202512, 1), Some(202601));
+        assert_eq!(add_months(202607, -18), Some(202501));
+    }
+
+    #[test]
+    fn month_helpers_reject_a_nonsense_partition_id() {
+        assert_eq!(month_bounds(202613), None);
+        assert_eq!(month_bounds(202600), None);
+        assert_eq!(add_months(202600, 1), None);
     }
 
     #[test]

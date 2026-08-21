@@ -467,6 +467,38 @@ export class EventBridgeStack extends cdk.Stack {
         // error the best-effort handler cannot catch, so without this a long
         // sweep would fail the invocation and trip the enrichment alarm).
         COARSE_SWEEP_TIME_BUDGET_SECS: '120',
+        // --- Task 0111: partition-bounded passes -------------------------
+        // Monthly partitions the scheduled 1m pass scans, newest-first
+        // (current + previous). Unbounded, every statement re-scanned all 102
+        // partitions — 736M rows / 18.4 GiB — to serve a live window of 17M,
+        // which walked Duration to the 300s timeout and fired
+        // prices-production-enrichment-duration-near-timeout at 300,338 ms.
+        // Measured 2026-08-21: an oracle batch cost 35.5s and a peg-pivot batch
+        // 82.3s, so an invocation budgeting 40 batches achieved 5.4.
+        // '0' restores the pre-0111 unbounded pass without a code change.
+        // Widen this only if ingest starts landing rows older than the previous
+        // month — NOT to cover the historical drain, which is the sweep below.
+        ENRICH_LIVE_PARTITIONS: '2',
+        // Frontier-driven historical drain (task 0111 phase 2). Walks the
+        // partitions BELOW the live window oldest-first, one month per run,
+        // recording progress in prices.enrichment_frontier — which must exist
+        // (created by hand, like every other table here; the worker has no DDL
+        // grant). Self-disables unless ENRICH_LIVE_PARTITIONS > 0, since an
+        // unbounded live pass already covers the whole table and the two would
+        // contend for the same partitions.
+        //
+        // Best-effort and time-budgeted, like the coarse sweep: it can never
+        // fail the invocation or regress the live pass.
+        ENRICH_HISTORICAL_SWEEP: 'true',
+        // One month per invocation. A month that still has backlog stays
+        // `pending` and resumes next run, so throughput comes from the hourly
+        // cadence rather than from doing many months at once — which keeps any
+        // single invocation's cost bounded and predictable.
+        ENRICH_HISTORICAL_MAX_MONTHS: '1',
+        // Wall-clock budget (seconds). Runs after the live pass and before the
+        // coarse sweep; with the live pass now ~1 min instead of the full 300s,
+        // both sweeps get real budget for the first time (task 0218).
+        ENRICH_HISTORICAL_TIME_BUDGET_SECS: '120',
       },
       alarmDescription:
         'Enrichment Lambda invocation errors (close_usd / volume_quote_usd enrichment pass failed).',
