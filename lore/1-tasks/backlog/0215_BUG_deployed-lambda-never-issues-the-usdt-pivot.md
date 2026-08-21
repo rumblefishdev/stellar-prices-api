@@ -60,6 +60,24 @@ history:
       `max_execution_time = 0` today and Caddy's 30 s was accidentally the only
       bound. Sequence the timeout FIRST so 0111 has a clean baseline to measure
       against.
+  - date: 2026-08-21
+    status: backlog
+    who: okarcz
+    note: >
+      BE REPLIED AND CONFIRMED — they are deploying the bump. They verified the
+      30 s from Caddy's admin API (the in-memory value the process enforces),
+      not from the file, and they hold an independent alibi for the 2026-07-26
+      onset: no restart since 06-29, last deploy 07-06, config unchanged since
+      07-02. Two things change on our side. (1) The mechanism is TIME TO FIRST
+      BYTE, not a property of INSERT ... SELECT — they were bitten on 07-02 by a
+      plain heavy SELECT — which widens the affected class to every statement
+      that computes before it emits, and puts the 26.4 s oracle insert next in
+      line. (2) Our "Caddy was the only bound on a runaway" rationale for half 2
+      is RETRACTED as stated; keep max_execution_time for BE's better reason —
+      a typed exception with an error code instead of an empty body. Also
+      recorded: their single-file bind mount pins an inode, so an edit plus a
+      reload would have been a phantom deploy. Verification protocol agreed —
+      they ping post-deploy, we confirm from CloudWatch and query_log.
 ---
 
 # Every invocation fails on the XLM pivot, so the USDT pivot is never reached
@@ -247,12 +265,76 @@ than the CH-side timeout so Caddy releases the upstream") is correct for a
 streaming `SELECT`, where headers arrive in milliseconds, and simply does not
 apply to `INSERT … SELECT`.
 
+## ✅ BE CONFIRMED IT 2026-08-21 — and found the trap that would have voided the fix
+
+They checked the box, agreed the change, and are shipping it. Three things in
+their reply change or harden this task; a fourth is worth stealing outright.
+
+### 1. The 30 s is enforced — verified from the running process, not the file
+
+They read it out of **Caddy's admin API** — the in-memory value the process is
+actually executing: `"response_header_timeout": 30000000000` (30 s in ns). That
+is the strongest confirmation available, and it matches our 18/18 measurement at
+exactly 30.0 s. We were measuring a real limit, not a config artifact.
+
+### 2. The 2026-07-26 onset is ours, and now has an independent alibi
+
+Caddy has **not restarted since 2026-06-29**, last deploy **07-06**, config
+unchanged since **07-02**. Nothing happened on their side on 07-26. The
+growth-crossing explanation recorded above is therefore no longer our inference
+alone — it is the only surviving one.
+
+### 3. ⚠️ CORRECTION — the mechanism is TIME TO FIRST BYTE, not `INSERT … SELECT`
+
+This task framed the limit as something `INSERT … SELECT` runs into. That is too
+narrow. **The same limit bit BE on 2026-07-02 on a plain heavy `SELECT`** — a
+~6 min scan over ~9.5 bn rows, 504 to the client while the query kept running
+server-side, identical signature. Conversely a *streaming* `SELECT` returns
+headers in milliseconds and may then grind for two hours untouched.
+
+So the affected class is **every statement that computes before it emits its
+first byte** — our pivots and peg INSERTs, `count_candidates`, any aggregating
+`SELECT`, and every operator-CLI statement of that shape. The discriminator is
+buffering, not the verb.
+
+⚠️ **The oracle insert was next in line.** It averages **26.4 s** against a 30 s
+ceiling, on a table growing ~10.9 M rows per 13 days. Had this gone unfound, a
+second caller would have crossed within weeks — and would have looked like a new,
+unrelated defect rather than the same one.
+
+### 4. 🔴 THE FINDING TO STEAL — a single-file bind mount pins an inode
+
+**The bump alone would not have been enough.** Their Caddyfile is bind-mounted as
+a **single file**, and a single-file mount pins an *inode*. Their deploy writes
+via rsync (temp + rename), which replaces the inode. So since 2026-07-06 the
+container has been reading a file that no longer exists at that path — host inode
+`16777224`, container inode `16777223`, dated 07-02. Both copies happen to say
+the same thing, so nothing broke.
+
+But **editing the file and running `caddy reload` would have been a phantom
+deploy**: repo green, box green, limit still 30 s, and this outage continuing
+behind a closed ticket. They are shipping the change with a one-time
+`--force-recreate` plus a deploy fix so the inode stops drifting, and they verify
+from the admin API — *"the file already lied once"*.
+
+➡️ **Generalise it.** Same failure family as [[0141]] (a stale lambda artifact
+where every signal read success) and `cdk synth` running `dist/` instead of
+`src/`: **verify the state the running process holds, never the file you edited.**
+Three independent instances now — a standing rule, not a war story.
+
+### 5. Their deploy touches the shared proxy
+
+`--force-recreate` drops every mTLS connection for a few seconds. Harmless for the
+hourly Lambda; **do not have a long operator CLI statement in flight during their
+window** (sdex-backfill, coarse-repair, the 0182 runner). Ask for the window.
+
 ### ⚠️ Scope is wider than this task
 
-The ceiling applies to **every** long statement through that proxy — our operator
-CLIs (sdex-backfill, coarse-repair, the 0182 runner, all on the same mTLS client)
-and **BE's own queries**, since it is their shared host. Any of them taking over
-30 s to first byte dies the same silent way.
+The ceiling applies to **every** statement through that proxy that buffers before
+it emits — our operator CLIs (sdex-backfill, coarse-repair, the 0182 runner, all
+on the same mTLS client) and **BE's own queries**, since it is their shared host.
+Any of them taking over 30 s to first byte dies the same silent way; BE's
+2026-07-02 `SELECT` is the confirmed second instance (see BE's reply, §3 above).
 
 ### ⛔ It does NOT collapse into [[0111]] — earlier guess retracted
 
@@ -291,14 +373,27 @@ host, shared config: **request it, never edit it ourselves.**
 
 ### Half 2 — ours, and it needs nothing from BE
 
-Caddy's 30 s was accidentally the only bound on a runaway query:
-`max_execution_time` is **0** (unlimited, unchanged). Removing Caddy's ceiling
-without replacing it leaves a two-hour hole.
+⛔ **The original rationale here is RETRACTED — BE refuted it, 2026-08-21.** This
+section used to argue: *"Caddy's 30 s was accidentally the only bound on a runaway
+query, so removing it leaves a two-hour hole."* BE's counter is correct and is the
+cleanest statement of the asymmetry the Caddyfile comment only hinted at:
 
-Set `max_execution_time` **on our client** instead. ClickHouse then enforces it
-and **throws a real exception with an error code** the worker logs, rather than
-an empty body indistinguishable from a network blip. `timeout_overflow_mode` is
-already `throw`.
+> A runaway query **streams**, so it sailed past the 30 s already. What died was
+> precisely the statement doing the work and buffering its result. The limit was
+> never a safeguard — it selected the exact opposite of what it looks like it
+> selects.
+
+⚠️ **One amendment, which makes half 2 more necessary rather than less.** BE's
+point holds for streaming `SELECT`s. A runaway `INSERT … SELECT`, or a runaway
+aggregation, buffers — and *that* is our entire workload. So for the enrichment
+path the 30 s genuinely was the only bound, and after the bump nothing bounds it:
+`max_execution_time` is **0** (unlimited, unchanged).
+
+**Keep half 2, for BE's better reason.** Set `max_execution_time` **on our
+client**. ClickHouse then enforces it and **throws a real exception with an error
+code** the worker logs, rather than an empty body indistinguishable from a network
+blip. `timeout_overflow_mode` is already `throw`. The value is in the *failure
+mode* — hazard 3 below — not in restoring a ceiling.
 
 ⚠️ **It must be per-caller, not a constant.** ~120 s suits the scheduled Lambda
 (2.6x headroom over today's 45.6 s worst, inside the 300 s Lambda budget so a
@@ -317,6 +412,41 @@ and reintroduces this failure class from the other direction.
   Confirm against `system.settings_profile_elements` before telling BE "there is
   no bound".
 
+## Verification after BE's deploy — agreed protocol, and what to expect
+
+BE ping the thread once deployed; we confirm from our side. That two-sided check
+is the hardest signal available, and it is deliberately **not** a re-read of the
+config file.
+
+Confirm in this order:
+
+1. `Clickhouse(BadResponse(""))` stops in `/aws/lambda/prices-production-enrichment`.
+2. `CAST(111 AS UInt32) AS ref_asset_id` appears in `system.query_log` on the
+   hourly schedule — the USDT pivot issued for the first time.
+3. `peg_insert : pivot_insert` moves **1:1 → 1:2**.
+4. USDT pivot `written_rows > 0` on `price_ohlcv_1m`, recorded before/after.
+
+### ⚠️ Predict this now, so it is not misread as a new defect
+
+With the 30 s gone, the binding constraint becomes the **Lambda's 300 s**. A
+peg-pivot batch is ~14 s peg + ~46 s XLM pivot + the (cheap, sort-key-pruned)
+USDT pivot + ~8 s `count_candidates` ≈ **70 s**, after the oracle tier has taken
+its share. So expect roughly **3-4 batches of the configured 20** per invocation,
+then `Task timed out` — and [[0026]]'s `EnrichmentPassDurationMs` alarm firing
+where it has been silent.
+
+That is progress, not a fix: a **visible** failure signal replacing an invisible
+one, ~3-4x the drain rate, and USDT unblocked. It is **not** the pass completing.
+[[0111]]'s "20 batches → ~4.8 M rows/day → ~116 days" was always conditional on
+bounding the scan; **the Caddy fix alone does not buy it.** Sequence unchanged:
+their fix → clean baseline → 0111.
+
+⚠️ **Tell BE about the load change.** Today the pass dies after one batch, so it
+scans ~72 times/day. Completing passes will scan several times that on a disk we
+share and are 3.3% of — the same disk BE filled on 2026-08-13, costing an 11.5 h
+ingest stall. It is a courtesy heads-up, and it is a second argument for taking
+0111 immediately after.
+
 ## Acceptance Criteria
 
 - [x] The source is shown correct — `pivot_ids() == [xlm, usdt]` and the peg
@@ -330,6 +460,12 @@ and reintroduces this failure class from the other direction.
       USDT pivot, recorded before/after.
 - [ ] `max_execution_time` is set per-caller on our client, and an exceeded bound
       produces a logged ClickHouse exception — verified by inducing, not inferred.
+- [ ] BE confirm the bump is live **from Caddy's admin API**, not from the
+      Caddyfile — their single-file bind mount desynced the two once already, and
+      a file-only check cannot tell a real deploy from a phantom one.
+- [ ] We confirm the errors stopped from CloudWatch and `system.query_log`, and
+      report it back in the thread. Two-sided, because neither side alone can see
+      both halves.
 - [ ] `CleanupRule` verified `DISABLED` before and after the deploy.
 - [ ] A missing reference asset fails loudly instead of silently narrowing
       `pivot_ids()`.
