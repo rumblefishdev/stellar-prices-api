@@ -634,28 +634,79 @@ this lands.
 
 ## Acceptance Criteria
 
-- [ ] A full `one_shot` drain over the current backlog completes inside the
-      Lambda budget, measured — not inferred from a drained-state query.
-- [ ] Per-batch rows-read is bounded and does not scale with total table size;
-      verified in `system.query_log`, not by wall-clock on a quiet cluster.
-- [ ] Re-measured **while the pre-Soroban tail backfill is actively writing** —
-      a quiet cluster is how this was missed. The drained-state numbers (0.3 s)
-      are 80× faster than the same query under load.
-- [ ] The 8.4M rows currently sitting un-enriched are drained, and the count is
-      recorded before/after.
-- [ ] 0026's `EnrichmentPassDurationMs` stays well clear of 300 s for a week
-      spanning active backfill.
+> **Restated 2026-08-21.** ACs 1 and 4 were written when the backlog was
+> believed to be **8.4M rows**. It is **656.69M**, of which **5.34M are
+> permanently unpriceable**. As originally worded neither could ever be
+> satisfied, so the task could never close — which is part of why it kept
+> sliding. The originals are preserved below each replacement.
 
-**Baseline to judge the fix against** (drained state, measured 2026-07-21 via the
-alarms deployed in [[0112]]): enrichment runs at **~4,500 ms against a 240,000 ms
-warning threshold — about 2% of the timeout budget**, 1 invocation/hour on
-schedule. That is a *quiet-cluster* number: the same work cost ~35 s/batch under
-backfill load. A fix is only demonstrated when the loaded figure stays low, not
-when the quiet one does.
+- [ ] **A bounded pass runs to completion inside the Lambda budget**, measured
+      in `system.query_log` — not inferred from a drained-state query.
 
-`prices-production-enrichment-duration-near-timeout` now fires at 80% of the
-timeout, so a recurrence surfaces as days of warning rather than a silent
-outage — but it does not prevent one.
+      The signal is exact and cannot be faked by a partial pass:
+      `count_remaining_at_volume_zero` (`SELECT count() AS total, countIf(...)`)
+      is issued **once per pass, at the very end**. On 2026-08-21 it appears
+      **zero times in 2.5 hours** — no pass completes at all, which is also why
+      the spec §5 metrics are not being published. Target: ~3/hour.
+
+      <sub>*Was: "a full `one_shot` drain over the current backlog completes
+      inside the Lambda budget." 556.78M XLM candidates will not drain in 300 s
+      under any scan strategy. The chosen design drains over months by
+      construction, so this demanded something the design never promised.*</sub>
+
+- [ ] **Per-batch rows-read is bounded and does not scale with total table
+      size**, verified in `system.query_log`, not by wall-clock on a quiet
+      cluster. Baseline to beat (2026-08-21): oracle **26.21 s / 735.78M**, XLM
+      pivot **44.93 s / 685.01M**, peg **14.50 s / 420.93M**,
+      `count_candidates` **9.27 s / 735.15M**. Target ≈ **17M** on every tier.
+
+- [ ] **Re-measured while the cluster is actively writing** — a quiet cluster is
+      how this was missed. The drained-state numbers (0.3 s) are 80× faster than
+      the same query under load. A measurement taken against an idle cluster
+      does not satisfy this AC no matter how good it looks.
+
+- [ ] **The drain demonstrably walks, and its terminal state is declared.**
+      `prices.enrichment_frontier` advances oldest-first across invocations, and
+      months predating the XLM/USDC reference market reach `exhausted`.
+
+      🔴 **A finished drain leaves a NON-ZERO residual of ~5.34M rows.** They
+      predate the reference market (its first candle is 2021-02) and are
+      permanently unpriceable by this design. That figure is recorded here so a
+      *finished* drain is not misread as an unfinished one — the specific
+      mistake this AC now exists to prevent.
+
+      <sub>*Was: "the 8.4M rows currently sitting un-enriched are drained, and
+      the count is recorded before/after." Wrong figure by ~78×, and it implied
+      a zero residual that the design cannot reach.*</sub>
+
+- [ ] **0026's `EnrichmentPassDurationMs` stays well clear of 300 s for a week**
+      spanning active backfill, and
+      `prices-production-enrichment-duration-near-timeout` returns to OK and
+      stays there. That alarm firing at **300,000 / 300,338 ms** on 2026-08-21
+      is what re-opened this task.
+
+- [ ] **The live window is not starved by the historical sweep.**
+      `EnrichmentRowsRemainingRecent` stays at its floor. The sweep is
+      best-effort and time-budgeted specifically so it can never regress the
+      live pass; this is the check that the budgeting works.
+
+      ⚠️ Note `EnrichmentRowsRemainingAtVolumeZero` changes meaning under a
+      bounded pass — it becomes window-scoped and will drop from ~656M to the
+      live window's count. No alarm consumes it (the stall alarm watches
+      `Recent`), but on a dashboard it will look like a dramatic fix that has
+      not happened.
+
+**Baseline to judge the fix against.** Two are on record and they disagree,
+which is the point:
+
+| | measured | per batch | note |
+|---|---|---|---|
+| drained state | 2026-07-21 | ~4,500 ms/pass | **quiet cluster — do not judge against this** |
+| loaded, pre-0215-fix | 2026-07-21 | ~35 s | pass aborted at 30 s |
+| loaded, post-0215-fix | 2026-08-21 | **35.5 s oracle / 82.3 s peg-pivot** | current; pass runs to the 300 s wall |
+
+A fix is demonstrated when the **loaded** figure stays low, never when the quiet
+one does.
 
 ## Out of scope
 
