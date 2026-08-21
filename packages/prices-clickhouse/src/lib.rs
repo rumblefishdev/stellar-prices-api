@@ -438,6 +438,59 @@ mod tests {
         }
     }
 
+    /// Task 0135 extends the 0145 guard to the current-prices MV: every
+    /// close_usd aggregate in current.sql must be the If-guarded form. The
+    /// pre-roll matcher above is alias-specific (`t.timestamp`), so this one
+    /// matches the unaliased spelling current.sql uses. A revert of the 0135
+    /// contract (argMaxIf → argMax) is otherwise invisible to CI — the
+    /// behavioural tests in current_mv_it.rs need a local ClickHouse and are
+    /// `#[ignore]`d.
+    #[test]
+    fn current_sql_uses_no_unguarded_argmax_on_close_usd() {
+        let stmts = split_statements(CURRENT_SQL);
+        assert!(!stmts.is_empty(), "current.sql yields no statements");
+
+        let mut guarded = 0usize;
+        for stmt in &stmts {
+            if let Some(offset) = stmt.find("argMax(close_usd") {
+                let head: String = stmt[offset..].chars().take(90).collect();
+                panic!(
+                    "current.sql: unguarded argMax on close_usd — use \
+                     argMaxIf(close_usd, timestamp, close_usd > 0) so the tip \
+                     carries its latest *priced* close instead of the \
+                     un-enriched sentinel 0 (task 0135); got: {head}"
+                );
+            }
+            // Prefix match, not the full expression: per_source's guard also
+            // carries the carry-bound predicate, so pinning the exact text
+            // would silently stop counting it (and the count below would
+            // "pass" one short).
+            guarded += stmt.matches("argMaxIf(close_usd, timestamp,").count();
+            guarded += stmt.matches("argMinIf(close_usd, timestamp,").count();
+        }
+
+        // Non-vacuity: 3 argMaxIf (xlm_usd scalar, per_source, unfiltered) +
+        // 2 argMinIf (ref_7d, open_24h). A drop means a projection lost its
+        // guard or the expression was reworded and this test has gone blind.
+        assert_eq!(
+            guarded, 5,
+            "current.sql guarded close_usd aggregate count changed — verify \
+             every site still skips un-enriched rows, then update this count"
+        );
+
+        // Task 0135, review finding #5: the carry bound must exist at EXACTLY
+        // one site. It was briefly duplicated across per_source and unfiltered,
+        // and a bound tuned in one place but not the other reproduces the very
+        // contradiction the review caught — a zero headline price beside a
+        // populated `sources`. The guard above cannot see that; this can.
+        let bounds = CURRENT_SQL.matches("INTERVAL 2 HOUR").count();
+        assert_eq!(
+            bounds, 1,
+            "the carry bound must appear exactly once (per_source). Found \
+             {bounds}: a second site means the two can drift apart"
+        );
+    }
+
     /// The 121 sites are the whole point: 6 + 14 + 6 + 95, matching scope
     /// correction C1 in task 0144. A count regression here means a pre-roll
     /// projection was added without the guard, or one was silently dropped.

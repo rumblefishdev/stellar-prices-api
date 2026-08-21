@@ -189,16 +189,33 @@
 -- non-nullable, so "unavailable" and a real value share a type and can only be
 -- told apart by value. That is a weaker contract than the value-or-absent one
 -- above, and consumers have to handle it explicitly:
---   price_xlm        Decimal(38,14). 0 = unavailable (no XLM market, or an
---                    un-enriched tip) — indistinguishable from a true 0.
+--   price_usd        Decimal(38,14). Since task 0135 this is the latest
+--                    PRICED close in the 24h window, NOT age-bounded: for an
+--                    asset that stopped trading it is simply its last priced
+--                    close, and updated_at (refresh time) is NOT a price-age
+--                    signal. No column carries that age yet. 0 = no priced
+--                    candle in the window (an un-enriched tip alone no longer
+--                    produces 0).
+--   price_xlm        Decimal(38,14). 0 = unavailable (no XLM market, or
+--                    price_usd on its 0 sentinel per the 0135 rule above) —
+--                    indistinguishable from a true 0. An un-enriched tip by
+--                    itself no longer zeroes it.
 --   change_24h_pct / change_7d_pct
 --                    Decimal(10,4) percent, clamped to ±999999.9999 (an
 --                    overflow would poison the whole MV refresh). 0 =
 --                    unavailable AND 0 = a genuinely flat 24h/7d; the two are
 --                    NOT distinguishable. Treat 0 as "no signal".
+--                    change_7d_pct's baseline is the oldest priced 1h close in
+--                    the [7d, 5d] band — no baseline there means the sentinel,
+--                    never a shorter-span move mislabelled as 7d.
 --   volume_24h_usd / market_cap_usd / vwap_24h
 --                    Decimal(38,14). 0 = unavailable. market_cap_usd is 0
---                    whenever circulating supply is absent (best-effort join).
+--                    whenever circulating supply is absent (best-effort join);
+--                    it multiplies price_usd and inherits its (unbounded) age.
+--                    vwap_24h is different: per-source closes ARE age-bounded
+--                    (2h), because a venue in `sources` asserts "quoting now"
+--                    — so an asset can legitimately show a price_usd with an
+--                    empty sources/zero vwap when no venue is currently live.
 --   sources          String holding a JSON object — NOT a JSON-typed column.
 --                    THREE states, and '' is the trap:
 --                      ''   — the MV has never rewritten this row (table
@@ -498,7 +515,11 @@ WHERE sac_address != '';
 -- prices.current_price_usd — live spot (tip) per asset, natural-identity keyed.
 -- Same contract as price_usd_series (natural id, NULL-never-error via the
 -- consumer's LEFT JOIN) but for "now": one row per asset with the latest USD
--- price + `updated_at` for the consumer's own staleness policy. Reads
+-- price + `updated_at`. ⚠️ **`updated_at` is the MV's refresh time, not the
+-- price's age** — since task 0135 `price_usd` is the latest *priced* close and
+-- is not age-bounded, so a staleness policy keyed on `updated_at` cannot see
+-- how old it is. See the sentinel table above; no column carries the price's
+-- own timestamp yet. Reads
 -- current_prices, which is written by the Current Price Updater (task 0039) —
 -- this view is the read surface; it is empty until that writer runs.
 --

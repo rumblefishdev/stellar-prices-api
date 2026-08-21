@@ -4,7 +4,7 @@ title: "The USDT pivot has NEVER priced a _1m row — the leg went dark on 2026-
 type: BUG
 status: backlog
 related_adr: []
-related_tasks: ["0182", "0172", "0165", "0145", "0111", "0173", "0204", "0212"]
+related_tasks: ["0182", "0172", "0165", "0145", "0111", "0173", "0204", "0212", "0215"]
 tags: ["priority-high", "effort-medium", "clickhouse", "enrichment", "data-correctness", "milestone-M2"]
 milestone: 2
 links:
@@ -44,6 +44,33 @@ history:
       that cannot reach recent data. 0172 removed the peg on 08-13 and its
       replacement never functioned. 0111 is the blocking dependency. Spawned
       0212 for the 1.56M peg-valued _1m rows still on prod.
+  - date: 2026-08-21
+    status: backlog
+    who: okarcz
+    note: >
+      ⚠️ THE 2026-08-20 ROOT CAUSE ABOVE IS FALSIFIED — do not act on it. The
+      USDT pivot is not behind a backlog; **the deployed Lambda never issues the
+      statement at all**. `pivot_sql` bakes its reference id into the SQL text,
+      so `system.query_log` reads the deployed binary's behaviour directly:
+      `CAST(111 AS UInt32) AS ref_asset_id` appears ONLY between 2026-08-18
+      11:40:08 and 14:30:04 — the window of 0182's hand-run from execution host
+      C, using a locally built binary — while `CAST(4 AS UInt32)` (XLM) runs
+      continuously to 2026-08-21 08:27. That also explains the 1:1
+      peg:pivot run ratio in the log, where the source issues two pivots per
+      step. Since `pivot_ids()` is `[xlm, usdt]` in one loop with no break
+      between them, XLM running while USDT does not means `refs.usdt` is `None`
+      in the deployed Lambda — a resolution or stale-asset defect, NOT a
+      performance one. Prod `prices.assets` does hold the canonical pair
+      (`asset_id = 111`, issuer `GCQTGZQQ…TG6V`), so the row is there to be
+      found. Split to **0215**, which is far cheaper than 0111 and no longer
+      blocked by it. Also corrected: the 657,234,896 figure quoted above is the
+      WHOLE-TABLE candidate count (656.69M re-measured 2026-08-21), not a USDT
+      one — USDT is not in the top 15 unpriced quote legs, and the real backlog
+      is XLM at 556.78M. And `pivot_written = 0` is false as stated: the XLM
+      pivot writes ~700K rows/day (exactly `batch_size` on every batch, so it
+      is LIMIT-bound and has never exhausted its candidates). The zero holds
+      for USDT ALONE, which is 0215 and not a throughput problem at all.
+      See 0111's 2026-08-21 measurement.
 ---
 
 # USDT-quoted candles stay unpriced far longer than the sweep interval
