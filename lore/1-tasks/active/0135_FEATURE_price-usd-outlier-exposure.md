@@ -204,6 +204,45 @@ history:
       gone. Remaining before archive: prod apply per the 0072 runbook,
       `zero_but_vwap_ok = 0`, XLM publishing a real price (may be blocked by
       [[0215]], not by this change), and a green [[0120]] re-run.
+  - date: 2026-08-21
+    status: active
+    who: stkrolikiewicz
+    note: >
+      **Applied to prod and ROLLED BACK the same session.** The two things
+      this task set out to fix worked; the carry bound did not, and the
+      counterfactual is what caught it.
+      Measured on ch-prod-01 immediately after the apply, then the OLD
+      definition's SELECT re-run over the same data as a control (the
+      step-0 rollback artifact wrapped in the same aggregate — read-only):
+      `zero_but_vwap_ok` 36 → **0** and `zero_price_usd` 1,129 → **376**
+      (753 assets regained a real price), both as intended — but
+      `empty_sources` 1,096 → **3,380**, so **2,284 assets (52% of the
+      table) lost their `sources` object and had `vwap_24h` zeroed**.
+      Cause: the 2h bound was calibrated against the enrichment SCHEDULE
+      (`rate(1 hour)` × 2), which is the methodologically right basis and
+      still wrong in practice — with enrichment down for two days
+      ([[0215]]) almost no venue has a priced close younger than 2h, so a
+      rule meant as a rare exception became the common case.
+      The trade is negative on its own terms, and by okarcz's own argument:
+      "a zero is worse than an old-but-true value, because the consumer
+      cannot separate worthless from unknown" applies to `vwap_24h` exactly
+      as it applies to `price_usd`. We traded 2,284 usable-if-stale VWAPs
+      for zeros to gain 753 prices.
+      Rolled back via the step-0 artifact and verified: old definition on
+      prod (3 `argMax`, 0 `argMaxIf`), refresh clean at 267 ms, and
+      `empty_sources` back to 1,156.
+      **Design lesson for the next attempt:** the defect the bound protects
+      against — a stale venue outvoting a live one in the unweighted §5.5
+      median — exists ONLY when a live venue is present to be outvoted. If
+      every venue is stale there is nothing to defend and dropping them all
+      is pure loss. The bound should therefore be conditional: exclude
+      stale venues only when at least one fresh venue survives. That is a
+      contract change, so it goes back to okarcz before another apply.
+      Operational note for the runbook: `SHOW CREATE` NORMALISES interval
+      syntax — `INTERVAL 2 HOUR` renders as `toIntervalHour(2)` — so the
+      documented "grep the definition to confirm the apply landed" check
+      reports a successful deploy as failed unless it greps for function
+      names. Cost me one false alarm mid-deploy.
 ---
 
 # price_usd is not outlier-protected
