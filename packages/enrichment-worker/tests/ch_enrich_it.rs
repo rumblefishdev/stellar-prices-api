@@ -1535,6 +1535,12 @@ async fn the_frontier_advances_exhausts_and_never_revisits() {
             live_start_month: 202607,
             max_months,
             deadline: None,
+            // Drift correction off for the walk assertions below: a re-check
+            // firing mid-walk would re-stamp months and blur what is being
+            // asserted. Its own behaviour is covered by
+            // `a_backfill_into_an_exhausted_month_reopens_it`.
+            recheck_after_secs: u32::MAX,
+            max_rechecks: 0,
         }
     };
     let client_for_sweep = Client::default().with_url(ch_url()).with_database(db);
@@ -1578,7 +1584,9 @@ async fn the_frontier_advances_exhausts_and_never_revisits() {
     assert_eq!(
         frontier_state(&client, db, 202102).await.as_deref(),
         Some("exhausted"),
-        "a month drained to its floor in one pass is also terminal"
+        "a month drained to zero candidates in one pass is terminal immediately — \
+         marking it pending would cost an extra visit per month across ~102 \
+         partitions purely to learn there is nothing left"
     );
     assert!(
         close_usd(&client, db, 10, 2, feb).await > 0.0,
@@ -1645,6 +1653,8 @@ async fn the_sweep_never_enters_the_live_window() {
             live_start_month: 202102,
             max_months: 12,
             deadline: None,
+            recheck_after_secs: u32::MAX,
+            max_rechecks: 0,
         },
     )
     .await
@@ -1658,5 +1668,107 @@ async fn the_sweep_never_enters_the_live_window() {
         close_usd(&client, db, 10, 2, feb).await,
         0.0,
         "the sweep must leave live-window rows for the live pass"
+    );
+}
+
+/// 🔴 `exhausted` must be a hint with an expiry, not a verdict.
+///
+/// A month is marked exhausted because nothing there could be priced *at that
+/// moment*. A backfill writing into a historical partition falsifies that later
+/// — which is exactly what tasks 0088 and 0201 do. Without the re-check those
+/// rows would sit unenriched forever while the frontier read clean, which is
+/// the "skipped rows that look healthy" failure class that cost 26 days in 0215.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn a_backfill_into_an_exhausted_month_reopens_it() {
+    use enrichment_worker::frontier::{HistoricalSweepConfig, run_historical_sweep};
+
+    let db = "it_enrich_frontier_drift";
+    let client = setup_scratch(db).await;
+    client
+        .query(&ASSETS.replace("{db}", db).replace("{usdc}", USDC_ISSUER))
+        .execute()
+        .await
+        .unwrap();
+
+    let feb = 1_613_390_400u32; // 2021-02-15
+    client
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1m \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
+             ({feb},10,2,'sdex', 4,4,4,4, 1,4,0,0,4,1,1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    let client_for_sweep = Client::default().with_url(ch_url()).with_database(db);
+    let sweep_cfg = |recheck_after_secs: u32, max_rechecks: u32| HistoricalSweepConfig {
+        base: cfg(db),
+        live_start_month: 202607,
+        max_months: 1,
+        deadline: None,
+        recheck_after_secs,
+        max_rechecks,
+    };
+
+    // Drain 202102 to zero candidates → exhausted.
+    run_historical_sweep(&client_for_sweep, &sweep_cfg(u32::MAX, 0))
+        .await
+        .unwrap();
+    assert_eq!(
+        frontier_state(&client, db, 202102).await.as_deref(),
+        Some("exhausted")
+    );
+
+    // A backfill lands a NEW unenriched candle in that finished partition.
+    let feb2 = feb + 60;
+    client
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1m \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
+             ({feb2},10,2,'sdex', 6,6,6,6, 1,6,0,0,6,1,1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    // With the mark still fresh, the walk skips the month entirely — the
+    // partition is invisible and the new row would never be enriched. This
+    // asserts the hazard exists, so the fix below is testing something real.
+    let blind = run_historical_sweep(&client_for_sweep, &sweep_cfg(u32::MAX, 4))
+        .await
+        .unwrap();
+    assert_eq!(blind.months_rechecked, 0, "nothing is stale yet");
+    assert_eq!(
+        close_usd(&client, db, 10, 2, feb2).await,
+        0.0,
+        "the backfilled row is invisible while the exhausted mark is trusted"
+    );
+
+    // recheck_after_secs = 0 makes every exhausted mark stale immediately.
+    let corrected = run_historical_sweep(&client_for_sweep, &sweep_cfg(0, 4))
+        .await
+        .unwrap();
+    assert_eq!(
+        corrected.months_rechecked, 1,
+        "the stale month was re-counted"
+    );
+    assert_eq!(corrected.months_reopened, 1, "and it had gained work");
+    assert_eq!(
+        frontier_state(&client, db, 202102).await.as_deref(),
+        Some("pending"),
+        "re-opened, so the next walk will work it"
+    );
+
+    // The next ordinary run picks it up and prices the backfilled row.
+    run_historical_sweep(&client_for_sweep, &sweep_cfg(u32::MAX, 0))
+        .await
+        .unwrap();
+    assert!(
+        close_usd(&client, db, 10, 2, feb2).await > 0.0,
+        "drift correction closed the loop — the backfilled row is enriched"
     );
 }

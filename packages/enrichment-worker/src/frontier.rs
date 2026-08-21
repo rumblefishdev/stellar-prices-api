@@ -67,6 +67,16 @@ impl FrontierState {
 struct StateRow {
     month: u32,
     state: String,
+    swept_at: u32,
+}
+
+/// What the frontier remembers about one month: its state, and when that was
+/// last confirmed. The timestamp is what keeps `exhausted` a *hint* rather than
+/// a verdict — see [`stale_exhausted_months`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MonthState {
+    state: FrontierState,
+    swept_at: u32,
 }
 
 #[derive(Debug, Clone, Row, Deserialize)]
@@ -97,6 +107,13 @@ pub struct SweepSummary {
     /// Set when the run stopped on its wall-clock budget rather than on
     /// `max_months`; distinguishes "nothing left to do" from "ran out of time".
     pub deadline_hit: bool,
+    /// Stale `exhausted` months re-confirmed against the data this run.
+    pub months_rechecked: u32,
+    /// Of those, how many had gained work and were re-opened to `pending`.
+    /// Non-zero means something wrote into a partition the sweep had finished —
+    /// a backfill, or a newly-priceable reference. Worth an eyebrow, not an
+    /// alarm: it is the drift correction doing its job.
+    pub months_reopened: u32,
 }
 
 impl SweepSummary {
@@ -119,6 +136,13 @@ pub struct HistoricalSweepConfig {
     pub max_months: u32,
     /// Wall-clock stop, checked before each month.
     pub deadline: Option<Instant>,
+    /// How long an `exhausted` mark is trusted before it is re-confirmed
+    /// against the data. This is what makes the frontier a hint with an expiry
+    /// rather than a permanent verdict — see [`stale_exhausted_months`].
+    pub recheck_after_secs: u32,
+    /// Exhausted months re-checked per invocation. Small, and separate from
+    /// `max_months`, so drift correction can never starve the actual drain.
+    pub max_rechecks: u32,
 }
 
 pub struct EnrichmentFrontier {
@@ -162,9 +186,10 @@ impl EnrichmentFrontier {
 
     /// Stored state per month for this table. One scan of a table that holds a
     /// few hundred rows.
-    async fn states(&self) -> Result<HashMap<u32, FrontierState>, ChEnrichError> {
+    async fn states(&self) -> Result<HashMap<u32, MonthState>, ChEnrichError> {
         let sql = format!(
-            "SELECT month, CAST(state AS String) AS state \
+            "SELECT month, CAST(state AS String) AS state, \
+                    toUnixTimestamp(swept_at) AS swept_at \
              FROM {db}.enrichment_frontier FINAL \
              WHERE tbl = ?",
             db = self.database,
@@ -177,8 +202,31 @@ impl EnrichmentFrontier {
             .await?;
         Ok(rows
             .into_iter()
-            .filter_map(|r| FrontierState::parse(&r.state).map(|s| (r.month, s)))
+            .filter_map(|r| {
+                FrontierState::parse(&r.state).map(|state| {
+                    (
+                        r.month,
+                        MonthState {
+                            state,
+                            swept_at: r.swept_at,
+                        },
+                    )
+                })
+            })
             .collect())
+    }
+
+    /// The ClickHouse server clock, as unix seconds.
+    ///
+    /// `swept_at` is written server-side, so staleness must be judged against
+    /// the same clock. Comparing a server-written timestamp to the Lambda's wall
+    /// clock would make the re-check cadence drift with host skew.
+    async fn server_now(&self) -> Result<u32, ChEnrichError> {
+        Ok(self
+            .client
+            .query("SELECT toUnixTimestamp(now())")
+            .fetch_one::<u32>()
+            .await?)
     }
 
     /// Record a month's outcome.
@@ -223,7 +271,7 @@ impl EnrichmentFrontier {
 fn months_to_sweep(
     span: (u32, u32),
     live_start_month: u32,
-    states: &HashMap<u32, FrontierState>,
+    states: &HashMap<u32, MonthState>,
 ) -> Vec<u32> {
     let (lo, hi) = span;
     let mut out = Vec::new();
@@ -232,7 +280,7 @@ fn months_to_sweep(
     // data predates the live window must not walk forward into empty calendar
     // months forever.
     while m < live_start_month && m <= hi {
-        if states.get(&m) != Some(&FrontierState::Exhausted) {
+        if states.get(&m).map(|s| s.state) != Some(FrontierState::Exhausted) {
             out.push(m);
         }
         match add_months(m, 1) {
@@ -241,6 +289,44 @@ fn months_to_sweep(
         }
     }
     out
+}
+
+/// `exhausted` months whose last confirmation is older than `recheck_after_secs`,
+/// oldest-confirmation first, capped at `limit`.
+///
+/// 🔴 **This is what stops `exhausted` becoming a verdict.** A month is marked
+/// exhausted because nothing there could be priced *at that moment*. Two things
+/// falsify that later: a backfill writes new rows into a historical partition
+/// (which is exactly what tasks 0088 and 0201 do), or a new reference/oracle
+/// price makes previously unpriceable candles priceable. Without a re-check
+/// those rows are never revisited and read as healthy forever — the failure
+/// class that cost 26 days in task 0215.
+///
+/// Re-checking is deliberately cheap: a pass with `max_batches = 0` computes
+/// the month's bounded candidate count and does no work, so a month that really
+/// is exhausted costs a few sub-second queries and gets re-stamped.
+///
+/// Oldest-confirmation-first so the rotation is fair — every exhausted month is
+/// revisited on a predictable cycle rather than the same few being re-checked
+/// while others go stale indefinitely.
+fn stale_exhausted_months(
+    states: &HashMap<u32, MonthState>,
+    now: u32,
+    recheck_after_secs: u32,
+    limit: u32,
+) -> Vec<u32> {
+    let mut stale: Vec<(u32, u32)> = states
+        .iter()
+        .filter(|(_, s)| s.state == FrontierState::Exhausted)
+        .filter(|(_, s)| now.saturating_sub(s.swept_at) >= recheck_after_secs)
+        .map(|(m, s)| (s.swept_at, *m))
+        .collect();
+    stale.sort_unstable();
+    stale
+        .into_iter()
+        .take(limit as usize)
+        .map(|(_, m)| m)
+        .collect()
 }
 
 /// Walk the frontier, working up to `max_months` monthly partitions.
@@ -308,10 +394,18 @@ pub async fn run_historical_sweep(
             .run()
             .await?;
 
-        // No progress ⇒ nothing here has a USD reference of any kind (or the
-        // month is empty). Terminal, and the reason the sweep needs no cutoff
-        // date for the pre-2021 unpriceable floor.
-        let state = if stats.rows_enriched == 0 {
+        // Terminal on EITHER condition, and both matter:
+        //
+        //   * `candidates_after == 0` — the month is fully drained. Marking it
+        //     pending would cost a whole extra visit per month just to learn
+        //     there is nothing left, doubling the walk over ~102 partitions.
+        //   * `rows_enriched == 0` — no progress, so nothing here has a USD
+        //     reference of any kind (or the month is empty). This is what lets
+        //     the pre-2021 unpriceable floor terminate with no cutoff date.
+        //
+        // Neither is permanent: `stale_exhausted_months` re-confirms both on a
+        // cycle, so a month that later gains work is re-opened.
+        let state = if stats.candidates_after == 0 || stats.rows_enriched == 0 {
             FrontierState::Exhausted
         } else {
             FrontierState::Pending
@@ -337,6 +431,57 @@ pub async fn run_historical_sweep(
         });
     }
 
+    // Drift correction. Runs after the real work and on the same deadline, so
+    // it can only ever use budget the drain did not need.
+    //
+    // `now` comes from the frontier rows' own clock domain — `swept_at` is
+    // written server-side by ClickHouse, so comparing it against the Lambda's
+    // wall clock would drift. Reading the server clock keeps one clock domain.
+    let now = frontier.server_now().await?;
+    for month in stale_exhausted_months(&states, now, cfg.recheck_after_secs, cfg.max_rechecks) {
+        if let Some(deadline) = cfg.deadline
+            && Instant::now() >= deadline
+        {
+            summary.deadline_hit = true;
+            break;
+        }
+        let Some(window) = month_bounds(month) else {
+            continue;
+        };
+
+        // `max_batches = 0` is the whole trick: the pass counts the month's
+        // bounded candidates and does no work, because `max_batches` keeps its
+        // literal meaning in both modes (never a hidden unbounded drain). So the
+        // re-check reuses the pass's own tested counting path rather than
+        // hand-rolling a second candidate query that could drift from it.
+        let mut ecfg = cfg.base.clone();
+        ecfg.time_window = Some(window);
+        ecfg.one_shot = false;
+        ecfg.max_batches = 0;
+        let stats = ChEnrichmentPass::with_client(client.clone(), ecfg)
+            .run()
+            .await?;
+
+        summary.months_rechecked += 1;
+        let still_exhausted = stats.candidates_before == 0;
+        if still_exhausted {
+            // Re-stamp so `swept_at` advances and the rotation moves on.
+            frontier.record(month, FrontierState::Exhausted, 0).await?;
+        } else {
+            summary.months_reopened += 1;
+            warn!(
+                month,
+                candidates = stats.candidates_before,
+                "historical sweep: re-opening an exhausted month — it gained work \
+                 since it was last confirmed (a backfill wrote here, or a new \
+                 reference made these candles priceable)"
+            );
+            frontier
+                .record(month, FrontierState::Pending, stats.candidates_before)
+                .await?;
+        }
+    }
+
     Ok(summary)
 }
 
@@ -344,8 +489,36 @@ pub async fn run_historical_sweep(
 mod tests {
     use super::*;
 
-    fn states(pairs: &[(u32, FrontierState)]) -> HashMap<u32, FrontierState> {
-        pairs.iter().copied().collect()
+    /// Frontier rows confirmed "now" (`swept_at = 1_000_000`), so nothing is
+    /// stale unless a test says so.
+    fn states(pairs: &[(u32, FrontierState)]) -> HashMap<u32, MonthState> {
+        pairs
+            .iter()
+            .map(|(m, state)| {
+                (
+                    *m,
+                    MonthState {
+                        state: *state,
+                        swept_at: 1_000_000,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    fn stamped(pairs: &[(u32, FrontierState, u32)]) -> HashMap<u32, MonthState> {
+        pairs
+            .iter()
+            .map(|(m, state, swept_at)| {
+                (
+                    *m,
+                    MonthState {
+                        state: *state,
+                        swept_at: *swept_at,
+                    },
+                )
+            })
+            .collect()
     }
 
     #[test]
@@ -414,6 +587,58 @@ mod tests {
         // to reach a live window the table has no data anywhere near.
         let q = months_to_sweep((202401, 202403), 202608, &states(&[]));
         assert_eq!(q, vec![202401, 202402, 202403]);
+    }
+
+    // --- drift correction ---------------------------------------------------
+
+    const DAY: u32 = 86_400;
+
+    #[test]
+    fn a_fresh_exhausted_month_is_not_rechecked() {
+        let s = stamped(&[(202101, FrontierState::Exhausted, 100 * DAY)]);
+        assert!(stale_exhausted_months(&s, 100 * DAY + 60, 7 * DAY, 4).is_empty());
+    }
+
+    #[test]
+    fn a_stale_exhausted_month_is_rechecked() {
+        let s = stamped(&[(202101, FrontierState::Exhausted, 100 * DAY)]);
+        assert_eq!(
+            stale_exhausted_months(&s, 108 * DAY, 7 * DAY, 4),
+            vec![202101]
+        );
+    }
+
+    #[test]
+    fn pending_months_are_never_rechecked() {
+        // They are already in the work queue; re-checking them would duplicate
+        // the count the pass is about to do anyway.
+        let s = stamped(&[(202101, FrontierState::Pending, 0)]);
+        assert!(stale_exhausted_months(&s, 999 * DAY, 7 * DAY, 4).is_empty());
+    }
+
+    #[test]
+    fn rechecks_rotate_oldest_confirmation_first() {
+        let s = stamped(&[
+            (202103, FrontierState::Exhausted, 30 * DAY),
+            (202101, FrontierState::Exhausted, 10 * DAY),
+            (202102, FrontierState::Exhausted, 20 * DAY),
+        ]);
+        // Fair rotation: the least recently confirmed goes first, so no month
+        // can go stale indefinitely while others are re-checked repeatedly.
+        assert_eq!(
+            stale_exhausted_months(&s, 999 * DAY, 7 * DAY, 3),
+            vec![202101, 202102, 202103]
+        );
+    }
+
+    #[test]
+    fn rechecks_are_capped_so_they_cannot_starve_the_drain() {
+        let all: Vec<(u32, FrontierState, u32)> = (1..=12)
+            .map(|m| (202000 + m, FrontierState::Exhausted, m * DAY))
+            .collect();
+        let picked = stale_exhausted_months(&stamped(&all), 999 * DAY, 7 * DAY, 4);
+        assert_eq!(picked.len(), 4);
+        assert_eq!(picked, vec![202001, 202002, 202003, 202004]);
     }
 
     #[test]

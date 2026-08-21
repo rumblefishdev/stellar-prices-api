@@ -141,6 +141,8 @@ pub fn pass_metrics(stats: &ChPassStats) -> Vec<Metric> {
 ///     This is the per-leg progress signal the pass itself cannot give: the XLM
 ///     pivot writes exactly `batch_size` every batch and so masks every other
 ///     leg's stall in the aggregate count (task 0219).
+///   * `EnrichmentFrontierMonthsReopened` — exhausted months that turned out to
+///     have gained work and were re-opened. Published only when non-zero.
 ///   * `EnrichmentHistoricalDeadlineHit` — 1 when the run stopped on its
 ///     wall-clock budget rather than on `max_months`. Distinguishes "nothing
 ///     left to do" from "ran out of time", which otherwise look identical from
@@ -163,6 +165,16 @@ pub fn historical_sweep_metrics(summary: &SweepSummary) -> Vec<Metric> {
             unit: Unit::Count,
         },
     ];
+    if summary.months_reopened > 0 {
+        // Only published when non-zero: a month re-opening means something wrote
+        // into a partition the sweep had finished. Worth seeing, but a constant
+        // 0 series on a dashboard trains people to ignore it.
+        m.push(Metric {
+            name: "EnrichmentFrontierMonthsReopened",
+            value: summary.months_reopened as f64,
+            unit: Unit::Count,
+        });
+    }
     if let Some(month) = summary.frontier_month {
         m.push(Metric {
             name: "EnrichmentFrontierMonth",

@@ -499,6 +499,17 @@ export class EventBridgeStack extends cdk.Stack {
         // coarse sweep; with the live pass now ~1 min instead of the full 300s,
         // both sweeps get real budget for the first time (task 0218).
         ENRICH_HISTORICAL_TIME_BUDGET_SECS: '120',
+        // How long an `exhausted` mark is trusted before it is re-confirmed
+        // against the data (7 days). Without this the frontier would be a
+        // permanent verdict: a backfill writing into a partition the sweep had
+        // finished (tasks 0088 / 0201 do exactly that) would leave those rows
+        // unenriched forever while the frontier read clean — the "skipped rows
+        // that look healthy" failure class that cost 26 days in task 0215.
+        ENRICH_HISTORICAL_RECHECK_SECS: '604800',
+        // Re-checks per invocation, capped separately from MAX_MONTHS so drift
+        // correction can never starve the drain. 4/run × 24 runs/day rotates
+        // the ~102 partitions roughly daily.
+        ENRICH_HISTORICAL_MAX_RECHECKS: '4',
       },
       alarmDescription:
         'Enrichment Lambda invocation errors (close_usd / volume_quote_usd enrichment pass failed).',

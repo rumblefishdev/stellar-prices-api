@@ -188,10 +188,22 @@ async fn main() -> Result<(), lambda_runtime::Error> {
     // from the hourly cadence rather than from doing many months at once.
     let historical_max_months: u32 = env_parse_or("ENRICH_HISTORICAL_MAX_MONTHS", 1);
     let historical_budget_secs: u64 = env_parse_or("ENRICH_HISTORICAL_TIME_BUDGET_SECS", 120);
+    // How long an `exhausted` mark is trusted before it is re-confirmed against
+    // the data. Without this the frontier would be a permanent verdict, and a
+    // backfill writing into a finished partition (which is exactly what tasks
+    // 0088 and 0201 do) would leave rows unenriched forever while the frontier
+    // read clean. Default 7 days.
+    let historical_recheck_secs: u32 = env_parse_or("ENRICH_HISTORICAL_RECHECK_SECS", 604_800);
+    // Re-checks per invocation, capped separately from `max_months` so drift
+    // correction can never starve the drain. At 4/run × 24 runs/day the ~102
+    // partitions rotate roughly daily, which is the cadence the plan asked for.
+    let historical_max_rechecks: u32 = env_parse_or("ENRICH_HISTORICAL_MAX_RECHECKS", 4);
     tracing::info!(
         enabled = historical_enabled,
         max_months = historical_max_months,
         time_budget_secs = historical_budget_secs,
+        recheck_after_secs = historical_recheck_secs,
+        max_rechecks = historical_max_rechecks,
         "historical sweep config"
     );
 
@@ -288,6 +300,8 @@ async fn main() -> Result<(), lambda_runtime::Error> {
                         .unwrap_or(u32::MAX),
                     max_months: historical_max_months,
                     deadline: Some(Instant::now() + Duration::from_millis(budget_ms)),
+                    recheck_after_secs: historical_recheck_secs,
+                    max_rechecks: historical_max_rechecks,
                 };
                 match run_historical_sweep(&sweep_client, &hcfg).await {
                     Ok(sum) => {
@@ -297,6 +311,8 @@ async fn main() -> Result<(), lambda_runtime::Error> {
                             frontier_month = sum.frontier_month,
                             rows_enriched = sum.total_enriched(),
                             deadline_hit = sum.deadline_hit,
+                            months_rechecked = sum.months_rechecked,
+                            months_reopened = sum.months_reopened,
                             "historical sweep complete"
                         );
                         let hm = enrichment_worker::metrics::historical_sweep_metrics(&sum);
