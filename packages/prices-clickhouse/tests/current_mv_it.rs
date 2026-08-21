@@ -169,9 +169,19 @@ async fn current_prices_mv_computes_price_volume_and_market_cap() {
 ///   3 FOO — three sources, one a gross outlier → the filter must ARM
 ///   4 BAR — one source → the filter must be a NO-OP
 ///   5 DUO — exactly two far-apart sources → the >=3 guard must keep BOTH
-///   6 EXO — every source unpriced → no divide-by-zero, `sources` = `{}`
-///   7 ZER — priced HISTORY, un-enriched TIP → the task-0138 -100% case
+///   6 EXO — every source unpriced, but WITH a real 7d baseline → the only
+///           fixture exercising the load-bearing change_7d numerator guard
+///   7 ZER — priced HISTORY, un-enriched TIP → 0135: latest priced close wins
 ///   8 DIP — a genuine ~-100% crash → must NOT be swallowed by 0138's guard
+///  10 STA — priced history OLDER than the 2h carry bound → the ASYMMETRY:
+///           price_usd still publishes it, the venue drops out of sources/vwap
+///  11 LAG — SINGLE source, priced history, un-enriched tip → carried (the
+///           shape the XLM acceptance criterion names)
+///  12 TRI — three sources, one carried past an un-enriched tip → the §5.5
+///           mask arms over the carried population and keeps all three
+///  13 NRB — priced, but its only 1h reference sits at 4 d, INSIDE the [7d, 5d]
+///           band's recent cutoff → change_7d_pct must be the sentinel rather
+///           than a 4-day move published as a 7-day one
 #[tokio::test]
 #[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
 async fn current_prices_mv_writes_0072_columns_and_filters_outliers() {
@@ -187,11 +197,23 @@ async fn current_prices_mv_writes_0072_columns_and_filters_outliers() {
              VALUES (1,'XLM','classic','','',1), (3,'FOO','classic','GFOO','',1), \
                     (4,'BAR','classic','GBAR','',1), (5,'DUO','classic','GDUO','',1), \
                     (6,'EXO','classic','GEXO','',1), (7,'ZER','classic','GZER','',1), \
-                    (8,'DIP','classic','GDIP','',1)"
+                    (8,'DIP','classic','GDIP','',1), (10,'STA','classic','GSTA','',1), \
+                    (11,'LAG','classic','GLAG','',1), (12,'TRI','classic','GTRI','',1), \
+                    (13,'NRB','classic','GNRB','',1)"
         ))
         .execute()
         .await
         .expect("assets");
+
+    // Supply for asset 7 so market_cap_usd = price_usd x supply is assertable
+    // (without a row the LEFT JOIN misses and market_cap is 0 for any price).
+    admin
+        .query(&format!(
+            "INSERT INTO {db}.asset_supply (asset_id, token_supply) VALUES (7, 1000)"
+        ))
+        .execute()
+        .await
+        .expect("asset_supply");
 
     // ts_min_ago / close_usd / volume_quote_usd / source, per asset.
     let rows: &[(u32, i64, &str, &str, &str)] = &[
@@ -204,24 +226,45 @@ async fn current_prices_mv_writes_0072_columns_and_filters_outliers() {
         (5, 7, "1.00", "1000", "sdex"),
         (5, 6, "3.00", "3000", "soroswap"),
         (6, 4, "0", "0", "sdex"), // exotic: never USD-priceable
-        // 0138: priced history + an UN-ENRICHED TIP. price_usd is an unfiltered
-        // argMax so it lands on the 0, while open_24h filters close_usd > 0 and
-        // lands on the real 2.00 — the exact prod shape that yielded -100%.
+        // 0135: priced history + an UN-ENRICHED TIP. Before the guard, the
+        // unfiltered argMax landed price_usd on the 0 (the prod shape that
+        // yielded 0138's -100%); with argMaxIf(close_usd > 0) the tip is
+        // SKIPPED and price_usd is the latest priced close — soroswap's 1.90.
         //
-        // TWO sources on purpose. per_source takes argMax(close_usd) per source
-        // and per_asset then drops `src_price > 0`, so a single-source asset
-        // whose tip is un-enriched loses its ONLY source and degrades to
-        // sources='{}' / vwap=0 — which is "no data at all", not the prod shape.
-        // Production XLM had price_usd = 0 *while* sources carried two live
-        // venues and vwap_24h read 0.17093839119102. soroswap's priced tip
-        // reproduces that, and pins the argMax-picks-the-un-enriched-source
-        // interaction the single-source fixture cannot distinguish.
+        // TWO sources on purpose, and the un-enriched tip sits on sdex, whose
+        // history IS priced (2.00). That pins the C2 half of the contract:
+        // per_source's argMaxIf keeps sdex at its latest priced close, so it
+        // stays in `sources` and the vwap weighting instead of vanishing with
+        // enrichment timing. Production XLM had price_usd = 0 *while* sources
+        // carried two live venues — this fixture reproduces the shape and must
+        // now publish real numbers on every column.
         (7, 30, "2.00", "500", "sdex"),
         (7, 2, "1.90", "400", "soroswap"),
         (7, 1, "0", "0", "sdex"),
         // 0138 control: a REAL near-total crash. The guard must leave this alone.
         (8, 30, "2.00", "500", "sdex"),
         (8, 1, "0.0001", "10", "sdex"),
+        // 10 STA — the carry BOUND, and the ASYMMETRY it creates. Its only
+        // priced close is 190 min old (> 2h), so the per-venue guard drops
+        // sdex from `sources` and the vwap — while `price_usd`, deliberately
+        // unbounded, still publishes that close. Price without venues is the
+        // intended shape: we hold a price, no venue is quoting right now.
+        (10, 190, "2.00", "500", "sdex"),
+        (10, 1, "0", "0", "sdex"),
+        // 11 LAG — single source, priced history INSIDE the bound: the carry
+        // must keep the venue alive on every column.
+        (11, 30, "2.00", "300", "sdex"),
+        (11, 1, "0", "0", "sdex"),
+        // 12 TRI — three sources, aquarius carried past an un-enriched tip:
+        // the >=3 mask ARMS over a population containing a carried price and
+        // must keep all three (all within 2% of the median).
+        (12, 10, "1.00", "100000", "sdex"),
+        (12, 9, "1.02", "50000", "soroswap"),
+        (12, 50, "1.01", "20000", "aquarius"),
+        (12, 1, "0", "0", "aquarius"),
+        // 13 NRB — ordinary priced asset; the interesting part is its 1h
+        // reference below, which is too RECENT for the [7d, 5d] band.
+        (13, 5, "2.00", "1000", "sdex"),
     ];
     for (i, (asset, mins, cu, vol, src)) in rows.iter().enumerate() {
         admin
@@ -256,9 +299,13 @@ async fn current_prices_mv_writes_0072_columns_and_filters_outliers() {
             .expect("1h ref row");
     }
 
-    // 7d references for the 0138 pair, so change_7d_pct has a real denominator
-    // to divide the zero/near-zero tip by.
-    for asset in [7_u32, 8] {
+    // 7d references for assets whose change_7d needs a real denominator:
+    // 7/8 (the 0138 pair), 10 (over-bound), and 6 — the unpriced asset, now
+    // the ONLY fixture pairing `price_usd = 0` with a REAL 7d baseline. That
+    // pairing is what the numerator guard protects, and it is reachable
+    // because ref_7d reads price_ohlcv_1h, a different table from the 24h
+    // window that zeroes price_usd.
+    for asset in [6_u32, 7, 8, 10] {
         admin
             .query(&format!(
                 "INSERT INTO {db}.price_ohlcv_1h \
@@ -273,6 +320,24 @@ async fn current_prices_mv_writes_0072_columns_and_filters_outliers() {
             .expect("0138 7d ref row");
     }
 
+    // Asset 13's ONLY 1h reference sits at 4 days — newer than the band's
+    // `now() - 5 DAY` cutoff. Without that cutoff argMinIf would pick it and
+    // publish a 4-day move as `change_7d_pct`; with it, close_7d_ago stays 0
+    // and the denominator guard lands on the sentinel. This is the only
+    // fixture that exercises the recent edge of the band.
+    admin
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1h \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) \
+             VALUES (now() - INTERVAL {mins} MINUTE, 13, 2, 'sdex', \
+              1.00,1.00,1.00,1.00, 10, 5, 5, 1.00, 1.00, 1, 1)",
+            mins = 4 * 24 * 60_i64
+        ))
+        .execute()
+        .await
+        .expect("13 too-recent 7d ref row");
+
     admin
         .query(&format!("SYSTEM REFRESH VIEW {db}.mv_current_prices"))
         .execute()
@@ -285,7 +350,7 @@ async fn current_prices_mv_writes_0072_columns_and_filters_outliers() {
             .fetch_one()
             .await
             .expect("count");
-        if n >= 7 {
+        if n >= 11 {
             ready = true;
             break;
         }
@@ -406,14 +471,14 @@ async fn current_prices_mv_writes_0072_columns_and_filters_outliers() {
     );
     assert_eq!(exo_s, "{}", "exotic sources must be an empty object");
 
-    // ── task 0138: an un-enriched TIP must not fabricate -100% ─────────────
-    // Distinct from asset 6 above: there, EVERY close_usd is 0, so open_24h is
-    // 0 too and the denominator guard alone lands on the sentinel. Here the
-    // history IS priced, so the denominator is real and only the NUMERATOR
-    // guard can save it. That is the case prod hit on 889 assets.
+    // ── task 0135: an un-enriched TIP is skipped, not read as 0 ────────────
+    // Distinct from asset 6 above: there, EVERY close_usd is 0, so the row
+    // legitimately publishes the sentinels. Here the history IS priced, so the
+    // 0135 contract requires the latest PRICED close on every column — the
+    // case prod hit on 88 of the top-200 volume rows (XLM and EURC included).
     //
-    // Control first — prove the fixture genuinely reproduces the bug, so the
-    // assertions below cannot pass vacuously.
+    // Control first — prove the fixture genuinely reproduces the pre-guard
+    // bug, so the assertions below cannot pass vacuously.
     let unguarded = scalar_f64(
         &admin,
         &format!(
@@ -438,24 +503,25 @@ async fn current_prices_mv_writes_0072_columns_and_filters_outliers() {
 
     let zer_p = scalar_f64(&admin, &f("price_usd", 7)).await;
     assert!(
-        zer_p.abs() < 1e-9,
-        "fixture precondition: un-enriched tip means price_usd 0, got {zer_p}"
+        (zer_p - 1.90).abs() < 1e-9,
+        "price_usd must be the latest PRICED close (soroswap 1.90), not the \
+         un-enriched tip's 0 — the 0135 contract, got {zer_p}"
     );
     let zer_24 = scalar_f64(&admin, &f("change_24h_pct", 7)).await;
     assert!(
-        zer_24.abs() < 1e-9,
-        "an un-enriched tip must yield the 0 = 'no signal' sentinel, NOT -100 \
-         (task 0138: 889 prod assets published -100 this way), got {zer_24}"
+        (zer_24 + 5.0).abs() < 1e-2,
+        "change_24h_pct must be computed from the priced close: \
+         (1.90 - 2.00) / 2.00 = -5%, NOT the 0 sentinel and NOT -100, got {zer_24}"
     );
     let zer_7d = scalar_f64(&admin, &f("change_7d_pct", 7)).await;
     assert!(
-        zer_7d.abs() < 1e-9,
-        "change_7d_pct must be sentinel 0, not -100, got {zer_7d}"
+        (zer_7d - 90.0).abs() < 1e-2,
+        "change_7d_pct must be (1.90 - 1.00) / 1.00 = +90%, got {zer_7d}"
     );
 
-    // The fixture must be the PROD shape, not "no data at all": a zero
-    // price_usd sitting beside a populated sources object and a real vwap is
-    // exactly what made the -100 indefensible in production.
+    // The C2 half: sdex's tip is un-enriched but its HISTORY is priced, so it
+    // must be carried at its latest priced close (2.00) — present in `sources`
+    // and weighted into the vwap — instead of vanishing with enrichment timing.
     let zer_vwap = scalar_f64(&admin, &f("vwap_24h", 7)).await;
     let zer_srcs: String = admin
         .query(&s("sources", 7))
@@ -463,14 +529,147 @@ async fn current_prices_mv_writes_0072_columns_and_filters_outliers() {
         .await
         .expect("zer sources");
     assert!(
-        (zer_vwap - 1.9).abs() < 1e-6,
-        "soroswap's priced tip must still yield a real vwap (1.9) beside the \
-         zero price_usd, got {zer_vwap}"
+        (zer_vwap - 1.955_555_56).abs() < 1e-6,
+        "vwap must weight BOTH sources ((2.00*500 + 1.90*400) / 900 = \
+         1.95555556); 1.9 alone means sdex was dropped by enrichment timing, \
+         got {zer_vwap}"
     );
     assert!(
-        zer_srcs.contains("soroswap"),
-        "sources must be POPULATED while price_usd is 0 — that pairing is the \
-         prod shape this task exists for, got {zer_srcs}"
+        zer_srcs.contains("soroswap") && zer_srcs.contains("sdex"),
+        "both venues must be in sources — sdex carried at its latest priced \
+         close per C2, got {zer_srcs}"
+    );
+
+    // price_xlm follows the priced close too: 1.90 / 0.50 = 3.8. Before the
+    // guard this column collapsed to 0 with price_usd (the AC names it).
+    let zer_xlm = scalar_f64(&admin, &f("price_xlm", 7)).await;
+    assert!(
+        (zer_xlm - 3.8).abs() < 1e-6,
+        "price_xlm must be 1.90 / 0.50 = 3.8, got {zer_xlm}"
+    );
+
+    // ── market_cap follows the priced close too: 1.90 x supply 1000 ───────
+    let zer_mc = scalar_f64(&admin, &f("market_cap_usd", 7)).await;
+    assert!(
+        (zer_mc - 1900.0).abs() < 1e-6,
+        "market_cap_usd must be 1.90 * 1000 = 1900, got {zer_mc}"
+    );
+
+    // ── 0135 ASYMMETRY: the bound guards the venues, not the headline ──────
+    // Asset 10's only priced close is 190 min old. The per-venue guard drops
+    // sdex (a venue that last quoted 3h ago is not quoting "now"), so
+    // `sources` empties and vwap goes to its sentinel — while `price_usd`
+    // still publishes the close, because blanking a price we hold is the
+    // outcome 0135 exists to remove. Measured on prod 2026-08-20: 1,091 of
+    // 4,444 assets (24.5%) already publish a hard zero without any bound.
+    let sta_p = scalar_f64(&admin, &f("price_usd", 10)).await;
+    assert!(
+        (sta_p - 2.0).abs() < 1e-9,
+        "price_usd is NOT age-bounded — it must still publish the 190-min-old \
+         priced close, got {sta_p}"
+    );
+    let sta_srcs: String = admin
+        .query(&s("sources", 10))
+        .fetch_one()
+        .await
+        .expect("sta sources");
+    assert_eq!(
+        sta_srcs, "{}",
+        "a venue whose last quote is beyond the carry bound must drop out of \
+         sources, so it cannot vote in the §5.5 median"
+    );
+    let sta_vwap = scalar_f64(&admin, &f("vwap_24h", 10)).await;
+    assert!(
+        sta_vwap.abs() < 1e-9,
+        "vwap must be the sentinel when no venue is currently quoting, got {sta_vwap}"
+    );
+    // The row stays internally coherent: change_* are computed FROM the
+    // published price, never fabricated against it.
+    let sta_24 = scalar_f64(&admin, &f("change_24h_pct", 10)).await;
+    assert!(
+        sta_24.abs() < 1e-9,
+        "one priced candle means open_24h == price_usd, so 0%, got {sta_24}"
+    );
+    let sta_7d = scalar_f64(&admin, &f("change_7d_pct", 10)).await;
+    assert!(
+        (sta_7d - 100.0).abs() < 1e-2,
+        "change_7d_pct must come from the published 2.00 against the 1.00 \
+         baseline = +100%, got {sta_7d}"
+    );
+
+    // ── the change_7d numerator guard, on the only shape that reaches it ───
+    // Asset 6 has no priced candle at all (price_usd = 0) but DOES have a real
+    // 1h baseline of 1.00 — ref_7d reads a different table, so the pairing is
+    // reachable. Without the numerator nullIf this publishes a fabricated
+    // -100%, which is what 0138 measured on 396 prod assets.
+    let exo_7d = scalar_f64(&admin, &f("change_7d_pct", 6)).await;
+    assert!(
+        exo_7d.abs() < 1e-9,
+        "an unpriced asset with a REAL 7d baseline must land on the 0 = 'no \
+         signal' sentinel, NOT -100, got {exo_7d}"
+    );
+
+    // ── 0135 single-source carry: the shape the XLM AC names ───────────────
+    let lag_p = scalar_f64(&admin, &f("price_usd", 11)).await;
+    let lag_vwap = scalar_f64(&admin, &f("vwap_24h", 11)).await;
+    let lag_srcs: String = admin
+        .query(&s("sources", 11))
+        .fetch_one()
+        .await
+        .expect("lag sources");
+    assert!(
+        (lag_p - 2.0).abs() < 1e-9,
+        "single-source asset with an in-bound un-enriched tip must publish its \
+         latest priced close, got {lag_p}"
+    );
+    assert!(
+        (lag_vwap - 2.0).abs() < 1e-6,
+        "single carried source must still yield a vwap, got {lag_vwap}"
+    );
+    assert!(
+        lag_srcs.contains("sdex") && lag_srcs.contains("\"2\""),
+        "the carried venue must appear in sources at its priced close, got {lag_srcs}"
+    );
+
+    // ── 0135 x §5.5: the mask arms over a population WITH a carried price ──
+    // Three sources, aquarius carried (1.01 from 50 min ago, tip un-enriched).
+    // All three sit within 2% of the median, so arming must keep all three —
+    // a carried-but-plausible price must not evict anyone.
+    let tri_vwap = scalar_f64(&admin, &f("vwap_24h", 12)).await;
+    let tri_srcs: String = admin
+        .query(&s("sources", 12))
+        .fetch_one()
+        .await
+        .expect("tri sources");
+    assert!(
+        (tri_vwap - 1.007_058_823_5).abs() < 1e-6,
+        "vwap must weight all three sources ((1.00*100000 + 1.02*50000 + \
+         1.01*20000) / 170000 = 1.00705882), got {tri_vwap}"
+    );
+    assert!(
+        tri_srcs.contains("sdex") && tri_srcs.contains("soroswap") && tri_srcs.contains("aquarius"),
+        "all three venues incl. the carried one must be in sources, got {tri_srcs}"
+    );
+    let tri_p = scalar_f64(&admin, &f("price_usd", 12)).await;
+    assert!(
+        (tri_p - 1.02).abs() < 1e-9,
+        "price_usd is the newest priced close (soroswap 1.02), got {tri_p}"
+    );
+
+    // ── ref_7d band, recent edge: a too-new baseline is NOT a 7d baseline ──
+    // Asset 13 is priced (2.00) and has a 1h close of 1.00 four days ago. Before
+    // the band's upper cutoff that close was the baseline and the row published
+    // +100% as a SEVEN-day move. The cutoff makes it the sentinel instead.
+    let nrb_p = scalar_f64(&admin, &f("price_usd", 13)).await;
+    assert!(
+        (nrb_p - 2.0).abs() < 1e-9,
+        "precondition: asset 13 must be priced, else the 7d assert is vacuous, got {nrb_p}"
+    );
+    let nrb_7d = scalar_f64(&admin, &f("change_7d_pct", 13)).await;
+    assert!(
+        nrb_7d.abs() < 1e-9,
+        "a baseline newer than the [7d, 5d] band must yield the 0 sentinel, not \
+         a 4-day move labelled 7-day (+100 here), got {nrb_7d}"
     );
 
     // ── task 0138: the guard must NOT swallow a genuine crash ──────────────
@@ -482,10 +681,10 @@ async fn current_prices_mv_writes_0072_columns_and_filters_outliers() {
         "a REAL ~-100% crash must survive the 0138 guard (expect -99.995), got {dip_24}"
     );
 
-    // NOTE: price_xlm for asset 7 is trivially 0 here (0 / anything), so it is
-    // NOT evidence that its nullIf guard works — that needs a missing DIVISOR
-    // with a non-zero price_usd, which is
-    // `price_xlm_lands_on_the_sentinel_when_the_xlm_divisor_is_missing` below.
+    // NOTE: asset 7's price_xlm above exercises the happy path only; the
+    // missing-DIVISOR guard needs an asset priced while no XLM market exists,
+    // which is `price_xlm_lands_on_the_sentinel_when_the_xlm_divisor_is_missing`
+    // below.
 
     teardown(db).await;
 }
