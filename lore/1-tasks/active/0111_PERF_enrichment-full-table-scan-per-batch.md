@@ -4,7 +4,7 @@ title: "Enrichment re-scans the whole table every batch — 545M rows/batch, cau
 type: PERF
 status: active
 related_adr: ["0007"]
-related_tasks: ["0026", "0062", "0085", "0112", "0088", "0209", "0212"]
+related_tasks: ["0026", "0062", "0085", "0112", "0088", "0209", "0212", "0215"]
 tags: [layer-indexing, clickhouse, enrichment, perf, priority-high, effort-medium, incident]
 links:
   - "../../../packages/enrichment-worker/src/ch_enrich.rs"
@@ -87,6 +87,32 @@ history:
       backlog means recent candles are never reached — and USDT has no oracle
       fallback, so its entire quote leg has been unpriced since 2026-08-13. See
       0209 and 0212.
+  - date: 2026-08-21
+    status: active
+    who: okarcz
+    note: >
+      RE-MEASURED on prod, and the task's target changes. The scan is worse than
+      the July figure that framed this task — `price_ohlcv_1m` is now 736.46M
+      rows / 18.44 GiB across 102 partitions and the enrichment INSERT reads
+      739.68M per batch, i.e. the whole table, tracking its growth exactly
+      (728.80M on 08-07 → 739.68M on 08-20). But the backlog is **XLM, not
+      USDT**: 556.78M of the 656.69M candidates are XLM-quoted
+      (`quote_asset_id = 4`), 85% of the total, and USDT does not appear in the
+      top 15 legs at all. Every option in the list should be costed against that
+      figure. Two structural facts that were not in the file before. **97.4% of
+      the table is 0088 backfill history** (689.64M rows before 202403 against a
+      17.05M live window), so the live pass is dragged through a 736M-row scan
+      to serve a historical drain that should be a separate bounded sweep —
+      which is a sharper argument for option 1 than the partition-pruning one
+      already recorded. And **the XLM/USDC reference market starts 2021-02**, so
+      the ~5.34M XLM-quoted candles from 2015-2020 can never be priced by
+      `pivot_sql` and must be DECLARED as a bounded floor; otherwise AC 4 ("the
+      backlog is drained") cannot terminate — the same trap
+      [[close-usd-zero-as-missing-defect-class]] already records. The backlog
+      concentrates in 2022 (131.57M) and 2023 (388.56M), both fully priceable.
+      ⚠️ Also corrects [[0209]]: its 657M figure is the WHOLE-TABLE candidate
+      count, not a USDT one, and its "pivot is behind a backlog" root cause is
+      falsified — see 0215.
 ---
 
 > **Why this is queued ahead of its own cost case:** the perf argument for 0111
@@ -172,6 +198,131 @@ partitions are sitting in the table).
 ⚠️ Chasing this step change is what surfaced [[0114]] — the coarse tables carry
 no USD values for 2025-02 → 2026-02. That is the more serious defect and
 outranks this task.
+
+
+## Re-measured 2026-08-21 — the target is XLM, and the scan is worse
+
+Measured from `system.parts` and `system.query_log` (no scan of the hot table),
+then two bounded `FINAL` scans. Supersedes the 2026-07-21 drained-state figures.
+
+### The scan
+
+| | 2026-07-21 (drained) | 2026-08-21 |
+|---|---|---|
+| table | 14.0M rows | **736.46M rows / 18.44 GiB / 102 partitions / 328 parts** |
+| `INSERT … SELECT` | 0.6-0.7 s, ~11-14M rows | **26.4 s, 739.68M rows, 1.08-1.45 GiB peak** |
+| `count_candidates` | 0.2-0.3 s | 6.7-9.0 s, 539M rows |
+| `pivot_sql` (XLM) | — | **45.6 s, 688M rows, 1.22 GiB peak** |
+| `peg_sql` | — | 14.2-15.3 s, 425M rows |
+
+`read_rows` tracks total table size exactly (728.80M on 08-07 → 739.68M on
+08-20, +10.9M in 13 days), which is the structural proof the July measurement
+relied on: this is the query's input, not the cluster's mood. **Zero exceptions
+in 14 days** — enrichment is not failing, it is simply never going to finish,
+which is why this task keeps sliding.
+
+⚠️ Peak memory is already 1.22-1.45 GiB. [[0154]] and option 5 both add a join
+to this pass; there is less headroom here than the options list assumes.
+
+### The backlog is XLM
+
+| era | rows | unenriched |
+|---|---|---|
+| historical (0088, `< 202403`) | 689.64M | 646.25M (93.7%) |
+| live window (`202607+`) | 17.05M | 10.44M (61.2%) |
+
+**656.69M candidates total** — this is 0209's "657,234,896", now identified as a
+whole-table figure rather than a USDT one.
+
+Top unpriced quote legs (`close_usd = 0 AND volume_quote > 0`):
+
+| quote | `quote_asset_id` | unpriced |
+|---|---|---|
+| **XLM** | **4** | **556.78M** |
+| yXLM | 10 | 12.42M |
+| yUSDC | 32 | 3.86M |
+| SHX | 14 | 3.67M |
+| XRP | 40 | 3.61M |
+
+USDT (`111`) is not in the top 15. `FINAL` also collapses 736.46M raw rows to
+706.69M, so ~29.8M superseded versions are re-read on every scan.
+
+### ⚠️ A bounded floor that must be declared, or AC 4 cannot terminate
+
+`pivot_sql` prices an XLM-quoted candle from the XLM/USDC market within
+`pivot_window_s`. **That market's first candle is 2021-02** (11,648 that month,
+rising to 44,328 by 202201). Everything older has no reference and is
+permanently unpriceable by this design:
+
+| year | XLM-quoted unpriced | |
+|---|---|---|
+| 2015-2020 | **5.34M** | ⛔ predates the reference — permanently unpriceable |
+| 2021 | 189.91K | drained (reference exists from Feb) |
+| 2022 | 131.57M | drain front is here |
+| 2023 | **388.56M** | untouched |
+| 2024 | 31.12M | untouched |
+| 2026 | 2.81K | live window, keeping up |
+
+The floor is small (<1%) and bounded, so the fear that the drain cannot finish
+is **refuted** — but it must be named and excluded from AC 4, not left to make a
+finished drain look unfinished. Note the mechanism: pre-2021 rows fail
+`r.usd IS NOT NULL` and the window predicate, so they are skipped rather than
+blocking; the oldest *matchable* candle is 2021-02, which is why 2021 is drained
+and the front sits in 2022.
+
+#### The drain rate — measured, and the scan is throttling it
+
+`written_rows` from `system.query_log`, 7 days to 2026-08-21:
+
+| stmt | runs/day | rows written/day | per run |
+|---|---|---|---|
+| **XLM pivot** | 66-72 | **660-720K** | **exactly 10,000 — `batch_size`, every batch** |
+| peg | 66-72 | 82-89K | ~1,230 |
+| oracle | 177-196 | 105-213K | ~550-1,100 |
+
+The XLM pivot writes **exactly `batch_size` on every single run** (17 runs →
+170K, 67 → 670K, 72 → 720K — perfectly linear). It is `LIMIT`-bound every time
+and has never once exhausted its candidates. Peg and oracle sit far below the
+same limit, so they are not limit-bound and are essentially caught up.
+**The XLM pivot is the sole bottleneck.**
+
+> **556.78M ÷ 720K/day ≈ 774 days (~2.1 years)**, before counting growth (0209
+> measured the candidate set rising 2,682 in under an hour, ~64K/day, which
+> pushes it past 850).
+
+⚠️ **The scan is not merely slow — it makes the pass FAIL, every single time.**
+The pass runs hourly at `max_batches = 20`, so 480 batches/day are budgeted; it
+achieves **72**. The reason is not the 300 s timeout (there is not one
+`Task timed out` in 48 h): **the XLM pivot errors with
+`Clickhouse(BadResponse(""))` on every invocation**, and `?` aborts the pass.
+The 72/day is 3 invocation attempts/hour — one EventBridge trigger plus two
+Lambda async retries — each dying after a single peg + XLM pivot. See [[0215]],
+which carries the CloudWatch timeline.
+
+The XLM pivot is the **only** statement over ~30 s (45.6 s, against peg 14.4 s
+and oracle 26.4 s, both of which survive), so a duration-linked read/idle
+timeout would explain why exactly this one dies. If that holds, bounding the
+scan so a batch costs ~1 s (the drained-state figure) does more than speed the
+drain up — it stops the pass failing at all, lets the **unchanged** Lambda reach
+its configured 20 batches → ~4.8M/day → **~116 days**, and lets the USDT pivot
+run for the first time. No config change needed.
+
+🔴 **Nothing about this was visible from the data.** ClickHouse completes the
+abandoned statement server-side and logs `QueryFinish`, so the 10,000 rows land
+and `written_rows`, `query_log` and the rollup alarms all read normal while the
+pass has not completed successfully in at least two days. The enrichment errors
+alarm that should have caught it is latched — [[0214]].
+
+⚠️ Corrects [[0209]]: `pivot_written = 0` is false for XLM, which writes ~700K
+rows/day. It holds only for USDT — see [[0215]].
+
+## What this does to the options
+
+**Option 1 wins, for a better reason than the one recorded above.** The live
+window is 17.05M rows and keeps up fine (2.81K unpriced). It is being dragged
+through a 736M-row scan purely to serve a historical drain. Splitting the live
+pass from a separate bounded historical sweep is the whole fix; partition
+pruning is the mechanism, not the argument.
 
 ## Root cause
 

@@ -21,6 +21,20 @@ history:
       enrichment alarm reads OK. Not caused by 0204 and not related to its
       changes; found because 0204's verification listed every alarm in the
       account rather than only its own.
+  - date: 2026-08-21
+    status: backlog
+    who: okarcz
+    note: >
+      ⬆️ PRIORITY EVIDENCE — this alarm's latch has been hiding a CONTINUOUS
+      failure, not a stale one-off. CloudWatch shows the enrichment pass erroring
+      with `Clickhouse(BadResponse(""))` on EVERY invocation, 3x/hour (one
+      trigger plus two Lambda async retries), across the full 48 h window checked
+      on 2026-08-21. It has not completed successfully in at least two days and
+      no page was raised. ⚠️ It is also invisible from the data: ClickHouse
+      finishes the abandoned statement server-side and logs QueryFinish, so the
+      rows land and every data-level signal reads normal. This alarm is the ONLY
+      thing that could have caught it. See 0215 for the timeline and 0111 for the
+      throughput consequence.
 ---
 
 # An enrichment alarm has been in ALARM for 24 days
