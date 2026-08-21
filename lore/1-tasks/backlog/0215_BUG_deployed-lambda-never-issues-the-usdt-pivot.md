@@ -1,6 +1,6 @@
 ---
 id: "0215"
-title: "Every enrichment invocation fails on the XLM pivot with BadResponse('') — the USDT pivot is never reached, and the drain only advances because ClickHouse finishes after the client gives up"
+title: "Caddy's response_header_timeout of 30s cuts every enrichment pivot at 30.0s — the pass has failed on EVERY invocation since 2026-07-26 and nothing reported it"
 type: BUG
 status: backlog
 related_adr: []
@@ -44,6 +44,22 @@ history:
       collapses into 0111; measure the actual timeout (client vs the Caddy mTLS
       proxy) before deciding. Also re-priced 0214: its latched alarm was hiding a
       continuous failure, and it is the only signal that could have caught this.
+  - date: 2026-08-21
+    status: backlog
+    who: okarcz
+    note: >
+      ROOT CAUSE CONFIRMED — Caddy `response_header_timeout 30s`. Measured 18/18
+      at exactly 30.0 s between `query_start_time` and the client error. CH and
+      our client are both exonerated by measurement (all four CH socket/HTTP
+      timeouts are 7200 with changed=1; the client sets no request timeout at
+      all). Onset 2026-07-26 matches the table crossing 30 s after cleanup was
+      disabled ~07-20. ⛔ RETRACTS the "probably collapses into 0111" note above:
+      0111 would clear the symptom but leaves the limit armed, silent, and
+      applying to every other caller including BE. Fix is two halves — BE raises
+      the Caddy knob, we add `max_execution_time` per-caller because
+      `max_execution_time = 0` today and Caddy's 30 s was accidentally the only
+      bound. Sequence the timeout FIRST so 0111 has a clean baseline to measure
+      against.
 ---
 
 # Every invocation fails on the XLM pivot, so the USDT pivot is never reached
@@ -178,67 +194,128 @@ confirm it exactly: peg 72/day, XLM pivot 72/day, oracle 192/day.
 ⛔ **NOT the Lambda timeout.** Zero `Task timed out` in 48 h. `Timeout` is 300 s,
 `MemorySize` 512 MB.
 
-### Likely cause — a 30-45 s read/idle timeout, hit by one statement only
+### ✅ ROOT CAUSE — `response_header_timeout 30s` in Caddy
 
-| statement | avg | survives? |
+`/srv/app/infra-hetzner/Caddyfile`, the `reverse_proxy clickhouse:8123` transport
+block:
+
+```
+dial_timeout             10s
+response_header_timeout  30s     ← this one
+read_timeout             7200s
+write_timeout            7200s
+```
+
+`response_header_timeout` bounds how long the **upstream may take to send its
+first response byte**. An `INSERT … SELECT` sends nothing until it completes. The
+XLM pivot runs **43.6-47.3 s**. So Caddy severs the connection at 30 s, every
+time, and the Rust client sees an empty body — `BadResponse("")`.
+
+**Measured 18/18, gap exactly 30.0 s** (`query_start_time` from `system.query_log`
+against the CloudWatch error timestamp, 6 h window, 2026-08-21):
+
+| query_start | client error (UTC) | gap |
 |---|---|---|
-| peg | 14.4 s | ✅ |
-| oracle | 26.4 s | ✅ |
-| **XLM pivot** | **45.6 s** | ❌ |
+| 06:19:30 | 06:20:00 | 30.0 |
+| 07:22:35 | 07:23:05 | 30.0 |
+| 08:26:35 | 08:27:05 | 30.0 |
+| 09:27:52 | 09:28:22 | 30.0 |
+| 11:27:57 | 11:28:27 | 30.0 |
 
-The XLM pivot is the only statement over ~30 s, and it is the only one that
-fails. An `INSERT … SELECT` sends no bytes while it runs, so a proxy **idle**
-timeout fits well. Two candidates, both unmeasured:
+…and every other sample identical.
 
-1. the `clickhouse` crate client's HTTP timeout, and
-2. the **Caddy mTLS reverse proxy** in front of ClickHouse on the Hetzner host.
+**Onset matches the mechanism.** Failures begin 2026-07-26 (6 that day, 67 the
+next, then a flat 72/day for 26 days). Cleanup was disabled ~2026-07-20 and the
+table began growing from 14.0M rows; by 07-26 the pivot had crossed 30 s and it
+has never dropped back under, because the table only grew (736.46M now).
 
-⚠️ `BadResponse("")` is a known-opaque driver error in this codebase — see the
-`FreezeDenied` doc comment in `ch_enrich.rs`, where the same empty-body symptom
-was a missing GRANT, diagnosable only by replaying the statement over curl.
-**Do not assume "timeout" without measuring it**; replay the XLM pivot over curl
-and watch where it dies.
+**Both other layers are exonerated, by measurement:**
 
-### ⚠️ This probably collapses into [[0111]]
+- **ClickHouse.** `http_send_timeout`, `http_receive_timeout`, `send_timeout`,
+  `receive_timeout` are all **7200** with `changed = 1` — deliberately raised.
+  The only 30 in `system.settings` is `http_headers_read_timeout`, which bounds
+  reading the *request* headers.
+- **Our client.** `mtls.rs` sets no request timeout at all — only
+  `pool_idle_timeout(8s)` and `pool_max_idle_per_host(2)`. hyper's legacy client
+  has no default. It was never going to give up on its own.
 
-If the cause is duration, the fix is not here. Bound the scan
-([[0111]] option 1), the XLM pivot drops from 45.6 s to ~1 s, the pass stops
-failing, and the USDT pivot is reached for the first time. **Measure the timeout
-before choosing** — if it is a proxy setting the two are independent, and if it
-is duration then this task is a symptom and should be closed into 0111.
+⚠️ **The Caddyfile's own comment shows how this happened.** It states the policy
+— *"Timeouts cover the longest legitimate analytical … 7200 s window"* — and
+sets `read_timeout`/`write_timeout` accordingly. `response_header_timeout` at 30 s
+is the one knob inconsistent with that policy. Its stated rationale ("tighter
+than the CH-side timeout so Caddy releases the upstream") is correct for a
+streaming `SELECT`, where headers arrive in milliseconds, and simply does not
+apply to `INSERT … SELECT`.
+
+### ⚠️ Scope is wider than this task
+
+The ceiling applies to **every** long statement through that proxy — our operator
+CLIs (sdex-backfill, coarse-repair, the 0182 runner, all on the same mTLS client)
+and **BE's own queries**, since it is their shared host. Any of them taking over
+30 s to first byte dies the same silent way.
+
+### ⛔ It does NOT collapse into [[0111]] — earlier guess retracted
+
+0111 option 1 would drop the pivot to ~3-4 s and clear the symptom incidentally.
+That is not a reason to skip the timeout fix:
+
+1. **The trap stays armed.** The limit remains, invisible, and silent. The next
+   thing on that path to exceed 30 s repeats this outage.
+2. **It fixes one caller.** Every other tool and BE keep the ceiling.
+3. **The hazard is the FAILURE MODE, not the 30 s.** ClickHouse succeeds, the
+   client errors, the rows land, nothing reports it. Staying under the line does
+   not change that.
+4. 🔴 **Ordering — this decides the sequence.** Bounding the scan first changes
+   two things at once (cost drops AND failures stop), so 0111's before/after
+   cannot be attributed. Fix the timeout first for a clean baseline.
+
+**Where the real guarantee comes from.** No fixed ceiling can be guaranteed
+un-hit. Today the statement's duration scales with **total table size**, which
+grows without bound, so *any* limit is crossed eventually. After 0111 option 1 it
+scales with **one partition**, which is bounded. That structural change — not a
+bigger number — is the guarantee.
 
 ### Why nobody saw it
 
 [[0214]] — the enrichment errors alarm latched 24 days ago and never
 re-notified. A continuous, every-invocation failure produced no page.
 
-## Implementation
+## Implementation — two halves, two owners
 
-- ✅ **The source is EXONERATED — done 2026-08-21.** `reference_ids_helpers`
-  asserts `full.pivot_ids() == vec![5, 7]` and `peg_sql_never_pegs_usdt` asserts
-  `IN (3)`; both green (39 unit tests pass). Feature flags are not involved —
-  nothing on the pivot path is `#[cfg]`-gated beyond `#[cfg(test)]`. So the code
-  emits two pivots and the deployed artifact emits one. **Do not go looking for a
-  source bug.**
-- ⚠️ **Close the coverage gap that let this hide.** The tests cover
-  `pivot_ids()` and `pivot_sql()` *separately*; NOTHING asserts that
-  `enrich_peg_pivot_step` issues **two** statements. That assertion — count the
-  statements one step sends, against a local CH — is what would have caught this,
-  and it is the reason a green suite coexisted with a dark quote leg for 8 days.
-- Rebuild from a verified-clean tree, redeploy, and confirm by reading the
-  **emitted SQL** — not `strings`, not `LastModified`, not deploy exit status
-  ([[oracle-writers-span-two-stacks]]). Both artifact-level checks looked healthy
-  while the artifact was wrong.
-- Rebuild, then verify **on the emitted SQL**, not on `strings` or
-  `LastModified` — both looked healthy while the artifact was wrong. Redeploy and
-  confirm by **measurement**, never by deploy exit status
-  ([[oracle-writers-span-two-stacks]]).
-- Add a guard so a silently-absent reference is refused rather than reported
-  healthy. 0204's gap 4 already carries `resolved_legs` in its metric row for
-  exactly this reason; the enrichment pass has no equivalent.
-- ⚠️ The enrichment Lambda ships from `eventbridge-stack`, which is where
-  `CleanupRule` lives. Check `describe-rule` **before and after** the deploy
-  ([[cleanup-rule-shreds-backfill-output]], [[0200]]).
+### Half 1 — BE's config, one line
+
+`response_header_timeout` **30s → 7200s**, aligning it with `read_timeout`,
+`write_timeout` and the policy the file's own comment states. Not a loosening of
+their policy — a correction of the one setting that contradicts it. ⚠️ Shared
+host, shared config: **request it, never edit it ourselves.**
+
+### Half 2 — ours, and it needs nothing from BE
+
+Caddy's 30 s was accidentally the only bound on a runaway query:
+`max_execution_time` is **0** (unlimited, unchanged). Removing Caddy's ceiling
+without replacing it leaves a two-hour hole.
+
+Set `max_execution_time` **on our client** instead. ClickHouse then enforces it
+and **throws a real exception with an error code** the worker logs, rather than
+an empty body indistinguishable from a network blip. `timeout_overflow_mode` is
+already `throw`.
+
+⚠️ **It must be per-caller, not a constant.** ~120 s suits the scheduled Lambda
+(2.6x headroom over today's 45.6 s worst, inside the 300 s Lambda budget so a
+runaway surfaces as a clean CH error rather than a Lambda timeout). The operator
+CLIs legitimately run far longer statements — a single global value breaks them
+and reintroduces this failure class from the other direction.
+
+### Also
+
+- Make an empty-body error distinguishable in the logs from an ordinary network
+  failure, so a recurrence is diagnosable without a 26-day archaeology dig.
+- Track worst statement duration against the configured ceiling as a metric, so
+  drift toward the limit is visible before it crosses.
+- ⚠️ Both `system.settings` readings were taken as `default` via CHQ. The worker
+  connects as `prices_writer`, an XML user that can carry a different profile.
+  Confirm against `system.settings_profile_elements` before telling BE "there is
+  no bound".
 
 ## Acceptance Criteria
 
@@ -251,6 +328,8 @@ re-notified. A continuous, every-invocation failure produced no page.
 - [ ] `peg_insert : pivot_insert` reaches 1:2 on `price_ohlcv_1m`.
 - [ ] USDT-quoted `_1m` rows are measurably written — `written_rows > 0` on the
       USDT pivot, recorded before/after.
+- [ ] `max_execution_time` is set per-caller on our client, and an exceeded bound
+      produces a logged ClickHouse exception — verified by inducing, not inferred.
 - [ ] `CleanupRule` verified `DISABLED` before and after the deploy.
 - [ ] A missing reference asset fails loudly instead of silently narrowing
       `pivot_ids()`.
