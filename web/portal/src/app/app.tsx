@@ -133,8 +133,14 @@ function Prerequisites() {
  * the task. "Cancelled" is not an error: the visitor pressed Cancel at Discord's
  * consent screen, the callback redirected here with `?signin=cancelled`, and the
  * only reasonable response is to say so and leave the button where it was.
+ *
+ * `rateLimit` is nothing to do with sign-in and is not read here: it comes off
+ * `/config`, which only this component's parent has, and is wanted three levels
+ * down by the usage panel (task 0188). Passed through rather than re-fetched or
+ * put in a context — one prop across two hops is less machinery than either,
+ * and it keeps the value's single source visible in the call chain.
  */
-function SignIn() {
+function SignIn({ rateLimit }: { rateLimit?: number }) {
   const [session, setSession] = useState<SessionState>({ state: 'loading' });
   // Two landing states, from two literals the backend appends. `cancelled` is
   // the visitor's own choice at Discord's consent screen; `failed` is any other
@@ -227,7 +233,13 @@ function SignIn() {
   }
 
   if (session.session.authenticated) {
-    return <Dashboard onSignOut={onSignOut} session={session.session} />;
+    return (
+      <Dashboard
+        onSignOut={onSignOut}
+        session={session.session}
+        rateLimit={rateLimit}
+      />
+    );
   }
 
   return (
@@ -271,9 +283,12 @@ function SignIn() {
 function Dashboard({
   onSignOut,
   session,
+  rateLimit,
 }: {
   onSignOut: () => void;
   session: PortalSession;
+  /** The free plan's per-second rate limit, straight from `/config`. */
+  rateLimit?: number;
 }) {
   const [keyOnScreen, setKeyOnScreen] = useState(false);
 
@@ -297,7 +312,7 @@ function Dashboard({
       {/* Task 0188. Keyed refetch: a key appearing on screen (revealed on
           mount, or fresh off 0189's issue round-trip) re-asks for usage, so
           the section leaves "no key yet" without a manual refresh. */}
-      <Usage keyOnScreen={keyOnScreen} />
+      <Usage keyOnScreen={keyOnScreen} rateLimit={rateLimit} />
     </>
   );
 }
@@ -658,8 +673,11 @@ function ApiKey({ onKey }: { onKey?: () => void }) {
  * - **The reset rule.** "The 1st of each month, 00:00 UTC" is OUR stated rule,
  *   not an AWS guarantee — AWS documents neither the instant nor the timezone
  *   (ADR 0010, correction #2) — and it is worded as ours.
- * - **The limits as numbers**: 1 request per second (task 0157) and
- *   used-of-quota, not prose.
+ * - **The limits as numbers**: requests per second (task 0157) and
+ *   used-of-quota, not prose. The rate figure comes from `/config`, not from a
+ *   literal here — it is the per-env value the gateway enforces
+ *   (`pricingApiFreePlanRateLimit`), and it was the one number on this panel
+ *   that could drift from what is actually in force.
  *
  * Fetches on mount, unlike `ApiKey` beside it, and the difference is the whole
  * point of the backend's design: `GET /usage` is read-only by construction —
@@ -667,7 +685,13 @@ function ApiKey({ onKey }: { onKey?: () => void }) {
  * nothing and mints nothing. The refresh button re-asks; the backend's
  * in-process cache is what keeps that from turning into control-plane traffic.
  */
-function Usage({ keyOnScreen }: { keyOnScreen: boolean }) {
+function Usage({
+  keyOnScreen,
+  rateLimit,
+}: {
+  keyOnScreen: boolean;
+  rateLimit?: number;
+}) {
   type UsageView =
     | { state: 'loading' }
     | { state: 'ok'; usage: PortalUsage }
@@ -707,24 +731,37 @@ function Usage({ keyOnScreen }: { keyOnScreen: boolean }) {
     return () => cancelInFlight.current?.();
   }, [load]);
 
-  // The latest view state, for the effect below — a ref rather than a dep,
-  // because the refetch must fire on the keyOnScreen TRANSITION alone. With
-  // `view.state` as a dependency the effect re-runs on every state change,
-  // and "no-key → load → no-key" (the backend can keep answering no_key while
-  // its cache catches up) becomes a fetch loop.
-  const viewState = useRef<UsageView['state']>('loading');
-  useEffect(() => {
-    viewState.current = view.state;
-  }, [view.state]);
+  // Fires the keyed refetch AT MOST ONCE per mount. This latch is what lets
+  // the effect below watch `view.state` — the obvious dependency — without
+  // becoming a fetch loop: the backend can legitimately keep answering
+  // `no_key` while its own cache catches up, so "no-key → load → no-key"
+  // would otherwise re-trigger itself forever.
+  //
+  // Watching the state (rather than the `keyOnScreen` transition alone, which
+  // is what a ref-read did) is the point, and it survives task 0189 changing
+  // where the key comes from. The two arrivals race the mount-time usage
+  // fetch: the reveal resolving with a key, and a landing on `?issue=ok`.
+  // Either can happen while the view is still `'loading'`, so a
+  // transition-only effect saw nothing to do — and then never ran again,
+  // because its dependencies had already settled. The in-flight request,
+  // issued before the key existed, resolves `no_key`, and the section sat on
+  // "your key is new" until the visitor found the Refresh button. Nothing the
+  // visitor could press helped either: `setKeyOnScreen(true)` on an
+  // already-`true` state changes no dependency.
+  const refetchedForKey = useRef(false);
 
-  // When a key appears on screen, refetch — but only OUT OF the no-key state:
-  // that is the one answer the issue just falsified. A section already
-  // showing numbers is showing an answer a reveal does not change, and
-  // blanking it into a loading flicker for an identical body would make the
-  // press look like it broke something.
+  // When a key is on screen and the usage section says "no key", refetch —
+  // that is the one answer the issue just falsified, whenever it arrives. A
+  // section already showing numbers is showing an answer a reveal does not
+  // change, and blanking it into a loading flicker for an identical body would
+  // make the press look like it broke something, so `'ok'` is left alone.
   useEffect(() => {
-    if (keyOnScreen && viewState.current === 'no-key') load();
-  }, [keyOnScreen, load]);
+    if (!keyOnScreen || view.state !== 'no-key' || refetchedForKey.current) {
+      return;
+    }
+    refetchedForKey.current = true;
+    load();
+  }, [keyOnScreen, view.state, load]);
 
   /**
    * THE lag line — the wording this task decides once. Rendered under every
@@ -745,9 +782,19 @@ function Usage({ keyOnScreen }: { keyOnScreen: boolean }) {
   /** The reset rule (ours) and the rate limit (0157), as numbers. */
   const limits = (resetsAt?: string) => (
     <>
-      <p>
-        Rate limit: <strong>1</strong> request per second.
-      </p>
+      {/* Omitted, not defaulted, when the deployment did not say what the
+          limit is: a fallback figure here would be exactly the silent
+          staleness reading it from `/config` removes. Every deployed
+          environment sets it — `compute-stack.ts` passes
+          `pricingApiFreePlanRateLimit` unconditionally — so the absent case is
+          a local run, where saying nothing is the honest answer. */}
+      {rateLimit !== undefined && (
+        <p>
+          Rate limit: <strong data-testid="rate-limit">{rateLimit}</strong>{' '}
+          request
+          {rateLimit === 1 ? '' : 's'} per second.
+        </p>
+      )}
       <p>
         Quota resets on the 1st of each month, 00:00 UTC
         {resetsAt ? (
@@ -896,7 +943,9 @@ function PortalHome() {
 
       {/* Reachable only once PORTAL_ENABLED is true. Task 0186 put sign-in
           here; issuing a key is task 0187's. */}
-      {probe.state === 'ok' && probe.config.enabled && <SignIn />}
+      {probe.state === 'ok' && probe.config.enabled && (
+        <SignIn rateLimit={probe.config.rate_limit_per_second} />
+      )}
 
       {/* A failure here is not cosmetic: it means the bundle could not reach
           its own backend, which is either the behaviour ordering in task 0184's

@@ -603,6 +603,7 @@ pub fn build_app_with(
         portal_endpoints: endpoints,
         portal_keys: gateway,
         portal_eligibility: eligibility,
+        portal_rate_limit: None,
     };
     app(&config, AppState::without_ch())
 }

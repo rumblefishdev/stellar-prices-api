@@ -160,6 +160,7 @@ fn config() -> AppConfig {
         // config there is no code path here that can reach API Gateway.
         portal_keys: None,
         portal_eligibility: None,
+        portal_rate_limit: None,
     }
 }
 

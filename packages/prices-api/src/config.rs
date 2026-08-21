@@ -33,6 +33,25 @@ pub struct AppConfig {
     /// half-built portal to the internet. Defaults are chosen per flag by what
     /// goes wrong when the variable is forgotten.
     pub portal_enabled: bool,
+    /// The free plan's per-key rate limit, requests per second, for the portal
+    /// dashboard to state (task 0188).
+    ///
+    /// Read from `PORTAL_RATE_LIMIT`, which `compute-stack.ts` sets from
+    /// `pricingApiFreePlanRateLimit` — the same config value
+    /// `api-gateway-stack.ts` feeds to `addUsagePlan`. It travels this way
+    /// rather than being read back from `GetUsagePlan` because that would cost
+    /// the portal a control-plane grant task 0188 deliberately does not take,
+    /// and rather than being a literal in the frontend because that is the one
+    /// number on the panel that could then drift from what the gateway
+    /// enforces: raise the limit in `infra/envs/production.json`, deploy, and a
+    /// dashboard whose stated theme is rendering honestly would keep stating
+    /// the old figure.
+    ///
+    /// `None` — unset, or set to something that is not a positive integer —
+    /// means this deployment cannot say what the limit is, and the page omits
+    /// the line rather than guessing. A default of 1 here would be the same
+    /// silent staleness one layer down.
+    pub portal_rate_limit: Option<u32>,
     /// Credentials for portal sign-in (task 0186): the Discord client id and
     /// secret, the registered redirect URI, and the key the session and `state`
     /// cookies are signed with.
@@ -97,6 +116,10 @@ impl AppConfig {
             portal_enabled: std::env::var("PORTAL_ENABLED")
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                 .unwrap_or(false),
+            portal_rate_limit: std::env::var("PORTAL_RATE_LIMIT")
+                .ok()
+                .and_then(|raw| raw.trim().parse::<u32>().ok())
+                .filter(|limit| *limit > 0),
             portal_oauth: None,
             portal_endpoints: crate::portal::auth::discord::Endpoints::from_env(),
             portal_keys: None,

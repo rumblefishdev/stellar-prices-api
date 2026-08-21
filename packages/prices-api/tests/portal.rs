@@ -36,6 +36,10 @@ fn config_with_keys(portal_enabled: bool, api_keys: Vec<String>) -> AppConfig {
         // config there is no code path here that can reach API Gateway.
         portal_keys: None,
         portal_eligibility: None,
+        // Task 0188: what the dashboard states as the per-key rate limit.
+        // `None` is the shape a deployment that was not told the limit has, and
+        // the tests that care set it explicitly.
+        portal_rate_limit: None,
     }
 }
 
@@ -196,6 +200,39 @@ async fn config_reports_open_when_the_flag_is_on() {
     assert_eq!(status, StatusCode::OK);
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["enabled"], serde_json::Value::Bool(true));
+}
+
+/// The dashboard's rate-limit line comes from here, not from a literal in the
+/// bundle (task 0188).
+///
+/// `pricingApiFreePlanRateLimit` is a per-env config value that
+/// `api-gateway-stack.ts` hands to `addUsagePlan` and `compute-stack.ts` hands
+/// to this Lambda as `PORTAL_RATE_LIMIT`. Raising it and deploying must change
+/// what the page says, which is only true while the page reads it from here.
+#[tokio::test]
+async fn config_carries_the_rate_limit_the_gateway_enforces() {
+    let mut settings = config(true);
+    settings.portal_rate_limit = Some(5);
+
+    let (status, body) = drive(app(&settings, AppState::without_ch()), CONFIG_PATH).await;
+
+    assert_eq!(status, StatusCode::OK);
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["rate_limit_per_second"], serde_json::json!(5));
+}
+
+/// A deployment that was not told the limit says nothing about it rather than
+/// defaulting to a number — a stale default IS the drift this field exists to
+/// remove, one layer down.
+#[tokio::test]
+async fn config_omits_the_rate_limit_when_it_was_not_configured() {
+    let (status, body) = send(true, CONFIG_PATH).await;
+    assert_eq!(status, StatusCode::OK);
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(
+        json.get("rate_limit_per_second").is_none(),
+        "an unconfigured limit must be absent, not a guess: {json}"
+    );
 }
 
 /// A stale `enabled: false` cached at a CDN or in a browser would keep the

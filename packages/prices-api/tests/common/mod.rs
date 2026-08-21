@@ -33,6 +33,7 @@ pub fn app_without_ch() -> Router {
         // config there is no code path here that can reach API Gateway.
         portal_keys: None,
         portal_eligibility: None,
+        portal_rate_limit: None,
     };
     app(&config, AppState::without_ch())
 }

@@ -36,9 +36,19 @@
 //! neither the reset instant nor its timezone (ADR 0010, correction #2, still
 //! open — the only statement anywhere is an example caption). "The 1st of the
 //! month, 00:00 UTC" is **our stated product rule**, the same one the rework
-//! cap in [0191] is defined by. If AWS's counter turns out to roll at a
-//! different instant, that is a UX wrinkle to word around, not a correctness
-//! bug in this module.
+//! cap in [0191] is defined by.
+//!
+//! If AWS's counter turns out to roll at a different instant, the LABEL is a UX
+//! wrinkle to word around — but the NUMBERS under it are not, and that is worth
+//! being precise about. The query runs from our calendar 1st while `remaining`
+//! is the last day's balance, so a range spanning two of AWS's periods would sum
+//! last period's traffic into `used` and reconstruct `limit = used + remaining`
+//! above the real quota: a 100 000 plan rendered as "150 000". `summarize_days`
+//! in `keys/gateway.rs` is what keeps that from reaching the page — it spots the
+//! reset (a `remaining` that rises can only be one) and counts from it, so both
+//! figures come out of a single AWS period whatever instant that period began.
+//! It also logs the sighting, which is the only evidence this system can produce
+//! about the instant ADR 0010 is still open on.
 //!
 //! # `GetUsage` lags, and the response says so
 //!
@@ -165,6 +175,9 @@ struct CacheInner {
 /// comfortably past that.
 #[derive(Clone, Copy)]
 struct EpochMark {
+    /// Bumped on every eviction, so it is `1` on the first one and never `0`
+    /// once the mark exists. [`epoch_of`] relies on that: "no mark" is a state
+    /// of its own, not a zero.
     value: u64,
     bumped_at: Instant,
 }
@@ -194,6 +207,16 @@ impl UsageCache {
         {
             cache.entries.remove(sub);
         }
+        // Pruned here as well as in `remember`, because `remember` is not
+        // reached on every path: a container whose usage lookups consistently
+        // fail (throttled or erroring with nothing cached) never calls it, and
+        // this writer would then be the one map's only writer and never its
+        // pruner — one mark accumulating per key issuance for the life of the
+        // container. Same bound as everywhere else, applied by whoever writes.
+        cache
+            .epochs
+            .retain(|_, mark| mark.bumped_at.elapsed() < STALE_KEEP);
+
         let mark = cache.epochs.entry(sub.to_string()).or_insert(EpochMark {
             value: 0,
             bumped_at: Instant::now(),
@@ -524,12 +547,19 @@ fn cached(
 
 /// The caller's current eviction epoch — read before a lookup starts, and
 /// compared by [`remember`] before a "no key" is stored. See [`CacheInner`].
-fn epoch_of(state: &UsageState, sub: &str) -> u64 {
+///
+/// `None` means the caller has no mark at all, which is the ordinary state:
+/// marks exist only for callers who have issued a key recently. It is
+/// deliberately NOT flattened to `0` — `0` is a value a mark can never hold
+/// (the first bump makes it `1`), so conflating the two would make "the mark
+/// was pruned mid-lookup" indistinguishable from "the mark says zero". See
+/// [`remember`].
+fn epoch_of(state: &UsageState, sub: &str) -> Option<u64> {
     let cache = state
         .cache
         .lock()
         .expect("the usage cache lock is not poisoned");
-    cache.epochs.get(sub).map(|mark| mark.value).unwrap_or(0)
+    cache.epochs.get(sub).map(|mark| mark.value)
 }
 
 /// Whether a cached answer still describes the current period.
@@ -559,17 +589,29 @@ fn answers_for_period(answer: &CachedAnswer, current_period_start: &str) -> bool
 /// remembers it. Real usage answers are stored regardless — see
 /// [`CacheInner`].
 ///
+/// **A caller with no mark now matches any epoch**, and that is the invariant
+/// rather than a laxity. Marks are pruned at [`STALE_KEEP`] by whichever
+/// `remember` runs next, so a mark bumped more than fifteen minutes ago can
+/// vanish during this lookup's ~10s window; comparing a pruned mark's absence
+/// against the nonzero epoch this lookup read would throw away a perfectly
+/// legitimate "no key" and buy a `GetApiKeys` on every load after it. Absence
+/// cannot hide the race it guards against: [`UsageCache::invalidate_no_key`]
+/// stamps `bumped_at` at the moment it bumps, so any eviction inside this
+/// window leaves a mark too fresh to be pruned. No mark at this point therefore
+/// PROVES no eviction happened.
+///
 /// Pruning on insert bounds both maps by activity: they hold at most the
 /// callers seen in the last [`STALE_KEEP`], which for this portal is a small
 /// number — and a warm Lambda container is the only place they live long
 /// enough to matter.
-fn remember(state: &UsageState, sub: &str, answer: CachedAnswer, epoch: u64) {
+fn remember(state: &UsageState, sub: &str, answer: CachedAnswer, epoch: Option<u64>) {
     let mut cache = state
         .cache
         .lock()
         .expect("the usage cache lock is not poisoned");
     if matches!(answer, CachedAnswer::NoKey)
-        && cache.epochs.get(sub).map(|mark| mark.value).unwrap_or(0) != epoch
+        && let Some(mark) = cache.epochs.get(sub)
+        && Some(mark.value) != epoch
     {
         tracing::debug!("a key was issued while this lookup ran; not caching its 'no key'");
         return;
@@ -752,6 +794,110 @@ mod tests {
         // Whereas a lookup that STARTED after the eviction stores normally.
         remember(&state, sub, CachedAnswer::NoKey, epoch_of(&state, sub));
         assert!(cached(&state, sub, CACHE_TTL, ANY_PERIOD).is_some());
+    }
+
+    /// What `STALE_KEEP` pruning does to one caller's mark, without waiting
+    /// fifteen minutes for it — `retain` drops the entry and nothing else
+    /// about the cache changes.
+    fn prune_the_mark(state: &UsageState, sub: &str) {
+        state
+            .cache
+            .lock()
+            .expect("the usage cache lock is not poisoned")
+            .epochs
+            .remove(sub);
+    }
+
+    /// Push one caller's mark past [`STALE_KEEP`], so the next writer's
+    /// `retain` drops it. Answers `false` on the one platform condition that
+    /// makes this impossible — an `Instant` less than `STALE_KEEP` from the
+    /// monotonic clock's origin, i.e. a machine booted minutes ago — because a
+    /// clock floor is not this module's behaviour to assert.
+    fn age_the_mark(state: &UsageState, sub: &str) -> bool {
+        let mut cache = state
+            .cache
+            .lock()
+            .expect("the usage cache lock is not poisoned");
+        let Some(mark) = cache.epochs.get_mut(sub) else {
+            return false;
+        };
+        match mark
+            .bumped_at
+            .checked_sub(STALE_KEEP + Duration::from_secs(1))
+        {
+            Some(aged) => {
+                mark.bumped_at = aged;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The other side of the guard: a mark that is GONE means no eviction
+    /// happened, so the "no key" is good and must be cached.
+    ///
+    /// Marks are pruned at [`STALE_KEEP`] by whichever `remember` runs next, so
+    /// a caller whose last key issue was more than fifteen minutes ago can lose
+    /// their mark to another request's prune while this lookup is in flight.
+    /// Read as a mismatch, that would discard a legitimate "no key" and buy a
+    /// `GetApiKeys` on every load afterwards — for a caller who genuinely has
+    /// none, which is exactly the state the cache exists to make cheap.
+    ///
+    /// Absence is safe to trust because `invalidate_no_key` stamps `bumped_at`
+    /// as it bumps: any eviction inside this window leaves a mark too fresh to
+    /// prune.
+    #[test]
+    fn a_no_key_survives_its_epoch_mark_being_pruned_mid_lookup() {
+        let state = UsageState::new(None, None);
+        let sub = "308994132968210433";
+
+        // Some time ago this caller issued a key, so they carry a mark — and
+        // it is nonzero, which is what made the old `unwrap_or(0)` comparison
+        // read a pruned mark as a moved epoch.
+        state.cache_handle().invalidate_no_key(sub);
+        let epoch_at_lookup_start = epoch_of(&state, sub);
+        assert_eq!(epoch_at_lookup_start, Some(1));
+
+        // Mid-lookup, another request's `remember` prunes the stale mark.
+        prune_the_mark(&state, sub);
+
+        remember(&state, sub, CachedAnswer::NoKey, epoch_at_lookup_start);
+        assert!(
+            cached(&state, sub, CACHE_TTL, ANY_PERIOD).is_some(),
+            "no mark means no eviction happened, so this 'no key' is good"
+        );
+    }
+
+    /// `remember` is not reached on every path — a container whose lookups
+    /// consistently throttle or fail with nothing cached never calls it — so
+    /// the eviction handle prunes too. Without that, `epochs` is a map with a
+    /// writer and no pruner: one mark per key issuance, for the life of a warm
+    /// container.
+    #[test]
+    fn the_eviction_handle_prunes_stale_marks_of_its_own() {
+        let state = UsageState::new(None, None);
+        let (long_gone, present) = ("111111111111111111", "222222222222222222");
+
+        state.cache_handle().invalidate_no_key(long_gone);
+        if !age_the_mark(&state, long_gone) {
+            return;
+        }
+
+        // A second caller's eviction — `remember` is never called here.
+        state.cache_handle().invalidate_no_key(present);
+
+        let cache = state
+            .cache
+            .lock()
+            .expect("the usage cache lock is not poisoned");
+        assert!(
+            !cache.epochs.contains_key(long_gone),
+            "a mark older than STALE_KEEP must not outlive the next eviction"
+        );
+        assert!(
+            cache.epochs.contains_key(present),
+            "the mark just bumped is the one thing the prune must keep"
+        );
     }
 
     /// The guard is for "no key" only: a real usage answer cannot be
