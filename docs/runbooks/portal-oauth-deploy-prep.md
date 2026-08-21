@@ -426,13 +426,14 @@ three are written out in full in `compute-stack.ts`; the short version:
   partner keys included. The handler always asks for `includeValues=false`, so
   this is what code execution in the Lambda would buy an attacker, not what the
   feature does.
-- **`DELETE /apikeys/*` CAN be narrowed** with an `aws:ResourceTag/ManagedBy`
-  condition — API Gateway supports tag conditions on control-plane actions, and
-  the keys are already tagged. It is not written yet: task 0194 owns it, because
-  it should be verified against the deployed stack and it changes behaviour for
-  a console-created duplicate (untagged → `AccessDenied` → `502` instead of
-  reconciling). Until then the reconciler's blast radius is bounded by code, not
-  by IAM.
+- **`GET`/`PATCH`/`DELETE` on `/apikeys/*` are tag-scoped** to
+  `ManagedBy=prices-portal` (task 0191). Without the condition the per-key
+  `GET` was the real exposure — `GetApiKey(includeValue=true)` reads the value
+  of any key in the account by id — and `PATCH` could rename a partner key
+  into a portal name. The behaviour change to know: an exact-name key created
+  **by hand** in the console is untagged and is no longer adopted; the routes
+  answer `502` and the key is left alone. The listing (`/apikeys`) cannot
+  take the condition and stays account-wide (values never requested).
 
 Task 0194 audits all three.
 

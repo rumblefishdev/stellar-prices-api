@@ -312,11 +312,16 @@ and nobody else's.
 
 On the page, **Replace my key…** beside the key opens a confirmation; the
 confirm button arms only once you type `delete-key`. Pressing it **deactivates
-the key immediately and issues nothing** — `POST /api-tokens/api/key/rework`,
-session-authenticated, no Discord round-trip. A new key can be issued only
-from the start of the next quota period (the 1st of next month, 00:00 UTC,
-**our** rule): until then "Get my API key" lands on `?issue=capped` with the
-date, and the page says so instead of offering the link.
+the key and issues nothing** — `POST /api-tokens/api/key/rework`,
+session-authenticated, no Discord round-trip. The control plane answers at
+once; the **data plane follows within about half a minute** (~25 s measured,
+0180 item 8), so treat the value as live until then — which is what the
+dialog says, and why neither it nor this section claims "immediately".
+
+A new key can be issued only from the start of the next quota period (the 1st
+of next month, 00:00 UTC, **our** rule): until then "Get my API key" lands on
+`?issue=capped` with the date, and the page says so instead of offering the
+link.
 
 ```bash
 # Before: one enabled key.

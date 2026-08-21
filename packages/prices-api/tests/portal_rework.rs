@@ -34,7 +34,7 @@ use harness::*;
 use mock_discord::{GRANTED_SCOPE, MemberReply, MockDiscord};
 use prices_api::portal::auth::discord::Endpoints;
 use prices_api::portal::keys::gateway::Gateway;
-use prices_api::portal::keys::{KEY_PATH, REWORK_PATH};
+use prices_api::portal::keys::{KEY_PATH, PORTAL_REQUEST_HEADER, REWORK_PATH};
 use prices_api::portal::usage::USAGE_PATH;
 
 fn app_with_discord(discord: &MockDiscord, gateway: &MockGateway) -> Router {
@@ -96,8 +96,17 @@ fn seed_revoked(gateway: &MockGateway, revoked_at: u64) -> String {
     })
 }
 
+/// The portal page's revoke: `POST` with the same-origin marker header the
+/// backend requires (`PORTAL_REQUEST_HEADER`).
 async fn revoke(router: &Router, cookie: Option<&str>) -> Reply {
-    call_path(router.clone(), "POST", REWORK_PATH, cookie).await
+    call_path_with(
+        router.clone(),
+        "POST",
+        REWORK_PATH,
+        cookie,
+        &[PORTAL_REQUEST_HEADER, ("sec-fetch-site", "same-origin")],
+    )
+    .await
 }
 
 async fn reveal_via(router: &Router) -> Reply {
@@ -138,10 +147,12 @@ async fn revoke_is_an_empty_404_while_the_portal_is_closed() {
 // ---------------------------------------------------------------------------
 
 /// The user's scenario: a key issued TODAY leaks, "Replace my key" is
-/// pressed, and the key is off at once — one `UpdateApiKey`, no Discord call,
-/// nothing created — with the answer naming the 1st of next month.
+/// pressed, and the key is disabled on the control plane in one
+/// `UpdateApiKey` — no Discord call, nothing created — with the answer naming
+/// the 1st of next month and the revocation instant. (The data plane follows
+/// in ~25 s, 0180 item 8; that window is the page's to state, and it does.)
 #[tokio::test]
-async fn revoke_deactivates_the_key_immediately_and_issues_nothing() {
+async fn revoke_disables_the_key_in_one_call_and_issues_nothing() {
     let discord = MockDiscord::start(GRANTED_SCOPE, None).await;
     let gateway = MockGateway::start().await;
     let key = seed_attached(&gateway, now_secs());
@@ -478,6 +489,70 @@ async fn a_revocation_whose_period_has_rolled_reveals_as_no_key() {
     );
 }
 
+/// An idempotent revoke of a key revoked in an EARLIER period does not tell
+/// the visitor to wait another month: `next_eligible_at` comes from
+/// `cap::decide`, like the reveal's and the issue path's, so a stale tab that
+/// re-`POST`s cannot hide an issue link the round-trip would have honoured.
+#[tokio::test]
+async fn an_idempotent_revoke_after_the_period_rolled_says_a_key_is_due_now() {
+    let discord = MockDiscord::start(GRANTED_SCOPE, None).await;
+    let gateway = MockGateway::start().await;
+    let revoked_at = the_3rd_of(first_of_month_offset(-1));
+    seed_revoked(&gateway, revoked_at);
+    let app = app_with_discord(&discord, &gateway);
+
+    let reply = revoke(&app, Some(&session_cookie(USER_ID))).await;
+    assert_eq!(reply.status, StatusCode::OK);
+    let next = reply.json()["next_eligible_at"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (next_month, _) = next_eligible_expected();
+    assert_ne!(
+        next, next_month,
+        "the period has rolled; the answer must not name the next one"
+    );
+    // "From now", so the page offers the issue link instead of a date.
+    let announced = chrono::DateTime::parse_from_rfc3339(&next).unwrap();
+    assert!(announced.timestamp() as u64 <= now_secs() + 5);
+    // The recorded instant, not "now" and not the epoch.
+    assert_eq!(
+        reply.json()["revoked_at"],
+        serde_json::json!(
+            chrono::DateTime::<chrono::Utc>::from_timestamp(revoked_at as i64, 0)
+                .unwrap()
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+        )
+    );
+    assert_eq!(gateway.with(|s| s.ops.len()), 0, "nothing was written");
+}
+
+/// An undated revocation record beside a dated one must not erase the date:
+/// a `None` instant caps against a `next_eligible_at` recomputed from the
+/// current period on every read, which rolls forward forever.
+#[tokio::test]
+async fn an_undated_duplicate_does_not_lock_the_owner_out_forever() {
+    let discord = MockDiscord::start(GRANTED_SCOPE, None).await;
+    let gateway = MockGateway::start().await;
+    seed_revoked(&gateway, the_3rd_of(first_of_month_offset(-1)));
+    gateway.with(|s| {
+        let id = s.seed_revoked(&key_name(), 900, 0);
+        s.undate(&id);
+        s.plan_keys.push((PLAN_ID.to_string(), id));
+    });
+    let app = app_with_discord(&discord, &gateway);
+
+    // Last month's revocation is the one that governs, so the replacement is
+    // due: the reveal says "no key" and the round-trip issues.
+    let revealed = reveal_via(&app).await;
+    assert_eq!(revealed.json()["code"], "no_key");
+    assert_eq!(
+        issue_round_trip(&app).await.location(),
+        "/api-tokens/?issue=ok"
+    );
+    assert_eq!(gateway.with(|s| s.create_calls), 1);
+}
+
 /// The LATEST revocation governs: a duplicate revoked last month beside a key
 /// revoked this month must not open the door this month's revocation closed.
 #[tokio::test]
@@ -588,7 +663,7 @@ async fn the_full_cycle_issue_revoke_wait_reissue() {
 
     // The 1st arrives.
     gateway.with(|s| {
-        s.keys[0].last_updated_at = the_3rd_of(first_of_month_offset(-1));
+        s.keys[0].last_updated_at = Some(the_3rd_of(first_of_month_offset(-1)));
     });
     assert_eq!(
         issue_round_trip(&app).await.location(),
@@ -620,4 +695,193 @@ async fn every_revoke_answer_carries_no_store() {
         assert_eq!(reply.cache_control(), "no-store");
         assert!(reply.headers.get(header::SET_COOKIE).is_none());
     }
+}
+
+// ---------------------------------------------------------------------------
+// Review findings (2026-08-21 audit)
+// ---------------------------------------------------------------------------
+
+/// A revoke without the portal's own request marker — a cross-site form
+/// `POST` that `SameSite=Lax` would let through once the portal and another
+/// page share a registrable domain — is refused before the session is read,
+/// and so is one that carries the marker but says `Sec-Fetch-Site:
+/// cross-site`. Nothing is written either way.
+#[tokio::test]
+async fn a_revoke_without_the_same_origin_markers_is_refused_before_anything_is_read() {
+    let discord = MockDiscord::start(GRANTED_SCOPE, None).await;
+    let gateway = MockGateway::start().await;
+    seed_attached(&gateway, 1_000);
+    let app = app_with_discord(&discord, &gateway);
+    let session = session_cookie(USER_ID);
+
+    for (label, headers) in [
+        ("no marker", vec![]),
+        ("wrong marker", vec![("x-requested-with", "XMLHttpRequest")]),
+        (
+            "marker but cross-site",
+            vec![PORTAL_REQUEST_HEADER, ("sec-fetch-site", "cross-site")],
+        ),
+        (
+            "marker but same-site sibling host",
+            vec![PORTAL_REQUEST_HEADER, ("sec-fetch-site", "same-site")],
+        ),
+    ] {
+        let reply =
+            call_path_with(app.clone(), "POST", REWORK_PATH, Some(&session), &headers).await;
+        assert_eq!(reply.status, StatusCode::FORBIDDEN, "{label}");
+        assert_eq!(reply.json()["code"], "cross_site_request", "{label}");
+        assert_eq!(reply.cache_control(), "no-store", "{label}");
+    }
+    assert_eq!(gateway.with(|s| s.list_calls), 0, "refused before AWS");
+    assert!(gateway.with(|s| s.keys[0].enabled));
+
+    // A typed-URL / bookmark style request (`none`) and a browser that sends
+    // no fetch metadata at all are both fine WITH the marker.
+    for headers in [
+        vec![PORTAL_REQUEST_HEADER, ("sec-fetch-site", "none")],
+        vec![PORTAL_REQUEST_HEADER],
+    ] {
+        let reply =
+            call_path_with(app.clone(), "POST", REWORK_PATH, Some(&session), &headers).await;
+        assert_eq!(reply.status, StatusCode::OK);
+    }
+}
+
+/// The reveal and the issue path decide the cap from the SAME instant — the
+/// latest revocation — so two revocation records from different months can
+/// never make the page offer an issue the round-trip refuses.
+#[tokio::test]
+async fn the_reveal_and_the_issue_agree_on_the_cap_with_mixed_period_revocations() {
+    let discord = MockDiscord::start(GRANTED_SCOPE, None).await;
+    let gateway = MockGateway::start().await;
+    // Older record revoked last month, newer one revoked this month.
+    seed_revoked(&gateway, the_3rd_of(first_of_month_offset(-1)));
+    seed_revoked(&gateway, the_3rd_of(first_of_month_offset(0)));
+    let app = app_with_discord(&discord, &gateway);
+    let (expected_at, expected_date) = next_eligible_expected();
+
+    let revealed = reveal_via(&app).await;
+    assert_eq!(revealed.json()["code"], "key_revoked", "not no_key");
+    assert_eq!(revealed.json()["details"]["next_eligible_at"], expected_at);
+
+    assert_eq!(
+        issue_round_trip(&app).await.location(),
+        format!("/api-tokens/?issue=capped&next_eligible_at={expected_date}")
+    );
+
+    // And the revoke's idempotent answer names the same instant.
+    let again = revoke(&app, Some(&session_cookie(USER_ID))).await;
+    assert_eq!(again.json()["next_eligible_at"], expected_at);
+}
+
+/// The usage section reads the same key the reveal does: a live key beside a
+/// revoked record shows its OWN counter, and a revocation whose period has
+/// rolled answers `no_key` like the reveal — never a record the next issue
+/// will delete.
+#[tokio::test]
+async fn usage_follows_the_same_key_as_the_reveal() {
+    let discord = MockDiscord::start(GRANTED_SCOPE, None).await;
+    let session = session_cookie(USER_ID);
+
+    // Live beside revoked (the revoked one is OLDER, so a blind "earliest
+    // wins" would pick it).
+    let gateway = MockGateway::start().await;
+    let dead = seed_revoked(&gateway, now_secs());
+    let live = seed_attached(&gateway, 2_000);
+    gateway.with(|s| {
+        s.usage.insert(dead.clone(), vec![vec![999, 99_001]]);
+        s.usage.insert(live.clone(), vec![vec![7, 99_993]]);
+    });
+    let app = app_with_discord(&discord, &gateway);
+    let usage = call_path(app.clone(), "GET", USAGE_PATH, Some(&session)).await;
+    assert_eq!(
+        usage.json()["used"],
+        7,
+        "{}",
+        String::from_utf8_lossy(&usage.body)
+    );
+    assert_eq!(
+        gateway.with(|s| s.usage_queries.last().unwrap().0.clone()),
+        live
+    );
+
+    // Revoked this period: the counter is preserved and still shown.
+    let gateway = MockGateway::start().await;
+    let dead = seed_revoked(&gateway, now_secs());
+    gateway.with(|s| {
+        s.usage.insert(dead.clone(), vec![vec![42, 99_958]]);
+    });
+    let app = app_with_discord(&discord, &gateway);
+    let usage = call_path(app.clone(), "GET", USAGE_PATH, Some(&session)).await;
+    assert_eq!(usage.status, StatusCode::OK);
+    assert_eq!(usage.json()["used"], 42);
+
+    // Revoked LAST period: the reveal says no_key; so does usage.
+    let gateway = MockGateway::start().await;
+    let dead = seed_revoked(&gateway, the_3rd_of(first_of_month_offset(-1)));
+    gateway.with(|s| {
+        s.usage.insert(dead.clone(), vec![vec![42, 99_958]]);
+    });
+    let app = app_with_discord(&discord, &gateway);
+    assert_eq!(reveal_via(&app).await.json()["code"], "no_key");
+    let usage = call_path(app, "GET", USAGE_PATH, Some(&session)).await;
+    assert_eq!(usage.status, StatusCode::NOT_FOUND);
+    assert_eq!(usage.json()["code"], "no_key");
+}
+
+/// Eventual consistency on the post-roll re-issue: the listing after the
+/// create still shows the record just deleted. It must not be ranked — it
+/// would win (earliest), its attach would 404, and the single retry would be
+/// spent on a phantom, leaving the NEW key created and unattached.
+#[tokio::test]
+async fn a_stale_listing_after_the_roll_does_not_rank_the_deleted_record() {
+    let discord = MockDiscord::start(GRANTED_SCOPE, None).await;
+    let gateway = MockGateway::start().await;
+    let dead = seed_revoked(&gateway, the_3rd_of(first_of_month_offset(-1)));
+    // Every listing from now on includes whatever has been deleted — so the
+    // re-listing after the record is deleted and the new key created still
+    // shows the dead record, exactly as a lagging `GetApiKeys` would.
+    gateway.with(|s| s.list_resurrects_deleted = true);
+    let app = app_with_discord(&discord, &gateway);
+
+    assert_eq!(
+        issue_round_trip(&app).await.location(),
+        "/api-tokens/?issue=ok"
+    );
+    gateway.with(|s| {
+        assert_eq!(s.keys.len(), 1);
+        assert_ne!(s.keys[0].id, dead);
+        assert!(s.keys[0].enabled);
+        assert!(
+            s.plan_keys
+                .contains(&(PLAN_ID.to_string(), s.keys[0].id.clone())),
+            "the new key is attached — not orphaned by a phantom winner"
+        );
+        assert_eq!(s.create_calls, 1);
+    });
+}
+
+/// `CreateApiKey` is never retried by the SDK: a create whose request landed
+/// but whose response was lost makes ONE key, not two or three, and the
+/// round-trip lands `failed` honestly rather than minting duplicates.
+#[tokio::test]
+async fn a_lost_create_response_is_not_retried_into_duplicates() {
+    let discord = MockDiscord::start(GRANTED_SCOPE, None).await;
+    let gateway = MockGateway::start().await;
+    gateway.with(|s| s.fail_next_create_after_creating = true);
+    let app = app_with_discord(&discord, &gateway);
+
+    let reply = issue_round_trip(&app).await;
+    assert_eq!(reply.location(), "/api-tokens/?issue=failed");
+    assert_eq!(
+        gateway.with(|s| s.create_calls),
+        1,
+        "one create request, however the SDK would like to retry it"
+    );
+    // The next press adopts the key that landed, as before.
+    assert_eq!(
+        issue_round_trip(&app).await.location(),
+        "/api-tokens/?issue=ok"
+    );
+    assert_eq!(gateway.with(|s| s.create_calls), 1);
 }

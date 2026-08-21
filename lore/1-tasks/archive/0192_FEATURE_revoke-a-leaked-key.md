@@ -2,7 +2,7 @@
 id: "0192"
 title: "Revoke a leaked key — kills it now, but the once-per-period cap still governs the replacement"
 type: FEATURE
-status: backlog
+status: superseded
 related_adr: ["0010"]
 related_tasks: ["0183", "0160", "0180", "0187", "0191", "0193"]
 tags: [layer-backend, priority-medium, effort-small, milestone-M3, epic-self-service-onboarding, api-gateway, security, slice-9]
@@ -11,7 +11,7 @@ links:
   - "../archive/0160_FEATURE_onboarding-backend-endpoints.md"
   - "../archive/0180_RESEARCH_settle-undocumented-discord-and-aws-behaviours/notes/R-apigw-namequery-quota-and-disable.md"
 history:
-  - date: 2026-08-13
+  - date: "2026-08-13"
     status: backlog
     who: akot
     note: >
@@ -20,7 +20,7 @@ history:
       usage counters, so revocation cannot become a free quota reset. That was
       the whole reason the 2026-08-07 meeting deferred it — the deferral is now
       a scheduling choice, not a correctness one.
-  - date: 2026-08-13
+  - date: "2026-08-13"
     status: backlog
     who: akot
     note: >
@@ -29,16 +29,31 @@ history:
       only issuable on the 1st. Revoke is a kill switch, not a second door to
       the same room — which makes the honesty of the confirmation screen the
       main design work in this slice.
+  - date: "2026-08-21"
+    status: superseded
+    by: ["0191"]
+    who: akot
+    note: >
+      Merged into [[0191]] at Adam's request. The 2026-08-21 reversal of 0191
+      made "Replace my key" exactly this task's rule — `UpdateApiKey
+      (enabled=false)` now, nothing issued, re-issue from the next period —
+      so one feature had two task files. The rule, the three 0180 item 8
+      measurements and the open "say the ~25 s window" criterion now live in
+      0191; the ClickHouse revocation-record sketch stays here, unbuilt,
+      because disabling makes the key its own record. Archived as
+      superseded, not completed: nothing was built under this id.
 ---
 
 # Revoke a leaked key
 
-> **Absorbed by [[0191]] on 2026-08-21.** "Replace my key" became exactly this
-> task's rule — `UpdateApiKey(enabled=false)` now, nothing issued, re-issue from
-> the next period — so there is no separate revoke to build. The one difference
-> from the text below: **disable, not delete**, because the disabled key's
-> `lastUpdatedDate` is the revocation record the cap reads. To be closed as
-> superseded when 0191 completes.
+> **Superseded — merged into [[0191]] on 2026-08-21.** "Replace my key" became
+> exactly this task's rule — `UpdateApiKey(enabled=false)` now, nothing issued,
+> re-issue from the next period — so there is no separate revoke to build and
+> no separate task to track it. The one difference from the text below:
+> **disable, not delete**, because the disabled key's `lastUpdatedDate` is the
+> revocation record the cap reads, which is why the *Storage* section below was
+> never needed. Everything still open from here is an acceptance criterion in
+> 0191. The text below is the 2026-08-13 plan, kept for the record.
 
 ## Summary
 

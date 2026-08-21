@@ -98,6 +98,30 @@ pub struct KeyRecord {
 /// both exist (a console re-enable, a duplicate), the credential is what the
 /// visitor is holding and what a revoke must act on. Among keys of one state
 /// the rule is [`choose_winner`]'s, so both sides of a double-submit agree.
+/// The instant the re-issue cap is decided from, for a user whose keys are
+/// ALL revoked: the **latest** revocation among them (task 0191).
+///
+/// One function for the reveal, the revoke and the issue path, so the three
+/// cannot disagree — they did: the issue read `max`, the reveal read the
+/// earliest record's date, and with two revocation records from different
+/// months the page offered "Get my API key" while the round-trip refused it.
+///
+/// An **undated** record is skipped, not fatal: `None` comes back only when
+/// no record among `revoked` carries a date at all, and the cap treats that
+/// as capped. Poisoning the whole answer on one undated record was worse
+/// than the shape it guarded against — with `None` the cap recomputes
+/// `next_eligible_at` from the *current* period on every read, so the date
+/// rolls forward every month and the owner is locked out for good, with no
+/// support action short of deleting the record. Skipping can only under-cap,
+/// and only in a shape AWS does not produce (`lastUpdatedDate` is always
+/// sent); the lockout was permanent.
+pub fn revocation_instant(revoked: &[KeyRecord]) -> Option<u64> {
+    revoked
+        .iter()
+        .filter_map(|record| record.last_updated_at)
+        .max()
+}
+
 pub fn current_key(records: &[KeyRecord]) -> Option<&KeyRecord> {
     let enabled: Vec<&KeyRecord> = records.iter().filter(|r| r.enabled).collect();
     if enabled.is_empty() {
@@ -184,6 +208,39 @@ mod tests {
         ];
         assert_eq!(current_key(&only_disabled).unwrap().id, "earlier");
         assert!(current_key(&[]).is_none());
+    }
+
+    /// The latest revocation governs; an undated record is skipped, and only
+    /// a set with no dated record at all is undatable (→ capped).
+    #[test]
+    fn the_revocation_instant_is_the_latest_dated_one() {
+        let earlier = KeyRecord {
+            last_updated_at: Some(10),
+            ..disabled("a", "n", Some(1))
+        };
+        let later = KeyRecord {
+            last_updated_at: Some(20),
+            ..disabled("b", "n", Some(2))
+        };
+        assert_eq!(
+            revocation_instant(&[earlier.clone(), later.clone()]),
+            Some(20)
+        );
+        assert_eq!(revocation_instant(&[later.clone(), earlier]), Some(20));
+        let undated = KeyRecord {
+            last_updated_at: None,
+            ..disabled("c", "n", Some(3))
+        };
+        // One undated record beside a dated one does NOT erase the date: a
+        // `None` here caps the owner against a next_eligible_at recomputed
+        // from the current period every read, which never arrives.
+        assert_eq!(
+            revocation_instant(&[undated.clone(), later.clone()]),
+            Some(20)
+        );
+        // Nothing datable at all is the one undatable case.
+        assert_eq!(revocation_instant(&[undated]), None);
+        assert_eq!(revocation_instant(&[]), None);
     }
 
     #[test]

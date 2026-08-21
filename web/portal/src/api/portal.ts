@@ -287,14 +287,20 @@ export const issueUrl = (): string => `${PORTAL_API}/auth/login?action=issue`;
 /**
  * What `POST /api-tokens/api/key/rework` answers (task 0191): the revocation.
  *
- * `next_eligible_at` is when a new key can be issued — the 1st of the next
- * month, 00:00 UTC, under OUR period rule (not an AWS guarantee; see the
- * backend's `portal/period.rs`). `revoked_at` is when the key went off.
+ * `next_eligible_at` is when a new key can be issued under OUR period rule
+ * (not an AWS guarantee; see the backend's `portal/period.rs`) — the 1st of
+ * the next month for a revocation in this period, and *now* for an idempotent
+ * revoke of a key whose period has already rolled, so a stale tab cannot hide
+ * an issue link the round-trip would honour.
+ *
+ * `revoked_at` is when the key went off. Absent when the backend cannot date
+ * the revocation (no `lastUpdatedDate` on any record) — the page renders the
+ * revocation without an instant rather than inventing one.
  */
 export interface PortalRevocation {
   revoked: true;
   next_eligible_at: string;
-  revoked_at: string;
+  revoked_at?: string;
 }
 
 /**
@@ -304,8 +310,11 @@ export interface PortalRevocation {
  * A `fetch`, not a navigation: unlike issuing, revoking needs no fresh Discord
  * token — it is destructive to the visitor's own access and to nothing else,
  * and a leaked key has to be killable while Discord is down. The session cookie
- * rides on this same-origin `POST` (`SameSite=Lax` lets it; a cross-site page
- * could not make the browser send it with a `POST`, which is the CSRF guard).
+ * rides on this same-origin `POST` — `SameSite=Lax` lets it, and `SameSite`
+ * alone is NOT the guard (it is site-scoped, so a sibling host's form `POST`
+ * would carry the cookie): the CSRF guard is the custom request header below,
+ * which a cross-origin page cannot send without a preflight this API never
+ * answers.
  *
  * The replacement is an ordinary `issueUrl()` round-trip — refused by the
  * backend until the quota period of the revocation has rolled, which the page
@@ -317,7 +326,14 @@ export async function revokeKey(): Promise<PortalRevocation> {
   try {
     response = await fetch(url, {
       method: 'POST',
-      headers: { accept: 'application/json' },
+      // The custom header is the CSRF guard: it makes this a non-simple
+      // request, which a cross-origin page cannot send without a CORS
+      // preflight this API never answers. The backend refuses a revoke
+      // without it (`PORTAL_REQUEST_HEADER` in `portal/keys/mod.rs`).
+      headers: {
+        accept: 'application/json',
+        'x-requested-with': 'stellar-prices-portal',
+      },
       signal: AbortSignal.timeout(KEY_TIMEOUT_MS),
     });
   } catch (error) {
@@ -350,7 +366,9 @@ export async function revokeKey(): Promise<PortalRevocation> {
   if (
     body.revoked !== true ||
     typeof body.next_eligible_at !== 'string' ||
-    typeof body.revoked_at !== 'string'
+    (body.revoked_at !== undefined &&
+      body.revoked_at !== null &&
+      typeof body.revoked_at !== 'string')
   ) {
     // A `200` that does not say `revoked: true` is not a shape this client
     // knows; rendering "revoked" on it would be the one false statement this
@@ -360,7 +378,8 @@ export async function revokeKey(): Promise<PortalRevocation> {
   return {
     revoked: true,
     next_eligible_at: body.next_eligible_at,
-    revoked_at: body.revoked_at,
+    revoked_at:
+      typeof body.revoked_at === 'string' ? body.revoked_at : undefined,
   };
 }
 

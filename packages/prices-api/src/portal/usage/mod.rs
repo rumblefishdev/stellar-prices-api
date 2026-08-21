@@ -87,8 +87,9 @@ use serde::Serialize;
 use crate::common::{cache_control, errors};
 
 use super::auth::secret::OauthSecret;
+use super::keys::cap::{self, Cap};
 use super::keys::gateway::{Gateway, GatewayError};
-use super::keys::naming::{choose_winner, exact_matches, key_name};
+use super::keys::naming::{current_key, exact_matches, key_name, revocation_instant};
 use super::period::Period;
 
 /// The one route. `GET` only — reading a counter must not share a path shape
@@ -478,10 +479,23 @@ async fn fetch(gateway: &Gateway, name: &str) -> Result<CachedAnswer, GatewayErr
     // The same list → exact filter → rank as the reveal, so the usage shown is
     // the usage of the key the reveal hands out — and nothing more: no create,
     // no attach, no delete. See the module docs.
+    // The same selector as the reveal and the revoke (`current_key`): the
+    // earliest LIVE key, else the earliest record. A live key beside a
+    // revoked one must show its own counter, not the dead key's.
     let candidates = exact_matches(gateway.list_named(name).await?, name);
-    let Some(winner) = choose_winner(&candidates) else {
+    let Some(winner) = current_key(&candidates).cloned() else {
         return Ok(CachedAnswer::NoKey);
     };
+    // A revoked key's counter is preserved (0180 item 8) and still describes
+    // this period, so it is shown while the revocation's period lasts — the
+    // reveal says "revoked" beside it. Once the period has rolled the reveal
+    // says "no key" and offers the issue; the usage must agree and say the
+    // same, rather than keep reporting a record the next issue will delete.
+    if !winner.enabled
+        && let Cap::Allowed = cap::decide(revocation_instant(&candidates), &Period::now())
+    {
+        return Ok(CachedAnswer::NoKey);
+    }
 
     let today = Utc::now().date_naive();
     let period = Period::containing(today);

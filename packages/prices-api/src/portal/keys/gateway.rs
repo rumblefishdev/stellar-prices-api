@@ -390,6 +390,14 @@ impl Gateway {
     /// a separate `TagResource` could fail and leave an untagged key, which is
     /// the one thing tagging exists to prevent.
     pub async fn create(&self, name: &str) -> Result<(KeyRecord, KeyValue), GatewayError> {
+        // **No SDK retries on a create.** `CreateApiKey` has no idempotency
+        // token, so a retried attempt whose first try actually landed makes a
+        // second key — under the user's exact name, enabled, attached to
+        // nothing. The SDK's standard mode retries transport errors and 5xx
+        // up to three times inside `OPERATION_TIMEOUT`, and `ATTEMPT_TIMEOUT`
+        // (2s) is short enough for a cold control plane to trip it. The
+        // reconciler sweeps duplicates, but only when the next listing is
+        // consistent; better not to make them. Reads keep their retries.
         let created = self
             .client
             .create_api_key()
@@ -398,6 +406,11 @@ impl Gateway {
             .enabled(true)
             .tags(TAG_MANAGED_BY.0, TAG_MANAGED_BY.1)
             .tags(TAG_ISSUED_BY.0, TAG_ISSUED_BY.1)
+            .customize()
+            .config_override(
+                aws_sdk_apigateway::config::Builder::new()
+                    .retry_config(aws_sdk_apigateway::config::retry::RetryConfig::disabled()),
+            )
             .send()
             .await
             .map_err(|e| GatewayError::Call {

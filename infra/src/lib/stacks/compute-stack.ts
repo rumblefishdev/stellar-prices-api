@@ -538,35 +538,29 @@ export class ComputeStack extends cdk.Stack {
     //    attacker with code execution in this Lambda would gain, not what the
     //    feature does. Worth stating precisely because it is easy to read the
     //    list of verbs as harmless next to `DELETE`.
-    // 3. **`DELETE` on `/apikeys/*` CAN be narrowed, and is not yet.** The path
-    //    wildcard is forced — AWS generates the key id, so it is unknowable at
-    //    synth time — but the resource is not the only axis available. API
-    //    Gateway supports `aws:ResourceTag/${TagKey}` conditions on control-plane
+    // 3. **`GET`/`PATCH`/`DELETE` on `/apikeys/*` ARE narrowed — by tag.** The
+    //    path wildcard is forced — AWS generates the key id, so it is
+    //    unknowable at synth time — but API Gateway supports
+    //    `aws:ResourceTag/${TagKey}` conditions on per-key control-plane
     //    actions
     //    (docs.aws.amazon.com/apigateway/latest/developerguide/apigateway-tagging-iam-policy.html),
-    //    and every key this feature creates already carries
-    //    `ManagedBy=prices-portal`, so the condition that would reduce "delete
-    //    any API key in the account, including a partner's" to "delete a key
-    //    this portal made" is available and unwritten.
+    //    and every key this feature creates carries `ManagedBy=prices-portal`
+    //    from the create call. Task 0191 wrote the condition (it was
+    //    "available and unwritten" since 0187, parked for 0194) once `PATCH`
+    //    joined the statement: a per-key read is `GetApiKey includeValue=true`
+    //    — the value of ANY key in the account by id, partner keys included,
+    //    and the call the code actually makes with the value flag on — and a
+    //    per-key patch can rename any key into a portal name the reconciler
+    //    would then adopt and reveal, or re-enable a key its owner revoked.
+    //    The accepted behaviour change: an exact-name key created BY HAND in
+    //    the console is untagged, so it is no longer adopted — read, disable
+    //    and delete all `AccessDenied`, the routes answer `502`, and the key
+    //    stays exactly as the human left it. The code guard in
+    //    `portal/keys/naming.rs` (never rank or delete a key whose name is not
+    //    exactly the caller's) still stands underneath.
     //
-    //    It is left to **task 0194**, which owns the IAM audit and can verify it
-    //    against the deployed stack rather than a synth — and it carries one
-    //    trade-off that has to be decided rather than assumed: an exact-name
-    //    duplicate created BY HAND in the console has no tag, so a tag-scoped
-    //    `DELETE` would fail it with `AccessDenied` and the reconciler would
-    //    answer `502` instead of converging. That is arguably the better
-    //    outcome — this service deleting a key a human made is the case the
-    //    name guard exists for — but it is a behaviour change, not a tightening.
-    //    Do NOT put the condition on `GET`: adopting a console-created key is a
-    //    documented requirement of this slice.
-    //
-    //    Until then, the guard that actually holds is in the handler
-    //    (`portal/keys/naming.rs`), which never ranks or deletes a key whose
-    //    name is not exactly the caller's — a guard in code, on a grant that is
-    //    account-wide in IAM.
-    //
-    // What is deliberately NOT here: `PATCH` (nothing in this slice updates a
-    // key), `apigateway:*`, and any grant on `/usageplans` beyond the key
+    // What is deliberately NOT here: `apigateway:*`, `PUT /tags/*` (the portal
+    // never re-tags a key), and any grant on `/usageplans` beyond the key
     // attachment and the usage read — both of those need the plan id, so both
     // live in `ApiGatewayStack`'s standalone policy (`POST …/keys` for 0187's
     // attach, `GET …/usage` for 0188's `GetUsage`).
@@ -597,6 +591,10 @@ export class ComputeStack extends cdk.Stack {
         sid: 'PortalReadDisableAndDeleteOwnApiKeys',
         actions: ['apigateway:GET', 'apigateway:PATCH', 'apigateway:DELETE'],
         resources: [`arn:aws:apigateway:${awsRegion}::/apikeys/*`],
+        // See limit 3 above: portal-made keys only.
+        conditions: {
+          StringEquals: { 'aws:ResourceTag/ManagedBy': 'prices-portal' },
+        },
       }),
     );
 

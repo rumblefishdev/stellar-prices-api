@@ -65,7 +65,9 @@ pub struct StoredKey {
     pub enabled: bool,
     /// `lastUpdatedDate` — stamped by `UpdateApiKey` (the revoke, task
     /// 0191), which is what the re-issue cap reads off a disabled key.
-    pub last_updated_at: u64,
+    /// `None` is the shape the service never sends and [`Store::undate`]
+    /// makes, so the cap's handling of it is testable end to end.
+    pub last_updated_at: Option<u64>,
 }
 
 #[derive(Default)]
@@ -154,6 +156,18 @@ pub struct Store {
     /// Answer every `UpdateApiKey` with a 500 (task 0191). Sticky, like
     /// `fail_deletes`, for the same reason.
     pub fail_disables: bool,
+    /// Answer EVERY `GetApiKeys` with the keys the store holds PLUS every key
+    /// deleted so far, as if the listing never caught up with the deletes
+    /// (task 0191). Sticky, so the re-listing AFTER a delete is the one that
+    /// shows the phantom — the shape that made the post-roll re-issue rank a
+    /// deleted record and burn its retry.
+    pub list_resurrects_deleted: bool,
+    /// Snapshots of every key deleted, for the knob above.
+    pub deleted_keys: Vec<StoredKey>,
+    /// Answer the next `CreateApiKey` with a 500 AFTER creating the key — the
+    /// "request landed, response lost" shape that an SDK retry turns into a
+    /// duplicate (task 0191). One-shot.
+    pub fail_next_create_after_creating: bool,
     pub next_id: usize,
 
     // -----------------------------------------------------------------------
@@ -202,7 +216,7 @@ impl Store {
             created_at,
             tags: HashMap::new(),
             enabled: true,
-            last_updated_at: created_at,
+            last_updated_at: Some(created_at),
         });
         id
     }
@@ -213,8 +227,16 @@ impl Store {
         let id = self.seed(name, created_at);
         let key = self.keys.last_mut().unwrap();
         key.enabled = false;
-        key.last_updated_at = revoked_at;
+        key.last_updated_at = Some(revoked_at);
         id
+    }
+
+    /// Strip a key's `lastUpdatedDate`, the shape AWS does not send — what
+    /// the cap must survive without locking its owner out forever.
+    pub fn undate(&mut self, id: &str) {
+        if let Some(key) = self.keys.iter_mut().find(|k| k.id == id) {
+            key.last_updated_at = None;
+        }
     }
 
     pub fn mint_id(&mut self) -> String {
@@ -321,12 +343,21 @@ pub async fn list_keys(
     } else {
         None
     };
-    let matched: Vec<StoredKey> = store
+    let mut matched: Vec<StoredKey> = store
         .list(&prefix)
         .into_iter()
         .filter(|k| Some(&k.id) != newest.as_ref())
         .cloned()
         .collect();
+    if store.list_resurrects_deleted {
+        let ghosts: Vec<StoredKey> = store
+            .deleted_keys
+            .iter()
+            .filter(|k| k.name.starts_with(&prefix))
+            .cloned()
+            .collect();
+        matched.extend(ghosts);
+    }
     let start: usize = query
         .position
         .as_deref()
@@ -361,7 +392,7 @@ pub async fn create_key(
         // created inside the current quota period, exactly as a real one
         // would. `created_at_override` pins it for tests that need a date.
         created_at: store.created_at_override.unwrap_or_else(now_secs),
-        last_updated_at: store.created_at_override.unwrap_or_else(now_secs),
+        last_updated_at: Some(store.created_at_override.unwrap_or_else(now_secs)),
         tags: body["tags"]
             .as_object()
             .map(|o| {
@@ -374,6 +405,9 @@ pub async fn create_key(
     };
     store.keys.push(created.clone());
     store.ops.push(format!("create:{id}"));
+    if std::mem::take(&mut store.fail_next_create_after_creating) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, "response lost").into_response();
+    }
     (StatusCode::CREATED, Json(api_key_json(&created))).into_response()
 }
 
@@ -422,6 +456,9 @@ pub async fn delete_key(
     store.deleted.push(id.clone());
     store.ops.push(format!("delete:{id}"));
     let existed = store.keys.iter().any(|k| k.id == id);
+    if let Some(gone) = store.keys.iter().find(|k| k.id == id).cloned() {
+        store.deleted_keys.push(gone);
+    }
     store.keys.retain(|k| k.id != id);
     if existed {
         StatusCode::ACCEPTED.into_response()
@@ -450,7 +487,7 @@ pub async fn update_key(
     for op in body["patchOperations"].as_array().into_iter().flatten() {
         if op["op"] == "replace" && op["path"] == "/enabled" {
             key.enabled = op["value"] == "true";
-            key.last_updated_at = now;
+            key.last_updated_at = Some(now);
         }
     }
     let snapshot = key.clone();
@@ -825,9 +862,24 @@ pub async fn call(router: Router, method: &str, cookie: Option<&str>) -> Reply {
 }
 
 pub async fn call_path(router: Router, method: &str, path: &str, cookie: Option<&str>) -> Reply {
+    call_path_with(router, method, path, cookie, &[]).await
+}
+
+/// [`call_path`] plus extra request headers — what the revoke (task 0191)
+/// needs, since it refuses a request without the portal's own marker.
+pub async fn call_path_with(
+    router: Router,
+    method: &str,
+    path: &str,
+    cookie: Option<&str>,
+    extra: &[(&str, &str)],
+) -> Reply {
     let mut request = Request::builder().method(method).uri(path);
     if let Some(cookie) = cookie {
         request = request.header(header::COOKIE, cookie);
+    }
+    for (name, value) in extra {
+        request = request.header(*name, *value);
     }
     let response = router
         .oneshot(request.body(Body::empty()).unwrap())

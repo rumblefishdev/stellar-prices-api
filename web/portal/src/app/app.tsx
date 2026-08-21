@@ -297,6 +297,11 @@ function Dashboard({
   rateLimit?: number;
 }) {
   const [keyOnScreen, setKeyOnScreen] = useState(false);
+  // Task 0191: a revoke in THIS page load. The key leaves the screen, and the
+  // usage section is told so — its cached "no key" copy ("your key is new")
+  // would otherwise describe a key just deactivated — and re-asked, because
+  // the backend evicted its cache on the revoke.
+  const [revokedCount, setRevokedCount] = useState(0);
 
   return (
     <>
@@ -314,11 +319,21 @@ function Dashboard({
           removes it along with the key it was showing — the component unmounts
           and its state goes with it, rather than leaving a stale credential on
           screen for the next person at the keyboard. */}
-      <ApiKey onKey={() => setKeyOnScreen(true)} />
+      <ApiKey
+        onKey={() => setKeyOnScreen(true)}
+        onRevoked={() => {
+          setKeyOnScreen(false);
+          setRevokedCount((n) => n + 1);
+        }}
+      />
       {/* Task 0188. Keyed refetch: a key appearing on screen (revealed on
           mount, or fresh off 0189's issue round-trip) re-asks for usage, so
           the section leaves "no key yet" without a manual refresh. */}
-      <Usage keyOnScreen={keyOnScreen} rateLimit={rateLimit} />
+      <Usage
+        keyOnScreen={keyOnScreen}
+        revokedCount={revokedCount}
+        rateLimit={rateLimit}
+      />
     </>
   );
 }
@@ -401,6 +416,61 @@ function describeNextEligible(value: string | null | undefined): string {
   });
 }
 
+/**
+ * Render an RFC 3339 instant as a UTC time — "21 August 2026, 12:00 UTC" —
+ * for the revocation instant (task 0191). UTC, not the viewer's zone, for the
+ * same reason as `describeNextEligible`.
+ *
+ * `null` for a missing or unparseable value, and the caller renders the
+ * revocation WITHOUT an instant: the backend sends no `revoked_at` when no
+ * record carries a date, and every stand-in reads as a statement of fact the
+ * page cannot make — "deactivated on just now", or (worse, via the
+ * next-eligible phrasing) "deactivated on the start of the next quota
+ * period".
+ */
+function describeUtcInstant(value: string | undefined): string | null {
+  if (!value) return null;
+  const at = new Date(value);
+  if (Number.isNaN(at.getTime())) return null;
+  const day = at.toLocaleDateString('en-GB', {
+    day: 'numeric',
+    month: 'long',
+    year: 'numeric',
+    timeZone: 'UTC',
+  });
+  const time = at.toLocaleTimeString('en-GB', {
+    hour: '2-digit',
+    minute: '2-digit',
+    timeZone: 'UTC',
+  });
+  return `${day}, ${time} UTC`;
+}
+
+/**
+ * How long a disable takes to reach the data plane, in the words the page
+ * uses. Measured under task 0180 item 8: a disabled key kept answering `200`
+ * for ~25 s before the `403` arrived. Said out loud rather than hidden behind
+ * "immediately", because a visitor revoking a LEAKED key is exactly the
+ * person who must not stop worrying one second too early.
+ */
+const PROPAGATION_COPY = 'within about half a minute';
+
+/**
+ * How long after a revocation the propagation window is still worth stating
+ * in the present tense. The window is ~25 s; five minutes is generous and
+ * keeps the copy honest on the reveal path, which renders the revoked view
+ * on every page load — days later, "until then treat it as live" would be
+ * telling somebody to keep worrying about a key that died last week.
+ */
+const PROPAGATION_FRESH_MS = 5 * 60 * 1000;
+
+/** Whether `revokedAt` (RFC 3339) is recent enough for the present tense. */
+function revokedJustNow(revokedAt: string | undefined): boolean {
+  if (!revokedAt) return false;
+  const at = new Date(revokedAt).getTime();
+  return !Number.isNaN(at) && Date.now() - at < PROPAGATION_FRESH_MS;
+}
+
 /** Whether `nextEligibleAt` (RFC 3339 or `YYYY-MM-DD`) is still ahead. */
 function stillWaiting(nextEligibleAt: string): boolean {
   const at = new Date(
@@ -408,7 +478,10 @@ function stillWaiting(nextEligibleAt: string): boolean {
       ? `${nextEligibleAt}T00:00:00Z`
       : nextEligibleAt,
   );
-  return !Number.isNaN(at.getTime()) && at.getTime() > Date.now();
+  // An unparseable date is treated as STILL WAITING: the safe direction is
+  // to withhold the issue link (the server would only refuse it), never to
+  // offer it on garbage.
+  return Number.isNaN(at.getTime()) || at.getTime() > Date.now();
 }
 
 /** The phrase that arms the revocation (task 0191). */
@@ -479,12 +552,13 @@ function ReplaceKey({
     >
       <h3 id="replace-key-title">Replace your API key?</h3>
       <p data-testid="replace-key-warning">
-        Replacing your key{' '}
-        <strong>deactivates the current one immediately</strong>. It stops
-        working the moment you confirm — anything still using it will break.{' '}
-        <strong>No new key is issued now</strong>: you can generate a new one at
-        the start of the next quota period (the 1st of next month, 00:00 UTC),
-        and until then you will not have a working key.
+        Replacing your key <strong>deactivates the current one</strong>. It
+        stops working {PROPAGATION_COPY} of your confirming — AWS takes that
+        long to apply the change, so treat it as live until then — and anything
+        still using it will break. <strong>No new key is issued now</strong>:
+        you can generate a new one at the start of the next quota period (the
+        1st of next month, 00:00 UTC), and until then you will not have a
+        working key.
       </p>
       <p>
         Do this if your key has leaked or you no longer trust where it is. If
@@ -510,7 +584,7 @@ function ReplaceKey({
         disabled={!armed || submitting}
         data-testid="replace-key-confirm"
       >
-        {submitting ? 'Deactivating…' : 'Deactivate my key now'}
+        {submitting ? 'Deactivating…' : 'Deactivate my key'}
       </button>{' '}
       <button type="button" onClick={onClose} disabled={submitting}>
         Cancel
@@ -549,7 +623,14 @@ function ReplaceKey({
  * retypes — without a button, the first thing every visitor does is select it by
  * hand, which defeats the masking they just toggled.
  */
-function ApiKey({ onKey }: { onKey?: () => void }) {
+function ApiKey({
+  onKey,
+  onRevoked,
+}: {
+  onKey?: () => void;
+  /** Task 0191: the key on screen was just deactivated. A fact, no data. */
+  onRevoked?: () => void;
+}) {
   type KeyView =
     | { state: 'loading' }
     | { state: 'ok'; key: PortalKey }
@@ -802,13 +883,31 @@ function ApiKey({ onKey }: { onKey?: () => void }) {
           shown again. */}
       {view.state === 'revoked' && (
         <div data-testid="key-revoked">
-          <p>
-            Your API key was deactivated
-            {view.revoked.revoked_at
-              ? ` on ${describeNextEligible(view.revoked.revoked_at)}`
-              : ''}{' '}
-            and no longer works.
-          </p>
+          {(() => {
+            const at = describeUtcInstant(view.revoked.revoked_at);
+            const fresh = revokedJustNow(view.revoked.revoked_at);
+            return (
+              <p>
+                Your API key was deactivated
+                {at && (
+                  <>
+                    {' on '}
+                    <strong data-testid="revoked-at">{at}</strong>
+                  </>
+                )}
+                {/* Present tense only while the window is still open: on the
+                    reveal path this same view renders days later, where
+                    "treat it as live" would be false. */}
+                {fresh
+                  ? `. It stops working ${PROPAGATION_COPY}${
+                      at ? ' of that instant' : ''
+                    } — until then treat it as live — and anything still using it will break.`
+                  : `. It stopped working ${PROPAGATION_COPY}${
+                      at ? ' of that instant' : ''
+                    }, and anything still using it is broken.`}
+              </p>
+            );
+          })()}
           {stillWaiting(view.revoked.next_eligible_at) ? (
             <p>
               You can generate a new key from{' '}
@@ -873,6 +972,7 @@ function ApiKey({ onKey }: { onKey?: () => void }) {
                 setReplacing(false);
                 setRevealed(false);
                 setView({ state: 'revoked', revoked });
+                onRevoked?.();
               }}
             />
           ) : (
@@ -931,9 +1031,12 @@ function ApiKey({ onKey }: { onKey?: () => void }) {
  */
 function Usage({
   keyOnScreen,
+  revokedCount = 0,
   rateLimit,
 }: {
   keyOnScreen: boolean;
+  /** Task 0191: bumped by the dashboard on each in-page revoke. */
+  revokedCount?: number;
   rateLimit?: number;
 }) {
   type UsageView =
@@ -974,6 +1077,17 @@ function Usage({
     load();
     return () => cancelInFlight.current?.();
   }, [load]);
+
+  // Task 0191: after an in-page revoke, re-ask. The backend evicted its
+  // cache for this caller, so this is one real read — and the answer may
+  // legitimately still carry the revoked key's figures (its counter is
+  // preserved), rendered under the "deactivated" wording below.
+  const lastRevokedCount = useRef(0);
+  useEffect(() => {
+    if (revokedCount === lastRevokedCount.current) return;
+    lastRevokedCount.current = revokedCount;
+    load();
+  }, [revokedCount, load]);
 
   // Fires the keyed refetch AT MOST ONCE per mount. This latch is what lets
   // the effect below watch `view.state` — the obvious dependency — without
@@ -1068,6 +1182,13 @@ function Usage({
             <p>
               Your key is new — usage figures appear here with a delay after
               your first requests.
+            </p>
+          ) : revokedCount > 0 ? (
+            // Task 0191: revoked in this page load, and AWS has no row for
+            // the key. Not "issue one above" — the key section is already
+            // saying when that becomes possible.
+            <p data-testid="usage-after-revoke">
+              Your key was deactivated; there is no usage to show for it.
             </p>
           ) : (
             <p>You have no API key yet — issue one above to see your usage.</p>

@@ -111,7 +111,9 @@ use super::auth::secret::OauthSecret;
 use super::period::Period;
 use cap::Cap;
 use gateway::{Attachment, Gateway, GatewayError, KeyValue};
-use naming::{KeyRecord, choose_winner, current_key, exact_matches, key_name, losers};
+use naming::{
+    KeyRecord, choose_winner, current_key, exact_matches, key_name, losers, revocation_instant,
+};
 
 /// The reveal, on both verbs — see [`key`] for why `POST` answers identically.
 pub const KEY_PATH: &str = "/api-tokens/api/key";
@@ -140,6 +142,23 @@ const NO_KEY: &str = "no_key";
 /// `revoked_at`, the slot `ErrorEnvelope` has for exactly this kind of
 /// structured context.
 const KEY_REVOKED: &str = "key_revoked";
+/// Error code for a revoke that did not come from the portal page (task
+/// 0191). See [`is_same_origin_write`].
+const CROSS_SITE_REQUEST: &str = "cross_site_request";
+
+/// The header the portal's own `fetch` sets on the revoke, and its value.
+///
+/// A custom header makes the request *non-simple*: a cross-origin page can
+/// only send it after a CORS preflight, and this API answers no preflight —
+/// so a browser never delivers such a request from anywhere but the portal's
+/// origin. This is the classic CSRF defence that does not depend on what the
+/// cookie's `SameSite` considers "the same site", which matters because
+/// `SameSite=Lax` is **site**-scoped: today `*.cloudfront.net` makes every
+/// distribution its own site, but after the custom-domain cutover ([0195])
+/// any sibling host under the registrable domain becomes same-site, and a
+/// form `POST` from it would carry the cookie. One request from such a host
+/// would then cost the victim their key for the rest of the month.
+pub const PORTAL_REQUEST_HEADER: (&str, &str) = ("x-requested-with", "stellar-prices-portal");
 
 /// How many times the whole flow is re-run when the key it settled on turns out
 /// to have been deleted underneath it.
@@ -325,14 +344,14 @@ async fn reveal(state: &KeysState, headers: &HeaderMap) -> Response {
     };
 
     match looked_up {
-        Ok(Lookup::Revoked(record)) => {
+        Ok(Lookup::Revoked { revoked_at }) => {
             // The owner killed this key. There is nothing to reveal — the
             // value is a leaked credential by the owner's own statement — and
             // nothing to issue until the period rolls; the page renders the
             // date rather than the "get my API key" link.
             let Cap::Capped {
                 next_eligible_at, ..
-            } = cap::decide(record.last_updated_at, &Period::now())
+            } = cap::decide(revoked_at, &Period::now())
             else {
                 // Revoked in an earlier period: a new key is due, and the
                 // issue round-trip will delete this one and create it. Until
@@ -350,7 +369,7 @@ async fn reveal(state: &KeysState, headers: &HeaderMap) -> Response {
                         ),
                         details: Some(serde_json::json!({
                             "next_eligible_at": next_eligible_at,
-                            "revoked_at": record.last_updated_at.map(rfc3339),
+                            "revoked_at": revoked_at.map(rfc3339),
                         })),
                     }),
                 )
@@ -401,6 +420,34 @@ async fn reveal(state: &KeysState, headers: &HeaderMap) -> Response {
     }
 }
 
+/// Whether a state-changing request came from the portal's own page.
+///
+/// Two independent signals, both required to agree:
+///
+/// 1. [`PORTAL_REQUEST_HEADER`] is present with its value — the non-simple
+///    request marker a cross-origin page cannot produce without a preflight.
+/// 2. `Sec-Fetch-Site`, when the browser sends it (every current browser
+///    does), is `same-origin`. `none` (a typed URL, a bookmark) is accepted
+///    too — it cannot be a `POST` from another page. A request carrying
+///    `cross-site` or `same-site` is refused even with the header: the
+///    header guards against a preflight-less browser, the fetch metadata
+///    guards against a misconfigured CORS answer ever appearing in front of
+///    this API.
+///
+/// Absence of `Sec-Fetch-Site` alone does not refuse — `curl` and older
+/// browsers omit it — which is why the header is the primary check.
+fn is_same_origin_write(headers: &HeaderMap) -> bool {
+    let marker = headers
+        .get(PORTAL_REQUEST_HEADER.0)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.eq_ignore_ascii_case(PORTAL_REQUEST_HEADER.1));
+    let fetch_site_ok = match headers.get("sec-fetch-site").and_then(|v| v.to_str().ok()) {
+        None => true,
+        Some(site) => site.eq_ignore_ascii_case("same-origin") || site.eq_ignore_ascii_case("none"),
+    };
+    marker && fetch_site_ok
+}
+
 /// `404 no_key`, shared by the reveal's two keyless answers.
 fn no_key_response() -> Response {
     (
@@ -426,10 +473,17 @@ fn rfc3339(secs: u64) -> String {
 struct RevokeResponse {
     /// Always `true` on a `200`; a failure is a status, never a `false`.
     revoked: bool,
-    /// When a new key can be issued under our period rule, RFC 3339.
+    /// When a new key can be issued under our period rule, RFC 3339 —
+    /// **decided by [`cap::decide`]**, not by the period alone, so this route
+    /// is not a reader of the cap that disagrees with the other four
+    /// (decision #22). For a revocation whose period has already rolled it is
+    /// now: an idempotent revoke must not tell a stale tab to wait another
+    /// month for a key the issue round-trip would hand over today.
     next_eligible_at: String,
-    /// When the key was revoked, RFC 3339 — now, or earlier if it already was.
-    revoked_at: String,
+    /// When the key was revoked, RFC 3339 — now, or earlier if it already
+    /// was. `null` when no record under the name carries a date: a made-up
+    /// epoch instant would render as "deactivated on 1 January 1970".
+    revoked_at: Option<String>,
 }
 
 /// `POST /key/rework` — revoke the caller's key now, issue nothing
@@ -460,6 +514,22 @@ async fn revoke(State(state): State<KeysState>, headers: HeaderMap) -> Response 
     let Some(gateway) = state.gateway.as_ref() else {
         return unconfigured();
     };
+    // Before the session is even read: the one write a session can cause
+    // must come from the portal's own page. See `is_same_origin_write`.
+    if !is_same_origin_write(&headers) {
+        tracing::warn!("a revoke arrived without the same-origin markers; refusing");
+        return no_store(
+            (
+                StatusCode::FORBIDDEN,
+                Json(errors::ErrorEnvelope {
+                    code: CROSS_SITE_REQUEST,
+                    message: "this action can only be taken from the portal page".into(),
+                    details: None,
+                }),
+            )
+                .into_response(),
+        );
+    }
     let Some(session) = super::auth::current_session(oauth, &headers) else {
         return no_store(errors::unauthorized_with(
             NOT_SIGNED_IN,
@@ -490,7 +560,7 @@ async fn revoke(State(state): State<KeysState>, headers: HeaderMap) -> Response 
     };
 
     match revoked {
-        Ok(Some(revoked_at)) => {
+        Ok(Revocation::Done { at }) => {
             tracing::info!("portal revoked an API key");
             // The cached usage describes a key that is now off. Its counter is
             // preserved (0180 item 8), so the numbers would still be right —
@@ -499,17 +569,27 @@ async fn revoke(State(state): State<KeysState>, headers: HeaderMap) -> Response 
             if let Some(cache) = &state.usage_cache {
                 cache.invalidate(&session.sub);
             }
-            let period = Period::now();
+            // The same decision function the reveal, the usage route and the
+            // issue path read, from the same instant — never `Period::now()`
+            // straight, which would answer "next month" for a revocation that
+            // happened two periods ago and hide the issue link the round-trip
+            // would have honoured.
+            let next_eligible_at = match cap::decide(at, &Period::now()) {
+                Cap::Capped {
+                    next_eligible_at, ..
+                } => next_eligible_at,
+                Cap::Allowed => rfc3339(now_secs()),
+            };
             no_store(
                 Json(RevokeResponse {
                     revoked: true,
-                    next_eligible_at: period.resets_at(),
-                    revoked_at: rfc3339(revoked_at),
+                    next_eligible_at,
+                    revoked_at: at.map(rfc3339),
                 })
                 .into_response(),
             )
         }
-        Ok(None) => no_store(
+        Ok(Revocation::NoKey) => no_store(
             (
                 StatusCode::NOT_FOUND,
                 Json(errors::ErrorEnvelope {
@@ -537,9 +617,10 @@ async fn revoke(State(state): State<KeysState>, headers: HeaderMap) -> Response 
     }
 }
 
-/// Disable every key under `name`. `Ok(None)` means there was none;
-/// `Ok(Some(revoked_at))` is the revocation instant — now for a key this call
-/// disabled, the recorded `lastUpdatedDate` for one that already was.
+/// Disable every key under `name`. [`Revocation::NoKey`] means there was
+/// none; [`Revocation::Done`] carries the revocation instant — now for a key
+/// this call disabled, the recorded `lastUpdatedDate` for one that already
+/// was, and `None` for the shape where no record under the name is dated.
 ///
 /// **Every** enabled key, not only the current one: a duplicate left by an
 /// earlier double-submit is a working credential the visitor was just told
@@ -548,14 +629,19 @@ async fn revoke(State(state): State<KeysState>, headers: HeaderMap) -> Response 
 /// works — but the keys disabled before it stay disabled: there is no
 /// rollback for a revocation, and re-enabling a leaked key would be the
 /// wrong direction to fail in.
-async fn disable_all(gateway: &Gateway, name: &str) -> Result<Option<u64>, GatewayError> {
+async fn disable_all(gateway: &Gateway, name: &str) -> Result<Revocation, GatewayError> {
     let keys = exact_matches(gateway.list_named(name).await?, name);
     let Some(current) = current_key(&keys) else {
-        return Ok(None);
+        return Ok(Revocation::NoKey);
     };
     if !current.enabled {
-        // Already revoked — answer with the recorded instant, write nothing.
-        return Ok(Some(current.last_updated_at.unwrap_or(0)));
+        // Already revoked — answer with the recorded instant (the latest,
+        // the same one the cap reads), write nothing. Undatable stays
+        // `None` all the way to the JSON: the page has copy for "we cannot
+        // date it", and none for the epoch.
+        return Ok(Revocation::Done {
+            at: revocation_instant(&keys),
+        });
     }
     for key in keys.iter().filter(|k| k.enabled) {
         // The same last-line guard the reconciler keeps before its deletes:
@@ -572,7 +658,18 @@ async fn disable_all(gateway: &Gateway, name: &str) -> Result<Option<u64>, Gatew
             tracing::info!(key_id = %key.id, "portal disabled a revoked API key");
         }
     }
-    Ok(Some(now_secs()))
+    Ok(Revocation::Done {
+        at: Some(now_secs()),
+    })
+}
+
+/// What [`disable_all`] found and did.
+enum Revocation {
+    /// Nothing under the name to revoke.
+    NoKey,
+    /// The key is off. `at` is the revocation instant, `None` only when no
+    /// record under the name carries a `lastUpdatedDate`.
+    Done { at: Option<u64> },
 }
 
 /// Seconds since the Unix epoch, saturating.
@@ -587,8 +684,10 @@ fn now_secs() -> u64 {
 enum Lookup {
     /// A live key and its value.
     Key(KeyRecord, KeyValue),
-    /// The owner's key, revoked — no value is read for it.
-    Revoked(KeyRecord),
+    /// The owner's key, revoked — no value is read for it. Carries the
+    /// instant the cap is decided from (`naming::revocation_instant`, the
+    /// latest revocation), which is what the issue path reads too.
+    Revoked { revoked_at: Option<u64> },
     /// Nothing to reveal.
     None,
 }
@@ -605,7 +704,9 @@ async fn lookup(gateway: &Gateway, name: &str) -> Result<Lookup, GatewayError> {
         return Ok(Lookup::None);
     };
     if !current.enabled {
-        return Ok(Lookup::Revoked(current));
+        return Ok(Lookup::Revoked {
+            revoked_at: revocation_instant(&candidates),
+        });
     }
     match gateway.value_of(&current.id).await? {
         Some(value) => Ok(Lookup::Key(current, value)),
@@ -648,7 +749,8 @@ pub(crate) async fn issue_for(gateway: &Gateway, sub: &str, deadline: Duration) 
         return IssueOutcome::Failed;
     };
 
-    match tokio::time::timeout(deadline, reconcile(gateway, &name)).await {
+    let deadline_at = std::time::Instant::now() + deadline;
+    match tokio::time::timeout(deadline, reconcile(gateway, &name, deadline_at)).await {
         Ok(Ok(Reconciled::Issued(outcome))) => {
             tracing::info!(
                 key_id = %outcome.record.id,
@@ -663,6 +765,13 @@ pub(crate) async fn issue_for(gateway: &Gateway, sub: &str, deadline: Duration) 
                 "portal issue refused: the key was revoked this quota period"
             );
             IssueOutcome::Capped { next_eligible_date }
+        }
+        Ok(Ok(Reconciled::OutOfTime)) => {
+            tracing::error!(
+                deadline_secs = deadline.as_secs_f32(),
+                "portal key issuance refused to start a create it could not finish"
+            );
+            IssueOutcome::Failed
         }
         // Every attempt found a key and then lost it before reading its value.
         Ok(Ok(Reconciled::Lost)) => {
@@ -709,14 +818,33 @@ enum Reconciled {
     /// Every attempt settled on a key that was deleted before its value could
     /// be read.
     Lost,
+    /// Too little time left to create and attach. Nothing was written.
+    OutOfTime,
 }
 
 /// One attempt's verdict; `Retry` re-enters the flow.
 enum Attempt {
     Done(Outcome),
-    Capped { next_eligible_date: String },
+    Capped {
+        next_eligible_date: String,
+    },
+    /// Too little of the deadline left to create and attach — nothing was
+    /// written. Not retried: the next attempt would have even less.
+    OutOfTime,
     Retry,
 }
+
+/// The least time a create is started with. `CreateApiKey` and
+/// `CreateUsagePlanKey` each get up to `gateway::OPERATION_TIMEOUT` (5s) in
+/// the worst case; in practice each is a few hundred milliseconds. 4s is
+/// enough for both at ordinary latency and refuses to start them when the
+/// invocation is about to be killed — which is the one way this flow can
+/// leave an enabled, unattached key behind.
+///
+/// Above `auth::issue::RECONCILE_FLOOR` (2s) on purpose: between the two a
+/// reconciliation can still adopt an existing key but will not start a
+/// create. The note on that constant is where the trade-off is argued.
+pub(crate) const CREATE_FLOOR: Duration = Duration::from_secs(4);
 
 /// List, filter, rank, converge — the reconciler, run up to [`MAX_ATTEMPTS`]
 /// times.
@@ -725,21 +853,31 @@ enum Attempt {
 /// value could be read. That is a real, transient state (a console session, or
 /// another invocation's reconciler) and it is reported as such rather than as a
 /// failure of this service.
-async fn reconcile(gateway: &Gateway, name: &str) -> Result<Reconciled, GatewayError> {
+async fn reconcile(
+    gateway: &Gateway,
+    name: &str,
+    deadline: std::time::Instant,
+) -> Result<Reconciled, GatewayError> {
     for _ in 0..MAX_ATTEMPTS {
-        match attempt(gateway, name).await? {
+        match attempt(gateway, name, deadline).await? {
             Attempt::Done(outcome) => return Ok(Reconciled::Issued(outcome)),
             Attempt::Capped { next_eligible_date } => {
                 return Ok(Reconciled::Capped { next_eligible_date });
             }
+            Attempt::OutOfTime => return Ok(Reconciled::OutOfTime),
             Attempt::Retry => {}
         }
     }
     Ok(Reconciled::Lost)
 }
 
-/// One pass of the reconciler.
-async fn attempt(gateway: &Gateway, name: &str) -> Result<Attempt, GatewayError> {
+/// One pass of the reconciler. `deadline` is the instant the caller's
+/// `timeout` fires; a create is not started without room for itself.
+async fn attempt(
+    gateway: &Gateway,
+    name: &str,
+    deadline: std::time::Instant,
+) -> Result<Attempt, GatewayError> {
     // Step 1: everything the control plane has under this name PREFIX, across
     // all pages, narrowed to exact equality here. Both halves matter and both
     // are argued for in `naming`.
@@ -755,10 +893,16 @@ async fn attempt(gateway: &Gateway, name: &str) -> Result<Attempt, GatewayError>
     // ahead of the live one.
     let (live, mut revoked): (Vec<KeyRecord>, Vec<KeyRecord>) =
         existing.into_iter().partition(|k| k.enabled);
+    // Ids this attempt deleted. `GetApiKeys` is eventually consistent, so the
+    // re-listing after a create can still show them; ranked, a deleted
+    // earlier-created record wins, its attach 404s, and the single retry is
+    // spent on a phantom — leaving the key just created unattached. Filtered
+    // out of the re-listing instead, along with anything disabled.
+    let mut deleted_here: Vec<String> = Vec::new();
     if live.is_empty() && !revoked.is_empty() {
         // The LATEST revocation governs: a duplicate revoked last month must
         // not open a door a revocation this month closed.
-        let revoked_at = revoked.iter().filter_map(|k| k.last_updated_at).max();
+        let revoked_at = revocation_instant(&revoked);
         if let Cap::Capped {
             next_eligible_date, ..
         } = cap::decide(revoked_at, &Period::now())
@@ -776,6 +920,7 @@ async fn attempt(gateway: &Gateway, name: &str) -> Result<Attempt, GatewayError>
             }
             tracing::info!(key_id = %dead.id, "deleting a revoked key whose period has rolled");
             gateway.delete(&dead.id).await?;
+            deleted_here.push(dead.id.clone());
         }
         // Deleted here, so the sweep below has nothing of theirs left to do.
         revoked.clear();
@@ -791,6 +936,18 @@ async fn attempt(gateway: &Gateway, name: &str) -> Result<Attempt, GatewayError>
     // dropped on purpose — see `Outcome`; a successful create is itself the
     // proof the key is readable.
     if candidates.is_empty() {
+        // A create is the one write that cannot be undone by a timeout: if
+        // the deadline cancels this future after the request left, the key
+        // exists, attached to nothing, revealed to its owner as a key that
+        // answers `403`. So the create is started only with room for itself
+        // and the attach behind it — see `CREATE_FLOOR`.
+        if deadline.saturating_duration_since(std::time::Instant::now()) < CREATE_FLOOR {
+            tracing::error!(
+                "not enough of the deadline left to create AND attach a key; refusing to \
+                 start a create that could be cut off"
+            );
+            return Ok(Attempt::OutOfTime);
+        }
         let (record, _value) = gateway.create(name).await?;
 
         // Re-list rather than returning what we just made. Two simultaneous
@@ -800,7 +957,10 @@ async fn attempt(gateway: &Gateway, name: &str) -> Result<Attempt, GatewayError>
         // the loser is deleted" is actually met. The rank rule is deterministic
         // (`naming::choose_winner`), so both invocations pick the same survivor
         // from the same list rather than each deleting the other's.
-        candidates = exact_matches(gateway.list_named(name).await?, name);
+        candidates = exact_matches(gateway.list_named(name).await?, name)
+            .into_iter()
+            .filter(|k| k.enabled && !deleted_here.contains(&k.id))
+            .collect();
         if candidates.is_empty() {
             // The control plane did not list what it just created. Rather than
             // fail, trust the create — it answered with an id and a value, and

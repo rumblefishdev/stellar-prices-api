@@ -1730,15 +1730,19 @@ describe('replace my key', () => {
    * The wording is the acceptance criterion: the key is deactivated
    * immediately, and no new key is issued until the next period.
    */
-  it('states that the key is deactivated immediately and that no new key is issued until the next period', async () => {
+  it('states that the key is deactivated, names the propagation window, and says no new key is issued until the next period', async () => {
     signedIn();
     renderApp();
 
     await openDialog();
     const warning = await screen.findByTestId('replace-key-warning');
-    expect(warning.textContent).toMatch(
-      /deactivates the current one immediately/i,
-    );
+    expect(warning.textContent).toMatch(/deactivates the current one/i);
+    // The 0192 criterion: no claim of immediacy the data plane does not
+    // have. ~25 s measured (0180 item 8); the copy says half a minute and
+    // tells the visitor to treat the key as live until then.
+    expect(warning.textContent).toMatch(/within about half a minute/i);
+    expect(warning.textContent).toMatch(/treat it as live until then/i);
+    expect(warning.textContent).not.toMatch(/immediately/i);
     expect(warning.textContent).toMatch(/will break/i);
     expect(warning.textContent).toMatch(/no new key is issued now/i);
     expect(warning.textContent).toMatch(/next quota period/i);
@@ -1791,10 +1795,26 @@ describe('replace my key', () => {
 
     const revoked = await screen.findByTestId('key-revoked');
     expect(revoked.textContent).toMatch(/deactivated/i);
+    // The revocation instant from the API, in UTC, is the anchor for the
+    // propagation window — not "now", not the viewer's zone.
+    expect(screen.getByTestId('revoked-at').textContent).toBe(
+      '21 August 2026, 12:00 UTC',
+    );
+    expect(revoked.textContent).toMatch(/within about half a minute/i);
     expect(revoked.textContent).toMatch(/1 September 2026/);
     expect(revoked.textContent).toMatch(/do not have a working key/i);
     expect(revokeCalls(fetchMock)).toHaveLength(1);
     expect((revokeCalls(fetchMock)[0][1] as RequestInit).method).toBe('POST');
+    // The CSRF marker: a non-simple header the backend requires and a
+    // cross-origin page cannot send without a preflight.
+    expect(
+      (
+        (revokeCalls(fetchMock)[0][1] as RequestInit).headers as Record<
+          string,
+          string
+        >
+      )['x-requested-with'],
+    ).toBe('stellar-prices-portal');
     expect(revokeCalls(fetchMock)[0][0].startsWith('http')).toBe(false);
     expect(screen.queryByTestId('api-key')).toBeNull();
     expect(document.body.textContent).not.toContain(KEY.value);
@@ -1865,6 +1885,61 @@ describe('replace my key', () => {
     expect(screen.queryByText(/one key, on the free plan/i)).toBeNull();
   });
 
+  /**
+   * After an in-page revoke the usage section stops describing the key as
+   * new, re-asks the backend (which evicted its cache), and — when AWS has no
+   * row — says the key was deactivated rather than "issue one above".
+   */
+  it('tells the usage section about an in-page revoke', async () => {
+    const fetchMock = signedIn();
+    renderApp();
+
+    // Before: a key on screen, usage says no key → "your key is new".
+    await screen.findByTestId('api-key');
+    expect(await screen.findByText(/your key is new/i)).toBeTruthy();
+    const usageCallsBefore = fetchMock.mock.calls.filter(
+      ([url]) => url === USAGE_URL,
+    ).length;
+
+    await openDialog();
+    fireEvent.change(screen.getByTestId('replace-key-phrase'), {
+      target: { value: 'delete-key' },
+    });
+    fireEvent.click(screen.getByTestId('replace-key-confirm'));
+    await screen.findByTestId('key-revoked');
+
+    expect(await screen.findByTestId('usage-after-revoke')).toBeTruthy();
+    expect(screen.queryByText(/your key is new/i)).toBeNull();
+    expect(document.body.textContent).not.toMatch(/issue one above/i);
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.filter(([url]) => url === USAGE_URL).length,
+      ).toBe(usageCallsBefore + 1),
+    );
+  });
+
+  /**
+   * A malformed `next_eligible_at` must NOT unlock the issue link — the safe
+   * direction for garbage is to keep waiting (the server would only refuse).
+   */
+  it('keeps the issue link hidden when the revoked date is unparseable', async () => {
+    signedIn(undefined, () => ({
+      ok: false,
+      status: 404,
+      json: async () => ({
+        code: 'key_revoked',
+        details: { next_eligible_at: 'not-a-date' },
+      }),
+    }));
+    renderApp();
+
+    await screen.findByTestId('key-revoked');
+    expect(screen.queryByRole('link', { name: /get my api key/i })).toBeNull();
+    expect(document.body.textContent).toMatch(
+      /start of the next quota period/i,
+    );
+  });
+
   /** Once the date has passed, the issue link comes back. */
   it('offers the issue round-trip once the revocation period has passed', async () => {
     signedIn(undefined, () => ({
@@ -1876,6 +1951,88 @@ describe('replace my key', () => {
       }),
     }));
     renderApp();
+
+    await screen.findByTestId('key-revoked');
+    const link = await screen.findByRole('link', { name: /get my api key/i });
+    expect(link.getAttribute('href')).toBe(ISSUE_HREF);
+  });
+
+  /**
+   * A revocation the backend cannot date renders WITHOUT an instant — never
+   * "deactivated on just now", and never the next-eligible phrase presented
+   * as the revocation instant.
+   */
+  it('renders an undated revocation without inventing an instant', async () => {
+    signedIn(undefined, () => ({
+      ok: false,
+      status: 404,
+      json: async () => ({
+        code: 'key_revoked',
+        details: { next_eligible_at: '2026-09-01T00:00:00Z' },
+      }),
+    }));
+    renderApp();
+
+    const revoked = await screen.findByTestId('key-revoked');
+    expect(revoked.textContent).toMatch(/deactivated/i);
+    expect(screen.queryByTestId('revoked-at')).toBeNull();
+    expect(revoked.textContent).not.toMatch(/just now/i);
+    expect(revoked.textContent).not.toMatch(
+      /deactivated on the start of the next quota period/i,
+    );
+    // The date it CAN be re-issued is still named — that one is known.
+    expect(revoked.textContent).toMatch(/1 September 2026/);
+  });
+
+  /**
+   * The propagation window is a statement about now. Rendered on a page load
+   * days after the revocation (the reveal path), it must not tell the owner
+   * of a long-dead key to keep treating it as live.
+   */
+  it('states the propagation window in the past tense for an old revocation', async () => {
+    signedIn(undefined, () => ({
+      ok: false,
+      status: 404,
+      json: async () => ({
+        code: 'key_revoked',
+        details: {
+          next_eligible_at: '2026-09-01T00:00:00Z',
+          revoked_at: '2026-08-01T09:00:00Z',
+        },
+      }),
+    }));
+    renderApp();
+
+    const revoked = await screen.findByTestId('key-revoked');
+    expect(screen.getByTestId('revoked-at').textContent).toBe(
+      '1 August 2026, 09:00 UTC',
+    );
+    expect(revoked.textContent).toMatch(/stopped working/i);
+    expect(revoked.textContent).not.toMatch(/treat it as live/i);
+    // The measured window is still named — only the tense changed.
+    expect(revoked.textContent).toMatch(/within about half a minute/i);
+  });
+
+  /**
+   * An idempotent revoke whose period has already rolled answers with a
+   * next-eligible instant of *now*, and the page offers the round-trip
+   * rather than a date a month out.
+   */
+  it('offers the issue link when the revoke answers a next eligible date already passed', async () => {
+    signedIn(() => ({
+      json: async () => ({
+        revoked: true,
+        next_eligible_at: '2020-01-01T00:00:00Z',
+        revoked_at: '2019-12-03T12:00:00Z',
+      }),
+    }));
+    renderApp();
+
+    await openDialog();
+    fireEvent.change(screen.getByTestId('replace-key-phrase'), {
+      target: { value: 'delete-key' },
+    });
+    fireEvent.click(screen.getByTestId('replace-key-confirm'));
 
     await screen.findByTestId('key-revoked');
     const link = await screen.findByRole('link', { name: /get my api key/i });

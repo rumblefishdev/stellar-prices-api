@@ -202,13 +202,28 @@ const ISSUE_BUDGET: Duration = Duration::from_secs(12);
 
 /// The least time worth starting a reconciliation with.
 ///
-/// A reconciliation needs at least a list, a create and an attach. Beginning
-/// one with less than this cannot end in a key, and starting control-plane
-/// writes that the invocation will be killed part-way through is how an
-/// unattached orphan is made. Below this the path lands on `?issue=failed` —
-/// which is the honest answer: eligibility passed, our key service did not
-/// have time.
+/// A reconciliation needs at least a list, and then either an adoption (one
+/// more read) or a create and an attach. Beginning one with less than this
+/// cannot end in a key at all, and starting control-plane writes that the
+/// invocation will be killed part-way through is how an unattached orphan is
+/// made. Below this the path lands on `?issue=failed` — which is the honest
+/// answer: eligibility passed, our key service did not have time.
+///
+/// **Deliberately below [`keys::CREATE_FLOOR`] (4s), not an oversight.**
+/// Between the two only an *adoption* can end in a key: `attempt` refuses to
+/// start a create with less than `CREATE_FLOOR` left, because a create cut
+/// off by the deadline leaves an enabled, unattached key its owner is shown
+/// as one that answers `403`. Raising this floor to `CREATE_FLOOR + a list`
+/// would save one `GetApiKeys` on a doomed first press and would cost every
+/// returning press its recovery — a key already created by a previous
+/// invocation is adopted in two reads, well inside 2s. The static assertion
+/// below is what fails if the ordering is ever inverted by accident.
 const RECONCILE_FLOOR: Duration = Duration::from_secs(2);
+
+const _: () = assert!(
+    RECONCILE_FLOOR.as_millis() <= keys::CREATE_FLOOR.as_millis(),
+    "RECONCILE_FLOOR above CREATE_FLOOR would refuse adoptions that fit;      see the note on RECONCILE_FLOOR"
+);
 
 /// Everything the issue arm needs beyond what sign-in already carries.
 ///

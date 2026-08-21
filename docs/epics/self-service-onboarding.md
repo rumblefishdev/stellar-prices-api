@@ -232,8 +232,8 @@ thirteen vertical increments, each one a user story that can be deployed and sho
 | 5   | `0188` | See usage against quota and the reset date                                         |
 | 6   | `0189` | Only Stellar Discord members with a non-new account can get a key                  |
 | 7   | `0190` | The key registry table — deferred, and has to justify itself                       |
-| 8   | `0191` | Replace a key, capped at once per quota period                                     |
-| 9   | `0192` | Revoke a leaked key — no replacement until the cap allows                          |
+| 8   | `0191` | Replace my key — revoke now, re-issue next quota period (merged with `0192`)       |
+| 9   | `0192` | ~~Revoke a leaked key~~ — merged into `0191` on 2026-08-21, superseded             |
 | 10  | `0193` | Make it presentable                                                                |
 | 11  | `0194` | Audit the assembled configuration (Tranche 3 AC 6)                                 |
 | 12  | `0195` | Swagger UI, per-prefix SPA fallback, custom domain                                 |

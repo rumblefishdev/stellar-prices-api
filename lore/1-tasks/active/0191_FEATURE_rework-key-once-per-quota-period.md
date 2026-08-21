@@ -1,11 +1,11 @@
 ---
 id: "0191"
-title: "Replace my key — rework, capped at once per quota period"
+title: "Replace my key — revoke now, re-issue next quota period (merged with 0192)"
 type: FEATURE
 status: active
 related_adr: ["0010"]
 related_tasks: ["0183", "0157", "0160", "0180", "0187", "0189", "0190", "0192", "0193"]
-tags: [layer-backend, priority-medium, effort-medium, milestone-M3, epic-self-service-onboarding, api-gateway, usage-plan, slice-8]
+tags: [layer-backend, priority-medium, effort-medium, milestone-M3, epic-self-service-onboarding, api-gateway, usage-plan, security, slice-8, slice-9]
 milestone: 3
 links:
   - "../../../docs/epics/self-service-onboarding.md"
@@ -43,6 +43,17 @@ history:
       absorbs [[0192]]; the `action=rework` OAuth round-trip is gone (revoke
       is session-only — a leak must be killable while Discord is down), and
       one IAM grant is added (`apigateway:PATCH` on `/apikeys/*`).
+  - date: "2026-08-21"
+    status: active
+    who: akot
+    note: >
+      **Merged with [[0192]]** at Adam's request — the reversal above made
+      "Replace my key" exactly 0192's rule, so two tasks described one
+      feature. 0192 is archived as `superseded`; its rule, the three measured
+      properties it was designed around, and its unmet criterion (the ~25 s
+      data-plane propagation window must be said out loud) move here. Title
+      and tags widened (`slice-9`, `security`); file name kept because the
+      branch and PR #238 carry it.
 ---
 
 # Rework — a new key, once a period
@@ -62,6 +73,37 @@ knowing that I will not have a working key again until the next quota period.*
 ~~An atomic swap: the old key is deleted and a new one issued in the same
 operation, so the user is never without a working key. The cap blocks the *next*
 rework, not the replacement.~~
+
+## The revoke rule (from [[0192]])
+
+**Revoking does not reset, consume or bypass the cap. It kills a key and
+issues nothing.** A user who was issued a key on 3 August and revokes on the
+4th is keyless until 1 September. Settled by Adam on 2026-08-13; not a default
+to re-derive.
+
+- The cap exists so a burnt quota cannot be escaped by minting a fresh
+  `apiKeyId` with a clean counter (quota is per `(usagePlanId, apiKeyId)`). If
+  revoke handed out a replacement, "revoke" would be the button pressed on the
+  20th of a heavy month.
+- Being keyless is the correct cost: the same as not using the leaked key,
+  minus the risk of someone else using it. So the confirmation must say it is
+  destructive to the user's own access, with the actual date.
+
+Three properties measured under [[0180]] item 8 (2026-08-12) that the build
+rests on:
+
+| Measured | Consequence |
+| --- | --- |
+| `UpdateApiKey(enabled=false)` **preserves** the usage counter (drained → disabled → re-enabled → still `429`) | revocation is not itself a quota reset, so it needed no cross-key tracking |
+| A disabled key is `403`, **byte-identical to no key** | the portal cannot infer a revocation from the gateway; the disabled key's own record (`lastUpdatedDate`) is what the reveal and the cap read |
+| Disable/enable take **~25 s** to reach the data plane | a `200` from the revoke reports the control plane, not reality — the window must be stated, not hidden |
+
+What 0192 planned and this merge did differently: it specified `DeleteApiKey`
+plus a persisted revocation record in ClickHouse (append-only table, a write
+grant from BE, a writer mTLS bundle on the Lambda). **Disabling instead of
+deleting makes the key its own record**, so none of that storage work exists.
+The ClickHouse sketch stays in the archived 0192 file for the day a record is
+needed that a key cannot carry.
 
 ## Step 0 — measure the rollover (was [[0180]] item 7)
 
@@ -177,9 +219,9 @@ are replaced, not re-counted.)*
       The restating is done everywhere. The poller was started 2026-08-21
       11:51Z (drain `200,200,200,429`); the verdict is the first `200` after
       the `429` run — record it in the Step 0 table
-- [x] "Replace my key" deactivates the key **immediately** and issues nothing —
-      one `UpdateApiKey`, no Discord call, nothing created
-      (`revoke_deactivates_the_key_immediately_and_issues_nothing`); every key
+- [x] "Replace my key" disables the key in one `UpdateApiKey` and issues
+      nothing — no Discord call, nothing created
+      (`revoke_disables_the_key_in_one_call_and_issues_nothing`); every key
       under the name, not only the current one; idempotent; a failed disable
       is a `502`, never a false "revoked"
 - [x] The revoked value is never revealed again; the reveal answers
@@ -207,6 +249,25 @@ are replaced, not re-counted.)*
       is issued until the next period; confirm is gated on typing
       `delete-key` and cannot double-fire; the revoked state renders the date
       (12 frontend tests)
+- [x] **(from 0192)** The revoke response and the dialog do not claim
+      immediacy the data plane does not have: the dialog says the key stops
+      working "within about half a minute" and to treat it as live until
+      then; the revoked state renders the API's `revoked_at` as a UTC
+      instant ("21 August 2026, 12:00 UTC") and repeats the window anchored
+      on it; the word "immediately" is asserted absent. The button reads
+      "Deactivate my key". Tests: the dialog wording spec and
+      `revokes with one POST … renders the revoked state with the date`;
+      the backend test is renamed
+      `revoke_disables_the_key_in_one_call_and_issues_nothing` so its name
+      does not claim what the mock cannot show
+- [x] **(from 0192)** Revocation works while Discord is unreachable — the
+      route is session-only and the revoke test makes zero Discord calls
+- [x] **(from 0192)** Revocation does not reset the quota counter — measured
+      under 0180 item 8, not assumed; the re-issue is a new key and is what
+      the cap governs
+- [x] **(from 0192)** The choice of `UpdateApiKey(enabled=false)` over
+      `DeleteApiKey` is recorded with its reasoning (decision #17; the
+      reverse of 0192's draft, for the reason given there)
 - [ ] `MONTH` confirmation scheduled for 1 September 2026 if the epic is
       open — dated note, not performed: on/after 2026-09-01 look for
       `summarize_days`' `quota reset inside the queried period` warn in the
@@ -221,8 +282,9 @@ are replaced, not re-counted.)*
 - If the measured AWS rollover instant differs from ours, the dashboard renders
   our date and the counter does its own thing. A UX wrinkle, not a correctness
   bug: the cap is ours to define.
-- The rework cap is why a leaked key cannot be invalidated until the 1st. That
-  gap is [[0192]], and it is no longer blocked.
+- ~~The rework cap is why a leaked key cannot be invalidated until the 1st. That
+  gap is [[0192]], and it is no longer blocked.~~ Closed by the reversal: the
+  action *is* the revocation, and [[0192]] is merged into this task.
 
 ## Implementation Notes
 
@@ -390,9 +452,8 @@ Nothing new spawned — every follow-up already has an owner or a date:
 - The live `403`/`200` curl pair → the deploy + [[0164]]'s evidence pass.
 - Styling of the dialog and the eight landings → [[0193]] (wording not
   re-decided).
-- Revoke (`UpdateApiKey(enabled=false)`, no cap, session-only by design) →
-  [[0192]], which will find `Action::parse`'s "arrives early" example is now
-  `revoke`.
+- ~~Revoke → [[0192]]~~ — merged into this task on 2026-08-21; nothing left
+  to hand over.
 - The now-seven-call surface and the per-load cost → [[0194]].
 
 ## Implementation Notes — 2026-08-21, after the reversal
@@ -448,3 +509,123 @@ states. Workspace 640 Rust, portal 88, 0 failed.
     cannot reopen a door closed this month.
 21. **The 2026-08-07 decision is struck through, not deleted**, in the epic
     and here: both the decision and its reversal are on the record.
+
+## Review round — 2026-08-21 audit (four lenses + two measurements)
+
+Two measurements made on the spot, because the findings depended on them:
+
+| measured | result |
+| --- | --- |
+| does `UpdateApiKey(enabled=false)` bump `lastUpdatedDate`? | **yes** (14:46:49 → 14:47:56 on a scratch key) — the cap has something to stand on |
+| does a no-op patch, or a `description` patch, bump it? | **yes, both** — so the code must never re-patch a disabled key (it does not), and a console edit of a `discord-*` key extends its owner's cap |
+
+Fixed in this round (A1–A5, B7, B8 of the audit list):
+
+22. **One selector, one cap instant, four readers.** `naming::current_key`
+    (earliest live, else earliest record) and the new
+    `naming::revocation_instant` (the **latest** revocation; undated poisons
+    it) are what the reveal, the revoke, the issue path **and the usage
+    route** read. Before: usage ignored `enabled`, the reveal capped on the
+    earliest record's date while the issue capped on the latest — two
+    revocation records from different months made the page offer an issue
+    the round-trip refused. Usage now also answers `no_key` once a
+    revocation's period has rolled, as the reveal does.
+    (`the_reveal_and_the_issue_agree_on_the_cap_with_mixed_period_revocations`,
+    `usage_follows_the_same_key_as_the_reveal`)
+23. **The re-listing after a post-roll create excludes the records just
+    deleted and anything disabled.** `GetApiKeys` is eventually consistent;
+    a phantom earlier-created record would win, 404 on attach, and spend the
+    single retry — leaving the new key created and unattached.
+    (`a_stale_listing_after_the_roll_does_not_rank_the_deleted_record`; the
+    mock gained a sticky `list_resurrects_deleted`)
+24. **A create is started only with ≥ 4 s of the deadline left**
+    (`CREATE_FLOOR`), else `Attempt::OutOfTime` → `?issue=failed` with
+    nothing written; and **`CreateApiKey` is sent without SDK retries** — no
+    idempotency token, so a retried request whose first try landed is a
+    duplicate. (`a_lost_create_response_is_not_retried_into_duplicates`; the
+    mock gained `fail_next_create_after_creating`)
+25. **`POST /key/rework` requires the portal's own request marker**
+    (`X-Requested-With: stellar-prices-portal`) and refuses
+    `Sec-Fetch-Site: cross-site`/`same-site` — `403 cross_site_request`,
+    before the session is read. `SameSite=Lax` alone is site-scoped, and
+    after the custom-domain cutover ([[0195]]) a sibling host's form `POST`
+    would carry the cookie and cost the victim their key for a month.
+    (`a_revoke_without_the_same_origin_markers_is_refused_before_anything_is_read`)
+26. **IAM `/apikeys/*` is tag-scoped** (`aws:ResourceTag/ManagedBy =
+    prices-portal`) on `GET`/`PATCH`/`DELETE`. The per-key `GET` with
+    `includeValue=true` was the real account-wide exposure, not the listing;
+    `PATCH` could rename a partner key into a portal name. Accepted change:
+    a hand-made exact-name key is no longer adopted (`502`, left alone).
+    Synth and CI check 5 green; the stale "NOT here: PATCH" paragraph is
+    gone.
+27. **Frontend:** the dashboard learns of an in-page revoke — the usage
+    section drops "your key is new", re-asks (the backend evicted its
+    cache), and says "deactivated" rather than "issue one above" when AWS
+    has no row; an unparseable `next_eligible_at` keeps the issue link
+    hidden (the safe direction); the revoke `fetch` carries the marker
+    header.
+
+Still open from the audit, deliberately: B6 (per-caller cache on the reveal
+/ dedup of `GetApiKeys` across `/key` and `/usage` — the control-plane
+budget), B9 ([[0205]] deploy), B10/B11 (CI allow-list; `timeoutSeconds` vs
+the Rust budgets), C (dialog focus/Escape), D (ADR 0010 correction #3, epic
+`:278-410`, [[0164]]'s plan, grant counts, stale comments), E (poller gap +
+`429` body logging).
+
+## Review round — 2026-08-21 code review of the audit round
+
+Eight findings against the audit round's own diff; all eight closed.
+
+28. **An undated record no longer poisons the cap instant.**
+    `naming::revocation_instant` skipped to `None` on a single record without
+    `lastUpdatedDate`, and `None` is capped — but `next_eligible_at` is then
+    recomputed from the *current* period on every read, so the date rolled
+    forward every month and the owner was locked out permanently, with no
+    support action short of deleting the record. It is now the max over the
+    dated records; `None` only when nothing under the name is datable.
+    Skipping can only under-cap, and only in a shape AWS does not produce;
+    the lockout was permanent.
+    (`the_revocation_instant_is_the_latest_dated_one`,
+    `an_undated_duplicate_does_not_lock_the_owner_out_forever` over HTTP; the
+    mock's `last_updated_at` became `Option` with a `Store::undate`)
+29. **The revoke stopped being a fifth reader of the cap.** It answered
+    `next_eligible_at: period.resets_at()` directly, so an idempotent revoke
+    of a key revoked two periods ago said "next month" while the reveal said
+    `no_key` and the round-trip would have issued — a stale tab or a
+    double-submit cost the visitor a month that was not owed. It now goes
+    through `cap::decide` like the other four readers, and answers *now* when
+    the period has rolled.
+    (`an_idempotent_revoke_after_the_period_rolled_says_a_key_is_due_now`)
+30. **`revoked_at` is nullable rather than an invented epoch.**
+    `unwrap_or(0)` rendered as "deactivated on 1 January 1970"; the field is
+    `Option<String>` in the JSON, and the page renders the revocation with no
+    instant instead. `describeUtcInstant` returns `null` for a missing or
+    unparseable value — its old fallbacks were "just now" (a claim about a
+    revocation that may be weeks old) and, via `describeNextEligible`,
+    "deactivated on the start of the next quota period", the *next-eligible*
+    phrase presented as the revocation instant.
+    (`renders an undated revocation without inventing an instant`)
+31. **The propagation window is present-tense only while it is open.** The
+    revoked view renders on every page load through the reveal, so "it stops
+    working within about half a minute — until then treat it as live" was
+    telling the owner of a key that died last week to keep treating it as
+    live. Past tense beyond `PROPAGATION_FRESH_MS` (5 min); the measured
+    window is still named, only the tense changes.
+    (`states the propagation window in the past tense for an old revocation`)
+32. **`RECONCILE_FLOOR` (2s) below `CREATE_FLOOR` (4s) is recorded as
+    deliberate, not reconciled away.** Between the two only an *adoption* can
+    end in a key — a create is refused, because one cut off by the deadline
+    leaves an enabled unattached key. Raising the floor would save one
+    `GetApiKeys` on a doomed first press and cost every returning press its
+    recovery. Both constants now document the gap and a `const` assertion
+    fails if the ordering is ever inverted.
+- **Docs:** `README.md` §3c no longer says "deactivates the key
+  immediately" — the claim this round removed from the dialog and asserts
+  absent in the spec; it states the ~25 s window instead. `api/portal.ts`'s
+  `revokeKey` doc no longer credits `POST` + `SameSite` as the CSRF guard,
+  which the backend explicitly rejects: the marker header is.
+
+**Tests:** 648 Rust across the workspace (+3 for this round), portal 93 (+3), 0 failed. `cargo fmt --check`,
+`clippy --all-targets` (0 warnings), `cargo check --features lambda`,
+`nx run-many -t lint typecheck build test -p portal`, `nx format:check --all`
+all green.
