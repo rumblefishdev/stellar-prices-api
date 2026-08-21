@@ -96,6 +96,23 @@ history:
       premise holds. It also proves half 2 must live in the client: the Lambda
       and the operator CLIs share the single prices_writer user, so no
       server-side setting can give them different ceilings.
+  - date: 2026-08-21
+    status: backlog
+    who: okarcz
+    note: >
+      FIXED AND VERIFIED. BE deployed at 14:46:18 UTC with the --force-recreate;
+      zero BadResponse since, a 46.4 s XLM pivot returned to the client, and the
+      USDT pivot ran on the schedule for the first time ever (1,895 rows, then
+      ~17/batch — so the "USDT backlog" of 0209/0212 was ~1,900 rows and the leg
+      was simply never asked). Three ACs now green. The new bottleneck is ours
+      and was predicted here before the deploy: Lambda 300 s, 3 batches per
+      attempt, ~2.16M rows/day (3x baseline, ~258 days for the XLM leg) — so 0111
+      is still required. Two new findings: 36% of every invocation is spent in
+      the oracle tier draining a few hundred rows out of a 737M-row scan, which
+      is the sharpest 0111 argument yet; and the coarse sweep behind main.rs:167's
+      `?` has NEVER executed, starving 0114's remedy — spawned as 0218. The peg
+      statement's constant 1,236 rows/batch spawned as 0219. Remaining here:
+      max_execution_time per-caller, and the two guard tests.
 ---
 
 # Every invocation fails on the XLM pivot, so the USDT pivot is never reached
@@ -555,17 +572,110 @@ share and are 3.3% of — the same disk BE filled on 2026-08-13, costing an 11.5
 ingest stall. It is a courtesy heads-up, and it is a second argument for taking
 0111 immediately after.
 
+## ✅ FIXED AND VERIFIED — 2026-08-21 14:46:18 UTC
+
+BE deployed the bump (`response_header_timeout` 30s → 7200s) with the one-time
+`--force-recreate` their inode finding required. Verified from our side inside
+the hour, against the baseline recorded above.
+
+### The proof is two adjacent lines
+
+```
+15:20:17  pivot_xlm   46.4 s  10000 rows   QueryFinish
+15:20:31  pivot_usdt  13.6 s   1895 rows   QueryFinish
+```
+
+A **46.4 s statement returned to the client and execution continued.** That has
+been impossible since 2026-07-26. The second line is the first `_1m` row ever
+priced by the USDT pivot on the schedule.
+
+| check | baseline | after |
+|---|---|---|
+| `BadResponse("")` | 3/hour for 26 days | **0** |
+| XLM pivot | 45.6 s, client cut at 30.0 s | 43.4-46.7 s, **all `QueryFinish`, all returned** |
+| USDT pivot | **absent from every scheduled run** | **6 runs**, 1,895 rows then ~17/batch |
+| peg : pivot | 1:1 | **1:2** |
+| peg-pivot batches per attempt | 1, then death | **3** |
+| oracle | 2-6 crossings/day killed the pass | 25.1-27.8 s, all completing |
+
+⚠️ **The USDT backlog was ~1,900 rows — not a backlog at all.** Its first batch
+wrote 1,895 and every batch since writes ~17. The leg was never behind, it was
+never being *asked*. This closes the substance of [[0209]] and [[0212]]: their
+premise was a throughput limit, and the truth was an unreached statement. The
+USDT pivot also costs **13.6 s, not 46 s**, because `quote_asset_id = 111` prunes
+on the sort key's 2nd column — the XLM pivot is expensive because XLM-quoted rows
+*are* the table, not because pivots are expensive.
+
+### The new bottleneck is ours: the Lambda's 300 s
+
+```
+REPORT … Duration: 300000.00 ms  Memory Size: 512 MB  Max Memory Used: 54 MB  Status: timeout
+```
+
+All three attempts, one shared `RequestId` (async retry 1 + 2). **Predicted in
+this task before the deploy and confirmed to the batch count** — 3 peg-pivot
+batches per attempt at ~72 s each (peg 14 + XLM pivot 45 + USDT pivot 13.6).
+
+⚠️ `Status: timeout` is a **field on the REPORT line**, not a separate
+`Task timed out` message, on `provided:al2023`. Grepping for the old string
+returns zero and reads as "no timeouts". It produced a wrong reading here; don't
+repeat it.
+
+**Memory is 54 MB of 512 MB** — the pass is purely time-bound, so raising memory
+buys nothing.
+
+### Throughput — 3x, and still not enough
+
+| | baseline | after |
+|---|---|---|
+| XLM pivot runs | 3/hour | **9/hour** (3 attempts × 3 batches) |
+| rows/day | 720 K | **~2.16 M** |
+| XLM backlog (556.78 M) | ~774 days | **~258 days** |
+
+Candidate counts corroborate: 656,569,249 → 656,535,211 → 656,506,042 across the
+three attempts, ~30 K each, matching 3 × `batch_size` exactly.
+
+🔴 **36% of every invocation is spent in the oracle tier** — 105-108 s of the
+300 s, draining **499, 517 and 3,564 candidates**. Three statements, each reading
+the full 737 M-row table. This is the sharpest single argument for [[0111]]
+option 1 yet recorded: the pass spends over a third of its budget scanning the
+whole table to find a few hundred rows.
+
+### 🔴 The coarse sweep has NEVER run — [[0114]]'s remedy is starved
+
+`main.rs:167` is `let stats = pass.run().await?;` and the sweep sits **after** it,
+so it is unreachable both ways: before the fix `run()` returned `Err` and `?`
+propagated; now the Lambda is killed inside `run()`. `"enrichment pass complete"`
+appears in none of the three attempts, and no `"coarse sweep complete"` line
+exists in the window.
+
+Its budget arithmetic cannot save it either — `budget = min(120 s, deadline − now
+− 60 s)`, and a pass that runs to the hard deadline leaves that at **0**.
+
+Spawned as **[[0218]]**. It matters because 0114 — the coarse tables carrying no
+USD values — is the defect [[0111]] itself calls "more serious and outranking".
+
+### Observation spawned as [[0219]]
+
+The peg statement writes **exactly 1,236 rows on every batch**, eight consecutive
+identical counts, and the baseline shows the same (54,414/44 = 1,236.7). New rows
+would vary. It looks like the same rows are re-selected and re-written every
+batch, inflating `version` for no gain. Pre-existing — not caused by this fix.
+
 ## Acceptance Criteria
 
 - [x] The source is shown correct — `pivot_ids() == [xlm, usdt]` and the peg
       excludes USDT, both green (2026-08-21). The defect is the artifact.
 - [ ] A test asserts `enrich_peg_pivot_step` issues TWO pivot statements, so a
       silently-narrowed pivot set fails the suite instead of the quote leg.
-- [ ] After the fix, `system.query_log` shows `CAST(111 AS UInt32) AS
+- [x] After the fix, `system.query_log` shows `CAST(111 AS UInt32) AS
       ref_asset_id` running on the hourly schedule, outside any hand-run window.
-- [ ] `peg_insert : pivot_insert` reaches 1:2 on `price_ohlcv_1m`.
-- [ ] USDT-quoted `_1m` rows are measurably written — `written_rows > 0` on the
-      USDT pivot, recorded before/after.
+      **Six runs from 15:20:31 UTC, 2026-08-21.**
+- [x] `peg_insert : pivot_insert` reaches 1:2 on `price_ohlcv_1m`. **Verified
+      2026-08-21 — every peg is followed by an XLM pivot and a USDT pivot.**
+- [x] USDT-quoted `_1m` rows are measurably written — `written_rows > 0` on the
+      USDT pivot, recorded before/after. **Before: 0 across all history. After:
+      1,895 on the first batch, ~17/batch since.**
 - [ ] `max_execution_time` is set per-caller on our client, and an exceeded bound
       produces a logged ClickHouse exception — verified by inducing, not inferred.
 - [ ] BE confirm the bump is live **from Caddy's admin API**, not from the
