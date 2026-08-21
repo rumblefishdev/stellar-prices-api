@@ -147,6 +147,58 @@ FROM system.view_refreshes
 WHERE view = 'mv_current_prices';
 ```
 
+## Step 1b — measure the COUNTERFACTUAL, before anything mutates (task 0135)
+
+**Do this whenever the change alters which rows or venues survive a filter.**
+Step 1 tells you what the new SELECT *costs*; it says nothing about what it
+*publishes*. Comparing post-apply numbers against a measurement from yesterday
+cannot separate your change from ordinary drift — and by the time you notice,
+the change is live.
+
+You already have both definitions: the new one in `current.sql`, the old one in
+step 0's rollback artifact. Run the SAME aggregate through each, over the same
+data, before touching anything. Both are plain `SELECT`s.
+
+```bash
+# Pick the metrics your change is supposed to move, plus the ones it could
+# damage. For 0135 that was: the target (zero_but_vwap_ok, zero_price_usd) AND
+# the collateral (empty_sources) — the third is the one that caught the problem.
+METRICS="count() AS assets, \
+  countIf(price_usd = 0 AND vwap_24h > 0) AS zero_but_vwap_ok, \
+  countIf(price_usd = 0) AS zero_price_usd, \
+  countIf(sources = '{}') AS empty_sources"
+
+# NEW definition
+{ echo "SELECT ${METRICS} FROM ("; \
+  sed -n '/^WITH/,$p' packages/prices-clickhouse/schema/current.sql \
+    | sed 's/;[[:space:]]*$//'; echo ")"; } > /tmp/metrics_new.sql
+
+# OLD definition, from the step-0 artifact (skips its leading DROP)
+{ echo "SELECT ${METRICS} FROM ("; \
+  awk '/WITH/{f=1} f' /tmp/rollback-mv.sql | sed '1s/^.*WITH/WITH/' \
+    | sed 's/;[[:space:]]*$//'; echo ")"; } > /tmp/metrics_old.sql
+
+for f in /tmp/metrics_old.sql /tmp/metrics_new.sql; do
+  echo "== $f"
+  ssh sorban-prod 'docker exec -i app-clickhouse-1 clickhouse-client --multiquery' < "$f"
+done
+```
+
+**Abort if any collateral metric moves against you by more than you are gaining
+on the target one.** 0135 shipped on a green step 1 and had to be rolled back an
+hour later: it fixed 753 assets (`zero_price_usd` 1,129 → 376) while blanking
+`sources` and `vwap_24h` on **2,284** (`empty_sources` 1,096 → 3,380, 52% of the
+table). Every number needed for that decision was obtainable *before* the apply,
+from artifacts step 0 already produces. Nobody thought to run the old definition
+forwards.
+
+⚠️ A filter calibrated against a *schedule* is not calibrated against *reality*.
+0135's bound came from the enrichment cadence (`rate(1 hour)` × 2) — the
+methodologically correct basis, chosen specifically to avoid encoding a
+transient outage — and was still wrong, because enrichment had been failing for
+two days and almost nothing met it. The counterfactual is what closes that gap;
+reasoning cannot.
+
 ## Step 2 — apply the MV
 
 Applies `DROP VIEW` + re-`CREATE` as one file. Order inside the file is
@@ -188,6 +240,28 @@ WHERE database = 'prices' AND table = 'mv_current_prices';   -- expect 4
 If that returns 0, the MV in place is still the v1 definition — the apply did not
 land. Confirm directly with `SHOW CREATE TABLE prices.mv_current_prices` and look
 for `arrayReduce('median'` in the body.
+
+> ⚠️ **`SHOW CREATE` NORMALISES the SQL — grep for function names, never for
+> syntax.** ClickHouse re-renders the definition rather than echoing your file,
+> and interval literals are rewritten: `INTERVAL 2 HOUR` comes back as
+> `toIntervalHour(2)`. Grepping the source spelling reports a **successful apply
+> as failed** (measured during the 0135 rollout — it produced a false alarm
+> mid-deploy, with the operator one command away from re-applying an apply that
+> had already worked).
+>
+> Function names survive verbatim, so they are the reliable discriminator. For a
+> guarded-aggregate change, count the two forms and require both to agree:
+>
+> ```bash
+> ssh sorban-prod "docker exec -i app-clickhouse-1 clickhouse-client --query \
+>   \"SHOW CREATE TABLE prices.mv_current_prices FORMAT TSVRaw\"" > /tmp/mv-now.sql
+> grep -c 'argMax(close_usd'   /tmp/mv-now.sql   # old form — expect 0 after apply
+> grep -c 'argMaxIf(close_usd' /tmp/mv-now.sql   # new form — expect the new count
+> ```
+>
+> The same trap applies to step 0's artifact check: a `grep` for interval syntax
+> returns 0 for an empty capture *and* for a good one, so verify the artifact by
+> line count and function names instead.
 
 Then confirm the columns are actually populated, not just present:
 
