@@ -230,6 +230,30 @@ impl Gateway {
     pub async fn from_ambient_config(free_plan_id: String) -> Self {
         let shared =
             aws_config::load_defaults(aws_sdk_apigateway::config::BehaviorVersion::latest()).await;
+
+        // Resolve credentials ONCE, here, instead of lazily on the first call.
+        //
+        // The default chain initialises its provider on first use, and two
+        // requests racing that first use — which is exactly what a dashboard
+        // load does, `/key` and `/usage` in parallel — can leave the loser
+        // with `profile file credentials provider initialization error
+        // already taken` (aws-config's SSO/profile provider; observed on a
+        // local `serve` run, 2026-08-21). In the Lambda the chain resolves
+        // from the environment and this is a no-op that costs nothing; it is
+        // the local run, on an SSO profile, that needs the first resolution
+        // serialised. A failure here is logged and NOT fatal: the per-call
+        // error is still the one the handlers report.
+        if let Some(provider) = shared.credentials_provider() {
+            use aws_sdk_apigateway::config::ProvideCredentials as _;
+            if let Err(error) = provider.provide_credentials().await {
+                tracing::warn!(
+                    error = %error,
+                    "could not resolve AWS credentials at cold start; every control-plane \
+                     call will retry the resolution"
+                );
+            }
+        }
+
         let config = aws_sdk_apigateway::config::Builder::from(&shared)
             .timeout_config(timeouts())
             .build();
