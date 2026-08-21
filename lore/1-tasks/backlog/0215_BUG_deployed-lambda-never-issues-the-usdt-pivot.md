@@ -1,6 +1,6 @@
 ---
 id: "0215"
-title: "The deployed enrichment Lambda never issues the USDT pivot — refs.usdt is None on prod, and the statement has only ever run by hand"
+title: "The deployed enrichment Lambda emits one pivot statement where the source emits two — the USDT pivot is never sent, and the artifact does not match any commit"
 type: BUG
 status: backlog
 related_adr: []
@@ -17,16 +17,35 @@ history:
       Split from 0209, whose 2026-08-20 root cause this falsifies. Measured from
       system.query_log while re-measuring 0111. Cheap to fix and NOT blocked by
       0111 — which is why it is split rather than folded in.
+  - date: 2026-08-21
+    status: backlog
+    who: okarcz
+    note: >
+      Two root-cause hypotheses raised and FALSIFIED the same day — both are
+      recorded in the task body so they are not re-run. Neither `strings` on the
+      deployed bootstrap nor the Lambda's `LastModified` discriminated anything:
+      `USDT_ISSUER` is present in a PRE-0172 binary too (USDT was a peg member
+      then), and the artifact was deployed 2026-08-20, a week after the merge.
+      What did discriminate was reading the SQL the binary EMITS out of
+      system.query_log — the peg's `IN (3)` vs `IN (3, 111)`, and the resolver's
+      `result_rows`. Feature flags were checked and are not involved: nothing on
+      the pivot path is `#[cfg]`-gated beyond `#[cfg(test)]`. Next step is a
+      LOCAL reproduction, not more prod archaeology.
 ---
 
-# The deployed Lambda never issues the USDT pivot
+# The deployed Lambda emits one pivot where the source emits two
 
 ## Summary
 
 `prices.price_ohlcv_1m` has no USDT-priced rows because the deployed enrichment
-Lambda **never runs the statement that would write them**. This is a resolution
-or stale-asset defect, not the backlog [[0209]] blamed, and it is not gated on
-[[0111]].
+Lambda **never sends the statement that would write them** — not once on the
+schedule, with no error and no `QueryStart`. It is not the backlog [[0209]]
+blamed, and it is not gated on [[0111]].
+
+⚠️ The mechanism is NOT yet established. Four measured facts contradict the
+source (see Root cause); the leading explanation is an artifact built from an
+uncommitted tree, but that is **inference, not measurement**. Reproduce locally
+before acting.
 
 ## Evidence (prod `system.query_log`, measured 2026-08-21)
 
@@ -56,37 +75,62 @@ Corroborated independently by the run ratio: through 2026-08-19 the log shows
 `peg_insert : pivot_insert` at exactly **1:1** (70:70, 67:67, 66:66), where the
 source issues one peg and **two** pivots per step.
 
-## Root cause — `refs.usdt` is `None` in the deployed Lambda
+## Root cause — the deployed artifact is not built from this source
 
-`ReferenceIds::pivot_ids()` returns `[xlm, usdt]`, and `enrich_peg_pivot_step`
-iterates it in a single `for` loop with no break between the two. So XLM running
-while USDT does not can only mean `pivot_ids()` yields one element — i.e.
-`resolve_reference_ids()` left `refs.usdt` at `None`.
+⚠️ **Two hypotheses were measured and FALSIFIED. Do not re-run them.**
 
-The data is not the problem. Prod `prices.assets` holds the canonical pair —
-`asset_id = 111`, `asset_code = 'USDT'`, issuer
-`GCQTGZQQ5G4PTM2GL7CDIFKUBIPEC52BROAQIAPW53XBRJVN6ZJVTG6V` — which is exactly
-what the resolver's predicate asks for.
+1. ⛔ **"The binary predates [[0172]]"** — falsified. `strings` on the deployed
+   bootstrap finds `USDT_ISSUER` (that proves nothing: pre-0172 USDT was a *peg
+   member*, so the constant was already compiled in), and the peg statement's own
+   text settles it — `system.query_log` shows `quote_asset_id IN (3, 111)`
+   running to 2026-08-13 10:19:39 and `IN (3)` from 2026-08-14 08:21:59 to now.
+   `stable_ids()` is post-0172. `LastModified` is 2026-08-20T12:12:39, a week
+   after the merge, and also proves nothing on its own ([[0141]]).
+2. ⛔ **"`refs.usdt` is `None`"** — falsified. `resolve_reference_ids()` returns
+   **`result_rows = 3`** on every scheduled invocation (72/day, last 2026-08-21
+   09:27:38). All three reference assets come back.
 
-Two candidates, both deploy-shaped, and the 08-18 binary resolving it correctly
-points at the first:
+### What the evidence forces
 
-1. **The deployed artifact predates [[0172]]**, which is what added USDT to
-   `pivot_ids()`. This is the [[0141]] stale-asset trap, which has now been live
-   three times — most recently on 2026-08-20, where the probe binary in
-   `target/` was three hours older than its source and every signal reported
-   success.
-2. **`USDT_ISSUER` in the deployed binary differs** from the issuer on
-   `asset_id = 111`.
+| # | measured | source implies |
+|---|---|---|
+| 1 | USDT pivot never sent — no `QueryStart`, no exception, 2 days | should be sent every step |
+| 2 | peg emits `IN (3)` | binary is post-0172 |
+| 3 | resolver returns 3 rows | `pivot_ids() == [xlm, usdt]` |
+| 4 | `resolve → has_any() → run_peg_pivot_tier(&refs)`, both pivots in one `Vec`, no break | two statements per step |
+
+Facts 2-4 make one statement per step impossible for this source. **So the
+deployed artifact is not built from it.** `stable_ids()` and `pivot_ids()`
+changed in the SAME commit (`6807025`), so no tagged commit produces the observed
+half-state — post-0172 peg, pre-0172 pivot set. A binary built from an
+**uncommitted working tree** does.
+
+That is [[0141]] in a form neither of its existing checks catches: not a stale
+artifact but a *work-in-progress* one. `LastModified` looked current and
+`strings` found the constant. Record this — the discriminator that worked was
+reading the **emitted SQL** out of `system.query_log`, never the artifact.
 
 ## Implementation
 
-- Discriminate the two candidates on the deployed artifact before changing any
-  code — `strings` the deployed bootstrap for `USDT_ISSUER` and for the second
-  pivot, the same discriminator recorded in the archived 0213 file.
-- If it is a stale asset: rebuild, verify by `strings`, redeploy, and confirm by
-  **measurement** — a `CAST(111 …)` run appearing on the schedule — never by
-  deploy exit status ([[oracle-writers-span-two-stacks]]).
+- ✅ **The source is EXONERATED — done 2026-08-21.** `reference_ids_helpers`
+  asserts `full.pivot_ids() == vec![5, 7]` and `peg_sql_never_pegs_usdt` asserts
+  `IN (3)`; both green (39 unit tests pass). Feature flags are not involved —
+  nothing on the pivot path is `#[cfg]`-gated beyond `#[cfg(test)]`. So the code
+  emits two pivots and the deployed artifact emits one. **Do not go looking for a
+  source bug.**
+- ⚠️ **Close the coverage gap that let this hide.** The tests cover
+  `pivot_ids()` and `pivot_sql()` *separately*; NOTHING asserts that
+  `enrich_peg_pivot_step` issues **two** statements. That assertion — count the
+  statements one step sends, against a local CH — is what would have caught this,
+  and it is the reason a green suite coexisted with a dark quote leg for 8 days.
+- Rebuild from a verified-clean tree, redeploy, and confirm by reading the
+  **emitted SQL** — not `strings`, not `LastModified`, not deploy exit status
+  ([[oracle-writers-span-two-stacks]]). Both artifact-level checks looked healthy
+  while the artifact was wrong.
+- Rebuild, then verify **on the emitted SQL**, not on `strings` or
+  `LastModified` — both looked healthy while the artifact was wrong. Redeploy and
+  confirm by **measurement**, never by deploy exit status
+  ([[oracle-writers-span-two-stacks]]).
 - Add a guard so a silently-absent reference is refused rather than reported
   healthy. 0204's gap 4 already carries `resolved_legs` in its metric row for
   exactly this reason; the enrichment pass has no equivalent.
@@ -96,8 +140,10 @@ points at the first:
 
 ## Acceptance Criteria
 
-- [ ] The deployed artifact is shown to be missing the USDT pivot (or to carry a
-      mismatched issuer), by inspecting the binary — not by reading the source.
+- [x] The source is shown correct — `pivot_ids() == [xlm, usdt]` and the peg
+      excludes USDT, both green (2026-08-21). The defect is the artifact.
+- [ ] A test asserts `enrich_peg_pivot_step` issues TWO pivot statements, so a
+      silently-narrowed pivot set fails the suite instead of the quote leg.
 - [ ] After the fix, `system.query_log` shows `CAST(111 AS UInt32) AS
       ref_asset_id` running on the hourly schedule, outside any hand-run window.
 - [ ] `peg_insert : pivot_insert` reaches 1:2 on `price_ohlcv_1m`.
