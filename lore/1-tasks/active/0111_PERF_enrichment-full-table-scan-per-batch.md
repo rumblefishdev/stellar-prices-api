@@ -338,6 +338,64 @@ alarm that should have caught it is latched — [[0214]].
 ⚠️ Corrects [[0209]]: `pivot_written = 0` is false for XLM, which writes ~700K
 rows/day. It holds only for USDT — see [[0215]].
 
+## ✅ Re-measured 2026-08-21 **after** the 0215 Caddy fix — the pass now completes its statements and the accounting closes exactly
+
+Triggered by `prices-production-enrichment-duration-near-timeout` firing at
+16:18 UTC on two consecutive datapoints of **300,000 ms and 300,338 ms** — i.e.
+not "near" the timeout, *at* it. This is the flip side of [[0215]]: with Caddy's
+30 s cut removed the 44.9 s XLM pivot survives, so the pass proceeds through
+batches instead of aborting, and runs the Lambda clock out instead.
+
+`system.query_log`, 2026-08-21 14:00-16:30 UTC, enrichment INSERTs split by tier:
+
+| tier | runs | errors | avg | total | rows read | written |
+|---|---|---|---|---|---|---|
+| pivot XLM | 18 | **0** | 44.93 s | 808.7 s | 685.01 M | 180,000 |
+| oracle | 22 | **0** | 26.21 s | 576.6 s | 735.78 M | 17,615 |
+| peg | 18 | **0** | 14.50 s | 261.0 s | 420.93 M | 22,248 |
+| pivot USDT | 10 | **0** | 13.61 s | 136.1 s | 425.86 M | 2,051 |
+| `count_candidates` | 40 | 0 | 9.27 s | 371.0 s | 735.15 M | — |
+
+**Per-invocation cost decomposes exactly:** an oracle batch is 26.21 + 9.27 =
+35.5 s, a peg-pivot batch is 14.5 + 44.93 + 13.61 + 9.27 = 82.3 s. Three oracle
+batches (106 s) plus 2.4 peg-pivot batches (198 s) = **304 s**. Seven and a half
+invocations × 5.4 batches = **the 40 counts observed**. Nothing is unexplained.
+
+> **It budgets `max_batches` = 20 per tier — 40 batches — and achieves 5.4.**
+
+### Four things this changes
+
+- ✅ **Zero errors on all four tiers.** [[0215]]'s fix is holding; the 44.9 s
+  pivot no longer dies at 30.0 s.
+- ✅ **The USDT pivot is no longer dark** — 2,051 rows written over 10 runs, and
+  *not* limit-bound. Corrects [[0209]] and the standing "pivot has never priced
+  a 1m row" note; that was true when measured and is now false.
+- ⚠️ **`count_remaining_at_volume_zero` does not appear in `query_log` at all.**
+  It runs once per pass, at the end. Its absence is the proof that **no pass
+  completed** in 2.5 hours — so the spec §5 metrics are not being published
+  either, which is its own blind spot on top of [[0214]].
+- 🔴 **The oracle tier is 27% of all enrichment time** — 576.6 s reading 735.78 M
+  rows per statement to write ~800 rows a batch that all live in the last few
+  hours. Phase 1 bounds this too.
+
+### ⛔ REFUTED: `watermark()` is not a hidden third scan
+
+The plan's "one unmeasured statement to check first" is measured and the
+suspicion is **wrong**. `SELECT toUnixTimestamp(max(timestamp))` reads **294
+rows in 0.00 s** (0.02-0.05 s over 24 h). `timestamp` is not a sort-key prefix,
+but `PARTITION BY toYYYYMM(timestamp)` gives every part a `minmax_timestamp`
+index and ClickHouse answers the aggregate from part metadata without touching
+data. A window predicate here buys nothing; do not add one. Recorded in the
+`watermark()` doc comment so this is not re-derived a third time.
+
+### The drain rate, re-based
+
+180,000 XLM rows per 2.5 h = **1.73 M/day**, up from the 660-720 K/day measured
+pre-fix — again, because the pass now gets further before dying. Against
+556.78 M that is **~322 days**, so the conclusion is unchanged: it does not
+finish. Phase 1 alone sends this to **zero** until the Phase 2 sweep lands,
+which is why the two should land together.
+
 ## What this does to the options
 
 **Option 1 wins, for a better reason than the one recorded above.** The live

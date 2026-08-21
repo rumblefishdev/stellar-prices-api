@@ -21,6 +21,7 @@
 #[tokio::main]
 async fn main() -> Result<(), lambda_runtime::Error> {
     use enrichment_worker::ch_enrich::{ChEnrichConfig, ChEnrichmentPass};
+    use enrichment_worker::live_window::{DEFAULT_LIVE_PARTITIONS, live_partition_window};
     use enrichment_worker::repair::{CoarseSweepConfig, is_coarse_table};
     use lambda_runtime::{LambdaEvent, run, service_fn};
     use prices_clickhouse::env::{env_or, env_parse_or};
@@ -52,9 +53,11 @@ async fn main() -> Result<(), lambda_runtime::Error> {
         // (spec §4), ignoring max_batches. An explicit flag, not a MAX_BATCHES
         // sentinel, so MAX_BATCHES keeps its literal meaning.
         one_shot: env_parse_or("ENRICHMENT_ONE_SHOT", false),
-        // The scheduled Lambda always runs the unbounded hourly pass over
-        // price_ohlcv_1m; the partition-bounded window is only set by the 0114
-        // coarse-repair driver (operator-run), never here.
+        // Template only — the scheduled pass sets this per invocation from
+        // `live_partition_window` (below), because a warm container must not
+        // carry a stale month across a partition boundary. Left `None` here so
+        // the coarse sweep's `base` clone (which sets its own per-month window)
+        // is unaffected.
         time_window: None,
         // Never on a scheduled path (task 0182). The reset DISCARDS already-
         // written USD values so a corrected tier can recompute them; it is a
@@ -136,14 +139,34 @@ async fn main() -> Result<(), lambda_runtime::Error> {
     );
     let sweep = Arc::new(sweep_cfg);
 
+    // Task 0111 — bound the scheduled pass to the newest `ENRICH_LIVE_PARTITIONS`
+    // monthly partitions. Unbounded, every batch re-scanned all 102 partitions
+    // (736 M rows / 18.4 GiB) to serve a live window of 17 M, which is what
+    // walked `Duration` up to the 300 s timeout. 0 = unbounded (the pre-0111
+    // pass), kept as a config-only escape hatch. Widen it if ingest ever lands
+    // rows older than the previous month; do NOT widen it to cover the
+    // historical drain — that is the frontier-driven sweep's job, and running it
+    // here is exactly the coupling this task removes.
+    let live_partitions: u32 = env_parse_or("ENRICH_LIVE_PARTITIONS", DEFAULT_LIVE_PARTITIONS);
+    tracing::info!(
+        live_partitions,
+        bounded = live_partitions > 0,
+        "scheduled 1m pass partition bound"
+    );
+
     // Cold start: build the mTLS client (MTLS_SECRET_NAME + CH_DOMAIN) and probe
     // connectivity. Failures here surface as a CloudWatch Init error.
     let client = prices_clickhouse::mtls::client_from_lambda_env(&cfg.database).await?;
     // A cheap clone (Arc-backed handle) the coarse sweep reuses per invocation;
     // the pass takes the original by value.
     let sweep_client = client.clone();
-    let pass = Arc::new(ChEnrichmentPass::with_client(client, cfg));
-    pass.preflight().await?;
+    let pass_client = client.clone();
+    // Probe with a throwaway pass; the pass the handler runs is rebuilt per
+    // invocation so it picks up the current month (see `live_partitions`).
+    ChEnrichmentPass::with_client(client, cfg.clone())
+        .preflight()
+        .await?;
+    let base_cfg = Arc::new(cfg);
 
     // CloudWatch client for the spec §5 metrics. Built once at cold start;
     // publish is best-effort per invocation (a metric failure never fails the
@@ -156,7 +179,8 @@ async fn main() -> Result<(), lambda_runtime::Error> {
     tracing::info!("enrichment-worker cold start ready");
 
     run(service_fn(move |event: LambdaEvent<serde_json::Value>| {
-        let pass = pass.clone();
+        let base_cfg = base_cfg.clone();
+        let pass_client = pass_client.clone();
         let cw = cw.clone();
         let env_name = env_name.clone();
         let sweep = sweep.clone();
@@ -164,6 +188,22 @@ async fn main() -> Result<(), lambda_runtime::Error> {
         // The Lambda invocation deadline (epoch ms) — bounds the sweep's budget.
         let lambda_deadline_ms = event.context.deadline;
         async move {
+            // Per-invocation, not per-cold-start: a warm container that lives
+            // across a month boundary must move its window with the calendar,
+            // or the new month's candles fall outside the scan entirely.
+            let now_unix = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs() as i64);
+            let mut pass_cfg = (*base_cfg).clone();
+            pass_cfg.time_window = live_partition_window(now_unix, live_partitions);
+            tracing::info!(
+                window_start = pass_cfg.time_window.map(|(s, _)| s),
+                window_end = pass_cfg.time_window.map(|(_, e)| e),
+                partitions = live_partitions,
+                "1m pass window"
+            );
+            let pass = ChEnrichmentPass::with_client(pass_client, pass_cfg);
+
             let stats = pass.run().await?;
             tracing::info!(
                 batches = stats.batches,
