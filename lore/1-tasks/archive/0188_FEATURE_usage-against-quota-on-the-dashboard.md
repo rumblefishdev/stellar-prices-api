@@ -2,7 +2,7 @@
 id: "0188"
 title: "Usage against quota on the dashboard — GetUsage, rendered honestly"
 type: FEATURE
-status: active
+status: completed
 related_adr: ["0010"]
 related_tasks: ["0183", "0157", "0160", "0187", "0193", "0194"]
 tags: [layer-backend, priority-high, effort-small, milestone-M3, epic-self-service-onboarding, api-gateway, dashboard, slice-5]
@@ -11,7 +11,7 @@ links:
   - "../../../docs/epics/self-service-onboarding.md"
   - "../archive/0160_FEATURE_onboarding-backend-endpoints.md"
 history:
-  - date: 2026-08-13
+  - date: "2026-08-13"
     status: backlog
     who: akot
     note: >
@@ -64,6 +64,36 @@ history:
       path disambiguates a dead plan id into `PlanNotFound` loudly), and
       `GetUsage` against a wrong plan id fails visibly on the first
       dashboard load.
+  - date: "2026-08-21"
+    status: completed
+    who: akot
+    note: >
+      Shipped in PR #227 (merged to `develop` as `a76d8a9`). 33 tests cover
+      this slice — 24 Rust (18 over HTTP against the mock control plane, 6
+      unit), 9 frontend, and one CI assertion pinning the `GetUsage` grant to
+      its narrow form; workspace 497 Rust tests, 0 failures. Seven of eight
+      acceptance criteria closed; "N requests move the number" cannot be
+      closed from a keyboard and waits on the deploy with [[0187]]'s live
+      curl and [[0164]]'s evidence pass.
+
+      Four review passes produced 20 findings: 18 fixed, one refuted as
+      designed (stale-serve stays throttle-only — an outage should be
+      visible), one accepted and handed on (`Instant` TTLs stretch across a
+      frozen Lambda container; the failure direction is serving-older, not
+      calling-more, and it joins [[0194]]'s costing pass). Two are worth
+      carrying forward. A cached "no key" survived the issue that falsified
+      it, and the eviction that fixed it then lost a race against an
+      in-flight lookup — the answer is per-caller eviction epochs where the
+      absence of a mark *proves* no eviction happened, rather than being
+      assumed to. And `remaining` is a running balance, so a day whose
+      `remaining` rises marks AWS's own period reset: counting from there
+      makes `used` and `remaining` come from one period whatever instant it
+      began, and warns — the only evidence this system can produce about the
+      instant ADR 0010 correction #2 is open on.
+
+      Nothing spawned: the live observation belongs to [[0164]], styling to
+      [[0193]], the control-plane call-volume costing and the IAM audit to
+      [[0194]], and the quota-roll instant to [[0191]].
 ---
 
 # Usage against quota

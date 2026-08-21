@@ -2,7 +2,7 @@
 id: "0189"
 title: "Eligibility gate — Stellar Discord membership and minimum account age before a key is issued"
 type: FEATURE
-status: active
+status: completed
 related_adr: ["0010"]
 related_tasks: ["0183", "0156", "0159", "0179", "0180", "0186", "0187", "0191", "0193"]
 tags: [layer-backend, priority-high, effort-medium, milestone-M3, epic-self-service-onboarding, discord, auth, abuse-prevention, spike, slice-6]
@@ -13,7 +13,7 @@ links:
   - "../archive/0159_FEATURE_discord-oauth-sign-in.md"
   - "../archive/0180_RESEARCH_settle-undocumented-discord-and-aws-behaviours/notes/R-discord-member-endpoint-response-shape.md"
 history:
-  - date: 2026-08-13
+  - date: "2026-08-13"
     status: backlog
     who: akot
     note: >
@@ -21,7 +21,7 @@ history:
       items 1–5. Those five measurements were a task-shaped blocker in front of
       the entire epic; they are actually the first hour of this one task, and
       nothing before this slice depends on them.
-  - date: 2026-08-20
+  - date: "2026-08-20"
     status: active
     who: akot
     note: >
@@ -29,6 +29,52 @@ history:
       the same portal files). Step 0's five measurements remain operator-owned
       prerequisites — the code is written to the documented safe rules and the
       result tables stay empty until they are run.
+  - date: "2026-08-21"
+    status: completed
+    who: akot
+    note: >
+      Shipped in PR #230 (merged to `develop` as `99bca3a`; reviewed and
+      approved by Oskar Karcz). 88 tests for the slice — 78 with the
+      implementation and 10 more from the review round — leaving the
+      workspace at 558 Rust tests and the portal at 61 frontend tests, 0
+      failures. All twelve acceptance criteria are closed in code: the gate
+      ships closed with zero Discord and zero control-plane calls, a
+      non-member is refused and no key is created, a `429`/`5xx` refuses
+      without claiming non-membership, `pending: undefined` fails closed and
+      loudly, an account under the threshold is told how long to wait, and
+      the `/key` route went fully read-only so a session cookie alone can
+      cause no control-plane write at all.
+
+      Step 0's five measurements are **not** done, and none were invented.
+      Every prerequisite is operator-owned (the extended Discord app, the
+      screening-off scratch guild, the non-member account), so the tables
+      keep a dated deferral and the code follows the documented safe rules —
+      a measurement changes at most one match arm each (Design Decisions
+      #4-#6). Runbook §5's `pending_absent` log check is where item 2 now
+      gets measured, from production rather than a scratch guild.
+
+      Twelve review findings across two rounds, all real. The one that most
+      deserves carrying: three separate comments asserted that Discord does
+      not re-prompt for consent while the authorize URL never sent
+      `prompt=none` — and once added, putting it on the *shared* URL
+      threatened both first-time sign-in and this task's own scope upgrade,
+      so it is issue-only (#19, #23). Second: one `is_snowflake` now guards
+      the cold-start probe and the member URL together, because
+      `stellar_test` — the value this task's own parameter table named —
+      passed the probe and would then have refused every visitor as
+      `unknown`, indefinitely.
+
+      Still operator-owned before production: `guilds.members.read` in the
+      Developer Portal (runbook §1 step 3), the two `put-parameter` seeds
+      (§2a), and [[0179]] step 4 re-pointing the guild id at the real Stellar
+      server. Nothing spawned — every follow-up already has an owner
+      ([[0179]], [[0180]], [[0191]], [[0192]], [[0193]], [[0194]]).
+
+      One finding raised and deliberately not fixed: S5, the symmetric dead
+      end on [[0186]]'s sign-in arm (`refuse_discord` answers a `502` to a
+      top-level navigation back from Discord). It is documented, pinned by
+      three tests, and changing sign-in's failure semantics inside a PR about
+      eligibility is a surprise a reviewer should not have to absorb.
 ---
 
 # Eligibility gate — membership and account age
