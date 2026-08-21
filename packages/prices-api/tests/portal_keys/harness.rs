@@ -136,6 +136,41 @@ pub struct Store {
     /// that disagrees with the reader, not a busy deleter.
     pub read_always_404: bool,
     pub next_id: usize,
+
+    // -----------------------------------------------------------------------
+    // GetUsage (task 0188)
+    // -----------------------------------------------------------------------
+    /// Daily `[used, remaining]` pairs per key id, in day order — what
+    /// `GetUsage` reports under `items`. A key with no entry here has no row,
+    /// which is exactly what a freshly attached key looks like while the
+    /// reporting lags. Raw `Vec<Vec<i64>>` rather than tuples, so a test can
+    /// also serve a MALFORMED row (`[121]`, `[]`) and prove the handler skips
+    /// it instead of defaulting the missing element.
+    pub usage: HashMap<String, Vec<Vec<i64>>>,
+    /// How many `GetUsage` HTTP calls arrived — what the cache assertions
+    /// count.
+    pub usage_calls: usize,
+    /// Every `(keyId, startDate, endDate)` triple `GetUsage` was asked for, so
+    /// a test can assert WHICH key's usage was read and over which period.
+    pub usage_queries: Vec<(String, String, String)>,
+    /// Answer every `GetUsage` with a 500. Sticky, for the reason `fail_list`
+    /// is: the SDK retries a 500, so a one-shot knob observes nothing.
+    pub fail_usage: bool,
+    /// Answer every `GetUsage` with `429 TooManyRequestsException` — the
+    /// account-wide control-plane throttle. Sticky for the same reason, and
+    /// doubly so here: the SDK's own backoff retries a 429, so only a throttle
+    /// that persists across those retries reaches the handler at all.
+    pub throttle_usage: bool,
+    /// The same throttle on `GetApiKeys`. The account-wide budget does not
+    /// care which operation is asked, so the usage flow's key LOOKUP can be
+    /// the throttled call just as well as the usage read — and the two must
+    /// land in the same stale-serve branch (`GatewayError::Throttled` from
+    /// `list_named`), which this knob is what makes assertable.
+    pub throttle_list: bool,
+    /// How many daily pairs one `GetUsage` page holds. `0` means everything in
+    /// one page; a small number forces the pagination path the summing must
+    /// walk to exhaustion.
+    pub usage_page_size: usize,
 }
 
 impl Store {
@@ -189,6 +224,7 @@ impl MockGateway {
             .route("/apikeys", get(list_keys).post(create_key))
             .route("/apikeys/{id}", get(read_key).delete(delete_key))
             .route("/usageplans/{plan}/keys", post(attach_key))
+            .route("/usageplans/{plan}/usage", get(read_usage))
             .with_state(store.clone());
 
         let listener = tokio::net::TcpListener::bind::<SocketAddr>(([127, 0, 0, 1], 0).into())
@@ -235,6 +271,9 @@ pub async fn list_keys(
         .include_values_seen
         .push(query.include_values.clone().unwrap_or_default());
 
+    if store.throttle_list {
+        return throttled();
+    }
     if store.fail_list {
         return (StatusCode::INTERNAL_SERVER_ERROR, "control plane is unwell").into_response();
     }
@@ -390,6 +429,93 @@ pub async fn attach_key(
         .into_response()
 }
 
+#[derive(serde::Deserialize)]
+pub struct UsageQuery {
+    #[serde(rename = "keyId")]
+    pub key_id: Option<String>,
+    #[serde(rename = "startDate")]
+    pub start_date: Option<String>,
+    #[serde(rename = "endDate")]
+    pub end_date: Option<String>,
+    pub position: Option<String>,
+    #[allow(dead_code)]
+    pub limit: Option<i32>,
+}
+
+/// `GET /usageplans/{plan}/usage` — task 0188's one new control-plane call.
+///
+/// The wire field for the per-key daily pairs is **`values`**, not `items`:
+/// the SDK's member is named `items` but its deserializer matches `"values"`
+/// (checked against `aws-sdk-apigateway`'s `shape_get_usage.rs`). A mock that
+/// answered with `items` would hand every test an empty map and the
+/// no-rows path would cover everything, vacuously.
+pub async fn read_usage(
+    State(store): State<Arc<Mutex<Store>>>,
+    Path(_plan): Path<String>,
+    Query(query): Query<UsageQuery>,
+) -> Response {
+    let mut store = store.lock().unwrap();
+    store.usage_calls += 1;
+    let key_id = query.key_id.clone().unwrap_or_default();
+    store.usage_queries.push((
+        key_id.clone(),
+        query.start_date.clone().unwrap_or_default(),
+        query.end_date.clone().unwrap_or_default(),
+    ));
+
+    if store.throttle_usage {
+        return throttled();
+    }
+    if store.fail_usage {
+        return (StatusCode::INTERNAL_SERVER_ERROR, "control plane is unwell").into_response();
+    }
+
+    let days = store.usage.get(&key_id).cloned().unwrap_or_default();
+    let start: usize = query
+        .position
+        .as_deref()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(0);
+    let start = start.min(days.len());
+    let page = if store.usage_page_size == 0 {
+        days.len()
+    } else {
+        store.usage_page_size
+    };
+    let end = (start + page).min(days.len());
+
+    let mut body = json!({
+        "usagePlanId": "freeplan1",
+        "startDate": query.start_date,
+        "endDate": query.end_date,
+    });
+    // No entry at all for a key with no rows — what a freshly attached key
+    // looks like while the reporting lags.
+    if !days.is_empty() {
+        body["values"] = json!({
+            key_id: days[start..end].iter().map(|day| json!(day)).collect::<Vec<_>>(),
+        });
+    }
+    if end < days.len() {
+        body["position"] = json!(end.to_string());
+    }
+    Json(body).into_response()
+}
+
+/// The `429` shape the SDK maps to `TooManyRequestsException` — the
+/// account-wide control-plane throttle. Sibling of [`not_found`], and the
+/// header is again what restJson1 matches on: without it the SDK reports a
+/// generic error and the handler's throttle branch — the one that serves the
+/// last good answer instead of an error page — is never reached.
+pub fn throttled() -> Response {
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        [("x-amzn-errortype", "TooManyRequestsException")],
+        Json(json!({ "message": "Too Many Requests" })),
+    )
+        .into_response()
+}
+
 /// The `404` shape the SDK maps to `NotFoundException`.
 ///
 /// The header is what restJson1 matches on; the body is what a human reads. Get
@@ -455,17 +581,48 @@ pub fn oauth_secret() -> OauthSecret {
 }
 
 pub fn build_app(portal_enabled: bool, gateway: Option<Gateway>) -> Router {
+    build_app_with(portal_enabled, gateway, Default::default(), None)
+}
+
+/// [`build_app`], plus where Discord is and where the eligibility knobs come
+/// from — what the issue round-trip suite (`tests/portal_issue.rs`) needs:
+/// the `action=issue` callback talks to a mock Discord AND the mock control
+/// plane in one request.
+pub fn build_app_with(
+    portal_enabled: bool,
+    gateway: Option<Gateway>,
+    endpoints: prices_api::portal::auth::discord::Endpoints,
+    eligibility: Option<prices_api::portal::eligibility::EligibilitySettings>,
+) -> Router {
     let config = AppConfig {
         ch_enabled: false,
         base_url: None,
         api_keys: vec![],
         portal_enabled,
         portal_oauth: portal_enabled.then(oauth_secret),
-        portal_endpoints: Default::default(),
+        portal_endpoints: endpoints,
         portal_keys: gateway,
+        portal_eligibility: eligibility,
+        portal_rate_limit: None,
     };
     app(&config, AppState::without_ch())
 }
+
+/// Eligibility knobs for tests: direct values, no SSM. The guild id is a
+/// snowflake because the code validates that before building the member URL.
+pub fn eligibility(
+    guild_id: &str,
+    min_age_minutes: &str,
+) -> prices_api::portal::eligibility::EligibilitySettings {
+    use prices_api::portal::eligibility::{EligibilitySettings, ParamSource};
+    EligibilitySettings {
+        guild_id: ParamSource::Direct(guild_id.to_string()),
+        min_account_age: ParamSource::Direct(min_age_minutes.to_string()),
+    }
+}
+
+/// The guild the issue suite gates on — any syntactically valid snowflake.
+pub const GUILD_ID: &str = "897514728459468821";
 
 /// A router with the portal open, sign-in configured, and the control plane
 /// pointed at `mock`.
@@ -533,10 +690,66 @@ impl Reply {
             .map(|v| v.to_str().unwrap().to_string())
             .unwrap_or_default()
     }
+
+    pub fn location(&self) -> String {
+        self.headers
+            .get(header::LOCATION)
+            .map(|v| v.to_str().unwrap().to_string())
+            .unwrap_or_default()
+    }
+
+    /// The value a browser would store for cookie `name`, or `None` if this
+    /// response clears it or never set it.
+    pub fn cookie(&self, name: &str) -> Option<String> {
+        self.headers
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .map(|v| v.to_str().unwrap().to_string())
+            .filter(|c| c.starts_with(&format!("{name}=")))
+            .filter(|c| !c.contains("Max-Age=0"))
+            .map(|c| {
+                c.split_once('=')
+                    .unwrap()
+                    .1
+                    .split(';')
+                    .next()
+                    .unwrap()
+                    .to_string()
+            })
+            .next()
+    }
+}
+
+/// The usage route alone (task 0188), with the cache TTL and the deadline both
+/// shortened.
+///
+/// Bypasses [`build_app`] for the reason `keys_router_with_deadline` does: the
+/// TTL and deadline live on `UsageState`, which `AppConfig` does not carry, and
+/// threading them through the whole config would put two production knobs
+/// somewhere a deploy could reach. What this skips — task 0183's prefix gate —
+/// is covered by its own tests; what it keeps is the handler, the real SDK and
+/// the mock behind it.
+pub fn usage_router_with(
+    mock: &MockGateway,
+    ttl: std::time::Duration,
+    deadline: std::time::Duration,
+) -> Router {
+    prices_api::portal::usage::routes(
+        prices_api::portal::usage::UsageState::new(
+            Some(oauth_secret()),
+            Some(Gateway::against(&mock.base, PLAN_ID.to_string())),
+        )
+        .with_ttl(ttl)
+        .with_deadline(deadline),
+    )
 }
 
 pub async fn call(router: Router, method: &str, cookie: Option<&str>) -> Reply {
-    let mut request = Request::builder().method(method).uri(KEY_PATH);
+    call_path(router, method, KEY_PATH, cookie).await
+}
+
+pub async fn call_path(router: Router, method: &str, path: &str, cookie: Option<&str>) -> Reply {
+    let mut request = Request::builder().method(method).uri(path);
     if let Some(cookie) = cookie {
         request = request.header(header::COOKIE, cookie);
     }
@@ -557,10 +770,55 @@ pub async fn call(router: Router, method: &str, cookie: Option<&str>) -> Reply {
     }
 }
 
-pub async fn issue(mock: &MockGateway, sub: &str) -> Reply {
+/// `GET /key` — the reveal. Since task 0189 the `POST` verb answers
+/// identically (read-only); [`post_key`] exists so tests can pin exactly that.
+pub async fn reveal(mock: &MockGateway, sub: &str) -> Reply {
+    call(app_against(mock), "GET", Some(&session_cookie(sub))).await
+}
+
+/// `POST /key` — 0187's issue verb, which task 0189 made a second reveal.
+pub async fn post_key(mock: &MockGateway, sub: &str) -> Reply {
     call(app_against(mock), "POST", Some(&session_cookie(sub))).await
 }
 
-pub async fn reveal(mock: &MockGateway, sub: &str) -> Reply {
-    call(app_against(mock), "GET", Some(&session_cookie(sub))).await
+/// Drive a full `action=issue` OAuth round-trip against `router` (which must
+/// be built with `build_app_with`, pointed at a mock Discord): `/auth/login`
+/// mints the state pair, the callback completes the action. Returns the
+/// callback's reply — a `303` whose `Location` is one of the five
+/// `?issue=…` landing states.
+pub async fn issue_round_trip(router: &Router) -> Reply {
+    let login = call_path(
+        router.clone(),
+        "GET",
+        "/api-tokens/api/auth/login?action=issue",
+        None,
+    )
+    .await;
+    assert_eq!(
+        login.status,
+        StatusCode::SEE_OTHER,
+        "login must redirect to Discord: {}",
+        String::from_utf8_lossy(&login.body)
+    );
+    let pending = login
+        .cookie(cookies::PENDING_COOKIE)
+        .expect("login must set the pending-login cookie");
+    let location = login.location();
+    let query = location
+        .split_once('?')
+        .expect("the authorize URL carries a query")
+        .1;
+    let state = form_urlencoded::parse(query.as_bytes())
+        .find(|(k, _)| k == "state")
+        .expect("the authorize URL must carry `state`")
+        .1
+        .to_string();
+
+    call_path(
+        router.clone(),
+        "GET",
+        &format!("/api-tokens/api/auth/callback?code=an-auth-code&state={state}"),
+        Some(&format!("{}={pending}", cookies::PENDING_COOKIE)),
+    )
+    .await
 }

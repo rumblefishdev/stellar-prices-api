@@ -43,7 +43,9 @@
 //! the Lambda already loads) and a different task — do not reach for it here.
 
 pub mod auth;
+pub mod eligibility;
 pub mod keys;
+pub mod usage;
 
 use axum::extract::{Request, State};
 use axum::http::StatusCode;
@@ -80,12 +82,30 @@ pub const CONFIG_PATH: &str = "/api-tokens/api/config";
 pub struct PortalConfig {
     /// Whether the portal is open for business.
     pub enabled: bool,
+    /// The free plan's per-key rate limit in requests per second, for the
+    /// dashboard to state (task 0188).
+    ///
+    /// Served from here rather than written into the bundle because it is a
+    /// per-env config value (`pricingApiFreePlanRateLimit`) that the gateway
+    /// enforces and the page merely reports: a literal in the frontend is the
+    /// one number on that panel that can drift from what is actually enforced.
+    /// It rides on `/config` rather than on `/usage` because the dashboard
+    /// states it in the no-key state too, and that state is a `404` with no
+    /// body to carry it — and because the limit is a property of the plan every
+    /// key joins, not of any one caller's key.
+    ///
+    /// Omitted from the JSON entirely when this deployment was not told what
+    /// the limit is; the page then omits the line rather than inventing a
+    /// figure. See `AppConfig::portal_rate_limit`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rate_limit_per_second: Option<u32>,
 }
 
 /// Cloneable gate state carried by the middleware.
 #[derive(Clone)]
 pub struct PortalGate {
     enabled: bool,
+    rate_limit: Option<u32>,
 }
 
 impl PortalGate {
@@ -97,8 +117,14 @@ impl PortalGate {
     /// the only route under the prefix was [`CONFIG_PATH`], which the gate
     /// skips, so every "closed" assertion was really watching an unrouted path
     /// 404 — and the whole suite stayed green with the gate deleted.
+    /// Only [`gate_portal`] reads this state, and the gate turns on `enabled`
+    /// alone — so the rate limit a test does not care about stays `None` here
+    /// rather than becoming a second argument at every call site.
     pub fn new(enabled: bool) -> Self {
-        Self { enabled }
+        Self {
+            enabled,
+            rate_limit: None,
+        }
     }
 }
 
@@ -112,6 +138,7 @@ impl PortalGate {
 pub fn apply(router: Router, config: &AppConfig) -> Router {
     let gate = PortalGate {
         enabled: config.portal_enabled,
+        rate_limit: config.portal_rate_limit,
     };
     // Merged as its own `Router` rather than `.route()`d onto the caller's:
     // by this point the data routes have had `AppState` applied and the router
@@ -121,32 +148,59 @@ pub fn apply(router: Router, config: &AppConfig) -> Router {
         .route(CONFIG_PATH, get(config_handler))
         .with_state(gate.clone());
 
-    // Sign-in (task 0186), merged the same way and for the same reason. Mounted
+    // Usage against quota (task 0188), merged the same way and mounted under
+    // the same conditions as everything below: unconditionally, answering
+    // `503` when nothing is provisioned rather than not existing. It shares
+    // the key routes' control-plane client — usage is scoped to
+    // `(usagePlanId, apiKeyId)` and the key id comes from the same lookup —
+    // but carries a state of its own, because it also owns the in-process
+    // cache that keeps dashboard refreshes off the account-wide control-plane
+    // budget. Built first so sign-in and the key routes can hold the cache
+    // handle below.
+    let usage_state =
+        usage::UsageState::new(config.portal_oauth.clone(), config.portal_keys.clone());
+    let usage_cache = usage_state.cache_handle();
+    let usage = usage::routes(usage_state);
+
+    // Sign-in (task 0186) and the eligibility-checked issue round-trip
+    // (task 0189), merged the same way and for the same reason. Mounted
     // UNCONDITIONALLY, including when no OAuth credentials were loaded: the
     // handlers answer `503` in that case rather than the routes silently not
     // existing, so a deployment that opens the portal without provisioning the
     // secret says so instead of looking like a portal with no sign-in. While the
     // portal is closed the gate below makes the distinction moot — every path
     // here is the same empty `404` as an unrouted one.
-    let sign_in = auth::routes(auth::AuthState::new(
-        config.portal_oauth.clone(),
-        config.portal_endpoints.clone(),
-    ));
+    //
+    // The issue deps carry the control-plane client and the usage-cache handle
+    // because the `action=issue` callback is where a key is actually created
+    // (`keys::issue_for`) — the key ROUTE below is read-only, which is what
+    // makes "issue is unreachable with a session cookie alone" structural.
+    let sign_in = auth::routes(
+        auth::AuthState::new(config.portal_oauth.clone(), config.portal_endpoints.clone())
+            .with_issue(auth::issue::IssueDeps::new(
+                config.portal_keys.clone(),
+                Some(usage_cache.clone()),
+                config.portal_eligibility.clone(),
+            )),
+    );
 
-    // Self-service API keys (task 0187), merged the same way and mounted under
-    // the same conditions: unconditionally, answering `503` when nothing is
-    // provisioned rather than not existing. The state carries the OAuth secret
-    // because the session cookie is what authorizes a key — there is no API key
-    // to present on the route whose job is to hand one out.
-    let api_keys = keys::routes(keys::KeysState::new(
-        config.portal_oauth.clone(),
-        config.portal_keys.clone(),
-    ));
+    // The key reveal (task 0187, read-only since task 0189), merged the same
+    // way and mounted under the same conditions: unconditionally, answering
+    // `503` when nothing is provisioned rather than not existing. The state
+    // carries the OAuth secret because the session cookie is what authorizes a
+    // reveal — showing the caller what already belongs to them, which is why a
+    // session suffices here and does not for the issue above. The usage-cache
+    // handle lets a successful reveal evict a cached "no key" (task 0188).
+    let api_keys = keys::routes(
+        keys::KeysState::new(config.portal_oauth.clone(), config.portal_keys.clone())
+            .with_usage_cache(usage_cache),
+    );
 
     router
         .merge(routes)
         .merge(sign_in)
         .merge(api_keys)
+        .merge(usage)
         .layer(axum::middleware::from_fn_with_state(gate, gate_portal))
 }
 
@@ -156,6 +210,7 @@ pub fn apply(router: Router, config: &AppConfig) -> Router {
 async fn config_handler(State(gate): State<PortalGate>) -> Response {
     let mut resp = Json(PortalConfig {
         enabled: gate.enabled,
+        rate_limit_per_second: gate.rate_limit,
     })
     .into_response();
     // Never cached: the flag changes on deploy, and a CDN or browser holding a
@@ -168,10 +223,10 @@ async fn config_handler(State(gate): State<PortalGate>) -> Response {
 /// True for any path the portal owns.
 ///
 /// Prefix match, not equality: it has to cover routes that do not exist yet
-/// ([0188]'s `/usage`, [0192]'s revocation), which is the point of gating by
-/// prefix rather than enumerating. [0186]'s `/auth/*` and [0187]'s `/key` have
-/// since landed and neither touched this function — which is the property
-/// working, not an argument for replacing it with a list.
+/// ([0191]'s rework, [0192]'s revocation), which is the point of gating by
+/// prefix rather than enumerating. [0186]'s `/auth/*`, [0187]'s `/key` and
+/// [0188]'s `/usage` have since landed and none of them touched this function —
+/// which is the property working, not an argument for replacing it with a list.
 fn is_portal_path(path: &str) -> bool {
     path.starts_with(PORTAL_API_PREFIX)
 }
@@ -197,6 +252,7 @@ mod tests {
         assert!(is_portal_path(CONFIG_PATH));
         assert!(is_portal_path("/api-tokens/api/auth/login"));
         assert!(is_portal_path("/api-tokens/api/key"));
+        assert!(is_portal_path("/api-tokens/api/usage"));
         // Routes that do not exist yet still match — that is the point.
         assert!(is_portal_path("/api-tokens/api/nothing-here"));
     }

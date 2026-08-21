@@ -83,10 +83,17 @@ stack**, not against the source, and not by assumption:
 - [ ] Both SSM parameters are operator-seeded; a `cdk deploy` does not restore a
       committed guild id
 - [ ] The portal bucket has no public access and is reachable only through OAC
-- [ ] Control-plane call volume per dashboard load is known and bounded —
-      `GetApiKey` + `GetUsage` per load, with the in-process cache in place and
-      backoff on throttling. Nobody has costed this yet; do it here, before the
-      portal sees real traffic
+- [ ] Control-plane call volume per dashboard load is known and bounded.
+      **Corrected 2026-08-20 by [[0190]]'s measurement — it is four calls, not
+      two:** `GetApiKeys` + `GetApiKey` on the reveal (`keys::lookup`) and
+      `GetApiKeys` + `GetUsage` on the usage route (`usage::fetch`), the two
+      listings being the same query for the same user in the same load. Measured
+      against the real account: ~1.14 s of control-plane time per cold load, on
+      an account budget of 10 rps / burst 40 shared with `cdk deploy` (observed
+      14-day peak 12/s, 42/min). Only the usage half is cached, so a warm load
+      still costs two. Cost it here against real traffic, and note [[0190]]'s two
+      cheaper remedies before any storage is considered: de-duplicate the shared
+      listing, and give the reveal the cache the usage route already has
 
 ## Opening the portal
 

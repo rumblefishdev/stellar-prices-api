@@ -503,12 +503,13 @@ export class ComputeStack extends cdk.Stack {
     // Self-service API keys (task 0187) — API Gateway CONTROL plane.
     // ---------------------------------------------------------------
     //
-    // Four of the five calls the portal makes. The fifth,
-    // `POST /usageplans/{id}/keys`, is granted in `ApiGatewayStack` instead,
-    // because the plan id lives there and importing it here would close the
-    // Compute -> Gateway -> Compute cycle described on
+    // Four of the six calls the portal makes. The other two —
+    // `POST /usageplans/{id}/keys` (task 0187's attach) and
+    // `GET /usageplans/{id}/usage` (task 0188's `GetUsage`) — are granted in
+    // `ApiGatewayStack` instead, because the plan id lives there and importing
+    // it here would close the Compute -> Gateway -> Compute cycle described on
     // `portalFreePlanParameterName` above. Each grant is declared where its
-    // resource is known; task 0194 audits the pair as one policy.
+    // resource is known; task 0194 audits the set as one policy.
     //
     // Control-plane ARNs carry no account id — `arn:aws:apigateway:<region>::`
     // with a doubled colon — and the resource is the API's own path.
@@ -565,9 +566,10 @@ export class ComputeStack extends cdk.Stack {
     //    account-wide in IAM.
     //
     // What is deliberately NOT here: `PATCH` (nothing in this slice updates a
-    // key), `apigateway:*`, and any grant on `/usageplans` beyond the one key
-    // attachment — `GetUsage` is task 0188's and will need a statement of its
-    // own.
+    // key), `apigateway:*`, and any grant on `/usageplans` beyond the key
+    // attachment and the usage read — both of those need the plan id, so both
+    // live in `ApiGatewayStack`'s standalone policy (`POST …/keys` for 0187's
+    // attach, `GET …/usage` for 0188's `GetUsage`).
     //
     // `DELETE` **is** here, and it is this slice's: the reconciler removes
     // duplicate keys after a double-submit ("keep the earliest createdDate,
@@ -605,6 +607,34 @@ export class ComputeStack extends cdk.Stack {
         actions: ['ssm:GetParameter'],
         resources: [
           `arn:aws:ssm:${awsRegion}:${accountId}:parameter${this.portalFreePlanParameterName}`,
+        ],
+      }),
+    );
+
+    // The eligibility gate's two knobs (task 0189), read at runtime — per
+    // issuance, not at cold start alone. The same currently-redundant-and-kept
+    // reasoning as `PortalReadFreePlanIdParameter` above: the baseline's
+    // `ReadSsmNamespaces` already covers `/prices/${envName}/*`, and this
+    // statement names the two parameters the gate depends on so a narrowed
+    // baseline cannot silently break issuance.
+    //
+    // **CDK must never CREATE these parameters** — no `ssm.StringParameter`,
+    // and no `valueForStringParameter` (which freezes the value into the
+    // template at deploy time, defeating "tunable without a redeploy"). A
+    // CloudFormation-managed parameter is CDK-owned, so the next `cdk deploy`
+    // silently restores the committed value — which, after task 0179 points
+    // production at the real Stellar guild, would un-flip it back to the test
+    // guild. The operator seeds both values at deploy prep (runbook §2a), the
+    // same ownership split as the OAuth secret. CI pins the rule:
+    // `verify-openapi-routes.mjs` check 7 refuses any `AWS::SSM::Parameter`
+    // with either name in any synthesized template.
+    this.apiHandlerRole.addToPrincipalPolicy(
+      new iam.PolicyStatement({
+        sid: 'PortalReadEligibilityParameters',
+        actions: ['ssm:GetParameter'],
+        resources: [
+          `arn:aws:ssm:${awsRegion}:${accountId}:parameter/prices/${envName}/discord-guild-id`,
+          `arn:aws:ssm:${awsRegion}:${accountId}:parameter/prices/${envName}/min-account-age-minutes`,
         ],
       }),
     );
@@ -672,6 +702,32 @@ export class ComputeStack extends cdk.Stack {
         // Set unconditionally alongside `PORTAL_OAUTH_SECRET_NAME`, and for the
         // same reason: opening the portal stays a one-word diff.
         PORTAL_FREE_PLAN_PARAM: this.portalFreePlanParameterName,
+        // The NAMES of the eligibility gate's two SSM parameters (task 0189):
+        // which Discord guild membership is checked against, and the minimum
+        // account age in minutes. Names, never values — the handler resolves
+        // them through the extension **per issuance**, so an operator's
+        // `aws ssm put-parameter` takes effect without a redeploy (bounded
+        // only by the extension's ~5 min cache). The values are
+        // operator-seeded and deliberately NOT CloudFormation resources — see
+        // the `PortalReadEligibilityParameters` statement above for the
+        // un-flip-after-0179 hazard that rule prevents. Set unconditionally,
+        // same one-word-diff reasoning as the two names above.
+        PORTAL_GUILD_ID_PARAM: `/prices/${envName}/discord-guild-id`,
+        PORTAL_MIN_ACCOUNT_AGE_PARAM: `/prices/${envName}/min-account-age-minutes`,
+        // The free plan's per-key rate limit, for the portal dashboard to STATE
+        // (task 0188) — the same `pricingApiFreePlanRateLimit` ApiGatewayStack
+        // hands to `addUsagePlan`, so the figure on the page and the figure the
+        // gateway enforces cannot disagree.
+        //
+        // It travels as an env var rather than being read back from
+        // `GetUsagePlan` because that would cost the portal a control-plane
+        // grant task 0188 deliberately does not take, and rather than being a
+        // literal in the bundle because that is the one number on that panel
+        // that could then go stale: raise the limit here, deploy, and a
+        // dashboard whose stated theme is honesty would keep stating the old
+        // one. Not a secret, and not conditional on `PORTAL_ENABLED` — same
+        // one-word-diff reasoning as the two names above.
+        PORTAL_RATE_LIMIT: String(config.pricingApiFreePlanRateLimit),
         PARAMETERS_SECRETS_EXTENSION_CACHE_ENABLED: 'true',
         // Strip the `/{stage}` prefix (`/production`) that API Gateway REST
         // proxy puts in the path, so lambda_http hands axum `/v1/...` (not

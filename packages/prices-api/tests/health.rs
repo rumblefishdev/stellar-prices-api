@@ -25,6 +25,8 @@ fn test_config() -> AppConfig {
         // is what every non-portal test wants — with no client in the
         // config there is no code path here that can reach API Gateway.
         portal_keys: None,
+        portal_eligibility: None,
+        portal_rate_limit: None,
     }
 }
 

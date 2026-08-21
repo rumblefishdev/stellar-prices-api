@@ -274,6 +274,138 @@ Three decisions the re-slice made, recorded so they are not re-litigated:
   and the next key is still only issuable on the 1st. Otherwise "revoke" becomes
   the button people press to escape a burnt quota.
 
+### `0190` — decided **CANCEL**, 2026-08-20, with the evidence
+
+The bullet above said `0190` has to prove it is needed. It was run as a
+measurement task and it did not prove it. **The registry is cancelled**, and
+this section is the reason, written here so it is not proposed a third time
+(`0158` → `0190` → ?) without new data.
+
+**What was measured, and how.** All figures below are from the production
+account `750702271865` / `eu-central-1` on 2026-08-20, not from estimates.
+
+| Fact                                               | Value                                                                              | Source                                                                                                                                                                                        |
+| -------------------------------------------------- | ---------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Control-plane budget, whole account                | **10 rps sustained, burst 40**, non-adjustable                                     | AWS _API Gateway quotas_, "Total operations" row. `GetApiKeys`/`GetApiKey`/`GetUsage` fall under "Other operations — no quota up to the total account quota", so they draw on that one bucket |
+| Real control-plane volume, 14 days (08-06 → 08-20) | 961 calls; **peak 12/s, 42/min, 245/h**                                            | CloudTrail `lookup-events`, `apigateway.amazonaws.com`, paged to exhaustion                                                                                                                   |
+| Who spends it                                      | `AWSCloudFormation` 355, `adam.kot` 318, `resource-explorer-2` 277, humans ≤8 each | same                                                                                                                                                                                          |
+| Portal-issued keys in the account                  | **1** (`discord-…-key`, 2026-08-18, made by a local run while the flag was off)    | `GetApiKeys`, 5 keys total, one page                                                                                                                                                          |
+| Cost of one **cold** dashboard load                | **4 control-plane calls**, ≈1.14 s of API time                                     | timed against the real account: `GetApiKeys` 286 ms, `GetApiKey` 264 ms, `GetApiKeys` 298 ms, `GetUsage` 288 ms                                                                               |
+| Cost of a **warm** load (inside 60 s)              | 2 calls — only the usage half is cached                                            | `portal/usage/mod.rs` `CACHE_TTL`; `portal/keys/mod.rs` `reveal` reads no cache                                                                                                               |
+
+**Premise 1 — "a hot path that cannot afford a control-plane call": not
+supported, and the registry is the wrong fix for it anyway.**
+
+A cold load is 4 calls: `GetApiKeys` + `GetApiKey` on the reveal
+(`keys::lookup`), `GetApiKeys` + `GetUsage` on the usage route
+(`usage::fetch`). **Calls 1 and 3 are the same query for the same user in the
+same page load** — the two routes each run their own `list_named`.
+
+A registry could replace only those two. `GetApiKey(includeValue=true)` and
+`GetUsage` cannot be replaced by any table we own: AWS holds the credential and
+AWS counts the quota. So the ceiling on what the registry buys is **4 → 2**.
+
+Two changes already available beat that ceiling and cost no storage:
+
+- de-duplicate the shared `GetApiKeys` within a load → 4 → 3;
+- give the reveal the in-process cache the usage route already has → warm loads
+  go to **0**, against the registry's floor of 2.
+
+The registry is therefore _strictly dominated_ on its own strongest premise. And
+there is no load to dominate: the portal is closed, one key exists, and the
+budget's peak consumer is `cdk deploy`, not visitors. Building a cache for
+traffic that has never been observed is the speculative hardening this task was
+written to prevent.
+
+The per-load figure belongs to `0194`, whose costing criterion says "nobody has
+costed this yet" — and whose description of the load as `GetApiKey + GetUsage`
+is **one `GetApiKeys` short** of what the code does. Corrected there.
+
+**Premise 2 — "history of previous keys/reworks": no customer exists.**
+
+`0191` states it outright — "a rework deletes and re-creates, the surviving
+key's `createdDate` is that instant — **no stored timestamp is needed** unless
+`0190` is built". `0192` wants a revocation record, not a history of prior keys.
+No slice, ADR, or acceptance criterion anywhere in the epic asks how often a
+user reworks. A feature whose only justification is a question nobody has asked
+is not built.
+
+**Premise 3 — "attribution surviving AWS": technically true, materially worse.**
+
+ClickHouse runs on Hetzner, not in this AWS account, so a registry row genuinely
+would outlive an account rebuild. That is the one premise that holds — and it
+still does not justify the table:
+
+- no disaster-recovery requirement for the portal exists in this epic or in
+  ADR 0007/0010;
+- attribution is already carried _by the keys themselves_: the name is
+  `discord-<userId>-key` by construction. If the keys survive, so does the
+  mapping; if they do not, there is nothing left to attribute;
+- the shared Hetzner volume filled up on 2026-08-13 and stalled ingestion for
+  11.5 h, and it **still has no free-space alarm** (`0204`, open). Making that
+  volume the sole custodian of identity→key attribution moves a durability-
+  critical record onto the least-monitored storage in the system.
+
+**The finding that settles it: the specified schema would destroy the one fact
+the epic really will need.**
+
+`0192` is the first slice that cannot avoid durable state — after a revoke no
+key survives, so `next_eligible_at` can no longer be recomputed from
+`createdDate`, and the cap has to be persisted. But `0158`/`0190`'s schema is
+`ReplacingMergeTree(updated_at) ORDER BY discord_user_id`: **one row per user,
+replaced on every write**. The next issue would overwrite the revocation row and
+silently reset the cap — precisely the "revoke as a free quota reset" the epic
+forbids. `0192` already anticipated this: "a single small record is not the same
+as the full registry".
+
+Building `0190` now would not merely be unnecessary. It would hand `0192` a
+structure that loses `0192`'s data.
+
+**Consequences of _not_ building it**, for the record: no new IAM (a registry
+write would need a ClickHouse **writer** grant on the internet-facing portal
+Lambda, which today only reads as `prices_reader`); one eventually-consistent
+source instead of two that can disagree (`GetApiKeys` is eventually consistent
+in both directions — `0187`); the one-key-per-account invariant stays where it
+already lives, in `0187`'s reconciler, which `0190` conceded "was never the
+invariant"; and no `FINAL`-on-every-read discipline to maintain.
+
+**What would re-open this — the only two triggers.**
+
+1. `0192` starting. It needs durable state; the decision to make there is
+   **a purpose-built revocation record** (append-only, keyed so an issue cannot
+   overwrite a revoke), _not_ this registry. If that record is later joined by a
+   second and a third durable need, revisit the shape then.
+2. `0194` measuring real per-load control-plane cost against real traffic and
+   finding the portal competing with deploys. Even then the first two remedies
+   are the de-duplicated listing and the reveal cache above; a table is the
+   third resort, and only with numbers attached.
+
+Absent one of those, with new data, the registry is not to be re-proposed.
+
+**Where storage does land, when the epic finally needs it.** Cancelling the
+registry is not a ruling that this epic never stores anything — `0192` will,
+and `0190` did that slice's groundwork rather than leaving it to be rediscovered:
+
+- **Substrate: ClickHouse, per ADR 0007** ("the prices-api live data sink is
+  BE's Hetzner-hosted ClickHouse cluster, not a Prices-owned RDS Postgres").
+  This project has no other store in the AWS account, and adding one for a
+  single small table would break that ADR for the smallest possible reason.
+- **Shape: append-only, and explicitly _not_ `0158`'s.** One row per event, not
+  `ReplacingMergeTree ORDER BY discord_user_id`, for the overwrite reason above.
+- **Write access does not exist and is not ours to grant — this is the item
+  with cross-team lead time.** The api-handler reads as `prices_reader`
+  (SELECT only, measured on `ch-prod-01` 2026-07-30); those grants are
+  XML-managed in BE's `services.xml` and cannot be SQL-GRANTed by us; and DDL on
+  that host is an operator action as the container's `default` user over the
+  loopback port, not a `cdk deploy`. A broad DDL grant for the ingestion writer
+  was already considered and rejected under task `0134`. So "ClickHouse is
+  already standing" is true of the _cluster_ and false of the _capability_ —
+  budget for a grant negotiation, a runbook DDL step, and a writer mTLS bundle
+  reaching a Lambda that today can only read.
+
+All three are written up in `0192`'s own _Storage_ section, which is where the
+decisions get made.
+
 Superseded task files stay in `lore/1-tasks/archive/` (`0158`–`0162`, and the
 canceled `0180`) and remain the reference for the details the slices cite.
 

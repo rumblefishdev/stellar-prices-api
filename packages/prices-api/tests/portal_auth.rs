@@ -16,17 +16,12 @@
 //! them. The mock records what it actually received, and the assertions are
 //! against that.
 //!
-//! The mock is [`MockDiscord`]: an axum app on an ephemeral port, serving
-//! `/oauth2/token` and `/users/@me`, pointed at by `DISCORD_API_BASE`.
+//! The mock is [`MockDiscord`] (`tests/common/mock_discord.rs`, shared with
+//! the issue round-trip suite): an axum app on an ephemeral port, serving
+//! `/oauth2/token`, `/users/@me` and the member route.
 
-use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
-
-use axum::extract::State;
+use axum::Router;
 use axum::http::{HeaderMap, StatusCode, header};
-use axum::response::IntoResponse;
-use axum::routing::{get, post};
-use axum::{Json, Router};
 use prices_api::portal::auth::{
     CALLBACK_PATH, LOGIN_PATH, LOGOUT_PATH, ME_PATH, cookies, crypto, discord::Endpoints,
     secret::OauthSecret, session::Session, state_token,
@@ -35,114 +30,9 @@ use prices_api::{AppConfig, AppState, app};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
-// ---------------------------------------------------------------------------
-// Mock Discord
-// ---------------------------------------------------------------------------
-
-/// What the mock saw, so the tests can assert on the request rather than only on
-/// the response.
-#[derive(Default)]
-struct Recorded {
-    /// The form body of the last `POST /oauth2/token`, decoded.
-    token_form: Vec<(String, String)>,
-    /// The `Authorization` header of the last `GET /users/@me`.
-    bearer: Option<String>,
-    /// How many code exchanges were attempted.
-    exchanges: usize,
-}
-
-#[derive(Clone)]
-struct MockState {
-    recorded: Arc<Mutex<Recorded>>,
-    /// Scope the mock claims to have granted. Overridden by one test.
-    granted_scope: String,
-    /// When set, `/oauth2/token` answers with this status instead of a token.
-    token_status: Option<StatusCode>,
-}
-
-struct MockDiscord {
-    base: String,
-    recorded: Arc<Mutex<Recorded>>,
-}
-
-impl MockDiscord {
-    async fn start(granted_scope: &str, token_status: Option<StatusCode>) -> Self {
-        let recorded = Arc::new(Mutex::new(Recorded::default()));
-        let state = MockState {
-            recorded: recorded.clone(),
-            granted_scope: granted_scope.to_string(),
-            token_status,
-        };
-
-        let router = Router::new()
-            .route("/oauth2/token", post(token))
-            .route("/users/@me", get(current_user))
-            .with_state(state);
-
-        // Port 0: the OS picks a free one, so the suite can run in parallel with
-        // itself and with anything else on the machine.
-        let listener = tokio::net::TcpListener::bind::<SocketAddr>(([127, 0, 0, 1], 0).into())
-            .await
-            .expect("the mock must bind to loopback");
-        let base = format!("http://{}", listener.local_addr().unwrap());
-        tokio::spawn(async move {
-            let _ = axum::serve(listener, router).await;
-        });
-
-        Self { base, recorded }
-    }
-
-    fn form_field(&self, name: &str) -> Option<String> {
-        self.recorded
-            .lock()
-            .unwrap()
-            .token_form
-            .iter()
-            .find(|(k, _)| k == name)
-            .map(|(_, v)| v.clone())
-    }
-
-    fn exchanges(&self) -> usize {
-        self.recorded.lock().unwrap().exchanges
-    }
-}
-
-async fn token(State(state): State<MockState>, body: String) -> axum::response::Response {
-    {
-        let mut recorded = state.recorded.lock().unwrap();
-        recorded.token_form = form_urlencoded::parse(body.as_bytes())
-            .into_owned()
-            .collect();
-        recorded.exchanges += 1;
-    }
-    if let Some(status) = state.token_status {
-        return (status, "upstream said no").into_response();
-    }
-    Json(json!({
-        "access_token": "an-access-token",
-        "token_type": "Bearer",
-        "expires_in": 604800,
-        "refresh_token": "a-refresh-token",
-        "scope": state.granted_scope,
-    }))
-    .into_response()
-}
-
-async fn current_user(State(state): State<MockState>, headers: HeaderMap) -> Json<Value> {
-    state.recorded.lock().unwrap().bearer = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_string);
-    Json(json!({
-        "id": "308994132968210433",
-        "username": "adam",
-        "discriminator": "0",
-        "global_name": "Adam",
-        // Fields this service must ignore rather than carry anywhere.
-        "email": "someone@example.com",
-        "verified": true,
-    }))
-}
+#[path = "common/mock_discord.rs"]
+mod mock_discord;
+use mock_discord::{GRANTED_SCOPE, MockDiscord};
 
 // ---------------------------------------------------------------------------
 // Router under test
@@ -210,6 +100,8 @@ fn build_app(portal_enabled: bool, endpoints: Endpoints) -> Router {
         // is what every non-portal test wants — with no client in the
         // config there is no code path here that can reach API Gateway.
         portal_keys: None,
+        portal_eligibility: None,
+        portal_rate_limit: None,
     };
     app(&config, AppState::without_ch())
 }
@@ -413,7 +305,7 @@ async fn a_closed_portal_answers_a_well_formed_callback_the_same_as_a_bare_one()
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn login_redirects_to_discord_asking_for_identify_and_nothing_else() {
+async fn login_redirects_to_discord_asking_for_the_two_scopes_and_nothing_else() {
     let open = signed_in_app(true);
     let reply = fetch(&open, LOGIN_PATH, &[]).await;
 
@@ -436,9 +328,21 @@ async fn login_redirects_to_discord_asking_for_identify_and_nothing_else() {
             .unwrap_or_default()
     };
 
-    assert_eq!(field("scope"), "identify");
+    // The pair, verbatim (task 0189) — and never `guilds` or `email`, which
+    // ADR 0010 refuses outright.
+    assert_eq!(field("scope"), "identify guilds.members.read");
     assert_eq!(field("response_type"), "code");
     assert_eq!(field("code_challenge_method"), "S256");
+    // And NO `prompt` on a sign-in (task 0189). Suppressing the consent
+    // screen is for the re-authorisation round-trips, which by construction
+    // follow an authorisation that already exists; sign-in is where the FIRST
+    // one happens — including the re-consent that grants 0189's new
+    // `guilds.members.read` to an account that authorised under 0186's
+    // narrower scope. See `authorize_url`.
+    assert!(
+        !query.iter().any(|(k, _)| k == "prompt"),
+        "sign-in must not suppress the consent screen: {location}"
+    );
     assert_eq!(field("redirect_uri"), REDIRECT_URI);
     assert!(!field("state").is_empty());
     assert!(!field("code_challenge").is_empty());
@@ -491,8 +395,9 @@ async fn two_logins_produce_two_different_states() {
 }
 
 /// The action slot is verified at the door as well as in the signature, so an
-/// action this build does not implement cannot start a round-trip that the
-/// callback would then have to decide what to do with.
+/// action this build does not implement — 0191's `rework`, arriving early —
+/// cannot start a round-trip that the callback would then have to decide what
+/// to do with.
 #[tokio::test]
 async fn login_refuses_an_action_it_does_not_implement() {
     let open = signed_in_app(true);
@@ -502,9 +407,59 @@ async fn login_refuses_an_action_it_does_not_implement() {
             .status,
         StatusCode::SEE_OTHER
     );
-    let refused = fetch(&open, &format!("{LOGIN_PATH}?action=issue"), &[]).await;
+    let refused = fetch(&open, &format!("{LOGIN_PATH}?action=rework"), &[]).await;
     assert_eq!(refused.status, StatusCode::BAD_REQUEST);
     assert!(refused.set_cookies().is_empty());
+}
+
+/// `action=issue` IS implemented (task 0189) — but on a deployment with no
+/// control plane or eligibility parameters wired it is refused before the
+/// visitor is sent to Discord: a round-trip that can only ever end in
+/// "failed" must not start.
+///
+/// **Refused with a landing, not with a `503` envelope.** This route is
+/// reached by a top-level navigation from a link on the dashboard, so a JSON
+/// body strands the visitor on an API URL with nothing to read and nothing to
+/// press. `?issue=failed` is the state that already means "our key service,
+/// not your eligibility" — and no round-trip is started, so no pending cookie
+/// is minted either.
+#[tokio::test]
+async fn login_lands_an_unwired_issue_round_trip_on_failed() {
+    let open = signed_in_app(true);
+    let refused = fetch(&open, &format!("{LOGIN_PATH}?action=issue"), &[]).await;
+    assert_eq!(refused.status, StatusCode::SEE_OTHER);
+    assert_eq!(refused.location(), "/api-tokens/?issue=failed");
+    assert!(refused.set_cookies().is_empty());
+    // And not a body the browser would render as text.
+    assert!(refused.body.is_empty(), "{:?}", refused.body);
+}
+
+/// The same door on a deployment with **no OAuth credentials at all**: a
+/// sign-in still gets the `503` envelope its caller can read, while an issue
+/// navigation gets a landing. The two answers differ because the two callers
+/// do — one is `fetch` from the page, the other is the browser itself.
+#[tokio::test]
+async fn an_issue_round_trip_with_no_credentials_lands_rather_than_503ing() {
+    let config = AppConfig {
+        ch_enabled: false,
+        base_url: None,
+        api_keys: vec![],
+        portal_enabled: true,
+        portal_oauth: None,
+        portal_endpoints: Endpoints::default(),
+        portal_keys: None,
+        portal_eligibility: None,
+        portal_rate_limit: None,
+    };
+    let router = app(&config, AppState::without_ch());
+
+    let signin = fetch(&router, LOGIN_PATH, &[]).await;
+    assert_eq!(signin.status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(signin.json()["code"], "sign_in_unconfigured");
+
+    let issue = fetch(&router, &format!("{LOGIN_PATH}?action=issue"), &[]).await;
+    assert_eq!(issue.status, StatusCode::SEE_OTHER);
+    assert_eq!(issue.location(), "/api-tokens/?issue=failed");
 }
 
 // ---------------------------------------------------------------------------
@@ -513,7 +468,7 @@ async fn login_refuses_an_action_it_does_not_implement() {
 
 #[tokio::test]
 async fn a_complete_round_trip_signs_the_visitor_in() {
-    let mock = MockDiscord::start("identify", None).await;
+    let mock = MockDiscord::start(GRANTED_SCOPE, None).await;
     let open = app_against(&mock);
 
     let started = start_login(&open).await;
@@ -556,6 +511,11 @@ async fn a_complete_round_trip_signs_the_visitor_in() {
     // And the pending cookie is gone — the replay defence, on the wire.
     assert!(reply.clears(cookies::PENDING_COOKIE));
 
+    // Sign-in checks identity only — the membership route is the ISSUE
+    // round-trip's, and a sign-in that consulted it would be re-inventing the
+    // session-carried eligibility ADR 0010 §8 forbids.
+    assert_eq!(mock.member_calls(), 0);
+
     // The exchange really happened, with the client secret in the BODY and the
     // PKCE verifier that matches the challenge sent at login.
     assert_eq!(mock.exchanges(), 1);
@@ -586,7 +546,7 @@ async fn a_complete_round_trip_signs_the_visitor_in() {
 /// backend's side: after the round-trip, `/auth/me` reports both.
 #[tokio::test]
 async fn me_reports_the_username_and_id_after_a_round_trip() {
-    let mock = MockDiscord::start("identify", None).await;
+    let mock = MockDiscord::start(GRANTED_SCOPE, None).await;
     let open = app_against(&mock);
 
     let started = start_login(&open).await;
@@ -617,7 +577,7 @@ async fn me_reports_the_username_and_id_after_a_round_trip() {
 /// outlives the request.
 #[tokio::test]
 async fn no_discord_token_survives_the_callback() {
-    let mock = MockDiscord::start("identify", None).await;
+    let mock = MockDiscord::start(GRANTED_SCOPE, None).await;
     let open = app_against(&mock);
 
     let started = start_login(&open).await;
@@ -670,7 +630,7 @@ async fn no_discord_token_survives_the_callback() {
 /// the caller sees, and that no session comes out of it.
 #[tokio::test]
 async fn a_mismatched_state_is_rejected_and_issues_no_session() {
-    let mock = MockDiscord::start("identify", None).await;
+    let mock = MockDiscord::start(GRANTED_SCOPE, None).await;
     let open = app_against(&mock);
 
     // Two independent logins. Present one browser's cookie with the other's
@@ -700,7 +660,7 @@ async fn a_mismatched_state_is_rejected_and_issues_no_session() {
 
 #[tokio::test]
 async fn a_callback_with_no_pending_cookie_is_rejected() {
-    let mock = MockDiscord::start("identify", None).await;
+    let mock = MockDiscord::start(GRANTED_SCOPE, None).await;
     let open = app_against(&mock);
 
     let state = start_login(&open).await.state;
@@ -716,7 +676,7 @@ async fn a_callback_with_no_pending_cookie_is_rejected() {
 /// who captured the URL — the `code` and `state` alone are not enough.
 #[tokio::test]
 async fn replaying_a_callback_url_after_the_cookie_is_cleared_is_rejected() {
-    let mock = MockDiscord::start("identify", None).await;
+    let mock = MockDiscord::start(GRANTED_SCOPE, None).await;
     let open = app_against(&mock);
 
     let started = start_login(&open).await;
@@ -740,7 +700,7 @@ async fn replaying_a_callback_url_after_the_cookie_is_cleared_is_rejected() {
 
 #[tokio::test]
 async fn a_forged_state_signed_with_another_key_is_rejected() {
-    let mock = MockDiscord::start("identify", None).await;
+    let mock = MockDiscord::start(GRANTED_SCOPE, None).await;
     let open = app_against(&mock);
 
     let pending = start_login(&open).await.pending;
@@ -765,7 +725,7 @@ async fn a_forged_state_signed_with_another_key_is_rejected() {
 /// signed with their key and not ours.
 #[tokio::test]
 async fn a_self_signed_pair_is_rejected() {
-    let mock = MockDiscord::start("identify", None).await;
+    let mock = MockDiscord::start(GRANTED_SCOPE, None).await;
     let open = app_against(&mock);
 
     let forged = state_token::start(
@@ -829,7 +789,7 @@ async fn a_cancelled_sign_in_returns_to_the_portal_saying_so() {
 async fn an_unverifiable_callback_cannot_cancel_someone_elses_sign_in() {
     // Needs a working Discord: the point is that the victim's own callback
     // still completes, which means it has to reach the token exchange.
-    let mock = MockDiscord::start("identify", None).await;
+    let mock = MockDiscord::start(GRANTED_SCOPE, None).await;
     let open = app_against(&mock);
 
     for attack in [
@@ -876,7 +836,7 @@ async fn an_unverifiable_callback_cannot_cancel_someone_elses_sign_in() {
 /// be gone.
 #[tokio::test]
 async fn a_verified_callback_always_drops_the_pending_cookie() {
-    let mock = MockDiscord::start("identify", None).await;
+    let mock = MockDiscord::start(GRANTED_SCOPE, None).await;
     let open = app_against(&mock);
 
     // Success.
@@ -903,7 +863,7 @@ async fn a_verified_callback_always_drops_the_pending_cookie() {
     assert!(cancel.clears(cookies::PENDING_COOKIE));
 
     // Verified, but Discord did not complete.
-    let broken = MockDiscord::start("identify", Some(StatusCode::UNAUTHORIZED)).await;
+    let broken = MockDiscord::start(GRANTED_SCOPE, Some(StatusCode::UNAUTHORIZED)).await;
     let broken_app = app_against(&broken);
     let failed = start_login(&broken_app).await;
     let upstream = fetch(
@@ -1057,32 +1017,58 @@ async fn a_callback_with_no_code_and_no_error_is_a_client_error() {
 }
 
 /// The Developer Portal registration and this code can disagree about scope,
-/// and the token response is the only place the real grant is visible. A
-/// broader grant than `identify` is refused rather than quietly accepted.
+/// and the token response is the only place the real grant is visible. A grant
+/// wider OR narrower than the requested pair is refused rather than quietly
+/// accepted — while the pair in the other order, which is the same set per
+/// RFC 6749 §3.3, is not.
 #[tokio::test]
-async fn a_grant_wider_than_identify_is_refused() {
-    let mock = MockDiscord::start("identify guilds", None).await;
-    let open = app_against(&mock);
+async fn a_grant_that_is_not_exactly_the_two_scopes_is_refused() {
+    for drifted in [
+        // Wider: the registration grew `guilds` or `email` — ADR 0010's
+        // named refusals.
+        "identify guilds.members.read guilds",
+        "identify guilds.members.read email",
+        // Narrower: the member scope missing would turn every membership
+        // check into a 401-shaped "unknown"; refuse at the exchange instead.
+        "identify",
+        "guilds.members.read",
+    ] {
+        let mock = MockDiscord::start(drifted, None).await;
+        let open = app_against(&mock);
 
+        let started = start_login(&open).await;
+        let (state, pending) = (&started.state, &started.pending);
+        let reply = fetch(
+            &open,
+            &format!("{CALLBACK_PATH}?code=c&state={state}"),
+            &[(cookies::PENDING_COOKIE, pending)],
+        )
+        .await;
+
+        assert_eq!(reply.status, StatusCode::BAD_GATEWAY, "scope={drifted}");
+        assert_eq!(reply.json()["code"], "discord_unavailable", "{drifted}");
+        assert!(reply.cookie(cookies::SESSION_COOKIE).is_none(), "{drifted}");
+    }
+
+    // The same set in the other order is the same grant.
+    let reordered = MockDiscord::start("guilds.members.read identify", None).await;
+    let open = app_against(&reordered);
     let started = start_login(&open).await;
-    let (state, pending) = (&started.state, &started.pending);
     let reply = fetch(
         &open,
-        &format!("{CALLBACK_PATH}?code=c&state={state}"),
-        &[(cookies::PENDING_COOKIE, pending)],
+        &format!("{CALLBACK_PATH}?code=c&state={}", started.state),
+        &[(cookies::PENDING_COOKIE, &started.pending)],
     )
     .await;
-
-    assert_eq!(reply.status, StatusCode::BAD_GATEWAY);
-    assert_eq!(reply.json()["code"], "discord_unavailable");
-    assert!(reply.cookie(cookies::SESSION_COOKIE).is_none());
+    assert_eq!(reply.status, StatusCode::SEE_OTHER);
+    assert!(reply.cookie(cookies::SESSION_COOKIE).is_some());
 }
 
 /// Discord having an incident must not read as a bug here, and must not leak
 /// Discord's response body to the visitor.
 #[tokio::test]
 async fn a_failed_token_exchange_is_a_502_with_no_upstream_detail() {
-    let mock = MockDiscord::start("identify", Some(StatusCode::UNAUTHORIZED)).await;
+    let mock = MockDiscord::start(GRANTED_SCOPE, Some(StatusCode::UNAUTHORIZED)).await;
     let open = app_against(&mock);
 
     let started = start_login(&open).await;
@@ -1155,7 +1141,7 @@ async fn me_ignores_a_forged_or_expired_session() {
 
 #[tokio::test]
 async fn logout_clears_the_session_at_the_path_that_set_it() {
-    let mock = MockDiscord::start("identify", None).await;
+    let mock = MockDiscord::start(GRANTED_SCOPE, None).await;
     let open = app_against(&mock);
 
     let started = start_login(&open).await;
@@ -1223,6 +1209,8 @@ async fn an_open_portal_with_no_credentials_answers_503_on_login() {
         // is what every non-portal test wants — with no client in the
         // config there is no code path here that can reach API Gateway.
         portal_keys: None,
+        portal_eligibility: None,
+        portal_rate_limit: None,
     };
     let router = app(&config, AppState::without_ch());
 
@@ -1255,6 +1243,8 @@ async fn sign_in_needs_no_api_key_even_when_the_key_gate_is_armed() {
         // is what every non-portal test wants — with no client in the
         // config there is no code path here that can reach API Gateway.
         portal_keys: None,
+        portal_eligibility: None,
+        portal_rate_limit: None,
     };
     let router = app(&config, AppState::without_ch());
 

@@ -31,7 +31,7 @@
  * stale file from another branch reads as a pass, or as drift that cannot be
  * reproduced. The synthesized template is still the caller's responsibility.
  */
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -683,6 +683,77 @@ for (const st of apigatewayStatements) {
   }
 }
 
+// --- 5b. Task 0188: the GetUsage grant exists, and is the narrow form. ---
+// The dashboard's `GetUsage` needs `apigateway:GET` on the free plan's
+// `/usage` sub-resource — a statement in ApiGatewayStack's standalone policy,
+// because only that stack knows the plan id. A missing statement fails at
+// runtime with AccessDenied, only once the portal opens, and reads as a
+// backend bug; a broadened one (`/usageplans/*`, or the plan root) hands the
+// api-handler reads this feature never makes. The `apigateway:*` and
+// `Resource: "*"` refusals above already bound the worst case; this pins the
+// intended shape.
+const usageGrants = apigatewayStatements.filter((st) => {
+  const resources = [st.Resource ?? []].flat();
+  // The resource is an Fn::Join carrying the plan id ref, so it is matched as
+  // serialized JSON rather than as a string. `/usage"` — with the closing
+  // quote — is the sub-resource as a path SUFFIX; a bare `/usage` would also
+  // match every `/usageplans/…` ARN, 0187's `/keys` attach included.
+  return resources.some((r) => JSON.stringify(r).includes('/usage"'));
+});
+if (usageGrants.length !== 1) {
+  fail(
+    `error: expected exactly one IAM statement on the usage plan's /usage ` +
+      `sub-resource, found ${usageGrants.length}.`,
+    '  → task 0188 reads per-key usage with GetUsage, granted as ' +
+      '`apigateway:GET` on `/usageplans/{planId}/usage` in ' +
+      'api-gateway-stack.ts (the standalone portal policy — the plan id ' +
+      'lives in that stack). Without it every dashboard load fails with ' +
+      'AccessDenied once the portal opens.',
+  );
+}
+{
+  const actions = [usageGrants[0].Action ?? []].flat().map(String);
+  if (actions.length !== 1 || actions[0] !== 'apigateway:GET') {
+    fail(
+      `error: the /usage grant carries actions ${JSON.stringify(actions)}.`,
+      '  → GetUsage needs `apigateway:GET` and nothing else on this ' +
+        'resource. Anything more (PATCH is UpdateUsage — moving the quota ' +
+        'counter) is a different feature and a different decision.',
+    );
+  }
+  // The narrow form has two more properties the count and action cannot see:
+  // the resource names THIS plan (a wildcard `/usageplans/*/usage` would read
+  // every plan's usage and still count as one statement), and the statement
+  // lives in the GATEWAY template — only that stack knows the plan id, so a
+  // copy in ComputeStack would necessarily be hard-coded or wildcarded.
+  const serialized = JSON.stringify([usageGrants[0].Resource ?? []].flat());
+  if (serialized.includes('*')) {
+    fail(
+      `error: the /usage grant's resource contains a wildcard: ${serialized}.`,
+      '  → the grant is meant to name the one pricing-api-free plan by ' +
+        'reference (api-gateway-stack.ts). A wildcard reads usage for every ' +
+        'plan in the account.',
+    );
+  }
+  const inCompute = resourcesOfType(computeTemplate, 'AWS::IAM::Policy').some(
+    ([, policy]) =>
+      (policy.Properties?.PolicyDocument?.Statement ?? []).some((st) =>
+        [st.Resource ?? []]
+          .flat()
+          .some((r) => JSON.stringify(r).includes('/usage"')),
+      ),
+  );
+  if (inCompute) {
+    fail(
+      'error: a /usage grant appears in the Compute template.',
+      '  → the GetUsage statement belongs in ApiGatewayStack’s standalone ' +
+        'portal policy, where the plan id is a reference rather than a ' +
+        'hand-typed string. See the cycle argument on `apiHandlerRole` in ' +
+        'api-gateway-stack.ts.',
+    );
+  }
+}
+
 // --- 6. The portal's methods are uncached AT THE GATEWAY. ---
 // Not deferrable to task 0194, and not the same check as the CloudFront one
 // above. `deployOptions.cachingEnabled` is ON in this stack and the gateway
@@ -723,6 +794,154 @@ for (const httpMethod of ['GET', 'POST']) {
         "serves one visitor another visitor's API key. Set " +
         '`cachingEnabled: false` in `portalSettings` in api-gateway-stack.ts.',
     );
+  }
+}
+
+// --- 7. Task 0189: the eligibility parameters are named, and never CDK-owned. ---
+// The gate's two knobs — which guild membership is checked against, and the
+// minimum account age — are OPERATOR-seeded SSM parameters, read at runtime per
+// issuance. Two properties hold that design together, and neither is visible to
+// the Rust suite:
+//
+// (a) the handler carries the two parameter NAMES, exactly. A typo'd name means
+//     the cold-start probe fails on the deploy that opens the portal — `/v1`
+//     down — long after the edit that broke it (the check-4 failure mode).
+// (b) NO synthesized template creates a parameter with either name. A
+//     CloudFormation-managed parameter is CDK-owned, so the next `cdk deploy`
+//     silently restores the committed value — which, after task 0179 points
+//     production at the real Stellar guild, would un-flip it back to the test
+//     guild. That regression is invisible at runtime until a member is refused.
+const ELIGIBILITY_PARAMS = {
+  PORTAL_GUILD_ID_PARAM: '/prices/production/discord-guild-id',
+  PORTAL_MIN_ACCOUNT_AGE_PARAM: '/prices/production/min-account-age-minutes',
+};
+for (const [envVar, expected] of Object.entries(ELIGIBILITY_PARAMS)) {
+  if (handlerEnv[envVar] !== expected) {
+    fail(
+      `error: the api-handler carries ${envVar}=` +
+        `${JSON.stringify(handlerEnv[envVar] ?? null)}, expected ` +
+        `${JSON.stringify(expected)}.`,
+      '  → task 0189 resolves the eligibility knobs from these names per ' +
+        'issuance (compute-stack.ts). The operator seeds the VALUES at deploy ' +
+        'prep (runbook §2a); a drifted name fails the cold-start probe on the ' +
+        'deploy that opens the portal, taking /v1 down with it.',
+    );
+  }
+}
+{
+  const cdkOut = join(repoRoot, 'infra', 'cdk.out');
+  const templateFiles = readdirSync(cdkOut).filter((f) =>
+    f.endsWith('.template.json'),
+  );
+  if (templateFiles.length === 0) {
+    fail(
+      'error: no synthesized templates found in infra/cdk.out.',
+      '  → run `npm run infra:synth:production` first.',
+    );
+  }
+  const forbiddenSuffixes = Object.values(ELIGIBILITY_PARAMS).map(
+    (name) => name.slice(name.lastIndexOf('/')), // '/discord-guild-id', …
+  );
+
+  // A `Name` is rarely a bare string once anyone interpolates the environment
+  // into it — `/prices/${env}/discord-guild-id` synthesizes to an `Fn::Join`
+  // or an `Fn::Sub`, which is the natural way somebody would write the very
+  // parameter this check forbids. Inspecting only literal strings therefore
+  // left the guard evadable by the most likely spelling of the mistake.
+  //
+  // So intrinsics are RESOLVED as far as their literal text goes, with each
+  // unresolvable piece (a `Ref`, a `${Var}`) standing in as one NUL — a byte
+  // no parameter name may contain, which makes "literal tail" and "followed
+  // by something we cannot read" distinguishable below. Anything this cannot
+  // read at all is a failure, not a skip: see the message on that branch.
+  const PLACEHOLDER = '\u0000';
+  const resolveName = (value) => {
+    if (typeof value === 'string') return value;
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+      return null;
+    }
+    const keys = Object.keys(value);
+    if (keys.length !== 1) return null;
+    const [fn] = keys;
+    const arg = value[fn];
+    if (fn === 'Ref' || fn === 'Fn::GetAtt' || fn === 'Fn::ImportValue') {
+      return PLACEHOLDER;
+    }
+    if (fn === 'Fn::Sub') {
+      const template = Array.isArray(arg) ? arg[0] : arg;
+      if (typeof template !== 'string') return null;
+      return (
+        template
+          // `${Foo}` substitutes; `${!Foo}` is an escaped literal `${Foo}`
+          // and must NOT be masked, or a suffix spelled that way would hide.
+          .replace(/\$\{(?!!)[^}]*\}/g, PLACEHOLDER)
+          .replace(/\$\{!([^}]*)\}/g, '${$1}')
+      );
+    }
+    if (fn === 'Fn::Join' && Array.isArray(arg) && arg.length === 2) {
+      const [separator, parts] = arg;
+      if (typeof separator !== 'string' || !Array.isArray(parts)) return null;
+      const resolved = parts.map(resolveName);
+      if (resolved.some((part) => part === null)) return null;
+      return resolved.join(separator);
+    }
+    return null;
+  };
+
+  // The suffix must be the END of the name, or be followed by something this
+  // check could not read — never merely contained in it. `endsWith` alone
+  // misses `${prefix}/discord-guild-id${suffix}`; a bare `includes` would
+  // false-fail on a genuinely different parameter such as
+  // `…/discord-guild-id-backup`, which is the over-broad-matcher mistake task
+  // 0188's check 5b already made once.
+  const createsParameter = (resolved) =>
+    forbiddenSuffixes.some((suffix) => {
+      for (
+        let at = resolved.indexOf(suffix);
+        at !== -1;
+        at = resolved.indexOf(suffix, at + 1)
+      ) {
+        const after = resolved[at + suffix.length];
+        if (after === undefined || after === PLACEHOLDER) return true;
+      }
+      return false;
+    });
+
+  for (const file of templateFiles) {
+    const tpl = readJson(join(cdkOut, file), 'synthesized template');
+    for (const [id, resource] of resourcesOfType(tpl, 'AWS::SSM::Parameter')) {
+      const name = resource.Properties?.Name;
+      // Absent is fine: CloudFormation then generates a physical name of its
+      // own, which cannot be one of ours.
+      if (name === undefined) continue;
+      const resolved = resolveName(name);
+      // A name whose LAST segment is not literal is unreadable in the only
+      // position that matters: the leaf is what the forbidden suffixes are.
+      // `{"Ref": …}` for the whole name is the extreme case of this.
+      if (resolved === null || resolved.endsWith(PLACEHOLDER)) {
+        fail(
+          `error: ${file} creates SSM parameter ${id} with a Name this check ` +
+            `cannot read: ${JSON.stringify(name)}.`,
+          '  → the guard below has to be able to tell whether a synthesized ' +
+            'template creates the eligibility parameters, and it refuses to ' +
+            'pass a name it cannot resolve rather than assume it is ' +
+            'harmless. Give the parameter a literal name, or teach ' +
+            '`resolveName` this intrinsic.',
+        );
+        continue;
+      }
+      if (createsParameter(resolved)) {
+        fail(
+          `error: ${file} creates SSM parameter ${JSON.stringify(name)} ` +
+            `(resource ${id}).`,
+          '  → the eligibility parameters are operator-seeded, never ' +
+            'CloudFormation resources: a CDK-owned parameter is restored to ' +
+            'the committed value by the next deploy, un-flipping production ' +
+            'back to the test guild after task 0179. Delete the ' +
+            '`ssm.StringParameter` and seed the value by hand (runbook §2a).',
+        );
+      }
+    }
   }
 }
 

@@ -146,14 +146,33 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # PINNED, and the pin is the whole point — see the cargo-lambda step.
+      #
+      # rustc 1.98.0 (2026-08-18) began passing `-Wl,--fix-cortex-a53-843419`
+      # on aarch64-unknown-linux-gnu. Zig's linker rejects it outright
+      # ("error: unsupported linker arg"), so every aarch64 link fails and the
+      # `Build Lambda bootstraps` step dies on the first crate that links —
+      # `crc-fast`, pulled in by aws-smithy-checksums. Nothing in this repo
+      # changed: PR #227 passed on 1.97.1 and PR #230 failed on 1.98.0 with the
+      # identical cargo-lambda 1.9.1 / zig 0.16.0 pair.
+      #
+      # cargo-zigbuild filters the arg since v0.23.0 (rust-cross/cargo-zigbuild
+      # #451, fixed by #452), but cargo-lambda 1.9.1 still vendors 0.20.1, so
+      # the fix is not reachable by upgrading cargo-lambda today. Unpin BOTH
+      # lines together once a cargo-lambda release carries zigbuild >= 0.23.
       - uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: 1.97.1
           components: clippy, rustfmt
 
       - uses: Swatinem/rust-cache@v2
 
+      # Pinned alongside the toolchain above: `pip3 install cargo-lambda`
+      # resolves to whatever is newest at run time, which is how the vendored
+      # cargo-zigbuild version — the half of this pair that actually carries
+      # the fix — could change under a green build without a commit.
       - name: Install cargo-lambda
-        run: pip3 install cargo-lambda
+        run: pip3 install cargo-lambda==1.9.1
 
       - run: cargo fmt --all -- --check
       - run: cargo check --workspace
