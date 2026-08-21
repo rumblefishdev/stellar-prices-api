@@ -135,6 +135,28 @@ history:
       every measurement so far filtered query_log on INSERT INTO, so it has never
       been looked at. Branch perf/0111_partition-bounded-enrichment-passes;
       prepare-only, nothing deployed.
+  - date: 2026-08-21
+    status: active
+    who: okarcz
+    note: >
+      Built and merged (PR #242, 7eff9c3) but NOT deployed. Pre-deploy
+      re-measurement falsified this file's own "the live window keeps up fine
+      (2.81K unpriced)": that figure is XLM-quoted only, conflated with the
+      all-quotes era figure of 10.44M of 17.05M (61.2%). Measured over 48h in
+      4h buckets, the unpriced share is FLAT at 50-58% with no age-decay — a
+      bucket 44h old looks like one 4h old, so enrichment never returns to
+      those rows. ~45% of the 26,900 rolling-4h total is the permanent
+      exotic-quote floor (long tail, no leg over 17%), but ~2,370/4h are
+      USDC(3)- and XLM(4)-quoted, i.e. should-be-priceable — ~14,200/day. Also
+      established that EnrichmentBacklogAlarm reads OK on NO DATA
+      (treatMissingData NOT_BREACHING) because pass_metrics only publishes
+      after pass.run() returns and the Lambda is killed mid-pass — the 0204
+      pattern. Net effect: the chosen design is unchanged, Phase 1's payoff is
+      larger than recorded (it un-starves the live window, not just speeds it),
+      and AC 6's "floor" is ~27K not 2.81K. Deploy deliberately deferred ~2
+      days (costs ~$0.29, 3.4% of the live backlog, 1.1% of the historical one)
+      pending an explanation for the unexplained RollupFreshnessProbeFunction
+      code-asset replacement in the cdk diff.
 ---
 
 > **Why this is queued ahead of its own cost case:** the perf argument for 0111
@@ -396,6 +418,125 @@ pre-fix — again, because the pass now gets further before dying. Against
 finish. Phase 1 alone sends this to **zero** until the Phase 2 sweep lands,
 which is why the two should land together.
 
+## ⚠️ Re-measured 2026-08-21 evening — the live window does NOT "keep up fine"
+
+Prompted by a pre-deploy question ("is it safe to leave this undeployed for two
+days?"). The answer is yes, but reaching it falsified a claim this file makes
+twice.
+
+### The conflation
+
+This file states the live window has **2.81 K** unpriced and "keeps up fine".
+That figure is **XLM-quoted only** — it comes from the by-year table under *The
+backlog is XLM*, whose scope is `quote_asset_id = 4`. The all-quotes figure sits
+in the era table one section earlier: **10.44 M of 17.05 M (61.2%)**. The two
+were read as though they shared a scope. They do not, and the era figure is the
+one that matches the live table.
+
+### The measurement
+
+`price_ohlcv_1m FINAL`, 48 h to 2026-08-21 ~20:45 UTC, `timestamp`-bounded so it
+prunes to the current partition — sub-second, no full scan:
+
+| bucket (UTC) | candidates | unpriced | share |
+|---|---|---|---|
+| 08-19 20:00 | 60,855 | 35,521 | **58.4%** |
+| 08-20 00:00 | 49,629 | 25,237 | 50.9% |
+| 08-20 04:00 | 28,911 | 13,692 | 47.4% |
+| 08-20 08:00 | 87,843 | 44,047 | 50.1% |
+| 08-20 12:00 | 71,176 | 41,785 | 58.7% |
+| 08-20 16:00 | 101,096 | 58,455 | 57.8% |
+| 08-20 20:00 | 41,703 | 23,472 | 56.3% |
+| 08-21 00:00 | 48,588 | 24,360 | 50.1% |
+| 08-21 04:00 | 39,853 | 19,694 | 49.4% |
+| 08-21 08:00 | 73,175 | 39,566 | 54.1% |
+| 08-21 12:00 | 39,311 | 20,134 | 51.2% |
+| 08-21 16:00 | 47,675 | 26,994 | 56.6% |
+| 08-21 20:00 | 9,010 | 6,882 | _(partial bucket)_ |
+
+**There is no decay.** A bucket 44 h old — 44 hourly passes' worth of chances —
+carries the same unpriced share as one 4 h old, and is in fact the highest of the
+complete buckets. Enrichment does not come back for these rows. Age-decay is the
+discriminator: lag drains, a floor does not.
+
+### Which legs, rolling 4 h (26,900 total)
+
+| `quote_asset_id` | unpriced |
+|---|---|
+| 10 (yXLM) | 4,518 |
+| **4 (XLM)** | **1,632** |
+| 32 (yUSDC) | 1,631 |
+| 40 (XRP) | 1,506 |
+| 28 | 1,372 |
+| 11 | 1,260 |
+| 1221 | 829 |
+| **3 (USDC)** | **738** |
+| 201223 | 723 |
+| 14 (SHX) | 673 |
+
+Top 10 = 14,882, so **~45% sits in a tail below rank 10** and no single leg
+exceeds 17%. That long tail is the permanent **exotic-quote floor** (quote ∉
+{USDC, USDT, XLM}, no oracle) that [[0056]] redesigned the stall alarm to
+exclude. It never drains by design, and it is what makes the aggregate decay
+above look flat — it masks whatever the priceable legs do. Most of the 26,900 is
+expected and is not this task's to fix.
+
+⚠️ **But two legs are not floor.** `3` (USDC) and `4` (XLM) are the pivot
+reference pair itself (`asset_id = 4 AND quote_asset_id = 3`). USDC-quoted
+candles are peg-tier arithmetic; XLM-quoted ones are precisely what `pivot_sql`
+exists to price. Together ~2,370 per 4 h ≈ **14,200/day of should-be-priceable
+rows**. Note 1,632 XLM-quoted unpriced in *four hours* against this file's
+"2,810 for all of 2026" — those two cannot both be true.
+
+⏳ **Not yet discriminated** — the one query not run: whether legs 3 and 4 decay
+with age once the floor is stripped out. Flat across 44 h ⇒ priceable live rows
+are being starved by the 300 s kill. Decaying ⇒ ordinary lag, and only the floor
+remains. The identities of 10/28/11/1221/201223 are also unconfirmed — read off
+this file rather than `prices.assets`, and [[0139]] warns against trusting an
+`asset_id`.
+
+### 🔴 The stall alarm reads OK because nothing is measured
+
+`pass_metrics` publishes only *after* `pass.run()` returns (`main.rs:275`), and
+the Lambda is killed mid-pass — so `EnrichmentRowsEnriched` and
+`EnrichmentRowsRemainingRecent` have **no datapoints at all**.
+`EnrichmentBacklogAlarm` is `treatMissingData: NOT_BREACHING`
+(`observability-stack.ts:381`), so no data reads as **OK**. Same pattern as the
+seven alarms in [[0204]]. This sharpens the §5-metrics blind spot noted above
+from "the metrics are missing" to "the alarm that should catch this is green
+*because* they are missing".
+
+Interim manual check while undeployed — baseline **~27 K**, investigate above
+~50 K:
+
+```sql
+SELECT count() AS recent_unpriced
+FROM prices.price_ohlcv_1m FINAL
+WHERE volume_quote_usd = 0 AND volume_quote > 0
+  AND timestamp >= now() - INTERVAL 4 HOUR
+```
+
+### What this changes for the fix
+
+**Phase 1's payoff is larger than this file claims.** It is framed purely as
+"stop dragging the live window through a 736 M-row scan". But post-fix the live
+pass reaches its full `max_batches` × `batch_size` = 200 K rows/pass ≈
+**4.8 M/day**, against a live inflow of ~180 K/day unpriced. That clears the
+inflow with headroom *and* eats into the 10.44 M live-window backlog. The live
+window is not merely being carried inefficiently — it is being **starved**, and
+Phase 1 fixes that too.
+
+Nothing here changes the chosen design or the phase ordering. It raises the
+payoff and adds a second thing to verify after deploy.
+
+### Deploy timing
+
+Two days undeployed costs ~$0.29 of Lambda, ~360 K live rows (**3.4%** of the
+10.44 M live backlog) and ~6 M historical rows (**1.1%** of 556.78 M). Judged
+acceptable against the unexplained `RollupFreshnessProbeFunction` code-asset
+replacement in the `cdk diff`: deploying an unexplained artifact into the stack
+that also carries `CleanupRule` ([[0200]]) is the larger risk.
+
 ## What this does to the options
 
 **Option 1 wins, for a better reason than the one recorded above.** The live
@@ -403,6 +544,12 @@ window is 17.05M rows and keeps up fine (2.81K unpriced). It is being dragged
 through a 736M-row scan purely to serve a historical drain. Splitting the live
 pass from a separate bounded historical sweep is the whole fix; partition
 pruning is the mechanism, not the argument.
+
+⚠️ **"keeps up fine (2.81K unpriced)" is FALSE** — corrected in the 2026-08-21
+evening re-measurement above. 2.81K is the XLM-only figure; all quote legs give
+**10.44M of 17.05M (61.2%)**, with no age-decay over 48 h. The conclusion here
+survives and strengthens: the live window is not merely carried inefficiently,
+it is starved.
 
 ## Root cause
 
@@ -523,8 +670,12 @@ One unbounded pass serves two populations with opposite needs:
 
 | | rows | unpriced | needs |
 |---|---|---|---|
-| live window (`202607+`) | 17.05 M | 2.81 K | **freshness**, keeps up fine |
+| live window (`202607+`) | 17.05 M | ~~2.81 K~~ **10.44 M** | **freshness**, ⚠️ **starved** |
 | historical (`< 202403`) | 689.64 M | 646.25 M | **throughput** |
+
+<sub>*The 2.81 K was XLM-quoted only and is corrected above (2026-08-21 evening).
+The live window is starved, not keeping up — which does not change the split,
+only how much Phase 1 is worth.*</sub>
 
 The live window is dragged through a 736 M-row scan purely to serve the drain.
 Splitting them is the whole fix.
@@ -689,6 +840,14 @@ this lands.
       `EnrichmentRowsRemainingRecent` stays at its floor. The sweep is
       best-effort and time-budgeted specifically so it can never regress the
       live pass; this is the check that the budgeting works.
+
+      🔴 **"its floor" is not 2.81 K.** Measured 2026-08-21 evening: **~27 K per
+      rolling 4 h**, of which roughly half is the permanent exotic-quote floor
+      and ~2,370 are should-be-priceable USDC/XLM legs. Judge this AC against
+      ~27 K falling toward the exotic-only residual (~12-15 K), never against
+      zero. And the metric itself is currently **unpublished** — the pass is
+      killed before `pass_metrics` runs — so first prove it has datapoints at
+      all, then judge its value.
 
       ⚠️ Note `EnrichmentRowsRemainingAtVolumeZero` changes meaning under a
       bounded pass — it becomes window-scoped and will drop from ~656M to the
