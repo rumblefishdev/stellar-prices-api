@@ -1,6 +1,6 @@
 ---
 id: "0215"
-title: "The deployed enrichment Lambda emits one pivot statement where the source emits two — the USDT pivot is never sent, and the artifact does not match any commit"
+title: "Every enrichment invocation fails on the XLM pivot with BadResponse('') — the USDT pivot is never reached, and the drain only advances because ClickHouse finishes after the client gives up"
 type: BUG
 status: backlog
 related_adr: []
@@ -31,21 +31,37 @@ history:
       `result_rows`. Feature flags were checked and are not involved: nothing on
       the pivot path is `#[cfg]`-gated beyond `#[cfg(test)]`. Next step is a
       LOCAL reproduction, not more prod archaeology.
+  - date: 2026-08-21
+    status: backlog
+    who: okarcz
+    note: >
+      MECHANISM FOUND in CloudWatch, after THREE falsified hypotheses (all
+      recorded in the body — do not re-run them). The pass fails on EVERY
+      invocation with `Clickhouse(BadResponse(""))`; the XLM pivot's client gives
+      up 18 s before ClickHouse finishes the same statement, `?` aborts, and the
+      USDT pivot is never reached. Not the Lambda timeout — zero `Task timed out`
+      in 48 h. The XLM pivot is the only statement over ~30 s, so this probably
+      collapses into 0111; measure the actual timeout (client vs the Caddy mTLS
+      proxy) before deciding. Also re-priced 0214: its latched alarm was hiding a
+      continuous failure, and it is the only signal that could have caught this.
 ---
 
-# The deployed Lambda emits one pivot where the source emits two
+# Every invocation fails on the XLM pivot, so the USDT pivot is never reached
 
 ## Summary
 
-`prices.price_ohlcv_1m` has no USDT-priced rows because the deployed enrichment
-Lambda **never sends the statement that would write them** — not once on the
-schedule, with no error and no `QueryStart`. It is not the backlog [[0209]]
-blamed, and it is not gated on [[0111]].
+**The enrichment pass fails on EVERY invocation** with
+`Clickhouse(BadResponse(""))` — three per hour, continuously, not
+intermittently. `enrich_peg_pivot_step` runs peg → XLM pivot → USDT pivot, each
+`execute().await?`. The XLM pivot errors, `?` propagates, and the loop never
+reaches the second reference. That is the whole reason
+`prices.price_ohlcv_1m` has no USDT-priced rows.
 
-⚠️ The mechanism is NOT yet established. Four measured facts contradict the
-source (see Root cause); the leading explanation is an artifact built from an
-uncommitted tree, but that is **inference, not measurement**. Reproduce locally
-before acting.
+⚠️ **Every signal looked healthy because ClickHouse completes the statement
+anyway.** The client abandons the request; CH finishes it server-side and logs
+`QueryFinish`; the 10,000 rows land. So `written_rows`, `query_log` and the
+rollup alarms all read normal while the pass has not completed successfully in
+at least two days.
 
 ## Evidence (prod `system.query_log`, measured 2026-08-21)
 
@@ -141,31 +157,60 @@ cargo lambda build --release --arm64 --features lambda "${args[@]}"
 
 So the deployed binary IS this source, correctly built. [[0141]] is not involved.
 
-## ⚠️ The mechanism is STILL UNKNOWN — do not start a fix
+## ✅ MECHANISM FOUND 2026-08-21 — CloudWatch, after three falsified hypotheses
 
-Three hypotheses falsified. What remains measured and unexplained:
+`/aws/lambda/prices-production-enrichment`, 48 h window:
 
-| # | measured | source implies |
+```
+09:27:52   XLM pivot   QueryStart                  (ClickHouse)
+09:28:22   ERROR  Clickhouse(BadResponse(""))      (Lambda — client gives up)
+09:28:40   XLM pivot   QueryFinish                 (ClickHouse completes anyway)
+```
+
+The client abandons the request **18 s before** ClickHouse finishes it. Repeats
+every hour, every invocation, across the whole window.
+
+**The three errors per hour share one `requestId`** — Lambda async-invoke retry
+(1 + 2). So it is not three batches per invocation; it is **three invocation
+attempts, each dying after one peg + one XLM pivot**. The statement counts
+confirm it exactly: peg 72/day, XLM pivot 72/day, oracle 192/day.
+
+⛔ **NOT the Lambda timeout.** Zero `Task timed out` in 48 h. `Timeout` is 300 s,
+`MemorySize` 512 MB.
+
+### Likely cause — a 30-45 s read/idle timeout, hit by one statement only
+
+| statement | avg | survives? |
 |---|---|---|
-| 1 | only `CAST(4 …)` sent — no `QueryStart`, no exception, 2 days | two statements per step |
-| 2 | peg emits `IN (3)` | binary is post-0172 |
-| 3 | resolver returns `result_rows = 3` | `pivot_ids() == [xlm, usdt]` |
-| 4 | deployed binary == current source, byte-identical | source tests are green |
+| peg | 14.4 s | ✅ |
+| oracle | 26.4 s | ✅ |
+| **XLM pivot** | **45.6 s** | ❌ |
 
-### The leading unfalsified candidate
+The XLM pivot is the only statement over ~30 s, and it is the only one that
+fails. An `INSERT … SELECT` sends no bytes while it runs, so a proxy **idle**
+timeout fits well. Two candidates, both unmeasured:
 
-`enrich_peg_pivot_step` issues peg → XLM pivot → USDT pivot, each `execute().await?`.
-**XLM is first in `pivot_ids()` and averages 45.6 s.** If its `execute()` returns
-`Err` *client-side* — an HTTP read timeout after ClickHouse has already completed
-and logged `QueryFinish` — the `?` propagates and the USDT pivot is never
-reached. That reproduces every row of the table above without contradicting any
-of them, and it predicts a specific, checkable signature.
+1. the `clickhouse` crate client's HTTP timeout, and
+2. the **Caddy mTLS reverse proxy** in front of ClickHouse on the Hetzner host.
 
-**Check before building anything:** the enrichment Lambda's CloudWatch logs for
-the pass window (client-side timeouts / `ChEnrichError` after a successful XLM
-pivot), and the configured HTTP timeout on the ClickHouse client against the
-45.6 s XLM pivot duration. If confirmed, the fix is the timeout and the statement
-ORDER — not the reference resolution, and not the artifact.
+⚠️ `BadResponse("")` is a known-opaque driver error in this codebase — see the
+`FreezeDenied` doc comment in `ch_enrich.rs`, where the same empty-body symptom
+was a missing GRANT, diagnosable only by replaying the statement over curl.
+**Do not assume "timeout" without measuring it**; replay the XLM pivot over curl
+and watch where it dies.
+
+### ⚠️ This probably collapses into [[0111]]
+
+If the cause is duration, the fix is not here. Bound the scan
+([[0111]] option 1), the XLM pivot drops from 45.6 s to ~1 s, the pass stops
+failing, and the USDT pivot is reached for the first time. **Measure the timeout
+before choosing** — if it is a proxy setting the two are independent, and if it
+is duration then this task is a symptom and should be closed into 0111.
+
+### Why nobody saw it
+
+[[0214]] — the enrichment errors alarm latched 24 days ago and never
+re-notified. A continuous, every-invocation failure produced no page.
 
 ## Implementation
 

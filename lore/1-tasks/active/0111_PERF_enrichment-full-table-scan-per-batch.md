@@ -290,14 +290,28 @@ same limit, so they are not limit-bound and are essentially caught up.
 > measured the candidate set rising 2,682 in under an hour, ~64K/day, which
 > pushes it past 850).
 
-⚠️ **The scan is not merely slow — it throttles the drain to 15% of the rate the
-deployed config already asks for.** The pass runs hourly at `max_batches = 20`,
-so 480 batches/day are budgeted; it achieves **72**. Each batch costs ~90 s of
-statements (45.6 s pivot + 26.4 s oracle + 14.4 s peg, plus count scans) against
-a 300 s timeout, so ~3 batches land per invocation instead of 20. Bounding the
-scan so a batch costs ~1 s (the drained-state figure) lets the **unchanged**
-Lambda reach its configured 20 → ~4.8M/day → **~116 days**. That is the payoff
-to cost option 1 against, and it needs no config change.
+⚠️ **The scan is not merely slow — it makes the pass FAIL, every single time.**
+The pass runs hourly at `max_batches = 20`, so 480 batches/day are budgeted; it
+achieves **72**. The reason is not the 300 s timeout (there is not one
+`Task timed out` in 48 h): **the XLM pivot errors with
+`Clickhouse(BadResponse(""))` on every invocation**, and `?` aborts the pass.
+The 72/day is 3 invocation attempts/hour — one EventBridge trigger plus two
+Lambda async retries — each dying after a single peg + XLM pivot. See [[0215]],
+which carries the CloudWatch timeline.
+
+The XLM pivot is the **only** statement over ~30 s (45.6 s, against peg 14.4 s
+and oracle 26.4 s, both of which survive), so a duration-linked read/idle
+timeout would explain why exactly this one dies. If that holds, bounding the
+scan so a batch costs ~1 s (the drained-state figure) does more than speed the
+drain up — it stops the pass failing at all, lets the **unchanged** Lambda reach
+its configured 20 batches → ~4.8M/day → **~116 days**, and lets the USDT pivot
+run for the first time. No config change needed.
+
+🔴 **Nothing about this was visible from the data.** ClickHouse completes the
+abandoned statement server-side and logs `QueryFinish`, so the 10,000 rows land
+and `written_rows`, `query_log` and the rollup alarms all read normal while the
+pass has not completed successfully in at least two days. The enrichment errors
+alarm that should have caught it is latched — [[0214]].
 
 ⚠️ Corrects [[0209]]: `pivot_written = 0` is false for XLM, which writes ~700K
 rows/day. It holds only for USDT — see [[0215]].
