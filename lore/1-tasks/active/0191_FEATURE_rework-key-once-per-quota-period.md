@@ -2,7 +2,7 @@
 id: "0191"
 title: "Replace my key — rework, capped at once per quota period"
 type: FEATURE
-status: backlog
+status: active
 related_adr: ["0010"]
 related_tasks: ["0183", "0157", "0160", "0180", "0187", "0189", "0190", "0192", "0193"]
 tags: [layer-backend, priority-medium, effort-medium, milestone-M3, epic-self-service-onboarding, api-gateway, usage-plan, slice-8]
@@ -12,13 +12,24 @@ links:
   - "../archive/0160_FEATURE_onboarding-backend-endpoints.md"
   - "../archive/0180_RESEARCH_settle-undocumented-discord-and-aws-behaviours/notes/R-apigw-namequery-quota-and-disable.md"
 history:
-  - date: 2026-08-13
+  - date: "2026-08-13"
     status: backlog
     who: akot
     note: >
       Eighth slice, the last of [[0160]]'s four operations, and the new home of
       [[0180]] item 7 (the quota rollover instant). Placed after the dashboard
       because a user who cannot see their key does not need to replace it.
+  - date: "2026-08-21"
+    status: active
+    who: akot
+    note: >
+      Activated on `develop` with [[0188]] and [[0189]] both merged (#227,
+      #230), so the reconciler, the read-only `/key` route, the usage cache
+      and `eligibility::decide` are all in place to build on. Step 0's DAY
+      rollover measurement runs alongside the implementation; the MONTH
+      confirmation cannot happen before 1 September 2026 and is recorded as
+      an open limit, not assumed.
+
 ---
 
 # Rework — a new key, once a period
