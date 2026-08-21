@@ -406,9 +406,9 @@ any behaviour until the flag moves.
 
 ### The IAM, and the three limits that come with it
 
-CDK grants the api-handler role six control-plane actions and nothing else
-(task 0191's rework adds no seventh — see below):
-`GET`/`POST` on `/apikeys`, `GET`/`DELETE` on `/apikeys/*`, `POST` on
+CDK grants the api-handler role seven control-plane actions and nothing else:
+`GET`/`POST` on `/apikeys`, `GET`/`PATCH`/`DELETE` on `/apikeys/*` (`PATCH`
+is task 0191's revoke — see below), `POST` on
 `/usageplans/{the free plan}/keys`, and — task 0188 — `GET` on
 `/usageplans/{the free plan}/usage` (`GetUsage`, the dashboard's usage read).
 The last two are declared in `api-gateway-stack.ts` rather than
@@ -436,30 +436,32 @@ three are written out in full in `compute-stack.ts`; the short version:
 
 Task 0194 audits all three.
 
-### Replacing a key (task 0191) — the same grants, one ordering to know
+### Replacing a key (task 0191) — one new grant, and a wait that is the point
 
-The rework — "Replace my key" on the dashboard — needs **no new grant and no
-new parameter**: it is `GetApiKeys` + `CreateApiKey` + `CreateUsagePlanKey` +
-`DeleteApiKey` + `GetApiKey`, all already granted above, behind the same
-`action=…` OAuth round-trip the issue uses (membership re-proved against the
-`discord-guild-id` parameter; the account-age parameter is deliberately not
-read). It makes **no `UpdateUsagePlan` and no `UpdateUsage` call** — both
-would be extra grants, and `UpdateUsagePlan` is throttled to one call per 20 s
-per account, which a per-visitor action must never sit behind.
+"Replace my key" on the dashboard is a **revocation**: `UpdateApiKey
+(enabled=false)` on the caller's key, session-authorized, no Discord
+round-trip (a leaked key has to be killable while Discord is down). Nothing
+is issued: the replacement is an ordinary issue round-trip, and the issue path
+refuses it until the quota period of the revocation has rolled — the 1st of
+the next month, 00:00 UTC, **our** rule. That wait is deliberate: quota is
+scoped to `(usagePlanId, apiKeyId)`, so a replacement issued on the spot would
+be a clean counter and "replace my key" would be the button people press on
+the 20th of a heavy month.
 
-The ordering inside the swap is the operational fact: **the new key is created
-and attached before the old one is deleted**, so a visitor is never keyless,
-and a failure at any step leaves them holding the key they had (a delete that
-fails rolls the replacement back). What the data plane then does is the
-ordinary consequence — a deleted key answers `403 Forbidden`, byte-identical to
-no key at all (0180 item 8) — and there is the usual tens-of-seconds
-propagation before the new key is accepted on `/v1/`.
+**The seventh grant** is `apigateway:PATCH` on `/apikeys/*`
+(`PortalReadDisableAndDeleteOwnApiKeys` in `compute-stack.ts`). Disable rather
+than delete, because the disabled key _is_ the record of the revocation: its
+`lastUpdatedDate` is what refuses the re-issue, and there is no registry
+(task 0190) to hold that fact otherwise. The handler sends exactly one patch
+operation, never re-enables a key, and `PATCH /apikeys/*` cannot reach a plan
+or a stage. No `UpdateUsagePlan`, no `UpdateUsage`.
 
-One rework per quota period, decided from the surviving key's `createdDate`
-against the **calendar month, UTC** — our rule, not AWS's (the `DAY`-proxy
-measurement is recorded in task 0191; the first real `MONTH` rollover this can
-be checked against is 1 September 2026). A refused rework says when the next
-one is available; nothing to operate.
+Operationally: a disabled key answers `403 Forbidden`, byte-identical to no
+key at all, after the usual tens of seconds of propagation (0180 item 8); its
+counter is preserved, so the dashboard keeps reporting it honestly. Once the
+period rolls, the next issue deletes the disabled key and creates the new one.
+A revoked user who asks for a key early lands on `?issue=capped` with the
+date; nothing to operate.
 
 ### Verifying it, and the warning that comes with that
 

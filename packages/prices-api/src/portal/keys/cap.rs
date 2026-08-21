@@ -1,40 +1,43 @@
-//! The rework cap: one new key per quota period (task 0191).
+//! The re-issue cap: a revoked key is replaced only in the next quota period
+//! (task 0191).
 //!
-//! **The rule.** A key may be replaced only when it was created **before** the
-//! current quota period began — the 1st of the calendar month, 00:00 UTC,
-//! under [`Period`]'s rule. A rework deletes the old key and creates a new
-//! one, so the surviving key's `createdDate` *is* the instant of the last
-//! rework; no stored timestamp is needed, which is the fact that let task 0190
-//! cancel the registry table.
+//! **The rule.** "Replace my key" deactivates the current key **immediately**
+//! and issues nothing. A new key can be issued only once the quota period in
+//! which the revocation happened has rolled — the 1st of the next calendar
+//! month, 00:00 UTC, under [`Period`]'s rule. A leak on the 3rd is dead on the
+//! 3rd; the replacement comes on the 1st.
 //!
-//! **Why creation time, not a separate "last rotated" stamp.** Quota is scoped
-//! to `(usagePlanId, apiKeyId)`, so a new key is a clean counter. If only
-//! reworks were capped, a user could take a key on the 1st, spend the whole
-//! quota, and rework on the 2nd into a fresh 100 000 — the exact loophole the
-//! cap exists to close. Any key acquired inside the current period was created
-//! inside it, so it can never be reworked inside it: one key per period, one
-//! quota.
+//! **Why the wait is the point, not a cost to engineer away.** Quota is scoped
+//! to `(usagePlanId, apiKeyId)`, so a new key is a clean counter. If a revoke
+//! handed out a replacement, "replace my key" would be the button people press
+//! on the 20th of a heavy month and the monthly quota would be decorative. The
+//! wait is the same cost the owner would pay by simply not using the leaked
+//! key, minus the risk of somebody else using it.
 //!
-//! **Worked example** (the 2026-08-07 meeting's): a key reworked on 3 August
-//! is refused until 1 September 00:00 UTC, and allowed from that instant. The
-//! refusal carries the date, because the wait is weeks and "try again later"
-//! would be a lie by omission.
+//! **What is compared.** The revoked key stays in the account, disabled; its
+//! `lastUpdatedDate` is the revocation instant, and a re-issue is allowed only
+//! when that instant falls strictly **before** the current period began. There
+//! is no stored timestamp because API Gateway already keeps this one — which
+//! is why task 0190's registry stayed cancelled.
+//!
+//! **Worked example:** revoked on 3 August → "Get my API key" is refused until
+//! 1 September 00:00 UTC, naming the date, and allowed from that instant.
 //!
 //! Pure, so the whole boundary table is decidable by a test with dates typed
 //! by hand. No clock is read here: the caller supplies the period.
 
 use super::super::period::Period;
 
-/// Whether a key may be replaced now.
+/// Whether a key may be re-issued now.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Cap {
-    /// The key predates the current period: a rework is allowed.
+    /// The revocation predates the current period: a new key may be issued.
     Allowed,
-    /// The key was created inside the current period (or cannot be dated —
-    /// see [`decide`]). Refused until the period rolls.
+    /// Revoked inside the current period (or undatable — see [`decide`]).
+    /// Refused until the period rolls.
     Capped {
-        /// The instant the next rework becomes available, RFC 3339 — the
-        /// `next_eligible_at` in the `409` envelope.
+        /// The instant a new key becomes available, RFC 3339 — the
+        /// `next_eligible_at` in the envelopes and the revoke answer.
         next_eligible_at: String,
         /// The same instant as a bare `YYYY-MM-DD`, for the callback's landing
         /// query: digits and dashes only, so no request-derived byte can reach
@@ -43,31 +46,32 @@ pub enum Cap {
     },
 }
 
-/// Decide the cap for a key created at `created_at` (Unix seconds, as API
-/// Gateway reports `createdDate`) against `period`.
+/// Decide the cap for a key revoked at `revoked_at` (Unix seconds — the
+/// disabled key's `lastUpdatedDate`) against `period`.
 ///
-/// Strictly **before** the period start: a key created at exactly
-/// 00:00:00 on the 1st was created inside the period and is capped until the
-/// next one — the boundary instant belongs to the period it begins.
+/// Strictly **before** the period start: a revocation at exactly 00:00:00 on
+/// the 1st happened inside the period that begins then, and the replacement
+/// waits for the next one — the boundary instant belongs to the period it
+/// begins.
 ///
 /// `None` — a key AWS did not date — is **capped**, not allowed. The service
-/// always sends `createdDate`, so this is a shape that should never occur;
-/// when it does, the cap cannot prove the key predates the period, and the
-/// failure that matters is a quota laundered through a rework, not a rework
-/// delayed to the 1st. Logged, because a deployment where it fires has a
-/// control plane answering in a shape nobody has seen.
-pub fn decide(created_at: Option<u64>, period: &Period) -> Cap {
+/// always sends `lastUpdatedDate`, so this is a shape that should never occur;
+/// when it does, the cap cannot prove the revocation predates the period, and
+/// the failure that matters is a quota laundered through a revoke-and-reissue,
+/// not a replacement delayed to the 1st. Logged, because a deployment where it
+/// fires has a control plane answering in a shape nobody has seen.
+pub fn decide(revoked_at: Option<u64>, period: &Period) -> Cap {
     let capped = || Cap::Capped {
         next_eligible_at: period.resets_at(),
         next_eligible_date: period.next_start_ymd(),
     };
-    match created_at {
-        Some(created_at) if created_at < period.start_secs() => Cap::Allowed,
+    match revoked_at {
+        Some(revoked_at) if revoked_at < period.start_secs() => Cap::Allowed,
         Some(_) => capped(),
         None => {
             tracing::warn!(
-                "the current key carries no createdDate; refusing the rework rather than \
-                 assuming it predates the period"
+                "the revoked key carries no lastUpdatedDate; refusing the re-issue rather than \
+                 assuming the revocation predates the period"
             );
             capped()
         }
@@ -93,16 +97,16 @@ mod tests {
             .timestamp() as u64
     }
 
-    /// The meeting's worked example, both halves: reworked on 3 August,
-    /// refused for the rest of August naming 1 September — and allowed from
-    /// the first second of 1 September.
+    /// The worked example, both halves: revoked on 3 August, refused for the
+    /// rest of August naming 1 September — and allowed from the first second
+    /// of 1 September.
     #[test]
-    fn reworked_on_3_august_refuses_until_1_september_and_succeeds_on_it() {
-        let reworked = at(2026, 8, 3, 14, 30, 0);
+    fn revoked_on_3_august_refuses_until_1_september_and_succeeds_on_it() {
+        let revoked = at(2026, 8, 3, 14, 30, 0);
 
         for day in [3, 4, 20, 31] {
             assert_eq!(
-                decide(Some(reworked), &period(2026, 8, day)),
+                decide(Some(revoked), &period(2026, 8, day)),
                 Cap::Capped {
                     next_eligible_at: "2026-09-01T00:00:00Z".into(),
                     next_eligible_date: "2026-09-01".into(),
@@ -111,26 +115,22 @@ mod tests {
             );
         }
 
-        assert_eq!(decide(Some(reworked), &period(2026, 9, 1)), Cap::Allowed);
-        assert_eq!(decide(Some(reworked), &period(2026, 9, 30)), Cap::Allowed);
+        assert_eq!(decide(Some(revoked), &period(2026, 9, 1)), Cap::Allowed);
+        assert_eq!(decide(Some(revoked), &period(2026, 9, 30)), Cap::Allowed);
     }
 
-    /// The cap is about creation, not about reworks: a key *issued* inside
-    /// the period is just as capped as one reworked inside it. This is the
-    /// loophole the fallback closes — take a key on the 1st, drain it, rework
-    /// on the 2nd into a clean counter.
+    /// A key issued AND revoked on the same day is capped like any other: the
+    /// cap is about the revocation instant, so a fresh key revoked at once
+    /// cannot be turned into a fresh counter.
     #[test]
-    fn a_key_issued_inside_the_period_cannot_be_reworked_inside_it() {
-        let issued_on_the_1st = at(2026, 8, 1, 9, 0, 0);
+    fn a_key_revoked_minutes_after_issue_is_capped_too() {
         assert!(matches!(
-            decide(Some(issued_on_the_1st), &period(2026, 8, 2)),
+            decide(Some(at(2026, 8, 21, 12, 0, 0)), &period(2026, 8, 21)),
             Cap::Capped { .. }
         ));
     }
 
-    /// The boundary instant belongs to the period it begins: a key created at
-    /// exactly 00:00:00 on the 1st is inside the period; one second earlier
-    /// is in the previous one and may be reworked.
+    /// The boundary instant belongs to the period it begins.
     #[test]
     fn the_boundary_instant_is_inside_the_new_period() {
         let midnight = at(2026, 8, 1, 0, 0, 0);
@@ -156,26 +156,23 @@ mod tests {
         );
     }
 
-    /// A key AWS did not date cannot be shown to predate the period, so it
-    /// is refused — the failure that matters is the laundered quota, not the
-    /// delayed rework.
+    /// A revocation AWS did not date cannot be shown to predate the period.
     #[test]
-    fn an_undated_key_is_capped_not_waved_through() {
+    fn an_undated_revocation_is_capped_not_waved_through() {
         assert!(matches!(
             decide(None, &period(2026, 8, 15)),
             Cap::Capped { .. }
         ));
     }
 
-    /// The landing-query form is digits and dashes only, by construction —
-    /// it reaches a `Location` header.
+    /// The landing-query form is digits and dashes only, by construction.
     #[test]
     fn the_date_form_is_url_safe_by_construction() {
         let Cap::Capped {
             next_eligible_date, ..
         } = decide(Some(u64::MAX), &period(2026, 8, 15))
         else {
-            panic!("a future key is capped");
+            panic!("a future revocation is capped");
         };
         assert!(
             next_eligible_date

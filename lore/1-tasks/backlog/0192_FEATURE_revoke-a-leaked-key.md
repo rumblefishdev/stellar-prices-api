@@ -33,6 +33,13 @@ history:
 
 # Revoke a leaked key
 
+> **Absorbed by [[0191]] on 2026-08-21.** "Replace my key" became exactly this
+> task's rule — `UpdateApiKey(enabled=false)` now, nothing issued, re-issue from
+> the next period — so there is no separate revoke to build. The one difference
+> from the text below: **disable, not delete**, because the disabled key's
+> `lastUpdatedDate` is the revocation record the cap reads. To be closed as
+> superseded when 0191 completes.
+
 ## Summary
 
 **Story:** *as a developer whose key leaked, I can kill it immediately — knowing

@@ -1,28 +1,25 @@
-//! Replacing a key — the rework round-trip and its pre-check, over HTTP,
-//! end to end (task 0191).
+//! Replacing a key — revoke now, re-issue next period — over HTTP, end to end
+//! (task 0191).
 //!
-//! Every test drives the real router through the real flow, the way
-//! `tests/portal_issue.rs` does for issuance: `GET /auth/login?action=rework`
-//! mints the signed state pair, the callback exchanges the code against a
-//! **mock Discord**, asks it for the guild membership — and **not** the
-//! account age — decides the once-per-period cap from the current key's
-//! `createdDate`, and only then swaps the key against a **mock control
-//! plane**. Both mocks record what they were asked, so the assertions are
-//! about what the flow *did*: which calls happened, in which order, and how
-//! many keys were created and deleted.
+//! "Replace my key" is a **revocation**: `POST /key/rework` disables the
+//! caller's key immediately and issues nothing. The replacement is an ordinary
+//! issue round-trip (`tests/portal_issue.rs`'s flow, driven here through the
+//! same mock Discord), and the issue path refuses it until the quota period in
+//! which the revocation happened has rolled — the re-issue cap, decided from
+//! the disabled key's `lastUpdatedDate`.
 //!
 //! Three properties are the spine of this file:
 //!
-//! - **Never keyless.** The new key is created and attached before the old
-//!   one is deleted, asserted on the mock's write *sequence* rather than on
-//!   the end state; and every failure leaves the visitor holding exactly the
-//!   key they had.
-//! - **One rework per quota period.** A key created inside the period —
-//!   issued or reworked, it makes no difference — is refused with `409` and
-//!   a `next_eligible_at` that is the 1st of the next month, on the pre-check
-//!   and on the round-trip alike.
-//! - **Unreachable with a session cookie alone.** The only thing a session
-//!   reaches is the read-only pre-check; the swap needs the round-trip.
+//! - **Revoke is immediate and total.** Every key under the name is disabled
+//!   in one `POST`, with no Discord call; the reveal then says "revoked" and
+//!   names the date, and never hands the dead value out again.
+//! - **The replacement waits for the 1st.** An issue inside the revocation's
+//!   period is `?issue=capped&next_eligible_at=…` with nothing written; the
+//!   same issue once the period has rolled deletes the revocation record and
+//!   creates the new key.
+//! - **A session cookie can revoke its own key and nothing else.** The route
+//!   is `POST`-only, writes only `enabled=false` on the caller's exact name,
+//!   and every other state the store can be in leaves it untouched.
 
 #[path = "portal_keys/harness.rs"]
 mod harness;
@@ -36,21 +33,11 @@ use chrono::{Datelike, NaiveDate, Utc};
 use harness::*;
 use mock_discord::{GRANTED_SCOPE, MemberReply, MockDiscord};
 use prices_api::portal::auth::discord::Endpoints;
-use prices_api::portal::auth::{cookies, state_token};
 use prices_api::portal::keys::gateway::Gateway;
 use prices_api::portal::keys::{KEY_PATH, REWORK_PATH};
 use prices_api::portal::usage::USAGE_PATH;
 
-fn rework_app(discord: &MockDiscord, gateway: &MockGateway) -> Router {
-    rework_app_with(discord, gateway, GUILD_ID, "5")
-}
-
-fn rework_app_with(
-    discord: &MockDiscord,
-    gateway: &MockGateway,
-    guild_id: &str,
-    min_age_minutes: &str,
-) -> Router {
+fn app_with_discord(discord: &MockDiscord, gateway: &MockGateway) -> Router {
     build_app_with(
         true,
         Some(Gateway::against(&gateway.base, PLAN_ID.to_string())),
@@ -58,7 +45,7 @@ fn rework_app_with(
             api_base: discord.base.clone(),
             ..Endpoints::default()
         },
-        Some(eligibility(guild_id, min_age_minutes)),
+        Some(eligibility(GUILD_ID, "5")),
     )
 }
 
@@ -78,13 +65,12 @@ fn first_of_month_offset(months: i32) -> NaiveDate {
     NaiveDate::from_ymd_opt(total.div_euclid(12), (total.rem_euclid(12) + 1) as u32, 1).unwrap()
 }
 
-/// The meeting's worked example, relative to the real calendar: "reworked on
-/// the 3rd" of the current month, and the 3rd of the previous month.
+/// "Revoked on the 3rd" of the month beginning `first`.
 fn the_3rd_of(first: NaiveDate) -> u64 {
     noon(first.with_day(3).unwrap())
 }
 
-fn next_eligible_at_expected() -> (String, String) {
+fn next_eligible_expected() -> (String, String) {
     let next = first_of_month_offset(1);
     (
         format!("{}T00:00:00Z", next.format("%Y-%m-%d")),
@@ -92,7 +78,7 @@ fn next_eligible_at_expected() -> (String, String) {
     )
 }
 
-/// Seed an attached key for the user, created at `created_at`.
+/// Seed an attached, live key for the user, created at `created_at`.
 fn seed_attached(gateway: &MockGateway, created_at: u64) -> String {
     gateway.with(|s| {
         let id = s.seed(&key_name(), created_at);
@@ -101,417 +87,421 @@ fn seed_attached(gateway: &MockGateway, created_at: u64) -> String {
     })
 }
 
-async fn precheck(router: &Router, cookie: Option<&str>) -> Reply {
+/// Seed a key the user revoked at `revoked_at`.
+fn seed_revoked(gateway: &MockGateway, revoked_at: u64) -> String {
+    gateway.with(|s| {
+        let id = s.seed_revoked(&key_name(), 1_000, revoked_at);
+        s.plan_keys.push((PLAN_ID.to_string(), id.clone()));
+        id
+    })
+}
+
+async fn revoke(router: &Router, cookie: Option<&str>) -> Reply {
     call_path(router.clone(), "POST", REWORK_PATH, cookie).await
+}
+
+async fn reveal_via(router: &Router) -> Reply {
+    call_path(
+        router.clone(),
+        "GET",
+        KEY_PATH,
+        Some(&session_cookie(USER_ID)),
+    )
+    .await
 }
 
 // ---------------------------------------------------------------------------
 // The gate — ships closed
 // ---------------------------------------------------------------------------
 
-/// The whole rework surface is an empty `404` while the portal is closed —
-/// the login that starts it, the callback that finishes it, and the
-/// pre-check — with zero calls to Discord and zero to the control plane.
+/// The revoke is an empty `404` while the portal is closed, with a valid
+/// session presented and zero control-plane calls.
 #[tokio::test]
-async fn everything_including_rework_is_an_empty_404_while_the_portal_is_closed() {
-    let discord = MockDiscord::start(GRANTED_SCOPE, None).await;
+async fn revoke_is_an_empty_404_while_the_portal_is_closed() {
     let gateway = MockGateway::start().await;
     seed_attached(&gateway, 1_000);
-    let closed = build_app_with(
+    let closed = build_app(
         false,
         Some(Gateway::against(&gateway.base, PLAN_ID.to_string())),
-        Endpoints {
-            api_base: discord.base.clone(),
-            ..Endpoints::default()
-        },
-        Some(eligibility(GUILD_ID, "5")),
     );
 
-    for (method, path) in [
-        ("GET", "/api-tokens/api/auth/login?action=rework"),
-        ("GET", "/api-tokens/api/auth/callback?code=c&state=s"),
-        ("POST", REWORK_PATH),
-    ] {
-        let reply = call_path(closed.clone(), method, path, Some(&session_cookie(USER_ID))).await;
-        assert_eq!(reply.status, StatusCode::NOT_FOUND, "{method} {path}");
-        assert!(reply.body.is_empty(), "{method} {path} carried a body");
-    }
-    assert_eq!(discord.exchanges(), 0);
-    assert_eq!(discord.member_calls(), 0);
+    let reply = revoke(&closed, Some(&session_cookie(USER_ID))).await;
+    assert_eq!(reply.status, StatusCode::NOT_FOUND);
+    assert!(reply.body.is_empty());
     assert_eq!(gateway.with(|s| s.list_calls), 0);
     assert_eq!(gateway.with(|s| s.ops.len()), 0);
+    assert!(gateway.with(|s| s.keys[0].enabled), "nothing was touched");
 }
 
 // ---------------------------------------------------------------------------
-// The happy path — a swap, never keyless
+// Revoke — immediate, total, no Discord
 // ---------------------------------------------------------------------------
 
-/// A member with a key from last period gets a new one: the old is deleted,
-/// the new is enabled and on the plan, the landing is `?rework=ok` with a
-/// fresh session — and the new value rides nowhere in the redirect.
+/// The user's scenario: a key issued TODAY leaks, "Replace my key" is
+/// pressed, and the key is off at once — one `UpdateApiKey`, no Discord call,
+/// nothing created — with the answer naming the 1st of next month.
 #[tokio::test]
-async fn a_member_replaces_their_key_and_the_old_one_is_gone() {
+async fn revoke_deactivates_the_key_immediately_and_issues_nothing() {
     let discord = MockDiscord::start(GRANTED_SCOPE, None).await;
     let gateway = MockGateway::start().await;
-    let old = seed_attached(&gateway, 1_000);
-    let app = rework_app(&discord, &gateway);
+    let key = seed_attached(&gateway, now_secs());
+    let app = app_with_discord(&discord, &gateway);
+    let (expected_at, _) = next_eligible_expected();
 
-    let reply = rework_round_trip(&app).await;
-    assert_eq!(reply.status, StatusCode::SEE_OTHER);
-    assert_eq!(reply.location(), "/api-tokens/?rework=ok");
-    assert!(reply.cookie(cookies::SESSION_COOKIE).is_some());
-
-    let stored = gateway.with(|s| s.keys.clone());
-    assert_eq!(stored.len(), 1, "exactly one key survives");
-    assert_ne!(stored[0].id, old, "and it is not the old one");
-    assert_eq!(stored[0].name, key_name());
-    assert!(stored[0].enabled);
-    assert!(
-        gateway.with(|s| s
-            .plan_keys
-            .contains(&(PLAN_ID.to_string(), stored[0].id.clone()))),
-        "the new key is on the plan"
-    );
-    assert_eq!(gateway.with(|s| s.deleted.clone()), vec![old]);
-
-    let headers = format!("{:?}", reply.headers);
-    assert!(!headers.contains(&stored[0].value), "{headers}");
-    assert!(!headers.contains("CANARY"), "{headers}");
-
-    // The page's next step: the reveal hands out the NEW key.
-    let revealed = reveal(&gateway, USER_ID).await;
-    assert_eq!(revealed.status, StatusCode::OK);
-    assert_eq!(revealed.json()["key_id"], stored[0].id);
-}
-
-/// **The ordering is the acceptance criterion.** The new key is created and
-/// attached before the old one is deleted, so there is no instant at which
-/// the visitor holds no working key. Asserted on the mock's write sequence:
-/// the end state cannot tell a swap from a delete-then-create.
-#[tokio::test]
-async fn the_new_key_is_created_and_attached_before_the_old_is_deleted() {
-    let discord = MockDiscord::start(GRANTED_SCOPE, None).await;
-    let gateway = MockGateway::start().await;
-    let old = seed_attached(&gateway, 1_000);
-
+    let reply = revoke(&app, Some(&session_cookie(USER_ID))).await;
     assert_eq!(
-        rework_round_trip(&rework_app(&discord, &gateway))
-            .await
-            .location(),
-        "/api-tokens/?rework=ok"
+        reply.status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&reply.body)
     );
-
-    let ops = gateway.with(|s| s.ops.clone());
-    let new = gateway.with(|s| s.keys[0].id.clone());
-    assert_eq!(
-        ops,
-        vec![
-            format!("create:{new}"),
-            format!("attach:{new}"),
-            format!("delete:{old}")
-        ],
-        "create → attach → delete, and nothing else"
-    );
-}
-
-/// What the data plane will do is a consequence of what the control plane
-/// holds: the old key id no longer exists (→ `403 Forbidden` on `/v1/`, the
-/// same answer as no key at all — measured under 0180 item 8), and the new
-/// key is enabled and attached (→ `200`). The live `curl` of both is the
-/// deploy-time check `packages/prices-api/README.md` names; this pins the
-/// two facts it depends on.
-#[tokio::test]
-async fn the_old_key_is_deleted_and_the_new_one_is_enabled_and_on_the_plan() {
-    let discord = MockDiscord::start(GRANTED_SCOPE, None).await;
-    let gateway = MockGateway::start().await;
-    let old = seed_attached(&gateway, 1_000);
-
-    rework_round_trip(&rework_app(&discord, &gateway)).await;
+    let body = reply.json();
+    assert_eq!(body["revoked"], true);
+    assert_eq!(body["next_eligible_at"], expected_at);
+    assert!(body["revoked_at"].as_str().unwrap().ends_with('Z'));
+    assert_eq!(reply.cache_control(), "no-store");
 
     gateway.with(|s| {
-        assert!(!s.keys.iter().any(|k| k.id == old), "the old key is gone");
-        let new = &s.keys[0];
-        assert!(new.enabled);
-        assert!(s.plan_keys.contains(&(PLAN_ID.to_string(), new.id.clone())));
-        // The old attachment is irrelevant once the key is gone, but the
-        // survivor must be the ONLY attached live key.
-        let live_attached: Vec<_> = s
-            .plan_keys
-            .iter()
-            .filter(|(_, id)| s.keys.iter().any(|k| &k.id == id))
-            .collect();
-        assert_eq!(live_attached.len(), 1);
+        assert!(!s.keys[0].enabled, "the key is off");
+        assert_eq!(s.keys.len(), 1, "and nothing was created");
+        assert_eq!(s.ops, vec![format!("disable:{key}")]);
     });
+    assert_eq!(discord.exchanges(), 0, "no Discord round-trip for a revoke");
+    assert_eq!(discord.member_calls(), 0);
 }
 
-/// Duplicates left by an earlier double-submit are all "the old key": every
-/// one of them dies, or the visitor keeps a working credential they were
+/// After the revoke the reveal never hands the dead value out again: it
+/// answers `404 key_revoked` with the date, and the page renders that instead
+/// of the "get my API key" link.
+#[tokio::test]
+async fn a_revoked_key_is_never_revealed_again_and_the_reveal_names_the_date() {
+    let discord = MockDiscord::start(GRANTED_SCOPE, None).await;
+    let gateway = MockGateway::start().await;
+    seed_attached(&gateway, 1_000);
+    let app = app_with_discord(&discord, &gateway);
+    let (expected_at, _) = next_eligible_expected();
+
+    assert_eq!(
+        revoke(&app, Some(&session_cookie(USER_ID))).await.status,
+        StatusCode::OK
+    );
+
+    let revealed = reveal_via(&app).await;
+    assert_eq!(revealed.status, StatusCode::NOT_FOUND);
+    let body = revealed.json();
+    assert_eq!(body["code"], "key_revoked");
+    assert_eq!(body["details"]["next_eligible_at"], expected_at);
+    assert!(body["details"]["revoked_at"].is_string());
+    assert!(
+        !String::from_utf8_lossy(&revealed.body).contains("CANARY"),
+        "the revoked value must not appear anywhere"
+    );
+    assert_eq!(revealed.cache_control(), "no-store");
+}
+
+/// Idempotent: a second press answers `200` with the same dates and writes
+/// nothing more — a retry after a dropped response is safe.
+#[tokio::test]
+async fn revoking_twice_is_one_write() {
+    let discord = MockDiscord::start(GRANTED_SCOPE, None).await;
+    let gateway = MockGateway::start().await;
+    let key = seed_attached(&gateway, 1_000);
+    let app = app_with_discord(&discord, &gateway);
+
+    let first = revoke(&app, Some(&session_cookie(USER_ID))).await;
+    let second = revoke(&app, Some(&session_cookie(USER_ID))).await;
+    assert_eq!(second.status, StatusCode::OK);
+    assert_eq!(
+        second.json()["next_eligible_at"],
+        first.json()["next_eligible_at"]
+    );
+    assert_eq!(
+        gateway.with(|s| s.ops.clone()),
+        vec![format!("disable:{key}")]
+    );
+}
+
+/// Every key under the name dies, not only the current one: a duplicate left
+/// by an earlier double-submit is a working credential the visitor was just
 /// told had stopped.
 #[tokio::test]
-async fn every_old_key_under_the_name_is_replaced_not_only_the_winner() {
+async fn every_key_under_the_name_is_revoked_not_only_the_current_one() {
     let discord = MockDiscord::start(GRANTED_SCOPE, None).await;
     let gateway = MockGateway::start().await;
-    let first = seed_attached(&gateway, 1_000);
-    let second = gateway.with(|s| s.seed(&key_name(), 2_000));
+    seed_attached(&gateway, 1_000);
+    gateway.with(|s| s.seed(&key_name(), 2_000));
+    let app = app_with_discord(&discord, &gateway);
 
     assert_eq!(
-        rework_round_trip(&rework_app(&discord, &gateway))
-            .await
-            .location(),
-        "/api-tokens/?rework=ok"
+        revoke(&app, Some(&session_cookie(USER_ID))).await.status,
+        StatusCode::OK
     );
-
-    let mut deleted = gateway.with(|s| s.deleted.clone());
-    deleted.sort();
-    let mut expected = vec![first, second];
-    expected.sort();
-    assert_eq!(deleted, expected);
-    assert_eq!(gateway.with(|s| s.keys.len()), 1);
-}
-
-/// However two simultaneous reworks interleave (two tabs — one tab's confirm
-/// is disabled on submit), the visitor ends with a working key: never none,
-/// every survivor on the plan, the old one gone. Two survivors are possible
-/// and accepted — both are capped until the 1st, and the next issue
-/// round-trip's reconciler converges them.
-#[tokio::test]
-async fn two_simultaneous_reworks_never_leave_the_user_keyless() {
-    let discord = MockDiscord::start(GRANTED_SCOPE, None).await;
-    let gateway = MockGateway::start().await;
-    let old = seed_attached(&gateway, 1_000);
-    let app = rework_app(&discord, &gateway);
-
-    let (a, b) = tokio::join!(rework_round_trip(&app), rework_round_trip(&app));
-    for reply in [&a, &b] {
-        assert!(
-            reply.location() == "/api-tokens/?rework=ok"
-                || reply.location() == "/api-tokens/?rework=failed",
-            "{}",
-            reply.location()
-        );
-    }
-
     gateway.with(|s| {
-        assert!(!s.keys.iter().any(|k| k.id == old), "the old key is gone");
-        assert!(!s.keys.is_empty(), "never keyless");
-        assert!(s.keys.len() <= 2);
-        for key in &s.keys {
-            assert!(
-                s.plan_keys.contains(&(PLAN_ID.to_string(), key.id.clone())),
-                "every survivor is on the plan"
-            );
-        }
+        assert!(s.keys.iter().all(|k| !k.enabled));
+        assert_eq!(s.ops.len(), 2);
     });
-    assert_eq!(reveal(&gateway, USER_ID).await.status, StatusCode::OK);
 }
 
-// ---------------------------------------------------------------------------
-// The cap — once per quota period
-// ---------------------------------------------------------------------------
-
-/// A second rework in the same period is refused — `409` with
-/// `next_eligible_at` on the pre-check, `?rework=capped&next_eligible_at=…`
-/// on the round-trip — and nothing moves: the key the first rework made is
-/// the key that stays.
+/// Revoking with no key is `404 no_key` and writes nothing.
 #[tokio::test]
-async fn a_second_rework_in_the_same_period_is_refused_with_409_and_next_eligible_at() {
+async fn revoking_with_no_key_is_no_key_and_writes_nothing() {
     let discord = MockDiscord::start(GRANTED_SCOPE, None).await;
     let gateway = MockGateway::start().await;
-    seed_attached(&gateway, 1_000);
-    let app = rework_app(&discord, &gateway);
+    let app = app_with_discord(&discord, &gateway);
 
-    assert_eq!(
-        rework_round_trip(&app).await.location(),
-        "/api-tokens/?rework=ok"
-    );
-    let after_first = gateway.with(|s| {
-        (
-            s.keys.iter().map(|k| k.id.clone()).collect::<Vec<_>>(),
-            s.ops.clone(),
-        )
-    });
-    let (expected_at, expected_date) = next_eligible_at_expected();
-
-    // The pre-check: the modal's question, answered before any round-trip.
-    let check = precheck(&app, Some(&session_cookie(USER_ID))).await;
-    assert_eq!(
-        check.status,
-        StatusCode::CONFLICT,
-        "{}",
-        String::from_utf8_lossy(&check.body)
-    );
-    let body = check.json();
-    assert_eq!(body["code"], "rework_capped");
-    assert_eq!(body["details"]["next_eligible_at"], expected_at);
-    assert_eq!(check.cache_control(), "no-store");
-
-    // The round-trip, should a client skip the pre-check.
-    let reply = rework_round_trip(&app).await;
-    assert_eq!(
-        reply.location(),
-        format!("/api-tokens/?rework=capped&next_eligible_at={expected_date}")
-    );
-    assert_eq!(
-        gateway.with(|s| {
-            (
-                s.keys.iter().map(|k| k.id.clone()).collect::<Vec<_>>(),
-                s.ops.clone(),
-            )
-        }),
-        after_first,
-        "a capped rework writes nothing"
-    );
-}
-
-/// The meeting's worked example against the real calendar: a key reworked on
-/// the 3rd of THIS month is refused until the 1st of next month; the same
-/// key dated the 3rd of LAST month — i.e. the calendar has rolled past the
-/// 1st — is allowed. (The literal 3 August → 1 September dates are pinned
-/// in `keys::cap`'s unit tests; this is the same rule over HTTP.)
-#[tokio::test]
-async fn reworked_on_the_3rd_refuses_until_the_1st_and_succeeds_once_it_has_passed() {
-    let discord = MockDiscord::start(GRANTED_SCOPE, None).await;
-    let (expected_at, _) = next_eligible_at_expected();
-
-    // This month's 3rd: capped, naming next month's 1st.
-    let gateway = MockGateway::start().await;
-    seed_attached(&gateway, the_3rd_of(first_of_month_offset(0)));
-    let app = rework_app(&discord, &gateway);
-    let refused = precheck(&app, Some(&session_cookie(USER_ID))).await;
-    assert_eq!(refused.status, StatusCode::CONFLICT);
-    assert_eq!(refused.json()["details"]["next_eligible_at"], expected_at);
-    assert_eq!(gateway.with(|s| s.ops.len()), 0);
-
-    // Last month's 3rd: the 1st has passed, so the rework goes through.
-    let gateway = MockGateway::start().await;
-    seed_attached(&gateway, the_3rd_of(first_of_month_offset(-1)));
-    let app = rework_app(&discord, &gateway);
-    let allowed = precheck(&app, Some(&session_cookie(USER_ID))).await;
-    assert_eq!(allowed.status, StatusCode::OK);
-    assert_eq!(allowed.json()["eligible"], true);
-    assert_eq!(
-        rework_round_trip(&app).await.location(),
-        "/api-tokens/?rework=ok"
-    );
-}
-
-/// The cap is about creation, not about reworks: a key **issued** this
-/// period (the issue round-trip, seconds ago) cannot be reworked this period
-/// either — which is the loophole the fallback closes.
-#[tokio::test]
-async fn a_key_issued_this_period_cannot_be_reworked_into_a_clean_counter() {
-    let discord = MockDiscord::start(GRANTED_SCOPE, None).await;
-    let gateway = MockGateway::start().await;
-    let app = rework_app(&discord, &gateway);
-
-    assert_eq!(
-        issue_round_trip(&app).await.location(),
-        "/api-tokens/?issue=ok"
-    );
-    let issued = gateway.with(|s| s.keys[0].id.clone());
-
-    let reply = rework_round_trip(&app).await;
-    assert!(
-        reply
-            .location()
-            .starts_with("/api-tokens/?rework=capped&next_eligible_at="),
-        "{}",
-        reply.location()
-    );
-    assert_eq!(gateway.with(|s| s.keys[0].id.clone()), issued);
-    assert_eq!(gateway.with(|s| s.deleted.len()), 0);
-}
-
-// ---------------------------------------------------------------------------
-// Unreachable with a session cookie alone
-// ---------------------------------------------------------------------------
-
-/// The one route a session cookie reaches is the pre-check, and the
-/// pre-check writes nothing — on the allowed answer, on the capped answer,
-/// and on the no-key answer alike. A callback presented with a session but
-/// no signed state is a `400` before any Discord call.
-#[tokio::test]
-async fn rework_is_unreachable_with_a_session_cookie_alone() {
-    let discord = MockDiscord::start(GRANTED_SCOPE, None).await;
-    let gateway = MockGateway::start().await;
-    seed_attached(&gateway, 1_000);
-    let app = rework_app(&discord, &gateway);
-    let session = session_cookie(USER_ID);
-
-    let allowed = precheck(&app, Some(&session)).await;
-    assert_eq!(allowed.status, StatusCode::OK);
-    assert_eq!(allowed.cache_control(), "no-store");
-    assert_eq!(
-        gateway.with(|s| s.ops.len()),
-        0,
-        "an allowed pre-check writes nothing"
-    );
-    assert_eq!(gateway.with(|s| s.keys.len()), 1);
-
-    // The callback with a session and no state: refused at the door.
-    let callback = call_path(
-        app.clone(),
-        "GET",
-        "/api-tokens/api/auth/callback?code=c",
-        Some(&session),
-    )
-    .await;
-    assert_eq!(callback.status, StatusCode::BAD_REQUEST);
-    assert_eq!(discord.exchanges(), 0);
-    assert_eq!(discord.member_calls(), 0);
-
-    // `GET` on the pre-check path is not a route at all.
-    let get = call_path(app, "GET", REWORK_PATH, Some(&session)).await;
-    assert_eq!(get.status, StatusCode::METHOD_NOT_ALLOWED);
-    assert_eq!(gateway.with(|s| s.ops.len()), 0);
-}
-
-#[tokio::test]
-async fn the_pre_check_refuses_an_unauthenticated_caller_before_aws_is_touched() {
-    let discord = MockDiscord::start(GRANTED_SCOPE, None).await;
-    let gateway = MockGateway::start().await;
-    let app = rework_app(&discord, &gateway);
-
-    let reply = precheck(&app, None).await;
-    assert_eq!(reply.status, StatusCode::UNAUTHORIZED);
-    assert_eq!(reply.json()["code"], "not_signed_in");
-    assert_eq!(gateway.with(|s| s.list_calls), 0);
-}
-
-#[tokio::test]
-async fn the_pre_check_answers_no_key_when_there_is_nothing_to_replace() {
-    let discord = MockDiscord::start(GRANTED_SCOPE, None).await;
-    let gateway = MockGateway::start().await;
-    let app = rework_app(&discord, &gateway);
-
-    let reply = precheck(&app, Some(&session_cookie(USER_ID))).await;
+    let reply = revoke(&app, Some(&session_cookie(USER_ID))).await;
     assert_eq!(reply.status, StatusCode::NOT_FOUND);
     assert_eq!(reply.json()["code"], "no_key");
     assert_eq!(gateway.with(|s| s.ops.len()), 0);
 }
 
-/// A round-trip for a visitor with no key lands on `no_key` and creates
-/// nothing — a rework is not an issue with weaker checks.
+/// Unauthenticated is refused before AWS is touched; a `GET` on the path is
+/// not a route. The `POST`-only shape plus `SameSite=Lax` is the CSRF guard.
 #[tokio::test]
-async fn a_rework_with_no_key_lands_on_no_key_and_creates_nothing() {
+async fn revoke_needs_a_session_and_the_post_verb() {
     let discord = MockDiscord::start(GRANTED_SCOPE, None).await;
     let gateway = MockGateway::start().await;
+    seed_attached(&gateway, 1_000);
+    let app = app_with_discord(&discord, &gateway);
 
-    let reply = rework_round_trip(&rework_app(&discord, &gateway)).await;
-    assert_eq!(reply.location(), "/api-tokens/?rework=no_key");
-    assert_eq!(gateway.with(|s| s.create_calls), 0);
-    assert!(reply.cookie(cookies::SESSION_COOKIE).is_some());
+    let anonymous = revoke(&app, None).await;
+    assert_eq!(anonymous.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(anonymous.json()["code"], "not_signed_in");
+    assert_eq!(anonymous.cache_control(), "no-store");
+
+    let get = call_path(app, "GET", REWORK_PATH, Some(&session_cookie(USER_ID))).await;
+    assert_eq!(get.status, StatusCode::METHOD_NOT_ALLOWED);
+
+    assert_eq!(gateway.with(|s| s.list_calls), 0);
+    assert!(gateway.with(|s| s.keys[0].enabled));
+}
+
+/// A forged session cannot revoke anybody's key, and one user's session
+/// cannot reach another user's key — the name is derived from the signed
+/// `sub`, and only exact matches are touched.
+#[tokio::test]
+async fn a_session_can_only_revoke_its_own_key() {
+    let discord = MockDiscord::start(GRANTED_SCOPE, None).await;
+    let gateway = MockGateway::start().await;
+    let mine = seed_attached(&gateway, 1_000);
+    let theirs = gateway.with(|s| s.seed("discord-999999999999999999-key", 1_000));
+    // A prefix neighbour — `discord-<my id>-key-old` — which `nameQuery`
+    // returns and the exact filter must drop.
+    let lookalike = gateway.with(|s| s.seed(&format!("{}-old", key_name()), 1_000));
+    let app = app_with_discord(&discord, &gateway);
+
+    assert_eq!(
+        revoke(&app, Some(&session_cookie(USER_ID))).await.status,
+        StatusCode::OK
+    );
+    gateway.with(|s| {
+        let by_id = |id: &str| s.keys.iter().find(|k| k.id == id).unwrap().enabled;
+        assert!(!by_id(&mine));
+        assert!(by_id(&theirs), "somebody else's key is untouched");
+        assert!(by_id(&lookalike), "a console lookalike is untouched");
+    });
+
+    let forged = format!(
+        "{}=not-a-real-session",
+        prices_api::portal::auth::cookies::SESSION_COOKIE
+    );
+    let reply = revoke(&app, Some(&forged)).await;
+    assert_eq!(reply.status, StatusCode::UNAUTHORIZED);
+}
+
+/// A control plane that refuses the disable is a `502`, and "revoked" is
+/// never said of a key that still works.
+#[tokio::test]
+async fn a_failed_disable_is_a_502_not_a_false_revoked() {
+    let discord = MockDiscord::start(GRANTED_SCOPE, None).await;
+    let gateway = MockGateway::start().await;
+    seed_attached(&gateway, 1_000);
+    gateway.with(|s| s.fail_disables = true);
+    let app = app_with_discord(&discord, &gateway);
+
+    let reply = revoke(&app, Some(&session_cookie(USER_ID))).await;
+    assert_eq!(reply.status, StatusCode::BAD_GATEWAY);
+    assert_eq!(reply.json()["code"], "key_unavailable");
+    assert!(gateway.with(|s| s.keys[0].enabled));
+    // And the reveal still hands the (un-revoked) key out.
+    assert_eq!(reveal_via(&app).await.status, StatusCode::OK);
+}
+
+/// A successful revoke evicts the usage route's cached answer, so the next
+/// dashboard load re-reads rather than serving a pre-revoke snapshot.
+#[tokio::test]
+async fn a_revoke_evicts_the_cached_usage() {
+    let discord = MockDiscord::start(GRANTED_SCOPE, None).await;
+    let gateway = MockGateway::start().await;
+    let key = seed_attached(&gateway, 1_000);
+    gateway.with(|s| {
+        s.usage.insert(key.clone(), vec![vec![42, 99_958]]);
+    });
+    let app = app_with_discord(&discord, &gateway);
+    let session = session_cookie(USER_ID);
+
+    let before = call_path(app.clone(), "GET", USAGE_PATH, Some(&session)).await;
+    assert_eq!(before.json()["used"], 42);
+    assert_eq!(gateway.with(|s| s.usage_calls), 1);
+
+    assert_eq!(revoke(&app, Some(&session)).await.status, StatusCode::OK);
+
+    // Inside the 60s TTL, so only the eviction explains a second read. The
+    // counter is preserved across a disable (0180 item 8), so the numbers
+    // are the same — and honest.
+    let after = call_path(app, "GET", USAGE_PATH, Some(&session)).await;
+    assert_eq!(after.status, StatusCode::OK);
+    assert_eq!(after.json()["used"], 42);
+    assert_eq!(gateway.with(|s| s.usage_calls), 2);
 }
 
 // ---------------------------------------------------------------------------
-// Membership — re-proved; age — never
+// The re-issue cap — the replacement waits for the 1st
 // ---------------------------------------------------------------------------
 
-/// A user who has left the guild is refused on rework with the not-a-member
-/// landing (the page names the server), nothing moves — and reveal still
-/// works for them afterwards: the epic's non-goal holds.
+/// Revoke, then "Get my API key" in the same period: eligibility passes and
+/// the issue is still refused — `?issue=capped&next_eligible_at=…` — with
+/// nothing created and the revoked key left as the record.
 #[tokio::test]
-async fn a_user_who_has_left_the_guild_is_refused_on_rework_and_keeps_their_key() {
+async fn an_issue_after_a_revoke_in_the_same_period_is_capped_with_the_date() {
+    let discord = MockDiscord::start(GRANTED_SCOPE, None).await;
+    let gateway = MockGateway::start().await;
+    let key = seed_attached(&gateway, 1_000);
+    let app = app_with_discord(&discord, &gateway);
+    let (_, expected_date) = next_eligible_expected();
+
+    assert_eq!(
+        revoke(&app, Some(&session_cookie(USER_ID))).await.status,
+        StatusCode::OK
+    );
+
+    let reply = issue_round_trip(&app).await;
+    assert_eq!(reply.status, StatusCode::SEE_OTHER);
+    assert_eq!(
+        reply.location(),
+        format!("/api-tokens/?issue=capped&next_eligible_at={expected_date}")
+    );
+    assert_eq!(
+        discord.member_calls(),
+        1,
+        "eligibility ran and passed first"
+    );
+    gateway.with(|s| {
+        assert_eq!(s.create_calls, 0);
+        assert_eq!(s.keys.len(), 1);
+        assert_eq!(s.keys[0].id, key);
+        assert!(!s.keys[0].enabled, "the revocation record stays");
+        assert_eq!(s.deleted.len(), 0);
+    });
+    // And the reveal keeps saying revoked, not "no key".
+    assert_eq!(reveal_via(&app).await.json()["code"], "key_revoked");
+}
+
+/// The worked example against the real calendar: revoked on the 3rd of THIS
+/// month → capped until the 1st of next; revoked on the 3rd of LAST month →
+/// the period has rolled, the revocation record is deleted, a new key is
+/// created and attached, and the reveal hands the NEW one out.
+#[tokio::test]
+async fn revoked_on_the_3rd_refuses_until_the_1st_and_issues_once_it_has_passed() {
+    let discord = MockDiscord::start(GRANTED_SCOPE, None).await;
+    let (expected_at, expected_date) = next_eligible_expected();
+
+    // This month's 3rd: capped.
+    let gateway = MockGateway::start().await;
+    seed_revoked(&gateway, the_3rd_of(first_of_month_offset(0)));
+    let app = app_with_discord(&discord, &gateway);
+    assert_eq!(
+        issue_round_trip(&app).await.location(),
+        format!("/api-tokens/?issue=capped&next_eligible_at={expected_date}")
+    );
+    assert_eq!(gateway.with(|s| s.create_calls), 0);
+    let revealed = reveal_via(&app).await;
+    assert_eq!(revealed.json()["code"], "key_revoked");
+    assert_eq!(revealed.json()["details"]["next_eligible_at"], expected_at);
+
+    // Last month's 3rd: the 1st has passed.
+    let gateway = MockGateway::start().await;
+    let dead = seed_revoked(&gateway, the_3rd_of(first_of_month_offset(-1)));
+    let app = app_with_discord(&discord, &gateway);
+    assert_eq!(
+        issue_round_trip(&app).await.location(),
+        "/api-tokens/?issue=ok"
+    );
+    gateway.with(|s| {
+        assert_eq!(
+            s.deleted,
+            vec![dead.clone()],
+            "the revocation record is gone"
+        );
+        assert_eq!(s.keys.len(), 1);
+        assert_ne!(s.keys[0].id, dead);
+        assert!(s.keys[0].enabled);
+        assert!(
+            s.plan_keys
+                .contains(&(PLAN_ID.to_string(), s.keys[0].id.clone()))
+        );
+        let new = s.keys[0].id.clone();
+        assert_eq!(
+            s.ops,
+            vec![
+                format!("delete:{dead}"),
+                format!("create:{new}"),
+                format!("attach:{new}")
+            ]
+        );
+    });
+    let revealed = reveal_via(&app).await;
+    assert_eq!(revealed.status, StatusCode::OK);
+    assert_eq!(
+        revealed.json()["key_id"],
+        gateway.with(|s| s.keys[0].id.clone())
+    );
+}
+
+/// A revoked key from last month — whose replacement is therefore due — is
+/// "no key" on the reveal until the owner presses the issue link: the dead
+/// value is never revealed, and the page offers the round-trip.
+#[tokio::test]
+async fn a_revocation_whose_period_has_rolled_reveals_as_no_key() {
+    let discord = MockDiscord::start(GRANTED_SCOPE, None).await;
+    let gateway = MockGateway::start().await;
+    seed_revoked(&gateway, the_3rd_of(first_of_month_offset(-1)));
+    let app = app_with_discord(&discord, &gateway);
+
+    let revealed = reveal_via(&app).await;
+    assert_eq!(revealed.status, StatusCode::NOT_FOUND);
+    assert_eq!(revealed.json()["code"], "no_key");
+    assert_eq!(
+        gateway.with(|s| s.ops.len()),
+        0,
+        "the reveal still writes nothing"
+    );
+}
+
+/// The LATEST revocation governs: a duplicate revoked last month beside a key
+/// revoked this month must not open the door this month's revocation closed.
+#[tokio::test]
+async fn the_latest_revocation_governs_the_cap() {
+    let discord = MockDiscord::start(GRANTED_SCOPE, None).await;
+    let gateway = MockGateway::start().await;
+    seed_revoked(&gateway, the_3rd_of(first_of_month_offset(-1)));
+    seed_revoked(&gateway, the_3rd_of(first_of_month_offset(0)));
+    let app = app_with_discord(&discord, &gateway);
+
+    assert!(
+        issue_round_trip(&app)
+            .await
+            .location()
+            .starts_with("/api-tokens/?issue=capped")
+    );
+    assert_eq!(gateway.with(|s| s.create_calls), 0);
+    assert_eq!(gateway.with(|s| s.deleted.len()), 0);
+}
+
+/// The cap refuses only after eligibility: a non-member who revoked is told
+/// to rejoin, not to wait — and nothing is written either way.
+#[tokio::test]
+async fn membership_is_still_checked_before_the_cap() {
     let discord = MockDiscord::start_with(
         GRANTED_SCOPE,
         None,
@@ -520,477 +510,114 @@ async fn a_user_who_has_left_the_guild_is_refused_on_rework_and_keeps_their_key(
     )
     .await;
     let gateway = MockGateway::start().await;
-    let old = seed_attached(&gateway, 1_000);
-    let app = rework_app(&discord, &gateway);
+    seed_revoked(&gateway, now_secs());
+    let app = app_with_discord(&discord, &gateway);
 
-    let reply = rework_round_trip(&app).await;
-    assert_eq!(reply.location(), "/api-tokens/?rework=not_member");
-    assert!(reply.cookie(cookies::SESSION_COOKIE).is_some());
-    assert_eq!(gateway.with(|s| s.ops.len()), 0, "nothing moves");
-    assert_eq!(discord.member_calls(), 1);
-
-    let revealed = call_path(app, "GET", KEY_PATH, Some(&session_cookie(USER_ID))).await;
-    assert_eq!(revealed.status, StatusCode::OK);
-    assert_eq!(revealed.json()["key_id"], old);
+    assert_eq!(
+        issue_round_trip(&app).await.location(),
+        "/api-tokens/?issue=not_member"
+    );
+    assert_eq!(gateway.with(|s| s.list_calls), 0);
 }
 
-/// A `429`/`5xx`/`401`/`403` from Discord refuses **without** claiming
-/// non-membership — `unknown`, and nothing moves.
+/// A live key beside a revoked one (a console re-enable, a duplicate): the
+/// live key is the current key — revealed, adopted — and the revoked record
+/// is swept by the next issue like any duplicate.
 #[tokio::test]
-async fn a_429_or_5xx_from_discord_refuses_the_rework_without_claiming_non_membership() {
-    for status in [
-        StatusCode::TOO_MANY_REQUESTS,
-        StatusCode::INTERNAL_SERVER_ERROR,
-        StatusCode::SERVICE_UNAVAILABLE,
-        StatusCode::UNAUTHORIZED,
-        StatusCode::FORBIDDEN,
-    ] {
-        let discord = MockDiscord::start_with(
-            GRANTED_SCOPE,
-            None,
-            MemberReply::Status(status),
-            mock_discord::USER_ID,
-        )
-        .await;
-        let gateway = MockGateway::start().await;
-        seed_attached(&gateway, 1_000);
-
-        let reply = rework_round_trip(&rework_app(&discord, &gateway)).await;
-        assert_eq!(reply.location(), "/api-tokens/?rework=unknown", "{status}");
-        assert_eq!(gateway.with(|s| s.ops.len()), 0, "{status}");
-    }
-}
-
-/// `pending` absent is `unknown` on a rework exactly as on an issue — the
-/// two paths share one membership table.
-#[tokio::test]
-async fn an_absent_pending_field_is_unknown_on_rework_too() {
-    let discord = MockDiscord::start_with(
-        GRANTED_SCOPE,
-        None,
-        MemberReply::Member { pending: None },
-        mock_discord::USER_ID,
-    )
-    .await;
+async fn a_live_key_beside_a_revoked_one_is_the_current_key() {
+    let discord = MockDiscord::start(GRANTED_SCOPE, None).await;
     let gateway = MockGateway::start().await;
-    seed_attached(&gateway, 1_000);
+    let dead = seed_revoked(&gateway, now_secs());
+    let live = seed_attached(&gateway, 2_000);
+    let app = app_with_discord(&discord, &gateway);
 
-    let reply = rework_round_trip(&rework_app(&discord, &gateway)).await;
-    assert_eq!(reply.location(), "/api-tokens/?rework=unknown");
-    assert_eq!(gateway.with(|s| s.ops.len()), 0);
-}
+    assert_eq!(reveal_via(&app).await.json()["key_id"], live);
 
-/// **Age is never re-checked on a rework.** An account created ten seconds
-/// ago — which the issue round-trip would refuse as too young under a
-/// five-minute threshold — reworks its key: an account old enough once is
-/// old enough forever.
-#[tokio::test]
-async fn account_age_is_not_re_checked_on_a_rework() {
-    const DISCORD_EPOCH_MS: u64 = 1_420_070_400_000;
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64;
-    let brand_new = ((now_ms - DISCORD_EPOCH_MS - 10_000) << 22).to_string();
-
-    let discord = MockDiscord::start_with(
-        GRANTED_SCOPE,
-        None,
-        MemberReply::Member {
-            pending: Some(false),
-        },
-        &brand_new,
-    )
-    .await;
-    let gateway = MockGateway::start().await;
+    assert_eq!(
+        issue_round_trip(&app).await.location(),
+        "/api-tokens/?issue=ok"
+    );
     gateway.with(|s| {
-        let id = s.seed(&format!("discord-{brand_new}-key"), 1_000);
-        s.plan_keys.push((PLAN_ID.to_string(), id));
+        assert_eq!(s.deleted, vec![dead.clone()]);
+        assert_eq!(s.keys.len(), 1);
+        assert_eq!(s.keys[0].id, live);
+        assert_eq!(s.create_calls, 0);
     });
-    let app = rework_app_with(&discord, &gateway, GUILD_ID, "5");
+}
 
-    // The issue path, for contrast, refuses this account.
+/// Regression: a live key from last month is still simply adopted by the
+/// issue — the cap exists only for revoked keys.
+#[tokio::test]
+async fn a_live_key_is_adopted_as_before_the_cap_existed() {
+    let discord = MockDiscord::start(GRANTED_SCOPE, None).await;
+    let gateway = MockGateway::start().await;
+    let key = seed_attached(&gateway, 1_000);
+    let app = app_with_discord(&discord, &gateway);
+
+    assert_eq!(
+        issue_round_trip(&app).await.location(),
+        "/api-tokens/?issue=ok"
+    );
+    assert_eq!(gateway.with(|s| s.create_calls), 0);
+    assert_eq!(reveal_via(&app).await.json()["key_id"], key);
+}
+
+/// The full cycle on one router: issue → revoke → issue refused → (period
+/// rolls, simulated by back-dating the revocation) → issue creates the new
+/// key and the old value is gone for good.
+#[tokio::test]
+async fn the_full_cycle_issue_revoke_wait_reissue() {
+    let discord = MockDiscord::start(GRANTED_SCOPE, None).await;
+    let gateway = MockGateway::start().await;
+    let app = app_with_discord(&discord, &gateway);
+    let session = session_cookie(USER_ID);
+
+    assert_eq!(
+        issue_round_trip(&app).await.location(),
+        "/api-tokens/?issue=ok"
+    );
+    let first = gateway.with(|s| s.keys[0].clone());
+
+    assert_eq!(revoke(&app, Some(&session)).await.status, StatusCode::OK);
     assert!(
         issue_round_trip(&app)
             .await
             .location()
-            .starts_with("/api-tokens/?issue=too_young")
+            .starts_with("/api-tokens/?issue=capped")
     );
-    // The rework path does not look.
+
+    // The 1st arrives.
+    gateway.with(|s| {
+        s.keys[0].last_updated_at = the_3rd_of(first_of_month_offset(-1));
+    });
     assert_eq!(
-        rework_round_trip(&app).await.location(),
-        "/api-tokens/?rework=ok"
-    );
-}
-
-/// The membership call carries the FRESH token from this round-trip's own
-/// exchange and names the configured guild — eligibility travels by
-/// re-authentication on a rework exactly as on an issue.
-#[tokio::test]
-async fn the_member_call_carries_the_fresh_token_on_a_rework() {
-    let discord = MockDiscord::start(GRANTED_SCOPE, None).await;
-    let gateway = MockGateway::start().await;
-    seed_attached(&gateway, 1_000);
-
-    rework_round_trip(&rework_app(&discord, &gateway)).await;
-
-    assert_eq!(discord.exchanges(), 1);
-    assert_eq!(discord.member_calls(), 1);
-    assert_eq!(
-        discord.member_bearer().as_deref(),
-        Some("Bearer an-access-token")
-    );
-    assert_eq!(discord.member_guild().as_deref(), Some(GUILD_ID));
-}
-
-/// The re-authorisation is a redirect, not a login: `prompt=none` rides on
-/// the rework's authorize URL as it does on the issue's.
-#[tokio::test]
-async fn the_rework_round_trip_suppresses_the_consent_screen() {
-    let discord = MockDiscord::start(GRANTED_SCOPE, None).await;
-    let gateway = MockGateway::start().await;
-    let app = rework_app(&discord, &gateway);
-
-    let login = call_path(app, "GET", "/api-tokens/api/auth/login?action=rework", None).await;
-    let query = login.location().split_once('?').unwrap().1.to_string();
-    let prompt = form_urlencoded::parse(query.as_bytes())
-        .find(|(k, _)| k == "prompt")
-        .map(|(_, v)| v.to_string());
-    assert_eq!(prompt.as_deref(), Some("none"));
-}
-
-// ---------------------------------------------------------------------------
-// Discord ending the round-trip early
-// ---------------------------------------------------------------------------
-
-/// A narrow or wider grant lands on `?rework=denied` before any member call
-/// — the registration drift the issue flow has a designed state for, and
-/// the rework the same.
-#[tokio::test]
-async fn a_drifted_grant_lands_on_rework_denied_before_any_member_call() {
-    for drifted in ["identify", "identify guilds.members.read guilds"] {
-        let discord = MockDiscord::start(drifted, None).await;
-        let gateway = MockGateway::start().await;
-        seed_attached(&gateway, 1_000);
-
-        let reply = rework_round_trip(&rework_app(&discord, &gateway)).await;
-        assert_eq!(reply.status, StatusCode::SEE_OTHER, "{drifted}");
-        assert_eq!(reply.location(), "/api-tokens/?rework=denied", "{drifted}");
-        assert_eq!(discord.member_calls(), 0, "{drifted}");
-        assert_eq!(gateway.with(|s| s.ops.len()), 0, "{drifted}");
-    }
-}
-
-/// Cancelled at Discord's screen → `?rework=cancelled`; refused by Discord
-/// for any other reason → `?rework=denied`. Neither is a verdict, and
-/// neither lands on the issue's or sign-in's banners.
-#[tokio::test]
-async fn a_rework_ended_at_discord_lands_on_its_own_cancelled_or_denied_state() {
-    let discord = MockDiscord::start(GRANTED_SCOPE, None).await;
-    let gateway = MockGateway::start().await;
-    let app = rework_app(&discord, &gateway);
-
-    for (error, expected) in [
-        ("access_denied", "/api-tokens/?rework=cancelled"),
-        ("invalid_scope", "/api-tokens/?rework=denied"),
-    ] {
-        let login = call_path(
-            app.clone(),
-            "GET",
-            "/api-tokens/api/auth/login?action=rework",
-            None,
-        )
-        .await;
-        let pending = login.cookie(cookies::PENDING_COOKIE).unwrap();
-        let query = login.location().split_once('?').unwrap().1.to_string();
-        let state = form_urlencoded::parse(query.as_bytes())
-            .find(|(k, _)| k == "state")
-            .unwrap()
-            .1
-            .to_string();
-
-        let reply = call_path(
-            app.clone(),
-            "GET",
-            &format!("/api-tokens/api/auth/callback?error={error}&state={state}"),
-            Some(&format!("{}={pending}", cookies::PENDING_COOKIE)),
-        )
-        .await;
-        assert_eq!(reply.location(), expected, "{error}");
-    }
-    assert_eq!(discord.exchanges(), 0);
-}
-
-/// Discord failing the exchange or the identity read on a rework is
-/// `unknown` — a landing, never the sign-in arm's `502` page.
-#[tokio::test]
-async fn a_discord_failure_mid_round_trip_lands_on_rework_unknown() {
-    let gateway = MockGateway::start().await;
-    seed_attached(&gateway, 1_000);
-
-    let exchange_down =
-        MockDiscord::start(GRANTED_SCOPE, Some(StatusCode::SERVICE_UNAVAILABLE)).await;
-    let reply = rework_round_trip(&rework_app(&exchange_down, &gateway)).await;
-    assert_eq!(reply.status, StatusCode::SEE_OTHER);
-    assert_eq!(reply.location(), "/api-tokens/?rework=unknown");
-
-    let identity_down = MockDiscord::start_full(
-        GRANTED_SCOPE,
-        None,
-        MemberReply::Member {
-            pending: Some(false),
-        },
-        USER_ID,
-        Some(StatusCode::TOO_MANY_REQUESTS),
-    )
-    .await;
-    let reply = rework_round_trip(&rework_app(&identity_down, &gateway)).await;
-    assert_eq!(reply.location(), "/api-tokens/?rework=unknown");
-    assert_eq!(gateway.with(|s| s.ops.len()), 0);
-}
-
-/// An unwired deployment refuses to START a rework, with a landing rather
-/// than a JSON page, and mints no pending cookie.
-#[tokio::test]
-async fn an_unwired_deployment_refuses_to_start_a_rework() {
-    let discord = MockDiscord::start(GRANTED_SCOPE, None).await;
-    let unwired = build_app_with(
-        true,
-        None,
-        Endpoints {
-            api_base: discord.base.clone(),
-            ..Endpoints::default()
-        },
-        None,
+        issue_round_trip(&app).await.location(),
+        "/api-tokens/?issue=ok"
     );
 
-    let reply = call_path(
-        unwired,
-        "GET",
-        "/api-tokens/api/auth/login?action=rework",
-        None,
-    )
-    .await;
-    assert_eq!(reply.status, StatusCode::SEE_OTHER);
-    assert_eq!(reply.location(), "/api-tokens/?rework=failed");
-    assert!(reply.cookie(cookies::PENDING_COOKIE).is_none());
-    assert_eq!(discord.exchanges(), 0);
-}
-
-// ---------------------------------------------------------------------------
-// The control plane, after membership passed — every failure leaves the key
-// ---------------------------------------------------------------------------
-
-/// A control plane that is down after a passed check is `failed` — not
-/// `unknown` — and the old key is untouched.
-#[tokio::test]
-async fn a_control_plane_failure_lands_on_failed_with_the_old_key_intact() {
-    let discord = MockDiscord::start(GRANTED_SCOPE, None).await;
-    let gateway = MockGateway::start().await;
-    let old = seed_attached(&gateway, 1_000);
-    gateway.with(|s| s.fail_list = true);
-
-    let reply = rework_round_trip(&rework_app(&discord, &gateway)).await;
-    assert_eq!(reply.location(), "/api-tokens/?rework=failed");
-    assert_eq!(discord.member_calls(), 1, "membership ran and passed");
-    assert_eq!(gateway.with(|s| s.keys[0].id.clone()), old);
-    assert_eq!(gateway.with(|s| s.ops.len()), 0);
-}
-
-/// A delete of the old key that fails rolls the replacement back: the
-/// visitor is told it failed, and what they hold is exactly the key they
-/// had — not two keys of which the page reveals the older.
-#[tokio::test]
-async fn a_failed_delete_of_the_old_key_rolls_the_replacement_back() {
-    let discord = MockDiscord::start(GRANTED_SCOPE, None).await;
-    let gateway = MockGateway::start().await;
-    let old = seed_attached(&gateway, 1_000);
-    gateway.with(|s| s.fail_delete_of = vec![old.clone()]);
-
-    let reply = rework_round_trip(&rework_app(&discord, &gateway)).await;
-    assert_eq!(reply.location(), "/api-tokens/?rework=failed");
-
-    let stored = gateway.with(|s| s.keys.clone());
-    assert_eq!(stored.len(), 1, "exactly the key they had");
-    assert_eq!(stored[0].id, old);
-    // The replacement was created, attached, and then deleted again.
-    let ops = gateway.with(|s| s.ops.clone());
-    let new = ops[0].trim_start_matches("create:").to_string();
-    assert_eq!(
-        ops,
-        vec![
-            format!("create:{new}"),
-            format!("attach:{new}"),
-            format!("delete:{new}")
-        ]
-    );
-    assert_eq!(reveal(&gateway, USER_ID).await.json()["key_id"], old);
-}
-
-/// A replacement that vanishes before it can be attached is `failed` with
-/// the old key untouched — the visitor never lost anything.
-#[tokio::test]
-async fn a_replacement_that_vanishes_before_the_attach_leaves_the_old_key() {
-    let discord = MockDiscord::start(GRANTED_SCOPE, None).await;
-    let gateway = MockGateway::start().await;
-    let old = seed_attached(&gateway, 1_000);
-    gateway.with(|s| s.vanish_on_next_attach = true);
-
-    let reply = rework_round_trip(&rework_app(&discord, &gateway)).await;
-    assert_eq!(reply.location(), "/api-tokens/?rework=failed");
     gateway.with(|s| {
         assert_eq!(s.keys.len(), 1);
-        assert_eq!(s.keys[0].id, old);
-        assert!(s.plan_keys.contains(&(PLAN_ID.to_string(), old.clone())));
+        assert_ne!(s.keys[0].id, first.id);
+        assert_ne!(s.keys[0].value, first.value);
+        assert!(s.deleted.contains(&first.id));
     });
+    let revealed = reveal_via(&app).await;
+    assert_eq!(revealed.status, StatusCode::OK);
+    assert_ne!(revealed.json()["value"], first.value);
 }
 
-/// A usage plan that does not exist is `failed`, and the old key stays.
+/// Every revoke answer is uncacheable and sets no cookie.
 #[tokio::test]
-async fn a_missing_usage_plan_is_failed_without_deleting_the_old_key() {
+async fn every_revoke_answer_carries_no_store() {
     let discord = MockDiscord::start(GRANTED_SCOPE, None).await;
     let gateway = MockGateway::start().await;
-    let old = seed_attached(&gateway, 1_000);
-    gateway.with(|s| s.attach_always_404 = true);
+    let app = app_with_discord(&discord, &gateway);
 
-    let reply = rework_round_trip(&rework_app(&discord, &gateway)).await;
-    assert_eq!(reply.location(), "/api-tokens/?rework=failed");
-    assert!(gateway.with(|s| s.keys.iter().any(|k| k.id == old)));
-    assert_eq!(gateway.with(|s| s.deleted.len()), 0);
-}
-
-/// A control plane slower than the deadline is `failed` — an answer, not a
-/// Lambda-killed invocation — and the old key stays.
-#[tokio::test]
-async fn a_control_plane_slower_than_the_deadline_lands_on_failed() {
-    let discord = MockDiscord::start(GRANTED_SCOPE, None).await;
-    let gateway = MockGateway::start().await;
-    let old = seed_attached(&gateway, 1_000);
-    // The listing is held past the deadline the issue deps carry; the budget
-    // arithmetic caps the swap at what is left of `ISSUE_BUDGET` (12s), so
-    // hold for longer than that.
-    gateway.with(|s| s.list_delay_ms = 13_000);
-
-    let reply = rework_round_trip(&rework_app(&discord, &gateway)).await;
-    assert_eq!(reply.location(), "/api-tokens/?rework=failed");
-    assert_eq!(gateway.with(|s| s.keys[0].id.clone()), old);
-    assert_eq!(gateway.with(|s| s.ops.len()), 0);
-}
-
-// ---------------------------------------------------------------------------
-// The usage cache
-// ---------------------------------------------------------------------------
-
-/// A successful rework evicts the usage route's cached answer: the numbers
-/// it held describe a key that no longer exists, and the new key starts from
-/// a clean counter. Driven through the real router so the callback and the
-/// usage route share one cache.
-#[tokio::test]
-async fn a_successful_rework_evicts_the_cached_usage_of_the_old_key() {
-    let discord = MockDiscord::start(GRANTED_SCOPE, None).await;
-    let gateway = MockGateway::start().await;
-    let old = seed_attached(&gateway, 1_000);
-    gateway.with(|s| {
-        s.usage.insert(old.clone(), vec![vec![42, 99_958]]);
-    });
-    let app = rework_app(&discord, &gateway);
-    let session = session_cookie(USER_ID);
-
-    let before = call_path(app.clone(), "GET", USAGE_PATH, Some(&session)).await;
-    assert_eq!(before.status, StatusCode::OK);
-    assert_eq!(before.json()["used"], 42);
-    assert_eq!(gateway.with(|s| s.usage_calls), 1);
-
-    assert_eq!(
-        rework_round_trip(&app).await.location(),
-        "/api-tokens/?rework=ok"
-    );
-
-    // Well inside the 60s TTL, so only the eviction can explain a second
-    // control-plane read — and its answer is the NEW key's: nothing recorded.
-    let after = call_path(app, "GET", USAGE_PATH, Some(&session)).await;
-    assert_eq!(after.status, StatusCode::OK);
-    assert!(
-        after.json()["used"].is_null(),
-        "{}",
-        String::from_utf8_lossy(&after.body)
-    );
-    assert_eq!(gateway.with(|s| s.usage_calls), 2);
-    let new = gateway.with(|s| s.keys[0].id.clone());
-    assert_eq!(
-        gateway.with(|s| s.usage_queries.last().unwrap().0.clone()),
-        new
-    );
-}
-
-// ---------------------------------------------------------------------------
-// Identity
-// ---------------------------------------------------------------------------
-
-/// A session for somebody else does not survive the round-trip: the fresh
-/// identity names the key that is replaced and the cookie now says so.
-#[tokio::test]
-async fn the_re_auth_identity_decides_whose_key_is_replaced() {
-    let discord = MockDiscord::start(GRANTED_SCOPE, None).await;
-    let gateway = MockGateway::start().await;
-    let mine = seed_attached(&gateway, 1_000);
-    let theirs = gateway.with(|s| s.seed("discord-999999999999999999-key", 1_000));
-    let app = rework_app(&discord, &gateway);
-
-    let login = call_path(
-        app.clone(),
-        "GET",
-        "/api-tokens/api/auth/login?action=rework",
-        None,
-    )
-    .await;
-    let pending = login.cookie(cookies::PENDING_COOKIE).unwrap();
-    let query = login.location().split_once('?').unwrap().1.to_string();
-    let state = form_urlencoded::parse(query.as_bytes())
-        .find(|(k, _)| k == "state")
-        .unwrap()
-        .1
-        .to_string();
-    let other = session_cookie("999999999999999999");
-    let reply = call_path(
-        app,
-        "GET",
-        &format!("/api-tokens/api/auth/callback?code=c&state={state}"),
-        Some(&format!("{}={pending}; {other}", cookies::PENDING_COOKIE)),
-    )
-    .await;
-
-    assert_eq!(reply.location(), "/api-tokens/?rework=ok");
-    let cookie = reply.cookie(cookies::SESSION_COOKIE).unwrap();
-    let session = prices_api::portal::auth::session::Session::decode(
-        SIGNING_KEY.as_bytes(),
-        &cookie,
-        state_token::now_secs(),
-    )
-    .unwrap();
-    assert_eq!(session.sub, USER_ID);
-    assert_eq!(gateway.with(|s| s.deleted.clone()), vec![mine]);
-    assert!(
-        gateway.with(|s| s.keys.iter().any(|k| k.id == theirs)),
-        "theirs is untouched"
-    );
-}
-
-/// Every pre-check answer is uncacheable.
-#[tokio::test]
-async fn every_pre_check_answer_carries_no_store() {
-    let discord = MockDiscord::start(GRANTED_SCOPE, None).await;
-    let gateway = MockGateway::start().await;
-    let app = rework_app(&discord, &gateway);
-
-    let no_key = precheck(&app, Some(&session_cookie(USER_ID))).await;
-    assert_eq!(no_key.cache_control(), "no-store");
-    let unauthenticated = precheck(&app, None).await;
-    assert_eq!(unauthenticated.cache_control(), "no-store");
-
-    seed_attached(&gateway, now_secs());
-    let capped = precheck(&app, Some(&session_cookie(USER_ID))).await;
-    assert_eq!(capped.status, StatusCode::CONFLICT);
-    assert_eq!(capped.cache_control(), "no-store");
-    assert!(capped.headers.get(header::SET_COOKIE).is_none());
+    for reply in [
+        revoke(&app, None).await,
+        revoke(&app, Some(&session_cookie(USER_ID))).await,
+    ] {
+        assert_eq!(reply.cache_control(), "no-store");
+        assert!(reply.headers.get(header::SET_COOKIE).is_none());
+    }
 }

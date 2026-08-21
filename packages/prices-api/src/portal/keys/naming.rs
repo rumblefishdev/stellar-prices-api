@@ -79,6 +79,32 @@ pub struct KeyRecord {
     /// ranks a missing value **last** so that a key we cannot date can never
     /// beat one we can.
     pub created_at: Option<u64>,
+    /// Whether the key is enabled (task 0191). A key the owner has revoked is
+    /// **disabled, not deleted**: it stays in the account as the record of
+    /// the revocation, because there is no registry (task 0190) and the only
+    /// fact that can refuse a re-issue inside the same quota period is a
+    /// disabled key whose [`Self::last_updated_at`] falls inside it.
+    pub enabled: bool,
+    /// `lastUpdatedDate`, Unix seconds — for a disabled key, the instant it
+    /// was revoked, which is what the re-issue cap is decided against.
+    pub last_updated_at: Option<u64>,
+}
+
+/// The key the owner currently holds, among `records`: the earliest **enabled**
+/// key if there is one, otherwise the earliest key of any state (task 0191).
+///
+/// Enabled keys win over disabled ones whatever their dates, because a
+/// disabled key is a revocation record and an enabled one is a credential: if
+/// both exist (a console re-enable, a duplicate), the credential is what the
+/// visitor is holding and what a revoke must act on. Among keys of one state
+/// the rule is [`choose_winner`]'s, so both sides of a double-submit agree.
+pub fn current_key(records: &[KeyRecord]) -> Option<&KeyRecord> {
+    let enabled: Vec<&KeyRecord> = records.iter().filter(|r| r.enabled).collect();
+    if enabled.is_empty() {
+        choose_winner(records)
+    } else {
+        enabled.into_iter().min_by_key(|r| rank(r))
+    }
 }
 
 /// Keep only the records whose name is **exactly** `name`.
@@ -128,7 +154,36 @@ mod tests {
             id: id.into(),
             name: name.into(),
             created_at,
+            enabled: true,
+            last_updated_at: created_at,
         }
+    }
+
+    fn disabled(id: &str, name: &str, created_at: Option<u64>) -> KeyRecord {
+        KeyRecord {
+            enabled: false,
+            ..record(id, name, created_at)
+        }
+    }
+
+    /// A credential beats a revocation record whatever their dates; among
+    /// credentials the earliest wins; with no credential the earliest record
+    /// is what the re-issue cap is read from.
+    #[test]
+    fn the_current_key_is_the_earliest_enabled_one_or_else_the_earliest_record() {
+        let records = vec![
+            disabled("revoked-early", "n", Some(10)),
+            record("live-late", "n", Some(200)),
+            record("live-early", "n", Some(100)),
+        ];
+        assert_eq!(current_key(&records).unwrap().id, "live-early");
+
+        let only_disabled = vec![
+            disabled("later", "n", Some(20)),
+            disabled("earlier", "n", Some(10)),
+        ];
+        assert_eq!(current_key(&only_disabled).unwrap().id, "earlier");
+        assert!(current_key(&[]).is_none());
     }
 
     #[test]

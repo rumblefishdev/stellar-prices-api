@@ -127,24 +127,28 @@ appears as an acceptance criterion in every iteration of our design response
       three samples and was re-run). The real `MONTH` rollover cannot be observed before
       **1 September 2026**; until then the proxy is evidence, not proof, and nothing here
       presents the boundary as AWS-documented.
-  - **Rework is a swap, not a delete-and-wait (settled 2026-08-07):** the old key is
+  - ~~**Rework is a swap, not a delete-and-wait (settled 2026-08-07):** the old key is
     deleted and a new one issued in the same operation, so a user is never left without
-    a working key. The cap blocks the _next_ rework, not the replacement. Eligibility is
-    measured from `coalesce(last_rotated_at, created_at)`, so a key issued inside the
-    current period cannot be reworked either — without that fallback a user could take a
-    key, exhaust the quota and rework into a clean counter within the same period, which
-    is the loophole this cap exists to close.
-  - **Rework flow on the dashboard (settled 2026-08-07):** the action opens a modal that
-    states plainly that the current key is deleted and **stops working immediately** —
-    anything using it breaks the moment the user confirms. The confirm button stays disabled
-    until the user types the phrase **`delete-key`**. A refused rework (one already performed
-    in the current quota period) renders the next eligible date, not a generic error.
-  - **Revocation is not covered.** This heading says "Rotation/revocation", but only rotation
-    is specified above and rotation does not appear in the acceptance criteria below. A user
-    whose key leaks mid-period cannot invalidate it and must wait for the period boundary.
-    API Gateway exposes `UpdateApiKey(enabled=false)`, which invalidates a key in one call
-    without touching the quota counter, so this is cheap to add and does not need to share
-    the rework cap. Recorded here as a known gap, deliberately deferred.
+    a working key. The cap blocks the _next_ rework, not the replacement.~~
+    **Superseded 2026-08-21 (Adam, task 0191): rework IS delete-and-wait.** "Replace my
+    key" deactivates the current key immediately (`UpdateApiKey enabled=false`) and
+    issues nothing; a new key can be issued only from the start of the next quota
+    period. The owner is keyless until the 1st, and that is the point: a leaked key on
+    the 3rd dies on the 3rd, and the replacement being a month away is what stops
+    "replace" from being a free counter reset. The disabled key is the revocation
+    record (its `lastUpdatedDate` decides the re-issue cap) — no registry needed.
+    This absorbs task 0192's revoke; revoke and replace are one action.
+    The original reasoning stays struck through above rather than deleted, so the
+    2026-08-07 decision and its reversal are both on the record.
+  - **Rework flow on the dashboard (settled 2026-08-07, wording updated 2026-08-21):** the
+    action opens a modal that states plainly that the current key is deactivated and
+    **stops working immediately** — anything using it breaks the moment the user confirms
+    — and that **no new key is issued until the next quota period**. The confirm button
+    stays disabled until the user types the phrase **`delete-key`**. A revoked user who
+    asks for a key early is shown the next eligible date, not a generic error.
+  - ~~**Revocation is not covered.**~~ **Covered since 2026-08-21 (task 0191):** replace
+    _is_ revocation — `UpdateApiKey(enabled=false)`, immediate, session-only, counter
+    preserved (measured, 0180 item 8) — and the re-issue waits for the next period.
 
 ## Rate limiting — override the design doc's default
 

@@ -1,8 +1,9 @@
-//! The API Gateway **control plane**, wrapped down to six calls (task 0187,
-//! plus task 0188's `GetUsage`).
+//! The API Gateway **control plane**, wrapped down to seven calls (task 0187,
+//! task 0188's `GetUsage`, task 0191's `UpdateApiKey`).
 //!
 //! Not the data plane. These are `GetApiKeys`, `CreateApiKey`,
-//! `CreateUsagePlanKey`, `GetApiKey`, `DeleteApiKey` and `GetUsage` — the API
+//! `CreateUsagePlanKey`, `GetApiKey`, `DeleteApiKey`, `UpdateApiKey`
+//! (disable only) and `GetUsage` — the API
 //! the console drives — and they are the reason this slice needs no database:
 //! **API Gateway is the source of truth for whether a key exists** (task 0158's
 //! own argument, restated in 0187's context), and for how much it has been
@@ -362,6 +363,11 @@ impl Gateway {
                         .created_date()
                         .map(|d| d.secs())
                         .and_then(|secs| u64::try_from(secs).ok()),
+                    enabled: item.enabled(),
+                    last_updated_at: item
+                        .last_updated_date()
+                        .map(|d| d.secs())
+                        .and_then(|secs| u64::try_from(secs).ok()),
                 });
             }
 
@@ -419,9 +425,57 @@ impl Gateway {
                     .created_date()
                     .map(|d| d.secs())
                     .and_then(|secs| u64::try_from(secs).ok()),
+                enabled: created.enabled(),
+                last_updated_at: created
+                    .last_updated_date()
+                    .map(|d| d.secs())
+                    .and_then(|secs| u64::try_from(secs).ok()),
             },
             KeyValue(value.to_string()),
         ))
+    }
+
+    /// Disable a key — `UpdateApiKey` with `replace /enabled false` — the
+    /// revocation (task 0191).
+    ///
+    /// **Disable, not delete.** Both take ~25 s to reach the data plane (0180
+    /// item 8, measured), so deleting buys no speed; what disabling buys is
+    /// the *record*: the key stays in the account with its `lastUpdatedDate`
+    /// as the revocation instant, and that is the only thing — with no
+    /// registry — that can refuse a re-issue inside the same quota period.
+    /// The counter is preserved across disable (same measurement), so the
+    /// dashboard keeps reporting the revoked key's usage honestly.
+    ///
+    /// `Ok(false)` is the deletion race — the key was listed and is gone — and
+    /// is a state the caller has an answer for (nothing to revoke), not an
+    /// error.
+    pub async fn disable(&self, key_id: &str) -> Result<bool, GatewayError> {
+        let patch = aws_sdk_apigateway::types::PatchOperation::builder()
+            .op(aws_sdk_apigateway::types::Op::Replace)
+            .path("/enabled")
+            .value("false")
+            .build();
+        match self
+            .client
+            .update_api_key()
+            .api_key(key_id)
+            .patch_operations(patch)
+            .send()
+            .await
+        {
+            Ok(_) => Ok(true),
+            Err(e) => {
+                let message = sdk_message(&e);
+                if e.into_service_error().is_not_found_exception() {
+                    Ok(false)
+                } else {
+                    Err(GatewayError::Call {
+                        operation: "UpdateApiKey",
+                        message,
+                    })
+                }
+            }
+        }
     }
 
     /// Attach a key to the free usage plan, which is what makes it work against

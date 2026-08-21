@@ -3,19 +3,7 @@ import { MemoryRouter, useLocation } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { ROUTER_BASENAME } from '../base-path';
-import { navigateTo } from '../api/portal';
 import App from './app';
-
-/**
- * The rework confirmation (task 0191) ends in a top-level navigation, and
- * jsdom's `window.location` cannot be replaced — so the API module's
- * `navigateTo` seam is the one export mocked here, and everything else in the
- * module stays real (the `fetch` stubs below exercise it).
- */
-vi.mock('../api/portal', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('../api/portal')>()),
-  navigateTo: vi.fn(),
-}));
 
 /**
  * Records the router's current query string, so the one-shot landing-param
@@ -83,10 +71,8 @@ const ME_URL = '/api-tokens/api/auth/me';
 const LOGOUT_URL = '/api-tokens/api/auth/logout';
 const USAGE_URL = '/api-tokens/api/usage';
 const KEY_URL = '/api-tokens/api/key';
-/** The rework pre-check (task 0191). */
+/** The revocation — "Replace my key" (task 0191). */
 const REWORK_URL = '/api-tokens/api/key/rework';
-/** Where the armed confirmation navigates (task 0191). */
-const REWORK_HREF = '/api-tokens/api/auth/login?action=rework';
 /** Where both "get my API key" and every retry link point (task 0189). */
 const ISSUE_HREF = '/api-tokens/api/auth/login?action=issue';
 
@@ -1651,7 +1637,6 @@ describe('usage against quota', () => {
 describe('replace my key', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
-    vi.mocked(navigateTo).mockReset();
   });
   afterEach(() => {
     vi.unstubAllGlobals();
@@ -1663,20 +1648,30 @@ describe('replace my key', () => {
     value: 'aBcDeF0123456789aBcDeF0123456789aBcDeF01',
   };
 
-  /** The pre-check's two answers, as the backend shapes them. */
-  const reworkAllowed = () => ({ json: async () => ({ eligible: true }) });
-  const reworkCapped = () => ({
+  const REVOKED = {
+    revoked: true,
+    next_eligible_at: '2026-09-01T00:00:00Z',
+    revoked_at: '2026-08-21T12:00:00Z',
+  };
+
+  /** The reveal's answer once the key is revoked (task 0191). */
+  const keyRevoked = () => ({
     ok: false,
-    status: 409,
+    status: 404,
     json: async () => ({
-      code: 'rework_capped',
-      message: 'your key was already issued or replaced this quota period',
-      details: { next_eligible_at: '2026-09-01T00:00:00Z' },
+      code: 'key_revoked',
+      message: 'your API key was revoked',
+      details: {
+        next_eligible_at: '2026-09-01T00:00:00Z',
+        revoked_at: '2026-08-21T12:00:00Z',
+      },
     }),
   });
 
-  const signedInWithKey = (
-    rework: () => Partial<Response> & { json?: () => unknown } = reworkAllowed,
+  const signedIn = (
+    revoke: () => Partial<Response> & { json?: () => unknown } = () => ({
+      json: async () => REVOKED,
+    }),
     key: () => Partial<Response> & { json?: () => unknown } = () => ({
       json: async () => KEY,
     }),
@@ -1692,7 +1687,7 @@ describe('replace my key', () => {
       }),
       [KEY_URL]: key,
       [USAGE_URL]: usageNoKey,
-      [REWORK_URL]: rework,
+      [REWORK_URL]: revoke,
     });
 
   const renderApp = (entry = '/') =>
@@ -1708,29 +1703,23 @@ describe('replace my key', () => {
     return screen.findByTestId('replace-key-dialog');
   };
 
+  const revokeCalls = (fetchMock: ReturnType<typeof stubRoutes>) =>
+    fetchMock.mock.calls.filter(([url]) => url === REWORK_URL);
+
   /**
-   * The control lives beside the key and nowhere else — there is nothing to
-   * replace without one — and pressing it opens a confirmation rather than
-   * navigating: the round-trip is reachable only from the armed confirm.
+   * The control lives beside the key and nowhere else, and pressing it opens
+   * a confirmation: nothing is sent to the backend until the armed confirm.
    */
-  it('offers replacement only beside an existing key, and opens a dialog rather than navigating', async () => {
-    const fetchMock = signedInWithKey();
+  it('offers replacement only beside an existing key, and opening the dialog sends nothing', async () => {
+    const fetchMock = signedIn();
     renderApp();
 
     await openDialog();
-    expect(navigateTo).not.toHaveBeenCalled();
-    // The pre-check is a POST to the rework route, relative and key-less.
-    const call = fetchMock.mock.calls.find(([url]) => url === REWORK_URL) as [
-      string,
-      RequestInit,
-    ];
-    expect(call).toBeTruthy();
-    expect(call[0].startsWith('http')).toBe(false);
-    expect(call[1]?.method).toBe('POST');
+    expect(revokeCalls(fetchMock)).toHaveLength(0);
   });
 
   it('does not offer replacement to a visitor with no key', async () => {
-    signedInWithKey(reworkAllowed, keyNoKey);
+    signedIn(undefined, keyNoKey);
     renderApp();
 
     await screen.findByRole('link', { name: /get my api key/i });
@@ -1738,26 +1727,26 @@ describe('replace my key', () => {
   });
 
   /**
-   * The wording is the acceptance criterion: the old key dies immediately,
-   * and the visitor is told so before they can confirm anything.
+   * The wording is the acceptance criterion: the key is deactivated
+   * immediately, and no new key is issued until the next period.
    */
-  it('states that the current key is deleted and stops working immediately', async () => {
-    signedInWithKey();
+  it('states that the key is deactivated immediately and that no new key is issued until the next period', async () => {
+    signedIn();
     renderApp();
 
     await openDialog();
     const warning = await screen.findByTestId('replace-key-warning');
-    expect(warning.textContent).toMatch(/deletes the current one/i);
-    expect(warning.textContent).toMatch(/stops working immediately/i);
+    expect(warning.textContent).toMatch(
+      /deactivates the current one immediately/i,
+    );
     expect(warning.textContent).toMatch(/will break/i);
+    expect(warning.textContent).toMatch(/no new key is issued now/i);
+    expect(warning.textContent).toMatch(/next quota period/i);
   });
 
-  /**
-   * Confirm is disabled until `delete-key` is typed — exactly that phrase —
-   * and the round-trip is not started by anything short of the armed press.
-   */
+  /** Confirm is disabled until `delete-key` is typed — exactly that phrase. */
   it('keeps confirm disabled until the visitor types delete-key', async () => {
-    signedInWithKey();
+    const fetchMock = signedIn();
     renderApp();
 
     await openDialog();
@@ -1767,25 +1756,24 @@ describe('replace my key', () => {
     const phrase = screen.getByTestId('replace-key-phrase') as HTMLInputElement;
     expect(confirm.disabled).toBe(true);
 
-    // Near misses do not arm it.
     for (const typed of ['delete', 'delete key', 'DELETE-KEY', 'delete-key ']) {
       fireEvent.change(phrase, { target: { value: typed } });
       expect(confirm.disabled, typed).toBe(true);
       fireEvent.click(confirm);
     }
-    expect(navigateTo).not.toHaveBeenCalled();
+    expect(revokeCalls(fetchMock)).toHaveLength(0);
 
     fireEvent.change(phrase, { target: { value: 'delete-key' } });
     expect(confirm.disabled).toBe(false);
   });
 
   /**
-   * One armed press is one navigation into the rework round-trip; the
-   * button is disabled again on submit, so a double-click cannot fire two
-   * reworks in the window before the page unloads.
+   * One armed press is one `POST`; the button is disabled again on submit so
+   * a double-click cannot fire two. On success the panel shows the revoked
+   * state with the backend's date, and the old value is gone from the page.
    */
-  it('navigates into the rework round-trip once and cannot double-fire', async () => {
-    signedInWithKey();
+  it('revokes with one POST, cannot double-fire, and renders the revoked state with the date', async () => {
+    const fetchMock = signedIn();
     renderApp();
 
     await openDialog();
@@ -1797,40 +1785,26 @@ describe('replace my key', () => {
     });
 
     fireEvent.click(confirm);
-    fireEvent.click(confirm);
-    fireEvent.click(confirm);
-
-    expect(navigateTo).toHaveBeenCalledTimes(1);
-    expect(navigateTo).toHaveBeenCalledWith(REWORK_HREF);
     expect(confirm.disabled).toBe(true);
-    expect(confirm.textContent).toMatch(/replacing/i);
-    // And the phrase cannot be edited back into an armed state mid-submit.
-    expect(
-      (screen.getByTestId('replace-key-phrase') as HTMLInputElement).disabled,
-    ).toBe(true);
+    fireEvent.click(confirm);
+    fireEvent.click(confirm);
+
+    const revoked = await screen.findByTestId('key-revoked');
+    expect(revoked.textContent).toMatch(/deactivated/i);
+    expect(revoked.textContent).toMatch(/1 September 2026/);
+    expect(revoked.textContent).toMatch(/do not have a working key/i);
+    expect(revokeCalls(fetchMock)).toHaveLength(1);
+    expect((revokeCalls(fetchMock)[0][1] as RequestInit).method).toBe('POST');
+    expect(revokeCalls(fetchMock)[0][0].startsWith('http')).toBe(false);
+    expect(screen.queryByTestId('api-key')).toBeNull();
+    expect(document.body.textContent).not.toContain(KEY.value);
+    // And no issue link while the date is ahead.
+    expect(screen.queryByRole('link', { name: /get my api key/i })).toBeNull();
   });
 
-  /**
-   * Inside the cap there is nothing to confirm: the dialog renders the next
-   * eligible date — "1 September 2026", not a generic error — and never arms.
-   * The 3-August worked example, on the page.
-   */
-  it('renders the next eligible date instead of a confirm when the cap is in the way', async () => {
-    signedInWithKey(reworkCapped);
-    renderApp();
-
-    await openDialog();
-    const capped = await screen.findByTestId('replace-key-capped');
-    expect(capped.textContent).toMatch(/1 September 2026/);
-    expect(capped.textContent).not.toMatch(/2026-09-01T/);
-    expect(screen.queryByTestId('replace-key-confirm')).toBeNull();
-    expect(screen.queryByTestId('replace-key-phrase')).toBeNull();
-    expect(navigateTo).not.toHaveBeenCalled();
-  });
-
-  /** A pre-check that fails is a stated failure with the backend's reason. */
-  it("reports a failed pre-check with the backend's reason", async () => {
-    signedInWithKey(() => ({
+  /** A failed revoke says so and keeps the key — "revoked" is never false. */
+  it('reports a failed revoke and keeps the key live', async () => {
+    signedIn(() => ({
       ok: false,
       status: 502,
       json: async () => ({
@@ -1841,134 +1815,100 @@ describe('replace my key', () => {
     renderApp();
 
     await openDialog();
+    fireEvent.change(screen.getByTestId('replace-key-phrase'), {
+      target: { value: 'delete-key' },
+    });
+    fireEvent.click(screen.getByTestId('replace-key-confirm'));
+
+    const failed = await screen.findByTestId('replace-key-failed');
+    expect(failed.textContent).toMatch(/still active/i);
+    expect(failed.textContent).toMatch(/could not reach the API key service/i);
+    expect(screen.queryByTestId('key-revoked')).toBeNull();
+    expect(screen.getByTestId('api-key')).toBeTruthy();
+    // The dialog stays, re-armed, for a retry.
     expect(
-      await screen.findByText(/could not reach the API key service/i),
-    ).toBeTruthy();
-    expect(screen.queryByTestId('replace-key-confirm')).toBeNull();
+      (screen.getByTestId('replace-key-confirm') as HTMLButtonElement).disabled,
+    ).toBe(false);
   });
 
-  it('closes without navigating', async () => {
-    signedInWithKey();
+  it('closes without sending anything', async () => {
+    const fetchMock = signedIn();
     renderApp();
 
     await openDialog();
-    await screen.findByTestId('replace-key-confirm');
     fireEvent.click(screen.getByRole('button', { name: /cancel/i }));
     expect(screen.queryByTestId('replace-key-dialog')).toBeNull();
     expect(screen.getByTestId('replace-key-open')).toBeTruthy();
-    expect(navigateTo).not.toHaveBeenCalled();
+    expect(revokeCalls(fetchMock)).toHaveLength(0);
   });
 
   // -------------------------------------------------------------------------
-  // The landing states
+  // The revoked state on load, and the capped issue landing
   // -------------------------------------------------------------------------
-
-  /** A completed rework says so, names the old key as dead, shows the key. */
-  it('welcomes a completed rework and says the old key has stopped working', async () => {
-    signedInWithKey();
-    renderApp('/?rework=ok');
-
-    const landed = await screen.findByTestId('rework-ok');
-    expect(landed.textContent).toMatch(/old key has stopped working/i);
-    expect(await screen.findByTestId('api-key')).toBeTruthy();
-    expect(screen.queryByTestId('issue-ok')).toBeNull();
-  });
 
   /**
-   * `?rework=ok` is proof a key exists even while the listing catches up —
-   * a "no key" answer right after a rework renders as settling, not as an
-   * offer to issue a second key, and the usage section does not say "issue
-   * one above" either.
+   * A reload after a revoke: the reveal answers `key_revoked`, the page
+   * renders the date and never the value, and offers no issue link while the
+   * date is ahead.
    */
-  it('renders a settling wait, not "no key", when the rework redirect beats the listing', async () => {
-    signedInWithKey(reworkAllowed, keyNoKey);
-    renderApp('/?rework=ok');
+  it('renders a revoked key as revoked with the date, not as "no key"', async () => {
+    signedIn(undefined, keyRevoked);
+    renderApp();
 
-    const settling = await screen.findByTestId('issue-ok-settling');
-    expect(settling.textContent).toMatch(/replaced/i);
+    const revoked = await screen.findByTestId('key-revoked');
+    expect(revoked.textContent).toMatch(/1 September 2026/);
     expect(screen.queryByRole('link', { name: /get my api key/i })).toBeNull();
-    expect(document.body.textContent).not.toMatch(/issue one above/i);
+    expect(screen.queryByTestId('replace-key-open')).toBeNull();
+    // The key section's keyless copy (and its issue link) must not render;
+    // the usage section beside it may still say "no key" — that is its own
+    // endpoint's answer, stubbed here, not the key section's.
+    expect(screen.queryByText(/one key, on the free plan/i)).toBeNull();
   });
 
-  /** The refusal renders the date, from the URL, sanitised. */
-  it('renders a capped landing with the next eligible date', async () => {
-    signedInWithKey();
-    renderApp('/?rework=capped&next_eligible_at=2026-09-01');
+  /** Once the date has passed, the issue link comes back. */
+  it('offers the issue round-trip once the revocation period has passed', async () => {
+    signedIn(undefined, () => ({
+      ok: false,
+      status: 404,
+      json: async () => ({
+        code: 'key_revoked',
+        details: { next_eligible_at: '2020-01-01T00:00:00Z' },
+      }),
+    }));
+    renderApp();
 
-    const capped = await screen.findByTestId('rework-capped');
+    await screen.findByTestId('key-revoked');
+    const link = await screen.findByRole('link', { name: /get my api key/i });
+    expect(link.getAttribute('href')).toBe(ISSUE_HREF);
+  });
+
+  /** The capped issue landing renders the date, sanitised, and no link. */
+  it('renders a capped issue with the next eligible date', async () => {
+    signedIn(undefined, keyRevoked);
+    renderApp('/?issue=capped&next_eligible_at=2026-09-01');
+
+    const capped = await screen.findByTestId('issue-capped');
     expect(capped.textContent).toMatch(/1 September 2026/);
-    expect(capped.textContent).toMatch(/not replaced/i);
+    expect(capped.textContent).toMatch(/do not have a working key/i);
+    expect(capped.querySelector('a')).toBeNull();
   });
 
   it('sanitises a nonsense next_eligible_at instead of rendering it', async () => {
-    signedInWithKey();
-    renderApp('/?rework=capped&next_eligible_at=<script>nope');
+    signedIn(undefined, keyRevoked);
+    renderApp('/?issue=capped&next_eligible_at=<script>nope');
 
-    const capped = await screen.findByTestId('rework-capped');
+    const capped = await screen.findByTestId('issue-capped');
     expect(capped.textContent).toMatch(/start of the next quota period/i);
     expect(capped.textContent).not.toContain('<script>');
   });
 
-  /**
-   * A departed member is named the server and told their existing key keeps
-   * working — the non-goal, stated on the refusal itself.
-   */
-  it('names the server and keeps the key when the visitor has left the guild', async () => {
-    signedInWithKey();
-    renderApp('/?rework=not_member');
-
-    const refusal = await screen.findByTestId('rework-not-member');
-    expect(refusal.textContent).toMatch(/stellar developers discord/i);
-    expect(refusal.textContent).toMatch(/existing key keeps working/i);
-    expect(
-      screen
-        .getAllByRole('link', { name: /stellar developers discord/i })[0]
-        .getAttribute('href'),
-    ).toBe('https://discord.gg/stellardev');
-    expect(await screen.findByTestId('api-key')).toBeTruthy();
-  });
-
-  /** The three states that are not the visitor's doing read differently. */
-  it('renders could-not-verify, failed and denied as three different things, none an accusation', async () => {
-    for (const [state, testId, pattern] of [
-      ['unknown', 'rework-unknown', /not a statement about your membership/i],
-      ['failed', 'rework-failed', /our key service/i],
-      ['denied', 'rework-denied', /not something you did/i],
-    ] as const) {
-      signedInWithKey();
-      const view = renderApp(`/?rework=${state}`);
-      const landed = await screen.findByTestId(testId);
-      expect(landed.textContent, state).toMatch(pattern);
-      expect(landed.textContent, state).toMatch(/keeps working/i);
-      expect(screen.queryByTestId('rework-not-member')).toBeNull();
-      view.unmount();
-    }
-  });
-
-  it('says a cancelled rework was cancelled, and that nothing changed', async () => {
-    signedInWithKey();
-    renderApp('/?rework=cancelled');
-
-    const landed = await screen.findByTestId('rework-cancelled');
-    expect(landed.textContent).toMatch(/not replaced/i);
-    expect(screen.queryByTestId('rework-failed')).toBeNull();
-  });
-
-  it('offers the issue round-trip when there was no key to replace', async () => {
-    signedInWithKey(reworkAllowed, keyNoKey);
-    renderApp('/?rework=no_key');
-
-    const landed = await screen.findByTestId('rework-no-key');
-    expect(landed.querySelector('a')?.getAttribute('href')).toBe(ISSUE_HREF);
-  });
-
   /** One-shot, like every other landing param: stripped from the URL. */
-  it('clears the rework outcome from the URL so a reload does not repeat it', async () => {
-    signedInWithKey();
-    renderApp('/?rework=capped&next_eligible_at=2026-09-01');
+  it('clears the capped outcome from the URL so a reload does not repeat it', async () => {
+    signedIn(undefined, keyRevoked);
+    renderApp('/?issue=capped&next_eligible_at=2026-09-01');
 
-    await screen.findByTestId('rework-capped');
+    await screen.findByTestId('issue-capped');
     await waitFor(() => expect(lastSearch).toBe(''));
-    expect(screen.getByTestId('rework-capped')).toBeTruthy();
+    expect(screen.getByTestId('issue-capped')).toBeTruthy();
   });
 });

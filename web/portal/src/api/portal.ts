@@ -285,59 +285,33 @@ export const signInUrl = (): string => `${PORTAL_API}/auth/login`;
 export const issueUrl = (): string => `${PORTAL_API}/auth/login?action=issue`;
 
 /**
- * Where the "Replace my key" confirmation sends the visitor (task 0191).
+ * What `POST /api-tokens/api/key/rework` answers (task 0191): the revocation.
  *
- * The same plain-navigation reasoning as {@link issueUrl}: a rework re-proves
- * Discord membership (not account age — old enough once is old enough forever)
- * against a fresh token, which only a top-level navigation can fetch. The
- * callback swaps the key — the new one is created and attached BEFORE the old
- * one is deleted, so the visitor is never keyless — and lands back here with
- * `?rework=<outcome>`, which `app.tsx` renders. The once-per-quota-period cap
- * is decided there too; {@link checkRework} asks about it first so the modal
- * can say "next eligible 1 September" before anyone types anything.
+ * `next_eligible_at` is when a new key can be issued — the 1st of the next
+ * month, 00:00 UTC, under OUR period rule (not an AWS guarantee; see the
+ * backend's `portal/period.rs`). `revoked_at` is when the key went off.
  */
-export const reworkUrl = (): string => `${PORTAL_API}/auth/login?action=rework`;
+export interface PortalRevocation {
+  revoked: true;
+  next_eligible_at: string;
+  revoked_at: string;
+}
 
 /**
- * Perform a top-level navigation — the one the rework confirmation makes.
+ * `POST /api-tokens/api/key/rework` — "Replace my key": revoke the key NOW,
+ * issue nothing (task 0191).
  *
- * A one-line seam rather than `window.location.assign` at the call site,
- * because jsdom's `location` is unforgeable: neither `delete window.location`
- * nor `defineProperty` can replace it, so a component that navigates directly
- * cannot be tested for WHEN it navigates (once, only once armed, never on a
- * second click). The tests mock this export and assert on the calls.
+ * A `fetch`, not a navigation: unlike issuing, revoking needs no fresh Discord
+ * token — it is destructive to the visitor's own access and to nothing else,
+ * and a leaked key has to be killable while Discord is down. The session cookie
+ * rides on this same-origin `POST` (`SameSite=Lax` lets it; a cross-site page
+ * could not make the browser send it with a `POST`, which is the CSRF guard).
+ *
+ * The replacement is an ordinary `issueUrl()` round-trip — refused by the
+ * backend until the quota period of the revocation has rolled, which the page
+ * renders as the date rather than offering a link that would only be refused.
  */
-export const navigateTo = (url: string): void => {
-  window.location.assign(url);
-};
-
-/**
- * What `POST /api-tokens/api/key/rework` tells the modal (task 0191).
- *
- * `eligible: false` is the backend's `409 rework_capped`, with the
- * `next_eligible_at` from the envelope's `details` — RFC 3339, the 1st of the
- * next month 00:00 UTC under OUR period rule (not an AWS guarantee; see the
- * backend's `portal/period.rs`).
- */
-export type ReworkCheck =
-  | { eligible: true }
-  | { eligible: false; next_eligible_at: string };
-
-/**
- * `POST /api-tokens/api/key/rework` — may this key be replaced now?
- *
- * **Read-only on the backend**, despite the verb: it lists the caller's key and
- * compares its creation date with the current period's start. Nothing is
- * created, attached or deleted — that needs the `reworkUrl()` round-trip. The
- * modal calls this when it opens, so a visitor inside the cap sees the date
- * they can next rework instead of typing `delete-key` and crossing Discord for
- * a refusal.
- *
- * A `404 no_key` is thrown rather than mapped: the control that opens the modal
- * only renders beside a key, so reaching it keyless is a stale page, and the
- * honest rendering is the failure with the backend's own message.
- */
-export async function checkRework(): Promise<ReworkCheck> {
+export async function revokeKey(): Promise<PortalRevocation> {
   const url = `${PORTAL_API}/key/rework`;
   let response: Response;
   try {
@@ -354,43 +328,40 @@ export async function checkRework(): Promise<ReworkCheck> {
     }
     throw new PortalApiError(`${url} could not be reached`);
   }
-  if (response.status === 409) {
-    const envelope = (await readEnvelope(response)) as
-      | (ErrorEnvelope & { details?: { next_eligible_at?: unknown } })
-      | null;
-    const nextEligibleAt = envelope?.details?.next_eligible_at;
-    if (
-      envelope?.code === 'rework_capped' &&
-      typeof nextEligibleAt === 'string'
-    ) {
-      return { eligible: false, next_eligible_at: nextEligibleAt };
-    }
-    throw new PortalApiError(failureMessage(url, 409, envelope), 409);
-  }
   if (!response.ok) {
     throw new PortalApiError(
       failureMessage(url, response.status, await readEnvelope(response)),
       response.status,
     );
   }
+  let body: {
+    revoked?: unknown;
+    next_eligible_at?: unknown;
+    revoked_at?: unknown;
+  };
   try {
-    const body = (await response.json()) as { eligible?: unknown };
-    if (body.eligible !== true) {
-      // A `200` that does not say `eligible: true` is not a shape this client
-      // knows; refusing to arm the modal on it is the safe reading.
-      throw new PortalApiError(
-        `${url} answered 200 without eligible: true`,
-        200,
-      );
-    }
-    return { eligible: true };
-  } catch (error) {
-    if (error instanceof PortalApiError) throw error;
+    body = (await response.json()) as typeof body;
+  } catch {
     throw new PortalApiError(
       `${url} answered ${response.status}, not JSON`,
       response.status,
     );
   }
+  if (
+    body.revoked !== true ||
+    typeof body.next_eligible_at !== 'string' ||
+    typeof body.revoked_at !== 'string'
+  ) {
+    // A `200` that does not say `revoked: true` is not a shape this client
+    // knows; rendering "revoked" on it would be the one false statement this
+    // dialog must never make.
+    throw new PortalApiError(`${url} answered 200 without revoked: true`, 200);
+  }
+  return {
+    revoked: true,
+    next_eligible_at: body.next_eligible_at,
+    revoked_at: body.revoked_at,
+  };
 }
 
 /**
@@ -528,7 +499,18 @@ export async function fetchUsage(): Promise<PortalUsage | null> {
 }
 
 /**
- * Reveal the key this account already has, or learn there is none.
+ * What the key route says when the owner revoked their key (task 0191): no
+ * usable key, and no issue offered until `next_eligible_at`.
+ */
+export interface PortalKeyRevoked {
+  revoked: true;
+  next_eligible_at: string;
+  revoked_at?: string;
+}
+
+/**
+ * Reveal the key this account already has, or learn there is none — or that
+ * it was revoked and when a new one can be issued.
  *
  * `GET`, and — since task 0189 — safe to fire on load: the backend's key route
  * is **read-only by construction** (it can never create, attach or delete),
@@ -542,7 +524,7 @@ export async function fetchUsage(): Promise<PortalUsage | null> {
  * caution `fetchUsage` takes: an EMPTY 404 is task 0183's closed portal, and
  * reading it as "you have no key" would be a false statement.
  */
-export async function fetchKey(): Promise<PortalKey | null> {
+export async function fetchKey(): Promise<PortalKey | PortalKeyRevoked | null> {
   const url = `${PORTAL_API}/key`;
   let response: Response;
   try {
@@ -560,9 +542,29 @@ export async function fetchKey(): Promise<PortalKey | null> {
   }
   if (response.status === 404) {
     try {
-      const body = (await response.json()) as { code?: string };
+      const body = (await response.json()) as {
+        code?: string;
+        details?: { next_eligible_at?: unknown; revoked_at?: unknown };
+      };
       if (body.code === 'no_key') {
         return null;
+      }
+      // The owner revoked it (task 0191). Distinct from `no_key` because the
+      // page must NOT offer the issue round-trip: the backend would refuse it
+      // until the date, and a link that only ever refuses is worse than the
+      // date itself.
+      if (
+        body.code === 'key_revoked' &&
+        typeof body.details?.next_eligible_at === 'string'
+      ) {
+        return {
+          revoked: true,
+          next_eligible_at: body.details.next_eligible_at,
+          revoked_at:
+            typeof body.details.revoked_at === 'string'
+              ? body.details.revoked_at
+              : undefined,
+        };
       }
     } catch {
       // Not JSON — the gate's empty 404, or something else entirely.

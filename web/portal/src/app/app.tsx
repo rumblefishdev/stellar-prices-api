@@ -2,22 +2,20 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Route, Routes, useSearchParams } from 'react-router-dom';
 
 import {
-  checkRework,
   fetchKey,
   fetchPortalConfig,
   fetchSession,
   fetchUsage,
   issueUrl,
-  navigateTo,
-  reworkUrl,
+  revokeKey,
   signInUrl,
   signOut,
   PortalApiError,
   type PortalConfig,
   type PortalKey,
+  type PortalKeyRevoked,
   type PortalSession,
   type PortalUsage,
-  type ReworkCheck,
 } from '../api/portal';
 
 /**
@@ -53,17 +51,11 @@ type SessionState =
 /** The landing params sign-in's callback appends. */
 const SIGNIN_PARAMS = ['signin'] as const;
 /**
- * The landing params the issue callback (task 0189) and the rework callback
- * (task 0191) append. One list, read by one `useOneShotParams` call, so the
- * two families are stripped together: `wait_secs` only means anything beside
- * `issue=too_young`, `next_eligible_at` only beside `rework=capped`.
+ * The landing params the issue callback appends (task 0189; `next_eligible_at`
+ * since task 0191). `wait_secs` only means anything beside `issue=too_young`,
+ * `next_eligible_at` only beside `issue=capped`.
  */
-const KEY_LANDING_PARAMS = [
-  'issue',
-  'wait_secs',
-  'rework',
-  'next_eligible_at',
-] as const;
+const ISSUE_PARAMS = ['issue', 'wait_secs', 'next_eligible_at'] as const;
 
 /**
  * Read landing-state query params **once**, then strip them from the URL.
@@ -346,7 +338,7 @@ const MAX_WAIT_SECS = 100 * 365 * 24 * 60 * 60;
  *
  * The number comes from a URL parameter, so it is sanitised: digits only, and
  * clamped rather than rejected. **Never a calendar date** — that pattern is
- * right for 0191's weeks-long rework cap and absurd for minutes — and never a
+ * right for 0191's weeks-long re-issue wait and absurd for minutes — and never a
  * hard-coded "5 minutes": the copy follows what the backend computed from the
  * operator's threshold.
  *
@@ -378,21 +370,22 @@ function describeWait(waitSecs: string | null): string {
 }
 
 /**
- * Render the next-eligible date a capped rework carries (task 0191).
+ * Render the date a revoked key's replacement can be issued (task 0191).
  *
  * The pattern `describeWait` deliberately avoids — a calendar date — is the
  * right one here, because the wait is weeks: "1 September 2026" is what a
- * visitor refused on 3 August needs to read. The value arrives either from the
- * `409` envelope (RFC 3339) or from the landing URL (`YYYY-MM-DD`), and in
- * both cases it is OUR instant — the 1st of the next month, 00:00 UTC, under
- * the period rule the backend states — so it is rendered in UTC and not in
- * the viewer's zone, where "1 September 00:00 UTC" can read as 31 August.
+ * visitor who revoked on 3 August needs to read. The value arrives from the
+ * revoke answer, from the reveal's `key_revoked` envelope (RFC 3339) or from
+ * the `?issue=capped` landing URL (`YYYY-MM-DD`); in every case it is OUR
+ * instant — the 1st of the next month, 00:00 UTC, under the period rule the
+ * backend states — so it is rendered in UTC and not in the viewer's zone,
+ * where "1 September 00:00 UTC" can read as 31 August.
  *
- * Sanitised, because one of the two sources is a URL: anything that is not a
- * date at the front renders as "the start of the next quota period", which is
- * true of every capped rework whatever the URL said.
+ * Sanitised, because one of the sources is a URL: anything that is not a date
+ * at the front renders as "the start of the next quota period", which is true
+ * of every capped issue whatever the URL said.
  */
-function describeNextEligible(value: string | null): string {
+function describeNextEligible(value: string | null | undefined): string {
   const match = value ? /^(\d{4})-(\d{2})-(\d{2})/.exec(value) : null;
   if (!match) return 'the start of the next quota period';
   const [, year, month, day] = match;
@@ -408,7 +401,17 @@ function describeNextEligible(value: string | null): string {
   });
 }
 
-/** The phrase that arms the rework confirmation (task 0191). */
+/** Whether `nextEligibleAt` (RFC 3339 or `YYYY-MM-DD`) is still ahead. */
+function stillWaiting(nextEligibleAt: string): boolean {
+  const at = new Date(
+    nextEligibleAt.length === 10
+      ? `${nextEligibleAt}T00:00:00Z`
+      : nextEligibleAt,
+  );
+  return !Number.isNaN(at.getTime()) && at.getTime() > Date.now();
+}
+
+/** The phrase that arms the revocation (task 0191). */
 const REWORK_CONFIRM_PHRASE = 'delete-key';
 
 /**
@@ -418,63 +421,53 @@ const REWORK_CONFIRM_PHRASE = 'delete-key';
  * the key panel until dismissed — and unstyled like everything before task
  * 0193. The WORDING is this task's and is not re-decided later:
  *
- * - It states plainly that the current key is deleted and **stops working
- *   immediately**, so anything still using it breaks the moment the visitor
- *   confirms. The backend creates and attaches the new key BEFORE deleting
- *   the old one, so the visitor is never keyless — but "never keyless" is
- *   about the account, not about the scripts holding the old value.
+ * - It states plainly that the current key is **deactivated immediately**,
+ *   so anything still using it breaks the moment the visitor confirms — and
+ *   that **no new key is issued until the next quota period**. Replacing is a
+ *   revocation with a dated replacement, not a swap: if a swap handed out a
+ *   fresh key (a fresh counter), "replace my key" would be the button people
+ *   press on the 20th of a heavy month.
  * - Confirm is **disabled until the visitor types `delete-key`**, and
  *   disabled again the moment it is pressed, so a double-click cannot fire two
- *   reworks. The press is a top-level navigation into the `action=rework`
- *   round-trip (a rework re-proves Discord membership against a fresh token,
- *   which only a navigation can fetch); the disabled state covers the window
- *   before the page unloads.
+ *   requests. The press is a same-origin `POST` (`revokeKey`) — no Discord
+ *   round-trip, so a leaked key is killable while Discord is down.
  *
- * On open, the modal asks the backend's pre-check whether the once-per-period
- * cap is in the way. Inside the cap there is nothing to confirm, so the
- * confirmation never arms: the visitor reads the date they can next replace
- * the key — "1 September 2026", not a generic error — and closes.
+ * On success the parent renders the revoked state with the exact date from
+ * the backend's answer; on failure the dialog says so and stays open, with the
+ * key still live — "revoked" is never shown for a key that still works.
  */
-function ReplaceKey({ onClose }: { onClose: () => void }) {
-  type CheckView =
-    | { state: 'checking' }
-    | { state: 'allowed' }
-    | { state: 'capped'; nextEligibleAt: string }
-    | { state: 'failed'; reason: string };
-
-  const [check, setCheck] = useState<CheckView>({ state: 'checking' });
+function ReplaceKey({
+  onClose,
+  onRevoked,
+}: {
+  onClose: () => void;
+  onRevoked: (revoked: PortalKeyRevoked) => void;
+}) {
   const [typed, setTyped] = useState('');
   const [submitting, setSubmitting] = useState(false);
-
-  useEffect(() => {
-    let live = true;
-    checkRework()
-      .then((result: ReworkCheck) => {
-        if (!live) return;
-        setCheck(
-          result.eligible
-            ? { state: 'allowed' }
-            : { state: 'capped', nextEligibleAt: result.next_eligible_at },
-        );
-      })
-      .catch((cause: unknown) => {
-        if (live) setCheck({ state: 'failed', reason: describeFailure(cause) });
-      });
-    return () => {
-      live = false;
-    };
-  }, []);
+  const [failure, setFailure] = useState<string | null>(null);
 
   const armed = typed === REWORK_CONFIRM_PHRASE;
 
   const onConfirm = () => {
-    // Disabled from the first press: the navigation below unloads the page,
-    // but not synchronously, and a second click in that window must not start
-    // a second round-trip. The state change re-renders the button disabled
-    // before the browser leaves.
+    // Disabled from the first press, before the request is even made: a
+    // second click in the window before the answer must not start a second
+    // request. The state change re-renders the button disabled synchronously.
     if (!armed || submitting) return;
     setSubmitting(true);
-    navigateTo(reworkUrl());
+    setFailure(null);
+    revokeKey()
+      .then((revoked) => {
+        onRevoked({
+          revoked: true,
+          next_eligible_at: revoked.next_eligible_at,
+          revoked_at: revoked.revoked_at,
+        });
+      })
+      .catch((cause: unknown) => {
+        setFailure(describeFailure(cause));
+        setSubmitting(false);
+      });
   };
 
   return (
@@ -485,68 +478,49 @@ function ReplaceKey({ onClose }: { onClose: () => void }) {
       data-testid="replace-key-dialog"
     >
       <h3 id="replace-key-title">Replace your API key?</h3>
-
-      {check.state === 'checking' && (
-        <p>Checking whether your key can be replaced…</p>
-      )}
-
-      {check.state === 'capped' && (
-        <p data-testid="replace-key-capped">
-          Your key was already issued or replaced this quota period, so it
-          cannot be replaced again yet. The next replacement becomes available
-          on <strong>{describeNextEligible(check.nextEligibleAt)}</strong>.
-        </p>
-      )}
-
-      {check.state === 'failed' && (
-        <p>
-          Could not check whether your key can be replaced:{' '}
-          <code>{check.reason}</code>
-        </p>
-      )}
-
-      {check.state === 'allowed' && (
-        <>
-          <p data-testid="replace-key-warning">
-            Replacing your key <strong>deletes the current one</strong>. It
-            stops working immediately — anything still using it will break the
-            moment you confirm. A new key is issued in the same step, so you
-            will not be without one, but you will need to update everything that
-            uses the old value.
-          </p>
-          <p>
-            You can replace your key once per quota period. After this
-            replacement, the next one becomes available at the start of the next
-            period.
-          </p>
-          <p>
-            <label>
-              Type <code>{REWORK_CONFIRM_PHRASE}</code> to confirm:{' '}
-              <input
-                type="text"
-                value={typed}
-                onChange={(event) => setTyped(event.target.value)}
-                autoComplete="off"
-                spellCheck={false}
-                disabled={submitting}
-                data-testid="replace-key-phrase"
-              />
-            </label>
-          </p>
-          <button
-            type="button"
-            onClick={onConfirm}
-            disabled={!armed || submitting}
-            data-testid="replace-key-confirm"
-          >
-            {submitting ? 'Replacing…' : 'Delete my key and issue a new one'}
-          </button>{' '}
-        </>
-      )}
-
+      <p data-testid="replace-key-warning">
+        Replacing your key{' '}
+        <strong>deactivates the current one immediately</strong>. It stops
+        working the moment you confirm — anything still using it will break.{' '}
+        <strong>No new key is issued now</strong>: you can generate a new one at
+        the start of the next quota period (the 1st of next month, 00:00 UTC),
+        and until then you will not have a working key.
+      </p>
+      <p>
+        Do this if your key has leaked or you no longer trust where it is. If
+        you only want a fresh key, wait for the next period instead.
+      </p>
+      <p>
+        <label>
+          Type <code>{REWORK_CONFIRM_PHRASE}</code> to confirm:{' '}
+          <input
+            type="text"
+            value={typed}
+            onChange={(event) => setTyped(event.target.value)}
+            autoComplete="off"
+            spellCheck={false}
+            disabled={submitting}
+            data-testid="replace-key-phrase"
+          />
+        </label>
+      </p>
+      <button
+        type="button"
+        onClick={onConfirm}
+        disabled={!armed || submitting}
+        data-testid="replace-key-confirm"
+      >
+        {submitting ? 'Deactivating…' : 'Deactivate my key now'}
+      </button>{' '}
       <button type="button" onClick={onClose} disabled={submitting}>
-        {check.state === 'allowed' ? 'Cancel' : 'Close'}
+        Cancel
       </button>
+      {failure && (
+        <p data-testid="replace-key-failed">
+          Could not deactivate your key — it is still active:{' '}
+          <code>{failure}</code>
+        </p>
+      )}
     </section>
   );
 }
@@ -580,6 +554,7 @@ function ApiKey({ onKey }: { onKey?: () => void }) {
     | { state: 'loading' }
     | { state: 'ok'; key: PortalKey }
     | { state: 'none' }
+    | { state: 'revoked'; revoked: PortalKeyRevoked }
     | { state: 'failed'; reason: string };
 
   const [view, setView] = useState<KeyView>({ state: 'loading' });
@@ -593,12 +568,11 @@ function ApiKey({ onKey }: { onKey?: () => void }) {
   const {
     issue,
     wait_secs: waitSecs,
-    rework,
     next_eligible_at: nextEligibleAt,
-  } = useOneShotParams(KEY_LANDING_PARAMS);
+  } = useOneShotParams(ISSUE_PARAMS);
   // Whether THIS landing is itself proof a key exists: the backend created
-  // (issue) or replaced (rework) one before it redirected.
-  const landedWithKey = issue === 'ok' || rework === 'ok';
+  // one before it redirected.
+  const landedWithKey = issue === 'ok';
   const [replacing, setReplacing] = useState(false);
 
   // The same guard `SignIn` and `Usage` keep, and for both of their reasons:
@@ -635,7 +609,13 @@ function ApiKey({ onKey }: { onKey?: () => void }) {
     fetchKey()
       .then((key) => {
         if (!live) return;
-        if (key) {
+        if (key && 'revoked' in key) {
+          // Task 0191: the owner killed it. No value, no issue link — the
+          // date instead. Nothing is reported upward: there is no key on
+          // screen for the usage section to reason about, though the
+          // counter it shows is still the revoked key's (preserved).
+          setView({ state: 'revoked', revoked: key });
+        } else if (key) {
           setView({ state: 'ok', key });
           // Masked on arrival, always: what nobody asked for is the
           // credential appearing on screen while they were looking elsewhere.
@@ -671,7 +651,7 @@ function ApiKey({ onKey }: { onKey?: () => void }) {
   }, [load]);
 
   useEffect(() => {
-    // `?issue=ok` (and `?rework=ok`) is itself proof a key exists — the
+    // `?issue=ok` is itself proof a key exists — the
     // backend created or replaced one before it redirected — even though
     // `GetApiKeys` may not list it for a moment yet. Reporting the fact NOW
     // keeps the usage section beside this one from telling a visitor who has
@@ -730,65 +710,16 @@ function ApiKey({ onKey }: { onKey?: () => void }) {
       {issue === 'ok' && (view.state === 'ok' || view.state === 'loading') && (
         <p data-testid="issue-ok">Your key is ready.</p>
       )}
-      {/* The rework landings (task 0191). `ok` follows the same settling
-          rule as `issue=ok`: the listing is eventually consistent, and a
-          freshly deleted old key can even still be LISTED for a moment, so
-          the line renders only where the key is on screen or about to be.
-          The old key is named as dead in as many words — that is the thing
-          the visitor was asked to confirm. */}
-      {rework === 'ok' && (view.state === 'ok' || view.state === 'loading') && (
-        <p data-testid="rework-ok">
-          Your key was replaced. The old key has stopped working; update
-          anything that used it with the new value below.
-        </p>
-      )}
-      {rework === 'capped' && (
-        <p data-testid="rework-capped">
-          Your key was not replaced: it was already issued or replaced this
-          quota period. The next replacement becomes available on{' '}
-          <strong>{describeNextEligible(nextEligibleAt)}</strong>.
-        </p>
-      )}
-      {rework === 'no_key' && (
-        <p data-testid="rework-no-key">
-          There was no key to replace. You can{' '}
-          <a href={issueUrl()}>get an API key</a> instead.
-        </p>
-      )}
-      {rework === 'not_member' && (
-        <p data-testid="rework-not-member">
-          Replacing a key needs current membership of the{' '}
-          <a href="https://discord.gg/stellardev">Stellar Developers Discord</a>
-          , and Discord says you are not a member right now. Your existing key
-          keeps working. Once you have rejoined, you can replace it again.
-        </p>
-      )}
-      {rework === 'unknown' && (
-        <p data-testid="rework-unknown">
-          We could not verify your Discord membership just now, so your key was
-          not replaced — that is a problem talking to Discord, not a statement
-          about your membership. Your existing key keeps working; please try
-          again shortly.
-        </p>
-      )}
-      {rework === 'failed' && (
-        <p data-testid="rework-failed">
-          We could not replace your key. This is our key service, not your
-          Discord membership, and your existing key keeps working. Please try
-          again, and tell us if it keeps happening.
-        </p>
-      )}
-      {rework === 'cancelled' && (
-        <p data-testid="rework-cancelled">
-          You stopped before Discord could check your membership — your key was
-          not replaced and keeps working.
-        </p>
-      )}
-      {rework === 'denied' && (
-        <p data-testid="rework-denied">
-          Discord would not complete the check, and this is not something you
-          did. Your key was not replaced and keeps working. Please try again,
-          and tell us if it keeps happening.
+      {/* Task 0191: eligible, but the key was revoked this quota period, so
+          no new one is issued until the date. Worded as a wait with a date,
+          like `too_young` — and, like the revoke dialog said it would be,
+          without a link that would only be refused. */}
+      {issue === 'capped' && (
+        <p data-testid="issue-capped">
+          No new key yet: you deactivated your previous key this quota period,
+          and a replacement can be issued from{' '}
+          <strong>{describeNextEligible(nextEligibleAt)}</strong>. Until then
+          you do not have a working key.
         </p>
       )}
       {issue === 'not_member' && (
@@ -858,12 +789,41 @@ function ApiKey({ onKey }: { onKey?: () => void }) {
           who has just been given their first. */}
       {view.state === 'none' && landedWithKey && (
         <p data-testid="issue-ok-settling">
-          Your key was {rework === 'ok' ? 'replaced' : 'created'}, and is taking
-          a moment to appear.{' '}
+          Your key was created, and is taking a moment to appear.{' '}
           <button type="button" onClick={reload}>
             Check again
           </button>
         </p>
+      )}
+
+      {/* Task 0191: revoked by the owner. The date comes from the backend;
+          the issue link appears only once it has passed, because before that
+          the round-trip would only be refused — and a dead value is never
+          shown again. */}
+      {view.state === 'revoked' && (
+        <div data-testid="key-revoked">
+          <p>
+            Your API key was deactivated
+            {view.revoked.revoked_at
+              ? ` on ${describeNextEligible(view.revoked.revoked_at)}`
+              : ''}{' '}
+            and no longer works.
+          </p>
+          {stillWaiting(view.revoked.next_eligible_at) ? (
+            <p>
+              You can generate a new key from{' '}
+              <strong>
+                {describeNextEligible(view.revoked.next_eligible_at)}
+              </strong>
+              . Until then you do not have a working key.
+            </p>
+          ) : (
+            <p>
+              A new key can be issued now:{' '}
+              <a href={issueUrl()}>Get my API key</a>.
+            </p>
+          )}
+        </div>
       )}
 
       {view.state === 'none' && !landedWithKey && (
@@ -907,7 +867,14 @@ function ApiKey({ onKey }: { onKey?: () => void }) {
               not a link into the round-trip — the round-trip is reached only
               from the armed confirm inside the dialog. */}
           {replacing ? (
-            <ReplaceKey onClose={() => setReplacing(false)} />
+            <ReplaceKey
+              onClose={() => setReplacing(false)}
+              onRevoked={(revoked) => {
+                setReplacing(false);
+                setRevealed(false);
+                setView({ state: 'revoked', revoked });
+              }}
+            />
           ) : (
             <p>
               <button

@@ -503,7 +503,7 @@ export class ComputeStack extends cdk.Stack {
     // Self-service API keys (task 0187) — API Gateway CONTROL plane.
     // ---------------------------------------------------------------
     //
-    // Four of the six calls the portal makes. The other two —
+    // Five of the seven calls the portal makes. The other two —
     // `POST /usageplans/{id}/keys` (task 0187's attach) and
     // `GET /usageplans/{id}/usage` (task 0188's `GetUsage`) — are granted in
     // `ApiGatewayStack` instead, because the plan id lives there and importing
@@ -573,8 +573,18 @@ export class ComputeStack extends cdk.Stack {
     //
     // `DELETE` **is** here, and it is this slice's: the reconciler removes
     // duplicate keys after a double-submit ("keep the earliest createdDate,
-    // DeleteApiKey the rest"). Task 0192's revocation will find it already
-    // granted; that is a coincidence of scope, not this task implementing it.
+    // DeleteApiKey the rest").
+    //
+    // `PATCH` on `/apikeys/*` is task 0191's: `UpdateApiKey(enabled=false)`,
+    // the revocation behind "Replace my key". Disable rather than delete,
+    // because the disabled key IS the record of the revocation — its
+    // `lastUpdatedDate` is what refuses a re-issue inside the same quota
+    // period, and there is no registry (task 0190) to hold that fact
+    // otherwise. The handler sends exactly one patch operation,
+    // `replace /enabled false`; it never re-enables, renames or re-tags a
+    // key, and `PATCH` on `/apikeys/*` cannot reach a usage plan or a stage.
+    // Same wildcard limit as `DELETE` (the key id is unknowable at synth
+    // time) and the same tag-condition tightening available to task 0194.
     this.apiHandlerRole.addToPrincipalPolicy(
       new iam.PolicyStatement({
         sid: 'PortalCreateAndListApiKeys',
@@ -584,8 +594,8 @@ export class ComputeStack extends cdk.Stack {
     );
     this.apiHandlerRole.addToPrincipalPolicy(
       new iam.PolicyStatement({
-        sid: 'PortalReadAndDeleteOwnApiKeys',
-        actions: ['apigateway:GET', 'apigateway:DELETE'],
+        sid: 'PortalReadDisableAndDeleteOwnApiKeys',
+        actions: ['apigateway:GET', 'apigateway:PATCH', 'apigateway:DELETE'],
         resources: [`arn:aws:apigateway:${awsRegion}::/apikeys/*`],
       }),
     );

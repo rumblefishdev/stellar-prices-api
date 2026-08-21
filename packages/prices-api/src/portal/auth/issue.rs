@@ -20,6 +20,7 @@
 //! | `?issue=too_young&wait_secs=N` | account below the threshold; `N` is the wait, so the page's copy follows the operator's setting |
 //! | `?issue=unknown` | membership could **not** be verified (throttle, outage, absent `pending`, unreadable parameter, or Discord failing the exchange or the identity read) — refused without accusation |
 //! | `?issue=failed` | our key service could not produce a key — the control plane refused, or issuance is not wired on this deployment. Never a statement about the visitor |
+//! | `?issue=capped&next_eligible_at=YYYY-MM-DD` | eligible, but the visitor revoked their key inside this quota period (task 0191); a new one is issued from the date. Nothing was written |
 //!
 //! `unknown` and `failed` are separate on purpose: one says "Discord could not
 //! vouch for you, try shortly", the other says "you are fine, our key service
@@ -97,10 +98,23 @@ pub(super) const ISSUE_FAILED_QUERY: &str = "?issue=failed";
 pub(super) const ISSUE_CANCELLED_QUERY: &str = "?issue=cancelled";
 pub(super) const ISSUE_DENIED_QUERY: &str = "?issue=denied";
 
-/// The one parameterised landing state: how long until the account clears the
-/// threshold. Digits only, by type.
+/// The first parameterised landing state: how long until the account clears
+/// the threshold. Digits only, by type.
 pub(super) fn too_young_query(wait_secs: u64) -> String {
     format!("?issue=too_young&wait_secs={wait_secs}")
+}
+
+/// The second (task 0191): when a revoked key's replacement can be issued.
+/// `next_eligible_date` is `keys::cap`'s `YYYY-MM-DD` — digits and dashes by
+/// construction from a `NaiveDate`, asserted here because it reaches a
+/// `Location` header.
+pub(super) fn capped_query(next_eligible_date: &str) -> String {
+    debug_assert!(
+        next_eligible_date
+            .bytes()
+            .all(|b| b.is_ascii_digit() || b == b'-')
+    );
+    format!("?issue=capped&next_eligible_at={next_eligible_date}")
 }
 
 /// Refuse to *start* an issue round-trip on a deployment that cannot finish
@@ -184,7 +198,7 @@ pub(super) fn refuse_issue_discord(
 /// 12s of a 15s function leaves ~3s to serialize a redirect and for the
 /// runtime to send it. The reconciler gets whatever survives; see
 /// [`RECONCILE_FLOOR`] for what happens when that is not enough.
-pub(super) const ISSUE_BUDGET: Duration = Duration::from_secs(12);
+const ISSUE_BUDGET: Duration = Duration::from_secs(12);
 
 /// The least time worth starting a reconciliation with.
 ///
@@ -194,12 +208,9 @@ pub(super) const ISSUE_BUDGET: Duration = Duration::from_secs(12);
 /// unattached orphan is made. Below this the path lands on `?issue=failed` —
 /// which is the honest answer: eligibility passed, our key service did not
 /// have time.
-pub(super) const RECONCILE_FLOOR: Duration = Duration::from_secs(2);
+const RECONCILE_FLOOR: Duration = Duration::from_secs(2);
 
-/// Everything the issue arm needs beyond what sign-in already carries — and
-/// everything the rework arm (`super::rework`, task 0191) needs too: the same
-/// control plane, the same usage cache to evict from, and the same settings
-/// (of which a rework reads only the guild id).
+/// Everything the issue arm needs beyond what sign-in already carries.
 ///
 /// All optional, like `AuthState::oauth` and `KeysState::gateway`, and for the
 /// same reason: the api-handler boots with the portal closed and nothing
@@ -412,6 +423,9 @@ pub(super) async fn complete_issue(
                     }
                     land(ISSUE_OK_QUERY)
                 }
+                IssueOutcome::Capped { next_eligible_date } => {
+                    land(&capped_query(&next_eligible_date))
+                }
                 IssueOutcome::Failed => land(ISSUE_FAILED_QUERY),
             }
         }
@@ -448,6 +462,15 @@ mod tests {
 
     /// The one dynamic landing state renders a `u64` and nothing else — no
     /// request-derived byte can reach the `Location` header through it.
+    /// The capped landing renders a bare date and nothing else.
+    #[test]
+    fn the_capped_query_carries_a_bare_date() {
+        assert_eq!(
+            capped_query("2026-09-01"),
+            "?issue=capped&next_eligible_at=2026-09-01"
+        );
+    }
+
     #[test]
     fn the_too_young_query_is_digits_only() {
         assert_eq!(too_young_query(173), "?issue=too_young&wait_secs=173");

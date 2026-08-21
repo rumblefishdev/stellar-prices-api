@@ -12,18 +12,18 @@
 //! | Sign in | — | identity only |
 //! | Issue a key | **yes** | membership (`pending === false`) + account age |
 //! | Reveal / usage | no | session only |
-//! | Rework ([0191]) | **yes** | membership only ([`membership`]) — age is never re-checked |
-//! | Revoke ([0192]) | no | session only — a **deliberate exception**: a user must be able to kill a leaked key while Discord is down |
+//! | Replace / revoke ([0191]) | no | session only — a **deliberate exception**: a user must be able to kill a leaked key while Discord is down, and the action issues nothing. The replacement is an ordinary issue in the next quota period |
 //!
 //! Account age is checked only at issuance because an account old enough once
-//! is old enough forever; re-checking it on a rework would be noise.
+//! is old enough forever.
 //!
 //! # The non-goal, stated so nobody "fixes" it
 //!
 //! **A user who leaves the guild after issuance keeps their key.** Sign-in
 //! proves membership at the moment of issuance and nothing afterwards; reveal
 //! and usage never consult Discord at all. What a departed member loses is the
-//! right to *rework* the key ([0191]), which re-proves membership when asked.
+//! right to be issued a *replacement* after a revoke ([0191]) — that is an
+//! issue, and issue re-proves membership.
 //! The registry stores no membership data — every check reads Discord live at
 //! the moment it matters, which is also why there is nothing here to expire.
 //!

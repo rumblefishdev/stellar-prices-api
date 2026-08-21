@@ -29,19 +29,39 @@ history:
       rollover measurement runs alongside the implementation; the MONTH
       confirmation cannot happen before 1 September 2026 and is recorded as
       an open limit, not assumed.
-
+  - date: "2026-08-21"
+    status: active
+    who: akot
+    note: >
+      **Model reversed by Adam after seeing it live.** The 2026-08-07 "swap"
+      (delete old + issue new in one operation, capped once per period) was
+      built and shipped to PR #238, then replaced the same day: "Replace my
+      key" is a **revocation** — the key is deactivated immediately, nothing
+      is issued, and a new key can be issued only from the next quota period.
+      Disable rather than delete, so the disabled key's `lastUpdatedDate` is
+      the revocation record the re-issue cap reads (no registry). This
+      absorbs [[0192]]; the `action=rework` OAuth round-trip is gone (revoke
+      is session-only — a leak must be killable while Discord is down), and
+      one IAM grant is added (`apigateway:PATCH` on `/apikeys/*`).
 ---
 
 # Rework — a new key, once a period
 
 ## Summary
 
-**Story:** *as a developer who has lost or leaked a key, I can generate a new
-one — but not often enough to use it as a free quota reset.*
+**Story:** *as a developer whose key has leaked, I can kill it immediately —
+knowing that I will not have a working key again until the next quota period.*
 
-An atomic swap: the old key is deleted and a new one issued in the same
+> **Reversed 2026-08-21.** The paragraph below is the 2026-08-07 design; it was
+> implemented, then reversed by Adam on seeing it live. **Current rule:**
+> "Replace my key" **deactivates** the current key now (`UpdateApiKey
+> enabled=false`) and issues nothing; "Get my API key" is refused until the
+> 1st of the next month (00:00 UTC, our period rule), naming the date. The
+> disabled key is the record of the revocation. See Implementation Notes.
+
+~~An atomic swap: the old key is deleted and a new one issued in the same
 operation, so the user is never without a working key. The cap blocks the *next*
-rework, not the replacement.
+rework, not the replacement.~~
 
 ## Step 0 — measure the rollover (was [[0180]] item 7)
 
@@ -91,8 +111,29 @@ loop here slows CI for everyone.
 
 ## Implementation
 
-- `POST /api-tokens/api/key/rework`. Delete the old key, `CreateApiKey` +
-  `CreateUsagePlanKey` for the new one, return the new value.
+> **As built (2026-08-21, after the reversal):**
+>
+> - `POST /api-tokens/api/key/rework` — session-authorized **revoke**:
+>   `UpdateApiKey(enabled=false)` on every key under the caller's name; answers
+>   `{revoked, next_eligible_at, revoked_at}`; idempotent; `404 no_key` with
+>   nothing to revoke. `POST`-only + `SameSite=Lax` is the CSRF guard.
+> - `GET /key` on a revoked key → `404 key_revoked` + `details.next_eligible_at`
+>   — the value is never revealed again, and the page shows the date instead
+>   of the issue link.
+> - The **issue** path enforces the cap: all keys under the name disabled →
+>   `cap::decide(latest lastUpdatedDate, Period::now())`; capped →
+>   `?issue=capped&next_eligible_at=YYYY-MM-DD`, nothing written; allowed →
+>   the disabled records are deleted and the ordinary create/attach runs.
+> - Frontend: the dialog says the key is deactivated immediately AND that no
+>   new key is issued until the next period; `delete-key` arms; one `POST`,
+>   disabled on submit; the revoked state renders the date.
+> - IAM: `apigateway:PATCH` on `/apikeys/*` (the seventh grant). No
+>   `UpdateUsagePlan`, no `UpdateUsage`.
+>
+> The bullets below are the superseded 2026-08-07 spec, kept for the record.
+
+- ~~`POST /api-tokens/api/key/rework`. Delete the old key, `CreateApiKey` +
+  `CreateUsagePlanKey` for the new one, return the new value.~~
 - **The cap:** allowed only when the current key's creation instant falls
   **before** the current quota period start (1st of the month, 00:00 UTC). Since
   a rework deletes and re-creates, the surviving key's `createdDate` is that
@@ -123,64 +164,54 @@ loop here slows CI for everyone.
 
 ## Acceptance Criteria
 
-- [x] **Ships closed.** With `PORTAL_ENABLED=false` ([[0183]]) this slice's
-      routes return an empty `404`; with it on, they behave normally — every
-      deploy goes straight to production. Asserted on all three surfaces —
-      `login?action=rework`, the callback, and `POST /key/rework` — with a
-      valid session presented and zero Discord / control-plane calls
-      (`everything_including_rework_is_an_empty_404_while_the_portal_is_closed`)
-- [ ] **(half done — the wording half; the measurement half is pending an AWS
-      session)** Item 7 measured on the `DAY`-period proxy and written up with
-      the date; [[0157]] and this task stop presenting the boundary as
-      AWS-documented. The restating is done everywhere it was stated (Step 0
-      table, last row). The measurement is not: the 0180 run had died after
-      three samples (Step 0), and the re-run needs `aws sso login`, which was
-      not available while this was built. Procedure unchanged; record the
-      result in the Step 0 table with its date
-- [x] Rework issues a new key and deletes the old one in one operation; the user
-      is never keyless — asserted on the mock's **write sequence**
-      (`create → attach → delete`), not the end state
-      (`the_new_key_is_created_and_attached_before_the_old_is_deleted`), and
-      every failure path asserted to leave the old key in place (a failed
-      delete rolls the replacement back)
-- [x] The old key returns `403` immediately after; the new one returns `200` —
-      asserted by construction (the old id no longer exists, which is the
-      `403` a deleted key gets per 0180 item 8; the new one is enabled and
-      attached), and as a live `curl` pair in `README.md` §3c, like [[0187]]'s.
-      The data-plane half cannot be observed in CI (the mock has no data
-      plane) and is [[0164]]'s evidence pass, with [[0187]]'s curl
-- [x] A second attempt in the same quota period is refused with `409` and
-      `next_eligible_at` — on the pre-check (`409 rework_capped`,
-      `details.next_eligible_at` RFC 3339) and on the round-trip
-      (`?rework=capped&next_eligible_at=YYYY-MM-DD`), with nothing written
-      (`a_second_rework_in_the_same_period_is_refused_with_409_and_next_eligible_at`)
-- [x] Reworking on 3 August refuses until 1 September and succeeds on
-      1 September — the meeting's worked example, tested with the literal
-      dates in `keys/cap.rs` (both halves, plus the boundary second) and
-      relative to the real calendar over HTTP
-      (`reworked_on_the_3rd_refuses_until_the_1st_and_succeeds_once_it_has_passed`)
-- [x] Rework is unreachable with a session cookie alone — the only route a
-      session reaches is the read-only pre-check (zero writes on `200`, `409`
-      and `404` alike), `GET` on it is `405`, and a callback with a session
-      but no signed state is a `400` before any Discord call
-      (`rework_is_unreachable_with_a_session_cookie_alone`)
-- [x] A user who has left the guild is refused on rework, with a message that
-      names the server rather than a generic error — `?rework=not_member`,
-      the page names and links the Stellar Developers Discord, and their
-      existing key still reveals afterwards (the non-goal, on the refusal)
-- [x] The modal states the old key dies immediately; confirm is gated on typing
-      `delete-key` and cannot double-fire — "deletes the current one … stops
-      working immediately … will break", near-misses (`delete`, `DELETE-KEY`,
-      trailing space) keep it disabled, one armed press is one `navigateTo`,
-      three presses are still one, and the button and the phrase box are
-      disabled on submit
+*(Rewritten 2026-08-21 for the revoke-now / re-issue-next-period model. The
+original swap-model criteria were all green at PR #238's first commit; they
+are replaced, not re-counted.)*
+
+- [x] **Ships closed.** With `PORTAL_ENABLED=false` ([[0183]]) the revoke is an
+      empty `404` with a valid session and zero control-plane calls
+      (`revoke_is_an_empty_404_while_the_portal_is_closed`)
+- [ ] **(half done — the wording half; the measurement half is running)**
+      Item 7 measured on the `DAY`-period proxy and written up with the date;
+      [[0157]] and this task stop presenting the boundary as AWS-documented.
+      The restating is done everywhere. The poller was started 2026-08-21
+      11:51Z (drain `200,200,200,429`); the verdict is the first `200` after
+      the `429` run — record it in the Step 0 table
+- [x] "Replace my key" deactivates the key **immediately** and issues nothing —
+      one `UpdateApiKey`, no Discord call, nothing created
+      (`revoke_deactivates_the_key_immediately_and_issues_nothing`); every key
+      under the name, not only the current one; idempotent; a failed disable
+      is a `502`, never a false "revoked"
+- [x] The revoked value is never revealed again; the reveal answers
+      `key_revoked` with the date
+      (`a_revoked_key_is_never_revealed_again_and_the_reveal_names_the_date`).
+      The data-plane `403` is by construction (disabled key = `403`, measured
+      under 0180 item 8) and the live `curl` in `README.md` §3c
+- [x] A new key cannot be issued in the period of the revocation: the issue
+      round-trip passes eligibility and still lands on
+      `?issue=capped&next_eligible_at=…` with nothing written
+      (`an_issue_after_a_revoke_in_the_same_period_is_capped_with_the_date`)
+- [x] Revoked on the 3rd → refused until the 1st, issued once it has passed,
+      old record deleted, new key created and attached — tested with literal
+      dates in `keys/cap.rs` and relative to the real calendar over HTTP
+      (`revoked_on_the_3rd_refuses_until_the_1st_and_issues_once_it_has_passed`,
+      `the_full_cycle_issue_revoke_wait_reissue`)
+- [x] A session cookie can revoke **its own** key and nothing else — `POST`
+      only (`GET` is `405`), unauthenticated is `401` before AWS, another
+      user's key and a console lookalike are untouched
+      (`a_session_can_only_revoke_its_own_key`)
+- [x] Membership is still re-proved on the re-issue (it is an issue), and a
+      non-member is told to rejoin before being told to wait
+      (`membership_is_still_checked_before_the_cap`)
+- [x] The modal states the key is deactivated immediately and that no new key
+      is issued until the next period; confirm is gated on typing
+      `delete-key` and cannot double-fire; the revoked state renders the date
+      (12 frontend tests)
 - [ ] `MONTH` confirmation scheduled for 1 September 2026 if the epic is
-      open — **scheduled as a dated note here, not performed**: on or after
-      2026-09-01, read the production plan's `GetUsage` for a key with August
-      traffic and look for `summarize_days`' `quota reset inside the queried
-      period` warn in the api-handler log (it fires only if AWS rolled at an
-      instant other than 00:00Z on the 1st); and/or re-run the `DAY` proxy
-      script against a `MONTH` scratch plan drained on 31 August
+      open — dated note, not performed: on/after 2026-09-01 look for
+      `summarize_days`' `quota reset inside the queried period` warn in the
+      api-handler log, or re-run the `DAY` proxy script against a `MONTH`
+      scratch plan drained on 31 August
 
 ## Notes
 
@@ -363,3 +394,57 @@ Nothing new spawned — every follow-up already has an owner or a date:
   [[0192]], which will find `Action::parse`'s "arrives early" example is now
   `revoke`.
 - The now-seven-call surface and the per-load cost → [[0194]].
+
+## Implementation Notes — 2026-08-21, after the reversal
+
+The swap shipped first (the notes above), was seen live by Adam, and was
+reversed the same afternoon. What changed, file by file:
+
+- **Removed:** `auth/rework.rs`, `Action::Rework`, the eight `?rework=`
+  landings, `reworkUrl`/`checkRework`/`navigateTo` on the frontend, the swap
+  and its 31 tests.
+- **`keys/naming.rs`:** `KeyRecord` gains `enabled` and `last_updated_at`;
+  `current_key()` — the earliest *enabled* key, else the earliest record —
+  is what the reveal and the revoke act on.
+- **`keys/gateway.rs`:** `disable()` (`UpdateApiKey`, one `replace /enabled
+  false`); `list_named`/`create` fill the two new fields. Seven calls now.
+- **`keys/cap.rs`:** the same rule, re-pointed: `decide(revoked_at, period)`
+  — strictly before the period start, undated → capped.
+- **`keys/mod.rs`:** `POST /key/rework` is the revoke (`disable_all`); the
+  reveal answers `key_revoked`; `attempt()` grows step 1b — all keys disabled
+  → cap → `Attempt::Capped`, or delete the records and fall into the create.
+  `IssueOutcome::Capped` → `issue.rs` lands `?issue=capped&next_eligible_at=`.
+- **Frontend:** `revokeKey()`, `PortalKeyRevoked` on `fetchKey`, the
+  `ReplaceKey` dialog re-worded (deactivated now, no new key until the next
+  period), the `revoked` view with the date and a deferred issue link,
+  `?issue=capped` landing.
+- **Infra:** `PortalReadDisableAndDeleteOwnApiKeys` — `apigateway:PATCH`
+  added on `/apikeys/*`, reasoning at the grant. Synth and CI check 5 green.
+- **Docs:** epic decision struck through with the reversal dated; runbook §7;
+  README §3c; [[0192]] absorbed.
+
+**Tests:** `tests/portal_rework.rs` rewritten — 19 over HTTP (revoke
+immediate/total/idempotent/own-key-only/502-never-false; cap on the issue path
+with the worked example relative to the calendar; latest revocation governs;
+live-beside-revoked; full cycle; cache eviction; `no-store`); `cap.rs` 6;
+`naming.rs` +1; `app.spec.tsx` 12 for the dialog and the revoked/capped
+states. Workspace 640 Rust, portal 88, 0 failed.
+
+### Design Decisions — emerged in the reversal
+
+17. **Disable, not delete.** Both propagate in ~25 s; only disabling leaves
+    the revocation record (`lastUpdatedDate`) that the re-issue cap needs,
+    and it costs one grant. The revoked value is never revealed again.
+18. **Revoke is session-only.** It issues nothing and is destructive only to
+    the caller's own access; a leak must be killable while Discord is down.
+    `POST`-only + `SameSite=Lax` is the CSRF stance, re-derived as
+    `auth/mod.rs` requires.
+19. **The cap moved to the issue path.** A revoked user's "Get my API key"
+    is an ordinary issue round-trip (membership + age re-proved) that the
+    reconciler refuses at step 1b; the `409`-with-date of the old model is now
+    `?issue=capped&next_eligible_at=` on the landing and `404 key_revoked`
+    with `details.next_eligible_at` on the reveal.
+20. **The latest revocation governs**, so a stale duplicate revoked last month
+    cannot reopen a door closed this month.
+21. **The 2026-08-07 decision is struck through, not deleted**, in the epic
+    and here: both the decision and its reversal are on the record.

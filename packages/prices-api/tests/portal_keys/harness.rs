@@ -63,6 +63,9 @@ pub struct StoredKey {
     pub created_at: u64,
     pub tags: HashMap<String, String>,
     pub enabled: bool,
+    /// `lastUpdatedDate` — stamped by `UpdateApiKey` (the revoke, task
+    /// 0191), which is what the re-issue cap reads off a disabled key.
+    pub last_updated_at: u64,
 }
 
 #[derive(Default)]
@@ -145,10 +148,12 @@ pub struct Store {
     /// replacement succeeds — which is the only way to observe the rollback.
     pub fail_delete_of: Vec<String>,
     /// Every write, in the order it arrived: `create:<id>`, `attach:<id>`,
-    /// `delete:<id>` (task 0191). The swap's ordering — create and attach the
-    /// new key BEFORE deleting the old — is a property of the sequence, not of
-    /// the end state, and this is what makes it assertable.
+    /// `delete:<id>`, `disable:<id>` (task 0191) — so a test can assert on
+    /// what was written and in which order, not only on the end state.
     pub ops: Vec<String>,
+    /// Answer every `UpdateApiKey` with a 500 (task 0191). Sticky, like
+    /// `fail_deletes`, for the same reason.
+    pub fail_disables: bool,
     pub next_id: usize,
 
     // -----------------------------------------------------------------------
@@ -197,7 +202,18 @@ impl Store {
             created_at,
             tags: HashMap::new(),
             enabled: true,
+            last_updated_at: created_at,
         });
+        id
+    }
+
+    /// A key the owner revoked at `revoked_at` (task 0191): disabled, with
+    /// `lastUpdatedDate` set to the revocation instant.
+    pub fn seed_revoked(&mut self, name: &str, created_at: u64, revoked_at: u64) -> String {
+        let id = self.seed(name, created_at);
+        let key = self.keys.last_mut().unwrap();
+        key.enabled = false;
+        key.last_updated_at = revoked_at;
         id
     }
 
@@ -236,7 +252,10 @@ impl MockGateway {
 
         let router = Router::new()
             .route("/apikeys", get(list_keys).post(create_key))
-            .route("/apikeys/{id}", get(read_key).delete(delete_key))
+            .route(
+                "/apikeys/{id}",
+                get(read_key).delete(delete_key).patch(update_key),
+            )
             .route("/usageplans/{plan}/keys", post(attach_key))
             .route("/usageplans/{plan}/usage", get(read_usage))
             .with_state(store.clone());
@@ -342,6 +361,7 @@ pub async fn create_key(
         // created inside the current quota period, exactly as a real one
         // would. `created_at_override` pins it for tests that need a date.
         created_at: store.created_at_override.unwrap_or_else(now_secs),
+        last_updated_at: store.created_at_override.unwrap_or_else(now_secs),
         tags: body["tags"]
             .as_object()
             .map(|o| {
@@ -408,6 +428,41 @@ pub async fn delete_key(
     } else {
         not_found()
     }
+}
+
+/// `PATCH /apikeys/{id}` — `UpdateApiKey`, task 0191's revoke. Applies
+/// `replace /enabled`, stamps `lastUpdatedDate` like the service, and answers
+/// the key. The body shape is what restJson1 sends: `{"patchOperations":
+/// [{"op":"replace","path":"/enabled","value":"false"}]}`.
+pub async fn update_key(
+    State(store): State<Arc<Mutex<Store>>>,
+    Path(id): Path<String>,
+    Json(body): Json<Value>,
+) -> Response {
+    let mut store = store.lock().unwrap();
+    if store.fail_disables {
+        return (StatusCode::INTERNAL_SERVER_ERROR, "control plane is unwell").into_response();
+    }
+    let now = now_secs();
+    let Some(key) = store.keys.iter_mut().find(|k| k.id == id) else {
+        return not_found();
+    };
+    for op in body["patchOperations"].as_array().into_iter().flatten() {
+        if op["op"] == "replace" && op["path"] == "/enabled" {
+            key.enabled = op["value"] == "true";
+            key.last_updated_at = now;
+        }
+    }
+    let snapshot = key.clone();
+    store.ops.push(format!(
+        "{}:{id}",
+        if snapshot.enabled {
+            "enable"
+        } else {
+            "disable"
+        }
+    ));
+    Json(api_key_json(&snapshot)).into_response()
 }
 
 pub async fn attach_key(
@@ -574,6 +629,7 @@ pub fn api_key_json(key: &StoredKey) -> Value {
         "value": key.value,
         "enabled": key.enabled,
         "createdDate": key.created_at,
+        "lastUpdatedDate": key.last_updated_at,
         "tags": key.tags,
     })
 }

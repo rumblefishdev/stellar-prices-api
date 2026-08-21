@@ -94,16 +94,6 @@ pub enum Action {
     /// complete an issuance — that is exactly what the mismatch check refuses.
     #[serde(rename = "issue")]
     Issue,
-    /// Replace an API key (task 0191).
-    ///
-    /// The same shape as [`Action::Issue`] — the round-trip is the proof — but
-    /// the callback checks **membership only**: an account old enough once is
-    /// old enough forever, so age is never re-checked on a rework. The cap
-    /// (one rework per quota period) is decided there too, against the
-    /// current key's `createdDate`. A `signin` or `issue` callback cannot
-    /// complete a rework; the mismatch check refuses it.
-    #[serde(rename = "rework")]
-    Rework,
     /// An extra action that exists **only under `cfg(test)`**.
     ///
     /// It is never parsed from a query string, never minted by [`start`]
@@ -134,7 +124,6 @@ impl Action {
         match raw {
             "signin" => Some(Self::SignIn),
             "issue" => Some(Self::Issue),
-            "rework" => Some(Self::Rework),
             // `TestOther` is deliberately absent: it must not be reachable from
             // a query string even in a test build.
             _ => None,
@@ -526,49 +515,12 @@ mod tests {
     fn an_unknown_action_query_value_is_rejected_rather_than_defaulted() {
         assert_eq!(Action::parse("signin"), Some(Action::SignIn));
         assert_eq!(Action::parse("issue"), Some(Action::Issue));
-        assert_eq!(Action::parse("rework"), Some(Action::Rework));
+        // `rework` is deliberately NOT an action: task 0191's revoke is
+        // session-only and never crosses the authorize endpoint.
         for unknown in [
-            "revoke", "", "SIGNIN", "ISSUE", "REWORK", "issue ", "signin ", "rework ",
+            "rework", "revoke", "", "SIGNIN", "ISSUE", "issue ", "signin ",
         ] {
             assert_eq!(Action::parse(unknown), None, "accepted {unknown:?}");
-        }
-    }
-
-    /// The third real action (task 0191): a rework pair round-trips and
-    /// reports itself, and crossing it with an ISSUE cookie is refused — the
-    /// two re-authorisation flows are as non-interchangeable with each other
-    /// as either is with sign-in, which is what stops an issue round-trip's
-    /// proof (membership + age) being spent on a rework, or a rework's
-    /// (membership only) on an issue.
-    #[test]
-    fn a_rework_pair_round_trips_and_cannot_be_completed_by_an_issue_cookie() {
-        let started = start(KEY, Action::Rework, NOW);
-        let accepted = accept(
-            KEY,
-            &started.state_param,
-            Some(&started.pending_cookie),
-            NOW + 1,
-        )
-        .expect("a freshly minted rework pair must verify");
-        assert_eq!(accepted.action, Action::Rework);
-
-        let state: StateClaims = verify_claims(KEY, CTX_STATE, &started.state_param).unwrap();
-        for other in [Action::Issue, Action::SignIn] {
-            let crossed_pending = sign_claims(
-                KEY,
-                CTX_PENDING,
-                &PendingClaims {
-                    action: other,
-                    nonce: state.nonce.clone(),
-                    verifier: "a-verifier".into(),
-                    exp: state.exp,
-                },
-            );
-            assert_eq!(
-                accept(KEY, &started.state_param, Some(&crossed_pending), NOW).unwrap_err(),
-                StateError::ActionMismatch,
-                "{other:?}"
-            );
         }
     }
 

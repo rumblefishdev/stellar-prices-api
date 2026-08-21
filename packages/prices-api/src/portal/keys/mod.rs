@@ -7,22 +7,31 @@
 //!
 //! | route | does |
 //! | --- | --- |
-//! | `GET`/`POST /api-tokens/api/key` | reveal — the lookup, plus the value. **Never creates.** |
-//! | `POST /api-tokens/api/key/rework` | the rework **pre-check** (task 0191): may this key be replaced now? `409` with `next_eligible_at` if not. **Never writes.** |
+//! | `GET`/`POST /api-tokens/api/key` | reveal — the lookup, plus the value. **Never creates.** A revoked key answers `404 key_revoked` with the date a new one can be issued |
+//! | `POST /api-tokens/api/key/rework` | **revoke** (task 0191): deactivate the caller's key now, issue nothing. Session-authorized, deliberately — see below |
 //!
 //! Issuance itself is [`issue_for`], reachable **only** from the OAuth
 //! callback completing an `action=issue` round-trip
 //! (`super::auth::issue`) — because issuing requires an eligibility proof
 //! (Stellar Discord membership + minimum account age, ADR 0010 §8) that only a
-//! fresh Discord token can provide, and a session cookie is not one. The
-//! rework — delete the old key, create the new one — is [`rework_for`], and
-//! is reachable **only** from the callback completing an `action=rework`
-//! round-trip (`super::auth::rework`), for the same reason: it re-proves
-//! membership (not age) against a fresh token. What the `/key/rework` route
-//! above does is answer the question the modal asks *before* sending the
-//! visitor to Discord — is the cap in the way? — and it answers it read-only,
-//! from the current key's `createdDate` and [`cap`]'s rule. The callback
-//! decides the cap again, authoritatively, with the fresh token in hand.
+//! fresh Discord token can provide, and a session cookie is not one. Since
+//! task 0191 the issue path also enforces the **re-issue cap**: a key the
+//! owner revoked inside the current quota period blocks a new one until the
+//! period rolls ([`cap`]), which is what makes "replace my key" a revocation
+//! rather than a free counter reset.
+//!
+//! # Revoke is session-only, on purpose
+//!
+//! The one write a session cookie can cause is `UpdateApiKey(enabled=false)`
+//! on the caller's **own** key — destructive to their own access and to
+//! nothing else. It is deliberately not behind a Discord round-trip: a leaked
+//! key has to be killable while Discord is down, and re-proving membership
+//! buys nothing for an action that issues no credential. The CSRF stance is
+//! re-derived as `auth/mod.rs` requires: the route is `POST`-only and the
+//! session cookie is `SameSite=Lax`, so a cross-site page cannot make the
+//! browser send it with a `POST`; a `GET` on the path is a `405`. The worst
+//! outcome of the write is the visitor's own key dying a month early, which
+//! is exactly what the confirmation dialog made them type `delete-key` for.
 //!
 //! # There is no database, and that is the design
 //!
@@ -67,7 +76,8 @@
 //! keeps working for them.** Reveal consults the session only — never
 //! Discord. That is the epic's stated non-goal, not an oversight: membership
 //! is proved at the moment of issuance and nothing afterwards (ADR 0010 §7);
-//! what a departed member loses is the right to rework ([0191]).
+//! what a departed member loses is the replacement after a revoke ([0191]),
+//! which is an issue and re-proves membership.
 //!
 //! # Never log a key value
 //!
@@ -101,14 +111,15 @@ use super::auth::secret::OauthSecret;
 use super::period::Period;
 use cap::Cap;
 use gateway::{Attachment, Gateway, GatewayError, KeyValue};
-use naming::{KeyRecord, choose_winner, exact_matches, key_name, losers};
+use naming::{KeyRecord, choose_winner, current_key, exact_matches, key_name, losers};
 
 /// The reveal, on both verbs — see [`key`] for why `POST` answers identically.
 pub const KEY_PATH: &str = "/api-tokens/api/key";
 
-/// The rework pre-check (task 0191). `POST` only: it is the answer to "may I
-/// replace my key?", asked by the confirmation modal, and although it writes
-/// nothing it is not a resource to `GET` — a link to it has no meaning.
+/// The revocation (task 0191). `POST` only — the verb is the CSRF guard, see
+/// the module docs — and the path keeps the task's name for the action the
+/// dashboard calls "Replace my key": the key is replaced, just not until the
+/// next period.
 pub const REWORK_PATH: &str = "/api-tokens/api/key/rework";
 
 /// Error code for a caller with no valid session.
@@ -122,12 +133,13 @@ const KEYS_UNCONFIGURED: &str = "keys_unconfigured";
 /// because the frontend reads both: a `404` is "no key" only when this
 /// envelope says so.
 const NO_KEY: &str = "no_key";
-/// Error code for a rework refused by the once-per-period cap (task 0191).
-///
-/// A `409`, not a `429`: `429` says "retry shortly" and the wait here can be
-/// weeks. The envelope's `details` carries `next_eligible_at`, RFC 3339 — the
-/// slot `ErrorEnvelope` has had for exactly this kind of structured context.
-const REWORK_CAPPED: &str = "rework_capped";
+/// Error code for a caller whose key is revoked and whose replacement is not
+/// due yet (task 0191). A `404` like `no_key` — there is no usable key — but
+/// a distinct code, because the page must not offer the issue round-trip: the
+/// envelope's `details` carries `next_eligible_at` (RFC 3339) and
+/// `revoked_at`, the slot `ErrorEnvelope` has for exactly this kind of
+/// structured context.
+const KEY_REVOKED: &str = "key_revoked";
 
 /// How many times the whole flow is re-run when the key it settled on turns out
 /// to have been deleted underneath it.
@@ -222,7 +234,7 @@ impl KeysState {
 pub fn routes(state: KeysState) -> Router {
     Router::new()
         .route(KEY_PATH, get(key).post(key))
-        .route(REWORK_PATH, post(rework_check))
+        .route(REWORK_PATH, post(revoke))
         .with_state(state)
 }
 
@@ -313,7 +325,39 @@ async fn reveal(state: &KeysState, headers: &HeaderMap) -> Response {
     };
 
     match looked_up {
-        Ok(Some((record, value))) => {
+        Ok(Lookup::Revoked(record)) => {
+            // The owner killed this key. There is nothing to reveal — the
+            // value is a leaked credential by the owner's own statement — and
+            // nothing to issue until the period rolls; the page renders the
+            // date rather than the "get my API key" link.
+            let Cap::Capped {
+                next_eligible_at, ..
+            } = cap::decide(record.last_updated_at, &Period::now())
+            else {
+                // Revoked in an earlier period: a new key is due, and the
+                // issue round-trip will delete this one and create it. Until
+                // that press the honest answer is still "no usable key".
+                return no_store(no_key_response());
+            };
+            no_store(
+                (
+                    StatusCode::NOT_FOUND,
+                    Json(errors::ErrorEnvelope {
+                        code: KEY_REVOKED,
+                        message: format!(
+                            "your API key was revoked; a new one can be issued from \
+                             {next_eligible_at}"
+                        ),
+                        details: Some(serde_json::json!({
+                            "next_eligible_at": next_eligible_at,
+                            "revoked_at": record.last_updated_at.map(rfc3339),
+                        })),
+                    }),
+                )
+                    .into_response(),
+            )
+        }
+        Ok(Lookup::Key(record, value)) => {
             tracing::info!(key_id = %record.id, "portal revealed an API key");
             // This response proves a key exists, so a cached "no key" on the
             // usage route is now false. An in-process eviction, not a
@@ -338,17 +382,7 @@ async fn reveal(state: &KeysState, headers: &HeaderMap) -> Response {
         // deleted between the list and the read. All three answer the same
         // envelope, because without a registry they are the same observation,
         // and all three are fixed the same way: the issue round-trip.
-        Ok(None) => no_store(
-            (
-                StatusCode::NOT_FOUND,
-                Json(errors::ErrorEnvelope {
-                    code: NO_KEY,
-                    message: "you have no API key yet; issue one from the portal".into(),
-                    details: None,
-                }),
-            )
-                .into_response(),
-        ),
+        Ok(Lookup::None) => no_store(no_key_response()),
         Err(error) => {
             // `error` cannot carry a key value — see `gateway::sdk_message`.
             tracing::error!(error = %error, "portal key reveal failed");
@@ -367,37 +401,59 @@ async fn reveal(state: &KeysState, headers: &HeaderMap) -> Response {
     }
 }
 
-/// What the rework pre-check answers when the cap is not in the way.
-///
-/// Deliberately small: the modal needs one bit. The `next_eligible_at` a
-/// refusal carries lives in the `409` envelope's `details`, where the page
-/// already knows to look for structured context.
-#[derive(Serialize)]
-struct ReworkCheck {
-    /// Always `true` on a `200` — a refusal is a `409`, never a `200` with
-    /// `false`, so a client that ignores the status cannot read "refused" as
-    /// "go ahead".
-    eligible: bool,
+/// `404 no_key`, shared by the reveal's two keyless answers.
+fn no_key_response() -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        Json(errors::ErrorEnvelope {
+            code: NO_KEY,
+            message: "you have no API key yet; issue one from the portal".into(),
+            details: None,
+        }),
+    )
+        .into_response()
 }
 
-/// `POST /key/rework` — may this caller's key be replaced now? (task 0191)
+/// Unix seconds → RFC 3339, for the envelopes.
+fn rfc3339(secs: u64) -> String {
+    chrono::DateTime::<chrono::Utc>::from_timestamp(secs as i64, 0)
+        .map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+        .unwrap_or_default()
+}
+
+/// What the revoke answers.
+#[derive(Serialize)]
+struct RevokeResponse {
+    /// Always `true` on a `200`; a failure is a status, never a `false`.
+    revoked: bool,
+    /// When a new key can be issued under our period rule, RFC 3339.
+    next_eligible_at: String,
+    /// When the key was revoked, RFC 3339 — now, or earlier if it already was.
+    revoked_at: String,
+}
+
+/// `POST /key/rework` — revoke the caller's key now, issue nothing
+/// (task 0191).
 ///
-/// **Read-only, like the reveal**: one paginated listing, no value read, no
-/// write of any kind. A session cookie is enough to *ask* because asking
-/// changes nothing and the answer is about the caller's own key; the rework
-/// itself needs the `action=rework` round-trip and its fresh membership
-/// proof, and the callback decides the cap again before any key moves — this
-/// route exists so the modal can say "next eligible 1 September" *before*
-/// the visitor types the confirmation phrase and crosses Discord for a
-/// refusal.
+/// **Deactivates, immediately, and that is the whole operation.** Every
+/// enabled key under the caller's name is disabled (`UpdateApiKey`); the
+/// answer carries the date a replacement can be issued — the 1st of the next
+/// month under our period rule — and the page renders it. Nothing is created:
+/// the cap on re-issue is what makes this a revocation rather than a free
+/// counter reset, and the wait is the visitor's own access, which the
+/// confirmation dialog made them type `delete-key` to accept.
+///
+/// Idempotent: a key already revoked answers `200` again with the same dates,
+/// so a retry after a dropped response is safe. A caller with no key is a
+/// `404 no_key`. Session-authorized — see the module docs for why that is
+/// deliberate and how the `POST`-only shape stands in for a CSRF token.
 ///
 /// | answer | meaning |
 /// | --- | --- |
-/// | `200 {eligible: true}` | the key predates the current period; the modal may arm |
-/// | `409 rework_capped` + `details.next_eligible_at` | created inside this period — refused until the 1st |
-/// | `404 no_key` | nothing to replace; the page offers the issue round-trip instead |
+/// | `200 {revoked: true, next_eligible_at, revoked_at}` | the key is off (the data plane follows within tens of seconds — 0180 item 8) |
+/// | `404 no_key` | nothing to revoke |
 /// | `401` / `502` / `503` | as the reveal |
-async fn rework_check(State(state): State<KeysState>, headers: HeaderMap) -> Response {
+async fn revoke(State(state): State<KeysState>, headers: HeaderMap) -> Response {
     let Some(oauth) = state.oauth.as_ref() else {
         return unconfigured();
     };
@@ -410,6 +466,7 @@ async fn rework_check(State(state): State<KeysState>, headers: HeaderMap) -> Res
             "sign in with Discord before asking to replace your API key",
         ));
     };
+    // Same guard as the reveal — and here it stands in front of a write.
     let Some(name) = key_name(&session.sub) else {
         tracing::warn!("a session carried a user id that is not a snowflake; refusing");
         return no_store(errors::unauthorized_with(
@@ -418,26 +475,12 @@ async fn rework_check(State(state): State<KeysState>, headers: HeaderMap) -> Res
         ));
     };
 
-    let listed = match tokio::time::timeout(state.deadline, gateway.list_named(&name)).await {
-        Ok(Ok(listed)) => listed,
-        Ok(Err(error)) => {
-            tracing::error!(error = %error, "portal rework pre-check failed");
-            return no_store(
-                (
-                    StatusCode::BAD_GATEWAY,
-                    Json(errors::ErrorEnvelope {
-                        code: KEY_UNAVAILABLE,
-                        message: "could not reach the API key service; try again".into(),
-                        details: None,
-                    }),
-                )
-                    .into_response(),
-            );
-        }
+    let revoked = match tokio::time::timeout(state.deadline, disable_all(gateway, &name)).await {
+        Ok(revoked) => revoked,
         Err(_elapsed) => {
             tracing::error!(
                 deadline_secs = state.deadline.as_secs_f32(),
-                "portal rework pre-check ran out of time"
+                "portal key revocation ran out of time"
             );
             return no_store(errors::service_unavailable(
                 KEY_UNAVAILABLE,
@@ -446,12 +489,27 @@ async fn rework_check(State(state): State<KeysState>, headers: HeaderMap) -> Res
         }
     };
 
-    // The same winner the reveal hands out and the rework will replace, so
-    // the date the modal shows is computed from the key the visitor is
-    // looking at.
-    let candidates = exact_matches(listed, &name);
-    let Some(current) = choose_winner(&candidates) else {
-        return no_store(
+    match revoked {
+        Ok(Some(revoked_at)) => {
+            tracing::info!("portal revoked an API key");
+            // The cached usage describes a key that is now off. Its counter is
+            // preserved (0180 item 8), so the numbers would still be right —
+            // but the page's state changed underneath them, and a fresh read
+            // is one call.
+            if let Some(cache) = &state.usage_cache {
+                cache.invalidate(&session.sub);
+            }
+            let period = Period::now();
+            no_store(
+                Json(RevokeResponse {
+                    revoked: true,
+                    next_eligible_at: period.resets_at(),
+                    revoked_at: rfc3339(revoked_at),
+                })
+                .into_response(),
+            )
+        }
+        Ok(None) => no_store(
             (
                 StatusCode::NOT_FOUND,
                 Json(errors::ErrorEnvelope {
@@ -461,62 +519,114 @@ async fn rework_check(State(state): State<KeysState>, headers: HeaderMap) -> Res
                 }),
             )
                 .into_response(),
-        );
-    };
-
-    match cap::decide(current.created_at, &Period::now()) {
-        Cap::Allowed => no_store(Json(ReworkCheck { eligible: true }).into_response()),
-        Cap::Capped {
-            next_eligible_at, ..
-        } => no_store(capped(next_eligible_at)),
+        ),
+        Err(error) => {
+            tracing::error!(error = %error, "portal key revocation failed");
+            no_store(
+                (
+                    StatusCode::BAD_GATEWAY,
+                    Json(errors::ErrorEnvelope {
+                        code: KEY_UNAVAILABLE,
+                        message: "could not reach the API key service; try again".into(),
+                        details: None,
+                    }),
+                )
+                    .into_response(),
+            )
+        }
     }
 }
 
-/// The `409` a capped rework answers — the envelope, with the date in the
-/// slot the envelope already has for structured context.
-fn capped(next_eligible_at: String) -> Response {
-    (
-        StatusCode::CONFLICT,
-        Json(errors::ErrorEnvelope {
-            code: REWORK_CAPPED,
-            message: format!(
-                "your key was already issued or replaced this quota period; the next \
-                 replacement is available from {next_eligible_at}"
-            ),
-            details: Some(serde_json::json!({ "next_eligible_at": next_eligible_at })),
-        }),
-    )
-        .into_response()
+/// Disable every key under `name`. `Ok(None)` means there was none;
+/// `Ok(Some(revoked_at))` is the revocation instant — now for a key this call
+/// disabled, the recorded `lastUpdatedDate` for one that already was.
+///
+/// **Every** enabled key, not only the current one: a duplicate left by an
+/// earlier double-submit is a working credential the visitor was just told
+/// had died. The first failure propagates — a `502` for a revocation is the
+/// honest answer, because "revoked" must never be said of a key that still
+/// works — but the keys disabled before it stay disabled: there is no
+/// rollback for a revocation, and re-enabling a leaked key would be the
+/// wrong direction to fail in.
+async fn disable_all(gateway: &Gateway, name: &str) -> Result<Option<u64>, GatewayError> {
+    let keys = exact_matches(gateway.list_named(name).await?, name);
+    let Some(current) = current_key(&keys) else {
+        return Ok(None);
+    };
+    if !current.enabled {
+        // Already revoked — answer with the recorded instant, write nothing.
+        return Ok(Some(current.last_updated_at.unwrap_or(0)));
+    }
+    for key in keys.iter().filter(|k| k.enabled) {
+        // The same last-line guard the reconciler keeps before its deletes:
+        // on the record, immediately before the write.
+        if key.name != name {
+            tracing::error!(
+                key_id = %key.id,
+                "refusing to disable a key whose name is not the caller's; \
+                 the exact-name filter has been bypassed"
+            );
+            continue;
+        }
+        if gateway.disable(&key.id).await? {
+            tracing::info!(key_id = %key.id, "portal disabled a revoked API key");
+        }
+    }
+    Ok(Some(now_secs()))
+}
+
+/// Seconds since the Unix epoch, saturating.
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// What the read-only lookup found.
+enum Lookup {
+    /// A live key and its value.
+    Key(KeyRecord, KeyValue),
+    /// The owner's key, revoked — no value is read for it.
+    Revoked(KeyRecord),
+    /// Nothing to reveal.
+    None,
 }
 
 /// The read-only lookup: list, filter, rank, read. Nothing here mutates.
 ///
-/// `Ok(None)` is "no key to reveal" — including the raced case where the
+/// `Lookup::None` is "no key to reveal" — including the raced case where the
 /// winner was listed and deleted before its value could be read. The reveal
 /// answers `no_key` for it rather than retrying into a create, because
 /// retrying into a create is exactly what this route gave up.
-async fn lookup(
-    gateway: &Gateway,
-    name: &str,
-) -> Result<Option<(KeyRecord, KeyValue)>, GatewayError> {
+async fn lookup(gateway: &Gateway, name: &str) -> Result<Lookup, GatewayError> {
     let candidates = exact_matches(gateway.list_named(name).await?, name);
-    let Some(winner) = choose_winner(&candidates).cloned() else {
-        return Ok(None);
+    let Some(current) = current_key(&candidates).cloned() else {
+        return Ok(Lookup::None);
     };
-    match gateway.value_of(&winner.id).await? {
-        Some(value) => Ok(Some((winner, value))),
-        None => Ok(None),
+    if !current.enabled {
+        return Ok(Lookup::Revoked(current));
+    }
+    match gateway.value_of(&current.id).await? {
+        Some(value) => Ok(Lookup::Key(current, value)),
+        None => Ok(Lookup::None),
     }
 }
 
 /// What the eligibility-checked issue round-trip needs to know.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum IssueOutcome {
     /// A key exists, is on the free plan, and its value is readable — created
     /// now or adopted. The value is deliberately not carried: the callback
     /// that consumes this answers with a redirect, and a credential must
     /// never ride in a `Location`.
     Issued,
+    /// The owner revoked their key inside the current quota period, so no
+    /// new one is issued until it rolls (task 0191). Nothing was written.
+    Capped {
+        /// `YYYY-MM-DD`, for the landing query.
+        next_eligible_date: String,
+    },
     /// The control plane would not produce a usable key — an error, a
     /// deadline, or a key deleted underneath every attempt. Logged inside
     /// with the same distinctions 0187's handler drew; the visitor is told to
@@ -539,7 +649,7 @@ pub(crate) async fn issue_for(gateway: &Gateway, sub: &str, deadline: Duration) 
     };
 
     match tokio::time::timeout(deadline, reconcile(gateway, &name)).await {
-        Ok(Ok(Some(outcome))) => {
+        Ok(Ok(Reconciled::Issued(outcome))) => {
             tracing::info!(
                 key_id = %outcome.record.id,
                 created = outcome.created,
@@ -547,8 +657,15 @@ pub(crate) async fn issue_for(gateway: &Gateway, sub: &str, deadline: Duration) 
             );
             IssueOutcome::Issued
         }
+        Ok(Ok(Reconciled::Capped { next_eligible_date })) => {
+            tracing::info!(
+                outcome = "capped",
+                "portal issue refused: the key was revoked this quota period"
+            );
+            IssueOutcome::Capped { next_eligible_date }
+        }
         // Every attempt found a key and then lost it before reading its value.
-        Ok(Ok(None)) => {
+        Ok(Ok(Reconciled::Lost)) => {
             tracing::warn!(
                 attempts = MAX_ATTEMPTS,
                 "a key was deleted underneath every issue attempt"
@@ -570,191 +687,6 @@ pub(crate) async fn issue_for(gateway: &Gateway, sub: &str, deadline: Duration) 
     }
 }
 
-/// What the eligibility-checked rework round-trip needs to know (task 0191).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ReworkOutcome {
-    /// A new key exists and is on the plan; the old one is gone.
-    Replaced,
-    /// There was no key to replace. The visitor is sent to issue one.
-    NoKey,
-    /// The current key was created inside this period. Nothing moved.
-    Capped {
-        /// `YYYY-MM-DD`, for the landing query.
-        next_eligible_date: String,
-    },
-    /// The control plane would not complete the swap. The old key is left in
-    /// place wherever that was possible (see [`swap`]); the visitor is told to
-    /// try again.
-    Failed,
-}
-
-/// Replace the key for `sub` — reachable only from `super::auth::rework`
-/// after a fresh membership proof.
-///
-/// The cap is decided **here**, against the listing this call makes, not
-/// trusted from the pre-check: the pre-check answered a session cookie some
-/// seconds ago, and the authority for "may this key be replaced" has to be
-/// the same call that is about to replace it.
-pub(crate) async fn rework_for(gateway: &Gateway, sub: &str, deadline: Duration) -> ReworkOutcome {
-    // Same guard as the reveal and the issue — and here, as in the issue, it
-    // stands in front of `DeleteApiKey`.
-    let Some(name) = key_name(sub) else {
-        tracing::warn!("a rework round-trip carried a user id that is not a snowflake; refusing");
-        return ReworkOutcome::Failed;
-    };
-
-    match tokio::time::timeout(deadline, swap(gateway, &name)).await {
-        Ok(Ok(Swap::Replaced { record })) => {
-            tracing::info!(key_id = %record.id, "portal replaced an API key");
-            ReworkOutcome::Replaced
-        }
-        Ok(Ok(Swap::NoKey)) => ReworkOutcome::NoKey,
-        Ok(Ok(Swap::Capped { next_eligible_date })) => {
-            tracing::info!(
-                outcome = "capped",
-                "portal rework refused by the period cap"
-            );
-            ReworkOutcome::Capped { next_eligible_date }
-        }
-        Ok(Ok(Swap::Lost)) => {
-            tracing::error!(
-                "the replacement key was deleted underneath the rework; the visitor may be \
-                 keyless until the next issue round-trip"
-            );
-            ReworkOutcome::Failed
-        }
-        Ok(Err(error)) => {
-            // `error` cannot carry a key value — see `gateway::sdk_message`.
-            tracing::error!(error = %error, "portal key rework failed");
-            ReworkOutcome::Failed
-        }
-        Err(_elapsed) => {
-            tracing::error!(
-                deadline_secs = deadline.as_secs_f32(),
-                "portal key rework ran out of time"
-            );
-            ReworkOutcome::Failed
-        }
-    }
-}
-
-/// What one pass of [`swap`] found or did.
-enum Swap {
-    Replaced {
-        record: KeyRecord,
-    },
-    NoKey,
-    Capped {
-        next_eligible_date: String,
-    },
-    /// The new key was created and then vanished before the swap completed —
-    /// a concurrent reconciler for the same name, or a console session.
-    Lost,
-}
-
-/// The swap: **create and attach the new key first, then delete the old** —
-/// so the visitor is never keyless, and the cap blocks the *next* rework
-/// rather than the replacement.
-///
-/// Step by step, with what each failure leaves behind:
-///
-/// 1. List, filter, rank: the current key is the reveal's winner. None →
-///    [`Swap::NoKey`]. Its `createdDate` decides the cap → [`Swap::Capped`].
-///    Nothing has been written.
-/// 2. `CreateApiKey` under the same name. A failure here leaves the old key
-///    exactly as it was.
-/// 3. `CreateUsagePlanKey` for the new key. A failure here leaves an orphan
-///    (enabled, on no plan) beside a working old key — the same orphan the
-///    issue path's attach can leave, and the next issue round-trip adopts or
-///    reconciles it. The old key still works. `KeyGone` means the new key
-///    was deleted in the milliseconds since its creation → [`Swap::Lost`],
-///    old key untouched.
-/// 4. `DeleteApiKey` on **every** old key under the name — the winner and
-///    any duplicates the reconciler had not yet swept. This is the instant
-///    the visitor was warned about: the old key stops working here. If a
-///    delete fails, the new key is deleted again (best effort) and the error
-///    propagates: the visitor is told it failed, and what they hold is the
-///    key they had, not two keys of which the page reveals the older.
-/// 5. The new key's value is read back, not to hand out (the caller answers
-///    with a redirect and the page reveals through the read-only route) but
-///    to prove it still exists. `None` → [`Swap::Lost`]: something deleted
-///    the replacement between the attach and now; the old key is gone too.
-///    Rare — it needs a concurrent reconciler for this exact name — and the
-///    heal is one issue round-trip, which recreates. Reported as a failure,
-///    loudly, rather than papered over by creating a third key inside a
-///    budget that is already mostly spent.
-///
-/// **Two simultaneous reworks** (two tabs; the modal's disabled confirm
-/// stops a double-click in one) each pass the cap against the same old key,
-/// each create, each attach, each delete the old key — and two new keys
-/// survive. Not keyless, not a quota launder (both are capped until the
-/// 1st), and the next issue round-trip's reconciler converges them on the
-/// earliest. Accepted rather than serialised: there is no lock to take on a
-/// control plane that is the source of truth, and the deterministic winner
-/// rule already makes the convergence safe.
-async fn swap(gateway: &Gateway, name: &str) -> Result<Swap, GatewayError> {
-    // Step 1.
-    let existing = exact_matches(gateway.list_named(name).await?, name);
-    let Some(current) = choose_winner(&existing) else {
-        return Ok(Swap::NoKey);
-    };
-    if let Cap::Capped {
-        next_eligible_date, ..
-    } = cap::decide(current.created_at, &Period::now())
-    {
-        return Ok(Swap::Capped { next_eligible_date });
-    }
-
-    // Step 2. The value is dropped on purpose — see `Outcome`.
-    let (replacement, _value) = gateway.create(name).await?;
-
-    // Step 3.
-    if gateway.attach_to_free_plan(&replacement.id).await? == Attachment::KeyGone {
-        return Ok(Swap::Lost);
-    }
-
-    // Step 4. Every old key, not only the winner: a duplicate left by an
-    // earlier double-submit is an old key too, and leaving it would leave the
-    // visitor a working credential they were told had died.
-    for old in &existing {
-        // The same last-line guard the reconciler keeps before its deletes:
-        // on the record, immediately before the destructive call.
-        if old.name != name {
-            tracing::error!(
-                key_id = %old.id,
-                "refusing to delete a key whose name is not the caller's; \
-                 the exact-name filter has been bypassed"
-            );
-            continue;
-        }
-        if let Err(error) = gateway.delete(&old.id).await {
-            tracing::error!(
-                key_id = %old.id,
-                error = %error,
-                "could not delete the key being replaced; rolling the replacement back"
-            );
-            if let Err(rollback) = gateway.delete(&replacement.id).await {
-                tracing::error!(
-                    key_id = %replacement.id,
-                    error = %rollback,
-                    "could not roll the replacement back either; the next issue round-trip \
-                     reconciles the duplicate"
-                );
-            }
-            return Err(error);
-        }
-        tracing::info!(key_id = %old.id, "portal deleted a replaced API key");
-    }
-
-    // Step 5.
-    match gateway.value_of(&replacement.id).await? {
-        Some(_value) => Ok(Swap::Replaced {
-            record: replacement,
-        }),
-        None => Ok(Swap::Lost),
-    }
-}
-
 /// The result of a successful reconciliation.
 ///
 /// Deliberately does **not** carry the key value. The issue flow's caller is a
@@ -767,31 +699,93 @@ struct Outcome {
     created: bool,
 }
 
+/// What the reconciler settled on.
+enum Reconciled {
+    Issued(Outcome),
+    /// A revoked key inside the current period stands in the way.
+    Capped {
+        next_eligible_date: String,
+    },
+    /// Every attempt settled on a key that was deleted before its value could
+    /// be read.
+    Lost,
+}
+
+/// One attempt's verdict; `Retry` re-enters the flow.
+enum Attempt {
+    Done(Outcome),
+    Capped { next_eligible_date: String },
+    Retry,
+}
+
 /// List, filter, rank, converge — the reconciler, run up to [`MAX_ATTEMPTS`]
 /// times.
 ///
-/// `Ok(None)` means every attempt settled on a key that was deleted before its
+/// `Lost` means every attempt settled on a key that was deleted before its
 /// value could be read. That is a real, transient state (a console session, or
 /// another invocation's reconciler) and it is reported as such rather than as a
 /// failure of this service.
-async fn reconcile(gateway: &Gateway, name: &str) -> Result<Option<Outcome>, GatewayError> {
+async fn reconcile(gateway: &Gateway, name: &str) -> Result<Reconciled, GatewayError> {
     for _ in 0..MAX_ATTEMPTS {
-        if let Some(outcome) = attempt(gateway, name).await? {
-            return Ok(Some(outcome));
+        match attempt(gateway, name).await? {
+            Attempt::Done(outcome) => return Ok(Reconciled::Issued(outcome)),
+            Attempt::Capped { next_eligible_date } => {
+                return Ok(Reconciled::Capped { next_eligible_date });
+            }
+            Attempt::Retry => {}
         }
     }
-    Ok(None)
+    Ok(Reconciled::Lost)
 }
 
 /// One pass of the reconciler.
-async fn attempt(gateway: &Gateway, name: &str) -> Result<Option<Outcome>, GatewayError> {
+async fn attempt(gateway: &Gateway, name: &str) -> Result<Attempt, GatewayError> {
     // Step 1: everything the control plane has under this name PREFIX, across
     // all pages, narrowed to exact equality here. Both halves matter and both
     // are argued for in `naming`.
     let existing = exact_matches(gateway.list_named(name).await?, name);
 
+    // Step 1b (task 0191): a revoked key. If every key under the name is
+    // disabled, the owner revoked it, and the re-issue cap decides: inside the
+    // period of the revocation → refused with the date, nothing written;
+    // after it → the revocation records are deleted and the flow continues
+    // into a create, exactly as for a first issue. Deleting BEFORE creating
+    // is safe here, unlike a swap, because a disabled key is not a credential
+    // anybody can lose; and it keeps the next listing from ranking a dead key
+    // ahead of the live one.
+    let (live, mut revoked): (Vec<KeyRecord>, Vec<KeyRecord>) =
+        existing.into_iter().partition(|k| k.enabled);
+    if live.is_empty() && !revoked.is_empty() {
+        // The LATEST revocation governs: a duplicate revoked last month must
+        // not open a door a revocation this month closed.
+        let revoked_at = revoked.iter().filter_map(|k| k.last_updated_at).max();
+        if let Cap::Capped {
+            next_eligible_date, ..
+        } = cap::decide(revoked_at, &Period::now())
+        {
+            return Ok(Attempt::Capped { next_eligible_date });
+        }
+        for dead in &revoked {
+            if dead.name != name {
+                tracing::error!(
+                    key_id = %dead.id,
+                    "refusing to delete a key whose name is not the caller's; \
+                     the exact-name filter has been bypassed"
+                );
+                continue;
+            }
+            tracing::info!(key_id = %dead.id, "deleting a revoked key whose period has rolled");
+            gateway.delete(&dead.id).await?;
+        }
+        // Deleted here, so the sweep below has nothing of theirs left to do.
+        revoked.clear();
+    }
+
     let mut created: Option<KeyRecord> = None;
-    let mut candidates = existing;
+    // Live keys only: a revoked key that survived the branch above (one live
+    // key beside it — a console re-enable, or a duplicate) is neither ranked
+    // nor adopted; it is swept like any other loser below.
+    let mut candidates = live;
 
     // Step 2: nothing yet — create one. The value the create answers with is
     // dropped on purpose — see `Outcome`; a successful create is itself the
@@ -816,9 +810,9 @@ async fn attempt(gateway: &Gateway, name: &str) -> Result<Option<Outcome>, Gatew
             // out a dead id — the one thing the adopt-or-recreate rule exists to
             // prevent — so this re-enters the flow like any other lost race.
             if gateway.attach_to_free_plan(&record.id).await? == Attachment::KeyGone {
-                return Ok(None);
+                return Ok(Attempt::Retry);
             }
-            return Ok(Some(Outcome {
+            return Ok(Attempt::Done(Outcome {
                 record,
                 created: true,
             }));
@@ -853,7 +847,7 @@ async fn attempt(gateway: &Gateway, name: &str) -> Result<Option<Outcome>, Gatew
     // all (`curl` reports `000`) and an invocation error on the Lambda's
     // `Errors` metric. Falling through to the retry answers `503` instead.
     let Some(winner) = choose_winner(&candidates).cloned() else {
-        return Ok(None);
+        return Ok(Attempt::Retry);
     };
 
     // Step 4: the winner is on the plan before anybody is handed it — however
@@ -889,11 +883,15 @@ async fn attempt(gateway: &Gateway, name: &str) -> Result<Option<Outcome>, Gatew
     // place that race can surface, so it has to answer it rather than turn a
     // hand-deleted key back into the dead end this slice exists to remove.
     if gateway.attach_to_free_plan(&winner.id).await? == Attachment::KeyGone {
-        return Ok(None);
+        return Ok(Attempt::Retry);
     }
 
-    // Step 5: everything that is not the winner is deleted.
-    for loser in losers(&candidates, &winner) {
+    // Step 5: everything that is not the winner is deleted — duplicates, and
+    // (task 0191) any revoked key left beside a live one.
+    for loser in losers(&candidates, &winner)
+        .into_iter()
+        .chain(revoked.iter())
+    {
         // Re-asserted immediately before the destructive call, on the record
         // itself rather than on the query that produced it. `exact_matches` has
         // already run; this is the guard that survives somebody "simplifying"
@@ -935,7 +933,7 @@ async fn attempt(gateway: &Gateway, name: &str) -> Result<Option<Outcome>, Gatew
     if let Some(record) = created
         && record.id == winner.id
     {
-        return Ok(Some(Outcome {
+        return Ok(Attempt::Done(Outcome {
             record: winner,
             created: true,
         }));
@@ -946,11 +944,11 @@ async fn attempt(gateway: &Gateway, name: &str) -> Result<Option<Outcome>, Gatew
     // whatever survived or create a replacement — this is the "not handed out
     // as a dead id" property.
     match gateway.value_of(&winner.id).await? {
-        Some(_value) => Ok(Some(Outcome {
+        Some(_value) => Ok(Attempt::Done(Outcome {
             record: winner,
             created: false,
         })),
-        None => Ok(None),
+        None => Ok(Attempt::Retry),
     }
 }
 
@@ -996,7 +994,7 @@ mod tests {
         assert!(!rest.contains('/'));
     }
 
-    /// The rework pre-check is one segment deeper — `key/rework` — which is
+    /// The revoke route is one segment deeper — `key/rework` — which is
     /// still inside the depth the currently-deployed gateway maps (0205's
     /// note: depth 1–2 under the prefix work today, depth 3 answers `403`
     /// until the greedy proxy deploys). Pinned so it is not moved deeper.

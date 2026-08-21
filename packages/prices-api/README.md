@@ -310,45 +310,38 @@ and nobody else's.
 
 ### 3c. Replacing a key (task 0191)
 
-The same local run serves the rework. On the page, **Replace my key…** beside
-the key opens a confirmation; the confirm button arms only once you type
-`delete-key`, and pressing it navigates through `/auth/login?action=rework` —
-a second OAuth round-trip, like the issue, because a rework re-proves Discord
-**membership** (not account age) against a fresh token. The callback then
-swaps the key: **the new key is created and attached before the old one is
-deleted**, so there is no instant at which you are keyless.
+On the page, **Replace my key…** beside the key opens a confirmation; the
+confirm button arms only once you type `delete-key`. Pressing it **deactivates
+the key immediately and issues nothing** — `POST /api-tokens/api/key/rework`,
+session-authenticated, no Discord round-trip. A new key can be issued only
+from the start of the next quota period (the 1st of next month, 00:00 UTC,
+**our** rule): until then "Get my API key" lands on `?issue=capped` with the
+date, and the page says so instead of offering the link.
 
 ```bash
-# Before: one key. Note its id.
+# Before: one enabled key.
 aws apigateway get-api-keys --name-query "discord-<your id>-key" \
-    --query 'items[].{id:id,created:createdDate}'
+    --query 'items[].{id:id,enabled:enabled,updated:lastUpdatedDate}'
 
-# Confirm the rework on the page, then:
+# Confirm on the page, then:
 aws apigateway get-api-keys --name-query "discord-<your id>-key" \
-    --query 'items[].{id:id,created:createdDate}'
-# → a DIFFERENT id, created just now; the old id is gone.
+    --query 'items[].{id:id,enabled:enabled,updated:lastUpdatedDate}'
+# → the SAME id, enabled: false, lastUpdatedDate just now — the revocation record.
 
-# The old value is refused and the new one works — the data-plane check CI
-# cannot make (the mock has no data plane). 403 is what a deleted key gets:
-# byte-identical to sending no key at all (0180 item 8).
-curl -sS -o /dev/null -w '%{http_code}\n' -H "X-API-Key: <the OLD value>" \
+# The value is refused within tens of seconds (0180 item 8) — the data-plane
+# check CI cannot make. 403 is byte-identical to sending no key at all.
+curl -sS -o /dev/null -w '%{http_code}\n' -H "X-API-Key: <the value>" \
     https://<api host>/production/v1/assets      # → 403
-curl -sS -o /dev/null -w '%{http_code}\n' -H "X-API-Key: <the NEW value>" \
-    https://<api host>/production/v1/assets      # → 200
 ```
 
-Open the confirmation a second time: it says the next replacement is available
-on the **1st of next month** and never arms. That is the once-per-quota-period
-cap, decided from the surviving key's `createdDate` against the calendar month
-in UTC — **our** period rule, the same one the usage panel states; AWS's own
-reset instant is undocumented (task 0191's Step 0 measured the `DAY` proxy;
-see that task). A key *issued* this period is capped the same way: the rule
-is about creation, not about reworks, or a fresh key would be a fresh counter.
+Press **Get my API key** now: the round-trip passes eligibility and lands on
+`?issue=capped&next_eligible_at=<1st of next month>` — nothing created, the
+disabled key untouched. On or after the 1st the same press deletes the
+disabled key, creates a new one and attaches it; the old value stays dead.
 
-The pre-check behind the dialog is `POST /api-tokens/api/key/rework`
-(session-authenticated, **read-only**: `200 {"eligible":true}` or
-`409 rework_capped` with `details.next_eligible_at`). It writes nothing; only
-the round-trip can.
+The principal needs the seventh grant, `apigateway:PATCH` on `/apikeys/*`
+(in the Lambda's role: `PortalReadDisableAndDeleteOwnApiKeys`). No
+`UpdateUsagePlan`, no `UpdateUsage`.
 
 ### 4. Afterwards
 
@@ -356,8 +349,7 @@ the round-trip can.
 aws apigateway delete-api-key --api-key <id>
 ```
 
-(A rework leaves exactly one key behind — the new one — so it is the id from
-§3c's second listing that needs deleting.)
+(A revoke leaves the key in place, disabled; delete it by id like any other.)
 
 ## Env (Lambda)
 
