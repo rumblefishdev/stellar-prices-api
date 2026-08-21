@@ -31,7 +31,8 @@
 --
 -- Columns (task 0072 completes the set; all ten are now written):
 --   price_usd       — latest PRICED close in the 24h window (argMaxIf, 0135);
---                     NOT age-bounded — see the unfiltered CTE for why
+--                     NOT age-bounded — see the unfiltered CTE for why. The
+--                     per-venue pipeline IS bounded, but conditionally: see 1b
 --   price_xlm       — price_usd re-expressed in XLM (÷ the XLM/USD close)
 --   change_24h_pct  — vs the oldest close inside the 24h window
 --   change_7d_pct   — vs the oldest priced close in the [7d, 5d] band of
@@ -122,21 +123,16 @@ WITH
     -- reading 0 here and being dropped by `src_price > 0` below as a side
     -- effect of enrichment timing.
     --
-    -- The carry is BOUNDED, and the bound lives HERE and nowhere else. The
-    -- reason is scope, not a number: the defect 0135 introduces is a dead
-    -- venue voting in the §5.5 median, which is a per-venue problem, so the
-    -- guard belongs in the per-venue pipeline. A carried close feeding
-    -- `sources` and `vwap_24h` asserts "this venue quotes X right now"; once
-    -- it is hours old that assertion is false, and because the median is
-    -- UNWEIGHTED, two stale venues can outvote and evict the one live venue
-    -- (the 3-source case in PR #228's review).
+    -- Freshness is measured but NOT yet applied — level 1b decides that, per
+    -- asset. Both columns take the latest priced close; they differ only in
+    -- whether a candle older than CARRY_BOUND may supply it, so for a source
+    -- that IS fresh the two are identical.
     --
     -- CARRY_BOUND = 2h, derived from the enrichment SCHEDULE — `rate(1 hour)`
     -- in infra/envs/production.json, so two cycles, and a venue quoting
     -- normally survives one missed pass. Deliberately NOT fitted to an
     -- observed lag: as of 2026-08-20 enrichment was failing on every run
     -- (task 0215), so a measured figure would encode a broken pipeline.
-    -- Revisit once 0111 and 0215 land.
     --
     -- Reference is `now()`, NOT the asset's own newest candle. An earlier
     -- revision compared against `max(timestamp)`, which spans quote legs
@@ -148,12 +144,52 @@ WITH
         SELECT
             asset_id                          AS asset_id,
             source                            AS source,
+            argMaxIf(close_usd, timestamp, close_usd > 0) AS src_price,
             argMaxIf(close_usd, timestamp,
-                     close_usd > 0 AND timestamp >= now() - INTERVAL 2 HOUR) AS src_price,
+                     close_usd > 0 AND timestamp >= now() - INTERVAL 2 HOUR) AS src_price_fresh,
             sum(volume_quote_usd)             AS src_volume
         FROM prices.price_ohlcv_1m FINAL
         WHERE timestamp >= now() - INTERVAL 24 HOUR
         GROUP BY asset_id, source
+    ),
+
+    -- Level 1b — the bound is CONDITIONAL, and that is the whole design.
+    --
+    -- What it guards: a venue whose last quote is hours old still votes in the
+    -- §5.5 median, which is UNWEIGHTED, so two stale venues can outvote and
+    -- evict the one live venue (the 3-source case in PR #228's review). That
+    -- defect needs a live venue to victimise.
+    --
+    -- So: drop stale venues ONLY when a fresh one survives. If every venue on
+    -- an asset is stale there is nothing to defend, and dropping them all is
+    -- pure loss — it empties `sources` and zeroes `vwap_24h` for an asset we
+    -- have perfectly usable, if unfresh, prices for.
+    --
+    -- ⚠️ This is not a hypothetical refinement. The unconditional form shipped
+    -- to prod on 2026-08-21 and was rolled back within the hour: measured
+    -- against the same data, it blanked `sources` on **2,284 of 4,365 assets
+    -- (52%)** while preventing **zero** evictions — 74% of the table had every
+    -- venue stale, because enrichment had been down for two days (0215). The
+    -- population where the defect can actually occur (>= 3 sources, mixed
+    -- fresh/stale) was **7 assets**, and on all 7 the fresh-only median sat
+    -- within 1% of the all-source median, far inside the 20% threshold.
+    --
+    -- Kept anyway, deliberately: that zero is not evidence of future safety.
+    -- The mixed population is small precisely BECAUSE almost nothing is fresh
+    -- right now; when 0215 and 0111 land, fresh venues multiply and the mixed
+    -- population grows with them. The risk rises as the pipeline recovers.
+    -- Conditional costs nothing by construction, so it is the cheap side of
+    -- that bet.
+    per_source_kept AS (
+        SELECT
+            asset_id,
+            source,
+            src_price,
+            src_price_fresh,
+            src_volume,
+            max(src_price_fresh > 0) OVER (PARTITION BY asset_id) AS asset_has_fresh
+        FROM per_source
+        WHERE src_price > 0
     ),
 
     -- Level 2 — collapse sources into per-asset arrays so the median filter can
@@ -167,12 +203,14 @@ WITH
             groupArray(src_volume)                AS vols_dec,
             groupArray(toFloat64(src_price))      AS prices_f,
             groupArray(toFloat64(src_volume))     AS vols_f
-        FROM per_source
-        WHERE src_price > 0            -- explicit rule (0135 C2): a source with
-                                        -- NO priced candle in the whole window
-                                        -- carries no signal; with the argMaxIf
-                                        -- above this can no longer drop a source
-                                        -- that merely has an un-enriched tip
+        FROM per_source_kept
+        WHERE NOT asset_has_fresh OR src_price_fresh > 0
+                                        -- explicit rule (0135 C2 + the
+                                        -- conditional bound): a source with NO
+                                        -- priced candle in the window is
+                                        -- already gone at level 1b; here a
+                                        -- STALE source is dropped only when the
+                                        -- asset still has a fresh one left
         GROUP BY asset_id
     ),
 

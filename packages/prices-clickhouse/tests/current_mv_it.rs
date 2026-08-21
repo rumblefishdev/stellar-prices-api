@@ -173,8 +173,9 @@ async fn current_prices_mv_computes_price_volume_and_market_cap() {
 ///           fixture exercising the load-bearing change_7d numerator guard
 ///   7 ZER — priced HISTORY, un-enriched TIP → 0135: latest priced close wins
 ///   8 DIP — a genuine ~-100% crash → must NOT be swallowed by 0138's guard
-///  10 STA — priced history OLDER than the 2h carry bound → the ASYMMETRY:
-///           price_usd still publishes it, the venue drops out of sources/vwap
+///  10 STA — EVERY venue stale → the conditional bound must NOT fire; the
+///           venue is kept, because there is no live venue to protect
+///  14 MIX — one fresh venue, one stale → the bound FIRES: stale is dropped
 ///  11 LAG — SINGLE source, priced history, un-enriched tip → carried (the
 ///           shape the XLM acceptance criterion names)
 ///  12 TRI — three sources, one carried past an un-enriched tip → the §5.5
@@ -199,7 +200,7 @@ async fn current_prices_mv_writes_0072_columns_and_filters_outliers() {
                     (6,'EXO','classic','GEXO','',1), (7,'ZER','classic','GZER','',1), \
                     (8,'DIP','classic','GDIP','',1), (10,'STA','classic','GSTA','',1), \
                     (11,'LAG','classic','GLAG','',1), (12,'TRI','classic','GTRI','',1), \
-                    (13,'NRB','classic','GNRB','',1)"
+                    (13,'NRB','classic','GNRB','',1), (14,'MIX','classic','GMIX','',1)"
         ))
         .execute()
         .await
@@ -265,6 +266,11 @@ async fn current_prices_mv_writes_0072_columns_and_filters_outliers() {
         // 13 NRB — ordinary priced asset; the interesting part is its 1h
         // reference below, which is too RECENT for the [7d, 5d] band.
         (13, 5, "2.00", "1000", "sdex"),
+        // 14 MIX — the conditional bound FIRING. sdex last quoted 190 min ago
+        // (stale), soroswap 5 min ago (fresh). Because a fresh venue survives,
+        // the stale one is dropped: it must not vote in the §5.5 median.
+        (14, 190, "2.00", "800", "sdex"),
+        (14, 5, "1.00", "400", "soroswap"),
     ];
     for (i, (asset, mins, cu, vol, src)) in rows.iter().enumerate() {
         admin
@@ -350,7 +356,7 @@ async fn current_prices_mv_writes_0072_columns_and_filters_outliers() {
             .fetch_one()
             .await
             .expect("count");
-        if n >= 11 {
+        if n >= 12 {
             ready = true;
             break;
         }
@@ -555,46 +561,59 @@ async fn current_prices_mv_writes_0072_columns_and_filters_outliers() {
         "market_cap_usd must be 1.90 * 1000 = 1900, got {zer_mc}"
     );
 
-    // ── 0135 ASYMMETRY: the bound guards the venues, not the headline ──────
-    // Asset 10's only priced close is 190 min old. The per-venue guard drops
-    // sdex (a venue that last quoted 3h ago is not quoting "now"), so
-    // `sources` empties and vwap goes to its sentinel — while `price_usd`
-    // still publishes the close, because blanking a price we hold is the
-    // outcome 0135 exists to remove. Measured on prod 2026-08-20: 1,091 of
-    // 4,444 assets (24.5%) already publish a hard zero without any bound.
+    // ── conditional bound, ARM A: every venue stale → do NOT fire ─────────
+    // Asset 10's only venue last quoted 190 min ago, past the 2h bound. There
+    // is no live venue to protect, so dropping it would be pure loss — it
+    // would empty `sources` and zero `vwap_24h` on an asset whose price we
+    // hold. Measured on prod 2026-08-21, the unconditional form did exactly
+    // that to 2,284 of 4,365 assets (52%) while preventing zero evictions.
     let sta_p = scalar_f64(&admin, &f("price_usd", 10)).await;
     assert!(
         (sta_p - 2.0).abs() < 1e-9,
-        "price_usd is NOT age-bounded — it must still publish the 190-min-old \
-         priced close, got {sta_p}"
+        "price_usd is not age-bounded, so the 190-min-old close still publishes, got {sta_p}"
     );
     let sta_srcs: String = admin
         .query(&s("sources", 10))
         .fetch_one()
         .await
         .expect("sta sources");
-    assert_eq!(
-        sta_srcs, "{}",
-        "a venue whose last quote is beyond the carry bound must drop out of \
-         sources, so it cannot vote in the §5.5 median"
+    assert!(
+        sta_srcs.contains("sdex"),
+        "with NO fresh venue on the asset the stale one must be KEPT — dropping \
+         it defends nothing and blanks the row, got {sta_srcs}"
     );
     let sta_vwap = scalar_f64(&admin, &f("vwap_24h", 10)).await;
     assert!(
-        sta_vwap.abs() < 1e-9,
-        "vwap must be the sentinel when no venue is currently quoting, got {sta_vwap}"
+        (sta_vwap - 2.0).abs() < 1e-6,
+        "vwap must still come from the kept venue, got {sta_vwap}"
     );
-    // The row stays internally coherent: change_* are computed FROM the
-    // published price, never fabricated against it.
-    let sta_24 = scalar_f64(&admin, &f("change_24h_pct", 10)).await;
+
+    // ── conditional bound, ARM B: a fresh venue survives → DO fire ─────────
+    // Asset 14 has sdex stale at 2.00 (190 min) and soroswap fresh at 1.00
+    // (5 min). Here the defect is live: unweighted, the stale venue votes in
+    // the median and its price is the one an outlier check would anchor on.
+    // So the stale venue is dropped and only the fresh one survives.
+    let mix_srcs: String = admin
+        .query(&s("sources", 14))
+        .fetch_one()
+        .await
+        .expect("mix sources");
     assert!(
-        sta_24.abs() < 1e-9,
-        "one priced candle means open_24h == price_usd, so 0%, got {sta_24}"
+        mix_srcs.contains("soroswap") && !mix_srcs.contains("sdex"),
+        "a stale venue must be dropped when a fresh one survives, got {mix_srcs}"
     );
-    let sta_7d = scalar_f64(&admin, &f("change_7d_pct", 10)).await;
+    let mix_vwap = scalar_f64(&admin, &f("vwap_24h", 14)).await;
     assert!(
-        (sta_7d - 100.0).abs() < 1e-2,
-        "change_7d_pct must come from the published 2.00 against the 1.00 \
-         baseline = +100%, got {sta_7d}"
+        (mix_vwap - 1.0).abs() < 1e-6,
+        "vwap must weight the FRESH venue only (1.00), not the blend with the \
+         stale 2.00 — a blend means the bound did not fire, got {mix_vwap}"
+    );
+    // price_usd is unbounded and venue-blind: it is simply the newest priced
+    // close on the asset, which here is the fresh one.
+    let mix_p = scalar_f64(&admin, &f("price_usd", 14)).await;
+    assert!(
+        (mix_p - 1.0).abs() < 1e-9,
+        "price_usd is the newest priced close regardless of venue, got {mix_p}"
     );
 
     // ── the change_7d numerator guard, on the only shape that reaches it ───

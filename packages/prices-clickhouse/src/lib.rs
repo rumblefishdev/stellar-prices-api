@@ -469,11 +469,12 @@ mod tests {
             guarded += stmt.matches("argMinIf(close_usd, timestamp,").count();
         }
 
-        // Non-vacuity: 3 argMaxIf (xlm_usd scalar, per_source, unfiltered) +
-        // 2 argMinIf (ref_7d, open_24h). A drop means a projection lost its
-        // guard or the expression was reworded and this test has gone blind.
+        // Non-vacuity: 4 argMaxIf (xlm_usd scalar, per_source's src_price and
+        // src_price_fresh, unfiltered) + 2 argMinIf (ref_7d, open_24h). A drop
+        // means a projection lost its guard or the expression was reworded and
+        // this test has gone blind.
         assert_eq!(
-            guarded, 5,
+            guarded, 6,
             "current.sql guarded close_usd aggregate count changed — verify \
              every site still skips un-enriched rows, then update this count"
         );
