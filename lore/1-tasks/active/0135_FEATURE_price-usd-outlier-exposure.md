@@ -252,7 +252,7 @@ history:
       the shape. `per_source` derives two prices (latest priced close, and
       latest priced close within 2h); a new level 1b keeps a stale venue
       unless the asset still has a fresh one, so the guard fires only where
-      the defect can occur. Code in PR #240.
+      the defect can occur. Code in PR #241.
       **Counterfactual on prod, both variants over the same data in one
       sitting** (4,152 assets): `zero_but_vwap_ok` 30 → **0**,
       `zero_price_usd` 868 → **368**, and — the metric the unconditional form
