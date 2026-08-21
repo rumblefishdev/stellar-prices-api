@@ -78,6 +78,24 @@ history:
       recorded: their single-file bind mount pins an inode, so an edit plus a
       reload would have been a phantom deploy. Verification protocol agreed —
       they ping post-deploy, we confirm from CloudWatch and query_log.
+  - date: 2026-08-21
+    status: backlog
+    who: okarcz
+    note: >
+      BEFORE-STATE RECORDED, and it changed the finding. Two discoveries. (1) The
+      30 s ceiling cuts TWO statements, not one — the oracle statement (p95
+      28.7 s, max 37 s, 737.6M rows read) crosses 2-6 times/day and 38 times on
+      08-15, and because the oracle tier runs FIRST those invocations issue no
+      peg or pivot work at all. Confirmed by counting the same event two ways:
+      oracle-over-30s matches (72 minus peg runs) exactly on six consecutive
+      days. So the earlier "next in line, a matter of weeks" framing was wrong,
+      as was an in-session guess blaming 08-14/15's low peg counts on the 0182
+      window. (2) max_execution_time resolved per profile — it is 30 on
+      read_only (so prices_reader, our API, is already bounded server-side) and
+      ABSENT on prices_write_ddl, so the worker really is unbounded and half 2's
+      premise holds. It also proves half 2 must live in the client: the Lambda
+      and the operator CLIs share the single prices_writer user, so no
+      server-side setting can give them different ceilings.
 ---
 
 # Every invocation fails on the XLM pivot, so the USDT pivot is never reached
@@ -297,10 +315,11 @@ first byte** — our pivots and peg INSERTs, `count_candidates`, any aggregating
 `SELECT`, and every operator-CLI statement of that shape. The discriminator is
 buffering, not the verb.
 
-⚠️ **The oracle insert was next in line.** It averages **26.4 s** against a 30 s
-ceiling, on a table growing ~10.9 M rows per 13 days. Had this gone unfound, a
-second caller would have crossed within weeks — and would have looked like a new,
-unrelated defect rather than the same one.
+🔴 **The oracle insert is not "next in line" — it is ALREADY crossing.** Measured
+the same day: p95 **28.7 s**, max **37 s**, 2-6 crossings/day and **38 on
+08-15**. See the baseline section below, which confirms it to the row. A second
+statement class has been failing this whole time and would have been written off
+as a network blip.
 
 ### 4. 🔴 THE FINDING TO STEAL — a single-file bind mount pins an inode
 
@@ -411,6 +430,95 @@ and reintroduces this failure class from the other direction.
   connects as `prices_writer`, an XML user that can carry a different profile.
   Confirm against `system.settings_profile_elements` before telling BE "there is
   no bound".
+
+## 📌 BASELINE — recorded 2026-08-21, BEFORE BE's deploy
+
+Captured deliberately while the ceiling is still armed, because every AC here and
+in [[0111]] says "recorded before/after" and this state is unrecoverable once the
+bump lands. Read from `system.query_log` and `system.parts` only — no `FINAL`
+scan of the hot table.
+
+### Table
+
+| | |
+|---|---|
+| `price_ohlcv_1m` | **736,707,689 rows / 18.45 GiB / 102 partitions / 322 parts** |
+
+### Statements on `price_ohlcv_1m`, 7 days
+
+| stmt | runs/day | avg | max | rows read | written/run |
+|---|---|---|---|---|---|
+| **XLM pivot** | 72 | **45.6 s** | 49.5 s | 687.6 M | **exactly 10,000** |
+| **oracle** (`oracle_prices` join) | ~190 | 26.2 s (p95 **28.7**) | **37 s** | **737.6 M** | ~600-1,100 |
+| peg | 66-72 | 14.4 s | 15.4 s | 423.0 M | ~1,237 |
+| USDT pivot | **0 — absent from all 7 days** | | | | |
+
+`BadResponse("")` in CloudWatch: **144 in 48 h = exactly 3/hour**, one per XLM
+pivot run. The XLM pivot writes **exactly `batch_size`** every run (440,000/44,
+660,000/66, 720,000/72 — perfectly linear), so it is `LIMIT`-bound every time and
+has never exhausted its candidates.
+
+## 🔴 The ceiling cuts TWO statements, not one — and the second one was missed
+
+⚠️ **Corrects this task's own framing.** The oracle statement is not "next in
+line" behind the XLM pivot; **it has been dying too**, and because the oracle
+tier runs FIRST, an invocation that dies there issues **no peg and no pivot work
+at all**.
+
+Confirmed by counting the same event two ways. If an oracle statement exceeds
+30 s, `?` aborts the pass before the peg-pivot tier, so peg runs must fall short
+of the 72 invocations/day (1 EventBridge + 2 async retries) by exactly that many:
+
+| date | oracle `> 30 s` | peg runs | 72 − peg | |
+|---|---|---|---|---|
+| 08-20 | 0 | 72 | 0 | ✅ |
+| 08-19 | 2 | 70 | 2 | ✅ |
+| 08-18 | 6 | 66 | 6 | ✅ |
+| 08-17 | 5 | 67 | 5 | ✅ |
+| 08-16 | 5 | 67 | 5 | ✅ |
+| **08-15** | **38** | **34** | **38** | ✅ |
+
+Six consecutive exact matches, including a day where the oracle ran ~2.5 s slower
+(p50 28.4 s vs 26.0) and 38 of 181 statements crossed. That is not correlation.
+
+⛔ **Also corrects an in-session guess:** 08-14/08-15's low peg counts were
+attributed to the 0172/0182 window. Wrong — same mechanism, worse day.
+
+**The oracle statement is a load-sensitive coin flip at the line**: p50 26.0-26.4,
+**p95 28.7**, max 37, against 30. What varies day to day is cluster load, not
+table size. And it reads **737.6 M rows — the whole table** — so 0111's growth
+argument applies to it identically, and it will cross more often, not less.
+
+`oracle_prices` (the `ASOF LEFT JOIN` target, `ch_enrich.rs:794`) appears in no
+other statement, so the classification is exact.
+
+## ✅ `max_execution_time` resolved per profile — the worker IS unbounded
+
+The earlier reading was taken as `default` and this task flagged it as unverified
+(the worker connects as `prices_writer`, an XML user with its own profile).
+Resolved from `system.settings_profile_elements`:
+
+| profile | users | `max_execution_time` |
+|---|---|---|
+| `read_only` | `api_reader`, `dev_read`, **`prices_reader`** | **30** |
+| `prices_write_ddl` | **`prices_writer`** | **absent** |
+
+`prices_write_ddl` carries nine elements — memory, insert-block sizes, all four
+7200 s socket timeouts — and **no execution bound**; unlike `dict_loader` it does
+not inherit `default` either. **So half 2's premise holds: the worker and every
+operator CLI run unbounded.**
+
+Two things fall out that were previously assertions:
+
+- **Our read path is already bounded at 30 s, server-side, by ClickHouse.** So
+  `prices_reader` gets a real `TIMEOUT_EXCEEDED` where `prices_writer` gets an
+  empty body. The failure asymmetry this task is about was already half-solved on
+  the API side — half 2 extends an existing house policy rather than inventing
+  one, and 30 is that policy's number.
+- 🔴 **It must live in the client, and now there is a hard reason.** The
+  scheduled Lambda and the operator CLIs **share the single `prices_writer`
+  user**, so there is no server-side place to give them different ceilings. A
+  profile-level setting cannot express this.
 
 ## Verification after BE's deploy — agreed protocol, and what to expect
 
