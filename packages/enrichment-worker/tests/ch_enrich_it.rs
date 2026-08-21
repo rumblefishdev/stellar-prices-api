@@ -1466,3 +1466,197 @@ async fn the_usd_reset_refuses_to_run_while_the_oracle_still_shadows_the_quote_l
         .await
         .unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// Task 0111 phase 2 — frontier-driven historical sweep
+// ---------------------------------------------------------------------------
+
+/// Read a month's stored frontier state, or `None` if the sweep never recorded
+/// it. `FINAL` collapses the ReplacingMergeTree so a re-recorded month reads as
+/// its latest state, which is exactly how the sweep reads it.
+async fn frontier_state(client: &Client, db: &str, month: u32) -> Option<String> {
+    client
+        .query(&format!(
+            "SELECT CAST(state AS String) FROM {db}.enrichment_frontier FINAL \
+             WHERE tbl = 'price_ohlcv_1m' AND month = ?"
+        ))
+        .bind(month)
+        .fetch_optional::<String>()
+        .await
+        .unwrap()
+}
+
+/// End-to-end frontier walk against a live ClickHouse. This is the half the
+/// pure `months_to_sweep` unit tests cannot reach: the actual SQL — the
+/// `Enum8`-by-name insert, `CAST(state AS String)` on read, the server-side
+/// `toUnixTimestamp64Milli` version, and `toYYYYMM(min|max(timestamp))` as the
+/// partition-span source.
+///
+/// Fixture spans three monthly partitions below the live window:
+///   * 202101 — FOO/XLM with **no** XLM/USDC reference anywhere before it, so
+///     nothing can price it. The permanently-unpriceable floor in miniature.
+///   * 202102 — FOO/USDC, peggable.
+///   * 202103 — FOO/USDC, peggable.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn the_frontier_advances_exhausts_and_never_revisits() {
+    use enrichment_worker::frontier::{HistoricalSweepConfig, run_historical_sweep};
+
+    let db = "it_enrich_frontier";
+    let client = setup_scratch(db).await;
+    client
+        .query(&ASSETS.replace("{db}", db).replace("{usdc}", USDC_ISSUER))
+        .execute()
+        .await
+        .unwrap();
+
+    // 2021-01-15, 2021-02-15, 2021-03-15 — one candle per monthly partition.
+    let (jan, feb, mar) = (1_610_712_000u32, 1_613_390_400u32, 1_615_809_600u32);
+    client
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1m \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
+             ({jan},10, 1,'phoenix', 7,7,7,7, 1,7,0,0,7,1,1), \
+             ({feb},10, 2,'sdex',    4,4,4,4, 1,4,0,0,4,1,1), \
+             ({mar},10, 2,'sdex',    9,9,9,9, 1,9,0,0,9,1,1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    let sweep = |max_months: u32| {
+        let mut base = cfg(db);
+        base.url = ch_url();
+        HistoricalSweepConfig {
+            base,
+            // Everything from 2026-07 on belongs to the live pass; the whole
+            // fixture is below it.
+            live_start_month: 202607,
+            max_months,
+            deadline: None,
+        }
+    };
+    let client_for_sweep = Client::default().with_url(ch_url()).with_database(db);
+
+    // --- run 1: the oldest month, which nothing can price -------------------
+    let r1 = run_historical_sweep(&client_for_sweep, &sweep(1))
+        .await
+        .unwrap();
+    assert_eq!(
+        r1.months.len(),
+        1,
+        "max_months = 1 works exactly one partition"
+    );
+    assert_eq!(r1.months[0].month, 202101, "oldest-first");
+    assert_eq!(
+        r1.frontier_month,
+        Some(202101),
+        "frontier position is the oldest pending month"
+    );
+    assert_eq!(
+        r1.total_enriched(),
+        0,
+        "202101 has no USD reference of any kind"
+    );
+    assert_eq!(
+        frontier_state(&client, db, 202101).await.as_deref(),
+        Some("exhausted"),
+        "a month that makes no progress is terminal — this is the pre-reference \
+         floor dropping out with no hard-coded cutoff date"
+    );
+
+    // --- run 2: must SKIP the exhausted month and advance -------------------
+    let r2 = run_historical_sweep(&client_for_sweep, &sweep(1))
+        .await
+        .unwrap();
+    assert_eq!(
+        r2.months[0].month, 202102,
+        "the exhausted month is never revisited"
+    );
+    assert!(r2.total_enriched() > 0, "202102 is peggable");
+    assert_eq!(
+        frontier_state(&client, db, 202102).await.as_deref(),
+        Some("exhausted"),
+        "a month drained to its floor in one pass is also terminal"
+    );
+    assert!(
+        close_usd(&client, db, 10, 2, feb).await > 0.0,
+        "the sweep actually wrote a USD value, not just a frontier row"
+    );
+
+    // --- run 3: the last month below the live window ------------------------
+    let r3 = run_historical_sweep(&client_for_sweep, &sweep(1))
+        .await
+        .unwrap();
+    assert_eq!(r3.months[0].month, 202103);
+    assert!(close_usd(&client, db, 10, 2, mar).await > 0.0);
+
+    // --- run 4: nothing left ------------------------------------------------
+    let r4 = run_historical_sweep(&client_for_sweep, &sweep(5))
+        .await
+        .unwrap();
+    assert!(
+        r4.months.is_empty(),
+        "a fully exhausted history yields no work"
+    );
+    assert_eq!(
+        r4.months_pending, 0,
+        "the drain-progress metric reaches zero"
+    );
+    assert_eq!(r4.frontier_month, None, "no frontier position remains");
+}
+
+/// The sweep must never touch a partition the live pass owns — otherwise the
+/// two contend for the same rows every hour, which is the coupling task 0111
+/// exists to remove.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn the_sweep_never_enters_the_live_window() {
+    use enrichment_worker::frontier::{HistoricalSweepConfig, run_historical_sweep};
+
+    let db = "it_enrich_frontier_live";
+    let client = setup_scratch(db).await;
+    client
+        .query(&ASSETS.replace("{db}", db).replace("{usdc}", USDC_ISSUER))
+        .execute()
+        .await
+        .unwrap();
+
+    // Both candles are inside the declared live window (202102 onward).
+    let (feb, mar) = (1_613_390_400u32, 1_615_809_600u32);
+    client
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1m \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
+             ({feb},10,2,'sdex', 4,4,4,4, 1,4,0,0,4,1,1), \
+             ({mar},10,2,'sdex', 9,9,9,9, 1,9,0,0,9,1,1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    let client_for_sweep = Client::default().with_url(ch_url()).with_database(db);
+    let summary = run_historical_sweep(
+        &client_for_sweep,
+        &HistoricalSweepConfig {
+            base: cfg(db),
+            live_start_month: 202102,
+            max_months: 12,
+            deadline: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        summary.months.is_empty(),
+        "every partition belongs to the live pass"
+    );
+    assert_eq!(
+        close_usd(&client, db, 10, 2, feb).await,
+        0.0,
+        "the sweep must leave live-window rows for the live pass"
+    );
+}
