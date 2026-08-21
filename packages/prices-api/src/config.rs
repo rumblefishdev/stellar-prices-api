@@ -87,6 +87,13 @@ pub struct AppConfig {
     /// [`Self::from_env`], because building it resolves credentials and reading
     /// the plan id is an HTTP call.
     pub portal_keys: Option<crate::portal::keys::gateway::Gateway>,
+    /// Where the eligibility gate's two knobs come from (task 0189): the
+    /// Stellar guild id and the minimum account age. `None` means the gate is
+    /// not configured, which is the normal state while `portal_enabled` is
+    /// false; filled by [`Self::load_portal_eligibility`], which also probes
+    /// both values once so a mis-seeded parameter fails the cold start rather
+    /// than a visitor's click.
+    pub portal_eligibility: Option<crate::portal::eligibility::EligibilitySettings>,
 }
 
 impl AppConfig {
@@ -116,6 +123,7 @@ impl AppConfig {
             portal_oauth: None,
             portal_endpoints: crate::portal::auth::discord::Endpoints::from_env(),
             portal_keys: None,
+            portal_eligibility: None,
         }
     }
 
@@ -191,6 +199,108 @@ impl AppConfig {
             Some(crate::portal::keys::gateway::Gateway::from_ambient_config(plan_id).await);
         Ok(())
     }
+
+    /// Fill [`Self::portal_eligibility`] with the sources of the eligibility
+    /// gate's two knobs (task 0189).
+    ///
+    /// Conditional on [`Self::portal_enabled`] for exactly the reasons the two
+    /// loaders above are. With the portal **open**, a missing source is fatal
+    /// — a portal whose "get my key" round-trip can only ever answer "could
+    /// not verify" is worse than a deploy that fails in `Init Errors` — and so
+    /// is an unreadable or malformed *value*: both parameters are **probed
+    /// once here**, so `discord-guild-id` seeded with a name instead of a
+    /// snowflake, or `min-account-age-minutes` holding "five", is a cold-start
+    /// failure with the parameter named, not a per-visitor refusal.
+    ///
+    /// What is stored is the **source**, not the probed value: every issuance
+    /// resolves it again, which is what makes an operator's `put-parameter`
+    /// take effect without a redeploy (bounded only by the Parameters and
+    /// Secrets extension's ~5 min cache).
+    ///
+    /// # Where the values come from
+    ///
+    /// `PORTAL_GUILD_ID_PARAM` and `PORTAL_MIN_ACCOUNT_AGE_PARAM` carry the
+    /// **names of SSM parameters** (`/prices/{env}/discord-guild-id`,
+    /// `/prices/{env}/min-account-age-minutes`), seeded by the operator at
+    /// deploy prep — never created by CDK, because a CloudFormation-managed
+    /// parameter is restored to the committed value by the next `cdk deploy`,
+    /// which would silently un-flip production back to the test guild after
+    /// [0179]. The direct-value overrides are local-only seams, compiled out
+    /// of the Lambda like `PORTAL_FREE_PLAN_ID`.
+    pub async fn load_portal_eligibility(&mut self) -> Result<(), PortalEligibilityError> {
+        if !self.portal_enabled {
+            return Ok(());
+        }
+        let settings = eligibility_settings()?;
+        // Probe both values now. The per-action resolve keeps them tunable;
+        // this makes a bad seed loud at deploy time.
+        settings
+            .guild_id()
+            .await
+            .map_err(PortalEligibilityError::Probe)?;
+        settings
+            .min_account_age_minutes()
+            .await
+            .map_err(PortalEligibilityError::Probe)?;
+        self.portal_eligibility = Some(settings);
+        Ok(())
+    }
+}
+
+/// Why the eligibility gate could not be configured at cold start.
+#[derive(Debug, thiserror::Error)]
+pub enum PortalEligibilityError {
+    #[error(
+        "the portal is open but the eligibility gate has no sources; set PORTAL_GUILD_ID_PARAM \
+         and PORTAL_MIN_ACCOUNT_AGE_PARAM to the SSM parameters the operator seeds at \
+         /prices/<env>/discord-guild-id and /prices/<env>/min-account-age-minutes (see the \
+         deploy-prep runbook)"
+    )]
+    NoSource,
+    #[error("probing the eligibility parameters failed: {0}")]
+    Probe(crate::portal::eligibility::EligibilityError),
+}
+
+/// Build the eligibility sources from the environment.
+fn eligibility_settings()
+-> Result<crate::portal::eligibility::EligibilitySettings, PortalEligibilityError> {
+    use crate::portal::eligibility::{EligibilitySettings, ParamSource};
+
+    let source = |direct_var: &str, param_var: &str| -> Option<ParamSource> {
+        // A direct value, for a local run. Checked first, and **compiled out
+        // of the Lambda**, exactly as `PORTAL_FREE_PLAN_ID` is and for the
+        // same reason: `lambda:UpdateFunctionConfiguration` is a permission
+        // distinct from `UpdateFunctionCode`, and these two values decide
+        // which guild gates issuance and how old an account must be — left
+        // readable in the Lambda, one configuration change would silently
+        // point the gate at a guild of somebody else's choosing.
+        #[cfg(not(feature = "lambda"))]
+        if let Ok(value) = std::env::var(direct_var)
+            && !value.trim().is_empty()
+        {
+            return Some(ParamSource::Direct(value));
+        }
+        #[cfg(feature = "lambda")]
+        let _ = direct_var;
+
+        let name = std::env::var(param_var).ok()?;
+        if name.trim().is_empty() {
+            return None;
+        }
+        Some(ParamSource::Ssm(name.trim().to_string()))
+    };
+
+    let guild_id = source("PORTAL_GUILD_ID", "PORTAL_GUILD_ID_PARAM")
+        .ok_or(PortalEligibilityError::NoSource)?;
+    let min_account_age = source(
+        "PORTAL_MIN_ACCOUNT_AGE_MINUTES",
+        "PORTAL_MIN_ACCOUNT_AGE_PARAM",
+    )
+    .ok_or(PortalEligibilityError::NoSource)?;
+    Ok(EligibilitySettings {
+        guild_id,
+        min_account_age,
+    })
 }
 
 /// Why key issuance could not be configured at cold start.

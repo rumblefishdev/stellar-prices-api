@@ -8,7 +8,8 @@
 //! | route | does |
 //! | --- | --- |
 //! | `GET /auth/login` | mints `state` + PKCE, redirects to Discord |
-//! | `GET /auth/callback` | verifies `state`, exchanges the code, issues a session |
+//! | `GET /auth/login?action=issue` | the same, for the eligibility-checked issue round-trip ([0189]) |
+//! | `GET /auth/callback` | verifies `state`, exchanges the code, completes the action it names |
 //! | `GET /auth/me` | reports who the caller is, or that they are nobody |
 //! | `POST /auth/logout` | clears the session |
 //!
@@ -17,13 +18,16 @@
 //! these routes are exempt from that gate, because a visitor signing in to get
 //! a key does not have one yet (`crate::auth::is_exempt`).
 //!
-//! # What this slice deliberately does not do
+//! # What a callback completes depends on what its `state` names
 //!
-//! Everything that turns an identity into an entitlement is [0189]: the
-//! `guilds.members.read` scope, the guild membership call, `pending`, the
-//! snowflake account-age minimum. Issuing a key is [0187]. Nothing here reads or
-//! writes any store — there is no registry yet ([0190] decides whether there
-//! ever is one) and no Discord token is kept (see [`session`]).
+//! A `signin` callback issues a session and nothing else. An `issue` callback
+//! ([`issue`], task 0189) additionally checks guild membership and account age
+//! against the **fresh** token before handing off to the key path — that is
+//! ADR 0010 §8's "the callback completes that action and nothing else", and
+//! the action slot in [`state_token`] is what makes the two round-trips
+//! non-interchangeable. Nothing here reads or writes any store — there is no
+//! registry yet ([0190] decides whether there ever is one) and no Discord
+//! token is kept (see [`session`]).
 //!
 //! # Why the routes are keyless, and what stands in for a key
 //!
@@ -37,6 +41,7 @@
 pub mod cookies;
 pub mod crypto;
 pub mod discord;
+pub mod issue;
 pub mod secret;
 pub mod session;
 pub mod state_token;
@@ -136,6 +141,9 @@ pub struct AuthState {
     oauth: Option<std::sync::Arc<OauthSecret>>,
     endpoints: std::sync::Arc<discord::Endpoints>,
     http: reqwest::Client,
+    /// What the `action=issue` round-trip needs beyond sign-in (task 0189).
+    /// Defaults to unwired; [`super::apply`] wires it when the portal opens.
+    issue: issue::IssueDeps,
 }
 
 impl AuthState {
@@ -144,7 +152,16 @@ impl AuthState {
             oauth: oauth.map(std::sync::Arc::new),
             endpoints: std::sync::Arc::new(endpoints),
             http: discord::build_client(),
+            issue: issue::IssueDeps::default(),
         }
+    }
+
+    /// Wire the issue round-trip's dependencies in. A builder, like
+    /// `KeysState::with_usage_cache`, so every existing constructor and test
+    /// stays valid.
+    pub fn with_issue(mut self, deps: issue::IssueDeps) -> Self {
+        self.issue = deps;
+        self
     }
 }
 
@@ -187,9 +204,11 @@ async fn login(
     State(state): State<AuthState>,
     ValidatedQuery(query): ValidatedQuery<LoginQuery>,
 ) -> Response {
-    let Some(oauth) = state.oauth.as_ref() else {
-        return unconfigured();
-    };
+    // Parsed BEFORE the credentials check below, because what an unprovisioned
+    // deployment should answer depends on which action was asked for: a
+    // sign-in gets the `503` envelope its caller can read, while an issue
+    // round-trip is a top-level navigation from a link and gets a landing it
+    // can render — see `refuse_issue_start`.
     let action = match query.action.as_deref() {
         None => Action::SignIn,
         Some(raw) => match Action::parse(raw) {
@@ -203,8 +222,26 @@ async fn login(
         },
     };
 
+    // An issue round-trip on a deployment with no credentials, no control
+    // plane or no eligibility parameters cannot end in a key — refuse before
+    // sending the visitor to Discord. Only reachable with the portal open and
+    // issuance unprovisioned: `load_portal_oauth` and `load_portal_eligibility`
+    // both fail the cold start on that combination, so this is the second
+    // line, not the first.
+    if action == Action::Issue && (state.oauth.is_none() || !state.issue.is_wired()) {
+        return issue::refuse_issue_start(
+            state.oauth.is_some(),
+            state.issue.gateway.is_some(),
+            state.issue.settings.is_some(),
+        );
+    }
+
+    let Some(oauth) = state.oauth.as_ref() else {
+        return unconfigured();
+    };
+
     let started = state_token::start(&oauth.signing_key, action, state_token::now_secs());
-    let location = authorize_url(&state.endpoints, oauth, &started);
+    let location = authorize_url(&state.endpoints, oauth, action, &started);
 
     // 303, not 302. The visitor arrived by GET so the distinction does not bite
     // here, but 303 states "go and GET this instead" unambiguously, and it is
@@ -230,15 +267,65 @@ async fn login(
 fn authorize_url(
     endpoints: &discord::Endpoints,
     oauth: &OauthSecret,
+    action: Action,
     started: &state_token::StartedLogin,
 ) -> String {
-    let query = form_urlencoded::Serializer::new(String::new())
+    let mut query = form_urlencoded::Serializer::new(String::new());
+    query
         .append_pair("response_type", "code")
         .append_pair("client_id", &oauth.client_id)
         .append_pair("redirect_uri", &oauth.redirect_uri)
-        // Exactly `identify`. ADR 0010; also declared in the Developer Portal,
-        // and verified again on the token response (`discord::exchange_code`).
-        .append_pair("scope", discord::SCOPE)
+        // Exactly `identify guilds.members.read`. ADR 0010; also declared in
+        // the Developer Portal, and verified again — as a set — on the token
+        // response (`discord::exchange_code`).
+        .append_pair("scope", discord::SCOPE);
+
+    // `prompt=none` — on the RE-AUTHORISATION round-trips only, never on
+    // sign-in.
+    //
+    // Why it is here at all: Discord's authorize endpoint defaults to
+    // `prompt=consent` and re-shows the approval screen on every
+    // authorisation, including ones where the same account already granted
+    // the same scopes. Three places in this codebase state the opposite as a
+    // design property — `issue::complete_issue` ("Discord does not re-prompt
+    // for consent on repeat authorisation, so this whole detour cost the
+    // visitor a redirect, not a login"), `session`'s TTL reasoning, and the
+    // frontend's `issueUrl` doc — and the shape of the issue flow rests on
+    // it: eligibility is proved per action, so a visitor crosses this
+    // endpoint again for every issue, every retry after a refusal, and (task
+    // 0191) every rework. At one consent screen apiece that is not a
+    // redirect, it is a login, four times over.
+    //
+    // Why NOT on sign-in, which is where it used to be sent too. Discord
+    // documents `prompt=none` for the case where "a user has previously
+    // authorized your application with the requested scopes"; what it does
+    // for an authorisation that has NOT been granted is undocumented. The
+    // expected behaviour is that the screen is shown anyway (it is not the
+    // strict OIDC `prompt=none`, which errors), but that was an assumption,
+    // and sign-in is the one path that cannot afford it: it is where the
+    // FIRST authorisation always happens (the issue link only exists inside
+    // the signed-in dashboard), so if the assumption is wrong, nobody can
+    // sign in at all and the whole funnel is dark. Sign-in also gains
+    // nothing from it — a first-timer has no consent to skip.
+    //
+    // The same reasoning covers the scope change this very task makes: an
+    // account that authorised under 0186's `identify` alone must be shown
+    // the screen again to grant `guilds.members.read`, and suppressing it on
+    // sign-in is exactly how that grant would come back narrower and be
+    // refused by `scopes_match` on every attempt.
+    //
+    // On an issue round-trip the assumption is not load-bearing: by
+    // construction the visitor is signed in, so the app is already authorised
+    // with these scopes — the documented case. If Discord ever refuses one
+    // anyway it does so as an OAuth error on the callback, which
+    // `refuse_oauth_error` logs and lands on `?issue=denied`, rendered rather
+    // than silent. 0180 item 5's consent capture confirms it at no extra
+    // cost.
+    if action == Action::Issue {
+        query.append_pair("prompt", "none");
+    }
+
+    let query = query
         .append_pair("state", &started.state_param)
         .append_pair("code_challenge", &started.code_challenge)
         .append_pair("code_challenge_method", "S256")
@@ -266,6 +353,12 @@ async fn callback(
     headers: HeaderMap,
     ValidatedQuery(query): ValidatedQuery<CallbackQuery>,
 ) -> Response {
+    // Stamped before anything else runs. An issue round-trip spends the same
+    // Lambda budget on the exchange below as it does on the reconciliation at
+    // the end, so the clock that bounds the reconciliation has to start here
+    // rather than where that work begins — see `issue::ISSUE_BUDGET`.
+    let started = std::time::Instant::now();
+
     let Some(oauth) = state.oauth.as_ref() else {
         return unconfigured();
     };
@@ -320,10 +413,16 @@ async fn callback(
             // fault: plain text on the page, the button still there, nothing
             // logged. A `warn` per cancellation would be noise proportional to
             // how many people change their mind.
-            return redirect(
-                &format!("{PORTAL_HOME}{CANCELLED_QUERY}"),
-                vec![drop_pending],
-            );
+            // Which flow was cancelled decides where the visitor lands: an
+            // issue round-trip starts from the dashboard, and `?signin=…`
+            // banners render only in the signed-out branch it has left.
+            let query = match accepted.action {
+                Action::Issue => issue::ISSUE_CANCELLED_QUERY,
+                #[cfg(test)]
+                Action::TestOther => CANCELLED_QUERY,
+                Action::SignIn => CANCELLED_QUERY,
+            };
+            return redirect(&format!("{PORTAL_HOME}{query}"), vec![drop_pending]);
         }
 
         // Everything else is a failure somebody has to know about, and the one
@@ -333,7 +432,7 @@ async fn callback(
         // a door that check never sees. Reported as "cancelled" and unlogged,
         // it presents as every visitor changing their mind forever, with
         // nothing in CloudWatch to contradict that reading.
-        return refuse_oauth_error(error, drop_pending);
+        return refuse_oauth_error(error, accepted.action, drop_pending);
     }
 
     let Some(code) = query.code.as_deref() else {
@@ -349,11 +448,10 @@ async fn callback(
         return refuse_query("callback carried neither `code` nor `error`", drop_pending);
     };
 
-    // One action exists, and it is still matched rather than assumed. When
-    // [0189] adds `issue`, the arm it needs is a new `match` line and not a
-    // restructuring of this handler.
+    // The action decides what this callback is allowed to complete — matched
+    // rather than assumed, which is what the slot was carried for.
     match accepted.action {
-        Action::SignIn => {}
+        Action::SignIn | Action::Issue => {}
         // Compiled only into the test build, and unreachable even there:
         // `Action::parse` never yields `TestOther`, so `/auth/login` cannot mint
         // a round-trip for it. Refused rather than `unreachable!()` — a panic in
@@ -379,8 +477,25 @@ async fn callback(
     .await
     {
         Ok(token) => token,
+        // WHICH round-trip this was decides what the visitor sees. A sign-in
+        // gets the `502` envelope below; an issue round-trip gets a landing it
+        // can render, because it started from the dashboard and `502` JSON is
+        // a dead end with no link back — and because the most likely cause
+        // here, `UnexpectedScope`, is a registration drift the issue flow has
+        // a designed state for. See `issue::refuse_issue_discord`.
+        Err(error) if accepted.action == Action::Issue => {
+            return issue::refuse_issue_discord("token exchange", error, drop_pending);
+        }
         Err(error) => return refuse_discord("token exchange", error, drop_pending),
     };
+
+    // An issue round-trip diverges here, with the fresh, scope-verified token:
+    // membership and account age are checked against it before any key moves,
+    // and every outcome is a redirect (see `issue`). The sign-in tail below
+    // never sees an `Issue` action.
+    if accepted.action == Action::Issue {
+        return issue::complete_issue(&state, oauth, token, drop_pending, started).await;
+    }
 
     // `token` is moved here, so from this line on the handler cannot reach it.
     let user = match discord::current_user(&state.http, &state.endpoints, token).await {
@@ -573,12 +688,21 @@ fn refuse_state(error: StateError) -> Response {
 /// green — the same shape of gap that let "every error is a cancellation" ship
 /// in the first place. A behaviour nothing can observe is a behaviour nothing
 /// protects.
-fn refuse_oauth_error(error: &str, drop_pending: String) -> Response {
+fn refuse_oauth_error(error: &str, action: Action, drop_pending: String) -> Response {
     tracing::warn!(
         error = %sanitise_error(error),
-        "portal sign-in refused by Discord"
+        ?action,
+        "portal round-trip refused by Discord"
     );
-    redirect(&format!("{PORTAL_HOME}{FAILED_QUERY}"), vec![drop_pending])
+    // The landing has to belong to the flow the visitor started, because that
+    // is what decides which half of the page is on screen when they get back.
+    let query = match action {
+        Action::Issue => issue::ISSUE_DENIED_QUERY,
+        #[cfg(test)]
+        Action::TestOther => FAILED_QUERY,
+        Action::SignIn => FAILED_QUERY,
+    };
+    redirect(&format!("{PORTAL_HOME}{query}"), vec![drop_pending])
 }
 
 /// Refuse a callback that is malformed on the caller's side.
@@ -709,10 +833,15 @@ mod tests {
     /// only place a mistake shows up on Discord's error page rather than in our
     /// logs.
     #[test]
-    fn the_authorize_url_asks_for_identify_with_s256_pkce() {
+    fn the_authorize_url_asks_for_the_two_scopes_with_s256_pkce() {
         let secret = oauth();
         let started = state_token::start(&secret.signing_key, Action::SignIn, 1_800_000_000);
-        let url = authorize_url(&discord::Endpoints::default(), &secret, &started);
+        let url = authorize_url(
+            &discord::Endpoints::default(),
+            &secret,
+            Action::SignIn,
+            &started,
+        );
 
         assert!(url.starts_with("https://discord.com/oauth2/authorize?"));
         let query: Vec<(String, String)> =
@@ -734,11 +863,21 @@ mod tests {
             get("redirect_uri"),
             "https://portal.example/api-tokens/api/auth/callback"
         );
-        // Exactly `identify` — not a superset, not a second scope.
-        assert_eq!(get("scope"), "identify");
+        // Exactly the pair — not a superset, and never `guilds` or `email`.
+        assert_eq!(get("scope"), "identify guilds.members.read");
         assert_eq!(get("code_challenge_method"), "S256");
         assert_eq!(get("code_challenge"), started.code_challenge);
         assert_eq!(get("state"), started.state_param);
+        // NO `prompt` on a sign-in. It is the round-trip where the FIRST
+        // authorisation happens, and what Discord does with `prompt=none` for
+        // an app the account has not authorised (or has authorised under
+        // 0186's narrower scope) is undocumented — see `authorize_url`.
+        // Asserted on the key, not on `get`'s empty-string default, so an
+        // empty `prompt=` would fail here too.
+        assert!(
+            !query.iter().any(|(k, _)| k == "prompt"),
+            "sign-in must not suppress the consent screen: {url}"
+        );
 
         // The verifier is the half that must NOT travel. A URL containing it
         // makes PKCE decorative and is the single worst thing this function
@@ -779,7 +918,12 @@ mod tests {
     fn the_authorize_url_encodes_its_parameters() {
         let secret = oauth();
         let started = state_token::start(&secret.signing_key, Action::SignIn, 0);
-        let url = authorize_url(&discord::Endpoints::default(), &secret, &started);
+        let url = authorize_url(
+            &discord::Endpoints::default(),
+            &secret,
+            Action::SignIn,
+            &started,
+        );
         assert!(url.contains("redirect_uri=https%3A%2F%2Fportal.example"));
     }
 
@@ -828,7 +972,7 @@ mod tests {
             .finish();
 
         tracing::subscriber::with_default(subscriber, || {
-            refuse_oauth_error("invalid_scope", String::new());
+            refuse_oauth_error("invalid_scope", Action::SignIn, String::new());
         });
 
         let text = logs.text();
@@ -883,7 +1027,8 @@ mod tests {
         }
     }
 
-    /// The redirect target is a literal in every branch. An `assert` rather than
+    /// The redirect target is a literal in every branch — sign-in's two
+    /// landing states and the issue flow's five alike. An `assert` rather than
     /// a comment, so a later slice that adds a `redirect_to` parameter has to
     /// delete this to do it.
     #[test]
@@ -891,7 +1036,17 @@ mod tests {
         assert_eq!(PORTAL_HOME, "/api-tokens/");
         assert!(PORTAL_HOME.starts_with('/'));
         assert!(!PORTAL_HOME.starts_with("//"));
-        assert!(format!("{PORTAL_HOME}{CANCELLED_QUERY}").starts_with("/api-tokens/?"));
+        for query in [
+            CANCELLED_QUERY,
+            FAILED_QUERY,
+            issue::ISSUE_OK_QUERY,
+            issue::ISSUE_NOT_MEMBER_QUERY,
+            issue::ISSUE_UNKNOWN_QUERY,
+            issue::ISSUE_FAILED_QUERY,
+            &issue::too_young_query(173),
+        ] {
+            assert!(format!("{PORTAL_HOME}{query}").starts_with("/api-tokens/?"));
+        }
     }
 
     /// The registered redirect URI and the route that serves it are one string,

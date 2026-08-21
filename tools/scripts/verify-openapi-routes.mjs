@@ -31,7 +31,7 @@
  * stale file from another branch reads as a pass, or as drift that cannot be
  * reproduced. The synthesized template is still the caller's responsibility.
  */
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -794,6 +794,154 @@ for (const httpMethod of ['GET', 'POST']) {
         "serves one visitor another visitor's API key. Set " +
         '`cachingEnabled: false` in `portalSettings` in api-gateway-stack.ts.',
     );
+  }
+}
+
+// --- 7. Task 0189: the eligibility parameters are named, and never CDK-owned. ---
+// The gate's two knobs — which guild membership is checked against, and the
+// minimum account age — are OPERATOR-seeded SSM parameters, read at runtime per
+// issuance. Two properties hold that design together, and neither is visible to
+// the Rust suite:
+//
+// (a) the handler carries the two parameter NAMES, exactly. A typo'd name means
+//     the cold-start probe fails on the deploy that opens the portal — `/v1`
+//     down — long after the edit that broke it (the check-4 failure mode).
+// (b) NO synthesized template creates a parameter with either name. A
+//     CloudFormation-managed parameter is CDK-owned, so the next `cdk deploy`
+//     silently restores the committed value — which, after task 0179 points
+//     production at the real Stellar guild, would un-flip it back to the test
+//     guild. That regression is invisible at runtime until a member is refused.
+const ELIGIBILITY_PARAMS = {
+  PORTAL_GUILD_ID_PARAM: '/prices/production/discord-guild-id',
+  PORTAL_MIN_ACCOUNT_AGE_PARAM: '/prices/production/min-account-age-minutes',
+};
+for (const [envVar, expected] of Object.entries(ELIGIBILITY_PARAMS)) {
+  if (handlerEnv[envVar] !== expected) {
+    fail(
+      `error: the api-handler carries ${envVar}=` +
+        `${JSON.stringify(handlerEnv[envVar] ?? null)}, expected ` +
+        `${JSON.stringify(expected)}.`,
+      '  → task 0189 resolves the eligibility knobs from these names per ' +
+        'issuance (compute-stack.ts). The operator seeds the VALUES at deploy ' +
+        'prep (runbook §2a); a drifted name fails the cold-start probe on the ' +
+        'deploy that opens the portal, taking /v1 down with it.',
+    );
+  }
+}
+{
+  const cdkOut = join(repoRoot, 'infra', 'cdk.out');
+  const templateFiles = readdirSync(cdkOut).filter((f) =>
+    f.endsWith('.template.json'),
+  );
+  if (templateFiles.length === 0) {
+    fail(
+      'error: no synthesized templates found in infra/cdk.out.',
+      '  → run `npm run infra:synth:production` first.',
+    );
+  }
+  const forbiddenSuffixes = Object.values(ELIGIBILITY_PARAMS).map(
+    (name) => name.slice(name.lastIndexOf('/')), // '/discord-guild-id', …
+  );
+
+  // A `Name` is rarely a bare string once anyone interpolates the environment
+  // into it — `/prices/${env}/discord-guild-id` synthesizes to an `Fn::Join`
+  // or an `Fn::Sub`, which is the natural way somebody would write the very
+  // parameter this check forbids. Inspecting only literal strings therefore
+  // left the guard evadable by the most likely spelling of the mistake.
+  //
+  // So intrinsics are RESOLVED as far as their literal text goes, with each
+  // unresolvable piece (a `Ref`, a `${Var}`) standing in as one NUL — a byte
+  // no parameter name may contain, which makes "literal tail" and "followed
+  // by something we cannot read" distinguishable below. Anything this cannot
+  // read at all is a failure, not a skip: see the message on that branch.
+  const PLACEHOLDER = '\u0000';
+  const resolveName = (value) => {
+    if (typeof value === 'string') return value;
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+      return null;
+    }
+    const keys = Object.keys(value);
+    if (keys.length !== 1) return null;
+    const [fn] = keys;
+    const arg = value[fn];
+    if (fn === 'Ref' || fn === 'Fn::GetAtt' || fn === 'Fn::ImportValue') {
+      return PLACEHOLDER;
+    }
+    if (fn === 'Fn::Sub') {
+      const template = Array.isArray(arg) ? arg[0] : arg;
+      if (typeof template !== 'string') return null;
+      return (
+        template
+          // `${Foo}` substitutes; `${!Foo}` is an escaped literal `${Foo}`
+          // and must NOT be masked, or a suffix spelled that way would hide.
+          .replace(/\$\{(?!!)[^}]*\}/g, PLACEHOLDER)
+          .replace(/\$\{!([^}]*)\}/g, '${$1}')
+      );
+    }
+    if (fn === 'Fn::Join' && Array.isArray(arg) && arg.length === 2) {
+      const [separator, parts] = arg;
+      if (typeof separator !== 'string' || !Array.isArray(parts)) return null;
+      const resolved = parts.map(resolveName);
+      if (resolved.some((part) => part === null)) return null;
+      return resolved.join(separator);
+    }
+    return null;
+  };
+
+  // The suffix must be the END of the name, or be followed by something this
+  // check could not read — never merely contained in it. `endsWith` alone
+  // misses `${prefix}/discord-guild-id${suffix}`; a bare `includes` would
+  // false-fail on a genuinely different parameter such as
+  // `…/discord-guild-id-backup`, which is the over-broad-matcher mistake task
+  // 0188's check 5b already made once.
+  const createsParameter = (resolved) =>
+    forbiddenSuffixes.some((suffix) => {
+      for (
+        let at = resolved.indexOf(suffix);
+        at !== -1;
+        at = resolved.indexOf(suffix, at + 1)
+      ) {
+        const after = resolved[at + suffix.length];
+        if (after === undefined || after === PLACEHOLDER) return true;
+      }
+      return false;
+    });
+
+  for (const file of templateFiles) {
+    const tpl = readJson(join(cdkOut, file), 'synthesized template');
+    for (const [id, resource] of resourcesOfType(tpl, 'AWS::SSM::Parameter')) {
+      const name = resource.Properties?.Name;
+      // Absent is fine: CloudFormation then generates a physical name of its
+      // own, which cannot be one of ours.
+      if (name === undefined) continue;
+      const resolved = resolveName(name);
+      // A name whose LAST segment is not literal is unreadable in the only
+      // position that matters: the leaf is what the forbidden suffixes are.
+      // `{"Ref": …}` for the whole name is the extreme case of this.
+      if (resolved === null || resolved.endsWith(PLACEHOLDER)) {
+        fail(
+          `error: ${file} creates SSM parameter ${id} with a Name this check ` +
+            `cannot read: ${JSON.stringify(name)}.`,
+          '  → the guard below has to be able to tell whether a synthesized ' +
+            'template creates the eligibility parameters, and it refuses to ' +
+            'pass a name it cannot resolve rather than assume it is ' +
+            'harmless. Give the parameter a literal name, or teach ' +
+            '`resolveName` this intrinsic.',
+        );
+        continue;
+      }
+      if (createsParameter(resolved)) {
+        fail(
+          `error: ${file} creates SSM parameter ${JSON.stringify(name)} ` +
+            `(resource ${id}).`,
+          '  → the eligibility parameters are operator-seeded, never ' +
+            'CloudFormation resources: a CDK-owned parameter is restored to ' +
+            'the committed value by the next deploy, un-flipping production ' +
+            'back to the test guild after task 0179. Delete the ' +
+            '`ssm.StringParameter` and seed the value by hand (runbook §2a).',
+        );
+      }
+    }
   }
 }
 

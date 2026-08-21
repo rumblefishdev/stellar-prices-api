@@ -560,11 +560,14 @@ async fn a_served_stale_answer_backs_off_the_next_load() {
     );
 }
 
-/// Issuing a key evicts a cached "no key": without this, the page's own
-/// refetch after the press — and any reload for the next minute — would be
-/// served the stale `NoKey` and tell a key-holder they have no key.
+/// A reveal that finds a key evicts a cached "no key": without this, a reload
+/// inside the TTL after the key appears (issued through 0189's round-trip, or
+/// adopted) would be served the stale `NoKey` and tell a key-holder they have
+/// no key. The eviction on the ISSUE path itself is asserted where the issue
+/// path now lives, in `tests/portal_issue.rs`'s happy-path round trip; this
+/// pins the reveal's half, which is what the page's own refetch hits.
 #[tokio::test]
-async fn issuing_a_key_evicts_a_cached_no_key() {
+async fn a_reveal_that_finds_a_key_evicts_a_cached_no_key() {
     let mock = MockGateway::start().await;
     let router = app_against(&mock);
 
@@ -578,8 +581,14 @@ async fn issuing_a_key_evicts_a_cached_no_key() {
     assert_eq!(before.status, StatusCode::NOT_FOUND);
     assert_eq!(before.json()["code"], "no_key");
 
-    let issued = call(router.clone(), "POST", Some(&session_cookie(USER_ID))).await;
-    assert_eq!(issued.status, StatusCode::OK);
+    // The key appears — 0189's callback created it in another request.
+    mock.with(|s| {
+        let id = s.seed(&format!("discord-{USER_ID}-key"), 1_000);
+        s.plan_keys.push((PLAN_ID.to_string(), id));
+    });
+
+    let revealed = call(router.clone(), "GET", Some(&session_cookie(USER_ID))).await;
+    assert_eq!(revealed.status, StatusCode::OK);
 
     // Inside the 60s TTL — only the eviction can explain a non-stale answer.
     let after = call_path(router, "GET", USAGE_PATH, Some(&session_cookie(USER_ID))).await;

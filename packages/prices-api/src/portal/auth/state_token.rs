@@ -46,12 +46,10 @@
 //!
 //! # The action slot
 //!
-//! [`Action`] has one variant today and the task requires it anyway, because
-//! [0189] binds "issue a key" and "rework a key" to a round-trip and adding the
-//! field then would mean re-deriving the signing format while a deployed portal
-//! holds live cookies in the old one. It is verified now, on both halves, so
-//! that when a second action exists the check is already there and already
-//! tested rather than being added alongside the thing it is meant to constrain.
+//! [`Action`] was carried with a single variant from [0186] precisely so that
+//! [0189] could add [`Action::Issue`] to a signing format that deployed portals
+//! already hold live cookies in, with the mismatch check already present and
+//! already tested rather than arriving alongside the thing it constrains.
 //!
 //! ADR 0010 §8 is what the slot is for: eligibility travels by
 //! re-authentication, not in the session, and "the callback completes that
@@ -85,19 +83,26 @@ const TOKEN_BYTES: usize = 32;
 /// cannot renumber an existing one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Action {
-    /// Establish who the visitor is. The only action in this slice.
+    /// Establish who the visitor is.
     #[serde(rename = "signin")]
     SignIn,
-    /// A second action that exists **only under `cfg(test)`**.
+    /// Issue an API key (task 0189).
     ///
-    /// Not [0189]'s `issue` arriving early — it is never parsed from a query
-    /// string, never minted by [`start`] outside a test, and is compiled out of
-    /// every shipped binary. It exists because with a single variant the
-    /// [`StateError::ActionMismatch`] arm in [`accept`] is **unreachable**, and
-    /// an unreachable branch is an untested one: deleting the comparison
-    /// entirely left the whole suite green, which is exactly the regression the
-    /// action slot is supposed to be protected against when [0189] adds a real
-    /// second action.
+    /// The round-trip is the eligibility proof: the callback holds a fresh
+    /// Discord token with which to check guild membership and account age at
+    /// the moment of issuance, per ADR 0010 §8. A `signin` callback cannot
+    /// complete an issuance — that is exactly what the mismatch check refuses.
+    #[serde(rename = "issue")]
+    Issue,
+    /// An extra action that exists **only under `cfg(test)`**.
+    ///
+    /// It is never parsed from a query string, never minted by [`start`]
+    /// outside a test, and is compiled out of every shipped binary. It existed
+    /// before [`Action::Issue`] because with a single variant the
+    /// [`StateError::ActionMismatch`] arm in [`accept`] was **unreachable**,
+    /// and an unreachable branch is an untested one: deleting the comparison
+    /// entirely left the whole suite green. It stays now so the mismatch tests
+    /// need no knowledge of which real actions a build happens to have.
     ///
     /// The alternative — asserting the mismatch through a hand-signed payload
     /// carrying an unknown action string — does not test this branch at all. It
@@ -110,14 +115,15 @@ pub enum Action {
 impl Action {
     /// Parse the `action` query parameter of `/auth/login`.
     ///
-    /// An unknown value is rejected rather than defaulted. Defaulting would mean
-    /// that when [0189] adds `issue`, a client asking for an action this build
-    /// does not know would silently get a sign-in — and the callback would then
-    /// complete a *different* action than the one confirmed, which is the exact
-    /// thing the slot exists to prevent.
+    /// An unknown value is rejected rather than defaulted. Defaulting would
+    /// mean a client asking for an action this build does not know (0191's
+    /// `rework`, say) would silently get a sign-in — and the callback would
+    /// then complete a *different* action than the one confirmed, which is the
+    /// exact thing the slot exists to prevent.
     pub fn parse(raw: &str) -> Option<Self> {
         match raw {
             "signin" => Some(Self::SignIn),
+            "issue" => Some(Self::Issue),
             // `TestOther` is deliberately absent: it must not be reachable from
             // a query string even in a test build.
             _ => None,
@@ -444,13 +450,12 @@ mod tests {
         assert_eq!(state.action, Action::SignIn);
         assert_eq!(pending.action, Action::SignIn);
 
-        // And a disagreement between them is refused. Constructed by signing a
-        // mismatched pair directly, which is the only way to reach this arm
-        // while one action exists — and the point is that it stays reachable.
+        // And a state naming an action this build does not know — 0191's
+        // `rework`, arriving early — is refused at deserialization.
         let crossed = sign_claims(
             KEY,
             CTX_STATE,
-            &serde_json::json!({ "action": "issue", "nonce": pending.nonce, "exp": state.exp }),
+            &serde_json::json!({ "action": "rework", "nonce": pending.nonce, "exp": state.exp }),
         );
         assert_eq!(
             accept(KEY, &crossed, Some(&started.pending_cookie), NOW).unwrap_err(),
@@ -509,8 +514,42 @@ mod tests {
     #[test]
     fn an_unknown_action_query_value_is_rejected_rather_than_defaulted() {
         assert_eq!(Action::parse("signin"), Some(Action::SignIn));
-        for unknown in ["issue", "rework", "", "SIGNIN", "signin "] {
+        assert_eq!(Action::parse("issue"), Some(Action::Issue));
+        for unknown in ["rework", "", "SIGNIN", "ISSUE", "issue ", "signin "] {
             assert_eq!(Action::parse(unknown), None, "accepted {unknown:?}");
         }
+    }
+
+    /// The variant 0186 carried the slot for: an issue round-trip mints,
+    /// verifies and reports `Action::Issue` end to end.
+    #[test]
+    fn an_issue_pair_round_trips_and_reports_its_action() {
+        let started = start(KEY, Action::Issue, NOW);
+        let accepted = accept(
+            KEY,
+            &started.state_param,
+            Some(&started.pending_cookie),
+            NOW + 1,
+        )
+        .expect("a freshly minted issue pair must verify");
+        assert_eq!(accepted.action, Action::Issue);
+
+        // And crossing it with a sign-in cookie is the mismatch the slot
+        // exists to refuse — two REAL actions now, not the test sentinel.
+        let state: StateClaims = verify_claims(KEY, CTX_STATE, &started.state_param).unwrap();
+        let crossed_pending = sign_claims(
+            KEY,
+            CTX_PENDING,
+            &PendingClaims {
+                action: Action::SignIn,
+                nonce: state.nonce.clone(),
+                verifier: "a-verifier".into(),
+                exp: state.exp,
+            },
+        );
+        assert_eq!(
+            accept(KEY, &started.state_param, Some(&crossed_pending), NOW).unwrap_err(),
+            StateError::ActionMismatch
+        );
     }
 }

@@ -35,6 +35,7 @@ fn config_with_keys(portal_enabled: bool, api_keys: Vec<String>) -> AppConfig {
         // is what every non-portal test wants — with no client in the
         // config there is no code path here that can reach API Gateway.
         portal_keys: None,
+        portal_eligibility: None,
         // Task 0188: what the dashboard states as the per-key rate limit.
         // `None` is the shape a deployment that was not told the limit has, and
         // the tests that care set it explicitly.

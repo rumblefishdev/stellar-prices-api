@@ -67,6 +67,19 @@ async fn main() {
         .await
         .expect("failed to configure portal key issuance");
 
+    // The eligibility gate (task 0189). This build has no Parameters and
+    // Secrets extension client, so both knobs come from the local-only seams,
+    // compiled out of the Lambda like `PORTAL_FREE_PLAN_ID`:
+    //
+    //     PORTAL_GUILD_ID=<guild snowflake> PORTAL_MIN_ACCOUNT_AGE_MINUTES=5
+    //
+    // Point `DISCORD_API_BASE` at a mock (or use the real one) — the member
+    // check runs against whatever Discord the sign-in does.
+    config
+        .load_portal_eligibility()
+        .await
+        .expect("failed to configure the portal eligibility gate");
+
     let port: u16 = std::env::var("PORT")
         .ok()
         .and_then(|p| p.parse().ok())

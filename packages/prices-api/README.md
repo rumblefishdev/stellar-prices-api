@@ -179,11 +179,15 @@ Remove the `localhost` redirect from the Discord application once you are done �
 or leave it and accept that any holder of that `client_secret` can complete a
 sign-in from their own machine.
 
-## Running self-service key issuance locally (task 0187)
+## Running self-service key issuance locally (tasks 0187 + 0189)
 
-`POST` and `GET /api-tokens/api/key` issue and reveal a real API Gateway key.
-They run on top of the sign-in above — the session cookie is what says whose key
-it is — and they need two more things.
+Since task 0189, `GET`/`POST /api-tokens/api/key` only **reveal** — the route is
+read-only by construction. Issuing runs through the eligibility round-trip:
+"Get my API key" navigates to `/auth/login?action=issue`, and the callback
+checks Stellar Discord membership and account age against a **fresh** Discord
+token before creating anything. Locally that means the run needs the sign-in
+above, the control-plane pieces below, **and** the two eligibility knobs
+(next section).
 
 > **Every key this creates and deletes is a PRODUCTION key.**
 >
@@ -212,20 +216,35 @@ role has (`compute-stack.ts`, `api-gateway-stack.ts`).
 PORTAL_ENABLED=true \
 PORTAL_OAUTH_SECRET_FILE=.portal-oauth.json \
 PORTAL_FREE_PLAN_ID=<the plan id from above> \
+PORTAL_GUILD_ID=<a guild snowflake your Discord account is a member of> \
+PORTAL_MIN_ACCOUNT_AGE_MINUTES=5 \
 AWS_PROFILE=<a profile with the five grants> \
   cargo run -p prices-api --features local-server --bin serve
 ```
 
-`PORTAL_FREE_PLAN_ID` is a **local-only** variable and is compiled out of the
-Lambda build, exactly like `PORTAL_OAUTH_SECRET_FILE` and the Discord endpoint
-overrides. In the Lambda the id is read from SSM by name
-(`PORTAL_FREE_PLAN_PARAM`), because `lambda:UpdateFunctionConfiguration` — a
-permission distinct from `UpdateFunctionCode` — would otherwise be enough to
-move every newly issued key onto a usage plan of somebody else's choosing.
+`PORTAL_FREE_PLAN_ID`, `PORTAL_GUILD_ID` and `PORTAL_MIN_ACCOUNT_AGE_MINUTES`
+are **local-only** variables and are compiled out of the Lambda build, exactly
+like `PORTAL_OAUTH_SECRET_FILE` and the Discord endpoint overrides. In the
+Lambda all three come from SSM by name (`PORTAL_FREE_PLAN_PARAM`,
+`PORTAL_GUILD_ID_PARAM`, `PORTAL_MIN_ACCOUNT_AGE_PARAM`), because
+`lambda:UpdateFunctionConfiguration` — a permission distinct from
+`UpdateFunctionCode` — would otherwise be enough to move every newly issued key
+onto a plan of somebody else's choosing, or point the eligibility gate at a
+guild of somebody else's choosing.
+
+**The membership check is real.** The issue round-trip calls
+`GET /users/@me/guilds/{PORTAL_GUILD_ID}/member` against real Discord with
+your own token, so the guild id must be one **your** account is a member of
+(any test guild of your own works) — otherwise the page honestly tells you to
+join a server you were never meant to join. The Discord application also needs
+`guilds.members.read` declared (deploy-prep runbook §1 step 3), or the round
+trip refuses its own grant at the token exchange.
 
 ### 3. What you should see
 
-Sign in at <http://localhost:4200/api-tokens/>, press **Get my API key**, and:
+Sign in at <http://localhost:4200/api-tokens/>, press **Get my API key** — a
+redirect through Discord and back (no second consent screen), landing on
+`?issue=ok` — and:
 
 ```bash
 # The key exists, is enabled, and is named for your Discord id.
@@ -243,8 +262,29 @@ curl -sS -o /dev/null -w '%{http_code}\n' \
 # → 200
 ```
 
-Press the button a second time: the same key, no new one. That is the
+Press the link a second time: the same key, no new one. That is the
 reconciler, not a cache.
+
+### 3a. The eligibility refusals (task 0189)
+
+The three refusal states are worth seeing once, because each renders
+differently on purpose:
+
+- **Not a member** — set `PORTAL_GUILD_ID` to a guild you are *not* in (any
+  valid snowflake): the page names the server and links the invite. Only a
+  confirmed Discord `404` (JSON code 10007/10004) lands here.
+- **Too young** — not reproducible with a real account (you cannot make yours
+  younger); the backend computes the wait from the snowflake and the page
+  renders it. Covered by the test suites; take their word for it.
+- **Could not verify** — point `DISCORD_API_BASE` at a dead port: the refusal
+  explicitly does *not* claim you are not a member. A parameter that will not
+  parse (e.g. `PORTAL_MIN_ACCOUNT_AGE_MINUTES=five`) fails the cold-start
+  probe instead — that is the deploy-time guard, not a bug.
+
+Changing `PORTAL_MIN_ACCOUNT_AGE_MINUTES` requires restarting `serve` locally
+(it is an env var here); **in the Lambda the SSM parameter is re-read per
+issuance**, so an operator's `put-parameter` needs no redeploy — that is the
+point of the design, and the reason the local seam is the exception.
 
 ### 3b. Usage against quota (task 0188)
 
@@ -264,8 +304,9 @@ Two things that look like bugs and are not:
   restart `serve`) to force a fresh `GetUsage`.
 
 The endpoint is **read-only by construction**: it never creates, attaches or
-deletes a key, which is why the page may call it on load while `/key` stays
-behind a button.
+deletes a key. Since task 0189 the `/key` route is read-only too, which is why
+the page now calls both on load — creating a key is the issue round-trip's job
+and nobody else's.
 
 ### 4. Afterwards
 
@@ -286,6 +327,9 @@ aws apigateway delete-api-key --api-key <id>
 | `DISCORD_AUTHORIZE_URL`, `DISCORD_API_BASE` | endpoint overrides, test/local seam only. Not set by CDK, so production always takes Discord's real endpoints |
 | `PORTAL_FREE_PLAN_PARAM` | SSM parameter **name** holding the `pricing-api-free` usage-plan id (task 0187). A name, not the id: the plan is created by `ApiGatewayStack`, which depends on `ComputeStack`, so a cross-stack reference would be a cycle |
 | `PORTAL_FREE_PLAN_ID` | local-only alternative to the above. Compiled out of the Lambda build, and not set by CDK |
+| `PORTAL_GUILD_ID_PARAM` | SSM parameter **name** holding the guild snowflake the eligibility gate checks membership against (task 0189). Operator-seeded, re-read per issuance — never a CloudFormation resource |
+| `PORTAL_MIN_ACCOUNT_AGE_PARAM` | SSM parameter **name** holding the minimum Discord account age in minutes (task 0189). Same rules as the guild id |
+| `PORTAL_GUILD_ID`, `PORTAL_MIN_ACCOUNT_AGE_MINUTES` | local-only direct values for the two above. Compiled out of the Lambda build, and not set by CDK |
 
 ## OpenAPI
 
