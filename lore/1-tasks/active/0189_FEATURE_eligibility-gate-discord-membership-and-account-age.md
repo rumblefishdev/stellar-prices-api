@@ -443,6 +443,100 @@ and landing-state tests.
     eventually consistent, and that window offered to issue a *second* key to
     somebody who had just been given their first.
 
+23. **`prompt=none` is for the re-authorisation round-trips only.** Decision
+    #19 put it on the shared `authorize_url`, which also changed **first-time
+    sign-in** — the one path that cannot carry the assumption, because it is
+    where the first authorisation always happens (the issue link exists only
+    inside the signed-in dashboard) and a wrong assumption there means nobody
+    signs in at all. Sign-in gains nothing from it either: a first-timer has
+    no consent to skip. The same reasoning covers this task's own scope
+    change — an account that authorised under [[0186]]'s `identify` alone
+    must be re-shown the screen to grant `guilds.members.read`, and
+    suppressing it on sign-in is exactly how that grant would come back
+    narrower and be refused by `scopes_match` on every attempt. On `issue`
+    the assumption stops being load-bearing: by construction the app is
+    already authorised with these scopes, which is Discord's documented case.
+    [[0191]]'s rework joins by adding one variant to the condition.
+
+24. **Every exit from the issue path is a redirect — the `502` is not
+    reachable from it.** A landing the page can render, chosen by fault:
+    `UnexpectedScope` is our registration drifting, which is the same fault
+    Discord reports as `invalid_scope` and which already lands on
+    `?issue=denied`; everything else is Discord not answering, which is
+    `?issue=unknown`. `/auth/login?action=issue` on an unwired deployment
+    joins them at `?issue=failed` instead of a `503` envelope, and logs the
+    deployment fault it previously reported to nobody.
+
+25. **`?issue=failed`'s copy no longer claims a check ran.** It is now
+    reachable *before* any check (decision #24's unwired door), so "your
+    eligibility checked out" would be a lie on one of its two causes. The
+    replacement keeps decision #7's split verbatim — our key service, never a
+    doubt about the visitor — and is true of both.
+
+26. **`?issue=ok` reports the key's existence to the dashboard by itself.**
+    The backend created the key before it redirected, so the landing is proof
+    even while `GetApiKeys` has not caught up. Without it the key section
+    said "your key was created" and the usage section directly below said
+    "you have no API key yet — issue one above": decision #22's
+    contradiction, one section down, offering a second key to somebody who
+    had just been given their first.
+
+## Review Findings
+
+**A second round** (PR #230 review by Oskar Karcz: five findings, plus two
+risks filed as prose rather than as bugs). **All five findings valid and
+fixed; both risks addressed** — one in code, one as an operator procedure.
+Five further problems found while re-reading the whole diff, four of them
+fixed. The round cleared the security-relevant core on its own reading (scope
+set-comparison, `member_url` snowflake validation, `classify_member_response`,
+the snowflake epoch math, the `ISSUE_BUDGET` derivation, the read-only
+`lookup`/`issue_for` split, the `Arc`-backed `UsageCache` handle, the
+`Action::Issue` state round-trip, the feature gating, `useOneShotParams`).
+
+| # | severity | what | resolution |
+| --- | --- | --- | --- |
+| K1 | Significant | Discord failures on an `action=issue` callback bypassed the `?issue=` design and answered a bare `502` worded "could not complete **sign-in**" — no page, no link back, about an action the visitor did not take. Likeliest trigger on this very PR: `UnexpectedScope`, if the Developer Portal registration still carries `identify` alone | Confirmed. `issue::refuse_issue_discord` + `refuse_issue_start`; see Design Decision #24. Three doors closed: the exchange, the identity read, and `login`'s unwired refusal |
+| K2 | Low | `describeWait` **rejected** rather than clamped: `/^\d{1,7}$/` turned any wait past ~16 weeks into "about a few minutes" — and `min-account-age-minutes` is a `put-parameter` applied without a redeploy and validated by nothing at deploy time | Confirmed. Digits-only without a length bound, a second/minute/hour/day ladder, and a clamp at 100 years (`Number` of a long digit string is `Infinity`, which the clamp resolves). Understating a wait is the one direction that cannot be recovered from |
+| K3 | Low | `?issue=ok` was guarded only against `view.state === 'none'`, so "Your key is ready." could sit directly above "Could not get your API key" | Confirmed. Guarded by naming the two states the line belongs to (`ok`, `loading`) instead of excluding one |
+| K4 | Low | The settling "Check again" did not reset the view, so a retry that still found nothing produced **no visible change at all** | Confirmed. `reload()` shows the loading state first, like `Usage`'s Refresh. `ApiKey` also gained that section's in-flight canceller, so two quick presses cannot land the older answer last |
+| K5 | Low | CI check 7(b) inspected `Properties.Name` only when it was a literal string, so a parameter whose name synthesizes to an `Fn::Join`/`Fn::Sub` — the natural spelling of `/prices/${env}/discord-guild-id` — walked straight past the never-CDK-owned guard | Confirmed. `resolveName` resolves `Fn::Sub` (including `${!Escaped}`), `Fn::Join` and `Ref`-family intrinsics, rendering unresolvable pieces as one NUL; a name whose **last segment** is not literal is a failure, not a skip. Suffix matching checks the following character, so `…-backup` is not a false positive — the over-broad-matcher mistake [[0188]]'s check 5b already made once. Exercised against seven synthesized shapes |
+| R1 | Risk | `pending: None` → `Unknown` refuses **every** member indefinitely if Discord's REST member object omits the field, and 0180 item 2 is unmeasured | Valid, and the behaviour is kept: fail-closed is the acceptance criterion, and flipping it would be inventing the measurement. What was missing is that nothing detects it — to a visitor it is indistinguishable from a Discord outage. Runbook §5 now carries a `filter-log-events --filter-pattern pending_absent` check for the first live attempt, which **is** 0180 item 2, taken from production instead of a scratch guild |
+| R2 | Risk | `prompt=none` on the shared `authorize_url` changed first-time sign-in, not just issuance | Valid, and understated: it also threatens the scope upgrade this task makes. Fixed in code — Design Decision #23 |
+
+Five more found in a second pass over the whole diff, four fixed:
+
+| # | what | resolution |
+| --- | --- | --- |
+| S1 | **The issue path's usage-cache eviction was asserted nowhere.** `portal_usage.rs`'s comment claimed the happy-path round-trip covered it; it did not, and deleting `invalidate_no_key` from `complete_issue` left the whole workspace green — resurrecting [[0188]]'s R2/C2 for a full TTL, on the one page load that follows an issue | Fixed: `a_successful_issue_evicts_the_cached_no_key`, driven through the real router so the callback and the usage route share one cache. Non-vacuity proven by deleting the call and watching it fail |
+| S2 | `?issue=ok` + a listing that has not caught up: the usage section told a visitor who had just been issued a key that they had none and should "issue one above" | Fixed — Design Decision #26 |
+| S3 | `?issue=failed`'s copy became false once the unwired door landed there | Fixed — Design Decision #25 |
+| S4 | `/auth/login?action=issue` on an unwired deployment reported the deployment fault to **nobody** — a `503` with no log line | Fixed: `tracing::error!` naming which of the three dependencies is missing |
+| S5 | **The same dead end exists on the sign-in arm**: `refuse_discord`'s `502` is answered to a top-level navigation back from Discord, leaving a first-time visitor on an API URL holding JSON | **Not fixed, deliberately.** It is [[0186]]'s code, untouched by this slice, and its "502, not 500" reasoning is documented and pinned by three tests; changing sign-in's failure semantics inside a PR about eligibility is a surprise a reviewer should not have to absorb. The fix is symmetric and one line (`?signin=failed`) — raised for a decision rather than taken |
+
+**Tests: +10** (workspace 553 → 558, `app.spec.tsx` 56 → 61). Backend:
+`?issue=denied` on a narrow *and* a wider grant, `?issue=unknown` on a failed
+exchange and on a failed identity read, `prompt=none` present on issue and
+absent on sign-in, the issue-path cache eviction, and the unwired login on
+both a missing control plane and missing credentials. Frontend: a long wait,
+an absurd wait, `?issue=ok` over a failed reveal, the retry's feedback, and
+the usage section after an issue. The mock Discord grew one knob
+(`start_full`'s `user_status`) so the identity read can fail on its own —
+the only way to reach the callback's last Discord call.
+
+**Verified:** `cargo fmt --all --check`, `cargo clippy -p prices-api
+--all-targets` (0 warnings), `cargo test --workspace` (558 passed, 0 failed),
+`cargo check -p prices-api --features lambda`, `nx run-many -t lint typecheck
+build test` (portal 70 passed), `nx format:check --all`, `make -C infra
+synth-production`, `npm run openapi:lint`, `openapi:verify-routes`,
+`openapi:verify-servers`.
+
+**Still required before merge, and not a code change:** this branch is cut
+from [[0188]]'s at a commit six behind its tip, and two of those six touch
+the same files (O1 moves the `1 req/s` literal onto `/config`; O3 rewrites
+the `keyOnScreen` effect this slice's C4 also touched). The rebase is the
+reviewer's own closing note. Those two lines were deliberately left alone
+here so the conflict is not deepened.
+
 ## Future Work
 
 Nothing new spawned — every follow-up already has an owner:
