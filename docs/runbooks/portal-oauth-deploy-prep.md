@@ -274,6 +274,33 @@ finishing a slice. Before it happens, both must be true:
   Lambda init exactly like a missing plan id; a registration still on
   `identify` alone refuses every issue round-trip at the authorize step.
 
+### After the first live issue attempt: check for `pending_absent`
+
+One behaviour the gate depends on is **undocumented and still unmeasured**
+(task 0180 item 2): whether Discord's REST member object carries the `pending`
+field at all. The code treats an absent `pending` as "could not verify" and
+refuses — never as "cleared" — which is the safe direction, but it is safe in a
+way that fails for **every** visitor if the field turns out never to be sent.
+Nothing about that failure looks different from a Discord outage on the page:
+each visitor sees "we could not verify your Discord membership just now".
+
+The one signal that tells the two apart is in the log, so look for it after the
+first real issue attempt:
+
+```bash
+aws logs filter-log-events \
+    --log-group-name /aws/lambda/prices-production-api-handler \
+    --filter-pattern pending_absent \
+    --start-time "$(($(date +%s) - 3600))000"
+```
+
+Nothing found: the field is present and the gate is working as designed. One
+line per attempt: the field is absent, **every member is being refused**, and
+the fix is the one arm named in `eligibility::decide` — not a parameter, not a
+redeploy of anything else. Record the result in task 0189's step 0 table with
+its date either way; that is the measurement, taken from production instead of
+from a scratch guild.
+
 ---
 
 ## 6. The custom-domain cutover — ordering

@@ -303,25 +303,49 @@ function Dashboard({
 }
 
 /**
+ * The largest wait this page will name, in seconds — a hundred years.
+ *
+ * Not a rejection threshold: a value above it is CLAMPED to it, not thrown
+ * away. It exists only to keep the arithmetic inside `Number`'s exact-integer
+ * range, so that a nonsense `wait_secs` renders as an obviously absurd number
+ * of days rather than as `Infinity` or a rounded float.
+ */
+const MAX_WAIT_SECS = 100 * 365 * 24 * 60 * 60;
+
+/**
  * Render the too-young wait from the backend's `wait_secs`.
  *
- * The number comes from a URL parameter, so it is sanitised: digits only,
- * clamped to a sane ceiling. **Never a calendar date** — that pattern is right
- * for 0191's weeks-long rework cap and absurd for minutes — and never a
+ * The number comes from a URL parameter, so it is sanitised: digits only, and
+ * clamped rather than rejected. **Never a calendar date** — that pattern is
+ * right for 0191's weeks-long rework cap and absurd for minutes — and never a
  * hard-coded "5 minutes": the copy follows what the backend computed from the
  * operator's threshold.
+ *
+ * **Clamping, not rejecting, is the whole point of the bucket ladder.** A
+ * length-bounded digit pattern (`\d{1,7}`) rejected anything past ~16 weeks
+ * and fell through to "a few minutes" — so a `min-account-age-minutes` set
+ * high by an operator's typo (it is a `put-parameter`, applied without a
+ * redeploy and validated by nothing at deploy time) rendered a months-long
+ * refusal as a coffee break. That is the most misleading direction available:
+ * the visitor retries, is refused again, and has no way to tell the wait is
+ * not what the page said. Overstating is recoverable; understating is not.
  */
 function describeWait(waitSecs: string | null): string {
-  const parsed =
-    waitSecs && /^\d{1,7}$/.test(waitSecs) ? Number(waitSecs) : NaN;
-  if (!Number.isFinite(parsed) || parsed <= 0) {
+  if (!waitSecs || !/^\d+$/.test(waitSecs)) {
     return 'a few minutes';
   }
-  if (parsed < 60) {
-    return `about ${parsed} second${parsed === 1 ? '' : 's'}`;
+  // `Number` of a very long digit string is `Infinity`, which `Math.min`
+  // resolves to the ceiling — so no length bound is needed to stay finite.
+  const parsed = Math.min(Number(waitSecs), MAX_WAIT_SECS);
+  if (!(parsed > 0)) {
+    return 'a few minutes';
   }
-  const minutes = Math.ceil(parsed / 60);
-  return `about ${minutes} minute${minutes === 1 ? '' : 's'}`;
+  const plural = (n: number, unit: string) =>
+    `about ${n} ${unit}${n === 1 ? '' : 's'}`;
+  if (parsed < 60) return plural(parsed, 'second');
+  if (parsed < 3600) return plural(Math.ceil(parsed / 60), 'minute');
+  if (parsed < 86_400) return plural(Math.ceil(parsed / 3600), 'hour');
+  return plural(Math.ceil(parsed / 86_400), 'day');
 }
 
 /**
@@ -365,16 +389,12 @@ function ApiKey({ onKey }: { onKey?: () => void }) {
   // `issue=too_young`.
   const { issue, wait_secs: waitSecs } = useOneShotParams(ISSUE_PARAMS);
 
-  // The same guard `SignIn` above keeps: signing out unmounts this component,
-  // and a response landing afterwards would be a credential written into the
-  // state of a component the visitor has just left.
-  const live = useRef(true);
-  useEffect(() => {
-    live.current = true;
-    return () => {
-      live.current = false;
-    };
-  }, []);
+  // The same guard `SignIn` and `Usage` keep, and for both of their reasons:
+  // signing out unmounts this component, and a response landing afterwards
+  // would be a credential written into the state of a component the visitor
+  // has just left — and "Check again" can be pressed while a load is still in
+  // flight, where the older answer must not overwrite the newer one.
+  const cancelInFlight = useRef<(() => void) | null>(null);
 
   // `onKey` is held in a ref rather than closed over, so `load` has EMPTY
   // dependencies and the mount effect below runs exactly once.
@@ -395,32 +415,59 @@ function ApiKey({ onKey }: { onKey?: () => void }) {
   });
 
   const load = useCallback(() => {
+    cancelInFlight.current?.();
+    let live = true;
+    cancelInFlight.current = () => {
+      live = false;
+    };
     fetchKey()
       .then((key) => {
-        if (!live.current) return;
+        if (!live) return;
         if (key) {
           setView({ state: 'ok', key });
           // Masked on arrival, always: what nobody asked for is the
           // credential appearing on screen while they were looking elsewhere.
           setRevealed(false);
-          // Tell the dashboard a key is on screen (task 0188's usage section
-          // reads it) — the FACT only, never the value or the id: nothing
-          // outside this component needs the credential, so nothing outside
-          // it gets to hold one.
+          // Tell the dashboard a key exists (task 0188's usage section reads
+          // it) — the FACT only, never the value or the id: nothing outside
+          // this component needs the credential, so nothing outside it gets
+          // to hold one.
           onKeyRef.current?.();
         } else {
           setView({ state: 'none' });
         }
       })
       .catch((cause: unknown) => {
-        if (!live.current) return;
+        if (!live) return;
         setView({ state: 'failed', reason: describeFailure(cause) });
       });
   }, []);
 
-  useEffect(() => {
+  /**
+   * Re-ask, from a control the visitor pressed.
+   *
+   * The loading state is the point: pressing "Check again" while the key is
+   * still settling produced *no visible change at all* — same words, same
+   * button — and a control that does nothing observable reads as broken. The
+   * sibling `Usage` section's Refresh has always done this; this is the same
+   * feedback, on the retry that needs it most (it is pressed precisely when
+   * the previous answer was "not yet").
+   */
+  const reload = useCallback(() => {
+    setView({ state: 'loading' });
     load();
   }, [load]);
+
+  useEffect(() => {
+    // `?issue=ok` is itself proof a key exists — the backend created one
+    // before it redirected — even though `GetApiKeys` may not list it for a
+    // moment yet. Reporting the fact NOW keeps the usage section beside this
+    // one from telling a visitor who has just been given their first key that
+    // they have none and should issue one.
+    if (issue === 'ok') onKeyRef.current?.();
+    load();
+    return () => cancelInFlight.current?.();
+  }, [load, issue]);
 
   const onCopy = () => {
     if (view.state !== 'ok') return;
@@ -456,14 +503,18 @@ function ApiKey({ onKey }: { onKey?: () => void }) {
           explicitly NOT an accusation — a Discord outage says nothing about
           anyone's membership. Retry is the same round-trip link in every
           case, because eligibility is proved per attempt, never remembered. */}
-      {/* Not while the lookup says `none`: `GetApiKeys` is eventually
-          consistent (see `keys/mod.rs` — "the listing can come back NON-empty
-          and still not contain the key just created"), and the reveal is a
-          single read with no retry. On a first issuance the redirect can beat
-          the listing, and "Your key is ready." sitting above "you have no API
-          key yet" is the page contradicting itself about the one fact the
-          visitor came for. The settling branch below says what is true. */}
-      {issue === 'ok' && view.state !== 'none' && (
+      {/* Only where the key is on screen, or about to be. `GetApiKeys` is
+          eventually consistent (see `keys/mod.rs` — "the listing can come
+          back NON-empty and still not contain the key just created"), and the
+          reveal is a single read with no retry, so on a first issuance the
+          redirect can beat the listing: "Your key is ready." above "you have
+          no API key yet" is the page contradicting itself about the one fact
+          the visitor came for, and the settling branch below says what is
+          actually true. The `failed` state is the same contradiction with a
+          different second half — "Your key is ready." directly above "Could
+          not get your API key" — so it is excluded by naming the two states
+          this line belongs to rather than by excluding `none` alone. */}
+      {issue === 'ok' && (view.state === 'ok' || view.state === 'loading') && (
         <p data-testid="issue-ok">Your key is ready.</p>
       )}
       {issue === 'not_member' && (
@@ -489,10 +540,17 @@ function ApiKey({ onKey }: { onKey?: () => void }) {
           Please <a href={issueUrl()}>try again</a> shortly.
         </p>
       )}
+      {/* Worded so it is true in both of its causes: the control plane
+          refusing after a passed check, and an issuance the deployment cannot
+          perform at all (`/auth/login?action=issue` on an unwired build lands
+          here too, rather than on a JSON error page). What it must keep
+          saying either way is decision #7's split — this is our key service,
+          never a doubt about the visitor. */}
       {issue === 'failed' && (
         <p data-testid="issue-failed">
-          Your eligibility checked out, but the key service could not create
-          your key. Please <a href={issueUrl()}>try again</a>.
+          We could not create your key. This is our key service, not your
+          Discord membership. Please <a href={issueUrl()}>try again</a>, and
+          tell us if it keeps happening.
         </p>
       )}
       {/* The round-trip ended at Discord, before any check ran. Two states,
@@ -527,7 +585,7 @@ function ApiKey({ onKey }: { onKey?: () => void }) {
       {view.state === 'none' && issue === 'ok' && (
         <p data-testid="issue-ok-settling">
           Your key was created, and is taking a moment to appear.{' '}
-          <button type="button" onClick={load}>
+          <button type="button" onClick={reload}>
             Check again
           </button>
         </p>

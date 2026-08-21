@@ -18,8 +18,8 @@
 //! | `?issue=ok` | the key exists and is on the plan — the page reveals it |
 //! | `?issue=not_member` | Discord confirmed no such membership (its own 10007/10004), or the member has not cleared screening |
 //! | `?issue=too_young&wait_secs=N` | account below the threshold; `N` is the wait, so the page's copy follows the operator's setting |
-//! | `?issue=unknown` | membership could **not** be verified (throttle, outage, absent `pending`, unreadable parameter) — refused without accusation |
-//! | `?issue=failed` | eligibility passed but the control plane would not produce a key |
+//! | `?issue=unknown` | membership could **not** be verified (throttle, outage, absent `pending`, unreadable parameter, or Discord failing the exchange or the identity read) — refused without accusation |
+//! | `?issue=failed` | our key service could not produce a key — the control plane refused, or issuance is not wired on this deployment. Never a statement about the visitor |
 //!
 //! `unknown` and `failed` are separate on purpose: one says "Discord could not
 //! vouch for you, try shortly", the other says "you are fine, our key service
@@ -27,10 +27,23 @@
 //! visitor's membership.
 //!
 //! The other two — [`ISSUE_CANCELLED_QUERY`] and [`ISSUE_DENIED_QUERY`] — are
-//! **not** verdicts and are not produced here. They belong to the callback,
-//! which reaches them when the round-trip ends at Discord before any check
-//! runs; they live in this module so that every `?issue=` literal is declared
-//! in one place. See their own documentation for why they are two and not one.
+//! **not** verdicts: they are what happens when the round-trip ends before a
+//! check can run. `cancelled` belongs to the callback alone; `denied` is
+//! raised both there (Discord's own `invalid_scope` and friends) and here, by
+//! [`refuse_issue_discord`], when the token response comes back with a scope
+//! set our registration should never have granted. Both literals live in this
+//! module so that every `?issue=` value is declared in one place. See their
+//! own documentation for why they are two and not one.
+//!
+//! # Nothing on this path answers with an error page
+//!
+//! Every exit from the moment the callback knows it is completing an issue —
+//! a refused exchange, a Discord outage, an unreadable parameter, a spent
+//! budget, a control plane that will not create — is a `303` to one of the
+//! literals above. The sign-in arm's `502 discord_unavailable` is deliberately
+//! *not* reachable from here: the visitor is mid-navigation from a link on
+//! their own dashboard, and a JSON body would strand them on an API URL with
+//! nothing to read and nothing to press.
 //!
 //! The **key value never rides in a `Location`** — after `?issue=ok` the page
 //! calls the reveal route, which is read-only and session-authorized.
@@ -56,7 +69,7 @@ use super::discord::{self, AccessToken, MemberLookup};
 use super::secret::OauthSecret;
 use super::session::{self, Session};
 use super::state_token;
-use super::{AuthState, PORTAL_HOME, cookies, redirect, refuse_discord};
+use super::{AuthState, PORTAL_HOME, cookies, redirect};
 use crate::portal::keys::gateway::Gateway;
 
 /// See the module table. Literals, like `?signin=…` — the dynamic one is
@@ -90,11 +103,68 @@ pub(super) fn too_young_query(wait_secs: u64) -> String {
     format!("?issue=too_young&wait_secs={wait_secs}")
 }
 
-/// Mirrors `keys`' `KEYS_UNCONFIGURED` — the same deployment fault ("portal
-/// open, key issuance not wired") reported under the same code whichever door
-/// it is noticed at. `/auth/login?action=issue` refuses with this instead of
-/// starting a round-trip that cannot end in a key.
-pub(super) const KEYS_UNCONFIGURED: &str = "keys_unconfigured";
+/// Refuse to *start* an issue round-trip on a deployment that cannot finish
+/// one — no OAuth credentials, no control plane, or no eligibility parameters.
+///
+/// A redirect, not the `503 keys_unconfigured` envelope this used to answer.
+/// `/auth/login?action=issue` is reached by a top-level navigation from a link
+/// on the dashboard, so a JSON body is a dead end: the visitor is left on an
+/// API URL, with no page, no wording and nothing to click. `?issue=failed` is
+/// the state that already means "your eligibility is not the problem, our key
+/// service is" — which is exactly true here, and true *before* any check ran,
+/// which is why that state's copy does not claim eligibility passed.
+///
+/// Loud in CloudWatch, because this is a deployment fault and nothing else
+/// reports it: the cold-start probes are supposed to make it unreachable, so
+/// one of these lines means a container came up in a state they did not catch.
+pub(super) fn refuse_issue_start(oauth: bool, gateway: bool, settings: bool) -> Response {
+    tracing::error!(
+        oauth,
+        gateway,
+        settings,
+        "an issue round-trip was started on a deployment that cannot complete one"
+    );
+    redirect(&format!("{PORTAL_HOME}{ISSUE_FAILED_QUERY}"), Vec::new())
+}
+
+/// Land a Discord failure that happened on an `action=issue` round-trip.
+///
+/// The sign-in arm answers these with `refuse_discord`'s `502` — a JSON
+/// envelope worded "could not complete **sign-in**". On an issue round-trip
+/// that is wrong twice over: the visitor pressed "get my API key" rather than
+/// "sign in", and they are mid-navigation, so what they receive is a bare JSON
+/// page with no link back rather than the dashboard state this module's whole
+/// design is built around.
+///
+/// Which landing depends on whose fault the failure is, the same split
+/// `unknown` and `denied` already carry elsewhere in this module:
+///
+/// - [`discord::DiscordError::UnexpectedScope`] is **our Developer Portal
+///   registration drifting** from `discord::SCOPE` — the same fault Discord
+///   reports as `invalid_scope` at the authorize step, which
+///   `refuse_oauth_error` already lands on `?issue=denied`. One fault, one
+///   landing, whichever half of the exchange notices it. "Try again shortly"
+///   would be a lie: no amount of waiting fixes a registration.
+/// - Everything else — unreachable, a non-2xx, an undecodable body — is
+///   Discord not answering, which is precisely `?issue=unknown`: refuse
+///   without saying anything about the visitor's membership.
+pub(super) fn refuse_issue_discord(
+    stage: &str,
+    error: discord::DiscordError,
+    drop_pending: String,
+) -> Response {
+    let query = match error {
+        discord::DiscordError::UnexpectedScope { .. } => ISSUE_DENIED_QUERY,
+        _ => ISSUE_UNKNOWN_QUERY,
+    };
+    tracing::warn!(
+        stage,
+        error = %error,
+        landing = query,
+        "portal issue round-trip could not complete with Discord"
+    );
+    redirect(&format!("{PORTAL_HOME}{query}"), vec![drop_pending])
+}
 
 /// The whole callback's I/O budget, measured from the moment the request
 /// arrived — **not** from the moment this module takes over.
@@ -257,9 +327,11 @@ pub(super) async fn complete_issue(
 
     let user = match discord::current_user(&state.http, &state.endpoints, token).await {
         Ok(user) => user,
-        // No identity, no session, no verdict — the same 502 the sign-in arm
-        // answers when Discord will not say who the visitor is.
-        Err(error) => return refuse_discord("identity read", error, drop_pending),
+        // No identity, no session, no verdict — but still a landing the page
+        // can render rather than the sign-in arm's `502`: this visitor asked
+        // for a key, and "we could not verify" is the honest thing to tell
+        // someone whose Discord went quiet mid-check.
+        Err(error) => return refuse_issue_discord("identity read", error, drop_pending),
     };
 
     // Identity is proven: from here on every outcome carries a fresh session,

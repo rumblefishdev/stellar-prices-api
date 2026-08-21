@@ -429,16 +429,111 @@ async fn the_member_call_carries_the_fresh_token_and_the_configured_guild() {
 /// A grant missing the member scope is refused at the exchange, before any
 /// membership call — a registration that drifted narrower must not turn every
 /// eligibility check into a refusal with a misleading shape.
+///
+/// **And it lands, rather than answering `502`.** This is the likeliest fault
+/// on this path — the Developer Portal registration still carrying 0186's
+/// `identify` alone — and the visitor pressed "get my API key" from a page
+/// they were looking at. `?issue=denied` is where the callback already puts
+/// Discord's own `invalid_scope`, which is the same fault noticed one step
+/// earlier: one registration drift, one landing, whichever half sees it.
+/// "Try again shortly" (`unknown`) would be a lie; no wait fixes a
+/// registration.
 #[tokio::test]
-async fn a_grant_missing_the_member_scope_is_refused_before_any_member_call() {
-    let discord = MockDiscord::start("identify", None).await;
+async fn a_grant_missing_the_member_scope_lands_on_denied_before_any_member_call() {
+    for drifted in ["identify", "identify guilds.members.read guilds"] {
+        let discord = MockDiscord::start(drifted, None).await;
+        let gateway = MockGateway::start().await;
+
+        let reply = issue_round_trip(&issue_app(&discord, &gateway)).await;
+        assert_eq!(reply.status, StatusCode::SEE_OTHER, "scope={drifted}");
+        assert_eq!(reply.location(), "/api-tokens/?issue=denied", "{drifted}");
+        // Not the sign-in arm's error page: nothing renderable, no way back.
+        assert!(reply.body.is_empty(), "{drifted}");
+        assert_eq!(discord.member_calls(), 0, "{drifted}");
+        assert_eq!(gateway.with(|s| s.create_calls), 0, "{drifted}");
+    }
+}
+
+/// Discord failing the **token exchange** on an issue round-trip is
+/// "we could not verify", not the sign-in arm's `502 discord_unavailable`.
+///
+/// The visitor is mid-navigation from their own dashboard: a JSON envelope
+/// worded "could not complete sign-in" is a dead end with no link back, about
+/// an action they did not take. It also must not leak Discord's body.
+#[tokio::test]
+async fn a_failed_token_exchange_on_an_issue_lands_on_unknown() {
+    let discord = MockDiscord::start(GRANTED_SCOPE, Some(StatusCode::SERVICE_UNAVAILABLE)).await;
     let gateway = MockGateway::start().await;
 
     let reply = issue_round_trip(&issue_app(&discord, &gateway)).await;
-    assert_eq!(reply.status, StatusCode::BAD_GATEWAY);
-    assert_eq!(reply.json()["code"], "discord_unavailable");
+    assert_eq!(reply.status, StatusCode::SEE_OTHER);
+    assert_eq!(reply.location(), "/api-tokens/?issue=unknown");
+    assert!(!String::from_utf8_lossy(&reply.body).contains("upstream said no"));
     assert_eq!(discord.member_calls(), 0);
     assert_eq!(gateway.with(|s| s.create_calls), 0);
+    // Refused before identity was proven, so no session is minted — and the
+    // one the visitor arrived with is left exactly as it was.
+    assert!(reply.cookie(cookies::SESSION_COOKIE).is_none());
+}
+
+/// The same rule for the **identity read**, the last Discord call on the
+/// path: it happens after the membership check, so this is a round-trip that
+/// got all the way to "who is this?" and lost Discord there.
+#[tokio::test]
+async fn a_failed_identity_read_on_an_issue_lands_on_unknown() {
+    let discord = MockDiscord::start_full(
+        GRANTED_SCOPE,
+        None,
+        MemberReply::Member {
+            pending: Some(false),
+        },
+        USER_ID,
+        Some(StatusCode::TOO_MANY_REQUESTS),
+    )
+    .await;
+    let gateway = MockGateway::start().await;
+
+    let reply = issue_round_trip(&issue_app(&discord, &gateway)).await;
+    assert_eq!(reply.status, StatusCode::SEE_OTHER);
+    assert_eq!(reply.location(), "/api-tokens/?issue=unknown");
+    assert_eq!(discord.member_calls(), 1, "the membership call did happen");
+    // No identity means no key: the reconciler needs a `sub` to name one.
+    assert_eq!(gateway.with(|s| s.create_calls), 0);
+}
+
+/// `prompt=none` is on the issue round-trip and **only** there.
+///
+/// The re-authorisation is the one that has to be a redirect rather than a
+/// login — eligibility is proved per action, so the visitor crosses the
+/// authorize endpoint again for every issue, every retry after a refusal and
+/// (0191) every rework. Sign-in is the opposite case: it is where the first
+/// authorisation happens, and what Discord does with `prompt=none` for an app
+/// that has not been authorised (or was authorised under 0186's narrower
+/// scope) is undocumented.
+#[tokio::test]
+async fn only_the_issue_round_trip_suppresses_the_consent_screen() {
+    let discord = MockDiscord::start(GRANTED_SCOPE, None).await;
+    let gateway = MockGateway::start().await;
+    let app = issue_app(&discord, &gateway);
+
+    let prompt_of = |location: &str| -> Option<String> {
+        let query = location.split_once('?').expect("a query").1.to_string();
+        form_urlencoded::parse(query.as_bytes())
+            .find(|(k, _)| k == "prompt")
+            .map(|(_, v)| v.to_string())
+    };
+
+    let issue = call_path(
+        app.clone(),
+        "GET",
+        "/api-tokens/api/auth/login?action=issue",
+        None,
+    )
+    .await;
+    assert_eq!(prompt_of(&issue.location()).as_deref(), Some("none"));
+
+    let signin = call_path(app, "GET", "/api-tokens/api/auth/login", None).await;
+    assert_eq!(prompt_of(&signin.location()), None);
 }
 
 // ---------------------------------------------------------------------------
@@ -567,6 +662,46 @@ async fn a_session_for_someone_else_is_replaced_by_the_re_auth_identity() {
         names,
         vec![key_name()],
         "the key belongs to the fresh identity too"
+    );
+}
+
+/// A successful issue evicts the usage route's cached "no key" — the half of
+/// 0188's R2/C2 fix that moved here when issuance moved to the callback.
+///
+/// The dashboard asks for usage on mount, so a visitor with no key has a
+/// `NoKey` cached for the next 60 seconds *before* they press "get my API
+/// key". Without the eviction, the page they land on after `?issue=ok` — and
+/// every reload for the rest of that TTL — tells a key-holder they have no
+/// key, which is exactly the falsehood 0188's R2 was filed for.
+///
+/// Asserted here because it was asserted **nowhere** otherwise: 0188's
+/// `issuing_a_key_evicts_a_cached_no_key` became a reveal-path test when this
+/// slice made `/key` read-only, and deleting `invalidate_no_key` from
+/// `complete_issue` left the whole workspace green.
+#[tokio::test]
+async fn a_successful_issue_evicts_the_cached_no_key() {
+    let discord = MockDiscord::start(GRANTED_SCOPE, None).await;
+    let gateway = MockGateway::start().await;
+    // One app, so the issue callback and the usage route share the cache the
+    // way `portal::apply` wires them in production.
+    let app = issue_app(&discord, &gateway);
+    let session = session_cookie(USER_ID);
+
+    // The dashboard's mount-time read, before the key exists: caches `NoKey`.
+    let before = call_path(app.clone(), "GET", USAGE_PATH, Some(&session)).await;
+    assert_eq!(before.status, StatusCode::NOT_FOUND);
+    assert_eq!(before.json()["code"], "no_key");
+
+    let issued = issue_round_trip(&app).await;
+    assert_eq!(issued.location(), "/api-tokens/?issue=ok");
+
+    // Well inside the 60s TTL, so only the eviction can explain this.
+    let after = call_path(app, "GET", USAGE_PATH, Some(&session)).await;
+    assert_eq!(
+        after.status,
+        StatusCode::OK,
+        "a cached `no_key` survived the issue that falsified it: {}",
+        String::from_utf8_lossy(&after.body)
     );
 }
 

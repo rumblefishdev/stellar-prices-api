@@ -960,9 +960,135 @@ describe('the API key', () => {
     renderApp('/?issue=failed');
 
     const failure = await screen.findByTestId('issue-failed');
-    expect(failure.textContent).toMatch(/eligibility checked out/i);
+    // Decision #7's split, in as many words — and worded so it is true of
+    // BOTH causes: a control plane that refused after a passed check, and an
+    // issuance the deployment cannot perform at all (an unwired
+    // `/auth/login?action=issue` lands here rather than on a JSON page). It
+    // must never claim a check ran that did not.
+    expect(failure.textContent).toMatch(/our key service/i);
+    expect(failure.textContent).toMatch(/not your discord membership/i);
     expect(screen.queryByTestId('issue-unknown')).toBeNull();
     expect(screen.queryByTestId('issue-not-member')).toBeNull();
+  });
+
+  /**
+   * A long wait is CLAMPED into a bigger unit, never rejected into "a few
+   * minutes".
+   *
+   * `min-account-age-minutes` is a `put-parameter` applied without a redeploy
+   * and validated by nothing at deploy time, so an operator's typo produces a
+   * genuinely enormous `wait_secs`. Rendering that as a coffee break is the
+   * most misleading direction available: the visitor retries, is refused
+   * again, and the page never lets on. Overstating a wait is recoverable.
+   */
+  it('renders a very long wait as a long wait, not as "a few minutes"', async () => {
+    signedInWithoutKey();
+    // 99,999,999s — one digit past what the old length-bounded guard allowed.
+    renderApp('/?issue=too_young&wait_secs=99999999');
+
+    const refusal = await screen.findByTestId('issue-too-young');
+    expect(refusal.textContent).toMatch(/about 1158 days/i);
+    expect(refusal.textContent).not.toMatch(/a few minutes/i);
+  });
+
+  /** And a value too large to be a number at all clamps to the ceiling. */
+  it('clamps an absurd wait_secs to the top of the scale', async () => {
+    signedInWithoutKey();
+    renderApp(`/?issue=too_young&wait_secs=${'9'.repeat(40)}`);
+
+    const refusal = await screen.findByTestId('issue-too-young');
+    // A hundred years, in days — obviously wrong to a reader, which is the
+    // point: it says "this figure is nonsense", not "wait a moment".
+    expect(refusal.textContent).toMatch(/about 36500 days/i);
+    expect(refusal.textContent).not.toMatch(/a few minutes/i);
+    expect(refusal.textContent).not.toContain('Infinity');
+    expect(refusal.textContent).not.toContain('NaN');
+  });
+
+  /**
+   * `?issue=ok` must not sit above "Could not get your API key".
+   *
+   * The `none` guard beside it was written for exactly this contradiction —
+   * the page asserting the key is ready next to the page saying it could not
+   * produce one — and `failed` is the same contradiction with a different
+   * second half.
+   */
+  it('does not claim the key is ready when the reveal failed', async () => {
+    signedInWithoutKey(() => ({ ok: false, status: 502 }));
+    renderApp('/?issue=ok');
+
+    await screen.findByText(/could not get your api key/i);
+    expect(screen.queryByTestId('issue-ok')).toBeNull();
+    expect(screen.queryByTestId('issue-ok-settling')).toBeNull();
+  });
+
+  /**
+   * The settling retry has to acknowledge the press.
+   *
+   * Without a loading state it produced no visible change at all — same
+   * words, same button — so the natural reading was that the control was
+   * broken. `Usage`'s Refresh has always done this; so does this one now.
+   */
+  it('says it is checking again when the settling retry is pressed', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let calls = 0;
+    stubRoutes({
+      [CONFIG_URL]: () => ({ json: async () => ({ enabled: true }) }),
+      [ME_URL]: () => ({
+        json: async () => ({
+          authenticated: true,
+          user_id: '308994132968210433',
+          username: 'adam',
+        }),
+      }),
+      [KEY_URL]: () => {
+        calls += 1;
+        if (calls === 1) return keyNoKey();
+        // Held open, so the loading state is observable rather than a frame
+        // the test races.
+        return {
+          ok: false,
+          status: 404,
+          json: async () => {
+            await gate;
+            return { code: 'no_key' };
+          },
+        };
+      },
+      [USAGE_URL]: usageNoKey,
+    });
+    renderApp('/?issue=ok');
+
+    const retry = await screen.findByRole('button', { name: /check again/i });
+    fireEvent.click(retry);
+    expect(await screen.findByText(/checking for your api key/i)).toBeTruthy();
+
+    release();
+    // And it comes back to the settling wait, not to "you have no key".
+    expect(await screen.findByTestId('issue-ok-settling')).toBeTruthy();
+  });
+
+  /**
+   * The usage section must not offer to issue a key to somebody who has just
+   * been issued one.
+   *
+   * `?issue=ok` is itself proof a key exists — the backend created it before
+   * redirecting — even while `GetApiKeys` has not caught up. Without that
+   * fact reaching the dashboard, the key section said "your key was created"
+   * and the section directly below it said "you have no API key yet — issue
+   * one above": the same self-contradiction as the `issue=ok` guard, one
+   * section down.
+   */
+  it('does not tell a visitor who just issued a key that they have none', async () => {
+    signedInWithoutKey();
+    renderApp('/?issue=ok');
+
+    await screen.findByTestId('issue-ok-settling');
+    expect(await screen.findByText(/your key is new/i)).toBeTruthy();
+    expect(screen.queryByText(/you have no api key yet/i)).toBeNull();
   });
 
   /**

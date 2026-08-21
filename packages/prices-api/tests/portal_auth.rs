@@ -332,10 +332,16 @@ async fn login_redirects_to_discord_asking_for_the_two_scopes_and_nothing_else()
     assert_eq!(field("scope"), "identify guilds.members.read");
     assert_eq!(field("response_type"), "code");
     assert_eq!(field("code_challenge_method"), "S256");
-    // Repeat authorisation must not re-prompt: eligibility is proved per
-    // action, so a visitor crosses this endpoint again for every issue and
-    // every retry (task 0189).
-    assert_eq!(field("prompt"), "none");
+    // And NO `prompt` on a sign-in (task 0189). Suppressing the consent
+    // screen is for the re-authorisation round-trips, which by construction
+    // follow an authorisation that already exists; sign-in is where the FIRST
+    // one happens — including the re-consent that grants 0189's new
+    // `guilds.members.read` to an account that authorised under 0186's
+    // narrower scope. See `authorize_url`.
+    assert!(
+        !query.iter().any(|(k, _)| k == "prompt"),
+        "sign-in must not suppress the consent screen: {location}"
+    );
     assert_eq!(field("redirect_uri"), REDIRECT_URI);
     assert!(!field("state").is_empty());
     assert!(!field("code_challenge").is_empty());
@@ -407,15 +413,51 @@ async fn login_refuses_an_action_it_does_not_implement() {
 
 /// `action=issue` IS implemented (task 0189) — but on a deployment with no
 /// control plane or eligibility parameters wired it is refused before the
-/// visitor is sent to Discord, under the same code the key routes use for the
-/// same fault. A round-trip that can only ever end in "failed" must not start.
+/// visitor is sent to Discord: a round-trip that can only ever end in
+/// "failed" must not start.
+///
+/// **Refused with a landing, not with a `503` envelope.** This route is
+/// reached by a top-level navigation from a link on the dashboard, so a JSON
+/// body strands the visitor on an API URL with nothing to read and nothing to
+/// press. `?issue=failed` is the state that already means "our key service,
+/// not your eligibility" — and no round-trip is started, so no pending cookie
+/// is minted either.
 #[tokio::test]
-async fn login_refuses_an_issue_round_trip_on_an_unwired_deployment() {
+async fn login_lands_an_unwired_issue_round_trip_on_failed() {
     let open = signed_in_app(true);
     let refused = fetch(&open, &format!("{LOGIN_PATH}?action=issue"), &[]).await;
-    assert_eq!(refused.status, StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(refused.json()["code"], "keys_unconfigured");
+    assert_eq!(refused.status, StatusCode::SEE_OTHER);
+    assert_eq!(refused.location(), "/api-tokens/?issue=failed");
     assert!(refused.set_cookies().is_empty());
+    // And not a body the browser would render as text.
+    assert!(refused.body.is_empty(), "{:?}", refused.body);
+}
+
+/// The same door on a deployment with **no OAuth credentials at all**: a
+/// sign-in still gets the `503` envelope its caller can read, while an issue
+/// navigation gets a landing. The two answers differ because the two callers
+/// do — one is `fetch` from the page, the other is the browser itself.
+#[tokio::test]
+async fn an_issue_round_trip_with_no_credentials_lands_rather_than_503ing() {
+    let config = AppConfig {
+        ch_enabled: false,
+        base_url: None,
+        api_keys: vec![],
+        portal_enabled: true,
+        portal_oauth: None,
+        portal_endpoints: Endpoints::default(),
+        portal_keys: None,
+        portal_eligibility: None,
+    };
+    let router = app(&config, AppState::without_ch());
+
+    let signin = fetch(&router, LOGIN_PATH, &[]).await;
+    assert_eq!(signin.status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(signin.json()["code"], "sign_in_unconfigured");
+
+    let issue = fetch(&router, &format!("{LOGIN_PATH}?action=issue"), &[]).await;
+    assert_eq!(issue.status, StatusCode::SEE_OTHER);
+    assert_eq!(issue.location(), "/api-tokens/?issue=failed");
 }
 
 // ---------------------------------------------------------------------------

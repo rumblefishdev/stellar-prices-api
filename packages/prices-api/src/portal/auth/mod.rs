@@ -204,9 +204,11 @@ async fn login(
     State(state): State<AuthState>,
     ValidatedQuery(query): ValidatedQuery<LoginQuery>,
 ) -> Response {
-    let Some(oauth) = state.oauth.as_ref() else {
-        return unconfigured();
-    };
+    // Parsed BEFORE the credentials check below, because what an unprovisioned
+    // deployment should answer depends on which action was asked for: a
+    // sign-in gets the `503` envelope its caller can read, while an issue
+    // round-trip is a top-level navigation from a link and gets a landing it
+    // can render — see `refuse_issue_start`.
     let action = match query.action.as_deref() {
         None => Action::SignIn,
         Some(raw) => match Action::parse(raw) {
@@ -220,21 +222,26 @@ async fn login(
         },
     };
 
-    // An issue round-trip on a deployment with no control plane or eligibility
-    // parameters wired cannot end in a key — refuse before sending the visitor
-    // to Discord, under the same code the key routes use for the same fault.
-    // Only reachable with the portal open and issuance unprovisioned, exactly
-    // like `unconfigured()` below; `load_portal_eligibility` fails the cold
-    // start on that combination, so this is the second line, not the first.
-    if action == Action::Issue && !state.issue.is_wired() {
-        return no_store(errors::service_unavailable(
-            issue::KEYS_UNCONFIGURED,
-            "API key issuance is not configured on this deployment",
-        ));
+    // An issue round-trip on a deployment with no credentials, no control
+    // plane or no eligibility parameters cannot end in a key — refuse before
+    // sending the visitor to Discord. Only reachable with the portal open and
+    // issuance unprovisioned: `load_portal_oauth` and `load_portal_eligibility`
+    // both fail the cold start on that combination, so this is the second
+    // line, not the first.
+    if action == Action::Issue && (state.oauth.is_none() || !state.issue.is_wired()) {
+        return issue::refuse_issue_start(
+            state.oauth.is_some(),
+            state.issue.gateway.is_some(),
+            state.issue.settings.is_some(),
+        );
     }
 
+    let Some(oauth) = state.oauth.as_ref() else {
+        return unconfigured();
+    };
+
     let started = state_token::start(&oauth.signing_key, action, state_token::now_secs());
-    let location = authorize_url(&state.endpoints, oauth, &started);
+    let location = authorize_url(&state.endpoints, oauth, action, &started);
 
     // 303, not 302. The visitor arrived by GET so the distinction does not bite
     // here, but 303 states "go and GET this instead" unambiguously, and it is
@@ -260,43 +267,65 @@ async fn login(
 fn authorize_url(
     endpoints: &discord::Endpoints,
     oauth: &OauthSecret,
+    action: Action,
     started: &state_token::StartedLogin,
 ) -> String {
-    let query = form_urlencoded::Serializer::new(String::new())
+    let mut query = form_urlencoded::Serializer::new(String::new());
+    query
         .append_pair("response_type", "code")
         .append_pair("client_id", &oauth.client_id)
         .append_pair("redirect_uri", &oauth.redirect_uri)
         // Exactly `identify guilds.members.read`. ADR 0010; also declared in
         // the Developer Portal, and verified again — as a set — on the token
         // response (`discord::exchange_code`).
-        .append_pair("scope", discord::SCOPE)
-        // WITHOUT this, Discord's authorize endpoint defaults to
-        // `prompt=consent` and re-shows the approval screen on EVERY
-        // authorisation, including ones where the same account already granted
-        // the same scopes. Three places in this codebase state the opposite as
-        // a design property — `issue::complete_issue` ("Discord does not
-        // re-prompt for consent on repeat authorisation, so this whole detour
-        // cost the visitor a redirect, not a login"), `session`'s TTL
-        // reasoning, and the frontend's `issueUrl` doc — and the whole shape
-        // of the issue flow rests on it: eligibility is proved per action, so
-        // a visitor crosses this endpoint again for every issue, every retry
-        // after a refusal, and (task 0191) every rework. At one consent screen
-        // apiece that is not a redirect, it is a login, four times over.
-        //
-        // `prompt=none` skips the screen for an authorisation already granted.
-        // It is NOT the strict OIDC `prompt=none`: Discord still shows the
-        // screen when the application has not been authorised before, or when
-        // the scopes have changed — which is what keeps first-time sign-in and
-        // the epic's one-round-trip `?action=issue` working for a brand-new
-        // visitor.
-        //
-        // That last sentence is the one assumption here, and it is checkable
-        // at no extra cost: 0180 item 5 already has the operator capturing the
-        // consent screen with and without `guilds.members.read`. If Discord
-        // instead refuses an unauthorised `prompt=none`, it does so as an
-        // OAuth error on the callback — logged by `refuse_oauth_error` and
-        // rendered, not silent.
-        .append_pair("prompt", "none")
+        .append_pair("scope", discord::SCOPE);
+
+    // `prompt=none` — on the RE-AUTHORISATION round-trips only, never on
+    // sign-in.
+    //
+    // Why it is here at all: Discord's authorize endpoint defaults to
+    // `prompt=consent` and re-shows the approval screen on every
+    // authorisation, including ones where the same account already granted
+    // the same scopes. Three places in this codebase state the opposite as a
+    // design property — `issue::complete_issue` ("Discord does not re-prompt
+    // for consent on repeat authorisation, so this whole detour cost the
+    // visitor a redirect, not a login"), `session`'s TTL reasoning, and the
+    // frontend's `issueUrl` doc — and the shape of the issue flow rests on
+    // it: eligibility is proved per action, so a visitor crosses this
+    // endpoint again for every issue, every retry after a refusal, and (task
+    // 0191) every rework. At one consent screen apiece that is not a
+    // redirect, it is a login, four times over.
+    //
+    // Why NOT on sign-in, which is where it used to be sent too. Discord
+    // documents `prompt=none` for the case where "a user has previously
+    // authorized your application with the requested scopes"; what it does
+    // for an authorisation that has NOT been granted is undocumented. The
+    // expected behaviour is that the screen is shown anyway (it is not the
+    // strict OIDC `prompt=none`, which errors), but that was an assumption,
+    // and sign-in is the one path that cannot afford it: it is where the
+    // FIRST authorisation always happens (the issue link only exists inside
+    // the signed-in dashboard), so if the assumption is wrong, nobody can
+    // sign in at all and the whole funnel is dark. Sign-in also gains
+    // nothing from it — a first-timer has no consent to skip.
+    //
+    // The same reasoning covers the scope change this very task makes: an
+    // account that authorised under 0186's `identify` alone must be shown
+    // the screen again to grant `guilds.members.read`, and suppressing it on
+    // sign-in is exactly how that grant would come back narrower and be
+    // refused by `scopes_match` on every attempt.
+    //
+    // On an issue round-trip the assumption is not load-bearing: by
+    // construction the visitor is signed in, so the app is already authorised
+    // with these scopes — the documented case. If Discord ever refuses one
+    // anyway it does so as an OAuth error on the callback, which
+    // `refuse_oauth_error` logs and lands on `?issue=denied`, rendered rather
+    // than silent. 0180 item 5's consent capture confirms it at no extra
+    // cost.
+    if action == Action::Issue {
+        query.append_pair("prompt", "none");
+    }
+
+    let query = query
         .append_pair("state", &started.state_param)
         .append_pair("code_challenge", &started.code_challenge)
         .append_pair("code_challenge_method", "S256")
@@ -448,6 +477,15 @@ async fn callback(
     .await
     {
         Ok(token) => token,
+        // WHICH round-trip this was decides what the visitor sees. A sign-in
+        // gets the `502` envelope below; an issue round-trip gets a landing it
+        // can render, because it started from the dashboard and `502` JSON is
+        // a dead end with no link back — and because the most likely cause
+        // here, `UnexpectedScope`, is a registration drift the issue flow has
+        // a designed state for. See `issue::refuse_issue_discord`.
+        Err(error) if accepted.action == Action::Issue => {
+            return issue::refuse_issue_discord("token exchange", error, drop_pending);
+        }
         Err(error) => return refuse_discord("token exchange", error, drop_pending),
     };
 
@@ -798,7 +836,12 @@ mod tests {
     fn the_authorize_url_asks_for_the_two_scopes_with_s256_pkce() {
         let secret = oauth();
         let started = state_token::start(&secret.signing_key, Action::SignIn, 1_800_000_000);
-        let url = authorize_url(&discord::Endpoints::default(), &secret, &started);
+        let url = authorize_url(
+            &discord::Endpoints::default(),
+            &secret,
+            Action::SignIn,
+            &started,
+        );
 
         assert!(url.starts_with("https://discord.com/oauth2/authorize?"));
         let query: Vec<(String, String)> =
@@ -825,11 +868,16 @@ mod tests {
         assert_eq!(get("code_challenge_method"), "S256");
         assert_eq!(get("code_challenge"), started.code_challenge);
         assert_eq!(get("state"), started.state_param);
-        // Without this the endpoint defaults to `prompt=consent` and every
-        // repeat authorisation is a fresh approval screen — which would make
-        // "the second round-trip is a redirect, not a login" false for the
-        // issue flow, every retry after a refusal, and 0191's rework.
-        assert_eq!(get("prompt"), "none");
+        // NO `prompt` on a sign-in. It is the round-trip where the FIRST
+        // authorisation happens, and what Discord does with `prompt=none` for
+        // an app the account has not authorised (or has authorised under
+        // 0186's narrower scope) is undocumented — see `authorize_url`.
+        // Asserted on the key, not on `get`'s empty-string default, so an
+        // empty `prompt=` would fail here too.
+        assert!(
+            !query.iter().any(|(k, _)| k == "prompt"),
+            "sign-in must not suppress the consent screen: {url}"
+        );
 
         // The verifier is the half that must NOT travel. A URL containing it
         // makes PKCE decorative and is the single worst thing this function
@@ -870,7 +918,12 @@ mod tests {
     fn the_authorize_url_encodes_its_parameters() {
         let secret = oauth();
         let started = state_token::start(&secret.signing_key, Action::SignIn, 0);
-        let url = authorize_url(&discord::Endpoints::default(), &secret, &started);
+        let url = authorize_url(
+            &discord::Endpoints::default(),
+            &secret,
+            Action::SignIn,
+            &started,
+        );
         assert!(url.contains("redirect_uri=https%3A%2F%2Fportal.example"));
     }
 

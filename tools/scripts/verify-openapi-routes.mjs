@@ -842,14 +842,95 @@ for (const [envVar, expected] of Object.entries(ELIGIBILITY_PARAMS)) {
   const forbiddenSuffixes = Object.values(ELIGIBILITY_PARAMS).map(
     (name) => name.slice(name.lastIndexOf('/')), // '/discord-guild-id', …
   );
+
+  // A `Name` is rarely a bare string once anyone interpolates the environment
+  // into it — `/prices/${env}/discord-guild-id` synthesizes to an `Fn::Join`
+  // or an `Fn::Sub`, which is the natural way somebody would write the very
+  // parameter this check forbids. Inspecting only literal strings therefore
+  // left the guard evadable by the most likely spelling of the mistake.
+  //
+  // So intrinsics are RESOLVED as far as their literal text goes, with each
+  // unresolvable piece (a `Ref`, a `${Var}`) standing in as one NUL — a byte
+  // no parameter name may contain, which makes "literal tail" and "followed
+  // by something we cannot read" distinguishable below. Anything this cannot
+  // read at all is a failure, not a skip: see the message on that branch.
+  const PLACEHOLDER = '\u0000';
+  const resolveName = (value) => {
+    if (typeof value === 'string') return value;
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+      return null;
+    }
+    const keys = Object.keys(value);
+    if (keys.length !== 1) return null;
+    const [fn] = keys;
+    const arg = value[fn];
+    if (fn === 'Ref' || fn === 'Fn::GetAtt' || fn === 'Fn::ImportValue') {
+      return PLACEHOLDER;
+    }
+    if (fn === 'Fn::Sub') {
+      const template = Array.isArray(arg) ? arg[0] : arg;
+      if (typeof template !== 'string') return null;
+      return (
+        template
+          // `${Foo}` substitutes; `${!Foo}` is an escaped literal `${Foo}`
+          // and must NOT be masked, or a suffix spelled that way would hide.
+          .replace(/\$\{(?!!)[^}]*\}/g, PLACEHOLDER)
+          .replace(/\$\{!([^}]*)\}/g, '${$1}')
+      );
+    }
+    if (fn === 'Fn::Join' && Array.isArray(arg) && arg.length === 2) {
+      const [separator, parts] = arg;
+      if (typeof separator !== 'string' || !Array.isArray(parts)) return null;
+      const resolved = parts.map(resolveName);
+      if (resolved.some((part) => part === null)) return null;
+      return resolved.join(separator);
+    }
+    return null;
+  };
+
+  // The suffix must be the END of the name, or be followed by something this
+  // check could not read — never merely contained in it. `endsWith` alone
+  // misses `${prefix}/discord-guild-id${suffix}`; a bare `includes` would
+  // false-fail on a genuinely different parameter such as
+  // `…/discord-guild-id-backup`, which is the over-broad-matcher mistake task
+  // 0188's check 5b already made once.
+  const createsParameter = (resolved) =>
+    forbiddenSuffixes.some((suffix) => {
+      for (
+        let at = resolved.indexOf(suffix);
+        at !== -1;
+        at = resolved.indexOf(suffix, at + 1)
+      ) {
+        const after = resolved[at + suffix.length];
+        if (after === undefined || after === PLACEHOLDER) return true;
+      }
+      return false;
+    });
+
   for (const file of templateFiles) {
     const tpl = readJson(join(cdkOut, file), 'synthesized template');
     for (const [id, resource] of resourcesOfType(tpl, 'AWS::SSM::Parameter')) {
       const name = resource.Properties?.Name;
-      if (
-        typeof name === 'string' &&
-        forbiddenSuffixes.some((suffix) => name.endsWith(suffix))
-      ) {
+      // Absent is fine: CloudFormation then generates a physical name of its
+      // own, which cannot be one of ours.
+      if (name === undefined) continue;
+      const resolved = resolveName(name);
+      // A name whose LAST segment is not literal is unreadable in the only
+      // position that matters: the leaf is what the forbidden suffixes are.
+      // `{"Ref": …}` for the whole name is the extreme case of this.
+      if (resolved === null || resolved.endsWith(PLACEHOLDER)) {
+        fail(
+          `error: ${file} creates SSM parameter ${id} with a Name this check ` +
+            `cannot read: ${JSON.stringify(name)}.`,
+          '  → the guard below has to be able to tell whether a synthesized ' +
+            'template creates the eligibility parameters, and it refuses to ' +
+            'pass a name it cannot resolve rather than assume it is ' +
+            'harmless. Give the parameter a literal name, or teach ' +
+            '`resolveName` this intrinsic.',
+        );
+        continue;
+      }
+      if (createsParameter(resolved)) {
         fail(
           `error: ${file} creates SSM parameter ${JSON.stringify(name)} ` +
             `(resource ${id}).`,

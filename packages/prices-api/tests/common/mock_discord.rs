@@ -80,6 +80,12 @@ struct MockState {
     token_status: Option<StatusCode>,
     member: MemberReply,
     user_id: String,
+    /// A status `GET /users/@me` answers with instead of the user object.
+    /// The identity read is the LAST Discord call on an issue round-trip —
+    /// after the exchange and after the membership check — so failing it
+    /// alone is the only way to reach the callback's "Discord went quiet
+    /// mid-check" branch.
+    user_status: Option<StatusCode>,
 }
 
 pub struct MockDiscord {
@@ -111,6 +117,17 @@ impl MockDiscord {
         member: MemberReply,
         user_id: &str,
     ) -> Self {
+        Self::start_full(granted_scope, token_status, member, user_id, None).await
+    }
+
+    /// [`start_with`], plus a status the **identity read** answers with.
+    pub async fn start_full(
+        granted_scope: &str,
+        token_status: Option<StatusCode>,
+        member: MemberReply,
+        user_id: &str,
+        user_status: Option<StatusCode>,
+    ) -> Self {
         let recorded = Arc::new(Mutex::new(Recorded::default()));
         let state = MockState {
             recorded: recorded.clone(),
@@ -118,6 +135,7 @@ impl MockDiscord {
             token_status,
             member,
             user_id: user_id.to_string(),
+            user_status,
         };
 
         let router = Router::new()
@@ -190,11 +208,14 @@ async fn token(State(state): State<MockState>, body: String) -> axum::response::
 async fn current_user(
     State(state): State<MockState>,
     headers: HeaderMap,
-) -> Json<serde_json::Value> {
+) -> axum::response::Response {
     state.recorded.lock().unwrap().bearer = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
+    if let Some(status) = state.user_status {
+        return (status, "upstream said no").into_response();
+    }
     Json(json!({
         "id": state.user_id,
         "username": USER_NAME,
@@ -204,6 +225,7 @@ async fn current_user(
         "email": "someone@example.com",
         "verified": true,
     }))
+    .into_response()
 }
 
 async fn guild_member(
