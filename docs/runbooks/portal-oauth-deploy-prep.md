@@ -406,7 +406,8 @@ any behaviour until the flag moves.
 
 ### The IAM, and the three limits that come with it
 
-CDK grants the api-handler role six control-plane actions and nothing else:
+CDK grants the api-handler role six control-plane actions and nothing else
+(task 0191's rework adds no seventh — see below):
 `GET`/`POST` on `/apikeys`, `GET`/`DELETE` on `/apikeys/*`, `POST` on
 `/usageplans/{the free plan}/keys`, and — task 0188 — `GET` on
 `/usageplans/{the free plan}/usage` (`GetUsage`, the dashboard's usage read).
@@ -434,6 +435,31 @@ three are written out in full in `compute-stack.ts`; the short version:
   by IAM.
 
 Task 0194 audits all three.
+
+### Replacing a key (task 0191) — the same grants, one ordering to know
+
+The rework — "Replace my key" on the dashboard — needs **no new grant and no
+new parameter**: it is `GetApiKeys` + `CreateApiKey` + `CreateUsagePlanKey` +
+`DeleteApiKey` + `GetApiKey`, all already granted above, behind the same
+`action=…` OAuth round-trip the issue uses (membership re-proved against the
+`discord-guild-id` parameter; the account-age parameter is deliberately not
+read). It makes **no `UpdateUsagePlan` and no `UpdateUsage` call** — both
+would be extra grants, and `UpdateUsagePlan` is throttled to one call per 20 s
+per account, which a per-visitor action must never sit behind.
+
+The ordering inside the swap is the operational fact: **the new key is created
+and attached before the old one is deleted**, so a visitor is never keyless,
+and a failure at any step leaves them holding the key they had (a delete that
+fails rolls the replacement back). What the data plane then does is the
+ordinary consequence — a deleted key answers `403 Forbidden`, byte-identical to
+no key at all (0180 item 8) — and there is the usual tens-of-seconds
+propagation before the new key is accepted on `/v1/`.
+
+One rework per quota period, decided from the surviving key's `createdDate`
+against the **calendar month, UTC** — our rule, not AWS's (the `DAY`-proxy
+measurement is recorded in task 0191; the first real `MONTH` rollover this can
+be checked against is 1 September 2026). A refused rework says when the next
+one is available; nothing to operate.
 
 ### Verifying it, and the warning that comes with that
 

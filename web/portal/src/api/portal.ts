@@ -285,6 +285,115 @@ export const signInUrl = (): string => `${PORTAL_API}/auth/login`;
 export const issueUrl = (): string => `${PORTAL_API}/auth/login?action=issue`;
 
 /**
+ * Where the "Replace my key" confirmation sends the visitor (task 0191).
+ *
+ * The same plain-navigation reasoning as {@link issueUrl}: a rework re-proves
+ * Discord membership (not account age — old enough once is old enough forever)
+ * against a fresh token, which only a top-level navigation can fetch. The
+ * callback swaps the key — the new one is created and attached BEFORE the old
+ * one is deleted, so the visitor is never keyless — and lands back here with
+ * `?rework=<outcome>`, which `app.tsx` renders. The once-per-quota-period cap
+ * is decided there too; {@link checkRework} asks about it first so the modal
+ * can say "next eligible 1 September" before anyone types anything.
+ */
+export const reworkUrl = (): string => `${PORTAL_API}/auth/login?action=rework`;
+
+/**
+ * Perform a top-level navigation — the one the rework confirmation makes.
+ *
+ * A one-line seam rather than `window.location.assign` at the call site,
+ * because jsdom's `location` is unforgeable: neither `delete window.location`
+ * nor `defineProperty` can replace it, so a component that navigates directly
+ * cannot be tested for WHEN it navigates (once, only once armed, never on a
+ * second click). The tests mock this export and assert on the calls.
+ */
+export const navigateTo = (url: string): void => {
+  window.location.assign(url);
+};
+
+/**
+ * What `POST /api-tokens/api/key/rework` tells the modal (task 0191).
+ *
+ * `eligible: false` is the backend's `409 rework_capped`, with the
+ * `next_eligible_at` from the envelope's `details` — RFC 3339, the 1st of the
+ * next month 00:00 UTC under OUR period rule (not an AWS guarantee; see the
+ * backend's `portal/period.rs`).
+ */
+export type ReworkCheck =
+  | { eligible: true }
+  | { eligible: false; next_eligible_at: string };
+
+/**
+ * `POST /api-tokens/api/key/rework` — may this key be replaced now?
+ *
+ * **Read-only on the backend**, despite the verb: it lists the caller's key and
+ * compares its creation date with the current period's start. Nothing is
+ * created, attached or deleted — that needs the `reworkUrl()` round-trip. The
+ * modal calls this when it opens, so a visitor inside the cap sees the date
+ * they can next rework instead of typing `delete-key` and crossing Discord for
+ * a refusal.
+ *
+ * A `404 no_key` is thrown rather than mapped: the control that opens the modal
+ * only renders beside a key, so reaching it keyless is a stale page, and the
+ * honest rendering is the failure with the backend's own message.
+ */
+export async function checkRework(): Promise<ReworkCheck> {
+  const url = `${PORTAL_API}/key/rework`;
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: 'POST',
+      headers: { accept: 'application/json' },
+      signal: AbortSignal.timeout(KEY_TIMEOUT_MS),
+    });
+  } catch (error) {
+    if (isTimeout(error)) {
+      throw new PortalApiError(
+        `${url} did not answer within ${KEY_TIMEOUT_MS / 1000}s`,
+      );
+    }
+    throw new PortalApiError(`${url} could not be reached`);
+  }
+  if (response.status === 409) {
+    const envelope = (await readEnvelope(response)) as
+      | (ErrorEnvelope & { details?: { next_eligible_at?: unknown } })
+      | null;
+    const nextEligibleAt = envelope?.details?.next_eligible_at;
+    if (
+      envelope?.code === 'rework_capped' &&
+      typeof nextEligibleAt === 'string'
+    ) {
+      return { eligible: false, next_eligible_at: nextEligibleAt };
+    }
+    throw new PortalApiError(failureMessage(url, 409, envelope), 409);
+  }
+  if (!response.ok) {
+    throw new PortalApiError(
+      failureMessage(url, response.status, await readEnvelope(response)),
+      response.status,
+    );
+  }
+  try {
+    const body = (await response.json()) as { eligible?: unknown };
+    if (body.eligible !== true) {
+      // A `200` that does not say `eligible: true` is not a shape this client
+      // knows; refusing to arm the modal on it is the safe reading.
+      throw new PortalApiError(
+        `${url} answered 200 without eligible: true`,
+        200,
+      );
+    }
+    return { eligible: true };
+  } catch (error) {
+    if (error instanceof PortalApiError) throw error;
+    throw new PortalApiError(
+      `${url} answered ${response.status}, not JSON`,
+      response.status,
+    );
+  }
+}
+
+/**
  * `POST /api-tokens/api/auth/logout` — clear the session.
  *
  * `POST`, because the backend only accepts that: a `GET` sign-out is triggerable

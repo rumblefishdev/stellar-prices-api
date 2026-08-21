@@ -120,6 +120,13 @@ appears as an acceptance criterion in every iteration of our design response
       the claim that our date and AWS's coincide is unverified until measured (task 0180).
       If they turn out to differ, we render our date and the quota counter does its own
       thing; that is a UX wrinkle, not a correctness bug, because the cap is ours to define.
+    - **Status 2026-08-21 (task 0191):** the cap ships defined as our rule — the calendar
+      month, UTC, one definition in `packages/prices-api/src/portal/period.rs` shared by
+      the usage panel and the rework — and the `DAY`-period proxy measurement of AWS's
+      reset instant is recorded in task 0191's Step 0 (the 2026-08-13 run had died after
+      three samples and was re-run). The real `MONTH` rollover cannot be observed before
+      **1 September 2026**; until then the proxy is evidence, not proof, and nothing here
+      presents the boundary as AWS-documented.
   - **Rework is a swap, not a delete-and-wait (settled 2026-08-07):** the old key is
     deleted and a new one issued in the same operation, so a user is never left without
     a working key. The cap blocks the _next_ rework, not the replacement. Eligibility is

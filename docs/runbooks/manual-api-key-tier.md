@@ -347,8 +347,12 @@ Then delete the row from the table below.
   `MONTH` is calendar-aligned or runs from plan creation. Note also that
   `QuotaSettings.offset` is _"the number of requests subtracted from the given
   limit in the initial time period"_ — a request count, not a way to shift the
-  reset day, so it cannot be used to force alignment. Unverified; task 0180 #7.
-  Do not promise a customer a specific reset date until it is measured.
+  reset day, so it cannot be used to force alignment. Task 0180 #7, carried to
+  task 0191, which measured the `DAY`-period proxy (result and date in that
+  task's Step 0 table) — a `MONTH` rollover itself cannot be observed before
+  1 September 2026. The portal states "the 1st, 00:00 UTC" as **our** period
+  rule for its own quota cap and dashboard; do not promise a customer that AWS's
+  counter resets at that instant until the `MONTH` observation exists.
 
 ---
 

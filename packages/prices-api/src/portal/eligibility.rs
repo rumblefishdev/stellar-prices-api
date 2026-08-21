@@ -12,7 +12,7 @@
 //! | Sign in | — | identity only |
 //! | Issue a key | **yes** | membership (`pending === false`) + account age |
 //! | Reveal / usage | no | session only |
-//! | Rework ([0191]) | **yes** | membership only — age is never re-checked |
+//! | Rework ([0191]) | **yes** | membership only ([`membership`]) — age is never re-checked |
 //! | Revoke ([0192]) | no | session only — a **deliberate exception**: a user must be able to kill a leaked key while Discord is down |
 //!
 //! Account age is checked only at issuance because an account old enough once
@@ -236,24 +236,10 @@ pub fn decide(
     min_age_minutes: u64,
     now_ms: u64,
 ) -> Eligibility {
-    match member {
-        MemberLookup::NotMember { .. } => return Eligibility::NotMember,
-        MemberLookup::Unknown { status, detail } => {
-            tracing::warn!(?status, detail, "membership could not be verified");
-            return Eligibility::Unknown;
-        }
-        MemberLookup::Member(m) => match m.pending {
-            Some(false) => {}
-            Some(true) => return Eligibility::NotMember,
-            None => {
-                tracing::warn!(
-                    reason = "pending_absent",
-                    "the member response carried no `pending` field; refusing without \
-                     accusation — see 0180 item 2 before changing this arm"
-                );
-                return Eligibility::Unknown;
-            }
-        },
+    match membership(member) {
+        Membership::Member => {}
+        Membership::NotMember => return Eligibility::NotMember,
+        Membership::Unknown => return Eligibility::Unknown,
     }
 
     let Some(created_ms) = account_created_ms(snowflake) else {
@@ -267,6 +253,47 @@ pub fn decide(
     }
     Eligibility::TooYoung {
         wait_secs: (old_enough_at - now_ms).div_ceil(1000),
+    }
+}
+
+/// The membership half of the verdict, on its own.
+///
+/// What a **rework** (task 0191) re-proves: the per-action table at the top
+/// of this module says membership only, never age, because an account old
+/// enough once is old enough forever. [`decide`] is this plus the age check,
+/// so the two paths cannot disagree about what a member is — the `pending`
+/// rules below are the single statement of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Membership {
+    /// `pending == Some(false)` — a full member, admin bypass included.
+    Member,
+    /// Confirmed non-membership, or `pending == Some(true)`.
+    NotMember,
+    /// Could not verify, including an absent `pending`. Refuse, never accuse.
+    Unknown,
+}
+
+/// Classify one membership answer. See [`decide`] for the `pending` rules,
+/// which live in this function and are documented there.
+pub fn membership(member: &MemberLookup) -> Membership {
+    match member {
+        MemberLookup::NotMember { .. } => Membership::NotMember,
+        MemberLookup::Unknown { status, detail } => {
+            tracing::warn!(?status, detail, "membership could not be verified");
+            Membership::Unknown
+        }
+        MemberLookup::Member(m) => match m.pending {
+            Some(false) => Membership::Member,
+            Some(true) => Membership::NotMember,
+            None => {
+                tracing::warn!(
+                    reason = "pending_absent",
+                    "the member response carried no `pending` field; refusing without \
+                     accusation — see 0180 item 2 before changing this arm"
+                );
+                Membership::Unknown
+            }
+        },
     }
 }
 
@@ -454,6 +481,37 @@ mod tests {
             min_account_age: ParamSource::Direct("5".into()),
         };
         assert_eq!(settings.guild_id().await.unwrap(), "897514728459468821");
+    }
+
+    /// The rework path reads [`membership`] alone; it must agree with
+    /// [`decide`] on every membership shape, or a rework could be allowed to
+    /// someone an issue would refuse (or the reverse).
+    #[test]
+    fn the_membership_half_agrees_with_the_full_verdict() {
+        let now = DOCUMENTED_CREATED_MS + 6 * 60_000;
+        let cases = [
+            (member(Some(false)), Membership::Member),
+            (member(Some(true)), Membership::NotMember),
+            (member(None), Membership::Unknown),
+            (
+                MemberLookup::NotMember { code: 10_007 },
+                Membership::NotMember,
+            ),
+            (
+                MemberLookup::NotMember { code: 10_004 },
+                Membership::NotMember,
+            ),
+            (unknown(), Membership::Unknown),
+        ];
+        for (lookup, expected) in cases {
+            assert_eq!(membership(&lookup), expected, "{lookup:?}");
+            let full = decide(&lookup, DOCUMENTED_SNOWFLAKE, 5, now);
+            match expected {
+                Membership::Member => assert_eq!(full, Eligibility::Eligible),
+                Membership::NotMember => assert_eq!(full, Eligibility::NotMember),
+                Membership::Unknown => assert_eq!(full, Eligibility::Unknown),
+            }
+        }
     }
 
     #[test]

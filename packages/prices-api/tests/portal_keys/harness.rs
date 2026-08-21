@@ -135,6 +135,20 @@ pub struct Store {
     /// reaches that code. Worth knowing — it means the branch guards a listing
     /// that disagrees with the reader, not a busy deleter.
     pub read_always_404: bool,
+    /// Stamp every key `CreateApiKey` mints with this `createdDate` instead of
+    /// the current time (task 0191) — so a test can create a key "on the 3rd
+    /// of last month" and then ask the cap about it.
+    pub created_at_override: Option<u64>,
+    /// Answer `DeleteApiKey` for exactly these ids with a 500, and succeed for
+    /// every other id (task 0191). Unlike the sticky `fail_deletes`, this lets
+    /// a test fail the delete of the OLD key while the rollback delete of the
+    /// replacement succeeds — which is the only way to observe the rollback.
+    pub fail_delete_of: Vec<String>,
+    /// Every write, in the order it arrived: `create:<id>`, `attach:<id>`,
+    /// `delete:<id>` (task 0191). The swap's ordering — create and attach the
+    /// new key BEFORE deleting the old — is a property of the sequence, not of
+    /// the end state, and this is what makes it assertable.
+    pub ops: Vec<String>,
     pub next_id: usize,
 
     // -----------------------------------------------------------------------
@@ -322,9 +336,12 @@ pub async fn create_key(
         id: id.clone(),
         name: body["name"].as_str().unwrap_or_default().to_string(),
         value: format!("VALUE-{id}-CANARY"),
-        // Whole seconds, like the service — which is why the winner rule needs
-        // an id tie-break.
-        created_at: 1_800_000_000,
+        // Whole seconds and the CURRENT time, like the service — whole seconds
+        // is why the winner rule needs an id tie-break, and "now" is what lets
+        // task 0191's cap be tested: a key the mock just created must read as
+        // created inside the current quota period, exactly as a real one
+        // would. `created_at_override` pins it for tests that need a date.
+        created_at: store.created_at_override.unwrap_or_else(now_secs),
         tags: body["tags"]
             .as_object()
             .map(|o| {
@@ -336,6 +353,7 @@ pub async fn create_key(
         enabled: body["enabled"].as_bool().unwrap_or(false),
     };
     store.keys.push(created.clone());
+    store.ops.push(format!("create:{id}"));
     (StatusCode::CREATED, Json(api_key_json(&created))).into_response()
 }
 
@@ -378,10 +396,11 @@ pub async fn delete_key(
     Path(id): Path<String>,
 ) -> Response {
     let mut store = store.lock().unwrap();
-    if store.fail_deletes {
+    if store.fail_deletes || store.fail_delete_of.contains(&id) {
         return (StatusCode::INTERNAL_SERVER_ERROR, "control plane is unwell").into_response();
     }
     store.deleted.push(id.clone());
+    store.ops.push(format!("delete:{id}"));
     let existed = store.keys.iter().any(|k| k.id == id);
     store.keys.retain(|k| k.id != id);
     if existed {
@@ -422,6 +441,7 @@ pub async fn attach_key(
         return conflict();
     }
     store.plan_keys.push((plan, key_id.clone()));
+    store.ops.push(format!("attach:{key_id}"));
     (
         StatusCode::CREATED,
         Json(json!({ "id": key_id, "type": "API_KEY" })),
@@ -787,10 +807,20 @@ pub async fn post_key(mock: &MockGateway, sub: &str) -> Reply {
 /// callback's reply — a `303` whose `Location` is one of the five
 /// `?issue=…` landing states.
 pub async fn issue_round_trip(router: &Router) -> Reply {
+    round_trip(router, "issue").await
+}
+
+/// The same, for task 0191's `action=rework` — a `303` whose `Location` is
+/// one of the `?rework=…` landing states.
+pub async fn rework_round_trip(router: &Router) -> Reply {
+    round_trip(router, "rework").await
+}
+
+async fn round_trip(router: &Router, action: &str) -> Reply {
     let login = call_path(
         router.clone(),
         "GET",
-        "/api-tokens/api/auth/login?action=issue",
+        &format!("/api-tokens/api/auth/login?action={action}"),
         None,
     )
     .await;

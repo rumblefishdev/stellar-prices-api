@@ -94,6 +94,16 @@ pub enum Action {
     /// complete an issuance — that is exactly what the mismatch check refuses.
     #[serde(rename = "issue")]
     Issue,
+    /// Replace an API key (task 0191).
+    ///
+    /// The same shape as [`Action::Issue`] — the round-trip is the proof — but
+    /// the callback checks **membership only**: an account old enough once is
+    /// old enough forever, so age is never re-checked on a rework. The cap
+    /// (one rework per quota period) is decided there too, against the
+    /// current key's `createdDate`. A `signin` or `issue` callback cannot
+    /// complete a rework; the mismatch check refuses it.
+    #[serde(rename = "rework")]
+    Rework,
     /// An extra action that exists **only under `cfg(test)`**.
     ///
     /// It is never parsed from a query string, never minted by [`start`]
@@ -116,14 +126,15 @@ impl Action {
     /// Parse the `action` query parameter of `/auth/login`.
     ///
     /// An unknown value is rejected rather than defaulted. Defaulting would
-    /// mean a client asking for an action this build does not know (0191's
-    /// `rework`, say) would silently get a sign-in — and the callback would
+    /// mean a client asking for an action this build does not know (0192's
+    /// `revoke`, say) would silently get a sign-in — and the callback would
     /// then complete a *different* action than the one confirmed, which is the
     /// exact thing the slot exists to prevent.
     pub fn parse(raw: &str) -> Option<Self> {
         match raw {
             "signin" => Some(Self::SignIn),
             "issue" => Some(Self::Issue),
+            "rework" => Some(Self::Rework),
             // `TestOther` is deliberately absent: it must not be reachable from
             // a query string even in a test build.
             _ => None,
@@ -450,12 +461,12 @@ mod tests {
         assert_eq!(state.action, Action::SignIn);
         assert_eq!(pending.action, Action::SignIn);
 
-        // And a state naming an action this build does not know — 0191's
-        // `rework`, arriving early — is refused at deserialization.
+        // And a state naming an action this build does not know — 0192's
+        // `revoke`, arriving early — is refused at deserialization.
         let crossed = sign_claims(
             KEY,
             CTX_STATE,
-            &serde_json::json!({ "action": "rework", "nonce": pending.nonce, "exp": state.exp }),
+            &serde_json::json!({ "action": "revoke", "nonce": pending.nonce, "exp": state.exp }),
         );
         assert_eq!(
             accept(KEY, &crossed, Some(&started.pending_cookie), NOW).unwrap_err(),
@@ -515,8 +526,49 @@ mod tests {
     fn an_unknown_action_query_value_is_rejected_rather_than_defaulted() {
         assert_eq!(Action::parse("signin"), Some(Action::SignIn));
         assert_eq!(Action::parse("issue"), Some(Action::Issue));
-        for unknown in ["rework", "", "SIGNIN", "ISSUE", "issue ", "signin "] {
+        assert_eq!(Action::parse("rework"), Some(Action::Rework));
+        for unknown in [
+            "revoke", "", "SIGNIN", "ISSUE", "REWORK", "issue ", "signin ", "rework ",
+        ] {
             assert_eq!(Action::parse(unknown), None, "accepted {unknown:?}");
+        }
+    }
+
+    /// The third real action (task 0191): a rework pair round-trips and
+    /// reports itself, and crossing it with an ISSUE cookie is refused — the
+    /// two re-authorisation flows are as non-interchangeable with each other
+    /// as either is with sign-in, which is what stops an issue round-trip's
+    /// proof (membership + age) being spent on a rework, or a rework's
+    /// (membership only) on an issue.
+    #[test]
+    fn a_rework_pair_round_trips_and_cannot_be_completed_by_an_issue_cookie() {
+        let started = start(KEY, Action::Rework, NOW);
+        let accepted = accept(
+            KEY,
+            &started.state_param,
+            Some(&started.pending_cookie),
+            NOW + 1,
+        )
+        .expect("a freshly minted rework pair must verify");
+        assert_eq!(accepted.action, Action::Rework);
+
+        let state: StateClaims = verify_claims(KEY, CTX_STATE, &started.state_param).unwrap();
+        for other in [Action::Issue, Action::SignIn] {
+            let crossed_pending = sign_claims(
+                KEY,
+                CTX_PENDING,
+                &PendingClaims {
+                    action: other,
+                    nonce: state.nonce.clone(),
+                    verifier: "a-verifier".into(),
+                    exp: state.exp,
+                },
+            );
+            assert_eq!(
+                accept(KEY, &started.state_param, Some(&crossed_pending), NOW).unwrap_err(),
+                StateError::ActionMismatch,
+                "{other:?}"
+            );
         }
     }
 

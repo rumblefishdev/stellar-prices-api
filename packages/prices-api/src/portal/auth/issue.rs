@@ -184,7 +184,7 @@ pub(super) fn refuse_issue_discord(
 /// 12s of a 15s function leaves ~3s to serialize a redirect and for the
 /// runtime to send it. The reconciler gets whatever survives; see
 /// [`RECONCILE_FLOOR`] for what happens when that is not enough.
-const ISSUE_BUDGET: Duration = Duration::from_secs(12);
+pub(super) const ISSUE_BUDGET: Duration = Duration::from_secs(12);
 
 /// The least time worth starting a reconciliation with.
 ///
@@ -194,9 +194,12 @@ const ISSUE_BUDGET: Duration = Duration::from_secs(12);
 /// unattached orphan is made. Below this the path lands on `?issue=failed` —
 /// which is the honest answer: eligibility passed, our key service did not
 /// have time.
-const RECONCILE_FLOOR: Duration = Duration::from_secs(2);
+pub(super) const RECONCILE_FLOOR: Duration = Duration::from_secs(2);
 
-/// Everything the issue arm needs beyond what sign-in already carries.
+/// Everything the issue arm needs beyond what sign-in already carries — and
+/// everything the rework arm (`super::rework`, task 0191) needs too: the same
+/// control plane, the same usage cache to evict from, and the same settings
+/// (of which a rework reads only the guild id).
 ///
 /// All optional, like `AuthState::oauth` and `KeysState::gateway`, and for the
 /// same reason: the api-handler boots with the portal closed and nothing

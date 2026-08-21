@@ -308,11 +308,56 @@ deletes a key. Since task 0189 the `/key` route is read-only too, which is why
 the page now calls both on load — creating a key is the issue round-trip's job
 and nobody else's.
 
+### 3c. Replacing a key (task 0191)
+
+The same local run serves the rework. On the page, **Replace my key…** beside
+the key opens a confirmation; the confirm button arms only once you type
+`delete-key`, and pressing it navigates through `/auth/login?action=rework` —
+a second OAuth round-trip, like the issue, because a rework re-proves Discord
+**membership** (not account age) against a fresh token. The callback then
+swaps the key: **the new key is created and attached before the old one is
+deleted**, so there is no instant at which you are keyless.
+
+```bash
+# Before: one key. Note its id.
+aws apigateway get-api-keys --name-query "discord-<your id>-key" \
+    --query 'items[].{id:id,created:createdDate}'
+
+# Confirm the rework on the page, then:
+aws apigateway get-api-keys --name-query "discord-<your id>-key" \
+    --query 'items[].{id:id,created:createdDate}'
+# → a DIFFERENT id, created just now; the old id is gone.
+
+# The old value is refused and the new one works — the data-plane check CI
+# cannot make (the mock has no data plane). 403 is what a deleted key gets:
+# byte-identical to sending no key at all (0180 item 8).
+curl -sS -o /dev/null -w '%{http_code}\n' -H "X-API-Key: <the OLD value>" \
+    https://<api host>/production/v1/assets      # → 403
+curl -sS -o /dev/null -w '%{http_code}\n' -H "X-API-Key: <the NEW value>" \
+    https://<api host>/production/v1/assets      # → 200
+```
+
+Open the confirmation a second time: it says the next replacement is available
+on the **1st of next month** and never arms. That is the once-per-quota-period
+cap, decided from the surviving key's `createdDate` against the calendar month
+in UTC — **our** period rule, the same one the usage panel states; AWS's own
+reset instant is undocumented (task 0191's Step 0 measured the `DAY` proxy;
+see that task). A key *issued* this period is capped the same way: the rule
+is about creation, not about reworks, or a fresh key would be a fresh counter.
+
+The pre-check behind the dialog is `POST /api-tokens/api/key/rework`
+(session-authenticated, **read-only**: `200 {"eligible":true}` or
+`409 rework_capped` with `details.next_eligible_at`). It writes nothing; only
+the round-trip can.
+
 ### 4. Afterwards
 
 ```bash
 aws apigateway delete-api-key --api-key <id>
 ```
+
+(A rework leaves exactly one key behind — the new one — so it is the id from
+§3c's second listing that needs deleting.)
 
 ## Env (Lambda)
 

@@ -160,6 +160,16 @@ stage `test`), plan `ox7pv0` at **3/DAY**, key `2ke0ixjy7h`. Drained to `429` at
 - Inference for `MONTH` →
 - Text restated in 0157 / 0158 / 0160 as our rule? →
 
+> **Correction 2026-08-21 (task 0191).** The run "running since 2026-08-13
+> 08:10Z" **did not run**: `data/item7-poll.tsv` holds three samples
+> (08:12:37Z–08:14:37Z, all `429`) and `poller.out` ends at the poll start —
+> the poller died two minutes in, and this note kept saying "running" for a
+> week. Nothing above was measured. The scratch stack (`9utcrbmoc6` /
+> `ox7pv0` / `2ke0ixjy7h`) is still standing and task 0191 re-runs the
+> procedure unchanged; **the result table lives in 0191's Step 0 from now
+> on**, not here, so that a second dead run cannot hide behind a table in an
+> archived note.
+
 The worked example ("reworked 3 August → next 1 September") stands either way.
 Its *justification* does not.
 

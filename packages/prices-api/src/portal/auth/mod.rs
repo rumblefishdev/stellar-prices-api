@@ -9,6 +9,7 @@
 //! | --- | --- |
 //! | `GET /auth/login` | mints `state` + PKCE, redirects to Discord |
 //! | `GET /auth/login?action=issue` | the same, for the eligibility-checked issue round-trip ([0189]) |
+//! | `GET /auth/login?action=rework` | the same, for the membership-checked rework round-trip ([0191]) |
 //! | `GET /auth/callback` | verifies `state`, exchanges the code, completes the action it names |
 //! | `GET /auth/me` | reports who the caller is, or that they are nobody |
 //! | `POST /auth/logout` | clears the session |
@@ -42,6 +43,7 @@ pub mod cookies;
 pub mod crypto;
 pub mod discord;
 pub mod issue;
+pub mod rework;
 pub mod secret;
 pub mod session;
 pub mod state_token;
@@ -194,8 +196,8 @@ pub fn routes(state: AuthState) -> Router {
 #[derive(Debug, Deserialize)]
 struct LoginQuery {
     /// Which action the round-trip authorizes. Absent means sign-in; [0189]
-    /// sends `issue` and `rework`. An unknown value is a `400` rather than a
-    /// default — see [`Action::parse`].
+    /// sends `issue`, [0191] sends `rework`. An unknown value is a `400`
+    /// rather than a default — see [`Action::parse`].
     action: Option<String>,
 }
 
@@ -228,12 +230,22 @@ async fn login(
     // issuance unprovisioned: `load_portal_oauth` and `load_portal_eligibility`
     // both fail the cold start on that combination, so this is the second
     // line, not the first.
-    if action == Action::Issue && (state.oauth.is_none() || !state.issue.is_wired()) {
-        return issue::refuse_issue_start(
+    if state.oauth.is_none() || !state.issue.is_wired() {
+        let (oauth, gateway, settings) = (
             state.oauth.is_some(),
             state.issue.gateway.is_some(),
             state.issue.settings.is_some(),
         );
+        match action {
+            Action::Issue => return issue::refuse_issue_start(oauth, gateway, settings),
+            // The rework shares the issue's dependencies — the control plane
+            // and the guild id — and the same reasoning: a round-trip that
+            // can only end in `failed` must not start.
+            Action::Rework => return rework::refuse_rework_start(oauth, gateway, settings),
+            #[cfg(test)]
+            Action::TestOther => {}
+            Action::SignIn => {}
+        }
     }
 
     let Some(oauth) = state.oauth.as_ref() else {
@@ -314,14 +326,14 @@ fn authorize_url(
     // sign-in is exactly how that grant would come back narrower and be
     // refused by `scopes_match` on every attempt.
     //
-    // On an issue round-trip the assumption is not load-bearing: by
-    // construction the visitor is signed in, so the app is already authorised
-    // with these scopes — the documented case. If Discord ever refuses one
-    // anyway it does so as an OAuth error on the callback, which
-    // `refuse_oauth_error` logs and lands on `?issue=denied`, rendered rather
-    // than silent. 0180 item 5's consent capture confirms it at no extra
-    // cost.
-    if action == Action::Issue {
+    // On an issue or rework round-trip the assumption is not load-bearing:
+    // by construction the visitor is signed in, so the app is already
+    // authorised with these scopes — the documented case. If Discord ever
+    // refuses one anyway it does so as an OAuth error on the callback, which
+    // `refuse_oauth_error` logs and lands on `?issue=denied` /
+    // `?rework=denied`, rendered rather than silent. 0180 item 5's consent
+    // capture confirms it at no extra cost.
+    if matches!(action, Action::Issue | Action::Rework) {
         query.append_pair("prompt", "none");
     }
 
@@ -418,6 +430,7 @@ async fn callback(
             // banners render only in the signed-out branch it has left.
             let query = match accepted.action {
                 Action::Issue => issue::ISSUE_CANCELLED_QUERY,
+                Action::Rework => rework::REWORK_CANCELLED_QUERY,
                 #[cfg(test)]
                 Action::TestOther => CANCELLED_QUERY,
                 Action::SignIn => CANCELLED_QUERY,
@@ -451,7 +464,7 @@ async fn callback(
     // The action decides what this callback is allowed to complete — matched
     // rather than assumed, which is what the slot was carried for.
     match accepted.action {
-        Action::SignIn | Action::Issue => {}
+        Action::SignIn | Action::Issue | Action::Rework => {}
         // Compiled only into the test build, and unreachable even there:
         // `Action::parse` never yields `TestOther`, so `/auth/login` cannot mint
         // a round-trip for it. Refused rather than `unreachable!()` — a panic in
@@ -486,15 +499,27 @@ async fn callback(
         Err(error) if accepted.action == Action::Issue => {
             return issue::refuse_issue_discord("token exchange", error, drop_pending);
         }
+        Err(error) if accepted.action == Action::Rework => {
+            return rework::refuse_rework_discord("token exchange", error, drop_pending);
+        }
         Err(error) => return refuse_discord("token exchange", error, drop_pending),
     };
 
-    // An issue round-trip diverges here, with the fresh, scope-verified token:
-    // membership and account age are checked against it before any key moves,
-    // and every outcome is a redirect (see `issue`). The sign-in tail below
-    // never sees an `Issue` action.
-    if accepted.action == Action::Issue {
-        return issue::complete_issue(&state, oauth, token, drop_pending, started).await;
+    // The re-authorisation round-trips diverge here, with the fresh,
+    // scope-verified token: an issue checks membership and account age, a
+    // rework checks membership alone, and neither lets a key move before the
+    // check. Every outcome of either is a redirect (see `issue`, `rework`).
+    // The sign-in tail below never sees either action.
+    match accepted.action {
+        Action::Issue => {
+            return issue::complete_issue(&state, oauth, token, drop_pending, started).await;
+        }
+        Action::Rework => {
+            return rework::complete_rework(&state, oauth, token, drop_pending, started).await;
+        }
+        #[cfg(test)]
+        Action::TestOther => {}
+        Action::SignIn => {}
     }
 
     // `token` is moved here, so from this line on the handler cannot reach it.
@@ -698,6 +723,7 @@ fn refuse_oauth_error(error: &str, action: Action, drop_pending: String) -> Resp
     // is what decides which half of the page is on screen when they get back.
     let query = match action {
         Action::Issue => issue::ISSUE_DENIED_QUERY,
+        Action::Rework => rework::REWORK_DENIED_QUERY,
         #[cfg(test)]
         Action::TestOther => FAILED_QUERY,
         Action::SignIn => FAILED_QUERY,
@@ -1044,9 +1070,35 @@ mod tests {
             issue::ISSUE_UNKNOWN_QUERY,
             issue::ISSUE_FAILED_QUERY,
             &issue::too_young_query(173),
+            rework::REWORK_OK_QUERY,
+            rework::REWORK_NO_KEY_QUERY,
+            rework::REWORK_NOT_MEMBER_QUERY,
+            rework::REWORK_UNKNOWN_QUERY,
+            rework::REWORK_FAILED_QUERY,
+            rework::REWORK_CANCELLED_QUERY,
+            rework::REWORK_DENIED_QUERY,
+            &rework::capped_query("2026-09-01"),
         ] {
             assert!(format!("{PORTAL_HOME}{query}").starts_with("/api-tokens/?"));
         }
+    }
+
+    /// `prompt=none` rides on BOTH re-authorisation round-trips — the rework
+    /// joined the issue by adding one variant to the condition (0189's
+    /// decision #23 said it would) — and on neither is it sign-in.
+    #[test]
+    fn both_re_authorisation_round_trips_suppress_the_consent_screen() {
+        let secret = oauth();
+        let prompt_of = |action: Action| {
+            let started = state_token::start(&secret.signing_key, action, 0);
+            let url = authorize_url(&discord::Endpoints::default(), &secret, action, &started);
+            form_urlencoded::parse(url.split_once('?').unwrap().1.as_bytes())
+                .find(|(k, _)| k == "prompt")
+                .map(|(_, v)| v.to_string())
+        };
+        assert_eq!(prompt_of(Action::Issue).as_deref(), Some("none"));
+        assert_eq!(prompt_of(Action::Rework).as_deref(), Some("none"));
+        assert_eq!(prompt_of(Action::SignIn), None);
     }
 
     /// The registered redirect URI and the route that serves it are one string,

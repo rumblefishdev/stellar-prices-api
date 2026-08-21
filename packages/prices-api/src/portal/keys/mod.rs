@@ -8,12 +8,21 @@
 //! | route | does |
 //! | --- | --- |
 //! | `GET`/`POST /api-tokens/api/key` | reveal — the lookup, plus the value. **Never creates.** |
+//! | `POST /api-tokens/api/key/rework` | the rework **pre-check** (task 0191): may this key be replaced now? `409` with `next_eligible_at` if not. **Never writes.** |
 //!
 //! Issuance itself is [`issue_for`], reachable **only** from the OAuth
 //! callback completing an `action=issue` round-trip
 //! (`super::auth::issue`) — because issuing requires an eligibility proof
 //! (Stellar Discord membership + minimum account age, ADR 0010 §8) that only a
-//! fresh Discord token can provide, and a session cookie is not one.
+//! fresh Discord token can provide, and a session cookie is not one. The
+//! rework — delete the old key, create the new one — is [`rework_for`], and
+//! is reachable **only** from the callback completing an `action=rework`
+//! round-trip (`super::auth::rework`), for the same reason: it re-proves
+//! membership (not age) against a fresh token. What the `/key/rework` route
+//! above does is answer the question the modal asks *before* sending the
+//! visitor to Discord — is the cap in the way? — and it answers it read-only,
+//! from the current key's `createdDate` and [`cap`]'s rule. The callback
+//! decides the cap again, authoritatively, with the fresh token in hand.
 //!
 //! # There is no database, and that is the design
 //!
@@ -71,6 +80,7 @@
 //! tracing subscriber's `info` level records the route and the outcome, never
 //! the credential.
 
+pub mod cap;
 pub mod gateway;
 pub mod naming;
 
@@ -82,17 +92,24 @@ use axum::Router;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use serde::Serialize;
 
 use crate::common::{cache_control, errors};
 
 use super::auth::secret::OauthSecret;
+use super::period::Period;
+use cap::Cap;
 use gateway::{Attachment, Gateway, GatewayError, KeyValue};
 use naming::{KeyRecord, choose_winner, exact_matches, key_name, losers};
 
 /// The reveal, on both verbs — see [`key`] for why `POST` answers identically.
 pub const KEY_PATH: &str = "/api-tokens/api/key";
+
+/// The rework pre-check (task 0191). `POST` only: it is the answer to "may I
+/// replace my key?", asked by the confirmation modal, and although it writes
+/// nothing it is not a resource to `GET` — a link to it has no meaning.
+pub const REWORK_PATH: &str = "/api-tokens/api/key/rework";
 
 /// Error code for a caller with no valid session.
 const NOT_SIGNED_IN: &str = "not_signed_in";
@@ -105,6 +122,12 @@ const KEYS_UNCONFIGURED: &str = "keys_unconfigured";
 /// because the frontend reads both: a `404` is "no key" only when this
 /// envelope says so.
 const NO_KEY: &str = "no_key";
+/// Error code for a rework refused by the once-per-period cap (task 0191).
+///
+/// A `409`, not a `429`: `429` says "retry shortly" and the wait here can be
+/// weeks. The envelope's `details` carries `next_eligible_at`, RFC 3339 — the
+/// slot `ErrorEnvelope` has had for exactly this kind of structured context.
+const REWORK_CAPPED: &str = "rework_capped";
 
 /// How many times the whole flow is re-run when the key it settled on turns out
 /// to have been deleted underneath it.
@@ -199,6 +222,7 @@ impl KeysState {
 pub fn routes(state: KeysState) -> Router {
     Router::new()
         .route(KEY_PATH, get(key).post(key))
+        .route(REWORK_PATH, post(rework_check))
         .with_state(state)
 }
 
@@ -343,6 +367,128 @@ async fn reveal(state: &KeysState, headers: &HeaderMap) -> Response {
     }
 }
 
+/// What the rework pre-check answers when the cap is not in the way.
+///
+/// Deliberately small: the modal needs one bit. The `next_eligible_at` a
+/// refusal carries lives in the `409` envelope's `details`, where the page
+/// already knows to look for structured context.
+#[derive(Serialize)]
+struct ReworkCheck {
+    /// Always `true` on a `200` — a refusal is a `409`, never a `200` with
+    /// `false`, so a client that ignores the status cannot read "refused" as
+    /// "go ahead".
+    eligible: bool,
+}
+
+/// `POST /key/rework` — may this caller's key be replaced now? (task 0191)
+///
+/// **Read-only, like the reveal**: one paginated listing, no value read, no
+/// write of any kind. A session cookie is enough to *ask* because asking
+/// changes nothing and the answer is about the caller's own key; the rework
+/// itself needs the `action=rework` round-trip and its fresh membership
+/// proof, and the callback decides the cap again before any key moves — this
+/// route exists so the modal can say "next eligible 1 September" *before*
+/// the visitor types the confirmation phrase and crosses Discord for a
+/// refusal.
+///
+/// | answer | meaning |
+/// | --- | --- |
+/// | `200 {eligible: true}` | the key predates the current period; the modal may arm |
+/// | `409 rework_capped` + `details.next_eligible_at` | created inside this period — refused until the 1st |
+/// | `404 no_key` | nothing to replace; the page offers the issue round-trip instead |
+/// | `401` / `502` / `503` | as the reveal |
+async fn rework_check(State(state): State<KeysState>, headers: HeaderMap) -> Response {
+    let Some(oauth) = state.oauth.as_ref() else {
+        return unconfigured();
+    };
+    let Some(gateway) = state.gateway.as_ref() else {
+        return unconfigured();
+    };
+    let Some(session) = super::auth::current_session(oauth, &headers) else {
+        return no_store(errors::unauthorized_with(
+            NOT_SIGNED_IN,
+            "sign in with Discord before asking to replace your API key",
+        ));
+    };
+    let Some(name) = key_name(&session.sub) else {
+        tracing::warn!("a session carried a user id that is not a snowflake; refusing");
+        return no_store(errors::unauthorized_with(
+            NOT_SIGNED_IN,
+            "sign in with Discord before asking to replace your API key",
+        ));
+    };
+
+    let listed = match tokio::time::timeout(state.deadline, gateway.list_named(&name)).await {
+        Ok(Ok(listed)) => listed,
+        Ok(Err(error)) => {
+            tracing::error!(error = %error, "portal rework pre-check failed");
+            return no_store(
+                (
+                    StatusCode::BAD_GATEWAY,
+                    Json(errors::ErrorEnvelope {
+                        code: KEY_UNAVAILABLE,
+                        message: "could not reach the API key service; try again".into(),
+                        details: None,
+                    }),
+                )
+                    .into_response(),
+            );
+        }
+        Err(_elapsed) => {
+            tracing::error!(
+                deadline_secs = state.deadline.as_secs_f32(),
+                "portal rework pre-check ran out of time"
+            );
+            return no_store(errors::service_unavailable(
+                KEY_UNAVAILABLE,
+                "the API key service is taking too long to answer; try again",
+            ));
+        }
+    };
+
+    // The same winner the reveal hands out and the rework will replace, so
+    // the date the modal shows is computed from the key the visitor is
+    // looking at.
+    let candidates = exact_matches(listed, &name);
+    let Some(current) = choose_winner(&candidates) else {
+        return no_store(
+            (
+                StatusCode::NOT_FOUND,
+                Json(errors::ErrorEnvelope {
+                    code: NO_KEY,
+                    message: "you have no API key to replace; issue one first".into(),
+                    details: None,
+                }),
+            )
+                .into_response(),
+        );
+    };
+
+    match cap::decide(current.created_at, &Period::now()) {
+        Cap::Allowed => no_store(Json(ReworkCheck { eligible: true }).into_response()),
+        Cap::Capped {
+            next_eligible_at, ..
+        } => no_store(capped(next_eligible_at)),
+    }
+}
+
+/// The `409` a capped rework answers — the envelope, with the date in the
+/// slot the envelope already has for structured context.
+fn capped(next_eligible_at: String) -> Response {
+    (
+        StatusCode::CONFLICT,
+        Json(errors::ErrorEnvelope {
+            code: REWORK_CAPPED,
+            message: format!(
+                "your key was already issued or replaced this quota period; the next \
+                 replacement is available from {next_eligible_at}"
+            ),
+            details: Some(serde_json::json!({ "next_eligible_at": next_eligible_at })),
+        }),
+    )
+        .into_response()
+}
+
 /// The read-only lookup: list, filter, rank, read. Nothing here mutates.
 ///
 /// `Ok(None)` is "no key to reveal" — including the raced case where the
@@ -421,6 +567,191 @@ pub(crate) async fn issue_for(gateway: &Gateway, sub: &str, deadline: Duration) 
             );
             IssueOutcome::Failed
         }
+    }
+}
+
+/// What the eligibility-checked rework round-trip needs to know (task 0191).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ReworkOutcome {
+    /// A new key exists and is on the plan; the old one is gone.
+    Replaced,
+    /// There was no key to replace. The visitor is sent to issue one.
+    NoKey,
+    /// The current key was created inside this period. Nothing moved.
+    Capped {
+        /// `YYYY-MM-DD`, for the landing query.
+        next_eligible_date: String,
+    },
+    /// The control plane would not complete the swap. The old key is left in
+    /// place wherever that was possible (see [`swap`]); the visitor is told to
+    /// try again.
+    Failed,
+}
+
+/// Replace the key for `sub` — reachable only from `super::auth::rework`
+/// after a fresh membership proof.
+///
+/// The cap is decided **here**, against the listing this call makes, not
+/// trusted from the pre-check: the pre-check answered a session cookie some
+/// seconds ago, and the authority for "may this key be replaced" has to be
+/// the same call that is about to replace it.
+pub(crate) async fn rework_for(gateway: &Gateway, sub: &str, deadline: Duration) -> ReworkOutcome {
+    // Same guard as the reveal and the issue — and here, as in the issue, it
+    // stands in front of `DeleteApiKey`.
+    let Some(name) = key_name(sub) else {
+        tracing::warn!("a rework round-trip carried a user id that is not a snowflake; refusing");
+        return ReworkOutcome::Failed;
+    };
+
+    match tokio::time::timeout(deadline, swap(gateway, &name)).await {
+        Ok(Ok(Swap::Replaced { record })) => {
+            tracing::info!(key_id = %record.id, "portal replaced an API key");
+            ReworkOutcome::Replaced
+        }
+        Ok(Ok(Swap::NoKey)) => ReworkOutcome::NoKey,
+        Ok(Ok(Swap::Capped { next_eligible_date })) => {
+            tracing::info!(
+                outcome = "capped",
+                "portal rework refused by the period cap"
+            );
+            ReworkOutcome::Capped { next_eligible_date }
+        }
+        Ok(Ok(Swap::Lost)) => {
+            tracing::error!(
+                "the replacement key was deleted underneath the rework; the visitor may be \
+                 keyless until the next issue round-trip"
+            );
+            ReworkOutcome::Failed
+        }
+        Ok(Err(error)) => {
+            // `error` cannot carry a key value — see `gateway::sdk_message`.
+            tracing::error!(error = %error, "portal key rework failed");
+            ReworkOutcome::Failed
+        }
+        Err(_elapsed) => {
+            tracing::error!(
+                deadline_secs = deadline.as_secs_f32(),
+                "portal key rework ran out of time"
+            );
+            ReworkOutcome::Failed
+        }
+    }
+}
+
+/// What one pass of [`swap`] found or did.
+enum Swap {
+    Replaced {
+        record: KeyRecord,
+    },
+    NoKey,
+    Capped {
+        next_eligible_date: String,
+    },
+    /// The new key was created and then vanished before the swap completed —
+    /// a concurrent reconciler for the same name, or a console session.
+    Lost,
+}
+
+/// The swap: **create and attach the new key first, then delete the old** —
+/// so the visitor is never keyless, and the cap blocks the *next* rework
+/// rather than the replacement.
+///
+/// Step by step, with what each failure leaves behind:
+///
+/// 1. List, filter, rank: the current key is the reveal's winner. None →
+///    [`Swap::NoKey`]. Its `createdDate` decides the cap → [`Swap::Capped`].
+///    Nothing has been written.
+/// 2. `CreateApiKey` under the same name. A failure here leaves the old key
+///    exactly as it was.
+/// 3. `CreateUsagePlanKey` for the new key. A failure here leaves an orphan
+///    (enabled, on no plan) beside a working old key — the same orphan the
+///    issue path's attach can leave, and the next issue round-trip adopts or
+///    reconciles it. The old key still works. `KeyGone` means the new key
+///    was deleted in the milliseconds since its creation → [`Swap::Lost`],
+///    old key untouched.
+/// 4. `DeleteApiKey` on **every** old key under the name — the winner and
+///    any duplicates the reconciler had not yet swept. This is the instant
+///    the visitor was warned about: the old key stops working here. If a
+///    delete fails, the new key is deleted again (best effort) and the error
+///    propagates: the visitor is told it failed, and what they hold is the
+///    key they had, not two keys of which the page reveals the older.
+/// 5. The new key's value is read back, not to hand out (the caller answers
+///    with a redirect and the page reveals through the read-only route) but
+///    to prove it still exists. `None` → [`Swap::Lost`]: something deleted
+///    the replacement between the attach and now; the old key is gone too.
+///    Rare — it needs a concurrent reconciler for this exact name — and the
+///    heal is one issue round-trip, which recreates. Reported as a failure,
+///    loudly, rather than papered over by creating a third key inside a
+///    budget that is already mostly spent.
+///
+/// **Two simultaneous reworks** (two tabs; the modal's disabled confirm
+/// stops a double-click in one) each pass the cap against the same old key,
+/// each create, each attach, each delete the old key — and two new keys
+/// survive. Not keyless, not a quota launder (both are capped until the
+/// 1st), and the next issue round-trip's reconciler converges them on the
+/// earliest. Accepted rather than serialised: there is no lock to take on a
+/// control plane that is the source of truth, and the deterministic winner
+/// rule already makes the convergence safe.
+async fn swap(gateway: &Gateway, name: &str) -> Result<Swap, GatewayError> {
+    // Step 1.
+    let existing = exact_matches(gateway.list_named(name).await?, name);
+    let Some(current) = choose_winner(&existing) else {
+        return Ok(Swap::NoKey);
+    };
+    if let Cap::Capped {
+        next_eligible_date, ..
+    } = cap::decide(current.created_at, &Period::now())
+    {
+        return Ok(Swap::Capped { next_eligible_date });
+    }
+
+    // Step 2. The value is dropped on purpose — see `Outcome`.
+    let (replacement, _value) = gateway.create(name).await?;
+
+    // Step 3.
+    if gateway.attach_to_free_plan(&replacement.id).await? == Attachment::KeyGone {
+        return Ok(Swap::Lost);
+    }
+
+    // Step 4. Every old key, not only the winner: a duplicate left by an
+    // earlier double-submit is an old key too, and leaving it would leave the
+    // visitor a working credential they were told had died.
+    for old in &existing {
+        // The same last-line guard the reconciler keeps before its deletes:
+        // on the record, immediately before the destructive call.
+        if old.name != name {
+            tracing::error!(
+                key_id = %old.id,
+                "refusing to delete a key whose name is not the caller's; \
+                 the exact-name filter has been bypassed"
+            );
+            continue;
+        }
+        if let Err(error) = gateway.delete(&old.id).await {
+            tracing::error!(
+                key_id = %old.id,
+                error = %error,
+                "could not delete the key being replaced; rolling the replacement back"
+            );
+            if let Err(rollback) = gateway.delete(&replacement.id).await {
+                tracing::error!(
+                    key_id = %replacement.id,
+                    error = %rollback,
+                    "could not roll the replacement back either; the next issue round-trip \
+                     reconciles the duplicate"
+                );
+            }
+            return Err(error);
+        }
+        tracing::info!(key_id = %old.id, "portal deleted a replaced API key");
+    }
+
+    // Step 5.
+    match gateway.value_of(&replacement.id).await? {
+        Some(_value) => Ok(Swap::Replaced {
+            record: replacement,
+        }),
+        None => Ok(Swap::Lost),
     }
 }
 
@@ -663,5 +994,17 @@ mod tests {
         let rest = KEY_PATH.trim_start_matches(super::super::PORTAL_API_PREFIX);
         assert_eq!(rest, "key");
         assert!(!rest.contains('/'));
+    }
+
+    /// The rework pre-check is one segment deeper — `key/rework` — which is
+    /// still inside the depth the currently-deployed gateway maps (0205's
+    /// note: depth 1–2 under the prefix work today, depth 3 answers `403`
+    /// until the greedy proxy deploys). Pinned so it is not moved deeper.
+    #[test]
+    fn the_rework_route_is_under_the_key_route_and_no_deeper() {
+        assert!(REWORK_PATH.starts_with(super::super::PORTAL_API_PREFIX));
+        assert_eq!(REWORK_PATH, format!("{KEY_PATH}/rework"));
+        let rest = REWORK_PATH.trim_start_matches(super::super::PORTAL_API_PREFIX);
+        assert_eq!(rest.split('/').count(), 2);
     }
 }

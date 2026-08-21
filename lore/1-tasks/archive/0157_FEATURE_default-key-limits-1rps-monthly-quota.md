@@ -365,6 +365,15 @@ conclusion stands on the remaining arguments.
   measured, treat the single-date property as a **design intent**, and make sure
   the wording in [[0160]] and [[0163]] presents the rework boundary as our rule
   rather than as AWS behaviour.
+  **Correction 2026-08-21 ([[0191]]):** the sentence above that opens this
+  bullet — "assumed calendar-aligned, resetting on the 1st at 00:00 UTC" — is
+  now the portal's **stated product rule**, implemented once in
+  `portal/period.rs` and used by both the usage panel and the rework cap; it is
+  not, and this task no longer reads it as, an AWS guarantee. [[0180]] #7's
+  `DAY`-period proxy measurement (the 2026-08-13 run had died after three
+  samples) was re-run by [[0191]], whose Step 0 table carries the result and
+  its date. A real `MONTH` rollover cannot be observed before 1 September 2026;
+  [[0191]] records that as an open limit rather than assuming it.
 - **The quota binds far harder than the rate.** At 1 req/s a key could produce
   ~2.6M requests/month; the quota stops it at 100 000. So the operative limit a
   user meets is the quota, and the per-second throttle is what stops them
