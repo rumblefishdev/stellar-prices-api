@@ -110,6 +110,63 @@ artifact but a *work-in-progress* one. `LastModified` looked current and
 `strings` found the constant. Record this — the discriminator that worked was
 reading the **emitted SQL** out of `system.query_log`, never the artifact.
 
+
+## ⛔ HYPOTHESIS 3 — "the artifact is stale" — ALSO FALSIFIED (2026-08-21)
+
+Recorded because the falsifying step is subtle and would otherwise be repeated.
+
+The deployed bootstrap is **byte-identical** to what the CI invocation produces
+from a clean tree:
+
+```
+b8120fb22a480b73…  /tmp/enrich/bootstrap                      (downloaded from Lambda)
+b8120fb22a480b73…  target/lambda/enrichment-worker/bootstrap  (rebuilt 2026-08-21)
+```
+
+⚠️ **The trap: `-p <one-crate>` is NOT a valid comparison build.** Building
+`enrichment-worker` alone yields `c9e5580e…` / 12,048,000 bytes, while the CI
+build (`-p` for all ten assets in ONE invocation) yields `b8120fb2…` /
+12,478,560. The 430 KB delta is **Cargo feature unification** — the multi-crate
+build enables extra features on shared dependencies — not different code. Same
+source, two binaries. `rollup-freshness-probe` shows the same ~433 KB delta for
+the same reason.
+
+**Always reproduce with the full asset list**, exactly as
+`.github/workflows/ci.yml` does:
+
+```bash
+args=(); while IFS= read -r n; do args+=(-p "$n"); done < <(tools/scripts/lambda-assets.sh)
+cargo lambda build --release --arm64 --features lambda "${args[@]}"
+```
+
+So the deployed binary IS this source, correctly built. [[0141]] is not involved.
+
+## ⚠️ The mechanism is STILL UNKNOWN — do not start a fix
+
+Three hypotheses falsified. What remains measured and unexplained:
+
+| # | measured | source implies |
+|---|---|---|
+| 1 | only `CAST(4 …)` sent — no `QueryStart`, no exception, 2 days | two statements per step |
+| 2 | peg emits `IN (3)` | binary is post-0172 |
+| 3 | resolver returns `result_rows = 3` | `pivot_ids() == [xlm, usdt]` |
+| 4 | deployed binary == current source, byte-identical | source tests are green |
+
+### The leading unfalsified candidate
+
+`enrich_peg_pivot_step` issues peg → XLM pivot → USDT pivot, each `execute().await?`.
+**XLM is first in `pivot_ids()` and averages 45.6 s.** If its `execute()` returns
+`Err` *client-side* — an HTTP read timeout after ClickHouse has already completed
+and logged `QueryFinish` — the `?` propagates and the USDT pivot is never
+reached. That reproduces every row of the table above without contradicting any
+of them, and it predicts a specific, checkable signature.
+
+**Check before building anything:** the enrichment Lambda's CloudWatch logs for
+the pass window (client-side timeouts / `ChEnrichError` after a successful XLM
+pivot), and the configured HTTP timeout on the ClickHouse client against the
+45.6 s XLM pivot duration. If confirmed, the fix is the timeout and the statement
+ORDER — not the reference resolution, and not the artifact.
+
 ## Implementation
 
 - ✅ **The source is EXONERATED — done 2026-08-21.** `reference_ids_helpers`
