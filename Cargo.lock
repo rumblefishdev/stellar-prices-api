@@ -1488,6 +1488,7 @@ version = "0.1.0"
 dependencies = [
  "aws-config",
  "aws-sdk-cloudwatch",
+ "chrono",
  "clap",
  "clickhouse",
  "lambda_runtime 0.13.0",

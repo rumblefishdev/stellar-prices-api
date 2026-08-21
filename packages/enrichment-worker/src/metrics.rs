@@ -20,6 +20,7 @@
 //! transient CloudWatch error never blocks enrichment.
 
 use crate::ch_enrich::ChPassStats;
+use crate::frontier::SweepSummary;
 use crate::repair::CoarseSweepSummary;
 
 /// CloudWatch namespace for all enrichment metrics. Matches the
@@ -28,11 +29,15 @@ use crate::repair::CoarseSweepSummary;
 pub const METRIC_NAMESPACE: &str = "Prices/Enrichment";
 
 /// CloudWatch unit for a [`Metric`]. Kept minimal — the enrichment metrics are
-/// either counts or a duration.
+/// counts, a duration, or a bare identifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Unit {
     Count,
     Milliseconds,
+    /// Dimensionless. For values that are identifiers rather than quantities —
+    /// `EnrichmentFrontierMonth` is a `YYYYMM`, and publishing it as a `Count`
+    /// would invite a dashboard to sum or average it into nonsense.
+    None,
 }
 
 /// One CloudWatch datum: a spec §5 metric name, its value, and unit.
@@ -118,6 +123,68 @@ pub fn pass_metrics(stats: &ChPassStats) -> Vec<Metric> {
 /// sits near-constant whether or not the sweep is keeping up and cannot observe
 /// the lag it would exist to catch. `RowsEnriched` is the usable signal; the
 /// floor size is available on demand via the per-quote-class composition query.
+/// Metrics for the frontier-driven historical drain (task 0111 phase 4). Same
+/// [`METRIC_NAMESPACE`], so the existing `PutMetricData` grant covers them.
+///
+/// The point of these is that **drain progress becomes a number instead of an
+/// archaeology dig**. Before this, answering "is the backlog moving?" meant
+/// hand-querying `query_log` and `system.parts` on prod.
+///
+///   * `EnrichmentFrontierMonthsPending` — monthly partitions below the live
+///     window still believed to hold work. Monotonically falling in a healthy
+///     drain; flat for days is the actionable signal.
+///   * `EnrichmentFrontierMonth` — the frontier position itself as `YYYYMM`.
+///     A gauge you can eyeball against the known span. Published as `None` →
+///     omitted rather than 0, so a finished drain does not read as "January
+///     year zero".
+///   * `EnrichmentHistoricalRowsEnriched` — rows the drain corrected this run.
+///     This is the per-leg progress signal the pass itself cannot give: the XLM
+///     pivot writes exactly `batch_size` every batch and so masks every other
+///     leg's stall in the aggregate count (task 0219).
+///   * `EnrichmentFrontierMonthsReopened` — exhausted months that turned out to
+///     have gained work and were re-opened. Published only when non-zero.
+///   * `EnrichmentHistoricalDeadlineHit` — 1 when the run stopped on its
+///     wall-clock budget rather than on `max_months`. Distinguishes "nothing
+///     left to do" from "ran out of time", which otherwise look identical from
+///     a rows-enriched of zero.
+pub fn historical_sweep_metrics(summary: &SweepSummary) -> Vec<Metric> {
+    let mut m = vec![
+        Metric {
+            name: "EnrichmentFrontierMonthsPending",
+            value: summary.months_pending as f64,
+            unit: Unit::Count,
+        },
+        Metric {
+            name: "EnrichmentHistoricalRowsEnriched",
+            value: summary.total_enriched() as f64,
+            unit: Unit::Count,
+        },
+        Metric {
+            name: "EnrichmentHistoricalDeadlineHit",
+            value: if summary.deadline_hit { 1.0 } else { 0.0 },
+            unit: Unit::Count,
+        },
+    ];
+    if summary.months_reopened > 0 {
+        // Only published when non-zero: a month re-opening means something wrote
+        // into a partition the sweep had finished. Worth seeing, but a constant
+        // 0 series on a dashboard trains people to ignore it.
+        m.push(Metric {
+            name: "EnrichmentFrontierMonthsReopened",
+            value: summary.months_reopened as f64,
+            unit: Unit::Count,
+        });
+    }
+    if let Some(month) = summary.frontier_month {
+        m.push(Metric {
+            name: "EnrichmentFrontierMonth",
+            value: month as f64,
+            unit: Unit::None,
+        });
+    }
+    m
+}
+
 pub fn sweep_metrics(summary: &CoarseSweepSummary) -> Vec<Metric> {
     vec![
         Metric {
@@ -162,6 +229,7 @@ pub async fn publish(
                 .unit(match m.unit {
                     Unit::Count => StandardUnit::Count,
                     Unit::Milliseconds => StandardUnit::Milliseconds,
+                    Unit::None => StandardUnit::None,
                 })
                 .dimensions(dimension.clone())
                 .build()

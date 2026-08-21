@@ -150,8 +150,8 @@ WHERE view = 'mv_current_prices';
 ## Step 1b — measure the COUNTERFACTUAL, before anything mutates (task 0135)
 
 **Do this whenever the change alters which rows or venues survive a filter.**
-Step 1 tells you what the new SELECT *costs*; it says nothing about what it
-*publishes*. Comparing post-apply numbers against a measurement from yesterday
+Step 1 tells you what the new SELECT _costs_; it says nothing about what it
+_publishes_. Comparing post-apply numbers against a measurement from yesterday
 cannot separate your change from ordinary drift — and by the time you notice,
 the change is live.
 
@@ -188,11 +188,11 @@ done
 on the target one.** 0135 shipped on a green step 1 and had to be rolled back an
 hour later: it fixed 753 assets (`zero_price_usd` 1,129 → 376) while blanking
 `sources` and `vwap_24h` on **2,284** (`empty_sources` 1,096 → 3,380, 52% of the
-table). Every number needed for that decision was obtainable *before* the apply,
+table). Every number needed for that decision was obtainable _before_ the apply,
 from artifacts step 0 already produces. Nobody thought to run the old definition
 forwards.
 
-⚠️ A filter calibrated against a *schedule* is not calibrated against *reality*.
+⚠️ A filter calibrated against a _schedule_ is not calibrated against _reality_.
 0135's bound came from the enrichment cadence (`rate(1 hour)` × 2) — the
 methodologically correct basis, chosen specifically to avoid encoding a
 transient outage — and was still wrong, because enrichment had been failing for
@@ -260,7 +260,7 @@ for `arrayReduce('median'` in the body.
 > ```
 >
 > The same trap applies to step 0's artifact check: a `grep` for interval syntax
-> returns 0 for an empty capture *and* for a good one, so verify the artifact by
+> returns 0 for an empty capture _and_ for a good one, so verify the artifact by
 > line count and function names instead.
 
 Then confirm the columns are actually populated, not just present:
