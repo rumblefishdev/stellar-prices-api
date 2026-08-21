@@ -399,6 +399,49 @@ and its `loadtest/` for the k6 harness.
 
 ---
 
+## Verifying recovery after an ingest stall
+
+⚠️ **Never conclude an ingest stall is over from alarm state.** On 2026-08-13 the
+lag alarm returned to **OK at 07:56** and that was true — the queue _was_ empty.
+It had emptied partly because messages were **given up on**, not processed: the
+oldest-message age eased (26,155 → 26,117 → 25,969 s) at exactly the rate the DLQ
+filled, reaching 91 by morning. An OK there meant "SQS stopped trying", which
+looks identical to "we caught up".
+
+**An empty queue is not a processed queue.** Verify on the data:
+
+```sql
+SELECT max(timestamp) FROM prices.price_ohlcv_1m;
+```
+
+⚠️ **And freshness alone does not prove completeness.** On the same day
+`max(timestamp)` was only **63 s behind** while **eight hourly buckets were
+missing** — the newest write had landed, the middle of the window had not. Check
+for holes, not just the tip:
+
+```sql
+SELECT toStartOfHour(timestamp) AS h, count()
+FROM prices.price_ohlcv_1m
+WHERE timestamp >= now() - INTERVAL 24 HOUR
+GROUP BY h ORDER BY h;
+```
+
+A missing or thin hour is a gap to backfill, whatever the alarms say. (A standing
+completeness signal is task 0203; until it lands this check is manual.)
+
+Three related traps, all recorded from the same incident:
+
+- **The DLQ depth is the honest measure of what was dropped** — and since task
+  0204 it escalates (`-dlq`, then `-dlq-10`, `-dlq-50`), so a single Slack line
+  no longer means a single message. Read the depth, not the message count.
+- **Check disk before redriving.** A full shared volume is what put 91 messages
+  there; redriving into a still-full disk just refills the DLQ.
+- ⛔ **Do not enable the cleanup worker to reclaim space** while a repair or
+  backfill campaign is running — it deletes that campaign's output as fast as it
+  is written (task 0200).
+
+---
+
 ## Related follow-ups
 
 | Task     | Why it matters here                                                       |

@@ -4,7 +4,7 @@ title: "GET /assets/{USDC}/ohlcv returns an empty series in every mode — the e
 type: BUG
 status: backlog
 related_adr: []
-related_tasks: ["0165", "0127", "0167", "0168", "0139", "0061", "0040"]
+related_tasks: ["0165", "0127", "0167", "0168", "0139", "0061", "0040", "0120"]
 tags:
   ["priority-high", "effort-medium", "api", "data-correctness", "read-surface", "scf", "milestone-M2"]
 milestone: 2
@@ -23,6 +23,22 @@ history:
       that view, it queries price_ohlcv_1d directly with its own base+quote
       filter. Shipping 0165 leaves this exactly as broken. Confirmed from code
       plus 0165's existing prod measurement; no new query needed.
+  - date: 2026-08-19
+    status: backlog
+    who: stkrolikiewicz
+    note: >
+      Blast radius measured wider than the self-pair by the [[0120]]
+      conformance run: the default `base_currency=USD` mode returns an empty
+      200 for ANY asset that never traded against canonical USDC, not just
+      for USDC itself. Five of 0120's twenty majors hit it — AUD, RON, BOL,
+      EQL (top-20 by volume) and the top soroban asset `CBIJ…` all return
+      0 buckets in USD mode over a 30-day window while returning 2–31 real
+      1d buckets with `base_currency=XLM` over the same window. The
+      "empty 200 is the wrong answer" argument below therefore applies to
+      every XLM-only-quoted asset in the store; a spawned-then-retired
+      duplicate spawn from that run (retired the same day; its id was since
+      reused by an unrelated task) folds into this task, and the 0120
+      suite's empty-window checks are its regression gate.
 ---
 
 # `/assets/{USDC}/ohlcv` can never return candles

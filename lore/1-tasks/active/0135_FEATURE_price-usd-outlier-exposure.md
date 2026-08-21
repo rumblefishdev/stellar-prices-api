@@ -2,7 +2,7 @@
 id: "0135"
 title: "Decide whether the headline price_usd should be outlier-protected like vwap_24h"
 type: FEATURE
-status: backlog
+status: active
 related_adr: []
 related_tasks: ["0072", "0118", "0123", "0144", "0145", "0146", "0147"]
 tags: ["phase-future", "effort-large", "priority-high", "milestone-M2", "vwap", "clickhouse"]
@@ -56,6 +56,41 @@ history:
       carries its latest priced close and stays in `sources` and in the
       `vwap_24h` weighting, instead of silently vanishing. Both are one-line
       changes in `current.sql`, which self-DROPs, so delivery is unblocked.
+  - date: 2026-08-19
+    status: backlog
+    who: stkrolikiewicz
+    note: >
+      Fresh production evidence from the [[0120]] conformance run, which
+      independently rediscovered both failure modes before dedup: 17 of the
+      20 fixed major assets publish `price_usd = 0` (88 of the top-200
+      volume rows — well past 07-30's 21-of-3,022), and 12 of the 20 hit
+      the C2 limit case — every source un-enriched at once, so
+      `sources: {}` and `vwap_24h = 0` beside an unfiltered
+      `volume_24h_usd > 0` (AQUA and BTC among them). The observed
+      "price>0 ⟺ sdex present" split is [[0154]]'s quote-restriction seen
+      from the read side: sdex candles are stable-quoted and always enrich,
+      AMM candles often never do. Spawned-then-retired duplicates
+      from that run fold into this task; the 0120 suite
+      (`npm run conformance:0120`) is the regression gate — its
+      price-sentinel checks must go green when the decided contract ships.
+  - date: 2026-08-20
+    status: backlog
+    who: stkrolikiewicz
+    note: >
+      Two [[0120]] runs 16 minutes apart turn the previous day's static
+      counts into a much stronger signal: this task's three failure classes
+      **churn in both directions** while the structural ones do not. Between
+      07:05 and 07:21 UTC the `sources`-empty set lost BTC, CBIJ, USDCAllow,
+      AUD and yUSDC but gained XRP (12 → 8); `price_usd = 0` went 18 → 17 →
+      13 across three runs. Over the same three runs [[0170]]'s empty-OHLCV
+      count held at exactly 12 and [[0178]]'s USDC 404 at exactly 1, same
+      assets every time. A per-asset data defect cannot move like that — the
+      churn is the enrichment-timing dependence of the third failure mode
+      (`current.sql:121` + `:140`), reproduced across many assets rather
+      than the single `native` flicker the 0072 runbook recorded. Practical
+      consequence for whoever ships the decided `argMaxIf` contract: a
+      before/after comparison must be taken from runs minutes apart, not
+      days, or normal churn will swamp the effect.
 ---
 
 # price_usd is not outlier-protected

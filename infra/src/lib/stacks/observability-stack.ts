@@ -237,12 +237,45 @@ export class ObservabilityStack extends cdk.Stack {
    * specific tier without depending on declaration order.
    */
   public readonly rollupFreshnessAlarms: Record<string, cloudwatch.Alarm>;
+  /** ClickHouse host free-space alarm (task 0204, gap 1). */
+  public readonly chDiskFreeAlarm: cloudwatch.Alarm;
   /** Live ledger-processor ingestion-lag alarm (task 0056 finding B). */
   public readonly ledgerProcessorLagAlarm: cloudwatch.Alarm;
   /** Live ledger-processor invocation-error alarm (task 0056 finding B). */
   public readonly ledgerProcessorErrorAlarm: cloudwatch.Alarm;
-  /** Live ledger-processor DLQ-depth alarm (task 0056 finding B). */
+  /** Live ledger-processor DLQ-depth alarm (task 0056 finding B). Rung 1. */
   public readonly ledgerProcessorDlqAlarm: cloudwatch.Alarm;
+  /**
+   * Escalation rungs above {@link ledgerProcessorDlqAlarm}, keyed by depth as a
+   * string (task 0204, gap 2). Each depth is a separate alarm so a growing DLQ
+   * keeps producing Slack messages instead of latching silently at `>= 1`.
+   */
+  public readonly ledgerProcessorDlqEscalationAlarms: Record<
+    string,
+    cloudwatch.Alarm
+  >;
+  /**
+   * USDT-quoted candles valued as if the $1 peg still held (task 0204, gap 4),
+   * keyed by the count that rung fires at. Correctness, not liveness — every
+   * other alarm in this stack scores this data perfectly healthy.
+   */
+  public readonly usdPegAppliedAlarms: Record<string, cloudwatch.Alarm>;
+  /**
+   * USDT-quoted candles left at `close_usd = 0` past the enrichment grace
+   * period (task 0204, gap 4), keyed by count. The inverse direction, added
+   * because task 0182's own repair produced it.
+   */
+  public readonly usdStrandedAlarms: Record<string, cloudwatch.Alarm>;
+  /**
+   * A rollup MV that has lost `APPEND` (task 0204, gap 3) — history destroyed
+   * on every refresh. Separate from {@link mvDriftAlarm} because this is the
+   * only drift severity that compounds while nobody looks.
+   */
+  public readonly mvDriftCriticalAlarm: cloudwatch.Alarm;
+  /** A rollup MV whose definition no longer matches `rollups.sql` (gap 3). */
+  public readonly mvDriftAlarm: cloudwatch.Alarm;
+  /** The drift check could not see the schema at all (gap 3) — likely a grant. */
+  public readonly mvDriftUnreadableAlarm: cloudwatch.Alarm;
   /** Live ledger-processor total-halt alarm — zero invocations (finding B / halt gap). */
   public readonly ledgerProcessorNoInvocationsAlarm: cloudwatch.Alarm;
   /**
@@ -537,6 +570,51 @@ export class ObservabilityStack extends cdk.Stack {
       ),
     );
 
+    // ClickHouse host free space (task 0204, gap 1). The 2026-08-13 stall ran
+    // 11.5 h and was found by reading Lambda panic logs — `asset-discovery`,
+    // `supply` and `ledger-processor` all failing with CH `Code: 243` — because
+    // nothing watched the disk itself.
+    //
+    // ⚠️ The volume is SHARED with the block-explorer team and we are 3.3% of
+    // it, so this alarm cannot prevent the condition and we cannot free
+    // meaningful space when it fires. Its entire value is warning time, which
+    // is why the threshold is a generous percentage rather than a last-ditch
+    // one; see config.opsAlarms.chDiskFreePercent for the arithmetic.
+    //
+    // Published by the rollup-freshness-probe (every 15 min) rather than a
+    // probe of its own, and into the existing Prices/Rollup namespace, so this
+    // change stays inside THIS stack. A new namespace would need the probe
+    // role's PutMetricData condition widened in eventbridge-stack.ts, which is
+    // where `CleanupRule` lives — and every deploy of that stack can silently
+    // re-enable `prices-{env}-cleanup`, which CDK asserts is ENABLED while the
+    // live rule is DISABLED. Cleanup running during the 0182/0201 repair
+    // campaign shreds that campaign's output. Not a hazard worth taking on for
+    // a namespace label.
+    //
+    // Missing data is NOT_BREACHING for the same reason as the rollup alarms:
+    // probe-down is covered by the probe's own `-errors` alarm and its
+    // worker-health pair, and an unreadable capacity fails the invocation
+    // rather than publishing a misleading zero. M-of-N (1 of 2) so a single
+    // missed publish cannot flip a real breach back to OK.
+    this.chDiskFreeAlarm = new cloudwatch.Alarm(this, 'ChDiskFreeAlarm', {
+      alarmName: `prices-${config.envName}-ch-disk-free`,
+      alarmDescription: `Free space on the ClickHouse host's filesystem has dropped below ${config.opsAlarms.chDiskFreePercent}% (task 0204). ⚠️ The volume is SHARED with the block-explorer team and we are ~3.3% of it — deleting prices data will NOT recover a meaningful amount, so escalate to BE rather than starting a cleanup. On 2026-08-13 this condition stalled ingestion for 11.5 h and surfaced only as ClickHouse Code: 243 panics in asset-discovery, supply and ledger-processor. ⛔ Do NOT enable the cleanup worker as a remedy while a repair/backfill campaign is running (task 0200). Threshold is operator-tunable via config.opsAlarms.chDiskFreePercent.`,
+      metric: new cloudwatch.Metric({
+        namespace: 'Prices/Rollup',
+        metricName: 'ClickHouseDiskFreePercent',
+        dimensionsMap: { Environment: config.envName },
+        statistic: 'Minimum',
+        period: cdk.Duration.minutes(15),
+      }),
+      threshold: config.opsAlarms.chDiskFreePercent,
+      evaluationPeriods: 2,
+      datapointsToAlarm: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.LESS_THAN_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+    this.chDiskFreeAlarm.addAlarmAction(snsAction);
+    this.chDiskFreeAlarm.addOkAction(snsAction);
+
     // mTLS cert expiry (§7 / §11.4). The mtls-notafter-probe publishes the
     // minimum days-to-NotAfter across the ingestion + api client certs; alarm
     // when it drops below the threshold (30 days default). Fires on an expired
@@ -656,7 +734,7 @@ export class ObservabilityStack extends cdk.Stack {
       {
         alarmName: `prices-${config.envName}-ledger-processor-dlq`,
         alarmDescription:
-          'A ledger doorbell exhausted its SQS retries and landed in the prices-ingest DLQ (ApproximateNumberOfMessagesVisible ≥ 1): a ledger the live processor could not process = a candle gap. Inspect the DLQ message, fix the cause, and redrive.',
+          'A ledger doorbell exhausted its SQS retries and landed in the prices-ingest DLQ (ApproximateNumberOfMessagesVisible ≥ 1): a ledger the live processor could not process = a candle gap. Inspect the DLQ message, fix the cause, and redrive. This is rung 1 of an escalating ladder (task 0204) — if the DLQ keeps filling, the -dlq-N alarms fire in turn, so ONE message here means one message, not necessarily one message for long.',
         metric: new cloudwatch.Metric({
           namespace: 'AWS/SQS',
           metricName: 'ApproximateNumberOfMessagesVisible',
@@ -674,6 +752,263 @@ export class ObservabilityStack extends cdk.Stack {
     );
     this.ledgerProcessorDlqAlarm.addAlarmAction(snsAction);
     this.ledgerProcessorDlqAlarm.addOkAction(snsAction);
+
+    // DLQ escalation ladder (task 0204, gap 2). On 2026-08-13 Slack carried
+    // exactly one line — `ApproximateNumberOfMessagesVisible >= 1` — while the
+    // DLQ grew to 91 overnight. Nobody reading the channel could tell 1 from 91.
+    //
+    // ⚠️ The cause is structural, not a bad threshold: CloudWatch notifies on a
+    // state TRANSITION. Once the rung-1 alarm above is latched in ALARM it says
+    // nothing further, however far the queue climbs. No threshold on a single
+    // alarm fixes that. Additional rungs do: each is its own alarm with its own
+    // transition, so a growing DLQ crosses a new one and sends a new message.
+    //
+    // ⚠️ Every rung MUST keep its OK action. A rung with no way back to OK
+    // latches permanently on first breach and is then silent for every
+    // subsequent incident — it would reproduce the very defect this closes, one
+    // level up. The cost is that a redrive to empty sends one OK per rung; that
+    // noise is deliberate and much cheaper than a silent ladder.
+    //
+    // Rung 1 stays exactly as declared above — same logical id, same alarm name
+    // — so this change is purely additive and cannot replace the alarm the team
+    // already watches.
+    this.ledgerProcessorDlqEscalationAlarms = Object.fromEntries(
+      config.opsAlarms.dlqEscalationDepths.map((depth) => {
+        const alarm = new cloudwatch.Alarm(
+          this,
+          `LedgerProcessorDlqAlarmDepth${depth}`,
+          {
+            alarmName: `prices-${config.envName}-ledger-processor-dlq-${depth}`,
+            alarmDescription: `The prices-ingest DLQ has reached ${depth} messages — ${depth} ledgers the live processor could not handle, i.e. ${depth} candle gaps. Escalation rung above prices-${config.envName}-ledger-processor-dlq (task 0204): a lone poison pill does not reach this depth, so treat it as systemic — check the ledger-processor logs, ClickHouse reachability and disk headroom (a full shared volume put 91 messages here on 2026-08-13) before redriving. Rungs are operator-tunable via config.opsAlarms.dlqEscalationDepths.`,
+            metric: new cloudwatch.Metric({
+              namespace: 'AWS/SQS',
+              metricName: 'ApproximateNumberOfMessagesVisible',
+              dimensionsMap: { QueueName: ingestDlq },
+              statistic: 'Maximum',
+              period: cdk.Duration.minutes(5),
+            }),
+            threshold: depth,
+            evaluationPeriods: 1,
+            datapointsToAlarm: 1,
+            comparisonOperator:
+              cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+            // Same reasoning as rung 1: SQS publishes no datapoint for an empty
+            // DLQ, so BREACHING would false-fire on a healthy queue.
+            treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+          },
+        );
+        alarm.addAlarmAction(snsAction);
+        alarm.addOkAction(snsAction);
+        return [String(depth), alarm];
+      }),
+    );
+
+    // USD-value correctness on the USDT quote leg (task 0204, gap 4).
+    //
+    // ⚠️ This is the only alarm in this stack that watches whether the data is
+    // RIGHT rather than whether it is ARRIVING. A close_usd that is fresh,
+    // present and wrong is invisible to all seven rollup alarms, to the disk
+    // alarm and to the DLQ ladder — every one of them reads healthy while the
+    // numbers are ~7.4x too high, which is the state prod sat in from the June
+    // 2022 depeg until 2026-08-18 (tasks 0172, 0182).
+    //
+    // ⚠️ Two directions, and the second is not symmetry for its own sake.
+    // peg-applied is the original defect; stranded (close_usd = 0 on a candle
+    // with a representable close) is what task 0182's REPAIR produced on
+    // 2026-08-19 — 157 candles zeroed with nothing to refill them. A check for
+    // only the first direction would have passed while that damage stood.
+    //
+    // ⚠️ A ladder rather than one alarm, for the gap 2 reason: a wrong
+    // close_usd is a STANDING condition, and CloudWatch notifies on a state
+    // TRANSITION, so a single alarm latches and goes quiet however far the
+    // population climbs. Unlike MV drift (gap 3), which is binary and has no
+    // way out of this, a count of wrong candles has DEPTH — a regressed writer
+    // keeps adding to it — so gap 2's ladder transfers directly. Every rung
+    // keeps its OK action for the same reason gap 2's rungs do: a rung with no
+    // path back to OK latches permanently on first breach and is then silent
+    // for every later incident.
+    //
+    // The probe scopes both counts to the USDT quote leg and bounds each to a
+    // rolling window. Both are load-bearing — exotic-quoted zeros are by
+    // design (~74M rows), and an unbounded scan every 15 min is task 0111's
+    // outage wearing a health check's clothes. See
+    // packages/rollup-freshness-probe/src/usd_sanity.rs.
+    //
+    // ⚠️ THE TWO DIRECTIONS READ DIFFERENT TIERS AND DIFFERENT WINDOWS (task
+    // 0213). `peg_applied` reads `price_ohlcv_1m` over 48 h — the tier
+    // enrichment WRITES; `stranded` reads `price_ohlcv_1h` over 7 days, where a
+    // zero rolls up faithfully and the 48 h grace matches BE's loss window.
+    // Reading one tier for both is what made the peg direction publish a
+    // confident 0 over 1,564,045 wrong rows.
+    //
+    // 🔴 A GREEN `usd-peg-applied` IS NOT EVIDENCE THE USDT LEG IS HEALTHY.
+    // Measured on prod 2026-08-20 inside the 48 h window: 684 rows scanned, ALL
+    // 684 at close_usd = 0, zero peg-valued and zero correctly priced. The leg
+    // has been unpriced since 2026-08-13 (task 0209), so this direction has
+    // nothing to judge and reads 0 for want of input. `usd-stranded` is what
+    // carries that condition, and it is latched. Never read one without the
+    // other.
+    //
+    // ⚠️ An earlier version of this comment said the peg ladder must not be
+    // deployed before 0212/0209 because it would ship permanently breached.
+    // The measurement above falsifies that — the 1.5 M peg population sits at
+    // timestamps <= 2026-08-13, entirely outside the window. That figure
+    // applies to an unbounded repoint, not to the query that ships; do not
+    // re-size these rungs against it.
+    const usdSanityRungs = (
+      metricName: string,
+      idPrefix: string,
+      alarmSuffix: string,
+      describe: (count: number) => string,
+    ): Record<string, cloudwatch.Alarm> =>
+      Object.fromEntries(
+        config.opsAlarms.usdSanityEscalationCounts.map((count) => {
+          const alarm = new cloudwatch.Alarm(this, `${idPrefix}${count}`, {
+            alarmName: `prices-${config.envName}-${alarmSuffix}-${count}`,
+            alarmDescription: describe(count),
+            metric: new cloudwatch.Metric({
+              namespace: 'Prices/Rollup',
+              metricName,
+              dimensionsMap: { Environment: config.envName },
+              statistic: 'Maximum',
+              period: cdk.Duration.minutes(15),
+            }),
+            threshold: count,
+            evaluationPeriods: 2,
+            datapointsToAlarm: 1,
+            comparisonOperator:
+              cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+            treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+          });
+          alarm.addAlarmAction(snsAction);
+          alarm.addOkAction(snsAction);
+          return [String(count), alarm];
+        }),
+      );
+
+    this.usdPegAppliedAlarms = usdSanityRungs(
+      'UsdtPegAppliedCandles',
+      'UsdPegAppliedAlarmCount',
+      'usd-peg-applied',
+      (count) =>
+        `${count} or more USDT-quoted price_ohlcv_1m candles written in the last 48 h carry a close_usd within 2% of their close — valued as if USDT were still pegged at $1. USDT depegged in June 2022 and trades at ~0.13-0.15 (task 0172), so these values are roughly 7.4x too high. Something is applying the peg path to the USDT leg again: check the enrichment tiers (USDT must be a PIVOT reference, never a peg member) and prices.oracle_prices for rows mis-attributed to the USDT identity — that is how tasks 0196 and 0168 reintroduced this WITHOUT touching the writer. VERIFY ON _1m, NEVER a coarse tier: task 0182 repaired the coarse tables directly, so _1h reads clean over a broken _1m (tasks 0212, 0213). Find what is writing them before re-running any repair. NOTE this metric reads 0 whenever the leg is unpriced, which it has been since 2026-08-13 - a green ladder is NOT proof of correct USD valuation, check prices-{env}-usd-stranded too. Rungs tunable via config.opsAlarms.usdSanityEscalationCounts.`,
+    );
+
+    this.usdStrandedAlarms = usdSanityRungs(
+      'UsdtStrandedCandles',
+      'UsdStrandedAlarmCount',
+      'usd-stranded',
+      (count) =>
+        `${count} or more USDT-quoted candles are still at close_usd = 0 more than 48 h after being written, despite a close large enough to price. A zero is indistinguishable from "no data" at ~130 unguarded argMax(close_usd, ...) sites (task 0145), and BE render an empty "--" TVL when nothing priced within 48 h, so this is a value the consumer has already LOST, not one that is merely late. KNOWN CAUSE as of 2026-08-20: the USDT pivot has NEVER priced a price_ohlcv_1m row (measured pivot_written = 0 against 1,564,045 peg-written), so this leg has been dark since 2026-08-13 and this alarm stays latched until that is fixed - tasks 0209 (root cause) and 0212 (the peg-valued rows). Verify on _1m, NEVER on a coarse tier: task 0182 repaired the coarse tables directly, so _1h reads clean over a broken _1m. Do NOT re-run a reset repair - 0182 own reset CREATED 157 stranded candles. Rungs tunable via config.opsAlarms.usdSanityEscalationCounts.`,
+    );
+
+    // Materialized-view drift, on a schedule (task 0204, gap 3). Task 0142 built
+    // `prices-clickhouse-drift` and NOTHING RAN IT — a check nobody runs is a
+    // check that does not exist. It covers a condition no other alarm here can
+    // see: task 0137 watches whether the rollups PRODUCE data, and a drifted MV
+    // does that perfectly well while producing the wrong numbers.
+    //
+    // ⚠️ Two severities, deliberately not one alarm. The CLI collapses
+    // everything to `exit 1`, which throws away the distinction that decides who
+    // gets woken — an MV that lost APPEND is destroying history on every refresh
+    // (the task 0095 data loss), while a definition mismatch is wrong but static.
+    //
+    // ⚠️ These fire ONCE and latch, unlike the DLQ ladder above, and that is a
+    // decision rather than an oversight (operator, 2026-08-19). Gap 2 needed a
+    // ladder because a DLQ GROWS while the alarm is quiet — 1 became 91
+    // overnight. Drift does not grow: one drifted MV stays one drifted MV until
+    // a person fixes it, so a latched alarm costs "somebody may forget", not
+    // "we are blind to an escalation". The exception is the critical severity,
+    // which does compound — which is exactly why it has its own alarm and its
+    // own urgency rather than being buried in the ordinary count.
+    //
+    // ⚠️ treatMissingData: MISSING, NOT the NOT_BREACHING used everywhere else
+    // in this stack, and the difference is load-bearing. Every alarm here has an
+    // OK action, so under NOT_BREACHING two consecutive missing datapoints would
+    // transition a latched ALARM back to OK and post an explicit "resolved"
+    // message to Slack — while the MV was still drifted and nobody had touched
+    // it. That is a stronger version of the 2026-08-13 false-recovery signal
+    // this whole task was filed over: the lag alarm returned to OK truthfully
+    // but for the wrong reason, and the operator read it as fixed. MISSING
+    // retains the last state across a gap instead, so a dead probe cannot
+    // announce a repair that did not happen. Nothing is lost by it — a probe
+    // that stops publishing is already covered by its own `-errors` alarm
+    // (addWorkerHealthAlarms), which is the correct signal for that condition.
+    // The liveness alarms above keep NOT_BREACHING deliberately: for those,
+    // "no data" genuinely is the absence of a breach.
+    this.mvDriftCriticalAlarm = new cloudwatch.Alarm(
+      this,
+      'MvDriftCriticalAlarm',
+      {
+        alarmName: `prices-${config.envName}-mv-drift-critical`,
+        alarmDescription: `A rollup materialized view is live WITHOUT the APPEND refresh mode. It atomically REPLACES its whole target table on every refresh, and because these MVs carry a bounded "WHERE timestamp >= now() - <window>", each tick overwrites the coarse table with only the recent window — deleting pre-rolled history permanently. This is the task 0090/0095 data loss, and every refresh makes it worse, so treat it as an emergency: check schema/rollups.sql against the live definition (packages/prices-clickhouse bin prices-clickhouse-drift prints the diff), re-create the MV WITH APPEND, then assess what history was lost. ⚠️ This alarm fires once and stays latched — it will NOT re-notify while the condition persists, so do not treat silence as resolution.`,
+        metric: new cloudwatch.Metric({
+          namespace: 'Prices/Rollup',
+          metricName: 'MvDriftCritical',
+          dimensionsMap: { Environment: config.envName },
+          statistic: 'Maximum',
+          period: cdk.Duration.minutes(15),
+        }),
+        threshold: 1,
+        evaluationPeriods: 2,
+        datapointsToAlarm: 1,
+        comparisonOperator:
+          cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.MISSING,
+      },
+    );
+    this.mvDriftCriticalAlarm.addAlarmAction(snsAction);
+    this.mvDriftCriticalAlarm.addOkAction(snsAction);
+
+    this.mvDriftAlarm = new cloudwatch.Alarm(this, 'MvDriftAlarm', {
+      alarmName: `prices-${config.envName}-mv-drift`,
+      alarmDescription: `A rollup materialized view no longer matches schema/rollups.sql — its definition drifted, it is missing, it could not be fingerprinted, or an undeclared MV is writing into a table it does not own. Data keeps flowing and looks healthy; it is simply being built from the wrong definition, which no other alarm can see. NOT an emergency (nothing is being destroyed) but it does not fix itself: run the prices-clickhouse-drift binary for the field-level diff, and note that re-applying rollups.sql will report success and change nothing on an MV that already exists. ⚠️ Fires once and stays latched by design (task 0204 gap 3) — drift does not grow, so silence here means "still wrong", never "resolved".`,
+      metric: new cloudwatch.Metric({
+        namespace: 'Prices/Rollup',
+        metricName: 'MvDriftCount',
+        dimensionsMap: { Environment: config.envName },
+        statistic: 'Maximum',
+        period: cdk.Duration.minutes(15),
+      }),
+      threshold: 1,
+      evaluationPeriods: 2,
+      datapointsToAlarm: 1,
+      comparisonOperator:
+        cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.MISSING,
+    });
+    this.mvDriftAlarm.addAlarmAction(snsAction);
+    this.mvDriftAlarm.addOkAction(snsAction);
+
+    // ⚠️ The false page this exists to prevent. `system.tables` is filtered by
+    // grant, not denied, so a narrowed grant makes every MV report "missing" —
+    // identical in shape to the entire rollup chain having been dropped.
+    // Publishing MvDriftCount = 6 in that state would page at maximum urgency
+    // with the wrong diagnosis. The probe suppresses the counts when it can see
+    // NO prices objects at all and raises this instead.
+    this.mvDriftUnreadableAlarm = new cloudwatch.Alarm(
+      this,
+      'MvDriftUnreadableAlarm',
+      {
+        alarmName: `prices-${config.envName}-mv-drift-unreadable`,
+        alarmDescription: `The MV drift check ran but could see NO objects in the prices database, so its drift counts are meaningless and have been suppressed. This is far more likely a narrowed ClickHouse grant than the rollup chain having been deleted — system.tables is filtered by grant rather than denied, so a permissions change makes every MV look missing. Check the probe's mTLS identity and its SELECT grant on prices.* FIRST. ⚠️ If the grant is intact, then the objects really are gone and this is a catastrophe: escalate immediately and do NOT re-apply rollups.sql before understanding what happened.`,
+        metric: new cloudwatch.Metric({
+          namespace: 'Prices/Rollup',
+          metricName: 'MvDriftUnreadable',
+          dimensionsMap: { Environment: config.envName },
+          statistic: 'Maximum',
+          period: cdk.Duration.minutes(15),
+        }),
+        threshold: 1,
+        evaluationPeriods: 2,
+        datapointsToAlarm: 1,
+        comparisonOperator:
+          cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.MISSING,
+      },
+    );
+    this.mvDriftUnreadableAlarm.addAlarmAction(snsAction);
+    this.mvDriftUnreadableAlarm.addOkAction(snsAction);
 
     // Total ingestion halt: the lag / errors / DLQ alarms above all key on the
     // *presence* of enqueued or failed messages, so a producer-side stop (BE's
@@ -765,7 +1100,7 @@ export class ObservabilityStack extends cdk.Stack {
         timeout: cdk.Duration.minutes(1),
         cadence: cdk.Duration.minutes(15),
         impact:
-          'Every rollup-freshness alarm goes dark: they read Prices/Rollup RollupLagSeconds, which only this probe publishes, so a frozen rollup chain would stop being reported rather than reported as frozen — the exact nine-day blind spot of task 0136.',
+          'Every rollup-freshness alarm goes dark: they read Prices/Rollup RollupLagSeconds, which only this probe publishes, so a frozen rollup chain would stop being reported rather than reported as frozen — the exact nine-day blind spot of task 0136. Since task 0204 the ClickHouse free-space alarm rides on the same probe, so it goes dark too: a filling shared volume would also stop being reported.',
       },
       {
         name: 'mtls-notafter-probe',
@@ -793,5 +1128,51 @@ export class ObservabilityStack extends cdk.Stack {
     cdk.Tags.of(this).add('Project', 'stellar-prices-api');
     cdk.Tags.of(this).add('ManagedBy', 'cdk');
     cdk.Tags.of(this).add('Environment', config.envName);
+
+    assertAlarmDescriptionsFitCloudWatch(this);
+  }
+}
+
+/**
+ * CloudWatch caps `AlarmDescription` at 1024 characters, and **nothing local
+ * enforces it**: `cdk synth` renders an over-long description happily, the
+ * template is valid CloudFormation, and the request is only rejected by the
+ * CloudWatch API mid-deploy — after some alarms in the stack have already been
+ * created (task 0204, 2026-08-20; three `usd-stranded` rungs at ~1250 chars).
+ *
+ * ⚠️ The alarms in this stack carry deliberately long, runbook-style
+ * descriptions, because an operator reading Slack at 03:00 has nothing else.
+ * That is worth keeping — but it means this ceiling will be hit again, and a
+ * failure discovered at deploy time is the most expensive place to discover it.
+ *
+ * So the check runs at synth: a walk of the construct tree that throws with the
+ * offending alarm and its length. It reads the resolved CloudFormation property
+ * rather than the constructor argument, so descriptions built from tokens or
+ * `Fn::Join` are measured as CloudWatch will actually see them.
+ */
+function assertAlarmDescriptionsFitCloudWatch(scope: Construct): void {
+  const MAX = 1024;
+  const tooLong = scope.node
+    .findAll()
+    .filter((c): c is cloudwatch.Alarm => c instanceof cloudwatch.Alarm)
+    .map((alarm) => {
+      const cfn = alarm.node.defaultChild as cloudwatch.CfnAlarm;
+      const description = cdk.Stack.of(alarm).resolve(
+        cfn.alarmDescription,
+      ) as unknown;
+      const length = typeof description === 'string' ? description.length : 0;
+      return { name: cfn.alarmName, length };
+    })
+    .filter((a) => a.length > MAX);
+
+  if (tooLong.length > 0) {
+    const detail = tooLong
+      .map((a) => `  ${String(a.name)} — ${a.length} chars`)
+      .join('\n');
+    throw new Error(
+      `${tooLong.length} CloudWatch alarm description(s) exceed the ${MAX}-character ` +
+        `API limit and would fail mid-deploy:\n${detail}\n` +
+        'Shorten the description(s); the limit is enforced by CloudWatch, not by synth.',
+    );
   }
 }
