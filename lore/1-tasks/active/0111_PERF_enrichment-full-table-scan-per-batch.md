@@ -113,6 +113,28 @@ history:
       ⚠️ Also corrects [[0209]]: its 657M figure is the WHOLE-TABLE candidate
       count, not a USDT one, and its "pivot is behind a backlog" root cause is
       falsified — see 0215.
+  - date: 2026-08-21
+    status: active
+    who: okarcz
+    note: >
+      OPTION 1 CHOSEN and the implementation plan written, after [[0215]]'s Caddy
+      fix cleared the sequencing gate and gave a clean baseline. Key finding that
+      shrinks the work: the partition-bounding mechanism ALREADY EXISTS, is
+      tested, and runs in production — ChEnrichConfig::time_window threaded by
+      window_pred(), set per month by the 0114 coarse-repair driver, with the
+      candidate-side-only bound already designed so the pivot reference still
+      forward-fills. The scheduled 1m pass simply sets it to None, and main.rs:58
+      states that as intent. So this is "drive the existing bounding from the
+      scheduled pass", not "build bounding". Design is a live pass bounded to 2
+      partitions plus a frontier-driven historical sweep, with the frontier
+      ADVISORY (every month re-confirmed by a cheap bounded count) so wrong state
+      can never silently skip rows — the failure class 0215 just cost 26 days on.
+      The pre-2021 unpriceable floor then needs no hard-coded cutoff: those
+      months make no progress and mark themselves exhausted. ⚠️ One statement
+      still unmeasured — watermark()'s `SELECT max(timestamp)` runs every pass and
+      every measurement so far filtered query_log on INSERT INTO, so it has never
+      been looked at. Branch perf/0111_partition-bounded-enrichment-passes;
+      prepare-only, nothing deployed.
 ---
 
 > **Why this is queued ahead of its own cost case:** the perf argument for 0111
@@ -406,6 +428,151 @@ re-litigate them without new evidence.
 
 Options 1 and 3 are complementary; 2 may be a fast stopgap; 5 is 3's cheaper
 half if [[0167]]'s table proves out.
+
+## ✅ CHOSEN: option 1, via option A — implementation plan (2026-08-21)
+
+### The mechanism already exists and is in production
+
+`ChEnrichConfig::time_window: Option<(u32, u32)>` (`ch_enrich.rs:298`) is
+threaded into every candidate scan by `window_pred()` (`ch_enrich.rs:504`) and is
+covered by tests (`peg_sql_threads_the_partition_window_into_the_outer_where`,
+`pivot_sql_bounds_only_the_candidate_side_not_the_reference`). `repair.rs:317`
+sets it per month for the coarse tables. Its own doc comment already names this
+task as the reason it exists.
+
+The scheduled 1m pass simply never sets it — `main.rs:58`:
+
+```rust
+// The scheduled Lambda always runs the unbounded hourly pass over
+// price_ohlcv_1m; the partition-bounded window is only set by the 0114
+// coarse-repair driver (operator-run), never here.
+time_window: None,
+```
+
+**That comment is the defect, written down as intent.** So this is not "build
+partition bounding" — it is "drive the existing, tested partition bounding from
+the scheduled pass", which is also what the reuse-tested-code working agreement
+requires.
+
+⚠️ Critically, `time_window` bounds **only the candidate side**. The pivot tier's
+inline XLM/USDC reference still forward-fills from earlier months, so a month's
+first buckets keep a valid anchor. That correctness property is already designed
+and tested — do not re-derive it.
+
+### The shape: split the two jobs that are currently welded together
+
+One unbounded pass serves two populations with opposite needs:
+
+| | rows | unpriced | needs |
+|---|---|---|---|
+| live window (`202607+`) | 17.05 M | 2.81 K | **freshness**, keeps up fine |
+| historical (`< 202403`) | 689.64 M | 646.25 M | **throughput** |
+
+The live window is dragged through a 736 M-row scan purely to serve the drain.
+Splitting them is the whole fix.
+
+### Phase 0 — schema: `prices.enrichment_frontier`
+
+Fourth instance of an established pattern in this schema — `ingest_cursor`
+(0064), `backfill_progress`, `discovery_state` are all tiny
+`ReplacingMergeTree` state tables in `prices`, live on prod and written by our
+workers.
+
+```
+tbl        LowCardinality(String)   -- price_ohlcv_1m, and the coarse tiers later
+month      UInt32                   -- YYYYMM, == the partition id under toYYYYMM
+state      Enum8('pending','exhausted')
+zeros_seen UInt64                   -- at last sweep, informational
+swept_at   DateTime
+version    UInt64                   -- monotonic; RMT(version) keeps the highest
+ENGINE = ReplacingMergeTree(version) ORDER BY (tbl, month)
+```
+
+- **Size:** ~102 partitions × 6 tiers ≈ 600 rows, tens of bytes each. Under
+  100 KB permanently, on a disk where we are 3.3% of a volume BE owns.
+- **Created by hand once**, like every other table here — there is no migration
+  runner, prod schema is applied manually and [[0142]] verified prod currently
+  matches `init.sql`. The worker needs no DDL grant.
+- **No MV, not in the rollup chain, not in the cleanup worker's retention list.**
+  It touches none of the machinery that has broken before.
+
+### Phase 1 — bound the live pass (`main.rs`)
+
+Set `time_window` to the current **and previous** monthly partition on the
+scheduled pass. Two partitions, not 102. Env-overridable
+(`ENRICH_LIVE_PARTITIONS`, default 2) so it can be widened without a code change
+if ingest ever lands late rows.
+
+This alone is most of the win, and it bounds the **oracle tier** too — which
+today burns 105-108 s of every 300 s invocation draining 499-3,564 candidates out
+of a 737 M-row scan (measured [[0215]]).
+
+### Phase 2 — the historical sweep, frontier-driven
+
+A driver in the shape of `CoarseRepairDriver` (`repair.rs`), which already has
+every piece: per-month `time_window`, `one_shot: false` for bounded batches, and
+a `deadline: Option<Instant>` so a slow catch-up cannot run past the Lambda
+timeout.
+
+Per invocation, after the live pass:
+
+1. Read the frontier; pick the oldest `pending` month for this table.
+2. **Confirm with a partition-bounded `count_candidates`** (~0.2-0.3 s).
+3. Run `ChEnrichmentPass` with that month's `time_window`, bounded batches,
+   deadline-aware.
+4. Write the frontier: no progress → `exhausted`; otherwise update `zeros_seen`.
+
+🔴 **The frontier is ADVISORY, never authoritative.** Step 2 is what makes it so.
+A wrong frontier then costs one cheap query, never skipped rows — and skipped
+rows that look healthy are precisely the failure class that cost 26 days in
+[[0215]]. Add a slow-cadence (daily) full re-enumeration to correct drift, so the
+state can only ever be a performance hint.
+
+⚠️ **Concurrency.** Three attempts run per hour via async retry. `version` is
+monotonic-forward (`ingest_cursor`'s deliberate design, including that a rewind
+then needs an explicit `DELETE`), and because the frontier is advisory a race
+costs duplicated work, not lost work.
+
+### Phase 3 — the unpriceable floor falls out for free
+
+5.34 M rows predate the XLM/USDC reference market (first candle 2021-02) and can
+never be priced by this design. They make no progress, so step 4 marks those
+months `exhausted` on first visit and the sweep never revisits them. **No
+hard-coded cutoff constant** — which is the main correctness advantage over
+bounded re-enumeration. Record the expected figure so a finished drain is not
+misread as an unfinished one (AC 4 below).
+
+### Phase 4 — make the drain observable
+
+- Publish frontier position and `pending` month count, so drain progress is a
+  metric rather than an archaeology dig.
+- A **per-leg** no-progress signal. Today one leg's progress masks another's
+  stall — see [[0219]], where the peg leg writes a constant 1,236 rows/batch
+  while `run_peg_pivot_tier`'s guard only breaks when the *overall* count stops
+  falling, which the XLM pivot's 10,000/batch prevents.
+
+### Phase 5 — tests
+
+Window threading is already covered. Add: frontier advance and exhaust; a
+no-progress month marked exhausted; monotonic version under concurrent writes;
+the live pass pruning to exactly the configured partition count.
+
+### ⚠️ One unmeasured statement to check first
+
+`watermark()` (`ch_enrich.rs:521`) runs `SELECT max(timestamp)` on every pass.
+`timestamp` is **4th** in the sort key, not a prefix. Every measurement in this
+task and in [[0215]] filtered `query_log` on `INSERT INTO`, so this SELECT has
+never been looked at. Measure it before assuming the live pass is cheap — it may
+be a third full scan hiding in plain sight.
+
+### Sequencing note
+
+Bounding the 1m pass is also what unblocks [[0218]]: the coarse sweep sits behind
+`main.rs:167`'s `?` with `budget = min(120 s, deadline − now − 60 s)`, and a pass
+that runs to the hard deadline leaves that at 0. It cannot do useful work until
+this lands.
+
+**Deploy is out of scope for this branch** — prepare only, per the standing rule.
 
 ## Acceptance Criteria
 
