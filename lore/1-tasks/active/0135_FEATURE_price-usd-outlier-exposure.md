@@ -243,6 +243,38 @@ history:
       documented "grep the definition to confirm the apply landed" check
       reports a successful deploy as failed unless it greps for function
       names. Cost me one false alarm mid-deploy.
+  - date: 2026-08-21
+    status: active
+    who: stkrolikiewicz
+    note: >
+      **Conditional bound implemented and measured BEFORE applying** — the
+      step the previous attempt lacked, now runbook step 1b. okarcz confirmed
+      the shape. `per_source` derives two prices (latest priced close, and
+      latest priced close within 2h); a new level 1b keeps a stale venue
+      unless the asset still has a fresh one, so the guard fires only where
+      the defect can occur. Code in PR #240.
+      **Counterfactual on prod, both variants over the same data in one
+      sitting** (4,152 assets): `zero_but_vwap_ok` 30 → **0**,
+      `zero_price_usd` 868 → **368**, and — the metric the unconditional form
+      destroyed — `empty_sources` 840 → **368**. Every metric improves, none
+      regresses. The 472-asset gain on `empty_sources` comes from C2's carry
+      rescuing venues with an un-enriched tip, which the conditional guard
+      does not take back.
+      Emergent property worth keeping: `empty_sources`, `zero_price_usd` and
+      `zero_vwap` all land on **368 exactly**. An asset now has a price,
+      sources and a VWAP, or none of the three — the contradiction this task
+      exists for is gone by construction rather than by luck.
+      Sizing, same session: the defect the guard prevents has **zero** live
+      occurrences. Seven assets are at risk (>= 3 sources, mixed fresh/stale)
+      and on all seven the fresh-only median sits within 1% of the all-source
+      median, against a 20% threshold. Kept regardless — the mixed population
+      is small precisely BECAUSE almost nothing is fresh while [[0215]] is
+      broken, and BE confirmed that fix is imminent, so the risk grows as the
+      pipeline recovers. Re-measure after 0215/0111.
+      Both arms pinned by fixtures and proven non-vacuous: disabling the
+      filter fails the MIX assertion (both venues survive), making it
+      unconditional fails the STA assertion with `sources = {}` — the
+      production regression reproduced in miniature.
 ---
 
 # price_usd is not outlier-protected
