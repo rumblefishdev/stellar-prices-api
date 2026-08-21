@@ -644,20 +644,22 @@ Current real-time price (latest snapshot from `current_prices`).
 
 `price_usd` is the **latest priced close**: a candle whose USD value has not
 been computed yet (enrichment is a separate, lagging pass) is skipped rather
-than reported as `0` — but only while the newest priced candle is within the
-**2 h carry bound** of the newest candle overall. Inside the bound the figure
-trails real time by up to one enrichment cycle (~25 min average, ~50 min
-worst case measured); beyond it the column returns `"0"` rather than
-certifying an hours-old close as current. `"0"` therefore means "no candle
-valued in USD within the bound" — either the asset genuinely did not trade,
-or USD-valuation has not reached any of its recent candles. `updated_at` is
-the snapshot time, **not** the price's age. `price_usd` is **not**
-outlier-filtered — it reports the newest priced close regardless of venue;
-`vwap_24h` is the de-noised figure. A source whose newest candle is
-un-enriched is likewise carried in `sources` and in the `vwap_24h` weighting
-at its latest priced close, under the same 2 h bound; a source is absent from
-`sources` when it has no priced candle inside the bound **or** the §5.5
-outlier filter excluded it. (Task 0135.)
+than reported as `0`. It is **not age-bounded** — for an asset that has
+stopped trading it is simply its last priced close, up to the 24 h window
+old — and `updated_at` is the snapshot time, **not** the price's age. No
+field carries that age today. `"0"` means no priced close exists in the
+window at all. `price_usd` is also **not** outlier-filtered: it reports the
+newest priced close regardless of venue, while `vwap_24h` is the de-noised
+figure.
+
+`sources` and `vwap_24h` are bounded where `price_usd` is not, and the
+asymmetry is deliberate: a per-venue entry asserts "this venue is quoting X",
+so a venue whose last priced close is more than **2 h** old is dropped rather
+than carried. A source is therefore absent when it has no recent priced
+close **or** the §5.5 outlier filter excluded it. One consequence worth
+planning for: an asset can legitimately return a `price_usd` alongside an
+empty `sources` and a `vwap_24h` of `0` — we hold a price, but no venue is
+currently quoting. (Task 0135.)
 
 **Response:**
 

@@ -268,10 +268,13 @@ timestamp)` and an un-enriched XLM tip zeroed `price_xlm`. Since 0135 both
 > - **Legs enrichment never reaches.** XLM trades continuously on
 >   exotic-quoted pairs that are not USD-priceable at all, so its newest
 >   _priced_ candle can be arbitrarily old while it looks actively traded.
-> - **Enrichment lag beyond the carry bound.** Task 0204 measured the ceiling
->   at **~30 h** on the USDT leg (2026-08-19), and [[0212]] shows the USDT
->   pivot has priced **zero** `price_ohlcv_1m` rows to date. On that leg the
->   lag is currently unbounded, so a healthy deploy can still show 0.
+> - **Enrichment not running at all.** As of 2026-08-20 the pass fails on
+>   every invocation — `Clickhouse(BadResponse(""))`, 3×/hour, for at least two
+>   days ([[0215]]). The client times out ~18 s _before_ ClickHouse finishes
+>   the same query; CH completes the INSERT server-side and logs `QueryFinish`,
+>   so rows land and every data-shaped signal looks normal. The XLM pivot runs
+>   first, fails, and aborts the pass, so the USDT pivot is never sent at all.
+>   Until that is fixed, a zero here says nothing about this deploy.
 >
 > Diagnose before reacting — if the query below shows the newest candles are
 > un-enriched or exotic-quoted, the view is fine and the finding belongs to
@@ -336,9 +339,9 @@ handler is still the stubbed build — re-check step 6 shipped.
 > (this bit three separate times — see PR #158). **0135 narrows when a zero is
 > expected, but does not turn it into an abort gate.** The MV now skips
 > un-enriched candles, so a zero on a liquid asset is worth a look — but the
-> two causes named in step 5 (never-priceable legs, and enrichment lag beyond
-> the carry bound, measured at ~30 h on the USDT leg in 0204) still produce it
-> with nothing broken. Investigate with the step-5 query; do not fail the
+> two causes named in step 5 (never-priceable legs, and — as of 2026-08-20 —
+> enrichment failing on every run, [[0215]]) still produce it with nothing
+> wrong in this MV. Investigate with the step-5 query; do not fail the
 > deploy on it. `change_24h_pct`/`change_7d_pct` remain "0 = no signal"
 > sentinels (a genuinely flat window also reads 0) — never gate on those.
 

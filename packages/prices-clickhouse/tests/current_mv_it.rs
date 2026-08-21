@@ -169,11 +169,12 @@ async fn current_prices_mv_computes_price_volume_and_market_cap() {
 ///   3 FOO — three sources, one a gross outlier → the filter must ARM
 ///   4 BAR — one source → the filter must be a NO-OP
 ///   5 DUO — exactly two far-apart sources → the >=3 guard must keep BOTH
-///   6 EXO — every source unpriced → no divide-by-zero, `sources` = `{}`
+///   6 EXO — every source unpriced, but WITH a real 7d baseline → the only
+///           fixture exercising the load-bearing change_7d numerator guard
 ///   7 ZER — priced HISTORY, un-enriched TIP → 0135: latest priced close wins
 ///   8 DIP — a genuine ~-100% crash → must NOT be swallowed by 0138's guard
-///  10 STA — priced history OLDER than the 2h carry bound → back to sentinels,
-///           and the change_* numerator guards proven load-bearing
+///  10 STA — priced history OLDER than the 2h carry bound → the ASYMMETRY:
+///           price_usd still publishes it, the venue drops out of sources/vwap
 ///  11 LAG — SINGLE source, priced history, un-enriched tip → carried (the
 ///           shape the XLM acceptance criterion names)
 ///  12 TRI — three sources, one carried past an un-enriched tip → the §5.5
@@ -243,10 +244,11 @@ async fn current_prices_mv_writes_0072_columns_and_filters_outliers() {
         // 0138 control: a REAL near-total crash. The guard must leave this alone.
         (8, 30, "2.00", "500", "sdex"),
         (8, 1, "0.0001", "10", "sdex"),
-        // 10 STA — the carry BOUND: priced history 190 min behind the tip
-        // (> 2h), so the carry must NOT apply and every column returns to its
-        // sentinel. Its 1h ref row below gives change_7d a REAL denominator,
-        // which makes this the regression test for the 7d numerator guard.
+        // 10 STA — the carry BOUND, and the ASYMMETRY it creates. Its only
+        // priced close is 190 min old (> 2h), so the per-venue guard drops
+        // sdex from `sources` and the vwap — while `price_usd`, deliberately
+        // unbounded, still publishes that close. Price without venues is the
+        // intended shape: we hold a price, no venue is quoting right now.
         (10, 190, "2.00", "500", "sdex"),
         (10, 1, "0", "0", "sdex"),
         // 11 LAG — single source, priced history INSIDE the bound: the carry
@@ -298,9 +300,12 @@ async fn current_prices_mv_writes_0072_columns_and_filters_outliers() {
     }
 
     // 7d references for assets whose change_7d needs a real denominator:
-    // 7/8 (the 0138 pair) and 10 (over-bound price_usd = 0 beside a REAL
-    // baseline — the exact shape only the numerator guard protects).
-    for asset in [7_u32, 8, 10] {
+    // 7/8 (the 0138 pair), 10 (over-bound), and 6 — the unpriced asset, now
+    // the ONLY fixture pairing `price_usd = 0` with a REAL 7d baseline. That
+    // pairing is what the numerator guard protects, and it is reachable
+    // because ref_7d reads price_ohlcv_1h, a different table from the 24h
+    // window that zeroes price_usd.
+    for asset in [6_u32, 7, 8, 10] {
         admin
             .query(&format!(
                 "INSERT INTO {db}.price_ohlcv_1h \
@@ -550,14 +555,18 @@ async fn current_prices_mv_writes_0072_columns_and_filters_outliers() {
         "market_cap_usd must be 1.90 * 1000 = 1900, got {zer_mc}"
     );
 
-    // ── 0135 carry BOUND: history older than 2h must NOT be carried ────────
-    // Asset 10's only priced candle is 190 min behind its tip. Publishing it
-    // would certify a 3h-old close as current (updated_at carries no age), so
-    // every column returns to its sentinel instead.
+    // ── 0135 ASYMMETRY: the bound guards the venues, not the headline ──────
+    // Asset 10's only priced close is 190 min old. The per-venue guard drops
+    // sdex (a venue that last quoted 3h ago is not quoting "now"), so
+    // `sources` empties and vwap goes to its sentinel — while `price_usd`
+    // still publishes the close, because blanking a price we hold is the
+    // outcome 0135 exists to remove. Measured on prod 2026-08-20: 1,091 of
+    // 4,444 assets (24.5%) already publish a hard zero without any bound.
     let sta_p = scalar_f64(&admin, &f("price_usd", 10)).await;
     assert!(
-        sta_p.abs() < 1e-9,
-        "price_usd beyond the 2h carry bound must be the 0 sentinel, got {sta_p}"
+        (sta_p - 2.0).abs() < 1e-9,
+        "price_usd is NOT age-bounded — it must still publish the 190-min-old \
+         priced close, got {sta_p}"
     );
     let sta_srcs: String = admin
         .query(&s("sources", 10))
@@ -566,23 +575,38 @@ async fn current_prices_mv_writes_0072_columns_and_filters_outliers() {
         .expect("sta sources");
     assert_eq!(
         sta_srcs, "{}",
-        "an over-bound source must drop out of sources"
+        "a venue whose last quote is beyond the carry bound must drop out of \
+         sources, so it cannot vote in the §5.5 median"
     );
-    // The numerator guards are LOAD-BEARING here, not belt-and-braces:
-    // open_24h is a real 2.00 and close_7d_ago a real 1.00, so without the
-    // nullIf on the numerator both columns would fabricate -100%.
+    let sta_vwap = scalar_f64(&admin, &f("vwap_24h", 10)).await;
+    assert!(
+        sta_vwap.abs() < 1e-9,
+        "vwap must be the sentinel when no venue is currently quoting, got {sta_vwap}"
+    );
+    // The row stays internally coherent: change_* are computed FROM the
+    // published price, never fabricated against it.
     let sta_24 = scalar_f64(&admin, &f("change_24h_pct", 10)).await;
     assert!(
         sta_24.abs() < 1e-9,
-        "change_24h_pct must be the 0 sentinel, NOT -100 (real open_24h=2.00 \
-         beside a zero price_usd), got {sta_24}"
+        "one priced candle means open_24h == price_usd, so 0%, got {sta_24}"
     );
     let sta_7d = scalar_f64(&admin, &f("change_7d_pct", 10)).await;
     assert!(
-        sta_7d.abs() < 1e-9,
-        "change_7d_pct must be the 0 sentinel, NOT -100 (real 1h baseline 1.00 \
-         beside a zero price_usd) — this is the only fixture exercising the 7d \
-         numerator guard, got {sta_7d}"
+        (sta_7d - 100.0).abs() < 1e-2,
+        "change_7d_pct must come from the published 2.00 against the 1.00 \
+         baseline = +100%, got {sta_7d}"
+    );
+
+    // ── the change_7d numerator guard, on the only shape that reaches it ───
+    // Asset 6 has no priced candle at all (price_usd = 0) but DOES have a real
+    // 1h baseline of 1.00 — ref_7d reads a different table, so the pairing is
+    // reachable. Without the numerator nullIf this publishes a fabricated
+    // -100%, which is what 0138 measured on 396 prod assets.
+    let exo_7d = scalar_f64(&admin, &f("change_7d_pct", 6)).await;
+    assert!(
+        exo_7d.abs() < 1e-9,
+        "an unpriced asset with a REAL 7d baseline must land on the 0 = 'no \
+         signal' sentinel, NOT -100, got {exo_7d}"
     );
 
     // ── 0135 single-source carry: the shape the XLM AC names ───────────────

@@ -30,8 +30,8 @@
 -- matching order.
 --
 -- Columns (task 0072 completes the set; all ten are now written):
---   price_usd       — latest PRICED close in the 24h window (argMaxIf, 0135;
---                     carry past an un-enriched tip bounded at 2h)
+--   price_usd       — latest PRICED close in the 24h window (argMaxIf, 0135);
+--                     NOT age-bounded — see the unfiltered CTE for why
 --   price_xlm       — price_usd re-expressed in XLM (÷ the XLM/USD close)
 --   change_24h_pct  — vs the oldest close inside the 24h window
 --   change_7d_pct   — vs the oldest priced close in the [7d, 5d] band of
@@ -122,21 +122,34 @@ WITH
     -- reading 0 here and being dropped by `src_price > 0` below as a side
     -- effect of enrichment timing.
     --
-    -- The carry is BOUNDED: it only applies while the source's newest priced
-    -- candle is within CARRY_BOUND of its newest candle overall. The decided
-    -- contract priced its staleness cost at ~50 min worst case (one enrichment
-    -- cycle, measured in 0144); 2h is that with headroom. Beyond the bound the
-    -- source reads 0 again and drops out below — a chronically-unpriced venue
-    -- (an exotic-quote pair enrichment never reaches) must not feed a
-    -- hours-old close into the §5.5 median vote or the vwap weighting, where
-    -- it can outvote and evict a live venue.
+    -- The carry is BOUNDED, and the bound lives HERE and nowhere else. The
+    -- reason is scope, not a number: the defect 0135 introduces is a dead
+    -- venue voting in the §5.5 median, which is a per-venue problem, so the
+    -- guard belongs in the per-venue pipeline. A carried close feeding
+    -- `sources` and `vwap_24h` asserts "this venue quotes X right now"; once
+    -- it is hours old that assertion is false, and because the median is
+    -- UNWEIGHTED, two stale venues can outvote and evict the one live venue
+    -- (the 3-source case in PR #228's review).
+    --
+    -- CARRY_BOUND = 2h, derived from the enrichment SCHEDULE — `rate(1 hour)`
+    -- in infra/envs/production.json, so two cycles, and a venue quoting
+    -- normally survives one missed pass. Deliberately NOT fitted to an
+    -- observed lag: as of 2026-08-20 enrichment was failing on every run
+    -- (task 0215), so a measured figure would encode a broken pipeline.
+    -- Revisit once 0111 and 0215 land.
+    --
+    -- Reference is `now()`, NOT the asset's own newest candle. An earlier
+    -- revision compared against `max(timestamp)`, which spans quote legs
+    -- enrichment can never price — for a venue trading continuously on such a
+    -- leg that reference advances forever, the bound becomes unsatisfiable and
+    -- the venue drops out with nothing wrong. `now()` asks the question this
+    -- column actually needs answered: is the venue's last quote still current?
     per_source AS (
         SELECT
             asset_id                          AS asset_id,
             source                            AS source,
-            if(maxIf(timestamp, close_usd > 0) >= max(timestamp) - INTERVAL 2 HOUR,
-               argMaxIf(close_usd, timestamp, close_usd > 0),
-               toDecimal128(0, 14))           AS src_price,
+            argMaxIf(close_usd, timestamp,
+                     close_usd > 0 AND timestamp >= now() - INTERVAL 2 HOUR) AS src_price,
             sum(volume_quote_usd)             AS src_volume
         FROM prices.price_ohlcv_1m FINAL
         WHERE timestamp >= now() - INTERVAL 24 HOUR
@@ -243,21 +256,34 @@ WITH
     -- instead of a self-join.
     --
     -- price_usd is the latest PRICED close (task 0135 contract, decided
-    -- 2026-08-05), bounded: the un-enriched tip is skipped only while the
-    -- newest priced candle is within CARRY_BOUND (2h, see per_source) of the
-    -- newest candle overall. Inside the bound the cost is one enrichment cycle
-    -- of staleness (~25 min avg, ~50 min worst case measured); beyond it the
-    -- column returns to the 0 sentinel rather than certifying an hours-old
-    -- close as current — updated_at is the refresh time and carries no age
-    -- signal, so an unbounded carry would be undetectable downstream. An asset
-    -- with NO priced candle in the window reads 0, the documented
+    -- 2026-08-05) and is deliberately NOT age-bounded, unlike per_source.
+    --
+    -- The asymmetry is the point. Publishing an old close for an asset that
+    -- stopped trading is not a defect this task introduced — the pre-0135
+    -- `argMax` published the same close. Bounding it here would be a new
+    -- restriction on behaviour nobody reported, and it would trade a known
+    -- price for the 0 sentinel, which is the outcome 0135 exists to remove:
+    -- measured on prod 2026-08-20, 1,091 of 4,444 assets (24.5%) already
+    -- publish a hard zero, and a consumer cannot tell "worthless" from "we do
+    -- not know". What 0135 DID introduce is a stale venue voting in the
+    -- median, and that is guarded one CTE up.
+    --
+    -- ⚠️ Honest consequence: this column can be older than it looks, and
+    -- `updated_at` is the refresh time, not the price's age. No column carries
+    -- that age today; publishing it is a follow-up task and is the real answer
+    -- to "how fresh is this?" — not blanking a price we hold.
+    --
+    -- ⚠️ Any future guard here must emit a SENTINEL, never filter the row out.
+    -- This MV is REPLACE, not APPEND (unlike the six rollup MVs), so
+    -- current_prices becomes exactly what this SELECT returns — a filtered-out
+    -- asset DISAPPEARS from the table rather than showing an empty price.
+    --
+    -- An asset with NO priced candle in the 24h window reads 0, the documented
     -- "unavailable" value.
     unfiltered AS (
         SELECT
             asset_id                          AS asset_id,
-            if(maxIf(timestamp, close_usd > 0) >= max(timestamp) - INTERVAL 2 HOUR,
-               argMaxIf(close_usd, timestamp, close_usd > 0),
-               toDecimal128(0, 14))           AS price_usd,
+            argMaxIf(close_usd, timestamp, close_usd > 0) AS price_usd,
             argMinIf(close_usd, timestamp, close_usd > 0) AS open_24h,
             sum(volume_quote_usd)             AS volume_24h_usd
         FROM prices.price_ohlcv_1m FINAL

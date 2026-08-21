@@ -190,12 +190,12 @@
 -- told apart by value. That is a weaker contract than the value-or-absent one
 -- above, and consumers have to handle it explicitly:
 --   price_usd        Decimal(38,14). Since task 0135 this is the latest
---                    PRICED close: an un-enriched tip is skipped while the
---                    newest priced candle is within 2h of the newest candle
---                    overall, so the value can be up to ~2h STALE while
---                    updated_at (refresh time) reads fresh — updated_at is NOT
---                    a price-age signal. 0 = no priced candle inside that
---                    bound (an un-enriched tip alone no longer produces 0).
+--                    PRICED close in the 24h window, NOT age-bounded: for an
+--                    asset that stopped trading it is simply its last priced
+--                    close, and updated_at (refresh time) is NOT a price-age
+--                    signal. No column carries that age yet. 0 = no priced
+--                    candle in the window (an un-enriched tip alone no longer
+--                    produces 0).
 --   price_xlm        Decimal(38,14). 0 = unavailable (no XLM market, or
 --                    price_usd on its 0 sentinel per the 0135 rule above) —
 --                    indistinguishable from a true 0. An un-enriched tip by
@@ -211,9 +211,11 @@
 --   volume_24h_usd / market_cap_usd / vwap_24h
 --                    Decimal(38,14). 0 = unavailable. market_cap_usd is 0
 --                    whenever circulating supply is absent (best-effort join);
---                    it multiplies price_usd, and vwap_24h weights per-source
---                    latest priced closes, so both inherit the ≤2h staleness
---                    bound described under price_usd.
+--                    it multiplies price_usd and inherits its (unbounded) age.
+--                    vwap_24h is different: per-source closes ARE age-bounded
+--                    (2h), because a venue in `sources` asserts "quoting now"
+--                    — so an asset can legitimately show a price_usd with an
+--                    empty sources/zero vwap when no venue is currently live.
 --   sources          String holding a JSON object — NOT a JSON-typed column.
 --                    THREE states, and '' is the trap:
 --                      ''   — the MV has never rewritten this row (table
@@ -515,9 +517,9 @@ WHERE sac_address != '';
 -- consumer's LEFT JOIN) but for "now": one row per asset with the latest USD
 -- price + `updated_at`. ⚠️ **`updated_at` is the MV's refresh time, not the
 -- price's age** — since task 0135 `price_usd` is the latest *priced* close and
--- may be carried from an earlier candle, so a staleness policy keyed on
--- `updated_at` cannot see that. See the sentinel table above for the rule; no
--- column currently carries the price's own timestamp. Reads
+-- is not age-bounded, so a staleness policy keyed on `updated_at` cannot see
+-- how old it is. See the sentinel table above; no column carries the price's
+-- own timestamp yet. Reads
 -- current_prices, which is written by the Current Price Updater (task 0039) —
 -- this view is the read surface; it is empty until that writer runs.
 --

@@ -12,16 +12,20 @@ pub struct PriceResponse {
     /// Latest **priced** USD close (task 0135): a candle whose USD value is
     /// not yet computed is skipped rather than reported as `"0"`.
     ///
-    /// **This value can be older than it looks.** The carry bound limits how
-    /// far USD-valuation may lag behind the newest candle — it does not limit
-    /// the age of the published close, which for an asset that has stopped
-    /// trading is simply its last priced close, up to the 24 h aggregation
-    /// window old. `updated_at` is the snapshot time, **not** the price's
-    /// age, and no field currently carries that age. `"0"` means no priced
-    /// close qualified at all.
+    /// **This value can be older than it looks, and is not age-bounded.** For
+    /// an asset that has stopped trading it is simply the last priced close,
+    /// up to the 24 h aggregation window old. `updated_at` is the snapshot
+    /// time, **not** the price's age, and no field currently carries that
+    /// age. `"0"` means no priced close exists in the window at all.
+    ///
+    /// Note the deliberate asymmetry with `sources` / `vwap_24h`: those drop a
+    /// venue whose last quote is stale, because a per-venue price asserts
+    /// "quoting now". This field makes no such claim.
     pub price_usd: String,
-    /// XLM-quoted price (task 0072); `price_usd / XLM-USD close`, so it
-    /// shares `price_usd`'s semantics and `"0"` sentinel.
+    /// XLM-quoted price (task 0072): `price_usd / XLM-USD close`. Shares
+    /// `price_usd`'s `"0"` sentinel — and note it is a quotient of **two
+    /// independently dated** closes, the asset's and XLM's, so it is not a
+    /// price "as of" any single instant and never was.
     pub price_xlm: String,
     /// 24h USD volume-weighted average price. Weighted across sources with the
     /// general-overview §5.5 inter-source median-outlier filter applied.

@@ -136,6 +136,54 @@ history:
       Contracts synced: `views.sql` sentinel table, the 0072 rollout runbook
       (its post-deploy guidance was inverted by this change), `dto.rs`
       doc-comments (the published OpenAPI descriptions) and §4.2.
+  - date: 2026-08-20
+    status: active
+    who: stkrolikiewicz
+    note: >
+      **Bound removed from `price_usd`; it survives only in `per_source`.**
+      Settled with okarcz, who accepted the shape and corrected the reasoning
+      — the correction is the important part of this entry.
+      **(a) My premise was wrong.** I argued a bound would blank the very
+      population 0135 rescues, inferring it from 0111's backlog figures.
+      Enrichment has TWO stages: the oracle stage handles recent candles and
+      keeps up (105–213k rows/day); the pivot stage grinds history
+      oldest-first and is the one drowning. 0111's note described the second
+      and read as the whole. Re-measured 2026-08-20: the current window holds
+      **2,810** unpriced XLM-quoted candles against 388M in 2023, and the
+      657M figure is whole-table (646M is 0088 backfill history; the current
+      window's 10.4M are exotic legs with no pricing path, sentinel under any
+      policy). So a bound would not have blanked normal assets. **Do not
+      re-import that argument.**
+      **(b) The reason that does hold** is scope: the defect 0135 introduced
+      is a dead venue voting in the §5.5 median, which is per-venue, so the
+      guard belongs there. A stale headline price for an asset that stopped
+      trading was never this task's bug — the pre-0135 `argMax` published the
+      same close.
+      **(c) The measured argument, stronger than either:** on prod
+      `current_prices FINAL` — 4,444 assets, **1,091 (24.5%) already publish a
+      hard zero** with no bound at all. That is the population this PR
+      rescues; a tight bound would push part of it back into the sentinel it
+      is already stuck in, and waste the rescue for the rest. A zero is worse
+      than an old-but-true price because the consumer cannot separate
+      "worthless" from "unknown".
+      **(d) N is deliberately not chosen.** Enrichment has been failing on
+      every invocation for ~2 days ([[0215]]), so any threshold fitted now
+      would encode a broken pipeline. `per_source`'s 2h comes from the
+      SCHEDULE (`rate(1 hour)` × 2), not from an observed lag. Revisit after
+      [[0111]] and [[0215]]. The 24.5% is an upper bound, not steady state.
+      **(e) Constraint recorded, not left to luck:** this MV is REPLACE, not
+      APPEND, so `current_prices` becomes exactly what the SELECT returns —
+      a guard that FILTERS rows would delete those assets from the table
+      rather than blank a field. Every guard here emits a sentinel.
+      Review findings #1/#3/#5 dissolve with the bound gone; #3 leaves a tail
+      (`price_xlm` is a quotient of two independently dated closes, so its age
+      is the older of the two) which goes to [[0216]] along with the age
+      column itself. The lint now also asserts the bound appears exactly once,
+      so it cannot be silently duplicated again.
+      okarcz verified all seven MVs on prod: Scheduled, no exceptions,
+      `mv_current_prices` at 222 ms reading 2.7M rows and writing 4,444, and
+      the live definition matches `current.sql` including TO-column order —
+      so the DROP + re-CREATE apply is safe.
 ---
 
 # price_usd is not outlier-protected

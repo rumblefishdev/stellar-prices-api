@@ -461,12 +461,12 @@ mod tests {
                      un-enriched sentinel 0 (task 0135); got: {head}"
                 );
             }
-            guarded += stmt
-                .matches("argMaxIf(close_usd, timestamp, close_usd > 0)")
-                .count();
-            guarded += stmt
-                .matches("argMinIf(close_usd, timestamp, close_usd > 0)")
-                .count();
+            // Prefix match, not the full expression: per_source's guard also
+            // carries the carry-bound predicate, so pinning the exact text
+            // would silently stop counting it (and the count below would
+            // "pass" one short).
+            guarded += stmt.matches("argMaxIf(close_usd, timestamp,").count();
+            guarded += stmt.matches("argMinIf(close_usd, timestamp,").count();
         }
 
         // Non-vacuity: 3 argMaxIf (xlm_usd scalar, per_source, unfiltered) +
@@ -476,6 +476,18 @@ mod tests {
             guarded, 5,
             "current.sql guarded close_usd aggregate count changed — verify \
              every site still skips un-enriched rows, then update this count"
+        );
+
+        // Task 0135, review finding #5: the carry bound must exist at EXACTLY
+        // one site. It was briefly duplicated across per_source and unfiltered,
+        // and a bound tuned in one place but not the other reproduces the very
+        // contradiction the review caught — a zero headline price beside a
+        // populated `sources`. The guard above cannot see that; this can.
+        let bounds = CURRENT_SQL.matches("INTERVAL 2 HOUR").count();
+        assert_eq!(
+            bounds, 1,
+            "the carry bound must appear exactly once (per_source). Found \
+             {bounds}: a second site means the two can drift apart"
         );
     }
 
