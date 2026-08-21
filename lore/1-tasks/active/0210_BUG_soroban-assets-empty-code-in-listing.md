@@ -2,7 +2,7 @@
 id: "0210"
 title: "Soroban assets carry an empty asset_code in listing and detail — top-volume rows are unidentifiable to consumers"
 type: BUG
-status: backlog
+status: active
 related_adr: []
 related_tasks: ["0120"]
 tags: [layer-backend, priority-medium, effort-small, milestone-M2, api, metadata, defect]
