@@ -18,7 +18,7 @@
     "assetDiscovery": "rate(1 hour)",
     "cleanup": "cron(0 3 * * ? *)",
     "enrichment": "rate(1 hour)",
-    "coarseSweep": "rate(1 hour)",
+    "coarseSweep": "cron(30 * * * ? *)",
     "backfillFreshnessProbe": "rate(15 minutes)",
     "rollupFreshnessProbe": "rate(15 minutes)",
     "mtlsNotafterProbe": "rate(1 day)"

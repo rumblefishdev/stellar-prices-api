@@ -213,7 +213,7 @@ pub fn sweep_metrics(summary: &CoarseSweepSummary, duration_ms: u64) -> Vec<Metr
         // hit its deadline, which is precisely when it matters.
         Metric {
             name: "CoarseSweepDeadlineHit",
-            value: if summary.deadline_hit { 1.0 } else { 0.0 },
+            value: if summary.was_starved() { 1.0 } else { 0.0 },
             unit: Unit::Count,
         },
         Metric {
@@ -371,6 +371,7 @@ mod tests {
                     rows_reset: 0,
                     snapshot_name: None,
                 }],
+                deadline_hit: false,
             },
         };
         let summary = CoarseSweepSummary {
@@ -426,6 +427,37 @@ mod tests {
         assert_eq!(by("CoarseSweepRuns").value, 1.0);
         assert_eq!(by("CoarseSweepFailedRuns").value, 0.0);
         assert_eq!(by("CoarseSweepTablesSwept").value, 0.0);
+    }
+
+    /// A table truncated mid-walk must ALSO mark the run starved. Before this
+    /// the flag lived only on the sweep, so a budget that expired *inside* a
+    /// table — or during the final one — reported `DeadlineHit = 0` and a
+    /// starved run looked healthy. Found in review of PR #244.
+    #[test]
+    fn a_table_truncated_mid_walk_marks_the_run_starved() {
+        use crate::repair::{RepairSummary, TableSweep};
+        let truncated = RepairSummary {
+            deadline_hit: true,
+            ..Default::default()
+        };
+        let summary = CoarseSweepSummary {
+            start_month: 202_605,
+            end_month: 202_606,
+            tables: vec![TableSweep {
+                table: "price_ohlcv_1h".to_string(),
+                summary: truncated,
+            }],
+            failed_tables: vec![],
+            skipped_tables: vec![],
+            // The sweep-level flag is FALSE: the loop never reached a later
+            // table, it ran out inside this one.
+            deadline_hit: false,
+            deferred_tables: vec![],
+        };
+        assert!(summary.was_starved(), "mid-table truncation must count");
+        let m = sweep_metrics(&summary, 120_000);
+        let by = |name: &str| m.iter().find(|x| x.name == name).expect("metric present");
+        assert_eq!(by("CoarseSweepDeadlineHit").value, 1.0);
     }
 
     /// The three states task 0218 AC 2 requires to be distinguishable. "Never

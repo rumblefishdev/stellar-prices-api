@@ -110,6 +110,13 @@ pub struct MonthRepair {
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct RepairSummary {
     pub months: Vec<MonthRepair>,
+    /// This table's month walk stopped early on the wall-clock budget.
+    ///
+    /// Without it a truncation *inside* a table is silent: the caller sees a
+    /// table that simply had fewer months, which reads identical to one that
+    /// finished. That was the residual AC 4 blind spot in task 0218 — the
+    /// per-table flag closes it, the per-sweep flag alone did not.
+    pub deadline_hit: bool,
 }
 
 impl RepairSummary {
@@ -274,6 +281,7 @@ impl CoarseRepairDriver {
                     next_month = mw.month,
                     "coarse repair: time budget reached — deferring remaining months to the next run"
                 );
+                summary.deadline_hit = true;
                 break;
             }
 
@@ -476,15 +484,25 @@ pub struct CoarseSweepSummary {
     /// Task 0218 AC 4 requires a starved run to be *visible*, and this is the
     /// field the `CoarseSweepDeadlineHit` metric is built from.
     pub deadline_hit: bool,
-    /// Tables not reached this run because the budget ran out. Empty unless
-    /// [`Self::deadline_hit`]. They are not failures — the next run resumes
-    /// them — but a list that never empties means the budget is too small.
+    /// Tables not reached this run because the budget ran out.
+    ///
+    /// ⚠️ A table that was *started* and truncated mid-walk is NOT listed here —
+    /// it appears in [`Self::tables`] with its own `deadline_hit` set. So this
+    /// list is "never started", not "not finished"; use [`Self::deadline_hit`],
+    /// which covers both, to answer "was this run starved".
     pub deferred_tables: Vec<String>,
 }
 
 impl CoarseSweepSummary {
     pub fn total_enriched(&self) -> u64 {
         self.tables.iter().map(|t| t.summary.total_enriched()).sum()
+    }
+    /// Whether this run was starved, by any of the three routes: it ran out of
+    /// budget before a later table, during the final table, or inside any
+    /// table's month walk. The metric `CoarseSweepDeadlineHit` is built from
+    /// this, so all three are visible (task 0218 AC 4).
+    pub fn was_starved(&self) -> bool {
+        self.deadline_hit || self.tables.iter().any(|t| t.summary.deadline_hit)
     }
     pub fn total_remaining(&self) -> u64 {
         self.tables

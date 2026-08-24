@@ -294,10 +294,19 @@ ssh -i ~/.ssh/sorban-prod_ed25519 deploy@168.119.73.161 \
      ORDER BY p.volume_quote DESC LIMIT 10 FORMAT PrettyCompact\""
 ```
 
-## Step 6 — the recurring guard (automated: folded into the enrichment Lambda)
+## Step 6 — the recurring guard (automated: its own Lambda)
+
+> ⚠️ **Changed by task 0218 (2026-08-24).** The guard used to be folded into the
+> enrichment Lambda, running after its 1m pass. It is now
+> **`prices-<env>-coarse-sweep`**, its own crate, function and EventBridge rule
+> (`cron(30 * * * ? *)`), because sitting behind the 1m pass's `?` meant it was
+> **skipped** whenever that pass errored and **starved** when it ran long — it
+> never executed in production at all. Everything below about _what it does_ still
+> holds; the operational details (which function carries the env vars, the off
+> switch, the alarms) are updated in place.
 
 The one-off historical repair (Steps 0–7) and the ongoing guard are the same job.
-The guard is **not** a separate cron or a separate Lambda — it is folded into the
+The guard used to be **not** a separate cron or a separate Lambda — folded into the
 existing hourly `enrichment` Lambda (`prices-<env>-enrichment`), which already
 owns `close_usd` for `price_ohlcv_1m`. After each 1m pass it also re-sweeps the
 recent coarse partitions, so any USD value the rollup path freezes going forward
@@ -315,8 +324,11 @@ broken repeatedly (cursor freeze, cleanup mid-backfill, the 4-day outage).
 
 ### What it does each run
 
-- Runs **after** the 1m pass and is **best-effort**: any sweep failure is logged
-  and swallowed, so it can never fail the invocation or delay/regress the 1m pass.
+- Runs on **its own hourly schedule**, independent of the 1m pass.
+  ⚠️ Since 0218 a sweep failure **fails its own invocation** (it is no longer
+  swallowed): there is no 1m pass to protect, and a swallowed error was
+  indistinguishable from a run that swept nothing. The enrichment worker is
+  unaffected either way — separate function, separate alarm.
 - **Bounded** (`one_shot = false`): each table/month runs at most
   `COARSE_SWEEP_MAX_BATCHES` batches, then stops; overflow defers to the next
   hourly run, so a run cannot approach the 5-min timeout.
@@ -341,9 +353,14 @@ Set in CDK (`infra/src/lib/stacks/eventbridge-stack.ts`, the enrichment Lambda's
 | `COARSE_SWEEP_MAX_BATCHES`      | `20`                                  | per-tier batch budget per month; caps a catch-up run.                                                                                                                                                                                          |
 | `COARSE_SWEEP_TIME_BUDGET_SECS` | `120`                                 | wall-clock budget per invocation; the sweep stops after this long (and always a margin before the Lambda deadline) and defers the rest, so a slow catch-up can never hit the hard timeout and fail the invocation.                             |
 
-> **Emergency off switch (no deploy):** in the AWS console set the enrichment
-> Lambda's `COARSE_SWEEP_TABLES` env var to empty. The next hourly run skips the
-> sweep; the 1m pass is unaffected. A redeploy restores the CDK value.
+> **Emergency off switch (no deploy):** set **`prices-<env>-coarse-sweep`**'s
+> `COARSE_SWEEP_TABLES` env var to empty — ⚠️ **not** the enrichment Lambda,
+> which no longer carries it (task 0218). The next run logs
+> `coarse sweep disabled` and does nothing; the 1m pass is unaffected because it
+> is a different function. A redeploy restores the CDK value.
+>
+> To stop it entirely, disable the `prices-<env>-coarse-sweep` EventBridge rule —
+> but note that trips the `-no-invocations` alarm after three hours, by design.
 
 Note `_15m` **is** in the recurring scope even though it is excluded from the
 _historical_ repair (see §Which tables): the historical repair skips it because
@@ -358,9 +375,21 @@ data, since cleanup has dropped the older partition — harmless).
   signal: the rollup path is re-freezing zeros, enrichment lag is exceeding the MV
   windows (task 0111 territory) and the guard is earning its keep.
 - `CoarseSweepTableFailures` — tables whose pass **errored** this run. **Alarm on
-  `> 0`** — the dead-sweep signal. (The enrichment `-errors` alarm will **not**
-  catch a sweep failure: the sweep is best-effort and never fails the invocation.)
-  Config skips are deliberately excluded so a benign typo can't false-fire it.
+  `> 0`** — the dead-sweep signal. Config skips are deliberately excluded so a
+  benign typo can't false-fire it.
+- `CoarseSweepRuns` / `CoarseSweepFailedRuns` (task 0218) — every completed run
+  reports itself, so the three states are distinguishable: **no datapoint at
+  all** = never ran (the `-no-invocations` alarm treats missing data as
+  breaching), `Runs=1 FailedRuns=0` = ran, `Runs=1 FailedRuns=1` = ran and failed.
+- `CoarseSweepDeadlineHit` / `CoarseSweepDurationMs` / `CoarseSweepTablesSwept`
+  (task 0218) — a run cut short by its wall-clock budget. A sustained `1` means
+  `COARSE_SWEEP_TIME_BUDGET_SECS` is too small for the backlog, and tables at the
+  tail of the list are being deferred every run.
+
+⚠️ Since 0218 the sweep has its **own** `prices-<env>-coarse-sweep-errors`,
+`-duration-near-timeout` and `-no-invocations` alarms. The enrichment worker's
+`-errors` alarm no longer has anything to do with the sweep in either direction.
+
 - `CoarseSweepTablesSkipped` — non-coarse names left in the config. Informational
   hygiene, not an alarm series.
 

@@ -42,13 +42,20 @@ const SUPPLY_WORKER_ASSET_DIR =
 const ORACLE_WORKER_ASSET_DIR =
   process.env['ORACLE_WORKER_ASSET_DIR'] ?? '../target/lambda/oracle-worker';
 
-/** Cargo-lambda build output for the `enrichment-worker` binary (task 0026). */
-// Task 0218: the coarse sweep ships from the same crate as the enrichment
-// worker but as its own bin/bootstrap, so it needs its own asset dir.
+/**
+ * Cargo-lambda build output for the `coarse-sweep-worker` binary (task 0218).
+ *
+ * Its OWN crate, not a bin inside `enrichment-worker`: the Lambda tooling
+ * requires crate name == bin name == `target/lambda/<name>`, and a bin in
+ * another crate fails both `lambda-assets.sh` and `verify-lambda-assets.sh`
+ * (`did not match any packages` / `CannotFindAsset`). The sweep LOGIC is still
+ * shared — it is `enrichment_worker::repair`, consumed as a library.
+ */
 const COARSE_SWEEP_WORKER_ASSET_DIR =
   process.env['COARSE_SWEEP_WORKER_ASSET_DIR'] ??
   '../target/lambda/coarse-sweep-worker';
 
+/** Cargo-lambda build output for the `enrichment-worker` binary (task 0026). */
 const ENRICHMENT_WORKER_ASSET_DIR =
   process.env['ENRICHMENT_WORKER_ASSET_DIR'] ??
   '../target/lambda/enrichment-worker';
@@ -187,6 +194,13 @@ export class EventBridgeStack extends cdk.Stack {
     // stage of the enrichment worker — but on its own rule, so a run that does
     // not happen is visible as zero invocations rather than as silence inside
     // another function's handler.
+    //
+    // ⚠️ Deliberately OFFSET from the enrichment rule (see
+    // `scheduleExpressions.coarseSweep`). Serialized inside one invocation the
+    // two never overlapped; on independent schedules they can. Their writes are
+    // disjoint so that is safe, but both issue `FINAL` scans against a shared
+    // ClickHouse where BE owns most of the volume and has filled it before, so
+    // there is no reason to stack their peaks in the same minute.
     this.coarseSweepRule = new events.Rule(this, 'CoarseSweepRule', {
       ruleName: `prices-${env}-coarse-sweep`,
       description: `close_usd / volume_quote_usd sweep of the coarse OHLCV rollups (${env})`,
@@ -483,9 +497,9 @@ export class EventBridgeStack extends cdk.Stack {
         // cadence rather than from doing many months at once — which keeps any
         // single invocation's cost bounded and predictable.
         ENRICH_HISTORICAL_MAX_MONTHS: '1',
-        // Wall-clock budget (seconds). Runs after the live pass and before the
-        // coarse sweep; with the live pass now ~1 min instead of the full 300s,
-        // both sweeps get real budget for the first time (task 0218).
+        // Wall-clock budget (seconds) for the historical drain. Since task
+        // 0218 moved the coarse sweep to its own Lambda this is the only stage
+        // after the live pass, so it no longer shares what the pass leaves.
         ENRICH_HISTORICAL_TIME_BUDGET_SECS: '120',
         // How long an `exhausted` mark is trusted before it is re-confirmed
         // against the data (7 days). Without this the frontier would be a

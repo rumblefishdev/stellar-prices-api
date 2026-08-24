@@ -1,6 +1,6 @@
 //! Standalone coarse-table sweep Lambda entrypoint (task 0218).
 //!
-//!     cargo lambda build -p enrichment-worker --release --arm64 --features lambda
+//!     cargo lambda build -p coarse-sweep-worker --release --arm64 --features lambda
 //!
 //! ## Why this is its own Lambda
 //!
@@ -49,6 +49,7 @@
 #[cfg(feature = "lambda")]
 #[tokio::main]
 async fn main() -> Result<(), lambda_runtime::Error> {
+    use enrichment_worker::budget::remaining_budget_ms;
     use enrichment_worker::ch_enrich::{ChEnrichConfig, ChEnrichmentPass};
     use enrichment_worker::repair::sweep_config_from_env;
     use lambda_runtime::{LambdaEvent, run, service_fn};
@@ -144,14 +145,13 @@ async fn main() -> Result<(), lambda_runtime::Error> {
             // defers to the next run instead of being hard-killed — a function
             // timeout is an invocation error, not a Rust `Err`, and would escape
             // the best-effort handling below.
-            const MARGIN_MS: u64 = 30_000;
-            let now_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| d.as_millis() as u64);
-            let remaining_ms = lambda_deadline_ms
-                .saturating_sub(now_ms)
-                .saturating_sub(MARGIN_MS);
-            let budget_ms = sweep_budget_secs.saturating_mul(1_000).min(remaining_ms);
+            //
+            // Uses the SHARED helper, not a local copy: an earlier revision of
+            // this file inlined a 30 s margin against the enrichment worker's
+            // 60 s, which is exactly the divergence `budget`'s doc warns about.
+            let budget_ms = sweep_budget_secs
+                .saturating_mul(1_000)
+                .min(remaining_budget_ms(lambda_deadline_ms));
             let started = Instant::now();
             let deadline = started + Duration::from_millis(budget_ms);
 

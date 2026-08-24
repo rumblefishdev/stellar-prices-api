@@ -20,6 +20,7 @@
 #[cfg(feature = "lambda")]
 #[tokio::main]
 async fn main() -> Result<(), lambda_runtime::Error> {
+    use enrichment_worker::budget::remaining_budget_ms;
     use enrichment_worker::ch_enrich::{ChEnrichConfig, ChEnrichmentPass};
     use enrichment_worker::frontier::{HistoricalSweepConfig, run_historical_sweep};
     use enrichment_worker::live_window::{
@@ -88,22 +89,6 @@ async fn main() -> Result<(), lambda_runtime::Error> {
     // built from the same `repair::sweep_config_from_env`. It ran here after the
     // 1m pass's `?`, which is why it never executed in production: skipped
     // whenever that pass errored, starved when it ran long.
-    /// Milliseconds of useful work left in this invocation: the Lambda deadline
-    /// minus a margin, so the drain stops cleanly instead of being hard-killed by
-    /// the function timeout. A timeout is an invocation error, not a Rust `Err`,
-    /// so it would escape the best-effort handling around each sweep and fail
-    /// the whole invocation.
-    ///
-    /// Shared by both sweeps rather than inlined twice — two callers computing
-    /// the same deadline arithmetic slightly differently is how one of them ends
-    /// up without a margin.
-    fn remaining_budget_ms(deadline_ms: u64) -> u64 {
-        const MARGIN_MS: u64 = 60_000;
-        let now_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |d| d.as_millis() as u64);
-        deadline_ms.saturating_sub(now_ms).saturating_sub(MARGIN_MS)
-    }
 
     // Task 0111 — bound the scheduled pass to the newest `ENRICH_LIVE_PARTITIONS`
     // monthly partitions. Unbounded, every batch re-scanned all 102 partitions

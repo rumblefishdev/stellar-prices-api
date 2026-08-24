@@ -1,3 +1,4 @@
+pub mod budget;
 pub mod candidates;
 pub mod ch_enrich;
 pub mod enrich;
