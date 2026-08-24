@@ -106,7 +106,9 @@ history:
       nothing shipped in three days of a spike that is honestly minutes of work
       per item. The `item7` poller was stopped mid-run; its scratch REST API
       (`9utcrbmoc6`), usage plan (`ox7pv0`) and key (`2ke0ixjy7h`) are left
-      standing on purpose for [[0191]] to reuse. Archived rather than trashed
+      standing on purpose for [[0191]] to reuse. **Torn down 2026-08-24** — [[0191]]
+      abandoned the item 7 measurement after a second run died silently, so
+      there was nothing left to reuse; the account is clean of `lore0180*`. Archived rather than trashed
       because the raw evidence tables in `notes/` are what ADR 0010 now cites.
 ---
 

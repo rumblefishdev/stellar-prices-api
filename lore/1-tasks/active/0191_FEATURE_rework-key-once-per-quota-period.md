@@ -54,6 +54,23 @@ history:
       data-plane propagation window must be said out loud) move here. Title
       and tags widened (`slice-9`, `security`); file name kept because the
       branch and PR #238 carry it.
+  - date: "2026-08-24"
+    status: active
+    who: akot
+    note: >
+      **Step 0's `DAY` proxy abandoned, deliberately, and the scratch stack
+      torn down.** Two runs died silently (13 and 21 August; 183 samples, all
+      `429`, the second dead ~9 h before the midnight it existed to observe).
+      Dropped rather than run a third time because the economics inverted: the
+      proxy existed to avoid waiting for 1 September, which is now 8 days out,
+      and the real `MONTH` answer comes off production from the `GetUsage`
+      reset warn in `keys/gateway.rs`. The criterion it served — stop calling
+      the boundary AWS-documented — was already met by the wording work on
+      2026-08-21, and nothing in the build depends on the instant. Scratch
+      key/plan/API deleted 07:45Z (the script's own `teardown` reported
+      success while leaving the plan alive; defect recorded in the script).
+      Dead poll logs moved to `.trash/`. One AC left: the 1 September
+      confirmation.
 ---
 
 # Rework — a new key, once a period
@@ -113,41 +130,59 @@ instant nor its timezone; the only statement anywhere is an example caption,
 is a **request count**, not a time shift. This is ADR 0010's correction #2 and it
 is still open.
 
-A `DAY`-period scratch plan is a proxy for the instant and the timezone, and the
-scratch resources from the abandoned run are **still standing** for it: REST API
-`9utcrbmoc6`, usage plan `ox7pv0`, key `2ke0ixjy7h`, plus
-`item7-quota-rollover.sh` and its partial log in the archived
-`0180_RESEARCH_.../measurement/`. Drain the key, poll across a UTC midnight,
-record when `429` becomes `200`.
+A `DAY`-period scratch plan was the proxy for the instant and the timezone:
+drain the key, poll across a UTC midnight, record when `429` becomes `200`.
+**Abandoned 2026-08-24 and the scratch stack torn down** — see the status block
+below. `item7-quota-rollover.sh` stays in the archived
+`0180_RESEARCH_.../measurement/` with its defects recorded at the top of the
+file.
 
-**One honest limit, stated up front: this cannot be fully settled before
-1 September 2026**, the next real `MONTH` rollover. The `DAY` proxy is strong
-evidence, not proof — and it is enough, because the criterion is to stop
+**The honest limit that decided it: this could never be fully settled before
+1 September 2026**, the next real `MONTH` rollover — the `DAY` proxy was always
+evidence, not proof. It was *enough* only because the criterion is to stop
 presenting "00:00 UTC on the 1st" as AWS-documented, not to prove AWS's
-implementation. Correct [[0157]]'s and this task's wording either way, and run
-the `MONTH` confirmation on 1 September if the epic is still open.
+implementation; and that criterion is met by the wording alone, which is why
+losing the proxy costs nothing. The `MONTH` confirmation on 1 September stands.
 
-**Careful with the control plane while doing it:** `UpdateUsagePlan` is throttled
-to **1 request per 20 seconds per account, non-adjustable**, and the whole
-control plane shares a **10 rps / burst 40** budget with our deploys. A careless
-loop here slows CI for everyone.
+**If anything here is ever re-run:** `UpdateUsagePlan` is throttled to **1
+request per 20 seconds per account, non-adjustable**, and the whole control
+plane shares a **10 rps / burst 40** budget with our deploys. A careless loop
+slows CI for everyone.
 
-> **Status 2026-08-21 — the 0180 run never happened; re-run from here.** The
-> "partial log" the paragraph above refers to holds **three samples**
-> (08:12:37Z–08:14:37Z on 2026-08-13, all `429`) and `poller.out` ends at the
-> poll start: the poller died two minutes in, and the archived note kept
-> saying "running" for a week. Nothing was measured, and nothing is invented
-> below. The scratch stack still stands; the procedure is `item7-quota-rollover.sh
-> drain` then `poll` across the next UTC midnight, unchanged. The implementation
-> does not wait on the answer — the cap is **our** rule, one definition in
-> `portal/period.rs`, and a different AWS instant changes the dashboard label,
-> not the cap.
+> **Status 2026-08-24 — the `DAY` proxy is abandoned, deliberately.** Two runs
+> were attempted and both died silently: 2026-08-13 (three samples, dead two
+> minutes in, and the archived note kept saying "running" for a week) and
+> 2026-08-21 (183 samples, 11:51Z → 15:03Z, dead ~9 h before the UTC midnight it
+> existed to observe). Nothing was ever measured; nothing is invented below.
+>
+> Dropped rather than attempted a third time because **the economics inverted**.
+> The proxy existed to avoid waiting for 1 September — 19 days away when it was
+> designed, 8 days away now. A third run needs the script's defects fixed *and*
+> credentials that outlive a 26 h window, to produce what this task already
+> calls "evidence, not proof".
+>
+> **What replaces it:** the real `MONTH` rollover on 1 September, read off
+> production by the warn `keys/gateway.rs` already emits when `GetUsage` reports
+> a reset inside the queried period. Real data, no scratch stack, no credentials
+> marathon. That is the last open AC.
+>
+> Nothing in the build waits on the answer — the cap is **our** rule, one
+> definition in `portal/period.rs`, and a different AWS instant changes the
+> dashboard label, not the cap. The wording half of the criterion (stop calling
+> the boundary AWS-documented) was done 2026-08-21 and stands.
+>
+> **Teardown, 2026-08-24 07:45Z:** key `2ke0ixjy7h`, usage plan `ox7pv0` and
+> REST API `9utcrbmoc6` deleted; the account greps clean of `lore0180*` and
+> `pricing-api-free-production` (`71t9im`) is untouched. Noted because the
+> script's `teardown` **reported success while leaving the plan alive** — it
+> deletes the plan before the REST API that still references its stage, and
+> every delete is `|| true`. The plan was removed by hand once the API was gone.
 
 | Question | Result | Date |
 | --- | --- | --- |
-| `DAY` reset instant and timezone | *re-run pending — the AWS SSO session had expired when this slice was built; run `drain` + `poll` and record the first `200` after the `429` run* | — |
-| Calendar-aligned or creation-anchored? | *pending — setup was 08:10Z, so the two hypotheses predict 00:00Z vs ~08:10Z and the window discriminates them* | — |
-| `GetUsage` agreeing with enforcement at the boundary? | *pending* | — |
+| `DAY` reset instant and timezone | **not measured — abandoned 2026-08-24** after two silently-dead runs; superseded by the 1 September `MONTH` observation on production | 2026-08-24 |
+| Calendar-aligned or creation-anchored? | **not measured** — dropped with the proxy; the question stays open and costs nothing, since the cap is ours | 2026-08-24 |
+| `GetUsage` agreeing with enforcement at the boundary? | **not measured** — dropped with the proxy | 2026-08-24 |
 | Inference for `MONTH` | **cannot be settled before 1 September 2026** — recorded as an open limit, not assumed. Whatever `DAY` shows is evidence, not proof | — |
 | Text restated as our rule? | **done** — [[0157]] (dated correction), the epic doc, `manual-api-key-tier.md`, `portal/period.rs`, the usage panel's copy, the rework copy | 2026-08-21 |
 
@@ -213,12 +248,13 @@ are replaced, not re-counted.)*
 - [x] **Ships closed.** With `PORTAL_ENABLED=false` ([[0183]]) the revoke is an
       empty `404` with a valid session and zero control-plane calls
       (`revoke_is_an_empty_404_while_the_portal_is_closed`)
-- [ ] **(half done — the wording half; the measurement half is running)**
-      Item 7 measured on the `DAY`-period proxy and written up with the date;
-      [[0157]] and this task stop presenting the boundary as AWS-documented.
-      The restating is done everywhere. The poller was started 2026-08-21
-      11:51Z (drain `200,200,200,429`); the verdict is the first `200` after
-      the `429` run — record it in the Step 0 table
+- [x] **The boundary is no longer presented as AWS-documented** — [[0157]],
+      the epic, `manual-api-key-tier.md`, `portal/period.rs` and the portal
+      copy all state it as our rule (2026-08-21). The `DAY`-proxy measurement
+      that would have backed it with evidence is **deliberately abandoned
+      2026-08-24** — two runs died silently and the real `MONTH` answer is 8
+      days away on production — with the scratch stack torn down. Reasoning,
+      teardown and replacement in Step 0
 - [x] "Replace my key" disables the key in one `UpdateApiKey` and issues
       nothing — no Discord call, nothing created
       (`revoke_disables_the_key_in_one_call_and_issues_nothing`); every key
