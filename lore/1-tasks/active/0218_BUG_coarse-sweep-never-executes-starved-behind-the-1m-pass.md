@@ -2,7 +2,7 @@
 id: "0218"
 title: "The coarse-table sweep has never executed — it sits behind the 1m pass's `?` and is starved by the Lambda deadline"
 type: BUG
-status: backlog
+status: active
 related_adr: []
 related_tasks: ["0215", "0114", "0111", "0026"]
 tags: ["priority-high", "effort-small", "enrichment", "observability", "data-correctness", "milestone-M2"]
@@ -19,6 +19,26 @@ history:
       and no "coarse sweep complete" line in any of them. Not a regression from
       the Caddy fix — the sweep was unreachable before it too, for a different
       reason.
+  - date: 2026-08-24
+    status: active
+    who: okarcz
+    note: >
+      Activated. 0111 deployed to prod 2026-08-24 08:03:24 UTC and the sweep is
+      now REACHED: "coarse sweep complete" appears on both post-deploy
+      invocations with tables_swept=6, tables_failed=0, tables_skipped=0,
+      rows_enriched=204,769 then 204,428, start_month=202607 end_month=202608.
+      The 1m pass now returns in ~7.2 s (duration_ms in its own log line) and
+      the invocation finishes in 26.7-29.6 s against the 300 s timeout, so
+      remaining_ms is no longer saturated at 0.
+      ⚠️ That satisfies AC 1 ONLY. The task's own argument stands: this is
+      "starved by design, not by accident" — the sweep still sits after the 1m
+      pass in one fixed budget, so the next growth in the 1m pass silently
+      starves it again. ACs 2, 3 and 4 are untouched: a never-reached stage is
+      still indistinguishable from one that ran and found nothing, the sweep's
+      budget can still be driven to zero by the preceding stage, and nothing is
+      published on an invocation that hits the deadline. Option 1 (separate
+      EventBridge rule + Lambda) remains the preferred fix and is the only one
+      that survives future growth.
 ---
 
 # The coarse sweep is unreachable, and has been on both sides of the fix
