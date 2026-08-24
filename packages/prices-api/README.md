@@ -344,9 +344,13 @@ Press **Get my API key** now: the round-trip passes eligibility and lands on
 disabled key untouched. On or after the 1st the same press deletes the
 disabled key, creates a new one and attaches it; the old value stays dead.
 
-The principal needs the seventh grant, `apigateway:PATCH` on `/apikeys/*`
-(in the Lambda's role: `PortalReadDisableAndDeleteOwnApiKeys`). No
-`UpdateUsagePlan`, no `UpdateUsage`.
+The principal needs the seventh grant, `apigateway:PATCH` on `/apikeys/*`, in
+its own statement (`PortalDisableOwnApiKeys`) and scoped by
+`aws:ResourceTag/ManagedBy = prices-portal`, so the revoke can only touch keys
+this portal created. The `GET`/`DELETE` statement beside it is 0187's and stays
+unconditioned — narrowing those two is task 0194's call, because it would stop
+the portal adopting a key created by hand in the console. No `UpdateUsagePlan`,
+no `UpdateUsage`.
 
 ### 4. Afterwards
 

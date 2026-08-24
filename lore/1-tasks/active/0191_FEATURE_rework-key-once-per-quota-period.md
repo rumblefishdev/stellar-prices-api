@@ -665,3 +665,112 @@ Eight findings against the audit round's own diff; all eight closed.
 `clippy --all-targets` (0 warnings), `cargo check --features lambda`,
 `nx run-many -t lint typecheck build test -p portal`, `nx format:check --all`
 all green.
+
+---
+
+## Review round — 2026-08-24, karczuRF's code review of PR #238
+
+Seven findings, all verified against the branch before acting; five were real
+as written, two needed correcting first. What that verification changed:
+
+- **Finding 2's stated invariant was the wrong way round.** `app.tsx`'s dialog
+  doc guarantees *"revoked" is never shown for a key that still works* — the
+  failure copy breaks the **opposite** direction (claiming a key is still
+  active when a disable may have landed). The defect is real; only the reason
+  given for it was.
+- **Finding 6 overstated the user-facing hole.** The usage panel does render
+  with nothing marking the key dead, but the key section above it renders
+  `key-revoked` on the same screen. The defect is the comment, which points a
+  future reader at copy that is not in that branch.
+- **Two things the review missed**, both found while checking it: the `PATCH`
+  paragraph in `compute-stack.ts` still said the tag condition was "available
+  to task 0194" while limit 3 twenty lines above said 0191 had written it; and
+  `disable_all` dated the revocation from **this process's clock** while every
+  later `cap::decide` reads AWS's `lastUpdatedDate` — invisible except across
+  00:00 UTC on the 1st, where the two fall in different quota periods and the
+  page promises a replacement a month early.
+
+### Decisions
+
+33. **The tag condition goes on `PATCH` alone, in its own statement — `GET`
+    and `DELETE` go back to 0187's unconditioned grant.** The condition was
+    written across all three verbs once `PATCH` joined the statement. That is
+    a behaviour change to two shipped code paths inside a feature slice, and
+    0187's own comment forbade it in as many words ("Do NOT put the condition
+    on `GET`: adopting a console-created key is a documented requirement of
+    this slice"). The new verb is still born narrow — nothing depends on
+    `PATCH` being account-wide — and narrowing the other two stays **task
+    0194's**, which owns the IAM audit and can verify against the deployed
+    stack. The separate `PortalDisableOwnApiKeys` sid is deliberate: a
+    condition on a shared statement silently reaches every action in it.
+
+    Also corrected in that comment: "so it is no longer adopted" was wrong.
+    Adoption is by NAME (`exact_matches` + `current_key`), not by tag — an
+    untagged console key is still listed, ranked and attached, and only then
+    `AccessDenied`s on the value read. The outcome the comment described was
+    right; the mechanism was not.
+
+34. **The post-roll cleanup logs and steps over a failed delete, like the
+    loser sweep does.** `attempt()`'s `gateway.delete(&dead.id).await?` was the
+    one place the "housekeeping must not withhold the key the request is for"
+    rule was not applied — and it is the worse place for it, because that
+    branch runs on *every* press once the name holds nothing but revoked keys.
+    One undeletable record meant `?issue=failed` forever with no in-product
+    recovery. Records that fail now stay in `revoked` for the end-of-function
+    sweep to retry instead of being cleared.
+
+35. **A revocation is `Done`, `Partial` or an error — three outcomes, not
+    two.** Propagating the first failed disable answered `502`, and `502` copy
+    has to describe a state the page cannot know. Now: at least one disable
+    landed and none failed → `Done`; some landed and some failed → `Partial`,
+    which reaches the page as `partial: true` and renders "one of your keys
+    could not be deactivated, a duplicate may still work" — never a plain
+    "revoked", which is the claim the dialog's docs forbid making about a key
+    that still answers. Nothing landed and something failed → the error, and
+    the `502` stands, because there "we could not deactivate it" is true.
+
+    The `502` copy no longer says the key "is still active" either. A `502` is
+    either a refusal with nothing written or a lost response on a patch that
+    landed; the page says the deactivation was not *confirmed* and tells the
+    visitor to reload.
+
+36. **Every enabled key racing away is `NoKey`, not a dated `Done`.** All
+    disables answering `NotFound` left no disabled record in the account, so
+    "deactivated, next eligible on the 1st" was contradicted by the very next
+    issue press, which finds the name empty and creates a key outright.
+
+37. **The revocation instant comes off the `UpdateApiKey` response.**
+    `Gateway::disable` returns `Disable::Applied(Option<u64>)` carrying the
+    patched key's `lastUpdatedDate` — the same byte `cap::decide` compares
+    against the period on every later read — instead of `bool` plus a local
+    `SystemTime::now()`. Two clocks, one of them ours, cannot straddle a period
+    boundary if only one of them is ever consulted. The `Disable` enum follows
+    `Attachment`'s precedent in the same module: two outcomes, the second not
+    an error.
+
+38. **`revocation_instant`'s rustdoc gets its own body back.** An edit had
+    concatenated `current_key`'s doc block onto it, leaving `current_key`
+    undocumented and `revocation_instant` opening with a selection rule that is
+    not its own.
+
+39. **`rework_round_trip` is deleted.** Left from the abandoned swap design and
+    unreachable: `Action::parse("rework")` returns `None` (asserted in
+    `state_token.rs`), so `/auth/login?action=rework` answers `400` and the
+    helper's `303` assertion could only panic. `round_trip`'s doc now records
+    why there is no rework variant.
+
+**Tests:** +4 Rust (`a_partial_revocation_is_reported_as_partial`,
+`a_revocation_that_raced_away_is_no_key_not_a_phantom_record`,
+`the_revocation_instant_comes_from_the_control_plane_not_our_clock`,
+`an_undeletable_revoked_record_does_not_block_the_re_issue`) and +2 portal
+(partial warning renders; clean revocation renders none). Two mock knobs added
+for them: `fail_disable_of` (the per-id twin of `fail_disables`) and
+`disable_stamps_at`. The existing failed-revoke spec was renamed and now
+asserts the copy does NOT claim the key is still active. `cargo test -p
+prices-api` 0 failed, `clippy --all-targets -D warnings` clean, portal 95/95,
+`tsc --noEmit` on `infra` and `web/portal` clean, prettier clean.
+
+**Not changed:** the five "checked and cleared" items in the review all hold —
+`into_service_error` was re-verified against the resolved
+`aws-smithy-runtime-api` 1.12.3 source (the non-`ServiceError` arm builds an
+unhandled error, it does not panic).

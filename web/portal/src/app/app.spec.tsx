@@ -1822,8 +1822,58 @@ describe('replace my key', () => {
     expect(screen.queryByRole('link', { name: /get my api key/i })).toBeNull();
   });
 
-  /** A failed revoke says so and keeps the key — "revoked" is never false. */
-  it('reports a failed revoke and keeps the key live', async () => {
+  /**
+   * A partial revocation warns instead of reading as a clean one.
+   *
+   * The backend answers `200 partial` when it disabled some keys under the
+   * name and failed on another — the visitor's own key is off, so a `502`
+   * would be false, but a duplicate may still answer on `/v1/` and a plain
+   * "revoked" would be false too. The warning is what tells them the next move
+   * is to press Replace again, not to wait for the 1st.
+   */
+  it('warns on a partial revocation instead of calling it revoked', async () => {
+    signedIn(() => ({
+      json: async () => ({ ...REVOKED, partial: true }),
+    }));
+    renderApp();
+
+    await openDialog();
+    fireEvent.change(screen.getByTestId('replace-key-phrase'), {
+      target: { value: 'delete-key' },
+    });
+    fireEvent.click(screen.getByTestId('replace-key-confirm'));
+
+    const warning = await screen.findByTestId('revoke-partial');
+    expect(warning.textContent).toMatch(/could not be deactivated/i);
+    expect(warning.textContent).toMatch(/may still work/i);
+    // The dates still render — the disables that landed are real.
+    expect(screen.getByTestId('revoked-at')).toBeTruthy();
+  });
+
+  /** The ordinary answer carries no flag, and renders no warning. */
+  it('renders no partial warning on a clean revocation', async () => {
+    signedIn();
+    renderApp();
+
+    await openDialog();
+    fireEvent.change(screen.getByTestId('replace-key-phrase'), {
+      target: { value: 'delete-key' },
+    });
+    fireEvent.click(screen.getByTestId('replace-key-confirm'));
+
+    await screen.findByTestId('key-revoked');
+    expect(screen.queryByTestId('revoke-partial')).toBeNull();
+  });
+
+  /**
+   * A failed revoke says so and keeps the key — "revoked" is never false.
+   *
+   * And it does not make the opposite claim either: a `502` can be a refusal
+   * with nothing written or a lost response on a patch that landed, so the copy
+   * says the deactivation was not CONFIRMED rather than that the key is still
+   * active.
+   */
+  it('reports a failed revoke without claiming the key is still active', async () => {
     signedIn(() => ({
       ok: false,
       status: 502,
@@ -1841,7 +1891,8 @@ describe('replace my key', () => {
     fireEvent.click(screen.getByTestId('replace-key-confirm'));
 
     const failed = await screen.findByTestId('replace-key-failed');
-    expect(failed.textContent).toMatch(/still active/i);
+    expect(failed.textContent).toMatch(/could not confirm the deactivation/i);
+    expect(failed.textContent).not.toMatch(/it is still active/i);
     expect(failed.textContent).toMatch(/could not reach the API key service/i);
     expect(screen.queryByTestId('key-revoked')).toBeNull();
     expect(screen.getByTestId('api-key')).toBeTruthy();

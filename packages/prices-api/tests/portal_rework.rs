@@ -253,6 +253,147 @@ async fn every_key_under_the_name_is_revoked_not_only_the_current_one() {
     });
 }
 
+/// A disable that fails for ONE key of a pair is reported as partial — not
+/// dressed up as a clean revocation, and not thrown away as a `502` either.
+///
+/// The visitor's own key is off, so `502` would be a lie in the other
+/// direction (and would have re-armed a dialog whose work was half done). The
+/// answer carries `partial`, which is what stops the page rendering a plain
+/// "revoked" while a duplicate still answers on `/v1/`.
+#[tokio::test]
+async fn a_partial_revocation_is_reported_as_partial() {
+    let discord = MockDiscord::start(GRANTED_SCOPE, None).await;
+    let gateway = MockGateway::start().await;
+    let first = seed_attached(&gateway, 1_000);
+    let stubborn = gateway.with(|s| s.seed(&key_name(), 2_000));
+    gateway.with(|s| s.fail_disable_of = vec![stubborn.clone()]);
+    let app = app_with_discord(&discord, &gateway);
+
+    let reply = revoke(&app, Some(&session_cookie(USER_ID))).await;
+    assert_eq!(reply.status, StatusCode::OK);
+    assert_eq!(reply.json()["revoked"], true);
+    assert_eq!(reply.json()["partial"], true);
+    assert!(
+        !reply.json()["revoked_at"].is_null(),
+        "the disables that landed are still dated"
+    );
+    gateway.with(|s| {
+        let by_id = |id: &str| s.keys.iter().find(|k| k.id == id).unwrap().enabled;
+        assert!(!by_id(&first), "the key that could be disabled is off");
+        assert!(by_id(&stubborn), "the one that refused is untouched");
+    });
+    // And the cap does NOT bite, because a live key survived: the issue path
+    // adopts it rather than refusing. That is the whole reason `partial` has to
+    // reach the page — the backend cannot pretend this was a revocation, and
+    // the visitor's next move is to press Replace again, not to wait for the
+    // 1st.
+    assert_eq!(
+        issue_round_trip(&app).await.location(),
+        "/api-tokens/?issue=ok"
+    );
+    assert_eq!(gateway.with(|s| s.create_calls), 0, "nothing new was minted");
+}
+
+/// Every enabled key raced away between the listing and the patch: `no_key`,
+/// not a phantom "deactivated".
+///
+/// Nothing was written, so there is no disabled record for the cap to read —
+/// and the very next issue press finds the name empty and creates a key
+/// outright. Answering `Done` here would have promised a wait the issue path
+/// does not honour.
+#[tokio::test]
+async fn a_revocation_that_raced_away_is_no_key_not_a_phantom_record() {
+    let discord = MockDiscord::start(GRANTED_SCOPE, None).await;
+    let gateway = MockGateway::start().await;
+    let gone = seed_attached(&gateway, 1_000);
+    // Listed, but no longer in the store: the patch 404s, which is the
+    // deletion race, not a failure.
+    gateway.with(|s| {
+        let key = s.keys.iter().find(|k| k.id == gone).unwrap().clone();
+        s.deleted_keys.push(key);
+        s.keys.retain(|k| k.id != gone);
+        s.list_resurrects_deleted = true;
+    });
+    let app = app_with_discord(&discord, &gateway);
+
+    let reply = revoke(&app, Some(&session_cookie(USER_ID))).await;
+    assert_eq!(reply.status, StatusCode::NOT_FOUND);
+    assert_eq!(reply.json()["code"], "no_key");
+}
+
+/// The revocation instant in the answer is the control plane's
+/// `lastUpdatedDate`, read off the patch response — not this process's clock.
+///
+/// The two are seconds apart in the ordinary case and invisible; across 00:00
+/// UTC on the 1st they fall in different quota periods, and the page would then
+/// name a `next_eligible_at` a month before the issue round-trip would honour
+/// it. Pinning the mock's stamp to a date of our choosing is the only way to
+/// tell which of the two clocks the answer used.
+#[tokio::test]
+async fn the_revocation_instant_comes_from_the_control_plane_not_our_clock() {
+    let discord = MockDiscord::start(GRANTED_SCOPE, None).await;
+    let gateway = MockGateway::start().await;
+    seed_attached(&gateway, 1_000);
+    // Last month's 3rd — a period that has already rolled, which our own clock
+    // could never produce for a revocation happening now.
+    let stamped = the_3rd_of(first_of_month_offset(-1));
+    gateway.with(|s| s.disable_stamps_at = Some(stamped));
+    let app = app_with_discord(&discord, &gateway);
+
+    let reply = revoke(&app, Some(&session_cookie(USER_ID))).await;
+    assert_eq!(reply.status, StatusCode::OK);
+    assert_eq!(
+        reply.json()["revoked_at"].as_str().unwrap(),
+        chrono::DateTime::from_timestamp(stamped as i64, 0)
+            .unwrap()
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    );
+    // And the cap agrees with it rather than with `now`: that period has
+    // rolled, so a key is due immediately.
+    assert_eq!(
+        issue_round_trip(&app).await.location(),
+        "/api-tokens/?issue=ok"
+    );
+}
+
+/// A revoked record that cannot be deleted does not withhold the new key.
+///
+/// The post-roll cleanup runs on EVERY issue press once the name holds nothing
+/// but revoked keys, so propagating its first failure made one undeletable
+/// record — an untagged exact-name key made by hand in the console, against a
+/// tag-scoped `DELETE` — a permanent `?issue=failed` with no in-product
+/// recovery. Logged and stepped over instead, exactly as the loser sweep does.
+#[tokio::test]
+async fn an_undeletable_revoked_record_does_not_block_the_re_issue() {
+    let discord = MockDiscord::start(GRANTED_SCOPE, None).await;
+    let gateway = MockGateway::start().await;
+    let dead = seed_revoked(&gateway, the_3rd_of(first_of_month_offset(-1)));
+    gateway.with(|s| s.fail_delete_of = vec![dead.clone()]);
+    let app = app_with_discord(&discord, &gateway);
+
+    assert_eq!(
+        issue_round_trip(&app).await.location(),
+        "/api-tokens/?issue=ok"
+    );
+    gateway.with(|s| {
+        let live: Vec<_> = s.keys.iter().filter(|k| k.enabled).collect();
+        assert_eq!(live.len(), 1, "the visitor got a working key");
+        assert_ne!(live[0].id, dead);
+        assert!(
+            s.plan_keys
+                .contains(&(PLAN_ID.to_string(), live[0].id.clone()))
+        );
+        assert!(
+            s.keys.iter().any(|k| k.id == dead && !k.enabled),
+            "the undeletable record is left for the next reconciliation"
+        );
+    });
+    // The new key is what the reveal hands out, not the stale record.
+    let revealed = reveal_via(&app).await;
+    assert_eq!(revealed.status, StatusCode::OK);
+    assert_ne!(revealed.json()["name"], serde_json::Value::Null);
+}
+
 /// Revoking with no key is `404 no_key` and writes nothing.
 #[tokio::test]
 async fn revoking_with_no_key_is_no_key_and_writes_nothing() {

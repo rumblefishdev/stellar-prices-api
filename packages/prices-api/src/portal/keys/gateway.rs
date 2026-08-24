@@ -132,6 +132,20 @@ pub enum Attachment {
     KeyGone,
 }
 
+/// What [`Gateway::disable`] observed (task 0191).
+///
+/// Two outcomes rather than `()` for the same reason as [`Attachment`]: the
+/// second one is not an error and the caller has copy for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Disable {
+    /// The key is off. Carries its `lastUpdatedDate` — the revocation instant
+    /// the cap will read — or `None` for the shape AWS does not produce, which
+    /// the cap treats as capped.
+    Applied(Option<u64>),
+    /// The key no longer exists, so there was nothing to disable.
+    KeyGone,
+}
+
 /// One key's consumption over a queried period, as AWS reports it.
 ///
 /// Derived from `GetUsage`'s daily `[used, remaining]` pairs rather than read
@@ -459,10 +473,19 @@ impl Gateway {
     /// The counter is preserved across disable (same measurement), so the
     /// dashboard keeps reporting the revoked key's usage honestly.
     ///
-    /// `Ok(false)` is the deletion race — the key was listed and is gone — and
-    /// is a state the caller has an answer for (nothing to revoke), not an
-    /// error.
-    pub async fn disable(&self, key_id: &str) -> Result<bool, GatewayError> {
+    /// [`Disable::KeyGone`] is the deletion race — the key was listed and is
+    /// gone — and is a state the caller has an answer for (nothing to revoke),
+    /// not an error.
+    ///
+    /// [`Disable::Applied`] carries the patched key's **`lastUpdatedDate`**,
+    /// read off this call's own response rather than re-listed or invented.
+    /// That is the byte the re-issue cap is decided against on every later read
+    /// (`cap::decide`), so returning it here is what stops the revoke answer
+    /// and the issue path disagreeing: a local `SystemTime::now()` is a
+    /// different clock from the control plane's, and two clocks straddling
+    /// 00:00 UTC on the 1st fall in different quota periods — the page would
+    /// promise a replacement a month before the round-trip would honour it.
+    pub async fn disable(&self, key_id: &str) -> Result<Disable, GatewayError> {
         let patch = aws_sdk_apigateway::types::PatchOperation::builder()
             .op(aws_sdk_apigateway::types::Op::Replace)
             .path("/enabled")
@@ -476,11 +499,16 @@ impl Gateway {
             .send()
             .await
         {
-            Ok(_) => Ok(true),
+            Ok(updated) => Ok(Disable::Applied(
+                updated
+                    .last_updated_date()
+                    .map(|d| d.secs())
+                    .and_then(|secs| u64::try_from(secs).ok()),
+            )),
             Err(e) => {
                 let message = sdk_message(&e);
                 if e.into_service_error().is_not_found_exception() {
-                    Ok(false)
+                    Ok(Disable::KeyGone)
                 } else {
                     Err(GatewayError::Call {
                         operation: "UpdateApiKey",

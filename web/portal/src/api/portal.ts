@@ -301,6 +301,13 @@ export interface PortalRevocation {
   revoked: true;
   next_eligible_at: string;
   revoked_at?: string;
+  /**
+   * Task 0191: the backend disabled some keys under this name and failed on at
+   * least one other, so a duplicate may still answer on `/v1/`. Absent from the
+   * ordinary answer — read it as `false` when missing, and never render a plain
+   * "revoked" while it is `true`.
+   */
+  partial?: boolean;
 }
 
 /**
@@ -354,6 +361,7 @@ export async function revokeKey(): Promise<PortalRevocation> {
     revoked?: unknown;
     next_eligible_at?: unknown;
     revoked_at?: unknown;
+    partial?: unknown;
   };
   try {
     body = (await response.json()) as typeof body;
@@ -380,6 +388,11 @@ export async function revokeKey(): Promise<PortalRevocation> {
     next_eligible_at: body.next_eligible_at,
     revoked_at:
       typeof body.revoked_at === 'string' ? body.revoked_at : undefined,
+    // Absent on the ordinary answer (the backend omits it when false), and
+    // anything other than a literal `true` is read as "not partial": this flag
+    // only ever ADDS a warning, so a malformed value must not be able to
+    // manufacture one.
+    partial: body.partial === true,
   };
 }
 
@@ -525,6 +538,13 @@ export interface PortalKeyRevoked {
   revoked: true;
   next_eligible_at: string;
   revoked_at?: string;
+  /**
+   * Carried over from a revoke that only partly succeeded, in this page load
+   * (see `PortalRevocation`). The reveal never sets it: a later `GET /key`
+   * cannot tell a duplicate that survived a failed disable from one that was
+   * never there, and it does not need to — it lists what is enabled.
+   */
+  partial?: boolean;
 }
 
 /**

@@ -508,6 +508,14 @@ const REWORK_CONFIRM_PHRASE = 'delete-key';
  * On success the parent renders the revoked state with the exact date from
  * the backend's answer; on failure the dialog says so and stays open, with the
  * key still live — "revoked" is never shown for a key that still works.
+ *
+ * **The failure copy holds the other half of that invariant, and it is the
+ * weaker half.** "Revoked" is decidable from the response; "still active" is
+ * not. A `502` can be a control-plane refusal with nothing written, or a lost
+ * response on an `UpdateApiKey` that landed — the page cannot tell, so it says
+ * what it knows (the deactivation was not confirmed) and never asserts the key
+ * is still working. The partly-succeeded case does not arrive here at all: the
+ * backend answers `200 partial`, and the revoked view renders the warning.
  */
 function ReplaceKey({
   onClose,
@@ -535,6 +543,7 @@ function ReplaceKey({
           revoked: true,
           next_eligible_at: revoked.next_eligible_at,
           revoked_at: revoked.revoked_at,
+          partial: revoked.partial,
         });
       })
       .catch((cause: unknown) => {
@@ -591,8 +600,9 @@ function ReplaceKey({
       </button>
       {failure && (
         <p data-testid="replace-key-failed">
-          Could not deactivate your key — it is still active:{' '}
-          <code>{failure}</code>
+          Could not confirm the deactivation — your key may or may not have been
+          switched off: <code>{failure}</code>. Close this and reload the page
+          to see where it stands, then try again if it is still live.
         </p>
       )}
     </section>
@@ -883,6 +893,21 @@ function ApiKey({
           shown again. */}
       {view.state === 'revoked' && (
         <div data-testid="key-revoked">
+          {/* Task 0191: the backend could not disable every key under this
+              name. The visitor's own key is off — that is what `Partial`
+              means — but a duplicate from an earlier double-submit may still
+              answer, so the page must not let the paragraph below stand
+              alone. First, because it is the sentence that changes what they
+              should do next. */}
+          {view.revoked.partial && (
+            <p data-testid="revoke-partial">
+              <strong>One of your keys could not be deactivated.</strong> A
+              duplicate under this name may still work against <code>/v1/</code>
+              . Press <strong>Replace my key…</strong> again once the page
+              reloads — it retries every key, and it will not cost you a second
+              revocation.
+            </p>
+          )}
           {(() => {
             const at = describeUtcInstant(view.revoked.revoked_at);
             const fresh = revokedJustNow(view.revoked.revoked_at);
@@ -1080,8 +1105,13 @@ function Usage({
 
   // Task 0191: after an in-page revoke, re-ask. The backend evicted its
   // cache for this caller, so this is one real read — and the answer may
-  // legitimately still carry the revoked key's figures (its counter is
-  // preserved), rendered under the "deactivated" wording below.
+  // legitimately still carry the revoked key's figures: `usage::fetch` keeps
+  // reporting a revoked key's counter (it is preserved) for as long as the cap
+  // holds, so the `ok` branch below renders an ordinary usage panel. Nothing in
+  // THIS section marks the key dead; the key section above it renders the
+  // `key-revoked` view, and that is where the visitor reads it. Only the
+  // `no-key` branch here has revoke wording, for the case where AWS has no row
+  // at all.
   const lastRevokedCount = useRef(0);
   useEffect(() => {
     if (revokedCount === lastRevokedCount.current) return;

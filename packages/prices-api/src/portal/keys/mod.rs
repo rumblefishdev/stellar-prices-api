@@ -110,7 +110,7 @@ use crate::common::{cache_control, errors};
 use super::auth::secret::OauthSecret;
 use super::period::Period;
 use cap::Cap;
-use gateway::{Attachment, Gateway, GatewayError, KeyValue};
+use gateway::{Attachment, Disable, Gateway, GatewayError, KeyValue};
 use naming::{
     KeyRecord, choose_winner, current_key, exact_matches, key_name, losers, revocation_instant,
 };
@@ -484,6 +484,14 @@ struct RevokeResponse {
     /// was. `null` when no record under the name carries a date: a made-up
     /// epoch instant would render as "deactivated on 1 January 1970".
     revoked_at: Option<String>,
+    /// `true` when at least one key under the name could **not** be disabled
+    /// while another was (task 0191's partial revocation). The page must not
+    /// render a plain "revoked" for it: a duplicate that still answers on
+    /// `/v1/` is exactly the state the dialog's docs forbid calling revoked.
+    /// Omitted from the JSON in the ordinary case, so the common answer keeps
+    /// the shape it had.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    partial: bool,
 }
 
 /// `POST /key/rework` — revoke the caller's key now, issue nothing
@@ -559,9 +567,18 @@ async fn revoke(State(state): State<KeysState>, headers: HeaderMap) -> Response 
         }
     };
 
+    // Read before the match consumes `revoked`; both arms below answer `200`
+    // with the same dates and differ only in this flag.
+    let partial = matches!(&revoked, Ok(Revocation::Partial { .. }));
     match revoked {
-        Ok(Revocation::Done { at }) => {
-            tracing::info!("portal revoked an API key");
+        Ok(Revocation::Done { at }) | Ok(Revocation::Partial { at }) => {
+            if partial {
+                tracing::error!(
+                    "portal revoked an API key only in part; a duplicate may still answer"
+                );
+            } else {
+                tracing::info!("portal revoked an API key");
+            }
             // The cached usage describes a key that is now off. Its counter is
             // preserved (0180 item 8), so the numbers would still be right —
             // but the page's state changed underneath them, and a fresh read
@@ -585,6 +602,7 @@ async fn revoke(State(state): State<KeysState>, headers: HeaderMap) -> Response 
                     revoked: true,
                     next_eligible_at,
                     revoked_at: at.map(rfc3339),
+                    partial,
                 })
                 .into_response(),
             )
@@ -618,17 +636,37 @@ async fn revoke(State(state): State<KeysState>, headers: HeaderMap) -> Response 
 }
 
 /// Disable every key under `name`. [`Revocation::NoKey`] means there was
-/// none; [`Revocation::Done`] carries the revocation instant — now for a key
-/// this call disabled, the recorded `lastUpdatedDate` for one that already
-/// was, and `None` for the shape where no record under the name is dated.
+/// none left to disable; [`Revocation::Done`] and [`Revocation::Partial`]
+/// carry the revocation instant — the control plane's own `lastUpdatedDate`
+/// for a key this call disabled, the recorded one for a key that already was,
+/// and `None` for the shape where no record under the name is dated.
 ///
 /// **Every** enabled key, not only the current one: a duplicate left by an
 /// earlier double-submit is a working credential the visitor was just told
-/// had died. The first failure propagates — a `502` for a revocation is the
-/// honest answer, because "revoked" must never be said of a key that still
-/// works — but the keys disabled before it stay disabled: there is no
-/// rollback for a revocation, and re-enabling a leaked key would be the
-/// wrong direction to fail in.
+/// had died.
+///
+/// **A failure mid-loop is logged and stepped over, not propagated** — the
+/// reverse of what this function did when it shipped, and the reason is the
+/// sentence at the other end of it. Propagating the first error answered
+/// `502`, and the dialog's `502` copy said the key "is still active" while the
+/// keys disabled before the error were off. There is no rollback for a
+/// revocation (re-enabling a leaked key is the wrong direction to fail in), so
+/// the state after a partial failure is real and has to be *reported* rather
+/// than denied:
+///
+/// - at least one disable applied, none failed → [`Revocation::Done`];
+/// - at least one applied **and** at least one failed → [`Revocation::Partial`],
+///   which the page renders as "your key is off, a duplicate may still work" —
+///   never as a plain "revoked", because that is the claim `app.tsx`'s dialog
+///   docs forbid making about a key that still answers;
+/// - nothing applied and something failed → the error, and the `502` stands:
+///   here "still active" is the truth, and no write of ours landed.
+///
+/// A key that answers `NotFound` is not a failure but the deletion race, and
+/// counts as neither: if every enabled key raced away there is nothing to
+/// revoke and no record to date, which is [`Revocation::NoKey`] — the same
+/// answer the very next `?action=issue` press will act on when it finds the
+/// name empty and creates a key outright.
 async fn disable_all(gateway: &Gateway, name: &str) -> Result<Revocation, GatewayError> {
     let keys = exact_matches(gateway.list_named(name).await?, name);
     let Some(current) = current_key(&keys) else {
@@ -643,6 +681,15 @@ async fn disable_all(gateway: &Gateway, name: &str) -> Result<Revocation, Gatewa
             at: revocation_instant(&keys),
         });
     }
+    // The LATEST instant among the disables that landed, which is what
+    // `naming::revocation_instant` will read back off the records afterwards
+    // and what `cap::decide` compares against the period. Never
+    // `SystemTime::now()`: that is a different clock from the control plane's,
+    // and on the 1st the two can fall either side of the period boundary — the
+    // page would then name a `next_eligible_at` a month before the issue
+    // round-trip would honour it.
+    let mut applied: Option<Option<u64>> = None;
+    let mut failure: Option<GatewayError> = None;
     for key in keys.iter().filter(|k| k.enabled) {
         // The same last-line guard the reconciler keeps before its deletes:
         // on the record, immediately before the write.
@@ -654,22 +701,60 @@ async fn disable_all(gateway: &Gateway, name: &str) -> Result<Revocation, Gatewa
             );
             continue;
         }
-        if gateway.disable(&key.id).await? {
-            tracing::info!(key_id = %key.id, "portal disabled a revoked API key");
+        match gateway.disable(&key.id).await {
+            Ok(Disable::Applied(at)) => {
+                tracing::info!(key_id = %key.id, "portal disabled a revoked API key");
+                applied = Some(match applied {
+                    Some(previous) => previous.max(at),
+                    None => at,
+                });
+            }
+            Ok(Disable::KeyGone) => {
+                tracing::info!(
+                    key_id = %key.id,
+                    "a key listed for revocation was already gone; nothing to disable"
+                );
+            }
+            Err(error) => {
+                tracing::error!(
+                    key_id = %key.id,
+                    error = %error,
+                    "could not disable a key during a revocation; continuing with the rest"
+                );
+                if failure.is_none() {
+                    failure = Some(error);
+                }
+            }
         }
     }
-    Ok(Revocation::Done {
-        at: Some(now_secs()),
-    })
+    match (applied, failure) {
+        (Some(at), None) => Ok(Revocation::Done { at }),
+        (Some(at), Some(_)) => Ok(Revocation::Partial { at }),
+        // Nothing of ours landed, so the `502` is honest and the dialog's
+        // "we could not deactivate it" is the right thing to say.
+        (None, Some(error)) => Err(error),
+        // Every enabled key raced away between the listing and the patch.
+        // Not `Done`: there is no disabled record in the account, so telling
+        // the visitor "deactivated, next eligible on the 1st" would be
+        // contradicted by the next issue press, which finds the name empty
+        // and creates a key on the spot.
+        (None, None) => Ok(Revocation::NoKey),
+    }
 }
 
 /// What [`disable_all`] found and did.
 enum Revocation {
-    /// Nothing under the name to revoke.
+    /// Nothing under the name left to revoke.
     NoKey,
-    /// The key is off. `at` is the revocation instant, `None` only when no
+    /// Every key is off. `at` is the revocation instant, `None` only when no
     /// record under the name carries a `lastUpdatedDate`.
     Done { at: Option<u64> },
+    /// Some keys are off and at least one could not be disabled — so a
+    /// credential under this name may still answer on `/v1/`. `at` dates the
+    /// disables that did land, and the cap is decided from it exactly as for
+    /// [`Self::Done`]: the owner is capped either way, because a revocation
+    /// they cannot fully complete must not also cost them the refusal.
+    Partial { at: Option<u64> },
 }
 
 /// Seconds since the Unix epoch, saturating.
@@ -909,6 +994,19 @@ async fn attempt(
         {
             return Ok(Attempt::Capped { next_eligible_date });
         }
+        // Logged and stepped over, NOT propagated — the same rule, for the
+        // same reason, as the loser sweep at the end of this function. A `?`
+        // here makes a delete that cannot succeed permanent: this branch is
+        // reached on EVERY press once the name holds nothing but revoked keys,
+        // so one undeletable record (an untagged exact-name key made by hand in
+        // the console, against the tag condition task 0194 may add to `DELETE`)
+        // would answer `?issue=failed` forever, with no in-product recovery.
+        // Housekeeping must not be able to withhold the key the request is for.
+        //
+        // The create below is safe with the record still there: the re-listing
+        // drops everything disabled, so a survivor is neither ranked nor
+        // adopted, and the sweep at the end tries it again.
+        let mut undeleted: Vec<KeyRecord> = Vec::new();
         for dead in &revoked {
             if dead.name != name {
                 tracing::error!(
@@ -919,11 +1017,22 @@ async fn attempt(
                 continue;
             }
             tracing::info!(key_id = %dead.id, "deleting a revoked key whose period has rolled");
-            gateway.delete(&dead.id).await?;
-            deleted_here.push(dead.id.clone());
+            match gateway.delete(&dead.id).await {
+                Ok(()) => deleted_here.push(dead.id.clone()),
+                Err(error) => {
+                    tracing::error!(
+                        key_id = %dead.id,
+                        error = %error,
+                        "could not delete a revoked key whose period has rolled; continuing \
+                         into the create and leaving it for the sweep"
+                    );
+                    undeleted.push(dead.clone());
+                }
+            }
         }
-        // Deleted here, so the sweep below has nothing of theirs left to do.
-        revoked.clear();
+        // Whatever was deleted here is gone, so the sweep below has nothing of
+        // theirs left to do; whatever failed stays in the list for it to retry.
+        revoked = undeleted;
     }
 
     let mut created: Option<KeyRecord> = None;

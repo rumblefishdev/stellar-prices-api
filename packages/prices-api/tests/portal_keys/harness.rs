@@ -156,6 +156,16 @@ pub struct Store {
     /// Answer every `UpdateApiKey` with a 500 (task 0191). Sticky, like
     /// `fail_deletes`, for the same reason.
     pub fail_disables: bool,
+    /// Answer `UpdateApiKey` for exactly these ids with a 500 and succeed for
+    /// every other id (task 0191) — the per-id twin of `fail_disables`, and the
+    /// only way to reach a PARTIAL revocation: one key of a double-submit pair
+    /// goes off while the other refuses.
+    pub fail_disable_of: Vec<String>,
+    /// Stamp a disabled key's `lastUpdatedDate` with this instant instead of
+    /// the mock's clock (task 0191), so a test can prove the revocation date in
+    /// the answer came from the control plane's response and not from the
+    /// handler's own `SystemTime::now()`.
+    pub disable_stamps_at: Option<u64>,
     /// Answer EVERY `GetApiKeys` with the keys the store holds PLUS every key
     /// deleted so far, as if the listing never caught up with the deletes
     /// (task 0191). Sticky, so the re-listing AFTER a delete is the one that
@@ -477,10 +487,10 @@ pub async fn update_key(
     Json(body): Json<Value>,
 ) -> Response {
     let mut store = store.lock().unwrap();
-    if store.fail_disables {
+    if store.fail_disables || store.fail_disable_of.contains(&id) {
         return (StatusCode::INTERNAL_SERVER_ERROR, "control plane is unwell").into_response();
     }
-    let now = now_secs();
+    let now = store.disable_stamps_at.unwrap_or_else(now_secs);
     let Some(key) = store.keys.iter_mut().find(|k| k.id == id) else {
         return not_found();
     };
@@ -918,12 +928,12 @@ pub async fn issue_round_trip(router: &Router) -> Reply {
     round_trip(router, "issue").await
 }
 
-/// The same, for task 0191's `action=rework` — a `303` whose `Location` is
-/// one of the `?rework=…` landing states.
-pub async fn rework_round_trip(router: &Router) -> Reply {
-    round_trip(router, "rework").await
-}
-
+/// The shared body of the round-trip helpers above.
+///
+/// `action` must be one [`Action::parse`] accepts; anything else answers `400`
+/// at `/auth/login` and the `303` assertion below panics. That is why there is
+/// no `rework` variant here: task 0191's revoke is a same-origin `POST`, not an
+/// OAuth round-trip, and `state_token.rs` asserts `"rework"` is not an action.
 async fn round_trip(router: &Router, action: &str) -> Reply {
     let login = call_path(
         router.clone(),

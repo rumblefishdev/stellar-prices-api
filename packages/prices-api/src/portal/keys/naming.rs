@@ -90,14 +90,6 @@ pub struct KeyRecord {
     pub last_updated_at: Option<u64>,
 }
 
-/// The key the owner currently holds, among `records`: the earliest **enabled**
-/// key if there is one, otherwise the earliest key of any state (task 0191).
-///
-/// Enabled keys win over disabled ones whatever their dates, because a
-/// disabled key is a revocation record and an enabled one is a credential: if
-/// both exist (a console re-enable, a duplicate), the credential is what the
-/// visitor is holding and what a revoke must act on. Among keys of one state
-/// the rule is [`choose_winner`]'s, so both sides of a double-submit agree.
 /// The instant the re-issue cap is decided from, for a user whose keys are
 /// ALL revoked: the **latest** revocation among them (task 0191).
 ///
@@ -122,6 +114,18 @@ pub fn revocation_instant(revoked: &[KeyRecord]) -> Option<u64> {
         .max()
 }
 
+/// The key the owner currently holds, among `records`: the earliest **enabled**
+/// key if there is one, otherwise the earliest key of any state (task 0191).
+///
+/// Enabled keys win over disabled ones whatever their dates, because a
+/// disabled key is a revocation record and an enabled one is a credential: if
+/// both exist (a console re-enable, a duplicate), the credential is what the
+/// visitor is holding and what a revoke must act on. Among keys of one state
+/// the rule is [`choose_winner`]'s, so both sides of a double-submit agree.
+///
+/// The reveal, the revoke and the usage route all select through this, so the
+/// key whose value is handed out, the key a revoke disables and the key whose
+/// counter is reported are the same key by construction.
 pub fn current_key(records: &[KeyRecord]) -> Option<&KeyRecord> {
     let enabled: Vec<&KeyRecord> = records.iter().filter(|r| r.enabled).collect();
     if enabled.is_empty() {
