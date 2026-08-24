@@ -25,7 +25,7 @@ async fn main() -> Result<(), lambda_runtime::Error> {
     use enrichment_worker::live_window::{
         DEFAULT_LIVE_PARTITIONS, live_partition_window, month_of,
     };
-    use enrichment_worker::repair::{CoarseSweepConfig, is_coarse_table};
+    use enrichment_worker::repair::{CoarseSweepConfig, sweep_config_from_env};
     use lambda_runtime::{LambdaEvent, run, service_fn};
     use prices_clickhouse::env::{env_or, env_parse_or};
     use std::sync::Arc;
@@ -92,40 +92,11 @@ async fn main() -> Result<(), lambda_runtime::Error> {
     // close_usd across 1m AND the rollups. Disabled unless COARSE_SWEEP_TABLES is
     // set, so the code ships inert until the CDK env turns it on. It runs AFTER
     // the 1m pass, bounded (one_shot = false) and best-effort (see the handler).
-    let sweep_cfg: Option<CoarseSweepConfig> = {
-        // Validate the table list ONCE at cold start: drop any non-coarse name
-        // (a typo, or the off-limits live `price_ohlcv_1m`) with a loud warning
-        // here rather than refusing it on every hourly run — the latter would
-        // permanently mark the run as having a skipped table.
-        let mut tables = Vec::new();
-        for name in env_or("COARSE_SWEEP_TABLES", "")
-            .split(',')
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            if is_coarse_table(name) {
-                tables.push(name.to_string());
-            } else {
-                tracing::warn!(
-                    table = %name,
-                    "coarse sweep: ignoring non-coarse table in COARSE_SWEEP_TABLES \
-                     (expected price_ohlcv_15m … _1M; price_ohlcv_1m is the live base and off-limits)"
-                );
-            }
-        }
-        if tables.is_empty() {
-            None
-        } else {
-            Some(CoarseSweepConfig {
-                // Shares oracle name / windows / batch size / database with the 1m
-                // pass; the sweep overwrites `table` + `max_batches` per table.
-                base: cfg.clone(),
-                tables,
-                lookback_months: env_parse_or("COARSE_SWEEP_LOOKBACK_MONTHS", 2),
-                max_batches: env_parse_or("COARSE_SWEEP_MAX_BATCHES", 20),
-            })
-        }
-    };
+    // Recurring coarse-table sweep (task 0114). Built from the SAME helper the
+    // standalone coarse-sweep Lambda uses (task 0218), so the two entrypoints
+    // can never disagree about which tables are in scope. Disabled unless
+    // COARSE_SWEEP_TABLES is set.
+    let sweep_cfg: Option<CoarseSweepConfig> = sweep_config_from_env(cfg.clone());
     // Per-invocation wall-clock budget for the sweep. It stops after this many
     // seconds — further capped by the Lambda deadline minus a margin below — so a
     // slow catch-up defers to the next run instead of being hard-killed by the

@@ -394,6 +394,56 @@ pub struct CoarseSweepConfig {
     pub max_batches: u32,
 }
 
+/// Build a [`CoarseSweepConfig`] from the environment, or `None` when the sweep
+/// is off.
+///
+/// `COARSE_SWEEP_TABLES` (comma-separated) is the **on switch**: empty or unset
+/// disables the sweep entirely, so the code ships inert and the CDK env turns it
+/// on with no code change.
+///
+/// The table list is validated **once here**, not per run: a typo, or the
+/// off-limits live base `price_ohlcv_1m`, is dropped with a loud warning at cold
+/// start. Rejecting it per-invocation instead would permanently mark every run
+/// as having a skipped table, which is a standing false alarm rather than a
+/// signal (task 0218).
+///
+/// Shared by the enrichment Lambda and the standalone coarse-sweep Lambda so the
+/// two can never disagree about which tables are in scope — the failure mode the
+/// reuse-over-reimplementation rule exists to prevent.
+pub fn sweep_config_from_env(base: ChEnrichConfig) -> Option<CoarseSweepConfig> {
+    let raw = prices_clickhouse::env::env_or("COARSE_SWEEP_TABLES", "");
+    let tables = coarse_tables_from_list(&raw);
+    if tables.is_empty() {
+        return None;
+    }
+    Some(CoarseSweepConfig {
+        base,
+        tables,
+        lookback_months: prices_clickhouse::env::env_parse_or("COARSE_SWEEP_LOOKBACK_MONTHS", 2),
+        max_batches: prices_clickhouse::env::env_parse_or("COARSE_SWEEP_MAX_BATCHES", 20),
+    })
+}
+
+/// Split a comma-separated table list, keeping only coarse rollups.
+///
+/// Pure and separately testable: the env plumbing above is the only untestable
+/// part, and this is where the actual guard lives.
+pub fn coarse_tables_from_list(raw: &str) -> Vec<String> {
+    let mut tables = Vec::new();
+    for name in raw.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        if is_coarse_table(name) {
+            tables.push(name.to_string());
+        } else {
+            warn!(
+                table = %name,
+                "coarse sweep: ignoring non-coarse table in COARSE_SWEEP_TABLES \
+                 (expected price_ohlcv_15m … _1M; price_ohlcv_1m is the live base and off-limits)"
+            );
+        }
+    }
+    tables
+}
+
 /// One table's sweep outcome — its name and per-month [`RepairSummary`].
 #[derive(Debug, Clone, Serialize)]
 pub struct TableSweep {
@@ -566,4 +616,74 @@ pub async fn run_coarse_sweep(
     }
 
     Ok(summary)
+}
+
+#[cfg(test)]
+mod sweep_config_tests {
+    use super::*;
+
+    /// The live base table is the one name that must never reach the sweep: it
+    /// is enrichment's own target, and a sweep writing it would make two
+    /// schedules write the same rows. Guarded in `is_coarse_table`; asserted
+    /// here because the guard is what keeps the two Lambdas' write sets disjoint
+    /// after the task 0218 split.
+    #[test]
+    fn the_live_base_table_is_refused() {
+        assert!(!is_coarse_table("price_ohlcv_1m"));
+        assert!(coarse_tables_from_list("price_ohlcv_1m").is_empty());
+    }
+
+    #[test]
+    fn every_coarse_rollup_is_accepted() {
+        for t in [
+            "price_ohlcv_15m",
+            "price_ohlcv_1h",
+            "price_ohlcv_4h",
+            "price_ohlcv_1d",
+            "price_ohlcv_1w",
+            "price_ohlcv_1M",
+        ] {
+            assert!(is_coarse_table(t), "{t} should be sweepable");
+        }
+        assert_eq!(
+            coarse_tables_from_list(
+                "price_ohlcv_15m,price_ohlcv_1h,price_ohlcv_4h,price_ohlcv_1d,price_ohlcv_1w,price_ohlcv_1M"
+            )
+            .len(),
+            6
+        );
+    }
+
+    /// A non-OHLCV name (a typo, or a state table someone pasted in) is dropped
+    /// rather than swept — the sweep must never touch anything outside the
+    /// rollup family.
+    #[test]
+    fn non_ohlcv_names_are_dropped() {
+        assert!(!is_coarse_table("assets"));
+        assert!(!is_coarse_table("enrichment_frontier"));
+        assert!(coarse_tables_from_list("assets,enrichment_frontier,usd_rate").is_empty());
+    }
+
+    /// Mixed input keeps only the valid coarse names and drops the rest, in
+    /// order — a single bad entry must not discard the whole list.
+    #[test]
+    fn a_bad_entry_does_not_discard_the_good_ones() {
+        assert_eq!(
+            coarse_tables_from_list("price_ohlcv_1h, price_ohlcv_1m, oops, price_ohlcv_1d"),
+            vec!["price_ohlcv_1h".to_string(), "price_ohlcv_1d".to_string()],
+        );
+    }
+
+    /// Whitespace and empty segments are tolerated: the value is hand-written in
+    /// the CDK env, so a trailing comma or a space after one must not silently
+    /// produce an empty-named table.
+    #[test]
+    fn whitespace_and_empty_segments_are_ignored() {
+        assert_eq!(
+            coarse_tables_from_list("  price_ohlcv_1h , , price_ohlcv_4h ,"),
+            vec!["price_ohlcv_1h".to_string(), "price_ohlcv_4h".to_string()],
+        );
+        assert!(coarse_tables_from_list("").is_empty());
+        assert!(coarse_tables_from_list(",,,").is_empty());
+    }
 }
