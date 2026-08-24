@@ -135,6 +135,54 @@ history:
       every measurement so far filtered query_log on INSERT INTO, so it has never
       been looked at. Branch perf/0111_partition-bounded-enrichment-passes;
       prepare-only, nothing deployed.
+  - date: 2026-08-21
+    status: active
+    who: okarcz
+    note: >
+      Built and merged (PR #242, 7eff9c3) but NOT deployed. Pre-deploy
+      re-measurement falsified this file's own "the live window keeps up fine
+      (2.81K unpriced)": that figure is XLM-quoted only, conflated with the
+      all-quotes era figure of 10.44M of 17.05M (61.2%). Measured over 48h in
+      4h buckets, the unpriced share is FLAT at 50-58% with no age-decay — a
+      bucket 44h old looks like one 4h old, so enrichment never returns to
+      those rows. ~45% of the 26,900 rolling-4h total is the permanent
+      exotic-quote floor (long tail, no leg over 17%), but ~2,370/4h are
+      USDC(3)- and XLM(4)-quoted, i.e. should-be-priceable — ~14,200/day. Also
+      established that EnrichmentBacklogAlarm reads OK on NO DATA
+      (treatMissingData NOT_BREACHING) because pass_metrics only publishes
+      after pass.run() returns and the Lambda is killed mid-pass — the 0204
+      pattern. Net effect: the chosen design is unchanged, Phase 1's payoff is
+      larger than recorded (it un-starves the live window, not just speeds it),
+      and AC 6's "floor" is ~27K not 2.81K. Deploy deliberately deferred ~2
+      days (costs ~$0.29, 3.4% of the live backlog, 1.1% of the historical one)
+      pending an explanation for the unexplained RollupFreshnessProbeFunction
+      code-asset replacement in the cdk diff.
+  - date: 2026-08-24
+    status: active
+    who: okarcz
+    note: >
+      Ran the leg-level discriminator the 2026-08-21 entry called for and it
+      REFUTED that entry's starvation conclusion. Legs 3 (USDC) and 4 (XLM) —
+      identities now confirmed against prices.assets — decay to zero within ~4h:
+      over a 40h window excluding the freshest 8h, XLM is 12 unpriced of 138,722
+      and USDC is 0 of 90,672. Every other quote leg is unpriced at EXACTLY
+      100%, with no middle ground, which is the signature of a structural gap
+      (no oracle, no pivot reference) rather than a backlog — the permanent
+      exotic-quote floor of 0056, ~88K rows/day against ~138K/day priceable.
+      USDT (111) is absent from the top 20, so live USDT volume is negligible
+      and the peg tier has nothing to do in the live window. yXLM (44,432) and
+      yUSDC (21,996) are 45% of the floor and belong to 0154, not here. Both
+      measurements are correct: ~42 of the 08-21 window's 48h predate the 0215
+      Caddy fix, when the pass died at 30.0s and the live window really was
+      starved, and the aggregates reconcile (51.2% on 08-22 20:00, inside the
+      08-21 50-58% band) because the floor is half the candidates and masks a
+      priceable half that goes to zero. Net: the starvation was real and 0215
+      already fixed it — it was never 0111's scan cost. Phase 1's payoff
+      reverts to the original case (the 300,000ms alarm, 5.4 of 40 budgeted
+      batches, the ~322-day drain, 0218 blocked behind it). AC 6 rewritten to be
+      leg-scoped, because EnrichmentRowsRemainingRecent is ~100% floor and would
+      have passed a starved pass. Still not deployed; the cdk diff blocker
+      stands.
 ---
 
 > **Why this is queued ahead of its own cost case:** the perf argument for 0111
@@ -396,6 +444,251 @@ pre-fix — again, because the pass now gets further before dying. Against
 finish. Phase 1 alone sends this to **zero** until the Phase 2 sweep lands,
 which is why the two should land together.
 
+## ⚠️ Re-measured 2026-08-21 evening — the live window does NOT "keep up fine"
+
+> 🗄️ **Superseded 2026-08-24 as a verdict, kept as a record.** Everything
+> measured here is accurate *for the regime it was taken in* — ~42 of its 48 h
+> predate the [[0215]] Caddy fix, when the pass died at 30.0 s on every
+> invocation. Its **starvation conclusion was falsified** by the leg-level
+> discriminator it itself called for; see *Re-measured 2026-08-24* below. Read
+> this section for the pre-fix baseline, not for what is true now.
+
+Prompted by a pre-deploy question ("is it safe to leave this undeployed for two
+days?"). The answer is yes, but reaching it falsified a claim this file makes
+twice.
+
+### The conflation
+
+This file states the live window has **2.81 K** unpriced and "keeps up fine".
+That figure is **XLM-quoted only** — it comes from the by-year table under *The
+backlog is XLM*, whose scope is `quote_asset_id = 4`. The all-quotes figure sits
+in the era table one section earlier: **10.44 M of 17.05 M (61.2%)**. The two
+were read as though they shared a scope. They do not, and the era figure is the
+one that matches the live table.
+
+### The measurement
+
+`price_ohlcv_1m FINAL`, 48 h to 2026-08-21 ~20:45 UTC, `timestamp`-bounded so it
+prunes to the current partition — sub-second, no full scan:
+
+| bucket (UTC) | candidates | unpriced | share |
+|---|---|---|---|
+| 08-19 20:00 | 60,855 | 35,521 | **58.4%** |
+| 08-20 00:00 | 49,629 | 25,237 | 50.9% |
+| 08-20 04:00 | 28,911 | 13,692 | 47.4% |
+| 08-20 08:00 | 87,843 | 44,047 | 50.1% |
+| 08-20 12:00 | 71,176 | 41,785 | 58.7% |
+| 08-20 16:00 | 101,096 | 58,455 | 57.8% |
+| 08-20 20:00 | 41,703 | 23,472 | 56.3% |
+| 08-21 00:00 | 48,588 | 24,360 | 50.1% |
+| 08-21 04:00 | 39,853 | 19,694 | 49.4% |
+| 08-21 08:00 | 73,175 | 39,566 | 54.1% |
+| 08-21 12:00 | 39,311 | 20,134 | 51.2% |
+| 08-21 16:00 | 47,675 | 26,994 | 56.6% |
+| 08-21 20:00 | 9,010 | 6,882 | _(partial bucket)_ |
+
+**There is no decay.** A bucket 44 h old — 44 hourly passes' worth of chances —
+carries the same unpriced share as one 4 h old, and is in fact the highest of the
+complete buckets. Enrichment does not come back for these rows. Age-decay is the
+discriminator: lag drains, a floor does not.
+
+### Which legs, rolling 4 h (26,900 total)
+
+| `quote_asset_id` | unpriced |
+|---|---|
+| 10 (yXLM) | 4,518 |
+| **4 (XLM)** | **1,632** |
+| 32 (yUSDC) | 1,631 |
+| 40 (XRP) | 1,506 |
+| 28 | 1,372 |
+| 11 | 1,260 |
+| 1221 | 829 |
+| **3 (USDC)** | **738** |
+| 201223 | 723 |
+| 14 (SHX) | 673 |
+
+Top 10 = 14,882, so **~45% sits in a tail below rank 10** and no single leg
+exceeds 17%. That long tail is the permanent **exotic-quote floor** (quote ∉
+{USDC, USDT, XLM}, no oracle) that [[0056]] redesigned the stall alarm to
+exclude. It never drains by design, and it is what makes the aggregate decay
+above look flat — it masks whatever the priceable legs do. Most of the 26,900 is
+expected and is not this task's to fix.
+
+⚠️ **But two legs are not floor.** `3` (USDC) and `4` (XLM) are the pivot
+reference pair itself (`asset_id = 4 AND quote_asset_id = 3`). USDC-quoted
+candles are peg-tier arithmetic; XLM-quoted ones are precisely what `pivot_sql`
+exists to price. Together ~2,370 per 4 h ≈ **14,200/day of should-be-priceable
+rows**. Note 1,632 XLM-quoted unpriced in *four hours* against this file's
+"2,810 for all of 2026" — those two cannot both be true.
+
+✅ **Discriminated 2026-08-24 — legs 3 and 4 DECAY, to zero, within ~4 h.** The
+question posed here ("flat ⇒ starved, decaying ⇒ ordinary lag") was the right
+one and it returned *decaying*. The starvation reading below is therefore
+**refuted for the post-0215 regime**; it was real when measured and [[0215]]
+fixed it. Leg identities are also now confirmed against `prices.assets`
+(`3` = USDC, `4` = XLM — the cohorts were right). See the next section.
+
+### 🔴 The stall alarm reads OK because nothing is measured
+
+`pass_metrics` publishes only *after* `pass.run()` returns (`main.rs:275`), and
+the Lambda is killed mid-pass — so `EnrichmentRowsEnriched` and
+`EnrichmentRowsRemainingRecent` have **no datapoints at all**.
+`EnrichmentBacklogAlarm` is `treatMissingData: NOT_BREACHING`
+(`observability-stack.ts:381`), so no data reads as **OK**. Same pattern as the
+seven alarms in [[0204]]. This sharpens the §5-metrics blind spot noted above
+from "the metrics are missing" to "the alarm that should catch this is green
+*because* they are missing".
+
+Interim manual check while undeployed — baseline **~27 K**, investigate above
+~50 K:
+
+```sql
+SELECT count() AS recent_unpriced
+FROM prices.price_ohlcv_1m FINAL
+WHERE volume_quote_usd = 0 AND volume_quote > 0
+  AND timestamp >= now() - INTERVAL 4 HOUR
+```
+
+### What this changes for the fix
+
+> ⛔ **This subsection's conclusion is WITHDRAWN — see *Re-measured 2026-08-24*.**
+> It argued Phase 1's payoff is larger than the file claims because Phase 1 also
+> un-starves the live window. The live window is not starved post-0215, so the
+> payoff reverts to the original, smaller case. Preserved because the reasoning
+> is sound *given* a starved live window, and a future regression would make it
+> live again.
+
+**Phase 1's payoff is larger than this file claims.** It is framed purely as
+"stop dragging the live window through a 736 M-row scan". But post-fix the live
+pass reaches its full `max_batches` × `batch_size` = 200 K rows/pass ≈
+**4.8 M/day**, against a live inflow of ~180 K/day unpriced. That clears the
+inflow with headroom *and* eats into the 10.44 M live-window backlog. The live
+window is not merely being carried inefficiently — it is being **starved**, and
+Phase 1 fixes that too.
+
+Nothing here changes the chosen design or the phase ordering. It raises the
+payoff and adds a second thing to verify after deploy.
+
+### Deploy timing
+
+Two days undeployed costs ~$0.29 of Lambda, ~360 K live rows (**3.4%** of the
+10.44 M live backlog) and ~6 M historical rows (**1.1%** of 556.78 M). Judged
+acceptable against the unexplained `RollupFreshnessProbeFunction` code-asset
+replacement in the `cdk diff`: deploying an unexplained artifact into the stack
+that also carries `CleanupRule` ([[0200]]) is the larger risk.
+
+## ✅ Re-measured 2026-08-24 — the live window is NOT starved; every leg is 0% or 100%
+
+Runs the discriminator the previous section called for and could not run: **do
+legs 3 and 4 decay with age once the exotic floor is stripped out?** They do —
+to zero, within about four hours. The starvation reading is **refuted for the
+post-0215 regime**.
+
+Both queries are `timestamp`-bounded so they prune to the current partition —
+sub-second, no full scan. Predicate is enrichment's real
+`CANDIDATE_PRED` (`ch_enrich.rs:209`),
+`(volume_quote_usd = 0 OR close_usd = 0) AND volume_quote > 0`, which is
+**broader** than the narrower `volume_quote_usd = 0` the 08-21 tables used — so
+these counts read slightly higher by construction. That is a predicate
+difference, not a regression.
+
+### Decay by cohort, 4 h buckets, 48 h to 2026-08-24 ~08:00 UTC
+
+| bucket (UTC) | USDC cand | unpriced | % | XLM cand | unpriced | % | floor cand | unpriced | % |
+|---|---|---|---|---|---|---|---|---|---|
+| 08-22 04:00 | 3,993 | 0 | **0** | 5,128 | 0 | **0** | 10,403 | 10,361 | 99.6 |
+| 08-22 08:00 | 13,480 | 0 | **0** | 19,879 | 0 | **0** | 46,103 | 45,957 | 99.7 |
+| 08-22 12:00 | 11,566 | 0 | **0** | 16,665 | 0 | **0** | 32,983 | 32,902 | 99.8 |
+| 08-22 16:00 | 8,592 | 0 | **0** | 15,025 | 2 | **0** | 35,328 | 35,261 | 99.8 |
+| 08-22 20:00 | 6,590 | 0 | **0** | 9,592 | 3 | **0** | 17,086 | 17,035 | 99.7 |
+| 08-23 00:00 | 9,146 | 0 | **0** | 14,048 | 1 | **0** | 22,029 | 21,955 | 99.7 |
+| 08-23 04:00 | 8,853 | 0 | **0** | 13,667 | 5 | **0** | 25,885 | 25,803 | 99.7 |
+| 08-23 08:00 | 9,412 | 0 | **0** | 13,376 | 1 | **0** | 19,826 | 19,752 | 99.6 |
+| 08-23 12:00 | 9,735 | 0 | **0** | 14,924 | 0 | **0** | 27,030 | 26,948 | 99.7 |
+| 08-23 16:00 | 3,976 | 0 | **0** | 7,896 | 0 | **0** | 16,054 | 16,048 | 100 |
+| 08-23 20:00 | 6,055 | 4 | 0.1 | 10,136 | 4 | **0** | 20,645 | 20,616 | 99.9 |
+| 08-24 00:00 | 8,808 | 8 | 0.1 | 12,465 | 1 | **0** | 23,828 | 23,766 | 99.7 |
+| 08-24 04:00 | 4,819 | 1,323 | _27.5_ | 8,468 | 1,737 | _20.5_ | 15,043 | 15,030 | 99.9 |
+
+The newest bucket is **lag, not floor** — it is mid-drain and always will be.
+Everything older than it is at zero.
+
+### Per leg, 40 h window with the newest 8 h excluded
+
+Excluding the freshest 8 h removes the draining buckets, so anything non-zero
+here is genuine floor rather than lag:
+
+| leg | `quote_asset_id` | candidates | unpriced | % |
+|---|---|---|---|---|
+| **XLM** | 4 | 138,722 | **12** | **0.0** |
+| **USDC** | 3 | 90,672 | **0** | **0.0** |
+| yXLM | 10 | 44,432 | 44,432 | **100** |
+| yUSDC | 32 | 21,996 | 21,996 | **100** |
+| XRP | 40 | 15,175 | 15,175 | **100** |
+| SHX | 14 | 9,413 | 9,413 | **100** |
+| YxT | 2 | 9,040 | 9,040 | **100** |
+| VELO | 28 | 8,772 | 8,772 | **100** |
+| LIBRE | 11 | 6,848 | 6,848 | **100** |
+| USTRY, sUSD, bubba, xLMNR, RIO, SSLX, m0N33Tr33, xRUNES, XXA, XTROOP | — | 2.0-4.6 K each | all | **100** |
+
+**There is no middle ground.** A leg is either fully priced or fully unpriced —
+100.0%, not 99% or 95%, on every exotic leg. That is the signature of a
+structural gap (no oracle, no pivot reference) rather than a backlog, and it
+matches [[0056]]'s exotic-quote floor exactly.
+
+Floor ≈ **88 K rows/day** against ≈ **138 K/day** of priceable inflow.
+
+### Three things this settles
+
+- ✅ **Leg identities confirmed against `prices.assets`** — `3` = USDC,
+  `4` = XLM. [[0139]]'s warning was heeded; the cohorts were right. The 08-21
+  guesses for 10/28/11 were also right (yXLM / VELO / LIBRE); `1221` = yBASH and
+  `201223` = TGM.
+- ✅ **USDT (`111`) does not appear in the top 20 at all.** Live USDT-quoted
+  volume is negligible, so the peg tier has essentially nothing to do in the live
+  window. This is why the 08-21 "floor" cohort read ~100% even though USDT is
+  peg-priceable — there is almost no USDT in it.
+- ⚠️ **yXLM (44,432) and yUSDC (21,996) are 45% of the floor** and the two
+  largest legs in it — yXLM alone is a third of XLM's own volume. They are
+  wrapped versions of the exact two assets we *can* price, unpriceable only
+  because no pivot tier covers them. That is [[0154]]'s scope, **not a defect
+  here**, and no task is spawned for it.
+
+### Why this and the 08-21 measurement are both correct
+
+They measured different regimes, and the aggregate reconciles exactly.
+
+The 08-21 window ran 08-19 20:00 → 08-21 20:45; the [[0215]] Caddy fix landed
+before 14:00 on 08-21, so **~42 of those 48 h are pre-fix**, when the pass died
+at 30.0 s on every invocation and the live window genuinely *was* starved.
+
+Take 08-22 20:00 from the cohort table: 17,038 unpriced of 33,268 candidates =
+**51.2%**, sitting squarely inside 08-21's 50-58% band. The aggregate looks flat
+because the floor is roughly half the candidates at ~99.7% and never moves —
+masking a priceable half that goes to zero. The 08-21 section *identified* that
+masking effect and then drew the opposite conclusion from it without testing.
+This is that test.
+
+> **The starvation was real, and [[0215]] already fixed it. It was never 0111's
+> scan cost.** Post-0215 the live priceable legs keep up fine even with the
+> unbounded 736 M-row scan.
+
+### What it changes for the fix
+
+**Phase 1's payoff reverts to the original, smaller case.** Every reason it is
+still needed is untouched:
+
+- `prices-production-enrichment-duration-near-timeout` firing at
+  **300,000 / 300,338 ms** — the thing that re-opened this task.
+- The pass budgets **40 batches** per invocation and achieves **5.4**.
+- The historical drain needs **~322 days** at the measured 1.73 M/day.
+- [[0218]] is blocked behind it (`main.rs:167`'s budget goes to 0).
+
+What it does change is **AC 6, which now has a far sharper check** — see below.
+And it raises a risk the starvation reading was masking: the Phase 2 historical
+sweep is the one thing that *could* starve a live window which is currently
+healthy. AC 6 is exactly that guard, and it is now able to detect it.
+
 ## What this does to the options
 
 **Option 1 wins, for a better reason than the one recorded above.** The live
@@ -403,6 +696,16 @@ window is 17.05M rows and keeps up fine (2.81K unpriced). It is being dragged
 through a 736M-row scan purely to serve a historical drain. Splitting the live
 pass from a separate bounded historical sweep is the whole fix; partition
 pruning is the mechanism, not the argument.
+
+⚠️ **"2.81K unpriced" is still the wrong figure — but "keeps up fine" is
+RIGHT.** 2.81 K is XLM-only; all quote legs give **10.44 M of 17.05 M (61.2%)**.
+That 61.2% is however **almost entirely the permanent exotic-quote floor**: the
+two priceable legs measured 2026-08-24 sit at **0.0% unpriced** (XLM 12 of
+138,722; USDC 0 of 90,672) while every exotic leg sits at **exactly 100%**. The
+08-21 "it is starved" correction applied to the pre-[[0215]] regime and is
+withdrawn. The conclusion in this paragraph survives on its original terms: the
+live window is carried *inefficiently*, and splitting it from the drain is still
+the whole fix.
 
 ## Root cause
 
@@ -523,8 +826,14 @@ One unbounded pass serves two populations with opposite needs:
 
 | | rows | unpriced | needs |
 |---|---|---|---|
-| live window (`202607+`) | 17.05 M | 2.81 K | **freshness**, keeps up fine |
+| live window (`202607+`) | 17.05 M | ~~2.81 K~~ **10.44 M**, ~all floor | **freshness** |
 | historical (`< 202403`) | 689.64 M | 646.25 M | **throughput** |
+
+<sub>*The 2.81 K was XLM-quoted only. The all-quotes figure is 10.44 M, but
+measured 2026-08-24 that is **almost entirely the permanent exotic-quote floor**
+— the priceable legs (USDC, XLM) run at 0.0% unpriced. The live window is
+carried inefficiently, not starved; the 08-21 starvation reading applied to the
+pre-[[0215]] regime and is withdrawn. Neither figure changes the split.*</sub>
 
 The live window is dragged through a 736 M-row scan purely to serve the drain.
 Splitting them is the whole fix.
@@ -689,6 +998,30 @@ this lands.
       `EnrichmentRowsRemainingRecent` stays at its floor. The sweep is
       best-effort and time-budgeted specifically so it can never regress the
       live pass; this is the check that the budgeting works.
+
+🔴 **Judge this AC per-leg, NOT on
+      `EnrichmentRowsRemainingRecent`.** That metric is ~100% permanent
+      exotic-quote floor (~88 K rows/day) and will read about the same whether
+      the fix works or not, so it cannot detect a starved live pass. It is also
+      currently **unpublished** — the pass is killed before `pass_metrics` runs
+      — so first prove it has datapoints at all.
+
+      The real check, measured 2026-08-24 and now the baseline:
+
+      | cohort | healthy value |
+      |---|---|
+      | USDC (`quote_asset_id = 3`) | **0 unpriced** outside the newest 4 h bucket |
+      | XLM (`quote_asset_id = 4`) | **~0** (12 of 138,722 over 40 h) |
+      | every other leg | **100% unpriced — unchanged, by design** |
+
+      If the Phase 2 historical sweep starves the live pass, USDC and XLM lift
+      off zero and it is unmistakable. Use the leg-level query from
+      *Re-measured 2026-08-24*, with the newest 8 h excluded so lag is not read
+      as floor.
+
+      <sub>*Was: judge against ~27 K falling toward ~12-15 K. That was derived
+      from the withdrawn starvation reading and would have passed a starved
+      pass, since the floor dominates the aggregate.*</sub>
 
       ⚠️ Note `EnrichmentRowsRemainingAtVolumeZero` changes meaning under a
       bounded pass — it becomes window-scoped and will drop from ~656M to the
