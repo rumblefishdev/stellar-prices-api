@@ -1,5 +1,6 @@
 import Box from '@mui/material/Box';
 import Button from '@mui/material/Button';
+import Container from '@mui/material/Container';
 import Stack from '@mui/material/Stack';
 import CircularProgress from '@mui/material/CircularProgress';
 import Typography from '@mui/material/Typography';
@@ -28,15 +29,20 @@ import {
   LabelledRule,
   LoginCard,
 } from '../landing/LoginCard';
-import { KeyField, UsageMeter } from '../landing/DashboardPanel';
-import { QUICKSTART, SWAGGER_UI } from '../landing/links';
+import {
+  DashboardCard,
+  KeyField,
+  MetaField,
+  UsageMeter,
+} from '../landing/DashboardPanel';
+import { DashboardNavbar } from '../landing/DashboardChrome';
 import { LoginSection, visuallyHidden } from '../landing/LoginSection';
 import {
   onOAuthPopupMessage,
   openOAuthPopup,
   readSigninOutcome,
 } from '../landing/oauthPopup';
-import { WindowCard, cardBorder } from '../landing/primitives';
+import { cardBorder } from '../landing/primitives';
 import { Documentation } from '../landing/Documentation';
 import { DeveloperDashboard } from '../landing/DeveloperDashboard';
 import { Endpoints } from '../landing/Endpoints';
@@ -654,11 +660,9 @@ function Legal() {
  * around.
  */
 function Dashboard({
-  onSignOut,
   session,
   rateLimit,
 }: {
-  onSignOut: () => void;
   session: PortalSession;
   /** The free plan's per-second rate limit, straight from `/config`. */
   rateLimit?: number;
@@ -666,76 +670,43 @@ function Dashboard({
   const [keyOnScreen, setKeyOnScreen] = useState(false);
 
   return (
-    <Box sx={{ width: '100%', maxWidth: 720 }}>
-      <WindowCard title="API Key">
-        <Stack spacing={3} sx={{ p: { xs: 2, sm: 3 } }}>
-          <Stack
-            direction="row"
-            alignItems="center"
-            justifyContent="space-between"
-            spacing={2}
-            sx={{ flexWrap: 'wrap', rowGap: 1.5 }}
-          >
-            {/* The acceptance criterion, rendered: username and ID. The ID is
-                the account key (ADR 0010) and the username is display only —
-                it comes from the signed session cookie and is refreshed at
-                each sign-in. */}
-            <p>
-              Signed in as <strong>{session.username}</strong> (ID{' '}
-              <code>{session.user_id}</code>)
-            </p>
-            <button type="button" onClick={onSignOut}>
-              Sign out
-            </button>
-          </Stack>
+    <Stack spacing={3}>
+      <Stack spacing={1}>
+        {/* The page's `h1`. The design puts the word "Dashboard" at the top of
+            the page and the card titles below it, which is also the right
+            outline: one page subject, three panels under it. */}
+        <Typography variant="h3" component="h1" color="text.primary">
+          Dashboard
+        </Typography>
+        <Typography variant="body1" sx={{ color: color.text.tertiary }}>
+          Copy your API Key below and make your first request
+        </Typography>
+      </Stack>
 
-          {/* Tasks 0187 + 0189. Inside the authenticated branch, so signing
-              out removes it along with the key it was showing — the component
-              unmounts and its state goes with it, rather than leaving a stale
-              credential on screen for the next person at the keyboard. */}
-          <ApiKey onKey={() => setKeyOnScreen(true)} />
-          {/* Task 0188. Keyed refetch: a key appearing on screen (revealed on
-              mount, or fresh off 0189's issue round-trip) re-asks for usage, so
-              the section leaves "no key yet" without a manual refresh. */}
-          <Usage keyOnScreen={keyOnScreen} rateLimit={rateLimit} />
-          <DashboardDocs />
-        </Stack>
-      </WindowCard>
-    </Box>
-  );
-}
+      {/* Tasks 0187 + 0189. Inside the authenticated branch, so signing out
+          removes it along with the key it was showing — the component unmounts
+          and its state goes with it, rather than leaving a stale credential on
+          screen for the next person at the keyboard. */}
+      <ApiKey onKey={() => setKeyOnScreen(true)} session={session} />
 
-/**
- * The two links out of the dashboard — task 0193's acceptance criterion, and
- * the one this slice had left undone: "link out to the quickstart and Swagger
- * UI from the dashboard. A key is only useful next to the thing that shows
- * what to call."
- *
- * Both point at the OpenAPI document today, because that is the only
- * documentation artefact actually served; task 0163 writes the quickstart and
- * task 0195 mounts Swagger UI, and `landing/links.ts` is the single place where
- * those two constants diverge when they land.
- */
-function DashboardDocs() {
-  return (
-    <Box
-      component="section"
-      sx={{
-        // Flat, not another card: it is a footer to the panel it sits in, and
-        // a third bordered box inside two others is depth for its own sake.
-        border: 'none !important',
-        backgroundColor: 'transparent !important',
-        padding: '0 !important',
-        gap: '8px !important',
-      }}
-    >
-      <h2>Next steps</h2>
-      <p>
-        <a href={QUICKSTART}>Quickstart</a> — your first request, end to end.
-        {' · '}
-        <a href={SWAGGER_UI}>API reference</a> — every endpoint and response.
-      </p>
-    </Box>
+      {/* Two columns at the design's 5:3 ratio, one at 375px. `align-items:
+          start` so the shorter card does not stretch to match the taller one —
+          the Rate Limit panel has a fixed amount to say. */}
+      <Box
+        sx={{
+          display: 'grid',
+          gap: 3,
+          alignItems: 'start',
+          gridTemplateColumns: { xs: '1fr', md: '5fr 3fr' },
+        }}
+      >
+        {/* Task 0188. Keyed refetch: a key appearing on screen (revealed on
+            mount, or fresh off 0189's issue round-trip) re-asks for usage, so
+            the section leaves "no key yet" without a manual refresh. */}
+        <Usage keyOnScreen={keyOnScreen} rateLimit={rateLimit} />
+        <RateLimitCard rateLimit={rateLimit} />
+      </Box>
+    </Stack>
   );
 }
 
@@ -809,7 +780,13 @@ function describeWait(waitSecs: string | null): string {
  * retypes — without a button, the first thing every visitor does is select it by
  * hand, which defeats the masking they just toggled.
  */
-function ApiKey({ onKey }: { onKey?: () => void }) {
+function ApiKey({
+  onKey,
+  session,
+}: {
+  onKey?: () => void;
+  session: PortalSession;
+}) {
   type KeyView =
     | { state: 'loading' }
     | { state: 'ok'; key: PortalKey }
@@ -931,9 +908,22 @@ function ApiKey({ onKey }: { onKey?: () => void }) {
   };
 
   return (
-    <section>
-      <h2>Your API key</h2>
-
+    <DashboardCard
+      title="API Key"
+      // "Just issued" only for the round-trip that just ended — otherwise a
+      // key that has existed for months would greet its owner as new every
+      // visit. "Not issued" is the red pill the design gives the empty state;
+      // everything else is a key that works.
+      status={
+        view.state === 'none'
+          ? { label: 'Not issued', tone: 'bad' }
+          : view.state === 'ok'
+            ? issue === 'ok'
+              ? { label: 'Just issued', tone: 'ok' }
+              : { label: 'Active', tone: 'ok' }
+            : undefined
+      }
+    >
       {/* The issue round-trip's outcome, in the wording this task decides.
           The two refusals a visitor can fix render differently from the one
           they cannot ("could not verify"), and "could not verify" is
@@ -1068,7 +1058,12 @@ function ApiKey({ onKey }: { onKey?: () => void }) {
                 >
                   {revealed ? 'Hide' : 'Reveal'}
                 </button>
-                <button type="button" onClick={onCopy}>
+                {/* `data-variant` rather than a class: the descendant rule in
+                    the dashboard's chrome styles every bare `<button>` the
+                    same, and copying the key is the card's primary action —
+                    the design gives it the brand fill. The attribute changes
+                    no wording and no role. */}
+                <button type="button" data-variant="primary" onClick={onCopy}>
                   Copy
                 </button>
               </>
@@ -1077,7 +1072,7 @@ function ApiKey({ onKey }: { onKey?: () => void }) {
           {copied && <p>Copied.</p>}
           <p>
             Send it as the <code>X-API-Key</code> header on <code>/v1/</code>{' '}
-            requests. Key <code>{view.key.name}</code>.
+            requests.
           </p>
         </>
       )}
@@ -1093,7 +1088,82 @@ function ApiKey({ onKey }: { onKey?: () => void }) {
           Could not copy your API key: <code>{error}</code>
         </p>
       )}
-    </section>
+
+      {/* The design's metadata row, with the fields the backend actually
+        returns. "Issued" and "Last rotated" are in the mock and are NOT here:
+        `GET /key` carries an id, a name and the value and no timestamps at
+        all, so both would have to be invented — see the note on `MetaField`.
+
+        Outside the `ok` branch on purpose. The Discord account is a property
+        of the SESSION, not of a key, and task 0186's acceptance criterion is
+        that the username and the ID are on screen for a signed-in visitor —
+        which has to hold on the day their key issuance failed too. The two
+        key fields inside it come and go with the key. */}
+      <Stack
+        direction={{ xs: 'column', sm: 'row' }}
+        spacing={{ xs: 2, sm: 4 }}
+        divider={
+          <Box
+            aria-hidden
+            sx={{
+              display: { xs: 'none', sm: 'block' },
+              width: '1px',
+              alignSelf: 'stretch',
+              backgroundColor: color.surface.gray,
+            }}
+          />
+        }
+      >
+        {view.state === 'ok' && (
+          <MetaField label="Key ID">
+            <code>{view.key.key_id}</code>
+          </MetaField>
+        )}
+        {view.state === 'ok' && (
+          <MetaField label="Key name">
+            <code>{view.key.name}</code>
+          </MetaField>
+        )}
+        {/* The username AND the Discord ID. The design shows only a
+              handle, but the ID is task 0186's acceptance criterion and it is
+              the account key (ADR 0010) — the username is display-only and
+              changes whenever the visitor renames themselves, so the ID is
+              the half worth being able to quote in a support thread. */}
+        <MetaField label="Discord account">
+          <Stack direction="row" spacing={1} alignItems="center">
+            <Box
+              aria-hidden
+              sx={{
+                flexShrink: 0,
+                width: 22,
+                height: 22,
+                borderRadius: '6px',
+                display: 'grid',
+                placeItems: 'center',
+                backgroundColor: '#5865f2',
+                color: color.white,
+              }}
+            >
+              <DiscordIcon sx={{ fontSize: 14 }} />
+            </Box>
+            <Stack spacing={0.25} sx={{ minWidth: 0 }}>
+              <Box component="span">{session.username}</Box>
+              <Box
+                component="code"
+                sx={{
+                  fontFamily: font.mono,
+                  fontWeight: 500,
+                  fontSize: '0.8125rem',
+                  color: color.text.tertiary,
+                }}
+              >
+                {session.user_id}
+              </Box>
+            </Stack>
+          </Stack>
+        </MetaField>
+      </Stack>
+    </DashboardCard>
   );
 }
 
@@ -1225,13 +1295,12 @@ function Usage({
           environment sets it — `compute-stack.ts` passes
           `pricingApiFreePlanRateLimit` unconditionally — so the absent case is
           a local run, where saying nothing is the honest answer. */}
-      {rateLimit !== undefined && (
-        <p>
-          Rate limit: <strong data-testid="rate-limit">{rateLimit}</strong>{' '}
-          request
-          {rateLimit === 1 ? '' : 's'} per second.
-        </p>
-      )}
+      {/* The rate limit is no longer stated here: the Rate Limit card beside
+          this one carries it, from the same `/config` value, and two panels
+          quoting the same figure is how they drift. `data-testid="rate-limit"`
+          moved there with it, so task 0188's assertions still find exactly one.
+          The omit-rather-than-default rule stands: no `/config` figure, no
+          card, no claim. */}
       <p>
         Quota resets on the 1st of each month, 00:00 UTC
         {resetsAt ? (
@@ -1246,9 +1315,7 @@ function Usage({
   );
 
   return (
-    <section>
-      <h2>Usage this period</h2>
-
+    <DashboardCard title="Monthly Usage">
       {view.state === 'loading' && <p>Loading your usage…</p>}
 
       {view.state === 'no-key' && (
@@ -1301,20 +1368,19 @@ function Usage({
                 can ("the 1st of each month, 00:00 UTC" — our rule, not an AWS
                 guarantee). Repeating the date two lines apart is the panel
                 saying the same thing twice and inviting the two to drift. */}
-            <UsageMeter used={view.usage.used} limit={view.usage.limit} />
-            <p>
-              Used: <strong data-testid="usage-used">{view.usage.used}</strong>
-            </p>
-            <p>
-              Remaining:{' '}
-              <strong data-testid="usage-remaining">
-                {view.usage.remaining}
-              </strong>
-            </p>
-            <p>
-              Monthly limit:{' '}
-              <strong data-testid="usage-limit">{view.usage.limit}</strong>
-            </p>
+            {/* Task 0188's three figures, in the design's arrangement. The
+                numbers, their `data-testid`s and the raw values its tests read
+                are unchanged — what went is the "Used: / Remaining: / Monthly
+                limit:" labelling around them, which 0188 wrote when this panel
+                was three unstyled paragraphs and which its own brief asked for
+                "as numbers, not prose". Its two STATEMENTS — the reset rule and
+                the lag line — are untouched below. */}
+            <UsageMeter
+              headline
+              used={view.usage.used}
+              limit={view.usage.limit}
+              remaining={view.usage.remaining}
+            />
             {limits(view.usage.resets_at)}
             {lastUpdated(view.usage.as_of)}
           </>
@@ -1331,7 +1397,117 @@ function Usage({
           Refresh
         </button>
       )}
-    </section>
+    </DashboardCard>
+  );
+}
+
+/**
+ * The Rate Limit card — the plan's two figures and what the gateway does when
+ * you cross them.
+ *
+ * The per-second figure comes from `/config` (task 0188 put it there so it
+ * cannot drift from what API Gateway actually enforces); the per-minute one is
+ * that number times sixty, computed rather than written down for the same
+ * reason. Both HTTP codes are properties of the gateway, not of a plan, so they
+ * are constants.
+ *
+ * The card renders nothing when the deployment did not say what the limit is —
+ * a local run, where inventing a figure would be exactly the silent staleness
+ * reading it from `/config` removes.
+ */
+function RateLimitCard({ rateLimit }: { rateLimit?: number }) {
+  if (rateLimit === undefined) return null;
+
+  return (
+    <DashboardCard title="Rate Limit" status={{ label: 'Active', tone: 'ok' }}>
+      <Stack direction="row" spacing={4}>
+        <Figure
+          label="Per-second limit"
+          value={rateLimit}
+          unit="req/s"
+          testId="rate-limit"
+        />
+        <Figure label="Per-minute limit" value={rateLimit * 60} unit="req/s" />
+      </Stack>
+      {/* Task 0188's sentence, kept verbatim and read only by assistive
+          technology. The design abbreviates the figure to "1 req/s", which is
+          right for the eye and wrong for a screen reader — "req" is not a word.
+          Expanding an abbreviation is what this technique is for, and it lets
+          0188's wording survive a change that was purely visual. */}
+      <Box component="p" sx={visuallyHidden}>
+        Rate limit: {rateLimit} request{rateLimit === 1 ? '' : 's'} per second.
+      </Box>
+      <Stack spacing={1} sx={{ pt: 1, borderTop: cardBorder }}>
+        <ResponseRow label="Response on throttle" code="HTTP 429" />
+        <ResponseRow label="Response on missing key" code="HTTP 403" />
+      </Stack>
+      {/* "Contact us" is plain text, not a link: there is no commercial-plans
+          destination to point it at, and a link to a 404 beside the words
+          "commercial plans" is worse than none. */}
+      <Typography variant="body2" sx={{ color: color.text.secondary }}>
+        Need higher limits? Contact us for commercial plans.
+      </Typography>
+    </DashboardCard>
+  );
+}
+
+/** One big yellow number with its unit, from the Rate Limit card. */
+function Figure({
+  label,
+  value,
+  unit,
+  testId,
+}: {
+  label: string;
+  value: number;
+  unit: string;
+  testId?: string;
+}) {
+  return (
+    <Stack spacing={0.5}>
+      <Typography variant="body2" sx={{ color: color.text.tertiary }}>
+        {label}
+      </Typography>
+      <Stack direction="row" spacing={1} alignItems="baseline">
+        <Typography
+          component="span"
+          sx={{
+            fontFamily: font.primary,
+            fontWeight: 700,
+            fontSize: '2rem',
+            lineHeight: 1,
+            color: color.text.accent,
+          }}
+          data-testid={testId}
+        >
+          {value}
+        </Typography>
+        <Typography variant="body2" sx={{ color: color.text.secondary }}>
+          {unit}
+        </Typography>
+      </Stack>
+    </Stack>
+  );
+}
+
+function ResponseRow({ label, code }: { label: string; code: string }) {
+  return (
+    <Stack direction="row" justifyContent="space-between" spacing={2}>
+      <Typography variant="body2" sx={{ color: color.text.secondary }}>
+        {label}
+      </Typography>
+      <Typography
+        component="code"
+        sx={{
+          fontFamily: font.mono,
+          fontSize: '0.875rem',
+          fontWeight: 700,
+          color: color.text.error,
+        }}
+      >
+        {code}
+      </Typography>
+    </Stack>
   );
 }
 
@@ -1375,7 +1551,7 @@ function PortalStatusChrome({ children }: { children: ReactNode }) {
         width: '100%',
         display: 'flex',
         flexDirection: 'column',
-        alignItems: 'center',
+        alignItems: 'stretch',
         gap: 3,
 
         // ---------------------------------------------------------------
@@ -1416,23 +1592,11 @@ function PortalStatusChrome({ children }: { children: ReactNode }) {
           py: 0.25,
           overflowWrap: 'anywhere',
         },
-        // Inner `<h2>`s — "Your API key", "Usage this period". Scoped through
-        // `section` so the panel's own heading, which is a `Typography`
-        // sibling and not inside one, keeps its size.
-        '& section > h2': {
-          ...theme.typography.h5,
-          color: color.text.primary,
-          margin: 0,
-        },
-        '& section': {
-          display: 'flex',
-          flexDirection: 'column',
-          alignItems: 'flex-start',
-          gap: '16px',
-          padding: '24px',
-          borderRadius: `${radius.lg}px`,
-          border: cardBorder,
-          backgroundColor: color.surface.background,
+        '& button[data-variant="primary"]': {
+          backgroundColor: `${color.surface.primary} !important`,
+          borderColor: 'transparent !important',
+          color: `${color.black} !important`,
+          '&:hover': { backgroundColor: `${color.primary[300]} !important` },
         },
         '& button': {
           ...theme.typography.body2,
@@ -1834,20 +1998,33 @@ function DashboardRoute({ gate }: { gate: Gate }) {
       ? gate.probe.config.rate_limit_per_second
       : undefined;
 
+  const session = (gate.session as { state: 'ok'; session: PortalSession })
+    .session;
+
   return (
-    <PortalStatusChrome>
-      {/* The dashboard's own screens are still the Figma frames this build
-          could not read, so it has no visible headline of its own yet. It is
-          a page, though, and a page needs an `h1`. */}
-      <LoginHeading level="h1" />
-      <Dashboard
-        onSignOut={gate.onSignOut}
-        session={
-          (gate.session as { state: 'ok'; session: PortalSession }).session
-        }
-        rateLimit={rateLimit}
-      />
-    </PortalStatusChrome>
+    <>
+      {/* Its own bar, not the landing page's: this visitor has a key, so there
+          is nothing here to offer them one. Sign-out lives in it, which is why
+          `Dashboard` no longer takes an `onSignOut`. */}
+      <DashboardNavbar username={session.username} onSignOut={gate.onSignOut} />
+      <Box
+        component="main"
+        sx={{
+          backgroundColor: color.surface.backgroundAlt,
+          // Fill the viewport even when the cards are short, so the footer sits
+          // at the bottom of the screen rather than halfway up it.
+          minHeight: 'calc(100dvh - 52px)',
+          py: { xs: 4, md: 7 },
+        }}
+      >
+        <Container>
+          <PortalStatusChrome>
+            <Dashboard session={session} rateLimit={rateLimit} />
+          </PortalStatusChrome>
+        </Container>
+      </Box>
+      <Footer canOfferKey={false} />
+    </>
   );
 }
 

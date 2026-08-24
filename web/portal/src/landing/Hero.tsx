@@ -6,7 +6,7 @@ import Typography from '@mui/material/Typography';
 import { alpha } from '@mui/material/styles';
 import { Link as RouterLink } from 'react-router-dom';
 
-import rumblefishLogo from '../assets/rumblefish-logo.png';
+import rumblefishLogo from '../assets/rumblefish-logo.svg';
 import { color, font, radius } from '../theme/tokens';
 import { LOGIN_ROUTE, SWAGGER_UI } from './links';
 import { ArrowBadge, cardBorder } from './primitives';

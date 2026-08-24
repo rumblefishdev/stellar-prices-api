@@ -24,15 +24,15 @@ import { ArrowBadge, cardBorder } from './primitives';
 /**
  * The SorobanScan lockup, and the Rumble Fish mark in the footer.
  *
- * Both are PNGs recovered from the Figma export rather than exported assets:
- * the seat this was built against had no MCP calls left for `download_assets`,
- * so the frame's own render was de-matted back to transparency (see the script
- * note in `src/assets/`). They are 2x and sit at their design size, so they are
- * sharp on a retina screen. Replace them with the real SVGs when a Figma export
- * is available — an SVG wordmark is a fifth of the bytes and scales.
+ * Real SVGs, exported from the file with `download_assets` — they replace the
+ * rasters an earlier pass recovered from a screenshot when the Figma seat had
+ * no tool calls left. The lockup is two nodes in the design (an 18.4 × 18.8
+ * circle mark and an 85.4 × 23.7 wordmark, 24px apart) and it stays two here:
+ * the mark alone is what a narrow viewport gets.
  */
-import rumblefishLogo from '../assets/rumblefish-logo.png';
-import sorobanScanLogo from '../assets/sorobanscan-logo.png';
+import rumblefishLogo from '../assets/rumblefish-logo.svg';
+import sorobanScanIcon from '../assets/sorobanscan-icon.svg';
+import sorobanScanWordmark from '../assets/sorobanscan-wordmark.svg';
 
 /** In-page destinations, in the order the sections appear. */
 const NAV = [
@@ -41,21 +41,32 @@ const NAV = [
   { label: 'FAQ', href: '#faq' },
 ] as const;
 
-function Wordmark() {
+export function Wordmark() {
   return (
-    <Box
-      component="img"
-      src={sorobanScanLogo}
-      // The product's name, so it is the `alt` text — not "logo", which tells a
-      // screen-reader user the shape of the thing rather than what it says.
-      alt="SorobanScan"
-      sx={{ height: 24, width: 'auto', display: 'block' }}
-    />
+    <Stack direction="row" spacing={0.75} alignItems="center">
+      <Box
+        component="img"
+        src={sorobanScanIcon}
+        // Decorative: the wordmark beside it carries the name, and announcing
+        // the mark as well would say "SorobanScan" twice.
+        alt=""
+        aria-hidden
+        sx={{ height: 19, width: 'auto', display: 'block' }}
+      />
+      <Box
+        component="img"
+        src={sorobanScanWordmark}
+        // The product's name, so it is the `alt` text — not "logo", which tells
+        // a screen-reader user the shape of the thing rather than what it says.
+        alt="SorobanScan"
+        sx={{ height: 24, width: 'auto', display: 'block' }}
+      />
+    </Stack>
   );
 }
 
 /** The footer's mark. Same provenance as the header's. */
-function RumbleFishMark({ height = 32 }: { height?: number }) {
+export function RumbleFishMark({ height = 32 }: { height?: number }) {
   return (
     <Box
       component="img"

@@ -211,7 +211,7 @@ describe('routes', () => {
     // The OAuth callback lands here; the dashboard is where it must end up.
     await waitFor(() => expect(lastPath).toBe('/dashboard'));
     expect(
-      await screen.findByRole('heading', { name: /^your api key$/i }),
+      await screen.findByRole('heading', { name: /^api key$/i }),
     ).toBeTruthy();
   });
 
@@ -271,9 +271,7 @@ describe('routes', () => {
     await waitFor(() => expect(lastPath).toBe('/'));
     // By heading, not by text: the landing page's Self-Service section says
     // "…your API key is ready immediately", which a loose text match hits.
-    expect(
-      screen.queryByRole('heading', { name: /^your api key$/i }),
-    ).toBeNull();
+    expect(screen.queryByRole('heading', { name: /^api key$/i })).toBeNull();
   });
 
   it('waits for the session before deciding about the dashboard', async () => {
@@ -321,7 +319,7 @@ describe('routes', () => {
 
     answer(undefined);
     expect(
-      await screen.findByRole('heading', { name: /^your api key$/i }),
+      await screen.findByRole('heading', { name: /^api key$/i }),
     ).toBeTruthy();
     expect(lastPath).toBe('/dashboard');
   });
@@ -568,7 +566,11 @@ describe('sign in with Discord', () => {
     openAndSignedIn();
     renderAt('/');
 
-    expect(await screen.findByText(/adam/)).toBeTruthy();
+    // `findAll` for the username: since task 0193 the dashboard names the
+    // signed-in account twice — in the navbar and in the API Key card's
+    // account row — and `findBy` throws on more than one match. The ID appears
+    // once and is still asserted as such.
+    expect((await screen.findAllByText(/adam/)).length).toBeGreaterThan(0);
     expect(await screen.findByText('308994132968210433')).toBeTruthy();
     // And the sign-in control is gone.
     expect(
@@ -949,7 +951,9 @@ describe('the sign-in popup', () => {
       }),
     );
 
-    expect(await screen.findByText(/your api key/i)).toBeTruthy();
+    expect(
+      await screen.findByRole('heading', { name: /^api key$/i }),
+    ).toBeTruthy();
   });
 });
 

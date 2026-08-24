@@ -135,12 +135,19 @@ export function LoginSection({
  * title already says where the visitor is. Hiding it with `clip` rather than
  * `display: none` is the difference between "not shown" and "not announced".
  */
+/*
+ * NOTE the `px` strings. Inside MUI's `sx`, a bare `width: 1` means **100%**,
+ * not one pixel — the system treats unitless values at or below 1 as fractions
+ * for width and height. Written as numbers, this "hidden" element was 100% x
+ * 100%: `clip` still hid it, but it pushed the document 900px wider than the
+ * viewport and gave the dashboard a horizontal scrollbar.
+ */
 export const visuallyHidden = {
   position: 'absolute',
-  width: 1,
-  height: 1,
+  width: '1px',
+  height: '1px',
   padding: 0,
-  margin: -1,
+  margin: '-1px',
   overflow: 'hidden',
   clip: 'rect(0 0 0 0)',
   whiteSpace: 'nowrap',

@@ -1,0 +1,178 @@
+import LogoutRoundedIcon from '@mui/icons-material/LogoutRounded';
+import Box from '@mui/material/Box';
+import Container from '@mui/material/Container';
+import Link from '@mui/material/Link';
+import Stack from '@mui/material/Stack';
+import Typography from '@mui/material/Typography';
+import { alpha } from '@mui/material/styles';
+import { Link as RouterLink } from 'react-router-dom';
+
+import { color, font, radius } from '../theme/tokens';
+import { DiscordIcon } from './DiscordIcon';
+import { Wordmark } from './Chrome';
+import { DASHBOARD_ROUTE, QUICKSTART, SWAGGER_UI } from './links';
+import { cardBorder } from './primitives';
+
+/**
+ * The signed-in navbar (Figma `Dashboard` frame, `852:1499`).
+ *
+ * A different bar from the landing page's, not a variant of it: the landing
+ * sells the API to somebody who has no key, and this one belongs to somebody
+ * who does. It carries where they are (Dashboard, underlined), the two places
+ * they go next, who they are signed in as, and the way out. There is no "Get
+ * API Key" here, because they have one.
+ */
+export function DashboardNavbar({
+  username,
+  onSignOut,
+}: {
+  username?: string;
+  onSignOut: () => void;
+}) {
+  const links = [
+    { label: 'Dashboard', to: DASHBOARD_ROUTE, current: true },
+    { label: 'Quick start', href: QUICKSTART },
+    { label: 'OpenAPI Docs', href: SWAGGER_UI },
+  ];
+
+  return (
+    <Box
+      component="nav"
+      aria-label="Dashboard"
+      sx={{
+        position: 'sticky',
+        top: 0,
+        zIndex: 10,
+        backgroundColor: alpha(color.surface.backgroundAlt, 0.85),
+        backdropFilter: 'blur(12px)',
+        borderBottom: cardBorder,
+      }}
+    >
+      <Container>
+        <Stack
+          direction="row"
+          alignItems="center"
+          justifyContent="space-between"
+          sx={{ minHeight: 52, gap: 2 }}
+        >
+          <Wordmark />
+
+          <Stack
+            direction="row"
+            alignItems="center"
+            spacing={{ xs: 1.5, md: 3 }}
+            sx={{ minWidth: 0 }}
+          >
+            {links.map(({ label, to, href, current }) => (
+              <Link
+                key={label}
+                {...(to ? { component: RouterLink, to } : { href })}
+                // `aria-current`, not just an underline: "you are here" has to
+                // reach a screen reader too, and a border-bottom does not.
+                aria-current={current ? 'page' : undefined}
+                sx={{
+                  display: { xs: current ? 'inline' : 'none', sm: 'inline' },
+                  whiteSpace: 'nowrap',
+                  fontFamily: font.secondary,
+                  fontSize: '0.9375rem',
+                  fontWeight: 500,
+                  textDecoration: 'none',
+                  color: current ? color.text.primary : color.text.tertiary,
+                  borderBottom: current
+                    ? `2px solid ${color.text.primary}`
+                    : '2px solid transparent',
+                  pb: '2px',
+                  '&:hover': { color: color.text.primary },
+                }}
+              >
+                {label}
+              </Link>
+            ))}
+
+            {username && (
+              <Stack
+                direction="row"
+                spacing={1}
+                alignItems="center"
+                sx={{ minWidth: 0 }}
+              >
+                <Box
+                  aria-hidden
+                  sx={{
+                    flexShrink: 0,
+                    width: 26,
+                    height: 26,
+                    borderRadius: '8px',
+                    display: 'grid',
+                    placeItems: 'center',
+                    backgroundColor: '#5865f2',
+                    color: color.white,
+                  }}
+                >
+                  <DiscordIcon sx={{ fontSize: 16 }} />
+                </Box>
+                <Typography
+                  sx={{
+                    fontFamily: font.secondary,
+                    fontWeight: 700,
+                    fontSize: '0.9375rem',
+                    color: color.text.primary,
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  {username}
+                </Typography>
+              </Stack>
+            )}
+
+            {/* A real `<button>`: signing out is a POST to `/auth/logout`
+                (task 0186), not a navigation, and the element has to say so. */}
+            <Stack
+              component="button"
+              type="button"
+              onClick={onSignOut}
+              direction="row"
+              spacing={1}
+              alignItems="center"
+              sx={{
+                flexShrink: 0,
+                background: 'none',
+                border: 'none',
+                cursor: 'pointer',
+                p: 0,
+                fontFamily: font.secondary,
+                fontSize: '0.9375rem',
+                fontWeight: 500,
+                color: color.text.tertiary,
+                '&:hover': { color: color.text.primary },
+              }}
+            >
+              <Box
+                component="span"
+                sx={{ display: { xs: 'none', sm: 'inline' } }}
+              >
+                Sign out
+              </Box>
+              <Box
+                aria-hidden
+                sx={{
+                  width: 24,
+                  height: 24,
+                  borderRadius: `${radius.pill}px`,
+                  display: 'grid',
+                  placeItems: 'center',
+                  backgroundColor: color.primary[400],
+                  color: color.black,
+                }}
+              >
+                <LogoutRoundedIcon sx={{ fontSize: 14 }} />
+              </Box>
+            </Stack>
+          </Stack>
+        </Stack>
+      </Container>
+    </Box>
+  );
+}
