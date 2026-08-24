@@ -26,16 +26,6 @@ path = "src/bin/cli.rs"
 # `aws-mtls` for the `--transport hetzner` (prod) path — the `mtls` module in
 # prices-clickhouse is behind that feature. Build/run:
 #   cargo run -p enrichment-worker --features aws-mtls --bin coarse-repair -- …
-# Standalone coarse-table sweep Lambda (task 0218). Split out of the enrichment
-# worker's handler, where it sat after the 1m pass's `?` and so was skipped when
-# that pass errored and starved when it ran long — it never executed in
-# production. Same crate and the same `repair::run_coarse_sweep`, so there is one
-# implementation and one table guard.
-[[bin]]
-name = "coarse-sweep-worker"
-path = "src/bin/coarse-sweep-worker.rs"
-required-features = ["lambda"]
-
 [[bin]]
 name = "coarse-repair"
 path = "src/bin/coarse-repair.rs"
