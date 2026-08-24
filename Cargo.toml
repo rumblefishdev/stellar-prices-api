@@ -16,6 +16,7 @@ members = [
     "packages/supply-worker",
     "packages/oracle-worker",
     "packages/enrichment-worker",
+    "packages/coarse-sweep-worker",
     "packages/prices-api",
     "packages/backfill-freshness-probe",
     "packages/rollup-freshness-probe",
