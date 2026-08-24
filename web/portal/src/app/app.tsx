@@ -1,5 +1,57 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { Route, Routes, useSearchParams } from 'react-router-dom';
+import Box from '@mui/material/Box';
+import Button from '@mui/material/Button';
+import Stack from '@mui/material/Stack';
+import CircularProgress from '@mui/material/CircularProgress';
+import Typography from '@mui/material/Typography';
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type MouseEvent,
+  type ReactNode,
+} from 'react';
+import {
+  Navigate,
+  Route,
+  Routes,
+  useLocation,
+  useSearchParams,
+} from 'react-router-dom';
+
+import { Navbar, Footer } from '../landing/Chrome';
+import { DiscordIcon } from '../landing/DiscordIcon';
+import {
+  Benefits,
+  Callout,
+  DISCORD,
+  LabelledRule,
+  LoginCard,
+} from '../landing/LoginCard';
+import { KeyField, UsageMeter } from '../landing/DashboardPanel';
+import { QUICKSTART, SWAGGER_UI } from '../landing/links';
+import { LoginSection, visuallyHidden } from '../landing/LoginSection';
+import {
+  onOAuthPopupMessage,
+  openOAuthPopup,
+  readSigninOutcome,
+} from '../landing/oauthPopup';
+import { WindowCard, cardBorder } from '../landing/primitives';
+import { Documentation } from '../landing/Documentation';
+import { DeveloperDashboard } from '../landing/DeveloperDashboard';
+import { Endpoints } from '../landing/Endpoints';
+import { FairAccess } from '../landing/FairAccess';
+import { Faq } from '../landing/Faq';
+import { Features } from '../landing/Features';
+import { FinalCta } from '../landing/FinalCta';
+import { Hero, TrustBand } from '../landing/Hero';
+import { SelfService } from '../landing/SelfService';
+import { UseCases } from '../landing/UseCases';
+import { LOGIN_ANCHOR } from '../landing/links';
+import { alpha } from '@mui/material/styles';
+
+import { theme } from '../theme/theme';
+import { color, font, radius } from '../theme/tokens';
 
 import {
   fetchKey,
@@ -45,6 +97,39 @@ type SessionState =
   | { state: 'loading' }
   | { state: 'ok'; session: PortalSession }
   | { state: 'failed'; reason: string };
+
+/**
+ * The login card's headline and standfirst — **new copy, owned by task 0193**,
+ * from the Figma login frame (`778:2499`).
+ *
+ * Task 0193's rule is that it re-decides no copy another slice owns, and this
+ * is the other side of that rule: the card's own chrome is not owned by anyone
+ * else, so the design's wording is taken as written. Everything INSIDE the card
+ * body — the prerequisites, the refusals, the cancelled and failed banners —
+ * still belongs to tasks 0186 and 0189 and is rendered verbatim.
+ *
+ * Shared across all four probe states so the card does not appear to change
+ * identity while it is deciding what to say.
+ */
+const LOGIN_TITLE = 'Get your API key';
+const LOGIN_SUBTITLE =
+  'Sign in with Discord to receive your key instantly. No forms, no waiting, no manual approval.';
+
+/**
+ * The "What you get" list from the design.
+ *
+ * Also 0193's copy — and deliberately NOT a restatement of the eligibility
+ * prerequisites, which are task 0189's and appear above the button where the
+ * acceptance criterion puts them. These four say what the key is; those two say
+ * who may have one. Collapsing them into one list is how the requirement stops
+ * being stated before the visitor authorises.
+ */
+const BENEFITS = [
+  { text: 'Instant API key — no waiting', kind: 'check' },
+  { text: '100,000 requests/month — free', kind: 'check' },
+  { text: 'Usage dashboard and key management', kind: 'check' },
+  { text: 'Discord account is your identity', kind: 'discord' },
+] as const;
 
 /** The landing params sign-in's callback appends. */
 const SIGNIN_PARAMS = ['signin'] as const;
@@ -140,18 +225,12 @@ function Prerequisites() {
  * put in a context — one prop across two hops is less machinery than either,
  * and it keeps the value's single source visible in the call chain.
  */
-function SignIn({ rateLimit }: { rateLimit?: number }) {
+function useSession(enabled: boolean): {
+  session: SessionState;
+  onSignOut: () => void;
+  reload: () => void;
+} {
   const [session, setSession] = useState<SessionState>({ state: 'loading' });
-  // Two landing states, from two literals the backend appends. `cancelled` is
-  // the visitor's own choice at Discord's consent screen; `failed` is any other
-  // OAuth error — a drifted scope registration, a Discord outage — which the
-  // backend also logs. Telling them apart on the page is the visible half of
-  // that split: calling a misconfiguration "cancelled" is what made it look
-  // like every visitor was changing their mind. One-shot (task 0189, closing
-  // 0186's O10): shown for this landing, stripped from the URL.
-  const { signin } = useOneShotParams(SIGNIN_PARAMS);
-  const cancelled = signin === 'cancelled';
-  const failed = signin === 'failed';
 
   // Cancels whichever `/auth/me` is currently in flight, whoever started it.
   //
@@ -190,10 +269,18 @@ function SignIn({ rateLimit }: { rateLimit?: number }) {
   // first and overwrite it. The cleanup reads the ref rather than closing over
   // this call's canceller, so it also cancels a request the sign-out handler
   // started.
+  //
+  // `enabled` gates the fetch, and that gate is not an optimisation: while
+  // `PORTAL_ENABLED` is off, task 0183's route gate answers `/auth/me` with an
+  // empty 404, so asking would put a guaranteed failure in the console of
+  // every visitor to a closed portal and leave this hook reporting `failed`
+  // for a portal that is merely shut. Not asking leaves it `loading`, and the
+  // routes that care never consult it while the portal is closed.
   useEffect(() => {
+    if (!enabled) return;
     load();
     return () => cancelInFlight.current?.();
-  }, [load]);
+  }, [enabled, load]);
 
   const onSignOut = () => {
     setSession({ state: 'loading' });
@@ -210,16 +297,175 @@ function SignIn({ rateLimit }: { rateLimit?: number }) {
       );
   };
 
+  return { session, onSignOut, reload: load };
+}
+
+/**
+ * The `/login` view — the Figma login frame (`778:2499`) and nothing else.
+ *
+ * A route of its own since the portal grew a second page. The OAuth callback
+ * still lands on `/api-tokens/`, exactly as `portal/auth/mod.rs` says it will
+ * ("when the portal grows a second page, the page it lands on decides where to
+ * go next; this handler still will not") — so `RootRoute` is what forwards a
+ * `?signin=…` landing here, carrying the query with it. That is why the
+ * banners below still read their params from the URL: they arrive on this
+ * route, just not from Discord directly.
+ */
+function LoginView({
+  session,
+  onSignedIn,
+}: {
+  session: SessionState;
+  onSignedIn: () => void;
+}) {
+  // Two landing states, from two literals the backend appends. `cancelled` is
+  // the visitor's own choice at Discord's consent screen; `failed` is any other
+  // OAuth error — a drifted scope registration, a Discord outage — which the
+  // backend also logs. Telling them apart on the page is the visible half of
+  // that split: calling a misconfiguration "cancelled" is what made it look
+  // like every visitor was changing their mind. One-shot (task 0189, closing
+  // 0186's O10): shown for this landing, stripped from the URL.
+  const { signin } = useOneShotParams(SIGNIN_PARAMS);
+
+  /**
+   * The refusal on screen, from EITHER source.
+   *
+   * The wording below is task 0186's and there is one copy of it, but there are
+   * now two ways to arrive at it: the full-page round-trip lands on
+   * `?signin=…`, and the popup hands the same literal back through
+   * `postMessage`. Feeding both into one piece of state is what keeps that a
+   * single rendering path — two branches saying the same sentence is how the
+   * two wordings drift apart.
+   */
+  const [outcome, setOutcome] = useState<string | null>(signin);
+  const cancelled = outcome === 'cancelled';
+  const failed = outcome === 'failed';
+
+  /** Whether a sign-in window is open and being waited on. */
+  const [waiting, setWaiting] = useState(false);
+  const popup = useRef<Window | null>(null);
+
+  /**
+   * Watch the sign-in window: its message, its closing, and the session it is
+   * trying to create.
+   *
+   * Three signals rather than one, because each covers a case the others
+   * cannot. The message is the fast, precise path — it carries the refusal
+   * literal. Polling `/auth/me` covers a popup whose `postMessage` never
+   * arrives (an extension, a `noopener` policy, a browser that reuses a tab).
+   * Watching `closed` covers the visitor who simply shuts the window: nothing
+   * happened, so the card goes back to offering the button rather than sitting
+   * on a spinner for ever.
+   */
+  useEffect(() => {
+    if (!waiting) return;
+
+    let live = true;
+    const finish = (refusal: string | null) => {
+      if (!live) return;
+      live = false;
+      setWaiting(false);
+      setOutcome(refusal);
+      // Ask the server either way. A refusal means no session, and saying so
+      // costs one request; a success means the cookie is already set and this
+      // is the only thing that will notice.
+      onSignedIn();
+    };
+
+    const stopListening = onOAuthPopupMessage(({ search }) =>
+      finish(readSigninOutcome(search)),
+    );
+
+    // 1.5s: fast enough that a visitor who finishes at Discord does not sit
+    // looking at a spinner, slow enough that a two-minute consent screen costs
+    // eighty requests to a route the backend answers from its own session
+    // cookie.
+    const poll = window.setInterval(() => {
+      fetchSession()
+        .then((result) => {
+          if (result.authenticated) finish(null);
+        })
+        .catch(() => {
+          // A failed poll says nothing about the round-trip in the other
+          // window. Keep waiting; the message or the close will end this.
+        });
+    }, 1500);
+
+    const watchClosed = window.setInterval(() => {
+      if (popup.current?.closed) {
+        // No outcome to report — the window was shut, which is not a refusal
+        // anyone chose at Discord. `finish(null)` re-reads the session, so a
+        // visitor who DID complete and then closed the window still lands on
+        // the dashboard.
+        finish(null);
+      }
+    }, 500);
+
+    return () => {
+      live = false;
+      stopListening();
+      window.clearInterval(poll);
+      window.clearInterval(watchClosed);
+    };
+  }, [waiting, onSignedIn]);
+
+  /**
+   * Open the round-trip in a second window — and do nothing at all if the
+   * browser will not allow it.
+   *
+   * `preventDefault` is called ONLY after a window is actually open. When it is
+   * blocked, the click falls through to the anchor's `href` and the flow
+   * happens in this tab exactly as it did before the popup existed.
+   */
+  const onSignInClick = (event: MouseEvent<HTMLAnchorElement>) => {
+    // Let the browser handle the gestures that mean "somewhere else": a
+    // middle-click, ⌘/Ctrl-click or a modified click is a request for a tab,
+    // and hijacking it into a popup is the kind of thing that makes people
+    // stop trusting a page with their credentials.
+    if (
+      event.defaultPrevented ||
+      event.button !== 0 ||
+      event.metaKey ||
+      event.ctrlKey ||
+      event.shiftKey ||
+      event.altKey
+    ) {
+      return;
+    }
+    const opened = openOAuthPopup(signInUrl());
+    if (!opened) return;
+    event.preventDefault();
+    popup.current = opened;
+    setOutcome(null);
+    setWaiting(true);
+  };
+
   if (session.state === 'loading') {
-    return <p>Checking whether you are signed in…</p>;
+    return (
+      <LoginCard
+        title={LOGIN_TITLE}
+        titleComponent="h1"
+        subtitle={LOGIN_SUBTITLE}
+      >
+        <Callout variant="neutral" icon={<CircularProgress size={18} />}>
+          <p>Checking whether you are signed in…</p>
+        </Callout>
+      </LoginCard>
+    );
   }
 
   if (session.state === 'failed') {
     return (
-      <>
-        <p>
-          Could not check your sign-in status: <code>{session.reason}</code>
-        </p>
+      <LoginCard
+        title={LOGIN_TITLE}
+        titleComponent="h1"
+        subtitle={LOGIN_SUBTITLE}
+      >
+        <Callout variant="error">
+          <p>
+            Could not check your sign-in status: <code>{session.reason}</code>
+          </p>
+        </Callout>
         {/* The control stays. A failed `/auth/me` usually means the backend is
             unreachable, in which case signing in will fail too — but it can
             also be one bad response, and a page that reports an error while
@@ -227,42 +473,169 @@ function SignIn({ rateLimit }: { rateLimit?: number }) {
             they can leave only by guessing at a reload. Signing in is a fresh
             top-level navigation, so it does not depend on the request that just
             failed. */}
-        <a href={signInUrl()}>Sign in with Discord</a>
-      </>
+        <DiscordButton href={signInUrl()}>Sign in with Discord</DiscordButton>
+      </LoginCard>
     );
   }
 
-  if (session.session.authenticated) {
+  // The design's second screen. Reached only when a popup actually opened —
+  // when one did not, the click became a full-page navigation and this window
+  // is already on its way to Discord.
+  if (waiting) {
     return (
-      <Dashboard
-        onSignOut={onSignOut}
-        session={session.session}
-        rateLimit={rateLimit}
-      />
+      <LoginCard
+        title="Redirecting to Discord"
+        titleComponent="h1"
+        subtitle="A new window will open for you to authorize with Discord."
+        footer={<Legal />}
+      >
+        <Callout variant="discord" title="Discord authorization window opened.">
+          Complete the sign-in there to continue. If nothing opened,{' '}
+          {/* The fallback the design's wording promises, wired to the thing it
+              promises: a plain top-level navigation in THIS tab, which is the
+              flow that works without a popup at all. */}
+          <a href={signInUrl()}>click here</a>.
+        </Callout>
+        <Stack spacing={1.5} alignItems="center" sx={{ py: 2 }}>
+          {/* The design's spinner is an arc travelling around a visible track,
+              not a bare arc. MUI draws only the arc, so the track is a second
+              ring underneath — a `determinate` progress pinned at 100%, which
+              inherits the same geometry rather than guessing at a border
+              radius that happens to line up. */}
+          <Box sx={{ position: 'relative', display: 'inline-flex' }}>
+            <CircularProgress
+              aria-hidden
+              variant="determinate"
+              value={100}
+              size={44}
+              thickness={3}
+              sx={{ color: alpha(color.stroke.default, 0.45) }}
+            />
+            <CircularProgress
+              size={44}
+              thickness={3}
+              sx={{ position: 'absolute', left: 0 }}
+            />
+          </Box>
+          <Typography variant="body1" color="text.primary">
+            Waiting for Discord…
+          </Typography>
+          <Typography variant="body2" sx={{ color: color.text.tertiary }}>
+            This page will update automatically.
+          </Typography>
+        </Stack>
+      </LoginCard>
     );
   }
 
   return (
-    <>
-      {cancelled && <p>Sign-in cancelled.</p>}
+    <LoginCard
+      title={LOGIN_TITLE}
+      titleComponent="h1"
+      subtitle={LOGIN_SUBTITLE}
+      footer={<Legal />}
+    >
+      {/* Both banners keep task 0186's wording exactly. "Cancelled" is not an
+          error and does not get the error skin — the visitor pressed Cancel at
+          Discord's consent screen, and colouring that red would tell them they
+          broke something. "Failed" is ours, so it does. */}
+      {cancelled && (
+        <Callout variant="discord">
+          <p>Sign-in cancelled.</p>
+        </Callout>
+      )}
       {failed && (
-        <p>
-          Sign-in could not be completed. This is not something you did — try
-          again, and tell us if it keeps happening.
-        </p>
+        <Callout variant="error">
+          <p>
+            Sign-in could not be completed. This is not something you did — try
+            again, and tell us if it keeps happening.
+          </p>
+        </Callout>
       )}
       <p>You are not signed in.</p>
       {/* Both prerequisites, BEFORE the control that starts an OAuth flow —
           the acceptance criterion. Signing in itself needs neither, but the
           visitor deciding whether to authorise an app deserves to know what
-          the key they came for will require. */}
+          the key they came for will require.
+
+          The design's card does not have this paragraph and the design's
+          "What you get" list does not replace it: that list says what the key
+          is, this says who may have one. Dropping it to match the mock would
+          break the one acceptance criterion this screen exists to satisfy. */}
       <Prerequisites />
       {/* A link, not a button with an onClick. The OAuth flow is a top-level
           navigation to discord.com and back; `fetch` cannot perform one, and
           the session cookie is `SameSite=Lax` precisely so that this navigation
-          carries it. `href` is relative, so it stays same-origin. */}
-      <a href={signInUrl()}>Sign in with Discord</a>
-    </>
+          carries it. `href` is relative, so it stays same-origin.
+
+          `DiscordButton` renders an `<a>` — `component="a"` with an `href` —
+          so it is still a link to the browser, to a screen reader and to the
+          tests that pin it by role. Only its appearance changed. */}
+      <DiscordButton href={signInUrl()} onClick={onSignInClick}>
+        Sign in with Discord
+      </DiscordButton>
+      <LabelledRule>What you get</LabelledRule>
+      <Benefits items={BENEFITS} />
+    </LoginCard>
+  );
+}
+
+/**
+ * The card's primary control, in Discord's blurple.
+ *
+ * Always an `<a>`: every caller is starting an OAuth round-trip, which is a
+ * top-level navigation that `fetch` cannot perform and that the `SameSite=Lax`
+ * session cookie depends on. Rendering it as a `<button>` would break the flow
+ * and the tests that find it by link role.
+ *
+ * Blurple rather than the brand yellow because the action is "hand me to
+ * Discord", and a button that looks like the rest of the site sets the wrong
+ * expectation about which consent screen is about to appear. Contrast of white
+ * on #5865f2 is 4.6:1, which clears AA for the 16 px semibold label.
+ */
+function DiscordButton({
+  href,
+  onClick,
+  children,
+}: {
+  href: string;
+  onClick?: (event: MouseEvent<HTMLAnchorElement>) => void;
+  children: ReactNode;
+}) {
+  return (
+    <Button
+      component="a"
+      href={href}
+      onClick={onClick}
+      variant="contained"
+      fullWidth
+      startIcon={<DiscordIcon />}
+      sx={{
+        backgroundColor: DISCORD,
+        color: color.white,
+        minHeight: 48,
+        '&:hover': { backgroundColor: '#4752c4' },
+      }}
+    >
+      {children}
+    </Button>
+  );
+}
+
+/**
+ * The card's legal footer.
+ *
+ * **The two documents it names do not exist yet**, so the words are set as
+ * plain text rather than as links. A link to a placeholder would be a promise
+ * the page cannot keep, and "you agree to our Terms of Service" pointing at a
+ * 404 is worse than the same sentence pointing nowhere. Give this component two
+ * URLs and the `<a>` elements go back in.
+ */
+function Legal() {
+  return (
+    <Typography variant="body2" sx={{ color: color.text.tertiary }}>
+      By continuing you agree to our Terms of Service and Privacy Policy.
+    </Typography>
   );
 }
 
@@ -293,27 +666,76 @@ function Dashboard({
   const [keyOnScreen, setKeyOnScreen] = useState(false);
 
   return (
-    <>
-      {/* The acceptance criterion, rendered: username and ID. The ID is the
-          account key (ADR 0010) and the username is display only — it comes
-          from the signed session cookie and is refreshed at each sign-in. */}
+    <Box sx={{ width: '100%', maxWidth: 720 }}>
+      <WindowCard title="API Key">
+        <Stack spacing={3} sx={{ p: { xs: 2, sm: 3 } }}>
+          <Stack
+            direction="row"
+            alignItems="center"
+            justifyContent="space-between"
+            spacing={2}
+            sx={{ flexWrap: 'wrap', rowGap: 1.5 }}
+          >
+            {/* The acceptance criterion, rendered: username and ID. The ID is
+                the account key (ADR 0010) and the username is display only —
+                it comes from the signed session cookie and is refreshed at
+                each sign-in. */}
+            <p>
+              Signed in as <strong>{session.username}</strong> (ID{' '}
+              <code>{session.user_id}</code>)
+            </p>
+            <button type="button" onClick={onSignOut}>
+              Sign out
+            </button>
+          </Stack>
+
+          {/* Tasks 0187 + 0189. Inside the authenticated branch, so signing
+              out removes it along with the key it was showing — the component
+              unmounts and its state goes with it, rather than leaving a stale
+              credential on screen for the next person at the keyboard. */}
+          <ApiKey onKey={() => setKeyOnScreen(true)} />
+          {/* Task 0188. Keyed refetch: a key appearing on screen (revealed on
+              mount, or fresh off 0189's issue round-trip) re-asks for usage, so
+              the section leaves "no key yet" without a manual refresh. */}
+          <Usage keyOnScreen={keyOnScreen} rateLimit={rateLimit} />
+          <DashboardDocs />
+        </Stack>
+      </WindowCard>
+    </Box>
+  );
+}
+
+/**
+ * The two links out of the dashboard — task 0193's acceptance criterion, and
+ * the one this slice had left undone: "link out to the quickstart and Swagger
+ * UI from the dashboard. A key is only useful next to the thing that shows
+ * what to call."
+ *
+ * Both point at the OpenAPI document today, because that is the only
+ * documentation artefact actually served; task 0163 writes the quickstart and
+ * task 0195 mounts Swagger UI, and `landing/links.ts` is the single place where
+ * those two constants diverge when they land.
+ */
+function DashboardDocs() {
+  return (
+    <Box
+      component="section"
+      sx={{
+        // Flat, not another card: it is a footer to the panel it sits in, and
+        // a third bordered box inside two others is depth for its own sake.
+        border: 'none !important',
+        backgroundColor: 'transparent !important',
+        padding: '0 !important',
+        gap: '8px !important',
+      }}
+    >
+      <h2>Next steps</h2>
       <p>
-        Signed in as <strong>{session.username}</strong> (ID{' '}
-        <code>{session.user_id}</code>)
+        <a href={QUICKSTART}>Quickstart</a> — your first request, end to end.
+        {' · '}
+        <a href={SWAGGER_UI}>API reference</a> — every endpoint and response.
       </p>
-      <button type="button" onClick={onSignOut}>
-        Sign out
-      </button>
-      {/* Tasks 0187 + 0189. Inside the authenticated branch, so signing out
-          removes it along with the key it was showing — the component unmounts
-          and its state goes with it, rather than leaving a stale credential on
-          screen for the next person at the keyboard. */}
-      <ApiKey onKey={() => setKeyOnScreen(true)} />
-      {/* Task 0188. Keyed refetch: a key appearing on screen (revealed on
-          mount, or fresh off 0189's issue round-trip) re-asks for usage, so
-          the section leaves "no key yet" without a manual refresh. */}
-      <Usage keyOnScreen={keyOnScreen} rateLimit={rateLimit} />
-    </>
+    </Box>
   );
 }
 
@@ -621,22 +1043,37 @@ function ApiKey({ onKey }: { onKey?: () => void }) {
 
       {view.state === 'ok' && (
         <>
-          <p>
-            {/* Masked by default. The mask is a fixed run of dots, not a
-                prefix-and-suffix of the real value: showing the first and last
-                few characters of a credential is a habit borrowed from card
-                numbers, where the rest is high-entropy. Here it would leak part
-                of the secret for no benefit anyone asked for. */}
-            <code data-testid="api-key">
-              {revealed ? view.key.value : '••••••••••••••••••••••••••••••••'}
-            </code>
-          </p>
-          <button type="button" onClick={() => setRevealed((was) => !was)}>
-            {revealed ? 'Hide' : 'Reveal'}
-          </button>{' '}
-          <button type="button" onClick={onCopy}>
-            Copy
-          </button>
+          {/* The design's key row (`landing/DashboardPanel.tsx`) — the same
+              component the landing page's preview draws, so the thing a
+              visitor was shown before signing in is the thing they land on.
+              Only the presentation moved: the mask, the toggle, the copy
+              button and every word around them are tasks 0187's and 0189's.
+
+              Masked by default. The mask is a fixed run of dots, not a
+              prefix-and-suffix of the real value: showing the first and last
+              few characters of a credential is a habit borrowed from card
+              numbers, where the rest is high-entropy. Here it would leak part
+              of the secret for no benefit anyone asked for. */}
+          <KeyField
+            label="API Key"
+            testId="api-key"
+            value={
+              revealed ? view.key.value : '••••••••••••••••••••••••••••••••'
+            }
+            actions={
+              <>
+                <button
+                  type="button"
+                  onClick={() => setRevealed((was) => !was)}
+                >
+                  {revealed ? 'Hide' : 'Reveal'}
+                </button>
+                <button type="button" onClick={onCopy}>
+                  Copy
+                </button>
+              </>
+            }
+          />
           {copied && <p>Copied.</p>}
           <p>
             Send it as the <code>X-API-Key</code> header on <code>/v1/</code>{' '}
@@ -851,6 +1288,20 @@ function Usage({
           </>
         ) : (
           <>
+            {/* The bar is task 0193's; the figures under it are task 0188's and
+                are untouched — same labels, same `data-testid`s, same raw
+                values. The meter adds the one thing three separate numbers do
+                not give: the ratio, at a glance. The design puts it on the
+                landing page's dashboard preview, and this is the same
+                component, so the preview cannot promise a bar the real screen
+                does not draw. */}
+            {/* NO `resetLabel` here, unlike the landing page's preview. Task
+                0188's `limits()` below already states the reset rule and the
+                next date, and states it more precisely than a meter caption
+                can ("the 1st of each month, 00:00 UTC" — our rule, not an AWS
+                guarantee). Repeating the date two lines apart is the panel
+                saying the same thing twice and inviting the two to drift. */}
+            <UsageMeter used={view.usage.used} limit={view.usage.limit} />
             <p>
               Used: <strong data-testid="usage-used">{view.usage.used}</strong>
             </p>
@@ -899,7 +1350,309 @@ function describeFailure(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
 }
 
-function PortalHome() {
+/**
+ * The portal panel — everything that talks to the backend, on one anchor.
+ *
+ * The `/config` probe used to live HERE and is now a prop. It moved up to
+ * `LandingPage` (task 0193) because the answer decides something outside this
+ * panel: whether the hero and the navbar render a "Get API Key" control at all.
+ * While the portal is closed those controls would promise a key the backend
+ * will not issue — the same objection task 0186 raised against putting a
+ * sign-in button on a closed page — and the alternative to lifting it is a
+ * second `/config` fetch per page load to answer a question one already
+ * answered.
+ */
+/**
+ * The wrapper that styles the plain markup tasks 0186 to 0192 own.
+ *
+ * Shared by the landing's status panel and the dashboard route, because both
+ * render that markup and neither may rewrite it — see the long note inside.
+ */
+function PortalStatusChrome({ children }: { children: ReactNode }) {
+  return (
+    <Box
+      sx={{
+        width: '100%',
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        gap: 3,
+
+        // ---------------------------------------------------------------
+        // Descendant styling, NOT a component rewrite.
+        //
+        // Everything below this heading is tasks 0186 to 0192's markup —
+        // plain `<p>`, `<a>`, `<button>`, `<code>` — and every sentence in it
+        // is copy those tasks decided. Task 0193's rule is that it re-decides
+        // none of it, so this slice styles the ELEMENTS and leaves the tree
+        // alone: no wording moves, no control changes role, no `data-testid`
+        // is touched, and the 84 tests that pin that copy keep passing
+        // unaltered.
+        //
+        // The alternative — rewriting each branch into MUI components — would
+        // have meant retyping ~40 pieces of decided copy by hand, which is
+        // exactly the way the reason behind a wording gets lost.
+        //
+        // It is deliberately scoped to this panel rather than put in
+        // `CssBaseline`: a global bare-`<a>` rule would also repaint the
+        // landing sections above, where every link is already a themed
+        // component.
+        // ---------------------------------------------------------------
+        '& p': {
+          ...theme.typography.body1,
+          color: color.text.secondary,
+          margin: 0,
+        },
+        '& a': {
+          color: color.text.accent,
+          textUnderlineOffset: '0.2em',
+        },
+        '& code': {
+          fontFamily: font.mono,
+          fontSize: '0.875em',
+          backgroundColor: color.surface.gray,
+          borderRadius: '4px',
+          px: 0.75,
+          py: 0.25,
+          overflowWrap: 'anywhere',
+        },
+        // Inner `<h2>`s — "Your API key", "Usage this period". Scoped through
+        // `section` so the panel's own heading, which is a `Typography`
+        // sibling and not inside one, keeps its size.
+        '& section > h2': {
+          ...theme.typography.h5,
+          color: color.text.primary,
+          margin: 0,
+        },
+        '& section': {
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'flex-start',
+          gap: '16px',
+          padding: '24px',
+          borderRadius: `${radius.lg}px`,
+          border: cardBorder,
+          backgroundColor: color.surface.background,
+        },
+        '& button': {
+          ...theme.typography.body2,
+          fontWeight: 700,
+          cursor: 'pointer',
+          minHeight: 44,
+          paddingInline: '20px',
+          borderRadius: `${radius.pill}px`,
+          border: cardBorder,
+          backgroundColor: color.surface.gray,
+          color: color.text.primary,
+          alignSelf: 'flex-start',
+          '&:hover': { borderColor: color.stroke.default },
+        },
+        '& hr': {
+          width: '100%',
+          border: 0,
+          borderTop: cardBorder,
+          margin: 0,
+        },
+        // The link that starts the issue round-trip gets the brand button,
+        // because it is the primary action of whichever state renders it — a
+        // page whose whole purpose is "get a key" should not present that as
+        // the same underlined text as a Discord invite three lines up.
+        //
+        // Matched on `href` rather than on a class or a wrapper: the URL comes
+        // from `issueUrl()` in `api/portal.ts`, so the selector tracks the
+        // route and not a styling hook somebody could remove without noticing.
+        // It stays an `<a>` — an OAuth flow is a top-level navigation and
+        // `fetch` cannot perform one, which is the reason task 0189 made it a
+        // link in the first place.
+        //
+        // `signInUrl()` is deliberately NOT in this selector any more: since
+        // the login card arrived, sign-in renders as a real MUI `Button` in
+        // Discord's blurple, and two competing rules for one control is how a
+        // button ends up yellow on one state and blurple on the next.
+        '& a[href*="action=issue"]': {
+          ...theme.typography.body2,
+          fontWeight: 700,
+          display: 'inline-flex',
+          alignItems: 'center',
+          minHeight: 44,
+          // px strings, NOT bare numbers: inside `sx`, MUI runs
+          // spacing-aware properties (`padding*`, `margin*`, `gap`) through
+          // `theme.spacing`, so `paddingInline: 20` is 160px, not 20 — which
+          // is what turned this button into a full-width yellow bar.
+          paddingInline: '20px',
+          borderRadius: `${radius.pill}px`,
+          backgroundColor: color.surface.primary,
+          color: color.black,
+          textDecoration: 'none',
+          // The panel is a column flex container, so without this the button
+          // stretches to the full 720 px measure — a full-width yellow bar
+          // that reads as a banner, not a control.
+          alignSelf: 'flex-start',
+          '&:hover': { backgroundColor: color.primary[300] },
+        },
+      }}
+    >
+      {children}
+    </Box>
+  );
+}
+
+/**
+ * The section's accessible name and its place in the document outline.
+ *
+ * Hidden rather than deleted: the Figma frames show no heading above the card,
+ * because the card's own title already says where the visitor is — but a
+ * section with no name is a landmark a screen-reader user cannot tell from any
+ * other. Task 0185's wording, unchanged.
+ */
+function LoginHeading({ level }: { level: 'h1' | 'h2' }) {
+  return (
+    <Typography
+      variant="h2"
+      component={level}
+      id={`${LOGIN_ANCHOR}-heading`}
+      sx={visuallyHidden}
+    >
+      Stellar Prices API — API keys
+    </Typography>
+  );
+}
+
+function PortalStatus({ probe }: { probe: Probe }) {
+  // Once the portal is open this band renders NOTHING. Its only job is the
+  // answer a visitor gets when there is nothing to click — still asking, shut,
+  // or unreachable.
+  //
+  // Task 0185's `Reached /api-tokens/api/config successfully — same-origin, no
+  // API key, no CORS` line used to live here and is **deliberately gone**: it
+  // was that slice's evidence that the bundle could reach its own backend,
+  // written when this page had nothing else to show for it. The page now has
+  // plenty — the sign-in control only appears because `/config` answered, and
+  // task 0193's own brief is that this must not look like a debug harness. The
+  // property it proved is covered by the tests that assert the relative URL and
+  // by the gate below; a diagnostic sentence under a marketing page was the
+  // last thing on it that read as scaffolding.
+  const hasCard = probe.state !== 'ok' || !probe.config.enabled;
+  if (!hasCard) return null;
+
+  return (
+    <LoginSection testId="portal-status" labelledBy={`${LOGIN_ANCHOR}-heading`}>
+      {/* Level 2: the hero above owns this page's `h1`. */}
+      <LoginHeading level="h2" />
+
+      <PortalStatusChrome>
+        {probe.state === 'loading' && (
+          <LoginCard title={LOGIN_TITLE} subtitle={LOGIN_SUBTITLE}>
+            <Callout variant="neutral" icon={<CircularProgress size={18} />}>
+              <p>Checking whether the portal is open…</p>
+            </Callout>
+          </LoginCard>
+        )}
+
+        {/* The closed state is the one that ships. Task 0194 flips the flag,
+          after task 0189's eligibility gate passes — so for now this is what
+          every visitor sees, and it must say so plainly and offer nothing to
+          click. No sign-in control: the backend answers those routes with an
+          empty 404 while the flag is off, so a button here would be a button
+          that cannot work.
+
+          It is also the state task 0193 was told to STYLE rather than treat as
+          an afterthought, because it may be what a visitor sees for weeks —
+          so it gets the design's card, not a bare sentence. The card carries
+          no Discord button, which is the same rule the hero follows. */}
+        {probe.state === 'ok' && !probe.config.enabled && (
+          <LoginCard title={LOGIN_TITLE} subtitle={LOGIN_SUBTITLE}>
+            <Callout variant="neutral">
+              <p>
+                This is where you will sign in and issue an API key. It is not
+                yet available.
+              </p>
+            </Callout>
+          </LoginCard>
+        )}
+
+        {/* No sign-in card here any more. Once the portal is open, signing in
+            is the `/login` route's job and the landing's only part in it is the
+            "Get API Key" control in the hero and the navbar. What stays on this
+            panel is the three answers a visitor gets when there is nothing to
+            click: still asking, shut, or unreachable. */}
+
+        {/* A failure here is not cosmetic: it means the bundle could not reach
+          its own backend, which is either the behaviour ordering in task 0184's
+          routing table or the gate in task 0183. Show the reason rather than a
+          spinner that never resolves.
+
+          The error skin, not the neutral one — and the distinction is the same
+          one task 0193 insists on between "could not verify" and "not a
+          member": a visitor must be able to tell at a glance whether they are
+          looking at something broken on our side or a rule about them. */}
+        {probe.state === 'failed' && (
+          <LoginCard title={LOGIN_TITLE} subtitle={LOGIN_SUBTITLE}>
+            <Callout variant="error">
+              <p>
+                Could not reach the portal backend: <code>{probe.reason}</code>
+              </p>
+            </Callout>
+          </LoginCard>
+        )}
+      </PortalStatusChrome>
+    </LoginSection>
+  );
+}
+
+/**
+ * The landing page (task 0193) — the marketing frame from Figma, with the live
+ * portal panel embedded in it as one more section.
+ *
+ * **Embedded, not a second route.** Task 0195 has not landed the per-prefix SPA
+ * fallback yet, so a hard refresh on `/api-tokens/anything` resolves against S3
+ * — which grants `s3:GetObject` and not `s3:ListBucket`, so a missing key comes
+ * back as `403 AccessDenied` rather than a 404 the router could handle. Until
+ * then this app has exactly one URL, and "go to the dashboard" is a scroll.
+ *
+ * The order is the Figma frame's order, and the portal sits after the sections
+ * that explain what a key is for. A visitor who arrives already knowing has the
+ * navbar's CTA, which jumps straight past all of it.
+ */
+/**
+ * The landing page (task 0193) — the marketing frame from Figma.
+ *
+ * Signing in is no longer part of it: that moved to `/login` when the portal
+ * grew a second page. What is left here is the status panel, which says the
+ * one useful thing when there is nothing to click — still asking, shut, or
+ * unreachable — and carries task 0185's same-origin evidence.
+ */
+function LandingPage({
+  probe,
+  canOfferKey,
+}: {
+  probe: Probe;
+  canOfferKey: boolean;
+}) {
+  return (
+    <>
+      <Navbar canOfferKey={canOfferKey} />
+      <Box component="main">
+        <Hero canOfferKey={canOfferKey} />
+        <TrustBand />
+        <Features />
+        <UseCases />
+        <Endpoints />
+        <SelfService />
+        <DeveloperDashboard />
+        <FairAccess />
+        <Documentation />
+        <Faq />
+        <FinalCta canOfferKey={canOfferKey} />
+        <PortalStatus probe={probe} />
+      </Box>
+      <Footer canOfferKey={canOfferKey} />
+    </>
+  );
+}
+
+/** The `/config` probe, asked once for the whole app. */
+function useConfigProbe(): Probe {
   const [probe, setProbe] = useState<Probe>({ state: 'loading' });
 
   useEffect(() => {
@@ -922,76 +1675,209 @@ function PortalHome() {
     };
   }, []);
 
+  return probe;
+}
+
+/**
+ * What the three routes share: the portal's flag, the session, and the two
+ * questions every route answers differently.
+ */
+type Gate = {
+  probe: Probe;
+  /** The portal is confirmed open. Not "not confirmed shut" — see `canOfferKey`. */
+  open: boolean;
+  session: SessionState;
+  /** The session lookup has an answer, whatever it is. */
+  settled: boolean;
+  authenticated: boolean;
+  onSignOut: () => void;
+  /**
+   * Re-ask `/auth/me`. The sign-in popup needs it: the session cookie appears
+   * without this window ever navigating, so nothing else would tell the app
+   * that the visitor is now signed in.
+   */
+  reloadSession: () => void;
+};
+
+/**
+ * `/` — the landing page, and the junction the OAuth callback lands on.
+ *
+ * `portal/auth/mod.rs` redirects to `/api-tokens/` in **every** outcome and
+ * says why: "when the portal grows a second page, the page it lands on decides
+ * where to go next; this handler still will not." This is that page, and these
+ * are the two decisions it makes.
+ *
+ * Both forwards carry `location.search` verbatim. The callback's `?issue=…`
+ * and `?signin=…` are one-shot landing states owned by tasks 0189 and 0186,
+ * read and stripped by whichever view renders them — dropping the query here
+ * would silently delete a refusal the visitor is owed an explanation for.
+ *
+ * The redirects are `replace`, so Back from the dashboard goes to wherever the
+ * visitor was before signing in rather than to a `/` that bounces them
+ * straight forward again.
+ */
+function RootRoute({ gate }: { gate: Gate }) {
+  const location = useLocation();
+  const canOfferKey = gate.open;
+
+  if (gate.open && gate.settled) {
+    if (gate.authenticated) {
+      return <Navigate to={`/dashboard${location.search}`} replace />;
+    }
+    // A signed-out visitor stays on the landing page — UNLESS they have just
+    // come back from Discord, in which case the banner explaining what
+    // happened belongs beside the button they will press again.
+    if (new URLSearchParams(location.search).has('signin')) {
+      return <Navigate to={`/login${location.search}`} replace />;
+    }
+  }
+
+  return <LandingPage probe={gate.probe} canOfferKey={canOfferKey} />;
+}
+
+/**
+ * `/login` — the Figma login frame, on its own, with nothing else on the page.
+ *
+ * A visitor who is already signed in is sent to the dashboard rather than
+ * shown a sign-in button that would start a round-trip they do not need.
+ */
+function LoginRoute({ gate }: { gate: Gate }) {
+  if (gate.probe.state === 'loading') {
+    return (
+      <LoginSection back full>
+        <LoginCard
+          title={LOGIN_TITLE}
+          titleComponent="h1"
+          subtitle={LOGIN_SUBTITLE}
+        >
+          <Callout variant="neutral" icon={<CircularProgress size={18} />}>
+            <p>Checking whether the portal is open…</p>
+          </Callout>
+        </LoginCard>
+      </LoginSection>
+    );
+  }
+
+  // Shut or unreachable. NOT a redirect to `/`: somebody who followed a link or
+  // a bookmark to this URL is owed the reason, and bouncing them to a marketing
+  // page they have to re-read is not one.
+  if (!gate.open) {
+    return (
+      <LoginSection back full>
+        <LoginCard
+          title={LOGIN_TITLE}
+          titleComponent="h1"
+          subtitle={LOGIN_SUBTITLE}
+        >
+          {gate.probe.state === 'failed' ? (
+            <Callout variant="error">
+              <p>
+                Could not reach the portal backend:{' '}
+                <code>{gate.probe.reason}</code>
+              </p>
+            </Callout>
+          ) : (
+            <Callout variant="neutral">
+              <p>
+                This is where you will sign in and issue an API key. It is not
+                yet available.
+              </p>
+            </Callout>
+          )}
+        </LoginCard>
+      </LoginSection>
+    );
+  }
+
+  if (gate.authenticated) {
+    return <Navigate to="/dashboard" replace />;
+  }
+
   return (
-    <main>
-      <h1>Stellar Prices API — API keys</h1>
+    <LoginSection back full>
+      <LoginView session={gate.session} onSignedIn={gate.reloadSession} />
+    </LoginSection>
+  );
+}
 
-      {probe.state === 'loading' && <p>Checking whether the portal is open…</p>}
+/**
+ * `/dashboard` — the key and the usage panel.
+ *
+ * A visitor who is not signed in goes to `/api-tokens/`, per the brief. It
+ * waits for `settled` first: redirecting while `/auth/me` is still in flight
+ * would bounce every arrival from the OAuth callback straight back to the
+ * landing page, which is the one journey this route exists to complete.
+ */
+function DashboardRoute({ gate }: { gate: Gate }) {
+  if (gate.probe.state === 'loading' || (gate.open && !gate.settled)) {
+    return (
+      <LoginSection full>
+        <LoginCard
+          title={LOGIN_TITLE}
+          titleComponent="h1"
+          subtitle={LOGIN_SUBTITLE}
+        >
+          <Callout variant="neutral" icon={<CircularProgress size={18} />}>
+            <p>Checking whether you are signed in…</p>
+          </Callout>
+        </LoginCard>
+      </LoginSection>
+    );
+  }
 
-      {/* The closed state is the one that ships. Task 0194 flips the flag,
-          after task 0189's eligibility gate passes — so for now this is what
-          every visitor sees, and it must say so plainly and offer nothing to
-          click. No sign-in control: the backend answers those routes with an
-          empty 404 while the flag is off, so a button here would be a button
-          that cannot work. */}
-      {probe.state === 'ok' && !probe.config.enabled && (
-        <p>
-          This is where you will sign in and issue an API key. It is not yet
-          available.
-        </p>
-      )}
+  if (!gate.open || !gate.authenticated) {
+    return <Navigate to="/" replace />;
+  }
 
-      {/* Reachable only once PORTAL_ENABLED is true. Task 0186 put sign-in
-          here; issuing a key is task 0187's. */}
-      {probe.state === 'ok' && probe.config.enabled && (
-        <SignIn rateLimit={probe.config.rate_limit_per_second} />
-      )}
+  const rateLimit =
+    gate.probe.state === 'ok'
+      ? gate.probe.config.rate_limit_per_second
+      : undefined;
 
-      {/* A failure here is not cosmetic: it means the bundle could not reach
-          its own backend, which is either the behaviour ordering in task 0184's
-          routing table or the gate in task 0183. Show the reason rather than a
-          spinner that never resolves. */}
-      {probe.state === 'failed' && (
-        <p>
-          Could not reach the portal backend: <code>{probe.reason}</code>
-        </p>
-      )}
-
-      <hr />
-
-      {/* The same-origin proof, and the reason it is this route rather than the
-          `/api-tokens/api/health` named in task 0185's criteria: that route does
-          not exist. The portal backend maps `/config` and, from task 0186,
-          `/auth/*`; task 0183's gate answers an empty 404 on every other path
-          under the prefix — so a `/health` probe would render a failure whether
-          or not anyone implemented it. `/config` answers 200 in BOTH flag
-          states, which is what makes it the honest probe. */}
-      {/* Three branches, not a two-way ternary on `=== 'ok'`. While the probe
-          is in flight the answer is not yet known, and a ternary claimed
-          "unsuccessfully" on first paint — so the page said it had failed to
-          reach the backend at the same time as saying it was still asking. This
-          paragraph is the acceptance criterion's evidence of a live call; it has
-          to be silent about the outcome until there is one. */}
-      {probe.state === 'loading' ? (
-        <p>
-          Calling <code>/api-tokens/api/config</code> — same-origin, no API key,
-          no CORS.
-        </p>
-      ) : (
-        <p>
-          Reached <code>/api-tokens/api/config</code>{' '}
-          {probe.state === 'ok' ? 'successfully' : 'unsuccessfully'} —
-          same-origin, no API key, no CORS.
-        </p>
-      )}
-    </main>
+  return (
+    <PortalStatusChrome>
+      {/* The dashboard's own screens are still the Figma frames this build
+          could not read, so it has no visible headline of its own yet. It is
+          a page, though, and a page needs an `h1`. */}
+      <LoginHeading level="h1" />
+      <Dashboard
+        onSignOut={gate.onSignOut}
+        session={
+          (gate.session as { state: 'ok'; session: PortalSession }).session
+        }
+        rateLimit={rateLimit}
+      />
+    </PortalStatusChrome>
   );
 }
 
 export function App() {
+  const probe = useConfigProbe();
+  const open = probe.state === 'ok' && probe.config.enabled;
+  const { session, onSignOut, reload } = useSession(open);
+
+  const gate: Gate = {
+    probe,
+    open,
+    session,
+    settled: session.state !== 'loading',
+    authenticated: session.state === 'ok' && session.session.authenticated,
+    onSignOut,
+    reloadSession: reload,
+  };
+
   return (
     <Routes>
-      <Route path="/" element={<PortalHome />} />
+      <Route path="/" element={<RootRoute gate={gate} />} />
+      <Route path="/login" element={<LoginRoute gate={gate} />} />
+      <Route path="/dashboard" element={<DashboardRoute gate={gate} />} />
+      {/* Anything else is a URL this app never minted. Sending it to `/`
+          rather than rendering a 404 keeps one promise the deployment cannot
+          yet keep on its own: until task 0195 lands the per-prefix SPA
+          fallback, an unknown path under this prefix never reaches the bundle
+          at all — S3 answers `403 AccessDenied` because the bucket policy
+          grants `s3:GetObject` and not `s3:ListBucket`. */}
+      <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   );
 }

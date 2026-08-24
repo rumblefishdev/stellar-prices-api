@@ -1,4 +1,10 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from '@testing-library/react';
 import { MemoryRouter, useLocation } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -11,8 +17,11 @@ import App from './app';
  * the banner stayed — `MemoryRouter` has no `window.location` to inspect.
  */
 let lastSearch = '';
+let lastPath = '';
 function LocationSpy() {
-  lastSearch = useLocation().search;
+  const location = useLocation();
+  lastSearch = location.search;
+  lastPath = location.pathname;
   return null;
 }
 
@@ -141,6 +150,190 @@ const renderApp = () =>
     </MemoryRouter>,
   );
 
+/**
+ * The login card alone — the one place on the page a sign-in control can be.
+ *
+ * Scoping exists because of task 0193: this app used to BE the panel, so
+ * "offers nothing to click" could be asserted against the whole document.
+ * Since the landing page arrived, the document also carries a navbar, a hero,
+ * a footer and a "Back to landing" link whose targets are `#features`,
+ * `#use-cases`, `#top` and the OpenAPI document — navigation that is correct
+ * whether the portal is open or shut, and that a closed-portal assertion has
+ * no business counting.
+ *
+ * The assertion itself is NOT relaxed. Inside this panel the rule is still
+ * zero controls while the flag is off, and the two controls that could promise
+ * a key from outside it — the hero's and the navbar's "Get API Key" — are
+ * rendered only on a confirmed-open probe and are covered by their own test
+ * below. Widening the scope back out would fail on the footer, not on a
+ * regression.
+ */
+function portalPanel() {
+  return within(screen.getByTestId('login-card'));
+}
+
+/**
+ * The three routes, and the two redirects between them (task 0193).
+ *
+ * These exist because the routes are a CONTRACT with the backend, not a
+ * cosmetic split. `portal/auth/mod.rs` sends every OAuth outcome to
+ * `/api-tokens/` and says so deliberately — "when the portal grows a second
+ * page, the page it lands on decides where to go next; this handler still will
+ * not". `/` is that page. If these forwards break, a completed sign-in ends on
+ * the marketing page and the visitor never reaches the key they just proved
+ * they are entitled to, with nothing on screen to say why.
+ *
+ * They also pin the guard the brief asks for in the other direction: a visitor
+ * with no session who arrives at `/dashboard` goes to `/api-tokens/`.
+ */
+describe('routes', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    lastPath = '';
+    lastSearch = '';
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const renderAt = (entry: string) =>
+    render(
+      <MemoryRouter initialEntries={[entry]}>
+        <App />
+        <LocationSpy />
+      </MemoryRouter>,
+    );
+
+  it('sends a signed-in visitor from the landing to the dashboard', async () => {
+    openAndSignedIn();
+    renderAt('/');
+
+    // The OAuth callback lands here; the dashboard is where it must end up.
+    await waitFor(() => expect(lastPath).toBe('/dashboard'));
+    expect(
+      await screen.findByRole('heading', { name: /^your api key$/i }),
+    ).toBeTruthy();
+  });
+
+  it('carries the issue outcome through to the dashboard', async () => {
+    openAndSignedIn();
+    renderAt('/?issue=not_member');
+
+    // The forward must not eat the query. `?issue=…` is a one-shot landing
+    // state owned by task 0189 and the dashboard is what renders it — dropping
+    // it here would swallow an eligibility refusal the visitor is owed.
+    await waitFor(() => expect(lastPath).toBe('/dashboard'));
+    expect(await screen.findByTestId('issue-not-member')).toBeTruthy();
+  });
+
+  it('sends a returning visitor with a signin outcome to the login screen', async () => {
+    openAndSignedOut();
+    renderAt('/?signin=cancelled');
+
+    await waitFor(() => expect(lastPath).toBe('/login'));
+    expect(await screen.findByText(/sign-in cancelled/i)).toBeTruthy();
+  });
+
+  it('leaves a signed-out visitor on the landing page', async () => {
+    openAndSignedOut();
+    renderAt('/');
+
+    expect(
+      (await screen.findAllByRole('link', { name: /get api key/i })).length,
+    ).toBeGreaterThan(0);
+    expect(lastPath).toBe('/');
+    // And the login card is not on the landing page — it is a route of its own.
+    expect(screen.queryByTestId('login-card')).toBeNull();
+  });
+
+  it('shows the login screen on its own, with none of the landing page', async () => {
+    openAndSignedOut();
+    renderAt('/login');
+
+    expect(await screen.findByTestId('login-card')).toBeTruthy();
+    expect(lastPath).toBe('/login');
+    // The marketing sections belong to `/`. "Only this one view" is the brief.
+    expect(document.getElementById('features')).toBeNull();
+    expect(document.getElementById('use-cases')).toBeNull();
+  });
+
+  it('sends a signed-in visitor away from the login screen', async () => {
+    openAndSignedIn();
+    renderAt('/login');
+
+    await waitFor(() => expect(lastPath).toBe('/dashboard'));
+  });
+
+  it('sends a visitor with no session away from the dashboard', async () => {
+    openAndSignedOut();
+    renderAt('/dashboard');
+
+    await waitFor(() => expect(lastPath).toBe('/'));
+    // By heading, not by text: the landing page's Self-Service section says
+    // "…your API key is ready immediately", which a loose text match hits.
+    expect(
+      screen.queryByRole('heading', { name: /^your api key$/i }),
+    ).toBeNull();
+  });
+
+  it('waits for the session before deciding about the dashboard', async () => {
+    // The redirect must not fire while `/auth/me` is still in flight: that is
+    // exactly the moment an arrival from the OAuth callback passes through,
+    // and bouncing it would break the one journey these routes exist for.
+    let answer: (value: unknown) => void = () => undefined;
+    const pending = new Promise((resolve) => {
+      answer = resolve;
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        if (url === CONFIG_URL)
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({ enabled: true }),
+          };
+        if (url === ME_URL) {
+          await pending;
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              authenticated: true,
+              user_id: '1',
+              username: 'adam',
+            }),
+          };
+        }
+        return {
+          ok: false,
+          status: 404,
+          json: async () => ({ code: 'no_key' }),
+        };
+      }),
+    );
+
+    renderAt('/dashboard');
+    expect(
+      await screen.findByText(/checking whether you are signed in/i),
+    ).toBeTruthy();
+    expect(lastPath).toBe('/dashboard');
+
+    answer(undefined);
+    expect(
+      await screen.findByRole('heading', { name: /^your api key$/i }),
+    ).toBeTruthy();
+    expect(lastPath).toBe('/dashboard');
+  });
+
+  it('sends an unknown path back to the landing page', async () => {
+    openAndSignedOut();
+    renderAt('/nonsense');
+
+    await waitFor(() => expect(lastPath).toBe('/'));
+  });
+});
+
 describe('portal home', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
@@ -157,8 +350,10 @@ describe('portal home', () => {
     // The acceptance criterion is "no sign-in button", not "no button that
     // happens to say sign in" — assert on the role, so any control added here
     // fails this rather than sneaking past a string match.
-    expect(screen.queryAllByRole('button')).toHaveLength(0);
-    expect(screen.queryAllByRole('link')).toHaveLength(0);
+    expect(portalPanel().queryAllByRole('button')).toHaveLength(0);
+    expect(portalPanel().queryAllByRole('link')).toHaveLength(0);
+    // And nothing above the fold offers the key either (task 0193).
+    expect(screen.queryByRole('link', { name: /get api key/i })).toBeNull();
   });
 
   it('renders the open state when the flag is on', async () => {
@@ -167,9 +362,17 @@ describe('portal home', () => {
 
     // Task 0185's "sign-in arrives with the next slice" placeholder is gone —
     // this slice IS that sign-in, so the open state is now the real control.
+    //
+    // Since task 0193 gave the portal routes, the control the LANDING offers is
+    // the one that leads to sign-in rather than the Discord button itself; the
+    // button is asserted on `/login`, where it now lives. What this test still
+    // pins is the gate: flag on, a way in appears and the closed sentence does
+    // not.
+    // `findAll`: the landing offers the same control in the navbar, the hero
+    // and the footer, and a `findBy` throws on more than one match.
     expect(
-      await screen.findByRole('link', { name: /sign in with discord/i }),
-    ).toBeTruthy();
+      (await screen.findAllByRole('link', { name: /get api key/i })).length,
+    ).toBeGreaterThan(0);
     expect(screen.queryByText(/not yet available/i)).toBeNull();
   });
 
@@ -260,17 +463,26 @@ describe('portal home', () => {
   });
 
   it('says nothing about the outcome while the probe is still in flight', async () => {
-    stubFetch({});
+    stubFetch({ json: async () => ({ enabled: true }) });
     renderApp();
 
-    // The evidence paragraph must not claim failure before there is an answer.
+    // Task 0185's `Reached /api-tokens/api/config successfully — same-origin…`
+    // line is gone (task 0193: the page must not read as a debug harness), so
+    // what this test guards has moved to the control that ACTS on the answer.
+    // The property is the same one and it is the one that matters: the page
+    // must not commit to an outcome it does not have yet.
     expect(
       screen.getByText(/Checking whether the portal is open/i),
     ).toBeTruthy();
-    expect(screen.queryByText(/unsuccessfully/i)).toBeNull();
+    // No offer of a key while nobody knows whether the portal is open…
+    expect(screen.queryByRole('link', { name: /get api key/i })).toBeNull();
+    // …and no claim that it is shut, either.
+    expect(screen.queryByText(/not yet available/i)).toBeNull();
 
-    // …and it must still report the outcome once one arrives.
-    expect(await screen.findByText(/successfully/i)).toBeTruthy();
+    // …and the answer, once it arrives, is acted on.
+    expect(
+      (await screen.findAllByRole('link', { name: /get api key/i })).length,
+    ).toBeGreaterThan(0);
   });
 
   // `renderApp` above mounts at `/` with no basename, so it cannot notice
@@ -325,7 +537,7 @@ describe('sign in with Discord', () => {
    */
   it('offers sign-in as a same-origin link, not a fetch', async () => {
     openAndSignedOut();
-    renderAt('/');
+    renderAt('/login');
 
     const link = await screen.findByRole('link', {
       name: /sign in with discord/i,
@@ -366,11 +578,11 @@ describe('sign in with Discord', () => {
 
   it('renders signed-out as plain text with the button still there', async () => {
     openAndSignedOut();
-    renderAt('/');
+    renderAt('/login');
 
     expect(await screen.findByText(/you are not signed in/i)).toBeTruthy();
-    // "Plain text, not a screen" — the heading and the same-origin evidence
-    // paragraph are still on the page.
+    // "Plain text, not a screen" — the card's heading is still the page's `h1`
+    // and the sign-in control is still beside the words, not behind them.
     expect(screen.getByRole('heading', { level: 1 })).toBeTruthy();
   });
 
@@ -384,7 +596,7 @@ describe('sign in with Discord', () => {
    */
   it('states both prerequisites before the visitor authenticates', async () => {
     openAndSignedOut();
-    renderAt('/');
+    renderAt('/login');
 
     await screen.findByRole('link', { name: /sign in with discord/i });
     expect(
@@ -465,7 +677,7 @@ describe('sign in with Discord', () => {
 
   it('does not claim a cancellation that did not happen', async () => {
     openAndSignedOut();
-    renderAt('/');
+    renderAt('/login');
     await screen.findByText(/you are not signed in/i);
     expect(screen.queryByText(/cancelled/i)).toBeNull();
   });
@@ -496,7 +708,16 @@ describe('sign in with Discord', () => {
     // assertions rather than warned about after them.
     fireEvent.click(button);
 
-    expect(await screen.findByText(/you are not signed in/i)).toBeTruthy();
+    // Signing out empties the session, and `/dashboard` sends a visitor with
+    // no session to `/api-tokens/` — so the observable result is the landing
+    // page with its way back in, not the "you are not signed in" line, which
+    // belongs to `/login`. The property this test exists for is unchanged and
+    // asserted below: the request was a POST, and the session was re-read
+    // rather than assumed.
+    expect(
+      (await screen.findAllByRole('link', { name: /get api key/i })).length,
+    ).toBeGreaterThan(0);
+    expect(screen.queryByRole('button', { name: /sign out/i })).toBeNull();
     const logout = fetchMock.mock.calls.find(([url]) => url === LOGOUT_URL);
     expect(logout).toBeTruthy();
     // A GET sign-out is triggerable by any third-party page; the backend only
@@ -514,7 +735,7 @@ describe('sign in with Discord', () => {
       [CONFIG_URL]: openConfig,
       [ME_URL]: () => ({ ok: false, status: 502 }),
     });
-    renderAt('/');
+    renderAt('/login');
 
     expect(
       await screen.findByText(/could not check your sign-in status/i),
@@ -535,7 +756,7 @@ describe('sign in with Discord', () => {
       [CONFIG_URL]: openConfig,
       [ME_URL]: () => ({ ok: false, status: 502 }),
     });
-    renderAt('/');
+    renderAt('/login');
 
     await screen.findByText(/could not check your sign-in status/i);
     const link = screen.getByRole('link', { name: /sign in with discord/i });
@@ -557,6 +778,178 @@ describe('sign in with Discord', () => {
     expect(fetchMock.mock.calls.every(([url]) => url === CONFIG_URL)).toBe(
       true,
     );
+  });
+});
+
+/**
+ * The sign-in popup (task 0193).
+ *
+ * The control stays an `<a>` with a real `href` and the popup is layered on
+ * top of it, so these tests pin BOTH halves: that a click opens the
+ * round-trip in a second window, and that a browser which refuses to open one
+ * falls through to the navigation that has always worked.
+ */
+describe('the sign-in popup', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const renderAt = (entry: string) =>
+    render(
+      <MemoryRouter initialEntries={[entry]}>
+        <App />
+      </MemoryRouter>,
+    );
+
+  /** A stand-in for the second window, and the `window.open` that returns it. */
+  const stubPopup = (opened: Partial<Window> | null) => {
+    // The parameters are declared even though the stub ignores them: the
+    // assertion below reads `calls[0][0]`, and without them the recorded call
+    // tuple has length 0 and will not typecheck.
+    const open = vi.fn(
+      (_url: string, _name?: string, _features?: string) =>
+        opened as Window | null,
+    );
+    vi.stubGlobal('open', open);
+    return open;
+  };
+
+  const clickSignIn = async () => {
+    const link = await screen.findByRole('link', {
+      name: /sign in with discord/i,
+    });
+    fireEvent.click(link);
+    return link;
+  };
+
+  it('opens the round-trip in a second window and waits', async () => {
+    openAndSignedOut();
+    const open = stubPopup({ closed: false, focus: () => undefined });
+    renderAt('/login');
+
+    await clickSignIn();
+
+    // The URL is the backend's own login route, relative — the popup goes
+    // through `/auth/login` so the PKCE `pending` cookie is set same-origin,
+    // exactly as the full-page flow does.
+    expect(open.mock.calls[0][0]).toBe('/api-tokens/api/auth/login');
+    expect(await screen.findByText(/redirecting to discord/i)).toBeTruthy();
+    expect(screen.getByText(/waiting for discord/i)).toBeTruthy();
+    // And the escape hatch the copy promises actually points somewhere.
+    expect(
+      screen.getByRole('link', { name: /click here/i }).getAttribute('href'),
+    ).toBe('/api-tokens/api/auth/login');
+  });
+
+  it('falls back to navigating this tab when the popup is blocked', async () => {
+    openAndSignedOut();
+    stubPopup(null);
+    renderAt('/login');
+
+    const link = await clickSignIn();
+
+    // No waiting screen: the click was not intercepted, so the browser is
+    // following the `href` and this document is already on its way out. A
+    // "Waiting for Discord…" spinner here would be a lie about a window that
+    // never opened.
+    expect(screen.queryByText(/waiting for discord/i)).toBeNull();
+    expect(link.getAttribute('href')).toBe('/api-tokens/api/auth/login');
+    expect(screen.getByText(/you are not signed in/i)).toBeTruthy();
+  });
+
+  it('leaves a modified click alone so it can open a tab', async () => {
+    openAndSignedOut();
+    const open = stubPopup({ closed: false, focus: () => undefined });
+    renderAt('/login');
+
+    const link = await screen.findByRole('link', {
+      name: /sign in with discord/i,
+    });
+    fireEvent.click(link, { metaKey: true });
+
+    expect(open).not.toHaveBeenCalled();
+    expect(screen.queryByText(/waiting for discord/i)).toBeNull();
+  });
+
+  it('reports the refusal the popup brings back, in task 0186 wording', async () => {
+    openAndSignedOut();
+    stubPopup({ closed: false, focus: () => undefined });
+    renderAt('/login');
+
+    await clickSignIn();
+    await screen.findByText(/waiting for discord/i);
+
+    fireEvent(
+      window,
+      new MessageEvent('message', {
+        origin: window.location.origin,
+        data: { source: 'stellar-portal-oauth', search: '?signin=cancelled' },
+      }),
+    );
+
+    // The same sentence the full-page flow shows, from the same one place in
+    // the component — not a second wording for the popup.
+    expect(await screen.findByText(/sign-in cancelled/i)).toBeTruthy();
+    expect(screen.queryByText(/waiting for discord/i)).toBeNull();
+  });
+
+  it('ignores a message from another origin', async () => {
+    openAndSignedOut();
+    stubPopup({ closed: false, focus: () => undefined });
+    renderAt('/login');
+
+    await clickSignIn();
+    await screen.findByText(/waiting for discord/i);
+
+    fireEvent(
+      window,
+      new MessageEvent('message', {
+        origin: 'https://not-us.example',
+        data: { source: 'stellar-portal-oauth', search: '?signin=failed' },
+      }),
+    );
+
+    // Still waiting. A `message` event arrives from any window that cares to
+    // send one, and without the origin check a third-party page could end the
+    // wait and make this card claim an outcome that never happened.
+    expect(screen.getByText(/waiting for discord/i)).toBeTruthy();
+    expect(screen.queryByText(/could not be completed/i)).toBeNull();
+  });
+
+  it('goes to the dashboard when the popup completes the sign-in', async () => {
+    // The popup reports no refusal; the session it created is what the app
+    // then finds. This is the whole journey the routes exist for.
+    let authenticated = false;
+    stubRoutes({
+      [CONFIG_URL]: openConfig,
+      [ME_URL]: () => ({
+        json: async () =>
+          authenticated
+            ? { authenticated: true, user_id: '1', username: 'adam' }
+            : { authenticated: false },
+      }),
+      [KEY_URL]: keyNoKey,
+      [USAGE_URL]: usageNoKey,
+    });
+    stubPopup({ closed: false, focus: () => undefined });
+    renderAt('/login');
+
+    await clickSignIn();
+    await screen.findByText(/waiting for discord/i);
+
+    authenticated = true;
+    fireEvent(
+      window,
+      new MessageEvent('message', {
+        origin: window.location.origin,
+        data: { source: 'stellar-portal-oauth', search: '' },
+      }),
+    );
+
+    expect(await screen.findByText(/your api key/i)).toBeTruthy();
   });
 });
 
@@ -787,7 +1180,10 @@ describe('the API key', () => {
   /** The key belongs to the session, so signing out must take it off screen. */
   it('is not rendered while signed out', async () => {
     openAndSignedOut();
-    renderApp();
+    // `/login`, not `/`: the key lives on the dashboard since task 0193 gave
+    // the portal routes, and a signed-out visitor never reaches that route —
+    // this asserts the key is absent from the screen they DO reach.
+    renderApp('/login');
 
     await screen.findByRole('link', { name: /sign in with discord/i });
     expect(screen.queryByRole('link', { name: /get my api key/i })).toBeNull();
@@ -803,8 +1199,9 @@ describe('the API key', () => {
     renderApp();
 
     await screen.findByText(/not yet available/i);
-    expect(screen.queryAllByRole('button')).toHaveLength(0);
-    expect(screen.queryAllByRole('link')).toHaveLength(0);
+    expect(portalPanel().queryAllByRole('button')).toHaveLength(0);
+    expect(portalPanel().queryAllByRole('link')).toHaveLength(0);
+    expect(screen.queryByRole('link', { name: /get api key/i })).toBeNull();
   });
 
   // -------------------------------------------------------------------------
