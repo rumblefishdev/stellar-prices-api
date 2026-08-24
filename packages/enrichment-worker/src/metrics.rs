@@ -185,8 +185,42 @@ pub fn historical_sweep_metrics(summary: &SweepSummary) -> Vec<Metric> {
     m
 }
 
-pub fn sweep_metrics(summary: &CoarseSweepSummary) -> Vec<Metric> {
+pub fn sweep_metrics(summary: &CoarseSweepSummary, duration_ms: u64) -> Vec<Metric> {
     vec![
+        // Published on EVERY completed run, including one that swept nothing.
+        // This is what separates "ran and found nothing" from "never reached"
+        // (task 0218 AC 2): the latter emits no datapoint at all, and the
+        // `-no-invocations` alarm treats missing data as breaching.
+        Metric {
+            name: "CoarseSweepRuns",
+            value: 1.0,
+            unit: Unit::Count,
+        },
+        // Zero here and 1 in `sweep_failure_metrics` — so a run that failed
+        // before producing a summary is a datapoint, not silence.
+        Metric {
+            name: "CoarseSweepFailedRuns",
+            value: 0.0,
+            unit: Unit::Count,
+        },
+        Metric {
+            name: "CoarseSweepTablesSwept",
+            value: summary.tables.len() as f64,
+            unit: Unit::Count,
+        },
+        // A starved run and a short run both report fewer swept tables; only
+        // this tells them apart (task 0218 AC 4). Published even when the run
+        // hit its deadline, which is precisely when it matters.
+        Metric {
+            name: "CoarseSweepDeadlineHit",
+            value: if summary.deadline_hit { 1.0 } else { 0.0 },
+            unit: Unit::Count,
+        },
+        Metric {
+            name: "CoarseSweepDurationMs",
+            value: duration_ms as f64,
+            unit: Unit::Milliseconds,
+        },
         Metric {
             name: "CoarseSweepRowsEnriched",
             value: summary.total_enriched() as f64,
@@ -201,6 +235,44 @@ pub fn sweep_metrics(summary: &CoarseSweepSummary) -> Vec<Metric> {
             name: "CoarseSweepTablesSkipped",
             value: summary.skipped_tables.len() as f64,
             unit: Unit::Count,
+        },
+    ]
+}
+
+/// Metrics for a sweep invocation that failed **before** producing a summary —
+/// i.e. `run_coarse_sweep` returned `Err`, so there is nothing to report per
+/// table.
+///
+/// Exists because the `Ok`-only publishing this replaced made a failed run
+/// indistinguishable from a run that never happened: both emitted nothing. The
+/// three states task 0218 AC 2 requires to be distinguishable are now:
+///
+/// | state | signal |
+/// |---|---|
+/// | never reached | **no datapoint at all** — caught by `-no-invocations` |
+/// | ran, found nothing | `CoarseSweepRuns=1`, `FailedRuns=0`, `RowsEnriched=0` |
+/// | ran, failed | `CoarseSweepRuns=1`, `FailedRuns=1` |
+pub fn sweep_failure_metrics(duration_ms: u64) -> Vec<Metric> {
+    vec![
+        Metric {
+            name: "CoarseSweepRuns",
+            value: 1.0,
+            unit: Unit::Count,
+        },
+        Metric {
+            name: "CoarseSweepFailedRuns",
+            value: 1.0,
+            unit: Unit::Count,
+        },
+        Metric {
+            name: "CoarseSweepRowsEnriched",
+            value: 0.0,
+            unit: Unit::Count,
+        },
+        Metric {
+            name: "CoarseSweepDurationMs",
+            value: duration_ms as f64,
+            unit: Unit::Milliseconds,
         },
     ]
 }
@@ -308,9 +380,11 @@ mod tests {
             // A genuine runtime pass error vs a benign config skip — distinct series.
             failed_tables: vec!["price_ohlcv_1d".to_string()],
             skipped_tables: vec!["price_ohlcv_1m".to_string()],
+            deadline_hit: false,
+            deferred_tables: vec![],
         };
 
-        let m = sweep_metrics(&summary);
+        let m = sweep_metrics(&summary, 21_500);
         let by = |name: &str| m.iter().find(|x| x.name == name).expect("metric present");
         // Enriched is summed across every swept table (8+4).
         assert_eq!(by("CoarseSweepRowsEnriched").value, 12.0);
@@ -320,7 +394,51 @@ mod tests {
         assert_eq!(by("CoarseSweepTablesSkipped").value, 1.0);
         // RowsRemaining is deliberately not published (floor-dominated).
         assert!(!m.iter().any(|x| x.name == "CoarseSweepRowsRemaining"));
-        assert_eq!(m.len(), 3);
+        // A completed run always reports itself, so "found nothing" is a
+        // datapoint rather than silence (task 0218 AC 2).
+        assert_eq!(by("CoarseSweepRuns").value, 1.0);
+        assert_eq!(by("CoarseSweepFailedRuns").value, 0.0);
+        assert_eq!(by("CoarseSweepTablesSwept").value, 2.0);
+        assert_eq!(by("CoarseSweepDeadlineHit").value, 0.0);
+        assert_eq!(by("CoarseSweepDurationMs").value, 21_500.0);
+        assert_eq!(m.len(), 8);
+    }
+
+    /// A run that stopped on its wall-clock budget must be distinguishable from
+    /// one that simply had fewer tables — otherwise a starved sweep looks
+    /// healthy, which is task 0218 AC 4.
+    #[test]
+    fn a_starved_run_publishes_deadline_hit() {
+        let summary = CoarseSweepSummary {
+            start_month: 202_605,
+            end_month: 202_606,
+            tables: vec![],
+            failed_tables: vec![],
+            skipped_tables: vec![],
+            deadline_hit: true,
+            deferred_tables: vec!["price_ohlcv_1d".to_string()],
+        };
+        let m = sweep_metrics(&summary, 120_000);
+        let by = |name: &str| m.iter().find(|x| x.name == name).expect("metric present");
+        assert_eq!(by("CoarseSweepDeadlineHit").value, 1.0);
+        // It still reports itself as a completed run — the point is that the
+        // run happened and was cut short, not that it never ran.
+        assert_eq!(by("CoarseSweepRuns").value, 1.0);
+        assert_eq!(by("CoarseSweepFailedRuns").value, 0.0);
+        assert_eq!(by("CoarseSweepTablesSwept").value, 0.0);
+    }
+
+    /// The three states task 0218 AC 2 requires to be distinguishable. "Never
+    /// reached" is the absence of any datapoint, so it is asserted by the other
+    /// two both emitting `CoarseSweepRuns = 1`.
+    #[test]
+    fn a_failed_run_is_a_datapoint_not_silence() {
+        let m = sweep_failure_metrics(4_200);
+        let by = |name: &str| m.iter().find(|x| x.name == name).expect("metric present");
+        assert_eq!(by("CoarseSweepRuns").value, 1.0);
+        assert_eq!(by("CoarseSweepFailedRuns").value, 1.0);
+        assert_eq!(by("CoarseSweepRowsEnriched").value, 0.0);
+        assert_eq!(by("CoarseSweepDurationMs").value, 4_200.0);
     }
 
     /// A pass that ran zero batches (empty backlog) has no per-batch figure, so

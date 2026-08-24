@@ -152,7 +152,8 @@ async fn main() -> Result<(), lambda_runtime::Error> {
                 .saturating_sub(now_ms)
                 .saturating_sub(MARGIN_MS);
             let budget_ms = sweep_budget_secs.saturating_mul(1_000).min(remaining_ms);
-            let deadline = Instant::now() + Duration::from_millis(budget_ms);
+            let started = Instant::now();
+            let deadline = started + Duration::from_millis(budget_ms);
 
             match enrichment_worker::repair::run_coarse_sweep(&client, cfg, Some(deadline)).await {
                 Ok(sum) => {
@@ -164,10 +165,20 @@ async fn main() -> Result<(), lambda_runtime::Error> {
                         tables_swept = sum.tables.len(),
                         tables_failed = sum.failed_tables.len(),
                         tables_skipped = sum.skipped_tables.len(),
+                        deadline_hit = sum.deadline_hit,
+                        deferred_tables = sum.deferred_tables.len(),
+                        duration_ms = started.elapsed().as_millis() as u64,
                         budget_ms,
                         "coarse sweep complete"
                     );
-                    let sm = enrichment_worker::metrics::sweep_metrics(&sum);
+                    // Published on EVERY completed run, including one that swept
+                    // nothing and one cut short by its budget — that is what makes
+                    // "ran and found nothing" distinguishable from "never reached"
+                    // (0218 AC 2) and a starved run visible (AC 4).
+                    let sm = enrichment_worker::metrics::sweep_metrics(
+                        &sum,
+                        started.elapsed().as_millis() as u64,
+                    );
                     if let Err(e) = enrichment_worker::metrics::publish(&cw, &env_name, &sm).await {
                         tracing::warn!(error = %e, "coarse sweep metric publish failed (non-fatal)");
                     }
@@ -179,6 +190,17 @@ async fn main() -> Result<(), lambda_runtime::Error> {
                     // only hide it — and "swept nothing" being indistinguishable
                     // from "failed" is exactly the defect this task exists to fix.
                     tracing::error!(error = %e, budget_ms, "coarse sweep failed");
+                    // Publish BEFORE returning Err. A failed run must leave a
+                    // datapoint, or it is indistinguishable from a run that never
+                    // happened — the Ok-only publishing this replaced was itself
+                    // part of the blind spot (0218 AC 2). Best-effort: a metric
+                    // failure must not mask the real error below.
+                    let fm = enrichment_worker::metrics::sweep_failure_metrics(
+                        started.elapsed().as_millis() as u64,
+                    );
+                    if let Err(pe) = enrichment_worker::metrics::publish(&cw, &env_name, &fm).await {
+                        tracing::warn!(error = %pe, "coarse sweep failure-metric publish failed");
+                    }
                     Err(lambda_runtime::Error::from(e.to_string()))
                 }
             }

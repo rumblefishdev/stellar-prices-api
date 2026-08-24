@@ -468,6 +468,18 @@ pub struct CoarseSweepSummary {
     /// never counted as a `failed_table` (which would false-fire the alarm every
     /// run for a config typo).
     pub skipped_tables: Vec<String>,
+    /// The run stopped early because its wall-clock budget ran out, leaving
+    /// [`Self::deferred_tables`] untouched this invocation.
+    ///
+    /// Recorded because a starved run and a short run are otherwise
+    /// indistinguishable from outside: both simply report fewer swept tables.
+    /// Task 0218 AC 4 requires a starved run to be *visible*, and this is the
+    /// field the `CoarseSweepDeadlineHit` metric is built from.
+    pub deadline_hit: bool,
+    /// Tables not reached this run because the budget ran out. Empty unless
+    /// [`Self::deadline_hit`]. They are not failures — the next run resumes
+    /// them — but a list that never empties means the budget is too small.
+    pub deferred_tables: Vec<String>,
 }
 
 impl CoarseSweepSummary {
@@ -559,6 +571,15 @@ pub async fn run_coarse_sweep(
                 next_table = %table,
                 "coarse sweep: time budget reached — deferring remaining tables to the next run"
             );
+            // Record it. Without this a starved run looks identical to a short
+            // one from outside — the blind spot task 0218 AC 4 closes.
+            summary.deadline_hit = true;
+            summary.deferred_tables = cfg
+                .tables
+                .iter()
+                .skip_while(|t| *t != table)
+                .cloned()
+                .collect();
             break;
         }
 

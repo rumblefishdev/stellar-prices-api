@@ -1079,6 +1079,21 @@ export class ObservabilityStack extends cdk.Stack {
           'USD columns (close_usd / volume_quote_usd) stop being filled in, so new candles serve as 0 to the API.',
       },
       {
+        // Task 0218. This worker is the whole reason the -no-invocations alarm
+        // matters here: the sweep previously ran as a stage inside the
+        // enrichment handler, where "never reached" was indistinguishable from
+        // "ran and found nothing" because neither emitted anything. As its own
+        // function, a run that does not happen is zero invocations, and
+        // BREACHING-on-missing turns that silence into a page.
+        name: 'coarse-sweep',
+        idPrefix: 'CoarseSweep',
+        functionName: workerFunctionName(config.envName, 'coarse-sweep'),
+        timeout: cdk.Duration.minutes(5),
+        cadence: cdk.Duration.hours(1),
+        impact:
+          'The coarse OHLCV rollups (_15m … _1M) stop having close_usd / volume_quote_usd filled in, so long-range charts serve 0 for any candle the rollup MVs captured before enrichment reached it. This ran silently unfixed for months (task 0218).',
+      },
+      {
         name: 'backfill-freshness-probe',
         idPrefix: 'BackfillFreshness',
         functionName: workerFunctionName(
