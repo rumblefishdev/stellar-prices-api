@@ -25,7 +25,6 @@ async fn main() -> Result<(), lambda_runtime::Error> {
     use enrichment_worker::live_window::{
         DEFAULT_LIVE_PARTITIONS, live_partition_window, month_of,
     };
-    use enrichment_worker::repair::{CoarseSweepConfig, sweep_config_from_env};
     use lambda_runtime::{LambdaEvent, run, service_fn};
     use prices_clickhouse::env::{env_or, env_parse_or};
     use std::sync::Arc;
@@ -84,37 +83,13 @@ async fn main() -> Result<(), lambda_runtime::Error> {
         "enrichment-worker cold start"
     );
 
-    // Recurring coarse-table sweep (task 0114). The rollup MVs re-aggregate only
-    // a bounded recent window, so any 1m row enriched *after* that window closes
-    // (enrichment lag / stalls) leaves its coarse counterpart frozen at zero
-    // forever. Rather than a second Lambda to repair that, this same enrichment
-    // worker also re-sweeps the recent coarse partitions each run — one owner of
-    // close_usd across 1m AND the rollups. Disabled unless COARSE_SWEEP_TABLES is
-    // set, so the code ships inert until the CDK env turns it on. It runs AFTER
-    // the 1m pass, bounded (one_shot = false) and best-effort (see the handler).
-    // Recurring coarse-table sweep (task 0114). Built from the SAME helper the
-    // standalone coarse-sweep Lambda uses (task 0218), so the two entrypoints
-    // can never disagree about which tables are in scope. Disabled unless
-    // COARSE_SWEEP_TABLES is set.
-    let sweep_cfg: Option<CoarseSweepConfig> = sweep_config_from_env(cfg.clone());
-    // Per-invocation wall-clock budget for the sweep. It stops after this many
-    // seconds — further capped by the Lambda deadline minus a margin below — so a
-    // slow catch-up defers to the next run instead of being hard-killed by the
-    // function timeout (which is an invocation error, not a Rust Err, and would
-    // escape the best-effort handling and fail the invocation).
-    let sweep_budget_secs: u64 = env_parse_or("COARSE_SWEEP_TIME_BUDGET_SECS", 120);
-    tracing::info!(
-        enabled = sweep_cfg.is_some(),
-        tables = sweep_cfg.as_ref().map_or(0, |s| s.tables.len()),
-        lookback_months = sweep_cfg.as_ref().map_or(0, |s| s.lookback_months),
-        max_batches = sweep_cfg.as_ref().map_or(0, |s| s.max_batches),
-        time_budget_secs = sweep_budget_secs,
-        "coarse sweep config"
-    );
-    let sweep = Arc::new(sweep_cfg);
-
+    // NOTE: the recurring coarse-table sweep (task 0114) was configured and run
+    // here until task 0218. It is its own Lambda now — `coarse-sweep-worker`,
+    // built from the same `repair::sweep_config_from_env`. It ran here after the
+    // 1m pass's `?`, which is why it never executed in production: skipped
+    // whenever that pass errored, starved when it ran long.
     /// Milliseconds of useful work left in this invocation: the Lambda deadline
-    /// minus a margin, so a sweep stops cleanly instead of being hard-killed by
+    /// minus a margin, so the drain stops cleanly instead of being hard-killed by
     /// the function timeout. A timeout is an invocation error, not a Rust `Err`,
     /// so it would escape the best-effort handling around each sweep and fail
     /// the whole invocation.
@@ -181,9 +156,10 @@ async fn main() -> Result<(), lambda_runtime::Error> {
     // Cold start: build the mTLS client (MTLS_SECRET_NAME + CH_DOMAIN) and probe
     // connectivity. Failures here surface as a CloudWatch Init error.
     let client = prices_clickhouse::mtls::client_from_lambda_env(&cfg.database).await?;
-    // A cheap clone (Arc-backed handle) the coarse sweep reuses per invocation;
-    // the pass takes the original by value.
-    let sweep_client = client.clone();
+    // Cheap Arc-backed clones; the preflight probe takes the original by value.
+    // The 0111 phase-2 historical drain runs after the live pass in the same
+    // invocation and needs its own handle (a cheap Arc-backed clone).
+    let hist_client = client.clone();
     let pass_client = client.clone();
     // Probe with a throwaway pass; the pass the handler runs is rebuilt per
     // invocation so it picks up the current month (see `live_partitions`).
@@ -205,10 +181,9 @@ async fn main() -> Result<(), lambda_runtime::Error> {
     run(service_fn(move |event: LambdaEvent<serde_json::Value>| {
         let base_cfg = base_cfg.clone();
         let pass_client = pass_client.clone();
+        let hist_client = hist_client.clone();
         let cw = cw.clone();
         let env_name = env_name.clone();
-        let sweep = sweep.clone();
-        let sweep_client = sweep_client.clone();
         // The Lambda invocation deadline (epoch ms) — bounds the sweep's budget.
         let lambda_deadline_ms = event.context.deadline;
         async move {
@@ -248,16 +223,17 @@ async fn main() -> Result<(), lambda_runtime::Error> {
                 tracing::warn!(error = %e, "cloudwatch metric publish failed (non-fatal)");
             }
 
-            // Task 0111 phase 2 — historical drain, AFTER the live pass and
-            // BEFORE the coarse sweep. Order is deliberate: with the live pass
-            // now bounded it costs ~1 min rather than the full 300 s, so both
-            // sweeps get real budget for the first time (that starvation is
-            // task 0218). The drain goes first because it is this task's
-            // deliverable and the coarse sweep is explicitly deferrable —
-            // its overflow rolls to the next run by design.
+            // Task 0111 phase 2 — historical drain, AFTER the live pass. With
+            // the live pass bounded it costs ~7 s rather than the full 300 s, so
+            // the drain gets real budget. Since task 0218 moved the coarse sweep
+            // to its own Lambda this is the only remaining stage after the pass,
+            // so it no longer competes for what the pass leaves.
             //
-            // Best-effort, exactly like the coarse sweep: a drain failure must
-            // never fail the invocation or regress the live pass.
+            // Still best-effort: a drain failure must never fail the invocation
+            // or regress the live pass. Note this stage is still behind the
+            // pass's `?` — that is acceptable here because the drain and the
+            // pass are the same job over different partitions, so a pass that
+            // cannot run means the drain has nothing useful to do either.
             if historical_enabled {
                 let budget_ms = remaining_budget_ms(lambda_deadline_ms)
                     .min(historical_budget_secs.saturating_mul(1_000));
@@ -274,7 +250,7 @@ async fn main() -> Result<(), lambda_runtime::Error> {
                     recheck_after_secs: historical_recheck_secs,
                     max_rechecks: historical_max_rechecks,
                 };
-                match run_historical_sweep(&sweep_client, &hcfg).await {
+                match run_historical_sweep(&hist_client, &hcfg).await {
                     Ok(sum) => {
                         tracing::info!(
                             months_swept = sum.months.len(),
@@ -299,51 +275,11 @@ async fn main() -> Result<(), lambda_runtime::Error> {
                 }
             }
 
-            // Recurring coarse-table sweep (task 0114), AFTER the critical-path 1m
-            // pass and strictly best-effort: any failure is logged and swallowed so
-            // a coarse hiccup can never fail the invocation or regress 1m
-            // enrichment. Time-bounded (below), so it also cannot blow the timeout.
-            if let Some(sweep_cfg) = sweep.as_ref() {
-                // Stop time = now + budget, capped so the sweep always finishes a
-                // margin BEFORE the Lambda deadline. If the 1m pass already
-                // consumed most of the budget, `remaining` is small and the sweep
-                // does little/nothing this run, deferring to the next — the point
-                // is that it never runs into the hard timeout.
-                let budget_ms = sweep_budget_secs
-                    .saturating_mul(1_000)
-                    .min(remaining_budget_ms(lambda_deadline_ms));
-                let sweep_deadline = Instant::now() + Duration::from_millis(budget_ms);
-
-                match enrichment_worker::repair::run_coarse_sweep(
-                    &sweep_client,
-                    sweep_cfg,
-                    Some(sweep_deadline),
-                )
-                .await
-                {
-                    Ok(sum) => {
-                        tracing::info!(
-                            start_month = sum.start_month,
-                            end_month = sum.end_month,
-                            rows_enriched = sum.total_enriched(),
-                            rows_remaining = sum.total_remaining(),
-                            tables_swept = sum.tables.len(),
-                            tables_failed = sum.failed_tables.len(),
-                            tables_skipped = sum.skipped_tables.len(),
-                            "coarse sweep complete"
-                        );
-                        let sm = enrichment_worker::metrics::sweep_metrics(&sum);
-                        if let Err(e) =
-                            enrichment_worker::metrics::publish(&cw, &env_name, &sm).await
-                        {
-                            tracing::warn!(error = %e, "coarse sweep metric publish failed (non-fatal)");
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "coarse sweep failed (non-fatal — 1m pass unaffected)");
-                    }
-                }
-            }
+            // NOTE: the coarse-table sweep (task 0114) used to run here, after
+            // the `?` above. That is exactly why it never executed in
+            // production — skipped whenever this pass errored, starved when it
+            // ran long. It is its own Lambda now (task 0218,
+            // `coarse-sweep-worker`). Do NOT re-add it here.
 
             // `ChPassStats` derives Serialize, so the response mirrors the
             // struct verbatim — adding a stat field never needs a manual edit here.
