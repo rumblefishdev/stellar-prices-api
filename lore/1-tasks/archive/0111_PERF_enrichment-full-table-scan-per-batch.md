@@ -2,7 +2,7 @@
 id: "0111"
 title: "Enrichment re-scans the whole table every batch — 545M rows/batch, caused a 4-day production outage"
 type: PERF
-status: active
+status: completed
 related_adr: ["0007"]
 related_tasks: ["0026", "0062", "0085", "0112", "0088", "0209", "0212", "0215"]
 tags: [layer-indexing, clickhouse, enrichment, perf, priority-high, effort-medium, incident]
@@ -157,6 +157,27 @@ history:
       days (costs ~$0.29, 3.4% of the live backlog, 1.1% of the historical one)
       pending an explanation for the unexplained RollupFreshnessProbeFunction
       code-asset replacement in the cdk diff.
+  - date: 2026-08-24
+    status: completed
+    who: okarcz
+    note: >
+      DEPLOYED 2026-08-24 08:03:24 UTC and verified the same morning. 5 of 6 ACs
+      pass on measured production data; AC 5 (the week-long duration soak to
+      ~2026-08-31) is DEFERRED to 0220, which is active and checked daily.
+      AC 2: oracle 26.21s/735.78M -> 0.62s/13.00M, pivot XLM 44.93s/685.01M ->
+      0.52s/10.53M, count_candidates 9.27s/735.15M -> 0.08s/4.27M, all under the
+      ~17M target. AC 3: measured while the cluster wrote 226,254,819 rows in 30
+      minutes, so this is not the quiet-cluster illusion that hid the defect
+      twice. AC 1: one completed pass per hour where there were zero in 2.5h;
+      Invocations/Errors went 3/3 to 1/0. AC 4: frontier walks oldest-first,
+      201511/201512/201601 all exhausted, no hard-coded cutoff. AC 6: legs 3 and
+      4 at 12 and 17 over 40h. The alarm returned to OK at 08:31.
+      Blocker resolved: the unexplained RollupFreshnessProbeFunction diff was
+      cargo FEATURE UNIFICATION, not a stale prod build - probe built alone is
+      byte-identical to prod, built with the other nine crates it is +433 KB.
+      Side effects: 0130 cleared (coarse sweep now sweeps all 6 tables, 0 failed)
+      and 0218 AC 1 met. Peak memory 1.08-1.45 GiB -> 517-581 MiB, which
+      obsoletes this file's headroom warning for 0154.
   - date: 2026-08-24
     status: active
     who: okarcz
@@ -949,7 +970,7 @@ this lands.
 > satisfied, so the task could never close — which is part of why it kept
 > sliding. The originals are preserved below each replacement.
 
-- [ ] **A bounded pass runs to completion inside the Lambda budget**, measured
+- [x] **A bounded pass runs to completion inside the Lambda budget**, measured
       in `system.query_log` — not inferred from a drained-state query.
 
       The signal is exact and cannot be faked by a partial pass:
@@ -963,18 +984,18 @@ this lands.
       under any scan strategy. The chosen design drains over months by
       construction, so this demanded something the design never promised.*</sub>
 
-- [ ] **Per-batch rows-read is bounded and does not scale with total table
+- [x] **Per-batch rows-read is bounded and does not scale with total table
       size**, verified in `system.query_log`, not by wall-clock on a quiet
       cluster. Baseline to beat (2026-08-21): oracle **26.21 s / 735.78M**, XLM
       pivot **44.93 s / 685.01M**, peg **14.50 s / 420.93M**,
       `count_candidates` **9.27 s / 735.15M**. Target ≈ **17M** on every tier.
 
-- [ ] **Re-measured while the cluster is actively writing** — a quiet cluster is
+- [x] **Re-measured while the cluster is actively writing** — a quiet cluster is
       how this was missed. The drained-state numbers (0.3 s) are 80× faster than
       the same query under load. A measurement taken against an idle cluster
       does not satisfy this AC no matter how good it looks.
 
-- [ ] **The drain demonstrably walks, and its terminal state is declared.**
+- [x] **The drain demonstrably walks, and its terminal state is declared.**
       `prices.enrichment_frontier` advances oldest-first across invocations, and
       months predating the XLM/USDC reference market reach `exhausted`.
 
@@ -988,13 +1009,13 @@ this lands.
       the count is recorded before/after." Wrong figure by ~78×, and it implied
       a zero residual that the design cannot reach.*</sub>
 
-- [ ] **0026's `EnrichmentPassDurationMs` stays well clear of 300 s for a week**
+- [ ] **(DEFERRED to [[0220]])** **0026's `EnrichmentPassDurationMs` stays well clear of 300 s for a week**
       spanning active backfill, and
       `prices-production-enrichment-duration-near-timeout` returns to OK and
       stays there. That alarm firing at **300,000 / 300,338 ms** on 2026-08-21
       is what re-opened this task.
 
-- [ ] **The live window is not starved by the historical sweep.**
+- [x] **The live window is not starved by the historical sweep.**
       `EnrichmentRowsRemainingRecent` stays at its floor. The sweep is
       best-effort and time-budgeted specifically so it can never regress the
       live pass; this is the check that the budgeting works.
@@ -1040,6 +1061,87 @@ which is the point:
 
 A fix is demonstrated when the **loaded** figure stays low, never when the quiet
 one does.
+
+## ✅ Completed 2026-08-24 — deployed and verified
+
+Deployed to production **2026-08-24 08:03:24 UTC**
+(`make -C infra deploy-production-eventbridge`, EventBridge stack only).
+Shipped: `ENRICH_LIVE_PARTITIONS=2`, `ENRICH_HISTORICAL_SWEEP=true`,
+`ENRICH_HISTORICAL_MAX_MONTHS=1`, `ENRICH_HISTORICAL_TIME_BUDGET_SECS=120`.
+`CleanupRule` verified DISABLED before and after.
+
+### AC 2 — per-tier cost, measured post-deploy in `system.query_log`
+
+| tier | before (2026-08-21) | after | reduction |
+|---|---|---|---|
+| oracle | 26.21 s / 735.78 M | **0.62 s / 13.00 M** | 57x rows, 42x time |
+| pivot XLM | 44.93 s / 685.01 M | **0.52 s / 10.53 M** | 65x rows, 86x time |
+| `count_candidates` | 9.27 s / 735.15 M | **0.08 s / 4.27 M** | **172x rows**, 116x time |
+
+Target was ~17 M. Every tier came in **under** it.
+
+### AC 3 — measured under real load, not on a quiet cluster
+
+**6,539 inserts writing 226,254,819 rows in the preceding 30 minutes.** This is
+the AC that the July measurement failed silently; it is properly satisfied here.
+
+### AC 1 — a pass completes, every hour
+
+`enrichment pass complete` (carrying `candidates_before`/`candidates_after`,
+i.e. `count_remaining_at_volume_zero`) appears **once per invocation**:
+08:17:27 enriched=3,600 dur=7,213 ms; 09:17:25 enriched=6,078 dur=5,220 ms;
+10:17:27 enriched=4,569 dur=7,319 ms. It appeared **zero** times in 2.5 h before.
+
+⚠️ The AC's "~3/hour" target assumed 3 attempts/hour. Post-fix the Lambda runs
+**1 invocation with 0 errors** instead of 3 with 3, so 1 completed pass/hour is
+the better outcome, not a miss. Invocations/Errors went 3/3 → 1/0.
+
+### AC 4 — the frontier walks and self-exhausts
+
+| month | state | zeros_seen | swept_at |
+|---|---|---|---|
+| 201511 | `exhausted` | 19 | 08:17:28 |
+| 201512 | `exhausted` | 4 | 09:17:26 |
+| 201601 | `exhausted` | 3 | 10:17:28 |
+
+One month per invocation, oldest-first, `deadline_hit=false` every run. Each
+pre-2021 month is marked `exhausted` on first visit — **Phase 3 working with no
+hard-coded cutoff**, which was the main correctness argument for this design.
+
+### AC 6 — the live window is not starved
+
+Legs 3 (USDC) and 4 (XLM) over a 40 h window excluding the freshest 8 h:
+**XLM = 17, USDC = 12**, against ~138,722 and ~90,672 candidates (~0.01%).
+Judged per-leg, not on `EnrichmentRowsRemainingRecent`, which is ~100% permanent
+exotic-quote floor and would pass a starved pass.
+
+### Issues encountered
+
+- 🔴 **The `cdk diff` blocker was NOT a stale prod build.** It showed an
+  unexplained `RollupFreshnessProbeFunction` code-asset replacement and held the
+  deploy for three days. Root cause is **cargo feature unification**: the probe
+  built alone hashes `19455046…` / 12,039,704 B — **byte-identical to prod** —
+  while the same source built alongside the other nine crates gives
+  `0414a138…` / 12,473,200 B (+433 KB). Same `rustc`, same dep versions. The
+  control that proved it: `cleanup-worker` rebuilt byte-identical to prod.
+  Recorded in memory as `lambda-asset-diff-is-feature-unification`.
+- ⚠️ The prediction that `init.sql` being `include_str!`-ed would ripple into
+  several lambdas was **false** — it is dead-code-eliminated from every crate
+  except `enrichment-worker`.
+
+### Side effects — two other tasks cleared
+
+- ✅ **[[0130]]** — the coarse sweep could never scan `price_ohlcv_15m` (Caddy
+  504). Now `tables_swept=6, tables_failed=0`.
+- ✅ **[[0218]] AC 1** — the coarse sweep had never executed in production. It
+  now runs every invocation, ~205 K rows enriched. 0218 stays open for ACs 2-4.
+
+### 🎁 Memory headroom for [[0154]]
+
+Peak memory is now **517-581 MiB**, against **1.08-1.45 GiB** before. This file's
+warning that "0154 and option 5 both add a join to this pass; there is less
+headroom here than the options list assumes" is **obsolete** — there is ~2.5x
+more headroom than when it was written.
 
 ## Out of scope
 
