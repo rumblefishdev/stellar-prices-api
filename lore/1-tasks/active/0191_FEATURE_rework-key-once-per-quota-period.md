@@ -770,6 +770,17 @@ asserts the copy does NOT claim the key is still active. `cargo test -p
 prices-api` 0 failed, `clippy --all-targets -D warnings` clean, portal 95/95,
 `tsc --noEmit` on `infra` and `web/portal` clean, prettier clean.
 
+40. **A partial revocation renders neither cap sentence.** Found on a re-read
+    of the round above, not in the review: the revoked view still rendered
+    "You can generate a new key from <date>. Until then you do not have a
+    working key." for a `Partial`, and both halves are false there — the
+    duplicate that refused to be disabled IS a working key, and the issue path
+    adopts it rather than refusing (`a_partial_revocation_is_reported_as_partial`
+    asserts exactly that: `?issue=ok`, nothing minted). The backend still
+    computes a cap for the answer, because the shape is shared; the page is
+    what must not repeat it. The warning carries the only instruction that
+    applies.
+
 **Not changed:** the five "checked and cleared" items in the review all hold —
 `into_service_error` was re-verified against the resolved
 `aws-smithy-runtime-api` 1.12.3 source (the non-`ServiceError` arm builds an

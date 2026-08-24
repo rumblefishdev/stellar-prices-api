@@ -253,6 +253,25 @@ async fn every_key_under_the_name_is_revoked_not_only_the_current_one() {
     });
 }
 
+/// The ordinary answer carries no `partial` at all — the flag is omitted, not
+/// sent as `false`, so a client that never learned about it reads the same
+/// shape it always did.
+#[tokio::test]
+async fn a_clean_revocation_omits_the_partial_flag() {
+    let discord = MockDiscord::start(GRANTED_SCOPE, None).await;
+    let gateway = MockGateway::start().await;
+    seed_attached(&gateway, 1_000);
+    let app = app_with_discord(&discord, &gateway);
+
+    let reply = revoke(&app, Some(&session_cookie(USER_ID))).await;
+    assert_eq!(reply.status, StatusCode::OK);
+    assert!(
+        reply.json().get("partial").is_none(),
+        "a clean revocation sends no partial flag: {}",
+        reply.json()
+    );
+}
+
 /// A disable that fails for ONE key of a pair is reported as partial — not
 /// dressed up as a clean revocation, and not thrown away as a `502` either.
 ///
@@ -291,7 +310,11 @@ async fn a_partial_revocation_is_reported_as_partial() {
         issue_round_trip(&app).await.location(),
         "/api-tokens/?issue=ok"
     );
-    assert_eq!(gateway.with(|s| s.create_calls), 0, "nothing new was minted");
+    assert_eq!(
+        gateway.with(|s| s.create_calls),
+        0,
+        "nothing new was minted"
+    );
 }
 
 /// Every enabled key raced away between the listing and the patch: `no_key`,

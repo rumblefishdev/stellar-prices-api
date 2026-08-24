@@ -933,7 +933,16 @@ function ApiKey({
               </p>
             );
           })()}
-          {stillWaiting(view.revoked.next_eligible_at) ? (
+          {/* Neither sentence below is true of a PARTIAL revocation, so
+              neither renders for one. "You do not have a working key" is
+              false — the duplicate that refused to be disabled is a working
+              key, and the issue path adopts it rather than refusing, so the
+              cap the backend computed does not describe what happens next
+              either. The warning above already carries the only instruction
+              that applies: press Replace again. */}
+          {view.revoked.partial ? null : stillWaiting(
+              view.revoked.next_eligible_at,
+            ) ? (
             <p>
               You can generate a new key from{' '}
               <strong>

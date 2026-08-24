@@ -1848,6 +1848,13 @@ describe('replace my key', () => {
     expect(warning.textContent).toMatch(/may still work/i);
     // The dates still render — the disables that landed are real.
     expect(screen.getByTestId('revoked-at')).toBeTruthy();
+    // But NOT the cap sentences: the surviving duplicate is a working key,
+    // and the issue path adopts it rather than refusing, so both "you do not
+    // have a working key" and the next-eligible date would be false here.
+    const revoked = screen.getByTestId('key-revoked');
+    expect(revoked.textContent).not.toMatch(/do not have a working key/i);
+    expect(revoked.textContent).not.toMatch(/1 September 2026/);
+    expect(screen.queryByRole('link', { name: /get my api key/i })).toBeNull();
   });
 
   /** The ordinary answer carries no flag, and renders no warning. */
