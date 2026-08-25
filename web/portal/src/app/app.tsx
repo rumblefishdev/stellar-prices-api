@@ -53,6 +53,7 @@ import { Faq } from '../landing/Faq';
 import { Features } from '../landing/Features';
 import { FinalCta } from '../landing/FinalCta';
 import { HeroSection } from '../landing/Hero';
+import { QuickStart } from '../quickstart/QuickStart';
 import { SelfService } from '../landing/SelfService';
 import { UseCases } from '../landing/UseCases';
 import { ArrowBadge } from '../landing/primitives';
@@ -2760,6 +2761,40 @@ function DashboardRoute({ gate }: { gate: Gate }) {
   );
 }
 
+/**
+ * `/quick-start` — the guide, reachable from the signed-in bar and from the
+ * landing page's docs cards alike. It needs no session: it is documentation,
+ * and a visitor deciding whether to sign in is exactly who should read it.
+ * The bar it gets depends on who is looking — the signed-in bar (with "Quick
+ * start" underlined) for somebody with a key, the landing bar otherwise.
+ */
+function QuickStartRoute({ gate }: { gate: Gate }) {
+  const rateLimit =
+    gate.probe.state === 'ok'
+      ? gate.probe.config.rate_limit_per_second
+      : undefined;
+  const signedIn = gate.open && gate.authenticated;
+  const username = signedIn
+    ? (gate.session as { state: 'ok'; session: PortalSession }).session.username
+    : undefined;
+
+  return (
+    <>
+      {signedIn ? (
+        <DashboardNavbar
+          username={username}
+          onSignOut={gate.onSignOut}
+          current="quick-start"
+        />
+      ) : (
+        <Navbar canOfferKey={gate.open} />
+      )}
+      <QuickStart rateLimit={rateLimit} />
+      <Footer canOfferKey={signedIn} />
+    </>
+  );
+}
+
 export function App() {
   const probe = useConfigProbe();
   const open = probe.state === 'ok' && probe.config.enabled;
@@ -2780,6 +2815,7 @@ export function App() {
       <Route path="/" element={<RootRoute gate={gate} />} />
       <Route path="/login" element={<LoginRoute gate={gate} />} />
       <Route path="/dashboard" element={<DashboardRoute gate={gate} />} />
+      <Route path="/quick-start" element={<QuickStartRoute gate={gate} />} />
       {/* Anything else is a URL this app never minted. Sending it to `/`
           rather than rendering a 404 keeps one promise the deployment cannot
           yet keep on its own: until task 0195 lands the per-prefix SPA

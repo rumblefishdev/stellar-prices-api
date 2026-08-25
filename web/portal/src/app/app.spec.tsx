@@ -332,6 +332,70 @@ describe('routes', () => {
 
     await waitFor(() => expect(lastPath).toBe('/'));
   });
+
+  it('serves the quick start to a signed-in visitor under the dashboard bar', async () => {
+    openAndSignedIn();
+    renderAt('/quick-start');
+
+    expect(
+      await screen.findByRole('heading', {
+        name: /get your first response in under 5 minutes/i,
+      }),
+    ).toBeTruthy();
+    // The signed-in bar — once `/auth/me` has answered — with THIS page
+    // underlined rather than the dashboard.
+    const bar = within(
+      await screen.findByRole('navigation', { name: 'Dashboard' }),
+    );
+    expect(
+      bar
+        .getByRole('link', { name: 'Quick start' })
+        .getAttribute('aria-current'),
+    ).toBe('page');
+    expect(
+      bar.getByRole('link', { name: 'Dashboard' }).getAttribute('aria-current'),
+    ).toBeNull();
+    expect(bar.getByText('adam')).toBeTruthy();
+    expect(lastPath).toBe('/quick-start');
+  });
+
+  it('serves the quick start to a signed-out visitor too, under the landing bar', async () => {
+    openAndSignedOut();
+    renderAt('/quick-start');
+
+    expect(
+      await screen.findByRole('heading', {
+        name: /get your first response in under 5 minutes/i,
+      }),
+    ).toBeTruthy();
+    expect(screen.getByRole('navigation', { name: 'Primary' })).toBeTruthy();
+    expect(screen.queryByRole('navigation', { name: 'Dashboard' })).toBeNull();
+  });
+
+  it('switches the first-request snippet by language and copies it', async () => {
+    openAndSignedIn();
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal('navigator', { ...navigator, clipboard: { writeText } });
+    renderAt('/quick-start');
+    await screen.findByRole('heading', { name: /first request/i });
+
+    const [tabs] = screen.getAllByRole('tablist', { name: 'Language' });
+    fireEvent.click(within(tabs).getByRole('tab', { name: 'Python' }));
+    expect(
+      within(tabs)
+        .getByRole('tab', { name: 'Python' })
+        .getAttribute('aria-selected'),
+    ).toBe('true');
+    expect(screen.getByRole('heading', { name: 'python' })).toBeTruthy();
+
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Copy python example' }),
+    );
+    await waitFor(() => expect(writeText).toHaveBeenCalledTimes(1));
+    expect(writeText.mock.calls[0][0]).toContain('requests.get(');
+    expect(writeText.mock.calls[0][0]).toContain('x-api-key');
+    expect(await screen.findByText('Copied')).toBeTruthy();
+  });
 });
 
 describe('portal home', () => {

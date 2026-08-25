@@ -10,7 +10,7 @@ import { Link as RouterLink } from 'react-router-dom';
 import { color, font, radius } from '../theme/tokens';
 import { DiscordIcon } from './DiscordIcon';
 import { Wordmark } from './Chrome';
-import { DASHBOARD_ROUTE, QUICKSTART, SWAGGER_UI } from './links';
+import { DASHBOARD_ROUTE, QUICKSTART_ROUTE, SWAGGER_UI } from './links';
 import { cardBorder } from './primitives';
 
 /**
@@ -25,13 +25,24 @@ import { cardBorder } from './primitives';
 export function DashboardNavbar({
   username,
   onSignOut,
+  current = 'dashboard',
 }: {
   username?: string;
   onSignOut: () => void;
+  /** Which of the bar's own pages this is — the one that gets the underline. */
+  current?: 'dashboard' | 'quick-start';
 }) {
   const links = [
-    { label: 'Dashboard', to: DASHBOARD_ROUTE, current: true },
-    { label: 'Quick start', href: QUICKSTART },
+    {
+      label: 'Dashboard',
+      to: DASHBOARD_ROUTE,
+      current: current === 'dashboard',
+    },
+    {
+      label: 'Quick start',
+      to: QUICKSTART_ROUTE,
+      current: current === 'quick-start',
+    },
     { label: 'OpenAPI Docs', href: SWAGGER_UI },
   ];
 

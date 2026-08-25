@@ -263,7 +263,9 @@ var APP_ROUTES = {
   '/api-tokens/login': '/api-tokens/index.html',
   '/api-tokens/login/': '/api-tokens/index.html',
   '/api-tokens/dashboard': '/api-tokens/index.html',
-  '/api-tokens/dashboard/': '/api-tokens/index.html'
+  '/api-tokens/dashboard/': '/api-tokens/index.html',
+  '/api-tokens/quick-start': '/api-tokens/index.html',
+  '/api-tokens/quick-start/': '/api-tokens/index.html'
 };
 
 function handler(event) {

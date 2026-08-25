@@ -13,14 +13,23 @@
  * third-party request and does not widen the CSP.
  */
 
+import { ROUTER_BASENAME } from '../base-path';
+
 /** The OpenAPI document. Real, served, and the only docs artefact today. */
 export const OPENAPI_JSON = '/api-docs-json';
 
 /** Swagger UI — task 0195. Falls back to the raw document until it lands. */
 export const SWAGGER_UI = OPENAPI_JSON;
 
-/** The quickstart — task 0163. Same fallback, same reason. */
-export const QUICKSTART = OPENAPI_JSON;
+/**
+ * The quick start — the in-app page built from the Figma `Quick start` frame
+ * (`918:644`). A ROUTE, so it is a `RouterLink` target like the dashboard;
+ * `QUICKSTART` is the same place as an absolute href for the plain `<a>`s on
+ * the landing page. Task 0163's curl-by-curl walkthrough is what its
+ * snippets are meant to say once the two are reconciled.
+ */
+export const QUICKSTART_ROUTE = '/quick-start';
+export const QUICKSTART = `${ROUTER_BASENAME}${QUICKSTART_ROUTE}`;
 
 /**
  * The registered vanity invite. The other invites SDF publishes are personal
