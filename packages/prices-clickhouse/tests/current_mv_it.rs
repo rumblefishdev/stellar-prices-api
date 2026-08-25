@@ -179,6 +179,8 @@ async fn current_prices_mv_computes_price_volume_and_market_cap() {
 ///           dropped before it can outvote the live one in the §5.5 median
 ///  15 EVN — four dead venues straddling the interpolated median → the mask
 ///           clears ALL of them, leaving a price beside empty `sources`
+///  16 LIV — a LIVE venue whose newest priced close is past the bound → it
+///           must be KEPT: liveness is measured on candles, not enrichment
 ///  11 LAG — SINGLE source, priced history, un-enriched tip → carried (the
 ///           shape the XLM acceptance criterion names)
 ///  12 TRI — three sources, one carried past an un-enriched tip → the §5.5
@@ -303,6 +305,24 @@ async fn current_prices_mv_writes_0072_columns_and_filters_outliers() {
         (15, 210, "1.00", "100", "soroswap"),
         (15, 220, "3.00", "100", "aquarius"),
         (15, 230, "3.00", "100", "phoenix"),
+        // 16 LIV — the ONLY fixture that discriminates candle-liveness from
+        // enrichment-freshness, and the shape PR #241's review found (finding
+        // 1). sdex is quoting RIGHT NOW and carries essentially all the
+        // volume, but its newest candle is un-enriched and its newest PRICED
+        // close is 3 h old — older than the bound. soroswap is tiny and
+        // happens to have been enriched 5 min ago.
+        //
+        // Liveness on CANDLES (correct): sdex is live, both venues are kept,
+        // and vwap ~= 1.00 because sdex carries the weight.
+        // Liveness on PRICED CLOSES (the defect): sdex reads as dead, is
+        // evicted in favour of soroswap, and the row publishes vwap 1.20 —
+        // drawn from $10 of the $1,000,020 the same row reports as volume.
+        //
+        // Assets 10/14/15 behave IDENTICALLY under both predicates, so
+        // without this fixture a revert to the old form stays green.
+        (16, 1, "0", "1000000", "sdex"),
+        (16, 180, "1.00", "10", "sdex"),
+        (16, 5, "1.20", "10", "soroswap"),
     ];
     for (i, (asset, mins, cu, vol, src)) in rows.iter().enumerate() {
         admin
@@ -388,7 +408,7 @@ async fn current_prices_mv_writes_0072_columns_and_filters_outliers() {
             .fetch_one()
             .await
             .expect("count");
-        if n >= 13 {
+        if n >= 14 {
             ready = true;
             break;
         }
@@ -680,6 +700,30 @@ async fn current_prices_mv_writes_0072_columns_and_filters_outliers() {
         "price_usd is venue-blind and must still publish the newest priced \
          close — this pairing is what disproves the three-way invariant; \
          got {evn_p}"
+    );
+
+    // ── liveness is a property of QUOTING, not of enrichment (finding 1) ──
+    // Asset 16's sdex quotes at 1 min with $1,000,000 of volume but was last
+    // enriched 3 h ago; soroswap is $10 enriched 5 min ago. Gating on the
+    // newest PRICED close evicts sdex and publishes soroswap's 1.20 as the
+    // VWAP of a $1,000,020 asset. Gating on the newest CANDLE keeps it.
+    let liv_srcs: String = admin
+        .query(&s("sources", 16))
+        .fetch_one()
+        .await
+        .expect("liv sources");
+    assert!(
+        liv_srcs.contains("sdex") && liv_srcs.contains("soroswap"),
+        "a venue quoting 1 min ago must be LIVE even though its newest priced \
+         close is past the bound — dropping it is the defect PR #241's review \
+         found; got {liv_srcs}"
+    );
+    let liv_vwap = scalar_f64(&admin, &f("vwap_24h", 16)).await;
+    assert!(
+        (liv_vwap - 1.0).abs() < 1e-3,
+        "vwap must be dominated by the venue holding the volume (~1.00). 1.20 \
+         means liveness was gated on enrichment and the $1,000,000 venue was \
+         evicted in favour of a $10 one; got {liv_vwap}"
     );
 
     // ── the change_7d numerator guard, on the only shape that reaches it ───
