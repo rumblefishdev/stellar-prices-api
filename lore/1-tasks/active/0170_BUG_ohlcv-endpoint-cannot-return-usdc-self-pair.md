@@ -81,6 +81,25 @@ history:
       contract change shared with [[0178]] and [[0120]]'s suite — flagged for an
       ADR rather than decided here. Sections added: "Measured on prod", the
       `base_currency` meaning decision, sketch steps 6-9, six new ACs.
+  - date: 2026-08-25
+    status: active
+    who: okarcz
+    note: >
+      Peg question settled by measurement, and it decides the `base_currency`
+      fork. `close_usd / close` on USDC-quoted candles — the implied USD-per-USDC
+      rate — **wobbles** (0.9976-1.0008 on ordinary days) with `exactly 1.0` a
+      small minority of rows, so the rate is MEASURED and this task does not
+      inherit [[0212]]'s hardcoded-peg defect. That also kills the "pair filter"
+      half of the fork: keeping `base_currency=USD` as a USDC-leg filter means
+      labelling USDC prices as USD, which is wrong by however far the peg has
+      drifted — not merely unhelpful. Separately, exactly one row in 30 days
+      falls outside ±1%: a non-canonical USDC (`GC4F4IX6DV`) at `close = 5e-14`,
+      `close_usd = 4e-14`. That is 5 ticks over 4 ticks of the
+      `Decimal(38, 14)` floor — quantisation, **not** [[0116]]'s absurd-large
+      defect. 🔴 Consequence for the guard: a band check on the derived rate is
+      insufficient, because a row quantising to ~1.02 would pass it and still be
+      meaningless. The precondition must be on the INPUTS' precision. Two ACs
+      added for it.
 ---
 
 # `/assets/{USDC}/ohlcv` can never return candles
@@ -353,6 +372,61 @@ Two coherent positions, and this task must pick one explicitly:
 asserts.** It is a public API contract on 20 k assets — it wants an ADR and the
 0120 owner's agreement, not a unilateral call inside this task.
 
+### The peg is MEASURED, not hardcoded — option A is depeg-safe
+
+The conversion in step 7 is only honest if `close_usd` is real USD rather than
+"USDC units assumed to be $1". Checked directly: `close_usd / close` on a
+USDC-quoted candle **is** the implied USD-per-USDC rate.
+
+`price_ohlcv_1d`, `quote_asset_id = 3`, last 30 days, by day:
+
+| day | rows | min rate | max rate | exactly 1.0 |
+|---|---|---|---|---|
+| 2026-08-25 | 663 | 1.000000 | 1.000264 | 9 |
+| 2026-08-24 | 716 | 0.997608 | 1.000263 | 39 |
+| 2026-08-23 | 733 | **0.800000** | 1.000123 | 13 |
+| 2026-08-22 | 817 | 0.996711 | 1.000187 | 18 |
+| 2026-08-21 | 807 | 0.999982 | 1.000434 | 26 |
+
+The rate **wobbles** — 0.9976 to 1.0008 on ordinary days — and `exactly 1.0` is a
+small minority of rows, not the population. A hardcoded peg would show
+`min = max = 1` with `exactly_one = rows` on every line. It does not.
+
+🔑 So this task does **not** inherit [[0212]]'s hardcoded-peg defect, and the
+conversion stays correct if USDC drifts. That was the live risk in choosing
+option A and it is now closed by measurement.
+
+### ⚠️ The guard must be on the INPUTS, not on the output rate
+
+Exactly **one** row in 30 days falls outside ±1%. It is not a dust-price defect:
+
+| code | issuer | close | close_usd | implied | volume_base | trades |
+|---|---|---|---|---|---|---|
+| USDC | `GC4F4IX6DV` | `0.00000000000005` | `0.00000000000004` | 0.8 | 1,460,498,063,318 | 4 |
+
+`Decimal(38, 14)` makes `1e-14` the smallest representable increment, so these
+are **5 ticks and 4 ticks of the last digit**. The 0.8 is `4/5` — pure
+quantisation, not a price movement. The asset is a non-canonical "USDC"
+(`GC4F4IX6DV`, not the canonical issuer) trading against real USDC at 5e-14: a
+worthless lookalike.
+
+**This is NOT [[0116]].** 0116 is absurdly *large* `close_usd` (up to $29.6 M);
+this is the opposite end, where the values are too small for the arithmetic to
+mean anything. Both corrupt a derived rate; they need different guards.
+
+🔴 **A band check on the derived rate is insufficient.** It catches this row only
+because `0.8` looks wrong. A row whose quantisation happened to land at `1.02`
+would pass the band and produce a meaningless multiplier that looks plausible.
+The guard must refuse to derive a rate when `close` (or `close_usd`) is within a
+few ticks of the `Decimal(38, 14)` floor — a *precision* precondition, not an
+*outlier* filter.
+
+⚠️ And note what the fix changes about severity. Today a bad `close_usd` corrupts
+one column that `/ohlcv` does not even return. Under option A it becomes the
+multiplier for **open, high, low, close and vwap together**. The fix amplifies
+existing bad rows rather than creating them, but the visible blast radius of one
+bad row grows from a field to a whole candle.
+
 ### Open: what to emit for a bucket whose `close_usd` is not yet filled
 
 The ~1.8% residual above is enrichment lag on the most recent buckets, so a
@@ -449,6 +523,13 @@ Added 2026-08-25, for the population the measurement found:
       enrichment-lag residual), and it is not a silent drop.
 - [ ] The exotic-quoted dark population is **counted**, and stated as a known
       limit — the 26 figure covers XLM-quoted assets only.
+- [ ] Rate derivation refuses to run when `close` or `close_usd` sits within a
+      few ticks of the `Decimal(38, 14)` floor — a **precision precondition**,
+      tested with the `GC4F4IX6DV` row's shape. A band check on the derived rate
+      alone does not satisfy this.
+- [ ] A test proves the conversion tracks a **moving** USDC rate, not a constant
+      — the measurement below shows the rate genuinely wobbles, so asserting
+      `1.0` would be asserting the wrong thing.
 
 ## Out of scope
 
