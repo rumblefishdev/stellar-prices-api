@@ -59,6 +59,28 @@ history:
       peg question is a public API contract and is shared with 0178 and with
       what 0120's suite asserts — to be agreed with the 0120 owner rather than
       decided unilaterally, likely as an ADR.
+  - date: 2026-08-25
+    status: active
+    who: okarcz
+    note: >
+      Blast radius MEASURED on prod, not estimated: **20,481 assets** return an
+      empty 200 on the default `base_currency=USD` request — every asset with an
+      XLM-quoted candle and no USDC leg in the last 30 days. The 2026-08-19 note
+      said "five of 0120's twenty majors"; five was the sample, not the
+      population. Also settled the fix path: `close_usd` is already on the candle
+      row at **99.9%** coverage (76,757 of 76,803 rows) and **uniform across
+      granularities** (1m 98.3%, 15m 98.1%, 1h 98.1%), so the dominant case needs
+      no rate join and no dependency on [[0167]]'s coverage window — the
+      per-bucket rate derives in-table as `close_usd / close`. `close = 0` count
+      is 0 across the sample. Two things got WORSE on measurement, both recorded
+      in full: rows quoted against a leg that is neither USDC nor XLM carry 0%
+      USD coverage and are NOT in the 20,481 (the population query filters
+      `xlm_rows > 0`), so the honest limit is 26 dark assets plus an uncounted
+      exotic-quoted population; and serving the 20,481 requires reinterpreting
+      `base_currency` from a PAIR FILTER to a DENOMINATION, which is a public API
+      contract change shared with [[0178]] and [[0120]]'s suite — flagged for an
+      ADR rather than decided here. Sections added: "Measured on prod", the
+      `base_currency` meaning decision, sketch steps 6-9, six new ACs.
 ---
 
 # `/assets/{USDC}/ohlcv` can never return candles
@@ -153,6 +175,11 @@ wrong silently.
 
 ## Blast radius
 
+> ⚠️ **Measured 2026-08-25 — this section understates it by four orders of
+> magnitude.** The consumer impact is **20,481 assets**, not USDC alone. See
+> "Measured on prod" below; the entries here remain accurate as the *milestone*
+> impact.
+
 - **[[0127]] AC 3** — *"`GET /assets/{USDC}/ohlcv?timeframe=all` returns 1d
   candles from 2022-01 or earlier"* — cannot pass at any backfill depth. 0088
   finishing changes nothing here.
@@ -162,6 +189,109 @@ wrong silently.
 - **[[0128]]** — the M2 submission package evidences both of the above.
 - Any consumer charting USDC. It is the asset a reviewer is most likely to try
   first, precisely because its expected answer (~$1) is the easiest to verify.
+
+## Measured on prod — 2026-08-25
+
+The 2026-08-19 note above put the blast radius at *"five of 0120's twenty
+majors"*. Measured directly, it is **20,481 assets** — and the fix is cheaper
+than this task assumed, because the data needed to serve them is already in the
+candle row.
+
+### The population
+
+`price_ohlcv_1d`, last 30 days. Assets with ≥1 XLM-quoted row and **zero**
+USDC-quoted rows — i.e. every asset the default `base_currency=USD` request
+returns an empty `200` for:
+
+| metric | value |
+|---|---|
+| assets XLM-quoted-only | **20,481** |
+| rows | 76,803 |
+| rows carrying `close_usd > 0` | 76,757 — **99.9%** |
+| assets fully covered | 20,449 |
+| assets fully dark (`close_usd` never set) | 26 |
+
+This is a different order of magnitude from the self-pair the title names. The
+self-pair is one asset; this is twenty thousand.
+
+### The five named majors — 100%, and no division landmine
+
+Same window, the assets 0120 flagged (`quote_leg` derived from `quote_asset_id`;
+USDC = `asset_id` 3, XLM = 4):
+
+| code | issuer/contract | quote leg | buckets | rows | `close_usd` | `close = 0` |
+|---|---|---|---|---|---|---|
+| — | `CBIJBDNZNF` | XLM | 30 | 30 | 30 (100%) | 0 |
+| RON | `GDE6EMCCVP` | XLM | 13 | 13 | 13 (100%) | 0 |
+| EQL | `GBKIUHEKEC` | XLM | 8 | 8 | 8 (100%) | 0 |
+| BOL | `GDOV2XVGNQ` | XLM | 10 | 10 | 10 (100%) | 0 |
+| AUD | `GBBWRCJSZR` | XLM | 23 | 23 | 23 (100%) | 0 |
+
+**Not one `USDC` quote-leg row appears in the whole result set** — the 2026-08-19
+finding reproduces exactly, from an independent query.
+
+`close = 0` is **0** on every row, so deriving a per-bucket rate as
+`close_usd / close` has no division landmine in this sample. That must still be
+guarded in code — the sample is 30 days, not all history.
+
+⚠️ **`AUD` resolves to 15 distinct issuers** with XLM-quoted candles in the
+window. "AUD" is not one asset; any test or evidence row must pin the issuer, or
+it is asserting on whichever issuer happened to sort first.
+
+### Coverage is uniform across granularities
+
+XLM-quoted rows, last 2 days (2 days not 30 — `_1m` is 7-day retention):
+
+| grain | with `close_usd` | total | pct |
+|---|---|---|---|
+| `1m` | 152,633 | 155,272 | **98.3%** |
+| `15m` | 59,342 | 60,468 | **98.1%** |
+| `1h` | 32,660 | 33,290 | **98.1%** |
+
+So there is **no separate design for fine granularities** — the same derivation
+serves all seven. This was the main open risk before measuring: had `1m` been
+dark, the fix would have worked for `1d`/`1w`/`1M` and returned nothing for
+`1m`, which is worse than today's uniform emptiness.
+
+⚠️ This does **not** contradict the 2026-08-21 reading that *"every exotic leg is
+exactly 100% unpriced"*. That population is legs which are **neither** USDC nor
+XLM — see below. XLM-quoted rows were never the dark ones. Two different slices,
+both true.
+
+The residual ~1.8% is enrichment lag on the most recent buckets, which is a
+design input, not a defect — see the open question below.
+
+### 🔴 The exotic-quoted population is dark, and the 20,481 does not include it
+
+Rows quoted against something that is neither USDC nor XLM carry **zero** USD
+coverage — 0% on every single one:
+
+| code | issuer | buckets | rows | `close_usd` |
+|---|---|---|---|---|
+| AUD | `GDNUSUAPQ6` | 28 | 177 | **0** |
+| AUD | `GADSZSZVMK` | 22 | 34 | **0** |
+| AUD | `GBBWRCJSZR` | 23 | 30 | **0** |
+| BOL | `GCD6T6GKYM` | 3 | 4 | **0** |
+
+This is [[0114]]'s no-reference floor surfacing on the read path — the same floor
+[[0218]]'s record measured at ~10.1 M rows.
+
+⚠️ **The 20,481 figure excludes them.** The population query filters
+`usdc_rows = 0 AND xlm_rows > 0`, so an asset quoted *only* against an exotic leg
+has `xlm_rows = 0` and was never counted. The honest limit for [[0128]] is
+therefore **26 fully-dark assets plus an uncounted exotic-quoted population** —
+that second number must be measured before any evidence is written, not left as
+"26".
+
+### What this settles
+
+1. **Case 2 needs no rate join.** `close_usd` is already on the candle row at
+   99.9% coverage, uniform across grains. No `ASOF` join, no dependency on
+   [[0167]]'s coverage window, for the twenty thousand.
+2. **[[0167]]/[[0168]]'s rate path is still required** — but only for the USDC
+   self-pair and inverse cases, which are one asset.
+3. **The task is mis-titled and under-prioritised.** It reads as a USDC edge
+   case; it is the default response for 20,481 assets.
 
 ## Design question to settle before implementing
 
@@ -192,6 +322,46 @@ generally.** `/ohlcv` returns OHLC **in the quote asset**
 not others makes the response's meaning depend on data availability, which is the
 `close_usd = 0` mistake in a new place.
 
+### 🔑 The larger decision the measurement exposes — what does `base_currency` MEAN?
+
+Today `base_currency=USD` is a **pair filter**: it selects `quote_asset_id =
+USDC` and returns OHLC denominated in USDC. That is why 20,481 assets get an
+empty `200` — they have no USDC leg to select.
+
+Serving them requires reinterpreting the parameter as a **denomination**: return
+this asset's candles expressed in USD, whatever leg they were traded against.
+Those are not the same contract, and the choice cannot be made per-asset without
+reintroducing the exact defect the warning above names — a response whose meaning
+depends on data availability.
+
+Two coherent positions, and this task must pick one explicitly:
+
+- **`base_currency` = denomination.** `USD` means "priced in USD", sourced from
+  `close_usd` (case 2) or the rate path (the self-pair). Consistent across every
+  asset; matches what a caller asking for "USD" almost certainly wants; matches
+  what [[0127]] AC 4's spot-check assumes. Cost: the returned OHLC is no longer
+  literally the stored quote-asset candle, so
+  [[ohlcv-returns-quote-asset-not-usd]] needs restating — and O/H/L are *derived*
+  rather than measured (see the sketch).
+- **`base_currency` = pair filter** (today's meaning). Then the honest answer for
+  20,481 assets is **not** an empty `200` — it is a `503`/`404` saying that leg
+  does not exist, and USD-denominated history moves to a different parameter or
+  endpoint. Truthful, but it fails [[0127]] AC 3/AC 4 by design and leaves the
+  reviewer's default request erroring on most of the store.
+
+⚠️ **This decision is shared with [[0178]] and with what [[0120]]'s suite
+asserts.** It is a public API contract on 20 k assets — it wants an ADR and the
+0120 owner's agreement, not a unilateral call inside this task.
+
+### Open: what to emit for a bucket whose `close_usd` is not yet filled
+
+The ~1.8% residual above is enrichment lag on the most recent buckets, so a
+window ending at `now` will have its right-hand edge unpriced. Three options —
+**drop the bucket**, **emit the USD fields as null**, or **emit with a provenance
+marker**. Dropping silently puts a hole at the right edge of every chart, which
+is the worst of the three and is also the [[0144]] one-value-many-meanings shape.
+Folds into the same provenance decision; not a separate thread.
+
 ## Implementation sketch
 
 1. Detect the degenerate case in `get_ohlcv`: resolved `asset_id ==
@@ -205,6 +375,42 @@ not others makes the response's meaning depend on data availability, which is th
    through to an empty 200.
 5. Provenance field on the response, consistent with whatever 0165 names its
    `method` values.
+
+**The dominant case, added 2026-08-25 — XLM-quoted assets in USD mode (20,481).**
+Not covered by steps 1-5 above, which address the self-pair only.
+
+6. `queries_ch::ohlcv` (`queries_ch.rs:557`) gains a second strategy. The
+   blocking condition is `queries_ch.rs:560` —
+   `vec!["asset_id = ?", "quote_asset_id = ?"]` — a hard `AND` on both legs with
+   no fallback, orientation flip or conversion.
+7. Derive the per-bucket rate **in-table** from the row itself:
+
+   ```
+   rate     = close_usd / close          -- implied USD per quote unit
+   open_usd = open × rate                -- and high, low likewise
+   ```
+
+   `close_usd` is a column on `price_ohlcv_1m` and every rolled copy
+   (`init.sql:115`); the current SELECT (`queries_ch.rs:583-596`) simply never
+   reads it. ⚠️ Guard `close = 0` even though the 30-day sample shows none.
+8. Column semantics under re-denomination — **not uniform**, do not map blindly:
+
+   | column | under conversion |
+   |---|---|
+   | `open`/`high`/`low`/`close` | × rate; ordering preserved, so `high` stays the max |
+   | `volume_base` | unchanged — base units do not move |
+   | `volume_quote_usd` | **already USD**, whatever the quote leg |
+   | `vwap` | × rate |
+   | `trade_count` | unchanged |
+
+   ⚠️ `volume_quote_usd` being already-USD means today's response *already* mixes
+   a USD volume with quote-denominated OHLC. That inconsistency predates this
+   task; decide it here rather than inheriting it.
+9. ⚠️ **O/H/L are derived, not measured.** Scaling by a single per-bucket rate
+   assumes the rate is constant within the bucket; the true USD high may fall at
+   a different instant than the quote-denominated high. Defensible at `1d`,
+   weaker at `1m`. State it in the response provenance and in [[0128]] — do not
+   ship it as if it were a measured extreme.
 
 ## Acceptance Criteria
 
@@ -226,6 +432,23 @@ not others makes the response's meaning depend on data availability, which is th
 - [ ] A non-peg asset's response is byte-identical to today's, proving no
       regression on the normal path.
 - [ ] [[0127]] AC 3 + AC 4 re-run and passing.
+
+Added 2026-08-25, for the population the measurement found:
+
+- [ ] `base_currency`'s meaning (denomination vs pair filter) decided and
+      recorded as an ADR, agreed with the [[0120]] owner — not chosen inside the
+      implementation.
+- [ ] A non-empty USD series for the five 0120 majors (`CBIJ…`, RON, EQL, BOL,
+      AUD **with its issuer pinned** — 15 AUD issuers exist), through the
+      deployed API.
+- [ ] O/H/L derivation documented as *derived, not measured*, and carried in the
+      response provenance rather than only in this file.
+- [ ] `close = 0` guarded, with a test — the clean 30-day sample is not proof
+      over all history.
+- [ ] Behaviour defined and tested for an unpriced recent bucket (the ~1.8%
+      enrichment-lag residual), and it is not a silent drop.
+- [ ] The exotic-quoted dark population is **counted**, and stated as a known
+      limit — the 26 figure covers XLM-quoted assets only.
 
 ## Out of scope
 
