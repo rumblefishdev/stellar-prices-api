@@ -2,9 +2,9 @@
 id: "0191"
 title: "Replace my key — revoke now, re-issue next quota period (merged with 0192)"
 type: FEATURE
-status: active
+status: completed
 related_adr: ["0010"]
-related_tasks: ["0183", "0157", "0160", "0180", "0187", "0189", "0190", "0192", "0193"]
+related_tasks: ["0183", "0157", "0160", "0180", "0187", "0189", "0190", "0192", "0193", "0221"]
 tags: [layer-backend, priority-medium, effort-medium, milestone-M3, epic-self-service-onboarding, api-gateway, usage-plan, security, slice-8, slice-9]
 milestone: 3
 links:
@@ -71,6 +71,26 @@ history:
       success while leaving the plan alive; defect recorded in the script).
       Dead poll logs moved to `.trash/`. One AC left: the 1 September
       confirmation.
+  - date: "2026-08-25"
+    status: completed
+    who: claude
+    note: >
+      **Completed.** Shipped as PR #238 (approved, all three CI checks green
+      on the merge commit): "Replace my key" deactivates every key under the
+      caller's name with one `UpdateApiKey(enabled=false)` and issues nothing;
+      the reveal answers `key_revoked` with the date; the re-issue is an
+      ordinary round-trip that `cap::decide` refuses until the 1st of the next
+      month, 00:00 UTC — our rule, one definition in `portal/period.rs`, read
+      by four call sites. Absorbed [[0192]]. Built twice: the 2026-08-07 swap,
+      reversed by Adam the day it went live, then the revoke — both on the
+      record. Four review rounds (audit, the audit's own review, karczuRF's
+      review of #238, one self-found finding) closed 40 numbered decisions.
+      Tests: 690 Rust across the workspace, portal 95, 0 failed; `fmt`,
+      `clippy -p prices-api` (0 warnings), `--features lambda`, `nx format:check`,
+      `synth-production` and the three `openapi:*` checks green. One IAM grant
+      added (`apigateway:PATCH` on `/apikeys/*`, tag-scoped in its own sid).
+      One acceptance criterion deferred, not dropped: the `MONTH` rollover
+      confirmation needs 1 September 2026, spawned as [[0221]].
 ---
 
 # Rework — a new key, once a period
@@ -304,11 +324,14 @@ are replaced, not re-counted.)*
 - [x] **(from 0192)** The choice of `UpdateApiKey(enabled=false)` over
       `DeleteApiKey` is recorded with its reasoning (decision #17; the
       reverse of 0192's draft, for the reason given there)
-- [ ] `MONTH` confirmation scheduled for 1 September 2026 if the epic is
-      open — dated note, not performed: on/after 2026-09-01 look for
-      `summarize_days`' `quota reset inside the queried period` warn in the
-      api-handler log, or re-run the `DAY` proxy script against a `MONTH`
-      scratch plan drained on 31 August
+- [ ] **(deferred to [[0221]])** `MONTH` confirmation on 1 September 2026 —
+      dated note, not performed, because the next real rollover is after this
+      task closes: on/after 2026-09-01 look for `summarize_days`' `quota reset
+      inside the queried period` warn in the api-handler log, or re-run the
+      `DAY` proxy script against a `MONTH` scratch plan drained on 31 August.
+      Nothing in the build waits on it — the cap is our rule, one definition in
+      `portal/period.rs`, and a different AWS instant changes the dashboard
+      label, not the cap
 
 ## Notes
 
@@ -480,11 +503,11 @@ No behaviour of an existing route changed.
 
 ## Future Work
 
-Nothing new spawned — every follow-up already has an owner or a date:
+One task spawned ([[0221]]); every other follow-up already has an owner:
 
-- **The `DAY` proxy re-run** → this task's Step 0, on the next AWS session
-  (`item7-quota-rollover.sh drain` + `poll`); **the `MONTH` confirmation** →
-  on/after 2026-09-01, per the last AC.
+- **The `MONTH` confirmation** → [[0221]], spawned on completion, dated
+  on/after 2026-09-01. The `DAY` proxy re-run is **not** carried over: it was
+  abandoned on 2026-08-24 and its scratch stack torn down (Step 0).
 - The live `403`/`200` curl pair → the deploy + [[0164]]'s evidence pass.
 - Styling of the dialog and the eight landings → [[0193]] (wording not
   re-decided).
