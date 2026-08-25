@@ -150,6 +150,22 @@ function addWorkerHealthAlarms(
   // Lambda publishes NO Invocations datapoint for a period with zero
   // invocations, so a LESS_THAN threshold alone would never evaluate.
   //
+  // `FILL(invocations, 0)` (task 0222) turns that absence into real zero
+  // datapoints, so the alarm evaluates ordinary data and `treatMissingData` is
+  // no longer load-bearing. This is a FIX, not a tidy-up: on 2026-08-25 the
+  // coarse sweep was held silent for three full hourly periods and the
+  // BREACHING-only form did NOT fire — verified against the metric, with the
+  // alarm's configuration confirmed correct at the time. Why it did not fire is
+  // still unexplained; this removes the dependency on that behaviour instead of
+  // tuning around it.
+  //
+  // FILL extends past the LAST datapoint, not merely between two — checked with
+  // get-metric-data over a window ending inside the gap. That property is the
+  // one that matters: an alarm's window always ends at ~now, so a real halt is
+  // always a TRAILING gap with nothing on its right. An interpolate-only FILL
+  // would have filled the case we do not need and missed the one we do, while
+  // still passing a naive test.
+  //
   // Expressed as three periods of one cadence rather than one period of three
   // cadences, which would be equivalent here but exceeds CloudWatch's 86400 s
   // maximum alarm period for the daily mtls probe (3 × 1 day = 259200 s). That
@@ -163,12 +179,20 @@ function addWorkerHealthAlarms(
     {
       alarmName: `prices-${envName}-${name}-no-invocations`,
       alarmDescription: `The ${name} worker recorded zero invocations for three consecutive ${cadence.toHumanString()} periods despite being scheduled at that cadence: the EventBridge rule is disabled or deleted, or invocation is failing before the function runs. ${impact} Fires on the ABSENCE of activity, which neither the -errors alarm (no invocations means no error datapoints) nor any custom-metric alarm can do.`,
-      metric: metric('Invocations', 'Sum', cadence),
+      metric: new cloudwatch.MathExpression({
+        expression: 'FILL(invocations, 0)',
+        usingMetrics: { invocations: metric('Invocations', 'Sum', cadence) },
+        period: cadence,
+        label: 'InvocationsFilled',
+      }),
       threshold: 1,
       evaluationPeriods: 3,
       datapointsToAlarm: 3,
       comparisonOperator: cloudwatch.ComparisonOperator.LESS_THAN_THRESHOLD,
-      // Missing = zero invocations = the halt we are looking for.
+      // Retained as a backstop, no longer the mechanism. FILL yields zeros only
+      // where the metric has published at some point; a function that has NEVER
+      // been invoked still produces no series at all, and BREACHING is the right
+      // answer there too — a worker that has never run is also a halt.
       treatMissingData: cloudwatch.TreatMissingData.BREACHING,
     },
   );

@@ -216,6 +216,99 @@ the merely convenient one: the mechanism demonstrably works when datapoints
 exist, so the defect is specifically that `AWS/Lambda` `Invocations` publishes
 **nothing** for an idle function.
 
+## ✅ REMEDY ESTABLISHED — `FILL(m, 0)` works, including on a trailing gap
+
+Tested read-only with `get-metric-data` against this morning's own window, which
+has real data at 06/07/08, nothing at 09/10/11, and data again at 12.
+
+**Test 1 — gap bracketed by data on both sides** (`06:00 → 13:00`):
+
+| series | n | values |
+|---|---|---|
+| `m1` raw | 4 | 06, 07, 08, 12 all `1.0` |
+| `FILL(m1, 0)` | **7** | `1, 1, 1, 0, 0, 0, 1` |
+
+**Test 2 — the one that actually decides it** (`06:00 → 12:00`, so the gap is
+**trailing** with nothing after it):
+
+| series | n | values |
+|---|---|---|
+| `m1` raw | 3 | 06, 07, 08 |
+| `FILL(m1, 0)` | **6** | `1, 1, 1, 0, 0, 0` |
+
+🔑 **`FILL` extends past the last datapoint.** It does not merely interpolate
+between known points.
+
+⚠️ **Why test 2 was necessary and test 1 was not enough.** An alarm always
+evaluates a window ending at ~now, so the gap it must detect is always trailing —
+a halted schedule has no datapoint on the right-hand side. Had `FILL` only
+interpolated, it would have filled exactly the case we do not need and not the
+one we do, passing test 1 while failing in production. An alarm that only fires
+once the service comes *back* is worse than no alarm, because it looks like
+coverage. Same class as [[0218]]'s original defect.
+
+### What this means for the alarm
+
+`FILL(Invocations, 0) < 1` sees three **real zero datapoints** for this morning's
+09/10/11 and breaches normally. `treatMissingData` stops being load-bearing —
+the whole missing-data path that failed is removed rather than tuned.
+
+The unexplained production behaviour (see RESULT) is therefore no longer on the
+critical path. It remains unexplained, and deliberately so: the fix does not
+depend on understanding it.
+
+## Applied 2026-08-25 — `addWorkerHealthAlarms`, and what it does NOT cover
+
+One change in the shared helper (`observability-stack.ts`), so it lands on every
+scheduled worker at once:
+
+```ts
+metric: new cloudwatch.MathExpression({
+  expression: 'FILL(invocations, 0)',
+  usingMetrics: { invocations: metric('Invocations', 'Sum', cadence) },
+  period: cadence,
+  label: 'InvocationsFilled',
+}),
+```
+
+`treatMissingData: BREACHING` is **kept** but demoted to a backstop: `FILL` yields
+zeros only where the metric has published at some point, so a function that has
+**never** been invoked still produces no series — and BREACHING is right there
+too, since a worker that has never run is also a halt.
+
+Synth verified against `Prices-production-Observability`. Five alarms convert:
+
+| alarm | cadence |
+|---|---|
+| `coarse-sweep-no-invocations` | 3600 |
+| `enrichment-no-invocations` | 3600 |
+| `backfill-freshness-probe-no-invocations` | 900 |
+| `rollup-freshness-probe-no-invocations` | 900 |
+| `mtls-notafter-probe-no-invocations` | 86400 |
+
+The rendered form — expression member with no `Period`, period carried on the
+`MetricStat` — matches the already-deployed `EnrichmentBacklogAlarm`, so the
+shape is proven in production rather than novel.
+
+### 🔴 `ledger-processor-no-invocations` is NOT fixed by this
+
+It is hand-rolled separately rather than going through the helper, and still
+renders the **legacy single-metric form** at `EvaluationPeriods 1 /
+DatapointsToAlarm 1`, `period=900`. Same defect, and the tightest configuration
+of the set — which makes it the one most likely to be silently trusted.
+
+Deliberately left alone in this change: it is a different worker with different
+semantics (`1/1`, not `3/3`), and folding it in would widen a one-line fix into a
+behaviour change for the ingest path. Flagged rather than fixed.
+
+### Not addressed: the `NOT_BREACHING` siblings
+
+`-errors` and `-duration-near-timeout` use `TreatMissingData.NOT_BREACHING`, so
+they read **OK on no data** — the failure mode already recorded for
+`EnrichmentBacklogAlarm`. `FILL` does not help there; a green reading still means
+"nothing was published", not "nothing was wrong". Separate concern, named here so
+it is not mistaken for covered.
+
 ## Implementation
 
 - ⚠️ **Evaluate option 2 first — it may make this a one-line CDK change.**
@@ -245,8 +338,10 @@ exist, so the defect is specifically that `AWS/Lambda` `Invocations` publishes
 - [x] Whether the delay is bounded is established.
       → **Bounded and small at 60 s and 300 s.** NOT established at 3600 s, and
       deliberately not pursued — see Decision.
-- [ ] The remedy removes the dependency on CloudWatch's missing-data semantics
+- [x] The remedy removes the dependency on CloudWatch's missing-data semantics
       rather than tuning around them.
+      → `FILL(invocations, 0)` in `addWorkerHealthAlarms`; synth verified, five
+      alarms convert. **Not yet deployed or induced.**
 - [ ] If unacceptable, a remedy ships and is verified by inducing the silence,
       not by reading the config.
 - [ ] [[0218]] AC 2 state 3 becomes inducible within a window a person can
