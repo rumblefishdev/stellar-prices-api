@@ -1,18 +1,23 @@
-import ArticleOutlinedIcon from '@mui/icons-material/ArticleOutlined';
-import CodeRoundedIcon from '@mui/icons-material/CodeRounded';
-import DescriptionOutlinedIcon from '@mui/icons-material/DescriptionOutlined';
-import ErrorOutlineRoundedIcon from '@mui/icons-material/ErrorOutlineRounded';
-import KeyOutlinedIcon from '@mui/icons-material/KeyOutlined';
-import TaskAltRoundedIcon from '@mui/icons-material/TaskAltRounded';
 import Box from '@mui/material/Box';
 import Link from '@mui/material/Link';
 import Stack from '@mui/material/Stack';
 import Typography from '@mui/material/Typography';
-import type { SvgIconComponent } from '@mui/icons-material';
 
+import authenticationIcon from '../assets/icons/docs-authentication.svg';
+import exampleRequestsIcon from '../assets/icons/docs-example-requests.svg';
+import openApiIcon from '../assets/icons/docs-openapi.svg';
+import quickStartIcon from '../assets/icons/docs-quick-start.svg';
+import rateLimitsIcon from '../assets/icons/docs-rate-limits.svg';
+import sdkExamplesIcon from '../assets/icons/docs-sdk-examples.svg';
 import { color, radius } from '../theme/tokens';
 import { OPENAPI_JSON, QUICKSTART, SWAGGER_UI } from './links';
-import { Section, SectionHeading, cardBorder, cardSurface } from './primitives';
+import {
+  CardRail,
+  Section,
+  SectionHeading,
+  cardBorder,
+  cardSurface,
+} from './primitives';
 
 /**
  * "Everything developers need" — six doors into the documentation.
@@ -29,7 +34,7 @@ import { Section, SectionHeading, cardBorder, cardSurface } from './primitives';
  */
 
 type Doc = {
-  icon: SvgIconComponent;
+  icon: string;
   title: string;
   body: string;
   href: string;
@@ -37,37 +42,37 @@ type Doc = {
 
 const DOCS: readonly Doc[] = [
   {
-    icon: ArticleOutlinedIcon,
+    icon: quickStartIcon,
     title: 'Quick Start',
     body: 'Get your first live response in under 5 minutes. Covers authentication and the most common endpoint.',
     href: QUICKSTART,
   },
   {
-    icon: KeyOutlinedIcon,
+    icon: authenticationIcon,
     title: 'Authentication',
     body: 'How API keys work, where to pass them, and what to expect when a key is missing or rate-limited.',
     href: SWAGGER_UI,
   },
   {
-    icon: TaskAltRoundedIcon,
+    icon: exampleRequestsIcon,
     title: 'Example Requests',
     body: 'Copy-ready curl commands for every endpoint. Test against the live API from your terminal.',
     href: SWAGGER_UI,
   },
   {
-    icon: DescriptionOutlinedIcon,
+    icon: openApiIcon,
     title: 'OpenAPI Specification',
     body: 'Full Swagger UI included. Explore, test and generate client code directly from the spec.',
     href: OPENAPI_JSON,
   },
   {
-    icon: CodeRoundedIcon,
+    icon: sdkExamplesIcon,
     title: 'SDK Examples',
     body: 'Working code snippets in four languages to copy into your project.',
     href: SWAGGER_UI,
   },
   {
-    icon: ErrorOutlineRoundedIcon,
+    icon: rateLimitsIcon,
     title: 'Rate Limits',
     body: 'How throttling works, what headers to watch, and how to handle 429 responses gracefully.',
     href: SWAGGER_UI,
@@ -85,18 +90,9 @@ export function Documentation() {
           subtitle="From your first curl to production deployment."
         />
 
-        <Box
-          sx={{
-            display: 'grid',
-            gap: 2,
-            gridTemplateColumns: {
-              xs: '1fr',
-              sm: 'repeat(2, 1fr)',
-              lg: 'repeat(3, 1fr)',
-            },
-          }}
-        >
-          {DOCS.map(({ icon: Icon, title, body, href }) => (
+        {/* A rail on a phone, like the feature grid — see `CardRail`. */}
+        <CardRail columns={{ sm: 'repeat(2, 1fr)', lg: 'repeat(3, 1fr)' }}>
+          {DOCS.map(({ icon, title, body, href }) => (
             <Stack
               key={title}
               component={Link}
@@ -118,20 +114,15 @@ export function Documentation() {
                 },
               }}
             >
+              {/* The exported Figma badge (Adam's `Documentations.zip`) —
+                  pale yellow disc, brown glyph, one file. */}
               <Box
+                component="img"
+                src={icon}
+                alt=""
                 aria-hidden
-                sx={{
-                  width: 32,
-                  height: 32,
-                  borderRadius: '50%',
-                  display: 'grid',
-                  placeItems: 'center',
-                  backgroundColor: color.primary[100],
-                  color: color.primary[950],
-                }}
-              >
-                <Icon sx={{ fontSize: 18 }} />
-              </Box>
+                sx={{ width: 32, height: 32, display: 'block' }}
+              />
               <Typography variant="h5" component="h3" color="text.primary">
                 {title}
               </Typography>
@@ -140,7 +131,7 @@ export function Documentation() {
               </Typography>
             </Stack>
           ))}
-        </Box>
+        </CardRail>
       </Stack>
     </Section>
   );

@@ -34,7 +34,10 @@ export function FinalCta({ canOfferKey }: { canOfferKey: boolean }) {
         <Stack
           direction={{ xs: 'column', sm: 'row' }}
           spacing={2}
-          sx={{ pt: 1 }}
+          // Edge to edge on a phone. The parent centres its children, which
+          // shrink-wraps this row to its widest button; the mobile frame has
+          // both buttons the full width of the section.
+          sx={{ pt: 1, width: { xs: '100%', sm: 'auto' } }}
         >
           {canOfferKey && (
             <Button
@@ -53,7 +56,10 @@ export function FinalCta({ canOfferKey }: { canOfferKey: boolean }) {
           <Button
             variant="contained"
             href={SWAGGER_UI}
-            endIcon={<ArrowBadge variant="onPrimary" />}
+            // Yellow disc, black arrow — the badge the design gives the white
+            // button. `onPrimary`'s black disc made it the darkest mark in a
+            // section that fades to the page floor.
+            endIcon={<ArrowBadge variant="onLight" />}
             sx={{
               backgroundColor: color.white,
               color: color.black,

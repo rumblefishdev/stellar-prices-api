@@ -4,7 +4,7 @@ import Container from '@mui/material/Container';
 import Stack from '@mui/material/Stack';
 import Typography from '@mui/material/Typography';
 import { alpha } from '@mui/material/styles';
-import type { ReactNode } from 'react';
+import type { ElementType, ReactNode } from 'react';
 
 import { color, font, radius } from '../theme/tokens';
 
@@ -137,6 +137,73 @@ export function Section({
 }
 
 /**
+ * A row of cards that is a grid on a wide screen and a swipeable rail on a
+ * phone — the mobile design's answer to every three-across grid on the page.
+ *
+ * At `xs` the items stop wrapping and line up in one horizontal, scrollable
+ * row, each `peek` wide so the next one shows at the right edge: that sliver
+ * is the whole affordance, the only thing that says "there is more". The rail
+ * bleeds out to the viewport edge (the `Container`'s 20px gutter, negated)
+ * because a card clipped by the screen reads as "keep going" and a card
+ * clipped by a padding box reads as broken. Scroll-snap so a flick lands on
+ * a card rather than between two.
+ *
+ * From `sm` up it is the plain grid the caller describes in `columns`, and
+ * none of the scrolling exists — `overflow: visible`, so a focus ring on a
+ * card link is not clipped.
+ *
+ * The scrollbar is hidden at `xs` only. On a phone the rail is swiped, and
+ * the bar would sit under the cards as a grey line the design does not have;
+ * on a desktop the rail never scrolls, so nothing is being hidden from a
+ * mouse user.
+ */
+export function CardRail({
+  component = 'div',
+  columns,
+  peek = '88%',
+  children,
+  sx,
+}: {
+  component?: ElementType;
+  /** The grid from `sm` up, e.g. `{ sm: 'repeat(2, 1fr)', lg: 'repeat(3, 1fr)' }`. */
+  columns: { sm?: string; md?: string; lg?: string };
+  /** Each item's width at `xs`. Under 100%, or nothing peeks. */
+  peek?: string;
+  children: ReactNode;
+  sx?: object;
+}) {
+  return (
+    <Box
+      component={component}
+      sx={{
+        display: 'grid',
+        gap: 2,
+        gridTemplateColumns: { xs: 'none', ...columns },
+        gridAutoFlow: { xs: 'column', sm: 'row' },
+        gridAutoColumns: { xs: peek, sm: 'auto' },
+        overflowX: { xs: 'auto', sm: 'visible' },
+        scrollSnapType: { xs: 'x mandatory', sm: 'none' },
+        scrollPaddingInline: 20,
+        // The bleed. `auto` width + negative margins is what makes a block
+        // (or a stretched flex item) wider than its parent by exactly the
+        // gutter on each side; `alignSelf: stretch` is for the callers whose
+        // Stack centres its children, which would otherwise shrink-wrap this.
+        width: { xs: 'auto', sm: '100%' },
+        alignSelf: { xs: 'stretch', sm: 'auto' },
+        mx: { xs: -2.5, sm: 0 },
+        px: { xs: 2.5, sm: 0 },
+        scrollbarWidth: { xs: 'none', sm: 'auto' },
+        '&::-webkit-scrollbar': { display: { xs: 'none', sm: 'block' } },
+        '& > *': { scrollSnapAlign: 'start' },
+        ...sx,
+      }}
+    >
+      {children}
+    </Box>
+  );
+}
+
+/**
  * The yellow eyebrow pill — "Why Prices API", "Use Cases", "FAQ".
  *
  * Rendered as a `<p>`, not a heading. It labels the section that follows and
@@ -201,11 +268,21 @@ export function SectionLabel({
  * `aria-hidden`, always: it is decoration on a control whose label already
  * says where it goes, and announcing "arrow forward" after "Get API Key" is
  * noise. The circle is a real element rather than an icon with a border so the
- * two variants (filled black on yellow, outlined yellow on dark) differ by
- * colour alone.
+ * three variants differ by colour alone:
+ *
+ * - `onPrimary` — filled black, yellow arrow. On the yellow button.
+ * - `onDark` — outlined yellow, yellow arrow. On the dark outlined button.
+ * - `onLight` — filled yellow, black arrow. On the white button in the closing
+ *   call to action, where a black disc would be the heaviest thing on the
+ *   section and the design puts the brand colour instead.
  */
-export function ArrowBadge({ variant }: { variant: 'onPrimary' | 'onDark' }) {
+export function ArrowBadge({
+  variant,
+}: {
+  variant: 'onPrimary' | 'onDark' | 'onLight';
+}) {
   const onPrimary = variant === 'onPrimary';
+  const onLight = variant === 'onLight';
   return (
     <Box
       aria-hidden
@@ -216,9 +293,14 @@ export function ArrowBadge({ variant }: { variant: 'onPrimary' | 'onDark' }) {
         borderRadius: '50%',
         display: 'grid',
         placeItems: 'center',
-        backgroundColor: onPrimary ? color.black : 'transparent',
-        border: onPrimary ? 'none' : `1.5px solid ${color.primary[400]}`,
-        color: color.primary[400],
+        backgroundColor: onLight
+          ? color.primary[400]
+          : onPrimary
+            ? color.black
+            : 'transparent',
+        border:
+          onPrimary || onLight ? 'none' : `1.5px solid ${color.primary[400]}`,
+        color: onLight ? color.black : color.primary[400],
       }}
     >
       <ArrowForwardRoundedIcon sx={{ fontSize: 14 }} />

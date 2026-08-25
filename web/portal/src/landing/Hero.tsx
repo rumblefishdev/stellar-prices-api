@@ -30,6 +30,16 @@ import { Terminal } from './Terminal';
  * which one it is in.
  */
 
+/** The hero's light: a tight core inside a wide halo, centred on `at`. */
+const heroGlow = (at: string) => `
+            radial-gradient(38% 46% at ${at}, ${alpha(color.primary[400], 0.1)} 0%, transparent 70%),
+            radial-gradient(70% 80% at ${at}, ${alpha(color.primary[400], 0.055)} 0%, transparent 72%)`;
+
+/** The faint 80px rule grid under it. */
+const heroGrid = `
+            linear-gradient(${alpha(color.stroke.default, 0.12)} 1px, transparent 1px),
+            linear-gradient(90deg, ${alpha(color.stroke.default, 0.12)} 1px, transparent 1px)`;
+
 /**
  * The `h1`. The page has exactly one, and it is this.
  *
@@ -72,11 +82,13 @@ export function Hero({ canOfferKey }: { canOfferKey: boolean }) {
           position: 'absolute',
           inset: 0,
           pointerEvents: 'none',
-          backgroundImage: `
-            radial-gradient(38% 46% at 72% 42%, ${alpha(color.primary[400], 0.1)} 0%, transparent 70%),
-            radial-gradient(70% 80% at 72% 40%, ${alpha(color.primary[400], 0.055)} 0%, transparent 72%),
-            linear-gradient(${alpha(color.stroke.default, 0.12)} 1px, transparent 1px),
-            linear-gradient(90deg, ${alpha(color.stroke.default, 0.12)} 1px, transparent 1px)`,
+          // The glow sits behind the terminal on a desktop and behind the
+          // headline and buttons on a phone, where the terminal has moved
+          // below them — the mobile frame lights the top third.
+          backgroundImage: {
+            xs: `${heroGlow('45% 30%')}, ${heroGrid}`,
+            md: `${heroGlow('72% 41%')}, ${heroGrid}`,
+          },
           backgroundSize: '100% 100%, 100% 100%, 80px 80px, 80px 80px',
           // Fade the grid out before it reaches the edges, so it reads as
           // texture behind the content rather than as a table.
@@ -326,11 +338,25 @@ export function TrustBand() {
             />
           </Stack>
 
+          {/* Wrapped and centred on a desktop; one scrolling row on a phone,
+              bleeding to the screen edge with the third chip cut off — the
+              mobile frame's "Stella…" is deliberate, it is what says there
+              are more. Same bleed as `CardRail`, for the same reason. */}
           <Stack
             direction="row"
             spacing={1}
             useFlexGap
-            sx={{ flexWrap: 'wrap', justifyContent: 'center' }}
+            sx={{
+              flexWrap: { xs: 'nowrap', md: 'wrap' },
+              justifyContent: { xs: 'flex-start', md: 'center' },
+              overflowX: { xs: 'auto', md: 'visible' },
+              alignSelf: { xs: 'stretch', md: 'auto' },
+              mx: { xs: -2.5, md: 0 },
+              px: { xs: 2.5, md: 0 },
+              scrollbarWidth: { xs: 'none', md: 'auto' },
+              '&::-webkit-scrollbar': { display: { xs: 'none', md: 'block' } },
+              '& > *': { flexShrink: 0, whiteSpace: 'nowrap' },
+            }}
           >
             {claims.map((claim) => (
               <Typography

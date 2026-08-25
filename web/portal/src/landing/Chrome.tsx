@@ -1,10 +1,15 @@
+import CloseRoundedIcon from '@mui/icons-material/CloseRounded';
+import MenuRoundedIcon from '@mui/icons-material/MenuRounded';
 import Box from '@mui/material/Box';
 import Button from '@mui/material/Button';
 import Container from '@mui/material/Container';
+import Drawer from '@mui/material/Drawer';
+import IconButton from '@mui/material/IconButton';
 import Link from '@mui/material/Link';
 import Stack from '@mui/material/Stack';
 import Typography from '@mui/material/Typography';
 import { alpha } from '@mui/material/styles';
+import { useState } from 'react';
 import { Link as RouterLink } from 'react-router-dom';
 
 import { color, font } from '../theme/tokens';
@@ -151,15 +156,135 @@ export function Navbar({ canOfferKey }: { canOfferKey: boolean }) {
                   // The floor comes back where it actually matters. A finger
                   // has no business hitting a 36px target; a mouse does.
                   '@media (pointer: coarse)': { minHeight: 44 },
+                  // The mobile frame's bar is the wordmark and a menu button,
+                  // nothing else; the call to action moves into the menu.
+                  display: { xs: 'none', sm: 'inline-flex' },
                 }}
               >
                 Get API Key
               </Button>
             )}
+            <MobileMenu canOfferKey={canOfferKey} />
           </Stack>
         </Stack>
       </Container>
     </Box>
+  );
+}
+
+/**
+ * The phone's navigation: a menu button in the bar, and a panel that drops
+ * from the top with the three in-page links and the call to action.
+ *
+ * Below `sm` the bar hides its links (there is no room for three beside the
+ * wordmark) and, without this, hid the only way to reach a section other
+ * than scrolling. The mobile frame draws the closed state — wordmark left,
+ * ≡ right — and not the open one; the panel is the plainest reading of it:
+ * the same bar with the button turned into ✕, and the links stacked under
+ * it at a size a thumb can hit. A top drawer rather than a side one so the
+ * open menu is visibly the bar that was tapped, unfolded.
+ *
+ * Closed on every link: an in-page anchor scrolls the page behind the panel
+ * and would otherwise leave the visitor looking at a menu over the section
+ * they asked for.
+ */
+function MobileMenu({ canOfferKey }: { canOfferKey: boolean }) {
+  const [open, setOpen] = useState(false);
+  const close = () => setOpen(false);
+
+  return (
+    <>
+      <IconButton
+        aria-label="Open menu"
+        aria-expanded={open}
+        aria-controls="mobile-menu"
+        onClick={() => setOpen(true)}
+        sx={{
+          display: { xs: 'inline-flex', sm: 'none' },
+          color: color.text.primary,
+          // Flush with the bar's right edge, like the frame — the button's
+          // own padding would otherwise indent the icon by 8px.
+          mr: -1,
+        }}
+      >
+        <MenuRoundedIcon />
+      </IconButton>
+
+      <Drawer
+        id="mobile-menu"
+        anchor="top"
+        open={open}
+        onClose={close}
+        slotProps={{
+          paper: {
+            sx: {
+              // The theme's Paper is a card: bordered on every side and
+              // rounded. This is a panel hanging off the top edge.
+              backgroundColor: color.surface.backgroundAlt,
+              backgroundImage: 'none',
+              border: 'none',
+              borderBottom: cardBorder,
+              borderRadius: 0,
+            },
+          },
+        }}
+      >
+        <Container>
+          <Stack
+            direction="row"
+            alignItems="center"
+            justifyContent="space-between"
+            sx={{ minHeight: 52 }}
+          >
+            <Wordmark />
+            <IconButton
+              aria-label="Close menu"
+              onClick={close}
+              sx={{ color: color.text.primary, mr: -1 }}
+            >
+              <CloseRoundedIcon />
+            </IconButton>
+          </Stack>
+          <Stack
+            component="nav"
+            aria-label="Menu"
+            spacing={0.5}
+            sx={{ pt: 1, pb: 3 }}
+          >
+            {NAV.map(({ label, href }) => (
+              <Link
+                key={label}
+                href={href}
+                onClick={close}
+                sx={{
+                  py: 1.5,
+                  color: color.text.primary,
+                  fontFamily: font.secondary,
+                  fontSize: '1.125rem',
+                  fontWeight: 500,
+                  textDecoration: 'none',
+                }}
+              >
+                {label}
+              </Link>
+            ))}
+            {canOfferKey && (
+              <Button
+                variant="contained"
+                color="primary"
+                component={RouterLink}
+                to={LOGIN_ROUTE}
+                onClick={close}
+                endIcon={<ArrowBadge variant="onPrimary" />}
+                sx={{ mt: 1.5 }}
+              >
+                Get API Key
+              </Button>
+            )}
+          </Stack>
+        </Container>
+      </Drawer>
+    </>
   );
 }
 
@@ -189,16 +314,21 @@ export function Footer({ canOfferKey }: { canOfferKey: boolean }) {
       }}
     >
       <Container>
+        {/* Centred and stacked on a phone — mark, then the links one under
+            another, then the copyright — per the mobile frame; a row between
+            the margins on a desktop. */}
         <Stack
           direction={{ xs: 'column', md: 'row' }}
-          spacing={2}
-          alignItems={{ xs: 'flex-start', md: 'center' }}
+          spacing={{ xs: 3, md: 2 }}
+          alignItems="center"
           justifyContent="space-between"
+          sx={{ textAlign: { xs: 'center', md: 'left' } }}
         >
           <RumbleFishMark />
           <Stack
-            direction="row"
-            spacing={2}
+            direction={{ xs: 'column', md: 'row' }}
+            spacing={{ xs: 1.5, md: 2 }}
+            alignItems="center"
             useFlexGap
             sx={{ flexWrap: 'wrap' }}
             component="nav"

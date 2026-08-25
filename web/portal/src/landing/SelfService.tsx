@@ -3,7 +3,7 @@ import Stack from '@mui/material/Stack';
 import Typography from '@mui/material/Typography';
 
 import { color, font } from '../theme/tokens';
-import { Section, SectionHeading } from './primitives';
+import { CardRail, Section, SectionHeading } from './primitives';
 
 /**
  * "Get started in under one minute" — the four steps, numbered.
@@ -61,22 +61,16 @@ export function SelfService() {
             design are not decoration, and a screen reader should get the
             sequence without them. The rendered numerals are `aria-hidden` for
             the same reason: the list already announces its position. */}
-        <Box
+        {/* Four across, and a rail on a phone with the next step peeking —
+            the mobile frame shows "01 Sign in with Discord" with "02" cut
+            off at the edge, which is the sequence made visible. Narrower
+            items than the card rails: a step is a centred column of text,
+            and at 88% the peek was a single letter. */}
+        <CardRail
           component="ol"
-          sx={{
-            m: 0,
-            p: 0,
-            listStyle: 'none',
-            display: 'grid',
-            gap: { xs: 4, md: 3 },
-            pt: { md: 2 },
-            width: '100%',
-            gridTemplateColumns: {
-              xs: '1fr',
-              sm: 'repeat(2, 1fr)',
-              md: 'repeat(4, 1fr)',
-            },
-          }}
+          columns={{ sm: 'repeat(2, 1fr)', md: 'repeat(4, 1fr)' }}
+          peek="70%"
+          sx={{ m: 0, listStyle: 'none', pt: { md: 2 } }}
         >
           {STEPS.map(({ title, body }, index) => (
             <Stack
@@ -111,7 +105,7 @@ export function SelfService() {
               </Typography>
             </Stack>
           ))}
-        </Box>
+        </CardRail>
       </Stack>
     </Section>
   );

@@ -39,7 +39,11 @@ function MethodBadge() {
         flexShrink: 0,
         px: 1,
         py: 0.25,
-        borderRadius: `${radius.pill}px`,
+        // A rounded rectangle, like every other chip on the page. Measured off
+        // the mobile frame: a 29×24 chip whose left edge runs straight after
+        // ~3px of arc, where `radius.pill` on a chip that height would be a
+        // lozenge with no straight edge at all.
+        borderRadius: `${radius.chip}px`,
         backgroundColor: color.accent.emerald[100],
         color: color.accent.emerald[900],
         fontFamily: font.secondary,
@@ -88,6 +92,12 @@ export function Endpoints() {
                 direction="row"
                 alignItems="center"
                 spacing={1.5}
+                // ⚠️ REQUIRED for the summary's `margin-left: auto` below. A
+                // `Stack` spaces with `margin-left` on every child but the
+                // first, through a selector specific enough to beat the
+                // child's own `sx` — so the summary kept the Stack's 12px and
+                // never moved to the right edge. `gap` leaves margins alone.
+                useFlexGap
                 sx={{
                   px: 2,
                   py: 1.5,
@@ -103,20 +113,30 @@ export function Endpoints() {
                     fontFamily: font.mono,
                     fontSize: '0.9375rem',
                     color: color.text.primary,
-                    // The path is the identity of the row; the summary yields
-                    // to it when the row runs out of width.
-                    flex: '1 1 auto',
-                    minWidth: 0,
+                    // The path is the identity of the row and never gives
+                    // way; the summary yields to it when the row runs out of
+                    // width.
+                    flex: '0 0 auto',
                   }}
                 >
                   {path}
                 </Typography>
+                {/* Hard against the row's right edge at every width — the
+                    frame right-aligns it, desktop and mobile. Truncated with
+                    an ellipsis rather than hidden where it does not fit, so a
+                    375px screen loses the tail of "Historical prices", not
+                    the whole column. */}
                 <Typography
                   variant="body2"
                   sx={{
                     color: color.text.tertiary,
-                    flexShrink: 0,
-                    display: { xs: 'none', sm: 'block' },
+                    ml: 'auto',
+                    pl: 1.5,
+                    minWidth: 0,
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                    textAlign: 'right',
                   }}
                 >
                   {summary}
