@@ -2,7 +2,7 @@
 id: "0170"
 title: "GET /assets/{USDC}/ohlcv returns an empty series in every mode — the endpoint asks for a USDC/USDC self-pair, and blocks 0127's M2 acceptance criterion"
 type: BUG
-status: backlog
+status: active
 related_adr: []
 related_tasks: ["0165", "0127", "0167", "0168", "0139", "0061", "0040", "0120"]
 tags:
@@ -39,6 +39,26 @@ history:
       duplicate spawn from that run (retired the same day; its id was since
       reused by an unrelated task) folds into this task, and the 0120
       suite's empty-window checks are its regression gate.
+  - date: 2026-08-25
+    status: active
+    who: okarcz
+    note: >
+      Activated. Picked up as the highest-leverage task left in M2: it gates
+      [[0127]] AC 3/AC 4 directly and is one of [[0120]]'s three blockers, so
+      it stands between the milestone and two acceptance criteria at once.
+      Scope taken as the WIDER reading from the 2026-08-19 measurement above —
+      every XLM-only-quoted asset, not the USDC self-pair alone; the title
+      still describes the narrow case and should be re-read against that note.
+      Ordered ahead of [[0178]] deliberately: same root cause and both need the
+      same return-semantics decision, but this one is a handler change with
+      [[0120]]'s suite already standing as its regression gate, where 0178 is a
+      refreshable-MV DROP+CREATE — the [[0095]] shape — and wants an
+      uninterrupted window plus a written rollback. Settling the semantics here
+      gives 0178 a precedent to inherit.
+      ⚠️ Open before implementation: the empty-200 vs 503 vs synthesized-from-
+      peg question is a public API contract and is shared with 0178 and with
+      what 0120's suite asserts — to be agreed with the 0120 owner rather than
+      decided unilaterally, likely as an ADR.
 ---
 
 # `/assets/{USDC}/ohlcv` can never return candles
