@@ -100,11 +100,44 @@ metric that never existed and a metric that stopped are not the same case.
 
 This is a hypothesis. The task is to establish the behaviour, not to assume it.
 
+## Experiment design — refined 2026-08-25, no idle Lambda needed
+
+The original sketch said "find a Lambda that is already idle". Unnecessary, and
+it would have tested the wrong thing: a function that has *never* published is
+the `INSUFFICIENT_DATA` case, which we already know breaches promptly. The case
+that failed is a metric that **published and then stopped**.
+
+🔑 **`prices-production-coarse-sweep` is already idle for 59 minutes of every
+hour.** It runs at `:30` and nothing else invokes it. So the exact failing
+condition reproduces once an hour, for free, without touching the schedule.
+
+Point *test* alarms at the same metric and dimension with a **short period** and
+time the breach. Two of them, because that separates the hypotheses:
+
+| alarm | Period | 3 datapoints span | interpretation |
+|---|---|---|---|
+| `tmp-0222-p60` | 60 | 3 min | if lag is **constant**, both breach at about the same clock time |
+| `tmp-0222-p300` | 300 | 15 min | if lag is **proportional to period**, p300 breaches ~5× later |
+
+If **neither** breaches within the idle hour, the missing-data path is broken for
+stopped metrics generally — a larger finding than a tuning problem, and it would
+condemn option 2 below before it is tried.
+
+⚠️ Both are created with **no `--alarm-actions`**, so nobody is paged. Names are
+prefixed `tmp-0222-` so they are obviously disposable, and they are deleted at
+the end of the run.
+
+⚠️ Start just after a `:30` run — that is the moment the metric stops publishing,
+which is what makes the window clean.
+
+⚠️ **Caveat to record with the result:** a lag measured at `Period=60` may not
+predict `Period=3600`. The two-alarm design is what makes that inference
+possible; a single short-period alarm would not support it.
+
 ## Implementation
 
-- **Measure the lag out-of-band.** Point an identical alarm at a Lambda that is
-  already idle and time how long it takes to breach. ⚠️ Costs nothing and touches
-  no production schedule — unlike a third induction.
+- **Run the experiment above.** Costs nothing and touches no production
+  schedule — unlike a third induction.
 - Establish whether the delay is bounded and predictable, or unbounded.
 - If the lag is real and long, decide the remedy. Options to cost:
   1. **Alarm on the custom metric instead.** `CoarseSweepRuns` is ours and could
