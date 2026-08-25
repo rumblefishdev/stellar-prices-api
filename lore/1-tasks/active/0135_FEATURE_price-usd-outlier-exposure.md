@@ -281,6 +281,47 @@ history:
       Re-measure again after [[0111]], and after BE's partition-limited scan
       (their next step, now that their own 300 s Lambda cap is the binding
       constraint) changes enrichment throughput a second time.
+  - date: 2026-08-25
+    status: active
+    who: stkrolikiewicz
+    note: >
+      **Applied to prod, and this time it held.** Second attempt, after the
+      08-21 apply/rollback. Deployed at 14:38:16 UTC from origin/develop
+      (SHA256 a77a485…, verified identical before the apply); refresh clean at
+      **206 ms, 3,188 rows, no exception**.
+      Deployed definition verified by function name rather than by interval
+      text: `argMax(close_usd` **0**, `argMaxIf` **3**, `argMinIf` **2**,
+      `asset_has_live` **2**.
+      Live metrics, against the same aggregate run on the old definition
+      40 min earlier: `zero_but_vwap_ok` **27 → 0**, `zero_price_usd`
+      **758 → 292**, `empty_sources` **735 → 292**, `zero_vwap`
+      **735 → 292**. Every metric down; 466 assets regained a real price and
+      443 regained a `sources` object. Predicted 283 in the pre-apply
+      counterfactual and got 292 — the 9-asset gap is population drift over
+      those 40 minutes (3,209 assets then, 3,188 now), not a modelling error.
+      Three acceptance criteria close here. `zero_but_vwap_ok = 0` on the
+      nose. **Native XLM** publishes `price_usd` 0.19078224260552 with
+      `vwap_24h` 0.19079970388652 beside it (0.01% apart), `change_24h_pct`
+      -3.8348 rather than a fabricated -100, and `sources` naming sdex and
+      aquarius with real volumes — Aquarius as a named VWAP source is also
+      what [[0120]]'s §9 bullet expects. `price_xlm` reads **exactly 1**, the
+      check the original 0072 runbook asserted and an un-enriched tip used to
+      break. Coherence control: **0** assets publish a price with empty
+      `sources`, so the shape the PR #241 review constructed (fixture 15) does
+      not occur on current data — as measured.
+      **What made the difference from 08-21:** the counterfactual ran BEFORE
+      the apply (runbook step 1b, added by #239 precisely because it did not
+      last time), on the exact file being deployed, so the expected numbers
+      were known going in rather than discovered afterwards.
+      **Runbook defect found during this deploy, not yet fixed.** Step 0's
+      sanity gate says `arrayReduce('median')` must be **0** in the captured
+      artifact, "else stop and re-plan". That was written for the 0072 rollout,
+      when prod ran v1. Rolling 0135 onto 0072 the median is legitimately
+      PRESENT (measured 1), so the gate condemns a correct artifact. Same
+      failure class as the `toIntervalHour` normalisation trap: a check whose
+      expected value silently depends on which upgrade you are performing.
+      Also: the `sed -i` invocations there are GNU-only and fail on macOS.
+      Remaining before archive: a green [[0120]] re-run.
 ---
 
 # price_usd is not outlier-protected
