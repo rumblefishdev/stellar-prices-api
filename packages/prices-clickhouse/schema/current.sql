@@ -31,7 +31,8 @@
 --
 -- Columns (task 0072 completes the set; all ten are now written):
 --   price_usd       — latest PRICED close in the 24h window (argMaxIf, 0135);
---                     NOT age-bounded — see the unfiltered CTE for why
+--                     NOT age-bounded — see the unfiltered CTE for why. The
+--                     per-venue pipeline IS bounded, but conditionally: see 1b
 --   price_xlm       — price_usd re-expressed in XLM (÷ the XLM/USD close)
 --   change_24h_pct  — vs the oldest close inside the 24h window
 --   change_7d_pct   — vs the oldest priced close in the [7d, 5d] band of
@@ -76,6 +77,27 @@
 -- dropping both leaves the asset with no VWAP at all. With 1 source the median
 -- is that source (deviation 0, always kept) — harmless but pointless. So the
 -- filter is a no-op below 3 sources by construction, not by luck.
+--
+-- ⚠️ At >= 3 it can, however, clear EVERY source. `median` is `quantile(0.5)`
+-- and INTERPOLATES on an even count, so a set straddling the midpoint by more
+-- than OUTLIER_PCT leaves nothing behind. Verified on prod 26.3.10.60:
+--
+--   [1.00, 1.00, 3.00, 3.00] -> median 2.00 -> every element deviates 50%
+--                            -> sources = '{}', vwap_24h = 0
+--
+-- while `price_usd` — venue-blind and taken from `unfiltered` — still
+-- publishes 1.00. So an asset CAN carry a price with no sources beside it, and
+-- the three-way coherence 0135 measures on prod (empty_sources = zero_price_usd
+-- = zero_vwap, 259 each on 2026-08-25) is an observed property of the current
+-- data, NOT an invariant of this SQL. Raised in the PR #241 review, finding 2,
+-- against a PR-body claim of "by construction" that was too strong.
+--
+-- It matters more after 0135's C2 carry than before it: assets whose every
+-- venue has an un-enriched tip used to arrive here with zero kept sources and
+-- never armed the mask. They now arrive with their carried prices, so the
+-- whole all-dead population — 65% of prod assets on 2026-08-25 — is newly
+-- routed through it. Pinned by fixture asset 15; whether interpolation is the
+-- right median for an even count is 0217's call, not this file's.
 --
 -- OUTLIER_PCT = 0.20 (20%). A starting value, deliberately loose. The asymmetry
 -- matters: wrongly EXCLUDING a legitimate venue silently removes it from the
@@ -122,38 +144,98 @@ WITH
     -- reading 0 here and being dropped by `src_price > 0` below as a side
     -- effect of enrichment timing.
     --
-    -- The carry is BOUNDED, and the bound lives HERE and nowhere else. The
-    -- reason is scope, not a number: the defect 0135 introduces is a dead
-    -- venue voting in the §5.5 median, which is a per-venue problem, so the
-    -- guard belongs in the per-venue pipeline. A carried close feeding
-    -- `sources` and `vwap_24h` asserts "this venue quotes X right now"; once
-    -- it is hours old that assertion is false, and because the median is
-    -- UNWEIGHTED, two stale venues can outvote and evict the one live venue
-    -- (the 3-source case in PR #228's review).
+    -- Liveness is measured but NOT yet applied — level 1b decides that, per
+    -- asset. Note the two columns read DIFFERENT things on purpose: src_price
+    -- is a price and skips un-enriched candles; src_is_live is a quoting
+    -- signal and counts them.
     --
     -- CARRY_BOUND = 2h, derived from the enrichment SCHEDULE — `rate(1 hour)`
     -- in infra/envs/production.json, so two cycles, and a venue quoting
     -- normally survives one missed pass. Deliberately NOT fitted to an
     -- observed lag: as of 2026-08-20 enrichment was failing on every run
     -- (task 0215), so a measured figure would encode a broken pipeline.
-    -- Revisit once 0111 and 0215 land.
     --
     -- Reference is `now()`, NOT the asset's own newest candle. An earlier
-    -- revision compared against `max(timestamp)`, which spans quote legs
-    -- enrichment can never price — for a venue trading continuously on such a
-    -- leg that reference advances forever, the bound becomes unsatisfiable and
-    -- the venue drops out with nothing wrong. `now()` asks the question this
-    -- column actually needs answered: is the venue's last quote still current?
+    -- revision compared the venue against `max(timestamp)` ACROSS the asset,
+    -- which spans quote legs enrichment can never price — for a venue trading
+    -- continuously on such a leg that reference advances forever, the bound
+    -- becomes unsatisfiable and the venue drops out with nothing wrong. Below,
+    -- `max(timestamp)` is the venue's OWN newest candle against the wall
+    -- clock, which is a different question and has no such failure mode.
+    --
+    -- ⚠️ src_is_live tests the venue's newest CANDLE, and there is deliberately
+    -- no `close_usd > 0` in that predicate. It asks "is this venue still
+    -- QUOTING?", which is not the same question as "has enrichment reached
+    -- this venue lately?" (PR #241 review, finding 1). An earlier revision
+    -- tested the newest *priced* close and so conflated a dead venue with one
+    -- enrichment simply had not caught up to — reproducing, one level down,
+    -- the exact defect C2 above exists to prevent. Measured on the review's
+    -- probe: a venue quoting 1 min ago carrying $1,000,000 of volume, last
+    -- enriched 3 h ago, was evicted in favour of one carrying $10 that
+    -- happened to be enriched 5 min ago — publishing a `vwap_24h` drawn from
+    -- 0.001% of the `volume_24h_usd` the same row reports. Liveness is a
+    -- property of quoting, so it is measured on candles.
     per_source AS (
         SELECT
             asset_id                          AS asset_id,
             source                            AS source,
-            argMaxIf(close_usd, timestamp,
-                     close_usd > 0 AND timestamp >= now() - INTERVAL 2 HOUR) AS src_price,
+            argMaxIf(close_usd, timestamp, close_usd > 0) AS src_price,
+            max(timestamp) >= now() - INTERVAL 2 HOUR     AS src_is_live,
             sum(volume_quote_usd)             AS src_volume
         FROM prices.price_ohlcv_1m FINAL
         WHERE timestamp >= now() - INTERVAL 24 HOUR
         GROUP BY asset_id, source
+    ),
+
+    -- Level 1b — the bound is CONDITIONAL, and that is the whole design.
+    --
+    -- What it guards: a venue that stopped quoting hours ago still votes in
+    -- the §5.5 median, which is UNWEIGHTED, so two dead venues can outvote and
+    -- evict the one live venue (the 3-source case in PR #228's review). That
+    -- defect needs a live venue to victimise.
+    --
+    -- So: drop dead venues ONLY when a live one survives. If every venue on an
+    -- asset is dead there is nothing to defend, and dropping them all is pure
+    -- loss — it empties `sources` and zeroes `vwap_24h` for an asset we have
+    -- perfectly usable, if stale, prices for.
+    --
+    -- ⚠️ This is not a hypothetical refinement. The unconditional form shipped
+    -- to prod on 2026-08-21 and was rolled back within the hour: measured
+    -- against the same data, it blanked `sources` on **2,284 of 4,365 assets
+    -- (52%)** while preventing **zero** evictions — 74% of the table had every
+    -- venue stale, because enrichment had been down for two days (0215).
+    --
+    -- Sizing, measured twice, and NOT trending the way an earlier revision of
+    -- this comment predicted:
+    --
+    --                          pipeline down (08-21)   healthy (08-25)
+    --   mixed live/dead                  35                  15
+    --     ...and >= 3 sources             7                   1   <- at-risk
+    --
+    -- That revision argued the mixed population would GROW as enrichment
+    -- recovered, so the guard would be worth more over time. Retracted: it
+    -- shrank by more than half. Assets move wholesale from all-dead to
+    -- all-live rather than through a mixed state — a venue that trades gets a
+    -- fresh candle, one that does not, does not. The mix is a transient, and a
+    -- consistent pipeline produces fewer of them.
+    --
+    -- Kept on the corrected argument: the guard's value is ANTI-correlated
+    -- with pipeline health. At 1 at-risk asset it prevents nothing measurable
+    -- today; it was worth 7 during an outage that ran 26 days before 0144
+    -- noticed it. The defect it blocks is silent and indistinguishable from a
+    -- real price downstream, and the conditional form costs nothing by
+    -- construction. Removing it is a two-line revert that changes none of the
+    -- measured gains, which come from C2's carry rather than from the guard.
+    per_source_kept AS (
+        SELECT
+            asset_id,
+            source,
+            src_price,
+            src_volume,
+            src_is_live,
+            max(src_is_live) OVER (PARTITION BY asset_id) AS asset_has_live
+        FROM per_source
+        WHERE src_price > 0
     ),
 
     -- Level 2 — collapse sources into per-asset arrays so the median filter can
@@ -167,12 +249,14 @@ WITH
             groupArray(src_volume)                AS vols_dec,
             groupArray(toFloat64(src_price))      AS prices_f,
             groupArray(toFloat64(src_volume))     AS vols_f
-        FROM per_source
-        WHERE src_price > 0            -- explicit rule (0135 C2): a source with
-                                        -- NO priced candle in the whole window
-                                        -- carries no signal; with the argMaxIf
-                                        -- above this can no longer drop a source
-                                        -- that merely has an un-enriched tip
+        FROM per_source_kept
+        WHERE NOT asset_has_live OR src_is_live
+                                        -- explicit rule (0135 C2 + the
+                                        -- conditional bound): a source with NO
+                                        -- priced candle in the window is
+                                        -- already gone at level 1b; here a
+                                        -- STALE source is dropped only when the
+                                        -- asset still has a fresh one left
         GROUP BY asset_id
     ),
 
@@ -315,8 +399,14 @@ SELECT
     -- while their `vwap_24h` and `sources` carried the real price. -100 is NOT
     -- a sentinel — it passes every consumer-side "0 means unavailable" guard
     -- the views.sql interop contract documents, because it looks like data.
-    -- With 0135's bounded argMaxIf the numerator is 0 when the window is
-    -- unpriced OR the carry bound is exceeded. For change_24h_pct that case
+    -- With 0135's guarded argMaxIf the numerator is 0 when the window holds no
+    -- priced candle at all — and ONLY then. It is not subject to the liveness
+    -- bound: the numerator reads `unfiltered.price_usd`, which is deliberately
+    -- venue-blind and unbounded, while the bound lives in `per_source` and has
+    -- never touched this projection. An earlier revision of this comment said
+    -- "or the carry bound is exceeded", which was never true and became more
+    -- misleading once the bound stopped being an argMaxIf predicate at all
+    -- (PR #241 review, finding 6). For change_24h_pct the unpriced case
     -- usually zeroes open_24h too (same table, same window), but NOT always —
     -- an over-bound asset has priced history and a real open_24h — and for
     -- change_7d_pct the denominator comes from a DIFFERENT table
