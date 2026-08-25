@@ -1,9 +1,6 @@
-import AddRoundedIcon from '@mui/icons-material/AddRounded';
-import BarChartRoundedIcon from '@mui/icons-material/BarChartRounded';
 import CheckRoundedIcon from '@mui/icons-material/CheckRounded';
 import ChevronRightRoundedIcon from '@mui/icons-material/ChevronRightRounded';
 import ContentCopyRoundedIcon from '@mui/icons-material/ContentCopyRounded';
-import DescriptionOutlinedIcon from '@mui/icons-material/DescriptionOutlined';
 import Box from '@mui/material/Box';
 import Container from '@mui/material/Container';
 import Link from '@mui/material/Link';
@@ -13,6 +10,15 @@ import { alpha } from '@mui/material/styles';
 import { useEffect, useState, type KeyboardEvent, type ReactNode } from 'react';
 import { Link as RouterLink } from 'react-router-dom';
 
+/* The three "What's next" badges, exported from the file (Adam's
+   `Designs.zip`, `Layout/251`) — a pale-yellow disc with a brown glyph, one
+   file each, exactly as the frame draws them. Real assets rather than the
+   nearest MUI glyph in a hand-built circle: the bar chart, the document and
+   the plus are the design's shapes, and approximating them here is how a
+   page stops matching the file it came from. */
+import apiReferenceIcon from '../assets/icons/next-api-reference.svg';
+import higherLimitsIcon from '../assets/icons/next-higher-limits.svg';
+import monitorUsageIcon from '../assets/icons/next-monitor-usage.svg';
 import { color, font, radius } from '../theme/tokens';
 import {
   DASHBOARD_ROUTE,
@@ -1464,11 +1470,21 @@ function RateLimits({ rateLimit }: { rateLimit?: number }) {
           color: color.text.tertiary,
         }}
       >
-        {/* "Contact us" is yellow but not a link, for the reason the
-            dashboard's Rate Limit card gives: there is no commercial-plans
-            destination to point it at yet. */}
+        {/* Underlined, as the frame draws it — but still NOT a link, for the
+            reason the dashboard's Rate Limit card gives: there is no
+            commercial-plans destination to point it at yet, and an underline
+            that leads to a 404 is worse than one that leads nowhere. The
+            underline is the design's emphasis; the `<a>` arrives with the
+            address. */}
         Need higher limits?{' '}
-        <Box component="span" sx={{ color: color.text.accent }}>
+        <Box
+          component="span"
+          sx={{
+            color: color.text.accent,
+            textDecoration: 'underline',
+            textUnderlineOffset: '0.2em',
+          }}
+        >
           Contact us
         </Box>{' '}
         for commercial plans.
@@ -1496,26 +1512,26 @@ function Sdk() {
 
 function WhatsNext() {
   const cards: {
-    icon: typeof AddRoundedIcon;
+    icon: string;
     title: string;
     body: string;
     to?: string;
     href?: string;
   }[] = [
     {
-      icon: BarChartRoundedIcon,
+      icon: monitorUsageIcon,
       title: 'Monitor your usage',
       body: 'Track monthly requests against your quota and see daily request history on your dashboard.',
       to: DASHBOARD_ROUTE,
     },
     {
-      icon: DescriptionOutlinedIcon,
+      icon: apiReferenceIcon,
       title: 'Full API reference',
       body: 'Explore all endpoints, parameters and response schemas in the interactive Swagger UI.',
       href: SWAGGER_UI,
     },
     {
-      icon: AddRoundedIcon,
+      icon: higherLimitsIcon,
       title: 'Higher limits',
       body: 'Need more than 100K requests/month? Contact us for commercial plans — no in-app upgrade flow.',
     },
@@ -1534,7 +1550,7 @@ function WhatsNext() {
           gridTemplateColumns: { xs: '1fr', sm: 'repeat(3, 1fr)' },
         }}
       >
-        {cards.map(({ icon: Icon, title, body, to, href }) => {
+        {cards.map(({ icon, title, body, to, href }) => {
           const linkProps = to
             ? { component: RouterLink, to }
             : href
@@ -1562,19 +1578,12 @@ function WhatsNext() {
               }}
             >
               <Box
+                component="img"
+                src={icon}
+                alt=""
                 aria-hidden
-                sx={{
-                  width: 32,
-                  height: 32,
-                  borderRadius: '50%',
-                  display: 'grid',
-                  placeItems: 'center',
-                  backgroundColor: color.primary[100],
-                  color: color.primary[950],
-                }}
-              >
-                <Icon sx={{ fontSize: 18 }} />
-              </Box>
+                sx={{ width: 32, height: 32, display: 'block' }}
+              />
               <Typography variant="h5" component="h3" color="text.primary">
                 {title}
               </Typography>
@@ -1598,31 +1607,64 @@ function WhatsNext() {
  * chips above the title, because a vertical list of ten links at 375px is a
  * screen of navigation before any content.
  *
- * Which entry is current comes from an `IntersectionObserver` on the section
- * headings — the frame underlines "Prerequisites" because that is where the
- * page opens, not because it is a fixed choice.
+ * Which entry is current is measured on scroll rather than observed: the
+ * answer is "the last heading that has passed under the navbar", and that is a
+ * question about ALL ten headings at once. An `IntersectionObserver` is handed
+ * only the ones whose visibility just changed, so between two of its callbacks
+ * — scrolling through a long section, or landing mid-page from a `#hash` — it
+ * has nothing to say and the rail stays on whatever it last knew. This reads
+ * the positions each time and always has an answer.
+ *
+ * `getClientRects()` is the "is this laid out at all" guard. In jsdom every
+ * rect is zero, which would otherwise make every heading look as though it had
+ * passed the line and light up the last entry on a page nobody has scrolled.
  */
 function Toc() {
   const [current, setCurrent] = useState<SectionId>(SECTIONS[0].id);
 
   useEffect(() => {
-    if (typeof IntersectionObserver === 'undefined') return;
-    const observer = new IntersectionObserver(
-      (entries) => {
-        const hit = entries
-          .filter((e) => e.isIntersecting)
-          .sort(
-            (a, b) => a.boundingClientRect.top - b.boundingClientRect.top,
-          )[0];
-        if (hit) setCurrent(hit.target.id as SectionId);
-      },
-      { rootMargin: '-80px 0px -70% 0px' },
-    );
-    for (const { id } of SECTIONS) {
-      const el = document.getElementById(id);
-      if (el) observer.observe(el);
-    }
-    return () => observer.disconnect();
+    let frame = 0;
+
+    const update = () => {
+      frame = 0;
+      // 120px: the sticky navbar is 52 and a heading that has slid just under
+      // it still reads as the section you are in, not the one before.
+      const line = 120;
+      let active: SectionId = SECTIONS[0].id;
+      let laidOut = false;
+      for (const { id } of SECTIONS) {
+        const el = document.getElementById(id);
+        if (!el || el.getClientRects().length === 0) continue;
+        laidOut = true;
+        if (el.getBoundingClientRect().top <= line) active = id;
+      }
+      // The foot of the page. The last section is usually shorter than the
+      // viewport, so its heading never reaches the line and "What's next"
+      // would be unreachable however far you scrolled.
+      if (
+        laidOut &&
+        window.innerHeight + window.scrollY >=
+          document.documentElement.scrollHeight - 2
+      ) {
+        active = SECTIONS[SECTIONS.length - 1].id;
+      }
+      setCurrent(active);
+    };
+
+    // rAF-throttled: `update` reads layout, and doing that on every scroll
+    // event is how a page of ten sections starts to feel heavy on a phone.
+    const onScroll = () => {
+      if (!frame) frame = requestAnimationFrame(update);
+    };
+
+    update();
+    window.addEventListener('scroll', onScroll, { passive: true });
+    window.addEventListener('resize', onScroll);
+    return () => {
+      window.removeEventListener('scroll', onScroll);
+      window.removeEventListener('resize', onScroll);
+      if (frame) cancelAnimationFrame(frame);
+    };
   }, []);
 
   return (
@@ -1635,6 +1677,11 @@ function Toc() {
         alignSelf: 'flex-start',
         width: { xs: 'auto', md: 220 },
         flexShrink: 0,
+        // Ten entries are shorter than any laptop viewport, but a stuck rail
+        // that runs off the bottom of a short window is unreachable — so it
+        // scrolls inside itself rather than growing past the screen.
+        maxHeight: { md: 'calc(100dvh - 120px)' },
+        overflowY: { md: 'auto' },
         // The phone rail bleeds to the viewport edge, like `CardRail`.
         mx: { xs: -2.5, md: 0 },
         px: { xs: 2.5, md: 0 },
@@ -1698,13 +1745,34 @@ export function QuickStart({ rateLimit }: { rateLimit?: number }) {
       component="main"
       sx={{
         position: 'relative',
-        overflow: 'hidden',
+        // `clip`, NOT `hidden`. `hidden` makes this element a scroll container,
+        // and a scroll container is what `position: sticky` sticks to — so the
+        // rail was pinned to a box that never scrolls and rode up the page with
+        // the content. `clip` still cuts off the glow's left edge without
+        // creating one. It is also x-only, so the guide is not trapped in a
+        // container of its own height.
+        overflowX: 'clip',
         backgroundColor: color.surface.background,
         minHeight: 'calc(100dvh - 52px)',
         py: { xs: 5, md: 10 },
       }}
     >
-      {/* The dashboard's rule grid and glow, strongest behind the title. */}
+      {/* The rule grid, MEASURED off the frame rather than carried over from
+          the dashboard, and in PIXELS — which is the whole point. A percentage
+          here resolves against this `main`, and this `main` is the entire
+          guide, so a mask in percent runs thousands of pixels past its end.
+
+          It is 80px, and it does not run the length of the page. On the
+          frame the last rule is at 714px and it is gone by 870 — an ellipse
+          centred a little left of the headline, 1150 × 470, which is also
+          what makes it fade out to the right rather than stopping in a line.
+          At its strongest a rule measures #393939 on the #212121 floor, i.e.
+          `Stroke/Default` at half — 24 levels of contrast, near the limit of
+          what is a texture rather than a table.
+
+          The glow is NOT here: it hangs off the headline instead, so that it
+          lands on the same word whatever the window is doing. See the note
+          beside it. */}
       <Box
         aria-hidden
         sx={{
@@ -1712,11 +1780,16 @@ export function QuickStart({ rateLimit }: { rateLimit?: number }) {
           inset: 0,
           pointerEvents: 'none',
           backgroundImage: `
-            radial-gradient(40% 30% at 22% 8%, ${alpha(color.primary[400], 0.12)} 0%, transparent 70%),
-            linear-gradient(${alpha(color.stroke.default, 0.34)} 1px, transparent 1px),
-            linear-gradient(90deg, ${alpha(color.stroke.default, 0.34)} 1px, transparent 1px)`,
-          backgroundSize: '100% 100%, 80px 80px, 80px 80px',
-          maskImage: 'linear-gradient(#000 0%, #000 600px, transparent 1400px)',
+            linear-gradient(${alpha(color.stroke.default, 0.5)} 1px, transparent 1px),
+            linear-gradient(90deg, ${alpha(color.stroke.default, 0.5)} 1px, transparent 1px)`,
+          backgroundSize: '80px 80px',
+          // The frame's rules land on 41px / 18px within this element, not on
+          // its corner.
+          backgroundPosition: '41px 18px',
+          maskImage: {
+            xs: 'radial-gradient(560px 380px at 30% 300px, #000 0%, rgba(0,0,0,0.85) 25%, transparent 100%)',
+            md: 'radial-gradient(1150px 470px at 380px 378px, #000 0%, rgba(0,0,0,0.85) 25%, transparent 100%)',
+          },
         }}
       />
       <Container sx={{ position: 'relative' }}>
@@ -1727,7 +1800,48 @@ export function QuickStart({ rateLimit }: { rateLimit?: number }) {
         >
           <Toc />
           <Stack spacing={{ xs: 8, md: 12 }} sx={{ minWidth: 0, flex: 1 }}>
-            <Stack spacing={2} sx={{ maxWidth: 760 }}>
+            <Stack
+              spacing={2}
+              // The glow's frame of reference. `isolate` so its `zIndex: -1`
+              // means "behind the headline" and not "behind the page" — an
+              // element sent below zero in the root stacking context
+              // disappears under the floor colour painted on `main`.
+              sx={{ maxWidth: 760, position: 'relative', isolation: 'isolate' }}
+            >
+              {/* The brand glow, on the word `Get`.
+
+                  Anchored to the HEADLINE, not to the page: measured off the
+                  frame it sits at (390, 190), which on a 1440 frame is the
+                  first line of the title — but 390px from the left edge of a
+                  1920 window is out in the left margin, because the content
+                  column is centred and the frame's is not. Hung off the title
+                  block instead, it lands on the same word at every width, and
+                  the phone layout needs no rule of its own.
+
+                  Peaks at 12% of the brand yellow (measured #3b3721 at its
+                  brightest) and is dead within ~180px. The mid stop is the
+                  measured falloff — half strength at 80px, where a two-stop
+                  gradient would put it at 105. */}
+              <Box
+                aria-hidden
+                sx={{
+                  position: 'absolute',
+                  zIndex: -1,
+                  pointerEvents: 'none',
+                  // 210 × 220 radii, so the box is twice each and the centre
+                  // of the gradient is the centre of the box. The offsets put
+                  // that centre 10px right of the title's left edge and 58px
+                  // down — the middle of `Get`.
+                  left: -200,
+                  top: -162,
+                  width: 420,
+                  height: 440,
+                  backgroundImage: `radial-gradient(210px 220px at 50% 50%, ${alpha(
+                    color.primary[400],
+                    0.12,
+                  )} 0%, ${alpha(color.primary[400], 0.06)} 38%, transparent 85%)`,
+                }}
+              />
               <Typography variant="h2" component="h1" color="text.primary">
                 Get your first response in under 5 minutes
               </Typography>

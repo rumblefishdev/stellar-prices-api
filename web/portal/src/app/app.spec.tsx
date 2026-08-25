@@ -359,6 +359,31 @@ describe('routes', () => {
     expect(lastPath).toBe('/quick-start');
   });
 
+  it('points the footer dashboard link at the prefix the app is served from', async () => {
+    openAndSignedIn();
+    // WITH the basename, unlike every other test here: the bug this pins only
+    // exists under one — a bare `href="/dashboard"` and a router link resolve
+    // to the same string when the app is mounted at the root, and to
+    // different ones on the deployment, where the bundle lives under
+    // `/api-tokens/`.
+    render(
+      <MemoryRouter
+        basename={ROUTER_BASENAME}
+        initialEntries={[`${ROUTER_BASENAME}/quick-start`]}
+      >
+        <App />
+      </MemoryRouter>,
+    );
+
+    // Wait for the session to settle: the footer offers the dashboard only
+    // to somebody who has one, and the signed-in bar is the proof it has.
+    await screen.findByRole('navigation', { name: 'Dashboard' });
+    const footer = within(screen.getByRole('navigation', { name: 'Footer' }));
+    expect(
+      footer.getByRole('link', { name: 'Dashboard' }).getAttribute('href'),
+    ).toBe(`${ROUTER_BASENAME}/dashboard`);
+  });
+
   it('serves the quick start to a signed-out visitor too, under the landing bar', async () => {
     openAndSignedOut();
     renderAt('/quick-start');
@@ -370,6 +395,24 @@ describe('routes', () => {
     ).toBeTruthy();
     expect(screen.getByRole('navigation', { name: 'Primary' })).toBeTruthy();
     expect(screen.queryByRole('navigation', { name: 'Dashboard' })).toBeNull();
+  });
+
+  it('marks the section the quick start opens on in its rail', async () => {
+    openAndSignedOut();
+    renderAt('/quick-start');
+    await screen.findByRole('heading', { name: /^prerequisites$/i });
+
+    const rail = within(
+      screen.getByRole('navigation', { name: 'On this page' }),
+    );
+    const entries = rail.getAllByRole('link');
+    expect(entries).toHaveLength(10);
+    // Unscrolled, the rail points at the first section rather than at
+    // nothing — the frame underlines `Prerequisites` for the same reason.
+    expect(entries[0].getAttribute('aria-current')).toBe('location');
+    expect(entries.filter((e) => e.getAttribute('aria-current'))).toHaveLength(
+      1,
+    );
   });
 
   it('switches the first-request snippet by language and copies it', async () => {

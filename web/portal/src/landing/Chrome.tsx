@@ -289,12 +289,18 @@ function MobileMenu({ canOfferKey }: { canOfferKey: boolean }) {
 }
 
 export function Footer({ canOfferKey }: { canOfferKey: boolean }) {
-  const links: { label: string; href?: string }[] = [
+  const links: { label: string; href?: string; to?: string }[] = [
     { label: 'Documentation', href: SWAGGER_UI },
     // Only where there is a dashboard to reach. While the portal is shut this
     // link would land on `/dashboard`, which sends a visitor with no session
     // straight back to the page they clicked from.
-    ...(canOfferKey ? [{ label: 'Dashboard', href: DASHBOARD_ROUTE }] : []),
+    //
+    // `to`, not `href`: `DASHBOARD_ROUTE` is a route relative to the router's
+    // basename, and as a bare `href` the browser resolved it against the
+    // domain root — `/dashboard` rather than `/api-tokens/dashboard`, which is
+    // a path the deployment does not serve. Every other in-app destination on
+    // the page already goes through `RouterLink`; this one did not.
+    ...(canOfferKey ? [{ label: 'Dashboard', to: DASHBOARD_ROUTE }] : []),
     { label: 'Status' },
     { label: 'Contact' },
     { label: 'rumblefish.dev', href: 'https://rumblefish.dev' },
@@ -334,11 +340,11 @@ export function Footer({ canOfferKey }: { canOfferKey: boolean }) {
             component="nav"
             aria-label="Footer"
           >
-            {links.map(({ label, href }) =>
-              href ? (
+            {links.map(({ label, href, to }) =>
+              href || to ? (
                 <Link
                   key={label}
-                  href={href}
+                  {...(to ? { component: RouterLink, to } : { href })}
                   sx={{
                     color: color.text.secondary,
                     fontFamily: font.secondary,
