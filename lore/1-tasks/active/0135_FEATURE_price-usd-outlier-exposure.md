@@ -243,6 +243,44 @@ history:
       documented "grep the definition to confirm the apply landed" check
       reports a successful deploy as failed unless it greps for function
       names. Cost me one false alarm mid-deploy.
+  - date: 2026-08-25
+    status: active
+    who: stkrolikiewicz
+    note: >
+      **Re-measured on a healthy pipeline; one of my own arguments is
+      retracted.** BE fixed [[0215]] on 2026-08-24 14:46 UTC (zero errors
+      since, against 3/hour and no successful run for the preceding 26 days),
+      so the numbers behind the conditional bound were re-taken ~16 h in.
+      **The change itself holds, on data 4 days and one pipeline-state apart.**
+      Old vs conditional over 3,166 assets: `zero_but_vwap_ok` 27 → **0**,
+      `zero_price_usd` 707 → **259**, `empty_sources` 680 → **259** (421
+      assets regain a `sources` object), `zero_vwap` 680 → **259**. The
+      three-way coherence reproduces exactly — an asset has a price, sources
+      and a VWAP, or none of the three — which the 08-21 run also showed at a
+      different value (368). Reproducing on independent data means it follows
+      from the construction, not from that day's data.
+      **Retracted:** PR #241 argued the guard would grow in value as
+      enrichment recovered, because fresh venues would multiply and with them
+      the mixed fresh/stale population. Measured, the opposite happened.
+      Freshness did rise (all-fresh assets 656/15.5% → 849/27%), but assets
+      moved wholesale from all-stale to all-fresh rather than through a mixed
+      state: **mixed 35 → 15, and the at-risk group (mixed AND ≥3 sources,
+      the only shape where the §5.5 median can evict anything) 7 → 1.**
+      A venue that trades gets a fresh price and one that does not, does not;
+      the mix is a transient, and a consistent pipeline yields fewer of them.
+      **The guard is kept on a corrected argument:** its value is
+      anti-correlated with pipeline health. It prevents nothing measurable
+      today (1 at-risk asset), was worth 7 during an outage that ran 26 days
+      before [[0144]] noticed it, and the defect it blocks — a stale venue
+      outvoting a live one in an unweighted median — is silent and
+      indistinguishable from a real price downstream. It costs nothing by
+      construction and is already pinned by non-vacuous fixtures. Deleting it
+      is a clean two-line revert that changes none of the numbers above; they
+      come from C2's carry, not from the guard. Recorded as a judgement call,
+      not a measurement.
+      Re-measure again after [[0111]], and after BE's partition-limited scan
+      (their next step, now that their own 300 s Lambda cap is the binding
+      constraint) changes enrichment throughput a second time.
 ---
 
 # price_usd is not outlier-protected
