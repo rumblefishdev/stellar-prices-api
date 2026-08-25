@@ -56,6 +56,36 @@ at **300,000 / 300,338 ms** on 2026-08-21, which is what re-opened 0111.
 Stage split inside an invocation: 1m pass ~7.2 s, historical sweep ~0.5 s, coarse
 sweep ~21 s. Peak Lambda memory **52-54 MB of 512 MB**.
 
+## Daily log
+
+### 2026-08-25 17:41 UTC — day 2 of 8, clean on all three metrics
+
+24 consecutive hourly datapoints, no gaps.
+
+| metric | reading | criterion |
+|---|---|---|
+| `Duration` max | **6,057 – 10,807 ms** | ≪ 240,000 ms — peak is 4.5% of threshold |
+| `Invocations` | **1.0/hour**, all 24 | 1/hour ✅ |
+| `Errors` | **0.0/hour**, all 24 | 0/hour ✅ |
+
+Alarm `prices-production-enrichment-duration-near-timeout` = `OK`, with
+`StateUpdatedTimestamp` still **2026-08-24T08:31:25** — unchanged since the
+hand-off baseline, so it has not flapped in between.
+
+No sign of the 3-invocations / 3-errors pattern.
+
+🔑 **The baseline above is stale, and a future check must not read today's 8 s
+against it as an unexplained change.** The hand-off recorded ~27,000 ms with a
+stage split of "1m pass ~7.2 s, historical sweep ~0.5 s, **coarse sweep ~21 s**".
+[[0218]] moved that coarse sweep into its own Lambda on 2026-08-24, so the ~21 s
+left this function. What remains — 6-11 s — matches the 1m-pass plus
+historical-sweep figures almost exactly. The drop is the split showing up in the
+metric, not a new improvement to chase.
+
+⚠️ Still outstanding for the soak: the **demonstrated-write-load** criterion. A
+quiet week does not count. It needs to land in only one of the six remaining
+checks; prefer a weekday afternoon over a Sunday.
+
 ## The daily check
 
 ```bash
