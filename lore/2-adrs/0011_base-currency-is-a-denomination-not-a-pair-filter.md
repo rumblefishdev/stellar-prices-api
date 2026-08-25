@@ -1,7 +1,7 @@
 ---
 id: "0011"
 title: "`base_currency` on the read surfaces is a DENOMINATION, not a quote-leg pair filter"
-status: proposed
+status: accepted
 deciders: [okarcz, stkrolikiewicz]
 related_tasks: ["0170", "0178", "0120", "0127", "0128", "0211", "0165", "0114", "0201", "0116", "0212"]
 related_adrs: ["0003", "0004", "0008"]
@@ -21,6 +21,20 @@ history:
       for both read surfaces at once. Carries the reconciliation against [[0201]]
       and the [[0212]] peg check inside the document rather than after it, at the
       reviewer's request.
+  - date: 2026-08-25
+    status: accepted
+    who: stkrolikiewicz
+    note: >
+      ACCEPTED. Approved by the [[0120]] owner on PR #246 — they own the
+      conformance suite whose assertions this inverts, so their sign-off is the
+      one that matters. Both read surfaces ([[0170]] and [[0178]]) now adopt this
+      rather than deciding separately.
+      ⚠️ §4's open item is NOT resolved by this acceptance: reusing 0165's
+      `traded`/`peg`/`oracle` values is agreed, but whether *derived O/H/L* rides
+      as a separate flag or as a fourth `method` value is still open. It changes
+      the response shape, so it must be settled before the implementation lands.
+      What is accepted here is the denomination CONTRACT, not the serialisation
+      of provenance.
 ---
 
 # ADR 0011: `base_currency` is a denomination, not a pair filter
