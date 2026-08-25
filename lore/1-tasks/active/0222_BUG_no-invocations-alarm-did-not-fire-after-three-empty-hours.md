@@ -57,6 +57,23 @@ history:
       publish, and that is precisely the condition being detected. Metric math
       with FILL(metric, 0) is the cheapest candidate and may reduce this to a
       one-line CDK change; evaluate it before building anything.
+  - date: 2026-08-25
+    status: active
+    who: okarcz
+    note: >
+      AC 5 RESTATED rather than ticked, and the reasoning matters more than the
+      tick: an alarm's time-to-fire and its time-to-test are the same quantity,
+      so no configuration change makes a three-hour condition testable in less
+      than three hours. The criterion asked for something unachievable. It is
+      replaced by proving the FILL mechanism breaches a real alarm on a trailing
+      gap; whether to spend a third attended window on 0218's own AC is left to
+      0218. Genuinely shortening detection was considered and declined — a
+      product question, and it cuts against the ledger-processor flap mitigation.
+      AC 6 ticked on the finding: the sibling alarms have a DIFFERENT failure
+      mode (NOT_BREACHING → OK on no data), which FILL does not address and whose
+      remedy has different semantics; spawned separately. One AC added: watch the
+      2/2 ledger-processor alarm for ~2 h post-deploy, since its flap risk was
+      mitigated on judgement rather than measurement.
 ---
 
 # The no-invocations alarm did not fire after three empty hours
@@ -433,9 +450,71 @@ the rest unchanged at `3/3`.
       alarms convert. **Not yet deployed or induced.**
 - [ ] If unacceptable, a remedy ships and is verified by inducing the silence,
       not by reading the config.
-- [ ] [[0218]] AC 2 state 3 becomes inducible within a window a person can
-      actually sit through, or the AC is formally restated with the reason.
-- [ ] The other coarse-sweep alarms are checked for the same failure mode.
+      → Cheap proxy induction, ~45 min, no schedule touched: a temp alarm using
+      `FILL(invocations, 0)` at `Period=900`, `3/3`, on the coarse sweep, created
+      just after a `:30` run. Everything so far is `get-metric-data`, which
+      proves FILL's behaviour but NOT that a CloudWatch **alarm** built on it
+      transitions. That gap is what this closes.
+- [x] ~~[[0218]] AC 2 state 3 becomes inducible within a window a person can
+      actually sit through~~ — **RESTATED, not ticked as written.** See
+      "AC 5 restated" below.
+      → Replaced by: the FILL mechanism is proven to breach a real alarm on a
+      trailing gap, and 0218's own induction is left as 0218's call.
+- [x] The other coarse-sweep alarms are checked for the same failure mode.
+      → **Checked, and they have a DIFFERENT one.** `-errors` and
+      `-duration-near-timeout` use `TreatMissingData.NOT_BREACHING`, so they read
+      **OK on no data** — green means "nothing published", not "nothing wrong".
+      Same class as `EnrichmentBacklogAlarm`. FILL does not help; the remedy has
+      different semantics (a duration alarm must not fire because nothing ran)
+      and is spawned separately rather than folded in here.
+- [ ] The `2/2` ledger-processor change is watched for ~2 h after deploy.
+      Its flap risk was mitigated on a judgement, not a measurement — post-deploy
+      is when a flap would show, and finding out from `describe-alarm-history`
+      beats finding out from a 3am page.
+
+## AC 5 restated — the criterion asked for something unachievable
+
+As written: *"0218 AC 2 state 3 becomes inducible within a window a person can
+actually sit through."*
+
+🔑 **An alarm's time-to-fire and its time-to-test are the same quantity.** If it
+breaches after three hours of silence, producing a breach requires three hours of
+silence. Rewriting `3 × 1 h` as `12 × 15 min` spans the same three hours — there
+is no configuration that decouples them. The only way to shorten the wait is to
+make the alarm *fire* sooner, which is a different decision with its own cost.
+
+So this fix does **not** shorten 0218's induction window, and no fix of this
+shape could. What it changes is that the alarm should now actually fire.
+
+**Restated as:** the FILL mechanism is verified to breach a real CloudWatch alarm
+on a trailing gap (AC 4's proxy induction). Whether to spend a third attended
+3.5 h window on 0218's own AC 2 state 3 is 0218's decision, now made with
+confidence the alarm will respond rather than hope.
+
+### The alternative, considered and declined
+
+Genuinely shortening detection — two missed runs instead of three — would make
+the induction shorter *honestly*, because the alarm would be faster. Declined
+here because it is a product question ("how long should a dead coarse sweep go
+unnoticed?") smuggled in as a testing convenience, and because it cuts against
+the change just made: the existing three-period design "absorbs a deploy window
+or a delayed datapoint", and under FILL a late datapoint becomes a filled zero —
+the exact flap risk mitigated on ledger-processor by moving the other way.
+
+Worth revisiting on its own merits. Not as a side effect of wanting a shorter
+test.
+
+⚠️ Same shape as [[0218]]'s own AC 4, restated rather than ticked when the split
+dissolved its premise. Restating a criterion that turns out to demand the
+impossible is normal; quietly ticking it would not be.
+
+## Future Work
+
+- **[[0223]] — the `-errors` and `-duration-near-timeout` alarms read OK on no
+  data.** Spawned 2026-08-25 from AC 6. Different failure mode from this task's:
+  `NOT_BREACHING` renders an unpublished period as healthy. `FILL` does not help
+  and the remedy has different semantics, so it is not folded into PR #247.
+  ⚠️ [[0220]]'s soak depends on one of these two alarms staying OK.
 
 ## Out of scope
 
