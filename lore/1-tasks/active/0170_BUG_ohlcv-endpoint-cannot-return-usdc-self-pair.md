@@ -100,6 +100,27 @@ history:
       insufficient, because a row quantising to ~1.02 would pass it and still be
       meaningless. The precondition must be on the INPUTS' precision. Two ACs
       added for it.
+  - date: 2026-08-25
+    status: active
+    who: okarcz
+    note: >
+      Reviewed with the [[0120]] owner; denomination path AGREED, ADR to follow.
+      Two evidence gaps they caught, both now closed by measurement. (1) The
+      99.9% was a 30-DAY figure and `timeframe=all` reads all history — reconciled
+      against [[0201]]'s 12,981,344 floor: both correct, different legs. 0201's
+      no-reference floor IS the exotic-quoted population (13,102,543 dark rows
+      today, within 1% a week later). Honest all-history coverage for the
+      population this fix serves is **99.90% live / 98.08% pre-Soroban**, and the
+      ~2% shortfall lands on [[0127]] AC 3. (2) The USDC peg check said nothing
+      about USDT; checked both tiers, `exactly 1.0` is **0 rows** on every month
+      of `_1d` and on `_1m`, implied rate ~0.13 — the real depegged value from
+      [[0172]]/[[0182]]. So no dependency on [[0212]], though that is scoped to
+      USDT-as-QUOTE and is not a verdict on 0212 itself. Also accepted: reuse
+      0165's `traded`/`peg`/`oracle` vocabulary rather than coining a fourth
+      word; fold [[0211]]'s boundary semantics into the same ADR; state the
+      exotic 13.1 M as an explicit non-goal. 🔴 Sequencing REVERSED from the
+      activation note: [[0178]] is blocked by PR #241 (same `current.sql`, same
+      CTEs, same [[0095]] DROP+recreate hazard) and cannot start first.
 ---
 
 # `/assets/{USDC}/ohlcv` can never return candles
@@ -233,6 +254,11 @@ returns an empty `200` for:
 This is a different order of magnitude from the self-pair the title names. The
 self-pair is one asset; this is twenty thousand.
 
+⚠️ **The 99.9% above is a 30-DAY figure and must not be quoted as an all-history
+coverage claim** — `timeframe=all` reads the whole table, which is [[0127]] AC 3.
+Corrected all-history figures are in "Reconciled against [[0201]]" below. Caught
+in review by the [[0120]] owner before it reached the ADR.
+
 ### The five named majors — 100%, and no division landmine
 
 Same window, the assets 0120 flagged (`quote_leg` derived from `quote_asset_id`;
@@ -312,6 +338,39 @@ that second number must be measured before any evidence is written, not left as
 3. **The task is mis-titled and under-prioritised.** It reads as a USDC edge
    case; it is the default response for 20,481 assets.
 
+## Agreed in review — 2026-08-25
+
+Reviewed with the [[0120]] owner, who owns the conformance suite this fix
+changes. Path agreed: `base_currency` becomes a **denomination**. Their input,
+and what was accepted:
+
+1. **The peg argument is the load-bearing one, not the 20,481.** A measured
+   0.9976-1.0008 rate under a field labelled `USD` is wrong for every asset that
+   *does* get an answer today — so this is a defect, not a preference between two
+   readings. Recorded because the first framing led with the population count and
+   that framing is weaker.
+2. **Reconcile against [[0201]] INSIDE the ADR, not after it.** Done above.
+3. **Name the residue precisely.** The earlier caveat called it "low-value rows
+   where the arithmetic isn't meaningful" — that is the precision-floor row, a
+   different thing from the 13.1 M no-reference rows. A value-based guard cannot
+   catch the latter, because value is not what is wrong with them. Two guards,
+   two populations, stated separately.
+4. **Reuse [[0165]]'s provenance vocabulary** — `traded` / `peg` / `oracle` — do
+   not coin a fourth word for the same concept on a third endpoint.
+5. **Fold [[0211]] in.** Window-boundary semantics (both ends inclusive) are
+   measured but documented nowhere. If the ADR defines what a candle means, it
+   settles that for free.
+6. **[[0212]] checked, not assumed** — see the USDT arm above.
+
+### Sequencing — corrected
+
+- **0170 is not blocked.** No overlap with any in-flight work.
+- 🔴 **[[0178]] IS blocked by PR #241** — same file (`current.sql`), same CTEs
+  (`@31`, `@123`, `@144`, `@203` — `unfiltered` and `per_source`, which 0178
+  restructures), same refreshable-MV DROP + recreate ([[0095]]'s hazard). 0178's
+  apply cannot go before #241 lands. This reverses the order assumed when 0170
+  was activated.
+
 ## Design question to settle before implementing
 
 The AC's own wording points at the answer: *"verifiable against known USDC price
@@ -372,6 +431,39 @@ Two coherent positions, and this task must pick one explicitly:
 asserts.** It is a public API contract on 20 k assets — it wants an ADR and the
 0120 owner's agreement, not a unilateral call inside this task.
 
+### Reconciled against [[0201]] — all history, by leg and era
+
+Raised in review: [[0201]]'s recovery pass reports **12,981,344** `_1d` rows left
+at the no-reference floor, which sits badly next to a 99.9% coverage claim. Both
+figures are correct; they measure different legs. `price_ohlcv_1d` FINAL, all
+history:
+
+| leg | era | rows | with `close_usd` | pct |
+|---|---|---|---|---|
+| USDC | live | 542,484 | 542,285 | 99.96% |
+| USDC | pre-soroban | 235,083 | 235,065 | 99.99% |
+| **XLM** | **live** | **4,842,528** | **4,837,891** | **99.90%** |
+| **XLM** | **pre-soroban** | **6,320,362** | **6,199,191** | **98.08%** |
+| other | live | 9,491,899 | 17,027 | **0.18%** |
+| other | pre-soroban | 3,655,518 | 27,847 | **0.76%** |
+
+Dark rows total **13,228,568**, of which **13,102,543 are exotic-quoted** —
+within 1% of 0201's 12,981,344, measured a week later and growing in the right
+direction.
+
+🔑 **0201's no-reference floor IS the exotic-quoted population.** Not a
+contradiction with the coverage figure; a different leg. The ADR carries both,
+labelled.
+
+**The claim this task may make:** for the population 0170 serves — XLM-quoted
+assets with no USDC leg — coverage is **99.90% live and 98.08% pre-Soroban**. The
+~2% historical shortfall lands on `timeframe=all`, i.e. [[0127]] AC 3, and must
+be stated there rather than rounded away.
+
+⚠️ Aside, worth not tripping over: the 121,199 gap between 0201's floor and
+today's exotic-dark is near-identical to XLM pre-soroban's 121,171 dark rows.
+Almost certainly coincidence — do not build on it.
+
 ### The peg is MEASURED, not hardcoded — option A is depeg-safe
 
 The conversion in step 7 is only honest if `close_usd` is real USD rather than
@@ -392,9 +484,27 @@ The rate **wobbles** — 0.9976 to 1.0008 on ordinary days — and `exactly 1.0`
 small minority of rows, not the population. A hardcoded peg would show
 `min = max = 1` with `exactly_one = rows` on every line. It does not.
 
-🔑 So this task does **not** inherit [[0212]]'s hardcoded-peg defect, and the
-conversion stays correct if USDC drifts. That was the live risk in choosing
-option A and it is now closed by measurement.
+**USDT-quoted rows — checked separately, after review flagged [[0212]].** The
+USDC check filters `quote_asset_id = 3` and says nothing about the other peg leg.
+
+| tier | window | rows | min rate | max rate | exactly 1.0 |
+|---|---|---|---|---|---|
+| `_1d` | 12 months | ~500-650/mo | 0.127 | 0.349 | **0 every month** |
+| `_1m` | 5 days | 2,449 | 0.151 | 0.174 | **0** |
+
+The implied USD-per-USDT sits around **0.13** — the real depegged value
+established by [[0172]] and repaired by [[0182]] — not $1. `_1m` was checked
+separately because [[0212]]'s title names that tier specifically and the tiers
+have diverged before ([[0114]], [[0218]]).
+
+🔑 So this task does **not** inherit [[0212]]'s hardcoded-peg defect on either
+peg leg, and the conversion stays correct if USDC drifts. That was the live risk
+in choosing option A and it is now closed by measurement.
+
+⚠️ **Scope of that claim:** measured where USDT/USDC is the **quote** leg, which
+is the population this fix converts through. It is **not** a verdict on 0212,
+which may concern USDT-as-base or a span not covered here. Do not close 0212 off
+this evidence.
 
 ### ⚠️ The guard must be on the INPUTS, not on the output rate
 
@@ -530,6 +640,12 @@ Added 2026-08-25, for the population the measurement found:
 - [ ] A test proves the conversion tracks a **moving** USDC rate, not a constant
       — the measurement below shows the rate genuinely wobbles, so asserting
       `1.0` would be asserting the wrong thing.
+- [ ] Provenance uses [[0165]]'s existing `traded` / `peg` / `oracle` values, not
+      a new vocabulary.
+- [ ] The ADR states the all-history coverage per leg (99.90% live / 98.08%
+      pre-Soroban for XLM-quoted) and names the exotic-quoted 13.1 M as an
+      explicit non-goal — not a rounded-away caveat.
+- [ ] [[0211]]'s window-boundary semantics settled in the same ADR.
 
 ## Out of scope
 
