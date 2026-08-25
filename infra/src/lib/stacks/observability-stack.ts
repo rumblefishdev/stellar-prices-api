@@ -146,9 +146,9 @@ function addWorkerHealthAlarms(
   duration.addOkAction(snsAction);
 
   // Three cadences of total silence: the schedule rule was disabled, deleted,
-  // or is failing to invoke. `treatMissingData: BREACHING` is load-bearing —
-  // Lambda publishes NO Invocations datapoint for a period with zero
-  // invocations, so a LESS_THAN threshold alone would never evaluate.
+  // or is failing to invoke. Lambda publishes NO Invocations datapoint for a
+  // period with zero invocations, so a LESS_THAN threshold on the raw metric
+  // would never evaluate.
   //
   // `FILL(invocations, 0)` (task 0222) turns that absence into real zero
   // datapoints, so the alarm evaluates ordinary data and `treatMissingData` is
@@ -159,12 +159,21 @@ function addWorkerHealthAlarms(
   // still unexplained; this removes the dependency on that behaviour instead of
   // tuning around it.
   //
-  // FILL extends past the LAST datapoint, not merely between two — checked with
-  // get-metric-data over a window ending inside the gap. That property is the
-  // one that matters: an alarm's window always ends at ~now, so a real halt is
-  // always a TRAILING gap with nothing on its right. An interpolate-only FILL
-  // would have filled the case we do not need and missed the one we do, while
-  // still passing a naive test.
+  // Two properties were verified with get-metric-data before relying on this,
+  // both against the 2026-08-25 window itself:
+  //
+  //   1. FILL extends past the LAST datapoint, not merely between two (window
+  //      ending inside the gap: raw 3 points, filled 6). An alarm's window
+  //      always ends at ~now, so a real halt is always a TRAILING gap.
+  //   2. FILL needs NO anchor at all. Over 09:00-12:00, which contains not one
+  //      raw datapoint, `raw` returned 0 values and `FILL` returned 3 zeros.
+  //
+  // (2) is the load-bearing one and is easy to miss: the alarm's own evaluation
+  // range during a sustained halt contains no raw data whatsoever, so a FILL
+  // that required a datapoint to anchor to would have been a no-op in the exact
+  // case this exists for — while still passing a test whose window happened to
+  // include healthy periods. Raised in review on PR #247 and settled by
+  // measurement, not by argument.
   //
   // Expressed as three periods of one cadence rather than one period of three
   // cadences, which would be equivalent here but exceeds CloudWatch's 86400 s
@@ -1040,7 +1049,8 @@ export class ObservabilityStack extends cdk.Stack {
     // stops publishing) is invisible to them — the queue drains to empty, the
     // Lambda is never invoked, and all three sit OK while live candles silently
     // stop. This alarm closes that blind spot from the consumer side: if the
-    // ledger-processor records zero `Invocations` for 15 min it has received no
+    // ledger-processor records zero `Invocations` for two 15-min periods it has
+    // received no
     // doorbells at all. Pubnet closes a ledger every ~5–6 s, so a healthy
     // processor is invoked near-continuously and a 15-min silence is a genuine
     // outage, never normal idle.
@@ -1062,7 +1072,7 @@ export class ObservabilityStack extends cdk.Stack {
       {
         alarmName: `prices-${config.envName}-ledger-processor-no-invocations`,
         alarmDescription:
-          'The live ledger-processor recorded zero invocations for 15 min: no ledger doorbells are arriving (upstream S3→SNS→SQS delivery stopped, the subscription was removed, or the producer halted). Live ingestion is stalled at the source and candles are silently frozen. Check the SNS subscription on prices-ingest, BE ledger publication, and the ingest queue. Unlike the lag/errors/DLQ alarms this fires on the ABSENCE of throughput.',
+          'The live ledger-processor recorded zero invocations for two consecutive 15-min periods: no ledger doorbells are arriving (upstream S3→SNS→SQS delivery stopped, the subscription was removed, or the producer halted). Live ingestion is stalled at the source and candles are silently frozen. Check the SNS subscription on prices-ingest, BE ledger publication, and the ingest queue. Unlike the lag/errors/DLQ alarms this fires on the ABSENCE of throughput.',
         metric: new cloudwatch.MathExpression({
           expression: 'FILL(invocations, 0)',
           usingMetrics: {
@@ -1078,12 +1088,30 @@ export class ObservabilityStack extends cdk.Stack {
           label: 'InvocationsFilled',
         }),
         threshold: 1,
-        evaluationPeriods: 1,
-        datapointsToAlarm: 1,
+        // 2 of 2, not 1 of 1 (task 0222, raised in review on PR #247). A single
+        // filled zero must not be able to breach this alarm on its own.
+        //
+        // The exposure is not new — `1/1` with BREACHING already meant one late
+        // `Invocations` datapoint was a breach. What changed is that FILL
+        // evaluates promptly on ordinary data, whereas the slow missing-data
+        // evaluation this task exists to remove was probably ALSO what kept the
+        // latent flap quiet. Removing the lag can convert a dormant risk into a
+        // live one, on the alarm that pages "live ingestion is stalled at the
+        // source" with both alarm and OK actions on the ops topic.
+        //
+        // Cost: a genuine halt is detected in 30 min rather than 15. Accepted —
+        // a missed 15 minutes on a halt is recoverable, whereas a flapping
+        // top-severity page teaches people to ignore the channel, which is the
+        // failure already sitting on prices-production-enrichment-errors
+        // (task 0214, in ALARM since 2026-07-27). The 3-of-3 alarms in
+        // addWorkerHealthAlarms already have this insulation; this hand-rolled
+        // one did not.
+        evaluationPeriods: 2,
+        datapointsToAlarm: 2,
         comparisonOperator: cloudwatch.ComparisonOperator.LESS_THAN_THRESHOLD,
-        // Backstop only, no longer the mechanism: FILL yields zeros where the
-        // metric has published at some point, so a processor that has NEVER been
-        // invoked still produces no series — and a halt is the right reading.
+        // Backstop only, no longer the mechanism: FILL supplies zeros for empty
+        // periods — verified with no anchor datapoint at all — so BREACHING now
+        // only covers a processor that has never published a series.
         treatMissingData: cloudwatch.TreatMissingData.BREACHING,
       },
     );
@@ -1125,8 +1153,8 @@ export class ObservabilityStack extends cdk.Stack {
         // matters here: the sweep previously ran as a stage inside the
         // enrichment handler, where "never reached" was indistinguishable from
         // "ran and found nothing" because neither emitted anything. As its own
-        // function, a run that does not happen is zero invocations, and
-        // BREACHING-on-missing turns that silence into a page.
+        // function, a run that does not happen is zero invocations, and the
+        // FILL-to-zero alarm above turns that silence into a page.
         name: 'coarse-sweep',
         idPrefix: 'CoarseSweep',
         functionName: workerFunctionName(config.envName, 'coarse-sweep'),

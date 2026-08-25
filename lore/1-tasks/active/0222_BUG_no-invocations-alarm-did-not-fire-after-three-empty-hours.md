@@ -325,6 +325,79 @@ they read **OK on no data** — the failure mode already recorded for
 "nothing was published", not "nothing was wrong". Separate concern, named here so
 it is not mistaken for covered.
 
+## Review response — PR #247, 2026-08-25
+
+Four findings raised. Two were settled by measurement rather than argument, one
+produced a real change, one was a straightforward correction.
+
+### 🔑 The finding that mattered, and it was RIGHT to raise
+
+> `FILL` can only emit zeros if the retrieved series contains at least one real
+> datapoint. Both validations used windows with real data on the left and a
+> trailing gap — that is not the shape of the alarm's own window at the moment it
+> must breach.
+
+Correct about the gap in the evidence. Both earlier tests included healthy
+periods; the alarm's evaluation range during a sustained halt contains **no raw
+data whatsoever**. Had `FILL` needed an anchor, this change would have been a
+no-op in the only case it exists for, while still passing both tests.
+
+**Settled by measurement.** `get-metric-data` over `09:00-12:00` — exactly the
+three empty buckets, not one raw datapoint anywhere in the window:
+
+| series | n | values |
+|---|---|---|
+| `m1` raw | **0** | `[]` |
+| `FILL(m1, 0)` | **3** | `0, 0, 0` |
+
+`FILL` needs no anchor; it synthesises across the whole query window. The finding
+falls, and so does its corollary that the `1/1` ledger-processor alarm gains
+nothing.
+
+⚠️ This evidence is now in the code comment, not only here — it is the assumption
+the entire change rests on and it was very nearly shipped untested.
+
+### The finding that produced a change — `ledger-processor` to 2/2
+
+> `FILL` extends zeros to the query window's end; an alarm's window ends inside
+> an incomplete period, and `Invocations` has publication latency. With `1/1`
+> that is immediately a full breach — flapping a top-severity page.
+
+**Not reproduced**, but not dismissed. A live query over the last hour returned
+`raw` and `filled` byte-identical, with no phantom trailing zero — however the
+window ended on a *complete* bucket that *had* data, so the scenario was never
+exercised. Absence of evidence.
+
+🔑 **What tipped the decision was realising the exposure is not new.** `1/1` with
+`BREACHING` already meant one late datapoint was a breach. What plausibly kept it
+quiet is the slow missing-data evaluation this task exists to remove. **Removing
+the lag can convert a dormant flap into a live one** — on the alarm that pages
+"live ingestion is stalled at the source", with both alarm and OK actions on the
+ops topic.
+
+Applied: `evaluationPeriods: 2` / `datapointsToAlarm: 2`, alarm description and
+prose updated to match.
+
+- **Cost:** a genuine halt is detected in 30 min rather than 15.
+- **Accepted because:** a missed 15 minutes on a halt is recoverable; a flapping
+  top-severity page teaches people to ignore the channel — the failure already
+  sitting on `prices-production-enrichment-errors` ([[0214]], in ALARM since
+  2026-07-27). The `3/3` alarms already had this insulation; the hand-rolled one
+  did not.
+
+⚠️ **A judgement under uncertainty, not a proof.** Recorded as one.
+
+### Correction — contradictory comments removed
+
+The old "`treatMissingData: BREACHING` is load-bearing" sentence was left standing
+next to the paragraph refuting it, and the same stale claim survived in the
+coarse-sweep worker entry. Both rewritten rather than layered — given how much of
+this task's cost came from misreading what the mechanism actually was, a
+contradiction in the comments is not a cosmetic issue.
+
+Synth after the response: **6 of 6** on metric math, ledger-processor at `2/2`,
+the rest unchanged at `3/3`.
+
 ## Implementation
 
 - ⚠️ **Evaluate option 2 first — it may make this a one-line CDK change.**
