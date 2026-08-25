@@ -2,7 +2,7 @@
 id: "0222"
 title: "The coarse-sweep no-invocations alarm did not fire after three genuinely empty hours — the instrument that detects a dead schedule is slower than its config claims"
 type: BUG
-status: backlog
+status: active
 related_adr: []
 related_tasks: ["0218", "0204", "0220"]
 tags: [layer-infra, priority-high, effort-small, observability, cloudwatch, alarms, ops]
@@ -22,6 +22,20 @@ history:
       transition recorded on 2026-08-25 at all. Configuration read from
       `describe-alarms` during the window and confirmed correct, so this is not
       [[0204]]'s blind-alarm failure and the definition needs no fix.
+  - date: 2026-08-25
+    status: active
+    who: okarcz
+    note: >
+      Activated the same day it was spawned, ahead of the rest of the backlog.
+      Reason: it is not a nice-to-have observability improvement, it is the
+      safety net for a schedule that has already gone silently dead once — and
+      that net has now demonstrably failed a live test. Until the lag is known,
+      nobody can say how long a dead coarse sweep would go unnoticed, which is
+      [[0218]]'s original defect with the fix in place.
+      First step is deliberately the cheap one: measure the lag against an
+      already-idle Lambda, touching no production schedule. Two attended ~3.5 h
+      windows have been spent on inducing this the expensive way and neither
+      produced evidence.
 ---
 
 # The no-invocations alarm did not fire after three empty hours
