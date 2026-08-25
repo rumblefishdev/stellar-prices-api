@@ -1,8 +1,9 @@
-//! The API Gateway **control plane**, wrapped down to six calls (task 0187,
-//! plus task 0188's `GetUsage`).
+//! The API Gateway **control plane**, wrapped down to seven calls (task 0187,
+//! task 0188's `GetUsage`, task 0191's `UpdateApiKey`).
 //!
 //! Not the data plane. These are `GetApiKeys`, `CreateApiKey`,
-//! `CreateUsagePlanKey`, `GetApiKey`, `DeleteApiKey` and `GetUsage` — the API
+//! `CreateUsagePlanKey`, `GetApiKey`, `DeleteApiKey`, `UpdateApiKey`
+//! (disable only) and `GetUsage` — the API
 //! the console drives — and they are the reason this slice needs no database:
 //! **API Gateway is the source of truth for whether a key exists** (task 0158's
 //! own argument, restated in 0187's context), and for how much it has been
@@ -131,6 +132,20 @@ pub enum Attachment {
     KeyGone,
 }
 
+/// What [`Gateway::disable`] observed (task 0191).
+///
+/// Two outcomes rather than `()` for the same reason as [`Attachment`]: the
+/// second one is not an error and the caller has copy for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Disable {
+    /// The key is off. Carries its `lastUpdatedDate` — the revocation instant
+    /// the cap will read — or `None` for the shape AWS does not produce, which
+    /// the cap treats as capped.
+    Applied(Option<u64>),
+    /// The key no longer exists, so there was nothing to disable.
+    KeyGone,
+}
+
 /// One key's consumption over a queried period, as AWS reports it.
 ///
 /// Derived from `GetUsage`'s daily `[used, remaining]` pairs rather than read
@@ -230,6 +245,30 @@ impl Gateway {
     pub async fn from_ambient_config(free_plan_id: String) -> Self {
         let shared =
             aws_config::load_defaults(aws_sdk_apigateway::config::BehaviorVersion::latest()).await;
+
+        // Resolve credentials ONCE, here, instead of lazily on the first call.
+        //
+        // The default chain initialises its provider on first use, and two
+        // requests racing that first use — which is exactly what a dashboard
+        // load does, `/key` and `/usage` in parallel — can leave the loser
+        // with `profile file credentials provider initialization error
+        // already taken` (aws-config's SSO/profile provider; observed on a
+        // local `serve` run, 2026-08-21). In the Lambda the chain resolves
+        // from the environment and this is a no-op that costs nothing; it is
+        // the local run, on an SSO profile, that needs the first resolution
+        // serialised. A failure here is logged and NOT fatal: the per-call
+        // error is still the one the handlers report.
+        if let Some(provider) = shared.credentials_provider() {
+            use aws_sdk_apigateway::config::ProvideCredentials as _;
+            if let Err(error) = provider.provide_credentials().await {
+                tracing::warn!(
+                    error = %error,
+                    "could not resolve AWS credentials at cold start; every control-plane \
+                     call will retry the resolution"
+                );
+            }
+        }
+
         let config = aws_sdk_apigateway::config::Builder::from(&shared)
             .timeout_config(timeouts())
             .build();
@@ -338,6 +377,11 @@ impl Gateway {
                         .created_date()
                         .map(|d| d.secs())
                         .and_then(|secs| u64::try_from(secs).ok()),
+                    enabled: item.enabled(),
+                    last_updated_at: item
+                        .last_updated_date()
+                        .map(|d| d.secs())
+                        .and_then(|secs| u64::try_from(secs).ok()),
                 });
             }
 
@@ -360,6 +404,14 @@ impl Gateway {
     /// a separate `TagResource` could fail and leave an untagged key, which is
     /// the one thing tagging exists to prevent.
     pub async fn create(&self, name: &str) -> Result<(KeyRecord, KeyValue), GatewayError> {
+        // **No SDK retries on a create.** `CreateApiKey` has no idempotency
+        // token, so a retried attempt whose first try actually landed makes a
+        // second key — under the user's exact name, enabled, attached to
+        // nothing. The SDK's standard mode retries transport errors and 5xx
+        // up to three times inside `OPERATION_TIMEOUT`, and `ATTEMPT_TIMEOUT`
+        // (2s) is short enough for a cold control plane to trip it. The
+        // reconciler sweeps duplicates, but only when the next listing is
+        // consistent; better not to make them. Reads keep their retries.
         let created = self
             .client
             .create_api_key()
@@ -368,6 +420,11 @@ impl Gateway {
             .enabled(true)
             .tags(TAG_MANAGED_BY.0, TAG_MANAGED_BY.1)
             .tags(TAG_ISSUED_BY.0, TAG_ISSUED_BY.1)
+            .customize()
+            .config_override(
+                aws_sdk_apigateway::config::Builder::new()
+                    .retry_config(aws_sdk_apigateway::config::retry::RetryConfig::disabled()),
+            )
             .send()
             .await
             .map_err(|e| GatewayError::Call {
@@ -395,9 +452,71 @@ impl Gateway {
                     .created_date()
                     .map(|d| d.secs())
                     .and_then(|secs| u64::try_from(secs).ok()),
+                enabled: created.enabled(),
+                last_updated_at: created
+                    .last_updated_date()
+                    .map(|d| d.secs())
+                    .and_then(|secs| u64::try_from(secs).ok()),
             },
             KeyValue(value.to_string()),
         ))
+    }
+
+    /// Disable a key — `UpdateApiKey` with `replace /enabled false` — the
+    /// revocation (task 0191).
+    ///
+    /// **Disable, not delete.** Both take ~25 s to reach the data plane (0180
+    /// item 8, measured), so deleting buys no speed; what disabling buys is
+    /// the *record*: the key stays in the account with its `lastUpdatedDate`
+    /// as the revocation instant, and that is the only thing — with no
+    /// registry — that can refuse a re-issue inside the same quota period.
+    /// The counter is preserved across disable (same measurement), so the
+    /// dashboard keeps reporting the revoked key's usage honestly.
+    ///
+    /// [`Disable::KeyGone`] is the deletion race — the key was listed and is
+    /// gone — and is a state the caller has an answer for (nothing to revoke),
+    /// not an error.
+    ///
+    /// [`Disable::Applied`] carries the patched key's **`lastUpdatedDate`**,
+    /// read off this call's own response rather than re-listed or invented.
+    /// That is the byte the re-issue cap is decided against on every later read
+    /// (`cap::decide`), so returning it here is what stops the revoke answer
+    /// and the issue path disagreeing: a local `SystemTime::now()` is a
+    /// different clock from the control plane's, and two clocks straddling
+    /// 00:00 UTC on the 1st fall in different quota periods — the page would
+    /// promise a replacement a month before the round-trip would honour it.
+    pub async fn disable(&self, key_id: &str) -> Result<Disable, GatewayError> {
+        let patch = aws_sdk_apigateway::types::PatchOperation::builder()
+            .op(aws_sdk_apigateway::types::Op::Replace)
+            .path("/enabled")
+            .value("false")
+            .build();
+        match self
+            .client
+            .update_api_key()
+            .api_key(key_id)
+            .patch_operations(patch)
+            .send()
+            .await
+        {
+            Ok(updated) => Ok(Disable::Applied(
+                updated
+                    .last_updated_date()
+                    .map(|d| d.secs())
+                    .and_then(|secs| u64::try_from(secs).ok()),
+            )),
+            Err(e) => {
+                let message = sdk_message(&e);
+                if e.into_service_error().is_not_found_exception() {
+                    Ok(Disable::KeyGone)
+                } else {
+                    Err(GatewayError::Call {
+                        operation: "UpdateApiKey",
+                        message,
+                    })
+                }
+            }
+        }
     }
 
     /// Attach a key to the free usage plan, which is what makes it work against

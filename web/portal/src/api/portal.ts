@@ -285,6 +285,118 @@ export const signInUrl = (): string => `${PORTAL_API}/auth/login`;
 export const issueUrl = (): string => `${PORTAL_API}/auth/login?action=issue`;
 
 /**
+ * What `POST /api-tokens/api/key/rework` answers (task 0191): the revocation.
+ *
+ * `next_eligible_at` is when a new key can be issued under OUR period rule
+ * (not an AWS guarantee; see the backend's `portal/period.rs`) — the 1st of
+ * the next month for a revocation in this period, and *now* for an idempotent
+ * revoke of a key whose period has already rolled, so a stale tab cannot hide
+ * an issue link the round-trip would honour.
+ *
+ * `revoked_at` is when the key went off. Absent when the backend cannot date
+ * the revocation (no `lastUpdatedDate` on any record) — the page renders the
+ * revocation without an instant rather than inventing one.
+ */
+export interface PortalRevocation {
+  revoked: true;
+  next_eligible_at: string;
+  revoked_at?: string;
+  /**
+   * Task 0191: the backend disabled some keys under this name and failed on at
+   * least one other, so a duplicate may still answer on `/v1/`. Absent from the
+   * ordinary answer — read it as `false` when missing, and never render a plain
+   * "revoked" while it is `true`.
+   */
+  partial?: boolean;
+}
+
+/**
+ * `POST /api-tokens/api/key/rework` — "Replace my key": revoke the key NOW,
+ * issue nothing (task 0191).
+ *
+ * A `fetch`, not a navigation: unlike issuing, revoking needs no fresh Discord
+ * token — it is destructive to the visitor's own access and to nothing else,
+ * and a leaked key has to be killable while Discord is down. The session cookie
+ * rides on this same-origin `POST` — `SameSite=Lax` lets it, and `SameSite`
+ * alone is NOT the guard (it is site-scoped, so a sibling host's form `POST`
+ * would carry the cookie): the CSRF guard is the custom request header below,
+ * which a cross-origin page cannot send without a preflight this API never
+ * answers.
+ *
+ * The replacement is an ordinary `issueUrl()` round-trip — refused by the
+ * backend until the quota period of the revocation has rolled, which the page
+ * renders as the date rather than offering a link that would only be refused.
+ */
+export async function revokeKey(): Promise<PortalRevocation> {
+  const url = `${PORTAL_API}/key/rework`;
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: 'POST',
+      // The custom header is the CSRF guard: it makes this a non-simple
+      // request, which a cross-origin page cannot send without a CORS
+      // preflight this API never answers. The backend refuses a revoke
+      // without it (`PORTAL_REQUEST_HEADER` in `portal/keys/mod.rs`).
+      headers: {
+        accept: 'application/json',
+        'x-requested-with': 'stellar-prices-portal',
+      },
+      signal: AbortSignal.timeout(KEY_TIMEOUT_MS),
+    });
+  } catch (error) {
+    if (isTimeout(error)) {
+      throw new PortalApiError(
+        `${url} did not answer within ${KEY_TIMEOUT_MS / 1000}s`,
+      );
+    }
+    throw new PortalApiError(`${url} could not be reached`);
+  }
+  if (!response.ok) {
+    throw new PortalApiError(
+      failureMessage(url, response.status, await readEnvelope(response)),
+      response.status,
+    );
+  }
+  let body: {
+    revoked?: unknown;
+    next_eligible_at?: unknown;
+    revoked_at?: unknown;
+    partial?: unknown;
+  };
+  try {
+    body = (await response.json()) as typeof body;
+  } catch {
+    throw new PortalApiError(
+      `${url} answered ${response.status}, not JSON`,
+      response.status,
+    );
+  }
+  if (
+    body.revoked !== true ||
+    typeof body.next_eligible_at !== 'string' ||
+    (body.revoked_at !== undefined &&
+      body.revoked_at !== null &&
+      typeof body.revoked_at !== 'string')
+  ) {
+    // A `200` that does not say `revoked: true` is not a shape this client
+    // knows; rendering "revoked" on it would be the one false statement this
+    // dialog must never make.
+    throw new PortalApiError(`${url} answered 200 without revoked: true`, 200);
+  }
+  return {
+    revoked: true,
+    next_eligible_at: body.next_eligible_at,
+    revoked_at:
+      typeof body.revoked_at === 'string' ? body.revoked_at : undefined,
+    // Absent on the ordinary answer (the backend omits it when false), and
+    // anything other than a literal `true` is read as "not partial": this flag
+    // only ever ADDS a warning, so a malformed value must not be able to
+    // manufacture one.
+    partial: body.partial === true,
+  };
+}
+
+/**
  * `POST /api-tokens/api/auth/logout` — clear the session.
  *
  * `POST`, because the backend only accepts that: a `GET` sign-out is triggerable
@@ -419,7 +531,25 @@ export async function fetchUsage(): Promise<PortalUsage | null> {
 }
 
 /**
- * Reveal the key this account already has, or learn there is none.
+ * What the key route says when the owner revoked their key (task 0191): no
+ * usable key, and no issue offered until `next_eligible_at`.
+ */
+export interface PortalKeyRevoked {
+  revoked: true;
+  next_eligible_at: string;
+  revoked_at?: string;
+  /**
+   * Carried over from a revoke that only partly succeeded, in this page load
+   * (see `PortalRevocation`). The reveal never sets it: a later `GET /key`
+   * cannot tell a duplicate that survived a failed disable from one that was
+   * never there, and it does not need to — it lists what is enabled.
+   */
+  partial?: boolean;
+}
+
+/**
+ * Reveal the key this account already has, or learn there is none — or that
+ * it was revoked and when a new one can be issued.
  *
  * `GET`, and — since task 0189 — safe to fire on load: the backend's key route
  * is **read-only by construction** (it can never create, attach or delete),
@@ -433,7 +563,7 @@ export async function fetchUsage(): Promise<PortalUsage | null> {
  * caution `fetchUsage` takes: an EMPTY 404 is task 0183's closed portal, and
  * reading it as "you have no key" would be a false statement.
  */
-export async function fetchKey(): Promise<PortalKey | null> {
+export async function fetchKey(): Promise<PortalKey | PortalKeyRevoked | null> {
   const url = `${PORTAL_API}/key`;
   let response: Response;
   try {
@@ -451,9 +581,29 @@ export async function fetchKey(): Promise<PortalKey | null> {
   }
   if (response.status === 404) {
     try {
-      const body = (await response.json()) as { code?: string };
+      const body = (await response.json()) as {
+        code?: string;
+        details?: { next_eligible_at?: unknown; revoked_at?: unknown };
+      };
       if (body.code === 'no_key') {
         return null;
+      }
+      // The owner revoked it (task 0191). Distinct from `no_key` because the
+      // page must NOT offer the issue round-trip: the backend would refuse it
+      // until the date, and a link that only ever refuses is worse than the
+      // date itself.
+      if (
+        body.code === 'key_revoked' &&
+        typeof body.details?.next_eligible_at === 'string'
+      ) {
+        return {
+          revoked: true,
+          next_eligible_at: body.details.next_eligible_at,
+          revoked_at:
+            typeof body.details.revoked_at === 'string'
+              ? body.details.revoked_at
+              : undefined,
+        };
       }
     } catch {
       // Not JSON — the gate's empty 404, or something else entirely.
