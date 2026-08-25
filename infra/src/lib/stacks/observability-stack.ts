@@ -1043,10 +1043,19 @@ export class ObservabilityStack extends cdk.Stack {
     // ledger-processor records zero `Invocations` for 15 min it has received no
     // doorbells at all. Pubnet closes a ledger every ~5–6 s, so a healthy
     // processor is invoked near-continuously and a 15-min silence is a genuine
-    // outage, never normal idle. `treatMissingData: BREACHING` is load-bearing:
+    // outage, never normal idle.
+    //
+    // `FILL(invocations, 0)` (task 0222), same as the scheduled workers above.
     // Lambda publishes NO `Invocations` datapoint for a period with zero
-    // invocations, so "missing" *is* the halt signal (a LESS_THAN threshold
-    // alone would never evaluate).
+    // invocations; FILL turns that absence into real zeros so the alarm
+    // evaluates ordinary data instead of depending on missing-data semantics.
+    //
+    // ⚠️ Note this alarm was NOT observed failing. The measured failure was at
+    // `Period=3600` (the coarse sweep, 2026-08-25); temporary alarms at 60 s and
+    // 300 s both breached correctly, and this one's 900 s was never tested. It is
+    // converted anyway because FILL makes the question irrelevant rather than
+    // betting that this period happens to be unaffected — and because this is
+    // the only alarm watching a total ingestion halt from the consumer side.
     this.ledgerProcessorNoInvocationsAlarm = new cloudwatch.Alarm(
       this,
       'LedgerProcessorNoInvocationsAlarm',
@@ -1054,18 +1063,27 @@ export class ObservabilityStack extends cdk.Stack {
         alarmName: `prices-${config.envName}-ledger-processor-no-invocations`,
         alarmDescription:
           'The live ledger-processor recorded zero invocations for 15 min: no ledger doorbells are arriving (upstream S3→SNS→SQS delivery stopped, the subscription was removed, or the producer halted). Live ingestion is stalled at the source and candles are silently frozen. Check the SNS subscription on prices-ingest, BE ledger publication, and the ingest queue. Unlike the lag/errors/DLQ alarms this fires on the ABSENCE of throughput.',
-        metric: new cloudwatch.Metric({
-          namespace: 'AWS/Lambda',
-          metricName: 'Invocations',
-          dimensionsMap: { FunctionName: ledgerProcessorFnName },
-          statistic: 'Sum',
+        metric: new cloudwatch.MathExpression({
+          expression: 'FILL(invocations, 0)',
+          usingMetrics: {
+            invocations: new cloudwatch.Metric({
+              namespace: 'AWS/Lambda',
+              metricName: 'Invocations',
+              dimensionsMap: { FunctionName: ledgerProcessorFnName },
+              statistic: 'Sum',
+              period: cdk.Duration.minutes(15),
+            }),
+          },
           period: cdk.Duration.minutes(15),
+          label: 'InvocationsFilled',
         }),
         threshold: 1,
         evaluationPeriods: 1,
         datapointsToAlarm: 1,
         comparisonOperator: cloudwatch.ComparisonOperator.LESS_THAN_THRESHOLD,
-        // Missing = zero invocations = the halt we are looking for.
+        // Backstop only, no longer the mechanism: FILL yields zeros where the
+        // metric has published at some point, so a processor that has NEVER been
+        // invoked still produces no series — and a halt is the right reading.
         treatMissingData: cloudwatch.TreatMissingData.BREACHING,
       },
     );

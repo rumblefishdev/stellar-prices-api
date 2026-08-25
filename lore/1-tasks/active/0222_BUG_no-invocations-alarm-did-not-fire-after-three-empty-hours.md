@@ -290,16 +290,32 @@ The rendered form — expression member with no `Period`, period carried on the
 `MetricStat` — matches the already-deployed `EnrichmentBacklogAlarm`, so the
 shape is proven in production rather than novel.
 
-### 🔴 `ledger-processor-no-invocations` is NOT fixed by this
+### `ledger-processor-no-invocations` — converted too, on an explicit judgement
 
-It is hand-rolled separately rather than going through the helper, and still
-renders the **legacy single-metric form** at `EvaluationPeriods 1 /
-DatapointsToAlarm 1`, `period=900`. Same defect, and the tightest configuration
-of the set — which makes it the one most likely to be silently trusted.
+It is hand-rolled rather than going through the helper, so it needed its own
+change. Same `MathExpression` wrapper; threshold, periods and `1/1` evaluation
+shape all unchanged.
 
-Deliberately left alone in this change: it is a different worker with different
-semantics (`1/1`, not `3/3`), and folding it in would widen a one-line fix into a
-behaviour change for the ingest path. Flagged rather than fixed.
+⚠️ **This alarm was never observed failing.** The measured failure was at
+`Period=3600`; temporary alarms at 60 s and 300 s both breached correctly, and
+this one's **900 s was never tested**. It sits between the two.
+
+Converted anyway, for two reasons:
+
+1. `FILL` makes the question irrelevant rather than betting that 900 s happens to
+   be unaffected. The remedy removes the dependency; it does not tune around it.
+2. It is the **only** alarm watching a total ingestion halt from the consumer
+   side. The lag, errors and DLQ alarms all key on the *presence* of messages, so
+   a producer-side stop drains the queue and leaves all three `OK` while live
+   candles freeze. Leaving the highest-consequence alarm on a mechanism we have
+   proven can fail silently is the worse asymmetry.
+
+The alternative — a 45-minute test at `Period=900` in the sweep's idle window —
+was costed and declined: it would establish whether this alarm is currently
+broken, but would not change what ships.
+
+Synth after the change: **6 of 6** no-invocations alarms on metric math, **0**
+remaining on the legacy single-metric form.
 
 ### Not addressed: the `NOT_BREACHING` siblings
 
