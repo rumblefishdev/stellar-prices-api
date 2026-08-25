@@ -74,6 +74,24 @@ history:
       remedy has different semantics; spawned separately. One AC added: watch the
       2/2 ledger-processor alarm for ~2 h post-deploy, since its flap risk was
       mitigated on judgement rather than measurement.
+  - date: 2026-08-25
+    status: active
+    who: okarcz
+    note: >
+      Deployed to production and AC 4 induced the same hour. All six
+      no-invocations alarms now evaluate `FILL(invocations, 0)`; the temp alarm
+      `tmp-0222-fill-p300` went OK to ALARM at 17:46:28 UTC on a trailing gap and
+      was deleted before the next :30 run. The induction ran at `Period=300`
+      rather than the 900 written into AC 4 - at 900 the third empty bucket
+      completes exactly at :30, racing the next sweep run, so 900 is a less
+      reliable test rather than a stricter one. AC 4 restated accordingly.
+      Two findings came out of the `stateReasonData` that are larger than the
+      tick: evaluation windows are query-anchored and slide rather than aligning
+      to the clock, which falsifies the bucket reasoning used for the earlier
+      control run; and on the corrected baseline FILL detects silence roughly an
+      order of magnitude faster than the raw form. AC 7 still open - the
+      ledger-processor flap watch is a single `describe-alarm-history` read on
+      2026-08-26, since history persists.
 ---
 
 # The no-invocations alarm did not fire after three empty hours
@@ -436,6 +454,102 @@ the rest unchanged at `3/3`.
 - Verify by inducing, on the standard [[0218]] set for itself — and the induction
   must now be cheap enough to repeat, which is part of what the fix buys.
 
+## Deploy + induction record — 2026-08-25
+
+### Deployed
+
+`Prices-production-Observability` **alone**, 17:32 UTC, 11.68 s. Only
+`observability-stack.ts` changed, so [[0218]]'s "EventBridge before
+Observability" ordering does not apply — every function the alarms name already
+exists.
+
+`cdk diff` was exactly the change and nothing else: six alarms swapping
+single-metric → metric-math, plus `ledger-processor` `1/1 → 2/2` and its
+description. No portal / Discord OAuth / Secrets / Compute / ApiGateway
+resources, no replacements, and no hidden-changes footer, so no `--strict`
+re-read was needed.
+
+⚠️ The `S3?SNS?SQS` in the diff's **removed** description is the known non-ASCII
+mangling of the currently-deployed text being read back. The `[+]` side renders
+`S3→SNS→SQS` correctly. Text only, not a change.
+
+`prices-production-cleanup` read `DISABLED` **before and after** the deploy.
+`prices-production-coarse-sweep` read `ENABLED cron(30 * * * ? *)` after.
+
+Post-deploy, all six converted and all `OK`:
+
+| alarm | eval | expression | period |
+|---|---|---|---|
+| `enrichment-no-invocations` | 3/3 | `FILL(invocations, 0)` | 3600 |
+| `coarse-sweep-no-invocations` | 3/3 | `FILL(invocations, 0)` | 3600 |
+| `backfill-freshness-probe-no-invocations` | 3/3 | `FILL(invocations, 0)` | 900 |
+| `rollup-freshness-probe-no-invocations` | 3/3 | `FILL(invocations, 0)` | 900 |
+| `mtls-notafter-probe-no-invocations` | 3/3 | `FILL(invocations, 0)` | 86400 |
+| `ledger-processor-no-invocations` | **2/2** | `FILL(invocations, 0)` | 900 |
+
+### AC 4 — INDUCED 2026-08-25, and this is the first *alarm* evidence
+
+`tmp-0222-fill-p300` — identical to the deployed coarse-sweep alarm except in
+`Period` — created 17:36 UTC just after the `:30` run, **no `--alarm-actions`**,
+so nobody was paged. Deleted 17:47, before the 18:30 run; `describe-alarms
+--alarm-name-prefix tmp-0222` returned empty afterwards.
+
+```
+17:36:10  INSUFFICIENT_DATA   (birth state)
+17:37:28  INSUFFICIENT_DATA → OK
+17:46:28  OK → ALARM
+```
+
+The `OK` at 17:37 is a real evaluation, not inertia: its window still held the
+17:30 run, so one of three datapoints was non-breaching against
+`DatapointsToAlarm: 3`. Everything before today was `get-metric-data`, which
+proves FILL's *behaviour*; this proves a CloudWatch **alarm** built on it
+transitions.
+
+### 🔑 Finding 1 — evaluation windows are query-anchored and slide
+
+From `stateReasonData` on the two transitions:
+
+| query | window start | buckets evaluated |
+|---|---|---|
+| 17:37:28 | 17:22:00 | 17:22 `0.0`, **17:27 `1.0`**, 17:32 `0.0` |
+| 17:46:28 | 17:31:00 | 17:31 `0.0`, 17:36 `0.0`, 17:41 `0.0` |
+
+The 17:30 run lands in a bucket **starting 17:27**, and the next evaluation's
+window starts at **17:31**. Buckets re-anchor to each query rather than to
+`:00/:05/:10`.
+
+⚠️ **This falsifies the reasoning used for the earlier control run** in RESULT
+above, which computed condition-met from clock-aligned buckets (`12:35-40,
+12:40-45, 12:45-50`). The correct baseline is *when the last run ages out of the
+sliding window*. The 6m51s figure is left in place as recorded, but should not be
+read as measured against a correct baseline.
+
+### 🔑 Finding 2 — FILL detects silence far faster, on the corrected baseline
+
+| form | last run | window clear | breached | lag |
+|---|---|---|---|---|
+| raw single-metric | 12:30 | 12:45 | 12:56:51 | **~11m51s** |
+| `FILL(invocations, 0)` | 17:30 | 17:45 | 17:46:28 | **~1m28s** |
+
+Same function, same dimension, same `Period=300`, same `3/3`. The only difference
+is FILL.
+
+⚠️ **Indicative, not a measured constant.** The earlier run's `stateReasonData`
+was never captured, so its window alignment is inferred rather than read. Do not
+quote the ratio as an established figure.
+
+### ⚠️ Finding 3 — the review's flap concern has its first supporting evidence
+
+The newest bucket in the breaching evaluation (17:41–17:46) closed **28 seconds**
+before the query that read it as `0.0`. Nothing was genuinely invoked, so this is
+not a reproduction — but an alarm reading a bucket that fresh is exactly the
+window in which a late-publishing `Invocations` datapoint would be counted as a
+zero.
+
+That is evidence *for* the `2/2` change on `ledger-processor`, which was made on
+judgement alone and explicitly recorded as such. It does not settle it; AC 7 does.
+
 ## Acceptance Criteria
 
 - [x] The lag between a function going idle and the alarm breaching is
@@ -447,14 +561,24 @@ the rest unchanged at `3/3`.
 - [x] The remedy removes the dependency on CloudWatch's missing-data semantics
       rather than tuning around them.
       → `FILL(invocations, 0)` in `addWorkerHealthAlarms`; synth verified, five
-      alarms convert. **Not yet deployed or induced.**
-- [ ] If unacceptable, a remedy ships and is verified by inducing the silence,
+      alarms convert (six with the hand-rolled ledger-processor).
+      **Deployed to production 2026-08-25 17:32 UTC and induced the same hour** —
+      see the deploy record above.
+- [x] If unacceptable, a remedy ships and is verified by inducing the silence,
       not by reading the config.
-      → Cheap proxy induction, ~45 min, no schedule touched: a temp alarm using
-      `FILL(invocations, 0)` at `Period=900`, `3/3`, on the coarse sweep, created
-      just after a `:30` run. Everything so far is `get-metric-data`, which
-      proves FILL's behaviour but NOT that a CloudWatch **alarm** built on it
-      transitions. That gap is what this closes.
+      → Shipped 17:32 UTC, induced 17:36-17:47 UTC. `tmp-0222-fill-p300` went
+      **`OK → ALARM` at 17:46:28** on a trailing gap, no schedule touched and no
+      actions attached. ⚠️ **Run at `Period=300`, not the `900` written above —
+      restated, see below.**
+
+  ⚠️ **AC 4's `Period=900` restated.** As written the proxy alarm was to run at
+  `Period=900`, `3/3`. That needs 45 minutes of silence, which puts the third
+  empty bucket at exactly `:30` — the moment the next sweep run lands. It races
+  the very thing it measures, so 900 is a *less reliable* test rather than a
+  stricter one. `Period=300` tests the same unproven proposition — that a
+  metric-math alarm built on FILL transitions — inside a 15-minute gap the
+  schedule reliably provides. Restated and agreed before the run, not after it.
+  Same restate-don't-tick pattern as this task's AC 5 and [[0218]]'s AC 4.
 - [x] ~~[[0218]] AC 2 state 3 becomes inducible within a window a person can
       actually sit through~~ — **RESTATED, not ticked as written.** See
       "AC 5 restated" below.
@@ -471,6 +595,20 @@ the rest unchanged at `3/3`.
       Its flap risk was mitigated on a judgement, not a measurement — post-deploy
       is when a flap would show, and finding out from `describe-alarm-history`
       beats finding out from a 3am page.
+      → ⏳ **OPEN.** Alarm live from 17:32 UTC 2026-08-25. `describe-alarm-history`
+      persists, so this is a single retroactive read on **2026-08-26** covering
+      the whole overnight window — no attended watch needed. Expect **no**
+      transitions beyond at most one settling `INSUFFICIENT_DATA → OK`. Repeated
+      `OK → ALARM → OK` cycling is the flap, and Finding 3 above says the
+      exposure is real; the response is to widen, not to leave a top-severity
+      page crying wolf.
+
+```bash
+aws cloudwatch describe-alarm-history \
+  --alarm-name prices-production-ledger-processor-no-invocations \
+  --history-item-type StateUpdate --max-records 20 --region eu-central-1 \
+  --query 'AlarmHistoryItems[].[Timestamp,HistorySummary]' --output text
+```
 
 ## AC 5 restated — the criterion asked for something unachievable
 
