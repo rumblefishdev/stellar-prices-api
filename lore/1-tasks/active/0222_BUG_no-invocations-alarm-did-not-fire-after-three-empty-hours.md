@@ -36,6 +36,27 @@ history:
       already-idle Lambda, touching no production schedule. Two attended ~3.5 h
       windows have been spent on inducing this the expensive way and neither
       produced evidence.
+  - date: 2026-08-25
+    status: active
+    who: okarcz
+    note: >
+      Experiment run and cleaned up the same hour, no production schedule
+      touched. Two temporary alarms on the coarse sweep's own idle window
+      (it runs at :30, so it is idle 59 minutes of every hour) breached in
+      **2m42s at Period=60** and **6m51s at Period=300**. That kills the worst
+      hypothesis — missing-data evaluation is NOT broken for stopped metrics —
+      and also kills strict proportionality to Period (5x period gave ~2.5x lag).
+      🔴 It does not explain the production failure: on those numbers the 3600 s
+      alarm should have breached ~12:05 and did not. A sub-proportional-lag story
+      fits every observation but is constructed after the fact and is recorded as
+      an untested hypothesis, not a conclusion.
+      Decision: stop reverse-engineering CloudWatch's missing-data semantics and
+      make silence produce a datapoint instead. ⚠️ Note the correction to the
+      original plan — publishing `CoarseSweepRuns = 0` from the worker cannot
+      work alone, because if the Lambda is never invoked nothing in it can
+      publish, and that is precisely the condition being detected. Metric math
+      with FILL(metric, 0) is the cheapest candidate and may reduce this to a
+      one-line CDK change; evaluate it before building anything.
 ---
 
 # The no-invocations alarm did not fire after three empty hours
@@ -134,30 +155,98 @@ which is what makes the window clean.
 predict `Period=3600`. The two-alarm design is what makes that inference
 possible; a single short-period alarm would not support it.
 
+## RESULT — experiment run 2026-08-25 12:37-13:06 UTC
+
+Two temporary alarms, identical to production except in `Period`, on the same
+metric and dimension. No alarm actions, so nobody was paged. Both deleted before
+the 13:30 run; `describe-alarms` returned empty afterwards.
+
+The sweep last ran at **12:30**, so the metric stopped publishing then.
+
+| alarm | condition met | breached | lag |
+|---|---|---|---|
+| `tmp-0222-p60` | at creation 12:37:05 (7 empty 1-min buckets already behind it) | **12:39:47** | **2m42s** from creation |
+| `tmp-0222-p300` | 12:50:00 (12:35-40, 12:40-45, 12:45-50 complete and empty) | **12:56:51** | **6m51s** |
+
+`p300` correctly read `OK` until then: at 12:37 its three newest 5-minute buckets
+included 12:30-35, which holds the 12:30 run — one non-breaching datapoint of
+three, `DatapointsToAlarm: 3` → `OK`. A useful check that both test alarms were
+evaluating properly rather than sitting inert.
+
+### Two hypotheses are dead
+
+- ❌ **"Missing-data evaluation is broken for stopped metrics."** It is not. Both
+  fired. This was the worst case and it is ruled out.
+- ❌ **"Lag is strictly proportional to `Period`."** A 5× period increase produced
+  a ~2.5× lag increase — 6m51s, not the ~13 minutes proportionality predicts.
+
+⚠️ **Comparability caveat, recorded rather than glossed:** `p60`'s lag is measured
+from *alarm creation* and `p300`'s from *condition-met*. Different baselines, so
+the 2.5× ratio is indicative, not clean. Do not quote it as a measured constant.
+
+### 🔴 What the experiment did NOT explain
+
+If the lag is a few minutes regardless of period, the production alarm should
+have breached around **12:05** — its three empty hours completed at 12:00. It did
+not, and was still `OK` at 12:41 carrying a `StateUpdatedTimestamp` from the
+previous day.
+
+**The production failure remains unexplained.**
+
+One story fits every observation: the lag is *sub*-proportional but still large
+at `Period=3600` — roughly 1.4 periods ≈ 84 minutes, putting a breach near 13:24
+— and re-enabling the rule at 12:20 meant the 12:30 run landed in the 12:00-13:00
+bucket, breaking the streak before the lagged evaluation resolved.
+
+⚠️ **That is a hypothesis constructed after the fact to fit the data.** It has not
+been tested. Testing it costs another multi-hour window, which is the reason for
+the decision below.
+
+## Decision — sidestep the semantics rather than reverse-engineer them
+
+Two attended ~3.5 h windows and one experiment have gone into establishing how
+CloudWatch evaluates a metric that stops publishing. Proving the remaining
+hypothesis costs another multi-hour wait, and even a proof leaves the alarm
+depending on behaviour AWS does not document precisely.
+
+🔑 **Stop depending on missing-data semantics. Make silence produce a datapoint.**
+
+A zero is data. The measurement is what makes this the *clear* choice rather than
+the merely convenient one: the mechanism demonstrably works when datapoints
+exist, so the defect is specifically that `AWS/Lambda` `Invocations` publishes
+**nothing** for an idle function.
+
 ## Implementation
 
-- **Run the experiment above.** Costs nothing and touches no production
-  schedule — unlike a third induction.
-- Establish whether the delay is bounded and predictable, or unbounded.
-- If the lag is real and long, decide the remedy. Options to cost:
-  1. **Alarm on the custom metric instead.** `CoarseSweepRuns` is ours and could
-     be published as an explicit `0`, which removes the missing-data path
-     entirely. Most likely the right answer.
-  2. Shorten `Period` and raise `EvaluationPeriods` for the same total window,
-     if evaluation frequency rather than total span is what lags.
-  3. A heartbeat/canary that publishes on a schedule independent of the sweep.
-- Whatever ships must be **verified by inducing**, on the same standard [[0218]]
-  set for itself.
-- Re-check the other alarms in the same family — `-errors` and
-  `-duration-near-timeout` both sit on `AWS/Lambda` metrics with the same
-  publish-nothing-when-idle property, and [[0220]]'s duration soak depends on one
-  of them.
+- ⚠️ **Evaluate option 2 first — it may make this a one-line CDK change.**
+  1. **Metric math with `FILL(metric, 0)`** — substitutes zero for missing
+     datapoints inside the alarm rather than at publish time. No new
+     infrastructure, no worker change, nothing to deploy but the alarm.
+  2. **A heartbeat that publishes the sweep's expected-run count**, so silence
+     becomes a *low number* rather than *no data*. More moving parts; a real
+     answer if option 1 does not hold.
+  3. **Rule-level monitoring** — `Invocations` / `FailedInvocations` on the
+     EventBridge rule rather than the function.
+- ⚠️ Publishing `CoarseSweepRuns = 0` from the worker is **not sufficient on its
+  own**: if the Lambda is never invoked, nothing inside the Lambda can publish.
+  That is the failure being detected. The zero has to come from somewhere that
+  runs when the sweep does not.
+- Re-check the sibling alarms — `-errors` and `-duration-near-timeout` sit on the
+  same `AWS/Lambda` metrics with the same publish-nothing-when-idle property, and
+  [[0220]]'s duration soak depends on one of them.
+- Verify by inducing, on the standard [[0218]] set for itself — and the induction
+  must now be cheap enough to repeat, which is part of what the fix buys.
 
 ## Acceptance Criteria
 
-- [ ] The lag between a function going idle and the alarm breaching is
+- [x] The lag between a function going idle and the alarm breaching is
       **measured**, with the method recorded — not inferred from configuration.
-- [ ] Whether the delay is bounded is established.
+      → 2m42s at `Period=60`, 6m51s at `Period=300`. See RESULT.
+- [x] Whether the delay is bounded is established.
+      → **Bounded and small at 60 s and 300 s.** NOT established at 3600 s, and
+      deliberately not pursued — see Decision.
+- [ ] The remedy removes the dependency on CloudWatch's missing-data semantics
+      rather than tuning around them.
 - [ ] If unacceptable, a remedy ships and is verified by inducing the silence,
       not by reading the config.
 - [ ] [[0218]] AC 2 state 3 becomes inducible within a window a person can
