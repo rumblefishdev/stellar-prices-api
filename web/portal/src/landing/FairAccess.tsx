@@ -61,8 +61,11 @@ const LIMITS: readonly {
 ];
 
 export function FairAccess() {
+  // The glow sits left, level with "Fair Access" — the mirror of the Endpoints
+  // glow, which is what makes the two `alt` sections either side of the
+  // dashboard band read as a pair.
   return (
-    <Section tone="alt" id="limits">
+    <Section tone="alt" id="limits" glow={{ at: '15% 20%' }}>
       <Stack
         direction={{ xs: 'column', md: 'row' }}
         spacing={{ xs: 4, md: 6 }}
@@ -106,6 +109,11 @@ export function FairAccess() {
                     flexShrink: 0,
                     width: 28,
                     height: 28,
+                    // A rounded SQUARE, and deliberately not the disc the
+                    // feature grid and the dashboard claims take: in Figma
+                    // these four ticks are squares. They are a checklist
+                    // marker, not a category icon, and the design separates
+                    // the two by shape.
                     borderRadius: '8px',
                     display: 'grid',
                     placeItems: 'center',
@@ -124,17 +132,34 @@ export function FairAccess() {
         </Stack>
 
         <Stack spacing={2} sx={{ flex: 1, minWidth: 0, width: '100%' }}>
-          <SectionLabel>Free Tier Limits</SectionLabel>
+          {/* Wrapped, because this `Stack` is a column flexbox and a flex
+              item is stretched across the cross axis whatever its `display`
+              is — the chip's own `inline-block` cannot save it, and it was
+              coming out as wide as the cards below it. The wrapper takes the
+              stretching; the chip inside it hugs its text and grows or
+              shrinks with the words alone. The other three eyebrows on the
+              page sit in Stacks with an explicit `alignItems`, which is why
+              only this one was stretched — see `SectionLabel`. */}
+          <Box>
+            <SectionLabel tone="neutral">Free Tier Limits</SectionLabel>
+          </Box>
           {LIMITS.map(({ label, figure, unit, note }) => (
             <Stack
               key={label}
-              spacing={1}
+              spacing={0.5}
               sx={{
-                p: 2.5,
+                // Shorter than the design's card: 16px of padding and a half
+                // step between the three lines, against 20px and a full step.
+                // The column is three facts, and at the old height it ran
+                // past the four reasons it answers.
+                px: 2,
+                py: 1.5,
                 borderRadius: `${radius.lg}px`,
-                // The design's one warm surface: the brand's darkest tint
-                // rather than the neutral card, which is what makes this
-                // column read as the answer to the column beside it.
+                // The design's one warm surface — measured #432205 (the
+                // brand's darkest tint) with a #724311 hairline off the Fair
+                // Access frame. It is what makes this column read as the
+                // answer to the column beside it rather than a fifth card in
+                // the same list. Only the CHIP above it went grey.
                 backgroundColor: color.primary[950],
                 border: `1px solid ${color.primary[900]}`,
               }}
@@ -143,7 +168,9 @@ export function FairAccess() {
                 sx={{
                   fontFamily: font.mono,
                   fontSize: '0.875rem',
-                  color: color.text.secondary,
+                  // Grey, like the note under it: the label names the figure
+                  // and should not compete with it.
+                  color: color.text.tertiary,
                 }}
               >
                 {label}
@@ -161,6 +188,9 @@ export function FairAccess() {
                 >
                   {figure}
                 </Typography>
+                {/* White, per the design — the unit finishes the figure's
+                    sentence ("1 req / second"), so it reads with it. The grey
+                    is for the label above and the note below. */}
                 <Typography variant="body1" color="text.primary">
                   {unit}
                 </Typography>

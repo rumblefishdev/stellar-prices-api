@@ -50,7 +50,7 @@ import { FairAccess } from '../landing/FairAccess';
 import { Faq } from '../landing/Faq';
 import { Features } from '../landing/Features';
 import { FinalCta } from '../landing/FinalCta';
-import { Hero, TrustBand } from '../landing/Hero';
+import { HeroSection } from '../landing/Hero';
 import { SelfService } from '../landing/SelfService';
 import { UseCases } from '../landing/UseCases';
 import { LOGIN_ANCHOR } from '../landing/links';
@@ -2199,8 +2199,9 @@ function LandingPage({
     <>
       <Navbar canOfferKey={canOfferKey} />
       <Box component="main">
-        <Hero canOfferKey={canOfferKey} />
-        <TrustBand />
+        {/* One section, one screen: the hero and the trust band together
+            fill the viewport under the navbar. See `HeroSection`. */}
+        <HeroSection canOfferKey={canOfferKey} />
         <Features />
         <UseCases />
         <Endpoints />

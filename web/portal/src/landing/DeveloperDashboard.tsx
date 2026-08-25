@@ -1,6 +1,6 @@
-import AddRoundedIcon from '@mui/icons-material/AddRounded';
-import BarChartRoundedIcon from '@mui/icons-material/BarChartRounded';
-import LockOutlinedIcon from '@mui/icons-material/LockOutlined';
+import QueryStatsRoundedIcon from '@mui/icons-material/QueryStatsRounded';
+import RocketLaunchRoundedIcon from '@mui/icons-material/RocketLaunchRounded';
+import VpnKeyRoundedIcon from '@mui/icons-material/VpnKeyRounded';
 import Box from '@mui/material/Box';
 import Stack from '@mui/material/Stack';
 import Typography from '@mui/material/Typography';
@@ -29,17 +29,17 @@ const CLAIMS: readonly {
   body: string;
 }[] = [
   {
-    icon: LockOutlinedIcon,
+    icon: VpnKeyRoundedIcon,
     title: 'API Key Management',
     body: 'View and copy your key at any time. Rotate once per month if needed.',
   },
   {
-    icon: BarChartRoundedIcon,
+    icon: QueryStatsRoundedIcon,
     title: 'Usage Dashboard',
     body: 'Live request count against your monthly quota with reset date shown clearly.',
   },
   {
-    icon: AddRoundedIcon,
+    icon: RocketLaunchRoundedIcon,
     title: 'Quick Start Guide',
     body: 'Copy-ready curl examples and SDK snippets shown right next to your key.',
   },
@@ -109,16 +109,19 @@ export function DeveloperDashboard() {
                   aria-hidden
                   sx={{
                     flexShrink: 0,
-                    width: 32,
-                    height: 32,
-                    borderRadius: '8px',
+                    width: 40,
+                    height: 40,
+                    // Discs, like the feature grid's. These three were the
+                    // squarest thing on the page and a plus sign was standing
+                    // in for "Quick Start Guide".
+                    borderRadius: '50%',
                     display: 'grid',
                     placeItems: 'center',
                     backgroundColor: color.accent.blue[100],
                     color: color.accent.blue[900],
                   }}
                 >
-                  <Icon sx={{ fontSize: 18 }} />
+                  <Icon sx={{ fontSize: 20 }} />
                 </Box>
                 <Stack spacing={0.5}>
                   <Typography variant="h5" component="h3" color="text.primary">

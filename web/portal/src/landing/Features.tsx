@@ -1,9 +1,9 @@
-import AutorenewRoundedIcon from '@mui/icons-material/AutorenewRounded';
-import CodeRoundedIcon from '@mui/icons-material/CodeRounded';
-import LockOutlinedIcon from '@mui/icons-material/LockOutlined';
-import MonitorHeartOutlinedIcon from '@mui/icons-material/MonitorHeartOutlined';
-import ShowChartRoundedIcon from '@mui/icons-material/ShowChartRounded';
-import TrendingUpRoundedIcon from '@mui/icons-material/TrendingUpRounded';
+import BoltRoundedIcon from '@mui/icons-material/BoltRounded';
+import HistoryRoundedIcon from '@mui/icons-material/HistoryRounded';
+import ShieldOutlinedIcon from '@mui/icons-material/ShieldOutlined';
+import SpeedRoundedIcon from '@mui/icons-material/SpeedRounded';
+import TerminalRoundedIcon from '@mui/icons-material/TerminalRounded';
+import WaterRoundedIcon from '@mui/icons-material/WaterRounded';
 import Box from '@mui/material/Box';
 import Stack from '@mui/material/Stack';
 import Typography from '@mui/material/Typography';
@@ -21,6 +21,12 @@ import { Section, SectionHeading, cardBorder, cardSurface } from './primitives';
  * were matched from the rendered frame instead. Swapping in the exported
  * assets is a one-line change per row and should happen — this note is here so
  * the next person knows these were chosen, not designed.
+ *
+ * The second pass (Adam's review) replaced the six glyphs with ones that say
+ * what the card says: a bolt for live prices rather than a refresh arrow, a
+ * clock-with-history for historical data rather than a second trend line, a
+ * speedometer rather than a heart monitor, a terminal rather than `</>`. The
+ * discs are round — see the tile below.
  *
  * The three-hue cycle (emerald, blue, violet) IS from the design, including
  * the pairing: the disc takes the accent's 900 shade and the glyph its 100,
@@ -47,37 +53,37 @@ const VIOLET = {
 
 const FEATURES: readonly Feature[] = [
   {
-    icon: AutorenewRoundedIcon,
+    icon: BoltRoundedIcon,
     accent: EMERALD,
     title: 'Live Prices',
     body: 'Real-time token prices for all Stellar assets. Sourced directly from Soroswap liquidity pools, updated on every block.',
   },
   {
-    icon: ShowChartRoundedIcon,
+    icon: WaterRoundedIcon,
     accent: BLUE,
     title: 'Liquidity Data',
     body: 'Pool reserves, trading depth and liquidity metrics. Essential for swap routing and price impact calculations.',
   },
   {
-    icon: TrendingUpRoundedIcon,
+    icon: HistoryRoundedIcon,
     accent: VIOLET,
     title: 'Historical Data',
     body: 'Price history for charts and analytics. Build portfolio trackers and trading dashboards with full time-series data.',
   },
   {
-    icon: MonitorHeartOutlinedIcon,
+    icon: SpeedRoundedIcon,
     accent: EMERALD,
     title: 'Fast Response Times',
     body: 'API Gateway caching keeps latency low for repeated lookups. Optimized for high-frequency applications like trading bots.',
   },
   {
-    icon: LockOutlinedIcon,
+    icon: ShieldOutlinedIcon,
     accent: BLUE,
     title: 'Secure Access',
     body: 'Every request requires an API key. Rate limiting and monthly quotas protect the service for all users.',
   },
   {
-    icon: CodeRoundedIcon,
+    icon: TerminalRoundedIcon,
     accent: VIOLET,
     title: 'Developer Friendly',
     body: 'REST API with full OpenAPI specification. Swagger UI included. SDK examples in JavaScript, Python, Rust and Go.',
@@ -137,16 +143,20 @@ export function Features() {
               <Box
                 aria-hidden
                 sx={{
-                  width: 32,
-                  height: 32,
-                  borderRadius: '8px',
+                  width: 40,
+                  height: 40,
+                  // A disc, not a rounded square — these six and the three
+                  // dashboard claims. The Fair Access ticks stay square:
+                  // Figma draws a checklist marker differently from a
+                  // category icon, and that difference is the shape.
+                  borderRadius: '50%',
                   display: 'grid',
                   placeItems: 'center',
                   backgroundColor: accent.disc,
                   color: accent.glyph,
                 }}
               >
-                <Icon sx={{ fontSize: 18 }} />
+                <Icon sx={{ fontSize: 20 }} />
               </Box>
               <Typography variant="h5" component="h3" color="text.primary">
                 {title}

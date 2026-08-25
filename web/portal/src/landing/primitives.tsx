@@ -57,15 +57,52 @@ export const cardSurface = (surface: CardSurface) =>
  */
 export const cardBorder = `1px solid ${alpha(color.stroke.default, 0.45)}`;
 
+/**
+ * The brand glow behind a section — the hero's light, reused down the page.
+ *
+ * Two stacked radials for the same reason the hero's backdrop stacks them: a
+ * single gradient bright enough to be seen against #0f0f0f bands where it
+ * ends, and two (a tight core inside a wide falloff) reads as a light source
+ * instead. `strength` is the CORE's alpha; the halo is derived from it so a
+ * section can be turned up or down with one number.
+ *
+ * `aria-hidden` and `pointer-events: none`: it is texture, and it covers the
+ * whole section including whatever controls sit in it.
+ */
+export type GlowPlacement = { at: string; size?: string; strength?: number };
+
+export function SectionGlow({
+  at,
+  size = '55% 65%',
+  strength = 0.08,
+}: GlowPlacement) {
+  return (
+    <Box
+      aria-hidden
+      sx={{
+        position: 'absolute',
+        inset: 0,
+        pointerEvents: 'none',
+        backgroundImage: `
+          radial-gradient(${size} at ${at}, ${alpha(color.primary[400], strength)} 0%, transparent 68%),
+          radial-gradient(90% 100% at ${at}, ${alpha(color.primary[400], strength * 0.5)} 0%, transparent 72%)`,
+      }}
+    />
+  );
+}
+
 /** A full-bleed section with the design's vertical rhythm and 1280 px content. */
 export function Section({
   tone = 'base',
   id,
+  glow,
   children,
   sx,
 }: {
   tone?: Tone;
   id?: string;
+  /** Paint the brand glow behind this section — see {@link SectionGlow}. */
+  glow?: GlowPlacement;
   children: ReactNode;
   sx?: object;
 }) {
@@ -75,6 +112,11 @@ export function Section({
       id={id}
       sx={{
         backgroundColor: toneBackground(tone),
+        // Only when there is a glow to contain: `relative` is what the glow
+        // positions against and `hidden` is what stops its falloff bleeding
+        // into the section below, where it would read as a second, dimmer
+        // light rather than the tail of this one.
+        ...(glow && { position: 'relative', overflow: 'hidden' }),
         // The design's sections run 128px of padding above their eyebrow and
         // roughly as much below; measured against the export, every section
         // here was coming out 50–185px short of its Figma height, which reads
@@ -84,7 +126,12 @@ export function Section({
         ...sx,
       }}
     >
-      <Container>{children}</Container>
+      {glow && <SectionGlow {...glow} />}
+      {/* `relative` so the content sits above the glow's layer without either
+          needing a z-index of its own. */}
+      <Container sx={glow ? { position: 'relative' } : undefined}>
+        {children}
+      </Container>
     </Box>
   );
 }
@@ -97,7 +144,21 @@ export function Section({
  * real `<h2>` would put the document outline out of order for a screen reader
  * in exchange for nothing visible.
  */
-export function SectionLabel({ children }: { children: ReactNode }) {
+export function SectionLabel({
+  children,
+  tone = 'brand',
+}: {
+  children: ReactNode;
+  /**
+   * `neutral` is the grey chip the design gives "Free Tier Limits" — measured
+   * #212121 with white text off the Fair Access frame. It is the one eyebrow
+   * on the page that labels a panel rather than a section, and the design
+   * marks that difference by taking the yellow away: two brand chips side by
+   * side ("Fair Access" and this one) would read as two section headings.
+   */
+  tone?: 'brand' | 'neutral';
+}) {
+  const neutral = tone === 'neutral';
   return (
     <Typography
       component="p"
@@ -106,9 +167,17 @@ export function SectionLabel({ children }: { children: ReactNode }) {
         // whether it sits left or centred is the parent's business. Forcing
         // `flex-start` here left-aligned it inside the three sections the
         // design centres.
+        //
+        // ⚠️ `inline-block` does NOT survive being a flex item: a column
+        // `Stack` with no `alignItems` stretches its children across the
+        // cross axis and the chip comes out as wide as whatever sits below
+        // it. Either give the Stack an `alignItems`, or wrap the label in a
+        // Box that takes the stretching — Fair Access does the latter.
         display: 'inline-block',
-        backgroundColor: color.surface.primary,
-        color: color.black,
+        backgroundColor: neutral
+          ? color.surface.background
+          : color.surface.primary,
+        color: neutral ? color.white : color.black,
         // A rounded rectangle, NOT a pill. Measured off the exported frame:
         // the corner arc runs ~12px at 2x, so 6px at 1x on a 32px-tall chip.
         // `radius.pill` made every eyebrow on the page a lozenge.

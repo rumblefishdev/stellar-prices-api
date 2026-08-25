@@ -35,8 +35,14 @@ const STEPS: readonly { title: string; body: string }[] = [
 ];
 
 export function SelfService() {
+  // The glow is centred and high: this section's heading is centred, and the
+  // light behind it is what separates the four steps from the band above.
   return (
-    <Section tone="base" id="get-started">
+    <Section
+      tone="base"
+      id="get-started"
+      glow={{ at: '50% 18%', size: '60% 55%' }}
+    >
       <Stack spacing={{ xs: 5, md: 9 }} alignItems="center">
         <SectionHeading
           label="Self-Service Portal"

@@ -37,7 +37,10 @@ import sorobanScanWordmark from '../assets/sorobanscan-wordmark.svg';
 /** In-page destinations, in the order the sections appear. */
 const NAV = [
   { label: 'Features', href: '#features' },
-  { label: 'Docs', href: SWAGGER_UI },
+  // In-page, not the OpenAPI document: "Quick Start" names the four-step
+  // section that gets a visitor from nothing to a key, and sending it out to
+  // a JSON file would be a link that answers a different question.
+  { label: 'Quick Start', href: '#get-started' },
   { label: 'FAQ', href: '#faq' },
 ] as const;
 

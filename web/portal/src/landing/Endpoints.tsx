@@ -53,8 +53,11 @@ function MethodBadge() {
 }
 
 export function Endpoints() {
+  // The glow sits over the eyebrow and the headline, on the left, where the
+  // design puts it — the endpoint list below stays unlit so the `Get` chips
+  // keep their contrast.
   return (
-    <Section tone="alt" id="endpoints">
+    <Section tone="alt" id="endpoints" glow={{ at: '18% 22%' }}>
       <Stack
         direction={{ xs: 'column', md: 'row' }}
         spacing={{ xs: 4, md: 6 }}

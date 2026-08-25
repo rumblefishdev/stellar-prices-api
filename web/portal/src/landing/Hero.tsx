@@ -48,13 +48,24 @@ export function Hero({ canOfferKey }: { canOfferKey: boolean }) {
         overflow: 'hidden',
         backgroundColor: color.surface.background,
         py: { xs: 7, md: 12 },
+        // Inside `HeroSection` this takes every pixel the trust band does not,
+        // and centres the copy in it. Column direction so the `Container`
+        // keeps its own width rather than being sized as a flex item in a row.
+        flex: 1,
+        display: 'flex',
+        flexDirection: 'column',
+        justifyContent: 'center',
       }}
     >
       {/* The Figma frame's `Grid layers` — a faint rule grid under an elliptical
-          glow. Painted with two CSS gradients rather than the exported vector:
+          glow. Painted with CSS gradients rather than the exported vector:
           it is a texture nobody looks at directly, and shipping it as markup
           would put ~40 `<line>` elements in the accessibility tree for it.
-          `pointer-events: none` so it never eats a click meant for the CTA. */}
+          `pointer-events: none` so it never eats a click meant for the CTA.
+
+          The glow is TWO stacked radials, not one: a tight bright core inside
+          a wide soft falloff. A single gradient strong enough to be seen at
+          the terminal's edge banded visibly across the middle of the fold. */}
       <Box
         aria-hidden
         sx={{
@@ -62,10 +73,11 @@ export function Hero({ canOfferKey }: { canOfferKey: boolean }) {
           inset: 0,
           pointerEvents: 'none',
           backgroundImage: `
-            radial-gradient(60% 70% at 72% 40%, ${alpha(color.primary[400], 0.05)} 0%, transparent 70%),
+            radial-gradient(38% 46% at 72% 42%, ${alpha(color.primary[400], 0.1)} 0%, transparent 70%),
+            radial-gradient(70% 80% at 72% 40%, ${alpha(color.primary[400], 0.055)} 0%, transparent 72%),
             linear-gradient(${alpha(color.stroke.default, 0.12)} 1px, transparent 1px),
             linear-gradient(90deg, ${alpha(color.stroke.default, 0.12)} 1px, transparent 1px)`,
-          backgroundSize: '100% 100%, 80px 80px, 80px 80px',
+          backgroundSize: '100% 100%, 100% 100%, 80px 80px, 80px 80px',
           // Fade the grid out before it reaches the edges, so it reads as
           // texture behind the content rather than as a table.
           maskImage:
@@ -190,7 +202,11 @@ function StatusBadge() {
         // added a ring the design does not have, which made the badge read as
         // a disabled chip rather than a status light.
         backgroundColor: color.surface.success,
-        borderRadius: `${radius.pill}px`,
+        // The design's chip radius, NOT a pill — the same 6px the yellow
+        // eyebrow labels take (see `SectionLabel`). A lozenge here made the
+        // one green element on the fold read as a different family of shape
+        // from every other label on the page.
+        borderRadius: `${radius.chip}px`,
         px: 1.5,
         py: 0.5,
       }}
@@ -216,6 +232,39 @@ function StatusBadge() {
         Live on Stellar Mainnet
       </Typography>
     </Stack>
+  );
+}
+
+/**
+ * The first screen: the hero and the trust band, as ONE section sized to the
+ * viewport.
+ *
+ * They are two frames in Figma and stay two components — the band has its own
+ * background and its own rules — but on screen they are one thing: everything
+ * a visitor sees before scrolling. Sizing them together is what stops the fold
+ * from cutting across the band, which is what showed a visitor the top edge of
+ * a strip they could not read and told them to scroll before the headline had
+ * landed.
+ *
+ * 52px comes off for the sticky navbar above. `dvh`, not `vh`, so a phone's
+ * collapsing address bar does not leave a gap under the band; `minHeight`, not
+ * `height`, so a narrow viewport where the copy and the terminal stack is free
+ * to be taller than the screen instead of clipping them.
+ */
+export function HeroSection({ canOfferKey }: { canOfferKey: boolean }) {
+  return (
+    <Box
+      component="section"
+      aria-label="Prices API"
+      sx={{
+        display: 'flex',
+        flexDirection: 'column',
+        minHeight: 'calc(100dvh - 52px)',
+      }}
+    >
+      <Hero canOfferKey={canOfferKey} />
+      <TrustBand />
+    </Box>
   );
 }
 
