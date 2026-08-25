@@ -3,7 +3,7 @@ id: "0170"
 title: "GET /assets/{USDC}/ohlcv returns an empty series in every mode — the endpoint asks for a USDC/USDC self-pair, and blocks 0127's M2 acceptance criterion"
 type: BUG
 status: active
-related_adr: []
+related_adr: ["0011"]
 related_tasks: ["0165", "0127", "0167", "0168", "0139", "0061", "0040", "0120"]
 tags:
   ["priority-high", "effort-medium", "api", "data-correctness", "read-surface", "scf", "milestone-M2"]
