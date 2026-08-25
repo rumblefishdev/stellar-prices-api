@@ -67,15 +67,21 @@ ssh -i ~/.ssh/sorban-prod_ed25519 deploy@168.119.73.161 \
 as captured** — replaying either while the object exists fails with
 `Code: 57 TABLE_ALREADY_EXISTS`. Fix both here, while nothing is on fire:
 
+`perl -i`, not `sed -i` — the two `sed` dialects disagree on in-place editing
+(GNU takes no argument, BSD/macOS requires an empty one) and the GNU spelling
+below used to fail outright on a Mac. `perl -i` behaves identically on both.
+
 ```bash
 # View: SHOW CREATE emits `CREATE VIEW …`; it must REPLACE, since the rollback
 # target already exists (the OR REPLACE in step 4 overwrote it in place).
-sed -i '1s/^CREATE VIEW /CREATE OR REPLACE VIEW /' \
+perl -i -pe 's/^CREATE VIEW /CREATE OR REPLACE VIEW / if $. == 1' \
   /tmp/0072-rollback-current_price_usd.sql
 
 # MV: a refreshable MV has no OR REPLACE form, so the DROP must precede it —
 # the same reason current.sql itself is DROP + re-CREATE.
-sed -i '1i DROP VIEW IF EXISTS prices.mv_current_prices;' \
+# The `!/^DROP VIEW/` guard makes this idempotent — re-running the prep step
+# would otherwise stack a second DROP onto the file.
+perl -i -pe 'print "DROP VIEW IF EXISTS prices.mv_current_prices;\n" if $. == 1 && !/^DROP VIEW/' \
   /tmp/0072-rollback-mv_current_prices.sql
 ```
 
@@ -84,13 +90,34 @@ Verify both before proceeding — this is the whole point of the step:
 ```bash
 head -1 /tmp/0072-rollback-current_price_usd.sql   # CREATE OR REPLACE VIEW …
 head -1 /tmp/0072-rollback-mv_current_prices.sql   # DROP VIEW IF EXISTS …
-grep -c "arrayReduce('median'" /tmp/0072-rollback-mv_current_prices.sql  # expect 0
+grep -c "arrayReduce('median'" /tmp/0072-rollback-mv_current_prices.sql
 ```
 
-That last check is the sanity gate: **0** means the captured MV is the v1
-definition, which is what a rollback needs. A non-zero count means the MV on
-prod is already the 0072 one and this rollback artifact would restore nothing —
-stop and re-plan before anything mutates.
+That last check is the sanity gate, and **its expected value depends on which
+upgrade you are running.** The artifact must capture the definition prod is on
+*right now* — the one you would roll back to — so assert the predecessor you
+actually expect:
+
+| rolling out | prod's predecessor | `arrayReduce('median'` |
+|---|---|---|
+| 0072 onto v1 | v1, no median filter | **0** |
+| 0135 onto 0072 | 0072, median filter present | **>= 1** |
+
+Getting either wrong means the artifact does not restore what you think it
+does — stop and re-plan before anything mutates.
+
+⚠️ This gate read `# expect 0` unconditionally until 2026-08-25, when the 0135
+apply hit it: prod was on 0072, the median was legitimately present, and the
+gate condemned a perfectly good rollback artifact. Same failure class as the
+`toIntervalHour` trap below — a check whose correct answer silently depends on
+the starting state. Whatever you add here, name the state it assumes.
+
+A second, state-independent gate worth running, since an empty capture also
+greps as 0 on every pattern:
+
+```bash
+wc -l /tmp/0072-rollback-mv_current_prices.sql   # must be non-trivially non-zero
+```
 
 ## Step 1 — cost probe (READ-ONLY, run before anything mutates)
 
