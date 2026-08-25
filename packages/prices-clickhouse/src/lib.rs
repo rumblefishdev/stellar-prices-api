@@ -225,18 +225,19 @@ mod tests {
 
     #[test]
     fn init_sql_parses_into_statements() {
-        // 1 CREATE DATABASE + 19 CREATE TABLE (assets, asset_metadata, _1m,
+        // 1 CREATE DATABASE + 20 CREATE TABLE (assets, asset_metadata, _1m,
         // _15m, _1h, _4h, _1d, _1w, _1M, current_prices, asset_supply,
         // oracle_prices, usd_rate, backfill_sdex_ledgers, backfill_progress,
-        // discovery_state, unresolved_pools, pool_registry, ingest_cursor) + 7
-        // close_usd ALTERs (one per OHLCV grain) + 1 assets.sac_address ALTER
-        // (task 0061) + 2 backfill_progress ALTERs (earliest_data_available
-        // [0073 half → 0053] + newest_data_available [0053]) = 30 statements.
+        // discovery_state, unresolved_pools, pool_registry, ingest_cursor,
+        // enrichment_frontier) + 7 close_usd ALTERs (one per OHLCV grain) + 1
+        // assets.sac_address ALTER (task 0061) + 2 backfill_progress ALTERs
+        // (earliest_data_available [0073 half → 0053] + newest_data_available
+        // [0053]) = 31 statements.
         // (+discovery_state task 0054, +asset_supply task 0039, +unresolved_pools
         // + pool_registry task 0053, +asset_metadata task 0067, +ingest_cursor
-        // task 0064, +usd_rate task 0167.)
+        // task 0064, +usd_rate task 0167, +enrichment_frontier task 0111.)
         let stmts = split_statements(INIT_SQL);
-        assert_eq!(stmts.len(), 30, "got {}", stmts.len());
+        assert_eq!(stmts.len(), 31, "got {}", stmts.len());
     }
 
     #[test]

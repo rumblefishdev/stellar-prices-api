@@ -449,3 +449,56 @@ CREATE TABLE IF NOT EXISTS prices.ingest_cursor (
 ENGINE = ReplacingMergeTree(ledger)
 ORDER BY (id)
 SETTINGS index_granularity = 8192;
+
+-- ---------------------------------------------------------------------
+-- Enrichment sweep frontier (task 0111). One row per (table, monthly
+-- partition) recording whether the historical USD-enrichment sweep still has
+-- work to do there. The scheduled pass is bounded to the newest few partitions
+-- (`ENRICH_LIVE_PARTITIONS`); the historical drain walks the rest one partition
+-- at a time, and this is how it remembers where it got to across invocations.
+--
+-- Fourth instance of the pattern `ingest_cursor` / `backfill_progress` /
+-- `discovery_state` already establish here: a tiny ReplacingMergeTree state
+-- table in `prices`, written by our own workers. ~102 partitions × 6 tiers is
+-- under 700 rows and well under 100 KB permanently — on a disk we are 3.3% of.
+-- Not a materialized view, not in the rollup chain, and NOT in the cleanup
+-- worker's retention list.
+--
+-- 🔴 ADVISORY, NEVER AUTHORITATIVE. The sweep re-confirms a month with a
+-- partition-bounded `count_candidates` (~0.2 s) before working it, so a wrong
+-- or stale row costs one cheap query and never skipped rows. Skipped rows that
+-- read as healthy are precisely the failure class that cost 26 days in task
+-- 0215; a performance hint cannot cause it, an authoritative cursor can. A
+-- slow-cadence full re-enumeration corrects drift for the same reason.
+--
+-- `state`:
+--   * `pending`   — believed to still hold enrichable zeros.
+--   * `exhausted` — a bounded pass made no progress here, so what remains has
+--                   no USD reference of any kind. That is the normal terminal
+--                   state, not an error: 5.34M rows predate the XLM/USDC
+--                   reference market (first candle 2021-02) and are permanently
+--                   unpriceable by this design. Marking them exhausted on first
+--                   visit is what stops the sweep revisiting them forever,
+--                   WITHOUT a hard-coded cutoff constant.
+--
+-- `version` is monotonic-forward, deliberately mirroring `ingest_cursor`:
+-- three invocation attempts run per hour (one EventBridge trigger plus two
+-- Lambda async retries), so writes race. RMT(version) keeps the highest, and
+-- because the frontier is advisory a race costs duplicated work rather than
+-- lost work. An operator rewind therefore needs an explicit DELETE, not a lower
+-- INSERT — the same intentional asymmetry as the ingest cursor.
+--
+-- `zeros_seen` is informational (the count at the last sweep), for drain-progress
+-- metrics; never read as a decision input.
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS prices.enrichment_frontier (
+    tbl         LowCardinality(String),
+    month       UInt32,
+    state       Enum8('pending' = 1, 'exhausted' = 2),
+    zeros_seen  UInt64,
+    swept_at    DateTime DEFAULT now(),
+    version     UInt64
+)
+ENGINE = ReplacingMergeTree(version)
+ORDER BY (tbl, month)
+SETTINGS index_granularity = 8192;

@@ -140,6 +140,14 @@ export interface EnvironmentConfig {
      */
     readonly enrichment: string;
     /**
+     * Standalone coarse-table USD sweep (task 0218). Split out of the
+     * enrichment worker, where it ran after that pass's `?` and so was skipped
+     * whenever the pass errored and starved when it ran long — it never
+     * executed in production. Its own schedule is what makes a missing run
+     * detectable by a zero-invocations alarm.
+     */
+    readonly coarseSweep: string;
+    /**
      * Backfill push-freshness probe (task 0056). Reads
      * `prices.backfill_progress.last_push_at` over mTLS and republishes each
      * stream's push age as the `Prices/Backfill` `PushAgeSeconds` metric the
@@ -626,6 +634,7 @@ export function validateConfig(config: EnvironmentConfig): void {
       'assetDiscovery',
       'cleanup',
       'enrichment',
+      'coarseSweep',
       'backfillFreshnessProbe',
       'rollupFreshnessProbe',
       'mtlsNotafterProbe',

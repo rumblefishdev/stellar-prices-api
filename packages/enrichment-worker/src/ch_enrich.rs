@@ -518,6 +518,17 @@ impl ChEnrichmentPass {
     /// the candidate count and falsely trip the `after >= remaining` no-progress
     /// break, stopping the pass with enrichable rows left. The newer candles are
     /// picked up by the next scheduled run. Returns 0 on an empty table.
+    ///
+    /// ⚠️ Deliberately **not** bounded by `cfg.time_window`, and measured, not
+    /// assumed (task 0111, 2026-08-21). The suspicion was that this is a third
+    /// full scan — `timestamp` is only the 4th sort-key column, so there is no
+    /// index prefix to answer `max()` from, and every earlier measurement had
+    /// filtered `query_log` on `INSERT INTO` and never looked at it. Prod says
+    /// otherwise: **294 rows read, 0.00 s**, because `PARTITION BY
+    /// toYYYYMM(timestamp)` gives every part a `minmax_timestamp` index and
+    /// ClickHouse answers the aggregate from part metadata alone. Adding a
+    /// window predicate here would buy nothing and cost a branch, so this stays
+    /// the one statement in the pass that reads the whole table's *extent*.
     async fn watermark(&self) -> Result<u32, ChEnrichError> {
         let sql = format!(
             "SELECT toUnixTimestamp(max(timestamp)) FROM {db}.{tbl}",

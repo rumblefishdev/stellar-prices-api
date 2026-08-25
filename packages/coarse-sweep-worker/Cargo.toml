@@ -1,0 +1,41 @@
+[package]
+name = "coarse-sweep-worker"
+version = "0.1.0"
+edition = "2024"
+description = "Coarse-table close_usd / volume_quote_usd sweep Lambda — EventBridge cron worker (task 0218)"
+
+# Its own crate, not a second bin on `enrichment-worker`, because the Lambda
+# tooling requires crate name == bin name == target/lambda/<name>: CI resolves
+# assets with `cargo lambda build -p <name>` and verifies each asset dir maps to
+# a package of that name (tools/scripts/lambda-assets.sh,
+# tools/scripts/verify-lambda-assets.sh). A bin living inside another crate
+# fails both with `did not match any packages` / `CannotFindAsset`.
+#
+# The sweep logic itself is NOT duplicated — it is `enrichment_worker::repair`,
+# reused as a library so there is one implementation and one table guard.
+[[bin]]
+name = "coarse-sweep-worker"
+path = "src/main.rs"
+required-features = ["lambda"]
+
+[features]
+default = []
+lambda = [
+    "enrichment-worker/lambda",
+    "prices-clickhouse/aws-mtls",
+    "dep:lambda_runtime",
+    "dep:aws-config",
+    "dep:aws-sdk-cloudwatch",
+]
+
+[dependencies]
+enrichment-worker = { path = "../enrichment-worker" }
+prices-clickhouse = { path = "../prices-clickhouse" }
+serde_json = "1"
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+lambda_runtime = { workspace = true, optional = true }
+aws-config = { workspace = true, optional = true }
+aws-sdk-cloudwatch = { workspace = true, optional = true }

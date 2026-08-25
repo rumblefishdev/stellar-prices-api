@@ -42,6 +42,7 @@ lambda = [
 ]
 
 [dependencies]
+chrono = { workspace = true }
 clap = { workspace = true }
 clickhouse = { workspace = true }
 rust_decimal = { workspace = true }
