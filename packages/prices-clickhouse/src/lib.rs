@@ -470,12 +470,18 @@ mod tests {
             guarded += stmt.matches("argMinIf(close_usd, timestamp,").count();
         }
 
-        // Non-vacuity: 4 argMaxIf (xlm_usd scalar, per_source's src_price and
-        // src_price_fresh, unfiltered) + 2 argMinIf (ref_7d, open_24h). A drop
-        // means a projection lost its guard or the expression was reworded and
-        // this test has gone blind.
+        // Non-vacuity: 3 argMaxIf (xlm_usd scalar, per_source's src_price,
+        // unfiltered) + 2 argMinIf (ref_7d, open_24h). A drop means a
+        // projection lost its guard or the expression was reworded and this
+        // test has gone blind.
+        //
+        // Was 6 until the PR #241 review: per_source's src_price_fresh was a
+        // second argMaxIf carrying the bound in its predicate. Liveness is now
+        // `max(timestamp) >= now() - INTERVAL 2 HOUR`, which is not a
+        // close_usd aggregate at all — it must NOT be, since counting
+        // close_usd there is exactly the finding-1 defect.
         assert_eq!(
-            guarded, 6,
+            guarded, 5,
             "current.sql guarded close_usd aggregate count changed — verify \
              every site still skips un-enriched rows, then update this count"
         );
