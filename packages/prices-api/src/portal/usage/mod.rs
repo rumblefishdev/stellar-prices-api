@@ -81,14 +81,16 @@ use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use chrono::{Datelike, NaiveDate, SecondsFormat, Utc};
+use chrono::{SecondsFormat, Utc};
 use serde::Serialize;
 
 use crate::common::{cache_control, errors};
 
 use super::auth::secret::OauthSecret;
+use super::keys::cap::{self, Cap};
 use super::keys::gateway::{Gateway, GatewayError};
-use super::keys::naming::{choose_winner, exact_matches, key_name};
+use super::keys::naming::{current_key, exact_matches, key_name, revocation_instant};
+use super::period::Period;
 
 /// The one route. `GET` only — reading a counter must not share a path shape
 /// with anything that writes.
@@ -195,6 +197,27 @@ struct EpochMark {
 pub struct UsageCache(Arc<Mutex<CacheInner>>);
 
 impl UsageCache {
+    /// Drop **whatever** is cached for `sub` — a real answer or a "no key" —
+    /// and bump the caller's epoch (task 0191).
+    ///
+    /// The rework path's eviction. A rework deletes the key the cached
+    /// numbers describe and issues one with a fresh counter, so a cached
+    /// usage answer is not stale but *about a key that no longer exists*;
+    /// serving it for the rest of the TTL would show the old key's
+    /// consumption under the new key's name. The epoch bump keeps an
+    /// in-flight "no key" from being stored (see [`CacheInner`]); an in-flight
+    /// **real** answer for the old key can still land for one TTL, which the
+    /// response's `as_of` dates honestly and which is bounded by
+    /// [`CACHE_TTL`] — accepted, because the alternative is discarding every
+    /// real answer whose lookup overlapped any rework.
+    pub fn invalidate(&self, sub: &str) {
+        {
+            let mut cache = self.0.lock().expect("the usage cache lock is not poisoned");
+            cache.entries.remove(sub);
+        }
+        self.invalidate_no_key(sub);
+    }
+
     /// Drop a cached "no key" answer for `sub`, if that is what is cached —
     /// and bump the caller's epoch either way, so an in-flight lookup that
     /// snapshotted the keyless state cannot write it back afterwards (see
@@ -352,12 +375,12 @@ async fn usage(State(state): State<UsageState>, headers: HeaderMap) -> Response 
     // last month's answer wearing this month's label, and the minute after a
     // month boundary is exactly when a viewer checks whether the reset
     // happened.
-    let period_now = current_period(Utc::now().date_naive());
+    let period_start = Period::now().start_ymd();
 
     // Fresh cache hit: no control-plane call of any kind. This is the
     // "repeated dashboard loads do not produce one GetUsage call each"
     // acceptance criterion, in one branch.
-    if let Some(entry) = cached(&state, &session.sub, state.ttl, &period_now.start) {
+    if let Some(entry) = cached(&state, &session.sub, state.ttl, &period_start) {
         return answer(entry.answer);
     }
 
@@ -376,7 +399,7 @@ async fn usage(State(state): State<UsageState>, headers: HeaderMap) -> Response 
             // timing — so it gets the same answer as the throttle arm below:
             // the last good answer (re-stamped, so the next TTL of loads
             // leaves the struggling control plane alone) beats the error page.
-            if let Some(entry) = cached(&state, &session.sub, STALE_KEEP, &period_now.start) {
+            if let Some(entry) = cached(&state, &session.sub, STALE_KEEP, &period_start) {
                 tracing::warn!(
                     deadline_secs = state.deadline.as_secs_f32(),
                     "portal usage lookup ran out of time; serving the cached answer"
@@ -407,7 +430,7 @@ async fn usage(State(state): State<UsageState>, headers: HeaderMap) -> Response 
         // happening and invite a retry; the entry the next success writes ends
         // the condition.
         Err(GatewayError::Throttled { operation }) => {
-            if let Some(entry) = cached(&state, &session.sub, STALE_KEEP, &period_now.start) {
+            if let Some(entry) = cached(&state, &session.sub, STALE_KEEP, &period_start) {
                 tracing::warn!(
                     operation,
                     "control plane is throttling; serving the cached usage answer"
@@ -456,13 +479,26 @@ async fn fetch(gateway: &Gateway, name: &str) -> Result<CachedAnswer, GatewayErr
     // The same list → exact filter → rank as the reveal, so the usage shown is
     // the usage of the key the reveal hands out — and nothing more: no create,
     // no attach, no delete. See the module docs.
+    // The same selector as the reveal and the revoke (`current_key`): the
+    // earliest LIVE key, else the earliest record. A live key beside a
+    // revoked one must show its own counter, not the dead key's.
     let candidates = exact_matches(gateway.list_named(name).await?, name);
-    let Some(winner) = choose_winner(&candidates) else {
+    let Some(winner) = current_key(&candidates).cloned() else {
         return Ok(CachedAnswer::NoKey);
     };
+    // A revoked key's counter is preserved (0180 item 8) and still describes
+    // this period, so it is shown while the revocation's period lasts — the
+    // reveal says "revoked" beside it. Once the period has rolled the reveal
+    // says "no key" and offers the issue; the usage must agree and say the
+    // same, rather than keep reporting a record the next issue will delete.
+    if !winner.enabled
+        && let Cap::Allowed = cap::decide(revocation_instant(&candidates), &Period::now())
+    {
+        return Ok(CachedAnswer::NoKey);
+    }
 
     let today = Utc::now().date_naive();
-    let period = current_period(today);
+    let period = Period::containing(today);
     // The QUERY ends today, not at the month's last day. The rendered
     // period_end stays the month boundary — that is our rule — but whether
     // the live control plane accepts a future `endDate` has never been
@@ -471,7 +507,7 @@ async fn fetch(gateway: &Gateway, name: &str) -> Result<CachedAnswer, GatewayErr
     // into a 502 on the first deployed run.
     let query_end = today.format("%Y-%m-%d").to_string();
     let usage = gateway
-        .usage_of(&winner.id, &period.start, &query_end)
+        .usage_of(&winner.id, &period.start_ymd(), &query_end)
         .await?;
 
     // Stamped when the call was actually made, not when the answer is served —
@@ -483,46 +519,11 @@ async fn fetch(gateway: &Gateway, name: &str) -> Result<CachedAnswer, GatewayErr
         used: usage.map(|u| u.used),
         remaining: usage.map(|u| u.remaining),
         limit: usage.map(|u| u.limit()),
-        period_start: period.start,
-        period_end: period.end,
-        resets_at: period.resets_at,
+        period_start: period.start_ymd(),
+        period_end: period.end_ymd(),
+        resets_at: period.resets_at(),
         as_of,
     }))
-}
-
-/// The current quota period under **our** rule: the calendar month, UTC.
-///
-/// Pure, so the December rollover and the leap year are decidable by a unit
-/// test rather than by waiting for one. AWS is deliberately not consulted —
-/// see the module docs.
-struct Period {
-    /// `YYYY-MM-DD`, the 1st of the current month.
-    start: String,
-    /// `YYYY-MM-DD`, the last day of the current month (inclusive, which is
-    /// what `GetUsage`'s `endDate` expects).
-    end: String,
-    /// RFC 3339, the 1st of the next month at 00:00 UTC.
-    resets_at: String,
-}
-
-fn current_period(today: NaiveDate) -> Period {
-    let start = NaiveDate::from_ymd_opt(today.year(), today.month(), 1)
-        .expect("the 1st of a real month exists");
-    let next_first = if today.month() == 12 {
-        NaiveDate::from_ymd_opt(today.year() + 1, 1, 1)
-    } else {
-        NaiveDate::from_ymd_opt(today.year(), today.month() + 1, 1)
-    }
-    .expect("the 1st of the following month exists");
-    let end = next_first
-        .pred_opt()
-        .expect("the day before the 1st exists");
-
-    Period {
-        start: start.format("%Y-%m-%d").to_string(),
-        end: end.format("%Y-%m-%d").to_string(),
-        resets_at: format!("{}T00:00:00Z", next_first.format("%Y-%m-%d")),
-    }
 }
 
 /// The cached entry for `sub`, if it is younger than `max_age` **and answers
@@ -691,47 +692,6 @@ mod tests {
         let rest = USAGE_PATH.trim_start_matches(super::super::PORTAL_API_PREFIX);
         assert_eq!(rest, "usage");
         assert!(!rest.contains('/'));
-    }
-
-    fn period(y: i32, m: u32, d: u32) -> Period {
-        current_period(NaiveDate::from_ymd_opt(y, m, d).unwrap())
-    }
-
-    /// Mid-month, mid-year — the ordinary case.
-    #[test]
-    fn the_period_is_the_calendar_month() {
-        let p = period(2026, 8, 19);
-        assert_eq!(p.start, "2026-08-01");
-        assert_eq!(p.end, "2026-08-31");
-        assert_eq!(p.resets_at, "2026-09-01T00:00:00Z");
-    }
-
-    /// The 1st and the last day are both inside their own month.
-    #[test]
-    fn the_boundaries_belong_to_their_month() {
-        let first = period(2026, 9, 1);
-        assert_eq!(first.start, "2026-09-01");
-        assert_eq!(first.end, "2026-09-30");
-        let last = period(2026, 9, 30);
-        assert_eq!(last.start, "2026-09-01");
-        assert_eq!(last.resets_at, "2026-10-01T00:00:00Z");
-    }
-
-    /// December resets into the next year.
-    #[test]
-    fn december_rolls_into_january() {
-        let p = period(2026, 12, 31);
-        assert_eq!(p.start, "2026-12-01");
-        assert_eq!(p.end, "2026-12-31");
-        assert_eq!(p.resets_at, "2027-01-01T00:00:00Z");
-    }
-
-    /// February in a leap year has its 29th.
-    #[test]
-    fn a_leap_february_ends_on_the_29th() {
-        let p = period(2028, 2, 15);
-        assert_eq!(p.end, "2028-02-29");
-        assert_eq!(p.resets_at, "2028-03-01T00:00:00Z");
     }
 
     fn usage_answer(period_start: &str) -> CachedAnswer {

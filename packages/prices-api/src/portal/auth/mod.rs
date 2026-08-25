@@ -194,8 +194,8 @@ pub fn routes(state: AuthState) -> Router {
 #[derive(Debug, Deserialize)]
 struct LoginQuery {
     /// Which action the round-trip authorizes. Absent means sign-in; [0189]
-    /// sends `issue` and `rework`. An unknown value is a `400` rather than a
-    /// default — see [`Action::parse`].
+    /// sends `issue`. An unknown value is a `400` rather than a default — see
+    /// [`Action::parse`].
     action: Option<String>,
 }
 
@@ -320,7 +320,8 @@ fn authorize_url(
     // anyway it does so as an OAuth error on the callback, which
     // `refuse_oauth_error` logs and lands on `?issue=denied`, rendered rather
     // than silent. 0180 item 5's consent capture confirms it at no extra
-    // cost.
+    // cost. (Task 0191's revoke is session-only and never crosses this
+    // endpoint, so the issue is still the one re-authorisation.)
     if action == Action::Issue {
         query.append_pair("prompt", "none");
     }
@@ -1044,6 +1045,7 @@ mod tests {
             issue::ISSUE_UNKNOWN_QUERY,
             issue::ISSUE_FAILED_QUERY,
             &issue::too_young_query(173),
+            &issue::capped_query("2026-09-01"),
         ] {
             assert!(format!("{PORTAL_HOME}{query}").starts_with("/api-tokens/?"));
         }

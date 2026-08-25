@@ -43,7 +43,7 @@ history:
       hand-over this document waits on is now [[0187]] (a key on screen), not
       [[0162]]; its hosting is [[0184]] and its Swagger UI [[0195]]. Two
       additions to step one: the prerequisites are [[0189]]'s membership and
-      account-age rules, and — until [[0192]] ships — the honest answer to "my
+      account-age rules, and — until [[0191]] (which absorbed 0192) ships — the honest answer to "my
       key leaked" is "stop using it and wait for the period to roll over", which
       belongs in the document rather than in a support conversation.
 ---

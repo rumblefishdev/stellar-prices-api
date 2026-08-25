@@ -30,6 +30,38 @@
 #     our deploys. Setup makes a handful of writes, spaced. The poll loop makes
 #     data-plane requests and read-only GetUsage calls.
 #
+# STATUS 2026-08-24 -- ABANDONED. Read this before running anything below.
+#
+#   The measurement this exists for was dropped (task 0191, Step 0): two runs
+#   died silently (2026-08-13, 2026-08-21) and the real MONTH rollover on
+#   1 September 2026 is the cheaper, better answer. The scratch stack this
+#   script created was torn down on 2026-08-24 -- `state.env` is archived as
+#   `state.env.torn-down-*`, so `setup` is the entry point, not `drain`.
+#
+#   Kept as a working harness. Three defects, all found the hard way:
+#
+#   1. `teardown` REPORTS SUCCESS WHILE LEAVING THE PLAN ALIVE. It deletes the
+#      usage plan before the REST API whose stage the plan still references,
+#      AWS refuses, and `|| true` swallows the refusal. Observed 2026-08-24:
+#      key and API gone, plan `ox7pv0` still standing. Delete the API first, or
+#      the plan last, and drop the `|| true` on the deletes.
+#   2. THE POLL LOOP DIES SILENTLY. `set -euo pipefail` plus `read_usage`'s
+#      `aws | awk` pipeline means one failed GetUsage -- an expired SSO token,
+#      say -- terminates the run with no output at all. There is no exit trap,
+#      so both deaths were invisible until someone diffed timestamps days
+#      later, and an archived note claimed "running" over a corpse for a week.
+#      Needs a trap that records the exit, and a `read_usage` that degrades to
+#      "?,?" instead of killing the run.
+#   3. A 26 h DEFAULT WINDOW OUTLIVES A TYPICAL SSO SESSION, which makes
+#      hitting defect 2 near-certain partway through. Use credentials that last
+#      the window (an IAM user scoped to the scratch, or run it on a role), not
+#      a laptop SSO token.
+#
+#   Also: the log is appended across runs under a single header, and `analyse`
+#   scans the whole file -- so re-running `poll` without a fresh `drain` can
+#   report a "reset instant" spanning two runs, days apart, looking plausible.
+#   Log per run before trusting `analyse` again.
+#
 # Usage:
 #   ./item7-quota-rollover.sh setup       # create scratch API + plan + key
 #   ./item7-quota-rollover.sh drain       # exhaust the quota

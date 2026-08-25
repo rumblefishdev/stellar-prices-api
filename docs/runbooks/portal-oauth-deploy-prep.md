@@ -406,8 +406,9 @@ any behaviour until the flag moves.
 
 ### The IAM, and the three limits that come with it
 
-CDK grants the api-handler role six control-plane actions and nothing else:
-`GET`/`POST` on `/apikeys`, `GET`/`DELETE` on `/apikeys/*`, `POST` on
+CDK grants the api-handler role seven control-plane actions and nothing else:
+`GET`/`POST` on `/apikeys`, `GET`/`PATCH`/`DELETE` on `/apikeys/*` (`PATCH`
+is task 0191's revoke — see below), `POST` on
 `/usageplans/{the free plan}/keys`, and — task 0188 — `GET` on
 `/usageplans/{the free plan}/usage` (`GetUsage`, the dashboard's usage read).
 The last two are declared in `api-gateway-stack.ts` rather than
@@ -425,15 +426,43 @@ three are written out in full in `compute-stack.ts`; the short version:
   partner keys included. The handler always asks for `includeValues=false`, so
   this is what code execution in the Lambda would buy an attacker, not what the
   feature does.
-- **`DELETE /apikeys/*` CAN be narrowed** with an `aws:ResourceTag/ManagedBy`
-  condition — API Gateway supports tag conditions on control-plane actions, and
-  the keys are already tagged. It is not written yet: task 0194 owns it, because
-  it should be verified against the deployed stack and it changes behaviour for
-  a console-created duplicate (untagged → `AccessDenied` → `502` instead of
-  reconciling). Until then the reconciler's blast radius is bounded by code, not
-  by IAM.
+- **`GET`/`PATCH`/`DELETE` on `/apikeys/*` are tag-scoped** to
+  `ManagedBy=prices-portal` (task 0191). Without the condition the per-key
+  `GET` was the real exposure — `GetApiKey(includeValue=true)` reads the value
+  of any key in the account by id — and `PATCH` could rename a partner key
+  into a portal name. The behaviour change to know: an exact-name key created
+  **by hand** in the console is untagged and is no longer adopted; the routes
+  answer `502` and the key is left alone. The listing (`/apikeys`) cannot
+  take the condition and stays account-wide (values never requested).
 
 Task 0194 audits all three.
+
+### Replacing a key (task 0191) — one new grant, and a wait that is the point
+
+"Replace my key" on the dashboard is a **revocation**: `UpdateApiKey
+(enabled=false)` on the caller's key, session-authorized, no Discord
+round-trip (a leaked key has to be killable while Discord is down). Nothing
+is issued: the replacement is an ordinary issue round-trip, and the issue path
+refuses it until the quota period of the revocation has rolled — the 1st of
+the next month, 00:00 UTC, **our** rule. That wait is deliberate: quota is
+scoped to `(usagePlanId, apiKeyId)`, so a replacement issued on the spot would
+be a clean counter and "replace my key" would be the button people press on
+the 20th of a heavy month.
+
+**The seventh grant** is `apigateway:PATCH` on `/apikeys/*`
+(`PortalReadDisableAndDeleteOwnApiKeys` in `compute-stack.ts`). Disable rather
+than delete, because the disabled key _is_ the record of the revocation: its
+`lastUpdatedDate` is what refuses the re-issue, and there is no registry
+(task 0190) to hold that fact otherwise. The handler sends exactly one patch
+operation, never re-enables a key, and `PATCH /apikeys/*` cannot reach a plan
+or a stage. No `UpdateUsagePlan`, no `UpdateUsage`.
+
+Operationally: a disabled key answers `403 Forbidden`, byte-identical to no
+key at all, after the usual tens of seconds of propagation (0180 item 8); its
+counter is preserved, so the dashboard keeps reporting it honestly. Once the
+period rolls, the next issue deletes the disabled key and creates the new one.
+A revoked user who asks for a key early lands on `?issue=capped` with the
+date; nothing to operate.
 
 ### Verifying it, and the warning that comes with that
 

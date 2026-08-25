@@ -130,5 +130,5 @@ that works is a smaller risk than leaving a finished one closed.
 
 - Deliberately a `TEST`, not a `FEATURE`. If this task ends up writing code, the
   slice that should have written it is the one to change.
-- Runs after [[0192]] and before [[0164]]. [[0164]] verifies the user-visible
+- Runs after [[0191]] (0192 merged into it) and before [[0164]]. [[0164]] verifies the user-visible
   flow; this verifies the configuration underneath it.

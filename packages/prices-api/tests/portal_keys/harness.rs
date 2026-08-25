@@ -63,6 +63,11 @@ pub struct StoredKey {
     pub created_at: u64,
     pub tags: HashMap<String, String>,
     pub enabled: bool,
+    /// `lastUpdatedDate` — stamped by `UpdateApiKey` (the revoke, task
+    /// 0191), which is what the re-issue cap reads off a disabled key.
+    /// `None` is the shape the service never sends and [`Store::undate`]
+    /// makes, so the cap's handling of it is testable end to end.
+    pub last_updated_at: Option<u64>,
 }
 
 #[derive(Default)]
@@ -135,6 +140,44 @@ pub struct Store {
     /// reaches that code. Worth knowing — it means the branch guards a listing
     /// that disagrees with the reader, not a busy deleter.
     pub read_always_404: bool,
+    /// Stamp every key `CreateApiKey` mints with this `createdDate` instead of
+    /// the current time (task 0191) — so a test can create a key "on the 3rd
+    /// of last month" and then ask the cap about it.
+    pub created_at_override: Option<u64>,
+    /// Answer `DeleteApiKey` for exactly these ids with a 500, and succeed for
+    /// every other id (task 0191). Unlike the sticky `fail_deletes`, this lets
+    /// a test fail the delete of the OLD key while the rollback delete of the
+    /// replacement succeeds — which is the only way to observe the rollback.
+    pub fail_delete_of: Vec<String>,
+    /// Every write, in the order it arrived: `create:<id>`, `attach:<id>`,
+    /// `delete:<id>`, `disable:<id>` (task 0191) — so a test can assert on
+    /// what was written and in which order, not only on the end state.
+    pub ops: Vec<String>,
+    /// Answer every `UpdateApiKey` with a 500 (task 0191). Sticky, like
+    /// `fail_deletes`, for the same reason.
+    pub fail_disables: bool,
+    /// Answer `UpdateApiKey` for exactly these ids with a 500 and succeed for
+    /// every other id (task 0191) — the per-id twin of `fail_disables`, and the
+    /// only way to reach a PARTIAL revocation: one key of a double-submit pair
+    /// goes off while the other refuses.
+    pub fail_disable_of: Vec<String>,
+    /// Stamp a disabled key's `lastUpdatedDate` with this instant instead of
+    /// the mock's clock (task 0191), so a test can prove the revocation date in
+    /// the answer came from the control plane's response and not from the
+    /// handler's own `SystemTime::now()`.
+    pub disable_stamps_at: Option<u64>,
+    /// Answer EVERY `GetApiKeys` with the keys the store holds PLUS every key
+    /// deleted so far, as if the listing never caught up with the deletes
+    /// (task 0191). Sticky, so the re-listing AFTER a delete is the one that
+    /// shows the phantom — the shape that made the post-roll re-issue rank a
+    /// deleted record and burn its retry.
+    pub list_resurrects_deleted: bool,
+    /// Snapshots of every key deleted, for the knob above.
+    pub deleted_keys: Vec<StoredKey>,
+    /// Answer the next `CreateApiKey` with a 500 AFTER creating the key — the
+    /// "request landed, response lost" shape that an SDK retry turns into a
+    /// duplicate (task 0191). One-shot.
+    pub fail_next_create_after_creating: bool,
     pub next_id: usize,
 
     // -----------------------------------------------------------------------
@@ -183,8 +226,27 @@ impl Store {
             created_at,
             tags: HashMap::new(),
             enabled: true,
+            last_updated_at: Some(created_at),
         });
         id
+    }
+
+    /// A key the owner revoked at `revoked_at` (task 0191): disabled, with
+    /// `lastUpdatedDate` set to the revocation instant.
+    pub fn seed_revoked(&mut self, name: &str, created_at: u64, revoked_at: u64) -> String {
+        let id = self.seed(name, created_at);
+        let key = self.keys.last_mut().unwrap();
+        key.enabled = false;
+        key.last_updated_at = Some(revoked_at);
+        id
+    }
+
+    /// Strip a key's `lastUpdatedDate`, the shape AWS does not send — what
+    /// the cap must survive without locking its owner out forever.
+    pub fn undate(&mut self, id: &str) {
+        if let Some(key) = self.keys.iter_mut().find(|k| k.id == id) {
+            key.last_updated_at = None;
+        }
     }
 
     pub fn mint_id(&mut self) -> String {
@@ -222,7 +284,10 @@ impl MockGateway {
 
         let router = Router::new()
             .route("/apikeys", get(list_keys).post(create_key))
-            .route("/apikeys/{id}", get(read_key).delete(delete_key))
+            .route(
+                "/apikeys/{id}",
+                get(read_key).delete(delete_key).patch(update_key),
+            )
             .route("/usageplans/{plan}/keys", post(attach_key))
             .route("/usageplans/{plan}/usage", get(read_usage))
             .with_state(store.clone());
@@ -288,12 +353,21 @@ pub async fn list_keys(
     } else {
         None
     };
-    let matched: Vec<StoredKey> = store
+    let mut matched: Vec<StoredKey> = store
         .list(&prefix)
         .into_iter()
         .filter(|k| Some(&k.id) != newest.as_ref())
         .cloned()
         .collect();
+    if store.list_resurrects_deleted {
+        let ghosts: Vec<StoredKey> = store
+            .deleted_keys
+            .iter()
+            .filter(|k| k.name.starts_with(&prefix))
+            .cloned()
+            .collect();
+        matched.extend(ghosts);
+    }
     let start: usize = query
         .position
         .as_deref()
@@ -322,9 +396,13 @@ pub async fn create_key(
         id: id.clone(),
         name: body["name"].as_str().unwrap_or_default().to_string(),
         value: format!("VALUE-{id}-CANARY"),
-        // Whole seconds, like the service — which is why the winner rule needs
-        // an id tie-break.
-        created_at: 1_800_000_000,
+        // Whole seconds and the CURRENT time, like the service — whole seconds
+        // is why the winner rule needs an id tie-break, and "now" is what lets
+        // task 0191's cap be tested: a key the mock just created must read as
+        // created inside the current quota period, exactly as a real one
+        // would. `created_at_override` pins it for tests that need a date.
+        created_at: store.created_at_override.unwrap_or_else(now_secs),
+        last_updated_at: Some(store.created_at_override.unwrap_or_else(now_secs)),
         tags: body["tags"]
             .as_object()
             .map(|o| {
@@ -336,6 +414,10 @@ pub async fn create_key(
         enabled: body["enabled"].as_bool().unwrap_or(false),
     };
     store.keys.push(created.clone());
+    store.ops.push(format!("create:{id}"));
+    if std::mem::take(&mut store.fail_next_create_after_creating) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, "response lost").into_response();
+    }
     (StatusCode::CREATED, Json(api_key_json(&created))).into_response()
 }
 
@@ -378,17 +460,56 @@ pub async fn delete_key(
     Path(id): Path<String>,
 ) -> Response {
     let mut store = store.lock().unwrap();
-    if store.fail_deletes {
+    if store.fail_deletes || store.fail_delete_of.contains(&id) {
         return (StatusCode::INTERNAL_SERVER_ERROR, "control plane is unwell").into_response();
     }
     store.deleted.push(id.clone());
+    store.ops.push(format!("delete:{id}"));
     let existed = store.keys.iter().any(|k| k.id == id);
+    if let Some(gone) = store.keys.iter().find(|k| k.id == id).cloned() {
+        store.deleted_keys.push(gone);
+    }
     store.keys.retain(|k| k.id != id);
     if existed {
         StatusCode::ACCEPTED.into_response()
     } else {
         not_found()
     }
+}
+
+/// `PATCH /apikeys/{id}` — `UpdateApiKey`, task 0191's revoke. Applies
+/// `replace /enabled`, stamps `lastUpdatedDate` like the service, and answers
+/// the key. The body shape is what restJson1 sends: `{"patchOperations":
+/// [{"op":"replace","path":"/enabled","value":"false"}]}`.
+pub async fn update_key(
+    State(store): State<Arc<Mutex<Store>>>,
+    Path(id): Path<String>,
+    Json(body): Json<Value>,
+) -> Response {
+    let mut store = store.lock().unwrap();
+    if store.fail_disables || store.fail_disable_of.contains(&id) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, "control plane is unwell").into_response();
+    }
+    let now = store.disable_stamps_at.unwrap_or_else(now_secs);
+    let Some(key) = store.keys.iter_mut().find(|k| k.id == id) else {
+        return not_found();
+    };
+    for op in body["patchOperations"].as_array().into_iter().flatten() {
+        if op["op"] == "replace" && op["path"] == "/enabled" {
+            key.enabled = op["value"] == "true";
+            key.last_updated_at = Some(now);
+        }
+    }
+    let snapshot = key.clone();
+    store.ops.push(format!(
+        "{}:{id}",
+        if snapshot.enabled {
+            "enable"
+        } else {
+            "disable"
+        }
+    ));
+    Json(api_key_json(&snapshot)).into_response()
 }
 
 pub async fn attach_key(
@@ -422,6 +543,7 @@ pub async fn attach_key(
         return conflict();
     }
     store.plan_keys.push((plan, key_id.clone()));
+    store.ops.push(format!("attach:{key_id}"));
     (
         StatusCode::CREATED,
         Json(json!({ "id": key_id, "type": "API_KEY" })),
@@ -554,6 +676,7 @@ pub fn api_key_json(key: &StoredKey) -> Value {
         "value": key.value,
         "enabled": key.enabled,
         "createdDate": key.created_at,
+        "lastUpdatedDate": key.last_updated_at,
         "tags": key.tags,
     })
 }
@@ -749,9 +872,24 @@ pub async fn call(router: Router, method: &str, cookie: Option<&str>) -> Reply {
 }
 
 pub async fn call_path(router: Router, method: &str, path: &str, cookie: Option<&str>) -> Reply {
+    call_path_with(router, method, path, cookie, &[]).await
+}
+
+/// [`call_path`] plus extra request headers — what the revoke (task 0191)
+/// needs, since it refuses a request without the portal's own marker.
+pub async fn call_path_with(
+    router: Router,
+    method: &str,
+    path: &str,
+    cookie: Option<&str>,
+    extra: &[(&str, &str)],
+) -> Reply {
     let mut request = Request::builder().method(method).uri(path);
     if let Some(cookie) = cookie {
         request = request.header(header::COOKIE, cookie);
+    }
+    for (name, value) in extra {
+        request = request.header(*name, *value);
     }
     let response = router
         .oneshot(request.body(Body::empty()).unwrap())
@@ -787,10 +925,20 @@ pub async fn post_key(mock: &MockGateway, sub: &str) -> Reply {
 /// callback's reply — a `303` whose `Location` is one of the five
 /// `?issue=…` landing states.
 pub async fn issue_round_trip(router: &Router) -> Reply {
+    round_trip(router, "issue").await
+}
+
+/// The shared body of the round-trip helpers above.
+///
+/// `action` must be one [`Action::parse`] accepts; anything else answers `400`
+/// at `/auth/login` and the `303` assertion below panics. That is why there is
+/// no `rework` variant here: task 0191's revoke is a same-origin `POST`, not an
+/// OAuth round-trip, and `state_token.rs` asserts `"rework"` is not an action.
+async fn round_trip(router: &Router, action: &str) -> Reply {
     let login = call_path(
         router.clone(),
         "GET",
-        "/api-tokens/api/auth/login?action=issue",
+        &format!("/api-tokens/api/auth/login?action={action}"),
         None,
     )
     .await;

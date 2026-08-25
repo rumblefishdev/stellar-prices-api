@@ -2,7 +2,7 @@
 id: "0193"
 title: "Make the portal presentable — MUI, the landing page, refusal screens, mobile"
 type: FEATURE
-status: backlog
+status: active
 related_adr: ["0010"]
 related_tasks: ["0183", "0162", "0185", "0187", "0188", "0189", "0191", "0192", "0163", "0195"]
 tags: [layer-frontend, priority-medium, effort-medium, milestone-M3, epic-self-service-onboarding, ui, dashboard, slice-10]
@@ -19,6 +19,14 @@ history:
       slice added its own. This task changes how they look and how the states
       hang together, and decides nothing about what they say: that wording was
       settled in the slice that owns each behaviour.
+  - date: 2026-08-24
+    status: active
+    who: akot
+    note: >
+      Activated by Adam to build the frontend. The portal is served under a
+      path prefix on an existing domain — `https://sorobanscan.rumblefish.dev/`
+      with the landing page at `/api-key` — so this slice's screens are the
+      whole visible surface of the self-service onboarding epic.
 ---
 
 # Make the portal presentable
@@ -37,7 +45,7 @@ this point; this slice is about it being legible.
 
 The rule that keeps this task honest: **it re-decides no copy.** The wording of
 the two eligibility refusals is [[0189]]'s, the `delete-key` modal is [[0191]]'s,
-the revoke confirmation and its "no replacement is issued" line are [[0192]]'s,
+the revoke confirmation and its "no replacement is issued" line are [[0191]]'s (0192 merged into it),
 the `GetUsage` lag line is [[0188]]'s. If this slice finds one of them wrong, fix
 it in the owning task rather than quietly here — otherwise the reason behind the
 wording is lost and the next person edits it back.

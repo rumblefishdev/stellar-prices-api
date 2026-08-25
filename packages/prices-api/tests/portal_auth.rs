@@ -395,7 +395,7 @@ async fn two_logins_produce_two_different_states() {
 }
 
 /// The action slot is verified at the door as well as in the signature, so an
-/// action this build does not implement — 0191's `rework`, arriving early —
+/// action this build does not implement — 0192's `revoke`, arriving early —
 /// cannot start a round-trip that the callback would then have to decide what
 /// to do with.
 #[tokio::test]
@@ -407,7 +407,7 @@ async fn login_refuses_an_action_it_does_not_implement() {
             .status,
         StatusCode::SEE_OTHER
     );
-    let refused = fetch(&open, &format!("{LOGIN_PATH}?action=rework"), &[]).await;
+    let refused = fetch(&open, &format!("{LOGIN_PATH}?action=revoke"), &[]).await;
     assert_eq!(refused.status, StatusCode::BAD_REQUEST);
     assert!(refused.set_cookies().is_empty());
 }
