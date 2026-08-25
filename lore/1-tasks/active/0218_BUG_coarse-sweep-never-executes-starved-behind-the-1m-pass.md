@@ -134,9 +134,12 @@ chosen.
       (embedded, backlog) → 2,924 → 1,020 (standalone, steady state).
 - [ ] A stage that is never *reached* is distinguishable in logs and metrics from
       one that ran and found nothing — verified by inducing, not inferred.
-      → **2 of 3 states induced.** *ran* and *ran and failed* done
-      (`CoarseSweepTableFailures` 0.0 → 1.0 on adjacent buckets); *never reached*
-      needs a ~3.5 h attended window, deferred to 2026-08-25 (see ⏳ HANDOFF).
+      → 🔴 **2 of 3 states induced, and the third now looks unreachable by this
+      method.** *ran* and *ran and failed* done (`CoarseSweepTableFailures`
+      0.0 → 1.0 on adjacent buckets). *never reached* ATTEMPTED 2026-08-25 with
+      three genuinely empty `Invocations` hours — **the alarm did not fire**,
+      despite correct configuration. See "AC 2 state 3 of 3 — FAILED" below. Two
+      attended windows spent; do not retry blind.
 - [x] The sweep's budget cannot be reduced to zero by the preceding stage.
       → `budget_ms=120000`, full and unreduced; there is no preceding stage left.
 - [x] `EnrichmentPassDurationMs` and the sweep's own metric are both published on
@@ -261,7 +264,94 @@ that never ran.
 Env restored from the saved copy immediately afterwards and diffed against it —
 byte-identical. A redeploy also restores the CDK values.
 
-### ⏳ HANDOFF — AC 2 state 3 of 3, DEFERRED to 2026-08-25 working hours
+### 🔴 AC 2 state 3 of 3 — ATTEMPTED 2026-08-25, FAILED. The alarm did not fire.
+
+The handoff below was executed as written. It did not produce the evidence, and
+the reason is **not** operator error, not a misconfiguration, and not [[0204]]'s
+blind-alarm failure.
+
+| | |
+|---|---|
+| rule disabled | 2026-08-25 **08:44 UTC** (after the 08:30 run, as planned) |
+| rule re-enabled | ~**12:20 UTC** — verified `ENABLED` |
+| empty clock hours | 09, 10, 11 — three consecutive, as required |
+| alarm state | **`OK` throughout**, and 15 min past the third bucket closing |
+
+**The function genuinely was never reached.** `AWS/Lambda` `Invocations`, on the
+exact dimension the alarm watches:
+
+```
+06:00  1.0        09:00  — no datapoint
+07:00  1.0        10:00  — no datapoint
+08:00  1.0        11:00  — no datapoint
+```
+
+`Prices/Enrichment` `CoarseSweepRuns` was likewise silent across 09:00-12:00. So
+the *precondition* was satisfied exactly; the alarm simply did not respond.
+
+`describe-alarm-history` shows **no state transition on 2026-08-25 at all** — the
+newest entries remain 2026-08-24's `INSUFFICIENT_DATA → ALARM` (14:15) and
+`ALARM → OK` (14:19).
+
+#### The configuration is correct — do not re-check it
+
+```
+Metric              AWS/Lambda / Invocations
+Dimensions          FunctionName=prices-production-coarse-sweep   ← correct
+Period              3600     EvaluationPeriods 3   DatapointsToAlarm 3
+Threshold           < 1.0    ComparisonOperator LessThanThreshold
+TreatMissingData    breaching
+```
+
+Read from `describe-alarms` during the window. There is nothing to fix in the
+alarm definition, and a future session should not spend time re-verifying the
+dimension or `treatMissingData`.
+
+⚠️ `StateReason` is stale by construction — CloudWatch rewrites it only on a
+state *change*, so it still described yesterday's transition. It is not evidence
+about today, and it misleads if read as such.
+
+#### Leading hypothesis — explicitly NOT established
+
+`AWS/Lambda` `Invocations` publishes **nothing** for an idle function; it does
+not publish a zero. An alarm watching a metric that published and then *stopped*
+appears to evaluate missing data far more slowly than `EvaluationPeriods ×
+Period` implies. Note the contrast: yesterday it went `INSUFFICIENT_DATA →
+ALARM` promptly at creation, when the metric had **never** published — a
+different situation from one that stopped.
+
+Plausible, unproven, and recorded as a hypothesis so the next attempt tests it
+rather than inheriting it.
+
+#### 🔑 This is a finding about the alarm, not only a missing tick
+
+The alarm exists so that a sweep which stops running gets noticed. If it needs
+substantially more than three hours of silence to breach, it is materially weaker
+than its `3 × 1 h` configuration advertises — an operational defect in this
+task's own observability, discovered by trying to use it.
+
+That reframes AC 2's third state. The state is not merely *un-induced*; the
+instrument built to detect it did not detect it under laboratory conditions.
+
+#### Decision
+
+1. **AC 2 stays at 2 of 3.** *ran* and *ran and failed* remain induced and
+   recorded above. *never reached* is unproven.
+2. **The rule was re-enabled rather than held for a longer window.** Same
+   reasoning as 2026-08-24: an unattended production schedule left disabled is
+   worse than an unproven AC, and holding it off to observe a lag of unknown
+   length reproduces this task's own defect.
+3. ⚠️ **Do not schedule a third blind attempt.** Two attended windows are spent.
+   The lag must be measured out-of-band first — cheaply, by pointing an identical
+   alarm at a function that is already idle and timing the breach — and only then
+   should an induction be sized to it.
+4. Spawned as follow-up work below rather than left as prose.
+
+### ⏳ HANDOFF (superseded by the attempt above — kept for the procedure, which was followed correctly)
+
+Original text:
+
+#### ⏳ HANDOFF — AC 2 state 3 of 3, DEFERRED to 2026-08-25 working hours
 
 Started 2026-08-24 14:42 UTC and **reverted the same session**: the alarm needs
 ~3.5 h and the operator had to stop. The rule was re-enabled rather than left off
@@ -409,6 +499,11 @@ on recovery — expected, not an incident.
 
 ## Future Work
 
+- 🔴 **[[0222]] — the `no-invocations` alarm did not fire after three genuinely
+  empty hours.** Spawned 2026-08-25 from this task's second failed induction. The
+  alarm's configuration is correct, so the defect is in how CloudWatch evaluates
+  a metric that stops publishing. This is the instrument this task shipped to
+  make a dead schedule visible, so it outranks the items below.
 - The sweep iterates `cfg.tables` in fixed order with no rotation, so if any
   table ever consumes the budget the tail starves permanently. Raised as the
   structural half of a rejected PR #244 review finding; not yet a task. Worth
