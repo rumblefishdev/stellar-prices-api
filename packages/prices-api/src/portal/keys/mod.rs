@@ -278,6 +278,22 @@ struct KeyResponse {
     name: String,
     /// The key itself — what goes in `X-API-Key`.
     value: String,
+    /// `createdDate`, RFC 3339 — when API Gateway minted this key.
+    ///
+    /// The dashboard's "Issued" field (task 0193's frame `778:2499`). Read off
+    /// the listing this route already made, so it costs no extra call; `None`
+    /// only where AWS omitted the field, which it does not do in practice —
+    /// the option follows [`naming::KeyRecord`], which types it that way
+    /// because the SDK does.
+    created_at: Option<String>,
+    /// `lastUpdatedDate`, RFC 3339 — the last change to the key RECORD.
+    ///
+    /// Deliberately not called "rotated": this build has no rotation, and the
+    /// audit under task 0191 measured that a no-op patch and a `description`
+    /// edit from the console both bump this value. It is what the re-issue cap
+    /// is decided against for a revoked key, and on the dashboard it is
+    /// labelled "Last updated" for exactly that reason.
+    last_updated_at: Option<String>,
 }
 
 /// Both verbs, one handler, and both are the **reveal**.
@@ -393,6 +409,8 @@ async fn reveal(state: &KeysState, headers: &HeaderMap) -> Response {
                     // exists: everything else in this module can only hold the
                     // value, never read it.
                     value: value.expose().to_string(),
+                    created_at: record.created_at.map(rfc3339),
+                    last_updated_at: record.last_updated_at.map(rfc3339),
                 })
                 .into_response(),
             )

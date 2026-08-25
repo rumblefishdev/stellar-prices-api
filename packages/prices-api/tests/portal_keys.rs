@@ -151,6 +151,41 @@ async fn an_existing_key_is_revealed_with_its_value() {
     assert_eq!(body["value"], mock.with(|s| s.keys[0].value.clone()));
 }
 
+/// The two instants the dashboard's metadata row states (task 0193).
+///
+/// They come off the listing this route already makes — no extra call — and
+/// they are RFC 3339 so the page renders them in UTC without parsing an epoch.
+/// `1_000` seconds after the epoch is 1970-01-01T00:16:40Z, which is what the
+/// literal below is: the point is the SHAPE and the wiring, not the date.
+#[tokio::test]
+async fn the_reveal_carries_the_keys_created_and_updated_instants() {
+    let mock = MockGateway::start().await;
+    let name = format!("discord-{USER_ID}-key");
+    mock.with(|s| s.seed(&name, 1_000));
+
+    let body = reveal(&mock, USER_ID).await.json();
+    assert_eq!(body["created_at"], "1970-01-01T00:16:40Z");
+    assert_eq!(body["last_updated_at"], "1970-01-01T00:16:40Z");
+}
+
+/// An undated record answers `null`, not an invented epoch.
+///
+/// The same rule the revocation instant follows (task 0191 finding #30): a
+/// missing `lastUpdatedDate` rendered as "1 January 1970" is worse than a
+/// field the page simply does not show. `undate` produces the shape AWS does
+/// not send, which is exactly why it is worth pinning.
+#[tokio::test]
+async fn an_undated_key_reveals_a_null_instant_rather_than_the_epoch() {
+    let mock = MockGateway::start().await;
+    let name = format!("discord-{USER_ID}-key");
+    let id = mock.with(|s| s.seed(&name, 1_000));
+    mock.with(|s| s.undate(&id));
+
+    let body = reveal(&mock, USER_ID).await.json();
+    assert!(body["last_updated_at"].is_null(), "{body}");
+    assert_eq!(body["created_at"], "1970-01-01T00:16:40Z");
+}
+
 /// **The acceptance criterion "issue is unreachable with a session cookie
 /// alone", verified by calling it directly with nothing else.** Both verbs,
 /// empty store — the state 0187's handler would have created in — and the

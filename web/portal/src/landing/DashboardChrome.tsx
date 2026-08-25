@@ -78,16 +78,39 @@ export function DashboardNavbar({
                   fontWeight: 500,
                   textDecoration: 'none',
                   color: current ? color.text.primary : color.text.tertiary,
+                  // The frame's active tab: a BRAND-yellow rule, not a white
+                  // one, and it runs past the word at both ends — 8px of side
+                  // padding is what makes it longer than the label without
+                  // moving the label itself off the design's baseline.
                   borderBottom: current
-                    ? `2px solid ${color.text.primary}`
+                    ? `2px solid ${color.primary[400]}`
                     : '2px solid transparent',
-                  pb: '2px',
+                  px: current ? 1 : 0,
+                  pb: '4px',
                   '&:hover': { color: color.text.primary },
                 }}
               >
                 {label}
               </Link>
             ))}
+
+            {/* The frame's vertical rule between "OpenAPI Docs" and the
+                account. Decorative, so `aria-hidden`: what it separates is
+                already two different things to a screen reader (a nav list and
+                the signed-in identity), and announcing a pipe between them
+                would be noise. */}
+            {username && (
+              <Box
+                aria-hidden
+                sx={{
+                  display: { xs: 'none', sm: 'block' },
+                  width: '1px',
+                  height: 24,
+                  flexShrink: 0,
+                  backgroundColor: alpha(color.stroke.default, 0.6),
+                }}
+              />
+            )}
 
             {username && (
               <Stack

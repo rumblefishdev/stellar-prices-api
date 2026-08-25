@@ -9,6 +9,16 @@ import { color, font, radius } from '../theme/tokens';
 import { cardBorder } from './primitives';
 
 /**
+ * The dashboard card's hairline — Figma's `Stroke/Default` at full strength.
+ *
+ * Distinct from the landing page's `cardBorder` (the same colour at 45%) and
+ * measured, not chosen: the dashboard's floor is #212121 where the landing's
+ * sections are #0f0f0f, and a 45% rule that separates a card on the darker
+ * floor is invisible on the lighter one.
+ */
+export const panelBorder = `1px solid ${color.stroke.default}`;
+
+/**
  * The dashboard's building blocks, shared by the landing page's preview and by
  * the real `/dashboard` route.
  *
@@ -127,7 +137,12 @@ export function KeyField({
   testId,
   actions,
 }: {
-  label: string;
+  /**
+   * Omitted on the first-login card, where the sentence above the box already
+   * says what it is ("Copy it below and make your first request") and the
+   * design draws the box bare.
+   */
+  label?: string;
   value: ReactNode;
   testId?: string;
   actions?: ReactNode;
@@ -143,13 +158,19 @@ export function KeyField({
           // credential itself rather than the panel around it, which is what
           // makes the key the thing your eye lands on when the dashboard opens
           // — and this screen exists so that a developer can copy it.
-          border: `1px solid ${color.stroke.action}`,
+          //
+          // `primary[400]`, measured off the frame's ring — not the darker
+          // `stroke.action` (#edbe05) this used to take, which is the strip's
+          // border below and reads as a duller yellow beside the key itself.
+          border: `1px solid ${color.primary[400]}`,
           backgroundColor: color.surface.backgroundAlt,
         }}
       >
-        <Typography variant="body2" sx={{ color: color.text.tertiary }}>
-          {label}
-        </Typography>
+        {label && (
+          <Typography variant="body2" sx={{ color: color.text.tertiary }}>
+            {label}
+          </Typography>
+        )}
         <Box
           component="code"
           data-testid={testId}
@@ -157,6 +178,13 @@ export function KeyField({
             fontFamily: font.mono,
             fontSize: '0.9375rem',
             color: color.text.accent,
+            // No chip behind the key: it already sits in its own ringed box,
+            // and a second, differently-grey rectangle inside that is the
+            // shade Adam kept seeing. The chrome's rule is narrowed to `p
+            // code` so this is now what actually applies rather than what
+            // loses to it on specificity.
+            backgroundColor: 'transparent',
+            padding: 0,
             // A 40-character opaque string must wrap rather than widen the
             // card — this renders at 375 px too.
             overflowWrap: 'anywhere',
@@ -265,11 +293,16 @@ export function UsageMeter({
               direction="row"
               justifyContent="space-between"
               spacing={2}
+              // Measured: the percentage is tertiary grey and what is left is
+              // a step brighter. The two are not the same claim — one is a
+              // ratio, the other a number of requests you still have.
               sx={{ color: color.text.secondary }}
             >
               <Typography
                 variant="body2"
-                sx={{ color: full ? color.text.error : 'inherit' }}
+                sx={{
+                  color: full ? color.text.error : color.text.tertiary,
+                }}
               >
                 {full ? '100% - limit reached' : `${percent}% used`}
               </Typography>
@@ -290,24 +323,38 @@ export function UsageMeter({
             // twice.
             aria-hidden
             sx={{
-              height: 8,
+              // Measured off the frame: a 10px white pill with the fill
+              // running #ffe945 → #cc9302 left to right. A flat brand yellow
+              // on a white track reads as a solid block; the gradient is what
+              // gives the bar a direction.
+              height: 10,
               borderRadius: `${radius.pill}px`,
-              backgroundColor: color.gray[50],
+              backgroundColor: color.white,
               '& .MuiLinearProgress-bar': {
                 borderRadius: `${radius.pill}px`,
                 // Red at the ceiling. The bar is the fastest read on the card,
                 // and "you have run out" should not arrive in the same colour
                 // as "you have plenty left".
-                backgroundColor: full ? color.red[400] : color.primary[400],
+                ...(full
+                  ? { backgroundColor: color.red[400] }
+                  : {
+                      backgroundColor: 'transparent',
+                      backgroundImage: `linear-gradient(90deg, ${color.primary[300]}, ${color.primary[600]})`,
+                    }),
               },
             }}
           />
 
+          {/* Under the bar, and LEFT — the frame's "Resets May 1" sits at the
+              start of the row, not opposite the percentage. On the dashboard
+              the percentage has already been said above the bar, so this row
+              carries the one caption; on the landing preview, which passes no
+              `resetLabel`, it carries the percentage instead. */}
           <Stack
             direction="row"
             justifyContent="space-between"
             spacing={2}
-            sx={{ color: color.text.secondary }}
+            sx={{ color: color.text.tertiary }}
           >
             {!headline && (
               <Typography variant="body2" color="inherit">
@@ -383,8 +430,15 @@ export function DashboardCard({
       component="section"
       sx={{
         borderRadius: `${radius.lg}px`,
-        border: cardBorder,
-        backgroundColor: color.surface.grayAlt,
+        // A SOLID #535353 hairline, not the landing page's 45% one — measured
+        // off the frame's card edge. The dashboard's cards sit on a lighter
+        // floor (#212121) than the landing's sections, and the faint rule that
+        // separates a card there disappears here.
+        border: panelBorder,
+        // Two fills, not one: the title band is the darkest surface and the
+        // body a step lighter, which is what makes the header read as a header
+        // without a second border. Measured #1a1a1a over #272727.
+        backgroundColor: color.surface.gray,
         overflow: 'hidden',
         ...sx,
       }}
@@ -393,9 +447,17 @@ export function DashboardCard({
         direction="row"
         alignItems="center"
         spacing={1.5}
-        sx={{ px: 3, py: 2, borderBottom: cardBorder }}
+        sx={{
+          px: 3,
+          py: 2,
+          backgroundColor: color.surface.grayAlt,
+          borderBottom: panelBorder,
+        }}
       >
-        <Typography variant="h5" component="h2" color="text.primary">
+        {/* 24px, the same size the page's own heading takes — measured, and
+            equal on the frame: the card titles and "Dashboard" have the same
+            cap height. `h5` (20px) made every card title a step smaller. */}
+        <Typography variant="h4" component="h2" color="text.primary">
           {title}
         </Typography>
         {status && <StatusPill {...status} />}
@@ -415,10 +477,15 @@ export function StatusPill({
   label: string;
   tone: 'ok' | 'muted' | 'bad';
 }) {
+  // Solid fills, measured: #0d542b behind #05df72. The 55% versions these
+  // replace were mixing with the card behind them, which on the frame's
+  // lighter body turned the one green thing on the card grey-green.
   const skin = {
-    ok: { fg: color.text.success, bg: alpha(color.surface.success, 0.55) },
-    bad: { fg: color.text.error, bg: alpha('#82181a', 0.55) },
-    muted: { fg: color.text.tertiary, bg: color.surface.gray },
+    ok: { fg: color.text.success, bg: color.surface.success },
+    bad: { fg: color.text.error, bg: '#82181a' },
+    // A step DARKER than the card body it sits on, not lighter: the body is
+    // `surface.gray` now, so the old muted fill was the card itself.
+    muted: { fg: color.text.tertiary, bg: color.surface.grayAlt },
   }[tone];
 
   return (
@@ -450,6 +517,115 @@ export function StatusPill({
 }
 
 /**
+ * The bordered note under the key card's metadata — the frame's yellow strip.
+ *
+ * A `<p>` inside a ringed box, with the warning glyph `aria-hidden`: the
+ * sentence carries the meaning and "warning triangle" announced before it is
+ * noise. It is `role="note"`, not `role="alert"`: nothing has just gone wrong
+ * and nothing needs interrupting — it states a rule that applies before the
+ * visitor presses anything.
+ */
+export function NoticeStrip({ children }: { children: ReactNode }) {
+  return (
+    <Stack
+      role="note"
+      direction="row"
+      spacing={1.5}
+      sx={{
+        p: 1.5,
+        borderRadius: `${radius.md}px`,
+        border: `1px solid ${color.stroke.action}`,
+        // The card's darkest surface, measured — not a tinted brand wash. On
+        // the frame the strip reads as an inset panel that happens to be
+        // ringed yellow, and a brown fill under yellow text is the one
+        // combination on this page that loses contrast.
+        backgroundColor: color.surface.grayAlt,
+      }}
+    >
+      <Box
+        aria-hidden
+        sx={{
+          flexShrink: 0,
+          width: 20,
+          height: 20,
+          borderRadius: '50%',
+          display: 'grid',
+          placeItems: 'center',
+          border: `1.5px solid ${color.text.accent}`,
+          color: color.text.accent,
+          fontFamily: font.secondary,
+          fontWeight: 700,
+          fontSize: '0.8125rem',
+          lineHeight: 1,
+        }}
+      >
+        !
+      </Box>
+      {/* The frame's two-colour sentence: white prose with the rule and the
+          date picked out in the brand yellow. Styled here rather than at each
+          call site so a `<strong>` inside any notice reads the same — and
+          because the dashboard's chrome paints every `<p>` secondary grey,
+          which this has to override to reach the frame's #f5f5f5. */}
+      <Box
+        sx={{
+          minWidth: 0,
+          '& p': { color: color.text.primary },
+          '& strong': { color: color.text.accent, fontWeight: 700 },
+        }}
+      >
+        {children}
+      </Box>
+    </Stack>
+  );
+}
+
+/**
+ * The metadata row under the key: label-over-value pairs separated by rules.
+ *
+ * A `<dl>`, because that is what it is — three terms and their definitions,
+ * not a table and not a list of sentences. The rules are `Stack` dividers, so
+ * they appear BETWEEN the columns and never trail the last one, and they are
+ * dropped at `xs` where the columns stack and a vertical rule between rows
+ * would be pointing the wrong way.
+ *
+ * The caller decides how many columns there are. On the first-login card that
+ * is two or three: the quota column renders only once the usage endpoint has
+ * answered, because the alternative is printing a plan limit this page has
+ * not been told.
+ */
+export function MetaRow({
+  children,
+  hidden = false,
+}: {
+  children: ReactNode;
+  /** Rendered nowhere at all — see the first-login card. */
+  hidden?: boolean;
+}) {
+  if (hidden) return null;
+  return (
+    <Stack
+      component="dl"
+      direction={{ xs: 'column', sm: 'row' }}
+      spacing={{ xs: 2, sm: 3 }}
+      sx={{ m: 0 }}
+      divider={
+        <Box
+          aria-hidden
+          sx={{
+            display: { xs: 'none', sm: 'block' },
+            width: '1px',
+            alignSelf: 'stretch',
+            backgroundColor: alpha(color.stroke.default, 0.45),
+          }}
+        />
+      }
+    >
+      {children}
+    </Stack>
+  );
+}
+
+/**
  * A label-over-value pair from the API Key card's metadata row.
  *
  * The design shows four — Key ID, Issued, Last rotated, Discord account — and
@@ -467,11 +643,17 @@ export function MetaField({
 }) {
   return (
     <Stack spacing={0.5} sx={{ minWidth: 0 }}>
-      <Typography variant="body2" sx={{ color: color.text.tertiary }}>
+      <Typography
+        component="dt"
+        variant="body2"
+        sx={{ color: color.text.tertiary }}
+      >
         {label}
       </Typography>
       <Box
+        component="dd"
         sx={{
+          m: 0,
           ...({ fontFamily: font.secondary } as object),
           fontWeight: 700,
           fontSize: '0.9375rem',

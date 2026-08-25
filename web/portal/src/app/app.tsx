@@ -33,6 +33,8 @@ import {
   DashboardCard,
   KeyField,
   MetaField,
+  MetaRow,
+  NoticeStrip,
   UsageMeter,
 } from '../landing/DashboardPanel';
 import { DashboardNavbar } from '../landing/DashboardChrome';
@@ -53,7 +55,11 @@ import { FinalCta } from '../landing/FinalCta';
 import { HeroSection } from '../landing/Hero';
 import { SelfService } from '../landing/SelfService';
 import { UseCases } from '../landing/UseCases';
-import { LOGIN_ANCHOR } from '../landing/links';
+import { ArrowBadge } from '../landing/primitives';
+import AutorenewRoundedIcon from '@mui/icons-material/AutorenewRounded';
+import ContentCopyRoundedIcon from '@mui/icons-material/ContentCopyRounded';
+
+import { LOGIN_ANCHOR, QUICKSTART } from '../landing/links';
 import { alpha } from '@mui/material/styles';
 
 import { theme } from '../theme/theme';
@@ -679,6 +685,13 @@ function Dashboard({
   // would otherwise describe a key just deactivated — and re-asked, because
   // the backend evicted its cache on the revoke.
   const [revokedCount, setRevokedCount] = useState(0);
+  // The quota `/usage` reported, so the key card's "Monthly quota" field can
+  // state a number this page was actually told. `undefined` until the panel
+  // below has an answer; the field is simply absent until then.
+  const [usageFacts, setUsageFacts] = useState<{
+    quota: number | null;
+    resetsAt: string | null;
+  }>({ quota: null, resetsAt: null });
 
   return (
     <Stack spacing={3}>
@@ -686,7 +699,9 @@ function Dashboard({
         {/* The page's `h1`. The design puts the word "Dashboard" at the top of
             the page and the card titles below it, which is also the right
             outline: one page subject, three panels under it. */}
-        <Typography variant="h3" component="h1" color="text.primary">
+        {/* 24px: measured equal to the card titles on the frame, so it takes
+            the same step of the scale — `h3` (28px) was one step too large. */}
+        <Typography variant="h4" component="h1" color="text.primary">
           Dashboard
         </Typography>
         <Typography variant="body1" sx={{ color: color.text.tertiary }}>
@@ -705,6 +720,9 @@ function Dashboard({
           setRevokedCount((n) => n + 1);
         }}
         session={session}
+        rateLimit={rateLimit}
+        quota={usageFacts.quota}
+        resetsAt={usageFacts.resetsAt}
       />
 
       {/* Two columns at the design's 5:3 ratio, one at 375px. `align-items:
@@ -713,9 +731,13 @@ function Dashboard({
       <Box
         sx={{
           display: 'grid',
-          gap: 3,
+          // Measured off the frame: 740 and 524 either side of a 16px gutter,
+          // which is 7fr : 5fr of the 1264 that leaves. The old 5fr : 3fr gave
+          // the usage card 62% where the design gives it 58%, and the Rate
+          // Limit card's two figures wrapped a line early because of it.
+          gap: 2,
           alignItems: 'start',
-          gridTemplateColumns: { xs: '1fr', md: '5fr 3fr' },
+          gridTemplateColumns: { xs: '1fr', md: '7fr 5fr' },
         }}
       >
         {/* Task 0188. Keyed refetch: a key appearing on screen (revealed on
@@ -726,6 +748,12 @@ function Dashboard({
           keyOnScreen={keyOnScreen}
           revokedCount={revokedCount}
           rateLimit={rateLimit}
+          onUsage={(usage) =>
+            setUsageFacts({
+              quota: usage?.limit ?? null,
+              resetsAt: usage?.resets_at ?? null,
+            })
+          }
         />
         <RateLimitCard rateLimit={rateLimit} />
       </Box>
@@ -839,6 +867,89 @@ function describeUtcInstant(value: string | undefined): string | null {
     timeZone: 'UTC',
   });
   return `${day}, ${time} UTC`;
+}
+
+/**
+ * The 1st of next month, in UTC — our quota period rule, computed.
+ *
+ * The backend states the same instant in `/usage`'s `resets_at`
+ * (`portal/period.rs`), and the page prefers that value wherever it has it.
+ * This is the fallback for the moment before that request answers, and it is
+ * a computation rather than a guess: "the 1st of the month, 00:00 UTC" is OUR
+ * definition, not something AWS reports (ADR 0010, correction #2).
+ */
+function describeNextPeriodStart(): string {
+  const now = new Date();
+  const next = new Date(
+    Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1),
+  );
+  return next.toLocaleDateString('en-GB', {
+    day: 'numeric',
+    month: 'long',
+    year: 'numeric',
+    timeZone: 'UTC',
+  });
+}
+
+/**
+ * The circled glyph inside a dashboard button — the frame's treatment.
+ *
+ * Both controls carry one: a black disc with a yellow glyph on the yellow
+ * button, a yellow disc with a black glyph on the dark one. The same shape the
+ * landing page's `ArrowBadge` draws, and a real element rather than a bordered
+ * icon for the same reason: the two variants differ by colour alone.
+ *
+ * `aria-hidden`, always — the word beside it is the label.
+ */
+function GlyphBadge({
+  icon: Icon,
+  tone,
+}: {
+  icon: typeof ContentCopyRoundedIcon;
+  tone: 'onPrimary' | 'onDark';
+}) {
+  const onPrimary = tone === 'onPrimary';
+  return (
+    <Box
+      aria-hidden
+      sx={{
+        width: 24,
+        height: 24,
+        flexShrink: 0,
+        borderRadius: '50%',
+        display: 'grid',
+        placeItems: 'center',
+        backgroundColor: onPrimary ? color.black : color.primary[400],
+        color: onPrimary ? color.primary[400] : color.black,
+      }}
+    >
+      <Icon sx={{ fontSize: 14 }} />
+    </Box>
+  );
+}
+
+/**
+ * A key's timestamp as a plain UTC date — "13 April 2026".
+ *
+ * Date only, where `describeUtcInstant` gives date and time: the metadata row
+ * states when a key came into being, and the minute it happened is noise
+ * beside an id and an account. UTC for the reason task 0191 decision #15
+ * gives: rendered in the viewer's zone, a key minted at 00:30 UTC on the 1st
+ * would be dated to the previous month west of Greenwich.
+ *
+ * `null` for a missing or unparseable value, so the caller can drop the field
+ * rather than print "Invalid Date".
+ */
+function describeUtcDay(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const at = new Date(value);
+  if (Number.isNaN(at.getTime())) return null;
+  return at.toLocaleDateString('en-GB', {
+    day: 'numeric',
+    month: 'long',
+    year: 'numeric',
+    timeZone: 'UTC',
+  });
 }
 
 /**
@@ -1032,11 +1143,30 @@ function ApiKey({
   onKey,
   onRevoked,
   session,
+  rateLimit,
+  quota,
+  resetsAt,
 }: {
   onKey?: () => void;
   /** Task 0191: the key on screen was just deactivated. A fact, no data. */
   onRevoked?: () => void;
   session: PortalSession;
+  /** The free plan's per-second limit, from `/config`. */
+  rateLimit?: number;
+  /**
+   * The monthly quota, as `/usage` reported it to the panel below — `null`
+   * where AWS has recorded nothing yet, `undefined` before it has answered.
+   * Lifted rather than fetched again: `GetUsage` is a control-plane call and
+   * this page already spends one (task 0194 owns that budget).
+   */
+  quota?: number | null;
+  /**
+   * When the current quota period ends, RFC 3339, as `/usage` reported it —
+   * and so the instant a key revoked today becomes re-issuable (task 0191:
+   * one key per period, the cap decided against the same `Period`). `null`
+   * until the panel below has an answer.
+   */
+  resetsAt?: string | null;
 }) {
   type KeyView =
     | { state: 'loading' }
@@ -1061,6 +1191,18 @@ function ApiKey({
   // Whether THIS landing is itself proof a key exists: the backend created
   // one before it redirected.
   const landedWithKey = issue === 'ok';
+  /**
+   * The first-login treatment — the frame Adam sent for "I just got my first
+   * key". True only while the round-trip's `?issue=ok` is still in the URL,
+   * which `useOneShotParams` strips on the next render, so a refresh returns
+   * the ordinary card.
+   */
+  const justIssued = landedWithKey && view.state === 'ok';
+  /** `createdDate` and `lastUpdatedDate`, as dates — absent where AWS's are. */
+  const issuedOn =
+    view.state === 'ok' ? describeUtcDay(view.key.created_at) : null;
+  const updatedOn =
+    view.state === 'ok' ? describeUtcDay(view.key.last_updated_at) : null;
   const [replacing, setReplacing] = useState(false);
 
   // The same guard `SignIn` and `Usage` keep, and for both of their reasons:
@@ -1176,18 +1318,30 @@ function ApiKey({
 
   return (
     <DashboardCard
-      title="API Key"
-      // "Just issued" only for the round-trip that just ended — otherwise a
-      // key that has existed for months would greet its owner as new every
-      // visit. "Not issued" is the red pill the design gives the empty state;
-      // everything else is a key that works.
+      // The first-login frame (Figma `843:2356`) retitles the card for the one
+      // page load that follows an issue round-trip: the panel is no longer
+      // "API Key", it is the delivery of one. Every later visit is the plain
+      // card, because a key that has existed for months greeting its owner
+      // with "Your API Key is ready" reads as though it were issued again.
+      title={justIssued ? 'Your API Key is ready' : 'API Key'}
+      // ⚠️ **"Just issued" for every key that works** — Adam's call against the
+      // frame (2026-08-25), replacing a rule that said "Just issued" for the
+      // first 24 hours and "Active" after it. That rule is why his own key,
+      // minted days ago, kept reading "Active".
+      //
+      // The word is now a claim the page cannot support for an older key. It
+      // is a status pill and nothing acts on it, so the cost is a wrong
+      // adjective rather than a wrong instruction. To put the honest rule
+      // back: `Date.now() - new Date(view.key.created_at).getTime() < 24h`,
+      // with "Active" as the other arm — `created_at` is on the response for
+      // exactly this kind of question.
+      //
+      // "Not issued" is the red pill the design gives the empty state.
       status={
         view.state === 'none'
           ? { label: 'Not issued', tone: 'bad' }
           : view.state === 'ok'
-            ? issue === 'ok'
-              ? { label: 'Just issued', tone: 'ok' }
-              : { label: 'Active', tone: 'ok' }
+            ? { label: 'Just issued', tone: 'ok' }
             : undefined
       }
     >
@@ -1209,7 +1363,14 @@ function ApiKey({
           not get your API key" — so it is excluded by naming the two states
           this line belongs to rather than by excluding `none` alone. */}
       {issue === 'ok' && (view.state === 'ok' || view.state === 'loading') && (
-        <p data-testid="issue-ok">Your key is ready.</p>
+        <Typography
+          data-testid="issue-ok"
+          variant="body1"
+          sx={{ color: color.text.secondary }}
+        >
+          Welcome! Your API key has been generated. Copy it below and make your
+          first request — the Quick Start guide has everything you need.
+        </Typography>
       )}
       {/* Task 0191: eligible, but the key was revoked this quota period, so
           no new one is issued until the date. Worded as a wait with a date,
@@ -1395,41 +1556,127 @@ function ApiKey({
               few characters of a credential is a habit borrowed from card
               numbers, where the rest is high-entropy. Here it would leak part
               of the secret for no benefit anyone asked for. */}
+          {/* ⚠️ **The first-login card shows the key, unmasked.** Task 0187
+              masks by default and this keeps that everywhere else; the frame
+              Adam sent for this one screen draws the credential in the clear,
+              and the reasoning holds: the visitor completed the OAuth
+              round-trip seconds ago, the sentence above says "copy it below",
+              and a mask plus a Reveal press between a developer and the thing
+              they just asked for is friction with nobody watching that a
+              returning visit does not have. Every later load is masked. */}
+          {/* No label inside the box: the card's own header says "API Key" one
+              line above it, and the frame draws the ring bare. */}
           <KeyField
-            label="API Key"
             testId="api-key"
             value={
-              revealed ? view.key.value : '••••••••••••••••••••••••••••••••'
+              revealed || justIssued
+                ? view.key.value
+                : '••••••••••••••••••••••••••••••••'
             }
             actions={
-              <>
-                <button
-                  type="button"
-                  onClick={() => setRevealed((was) => !was)}
-                >
-                  {revealed ? 'Hide' : 'Reveal'}
-                </button>
-                {/* `data-variant` rather than a class: the descendant rule in
-                    the dashboard's chrome styles every bare `<button>` the
-                    same, and copying the key is the card's primary action —
-                    the design gives it the brand fill. The attribute changes
-                    no wording and no role. */}
-                <button type="button" data-variant="primary" onClick={onCopy}>
-                  Copy
-                </button>
-              </>
+              justIssued ? (
+                <>
+                  <button type="button" data-variant="primary" onClick={onCopy}>
+                    <GlyphBadge
+                      icon={ContentCopyRoundedIcon}
+                      tone="onPrimary"
+                    />
+                    Copy key
+                  </button>
+                  {/* The frame's second control, and a link because it leaves
+                      the page. Task 0163 has not landed, so `QUICKSTART` is
+                      still the OpenAPI document — one constant, one diff when
+                      it does. */}
+                  <a href={QUICKSTART} data-variant="quiet">
+                    View quick start
+                    <ArrowBadge variant="onLight" />
+                  </a>
+                </>
+              ) : (
+                <>
+                  {/* `data-variant` rather than a class: the descendant rule
+                      in the dashboard's chrome styles every bare `<button>`
+                      the same, and copying the key is the card's primary
+                      action — the design gives it the brand fill. The
+                      attribute changes no wording and no role. */}
+                  <button type="button" data-variant="primary" onClick={onCopy}>
+                    <GlyphBadge
+                      icon={ContentCopyRoundedIcon}
+                      tone="onPrimary"
+                    />
+                    Copy key
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setRevealed((was) => !was)}
+                  >
+                    {revealed ? 'Hide' : 'Reveal'}
+                  </button>
+                  {/* The frame's second control, in the row the frame puts it
+                      in — and NOT with the frame's word. It says "Regenerate"
+                      and its dialog promises a key "again" after the 1st;
+                      this build deactivates and issues nothing until the next
+                      period, which is task 0191's decided model and wording.
+                      0193 restyles copy, it does not re-decide it. */}
+                  {/* ⚠️ **"Regenerate" is Adam's word, chosen on 2026-08-25
+                      over task 0191's "Replace my key…"** — the frame's, and
+                      the one the button now carries. The BEHAVIOUR behind it
+                      is unchanged and is not what the word implies: pressing
+                      it deactivates the key and issues nothing, and the
+                      confirmation that opens says exactly that in 0191's
+                      wording. Where the two disagree, the dialog is the one
+                      telling the truth. */}
+                  {!replacing && (
+                    <button
+                      type="button"
+                      onClick={() => setReplacing(true)}
+                      data-testid="replace-key-open"
+                    >
+                      <GlyphBadge icon={AutorenewRoundedIcon} tone="onDark" />
+                      Regenerate
+                    </button>
+                  )}
+                </>
+              )
             }
           />
           {copied && <p>Copied.</p>}
-          <p>
-            Send it as the <code>X-API-Key</code> header on <code>/v1/</code>{' '}
-            requests.
-          </p>
+          {/* The frame's row under the buttons. "Issued" is honest ONLY on
+              this path: `GET /key` returns no timestamps (see `MetaField`),
+              but `?issue=ok` means the backend created this key during the
+              round-trip that just ended, so "just now" and today's date are
+              facts this page holds rather than a value it invented. The quota
+              column appears only once `/usage` has answered — see `onQuota`. */}
+          {justIssued && (
+            <MetaRow>
+              {/* "Just now" is what `?issue=ok` proves — the backend created
+                  this key during the round-trip that just ended — and the date
+                  beside it is `createdDate`, off the same listing the reveal
+                  already made. Neither is read from this machine's clock. */}
+              <MetaField label="Issued">
+                Just now
+                {issuedOn && ` · ${issuedOn}`}
+              </MetaField>
+              {quota !== undefined && quota !== null && (
+                <MetaField label="Monthly quota">
+                  {quota.toLocaleString('en-US')} requests
+                </MetaField>
+              )}
+              {rateLimit !== undefined && (
+                <MetaField label="Rate limit">{rateLimit} req/s</MetaField>
+              )}
+            </MetaRow>
+          )}
+          {/* ⚠️ Task 0189's "Send it as the `X-API-Key` header on `/v1/`
+              requests." was here and is gone (Adam, 2026-08-25). It is the
+              only place the dashboard said WHERE to put the key; the Quick
+              Start behind the navbar link is now the only place a visitor
+              learns that. */}
           {/* Task 0191. Beside the key and nowhere else: there is nothing to
               replace without one. A button that opens the confirmation,
               not a link into the round-trip — the round-trip is reached only
               from the armed confirm inside the dialog. */}
-          {replacing ? (
+          {replacing && (
             <ReplaceKey
               onClose={() => setReplacing(false)}
               onRevoked={(revoked) => {
@@ -1439,16 +1686,6 @@ function ApiKey({
                 onRevoked?.();
               }}
             />
-          ) : (
-            <p>
-              <button
-                type="button"
-                onClick={() => setReplacing(true)}
-                data-testid="replace-key-open"
-              >
-                Replace my key…
-              </button>
-            </p>
           )}
         </>
       )}
@@ -1475,36 +1712,45 @@ function ApiKey({
         that the username and the ID are on screen for a signed-in visitor —
         which has to hold on the day their key issuance failed too. The two
         key fields inside it come and go with the key. */}
-      <Stack
-        direction={{ xs: 'column', sm: 'row' }}
-        spacing={{ xs: 2, sm: 4 }}
-        divider={
-          <Box
-            aria-hidden
-            sx={{
-              display: { xs: 'none', sm: 'block' },
-              width: '1px',
-              alignSelf: 'stretch',
-              backgroundColor: color.surface.gray,
-            }}
-          />
-        }
-      >
+      {/* Hidden on the first-login card, which has a metadata row of its own
+          (Issued · Monthly quota · Rate limit) inside the `ok` branch above —
+          the frame for that screen shows those three and not these four, and
+          rendering both put "Issued" on the card twice. */}
+      <MetaRow hidden={justIssued}>
         {view.state === 'ok' && (
           <MetaField label="Key ID">
             <code>{view.key.key_id}</code>
           </MetaField>
         )}
-        {view.state === 'ok' && (
-          <MetaField label="Key name">
-            <code>{view.key.name}</code>
-          </MetaField>
+        {/* The frame's "Issued" and "Last rotated", now that `GET /key`
+            carries both instants. Two departures from it, both deliberate:
+
+            - **"Last rotated" is the frame's label** (Adam, 2026-08-25), over
+              the "Last updated" this carried. ⚠️ The value is AWS's
+              `lastUpdatedDate`, which the 0191 audit measured a no-op patch
+              and a console `description` edit both bumping — so on a key
+              nobody has touched it is the issue date, and after a revocation
+              it is the revocation. It is never a rotation, because this build
+              has none.
+            - **Key name is gone.** It was not in the frame, and it is
+              `discord-<userId>-key` — the Discord id in the column beside it,
+              with a prefix. A column that restates its neighbour is what made
+              this row five wide where the design has four. */}
+        {view.state === 'ok' && issuedOn && (
+          <MetaField label="Issued">{issuedOn}</MetaField>
         )}
-        {/* The username AND the Discord ID. The design shows only a
-              handle, but the ID is task 0186's acceptance criterion and it is
-              the account key (ADR 0010) — the username is display-only and
-              changes whenever the visitor renames themselves, so the ID is
-              the half worth being able to quote in a support thread. */}
+        {view.state === 'ok' && updatedOn && (
+          <MetaField label="Last rotated">{updatedOn}</MetaField>
+        )}
+
+        {/* The handle alone, as the frame draws it — Adam, 2026-08-25.
+            ⚠️ The numeric Discord id was here because it is task 0186's
+            acceptance criterion ("the username and the ID are on screen") and
+            because it, not the handle, is the account key (ADR 0010): a
+            visitor can rename themselves, the id never changes. It is kept as
+            the column's `title`, so it is still one hover away for a support
+            thread, but it is no longer on screen — 0186's criterion is not
+            met by this build any more. */}
         <MetaField label="Discord account">
           <Stack direction="row" spacing={1} alignItems="center">
             <Box
@@ -1522,23 +1768,41 @@ function ApiKey({
             >
               <DiscordIcon sx={{ fontSize: 14 }} />
             </Box>
-            <Stack spacing={0.25} sx={{ minWidth: 0 }}>
-              <Box component="span">{session.username}</Box>
-              <Box
-                component="code"
-                sx={{
-                  fontFamily: font.mono,
-                  fontWeight: 500,
-                  fontSize: '0.8125rem',
-                  color: color.text.tertiary,
-                }}
-              >
-                {session.user_id}
-              </Box>
-            </Stack>
+            <Box component="span" title={session.user_id}>
+              {session.username}
+            </Box>
           </Stack>
         </MetaField>
-      </Stack>
+      </MetaRow>
+
+      {/* The frame's yellow strip, under the metadata row it belongs to.
+          Adam's wording, 2026-08-25 — the frame's, kept whole:
+
+              Key rotation is limited to once per calendar month.
+              Next rotation available: <the 1st of next month>
+
+          ⚠️ It describes the swap model task 0191 built and then reversed.
+          Nothing is rotated: pressing Regenerate deactivates the key and
+          issues nothing, and a new key comes only with the next period. The
+          date is right either way — it is the same instant both models point
+          at — and the dialog behind the button still says what actually
+          happens.
+
+          The date prefers `/usage`'s `resets_at`, which is the backend's own
+          `Period`; without it the page computes the 1st of next month itself,
+          because that IS the rule (`portal/period.rs`) rather than a number
+          the server holds. */}
+      {view.state === 'ok' && !justIssued && (
+        <NoticeStrip>
+          <p>
+            Key rotation is limited to <strong>once per calendar month</strong>.
+            Next rotation available:{' '}
+            <strong>
+              {describeUtcDay(resetsAt) ?? describeNextPeriodStart()}
+            </strong>
+          </p>
+        </NoticeStrip>
+      )}
     </DashboardCard>
   );
 }
@@ -1572,11 +1836,20 @@ function Usage({
   keyOnScreen,
   revokedCount = 0,
   rateLimit,
+  onUsage,
 }: {
   keyOnScreen: boolean;
   /** Task 0191: bumped by the dashboard on each in-page revoke. */
   revokedCount?: number;
   rateLimit?: number;
+  /**
+   * What this panel read, handed to the dashboard so the key card above can
+   * state the quota and the date the next key becomes available without a
+   * second `GetUsage` (task 0194 owns that budget). `null` where AWS has
+   * recorded nothing yet, which is what keeps those fields absent rather than
+   * zero or a guessed date.
+   */
+  onUsage?: (usage: PortalUsage | null) => void;
 }) {
   type UsageView =
     | { state: 'loading' }
@@ -1601,6 +1874,9 @@ function Usage({
       .then((usage) => {
         if (!live) return;
         setView(usage ? { state: 'ok', usage } : { state: 'no-key' });
+        // Up to the dashboard — see `onUsage`. `null` for a key AWS has no
+        // row for yet, which is a different thing from zero.
+        onUsage?.(usage ?? null);
       })
       .catch((error: unknown) => {
         // Through `describeFailure`, like the key section beside this one: an
@@ -1609,6 +1885,13 @@ function Usage({
         // other — two wordings for one cause on one screen reads as two bugs.
         if (live) setView({ state: 'failed', reason: describeFailure(error) });
       });
+    // ⚠️ `onUsage` IS an inline arrow at the call site, so it is a new
+    // function on every render of `Dashboard` — and naming it here would
+    // re-create `load`, which the mount effect below depends on, and refetch
+    // usage in a loop. It is left out on purpose: `load` reads nothing from
+    // it that can go stale, because the callback only forwards this fetch's
+    // own answer.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // On mount only.
@@ -1666,81 +1949,58 @@ function Usage({
   }, [keyOnScreen, view.state, load]);
 
   /**
-   * THE lag line — the wording this task decides once. Rendered under every
-   * state that shows (or withholds) a figure, so the page never presents an
-   * AWS-lagged number as live.
+   * The reset caption, under the bar and left-aligned — "Resets 1 September".
+   *
+   * ⚠️ **This replaces two lines task 0188 decided**, at Adam's instruction on
+   * 2026-08-25: the "Quota resets on the 1st of each month, 00:00 UTC — next
+   * reset …" sentence and the "Last updated … AWS reports usage with a delay"
+   * line, along with the Refresh button beside them. The frame has none of the
+   * three, and the space they occupied is where task [[0222]]'s daily chart
+   * goes.
+   *
+   * What is lost with them is 0188's lag disclosure — the panel no longer says
+   * that a figure can trail reality by minutes. The date below still carries
+   * the reset rule, which is the half the frame keeps; the lag is the half
+   * that now goes unsaid.
    */
-  const lastUpdated = (asOf: string) => (
-    <p>
-      {/* `toUTCString` spells the zone "GMT"; the decided wording says UTC,
-          and since 0193 must not re-decide this line, the suffix is corrected
-          here rather than frozen. Same instant either way. */}
-      Last updated {new Date(asOf).toUTCString().replace(/GMT$/, 'UTC')} — AWS
-      reports usage with a delay, so requests made in the last few minutes may
-      not be counted yet.
-    </p>
-  );
-
-  /** The reset rule (ours) and the rate limit (0157), as numbers. */
-  const limits = (resetsAt?: string) => (
-    <>
-      {/* Omitted, not defaulted, when the deployment did not say what the
-          limit is: a fallback figure here would be exactly the silent
-          staleness reading it from `/config` removes. Every deployed
-          environment sets it — `compute-stack.ts` passes
-          `pricingApiFreePlanRateLimit` unconditionally — so the absent case is
-          a local run, where saying nothing is the honest answer. */}
-      {/* The rate limit is no longer stated here: the Rate Limit card beside
-          this one carries it, from the same `/config` value, and two panels
-          quoting the same figure is how they drift. `data-testid="rate-limit"`
-          moved there with it, so task 0188's assertions still find exactly one.
-          The omit-rather-than-default rule stands: no `/config` figure, no
-          card, no claim. */}
-      <p>
-        Quota resets on the 1st of each month, 00:00 UTC
-        {resetsAt ? (
-          <>
-            {' '}
-            — next reset <strong>{resetsAt.slice(0, 10)}</strong>
-          </>
-        ) : null}
-        .
-      </p>
-    </>
-  );
+  const resetCaption = (resetsAt?: string) => {
+    if (!resetsAt) return null;
+    const at = new Date(resetsAt);
+    if (Number.isNaN(at.getTime())) return null;
+    // Day and month, no year — "Resets 1 September", the frame's "Resets May
+    // 1" in the day-first order every other date on this page uses. The year
+    // is never in doubt: the next reset is at most a month away.
+    return `Resets ${at.toLocaleDateString('en-GB', {
+      day: 'numeric',
+      month: 'long',
+      timeZone: 'UTC',
+    })}`;
+  };
 
   return (
     <DashboardCard title="Monthly Usage">
       {view.state === 'loading' && <p>Loading your usage…</p>}
 
-      {view.state === 'no-key' && (
-        <>
-          {keyOnScreen ? (
-            // The endpoint said "no key" while a key is on this very screen:
-            // the backend's short cache has not caught up with the issue yet.
-            // "You have no key" would be false, so say what is actually
-            // happening.
-            <p>
-              Your key is new — usage figures appear here with a delay after
-              your first requests.
-            </p>
-          ) : revokedCount > 0 ? (
-            // Task 0191: revoked in this page load, and AWS has no row for
-            // the key. Not "issue one above" — the key section is already
-            // saying when that becomes possible.
-            <p data-testid="usage-after-revoke">
-              Your key was deactivated; there is no usage to show for it.
-            </p>
-          ) : (
-            <p>You have no API key yet — issue one above to see your usage.</p>
-          )}
-          {/* The limits still render: they are properties of the plan every
-              key joins, not of a particular key, and the visitor deciding
-              whether to issue one is exactly who they inform. No next-reset
-              date — that comes with a usage answer. */}
-          {limits()}
-        </>
-      )}
+      {view.state === 'no-key' &&
+        (keyOnScreen ? (
+          // The endpoint said "no key" while a key is on this very screen:
+          // the backend's short cache has not caught up with the issue yet.
+          // "You have no key" would be false, so say what is actually
+          // happening.
+          <p>
+            Your key is new — usage figures appear here with a delay after your
+            first requests.
+          </p>
+        ) : revokedCount > 0 ? (
+          // Task 0191: revoked in this page load, and AWS has no row for
+          // the key. Not "issue one above" — the key section is already
+          // saying when that becomes possible.
+          <p data-testid="usage-after-revoke">
+            Your key was deactivated; there is no usage to show for it.
+          </p>
+        ) : (
+          <p>You have no API key yet — issue one above to see your usage.</p>
+        ))}
 
       {view.state === 'ok' &&
         (view.usage.used === null ? (
@@ -1752,8 +2012,6 @@ function Usage({
               AWS has not recorded any usage for your key this period yet —
               figures appear with a delay after your first requests.
             </p>
-            {limits(view.usage.resets_at)}
-            {lastUpdated(view.usage.as_of)}
           </>
         ) : (
           <>
@@ -1782,9 +2040,8 @@ function Usage({
               used={view.usage.used}
               limit={view.usage.limit}
               remaining={view.usage.remaining}
+              resetLabel={resetCaption(view.usage.resets_at)}
             />
-            {limits(view.usage.resets_at)}
-            {lastUpdated(view.usage.as_of)}
           </>
         ))}
 
@@ -1792,12 +2049,6 @@ function Usage({
         <p>
           Could not load your usage: <code>{view.reason}</code>
         </p>
-      )}
-
-      {view.state !== 'loading' && (
-        <button type="button" onClick={load}>
-          Refresh
-        </button>
       )}
     </DashboardCard>
   );
@@ -1813,23 +2064,35 @@ function Usage({
  * reason. Both HTTP codes are properties of the gateway, not of a plan, so they
  * are constants.
  *
- * The card renders nothing when the deployment did not say what the limit is —
- * a local run, where inventing a figure would be exactly the silent staleness
- * reading it from `/config` removes.
+ * **The card always renders**, which is a change from the build that dropped
+ * it whenever `/config` carried no limit (Adam, 2026-08-25: "brakuje całego
+ * jednego kafelka"). A local run without `PORTAL_RATE_LIMIT` set was losing a
+ * third of the dashboard, and a missing panel is a worse answer than a stated
+ * one: the free plan's rate is 1 req/s (task 0157), the landing page says so
+ * to every visitor before they sign in, and this card now says the same where
+ * the deployment has not spoken.
+ *
+ * ⚠️ `/config` still WINS wherever it answers, which is every deployed
+ * environment (`compute-stack.ts` passes `pricingApiFreePlanRateLimit`
+ * unconditionally). The fallback is for the local case only, and if the free
+ * plan's rate ever changes, this constant is one of the two places that must
+ * change with it — the other being `FairAccess`.
  */
+const FREE_PLAN_RATE_LIMIT = 1;
+
 function RateLimitCard({ rateLimit }: { rateLimit?: number }) {
-  if (rateLimit === undefined) return null;
+  const perSecond = rateLimit ?? FREE_PLAN_RATE_LIMIT;
 
   return (
     <DashboardCard title="Rate Limit" status={{ label: 'Active', tone: 'ok' }}>
       <Stack direction="row" spacing={4}>
         <Figure
           label="Per-second limit"
-          value={rateLimit}
+          value={perSecond}
           unit="req/s"
           testId="rate-limit"
         />
-        <Figure label="Per-minute limit" value={rateLimit * 60} unit="req/s" />
+        <Figure label="Per-minute limit" value={perSecond * 60} unit="req/s" />
       </Stack>
       {/* Task 0188's sentence, kept verbatim and read only by assistive
           technology. The design abbreviates the figure to "1 req/s", which is
@@ -1837,7 +2100,7 @@ function RateLimitCard({ rateLimit }: { rateLimit?: number }) {
           Expanding an abbreviation is what this technique is for, and it lets
           0188's wording survive a change that was purely visual. */}
       <Box component="p" sx={visuallyHidden}>
-        Rate limit: {rateLimit} request{rateLimit === 1 ? '' : 's'} per second.
+        Rate limit: {perSecond} request{perSecond === 1 ? '' : 's'} per second.
       </Box>
       <Stack spacing={1} sx={{ pt: 1, borderTop: cardBorder }}>
         <ResponseRow label="Response on throttle" code="HTTP 429" />
@@ -1876,7 +2139,9 @@ function Figure({
           sx={{
             fontFamily: font.primary,
             fontWeight: 700,
-            fontSize: '2rem',
+            // 36px: measured 27px of cap height on the frame's "60", where
+            // 2rem gives 23.
+            fontSize: '2.25rem',
             lineHeight: 1,
             color: color.text.accent,
           }}
@@ -1895,7 +2160,9 @@ function Figure({
 function ResponseRow({ label, code }: { label: string; code: string }) {
   return (
     <Stack direction="row" justifyContent="space-between" spacing={2}>
-      <Typography variant="body2" sx={{ color: color.text.secondary }}>
+      {/* Tertiary, measured #a3a3a3 — the label names the status beside it and
+          the status is the part with the colour. */}
+      <Typography variant="body2" sx={{ color: color.text.tertiary }}>
         {label}
       </Typography>
       <Typography
@@ -1985,7 +2252,16 @@ function PortalStatusChrome({ children }: { children: ReactNode }) {
           color: color.text.accent,
           textUnderlineOffset: '0.2em',
         },
-        '& code': {
+        // ⚠️ `& p code`, NOT `& code`. The grey chip belongs to code quoted
+        // inside a sentence — `X-API-Key`, `/v1/`, a failure reason — and to
+        // nothing else. As `& code` it also painted the two places the frame
+        // draws bare: the key itself, inside its yellow ring, and the Key ID
+        // in the metadata row. Both tried to opt out with their own
+        // `backgroundColor` and neither could: `.chrome code` is one class
+        // plus one type, which outranks the single class Emotion puts on the
+        // element's own `sx`. Narrowing the rule is the fix; raising the
+        // other side's specificity would have been a fight with no end.
+        '& p code': {
           fontFamily: font.mono,
           fontSize: '0.875em',
           backgroundColor: color.surface.gray,
@@ -1993,6 +2269,21 @@ function PortalStatusChrome({ children }: { children: ReactNode }) {
           px: 0.75,
           py: 0.25,
           overflowWrap: 'anywhere',
+        },
+        // Everything else that is `<code>` keeps the face and nothing else.
+        '& code': { fontFamily: font.mono, overflowWrap: 'anywhere' },
+        // The first-login card's second control. A link, so it keeps `& a`'s
+        // semantics, but the frame draws it as a button-height row of white
+        // text with the circled arrow rather than as accent-coloured prose.
+        '& a[data-variant="quiet"]': {
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: 1,
+          minHeight: 44,
+          ...theme.typography.body2,
+          fontWeight: 700,
+          color: color.text.primary,
+          textDecoration: 'none',
         },
         '& button[data-variant="primary"]': {
           backgroundColor: `${color.surface.primary} !important`,
@@ -2004,14 +2295,25 @@ function PortalStatusChrome({ children }: { children: ReactNode }) {
           ...theme.typography.body2,
           fontWeight: 700,
           cursor: 'pointer',
-          minHeight: 44,
-          paddingInline: '20px',
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: 1,
+          // 36 to match the frame, with the touch-target floor restored where
+          // a finger is doing the pressing — the same trade the navbar's one
+          // control makes, and for the same reason: 44 everywhere made the
+          // dashboard's buttons visibly taller than the mock.
+          minHeight: 36,
+          '@media (pointer: coarse)': { minHeight: 44 },
+          paddingInline: '16px',
           borderRadius: `${radius.pill}px`,
-          border: cardBorder,
-          backgroundColor: color.surface.gray,
+          // Measured: the frame's secondary button is a fill one step DARKER
+          // than the card body it sits on, with no border at all. The old
+          // `surface.gray` + hairline is now the colour of the body itself.
+          border: 'none',
+          backgroundColor: color.surface.grayAlt,
           color: color.text.primary,
           alignSelf: 'flex-start',
-          '&:hover': { borderColor: color.stroke.default },
+          '&:hover': { backgroundColor: color.black },
         },
         '& hr': {
           width: '100%',
@@ -2413,14 +2715,41 @@ function DashboardRoute({ gate }: { gate: Gate }) {
       <Box
         component="main"
         sx={{
-          backgroundColor: color.surface.backgroundAlt,
+          position: 'relative',
+          overflow: 'hidden',
+          // #212121, measured off the frame — the SAME floor the hero stands
+          // on, not the darker `backgroundAlt` this used to take. The cards
+          // are what step away from it (a #1a1a1a title band over a #272727
+          // body); the page itself is the light one, which is why a card on
+          // the old floor read as lighter than its surroundings and on the
+          // real one reads as raised.
+          backgroundColor: color.surface.background,
           // Fill the viewport even when the cards are short, so the footer sits
           // at the bottom of the screen rather than halfway up it.
           minHeight: 'calc(100dvh - 52px)',
           py: { xs: 4, md: 7 },
         }}
       >
-        <Container>
+        {/* The hero's rule grid, on the dashboard too — 80px, and measured at
+            #323232 on the floor, which is `Stroke/Default` at a third. It is
+            strongest behind the cards and gone by the foot of the page, so the
+            mask is a radial centred on the upper third rather than the hero's
+            wider one. Decorative, and never in the way of a click. */}
+        <Box
+          aria-hidden
+          sx={{
+            position: 'absolute',
+            inset: 0,
+            pointerEvents: 'none',
+            backgroundImage: `
+              linear-gradient(${alpha(color.stroke.default, 0.34)} 1px, transparent 1px),
+              linear-gradient(90deg, ${alpha(color.stroke.default, 0.34)} 1px, transparent 1px)`,
+            backgroundSize: '80px 80px, 80px 80px',
+            maskImage:
+              'radial-gradient(120% 70% at 50% 20%, #000 25%, transparent 80%)',
+          }}
+        />
+        <Container sx={{ position: 'relative' }}>
           <PortalStatusChrome>
             <Dashboard session={session} rateLimit={rateLimit} />
           </PortalStatusChrome>

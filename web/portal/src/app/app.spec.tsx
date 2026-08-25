@@ -570,10 +570,15 @@ describe('sign in with Discord', () => {
 
     // `findAll` for the username: since task 0193 the dashboard names the
     // signed-in account twice — in the navbar and in the API Key card's
-    // account row — and `findBy` throws on more than one match. The ID appears
-    // once and is still asserted as such.
+    // account row — and `findBy` throws on more than one match.
     expect((await screen.findAllByText(/adam/)).length).toBeGreaterThan(0);
-    expect(await screen.findByText('308994132968210433')).toBeTruthy();
+    // ⚠️ The numeric ID is NO LONGER ON SCREEN. Adam had the account column cut
+    // down to the handle on 2026-08-25 to match the frame, so task 0186's
+    // criterion ("the username and the ID are on screen") is not met by this
+    // build; the id survives as the column's `title`, one hover away, and this
+    // assertion follows it there rather than being deleted.
+    const account = await screen.findByTitle('308994132968210433');
+    expect(account.textContent).toContain('adam');
     // And the sign-in control is gone.
     expect(
       screen.queryByRole('link', { name: /sign in with discord/i }),
@@ -1134,7 +1139,7 @@ describe('the API key', () => {
     renderApp();
     await screen.findByTestId('api-key');
 
-    fireEvent.click(screen.getByRole('button', { name: /^copy$/i }));
+    fireEvent.click(screen.getByRole('button', { name: /copy key/i }));
 
     // The masked display must not become what gets copied — the reason the
     // component keeps the value in state rather than reading it back out of the
@@ -1154,7 +1159,7 @@ describe('the API key', () => {
     renderApp();
     await screen.findByTestId('api-key');
 
-    fireEvent.click(screen.getByRole('button', { name: /^copy$/i }));
+    fireEvent.click(screen.getByRole('button', { name: /copy key/i }));
 
     expect(await screen.findByText(/copy it by hand/i)).toBeTruthy();
     // And the key is still there to copy by hand.
@@ -1221,6 +1226,134 @@ describe('the API key', () => {
 
     expect(await screen.findByTestId('issue-ok')).toBeTruthy();
     expect(await screen.findByTestId('api-key')).toBeTruthy();
+  });
+
+  /**
+   * The first-login card (Figma `843:2356`), and the one place the mask is
+   * lifted.
+   *
+   * Task 0187 masks the key by default and every other load still does. This
+   * screen is the delivery of a credential the visitor asked for seconds ago
+   * — the card says "copy it below" — so the value is on screen without a
+   * Reveal press, and the control beside it says "Copy key" rather than
+   * "Copy".
+   */
+  it('shows the key unmasked on the first-login card, with no reveal press', async () => {
+    signedInWithKey();
+    renderApp('/?issue=ok');
+
+    const field = await screen.findByTestId('api-key');
+    expect(field.textContent).toBe(KEY_VALUE);
+    expect(screen.queryByRole('button', { name: /reveal/i })).toBeNull();
+    expect(
+      screen.getByRole('heading', { name: /your api key is ready/i }),
+    ).toBeTruthy();
+    expect(screen.getByRole('button', { name: /copy key/i })).toBeTruthy();
+    expect(
+      screen.getByRole('link', { name: /view quick start/i }),
+    ).toBeTruthy();
+  });
+
+  /**
+   * The metadata row's two instants come from `GET /key`, which task 0193
+   * extended to carry `createdDate` and `lastUpdatedDate` — not from this
+   * machine's clock, and not invented where AWS omits them.
+   *
+   * The label is the frame's "Last rotated" (Adam, 2026-08-25) even though the
+   * value is `lastUpdatedDate` and this build rotates nothing — the deviation
+   * is recorded at the render site.
+   */
+  it('dates the key from the control plane, in UTC', async () => {
+    signedInWithKey({
+      key_id: 'abc123',
+      name: 'discord-308994132968210433-key',
+      value: KEY_VALUE,
+      created_at: '2026-04-13T09:30:00Z',
+      last_updated_at: '2026-04-30T22:45:00Z',
+    });
+    renderApp('/');
+
+    expect(await screen.findByText('Issued')).toBeTruthy();
+    expect(screen.getByText('13 April 2026')).toBeTruthy();
+    expect(screen.getByText('Last rotated')).toBeTruthy();
+    // 22:45 UTC on the 30th stays the 30th — rendered in a zone behind UTC it
+    // would read as the 1st of May, which is a different quota period.
+    expect(screen.getByText('30 April 2026')).toBeTruthy();
+  });
+
+  /** A build whose backend has no timestamps yet drops the fields. */
+  it('omits the dates rather than inventing them when the API sends none', async () => {
+    signedInWithKey();
+    renderApp('/');
+
+    await screen.findByTestId('api-key');
+    expect(screen.queryByText('Issued')).toBeNull();
+    expect(screen.queryByText('Last rotated')).toBeNull();
+  });
+
+  /**
+   * The frame's yellow strip, in the frame's words (Adam, 2026-08-25) —
+   * replacing the "replacing issues nothing in its place" sentence this
+   * carried, which was task 0191's model stated plainly.
+   *
+   * The date is what this pins: whichever wording the strip wears, the instant
+   * it names is the start of the next quota period, and it must be a real date
+   * rather than the words "next month". `/usage` is stubbed `no_key` here, so
+   * this exercises the computed fallback rather than `resets_at`.
+   */
+  it('names the next rotation date in the notice strip', async () => {
+    signedInWithKey();
+    renderApp('/');
+
+    const note = await screen.findByRole('note');
+    expect(note.textContent).toMatch(/once per calendar month/i);
+    const nextMonth = new Date(
+      Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth() + 1, 1),
+    );
+    expect(note.textContent).toContain(
+      nextMonth.toLocaleDateString('en-GB', {
+        day: 'numeric',
+        month: 'long',
+        year: 'numeric',
+        timeZone: 'UTC',
+      }),
+    );
+  });
+
+  /**
+   * The mask is the default everywhere else, which is the half of the pair
+   * above that keeps 0187's rule true: no `?issue=ok`, no unmasking.
+   */
+  it('masks the key on an ordinary visit and keeps the plain card title', async () => {
+    signedInWithKey();
+    renderApp('/');
+
+    const field = await screen.findByTestId('api-key');
+    expect(field.textContent).not.toBe(KEY_VALUE);
+    expect(screen.getByRole('button', { name: /reveal/i })).toBeTruthy();
+    expect(screen.getByRole('heading', { name: /^api key$/i })).toBeTruthy();
+    expect(
+      screen.queryByRole('link', { name: /view quick start/i }),
+    ).toBeNull();
+  });
+
+  /**
+   * "Issued" is only ever rendered where the round-trip that just ended
+   * created the key, because `GET /key` carries no timestamp — and the rate
+   * limit comes from `/config`, which the stub answers with 1 req/s.
+   *
+   * The quota column is deliberately NOT asserted here: this stub's `/usage`
+   * says "no key yet", so the page has not been told a limit and the field is
+   * absent rather than invented.
+   */
+  it('states when the key was issued and at what rate limit', async () => {
+    signedInWithKey();
+    renderApp('/?issue=ok');
+
+    expect(await screen.findByText('Issued')).toBeTruthy();
+    expect(screen.getByText(/just now/i)).toBeTruthy();
+    expect(screen.getByText('Rate limit')).toBeTruthy();
+    expect(screen.queryByText('Monthly quota')).toBeNull();
   });
 
   /**
@@ -1595,10 +1728,12 @@ describe('usage against quota', () => {
 
     // The limits as numbers, not prose (task 0157's figures).
     expect(screen.getByText(/request per second/i)).toBeTruthy();
-    // The reset rule is OURS — the 1st of the month, 00:00 UTC — and the next
-    // date is rendered from the response, not computed in the page.
-    expect(screen.getByText(/1st of each month, 00:00 UTC/i)).toBeTruthy();
-    expect(screen.getByText(/2026-09-01/)).toBeTruthy();
+    // ⚠️ The reset RULE sentence ("the 1st of each month, 00:00 UTC") was cut
+    // from this card on 2026-08-25 at Adam's instruction, along with the lag
+    // line and the Refresh button — the frame has none of them and task 0222's
+    // chart takes the space. What survives is the date itself, as the caption
+    // under the bar, which is the half a visitor acts on.
+    expect(screen.getByText('Resets 1 September')).toBeTruthy();
 
     // And the URL is relative: same-origin, cookie attached by the browser.
     const call = fetchMock.mock.calls.find(([url]) => url === USAGE_URL) as [
@@ -1608,27 +1743,20 @@ describe('usage against quota', () => {
   });
 
   /**
-   * **The wording this task decides once** (task 0193 restyles it without
-   * re-deciding): every rendered figure carries when it was last refreshed and
-   * that AWS reports with a delay. Without this line, a visitor who just made
-   * requests reads the dashboard as broken.
+   * ⚠️ **DELETED, not moved: the lag line is no longer rendered.**
+   *
+   * Task 0188 decided that every figure on this card carries "Last updated …
+   * — AWS reports usage with a delay, so requests made in the last few minutes
+   * may not be counted yet", and this test pinned that wording verbatim. Adam
+   * removed the line on 2026-08-25 ("to jest do usunięcia, tutaj będą
+   * wykresy") together with the reset-rule sentence and the Refresh button.
+   *
+   * What that costs is written down rather than quietly dropped: the panel no
+   * longer tells a visitor that a figure can trail their last request by
+   * minutes, so a developer who has just made calls and sees an unchanged
+   * number has nothing on screen explaining why. If it should come back, this
+   * is the test to restore with it — `USAGE.as_of` is still in the fixture.
    */
-  it('states when the figure was last refreshed, and that AWS lags', async () => {
-    signedInWithUsage();
-    renderApp();
-
-    await screen.findByTestId('usage-used');
-    expect(screen.getByText(/last updated/i).textContent).toMatch(
-      /AWS reports usage with a delay/i,
-    );
-    // The timestamp is the backend's `as_of` — the moment of the GetUsage —
-    // rendered in UTC (the decided wording says UTC, not toUTCString's
-    // "GMT"), not the moment of the page load.
-    expect(screen.getByText(/last updated/i).textContent).toContain(
-      new Date(USAGE.as_of).toUTCString().replace(/GMT$/, 'UTC'),
-    );
-    expect(screen.getByText(/last updated/i).textContent).not.toContain('GMT');
-  });
 
   /** Usage is read-only, so it may and does load on mount. */
   it('fetches usage on mount, without any button press', async () => {
@@ -1653,10 +1781,11 @@ describe('usage against quota', () => {
 
     expect(await screen.findByText(/no API key yet/i)).toBeTruthy();
     expect(document.body.textContent).not.toContain('Could not load');
-    // The limits still render — they belong to the plan, not to a key, and a
-    // visitor deciding whether to issue one is exactly who they inform.
+    // The rate limit still renders — it belongs to the plan, not to a key, and
+    // a visitor deciding whether to issue one is exactly who it informs. The
+    // reset RULE sentence that used to sit beside it is gone (2026-08-25);
+    // with no usage answer there is no date to caption either.
     expect(screen.getByText(/request per second/i)).toBeTruthy();
-    expect(screen.getByText(/1st of each month, 00:00 UTC/i)).toBeTruthy();
   });
 
   /**
@@ -1699,7 +1828,6 @@ describe('usage against quota', () => {
     expect(await screen.findByText(/not recorded any usage/i)).toBeTruthy();
     expect(screen.queryByTestId('usage-used')).toBeNull();
     expect(screen.getByText(/request per second/i)).toBeTruthy();
-    expect(screen.getByText(/last updated/i)).toBeTruthy();
   });
 
   /**
@@ -1922,7 +2050,7 @@ describe('usage against quota', () => {
    * fallback figure would be the same silent staleness one layer down — and
    * unlike the missing line, it would look authoritative.
    */
-  it('omits the rate limit when the backend does not report one', async () => {
+  it('falls back to the plan rate rather than dropping the Rate Limit card', async () => {
     stubRoutes({
       [CONFIG_URL]: () => ({ json: async () => ({ enabled: true }) }),
       [ME_URL]: () => ({
@@ -1936,12 +2064,16 @@ describe('usage against quota', () => {
     });
     renderApp();
 
-    // The rest of the panel is unaffected — only the one line it cannot
-    // honestly render goes missing.
+    // ⚠️ The OPPOSITE of what this pinned until 2026-08-25, when Adam found the
+    // whole Rate Limit card missing on a local run. `/config` without a limit
+    // used to drop the panel; it now shows the free plan's documented 1 req/s
+    // (task 0157), the same figure the landing page states to every visitor.
+    // A stated figure beats a third of the dashboard disappearing — and where
+    // the deployment DOES answer, its value still wins (the test above).
     await screen.findByTestId('usage-used');
-    expect(screen.queryByTestId('rate-limit')).toBeNull();
-    expect(screen.queryByText(/per second/i)).toBeNull();
-    expect(screen.getByText(/quota resets on the 1st/i)).toBeTruthy();
+    expect((await screen.findByTestId('rate-limit')).textContent).toBe('1');
+    expect(screen.getByText(/per-minute limit/i)).toBeTruthy();
+    expect(screen.getByText(/request per second/i)).toBeTruthy();
   });
 
   /**
@@ -1993,31 +2125,20 @@ describe('usage against quota', () => {
   });
 
   /** The refresh control re-asks; the backend's cache bounds what that costs. */
-  it('refreshes on the button', async () => {
-    const fetchMock = signedInWithUsage();
-    renderApp();
-    await screen.findByTestId('usage-used');
-    const before = fetchMock.mock.calls.filter(
-      ([url]) => url === USAGE_URL,
-    ).length;
-
-    fireEvent.click(screen.getByRole('button', { name: /refresh/i }));
-
-    await waitFor(() =>
-      expect(
-        fetchMock.mock.calls.filter(([url]) => url === USAGE_URL).length,
-      ).toBe(before + 1),
-    );
-    await screen.findByTestId('usage-used');
-  });
+  /**
+   * ⚠️ **DELETED with the control.** The usage card had a Refresh button and
+   * this pinned that pressing it re-read `/usage`; Adam removed it on
+   * 2026-08-25 with the two lines beside it. The panel still refetches on its
+   * own — on mount, and when a key appears on screen (the tests above) — but a
+   * visitor who wants a fresher figure now reloads the page.
+   */
 
   /** A backend failure is a stated failure, not a blank section. */
-  it('reports a failure and keeps the refresh control', async () => {
+  it('reports a failure rather than an empty card', async () => {
     signedInWithUsage(() => ({ ok: false, status: 502 }));
     renderApp();
 
     expect(await screen.findByText(/could not load your usage/i)).toBeTruthy();
-    expect(screen.getByRole('button', { name: /refresh/i })).toBeTruthy();
   });
 
   /**

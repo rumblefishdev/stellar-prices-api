@@ -439,6 +439,23 @@ export interface PortalKey {
   name: string;
   /** The credential itself — what goes in `X-API-Key`. */
   value: string;
+  /**
+   * `createdDate`, RFC 3339 — when API Gateway minted the key.
+   *
+   * Optional in the type because the backend types it that way (the SDK makes
+   * the field optional and `KeyRecord` follows), and because a deployment
+   * running the previous build answers without it. The page renders the field
+   * only where it has a value.
+   */
+  created_at?: string | null;
+  /**
+   * `lastUpdatedDate`, RFC 3339 — the last change to the key RECORD.
+   *
+   * NOT "last rotated": this build has no rotation, and any edit bumps it
+   * (measured under task 0191's audit — a no-op patch and a console
+   * `description` edit both do). The dashboard labels it "Last updated".
+   */
+  last_updated_at?: string | null;
 }
 
 /**
