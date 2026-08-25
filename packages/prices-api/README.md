@@ -308,11 +308,57 @@ deletes a key. Since task 0189 the `/key` route is read-only too, which is why
 the page now calls both on load — creating a key is the issue round-trip's job
 and nobody else's.
 
+### 3c. Replacing a key (task 0191)
+
+On the page, **Replace my key…** beside the key opens a confirmation; the
+confirm button arms only once you type `delete-key`. Pressing it **deactivates
+the key and issues nothing** — `POST /api-tokens/api/key/rework`,
+session-authenticated, no Discord round-trip. The control plane answers at
+once; the **data plane follows within about half a minute** (~25 s measured,
+0180 item 8), so treat the value as live until then — which is what the
+dialog says, and why neither it nor this section claims "immediately".
+
+A new key can be issued only from the start of the next quota period (the 1st
+of next month, 00:00 UTC, **our** rule): until then "Get my API key" lands on
+`?issue=capped` with the date, and the page says so instead of offering the
+link.
+
+```bash
+# Before: one enabled key.
+aws apigateway get-api-keys --name-query "discord-<your id>-key" \
+    --query 'items[].{id:id,enabled:enabled,updated:lastUpdatedDate}'
+
+# Confirm on the page, then:
+aws apigateway get-api-keys --name-query "discord-<your id>-key" \
+    --query 'items[].{id:id,enabled:enabled,updated:lastUpdatedDate}'
+# → the SAME id, enabled: false, lastUpdatedDate just now — the revocation record.
+
+# The value is refused within tens of seconds (0180 item 8) — the data-plane
+# check CI cannot make. 403 is byte-identical to sending no key at all.
+curl -sS -o /dev/null -w '%{http_code}\n' -H "X-API-Key: <the value>" \
+    https://<api host>/production/v1/assets      # → 403
+```
+
+Press **Get my API key** now: the round-trip passes eligibility and lands on
+`?issue=capped&next_eligible_at=<1st of next month>` — nothing created, the
+disabled key untouched. On or after the 1st the same press deletes the
+disabled key, creates a new one and attaches it; the old value stays dead.
+
+The principal needs the seventh grant, `apigateway:PATCH` on `/apikeys/*`, in
+its own statement (`PortalDisableOwnApiKeys`) and scoped by
+`aws:ResourceTag/ManagedBy = prices-portal`, so the revoke can only touch keys
+this portal created. The `GET`/`DELETE` statement beside it is 0187's and stays
+unconditioned — narrowing those two is task 0194's call, because it would stop
+the portal adopting a key created by hand in the console. No `UpdateUsagePlan`,
+no `UpdateUsage`.
+
 ### 4. Afterwards
 
 ```bash
 aws apigateway delete-api-key --api-key <id>
 ```
+
+(A revoke leaves the key in place, disabled; delete it by id like any other.)
 
 ## Env (Lambda)
 

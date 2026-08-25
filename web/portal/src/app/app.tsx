@@ -65,11 +65,13 @@ import {
   fetchSession,
   fetchUsage,
   issueUrl,
+  revokeKey,
   signInUrl,
   signOut,
   PortalApiError,
   type PortalConfig,
   type PortalKey,
+  type PortalKeyRevoked,
   type PortalSession,
   type PortalUsage,
 } from '../api/portal';
@@ -139,8 +141,12 @@ const BENEFITS = [
 
 /** The landing params sign-in's callback appends. */
 const SIGNIN_PARAMS = ['signin'] as const;
-/** The landing params the issue callback appends (task 0189). */
-const ISSUE_PARAMS = ['issue', 'wait_secs'] as const;
+/**
+ * The landing params the issue callback appends (task 0189; `next_eligible_at`
+ * since task 0191). `wait_secs` only means anything beside `issue=too_young`,
+ * `next_eligible_at` only beside `issue=capped`.
+ */
+const ISSUE_PARAMS = ['issue', 'wait_secs', 'next_eligible_at'] as const;
 
 /**
  * Read landing-state query params **once**, then strip them from the URL.
@@ -668,6 +674,11 @@ function Dashboard({
   rateLimit?: number;
 }) {
   const [keyOnScreen, setKeyOnScreen] = useState(false);
+  // Task 0191: a revoke in THIS page load. The key leaves the screen, and the
+  // usage section is told so — its cached "no key" copy ("your key is new")
+  // would otherwise describe a key just deactivated — and re-asked, because
+  // the backend evicted its cache on the revoke.
+  const [revokedCount, setRevokedCount] = useState(0);
 
   return (
     <Stack spacing={3}>
@@ -687,7 +698,14 @@ function Dashboard({
           removes it along with the key it was showing — the component unmounts
           and its state goes with it, rather than leaving a stale credential on
           screen for the next person at the keyboard. */}
-      <ApiKey onKey={() => setKeyOnScreen(true)} session={session} />
+      <ApiKey
+        onKey={() => setKeyOnScreen(true)}
+        onRevoked={() => {
+          setKeyOnScreen(false);
+          setRevokedCount((n) => n + 1);
+        }}
+        session={session}
+      />
 
       {/* Two columns at the design's 5:3 ratio, one at 375px. `align-items:
           start` so the shorter card does not stretch to match the taller one —
@@ -702,8 +720,13 @@ function Dashboard({
       >
         {/* Task 0188. Keyed refetch: a key appearing on screen (revealed on
             mount, or fresh off 0189's issue round-trip) re-asks for usage, so
-            the section leaves "no key yet" without a manual refresh. */}
-        <Usage keyOnScreen={keyOnScreen} rateLimit={rateLimit} />
+            the section leaves "no key yet" without a manual refresh. Task
+            0191 adds the other direction: an in-page revoke re-asks too. */}
+        <Usage
+          keyOnScreen={keyOnScreen}
+          revokedCount={revokedCount}
+          rateLimit={rateLimit}
+        />
         <RateLimitCard rateLimit={rateLimit} />
       </Box>
     </Stack>
@@ -725,7 +748,7 @@ const MAX_WAIT_SECS = 100 * 365 * 24 * 60 * 60;
  *
  * The number comes from a URL parameter, so it is sanitised: digits only, and
  * clamped rather than rejected. **Never a calendar date** — that pattern is
- * right for 0191's weeks-long rework cap and absurd for minutes — and never a
+ * right for 0191's weeks-long re-issue wait and absurd for minutes — and never a
  * hard-coded "5 minutes": the copy follows what the backend computed from the
  * operator's threshold.
  *
@@ -757,6 +780,231 @@ function describeWait(waitSecs: string | null): string {
 }
 
 /**
+ * Render the date a revoked key's replacement can be issued (task 0191).
+ *
+ * The pattern `describeWait` deliberately avoids — a calendar date — is the
+ * right one here, because the wait is weeks: "1 September 2026" is what a
+ * visitor who revoked on 3 August needs to read. The value arrives from the
+ * revoke answer, from the reveal's `key_revoked` envelope (RFC 3339) or from
+ * the `?issue=capped` landing URL (`YYYY-MM-DD`); in every case it is OUR
+ * instant — the 1st of the next month, 00:00 UTC, under the period rule the
+ * backend states — so it is rendered in UTC and not in the viewer's zone,
+ * where "1 September 00:00 UTC" can read as 31 August.
+ *
+ * Sanitised, because one of the sources is a URL: anything that is not a date
+ * at the front renders as "the start of the next quota period", which is true
+ * of every capped issue whatever the URL said.
+ */
+function describeNextEligible(value: string | null | undefined): string {
+  const match = value ? /^(\d{4})-(\d{2})-(\d{2})/.exec(value) : null;
+  if (!match) return 'the start of the next quota period';
+  const [, year, month, day] = match;
+  const date = new Date(Date.UTC(Number(year), Number(month) - 1, Number(day)));
+  if (Number.isNaN(date.getTime())) {
+    return 'the start of the next quota period';
+  }
+  return date.toLocaleDateString('en-GB', {
+    day: 'numeric',
+    month: 'long',
+    year: 'numeric',
+    timeZone: 'UTC',
+  });
+}
+
+/**
+ * Render an RFC 3339 instant as a UTC time — "21 August 2026, 12:00 UTC" —
+ * for the revocation instant (task 0191). UTC, not the viewer's zone, for the
+ * same reason as `describeNextEligible`.
+ *
+ * `null` for a missing or unparseable value, and the caller renders the
+ * revocation WITHOUT an instant: the backend sends no `revoked_at` when no
+ * record carries a date, and every stand-in reads as a statement of fact the
+ * page cannot make — "deactivated on just now", or (worse, via the
+ * next-eligible phrasing) "deactivated on the start of the next quota
+ * period".
+ */
+function describeUtcInstant(value: string | undefined): string | null {
+  if (!value) return null;
+  const at = new Date(value);
+  if (Number.isNaN(at.getTime())) return null;
+  const day = at.toLocaleDateString('en-GB', {
+    day: 'numeric',
+    month: 'long',
+    year: 'numeric',
+    timeZone: 'UTC',
+  });
+  const time = at.toLocaleTimeString('en-GB', {
+    hour: '2-digit',
+    minute: '2-digit',
+    timeZone: 'UTC',
+  });
+  return `${day}, ${time} UTC`;
+}
+
+/**
+ * How long a disable takes to reach the data plane, in the words the page
+ * uses. Measured under task 0180 item 8: a disabled key kept answering `200`
+ * for ~25 s before the `403` arrived. Said out loud rather than hidden behind
+ * "immediately", because a visitor revoking a LEAKED key is exactly the
+ * person who must not stop worrying one second too early.
+ */
+const PROPAGATION_COPY = 'within about half a minute';
+
+/**
+ * How long after a revocation the propagation window is still worth stating
+ * in the present tense. The window is ~25 s; five minutes is generous and
+ * keeps the copy honest on the reveal path, which renders the revoked view
+ * on every page load — days later, "until then treat it as live" would be
+ * telling somebody to keep worrying about a key that died last week.
+ */
+const PROPAGATION_FRESH_MS = 5 * 60 * 1000;
+
+/** Whether `revokedAt` (RFC 3339) is recent enough for the present tense. */
+function revokedJustNow(revokedAt: string | undefined): boolean {
+  if (!revokedAt) return false;
+  const at = new Date(revokedAt).getTime();
+  return !Number.isNaN(at) && Date.now() - at < PROPAGATION_FRESH_MS;
+}
+
+/** Whether `nextEligibleAt` (RFC 3339 or `YYYY-MM-DD`) is still ahead. */
+function stillWaiting(nextEligibleAt: string): boolean {
+  const at = new Date(
+    nextEligibleAt.length === 10
+      ? `${nextEligibleAt}T00:00:00Z`
+      : nextEligibleAt,
+  );
+  // An unparseable date is treated as STILL WAITING: the safe direction is
+  // to withhold the issue link (the server would only refuse it), never to
+  // offer it on garbage.
+  return Number.isNaN(at.getTime()) || at.getTime() > Date.now();
+}
+
+/** The phrase that arms the revocation (task 0191). */
+const REWORK_CONFIRM_PHRASE = 'delete-key';
+
+/**
+ * The "Replace my key" confirmation (task 0191).
+ *
+ * A modal in the plain sense — one `role="dialog"` section that takes over
+ * the key panel until dismissed — and unstyled like everything before task
+ * 0193. The WORDING is this task's and is not re-decided later:
+ *
+ * - It states plainly that the current key is **deactivated immediately**,
+ *   so anything still using it breaks the moment the visitor confirms — and
+ *   that **no new key is issued until the next quota period**. Replacing is a
+ *   revocation with a dated replacement, not a swap: if a swap handed out a
+ *   fresh key (a fresh counter), "replace my key" would be the button people
+ *   press on the 20th of a heavy month.
+ * - Confirm is **disabled until the visitor types `delete-key`**, and
+ *   disabled again the moment it is pressed, so a double-click cannot fire two
+ *   requests. The press is a same-origin `POST` (`revokeKey`) — no Discord
+ *   round-trip, so a leaked key is killable while Discord is down.
+ *
+ * On success the parent renders the revoked state with the exact date from
+ * the backend's answer; on failure the dialog says so and stays open, with the
+ * key still live — "revoked" is never shown for a key that still works.
+ *
+ * **The failure copy holds the other half of that invariant, and it is the
+ * weaker half.** "Revoked" is decidable from the response; "still active" is
+ * not. A `502` can be a control-plane refusal with nothing written, or a lost
+ * response on an `UpdateApiKey` that landed — the page cannot tell, so it says
+ * what it knows (the deactivation was not confirmed) and never asserts the key
+ * is still working. The partly-succeeded case does not arrive here at all: the
+ * backend answers `200 partial`, and the revoked view renders the warning.
+ */
+function ReplaceKey({
+  onClose,
+  onRevoked,
+}: {
+  onClose: () => void;
+  onRevoked: (revoked: PortalKeyRevoked) => void;
+}) {
+  const [typed, setTyped] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [failure, setFailure] = useState<string | null>(null);
+
+  const armed = typed === REWORK_CONFIRM_PHRASE;
+
+  const onConfirm = () => {
+    // Disabled from the first press, before the request is even made: a
+    // second click in the window before the answer must not start a second
+    // request. The state change re-renders the button disabled synchronously.
+    if (!armed || submitting) return;
+    setSubmitting(true);
+    setFailure(null);
+    revokeKey()
+      .then((revoked) => {
+        onRevoked({
+          revoked: true,
+          next_eligible_at: revoked.next_eligible_at,
+          revoked_at: revoked.revoked_at,
+          partial: revoked.partial,
+        });
+      })
+      .catch((cause: unknown) => {
+        setFailure(describeFailure(cause));
+        setSubmitting(false);
+      });
+  };
+
+  return (
+    <section
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="replace-key-title"
+      data-testid="replace-key-dialog"
+    >
+      <h3 id="replace-key-title">Replace your API key?</h3>
+      <p data-testid="replace-key-warning">
+        Replacing your key <strong>deactivates the current one</strong>. It
+        stops working {PROPAGATION_COPY} of your confirming — AWS takes that
+        long to apply the change, so treat it as live until then — and anything
+        still using it will break. <strong>No new key is issued now</strong>:
+        you can generate a new one at the start of the next quota period (the
+        1st of next month, 00:00 UTC), and until then you will not have a
+        working key.
+      </p>
+      <p>
+        Do this if your key has leaked or you no longer trust where it is. If
+        you only want a fresh key, wait for the next period instead.
+      </p>
+      <p>
+        <label>
+          Type <code>{REWORK_CONFIRM_PHRASE}</code> to confirm:{' '}
+          <input
+            type="text"
+            value={typed}
+            onChange={(event) => setTyped(event.target.value)}
+            autoComplete="off"
+            spellCheck={false}
+            disabled={submitting}
+            data-testid="replace-key-phrase"
+          />
+        </label>
+      </p>
+      <button
+        type="button"
+        onClick={onConfirm}
+        disabled={!armed || submitting}
+        data-testid="replace-key-confirm"
+      >
+        {submitting ? 'Deactivating…' : 'Deactivate my key'}
+      </button>{' '}
+      <button type="button" onClick={onClose} disabled={submitting}>
+        Cancel
+      </button>
+      {failure && (
+        <p data-testid="replace-key-failed">
+          Could not confirm the deactivation — your key may or may not have been
+          switched off: <code>{failure}</code>. Close this and reload the page
+          to see where it stands, then try again if it is still live.
+        </p>
+      )}
+    </section>
+  );
+}
+
+/**
  * The API key, masked (task 0187; issuance re-shaped by task 0189).
  *
  * Rendered only for a signed-in visitor, because that is the only state in which
@@ -782,15 +1030,19 @@ function describeWait(waitSecs: string | null): string {
  */
 function ApiKey({
   onKey,
+  onRevoked,
   session,
 }: {
   onKey?: () => void;
+  /** Task 0191: the key on screen was just deactivated. A fact, no data. */
+  onRevoked?: () => void;
   session: PortalSession;
 }) {
   type KeyView =
     | { state: 'loading' }
     | { state: 'ok'; key: PortalKey }
     | { state: 'none' }
+    | { state: 'revoked'; revoked: PortalKeyRevoked }
     | { state: 'failed'; reason: string };
 
   const [view, setView] = useState<KeyView>({ state: 'loading' });
@@ -801,7 +1053,15 @@ function ApiKey({
   // The issue round-trip's landing state, read once and stripped from the URL
   // — see `useOneShotParams`. `wait_secs` only means anything alongside
   // `issue=too_young`.
-  const { issue, wait_secs: waitSecs } = useOneShotParams(ISSUE_PARAMS);
+  const {
+    issue,
+    wait_secs: waitSecs,
+    next_eligible_at: nextEligibleAt,
+  } = useOneShotParams(ISSUE_PARAMS);
+  // Whether THIS landing is itself proof a key exists: the backend created
+  // one before it redirected.
+  const landedWithKey = issue === 'ok';
+  const [replacing, setReplacing] = useState(false);
 
   // The same guard `SignIn` and `Usage` keep, and for both of their reasons:
   // signing out unmounts this component, and a response landing afterwards
@@ -837,7 +1097,13 @@ function ApiKey({
     fetchKey()
       .then((key) => {
         if (!live) return;
-        if (key) {
+        if (key && 'revoked' in key) {
+          // Task 0191: the owner killed it. No value, no issue link — the
+          // date instead. Nothing is reported upward: there is no key on
+          // screen for the usage section to reason about, though the
+          // counter it shows is still the revoked key's (preserved).
+          setView({ state: 'revoked', revoked: key });
+        } else if (key) {
           setView({ state: 'ok', key });
           // Masked on arrival, always: what nobody asked for is the
           // credential appearing on screen while they were looking elsewhere.
@@ -873,15 +1139,16 @@ function ApiKey({
   }, [load]);
 
   useEffect(() => {
-    // `?issue=ok` is itself proof a key exists — the backend created one
-    // before it redirected — even though `GetApiKeys` may not list it for a
-    // moment yet. Reporting the fact NOW keeps the usage section beside this
-    // one from telling a visitor who has just been given their first key that
-    // they have none and should issue one.
-    if (issue === 'ok') onKeyRef.current?.();
+    // `?issue=ok` is itself proof a key exists — the
+    // backend created or replaced one before it redirected — even though
+    // `GetApiKeys` may not list it for a moment yet. Reporting the fact NOW
+    // keeps the usage section beside this one from telling a visitor who has
+    // just been given their first key that they have none and should issue
+    // one.
+    if (landedWithKey) onKeyRef.current?.();
     load();
     return () => cancelInFlight.current?.();
-  }, [load, issue]);
+  }, [load, landedWithKey]);
 
   const onCopy = () => {
     if (view.state !== 'ok') return;
@@ -943,6 +1210,18 @@ function ApiKey({
           this line belongs to rather than by excluding `none` alone. */}
       {issue === 'ok' && (view.state === 'ok' || view.state === 'loading') && (
         <p data-testid="issue-ok">Your key is ready.</p>
+      )}
+      {/* Task 0191: eligible, but the key was revoked this quota period, so
+          no new one is issued until the date. Worded as a wait with a date,
+          like `too_young` — and, like the revoke dialog said it would be,
+          without a link that would only be refused. */}
+      {issue === 'capped' && (
+        <p data-testid="issue-capped">
+          No new key yet: you deactivated your previous key this quota period,
+          and a replacement can be issued from{' '}
+          <strong>{describeNextEligible(nextEligibleAt)}</strong>. Until then
+          you do not have a working key.
+        </p>
       )}
       {issue === 'not_member' && (
         <p data-testid="issue-not-member">
@@ -1009,7 +1288,7 @@ function ApiKey({
           so it renders as one, and specifically NOT as the "you have no key"
           branch below, which would offer to issue a second key for a visitor
           who has just been given their first. */}
-      {view.state === 'none' && issue === 'ok' && (
+      {view.state === 'none' && landedWithKey && (
         <p data-testid="issue-ok-settling">
           Your key was created, and is taking a moment to appear.{' '}
           <button type="button" onClick={reload}>
@@ -1018,7 +1297,79 @@ function ApiKey({
         </p>
       )}
 
-      {view.state === 'none' && issue !== 'ok' && (
+      {/* Task 0191: revoked by the owner. The date comes from the backend;
+          the issue link appears only once it has passed, because before that
+          the round-trip would only be refused — and a dead value is never
+          shown again. */}
+      {view.state === 'revoked' && (
+        <div data-testid="key-revoked">
+          {/* Task 0191: the backend could not disable every key under this
+              name. The visitor's own key is off — that is what `Partial`
+              means — but a duplicate from an earlier double-submit may still
+              answer, so the page must not let the paragraph below stand
+              alone. First, because it is the sentence that changes what they
+              should do next. */}
+          {view.revoked.partial && (
+            <p data-testid="revoke-partial">
+              <strong>One of your keys could not be deactivated.</strong> A
+              duplicate under this name may still work against <code>/v1/</code>
+              . Press <strong>Replace my key…</strong> again once the page
+              reloads — it retries every key, and it will not cost you a second
+              revocation.
+            </p>
+          )}
+          {(() => {
+            const at = describeUtcInstant(view.revoked.revoked_at);
+            const fresh = revokedJustNow(view.revoked.revoked_at);
+            return (
+              <p>
+                Your API key was deactivated
+                {at && (
+                  <>
+                    {' on '}
+                    <strong data-testid="revoked-at">{at}</strong>
+                  </>
+                )}
+                {/* Present tense only while the window is still open: on the
+                    reveal path this same view renders days later, where
+                    "treat it as live" would be false. */}
+                {fresh
+                  ? `. It stops working ${PROPAGATION_COPY}${
+                      at ? ' of that instant' : ''
+                    } — until then treat it as live — and anything still using it will break.`
+                  : `. It stopped working ${PROPAGATION_COPY}${
+                      at ? ' of that instant' : ''
+                    }, and anything still using it is broken.`}
+              </p>
+            );
+          })()}
+          {/* Neither sentence below is true of a PARTIAL revocation, so
+              neither renders for one. "You do not have a working key" is
+              false — the duplicate that refused to be disabled is a working
+              key, and the issue path adopts it rather than refusing, so the
+              cap the backend computed does not describe what happens next
+              either. The warning above already carries the only instruction
+              that applies: press Replace again. */}
+          {view.revoked.partial ? null : stillWaiting(
+              view.revoked.next_eligible_at,
+            ) ? (
+            <p>
+              You can generate a new key from{' '}
+              <strong>
+                {describeNextEligible(view.revoked.next_eligible_at)}
+              </strong>
+              . Until then you do not have a working key.
+            </p>
+          ) : (
+            <p>
+              A new key can be issued now:{' '}
+              <a href={issueUrl()}>Get my API key</a>.
+            </p>
+          )}
+        </div>
+      )}
+
+      {view.state === 'none' && !landedWithKey && (
         <>
           <Prerequisites />
           <p>
@@ -1074,6 +1425,31 @@ function ApiKey({
             Send it as the <code>X-API-Key</code> header on <code>/v1/</code>{' '}
             requests.
           </p>
+          {/* Task 0191. Beside the key and nowhere else: there is nothing to
+              replace without one. A button that opens the confirmation,
+              not a link into the round-trip — the round-trip is reached only
+              from the armed confirm inside the dialog. */}
+          {replacing ? (
+            <ReplaceKey
+              onClose={() => setReplacing(false)}
+              onRevoked={(revoked) => {
+                setReplacing(false);
+                setRevealed(false);
+                setView({ state: 'revoked', revoked });
+                onRevoked?.();
+              }}
+            />
+          ) : (
+            <p>
+              <button
+                type="button"
+                onClick={() => setReplacing(true)}
+                data-testid="replace-key-open"
+              >
+                Replace my key…
+              </button>
+            </p>
+          )}
         </>
       )}
 
@@ -1194,9 +1570,12 @@ function ApiKey({
  */
 function Usage({
   keyOnScreen,
+  revokedCount = 0,
   rateLimit,
 }: {
   keyOnScreen: boolean;
+  /** Task 0191: bumped by the dashboard on each in-page revoke. */
+  revokedCount?: number;
   rateLimit?: number;
 }) {
   type UsageView =
@@ -1237,6 +1616,22 @@ function Usage({
     load();
     return () => cancelInFlight.current?.();
   }, [load]);
+
+  // Task 0191: after an in-page revoke, re-ask. The backend evicted its
+  // cache for this caller, so this is one real read — and the answer may
+  // legitimately still carry the revoked key's figures: `usage::fetch` keeps
+  // reporting a revoked key's counter (it is preserved) for as long as the cap
+  // holds, so the `ok` branch below renders an ordinary usage panel. Nothing in
+  // THIS section marks the key dead; the key section above it renders the
+  // `key-revoked` view, and that is where the visitor reads it. Only the
+  // `no-key` branch here has revoke wording, for the case where AWS has no row
+  // at all.
+  const lastRevokedCount = useRef(0);
+  useEffect(() => {
+    if (revokedCount === lastRevokedCount.current) return;
+    lastRevokedCount.current = revokedCount;
+    load();
+  }, [revokedCount, load]);
 
   // Fires the keyed refetch AT MOST ONCE per mount. This latch is what lets
   // the effect below watch `view.state` — the obvious dependency — without
@@ -1328,6 +1723,13 @@ function Usage({
             <p>
               Your key is new — usage figures appear here with a delay after
               your first requests.
+            </p>
+          ) : revokedCount > 0 ? (
+            // Task 0191: revoked in this page load, and AWS has no row for
+            // the key. Not "issue one above" — the key section is already
+            // saying when that becomes possible.
+            <p data-testid="usage-after-revoke">
+              Your key was deactivated; there is no usage to show for it.
             </p>
           ) : (
             <p>You have no API key yet — issue one above to see your usage.</p>

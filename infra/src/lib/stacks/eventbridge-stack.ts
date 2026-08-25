@@ -42,6 +42,19 @@ const SUPPLY_WORKER_ASSET_DIR =
 const ORACLE_WORKER_ASSET_DIR =
   process.env['ORACLE_WORKER_ASSET_DIR'] ?? '../target/lambda/oracle-worker';
 
+/**
+ * Cargo-lambda build output for the `coarse-sweep-worker` binary (task 0218).
+ *
+ * Its OWN crate, not a bin inside `enrichment-worker`: the Lambda tooling
+ * requires crate name == bin name == `target/lambda/<name>`, and a bin in
+ * another crate fails both `lambda-assets.sh` and `verify-lambda-assets.sh`
+ * (`did not match any packages` / `CannotFindAsset`). The sweep LOGIC is still
+ * shared — it is `enrichment_worker::repair`, consumed as a library.
+ */
+const COARSE_SWEEP_WORKER_ASSET_DIR =
+  process.env['COARSE_SWEEP_WORKER_ASSET_DIR'] ??
+  '../target/lambda/coarse-sweep-worker';
+
 /** Cargo-lambda build output for the `enrichment-worker` binary (task 0026). */
 const ENRICHMENT_WORKER_ASSET_DIR =
   process.env['ENRICHMENT_WORKER_ASSET_DIR'] ??
@@ -87,6 +100,7 @@ export class EventBridgeStack extends cdk.Stack {
   public readonly assetDiscoveryRule: events.Rule;
   public readonly cleanupRule: events.Rule;
   public readonly enrichmentRule: events.Rule;
+  public readonly coarseSweepRule: events.Rule;
   public readonly backfillFreshnessProbeRule: events.Rule;
   public readonly rollupFreshnessProbeRule: events.Rule;
   public readonly mtlsNotafterProbeRule: events.Rule;
@@ -95,6 +109,7 @@ export class EventBridgeStack extends cdk.Stack {
   public readonly supplyFunction: lambda.Function;
   public readonly oracleFunction: lambda.Function;
   public readonly enrichmentFunction: lambda.Function;
+  public readonly coarseSweepFunction: lambda.Function;
   public readonly backfillFreshnessProbeFunction: lambda.Function;
   public readonly rollupFreshnessProbeFunction: lambda.Function;
   public readonly mtlsNotafterProbeFunction: lambda.Function;
@@ -173,6 +188,23 @@ export class EventBridgeStack extends cdk.Stack {
       ruleName: `prices-${env}-enrichment`,
       description: `close_usd / volume_quote_usd enrichment of price_ohlcv_1m (${env})`,
       schedule: events.Schedule.expression(schedules.enrichment),
+    });
+
+    // Task 0218. Hourly, matching the cadence the sweep effectively had as a
+    // stage of the enrichment worker — but on its own rule, so a run that does
+    // not happen is visible as zero invocations rather than as silence inside
+    // another function's handler.
+    //
+    // ⚠️ Deliberately OFFSET from the enrichment rule (see
+    // `scheduleExpressions.coarseSweep`). Serialized inside one invocation the
+    // two never overlapped; on independent schedules they can. Their writes are
+    // disjoint so that is safe, but both issue `FINAL` scans against a shared
+    // ClickHouse where BE owns most of the volume and has filled it before, so
+    // there is no reason to stack their peaks in the same minute.
+    this.coarseSweepRule = new events.Rule(this, 'CoarseSweepRule', {
+      ruleName: `prices-${env}-coarse-sweep`,
+      description: `close_usd / volume_quote_usd sweep of the coarse OHLCV rollups (${env})`,
+      schedule: events.Schedule.expression(schedules.coarseSweep),
     });
 
     this.backfillFreshnessProbeRule = new events.Rule(
@@ -432,41 +464,11 @@ export class EventBridgeStack extends cdk.Stack {
         // (reflector / 300 / 86400 / 10000 / 20). ENRICHMENT_ONE_SHOT is left
         // unset (false) here — it belongs only on a dedicated one-time drain
         // invocation, never this hourly target (see the timeout note above).
-        //
-        // Recurring coarse-table USD sweep (task 0114). The rollup MVs only
-        // re-aggregate a bounded recent window, so any 1m row enriched *after*
-        // that window closes (enrichment lag / a stall) leaves its coarse
-        // counterpart frozen at zero forever. Rather than a second Lambda to
-        // repair that, this same worker re-sweeps the recent coarse partitions
-        // after each 1m pass — one owner of close_usd across 1m AND the rollups.
-        // The handler runs it bounded (overflow defers to the next hour) and
-        // best-effort (a sweep failure never fails the invocation or the 1m
-        // pass), so it is safe on the shared cluster and under the 5-min timeout.
-        // COARSE_SWEEP_TABLES being non-empty is the on switch; clearing it
-        // disables the sweep with no code change.
-        //
-        // Every rollup table is included so no stored USD value is left wrong.
-        // `_15m` is a 30-day rolling window (cleanup-worker RETENTION), unlike the
-        // {1h,4h,1d,1w,1M} which are retained forever — so the 2-month lookback
-        // naturally only finds ~30 days of `_15m` data (older partitions are
-        // already dropped); that is harmless, the sweep just covers whatever
-        // exists. `_1m` is the live base table and is refused by the handler.
-        COARSE_SWEEP_TABLES:
-          'price_ohlcv_15m,price_ohlcv_1h,price_ohlcv_4h,price_ohlcv_1d,price_ohlcv_1w,price_ohlcv_1M',
-        // Trailing months swept each run, inclusive of the current month: 2 =
-        // current + previous (covers month-boundary rollups + multi-day lag).
-        COARSE_SWEEP_LOOKBACK_MONTHS: '2',
-        // Per-tier batch budget for each month's bounded sweep pass. Steady state
-        // early-exits (recent partitions already at the no_reference floor); this
-        // caps a catch-up run so it cannot approach the timeout.
-        COARSE_SWEEP_MAX_BATCHES: '20',
-        // Wall-clock budget (seconds) for the sweep per invocation. The handler
-        // stops it this long after it starts — and always a margin before the
-        // Lambda deadline — so a slow catch-up defers to the next run instead of
-        // being hard-killed by the 5-min timeout (a timeout is an invocation
-        // error the best-effort handler cannot catch, so without this a long
-        // sweep would fail the invocation and trip the enrichment alarm).
-        COARSE_SWEEP_TIME_BUDGET_SECS: '120',
+        // NOTE: the coarse-table USD sweep (task 0114) used to run here as a
+        // stage of this worker. It moved to its own function and schedule in
+        // task 0218 — see CoarseSweepFunction below. Do NOT re-add the
+        // COARSE_SWEEP_* vars here: two schedules running the same sweep would
+        // be two writers to the same coarse tables.
         // --- Task 0111: partition-bounded passes -------------------------
         // Monthly partitions the scheduled 1m pass scans, newest-first
         // (current + previous). Unbounded, every statement re-scanned all 102
@@ -495,9 +497,9 @@ export class EventBridgeStack extends cdk.Stack {
         // cadence rather than from doing many months at once — which keeps any
         // single invocation's cost bounded and predictable.
         ENRICH_HISTORICAL_MAX_MONTHS: '1',
-        // Wall-clock budget (seconds). Runs after the live pass and before the
-        // coarse sweep; with the live pass now ~1 min instead of the full 300s,
-        // both sweeps get real budget for the first time (task 0218).
+        // Wall-clock budget (seconds) for the historical drain. Since task
+        // 0218 moved the coarse sweep to its own Lambda this is the only stage
+        // after the live pass, so it no longer shares what the pass leaves.
         ENRICH_HISTORICAL_TIME_BUDGET_SECS: '120',
         // How long an `exhausted` mark is trusted before it is re-confirmed
         // against the data (7 days). Without this the frontier would be a
@@ -533,6 +535,110 @@ export class EventBridgeStack extends cdk.Stack {
         },
       }),
     );
+
+    // -----------------------------------------------------------------
+    // Coarse-table USD sweep (task 0218) — split out of the enrichment worker.
+    //
+    // It used to be the last stage of the enrichment handler, after
+    // `pass.run().await?`. That gave it two failure modes it could not escape,
+    // and it NEVER executed in production under either: skipped whenever the 1m
+    // pass errored (task 0215 had it erroring on every invocation for 26 days),
+    // and starved once it stopped erroring, because the sweep's budget is the
+    // Lambda deadline minus whatever the pass left.
+    //
+    // Task 0111 bounded the 1m pass and the sweep began running — but that is
+    // the symptom. Any stage after an unbounded stage in one fixed budget is
+    // starved by construction, and the next growth in the 1m pass starves it
+    // again, silently.
+    //
+    // ⚠️ The `?` is the deciding reason for a separate function, not the budget:
+    // reserving time inside the one Lambda fixes starvation and leaves skipping
+    // intact. Only a separate invocation removes the dependency on the 1m pass
+    // SUCCEEDING. It also makes a missing run observable — a zero-invocations
+    // alarm cannot watch a stage buried inside another function's handler.
+    //
+    // Writes only the coarse rollups; `price_ohlcv_1m` is refused by
+    // `is_coarse_table` in the worker, so this function and the enrichment
+    // function have provably disjoint write sets and may run concurrently.
+    // (The coarse tables are already written every 60s by mv_ohlcv_1m_to_15m,
+    // so concurrent writers are the pre-existing steady state.)
+    // -----------------------------------------------------------------
+    const coarseSweep = createWorkerLambda(this, {
+      config,
+      accountId,
+      mtlsSecretName: discoveryMtlsSecretName,
+      idPrefix: 'CoarseSweep',
+      name: 'coarse-sweep',
+      errorAlarmActions: [opsAlarmAction],
+      assetDir: COARSE_SWEEP_WORKER_ASSET_DIR,
+      // Peak usage measured 52-54 MB, so this is over-provisioned — but Lambda
+      // CPU scales with memory, and the sweep spends its time on TLS and
+      // response parsing against ClickHouse. Cutting memory would cut CPU and
+      // could make the ~21s sweep slower for a saving of a few cents a month.
+      memorySize: 512,
+      // The sweep self-limits to COARSE_SWEEP_TIME_BUDGET_SECS and always stops
+      // a margin before this deadline, so the timeout is a backstop, not the
+      // control. 5 min matches the enrichment worker.
+      timeout: cdk.Duration.minutes(5),
+      // A failed sweep must NOT be re-driven twice: the work is idempotent and
+      // the next hourly run resumes it anyway, so retries would triple the load
+      // on a shared cluster and turn one bad hour into three error datapoints
+      // instead of one clean signal. Same reasoning as the 0084 supply worker.
+      asyncRetryAttempts: 0,
+      secretsExtensionLayer,
+      chDomain,
+      rule: this.coarseSweepRule,
+      environment: {
+        // Moved here from the enrichment worker (task 0218). Every rollup table
+        // is included so no stored USD value is left wrong. `_15m` is a 30-day
+        // rolling window (cleanup-worker RETENTION) unlike {1h,4h,1d,1w,1M}
+        // which are retained forever, so the 2-month lookback naturally finds
+        // only ~30 days of `_15m`; harmless, the sweep covers whatever exists.
+        // `price_ohlcv_1m` is the live base table and is refused by the worker.
+        //
+        // A non-empty list is still the on switch: clearing it disables the
+        // sweep with no code change. The function then still runs and still
+        // logs each invocation, so "configured off" stays distinguishable from
+        // "never ran" — which is the whole point of task 0218.
+        COARSE_SWEEP_TABLES:
+          'price_ohlcv_15m,price_ohlcv_1h,price_ohlcv_4h,price_ohlcv_1d,price_ohlcv_1w,price_ohlcv_1M',
+        COARSE_SWEEP_LOOKBACK_MONTHS: '2',
+        COARSE_SWEEP_MAX_BATCHES: '20',
+        COARSE_SWEEP_TIME_BUDGET_SECS: '120',
+      },
+      alarmDescription:
+        'Coarse-table USD sweep Lambda invocation errors (close_usd / volume_quote_usd sweep of the OHLCV rollups failed).',
+      alarmPeriod: cdk.Duration.hours(1),
+    });
+    this.coarseSweepFunction = coarseSweep.function;
+
+    // At most one sweep at a time. At ~21s per run on an hourly schedule an
+    // overlap is already near-impossible, so this costs nothing and closes the
+    // tail risk of several sweeps stacking against BE's shared ClickHouse.
+    const coarseSweepCfn = coarseSweep.function.node
+      .defaultChild as lambda.CfnFunction;
+    coarseSweepCfn.reservedConcurrentExecutions = 1;
+
+    // Publishes CoarseSweepRowsEnriched / CoarseSweepTableFailures /
+    // CoarseSweepTablesSkipped under `Prices/Enrichment`. PutMetricData has no
+    // resource-level scoping, so it is `*` constrained to that namespace.
+    coarseSweep.role.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'PublishCoarseSweepMetrics',
+        actions: ['cloudwatch:PutMetricData'],
+        resources: ['*'],
+        conditions: {
+          StringEquals: { 'cloudwatch:namespace': 'Prices/Enrichment' },
+        },
+      }),
+    );
+
+    new cdk.CfnOutput(this, 'CoarseSweepRuleArn', {
+      value: this.coarseSweepRule.ruleArn,
+    });
+    new cdk.CfnOutput(this, 'CoarseSweepFunctionName', {
+      value: this.coarseSweepFunction.functionName,
+    });
 
     new cdk.CfnOutput(this, 'EnrichmentRuleArn', {
       value: this.enrichmentRule.ruleArn,

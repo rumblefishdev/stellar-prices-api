@@ -116,8 +116,8 @@ impl Action {
     /// Parse the `action` query parameter of `/auth/login`.
     ///
     /// An unknown value is rejected rather than defaulted. Defaulting would
-    /// mean a client asking for an action this build does not know (0191's
-    /// `rework`, say) would silently get a sign-in — and the callback would
+    /// mean a client asking for an action this build does not know (0192's
+    /// `revoke`, say) would silently get a sign-in — and the callback would
     /// then complete a *different* action than the one confirmed, which is the
     /// exact thing the slot exists to prevent.
     pub fn parse(raw: &str) -> Option<Self> {
@@ -450,12 +450,12 @@ mod tests {
         assert_eq!(state.action, Action::SignIn);
         assert_eq!(pending.action, Action::SignIn);
 
-        // And a state naming an action this build does not know — 0191's
-        // `rework`, arriving early — is refused at deserialization.
+        // And a state naming an action this build does not know — 0192's
+        // `revoke`, arriving early — is refused at deserialization.
         let crossed = sign_claims(
             KEY,
             CTX_STATE,
-            &serde_json::json!({ "action": "rework", "nonce": pending.nonce, "exp": state.exp }),
+            &serde_json::json!({ "action": "revoke", "nonce": pending.nonce, "exp": state.exp }),
         );
         assert_eq!(
             accept(KEY, &crossed, Some(&started.pending_cookie), NOW).unwrap_err(),
@@ -515,7 +515,11 @@ mod tests {
     fn an_unknown_action_query_value_is_rejected_rather_than_defaulted() {
         assert_eq!(Action::parse("signin"), Some(Action::SignIn));
         assert_eq!(Action::parse("issue"), Some(Action::Issue));
-        for unknown in ["rework", "", "SIGNIN", "ISSUE", "issue ", "signin "] {
+        // `rework` is deliberately NOT an action: task 0191's revoke is
+        // session-only and never crosses the authorize endpoint.
+        for unknown in [
+            "rework", "revoke", "", "SIGNIN", "ISSUE", "issue ", "signin ",
+        ] {
             assert_eq!(Action::parse(unknown), None, "accepted {unknown:?}");
         }
     }
