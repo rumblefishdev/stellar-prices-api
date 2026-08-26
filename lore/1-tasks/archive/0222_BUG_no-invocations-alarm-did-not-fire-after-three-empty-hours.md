@@ -2,7 +2,7 @@
 id: "0222"
 title: "The coarse-sweep no-invocations alarm did not fire after three genuinely empty hours — the instrument that detects a dead schedule is slower than its config claims"
 type: BUG
-status: active
+status: completed
 related_adr: []
 related_tasks: ["0218", "0204", "0220"]
 tags: [layer-infra, priority-high, effort-small, observability, cloudwatch, alarms, ops]
@@ -92,6 +92,28 @@ history:
       order of magnitude faster than the raw form. AC 7 still open - the
       ledger-processor flap watch is a single `describe-alarm-history` read on
       2026-08-26, since history persists.
+  - date: 2026-08-26
+    status: completed
+    who: okarcz
+    note: >
+      AC 7 closed on the overnight read and the task completed. 7 of 7 criteria
+      resolved — 5 ticked as written, AC 4's Period and AC 5 restated rather than
+      ticked, with the reasoning recorded in both cases.
+      The `2/2` ledger-processor flap did NOT materialise: zero state transitions
+      in the 13.5 h since the 17:32 deploy, `StateUpdatedTimestamp` still
+      2026-07-09, and the only retained history item is the ConfigurationUpdate
+      at 17:31:40. The OK was checked for substance rather than taken at face
+      value — 56 of 56 expected 900 s buckets, 155-161 invocations each, FILL
+      output byte-identical to raw with no filled buckets.
+      🔑 Finding 4 added: a hand-run `get-metric-data` FILL query whose window
+      ends in the FUTURE fabricates a trailing gap — 19 consecutive zero buckets
+      that read exactly like a 4h45m ingestion halt. Bound the window at `now`.
+      It also strengthens the 2/2 judgement call: if future buckets fill as
+      zeros, an incomplete current bucket does too.
+      Shipped: PR #247 (the FILL fix, deployed 2026-08-25 17:32 UTC), PR #250
+      (deploy + induction record). Six no-invocations alarms converted to metric
+      math, zero left on the legacy single-metric form. Follow-up [[0223]]
+      already spawned for the NOT_BREACHING siblings.
 ---
 
 # The no-invocations alarm did not fire after three empty hours
@@ -591,17 +613,14 @@ judgement alone and explicitly recorded as such. It does not settle it; AC 7 doe
       Same class as `EnrichmentBacklogAlarm`. FILL does not help; the remedy has
       different semantics (a duration alarm must not fire because nothing ran)
       and is spawned separately rather than folded in here.
-- [ ] The `2/2` ledger-processor change is watched for ~2 h after deploy.
+- [x] The `2/2` ledger-processor change is watched for ~2 h after deploy.
       Its flap risk was mitigated on a judgement, not a measurement — post-deploy
       is when a flap would show, and finding out from `describe-alarm-history`
       beats finding out from a 3am page.
-      → ⏳ **OPEN.** Alarm live from 17:32 UTC 2026-08-25. `describe-alarm-history`
-      persists, so this is a single retroactive read on **2026-08-26** covering
-      the whole overnight window — no attended watch needed. Expect **no**
-      transitions beyond at most one settling `INSUFFICIENT_DATA → OK`. Repeated
-      `OK → ALARM → OK` cycling is the flap, and Finding 3 above says the
-      exposure is real; the response is to widen, not to leave a top-severity
-      page crying wolf.
+      → **NO FLAP.** Read 2026-08-26 07:0x UTC, covering the whole 13.5 h
+      overnight window since the 17:32 deploy. **Zero `OK → ALARM → OK` cycles**
+      — in fact zero state transitions of any kind. See "AC 7 — the overnight
+      read" below.
 
 ```bash
 aws cloudwatch describe-alarm-history \
@@ -609,6 +628,58 @@ aws cloudwatch describe-alarm-history \
   --history-item-type StateUpdate --max-records 20 --region eu-central-1 \
   --query 'AlarmHistoryItems[].[Timestamp,HistorySummary]' --output text
 ```
+
+## AC 7 — the overnight read, 2026-08-26 07:0x UTC
+
+The flap did not happen. `describe-alarm-history --history-item-type StateUpdate`
+returned **empty**, and the discriminator that empty is a *result* rather than a
+typo'd alarm name is `describe-alarms`:
+
+```
+prices-production-ledger-processor-no-invocations   OK   2/2   threshold 1.0   breaching
+StateUpdatedTimestamp  2026-07-09T08:35:18Z
+ConfigurationUpdate    2026-08-25T17:31:40Z    <- the deploy
+```
+
+The only retained history item is the config update at **17:31:40**, matching the
+deploy record. `StateUpdatedTimestamp` is **2026-07-09** — six weeks before the
+change — so the alarm held `OK` straight through the conversion and did not even
+produce the settling `INSUFFICIENT_DATA → OK` this AC predicted. Updating an
+alarm's metric did not reset its state.
+
+### The `OK` is substantive, not vacuous
+
+A green reading is worth nothing on its own — the standing lesson from
+`usd-peg-applied` and from `EnrichmentBacklogAlarm`. So the datapoints were read
+directly, `17:00 → 07:00`, `Period=900`:
+
+| series | n | range |
+|---|---|---|
+| `raw` | **56 of 56** expected buckets | **155 – 161** |
+| `FILL(raw, 0)` | **56**, byte-identical | zero filled buckets |
+
+Live ingestion ran continuously at ~1 invocation every 5.6 s. The alarm is
+reading real non-breaching datapoints, so `OK` means "healthy", not "blind".
+
+### ⚠️ Finding 4 — a FILL query whose window ends in the *future* fabricates a halt
+
+The first version of the check above ran to an end-time of `12:00Z` while the
+clock read `07:02Z`. `FILL` synthesised zeros across the ~5 hours of **future**
+window, returning **19 consecutive empty 15-minute buckets on a trailing gap** —
+output indistinguishable from a genuine 4h45m ingestion halt, and very nearly
+reported as one.
+
+That is the documented "FILL extends past the last datapoint" behaviour working
+exactly as specified. The operational rule it implies:
+
+🔑 **Bound a hand-run `get-metric-data` FILL window at `now`.** A future end-time
+manufactures the exact signal you are testing for. Always `date -u` first.
+
+The alarms themselves are unaffected — an alarm's window always ends at ~now —
+but this sharpens the case for the `2/2` change rather than weakening it: if
+*future* buckets fill as zeros, an **incomplete** current bucket does too, which
+is the flap mechanism Finding 3 caught at 28 seconds. `1/1` on a FILL alarm would
+be a live page waiting to happen.
 
 ## AC 5 restated — the criterion asked for something unachievable
 
