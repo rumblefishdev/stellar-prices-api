@@ -585,6 +585,23 @@ pub struct OhlcvArgs {
     pub limit: u64,
 }
 
+/// Smallest `close` / `close_usd` a USD rate may be derived from — a
+/// **precision precondition**, not a plausibility band.
+///
+/// The columns are `Decimal(38, 14)`, so one tick is `1e-14`. A row measured on
+/// prod carries `close = 5e-14`, `close_usd = 4e-14` — five ticks over four. The
+/// implied rate is 1.25, which looks perfectly ordinary, so **no check on the
+/// derived rate can reject it**: the value is not what is wrong, the inputs are.
+/// Both operands are single-digit multiples of the quantisation step, and their
+/// ratio is quantisation noise wearing a plausible number.
+///
+/// `1e-12` is 100 ticks, so a value at the threshold still carries ~2 significant
+/// digits. ⚠️ The exact figure is a judgement — the measurement establishes that
+/// a floor is needed and roughly where the noise lives, not that 100 ticks is
+/// the uniquely right line. Rows below it are treated as unpriced (§5): the
+/// bucket returns, without price fields.
+const PRECISION_FLOOR: &str = "toDecimal128('0.000000000001', 14)";
+
 /// Synthesize a USD series for a **peg asset** — one that is only ever stored as
 /// a quote leg, never as a base (ADR 0011 §6).
 ///
@@ -627,15 +644,45 @@ pub struct OhlcvArgs {
 /// `volume_base` and `trade_count` are `0`: USDC is not traded as a base, so
 /// there is no base volume to report. Reporting its volume as a *quote* here
 /// would answer a different question than the one asked.
+///
+/// ## Denominating in XLM — derived, deliberately not inverted
+///
+/// ADR 0011 §6 says *derive rather than invert*, and the difference matters. The
+/// market is stored one way round only: base XLM, quote USDC. Flipping that
+/// candle into a USDC/XLM one is a minefield — O/H/L invert with **high↔low
+/// swapping**, `volume_base` becomes the *quote* volume rather than a
+/// reciprocal, `volume_quote_usd` re-bases onto the other leg, and `vwap` has to
+/// be re-weighted rather than flipped.
+///
+/// So the series is **built from two USD rates** instead:
+///
+/// ```text
+/// USDC in XLM = USDC's USD rate / XLM's USD price in that bucket
+/// ```
+///
+/// The numerator is the same `usd_rate` observation the USD path uses; the
+/// denominator is `close_usd` on the XLM/USDC candle, which is XLM's USD price
+/// as already computed by enrichment. No inversion, no volume re-basing, and the
+/// pitfalls above never arise — the volumes are `0` here for the same reason
+/// they are in USD mode.
+///
+/// ⚠️ The denominator is guarded by the same [`PRECISION_FLOOR`]: an unpriced or
+/// dust-valued XLM bucket yields no price rather than a division blow-up.
 pub async fn ohlcv_peg_series(
     ch: &Client,
     args: &OhlcvArgs,
     usdc_id: u32,
     usdc_issuer: &str,
+    // `Some(xlm_id)` denominates in XLM instead of USD — ADR 0011 §6's second
+    // degenerate case. See the "Denominating in XLM" note above.
+    xlm_id: Option<u32>,
 ) -> Result<Vec<Candle>, clickhouse::error::Error> {
     let table = format!("price_ohlcv_{}", args.granularity.as_str());
 
     let mut conds = vec!["quote_asset_id = ?".to_string()];
+    if xlm_id.is_some() {
+        conds.push("asset_id = ?".to_string());
+    }
     if args.start.is_some() {
         conds.push("timestamp >= toDateTime(?)".to_string());
     }
@@ -659,13 +706,13 @@ pub async fn ohlcv_peg_series(
         "SELECT ts, o, h, l, c, vb, vqu, vw, tc, meth, drv FROM ( \
            SELECT \
              formatDateTime(b.bkt, '%Y-%m-%dT%H:%i:%SZ') AS ts, \
-             toNullable(toString(ifNull(r.rate, toDecimal128(1, 14)))) AS o, \
-             toNullable(toString(ifNull(r.rate, toDecimal128(1, 14)))) AS h, \
-             toNullable(toString(ifNull(r.rate, toDecimal128(1, 14)))) AS l, \
-             toNullable(toString(ifNull(r.rate, toDecimal128(1, 14)))) AS c, \
+             {val} AS o, \
+             {val} AS h, \
+             {val} AS l, \
+             {val} AS c, \
              '0' AS vb, \
              '0' AS vqu, \
-             toNullable(toString(ifNull(r.rate, toDecimal128(1, 14)))) AS vw, \
+             {val} AS vw, \
              toUInt64(0) AS tc, \
              toNullable(multiIf(r.meth IS NULL, 'peg', \
                                 r.meth = 'oracle', 'oracle', \
@@ -673,8 +720,9 @@ pub async fn ohlcv_peg_series(
                                 'traded')) AS meth, \
              toNullable(toUInt8(1)) AS drv, \
              b.bkt AS bkt \
-           FROM ( SELECT DISTINCT timestamp AS bkt, 1 AS k \
+           FROM ( SELECT timestamp AS bkt, 1 AS k, {denom} AS den \
                   FROM {table} FINAL WHERE {conds} \
+                  GROUP BY timestamp \
                   ORDER BY bkt DESC LIMIT {limit} ) AS b \
            ASOF LEFT JOIN ( SELECT 1 AS k, timestamp AS rts, usd_rate AS rate, \
                                    method AS meth \
@@ -684,10 +732,27 @@ pub async fn ohlcv_peg_series(
          ) ORDER BY bkt ASC \
          SETTINGS join_use_nulls = 1",
         conds = conds.join(" AND "),
-        limit = args.limit
+        limit = args.limit,
+        denom = if xlm_id.is_some() {
+            // XLM's USD price for the bucket, from the highest-volume source.
+            format!("argMaxIf(close_usd, volume_base, close_usd >= {PRECISION_FLOOR})")
+        } else {
+            "toDecimal128(1, 14)".to_string()
+        },
+        val = if xlm_id.is_some() {
+            // rate / XLM-USD, NULL when the denominator was floored out.
+            "toNullable(toString(toDecimal128OrNull(toString( \
+                 toFloat64(ifNull(r.rate, toDecimal128(1, 14))) \
+                 / nullIf(toFloat64(b.den), 0)), 14)))"
+        } else {
+            "toNullable(toString(ifNull(r.rate, toDecimal128(1, 14))))"
+        }
     );
 
     let mut q = ch.query(&sql).bind(usdc_id);
+    if let Some(x) = xlm_id {
+        q = q.bind(x);
+    }
     if let Some(st) = args.start {
         q = q.bind(st);
     }
@@ -785,6 +850,7 @@ pub async fn ohlcv(ch: &Client, args: OhlcvArgs) -> Result<Vec<Candle>, clickhou
     let (projection, aggregates) = match args.denomination {
         Denomination::Usd(ref refs) => {
             let usdc = refs.usdc;
+            let floor = PRECISION_FLOOR;
             // Omitted entirely when neither pivot reference is tracked — an
             // empty `IN ()` is a syntax error, and the label is optional.
             let traded_arm = if refs.pivots.is_empty() {
@@ -800,7 +866,7 @@ pub async fn ohlcv(ch: &Client, args: OhlcvArgs) -> Result<Vec<Candle>, clickhou
                 // never to a price or a method.
                 format!(
                     "timestamp, volume_base, volume_quote_usd, trade_count, \
-                     (close > 0 AND close_usd > 0 \
+                     (close >= {floor} AND close_usd >= {floor} \
                        AND (quote_asset_id = {usdc} OR close_usd != close)) AS valid, \
                      toFloat64(close_usd) / nullIf(toFloat64(close), 0) AS rate, \
                      toDecimal128OrNull(toString(toFloat64(open) * rate), 14) AS o_x, \

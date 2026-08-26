@@ -628,8 +628,15 @@ rather than holding this one open.
       only in a test.
 - [ ] The returned USDC/USD closes sit within a stated tolerance of ~$1, and the
       tolerance is justified (not asserted as exactly `1.0`).
-- [ ] `?base_currency=XLM` returns a non-empty, correctly-oriented series, with
+- [x] `?base_currency=XLM` returns a non-empty, correctly-oriented series, with
       `volume_*` and `vwap` verified rather than assumed to invert.
+      → **Derived, not inverted** (§6). `USDC_usd / XLM_usd` per bucket, so the
+      inversion pitfalls the ADR warns about never arise: nothing is flipped, so
+      there is no high↔low swap, no volume re-basing and no vwap re-weighting.
+      Volumes are `0` for the same reason as the USD peg series — USDC is not
+      traded as a base. Pinned by
+      `ohlcv_usdc_in_xlm_is_derived_from_two_usd_rates`, seeded so the derived
+      answer (3.9972) differs from what a naive inversion would give (4.0).
 - [x] Fallback **semantics** tested, not the constant: no rate available → peg;
       rate available → that rate. A test asserting exactly `1.0` must not be the
       only coverage ([[0168]] would have to rewrite it).
@@ -637,9 +644,12 @@ rather than holding this one open.
       **moving** rate (0.9993 → 1.0007) and asserts the two buckets differ, so a
       hardcoded peg fails it. `ohlcv_usdc_before_any_observation_falls_back_to_a_labelled_peg`
       covers the other arm and asserts `method = "peg"`.
-- [ ] USDT behaves correctly too — it trades genuinely as a base in 102 pools, so
+- [x] USDT behaves correctly too — it trades genuinely as a base in 102 pools, so
       confirm the synthetic path does **not** override real market data (the same
       trap [[0165]] documents).
+      → The peg path keys on canonical USDC's identity alone, so USDT never
+      enters it. `ohlcv_usdt_as_a_base_keeps_its_real_market_data` asserts a
+      depegged 0.13 survives and is not synthesized at par.
 - [ ] A non-peg asset's response is byte-identical to today's, proving no
       regression on the normal path.
 - [ ] [[0127]] AC 3 + AC 4 re-run and passing.
@@ -659,19 +669,33 @@ rather than holding this one open.
       deployed API.
 - [ ] O/H/L derivation documented as *derived, not measured*, and carried in the
       response provenance rather than only in this file.
-- [ ] `close = 0` guarded, with a test — the clean 30-day sample is not proof
+- [x] `close = 0` guarded, with a test — the clean 30-day sample is not proof
       over all history.
-- [ ] Rate derivation refuses to run when `close` or `close_usd` sits within a
+      → `ohlcv_guards_a_zero_close`. Covered separately from `close_usd = 0`
+      because they are different populations.
+- [x] Rate derivation refuses to run when `close` or `close_usd` sits within a
       few ticks of the `Decimal(38, 14)` floor — a **precision precondition**,
       tested with the `GC4F4IX6DV` row's shape. A band check on the derived rate
       alone does not satisfy this.
+      → `PRECISION_FLOOR` = 1e-12 (100 ticks) on **both inputs**, applied in
+      `valid`. `ohlcv_refuses_to_derive_a_rate_from_values_at_the_decimal_floor`
+      uses the measured shape — `close = 5e-14`, `close_usd = 4e-14`, implied
+      rate **1.25**, an ordinary-looking number no band check could reject.
+      ⚠️ The exact threshold is a judgement; the measurement establishes that a
+      floor is needed, not that 100 ticks is the uniquely right line.
 - [ ] [[0225]]'s acceptance criteria pass — it is this fix's consumer-facing
       verification and gets no separate implementation.
-- [ ] A test proves the conversion tracks a **moving** USDC rate, not a constant
+- [x] A test proves the conversion tracks a **moving** USDC rate, not a constant
       — the measurement below shows the rate genuinely wobbles, so asserting
       `1.0` would be asserting the wrong thing.
-- [ ] Provenance uses [[0165]]'s existing `traded` / `peg` / `oracle` values, not
+      → `ohlcv_usdc_self_pair_is_synthesized_from_the_measured_rate` seeds
+      0.9993 → 1.0007 and asserts the two buckets **differ**, so a hardcoded peg
+      fails rather than passes.
+- [x] Provenance uses [[0165]]'s existing `traded` / `peg` / `oracle` values, not
       a new vocabulary.
+      → Both paths map onto the trio. `usd_rate`'s `pivot`/`pivot2` fold into
+      `traded` — a pivot is priced through a reference asset's own traded
+      candles — so no fourth word is coined.
 
 ### Follow-on — real, but does not gate M2
 

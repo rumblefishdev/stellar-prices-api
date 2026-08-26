@@ -505,16 +505,36 @@ pub async fn get_ohlcv(
     // for it matches zero rows and no amount of filter-dropping helps — its
     // series is synthesized instead. Keyed on the requested identity, not on a
     // resolved asset_id, because 0139 has ids serving more than one identity.
-    let is_peg_asset = matches!(base_currency, BaseCurrency::Usd)
-        && id.to_canonical() == usdc_identifier().to_canonical();
+    // Both denominations, not just USD: §6 covers USDC-in-XLM too, and that mode
+    // has the same problem — USDC is not a base leg there either.
+    let is_peg_asset = id.to_canonical() == usdc_identifier().to_canonical();
 
     let data = if is_peg_asset {
-        let usdc = match &args.denomination {
-            queries_ch::Denomination::Usd(refs) => refs.usdc,
-            queries_ch::Denomination::QuoteLeg(q) => *q,
+        // In XLM mode the QuoteLeg id IS native XLM, and USDC has to be
+        // resolved separately — it is the numerator's identity, not the filter.
+        let (usdc, xlm) = match &args.denomination {
+            queries_ch::Denomination::Usd(refs) => (refs.usdc, None),
+            queries_ch::Denomination::QuoteLeg(x) => {
+                match queries_ch::resolve_asset_id(state.ch(), &usdc_identifier()).await {
+                    Ok(Some(u)) => (u, Some(*x)),
+                    Ok(None) => {
+                        return errors::service_unavailable(
+                            errors::QUOTE_UNAVAILABLE,
+                            "pricing in the requested base_currency is unavailable",
+                        );
+                    }
+                    Err(e) => return errors::db_error(&e, "quote lookup"),
+                }
+            }
         };
-        match queries_ch::ohlcv_peg_series(state.ch(), &args, usdc, prices_clickhouse::USDC_ISSUER)
-            .await
+        match queries_ch::ohlcv_peg_series(
+            state.ch(),
+            &args,
+            usdc,
+            prices_clickhouse::USDC_ISSUER,
+            xlm,
+        )
+        .await
         {
             Ok(d) => d,
             Err(e) => return errors::db_error(&e, "ohlcv peg series"),

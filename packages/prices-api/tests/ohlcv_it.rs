@@ -554,3 +554,231 @@ async fn ohlcv_usdc_before_any_observation_falls_back_to_a_labelled_peg() {
 
     teardown(db).await;
 }
+
+/// The precision precondition (ADR 0011 §7 / task 0170).
+///
+/// Shaped on a real prod row: `close = 5e-14`, `close_usd = 4e-14` — five ticks
+/// of the `Decimal(38,14)` floor over four. The implied rate is **1.25**, an
+/// entirely ordinary-looking number, which is exactly why a band check on the
+/// derived rate cannot catch it. The inputs are what is wrong, not the value.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn ohlcv_refuses_to_derive_a_rate_from_values_at_the_decimal_floor() {
+    let db = "it_ohlcv_precision_0170";
+    let client = setup(db).await;
+    let admin = Client::default().with_url(ch_url()).with_database(db);
+    admin
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1h \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
+             ('2026-03-01 10:00:00', 3, 2, 'sdex', 0.00000000000005, 0.00000000000005, \
+              0.00000000000005, 0.00000000000005, 9, 9, 0.00000000000004, \
+              0.00000000000005, 1, 1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    let uri = format!(
+        "/v1/assets/FOO:{}/ohlcv?granularity=1h&start=2026-03-01T10:00:00Z\
+         &end=2026-03-01T10:00:00Z&base_currency=USD",
+        iss()
+    );
+    let (status, json) = get(client, &uri).await;
+    assert_eq!(status, StatusCode::OK, "body={json}");
+
+    let data = json["data"].as_array().unwrap();
+    assert_eq!(data.len(), 1, "the bucket still returns (§5)");
+    let c = &data[0];
+    assert!(
+        c["close"].is_null() && c["method"].is_null(),
+        "a rate from 5 ticks over 4 is quantisation noise, not a price: {c}"
+    );
+    // The activity itself is real and still reported.
+    approx(&c["volume_base"], 9.0);
+
+    teardown(db).await;
+}
+
+/// `close = 0` is a distinct population from `close_usd = 0` and needs its own
+/// coverage: dividing by it is what the guard exists to prevent.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn ohlcv_guards_a_zero_close() {
+    let db = "it_ohlcv_zero_close_0170";
+    let client = setup(db).await;
+    let admin = Client::default().with_url(ch_url()).with_database(db);
+    admin
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1h \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
+             ('2026-03-02 10:00:00', 3, 2, 'sdex', 0, 0, 0, 0, 4, 0, 2.0, 0, 1, 1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    let uri = format!(
+        "/v1/assets/FOO:{}/ohlcv?granularity=1h&start=2026-03-02T10:00:00Z\
+         &end=2026-03-02T10:00:00Z&base_currency=USD",
+        iss()
+    );
+    let (status, json) = get(client, &uri).await;
+    assert_eq!(status, StatusCode::OK, "body={json}");
+    let c = &json["data"].as_array().unwrap()[0];
+    assert!(c["close"].is_null(), "close = 0 must not divide: {c}");
+
+    teardown(db).await;
+}
+
+/// USDT trades genuinely as a base in ~102 pools. The synthetic peg path must
+/// NOT capture it — that is the trap 0165 documents and 0172 proved expensive:
+/// USDT is not at par, and overriding real market data with an assumed rate is
+/// how 44,657 candles came to be overstated ~7.4x.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn ohlcv_usdt_as_a_base_keeps_its_real_market_data() {
+    let db = "it_ohlcv_usdt_base_0170";
+    let client = setup(db).await;
+    let admin = Client::default().with_url(ch_url()).with_database(db);
+    admin
+        .query(&format!(
+            "INSERT INTO {db}.assets \
+             (asset_id, asset_code, asset_type, issuer_address, contract_address) VALUES \
+             (5, 'USDT', 'credit', '{u}', '')",
+            u = prices_clickhouse::USDT_ISSUER
+        ))
+        .execute()
+        .await
+        .unwrap();
+    // USDT/USDC at its real depegged level, not par.
+    admin
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1h \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
+             ('2026-03-03 10:00:00', 5, 2, 'sdex', 0.13, 0.14, 0.12, 0.13, 100, 13, 0.13, 0.13, 6, 1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    let uri = format!(
+        "/v1/assets/USDT:{u}/ohlcv?granularity=1h&start=2026-03-03T10:00:00Z\
+         &end=2026-03-03T10:00:00Z&base_currency=USD",
+        u = prices_clickhouse::USDT_ISSUER
+    );
+    let (status, json) = get(client, &uri).await;
+    assert_eq!(status, StatusCode::OK, "body={json}");
+    let data = json["data"].as_array().unwrap();
+    assert_eq!(data.len(), 1, "USDT has real candles as a base: {json}");
+    approx(&data[0]["close"], 0.13);
+    assert!(
+        (data[0]["close"].as_str().unwrap().parse::<f64>().unwrap() - 1.0).abs() > 0.5,
+        "USDT must not be synthesized at par: {}",
+        data[0]
+    );
+
+    teardown(db).await;
+}
+
+/// The whole point of the task: an asset that genuinely never traded must stay
+/// distinguishable from one that is merely unrepresentable in the requested
+/// denomination. Before the fix both were an empty `200`.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn ohlcv_never_traded_is_distinguishable_from_unrepresentable() {
+    let db = "it_ohlcv_never_traded_0170";
+    let client = setup(db).await;
+    let admin = Client::default().with_url(ch_url()).with_database(db);
+    seed_xlm_only(db, &admin).await;
+    admin
+        .query(&format!(
+            "INSERT INTO {db}.assets \
+             (asset_id, asset_code, asset_type, issuer_address, contract_address) VALUES \
+             (6, 'GHOST', 'credit', '{i}', '')",
+            i = iss()
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    // GHOST is tracked but has no candles anywhere: a genuine empty series.
+    let (status, ghost) = get(
+        client.clone(),
+        &format!(
+            "/v1/assets/GHOST:{}/ohlcv?granularity=1h&base_currency=USD",
+            iss()
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body={ghost}");
+    assert!(
+        ghost["data"].as_array().unwrap().is_empty(),
+        "an asset that never traded is still an empty series"
+    );
+
+    // BAR trades only against XLM — the case that used to look identical.
+    let (status, bar) = get(
+        client,
+        &format!(
+            "/v1/assets/BAR:{}/ohlcv?granularity=1h&start=2026-02-10T10:00:00Z\
+             &end=2026-02-10T10:00:00Z&base_currency=USD",
+            iss()
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body={bar}");
+    assert!(
+        !bar["data"].as_array().unwrap().is_empty(),
+        "an XLM-only asset must NOT read as never-traded: {bar}"
+    );
+
+    teardown(db).await;
+}
+
+/// ADR 0011 §6's second degenerate case: USDC denominated in XLM.
+///
+/// The market exists one way round only (base XLM, quote USDC), so the series is
+/// DERIVED from two USD rates rather than inverted out of that candle —
+/// `USDC_usd / XLM_usd`. Seeded so the answer is unambiguous: USDC at 0.9993 USD
+/// and XLM at 0.25 USD gives 3.9972 XLM per USDC.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn ohlcv_usdc_in_xlm_is_derived_from_two_usd_rates() {
+    let db = "it_ohlcv_usdc_xlm_0170";
+    let client = setup(db).await;
+    let admin = Client::default().with_url(ch_url()).with_database(db);
+    seed_peg_rate(db, &admin).await;
+    // XLM/USDC at $0.25 in the bucket the rate covers.
+    admin
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1h \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
+             ('2026-02-10 10:00:00', 1, 2, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    let uri = format!(
+        "/v1/assets/USDC:{}/ohlcv?granularity=1h&start=2026-02-10T10:00:00Z\
+         &end=2026-02-10T10:00:00Z&base_currency=XLM",
+        iss()
+    );
+    let (status, json) = get(client, &uri).await;
+    assert_eq!(status, StatusCode::OK, "body={json}");
+    assert_eq!(json["base_currency"], "XLM");
+
+    let data = json["data"].as_array().unwrap();
+    assert_eq!(data.len(), 1, "USDC must have an XLM series: {json}");
+    // 0.9993 / 0.25 = 3.9972 — NOT 1/0.25 = 4.0, which is what a naive
+    // inversion of the candle would have produced.
+    approx(&data[0]["close"], 3.9972);
+    assert_eq!(data[0]["method"], "oracle");
+
+    teardown(db).await;
+}
