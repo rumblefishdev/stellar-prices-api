@@ -628,20 +628,40 @@ rather than holding this one open.
       only in a test.
 - [ ] The returned USDC/USD closes sit within a stated tolerance of ~$1, and the
       tolerance is justified (not asserted as exactly `1.0`).
-- [ ] `?base_currency=XLM` returns a non-empty, correctly-oriented series, with
+- [x] `?base_currency=XLM` returns a non-empty, correctly-oriented series, with
       `volume_*` and `vwap` verified rather than assumed to invert.
-- [ ] Fallback **semantics** tested, not the constant: no rate available → peg;
+      → **Derived, not inverted** (§6). `USDC_usd / XLM_usd` per bucket, so the
+      inversion pitfalls the ADR warns about never arise: nothing is flipped, so
+      there is no high↔low swap, no volume re-basing and no vwap re-weighting.
+      Volumes are `0` for the same reason as the USD peg series — USDC is not
+      traded as a base. Pinned by
+      `ohlcv_usdc_in_xlm_is_derived_from_two_usd_rates`, seeded so the derived
+      answer (3.9972) differs from what a naive inversion would give (4.0).
+- [x] Fallback **semantics** tested, not the constant: no rate available → peg;
       rate available → that rate. A test asserting exactly `1.0` must not be the
       only coverage ([[0168]] would have to rewrite it).
-- [ ] Response carries provenance distinguishing a measured rate from a
-      placeholder.
-- [ ] USDT behaves correctly too — it trades genuinely as a base in 102 pools, so
+      → `ohlcv_usdc_self_pair_is_synthesized_from_the_measured_rate` seeds a
+      **moving** rate (0.9993 → 1.0007) and asserts the two buckets differ, so a
+      hardcoded peg fails it. `ohlcv_usdc_before_any_observation_falls_back_to_a_labelled_peg`
+      covers the other arm and asserts `method = "peg"`.
+- [x] USDT behaves correctly too — it trades genuinely as a base in 102 pools, so
       confirm the synthetic path does **not** override real market data (the same
       trap [[0165]] documents).
-- [ ] A non-peg asset's response is byte-identical to today's, proving no
-      regression on the normal path.
+      → The peg path keys on canonical USDC's identity alone, so USDT never
+      enters it. `ohlcv_usdt_as_a_base_keeps_its_real_market_data` asserts a
+      depegged 0.13 survives and is not synthesized at par.
+- [x] ~~A non-peg asset's response is byte-identical to today's~~ — **RESTATED,
+      not ticked as written.** See "AC restated — byte-identical" below.
+      → Replaced by: **every numeric field is identical**, and the response
+      differs only by the two additive provenance fields. Verified by
+      `ohlcv_merges_sources_and_notes_backfill`, whose expected values are
+      unchanged from the pre-0170 fixture.
 - [ ] [[0127]] AC 3 + AC 4 re-run and passing.
 
+- [x] Response carries provenance distinguishing a measured rate from a
+      placeholder.
+      → `method` is `oracle` for a measured `usd_rate` observation and `peg`
+      where none exists at or before the bucket. Both pinned by tests.
 - [x] `base_currency`'s meaning (denomination vs pair filter) decided and
       recorded as an ADR, agreed with the [[0120]] owner — not chosen inside the
       implementation.
@@ -653,19 +673,33 @@ rather than holding this one open.
       deployed API.
 - [ ] O/H/L derivation documented as *derived, not measured*, and carried in the
       response provenance rather than only in this file.
-- [ ] `close = 0` guarded, with a test — the clean 30-day sample is not proof
+- [x] `close = 0` guarded, with a test — the clean 30-day sample is not proof
       over all history.
-- [ ] Rate derivation refuses to run when `close` or `close_usd` sits within a
+      → `ohlcv_guards_a_zero_close`. Covered separately from `close_usd = 0`
+      because they are different populations.
+- [x] Rate derivation refuses to run when `close` or `close_usd` sits within a
       few ticks of the `Decimal(38, 14)` floor — a **precision precondition**,
       tested with the `GC4F4IX6DV` row's shape. A band check on the derived rate
       alone does not satisfy this.
+      → `PRECISION_FLOOR` = 1e-12 (100 ticks) on **both inputs**, applied in
+      `valid`. `ohlcv_refuses_to_derive_a_rate_from_values_at_the_decimal_floor`
+      uses the measured shape — `close = 5e-14`, `close_usd = 4e-14`, implied
+      rate **1.25**, an ordinary-looking number no band check could reject.
+      ⚠️ The exact threshold is a judgement; the measurement establishes that a
+      floor is needed, not that 100 ticks is the uniquely right line.
 - [ ] [[0225]]'s acceptance criteria pass — it is this fix's consumer-facing
       verification and gets no separate implementation.
-- [ ] A test proves the conversion tracks a **moving** USDC rate, not a constant
+- [x] A test proves the conversion tracks a **moving** USDC rate, not a constant
       — the measurement below shows the rate genuinely wobbles, so asserting
       `1.0` would be asserting the wrong thing.
-- [ ] Provenance uses [[0165]]'s existing `traded` / `peg` / `oracle` values, not
+      → `ohlcv_usdc_self_pair_is_synthesized_from_the_measured_rate` seeds
+      0.9993 → 1.0007 and asserts the two buckets **differ**, so a hardcoded peg
+      fails rather than passes.
+- [x] Provenance uses [[0165]]'s existing `traded` / `peg` / `oracle` values, not
       a new vocabulary.
+      → Both paths map onto the trio. `usd_rate`'s `pivot`/`pivot2` fold into
+      `traded` — a pivot is priced through a reference asset's own traded
+      candles — so no fourth word is coined.
 
 ### Follow-on — real, but does not gate M2
 
@@ -681,6 +715,132 @@ restating rather than silently carrying.
       pre-Soroban for XLM-quoted) and names the exotic-quoted 13.1 M as an
       explicit non-goal — not a rounded-away caveat.
 - [ ] [[0211]]'s window-boundary semantics settled in the same ADR.
+
+## AC restated — "byte-identical" became unachievable, and had to
+
+As written the criterion asked that a non-peg asset's response be **byte-identical**
+to today's. That is now impossible by construction: [[ADR-0011]] §4 puts `method`
+and `derived` on **every** candle, so every response gains two fields.
+
+🔑 **The criterion was not wrong — it was overtaken by a decision made after it
+was written.** Its intent, "prove no regression on the normal path", is intact
+and met. What changed is that the ADR settled a provenance contract the AC
+predates, and a response cannot both carry provenance and be byte-identical to
+one that does not.
+
+**Restated as:** a non-peg asset's response carries **identical values in every
+field that existed before**, differing only by the additive `method` and
+`derived`. That is verified by `ohlcv_merges_sources_and_notes_backfill` — its
+expected numbers are unchanged from the pre-0170 fixture, which is exactly the
+regression check the original wording was reaching for.
+
+⚠️ The change is **additive**, so a consumer reading only the old fields is
+unaffected. That is what makes the restatement honest rather than convenient: had
+the shape changed in a way that broke existing readers, "no regression on the
+normal path" would have been **false**, and the right move would have been to
+fail the criterion rather than reword it.
+
+Same pattern as [[0222]] AC 5 and [[0218]] AC 4: restate when a criterion turns
+out to demand something impossible, and say so — quietly ticking it would not be
+the same thing. Mirrored in [[0225]], which carries the same wording.
+
+## ⚠️ Semantic change from PR #253's second review — the peg series is anchored on XLM/USDC
+
+The synthesized USDC series originally took its buckets from **any** USDC-quoted
+candle. It now takes them from the **XLM/USDC market specifically**, in both
+denominations.
+
+🔑 **Why: it was a full-table scan.** `price_ohlcv_*` is
+`ORDER BY (asset_id, quote_asset_id, source, timestamp)`, so filtering on the
+quote leg alone is **not a key prefix** — no granule pruning applies and the
+query degenerated into a `FINAL` scan of every asset's candles in the covered
+partitions (~24.9 M rows in `price_ohlcv_1d` alone, far more at finer grains) on
+an endpoint with a p95 < 200 ms target ([[0121]]). `views.sql:370` already flags
+this exact shape. Adding `asset_id` restores the prefix.
+
+### ✅ The narrowing was MEASURED, and it costs 2 buckets in total
+
+Anchoring on XLM/USDC means buckets exist only where that pair traded, not
+wherever *any* asset traded against USDC. That was recorded as an unverified
+judgement; it has now been measured on prod (2026-08-26), per year on
+`price_ohlcv_1d`:
+
+| year | any USDC quote | XLM/USDC | lost | covered |
+|---|---|---|---|---|
+| 2021 | 336 | 334 | **2** | 99.40% |
+| 2022 | 365 | 365 | 0 | 100% |
+| 2023 | 365 | 365 | 0 | 100% |
+| 2024 | 366 | 366 | 0 | 100% |
+| 2025 | 365 | 365 | 0 | 100% |
+| 2026 | 238 | 238 | 0 | 100% |
+
+**2 of 2,035 buckets — 99.90%.** Both are `2021-01-25` and `2021-01-26`,
+consecutive days at the very start of the dataset, before XLM/USDC was
+continuously liquid. From 2022 onward the two sets are **identical**.
+
+🔑 The judgement holds: XLM/USDC is not merely the reference market by
+reputation, it is a complete proxy for USDC-quoted activity across every year
+that matters. The scan it replaces was ~24.9 M rows on a p95-bounded endpoint.
+
+### ⚠️ KNOWN LIMIT — the USDC series starts 2021-02-01, not 2021-01-25
+
+They *were* the earliest, and the calendar gap is wider than the bucket count
+suggests:
+
+```
+first bucket, any USDC quote   2021-01-25
+first bucket, XLM/USDC         2021-02-01
+```
+
+So between 01-25 and 02-01 only two days carried any USDC-quoted candle at all
+(01-25 and 01-26), and XLM/USDC does not begin until 02-01. The synthesized USDC
+series therefore starts **seven calendar days later** than the earliest
+USDC-quoted market activity, losing **two** real buckets.
+
+**Accepted, and stated rather than discovered.** The alternative is the ~24.9 M
+row `FINAL` scan the anchoring exists to remove, on an endpoint with a p95
+< 200 ms target — two buckets at the dawn of the dataset is not worth that.
+
+🔑 **Carry this into AC 1's verification.** That criterion says the series must
+span *"the backfilled range"*; on prod it will start 2021-02-01. That is the
+correct answer under this design, not a shortfall to be explained away at
+verification time — and [[ADR-0011]]'s coverage section should state it alongside
+the per-leg figures it already carries.
+
+## §6 peg-asset path — implemented 2026-08-26
+
+The **original narrow defect**, and the one the main denomination change did not
+touch: canonical USDC is never stored as a base leg, so `GET /assets/{USDC}/ohlcv`
+matched zero rows. Dropping the quote filter does not help — there is nothing to
+filter. The series is synthesized instead (`ohlcv_peg_series`).
+
+- **Buckets** come from candles where USDC is the *quote*, so the series spans
+  the whole backfilled range and every bucket is a period the market was open.
+- **Value** is the newest `prices.usd_rate` observation **at or before** the
+  bucket — [[0167]]'s stated rule for that table (observations + `ASOF`
+  at-or-before, never an average), and the same shape enrichment's oracle tier
+  uses, so read and write cannot drift.
+- **Fallback** is $1 labelled `method = 'peg'` for buckets with no observation.
+  `usd_rate` starts **2026-03-11** while `timeframe=all` reads back to 2021, so
+  this is the majority of the real series, not an edge case.
+
+⚠️ **This is the one place a literal `1.0` is correct.** §6 forbids a hardcoded
+peg *where a measurement exists*; where none exists the peg IS the fallback and
+`method` is what keeps the two apart. A response rendering both as the same
+number would be [[0212]]'s defect in a new place.
+
+`volume_base` and `trade_count` are `0` — USDC is not traded as a base, and
+reporting its volume as a quote would answer a different question.
+
+### ⚠️ Two ClickHouse traps hit while building it, both silent
+
+1. **`join_use_nulls` is load-bearing.** By default an unmatched `LEFT JOIN` row
+   yields the column's **DEFAULT, not NULL**, so `r.rate` came back `0` and
+   `ifNull(..., 1)` never fired — rendering USDC at **$0.00** for every
+   pre-observation bucket. That is the whole pre-2026-03 series. Caught only
+   because the fallback test asserted the value rather than just the label.
+2. **`ASOF JOIN` needs an equality alongside the inequality**, and there is no
+   natural key here; both sides carry a constant `1 AS k`.
 
 ## Out of scope
 

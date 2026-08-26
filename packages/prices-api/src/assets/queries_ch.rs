@@ -585,6 +585,191 @@ pub struct OhlcvArgs {
     pub limit: u64,
 }
 
+/// Smallest `close` / `close_usd` a USD rate may be derived from — a
+/// **precision precondition**, not a plausibility band.
+///
+/// The columns are `Decimal(38, 14)`, so one tick is `1e-14`. A row measured on
+/// prod carries `close = 5e-14`, `close_usd = 4e-14` — five ticks over four. The
+/// implied rate is 1.25, which looks perfectly ordinary, so **no check on the
+/// derived rate can reject it**: the value is not what is wrong, the inputs are.
+/// Both operands are single-digit multiples of the quantisation step, and their
+/// ratio is quantisation noise wearing a plausible number.
+///
+/// `1e-12` is 100 ticks, so a value at the threshold still carries ~2 significant
+/// digits. ⚠️ The exact figure is a judgement — the measurement establishes that
+/// a floor is needed and roughly where the noise lives, not that 100 ticks is
+/// the uniquely right line. Rows below it are treated as unpriced (§5): the
+/// bucket returns, without price fields.
+const PRECISION_FLOOR: &str = "toDecimal128('0.000000000001', 14)";
+
+/// Synthesize a USD series for a **peg asset** — one that is only ever stored as
+/// a quote leg, never as a base (ADR 0011 §6).
+///
+/// ## Why this cannot be a normal query
+///
+/// Canonical USDC never appears as `asset_id` in any candle: the quote-preference
+/// design makes it the quote, always. So `GET /assets/{USDC}/ohlcv` asks for a
+/// USDC/USDC self-pair and matches **zero rows** — and, unlike the wide defect
+/// this endpoint's main path fixes, dropping the quote filter does not help. The
+/// series has to be built rather than read.
+///
+/// ## Buckets from real trading, rate from `usd_rate`
+///
+/// The bucket timestamps come from candles where USDC is the **quote**, so the
+/// series spans the whole backfilled range and every bucket corresponds to a
+/// period the market was actually open — not a synthetic calendar.
+///
+/// The value per bucket is the newest `prices.usd_rate` observation **at or
+/// before** the bucket. That is 0167's stated rule for this table — observations
+/// and `ASOF` at-or-before, never an average — and it is the same shape the
+/// enrichment oracle tier uses, so the read side cannot drift from the write
+/// side.
+///
+/// ## The fallback is the peg, and it is labelled as such
+///
+/// `usd_rate` starts 2026-03-11; `timeframe=all` reads back to 2021. Buckets with
+/// no observation at or before them fall back to $1 and are labelled
+/// `method = 'peg'`, which 0165 defines as *"no measured rate was available"* —
+/// never as an assertion that $1 is correct.
+///
+/// ⚠️ **This is the one place a literal `1.0` is right.** ADR 0011 §6 forbids a
+/// hardcoded peg *where a measurement exists* — our own enrichment prices a
+/// `TF/USDC` candle at `close × 0.9993`, so a flat $1 would contradict our data.
+/// Where no measurement exists the peg IS the fallback, and the `method` field is
+/// what keeps the two distinguishable. A response that silently rendered both as
+/// the same number would be [`0212`]'s hardcoded-peg defect in a new place.
+///
+/// ## What is deliberately zero
+///
+/// `volume_base` and `trade_count` are `0`: USDC is not traded as a base, so
+/// there is no base volume to report. Reporting its volume as a *quote* here
+/// would answer a different question than the one asked.
+///
+/// ## Denominating in XLM — derived, deliberately not inverted
+///
+/// ADR 0011 §6 says *derive rather than invert*, and the difference matters. The
+/// market is stored one way round only: base XLM, quote USDC. Flipping that
+/// candle into a USDC/XLM one is a minefield — O/H/L invert with **high↔low
+/// swapping**, `volume_base` becomes the *quote* volume rather than a
+/// reciprocal, `volume_quote_usd` re-bases onto the other leg, and `vwap` has to
+/// be re-weighted rather than flipped.
+///
+/// So the series is **built from two USD rates** instead:
+///
+/// ```text
+/// USDC in XLM = USDC's USD rate / XLM's USD price in that bucket
+/// ```
+///
+/// The numerator is the same `usd_rate` observation the USD path uses; the
+/// denominator is `close_usd` on the XLM/USDC candle, which is XLM's USD price
+/// as already computed by enrichment. No inversion, no volume re-basing, and the
+/// pitfalls above never arise — the volumes are `0` here for the same reason
+/// they are in USD mode.
+///
+/// ⚠️ The denominator is guarded by the same [`PRECISION_FLOOR`]: an unpriced or
+/// dust-valued XLM bucket yields no price rather than a division blow-up.
+pub async fn ohlcv_peg_series(
+    ch: &Client,
+    args: &OhlcvArgs,
+    usdc_id: u32,
+    xlm_id: u32,
+    usdc_issuer: &str,
+    // Denominate in XLM instead of USD — ADR 0011 §6's second degenerate case.
+    in_xlm: bool,
+) -> Result<Vec<Candle>, clickhouse::error::Error> {
+    let table = format!("price_ohlcv_{}", args.granularity.as_str());
+
+    // ⚠️ `asset_id` FIRST, always — including in USD mode, where the id is not
+    // otherwise needed. `price_ohlcv_*` is ORDER BY (asset_id, quote_asset_id,
+    // source, timestamp), so filtering on `quote_asset_id` alone is NOT a key
+    // prefix: no granule pruning applies and the query degenerates into a FINAL
+    // scan of every asset's candles in the covered partitions (~24.9 M rows in
+    // `price_ohlcv_1d` alone, far more at finer grains). `views.sql:370` flags
+    // exactly this shape. Anchoring on the XLM/USDC market restores the prefix.
+    let mut conds = vec!["asset_id = ?".to_string(), "quote_asset_id = ?".to_string()];
+    if args.start.is_some() {
+        conds.push("timestamp >= toDateTime(?)".to_string());
+    }
+    if args.end.is_some() {
+        conds.push("timestamp <= toDateTime(?)".to_string());
+    }
+
+    // ClickHouse's ASOF JOIN needs at least one equality alongside the
+    // inequality; there is no natural key here, so both sides carry a constant.
+    //
+    // ⚠️ `join_use_nulls = 1` is load-bearing, not tidiness. By default an
+    // unmatched LEFT JOIN row yields the column's DEFAULT, not NULL — so
+    // `r.rate` came back as `0` for every pre-observation bucket and `ifNull`
+    // never fired, rendering USDC at $0.00 instead of falling back to the peg.
+    // Caught by `ohlcv_usdc_before_any_observation_falls_back_to_a_labelled_peg`.
+    //
+    // ⚠️ The right side is collapsed to ONE row per timestamp before the join.
+    // `usd_rate` is ORDER BY (…, timestamp, method) with `method` in the key
+    // *deliberately*, so a measured `oracle` and a fallback `peg` can coexist at
+    // the same instant and "the consumer chooses" (`init.sql:280`). Joining the
+    // raw table would let ASOF break that tie by part read order, so the same
+    // request could return 0.9993/`oracle` or 1.0/`peg` on consecutive calls.
+    // The preference below is the choice, made explicitly: a measurement beats a
+    // pivot beats a fallback.
+    let val = if in_xlm {
+        "toNullable(toString(toDecimal128OrNull(toString( \
+             toFloat64(ifNull(r.rate, toDecimal128(1, 14))) \
+             / nullIf(toFloat64(b.den), 0)), 14)))"
+    } else {
+        "toNullable(toString(ifNull(r.rate, toDecimal128(1, 14))))"
+    };
+    let sql = format!(
+        "SELECT ts, o, h, l, c, vb, vqu, vw, tc, meth, drv FROM ( \
+           SELECT \
+             formatDateTime(b.bkt, '%Y-%m-%dT%H:%i:%SZ') AS ts, \
+             {val} AS o, \
+             o AS h, o AS l, o AS c, o AS vw, \
+             '0' AS vb, \
+             '0' AS vqu, \
+             toUInt64(0) AS tc, \
+             if(o IS NULL, NULL, \
+                toNullable(multiIf(r.meth IS NULL, 'peg', \
+                                   r.meth = 'oracle', 'oracle', \
+                                   r.meth = 'peg', 'peg', \
+                                   'traded'))) AS meth, \
+             if(o IS NULL, NULL, toNullable(toUInt8(1))) AS drv, \
+             b.bkt AS bkt \
+           FROM ( SELECT timestamp AS bkt, 1 AS k, {denom} AS den \
+                  FROM {table} FINAL WHERE {conds} \
+                  GROUP BY timestamp \
+                  ORDER BY bkt DESC LIMIT {limit} ) AS b \
+           ASOF LEFT JOIN ( \
+                  SELECT 1 AS k, rts, argMin(rate, pref) AS rate, argMin(m, pref) AS meth \
+                  FROM ( SELECT timestamp AS rts, usd_rate AS rate, method AS m, \
+                                multiIf(method = 'oracle', 0, method = 'pivot', 1, \
+                                        method = 'pivot2', 2, 3) AS pref \
+                         FROM usd_rate FINAL \
+                         WHERE asset_kind = 'credit' AND asset_code = 'USDC' \
+                           AND issuer_address = ? AND contract_address = '' ) \
+                  GROUP BY rts ) AS r \
+             ON b.k = r.k AND r.rts <= b.bkt \
+         ) ORDER BY bkt ASC \
+         SETTINGS join_use_nulls = 1",
+        conds = conds.join(" AND "),
+        limit = args.limit,
+        denom = if in_xlm {
+            // XLM's USD price for the bucket, from the highest-volume source.
+            format!("argMaxIf(close_usd, volume_base, close_usd >= {PRECISION_FLOOR})")
+        } else {
+            "toDecimal128(1, 14)".to_string()
+        },
+    );
+
+    let mut q = ch.query(&sql).bind(xlm_id).bind(usdc_id);
+    if let Some(st) = args.start {
+        q = q.bind(st);
+    }
+    if let Some(e) = args.end {
+        q = q.bind(e);
+    }
+    q.bind(usdc_issuer).fetch_all::<Candle>().await
+}
+
 /// Read merged candles for one asset at the chosen grain, denominated per
 /// [ADR 0011].
 ///
@@ -673,6 +858,7 @@ pub async fn ohlcv(ch: &Client, args: OhlcvArgs) -> Result<Vec<Candle>, clickhou
     let (projection, aggregates) = match args.denomination {
         Denomination::Usd(ref refs) => {
             let usdc = refs.usdc;
+            let floor = PRECISION_FLOOR;
             // Omitted entirely when neither pivot reference is tracked — an
             // empty `IN ()` is a syntax error, and the label is optional.
             let traded_arm = if refs.pivots.is_empty() {
@@ -687,15 +873,15 @@ pub async fn ohlcv(ch: &Client, args: OhlcvArgs) -> Result<Vec<Candle>, clickhou
                 // cannot be priced contributes to volume and trade_count but
                 // never to a price or a method.
                 format!(
-                    "timestamp, volume_base, volume_quote_usd, trade_count, \
-                     (close > 0 AND close_usd > 0 \
+                    "timestamp, volume_base, volume_quote_usd, trade_count, quote_asset_id, \
+                     (close >= {floor} AND close_usd >= {floor} \
                        AND (quote_asset_id = {usdc} OR close_usd != close)) AS valid, \
                      toFloat64(close_usd) / nullIf(toFloat64(close), 0) AS rate, \
-                     toDecimal128(toFloat64(open) * rate, 14) AS o_x, \
-                     toDecimal128(toFloat64(high) * rate, 14) AS h_x, \
-                     toDecimal128(toFloat64(low)  * rate, 14) AS l_x, \
+                     toDecimal128OrNull(toString(toFloat64(open) * rate), 14) AS o_x, \
+                     toDecimal128OrNull(toString(toFloat64(high) * rate), 14) AS h_x, \
+                     toDecimal128OrNull(toString(toFloat64(low)  * rate), 14) AS l_x, \
                      close_usd AS c_x, \
-                     toDecimal128(toFloat64(vwap) * rate, 14) AS w_x, \
+                     toDecimal128OrNull(toString(toFloat64(vwap) * rate), 14) AS w_x, \
                      multiIf(quote_asset_id = {usdc} AND close_usd = close, 'peg', \
                              quote_asset_id = {usdc}, 'oracle', \
                              {traded_arm}\
@@ -704,17 +890,17 @@ pub async fn ohlcv(ch: &Client, args: OhlcvArgs) -> Result<Vec<Candle>, clickhou
                 // `countIf(valid) = 0` is what produces §5's price-less bucket:
                 // NULL across every price field, while the volume columns below
                 // still aggregate over all rows.
-                "if(countIf(valid) = 0, NULL, toString(argMaxIf(o_x, volume_base, valid))) AS o, \
+                "if(countIf(valid) = 0, NULL, toString(argMaxIf(o_x, (volume_base, quote_asset_id), valid))) AS o, \
                  if(countIf(valid) = 0, NULL, toString(maxIf(h_x, valid))) AS h, \
                  if(countIf(valid) = 0, NULL, toString(minIf(l_x, valid))) AS l, \
-                 if(countIf(valid) = 0, NULL, toString(argMaxIf(c_x, volume_base, valid))) AS c, \
+                 if(countIf(valid) = 0, NULL, toString(argMaxIf(c_x, (volume_base, quote_asset_id), valid))) AS c, \
                  toString(sum(volume_base)) AS vb, \
                  toString(sum(volume_quote_usd)) AS vqu, \
-                 if(countIf(valid) = 0, NULL, toString(toDecimal128(ifNull( \
+                 if(countIf(valid) = 0, NULL, toString(toDecimal128OrNull(toString( \
                      sumIf(toFloat64(w_x) * toFloat64(volume_base), valid) \
-                     / nullIf(sumIf(toFloat64(volume_base), valid), 0), 0), 14))) AS vw, \
+                     / nullIf(sumIf(toFloat64(volume_base), valid), 0)), 14))) AS vw, \
                  toUInt64(sum(trade_count)) AS tc, \
-                 if(countIf(valid) = 0, NULL, argMaxIf(meth, volume_base, valid)) AS meth, \
+                 nullIf(if(countIf(valid) = 0, NULL, argMaxIf(meth, (volume_base, quote_asset_id), valid)), '') AS meth, \
                  if(countIf(valid) = 0, NULL, toUInt8(1)) AS drv"
                     .to_string(),
             )
@@ -725,14 +911,24 @@ pub async fn ohlcv(ch: &Client, args: OhlcvArgs) -> Result<Vec<Candle>, clickhou
         Denomination::QuoteLeg(_) => (
             "timestamp, open, high, low, close, volume_base, volume_quote_usd, vwap, trade_count"
                 .to_string(),
-            "toString(argMax(open, volume_base)) AS o, \
-             toString(max(high)) AS h, \
-             toString(min(low)) AS l, \
-             toString(argMax(close, volume_base)) AS c, \
+            // ⚠️ The price columns MUST be Nullable to match `Candle`'s
+            // `Option<String>` fields. RowBinary is positional and carries no
+            // types (the client does not use WithNamesAndTypes), so the
+            // deserializer reads one byte as the Option tag: handed a plain
+            // String it reads the LEB128 length instead and either errors
+            // (`InvalidTagEncoding`) or, for lengths 0/1, silently mis-frames
+            // the rest of the row. Pinned by
+            // `ohlcv_xlm_denomination_decodes_rows` — the pre-existing XLM test
+            // asserts an EMPTY series, so no row is ever decoded and it cannot
+            // catch this.
+            "toNullable(toString(argMax(open, volume_base))) AS o, \
+             toNullable(toString(max(high))) AS h, \
+             toNullable(toString(min(low))) AS l, \
+             toNullable(toString(argMax(close, volume_base))) AS c, \
              toString(sum(volume_base)) AS vb, \
              toString(sum(volume_quote_usd)) AS vqu, \
-             toString(toDecimal128(ifNull(sum(toFloat64(vwap) * toFloat64(volume_base)) \
-                 / nullIf(sum(toFloat64(volume_base)), 0), 0), 14)) AS vw, \
+             toNullable(toString(toDecimal128(ifNull(sum(toFloat64(vwap) * toFloat64(volume_base)) \
+                 / nullIf(sum(toFloat64(volume_base)), 0), 0), 14))) AS vw, \
              toUInt64(sum(trade_count)) AS tc, \
              CAST(NULL AS Nullable(String)) AS meth, \
              CAST(NULL AS Nullable(UInt8)) AS drv"

@@ -162,7 +162,17 @@ pub struct Candle {
     pub close: Option<String>,
     /// Base-asset volume.
     pub volume_base: String,
-    /// USD-denominated quote volume (the one USD figure on the candle).
+    /// USD-denominated quote volume, summed over **every** row in the bucket.
+    ///
+    /// ⚠️ **Not the same population as `volume_base`.** The column is `0` on a
+    /// row enrichment has not priced, so an unpriced leg contributes its base
+    /// volume and trade count but nothing here. Since [ADR 0011] dropped the
+    /// quote filter a bucket can hold several legs, so the two can now disagree
+    /// where before the fix both came from the same USDC-legged rows.
+    ///
+    /// Read it as "the USD volume we can account for", not as the bucket's total
+    /// restated in USD. It is strictly more complete than before the fix — more
+    /// legs are counted, not fewer — but it is a subtotal.
     pub volume_quote_usd: String,
     pub vwap: Option<String>,
     /// Trades in the bucket. The ceiling is `2^53 - 1`, the largest integer a
@@ -184,17 +194,32 @@ pub struct Candle {
     /// `queries_ch::ohlcv` for the classification and the prod measurement
     /// behind it.
     ///
-    /// `None` exactly when the price fields are absent.
+    /// `None` when the price fields are absent, **and also for every
+    /// `base_currency=XLM` response** — that mode returns candles as stored, so
+    /// there is no USD rate to attribute. A null `method` therefore means "no
+    /// USD provenance to report", not "this bucket has no price".
     pub method: Option<String>,
-    /// Whether `open`/`high`/`low`/`vwap` were **derived by scaling** rather than
-    /// measured (ADR 0011 §3). `close` is always exact — it is `close_usd` as
-    /// stored — but the extremes are reconstructed with one rate per bucket, so
-    /// the true USD high may have fallen at a different instant than the
-    /// quote-denominated high.
+    /// Whether `open`/`high`/`low`/`vwap` were **derived** rather than measured
+    /// (ADR 0011 §3).
+    ///
+    /// On the normal path `close` is exact — it is `close_usd` as stored — while
+    /// the extremes are reconstructed with one rate per bucket, so the true USD
+    /// high may have fallen at a different instant than the quote-denominated
+    /// high.
+    ///
+    /// ⚠️ **On the synthesized peg-asset path (§6) nothing is measured, `close`
+    /// included.** Canonical USDC has no candles of its own, so every field is
+    /// the `usd_rate` observation for the bucket — or the $1 fallback when none
+    /// precedes it, which [`Candle::method`] reports as `peg`. Do not read
+    /// `derived: true` as "only the extremes are reconstructed"; read it as "not
+    /// measured on this market".
     ///
     /// A separate axis from [`Candle::method`], deliberately: a bucket can be
     /// `traded` *and* derived, so one field cannot carry both (ADR 0011 §4,
-    /// settled 2026-08-26). `None` exactly when the price fields are absent.
+    /// settled 2026-08-26).
+    ///
+    /// `None` when the price fields are absent, and for `base_currency=XLM`,
+    /// where nothing is converted and so nothing is derived.
     pub derived: Option<bool>,
 }
 
