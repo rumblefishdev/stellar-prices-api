@@ -95,13 +95,13 @@ grep -c "arrayReduce('median'" /tmp/0072-rollback-mv_current_prices.sql
 
 That last check is the sanity gate, and **its expected value depends on which
 upgrade you are running.** The artifact must capture the definition prod is on
-*right now* — the one you would roll back to — so assert the predecessor you
+_right now_ — the one you would roll back to — so assert the predecessor you
 actually expect:
 
-| rolling out | prod's predecessor | `arrayReduce('median'` |
-|---|---|---|
-| 0072 onto v1 | v1, no median filter | **0** |
-| 0135 onto 0072 | 0072, median filter present | **>= 1** |
+| rolling out    | prod's predecessor          | `arrayReduce('median'` |
+| -------------- | --------------------------- | ---------------------- |
+| 0072 onto v1   | v1, no median filter        | **0**                  |
+| 0135 onto 0072 | 0072, median filter present | **>= 1**               |
 
 Getting either wrong means the artifact does not restore what you think it
 does — stop and re-plan before anything mutates.
