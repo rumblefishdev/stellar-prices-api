@@ -3,8 +3,10 @@ import LinearProgress from '@mui/material/LinearProgress';
 import Stack from '@mui/material/Stack';
 import Typography from '@mui/material/Typography';
 import { alpha } from '@mui/material/styles';
+import type { SxProps, Theme } from '@mui/material/styles';
 import type { ReactNode } from 'react';
 
+import { theme } from '../theme/theme';
 import { color, font, radius } from '../theme/tokens';
 import { cardBorder } from './primitives';
 
@@ -135,6 +137,7 @@ export function KeyField({
   label,
   value,
   testId,
+  inlineAction,
   actions,
 }: {
   /**
@@ -145,6 +148,16 @@ export function KeyField({
   label?: string;
   value: ReactNode;
   testId?: string;
+  /**
+   * A control that sits INSIDE the ring, on the value's row — the first-login
+   * frame's "Show key" (Adam, 2026-08-26).
+   *
+   * Distinct from `actions`, which sit below the box: this one belongs to the
+   * value it acts on, and the frame draws the two rows differently. The value
+   * keeps `minWidth: 0` so a 40-character key wraps rather than pushing the
+   * control off the card at 375 px.
+   */
+  inlineAction?: ReactNode;
   actions?: ReactNode;
 }) {
   return (
@@ -171,28 +184,48 @@ export function KeyField({
             {label}
           </Typography>
         )}
-        <Box
-          component="code"
-          data-testid={testId}
-          sx={{
-            fontFamily: font.mono,
-            fontSize: '0.9375rem',
-            color: color.text.accent,
-            // No chip behind the key: it already sits in its own ringed box,
-            // and a second, differently-grey rectangle inside that is the
-            // shade Adam kept seeing. The chrome's rule is narrowed to `p
-            // code` so this is now what actually applies rather than what
-            // loses to it on specificity.
-            backgroundColor: 'transparent',
-            padding: 0,
-            // A 40-character opaque string must wrap rather than widen the
-            // card — this renders at 375 px too.
-            overflowWrap: 'anywhere',
-            minWidth: 0,
-          }}
+        {/* `flex-start`, not `space-between`: the frame puts the control
+            immediately BESIDE the value, not against the far edge of a ring
+            that runs the width of the card. The value keeps `minWidth: 0` and
+            is the half that shrinks, so revealing a 40-character key wraps it
+            rather than pushing the control out of the box. */}
+        <Stack
+          direction="row"
+          spacing={1.5}
+          sx={{ alignItems: 'center', justifyContent: 'flex-start' }}
         >
-          {value}
-        </Box>
+          <Box
+            component="code"
+            data-testid={testId}
+            sx={{
+              fontFamily: font.mono,
+              fontSize: '0.9375rem',
+              color: color.text.accent,
+              // No chip behind the key: it already sits in its own ringed box,
+              // and a second, differently-grey rectangle inside that is the
+              // shade Adam kept seeing. The chrome's rule is narrowed to `p
+              // code` so this is now what actually applies rather than what
+              // loses to it on specificity.
+              backgroundColor: 'transparent',
+              padding: 0,
+              // A 40-character opaque string must wrap rather than widen the
+              // card — this renders at 375 px too.
+              overflowWrap: 'anywhere',
+              minWidth: 0,
+            }}
+          >
+            {value}
+          </Box>
+          {inlineAction && (
+            // `flexShrink: 0` so the control keeps its width and the key wraps
+            // instead — the chrome's bare-`<button>` rule sets
+            // `alignSelf: flex-start`, which this wrapper absorbs so the
+            // button still sits on the value's centre line.
+            <Box sx={{ flexShrink: 0, display: 'flex', alignItems: 'center' }}>
+              {inlineAction}
+            </Box>
+          )}
+        </Stack>
       </Stack>
       {actions && (
         <Stack direction="row" spacing={1.5} sx={{ flexWrap: 'wrap' }}>
@@ -275,7 +308,13 @@ export function UsageMeter({
               fontWeight: 700,
               fontSize: { xs: '2.25rem', sm: '3rem' },
               lineHeight: 1,
-              color: full ? color.text.error : color.text.accent,
+              // Yellow at every level, the ceiling included (Adam,
+              // 2026-08-26). The figure is the card's identity, not its alarm:
+              // the bar, the caption and the notice below already carry "you
+              // have run out" in red, and turning the one big brand-coloured
+              // number red as well made the card read as an error page rather
+              // than a dashboard reporting a bad number.
+              color: color.text.accent,
             }}
           >
             <RawFigure testId="usage-used" value={used} />
@@ -301,7 +340,13 @@ export function UsageMeter({
               <Typography
                 variant="body2"
                 sx={{
-                  color: full ? color.text.error : color.text.tertiary,
+                  // #ffa2a2 at the ceiling — the gradient's PALE end (Adam,
+                  // 2026-08-26). The saturated #e7000b is reserved for the
+                  // notice's picked-out words, and these two captions are
+                  // labels on a bar rather than emphasis: the same red at full
+                  // strength in four places on one card left nothing louder
+                  // than anything else.
+                  color: full ? color.red[300] : color.text.tertiary,
                 }}
               >
                 {full ? '100% - limit reached' : `${percent}% used`}
@@ -335,12 +380,15 @@ export function UsageMeter({
                 // Red at the ceiling. The bar is the fastest read on the card,
                 // and "you have run out" should not arrive in the same colour
                 // as "you have plenty left".
-                ...(full
-                  ? { backgroundColor: color.red[400] }
-                  : {
-                      backgroundColor: 'transparent',
-                      backgroundImage: `linear-gradient(90deg, ${color.primary[300]}, ${color.primary[600]})`,
-                    }),
+                backgroundColor: 'transparent',
+                // Red at the ceiling, and a GRADIENT like the yellow one —
+                // measured off the `Dashboard - limits` frame. The flat red
+                // fill this replaces was the one bar on the page built
+                // differently from the other, which read as a different
+                // component rather than the same component in a worse state.
+                backgroundImage: full
+                  ? `linear-gradient(90deg, ${color.red[300]}, ${color.red[600]})`
+                  : `linear-gradient(90deg, ${color.primary[300]}, ${color.primary[600]})`,
               },
             }}
           />
@@ -354,7 +402,17 @@ export function UsageMeter({
             direction="row"
             justifyContent="space-between"
             spacing={2}
-            sx={{ color: color.text.tertiary }}
+            // The fallback for this row's children. Both captions below set
+            // their own colour because an inherited one loses to the chrome's
+            // `& p` rule (see the reset label) — this stays as the value they
+            // agree with, so the row is never the odd one out if a third
+            // caption is added and forgets.
+            //
+            // Red at the ceiling is the frame's own treatment and it earns it:
+            // once the quota is spent, the reset date stops being a footnote
+            // and becomes the single most useful fact on the card, because it
+            // is when the API starts answering again.
+            sx={{ color: full ? color.red[300] : color.text.tertiary }}
           >
             {!headline && (
               <Typography variant="body2" color="inherit">
@@ -362,7 +420,18 @@ export function UsageMeter({
               </Typography>
             )}
             {resetLabel && (
-              <Typography variant="body2" color="inherit">
+              // ⚠️ The colour is set HERE and not inherited from the row.
+              // `body2` renders a `<p>`, and the dashboard chrome paints every
+              // `<p>` in its subtree secondary grey — a rule that beats an
+              // inherited value on specificity, so `color="inherit"` silently
+              // came out #d3d3d3 while the percentage beside it (which carries
+              // its own `sx`) went red. Measured, not reasoned about: the two
+              // captions bracket the same bar and were rendering in two
+              // different colours.
+              <Typography
+                variant="body2"
+                sx={{ color: full ? color.red[300] : color.text.tertiary }}
+              >
                 {resetLabel}
               </Typography>
             )}
@@ -422,7 +491,16 @@ export function DashboardCard({
 }: {
   title: string;
   status?: { label: string; tone: 'ok' | 'muted' | 'bad' };
-  children: ReactNode;
+  /**
+   * Omitted for the deliberately empty tile — the `Dashboard - no key` frame
+   * gives Monthly Usage and Rate Limit a header band over an empty body while
+   * the card above carries the page's only action.
+   *
+   * The card keeps its header and its height in that case rather than
+   * collapsing to a title bar: a collapsed panel reads as a rendering failure,
+   * and the dashboard would visibly rearrange itself the moment a key arrived.
+   */
+  children?: ReactNode;
   sx?: object;
 }) {
   return (
@@ -462,7 +540,16 @@ export function DashboardCard({
         </Typography>
         {status && <StatusPill {...status} />}
       </Stack>
-      <Stack spacing={2.5} sx={{ p: 3 }}>
+      <Stack
+        spacing={2.5}
+        sx={{
+          p: 3,
+          // The empty tile keeps a body. Proportional to the frame, where the
+          // two empty cards stand about as tall as the filled Monthly Usage
+          // card they replace — not a bare header band.
+          ...(children === undefined && { minHeight: 240 }),
+        }}
+      >
         {children}
       </Stack>
     </Box>
@@ -524,53 +611,127 @@ export function StatusPill({
  * noise. It is `role="note"`, not `role="alert"`: nothing has just gone wrong
  * and nothing needs interrupting — it states a rule that applies before the
  * visitor presses anything.
+ *
+ * `glyph={false}` drops the disc, for the one place the frame draws this box
+ * bare: inside the regenerate dialog (Adam, 2026-08-26), where the heading and
+ * its own badge have already said "this is a warning" and a second marker two
+ * lines down is the third time in one card. The ring and the yellow
+ * `Important:` carry it there. Everywhere else the glyph stays — on the
+ * dashboard the strip sits among ordinary prose with nothing else marking it.
+ *
+ * `sx` merges over the box's own rules, for the callers that need the same
+ * strip at a different rhythm — the dialog runs it at a taller `py` than the
+ * dashboard does. An escape hatch rather than a second boolean: the next
+ * variation would otherwise be a third prop, and the component would end up
+ * enumerating its call sites.
  */
-export function NoticeStrip({ children }: { children: ReactNode }) {
+export function NoticeStrip({
+  children,
+  glyph = true,
+  tone = 'warning',
+  sx,
+}: {
+  children: ReactNode;
+  glyph?: boolean;
+  /**
+   * `'warning'` is the frame's yellow strip — a rule that applies, stated
+   * before you trip over it (key rotation is once a month).
+   *
+   * `'error'` is task 0193's addition for the quota-reached card: a rule you
+   * have ALREADY tripped over, and one that is changing what the API does to
+   * your requests right now. The two are the same box because they are the same
+   * kind of statement and the frame draws them identically apart from the hue —
+   * but they must not be the same colour, because "this will apply" and "this
+   * is applying" are not the same news, and the yellow one is on screen at the
+   * same time two cards up.
+   *
+   * It stays `role="note"`, not `role="alert"`: nothing has *just* happened.
+   * The state is already true when the dashboard opens, and an alert role
+   * interrupts a screen reader mid-sentence to say so on every visit.
+   */
+  tone?: 'warning' | 'error';
+  sx?: SxProps<Theme>;
+}) {
+  // Border, glyph and the picked-out words move together — the strip reads as
+  // one coloured object, and a red rule around yellow emphasis would look like
+  // two notices that collided.
+  const skin =
+    tone === 'error'
+      ? // Measured, Adam 2026-08-26: prose #ffa2a2 with the picked-out words a
+        // full step down at #e7000b — the same pair the bar's gradient runs
+        // between, so the strip reads as belonging to the meter above it. The
+        // emphasis is DARKER than its prose here, which inverts the yellow
+        // strip's relationship: on red, a lighter accent on a light-red
+        // sentence has nowhere to go, and the saturated end is the only value
+        // that still reads as emphasis.
+        { line: color.red[600], mark: color.red[600], prose: color.red[300] }
+      : {
+          line: color.stroke.action,
+          mark: color.text.accent,
+          prose: color.text.primary,
+        };
+
   return (
     <Stack
       role="note"
       direction="row"
       spacing={1.5}
-      sx={{
-        p: 1.5,
-        borderRadius: `${radius.md}px`,
-        border: `1px solid ${color.stroke.action}`,
-        // The card's darkest surface, measured — not a tinted brand wash. On
-        // the frame the strip reads as an inset panel that happens to be
-        // ringed yellow, and a brown fill under yellow text is the one
-        // combination on this page that loses contrast.
-        backgroundColor: color.surface.grayAlt,
-      }}
+      // MUI's array form, not an object spread: `SxProps` is legally a
+      // function or an array as well as an object, and spreading one of those
+      // would silently drop it.
+      sx={[
+        {
+          p: 1.5,
+          borderRadius: `${radius.md}px`,
+          border: `1px solid ${skin.line}`,
+          // The card's darkest surface, measured — not a tinted brand wash. On
+          // the frame the strip reads as an inset panel that happens to be
+          // ringed yellow, and a brown fill under yellow text is the one
+          // combination on this page that loses contrast.
+          backgroundColor: color.surface.grayAlt,
+        },
+        ...(Array.isArray(sx) ? sx : [sx]),
+      ]}
     >
-      <Box
-        aria-hidden
-        sx={{
-          flexShrink: 0,
-          width: 20,
-          height: 20,
-          borderRadius: '50%',
-          display: 'grid',
-          placeItems: 'center',
-          border: `1.5px solid ${color.text.accent}`,
-          color: color.text.accent,
-          fontFamily: font.secondary,
-          fontWeight: 700,
-          fontSize: '0.8125rem',
-          lineHeight: 1,
-        }}
-      >
-        !
-      </Box>
+      {glyph && (
+        <Box
+          aria-hidden
+          sx={{
+            flexShrink: 0,
+            width: 20,
+            height: 20,
+            borderRadius: '50%',
+            display: 'grid',
+            placeItems: 'center',
+            border: `1.5px solid ${skin.mark}`,
+            color: skin.mark,
+            fontFamily: font.secondary,
+            fontWeight: 700,
+            fontSize: '0.8125rem',
+            lineHeight: 1,
+          }}
+        >
+          !
+        </Box>
+      )}
       {/* The frame's two-colour sentence: white prose with the rule and the
           date picked out in the brand yellow. Styled here rather than at each
           call site so a `<strong>` inside any notice reads the same — and
           because the dashboard's chrome paints every `<p>` secondary grey,
-          which this has to override to reach the frame's #f5f5f5. */}
+          which this has to override to reach the frame's #f5f5f5.
+          ⚠️ `margin: 0` belongs HERE, not to the caller. It used to arrive
+          from the dashboard chrome's `& p` rule, which reaches this strip only
+          while it renders inside that subtree — the regenerate dialog renders
+          through a portal, outside it, and the `<p>` came back with the user
+          agent's 1em above and below. The box owns its own rhythm now, so the
+          padding a caller sets is the padding it gets wherever it is mounted;
+          on the dashboard nothing moves, because the chrome was already
+          zeroing it. */}
       <Box
         sx={{
           minWidth: 0,
-          '& p': { color: color.text.primary },
-          '& strong': { color: color.text.accent, fontWeight: 700 },
+          '& p': { ...theme.typography.body1, color: skin.prose, m: 0 },
+          '& strong': { color: skin.mark, fontWeight: 700 },
         }}
       >
         {children}

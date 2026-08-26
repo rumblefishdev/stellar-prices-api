@@ -1,6 +1,8 @@
 import Box from '@mui/material/Box';
 import Button from '@mui/material/Button';
 import Container from '@mui/material/Container';
+import Divider from '@mui/material/Divider';
+import Dialog from '@mui/material/Dialog';
 import Stack from '@mui/material/Stack';
 import CircularProgress from '@mui/material/CircularProgress';
 import Typography from '@mui/material/Typography';
@@ -9,14 +11,17 @@ import {
   useEffect,
   useRef,
   useState,
+  type ChangeEvent,
   type MouseEvent,
   type ReactNode,
 } from 'react';
 import {
+  Link as RouterLink,
   Navigate,
   Route,
   Routes,
   useLocation,
+  useNavigate,
   useSearchParams,
 } from 'react-router-dom';
 
@@ -26,6 +31,7 @@ import {
   Benefits,
   Callout,
   DISCORD,
+  LOGIN_CARD_MAX_WIDTH,
   LabelledRule,
   LoginCard,
 } from '../landing/LoginCard';
@@ -38,7 +44,11 @@ import {
   UsageMeter,
 } from '../landing/DashboardPanel';
 import { DashboardNavbar } from '../landing/DashboardChrome';
-import { LoginSection, visuallyHidden } from '../landing/LoginSection';
+import {
+  LoginSection,
+  useOwnBackLink,
+  visuallyHidden,
+} from '../landing/LoginSection';
 import {
   onOAuthPopupMessage,
   openOAuthPopup,
@@ -57,10 +67,19 @@ import { QuickStart } from '../quickstart/QuickStart';
 import { SelfService } from '../landing/SelfService';
 import { UseCases } from '../landing/UseCases';
 import { ArrowBadge } from '../landing/primitives';
+import AddRoundedIcon from '@mui/icons-material/AddRounded';
 import AutorenewRoundedIcon from '@mui/icons-material/AutorenewRounded';
+import ChevronLeftRoundedIcon from '@mui/icons-material/ChevronLeftRounded';
 import ContentCopyRoundedIcon from '@mui/icons-material/ContentCopyRounded';
+import ErrorOutlineRoundedIcon from '@mui/icons-material/ErrorOutlineRounded';
+import SwitchAccountRoundedIcon from '@mui/icons-material/SwitchAccountRounded';
+import SyncProblemRoundedIcon from '@mui/icons-material/SyncProblemRounded';
 
-import { LOGIN_ANCHOR, QUICKSTART } from '../landing/links';
+import {
+  LOGIN_ANCHOR,
+  QUICKSTART,
+  STELLAR_DISCORD_INVITE,
+} from '../landing/links';
 import { alpha } from '@mui/material/styles';
 
 import { theme } from '../theme/theme';
@@ -205,29 +224,6 @@ function useOneShotParams(
 }
 
 /**
- * The two prerequisites, stated **before** the visitor authenticates
- * (task 0189): learning about the membership requirement after the consent
- * screen means they authorised an app for nothing. The wording is this task's;
- * 0193 restyles it without re-deciding it.
- *
- * `discord.gg/stellardev` is the registered vanity invite — the other invites
- * SDF publishes are personal and at least one is already dead (task 0179).
- * The account-age line deliberately names no number: the threshold is operator
- * configuration the backend reports when it matters, and a hard-coded "5
- * minutes" here would drift the moment the SSM parameter changes.
- */
-function Prerequisites() {
-  return (
-    <p>
-      Getting an API key needs two things, both checked via Discord when you ask
-      for one: membership of the{' '}
-      <a href="https://discord.gg/stellardev">Stellar Developers Discord</a>,
-      and a Discord account that is not brand new.
-    </p>
-  );
-}
-
-/**
  * Sign-in, as plain text and one control (task 0186).
  *
  * Rendered only when the portal is open — while the flag is off there is nothing
@@ -359,10 +355,24 @@ function LoginView({
   const [outcome, setOutcome] = useState<string | null>(signin);
   const cancelled = outcome === 'cancelled';
   const failed = outcome === 'failed';
+  // ⚠️ Two states this card did not have before 2026-08-26 (Adam): sign-in
+  // now proves Discord membership, so the two verdicts that used to appear
+  // only after pressing "Get my API key" can also end the sign-in itself.
+  const notMember = outcome === 'not_member';
+  const unverified = outcome === 'unknown';
+
+  // The OAuth error card draws its own back link, under the retry button, so
+  // the section above must not draw one too. Called unconditionally with a
+  // boolean — it is a hook. See `useOwnBackLink`.
+  useOwnBackLink(cancelled || failed);
 
   /** Whether a sign-in window is open and being waited on. */
   const [waiting, setWaiting] = useState(false);
+  /** Whether the "use a different account" dialog is open. */
+  const [switching, setSwitching] = useState(false);
+
   const popup = useRef<Window | null>(null);
+  const navigate = useNavigate();
 
   /**
    * Watch the sign-in window: its message, its closing, and the session it is
@@ -391,9 +401,21 @@ function LoginView({
       onSignedIn();
     };
 
-    const stopListening = onOAuthPopupMessage(({ search }) =>
-      finish(readSigninOutcome(search)),
-    );
+    const stopListening = onOAuthPopupMessage(({ search }) => {
+      // ⚠️ The popup's landing query is FORWARDED, not only read (Adam,
+      // 2026-08-26). Sign-in now issues the first key, and the callback lands
+      // the popup on `?issue=ok` (or `too_young`, `failed`) — a query the
+      // OPENER never sees, because the popup is the window that navigated.
+      // Putting it on this tab's URL before the session is re-read lets
+      // `LoginRoute`'s redirect carry it to `/dashboard`, where the first-login
+      // card reads it exactly as it reads the full-page flow's. `signin=…`
+      // outcomes are not forwarded: they belong to this card, and
+      // `readSigninOutcome` is what reads them.
+      if (new URLSearchParams(search).has('issue')) {
+        navigate({ search }, { replace: true });
+      }
+      finish(readSigninOutcome(search));
+    });
 
     // 1.5s: fast enough that a visitor who finishes at Discord does not sit
     // looking at a spinner, slow enough that a two-minute consent screen costs
@@ -411,13 +433,35 @@ function LoginView({
     }, 1500);
 
     const watchClosed = window.setInterval(() => {
-      if (popup.current?.closed) {
-        // No outcome to report — the window was shut, which is not a refusal
-        // anyone chose at Discord. `finish(null)` re-reads the session, so a
-        // visitor who DID complete and then closed the window still lands on
-        // the dashboard.
-        finish(null);
-      }
+      if (!live || !popup.current?.closed) return;
+      // ⚠️ **A shut window is now a reported failure (Adam, 2026-08-26).** It
+      // used to be `finish(null)`: the card went quietly back to offering the
+      // button, which is indistinguishable from the button not having worked.
+      //
+      // But it is decided AGAINST THE SERVER, not from the close alone. The
+      // popup posts its message and closes in the same breath, and the poll
+      // may not have run yet, so "the window is gone" is not evidence that
+      // nothing happened — a visitor who completed the round-trip and then
+      // closed the window must land on the dashboard, never on an error about
+      // a sign-in that worked.
+      //
+      // The other two signals are stopped first so this one owns the outcome;
+      // `live` is what the message listener and the poll check.
+      live = false;
+      stopListening();
+      window.clearInterval(poll);
+      window.clearInterval(watchClosed);
+      const settle = (refusal: string | null) => {
+        setWaiting(false);
+        setOutcome(refusal);
+        onSignedIn();
+      };
+      fetchSession()
+        .then((result) => settle(result.authenticated ? null : 'failed'))
+        // No answer is not proof of a session, and the visitor is looking at a
+        // window they just closed. Say the sign-in did not complete; the card
+        // it lands on offers the retry.
+        .catch(() => settle('failed'));
     }, 500);
 
     return () => {
@@ -426,7 +470,7 @@ function LoginView({
       window.clearInterval(poll);
       window.clearInterval(watchClosed);
     };
-  }, [waiting, onSignedIn]);
+  }, [waiting, onSignedIn, navigate]);
 
   /**
    * Open the round-trip in a second window — and do nothing at all if the
@@ -547,6 +591,123 @@ function LoginView({
     );
   }
 
+  // ⚠️ **The OAuth failure is a screen too** (Adam, 2026-08-26, Figma
+  // `825:1284`), and it covers all THREE ways the round-trip can end without a
+  // session: the visitor pressed Cancel at Discord's consent screen, they shut
+  // the window, or Discord answered with an error.
+  //
+  // **This merges a split task 0186 decided, and the merge is Adam's.** That
+  // task kept `cancelled` in plain text with no error skin, on the grounds
+  // that colouring a deliberate choice red tells the visitor they broke
+  // something. The frame puts both under one "OAuth error" callout whose own
+  // wording names the cancellation case, so the presentation is now one state.
+  //
+  // What is NOT merged, and must not be: the backend still lands the two on
+  // different literals (`?signin=cancelled` and `?signin=failed`,
+  // `portal/auth/mod.rs`) and still logs them apart. 0186's real defect was a
+  // MISCONFIGURATION reading as "every visitor is changing their mind", and
+  // that direction is still closed — the distinction survives everywhere it
+  // was load-bearing, and un-merging the screen is a one-line change here.
+  if (cancelled || failed) {
+    return (
+      <LoginCard
+        // ⚠️ **The frame's header, verbatim, at Adam's instruction
+        // (2026-08-26)** — the same two lines the waiting card carries,
+        // because this screen is that card's error variant and the designer
+        // kept them. It was briefly "Sign-in was not completed"; that is
+        // reverted. Read literally the header now describes a redirect that
+        // has already happened and will not happen again until the visitor
+        // presses the button below, and the callout under it is what carries
+        // the state. Recorded rather than argued: it is the designer's call,
+        // and one line to change if it reads wrong in front of people.
+        title="Redirecting to Discord"
+        titleComponent="h1"
+        subtitle="A new window will open for you to authorize with Discord."
+        footer={<KeepsHappening />}
+      >
+        {/* ⚠️ The frame's sentence, verbatim (Adam, 2026-08-26). It names two
+            of the three ways in — denied access, and a timed-out session —
+            and not the third, a window shut before finishing, which lands
+            here too. Left as the frame has it. */}
+        <Callout variant="error" title="OAuth error">
+          <p data-testid="signin-failed">
+            Discord returned an error during authorization. This can happen if
+            you denied access or if the session timed out.
+          </p>
+        </Callout>
+        <DiscordButton href={signInUrl()} onClick={onSignInClick}>
+          Try again with Discord
+        </DiscordButton>
+        <BackToLanding />
+      </LoginCard>
+    );
+  }
+
+  // ⚠️ **A screen, not a banner** (Adam, 2026-08-26, Figma `825:1485`). A
+  // visitor refused for membership cannot use anything else on this card: the
+  // sign-in button would hand them straight back to the same refusal, and the
+  // prerequisites list would be telling them a rule they have just been
+  // refused under. The card is replaced rather than annotated, and the ONE
+  // action it offers is the one that changes the answer — joining.
+  //
+  // Its sibling `unknown` deliberately stays a banner on the ordinary card.
+  // See the comment there.
+  if (notMember) {
+    return (
+      <LoginCard
+        title="Access not available"
+        titleComponent="h1"
+        subtitle={
+          <>
+            Your Discord account does not meet the requirements to receive an
+            API key.
+          </>
+        }
+        footer={<KeepsHappening />}
+      >
+        {/* `neutral`, whose fallback glyph is already the frame's padlock.
+            NOT the error skin: nothing failed — we asked, Discord answered,
+            and the answer was no. Red would say the portal broke. */}
+        <Callout variant="neutral" title="Stellar Discord membership required">
+          <p data-testid="signin-not-member">
+            API keys are available to members of the Stellar Discord server.
+            Join the server and try again.{' '}
+            {/* ⚠️ The frame stops at the sentence above; this one is kept from
+                task 0189's wording (Adam, 2026-08-26) because it is the only
+                thing that explains the case where a visitor HAS joined and is
+                still refused. `pending: true` — on the server, still inside
+                its screening — is a refusal by `eligibility::membership`, and
+                without this line that visitor's only next step is a support
+                thread. */}
+            New members may need to complete the server&apos;s screening first.
+          </p>
+        </Callout>
+        {/* The invite, in Discord's own blurple — the same control the sign-in
+            state uses, because both hand the visitor to Discord and neither
+            should look like the rest of the site while doing it. */}
+        <DiscordButton href={STELLAR_DISCORD_INVITE}>
+          Join Stellar Discord
+        </DiscordButton>
+        {/* The quiet second action. A REFUSED sign-in leaves no session (see
+            `portal/auth/mod.rs`), so there is nothing to sign out of and this
+            is simply the round-trip again — where Discord's own account
+            switcher is the part that does the work. */}
+        <TryDifferentAccount onClick={() => setSwitching(true)} />
+        {switching && (
+          <SwitchAccountDialog
+            onClose={() => setSwitching(false)}
+            onSignIn={(event) => {
+              // Closed first, so the popup-blocked fallback navigates this tab
+              // away from a dialog rather than out from under one.
+              setSwitching(false);
+              onSignInClick(event);
+            }}
+          />
+        )}
+      </LoginCard>
+    );
+  }
+
   return (
     <LoginCard
       title={LOGIN_TITLE}
@@ -571,17 +732,49 @@ function LoginView({
           </p>
         </Callout>
       )}
-      <p>You are not signed in.</p>
-      {/* Both prerequisites, BEFORE the control that starts an OAuth flow —
-          the acceptance criterion. Signing in itself needs neither, but the
-          visitor deciding whether to authorise an app deserves to know what
-          the key they came for will require.
+      {/* ⚠️ **New copy, and the only copy this slice writes rather than
+          restyles** (Adam, 2026-08-26). The sign-in membership gate is new, so
+          this refusal has no owning task to inherit wording from; it is
+          modelled line-for-line on task 0189's `issue=unknown`, which says the
+          same thing one press later. If it is wrong it is wrong in both
+          places — fix them together.
 
-          The design's card does not have this paragraph and the design's
-          "What you get" list does not replace it: that list says what the key
-          is, this says who may have one. Dropping it to match the mock would
-          break the one acceptance criterion this screen exists to satisfy. */}
-      <Prerequisites />
+          Its sibling, `not_member`, is not here: it is a SCREEN, above. That
+          asymmetry is 0193's acceptance criterion made structural — a refusal
+          the visitor can act on takes over the card and names the way out; one
+          that says only "we could not check" stays a banner over a sign-in
+          button that still works, because retrying is the whole remedy. */}
+      {unverified && (
+        <Callout
+          variant="error"
+          icon={<SyncProblemRoundedIcon sx={{ fontSize: 18 }} />}
+          title="We could not check your membership"
+        >
+          <p data-testid="signin-unknown">
+            That is a problem talking to Discord, not a statement about your
+            membership. Please try signing in again shortly.
+          </p>
+        </Callout>
+      )}
+      {/* ⚠️ **"You are not signed in." and the two-prerequisites paragraph
+          were both removed here on 2026-08-26, at Adam's instruction**, to
+          match Figma `824:140`. The comment that stood here argued the
+          opposite — that dropping the paragraph "would break the one
+          acceptance criterion this screen exists to satisfy" — so the reason
+          it is now safe to drop belongs on the record:
+
+          the same two prerequisites, in the same words and behind the same
+          registered invite, are stated by the landing page's FAQ
+          (`landing/Faq.tsx`, "How do I get an API key?").
+
+          ⚠️ **That is weaker than what it replaced, in two ways**, and both
+          are stated rather than smoothed over: the FAQ answer is inside a
+          COLLAPSED accordion, so it states nothing until a visitor opens it;
+          and on the `/login` route the card is the whole page and now names
+          neither rule, so somebody who arrives straight at that URL learns
+          them only by being refused. The guard moved with the copy — see
+          `app.spec.tsx`, where the assertion now has to click the row open
+          before it can read the sentence. */}
       {/* A link, not a button with an onClick. The OAuth flow is a top-level
           navigation to discord.com and back; `fetch` cannot perform one, and
           the session cookie is `SameSite=Lax` precisely so that this navigation
@@ -615,10 +808,19 @@ function LoginView({
 function DiscordButton({
   href,
   onClick,
+  target,
   children,
 }: {
   href: string;
   onClick?: (event: MouseEvent<HTMLAnchorElement>) => void;
+  /**
+   * `_blank` for the one caller that sends the visitor to discord.com to do
+   * something there and come BACK — switching account. `rel` is set from this
+   * rather than passed separately, because `noopener` is not optional on a
+   * `_blank` and leaving it to the call site is how one of them ends up
+   * without it.
+   */
+  target?: '_blank';
   children: ReactNode;
 }) {
   return (
@@ -626,6 +828,8 @@ function DiscordButton({
       component="a"
       href={href}
       onClick={onClick}
+      target={target}
+      rel={target === '_blank' ? 'noopener noreferrer' : undefined}
       variant="contained"
       fullWidth
       startIcon={<DiscordIcon />}
@@ -642,18 +846,298 @@ function DiscordButton({
 }
 
 /**
+ * The refusal card's second action — the frame's "‹ Try different account".
+ *
+ * ⚠️ **A button that opens [`SwitchAccountDialog`], not a link into the
+ * round-trip (Adam, 2026-08-26).** It WAS the link, and the link did nothing
+ * useful: `/auth/login` sends no `prompt`, so a visitor Discord already has a
+ * session for is re-authorised against the same account, the popup returns the
+ * identical refusal, and the screen redraws unchanged. Pressing a control and
+ * getting the screen you were already on is indistinguishable from a broken
+ * button, which is what it was reported as.
+ *
+ * What replaced it is the dialog, because switching account is not something
+ * this application can perform — see its docs.
+ *
+ * Quiet rather than filled: the frame gives the card one filled control and
+ * this is not it. The chevron is `aria-hidden` — it is direction, not meaning,
+ * and "less-than sign, try different account" is what a screen reader would
+ * otherwise say.
+ */
+function TryDifferentAccount({ onClick }: { onClick: () => void }) {
+  return (
+    <Button
+      type="button"
+      onClick={onClick}
+      fullWidth
+      startIcon={<ChevronLeftRoundedIcon aria-hidden />}
+      data-testid="switch-account-open"
+      sx={{
+        minHeight: 44,
+        ...theme.typography.body1,
+        fontWeight: 500,
+        color: color.text.tertiary,
+        '&:hover': {
+          color: color.text.primary,
+          backgroundColor: alpha(color.gray[50], 0.06),
+        },
+      }}
+    >
+      Try different account
+    </Button>
+  );
+}
+
+/**
+ * "‹ Back to landing" drawn INSIDE a card, under its primary action.
+ *
+ * ⚠️ The OAuth error screen only (Adam, 2026-08-26, Figma `825:1284`). Every
+ * other login state keeps the link above the card, where `LoginSection` puts
+ * it; this one claims it with `useOwnBackLink` so the section stands its own
+ * down and the page never carries two.
+ *
+ * A router `Link` behind a `Button`, matching `TryDifferentAccount` beside it:
+ * in-app navigation, so a full document load here would throw away the
+ * `/config` answer and the session lookup the app has already made.
+ */
+function BackToLanding() {
+  return (
+    <Button
+      component={RouterLink}
+      to="/"
+      fullWidth
+      startIcon={<ChevronLeftRoundedIcon aria-hidden />}
+      sx={{
+        minHeight: 44,
+        ...theme.typography.body1,
+        fontWeight: 500,
+        color: color.text.tertiary,
+        '&:hover': {
+          color: color.text.primary,
+          backgroundColor: alpha(color.gray[50], 0.06),
+        },
+      }}
+    >
+      Back to landing
+    </Button>
+  );
+}
+
+/** Where a visitor switches Discord account. Discord's, not ours. */
+const DISCORD_LOGIN = 'https://discord.com/login';
+
+/**
+ * "Use a different Discord account" — what `Try different account` opens.
+ *
+ * **Why a dialog and not simply another sign-in link.** OAuth gives a client no
+ * way to ask for an account chooser: Discord's `prompt` takes `consent` and
+ * `none` and nothing else — there is no `select_account` — so an application
+ * cannot make the authorisation screen offer a different account. Whoever
+ * Discord has a session for is whoever comes back. The honest thing is to say
+ * that and hand over the two steps that actually work, rather than to keep
+ * re-running a round-trip whose answer cannot change.
+ *
+ * Both actions are real and neither is dressed as the other:
+ *
+ * - **Switch on Discord** opens `discord.com/login` in a NEW tab, so this card
+ *   and its refusal survive the trip. A link, `target="_blank"` with
+ *   `noopener` — never a script, on a page that renders credentials elsewhere
+ *   and keeps its CSP trivial ([0193]).
+ * - **Try signing in again** re-runs the round-trip, which is the right action
+ *   AFTER the first one and a no-op before it. Listed second for that reason,
+ *   and worded as a retry rather than as a switch.
+ *
+ * It claims nothing about the outcome: signing in as another account reaches
+ * the same membership gate, and if that account is not a member either the
+ * visitor lands back here. Saying "then you will be in" would be inventing a
+ * verdict this page cannot hold.
+ */
+function SwitchAccountDialog({
+  onClose,
+  onSignIn,
+}: {
+  onClose: () => void;
+  onSignIn: (event: MouseEvent<HTMLAnchorElement>) => void;
+}) {
+  return (
+    <Dialog
+      open
+      onClose={onClose}
+      aria-labelledby="switch-account-title"
+      maxWidth="sm"
+      fullWidth
+      slotProps={{
+        paper: {
+          sx: {
+            backgroundColor: color.surface.gray,
+            border: cardBorder,
+            borderRadius: `${radius.lg}px`,
+            p: { xs: 2.5, sm: 3 },
+            m: 2,
+          },
+        },
+        backdrop: { sx: { backgroundColor: alpha(color.black, 0.72) } },
+      }}
+    >
+      <Stack spacing={2.5} data-testid="switch-account-dialog">
+        {/* Discord's own blurple, because every step below happens on their
+            side. `aria-hidden` — the heading is the label. */}
+        <Box
+          aria-hidden
+          sx={{
+            width: 56,
+            height: 56,
+            borderRadius: '50%',
+            display: 'grid',
+            placeItems: 'center',
+            backgroundColor: DISCORD,
+            color: color.white,
+          }}
+        >
+          <SwitchAccountRoundedIcon sx={{ fontSize: 28 }} />
+        </Box>
+
+        <Typography
+          id="switch-account-title"
+          component="h2"
+          sx={{
+            fontFamily: font.primary,
+            fontWeight: 700,
+            fontSize: { xs: '1.5rem', sm: '1.75rem' },
+            lineHeight: 1.15,
+            color: color.text.primary,
+          }}
+        >
+          Use a different Discord account
+        </Typography>
+
+        <Typography
+          data-testid="switch-account-explainer"
+          sx={{ ...theme.typography.body1, color: color.text.secondary }}
+        >
+          Discord signs you in as whichever account it already has a session
+          for, and we cannot change that from here. Switch account on Discord
+          first, then come back and sign in again.
+        </Typography>
+
+        <Stack spacing={1.5}>
+          <DiscordButton href={DISCORD_LOGIN} target="_blank">
+            Switch account on Discord
+          </DiscordButton>
+          <Button
+            component="a"
+            href={signInUrl()}
+            onClick={onSignIn}
+            fullWidth
+            variant="outlined"
+            sx={{
+              minHeight: 48,
+              ...theme.typography.body1,
+              fontWeight: 700,
+              color: color.text.primary,
+              borderColor: color.stroke.default,
+              '&:hover': {
+                borderColor: color.text.primary,
+                backgroundColor: alpha(color.gray[50], 0.06),
+              },
+            }}
+          >
+            Try signing in again
+          </Button>
+          <Button
+            type="button"
+            onClick={onClose}
+            fullWidth
+            sx={{
+              minHeight: 44,
+              ...theme.typography.body2,
+              fontWeight: 700,
+              color: color.text.tertiary,
+              '&:hover': {
+                color: color.text.primary,
+                backgroundColor: alpha(color.gray[50], 0.06),
+              },
+            }}
+          >
+            Cancel
+          </Button>
+        </Stack>
+      </Stack>
+    </Dialog>
+  );
+}
+
+/**
+ * The refusal card's footer — the frame's "If this keeps happening, contact
+ * support or check our status page."
+ *
+ * ⚠️ **The frame underlines both as links; here they are plain text**, and
+ * that is [`Legal`]'s rule applied rather than an omission: neither a support
+ * destination nor a status page exists in this build (`landing/links.ts` holds
+ * every off-page destination the portal names, and neither is among them). A
+ * link to a placeholder is a promise the page cannot keep, and it is a worse
+ * failure here than on the legal line — this sentence is read by somebody
+ * already stuck. Give this component the two URLs when they exist and the
+ * words become links without moving.
+ */
+function KeepsHappening() {
+  return (
+    <Typography variant="body2" sx={{ color: color.text.tertiary }}>
+      If this keeps happening,{' '}
+      <Box component="span" sx={UNDERLINED}>
+        contact support
+      </Box>{' '}
+      or check our{' '}
+      <Box component="span" sx={UNDERLINED}>
+        status page
+      </Box>
+      .
+    </Typography>
+  );
+}
+
+/**
+ * The frame's underline on a footer's named destinations — the OAuth error
+ * card's "contact support" and "status page", and [`Legal`]'s two documents.
+ *
+ * ⚠️ **Underlined at Adam's instruction (2026-08-26), and still `<span>` and
+ * not `<a>`**, because neither destination exists in this build —
+ * `landing/links.ts` holds every off-page target the portal names and neither
+ * a support address nor a status page is among them. [`Legal`] settled the
+ * rule this follows: a link to a placeholder is a promise the page cannot
+ * keep. The two are therefore drawn as the frame draws them and are not
+ * clickable, which is a known and deliberate mismatch — swap the `<span>`s
+ * for `<a>`s the day the URLs land and nothing else moves.
+ */
+const UNDERLINED = {
+  textDecoration: 'underline',
+  textUnderlineOffset: '0.2em',
+  color: color.text.secondary,
+} as const;
+
+/**
  * The card's legal footer.
  *
- * **The two documents it names do not exist yet**, so the words are set as
- * plain text rather than as links. A link to a placeholder would be a promise
- * the page cannot keep, and "you agree to our Terms of Service" pointing at a
- * 404 is worse than the same sentence pointing nowhere. Give this component two
- * URLs and the `<a>` elements go back in.
+ * **The two documents it names do not exist yet**, so the words are drawn
+ * underlined ([`UNDERLINED`], the frame's treatment, Adam 2026-08-26) but are
+ * still `<span>` and not `<a>`. A link to a placeholder would be a promise the
+ * page cannot keep, and "you agree to our Terms of Service" pointing at a 404
+ * is worse than the same sentence pointing nowhere. The mismatch is known and
+ * deliberate: they look clickable and are not, until the URLs land — at which
+ * point the two `<span>`s become `<a>`s and nothing else moves.
  */
 function Legal() {
   return (
     <Typography variant="body2" sx={{ color: color.text.tertiary }}>
-      By continuing you agree to our Terms of Service and Privacy Policy.
+      By continuing you agree to our{' '}
+      <Box component="span" sx={UNDERLINED}>
+        Terms of Service
+      </Box>{' '}
+      and{' '}
+      <Box component="span" sx={UNDERLINED}>
+        Privacy Policy
+      </Box>
+      .
     </Typography>
   );
 }
@@ -675,17 +1159,65 @@ function Legal() {
 function Dashboard({
   session,
   rateLimit,
+  onSignOut,
 }: {
   session: PortalSession;
   /** The free plan's per-second rate limit, straight from `/config`. */
   rateLimit?: number;
+  /**
+   * ⚠️ Back on this component since 2026-08-26, for one caller only: the
+   * revoked card puts "Sign out" among its actions, as the frame draws it.
+   * Sign-out otherwise lives in the navbar, which is why this prop had been
+   * removed — see `DashboardRoute`.
+   */
+  onSignOut: () => void;
 }) {
+  const landingSearch = useLocation().search;
   const [keyOnScreen, setKeyOnScreen] = useState(false);
   // Task 0191: a revoke in THIS page load. The key leaves the screen, and the
   // usage section is told so — its cached "no key" copy ("your key is new")
   // would otherwise describe a key just deactivated — and re-asked, because
   // the backend evicted its cache on the revoke.
   const [revokedCount, setRevokedCount] = useState(0);
+  // Task 0191 + the revoked dashboard (Adam, 2026-08-26): the account's key is
+  // gone, learned either on this page load or from the confirmation dialog.
+  const [revoked, setRevoked] = useState<PortalKeyRevoked | null>(null);
+  /**
+   * The account has no key at all, per the key card above (`onKeyAbsent`).
+   *
+   * `false` until told otherwise, which is what keeps the two cards below
+   * showing their loading state on a cold load rather than flashing empty and
+   * then filling in.
+   *
+   * ⚠️ **This empties both tiles** (Adam, 2026-08-26, from the
+   * `Dashboard - no key` frame). It is a deliberate reversal of the rule the
+   * rest of this slice works under — "every non-happy state gets a screen, not
+   * a blank page" — and it is narrow: the ONE state where the whole dashboard
+   * has a single action, on the card above, and the frame gives the other two
+   * nothing so that nothing competes with it. Every other empty-ish state
+   * (revoked, nothing recorded yet, the portal closed) still says its
+   * sentence.
+   */
+  const [keyAbsent, setKeyAbsent] = useState(false);
+
+  /**
+   * Whether THIS page load landed carrying an `?issue=…` outcome.
+   *
+   * ⚠️ A landing that carries one keeps the ordinary dashboard, because the
+   * revoked card cannot say what those outcomes say: `not_member`,
+   * `too_young`, `unknown` and `failed` are all reachable by an account whose
+   * key is revoked, and each is a different reason the issue round-trip did
+   * not produce one. Swallowing them behind a card that only knows a date
+   * would leave the visitor with no explanation at all.
+   *
+   * A snapshot taken ONCE, not a live read. `ApiKey` consumes the parameter
+   * with `useOneShotParams`, which strips it from the URL — and if this
+   * component had early-returned before that ran, the banner would render for
+   * a frame and vanish as the panel unmounted.
+   */
+  const [issueOnLanding] = useState(
+    () => new URLSearchParams(landingSearch).get('issue') !== null,
+  );
   // The quota `/usage` reported, so the key card's "Monthly quota" field can
   // state a number this page was actually told. `undefined` until the panel
   // below has an answer; the field is simply absent until then.
@@ -693,6 +1225,16 @@ function Dashboard({
     quota: number | null;
     resetsAt: string | null;
   }>({ quota: null, resetsAt: null });
+
+  // ⚠️ **A revoked key replaces the whole dashboard** (Adam, 2026-08-26).
+  //
+  // A PARTIAL revocation is deliberately excluded: task 0191's warning tells
+  // that visitor to press Regenerate again, and this card has no key panel to
+  // press it in. They keep the ordinary dashboard, where the control exists
+  // and the warning sits beside it.
+  if (revoked && !revoked.partial && !issueOnLanding) {
+    return <RevokedDashboard revoked={revoked} onSignOut={onSignOut} />;
+  }
 
   return (
     <Stack spacing={3}>
@@ -720,6 +1262,8 @@ function Dashboard({
           setKeyOnScreen(false);
           setRevokedCount((n) => n + 1);
         }}
+        onRevokedState={setRevoked}
+        onKeyAbsent={setKeyAbsent}
         session={session}
         rateLimit={rateLimit}
         quota={usageFacts.quota}
@@ -746,6 +1290,7 @@ function Dashboard({
             the section leaves "no key yet" without a manual refresh. Task
             0191 adds the other direction: an in-page revoke re-asks too. */}
         <Usage
+          keyAbsent={keyAbsent}
           keyOnScreen={keyOnScreen}
           revokedCount={revokedCount}
           rateLimit={rateLimit}
@@ -756,11 +1301,298 @@ function Dashboard({
             })
           }
         />
-        <RateLimitCard rateLimit={rateLimit} />
+        <RateLimitCard rateLimit={rateLimit} keyAbsent={keyAbsent} />
       </Box>
     </Stack>
   );
 }
+
+/**
+ * "Your API key was deactivated on <date>. It stopped working within about
+ * half a minute of that instant…" — task 0191's sentence, and the only copy in
+ * this file that two screens share.
+ *
+ * Extracted 2026-08-26 when the revoked dashboard arrived: it is stated both
+ * in that card's Reason box and, for a PARTIAL revocation, in the ordinary
+ * dashboard's key panel. Two copies of a decided sentence is how the two
+ * wordings drift apart.
+ *
+ * The `<strong data-testid="revoked-at">` and the tense switch are 0191's and
+ * are not re-decided here: the present tense holds only while the propagation
+ * window is still open, because this same sentence renders days later on the
+ * reveal path, where "treat it as live" would be false.
+ */
+function DeactivationSentence({ revoked }: { revoked: PortalKeyRevoked }) {
+  const at = describeUtcInstant(revoked.revoked_at);
+  const fresh = revokedJustNow(revoked.revoked_at);
+  return (
+    <p>
+      Your API key was deactivated
+      {at && (
+        <>
+          {' on '}
+          <strong data-testid="revoked-at">{at}</strong>
+        </>
+      )}
+      {fresh
+        ? `. It stops working ${PROPAGATION_COPY}${
+            at ? ' of that instant' : ''
+          } — until then treat it as live — and anything still using it will break.`
+        : `. It stopped working ${PROPAGATION_COPY}${
+            at ? ' of that instant' : ''
+          }, and anything still using it is broken.`}
+    </p>
+  );
+}
+
+/**
+ * The badge behind the revoked card's glyph — a pale wash with a dark glyph.
+ *
+ * ⚠️ These were sampled off the PNG (`#fde8e8` / `#8b1a1a`) until the Figma
+ * variables for node `997:2210` were read on 2026-08-26. They ARE design-system
+ * values — `Red/100` and `Red/950` — so they come through `tokens.ts` now, and
+ * a designer changing the red scale changes this with it.
+ */
+const REVOKED_BADGE_SURFACE = color.red[100];
+const REVOKED_BADGE_GLYPH = color.red[950];
+
+/** One labelled panel inside the revoked card — the frame's two inset boxes. */
+function RevokedPanel({
+  label,
+  align = 'left',
+  labelVariant = 'body1',
+  children,
+}: {
+  label: string;
+  align?: 'left' | 'center';
+  /**
+   * The frame gives its two panels different label sizes, measured against the
+   * variables for node `997:2210`: "Next key available" is `Body/Regular/500`
+   * (16) and "Reason" is `Body/Extra Small/500` (12). One is the card's second
+   * headline, the other is a field name — so this is a real distinction, not
+   * drift.
+   */
+  labelVariant?: 'body1' | 'caption';
+  children: ReactNode;
+}) {
+  return (
+    <Stack
+      spacing={0.5}
+      sx={{
+        p: 2,
+        borderRadius: `${radius.md}px`,
+        backgroundColor: color.surface.grayAlt,
+        textAlign: align,
+      }}
+    >
+      <Typography variant={labelVariant} sx={{ color: color.text.tertiary }}>
+        {label}
+      </Typography>
+      {children}
+    </Stack>
+  );
+}
+
+/**
+ * The whole dashboard, replaced by one card, for an account that ARRIVES with
+ * its key already revoked (Adam, 2026-08-26, Figma `997:2114` / `1000005216`).
+ *
+ * **Why it replaces the page rather than sitting in it.** Every other panel the
+ * dashboard draws is about a key: the masked value, usage against quota, the
+ * rate limit. With no key they would all render their empty states at once,
+ * which is four ways of saying the same thing and none of them the thing that
+ * matters — when a new key can be issued.
+ *
+ * **The frame's copy is used verbatim** (Adam, 2026-08-26). It is written for
+ * an operator-side suspension — "suspended for this account", a fixed Reason
+ * about quota abuse, "Contact us about this decision" — while the only way to
+ * reach this state today is the owner revoking their own key (task 0191). That
+ * was raised and Adam decided; the wording is his to change and is not
+ * re-decided here.
+ *
+ * Two things the frame does not cover, both additive and invisible in the
+ * mock:
+ *
+ * - **Once the period HAS rolled**, the primary control becomes "Get my API
+ *   key". The frame's footer says a new key arrives automatically on signing
+ *   in, which nothing implements — issuance is the OAuth round-trip
+ *   `issueUrl()` starts. Without this the account has no way out of the card.
+ * - A PARTIAL revocation never reaches here, and neither does a revoke that
+ *   happened in this page load — see `Dashboard`.
+ */
+function RevokedDashboard({
+  revoked,
+  onSignOut,
+}: {
+  revoked: PortalKeyRevoked;
+  onSignOut: () => void;
+}) {
+  const waiting = stillWaiting(revoked.next_eligible_at);
+  const nextEligible = describeNextEligible(revoked.next_eligible_at);
+
+  return (
+    <Box
+      sx={{ display: 'flex', justifyContent: 'center', py: { xs: 2, md: 6 } }}
+    >
+      <Box
+        data-testid="key-revoked"
+        sx={{
+          width: '100%',
+          maxWidth: LOGIN_CARD_MAX_WIDTH,
+          borderRadius: `${radius.lg}px`,
+          border: cardBorder,
+          backgroundColor: color.surface.gray,
+          overflow: 'hidden',
+        }}
+      >
+        <Stack spacing={2} sx={{ p: 4, textAlign: 'center' }}>
+          {/* A rounded square, not a disc — the frame's shape. The two colours
+              are sampled from the export; neither is in the Figma variable
+              set, so they are named as literals for the same reason
+              `LoginCard`'s `ERROR_SURFACE`/`ERROR_EDGE` are. */}
+          <Box
+            aria-hidden
+            sx={{
+              alignSelf: 'center',
+              width: 56,
+              height: 56,
+              borderRadius: `${radius.md}px`,
+              display: 'grid',
+              placeItems: 'center',
+              backgroundColor: REVOKED_BADGE_SURFACE,
+              color: REVOKED_BADGE_GLYPH,
+            }}
+          >
+            <ErrorOutlineRoundedIcon sx={{ fontSize: 30 }} />
+          </Box>
+          {/* `h4`, not `h3`: the frame's `Fontsize/Heading/h4` is 32 at
+              weight 600, which is exactly what the theme's fluid `h4`
+              (24 → 32) reaches. `h3` tops out at 40 and was a step too large. */}
+          <Typography variant="h4" component="h1" color="text.primary">
+            Your API key has been revoked
+          </Typography>
+          <Typography variant="body1" sx={{ color: color.text.tertiary }}>
+            Access to the Prices API has been suspended for this account. A new
+            key will be available from the date below.
+          </Typography>
+        </Stack>
+
+        <Stack spacing={2} sx={{ px: 4, pb: 4 }}>
+          <RevokedPanel label="Next key available" align="center">
+            {/* The same `Heading 4` as the card's title, measured equal on
+                the frame — and `Text/Accent`. Was a hand-rolled 28px at
+                weight 700, which is neither. */}
+            <Typography
+              variant="h4"
+              data-testid="revoked-next-eligible"
+              sx={{ color: color.text.accent }}
+            >
+              {nextEligible}
+            </Typography>
+          </RevokedPanel>
+
+          <RevokedPanel label="Reason" labelVariant="caption">
+            <Typography
+              variant="body2"
+              data-testid="revoked-reason"
+              sx={{ color: color.text.secondary }}
+            >
+              Monthly quota exceeded repeatedly. Key was suspended to protect
+              shared infrastructure.
+            </Typography>
+          </RevokedPanel>
+
+          <Stack spacing={1}>
+            {/* ⚠️ The frame's filled control names no destination, and this
+                build has none to give it: `landing/links.ts` holds every
+                off-page target the portal names and there is no support
+                address among them. Rendered as the frame draws it and wired to
+                nothing — the same standing gap as "Contact support" below and
+                `Legal`'s two documents. Give it an `href` and it becomes a
+                link without moving. */}
+            {waiting ? (
+              <Button
+                type="button"
+                variant="contained"
+                fullWidth
+                data-testid="revoked-contact"
+                sx={REVOKED_PRIMARY}
+              >
+                Contact us about this decision
+              </Button>
+            ) : (
+              // The period has rolled, so the action that changes something is
+              // available. See the component docs.
+              <Button
+                component="a"
+                href={issueUrl()}
+                variant="contained"
+                fullWidth
+                data-testid="revoked-issue"
+                sx={REVOKED_PRIMARY}
+              >
+                Get my API key
+              </Button>
+            )}
+            <Button
+              type="button"
+              onClick={onSignOut}
+              fullWidth
+              data-testid="revoked-sign-out"
+              sx={{
+                minHeight: 44,
+                ...theme.typography.body1,
+                fontWeight: 500,
+                color: color.text.primary,
+                '&:hover': { backgroundColor: alpha(color.gray[50], 0.06) },
+              }}
+            >
+              Sign out
+            </Button>
+          </Stack>
+        </Stack>
+
+        <Divider sx={{ borderColor: alpha(color.stroke.default, 0.45) }} />
+
+        <Box
+          sx={{
+            backgroundColor: color.surface.grayAlt,
+            px: 3,
+            py: 2,
+            textAlign: 'center',
+          }}
+        >
+          {/* `Body/Extra Small/500` (12), `Text/Tertiary`. */}
+          {/* `component="p"`: MUI renders `caption` as a `<span>`, which is
+              inline and does not take the centred block's width — the two
+              lines the frame draws would not wrap where it wraps them. */}
+          <Typography
+            variant="caption"
+            component="p"
+            sx={{ color: color.text.tertiary }}
+          >
+            After {nextEligible}, sign in again to receive a new key
+            automatically. Questions?{' '}
+            <Box component="span" sx={UNDERLINED}>
+              Contact support.
+            </Box>
+          </Typography>
+        </Box>
+      </Box>
+    </Box>
+  );
+}
+
+/** The revoked card's filled control — the frame's brand-yellow pill. */
+const REVOKED_PRIMARY = {
+  minHeight: 48,
+  // `Body/Regular/500` — the frame's button label is medium, where the theme's
+  // `button` variant is 700. Weight only; size and face already match.
+  fontWeight: 500,
+  backgroundColor: color.surface.primary,
+  color: color.black,
+  '&:hover': { backgroundColor: color.primary[300] },
+} as const;
 
 /**
  * The largest wait this page will name, in seconds — a hundred years.
@@ -991,30 +1823,57 @@ function stillWaiting(nextEligibleAt: string): boolean {
   return Number.isNaN(at.getTime()) || at.getTime() > Date.now();
 }
 
-/** The phrase that arms the revocation (task 0191). */
-const REWORK_CONFIRM_PHRASE = 'delete-key';
+/**
+ * The phrase that arms the regeneration.
+ *
+ * ⚠️ **`regenerate-key`, not task 0191's `delete-key` — Adam, 2026-08-26.**
+ * The phrase follows the button: the control has said "Regenerate" since
+ * 2026-08-25, and a dialog that demands the word `delete` under a heading that
+ * says "Regenerate" is asking the visitor to agree to a different sentence
+ * from the one they just read. 0191's REASON for having a typed phrase at all
+ * — that this is destructive and must not be reachable by one stray click —
+ * is untouched; only the string changed.
+ */
+const REWORK_CONFIRM_PHRASE = 'regenerate-key';
 
 /**
- * The "Replace my key" confirmation (task 0191).
+ * The "Regenerate" confirmation (task 0191's dialog, task 0193's frame).
  *
- * A modal in the plain sense — one `role="dialog"` section that takes over
- * the key panel until dismissed — and unstyled like everything before task
- * 0193. The WORDING is this task's and is not re-decided later:
+ * A real modal since 0193: MUI's `Dialog`, so it takes the focus, traps it,
+ * closes on `Escape` and dims the dashboard behind it — the frame draws a
+ * floating card over a darkened page, and the inline `<section>` this replaced
+ * could do none of that. It renders through a portal, OUTSIDE the dashboard
+ * chrome's descendant rules, so every element here is styled locally; nothing
+ * it draws can be inherited.
  *
- * - It states plainly that the current key is **deactivated immediately**,
- *   so anything still using it breaks the moment the visitor confirms — and
- *   that **no new key is issued until the next quota period**. Replacing is a
- *   revocation with a dated replacement, not a swap: if a swap handed out a
- *   fresh key (a fresh counter), "replace my key" would be the button people
- *   press on the 20th of a heavy month.
- * - Confirm is **disabled until the visitor types `delete-key`**, and
- *   disabled again the moment it is pressed, so a double-click cannot fire two
+ * **The WORDING is task 0191's and is still not re-decided here**, with the
+ * two exceptions Adam made by hand and which are marked as such: the verb is
+ * "regenerate" (the frame's, and the button's since 2026-08-25) and the typed
+ * phrase is `regenerate-key`. Every load-bearing sentence is 0191's:
+ *
+ * - the current key is **deactivated**, within the propagation window rather
+ *   than "immediately", so anything still using it breaks;
+ * - **no new key is issued now** — regenerating is a revocation with a dated
+ *   replacement, not a swap. If a swap handed out a fresh key (a fresh
+ *   counter), this would be the button people press on the 20th of a heavy
+ *   month.
+ * - Confirm is **disabled until the visitor types the phrase**, and disabled
+ *   again the moment it is pressed, so a double-click cannot fire two
  *   requests. The press is a same-origin `POST` (`revokeKey`) — no Discord
  *   round-trip, so a leaked key is killable while Discord is down.
  *
- * On success the parent renders the revoked state with the exact date from
- * the backend's answer; on failure the dialog says so and stays open, with the
- * key still live — "revoked" is never shown for a key that still works.
+ * **Where the frame and this build disagree, this build is what ships.** The
+ * frame's "Important" box reads "Rotation is limited to once per calendar
+ * month. After regenerating you will not be able to rotate again until
+ * <date>", which describes a product that hands you a new key on the spot.
+ * This one does not: it deactivates and issues nothing until the period rolls
+ * ([[0191]]'s model, and the settled rotation-vs-revocation answer). The box
+ * keeps its position, its ring and its two-colour treatment, and states what
+ * actually happens.
+ *
+ * On success the parent renders the revoked state with the exact date from the
+ * backend's answer; on failure the dialog says so and stays open, with the key
+ * still live — "revoked" is never shown for a key that still works.
  *
  * **The failure copy holds the other half of that invariant, and it is the
  * weaker half.** "Revoked" is decidable from the response; "still active" is
@@ -1060,59 +1919,244 @@ function ReplaceKey({
   };
 
   return (
-    <section
-      role="dialog"
-      aria-modal="true"
+    <Dialog
+      open
+      // Not dismissible mid-flight: a backdrop click or `Escape` while the
+      // `POST` is in the air would unmount the one place the answer has to
+      // land, and the visitor would be left not knowing whether their key
+      // still works — the single thing this dialog exists to never do.
+      onClose={submitting ? undefined : onClose}
       aria-labelledby="replace-key-title"
-      data-testid="replace-key-dialog"
+      aria-describedby="replace-key-warning"
+      // `sm` (600), not `xs` (444): the frame's card is wide enough that the
+      // warning runs two lines rather than four, and the height that buys
+      // back is what keeps the whole dialog — badge, rule, input and both
+      // controls — on one screen at laptop height without scrolling.
+      maxWidth="sm"
+      fullWidth
+      slotProps={{
+        paper: {
+          sx: {
+            // The card colour, not `MuiPaper`'s default darkest surface: the
+            // frame floats this ABOVE the dashboard, and the one surface a
+            // raised element takes here is the card's.
+            backgroundColor: color.surface.gray,
+            border: cardBorder,
+            borderRadius: `${radius.lg}px`,
+            p: { xs: 2.5, sm: 3 },
+            m: 2,
+          },
+        },
+        backdrop: { sx: { backgroundColor: alpha(color.black, 0.72) } },
+      }}
     >
-      <h3 id="replace-key-title">Replace your API key?</h3>
-      <p data-testid="replace-key-warning">
-        Replacing your key <strong>deactivates the current one</strong>. It
-        stops working {PROPAGATION_COPY} of your confirming — AWS takes that
-        long to apply the change, so treat it as live until then — and anything
-        still using it will break. <strong>No new key is issued now</strong>:
-        you can generate a new one at the start of the next quota period (the
-        1st of next month, 00:00 UTC), and until then you will not have a
-        working key.
-      </p>
-      <p>
-        Do this if your key has leaked or you no longer trust where it is. If
-        you only want a fresh key, wait for the next period instead.
-      </p>
-      <p>
-        <label>
-          Type <code>{REWORK_CONFIRM_PHRASE}</code> to confirm:{' '}
-          <input
+      {/* The testid rides the content, not the `Paper`: MUI 7 types
+          `slotProps.paper` against `PaperProps`, which admits no `data-*`, and
+          reaching the element would mean casting the slot's props — a lie in
+          the type system bought for an attribute that works just as well one
+          node in. `role="dialog"` and the labelling stay on the `Paper`, where
+          the accessibility tree wants them. */}
+      <Stack spacing={2.5} data-testid="replace-key-dialog">
+        {/* The frame's badge: a cream disc with the brand's own darkest
+            yellow as the glyph. `aria-hidden` — the heading under it is the
+            label, and "autorenew icon" announced first is noise. */}
+        <Box
+          aria-hidden
+          sx={{
+            width: 56,
+            height: 56,
+            borderRadius: '50%',
+            display: 'grid',
+            placeItems: 'center',
+            backgroundColor: color.primary[100],
+            color: color.primary[900],
+          }}
+        >
+          <AutorenewRoundedIcon sx={{ fontSize: 28 }} />
+        </Box>
+
+        <Typography
+          id="replace-key-title"
+          component="h2"
+          sx={{
+            fontFamily: font.primary,
+            fontWeight: 700,
+            fontSize: { xs: '1.5rem', sm: '1.75rem' },
+            lineHeight: 1.15,
+            color: color.text.primary,
+          }}
+        >
+          Regenerate API key?
+        </Typography>
+
+        {/* One `data-testid` over BOTH halves of the warning, because both
+            halves are the warning: the deactivation sentence and the rule in
+            the ringed box are what task 0191 decided had to be said, and the
+            tests that pin that copy read this subtree's text. Splitting the
+            testid would let one half be deleted with the suite still green. */}
+        <Box data-testid="replace-key-warning">
+          <Stack spacing={2}>
+            <Typography
+              sx={{ ...theme.typography.body1, color: color.text.secondary }}
+            >
+              Regenerating <strong>deactivates the current one</strong>. It
+              stops working {PROPAGATION_COPY} of your confirming — AWS takes
+              that long to apply the change, so treat it as live until then —
+              and anything still using it will break.
+            </Typography>
+            {/* Taller than the dashboard's strip (Adam, 2026-08-26): with the
+                disc gone the text runs the full width of the box, and 12 px
+                top and bottom against a three-line paragraph reads as a
+                caption rather than the rule the visitor has to weigh. */}
+            <NoticeStrip glyph={false} sx={{ py: 2.5 }}>
+              <p>
+                <strong>Important:</strong> regenerating is limited to once per
+                quota period, and <strong>no new key is issued now</strong>. You
+                can generate a new one at the start of the next quota period (
+                <strong>the 1st of next month, 00:00 UTC</strong>), and until
+                then you will not have a working key.
+              </p>
+            </NoticeStrip>
+            <Typography
+              sx={{ ...theme.typography.body2, color: color.text.tertiary }}
+            >
+              Do this if your key has leaked or you no longer trust where it is.
+              If you only want a fresh key, wait for the next period instead.
+            </Typography>
+          </Stack>
+        </Box>
+
+        {/* The typed phrase, under the rule it confirms rather than beside the
+            button it arms: the visitor should have read what they are agreeing
+            to before there is anywhere to type. */}
+        <Stack spacing={1} component="label">
+          <Typography
+            component="span"
+            sx={{ ...theme.typography.body2, color: color.text.secondary }}
+          >
+            Type{' '}
+            <Box
+              component="code"
+              sx={{
+                fontFamily: font.mono,
+                fontSize: '0.875em',
+                color: color.text.accent,
+                backgroundColor: color.surface.grayAlt,
+                borderRadius: '4px',
+                px: 0.75,
+                py: 0.25,
+              }}
+            >
+              {REWORK_CONFIRM_PHRASE}
+            </Box>{' '}
+            to confirm:
+          </Typography>
+          <Box
+            component="input"
             type="text"
             value={typed}
-            onChange={(event) => setTyped(event.target.value)}
+            onChange={(event: ChangeEvent<HTMLInputElement>) =>
+              setTyped(event.target.value)
+            }
             autoComplete="off"
             spellCheck={false}
             disabled={submitting}
             data-testid="replace-key-phrase"
+            sx={{
+              width: '100%',
+              minHeight: 44,
+              boxSizing: 'border-box',
+              px: 1.5,
+              fontFamily: font.mono,
+              fontSize: '0.9375rem',
+              color: color.text.primary,
+              backgroundColor: color.surface.grayAlt,
+              border: `1px solid ${color.stroke.default}`,
+              borderRadius: `${radius.chip}px`,
+              '&:focus-visible': {
+                outline: `2px solid ${color.stroke.action}`,
+                outlineOffset: 2,
+                borderColor: 'transparent',
+              },
+              '&:disabled': { opacity: 0.6 },
+            }}
           />
-        </label>
-      </p>
-      <button
-        type="button"
-        onClick={onConfirm}
-        disabled={!armed || submitting}
-        data-testid="replace-key-confirm"
-      >
-        {submitting ? 'Deactivating…' : 'Deactivate my key'}
-      </button>{' '}
-      <button type="button" onClick={onClose} disabled={submitting}>
-        Cancel
-      </button>
-      {failure && (
-        <p data-testid="replace-key-failed">
-          Could not confirm the deactivation — your key may or may not have been
-          switched off: <code>{failure}</code>. Close this and reload the page
-          to see where it stands, then try again if it is still live.
-        </p>
-      )}
-    </section>
+        </Stack>
+
+        {/* The frame's footer: cancel as quiet text, the destructive action in
+            the brand fill on the right. Reversed at `xs` into a column with
+            the primary action on top, because at 375 px a side-by-side pair
+            puts the confirm under the thumb of somebody scrolling. */}
+        <Stack
+          direction={{ xs: 'column-reverse', sm: 'row' }}
+          spacing={1.5}
+          // The pair spans the card (Adam, 2026-08-26) rather than sitting
+          // right-aligned as the frame draws it: equal halves, so neither
+          // reading of "which one is the safe one" is decided by width. At
+          // `xs` they stack, and the destructive one stays on TOP of the
+          // reversed column — the thumb rests at the bottom of a phone.
+          sx={{ alignItems: 'stretch', pt: 0.5, '& > *': { flex: 1 } }}
+        >
+          <Button
+            type="button"
+            onClick={onClose}
+            disabled={submitting}
+            sx={{
+              ...theme.typography.body2,
+              fontWeight: 700,
+              color: color.text.primary,
+              '&:hover': { backgroundColor: alpha(color.gray[50], 0.08) },
+            }}
+          >
+            Cancel
+          </Button>
+          <Button
+            type="button"
+            variant="contained"
+            onClick={onConfirm}
+            disabled={!armed || submitting}
+            data-testid="replace-key-confirm"
+            sx={{
+              ...theme.typography.body2,
+              fontWeight: 700,
+              backgroundColor: color.surface.primary,
+              color: color.black,
+              '&:hover': { backgroundColor: color.primary[300] },
+              '&.Mui-disabled': {
+                backgroundColor: color.surface.grayAlt,
+                color: color.text.tertiary,
+              },
+            }}
+          >
+            {submitting ? 'Deactivating…' : 'Regenerate'}
+          </Button>
+        </Stack>
+
+        {failure && (
+          <Typography
+            data-testid="replace-key-failed"
+            role="alert"
+            sx={{ ...theme.typography.body2, color: color.text.error }}
+          >
+            Could not confirm the deactivation — your key may or may not have
+            been switched off:{' '}
+            {/* The face is set here for the same reason the notice's margin
+                is: the dashboard chrome's `& code` rule does not reach a
+                dialog rendered through a portal, and a failure reason in the
+                body face is the one string on this screen a visitor may have
+                to copy into a support message. */}
+            <Box
+              component="code"
+              sx={{ fontFamily: font.mono, overflowWrap: 'anywhere' }}
+            >
+              {failure}
+            </Box>
+            . Close this and reload the page to see where it stands, then try
+            again if it is still live.
+          </Typography>
+        )}
+      </Stack>
+    </Dialog>
   );
 }
 
@@ -1143,6 +2187,8 @@ function ReplaceKey({
 function ApiKey({
   onKey,
   onRevoked,
+  onRevokedState,
+  onKeyAbsent,
   session,
   rateLimit,
   quota,
@@ -1151,6 +2197,35 @@ function ApiKey({
   onKey?: () => void;
   /** Task 0191: the key on screen was just deactivated. A fact, no data. */
   onRevoked?: () => void;
+  /**
+   * The revoked key's details, learned ON MOUNT from `GET /key`.
+   *
+   * ⚠️ Deliberately NOT fired by the confirmation dialog. A revocation that
+   * just happened in this page load keeps the ordinary dashboard: task 0191
+   * made the usage section say "your key was deactivated" at exactly that
+   * moment, and a partial revocation needs the Regenerate control still on
+   * screen to retry. The revoked CARD is for arriving at a dashboard whose key
+   * was already gone — which is the state Adam asked for on 2026-08-26.
+   *
+   * Separate from `onRevoked`, which counts revocations that happened in this
+   * page load and exists to re-ask `/usage`.
+   */
+  onRevokedState?: (revoked: PortalKeyRevoked) => void;
+  /**
+   * Whether the account has NO key — `GET /key` answered `404 no_key`.
+   *
+   * Distinct from `onKey`, which reports the opposite fact and only ever fires
+   * in the affirmative: the dashboard needs to know the difference between
+   * "there is no key" and "we have not been told yet", because the two cards
+   * beside this one render empty for the first and render their loading state
+   * for the second.
+   *
+   * Reported from HERE and not derived from `/usage` beside it, though that
+   * endpoint also answers `no_key`: the two answers come from different caches
+   * and can disagree for a moment, and a dashboard where one tile empties a
+   * beat before the other reads as a rendering bug.
+   */
+  onKeyAbsent?: (absent: boolean) => void;
   session: PortalSession;
   /** The free plan's per-second limit, from `/config`. */
   rateLimit?: number;
@@ -1199,6 +2274,15 @@ function ApiKey({
    * the ordinary card.
    */
   const justIssued = landedWithKey && view.state === 'ok';
+  /**
+   * The `Dashboard - no key` card: the account has no key and this load did not
+   * arrive from a completed issue round-trip.
+   *
+   * Named because three things now key off it — the branch that renders the
+   * card, the metadata row it suppresses, and (through `onKeyAbsent`) the two
+   * tiles beside it — and three copies of the same condition is how they drift.
+   */
+  const emptyKeyCard = view.state === 'none' && !landedWithKey;
   /** `createdDate` and `lastUpdatedDate`, as dates — absent where AWS's are. */
   const issuedOn =
     view.state === 'ok' ? describeUtcDay(view.key.created_at) : null;
@@ -1231,6 +2315,32 @@ function ApiKey({
     onKeyRef.current = onKey;
   });
 
+  // Same ref treatment, same reason: `load` must not re-create itself because
+  // a caller passed a fresh arrow, and this component should not depend on
+  // every caller remembering to memoise a prop.
+  const onRevokedStateRef = useRef(onRevokedState);
+  useEffect(() => {
+    onRevokedStateRef.current = onRevokedState;
+  });
+
+  // Same ref treatment, same reason.
+  const onKeyAbsentRef = useRef(onKeyAbsent);
+  useEffect(() => {
+    onKeyAbsentRef.current = onKeyAbsent;
+  });
+
+  // ⚠️ Read through a ref inside `load`, which is a `useCallback([])` — a
+  // closure that captures its scope ONCE. The effect below already depends on
+  // `landedWithKey` because it can change after mount (`useOneShotParams`
+  // resolves the URL and strips it), so reading it directly in `load` would
+  // pin the value from first render: an `?issue=ok` landing whose listing has
+  // not caught up would report the key as absent and empty the two cards
+  // beside it, for the one visitor who has definitely just been given one.
+  const landedWithKeyRef = useRef(landedWithKey);
+  useEffect(() => {
+    landedWithKeyRef.current = landedWithKey;
+  });
+
   const load = useCallback(() => {
     cancelInFlight.current?.();
     let live = true;
@@ -1246,6 +2356,11 @@ function ApiKey({
           // screen for the usage section to reason about, though the
           // counter it shows is still the revoked key's (preserved).
           setView({ state: 'revoked', revoked: key });
+          onRevokedStateRef.current?.(key);
+          // A revoked key is not an ABSENT one: the account had one, the
+          // counter it spent is still real, and the revoked card replaces the
+          // whole dashboard anyway.
+          onKeyAbsentRef.current?.(false);
         } else if (key) {
           setView({ state: 'ok', key });
           // Masked on arrival, always: what nobody asked for is the
@@ -1256,8 +2371,15 @@ function ApiKey({
           // this component needs the credential, so nothing outside it gets
           // to hold one.
           onKeyRef.current?.();
+          onKeyAbsentRef.current?.(false);
         } else {
           setView({ state: 'none' });
+          // ⚠️ NOT while `?issue=ok` is on the URL: the backend created a key
+          // during the round-trip that just ended and `GetApiKeys` has simply
+          // not caught up (see `keys/mod.rs`). Emptying the cards beside this
+          // one for a visitor who has just been given their first key is the
+          // worst moment to show them a blank dashboard.
+          onKeyAbsentRef.current?.(!landedWithKeyRef.current);
         }
       })
       .catch((cause: unknown) => {
@@ -1288,7 +2410,10 @@ function ApiKey({
     // keeps the usage section beside this one from telling a visitor who has
     // just been given their first key that they have none and should issue
     // one.
-    if (landedWithKey) onKeyRef.current?.();
+    if (landedWithKey) {
+      onKeyRef.current?.();
+      onKeyAbsentRef.current?.(false);
+    }
     load();
     return () => cancelInFlight.current?.();
   }, [load, landedWithKey]);
@@ -1480,31 +2605,7 @@ function ApiKey({
               revocation.
             </p>
           )}
-          {(() => {
-            const at = describeUtcInstant(view.revoked.revoked_at);
-            const fresh = revokedJustNow(view.revoked.revoked_at);
-            return (
-              <p>
-                Your API key was deactivated
-                {at && (
-                  <>
-                    {' on '}
-                    <strong data-testid="revoked-at">{at}</strong>
-                  </>
-                )}
-                {/* Present tense only while the window is still open: on the
-                    reveal path this same view renders days later, where
-                    "treat it as live" would be false. */}
-                {fresh
-                  ? `. It stops working ${PROPAGATION_COPY}${
-                      at ? ' of that instant' : ''
-                    } — until then treat it as live — and anything still using it will break.`
-                  : `. It stopped working ${PROPAGATION_COPY}${
-                      at ? ' of that instant' : ''
-                    }, and anything still using it is broken.`}
-              </p>
-            );
-          })()}
+          <DeactivationSentence revoked={view.revoked} />
           {/* Neither sentence below is true of a PARTIAL revocation, so
               neither renders for one. "You do not have a working key" is
               false — the duplicate that refused to be disabled is a working
@@ -1531,16 +2632,46 @@ function ApiKey({
         </div>
       )}
 
-      {view.state === 'none' && !landedWithKey && (
+      {emptyKeyCard && (
         <>
-          <Prerequisites />
-          <p>
-            One key, on the free plan. Asking again later shows the same key
-            rather than issuing another.
-          </p>
+          {/* The `Dashboard - no key` frame (Adam, 2026-08-26): a red strip and
+              one full-width control, and nothing else in the card.
+
+              ⚠️ **This DROPS two sentences that were here** — [`Prerequisites`]
+              (task 0189's eligibility wording) and 0187's "One key, on the free
+              plan…". Neither is re-worded anywhere; they are simply not on this
+              card any more, and the prerequisites are still stated in full on
+              the landing page, before the visitor authenticates, which is where
+              the epic's criterion puts them. Flagged rather than done quietly,
+              because the rule this slice works under is that it re-decides no
+              other slice's copy: this is a frame saying what the card contains,
+              not this slice deciding those sentences were wrong.
+
+              What the strip's own sentence adds is the DIAGNOSIS. "You have no
+              key" is a state; "issuance can fail during sign-in" is the reason a
+              signed-in visitor might be looking at it, and it is the half that
+              tells them pressing the button below is worth doing rather than a
+              repeat of something that already failed. */}
+          <NoticeStrip tone="error">
+            <p data-testid="no-key-notice">
+              No API key found for your account. This can happen if key issuance
+              failed during sign-in.
+            </p>
+          </NoticeStrip>
           {/* A link, not a button: issuing is an OAuth round-trip (see
-              `issueUrl`), and only a top-level navigation can carry it. */}
-          <a href={issueUrl()}>Get my API key</a>
+              `issueUrl`), and only a top-level navigation can carry it.
+
+              `data-variant="cta"` widens it to the card, which is the one place
+              the frame draws this control as a full-width bar. The chrome's
+              rule for issue links otherwise pins them to `flex-start` on
+              purpose — a stretched yellow row reads as a banner rather than a
+              control — and that reasoning still holds everywhere it is NOT the
+              only thing in the card. Here it is the only thing in the card, and
+              a banner that is also the single action is just the action. */}
+          <a href={issueUrl()} data-variant="cta">
+            <GlyphBadge icon={AddRoundedIcon} tone="onPrimary" />
+            Generate API Key
+          </a>
         </>
       )}
 
@@ -1557,22 +2688,40 @@ function ApiKey({
               few characters of a credential is a habit borrowed from card
               numbers, where the rest is high-entropy. Here it would leak part
               of the secret for no benefit anyone asked for. */}
-          {/* ⚠️ **The first-login card shows the key, unmasked.** Task 0187
-              masks by default and this keeps that everywhere else; the frame
-              Adam sent for this one screen draws the credential in the clear,
-              and the reasoning holds: the visitor completed the OAuth
-              round-trip seconds ago, the sentence above says "copy it below",
-              and a mask plus a Reveal press between a developer and the thing
-              they just asked for is friction with nobody watching that a
-              returning visit does not have. Every later load is masked. */}
+          {/* ⚠️ **The first-login card masks too, since 2026-08-26 (Adam).**
+              It briefly did not: this slice read the frame as drawing the
+              credential in the clear and argued the friction was not worth it
+              seconds after an OAuth round-trip. Re-reading the frame, the
+              first-login box holds a run of dots and a "Show key" control —
+              so 0187's rule has no exception after all, and the one place the
+              mask was lifted is now the one place it was wrong. The card that
+              delivers a credential is exactly the card most likely to be on a
+              shared screen. */}
           {/* No label inside the box: the card's own header says "API Key" one
               line above it, and the frame draws the ring bare. */}
           <KeyField
             testId="api-key"
             value={
-              revealed || justIssued
-                ? view.key.value
-                : '••••••••••••••••••••••••••••••••'
+              revealed ? view.key.value : '••••••••••••••••••••••••••••••••'
+            }
+            // ⚠️ **One control, both cards, inside the ring** (Adam,
+            // 2026-08-26). The ordinary card used to spell this "Reveal" and
+            // put it in the row below, between "Copy key" and "Regenerate" —
+            // so the two dashboards a visitor sees on consecutive days named
+            // the same act differently and put it in different places. It
+            // belongs beside the value it uncovers, and the first-login
+            // frame's word wins.
+            //
+            // A bare `<button>`, so the chrome's rule draws it as the dark
+            // pill the frame draws.
+            inlineAction={
+              <button
+                type="button"
+                data-testid="show-key"
+                onClick={() => setRevealed((was) => !was)}
+              >
+                {revealed ? 'Hide key' : 'Show key'}
+              </button>
             }
             actions={
               justIssued ? (
@@ -1607,26 +2756,23 @@ function ApiKey({
                     />
                     Copy key
                   </button>
-                  <button
-                    type="button"
-                    onClick={() => setRevealed((was) => !was)}
-                  >
-                    {revealed ? 'Hide' : 'Reveal'}
-                  </button>
                   {/* The frame's second control, in the row the frame puts it
-                      in — and NOT with the frame's word. It says "Regenerate"
-                      and its dialog promises a key "again" after the 1st;
-                      this build deactivates and issues nothing until the next
-                      period, which is task 0191's decided model and wording.
-                      0193 restyles copy, it does not re-decide it. */}
+                      in. It opens the confirmation (`ReplaceKey`) — never the
+                      round-trip, which is reached only from the armed confirm
+                      inside it. */}
                   {/* ⚠️ **"Regenerate" is Adam's word, chosen on 2026-08-25
                       over task 0191's "Replace my key…"** — the frame's, and
-                      the one the button now carries. The BEHAVIOUR behind it
-                      is unchanged and is not what the word implies: pressing
-                      it deactivates the key and issues nothing, and the
-                      confirmation that opens says exactly that in 0191's
-                      wording. Where the two disagree, the dialog is the one
-                      telling the truth. */}
+                      the one the button now carries. On 2026-08-26 the dialog
+                      followed it: its heading, its confirm button and its
+                      typed phrase (`regenerate-key`) all say the same verb,
+                      because a dialog that demanded `delete-key` under a
+                      button marked "Regenerate" asked the visitor to agree to
+                      a sentence they had not read. The BEHAVIOUR is unchanged
+                      and is still not what the word implies: pressing this
+                      deactivates the key and issues nothing until the period
+                      rolls, and the dialog says so in task 0191's wording.
+                      Where the frame's word and the build disagree, the
+                      dialog is the one telling the truth. */}
                   {!replacing && (
                     <button
                       type="button"
@@ -1717,7 +2863,21 @@ function ApiKey({
           (Issued · Monthly quota · Rate limit) inside the `ok` branch above —
           the frame for that screen shows those three and not these four, and
           rendering both put "Issued" on the card twice. */}
-      <MetaRow hidden={justIssued}>
+      {/* ⚠️ **Also hidden on the empty card** (Adam, 2026-08-26): the
+          `Dashboard - no key` frame gives it a strip and a button and nothing
+          else, and the metadata row was putting a lone "Discord account"
+          column under them.
+
+          This costs task 0186's acceptance criterion on THIS screen — "the
+          username and the ID are on screen for a signed-in visitor" — which
+          the row was deliberately placed outside the `ok` branch to satisfy,
+          precisely so it would hold on the day a visitor's key issuance
+          failed. The navbar still names the account; the numeric id, which
+          lived in this column's `title`, is now nowhere on the empty
+          dashboard. Flagged rather than absorbed: if 0186's criterion is to
+          survive, it needs somewhere else to live, and that is a change to
+          0186 rather than to this frame. */}
+      <MetaRow hidden={justIssued || emptyKeyCard}>
         {view.state === 'ok' && (
           <MetaField label="Key ID">
             <code>{view.key.key_id}</code>
@@ -1833,12 +2993,78 @@ function ApiKey({
  * nothing and mints nothing. The refresh button re-asks; the backend's
  * in-process cache is what keeps that from turning into control-plane traffic.
  */
+/**
+ * The quota-reached notice — task 0193, from the `Dashboard - limits` frame.
+ *
+ * The card above it already says *how much* is gone (100,000 of 100,000, a red
+ * bar, "0 remaining"). None of that says what a developer at the ceiling
+ * actually needs to know, which is what their integration is doing RIGHT NOW:
+ * every request is being refused with `429` until the reset. A spent bar is a
+ * fact about the past; this is the consequence, and it is the reason the state
+ * gets its own strip instead of just a colour change.
+ *
+ * **New copy, and it belongs to this slice.** The brief's rule is that 0193
+ * re-decides no wording another task owns, and this wording is not owned: the
+ * quota-reached state is not in [[0188]]'s panel (which stops at three figures
+ * and a reset rule) nor in [[0191]]'s revoke flow. The date and the status code
+ * are both restatements of things already decided elsewhere — the reset rule is
+ * 0188's, `HTTP 429` on throttle is the Rate Limit card's constant — and
+ * neither is re-worded here, only repeated where it now bites.
+ *
+ * "Contact us" is plain text under [`Legal`]'s rule, the same as the Rate Limit
+ * card's identical offer two columns away: there is still no commercial-plans
+ * destination, and this sentence is read by somebody who has just been cut off
+ * — the worst possible moment to hand out a link that 404s.
+ */
+function QuotaReachedNotice({ resetsAt }: { resetsAt: string }) {
+  const at = new Date(resetsAt);
+  const on = Number.isNaN(at.getTime())
+    ? null
+    : at.toLocaleDateString('en-GB', {
+        day: 'numeric',
+        month: 'long',
+        timeZone: 'UTC',
+      });
+
+  return (
+    <NoticeStrip tone="error">
+      <p data-testid="usage-quota-reached">
+        Monthly quota reached. API requests will return{' '}
+        <strong>HTTP 429</strong>
+        {/* The date is dropped rather than guessed if `resets_at` is
+            unparseable: the sentence still says what is happening and when it
+            stops being true is simply left unsaid, which beats "resets on
+            Invalid Date" on the one card a cut-off developer is reading. */}
+        {on ? <> until the quota resets on {on}</> : ' until the quota resets'}.{' '}
+        {/* `<strong>`, so it takes the strip's emphasis colour (#e7000b) from
+            the one place that decides it, rather than naming the hex a second
+            time here — the same treatment `HTTP 429` gets, because the frame
+            gives the two the same weight. Still underlined and still a
+            `<span>` inside it and not an `<a>`: there is no commercial-plans
+            destination, which is [`Legal`]'s rule. */}
+        <strong>
+          <Box component="span" sx={{ ...UNDERLINED, color: 'inherit' }}>
+            Contact us for higher limits.
+          </Box>
+        </strong>
+      </p>
+    </NoticeStrip>
+  );
+}
+
 function Usage({
+  keyAbsent = false,
   keyOnScreen,
   revokedCount = 0,
   rateLimit,
   onUsage,
 }: {
+  /**
+   * The account has no key at all — the frame gives this card an empty body.
+   * See the dashboard's `keyAbsent`, which explains why a blank tile is the
+   * right answer for this ONE state and for no other.
+   */
+  keyAbsent?: boolean;
   keyOnScreen: boolean;
   /** Task 0191: bumped by the dashboard on each in-page revoke. */
   revokedCount?: number;
@@ -1978,6 +3204,16 @@ function Usage({
     })}`;
   };
 
+  // The empty tile from the `Dashboard - no key` frame. Rendered BEFORE the
+  // fetch's own view is consulted, so it does not matter whether `/usage` has
+  // answered `no_key` yet or is still in flight — the key card has already
+  // settled the question, and the two cannot disagree on screen.
+  //
+  // Still a titled card, not nothing: the frame keeps the header band, and a
+  // dashboard that drops a panel entirely when you have no key would rearrange
+  // itself the moment you got one.
+  if (keyAbsent) return <DashboardCard title="Monthly Usage" />;
+
   return (
     <DashboardCard title="Monthly Usage">
       {view.state === 'loading' && <p>Loading your usage…</p>}
@@ -2043,6 +3279,15 @@ function Usage({
               remaining={view.usage.remaining}
               resetLabel={resetCaption(view.usage.resets_at)}
             />
+            {/* Only at the ceiling, and `>=` rather than `===`: AWS can count
+                a burst PAST the quota (the gateway refuses on its own clock,
+                not on ours), and a card that goes quiet again at 100,001 would
+                be dropping the notice exactly when it is most true. */}
+            {view.usage.limit !== null &&
+              view.usage.limit > 0 &&
+              view.usage.used >= view.usage.limit && (
+                <QuotaReachedNotice resetsAt={view.usage.resets_at} />
+              )}
           </>
         ))}
 
@@ -2081,8 +3326,29 @@ function Usage({
  */
 const FREE_PLAN_RATE_LIMIT = 1;
 
-function RateLimitCard({ rateLimit }: { rateLimit?: number }) {
+function RateLimitCard({
+  rateLimit,
+  keyAbsent = false,
+}: {
+  rateLimit?: number;
+  /**
+   * The account has no key — the frame empties this card too. See the
+   * dashboard's `keyAbsent`.
+   *
+   * ⚠️ This card's figures do NOT depend on having a key: the free plan's rate
+   * is the free plan's rate, and every other state renders them. Emptying it
+   * here is the frame's call and it is defensible — a limit stated for a
+   * credential that does not exist is a number with nothing to apply to, and
+   * the frame wants nothing competing with the one button on the card above.
+   * **The green "Active" pill goes with it**, and that part is not merely
+   * defensible but required: "Active" is a claim about a key, and there is no
+   * key to make it about.
+   */
+  keyAbsent?: boolean;
+}) {
   const perSecond = rateLimit ?? FREE_PLAN_RATE_LIMIT;
+
+  if (keyAbsent) return <DashboardCard title="Rate Limit" />;
 
   return (
     <DashboardCard title="Rate Limit" status={{ label: 'Active', tone: 'ok' }}>
@@ -2292,7 +3558,21 @@ function PortalStatusChrome({ children }: { children: ReactNode }) {
           color: `${color.black} !important`,
           '&:hover': { backgroundColor: `${color.primary[300]} !important` },
         },
-        '& button': {
+        // ⚠️ **Plain `<button>` only — never a MUI one** (Adam, 2026-08-26).
+        //
+        // This rule is `.chrome button`: one class plus one type, which
+        // outranks the single class Emotion puts on a component's own `sx`. It
+        // was written for the bare markup tasks 0186–0192 left in this panel,
+        // but it reached every MUI `Button` rendered inside the chrome too and
+        // overrode what they asked for. The revoked card's "Sign out" is the
+        // one that showed it: the frame draws a bare label and it came out as
+        // a dark grey pill, because a `text` Button sets no background of its
+        // own and had nothing to win the cascade with. Its yellow sibling
+        // escaped only because `.MuiButton-contained` is two classes.
+        //
+        // Narrowed rather than fought with `!important` on the other side —
+        // the same fix, and the same reasoning, as `& p code` above.
+        '& button:not([class*="MuiButton-root"])': {
           ...theme.typography.body2,
           fontWeight: 700,
           cursor: 'pointer',
@@ -2358,6 +3638,27 @@ function PortalStatusChrome({ children }: { children: ReactNode }) {
           // that reads as a banner, not a control.
           alignSelf: 'flex-start',
           '&:hover': { backgroundColor: color.primary[300] },
+          // The `+` badge the empty-key card puts inside this link. The rule
+          // had no icon to space before, so it set no gap at all.
+          gap: 1.5,
+          // The empty-key card's bar, full width (Adam, 2026-08-26).
+          // `stretch` rather than `width: 100%`: the panel is a column flex
+          // container, so the cross-axis is what decides this, and a
+          // percentage width would still be pinned left by `alignSelf` above.
+          //
+          // The rule above pins every OTHER issue link to `flex-start`, on the
+          // reasoning that a stretched yellow row reads as a banner rather
+          // than a control. That still holds where the link sits among other
+          // things. Here it is the only thing in the card, so there is nothing
+          // for it to be mistaken for.
+          '&[data-variant="cta"]': {
+            alignSelf: 'stretch',
+            justifyContent: 'center',
+            // Taller than the inline form (44) — measured off the frame, where
+            // this bar is the card's whole body and carries the same weight as
+            // the key's ringed box on the card it replaces.
+            minHeight: 56,
+          },
         },
       }}
     >
@@ -2612,6 +3913,7 @@ function RootRoute({ gate }: { gate: Gate }) {
  * shown a sign-in button that would start a round-trip they do not need.
  */
 function LoginRoute({ gate }: { gate: Gate }) {
+  const location = useLocation();
   if (gate.probe.state === 'loading') {
     return (
       <LoginSection back full>
@@ -2660,7 +3962,10 @@ function LoginRoute({ gate }: { gate: Gate }) {
   }
 
   if (gate.authenticated) {
-    return <Navigate to="/dashboard" replace />;
+    // The query rides along, like `RootRoute`'s forward: a sign-in that
+    // issued a key lands its popup on `?issue=ok`, `LoginPanel` copies that
+    // onto this URL, and the dashboard's first-login card is what reads it.
+    return <Navigate to={`/dashboard${location.search}`} replace />;
   }
 
   return (
@@ -2752,7 +4057,11 @@ function DashboardRoute({ gate }: { gate: Gate }) {
         />
         <Container sx={{ position: 'relative' }}>
           <PortalStatusChrome>
-            <Dashboard session={session} rateLimit={rateLimit} />
+            <Dashboard
+              session={session}
+              rateLimit={rateLimit}
+              onSignOut={gate.onSignOut}
+            />
           </PortalStatusChrome>
         </Container>
       </Box>

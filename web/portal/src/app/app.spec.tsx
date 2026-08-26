@@ -233,7 +233,34 @@ describe('routes', () => {
     renderAt('/?signin=cancelled');
 
     await waitFor(() => expect(lastPath).toBe('/login'));
-    expect(await screen.findByText(/sign-in cancelled/i)).toBeTruthy();
+    expect(await screen.findByTestId('signin-failed')).toBeTruthy();
+  });
+
+  /**
+   * ⚠️ **"Back to landing" stays ABOVE the card, top-left** (Adam,
+   * 2026-08-26, Figma `824:140`). It briefly moved into the foot of the card
+   * and moved straight back; pinned here because the trap is the same in both
+   * directions — rendered in both places it is two links with one name and one
+   * target, and rendered unconditionally it appears on the landing page's own
+   * status panel, where it points at the page you are already reading.
+   */
+  it('puts exactly one back link above the login card, and none on the landing', async () => {
+    openAndSignedOut();
+    renderAt('/login');
+
+    await screen.findByRole('link', { name: /sign in with discord/i });
+    const back = screen.getAllByRole('link', { name: /back to landing/i });
+    expect(back).toHaveLength(1);
+    // Above the card, not inside it.
+    expect(screen.getByTestId('login-card').contains(back[0])).toBe(false);
+  });
+
+  it('offers no back link on the landing page itself', async () => {
+    openAndSignedOut();
+    renderAt('/');
+
+    await screen.findAllByRole('link', { name: /get api key/i });
+    expect(screen.queryByRole('link', { name: /back to landing/i })).toBeNull();
   });
 
   it('leaves a signed-out visitor on the landing page', async () => {
@@ -670,36 +697,75 @@ describe('sign in with Discord', () => {
     );
   });
 
-  /** The acceptance criterion: the page shows their Discord username and ID. */
-  it('shows the username and the Discord ID once signed in', async () => {
+  /**
+   * The acceptance criterion: the page shows their Discord username and ID.
+   *
+   * ⚠️ **Task 0186's criterion has eroded twice and this test records both.**
+   *
+   * 1. The numeric ID left the screen on 2026-08-25, when Adam had the account
+   *    column cut down to the handle to match the frame. It survived as the
+   *    column's `title` — one hover away — and the assertion followed it there.
+   * 2. The column itself leaves the EMPTY-KEY card on 2026-08-26, with the
+   *    `Dashboard - no key` frame. So for a signed-in visitor with no key, the
+   *    id is nowhere at all and the username is only in the navbar.
+   *
+   * The test is split rather than weakened: the keyless half asserts what that
+   * visitor actually gets, and the half with a key still pins the id. If 0186's
+   * criterion is to be met again it needs somewhere on the empty dashboard to
+   * live, and that is a change to 0186.
+   */
+  it('names the signed-in account, even with no key to show', async () => {
     openAndSignedIn();
     renderAt('/');
 
-    // `findAll` for the username: since task 0193 the dashboard names the
-    // signed-in account twice — in the navbar and in the API Key card's
-    // account row — and `findBy` throws on more than one match.
+    // The navbar. `findAll` because the dashboard can name the account more
+    // than once, and `findBy` throws on more than one match.
     expect((await screen.findAllByText(/adam/)).length).toBeGreaterThan(0);
-    // ⚠️ The numeric ID is NO LONGER ON SCREEN. Adam had the account column cut
-    // down to the handle on 2026-08-25 to match the frame, so task 0186's
-    // criterion ("the username and the ID are on screen") is not met by this
-    // build; the id survives as the column's `title`, one hover away, and this
-    // assertion follows it there rather than being deleted.
-    const account = await screen.findByTitle('308994132968210433');
-    expect(account.textContent).toContain('adam');
     // And the sign-in control is gone.
     expect(
       screen.queryByRole('link', { name: /sign in with discord/i }),
     ).toBeNull();
   });
 
-  it('renders signed-out as plain text with the button still there', async () => {
+  it('carries the Discord ID on the account column, once there is a key', async () => {
+    stubRoutes({
+      [CONFIG_URL]: openConfig,
+      [ME_URL]: () => ({
+        json: async () => ({
+          authenticated: true,
+          user_id: '308994132968210433',
+          username: 'adam',
+        }),
+      }),
+      [KEY_URL]: () => ({
+        json: async () => ({
+          key_id: 'identity-key',
+          name: 'discord-identity-key',
+          value: 'IDENTITYKEY00000000000000000000000000000',
+        }),
+      }),
+      [USAGE_URL]: usageNoKey,
+    });
+    renderAt('/');
+
+    const account = await screen.findByTitle('308994132968210433');
+    expect(account.textContent).toContain('adam');
+  });
+
+  /**
+   * ⚠️ "You are not signed in." was removed on 2026-08-26 (Adam, Figma
+   * `824:140`). The state is now identified by what it OFFERS rather than by
+   * a sentence about what the visitor is not, so that is what this asserts.
+   */
+  it('renders the signed-out card with its heading and the button', async () => {
     openAndSignedOut();
     renderAt('/login');
 
-    expect(await screen.findByText(/you are not signed in/i)).toBeTruthy();
-    // "Plain text, not a screen" — the card's heading is still the page's `h1`
-    // and the sign-in control is still beside the words, not behind them.
+    expect(
+      await screen.findByRole('link', { name: /sign in with discord/i }),
+    ).toBeTruthy();
     expect(screen.getByRole('heading', { level: 1 })).toBeTruthy();
+    expect(screen.queryByText(/you are not signed in/i)).toBeNull();
   });
 
   /**
@@ -709,24 +775,38 @@ describe('sign in with Discord', () => {
    * nothing. The invite is the registered vanity code; the account-age line
    * names no number, because the threshold is operator configuration the
    * backend reports when it matters.
+   *
+   * ⚠️ **Asserted on the LANDING page since 2026-08-26.** The sign-in card
+   * used to carry the same sentence and Adam removed it to match Figma
+   * `824:140`; the copy survives in the FAQ, which is what the criterion
+   * actually names ("the landing page states both prerequisites"). Moved
+   * rather than deleted, because a criterion with no test is a criterion
+   * nobody will notice breaking.
    */
-  it('states both prerequisites before the visitor authenticates', async () => {
+  it('states both prerequisites on the landing page, before the visitor authenticates', async () => {
     openAndSignedOut();
-    renderAt('/login');
+    renderAt('/');
 
-    await screen.findByRole('link', { name: /sign in with discord/i });
-    expect(
-      screen.getByRole('link', { name: /stellar developers discord/i }),
-    ).toBeTruthy();
-    expect(
-      screen
-        .getByRole('link', { name: /stellar developers discord/i })
-        .getAttribute('href'),
-    ).toBe('https://discord.gg/stellardev');
-    expect(screen.getByText(/not brand new/i)).toBeTruthy();
-    // Not a hard-coded threshold — that would drift the moment the SSM
-    // parameter changes.
-    expect(document.body.textContent).not.toMatch(/5 minutes/i);
+    // ⚠️ Behind an accordion, and the click is part of the assertion. This is
+    // WEAKER than the paragraph it replaced, which sat above the sign-in
+    // button and needed no interaction — recorded here rather than smoothed
+    // over, because the criterion says "states", and a collapsed FAQ row
+    // states nothing until somebody opens it.
+    fireEvent.click(
+      await screen.findByRole('button', { name: /how do i get an api key/i }),
+    );
+
+    const invite = await screen.findByRole('link', {
+      name: /stellar developers discord/i,
+    });
+    expect(invite.getAttribute('href')).toBe('https://discord.gg/stellardev');
+
+    // The age line names no number — a hard-coded threshold would drift the
+    // moment the SSM parameter changes. Scoped to the answer itself: the
+    // landing page says "under 5 minutes" about the quick start three
+    // sections away, and a whole-document match would fail on that.
+    const answer = screen.getByText(/not brand new/i);
+    expect(answer.textContent).not.toMatch(/\d+\s*(minute|hour|day)/i);
   });
 
   /**
@@ -744,57 +824,200 @@ describe('sign in with Discord', () => {
       </MemoryRouter>,
     );
 
-    expect(await screen.findByText(/sign-in cancelled/i)).toBeTruthy();
+    expect(await screen.findByTestId('signin-failed')).toBeTruthy();
     await waitFor(() => expect(lastSearch).not.toContain('signin'));
-    // The banner survives the cleanup — it belongs to this landing.
-    expect(screen.getByText(/sign-in cancelled/i)).toBeTruthy();
+    // The screen survives the cleanup — it belongs to this landing.
+    expect(screen.getByTestId('signin-failed')).toBeTruthy();
   });
 
   /**
-   * The visitor pressed Cancel at Discord's consent screen; the callback
-   * redirected to `/api-tokens/?signin=cancelled`. Plain text, and the button
-   * stays where it was — this is not an error state.
+   * ⚠️ **Both `?signin=cancelled` and `?signin=failed` now render one screen**
+   * (Adam, 2026-08-26, Figma `825:1284`), where task 0186 rendered two
+   * banners.
+   *
+   * What the merge kept is what 0186 was actually defending: the copy never
+   * accuses the visitor of anything, and it names the cancellation case out
+   * loud rather than implying a fault. What it gave up is the separate
+   * "Sign-in cancelled." wording. The backend split is untouched — the two
+   * literals and their logs are asserted in `tests/portal_auth.rs` — so this
+   * is one line to un-merge if it reads wrong in front of people.
    */
-  it('says sign-in was cancelled, in plain text, and still offers the button', async () => {
-    openAndSignedOut();
-    renderAt('/?signin=cancelled');
+  it.each(['cancelled', 'failed'])(
+    'renders the OAuth error screen for signin=%s',
+    async (outcome) => {
+      openAndSignedOut();
+      renderAt(`/?signin=${outcome}`);
 
-    expect(await screen.findByText(/sign-in cancelled/i)).toBeTruthy();
-    expect(
-      screen.getByRole('link', { name: /sign in with discord/i }),
-    ).toBeTruthy();
-    // Not dressed up as a failure.
-    expect(screen.queryByText(/could not/i)).toBeNull();
-  });
+      // The frame's header, verbatim — shared with the waiting card, which
+      // this screen is the error variant of.
+      expect(
+        await screen.findByRole('heading', { name: /redirecting to discord/i }),
+      ).toBeTruthy();
+      const message = screen.getByTestId('signin-failed');
+      // The frame's sentence, verbatim — the two causes it names, and never
+      // an accusation about who the visitor is.
+      expect(message.textContent).toMatch(
+        /discord returned an error during authorization/i,
+      );
+      expect(message.textContent).toMatch(/denied access/i);
+      expect(message.textContent).toMatch(/timed out/i);
+      // The retry is the card's one filled control.
+      expect(
+        screen
+          .getByRole('link', { name: /try again with discord/i })
+          .getAttribute('href'),
+      ).toBe('/api-tokens/api/auth/login');
+      // And it never reads as a refusal about who the visitor is.
+      expect(screen.queryByTestId('signin-not-member')).toBeNull();
+    },
+  );
 
   /**
-   * `?signin=failed` is the other landing state: any OAuth error that is not
-   * the visitor declining. Rendering it as "cancelled" is what let a drifted
-   * scope registration look like every visitor changing their mind.
+   * ⚠️ On the OAuth error screen the back link moves INSIDE the card, under
+   * "Try again with Discord" (Adam, 2026-08-26, Figma `825:1284`).
+   *
+   * The property that matters is not where it is but that there is still
+   * exactly ONE: the section above draws its own on every other login state,
+   * and both rendering it is the bug `useOwnBackLink` exists to prevent.
    */
-  it('distinguishes a failed sign-in from a cancelled one', async () => {
+  it('moves the back link inside the error card, and leaves only one on the page', async () => {
     openAndSignedOut();
     renderAt('/?signin=failed');
 
-    expect(await screen.findByText(/could not be completed/i)).toBeTruthy();
+    await screen.findByTestId('signin-failed');
+    const back = screen.getAllByRole('link', { name: /back to landing/i });
+    expect(back).toHaveLength(1);
+    expect(screen.getByTestId('login-card').contains(back[0])).toBe(true);
+  });
+
+  /**
+   * The card is REPLACED, so the ordinary sign-in control is gone — a visitor
+   * looking at an unfinished round-trip is offered the retry, once, rather
+   * than two buttons that do the same thing.
+   */
+  it('replaces the sign-in card rather than annotating it', async () => {
+    openAndSignedOut();
+    renderAt('/?signin=failed');
+
+    await screen.findByTestId('signin-failed');
+    expect(
+      screen.queryByRole('link', { name: /sign in with discord/i }),
+    ).toBeNull();
+    expect(
+      screen.queryByRole('heading', { name: /get your api key/i }),
+    ).toBeNull();
+  });
+
+  /**
+   * ⚠️ Sign-in refuses a non-member as of 2026-08-26 (Adam), and the refusal
+   * is a SCREEN (Figma `825:1485`), not a banner over a sign-in button.
+   *
+   * The property under test is that the card is REPLACED: a visitor refused
+   * for membership must not still be offered the control that will hand them
+   * back to the same refusal, and must not be shown the prerequisites list
+   * they have just been refused under.
+   */
+  it('replaces the login card with the access-not-available screen for a non-member', async () => {
+    openAndSignedOut();
+    renderAt('/?signin=not_member');
+
+    expect(
+      await screen.findByRole('heading', { name: /access not available/i }),
+    ).toBeTruthy();
+    const message = screen.getByTestId('signin-not-member');
+    expect(message.textContent).toMatch(/members of the stellar discord/i);
+    // Kept from 0189: the one line that explains a visitor who HAS joined and
+    // is still refused (`pending: true`).
+    expect(message.textContent).toMatch(/screening/i);
+
+    // The single filled action is the invite, and it is the real one.
+    const join = screen.getByRole('link', { name: /join stellar discord/i });
+    expect(join.getAttribute('href')).toBe('https://discord.gg/stellardev');
+
+    // The sign-in control is GONE — replaced by the quiet second action.
+    expect(
+      screen.queryByRole('link', { name: /sign in with discord/i }),
+    ).toBeNull();
+    expect(
+      screen.getByRole('button', { name: /try different account/i }),
+    ).toBeTruthy();
+
+    // Never dressed as our fault, and never as the visitor's cancellation.
     expect(screen.queryByText(/sign-in cancelled/i)).toBeNull();
-    // Still a plain-text state with the button, not an error screen.
+    expect(screen.queryByTestId('signin-unknown')).toBeNull();
+  });
+
+  /**
+   * ⚠️ "Try different account" opens a dialog rather than re-running the
+   * round-trip (Adam, 2026-08-26). The old link re-authorised the SAME account
+   * — OAuth has no `select_account` prompt, so no request this client can make
+   * will offer a chooser — and redrew the same refusal, which read as a dead
+   * button.
+   *
+   * What is pinned here is that the dialog says the switch happens ON DISCORD
+   * and offers a real way to get there, because that is the only step that can
+   * change the answer.
+   */
+  it('offers a way to switch Discord account instead of re-running the same sign-in', async () => {
+    openAndSignedOut();
+    renderAt('/?signin=not_member');
+
+    fireEvent.click(await screen.findByTestId('switch-account-open'));
+
+    const dialog = await screen.findByRole('dialog', {
+      name: /use a different discord account/i,
+    });
+    expect(dialog.getAttribute('aria-modal')).toBe('true');
+    // It says WHY, rather than pretending the portal can switch accounts.
+    expect(screen.getByTestId('switch-account-explainer').textContent).toMatch(
+      /switch account on discord/i,
+    );
+
+    // The way out is a real link to Discord, opened so this card survives.
+    const switchLink = screen.getByRole('link', {
+      name: /switch account on discord/i,
+    });
+    expect(switchLink.getAttribute('href')).toBe('https://discord.com/login');
+    expect(switchLink.getAttribute('target')).toBe('_blank');
+    expect(switchLink.getAttribute('rel')).toContain('noopener');
+
+    // And the retry is still there, second, worded as a retry.
+    expect(
+      screen
+        .getByRole('link', { name: /try signing in again/i })
+        .getAttribute('href'),
+    ).toBe('/api-tokens/api/auth/login');
+  });
+
+  /**
+   * The 0193 criterion, on the sign-in path this time: "could not verify" and
+   * "not a member" must be tellable apart. One accuses the visitor of
+   * something and names a remedy; the other accuses nobody and says retry.
+   */
+  it('keeps a failed membership check distinct from a refused one', async () => {
+    openAndSignedOut();
+    renderAt('/?signin=unknown');
+
+    const banner = await screen.findByTestId('signin-unknown');
+    expect(banner.textContent).toMatch(
+      /not a statement about your membership/i,
+    );
+    expect(banner.textContent).toMatch(/again/i);
+    // The accusation is absent, and so is its remedy: nothing here tells the
+    // visitor to go and join anything, because we do not know that they have
+    // not.
+    expect(screen.queryByTestId('signin-not-member')).toBeNull();
+    expect(banner.querySelector('a')).toBeNull();
+    // The button is still there — this state is retryable.
     expect(
       screen.getByRole('link', { name: /sign in with discord/i }),
     ).toBeTruthy();
-  });
-
-  it('does not claim a failure that did not happen', async () => {
-    openAndSignedOut();
-    renderAt('/?signin=cancelled');
-    expect(await screen.findByText(/sign-in cancelled/i)).toBeTruthy();
-    expect(screen.queryByText(/could not be completed/i)).toBeNull();
   });
 
   it('does not claim a cancellation that did not happen', async () => {
     openAndSignedOut();
     renderAt('/login');
-    await screen.findByText(/you are not signed in/i);
+    await screen.findByRole('link', { name: /sign in with discord/i });
     expect(screen.queryByText(/cancelled/i)).toBeNull();
   });
 
@@ -973,7 +1196,10 @@ describe('the sign-in popup', () => {
     // never opened.
     expect(screen.queryByText(/waiting for discord/i)).toBeNull();
     expect(link.getAttribute('href')).toBe('/api-tokens/api/auth/login');
-    expect(screen.getByText(/you are not signed in/i)).toBeTruthy();
+    // Still the signed-out card, identified by the control it offers.
+    expect(
+      screen.getByRole('heading', { name: /get your api key/i }),
+    ).toBeTruthy();
   });
 
   it('leaves a modified click alone so it can open a tab', async () => {
@@ -990,7 +1216,7 @@ describe('the sign-in popup', () => {
     expect(screen.queryByText(/waiting for discord/i)).toBeNull();
   });
 
-  it('reports the refusal the popup brings back, in task 0186 wording', async () => {
+  it('reports the refusal the popup brings back, on the one screen that renders it', async () => {
     openAndSignedOut();
     stubPopup({ closed: false, focus: () => undefined });
     renderAt('/login');
@@ -1006,10 +1232,92 @@ describe('the sign-in popup', () => {
       }),
     );
 
-    // The same sentence the full-page flow shows, from the same one place in
+    // The same screen the full-page flow shows, from the same one place in
     // the component — not a second wording for the popup.
-    expect(await screen.findByText(/sign-in cancelled/i)).toBeTruthy();
+    expect(await screen.findByTestId('signin-failed')).toBeTruthy();
     expect(screen.queryByText(/waiting for discord/i)).toBeNull();
+  });
+
+  /**
+   * ⚠️ **Shutting the window is reported (Adam, 2026-08-26)**, and reported
+   * only after the server has been asked.
+   *
+   * The old behaviour went quietly back to offering the button, which is what
+   * a broken button looks like. The new one must still not cry failure over a
+   * sign-in that WORKED — the popup posts and closes in the same breath — so
+   * the outcome is decided by `/auth/me`, not by the close.
+   */
+  it('reports a shut window as a failure only when no session was created', async () => {
+    openAndSignedOut();
+    const popup = { closed: false, focus: () => undefined };
+    stubPopup(popup);
+    renderAt('/login');
+
+    await clickSignIn();
+    await screen.findByText(/waiting for discord/i);
+
+    popup.closed = true;
+
+    expect(await screen.findByTestId('signin-failed')).toBeTruthy();
+  });
+
+  /**
+   * ⚠️ The first sign-in issues a key (Adam, 2026-08-26), and the callback
+   * lands the POPUP on `?issue=ok` — a query this tab never navigated to.
+   * What is pinned: the opener forwards it, so the visitor lands on the
+   * dashboard's first-login card rather than on the plain one.
+   */
+  it('lands the key the sign-in issued on the first-login card', async () => {
+    let authenticated = false;
+    stubRoutes({
+      [CONFIG_URL]: openConfig,
+      [ME_URL]: () => ({
+        json: async () =>
+          authenticated
+            ? {
+                authenticated: true,
+                user_id: '308994132968210433',
+                username: 'adam',
+              }
+            : { authenticated: false },
+      }),
+      [KEY_URL]: () => ({
+        json: async () => ({
+          key_id: 'abc123',
+          name: 'discord-308994132968210433-key',
+          value: 'sk_test_0123456789abcdef',
+        }),
+      }),
+      [USAGE_URL]: usageNoKey,
+    });
+    stubPopup({ closed: false, focus: () => undefined });
+    render(
+      <MemoryRouter initialEntries={['/login']}>
+        <App />
+        <LocationSpy />
+      </MemoryRouter>,
+    );
+
+    await clickSignIn();
+    await screen.findByText(/waiting for discord/i);
+
+    authenticated = true;
+    fireEvent(
+      window,
+      new MessageEvent('message', {
+        origin: window.location.origin,
+        data: { source: 'stellar-portal-oauth', search: '?issue=ok' },
+      }),
+    );
+
+    expect(await screen.findByTestId('issue-ok')).toBeTruthy();
+    // The card retitles once `/key` has answered — `justIssued` needs both
+    // the landing AND a key on screen — so this is awaited, not read.
+    expect(
+      await screen.findByRole('heading', { name: /your api key is ready/i }),
+    ).toBeTruthy();
+    expect(await screen.findByTestId('api-key')).toBeTruthy();
+    expect(lastPath).toBe('/dashboard');
   });
 
   it('ignores a message from another origin', async () => {
@@ -1168,24 +1476,50 @@ describe('the API key', () => {
   /**
    * No key: the control is a **link into the issue round-trip**, not a button
    * with a fetch — the eligibility proof needs a fresh Discord token, which
-   * only a top-level navigation can carry — and the prerequisites are stated
-   * right where the decision is made.
+   * only a top-level navigation can carry.
+   *
+   * ⚠️ **This test used to also assert the prerequisites were stated on this
+   * card** (`/not brand new/i`), which was task 0189's decision: say them where
+   * the decision is made. The `Dashboard - no key` frame (Adam, 2026-08-26)
+   * gives the card a red strip and one button and nothing else, so they are no
+   * longer here — and the assertion is dropped rather than left failing. They
+   * are still stated in full on the landing page, BEFORE the visitor
+   * authenticates, which is where the epic's criterion actually places them and
+   * where authorising-for-nothing is the risk 0189 was guarding against.
+   *
+   * The rest of the test is unchanged and is the part that matters most: it is
+   * still a link, it still points at the round-trip, and the card still makes
+   * no request that could create anything.
    */
-  it('offers get-my-api-key as a link into the issue round-trip, not a fetch', async () => {
+  it('offers the issue round-trip as a link, not a fetch', async () => {
     const fetchMock = signedInWithoutKey();
     renderApp();
 
-    const link = await screen.findByRole('link', { name: /get my api key/i });
+    // The frame's label. The other states' retry links still read "Get my API
+    // key" — this is the empty card's control, not a rename across the app.
+    const link = await screen.findByRole('link', { name: /generate api key/i });
     expect(link.getAttribute('href')).toBe(ISSUE_HREF);
     expect(link.getAttribute('href')?.startsWith('http')).toBe(false);
-    // The prerequisites, at the point of decision.
-    expect(screen.getAllByText(/not brand new/i).length).toBeGreaterThan(0);
     // And no request was made that could have created anything.
     expect(
       fetchMock.mock.calls.every(
         ([, init]) => !(init as RequestInit | undefined)?.method,
       ),
     ).toBe(true);
+  });
+
+  /**
+   * The frame's red strip, and the reason it says more than "you have no key":
+   * the diagnosis is what tells a signed-in visitor that pressing the button is
+   * worth doing rather than a repeat of something that already failed.
+   */
+  it('names the likely cause on the empty card, not just the empty state', async () => {
+    signedInWithoutKey();
+    renderApp();
+
+    const notice = await screen.findByTestId('no-key-notice');
+    expect(notice.textContent).toMatch(/no api key found for your account/i);
+    expect(notice.textContent).toMatch(/issuance failed during sign-in/i);
   });
 
   /**
@@ -1227,15 +1561,21 @@ describe('the API key', () => {
     }
   });
 
-  it('reveals and re-hides the value on the toggle', async () => {
+  /**
+   * ⚠️ "Reveal"/"Hide" became "Show key"/"Hide key" inside the ring on
+   * 2026-08-26 (Adam) — one control and one wording across both dashboards,
+   * where the ordinary card used to name the act differently from the
+   * first-login one and put it in a different row.
+   */
+  it('shows and re-hides the value on the toggle', async () => {
     signedInWithKey();
     renderApp();
     await screen.findByTestId('api-key');
 
-    fireEvent.click(screen.getByRole('button', { name: /^reveal$/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^show key$/i }));
     expect(screen.getByTestId('api-key').textContent).toBe(KEY_VALUE);
 
-    fireEvent.click(screen.getByRole('button', { name: /^hide$/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^hide key$/i }));
     expect(screen.getByTestId('api-key').textContent).not.toContain(KEY_VALUE);
   });
 
@@ -1336,22 +1676,20 @@ describe('the API key', () => {
   });
 
   /**
-   * The first-login card (Figma `843:2356`), and the one place the mask is
-   * lifted.
+   * The first-login card (Figma `843:2356`).
    *
-   * Task 0187 masks the key by default and every other load still does. This
-   * screen is the delivery of a credential the visitor asked for seconds ago
-   * — the card says "copy it below" — so the value is on screen without a
-   * Reveal press, and the control beside it says "Copy key" rather than
-   * "Copy".
+   * ⚠️ **This asserted the opposite until 2026-08-26**, when Adam pointed at
+   * the frame: the box holds a run of dots and a "Show key" control, so task
+   * 0187's mask has no exception. The card's own controls are still its own —
+   * "Copy key" and the quick-start link, not the ordinary card's "Reveal".
    */
-  it('shows the key unmasked on the first-login card, with no reveal press', async () => {
+  it('masks the key on the first-login card, behind its own Show key control', async () => {
     signedInWithKey();
     renderApp('/?issue=ok');
 
     const field = await screen.findByTestId('api-key');
-    expect(field.textContent).toBe(KEY_VALUE);
-    expect(screen.queryByRole('button', { name: /reveal/i })).toBeNull();
+    expect(field.textContent).not.toContain(KEY_VALUE);
+    expect(field.textContent).toMatch(/^•+$/);
     expect(
       screen.getByRole('heading', { name: /your api key is ready/i }),
     ).toBeTruthy();
@@ -1359,6 +1697,31 @@ describe('the API key', () => {
     expect(
       screen.getByRole('link', { name: /view quick start/i }),
     ).toBeTruthy();
+
+    // The same control, in the same place, as the ordinary card's — see the
+    // toggle test above.
+    expect(screen.queryByRole('button', { name: /^reveal$/i })).toBeNull();
+    fireEvent.click(screen.getByTestId('show-key'));
+    expect(screen.getByTestId('api-key').textContent).toBe(KEY_VALUE);
+    expect(screen.getByRole('button', { name: /hide key/i })).toBeTruthy();
+  });
+
+  /**
+   * The mask survives a copy: pressing "Copy key" hands over the real value
+   * without putting it on screen, which is the whole point of masking a card
+   * whose purpose is to hand a credential over.
+   */
+  it('copies the real value while the key is still masked', async () => {
+    const writeText = vi.fn(() => Promise.resolve());
+    vi.stubGlobal('navigator', { clipboard: { writeText } });
+    signedInWithKey();
+    renderApp('/?issue=ok');
+
+    await screen.findByTestId('api-key');
+    fireEvent.click(screen.getByRole('button', { name: /copy key/i }));
+
+    expect(writeText).toHaveBeenCalledWith(KEY_VALUE);
+    expect(screen.getByTestId('api-key').textContent).toMatch(/^•+$/);
   });
 
   /**
@@ -1437,7 +1800,10 @@ describe('the API key', () => {
 
     const field = await screen.findByTestId('api-key');
     expect(field.textContent).not.toBe(KEY_VALUE);
-    expect(screen.getByRole('button', { name: /reveal/i })).toBeTruthy();
+    // Beside the value, not in the row of actions below it.
+    const show = screen.getByTestId('show-key');
+    expect(show.textContent).toMatch(/^show key$/i);
+    expect(field.parentElement?.contains(show)).toBe(true);
     expect(screen.getByRole('heading', { name: /^api key$/i })).toBeTruthy();
     expect(
       screen.queryByRole('link', { name: /view quick start/i }),
@@ -1809,8 +2175,38 @@ describe('usage against quota', () => {
           username: 'adam',
         }),
       }),
-      [KEY_URL]: keyNoKey,
+      // ⚠️ **A key, not `keyNoKey`** (2026-08-26). This suite is about the
+      // usage panel, and every test in it used to run against an account with
+      // no key — incidental when the two cards were independent, and wrong
+      // since the `Dashboard - no key` frame made the key card's answer empty
+      // this one. An account with usage figures is an account with a key, so
+      // the stub now says so and the panel under test actually renders.
+      //
+      // The one test that IS about having no key asserts the empty tile
+      // instead, below.
+      [KEY_URL]: () => ({
+        json: async () => ({
+          key_id: 'usage-suite-key',
+          name: 'discord-usage-key',
+          value: 'USAGESUITEKEY000000000000000000000000000',
+        }),
+      }),
       [USAGE_URL]: usage,
+    });
+
+  /** The same stub with the account's key genuinely absent. */
+  const signedInWithoutAnyKey = () =>
+    stubRoutes({
+      [CONFIG_URL]: openConfig,
+      [ME_URL]: () => ({
+        json: async () => ({
+          authenticated: true,
+          user_id: '308994132968210433',
+          username: 'adam',
+        }),
+      }),
+      [KEY_URL]: keyNoKey,
+      [USAGE_URL]: usageNoKey,
     });
 
   const renderApp = () =>
@@ -1882,17 +2278,36 @@ describe('usage against quota', () => {
   });
 
   /** A signed-in visitor with no key is told so, in words they can act on. */
-  it('renders the no-key state rather than an error', async () => {
-    signedInWithUsage(usageNoKey);
+  /**
+   * ⚠️ **Both cards go EMPTY when the account has no key** (Adam, 2026-08-26,
+   * from the `Dashboard - no key` frame), and this test used to assert the
+   * opposite of each half.
+   *
+   * It asserted the usage panel's "you have no API key yet" sentence, which is
+   * no longer rendered on this state, and it asserted that the rate limit still
+   * showed — with a comment arguing the figure belongs to the plan rather than
+   * to a key, which is true and was overruled: the frame gives the empty
+   * dashboard one action, on the card above, and nothing beside it to compete.
+   *
+   * What it still guards is the part that matters — the absence is rendered as
+   * a deliberate empty state and never as a failure.
+   */
+  it('renders no key as two empty tiles, not as an error', async () => {
+    signedInWithoutAnyKey();
     renderApp();
 
-    expect(await screen.findByText(/no API key yet/i)).toBeTruthy();
+    // The key card's own state is what proves the page got there.
+    await screen.findByTestId('no-key-notice');
+
+    // Both panels keep their titles and lose their bodies.
+    expect(screen.getByText('Monthly Usage')).toBeTruthy();
+    expect(screen.getByText('Rate Limit')).toBeTruthy();
+    expect(screen.queryByText(/request per second/i)).toBeNull();
+    expect(screen.queryByTestId('usage-used')).toBeNull();
+    // "Active" is a claim about a key, and there is none.
+    expect(screen.queryByText('Active')).toBeNull();
+    // And nothing anywhere reads as a failure.
     expect(document.body.textContent).not.toContain('Could not load');
-    // The rate limit still renders — it belongs to the plan, not to a key, and
-    // a visitor deciding whether to issue one is exactly who it informs. The
-    // reset RULE sentence that used to sit beside it is gone (2026-08-25);
-    // with no usage answer there is no date to caption either.
-    expect(screen.getByText(/request per second/i)).toBeTruthy();
   });
 
   /**
@@ -2347,11 +2762,33 @@ describe('replace my key', () => {
     expect(revokeCalls(fetchMock)).toHaveLength(0);
   });
 
+  /**
+   * Task 0193 made it a real modal rather than a section spliced into the
+   * page: the frame draws a floating card over a dimmed dashboard, and the
+   * properties that come with that — an accessible name, `aria-modal`, and a
+   * confirm carrying the frame's verb — are what a visitor and a screen
+   * reader both need to know which decision they are being asked for.
+   */
+  it('opens as a modal dialog named for the action, with the frame verb on the confirm', async () => {
+    signedIn();
+    renderApp();
+
+    await openDialog();
+    const dialog = screen.getByRole('dialog', {
+      name: /regenerate api key\?/i,
+    });
+    expect(dialog.getAttribute('aria-modal')).toBe('true');
+    expect(
+      (screen.getByTestId('replace-key-confirm') as HTMLButtonElement)
+        .textContent,
+    ).toMatch(/^regenerate$/i);
+  });
+
   it('does not offer replacement to a visitor with no key', async () => {
     signedIn(undefined, keyNoKey);
     renderApp();
 
-    await screen.findByRole('link', { name: /get my api key/i });
+    await screen.findByRole('link', { name: /generate api key/i });
     expect(screen.queryByTestId('replace-key-open')).toBeNull();
   });
 
@@ -2377,8 +2814,13 @@ describe('replace my key', () => {
     expect(warning.textContent).toMatch(/next quota period/i);
   });
 
-  /** Confirm is disabled until `delete-key` is typed — exactly that phrase. */
-  it('keeps confirm disabled until the visitor types delete-key', async () => {
+  /**
+   * Confirm is disabled until `regenerate-key` is typed — exactly that
+   * phrase. The string is Adam's (2026-08-26, following the button's word);
+   * the property task 0191 decided is the one asserted here, that a
+   * near-miss never arms the control and never reaches the backend.
+   */
+  it('keeps confirm disabled until the visitor types regenerate-key', async () => {
     const fetchMock = signedIn();
     renderApp();
 
@@ -2389,14 +2831,19 @@ describe('replace my key', () => {
     const phrase = screen.getByTestId('replace-key-phrase') as HTMLInputElement;
     expect(confirm.disabled).toBe(true);
 
-    for (const typed of ['delete', 'delete key', 'DELETE-KEY', 'delete-key ']) {
+    for (const typed of [
+      'regenerate',
+      'regenerate key',
+      'REGENERATE-KEY',
+      'regenerate-key ',
+    ]) {
       fireEvent.change(phrase, { target: { value: typed } });
       expect(confirm.disabled, typed).toBe(true);
       fireEvent.click(confirm);
     }
     expect(revokeCalls(fetchMock)).toHaveLength(0);
 
-    fireEvent.change(phrase, { target: { value: 'delete-key' } });
+    fireEvent.change(phrase, { target: { value: 'regenerate-key' } });
     expect(confirm.disabled).toBe(false);
   });
 
@@ -2414,7 +2861,7 @@ describe('replace my key', () => {
       'replace-key-confirm',
     )) as HTMLButtonElement;
     fireEvent.change(screen.getByTestId('replace-key-phrase'), {
-      target: { value: 'delete-key' },
+      target: { value: 'regenerate-key' },
     });
 
     fireEvent.click(confirm);
@@ -2468,7 +2915,7 @@ describe('replace my key', () => {
 
     await openDialog();
     fireEvent.change(screen.getByTestId('replace-key-phrase'), {
-      target: { value: 'delete-key' },
+      target: { value: 'regenerate-key' },
     });
     fireEvent.click(screen.getByTestId('replace-key-confirm'));
 
@@ -2493,7 +2940,7 @@ describe('replace my key', () => {
 
     await openDialog();
     fireEvent.change(screen.getByTestId('replace-key-phrase'), {
-      target: { value: 'delete-key' },
+      target: { value: 'regenerate-key' },
     });
     fireEvent.click(screen.getByTestId('replace-key-confirm'));
 
@@ -2522,7 +2969,7 @@ describe('replace my key', () => {
 
     await openDialog();
     fireEvent.change(screen.getByTestId('replace-key-phrase'), {
-      target: { value: 'delete-key' },
+      target: { value: 'regenerate-key' },
     });
     fireEvent.click(screen.getByTestId('replace-key-confirm'));
 
@@ -2590,7 +3037,7 @@ describe('replace my key', () => {
 
     await openDialog();
     fireEvent.change(screen.getByTestId('replace-key-phrase'), {
-      target: { value: 'delete-key' },
+      target: { value: 'regenerate-key' },
     });
     fireEvent.click(screen.getByTestId('replace-key-confirm'));
     await screen.findByTestId('key-revoked');
@@ -2603,6 +3050,80 @@ describe('replace my key', () => {
         fetchMock.mock.calls.filter(([url]) => url === USAGE_URL).length,
       ).toBe(usageCallsBefore + 1),
     );
+  });
+
+  /**
+   * ⚠️ **Signing in to an account whose key is already revoked replaces the
+   * whole dashboard with one card** (Adam, 2026-08-26, Figma `997:2114`).
+   *
+   * Three boundaries are asserted here rather than the pixels, because each
+   * one is a way this could quietly swallow something a visitor needs:
+   * the card must carry task 0191's decided sentence, it must not appear for a
+   * revocation that happened in THIS page load, and it must not appear on a
+   * landing that carries an `?issue=…` outcome it cannot explain.
+   */
+  it('replaces the dashboard for an account that arrives already revoked', async () => {
+    signedIn(undefined, keyRevoked);
+    renderApp();
+
+    const card = await screen.findByTestId('key-revoked');
+    expect(
+      screen.getByRole('heading', { name: /your api key has been revoked/i }),
+    ).toBeTruthy();
+    expect(screen.getByTestId('revoked-next-eligible').textContent).toMatch(
+      /1 September 2026/,
+    );
+    // The frame's Reason, verbatim.
+    expect(screen.getByTestId('revoked-reason').textContent).toMatch(
+      /monthly quota exceeded repeatedly/i,
+    );
+    // Both of the frame's actions, and the footer's date.
+    expect(screen.getByTestId('revoked-contact')).toBeTruthy();
+    expect(screen.getByTestId('revoked-sign-out')).toBeTruthy();
+    expect(card.textContent).toMatch(/After 1 September 2026, sign in again/i);
+    // No key panel behind it: nothing to copy, reveal or regenerate.
+    expect(screen.queryByTestId('api-key')).toBeNull();
+    expect(screen.queryByTestId('replace-key-open')).toBeNull();
+  });
+
+  /**
+   * The account is not stuck: once the period has rolled, the frame's
+   * "Contact us about this decision" gives way to the control that actually
+   * issues a key. The frame's footer says one arrives automatically on signing
+   * in, which nothing implements.
+   */
+  it('offers the issue round-trip from the revoked card once the period has passed', async () => {
+    signedIn(undefined, () => ({
+      ok: false,
+      status: 404,
+      json: async () => ({
+        code: 'key_revoked',
+        details: { next_eligible_at: '2020-01-01T00:00:00Z' },
+      }),
+    }));
+    renderApp();
+
+    await screen.findByTestId('key-revoked');
+    expect(screen.getByTestId('revoked-issue').getAttribute('href')).toBe(
+      ISSUE_HREF,
+    );
+    expect(screen.queryByTestId('revoked-contact')).toBeNull();
+  });
+
+  /**
+   * The `?issue=…` outcomes are reachable BY a revoked account — `capped` is
+   * the obvious one, but `not_member`, `too_young` and `unknown` all are — and
+   * each says something this card cannot. A landing carrying one keeps the
+   * ordinary dashboard.
+   */
+  it('keeps the ordinary dashboard when the landing carries an issue outcome', async () => {
+    signedIn(undefined, keyRevoked);
+    renderApp('/?issue=capped&next_eligible_at=2026-09-01');
+
+    expect(await screen.findByTestId('issue-capped')).toBeTruthy();
+    expect(
+      screen.queryByRole('heading', { name: /your api key has been revoked/i }),
+    ).toBeNull();
   });
 
   /**
@@ -2649,16 +3170,21 @@ describe('replace my key', () => {
    * "deactivated on just now", and never the next-eligible phrase presented
    * as the revocation instant.
    */
+  /** Same move as the test above, and for the same reason. */
   it('renders an undated revocation without inventing an instant', async () => {
-    signedIn(undefined, () => ({
-      ok: false,
-      status: 404,
+    signedIn(() => ({
       json: async () => ({
-        code: 'key_revoked',
-        details: { next_eligible_at: '2026-09-01T00:00:00Z' },
+        revoked: true,
+        next_eligible_at: '2026-09-01T00:00:00Z',
       }),
     }));
     renderApp();
+
+    await openDialog();
+    fireEvent.change(screen.getByTestId('replace-key-phrase'), {
+      target: { value: 'regenerate-key' },
+    });
+    fireEvent.click(screen.getByTestId('replace-key-confirm'));
 
     const revoked = await screen.findByTestId('key-revoked');
     expect(revoked.textContent).toMatch(/deactivated/i);
@@ -2676,19 +3202,28 @@ describe('replace my key', () => {
    * days after the revocation (the reveal path), it must not tell the owner
    * of a long-dead key to keep treating it as live.
    */
+  /**
+   * ⚠️ Driven through the in-page revoke since 2026-08-26. Task 0191's
+   * sentence lives on that path and on the partial one; an account that
+   * ARRIVES already revoked now gets the frame's card
+   * (`RevokedDashboard`), whose Reason box is a fixed string. The property
+   * being pinned — the tense follows the propagation window — is unchanged.
+   */
   it('states the propagation window in the past tense for an old revocation', async () => {
-    signedIn(undefined, () => ({
-      ok: false,
-      status: 404,
+    signedIn(() => ({
       json: async () => ({
-        code: 'key_revoked',
-        details: {
-          next_eligible_at: '2026-09-01T00:00:00Z',
-          revoked_at: '2026-08-01T09:00:00Z',
-        },
+        revoked: true,
+        next_eligible_at: '2026-09-01T00:00:00Z',
+        revoked_at: '2026-08-01T09:00:00Z',
       }),
     }));
     renderApp();
+
+    await openDialog();
+    fireEvent.change(screen.getByTestId('replace-key-phrase'), {
+      target: { value: 'regenerate-key' },
+    });
+    fireEvent.click(screen.getByTestId('replace-key-confirm'));
 
     const revoked = await screen.findByTestId('key-revoked');
     expect(screen.getByTestId('revoked-at').textContent).toBe(
@@ -2717,7 +3252,7 @@ describe('replace my key', () => {
 
     await openDialog();
     fireEvent.change(screen.getByTestId('replace-key-phrase'), {
-      target: { value: 'delete-key' },
+      target: { value: 'regenerate-key' },
     });
     fireEvent.click(screen.getByTestId('replace-key-confirm'));
 

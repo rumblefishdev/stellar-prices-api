@@ -74,7 +74,32 @@ export const color = {
     blue: { 100: '#dbeafe', 900: '#1c398e' },
   },
   gray: { 50: '#fafafa', 900: '#1a1a1a' },
-  red: { 400: '#ff6467' },
+  /**
+   * `Red/100` and `Red/950` — the revoked card's badge, read from the Figma
+   * variables for node `997:2210` (2026-08-26). `950` is the same value
+   * `LoginCard`'s error callout fills with; that literal predates this entry
+   * and now has a name.
+   */
+  red: {
+    100: '#ffe2e2',
+    /**
+     * The pale end of the spent-quota bar's gradient — the same value
+     * `text.error` carries. Named in the ramp as well as in the text roles
+     * because here it is a FILL, not prose, and a gradient reading
+     * `text.error → red[600]` would be describing one of its two stops by the
+     * job the other family does.
+     */
+    300: '#ffa2a2',
+    400: '#ff6467',
+    /**
+     * The saturated end of that gradient, and the rule around the quota-reached
+     * notice. Task 0193, measured off the `Dashboard - limits` frame
+     * (2026-08-26): the bar darkens left to right exactly as the yellow one
+     * does, so the two states differ in hue and not in construction.
+     */
+    600: '#e7000b',
+    950: '#460809',
+  },
   yellow: { 400: '#ffb900' },
   green: { 400: '#05df72' },
   black: '#000000',
