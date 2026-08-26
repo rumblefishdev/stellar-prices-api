@@ -58,6 +58,44 @@ sweep ~21 s. Peak Lambda memory **52-54 MB of 512 MB**.
 
 ## Daily log
 
+### 2026-08-26 16:1x UTC — day 3 of 8, clean AND under real write load
+
+24 consecutive hourly datapoints, no gaps.
+
+| metric | reading | criterion |
+|---|---|---|
+| `Duration` max | **6,251 – 10,097 ms** | ≪ 240,000 ms — peak is **4.2%** of threshold |
+| `Invocations` | **1.0/hour**, all 24 | 1/hour ✅ |
+| `Errors` | **0.0/hour**, all 24 | 0/hour ✅ |
+
+Alarm `prices-production-enrichment-duration-near-timeout` = `OK`,
+`StateUpdatedTimestamp` still **2026-08-24T08:31:25** — unchanged since the
+hand-off, and `describe-alarm-history` shows **no transitions at all** since
+then. Days 1-3 have not flapped.
+
+#### 🔑 This window carries demonstrated write load — the outstanding criterion
+
+`Prices/Enrichment`, `Environment=production`, same 24 h:
+
+| metric | 24 h |
+|---|---|
+| `EnrichmentRowsEnriched` | **126,560 rows** (3,743 – 9,415 per hour, all 24) |
+| `EnrichmentRowsRemainingRecent` | 22,434 – 41,005 — a live backlog, worked continuously |
+| `EnrichmentPassDurationMs` (worker's own) | 5,378 – 9,196 ms |
+
+So this is **not** a quiet check. The pass enriched ~126.5 k rows while its
+duration stayed at ~4% of the alarm threshold. That is the combination AC 4 asks
+for, obtained from CloudWatch rather than the `CHQ` insert query.
+
+⚠️ **Method note, because it nearly produced a false alarm.** The first query
+omitted the `Environment=production` **dimension** and returned **zero
+datapoints** for every `Prices/Enrichment` metric — which reads exactly like "the
+worker has stopped publishing". CloudWatch treats each dimension set as a
+distinct metric, so a dimensionless query matches a series that does not exist.
+🔑 **Always pass the dimension; `list-metrics --metric-name X --query
+'Metrics[].Dimensions'` shows which.** Same shape as [[0222]]'s future-window
+trap: a query artefact that is indistinguishable from a production failure.
+
 ### 2026-08-25 17:41 UTC — day 2 of 8, clean on all three metrics
 
 24 consecutive hourly datapoints, no gaps.
@@ -132,7 +170,7 @@ No code deploy needed: set `ENRICH_LIVE_PARTITIONS=0` on
       — baseline is ~27,000 ms, so anything above ~100,000 ms warrants a look
       before the threshold is reached.
 - [ ] `Invocations` stays at **1/hour** and `Errors` at **0/hour**.
-- [ ] At least one check falls in a window with **demonstrated write load**,
+- [x] At least one check falls in a window with **demonstrated write load**,
       evidenced by the `query_log` insert count, not assumed.
 - [ ] On success: record the result in [[0111]]'s archived file and tick its
       AC 5. On failure: reopen 0111 rather than patching around it here.
