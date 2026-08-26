@@ -2,7 +2,7 @@
 id: "0135"
 title: "Decide whether the headline price_usd should be outlier-protected like vwap_24h"
 type: FEATURE
-status: active
+status: completed
 related_adr: []
 related_tasks: ["0072", "0118", "0123", "0144", "0145", "0146", "0147"]
 tags: ["phase-future", "effort-large", "priority-high", "milestone-M2", "vwap", "clickhouse"]
@@ -243,6 +243,116 @@ history:
       documented "grep the definition to confirm the apply landed" check
       reports a successful deploy as failed unless it greps for function
       names. Cost me one false alarm mid-deploy.
+  - date: 2026-08-25
+    status: active
+    who: stkrolikiewicz
+    note: >
+      **Re-measured on a healthy pipeline; one of my own arguments is
+      retracted.** BE fixed [[0215]] on 2026-08-24 14:46 UTC (zero errors
+      since, against 3/hour and no successful run for the preceding 26 days),
+      so the numbers behind the conditional bound were re-taken ~16 h in.
+      **The change itself holds, on data 4 days and one pipeline-state apart.**
+      Old vs conditional over 3,166 assets: `zero_but_vwap_ok` 27 → **0**,
+      `zero_price_usd` 707 → **259**, `empty_sources` 680 → **259** (421
+      assets regain a `sources` object), `zero_vwap` 680 → **259**. The
+      three-way coherence reproduces exactly — an asset has a price, sources
+      and a VWAP, or none of the three — which the 08-21 run also showed at a
+      different value (368). Reproducing on independent data means it follows
+      from the construction, not from that day's data.
+      **Retracted:** PR #241 argued the guard would grow in value as
+      enrichment recovered, because fresh venues would multiply and with them
+      the mixed fresh/stale population. Measured, the opposite happened.
+      Freshness did rise (all-fresh assets 656/15.5% → 849/27%), but assets
+      moved wholesale from all-stale to all-fresh rather than through a mixed
+      state: **mixed 35 → 15, and the at-risk group (mixed AND ≥3 sources,
+      the only shape where the §5.5 median can evict anything) 7 → 1.**
+      A venue that trades gets a fresh price and one that does not, does not;
+      the mix is a transient, and a consistent pipeline yields fewer of them.
+      **The guard is kept on a corrected argument:** its value is
+      anti-correlated with pipeline health. It prevents nothing measurable
+      today (1 at-risk asset), was worth 7 during an outage that ran 26 days
+      before [[0144]] noticed it, and the defect it blocks — a stale venue
+      outvoting a live one in an unweighted median — is silent and
+      indistinguishable from a real price downstream. It costs nothing by
+      construction and is already pinned by non-vacuous fixtures. Deleting it
+      is a clean two-line revert that changes none of the numbers above; they
+      come from C2's carry, not from the guard. Recorded as a judgement call,
+      not a measurement.
+      Re-measure again after [[0111]], and after BE's partition-limited scan
+      (their next step, now that their own 300 s Lambda cap is the binding
+      constraint) changes enrichment throughput a second time.
+  - date: 2026-08-25
+    status: active
+    who: stkrolikiewicz
+    note: >
+      **Applied to prod, and this time it held.** Second attempt, after the
+      08-21 apply/rollback. Deployed at 14:38:16 UTC from origin/develop
+      (SHA256 a77a485…, verified identical before the apply); refresh clean at
+      **206 ms, 3,188 rows, no exception**.
+      Deployed definition verified by function name rather than by interval
+      text: `argMax(close_usd` **0**, `argMaxIf` **3**, `argMinIf` **2**,
+      `asset_has_live` **2**.
+      Live metrics, against the same aggregate run on the old definition
+      40 min earlier: `zero_but_vwap_ok` **27 → 0**, `zero_price_usd`
+      **758 → 292**, `empty_sources` **735 → 292**, `zero_vwap`
+      **735 → 292**. Every metric down; 466 assets regained a real price and
+      443 regained a `sources` object. Predicted 283 in the pre-apply
+      counterfactual and got 292 — the 9-asset gap is population drift over
+      those 40 minutes (3,209 assets then, 3,188 now), not a modelling error.
+      Three acceptance criteria close here. `zero_but_vwap_ok = 0` on the
+      nose. **Native XLM** publishes `price_usd` 0.19078224260552 with
+      `vwap_24h` 0.19079970388652 beside it (0.01% apart), `change_24h_pct`
+      -3.8348 rather than a fabricated -100, and `sources` naming sdex and
+      aquarius with real volumes — Aquarius as a named VWAP source is also
+      what [[0120]]'s §9 bullet expects. `price_xlm` reads **exactly 1**, the
+      check the original 0072 runbook asserted and an un-enriched tip used to
+      break. Coherence control: **0** assets publish a price with empty
+      `sources`, so the shape the PR #241 review constructed (fixture 15) does
+      not occur on current data — as measured.
+      **What made the difference from 08-21:** the counterfactual ran BEFORE
+      the apply (runbook step 1b, added by #239 precisely because it did not
+      last time), on the exact file being deployed, so the expected numbers
+      were known going in rather than discovered afterwards.
+      **Runbook defect found during this deploy, not yet fixed.** Step 0's
+      sanity gate says `arrayReduce('median')` must be **0** in the captured
+      artifact, "else stop and re-plan". That was written for the 0072 rollout,
+      when prod ran v1. Rolling 0135 onto 0072 the median is legitimately
+      PRESENT (measured 1), so the gate condemns a correct artifact. Same
+      failure class as the `toIntervalHour` normalisation trap: a check whose
+      expected value silently depends on which upgrade you are performing.
+      Also: the `sed -i` invocations there are GNU-only and fail on macOS.
+      Remaining before archive: a green [[0120]] re-run.
+  - date: 2026-08-25
+    status: completed
+    who: stkrolikiewicz
+    note: >
+      **Complete and archived.** Two of the three failure modes fixed and live
+      on prod; the third (should `price_usd` go through the §5.5 keep-mask)
+      moved to [[0217]], which cannot be answered before [[0118]]/[[0123]].
+      5 of 7 acceptance criteria met, 2 deferred with the decision, 0 open.
+      Shipped across #228 (guards + C2 carry + `ref_7d` band), #241 (the
+      conditional bound, re-gated onto candles after review) and #248 (this
+      record + two runbook fixes). 28 lib tests and 3 integration tests
+      against ClickHouse 26.3.10.60, the pinned prod version.
+      Prod, 2026-08-25 14:38:16 UTC: `zero_but_vwap_ok` **27 → 0**,
+      `zero_price_usd` 758 → 292, `empty_sources` 735 → 292, `zero_vwap`
+      735 → 292 — 466 assets regained a real price, 443 a `sources` object.
+      Native XLM publishes 0.19078224260552 with `price_xlm` exactly 1 and
+      `change_24h_pct` -3.8348 instead of a fabricated -100.
+      [[0120]] conformance re-run: **847 pass / 13 fail / 11 skip**, against
+      752/55/0 before. Every remaining failure checked against all seven
+      columns this task touches — **zero attributable to 0135**; the 13 are
+      [[0170]]'s USDC self-pair and empty ohlcv windows on 6 assets. XLM
+      passes clean. The 11 skips are one honest batch/single check declining
+      to compare across a minute boundary, which leaves 0120's batch criterion
+      evidenced on 8 of 19 assets — 0120's gap to close, not this task's.
+      **Took two prod attempts.** The first, on 08-21, shipped an
+      unconditional bound that blanked `sources` on 52% of the table and was
+      rolled back within the hour. What changed: the counterfactual now runs
+      BEFORE the apply (runbook step 1b), on the exact file being deployed.
+      Spawned [[0224]] — the guard protects 1 asset today and was kept on a
+      judgement call, so the promised re-measurement is a task rather than a
+      comment.
 ---
 
 # price_usd is not outlier-protected
@@ -415,23 +525,157 @@ base for whichever option is chosen.
       It is deliberately **not** age-bounded — bounding it would trade a known
       price for the 0 sentinel, and 24.5% of prod assets already sit on that
       sentinel. The age itself is published by [[0216]]; the per-venue
-      pipeline is where the bound lives. `zero_but_vwap_ok` verification is
-      post-deploy and still open.
+      pipeline is where the bound lives. `zero_but_vwap_ok` verified on prod
+      after the 2026-08-25 apply: **27 → 0**, measured against the same
+      aggregate run on the old definition 40 minutes earlier.
 - [x] `market_cap_usd` and `price_xlm` no longer collapse to 0 purely because the
       newest candle is un-enriched. (Both asserted on fixture 7 in
       `current_mv_it.rs`: `price_xlm` 3.8 and `market_cap_usd` 1900 against a
       seeded supply — the first version of this PR ticked the box citing a
       `market_cap_usd` assertion that did not exist.)
-- [ ] Native **XLM** specifically publishes a real `price_usd` — the case BE
-      measured and the one [[0144]] shows is close to chronic, since XLM's
-      newest candle is both usually newer than the last enrichment pass and
-      often an exotic-quote pair that will never be enriched at all.
-- [x] The C2 question answered by an **explicit, bounded rule**: a source is
-      carried at its latest priced close while that close is younger than 2 h
-      (measured against `now()`, not against the asset's own newest candle —
-      that reference spans legs enrichment can never price, so it never
-      resolves), and is absent from `sources`/`vwap_24h` beyond that or with
-      no priced candle at all. The membership rule is now a stated policy
-      rather than whatever enrichment happened to have reached, though a
-      chronically-unpriced venue still drops out — that population is
-      [[0154]]'s. Alignment with [[0147]]'s coverage gate: still open.
+- [x] Native **XLM** specifically publishes a real `price_usd`. Verified on
+      prod after the 2026-08-25 apply: `price_usd` 0.19078224260552,
+      `vwap_24h` 0.19079970388652 beside it (0.01% apart), `price_xlm`
+      **exactly 1**, `change_24h_pct` -3.8348 rather than a fabricated -100,
+      and `sources` naming sdex + aquarius with real volumes. XLM also passes
+      the [[0120]] conformance re-run with **zero** failures.
+- [x] The C2 question answered by an **explicit, conditional rule**. A source
+      is carried at its latest priced close, and is kept while the venue is
+      still QUOTING — newest **candle** within 2 h of `now()`. A non-quoting
+      venue is dropped only when the asset still has a quoting one left; if
+      every venue is quiet, all are kept, because there is then no live venue
+      to defend and blanking the row is pure loss.
+      ⚠️ Two earlier formulations of this criterion were **wrong and shipped
+      as wrong**, which is why the wording is laboured here:
+      (a) the unconditional bound, reverted from prod on 2026-08-21 after it
+      blanked `sources` on 2,284 of 4,365 assets; and
+      (b) gating on the newest *priced* close rather than the newest candle,
+      caught in PR #241 review — that conflates a dead venue with one
+      enrichment has not reached, reproducing C2's own defect one level down.
+      A venue quoting 1 min ago with $1,000,000 of volume was evicted in
+      favour of one carrying $10. Pinned by fixture 16 LIV, proven
+      non-vacuous.
+      A chronically-unpriced venue still drops out — that population is
+      [[0154]]'s. Alignment with [[0147]]'s coverage gate: still open,
+      tracked there rather than here.
+
+## Implementation Notes
+
+Shipped in three PRs. The schema file `packages/prices-clickhouse/schema/current.sql`
+self-DROPs and re-CREATEs, so every change is one apply.
+
+| PR | what |
+|---|---|
+| #228 | `price_usd` guarded (`argMaxIf`), C2 carry on `per_source.src_price`, `ref_7d` narrowed to the `[7d, 5d]` band, docs |
+| #241 | the carry bound made **conditional**, then re-gated onto candles after review |
+| #248 | this record, plus two runbook defects the apply exposed |
+
+Final shape of the per-venue pipeline:
+
+```sql
+per_source       src_price    = argMaxIf(close_usd, timestamp, close_usd > 0)
+                 src_is_live  = max(timestamp) >= now() - INTERVAL 2 HOUR
+per_source_kept  asset_has_live = max(src_is_live) OVER (PARTITION BY asset_id)
+per_asset        WHERE NOT asset_has_live OR src_is_live
+```
+
+`unfiltered.price_usd` is deliberately **not** age-bounded — bounding it trades a
+known price for the `0` sentinel. The age itself is [[0216]]'s.
+
+Tests: 28 lib (incl. a lint pinning 5 guarded `close_usd` aggregates and the carry
+bound at exactly one site) + 3 integration against ClickHouse 26.3.10.60, the pinned
+prod version. Fixtures 10 STA / 14 MIX / 15 EVN / 16 LIV cover both arms of the
+conditional bound, the mask clearing every source, and candle-vs-enrichment liveness.
+
+Deployed to prod 2026-08-25 14:38:16 UTC. `zero_but_vwap_ok` 27 → **0**,
+`zero_price_usd` 758 → **292**, `empty_sources` 735 → **292**, `zero_vwap` 735 → **292**.
+
+## Design Decisions
+
+### From Plan
+
+1. **`price_usd` publishes the latest *priced* close.** `argMaxIf(close_usd,
+   timestamp, close_usd > 0)`. Cost is staleness against today's permanent zero;
+   rejected keeping the zero, and rejected `NULL` (needs a Nullable or status
+   column — that is [[0151]]).
+
+2. **C2: an unpriced venue is carried, not dropped.** A venue whose newest candle
+   is un-enriched keeps its latest priced close and stays in `sources` and the VWAP
+   weighting, instead of vanishing as a side effect of enrichment timing.
+
+### Emerged
+
+3. **The carry bound is CONDITIONAL.** Not in the original plan — the unconditional
+   form was designed, shipped and rolled back the same session. A stale venue can
+   only outvote a live one if a live one exists; where every venue is quiet there is
+   nothing to defend and dropping them all is pure loss.
+
+4. **Liveness is measured on candles, not on priced closes.** Emerged from PR #241
+   review. `max(timestamp) >= now() - 2h`, with no `close_usd` term — deliberately,
+   since counting `close_usd` there *is* the defect.
+
+5. **`unfiltered.price_usd` left unbounded, on purpose.** The bound lives only in
+   `per_source`. Pinned by a lint asserting the bound appears at exactly one site,
+   because a bound tuned in one place and not the other reproduces the contradiction
+   the #228 review caught.
+
+6. **`ref_7d` narrowed to `[now()-7d, now()-5d]`.** Beyond the task's contract. An
+   open-ended `argMin` returned the oldest *available* priced close, so a
+   freshly-listed asset published a 2-hour move labelled as 7-day. The cutoff bounds
+   that error without removing it — a baseline at the 5-day edge is still ~28% short
+   on span. Naming the baseline's own timestamp is the real fix and is a schema change.
+
+7. **Failure mode 1 split out to [[0217]] rather than carried.** It cannot be settled
+   here: sequencing puts it after [[0118]], with [[0123]] as its evidence base, both
+   still backlog. Carrying it would hold 0135 open indefinitely on a question it is
+   not allowed to answer.
+
+## Issues Encountered
+
+- **Production regression and rollback, 2026-08-21.** The unconditional bound blanked
+  `sources` on **2,284 of 4,365 assets (52%)** while preventing **zero** evictions —
+  74% of the table had every venue stale, because enrichment had been down for two
+  days ([[0215]]). Root cause: the bound was calibrated against the enrichment
+  *schedule* (`rate(1 hour)` × 2), methodologically right and wrong in practice.
+  Rolled back via the step-0 artifact. **Intentional design change, not a code bug.**
+
+- **The counterfactual ran after the apply, not before.** That is what made 08-21 a
+  rollback instead of an abort. Runbook step 1b now mandates measuring first; the
+  2026-08-25 apply used it and the expected numbers were known going in.
+
+- **A retracted argument outlived its retraction.** The claim that the guard's value
+  would *grow* as enrichment recovered was measured false (mixed 35 → 15, at-risk
+  7 → 1: assets move wholesale from all-dead to all-live, not through a mixed state).
+  Retracted in the PR body and this record — but left standing in the schema comment,
+  which is the artifact people actually read. Caught in review. **The lesson is that a
+  retraction has to reach every copy.**
+
+- **`SHOW CREATE` normalises interval syntax.** `INTERVAL 2 HOUR` comes back as
+  `toIntervalHour(2)`, so the runbook's "grep the definition" check reported a
+  successful deploy as failed. Cost one false alarm mid-deploy. Grep function names.
+
+- **An empty capture greps as 0 on every pattern.** The same false alarm had a second
+  hole: a zero count could mean "not there" or "nothing captured". Line-count gate added.
+
+- **Runbook step 0's sanity gate was upgrade-blind.** It expected
+  `arrayReduce('median')` = 0, correct only when rolling onto v1. Rolling 0135 onto
+  0072 the median is legitimately present, so the gate condemned a good rollback
+  artifact. Fixed in #248 with a per-upgrade table. Its `sed -i` calls were also
+  GNU-only and failed on macOS.
+
+- **Broken/modified tests:** `current_mv_it.rs` fixture asset 10 (STA) lost its
+  un-enriched tip row. Under candle-based liveness that tip makes the venue **live**,
+  so ARM A would have kept passing while testing nothing. Intentional, and the reason
+  is recorded in the fixture so it is not added back. ARM B (asset 14) went from two
+  sources to three, because the §5.5 mask is a documented no-op below three — the
+  two-source version asserted the bound without exercising the defect it exists for.
+
+## Future Work
+
+- **Re-measure whether the conditional guard earns its place** — [[0224]]. It
+  protects **1** asset today. Kept on the argument that its value is anti-correlated
+  with pipeline health, which is honest but untested over time.
+- **Failure mode 1** (should `price_usd` go through the §5.5 keep-mask) — [[0217]].
+- **Publish the price's age** — [[0216]].
+- **Coverage-gate alignment** — [[0147]], tracked there.
+- **Chronically-unpriced venues** — [[0154]].

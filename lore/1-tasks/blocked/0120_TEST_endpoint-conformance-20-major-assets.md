@@ -5,7 +5,7 @@ type: TEST
 status: blocked
 by: ["0135", "0170", "0178"]
 related_adr: ["0008"]
-related_tasks: ["0072", "0118", "0119", "0124", "0128"]
+related_tasks: ["0072", "0118", "0119", "0124", "0128", "0135", "0170", "0178", "0225"]
 tags: [layer-backend, priority-high, effort-medium, milestone-M2, api, testing, verification, acceptance]
 milestone: 2
 links:
@@ -34,6 +34,38 @@ history:
       [[0135]], [[0170]] or [[0178]]; this task blocks on them for the
       final stub/sentinel AC — re-run the suite green after they land and
       cite the report in [[0128]].
+  - date: 2026-08-25
+    status: blocked
+    who: stkrolikiewicz
+    note: >
+      **Re-run after [[0135]] landed on prod: 847 pass / 13 fail / 11 skip**,
+      against 752 / 55 / 0 on 2026-08-19. Report
+      `conformance-0120-report-2026-08-25T1443.json`.
+      0135's share is closed. Every failure was checked programmatically
+      against all seven columns 0135 touches — **zero** attributable to it,
+      and XLM now passes the whole suite clean.
+      **The unblock plan in the entry above is WRONG and is corrected here.**
+      It said: re-run green once 0135/0170/0178 land. It will not go green.
+      Of the 13 remaining failures only **1** belongs to [[0170]] (USDC
+      `/price` 404, the self-pair). The other **12** are a defect none of the
+      three blockers owns, filed as [[0225]]: `/ohlcv` filters on both legs
+      and defaults the quote to USDC, so an asset trading actively against
+      XLM returns an empty 200. Measured on prod the same session — AUD has
+      **4,864** daily candles against XLM current to today, and 1,214 against
+      USDC whose newest is 2026-05-20; RON and EQL have no USDC pair at all
+      yet trade against XLM today. The suite's assertion is right and the
+      endpoint is wrong, so this is not a suite fix.
+      **A second gap, this one the suite's own.** All 11 skips are a single
+      check — "batch/single timestamps never aligned" — which honestly
+      declines to compare a `POST /prices/batch` response against a `/price`
+      response taken in a different minute (`batch=14:45:00Z single=14:46:00Z`;
+      `current_prices` refreshes every minute and the suite paces at 1 rps, so
+      crossing a boundary is the norm). Consequence: AC "batch agrees with
+      per-asset /price" is evidenced on **8 of 19** assets, not all of them.
+      The suite already has a re-fetch path that rescued one case; it needs to
+      pin both calls to the same `updated_at` or retry within the minute.
+      That belongs to this task, not to a new one.
+      Blockers now: [[0170]], [[0178]], [[0225]]. 0135 cleared.
 ---
 
 # Endpoint conformance for 20 major assets

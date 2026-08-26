@@ -173,8 +173,14 @@ async fn current_prices_mv_computes_price_volume_and_market_cap() {
 ///           fixture exercising the load-bearing change_7d numerator guard
 ///   7 ZER — priced HISTORY, un-enriched TIP → 0135: latest priced close wins
 ///   8 DIP — a genuine ~-100% crash → must NOT be swallowed by 0138's guard
-///  10 STA — priced history OLDER than the 2h carry bound → the ASYMMETRY:
-///           price_usd still publishes it, the venue drops out of sources/vwap
+///  10 STA — EVERY venue dead → the conditional bound must NOT fire; the
+///           venue is kept, because there is no live venue to protect
+///  14 MIX — one live venue, TWO dead → the bound FIRES: the dead pair is
+///           dropped before it can outvote the live one in the §5.5 median
+///  15 EVN — four dead venues straddling the interpolated median → the mask
+///           clears ALL of them, leaving a price beside empty `sources`
+///  16 LIV — a LIVE venue whose newest priced close is past the bound → it
+///           must be KEPT: liveness is measured on candles, not enrichment
 ///  11 LAG — SINGLE source, priced history, un-enriched tip → carried (the
 ///           shape the XLM acceptance criterion names)
 ///  12 TRI — three sources, one carried past an un-enriched tip → the §5.5
@@ -199,7 +205,7 @@ async fn current_prices_mv_writes_0072_columns_and_filters_outliers() {
                     (6,'EXO','classic','GEXO','',1), (7,'ZER','classic','GZER','',1), \
                     (8,'DIP','classic','GDIP','',1), (10,'STA','classic','GSTA','',1), \
                     (11,'LAG','classic','GLAG','',1), (12,'TRI','classic','GTRI','',1), \
-                    (13,'NRB','classic','GNRB','',1)"
+                    (13,'NRB','classic','GNRB','',1), (14,'MIX','classic','GMIX','',1)"
         ))
         .execute()
         .await
@@ -244,13 +250,19 @@ async fn current_prices_mv_writes_0072_columns_and_filters_outliers() {
         // 0138 control: a REAL near-total crash. The guard must leave this alone.
         (8, 30, "2.00", "500", "sdex"),
         (8, 1, "0.0001", "10", "sdex"),
-        // 10 STA — the carry BOUND, and the ASYMMETRY it creates. Its only
-        // priced close is 190 min old (> 2h), so the per-venue guard drops
-        // sdex from `sources` and the vwap — while `price_usd`, deliberately
-        // unbounded, still publishes that close. Price without venues is the
-        // intended shape: we hold a price, no venue is quoting right now.
+        // 10 STA — ARM A of the conditional bound. EVERY venue here is dead:
+        // sdex's newest candle is 190 min old, past the 2h bound. With no live
+        // venue to protect there is nothing to defend, so the bound must NOT
+        // fire — sdex is KEPT, `sources` names it and `vwap_24h` comes from
+        // it. Dropping it would blank the row for an asset we hold a perfectly
+        // good, merely stale, price for: that is the 2026-08-21 prod rollback,
+        // reproduced as a test.
+        //
+        // There is deliberately NO un-enriched tip row here. Liveness is
+        // measured on the newest CANDLE, not the newest priced close (PR #241
+        // review, finding 1), so a tip at 1 min would make sdex LIVE and this
+        // fixture would silently stop testing ARM A at all.
         (10, 190, "2.00", "500", "sdex"),
-        (10, 1, "0", "0", "sdex"),
         // 11 LAG — single source, priced history INSIDE the bound: the carry
         // must keep the venue alive on every column.
         (11, 30, "2.00", "300", "sdex"),
@@ -265,6 +277,52 @@ async fn current_prices_mv_writes_0072_columns_and_filters_outliers() {
         // 13 NRB — ordinary priced asset; the interesting part is its 1h
         // reference below, which is too RECENT for the [7d, 5d] band.
         (13, 5, "2.00", "1000", "sdex"),
+        // 14 MIX — the conditional bound FIRING. sdex last quoted 190 min ago
+        // (stale), soroswap 5 min ago (fresh). Because a fresh venue survives,
+        // the stale one is dropped: it must not vote in the §5.5 median.
+        // 14 MIX — ARM B: a live venue survives, so the bound FIRES. Two dead
+        // venues at 5.00 and one live at 1.00. THREE sources, because that is
+        // the whole point: the §5.5 mask is a documented no-op below 3
+        // (current.sql), so the two-source version of this fixture asserted
+        // the bound while never exercising the defect the bound exists for
+        // (PR #241 review, finding 5). At three, WITHOUT the bound the median
+        // is 5.00, the live venue deviates 80% and IS the one evicted —
+        // publishing a vwap of 5.00 from two venues that stopped quoting hours
+        // ago. With the bound the dead pair is dropped before it can vote.
+        (14, 190, "5.00", "800", "sdex"),
+        (14, 200, "5.00", "700", "aquarius"),
+        (14, 5, "1.00", "400", "soroswap"),
+        // 15 EVN — the §5.5 mask clearing EVERY source. Four dead venues at
+        // 1.00, 1.00, 3.00, 3.00: `median` is `quantile(0.5)` and interpolates
+        // to 2.00, so all four deviate 50% and none survives. The row still
+        // publishes `price_usd` 1.00, which is venue-blind. That pairing —
+        // a real price beside `sources = {}` and `vwap_24h = 0` — disproves
+        // the "price, sources and VWAP, or none of the three, BY CONSTRUCTION"
+        // claim (PR #241 review, finding 2). Reachable only because C2's carry
+        // brings all-dead assets into the mask at all; before it they arrived
+        // with zero kept sources and it never armed.
+        (15, 200, "1.00", "100", "sdex"),
+        (15, 210, "1.00", "100", "soroswap"),
+        (15, 220, "3.00", "100", "aquarius"),
+        (15, 230, "3.00", "100", "phoenix"),
+        // 16 LIV — the ONLY fixture that discriminates candle-liveness from
+        // enrichment-freshness, and the shape PR #241's review found (finding
+        // 1). sdex is quoting RIGHT NOW and carries essentially all the
+        // volume, but its newest candle is un-enriched and its newest PRICED
+        // close is 3 h old — older than the bound. soroswap is tiny and
+        // happens to have been enriched 5 min ago.
+        //
+        // Liveness on CANDLES (correct): sdex is live, both venues are kept,
+        // and vwap ~= 1.00 because sdex carries the weight.
+        // Liveness on PRICED CLOSES (the defect): sdex reads as dead, is
+        // evicted in favour of soroswap, and the row publishes vwap 1.20 —
+        // drawn from $10 of the $1,000,020 the same row reports as volume.
+        //
+        // Assets 10/14/15 behave IDENTICALLY under both predicates, so
+        // without this fixture a revert to the old form stays green.
+        (16, 1, "0", "1000000", "sdex"),
+        (16, 180, "1.00", "10", "sdex"),
+        (16, 5, "1.20", "10", "soroswap"),
     ];
     for (i, (asset, mins, cu, vol, src)) in rows.iter().enumerate() {
         admin
@@ -350,7 +408,7 @@ async fn current_prices_mv_writes_0072_columns_and_filters_outliers() {
             .fetch_one()
             .await
             .expect("count");
-        if n >= 11 {
+        if n >= 14 {
             ready = true;
             break;
         }
@@ -555,46 +613,117 @@ async fn current_prices_mv_writes_0072_columns_and_filters_outliers() {
         "market_cap_usd must be 1.90 * 1000 = 1900, got {zer_mc}"
     );
 
-    // ── 0135 ASYMMETRY: the bound guards the venues, not the headline ──────
-    // Asset 10's only priced close is 190 min old. The per-venue guard drops
-    // sdex (a venue that last quoted 3h ago is not quoting "now"), so
-    // `sources` empties and vwap goes to its sentinel — while `price_usd`
-    // still publishes the close, because blanking a price we hold is the
-    // outcome 0135 exists to remove. Measured on prod 2026-08-20: 1,091 of
-    // 4,444 assets (24.5%) already publish a hard zero without any bound.
+    // ── conditional bound, ARM A: every venue stale → do NOT fire ─────────
+    // Asset 10's only venue last quoted 190 min ago, past the 2h bound. There
+    // is no live venue to protect, so dropping it would be pure loss — it
+    // would empty `sources` and zero `vwap_24h` on an asset whose price we
+    // hold. Measured on prod 2026-08-21, the unconditional form did exactly
+    // that to 2,284 of 4,365 assets (52%) while preventing zero evictions.
     let sta_p = scalar_f64(&admin, &f("price_usd", 10)).await;
     assert!(
         (sta_p - 2.0).abs() < 1e-9,
-        "price_usd is NOT age-bounded — it must still publish the 190-min-old \
-         priced close, got {sta_p}"
+        "price_usd is not age-bounded, so the 190-min-old close still publishes, got {sta_p}"
     );
     let sta_srcs: String = admin
         .query(&s("sources", 10))
         .fetch_one()
         .await
         .expect("sta sources");
-    assert_eq!(
-        sta_srcs, "{}",
-        "a venue whose last quote is beyond the carry bound must drop out of \
-         sources, so it cannot vote in the §5.5 median"
+    assert!(
+        sta_srcs.contains("sdex"),
+        "with NO fresh venue on the asset the stale one must be KEPT — dropping \
+         it defends nothing and blanks the row, got {sta_srcs}"
     );
     let sta_vwap = scalar_f64(&admin, &f("vwap_24h", 10)).await;
     assert!(
-        sta_vwap.abs() < 1e-9,
-        "vwap must be the sentinel when no venue is currently quoting, got {sta_vwap}"
+        (sta_vwap - 2.0).abs() < 1e-6,
+        "vwap must still come from the kept venue, got {sta_vwap}"
     );
-    // The row stays internally coherent: change_* are computed FROM the
-    // published price, never fabricated against it.
-    let sta_24 = scalar_f64(&admin, &f("change_24h_pct", 10)).await;
+
+    // ── conditional bound, ARM B: a live venue survives → DO fire ──────────
+    // Asset 14 has sdex and aquarius DEAD at 5.00 (190/200 min) and soroswap
+    // LIVE at 1.00 (5 min). Three sources, so the §5.5 mask genuinely arms and
+    // the defect is real: unweighted, the dead pair's 5.00 is the median, the
+    // live venue deviates 80% and is the one the mask would evict. The bound
+    // drops the dead pair before it can vote.
+    let mix_srcs: String = admin
+        .query(&s("sources", 14))
+        .fetch_one()
+        .await
+        .expect("mix sources");
     assert!(
-        sta_24.abs() < 1e-9,
-        "one priced candle means open_24h == price_usd, so 0%, got {sta_24}"
+        mix_srcs.contains("soroswap")
+            && !mix_srcs.contains("sdex")
+            && !mix_srcs.contains("aquarius"),
+        "both dead venues must be dropped when a live one survives, got {mix_srcs}"
     );
-    let sta_7d = scalar_f64(&admin, &f("change_7d_pct", 10)).await;
+    let mix_vwap = scalar_f64(&admin, &f("vwap_24h", 14)).await;
     assert!(
-        (sta_7d - 100.0).abs() < 1e-2,
-        "change_7d_pct must come from the published 2.00 against the 1.00 \
-         baseline = +100%, got {sta_7d}"
+        (mix_vwap - 1.0).abs() < 1e-6,
+        "vwap must come from the LIVE venue (1.00). 5.00 means the bound did \
+         not fire and the dead pair outvoted it — the exact defect this arm \
+         exists to pin; got {mix_vwap}"
+    );
+    // price_usd is unbounded and venue-blind: it is simply the newest priced
+    // close on the asset, which here is the live one.
+    let mix_p = scalar_f64(&admin, &f("price_usd", 14)).await;
+    assert!(
+        (mix_p - 1.0).abs() < 1e-9,
+        "price_usd is the newest priced close regardless of venue, got {mix_p}"
+    );
+
+    // ── the §5.5 mask can clear EVERY source (review finding 2) ────────────
+    // Asset 15's four dead venues straddle the interpolated median 2.00 by
+    // 50%, so nothing survives — while price_usd still publishes. This is the
+    // counterexample to "by construction": an asset CAN hold a price with no
+    // sources and no VWAP beside it. Whether interpolation is the right median
+    // for an even count is task 0217's decision, not this test's.
+    let evn_srcs: String = admin
+        .query(&s("sources", 15))
+        .fetch_one()
+        .await
+        .expect("evn sources");
+    assert!(
+        !evn_srcs.contains("sdex") && !evn_srcs.contains("phoenix"),
+        "an even-count set straddling the median by > OUTLIER_PCT must clear \
+         entirely — if this keeps sources, the mask's arming rule changed and \
+         current.sql's note about it is stale; got {evn_srcs}"
+    );
+    let evn_vwap = scalar_f64(&admin, &f("vwap_24h", 15)).await;
+    assert!(
+        evn_vwap.abs() < 1e-9,
+        "vwap must be 0 when every source is filtered out, got {evn_vwap}"
+    );
+    let evn_p = scalar_f64(&admin, &f("price_usd", 15)).await;
+    assert!(
+        (evn_p - 1.0).abs() < 1e-9,
+        "price_usd is venue-blind and must still publish the newest priced \
+         close — this pairing is what disproves the three-way invariant; \
+         got {evn_p}"
+    );
+
+    // ── liveness is a property of QUOTING, not of enrichment (finding 1) ──
+    // Asset 16's sdex quotes at 1 min with $1,000,000 of volume but was last
+    // enriched 3 h ago; soroswap is $10 enriched 5 min ago. Gating on the
+    // newest PRICED close evicts sdex and publishes soroswap's 1.20 as the
+    // VWAP of a $1,000,020 asset. Gating on the newest CANDLE keeps it.
+    let liv_srcs: String = admin
+        .query(&s("sources", 16))
+        .fetch_one()
+        .await
+        .expect("liv sources");
+    assert!(
+        liv_srcs.contains("sdex") && liv_srcs.contains("soroswap"),
+        "a venue quoting 1 min ago must be LIVE even though its newest priced \
+         close is past the bound — dropping it is the defect PR #241's review \
+         found; got {liv_srcs}"
+    );
+    let liv_vwap = scalar_f64(&admin, &f("vwap_24h", 16)).await;
+    assert!(
+        (liv_vwap - 1.0).abs() < 1e-3,
+        "vwap must be dominated by the venue holding the volume (~1.00). 1.20 \
+         means liveness was gated on enrichment and the $1,000,000 venue was \
+         evicted in favour of a $10 one; got {liv_vwap}"
     );
 
     // ── the change_7d numerator guard, on the only shape that reaches it ───
