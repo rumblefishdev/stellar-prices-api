@@ -55,6 +55,29 @@ history:
       `raw_data` as the upstream-vs-ours discriminator. Inherited from 0086: the
       cleanup-worker interaction and the two-runs-1s-apart confirmation of the
       x1000 mapping.
+  - date: 2026-08-26
+    status: active
+    who: okarcz
+    note: >
+      AC 1 CLOSED by measurement on prod — the question that gated severity.
+      A 1970 row wins the enrichment ASOF **100% of the time** in the exposed
+      population (471,087 of 471,087 USDC-quoted `_1d` candles in 2025), because
+      real `reflector` coverage does not start until 2026-03-11 14:00 while
+      candles run to 2015. And the 300 s staleness guard rejects **100% of them**,
+      smallest gap 1.73e9 s — a 5.8-million-fold margin.
+      🔑 **Severity settled: data-loss, not wrong-value.** No candle was ever
+      priced from a 1970 row; re-enrichment stays out of scope. [[0199]]'s "it is
+      inert" reached the right answer from reasoning that does not hold — its
+      claim that the row "never matches" is outright false.
+      🔴 Two findings beyond the AC. (1) Prod runs `join_use_nulls = 0`
+      (`changed = 0`) and `enrich_batch` sets no SETTINGS, so an unmatched row
+      yields DEFAULT not NULL — `o.price_usd IS NOT NULL` filters nothing and the
+      tier's whole correctness rests on the one arithmetic guard. [[0170]]'s trap
+      in a second place. (2) Asset 111 (USDT) has **zero** `reflector` rows at
+      all, so the oracle tier cannot price a USDT-quoted candle — bears on
+      [[0212]], [[0209]], [[0173]]. Not checked for other `oracle_name` values.
+      Also: rows grew 3,186 -> 3,211 per asset within the session, confirming the
+      defect is live and matching the 172-174/day series.
 ---
 
 # Reflector timestamps are divided by 1000 whether or not they are milliseconds
@@ -151,6 +174,37 @@ USDT (asset_id 111) reads as unaffected in today's measurement **only because
 [[0196]]'s purge deleted its copy** — recorded in 0199, which saw USDT's 1970 row
 alive on 2026-08-13 before the purge took it. Do not conclude USDT is exempt.
 
+### 🔴 Measured 2026-08-26 — USDT has NO `reflector` rows at all, 1970 or otherwise
+
+The step-1 census returned **two rows, not three**. Asset 111 is absent from
+`prices.oracle_prices WHERE oracle_name = 'reflector'` entirely — not zero 1970
+rows, **zero rows**:
+
+| asset_id | rows_1970 | first_real | last_real | rows_total |
+|---|---|---|---|---|
+| 3 (USDC) | 3,211 | 2026-03-11 14:00 | 2026-08-26 16:45 | 51,341 |
+| 4 (XLM) | 3,211 | 2026-03-11 14:00 | 2026-08-26 16:45 | 51,341 |
+| **111 (USDT)** | — | — | — | **absent** |
+
+0086 saw asset 111 being written by `reflector` on 2026-07-06 (`price_usd
+0.99949868096361`). [[0196]] purged those rows. **Nothing has re-added any since**
+— so this is not the purge alone, it is the purge plus a writer that stopped.
+
+⚠️ **Consequence beyond this task: the oracle tier cannot price a USDT-quoted
+candle at all.** `o.asset_id = p.quote_asset_id` can never match for 111. That is
+a live coverage hole and it lands squarely on [[0212]] (1.56 M `_1m` rows still
+carrying the $1 peg), [[0209]] and [[0173]].
+
+⚠️ **Scope of the claim — do not overstate it.** This is measured for
+`oracle_name = 'reflector'` only. Whether asset 111 has rows under a *different*
+`oracle_name` was not checked and must be, before anyone concludes USDT has no
+oracle coverage. Filed as a follow-up rather than assumed either way.
+
+🔑 **The corruption is still accruing, and the rate is now pinned.** This task was
+filed this morning at **3,186** rows per asset; the census hours later reads
+**3,211** — **+25 per asset, +50 total, in a single session.** Consistent with the
+172-174 rows/day series. It is not a historical artifact.
+
 🔑 **A second independent confirmation of the ×1000 mapping, from 0086:** the two
 timestamps are one second apart (`:41`, `:42`), which is ~1000 s apart in real
 time — exactly two consecutive oracle-watcher runs at its real cadence. The
@@ -222,18 +276,66 @@ the next oracle run recreates it. Moot while cleanup is off, and live again the
 moment [[0200]] turns it back on — so this must be fixed before that decision
 lands, or the two will fight.
 
-⚠️ **Not yet established:** whether a 1970 row can ever WIN the enrichment
-`ASOF LEFT JOIN`. It is at-or-before every candle ever recorded, so it is a
-candidate for every row — the staleness window should reject it, but that has not
-been verified. If the window is applied loosely this stops being a data-loss bug
-and becomes a wrong-value bug. **Check this before anything else**; it changes the
-severity.
+## ✅ SETTLED 2026-08-26 — the 1970 rows win the ASOF *always*, and the guard rejects them *always*
 
-🔴 **0199 asserted this was safe; it did not measure it.** Its text reads *"a 1970
-row never matches a real candle and cannot poison a price… It is inert."* That is
-reasoning from the staleness bound, not a query against it. Treat the question as
-open — an inherited assumption is exactly the shape of thing this fold exists to
-catch.
+The open question above is closed by measurement. The answer is not the one
+either 0199 or this task assumed, and the shape matters.
+
+`price_ohlcv_1d`, USDC-quoted (`quote_asset_id = 3`), calendar 2025 — a slice
+lying entirely before the first real oracle observation, run with
+`join_use_nulls = 1` so a genuine 1970 row is distinguishable from a no-match:
+
+| metric | value |
+|---|---|
+| candles in slice | 471,087 |
+| `no_match` | **0** |
+| ASOF won by a **1970 row** | **471,087 — 100%** |
+| ASOF won by a real row | 0 |
+| **survives the 300 s staleness guard** | **0** |
+| smallest gap `p.timestamp - o.timestamp` | **1,733,901,838 s (~55 years)** |
+
+🔑 **Both halves of the question have counter-intuitive answers.** A 1970 row does
+not merely *sometimes* win the join — it wins **every single time** in the exposed
+population, because real `reflector` coverage does not begin until
+**2026-03-11 14:00** while candles run back to 2015. And the guard rejects every
+one of them, with a margin of 1.73 × 10⁹ against a 300 s bound — a factor of 5.8
+million. There is no plausible drift, clock skew or config change that closes that
+gap.
+
+**So the severity is settled: this is a data-loss bug, not a wrong-value bug.**
+No candle has ever been priced from a 1970 row. Re-enrichment stays out of scope.
+
+⚠️ **0199's conclusion was right; its reasoning was not sufficient to hold it.**
+It wrote *"a 1970 row never matches a real candle and cannot poison a price… It is
+inert."* The first clause is **false** — the row matches constantly, 100% of the
+time. Only the second clause survives, and it survives because of a guard 0199
+never checked. Recorded because "the conclusion was correct" is the most dangerous
+possible reason to stop measuring.
+
+🔑 **Why it is genuinely inert, stated precisely:** ASOF picks the newest
+`o.timestamp <= p.timestamp`, so a 1970 row can only win when *no* real reading
+precedes the candle. In exactly that case the alternative is no match at all —
+which `o.price_usd IS NOT NULL` would drop anyway. The 1970 rows therefore
+displace nothing. They cost scan work, not correctness.
+
+### 🔴 Hardening finding — `o.price_usd IS NOT NULL` is dead code in production
+
+Measured alongside: the prod server has **`join_use_nulls = 0`, `changed = 0`**,
+and `enrich_batch` (`ch_enrich.rs:805`) sets no `SETTINGS` clause. At that default
+an unmatched `LEFT JOIN` row yields the column **DEFAULT, not NULL** — so
+`o.price_usd` returns `0` and `o.timestamp` returns `1970-01-01`. `IS NOT NULL` is
+therefore **always true** and filters nothing.
+
+⚠️ **The entire correctness of the oracle tier rests on the single arithmetic
+guard** `(p.timestamp - o.timestamp) <= 300`. It holds today by an enormous
+margin, so nothing is broken — but the redundancy the code appears to have is not
+there. This is [[0170]]'s `join_use_nulls` trap in a second place, and it means a
+real 1970 row and a total no-match are indistinguishable to the production query.
+
+⚠️ It also means an unmatched row is only rejected because epoch 0 is far from
+`p.timestamp`. Sound for any candle this system can hold, but it is arithmetic
+doing a null-check's job, and it should be named as such rather than left to be
+rediscovered.
 
 ## Implementation
 
@@ -263,9 +365,13 @@ catch.
 
 ## Acceptance Criteria
 
-- [ ] Whether a 1970 row can win the enrichment ASOF join is **established by
+- [x] Whether a 1970 row can win the enrichment ASOF join is **established by
       measurement**, and the answer is recorded. This gates the severity.
-      ⚠️ 0199's "it is inert" is an assumption, not evidence — do not inherit it.
+      → **It wins 100% of the time and is rejected 100% of the time.** 471,087/471,087
+      candles in the 2025 USDC slice matched a 1970 row; 0 survived the 300 s guard,
+      smallest gap 1.73e9 s. **Severity settled: data-loss, not wrong-value.**
+      See "SETTLED 2026-08-26" above. 0199's "it is inert" was the right conclusion
+      from insufficient reasoning — its first clause is outright false.
 - [ ] Both conversion sites handle either unit, with a test per site covering a
       seconds input, a millis input, and the boundary between them.
 - [ ] The event-decode path's real payload shape is stated as evidence, not
