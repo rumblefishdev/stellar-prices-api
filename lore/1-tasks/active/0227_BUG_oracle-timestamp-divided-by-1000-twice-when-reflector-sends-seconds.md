@@ -292,9 +292,16 @@ the *best* month in the table at 0.4%. Daily resolution across 2026-06-20 → 07
 shows the same: 283-288 every single day, no step at 07-06, none at 07-20, and a
 run of clean 288s from 07-21 onward.
 
-**So the corrupt rows are ADDITIONAL junk, not LOST readings.** Every scheduled
-poll still produces a good row. The defect writes extra bad rows alongside the good
-ones; it does not damage them.
+**So there is no step, and no change in coverage at either candidate onset date.**
+
+🔴 **CORRECTION 2026-08-26 — an earlier revision of this section went further than
+the data supports.** It concluded *"the corrupt rows are ADDITIONAL junk, not LOST
+readings — every scheduled poll still produces a good row."* That rested on an
+assumed 288/day cadence which the write-volume measurement below **contradicts**.
+What the flat `usd_rate` series actually establishes is narrower and still
+valuable: **the corruption rate did not CHANGE at 2026-07-06 or 2026-07-20.**
+Whether readings are lost is reopened — see "the write volume does not fit the
+schedule" below.
 
 ⚠️ **Severity drops a second time.** With AC 1 already showing the rows are inert in
 the ASOF, and coverage now shown to be intact, what remains is: ~170 junk rows/day
@@ -406,6 +413,83 @@ real 1970 row and a total no-match are indistinguishable to the production query
 `p.timestamp`. Sound for any candle this system can hold, but it is arithmetic
 doing a null-check's job, and it should be named as such rather than left to be
 rediscovered.
+
+
+## ✅ The writer is identified, and the compression is confirmed — 2026-08-26
+
+Two hypotheses were open. Both are now settled, and the second settles the onset
+question with a mechanism rather than an inference.
+
+### Writer: the POLL path only
+
+`raw_data` discriminates the two sites — `oracle-worker/src/lib.rs:301` writes
+`{"symbol":…}`, `soroban.rs:698` (`decode_reflector`) writes `{"asset":…}`. Both
+tag `oracle_name = 'reflector'`, so both would appear. Measured over all 1970 rows:
+
+| writer | asset_id | rows | distinct ts | min stored | max stored |
+|---|---|---|---|---|---|
+| **POLL → `lib.rs:298`** | 3 | 3,212 | 3,210 | 1970-01-21 15:41:56 | 1970-01-21 16:36:03 |
+| **POLL → `lib.rs:298`** | 4 | 3,212 | 3,210 | 1970-01-21 15:41:56 | 1970-01-21 16:36:03 |
+| EVENT → `soroban.rs:667` | — | **0** | — | — | — |
+
+🔑 **Not one row from the event-decode path.** The fix belongs in `oracle-worker`.
+
+⚠️ **This does not exempt `soroban.rs:667`.** Dedup is on
+`(asset_id, oracle_name, timestamp)` and `raw_data` is not in the key, so a row
+that lost a merge leaves no trace. And the event path may simply not be decoding
+Reflector `update` events on prod at all — which is a different question, not
+evidence of correctness. The AC requiring its payload shape as evidence **stands**.
+
+### Compression confirmed — 98.83% dense against a 0.331% control
+
+| band | asset | rows | distinct ts | span (s) | density |
+|---|---|---|---|---|---|
+| **1970 (corrupt)** | 3, 4 | 3,212 | 3,210 | 3,248 | **98.83%** |
+| real (control) | 3, 4 | 48,134 | 48,134 | 14,526,301 | **0.331%** |
+
+The control is exactly `1/302` — one reading per ~302 s, the 5-minute cadence. The
+corrupt band is **299× denser**, saturating essentially every second of its span.
+
+Reconstructed ×1000, the corrupt span is **2026-07-20 → 2026-08-26** — 3,248
+stored seconds = 37.6 real days. So the stored row count measures **the width of
+the surviving window, not the number of corrupted readings**: the two are related
+by the 1000× compression, and the reading count cannot be recovered from it.
+
+🔑 **This is what finally settles the onset, and it settles it against the
+original claim.** `usd_rate` is flat at 284-287/day in *every* month from
+2026-03-11 onward, so the corruption rate did not change at 07-20. Yet the
+surviving corrupt window begins **exactly** at 07-20 — the day
+`prices-production-cleanup` was disabled. A rate that did not change, plus a
+window that starts precisely when deletion stopped, is the signature of an old
+defect whose evidence was being swept. **The "Reflector changed upstream around
+2026-07-20" hypothesis is dead**, and 0086's 07-06 sighting is simply a sample
+taken before the sweep stopped.
+
+### 🔴 OPEN — the write volume does not fit the schedule
+
+`infra/envs/production.json:17` sets `"oracleWatcher": "rate(5 minutes)"` — **288
+invocations/day**, one row per asset per invocation. Measured, per asset:
+
+| | rows/day |
+|---|---|
+| good (`usd_rate`, Aug) | 284.5 |
+| corrupt slots (3,210 / 37.6 d) | 85.4 |
+| **total** | **~370** |
+| **schedule permits** | **288** |
+
+**~29% more rows than the schedule allows.** The two figures cannot both come from
+one row per scheduled invocation, and this is unresolved.
+
+⚠️ It also means the corruption *rate* is still unknown. Saturation at 98.83% is
+reached by anything from ~86 to 288 corrupt polls/day — one per slot, or 3.3 per
+slot collapsed by the ReplacingMergeTree. The stored count cannot distinguish
+them, so **how many readings are actually lost is still an open question**, and the
+"~30%" in the title is not yet earned by measurement.
+
+Leading hypothesis: **Lambda async retries.** EventBridge invokes asynchronously
+and retries twice on failure; [[0214]] measured exactly this shape on the
+enrichment worker — *"3×/hour (one trigger plus two Lambda async retries)"*. A
+partially-failing oracle invocation would write extra rows on each retry.
 
 ## Implementation
 
