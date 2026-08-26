@@ -34,6 +34,20 @@ history:
       Side product to record: the distribution of per-venue deviations from
       the median — the tuning basis current.sql's OUTLIER_PCT comment defers
       to this task, and an input [[0217]] waits on.
+  - date: 2026-08-26
+    status: active
+    who: stkrolikiewicz
+    note: >
+      Assets selected from a prod measurement (~13:03 UTC), not from memory —
+      per-venue 24h profile of all 20 majors. Subjects: XLM (full pipeline,
+      mask armed), EURC (same shape, independent), BTC (2-source weighting
+      arithmetic), AQUA (guard cuts 3→2, mask must not arm). Controls:
+      USDCAllow (all-quiet keep arm, rank-1 volume), SCOP (src_price=0
+      population filter vs guard). ETH rejected: cross-source argMaxIf tie
+      on newest_priced makes price_usd non-deterministic — recorded as an
+      explainable-delta class instead. Enrichment tip lag ~45 min, carry
+      engaged nearly everywhere: the recompute must use priced-close
+      semantics or it will mismatch by construction.
 ---
 
 # VWAP reconciliation against raw OHLCV rows
@@ -98,6 +112,48 @@ rule is part of what is verified).
   covers serialization: `Decimal(38,14)` values are serialised as **strings**
   by design (§3.3) precisely to avoid float truncation — confirm no precision is
   lost between CH and JSON.
+
+## Asset selection — measured on prod 2026-08-26 ~13:03 UTC
+
+Per-venue profile over the trailing 24h (`price_ohlcv_1m FINAL`, read-only via
+the 0072 runbook's ssh path), all 20 of [[0120]]'s majors; identity→id
+resolution collision-checked per [[0139]] (20 identities → 20 distinct ids).
+
+**Subjects (multi-source, count toward the ≥3 AC):**
+
+| asset | id | venues in window | why this one |
+|---|---|---|---|
+| XLM | 4 | sdex+aquarius+soroswap live, phoenix stale | Exercises **every** stage: conditional guard drops phoenix (live=0 at 10:49), mask **arms** over the 3 survivors, carry engaged on all three. Canary asset (`price_xlm = 1`). |
+| EURC | 430 | sdex+soroswap+aquarius live, phoenix stale | Same full shape as XLM on an independent asset — mask armed at exactly 3 kept. |
+| BTC | 108 | sdex+aquarius, both live | 2-source: mask all-true, so the weighted mean is checkable in isolation; real 0.67% venue spread (78,375 vs 78,898) makes the weighting arithmetic non-trivial. |
+| AQUA | 5 | 3 raw venues; soroswap stale → guard cuts to 2 | Pins the guard→mask interaction: mask must **not** arm, because it counts the *kept* population (2), not the raw one (3). |
+
+**Controls (extra, not counted toward the AC):**
+
+- **USDCAllow (741)** — single venue, newest candle 08:55 (>4h stale) yet
+  published: the guard's *all-quiet → keep everything* arm. Also store rank-1
+  by volume ($36.6M), so the largest row in the table gets reconciled.
+- **SCOP (70)** — aquarius present in the window with `src_price = 0` (25
+  candles, none ever priced): excluded by the `WHERE src_price > 0` population
+  filter, **not** by the liveness guard. The excluded-set assertion must
+  attribute each exclusion to the right rule.
+
+**Excluded, with reasons:** USDC (structural, [[0178]] — no rows as base);
+AUD (zero `_1m` rows in the window — did not trade); RON (stale-only, $4
+volume, price 7e-8 — near the precision floor ADR 0011 §7a warns about);
+**ETH deliberately rejected** — both venues share `newest_priced = 12:16`, and
+`price_usd` resolved the `argMaxIf` tie to aquarius (2448.57) over sdex
+(2427.08); tie-break across sources is non-contractual, so any `price_usd`
+assertion on it would be flaky. Recorded instead as an explainable-delta class
+for the reconciliation.
+
+**Window-state facts to carry into the recompute:** enrichment tip lag ~45 min
+(newest candles 13:02, newest priced 12:16) — carry engaged on nearly every
+live venue, so the recompute must mirror `argMaxIf(close_usd, ts, >0)`
+semantics, a plain `argMax` will mismatch. Phoenix's exclusion on XLM/EURC is
+**guard**, not mask — its price sits 0.66% from the median, far inside the 20%
+band; today's live data therefore exercises guard-exclusions, and the
+mask-exclusion assertion is expected to hold on an **empty** set.
 
 ## Acceptance Criteria
 
