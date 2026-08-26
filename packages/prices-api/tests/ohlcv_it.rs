@@ -476,14 +476,24 @@ async fn seed_peg_rate(db: &str, admin: &Client) {
         .execute()
         .await
         .unwrap();
-    // A FOO/USDC candle well before any observation: its bucket must still be
-    // produced, and must fall back to the peg.
+    // The peg series takes its buckets from the XLM/USDC reference market
+    // (asset_id 1 quoted in asset_id 2), NOT from "any USDC-quoted candle":
+    // price_ohlcv_* is ORDER BY (asset_id, quote_asset_id, …), so filtering on
+    // the quote alone is not a key prefix and degenerates into a full FINAL
+    // scan. `close_usd = 0.25` is XLM's USD price, which the XLM denomination
+    // divides by.
+    //
+    //   2024-01-05 09:00  predates every observation → peg fallback
+    //   2026-02-10 10:00  covered by the 0.9993 observation
+    //   2026-02-10 11:00  covered by the 1.0007 observation
     admin
         .query(&format!(
             "INSERT INTO {db}.price_ohlcv_1h \
              (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
               volume_base, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             ('2024-01-05 09:00:00', 3, 2, 'sdex', 1.0, 1.0, 1.0, 1.0, 1, 1, 1.0, 1.0, 1, 1)"
+             ('2024-01-05 09:00:00', 1, 2, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1), \
+             ('2026-02-10 10:00:00', 1, 2, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1), \
+             ('2026-02-10 11:00:00', 1, 2, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1)"
         ))
         .execute()
         .await
@@ -752,17 +762,6 @@ async fn ohlcv_usdc_in_xlm_is_derived_from_two_usd_rates() {
     let client = setup(db).await;
     let admin = Client::default().with_url(ch_url()).with_database(db);
     seed_peg_rate(db, &admin).await;
-    // XLM/USDC at $0.25 in the bucket the rate covers.
-    admin
-        .query(&format!(
-            "INSERT INTO {db}.price_ohlcv_1h \
-             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
-              volume_base, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
-             ('2026-02-10 10:00:00', 1, 2, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 225, 0.25, 0.25, 9, 1)"
-        ))
-        .execute()
-        .await
-        .unwrap();
 
     let uri = format!(
         "/v1/assets/USDC:{}/ohlcv?granularity=1h&start=2026-02-10T10:00:00Z\
@@ -779,6 +778,54 @@ async fn ohlcv_usdc_in_xlm_is_derived_from_two_usd_rates() {
     // inversion of the candle would have produced.
     approx(&data[0]["close"], 3.9972);
     assert_eq!(data[0]["method"], "oracle");
+
+    teardown(db).await;
+}
+
+/// Finding from PR #253's review: on the synthesized path `method` and `derived`
+/// were computed independently of whether the price survived, so an XLM-mode
+/// bucket whose denominator was floored out returned `close: null` next to
+/// `method: "oracle"`, `derived: true`.
+///
+/// That inverts the contract the DTO states, and a client using `method != null`
+/// as "this bucket is priced" would dereference a null. The unpriced right-hand
+/// edge is exactly where it would have bitten.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn ohlcv_usdc_in_xlm_nulls_provenance_when_the_denominator_is_unpriced() {
+    let db = "it_ohlcv_xlm_den_null_0170";
+    let client = setup(db).await;
+    let admin = Client::default().with_url(ch_url()).with_database(db);
+    seed_peg_rate(db, &admin).await;
+    // An XLM/USDC bucket enrichment has not reached: close_usd = 0, so there is
+    // no denominator. The rate observation at 10:00 still precedes it, so a
+    // naive implementation would happily label this one.
+    admin
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1h \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
+             ('2026-02-10 12:00:00', 1, 2, 'sdex', 0.25, 0.26, 0.24, 0.25, 900, 0, 0, 0.25, 9, 1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    let uri = format!(
+        "/v1/assets/USDC:{}/ohlcv?granularity=1h&start=2026-02-10T12:00:00Z\
+         &end=2026-02-10T12:00:00Z&base_currency=XLM",
+        iss()
+    );
+    let (status, json) = get(client, &uri).await;
+    assert_eq!(status, StatusCode::OK, "body={json}");
+    let data = json["data"].as_array().unwrap();
+    assert_eq!(data.len(), 1, "the bucket still returns (§5)");
+    let c = &data[0];
+    assert!(c["close"].is_null(), "no denominator means no price: {c}");
+    assert!(
+        c["method"].is_null() && c["derived"].is_null(),
+        "provenance must vanish with the price it describes: {c}"
+    );
 
     teardown(db).await;
 }

@@ -744,6 +744,29 @@ Same pattern as [[0222]] AC 5 and [[0218]] AC 4: restate when a criterion turns
 out to demand something impossible, and say so — quietly ticking it would not be
 the same thing. Mirrored in [[0225]], which carries the same wording.
 
+## ⚠️ Semantic change from PR #253's second review — the peg series is anchored on XLM/USDC
+
+The synthesized USDC series originally took its buckets from **any** USDC-quoted
+candle. It now takes them from the **XLM/USDC market specifically**, in both
+denominations.
+
+🔑 **Why: it was a full-table scan.** `price_ohlcv_*` is
+`ORDER BY (asset_id, quote_asset_id, source, timestamp)`, so filtering on the
+quote leg alone is **not a key prefix** — no granule pruning applies and the
+query degenerated into a `FINAL` scan of every asset's candles in the covered
+partitions (~24.9 M rows in `price_ohlcv_1d` alone, far more at finer grains) on
+an endpoint with a p95 < 200 ms target ([[0121]]). `views.sql:370` already flags
+this exact shape. Adding `asset_id` restores the prefix.
+
+⚠️ **The coverage is narrower, and that is a real trade.** Buckets now exist only
+where XLM/USDC traded, not wherever *any* asset traded against USDC. XLM/USDC is
+the reference market and the most liquid pair, so the two should be close to
+identical in practice — but **that has not been measured**, and it is worth a
+check against prod before the deploy criteria are read as met. If XLM/USDC has
+gaps some other USDC pair covers, the series will have holes it did not have.
+
+Recorded as a judgement made under review pressure, not a verified equivalence.
+
 ## §6 peg-asset path — implemented 2026-08-26
 
 The **original narrow defect**, and the one the main denomination change did not

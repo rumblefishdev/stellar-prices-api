@@ -199,11 +199,20 @@ pub struct Candle {
     /// there is no USD rate to attribute. A null `method` therefore means "no
     /// USD provenance to report", not "this bucket has no price".
     pub method: Option<String>,
-    /// Whether `open`/`high`/`low`/`vwap` were **derived by scaling** rather than
-    /// measured (ADR 0011 §3). `close` is always exact — it is `close_usd` as
-    /// stored — but the extremes are reconstructed with one rate per bucket, so
-    /// the true USD high may have fallen at a different instant than the
-    /// quote-denominated high.
+    /// Whether `open`/`high`/`low`/`vwap` were **derived** rather than measured
+    /// (ADR 0011 §3).
+    ///
+    /// On the normal path `close` is exact — it is `close_usd` as stored — while
+    /// the extremes are reconstructed with one rate per bucket, so the true USD
+    /// high may have fallen at a different instant than the quote-denominated
+    /// high.
+    ///
+    /// ⚠️ **On the synthesized peg-asset path (§6) nothing is measured, `close`
+    /// included.** Canonical USDC has no candles of its own, so every field is
+    /// the `usd_rate` observation for the bucket — or the $1 fallback when none
+    /// precedes it, which [`Candle::method`] reports as `peg`. Do not read
+    /// `derived: true` as "only the extremes are reconstructed"; read it as "not
+    /// measured on this market".
     ///
     /// A separate axis from [`Candle::method`], deliberately: a bucket can be
     /// `traded` *and* derived, so one field cannot carry both (ADR 0011 §4,

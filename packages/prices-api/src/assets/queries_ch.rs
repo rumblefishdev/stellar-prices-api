@@ -672,17 +672,21 @@ pub async fn ohlcv_peg_series(
     ch: &Client,
     args: &OhlcvArgs,
     usdc_id: u32,
+    xlm_id: u32,
     usdc_issuer: &str,
-    // `Some(xlm_id)` denominates in XLM instead of USD — ADR 0011 §6's second
-    // degenerate case. See the "Denominating in XLM" note above.
-    xlm_id: Option<u32>,
+    // Denominate in XLM instead of USD — ADR 0011 §6's second degenerate case.
+    in_xlm: bool,
 ) -> Result<Vec<Candle>, clickhouse::error::Error> {
     let table = format!("price_ohlcv_{}", args.granularity.as_str());
 
-    let mut conds = vec!["quote_asset_id = ?".to_string()];
-    if xlm_id.is_some() {
-        conds.push("asset_id = ?".to_string());
-    }
+    // ⚠️ `asset_id` FIRST, always — including in USD mode, where the id is not
+    // otherwise needed. `price_ohlcv_*` is ORDER BY (asset_id, quote_asset_id,
+    // source, timestamp), so filtering on `quote_asset_id` alone is NOT a key
+    // prefix: no granule pruning applies and the query degenerates into a FINAL
+    // scan of every asset's candles in the covered partitions (~24.9 M rows in
+    // `price_ohlcv_1d` alone, far more at finer grains). `views.sql:370` flags
+    // exactly this shape. Anchoring on the XLM/USDC market restores the prefix.
+    let mut conds = vec!["asset_id = ?".to_string(), "quote_asset_id = ?".to_string()];
     if args.start.is_some() {
         conds.push("timestamp >= toDateTime(?)".to_string());
     }
@@ -699,60 +703,64 @@ pub async fn ohlcv_peg_series(
     // never fired, rendering USDC at $0.00 instead of falling back to the peg.
     // Caught by `ohlcv_usdc_before_any_observation_falls_back_to_a_labelled_peg`.
     //
-    // usd_rate's own vocabulary is oracle/peg/pivot/pivot2. Mapped onto 0165's
-    // traded/peg/oracle, per ADR 0011 §4's "no fourth word": a pivot is priced
-    // through a reference asset's own traded candles, so it is `traded`.
+    // ⚠️ The right side is collapsed to ONE row per timestamp before the join.
+    // `usd_rate` is ORDER BY (…, timestamp, method) with `method` in the key
+    // *deliberately*, so a measured `oracle` and a fallback `peg` can coexist at
+    // the same instant and "the consumer chooses" (`init.sql:280`). Joining the
+    // raw table would let ASOF break that tie by part read order, so the same
+    // request could return 0.9993/`oracle` or 1.0/`peg` on consecutive calls.
+    // The preference below is the choice, made explicitly: a measurement beats a
+    // pivot beats a fallback.
+    let val = if in_xlm {
+        "toNullable(toString(toDecimal128OrNull(toString( \
+             toFloat64(ifNull(r.rate, toDecimal128(1, 14))) \
+             / nullIf(toFloat64(b.den), 0)), 14)))"
+    } else {
+        "toNullable(toString(ifNull(r.rate, toDecimal128(1, 14))))"
+    };
     let sql = format!(
         "SELECT ts, o, h, l, c, vb, vqu, vw, tc, meth, drv FROM ( \
            SELECT \
              formatDateTime(b.bkt, '%Y-%m-%dT%H:%i:%SZ') AS ts, \
              {val} AS o, \
-             {val} AS h, \
-             {val} AS l, \
-             {val} AS c, \
+             o AS h, o AS l, o AS c, o AS vw, \
              '0' AS vb, \
              '0' AS vqu, \
-             {val} AS vw, \
              toUInt64(0) AS tc, \
-             toNullable(multiIf(r.meth IS NULL, 'peg', \
-                                r.meth = 'oracle', 'oracle', \
-                                r.meth = 'peg', 'peg', \
-                                'traded')) AS meth, \
-             toNullable(toUInt8(1)) AS drv, \
+             if(o IS NULL, NULL, \
+                toNullable(multiIf(r.meth IS NULL, 'peg', \
+                                   r.meth = 'oracle', 'oracle', \
+                                   r.meth = 'peg', 'peg', \
+                                   'traded'))) AS meth, \
+             if(o IS NULL, NULL, toNullable(toUInt8(1))) AS drv, \
              b.bkt AS bkt \
            FROM ( SELECT timestamp AS bkt, 1 AS k, {denom} AS den \
                   FROM {table} FINAL WHERE {conds} \
                   GROUP BY timestamp \
                   ORDER BY bkt DESC LIMIT {limit} ) AS b \
-           ASOF LEFT JOIN ( SELECT 1 AS k, timestamp AS rts, usd_rate AS rate, \
-                                   method AS meth \
-                            FROM usd_rate FINAL \
-                            WHERE asset_code = 'USDC' AND issuer_address = ? ) AS r \
+           ASOF LEFT JOIN ( \
+                  SELECT 1 AS k, rts, argMin(rate, pref) AS rate, argMin(m, pref) AS meth \
+                  FROM ( SELECT timestamp AS rts, usd_rate AS rate, method AS m, \
+                                multiIf(method = 'oracle', 0, method = 'pivot', 1, \
+                                        method = 'pivot2', 2, 3) AS pref \
+                         FROM usd_rate FINAL \
+                         WHERE asset_kind = 'credit' AND asset_code = 'USDC' \
+                           AND issuer_address = ? AND contract_address = '' ) \
+                  GROUP BY rts ) AS r \
              ON b.k = r.k AND r.rts <= b.bkt \
          ) ORDER BY bkt ASC \
          SETTINGS join_use_nulls = 1",
         conds = conds.join(" AND "),
         limit = args.limit,
-        denom = if xlm_id.is_some() {
+        denom = if in_xlm {
             // XLM's USD price for the bucket, from the highest-volume source.
             format!("argMaxIf(close_usd, volume_base, close_usd >= {PRECISION_FLOOR})")
         } else {
             "toDecimal128(1, 14)".to_string()
         },
-        val = if xlm_id.is_some() {
-            // rate / XLM-USD, NULL when the denominator was floored out.
-            "toNullable(toString(toDecimal128OrNull(toString( \
-                 toFloat64(ifNull(r.rate, toDecimal128(1, 14))) \
-                 / nullIf(toFloat64(b.den), 0)), 14)))"
-        } else {
-            "toNullable(toString(ifNull(r.rate, toDecimal128(1, 14))))"
-        }
     );
 
-    let mut q = ch.query(&sql).bind(usdc_id);
-    if let Some(x) = xlm_id {
-        q = q.bind(x);
-    }
+    let mut q = ch.query(&sql).bind(xlm_id).bind(usdc_id);
     if let Some(st) = args.start {
         q = q.bind(st);
     }
@@ -865,7 +873,7 @@ pub async fn ohlcv(ch: &Client, args: OhlcvArgs) -> Result<Vec<Candle>, clickhou
                 // cannot be priced contributes to volume and trade_count but
                 // never to a price or a method.
                 format!(
-                    "timestamp, volume_base, volume_quote_usd, trade_count, \
+                    "timestamp, volume_base, volume_quote_usd, trade_count, quote_asset_id, \
                      (close >= {floor} AND close_usd >= {floor} \
                        AND (quote_asset_id = {usdc} OR close_usd != close)) AS valid, \
                      toFloat64(close_usd) / nullIf(toFloat64(close), 0) AS rate, \
@@ -882,17 +890,17 @@ pub async fn ohlcv(ch: &Client, args: OhlcvArgs) -> Result<Vec<Candle>, clickhou
                 // `countIf(valid) = 0` is what produces §5's price-less bucket:
                 // NULL across every price field, while the volume columns below
                 // still aggregate over all rows.
-                "if(countIf(valid) = 0, NULL, toString(argMaxIf(o_x, volume_base, valid))) AS o, \
+                "if(countIf(valid) = 0, NULL, toString(argMaxIf(o_x, (volume_base, quote_asset_id), valid))) AS o, \
                  if(countIf(valid) = 0, NULL, toString(maxIf(h_x, valid))) AS h, \
                  if(countIf(valid) = 0, NULL, toString(minIf(l_x, valid))) AS l, \
-                 if(countIf(valid) = 0, NULL, toString(argMaxIf(c_x, volume_base, valid))) AS c, \
+                 if(countIf(valid) = 0, NULL, toString(argMaxIf(c_x, (volume_base, quote_asset_id), valid))) AS c, \
                  toString(sum(volume_base)) AS vb, \
                  toString(sum(volume_quote_usd)) AS vqu, \
-                 if(countIf(valid) = 0, NULL, toString(toDecimal128OrNull(toString(ifNull( \
+                 if(countIf(valid) = 0, NULL, toString(toDecimal128OrNull(toString( \
                      sumIf(toFloat64(w_x) * toFloat64(volume_base), valid) \
-                     / nullIf(sumIf(toFloat64(volume_base), valid), 0), 0)), 14))) AS vw, \
+                     / nullIf(sumIf(toFloat64(volume_base), valid), 0)), 14))) AS vw, \
                  toUInt64(sum(trade_count)) AS tc, \
-                 nullIf(if(countIf(valid) = 0, NULL, argMaxIf(meth, volume_base, valid)), '') AS meth, \
+                 nullIf(if(countIf(valid) = 0, NULL, argMaxIf(meth, (volume_base, quote_asset_id), valid)), '') AS meth, \
                  if(countIf(valid) = 0, NULL, toUInt8(1)) AS drv"
                     .to_string(),
             )
