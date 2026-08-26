@@ -1,0 +1,81 @@
+pinned T = 2026-08-26 13:22:00  window = [2026-08-25 13:22:00, 2026-08-26 13:22:00]  live cutoff = 2026-08-26 11:22:00
+
+== AQUA (asset_id 5) — 18300 raw rows, 3 sources, has_live=True, mask_armed=False
+   OK       price_usd              pub 0.00035127847944 vs computed [Decimal('0.00035057538854'), Decimal('0.00035089778559'), Decimal('0.00035127847944'), Decimal('0.00035151840049')]  [TIE x4 @ 2026-08-26 13:16:00]
+   OK       volume_24h_usd         pub 71438.62053707298822 vs computed 71438.62053707298822 (delta 0E-14)
+   OK       vwap_24h               pub 0.00035119995368 vs computed 0.00035119995368 (rel 1.36e-11, best of 4 tie combos)
+   OK       sources keys           pub ['aquarius', 'sdex'] vs computed ['aquarius', 'sdex']
+   OK       sources[aquarius].price pub 0.00035127847944 vs [Decimal('0.00035089778559'), Decimal('0.00035127847944')]
+   OK       sources[aquarius].volume pub 63459.64215225639773 vs 63459.64215225639773
+   OK       sources[sdex].price    pub 0.00035057538854 vs [Decimal('0.00035057538854'), Decimal('0.00035151840049')]
+   OK       sources[sdex].volume   pub 7978.69744749218513 vs 7978.69744749218513
+   OK       price_xlm              pub 0.00192945624066 vs 0.00192945624067 (rel 5.14e-12)
+   excluded: population-filter=[] guard=['soroswap'] mask=[]
+
+== BTC (asset_id 108) — 1628 raw rows, 2 sources, has_live=True, mask_armed=False
+   OK       price_usd              pub 78097.87556329243775 vs computed [Decimal('78097.87556329243775'), Decimal('78283.06090621750574')]  [TIE x2 @ 2026-08-26 13:12:00]
+   OK       volume_24h_usd         pub 8482.44259305626666 vs computed 8482.44259305626666 (delta 0E-14)
+   OK       vwap_24h               pub 78154.3110270170624 vs computed 78154.31102701707277 (rel 1.86e-16, best of 2 tie combos)
+   OK       sources keys           pub ['aquarius', 'sdex'] vs computed ['aquarius', 'sdex']
+   OK       sources[aquarius].price pub 78314.74003244600333 vs [Decimal('78314.74003244600333')]
+   OK       sources[aquarius].volume pub 2207.41822358054921 vs 2207.41822358054921
+   OK       sources[sdex].price    pub 78097.87556329243775 vs [Decimal('78097.87556329243775'), Decimal('78283.06090621750574')]
+   OK       sources[sdex].volume   pub 6275.02436947571745 vs 6275.02436947571745
+   OK       price_xlm              pub 428965.74145070891008 vs 428965.74145070899976 (rel 2.71e-16)
+   excluded: population-filter=[] guard=[] mask=[]
+
+== EURC (asset_id 430) — 3719 raw rows, 4 sources, has_live=True, mask_armed=True
+   OK       price_usd              pub 1.15672101865701 vs computed [Decimal('1.15566271394257'), Decimal('1.15672101865701'), Decimal('1.15770289922041')]  [TIE x3 @ 2026-08-26 13:16:00]
+   OK       volume_24h_usd         pub 76538.2277600093768 vs computed 76538.22776000937680 (delta 0E-14)
+   OK       vwap_24h               pub 1.15658468361579 vs computed 1.15658468361580 (rel 8.06e-15, best of 2 tie combos)
+   OK       sources keys           pub ['aquarius', 'phoenix', 'sdex', 'soroswap'] vs computed ['aquarius', 'phoenix', 'sdex', 'soroswap']
+   OK       sources[aquarius].price pub 1.15716847400955 vs [Decimal('1.15716847400955')]
+   OK       sources[aquarius].volume pub 5286.6801220212321 vs 5286.68012202123210
+   OK       sources[phoenix].price pub 1.1664778401995 vs [Decimal('1.1664778401995')]
+   OK       sources[phoenix].volume pub 86.06313661594242 vs 86.06313661594242
+   OK       sources[sdex].price    pub 1.15672101865701 vs [Decimal('1.15672101865701'), Decimal('1.15770289922041')]
+   OK       sources[sdex].volume   pub 58276.8540031315589 vs 58276.85400313155890
+   OK       sources[soroswap].price pub 1.15566271394257 vs [Decimal('1.15566271394257')]
+   OK       sources[soroswap].volume pub 12888.63049824064338 vs 12888.63049824064338
+   OK       price_xlm              pub 6.35348510879397 vs 6.35348510879398 (rel 1.26e-15)
+   excluded: population-filter=[] guard=[] mask=[]
+   mask: median=1.1569447463 deviations={'soroswap': '0.1108%', 'phoenix': '0.8240%', 'aquarius': '0.0193%', 'sdex': '0.0193%'}
+
+== SCOP (asset_id 70) — 2620 raw rows, 2 sources, has_live=True, mask_armed=False
+   OK       price_usd              pub 0.00281588720502 vs computed [Decimal('0.00281588720502')]
+   OK       volume_24h_usd         pub 2715.85907037454523 vs computed 2715.85907037454523 (delta 0E-14)
+   OK       vwap_24h               pub 0.00281588720502 vs computed 0.00281588720502 (rel 0.00e+00)
+   OK       sources keys           pub ['sdex'] vs computed ['sdex']
+   OK       sources[sdex].price    pub 0.00281588720502 vs [Decimal('0.00281588720502')]
+   OK       sources[sdex].volume   pub 2715.85907037454523 vs 2715.85907037454523
+   OK       price_xlm              pub 0.01546673496597 vs 0.01546673496597 (rel 1.82e-13)
+   excluded: population-filter=['aquarius'] guard=[] mask=[]
+
+== USDCAllow (asset_id 741) — 33 raw rows, 1 sources, has_live=True, mask_armed=False
+   OK       price_usd              pub 1.00009950622654 vs computed [Decimal('1.00009950622654')]
+   OK       volume_24h_usd         pub 38873603.66102414257026 vs computed 38873603.66102414257026 (delta 0E-14)
+   OK       vwap_24h               pub 1.00009950622654 vs computed 1.00009950622654 (rel 0.00e+00)
+   OK       sources keys           pub ['sdex'] vs computed ['sdex']
+   OK       sources[sdex].price    pub 1.00009950622654 vs [Decimal('1.00009950622654')]
+   OK       sources[sdex].volume   pub 38873603.66102414257026 vs 38873603.66102414257026
+   OK       price_xlm              pub 5.49321506018786 vs 5.49321506018786 (rel 4.85e-16)
+   excluded: population-filter=[] guard=[] mask=[]
+
+== XLM (asset_id 4) — 2808 raw rows, 4 sources, has_live=True, mask_armed=True
+   OK       price_usd              pub 0.18206086877515 vs computed [Decimal('0.18206086877515'), Decimal('0.18221631063732'), Decimal('0.18222539201149'), Decimal('0.18266844083669')]  [TIE x4 @ 2026-08-26 13:16:00]
+   OK       volume_24h_usd         pub 481665.5960193499853 vs computed 481665.59601934998530 (delta 0E-14)
+   OK       vwap_24h               pub 0.18211278769599 vs computed 0.18211278769600 (rel 5.09e-14)
+   OK       sources keys           pub ['aquarius', 'phoenix', 'sdex', 'soroswap'] vs computed ['aquarius', 'phoenix', 'sdex', 'soroswap']
+   OK       sources[aquarius].price pub 0.18206086877515 vs [Decimal('0.18206086877515')]
+   OK       sources[aquarius].volume pub 321578.82559984588863 vs 321578.82559984588863
+   OK       sources[phoenix].price pub 0.18266844083669 vs [Decimal('0.18266844083669')]
+   OK       sources[phoenix].volume pub 155.66477841510456 vs 155.66477841510456
+   OK       sources[sdex].price    pub 0.18221631063732 vs [Decimal('0.18221631063732')]
+   OK       sources[sdex].volume   pub 154095.91985456751468 vs 154095.91985456751468
+   OK       sources[soroswap].price pub 0.18222539201149 vs [Decimal('0.18222539201149')]
+   OK       sources[soroswap].volume pub 5835.18578652147743 vs 5835.18578652147743
+   OK       price_xlm              pub 1 (must be exactly 1)
+   excluded: population-filter=[] guard=[] mask=[]
+   mask: median=0.1822208513 deviations={'soroswap': '0.0025%', 'phoenix': '0.2456%', 'aquarius': '0.0878%', 'sdex': '0.0025%'}
+
+RESULT: ALL RECONCILED

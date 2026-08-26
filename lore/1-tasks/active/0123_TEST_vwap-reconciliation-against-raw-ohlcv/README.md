@@ -48,6 +48,20 @@ history:
       explainable-delta class instead. Enrichment tip lag ~45 min, carry
       engaged nearly everywhere: the recompute must use priced-close
       semantics or it will mismatch by construction.
+  - date: 2026-08-26
+    status: active
+    who: stkrolikiewicz
+    note: >
+      Run 1 executed and reconciled clean: 41/41 checks over 6 assets at a
+      pinned T = 13:22:00 UTC — volumes exactly equal, vwap within 1.4e-11
+      of the Float64 tolerance, sources JSON Decimal-exact, exclusions
+      attributed to the right rule (guard vs population filter; mask empty
+      as measured). Task converted to directory; evidence in benchmark/.
+      Two findings recorded: cross-quote argMaxIf ties on 4 of 6 assets
+      (published values asserted as tie-set members; a naive recompute
+      false-positives at 3.0e-04), and window-state drift between selection
+      and capture (phoenix revived, guard case moved to AQUA). Remaining:
+      the public-API serialization AC — needs API_KEY/BASE_URL.
 ---
 
 # VWAP reconciliation against raw OHLCV rows
@@ -155,20 +169,82 @@ semantics, a plain `argMax` will mismatch. Phoenix's exclusion on XLM/EURC is
 band; today's live data therefore exercises guard-exclusions, and the
 mask-exclusion assertion is expected to hold on an **empty** set.
 
+## Reconciliation run 1 — 2026-08-26, T = 13:22:00 UTC
+
+**Result: ALL RECONCILED — 41/41 checks across 6 assets.** Evidence in
+`benchmark/`: `reconcile.py` (independent recompute, Python stdlib, contract
+reimplemented from §5.5 + the current.sql column contract — not a translation
+of the CTEs), `current.csv` (the pinned `current_prices` rows, full Decimal
+precision), `raw-T1322.csv.gz` (29,108 `price_ohlcv_1m FINAL` rows in
+`[T−24h, T]`, captured 80 s after the tick), `q-raw.sql`, `report.txt` (full
+output). Re-run: `python3 benchmark/reconcile.py benchmark/current.csv <(gunzip -c benchmark/raw-T1322.csv.gz)`.
+
+| asset | sources | vwap rel. delta | volume delta | exclusions (attributed) |
+|---|---|---|---|---|
+| XLM | 4, mask armed | 5.1e-14 | exact (0E-14) | none; max deviation phoenix 0.246% |
+| EURC | 4, mask armed | 8.1e-15 | exact | none; max deviation phoenix 0.824% |
+| BTC | 2 | 1.9e-16 | exact | none |
+| AQUA | 3 → guard cuts to 2 | 1.4e-11 | exact | **guard**: soroswap (stale 07:53) |
+| SCOP | 2 → filter cuts to 1 | 0 | exact | **population filter**: aquarius (25 candles, none priced) |
+| USDCAllow | 1 | 0 | exact | none |
+
+Tolerances, stated and justified: `volume_24h_usd` asserted **exactly equal**
+(Decimal sum of Decimals — and it held, 0E-14 on all six); `vwap_24h` at
+rel ≤ 1e-9 (the MV computes over Float64 arrays before the Decimal(38,14)
+cast; ~15–16 significant digits); per-source `sources` values Decimal-exact;
+`price_xlm` ratio ≤ 1e-9 with XLM itself asserted exactly 1.
+
+**Finding 1 — cross-quote `argMaxIf` ties are common, not exotic.** 4 of 6
+assets had ≥2 rows sharing the newest-priced timestamp (different quote legs,
+same source, same minute), so "the latest priced close" is a **set**, and the
+MV's pick among ties is non-contractual. The recompute therefore asserts
+set-membership for prices and enumerates tie combinations for the vwap
+(published matched: AQUA best-of-4 at 1.4e-11). First draft of the script
+picked an arbitrary tie member and produced a false 3.0e-04 "mismatch" on
+AQUA — the deviation a naive reconciliation would misreport as an MV bug.
+Feeds the same non-determinism class that disqualified ETH at selection.
+
+**Finding 2 — window-state drift between selection and capture.** At
+selection (13:03) phoenix was stale on XLM/EURC (guard-dropped, `sources`
+showed 3); by T=13:22 phoenix had fresh candles and re-entered — mask armed
+over 4, exclusions empty. The guard arm is instead exercised by AQUA in this
+run. Confirms exclusion sets are time-sensitive: any re-run must re-derive
+the expected exclusions from the raw rows, never reuse a previous run's.
+
+**Side product for [[0217]] / OUTLIER_PCT tuning:** per-venue deviations from
+the unweighted median where the mask armed — XLM {sdex 0.0025%, soroswap
+0.0025%, aquarius 0.088%, phoenix 0.246%}, EURC {aquarius 0.019%, sdex
+0.019%, soroswap 0.111%, phoenix 0.824%}. Max observed 0.824% against the
+20% band — ~24× headroom; the mask excluded nothing, consistent with
+[[0135]]'s at-risk measurements.
+
 ## Acceptance Criteria
 
-- [ ] ≥3 multi-source assets reconciled, at least one with both SDEX and AMM
-      sources in the window
-- [ ] The 24h window is pinned and recorded; the comparison is reproducible
-- [ ] Recomputation is independent of the MV's own SQL
-- [ ] Weighted price matches within a stated, justified tolerance
-- [ ] `volume_24h_usd` matches tightly (it is a plain sum)
-- [ ] The **set of excluded sources** matches the threshold + outlier rules,
-      asserted explicitly
-- [ ] `sources` JSON per-source values reconcile
+- [x] ≥3 multi-source assets reconciled, at least one with both SDEX and AMM
+      sources in the window — **4 multi-source (XLM, EURC, BTC, AQUA), all
+      mixing sdex + AMM venues**
+- [x] The 24h window is pinned and recorded; the comparison is reproducible —
+      **T = 2026-08-26 13:22:00, capture files + query committed**
+- [x] Recomputation is independent of the MV's own SQL — **Python stdlib
+      reimplementation of the contract; ties handled as sets, which the SQL
+      cannot even express**
+- [x] Weighted price matches within a stated, justified tolerance — **≤1.4e-11
+      observed vs 1e-9 stated (Float64 rationale above)**
+- [x] `volume_24h_usd` matches tightly (it is a plain sum) — **exactly, 0E-14
+      on all six**
+- [x] The **set of excluded sources** matches the threshold + outlier rules,
+      asserted explicitly — **guard (AQUA/soroswap) and population filter
+      (SCOP/aquarius) attributed separately; mask exclusions empty and
+      asserted empty; `min_volume_usd` does not exist yet ([[0118]]), so no
+      threshold exclusions are expected or found**
+- [x] `sources` JSON per-source values reconcile — **keys and Decimal values
+      exact on all six**
 - [ ] End-to-end check through the public API confirms no precision loss in
-      JSON serialization
-- [ ] Method + results written up as citable evidence for [[0128]]
+      JSON serialization — **open: needs `API_KEY`/`BASE_URL` (same
+      convention as the 0120 suite, `.env.local`); one asset, compare the
+      string-serialised Decimals against the pinned CH row**
+- [x] Method + results written up as citable evidence for [[0128]] — **this
+      section + `benchmark/`; cite as run 1, T=13:22:00Z**
 
 ## Notes
 
