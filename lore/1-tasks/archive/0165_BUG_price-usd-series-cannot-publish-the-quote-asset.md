@@ -2,7 +2,7 @@
 id: "0165"
 title: "price_usd_series can never publish USDC — the view only emits base assets, so the canonical quote asset is structurally unpriceable"
 type: BUG
-status: active
+status: completed
 related_adr: []
 related_tasks: ["0144", "0154", "0147", "0150", "0151", "0061", "0139", "0136", "0167", "0168"]
 tags:
@@ -171,6 +171,15 @@ history:
       (/assets/{USDC}/ohlcv still returns an empty 200 - different code path,
       a USDC/USDC self-pair) and 0178. Three surfaces carried the USDC hole; this
       task closed one of them.
+  - date: 2026-08-26
+    status: completed
+    who: stkrolikiewicz
+    note: >
+      Frontmatter drift fix only, no content change. The file has sat in
+      archive/ since the 2026-08-11 completion entry above, but the
+      frontmatter still read `status: active` — so every status-keyed query
+      ("what is left for M2?") counted a completed task as open. Corrected
+      to `completed`; found while surveying M2 state.
 ---
 
 # `price_usd_series` can never publish USDC
