@@ -272,8 +272,14 @@ pub struct OhlcvParams {
 
 /// `GET /assets/{asset_identifier}/ohlcv` — candlestick history.
 ///
-/// O/H/L/C are denominated in `base_currency` (USD→USDC quote, XLM→native quote)
-/// and returned as stored — no conversion. Candles merge across sources per
+/// `base_currency` **denominates** the series; it does not select a quote leg
+/// (ADR 0011). `USD` expresses every candle in USD whatever it traded against,
+/// so an asset with no USDC market still returns its history — `close` is exact
+/// and O/H/L/`vwap` are derived by scaling, flagged per candle. `XLM` still
+/// filters to the native quote and returns candles as stored.
+///
+/// Price fields are **absent, not dropped**, on a bucket with no USD value.
+/// Candles merge across sources — and, in USD mode, across quote legs — per
 /// bucket. `backfill_note` appears only for `timeframe=all` while the backfill
 /// is still running.
 #[utoipa::path(
@@ -305,8 +311,9 @@ pub struct OhlcvParams {
         (status = 404, description = "Unknown asset", body = ErrorEnvelope),
         (status = 429, description = "Per-key rate limit or monthly quota exceeded (API Gateway usage plan)"),
         (status = 500, description = "Query or upstream failure (`db_error`)", body = ErrorEnvelope),
-        (status = 503, description = "The requested `base_currency` quote asset is not \
-                                      tracked (`quote_unavailable`)", body = ErrorEnvelope),
+        (status = 503, description = "A reference asset the denomination needs is not \
+                                      tracked — canonical USDC for `USD`, native for \
+                                      `XLM` (`quote_unavailable`)", body = ErrorEnvelope),
     )
 )]
 pub async fn get_ohlcv(
@@ -425,20 +432,45 @@ pub async fn get_ohlcv(
     // with no history).
     let denomination = match base_currency {
         BaseCurrency::Usd => {
+            // Three fixed identities, resolved CONCURRENTLY: they do not depend
+            // on each other, and this is a latency-sensitive read path with a
+            // p95 SLO (task 0121). Serially it was three extra round trips on
+            // top of the asset lookup.
+            let (usdc_id, xlm_id, usdt_id) = (
+                usdc_identifier(),
+                AssetIdentifier::Native,
+                usdt_identifier(),
+            );
+            let (usdc, xlm, usdt) = tokio::join!(
+                queries_ch::resolve_asset_id(state.ch(), &usdc_id),
+                queries_ch::resolve_asset_id(state.ch(), &xlm_id),
+                queries_ch::resolve_asset_id(state.ch(), &usdt_id),
+            );
+
             // USDC must resolve: see UsdRefs::usdc.
-            let usdc = match resolve_reference(state.ch(), usdc_identifier(), base_currency).await {
-                Ok(id) => id,
-                Err(resp) => return resp,
+            let usdc = match usdc {
+                Ok(Some(id)) => id,
+                Ok(None) => {
+                    tracing::error!(
+                        base_currency = base_currency.as_str(),
+                        "ohlcv reference asset not tracked"
+                    );
+                    return errors::service_unavailable(
+                        errors::QUOTE_UNAVAILABLE,
+                        "pricing in the requested base_currency is unavailable",
+                    );
+                }
+                Err(e) => return errors::db_error(&e, "quote lookup"),
             };
+
             // The pivots are best-effort. A lookup ERROR still fails the request
             // — that is the database misbehaving, not an absent asset — but a
             // clean "not tracked" only costs the `traded` label.
             let mut pivots = Vec::new();
-            for ident in [AssetIdentifier::Native, usdt_identifier()] {
-                match queries_ch::resolve_asset_id(state.ch(), &ident).await {
+            for found in [xlm, usdt] {
+                match found {
                     Ok(Some(id)) => pivots.push(id),
                     Ok(None) => tracing::debug!(
-                        asset = %ident.to_canonical(),
                         "ohlcv pivot reference not tracked; rows on this leg go unlabelled"
                     ),
                     Err(e) => return errors::db_error(&e, "quote lookup"),
@@ -497,7 +529,6 @@ pub async fn get_ohlcv(
     ohlcv_response(&id, granularity, base_currency, note, data)
 }
 
-/// Build the OHLCV 200 response with a MEDIUM cache header.
 /// Canonical USDC's natural identity — the same `(code, issuer)` pair the
 /// enrichment peg tier and `views.sql` key on, so the three cannot drift.
 fn usdc_identifier() -> AssetIdentifier {
@@ -547,6 +578,7 @@ async fn resolve_reference(
     }
 }
 
+/// Build the OHLCV 200 response with a MEDIUM cache header.
 fn ohlcv_response(
     id: &AssetIdentifier,
     granularity: Granularity,

@@ -430,3 +430,29 @@ async fn ohlcv_converts_each_leg_before_merging_across_them() {
 
     teardown(db).await;
 }
+
+/// Regression test for the RowBinary shape of `base_currency=XLM`.
+///
+/// The existing XLM test asserts an EMPTY series, so no row is ever decoded and
+/// a column-type mismatch in that branch is invisible to it. `BAR` is quoted in
+/// XLM, so this one actually decodes rows.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn ohlcv_xlm_denomination_decodes_rows() {
+    let db = "it_ohlcv_xlm_rows_0170";
+    let client = setup(db).await;
+    seed_xlm_only(db, &Client::default().with_url(ch_url()).with_database(db)).await;
+
+    let uri = format!(
+        "/v1/assets/BAR:{}/ohlcv?granularity=1h&start=2026-02-10T10:00:00Z\
+         &end=2026-02-10T10:00:00Z&base_currency=XLM",
+        iss()
+    );
+    let (status, json) = get(client, &uri).await;
+    assert_eq!(status, StatusCode::OK, "body={json}");
+    let data = json["data"].as_array().unwrap();
+    assert_eq!(data.len(), 1, "XLM-quoted candle must decode: {json}");
+    approx(&data[0]["close"], 10.0);
+
+    teardown(db).await;
+}

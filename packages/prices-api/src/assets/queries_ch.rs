@@ -691,11 +691,11 @@ pub async fn ohlcv(ch: &Client, args: OhlcvArgs) -> Result<Vec<Candle>, clickhou
                      (close > 0 AND close_usd > 0 \
                        AND (quote_asset_id = {usdc} OR close_usd != close)) AS valid, \
                      toFloat64(close_usd) / nullIf(toFloat64(close), 0) AS rate, \
-                     toDecimal128(toFloat64(open) * rate, 14) AS o_x, \
-                     toDecimal128(toFloat64(high) * rate, 14) AS h_x, \
-                     toDecimal128(toFloat64(low)  * rate, 14) AS l_x, \
+                     toDecimal128OrNull(toString(toFloat64(open) * rate), 14) AS o_x, \
+                     toDecimal128OrNull(toString(toFloat64(high) * rate), 14) AS h_x, \
+                     toDecimal128OrNull(toString(toFloat64(low)  * rate), 14) AS l_x, \
                      close_usd AS c_x, \
-                     toDecimal128(toFloat64(vwap) * rate, 14) AS w_x, \
+                     toDecimal128OrNull(toString(toFloat64(vwap) * rate), 14) AS w_x, \
                      multiIf(quote_asset_id = {usdc} AND close_usd = close, 'peg', \
                              quote_asset_id = {usdc}, 'oracle', \
                              {traded_arm}\
@@ -710,11 +710,11 @@ pub async fn ohlcv(ch: &Client, args: OhlcvArgs) -> Result<Vec<Candle>, clickhou
                  if(countIf(valid) = 0, NULL, toString(argMaxIf(c_x, volume_base, valid))) AS c, \
                  toString(sum(volume_base)) AS vb, \
                  toString(sum(volume_quote_usd)) AS vqu, \
-                 if(countIf(valid) = 0, NULL, toString(toDecimal128(ifNull( \
+                 if(countIf(valid) = 0, NULL, toString(toDecimal128OrNull(toString(ifNull( \
                      sumIf(toFloat64(w_x) * toFloat64(volume_base), valid) \
-                     / nullIf(sumIf(toFloat64(volume_base), valid), 0), 0), 14))) AS vw, \
+                     / nullIf(sumIf(toFloat64(volume_base), valid), 0), 0)), 14))) AS vw, \
                  toUInt64(sum(trade_count)) AS tc, \
-                 if(countIf(valid) = 0, NULL, argMaxIf(meth, volume_base, valid)) AS meth, \
+                 nullIf(if(countIf(valid) = 0, NULL, argMaxIf(meth, volume_base, valid)), '') AS meth, \
                  if(countIf(valid) = 0, NULL, toUInt8(1)) AS drv"
                     .to_string(),
             )
@@ -725,14 +725,24 @@ pub async fn ohlcv(ch: &Client, args: OhlcvArgs) -> Result<Vec<Candle>, clickhou
         Denomination::QuoteLeg(_) => (
             "timestamp, open, high, low, close, volume_base, volume_quote_usd, vwap, trade_count"
                 .to_string(),
-            "toString(argMax(open, volume_base)) AS o, \
-             toString(max(high)) AS h, \
-             toString(min(low)) AS l, \
-             toString(argMax(close, volume_base)) AS c, \
+            // ⚠️ The price columns MUST be Nullable to match `Candle`'s
+            // `Option<String>` fields. RowBinary is positional and carries no
+            // types (the client does not use WithNamesAndTypes), so the
+            // deserializer reads one byte as the Option tag: handed a plain
+            // String it reads the LEB128 length instead and either errors
+            // (`InvalidTagEncoding`) or, for lengths 0/1, silently mis-frames
+            // the rest of the row. Pinned by
+            // `ohlcv_xlm_denomination_decodes_rows` — the pre-existing XLM test
+            // asserts an EMPTY series, so no row is ever decoded and it cannot
+            // catch this.
+            "toNullable(toString(argMax(open, volume_base))) AS o, \
+             toNullable(toString(max(high))) AS h, \
+             toNullable(toString(min(low))) AS l, \
+             toNullable(toString(argMax(close, volume_base))) AS c, \
              toString(sum(volume_base)) AS vb, \
              toString(sum(volume_quote_usd)) AS vqu, \
-             toString(toDecimal128(ifNull(sum(toFloat64(vwap) * toFloat64(volume_base)) \
-                 / nullIf(sum(toFloat64(volume_base)), 0), 0), 14)) AS vw, \
+             toNullable(toString(toDecimal128(ifNull(sum(toFloat64(vwap) * toFloat64(volume_base)) \
+                 / nullIf(sum(toFloat64(volume_base)), 0), 0), 14))) AS vw, \
              toUInt64(sum(trade_count)) AS tc, \
              CAST(NULL AS Nullable(String)) AS meth, \
              CAST(NULL AS Nullable(UInt8)) AS drv"
