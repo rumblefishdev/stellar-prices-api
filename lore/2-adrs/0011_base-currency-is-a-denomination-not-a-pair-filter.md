@@ -48,6 +48,21 @@ history:
       but it is still a response-shape decision that [[0120]]'s suite asserts
       against, and [[0178]] inherits it. No other part of the ADR changes; the
       denomination contract accepted on 2026-08-25 stands as written.
+  - date: 2026-08-26
+    status: accepted
+    who: okarcz
+    note: >
+      §2b added during [[0170]]'s implementation: the per-row conversion must
+      precede the cross-leg merge. §1 implies it and nothing stated it, and the
+      reversed order fails silently — `max(high)` across mixed denominations
+      yields a plausible number in the wrong unit. Pinned by an integration test
+      whose two possible answers differ (3.0 vs 12.0), so it discriminates.
+      Also recorded from the implementation: §4's `method` is **derived at read
+      time** from the quote leg and rate signature, because the candle tables
+      carry `close_usd` with no companion provenance column — there is nothing to
+      propagate. The pivot maps to 0165's `traded` rather than coining a fourth
+      word, which leaves an XLM-quoted candle labelled `traded` resting on the
+      USDC peg one hop back — [[0228]], not this ADR.
 ---
 
 # ADR 0011: `base_currency` is a denomination, not a pair filter
@@ -156,6 +171,27 @@ blindly:
 | `volume_quote_usd` | **already USD**, whatever the quote leg |
 | `vwap` | × rate |
 | `trade_count` | unchanged |
+
+### 2b. The conversion happens BEFORE the cross-leg merge
+
+Added 2026-08-26 during implementation. §1 implies it; nothing stated it, and
+reversing it fails **silently**.
+
+Once `base_currency` stops filtering the quote leg, one bucket can hold candles
+from several legs at once — AUD against XLM and against USDC on the same day. The
+merge takes `max(high)` / `min(low)` across those rows. Convert *after* merging
+and that `max` compares an XLM-denominated high with a USDC-denominated one:
+different units, no error, and a plausible-looking number falling out.
+
+🔑 **Scale every row to the denomination in the inner SELECT, then aggregate.**
+§1 forces it — a denomination whose meaning varies with the data available is the
+`close_usd = 0` defect class in a new place — but the ordering is written down
+here because the failure mode produces no signal.
+
+Pinned by `ohlcv_converts_each_leg_before_merging_across_them`: one bucket, two
+legs, rates 0.25 and 1.0. Converted first the high is `max(3.0, 1.3) = 3.0`;
+converted after the merge it would be `max(12.0, 1.3) = 12.0`. The two answers
+differ, so the test discriminates rather than merely passing.
 
 ### 3. O/H/L are DERIVED, and must say so
 

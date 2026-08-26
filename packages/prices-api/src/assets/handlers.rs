@@ -412,31 +412,46 @@ pub async fn get_ohlcv(
         Err(e) => return errors::db_error(&e, "asset lookup"),
     };
 
-    // Resolve the quote leg from base_currency.
-    let quote_ident = match base_currency {
-        BaseCurrency::Usd => AssetIdentifier::Classic {
-            code: "USDC".to_string(),
-            issuer: prices_clickhouse::USDC_ISSUER.to_string(),
-        },
-        BaseCurrency::Xlm => AssetIdentifier::Native,
-    };
-    let quote_asset_id = match queries_ch::resolve_asset_id(state.ch(), &quote_ident).await {
-        Ok(Some(q)) => q,
-        // The quote leg (USDC for USD, native for XLM) must be tracked — its
-        // absence is a server-side data gap, not "no candles". Surface it as a
-        // 503 instead of masking it as an empty 200 (which looks like a healthy
-        // asset with no history).
-        Ok(None) => {
-            tracing::error!(
-                base_currency = base_currency.as_str(),
-                "ohlcv quote asset not tracked"
-            );
-            return errors::service_unavailable(
-                errors::QUOTE_UNAVAILABLE,
-                "pricing in the requested base_currency is unavailable",
-            );
+    // Resolve the denomination (ADR 0011 §1). In USD mode `base_currency` no
+    // longer selects a quote leg — the reference ids are needed only to classify
+    // each row's provenance, not to filter it. In XLM mode it is still the
+    // pre-ADR pair filter; see Denomination::QuoteLeg.
+    //
+    // The three references are resolved by natural identity, mirroring the
+    // enrichment worker's own resolve_reference_ids so read and write cannot
+    // disagree about which USDC is canonical. All three must be tracked: their
+    // absence is a server-side data gap, not "no candles", so it stays a 503
+    // rather than being masked as an empty 200 (which looks like a healthy asset
+    // with no history).
+    let denomination = match base_currency {
+        BaseCurrency::Usd => {
+            // USDC must resolve: see UsdRefs::usdc.
+            let usdc = match resolve_reference(state.ch(), usdc_identifier(), base_currency).await {
+                Ok(id) => id,
+                Err(resp) => return resp,
+            };
+            // The pivots are best-effort. A lookup ERROR still fails the request
+            // — that is the database misbehaving, not an absent asset — but a
+            // clean "not tracked" only costs the `traded` label.
+            let mut pivots = Vec::new();
+            for ident in [AssetIdentifier::Native, usdt_identifier()] {
+                match queries_ch::resolve_asset_id(state.ch(), &ident).await {
+                    Ok(Some(id)) => pivots.push(id),
+                    Ok(None) => tracing::debug!(
+                        asset = %ident.to_canonical(),
+                        "ohlcv pivot reference not tracked; rows on this leg go unlabelled"
+                    ),
+                    Err(e) => return errors::db_error(&e, "quote lookup"),
+                }
+            }
+            queries_ch::Denomination::Usd(queries_ch::UsdRefs { usdc, pivots })
         }
-        Err(e) => return errors::db_error(&e, "quote lookup"),
+        BaseCurrency::Xlm => {
+            match resolve_reference(state.ch(), AssetIdentifier::Native, base_currency).await {
+                Ok(id) => queries_ch::Denomination::QuoteLeg(id),
+                Err(resp) => return resp,
+            }
+        }
     };
 
     // The validated window is exactly what binds into SQL — the same eff_start
@@ -448,7 +463,7 @@ pub async fn get_ohlcv(
     // an open top costs nothing (future buckets don't exist).
     let args = OhlcvArgs {
         asset_id,
-        quote_asset_id,
+        denomination,
         granularity,
         start: Some(eff_start),
         end,
@@ -483,6 +498,55 @@ pub async fn get_ohlcv(
 }
 
 /// Build the OHLCV 200 response with a MEDIUM cache header.
+/// Canonical USDC's natural identity — the same `(code, issuer)` pair the
+/// enrichment peg tier and `views.sql` key on, so the three cannot drift.
+fn usdc_identifier() -> AssetIdentifier {
+    AssetIdentifier::Classic {
+        code: "USDC".to_string(),
+        issuer: prices_clickhouse::USDC_ISSUER.to_string(),
+    }
+}
+
+/// Canonical Stellar USDT's natural identity.
+///
+/// ⚠️ This is a *reference* leg, not a peg. It depegged in June 2022 and trades
+/// at ~$0.13 (task 0172); candles quoted in it are priced by measurement through
+/// the pivot, exactly like XLM. Naming it here is only how those rows get
+/// classified `traded`.
+fn usdt_identifier() -> AssetIdentifier {
+    AssetIdentifier::Classic {
+        code: "USDT".to_string(),
+        issuer: prices_clickhouse::USDT_ISSUER.to_string(),
+    }
+}
+
+/// Resolve one reference leg, mapping "not tracked" to a 503.
+///
+/// A missing reference is a server-side data gap. Returning an empty 200 would
+/// render it as "this asset has no history", which is the exact confusion this
+/// endpoint's whole fix is about.
+async fn resolve_reference(
+    ch: &clickhouse::Client,
+    ident: AssetIdentifier,
+    base_currency: BaseCurrency,
+) -> Result<u32, Response> {
+    match queries_ch::resolve_asset_id(ch, &ident).await {
+        Ok(Some(id)) => Ok(id),
+        Ok(None) => {
+            tracing::error!(
+                base_currency = base_currency.as_str(),
+                asset = %ident.to_canonical(),
+                "ohlcv reference asset not tracked"
+            );
+            Err(errors::service_unavailable(
+                errors::QUOTE_UNAVAILABLE,
+                "pricing in the requested base_currency is unavailable",
+            ))
+        }
+        Err(e) => Err(errors::db_error(&e, "quote lookup")),
+    }
+}
+
 fn ohlcv_response(
     id: &AssetIdentifier,
     granularity: Granularity,
