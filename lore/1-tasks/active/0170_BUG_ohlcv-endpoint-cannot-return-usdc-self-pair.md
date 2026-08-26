@@ -782,11 +782,30 @@ continuously liquid. From 2022 onward the two sets are **identical**.
 reputation, it is a complete proxy for USDC-quoted activity across every year
 that matters. The scan it replaces was ~24.9 M rows on a p95-bounded endpoint.
 
-⚠️ **Open, and cheap to settle:** whether those two days were the *earliest*
-buckets in the wide set. If they were, the synthesized USDC series now starts two
-days later than the data technically supports — harmless, but it should be stated
-rather than discovered. If they sit inside an already-started range, nothing at
-all changes about the series' extent.
+### ⚠️ KNOWN LIMIT — the USDC series starts 2021-02-01, not 2021-01-25
+
+They *were* the earliest, and the calendar gap is wider than the bucket count
+suggests:
+
+```
+first bucket, any USDC quote   2021-01-25
+first bucket, XLM/USDC         2021-02-01
+```
+
+So between 01-25 and 02-01 only two days carried any USDC-quoted candle at all
+(01-25 and 01-26), and XLM/USDC does not begin until 02-01. The synthesized USDC
+series therefore starts **seven calendar days later** than the earliest
+USDC-quoted market activity, losing **two** real buckets.
+
+**Accepted, and stated rather than discovered.** The alternative is the ~24.9 M
+row `FINAL` scan the anchoring exists to remove, on an endpoint with a p95
+< 200 ms target — two buckets at the dawn of the dataset is not worth that.
+
+🔑 **Carry this into AC 1's verification.** That criterion says the series must
+span *"the backfilled range"*; on prod it will start 2021-02-01. That is the
+correct answer under this design, not a shortfall to be explained away at
+verification time — and [[ADR-0011]]'s coverage section should state it alongside
+the per-leg figures it already carries.
 
 ## §6 peg-asset path — implemented 2026-08-26
 
