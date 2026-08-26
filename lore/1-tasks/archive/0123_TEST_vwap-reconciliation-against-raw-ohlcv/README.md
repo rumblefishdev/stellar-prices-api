@@ -2,7 +2,7 @@
 id: "0123"
 title: "VWAP reconciliation — current_prices verifiable against raw price_ohlcv rows for ≥3 assets"
 type: TEST
-status: active
+status: completed
 related_adr: ["0004", "0007"]
 related_tasks: ["0072", "0118", "0116", "0120", "0128"]
 tags: [layer-database, priority-high, effort-medium, milestone-M2, vwap, clickhouse, verification, acceptance]
@@ -62,6 +62,22 @@ history:
       false-positives at 3.0e-04), and window-state drift between selection
       and capture (phoenix revived, guard case moved to AQUA). Remaining:
       the public-API serialization AC — needs API_KEY/BASE_URL.
+  - date: 2026-08-26
+    status: completed
+    who: stkrolikiewicz
+    note: >
+      COMPLETE — all 9 acceptance criteria met, Tranche 2 AC 4 evidenced.
+      Run 1 (T=13:22:00Z): 41/41 checks over 6 assets, volumes exactly
+      equal, vwap ≤1.4e-11, exclusions attributed per rule. Run 2
+      (tick 14:17:00Z): API-vs-CH serialization for XLM, 13/13 fields
+      Decimal-exact and string-typed — no precision loss. Evidence and
+      both scripts under benchmark/, reproducible end to end. Side
+      product for [[0217]]: max deviation from the unweighted median
+      0.824% against the 20% band (~24x headroom), mask excluded nothing.
+      No new tasks spawned — the tie-nondeterminism and even-count-median
+      questions land in already-open [[0217]], the min_volume_usd gap in
+      [[0118]]. Citable by [[0128]] as: benchmark/report.txt (run 1) +
+      api_serialization_check.py output (run 2).
 ---
 
 # VWAP reconciliation against raw OHLCV rows
@@ -239,12 +255,42 @@ the unweighted median where the mask armed — XLM {sdex 0.0025%, soroswap
       threshold exclusions are expected or found**
 - [x] `sources` JSON per-source values reconcile — **keys and Decimal values
       exact on all six**
-- [ ] End-to-end check through the public API confirms no precision loss in
-      JSON serialization — **open: needs `API_KEY`/`BASE_URL` (same
-      convention as the 0120 suite, `.env.local`); one asset, compare the
-      string-serialised Decimals against the pinned CH row**
+- [x] End-to-end check through the public API confirms no precision loss in
+      JSON serialization — **run 2, tick 14:17:00: XLM via
+      `GET /v1/assets/native/price` vs the CH row captured at the same
+      `updated_at` — 13/13 fields Decimal-value-exact AND string-typed in
+      the JSON (the §3.3 design point held); `benchmark/
+      api_serialization_check.py` + `api-xlm.json` + `ch-xlm.csv`**
 - [x] Method + results written up as citable evidence for [[0128]] — **this
       section + `benchmark/`; cite as run 1, T=13:22:00Z**
+
+## Design Decisions
+
+### From Plan
+
+1. **Contract reimplementation, not CTE translation.** The recompute is
+   Python stdlib over exported CSVs, written from §5.5 + the current.sql
+   column contract. A bug in the MV's SQL cannot reproduce itself in the
+   check (the task's own requirement).
+2. **Same-tick pinning.** Every comparison — CH-vs-recompute and API-vs-CH —
+   is pinned to one `updated_at` tick, the 0120 batch/single lesson applied
+   from the start.
+3. **Volumes asserted exactly equal**, not within tolerance: Decimal sums of
+   Decimals. It held (0E-14 on all six), so the tolerance question never
+   arises for the one column that permits exactness.
+
+### Emerged
+
+4. **Tie sets instead of tie-breaks.** `argMaxIf` over rows sharing the
+   newest-priced timestamp (different quote legs) is non-contractual, and 4
+   of 6 assets hit it. Prices are asserted as set-membership; the vwap check
+   enumerates tie combinations and requires the published value to match one.
+   Decided after the naive first draft mis-reported a 3.0e-04 AQUA mismatch
+   that was entirely the arbitrary tie pick.
+5. **Exclusion sets re-derived per run, never reused.** Between selection
+   (13:03) and capture (13:22) phoenix revived on XLM/EURC and the guard case
+   moved to AQUA — expected exclusions are a function of the same snapshot,
+   not of the asset.
 
 ## Notes
 
