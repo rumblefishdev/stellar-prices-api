@@ -758,14 +758,35 @@ partitions (~24.9 M rows in `price_ohlcv_1d` alone, far more at finer grains) on
 an endpoint with a p95 < 200 ms target ([[0121]]). `views.sql:370` already flags
 this exact shape. Adding `asset_id` restores the prefix.
 
-⚠️ **The coverage is narrower, and that is a real trade.** Buckets now exist only
-where XLM/USDC traded, not wherever *any* asset traded against USDC. XLM/USDC is
-the reference market and the most liquid pair, so the two should be close to
-identical in practice — but **that has not been measured**, and it is worth a
-check against prod before the deploy criteria are read as met. If XLM/USDC has
-gaps some other USDC pair covers, the series will have holes it did not have.
+### ✅ The narrowing was MEASURED, and it costs 2 buckets in total
 
-Recorded as a judgement made under review pressure, not a verified equivalence.
+Anchoring on XLM/USDC means buckets exist only where that pair traded, not
+wherever *any* asset traded against USDC. That was recorded as an unverified
+judgement; it has now been measured on prod (2026-08-26), per year on
+`price_ohlcv_1d`:
+
+| year | any USDC quote | XLM/USDC | lost | covered |
+|---|---|---|---|---|
+| 2021 | 336 | 334 | **2** | 99.40% |
+| 2022 | 365 | 365 | 0 | 100% |
+| 2023 | 365 | 365 | 0 | 100% |
+| 2024 | 366 | 366 | 0 | 100% |
+| 2025 | 365 | 365 | 0 | 100% |
+| 2026 | 238 | 238 | 0 | 100% |
+
+**2 of 2,035 buckets — 99.90%.** Both are `2021-01-25` and `2021-01-26`,
+consecutive days at the very start of the dataset, before XLM/USDC was
+continuously liquid. From 2022 onward the two sets are **identical**.
+
+🔑 The judgement holds: XLM/USDC is not merely the reference market by
+reputation, it is a complete proxy for USDC-quoted activity across every year
+that matters. The scan it replaces was ~24.9 M rows on a p95-bounded endpoint.
+
+⚠️ **Open, and cheap to settle:** whether those two days were the *earliest*
+buckets in the wide set. If they were, the synthesized USDC series now starts two
+days later than the data technically supports — harmless, but it should be stated
+rather than discovered. If they sit inside an already-started range, nothing at
+all changes about the series' extent.
 
 ## §6 peg-asset path — implemented 2026-08-26
 
