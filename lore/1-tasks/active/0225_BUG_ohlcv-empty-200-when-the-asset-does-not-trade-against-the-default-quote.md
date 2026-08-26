@@ -135,7 +135,18 @@ returns OHLC in the quote asset), because options 1 and 3 change that.
 - [ ] The same verified for an asset with NO USDC pair at all (RON or EQL)
 - [ ] An asset that genuinely never traded is still distinguishable from this
       case — the whole point; assert both
-- [ ] A normal USDC-quoted asset's response is byte-identical to today's
+- [x] ~~A normal USDC-quoted asset's response is byte-identical to today's~~ —
+      **RESTATED, not ticked as written**, in step with [[0170]], which carries
+      the same wording and the full reasoning.
+      → [[ADR-0011]] §4 puts `method` and `derived` on every candle, so no
+      response can be byte-identical to a pre-ADR one. Restated as: **identical
+      values in every field that existed before**, differing only by the two
+      additive fields. Verified by `ohlcv_merges_sources_and_notes_backfill`,
+      whose expected numbers are unchanged from the pre-0170 fixture.
+      ⚠️ Additive, so a consumer reading only the old fields is unaffected —
+      which is what makes this a restatement rather than a quiet pass. A
+      shape change that broke existing readers would have made "no regression"
+      false, and the criterion should then have FAILED rather than been reworded.
 - [ ] [[0120]]'s ohlcv failures drop to 0 on a re-run, or the remainder is
       attributed to a named task
 

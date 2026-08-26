@@ -650,8 +650,12 @@ rather than holding this one open.
       → The peg path keys on canonical USDC's identity alone, so USDT never
       enters it. `ohlcv_usdt_as_a_base_keeps_its_real_market_data` asserts a
       depegged 0.13 survives and is not synthesized at par.
-- [ ] A non-peg asset's response is byte-identical to today's, proving no
-      regression on the normal path.
+- [x] ~~A non-peg asset's response is byte-identical to today's~~ — **RESTATED,
+      not ticked as written.** See "AC restated — byte-identical" below.
+      → Replaced by: **every numeric field is identical**, and the response
+      differs only by the two additive provenance fields. Verified by
+      `ohlcv_merges_sources_and_notes_backfill`, whose expected values are
+      unchanged from the pre-0170 fixture.
 - [ ] [[0127]] AC 3 + AC 4 re-run and passing.
 
 - [x] Response carries provenance distinguishing a measured rate from a
@@ -711,6 +715,34 @@ restating rather than silently carrying.
       pre-Soroban for XLM-quoted) and names the exotic-quoted 13.1 M as an
       explicit non-goal — not a rounded-away caveat.
 - [ ] [[0211]]'s window-boundary semantics settled in the same ADR.
+
+## AC restated — "byte-identical" became unachievable, and had to
+
+As written the criterion asked that a non-peg asset's response be **byte-identical**
+to today's. That is now impossible by construction: [[ADR-0011]] §4 puts `method`
+and `derived` on **every** candle, so every response gains two fields.
+
+🔑 **The criterion was not wrong — it was overtaken by a decision made after it
+was written.** Its intent, "prove no regression on the normal path", is intact
+and met. What changed is that the ADR settled a provenance contract the AC
+predates, and a response cannot both carry provenance and be byte-identical to
+one that does not.
+
+**Restated as:** a non-peg asset's response carries **identical values in every
+field that existed before**, differing only by the additive `method` and
+`derived`. That is verified by `ohlcv_merges_sources_and_notes_backfill` — its
+expected numbers are unchanged from the pre-0170 fixture, which is exactly the
+regression check the original wording was reaching for.
+
+⚠️ The change is **additive**, so a consumer reading only the old fields is
+unaffected. That is what makes the restatement honest rather than convenient: had
+the shape changed in a way that broke existing readers, "no regression on the
+normal path" would have been **false**, and the right move would have been to
+fail the criterion rather than reword it.
+
+Same pattern as [[0222]] AC 5 and [[0218]] AC 4: restate when a criterion turns
+out to demand something impossible, and say so — quietly ticking it would not be
+the same thing. Mirrored in [[0225]], which carries the same wording.
 
 ## §6 peg-asset path — implemented 2026-08-26
 
