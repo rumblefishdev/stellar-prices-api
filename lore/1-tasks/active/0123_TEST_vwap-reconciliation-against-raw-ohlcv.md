@@ -2,7 +2,7 @@
 id: "0123"
 title: "VWAP reconciliation — current_prices verifiable against raw price_ohlcv rows for ≥3 assets"
 type: TEST
-status: backlog
+status: active
 related_adr: ["0004", "0007"]
 related_tasks: ["0072", "0118", "0116", "0120", "0128"]
 tags: [layer-database, priority-high, effort-medium, milestone-M2, vwap, clickhouse, verification, acceptance]
@@ -19,6 +19,21 @@ history:
       acceptance criterion 4 — the only AC that checks the §5.5 formula is
       arithmetically what the doc says, rather than merely that a number is
       returned.
+  - date: 2026-08-26
+    status: active
+    who: stkrolikiewicz
+    note: >
+      Promoted to active — starting the reconciliation pass. Plan: recompute
+      the §5.5 pipeline independently (own script, not a copy of the CTEs)
+      from price_ohlcv_1m FINAL for assets off [[0120]]'s 20-major list —
+      at least one with >= 3 sources (mask arms), one single-source control,
+      one with a venue in carry. Reconcile vwap_24h/sources (masked
+      population) separately from price_usd/volume_24h_usd (unmasked).
+      Compare at pinned updated_at; measure on a healthy pipeline
+      ([[0215]] fixed 2026-08-24, check [[0220]] before reading).
+      Side product to record: the distribution of per-venue deviations from
+      the median — the tuning basis current.sql's OUTLIER_PCT comment defers
+      to this task, and an input [[0217]] waits on.
 ---
 
 # VWAP reconciliation against raw OHLCV rows
