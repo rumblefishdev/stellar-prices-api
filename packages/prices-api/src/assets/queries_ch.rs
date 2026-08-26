@@ -585,6 +585,118 @@ pub struct OhlcvArgs {
     pub limit: u64,
 }
 
+/// Synthesize a USD series for a **peg asset** — one that is only ever stored as
+/// a quote leg, never as a base (ADR 0011 §6).
+///
+/// ## Why this cannot be a normal query
+///
+/// Canonical USDC never appears as `asset_id` in any candle: the quote-preference
+/// design makes it the quote, always. So `GET /assets/{USDC}/ohlcv` asks for a
+/// USDC/USDC self-pair and matches **zero rows** — and, unlike the wide defect
+/// this endpoint's main path fixes, dropping the quote filter does not help. The
+/// series has to be built rather than read.
+///
+/// ## Buckets from real trading, rate from `usd_rate`
+///
+/// The bucket timestamps come from candles where USDC is the **quote**, so the
+/// series spans the whole backfilled range and every bucket corresponds to a
+/// period the market was actually open — not a synthetic calendar.
+///
+/// The value per bucket is the newest `prices.usd_rate` observation **at or
+/// before** the bucket. That is 0167's stated rule for this table — observations
+/// and `ASOF` at-or-before, never an average — and it is the same shape the
+/// enrichment oracle tier uses, so the read side cannot drift from the write
+/// side.
+///
+/// ## The fallback is the peg, and it is labelled as such
+///
+/// `usd_rate` starts 2026-03-11; `timeframe=all` reads back to 2021. Buckets with
+/// no observation at or before them fall back to $1 and are labelled
+/// `method = 'peg'`, which 0165 defines as *"no measured rate was available"* —
+/// never as an assertion that $1 is correct.
+///
+/// ⚠️ **This is the one place a literal `1.0` is right.** ADR 0011 §6 forbids a
+/// hardcoded peg *where a measurement exists* — our own enrichment prices a
+/// `TF/USDC` candle at `close × 0.9993`, so a flat $1 would contradict our data.
+/// Where no measurement exists the peg IS the fallback, and the `method` field is
+/// what keeps the two distinguishable. A response that silently rendered both as
+/// the same number would be [`0212`]'s hardcoded-peg defect in a new place.
+///
+/// ## What is deliberately zero
+///
+/// `volume_base` and `trade_count` are `0`: USDC is not traded as a base, so
+/// there is no base volume to report. Reporting its volume as a *quote* here
+/// would answer a different question than the one asked.
+pub async fn ohlcv_peg_series(
+    ch: &Client,
+    args: &OhlcvArgs,
+    usdc_id: u32,
+    usdc_issuer: &str,
+) -> Result<Vec<Candle>, clickhouse::error::Error> {
+    let table = format!("price_ohlcv_{}", args.granularity.as_str());
+
+    let mut conds = vec!["quote_asset_id = ?".to_string()];
+    if args.start.is_some() {
+        conds.push("timestamp >= toDateTime(?)".to_string());
+    }
+    if args.end.is_some() {
+        conds.push("timestamp <= toDateTime(?)".to_string());
+    }
+
+    // ClickHouse's ASOF JOIN needs at least one equality alongside the
+    // inequality; there is no natural key here, so both sides carry a constant.
+    //
+    // ⚠️ `join_use_nulls = 1` is load-bearing, not tidiness. By default an
+    // unmatched LEFT JOIN row yields the column's DEFAULT, not NULL — so
+    // `r.rate` came back as `0` for every pre-observation bucket and `ifNull`
+    // never fired, rendering USDC at $0.00 instead of falling back to the peg.
+    // Caught by `ohlcv_usdc_before_any_observation_falls_back_to_a_labelled_peg`.
+    //
+    // usd_rate's own vocabulary is oracle/peg/pivot/pivot2. Mapped onto 0165's
+    // traded/peg/oracle, per ADR 0011 §4's "no fourth word": a pivot is priced
+    // through a reference asset's own traded candles, so it is `traded`.
+    let sql = format!(
+        "SELECT ts, o, h, l, c, vb, vqu, vw, tc, meth, drv FROM ( \
+           SELECT \
+             formatDateTime(b.bkt, '%Y-%m-%dT%H:%i:%SZ') AS ts, \
+             toNullable(toString(ifNull(r.rate, toDecimal128(1, 14)))) AS o, \
+             toNullable(toString(ifNull(r.rate, toDecimal128(1, 14)))) AS h, \
+             toNullable(toString(ifNull(r.rate, toDecimal128(1, 14)))) AS l, \
+             toNullable(toString(ifNull(r.rate, toDecimal128(1, 14)))) AS c, \
+             '0' AS vb, \
+             '0' AS vqu, \
+             toNullable(toString(ifNull(r.rate, toDecimal128(1, 14)))) AS vw, \
+             toUInt64(0) AS tc, \
+             toNullable(multiIf(r.meth IS NULL, 'peg', \
+                                r.meth = 'oracle', 'oracle', \
+                                r.meth = 'peg', 'peg', \
+                                'traded')) AS meth, \
+             toNullable(toUInt8(1)) AS drv, \
+             b.bkt AS bkt \
+           FROM ( SELECT DISTINCT timestamp AS bkt, 1 AS k \
+                  FROM {table} FINAL WHERE {conds} \
+                  ORDER BY bkt DESC LIMIT {limit} ) AS b \
+           ASOF LEFT JOIN ( SELECT 1 AS k, timestamp AS rts, usd_rate AS rate, \
+                                   method AS meth \
+                            FROM usd_rate FINAL \
+                            WHERE asset_code = 'USDC' AND issuer_address = ? ) AS r \
+             ON b.k = r.k AND r.rts <= b.bkt \
+         ) ORDER BY bkt ASC \
+         SETTINGS join_use_nulls = 1",
+        conds = conds.join(" AND "),
+        limit = args.limit
+    );
+
+    let mut q = ch.query(&sql).bind(usdc_id);
+    if let Some(st) = args.start {
+        q = q.bind(st);
+    }
+    if let Some(e) = args.end {
+        q = q.bind(e);
+    }
+    q.bind(usdc_issuer).fetch_all::<Candle>().await
+}
+
 /// Read merged candles for one asset at the chosen grain, denominated per
 /// [ADR 0011].
 ///

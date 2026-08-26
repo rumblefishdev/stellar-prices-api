@@ -456,3 +456,101 @@ async fn ohlcv_xlm_denomination_decodes_rows() {
 
     teardown(db).await;
 }
+
+/// Seed `prices.usd_rate` with a MOVING measured rate for canonical USDC, plus
+/// a USDC-quoted candle in a bucket that predates every observation.
+///
+/// The rate deliberately wobbles (0.9993, 1.0007) rather than sitting at 1.0:
+/// a test that asserted the constant would pass against a hardcoded peg and
+/// prove nothing (ADR 0011 §6, task 0212).
+async fn seed_peg_rate(db: &str, admin: &Client) {
+    admin
+        .query(&format!(
+            "INSERT INTO {db}.usd_rate \
+             (asset_kind, asset_code, issuer_address, contract_address, timestamp, \
+              usd_rate, method, reference_asset, hops, version) VALUES \
+             ('credit', 'USDC', '{i}', '', '2026-02-10 10:00:00', 0.9993, 'oracle', '', 0, 1), \
+             ('credit', 'USDC', '{i}', '', '2026-02-10 11:00:00', 1.0007, 'oracle', '', 0, 1)",
+            i = iss()
+        ))
+        .execute()
+        .await
+        .unwrap();
+    // A FOO/USDC candle well before any observation: its bucket must still be
+    // produced, and must fall back to the peg.
+    admin
+        .query(&format!(
+            "INSERT INTO {db}.price_ohlcv_1h \
+             (timestamp, asset_id, quote_asset_id, source, open, high, low, close, \
+              volume_base, volume_quote_usd, close_usd, vwap, trade_count, version) VALUES \
+             ('2024-01-05 09:00:00', 3, 2, 'sdex', 1.0, 1.0, 1.0, 1.0, 1, 1, 1.0, 1.0, 1, 1)"
+        ))
+        .execute()
+        .await
+        .unwrap();
+}
+
+/// 🔑 ADR 0011 §6 — the ORIGINAL narrow defect this task was named for.
+///
+/// USDC is never stored as a base leg, so `GET /assets/{USDC}/ohlcv` asked for a
+/// USDC/USDC self-pair and matched zero rows. Dropping the quote filter does not
+/// help; the series has to be synthesized.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn ohlcv_usdc_self_pair_is_synthesized_from_the_measured_rate() {
+    let db = "it_ohlcv_peg_0170";
+    let client = setup(db).await;
+    seed_peg_rate(db, &Client::default().with_url(ch_url()).with_database(db)).await;
+
+    let uri = format!(
+        "/v1/assets/USDC:{}/ohlcv?granularity=1h&start=2026-02-10T10:00:00Z\
+         &end=2026-02-10T11:00:00Z&base_currency=USD",
+        iss()
+    );
+    let (status, json) = get(client, &uri).await;
+    assert_eq!(status, StatusCode::OK, "body={json}");
+
+    let data = json["data"].as_array().unwrap();
+    assert_eq!(data.len(), 2, "USDC must have a series at all: {json}");
+
+    // ASOF at-or-before: 10:00 takes the 10:00 observation, 11:00 the 11:00 one.
+    approx(&data[0]["close"], 0.9993);
+    approx(&data[1]["close"], 1.0007);
+    assert_eq!(data[0]["method"], "oracle");
+    assert_ne!(
+        data[0]["close"], data[1]["close"],
+        "the series must track a MOVING rate, not a constant"
+    );
+
+    teardown(db).await;
+}
+
+/// ADR 0011 §6 fallback semantics: no rate available → peg, and it says `peg`.
+///
+/// `usd_rate` starts 2026-03-11 on prod while `timeframe=all` reads back to
+/// 2021, so this is the majority of the real series — not an edge case.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn ohlcv_usdc_before_any_observation_falls_back_to_a_labelled_peg() {
+    let db = "it_ohlcv_peg_fallback_0170";
+    let client = setup(db).await;
+    seed_peg_rate(db, &Client::default().with_url(ch_url()).with_database(db)).await;
+
+    let uri = format!(
+        "/v1/assets/USDC:{}/ohlcv?granularity=1h&start=2024-01-05T09:00:00Z\
+         &end=2024-01-05T09:00:00Z&base_currency=USD",
+        iss()
+    );
+    let (status, json) = get(client, &uri).await;
+    assert_eq!(status, StatusCode::OK, "body={json}");
+
+    let data = json["data"].as_array().unwrap();
+    assert_eq!(data.len(), 1, "the pre-observation bucket must still exist");
+    approx(&data[0]["close"], 1.0);
+    assert_eq!(
+        data[0]["method"], "peg",
+        "a fallback must be labelled, never rendered as a measurement"
+    );
+
+    teardown(db).await;
+}

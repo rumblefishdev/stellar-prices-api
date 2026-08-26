@@ -501,9 +501,29 @@ pub async fn get_ohlcv(
         end,
         limit: OHLCV_MAX_POINTS,
     };
-    let data = match queries_ch::ohlcv(state.ch(), args).await {
-        Ok(d) => d,
-        Err(e) => return errors::db_error(&e, "ohlcv lookup"),
+    // ADR 0011 §6: canonical USDC is only ever a quote leg, so a normal query
+    // for it matches zero rows and no amount of filter-dropping helps — its
+    // series is synthesized instead. Keyed on the requested identity, not on a
+    // resolved asset_id, because 0139 has ids serving more than one identity.
+    let is_peg_asset = matches!(base_currency, BaseCurrency::Usd)
+        && id.to_canonical() == usdc_identifier().to_canonical();
+
+    let data = if is_peg_asset {
+        let usdc = match &args.denomination {
+            queries_ch::Denomination::Usd(refs) => refs.usdc,
+            queries_ch::Denomination::QuoteLeg(q) => *q,
+        };
+        match queries_ch::ohlcv_peg_series(state.ch(), &args, usdc, prices_clickhouse::USDC_ISSUER)
+            .await
+        {
+            Ok(d) => d,
+            Err(e) => return errors::db_error(&e, "ohlcv peg series"),
+        }
+    } else {
+        match queries_ch::ohlcv(state.ch(), args).await {
+            Ok(d) => d,
+            Err(e) => return errors::db_error(&e, "ohlcv lookup"),
+        }
     };
 
     // backfill_note: only for timeframe=all, with data, while SDEX still running.
