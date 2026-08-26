@@ -824,7 +824,11 @@ pub(crate) enum IssueOutcome {
     /// now or adopted. The value is deliberately not carried: the callback
     /// that consumes this answers with a redirect, and a credential must
     /// never ride in a `Location`.
-    Issued,
+    ///
+    /// `created` tells the two apart, and it matters since 2026-08-26: the
+    /// sign-in round-trip issues too, and a visitor whose months-old key was
+    /// merely ADOPTED must not land on "Your API Key is ready".
+    Issued { created: bool },
     /// The owner revoked their key inside the current quota period, so no
     /// new one is issued until it rolls (task 0191). Nothing was written.
     Capped {
@@ -860,7 +864,9 @@ pub(crate) async fn issue_for(gateway: &Gateway, sub: &str, deadline: Duration) 
                 created = outcome.created,
                 "portal issued an API key"
             );
-            IssueOutcome::Issued
+            IssueOutcome::Issued {
+                created: outcome.created,
+            }
         }
         Ok(Ok(Reconciled::Capped { next_eligible_date })) => {
             tracing::info!(

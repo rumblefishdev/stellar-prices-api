@@ -147,12 +147,26 @@ export function onOAuthPopupMessage(
 /**
  * The `?signin=…` outcome the callback appended, out of a popup message.
  *
- * The literals are task 0186's (`portal/auth/mod.rs`, `CANCELLED_QUERY` and
- * `FAILED_QUERY`) and anything else — including the empty string a successful
- * sign-in lands on — is `null`, meaning "no refusal to report; ask the server
- * whether there is a session now".
+ * The literals are the backend's (`portal/auth/mod.rs`) and anything else —
+ * including the empty string a successful sign-in lands on — is `null`,
+ * meaning "no refusal to report; ask the server whether there is a session
+ * now".
+ *
+ * `cancelled` and `failed` are task 0186's. `not_member` and `unknown` arrived
+ * with the sign-in membership gate (Adam, 2026-08-26) and are the SAME two
+ * verdicts the issue round-trip has always had — kept as separate literals
+ * here for the reason they are separate there: refusing someone is not the
+ * same as failing to check.
+ *
+ * Allow-listed rather than passed through: the value reaches a render branch,
+ * and the query it comes from is attacker-supplied on a top-level navigation.
  */
 export function readSigninOutcome(search: string): string | null {
   const value = new URLSearchParams(search).get('signin');
-  return value === 'cancelled' || value === 'failed' ? value : null;
+  return value === 'cancelled' ||
+    value === 'failed' ||
+    value === 'not_member' ||
+    value === 'unknown'
+    ? value
+    : null;
 }

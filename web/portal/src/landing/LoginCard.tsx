@@ -8,7 +8,9 @@ import Typography from '@mui/material/Typography';
 import { alpha } from '@mui/material/styles';
 import type { ReactNode } from 'react';
 
-import { color, font, radius } from '../theme/tokens';
+import builtByWordmark from '../assets/built-by.png';
+import rumblefishLockup from '../assets/rumblefish-lockup.png';
+import { color, radius } from '../theme/tokens';
 import { DiscordIcon } from './DiscordIcon';
 import { cardBorder } from './primitives';
 
@@ -36,8 +38,14 @@ import { cardBorder } from './primitives';
 /** Discord's brand blurple. Their colour, so it is not a theme token. */
 export const DISCORD = '#5865f2';
 
-/** The error callout's fill and edge. Sampled; no matching Figma variable. */
-const ERROR_SURFACE = '#460809';
+/**
+ * The error callout's fill and edge.
+ *
+ * The fill IS a design-system variable — `Red/950`, confirmed against node
+ * `997:2210` on 2026-08-26 — so it comes through `tokens.ts` like every other
+ * one. The edge is still a sample with no variable behind it.
+ */
+const ERROR_SURFACE = color.red[950];
 const ERROR_EDGE = '#82181a';
 
 /**
@@ -47,6 +55,15 @@ const ERROR_EDGE = '#82181a';
  * a screen reader can jump to rather than a `<div>` that happens to look like a
  * panel.
  */
+/**
+ * The card's width, and the width of the column it sits in.
+ *
+ * Exported because `LoginSection` places "Back to landing" ABOVE the card and
+ * has to line up with its left edge (Adam, 2026-08-26). As a literal in two
+ * files the link drifts off the card the first time this number changes.
+ */
+export const LOGIN_CARD_MAX_WIDTH = 464;
+
 export function LoginCard({
   title,
   titleComponent = 'h3',
@@ -80,7 +97,7 @@ export function LoginCard({
       data-testid="login-card"
       sx={{
         width: '100%',
-        maxWidth: 464,
+        maxWidth: LOGIN_CARD_MAX_WIDTH,
         borderRadius: `${radius.lg}px`,
         border: cardBorder,
         backgroundColor: color.surface.gray,
@@ -131,42 +148,43 @@ export function LoginCard({
 /**
  * "Built by Rumble Fish", the card's top line.
  *
- * The Figma frame uses the 188 × 47 wordmark image. Set as text until that
- * asset is exported — a broken `<img>` at the top of the sign-in card is a
- * worse first impression than the name in the heading face, and the export
- * needs a Figma call this build did not have.
+ * ⚠️ **The design's own two images since 2026-08-26 (Adam supplied them).**
+ * This was set as TEXT in Clash Display, because the Figma seat had no MCP
+ * calls left to export the assets and a broken `<img>` at the top of the
+ * sign-in card is a worse first impression than the name in the heading face.
+ * The export arrived, so the placeholder is gone: neither the wordmark's
+ * weight nor the lockup's mark can be reproduced by a font, and it showed.
+ *
+ * Both are @2x PNGs (144 × 34 and 192 × 48) drawn at half size, so they are
+ * sharp on the retina display a reviewer will open this on.
+ *
+ * One `role="img"` over the pair rather than two `alt`s: it is a single lockup
+ * that happens to ship as two files, and "Built by, image, Rumblefish, image"
+ * is what a screen reader would otherwise read out. The halves are `alt=""`
+ * because the label on the wrapper is the name.
  */
 function BuiltBy() {
   return (
     <Stack
+      role="img"
+      aria-label="Built by Rumble Fish"
       direction="row"
       spacing={1}
       justifyContent="center"
       alignItems="center"
     >
-      <Typography
-        component="span"
-        sx={{
-          fontFamily: font.primary,
-          fontWeight: 700,
-          fontSize: '1rem',
-          color: color.text.primary,
-        }}
-      >
-        Built by
-      </Typography>
-      <Typography
-        component="span"
-        sx={{
-          fontFamily: font.primary,
-          fontWeight: 700,
-          fontSize: '1rem',
-          letterSpacing: '0.04em',
-          color: color.text.primary,
-        }}
-      >
-        RUMBLEFISH
-      </Typography>
+      <Box
+        component="img"
+        src={builtByWordmark}
+        alt=""
+        sx={{ width: 72, height: 'auto', display: 'block' }}
+      />
+      <Box
+        component="img"
+        src={rumblefishLockup}
+        alt=""
+        sx={{ width: 96, height: 'auto', display: 'block' }}
+      />
     </Stack>
   );
 }
@@ -263,10 +281,27 @@ export function Callout({
           // other tasks own — and a `<p>` inside a `<p>` is markup the browser
           // silently repairs by closing the outer one, which moves the text out
           // of the box that was meant to contain it.
+          //
+          // ⚠️ **`margin: 0` on those `<p>`s belongs here** (Adam,
+          // 2026-08-26). Nothing in this app resets it: `CssBaseline` paints
+          // the floor and the code face and leaves paragraph margins alone,
+          // and the dashboard's chrome — the one place that DOES zero them —
+          // is a different subtree entirely. So every callout on the login
+          // card was drawing the user agent's `1em` above and below its
+          // sentence, inside a box padded for none: the red OAuth error box
+          // was the obvious one, but `discord` and `neutral` had it too.
+          //
+          // Consecutive paragraphs get their gap from a rule rather than from
+          // the collapsed margins they used to inherit, so a two-`<p>` callout
+          // still reads as two paragraphs.
           <Typography
             variant="body2"
             component="div"
-            sx={{ color: color.text.secondary }}
+            sx={{
+              color: color.text.secondary,
+              '& p': { margin: 0 },
+              '& p + p': { marginTop: 1 },
+            }}
           >
             {children}
           </Typography>

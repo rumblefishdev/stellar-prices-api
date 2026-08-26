@@ -32,7 +32,14 @@ use tower::ServiceExt;
 
 #[path = "common/mock_discord.rs"]
 mod mock_discord;
-use mock_discord::{GRANTED_SCOPE, MockDiscord};
+use mock_discord::{GRANTED_SCOPE, MemberReply, MockDiscord, USER_ID};
+// The mock control plane, for the sign-in tests that issue a key (2026-08-26).
+// Only the two names, never a glob: the harness defines an `oauth_secret` and a
+// `USER_ID` of its own, and this file already has both.
+#[path = "portal_keys/harness.rs"]
+mod harness;
+use harness::{MockGateway, PLAN_ID};
+use prices_api::portal::keys::gateway::Gateway;
 
 // ---------------------------------------------------------------------------
 // Router under test
@@ -88,6 +95,27 @@ fn app_against(mock: &MockDiscord) -> Router {
     )
 }
 
+/// The guild sign-in gates on. Any syntactically valid snowflake; the same
+/// constant the issue suite uses, duplicated rather than shared because this
+/// file does not pull in `portal_keys/harness.rs`.
+const GUILD_ID: &str = "897514728459468821";
+
+/// Eligibility settings wired straight from values, no SSM.
+///
+/// ⚠️ Every sign-in test needs these as of 2026-08-26: the callback now proves
+/// guild membership before it writes a session, and a router with no settings
+/// refuses with `?signin=unknown` — fail-closed, deliberately. A test that
+/// wants the refusal builds its own router; the default one is the happy path.
+fn eligibility_settings() -> prices_api::portal::eligibility::EligibilitySettings {
+    use prices_api::portal::eligibility::{EligibilitySettings, ParamSource};
+    EligibilitySettings {
+        // `min_account_age` is present but never consulted on this path —
+        // sign-in proves membership only. Age stays at the key (task 0189).
+        guild_id: ParamSource::Direct(GUILD_ID.to_string()),
+        min_account_age: ParamSource::Direct("5".to_string()),
+    }
+}
+
 fn build_app(portal_enabled: bool, endpoints: Endpoints) -> Router {
     let config = AppConfig {
         ch_enabled: false,
@@ -100,7 +128,7 @@ fn build_app(portal_enabled: bool, endpoints: Endpoints) -> Router {
         // is what every non-portal test wants — with no client in the
         // config there is no code path here that can reach API Gateway.
         portal_keys: None,
-        portal_eligibility: None,
+        portal_eligibility: portal_enabled.then(eligibility_settings),
         portal_rate_limit: None,
     };
     app(&config, AppState::without_ch())
@@ -481,6 +509,9 @@ async fn a_complete_round_trip_signs_the_visitor_in() {
     .await;
 
     assert_eq!(reply.status, StatusCode::SEE_OTHER);
+    // Plain, because `build_app` wires no control plane: with nothing to
+    // issue against, sign-in does not try. The issuing sign-in — the shape a
+    // real deployment has — is covered by the `app_with_keys` tests below.
     assert_eq!(
         reply.location(),
         "/api-tokens/",
@@ -511,10 +542,19 @@ async fn a_complete_round_trip_signs_the_visitor_in() {
     // And the pending cookie is gone — the replay defence, on the wire.
     assert!(reply.clears(cookies::PENDING_COOKIE));
 
-    // Sign-in checks identity only — the membership route is the ISSUE
-    // round-trip's, and a sign-in that consulted it would be re-inventing the
-    // session-carried eligibility ADR 0010 §8 forbids.
-    assert_eq!(mock.member_calls(), 0);
+    // ⚠️ **Sign-in now consults the membership route too (Adam, 2026-08-26).**
+    // This assertion read `0` until then, with the reasoning that the check
+    // belonged to the issue round-trip alone. What it must NOT become is a
+    // session that carries the verdict — ADR 0010 §8 — so the issue and rework
+    // paths still re-prove membership per action, and the cookie below still
+    // says nothing about eligibility. Asserted `1` rather than `>= 1`: one
+    // round-trip answers the membership question once.
+    assert_eq!(mock.member_calls(), 1);
+    assert_eq!(
+        mock.member_guild().as_deref(),
+        Some(GUILD_ID),
+        "the guild asked about is the configured one, not one from the request"
+    );
 
     // The exchange really happened, with the client secret in the BODY and the
     // PKCE verifier that matches the challenge sent at login.
@@ -540,6 +580,299 @@ async fn a_complete_round_trip_signs_the_visitor_in() {
     let verifier = mock.form_field("code_verifier").expect("PKCE verifier");
     assert_eq!(crypto::pkce_challenge(&verifier), started.challenge);
     assert_ne!(verifier, started.challenge);
+}
+
+// ---------------------------------------------------------------------------
+// The sign-in membership gate (Adam, 2026-08-26)
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// The first key, on the first sign-in (Adam, 2026-08-26)
+// ---------------------------------------------------------------------------
+
+/// A router with sign-in, eligibility AND the control plane wired — the shape
+/// of a real deployment, and the one the tests below need. `build_app` leaves
+/// the control plane out on purpose (see its comment), which is also the one
+/// case sign-in lands plain regardless of key: with nothing to issue against,
+/// issuing is not attempted.
+fn app_with_keys(discord: &MockDiscord, gateway: &MockGateway) -> Router {
+    let config = AppConfig {
+        ch_enabled: false,
+        base_url: None,
+        api_keys: vec![],
+        portal_enabled: true,
+        portal_oauth: Some(oauth_secret()),
+        portal_endpoints: Endpoints {
+            api_base: discord.base.clone(),
+            ..Endpoints::default()
+        },
+        portal_keys: Some(Gateway::against(&gateway.base, PLAN_ID.to_string())),
+        portal_eligibility: Some(eligibility_settings()),
+        portal_rate_limit: None,
+    };
+    app(&config, AppState::without_ch())
+}
+
+fn key_name() -> String {
+    format!("discord-{USER_ID}-key")
+}
+
+/// A snowflake for an account created `secs` ago — the too-young test's
+/// input. Same arithmetic as `portal_issue.rs`.
+fn snowflake_created_secs_ago(secs: u64) -> String {
+    const DISCORD_EPOCH_MS: u64 = 1_420_070_400_000;
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    ((now_ms - DISCORD_EPOCH_MS - secs * 1_000) << 22).to_string()
+}
+
+/// Task 0193's first acceptance criterion, on the wire: a first sign-in ends
+/// with a session AND a key, and lands on the state the first-login card
+/// reads. One create, and the key carries the visitor's name.
+#[tokio::test]
+async fn a_first_sign_in_issues_a_key_and_lands_on_the_welcome() {
+    let discord = MockDiscord::start(GRANTED_SCOPE, None).await;
+    let gateway = MockGateway::start().await;
+
+    let reply = sign_in_against(&app_with_keys(&discord, &gateway)).await;
+
+    assert_eq!(reply.status, StatusCode::SEE_OTHER);
+    assert_eq!(reply.location(), "/api-tokens/?issue=ok");
+    assert!(reply.cookie(cookies::SESSION_COOKIE).is_some());
+    assert_eq!(gateway.with(|s| s.create_calls), 1);
+    assert_eq!(gateway.with(|s| s.named(&key_name()).len()), 1);
+}
+
+/// The other half of the criterion: "returning shows the same key". An
+/// existing key is adopted, not re-minted — and the landing is the PLAIN
+/// dashboard, because `?issue=ok` says "Just issued" and that would be a lie
+/// about a key that has existed for months.
+#[tokio::test]
+async fn a_returning_sign_in_adopts_the_key_and_lands_plain() {
+    let discord = MockDiscord::start(GRANTED_SCOPE, None).await;
+    let gateway = MockGateway::start().await;
+    gateway.with(|s| s.seed(&key_name(), 1_700_000_000));
+
+    let reply = sign_in_against(&app_with_keys(&discord, &gateway)).await;
+
+    assert_eq!(reply.location(), "/api-tokens/");
+    assert!(reply.cookie(cookies::SESSION_COOKIE).is_some());
+    assert_eq!(
+        gateway.with(|s| s.create_calls),
+        0,
+        "adopting must not mint"
+    );
+    assert_eq!(gateway.with(|s| s.named(&key_name()).len()), 1);
+}
+
+/// Age is checked at sign-in ONLY for issuing, never for the session: a
+/// brand-new account is signed in and told to wait, and — the part that
+/// matters — the reconciler is never reached, because `issue_for` adopts
+/// without an age check and would mint for exactly this account.
+#[tokio::test]
+async fn a_too_young_account_signs_in_but_gets_no_key() {
+    let discord = MockDiscord::start_with(
+        GRANTED_SCOPE,
+        None,
+        MemberReply::Member {
+            pending: Some(false),
+        },
+        &snowflake_created_secs_ago(30),
+    )
+    .await;
+    let gateway = MockGateway::start().await;
+
+    let reply = sign_in_against(&app_with_keys(&discord, &gateway)).await;
+
+    assert!(
+        reply
+            .location()
+            .starts_with("/api-tokens/?issue=too_young&wait_secs="),
+        "{}",
+        reply.location()
+    );
+    assert!(
+        reply.cookie(cookies::SESSION_COOKIE).is_some(),
+        "too young to hold a key is not too young to sign in"
+    );
+    assert_eq!(gateway.with(|s| s.create_calls), 0);
+    assert_eq!(
+        gateway.with(|s| s.list_calls),
+        0,
+        "the reconciler must not run"
+    );
+}
+
+/// An account that revoked its key this period signs in to the plain
+/// dashboard — where `GET /key` renders the revoked card — rather than to
+/// `?issue=capped`, which answers a request for a new key this visitor did
+/// not make. Nothing is written.
+#[tokio::test]
+async fn a_revoked_account_signs_in_and_lands_plain() {
+    let discord = MockDiscord::start(GRANTED_SCOPE, None).await;
+    let gateway = MockGateway::start().await;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    gateway.with(|s| s.seed_revoked(&key_name(), now - 86_400, now - 60));
+
+    let reply = sign_in_against(&app_with_keys(&discord, &gateway)).await;
+
+    assert_eq!(reply.location(), "/api-tokens/");
+    assert!(reply.cookie(cookies::SESSION_COOKIE).is_some());
+    assert_eq!(gateway.with(|s| s.create_calls), 0);
+}
+
+/// The membership gate still comes first: a non-member gets neither a session
+/// nor a key, and the control plane is never consulted.
+#[tokio::test]
+async fn a_non_member_gets_no_key_either() {
+    let discord = MockDiscord::start_with(
+        GRANTED_SCOPE,
+        None,
+        MemberReply::NotFound { code: 10_007 },
+        USER_ID,
+    )
+    .await;
+    let gateway = MockGateway::start().await;
+
+    let reply = sign_in_against(&app_with_keys(&discord, &gateway)).await;
+
+    assert_eq!(reply.location(), "/api-tokens/?signin=not_member");
+    assert!(reply.cookie(cookies::SESSION_COOKIE).is_none());
+    assert_eq!(gateway.with(|s| s.list_calls), 0);
+    assert_eq!(gateway.with(|s| s.create_calls), 0);
+}
+
+/// Drive a full sign-in against `mock` and return the callback's reply.
+async fn sign_in_against(router: &Router) -> Reply {
+    let started = start_login(router).await;
+    fetch(
+        router,
+        &format!("{CALLBACK_PATH}?code=an-auth-code&state={}", started.state),
+        &[(cookies::PENDING_COOKIE, &started.pending)],
+    )
+    .await
+}
+
+/// A non-member is refused AT SIGN-IN, and leaves with no session.
+///
+/// The refusal has to be the absence of a cookie, not a dashboard that then
+/// says no: a session is the only thing standing between a visitor and every
+/// signed-in route, and issuing one to somebody we have just decided is not
+/// entitled to a key would make the gate decorative.
+#[tokio::test]
+async fn a_non_member_cannot_sign_in() {
+    let mock = MockDiscord::start_with(
+        GRANTED_SCOPE,
+        None,
+        MemberReply::NotFound { code: 10_007 },
+        USER_ID,
+    )
+    .await;
+    let open = app_against(&mock);
+
+    let reply = sign_in_against(&open).await;
+
+    assert_eq!(reply.status, StatusCode::SEE_OTHER);
+    assert_eq!(reply.location(), "/api-tokens/?signin=not_member");
+    assert!(
+        reply.cookie(cookies::SESSION_COOKIE).is_none(),
+        "a refused sign-in must not leave a session behind"
+    );
+    // The pending cookie still goes, so the callback stays single-use even on
+    // a refusal — otherwise a refused visitor could replay the code.
+    assert!(reply.clears(cookies::PENDING_COOKIE));
+    assert_eq!(mock.member_calls(), 1);
+}
+
+/// `pending: true` — on the server but still inside its screening — is the
+/// same refusal, and is task 0189's rule rather than a new one: `decide` and
+/// `membership` share the single statement of it.
+#[tokio::test]
+async fn a_member_still_in_screening_cannot_sign_in() {
+    let mock = MockDiscord::start_with(
+        GRANTED_SCOPE,
+        None,
+        MemberReply::Member {
+            pending: Some(true),
+        },
+        USER_ID,
+    )
+    .await;
+
+    let reply = sign_in_against(&app_against(&mock)).await;
+
+    assert_eq!(reply.location(), "/api-tokens/?signin=not_member");
+    assert!(reply.cookie(cookies::SESSION_COOKIE).is_none());
+}
+
+/// Every way of NOT KNOWING lands on `unknown`, never on `not_member`.
+///
+/// This is the half that matters most: "not a member" is a statement about the
+/// visitor which they cannot act on if we are wrong, and a throttle from
+/// Discord is not evidence of anything about them. One refusal per shape, all
+/// of them without accusation.
+#[tokio::test]
+async fn an_unanswerable_membership_question_refuses_without_accusing() {
+    for reply_shape in [
+        // Discord throttled or fell over.
+        MemberReply::Status(StatusCode::TOO_MANY_REQUESTS),
+        MemberReply::Status(StatusCode::INTERNAL_SERVER_ERROR),
+        // A `200` we cannot read, and one whose `pending` is absent — 0180
+        // item 2's arm, which is deliberately NOT read as membership.
+        MemberReply::Malformed,
+        MemberReply::Member { pending: None },
+        // An unrecognised `404` code is a shape we do not know, not a verdict.
+        MemberReply::NotFound { code: 99_999 },
+    ] {
+        let mock = MockDiscord::start_with(GRANTED_SCOPE, None, reply_shape, USER_ID).await;
+
+        let reply = sign_in_against(&app_against(&mock)).await;
+
+        assert_eq!(reply.location(), "/api-tokens/?signin=unknown");
+        assert!(reply.cookie(cookies::SESSION_COOKIE).is_none());
+    }
+}
+
+/// A deployment with credentials but no eligibility parameters cannot ask the
+/// question, so it refuses — and refuses as `unknown`, because nothing was
+/// decided about the visitor.
+///
+/// Fail-closed on purpose: `login` already refuses `action=issue` on an
+/// unwired build, so signing someone in here would seat them on a dashboard
+/// whose only action is guaranteed to refuse them.
+#[tokio::test]
+async fn a_deployment_with_no_eligibility_settings_refuses_sign_in() {
+    let mock = MockDiscord::start(GRANTED_SCOPE, None).await;
+    let config = AppConfig {
+        ch_enabled: false,
+        base_url: None,
+        api_keys: vec![],
+        portal_enabled: true,
+        portal_oauth: Some(oauth_secret()),
+        portal_endpoints: Endpoints {
+            api_base: mock.base.clone(),
+            ..Endpoints::default()
+        },
+        portal_keys: None,
+        portal_eligibility: None,
+        portal_rate_limit: None,
+    };
+    let unwired = app(&config, AppState::without_ch());
+
+    let reply = sign_in_against(&unwired).await;
+
+    assert_eq!(reply.location(), "/api-tokens/?signin=unknown");
+    assert!(reply.cookie(cookies::SESSION_COOKIE).is_none());
+    assert_eq!(
+        mock.member_calls(),
+        0,
+        "with no guild id there is nothing to ask"
+    );
 }
 
 /// The criterion "the page shows their Discord username and ID", from the

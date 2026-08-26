@@ -7,7 +7,7 @@
 //!
 //! | route | does |
 //! | --- | --- |
-//! | `GET /auth/login` | mints `state` + PKCE, redirects to Discord |
+//! | `GET /auth/login` | mints `state` + PKCE, redirects to Discord; the callback proves membership, signs in, and issues the first key |
 //! | `GET /auth/login?action=issue` | the same, for the eligibility-checked issue round-trip ([0189]) |
 //! | `GET /auth/callback` | verifies `state`, exchanges the code, completes the action it names |
 //! | `GET /auth/me` | reports who the caller is, or that they are nobody |
@@ -20,12 +20,25 @@
 //!
 //! # What a callback completes depends on what its `state` names
 //!
-//! A `signin` callback issues a session and nothing else. An `issue` callback
-//! ([`issue`], task 0189) additionally checks guild membership and account age
-//! against the **fresh** token before handing off to the key path — that is
-//! ADR 0010 §8's "the callback completes that action and nothing else", and
-//! the action slot in [`state_token`] is what makes the two round-trips
-//! non-interchangeable. Nothing here reads or writes any store — there is no
+//! A `signin` callback proves **guild membership** and, if it holds, issues a
+//! session — and then, since 2026-08-26, runs the same age check and reconciler
+//! the `issue` callback runs, so a first sign-in lands with a key
+//! ([`issue::after_sign_in`]; task 0193's first acceptance criterion). An
+//! `issue` callback ([`issue`], task 0189) is the explicit press: it proves
+//! membership **and account age** against its own **fresh** token before
+//! handing off to the key path. The action slot in [`state_token`] still keeps
+//! the two round-trips non-interchangeable — they land on different states for
+//! the same outcome (an adopted key is the plain dashboard from sign-in and the
+//! welcome from a press).
+//!
+//! ⚠️ **Sign-in checked identity alone until 2026-08-26 (Adam).** The gate was
+//! [0189]'s and stood only at the key, so a non-member could sign in and meet
+//! the refusal one press later. It now stands in both places — and it has to
+//! stand in both: the session carries no eligibility claim (ADR 0010 §8), so
+//! the sign-in check expires with the sign-in that ran it and proves nothing
+//! about the next action. Age is deliberately NOT re-checked here; an account
+//! old enough once is old enough forever, and failing a young account's
+//! sign-in would lock it out of a dashboard it may read. Nothing here reads or writes any store — there is no
 //! registry yet ([0190] decides whether there ever is one) and no Discord
 //! token is kept (see [`session`]).
 //!
@@ -58,6 +71,7 @@ use serde::{Deserialize, Serialize};
 use crate::common::extract::ValidatedQuery;
 use crate::common::{cache_control, errors};
 
+use super::eligibility;
 use secret::OauthSecret;
 use session::Session;
 use state_token::{Action, StateError};
@@ -88,6 +102,25 @@ const PORTAL_HOME: &str = "/api-tokens/";
 /// screen, so [0185]'s page can say "sign-in cancelled" instead of silently
 /// looking signed out.
 const CANCELLED_QUERY: &str = "?signin=cancelled";
+
+/// Appended to [`PORTAL_HOME`] when the visitor is not a member of the guild.
+///
+/// ⚠️ **Sign-in refuses on membership as of 2026-08-26 (Adam).** Until then the
+/// gate stood only on the issue round-trip ([0189]) and signing in proved
+/// identity alone ([0186]): a non-member reached the dashboard and met the
+/// refusal one press later, at the key. The gate is now BOTH places, not moved
+/// — see the sign-in tail in [`callback`] for why the later one cannot go.
+const NOT_MEMBER_QUERY: &str = "?signin=not_member";
+
+/// Appended to [`PORTAL_HOME`] when the membership question could not be
+/// answered — Discord unreachable, an unreadable guild parameter, a response
+/// with no `pending` field, or a deployment with no eligibility settings wired.
+///
+/// A separate landing from [`NOT_MEMBER_QUERY`] for the reason [0189] gives and
+/// [0193] made an acceptance criterion: "could not verify" is our fault and is
+/// retryable, "not a member" is a statement about the visitor that they cannot
+/// act on if it is wrong. Never collapse the two.
+const UNKNOWN_QUERY: &str = "?signin=unknown";
 
 /// Appended to [`PORTAL_HOME`] when Discord refused the request for a reason
 /// that is **not** the visitor declining.
@@ -498,6 +531,100 @@ async fn callback(
         return issue::complete_issue(&state, oauth, token, drop_pending, started).await;
     }
 
+    // ⚠️ **Membership is proved HERE too, as of 2026-08-26 (Adam).**
+    //
+    // Task 0186 made sign-in identity-only and 0189 put the whole eligibility
+    // gate on the issue round-trip. That is why a non-member could sign in:
+    // nothing on this path ever asked. It now asks, and refuses before any
+    // session cookie is written — a refused sign-in leaves the visitor signed
+    // out, which is the only refusal a page with no dashboard behind it can
+    // express.
+    //
+    // **This ADDS a gate, it does not move one.** The issue and rework paths
+    // still re-prove membership per action, and must: ADR 0010 §8 forbids the
+    // session from carrying an eligibility claim, precisely because a cookie
+    // minted today would still be asserting "member" weeks later when the
+    // visitor has left the server. This check therefore expires with the
+    // sign-in that ran it and proves nothing about the next action.
+    //
+    // **Membership only — never the age check.** `eligibility::membership` is
+    // the half [0191]'s rework already re-proves on its own; an account old
+    // enough once is old enough forever, so making a first-day account fail to
+    // SIGN IN would lock it out of a dashboard it is entitled to read the
+    // moment it is old enough. Age stays where 0189 put it: at the key.
+    //
+    // The token is BORROWED here and consumed by the identity read below, in
+    // the order `issue::complete_issue` uses and for the same reason: one
+    // round-trip answers both questions.
+    // Both parameters are read, not just the guild: the age threshold is
+    // consulted AFTER the session is written, by `issue::after_sign_in`, and
+    // reading it here means one SSM round-trip serves both questions.
+    let checked: Option<(discord::MemberLookup, u64)> = match state.issue.settings.as_deref() {
+        Some(settings) => match (
+            settings.guild_id().await,
+            settings.min_account_age_minutes().await,
+        ) {
+            (Ok(guild_id), Ok(min_age)) => {
+                let looked_up =
+                    discord::guild_member(&state.http, &state.endpoints, &token, &guild_id).await;
+                if let discord::MemberLookup::NotMember { code: 10_004 } = looked_up {
+                    // "Unknown Guild" is far more likely to be OUR mis-seeded
+                    // parameter than the visitor's standing. Same warn, same
+                    // reasoning, as the issue path's.
+                    tracing::warn!(
+                        guild_id = %guild_id,
+                        "sign-in membership check answered Unknown Guild (10004) — \
+                         is the discord-guild-id parameter right?"
+                    );
+                }
+                Some((looked_up, min_age))
+            }
+            (guild, age) => {
+                for error in [guild.err(), age.err()].into_iter().flatten() {
+                    tracing::error!(
+                        error = %error,
+                        "eligibility parameter could not be read at sign-in; refusing without accusation"
+                    );
+                }
+                None
+            }
+        },
+        // Fail closed, and deliberately: an unwired deployment already refuses
+        // `action=issue`, so letting sign-in through would seat visitors on a
+        // dashboard whose only action is guaranteed to refuse them. A portal
+        // that cannot ask the question is a portal that is not open yet, which
+        // is [0183]'s state and has a screen of its own.
+        None => {
+            tracing::error!("a sign-in callback arrived with no eligibility settings wired");
+            None
+        }
+    };
+    let membership = checked
+        .as_ref()
+        .map(|(member, _)| eligibility::membership(member))
+        .unwrap_or(eligibility::Membership::Unknown);
+
+    match membership {
+        eligibility::Membership::Member => {}
+        eligibility::Membership::NotMember => {
+            tracing::info!(outcome = "not_member", "portal sign-in refused");
+            return redirect(
+                &format!("{PORTAL_HOME}{NOT_MEMBER_QUERY}"),
+                vec![drop_pending],
+            );
+        }
+        eligibility::Membership::Unknown => {
+            // The load-bearing warns (which check could not answer, and why)
+            // fired where the answer was known; this line says what the
+            // visitor was told.
+            tracing::info!(
+                outcome = "unknown",
+                "portal sign-in refused without accusation"
+            );
+            return redirect(&format!("{PORTAL_HOME}{UNKNOWN_QUERY}"), vec![drop_pending]);
+        }
+    }
+
     // `token` is moved here, so from this line on the handler cannot reach it.
     let user = match discord::current_user(&state.http, &state.endpoints, token).await {
         Ok(user) => user,
@@ -505,8 +632,19 @@ async fn callback(
     };
 
     let session = Session::issue(&user.id, &user.username, state_token::now_secs());
+
+    // The first key, on the first sign-in (Adam, 2026-08-26) — see
+    // `issue::after_sign_in` for what lands where. `checked` is `Some` here
+    // by construction: `Membership::Member` above is derived from it.
+    let landing = match checked.as_ref() {
+        Some((member, min_age)) => {
+            issue::after_sign_in(&state, member, &user.id, *min_age, started).await
+        }
+        None => String::new(),
+    };
+
     redirect(
-        PORTAL_HOME,
+        &format!("{PORTAL_HOME}{landing}"),
         vec![
             drop_pending,
             cookies::set(
@@ -1020,6 +1158,8 @@ mod tests {
     #[test]
     fn the_two_landing_states_are_distinct_literals() {
         assert_eq!(CANCELLED_QUERY, "?signin=cancelled");
+        assert_eq!(NOT_MEMBER_QUERY, "?signin=not_member");
+        assert_eq!(UNKNOWN_QUERY, "?signin=unknown");
         assert_eq!(FAILED_QUERY, "?signin=failed");
         assert_ne!(CANCELLED_QUERY, FAILED_QUERY);
         assert_eq!(ERROR_ACCESS_DENIED, "access_denied");
@@ -1040,6 +1180,8 @@ mod tests {
         for query in [
             CANCELLED_QUERY,
             FAILED_QUERY,
+            NOT_MEMBER_QUERY,
+            UNKNOWN_QUERY,
             issue::ISSUE_OK_QUERY,
             issue::ISSUE_NOT_MEMBER_QUERY,
             issue::ISSUE_UNKNOWN_QUERY,

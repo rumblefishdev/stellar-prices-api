@@ -406,44 +406,145 @@ pub(super) async fn complete_issue(
             );
             land(ISSUE_UNKNOWN_QUERY)
         }
-        Eligibility::Eligible => {
-            let Some(gateway) = state.issue.gateway.as_deref() else {
+        Eligibility::Eligible => match issue(state, &user.id, started).await {
+            // An explicit press lands on the welcome whether the key was
+            // minted or adopted — the visitor asked for a key and has one.
+            Issued { .. } => land(ISSUE_OK_QUERY),
+            Capped { next_eligible_date } => land(&capped_query(&next_eligible_date)),
+            Failed => land(ISSUE_FAILED_QUERY),
+            Unwired => {
                 tracing::error!("an eligible issue callback arrived with no control plane wired");
-                return land(ISSUE_FAILED_QUERY);
-            };
-
-            // What is left of the invocation, not a constant. Everything above
-            // — the exchange, both parameter reads, both Discord reads — has
-            // already been paid for out of the same budget.
-            let remaining = ISSUE_BUDGET.saturating_sub(started.elapsed());
-            if remaining < RECONCILE_FLOOR {
-                tracing::error!(
-                    remaining_ms = remaining.as_millis() as u64,
-                    "eligibility passed but the invocation's budget is spent; \
-                     refusing to start a reconciliation that cannot finish"
-                );
-                return land(ISSUE_FAILED_QUERY);
+                land(ISSUE_FAILED_QUERY)
             }
-            // `min`, so the configured deadline stays an upper bound and the
-            // `with_deadline` test seam keeps working.
-            let deadline = remaining.min(state.issue.deadline);
+        },
+    }
+}
 
-            match keys::issue_for(gateway, &user.id, deadline).await {
-                IssueOutcome::Issued => {
-                    // A key now exists, so a cached "no key" on the usage
-                    // route is false — same eviction the reveal performs,
-                    // for the page this redirect is about to land on.
-                    if let Some(cache) = &state.issue.usage_cache {
-                        cache.invalidate_no_key(&user.id);
-                    }
-                    land(ISSUE_OK_QUERY)
-                }
-                IssueOutcome::Capped { next_eligible_date } => {
-                    land(&capped_query(&next_eligible_date))
-                }
-                IssueOutcome::Failed => land(ISSUE_FAILED_QUERY),
+/// What [`issue`] settled on — [`IssueOutcome`] plus the one case that is the
+/// deployment's fault rather than the reconciler's, so each caller can land
+/// it in its own words.
+pub(super) enum Landing {
+    Issued {
+        created: bool,
+    },
+    Capped {
+        next_eligible_date: String,
+    },
+    Failed,
+    /// No control plane wired. Nothing was attempted.
+    Unwired,
+}
+use Landing::*;
+
+/// Run the reconciler for `user_id` inside what is left of the invocation.
+///
+/// The shared half of two callbacks: the explicit `action=issue` press
+/// ([`complete_issue`]) and, since 2026-08-26, the sign-in round-trip
+/// ([`after_sign_in`]). What each does with the answer differs; what it costs
+/// and how it is bounded does not, and it lives once.
+///
+/// `started` is stamped when the **request** arrived — see [`ISSUE_BUDGET`].
+async fn issue(state: &AuthState, user_id: &str, started: Instant) -> Landing {
+    let Some(gateway) = state.issue.gateway.as_deref() else {
+        return Unwired;
+    };
+
+    // What is left of the invocation, not a constant. Everything before this
+    // — the exchange, both parameter reads, both Discord reads — has already
+    // been paid for out of the same budget.
+    let remaining = ISSUE_BUDGET.saturating_sub(started.elapsed());
+    if remaining < RECONCILE_FLOOR {
+        tracing::error!(
+            remaining_ms = remaining.as_millis() as u64,
+            "eligibility passed but the invocation's budget is spent; \
+             refusing to start a reconciliation that cannot finish"
+        );
+        return Failed;
+    }
+    // `min`, so the configured deadline stays an upper bound and the
+    // `with_deadline` test seam keeps working.
+    let deadline = remaining.min(state.issue.deadline);
+
+    match keys::issue_for(gateway, user_id, deadline).await {
+        IssueOutcome::Issued { created } => {
+            // A key now exists, so a cached "no key" on the usage route is
+            // false — same eviction the reveal performs, for the page this
+            // redirect is about to land on.
+            if let Some(cache) = &state.issue.usage_cache {
+                cache.invalidate_no_key(user_id);
             }
+            Issued { created }
         }
+        IssueOutcome::Capped { next_eligible_date } => Capped { next_eligible_date },
+        IssueOutcome::Failed => Failed,
+    }
+}
+
+/// The key half of a **sign-in** callback (Adam, 2026-08-26): the landing
+/// query for a visitor who has just proved membership and identity.
+///
+/// **Why sign-in issues at all.** Task 0193's first acceptance criterion is
+/// "first sign-in lands on the dashboard with the key visible and copyable;
+/// returning shows the same key". Until this, sign-in proved identity and
+/// stopped, and a first-timer met an empty dashboard with a button that ran
+/// the whole round-trip again. This is that second round-trip folded into the
+/// first, with two differences from an explicit press, both about what the
+/// visitor is TOLD:
+///
+/// - An adopted key lands on the plain dashboard, not the welcome. `?issue=ok`
+///   says "Your API Key is ready · Just issued", which is false of a key that
+///   has existed for months; the dashboard's own reveal shows it.
+/// - A revoked key lands plain too. The explicit press lands `?issue=capped`
+///   because it is answering a request for a new key; a sign-in made no such
+///   request, and the dashboard's `GET /key` renders the revoked card, which
+///   is the screen for that account. And once the period has rolled the
+///   reconciler simply mints one — which is exactly what that card's footer
+///   promises ("sign in again to receive a new key automatically").
+///
+/// **Age is checked here, not at sign-in's gate.** Membership was proved
+/// before the session was written (a non-member gets no session); a too-young
+/// account IS signed in and lands `?issue=too_young`, because an account old
+/// enough once is old enough forever and it is entitled to read the dashboard
+/// while it waits. What it must not do is reach the reconciler: `issue_for`
+/// adopts without an age check, so skipping `decide` here would mint a key for
+/// exactly the account the threshold exists to refuse.
+///
+/// `Unwired` lands plain with an error line rather than `?issue=failed`: the
+/// session is the sign-in's deliverable and it exists; the dashboard's own
+/// issue control reaches `refuse_issue_start`, which reports the fault to the
+/// visitor in the state that means "our key service, not you".
+pub(super) async fn after_sign_in(
+    state: &AuthState,
+    member: &MemberLookup,
+    user_id: &str,
+    min_age_minutes: u64,
+    started: Instant,
+) -> String {
+    match eligibility::decide(member, user_id, min_age_minutes, eligibility::now_ms()) {
+        Eligibility::TooYoung { wait_secs } => {
+            tracing::info!(outcome = "too_young", wait_secs, "sign-in issued no key");
+            too_young_query(wait_secs)
+        }
+        // Membership was decided before the session was written; `decide`
+        // re-derives the same answer from the same `MemberLookup`, so these
+        // two arms are unreachable. Land plain rather than panic — the
+        // dashboard's issue control will re-ask and land the real verdict.
+        Eligibility::NotMember | Eligibility::Unknown => {
+            tracing::warn!("sign-in passed membership but `decide` did not; landing without a key");
+            String::new()
+        }
+        Eligibility::Eligible => match issue(state, user_id, started).await {
+            Issued { created: true } => ISSUE_OK_QUERY.to_string(),
+            Issued { created: false } => String::new(),
+            Capped { .. } => String::new(),
+            Failed => ISSUE_FAILED_QUERY.to_string(),
+            Unwired => {
+                tracing::error!(
+                    "a sign-in callback arrived with no control plane wired; no key issued"
+                );
+                String::new()
+            }
+        },
     }
 }
 

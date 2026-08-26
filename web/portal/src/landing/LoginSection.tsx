@@ -4,10 +4,18 @@ import Container from '@mui/material/Container';
 import Link from '@mui/material/Link';
 import Stack from '@mui/material/Stack';
 import { alpha } from '@mui/material/styles';
-import type { ReactNode } from 'react';
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useLayoutEffect,
+  useState,
+  type ReactNode,
+} from 'react';
 import { Link as RouterLink } from 'react-router-dom';
 
 import { color } from '../theme/tokens';
+import { LOGIN_CARD_MAX_WIDTH } from './LoginCard';
 import { LOGIN_ANCHOR } from './links';
 
 /**
@@ -28,6 +36,42 @@ import { LOGIN_ANCHOR } from './links';
  * running out — the two screens the reviewer looks at are visibly the same
  * product.
  */
+/**
+ * How a card tells the section "I am drawing the back link myself".
+ *
+ * ⚠️ Added 2026-08-26 (Adam): the OAuth error card puts "Back to landing"
+ * INSIDE it, under "Try again with Discord", while every other login state
+ * keeps it above the card. Both cannot render one — two links with the same
+ * name and the same target on one page is the bug this whole arrangement
+ * exists to avoid — and the state that decides lives three components down,
+ * in `LoginPanel`, where the `?signin=…` outcome is held.
+ *
+ * A context rather than a prop threaded through `LoginRoute` → `LoginView` →
+ * `LoginPanel`: those two middle components exist only to place the panel and
+ * would be carrying a value neither of them reads.
+ */
+const BackLinkClaim = createContext<((owned: boolean) => void) | null>(null);
+
+/**
+ * Claim the section's back link for this card, for as long as `owned` holds.
+ *
+ * `useLayoutEffect`, not `useEffect`: the claim has to land before the browser
+ * paints, or the section's own link is visible for a frame and the page
+ * flickers a second one in and out.
+ *
+ * Call it UNCONDITIONALLY with a boolean — it is a hook, and a card that
+ * claims on some renders and not others would break the rules of hooks.
+ */
+export function useOwnBackLink(owned: boolean) {
+  const claim = useContext(BackLinkClaim);
+  useLayoutEffect(() => {
+    claim?.(owned);
+    // Released on unmount as well as on `owned` going false, so a card that
+    // disappears does not leave the section thinking somebody still has it.
+    return () => claim?.(false);
+  }, [claim, owned]);
+}
+
 export function LoginSection({
   children,
   testId,
@@ -59,6 +103,11 @@ export function LoginSection({
   /** Drop the section's vertical rhythm to a caption's worth. */
   compact?: boolean;
 }) {
+  // Whether a card inside this section is drawing the back link itself. See
+  // `useOwnBackLink`.
+  const [cardOwnsBackLink, setCardOwnsBackLink] = useState(false);
+  const claim = useCallback((owned: boolean) => setCardOwnsBackLink(owned), []);
+
   return (
     <Box
       component="section"
@@ -85,7 +134,7 @@ export function LoginSection({
           inset: 0,
           pointerEvents: 'none',
           backgroundImage: `
-            radial-gradient(50% 60% at 50% 35%, ${alpha(color.primary[400], 0.06)} 0%, transparent 70%),
+            radial-gradient(50% 60% at 50% 35%, ${alpha(color.primary[400], 0.085)} 0%, transparent 70%),
             linear-gradient(${alpha(color.stroke.default, 0.12)} 1px, transparent 1px),
             linear-gradient(90deg, ${alpha(color.stroke.default, 0.12)} 1px, transparent 1px)`,
           backgroundSize: '100% 100%, 80px 80px, 80px 80px',
@@ -96,12 +145,30 @@ export function LoginSection({
 
       <Container sx={{ position: 'relative', width: '100%' }}>
         <Stack spacing={3} alignItems="center">
-          {/* Top-left in the design. A router `Link`, not an `<a href>`: this
-              is an in-app navigation and a full document load here would throw
-              away the `/config` answer and the session lookup the app has
-              already made. */}
-          {back && (
-            <Box sx={{ alignSelf: 'flex-start' }}>
+          {/* Top-left in the design, and ABOVE the card — where it briefly
+              was not: on 2026-08-26 it moved into the foot of the card and
+              then straight back here, at Adam's instruction, because the frame
+              puts it here on every login state. The card renders none of its
+              own; this is the only one on the page.
+
+              A router `Link`, not an `<a href>`: this is an in-app navigation
+              and a full document load here would throw away the `/config`
+              answer and the session lookup the app has already made. */}
+          {back && !cardOwnsBackLink && (
+            // ⚠️ **Above the card, aligned to its left edge — not beside it**
+            // (Adam, 2026-08-26). `alignSelf: 'flex-start'` put the link
+            // against the CONTAINER's edge, which at 1280 px leaves it
+            // stranded hundreds of pixels away from the 464 px card it
+            // belongs to and reads as page furniture rather than as this
+            // screen's way back. Matching the card's own column puts it
+            // where every frame draws it.
+            <Box
+              sx={{
+                width: '100%',
+                maxWidth: LOGIN_CARD_MAX_WIDTH,
+                alignSelf: 'center',
+              }}
+            >
               <Link
                 component={RouterLink}
                 to="/"
@@ -120,7 +187,9 @@ export function LoginSection({
             </Box>
           )}
 
-          {children}
+          <BackLinkClaim.Provider value={claim}>
+            {children}
+          </BackLinkClaim.Provider>
         </Stack>
       </Container>
     </Box>
