@@ -153,28 +153,24 @@ a backfill deletes output as fast as it is written. That cost 5 days once.
 after** every deploy of this stack. A code-only change to the worker crate does
 not carry this risk; a `memorySize` change does.
 
-## 🔴 Finding that belongs to [[0223]], not here
+## 🔴 Finding that belonged to [[0223]] — corrected there, same PR
 
-While checking whether the alarm noise was 0223's problem, a real scope gap
-surfaced in 0223 itself.
+Checking whether the oracle's alarm noise was 0223's problem exposed a scope
+error in 0223 itself. The oracle's `-errors` alarm is not built where 0223 said
+`-errors` alarms are built.
 
-0223 says *"apply to every worker built by `addWorkerHealthAlarms`."* The oracle's
-error alarm is **not** built there — it comes from a second code path:
+✅ **Applied to 0223 on 2026-08-26**, in the PR that spawned this task. Summary,
+scope bullets and acceptance criteria corrected there; full detail lives in 0223
+under "Where these alarms actually live" rather than being duplicated here.
 
-```
-infra/src/lib/lambda-baseline.ts:309   createWorkerLambda → ${idPrefix}ErrorAlarm
-    evaluationPeriods: 1
-    treatMissingData: NOT_BREACHING        ← identical defect, different file
-```
+The short version: **three** builders, not one — `addWorkerHealthAlarms` builds
+no `-errors` alarm at all, `createWorkerLambda` (`lambda-baseline.ts:309`) builds
+9 of them at `1/1`, and `ledger-processor-errors` is hand-rolled a third time.
+0223 as originally scoped would have fixed the duration half and left every
+`-errors` alarm untouched.
 
-So 0223 as scoped would fix `observability-stack.ts` and leave every
-`createWorkerLambda` error alarm carrying the exact defect it exists to remove.
-
-⚠️ **Same trap [[0222]] hit**: `ledger-processor-no-invocations` was hand-rolled
-outside the helper and needed its own separate change. Two helpers, one defect,
-and the second is easy to miss because the first one looks complete.
-
-**Action: amend 0223's scope.** Not done here — recorded so it is not lost.
+⚠️ **Same trap [[0222]] hit** with the hand-rolled `ledger-processor-no-invocations`
+— here it recurs twice over. Nothing further is owed to 0223 from this task.
 
 ## Out of scope
 
