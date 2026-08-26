@@ -398,8 +398,25 @@ rediscovered.
 
 ### Folded in from [[0199]]
 
-- [ ] `raw_data` inspected and the **upstream-vs-ours** question answered from
-      the stored payload, not from inference.
+- [x] ~~`raw_data` inspected and the upstream-vs-ours question answered from the
+      stored payload~~ — **IMPOSSIBLE AS WRITTEN, criterion retired 2026-08-26.**
+      `oracle-worker/src/lib.rs:301` writes `raw_data` as
+      `format!("{{\"symbol\":\"{symbol}\"}}")` — a literal WE construct, holding
+      the symbol and nothing else. There is no stored payload and no original
+      timestamp, so the column cannot answer the question. 0199's premise that it
+      "keeps the original payload" was wrong.
+      → Replaced by the `usd_rate` gap test below, which reaches the same question
+      through durable data.
+- [ ] **Onset settled via `prices.usd_rate` gaps.** The snapshotter
+      (`writer.rs:493`) drops corrupt readings with `o.timestamp > ORACLE_EPOCH_FLOOR`,
+      and `usd_rate` is forever-retained rather than swept — so every corrupt
+      reading leaves a permanent *hole* there. Its per-day row count is therefore a
+      fossil record of the corruption rate that survives even where `oracle_prices`
+      partition `197001` was swept. A uniform shortfall back to 2026-03-11 kills the
+      "Reflector changed on 2026-07-20" hypothesis outright; a step change dates the
+      real onset.
+- [ ] ⚠️ If neither test dates the onset, say so and stop — the pre-07-20 rows were
+      deleted, and an undatable onset is an honest answer. Do not infer one.
 - [ ] Coverage queries that use `min(timestamp)` on `oracle_prices` are
       re-checked — this defect already gave [[0167]] a wrong start date once.
 - [ ] Whether the 13-month retention should have dropped partition `197001` is
