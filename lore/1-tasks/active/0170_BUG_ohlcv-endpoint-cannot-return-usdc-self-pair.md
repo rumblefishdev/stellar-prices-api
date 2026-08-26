@@ -1,10 +1,10 @@
 ---
 id: "0170"
-title: "GET /assets/{USDC}/ohlcv returns an empty series in every mode — the endpoint asks for a USDC/USDC self-pair, and blocks 0127's M2 acceptance criterion"
+title: "GET /assets/{id}/ohlcv returns an empty 200 for 20,481 assets — base_currency filters the quote leg instead of denominating, and blocks 0127's M2 acceptance criterion"
 type: BUG
 status: active
 related_adr: ["0011"]
-related_tasks: ["0165", "0127", "0167", "0168", "0139", "0061", "0040", "0120"]
+related_tasks: ["0165", "0127", "0167", "0168", "0139", "0061", "0040", "0120", "0225", "0178"]
 tags:
   ["priority-high", "effort-medium", "api", "data-correctness", "read-surface", "scf", "milestone-M2"]
 milestone: 2
@@ -121,6 +121,24 @@ history:
       exotic 13.1 M as an explicit non-goal. 🔴 Sequencing REVERSED from the
       activation note: [[0178]] is blocked by PR #241 (same `current.sql`, same
       CTEs, same [[0095]] DROP+recreate hazard) and cannot start first.
+  - date: 2026-08-26
+    status: active
+    who: okarcz
+    note: >
+      🔑 TITLE CORRECTED to match the scope. It described only the USDC self-pair
+      while the task has covered the whole 20,481-asset population since
+      2026-08-19. That mismatch has now caused the same defect to be spawned as a
+      NEW task twice from the [[0120]] conformance runs — once on 08-19 (retired
+      same day) and again on 08-25 as [[0225]]. A task list that shows the narrow
+      case invites the general one to be filed as new; fixing the title is the
+      actual remedy, not vigilance.
+      [[0225]] reassigned here and activated as this fix's verification vehicle —
+      it gets no separate implementation.
+      [[ADR-0011]] §4 settled the last open decision: derived O/H/L rides as a
+      separate flag, `method` keeps 0165's traded/peg/oracle. Implementation is
+      no longer gated on a design question.
+      ACs split below into the M2 gate and follow-on, so this can close on the
+      evidence that matters rather than on all 19 at once.
 ---
 
 # `/assets/{USDC}/ohlcv` can never return candles
@@ -598,6 +616,13 @@ Not covered by steps 1-5 above, which address the self-pair only.
 
 ## Acceptance Criteria
 
+Split 2026-08-26. **Gate** is what [[0127]]'s M2 criterion and [[0120]]'s re-run
+actually require — this task closes when the gate is met. **Follow-on** is real
+work that does not block the milestone; it moves to a spawned task at close
+rather than holding this one open.
+
+### Gate — blocks [[0127]] AC 3/AC 4 and [[0120]]
+
 - [ ] `GET /assets/{USDC}/ohlcv?timeframe=all` returns a non-empty 1d series
       spanning the backfilled range, verified **through the deployed API**, not
       only in a test.
@@ -617,11 +642,12 @@ Not covered by steps 1-5 above, which address the self-pair only.
       regression on the normal path.
 - [ ] [[0127]] AC 3 + AC 4 re-run and passing.
 
-Added 2026-08-25, for the population the measurement found:
-
-- [ ] `base_currency`'s meaning (denomination vs pair filter) decided and
+- [x] `base_currency`'s meaning (denomination vs pair filter) decided and
       recorded as an ADR, agreed with the [[0120]] owner — not chosen inside the
       implementation.
+      → **[[ADR-0011]] accepted 2026-08-25**, deciders okarcz + stkrolikiewicz.
+      §4's open item (derived O/H/L provenance) settled 2026-08-26: a separate
+      flag, `method` unchanged. No design question remains open.
 - [ ] A non-empty USD series for the five 0120 majors (`CBIJ…`, RON, EQL, BOL,
       AUD **with its issuer pinned** — 15 AUD issuers exist), through the
       deployed API.
@@ -629,19 +655,28 @@ Added 2026-08-25, for the population the measurement found:
       response provenance rather than only in this file.
 - [ ] `close = 0` guarded, with a test — the clean 30-day sample is not proof
       over all history.
-- [ ] Behaviour defined and tested for an unpriced recent bucket (the ~1.8%
-      enrichment-lag residual), and it is not a silent drop.
-- [ ] The exotic-quoted dark population is **counted**, and stated as a known
-      limit — the 26 figure covers XLM-quoted assets only.
 - [ ] Rate derivation refuses to run when `close` or `close_usd` sits within a
       few ticks of the `Decimal(38, 14)` floor — a **precision precondition**,
       tested with the `GC4F4IX6DV` row's shape. A band check on the derived rate
       alone does not satisfy this.
+- [ ] [[0225]]'s acceptance criteria pass — it is this fix's consumer-facing
+      verification and gets no separate implementation.
 - [ ] A test proves the conversion tracks a **moving** USDC rate, not a constant
       — the measurement below shows the rate genuinely wobbles, so asserting
       `1.0` would be asserting the wrong thing.
 - [ ] Provenance uses [[0165]]'s existing `traded` / `peg` / `oracle` values, not
       a new vocabulary.
+
+### Follow-on — real, but does not gate M2
+
+⚠️ These move to a spawned task when the gate closes. Listing them here is not a
+commitment to hold this task open for them; [[0222]] AC 5 is the precedent for
+restating rather than silently carrying.
+
+- [ ] Behaviour defined and tested for an unpriced recent bucket (the ~1.8%
+      enrichment-lag residual), and it is not a silent drop.
+- [ ] The exotic-quoted dark population is **counted**, and stated as a known
+      limit — the 26 figure covers XLM-quoted assets only.
 - [ ] The ADR states the all-history coverage per leg (99.90% live / 98.08%
       pre-Soroban for XLM-quoted) and names the exotic-quoted 13.1 M as an
       explicit non-goal — not a rounded-away caveat.
