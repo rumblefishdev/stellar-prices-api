@@ -531,13 +531,51 @@ impl Timeframe {
 /// `timeframe=all` window math — makes `all` computable without touching CH.
 pub const STELLAR_GENESIS_EPOCH: i64 = 1_443_571_200;
 
+/// Reference `asset_id`s the USD classification keys on, resolved by **natural
+/// identity** (never a bare `asset_id` — task 0139 has 3,281 ids serving 6,568
+/// identities). Mirrors the enrichment worker's own `resolve_reference_ids`, so
+/// the read side and the write side cannot disagree about what "USDC" means.
+#[derive(Debug, Clone)]
+pub struct UsdRefs {
+    /// Canonical USDC. **Required** — the peg-vs-oracle split keys on it, and
+    /// without it a genuine peg row (`close_usd = close` on a USDC leg) is
+    /// indistinguishable from the anomalous same-signature rows on other legs
+    /// and would be dropped. Its absence is a real server-side data gap.
+    pub usdc: u32,
+    /// XLM and canonical USDT, the two pivot references. **Optional**: they only
+    /// select the `traded` label. An untracked reference cannot be any candle's
+    /// quote leg, so the branch simply never matches — refusing to serve the
+    /// endpoint over a missing label would turn a cosmetic dependency into an
+    /// outage.
+    pub pivots: Vec<u32>,
+}
+
+/// What `base_currency` asks for. Per [ADR 0011] it **denominates**; it does not
+/// select a quote leg.
+#[derive(Debug, Clone)]
+pub enum Denomination {
+    /// Express every candle in USD, whatever leg it traded against. No quote
+    /// filter — that filter was the defect: an asset trading only against XLM
+    /// matched the base conjunct and was emptied by the quote one, returning a
+    /// `200` with no data for 20,481 assets.
+    Usd(UsdRefs),
+    /// Filter to one quote leg and return the candles as stored.
+    ///
+    /// ⚠️ This is the **pre-ADR-0011 behaviour**, still in place for
+    /// `base_currency=XLM`. Converting that mode needs XLM's own USD rate per
+    /// bucket, which is not on the candle row — ADR 0011 §6's degenerate cases.
+    /// Tracked in [`0170`]; not a decision, just not done yet.
+    QuoteLeg(u32),
+}
+
 /// Validated OHLCV query inputs. `start`/`end` are **validated epochs**
 /// (task 0119): binding the handler's parse result instead of the raw string
 /// leaves exactly one interpretation of the window — no divergence between our
 /// point-count check and what ClickHouse would have made of the raw value.
 pub struct OhlcvArgs {
     pub asset_id: u32,
-    pub quote_asset_id: u32,
+    /// How the candles are denominated (ADR 0011 §1).
+    pub denomination: Denomination,
     pub granularity: Granularity,
     /// Window lower bound (epoch seconds) — always set by the handler.
     pub start: Option<i64>,
@@ -547,17 +585,74 @@ pub struct OhlcvArgs {
     pub limit: u64,
 }
 
-/// Read merged candles for one asset against one quote leg, at the chosen grain.
+/// Read merged candles for one asset at the chosen grain, denominated per
+/// [ADR 0011].
 ///
-/// Per-source rows are collapsed (`FINAL`) then merged across sources per
-/// bucket: `high=max`, `low=min`, volumes + `trade_count` summed, `vwap`
-/// volume-weighted, and `open`/`close` taken from the highest-volume source
-/// (`argMax(.., volume_base)`). O/H/L/C are returned as stored (quote-asset
-/// denominated). Ascending by timestamp.
+/// Per-source rows are collapsed (`FINAL`) then merged per bucket: `high=max`,
+/// `low=min`, volumes + `trade_count` summed, `vwap` volume-weighted, and
+/// `open`/`close` from the highest-volume source (`argMax(.., volume_base)`).
+/// Ascending by timestamp.
+///
+/// ## 🔑 In USD mode the conversion happens BEFORE the merge, and the order is
+/// load-bearing
+///
+/// Dropping the quote filter means one bucket can hold candles from several
+/// quote legs at once — AUD against XLM and against USDC in the same day. The
+/// merge takes `max(high)` across those rows. Convert *after* merging and that
+/// `max` compares an XLM-denominated high with a USDC-denominated one: different
+/// units, silently, with a plausible-looking number falling out.
+///
+/// So every row is scaled to USD in the inner SELECT and only then aggregated.
+/// ADR 0011 §1 forces this — a denomination whose meaning varies with the data
+/// available is the `close_usd = 0` defect class in a new place — but the ADR
+/// does not state the ordering, so it is stated here.
+///
+/// ## Provenance is derived, because the candle tables do not store it
+///
+/// `close_usd` is a bare `Decimal(38,14)` with no companion `method` column, so
+/// there is nothing to propagate. It is reconstructed from the quote leg and the
+/// rate signature instead. Measured on prod 2026-08-26 over `price_ohlcv_1d`:
+///
+/// | quote leg | signature | n | method |
+/// |---|---|---|---|
+/// | USDC, pre-oracle | `close_usd = close` | 522,321 (100%) | `peg` |
+/// | USDC, oracle window | `close_usd = close` | 134,193 | `peg` |
+/// | USDC, oracle window | scaled | 121,474 | `oracle` |
+/// | XLM / USDT | scaled | 11,038,372 | `traded` |
+/// | anything else | `close_usd = 0` | 13,114,668 (100%) | — no USD fields |
+///
+/// The peg tier multiplies by exactly $1, so `close_usd = close` is an exact
+/// integer comparison on the stored decimals — no division, no float error, and
+/// no dividing by a near-zero `close`. Pre-oracle USDC came back 100% pegged with
+/// zero scaled rows, which is what makes this a classification rather than a
+/// guess.
+///
+/// ⚠️ **`traded` covers the pivot.** ADR 0011 §4 forbids coining a fourth word,
+/// and 0165 defines `traded` as a volume-weighted aggregate of candles a venue
+/// actually traded — which is exactly what the pivot's reference rate is (the
+/// reference asset's own close against USDC). Note this leaves an XLM-quoted
+/// candle labelled `traded` resting on the USDC peg one hop back; that
+/// dependency is [`0228`], not this function.
+///
+/// ## The 5,921 rows this deliberately drops
+///
+/// A candle on an XLM or USDT leg with `close_usd = close` claims its reference
+/// asset was worth exactly $1.00000000000000. XLM has never been near a dollar,
+/// and canonical Stellar USDT trades at ~$0.13 since its 2022 depeg (task 0172).
+/// Measured: 2,139 XLM-quoted and 3,782 USDT-quoted such rows.
+///
+/// They are excluded from the USD aggregation rather than labelled, because
+/// every available label would be a false claim — `peg` asserts a peg that does
+/// not exist on that leg. A bucket left with no valid row still returns, with
+/// its price fields absent (§5); it does not vanish. The underlying rows are
+/// [`0227`]/[`0182`] territory.
 pub async fn ohlcv(ch: &Client, args: OhlcvArgs) -> Result<Vec<Candle>, clickhouse::error::Error> {
     let table = format!("price_ohlcv_{}", args.granularity.as_str());
 
-    let mut conds = vec!["asset_id = ?".to_string(), "quote_asset_id = ?".to_string()];
+    let mut conds = vec!["asset_id = ?".to_string()];
+    if let Denomination::QuoteLeg(_) = args.denomination {
+        conds.push("quote_asset_id = ?".to_string());
+    }
     if args.start.is_some() {
         conds.push("timestamp >= toDateTime(?)".to_string());
     }
@@ -575,11 +670,62 @@ pub async fn ohlcv(ch: &Client, args: OhlcvArgs) -> Result<Vec<Candle>, clickhou
     // ascending for output. An ASC+LIMIT would instead return the OLDEST N and
     // silently drop the recent candles a chart actually wants. `ts` is ISO-8601
     // (`%Y-%m-%dT%H:%i:%SZ`), so lexicographic `ts ASC` == chronological order.
-    let sql = format!(
-        "SELECT ts, o, h, l, c, vb, vqu, vw, tc FROM ( \
-           SELECT \
-             formatDateTime(timestamp, '%Y-%m-%dT%H:%i:%SZ') AS ts, \
-             toString(argMax(open, volume_base)) AS o, \
+    let (projection, aggregates) = match args.denomination {
+        Denomination::Usd(ref refs) => {
+            let usdc = refs.usdc;
+            // Omitted entirely when neither pivot reference is tracked — an
+            // empty `IN ()` is a syntax error, and the label is optional.
+            let traded_arm = if refs.pivots.is_empty() {
+                String::new()
+            } else {
+                let ids: Vec<String> = refs.pivots.iter().map(|i| i.to_string()).collect();
+                format!("quote_asset_id IN ({}), 'traded', ", ids.join(", "))
+            };
+            (
+                // Per-row scaling — see the ordering note above. `valid` gates
+                // both the arithmetic and the classification, so a row that
+                // cannot be priced contributes to volume and trade_count but
+                // never to a price or a method.
+                format!(
+                    "timestamp, volume_base, volume_quote_usd, trade_count, \
+                     (close > 0 AND close_usd > 0 \
+                       AND (quote_asset_id = {usdc} OR close_usd != close)) AS valid, \
+                     toFloat64(close_usd) / nullIf(toFloat64(close), 0) AS rate, \
+                     toDecimal128(toFloat64(open) * rate, 14) AS o_x, \
+                     toDecimal128(toFloat64(high) * rate, 14) AS h_x, \
+                     toDecimal128(toFloat64(low)  * rate, 14) AS l_x, \
+                     close_usd AS c_x, \
+                     toDecimal128(toFloat64(vwap) * rate, 14) AS w_x, \
+                     multiIf(quote_asset_id = {usdc} AND close_usd = close, 'peg', \
+                             quote_asset_id = {usdc}, 'oracle', \
+                             {traded_arm}\
+                             '') AS meth"
+                ),
+                // `countIf(valid) = 0` is what produces §5's price-less bucket:
+                // NULL across every price field, while the volume columns below
+                // still aggregate over all rows.
+                "if(countIf(valid) = 0, NULL, toString(argMaxIf(o_x, volume_base, valid))) AS o, \
+                 if(countIf(valid) = 0, NULL, toString(maxIf(h_x, valid))) AS h, \
+                 if(countIf(valid) = 0, NULL, toString(minIf(l_x, valid))) AS l, \
+                 if(countIf(valid) = 0, NULL, toString(argMaxIf(c_x, volume_base, valid))) AS c, \
+                 toString(sum(volume_base)) AS vb, \
+                 toString(sum(volume_quote_usd)) AS vqu, \
+                 if(countIf(valid) = 0, NULL, toString(toDecimal128(ifNull( \
+                     sumIf(toFloat64(w_x) * toFloat64(volume_base), valid) \
+                     / nullIf(sumIf(toFloat64(volume_base), valid), 0), 0), 14))) AS vw, \
+                 toUInt64(sum(trade_count)) AS tc, \
+                 if(countIf(valid) = 0, NULL, argMaxIf(meth, volume_base, valid)) AS meth, \
+                 if(countIf(valid) = 0, NULL, toUInt8(1)) AS drv"
+                    .to_string(),
+            )
+        }
+        // As stored: no conversion, so nothing is derived and there is no USD
+        // rate to attribute. Both provenance fields are NULL rather than
+        // guessed — see Denomination::QuoteLeg.
+        Denomination::QuoteLeg(_) => (
+            "timestamp, open, high, low, close, volume_base, volume_quote_usd, vwap, trade_count"
+                .to_string(),
+            "toString(argMax(open, volume_base)) AS o, \
              toString(max(high)) AS h, \
              toString(min(low)) AS l, \
              toString(argMax(close, volume_base)) AS c, \
@@ -587,9 +733,19 @@ pub async fn ohlcv(ch: &Client, args: OhlcvArgs) -> Result<Vec<Candle>, clickhou
              toString(sum(volume_quote_usd)) AS vqu, \
              toString(toDecimal128(ifNull(sum(toFloat64(vwap) * toFloat64(volume_base)) \
                  / nullIf(sum(toFloat64(volume_base)), 0), 0), 14)) AS vw, \
-             toUInt64(sum(trade_count)) AS tc \
-           FROM {table} FINAL \
-           WHERE {conds} \
+             toUInt64(sum(trade_count)) AS tc, \
+             CAST(NULL AS Nullable(String)) AS meth, \
+             CAST(NULL AS Nullable(UInt8)) AS drv"
+                .to_string(),
+        ),
+    };
+
+    let sql = format!(
+        "SELECT ts, o, h, l, c, vb, vqu, vw, tc, meth, drv FROM ( \
+           SELECT \
+             formatDateTime(timestamp, '%Y-%m-%dT%H:%i:%SZ') AS ts, \
+             {aggregates} \
+           FROM ( SELECT {projection} FROM {table} FINAL WHERE {conds} ) \
            GROUP BY timestamp \
            ORDER BY timestamp DESC \
            LIMIT {limit} \
@@ -598,7 +754,10 @@ pub async fn ohlcv(ch: &Client, args: OhlcvArgs) -> Result<Vec<Candle>, clickhou
         limit = args.limit
     );
 
-    let mut q = ch.query(&sql).bind(args.asset_id).bind(args.quote_asset_id);
+    let mut q = ch.query(&sql).bind(args.asset_id);
+    if let Denomination::QuoteLeg(quote) = args.denomination {
+        q = q.bind(quote);
+    }
     if let Some(s) = args.start {
         q = q.bind(s);
     }

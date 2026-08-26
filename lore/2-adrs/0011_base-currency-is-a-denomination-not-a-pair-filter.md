@@ -35,6 +35,34 @@ history:
       the response shape, so it must be settled before the implementation lands.
       What is accepted here is the denomination CONTRACT, not the serialisation
       of provenance.
+  - date: 2026-08-26
+    status: accepted
+    who: okarcz
+    note: >
+      §4's open item RESOLVED — the one thing the acceptance flagged as blocking
+      implementation. Derived O/H/L carries a **separate flag**; `method` keeps
+      0165's traded/peg/oracle values untouched. Reasoning: the two are different
+      axes and a bucket can be `traded` AND derived, so one enum cannot express
+      both without making `method=derived` ambiguous about the rate's provenance.
+      The field is additive, so a consumer reading only `method` is unaffected —
+      but it is still a response-shape decision that [[0120]]'s suite asserts
+      against, and [[0178]] inherits it. No other part of the ADR changes; the
+      denomination contract accepted on 2026-08-25 stands as written.
+  - date: 2026-08-26
+    status: accepted
+    who: okarcz
+    note: >
+      §2b added during [[0170]]'s implementation: the per-row conversion must
+      precede the cross-leg merge. §1 implies it and nothing stated it, and the
+      reversed order fails silently — `max(high)` across mixed denominations
+      yields a plausible number in the wrong unit. Pinned by an integration test
+      whose two possible answers differ (3.0 vs 12.0), so it discriminates.
+      Also recorded from the implementation: §4's `method` is **derived at read
+      time** from the quote leg and rate signature, because the candle tables
+      carry `close_usd` with no companion provenance column — there is nothing to
+      propagate. The pivot maps to 0165's `traded` rather than coining a fourth
+      word, which leaves an XLM-quoted candle labelled `traded` resting on the
+      USDC peg one hop back — [[0228]], not this ADR.
 ---
 
 # ADR 0011: `base_currency` is a denomination, not a pair filter
@@ -144,6 +172,27 @@ blindly:
 | `vwap` | × rate |
 | `trade_count` | unchanged |
 
+### 2b. The conversion happens BEFORE the cross-leg merge
+
+Added 2026-08-26 during implementation. §1 implies it; nothing stated it, and
+reversing it fails **silently**.
+
+Once `base_currency` stops filtering the quote leg, one bucket can hold candles
+from several legs at once — AUD against XLM and against USDC on the same day. The
+merge takes `max(high)` / `min(low)` across those rows. Convert *after* merging
+and that `max` compares an XLM-denominated high with a USDC-denominated one:
+different units, no error, and a plausible-looking number falling out.
+
+🔑 **Scale every row to the denomination in the inner SELECT, then aggregate.**
+§1 forces it — a denomination whose meaning varies with the data available is the
+`close_usd = 0` defect class in a new place — but the ordering is written down
+here because the failure mode produces no signal.
+
+Pinned by `ohlcv_converts_each_leg_before_merging_across_them`: one bucket, two
+legs, rates 0.25 and 1.0. Converted first the high is `max(3.0, 1.3) = 3.0`;
+converted after the merge it would be `max(12.0, 1.3) = 12.0`. The two answers
+differ, so the test discriminates rather than merely passing.
+
 ### 3. O/H/L are DERIVED, and must say so
 
 Scaling by one rate per bucket assumes the rate is constant within the bucket.
@@ -160,11 +209,24 @@ it rather than presenting derived extremes as measured ones.
 already shipped on the series views — `traded` / `peg` / `oracle`. **No fourth
 word is coined for the same concept on a third endpoint.**
 
-⚠️ **Open for the deciders:** "derived O/H/L" (§3) is a *different axis* from how
-`close_usd` was arrived at, so it cannot be expressed by reusing `method`'s
-values. Proposal: keep `method` for the USD value's provenance and carry the
-derivation as a separate boolean/flag rather than as a fourth `method` value.
-This is not settled.
+✅ **SETTLED 2026-08-26 — a separate flag, not a fourth `method` value.**
+The proposal below was accepted as written.
+
+"derived O/H/L" (§3) is a *different axis* from how `close_usd` was arrived at.
+`method` answers **where the USD value came from**; derivation answers **which
+fields were reconstructed rather than measured**. Collapsing them into one enum
+makes `method=derived` silently ambiguous about the rate's own provenance — a
+bucket can be `traded` *and* derived, or `peg` *and* derived, and a single field
+cannot carry both.
+
+So: `method` keeps 0165's `traded` / `peg` / `oracle` unchanged, and the
+derivation rides as its own boolean-shaped flag alongside it.
+
+⚠️ **Consequence to carry into implementation:** this settles the response
+*shape*, which [[0120]]'s conformance suite asserts against. The field is
+**additive** — `method`'s existing values and meaning do not change — so a
+consumer reading only `method` is unaffected. [[0178]] inherits the same
+two-axis vocabulary rather than deciding again.
 
 ### 5. An unpriced bucket is returned, never silently dropped
 

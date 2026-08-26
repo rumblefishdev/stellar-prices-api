@@ -2,7 +2,7 @@
 id: "0225"
 title: "GET /ohlcv returns an empty 200 for actively-trading assets that do not trade against the default USDC quote — 12 of 13 remaining 0120 failures"
 type: BUG
-status: backlog
+status: active
 related_adr: []
 related_tasks: ["0120", "0170", "0128", "0210"]
 tags: ["priority-high", "effort-medium", "api", "read-surface", "data-correctness", "scf", "milestone-M2"]
@@ -19,6 +19,30 @@ history:
       blocks on 0135/0170/0178 and expected to go green once they were done —
       it will not. 12 of the 13 remaining failures are this defect, and it is
       owned by none of the three. Measured on prod the same session.
+  - date: 2026-08-26
+    status: active
+    who: okarcz
+    note: >
+      Reassigned from the [[0120]] owner and activated, at their request, after
+      review showed this is the SAME defect as [[0170]]'s current scope rather
+      than a distinct one.
+      🔑 The "Do not fold this into 0170" note below is correct against 0170's
+      TITLE, which still describes only the USDC self-pair, but not against its
+      SCOPE. 0170 was widened on 2026-08-19 (by this task's own author) to "any
+      asset that never traded against canonical USDC", measured on 2026-08-25 at
+      **20,481 assets**, and already carries the acceptance criterion "a non-empty
+      USD series for the five 0120 majors (CBIJ…, RON, EQL, BOL, AUD)" — the same
+      five assets, the same trigger, the same remedy.
+      ⚠️ This is the SECOND duplicate spawn of the same defect from the 0120
+      conformance runs; 0170's 2026-08-19 entry records the first, retired the
+      same day. The root cause is 0170's stale title, corrected in the same PR.
+      Sequencing: this task does NOT get its own implementation. [[ADR-0011]]'s
+      denomination contract, implemented in 0170, serves this population as a
+      side effect. This stays active as the verification vehicle — its ACs are
+      the consumer-facing check on 0170's change and its 0120 re-run is the
+      regression gate. Close it on 0170's evidence, not on separate work.
+      Design question below RESOLVED by ADR 0011: option 3 (convert through a USD
+      denomination). Options 1 and 2 are not taken.
 ---
 
 # `/ohlcv` reports "no candles" for assets that are trading right now
@@ -73,9 +97,21 @@ asset with 4,864 daily candles.
 - Any consumer charting an asset whose liquidity is on XLM rather than USDC,
   which on this network is the common case, not the exception.
 
-## Design question to settle first
+## Design question — SETTLED 2026-08-25 by [[ADR-0011]]
 
-Three defensible answers; pick explicitly rather than by accident:
+✅ **Option 3 was taken**, as the general contract for both read surfaces rather
+than a choice made inside this endpoint: `base_currency` is a **denomination**,
+not a quote-leg pair filter. Options 1 and 2 are explicitly not taken — 1 makes
+the response's meaning data-dependent, and 2 leaves a charting consumer with no
+series for an asset that is trading right now.
+
+The conversion needs no `usd_reference` join in the dominant case: `close_usd` is
+already on the candle row at 99.9% coverage, so the per-bucket rate derives
+in-table as `close_usd / close`. That rate is **measured, not pegged** — it
+wobbles 0.9976-1.0008 — which is what makes the denomination reading correct
+rather than merely more useful.
+
+Recorded below as raised, for the reasoning that led here:
 
 1. **Fall back to the asset's most-liquid quote** and say so in the response.
    Most useful, but makes the response's *meaning* data-dependent — the same
@@ -105,8 +141,13 @@ returns OHLC in the quote asset), because options 1 and 3 change that.
 
 ## Notes
 
-- Do not fold this into [[0170]]. They share a handler and a symptom but have
-  different root causes and different correct answers; merging them makes the
-  eventual fix untestable against either.
+- ⚠️ **RETRACTED 2026-08-26 — "do not fold this into [[0170]]" was written
+  against 0170's TITLE, not its scope.** The title still describes only the USDC
+  self-pair; the task was widened to this exact population on 2026-08-19 and
+  measured at 20,481 assets on 2026-08-25, and already carries an AC naming these
+  same five majors. Same root cause, same remedy, one ADR.
+  What survives of the original concern: the two cases must stay separately
+  *testable*. They are — 0170 keeps the self-pair assertions, this task keeps the
+  XLM-only-quoted assertions, and both run against one implementation.
 - The `CBIJBDNZ…` row also carries [[0210]]'s empty `asset_code`, visible in
   the probe output as a blank code column. Different defect, same asset.

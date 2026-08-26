@@ -137,21 +137,34 @@ pub struct AssetListResponse {
     pub has_more: bool,
 }
 
-/// One OHLCV candle (overview §4.2). O/H/L/C are in the `base_currency` quote
-/// asset, **as stored** (no conversion). Doubles as the CH row.
+/// One OHLCV candle (overview §4.2), denominated in `base_currency` per
+/// [ADR 0011]. Doubles as the CH row.
+///
+/// ## Why the price fields are nullable (ADR 0011 §5)
+///
+/// `close_usd` is a cached product, not a stored fact, and it is absent for two
+/// distinct populations: a bucket enrichment has not reached yet (~1.8% at the
+/// right-hand edge), and a candle quoted in a leg we hold no reference for. Both
+/// are returned **with the price fields absent, never dropped** — omitting the
+/// bucket would put a hole at the end of every chart and make "not yet priced"
+/// indistinguishable from "did not trade".
+///
+/// `volume_base`, `volume_quote_usd` and `trade_count` are always present: they
+/// do not depend on the USD rate (`volume_quote_usd` is already USD whatever the
+/// quote leg), so a price-less bucket still carries real activity.
 #[derive(Debug, Serialize, serde::Deserialize, clickhouse::Row, ToSchema)]
 pub struct Candle {
     /// Bucket start (ISO-8601 UTC).
     pub timestamp: String,
-    pub open: String,
-    pub high: String,
-    pub low: String,
-    pub close: String,
+    pub open: Option<String>,
+    pub high: Option<String>,
+    pub low: Option<String>,
+    pub close: Option<String>,
     /// Base-asset volume.
     pub volume_base: String,
     /// USD-denominated quote volume (the one USD figure on the candle).
     pub volume_quote_usd: String,
-    pub vwap: String,
+    pub vwap: Option<String>,
     /// Trades in the bucket. The ceiling is `2^53 - 1`, the largest integer a
     /// JSON number carries without loss — not a domain limit (no protocol bound
     /// exists on a trade count) but a transport one, so a client knows the value
@@ -159,6 +172,30 @@ pub struct Candle {
     /// magnitude below it, so it never binds in practice.
     #[schema(maximum = 9_007_199_254_740_991u64)]
     pub trade_count: u64,
+    /// Where the USD rate behind this bucket came from — [`0165`]'s existing
+    /// vocabulary, reused rather than re-coined (ADR 0011 §4):
+    ///
+    /// - `peg` — no measured rate was available; the $1 USDC assumption applied.
+    /// - `oracle` — a measured Reflector reading.
+    /// - `traded` — priced through a reference asset's own traded candles.
+    ///
+    /// Derived from the candle's quote leg and rate signature, not stored: the
+    /// candle tables carry `close_usd` with no companion provenance column. See
+    /// `queries_ch::ohlcv` for the classification and the prod measurement
+    /// behind it.
+    ///
+    /// `None` exactly when the price fields are absent.
+    pub method: Option<String>,
+    /// Whether `open`/`high`/`low`/`vwap` were **derived by scaling** rather than
+    /// measured (ADR 0011 §3). `close` is always exact — it is `close_usd` as
+    /// stored — but the extremes are reconstructed with one rate per bucket, so
+    /// the true USD high may have fallen at a different instant than the
+    /// quote-denominated high.
+    ///
+    /// A separate axis from [`Candle::method`], deliberately: a bucket can be
+    /// `traded` *and* derived, so one field cannot carry both (ADR 0011 §4,
+    /// settled 2026-08-26). `None` exactly when the price fields are absent.
+    pub derived: Option<bool>,
 }
 
 /// `GET /assets/{id}/ohlcv` response.
