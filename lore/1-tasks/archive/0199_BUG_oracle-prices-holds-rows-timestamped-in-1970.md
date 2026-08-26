@@ -2,9 +2,9 @@
 id: "0199"
 title: "oracle_prices holds rows timestamped in 1970 — a millisecond reading divided by 10^6 instead of 10^3"
 type: BUG
-status: backlog
+status: superseded
 related_adr: []
-related_tasks: ["0196", "0167", "0154"]
+related_tasks: ["0196", "0167", "0154", "0227"]
 tags:
   ["priority-medium", "effort-small", "oracle", "data-correctness", "clickhouse", "milestone-M2"]
 milestone: 2
@@ -21,7 +21,33 @@ history:
       identical to the second across two independent assets, so systematic rather
       than one corrupt row. USDT's copy was deleted with the 0196 purge; USDC's is
       untouched and still investigable.
+  - date: 2026-08-26
+    status: superseded
+    who: okarcz
+    by: ["0227"]
+    note: >
+      Folded into [[0227]], which has the same defect with the code site
+      identified (`oracle-worker/src/lib.rs:298`, an unconditional `/1000`
+      applied to a value already in seconds) and a proven x1000 reconstruction
+      of the corrupted timestamps. This task's contributions carried over: the
+      independent /10^6-vs-/10^3 arithmetic that reached the same mechanism from
+      the number alone; the `min(timestamp)` coverage trap that already gave
+      [[0167]] a wrong start date; `raw_data` as the upstream-vs-ours
+      discriminator; and the 13-month retention question.
+      ⚠️ Two of this task's positions were RETIRED in the fold, both recorded in
+      0227 rather than dropped. (1) "It is inert" — the claim that a 1970 row can
+      never win the enrichment ASOF join is reasoning from the staleness bound,
+      not a measurement; 0227 carries it as an OPEN question that gates severity.
+      (2) The AC asking for the bad rows to be DELETED as unrecoverable is
+      superseded — the x1000 mapping is now proven, so they are repairable.
 ---
+
+> **Superseded by [[0227]]** (2026-08-26). One defect, three filings — see also
+> [[0086]] (2026-07-06), archived the same day. Findings consolidated into
+> `lore/1-tasks/active/0227_BUG_oracle-timestamp-divided-by-1000-twice-when-reflector-sends-seconds.md`.
+> ⚠️ Two claims below were retired in the fold: "it is inert" (unmeasured — 0227
+> treats it as open) and the delete-the-rows AC (they are recoverable). Kept here
+> for history; read 0227 for the current position.
 
 # `oracle_prices` has rows timestamped in 1970
 
