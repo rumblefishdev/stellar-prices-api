@@ -92,9 +92,14 @@ history:
 timestamp reads **1970-01-21**. The prices on those rows are fine. Only the
 timestamp is destroyed, by our own unit conversion.
 
-Roughly **30% of every day's oracle readings** currently land this way, and it is
-still happening. The defect is **at least as old as 2026-07-06** (0086) — see the
-onset correction below, which is the single most important thing the fold changed.
+Roughly **30% of every day's stored oracle rows** land this way, and it is still
+happening. The defect is **at least as old as 2026-07-06** (0086) — see the onset
+correction below.
+
+⚠️ **"30% of readings" was the wrong reading of that figure.** Measured, the good
+readings are all still there at ~285/day; the corrupt rows are *extra*, not
+substitutes. See "REFUTED 2026-08-26" below — nothing is lost, and no price is
+wrong.
 
 ## The defect
 
@@ -260,10 +265,75 @@ against 51,235 oracle readings, and `51,235 − 3,186 = 48,049` exactly. The
 snapshotter rejects every affected row. 0199 measured the same thing from the
 other side: `usd_rate`'s min for USDT was a sane `2026-03-11 14:00`.
 
-❌ **~30% of the rate readings for the last five weeks are being discarded**,
-thinning the ASOF join's coverage during precisely the period the depeg-aware
-oracle tier exists to cover. A candle enriched in that window had fewer rate
-points to match against than it should have.
+## ✅ REFUTED 2026-08-26 — nothing is being discarded, and coverage is NOT thinned
+
+This task claimed *"~30% of the rate readings for the last five weeks are being
+discarded, thinning the ASOF join's coverage… a candle enriched in that window had
+fewer rate points to match against than it should have."* **Measured, that is
+false.**
+
+`prices.usd_rate` is the negative image: the snapshotter (`writer.rs:493`) drops
+every corrupt reading on an epoch floor, and the table is forever-retained rather
+than swept — so a real shortfall would be permanently visible as a hole. Per month,
+canonical USDC, `method = 'oracle'` (cadence is 5-minutely, so a clean day is 288):
+
+| month | rates stored | days | per day | short |
+|---|---|---|---|---|
+| 2026-03 | 5,864 | 21 | 279.2 | 3.0% |
+| 2026-04 | 8,550 | 30 | 285.0 | 1.0% |
+| 2026-05 | 8,867 | 31 | 286.0 | 0.7% |
+| 2026-06 | 8,564 | 30 | 285.5 | 0.9% |
+| 2026-07 | 8,889 | 31 | 286.7 | 0.4% |
+| **2026-08** | 7,397 | 26 | **284.5** | **1.2%** |
+
+🔑 **August — deep inside the "corrupted" window — is as complete as April.** The
+shortfall never exceeds 3%, and July, the month the corruption supposedly began, is
+the *best* month in the table at 0.4%. Daily resolution across 2026-06-20 → 07-31
+shows the same: 283-288 every single day, no step at 07-06, none at 07-20, and a
+run of clean 288s from 07-21 onward.
+
+**So the corrupt rows are ADDITIONAL junk, not LOST readings.** Every scheduled
+poll still produces a good row. The defect writes extra bad rows alongside the good
+ones; it does not damage them.
+
+⚠️ **Severity drops a second time.** With AC 1 already showing the rows are inert in
+the ASOF, and coverage now shown to be intact, what remains is: ~170 junk rows/day
+that nothing reads, `min(timestamp)` defeated as a coverage measure, and partition
+`197001` re-materialising against the cleanup worker. Real, worth fixing, and
+**not** a correctness threat to any price.
+
+### 🔴 NEW OPEN QUESTION — the arithmetic does not close, and it may mean a second writer
+
+The numbers no longer add up, and this must be resolved before the fix is written.
+
+| quantity | value |
+|---|---|
+| `usd_rate` rows, USDC, all months | 48,131 |
+| `oracle_prices` real rows, USDC (51,341 − 3,211) | 48,130 |
+| → real readings per day | **~285**, i.e. essentially the full 288 cadence |
+| corrupt rows, USDC | 3,211 over ~37 days = **~87/day** |
+| **implied total writes/day in the corrupt window** | **~372** |
+| **scheduled poll cadence** | **288** |
+
+🔑 **372 > 288.** The poll path writes at most one row per symbol per 5-minute run,
+so it cannot produce ~285 good rows *and* ~87 bad ones in the same day. Something
+else is writing, or something is collapsing. Two candidate models, both testable:
+
+- **A — a second writer.** [[oracle-writers-span-two-stacks]] records that
+  `reflector_key_to_identity` is shared with ledger-processor's event-decode path,
+  which carries the *other* unconditional divide (`soroban.rs:667`). If that path
+  writes under `oracle_name = 'reflector'`, it is the source — and **fixing
+  `lib.rs:298` alone would change nothing**, which is the silent-half-fix trap this
+  task already warns about, arriving from the opposite direction.
+- **B — timestamp collision.** With `stored = sent / 1000` on integer division, two
+  polls 300 s apart differ by only 0.3 in the stored domain, so **~3.3 consecutive
+  polls truncate onto the same stored second** and a ReplacingMergeTree keyed on
+  that timestamp would collapse them. 0086 saw exactly this shape — consecutive
+  stored seconds `:41` and `:42`, which it read as ~1000 s apart in real time.
+
+⚠️ **These are hypotheses, not findings.** Model B predicts heavy duplication at
+each stored second; model A predicts none. They are distinguishable in one query
+and must be settled before the magnitude check is designed.
 
 ❌ **It defeats `min(timestamp)` as a coverage measure** (from 0199). [[0167]]'s
 whole argument turned on when oracle coverage starts, and a 1970 row makes the
