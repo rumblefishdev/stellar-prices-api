@@ -28,6 +28,25 @@ history:
       task is the design question, not the bump. Raising memory as a temporary
       measure is still available if the noise becomes intolerable before this is
       scheduled, but it is a stopgap and must be recorded as one.
+  - date: 2026-08-27
+    status: backlog
+    who: okarcz
+    note: >
+      ⚠️ Scope input from [[0227]]'s prod verification, and it may change this
+      task's answer. This task's premise is that the POLL write is **wholly
+      redundant** — but with 0227 deployed the two writers now collide on the
+      `ReplacingMergeTree` key (`oracle_prices` has no version column, both use
+      `oracle_name = 'reflector'`, and both derive the same 5-minute
+      observation), so the surviving row is arbitrary and `raw_data` no longer
+      discriminates them. Measured within minutes of the deploy: the same key
+      read as EVENT at 14:52 and as POLL shortly after, and a three-hour census
+      finds NO key where both survive. On top of that the two arms may disagree
+      on price — over 24 h on asset 3, the event writer ranges
+      0.999900009999-1.00019049063001 with 22/285 exactly `1`, while both
+      surviving poll rows are exactly `1`. n = 2, so this is a question, not a
+      finding; but if it holds, "redundant" becomes "conflicting" and the value
+      `usd_rate` snapshots is a coin flip. Settle it with the distribution query
+      recorded in 0227 once a few dozen poll rows have survived.
 ---
 
 # The oracle worker reads the entire asset registry on every run
