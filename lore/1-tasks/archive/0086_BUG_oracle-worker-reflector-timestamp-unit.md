@@ -2,9 +2,9 @@
 id: "0086"
 title: "oracle-worker writes Reflector prices with epoch/1000 timestamps (seconds-vs-ms) → junk 1970-01 rows"
 type: BUG
-status: backlog
+status: superseded
 related_adr: []
-related_tasks: ["0083"]
+related_tasks: ["0083", "0227"]
 tags: [layer-worker, priority-medium, effort-small, oracle, reflector, clickhouse, data-quality, post-deploy]
 links:
   - "../../../packages/oracle-worker/src"
@@ -17,7 +17,33 @@ history:
       dropped prices.oracle_prices partition 197001, but it reappeared within minutes
       (modification_time 18:32:28, post-drop) because the oracle-watcher keeps
       re-inserting rows with 1970-01 timestamps.
+  - date: 2026-08-26
+    status: superseded
+    who: okarcz
+    by: ["0227"]
+    note: >
+      Folded into [[0227]]. Filed 2026-07-06 and never worked; [[0199]] rediscovered
+      the same defect on 2026-08-13 and 0227 on 2026-08-26, each from an unrelated
+      investigation.
+      🔑 This task turned out to hold the fold's most valuable evidence. Its
+      2026-07-06 measurement REFUTES 0227's stated 2026-07-20 onset: the rows
+      predate it by two weeks, and 2026-07-20 is simply when
+      `prices-production-cleanup` was disabled ([[0200]]) and stopped sweeping
+      partition `197001`. The apparent onset is a retention artifact, and the
+      "Reflector changed its payload upstream" hypothesis lost its evidence.
+      Also carried over: all THREE affected assets (USDC 3, XLM 4, USDT 111 —
+      0227 saw only two because [[0196]] purged USDT's copy); the two-runs-1s-apart
+      observation that independently confirms the x1000 mapping; the
+      "conditional, not constant" reading that only some readings divide wrongly;
+      and the [[0083]] cleanup-worker interaction, which goes live again the
+      moment 0200 re-enables cleanup.
 ---
+
+> **Superseded by [[0227]]** (2026-08-26). One defect, three filings — see also
+> [[0199]] (2026-08-13), archived the same day. Findings consolidated into
+> `lore/1-tasks/active/0227_BUG_oracle-timestamp-divided-by-1000-twice-when-reflector-sends-seconds.md`.
+> 🔑 This task's 2026-07-06 evidence is what refuted 0227's stated onset date —
+> read it there before trusting any timeline for this bug.
 
 # oracle-worker writes Reflector prices with epoch/1000 timestamps
 
