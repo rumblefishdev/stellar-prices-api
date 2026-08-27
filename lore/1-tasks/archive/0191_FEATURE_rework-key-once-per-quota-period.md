@@ -844,3 +844,14 @@ records it here rather than in the styling task.
     file the dialog as broken), and [[0193]]'s own context line. Code:
     `REWORK_CONFIRM_PHRASE` in `web/portal/src/app/app.tsx`, with the spec
     `keeps confirm disabled until the visitor types regenerate-key`.
+
+    **Second amendment, same day, same route.** [[0193]]'s review (PR #249)
+    found two landing-page sentences transcribed from the Figma file that
+    stated the model this task superseded: the FAQ's "The replacement is
+    issued straight away and the old key stops working" and the claims
+    card's "Rotate once per month if needed". Both now restate decision 5 —
+    deactivated at once, nothing issued until the next quota period, and
+    "regenerate" rather than "rotate" — in `landing/Faq.tsx` and
+    `landing/DeveloperDashboard.tsx`. Recorded here because the words are
+    this task's, and the Figma frames still carry the old ones: a future
+    re-transcription must not bring them back.
