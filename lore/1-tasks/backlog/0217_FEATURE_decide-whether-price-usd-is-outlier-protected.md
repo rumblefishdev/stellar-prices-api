@@ -136,6 +136,22 @@ handled at the right layers: the 2h conditional liveness guard, carry, and
 lagged majority evicts the first mover) is unobserved in practice — 0123
 measured max deviation 0.824% against the 20% band.
 
+**Also considered and rejected: evaluating every venue at a common
+timestamp** (snapshot-at-T, consolidated-tape style — take the laggard
+venue's newest priced minute and read every other venue as of that minute).
+Rejected 2026-08-27, four reasons: (1) a candle at the common T usually does
+not exist — candles are per traded minute, so sparse venues get an
+ASOF-backward read anyway and the skew merely moves its anchor into the
+past; (2) the hourly enrichment pass already synchronises priced tips to the
+pass boundary — residual cross-venue skew is trading sparsity, which no
+timestamp choice fixes; (3) it inverts failure isolation: today a lagging
+venue degrades only its own vote, synchronised it would pin the whole
+asset's freshness to the worst venue; (4) the defect it would close needs a
+>20% move inside a <=2h skew window — unobserved (0123: max deviation
+0.824%). The residual concern (a fresh first-mover judged against a carried
+majority) is better served by the volume-weighted median above plus
+[[0216]]'s explicit age column.
+
 **Cost of any semantic change:** AC 4 (Tranche 2) was evidenced on the
 current semantics — changing the median invalidates that evidence, so the
 change requires a 0123-style re-run plus `current_mv_it.rs` fixture updates,
