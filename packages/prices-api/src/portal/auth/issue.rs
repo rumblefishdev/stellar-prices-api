@@ -513,13 +513,32 @@ async fn issue(state: &AuthState, user_id: &str, started: Instant) -> Landing {
 /// session is the sign-in's deliverable and it exists; the dashboard's own
 /// issue control reaches `refuse_issue_start`, which reports the fault to the
 /// visitor in the state that means "our key service, not you".
+///
+/// **`Failed` lands plain too** — the sign-in made no request for a key, and
+/// `?issue=failed` on a returning member's dashboard sits next to the working
+/// key `GET /key` reveals a moment later: a banner saying our key service
+/// failed, over a key it plainly did not fail to keep. On a cold start the
+/// budget can already be spent by the exchange, the parameter reads and two
+/// Discord calls, which made this the common case, not the corner. A visitor
+/// with no key meets the no-key dashboard, whose issue control runs the
+/// explicit round-trip and reports its own `failed` when it earns one.
+///
+/// `min_age_minutes` is `None` when the parameter could not be read at
+/// sign-in: the session still exists, but without the threshold there is no
+/// safe verdict on age, so no key is issued and the landing is plain.
 pub(super) async fn after_sign_in(
     state: &AuthState,
     member: &MemberLookup,
     user_id: &str,
-    min_age_minutes: u64,
+    min_age_minutes: Option<u64>,
     started: Instant,
 ) -> String {
+    let Some(min_age_minutes) = min_age_minutes else {
+        tracing::warn!(
+            "sign-in has no account-age threshold to check against; landing without a key"
+        );
+        return String::new();
+    };
     match eligibility::decide(member, user_id, min_age_minutes, eligibility::now_ms()) {
         Eligibility::TooYoung { wait_secs } => {
             tracing::info!(outcome = "too_young", wait_secs, "sign-in issued no key");
@@ -537,7 +556,10 @@ pub(super) async fn after_sign_in(
             Issued { created: true } => ISSUE_OK_QUERY.to_string(),
             Issued { created: false } => String::new(),
             Capped { .. } => String::new(),
-            Failed => ISSUE_FAILED_QUERY.to_string(),
+            Failed => {
+                tracing::warn!("sign-in could not issue or adopt a key; landing without one");
+                String::new()
+            }
             Unwired => {
                 tracing::error!(
                     "a sign-in callback arrived with no control plane wired; no key issued"

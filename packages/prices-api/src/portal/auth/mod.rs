@@ -558,37 +558,58 @@ async fn callback(
     // round-trip answers both questions.
     // Both parameters are read, not just the guild: the age threshold is
     // consulted AFTER the session is written, by `issue::after_sign_in`, and
-    // reading it here means one SSM round-trip serves both questions.
-    let checked: Option<(discord::MemberLookup, u64)> = match state.issue.settings.as_deref() {
-        Some(settings) => match (
-            settings.guild_id().await,
-            settings.min_account_age_minutes().await,
-        ) {
-            (Ok(guild_id), Ok(min_age)) => {
-                let looked_up =
-                    discord::guild_member(&state.http, &state.endpoints, &token, &guild_id).await;
-                if let discord::MemberLookup::NotMember { code: 10_004 } = looked_up {
-                    // "Unknown Guild" is far more likely to be OUR mis-seeded
-                    // parameter than the visitor's standing. Same warn, same
-                    // reasoning, as the issue path's.
-                    tracing::warn!(
-                        guild_id = %guild_id,
-                        "sign-in membership check answered Unknown Guild (10004) — \
-                         is the discord-guild-id parameter right?"
-                    );
-                }
-                Some((looked_up, min_age))
-            }
-            (guild, age) => {
-                for error in [guild.err(), age.err()].into_iter().flatten() {
+    // reading it here means one SSM round-trip serves both questions. But
+    // they are read SEPARATELY, and only the guild gates the session. ⚠️ They
+    // used to fail together: a min-account-age parameter that was unseeded,
+    // throttled or unreadable refused EVERY sign-in as `unknown` — returning
+    // members included, over a value the sign-in itself never consults. The
+    // age read failing now costs the visitor the key half only: they are
+    // signed in, land plain, and the dashboard's issue control re-asks.
+    let (checked, min_age): (Option<discord::MemberLookup>, Option<u64>) = match state
+        .issue
+        .settings
+        .as_deref()
+    {
+        Some(settings) => {
+            let (guild_id, min_age) =
+                tokio::join!(settings.guild_id(), settings.min_account_age_minutes());
+            let min_age = match min_age {
+                Ok(min_age) => Some(min_age),
+                Err(error) => {
                     tracing::error!(
                         error = %error,
-                        "eligibility parameter could not be read at sign-in; refusing without accusation"
+                        "min-account-age parameter could not be read at sign-in; \
+                         the session proceeds, no key is issued"
                     );
+                    None
                 }
-                None
+            };
+            match guild_id {
+                Ok(guild_id) => {
+                    let looked_up =
+                        discord::guild_member(&state.http, &state.endpoints, &token, &guild_id)
+                            .await;
+                    if let discord::MemberLookup::NotMember { code: 10_004 } = looked_up {
+                        // "Unknown Guild" is far more likely to be OUR mis-seeded
+                        // parameter than the visitor's standing. Same warn, same
+                        // reasoning, as the issue path's.
+                        tracing::warn!(
+                            guild_id = %guild_id,
+                            "sign-in membership check answered Unknown Guild (10004) — \
+                             is the discord-guild-id parameter right?"
+                        );
+                    }
+                    (Some(looked_up), min_age)
+                }
+                Err(error) => {
+                    tracing::error!(
+                        error = %error,
+                        "guild-id parameter could not be read at sign-in; refusing without accusation"
+                    );
+                    (None, min_age)
+                }
             }
-        },
+        }
         // Fail closed, and deliberately: an unwired deployment already refuses
         // `action=issue`, so letting sign-in through would seat visitors on a
         // dashboard whose only action is guaranteed to refuse them. A portal
@@ -596,12 +617,12 @@ async fn callback(
         // is [0183]'s state and has a screen of its own.
         None => {
             tracing::error!("a sign-in callback arrived with no eligibility settings wired");
-            None
+            (None, None)
         }
     };
     let membership = checked
         .as_ref()
-        .map(|(member, _)| eligibility::membership(member))
+        .map(eligibility::membership)
         .unwrap_or(eligibility::Membership::Unknown);
 
     match membership {
@@ -637,9 +658,7 @@ async fn callback(
     // `issue::after_sign_in` for what lands where. `checked` is `Some` here
     // by construction: `Membership::Member` above is derived from it.
     let landing = match checked.as_ref() {
-        Some((member, min_age)) => {
-            issue::after_sign_in(&state, member, &user.id, *min_age, started).await
-        }
+        Some(member) => issue::after_sign_in(&state, member, &user.id, min_age, started).await,
         None => String::new(),
     };
 

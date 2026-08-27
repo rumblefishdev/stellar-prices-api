@@ -596,6 +596,14 @@ async fn a_complete_round_trip_signs_the_visitor_in() {
 /// case sign-in lands plain regardless of key: with nothing to issue against,
 /// issuing is not attempted.
 fn app_with_keys(discord: &MockDiscord, gateway: &MockGateway) -> Router {
+    app_with_keys_and(discord, gateway, eligibility_settings())
+}
+
+fn app_with_keys_and(
+    discord: &MockDiscord,
+    gateway: &MockGateway,
+    eligibility: prices_api::portal::eligibility::EligibilitySettings,
+) -> Router {
     let config = AppConfig {
         ch_enabled: false,
         base_url: None,
@@ -607,7 +615,7 @@ fn app_with_keys(discord: &MockDiscord, gateway: &MockGateway) -> Router {
             ..Endpoints::default()
         },
         portal_keys: Some(Gateway::against(&gateway.base, PLAN_ID.to_string())),
-        portal_eligibility: Some(eligibility_settings()),
+        portal_eligibility: Some(eligibility),
         portal_rate_limit: None,
     };
     app(&config, AppState::without_ch())
@@ -665,6 +673,72 @@ async fn a_returning_sign_in_adopts_the_key_and_lands_plain() {
         "adopting must not mint"
     );
     assert_eq!(gateway.with(|s| s.named(&key_name()).len()), 1);
+}
+
+/// ⚠️ **The age parameter does not gate the session.** Sign-in proves
+/// membership only, so a min-account-age parameter that cannot be read must
+/// cost the visitor the key half — not the sign-in. It used to refuse every
+/// visitor as `unknown`, returning members included, over a value this path
+/// never consults; a mis-seeded parameter locked the whole portal.
+#[tokio::test]
+async fn an_unreadable_age_parameter_signs_the_visitor_in_without_a_key() {
+    use prices_api::portal::eligibility::{EligibilitySettings, ParamSource};
+    let discord = MockDiscord::start(GRANTED_SCOPE, None).await;
+    let gateway = MockGateway::start().await;
+    let settings = EligibilitySettings {
+        guild_id: ParamSource::Direct(GUILD_ID.to_string()),
+        min_account_age: ParamSource::Direct("five".to_string()),
+    };
+
+    let reply = sign_in_against(&app_with_keys_and(&discord, &gateway, settings)).await;
+
+    assert_eq!(reply.location(), "/api-tokens/");
+    assert!(reply.cookie(cookies::SESSION_COOKIE).is_some());
+    assert_eq!(discord.member_calls(), 1, "membership is still proved");
+    assert_eq!(
+        gateway.with(|s| s.create_calls),
+        0,
+        "no threshold, no verdict on age, no key"
+    );
+}
+
+/// And the guild id still does: with no guild to ask, nothing was decided
+/// about the visitor, and the refusal is `unknown` — regardless of the age
+/// parameter being fine.
+#[tokio::test]
+async fn an_unreadable_guild_parameter_still_refuses_sign_in() {
+    use prices_api::portal::eligibility::{EligibilitySettings, ParamSource};
+    let discord = MockDiscord::start(GRANTED_SCOPE, None).await;
+    let gateway = MockGateway::start().await;
+    let settings = EligibilitySettings {
+        guild_id: ParamSource::Direct(String::new()),
+        min_account_age: ParamSource::Direct("5".to_string()),
+    };
+
+    let reply = sign_in_against(&app_with_keys_and(&discord, &gateway, settings)).await;
+
+    assert_eq!(reply.location(), "/api-tokens/?signin=unknown");
+    assert!(reply.cookie(cookies::SESSION_COOKIE).is_none());
+    assert_eq!(discord.member_calls(), 0);
+}
+
+/// A control-plane fault during the sign-in's key half lands PLAIN, with the
+/// session — not on `?issue=failed`. The sign-in asked for no key, and the
+/// banner would sit next to whatever `GET /key` reveals: for a returning
+/// member, a working key that the banner says our service failed to produce.
+/// The explicit `action=issue` press keeps `?issue=failed` (see
+/// `portal_issue.rs`); it is the one answering a request.
+#[tokio::test]
+async fn a_control_plane_failure_at_sign_in_lands_plain_with_a_session() {
+    let discord = MockDiscord::start(GRANTED_SCOPE, None).await;
+    let gateway = MockGateway::start().await;
+    gateway.with(|s| s.fail_list = true);
+
+    let reply = sign_in_against(&app_with_keys(&discord, &gateway)).await;
+
+    assert_eq!(reply.location(), "/api-tokens/");
+    assert!(reply.cookie(cookies::SESSION_COOKIE).is_some());
+    assert_eq!(gateway.with(|s| s.create_calls), 0);
 }
 
 /// Age is checked at sign-in ONLY for issuing, never for the session: a
