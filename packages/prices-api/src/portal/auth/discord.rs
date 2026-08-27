@@ -88,14 +88,30 @@ pub const DEFAULT_AUTHORIZE_URL: &str = "https://discord.com/oauth2/authorize";
 /// Base of Discord's REST API. `/oauth2/token` and `/users/@me` hang off it.
 pub const DEFAULT_API_BASE: &str = "https://discord.com/api";
 
-/// Timeout for each of the two calls.
+/// Timeout for each Discord call.
 ///
 /// The api-handler's own Lambda timeout is 15s (`production.json`) and API
-/// Gateway's ceiling is 29s, so two untimed calls could burn the whole budget
-/// and return nothing. Five seconds each leaves room for both plus the handler's
-/// own work, and a Discord that is slower than that is a Discord that is down —
-/// which the visitor is better told about than left waiting for.
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+/// Gateway's ceiling is 29s, so untimed calls could burn the whole budget and
+/// return nothing. A Discord that is slower than this is a Discord that is
+/// down — which the visitor is better told about than left waiting for.
+///
+/// ⚠️ **Four seconds, not five, since 2026-08-27.** The sign-in callback now
+/// makes THREE calls where it made two — the token exchange, the membership
+/// read added on 2026-08-26, and the identity read — and they are serial by
+/// design (the token is borrowed by the first and consumed by the last). At
+/// five seconds each plus the parameter reads, the slow-but-not-failing case
+/// summed past the 15s invocation timeout: the Lambda was killed and the
+/// browser got a bare API Gateway 502 instead of any of the designed screens.
+/// The arithmetic that has to keep holding, worst case:
+///
+/// ```text
+/// exchange 4s + parameters 2s + membership 4s + identity 4s = 14s < 15s
+/// ```
+///
+/// `PARAMETER_TIMEOUT` in `portal/eligibility.rs` is the 2s term. Raising
+/// either constant, or adding a fourth call, needs this sum redone and
+/// `timeoutSeconds` in `infra/envs/production.json` checked against it.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(4);
 
 /// Endpoints, separated from the credentials so tests can point them at a
 /// loopback mock while using the same code path production does.

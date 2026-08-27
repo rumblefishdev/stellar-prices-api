@@ -122,6 +122,20 @@ const NOT_MEMBER_QUERY: &str = "?signin=not_member";
 /// act on if it is wrong. Never collapse the two.
 const UNKNOWN_QUERY: &str = "?signin=unknown";
 
+/// Appended to [`PORTAL_HOME`] when this deployment cannot ask the eligibility
+/// question at all — no settings wired.
+///
+/// ⚠️ **Not [`UNKNOWN_QUERY`], which it used to be.** That literal renders
+/// [0189]'s "we could not check your membership — a problem talking to
+/// Discord" copy, and on an unwired build there is no Discord problem and no
+/// membership question in flight: the portal is not open yet. Landing both on
+/// one screen is the collapse [0193]'s "could not verify is not not-a-member"
+/// criterion forbids, one level up — a transient fault rendered for a
+/// permanent state, telling the visitor to retry something that cannot succeed
+/// until an operator acts. The page reads this literal and renders [0183]'s
+/// closed-portal card, whose wording already exists and is true.
+const NOT_OPEN_QUERY: &str = "?signin=not_open";
+
 /// Appended to [`PORTAL_HOME`] when Discord refused the request for a reason
 /// that is **not** the visitor declining.
 ///
@@ -614,10 +628,14 @@ async fn callback(
         // `action=issue`, so letting sign-in through would seat visitors on a
         // dashboard whose only action is guaranteed to refuse them. A portal
         // that cannot ask the question is a portal that is not open yet, which
-        // is [0183]'s state and has a screen of its own.
+        // is [0183]'s state and has a screen of its own — and, since
+        // 2026-08-27, the screen this lands on: see `NOT_OPEN_QUERY`.
         None => {
             tracing::error!("a sign-in callback arrived with no eligibility settings wired");
-            (None, None)
+            return redirect(
+                &format!("{PORTAL_HOME}{NOT_OPEN_QUERY}"),
+                vec![drop_pending],
+            );
         }
     };
     let membership = checked

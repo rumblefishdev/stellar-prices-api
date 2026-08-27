@@ -675,6 +675,42 @@ async fn a_returning_sign_in_adopts_the_key_and_lands_plain() {
     assert_eq!(gateway.with(|s| s.named(&key_name()).len()), 1);
 }
 
+/// The refusals leave any EXISTING session alone — deliberately, and this
+/// pins it against a plausible "fix".
+///
+/// ADR 0010's table grants the dashboard and the reveal to the session alone,
+/// "works forever": an account that held a key and later left the guild keeps
+/// reading it. So a refused sign-in must not clear the cookie — the refusal is
+/// about the round-trip that just ran, not about access already granted. What
+/// the refusal owes the visitor is to be VISIBLE, and that is the page's job:
+/// `?signin=not_member` rides the redirect and the dashboard renders it.
+#[tokio::test]
+async fn a_refused_sign_in_leaves_an_existing_session_alone() {
+    let mock = MockDiscord::start_with(
+        GRANTED_SCOPE,
+        None,
+        MemberReply::NotFound { code: 10_007 },
+        USER_ID,
+    )
+    .await;
+
+    let reply = sign_in_against(&app_against(&mock)).await;
+
+    assert_eq!(reply.location(), "/api-tokens/?signin=not_member");
+    // No session is issued …
+    assert!(reply.cookie(cookies::SESSION_COOKIE).is_none());
+    // … and none is cleared either: the only `Set-Cookie` is the pending
+    // cookie's own clear, which every callback drops.
+    let set_cookies = reply.set_cookies();
+    let clearing_session = set_cookies
+        .iter()
+        .any(|c| c.starts_with(&format!("{}=;", cookies::SESSION_COOKIE)));
+    assert!(
+        !clearing_session,
+        "a refused sign-in must not sign out a visitor who was already in: {set_cookies:?}"
+    );
+}
+
 /// ⚠️ **The age parameter does not gate the session.** Sign-in proves
 /// membership only, so a min-account-age parameter that cannot be read must
 /// cost the visitor the key half — not the sign-in. It used to refuse every
@@ -913,12 +949,19 @@ async fn an_unanswerable_membership_question_refuses_without_accusing() {
 }
 
 /// A deployment with credentials but no eligibility parameters cannot ask the
-/// question, so it refuses — and refuses as `unknown`, because nothing was
-/// decided about the visitor.
+/// question, so it refuses — as `not_open`, the closed-portal state.
 ///
-/// Fail-closed on purpose: `login` already refuses `action=issue` on an
-/// unwired build, so signing someone in here would seat them on a dashboard
-/// whose only action is guaranteed to refuse them.
+/// ⚠️ **It answered `?signin=unknown` until 2026-08-27.** That literal renders
+/// 0189's "we could not check your membership — a problem talking to Discord"
+/// card, and on an unwired build there is no Discord problem: nothing was
+/// asked. The visitor was told to retry something that could not succeed until
+/// an operator wired the parameters, in the voice reserved for a transient
+/// fault. `not_open` renders 0183's closed-portal card, which is both true and
+/// already written.
+///
+/// Fail-closed on purpose either way: `login` already refuses `action=issue`
+/// on an unwired build, so signing someone in here would seat them on a
+/// dashboard whose only action is guaranteed to refuse them.
 #[tokio::test]
 async fn a_deployment_with_no_eligibility_settings_refuses_sign_in() {
     let mock = MockDiscord::start(GRANTED_SCOPE, None).await;
@@ -940,7 +983,7 @@ async fn a_deployment_with_no_eligibility_settings_refuses_sign_in() {
 
     let reply = sign_in_against(&unwired).await;
 
-    assert_eq!(reply.location(), "/api-tokens/?signin=unknown");
+    assert_eq!(reply.location(), "/api-tokens/?signin=not_open");
     assert!(reply.cookie(cookies::SESSION_COOKIE).is_none());
     assert_eq!(
         mock.member_calls(),

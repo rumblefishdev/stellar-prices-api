@@ -409,8 +409,8 @@ async fn reveal(state: &KeysState, headers: &HeaderMap) -> Response {
                     // exists: everything else in this module can only hold the
                     // value, never read it.
                     value: value.expose().to_string(),
-                    created_at: record.created_at.map(rfc3339),
-                    last_updated_at: record.last_updated_at.map(rfc3339),
+                    created_at: record.created_at.and_then(rfc3339),
+                    last_updated_at: record.last_updated_at.and_then(rfc3339),
                 })
                 .into_response(),
             )
@@ -480,10 +480,22 @@ fn no_key_response() -> Response {
 }
 
 /// Unix seconds → RFC 3339, for the envelopes.
-fn rfc3339(secs: u64) -> String {
-    chrono::DateTime::<chrono::Utc>::from_timestamp(secs as i64, 0)
-        .map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
-        .unwrap_or_default()
+///
+/// `None` for a value `chrono` cannot place on the calendar, never `""`. Both
+/// instants in the reveal envelope are `Option<String>` and the contract is
+/// that an unknown one is `null` (`an_undated_key_reveals_a_null_instant_
+/// _rather_than_the_epoch`); an empty string would be a third shape no
+/// consumer is written for, and `describeUtcDay('')` renders it as nothing at
+/// all — the response would lie rather than admit the gap.
+fn rfc3339(secs: u64) -> Option<String> {
+    let stamped = chrono::DateTime::<chrono::Utc>::from_timestamp(secs as i64, 0);
+    if stamped.is_none() {
+        tracing::warn!(
+            secs,
+            "a key instant is not a representable date; reporting null"
+        );
+    }
+    stamped.map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
 }
 
 /// What the revoke answers.
@@ -613,13 +625,17 @@ async fn revoke(State(state): State<KeysState>, headers: HeaderMap) -> Response 
                 Cap::Capped {
                     next_eligible_at, ..
                 } => next_eligible_at,
-                Cap::Allowed => rfc3339(now_secs()),
+                // `now_secs()` is a representable date by construction, so
+                // the fallback is unreachable; it exists so that `None` can
+                // never be flattened into an empty string, which is the shape
+                // `rfc3339` was changed to stop producing.
+                Cap::Allowed => rfc3339(now_secs()).unwrap_or_else(|| Period::now().resets_at()),
             };
             no_store(
                 Json(RevokeResponse {
                     revoked: true,
                     next_eligible_at,
-                    revoked_at: at.map(rfc3339),
+                    revoked_at: at.and_then(rfc3339),
                     partial,
                 })
                 .into_response(),
