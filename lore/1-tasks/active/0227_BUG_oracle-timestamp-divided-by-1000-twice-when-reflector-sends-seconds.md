@@ -1,6 +1,6 @@
 ---
 id: "0227"
-title: "~30% of oracle readings land at 1970-01-21 — the Reflector timestamp is divided by 1000 unconditionally, and it is not always milliseconds"
+title: "100% of oracle POLL readings land at 1970-01-21 — `lastprice` returns SECONDS and the ÷1000 was copied from the event path; the rows are wholly redundant"
 type: BUG
 status: active
 related_adr: []
@@ -78,9 +78,48 @@ history:
       [[0212]], [[0209]], [[0173]]. Not checked for other `oracle_name` values.
       Also: rows grew 3,186 -> 3,211 per asset within the session, confirming the
       defect is live and matching the 172-174/day series.
+  - date: 2026-08-27
+    status: active
+    who: okarcz
+    note: >
+      🔑 **ROOT CAUSE FOUND, and it is not the one this task was filed on.**
+      `raw_data` classified across BOTH bands (yesterday's census classified only
+      the 1970 rows) returns a perfect partition, asset 3: corrupt = **3,264 rows,
+      100% POLL** (`{"symbol":…}`); real = **48,311 rows, 100% EVENT**
+      (`{"asset":…}`), 2026-03-11 14:00 -> 2026-08-27 07:50. Zero mixing, no
+      `other`. The POLL path has never written a correct row; the EVENT path has
+      never written a bad one.
+      The two paths read the timestamp from different places carrying different
+      units: `soroban.rs:659-667` takes `topic[2]` of the Reflector `update`
+      event, documented in code as the u64 **ms** timestamp -> ÷1000 correct;
+      `lib.rs:137-165` takes `PriceData.timestamp` from the `lastprice` return,
+      which is **SECONDS** (SEP-40 / Soroban ledger convention) -> ÷1000 = 1970.
+      The bug is `lib.rs:295`'s comment — the divide was copied across "to match
+      the event-decoded path" on the assumption both carry the same shape.
+      ✅ The 372-vs-288 write-volume gap is CLOSED, arithmetic exact: 288 EVENT +
+      86.4 POLL stored slots = 374.4/day predicted vs **373.2 measured**.
+      ✅ **Nothing is lost.** Good readings run 3.331 per 1000 s window where a
+      corrupt row exists vs 3.316 where none does (theoretical max 3.333) — 99.94%
+      of perfect. Cadence confirmed exactly 300 s (11,021 gaps of 300, 8 of 600).
+      ✅ 0086's "conditional, not constant" is ANSWERED and REFUTED — not
+      conditional at all, 100% of POLL readings are destroyed. It is a second
+      WRITER, not a second branch.
+      🔑 Every corrupt row is a **100% exact `Decimal(38,14)` price twin** of an
+      EVENT row in the same reconstructed window (3,264/3,264) — so the POLL
+      write is wholly redundant and the rows are worth **deleting, not
+      repairing**; yesterday's "recovery is the better option" is retired again.
+      🔴 Correction: USDT's absence is **BY DESIGN**, not a stopped writer.
+      `reflector_key_to_identity` (`soroban.rs:109-118`) has no USDT arm — removed
+      by [[0172]] and gated on [[0173]], with an explicit "do not restore" comment.
+      ⏳ Lands on [[0226]]: the oracle-worker loads 620,615 assets to write 2 rows,
+      and those 2 rows are the garbage ones.
 ---
 
-# Reflector timestamps are divided by 1000 whether or not they are milliseconds
+# The oracle POLL path divides a SECONDS timestamp by 1000 — every one of its readings lands in 1970
+
+> ⚠️ The filename slug (`…divided-by-1000-twice-when-reflector-sends-seconds`) is
+> stale — there is no double division and Reflector did not change. Kept because
+> the branch and PR #256 are named after it.
 
 > **Consolidates [[0199]] (2026-08-13) and [[0086]] (2026-07-06)**, both archived
 > as superseded on 2026-08-26. Three sightings of one defect, fourteen months of
@@ -88,18 +127,28 @@ history:
 
 ## Summary
 
-`prices.oracle_prices` holds **6,372 rows** (3,186 per asset, XLM and USDC) whose
-timestamp reads **1970-01-21**. The prices on those rows are fine. Only the
-timestamp is destroyed, by our own unit conversion.
+Reflector's price reaches `prices.oracle_prices` by **two independent paths**, and
+they disagree about the unit of the timestamp. One handles it correctly. The other
+has never once got it right.
 
-Roughly **30% of every day's stored oracle rows** land this way, and it is still
-happening. The defect is **at least as old as 2026-07-06** (0086) — see the onset
-correction below.
+| path | reads | unit received | after `÷1000` | rows (asset 3) |
+|---|---|---|---|---|
+| **EVENT** — `soroban.rs:659-667` | `topic[2]` of the `update` event | **milliseconds** | correct ✅ | **48,311 — all good** |
+| **POLL** — `lib.rs:137-165, 298` | `PriceData.timestamp` from `lastprice` | **seconds** | 1970-01-21 ❌ | **3,264 — all corrupt** |
 
-⚠️ **"30% of readings" was the wrong reading of that figure.** Measured, the good
-readings are all still there at ~285/day; the corrupt rows are *extra*, not
-substitutes. See "REFUTED 2026-08-26" below — nothing is lost, and no price is
-wrong.
+**100% of POLL readings are destroyed. 0% of EVENT readings are.** The prices on
+the corrupt rows are fine; only the timestamp is wrong, and we wrote it that way.
+
+🔑 **And it has never mattered, because the EVENT path shadows it.** Every corrupt
+row is an exact price twin of an EVENT row for the same reading — 3,264 of 3,264
+matching to all 14 decimals. Nothing is lost, no candle was ever priced from a 1970
+row, and `oracle_prices` has been fully correct this whole time by accident.
+
+⚠️ **The three framings this task was filed under are all dead**, each killed by
+measurement and each recorded below rather than deleted: "~30% of readings" (it is
+100%, of one path, and none are lost), "Reflector changed upstream on 2026-07-20"
+(that is the day cleanup stopped sweeping), and "the same divide exists twice so
+fix both stacks" (one site is proven correct by 48,311 rows).
 
 ## The defect
 
@@ -161,7 +210,7 @@ tested against the code before a magnitude check is accepted as sufficient. A
 magnitude check fixes the symptom either way, but if a fallback field is involved
 we would be leaving the real selector unexamined.
 
-## 🔴 Three assets, not two
+## 🟡 Three assets, not two — ⚠️ SUPERSEDED, it is two by design (see 2026-08-27 below)
 
 0086 caught all three peg/pivot assets on 2026-07-06:
 
@@ -205,6 +254,28 @@ carrying the $1 peg), [[0209]] and [[0173]].
 `oracle_name` was not checked and must be, before anyone concludes USDT has no
 oracle coverage. Filed as a follow-up rather than assumed either way.
 
+### ✅ CORRECTED 2026-08-27 — USDT's absence is BY DESIGN, not a stopped writer
+
+The section above concluded *"this is not the purge alone, it is the purge plus a
+writer that stopped."* **That is wrong, and the code says so plainly.**
+`reflector_key_to_identity` (`prices-ingest-core/src/soroban.rs:109-118`) maps
+`XLM`/`native` and `USDC` and nothing else. The `USDT` arm was **removed by
+[[0172]]**, and the doc comment immediately above it is explicit:
+
+> ⚠️ **Do not restore the `USDT` arm to fix an apparent coverage gap.** The oracle
+> tier runs *before* the pivot and wins where it applies, so an oracle row for this
+> identity silently re-introduces the $1 peg that task 0172 removed. Restoring it
+> requires fixing the symbol→issuer mapping first (task [[0173]]).
+
+Both writers share that function, so **neither** can emit asset 111. Nothing
+stopped; a deliberate decision was taken and documented. 0086's 2026-07-06 sighting
+of USDT rows simply predates 0172.
+
+⚠️ **The consequence still stands, and it is still owed** — the oracle tier cannot
+price a USDT-quoted candle, which bears on [[0212]], [[0209]] and [[0173]]. But it
+is a **known, owned design gap under 0173**, not a live defect for this task to
+chase. The AC below is amended accordingly.
+
 🔑 **The corruption is still accruing, and the rate is now pinned.** This task was
 filed this morning at **3,186** rows per asset; the census hours later reads
 **3,211** — **+25 per asset, +50 total, in a single session.** Consistent with the
@@ -215,17 +286,24 @@ timestamps are one second apart (`:41`, `:42`), which is ~1000 s apart in real
 time — exactly two consecutive oracle-watcher runs at its real cadence. The
 scaled domain reproduces the true polling interval.
 
-## 🔴 The same divide exists twice, in two different stacks
+## ✅ The same divide exists twice — and only one of them is wrong
 
-| site | stack | shape |
-|---|---|---|
-| `oracle-worker/src/lib.rs:298` | **EventBridge** | `(pd.timestamp / 1000)` |
-| `prices-ingest-core/src/soroban.rs:667` | **Compute** (ledger-processor) | `(ts_ms / 1000) as u32` |
+| site | stack | shape | input unit | verdict |
+|---|---|---|---|---|
+| `oracle-worker/src/lib.rs:298` | **EventBridge** | `(pd.timestamp / 1000)` | **seconds** | ❌ 100% corrupt |
+| `prices-ingest-core/src/soroban.rs:667` | **Compute** (ledger-processor) | `(ts_ms / 1000) as u32` | **milliseconds** | ✅ 48,311 rows correct |
 
-⚠️ Deploying one is a **silent half-fix** — see [[oracle-writers-span-two-stacks]].
-The event-decode path was not measured for this defect; whether it is affected
-depends on whether the event payload carries the same shape as the RPC response,
-and that is an open question, not an assumption to carry.
+🔑 **Identical arithmetic, opposite outcomes — because the inputs differ.** The
+line is not the bug; the *assumption that both lines see the same thing* is, and
+it is written down at `lib.rs:295`.
+
+⚠️ **The half-fix warning is now inverted, and that is worth stating explicitly.**
+This section originally read: *"Deploying one is a silent half-fix — the event-decode
+path was not measured for this defect."* Measured, the risk runs the other way —
+changing `soroban.rs:667` is the change that could break something, since it is the
+only path producing usable rows. [[oracle-writers-span-two-stacks]] still holds as
+a rule (verify writer behaviour by measurement, never by deploy exit status); it
+was the *unmeasured symmetry assumption* that misled, not the memory.
 
 ## Evidence — measured on prod 2026-08-26
 
@@ -303,13 +381,29 @@ valuable: **the corruption rate did not CHANGE at 2026-07-06 or 2026-07-20.**
 Whether readings are lost is reopened — see "the write volume does not fit the
 schedule" below.
 
+✅ **Re-closed 2026-08-27, and the original wording was right after all.** The
+corrupt rows ARE additional junk rather than lost readings, and every scheduled
+poll DOES still produce a good row — the good series runs 3.331 per 1000 s window
+against a theoretical 3.333, at an exactly 300 s cadence. What that revision got
+wrong was its *reason*: it assumed one writer at 288/day. There are two, and the
+good rows come from the other one. Right answer, wrong mechanism — recorded
+because a conclusion that survives a refutation of its own premise is worth
+distrusting until it is re-derived.
+
 ⚠️ **Severity drops a second time.** With AC 1 already showing the rows are inert in
 the ASOF, and coverage now shown to be intact, what remains is: ~170 junk rows/day
 that nothing reads, `min(timestamp)` defeated as a coverage measure, and partition
 `197001` re-materialising against the cleanup worker. Real, worth fixing, and
 **not** a correctness threat to any price.
 
-### 🔴 NEW OPEN QUESTION — the arithmetic does not close, and it may mean a second writer
+### ✅ CLOSED 2026-08-27 — the arithmetic does not close, and it DID mean a second writer
+
+> **Model A was right and model B was wrong**, though not in the form either was
+> written. The second writer is not a retry and not a rogue path — it is
+> `soroban.rs`'s event decoder, doing its job correctly on the same 5-minute
+> cadence, and *it* produces the good rows while the POLL path produces only bad
+> ones. The reasoning below reached the right fork; the section is kept intact
+> because the question it asked is exactly the one that cracked the task open.
 
 The numbers no longer add up, and this must be resolved before the fix is written.
 
@@ -434,11 +528,13 @@ tag `oracle_name = 'reflector'`, so both would appear. Measured over all 1970 ro
 
 🔑 **Not one row from the event-decode path.** The fix belongs in `oracle-worker`.
 
-⚠️ **This does not exempt `soroban.rs:667`.** Dedup is on
-`(asset_id, oracle_name, timestamp)` and `raw_data` is not in the key, so a row
-that lost a merge leaves no trace. And the event path may simply not be decoding
-Reflector `update` events on prod at all — which is a different question, not
-evidence of correctness. The AC requiring its payload shape as evidence **stands**.
+⚠️ **This census classified only the 1970 rows, and that was the gap.** It could
+say which writer produced the corrupt band but not what the *good* band was made
+of — so it left "the event path may simply not be decoding Reflector `update`
+events on prod at all" open, and read the absence of EVENT rows as possible
+merge-loss rather than as evidence. Classifying **both** bands on 2026-08-27
+answered it in one query: see "🔑 SOLVED 2026-08-27" below. The exemption for
+`soroban.rs:667` is now evidence-backed rather than assumed.
 
 ### Compression confirmed — 98.83% dense against a 0.331% control
 
@@ -465,7 +561,20 @@ defect whose evidence was being swept. **The "Reflector changed upstream around
 2026-07-20" hypothesis is dead**, and 0086's 07-06 sighting is simply a sample
 taken before the sweep stopped.
 
-### 🔴 OPEN — the write volume does not fit the schedule
+### ✅ RESOLVED 2026-08-27 — the write volume fits two schedules, not one
+
+Kept in full below because the reasoning was sound and only the conclusion was
+premature. The gap closes exactly once the second writer is identified: **288
+EVENT rows/day + 86.4 POLL stored slots/day = 374.4 predicted, against 373.2
+measured.** Neither hypothesis in the section below was right — it was not Lambda
+retries (model A as framed) and not readings collapsing out of the good series
+(model B). It was two writers on the same 5-minute cadence, one of them 100%
+corrupt and compressing 3.33:1 in the stored domain.
+
+⚠️ **And "how many readings are lost" — the question this section reopened — is
+answered: none.** See the measurement below.
+
+### 🔴 the original OPEN framing — the write volume does not fit the schedule
 
 `infra/envs/production.json:17` sets `"oracleWatcher": "rate(5 minutes)"` — **288
 invocations/day**, one row per asset per invocation. Measured, per asset:
@@ -491,31 +600,151 @@ and retries twice on failure; [[0214]] measured exactly this shape on the
 enrichment worker — *"3×/hour (one trigger plus two Lambda async retries)"*. A
 partially-failing oracle invocation would write extra rows on each retry.
 
+## 🔑 SOLVED 2026-08-27 — two writers, two units; the POLL path is 100% corrupt and 100% redundant
+
+Four measurements on prod, asset 3 (USDC). Together they close the root cause, the
+write-volume gap, the loss question and 0086's conditionality question.
+
+### A — nothing is lost
+
+A corrupt row stored at second `s` was really taken somewhere in the real window
+`[s×1000, s×1000+999]` — 1,000 real seconds, which at a 300 s cadence should hold
+**3.333** good readings. Counting good rows per window, split on whether that
+window also holds a corrupt row (`join_use_nulls = 1`, per [[0170]]'s trap):
+
+| band | windows | good rows | good per window |
+|---|---|---|---|
+| window has a corrupt row | 3,263 | 10,870 | **3.331** |
+| window has none (control) | 38 | 126 | **3.316** |
+
+🔑 **99.94% of theoretical perfect, inside the corrupt windows.** A displaced
+reading would read 2.33 — a 30% drop. The observed difference is **0.45%**. The
+corrupt rows displace nothing.
+
+### B — the cadence is exactly what the config says
+
+| gap between consecutive good rows | count |
+|---|---|
+| **300 s** | **11,021** |
+| 600 s | 8 |
+
+Eight missed polls in 38 days, nothing else. (`1784505600` also appears once — the
+first row having no predecessor, not a gap.) So `"oracleWatcher": "rate(5 minutes)"`
+= 288/day is real, and the good series *achieves* it: 288/day, every day, flat.
+
+### C — 86.4 is a saturation ceiling, not a rate
+
+`corrupt_slots` reads **86-87 every single day**. That is **86,400 ÷ 1,000** — the
+number of 1000-second windows in a day. The compressed band is not "86 corrupted
+readings a day", it is *every available slot in the compressed domain, filled*. The
+count never measured a rate. This confirms the 2026-08-26 compression finding
+numerically rather than by inference.
+
+### D — the corrupt row is the same reading, written twice
+
+| | value |
+|---|---|
+| corrupt rows | 3,264 |
+| with an **exact** `Decimal(38,14)` price twin in the same window | **3,264** |
+| | **100%** |
+
+At 14 decimal places this is not coincidence. Every corrupt row carries a price
+already stored correctly by another row.
+
+### E — the discriminator: one outage, one survivor
+
+Hourly across the 2026-08-13 Hetzner disk-full incident:
+
+```
+2026-08-13 20:00   good 12   corrupt 2
+2026-08-13 21:00   good 12   corrupt 0   <- corrupt writer dies
+   …                  …            …
+2026-08-14 06:00   good 12   corrupt 0
+2026-08-14 07:00   good 12   corrupt 3   <- and returns, 10 h later
+```
+
+**The good series does not miss a single poll through the entire outage.** Two
+series, one incident, one survivor — so two writers with independent failure modes.
+(`run_oracle` fails the whole pass on a CH write failure, `lib.rs:271`; the
+ledger-processor kept going.)
+
+### The mechanism
+
+`raw_data` classified across **both** bands — the step 2026-08-26's census missed:
+
+| band | writer | rows | first seen | last seen |
+|---|---|---|---|---|
+| corrupt (1970) | **POLL `{"symbol":"USDC"}`** | 3,264 | 1970-01-21 15:41:56 | 1970-01-21 16:36:57 |
+| real | **EVENT `{"asset":"USDC"}`** | 48,311 | 2026-03-11 14:00 | 2026-08-27 07:50 |
+
+A perfect partition — zero mixing, no `other`. The two paths take the timestamp
+from different fields, and those fields carry different units:
+
+- **EVENT**, `soroban.rs:659-667` — `topic[2]` of the `update` event, whose own doc
+  comment says *"topic[2] is the u64 **ms** timestamp"*. `÷1000` → correct.
+  (Its fallback, `ev.created_at * 1000`, deliberately normalises ledger-close
+  seconds *up* to ms first. That is the "fallback timestamp field" 0086
+  hypothesised — real, and handled correctly. Just not the culprit.)
+- **POLL**, `lib.rs:137-165` — `PriceData.timestamp` from the `lastprice` return.
+  Reconstructing: 1,784,516 × 1000 = 1,784,516,000 = 2026-07-20 **in seconds**,
+  the SEP-40 / Soroban ledger convention. `÷1000` → 1970.
+
+🔑 **The bug is the comment at `lib.rs:295`.** *"Reflector reports millisecond
+timestamps … divide by 1000 **to match the event-decoded path**"* — the divide was
+copied across on the assumption that the RPC return carries the same shape as the
+event topic. It does not. This task's own warning was right: *"whether the event
+payload carries the same shape as the RPC response … is an open question, not an
+assumption to carry."*
+
+### What follows
+
+- ✅ **The fix is one line, in one stack.** `soroban.rs:667` is proven correct by
+  48,311 rows over 5.5 months.
+- ✅ **Not conditional.** 0086 was right about *path* and wrong about *conditional*
+  — 100% of POLL readings are destroyed. It is a second writer, not a second branch.
+- ✅ **Delete, do not repair.** Every corrupt row is a price twin of a correctly
+  stored row; a ×1000 repair would land on instants the EVENT path already covers
+  and add zero information.
+- 🔴 **The POLL write to `oracle_prices` is wholly redundant.** Every reading it
+  produces is already stored correctly, and the `usd_rate` snapshotter reads the
+  EVENT rows. Lands on [[0226]] — that worker loads **620,615 assets to write 2
+  rows**, and those 2 rows are the garbage ones. Deleting the write would resolve
+  0226 outright. ⚠️ Not free: the poll worker also owns the `usd_rate` snapshot and
+  [[0228]] is open on XLM never being snapshotted, so both need settling first.
+  Recorded here, decided in 0226.
+
 ## Implementation
 
-- Magnitude check at both sites rather than a unit assumption: treat a value
-  ≥ 10¹¹ as milliseconds and divide, otherwise take it as seconds. Bounds chosen
-  so both shapes are unambiguous for any date this system can serve.
-- ⚠️ Do **not** fix only `oracle-worker`. Establish the event-decode path's
-  actual payload shape first, then fix and deploy both stacks or state explicitly
-  why one is exempt.
-- Test 0086's "conditional, not constant" reading against the code: is there a
-  fallback timestamp field, or a secondary path, that explains why only *some*
-  readings are affected? A magnitude check masks this either way — answer it
-  before it is masked.
-- Read `raw_data` to settle **upstream vs ours** (0199). The column keeps the
-  original payload, so it can say directly whether Reflector sent seconds or we
-  mangled milliseconds. This is the cheapest available test of the refuted
-  "Reflector changed" hypothesis.
-- Repair the 6,372 existing rows. The ×1000 mapping is proven, so they are
-  recoverable rather than lost — but `oracle_prices` is an input to enrichment,
-  so a repair means deciding whether affected candles get re-enriched.
-  ⚠️ 0199 proposed **deleting** them instead, on the belief the true instant was
-  unrecoverable. That belief predates this task's reconstruction; recovery is now
-  the better option and the delete recommendation is retired.
-- Add a guard so this cannot recur silently: a reading whose timestamp is
-  implausible for this system (before the oracle window, or in the future)
-  should be **rejected loudly**, not written.
+> Rewritten 2026-08-27 against the measured root cause. The pre-measurement plan
+> — magnitude checks at both sites, `raw_data` as an upstream discriminator, and
+> repairing the rows — is superseded; the reasons are recorded in the sections
+> above rather than deleted.
+
+- **`lib.rs:298` — stop dividing.** `lastprice` returns **seconds**. Correct the
+  comment at `lib.rs:295` in the same change: it is the actual defect, and it
+  names the wrong path as its authority.
+- **Keep a magnitude check anyway, as a tolerance rather than a fix.** Treat a
+  value ≥ 10¹¹ as milliseconds and divide, otherwise take it as seconds — bounds
+  chosen so both shapes are unambiguous for any date this system can serve. The
+  unit is an upstream contract we do not control, and this task exists because
+  someone assumed it once.
+- **Reject loudly.** A reading whose timestamp is implausible for this system
+  (before the oracle window, or in the future) must be **rejected and alarmed**,
+  not written. This is the single most valuable deliverable here: the defect was
+  discoverable only by stumbling over it, and it was stumbled over three times.
+- ⚠️ **`soroban.rs:667` is EXEMPT from change, on evidence** — 48,311 correct rows
+  since 2026-03-11, zero corrupt. A magnitude check there is a harmless no-op and
+  may be added for symmetry, but it is not required and must not gate the deploy.
+  This retires the standing "do not fix only oracle-worker" instruction, which was
+  correct while the event path's shape was unknown.
+- **Delete the 3,264 (×2 assets) corrupt rows; do not repair them.** Every one is
+  an exact price twin of an EVENT row already stored correctly, so a ×1000 repair
+  adds no information and would collide with rows the EVENT path already owns.
+  ⚠️ Deletion is `ALTER … DELETE` / partition drop on `197001` — the same
+  partition [[0083]]'s cleanup worker targets, so sequence it against [[0200]].
+- **Then ask whether the POLL path should write to `oracle_prices` at all**
+  ([[0226]]). It is wholly redundant today. Blocked on the `usd_rate` snapshot
+  ownership and [[0228]]; recorded here, decided there.
 
 ## Acceptance Criteria
 
@@ -526,29 +755,53 @@ partially-failing oracle invocation would write extra rows on each retry.
       smallest gap 1.73e9 s. **Severity settled: data-loss, not wrong-value.**
       See "SETTLED 2026-08-26" above. 0199's "it is inert" was the right conclusion
       from insufficient reasoning — its first clause is outright false.
-- [ ] Both conversion sites handle either unit, with a test per site covering a
-      seconds input, a millis input, and the boundary between them.
-- [ ] The event-decode path's real payload shape is stated as evidence, not
+- [ ] `lib.rs:298` takes `lastprice`'s timestamp as **seconds**, with a magnitude
+      check as tolerance, and a test covering a seconds input, a millis input and
+      the boundary. The `lib.rs:295` comment is corrected in the same change.
+- [x] The event-decode path's real payload shape is stated as evidence, not
       assumed from the oracle-worker comment.
-- [ ] Whatever ships is deployed to **both** stacks, or the exemption is written
+      → **`topic[2]`, u64 milliseconds**, per `soroban.rs:652-667`'s own doc
+      comment, with the `ev.created_at * 1000` fallback normalising ledger-close
+      seconds up to ms first. Corroborated on prod by **48,311 EVENT-tagged rows,
+      100% correctly stamped, 2026-03-11 → 2026-08-27**. This also settles the
+      standing "the event path may not be decoding on prod at all" doubt: it is.
+- [x] Whatever ships is deployed to **both** stacks, or the exemption is written
       down with its reasoning.
+      → **`soroban.rs:667` is exempt, on measurement.** 48,311 correct rows, zero
+      corrupt, across 5.5 months. Only `oracle-worker` ships. Recorded in
+      Implementation above.
 - [ ] New readings stop landing before the oracle window — verified on prod after
       deploy, not from the code.
-- [ ] The 6,372 existing rows are repaired or explicitly written off, with the
+- [x] The 6,372 existing rows are repaired or explicitly written off, with the
       decision recorded.
+      → **Decision: DELETE.** All 3,264 per asset are exact `Decimal(38,14)` price
+      twins of EVENT rows already stored correctly (3,264/3,264), so a ×1000
+      repair adds no information. ⚠️ The *execution* of the delete is still owed
+      and is sequenced against [[0200]] — see Implementation.
 - [ ] A malformed timestamp is rejected loudly rather than written, with a test.
 
 ### Folded in from [[0086]]
 
-- [ ] The **conditional** nature is explained — why the bulk of readings land
-      correctly and only some divide wrongly. A magnitude check that fixes the
-      symptom without answering this closes the criterion only if the
-      investigation is recorded as inconclusive, not skipped.
+- [x] The **conditional** nature is explained — why the bulk of readings land
+      correctly and only some divide wrongly.
+      → **It is not conditional. The premise was wrong.** 0086 inferred a
+      conditional branch from "the bulk of rows land correctly"; the bulk land
+      correctly because a **different writer** produces them. Measured: corrupt =
+      100% POLL, real = 100% EVENT, zero mixing. Every POLL reading is destroyed;
+      no EVENT reading is. 0086 was right that "only some code path divides by
+      1000" and wrong that the split is per-reading. Its "likely a fallback
+      timestamp field" guess was also real but innocent — `soroban.rs:666`'s
+      `ev.created_at * 1000` — and correctly handled.
 - [ ] Partition `197001` stays empty after the fix, verified across a live
       oracle-watcher run — and the interaction with [[0083]]'s cleanup worker is
       settled before [[0200]] re-enables it.
-- [ ] All three affected assets confirmed clean (USDC 3, XLM 4, **USDT 111** —
-      whose evidence [[0196]] purged, so its absence today proves nothing).
+- [ ] Both writable assets confirmed clean (USDC 3, XLM 4).
+      ⚠️ **Amended 2026-08-27 — USDT 111 is struck from this criterion.** Its
+      absence is by design, not evidence lost to [[0196]]'s purge:
+      `reflector_key_to_identity` has no USDT arm, removed by [[0172]] and gated on
+      [[0173]], with an explicit "do not restore" comment. Both writers share that
+      function, so neither can emit asset 111. 0086's 2026-07-06 sighting predates
+      0172. The coverage consequence is real and owned by 0173 — not by this task.
 
 ### Folded in from [[0199]]
 
@@ -561,7 +814,18 @@ partially-failing oracle invocation would write extra rows on each retry.
       "keeps the original payload" was wrong.
       → Replaced by the `usd_rate` gap test below, which reaches the same question
       through durable data.
-- [ ] **Onset settled via `prices.usd_rate` gaps.** The snapshotter
+- [x] **Onset settled via `prices.usd_rate` gaps.** ✅ Closed 2026-08-26 and
+      reinforced 2026-08-27. `usd_rate` is flat at 284-287/day in every month from
+      2026-03-11, so the corruption rate never changed — while the surviving
+      corrupt window begins **exactly** on 2026-07-20, the day
+      `prices-production-cleanup` was disabled. A rate that did not change plus a
+      window starting precisely when deletion stopped is an old defect whose
+      evidence was being swept. The "Reflector changed upstream" hypothesis is
+      dead. 2026-08-27 adds the mechanism: `usd_rate` tracks the **EVENT** path,
+      which was never corrupt, so its flatness was always going to be flat.
+      **The true onset is UNDATABLE** — see the criterion below, which is the one
+      that applies. Original text follows.
+      The snapshotter
       (`writer.rs:493`) drops corrupt readings with `o.timestamp > ORACLE_EPOCH_FLOOR`,
       and `usd_rate` is forever-retained rather than swept — so every corrupt
       reading leaves a permanent *hole* there. Its per-day row count is therefore a
@@ -569,8 +833,13 @@ partially-failing oracle invocation would write extra rows on each retry.
       partition `197001` was swept. A uniform shortfall back to 2026-03-11 kills the
       "Reflector changed on 2026-07-20" hypothesis outright; a step change dates the
       real onset.
-- [ ] ⚠️ If neither test dates the onset, say so and stop — the pre-07-20 rows were
-      deleted, and an undatable onset is an honest answer. Do not infer one.
+- [x] ⚠️ If neither test dates the onset, say so and stop.
+      → **Neither test dates it, and this is the honest answer: the onset is
+      undatable.** The POLL path has been wrong since it was written; the
+      pre-2026-07-20 rows were swept by cleanup; and `usd_rate` records the EVENT
+      path, which never carried the defect, so it holds no fossil of it. The only
+      hard floor is **2026-07-06** ([[0086]]'s direct sighting). No onset is
+      inferred.
 - [ ] Coverage queries that use `min(timestamp)` on `oracle_prices` are
       re-checked — this defect already gave [[0167]] a wrong start date once.
 - [ ] Whether the 13-month retention should have dropped partition `197001` is
@@ -596,6 +865,18 @@ partially-failing oracle invocation would write extra rows on each retry.
   affected rows are entirely plausible — XLM at 0.15-0.22, USDC at ~1.00. Only
   the timestamp is wrong, and no alarm or guard reads timestamps for plausibility.
   Same class as [[0215]]'s invisible failure, where every data signal read normal.
+- 🔑 **The comment was the bug, and it cited the wrong authority.** `lib.rs:295`
+  does not merely assert milliseconds — it justifies the divide as being *"to
+  match the event-decoded path"*. A cross-reference to a second code site was
+  treated as evidence about an upstream payload. It is worth noticing that the
+  most confident-looking sentence in the file was the false one, and that it stood
+  for months precisely because it looked like it had already been checked.
+- 🔑 **Yesterday's census asked the right question of half the data.** The
+  2026-08-26 `raw_data` classification ran over the 1970 rows only, found no EVENT
+  rows there, and correctly refused to read that as exoneration. One query over
+  *both* bands settled everything. The lesson is not "measure more" — it is that a
+  census restricted to the anomalous population cannot see what the normal
+  population is made of, and the control group is where the answer was.
 - 🔑 **Filed three times in seven weeks and fixed none of them.** 0086
   (2026-07-06, from a cleanup-RBAC proof), 0199 (2026-08-13, from the 0196 purge
   measurement), 0227 (2026-08-26, from an 0170 coverage query) — three unrelated
