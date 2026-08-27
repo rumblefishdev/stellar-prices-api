@@ -746,6 +746,41 @@ assumption to carry."*
   ([[0226]]). It is wholly redundant today. Blocked on the `usd_rate` snapshot
   ownership and [[0228]]; recorded here, decided there.
 
+## Implementation — shipped 2026-08-27
+
+One function, one stack (`oracle-worker`), and a guard that did not exist before.
+
+```rust
+pub fn reflector_timestamp_to_epoch_seconds(raw: u64, now_secs: u64) -> Result<u32, BadTimestamp>
+```
+
+- **The unit is decided by magnitude, not by declaration.** At or above
+  `REFLECTOR_MILLIS_THRESHOLD` (1e11) the value is milliseconds; below it,
+  seconds. That threshold sits in a ~3,000-year dead zone — 1e11 seconds is the
+  year 5138, 1e11 milliseconds is 1973 — so no real reading is ambiguous and the
+  exact placement is not load-bearing.
+- **Implausible readings are refused, not written.** Before Stellar genesis, or
+  more than `FUTURE_SKEW_SECS` (1 h) ahead of our clock, and the sample is
+  dropped with an `error` log naming the raw value; `skipped` counts it. Both
+  failure shapes of a unit mistake are covered: seconds-read-as-millis lands in
+  1970, millis-read-as-seconds lands in the far future.
+- **`now_secs` is passed in**, so the boundary is testable rather than
+  wall-clock dependent. Read once per pass, not per symbol, so the window cannot
+  move underneath a batch. On the impossible branch (a clock before 1970) the
+  future bound is disabled rather than made infinitely strict — the guard exists
+  to catch a unit mistake, and a broken clock must not silently stop the feed.
+
+🔑 **The test that would have caught this in 2026-03 is
+`a_seconds_reading_is_taken_as_seconds`** — a single assertion that a plausible
+`lastprice` value survives the conversion unchanged. There was no test on this
+conversion at all; the unit was asserted only in a comment, and the comment was
+wrong.
+
+⚠️ **`soroban.rs:667` is untouched, by measurement** — 48,311 correctly stamped
+rows across 5.5 months, zero corrupt. The standing "deploy both stacks" rule
+(recorded because `reflector_key_to_identity` is shared) does not apply to this
+defect, and the exemption is evidenced rather than assumed.
+
 ## Acceptance Criteria
 
 - [x] Whether a 1970 row can win the enrichment ASOF join is **established by
@@ -755,9 +790,17 @@ assumption to carry."*
       smallest gap 1.73e9 s. **Severity settled: data-loss, not wrong-value.**
       See "SETTLED 2026-08-26" above. 0199's "it is inert" was the right conclusion
       from insufficient reasoning — its first clause is outright false.
-- [ ] `lib.rs:298` takes `lastprice`'s timestamp as **seconds**, with a magnitude
+- [x] `lib.rs:298` takes `lastprice`'s timestamp as **seconds**, with a magnitude
       check as tolerance, and a test covering a seconds input, a millis input and
       the boundary. The `lib.rs:295` comment is corrected in the same change.
+      → `reflector_timestamp_to_epoch_seconds(raw, now_secs)`. Decides the unit
+      from the **magnitude** rather than from any declared unit, so the mistake
+      that caused this — trusting a comment about another code site — cannot
+      recur in the same shape. The false comment is gone; what replaces it says
+      what the two arms actually read. Tests:
+      `a_seconds_reading_is_taken_as_seconds` (the defect itself — this exact
+      input became 1970-01-21 before), `a_millis_reading_is_converted`,
+      `the_threshold_sits_in_a_dead_zone_where_neither_unit_is_plausible`.
 - [x] The event-decode path's real payload shape is stated as evidence, not
       assumed from the oracle-worker comment.
       → **`topic[2]`, u64 milliseconds**, per `soroban.rs:652-667`'s own doc
@@ -778,7 +821,14 @@ assumption to carry."*
       twins of EVENT rows already stored correctly (3,264/3,264), so a ×1000
       repair adds no information. ⚠️ The *execution* of the delete is still owed
       and is sequenced against [[0200]] — see Implementation.
-- [ ] A malformed timestamp is rejected loudly rather than written, with a test.
+- [x] A malformed timestamp is rejected loudly rather than written, with a test.
+      → `BadTimestamp::{BeforeGenesis, InTheFuture}`, carrying the raw value so
+      the log line alone is diagnosable. The row is **not written**, `skipped` is
+      incremented and it logs at `error`. Tests:
+      `an_implausible_reading_is_rejected_loudly` (including a reading already
+      divided once — exactly what this bug produced — and `0`),
+      `a_reading_slightly_ahead_of_our_clock_is_accepted` pinning the skew
+      boundary.
 
 ### Folded in from [[0086]]
 

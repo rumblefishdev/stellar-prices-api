@@ -107,6 +107,86 @@ pub enum OracleError {
     Base64(#[from] base64::DecodeError),
 }
 
+/// Values at or above this are **milliseconds**; below it, **seconds**.
+///
+/// `1e11` seconds is the year 5138 and `1e11` milliseconds is 1973 — no real
+/// reading can be ambiguous between the two, so the gap either side of this
+/// line is roughly three thousand years wide. It is a magnitude check, not a
+/// guess: [`reflector_timestamp_to_epoch_seconds`] rejects anything that lands
+/// outside the plausible window after conversion, so a value in the dead zone
+/// fails loudly instead of being filed under the wrong unit.
+pub const REFLECTOR_MILLIS_THRESHOLD: u64 = 100_000_000_000;
+
+/// Earliest reading that can be real: Stellar genesis, 2015-09-30 UTC.
+pub const EARLIEST_PLAUSIBLE_SECS: u64 = 1_443_571_200;
+
+/// How far ahead of our own clock a reading may sit before it is malformed.
+/// Reflector stamps the observation, not the reply, so a fresh reading is
+/// normally in the recent past; an hour absorbs clock skew without admitting a
+/// value that has plainly been mis-scaled.
+pub const FUTURE_SKEW_SECS: u64 = 3_600;
+
+/// Why a Reflector timestamp was refused. Carries the raw value so the log line
+/// is enough to diagnose from — see [`reflector_timestamp_to_epoch_seconds`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum BadTimestamp {
+    #[error("timestamp {raw} converts to {secs}s, before Stellar genesis")]
+    BeforeGenesis { raw: u64, secs: u64 },
+    #[error("timestamp {raw} converts to {secs}s, more than an hour ahead of now ({now}s)")]
+    InTheFuture { raw: u64, secs: u64, now: u64 },
+}
+
+/// Convert a Reflector `PriceData.timestamp` to `oracle_prices.timestamp`
+/// (epoch **seconds**), refusing anything implausible.
+///
+/// # 🔴 Why this is not a `/ 1000`
+///
+/// It was, and that is task 0227. The poll path took `lastprice`'s timestamp as
+/// milliseconds and divided unconditionally, on the strength of a comment
+/// claiming it matched the event-decoded path. It does not: the two arms read
+/// **different fields carrying different units**. The event path takes
+/// `topic[2]` of an `update` event, which really is milliseconds
+/// (`prices-ingest-core` `soroban.rs:652-667`); `lastprice` returns **seconds**.
+///
+/// Every row the poll path ever wrote landed at 1970-01-21 — 3,264 per asset on
+/// prod, 100% of that writer's output, against 48,311 correctly-stamped rows
+/// from the event path with zero mixing. Nothing was lost (each corrupt row is
+/// an exact `Decimal(38,14)` price twin of an event row) and nothing was priced
+/// wrongly (a 1970 row wins the enrichment ASOF join and is then rejected by the
+/// 300 s staleness guard, 471,087 times out of 471,087) — but the readings were
+/// unusable, and silently so.
+///
+/// # The lesson this signature encodes
+///
+/// A cross-reference to another code site is not evidence about an upstream
+/// payload. So this function no longer trusts a declared unit at all: it decides
+/// from the **magnitude**, and refuses to write anything that is implausible
+/// under either reading. A future Reflector change of unit therefore produces a
+/// loud rejection, not five months of 1970.
+///
+/// `now_secs` is passed in rather than read here so the boundary is testable.
+pub fn reflector_timestamp_to_epoch_seconds(raw: u64, now_secs: u64) -> Result<u32, BadTimestamp> {
+    let secs = if raw >= REFLECTOR_MILLIS_THRESHOLD {
+        raw / 1000
+    } else {
+        raw
+    };
+    if secs < EARLIEST_PLAUSIBLE_SECS {
+        return Err(BadTimestamp::BeforeGenesis { raw, secs });
+    }
+    if secs > now_secs.saturating_add(FUTURE_SKEW_SECS) {
+        return Err(BadTimestamp::InTheFuture {
+            raw,
+            secs,
+            now: now_secs,
+        });
+    }
+    // Unreachable while the future check holds — u32::MAX is 2106 — but the cast
+    // is lossy and `oracle_prices.timestamp` is a DateTime, so clamp rather than
+    // wrap if those bounds ever move.
+    Ok(secs.min(u32::MAX as u64) as u32)
+}
+
 /// A decoded `PriceData` from the oracle (price is 14-decimal `i128`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PriceData {
@@ -280,6 +360,18 @@ pub async fn run_oracle(
     let known_before = registry.assets().count();
     let mut samples = Vec::new();
     let mut skipped = 0usize;
+    // Read once per pass, not per symbol: the plausibility window must not move
+    // underneath a batch, or the same reading could be accepted for one symbol
+    // and refused for the next.
+    //
+    // On the impossible branch (a system clock before 1970) the future bound is
+    // disabled rather than made infinitely strict: the guard exists to catch a
+    // unit mistake, which the genesis bound and the magnitude threshold already
+    // catch, and a broken clock must not silently stop the feed.
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(u64::MAX);
 
     for &symbol in TRACKED_SYMBOLS {
         // Filter out any polled symbol with no Stellar identity (shared with the
@@ -289,13 +381,31 @@ pub async fn run_oracle(
         };
         match fetch_lastprice(http, rpc_url, contract, symbol).await {
             Ok(Some(pd)) => {
+                // ⚠️ `lastprice` reports SECONDS — see
+                // `reflector_timestamp_to_epoch_seconds`, which decides from the
+                // magnitude rather than from any declared unit. The previous
+                // version of this line divided by 1000 unconditionally, on the
+                // strength of a comment about the event-decoded path, and so
+                // wrote every one of its readings to 1970-01-21 (task 0227).
+                let timestamp = match reflector_timestamp_to_epoch_seconds(pd.timestamp, now_secs) {
+                    Ok(ts) => ts,
+                    Err(err) => {
+                        // Loud, and NOT written. A rejected reading costs one
+                        // 5-minute sample; a written one is indistinguishable
+                        // from a real observation for as long as it is stored.
+                        skipped += 1;
+                        tracing::error!(
+                            symbol,
+                            raw = pd.timestamp,
+                            error = %err,
+                            "reflector timestamp rejected; row not written"
+                        );
+                        continue;
+                    }
+                };
                 let asset_id = registry.get_or_assign(&identity);
                 samples.push(OracleSample {
-                    // Reflector reports millisecond timestamps; oracle_prices.timestamp
-                    // is DateTime (epoch seconds), so divide by 1000 to match the
-                    // event-decoded path (prices-ingest-core soroban.rs). The clamp is
-                    // a backstop for the 2106 u32 ceiling, not the unit conversion.
-                    timestamp: (pd.timestamp / 1000).min(u32::MAX as u64) as u32,
+                    timestamp,
                     asset_id,
                     oracle_name: ORACLE_NAME.to_string(),
                     price_usd: pd.price,
@@ -368,6 +478,96 @@ pub async fn run_oracle(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A plausible "now" for the timestamp tests: 2026-08-27T12:00:00Z.
+    const NOW: u64 = 1_787_140_800;
+
+    /// 🔑 Task 0227, the defect itself. `lastprice` reports **seconds**, and a
+    /// seconds reading must survive untouched.
+    ///
+    /// The old code divided by 1000 unconditionally, so this exact input became
+    /// 1,787,140 — 1970-01-21. That was 100% of the poll path's output for at
+    /// least five months.
+    #[test]
+    fn a_seconds_reading_is_taken_as_seconds() {
+        let ts = reflector_timestamp_to_epoch_seconds(NOW, NOW).unwrap();
+        assert_eq!(ts, NOW as u32, "a seconds reading must not be divided");
+    }
+
+    /// The other unit still converts, so the function is safe to point at the
+    /// event path's `topic[2]` too, and safe if Reflector ever changes.
+    #[test]
+    fn a_millis_reading_is_converted() {
+        let ts = reflector_timestamp_to_epoch_seconds(NOW * 1000, NOW).unwrap();
+        assert_eq!(ts, NOW as u32);
+    }
+
+    /// 🔑 The boundary is **uninhabitable**, and that is the property worth
+    /// pinning — not where exactly it sits.
+    ///
+    /// A value just below the threshold is the year 5138 read as seconds; at the
+    /// threshold it is 1973 read as millis. So neither side of the line can be
+    /// accepted, and the exact placement of `REFLECTOR_MILLIS_THRESHOLD` is not
+    /// load-bearing: any threshold inside the ~3,000-year gap behaves
+    /// identically. The unit decision itself is pinned by the two tests above,
+    /// on values that are real under exactly one reading.
+    ///
+    /// ⚠️ A first version of this test asserted the two sides were *accepted*
+    /// with different units. It failed — correctly — which is how the dead zone
+    /// got documented instead of assumed.
+    #[test]
+    fn the_threshold_sits_in_a_dead_zone_where_neither_unit_is_plausible() {
+        assert!(
+            matches!(
+                reflector_timestamp_to_epoch_seconds(REFLECTOR_MILLIS_THRESHOLD - 1, NOW),
+                Err(BadTimestamp::InTheFuture { .. })
+            ),
+            "just below the threshold, read as seconds, is the year 5138"
+        );
+        assert!(
+            matches!(
+                reflector_timestamp_to_epoch_seconds(REFLECTOR_MILLIS_THRESHOLD, NOW),
+                Err(BadTimestamp::BeforeGenesis { .. })
+            ),
+            "at the threshold, read as millis, is 1973"
+        );
+    }
+
+    /// A malformed reading is REFUSED, not written — the criterion 0227 adds
+    /// after five months of rows that looked like data.
+    ///
+    /// Both arms matter and they fail differently: a seconds value read as
+    /// millis lands in 1970 (too small), and a millis value read as seconds
+    /// lands in the far future. Neither can reach `oracle_prices` now.
+    #[test]
+    fn an_implausible_reading_is_rejected_loudly() {
+        // What the 0227 bug produced: a real reading already divided once.
+        let already_divided = NOW / 1000;
+        assert!(matches!(
+            reflector_timestamp_to_epoch_seconds(already_divided, NOW),
+            Err(BadTimestamp::BeforeGenesis { .. })
+        ));
+
+        // A value in the dead zone below the threshold — the shape a unit
+        // change would produce. Year 5138 if believed as seconds.
+        let too_far_ahead = REFLECTOR_MILLIS_THRESHOLD - 1;
+        assert!(matches!(
+            reflector_timestamp_to_epoch_seconds(too_far_ahead, NOW),
+            Err(BadTimestamp::InTheFuture { .. })
+        ));
+
+        // Zero — the value a missing field decodes to in more languages than
+        // one, and the one most likely to arrive by accident.
+        assert!(reflector_timestamp_to_epoch_seconds(0, NOW).is_err());
+    }
+
+    /// Clock skew is tolerated; a mis-scaled value is not. The boundary between
+    /// those two is what `FUTURE_SKEW_SECS` buys, so pin it.
+    #[test]
+    fn a_reading_slightly_ahead_of_our_clock_is_accepted() {
+        assert!(reflector_timestamp_to_epoch_seconds(NOW + FUTURE_SKEW_SECS, NOW).is_ok());
+        assert!(reflector_timestamp_to_epoch_seconds(NOW + FUTURE_SKEW_SECS + 1, NOW).is_err());
+    }
 
     #[test]
     fn every_tracked_symbol_resolves_to_an_identity() {
