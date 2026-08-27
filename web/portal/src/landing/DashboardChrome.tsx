@@ -64,7 +64,13 @@ export function DashboardNavbar({
           direction="row"
           alignItems="center"
           justifyContent="space-between"
-          sx={{ minHeight: 52, gap: 2 }}
+          // ⚠️ Wraps at `xs` on purpose, and the nav below takes the full
+          // width when it does — so on a phone the bar is TWO rows by
+          // construction: the wordmark, then the links and the account. It
+          // used to be three: the nav wrapped inside its own box beside the
+          // wordmark, "Dashboard / Quick start" climbed above the brand and
+          // sign-out fell onto a row of its own (PR #249 review, 375 px).
+          sx={{ minHeight: 52, gap: 2, flexWrap: { xs: 'wrap', sm: 'nowrap' } }}
         >
           <Wordmark />
 
@@ -73,7 +79,12 @@ export function DashboardNavbar({
             alignItems="center"
             spacing={{ xs: 1.5, md: 3 }}
             useFlexGap
-            sx={{ minWidth: 0, flexWrap: { xs: 'wrap', sm: 'nowrap' } }}
+            sx={{
+              minWidth: 0,
+              width: { xs: '100%', sm: 'auto' },
+              justifyContent: { xs: 'space-between', sm: 'flex-start' },
+              flexWrap: { xs: 'wrap', sm: 'nowrap' },
+            }}
           >
             {links.map(({ label, to, href, current }) => (
               <Link
@@ -155,6 +166,10 @@ export function DashboardNavbar({
                 </Box>
                 <Typography
                   sx={{
+                    // The handle is display-only; on a phone the Discord
+                    // glyph stands for it so the three links and the sign-out
+                    // fit one row. It is still on the dashboard's own card.
+                    display: { xs: 'none', sm: 'block' },
                     fontFamily: font.secondary,
                     fontWeight: 700,
                     fontSize: '0.9375rem',
@@ -175,6 +190,11 @@ export function DashboardNavbar({
               component="button"
               type="button"
               onClick={onSignOut}
+              // The label is `display: none` under `sm` and the glyph is
+              // `aria-hidden`, so without this the button had NO accessible
+              // name on a phone — measured empty (PR #249 review). `aria-label`
+              // names it at every width; the visible text is the same words.
+              aria-label="Sign out"
               direction="row"
               spacing={1}
               alignItems="center"
@@ -184,6 +204,11 @@ export function DashboardNavbar({
                 border: 'none',
                 cursor: 'pointer',
                 p: 0,
+                // 44 px is the touch target the PR promises; the glyph stays
+                // 24 px and the hit area grows around it.
+                minWidth: 44,
+                minHeight: 44,
+                justifyContent: 'center',
                 fontFamily: font.secondary,
                 fontSize: '0.9375rem',
                 fontWeight: 500,

@@ -641,7 +641,6 @@ function LoginView({
         title="Redirecting to Discord"
         titleComponent="h1"
         subtitle="A new window will open for you to authorize with Discord."
-        footer={<Legal />}
       >
         <Callout variant="discord" title="Discord authorization window opened.">
           Complete the sign-in there to continue. If nothing opened,{' '}
@@ -811,7 +810,6 @@ function LoginView({
       title={LOGIN_TITLE}
       titleComponent="h1"
       subtitle={LOGIN_SUBTITLE}
-      footer={<Legal />}
     >
       {/* Both banners keep task 0186's wording exactly. "Cancelled" is not an
           error and does not get the error skin — the visitor pressed Cancel at
@@ -854,25 +852,29 @@ function LoginView({
           </p>
         </Callout>
       )}
-      {/* ⚠️ **"You are not signed in." and the two-prerequisites paragraph
-          were both removed here on 2026-08-26, at Adam's instruction**, to
-          match Figma `824:140`. The comment that stood here argued the
-          opposite — that dropping the paragraph "would break the one
-          acceptance criterion this screen exists to satisfy" — so the reason
-          it is now safe to drop belongs on the record:
-
-          the same two prerequisites, in the same words and behind the same
-          registered invite, are stated by the landing page's FAQ
-          (`landing/Faq.tsx`, "How do I get an API key?").
-
-          ⚠️ **That is weaker than what it replaced, in two ways**, and both
-          are stated rather than smoothed over: the FAQ answer is inside a
-          COLLAPSED accordion, so it states nothing until a visitor opens it;
-          and on the `/login` route the card is the whole page and now names
-          neither rule, so somebody who arrives straight at that URL learns
-          them only by being refused. The guard moved with the copy — see
-          `app.spec.tsx`, where the assertion now has to click the row open
-          before it can read the sentence. */}
+      {/* ⚠️ **The two prerequisites, back above the button since 2026-08-27.**
+          "You are not signed in." and task 0189's two-rules paragraph were
+          both removed here on 2026-08-26, at Adam's instruction, to match
+          Figma `824:140`, on the argument that the landing page's FAQ states
+          the same rules. PR #249's review named what that cost — the FAQ is
+          a COLLAPSED accordion and states nothing until opened, and on
+          `/login` the card is the whole page and named neither rule — and
+          this task's acceptance criterion still reads "states both
+          prerequisites before the sign-in button". Restored as one small
+          line rather than the paragraph: 0189's words, verbatim, in the
+          card's tertiary type, ABOVE the control, so a developer learns the
+          rules before authorising an app for nothing. The FAQ keeps the long
+          form. The frame does not draw this line; the criterion does. */}
+      <Typography
+        variant="body2"
+        data-testid="prerequisites"
+        sx={{ color: color.text.tertiary, m: 0 }}
+      >
+        Getting an API key needs two things, both checked via Discord when you
+        ask for one: membership of the{' '}
+        <a href={STELLAR_DISCORD_INVITE}>Stellar Developers Discord</a>, and a
+        Discord account that is not brand new.
+      </Typography>
       {/* A link, not a button with an onClick. The OAuth flow is a top-level
           navigation to discord.com and back; `fetch` cannot perform one, and
           the session cookie is `SameSite=Lax` precisely so that this navigation
@@ -1196,16 +1198,17 @@ function KeepsHappening() {
 
 /**
  * The frame's underline on a footer's named destinations — the OAuth error
- * card's "contact support" and "status page", and [`Legal`]'s two documents.
+ * card's "contact support" and "status page".
  *
  * ⚠️ **Underlined at Adam's instruction (2026-08-26), and still `<span>` and
  * not `<a>`**, because neither destination exists in this build —
  * `landing/links.ts` holds every off-page target the portal names and neither
- * a support address nor a status page is among them. [`Legal`] settled the
- * rule this follows: a link to a placeholder is a promise the page cannot
- * keep. The two are therefore drawn as the frame draws them and are not
- * clickable, which is a known and deliberate mismatch — swap the `<span>`s
- * for `<a>`s the day the URLs land and nothing else moves.
+ * a support address nor a status page is among them. The rule this follows:
+ * a link to a placeholder is a promise the page cannot keep. The two are
+ * therefore drawn as the frame draws them and are not clickable, which is a
+ * known and deliberate mismatch — swap the `<span>`s for `<a>`s the day the
+ * URLs land and nothing else moves. (The legal footer that used to share
+ * this rule is no longer rendered at all — see the note below `UNDERLINED`.)
  */
 const UNDERLINED = {
   textDecoration: 'underline',
@@ -1213,32 +1216,16 @@ const UNDERLINED = {
   color: color.text.secondary,
 } as const;
 
-/**
- * The card's legal footer.
- *
- * **The two documents it names do not exist yet**, so the words are drawn
- * underlined ([`UNDERLINED`], the frame's treatment, Adam 2026-08-26) but are
- * still `<span>` and not `<a>`. A link to a placeholder would be a promise the
- * page cannot keep, and "you agree to our Terms of Service" pointing at a 404
- * is worse than the same sentence pointing nowhere. The mismatch is known and
- * deliberate: they look clickable and are not, until the URLs land — at which
- * point the two `<span>`s become `<a>`s and nothing else moves.
+/*
+ * ⚠️ **The card's legal footer is not rendered — task 0193, decision #4,
+ * 2026-08-27.** The frame's "By continuing you agree to our Terms of Service
+ * and Privacy Policy" was drawn here as two underlined `<span>`s, because
+ * neither document exists yet and a link to a placeholder is a promise the
+ * page cannot keep. PR #249's review named the other half of that: a sentence
+ * asking the visitor to agree to two documents they cannot open is a promise
+ * too, and a worse one. The sentence returns as two `<a>`s the day the URLs
+ * land in `landing/links.ts`; until then the cards carry no `footer`.
  */
-function Legal() {
-  return (
-    <Typography variant="body2" sx={{ color: color.text.tertiary }}>
-      By continuing you agree to our{' '}
-      <Box component="span" sx={UNDERLINED}>
-        Terms of Service
-      </Box>{' '}
-      and{' '}
-      <Box component="span" sx={UNDERLINED}>
-        Privacy Policy
-      </Box>
-      .
-    </Typography>
-  );
-}
 
 /**
  * The signed-in half of the page: identity, the key (task 0187), and usage

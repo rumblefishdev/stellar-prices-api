@@ -35,7 +35,9 @@ const CLAIMS: readonly { icon: string; title: string; body: string }[] = [
   {
     icon: apiKeyIcon,
     title: 'API Key Management',
-    body: 'View and copy your key at any time. Rotate once per month if needed.',
+    // "Regenerate", not "rotate", and "quota period", not "month": task
+    // 0191's words — nothing rotates, and the cap is the quota period.
+    body: 'View and copy your key at any time. Regenerate once per quota period if needed.',
   },
   {
     icon: usageIcon,

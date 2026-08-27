@@ -787,16 +787,18 @@ describe('sign in with Discord', () => {
     openAndSignedOut();
     renderAt('/');
 
-    // ⚠️ Behind an accordion, and the click is part of the assertion. This is
-    // WEAKER than the paragraph it replaced, which sat above the sign-in
-    // button and needed no interaction — recorded here rather than smoothed
-    // over, because the criterion says "states", and a collapsed FAQ row
-    // states nothing until somebody opens it.
-    fireEvent.click(
-      await screen.findByRole('button', { name: /how do i get an api key/i }),
-    );
+    // With the portal open the landing page has no sign-in card — the
+    // Discord button is `/login`'s, and the line above it is asserted in the
+    // next test. What the landing page states, it states in the FAQ, and
+    // the row that carries the two rules is OPEN by default: a collapsed
+    // accordion states nothing, and the criterion says "states" (PR #249
+    // review; 2026-08-26 had it collapsed, behind a click).
+    const row = await screen.findByRole('button', {
+      name: /how do i get an api key/i,
+    });
+    expect(row.getAttribute('aria-expanded')).toBe('true');
 
-    const invite = await screen.findByRole('link', {
+    const invite = screen.getByRole('link', {
       name: /stellar developers discord/i,
     });
     expect(invite.getAttribute('href')).toBe('https://discord.gg/stellardev');
@@ -807,6 +809,34 @@ describe('sign in with Discord', () => {
     // sections away, and a whole-document match would fail on that.
     const answer = screen.getByText(/not brand new/i);
     expect(answer.textContent).not.toMatch(/\d+\s*(minute|hour|day)/i);
+  });
+
+  /**
+   * `/login` is the card alone — somebody who follows a link straight there
+   * must not learn the rules only by being refused.
+   */
+  it('states both prerequisites on /login too', async () => {
+    openAndSignedOut();
+    renderAt('/login');
+
+    // The button first: `portalPanel()` binds to the card node that exists
+    // when it is called, and before the session answers that is the
+    // "checking" card, which unmounts.
+    const button = await screen.findByRole('link', {
+      name: /sign in with discord/i,
+    });
+    const card = portalPanel();
+    const stated = card.getByTestId('prerequisites');
+    // Above the control, not below it: the criterion says "before".
+    expect(
+      stated.compareDocumentPosition(button) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      card
+        .getByRole('link', { name: /stellar developers discord/i })
+        .getAttribute('href'),
+    ).toBe('https://discord.gg/stellardev');
+    expect(stated.textContent).not.toMatch(/\d+\s*(minute|hour|day)/i);
   });
 
   /**

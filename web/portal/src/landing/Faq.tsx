@@ -31,11 +31,21 @@ import { Section, SectionHeading, cardBorder, cardSurface } from './primitives';
  * slice lands rather than paraphrased here.
  */
 
-type Faq = { question: string; answer: ReactNode };
+type Faq = {
+  question: string;
+  answer: ReactNode; /**
+   * Rendered open. Task 0193's acceptance criterion says the landing page
+   * "states both prerequisites before the sign-in button"; a collapsed row
+   * states nothing until somebody opens it (PR #249 review). The one answer
+   * that carries the two rules is open by default; the rest stay shut.
+   */
+  open?: boolean;
+};
 
 const FAQS: readonly Faq[] = [
   {
     question: 'How do I get an API key?',
+    open: true,
     answer: (
       <>
         Sign in with Discord and the key is issued immediately. Two things are
@@ -81,9 +91,15 @@ const FAQS: readonly Faq[] = [
     ),
   },
   {
-    question: 'Can I rotate my API key?',
+    question: 'Can I regenerate my API key?',
+    // Task 0191's model, restated: pressing Regenerate deactivates the key
+    // at once and NOTHING is issued in its place until the next quota period.
+    // This answer used to promise the opposite ("issued straight away") —
+    // the model 0191 superseded on 2026-08-21 — and the dashboard's own
+    // dialog said so a click away. Corrected 2026-08-27; 0191's amendment
+    // section records this FAQ as a second home of that copy.
     answer:
-      'Yes — you can replace your key once per quota period. The replacement is issued straight away and the old key stops working.',
+      'Yes — once per quota period. Regenerate deactivates your current key immediately; a new one can be issued from the start of the next period (the 1st of the month, 00:00 UTC), not straight away.',
   },
 ];
 
@@ -105,9 +121,10 @@ export function Faq() {
             gridTemplateColumns: { xs: '1fr', md: 'repeat(2, 1fr)' },
           }}
         >
-          {FAQS.map(({ question, answer }) => (
+          {FAQS.map(({ question, answer, open }) => (
             <Accordion
               key={question}
+              defaultExpanded={open}
               disableGutters
               square={false}
               sx={{
