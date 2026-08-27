@@ -781,6 +781,36 @@ rows across 5.5 months, zero corrupt. The standing "deploy both stacks" rule
 (recorded because `reflector_key_to_identity` is shared) does not apply to this
 defect, and the exemption is evidenced rather than assumed.
 
+## 🔴 The fix makes the two writers collide — capture the evidence before merges do
+
+`prices.oracle_prices` is `ReplacingMergeTree` with **no version column**,
+`ORDER BY (asset_id, oracle_name, timestamp)` (`init.sql:200-210`). Both writers
+use `oracle_name = 'reflector'`, and both derive their timestamp from the same
+Reflector 5-minute observation.
+
+While the POLL path was broken, its rows sat 56 years away from the EVENT rows,
+so the two writers never shared a key — which is precisely why `raw_data`
+(`{"symbol":…}` vs `{"asset":…}`) worked as a writer discriminator and produced
+the clean 3,264 / 48,311 partition this task was solved with.
+
+**After the fix they collide.** A correct POLL row lands on an existing EVENT
+row's key; the only differing column is `raw_data`, and with no version column
+the survivor of a merge is arbitrary. Two consequences, both operational:
+
+1. **The open verification AC can only be confirmed negatively** — partition
+   `197001` stops growing — because a correct POLL row dedups into its EVENT
+   twin and cannot be counted. Capture the post-deploy census **without
+   `FINAL`**, promptly, before merges collapse the duplicates.
+2. **The `raw_data` discriminator stops working**, which also removes the
+   measurement [[0226]] needs to decide whether the POLL write should exist at
+   all. If that decision is wanted, take the reading in the window between
+   deploy and the first merge — or accept that 0226 argues from this task's
+   existing evidence instead.
+
+⚠️ This is not an argument against the fix. It is an argument for taking one
+measurement early, and it is the second time in this task that a defect turned
+out to be the only thing making a population separable.
+
 ## Acceptance Criteria
 
 - [x] Whether a 1970 row can win the enrichment ASOF join is **established by
@@ -815,6 +845,9 @@ defect, and the exemption is evidenced rather than assumed.
       Implementation above.
 - [ ] New readings stop landing before the oracle window — verified on prod after
       deploy, not from the code.
+      🔴 **Read the dedup note below first: after this fix a correct POLL row is
+      no longer separately countable, so this must be captured WITHOUT `FINAL`,
+      promptly after deploy.**
 - [x] The 6,372 existing rows are repaired or explicitly written off, with the
       decision recorded.
       → **Decision: DELETE.** All 3,264 per asset are exact `Decimal(38,14)` price
@@ -822,6 +855,13 @@ defect, and the exemption is evidenced rather than assumed.
       repair adds no information. ⚠️ The *execution* of the delete is still owed
       and is sequenced against [[0200]] — see Implementation.
 - [x] A malformed timestamp is rejected loudly rather than written, with a test.
+      ⚠️ **The rejection half only. "Rejected *and alarmed*" — which the plan
+      below calls the single most valuable deliverable here — is NOT met and is
+      spawned as [[0231]]**, because `run_oracle` still returns `Ok` and no
+      metric filter or alarm reads this worker's `skipped`, its ERROR logs or
+      `written == 0`. Recorded rather than quietly ticked: without it the guard
+      trades five months of silently wrong rows for an indefinite silently
+      absent feed, which is the same defect wearing different clothes.
       → `BadTimestamp::{BeforeGenesis, InTheFuture}`, carrying the raw value so
       the log line alone is diagnosable. The row is **not written**, `skipped` is
       incremented and it logs at `error`. Tests:

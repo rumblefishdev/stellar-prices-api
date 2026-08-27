@@ -117,8 +117,16 @@ pub enum OracleError {
 /// fails loudly instead of being filed under the wrong unit.
 pub const REFLECTOR_MILLIS_THRESHOLD: u64 = 100_000_000_000;
 
-/// Earliest reading that can be real: Stellar genesis, 2015-09-30 UTC.
-pub const EARLIEST_PLAUSIBLE_SECS: u64 = 1_443_571_200;
+/// Earliest reading that can be real.
+///
+/// ⚠️ **This is `prices_ingest_core::ORACLE_EPOCH_FLOOR`, deliberately, and not
+/// a floor of this module's own.** That constant (2020-01-01) already gates the
+/// `usd_rate` snapshot at `writer.rs:506`. A looser floor here — Stellar genesis
+/// in 2015 was the first thing tried — would admit a 2018 reading into
+/// `oracle_prices`, which the snapshot then drops silently: no rejection log, no
+/// row downstream, no signal anywhere. Two floors that disagree produce exactly
+/// the quiet gap this task exists to remove, so there is one floor.
+pub const EARLIEST_PLAUSIBLE_SECS: u64 = prices_ingest_core::writer::ORACLE_EPOCH_FLOOR as u64;
 
 /// How far ahead of our own clock a reading may sit before it is malformed.
 /// Reflector stamps the observation, not the reply, so a fresh reading is
@@ -479,7 +487,12 @@ pub async fn run_oracle(
 mod tests {
     use super::*;
 
-    /// A plausible "now" for the timestamp tests: 2026-08-27T12:00:00Z.
+    /// A plausible "now" for the timestamp tests: 2026-08-19T12:00:00Z.
+    ///
+    /// ⚠️ This comment said 2026-08-27 until it was checked against
+    /// `date -u -d @1787140800`. In a change whose entire root cause is a
+    /// comment about a timestamp that was trusted and wrong, an unverified
+    /// timestamp comment is not a small thing.
     const NOW: u64 = 1_787_140_800;
 
     /// 🔑 Task 0227, the defect itself. `lastprice` reports **seconds**, and a
@@ -567,6 +580,27 @@ mod tests {
     fn a_reading_slightly_ahead_of_our_clock_is_accepted() {
         assert!(reflector_timestamp_to_epoch_seconds(NOW + FUTURE_SKEW_SECS, NOW).is_ok());
         assert!(reflector_timestamp_to_epoch_seconds(NOW + FUTURE_SKEW_SECS + 1, NOW).is_err());
+    }
+
+    /// The floor here and the floor the `usd_rate` snapshot enforces must be
+    /// the SAME value, or the gap between them is a silent hole: a reading in
+    /// it is written to `oracle_prices`, then dropped by the copy at
+    /// `writer.rs:506` with no log and no row — undiscoverable except by
+    /// noticing an absence.
+    ///
+    /// A first version of this guard used Stellar genesis (2015-09-30) and
+    /// opened exactly that 4.3-year window.
+    #[test]
+    fn the_plausibility_floor_is_the_one_the_usd_rate_snapshot_uses() {
+        assert_eq!(
+            EARLIEST_PLAUSIBLE_SECS,
+            prices_ingest_core::writer::ORACLE_EPOCH_FLOOR as u64
+        );
+        // 2017-07-14 — inside the window the looser floor would have admitted.
+        assert!(
+            reflector_timestamp_to_epoch_seconds(1_500_000_000, NOW).is_err(),
+            "a reading the snapshot would silently drop must be refused here"
+        );
     }
 
     #[test]
