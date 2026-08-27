@@ -390,15 +390,41 @@ function LoginView({
     if (!waiting) return;
 
     let live = true;
+    let grace: number | undefined;
     const finish = (refusal: string | null) => {
       if (!live) return;
       live = false;
+      window.clearTimeout(grace);
+      window.clearInterval(poll);
+      window.clearInterval(watchClosed);
       setWaiting(false);
       setOutcome(refusal);
       // Ask the server either way. A refusal means no session, and saying so
       // costs one request; a success means the cookie is already set and this
       // is the only thing that will notice.
       onSignedIn();
+    };
+
+    /**
+     * Hold a slower signal's verdict open for `POPUP_MESSAGE_GRACE_MS` so the
+     * message can still overtake it. ⚠️ The poll and the close both used to
+     * end the wait on the spot, and both can observe their fact BEFORE the
+     * popup's `postMessage` arrives: the callback's 303 sets the cookie and
+     * lands the popup on its query, but the popup still has to download the
+     * bundle before `bridgeOAuthPopup` posts — and once it does post it closes
+     * in the same breath, so `closed` can be true while the message is still
+     * queued. Ending early tore the listener down and the query it carried
+     * (`?issue=too_young`, `?signin=not_member`) was lost: a refused visitor
+     * saw a plain dashboard or the generic failure card. Only the first
+     * caller starts the timer; a message during the grace calls `finish`
+     * directly and cancels it.
+     */
+    const afterGrace = (verdict: () => void) => {
+      if (!live || grace !== undefined) return;
+      grace = window.setTimeout(() => {
+        grace = undefined;
+        if (live) verdict();
+      }, POPUP_MESSAGE_GRACE_MS);
     };
 
     const stopListening = onOAuthPopupMessage(({ search }) => {
@@ -411,6 +437,7 @@ function LoginView({
       // card reads it exactly as it reads the full-page flow's. `signin=…`
       // outcomes are not forwarded: they belong to this card, and
       // `readSigninOutcome` is what reads them.
+      if (!live) return;
       if (new URLSearchParams(search).has('issue')) {
         navigate({ search }, { replace: true });
       }
@@ -422,9 +449,10 @@ function LoginView({
     // eighty requests to a route the backend answers from its own session
     // cookie.
     const poll = window.setInterval(() => {
+      if (!live || grace !== undefined) return;
       fetchSession()
         .then((result) => {
-          if (result.authenticated) finish(null);
+          if (result.authenticated) afterGrace(() => finish(null));
         })
         .catch(() => {
           // A failed poll says nothing about the round-trip in the other
@@ -443,29 +471,21 @@ function LoginView({
       // may not have run yet, so "the window is gone" is not evidence that
       // nothing happened — a visitor who completed the round-trip and then
       // closed the window must land on the dashboard, never on an error about
-      // a sign-in that worked.
-      //
-      // The other two signals are stopped first so this one owns the outcome;
-      // `live` is what the message listener and the poll check.
-      live = false;
-      stopListening();
-      window.clearInterval(poll);
-      window.clearInterval(watchClosed);
-      const settle = (refusal: string | null) => {
-        setWaiting(false);
-        setOutcome(refusal);
-        onSignedIn();
-      };
-      fetchSession()
-        .then((result) => settle(result.authenticated ? null : 'failed'))
-        // No answer is not proof of a session, and the visitor is looking at a
-        // window they just closed. Say the sign-in did not complete; the card
-        // it lands on offers the retry.
-        .catch(() => settle('failed'));
+      // a sign-in that worked. And it is decided only AFTER the grace, so a
+      // message the close raced past still lands its own, precise refusal.
+      afterGrace(() => {
+        fetchSession()
+          .then((result) => finish(result.authenticated ? null : 'failed'))
+          // No answer is not proof of a session, and the visitor is looking
+          // at a window they just closed. Say the sign-in did not complete;
+          // the card it lands on offers the retry.
+          .catch(() => finish('failed'));
+      });
     }, 500);
 
     return () => {
       live = false;
+      window.clearTimeout(grace);
       stopListening();
       window.clearInterval(poll);
       window.clearInterval(watchClosed);
@@ -1661,7 +1681,14 @@ function describeNextEligible(value: string | null | undefined): string {
   if (!match) return 'the start of the next quota period';
   const [, year, month, day] = match;
   const date = new Date(Date.UTC(Number(year), Number(month) - 1, Number(day)));
-  if (Number.isNaN(date.getTime())) {
+  // `Date.UTC` does not reject an impossible month or day — it rolls them
+  // over, so `2026-13-45` comes back as a real date in February 2027 rather
+  // than `NaN`. Reading the fields back is what tells a date from garbage.
+  if (
+    Number.isNaN(date.getTime()) ||
+    date.getUTCMonth() + 1 !== Number(month) ||
+    date.getUTCDate() !== Number(day)
+  ) {
     return 'the start of the next quota period';
   }
   return date.toLocaleDateString('en-GB', {
@@ -1801,6 +1828,14 @@ const PROPAGATION_COPY = 'within about half a minute';
  * on every page load — days later, "until then treat it as live" would be
  * telling somebody to keep worrying about a key that died last week.
  */
+/**
+ * How long the sign-in poll and the closed-window watch hold their verdict so
+ * the popup's `postMessage` can still overtake it (see `afterGrace`). Longer
+ * than a queued message task by orders of magnitude; shorter than a visitor
+ * notices on top of the round-trip they just made.
+ */
+const POPUP_MESSAGE_GRACE_MS = 1500;
+
 const PROPAGATION_FRESH_MS = 5 * 60 * 1000;
 
 /** Whether `revokedAt` (RFC 3339) is recent enough for the present tense. */
@@ -3182,7 +3217,7 @@ function Usage({
    * 2026-08-25: the "Quota resets on the 1st of each month, 00:00 UTC — next
    * reset …" sentence and the "Last updated … AWS reports usage with a delay"
    * line, along with the Refresh button beside them. The frame has none of the
-   * three, and the space they occupied is where task [[0222]]'s daily chart
+   * three, and the space they occupied is where task [[0226]]'s daily chart
    * goes.
    *
    * What is lost with them is 0188's lag disclosure — the panel no longer says
@@ -3359,7 +3394,11 @@ function RateLimitCard({
           unit="req/s"
           testId="rate-limit"
         />
-        <Figure label="Per-minute limit" value={perSecond * 60} unit="req/s" />
+        <Figure
+          label="Per-minute limit"
+          value={perSecond * 60}
+          unit="req/min"
+        />
       </Stack>
       {/* Task 0188's sentence, kept verbatim and read only by assistive
           technology. The design abbreviates the figure to "1 req/s", which is

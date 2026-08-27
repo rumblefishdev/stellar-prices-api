@@ -271,8 +271,16 @@ export function UsageMeter({
   headline?: boolean;
 }) {
   const known = used !== null && limit !== null && limit > 0;
-  const percent = known ? Math.min(100, Math.round((used / limit) * 100)) : 0;
-  const full = percent >= 100;
+  // Decided on the counts, not on a rounded percentage: 995 of 1,000 rounds
+  // to 100 % but the quota is not reached, and the dashboard's own
+  // `QuotaReachedNotice` gates on the same `used >= limit`. The percentage is
+  // floored for the same reason — it must not read "100 %" before it is.
+  const full = known && used >= limit;
+  const percent = full
+    ? 100
+    : known
+      ? Math.min(99, Math.floor((used / limit) * 100))
+      : 0;
 
   return (
     <Stack spacing={1.5}>

@@ -1258,7 +1258,102 @@ describe('the sign-in popup', () => {
 
     popup.closed = true;
 
-    expect(await screen.findByTestId('signin-failed')).toBeTruthy();
+    // Slower than a plain `findBy`: the close holds its verdict for the
+    // message grace before asking `/auth/me`.
+    expect(
+      await screen.findByTestId('signin-failed', {}, { timeout: 5000 }),
+    ).toBeTruthy();
+  });
+
+  /**
+   * ⚠️ **The message must still win a race it starts late.** The callback's
+   * 303 sets the cookie and lands the popup on `?issue=too_young`, but the
+   * popup has to download the bundle before it posts — and the 1.5 s poll can
+   * see `authenticated: true` first. Ending the wait on the poll tore the
+   * listener down, and the query the popup was about to forward was lost: the
+   * too-young visitor landed on a plain dashboard with no explanation.
+   */
+  it('lets a late popup message overtake a poll that already saw the session', async () => {
+    let meCalls = 0;
+    stubRoutes({
+      [CONFIG_URL]: openConfig,
+      [ME_URL]: () => {
+        meCalls += 1;
+        return {
+          json: async () =>
+            // The first read is the app's own on mount; from the first poll
+            // onwards the cookie is already there.
+            meCalls > 1
+              ? { authenticated: true, user_id: '1', username: 'adam' }
+              : { authenticated: false },
+        };
+      },
+      [KEY_URL]: keyNoKey,
+      [USAGE_URL]: usageNoKey,
+    });
+    stubPopup({ closed: false, focus: () => undefined });
+    render(
+      <MemoryRouter initialEntries={['/login']}>
+        <App />
+        <LocationSpy />
+      </MemoryRouter>,
+    );
+
+    await clickSignIn();
+    await screen.findByText(/waiting for discord/i);
+    // The poll has run and seen the session …
+    await waitFor(() => expect(meCalls).toBeGreaterThan(1), {
+      timeout: 3000,
+    });
+    // … and the popup's message arrives only now.
+    fireEvent(
+      window,
+      new MessageEvent('message', {
+        origin: window.location.origin,
+        data: {
+          source: 'stellar-portal-oauth',
+          search: '?issue=too_young&wait_secs=600',
+        },
+      }),
+    );
+
+    expect(
+      await screen.findByTestId('issue-too-young', {}, { timeout: 5000 }),
+    ).toBeTruthy();
+    expect(lastPath).toBe('/dashboard');
+  });
+
+  /**
+   * ⚠️ **Same race, the other slow signal.** `bridgeOAuthPopup` posts and
+   * closes in the same breath, so the 500 ms `closed` watch can observe the
+   * window gone while the message is still queued. Deciding on the close
+   * alone turned "not a member" into the generic failure card — exactly the
+   * distinction task 0193 makes an acceptance criterion.
+   */
+  it('lets a popup message overtake the closed-window watch', async () => {
+    openAndSignedOut();
+    const popup = { closed: false, focus: () => undefined };
+    stubPopup(popup);
+    renderAt('/login');
+
+    await clickSignIn();
+    await screen.findByText(/waiting for discord/i);
+
+    popup.closed = true;
+    // Let the watch observe the close before the message lands.
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    fireEvent(
+      window,
+      new MessageEvent('message', {
+        origin: window.location.origin,
+        data: { source: 'stellar-portal-oauth', search: '?signin=not_member' },
+      }),
+    );
+
+    expect(
+      await screen.findByTestId('signin-not-member', {}, { timeout: 5000 }),
+    ).toBeTruthy();
+    expect(screen.queryByTestId('signin-failed')).toBeNull();
   });
 
   /**
@@ -2233,7 +2328,7 @@ describe('usage against quota', () => {
     expect(screen.getByText(/request per second/i)).toBeTruthy();
     // ⚠️ The reset RULE sentence ("the 1st of each month, 00:00 UTC") was cut
     // from this card on 2026-08-25 at Adam's instruction, along with the lag
-    // line and the Refresh button — the frame has none of them and task 0222's
+    // line and the Refresh button — the frame has none of them and task 0226's
     // chart takes the space. What survives is the date itself, as the caption
     // under the bar, which is the half a visitor acts on.
     expect(screen.getByText('Resets 1 September')).toBeTruthy();
@@ -2565,6 +2660,26 @@ describe('usage against quota', () => {
     // Plural, because the figure is no longer the one the sentence was
     // written around.
     expect(screen.getByText(/requests per second/i)).toBeTruthy();
+    // The per-minute tile carries the per-minute unit — it read "req/s"
+    // once, next to a tile that also read "req/s" with a different number.
+    expect(screen.getByText('req/min')).toBeTruthy();
+  });
+
+  /**
+   * "Limit reached" is decided on the counts, not on a rounded percentage.
+   * 995 of 1,000 rounds to 100 %, and the bar used to go red and say the
+   * limit was reached while `remaining` still said 5 and the quota-reached
+   * notice — gated on `used >= limit` — stayed away.
+   */
+  it('does not call the quota reached before it is', async () => {
+    signedInWithUsage(() => ({
+      json: async () => ({ ...USAGE, used: 995, remaining: 5, limit: 1000 }),
+    }));
+    renderApp();
+
+    expect((await screen.findByTestId('usage-used')).textContent).toBe('995');
+    expect(screen.queryByText(/limit reached/i)).toBeNull();
+    expect(screen.getByText('99% used')).toBeTruthy();
   });
 
   /**
@@ -3270,6 +3385,20 @@ describe('replace my key', () => {
     expect(capped.textContent).toMatch(/1 September 2026/);
     expect(capped.textContent).toMatch(/do not have a working key/i);
     expect(capped.querySelector('a')).toBeNull();
+  });
+
+  /**
+   * `Date.UTC` rolls an impossible month or day over instead of failing, so a
+   * value that passes the shape check can still be garbage — and used to
+   * render as a confident "14 February 2027".
+   */
+  it('sanitises a next_eligible_at whose month or day does not exist', async () => {
+    signedIn(undefined, keyRevoked);
+    renderApp('/?issue=capped&next_eligible_at=2026-13-45');
+
+    const capped = await screen.findByTestId('issue-capped');
+    expect(capped.textContent).toMatch(/start of the next quota period/i);
+    expect(capped.textContent).not.toMatch(/2027/);
   });
 
   it('sanitises a nonsense next_eligible_at instead of rendering it', async () => {
