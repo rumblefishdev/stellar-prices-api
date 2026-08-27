@@ -1415,6 +1415,24 @@ describe('the sign-in popup', () => {
     expect(lastPath).toBe('/dashboard');
   });
 
+  /**
+   * A deployment that cannot ask the eligibility question lands its own
+   * literal, and gets 0183's closed-portal card — not 0189's "problem talking
+   * to Discord", which claims a transient fault for a permanent state and
+   * offers a retry that cannot succeed until an operator acts.
+   */
+  it('renders the closed-portal card for a deployment that cannot check eligibility', async () => {
+    openAndSignedOut();
+    renderAt('/login?signin=not_open');
+
+    expect(await screen.findByTestId('portal-closed')).toBeTruthy();
+    expect(screen.queryByTestId('signin-unknown')).toBeNull();
+    // Nothing to press: the round-trip cannot succeed on this build.
+    expect(
+      screen.queryByRole('link', { name: /sign in with discord/i }),
+    ).toBeNull();
+  });
+
   it('ignores a message from another origin', async () => {
     openAndSignedOut();
     stubPopup({ closed: false, focus: () => undefined });
@@ -1484,6 +1502,167 @@ describe('the sign-in popup', () => {
  * top-level navigation through the eligibility round-trip, and the round-trip
  * outcomes land back here as `?issue=<outcome>`.
  */
+/**
+ * `/login` before the portal is open — a URL a reviewer can land on directly,
+ * and two states that had no test.
+ */
+describe('the login route when there is nothing to sign in to', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('renders the closed-portal card, with nothing to press', async () => {
+    stubRoutes({
+      [CONFIG_URL]: () => ({ json: async () => ({ enabled: false }) }),
+      [ME_URL]: () => ({ json: async () => ({ authenticated: false }) }),
+    });
+    render(
+      <MemoryRouter initialEntries={['/login']}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByTestId('portal-closed')).toBeTruthy();
+    expect(
+      screen.queryByRole('link', { name: /sign in with discord/i }),
+    ).toBeNull();
+  });
+
+  it('names the reason when the backend cannot be reached at all', async () => {
+    stubRoutes({
+      [CONFIG_URL]: () => {
+        throw new Error('network down');
+      },
+      [ME_URL]: () => ({ json: async () => ({ authenticated: false }) }),
+    });
+    render(
+      <MemoryRouter initialEntries={['/login']}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    // The error skin and the reason — not the closed-portal card, which would
+    // claim a deliberate state for a broken one.
+    expect(
+      await screen.findByText(/could not reach the portal backend/i),
+    ).toBeTruthy();
+    expect(screen.queryByTestId('portal-closed')).toBeNull();
+  });
+});
+
+/**
+ * Landing states that arrive on a visitor with no session.
+ */
+describe('a landing state with no session behind it', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  /**
+   * ⚠️ `RootRoute` forwarded only `?signin=…` to `/login`. An issue
+   * round-trip whose session expired mid-flight landed with `?issue=…`,
+   * matched neither branch, and rendered the marketing page — the one journey
+   * where the visitor is owed an answer ending on the page that answers
+   * nothing.
+   */
+  it('carries an issue outcome to the sign-in card rather than dropping it', async () => {
+    openAndSignedOut();
+    render(
+      <MemoryRouter
+        initialEntries={['/?issue=capped&next_eligible_at=2026-09-01']}
+      >
+        <App />
+        <LocationSpy />
+      </MemoryRouter>,
+    );
+
+    // The sign-in card, not the landing page — and the query survives the hop,
+    // so signing back in lands it on the dashboard that reads it.
+    await screen.findByRole('link', { name: /sign in with discord/i });
+    await waitFor(() => expect(lastPath).toBe('/login'));
+    expect(lastSearch).toContain('issue=capped');
+    expect(lastSearch).toContain('next_eligible_at=2026-09-01');
+  });
+});
+
+/**
+ * The two navigation bars, on the pages that are not the landing page.
+ */
+describe('navigation off the landing page', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  /**
+   * ⚠️ The landing navbar renders on `/quick-start` for a signed-out visitor,
+   * and its three links name landing-page sections (`#features`,
+   * `#get-started`, `#faq`). None of those ids exists there, so all three did
+   * nothing at all when clicked. Off the landing page they point back at it.
+   */
+  it('points the quick start navbar back at the landing page sections', async () => {
+    openAndSignedOut();
+    render(
+      <MemoryRouter initialEntries={['/quick-start']}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    const features = await screen.findByRole('link', { name: /^features$/i });
+    expect(features.getAttribute('href')).toBe(`${ROUTER_BASENAME}/#features`);
+    expect(
+      screen.getByRole('link', { name: /^faq$/i }).getAttribute('href'),
+    ).toBe(`${ROUTER_BASENAME}/#faq`);
+  });
+
+  /**
+   * ⚠️ Every non-current link in the signed-in bar was `display: none` at
+   * `xs`, so on a phone the bar showed only where the visitor already was: no
+   * way back to the dashboard from the quick start, and "OpenAPI Docs"
+   * reachable from neither page. The 375px criterion is about being usable,
+   * not merely about fitting.
+   */
+  it('keeps every signed-in destination reachable, at any width', async () => {
+    stubRoutes({
+      [CONFIG_URL]: openConfig,
+      [ME_URL]: () => ({
+        json: async () => ({
+          authenticated: true,
+          user_id: '308994132968210433',
+          username: 'adam',
+        }),
+      }),
+      [KEY_URL]: keyNoKey,
+      [USAGE_URL]: usageNoKey,
+    });
+    render(
+      <MemoryRouter initialEntries={['/quick-start']}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    // Scoped to the signed-in bar: the footer names some of the same
+    // destinations, and it is not what this is about.
+    const bar = within(
+      (await screen.findByRole('navigation', {
+        name: /dashboard/i,
+      })) as HTMLElement,
+    );
+    for (const name of [/^dashboard$/i, /openapi docs/i, /quick start/i]) {
+      const link = bar.getByRole('link', { name });
+      expect(getComputedStyle(link).display, String(name)).not.toBe('none');
+    }
+  });
+});
+
 describe('the API key', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
@@ -1634,7 +1813,41 @@ describe('the API key', () => {
     renderApp();
 
     expect(await screen.findByText(/could not get your api key/i)).toBeTruthy();
-    expect(screen.queryByRole('link', { name: /get my api key/i })).toBeNull();
+    expect(
+      screen.queryByRole('link', { name: /generate api key/i }),
+    ).toBeNull();
+  });
+
+  /**
+   * ⚠️ "Copied." used to be set once and never cleared, so a SECOND copy gave
+   * no sign it had worked. The confirmation is also announced — the button's
+   * own label does not change, so without `role="status"` the copy succeeds
+   * silently for anyone not looking at the text.
+   *
+   * Real timers, not fake ones: `findBy*` is timer-driven, and swapping the
+   * clock out from under it makes every query in this file hang.
+   */
+  it('clears the copy confirmation so a second copy is visible too', async () => {
+    const writeText = vi.fn(() => Promise.resolve());
+    vi.stubGlobal('navigator', { clipboard: { writeText } });
+    signedInWithKey();
+    renderApp();
+
+    await screen.findByTestId('api-key');
+    const copy = screen.getByRole('button', { name: /copy key/i });
+
+    fireEvent.click(copy);
+    expect((await screen.findByRole('status')).textContent).toMatch(/copied/i);
+
+    // It goes away on its own — the two-second window the quick start's copy
+    // button uses.
+    await waitFor(() => expect(screen.queryByRole('status')).toBeNull(), {
+      timeout: 4000,
+    });
+
+    // And comes back on the next press, which is the whole point.
+    fireEvent.click(copy);
+    expect((await screen.findByRole('status')).textContent).toMatch(/copied/i);
   });
 
   /**
@@ -1739,7 +1952,9 @@ describe('the API key', () => {
     renderApp('/login');
 
     await screen.findByRole('link', { name: /sign in with discord/i });
-    expect(screen.queryByRole('link', { name: /get my api key/i })).toBeNull();
+    expect(
+      screen.queryByRole('link', { name: /generate api key/i }),
+    ).toBeNull();
     expect(screen.queryByTestId('api-key')).toBeNull();
   });
 
@@ -2001,7 +2216,56 @@ describe('the API key', () => {
     // Not the success line — the key is not on screen to be ready.
     expect(screen.queryByTestId('issue-ok')).toBeNull();
     // And not the "you have no key" branch, whose control issues another one.
-    expect(screen.queryByRole('link', { name: /get my api key/i })).toBeNull();
+    expect(
+      screen.queryByRole('link', { name: /generate api key/i }),
+    ).toBeNull();
+  });
+
+  /**
+   * ⚠️ **A sign-in refusal must be VISIBLE to a visitor who is still signed
+   * in.** ADR 0010 grants the dashboard and the reveal to the session alone,
+   * so somebody who leaves the Stellar Discord keeps reading the key they
+   * already hold and the callback rightly leaves that session standing. But
+   * `RootRoute` forwards every authenticated arrival to `/dashboard` with the
+   * query attached, and `?signin=…` was read only by the signed-OUT card — so
+   * the refusal rendered nowhere at all and the dashboard said nothing.
+   */
+  it('renders a sign-in membership refusal on the dashboard of a signed-in visitor', async () => {
+    signedInWithKey();
+    renderApp('/?signin=not_member');
+
+    const refusal = await screen.findByTestId('issue-not-member');
+    expect(refusal.textContent).toMatch(/stellar developers discord/i);
+    // The session is untouched: the key they already hold is still on screen.
+    expect(await screen.findByTestId('api-key')).toBeTruthy();
+    // And it is one-shot, like every other landing state.
+    await waitFor(() => expect(lastSearch).toBe(''));
+  });
+
+  it('keeps could-not-verify distinct from not-a-member on the dashboard too', async () => {
+    signedInWithKey();
+    renderApp('/?signin=unknown');
+
+    const refusal = await screen.findByTestId('issue-unknown');
+    expect(refusal.textContent).toMatch(/problem talking to discord/i);
+    expect(screen.queryByTestId('issue-not-member')).toBeNull();
+  });
+
+  /**
+   * The two outcomes the dashboard must NOT claim: they are about a
+   * round-trip that never reached a verdict, and the remedy is the sign-in
+   * button this page does not have.
+   */
+  it('leaves a cancelled or failed sign-in to the card that owns the button', async () => {
+    for (const outcome of ['cancelled', 'failed']) {
+      signedInWithKey();
+      const view = renderApp(`/?signin=${outcome}`);
+
+      expect(await screen.findByTestId('api-key')).toBeTruthy();
+      expect(screen.queryByTestId('issue-not-member'), outcome).toBeNull();
+      expect(screen.queryByTestId('issue-unknown'), outcome).toBeNull();
+      view.unmount();
+    }
   });
 
   /**
@@ -2644,6 +2908,18 @@ describe('usage against quota', () => {
       [CONFIG_URL]: () => ({
         json: async () => ({ enabled: true, rate_limit_per_second: 5 }),
       }),
+      // ⚠️ Added 2026-08-27. Without it `fetchKey` rejects with "unexpected
+      // request", the key card renders its failure state, and this test — and
+      // the one below — passed against a dashboard that was broken in a way
+      // neither of them was about.
+      [KEY_URL]: () => ({
+        json: async () => ({
+          key_id: 'rate-limit-suite-key',
+          name: 'discord-rate-limit-key',
+          value: 'aBcDeF0123456789aBcDeF0123456789aBcDeF01',
+          created_at: '2026-08-01T09:00:00Z',
+        }),
+      }),
       [ME_URL]: () => ({
         json: async () => ({
           authenticated: true,
@@ -2663,6 +2939,50 @@ describe('usage against quota', () => {
     // The per-minute tile carries the per-minute unit — it read "req/s"
     // once, next to a tile that also read "req/s" with a different number.
     expect(screen.getByText('req/min')).toBeTruthy();
+  });
+
+  /**
+   * The state a cut-off developer lands on, and the one that had no test at
+   * all: at and past the ceiling the card must say why the API answers 429
+   * and when that stops being true.
+   */
+  it('says the quota is reached at the ceiling, and past it', async () => {
+    for (const used of [1000, 1200]) {
+      signedInWithUsage(() => ({
+        json: async () => ({
+          ...USAGE,
+          used,
+          remaining: 0,
+          limit: 1000,
+          resets_at: '2026-09-01T00:00:00Z',
+        }),
+      }));
+      const view = renderApp();
+
+      const notice = await screen.findByTestId('usage-quota-reached');
+      expect(notice.textContent, `used=${used}`).toMatch(/HTTP 429/);
+      expect(notice.textContent, `used=${used}`).toMatch(/1 September/);
+      expect(screen.getByText(/limit reached/i)).toBeTruthy();
+      view.unmount();
+    }
+  });
+
+  /** An unparseable reset instant drops the date rather than guessing one. */
+  it('states the quota is reached even when the reset date is unusable', async () => {
+    signedInWithUsage(() => ({
+      json: async () => ({
+        ...USAGE,
+        used: 1000,
+        remaining: 0,
+        limit: 1000,
+        resets_at: 'not-a-date',
+      }),
+    }));
+    renderApp();
+
+    const notice = await screen.findByTestId('usage-quota-reached');
+    expect(notice.textContent).toMatch(/HTTP 429/);
+    expect(notice.textContent).not.toMatch(/Invalid Date/);
   });
 
   /**
@@ -2690,6 +3010,14 @@ describe('usage against quota', () => {
   it('falls back to the plan rate rather than dropping the Rate Limit card', async () => {
     stubRoutes({
       [CONFIG_URL]: () => ({ json: async () => ({ enabled: true }) }),
+      [KEY_URL]: () => ({
+        json: async () => ({
+          key_id: 'rate-limit-suite-key',
+          name: 'discord-rate-limit-key',
+          value: 'aBcDeF0123456789aBcDeF0123456789aBcDeF01',
+          created_at: '2026-08-01T09:00:00Z',
+        }),
+      }),
       [ME_URL]: () => ({
         json: async () => ({
           authenticated: true,
@@ -2935,6 +3263,31 @@ describe('replace my key', () => {
    * the property task 0191 decided is the one asserted here, that a
    * near-miss never arms the control and never reaches the backend.
    */
+  /**
+   * ⚠️ The dialog declared `aria-describedby="replace-key-warning"` against a
+   * node that carried only a `data-testid`, so the two sentences it exists to
+   * deliver — the deactivation window and "no new key is issued now" — were
+   * never announced. A destructive confirmation that a screen reader hears as
+   * a bare title is a confirmation of nothing.
+   */
+  it('describes the destructive dialog with the warning a screen reader needs', async () => {
+    signedIn();
+    renderApp();
+
+    fireEvent.click(await screen.findByTestId('replace-key-open'));
+    const dialog = await screen.findByRole('dialog');
+    const describedBy = dialog.getAttribute('aria-describedby');
+    expect(describedBy).toBe('replace-key-warning');
+
+    const description = document.getElementById(describedBy as string);
+    expect(
+      description,
+      'aria-describedby must resolve to a real node',
+    ).toBeTruthy();
+    expect(description?.textContent).toMatch(/no new key is issued now/i);
+    expect(description?.textContent).toMatch(/deactivates the current one/i);
+  });
+
   it('keeps confirm disabled until the visitor types regenerate-key', async () => {
     const fetchMock = signedIn();
     renderApp();
@@ -3010,7 +3363,9 @@ describe('replace my key', () => {
     expect(screen.queryByTestId('api-key')).toBeNull();
     expect(document.body.textContent).not.toContain(KEY.value);
     // And no issue link while the date is ahead.
-    expect(screen.queryByRole('link', { name: /get my api key/i })).toBeNull();
+    expect(
+      screen.queryByRole('link', { name: /generate api key/i }),
+    ).toBeNull();
   });
 
   /**
@@ -3045,7 +3400,9 @@ describe('replace my key', () => {
     const revoked = screen.getByTestId('key-revoked');
     expect(revoked.textContent).not.toMatch(/do not have a working key/i);
     expect(revoked.textContent).not.toMatch(/1 September 2026/);
-    expect(screen.queryByRole('link', { name: /get my api key/i })).toBeNull();
+    expect(
+      screen.queryByRole('link', { name: /generate api key/i }),
+    ).toBeNull();
   });
 
   /** The ordinary answer carries no flag, and renders no warning. */
@@ -3126,12 +3483,19 @@ describe('replace my key', () => {
 
     const revoked = await screen.findByTestId('key-revoked');
     expect(revoked.textContent).toMatch(/1 September 2026/);
-    expect(screen.queryByRole('link', { name: /get my api key/i })).toBeNull();
+    expect(
+      screen.queryByRole('link', { name: /generate api key/i }),
+    ).toBeNull();
     expect(screen.queryByTestId('replace-key-open')).toBeNull();
     // The key section's keyless copy (and its issue link) must not render;
     // the usage section beside it may still say "no key" — that is its own
     // endpoint's answer, stubbed here, not the key section's.
-    expect(screen.queryByText(/one key, on the free plan/i)).toBeNull();
+    //
+    // ⚠️ This asserted the absence of "one key, on the free plan" until
+    // 2026-08-27 — a sentence that exists nowhere in the repo, so it held
+    // however the card rendered. `no-key-notice` is the testid the keyless
+    // branch actually carries.
+    expect(screen.queryByTestId('no-key-notice')).toBeNull();
   });
 
   /**
@@ -3202,6 +3566,47 @@ describe('replace my key', () => {
   });
 
   /**
+   * The revoked card's own sign-out was rendered and asserted present, but
+   * never pressed — so nothing pinned that it does anything. It is the only
+   * control on that screen that leads anywhere.
+   */
+  it('signs out from the revoked card, with a POST', async () => {
+    let authenticated = true;
+    const fetchMock = stubRoutes({
+      [CONFIG_URL]: openConfig,
+      [ME_URL]: () => ({
+        json: async () =>
+          authenticated
+            ? {
+                authenticated: true,
+                user_id: '308994132968210433',
+                username: 'adam',
+              }
+            : { authenticated: false },
+      }),
+      [KEY_URL]: keyRevoked,
+      [USAGE_URL]: usageNoKey,
+      [LOGOUT_URL]: () => {
+        authenticated = false;
+        return { status: 204, json: async () => ({}) };
+      },
+    });
+    renderApp();
+
+    fireEvent.click(await screen.findByTestId('revoked-sign-out'));
+
+    const logout = await waitFor(() => {
+      const call = fetchMock.mock.calls.find(([url]) => url === LOGOUT_URL);
+      expect(call).toBeTruthy();
+      return call as [string, RequestInit];
+    });
+    // A GET sign-out is triggerable by any third-party page.
+    expect(logout[1].method).toBe('POST');
+    // And the session is re-read rather than assumed: the card goes.
+    await waitFor(() => expect(screen.queryByTestId('key-revoked')).toBeNull());
+  });
+
+  /**
    * The account is not stuck: once the period has rolled, the frame's
    * "Contact us about this decision" gives way to the control that actually
    * issues a key. The frame's footer says one arrives automatically on signing
@@ -3257,7 +3662,9 @@ describe('replace my key', () => {
     renderApp();
 
     await screen.findByTestId('key-revoked');
-    expect(screen.queryByRole('link', { name: /get my api key/i })).toBeNull();
+    expect(
+      screen.queryByRole('link', { name: /generate api key/i }),
+    ).toBeNull();
     expect(document.body.textContent).toMatch(
       /start of the next quota period/i,
     );

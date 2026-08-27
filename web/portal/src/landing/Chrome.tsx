@@ -13,7 +13,7 @@ import { useState } from 'react';
 import { Link as RouterLink } from 'react-router-dom';
 
 import { color, font } from '../theme/tokens';
-import { DASHBOARD_ROUTE, LOGIN_ROUTE, SWAGGER_UI } from './links';
+import { DASHBOARD_ROUTE, LANDING, LOGIN_ROUTE, SWAGGER_UI } from './links';
 import { ArrowBadge, cardBorder } from './primitives';
 
 /**
@@ -85,7 +85,23 @@ export function RumbleFishMark({ height = 32 }: { height?: number }) {
   );
 }
 
-export function Navbar({ canOfferKey }: { canOfferKey: boolean }) {
+export function Navbar({
+  canOfferKey,
+  /**
+   * Whether the in-page sections the links name are on THIS page.
+   *
+   * ⚠️ The quick start renders this same bar for a signed-out visitor, and its
+   * sections are `prerequisites`…`next` — none of `#features`, `#get-started`
+   * or `#faq` exists there, so all three links did nothing at all when
+   * clicked. Off the landing page they become links back to it, at the same
+   * anchors, which is where those sections actually are.
+   */
+  inPage = true,
+}: {
+  canOfferKey: boolean;
+  inPage?: boolean;
+}) {
+  const navHref = (href: string) => (inPage ? href : `${LANDING}${href}`);
   return (
     <Box
       component="nav"
@@ -112,10 +128,10 @@ export function Navbar({ canOfferKey }: { canOfferKey: boolean }) {
         >
           <Wordmark />
           <Stack direction="row" alignItems="center" spacing={{ xs: 1, sm: 2 }}>
-            {NAV.map(({ label, href }) => (
+            {NAV.map(({ label, href: anchor }) => (
               <Link
                 key={label}
-                href={href}
+                href={navHref(anchor)}
                 // Muted until hovered: three secondary links beside a yellow
                 // CTA should not compete with it, which is what the design
                 // does by giving them no colour of their own.
@@ -164,7 +180,7 @@ export function Navbar({ canOfferKey }: { canOfferKey: boolean }) {
                 Get API Key
               </Button>
             )}
-            <MobileMenu canOfferKey={canOfferKey} />
+            <MobileMenu canOfferKey={canOfferKey} inPage={inPage} />
           </Stack>
         </Stack>
       </Container>
@@ -188,7 +204,15 @@ export function Navbar({ canOfferKey }: { canOfferKey: boolean }) {
  * and would otherwise leave the visitor looking at a menu over the section
  * they asked for.
  */
-function MobileMenu({ canOfferKey }: { canOfferKey: boolean }) {
+function MobileMenu({
+  canOfferKey,
+  inPage,
+}: {
+  canOfferKey: boolean;
+  /** Same meaning as `Navbar`'s — the drawer holds the same three links. */
+  inPage: boolean;
+}) {
+  const navHref = (href: string) => (inPage ? href : `${LANDING}${href}`);
   const [open, setOpen] = useState(false);
   const close = () => setOpen(false);
 
@@ -251,10 +275,10 @@ function MobileMenu({ canOfferKey }: { canOfferKey: boolean }) {
             spacing={0.5}
             sx={{ pt: 1, pb: 3 }}
           >
-            {NAV.map(({ label, href }) => (
+            {NAV.map(({ label, href: anchor }) => (
               <Link
                 key={label}
-                href={href}
+                href={navHref(anchor)}
                 onClick={close}
                 sx={{
                   py: 1.5,

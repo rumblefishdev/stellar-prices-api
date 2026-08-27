@@ -161,12 +161,29 @@ export function onOAuthPopupMessage(
  * Allow-listed rather than passed through: the value reaches a render branch,
  * and the query it comes from is attacker-supplied on a top-level navigation.
  */
-export function readSigninOutcome(search: string): string | null {
+export type SigninOutcome =
+  | 'cancelled'
+  | 'failed'
+  | 'not_member'
+  | 'unknown'
+  | 'not_open';
+
+/** Every literal the backend lands, and the only values this returns. */
+const SIGNIN_OUTCOMES: readonly SigninOutcome[] = [
+  'cancelled',
+  'failed',
+  'not_member',
+  'unknown',
+  // A deployment with no eligibility parameters wired — 0183's closed portal,
+  // reached through the callback rather than through `/config`.
+  'not_open',
+] as const;
+
+export function readSigninOutcome(search: string): SigninOutcome | null {
   const value = new URLSearchParams(search).get('signin');
-  return value === 'cancelled' ||
-    value === 'failed' ||
-    value === 'not_member' ||
-    value === 'unknown'
-    ? value
-    : null;
+  // A union rather than a widened `string`: the caller derives one boolean per
+  // literal, and a value outside this list used to fall through every branch
+  // to the plain sign-in card. Typing the return makes a new literal here a
+  // compile error at the render site until it is given a screen.
+  return SIGNIN_OUTCOMES.find((outcome) => outcome === value) ?? null;
 }

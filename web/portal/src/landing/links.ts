@@ -63,3 +63,13 @@ export const LOGIN_ROUTE = '/login';
 
 /** The dashboard route. Same deployment caveat as {@link LOGIN_ROUTE}. */
 export const DASHBOARD_ROUTE = '/dashboard';
+
+/**
+ * The landing page as an absolute href, for the pages that are NOT it.
+ *
+ * The navbar's three links name sections of the landing page (`#features`,
+ * `#get-started`, `#faq`); on the quick start those anchors do not exist, so
+ * they are prefixed with this and become links back to the page that has
+ * them. Same basename treatment as {@link QUICKSTART}.
+ */
+export const LANDING = `${ROUTER_BASENAME}/`;

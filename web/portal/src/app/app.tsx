@@ -360,6 +360,11 @@ function LoginView({
   // only after pressing "Get my API key" can also end the sign-in itself.
   const notMember = outcome === 'not_member';
   const unverified = outcome === 'unknown';
+  // A deployment that cannot ask the eligibility question at all. Its own
+  // literal since 2026-08-27 — it used to arrive as `unknown` and borrow the
+  // "problem talking to Discord" wording for a state where nothing was asked
+  // and retrying cannot help. See `NOT_OPEN_QUERY` in `portal/auth/mod.rs`.
+  const notOpen = outcome === 'not_open';
 
   // The OAuth error card draws its own back link, under the retry button, so
   // the section above must not draw one too. Called unconditionally with a
@@ -368,6 +373,26 @@ function LoginView({
 
   /** Whether a sign-in window is open and being waited on. */
   const [waiting, setWaiting] = useState(false);
+  /**
+   * The session answer that was on screen when a SUCCESSFUL round-trip ended.
+   *
+   * `null` whenever nothing is being confirmed. Set by `finish`, cleared by
+   * the effect that watches for a newer answer — see it for why this is a
+   * reference rather than a flag.
+   */
+  const confirmingFrom = useRef<SessionState | null>(null);
+  /**
+   * The current session answer, readable from inside the wait effect without
+   * being one of its dependencies.
+   *
+   * Listing `session` there would tear down and rebuild the poll and the two
+   * watchers every time the session object changed — including the change the
+   * round-trip itself causes. A ref is also the more correct read: what
+   * `finish` needs is the answer on screen WHEN IT RUNS, not the one that was
+   * there when the effect was created.
+   */
+  const sessionNow = useRef(session);
+  sessionNow.current = session;
   /** Whether the "use a different account" dialog is open. */
   const [switching, setSwitching] = useState(false);
 
@@ -397,7 +422,20 @@ function LoginView({
       window.clearTimeout(grace);
       window.clearInterval(poll);
       window.clearInterval(watchClosed);
-      setWaiting(false);
+      // ⚠️ A SUCCESS keeps waiting. `onSignedIn` only STARTS the `/auth/me`
+      // read that flips this app to signed-in and navigates to the dashboard;
+      // dropping `waiting` here rendered the "Sign in with Discord" card again
+      // for the length of that request, immediately after a sign-in that
+      // worked — the visitor watches the button they just pressed come back.
+      // The spinner stays until the session settles (the effect below), which
+      // is also the honest description of what is happening.
+      if (refusal !== null) {
+        setWaiting(false);
+      } else {
+        // Remember WHICH session answer was on screen when the round-trip
+        // ended, so the effect below can tell the reload's answer from it.
+        confirmingFrom.current = sessionNow.current;
+      }
       setOutcome(refusal);
       // Ask the server either way. A refusal means no session, and saying so
       // costs one request; a success means the cookie is already set and this
@@ -491,6 +529,28 @@ function LoginView({
       window.clearInterval(watchClosed);
     };
   }, [waiting, onSignedIn, navigate]);
+
+  /**
+   * Stop waiting once the session read `finish` started has ANSWERED.
+   *
+   * Identity, not `state`: `reload` leaves the previous answer on screen while
+   * its request is in flight (it never flips to `loading`), so "the state is
+   * not loading" is true the whole time and would end the wait instantly —
+   * which is the flash this exists to prevent. Every answer is a fresh object,
+   * so a change of reference is the arrival of a new one.
+   *
+   * On the happy path the redirect unmounts this component before it runs. It
+   * matters on the unhappy one: the popup reported success, the session read
+   * came back NOT authenticated (the cookie never arrived, or expired between
+   * the two), and without this the card would spin for ever on a round-trip
+   * that is over. The button comes back, which is all there is left to offer.
+   */
+  useEffect(() => {
+    if (confirmingFrom.current === null) return;
+    if (session === confirmingFrom.current) return;
+    confirmingFrom.current = null;
+    setWaiting(false);
+  }, [session]);
 
   /**
    * Open the round-trip in a second window — and do nothing at all if the
@@ -628,6 +688,13 @@ function LoginView({
   // MISCONFIGURATION reading as "every visitor is changing their mind", and
   // that direction is still closed — the distinction survives everywhere it
   // was load-bearing, and un-merging the screen is a one-line change here.
+  // Before the OAuth-failure screen, because it is not a failure of anything
+  // the visitor did: the portal is not open on this deployment, and 0183's
+  // card is the one that says so.
+  if (notOpen) {
+    return <ClosedPortalCard />;
+  }
+
   if (cancelled || failed) {
     return (
       <LoginCard
@@ -2029,7 +2096,7 @@ function ReplaceKey({
             the ringed box are what task 0191 decided had to be said, and the
             tests that pin that copy read this subtree's text. Splitting the
             testid would let one half be deleted with the suite still green. */}
-        <Box data-testid="replace-key-warning">
+        <Box id="replace-key-warning" data-testid="replace-key-warning">
           <Stack spacing={2}>
             <Typography
               sx={{ ...theme.typography.body1, color: color.text.secondary }}
@@ -2290,6 +2357,16 @@ function ApiKey({
   const [error, setError] = useState<string | null>(null);
   const [revealed, setRevealed] = useState(false);
   const [copied, setCopied] = useState(false);
+  // ⚠️ `copied` used to be set once and never cleared, so "Copied." stayed
+  // under the key for the life of the mount and a SECOND copy gave no sign it
+  // had worked — the visitor whose paste went to the wrong window presses
+  // again and watches nothing happen. Same two-second window the quick start's
+  // `CopyButton` uses, so the two controls behave alike.
+  useEffect(() => {
+    if (!copied) return;
+    const clearing = setTimeout(() => setCopied(false), 2000);
+    return () => clearTimeout(clearing);
+  }, [copied]);
 
   // The issue round-trip's landing state, read once and stripped from the URL
   // — see `useOneShotParams`. `wait_secs` only means anything alongside
@@ -2299,6 +2376,29 @@ function ApiKey({
     wait_secs: waitSecs,
     next_eligible_at: nextEligibleAt,
   } = useOneShotParams(ISSUE_PARAMS);
+  /**
+   * The SIGN-IN round-trip's refusal, when it lands on a visitor who is
+   * already signed in.
+   *
+   * ⚠️ **It rendered nowhere at all until 2026-08-27.** ADR 0010 grants the
+   * dashboard and the reveal to the session alone — "works forever" — so an
+   * account that holds a key and later leaves the guild keeps reading it, and
+   * the callback rightly leaves that session standing. But `RootRoute` sends
+   * every authenticated visitor to `/dashboard` with the query attached, and
+   * `?signin=…` is read only by `LoginView`, on the signed-OUT branch. The
+   * refusal was therefore invisible: someone who had left the Stellar Discord
+   * signed in, was refused, and met an ordinary dashboard that said nothing.
+   *
+   * Only the two membership verdicts are read here. `cancelled` and `failed`
+   * are about a round-trip that never reached a verdict and belong to the
+   * card that offers the button; the dashboard has no button to retry them
+   * with. The wording is the issue flow's own, because it is the same two
+   * verdicts about the same person with the same remedy — and it is stripped
+   * from the URL like every other landing state.
+   */
+  const { signin } = useOneShotParams(SIGNIN_PARAMS);
+  const refusedNotMember = issue === 'not_member' || signin === 'not_member';
+  const refusedUnknown = issue === 'unknown' || signin === 'unknown';
   // Whether THIS landing is itself proof a key exists: the backend created
   // one before it redirected.
   const landedWithKey = issue === 'ok';
@@ -2545,7 +2645,7 @@ function ApiKey({
           you do not have a working key.
         </p>
       )}
-      {issue === 'not_member' && (
+      {refusedNotMember && (
         <p data-testid="issue-not-member">
           You need to be a member of the{' '}
           <a href="https://discord.gg/stellardev">Stellar Developers Discord</a>{' '}
@@ -2561,7 +2661,7 @@ function ApiKey({
           <a href={issueUrl()}>get my API key</a>.
         </p>
       )}
-      {issue === 'unknown' && (
+      {refusedUnknown && (
         <p data-testid="issue-unknown">
           We could not verify your Discord membership just now — that is a
           problem talking to Discord, not a statement about your membership.
@@ -2822,7 +2922,10 @@ function ApiKey({
               )
             }
           />
-          {copied && <p>Copied.</p>}
+          {/* `role="status"` so the confirmation reaches a screen reader:
+              the button's own label does not change, so without this the copy
+              succeeds silently for anyone not looking at the text. */}
+          {copied && <p role="status">Copied.</p>}
           {/* The frame's row under the buttons. "Issued" is honest ONLY on
               this path: `GET /key` returns no timestamps (see `MetaField`),
               but `?issue=ok` means the backend created this key during the
@@ -3769,16 +3872,7 @@ function PortalStatus({ probe }: { probe: Probe }) {
           an afterthought, because it may be what a visitor sees for weeks —
           so it gets the design's card, not a bare sentence. The card carries
           no Discord button, which is the same rule the hero follows. */}
-        {probe.state === 'ok' && !probe.config.enabled && (
-          <LoginCard title={LOGIN_TITLE} subtitle={LOGIN_SUBTITLE}>
-            <Callout variant="neutral">
-              <p>
-                This is where you will sign in and issue an API key. It is not
-                yet available.
-              </p>
-            </Callout>
-          </LoginCard>
-        )}
+        {probe.state === 'ok' && !probe.config.enabled && <ClosedPortalCard />}
 
         {/* No sign-in card here any more. Once the portal is open, signing in
             is the `/login` route's job and the landing's only part in it is the
@@ -3937,12 +4031,52 @@ function RootRoute({ gate }: { gate: Gate }) {
     // A signed-out visitor stays on the landing page — UNLESS they have just
     // come back from Discord, in which case the banner explaining what
     // happened belongs beside the button they will press again.
-    if (new URLSearchParams(location.search).has('signin')) {
+    //
+    // ⚠️ `issue` counts as coming back from Discord too, and used not to: an
+    // issue round-trip whose session expired mid-flight landed here with
+    // `?issue=…` still on the URL, matched neither branch, and rendered the
+    // marketing page — the one journey where the visitor is owed an answer
+    // ends on the page that answers nothing. `/login` reads `signin` and the
+    // dashboard reads `issue`, so a landing that carries only `issue` needs
+    // the sign-in card first anyway; forwarding it keeps the query alive
+    // through that hop instead of dropping the refusal on the floor.
+    const landed = new URLSearchParams(location.search);
+    if (landed.has('signin') || landed.has('issue')) {
       return <Navigate to={`/login${location.search}`} replace />;
     }
   }
 
   return <LandingPage probe={gate.probe} canOfferKey={canOfferKey} />;
+}
+
+/**
+ * Task 0183's "the portal is not open yet" card.
+ *
+ * One component for what was the same markup in three places: the landing
+ * page's login panel, the `/login` route, and — since 2026-08-27 — the
+ * `?signin=not_open` landing, which is a deployment that has credentials but
+ * cannot ask the eligibility question at all. That last one used to arrive as
+ * `?signin=unknown` and render 0189's "we could not check your membership"
+ * card: a transient Discord fault, claimed for a permanent state, with a retry
+ * that could not succeed until an operator wired the parameters.
+ *
+ * The wording is 0183's and is not re-decided here.
+ */
+function ClosedPortalCard({ titleComponent }: { titleComponent?: 'h1' }) {
+  return (
+    <LoginCard
+      title={LOGIN_TITLE}
+      titleComponent={titleComponent}
+      subtitle={LOGIN_SUBTITLE}
+    >
+      <Callout variant="neutral">
+        <p data-testid="portal-closed">
+          This is where you will sign in and issue an API key. It is not yet
+          available.
+        </p>
+      </Callout>
+    </LoginCard>
+  );
 }
 
 /**
@@ -3975,27 +4109,22 @@ function LoginRoute({ gate }: { gate: Gate }) {
   if (!gate.open) {
     return (
       <LoginSection back full>
-        <LoginCard
-          title={LOGIN_TITLE}
-          titleComponent="h1"
-          subtitle={LOGIN_SUBTITLE}
-        >
-          {gate.probe.state === 'failed' ? (
+        {gate.probe.state === 'failed' ? (
+          <LoginCard
+            title={LOGIN_TITLE}
+            titleComponent="h1"
+            subtitle={LOGIN_SUBTITLE}
+          >
             <Callout variant="error">
               <p>
                 Could not reach the portal backend:{' '}
                 <code>{gate.probe.reason}</code>
               </p>
             </Callout>
-          ) : (
-            <Callout variant="neutral">
-              <p>
-                This is where you will sign in and issue an API key. It is not
-                yet available.
-              </p>
-            </Callout>
-          )}
-        </LoginCard>
+          </LoginCard>
+        ) : (
+          <ClosedPortalCard titleComponent="h1" />
+        )}
       </LoginSection>
     );
   }
@@ -4135,7 +4264,9 @@ function QuickStartRoute({ gate }: { gate: Gate }) {
           current="quick-start"
         />
       ) : (
-        <Navbar canOfferKey={gate.open} />
+        // `inPage={false}`: this is the quick start, and the bar's three
+        // links name sections of the LANDING page.
+        <Navbar canOfferKey={gate.open} inPage={false} />
       )}
       <QuickStart rateLimit={rateLimit} />
       <Footer canOfferKey={signedIn} />

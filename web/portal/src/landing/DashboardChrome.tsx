@@ -72,7 +72,8 @@ export function DashboardNavbar({
             direction="row"
             alignItems="center"
             spacing={{ xs: 1.5, md: 3 }}
-            sx={{ minWidth: 0 }}
+            useFlexGap
+            sx={{ minWidth: 0, flexWrap: { xs: 'wrap', sm: 'nowrap' } }}
           >
             {links.map(({ label, to, href, current }) => (
               <Link
@@ -82,7 +83,14 @@ export function DashboardNavbar({
                 // reach a screen reader too, and a border-bottom does not.
                 aria-current={current ? 'page' : undefined}
                 sx={{
-                  display: { xs: current ? 'inline' : 'none', sm: 'inline' },
+                  // ⚠️ Every non-current link used to be `display: none` at
+                  // `xs`, which on a phone left the bar showing only where the
+                  // visitor already was: no way back to the dashboard from the
+                  // quick start, and "OpenAPI Docs" reachable from neither
+                  // page. Three short labels fit — they wrap onto a second row
+                  // rather than disappearing, and the row is what the 375px
+                  // criterion asks for.
+                  display: 'inline',
                   whiteSpace: 'nowrap',
                   fontFamily: font.secondary,
                   fontSize: '0.9375rem',
