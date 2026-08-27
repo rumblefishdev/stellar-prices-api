@@ -130,7 +130,16 @@ type Probe =
 type SessionState =
   | { state: 'loading' }
   | { state: 'ok'; session: PortalSession }
-  | { state: 'failed'; reason: string };
+  /**
+   * `while` says which request failed, because the two need different
+   * sentences and different remedies: a failed CHECK leaves the visitor's
+   * standing unknown and the fix is to ask again (or to sign in afresh); a
+   * failed SIGN-OUT leaves them signed in on a device they meant to leave,
+   * and the fix is to try again or close the browser. Rendering the second
+   * as the first — or, as this used to, as a successful sign-out — is what
+   * put the key back on screen after a reload on a shared machine.
+   */
+  | { state: 'failed'; reason: string; while: 'checking' | 'signing-out' };
 
 /**
  * The login card's headline and standfirst — **new copy, owned by task 0193**,
@@ -274,6 +283,7 @@ function useSession(enabled: boolean): {
           setSession({
             state: 'failed',
             reason: error instanceof Error ? error.message : String(error),
+            while: 'checking',
           });
       });
     return cancel;
@@ -304,10 +314,15 @@ function useSession(enabled: boolean): {
       // cookie is gone, and asking it costs one request on an action nobody
       // performs in a loop.
       .then(() => load())
+      // ⚠️ A failed sign-out is NOT a sign-out. The `HttpOnly` cookie was
+      // never cleared, so the session is exactly as live as before the
+      // press; this state exists so the page says that rather than landing
+      // the visitor on the marketing page as if it had worked.
       .catch((error: unknown) =>
         setSession({
           state: 'failed',
           reason: error instanceof Error ? error.message : String(error),
+          while: 'signing-out',
         }),
       );
   };
@@ -604,11 +619,7 @@ function LoginView({
         titleComponent="h1"
         subtitle={LOGIN_SUBTITLE}
       >
-        <Callout variant="error">
-          <p>
-            Could not check your sign-in status: <code>{session.reason}</code>
-          </p>
-        </Callout>
+        <SessionFailedCallout session={session} />
         {/* The control stays. A failed `/auth/me` usually means the backend is
             unreachable, in which case signing in will fail too — but it can
             also be one bad response, and a page that reports an error while
@@ -1302,9 +1313,17 @@ function Dashboard({
    * component had early-returned before that ran, the banner would render for
    * a frame and vanish as the panel unmounted.
    */
-  const [issueOnLanding] = useState(
-    () => new URLSearchParams(landingSearch).get('issue') !== null,
-  );
+  const [issueOnLanding] = useState(() => {
+    const landed = new URLSearchParams(landingSearch);
+    // Both keys, not `issue` alone. Since sign-in started running the
+    // membership check (2026-08-26) the two refusals this guard exists to
+    // keep on screen also arrive as `?signin=not_member` / `?signin=unknown`
+    // — and an account whose key is revoked and which has since left the
+    // Discord is exactly the one that gets both at once. Reading only `issue`
+    // put the revoked card over the refusal, and the one-shot parameter was
+    // already consumed by then, so a reload could not bring it back.
+    return landed.get('issue') !== null || landed.get('signin') !== null;
+  });
   // The quota `/usage` reported, so the key card's "Monthly quota" field can
   // state a number this page was actually told. `undefined` until the panel
   // below has an answer; the field is simply absent until then.
@@ -2597,9 +2616,14 @@ function ApiKey({
       // with "Active" as the other arm — `created_at` is on the response for
       // exactly this kind of question.
       //
-      // "Not issued" is the red pill the design gives the empty state.
+      // "Not issued" is the red pill the design gives the empty state — the
+      // `emptyKeyCard` one, NOT every `none`: while `?issue=ok` is on the URL
+      // the key exists and the listing has not caught up, and a red "Not
+      // issued" over "your key was created" is the page contradicting itself
+      // about the one fact the visitor came for. This was the one reader of
+      // `view.state === 'none'` that had not moved to the named condition.
       status={
-        view.state === 'none'
+        emptyKeyCard
           ? { label: 'Not issued', tone: 'bad' }
           : view.state === 'ok'
             ? { label: 'Just issued', tone: 'ok' }
@@ -3983,6 +4007,32 @@ function useConfigProbe(): Probe {
 }
 
 /**
+ * The sentence for a session request that failed — one place, because the
+ * login card and the dashboard both render it and the two used to disagree
+ * (the dashboard rendered nothing: it redirected to the landing page).
+ */
+function SessionFailedCallout({
+  session,
+}: {
+  session: Extract<SessionState, { state: 'failed' }>;
+}) {
+  return (
+    <Callout variant="error">
+      {session.while === 'signing-out' ? (
+        <p data-testid="sign-out-failed">
+          Could not sign you out: <code>{session.reason}</code>. You are still
+          signed in on this device — try again, or close the browser.
+        </p>
+      ) : (
+        <p data-testid="session-check-failed">
+          Could not check your sign-in status: <code>{session.reason}</code>
+        </p>
+      )}
+    </Callout>
+  );
+}
+
+/**
  * What the three routes share: the portal's flag, the session, and the two
  * questions every route answers differently.
  */
@@ -4163,6 +4213,44 @@ function DashboardRoute({ gate }: { gate: Gate }) {
           <Callout variant="neutral" icon={<CircularProgress size={18} />}>
             <p>Checking whether you are signed in…</p>
           </Callout>
+        </LoginCard>
+      </LoginSection>
+    );
+  }
+
+  // ⚠️ "Not authenticated" and "could not find out" are different answers,
+  // and only the first earns the redirect. A `/auth/me` that answered `502`
+  // — or a sign-out that did — used to bounce a visitor with a key on screen
+  // to the marketing page, whose "Get API Key" buttons then addressed them as
+  // a stranger. The reason rendered only on `/login`, a page nobody on the
+  // dashboard is sent to. "Backend unavailable" is one of the states this
+  // task owes a screen; this is that screen for this route.
+  if (gate.open && gate.session.state === 'failed') {
+    const failed = gate.session;
+    const signingOut = failed.while === 'signing-out';
+    return (
+      <LoginSection back full>
+        <LoginCard
+          title={LOGIN_TITLE}
+          titleComponent="h1"
+          subtitle={LOGIN_SUBTITLE}
+        >
+          <SessionFailedCallout session={failed} />
+          <Button
+            type="button"
+            variant="contained"
+            onClick={signingOut ? gate.onSignOut : gate.reloadSession}
+          >
+            {signingOut ? 'Try signing out again' : 'Try again'}
+          </Button>
+          {/* Signing in is a fresh top-level navigation, so it does not depend
+              on the request that just failed — same reasoning as `LoginView`.
+              Not offered after a failed sign-out: the visitor IS signed in. */}
+          {!signingOut && (
+            <DiscordButton href={signInUrl()}>
+              Sign in with Discord
+            </DiscordButton>
+          )}
         </LoginCard>
       </LoginSection>
     );

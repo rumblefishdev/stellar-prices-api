@@ -413,12 +413,24 @@ export async function signOut(): Promise<void> {
       method: 'POST',
       signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
     });
-  } catch {
+  } catch (error) {
+    // The same two branches as `getJson`, for the same reason: a stalled
+    // sign-out used to report as "could not be reached", which points at the
+    // visitor's network when the cause was a gateway that accepted and then
+    // said nothing.
+    if (isTimeout(error)) {
+      throw new PortalApiError(
+        `${url} did not answer within ${PROBE_TIMEOUT_MS / 1000}s`,
+      );
+    }
     throw new PortalApiError(`${url} could not be reached`);
   }
   if (!response.ok) {
+    // The backend's own sentence where it wrote one — this was the one call
+    // that threw the envelope away, and a failed sign-out is the call whose
+    // message the visitor most needs to read (see `useSession`).
     throw new PortalApiError(
-      `${url} answered ${response.status}`,
+      failureMessage(url, response.status, await readEnvelope(response)),
       response.status,
     );
   }

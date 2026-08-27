@@ -1065,6 +1065,55 @@ describe('sign in with Discord', () => {
   });
 
   /**
+   * A failed sign-out is not a sign-out: the `HttpOnly` cookie was never
+   * cleared. This used to render as a successful one — the landing page —
+   * and a reload put the key back on screen, which on a shared machine is
+   * the one outcome the button exists to prevent (PR #249 review).
+   */
+  it('says so when signing out fails, and stays on the dashboard', async () => {
+    stubRoutes({
+      [CONFIG_URL]: openConfig,
+      [ME_URL]: () => ({
+        json: async () => ({
+          authenticated: true,
+          user_id: '1',
+          username: 'adam',
+        }),
+      }),
+      [LOGOUT_URL]: () => ({
+        ok: false,
+        status: 503,
+        json: async () => ({
+          code: 'unavailable',
+          message: 'the session store is unreachable',
+        }),
+      }),
+      [KEY_URL]: keyNoKey,
+      [USAGE_URL]: usageNoKey,
+    });
+
+    render(
+      <MemoryRouter initialEntries={['/']}>
+        <App />
+        <LocationSpy />
+      </MemoryRouter>,
+    );
+    fireEvent.click(await screen.findByRole('button', { name: /sign out/i }));
+
+    const failed = await screen.findByTestId('sign-out-failed');
+    // The backend's own sentence, not `answered 503`.
+    expect(failed.textContent).toMatch(/the session store is unreachable/);
+    expect(failed.textContent).toMatch(/still signed in/i);
+    expect(
+      screen.getByRole('button', { name: /try signing out again/i }),
+    ).toBeTruthy();
+    expect(lastPath).toBe('/dashboard');
+    expect(
+      screen.queryAllByRole('link', { name: /get api key/i }),
+    ).toHaveLength(0);
+  });
+
+  /**
    * A backend that cannot answer "who am I" must not leave the page on a
    * spinner — the same rule the config probe follows, applied to the second
    * call this page makes.
@@ -1100,6 +1149,33 @@ describe('sign in with Discord', () => {
     await screen.findByText(/could not check your sign-in status/i);
     const link = screen.getByRole('link', { name: /sign in with discord/i });
     expect(link.getAttribute('href')).toBe('/api-tokens/api/auth/login');
+  });
+
+  /**
+   * "Not signed in" and "could not find out" are different answers, and
+   * only the first earns the redirect. A `502` from `/auth/me` on the
+   * dashboard used to bounce the visitor to the marketing page — with its
+   * "Get API Key" buttons and no mention of the failure (PR #249 review).
+   */
+  it('renders the failure on the dashboard instead of bouncing to the landing page', async () => {
+    stubRoutes({
+      [CONFIG_URL]: openConfig,
+      [ME_URL]: () => ({ ok: false, status: 502 }),
+    });
+    // With the spy: this test's property is the path the visitor is left on.
+    render(
+      <MemoryRouter initialEntries={['/dashboard']}>
+        <App />
+        <LocationSpy />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByTestId('session-check-failed')).toBeTruthy();
+    expect(screen.getByRole('button', { name: /try again/i })).toBeTruthy();
+    expect(lastPath).toBe('/dashboard');
+    expect(
+      screen.queryAllByRole('link', { name: /get api key/i }),
+    ).toHaveLength(0);
   });
 
   /**
@@ -2213,6 +2289,10 @@ describe('the API key', () => {
     renderApp('/?issue=ok');
 
     expect(await screen.findByTestId('issue-ok-settling')).toBeTruthy();
+    // Nor the empty state's red pill over it: the key exists, the listing is
+    // merely behind, and "Not issued" above "your key was created" was the
+    // page contradicting itself (PR #249 review, both reviewers).
+    expect(screen.queryByText(/not issued/i)).toBeNull();
     // Not the success line — the key is not on screen to be ready.
     expect(screen.queryByTestId('issue-ok')).toBeNull();
     // And not the "you have no key" branch, whose control issues another one.
@@ -3563,6 +3643,24 @@ describe('replace my key', () => {
     // No key panel behind it: nothing to copy, reveal or regenerate.
     expect(screen.queryByTestId('api-key')).toBeNull();
     expect(screen.queryByTestId('replace-key-open')).toBeNull();
+  });
+
+  /**
+   * The refusals the card must not swallow arrive as `?signin=…` too, since
+   * sign-in runs the membership check: an account whose key is revoked and
+   * which has since left the Discord gets exactly this landing. The guard
+   * read only `issue`, the card replaced the page, and the one component
+   * that renders the refusal was unmounted — the visitor was refused and
+   * told nothing (PR #249 review, both reviewers).
+   */
+  it('keeps a sign-in refusal on screen for an account that arrives revoked', async () => {
+    signedIn(undefined, keyRevoked);
+    renderApp('/?signin=not_member');
+
+    expect(await screen.findByTestId('issue-not-member')).toBeTruthy();
+    // The ordinary dashboard, with its revoked panel — not the card.
+    expect(screen.getByTestId('key-revoked')).toBeTruthy();
+    expect(screen.queryByTestId('revoked-reason')).toBeNull();
   });
 
   /**
