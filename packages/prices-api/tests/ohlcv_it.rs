@@ -91,6 +91,12 @@ async fn setup(db: &str) -> Client {
     Client::default().with_url(ch_url()).with_database(db)
 }
 
+/// Run a statement that returns nothing, failing loudly. Used for the account
+/// management the read-only test needs; the data seeds spell their own out.
+async fn exec(client: &Client, sql: &str) {
+    client.query(sql).execute().await.unwrap();
+}
+
 async fn teardown(db: &str) {
     let admin = Client::default().with_url(ch_url());
     let _ = admin
@@ -561,6 +567,66 @@ async fn ohlcv_usdc_before_any_observation_falls_back_to_a_labelled_peg() {
         data[0]["method"], "peg",
         "a fallback must be labelled, never rendered as a measurement"
     );
+
+    teardown(db).await;
+}
+
+/// 🔑 The production failure of 2026-08-27, pinned so it cannot return.
+///
+/// The peg query used to end `SETTINGS join_use_nulls = 1`. `prices_reader` runs
+/// read-only in production and a read-only user may not modify a setting, so
+/// ClickHouse refused the query outright — `Code: 164 … (READONLY)` at
+/// `ExceptionBeforeStart`, 40 ms, no rows read — and the deployed endpoint
+/// answered `500` for canonical USDC. Every test in this file passed throughout,
+/// because they all connect as a user that is **not** read-only.
+///
+/// That gap is what this closes. It is not a test of the fallback (two tests
+/// above already own that) but of the privilege the query runs under: the same
+/// request, as a `readonly = 1` user, must still answer. A future `SETTINGS`
+/// clause fails here instead of on prod.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse (cargo test -- --ignored)"]
+async fn ohlcv_peg_series_answers_for_a_readonly_user() {
+    let db = "it_ohlcv_peg_readonly_0170";
+    let _ = setup(db).await;
+    seed_peg_rate(db, &Client::default().with_url(ch_url()).with_database(db)).await;
+
+    let admin = Client::default().with_url(ch_url());
+    exec(&admin, "DROP USER IF EXISTS ohlcv_ro_0170").await;
+    exec(
+        &admin,
+        "CREATE USER ohlcv_ro_0170 IDENTIFIED WITH no_password SETTINGS readonly = 1",
+    )
+    .await;
+    exec(&admin, &format!("GRANT SELECT ON {db}.* TO ohlcv_ro_0170")).await;
+
+    let readonly = Client::default()
+        .with_url(ch_url())
+        .with_database(db)
+        .with_user("ohlcv_ro_0170");
+
+    let uri = format!(
+        "/v1/assets/USDC:{}/ohlcv?granularity=1h&start=2026-02-10T10:00:00Z\
+         &end=2026-02-10T11:00:00Z&base_currency=USD",
+        iss()
+    );
+    let (status, json) = get(readonly, &uri).await;
+
+    // ⚠️ The user is dropped BEFORE the assertions. A failing assertion unwinds
+    // past whatever follows it, and leaving a passwordless account holding
+    // SELECT behind on the server is not an acceptable cost of a red test —
+    // `ch_url()` honours `CLICKHOUSE_URL` and need not be a throwaway container.
+    exec(&admin, "DROP USER IF EXISTS ohlcv_ro_0170").await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a read-only user must be able to read the peg series: body={json}"
+    );
+    let data = json["data"].as_array().unwrap();
+    assert_eq!(data.len(), 2, "the synthesized series must survive: {json}");
+    approx(&data[0]["close"], 0.9993);
+    assert_eq!(data[0]["method"], "oracle");
 
     teardown(db).await;
 }

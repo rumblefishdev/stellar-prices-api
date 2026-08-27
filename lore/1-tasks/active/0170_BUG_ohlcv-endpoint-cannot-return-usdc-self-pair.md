@@ -842,6 +842,63 @@ reporting its volume as a quote would answer a different question.
 2. **`ASOF JOIN` needs an equality alongside the inequality**, and there is no
    natural key here; both sides carry a constant `1 AS k`.
 
+## 🔴 The first prod verification FAILED — `SETTINGS` is refused for the API's user
+
+**2026-08-27.** Trap 1's fix — `SETTINGS join_use_nulls = 1` — is itself
+inadmissible in production. The batch deploy of 08-27 shipped this endpoint, and
+the first call through the deployed API answered **`500 db_error`**:
+
+```
+GET /v1/assets/USDC:GA5Z…/ohlcv?timeframe=all&granularity=1d  → 500
+{"code":"db_error","message":"ohlcv peg series failed"}
+```
+
+`system.query_log` names it exactly:
+
+| field | value |
+|---|---|
+| user | `prices_reader` |
+| type | `ExceptionBeforeStart` |
+| exception_code | **164** |
+| exception | `Cannot modify 'join_use_nulls' setting in readonly mode. (READONLY)` |
+
+`prices_reader` runs **read-only**, and a read-only user may not modify a
+setting — so ClickHouse refused the query **before executing a row**. The Lambda
+`REPORT` line corroborates: 277 ms total of which 234 ms was cold start, i.e. a
+~40 ms round trip. It is the only query in the whole service that carried a
+`SETTINGS` clause.
+
+**Two diagnostic notes worth keeping.**
+
+- The error surfaced as `bad response: ` with an **empty reason**. The client
+  asks for compressed responses, so a plain-text error body decompresses to
+  nothing and `clickhouse-rs` reports the status with no text
+  (`response.rs:106-111`). An empty error message here means *"read the
+  `query_log`"*, not *"the proxy answered"* — the first reading cost a wrong
+  hypothesis (a repeat of [[0215]]'s Caddy timeout), killed by the 277 ms.
+- **Every local test passed throughout**, because the local user is not
+  read-only. This is the permissions twin of the version-pinning rule: matching
+  the engine version is not enough if the *privileges* differ.
+
+**The fix — a sentinel, not a setting.** `usd_rate.method` is
+`LowCardinality(String)` (`init.sql:299`), so an unmatched ASOF row defaults it
+to `''`, and no real row can carry one (every writer sets it; it is in the
+table's ORDER BY key). `ifNull(r.meth, '') = ''` is therefore the no-match test,
+and it holds under `join_use_nulls` **either way** — so the answer no longer
+depends on a server default in either direction, which the `SETTINGS` version
+could not claim. The clause is gone.
+
+Rejected: asking BE for `readonly = 2` on `prices_reader`. It loosens a
+read-only user for one query's convenience, it is an XML-managed user so it
+needs their change and a restart, and it would leave us depending on a
+permission we do not control.
+
+**Guarded.** `ohlcv_peg_series_answers_for_a_readonly_user` runs the endpoint as
+a `readonly = 1` user. Verified non-vacuous: restoring the `SETTINGS` clause
+makes it fail with the exact prod symptom (`500`, `ohlcv peg series failed`)
+while the other 17 tests in the file still pass — which is precisely why this
+reached production.
+
 ## Out of scope
 
 - **`price_usd_series`** — that is [[0165]], already active.
