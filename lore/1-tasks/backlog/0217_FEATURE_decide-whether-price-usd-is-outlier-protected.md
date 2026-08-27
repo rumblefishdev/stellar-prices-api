@@ -24,6 +24,18 @@ history:
       therefore what "outlier" means, and [[0123]] is the evidence base for
       whichever option is chosen. Both are in backlog, so 0135 would have
       stayed open indefinitely on a question it could not answer.
+  - date: 2026-08-27
+    status: backlog
+    who: stkrolikiewicz
+    note: >
+      Design input recorded from the 0118 kickoff: the unweighted median is a
+      cheap manipulation surface (dust venues can evict the deep market);
+      candidate fix is a volume-weighted median (quantileExactWeighted), which
+      also kills the even-count interpolation pathology by construction.
+      Age-weighted votes considered and argued against — age is pipeline
+      artifact, handled by the liveness guard + [[0216]]. See the new
+      "Design input" section. [[0123]] is now completed, so the evidence-base
+      blocker is met; only [[0118]] remains.
 ---
 
 # Is the headline price outlier-protected, or not?
@@ -83,6 +95,51 @@ so no consumer guard catches it.
   from the inter-source median — and leave both numbers untouched. Most
   informative, largest API-surface change. Pairs naturally with [[0216]]'s
   age column: both answer "how much should I trust this number?".
+
+## Design input — volume-weighted median (2026-08-27, from 0118 planning)
+
+This task also owns the median mechanism itself (current.sql delegates the
+even-count-interpolation question here; 0123's close landed the tie-set
+question here too). Analysis from the 0118 kickoff discussion, recorded so
+the decision is made with it on the table:
+
+**The unweighted median is an attack surface.** Every venue votes equally, so
+two dust venues can outvote and evict the deep market — and after eviction,
+100% of the vwap weight lands on the manipulated pools. Cost of the attack is
+moving two thin AMM pools >20%; 0118's $100 floor raises that bar only
+slightly.
+
+**Candidate fix: `quantileExactWeighted(0.5)(price, volume)`** — the
+reference becomes "the price where half the volume sits". One function swap,
+three properties:
+
+1. Dust cannot steer the reference — the attack now requires controlling
+   half the asset's 24h volume.
+2. No interpolation pathology: the weighted quantile returns a *real* venue
+   price, so the median-holder always has deviation 0 and survives — the
+   `[1,1,3,3] → sources = '{}'` case becomes impossible by construction.
+3. The >= 3 guard stops being load-bearing: at 2 sources the reference is
+   the deeper venue, turning the test into "does the thin venue agree with
+   the deep one?" — a defensible asymmetry (deep markets are expensive to
+   manipulate).
+
+Weights must be integer: `toUInt64(greatest(1, src_volume))` so a
+zero-volume source still counts as 1.
+
+**Deliberately NOT proposed: age-weighted votes.** Per-venue price age is
+today ~100% an artifact of the hourly enrichment cadence, not a market
+signal — folding it into vote weights would penalise venues for our own
+pipeline lag, re-introducing the defect 0135's carry removed, and would make
+the AC-4 hand-reconciliation (0123) substantially harder. Age is already
+handled at the right layers: the 2h conditional liveness guard, carry, and
+[[0216]]'s age column. The one residual gap (a >20% move inside 2h where the
+lagged majority evicts the first mover) is unobserved in practice — 0123
+measured max deviation 0.824% against the 20% band.
+
+**Cost of any semantic change:** AC 4 (Tranche 2) was evidenced on the
+current semantics — changing the median invalidates that evidence, so the
+change requires a 0123-style re-run plus `current_mv_it.rs` fixture updates,
+and must be called out as a published-value change.
 
 ## Sequencing (why this is not startable today)
 
