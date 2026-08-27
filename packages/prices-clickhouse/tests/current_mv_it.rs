@@ -188,6 +188,17 @@ async fn current_prices_mv_computes_price_volume_and_market_cap() {
 ///  13 NRB — priced, but its only 1h reference sits at 4 d, INSIDE the [7d, 5d]
 ///           band's recent cutoff → change_7d_pct must be the sentinel rather
 ///           than a 4-day move published as a 7-day one
+///  17 DST — a dust venue (below MIN_VOLUME_USD) with an absurd price → the
+///           0118 threshold drops it before the median; price_usd and
+///           volume_24h_usd stay demonstrably UNAFFECTED
+///  18 ATK — two live dust venues straddling a deep market → without the
+///           threshold they OWN the median and evict the deep venue; with it
+///           they never vote (the exact defect 0118 closes)
+///  19 THL — live dust + stale real venue → the threshold runs BEFORE the
+///           asset_has_live window, so the asset counts as all-quiet and the
+///           stale venue is kept
+///  20 SUB — every venue below the threshold → vwap 0 and sources {} beside
+///           a real price_usd and an UNFILTERED volume_24h_usd
 #[tokio::test]
 #[ignore = "requires a local ClickHouse (docker compose up -d clickhouse)"]
 async fn current_prices_mv_writes_0072_columns_and_filters_outliers() {
@@ -301,10 +312,13 @@ async fn current_prices_mv_writes_0072_columns_and_filters_outliers() {
         // claim (PR #241 review, finding 2). Reachable only because C2's carry
         // brings all-dead assets into the mask at all; before it they arrived
         // with zero kept sources and it never armed.
-        (15, 200, "1.00", "100", "sdex"),
-        (15, 210, "1.00", "100", "soroswap"),
-        (15, 220, "3.00", "100", "aquarius"),
-        (15, 230, "3.00", "100", "phoenix"),
+        // Volumes 200, not 100: MIN_VOLUME_USD (0118) would drop $100 venues
+        // before the mask and this fixture would pass vacuously, testing the
+        // threshold instead of the mask-clears-everything path it pins.
+        (15, 200, "1.00", "200", "sdex"),
+        (15, 210, "1.00", "200", "soroswap"),
+        (15, 220, "3.00", "200", "aquarius"),
+        (15, 230, "3.00", "200", "phoenix"),
         // 16 LIV — the ONLY fixture that discriminates candle-liveness from
         // enrichment-freshness, and the shape PR #241's review found (finding
         // 1). sdex is quoting RIGHT NOW and carries essentially all the
@@ -316,13 +330,45 @@ async fn current_prices_mv_writes_0072_columns_and_filters_outliers() {
         // and vwap ~= 1.00 because sdex carries the weight.
         // Liveness on PRICED CLOSES (the defect): sdex reads as dead, is
         // evicted in favour of soroswap, and the row publishes vwap 1.20 —
-        // drawn from $10 of the $1,000,020 the same row reports as volume.
+        // drawn from $150 of the $1,000,160 the same row reports as volume.
         //
         // Assets 10/14/15 behave IDENTICALLY under both predicates, so
         // without this fixture a revert to the old form stays green.
+        // soroswap at $150, not $10 as the PR #241 probe had it: it must clear
+        // the 0118 threshold to stay in the fixture's cast at all — the point
+        // here is liveness, and $150 is still noise against sdex's $1M.
         (16, 1, "0", "1000000", "sdex"),
         (16, 180, "1.00", "10", "sdex"),
-        (16, 5, "1.20", "10", "soroswap"),
+        (16, 5, "1.20", "150", "soroswap"),
+        // 17 DST — the 0118 threshold. soroswap holds $50 of volume and quotes
+        // an absurd 5.00; it must be dropped BEFORE the median so the mask
+        // arms over the two real venues only. Its row is deliberately the
+        // NEWEST priced close, so price_usd = 5.00 — pinning that the
+        // threshold is a weighting rule and price_usd stays venue-blind
+        // (pinned-not-endorsed, same note as asset 3's change columns).
+        (17, 10, "1.00", "100000", "sdex"),
+        (17, 9, "1.02", "20000", "aquarius"),
+        (17, 8, "5.00", "50", "soroswap"),
+        // 18 ATK — the manipulation shape 0118 closes. Two live dust venues
+        // straddle one deep market. WITHOUT the threshold the dust pair owns
+        // the unweighted median (1.35), the deep venue deviates 26% and is
+        // evicted, and the published vwap is ~1.3615 — drawn from $65 of the
+        // $500,065 the row reports. WITH it the dust never votes.
+        (18, 5, "1.00", "500000", "sdex"),
+        (18, 4, "1.35", "40", "soroswap"),
+        (18, 3, "1.38", "25", "phoenix"),
+        // 19 THL — threshold × liveness ordering. soroswap is LIVE but dust;
+        // sdex is STALE (190 min) but real. Threshold-first means the
+        // asset_has_live window sees only sdex → all-quiet arm → sdex kept.
+        // Threshold-after-window would let dust soroswap arm the guard, evict
+        // sdex as stale, then vanish itself — sources {} on an asset we hold
+        // a good price for.
+        (19, 190, "2.00", "10000", "sdex"),
+        (19, 5, "1.00", "50", "soroswap"),
+        // 20 SUB — every venue below the threshold: the documented "price with
+        // no sources beside it" shape, plus proof volume_24h_usd is a TOTAL
+        // the threshold never touches.
+        (20, 5, "3.00", "50", "sdex"),
     ];
     for (i, (asset, mins, cu, vol, src)) in rows.iter().enumerate() {
         admin
@@ -408,7 +454,7 @@ async fn current_prices_mv_writes_0072_columns_and_filters_outliers() {
             .fetch_one()
             .await
             .expect("count");
-        if n >= 14 {
+        if n >= 18 {
             ready = true;
             break;
         }
@@ -723,7 +769,111 @@ async fn current_prices_mv_writes_0072_columns_and_filters_outliers() {
         (liv_vwap - 1.0).abs() < 1e-3,
         "vwap must be dominated by the venue holding the volume (~1.00). 1.20 \
          means liveness was gated on enrichment and the $1,000,000 venue was \
-         evicted in favour of a $10 one; got {liv_vwap}"
+         evicted in favour of a $150 one; got {liv_vwap}"
+    );
+
+    // ── 0118: the min_volume_usd threshold ─────────────────────────────────
+    // Asset 17 — a $50 venue quoting an absurd 5.00 is dropped BEFORE the
+    // median: the two real venues vwap among themselves and the dust never
+    // skews the vote.
+    let dst_vwap = scalar_f64(&admin, &f("vwap_24h", 17)).await;
+    assert!(
+        (dst_vwap - 1.003_333_33).abs() < 1e-6,
+        "vwap must weight only the above-threshold venues ((1.00*100000 + \
+         1.02*20000) / 120000 = 1.00333333), got {dst_vwap}"
+    );
+    let dst_srcs: String = admin
+        .query(&s("sources", 17))
+        .fetch_one()
+        .await
+        .expect("dst sources");
+    assert!(
+        dst_srcs.contains("sdex")
+            && dst_srcs.contains("aquarius")
+            && !dst_srcs.contains("soroswap"),
+        "a below-threshold source must be ABSENT from sources (§3.3), got {dst_srcs}"
+    );
+    // The threshold is a WEIGHTING rule only: volume_24h_usd still counts the
+    // dust, and price_usd is still the venue-blind newest priced close — which
+    // here IS the dust venue's 5.00 (pinned-not-endorsed; the same asymmetry
+    // asset 3's change columns pin for the outlier mask, owned by 0217).
+    let dst_vol = scalar_f64(&admin, &f("volume_24h_usd", 17)).await;
+    assert!(
+        (dst_vol - 120_050.0).abs() < 1e-3,
+        "volume_24h_usd is a total the threshold never touches (120050), got {dst_vol}"
+    );
+    let dst_p = scalar_f64(&admin, &f("price_usd", 17)).await;
+    assert!(
+        (dst_p - 5.0).abs() < 1e-9,
+        "price_usd must be demonstrably unaffected by the threshold — the \
+         newest priced close even when it comes from a below-threshold venue, \
+         got {dst_p}"
+    );
+
+    // Asset 18 — the defect 0118 closes. Without the threshold the two dust
+    // venues own the unweighted median (1.35), sdex deviates 26% > 20% and is
+    // EVICTED, and the row publishes vwap ~1.3615 from $65 of turnover. The
+    // threshold drops them before the vote, so the deep market prices itself.
+    let atk_vwap = scalar_f64(&admin, &f("vwap_24h", 18)).await;
+    assert!(
+        (atk_vwap - 1.0).abs() < 1e-6,
+        "dust venues must not be able to move vwap_24h: expect 1.00 from the \
+         deep venue; ~1.3615 means they owned the median and evicted it — the \
+         exact pre-0118 defect; got {atk_vwap}"
+    );
+    let atk_srcs: String = admin
+        .query(&s("sources", 18))
+        .fetch_one()
+        .await
+        .expect("atk sources");
+    assert!(
+        atk_srcs.contains("sdex")
+            && !atk_srcs.contains("soroswap")
+            && !atk_srcs.contains("phoenix"),
+        "only the deep venue may remain in sources, got {atk_srcs}"
+    );
+
+    // Asset 19 — ordering: threshold BEFORE the asset_has_live window. The
+    // live venue is dust, so after the threshold the asset is all-quiet and
+    // the stale-but-real sdex must be KEPT. If the window ran first, dust
+    // soroswap would arm the guard, evict sdex, then vanish itself.
+    let thl_srcs: String = admin
+        .query(&s("sources", 19))
+        .fetch_one()
+        .await
+        .expect("thl sources");
+    assert!(
+        thl_srcs.contains("sdex") && !thl_srcs.contains("soroswap"),
+        "with the only live venue below the threshold the asset counts as \
+         all-quiet and the stale venue survives; sources = {{}} means the \
+         liveness window ran before the threshold, got {thl_srcs}"
+    );
+    let thl_vwap = scalar_f64(&admin, &f("vwap_24h", 19)).await;
+    assert!(
+        (thl_vwap - 2.0).abs() < 1e-6,
+        "vwap must come from the kept stale venue (2.00), got {thl_vwap}"
+    );
+
+    // Asset 20 — every venue below the threshold: vwap and sources empty by
+    // rule, while price_usd and volume_24h_usd publish untouched. This is the
+    // blast-radius shape the deploy runbook step measures on prod.
+    let sub_vwap = scalar_f64(&admin, &f("vwap_24h", 20)).await;
+    let sub_srcs: String = admin
+        .query(&s("sources", 20))
+        .fetch_one()
+        .await
+        .expect("sub sources");
+    let sub_p = scalar_f64(&admin, &f("price_usd", 20)).await;
+    let sub_vol = scalar_f64(&admin, &f("volume_24h_usd", 20)).await;
+    assert!(
+        sub_vwap.abs() < 1e-9 && sub_srcs == "{}",
+        "an asset whose every source is below the threshold publishes vwap 0 \
+         and empty sources, got vwap {sub_vwap} sources {sub_srcs}"
+    );
+    assert!(
+        (sub_p - 3.0).abs() < 1e-9 && (sub_vol - 50.0).abs() < 1e-9,
+        "price_usd (3.00) and volume_24h_usd (50) must be untouched by the \
+         threshold, got {sub_p} / {sub_vol}"
     );
 
     // ── the change_7d numerator guard, on the only shape that reaches it ───

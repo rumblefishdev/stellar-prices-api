@@ -40,9 +40,11 @@
 --   volume_24h_usd  — trailing-24h USD volume, ALL sources (a total, never filtered)
 --   market_cap_usd  — price_usd × circulating supply from prices.asset_supply
 --   vwap_24h        — USD volume-weighted close across sources, with the §5.5
---                     inter-source median-outlier filter applied
---   sources         — JSON per-source {price, volume_24h}; outlier-excluded
---                     sources are ABSENT from the object (general-overview §3.3)
+--                     min_volume_usd threshold (task 0118) and inter-source
+--                     median-outlier filter applied
+--   sources         — JSON per-source {price, volume_24h}; sources excluded by
+--                     min_volume_usd or outlier detection are ABSENT from the
+--                     object (general-overview §3.3)
 --
 -- ── Numeric strategy ────────────────────────────────────────────────────────
 -- Decimal×Decimal widens scale past Decimal(38,14)'s budget (14+14=28 scale
@@ -107,9 +109,29 @@
 -- percent between venues, so a tight threshold costs more than it saves. Tune
 -- against real multi-source assets — see task 0123's reconciliation.
 --
--- NOTE: the §5.5 `min_volume_usd` inclusion threshold is deliberately NOT here;
--- it is task 0118, which layers it on top of this filter (cheap sources are
--- dropped BEFORE the median is taken, so they cannot skew it either).
+-- ── §5.5 min_volume_usd inclusion threshold (task 0118) ─────────────────────
+-- "Only include sources where volume_24h > configurable_min_threshold_usd
+-- (e.g. $100)." MIN_VOLUME_USD = 100, the spec's own worked example. A literal
+-- in the WHERE below, not a settings table — the MV is redeployed by DDL
+-- anyway, so a second indirection buys nothing. The API-side `?min_volume_usd=`
+-- override (same task) re-weights from the `sources` JSON in the handler; this
+-- MV always computes at the system default.
+--
+-- ORDER MATTERS, twice:
+--   * threshold BEFORE the median — a dust venue must not be able to skew the
+--     vote it is not allowed to weight in;
+--   * threshold BEFORE the liveness window (`asset_has_live`) — the guard must
+--     not defend a venue the threshold is about to erase. Concretely: a live
+--     $50 venue beside a stale $10k venue should NOT evict the $10k one and
+--     then vanish itself, leaving `sources` empty; with the threshold first the
+--     asset counts as all-quiet and keeps the stale-but-real price.
+--
+-- The threshold is a WEIGHTING rule only: `price_usd` and `volume_24h_usd`
+-- read from `unfiltered` and are untouched by construction. An asset whose
+-- EVERY source is below the threshold publishes vwap_24h = 0 and sources = '{}'
+-- while keeping its price_usd — the documented "price with no sources beside
+-- it" shape. Blast radius on the low-volume tail is a deploy-time check; see
+-- the 0118 runbook step.
 
 DROP VIEW IF EXISTS prices.mv_current_prices;
 
@@ -236,6 +258,10 @@ WITH
             max(src_is_live) OVER (PARTITION BY asset_id) AS asset_has_live
         FROM per_source
         WHERE src_price > 0
+          AND src_volume > 100  -- MIN_VOLUME_USD (§5.5 / task 0118): strict >,
+                                -- per the spec's "volume_24h > threshold".
+                                -- Sits before the asset_has_live window on
+                                -- purpose — see the header note.
     ),
 
     -- Level 2 — collapse sources into per-asset arrays so the median filter can
