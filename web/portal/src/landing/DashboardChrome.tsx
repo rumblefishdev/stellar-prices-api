@@ -77,7 +77,11 @@ export function DashboardNavbar({
           <Stack
             direction="row"
             alignItems="center"
-            spacing={{ xs: 1.5, md: 3 }}
+            // Measured at 375 px (343 px inside the container): three labels
+            // at 15 px, the account glyph and a 44 px sign-out summed past the
+            // row and sign-out still fell onto a third line. 14 px labels,
+            // 8 px gaps and no glyph on a phone bring the row to ~300 px.
+            spacing={{ xs: 1, sm: 1.5, md: 3 }}
             useFlexGap
             sx={{
               minWidth: 0,
@@ -104,7 +108,7 @@ export function DashboardNavbar({
                   display: 'inline',
                   whiteSpace: 'nowrap',
                   fontFamily: font.secondary,
-                  fontSize: '0.9375rem',
+                  fontSize: { xs: '0.875rem', sm: '0.9375rem' },
                   fontWeight: 500,
                   textDecoration: 'none',
                   color: current ? color.text.primary : color.text.tertiary,
@@ -147,7 +151,10 @@ export function DashboardNavbar({
                 direction="row"
                 spacing={1}
                 alignItems="center"
-                sx={{ minWidth: 0 }}
+                // The account block — glyph and handle — is display-only and
+                // is what does not fit at 375 px; the handle is on the key
+                // card, so on a phone the bar drops the block entirely.
+                sx={{ minWidth: 0, display: { xs: 'none', sm: 'flex' } }}
               >
                 <Box
                   aria-hidden
@@ -166,10 +173,6 @@ export function DashboardNavbar({
                 </Box>
                 <Typography
                   sx={{
-                    // The handle is display-only; on a phone the Discord
-                    // glyph stands for it so the three links and the sign-out
-                    // fit one row. It is still on the dashboard's own card.
-                    display: { xs: 'none', sm: 'block' },
                     fontFamily: font.secondary,
                     fontWeight: 700,
                     fontSize: '0.9375rem',

@@ -2180,9 +2180,11 @@ describe('the API key', () => {
   });
 
   /**
-   * The frame's yellow strip, in the frame's words (Adam, 2026-08-25) —
-   * replacing the "replacing issues nothing in its place" sentence this
-   * carried, which was task 0191's model stated plainly.
+   * The frame's yellow strip. Its words were the frame's (Adam, 2026-08-25:
+   * "Key rotation is limited to once per calendar month") until 2026-08-27,
+   * when PR #249's review round returned it to task 0191's model — nothing
+   * rotates, nothing is issued now, once per quota period — like the two
+   * landing sentences before it.
    *
    * The date is what this pins: whichever wording the strip wears, the instant
    * it names is the start of the next quota period, and it must be a real date
@@ -2194,7 +2196,9 @@ describe('the API key', () => {
     renderApp('/');
 
     const note = await screen.findByRole('note');
-    expect(note.textContent).toMatch(/once per calendar month/i);
+    expect(note.textContent).toMatch(/once per quota period/i);
+    expect(note.textContent).toMatch(/issues nothing now/i);
+    expect(note.textContent).not.toMatch(/rotat/i);
     const nextMonth = new Date(
       Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth() + 1, 1),
     );

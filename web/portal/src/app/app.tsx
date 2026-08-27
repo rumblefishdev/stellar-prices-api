@@ -3097,17 +3097,21 @@ function ApiKey({
       </MetaRow>
 
       {/* The frame's yellow strip, under the metadata row it belongs to.
-          Adam's wording, 2026-08-25 — the frame's, kept whole:
+          The frame's words (Adam, 2026-08-25) were kept whole until
+          2026-08-27:
 
               Key rotation is limited to once per calendar month.
               Next rotation available: <the 1st of next month>
 
-          ⚠️ It describes the swap model task 0191 built and then reversed.
+          ⚠️ They describe the swap model task 0191 built and then reversed,
+          and PR #249's review round found the same sentence pair on the
+          landing page and sent both back to 0191's model; this strip is the
+          third place and was found while driving the states in a browser.
           Nothing is rotated: pressing Regenerate deactivates the key and
-          issues nothing, and a new key comes only with the next period. The
-          date is right either way — it is the same instant both models point
-          at — and the dialog behind the button still says what actually
-          happens.
+          issues nothing, and a new key comes only with the next period — so
+          the strip now says that, in 0191's terms (regenerate, quota period),
+          and the dialog behind the button agrees with it instead of
+          contradicting it. The date is the same instant either way.
 
           The date prefers `/usage`'s `resets_at`, which is the backend's own
           `Period`; without it the page computes the 1st of next month itself,
@@ -3116,8 +3120,8 @@ function ApiKey({
       {view.state === 'ok' && !justIssued && (
         <NoticeStrip>
           <p>
-            Key rotation is limited to <strong>once per calendar month</strong>.
-            Next rotation available:{' '}
+            Regenerating is limited to <strong>once per quota period</strong>{' '}
+            and issues nothing now. A new key can be issued from:{' '}
             <strong>
               {describeUtcDay(resetsAt) ?? describeNextPeriodStart()}
             </strong>
