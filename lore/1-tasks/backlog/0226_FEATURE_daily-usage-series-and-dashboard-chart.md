@@ -1,5 +1,5 @@
 ---
-id: "0222"
+id: "0226"
 title: "Daily requests chart — expose the per-day series /usage already reads, and draw it"
 type: FEATURE
 status: backlog
@@ -19,6 +19,14 @@ history:
       it needs is read by the backend already and thrown away before it leaves
       the gateway. Adam chose to ship the rest of the frame first and do this
       as its own slice.
+  - date: "2026-08-27"
+    status: backlog
+    who: akot
+    note: >
+      Renumbered 0222 → 0226. The id had been taken on `develop` by the
+      no-invocations alarm bug (PR #250) before this branch merged it in;
+      found by [[0193]]'s review round. The two code comments that cited it
+      (`app.tsx`, `app.spec.tsx`) re-pointed in the same change.
 ---
 
 # Daily requests chart
