@@ -623,11 +623,20 @@ rather than holding this one open.
 
 ### Gate — blocks [[0127]] AC 3/AC 4 and [[0120]]
 
-- [ ] `GET /assets/{USDC}/ohlcv?timeframe=all` returns a non-empty 1d series
+- [x] `GET /assets/{USDC}/ohlcv?timeframe=all` returns a non-empty 1d series
       spanning the backfilled range, verified **through the deployed API**, not
       only in a test.
-- [ ] The returned USDC/USD closes sit within a stated tolerance of ~$1, and the
+      → **2,034 buckets, 2021-02-01 → 2026-08-27**, `HTTP 200`, through the
+      production API on 2026-08-27 (see "Verified on prod" below). Took two
+      deploys: the first shipped a query production refused.
+- [x] The returned USDC/USD closes sit within a stated tolerance of ~$1, and the
       tolerance is justified (not asserted as exactly `1.0`).
+      → **±0.5%**, measured. Over the **169** `oracle` buckets the extremes are
+      `0.99947311646448` and `1.00110725843914` — a largest deviation of
+      **0.1107%**, so the bound carries ~4.5× headroom. ⚠️ Stated over the
+      MEASURED buckets only: the 1,865 `peg` buckets are exactly `1` *by
+      construction* and cannot fail any tolerance, so including them would make
+      the criterion vacuous.
 - [x] `?base_currency=XLM` returns a non-empty, correctly-oriented series, with
       `volume_*` and `vwap` verified rather than assumed to invert.
       → **Derived, not inverted** (§6). `USDC_usd / XLM_usd` per bucket, so the
@@ -668,11 +677,21 @@ rather than holding this one open.
       → **[[ADR-0011]] accepted 2026-08-25**, deciders okarcz + stkrolikiewicz.
       §4's open item (derived O/H/L provenance) settled 2026-08-26: a separate
       flag, `method` unchanged. No design question remains open.
-- [ ] A non-empty USD series for the five 0120 majors (`CBIJ…`, RON, EQL, BOL,
+- [x] A non-empty USD series for the five 0120 majors (`CBIJ…`, RON, EQL, BOL,
       AUD **with its issuer pinned** — 15 AUD issuers exist), through the
       deployed API.
-- [ ] O/H/L derivation documented as *derived, not measured*, and carried in the
+      → All five non-empty on a 30-day window, every priced bucket labelled
+      `traded`: `CBIJ…` 30, AUD (`GBBWRCJSZR…`) 23, RON 14, EQL 11, BOL 12.
+      EQL carries **1 unpriced bucket** (2026-08-25, `volume_base = 1`,
+      `trade_count = 2`) — the guard behaving as designed, a dust bucket
+      returned present-but-price-less rather than dropped.
+- [x] O/H/L derivation documented as *derived, not measured*, and carried in the
       response provenance rather than only in this file.
+      → `Candle::derived` ships in every response, and its doc comment
+      publishes to the OpenAPI document (verified out of
+      `extract_openapi`: *"Whether `open`/`high`/`low`/`vwap` were **derived**
+      rather than measured (ADR 0011 §3)"*). A separate axis from `method`, per
+      §4.
 - [x] `close = 0` guarded, with a test — the clean 30-day sample is not proof
       over all history.
       → `ohlcv_guards_a_zero_close`. Covered separately from `close_usd = 0`
@@ -898,6 +917,54 @@ a `readonly = 1` user. Verified non-vacuous: restoring the `SETTINGS` clause
 makes it fail with the exact prod symptom (`500`, `ohlcv peg series failed`)
 while the other 17 tests in the file still pass — which is precisely why this
 reached production.
+
+## ✅ Verified on prod — 2026-08-27
+
+Shipped in the 08-27 batch deploy (the API Lambda had not been deployed since
+08-14), then re-deployed with the read-only fix above. `CodeSha256`
+`bvrPfpYRehco5lL04rEm4xvYVIPvDtuLgYKOszIai3o=`, 15:02 local.
+
+**The USDC self-pair — the defect this task is named for.**
+
+| | |
+|---|---|
+| buckets | **2,034** (1d) |
+| span | **2021-02-01 → 2026-08-27** |
+| `oracle` / `peg` | **169 / 1,865** |
+| measured range | `0.99947311646448` … `1.00110725843914` |
+| largest deviation | **0.1107%** |
+| `derived` | `true` on every bucket |
+
+🔑 **The 169/1,865 split is the load-bearing number, not the 2,034.** `usd_rate`
+begins 2026-03-11, and 03-11 → 08-27 is ~170 days: the boundary falls exactly
+where the observations start. A fallback that silently won everywhere, or one
+that never fired, would both still have produced a non-empty series — this is
+what distinguishes "the ASOF works" from "the endpoint returns numbers".
+
+**The five 0120 majors**, 30-day window, USD mode — the population the wider
+reading of this task serves (20,481 assets), all previously an empty `200`:
+
+| asset | buckets | methods |
+|---|---|---|
+| `CBIJBDNZNF…` (soroban) | 30 | 30 `traded` |
+| AUD `GBBWRCJSZR…` | 23 | 23 `traded` |
+| RON `GDE6EMCCVP…` | 14 | 14 `traded` |
+| BOL `GDOV2XVGNQ…` | 12 | 12 `traded` |
+| EQL `GBKIUHEKEC…` | 11 | 10 `traded` + **1 unpriced** |
+
+`traded` throughout is the expected label: these are XLM-quoted assets
+denominated from `close_usd`, so they never touch the peg path.
+
+⚠️ **Two measurement traps worth keeping**, both of which produced a wrong
+number before a right one:
+
+1. A tolerance computed over the whole series is **vacuous** — 92% of the
+   buckets are `peg`, exactly `1` by construction. Filter to `method = 'oracle'`
+   first.
+2. `jq`'s `//` yields *all truthy outputs of the left side* and only falls
+   through when there are none, so `[.data[].method // "unpriced"]` silently
+   **drops** null methods instead of relabelling them. EQL read as 10 methods
+   over 11 buckets; the missing one was the unpriced bucket.
 
 ## Out of scope
 
