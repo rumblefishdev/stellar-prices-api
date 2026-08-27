@@ -8,7 +8,7 @@ import { Link as RouterLink } from 'react-router-dom';
 
 import rumblefishLogo from '../assets/rumblefish-logo.svg';
 import { color, font, radius } from '../theme/tokens';
-import { LOGIN_ROUTE, SWAGGER_UI } from './links';
+import { LOGIN_ROUTE, API_REFERENCE } from './links';
 import { ArrowBadge, cardBorder } from './primitives';
 import { Terminal } from './Terminal';
 
@@ -160,7 +160,7 @@ export function Hero({ canOfferKey }: { canOfferKey: boolean }) {
               <Button
                 variant={canOfferKey ? 'outlined' : 'contained'}
                 color="primary"
-                href={SWAGGER_UI}
+                href={API_REFERENCE}
                 endIcon={
                   <ArrowBadge variant={canOfferKey ? 'onDark' : 'onPrimary'} />
                 }

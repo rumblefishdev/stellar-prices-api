@@ -4,7 +4,7 @@ import Typography from '@mui/material/Typography';
 import { Link as RouterLink } from 'react-router-dom';
 
 import { color } from '../theme/tokens';
-import { LOGIN_ROUTE, SWAGGER_UI } from './links';
+import { LOGIN_ROUTE, API_REFERENCE } from './links';
 import { ArrowBadge, GradientSection } from './primitives';
 
 /**
@@ -55,7 +55,7 @@ export function FinalCta({ canOfferKey }: { canOfferKey: boolean }) {
               from competing. */}
           <Button
             variant="contained"
-            href={SWAGGER_UI}
+            href={API_REFERENCE}
             // Yellow disc, black arrow — the badge the design gives the white
             // button. `onPrimary`'s black disc made it the darkest mark in a
             // section that fades to the page floor.

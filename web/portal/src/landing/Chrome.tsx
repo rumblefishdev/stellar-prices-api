@@ -13,7 +13,7 @@ import { useState } from 'react';
 import { Link as RouterLink } from 'react-router-dom';
 
 import { color, font } from '../theme/tokens';
-import { DASHBOARD_ROUTE, LANDING, LOGIN_ROUTE, SWAGGER_UI } from './links';
+import { DASHBOARD_ROUTE, LANDING, LOGIN_ROUTE, API_REFERENCE } from './links';
 import { ArrowBadge, cardBorder } from './primitives';
 
 /**
@@ -314,7 +314,7 @@ function MobileMenu({
 
 export function Footer({ canOfferKey }: { canOfferKey: boolean }) {
   const links: { label: string; href?: string; to?: string }[] = [
-    { label: 'Documentation', href: SWAGGER_UI },
+    { label: 'Documentation', href: API_REFERENCE },
     // Only where there is a dashboard to reach. While the portal is shut this
     // link would land on `/dashboard`, which sends a visitor with no session
     // straight back to the page they clicked from.

@@ -24,7 +24,7 @@ import {
   DASHBOARD_ROUTE,
   LOGIN_ROUTE,
   STELLAR_DISCORD_INVITE,
-  SWAGGER_UI,
+  API_REFERENCE,
 } from '../landing/links';
 import { cardBorder } from '../landing/primitives';
 import { panelBorder } from '../landing/DashboardPanel';
@@ -39,14 +39,24 @@ import { panelBorder } from '../landing/DashboardPanel';
  * the visitor copies, which is why the one interactive thing here is the
  * copy button.
  *
- * The base URL and the paths are the DESIGN's, not this repo's OpenAPI
- * document's — the same gap `landing/Endpoints.tsx` notes. Reconciling them is
- * a product decision about the public surface; this page renders what the
- * frame says so that the two do not diverge into a third answer, and keeps
- * both in one constant each so the reconciliation is a two-line diff.
+ * The PATHS are the DESIGN's, not this repo's OpenAPI document's — the same
+ * gap `landing/Endpoints.tsx` notes. Reconciling them is a product decision
+ * about the public surface, tracked as task 0227 rather than remembered; this
+ * page renders what the frame says so that the two do not diverge into a
+ * third answer, and keeps the paths in one place so the reconciliation is a
+ * small diff.
+ *
+ * The HOST is ours, since 2026-08-27, and is not the design's. The frame
+ * shows `api.soroswap.finance`, and this page told a reader to paste their
+ * real key into a `curl` aimed at it — a credential, sent to a domain that
+ * is not this API's, from the page that issued it. The base below is the
+ * execute-api origin `docs/scf/api-endpoints.md` documents as the public one
+ * until task 0195's custom domain lands; a request to it with a design-only
+ * path answers our `404`, which is a wrong path and not a leaked key.
  */
 
-const BASE_URL = 'https://api.soroswap.finance/v1';
+const BASE_URL =
+  'https://02mabge71l.execute-api.eu-central-1.amazonaws.com/production/v1';
 const PLACEHOLDER_KEY = 'sf_live_YOUR_KEY_HERE';
 
 /** The sections, in page order. Doubles as the left-hand table of contents. */
@@ -737,7 +747,10 @@ const ERROR_CODES: readonly {
     status: 429,
     tone: 'warn',
     when: 'Rate limit exceeded (1 req/s) or monthly quota reached',
-    fix: 'Slow down requests. Check the Retry-After header for the wait time. Monitor quota on your dashboard.',
+    // No `Retry-After`: API Gateway's throttle response carries none, and
+    // telling a reader to wait for a header that never comes is worse than
+    // no advice. Measured — see `RATE_LIMIT_BODY`.
+    fix: 'Slow down to 1 request per second and retry after a short pause — the response carries no Retry-After header. Monitor quota on your dashboard.',
   },
   {
     status: 404,
@@ -753,7 +766,25 @@ const ERROR_CODES: readonly {
   },
 ];
 
-const RATE_LIMIT_BODY = `// HTTP 429 Too Many Requests\n// Retry-After: 1\n{\n  "code": "RATE_LIMIT_EXCEEDED",\n  "message": "Request rate limit exceeded. Retry after 1 second."\n}`;
+/**
+ * The 429 as API Gateway actually sends it — **measured on 2026-08-27**
+ * against the production `pricing-api-free` plan (1 req/s, burst 5) with
+ * 120 concurrent requests: status `429`, `x-amzn-errortype:
+ * TooManyRequestsException`, `content-type: application/json`, body exactly
+ * `{"message":"Too Many Requests"}`, and no `Retry-After`.
+ *
+ * ⚠️ This page used to render an invented contract here — a `Retry-After: 1`
+ * header and a `RATE_LIMIT_EXCEEDED` code — behind a copy button. Neither
+ * string exists in `packages/` or `infra/`; throttling is the gateway's, not
+ * ours, and the gateway's body is the one above. Task 0193's decision #3:
+ * the design said only "what headers to watch", so the concrete contract is
+ * decided here, from a measurement, and not from the frame.
+ *
+ * Not measured: the MONTHLY quota's 429, which API Gateway documents as
+ * `{"message":"Limit Exceeded"}` — producing it means spending the plan's
+ * 100 000 requests. The page does not show a body it has not seen.
+ */
+const RATE_LIMIT_BODY = `// HTTP 429 Too Many Requests\n// x-amzn-errortype: TooManyRequestsException\n{\n  "message": "Too Many Requests"\n}`;
 
 const SDK_LANGS = [
   { key: 'js', label: 'JavaScript' },
@@ -1528,7 +1559,7 @@ function WhatsNext() {
       icon: apiReferenceIcon,
       title: 'Full API reference',
       body: 'Explore all endpoints, parameters and response schemas in the interactive Swagger UI.',
-      href: SWAGGER_UI,
+      href: API_REFERENCE,
     },
     {
       icon: higherLimitsIcon,

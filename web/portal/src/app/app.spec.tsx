@@ -2115,9 +2115,11 @@ describe('the API key', () => {
    * extended to carry `createdDate` and `lastUpdatedDate` — not from this
    * machine's clock, and not invented where AWS omits them.
    *
-   * The label is the frame's "Last rotated" (Adam, 2026-08-25) even though the
-   * value is `lastUpdatedDate` and this build rotates nothing — the deviation
-   * is recorded at the render site.
+   * The label is "Last updated": the frame's "Last rotated" was taken on
+   * 2026-08-25 and reversed on 2026-08-27 (PR #249 review), because the value
+   * is `lastUpdatedDate`, this build rotates nothing, and both ends of the
+   * contract say the dashboard labels it so. The reversal is recorded at the
+   * render site.
    */
   it('dates the key from the control plane, in UTC', async () => {
     signedInWithKey({
@@ -2131,7 +2133,7 @@ describe('the API key', () => {
 
     expect(await screen.findByText('Issued')).toBeTruthy();
     expect(screen.getByText('13 April 2026')).toBeTruthy();
-    expect(screen.getByText('Last rotated')).toBeTruthy();
+    expect(screen.getByText('Last updated')).toBeTruthy();
     // 22:45 UTC on the 30th stays the 30th — rendered in a zone behind UTC it
     // would read as the 1st of May, which is a different quota period.
     expect(screen.getByText('30 April 2026')).toBeTruthy();
@@ -2144,7 +2146,7 @@ describe('the API key', () => {
 
     await screen.findByTestId('api-key');
     expect(screen.queryByText('Issued')).toBeNull();
-    expect(screen.queryByText('Last rotated')).toBeNull();
+    expect(screen.queryByText('Last updated')).toBeNull();
   });
 
   /**
@@ -2676,6 +2678,12 @@ describe('usage against quota', () => {
     // chart takes the space. What survives is the date itself, as the caption
     // under the bar, which is the half a visitor acts on.
     expect(screen.getByText('Resets 1 September')).toBeTruthy();
+    // Task 0188's lag line, verbatim, back under the meter since 2026-08-27
+    // (PR #249 review) — the panel must not present an AWS-lagged figure as
+    // live. `as_of` is the fixture's, rendered in UTC.
+    const asOf = screen.getByTestId('usage-as-of');
+    expect(asOf.textContent).toMatch(/Last updated .*10:15:00 UTC/);
+    expect(asOf.textContent).toMatch(/AWS reports usage with a delay/);
 
     // And the URL is relative: same-origin, cookie attached by the browser.
     const call = fetchMock.mock.calls.find(([url]) => url === USAGE_URL) as [
@@ -2685,19 +2693,16 @@ describe('usage against quota', () => {
   });
 
   /**
-   * ⚠️ **DELETED, not moved: the lag line is no longer rendered.**
+   * ⚠️ **The lag line was deleted on 2026-08-25 and is back since 2026-08-27.**
    *
    * Task 0188 decided that every figure on this card carries "Last updated …
    * — AWS reports usage with a delay, so requests made in the last few minutes
-   * may not be counted yet", and this test pinned that wording verbatim. Adam
-   * removed the line on 2026-08-25 ("to jest do usunięcia, tutaj będą
-   * wykresy") together with the reset-rule sentence and the Refresh button.
-   *
-   * What that costs is written down rather than quietly dropped: the panel no
-   * longer tells a visitor that a figure can trail their last request by
-   * minutes, so a developer who has just made calls and sees an unchanged
-   * number has nothing on screen explaining why. If it should come back, this
-   * is the test to restore with it — `USAGE.as_of` is still in the fixture.
+   * may not be counted yet". Adam removed the line on 2026-08-25 ("to jest do
+   * usunięcia, tutaj będą wykresy") together with the reset-rule sentence and
+   * the Refresh button; PR #249's review sent it back, on 0188's own terms —
+   * this slice restyles the line and does not re-decide it. It is asserted in
+   * the numbers test above; what stays deleted is the Refresh button and the
+   * reset-rule sentence, whose date survives as the meter caption.
    */
 
   /** Usage is read-only, so it may and does load on mount. */
@@ -3658,8 +3663,9 @@ describe('replace my key', () => {
     renderApp('/?signin=not_member');
 
     expect(await screen.findByTestId('issue-not-member')).toBeTruthy();
-    // The ordinary dashboard, with its revoked panel — not the card.
-    expect(screen.getByTestId('key-revoked')).toBeTruthy();
+    // The ordinary dashboard, with its revoked panel — not the card. Awaited:
+    // the banner renders before `GET /key` has answered, the panel after.
+    expect(await screen.findByTestId('key-revoked')).toBeTruthy();
     expect(screen.queryByTestId('revoked-reason')).toBeNull();
   });
 

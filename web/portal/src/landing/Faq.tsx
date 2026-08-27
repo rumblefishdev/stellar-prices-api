@@ -9,7 +9,7 @@ import Typography from '@mui/material/Typography';
 import type { ReactNode } from 'react';
 
 import { color, radius } from '../theme/tokens';
-import { STELLAR_DISCORD_INVITE, SWAGGER_UI } from './links';
+import { STELLAR_DISCORD_INVITE, API_REFERENCE } from './links';
 import { Section, SectionHeading, cardBorder, cardSurface } from './primitives';
 
 /**
@@ -74,7 +74,7 @@ const FAQS: readonly Faq[] = [
     question: 'Where is the documentation?',
     answer: (
       <>
-        The full <Link href={SWAGGER_UI}>OpenAPI specification</Link> covers
+        The full <Link href={API_REFERENCE}>OpenAPI specification</Link> covers
         every endpoint and every response shape. It is linked from your
         dashboard too, next to your key.
       </>

@@ -18,8 +18,16 @@ import { ROUTER_BASENAME } from '../base-path';
 /** The OpenAPI document. Real, served, and the only docs artefact today. */
 export const OPENAPI_JSON = '/api-docs-json';
 
-/** Swagger UI — task 0195. Falls back to the raw document until it lands. */
-export const SWAGGER_UI = OPENAPI_JSON;
+/**
+ * The API reference — today the raw OpenAPI document, because that is the
+ * only reference that exists. Task 0195 mounts Swagger UI on it; when it
+ * lands, this is the one constant to re-point.
+ *
+ * Was `API_REFERENCE`, aliased to the document above. Every "Swagger UI"
+ * affordance then silently opened `/api-docs-json`: a name that promised a
+ * page the portal does not have. Named for what it opens instead.
+ */
+export const API_REFERENCE = OPENAPI_JSON;
 
 /**
  * The quick start — the in-app page built from the Figma `Quick start` frame

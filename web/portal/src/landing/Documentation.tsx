@@ -10,7 +10,7 @@ import quickStartIcon from '../assets/icons/docs-quick-start.svg';
 import rateLimitsIcon from '../assets/icons/docs-rate-limits.svg';
 import sdkExamplesIcon from '../assets/icons/docs-sdk-examples.svg';
 import { color, radius } from '../theme/tokens';
-import { OPENAPI_JSON, QUICKSTART, SWAGGER_UI } from './links';
+import { OPENAPI_JSON, QUICKSTART, API_REFERENCE } from './links';
 import {
   CardRail,
   Section,
@@ -51,13 +51,13 @@ const DOCS: readonly Doc[] = [
     icon: authenticationIcon,
     title: 'Authentication',
     body: 'How API keys work, where to pass them, and what to expect when a key is missing or rate-limited.',
-    href: SWAGGER_UI,
+    href: API_REFERENCE,
   },
   {
     icon: exampleRequestsIcon,
     title: 'Example Requests',
     body: 'Copy-ready curl commands for every endpoint. Test against the live API from your terminal.',
-    href: SWAGGER_UI,
+    href: API_REFERENCE,
   },
   {
     icon: openApiIcon,
@@ -69,13 +69,13 @@ const DOCS: readonly Doc[] = [
     icon: sdkExamplesIcon,
     title: 'SDK Examples',
     body: 'Working code snippets in four languages to copy into your project.',
-    href: SWAGGER_UI,
+    href: API_REFERENCE,
   },
   {
     icon: rateLimitsIcon,
     title: 'Rate Limits',
     body: 'How throttling works, what headers to watch, and how to handle 429 responses gracefully.',
-    href: SWAGGER_UI,
+    href: API_REFERENCE,
   },
 ];
 

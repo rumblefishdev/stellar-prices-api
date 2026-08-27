@@ -1335,9 +1335,10 @@ function Dashboard({
   // ⚠️ **A revoked key replaces the whole dashboard** (Adam, 2026-08-26).
   //
   // A PARTIAL revocation is deliberately excluded: task 0191's warning tells
-  // that visitor to press Regenerate again, and this card has no key panel to
-  // press it in. They keep the ordinary dashboard, where the control exists
-  // and the warning sits beside it.
+  // that visitor to reload and press Regenerate again, and this card has no
+  // key panel to press it in. They keep the ordinary dashboard — where the
+  // warning renders under the revoked state, and where a reload adopts the
+  // duplicate that refused to be disabled and brings the control back.
   if (revoked && !revoked.partial && !issueOnLanding) {
     return <RevokedDashboard revoked={revoked} onSignOut={onSignOut} />;
   }
@@ -1908,13 +1909,6 @@ function describeUtcDay(value: string | null | undefined): string | null {
 const PROPAGATION_COPY = 'within about half a minute';
 
 /**
- * How long after a revocation the propagation window is still worth stating
- * in the present tense. The window is ~25 s; five minutes is generous and
- * keeps the copy honest on the reveal path, which renders the revoked view
- * on every page load — days later, "until then treat it as live" would be
- * telling somebody to keep worrying about a key that died last week.
- */
-/**
  * How long the sign-in poll and the closed-window watch hold their verdict so
  * the popup's `postMessage` can still overtake it (see `afterGrace`). Longer
  * than a queued message task by orders of magnitude; shorter than a visitor
@@ -1922,6 +1916,13 @@ const PROPAGATION_COPY = 'within about half a minute';
  */
 const POPUP_MESSAGE_GRACE_MS = 1500;
 
+/**
+ * How long after a revocation the propagation window is still worth stating
+ * in the present tense. The window is ~25 s; five minutes is generous and
+ * keeps the copy honest on the reveal path, which renders the revoked view
+ * on every page load — days later, "until then treat it as live" would be
+ * telling somebody to keep worrying about a key that died last week.
+ */
 const PROPAGATION_FRESH_MS = 5 * 60 * 1000;
 
 /** Whether `revokedAt` (RFC 3339) is recent enough for the present tense. */
@@ -2759,9 +2760,8 @@ function ApiKey({
             <p data-testid="revoke-partial">
               <strong>One of your keys could not be deactivated.</strong> A
               duplicate under this name may still work against <code>/v1/</code>
-              . Press <strong>Replace my key…</strong> again once the page
-              reloads — it retries every key, and it will not cost you a second
-              revocation.
+              . Reload the page and press <strong>Regenerate</strong> again — it
+              retries every key, and it will not cost you a second revocation.
             </p>
           )}
           <DeactivationSentence revoked={view.revoked} />
@@ -2771,7 +2771,7 @@ function ApiKey({
               key, and the issue path adopts it rather than refusing, so the
               cap the backend computed does not describe what happens next
               either. The warning above already carries the only instruction
-              that applies: press Replace again. */}
+              that applies: reload and press Regenerate again. */}
           {view.revoked.partial ? null : stillWaiting(
               view.revoked.next_eligible_at,
             ) ? (
@@ -2814,7 +2814,14 @@ function ApiKey({
           <NoticeStrip tone="error">
             <p data-testid="no-key-notice">
               No API key found for your account. This can happen if key issuance
-              failed during sign-in.
+              failed during sign-in.{' '}
+              {/* The numeric Discord id, on the one card that ends in a
+                  support request. It is the account key (ADR 0010) and task
+                  0186's acceptance criterion puts it on screen; the metadata
+                  row that carries it elsewhere is hidden on this card, so
+                  without this sentence it was not even on hover here. */}
+              If you contact us, quote your Discord ID{' '}
+              <code data-testid="no-key-discord-id">{session.user_id}</code>.
             </p>
           </NoticeStrip>
           {/* A link, not a button: issuing is an OAuth round-trip (see
@@ -3048,13 +3055,17 @@ function ApiKey({
         {/* The frame's "Issued" and "Last rotated", now that `GET /key`
             carries both instants. Two departures from it, both deliberate:
 
-            - **"Last rotated" is the frame's label** (Adam, 2026-08-25), over
-              the "Last updated" this carried. ⚠️ The value is AWS's
-              `lastUpdatedDate`, which the 0191 audit measured a no-op patch
-              and a console `description` edit both bumping — so on a key
-              nobody has touched it is the issue date, and after a revocation
-              it is the revocation. It is never a rotation, because this build
-              has none.
+            - **"Last updated", not the frame's "Last rotated".** The frame's
+              label was taken on 2026-08-25 and reversed on 2026-08-27, on PR
+              #249's review: the value is AWS's `lastUpdatedDate`, which the
+              0191 audit measured a no-op patch and a console `description`
+              edit both bumping — so on a key nobody has touched it is the
+              issue date, and after a revocation it is the revocation. It is
+              never a rotation, because this build has none (0191: "Nothing
+              is rotated"), and both ends of the contract — `keys/mod.rs` and
+              `api/portal.ts` — name the field for that reason and say the
+              dashboard labels it "Last updated". A label the value cannot
+              stand behind is the frame's to fix, not this page's to keep.
             - **Key name is gone.** It was not in the frame, and it is
               `discord-<userId>-key` — the Discord id in the column beside it,
               with a prefix. A column that restates its neighbour is what made
@@ -3063,7 +3074,7 @@ function ApiKey({
           <MetaField label="Issued">{issuedOn}</MetaField>
         )}
         {view.state === 'ok' && updatedOn && (
-          <MetaField label="Last rotated">{updatedOn}</MetaField>
+          <MetaField label="Last updated">{updatedOn}</MetaField>
         )}
 
         {/* The handle alone, as the frame draws it — Adam, 2026-08-25.
@@ -3432,8 +3443,9 @@ function Usage({
                 are unchanged — what went is the "Used: / Remaining: / Monthly
                 limit:" labelling around them, which 0188 wrote when this panel
                 was three unstyled paragraphs and which its own brief asked for
-                "as numbers, not prose". Its two STATEMENTS — the reset rule and
-                the lag line — are untouched below. */}
+                "as numbers, not prose". Of its two STATEMENTS, the reset rule
+                survives as the caption under the bar, and the lag line is the
+                paragraph below the meter. */}
             <UsageMeter
               headline
               used={view.usage.used}
@@ -3441,6 +3453,28 @@ function Usage({
               remaining={view.usage.remaining}
               resetLabel={resetCaption(view.usage.resets_at)}
             />
+            {/* ⚠️ Task 0188's lag line, **back since 2026-08-27**. It was cut
+                on 2026-08-25 with the reset-rule sentence and the Refresh
+                button ("tutaj będą wykresy" — task 0226's chart takes the
+                space), and PR #249's review sent it back: 0188 decided this
+                wording once and says this slice "restyles it but does not
+                re-decide it", `as_of` was still served and no longer read,
+                and a developer who has just made calls and sees an unchanged
+                number had nothing on screen explaining why. Rendered small,
+                under the meter — the restyle — with 0188's sentence verbatim.
+                `toUTCString` spells the zone "GMT"; the decided wording says
+                UTC, so the suffix is corrected rather than the line frozen. */}
+            <Typography
+              component="p"
+              variant="caption"
+              data-testid="usage-as-of"
+              sx={{ color: color.text.tertiary, m: 0 }}
+            >
+              Last updated{' '}
+              {new Date(view.usage.as_of).toUTCString().replace(/GMT$/, 'UTC')}{' '}
+              — AWS reports usage with a delay, so requests made in the last few
+              minutes may not be counted yet.
+            </Typography>
             {/* Only at the ceiling, and `>=` rather than `===`: AWS can count
                 a burst PAST the quota (the gateway refuses on its own clock,
                 not on ours), and a card that goes quiet again at 100,001 would

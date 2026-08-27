@@ -186,7 +186,7 @@ function ExampleResponse() {
             {'\n{\n'}
             {tok(KEY, '"asset"')}: {tok(STR, '"XLM-USDC"')},{'\n'}
             {tok(KEY, '"price"')}: {tok(NUM, '0.0812')},{'\n'}
-            {tok(KEY, '"change_24h"')} {tok(NUM, '+2.14')},{'\n'}
+            {tok(KEY, '"change_24h"')}: {tok(NUM, '+2.14')},{'\n'}
             {tok(KEY, '"volume_24h"')}: {tok(NUM, '142891.50')},{'\n'}
             {tok(KEY, '"liquidity"')}: {tok(NUM, '2400000')},{'\n'}
             {tok(KEY, '"source"')}: {tok(STR, '"soroswap"')},{'\n'}

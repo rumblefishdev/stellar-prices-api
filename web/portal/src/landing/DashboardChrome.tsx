@@ -10,7 +10,7 @@ import { Link as RouterLink } from 'react-router-dom';
 import { color, font, radius } from '../theme/tokens';
 import { DiscordIcon } from './DiscordIcon';
 import { Wordmark } from './Chrome';
-import { DASHBOARD_ROUTE, QUICKSTART_ROUTE, SWAGGER_UI } from './links';
+import { DASHBOARD_ROUTE, QUICKSTART_ROUTE, API_REFERENCE } from './links';
 import { cardBorder } from './primitives';
 
 /**
@@ -43,7 +43,7 @@ export function DashboardNavbar({
       to: QUICKSTART_ROUTE,
       current: current === 'quick-start',
     },
-    { label: 'OpenAPI Docs', href: SWAGGER_UI },
+    { label: 'OpenAPI Docs', href: API_REFERENCE },
   ];
 
   return (
