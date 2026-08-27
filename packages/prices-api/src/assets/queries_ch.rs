@@ -697,11 +697,29 @@ pub async fn ohlcv_peg_series(
     // ClickHouse's ASOF JOIN needs at least one equality alongside the
     // inequality; there is no natural key here, so both sides carry a constant.
     //
-    // ⚠️ `join_use_nulls = 1` is load-bearing, not tidiness. By default an
-    // unmatched LEFT JOIN row yields the column's DEFAULT, not NULL — so
-    // `r.rate` came back as `0` for every pre-observation bucket and `ifNull`
-    // never fired, rendering USDC at $0.00 instead of falling back to the peg.
-    // Caught by `ohlcv_usdc_before_any_observation_falls_back_to_a_labelled_peg`.
+    // ⚠️ An unmatched ASOF row does NOT yield NULL. By default
+    // (`join_use_nulls = 0`, which is what production runs) it yields the
+    // column's DEFAULT — so `r.rate` is `0` for every pre-observation bucket,
+    // and a NULL test never fires, rendering USDC at $0.00 instead of falling
+    // back to the peg. Caught by
+    // `ohlcv_usdc_before_any_observation_falls_back_to_a_labelled_peg`.
+    //
+    // ⚠️ **And the setting cannot simply be asked for.** This query used to end
+    // `SETTINGS join_use_nulls = 1`. `prices_reader` runs read-only in
+    // production and a read-only user may not modify a setting, so ClickHouse
+    // refused the whole query with `Code: 164 … (READONLY)` at
+    // `ExceptionBeforeStart` — 40 ms, no rows read, and the endpoint answered
+    // `500` for canonical USDC on the deployed API (2026-08-27). Every local
+    // test passed throughout, because the local user is not read-only. Do not
+    // reintroduce a `SETTINGS` clause here; it is the one query in this service
+    // that ever carried one.
+    //
+    // So the no-match test is a SENTINEL rather than a NULL. `usd_rate.method`
+    // is `LowCardinality(String)` (`init.sql:299`), so an unmatched row defaults
+    // it to the empty string, and no real row can carry one — every writer sets
+    // it and it sits in the table's ORDER BY key. The `ifNull(…, '')` wrapper
+    // makes the test hold under `join_use_nulls = 1` too, so the answer no
+    // longer depends on a server default in either direction.
     //
     // ⚠️ The right side is collapsed to ONE row per timestamp before the join.
     // `usd_rate` is ORDER BY (…, timestamp, method) with `method` in the key
@@ -711,12 +729,18 @@ pub async fn ohlcv_peg_series(
     // request could return 0.9993/`oracle` or 1.0/`peg` on consecutive calls.
     // The preference below is the choice, made explicitly: a measurement beats a
     // pivot beats a fallback.
+    // The no-match sentinel, in one place because three expressions below must
+    // agree on what "no observation at or before this bucket" means.
+    const NO_RATE: &str = "ifNull(r.meth, '') = ''";
+
     let val = if in_xlm {
-        "toNullable(toString(toDecimal128OrNull(toString( \
-             toFloat64(ifNull(r.rate, toDecimal128(1, 14))) \
+        format!(
+            "toNullable(toString(toDecimal128OrNull(toString( \
+             toFloat64(if({NO_RATE}, toDecimal128(1, 14), r.rate)) \
              / nullIf(toFloat64(b.den), 0)), 14)))"
+        )
     } else {
-        "toNullable(toString(ifNull(r.rate, toDecimal128(1, 14))))"
+        format!("toNullable(toString(if({NO_RATE}, toDecimal128(1, 14), r.rate)))")
     };
     let sql = format!(
         "SELECT ts, o, h, l, c, vb, vqu, vw, tc, meth, drv FROM ( \
@@ -728,7 +752,7 @@ pub async fn ohlcv_peg_series(
              '0' AS vqu, \
              toUInt64(0) AS tc, \
              if(o IS NULL, NULL, \
-                toNullable(multiIf(r.meth IS NULL, 'peg', \
+                toNullable(multiIf({NO_RATE}, 'peg', \
                                    r.meth = 'oracle', 'oracle', \
                                    r.meth = 'peg', 'peg', \
                                    'traded'))) AS meth, \
@@ -748,8 +772,7 @@ pub async fn ohlcv_peg_series(
                            AND issuer_address = ? AND contract_address = '' ) \
                   GROUP BY rts ) AS r \
              ON b.k = r.k AND r.rts <= b.bkt \
-         ) ORDER BY bkt ASC \
-         SETTINGS join_use_nulls = 1",
+         ) ORDER BY bkt ASC",
         conds = conds.join(" AND "),
         limit = args.limit,
         denom = if in_xlm {
