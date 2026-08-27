@@ -199,3 +199,99 @@ async fn price_unknown_asset_is_404() {
 
     teardown(db).await;
 }
+
+/// Task 0118 — the `?min_volume_usd=` override, end to end over a seeded
+/// three-source row: pass-through at/below the system default (byte-identical
+/// bodies), narrowing above it, and the all-excluded sentinels.
+#[tokio::test]
+#[ignore = "requires a local ClickHouse"]
+async fn price_min_volume_override_narrows_sources_and_reweights() {
+    let db = "it_price_min_volume_0118";
+    let client = setup(db).await;
+
+    // A third asset with three sources: $100k, $20k, and a $150 dust venue
+    // quoting an absurd 5. The seeded vwap is what the MV (at the $100 system
+    // default) would publish: (1*100000 + 1.02*20000 + 5*150) / 120150.
+    let admin = Client::default().with_url(ch_url()).with_database(db);
+    admin
+        .query(&format!(
+            "INSERT INTO {db}.assets \
+             (asset_id, asset_code, asset_type, issuer_address, contract_address) VALUES \
+             (3, 'MULTI', 'credit', '{issuer}', '')",
+            issuer = prices_clickhouse::USDC_ISSUER
+        ))
+        .execute()
+        .await
+        .unwrap();
+    admin
+        .query(&format!(
+            "INSERT INTO {db}.current_prices \
+             (asset_id, price_usd, price_xlm, change_24h_pct, change_7d_pct, \
+              vwap_24h, volume_24h_usd, sources, updated_at) VALUES \
+             (3, 5, 0, 0, 0, 1.00832292967124, 120150, \
+              '{{\"sdex\":{{\"price\":\"1\",\"volume_24h\":\"100000\"}},\
+                 \"aquarius\":{{\"price\":\"1.02\",\"volume_24h\":\"20000\"}},\
+                 \"soroswap\":{{\"price\":\"5\",\"volume_24h\":\"150\"}}}}', \
+              '2026-02-10 12:00:30')"
+        ))
+        .execute()
+        .await
+        .unwrap();
+
+    let base = format!("/v1/assets/MULTI:{}/price", prices_clickhouse::USDC_ISSUER);
+    let raw = |uri: String| {
+        let client = client.clone();
+        async move {
+            let resp = app(&config(), AppState::new(client))
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            let status = resp.status();
+            let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            (status, bytes)
+        }
+    };
+
+    // AC: default path byte-identical whether the param is omitted, set to
+    // the system default, or below it.
+    let (s0, b0) = raw(base.clone()).await;
+    assert_eq!(s0, StatusCode::OK);
+    for suffix in ["?min_volume_usd=100", "?min_volume_usd=0"] {
+        let (s, b) = raw(format!("{base}{suffix}")).await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(
+            b, b0,
+            "{suffix} must be byte-identical to the param-less response"
+        );
+    }
+
+    // AC: a higher value provably narrows the source set and reweights.
+    let (s2, b2) = raw(format!("{base}?min_volume_usd=2000")).await;
+    assert_eq!(s2, StatusCode::OK);
+    let json: serde_json::Value = serde_json::from_slice(&b2).unwrap();
+    assert!(
+        json["sources"].get("soroswap").is_none(),
+        "the $150 venue must be excluded, got {}",
+        json["sources"]
+    );
+    assert!(
+        json["sources"].get("sdex").is_some() && json["sources"].get("aquarius").is_some(),
+        "got {}",
+        json["sources"]
+    );
+    approx(&json["vwap_24h"], 120_400.0 / 120_000.0);
+    // The threshold is a weighting rule only.
+    approx(&json["price_usd"], 5.0);
+    approx(&json["volume_24h_usd"], 120_150.0);
+
+    // Everything excluded → the MV's own sentinels for that shape.
+    let (s3, b3) = raw(format!("{base}?min_volume_usd=1000000")).await;
+    assert_eq!(s3, StatusCode::OK);
+    let json: serde_json::Value = serde_json::from_slice(&b3).unwrap();
+    assert_eq!(json["sources"], serde_json::json!({}));
+    assert_eq!(json["vwap_24h"], "0");
+
+    teardown(db).await;
+}

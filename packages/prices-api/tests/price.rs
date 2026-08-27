@@ -76,3 +76,34 @@ async fn price_path_is_documented_in_openapi() {
         "price path missing from OpenAPI spec"
     );
 }
+
+/// Task 0118 — `?min_volume_usd=` validation runs before any CH call: the
+/// CH-less state would panic if the handler reached `state.ch()`.
+#[tokio::test]
+async fn price_with_invalid_min_volume_is_400_without_touching_ch() {
+    // serde rejects non-numeric text; the handler itself must reject values
+    // f64::from_str happily parses (NaN, inf), negatives, and absurd
+    // magnitudes — 0119's contract: every invalid input is a 400 in the
+    // standard envelope.
+    for bad in ["abc", "-1", "NaN", "inf", "1e16", ""] {
+        let response = app(&test_config(), AppState::without_ch())
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/v1/assets/native/price?min_volume_usd={bad}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "min_volume_usd={bad}"
+        );
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["code"], "invalid_query", "min_volume_usd={bad}");
+    }
+}
