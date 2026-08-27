@@ -24,6 +24,8 @@
 #   2. You must sign in with a Discord account that IS a member of the guild
 #      being measured. Measuring with an account that is not a member answers
 #      "not a member", not the question.
+#   3. Know which way Membership Screening is set on that guild before you
+#      run — it is what the result means (see GUILD below).
 #
 # ⚠️ ONE REAL PRODUCTION KEY. Sign-in issues the first key, and
 # PORTAL_FREE_PLAN_ID points at the real `pricing-api-free` plan, so a
@@ -33,11 +35,32 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
-# The real Stellar Developers guild. THE GUILD IS THE MEASUREMENT: Discord
-# populates `pending` only where Membership Screening is on, so a scratch
-# guild with screening off answers a different question than production will
-# ask. This is also task 0179 step 4's value.
-GUILD="${GUILD:-897514728459468821}"
+# WHICH GUILD, AND WHY IT DECIDES WHAT YOU LEARN.
+#
+# Discord populates `pending` only for guilds with Membership Screening
+# enabled, so the guild is a variable of the experiment, not a detail.
+#
+#   Default — the scratch guild (`1536303837785362432`). You own it, which
+#   makes it the BETTER instrument: toggle Membership Screening in Server
+#   Settings → Members and run this twice, and the two runs measure both arms
+#   of `eligibility.rs`'s `match m.pending` — more than one observation
+#   against a server whose settings we cannot change would ever give.
+#
+#   ALREADY RUN, 2026-08-27: this guild answered `pending: false` (present).
+#   Recorded in task 0189's Step 0 table, item 2. Whether that was with
+#   screening on or off is UNCONFIRMED, and it is the whole difference
+#   between "item 2 answered" and "items 2 and 4 answered" — check the
+#   setting before running the other arm.
+#
+#   GUILD=897514728459468821 — the real Stellar Developers guild, which is
+#   what production will gate on (task 0179 step 4). Needs an account that is
+#   a member of it. Run this once the scratch runs have told you what each
+#   arm looks like.
+#
+# What production ultimately turns on is whether the Stellar guild has
+# screening enabled — visible in its `features` (MEMBER_VERIFICATION_GATE_
+# ENABLED) without any OAuth round-trip at all.
+GUILD="${GUILD:-1536303837785362432}"
 SECRET_FILE="${SECRET_FILE:-.portal-oauth.json}"
 PORT="${PORT:-8080}"
 LOG="${LOG:-/tmp/portal-pending-absent-$(date +%Y%m%dT%H%M%S).log}"
