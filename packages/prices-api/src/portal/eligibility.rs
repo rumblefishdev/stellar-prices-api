@@ -74,8 +74,12 @@ const DISCORD_EPOCH_MS: u64 = 1_420_070_400_000;
 /// Only the extension client can be slow — the `Direct` source is a value
 /// already in memory, and the build without the client fails immediately — so
 /// the constant lives with the code that can actually wait.
-#[cfg(feature = "aws-mtls")]
-const PARAMETER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+///
+/// `pub(crate)` and unconditional so `auth::issue`'s budget test can add it
+/// up against the invocation timeout in every build, not only the one with
+/// the client that waits on it.
+#[cfg_attr(not(feature = "aws-mtls"), allow(dead_code))]
+pub(crate) const PARAMETER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Where one eligibility parameter's value comes from.
 #[derive(Debug, Clone)]

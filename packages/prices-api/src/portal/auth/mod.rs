@@ -1219,10 +1219,13 @@ mod tests {
             FAILED_QUERY,
             NOT_MEMBER_QUERY,
             UNKNOWN_QUERY,
+            NOT_OPEN_QUERY,
             issue::ISSUE_OK_QUERY,
             issue::ISSUE_NOT_MEMBER_QUERY,
             issue::ISSUE_UNKNOWN_QUERY,
             issue::ISSUE_FAILED_QUERY,
+            issue::ISSUE_CANCELLED_QUERY,
+            issue::ISSUE_DENIED_QUERY,
             &issue::too_young_query(173),
             &issue::capped_query("2026-09-01"),
         ] {

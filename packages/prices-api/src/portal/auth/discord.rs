@@ -110,8 +110,9 @@ pub const DEFAULT_API_BASE: &str = "https://discord.com/api";
 ///
 /// `PARAMETER_TIMEOUT` in `portal/eligibility.rs` is the 2s term. Raising
 /// either constant, or adding a fourth call, needs this sum redone and
-/// `timeoutSeconds` in `infra/envs/production.json` checked against it.
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(4);
+/// `timeoutSeconds` in `infra/envs/production.json` checked against it —
+/// `issue::tests::budget_arithmetic_fits_the_lambda` does the sum.
+pub(super) const REQUEST_TIMEOUT: Duration = Duration::from_secs(4);
 
 /// Endpoints, separated from the credentials so tests can point them at a
 /// loopback mock while using the same code path production does.

@@ -186,10 +186,13 @@ pub(super) fn refuse_issue_discord(
 /// `keys::RECONCILE_DEADLINE` is 10s and was sized for 0187, where the
 /// reconciliation was essentially the entire request: "10s leaves the handler
 /// ~5s of the function's budget". This path puts four more network calls in
-/// front of it — the token exchange (5s), two Parameters and Secrets reads
-/// (2s each) and two Discord reads (5s each) — so reusing that constant
-/// unchanged would let the worst case reach ~29s against
-/// `apiHandler.timeoutSeconds` of **15**. Lambda would kill the invocation
+/// front of it — the token exchange (4s), two Parameters and Secrets reads
+/// (2s, **joined**, so they cost one wait and not two) and two Discord reads
+/// (4s each) — so reusing that constant unchanged would let the worst case
+/// reach ~24s against `apiHandler.timeoutSeconds` of **15**. The
+/// `discord::REQUEST_TIMEOUT` docblock carries the sum that has to keep
+/// holding — `4 + 2 + 4 + 4 = 14s` — and `budget_arithmetic_fits_the_lambda`
+/// below pins it, so raising a term here fails a test rather than a visitor. Lambda would kill the invocation
 /// with no response at all: the visitor gets API Gateway's bare `502` instead
 /// of the designed `?issue=failed` redirect, an `Errors` datapoint is
 /// recorded, and a key may exist that was never attached — precisely the
@@ -312,21 +315,25 @@ pub(super) async fn complete_issue(
             tracing::error!("an issue callback arrived with no eligibility settings wired");
             None
         }
-        Some(settings) => match (
-            settings.guild_id().await,
-            settings.min_account_age_minutes().await,
-        ) {
-            (Ok(guild_id), Ok(min_age)) => Some((guild_id, min_age)),
-            (guild, age) => {
-                for error in [guild.err(), age.err()].into_iter().flatten() {
-                    tracing::error!(
-                        error = %error,
-                        "eligibility parameters could not be read; refusing without accusation"
-                    );
+        // Joined, as the sign-in path joins them (`auth/mod.rs`): read one
+        // after the other they cost two `PARAMETER_TIMEOUT`s in the worst
+        // case, and that is the 2s that put this callback at 16s against the
+        // 15s invocation — the Lambda killed, a bare API Gateway 502, and
+        // possibly a key created and never attached.
+        Some(settings) => {
+            match tokio::join!(settings.guild_id(), settings.min_account_age_minutes()) {
+                (Ok(guild_id), Ok(min_age)) => Some((guild_id, min_age)),
+                (guild, age) => {
+                    for error in [guild.err(), age.err()].into_iter().flatten() {
+                        tracing::error!(
+                            error = %error,
+                            "eligibility parameters could not be read; refusing without accusation"
+                        );
+                    }
+                    None
                 }
-                None
             }
-        },
+        }
     };
 
     // The membership call BORROWS the token; the identity read then consumes
@@ -573,6 +580,26 @@ pub(super) async fn after_sign_in(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The slow-but-not-failing worst case of both callbacks — the token
+    /// exchange, the two parameter reads (joined, so one wait), the
+    /// membership read and the identity read — has to finish inside the
+    /// invocation timeout, or Lambda kills it and the browser gets API
+    /// Gateway's bare `502` in place of every screen this module lands on.
+    /// The 15 is `apiHandler.timeoutSeconds` in `infra/envs/production.json`;
+    /// raise either constant, or add a call, and this is what fails first.
+    #[test]
+    fn budget_arithmetic_fits_the_lambda() {
+        const LAMBDA_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+        let worst = discord::REQUEST_TIMEOUT * 3 + crate::portal::eligibility::PARAMETER_TIMEOUT;
+        assert!(
+            worst < LAMBDA_TIMEOUT,
+            "worst case {worst:?} does not fit inside {LAMBDA_TIMEOUT:?}"
+        );
+        // And the reconciler's share is measured from arrival, so it cannot
+        // extend the callback past the same line.
+        assert!(ISSUE_BUDGET < LAMBDA_TIMEOUT);
+    }
 
     /// Every landing state is a distinct literal under the portal home,
     /// like `?signin=…` — extending `the_only_redirect_targets_are_the_portal
